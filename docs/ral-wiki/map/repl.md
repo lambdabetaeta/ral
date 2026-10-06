@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 143b008b
+generated_at_commit: 446e3123
 generated_at_date: 2026-10-06
 covers_paths: [ral/src/]
 ---
@@ -25,12 +25,11 @@ holds a `Shell`.
   `--capabilities` status 2 identically; every evaluation after it — a line,
   a script, a prompt, a hook — is one dispatch through `dispatch_to_report`,
   and every read of engine state is a typed probe.
-- *Three frontends.* The interactive REPL presents one `Surface` —
+- *Two frontends.* The interactive REPL presents one `Surface` —
   *minimal* (canonical-stdin fallback), *readline* (the default full editor),
-  or *structural*, a ratatui projection of live program state. The structural
-  surface is the near-term realisation of the recorded direction
-  ([[decisions/260522_repl-architecture|repl-architecture]]); it is selected
-  with `--surface` or the rc `surface:` key.
+  selected with `--surface` or the rc `surface:` key. The structural
+  surface (a ratatui projection) was retired in 261006
+  ([[decisions/260620_repl-as-structural-surface|repl-as-structural-surface]]).
 
 The frontend is a layer *above* the engine. Editor state is host-side, in the
 REPL's `ReplHost` and `PluginRuntime`; the `_ed-*` builtins are thin
@@ -51,12 +50,10 @@ REPL makes that state the thing the loop threads.
   engine-side, value printing, error formatting (`ral/src/repl/session*`,
   `exec.rs`, `host.rs`, `enquiry.rs`, `prompt.rs`, `config*`, `theme.rs`,
   `errfmt.rs`).
-- [[map/repl/frontend|frontend]] — the `Frontend` trait and its three
-  implementations (minimal, rustyline, structural — the structural surface's
-  typed spine, reactive worksheet, handles matrix, vi-mode, and DAG render),
-  plus the frontend-neutral fuzzy completion engine, Tab menu, and shared
-  highlight table
-  (`ral/src/repl/frontend*`, `completion.rs`, `complete.rs`, `worksheet.rs`,
+- [[map/repl/frontend|frontend]] — the `Frontend` trait and its two
+  implementations (minimal, rustyline), plus the frontend-neutral fuzzy
+  completion engine and shared highlight table
+  (`ral/src/repl/frontend*`, `completion.rs`, `complete.rs`,
   `cursor.rs`, `highlight_style.rs`).
 - [[map/repl/plugins|plugins]] — the plugin runtime, the `_ed-*` editor doors,
   the plugin load doors, and the one ordered keybinding router

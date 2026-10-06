@@ -1,6 +1,8 @@
 ---
-status: proposed
+status: superseded
 ---
+
+> superseded: structural surface retired in 261006.
 
 # The REPL is a projection of live program state, not a transcript
 
@@ -363,7 +365,7 @@ ral and exarch read as one design system:
 
 The margin is the persistent canvas; the prompt line stays where shells have
 always put it. Colour is suppressed automatically when
-`ral_core::ansi::use_ui_color` returns false, so the projections store
+`ral_core::terminal::ui_color` returns false, so the projections store
 unconditional colour and degrade on dumb terminals
 ([[map/repl/frontend|frontend]]).
 

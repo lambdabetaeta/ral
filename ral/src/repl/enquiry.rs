@@ -6,9 +6,9 @@
 //! - `` `repl-plugin `` — the load doors telling the host a plugin's
 //!   first-order manifest, which the host may refuse.
 
+use ral_core::first_order::FOValue;
+use ral_core::first_order::datum::{Datum, tag, untag};
 use ral_core::record;
-use ral_core::serial::FOValue;
-use ral_core::serial::datum::{Datum, tag, untag};
 
 use super::plugin::manifest::Manifest;
 
@@ -119,7 +119,7 @@ impl Datum for EditorOp {
     }
 
     fn decode(v: &FOValue) -> Result<Self, String> {
-        use ral_core::serial::datum::{exact_keys, field};
+        use ral_core::first_order::datum::{exact_keys, field};
         Ok(match untag(v) {
             Some(("get", None)) => Self::Get,
             Some(("set", Some(p))) => {
@@ -167,12 +167,12 @@ impl Datum for Enquiry {
                     String::decode(n).map(|n| Self::Plugin(PluginNote::Unloaded(n)))
                 }
                 _ => Err(format!(
-                    "no `{PLUGIN} request is shaped like {} — expected `loaded or `unloaded",
+                    "no `{PLUGIN} request is shaped like {}: expected `loaded or `unloaded",
                     note.shape()
                 )),
             },
             Some((class, _)) => Err(format!(
-                "the REPL answers no `{class} enquiries — only `{EDITOR} and `{PLUGIN}"
+                "the REPL answers no `{class} enquiries: only `{EDITOR} and `{PLUGIN}"
             )),
             None => Err(format!("an enquiry must be a variant, got {}", v.shape())),
         }

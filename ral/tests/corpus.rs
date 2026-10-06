@@ -1,3 +1,7 @@
+#![allow(
+    clippy::disallowed_macros,
+    reason = "[test] libtest captures print macros"
+)]
 #![allow(clippy::disallowed_methods)]
 
 //! The static corpora.  A type or parse error aborts a script, so it cannot be

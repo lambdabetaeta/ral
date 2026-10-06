@@ -1,106 +1,57 @@
-//! Destructuring bind: match a runtime `Value` against a compiled
-//! `IrPattern`, staging its bindings and folding them into an [`Env`].
-//! All-or-nothing: [`stage_pattern`] collects every binding first, so a
-//! pattern that fails partway — `let [[p],[q,r]] = [[1],[2]]` — leaves the
-//! environment it was given untouched.
+//! Destructuring: match a runtime `Value` against a compiled `Pattern`.
+//! Pure and all-or-nothing: [`destructure`] collects every binding first, so a
+//! pattern that fails partway — `let [[p],[q,r]] = [[1],[2]]` — binds nothing.
 
-use crate::ir::{IrPattern, Name};
-use crate::typecheck::Scheme;
-use crate::types::{Binding, Env, Error, Settled, Shell, Value};
-use std::sync::Arc;
+use crate::ir::{Name, Pattern};
+use crate::types::{Binding, Env, Error, Settled, Value};
 
-/// Destructure `value` against `pattern`, attaching to each bound name the
-/// scheme `schemes` lists for it (empty for a scheme-less bind), and fold the
-/// result into `env`.
+/// The `(name, value)` pairs `pattern` binds in `value`, in pattern order.
 ///
 /// # Errors
-/// The shape mismatches [`stage_pattern`] reports.
-pub(crate) fn bind_pattern(
-    pattern: &IrPattern,
-    value: &Value,
-    schemes: &[(String, Arc<Scheme>)],
-    env: Env,
-    shell: &mut Shell,
-) -> Settled<Env> {
-    bind_pattern_staged(pattern, value, schemes, env, shell, |_, _, _| {})
+/// The shape mismatches [`stage`] reports.
+pub(crate) fn destructure(pattern: &Pattern, value: &Value) -> Settled<Vec<(Name, Value)>> {
+    let mut staged = Vec::new();
+    stage(pattern, value, &mut staged)?;
+    Ok(staged)
 }
 
-/// As [`bind_pattern`], but calls `observe` on each staged `(name, Binding)`
-/// pair just before it is folded into `env` — `run_phrase_define` uses this
-/// to feed `note_define` the binding it just staged, with no lookup back
-/// into `env` afterward.
+/// `env` extended by what `pattern` binds in `value`, each name scheme-less.
 ///
 /// # Errors
-/// The shape mismatches [`stage_pattern`] reports.
-pub(crate) fn bind_pattern_staged(
-    pattern: &IrPattern,
-    value: &Value,
-    schemes: &[(String, Arc<Scheme>)],
-    mut env: Env,
-    shell: &mut Shell,
-    mut observe: impl FnMut(&str, &Binding, &mut Shell),
-) -> Settled<Env> {
-    // A bare Name can't partially fail, so it skips the staging Vec entirely.
-    if let IrPattern::Name(name) = pattern {
-        debug_assert!(
-            crate::syntax::ast::WordLiteral::classify(name).is_none(),
-            "parser guarantees a binding name is never a word literal",
-        );
-        let binding = Binding {
-            value: value.clone(),
-            scheme: scheme_for(schemes, name),
-        };
-        observe(name, &binding, shell);
-        env.bind(name.clone(), binding);
-        return Ok(env);
-    }
-    let mut staged = Vec::new();
-    stage_pattern(pattern, value, schemes, &mut staged)?;
-    for (name, binding) in staged {
-        observe(&name, &binding, shell);
-        env.bind(name, binding);
-    }
+/// The shape mismatches [`destructure`] reports.
+pub(crate) fn bind(pattern: &Pattern, value: &Value, mut env: Env) -> Settled<Env> {
+    env.extend(
+        destructure(pattern, value)?
+            .into_iter()
+            .map(|(name, value)| {
+                (
+                    name,
+                    Binding {
+                        value,
+                        scheme: None,
+                    },
+                )
+            }),
+    );
     Ok(env)
 }
 
-/// The scheme a `Define` harvested for `name`, shared rather than cloned: a
-/// bound scheme is copied on every environment node clone, never read by a step.
-fn scheme_for(schemes: &[(String, Arc<Scheme>)], name: &str) -> Option<Arc<Scheme>> {
-    schemes
-        .iter()
-        .find(|(n, _)| n == name)
-        .map(|(_, s)| Arc::clone(s))
-}
-
-/// Recursive worker for [`bind_pattern`]: pushes each binding onto `staged`
-/// rather than installing it, so a caller's environment stays untouched until
-/// the whole pattern has matched.
-fn stage_pattern(
-    pattern: &IrPattern,
-    value: &Value,
-    schemes: &[(String, Arc<Scheme>)],
-    staged: &mut Vec<(Name, Binding)>,
-) -> Settled<()> {
+/// Recursive worker for [`destructure`]: pushes each binding onto `staged`.
+fn stage(pattern: &Pattern, value: &Value, staged: &mut Vec<(Name, Value)>) -> Settled<()> {
     match pattern {
-        IrPattern::Wildcard => Ok(()),
-        IrPattern::Name(name) => {
+        Pattern::Wildcard => Ok(()),
+        Pattern::Name(name) => {
             debug_assert!(
                 crate::syntax::ast::WordLiteral::classify(name).is_none(),
                 "parser guarantees a binding name is never a word literal",
             );
-            staged.push((
-                name.clone(),
-                Binding {
-                    value: value.clone(),
-                    scheme: scheme_for(schemes, name),
-                },
-            ));
+            staged.push((name.clone(), value.clone()));
             Ok(())
         }
-        IrPattern::List { elems, rest } => {
+        Pattern::List { elems, rest } => {
             let Value::List(items) = value else {
                 return Err(
-                    Error::new(format!("expected List, got {}", value.type_name()), 1)
+                    Error::new(format!("expected List, got {}", value.type_name()))
                         .with_hint("right-hand side must be a list")
                         .into(),
                 );
@@ -113,19 +64,21 @@ fn stage_pattern(
                 } else {
                     "the list has too few elements for the named bindings"
                 };
-                return Err(Error::new(
-                    format!("need {} values, got {}", elems.len(), items.len()),
-                    1,
-                )
+                return Err(Error::new(format!(
+                    "need {} values, got {}",
+                    elems.len(),
+                    items.len()
+                ))
                 .with_hint(hint)
                 .into());
             }
             // Without a `...rest` tail, a longer list would lose its extras in silence.
             if rest.is_none() && items.len() > elems.len() {
-                return Err(Error::new(
-                    format!("need {} values, got {}", elems.len(), items.len()),
-                    1,
-                )
+                return Err(Error::new(format!(
+                    "need {} values, got {}",
+                    elems.len(),
+                    items.len()
+                ))
                 .with_hint("there are more elements; use [..., ...rest] to capture them")
                 .into());
             }
@@ -133,26 +86,20 @@ fn stage_pattern(
                 let item = items
                     .get(i)
                     .expect("checked above: elems.len() <= items.len()");
-                stage_pattern(pat, &item, schemes, staged)?;
+                stage(pat, &item, staged)?;
             }
             if let Some(name) = rest {
                 // `imbl::Vector` splits in O(log n) by sharing structure: no element clones.
                 let mut whole = items.clone();
                 let tail = whole.split_off(elems.len());
-                staged.push((
-                    name.clone(),
-                    Binding {
-                        value: Value::List(tail),
-                        scheme: scheme_for(schemes, name),
-                    },
-                ));
+                staged.push((name.clone(), Value::List(tail)));
             }
             Ok(())
         }
-        IrPattern::Map(entries) => {
+        Pattern::Map(entries) => {
             let Value::Map(m) = value else {
                 return Err(
-                    Error::new(format!("expected Map, got {}", value.type_name()), 1)
+                    Error::new(format!("expected Map, got {}", value.type_name()))
                         .with_hint("right-hand side must be a map")
                         .into(),
                 );
@@ -161,11 +108,11 @@ fn stage_pattern(
                 let key_label = &entry.key;
                 let Some(val) = m.get(key_label) else {
                     let ks: Vec<&str> = m.keys().collect();
-                    return Err(Error::new(format!("key '{key_label}' not found"), 1)
+                    return Err(Error::new(format!("key '{key_label}' not found"))
                         .with_hint(format!("available: {}", ks.join(", ")))
                         .into());
                 };
-                stage_pattern(&entry.pattern, &val, schemes, staged)?;
+                stage(&entry.pattern, &val, staged)?;
             }
             Ok(())
         }
@@ -177,68 +124,48 @@ mod tests {
     use super::*;
     use crate::types::Break;
 
-    fn list_pat(elems: &[&str], rest: Option<&str>) -> IrPattern {
-        IrPattern::List {
-            elems: elems.iter().map(|n| IrPattern::Name((*n).into())).collect(),
+    fn list_pat(elems: &[&str], rest: Option<&str>) -> Pattern {
+        Pattern::List {
+            elems: elems.iter().map(|n| Pattern::Name((*n).into())).collect(),
             rest: rest.map(Into::into),
+        }
+    }
+
+    fn message(result: Settled<Vec<(Name, Value)>>) -> String {
+        match result {
+            Err(Break::Error(e)) => e.message,
+            other => panic!("expected length error, got {other:?}"),
         }
     }
 
     /// The typechecker cannot catch this: `Ty::List` carries no length.
     #[test]
     fn rest_pattern_errors_when_list_shorter_than_elems() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
         let pat = list_pat(&["a", "b"], Some("rest"));
         let value = Value::list(vec![Value::string("x")]);
-        let result = bind_pattern(&pat, &value, &[], shell.env.clone(), &mut shell);
-        match result {
-            Err(Break::Error(e)) => {
-                assert!(
-                    e.message.contains("need 2 values, got 1"),
-                    "expected length error, got {:?}",
-                    e.message,
-                );
-            }
-            other => panic!("expected length error, got {other:?}"),
-        }
-        assert!(shell.env.get("a").is_none());
-        assert!(shell.env.get("b").is_none());
+        assert!(message(destructure(&pat, &value)).contains("need 2 values, got 1"));
     }
 
     #[test]
     fn list_pattern_errors_when_list_longer_than_elems() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
         let pat = list_pat(&["a", "b"], None);
         let value = Value::list(vec![
             Value::string("x"),
             Value::string("y"),
             Value::string("z"),
         ]);
-        let result = bind_pattern(&pat, &value, &[], shell.env.clone(), &mut shell);
-        match result {
-            Err(Break::Error(e)) => {
-                assert!(
-                    e.message.contains("need 2 values, got 3"),
-                    "expected length error, got {:?}",
-                    e.message,
-                );
-            }
-            other => panic!("expected length error, got {other:?}"),
-        }
-        assert!(shell.env.get("a").is_none());
-        assert!(shell.env.get("b").is_none());
+        assert!(message(destructure(&pat, &value)).contains("need 2 values, got 3"));
     }
 
     #[test]
     fn rest_pattern_binds_tail_when_list_long_enough() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
         let pat = list_pat(&["a", "b"], Some("rest"));
         let value = Value::list(vec![
             Value::string("x"),
             Value::string("y"),
             Value::string("z"),
         ]);
-        let env = bind_pattern(&pat, &value, &[], shell.env.clone(), &mut shell).expect("binds");
+        let env = bind(&pat, &value, Env::new()).expect("binds");
         assert_eq!(env.get("a"), Some(&Value::string("x")));
         assert_eq!(env.get("b"), Some(&Value::string("y")));
         assert_eq!(

@@ -532,9 +532,10 @@ mod tests {
     use crate::agent::cancel;
     use crate::bus::{AgentMessage, AgentOutcome, AgentResult};
     use crate::bus::{Read, Rewrite};
+    use ral_core::test_helper::eventually;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     /// The deliveries of one mid-exchange drain, for tests that queue no reads.
     fn drained(inbox: &Inbox) -> Vec<Item> {
@@ -568,17 +569,6 @@ mod tests {
         }
     }
 
-    fn eventually(timeout: Duration, pred: impl Fn() -> bool) -> bool {
-        let start = Instant::now();
-        while start.elapsed() < timeout {
-            if pred() {
-                return true;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        false
-    }
-
     #[test]
     fn inbox_waiting_for_input_tracks_human_park() {
         let inbox = Inbox::new();
@@ -606,7 +596,10 @@ mod tests {
         });
 
         assert!(
-            eventually(Duration::from_secs(1), || inbox.waiting_for_input()),
+            eventually(Duration::from_secs(1), || inbox
+                .waiting_for_input()
+                .then_some(()))
+            .is_some(),
             "a Held empty-inbox park is the human-input yield point"
         );
 
@@ -651,7 +644,10 @@ mod tests {
         });
 
         assert!(
-            eventually(Duration::from_secs(1), || observed.load(Ordering::Acquire)),
+            eventually(Duration::from_secs(1), || observed
+                .load(Ordering::Acquire)
+                .then_some(()))
+            .is_some(),
             "the worker reached the park predicate"
         );
         std::thread::sleep(Duration::from_millis(150));
@@ -660,7 +656,7 @@ mod tests {
             "waiting on children is still work, not a human-input yield"
         );
 
-        token.cancel(ral_core::process::CancelCause::Explicit);
+        token.cancel(ral_core::process::CancelCause::Cancelled);
         assert!(
             handle.join().expect("cancelled worker joins").is_none(),
             "non-human parks terminate on cancellation"
@@ -696,11 +692,14 @@ mod tests {
         });
 
         assert!(
-            eventually(Duration::from_secs(1), || observed.load(Ordering::Acquire)),
+            eventually(Duration::from_secs(1), || observed
+                .load(Ordering::Acquire)
+                .then_some(()))
+            .is_some(),
             "the worker reached the park predicate"
         );
 
-        token.cancel(ral_core::process::CancelCause::Interrupt);
+        token.cancel(ral_core::process::CancelCause::Interrupted);
 
         inbox.mailbox().push_user("resume".into());
         assert!(
@@ -732,11 +731,14 @@ mod tests {
         });
 
         assert!(
-            eventually(Duration::from_secs(1), || observed.load(Ordering::Acquire)),
+            eventually(Duration::from_secs(1), || observed
+                .load(Ordering::Acquire)
+                .then_some(()))
+            .is_some(),
             "the worker reached the park predicate"
         );
 
-        token.cancel(ral_core::process::CancelCause::Explicit);
+        token.cancel(ral_core::process::CancelCause::Cancelled);
         assert!(
             handle.join().expect("cancelled worker joins").is_none(),
             "a terminate cause ends an Engaged park despite the exchange"
@@ -770,11 +772,14 @@ mod tests {
         });
 
         assert!(
-            eventually(Duration::from_secs(1), || observed.load(Ordering::Acquire)),
+            eventually(Duration::from_secs(1), || observed
+                .load(Ordering::Acquire)
+                .then_some(()))
+            .is_some(),
             "the worker reached the park predicate"
         );
 
-        token.cancel(ral_core::process::CancelCause::Explicit);
+        token.cancel(ral_core::process::CancelCause::Cancelled);
 
         inbox.mailbox().push_user("resume".into());
         assert!(
@@ -979,7 +984,10 @@ mod tests {
             "done",
             map_value(vec![
                 ("cmd", s("<block>")),
-                ("outcome", variant("ok", ral_core::serial::FOValue::Unit)),
+                (
+                    "outcome",
+                    variant("ok", ral_core::first_order::FOValue::Unit),
+                ),
             ]),
         );
         Post::Stamped {

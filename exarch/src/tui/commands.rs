@@ -110,7 +110,7 @@ impl Verb {
                 &[],
                 None,
                 false,
-                "Sign in with ChatGPT — adds a plan-backed provider.",
+                "Sign in with ChatGPT: adds a plan-backed provider.",
             ),
             Self::Limits => meta(
                 "/limits",
@@ -173,7 +173,7 @@ impl Verb {
     }
 
     const REWIND_USAGE: &str =
-        "usage: /rewind <turn> — name a turn still in your context; it and every later turn leave";
+        "usage: /rewind <turn>; name a turn still in your context; it and every later turn leave";
 
     /// Type the trailing argument, or say how it is malformed — the usage
     /// hints live here, so [`run`] receives only well-formed commands.
@@ -503,7 +503,7 @@ fn run(
                 tui.app
                     .push_error(focused, "/close closes a branch, not this tab");
             } else if let Some(agent) = tui.app.tabs.focused_agent() {
-                agent.cancel_tree(ral_core::process::CancelCause::Explicit);
+                agent.cancel_tree(ral_core::process::CancelCause::Cancelled);
             } else {
                 tui.app.push_error(
                     focused,
@@ -530,7 +530,7 @@ fn run(
             crate::signals::raise_interrupt();
             if let Some(agent) = tui.app.tabs.agent(root) {
                 agent.interrupt();
-                agent.cancel_descendants(ral_core::process::CancelCause::Explicit);
+                agent.cancel_descendants(ral_core::process::CancelCause::Cancelled);
             }
             tui.app.clear(info, tui.guard.term())?;
             mailbox.push(Post::Rewrite(Rewrite::Clear));

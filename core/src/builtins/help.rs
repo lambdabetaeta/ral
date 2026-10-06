@@ -2,11 +2,12 @@
 //! definition, builtin, prelude function, or host-installed library entry to
 //! its doc, its type, and where the shell would find it.
 
-use crate::ansi::{self, BOLD, CYAN, DIM, RESET};
+use crate::ansi::{BOLD, CYAN, DIM, RESET};
 use crate::ir::CommandName;
 use crate::prelude_manifest::PRELUDE_DOCS;
 use crate::runtime::command::Head;
-use crate::typecheck::{builtin_type_hint, fmt_scheme};
+use crate::terminal;
+use crate::typecheck::builtin_type_hint;
 use crate::types::{Binding, HandlerLookup, Settled, Shell, Value};
 use std::fmt::{self, Write};
 use std::path::PathBuf;
@@ -16,7 +17,7 @@ use std::path::PathBuf;
 /// prelude's `Bind` nodes carry theirs too.  `None` for a binding from an
 /// unchecked path, which has no scheme to show.
 fn scheme_of(binding: Option<&Binding>) -> Option<String> {
-    binding?.scheme.as_deref().map(fmt_scheme)
+    binding?.scheme.as_deref().map(ToString::to_string)
 }
 
 fn prelude_doc(name: &str) -> Option<&'static str> {
@@ -52,7 +53,11 @@ fn registries(shell: &Shell) -> [(&'static str, Vec<(&str, &str)>); 3] {
                 shell
                     .builtin_names()
                     .filter(|name| !name.starts_with('_'))
-                    .filter_map(|name| shell.lookup_builtin(name).map(|entry| (name, entry.doc)))
+                    .filter_map(|name| {
+                        shell
+                            .lookup_builtin(name)
+                            .map(|entry| (name, entry.decl.doc))
+                    })
                     .collect(),
             ),
         ),
@@ -90,7 +95,7 @@ struct Colors {
 
 impl Colors {
     fn current() -> Self {
-        if ansi::use_ui_color() {
+        if terminal::ui_color() {
             Self {
                 bold: BOLD,
                 cyan: CYAN,
@@ -223,7 +228,7 @@ fn explanation(name: &str, shell: &Shell, colors: Colors) -> String {
 /// Every other site sweeps the documented registries, since a frame stacked
 /// over a native — a handler, an alias — inherits the native's doc.
 fn documented(name: &str, site: Option<&Where>, shell: &Shell) -> (Option<String>, Option<String>) {
-    let manifest = || builtin_type_hint(&shell.session.builtins, name);
+    let manifest = || builtin_type_hint(shell.session.builtins.manifest(), name);
     let library_doc = || shell.session.library_docs.get(name).cloned();
 
     if matches!(site, Some(Where::Session)) {
@@ -231,7 +236,7 @@ fn documented(name: &str, site: Option<&Where>, shell: &Shell) -> (Option<String
     }
     shell
         .lookup_builtin(name)
-        .map(|entry| (Some(entry.doc.to_owned()), manifest()))
+        .map(|entry| (Some(entry.decl.doc.to_owned()), manifest()))
         .or_else(|| {
             prelude_doc(name).map(|doc| {
                 let ty = scheme_of(shell.sig.prelude_binding(name)).or_else(manifest);
@@ -322,7 +327,7 @@ fn locate_all(name: &str, shell: &Shell) -> Vec<Where> {
     if shell.sig.prelude_binding(name).is_some() {
         sites.push(Where::Prelude);
     }
-    if shell.session.builtins.value(name).is_some() {
+    if shell.session.builtins.manifest().value(name).is_some() {
         sites.push(Where::Builtin);
     }
     // An alias is a handler frame too, so it must be named before a bare base
@@ -341,7 +346,14 @@ fn locate_all(name: &str, shell: &Shell) -> Vec<Where> {
     // An arm stacked over a base frame shadows it in the stack's own lookup,
     // which returns only the winner — so the frame underneath is named here,
     // by its own argv-half manifest row, independently of the stack's answer.
-    if !seen_as_frame && shell.session.builtins.base_frames().any(|e| e.name == name) {
+    if !seen_as_frame
+        && shell
+            .session
+            .builtins
+            .manifest()
+            .base_frames()
+            .any(|e| e.name == name)
+    {
         sites.push(Where::Builtin);
     }
     if let Some(path) = shell.locate_command(name) {
@@ -363,7 +375,10 @@ fn grant_admits(name: &str, shell: &Shell) -> bool {
     } else {
         CommandName::Bare(name.into())
     };
-    crate::capability::admits_head(&shell.context, &Head::resolve(&head, &shell.context))
+    let Ok(program) = Head::resolve(&head, &shell.context).program else {
+        return true;
+    };
+    shell.context.grants.admits(&program)
 }
 
 #[cfg(test)]
@@ -380,7 +395,7 @@ mod tests {
             "summary starts at the first line, got {doc:?}"
         );
         assert!(
-            doc.contains("`a.tar.gz` has `` `just 'gz'``, while"),
+            doc.contains("`a.tar.gz` has `` `some 'gz'``, while"),
             "the wrapped sentence is joined in full, got {doc:?}"
         );
     }
@@ -398,11 +413,11 @@ mod tests {
     /// a shell no host dressed shows no `Library:` section at all.
     #[test]
     fn bare_shell_help_has_no_library_section() {
-        let mut shell = Shell::default();
+        let mut shell = crate::test_helper::core_shell();
         let (sink, buf) = crate::io::new_buffer();
         shell.set_stdout(sink);
         builtin_help(&[], &mut shell).expect("a buffer sink cannot fail");
-        let out = String::from_utf8(crate::io::take_buffer(&buf)).expect("help output is UTF-8");
+        let out = String::from_utf8(buf.take()).expect("help output is UTF-8");
         assert!(
             !out.contains("Library:"),
             "a bare shell must list no Library section, got:\n{out}"
@@ -413,14 +428,13 @@ mod tests {
     /// `session.library_docs`.
     #[test]
     fn installed_library_docs_surface_in_help_and_explain() {
-        let mut shell = Shell::default();
+        let mut shell = crate::test_helper::core_shell();
         shell.install_library_docs(vec![("frob".to_string(), "frob the widget".to_string())]);
 
         let (sink, buf) = crate::io::new_buffer();
         shell.set_stdout(sink);
         builtin_help(&[], &mut shell).expect("a buffer sink cannot fail");
-        let help_out =
-            String::from_utf8(crate::io::take_buffer(&buf)).expect("help output is UTF-8");
+        let help_out = String::from_utf8(buf.take()).expect("help output is UTF-8");
         assert!(
             help_out.contains("Library:") && help_out.contains("frob"),
             "help must list the installed library entry, got:\n{help_out}"
@@ -429,8 +443,7 @@ mod tests {
         let (sink, buf) = crate::io::new_buffer();
         shell.set_stdout(sink);
         builtin_explain(&[Value::string("frob")], &mut shell).expect("a buffer sink cannot fail");
-        let explain_out =
-            String::from_utf8(crate::io::take_buffer(&buf)).expect("explain output is UTF-8");
+        let explain_out = String::from_utf8(buf.take()).expect("explain output is UTF-8");
         assert!(
             explain_out.contains("frob the widget"),
             "explain must resolve the installed library doc, got:\n{explain_out}"
@@ -440,7 +453,7 @@ mod tests {
     /// The index prints a doc's lead paragraph; `explain` prints the whole thing.
     #[test]
     fn index_shows_summary_explain_shows_full_doc() {
-        let mut shell = Shell::default();
+        let mut shell = crate::test_helper::core_shell();
         shell.install_library_docs(vec![(
             "frob".to_string(),
             "frob the widget.\n\nHandle with care: it is load-bearing.".to_string(),
@@ -449,8 +462,7 @@ mod tests {
         let (sink, buf) = crate::io::new_buffer();
         shell.set_stdout(sink);
         builtin_help(&[], &mut shell).expect("a buffer sink cannot fail");
-        let help_out =
-            String::from_utf8(crate::io::take_buffer(&buf)).expect("help output is UTF-8");
+        let help_out = String::from_utf8(buf.take()).expect("help output is UTF-8");
         assert!(
             help_out.contains("frob the widget.") && !help_out.contains("load-bearing"),
             "help's index row must carry only the lead paragraph, got:\n{help_out}"
@@ -459,8 +471,7 @@ mod tests {
         let (sink, buf) = crate::io::new_buffer();
         shell.set_stdout(sink);
         builtin_explain(&[Value::string("frob")], &mut shell).expect("a buffer sink cannot fail");
-        let explain_out =
-            String::from_utf8(crate::io::take_buffer(&buf)).expect("explain output is UTF-8");
+        let explain_out = String::from_utf8(buf.take()).expect("explain output is UTF-8");
         assert!(
             explain_out.contains("frob the widget.") && explain_out.contains("load-bearing"),
             "explain must print the doc in full, got:\n{explain_out}"
@@ -471,7 +482,7 @@ mod tests {
     /// the latter, from inside a block as at the top.
     #[test]
     fn explain_reflects_on_the_session_not_the_callers_block() {
-        let mut shell = Shell::default();
+        let mut shell = crate::test_helper::core_shell();
         shell.set_var("sess_name".into(), Value::Int(1));
         for (source, expected) in [
             ("!{ explain sess_name }", "sess_name: session"),

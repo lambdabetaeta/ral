@@ -16,11 +16,13 @@ mod common;
 
 use common::fresh_shell;
 
-use ral_core::protocol::{Program, Run};
 #[cfg(unix)]
-use ral_core::types::FsPolicy;
-use ral_core::types::{Capabilities, GrantStack, Settled, Shell};
-use ral_core::{Break, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Value};
+use ral_core::capability::FsPolicy;
+use ral_core::capability::{Capabilities, GrantStack};
+use ral_core::protocol::Run;
+use ral_core::run::RunReport;
+use ral_core::types::{Settled, Shell};
+use ral_core::{Break, Value};
 use std::path::Path;
 
 // ── Harness ─────────────────────────────────────────────────────────────
@@ -31,23 +33,9 @@ use std::path::Path;
 /// test below picks source it expects to compile, so a static diagnostic is a
 /// test bug.
 fn top_level_under(shell: &mut Shell, caps: Capabilities, source: &str) -> Settled<Value> {
-    match shell.run(RunRequest {
-        run: Run {
-            program: Program::Source(source.into()),
-            script_name: "<test>".into(),
-            caps: GrantStack::of(caps),
-            wall: None,
-            deferred_lease: None,
-            worker_cap: None,
-            io: RunIo::Inherit,
-            terminal: RequestedTerminalAccess::Leased,
-            stdin: RunStdin::Inherit,
-            trail: None,
-        },
-        surface: None,
-        deferred: None,
-        desk: None,
-        fork: None,
+    match shell.run(Run {
+        caps: GrantStack::of(caps),
+        ..Run::foreground(source, "<test>")
     }) {
         RunReport::Ran { ending, .. } => ending.into_result(),
         RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),

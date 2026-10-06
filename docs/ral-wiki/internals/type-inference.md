@@ -130,7 +130,7 @@ the annotate walk ([[decisions/260930_graded-f|graded-f]]).
   arity, as a value in hand.
 - `discharge` applies to the `Exec` and `Redirect` rules when stdout is
   redirected: `Return(_, a)` becomes `Return(Value, a)`, through `Fun` results.
-- `annotate` is a structural rebuild (`annotate_comp`, `annotate_val_at`) that
+- `annotate` is a structural rebuild (the methods of `Annotate { ctx, eta }`) that
   wraps each recorded node in `cap M to d. decode d` (`CompKind::Capture` and
   `CompKind::Decode`, both checker-inserted); a value in hand becomes a lambda
   whose body captures the forced call.
@@ -225,7 +225,7 @@ is guaranteed throughout is a graceful `TypeTooDeep` rather than a blown stack.
 **Generalisation is at the binding boundary** (`generalize.rs`). At each `Bind`
 the inferencer takes the type's free variables minus those still free in the
 environment and closes over the difference into a `Scheme`, each quantifier
-list sorted by variable id so a scheme — and the letters `fmt_scheme` prints it
+list sorted by variable id so a scheme — and the letters its `Display` prints it
 under — is a function of the type alone; `instantiate` refreshes a scheme's
 bound variables at each use. Generalisation walks the
 type structurally and unbudgeted, where unification charges a depth ceiling:
@@ -251,7 +251,7 @@ every variable of the structure weak, with the same source. A scheme or binding 
 (`apply_ty_keeping_weak`) until its unit ends. A weak
 variable is treated as free in the environment, so a `let` over it is
 monomorphic in it, and the scheme lists it in `Scheme.weak` instead of
-quantifying it; `fmt_scheme` prints it `_α` after the binders. A pending label
+quantifying it; its `Display` prints it `_α` after the binders. A pending label
 read whose target is weak is tied in the same way (`settle_pending_labels`).
 There is no value restriction: a `let` of anything generalises
 ([[decisions/260930_a-let-generalises-what-is-not-weak|a-let-generalises-what-is-not-weak]]).

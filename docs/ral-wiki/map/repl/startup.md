@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 0948a758
+generated_at_commit: 446e3123
 generated_at_date: 2026-10-06
 covers_paths: [ral/src/main.rs, ral/src/startup.rs, ral/src/cli.rs, ral/src/batch.rs, ral/src/boot_door.rs, ral/src/platform.rs, ral/build.rs]
 ---
@@ -25,15 +25,17 @@ so one that is not UTF-8 is refused with status 2, never mangled.
 
 **One pure classifier names the hidden role a process was started for, and
 one dispatch serves it.** `ral_core::classify(argv)`
-(`core/src/invocation.rs`) reads the first argument alone and returns an
-`Invocation`: `Engine`, `PipelineAnchor`, `PgidCheck`, `DetachBirth`,
-`Warrant`, `BundledTool`, or `Shell`. Flag precedence and disjointness live
-there and nowhere else — a flag a script was given, or a tool's own `--engine`,
-names no role. `ral_core::sandbox::serve_pre_main(&role, installers)` is the
-one place a role is served: `ral`'s `identify`, `exarch::dispatch_pre_main`
-and the test helper `#[ctor]` each hand it the role and their own engine
-installers, and differ only in what they do with its `Option<u8>`. It lives
-in `sandbox` because what it decides is when each role is pinned. Before argv
+(`core/src/role.rs`) reads the first argument alone over `Role::ALL` and
+returns an `Invocation`: `Engine`, `PipelineAnchor`, `PgidCheck`,
+`DetachBirth`, `Warrant`, `BundledTool`, or `Shell`. Each flag is spelled once,
+by `Role::flag`, and disjointness lives there and nowhere else — a flag a
+script was given, or a tool's own `--engine`, names no role; the two test roles
+exist only under `test-util`. `ral_core::invocation::serve(&role, installers)`
+is the one place a role is served, each role's body staying with the code it
+serves. `ral`'s `identify` hands it the role it classified; exarch and every
+test `#[ctor]` share `ral_core::invocation::serve_process(installers)`, which
+reads argv itself. They differ only in what they do with its `Option<u8>`; what
+it decides is when each role is pinned. Before argv
 is parsed, `main` refuses to run setuid — the shell inherits the caller's
 environment and must not run elevated, and neither must any re-exec child, so
 the refusal precedes the whole chain — and restores the Unix signal
@@ -45,15 +47,17 @@ dispositions. Then, per role:
   warrant off fd 99, enters the OS [[map/core/capabilities|sandbox]], and only
   then `execve`s the host program or runs the bundled tool in-process. Windows
   refuses it.
-- **Pipeline anchor** — `serve_anchor` (`--ral-pipeline-anchor`, the
+- **Pipeline anchor** — `pipeline::anchor::serve` (`--ral-pipeline-anchor`, the
   one multicall re-exec a pipeline uses: a stage itself runs on a thread of the
   parent process, but a multi-stage pipeline needs one process to hold its pgid
   open for its whole life). **Pgid probe** (`PgidCheck`, Unix) —
-  `test_helper::serve_pgid_check`, served by every binary, since the tests
-  spawn a real `ral` as a pipeline stage. Neither spawns anything, so neither
-  is pinned.
+  `invocation::probe::pgid_check`, served by every `test-util` binary, since the
+  tests spawn a real `ral` as a pipeline stage. Neither spawns anything, so
+  neither is pinned.
 - **Every other role** runs `sandbox::boot` first, which pins the binary (and, on
-  Linux, bwrap) and, on Windows, sweeps what a crashed prior session left registered.
+  Linux, bwrap) and, on Windows, sweeps what a crashed prior session left
+  registered; the bundled tool only `sandbox::pin`s, as a re-exec child that
+  reaches no ledger.
   - **Engine** (Unix) — then hands the process to
     `ral_core::engine::run_engine(installers)`, pinned exactly as the shell
     is: its grant-confined launches need the envelope as much as the shell's.
@@ -73,9 +77,8 @@ dispositions. Then, per role:
     and each external child launches under the effective policy
     ([[decisions/260617_sandbox-external-children|sandbox-external-children]]).
   - **Shell** — `None`, and `identify` answers `Shell(Mode)`. The test-only
-    `DetachBirth` is `None` too: the test helper, which passes no engine
-    installers, serves that fixture itself (`serve_detach_birth`) once the
-    dispatch has pinned it.
+    `DetachBirth` is booted like the shell and then served in place
+    (`probe::detach_birth`).
 
 The roles that are not the shell exit here, never reaching clap.
 
@@ -92,8 +95,8 @@ still resolves to `Command`/`Script` and runs it, as cron, `su -`, and
 `$SHELL -l -c …` require; the flag matters only once resolution has landed on
 `Interactive`, where it gates login-profile sourcing at REPL boot
 ([[map/repl/loop|loop]]). `RunOpts` (`--recursion-limit`, `--capabilities`)
-rides every mode; `BatchOpts` adds `--audit` / `--pretty` / `--check` /
-`--dump-ast`; `InteractiveOpts` adds `-l`, `--norc`, `-i`, `-s`, and
+rides every mode; `BatchOpts` adds `--audit` / `--pretty` / `halt: Option<Halt>`
+(`--check` / `--dump-ast` / `--dump-ir`, one clap group); `InteractiveOpts` adds `-l`, `--norc`, `-i`, `-s`, and
 `--surface`.
 
 - **Argv terminator.** `inject_arg_terminator` splices a `--` before the first
@@ -104,7 +107,7 @@ rides every mode; `BatchOpts` adds `--audit` / `--pretty` / `--check` /
   the terminator fenced between them; the set of such flags is read from clap's
   own model (`value_taking_longs`), so the injector can never disagree with the
   `Cli` definition.
-- **Frontend selection.** `--surface <minimal|readline|structural>` (a clap
+- **Frontend selection.** `--surface <minimal|readline>` (a clap
   `ValueEnum`, default `readline`) picks the interactive frontend, overriding
   the rc `surface:` key; `None` defers to rc, then the default. The capability
   axis stays the `RAL_INTERACTIVE_MODE` env var — the escape hatch for setups
@@ -127,9 +130,10 @@ through `dispatch_to_report` under the mute host `()`, so it shares the REPL's
 one ending law and one typecheck
 ([[design/engine-protocol|engine-protocol]]).
 
-- **Static work.** `--check` and `--dump-ast` parse, elaborate and (for
-  `--check`) typecheck the source against `PRELUDE`'s schemes plus the batch
-  surface's builtin table, and boot nothing.
+- **Static work.** `--dump-ast` and `--dump-ir` parse and elaborate, printing
+  the tree or the elaborated phrases; `--check` is `compile_and_typecheck`
+  against `PRELUDE`'s schemes plus the batch surface's builtin table, rendered
+  and exited through `StaticDiagnostics::render`. None boots anything.
 - **Boot, stage one.** `IdentityTransport::boot` with the `batch` installer
   (the table is not `cfg(unix)`-gated, only `run_engine` is), whose recipe
   decodes `Attach.config` — `{args}` — strictly, boots the batch surface, sets
@@ -139,8 +143,8 @@ one ending law and one typecheck
   sentence on stderr.
 - **Boot, stage two.** The first dispatch is `Program::Hook` on
   `Session "boot"`, the `_ral-boot` builtin itself (`ral/src/boot_door.rs`),
-  applied to the REPL's own record, `{login: false, no_rc: true,
-  recursion_limit, capabilities}`. The door is one-shot — it unregisters its
+  applied to the REPL's own record, `{login: false, no-rc: true,
+  recursion-limit, capabilities}`. The door is one-shot — it unregisters its
   own hook — sources no startup file here, sets the recursion limit, and
   applies `--capabilities` under its own mooring. `boot_door::settle` reads
   its `Ending`: a load failure is `Raised` status 2, an `exit N` is
@@ -169,20 +173,19 @@ crate-root `PRELUDE: ral_core::boot::BakedPrelude` static built by the
 `ral_core::boot::boot_shell(terminal, &PRELUDE, surface)`, which constructs
 the shell, installs the surface next to `CORE_BUILTINS`, seeds default env
 vars, and registers builtins against the prelude comp. `BakedPrelude` lazily
-`postcard`-decodes the IR and scheme blobs on first access. Probing the
+`postcard`-decodes the IR blob on first access. Probing the
 underlying machine is a separate concern, owned by `ral_core::host`.
 
 `build.rs` is the git-hash block — stamping `RAL_VERSION_SUFFIX` (`+<hash>`
 in a git checkout, empty in a release tarball) into the version string — plus
 one call to `ral_core::boot::bake_prelude_to_out_dir`, which
 parses, elaborates, and `bake_prelude`s `prelude.ral` (annotating each top-level
-bind with its inferred scheme and harvesting those same schemes off one checked
-pass), then serialises the *annotated* `Comp` and the harvested schemes into
-`OUT_DIR`. This is the consumer half of core's schema-less prelude discipline
+bind with its inferred scheme in one checked pass), then serialises the
+*annotated* `Comp` into `OUT_DIR`. This is the consumer half of core's schema-less prelude discipline
 ([[map/core|core]]): a crate's build script cannot depend on the crate it builds,
 so core cannot bake its own prelude, and each embedding host bakes it from core's
 source. Evaluating the annotated prelude installs each binding's scheme into
-scope[0], so the per-run seed and the baked list agree by construction
+scope[0], so the per-run seed and the prelude's own schemes agree by construction
 ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
 
 ## Platform glue
@@ -193,14 +196,15 @@ binary needs: `probe_terminal` (under `RAL_INTERACTIVE_MODE`),
 home), `load_exit_hints` (user override in the data dir, else the embedded
 `data/exit-hints.txt`), and `exit_byte` (the one clamp-and-narrow every mode's
 final code funnels through).
-Default-env seeding is core's: `boot_shell` calls
-`Shell::seed_default_env_vars`.
+Default-env seeding is core's: `boot_shell` seeds the host's env and cwd
+(`boot::seed_env`, private) between building the shell and seating the
+prelude.
 
 Builtins are shell-scoped: each mode declares its surface as one
 `HostSurface` value and hands it to `boot_shell`, so the checker surface and
 the runtime surface cannot drift. Batch's surface is core plus
 `WATCH_BUILTIN`, `SURFACE_BUILTIN` and the boot door, and the same value seeds `--check`'s builtin table
-(`HostSurface::builtin_table`, the checker with no live shell); the REPL's
+(`HostSurface::manifest`, the checker's Σ with no live shell); the REPL's
 adds the [[map/repl/plugins|`_ed-*` doors and the plugin load doors]], all
 static. Both ral front-ends print a watched worker's lines, so `watch` is the
 ral hosts' to install

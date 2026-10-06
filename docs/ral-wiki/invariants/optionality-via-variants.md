@@ -2,7 +2,9 @@
 
 ral has no `Option` type and no null. Optionality — a value that may be present
 or absent — is expressed as an **open variant**, idiomatically `` `some v `` and
-`` `none ``, passed as an ordinary value and discriminated by `case`.
+`` `none ``, passed as an ordinary value and discriminated by `case`. Every
+`Option` a record carries is this variant (`Datum for Option<T>`), so an absent
+principal, error, target or note is `` `none ``, never the empty string.
 
 This follows from two other commitments:
 

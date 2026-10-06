@@ -1,14 +1,13 @@
 //! `impl Context`: verbs over the dynamic context — env overrides, `HOME` /
 //! `USER`, and the [`Resolver`] bound to the live home/cwd pair.
 //!
-//! [`Context`] is the `Shell::context` field that `Shell::inherit_from` and
-//! `Shell::spawn_thread` clone into a child.  `PWD` stays out of
+//! [`Context`] is the `Shell::context` field that [`Shell::child`](super::Shell)
+//! clones into a child.  `PWD` stays out of
 //! `env_overrides`; the canonical directory lives on `context.cwd`.
 
 use super::Context;
-use super::cwd::Cwd;
 use crate::path::{Resolver, SearchCwd};
-use crate::types::{EnvVars, GrantStack, HandlerStack, Modules};
+use crate::types::EnvVars;
 use std::path::{Path, PathBuf};
 
 impl Context {
@@ -20,11 +19,6 @@ impl Context {
     /// Insert `k → v`.
     pub fn set_env_var(&mut self, k: impl Into<String>, v: impl Into<String>) {
         self.env_overrides.insert(k.into(), v.into());
-    }
-
-    /// Insert `k → v` only if `k` is unbound.
-    pub(crate) fn set_env_var_or_keep(&mut self, k: impl Into<String>, v: impl Into<String>) {
-        self.env_overrides.insert_or_keep(k.into(), v.into());
     }
 
     /// Bulk-insert each item.
@@ -39,15 +33,27 @@ impl Context {
         }
     }
 
-    /// Effective `HOME` via [`crate::path::home`]: these overrides first, then
-    /// the host env, `None` when neither binds.
+    /// Effective `HOME`: [`EnvVars::home`](crate::types::EnvVars::home) over
+    /// these overrides.
     pub(crate) fn home(&self) -> Option<String> {
-        crate::path::home(&self.env_overrides)
+        self.env_overrides.home()
+    }
+
+    /// [`Self::home`], or the one sentence that names an unset `HOME`, shared
+    /// by `~` and `home`.
+    ///
+    /// # Errors
+    /// `HOME` is unset.
+    pub(crate) fn home_dir(&self) -> Result<String, crate::types::Error> {
+        self.home().ok_or_else(|| {
+            crate::types::Error::new("HOME is unset, so `~` and `home` name no directory")
+                .with_hint("set HOME, or spell out an explicit path")
+        })
     }
 
     /// The `USER` stamped on observations.  Overrides only, with no
     /// host-env fallback, so it names nobody until a front end has run
-    /// [`Shell::seed_default_env_vars`](super::Shell::seed_default_env_vars).
+    /// [`boot_shell`](crate::boot::boot_shell).
     /// An empty binding names nobody either.
     pub fn principal(&self) -> Option<String> {
         self.env_overrides
@@ -63,11 +69,11 @@ impl Context {
     }
 
     /// Where a child launched from this context starts: the cell's directory,
-    /// else [`process_cwd`](crate::path::process_cwd) for an unseeded shell,
+    /// else [`cwd`](crate::host::cwd) for an unseeded shell,
     /// else `"."` if even `getcwd(3)` fails.
     pub(crate) fn launch_cwd(&self) -> PathBuf {
         self.cwd().map_or_else(
-            || crate::path::process_cwd().unwrap_or_else(|| PathBuf::from(".")),
+            || crate::host::cwd().unwrap_or_else(|| PathBuf::from(".")),
             Path::to_path_buf,
         )
     }
@@ -86,31 +92,29 @@ impl Context {
             cwd: self.cwd(),
         }
     }
+}
 
-    /// The cwd cell, for the wire mirror.
-    pub(crate) fn wire_cwd(&self) -> &Cwd {
-        &self.cwd
-    }
-
-    /// Rebuild a context from its wire mirror's parts — `crate::subprocess`
-    /// is the sole caller.  `hooks` starts empty: host lifecycle entry points
-    /// never ride the wire.
-    pub(crate) fn from_wire(
-        env_overrides: EnvVars,
-        grants: GrantStack,
-        handlers: HandlerStack,
-        args: Vec<String>,
-        modules: Modules,
-        cwd: Cwd,
-    ) -> Self {
-        Self {
+impl<H> Context<H> {
+    /// The same context over other handlers, if `f` can make them.
+    pub(crate) fn try_map_handlers<G, E>(
+        self,
+        f: impl FnOnce(H) -> Result<G, E>,
+    ) -> Result<Context<G>, E> {
+        let Self {
             env_overrides,
+            cwd,
             grants,
             handlers,
-            hooks: std::collections::HashMap::default(),
             args,
             modules,
+        } = self;
+        Ok(Context {
+            env_overrides,
             cwd,
-        }
+            grants,
+            handlers: f(handlers)?,
+            args,
+            modules,
+        })
     }
 }

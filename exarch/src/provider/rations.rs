@@ -172,6 +172,7 @@ impl Rations {
 mod tests {
     use super::*;
     use crate::provider::allowance::Consumption;
+    use ral_core::test_helper::eventually;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn reading(fraction: f64) -> Vec<Allowance> {
@@ -223,14 +224,6 @@ mod tests {
 
     fn allowance_until(rations: &Rations, account: &Account) -> Option<jiff::Timestamp> {
         rations.with(&account.id, |standing| standing.allowance_until)
-    }
-
-    /// A read lands on a thread of its own.
-    fn eventually(done: impl Fn() -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !done() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(5));
-        }
     }
 
     /// An allowance holds every model, a rate its own alone; a hold the loop
@@ -305,7 +298,11 @@ mod tests {
         let account = Account::built_in("openrouter");
         let source = FakeSource::answering(Ok(reading(0.5)));
         rations.admit(&account, "m", &source).unwrap();
-        eventually(|| !rations.reading(&account.id).is_empty());
+        // A read lands on a thread of its own.
+        eventually(Duration::from_secs(5), || {
+            (!rations.reading(&account.id).is_empty()).then_some(())
+        })
+        .expect("the read landed");
         assert_eq!(rations.reading(&account.id), reading(0.5));
         rations.admit(&account, "m", &source).unwrap();
         assert_eq!(source.calls(), 1, "the second admit is inside INTERVAL");
@@ -318,7 +315,10 @@ mod tests {
         rations.land(&account.id, reading(0.5));
         let source = FakeSource::answering(Err("network is down".into()));
         rations.admit(&account, "m", &source).unwrap();
-        eventually(|| source.calls() == 1);
+        eventually(Duration::from_secs(5), || {
+            (source.calls() == 1).then_some(())
+        })
+        .expect("the read was asked for");
         assert_eq!(source.calls(), 1);
         assert_eq!(rations.reading(&account.id), reading(0.5));
     }

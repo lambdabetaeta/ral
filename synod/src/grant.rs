@@ -28,14 +28,14 @@
 //! path names nothing.  One substitution, in one function, which is why
 //! the construction lives here and is not scattered across the session.
 
+use ral_core::capability::{Capabilities, EditorPolicy, ExecKey, FsPolicy, ShellPolicy, Verdict};
 use ral_core::path::FrozenPath;
-use ral_core::types::{Capabilities, EditorPolicy, ExecKey, FsPolicy, ShellPolicy, Verdict};
 use std::path::{Path, PathBuf};
 
 /// The image's office toolbox, as an allowlist of *bare command names*:
 /// no path or dir key.
 ///
-/// [`ExecGrant`](ral_core::types::ExecGrant) admits by bare name, by path or by directory prefix,
+/// [`ExecGrant`](ral_core::capability::ExecGrant) admits by bare name, by path or by directory prefix,
 /// and exarch's profiles lean hard on the directory half because a
 /// developer's tool roots are open-ended: Homebrew, rustup toolchains,
 /// nvm and pyenv install binaries nobody can enumerate in advance, so
@@ -571,7 +571,6 @@ mod tests {
     use super::*;
     use crate::test_fixture::workshop;
     use ral_core::capability::FsOp;
-    use ral_core::types::Shell;
 
     fn refusal(folder: &Path) -> String {
         Grant::open(folder).expect_err("this folder must be refused")
@@ -845,7 +844,7 @@ mod tests {
         let (_dir, grant) = granted("grant-fs");
         let caps = grant.capabilities();
 
-        let mut shell = Shell::default();
+        let mut shell = ral_core::test_helper::core_shell();
         // Read asks the guard, write asks the stack directly: the write door
         // is `locate`, which walks the name first and would fail on these
         // paths for not existing, long before it reached the grant.
@@ -913,7 +912,7 @@ mod tests {
         let Some(home) = ral_core::host::home() else {
             return;
         };
-        let mut shell = Shell::default();
+        let mut shell = ral_core::test_helper::core_shell();
         shell.with_capabilities(grant.capabilities(), |sh| {
             let path = sh.resolve(&format!("{home}/.ssh/id_ed25519"));
             assert!(
@@ -938,7 +937,7 @@ mod tests {
                 "the office toolbox must admit {tool}"
             );
         }
-        let mut shell = Shell::default();
+        let mut shell = ral_core::test_helper::core_shell();
         shell.with_capabilities(caps, |sh| {
             // The image cuts these on purpose: what has to be built from
             // source on a machine that forgets it at reboot is a delay,

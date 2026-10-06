@@ -1,3 +1,7 @@
+#![allow(
+    clippy::disallowed_macros,
+    reason = "[silent:build-script] cargo reads these lines as directives"
+)]
 use std::process::Command;
 
 #[allow(

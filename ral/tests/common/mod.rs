@@ -1,3 +1,7 @@
+#![allow(
+    clippy::disallowed_macros,
+    reason = "[test] libtest captures print macros"
+)]
 #![allow(clippy::disallowed_methods)]
 
 //! Shared scaffolding for `ral` integration tests.

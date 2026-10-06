@@ -23,9 +23,6 @@
 //! - [`prompt`]   -- Prompt rendering.
 //! - [`session`]  -- The REPL state machine driving the loop.
 //! - [`theme`]    -- REPL value-output styling (configurable from rc).
-//! - [`worksheet`] -- The REPL-side worksheet model: per-binding
-//!   dependency edges and the pure/effectful verdict, retained across runs
-//!   for the structural surface's reactive worksheet.
 
 mod complete;
 mod completion;
@@ -43,8 +40,6 @@ mod keybinding;
 mod prompt;
 mod session;
 mod theme;
-#[cfg(feature = "structural")]
-mod worksheet;
 
 pub(crate) use config::RcSettings;
 pub(crate) use config::source::source_startup_files;
@@ -67,15 +62,9 @@ pub(crate) fn run_interactive(opts: &crate::cli::InteractiveOpts) -> ExitCode {
 #[cfg(test)]
 pub(crate) fn eval(shell: &mut ral_core::Shell, src: &str) -> ral_core::Value {
     let run = exec::line_run(src);
-    match shell.run(ral_core::RunRequest {
-        run,
-        surface: None,
-        deferred: None,
-        desk: None,
-        fork: None,
-    }) {
-        ral_core::RunReport::Ran { ending, .. } => ending.into_result().expect("evaluate"),
-        ral_core::RunReport::Static { .. } => panic!("well-formed source must run: {src:?}"),
+    match shell.run(run) {
+        ral_core::run::RunReport::Ran { ending, .. } => ending.into_result().expect("evaluate"),
+        ral_core::run::RunReport::Static { .. } => panic!("well-formed source must run: {src:?}"),
     }
 }
 
@@ -87,7 +76,7 @@ pub(crate) fn eval(shell: &mut ral_core::Shell, src: &str) -> ral_core::Value {
 pub(crate) fn engine_at(
     attach: &ral_core::protocol::Attach,
     dress: impl FnOnce(&mut ral_core::Shell) + 'static,
-) -> ral_core::protocol::IdentityTransport {
+) -> ral_core::carrier::IdentityTransport {
     use ral_core::engine::{Booted, EngineInstaller};
     type Dress = Box<dyn FnOnce(&mut ral_core::Shell)>;
     thread_local! {
@@ -98,7 +87,8 @@ pub(crate) fn engine_at(
         reason = "must match EngineInstaller::boot's signature, which can genuinely refuse"
     )]
     fn dressed(_: &ral_core::protocol::Attach) -> Result<Booted, String> {
-        let mut shell = ral_core::Shell::new(ral_core::io::TerminalState::default());
+        let mut shell =
+            ral_core::HostSurface::default().shell(ral_core::terminal::TerminalState::default());
         if let Some(dress) = DRESS.take() {
             dress(&mut shell);
         }
@@ -113,7 +103,7 @@ pub(crate) fn engine_at(
         narrow: |_, _| Err("a test engine hatches no children".into()),
     }];
     DRESS.set(Some(Box::new(dress)));
-    ral_core::protocol::IdentityTransport::boot(&INSTALLERS, attach).expect("a test engine boots")
+    ral_core::carrier::IdentityTransport::boot(&INSTALLERS, attach).expect("a test engine boots")
 }
 
 #[cfg(test)]
@@ -123,7 +113,7 @@ pub(crate) const TEST_TAG: &str = "test";
 #[cfg(test)]
 pub(crate) fn engine(
     dress: impl FnOnce(&mut ral_core::Shell) + 'static,
-) -> ral_core::protocol::IdentityTransport {
+) -> ral_core::carrier::IdentityTransport {
     let temp = std::env::temp_dir();
     engine_at(
         &ral_core::protocol::Attach::new(TEST_TAG, temp.clone(), temp),
@@ -133,7 +123,7 @@ pub(crate) fn engine(
 
 /// Dispatch `src` as an input line under the mute host.
 #[cfg(test)]
-pub(crate) fn run_line(t: &dyn ral_core::protocol::Transport, src: &str) {
-    ral_core::protocol::dispatch_to_report(t, exec::line_run(src), std::sync::Arc::new(()))
+pub(crate) fn run_line(t: &dyn ral_core::carrier::Transport, src: &str) {
+    ral_core::carrier::dispatch_to_report(t, exec::line_run(src), std::sync::Arc::new(()))
         .expect("the engine is attached");
 }

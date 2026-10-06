@@ -3,9 +3,9 @@
 //! Core flushes a single `` `done `` value at the end of a background block's
 //! deferred buffer; [`value_to_done`] decodes it, [`settled_spans`] words it.
 
-use ral_core::serial::FOValue;
+use ral_core::first_order::FOValue;
+use ral_core::types::{Done, DoneEvent};
 
-use super::value::{int_field, record, str_field};
 use super::{Role, Span};
 use crate::record::DoneOutcome;
 
@@ -13,35 +13,16 @@ use crate::record::DoneOutcome;
 /// `None` for anything else — and since `decode_surface` in `shell_eval.rs`
 /// tries this branch last, `None` drops the value rather than passing it on.
 pub(crate) fn value_to_done(v: &FOValue) -> Option<(String, DoneOutcome)> {
-    let FOValue::Variant { label, payload } = v else {
-        return None;
-    };
-    if label != "done" {
-        return None;
-    }
-    let m = record(payload.as_deref()?)?;
-    let FOValue::Variant { label, payload } = m.field("outcome")? else {
-        return None;
-    };
-    let outcome = match label.as_str() {
-        "ok" => DoneOutcome::Ok,
-        "err" => {
-            let rec = record(payload.as_deref()?)?;
-            DoneOutcome::Err {
-                message: str_field(rec, "message").unwrap_or_default(),
-                status: int_field(rec, "status").unwrap_or(0),
-            }
-        }
-        "panic" => DoneOutcome::Panic {
-            message: payload
-                .as_deref()
-                .and_then(FOValue::as_str)
-                .unwrap_or_default()
-                .to_owned(),
+    let DoneEvent { cmd, outcome } = DoneEvent::from_surface(v)?;
+    let outcome = match outcome {
+        Done::Ok => DoneOutcome::Ok,
+        Done::Err(rec) => DoneOutcome::Err {
+            message: rec.message().to_owned(),
+            status: rec.status().into(),
         },
-        _ => return None,
+        Done::Panic(message) => DoneOutcome::Panic { message },
     };
-    Some((str_field(m, "cmd")?, outcome))
+    Some((cmd, outcome))
 }
 
 /// How a settled worker reads: its name, and muted prose around the outcome.
@@ -82,54 +63,32 @@ pub fn settled_text(cmd: &str, outcome: &DoneOutcome) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::testkit::{card_value, int, map_value, s, variant};
+    use super::super::testkit::{card_value, map_value, s};
     use super::*;
+    use ral_core::types::{ErrorRecord, Status};
 
-    /// Mirrors core's `done_event`: `cmd` plus a closed outcome variant.
-    fn done_value(cmd: &str, outcome: FOValue) -> FOValue {
-        variant(
-            "done",
-            map_value(vec![("cmd", s(cmd)), ("outcome", outcome)]),
-        )
+    fn done(outcome: Done) -> FOValue {
+        DoneEvent {
+            cmd: "block at turn 1, line 1".into(),
+            outcome,
+        }
+        .to_surface()
     }
 
     #[test]
     fn value_to_done_decodes_each_outcome() {
         let named = |outcome| Some(("block at turn 1, line 1".to_string(), outcome));
+        assert_eq!(value_to_done(&done(Done::Ok)), named(DoneOutcome::Ok));
+        let err = ErrorRecord::new("<runtime>", &Status::Raised(2), "boom", None);
         assert_eq!(
-            value_to_done(&done_value(
-                "block at turn 1, line 1",
-                variant("ok", FOValue::Unit)
-            )),
-            named(DoneOutcome::Ok)
-        );
-        let err = variant(
-            "err",
-            map_value(vec![
-                ("cmd", s("<runtime>")),
-                ("status", int(2)),
-                ("message", s("boom")),
-                (
-                    "site",
-                    FOValue::Variant {
-                        label: "none".into(),
-                        payload: None,
-                    },
-                ),
-            ]),
-        );
-        assert_eq!(
-            value_to_done(&done_value("block at turn 1, line 1", err)),
+            value_to_done(&done(Done::Err(err))),
             named(DoneOutcome::Err {
                 message: "boom".into(),
                 status: 2,
             })
         );
         assert_eq!(
-            value_to_done(&done_value(
-                "block at turn 1, line 1",
-                variant("panic", s("kaput"))
-            )),
+            value_to_done(&done(Done::Panic("kaput".into()))),
             named(DoneOutcome::Panic {
                 message: "kaput".into(),
             })

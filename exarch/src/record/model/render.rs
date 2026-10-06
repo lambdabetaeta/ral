@@ -125,7 +125,7 @@ pub(super) fn render_marker(context: &Context, hole: &[Turn]) -> String {
     if collapsed > 0 {
         let range = format!("{}–{}", rows[0].id, rows[collapsed - 1].id);
         lines.push(format!(
-            "{range:>MARKER_ID$}  ({collapsed} earlier turns — exarch-transcript `index)"
+            "{range:>MARKER_ID$}  ({collapsed} earlier turns: exarch-transcript `index)"
         ));
     }
     let mut seen = 0usize;

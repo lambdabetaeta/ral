@@ -14,9 +14,8 @@
 use super::env::{InferCtx, TyEnv};
 use super::error::{KindFound, Reason, TypeErrorKind};
 use super::generalize::{FreeVars, env_free_vars, free_ty};
-use super::kind::{Head, Kind};
-use super::ty::{Label, Row, Ty, TyVar};
 use crate::source::Span;
+use crate::ty::{Head, Kind, Label, Row, Ty, TyVar};
 
 pub(super) struct Lbl {
     pub target: Ty,
@@ -114,7 +113,7 @@ impl InferCtx {
     }
 
     fn read_as_map(&mut self, lbl: &Lbl) {
-        let map = Ty::Map(Box::new(lbl.elem.clone()));
+        let map = Ty::map(lbl.elem.clone());
         self.unify_ty(&lbl.target, &map, Reason::MapKeyRead);
     }
 
@@ -243,16 +242,8 @@ impl InferCtx {
 
     fn read_as(&mut self, idx: &Idx, shape: Shape) -> Settled {
         let (container, key, reason) = match shape {
-            Shape::List => (
-                Ty::List(Box::new(idx.elem.clone())),
-                Ty::Int,
-                Reason::ListIndexKey,
-            ),
-            Shape::Map => (
-                Ty::Map(Box::new(idx.elem.clone())),
-                Ty::String,
-                Reason::MapIndexKey,
-            ),
+            Shape::List => (Ty::list(idx.elem.clone()), Ty::Int, Reason::ListIndexKey),
+            Shape::Map => (Ty::map(idx.elem.clone()), Ty::String, Reason::MapIndexKey),
         };
         self.unify_ty(&idx.target, &container, Reason::DynamicIndexTarget);
         self.unify_ty(&idx.key, &key, reason);

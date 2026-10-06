@@ -24,6 +24,8 @@ field and the line that needed it.
   by `annotate` for a boundary head. There is no `Check` frame: the door
   already knows the value, and a frame sees it only after the door has let it
   go. `serial.rs` ships the site with the IR, so an engine child admits too.
+  The checker builds the site (`typecheck/site.rs`); the runtime walks it
+  (`types/admit.rs`).
 - **A `Site` is the solved type frozen as a graph**, one node per variable
   root, so cycles close and sharing survives; it keeps the span that imposed
   each structure and each free variable's kind. `Site::admit` walks the value

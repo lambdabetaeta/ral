@@ -15,7 +15,7 @@ pub(crate) type PreludeMap = HashMap<String, Binding, FxBuildHasher>;
 
 /// Σ: language-given constants (seeded once at boot,
 /// [`Signature::install_natives`]) and the baked prelude's bindings (seeded
-/// once per shell, [`crate::builtins::register`]).  A `Signature` is one per
+/// once per shell, [`BakedPrelude::seat`](crate::boot::BakedPrelude::seat)).  A `Signature` is one per
 /// shell, `Arc`-shared into every fork; the prelude inside it is
 /// process-wide, one map baked once and `Arc`-shared into every shell's
 /// `Signature` in turn, never copied.

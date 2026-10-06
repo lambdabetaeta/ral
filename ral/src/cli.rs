@@ -42,15 +42,33 @@ pub(crate) struct RunOpts {
     pub capabilities: Vec<std::path::PathBuf>,
 }
 
+/// Where a batch run stops short of running: static work on the source alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Halt {
+    /// `--dump-ast`: the parse.
+    Ast,
+    /// `--dump-ir`: the elaborated phrases, whether or not they typecheck.
+    Ir,
+    /// `--check`: the whole compile, reported as a run reports it.
+    Checked,
+}
+
+impl Halt {
+    fn flag(self) -> &'static str {
+        match self {
+            Self::Ast => "--dump-ast",
+            Self::Ir => "--dump-ir",
+            Self::Checked => "--check",
+        }
+    }
+}
+
 /// Flags valid only in batch (script / `-c`) modes.
 #[derive(Default, Clone)]
-// Distinct batch-mode flags, not a bundle-able group.
-#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct BatchOpts {
     pub audit: bool,
     pub pretty: bool,
-    pub check: bool,
-    pub dump_ast: bool,
+    pub halt: Option<Halt>,
     pub run: RunOpts,
 }
 
@@ -91,10 +109,11 @@ impl InteractiveOpts {
 #[command(
     name = "ral",
     version = concat!(env!("CARGO_PKG_VERSION"), env!("RAL_VERSION_SUFFIX")),
-    about = "ral — a typed, structured shell",
+    about = "ral: a typed, structured shell",
+    group(clap::ArgGroup::new("halt").args(["check", "dump_ast", "dump_ir"])),
     long_about = "\
-ral is a typed, structured shell. Programs pass values — records, lists, \
-variants, strings, numbers — and the type checker catches many mistakes before \
+ral is a typed, structured shell. Programs pass values: records, lists, \
+variants, strings, numbers: and the type checker catches many mistakes before \
 execution.
 
 USAGE
@@ -119,8 +138,8 @@ ENVIRONMENT
     RAL_TIMING            when present, print batch phase timings to stderr
 
 AUDIT
-    Use audit { ... } to get a report: how the body settled — `ok of its \
-value, or `err of the same error record try hands a handler — beside a trail \
+    Use audit { ... } to get a report: how the body settled: `ok of its \
+value, or `err of the same error record try hands a handler: beside a trail \
 of what it did. The trail lists commands, redirect reads and writes, \
 capability denials and worker births, each with its arguments, status, \
 output, timing, source location, and principal, in the order they settled. \
@@ -170,12 +189,20 @@ struct Cli {
     #[arg(long = "dump-ast")]
     dump_ast: bool,
 
+    /// Print ral's elaborated phrases to standard error without running them.
+    ///
+    /// Ral stops after elaboration, so this option does not type-check the
+    /// program: it prints the phrases of a program that fails the check too.
+    /// You must give ral a script file or use `-c`.
+    #[arg(long = "dump-ir")]
+    dump_ir: bool,
+
     /// Set the maximum number of machine frames ral may use while running code.
     ///
     /// N must be a positive integer. The default is 100000. In an interactive
-    /// session, this option overrides `recursion_limit` in the rc file. It has
-    /// no effect with `--check` or `--dump-ast` because those modes do not run
-    /// the program.
+    /// session, this option overrides `recursion-limit` in the rc file. It has
+    /// no effect with `--check`, `--dump-ast` or `--dump-ir` because those modes do
+    /// not run the program.
     #[arg(long = "recursion-limit", value_name = "N",
           value_parser = clap::value_parser!(u64).range(1..))]
     recursion_limit: Option<u64>,
@@ -184,8 +211,8 @@ struct Cli {
     ///
     /// Separate paths with commas or repeat this option. Ral combines the
     /// profiles from left to right and applies them before running code. It has
-    /// no effect with `--check` or `--dump-ast` because those modes do not start
-    /// a runtime session.
+    /// no effect with `--check`, `--dump-ast` or `--dump-ir` because those modes do
+    /// not start a runtime session.
     #[arg(long, value_name = "PATHS", value_delimiter = ',',
           action = clap::ArgAction::Append)]
     capabilities: Vec<std::path::PathBuf>,
@@ -233,9 +260,8 @@ struct Cli {
     /// Choose the interface for an interactive session.
     ///
     /// This option overrides `surface` in the rc file. The choices are
-    /// `readline` (the default), `minimal` and `structural`. A terminal resolved
-    /// to minimal mode still uses the minimal interface. If the structural
-    /// interface is unavailable, ral warns and uses readline instead.
+    /// `readline` (the default) and `minimal`. A terminal resolved to minimal
+    /// mode still uses the minimal interface.
     #[arg(long, value_enum, value_name = "SURFACE")]
     surface: Option<crate::repl::Surface>,
 
@@ -276,11 +302,17 @@ impl Cli {
             }),
             capabilities,
         };
+        let halt = [
+            (self.check, Halt::Checked),
+            (self.dump_ast, Halt::Ast),
+            (self.dump_ir, Halt::Ir),
+        ]
+        .into_iter()
+        .find_map(|(on, halt)| on.then_some(halt));
         let batch = BatchOpts {
             audit: self.audit,
             pretty: self.pretty,
-            check: self.check,
-            dump_ast: self.dump_ast,
+            halt,
             run: run.clone(),
         };
 
@@ -311,7 +343,7 @@ impl Cli {
             };
         }
 
-        reject_batch_flags_without_batch(self.audit, self.check, self.dump_ast);
+        reject_batch_flags_without_batch(self.audit, halt);
 
         Mode::Interactive(InteractiveOpts {
             login,
@@ -368,17 +400,9 @@ fn inject_arg_terminator(raw: &[String]) -> Vec<String> {
     out
 }
 
-fn reject_batch_flags_without_batch(audit: bool, check: bool, dump_ast: bool) {
-    if !audit && !check && !dump_ast {
+fn reject_batch_flags_without_batch(audit: bool, halt: Option<Halt>) {
+    let Some(flag) = audit.then_some("--audit").or_else(|| halt.map(Halt::flag)) else {
         return;
-    }
-
-    let flag = if audit {
-        "--audit"
-    } else if check {
-        "--check"
-    } else {
-        "--dump-ast"
     };
     Cli::command()
         .error(

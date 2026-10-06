@@ -1,15 +1,7 @@
-//! ANSI escape constants, OSC sequence builders, and the color gate.
+//! ANSI escape constants, OSC sequence builders, and escape scanning.
 //!
-//! [`use_color`] (stderr) and [`use_ui_color`] (stdout) consult a
-//! [`TerminalState`] that each frontend seeds once at startup through
-//! [`set_terminal`], re-exported as `diagnostic::set_terminal`.  Until then
-//! [`use_color`] probes inline, so early-startup errors still color.  The OSC
-//! builders only format; whether a sequence may be emitted is decided by the
-//! `TerminalState::ui_*_ok` predicates.
-
-use std::sync::OnceLock;
-
-use crate::io::TerminalState;
+//! Vocabulary only: whether a sequence may be emitted is decided by
+//! [`TerminalState`](crate::terminal::TerminalState).
 
 // ── Constants ─────────────────────────────────────────────────────────────
 
@@ -198,49 +190,6 @@ pub fn visible(s: &str) -> String {
     }
     out.extend(line);
     out
-}
-
-// ── Color-gating ──────────────────────────────────────────────────────────
-
-static CACHED_TERMINAL: OnceLock<TerminalState> = OnceLock::new();
-
-/// Seed the cached [`TerminalState`] once per process, after probing.  The
-/// first call wins; later ones are ignored.
-pub fn set_terminal(t: &TerminalState) {
-    let _ = CACHED_TERMINAL.set(*t);
-}
-
-/// Whether stderr — diagnostics, errors, warnings — may carry color.
-///
-/// Prefers the cached snapshot so all gating agrees on one source of truth,
-/// and probes inline while the cache is still empty.
-pub fn use_color() -> bool {
-    if let Some(t) = CACHED_TERMINAL.get() {
-        return t.stderr_ansi_ok();
-    }
-    if anstyle_query::no_color() {
-        return false;
-    }
-    if !anstyle_query::term_supports_ansi_color() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::io::IsTerminal;
-        std::io::stderr().is_terminal()
-    }
-    #[cfg(windows)]
-    {
-        crate::io::is_console(crate::io::STD_ERROR_HANDLE)
-    }
-}
-
-/// Whether stdout — REPL value output, help — may carry color.
-///
-/// Cache-only, so false until [`set_terminal`] runs, and gated on the stdout
-/// predicate: stdout can be piped into a pager while stderr stays a tty.
-pub fn use_ui_color() -> bool {
-    CACHED_TERMINAL.get().is_some_and(TerminalState::ui_ansi_ok)
 }
 
 /// `code` when `enabled`, the empty string otherwise.

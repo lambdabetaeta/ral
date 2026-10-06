@@ -1,9 +1,10 @@
 //! The fs dimension: a [`Region`] per op, as [`super::exec`] holds the exec
 //! dimension.
 //!
-//! Both readers of fs authority consume it: the in-process guard in
-//! [`super::enforce`] judges a path by the region, the OS projection in
-//! [`super::sandbox`] renders its live allows and its denies.  Agreement
+//! Both readers of fs authority consume it: the in-process guard
+//! (`crate::guard`) judges a path by the region, the OS projection
+//! (`crate::sandbox::SandboxProjection`) renders its live allows and its
+//! denies.  Agreement
 //! between guard and sandbox profile is then structural — one fold per op,
 //! two consumers — rather than a property two independent folds have to be
 //! tested into.
@@ -15,24 +16,20 @@
 //! at spawn, because that is when the OS profile is written.
 
 use super::table::{Scope, Table};
+use super::{FsPolicy, GrantStack, Meet, Verdict};
 use crate::path::{FrozenPath, Polarity, Resolver};
-use crate::types::{FsPolicy, GrantStack, Meet, Verdict};
 use std::path::Path;
+use strum::IntoStaticStr;
 
 /// Which fs region a check consults: the read or the write prefix set.
+#[derive(IntoStaticStr)]
+#[strum(serialize_all = "kebab-case")]
 pub enum FsOp {
     Read,
     Write,
 }
 
 impl FsOp {
-    pub(super) fn label(&self) -> &'static str {
-        match self {
-            Self::Read => "read",
-            Self::Write => "write",
-        }
-    }
-
     fn prefixes<'a>(&self, fs: &'a FsPolicy) -> &'a [FrozenPath] {
         match self {
             Self::Read => &fs.read_prefixes,
@@ -67,7 +64,7 @@ impl Scope for FrozenPath {
 /// its denies, re-frozen, met.  `None` exactly when no layer held an `fs`
 /// opinion, so the guard is unrestricted and the projection needs no fs
 /// rules; a layer that opined and admitted nothing denies.
-pub(super) fn region(grants: &GrantStack, resolver: &Resolver, op: &FsOp) -> Option<Region> {
+pub(crate) fn region(grants: &GrantStack, resolver: &Resolver, op: &FsOp) -> Option<Region> {
     grants
         .fs()
         .map(|fs| {

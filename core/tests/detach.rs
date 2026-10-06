@@ -26,15 +26,18 @@
 
 mod common;
 
-use ral_core::protocol::{Program, Run};
-use ral_core::serial::FOValue;
+use ral_core::first_order::FOValue;
+use ral_core::protocol::Run;
+use ral_core::protocol::probe::Probe;
+use ral_core::run::RunReport;
 use ral_core::sync::LockExt as _;
-use ral_core::types::{GrantStack, Shell};
-use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Value, builtins};
+use ral_core::test_helper::eventually;
+use ral_core::types::Shell;
+use ral_core::{RunIo, Value, builtins};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// The marker the hidden birth flag's survivor writes to its trace file and
 /// to both its streams, which go to `/dev/null`.
@@ -50,7 +53,7 @@ static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 /// always has births to spend.
 fn armed() -> Shell {
     let mut shell = ral_core::boot::boot_shell(
-        ral_core::io::TerminalState::default(),
+        ral_core::terminal::TerminalState::default(),
         common::prelude(),
         &ral_core::boot::HostSurface::default(),
     );
@@ -63,29 +66,16 @@ fn armed() -> Shell {
 /// `to-json` rather than the `Value`, so what the model would read is what
 /// the test reads.
 fn birth(shell: &mut Shell, call: &str) -> serde_json::Value {
-    let report = shell.run(RunRequest {
-        run: Run {
-            program: Program::Source(format!("let r = {call}; to-json $r")),
-            script_name: "<test>".into(),
-            caps: GrantStack::root(),
-            wall: None,
-            deferred_lease: None,
-            worker_cap: None,
-            io: RunIo::Capture,
-            terminal: RequestedTerminalAccess::Leased,
-            stdin: RunStdin::Inherit,
-            trail: None,
-        },
-        surface: None,
-        deferred: None,
-        desk: None,
-        fork: None,
+    let report = shell.run(Run {
+        io: RunIo::Capture,
+        ..Run::foreground(format!("let r = {call}; to-json $r"), "<test>")
     });
     match report {
         RunReport::Ran {
-            ending: ral_core::Ending::Settled {
-                value: Value::Unit, ..
-            },
+            ending:
+                ral_core::run::Ending::Settled {
+                    value: Value::Unit, ..
+                },
             captured: Some(captured),
             ..
         } => serde_json::from_slice(&captured.stdout).expect("`to-json` emits JSON"),
@@ -100,27 +90,15 @@ fn birth(shell: &mut Shell, call: &str) -> serde_json::Value {
 /// with, insisting the run reached evaluation so a refusal is never
 /// confused with a compile failure.
 fn refusal(shell: &mut Shell, source: &str) -> String {
-    let report = shell.run(RunRequest {
-        run: Run {
-            program: Program::Source(source.into()),
-            script_name: "<test>".into(),
-            caps: GrantStack::root(),
-            wall: None,
-            deferred_lease: None,
-            worker_cap: None,
-            io: RunIo::Capture,
-            terminal: RequestedTerminalAccess::Leased,
-            stdin: RunStdin::Inherit,
-            trail: None,
-        },
-        surface: None,
-        deferred: None,
-        desk: None,
-        fork: None,
+    let report = shell.run(Run {
+        io: RunIo::Capture,
+        ..Run::foreground(source, "<test>")
     });
     match report {
         RunReport::Ran {
-            ending: ral_core::Ending::Raised { error, .. } | ral_core::Ending::Walled { error, .. },
+            ending:
+                ral_core::run::Ending::Raised { error, .. }
+                | ral_core::run::Ending::Walled { error, .. },
             ..
         } => error.to_string(),
         RunReport::Ran { ending, .. } => panic!("{source} must be refused, got {ending:?}"),
@@ -137,7 +115,7 @@ fn refusal(shell: &mut Shell, source: &str) -> String {
 /// libtest ever sees the argv.
 fn host_that_births_and_exits(trace: &Path, host_out: &Path, host_err: &Path) -> Survivor {
     let status = std::process::Command::new(std::env::current_exe().unwrap())
-        .arg(ral_core::test_helper::DETACH_BIRTH_FLAG)
+        .arg(ral_core::Role::DetachBirth.flag())
         .arg(trace)
         .arg(MARKER)
         .stdout(std::fs::File::create(host_out).unwrap())
@@ -159,14 +137,7 @@ fn host_that_births_and_exits(trace: &Path, host_out: &Path, host_err: &Path) ->
 /// whose scheduler jitter dwarfs any honest guess at how long a fork, an
 /// exec, and a write take.
 fn settles(holds: impl Fn() -> bool) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        if holds() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    holds()
+    eventually(Duration::from_secs(10), || holds().then_some(())).is_some()
 }
 
 /// A process this session no longer owns, sent SIGKILL when the guard
@@ -266,14 +237,8 @@ fn a_detached_process_is_in_no_worker_registry_and_no_workers_listing() {
         shell.workers().is_empty(),
         "a birth files nothing in the worker registry"
     );
-    match ral_core::test_access::answer_probe(
-        &shell,
-        &FOValue::Variant {
-            label: "workers".into(),
-            payload: None,
-        },
-    ) {
-        Ok(FOValue::List { items }) => assert!(
+    match ral_core::test_access::answer_probe(&shell, &Probe::Workers) {
+        FOValue::List { items } => assert!(
             items.is_empty(),
             "`workers listed {items:?} for a process no session owns"
         ),

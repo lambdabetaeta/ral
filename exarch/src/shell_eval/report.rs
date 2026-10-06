@@ -9,7 +9,7 @@
 use super::{ToolResult, ral_value_to_text};
 use crate::fleet::desk::ActFragment;
 use ral_core::protocol::Ending;
-use ral_core::protocol::reading::WorkerRow;
+use ral_core::protocol::probe::WorkerRow;
 use std::collections::HashSet;
 
 /// Enough of one call's fan-out to name without crowding the stderr it rides
@@ -99,13 +99,13 @@ fn timeout_tip(timeout_secs: u64) -> String {
     format!(
         "\nthis call timed out after {timeout_secs}s at the point above. The steps \
          before it completed and their definitions are still bound; the step it names \
-         did not complete, and the steps after it did not run — resume from there \
+         did not complete, and the steps after it did not run: resume from there \
          rather than replaying this call.\n\
          recovery: if the command is simply slow and there is nothing to overlap it \
          with, retry with a higher `timeout_secs`. If other work can run alongside it, \
          defer it instead (`let h = defer {{ … }}`) and let the run return: the host \
          notifies you at the next exchange boundary when it settles and renders its \
-         output on the rail, and `await $h` gives you its value record — you need not \
+         output on the rail, and `await $h` gives you its value record: you need not \
          poll.\n"
     )
 }
@@ -114,14 +114,14 @@ fn exit_tip(single_command: bool) -> String {
     let mut tip = String::from(
         "\nrecovery: this non-zero exit raised. If the exit code is the tool own \
          signal rather than a failure (grep no-match=1, diff differs=1, test false=1, \
-         valgrind --error-exitcode=N), its stdout/stderr were captured — read them as \
+         valgrind --error-exitcode=N), its stdout/stderr were captured: read them as \
          data with `audit { … }`, which does not raise, or catch with \
          `try { … } { |err| … }`. For a yes/no check use `succeeds { … }`.",
     );
     if !single_command {
         tip.push_str(
             " A non-zero exit also aborts the rest of this command: the steps after it \
-             never ran, while the definitions that completed before it are still bound — \
+             never ran, while the definitions that completed before it are still bound: \
              resume from the failing step rather than replaying the whole call. Wrap \
              risky tools in `audit`/`try`, or split them out.",
         );
@@ -153,11 +153,11 @@ fn orphan_note(ending: &Ending, births: &HashSet<u64>, workers: &[WorkerRow]) ->
     };
     let fate = match ending {
         Ending::Unreturnable { .. } => {
-            "A handle this call bound with `let` is still bound — `await $h` reaches it; \
+            "A handle this call bound with `let` is still bound: `await $h` reaches it; \
              one it only returned was lost with the result, so that work is orphaned."
         }
         _ => {
-            "A handle bound by a step that completed before the failure is still bound — \
+            "A handle bound by a step that completed before the failure is still bound: \
              `await $h` reaches it; one the failing step would have bound never landed, so \
              that work is orphaned."
         }
@@ -170,7 +170,8 @@ fn orphan_note(ending: &Ending, births: &HashSet<u64>, workers: &[WorkerRow]) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ral_core::serial::FOValue;
+    use ral_core::fact::Act;
+    use ral_core::first_order::FOValue;
     use ral_core::types::{LeaseClass, Observation, Observed};
 
     fn born(ids: &[u64]) -> HashSet<u64> {
@@ -193,12 +194,12 @@ mod tests {
         Observation::instant(
             None,
             Some("test".into()),
-            Observed::Act {
+            Observed::Act(Act {
                 verb: verb.into(),
                 subject: subject.map(str::to_string),
                 payload: String::new(),
                 refused: false,
-            },
+            }),
         )
     }
 
@@ -224,7 +225,7 @@ mod tests {
 
     /// The status a walled run carries: its deadline cancellation's own.
     fn deadline_status() -> ral_core::protocol::FailureStatus {
-        ral_core::types::Status::Cancelled(ral_core::process::CancelCause::Deadline)
+        ral_core::types::Status::Cancelled(ral_core::process::CancelCause::TimedOut)
             .code()
             .into()
     }

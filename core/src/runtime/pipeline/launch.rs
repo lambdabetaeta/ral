@@ -11,7 +11,7 @@ use super::stage::{ExternalStage, StageHandle, StageKind};
 use super::thread::launch_thread_stage;
 use crate::io::{Sink, Source, SourceReader};
 use crate::process::PgidPolicy;
-use crate::types::{Env, Mooring, Settled, Shell, Value};
+use crate::types::{Env, Error, Mooring, Settled, Shell, Value};
 use std::sync::Arc;
 
 /// A thread reads what a child would inherit, except a tty: reading the
@@ -21,7 +21,7 @@ use std::sync::Arc;
 pub(super) fn stage_stdin(
     route: ByteIn,
     shell: &Shell,
-    wake: &Arc<crate::process::Wake>,
+    wake: &Arc<crate::io::Wake>,
 ) -> Settled<Source> {
     let reader = match route {
         ByteIn::Upstream(r) => Some(SourceReader::pipe(r)),
@@ -29,9 +29,12 @@ pub(super) fn stage_stdin(
             Source::Empty => None,
             Source::Terminal if shell.io.terminal.startup_stdin_tty => None,
             Source::Terminal => Some(SourceReader::file(
-                dup_stdin_file().map_err(command::stdin_error)?,
+                dup_stdin_file().map_err(|e| Error::io("could not duplicate stdin", &e))?,
             )),
-            Source::Reader(r) => Some(r.try_clone().map_err(command::stdin_error)?),
+            Source::Reader(r) => Some(
+                r.try_clone()
+                    .map_err(|e| Error::io("could not duplicate stdin", &e))?,
+            ),
         },
     };
     Ok(reader.map_or(Source::Empty, |r| {
@@ -77,7 +80,7 @@ fn wire_stage(
     let downstream;
     let stdout = match stdout {
         ByteOut::Downstream(writer, edge) => {
-            let wake = crate::process::Wake::new().map_err(super::route::pipe_error)?;
+            let wake = crate::io::Wake::new().map_err(|e| Error::io("pipe", &e))?;
             downstream = Sink::Pipe {
                 writer: Arc::new(writer),
                 wake,
@@ -104,6 +107,7 @@ pub(super) struct LaunchCx<'a> {
     /// The pipeline node's own lexical environment — a thread stage's captured
     /// closure env, distinct from `shell.env` inside a nested machine.
     pub(super) env: &'a Env,
+    pub(super) eval: super::StageEval,
     pub(super) group: &'a PipelineGroup,
     /// Whether the group was lent the terminal, frozen before any stage exists.
     pub(super) holds_terminal: bool,
@@ -156,17 +160,16 @@ fn launch_external_stage_direct(
     )?;
     // Confinement may have taken seconds since the caller's own poll, so poll
     // again rather than spawn into an expired wall.
-    crate::process::check(cx.mooring)?;
+    cx.mooring.check()?;
 
     let pumps = wire_stage(&mut cmd, stdin, stdout, cx.holds_terminal, cx.shell)?;
 
-    let confinement = cmd.confinement();
-    let (mut child, leader, jail) = cmd
-        .spawn(PgidPolicy::Join(cx.group.leader_pgid()))
-        .map_err(|e| command::spawn_error(confinement, &rc.shown, &e))?;
-    if cx.shell.has_active_capabilities() {
-        crate::sandbox::apply_child_limits_in_pipeline(&child, cx.group.leader_pgid());
-    }
+    let (mut child, leader, jail) = command::spawn(
+        &mut cmd,
+        PgidPolicy::Join(cx.group.leader_pgid()),
+        &rc.shown,
+        cx.shell,
+    )?;
     let pumps = pumps.start(&mut child);
     // A joining stage leads a group only behind an envelope, whose payload
     // leads a session of its own out of the pipeline group's reach.

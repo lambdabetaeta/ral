@@ -2,8 +2,8 @@
 //! `Comp` and the schemes baked from it.  Both are memoised so the
 //! prelude is parsed and elaborated exactly once per test binary.
 //!
-//! Also installs a pre-main constructor that serves the shared re-exec
-//! stages (see [`ral_core::test_helper::run_pre_main_reexec_stages`]):
+//! Also installs a pre-main constructor that serves the re-exec roles
+//! (see [`ral_core::invocation::serve_process`]):
 //! the pipeline anchor and capture-active standalone invocations of bundled
 //! coreutils tools re-exec `current_exe()` — the test binary itself — so
 //! without the constructor the re-exec would land in the test framework
@@ -12,10 +12,10 @@
 #![allow(dead_code)] // not every test file uses every helper
 
 use ral_core::boot::{BakedPrelude, HostSurface, boot_shell};
-use ral_core::io::TerminalState;
+use ral_core::terminal::TerminalState;
 use ral_core::types::Shell;
-use ral_core::{Scheme, ir::Comp, ir::Toplevel};
-use std::sync::{Arc, OnceLock};
+use ral_core::{Scheme, ir::Comp};
+use std::sync::Arc;
 
 #[ctor::ctor(unsafe)]
 #[allow(
@@ -23,7 +23,7 @@ use std::sync::{Arc, OnceLock};
     reason = "a re-exec stage that has served its request, in a ctor before main: no shell, reaper or staged write exists in the process yet"
 )]
 fn init_test_binary() {
-    if let Some(code) = ral_core::test_helper::run_pre_main_reexec_stages() {
+    if let Some(code) = ral_core::invocation::serve_process(&[]) {
         std::process::exit(i32::from(code));
     }
 }
@@ -31,8 +31,7 @@ fn init_test_binary() {
 /// The prelude baked once at runtime (test binaries have no build-time
 /// blob), memoised for the accessors below and for `boot_shell`.
 pub fn prelude() -> &'static BakedPrelude {
-    static B: OnceLock<BakedPrelude> = OnceLock::new();
-    B.get_or_init(BakedPrelude::bake_runtime)
+    BakedPrelude::runtime()
 }
 
 /// A shell booted as every front end boots one: core's builtin surface,
@@ -41,16 +40,27 @@ pub fn fresh_shell() -> Shell {
     boot_shell(TerminalState::default(), prelude(), &HostSurface::default())
 }
 
-/// The annotated prelude toplevel — its `Phrase::Define`s carry the
-/// checker's schemes, so `builtins::register` installs each prelude
-/// binding's scheme next to its value.
-pub fn prelude_comp() -> &'static Arc<Toplevel> {
-    prelude().comp()
+/// `surface`'s Σ, as the checker sees it.
+pub fn manifest(surface: &HostSurface) -> ral_core::typecheck::Manifest {
+    surface.manifest()
 }
 
-/// The schemes harvested from the annotated prelude's `Bind` nodes.
-pub fn prelude_schemes() -> &'static [(String, Scheme)] {
-    prelude().schemes()
+/// The schemes on the baked prelude's `Phrase::Define`s, in phrase order.
+pub fn prelude_schemes() -> Vec<(String, Arc<Scheme>)> {
+    prelude()
+        .comp()
+        .phrases
+        .iter()
+        .flat_map(|phrase| match &phrase.item {
+            ral_core::ir::Phrase::Define { schemes, .. } => schemes.clone(),
+            ral_core::ir::Phrase::Run(_) => Vec::new(),
+        })
+        .collect()
+}
+
+/// The checker's seed for a surface: the baked prelude's schemes over its Σ.
+pub fn schemes_for(surface: &HostSurface) -> ral_core::SessionSchemes {
+    ral_core::SessionSchemes::from_prelude(prelude().comp(), manifest(surface))
 }
 
 /// Visit every `Comp` in a tree, descending past the top-level spine into
@@ -62,7 +72,7 @@ pub fn walk_comp(comp: &Comp, visit: &mut impl FnMut(&Comp)) {
     visit(comp);
     let mut sub = |c: &Arc<Comp>| walk_comp(c, visit);
     match &comp.item {
-        CompKind::Pipeline { stages, .. } => stages.iter().for_each(&mut sub),
+        CompKind::Pipeline { stages } => stages.iter().for_each(&mut sub),
         CompKind::Lam { body, .. } => sub(body),
         CompKind::Bind {
             comp: rhs, rest, ..

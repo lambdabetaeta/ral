@@ -433,7 +433,7 @@ fn apply_login(tui: &mut Tui, ctx: &CommandCtx<'_>, token: &OAuthToken, replaced
     let next = if already_active {
         ""
     } else {
-        " — run /model to use it"
+        "; run /model to use it"
     };
     let text = format!("[{action} ChatGPT account {label}{next}]");
     if let Err(error) = ctx

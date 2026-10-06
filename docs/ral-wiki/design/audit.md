@@ -7,7 +7,7 @@ denials, worker births — so a run can be inspected after the fact. It is one o
 the five [[design/control-operators|control operators]] for the same reason as
 the others: the trail it threads lives in `Shell` state, not in any value the
 body could construct. Every fact is one vocabulary, `Observation`
-(`core/src/types/observation.rs`) — the same one the surface rail and
+(`core/src/types/audit/observation.rs`) — the same one the surface rail and
 `--audit`'s JSON project, and the same one a host author speaks (exarch's
 desk records its committed acts as `Observed::Act`, host-side, into a
 per-call fragment of its own rather than the engine's trail) — so a command,
@@ -74,9 +74,10 @@ tee is not a gate.
   all: nothing it does needs one.
 - Source nesting decides which collection an observation lands in, regardless
   of which process or thread produced it.
-- A process boundary — the OS-sandbox child a `grant` re-execs into
-  ([[design/grant|grant]]), a pipeline-stage helper — only *transports* its
-  fragment back to the owning evaluator, which merges it into the surrounding
+- A boundary — the OS-sandbox child a `grant` re-execs into
+  ([[design/grant|grant]]), or a pipeline stage's thread
+  ([[decisions/260902_stages-are-threads|stages-are-threads]]) — only
+  *transports* its fragment back to the owning evaluator, which merges it into the surrounding
   trail; the boundary never decides structure.
 - A delimiter's lifecycle is scope-shaped, not one-shot: opening either
   installs a trail or finds one already open, and whichever happened decides
@@ -111,7 +112,7 @@ Each observation is self-describing about who and how it happened:
 
 - every observation carries the `principal` in force where it was recorded, so
   the trail records *who* as well as *what*, and a transported fragment still
-  names its actor — `None` in Rust, the empty string in the projection, where
+  names its actor — `None` in Rust, `` `none `` in the projection, where
   no `USER` is bound and there is nobody to name;
 - an observation carries only its own tag's fields — a `` `command ``'s
   `argv`, a `` `check ``'s `resource` / `decision` — never a handler frame or
@@ -119,10 +120,10 @@ Each observation is self-describing about who and how it happened:
   returned value either: `argv`, the status, and the bytes are what a later
   reader can act on, and a process-local or executable value has no honest
   projection to offer one;
-- an optional field is a variant, `` `just `` or `` `none ``, never a missing
+- an optional field is a variant, `` `some `` or `` `none ``, never a missing
   key: "there was no before-image" is a fact the trail states, not one a reader
   infers from silence. A before-image is a *read*: under a grant that admits
-  no read of the target, the write still lands and `old_bytes` is `` `none `` —
+  no read of the target, the write still lands and `old-bytes` is `` `none `` —
   decided at the door (`Shell::admits_fs_exact`), before the bytes could enter
   any observation, never hidden afterwards by a renderer;
 - tail-recursive iteration adds no wrapper: a loop contributes one flat run of
@@ -165,14 +166,23 @@ file. One predicate says so, `LexicalPath::is_discard`
 (`core/src/path/forms.rs`), asked at both doors that have an opinion: the
 in-process guard, which excuses such a target from an *access*
 ([[internals/capability-enforcement|capability-enforcement]]), and
-`observe_stamped` itself, the one fan-out door, which excuses it from a
+`Shell::observe_stamped` itself, the one fan-out door, which excuses it from a
 *mutation*. Every redirect seam already passes through that door, so the rule
 is stated once and no seam can forget it.
 
 See also [[design/syscalls-are-effects|syscalls-are-effects]] — an audit trail
 is a trace of the operations performed and the scopes that framed them.
 
-Recording lives in `core/src/evaluator/audit.rs` ([[map/core/evaluator|evaluator]]);
+One module owns it all: `core/src/types/audit.rs` is the trail (`Audit`, with
+`TrailScope` carrying the capture policy it displaced), `types/audit/door.rs` the
+fan-out (`impl Shell { observe, observe_stamped, listening, audit_start,
+record_check }`, and `Shell::observation`, which stamps the call site and
+principal), `types/audit/observation.rs` its constructors; the records themselves are
+`fact::observation`, each a `record!`/`variant!`/`label!` so one declaration
+yields the encoding, its decoder and its ral type. A `Check` is
+`{ resource, fields }` and takes its decision from the resource, so a denied
+deputy is not representable. `evaluator/call.rs` keeps only the call frame
+([[map/core/evaluator|evaluator]]);
 the dispatch delimiter is the run door's own scope, held at `Shell::enter` in
 `core/src/run.rs`, outside the `catch_unwind` a panicking run rolls back
 through — a panic still drains and closes the scope, but reports `Static`

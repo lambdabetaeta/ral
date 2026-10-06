@@ -116,16 +116,8 @@ fn shallow(val: &Value, params: &PrintParams) -> String {
             None => format!("`{label}"),
             Some(p) => format!("`{label} {}", shallow(p, params)),
         },
-        Value::Unit => "()".into(),
-        Value::Bool(b) => if *b { "true" } else { "false" }.into(),
-        Value::Int(n) => n.to_string(),
-        Value::Float(f) => crate::types::fmt_float(*f),
         Value::Handle(_) => "<handle>".into(),
-        Value::Thunk(c) => match c.comp().arrow() {
-            Some((param, body)) => crate::types::fmt_lambda(param, body),
-            None => "<block>".into(),
-        },
-        Value::Native { entry, applied } => crate::types::fmt_native(&entry.name, applied),
+        other => other.to_string(),
     }
 }
 
@@ -213,20 +205,9 @@ fn bracketed(parts: &[String], indent: usize, params: &PrintParams) -> String {
 /// n*'#'`: zero when `body` has no `'`, else one past the longest run of `#`s
 /// following a `'`.
 fn quote_bump_level(body: &str) -> usize {
-    let bytes = body.as_bytes();
-    let mut max_run: Option<usize> = None;
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'\'' {
-            let mut run = 0;
-            while i + 1 + run < bytes.len() && bytes[i + 1 + run] == b'#' {
-                run += 1;
-            }
-            max_run = Some(max_run.map_or(run, |m| m.max(run)));
-            i += 1 + run;
-        } else {
-            i += 1;
-        }
-    }
-    max_run.map_or(0, |m| m + 1)
+    body.split('\'')
+        .skip(1)
+        .map(|after| after.bytes().take_while(|&b| b == b'#').count() + 1)
+        .max()
+        .unwrap_or(0)
 }

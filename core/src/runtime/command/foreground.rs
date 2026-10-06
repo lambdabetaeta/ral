@@ -12,16 +12,9 @@ use crate::process::{Membership, Pgid, PgidPolicy, TerminalLoan};
 use crate::types::{Mooring, Shell};
 
 /// Whether a freshly-spawned standalone external takes the controlling
-/// terminal, and whether it leads its own process group.
-pub(super) struct ForegroundDecision {
-    want_fg: bool,
-    /// Top-level and non-interactive: no session whose terminal-foreground
-    /// group the child must stay consistent with, so it may lead its own
-    /// group and let a cancel tree-kill it.
-    own_group_when_background: bool,
-    /// The pipeline group this run's stage thread belongs to, if any.
-    stage_group: Option<Pgid>,
-}
+/// terminal, and whether it leads its own process group: one decision, held as
+/// the [`PgidPolicy`] it entails, since `NewLeader` is exactly the foreground.
+pub(super) struct ForegroundDecision(PgidPolicy);
 
 impl ForegroundDecision {
     /// Foreground requires all three: a top-level launch role, a run holding
@@ -43,52 +36,26 @@ impl ForegroundDecision {
         enveloped: bool,
         mooring: &Mooring,
     ) -> Self {
-        let want_fg = shell.io.launch_role.is_top_level()
-            && shell.terminal_lease(mooring).is_some()
+        let want_fg = shell.terminal_lease(mooring).is_some()
             && !needs_pump
             && !enveloped
             && matches!(shell.io.stdout, crate::io::Sink::Terminal);
-        Self {
+        Self(policy(
+            shell.io.stage.as_ref().map(Membership::group),
             want_fg,
-            own_group_when_background: shell.io.launch_role.is_top_level() && !shell.io.interactive,
-            stage_group: shell.io.launch_role.membership().map(Membership::group),
-        }
+            shell.io.interactive,
+        ))
     }
 
-    /// `NewLeader` when the child takes the foreground, `NewSession` for a
-    /// detached non-interactive top-level child, `Inherit` otherwise.
-    ///
-    /// The detached child needs a group of its own so a watchdog cancel can
-    /// `kill(-pgid, …)` the whole subtree: an `Inherit` child's only killable
-    /// handle is its pid, so a grandchild it forks (`/bin/sh -c '… &'`)
-    /// survives holding the stdout pipe open and the pump drain outlasts the
-    /// timeout.  `NewSession` rather than `NewLeader` because such a child
-    /// never takes the terminal, and severing the session stops it — or
-    /// anything it spawns — from signalling whatever owns the tty; the new
-    /// session's pgid still equals its pid, so the tree-kill is unchanged.
-    ///
-    /// A run inside a pipeline stage joins the stage's group instead, so its
-    /// externals stay under the one pgid the pipeline signals as a whole.
-    /// `Inherit` is what remains: an interactive background child, which
-    /// relies on the kernel's terminal-driven SIGINT reaching it.
     pub(super) fn pgid_policy(&self) -> PgidPolicy {
-        if self.want_fg {
-            PgidPolicy::NewLeader
-        } else if self.own_group_when_background {
-            PgidPolicy::NewSession
-        } else if let Some(g) = self.stage_group {
-            PgidPolicy::Join(g)
-        } else {
-            PgidPolicy::Inherit
-        }
+        self.0
     }
 
     /// True when this decision elected to take foreground.  Gated to match
-    /// its sole caller, the debug-only `trace_io_wiring`; the spawn path
-    /// reads the field directly.
+    /// its sole caller, the debug-only `trace_io_wiring`.
     #[cfg(debug_assertions)]
     pub(super) fn want_fg(&self) -> bool {
-        self.want_fg
+        matches!(self.0, PgidPolicy::NewLeader)
     }
 
     /// Lend the controlling terminal to the freshly-spawned child, for the run
@@ -104,10 +71,10 @@ impl ForegroundDecision {
         shell: &Shell,
         mooring: &Mooring,
     ) -> Option<TerminalLoan> {
-        if !self.want_fg {
+        if !matches!(self.0, PgidPolicy::NewLeader) {
             return None;
         }
-        // `want_fg` already required the lease, so the `?` never fires; the
+        // Foreground already required the lease, so the `?` never fires; the
         // borrow is the unforgeable proof `try_acquire` demands.
         let lease = shell.terminal_lease(mooring)?;
         #[cfg(unix)]
@@ -126,17 +93,45 @@ impl ForegroundDecision {
     }
 }
 
+/// `NewLeader` when the child takes the foreground, `NewSession` for a
+/// detached non-interactive top-level child, `Inherit` otherwise.
+///
+/// The detached child needs a group of its own so a watchdog cancel can
+/// `kill(-pgid, …)` the whole subtree: an `Inherit` child's only killable
+/// handle is its pid, so a grandchild it forks (`/bin/sh -c '… &'`)
+/// survives holding the stdout pipe open and the pump drain outlasts the
+/// timeout.  `NewSession` rather than `NewLeader` because such a child
+/// never takes the terminal, and severing the session stops it — or
+/// anything it spawns — from signalling whatever owns the tty; the new
+/// session's pgid still equals its pid, so the tree-kill is unchanged.
+///
+/// A run inside a pipeline stage (`stage` is its group) joins that group
+/// instead, so its externals stay under the one pgid the pipeline signals as
+/// a whole, and never takes the foreground.  `Inherit` is what remains: an
+/// interactive background child, which relies on the kernel's terminal-driven
+/// SIGINT reaching it.
+fn policy(stage: Option<Pgid>, want_fg: bool, interactive: bool) -> PgidPolicy {
+    match stage {
+        Some(group) => PgidPolicy::Join(group),
+        None if want_fg => PgidPolicy::NewLeader,
+        None if !interactive => PgidPolicy::NewSession,
+        None => PgidPolicy::Inherit,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn pgid_policy_for_a_stage_group() {
-        let decision = ForegroundDecision {
-            want_fg: false,
-            own_group_when_background: false,
-            stage_group: Some(Pgid::from_raw(1).expect("1 is positive")),
-        };
-        assert!(matches!(decision.pgid_policy(), PgidPolicy::Join(_)));
+    fn a_stage_joins_its_group_and_a_top_level_run_leads_by_circumstance() {
+        let group = Pgid::from_raw(1).expect("1 is positive");
+        assert!(matches!(
+            policy(Some(group), true, false),
+            PgidPolicy::Join(_)
+        ));
+        assert!(matches!(policy(None, true, true), PgidPolicy::NewLeader));
+        assert!(matches!(policy(None, false, false), PgidPolicy::NewSession));
+        assert!(matches!(policy(None, false, true), PgidPolicy::Inherit));
     }
 }

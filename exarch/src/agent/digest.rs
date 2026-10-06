@@ -91,7 +91,7 @@ fn align_cut_back(s: &str, idx: usize) -> usize {
     if let Some(off) = s.as_bytes()[lo..idx].iter().rposition(|&b| b == b'\n') {
         return lo + off;
     }
-    ral_core::text::floor_char_boundary(s, idx)
+    s.floor_char_boundary(idx)
 }
 
 /// Forward from `idx` to one past a newline within a small window, else the
@@ -102,7 +102,7 @@ fn align_cut_forward(s: &str, idx: usize) -> usize {
     if let Some(off) = s.as_bytes()[idx..hi].iter().position(|&b| b == b'\n') {
         return idx + off + 1;
     }
-    ral_core::text::ceil_char_boundary(s, idx)
+    s.ceil_char_boundary(idx)
 }
 
 #[cfg(test)]

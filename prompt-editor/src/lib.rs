@@ -55,7 +55,7 @@ impl PromptEditor {
 
     /// Soft-wrap long logical lines onto further screen rows. Off by default:
     /// an inline editor whose caller maps each logical row to one screen row
-    /// (the structural REPL) must not wrap, or its overlays drift. The exarch
+    /// must not wrap, or its overlays drift. The exarch
     /// prompt box opts in, since it sizes its height to the wrapped row count.
     #[must_use]
     pub fn wrap(mut self, on: bool) -> Self {

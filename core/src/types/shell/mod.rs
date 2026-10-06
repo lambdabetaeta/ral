@@ -14,7 +14,6 @@
 //! too small to belong to one stay here.
 
 pub(crate) mod bindings;
-mod checks;
 mod context;
 pub(crate) mod cwd;
 pub(crate) mod detached;
@@ -23,6 +22,7 @@ mod host;
 mod inherit;
 mod init;
 pub(crate) mod modules;
+pub(crate) mod notice;
 pub(crate) mod repl;
 mod scope;
 mod scrub;
@@ -33,20 +33,20 @@ use self::cwd::Cwd;
 use self::detached::DetachPolicy;
 use self::modules::Modules;
 use self::repl::ReplScratch;
-use self::workers::WorkerRegistry;
+use self::workers::Roster;
 use super::audit::Audit;
 use super::builtin::BuiltinTable;
-use super::capability::GrantStack;
 use super::env::Env;
 use super::env::EnvVars;
 use super::error::Error;
 use super::flow::{Break, Settled};
 use super::handler::HandlerStack;
 use super::mooring::{Fork, Mooring, NurseryId, TerminalAccess};
-use crate::diagnostic::CallSite;
+use super::sig;
+use crate::capability::GrantStack;
 use crate::io::Io;
 use crate::process::{CancelCause, DurableRoot, ForegroundScope};
-use crate::source::{FileId, Source, SourceDb, Span};
+use crate::source::{CallSite, FileId, Source, SourceDb, Span};
 use std::io::Write as _;
 use std::sync::Arc;
 
@@ -59,10 +59,14 @@ pub const DEFAULT_STACK_LIMIT: usize = 100_000;
 ///
 /// It clones wholesale into a child, so what is *not* here is the point: the
 /// lexical environment flows by its own rule, the run's own frame is
-/// installed afresh, and call site and builtin table stay run and session
-/// state — so a clone carries no render registry and no host dispatch.
-#[derive(Debug, Clone, Default)]
-pub struct Context {
+/// installed afresh, and call site, builtin table and hooks stay run and
+/// session state — so a clone carries no render registry and no host
+/// dispatch.
+///
+/// `H` is the handler stack's form: the live [`HandlerStack`], or the seed's
+/// interned frames, which is the only other shape the context takes.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Context<H = HandlerStack> {
     // ── attenuable by within / grant ─────────────────────────────────────
     /// Process env-var overrides set by `within [env: …]`.  `PWD` is
     /// excluded, living on `cwd` below; `OLDPWD` too, as ral keeps no previous
@@ -75,12 +79,7 @@ pub struct Context {
     /// Capability restrictions, innermost last.
     pub(crate) grants: GrantStack,
     /// `within [handlers: …, handler: …]` effect-handler stack, innermost last.
-    pub(crate) handlers: HandlerStack,
-
-    /// Session-lived named run entry points (rc-declared prompt, startup block,
-    /// plugin hooks) — a namespace apart from both lexical scope and the
-    /// handler stack, since hooks are run roots, never commands or variables.
-    pub(crate) hooks: std::collections::HashMap<hooks::HookName, hooks::Hook>,
+    pub(crate) handlers: H,
 
     // ── dynamic context, not attenuable ─────────────────────────────────
     /// Invocation positionals (`args`), from the command line or `source`.
@@ -105,12 +104,11 @@ pub struct SessionState {
     /// its runtime errors.  Append-only for the whole session, so a nested
     /// run's spans can never alias an outer run's [`FileId`].
     pub(crate) sources: SourceDb,
-    /// The current run's root source.  [`FileId::DUMMY`] between runs, and in
-    /// a spawned stage or worker thread, which roots no run of its own: its
-    /// `use` fallback therefore resolves through a missing entry to `""`,
-    /// i.e. cwd-relative.
-    pub(crate) root_file: FileId,
-    pub(crate) exit_hints: crate::exit_hints::ExitHints,
+    /// The current run's root source, which a child inherits, so a bare `use`
+    /// in a worker or a stage falls back to it.  `None` between runs: the
+    /// fallback is then `""`, i.e. cwd-relative.
+    pub(crate) root_file: Option<FileId>,
+    pub(crate) exit_hints: crate::types::ExitHints,
     /// Builtin bodies are Rust fn pointers or captured host closures, hence
     /// process-local: the receiver of a wire shell installs its own table
     /// rather than having one shipped to it.
@@ -129,17 +127,24 @@ pub struct SessionState {
     pub(crate) guest_jail: Option<std::sync::Arc<crate::process::jail::GuestJail>>,
     /// The machine's stack cap: `Machine::reserve` refuses a push at
     /// `stack.len() >= stack_limit`.  Counts machine frames, not host stack
-    /// frames; `--recursion-limit`/rc's `recursion_limit:` key set it.
+    /// frames; `--recursion-limit`/rc's `recursion-limit:` key set it.
     pub(crate) stack_limit: usize,
+    /// Named run entry points (rc-declared prompt, startup block, plugin
+    /// hooks): a namespace apart from both lexical scope and the handler
+    /// stack, since hooks are run roots, never commands or variables.  Session
+    /// state, not context: a worker or a stage never dispatches one, and a run
+    /// that registers one and then panics does not roll it back.
+    pub(crate) hooks: std::collections::HashMap<hooks::HookName, hooks::Hook>,
 }
 
 /// Host-local scratch whose members each carry their own flow rule — not a
 /// lifetime category, the residue left once run and session state are named.
+#[derive(Default)]
 pub struct LocalState {
     /// The in-flight audit trail and its byte-capture policy.  `grant`,
     /// `within`, `guard`, `try`, and `audit` are collection boundaries, not
     /// observations; the dispatcher posts one observation per real command
-    /// through [`crate::evaluator::audit`].
+    /// through `types::audit::door`.
     pub(crate) audit: Audit,
     /// Flows across neither threads nor IPC; moved across the pipeline-stage
     /// boundary.
@@ -148,7 +153,7 @@ pub struct LocalState {
     /// [`Shell::spawn_thread`] shares the registry into the worker's own shell,
     /// so a nested `spawn` registers alongside its parent; a sub-agent fork
     /// starts fresh, one registry per agent.
-    pub(crate) workers: WorkerRegistry,
+    pub(crate) workers: Roster,
     /// Inert until a host arms it, then ages every non-baseline top-level name
     /// so long-unused scratch can be pruned.  Unlike [`Self::workers`] it needs
     /// no lock: its one writer is the thread owning `&mut Shell` for every run,
@@ -159,43 +164,12 @@ pub struct LocalState {
     /// verb rather than owning one it cannot budget.  `Arc`-shared into a
     /// worker's shell, so a `detach` inside `spawn { }` spends this budget.
     pub(crate) detach: Option<Arc<DetachPolicy>>,
-    /// False only in a [`Shell::spawn_thread`] child, which shares its
-    /// *parent's* registry by `Arc` clone: a worker's own shell dropping must
-    /// not cancel its parent's whole roster.  Read by the [`Drop`] below.
-    pub(crate) workers_owned: bool,
     /// Nested `machine::evaluate`/`machine::apply` re-entries live on this
     /// host stack frame: a native such as `map` applying a user function.
     /// `machine::run` increments before its `catch_unwind` and decrements right
     /// after, so a panic unwinding out still leaves it lowered before the
     /// payload resumes.
     pub(crate) machine_depth: usize,
-}
-
-impl Default for LocalState {
-    fn default() -> Self {
-        Self {
-            audit: Audit::default(),
-            repl: ReplScratch::default(),
-            workers: WorkerRegistry::default(),
-            bindings: BindingLedger::default(),
-            detach: None,
-            workers_owned: true,
-            machine_depth: 0,
-        }
-    }
-}
-
-/// A session's workers die with the session's shell, external children and
-/// their grandchildren included: [`WorkerRegistry::cancel_all`] cancels, then
-/// waits for the kills to land.  Dropping covers every teardown path — an
-/// agent's ordinary end, a `/clear`'s shell replacement, a wire session's
-/// detach, a batch script's last line — without a host call site.
-impl Drop for LocalState {
-    fn drop(&mut self) {
-        if self.workers_owned {
-            self.workers.cancel_all();
-        }
-    }
 }
 
 /// The runtime: a field changes within a run (`io`), survives a run
@@ -222,20 +196,6 @@ pub struct Shell {
 }
 
 impl Shell {
-    /// Resolve `span` to the value-typed [`CallSite`] observations and
-    /// capability checks carry; `None` when there is no span, or its source is
-    /// not registered in this session.
-    pub(crate) fn site_of(&self, span: Option<Span>) -> Option<CallSite> {
-        let span = span?;
-        let source = self.session.sources.get(span.file)?;
-        let (line, col) = source.byte_to_line_col(span.start as usize);
-        Some(CallSite {
-            script: source.name().clone(),
-            line,
-            col,
-        })
-    }
-
     /// A call's span becomes the dispatch site, unless it lies outside the
     /// session's sources — the baked prelude's — so that `defer`'s inner
     /// `spawn` is stamped where the user wrote `defer`.
@@ -258,13 +218,14 @@ impl Shell {
         r
     }
 
-    /// [`Self::site_of`] applied to the dispatch register [`Audit`] carries.
-    /// Returned by value so the caller may hold `&mut audit` alongside it.
+    /// The dispatch register [`Audit`] carries, resolved against the session's
+    /// sources.  Returned by value so the caller may hold `&mut audit`
+    /// alongside it.
     /// `pub`, not `pub(crate)`: a host door that builds its own
     /// [`crate::types::Observation`] (a grep walk, a read outside any
     /// redirect) needs the same call site core's own doors stamp.
     pub fn call_site(&self) -> Option<CallSite> {
-        self.site_of(self.local.audit.call_site)
+        self.session.sources.site(self.local.audit.call_site?)
     }
 
     /// Put one enquiry to `mooring`'s host desk and block for the answer.  The
@@ -276,12 +237,12 @@ impl Shell {
     pub fn enquire(
         &self,
         mooring: &Mooring,
-        req: crate::serial::FOValue,
-    ) -> Result<crate::serial::FOValue, crate::types::Error> {
+        req: crate::first_order::FOValue,
+    ) -> Result<crate::first_order::FOValue, crate::types::Error> {
         match mooring.desk.as_ref() {
             Some(desk) => desk.enquire(req, mooring.cancel.as_scope()),
             None => Err(
-                Error::new(crate::types::NO_DESK, crate::types::NO_DESK_STATUS)
+                Error::raised(crate::types::NO_DESK, crate::types::NO_DESK_STATUS)
                     .with_hint(crate::types::NO_DESK_HINT),
             ),
         }
@@ -297,29 +258,11 @@ impl Shell {
     pub fn fork_into_nursery(&self, mooring: &Mooring) -> crate::types::Settled<NurseryId> {
         match mooring.fork.as_ref() {
             Some(Fork::Park(nursery)) => Ok(nursery.park(self.fork_scrubbed())),
-            Some(Fork::Listen) => Err(crate::types::Break::Error(Error::new(
+            Some(Fork::Listen) => Err(sig(
                 "this host's forked sessions leave over a wire, so there is no pen to park one in",
-                1,
-            ))),
-            None => Err(crate::types::Break::Error(Error::new(
-                "this host adopts no forked sessions",
-                1,
-            ))),
+            )),
+            None => Err(sig("this host adopts no forked sessions")),
         }
-    }
-
-    /// Overwrite `path` through core's whole `>`-redirect recipe —
-    /// symlink-resolved, mode-preserving, fsync-durable — while emitting no io
-    /// event: the door for a host builtin (exarch's `edit-hash` /
-    /// `edit-replace`) that writes *below* the redirect frame and speaks its
-    /// own surface, so that it shares the recipe instead of forking a weaker
-    /// write that narrows the mode, replaces symlinks, and skips the flush.
-    ///
-    /// # Errors
-    /// Returns `Err` if the target cannot be opened, the write fails, or the
-    /// atomic commit (rename and fsync) fails.
-    pub fn atomic_write(&mut self, path: &str, bytes: &[u8]) -> crate::types::Settled<()> {
-        crate::runtime::command::atomic_write(path, bytes, self)
     }
 
     /// Register `text` under display `name`, returning the [`FileId`] the
@@ -334,7 +277,7 @@ impl Shell {
     /// `root_file`, so the run's own root keeps its name.
     pub(crate) fn install_root_context(&mut self, name: &str, text: &str) -> FileId {
         let file = self.install_script_context(name, text);
-        self.session.root_file = file;
+        self.session.root_file = Some(file);
         file
     }
 
@@ -365,10 +308,7 @@ impl Shell {
             Err(e) if matches!(e.get_ref(), Some(src) if src.is::<crate::io::DeadEdge>()) => {
                 Err(Break::Error(Error::cancelled(CancelCause::ReaderGone)))
             }
-            Err(e) => Err(Break::Error(Error::new(
-                format!("could not write to {what}: {e}"),
-                1,
-            ))),
+            Err(e) => Err(sig(format!("could not write to {what}: {e}"))),
         }
     }
 
@@ -378,7 +318,7 @@ impl Shell {
     pub(crate) fn value_scheme(
         &self,
         value: &crate::types::Value,
-    ) -> Option<Arc<crate::typecheck::Scheme>> {
+    ) -> Option<Arc<crate::ty::Scheme>> {
         let (param, body) = match value {
             crate::types::Value::Thunk(closure) => match closure.comp().arrow() {
                 Some((param, body)) => (Some(param), body),
@@ -394,12 +334,6 @@ impl Shell {
     }
 }
 
-impl Default for Shell {
-    fn default() -> Self {
-        Self::new(crate::io::TerminalState::default())
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, reason = "test scaffolding")]
 mod tests {
@@ -412,7 +346,7 @@ mod tests {
     /// absent-host sentence: the two are different situations.
     #[test]
     fn fork_into_nursery_refuses_a_listening_run_with_its_own_sentence() {
-        let shell = Shell::new(crate::io::TerminalState::default());
+        let shell = crate::test_helper::core_shell();
         let mooring = Mooring {
             fork: Some(Fork::Listen),
             ..Mooring::adrift()
@@ -436,7 +370,7 @@ mod tests {
     /// The nursery twin of `enquire`'s absent-desk contract, error text and all.
     #[test]
     fn fork_into_nursery_errors_honestly_without_a_nursery() {
-        let shell = Shell::new(crate::io::TerminalState::default());
+        let shell = crate::test_helper::core_shell();
         match shell
             .fork_into_nursery(&Mooring::adrift())
             .expect_err("no nursery is installed")
@@ -454,7 +388,7 @@ mod tests {
     /// parent's whole lexical scope, as `fork_session` promises.
     #[test]
     fn nursery_round_trips_a_forked_session() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let mut shell = crate::test_helper::core_shell();
         shell.set_var("parent_binding".to_string(), Value::Int(42));
         let nursery = Nursery::default();
         let mooring = Mooring {
@@ -481,7 +415,7 @@ mod tests {
     /// fork parked mid-run and never adopted cannot outlive the run.
     #[test]
     fn run_door_panic_still_empties_nursery() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let mut shell = crate::test_helper::core_shell();
         let nursery = Nursery::default();
         let parked_id: Arc<Mutex<Option<NurseryId>>> = Arc::new(Mutex::new(None));
         let parked = parked_id.clone();
@@ -495,7 +429,10 @@ mod tests {
 
         let _ = shell.run(crate::run::RunRequest {
             fork: Some(Fork::Park(nursery.clone())),
-            ..crate::run::tests::capture_req("park-then-panic")
+            ..crate::run::RunRequest::from(crate::protocol::Run::captured(
+                "park-then-panic",
+                "<test>",
+            ))
         });
 
         let id = parked_id

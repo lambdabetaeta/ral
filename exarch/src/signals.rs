@@ -192,7 +192,7 @@ mod hear_tests {
             "SIGINT interrupts the trunk's exchange and never ends it"
         );
 
-        hear(&weak, Ambient::Root(CancelCause::Terminate));
+        hear(&weak, Ambient::Root(CancelCause::Terminated));
         assert!(
             trunk.token.terminated(),
             "SIGTERM stamps Terminate, which ends the agent"
@@ -205,7 +205,7 @@ mod hear_tests {
         let trunk = test_agent(&fleet, TestAgentSpec::new("trunk")).expect("a fresh trunk");
         let weak = Arc::downgrade(&trunk);
         drop(trunk);
-        hear(&weak, Ambient::Root(CancelCause::Terminate));
+        hear(&weak, Ambient::Root(CancelCause::Terminated));
     }
 }
 
@@ -223,8 +223,9 @@ mod tests {
 
     use super::*;
     use crate::agent::testkit::{TestAgentSpec, test_agent};
+    use ral_core::test_helper::eventually;
     use std::sync::Mutex;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     /// These tests touch the escalation ladder, so they must not run
     /// concurrently.
@@ -247,37 +248,29 @@ mod tests {
         ral_core::process::clear();
     }
 
-    /// Poll `done` until it holds or a generous deadline passes: a forwarded
-    /// signal lands on the forwarder's own thread.
-    fn eventually(done: impl Fn() -> bool) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while Instant::now() < deadline {
-            if done() {
-                return true;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        done()
-    }
-
     /// Without the entry ceremony, ral's bare handler would run alone: a
     /// delivered SIGINT would tick the escalation ladder. With it, the SIGINT
     /// reaches the faced trunk as an interrupt, and a SIGTERM as its end.
     #[test]
-    #[ignore = "delivers a real process-wide SIGINT and SIGTERM — driven in its own process by signal_delivery_tests_own_their_process"]
+    #[ignore = "delivers a real process-wide SIGINT and SIGTERM: driven in its own process by signal_delivery_tests_own_their_process"]
     fn a_delivered_signal_reaches_the_faced_trunk_without_escalating() {
         ral_core::process::clear();
         // A raw ral install models any clobber before the exarch session
         // constructor runs.
         ral_core::process::install_handlers();
-        crate::bootstrap::face_process_signals(&ral_core::io::TerminalState::default());
+        crate::bootstrap::face_process_signals(&ral_core::terminal::TerminalState::default());
         let fleet = crate::fleet::Fleet::for_test();
         let trunk = test_agent(&fleet, TestAgentSpec::new("trunk")).expect("a fresh trunk");
         let _signals = face(&trunk);
 
         assert_eq!(unsafe { libc::raise(libc::SIGINT) }, 0, "raise SIGINT");
         assert!(
-            eventually(|| trunk.token.is_cancelled()),
+            // A forwarded signal lands on the forwarder's own thread.
+            eventually(Duration::from_secs(10), || trunk
+                .token
+                .is_cancelled()
+                .then_some(()))
+            .is_some(),
             "a delivered SIGINT must reach the faced trunk"
         );
         assert!(
@@ -291,7 +284,11 @@ mod tests {
 
         assert_eq!(unsafe { libc::raise(libc::SIGTERM) }, 0, "raise SIGTERM");
         assert!(
-            eventually(|| trunk.token.terminated()),
+            eventually(Duration::from_secs(10), || trunk
+                .token
+                .terminated()
+                .then_some(()))
+            .is_some(),
             "a delivered SIGTERM must end the faced trunk"
         );
         ral_core::process::clear();

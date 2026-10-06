@@ -25,7 +25,7 @@ const BACKLOG: libc::c_int = 4;
 pub(crate) fn bind() -> Result<(OwnedFd, u32), String> {
     listen_any().map_err(|e| {
         format!(
-            "could not bind a guest port for the host to dial: {e} — is this engine running \
+            "could not bind a guest port for the host to dial: {e}; is this engine running \
              inside a VM with a vsock device?"
         )
     })

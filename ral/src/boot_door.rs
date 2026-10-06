@@ -4,15 +4,17 @@
 //! failure is `Raised` status 2, a profile's `exit N` is `Exited(N)`. It
 //! answers what the rc settled for the host.
 
-use ral_core::protocol::{Ending, Program, Report, Severed};
+use ral_core::carrier::Severed;
+use ral_core::first_order::FOValue;
+use ral_core::first_order::datum::Datum as _;
+use ral_core::protocol::{Ending, Program, Report};
 use ral_core::record;
-use ral_core::serial::FOValue;
-use ral_core::serial::datum::Datum as _;
-use ral_core::typecheck::builtins::{closed_record, closed_variant, fun, mk_scheme, pure, thunk};
-use ral_core::typecheck::{Row, Scheme, Ty, Unifier};
+use ral_core::ty::{Row, Scheme, Ty, Typed as _};
+use ral_core::typecheck::Unifier;
+use ral_core::typecheck::builtins::{fun, mk_scheme, pure, thunk};
 use ral_core::types::{
-    Break, BuiltinBody, BuiltinEntry, DefaultPolicy, Error, HookName, HookSig, Mooring, Settled,
-    Status,
+    Break, BuiltinBody, BuiltinEntry, DefaultPolicy, HookName, HookSig, Mooring, Settled, Status,
+    sig,
 };
 use ral_core::{Shell, Value};
 use ral_core::{err, errln};
@@ -38,24 +40,10 @@ pub(crate) static DOOR: &[BuiltinEntry] = &DOOR_ARR;
 /// fields.
 fn scheme(u: &mut Unifier) -> Scheme {
     let row = u.fresh_row_var();
-    let theme = closed_record(&[
-        ("value_prefix", Ty::String),
-        (
-            "value_color",
-            closed_variant(&[("none", Ty::Unit), ("some", Ty::String)]),
-        ),
-    ]);
-    let settings = closed_record(&[
-        ("edit_mode", Ty::String),
-        ("bell", Ty::Bool),
-        ("surface", Ty::String),
-        ("theme", theme),
-        ("startup", Ty::Bool),
-    ]);
     mk_scheme(
         &[],
         &[(row, false)],
-        thunk(fun(Ty::Record(Row::Var(row)), pure(settings))),
+        thunk(fun(Ty::Record(Row::Var(row)), pure(RcSettings::ty()))),
     )
 }
 
@@ -76,7 +64,6 @@ pub(crate) fn register(shell: &mut Shell) -> Result<(), String> {
                 kind: "boot".into(),
             },
             DefaultPolicy::denied(),
-            ral_core::source::Span::synthetic(),
         )
         .map_err(|e| e.to_string())
 }
@@ -91,8 +78,8 @@ pub(crate) struct Boot {
 
 record!(Boot {
     login: "login",
-    no_rc: "no_rc",
-    recursion_limit: "recursion_limit",
+    no_rc: "no-rc",
+    recursion_limit: "recursion-limit",
     capabilities: "capabilities",
 });
 
@@ -126,13 +113,15 @@ fn boot(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> 
         shell.set_stack_limit(n);
     }
     let paths: Vec<std::path::PathBuf> = boot.capabilities.iter().map(Into::into).collect();
-    ral_core::capability::apply_session_profiles(mooring, shell, &paths).map_err(|e| match e {
-        Break::Error(mut e) => {
-            e.status = Status::Raised(2);
-            Break::Error(e.context("--capabilities"))
-        }
-        escape @ Break::Escape(_) => escape,
-    })?;
+    ral_core::load::profile::apply_session_profiles(mooring, shell, &paths).map_err(
+        |e| match e {
+            Break::Error(mut e) => {
+                e.status = Status::Raised(2);
+                Break::Error(e.context("--capabilities"))
+            }
+            escape @ Break::Escape(_) => escape,
+        },
+    )?;
     if shell.is_interactive() {
         install_default_prompt(shell);
     }
@@ -140,7 +129,7 @@ fn boot(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> 
 }
 
 fn refuse(message: &str) -> Break {
-    Break::Error(Error::new(format!("{NAME}: {message}"), 1))
+    sig(format!("{NAME}: {message}"))
 }
 
 /// What the boot dispatch came to: the rc's settings, or the status the

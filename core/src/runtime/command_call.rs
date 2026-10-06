@@ -7,16 +7,18 @@
 //! `resolve_command_word`/`classify_command` directly.
 
 use crate::capability::Program;
+use crate::guard::{Denial, deny_head};
 use crate::ir::{CommandName, CommandWord};
 use crate::types::{
-    Break, BuiltinEntry, Env, Error, HandlerEntry, HandlerLookup, Mooring, Settled, Shell, Value,
+    AuditIo, AuditStart, Break, BuiltinEntry, CommandOrigin, Env, HandlerEntry, HandlerLookup,
+    Mooring, Observation, Observed, Settled, Shell, Value, epoch_us, name_failure,
 };
 
+use super::capture::with_audit_capture;
 use super::command::{self, Head};
-use crate::evaluator::audit;
-use crate::evaluator::redirect::with_redirects;
+use super::redirect::scope::with_redirects;
+use crate::ir::Redirects;
 use crate::source::Span;
-use crate::syntax::ast::Redirects;
 
 // ── Resolution ─────────────────────────────────────────────────────────
 
@@ -76,8 +78,8 @@ pub(crate) fn classify_command(
 ) -> Settled<Resolution> {
     let r = resolve_command_word(head, env, shell);
     if let Resolution::External(head) = &r
-        && !crate::capability::admits_head(&shell.context, head)
         && let Ok(program) = &head.program
+        && !shell.context.grants.admits(program)
     {
         return Err(refuse_head(&head.shown, program, mooring, shell));
     }
@@ -86,17 +88,9 @@ pub(crate) fn classify_command(
 
 /// Denial for a head whose program the grant refuses.
 fn refuse_head(shown: &str, program: &Program, mooring: &Mooring, shell: &mut Shell) -> Break {
-    let fields = std::collections::BTreeMap::from([("name".to_string(), shown.to_string())]);
-    audit::record_capability(shell, mooring, "exec", fields);
-    match crate::capability::exec_respelled(&shell.context, program) {
-        Some(why) => Error::new(why, 1),
-        None => Error::new(
-            format!("command '{shown}' denied by active grant ({program})"),
-            1,
-        )
-        .with_hint("add the command to the grant exec map to allow it"),
-    }
-    .into()
+    let Denial { check, error } = deny_head(&shell.context.grants, shown, program);
+    shell.record_check(Some(mooring), check);
+    error.into()
 }
 
 // ── Runners ─────────────────────────────────────────────────────────────
@@ -115,7 +109,7 @@ pub(crate) fn run_base_frame(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    audit::call_native(&entry.name, shell, |shell, frame| {
+    entry.framed(shell, |shell, frame| {
         with_redirects(redirects, span, mooring, shell, |shell| {
             entry.call_body(frame, args, None, mooring, shell)
         })
@@ -131,9 +125,60 @@ pub(crate) fn run_external(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    audit::call_external(&head.shown, args, mooring, shell, |shell| {
+    call_external(&head.shown, args, mooring, shell, |shell| {
         with_redirects(redirects, span, mooring, shell, |shell| {
             command::run(head, args, mooring, shell)
         })
     })
+}
+
+/// An external's door: stamp the start, tee its stdout and stderr through
+/// the capture, name a failure, and settle the one [`Observed::Command`].
+fn call_external(
+    shown: &str,
+    args: &[Value],
+    mooring: &Mooring,
+    shell: &mut Shell,
+    body: impl FnOnce(&mut Shell) -> Settled<Value>,
+) -> Settled<Value> {
+    let start = shell.audit_start(mooring);
+    let (mut result, stdout, stderr) = with_audit_capture(shell, body);
+    name_failure(shown, &mut result);
+    let io = AuditIo { stdout, stderr };
+    finish_command(shell, mooring, start, shown, args, &result, io);
+    result
+}
+
+fn finish_command(
+    shell: &mut Shell,
+    mooring: &Mooring,
+    start: AuditStart,
+    shown: &str,
+    args: &[Value],
+    result: &Settled<Value>,
+    io: AuditIo,
+) {
+    if !shell.listening(mooring) {
+        return;
+    }
+    let (status, error) = match result {
+        Ok(_) => (0, None),
+        Err(Break::Error(e)) => (e.code(), Some(e.message.clone())),
+        Err(_) => return,
+    };
+    let obs = Observation::spanning(
+        start.site,
+        start.time,
+        epoch_us(),
+        shell.context.principal(),
+        Observed::command(
+            shown,
+            Value::render_argv(args),
+            status,
+            CommandOrigin::External,
+            io,
+            error,
+        ),
+    );
+    shell.observe_stamped(Some(mooring), obs);
 }

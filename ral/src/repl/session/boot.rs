@@ -2,15 +2,14 @@
 //! process-level setup that precedes the engine — signal handlers, terminal
 //! claim, panic hook — and the frontend the rc settles on after it.
 
-use ral_core::diagnostic;
-use ral_core::io::{InteractiveMode, TerminalState};
-use ral_core::protocol::Transport;
+use ral_core::carrier::Transport;
+#[cfg(unix)]
+use ral_core::terminal;
+use ral_core::terminal::{InteractiveMode, TerminalState};
 use rustyline::config::BellStyle;
 use std::sync::Arc;
 
 use super::super::config::RcSettings;
-#[cfg(feature = "structural")]
-use super::super::frontend::StructuralFrontend;
 use super::super::frontend::{Frontend, MinimalFrontend, RustylineFrontend, Surface};
 use super::super::host::ReplHost;
 
@@ -54,7 +53,7 @@ pub(super) fn setup_signals() -> TerminalClaim {
             // unusual terminal setups (nested shell-in-pipe, container
             // PID namespaces, mosh sessions) trip these calls.  Warn,
             // keep going.
-            diagnostic::shell_warning(&format!(
+            terminal::shell_warning(&format!(
                 "ral: could not claim terminal: {msg}; job control may misbehave"
             ));
             TerminalClaim::default()
@@ -154,7 +153,7 @@ fn claim_terminal() -> Result<TerminalClaim, String> {
 ///
 /// Unix snapshots termios and restores it with `tcsetattr`; Windows
 /// snapshots the console mode and restores it with `SetConsoleMode`
-/// (`ral_core::io::console_mode_snapshot`/`restore_console_mode`) — the
+/// (`ral_core::terminal::console_mode_snapshot`/`restore_console_mode`) — the
 /// two platforms' analogues of "undo whatever raw mode left dirty" before
 /// [`write_crash_log`] runs.  Either arm is a no-op when stdin isn't a
 /// real terminal (no termios / console mode to snapshot).
@@ -176,11 +175,11 @@ pub(super) fn setup_panic_hook() {
     }
     #[cfg(windows)]
     {
-        let saved = ral_core::io::console_mode_snapshot();
+        let saved = ral_core::terminal::console_mode_snapshot();
         if let Some(mode) = saved {
             let crash_dir = crash_log_dir();
             std::panic::set_hook(Box::new(move |info| {
-                ral_core::io::restore_console_mode(mode);
+                ral_core::terminal::restore_console_mode(mode);
                 write_crash_log(&crash_dir, info);
             }));
         }
@@ -195,10 +194,9 @@ pub(super) fn setup_panic_hook() {
     reason = "host-env: the crash log belongs to the launching user, outside any shell overlay"
 )]
 fn crash_log_dir() -> std::path::PathBuf {
-    let home = ral_core::host::home();
     // A crash report must land somewhere; with no home the temp dir is the
     // honest last resort, where writing it under the cwd would not be.
-    ral_core::path::basedir::resolve_xdg(ral_core::path::basedir::XdgKind::State, home.as_deref())
+    ral_core::host::xdg(ral_core::host::XdgKind::State)
         .unwrap_or_else(std::env::temp_dir)
         .join("ral")
 }
@@ -221,7 +219,7 @@ fn write_crash_log(dir: &std::path::Path, info: &std::panic::PanicHookInfo<'_>) 
     let path = dir.join(format!("crash-{ts}.log")).display().to_string();
     let bt = std::backtrace::Backtrace::force_capture();
     let _ = std::fs::write(&path, format!("{info}\n\n{bt}"));
-    let _ = writeln!(std::io::stderr(), "ral: panic — crash log: {path}");
+    let _ = writeln!(std::io::stderr(), "ral: panic; crash log: {path}");
 }
 
 /// Build the line-editing frontend from the resolved [`RcSettings`] —
@@ -229,13 +227,10 @@ fn write_crash_log(dir: &std::path::Path, info: &std::panic::PanicHookInfo<'_>) 
 /// flag, if given.
 ///
 /// The capability gate comes first: a terminal resolved to
-/// [`InteractiveMode::Minimal`](ral_core::io::InteractiveMode::Minimal) — a
+/// [`InteractiveMode::Minimal`](ral_core::terminal::InteractiveMode::Minimal) — a
 /// dumb terminal or `RAL_INTERACTIVE_MODE=minimal` — can only do the
 /// canonical-stdin editor, whatever surface was asked for.  Otherwise the
-/// surface preference decides.  A `Structural` request that cannot be
-/// honoured — no raw mode, or a binary built without the `structural`
-/// feature — warns and falls back to readline rather than degrading
-/// silently.
+/// surface preference decides.
 pub(super) fn create_frontend(
     interactive_mode: InteractiveMode,
     settings: &RcSettings,
@@ -248,20 +243,6 @@ pub(super) fn create_frontend(
     }
     match settings.surface {
         Surface::Minimal => return Box::new(MinimalFrontend::new()),
-        // The structural surface's `new` probes raw mode and the terminal's
-        // size and errors when either is unavailable, so a failure warns and
-        // falls through.
-        Surface::Structural => {
-            #[cfg(feature = "structural")]
-            match StructuralFrontend::new(settings.edit_mode, host.clone()) {
-                Ok(fe) => return Box::new(fe),
-                Err(e) => diagnostic::shell_warning(&format!(
-                    "ral: structural surface unavailable: {e}; using readline"
-                )),
-            }
-            #[cfg(not(feature = "structural"))]
-            diagnostic::shell_warning("ral: this build has no structural surface; using readline");
-        }
         Surface::Readline => {}
     }
     let bell = if settings.bell {

@@ -22,7 +22,7 @@ algebra stays textbook and order-independence is a fact about the term rules
 alone ([[decisions/260930_a-table-never-enters-the-unifier|a-table-never-enters-the-unifier]]).
 
 - **Two label alphabets, one per type former** — `Label::Field` for `Record`,
-  `Label::Case` for `Variant` (`core/src/typecheck/ty.rs`) — and the two never
+  `Label::Case` for `Variant` (`core/src/ty.rs`) — and the two never
   unify. The alphabet is a constructor, not a character: a field named
   `` '`dev' `` is `Field("`dev")` and no spelling of it reaches
   `Case("dev")`. `unify_row` refuses a row whose spine carries both, which is

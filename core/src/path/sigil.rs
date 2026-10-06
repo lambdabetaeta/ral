@@ -1,46 +1,15 @@
-//! Path-prefix sigils: `~[/sub]`, `xdg:NAME[/sub]`, `cwd:[/sub]`,
-//! `tempdir:[/sub]`, and `gitdir:[/sub]` at the head of a grant path.
+//! Run-time expansion of the path-prefix sigils `~[/sub]` and `xdg:NAME[/sub]`
+//! at the head of a path.  Anything else passes through unchanged.
 //!
-//! A policy thus names no host's home, XDG layout, or working directory.
-//! Anything else passes through unchanged.
-//!
-//! `~` and `xdg:` expand both at runtime (stage 1 of [`crate::path::Resolver`])
-//! and at policy freeze; the other three are freeze-only, and resolve exactly
-//! once, so a later `chdir` or `TMPDIR` change cannot retroactively widen a
-//! grant.  XDG uses the Linux defaults on every platform, macOS included
-//! ([`crate::path::basedir`]); `gitdir:` follows a worktree `.git` pointer via
-//! [`crate::path::discover_git_dir`] — only as far as a git directory that
-//! claims the working tree — and falls back to the cwd outside a repo.
-//!
-//! `path:` and `system:` ([`system_tool_roots`]) are exec-only, each expanding
-//! to many directories rather than one path, and `capability::decode`'s
-//! exec-map freeze handles them instead of this module.
+//! `~` and `xdg:` expand both here, at run time (stage 1 of
+//! [`crate::path::Resolver`]), and at policy freeze; the other sigils
+//! (`cwd:`, `tempdir:`, `gitdir:`, and the exec-only `path:` and `system:`)
+//! are freeze-only, and `guard::freeze` owns them with the rest of the freeze.
+//! XDG uses the Linux defaults on every platform, macOS included
+//! ([`crate::host`]).
 
-use crate::path::basedir::{XdgKind, resolve_xdg};
-use crate::path::canon::canonicalise_lenient;
-use crate::path::forms::FrozenPath;
-use crate::path::lex::{Identity, fold_dots, path_within};
+use crate::host::{XdgKind, resolve_xdg};
 use crate::path::tilde::TildePath;
-use crate::types::PolicyError;
-use std::path::{Path, PathBuf};
-
-/// Shaped like an `xdg:` token, known name or not — so a load-time validator
-/// can tell an unknown token from an ordinary path.
-pub(crate) fn looks_like_xdg(s: &str) -> bool {
-    s.starts_with("xdg:")
-}
-
-/// A path separator, or one of the five sigil heads [`freeze_one`] knows.
-/// `capability::decode`'s exec map uses it to let bare command names (`git`)
-/// through freeze unresolved.
-pub(crate) fn looks_like_path_or_sigil(s: &str) -> bool {
-    s.contains('/')
-        || TildePath::parse(s).is_some()
-        || s.starts_with("xdg:")
-        || s.starts_with("cwd:")
-        || s.starts_with("tempdir:")
-        || s.starts_with("gitdir:")
-}
 
 /// Parse `xdg:NAME[/sub]`; `None` for a non-`xdg:` input or an unknown name.
 pub(crate) fn parse_xdg_token(input: &str) -> Option<(XdgKind, Option<&str>)> {
@@ -49,13 +18,13 @@ pub(crate) fn parse_xdg_token(input: &str) -> Option<(XdgKind, Option<&str>)> {
         Some((n, s)) => (n, Some(relative_suffix(s))),
         None => (body, None),
     };
-    Some((XdgKind::parse(name)?, sub))
+    Some((name.parse().ok()?, sub))
 }
 
 /// A sigil's sub-path as something that joins *onto* its base: leading
 /// separators come off, because `Path::join` on a rooted suffix discards the
 /// base outright — `xdg:data//etc` would otherwise name `/etc`.
-fn relative_suffix(s: &str) -> &str {
+pub(crate) fn relative_suffix(s: &str) -> &str {
     s.trim_start_matches(['/', '\\'])
 }
 
@@ -67,7 +36,7 @@ fn relative_suffix(s: &str) -> &str {
 /// whatever cannot be answered passes through literally — an unknown `home`
 /// leaves `~/x` as `~/x`.  That fails closed, a prefix matching nothing
 /// beating a fabricated path that might; a caller wanting the same gap to be
-/// a configuration error uses [`freeze_one`].
+/// a configuration error freezes with `guard::freeze::FreezeCtx::path`.
 pub fn expand_path_prefix(input: &str, home: Option<&str>) -> String {
     if let Some((kind, sub)) = parse_xdg_token(input) {
         return match resolve_xdg(kind, home) {
@@ -84,417 +53,9 @@ pub fn expand_path_prefix(input: &str, home: Option<&str>) -> String {
     input.to_string()
 }
 
-/// The caller-supplied half of the freeze context; `xdg:` and `tempdir:` read
-/// the process environment, and `gitdir:` walks the filesystem from `cwd`.
-///
-/// `home` is `None` where nothing binds one, so a policy naming a
-/// home-relative sigil there is refused rather than resolved against a
-/// stand-in.  The `cwd` is not optional, unlike
-/// [`Resolver`](super::Resolver)'s otherwise identical pair: a grant is frozen
-/// once, so "here" must be settled now rather than re-asked per access.
-pub struct FreezeCtx<'a> {
-    pub home: Option<&'a str>,
-    pub cwd: &'a Path,
-}
-
-impl FreezeCtx<'_> {
-    /// The home to freeze against, an empty one read as none.  The readers in
-    /// [`crate::path::tilde`] already filter that, but the field is public and
-    /// this is the door where a `Some("")` would root `~/x` at `/x` — a grant
-    /// nobody wrote.
-    fn home(&self) -> Option<&str> {
-        self.home.filter(|h| !h.is_empty())
-    }
-}
-
-/// [`freeze_one`] over a list, minting the grant's whole prefix set at once.
-///
-/// Resolving here at load rather than per-check is what makes a grant immune to
-/// later env and cwd changes, and closes the window in which `XDG_*_HOME` could
-/// mutate between load and a subsequent access.
-///
-/// # Errors
-/// Whatever [`freeze_one`] rejects, on the first entry that does.
-pub fn freeze_path_list(
-    paths: Vec<String>,
-    ctx: &FreezeCtx<'_>,
-) -> Result<Vec<FrozenPath>, PolicyError> {
-    paths
-        .into_iter()
-        .map(|entry| freeze_one(&entry, ctx))
-        .collect()
-}
-
-/// Expand one entry's sigil against `ctx`, then fold `.`/`..` and wrap, so every
-/// frozen entry is sigil-free and in the normal form the in-process guard matches against.
-///
-/// Two sigils read a source the session does not own, and each guards it in the
-/// terms of what would otherwise author the grant: an `XDG_*_HOME` must land
-/// under `home` ([`resolve_xdg_safe`]), and a `.git` pointer file must be
-/// answered by a git directory that claims the working tree
-/// ([`crate::path::discover_git_dir`]).  `tempdir:` alone trusts its source as
-/// given, `TMPDIR` being the launching user's to set.
-///
-/// # Errors
-/// An unknown `xdg:` token, an `xdg:` path that escapes `HOME` once folded, an
-/// unset `HOME` under a home-relative sigil (`~`, `xdg:`), or a `.git` pointer
-/// no git directory claims.
-#[allow(clippy::disallowed_methods)]
-pub fn freeze_one(entry: &str, ctx: &FreezeCtx<'_>) -> Result<FrozenPath, PolicyError> {
-    if looks_like_xdg(entry) {
-        let (kind, sub) =
-            parse_xdg_token(entry).ok_or_else(|| PolicyError::new(unknown_xdg_message(entry)))?;
-        return resolve_xdg_safe(kind, sub, ctx.home());
-    }
-    if let Some(sub) = parse_literal_sigil(entry, "cwd") {
-        return Ok(join_sub(ctx.cwd.to_path_buf(), sub));
-    }
-    if let Some(sub) = parse_literal_sigil(entry, "tempdir") {
-        return Ok(join_sub(std::env::temp_dir(), sub));
-    }
-    if let Some(sub) = parse_literal_sigil(entry, "gitdir") {
-        let base = crate::path::discover_git_dir(ctx.cwd)?.unwrap_or_else(|| ctx.cwd.to_path_buf());
-        return Ok(join_sub(base, sub));
-    }
-    if let Some(t) = TildePath::parse(entry) {
-        let expanded = ctx
-            .home()
-            .map(|home| t.expand(home))
-            .ok_or_else(|| PolicyError::new(home_unknown_message()))?;
-        return Ok(FrozenPath::freeze(Path::new(&expanded)));
-    }
-    Ok(FrozenPath::freeze(Path::new(entry)))
-}
-
-/// The one answer for a home-relative sigil where nothing binds `HOME`: `~`
-/// and `xdg:` fail for the same reason and take the same two fixes.
-fn home_unknown_message() -> String {
-    "HOME is unset, so `~/...` and `xdg:...` tokens in the policy \
-     can't be resolved.  Set HOME in the environment, or replace the \
-     sigil-bearing entries in the policy with explicit absolute paths."
-        .to_string()
-}
-
-/// Match `name:`, `name:sub`, or `name:/sub`, the suffix made
-/// [`relative_suffix`]-safe.
-#[allow(
-    clippy::option_option,
-    reason = "tri-state: no-match / match-no-suffix / match-with-suffix"
-)]
-fn parse_literal_sigil<'a>(input: &'a str, name: &str) -> Option<Option<&'a str>> {
-    let body = input.strip_prefix(name)?.strip_prefix(':')?;
-    Some(if body.is_empty() {
-        None
-    } else {
-        Some(relative_suffix(body))
-    })
-}
-
-fn join_sub(base: PathBuf, sub: Option<&str>) -> FrozenPath {
-    let full = match sub {
-        None | Some("") => base,
-        Some(s) => base.join(s),
-    };
-    FrozenPath::freeze(&full)
-}
-
-/// Resolve an XDG kind plus sub-path, and require the result under `home`:
-/// otherwise an attacker-set `XDG_DATA_HOME=/etc` would silently widen an
-/// `xdg:data` grant to `/etc`.
-///
-/// The question is asked exactly as the in-process *fs* guard asks it —
-/// [`path_within`] over the symlink-followed forms, fs authority being over
-/// objects — so the freeze guard and the fs guard cannot disagree.  Both
-/// sides are folded and canonicalised: `xdg:config/../../etc` collapses to
-/// `/etc` rather than stepping over the guard and collapsing at match time, a
-/// `XDG_*_HOME` pointing *through* a symlink is judged where it lands, and a
-/// HOME that is itself a symlink (macOS `/home`) still contains its own
-/// subdirectories.
-///
-/// That guard is stated in `home`'s terms, so an unknown home leaves an
-/// `xdg:` grant unanswerable — an absolute `XDG_*_HOME` included, since there
-/// would then be nothing to contain it.
-#[allow(clippy::disallowed_methods)]
-fn resolve_xdg_safe(
-    kind: XdgKind,
-    sub: Option<&str>,
-    home: Option<&str>,
-) -> Result<FrozenPath, PolicyError> {
-    let (Some(home), Some(base)) = (home, resolve_xdg(kind, home)) else {
-        return Err(PolicyError::new(home_unknown_message()));
-    };
-    let resolved = join_sub(base, sub);
-    let canonical_home = canonicalise_lenient(&fold_dots(Path::new(home)));
-    if path_within(resolved.real_path(), &canonical_home, Identity::Stored) {
-        return Ok(resolved);
-    }
-    let val = std::env::var(kind.env_var()).unwrap_or_default();
-    let env_clause = if val.is_empty() {
-        format!(
-            "{var} is unset, so the default ({}) was used. Is HOME ({home}) \
-             set correctly?",
-            resolved.as_str(),
-            var = kind.env_var(),
-            home = home,
-        )
-    } else {
-        format!(
-            "{var}={val}: set it to a subpath of HOME ({home}), unset it to \
-             use the default, or replace xdg:{name} in the policy with an \
-             explicit path.",
-            var = kind.env_var(),
-            val = val,
-            home = home,
-            name = kind.token_name(),
-        )
-    };
-    let via = if resolved.real() == resolved.as_str() {
-        String::new()
-    } else {
-        format!(
-            " (written '{}', which is a symbolic link)",
-            resolved.as_str()
-        )
-    };
-    Err(PolicyError::new(format!(
-        "xdg:{name} resolves to '{path}'{via}, outside HOME; refusing to \
-         widen the grant.  {clause}",
-        name = kind.token_name(),
-        path = resolved.real(),
-        clause = env_clause,
-    )))
-}
-
-fn unknown_xdg_message(entry: &str) -> String {
-    format!(
-        "unknown xdg token '{entry}'; known kinds are: {}. \
-         Did you mean one of those? (Token form is `xdg:NAME` or \
-         `xdg:NAME/sub/path`.)",
-        XdgKind::all().join(", "),
-    )
-}
-
-/// The platform's tool-root directories — what the `system:` exec sigil expands
-/// to.
-///
-/// Feeds [`unix_tool_roots`] or [`windows_tool_roots`] the live filesystem and
-/// environment.  Both stay public and parameterised over those inputs so each
-/// platform's list is unit-testable on every host, not only the one compiling
-/// it — the pattern `which`'s `name_key_on` follows too.
-pub fn system_tool_roots() -> Vec<String> {
-    #[cfg(windows)]
-    {
-        let system_root = std::env::var("SystemRoot").unwrap_or_default();
-        let program_files = std::env::var("ProgramFiles").unwrap_or_default();
-        let program_files_x86 = std::env::var("ProgramFiles(x86)").unwrap_or_default();
-        let program_files_dirs: Vec<&str> = [program_files.as_str(), program_files_x86.as_str()]
-            .into_iter()
-            .filter(|s| !s.is_empty())
-            .collect();
-        windows_tool_roots(&system_root, &program_files_dirs, crate::path::exists)
-    }
-    #[cfg(not(windows))]
-    {
-        unix_tool_roots(crate::path::exists)
-    }
-}
-
-/// `/usr/bin` and `/bin` unconditionally, plus whichever of the Homebrew
-/// prefixes and the toolchain roots `exists` reports.
-///
-/// The one place platform tool roots live as grant data: the OS sandboxes
-/// admit nothing beyond what a grant names, so program behaviour that no
-/// carrier explains — `cc → cc1`, `git → git-remote-https`, `clang → ld` —
-/// needs its directory here.
-#[cfg_attr(not(any(unix, test)), allow(dead_code))]
-pub(crate) fn unix_tool_roots(exists: impl Fn(&str) -> bool) -> Vec<String> {
-    let mut roots = vec!["/usr/bin".to_string(), "/bin".to_string()];
-    roots.extend(
-        [
-            "/opt/homebrew",
-            "/home/linuxbrew/.linuxbrew",
-            "/usr/libexec",
-            "/usr/lib/git-core",
-            "/usr/lib/gcc",
-            "/Library/Developer/CommandLineTools",
-            "/Applications/Xcode.app/Contents/Developer",
-        ]
-        .into_iter()
-        .filter(|root| exists(root))
-        .map(str::to_string),
-    );
-    roots
-}
-
-/// `%SystemRoot%\System32` and the bundled Windows PowerShell home — falling
-/// back to the conventional `C:\Windows` when `system_root` is empty.
-///
-/// A Git-for-Windows `usr\bin` joins them, under whichever
-/// `program_files_dirs` entry `exists` reports.
-#[cfg_attr(not(any(windows, test)), allow(dead_code))]
-pub(crate) fn windows_tool_roots(
-    system_root: &str,
-    program_files_dirs: &[&str],
-    exists: impl Fn(&str) -> bool,
-) -> Vec<String> {
-    let system_root = if system_root.is_empty() {
-        r"C:\Windows"
-    } else {
-        system_root
-    };
-    let mut roots = vec![
-        format!(r"{system_root}\System32"),
-        format!(r"{system_root}\System32\WindowsPowerShell\v1.0"),
-    ];
-    for pf in program_files_dirs {
-        let git_bin = format!(r"{pf}\Git\usr\bin");
-        if exists(&git_bin) {
-            roots.push(git_bin);
-        }
-    }
-    roots
-}
-
 #[cfg(test)]
-#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
-
-    fn ctx<'a>(home: &'a str, cwd: &'a Path) -> FreezeCtx<'a> {
-        FreezeCtx {
-            home: Some(home),
-            cwd,
-        }
-    }
-
-    /// A context where nothing binds `HOME` — the shape every home-relative
-    /// sigil must refuse.
-    fn homeless_ctx(cwd: &Path) -> FreezeCtx<'_> {
-        FreezeCtx { home: None, cwd }
-    }
-
-    fn frozen(paths: &[&str], ctx: &FreezeCtx<'_>) -> Result<Vec<String>, PolicyError> {
-        freeze_path_list(
-            paths.iter().map(std::string::ToString::to_string).collect(),
-            ctx,
-        )
-        .map(|v| v.iter().map(|p| p.as_str().to_string()).collect())
-    }
-
-    // Unix-only: `PathBuf::join` yields `\` separators on Windows.
-    #[cfg(unix)]
-    #[test]
-    fn freeze_expands_cwd_sigil() {
-        let paths = frozen(&["cwd:", "cwd:/src"], &ctx("/h", Path::new("/work/proj"))).unwrap();
-        assert_eq!(
-            paths,
-            vec!["/work/proj".to_string(), "/work/proj/src".to_string()]
-        );
-    }
-
-    #[test]
-    fn freeze_expands_tempdir_sigil() {
-        let paths = frozen(
-            &["tempdir:", "tempdir:/scratch"],
-            &ctx("/h", Path::new("/cwd")),
-        )
-        .unwrap();
-        // macOS `TMPDIR` ends in `/`, which folding strips — so compare
-        // against the same kernel rather than a literal.
-        let temp = std::env::temp_dir();
-        let fold = |p: &Path| fold_dots(p).to_string_lossy().into_owned();
-        assert_eq!(paths[0], fold(&temp));
-        assert_eq!(paths[1], fold(&temp.join("scratch")));
-    }
-
-    #[test]
-    fn freeze_leaves_literal_paths_alone() {
-        let paths = frozen(&["/tmp", "/etc/hosts"], &ctx("/h", Path::new("/cwd"))).unwrap();
-        // `fold_dots` rebuilds with the host separator, so the frozen form is
-        // `\tmp` on Windows — compare against the same kernel.
-        let fold = |s: &str| fold_dots(Path::new(s)).to_string_lossy().into_owned();
-        assert_eq!(paths, vec![fold("/tmp"), fold("/etc/hosts")]);
-    }
-
-    /// The guard folds the whole prefix before comparing, so a `..` climb out
-    /// of HOME is rejected at freeze rather than collapsing at match time.
-    // Unix-only: the folded escape `/etc` is a Unix root.
-    #[cfg(unix)]
-    #[test]
-    fn freeze_rejects_xdg_subpath_escaping_home() {
-        let err = frozen(
-            &["xdg:config/../../../../etc"],
-            &ctx("/h", Path::new("/cwd")),
-        )
-        .unwrap_err()
-        .message;
-        assert!(err.contains("outside HOME"), "{err}");
-    }
-
-    /// The escape the surface form hides: `XDG_DATA_HOME` naming a link
-    /// *inside* HOME whose target is outside it.  The fs guard matches the
-    /// symlink-followed form, so the freeze guard must ask it there too.
-    // Unix-only: `std::os::unix::fs::symlink`, and `/etc` is a Unix root.
-    #[cfg(unix)]
-    #[test]
-    fn freeze_rejects_xdg_home_symlinked_out_of_home() {
-        let home = tempfile::tempdir().unwrap();
-        let link = home.path().join("link");
-        std::os::unix::fs::symlink("/etc", &link).unwrap();
-        let home_str = home.path().to_string_lossy().into_owned();
-        let err = crate::test_env::with_var("XDG_DATA_HOME", Some(&link.to_string_lossy()), || {
-            frozen(&["xdg:data"], &ctx(&home_str, Path::new("/cwd")))
-                .unwrap_err()
-                .message
-        });
-        assert!(err.contains("outside HOME"), "{err}");
-        assert!(
-            err.contains("/etc"),
-            "the message must name where it lands: {err}"
-        );
-    }
-
-    /// The dual, and the reason both sides are canonicalised: macOS reaches
-    /// a `/var/folders/...` tempdir through a symlink, so canonicalising only
-    /// the XDG side would refuse a HOME nobody tampered with.
-    // Unix-only: pairs with the test above.
-    #[cfg(unix)]
-    #[test]
-    fn freeze_accepts_xdg_home_under_a_symlinked_home() {
-        let home = tempfile::tempdir().unwrap();
-        let data = home.path().join("data");
-        std::fs::create_dir(&data).unwrap();
-        let home_str = home.path().to_string_lossy().into_owned();
-        crate::test_env::with_var("XDG_DATA_HOME", Some(&data.to_string_lossy()), || {
-            frozen(&["xdg:data"], &ctx(&home_str, Path::new("/cwd"))).unwrap();
-        });
-    }
-
-    /// `Path::join` on a rooted suffix discards the base, so an `xdg:` token
-    /// spelled with a double slash must not name the root.  Both halves of
-    /// expansion answer alike.
-    // Unix-only: Linux XDG defaults, and `/etc` is a Unix root.
-    #[cfg(unix)]
-    #[test]
-    fn xdg_subpath_cannot_discard_its_base() {
-        crate::test_env::with_var("XDG_CONFIG_HOME", None, || {
-            let paths = frozen(&["xdg:config//etc"], &ctx("/h", Path::new("/cwd"))).unwrap();
-            assert_eq!(paths, vec!["/h/.config/etc".to_string()]);
-            assert_eq!(
-                expand_path_prefix("xdg:config//etc", Some("/h")),
-                "/h/.config/etc"
-            );
-        });
-    }
-
-    /// Even a sigil-free literal is stored in the form the in-process guard matches against.
-    // Unix-only: Unix path shapes.
-    #[cfg(unix)]
-    #[test]
-    fn freeze_folds_dot_dot_in_literal() {
-        let paths = frozen(&["/a/b/../c"], &ctx("/h", Path::new("/cwd"))).unwrap();
-        assert_eq!(paths, vec!["/a/c".to_string()]);
-    }
 
     #[test]
     fn parse_xdg_token_recognises_each_kind() {
@@ -521,13 +82,11 @@ mod tests {
 
     #[test]
     fn parse_xdg_token_rejects_unknown_name() {
-        assert!(looks_like_xdg("xdg:cofnig"));
         assert!(parse_xdg_token("xdg:cofnig").is_none());
     }
 
     #[test]
     fn parse_xdg_token_rejects_non_xdg() {
-        assert!(!looks_like_xdg("/etc"));
         assert!(parse_xdg_token("/etc").is_none());
     }
 
@@ -536,26 +95,10 @@ mod tests {
         assert_eq!(expand_path_prefix("~/foo", Some("/h")), "/h/foo");
     }
 
-    /// A home-relative sigil has no answer where nothing binds `HOME`.  The
-    /// freeze refuses and says which env var is missing; the runtime twin
-    /// passes the entry through literally, a prefix matching nothing being the
-    /// fail-closed reading on that side.  Neither fabricates `/.gitconfig`.
-    #[test]
-    fn freeze_rejects_home_relative_sigils_without_home() {
-        for entry in ["~", "~/.gitconfig", "xdg:config/git"] {
-            let err = frozen(&[entry], &homeless_ctx(Path::new("/cwd")))
-                .unwrap_err()
-                .message;
-            assert!(err.contains("HOME is unset"), "{entry}: {err}");
-        }
-        assert_eq!(expand_path_prefix("~/.gitconfig", None), "~/.gitconfig");
-        assert_eq!(expand_path_prefix("xdg:config/git", None), "xdg:config/git");
-    }
-
     #[test]
     fn unknown_xdg_token_passes_through_unchanged() {
-        // Runtime is permissive — the load-time validator turns a typo into an
-        // error; here it only must not be silently rewritten.
+        // Runtime is permissive: the freeze turns a typo into an error; here
+        // it only must not be silently rewritten.
         assert_eq!(expand_path_prefix("xdg:cofnig", Some("/h")), "xdg:cofnig");
     }
 
@@ -572,94 +115,5 @@ mod tests {
         // Only the tail is asserted: the base moves with `XDG_CACHE_HOME`.
         let out = expand_path_prefix("xdg:cache/foo", Some("/h"));
         assert!(out.ends_with("/foo"), "got {out}");
-    }
-
-    #[test]
-    fn unix_tool_roots_always_carries_usr_bin_and_bin() {
-        let roots = unix_tool_roots(|_| false);
-        assert_eq!(roots, vec!["/usr/bin".to_string(), "/bin".to_string()]);
-    }
-
-    #[test]
-    fn unix_tool_roots_adds_present_homebrew_prefix_only() {
-        let roots = unix_tool_roots(|p| p == "/opt/homebrew");
-        assert_eq!(
-            roots,
-            vec![
-                "/usr/bin".to_string(),
-                "/bin".to_string(),
-                "/opt/homebrew".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn unix_tool_roots_adds_each_present_toolchain_root_only() {
-        let toolchains = [
-            "/usr/libexec",
-            "/usr/lib/git-core",
-            "/usr/lib/gcc",
-            "/Library/Developer/CommandLineTools",
-            "/Applications/Xcode.app/Contents/Developer",
-        ];
-        assert_eq!(
-            unix_tool_roots(|p| toolchains.contains(&p)).split_at(2).1,
-            toolchains
-        );
-        for present in toolchains {
-            let roots = unix_tool_roots(|p| p == present);
-            assert_eq!(roots, ["/usr/bin", "/bin", present], "{present}");
-        }
-    }
-
-    /// No `cfg(windows)` on any of the Windows-shape tests: they run on the
-    /// macOS and Linux CI hosts that never compile `system_tool_roots`' other
-    /// half.
-    #[test]
-    fn windows_tool_roots_always_carries_system32_and_powershell() {
-        let roots = windows_tool_roots(r"C:\Windows", &[], |_| false);
-        assert_eq!(
-            roots,
-            vec![
-                r"C:\Windows\System32".to_string(),
-                r"C:\Windows\System32\WindowsPowerShell\v1.0".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn windows_tool_roots_falls_back_when_system_root_unset() {
-        let roots = windows_tool_roots("", &[], |_| false);
-        assert!(roots[0].starts_with(r"C:\Windows"), "got {roots:?}");
-    }
-
-    #[test]
-    fn windows_tool_roots_adds_git_for_windows_usr_bin_when_present() {
-        let roots = windows_tool_roots(r"C:\Windows", &[r"C:\Program Files"], |p| {
-            p == r"C:\Program Files\Git\usr\bin"
-        });
-        assert!(
-            roots.contains(&r"C:\Program Files\Git\usr\bin".to_string()),
-            "got {roots:?}"
-        );
-    }
-
-    #[test]
-    fn windows_tool_roots_omits_git_for_windows_when_absent() {
-        let roots = windows_tool_roots(r"C:\Windows", &[r"C:\Program Files"], |_| false);
-        assert!(!roots.iter().any(|r| r.contains("Git")), "got {roots:?}");
-    }
-
-    #[test]
-    fn windows_tool_roots_checks_both_program_files_locations() {
-        let roots = windows_tool_roots(
-            r"C:\Windows",
-            &[r"C:\Program Files", r"C:\Program Files (x86)"],
-            |p| p == r"C:\Program Files (x86)\Git\usr\bin",
-        );
-        assert!(
-            roots.contains(&r"C:\Program Files (x86)\Git\usr\bin".to_string()),
-            "got {roots:?}"
-        );
     }
 }

@@ -73,6 +73,10 @@
 //! which is the same law the engine's own wire runs under, applied one layer
 //! down.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "[silent:windows-host] a host diagnostic with no ral shell to print through"
+)]
 use serde::{Deserialize, Serialize};
 
 pub mod client;
@@ -188,7 +192,7 @@ pub enum Reply {
 
 /// Length-prefixed JSON, the same framing the engine's own wire uses.
 ///
-/// Written out here rather than borrowed from `ral-core`'s `subprocess_codec`
+/// Written out here rather than borrowed from `ral-core`'s `frame`
 /// because this crate deliberately does not depend on `ral-core` — a machine
 /// layer that needed the shell to talk to its own service would have the
 /// dependency backwards.

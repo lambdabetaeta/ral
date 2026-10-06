@@ -16,7 +16,6 @@ mod detach;
 mod foreground;
 mod head;
 pub(crate) mod process;
-mod redirect;
 mod stdio;
 mod vet;
 
@@ -24,17 +23,12 @@ pub(crate) use child::{Pumps, RunningChild};
 #[cfg(unix)]
 pub(crate) use detach::detach;
 pub(crate) use head::Head;
-pub(crate) use process::{build_launch, spawn_error};
-pub(crate) use redirect::{
-    OpenedWrite, StdinRedirectGuard, atomic_write, atomic_write_error, install_stdin_redirect,
-    open_write,
-};
-pub(crate) use stdio::{ChildIo, TtyInputPermit, stdin_error, wire_stdio};
+pub(crate) use process::{brake, build_launch, spawn, with_denials};
+pub(crate) use stdio::{ChildIo, TtyInputPermit, wire_stdio};
 pub(crate) use vet::vet;
 
 use child::WaitedChild;
 use foreground::ForegroundDecision;
-use process::spawn;
 use stdio::inherit_tty;
 
 /// Runs a standalone external call from vetting to reap.  A bundled
@@ -58,7 +52,7 @@ pub(crate) fn run(
         shell,
         mooring.cancel.as_scope(),
     )?;
-    crate::process::check(mooring)?;
+    mooring.check()?;
 
     let inherit_tty = inherit_tty(shell);
     let pumps = wire_stdio(
@@ -72,21 +66,21 @@ pub(crate) fn run(
 
     let confinement = command.confinement();
     let fg = ForegroundDecision::for_standalone(shell, needs_pump, confinement.is_some(), mooring);
-    let program = rc.admitted.program().to_string();
-    trace_io_wiring(&cmd_name, &program, inherit_tty, needs_pump, &fg, shell);
+    #[cfg(debug_assertions)]
+    {
+        let program = rc.admitted.program().to_string();
+        trace_io_wiring(&cmd_name, &program, inherit_tty, needs_pump, &fg, shell);
+    }
 
     announce_command_title(&cmd_name, shell);
 
     // Anchor the denial-log window before the spawn, so a kernel deny the
-    // child logs falls inside what `sandbox::augment_failure` reads back.
+    // child logs falls inside what `sandbox::denial_hint` reads back.
     let started = std::time::Instant::now();
-    let (child, led, jail) = match spawn(&mut command, fg.pgid_policy(), shell) {
-        Ok(pair) => pair,
-        // `finish_command` builds the `Command{External}` observation from
-        // whatever error reaches it, so a spawn failure needs no emission of
-        // its own here.
-        Err(e) => return Err(spawn_error(confinement, &cmd_name, &e)),
-    };
+    // `finish_command` builds the `Command{External}` observation from
+    // whatever error reaches it, so a spawn failure needs no emission of
+    // its own here.
+    let (child, led, jail) = spawn(&mut command, fg.pgid_policy(), &cmd_name, shell)?;
 
     let child_pid = child.id();
     // Held until `reclaim`: its `Drop` restores ral's pgid on every path out
@@ -94,7 +88,7 @@ pub(crate) fn run(
     // pgroup.
     let loan = fg.acquire(child_pid, shell, mooring);
 
-    let group = landed_in(led, &shell.io.launch_role);
+    let group = landed_in(led, shell.io.stage.as_ref());
     // Nothing fallible may run between `spawn` and this assembly: until
     // `RunningChild` owns it the bare child leaks on an early return,
     // whereas afterwards its `Drop` SIGKILLs the pgid and reaps.
@@ -110,8 +104,9 @@ pub(crate) fn run(
     let waited: WaitedChild = running.wait();
     // The terminal returns the instant its tenant is dead, and what the
     // tenant heard is struck on the frame before the next poll.
-    let pressed = loan.and_then(|loan| loan.reclaim(waited.outcome.death(false)));
-    let (outcome, cause) = (waited.outcome, waited.cause.max(pressed));
+    let outcome = waited.outcome.enveloped(confinement.is_some());
+    let pressed = loan.and_then(|loan| loan.reclaim(outcome.death()));
+    let cause = waited.cause.max(pressed);
 
     // Only joins the pump threads: under audit the bytes are already
     // captured by the dispatch-level Tee on `shell.io.stdout` / `stderr`.
@@ -119,25 +114,29 @@ pub(crate) fn run(
     // A command inside a pipeline stage cannot take SIGPIPE from an interior
     // edge — the parent holds that edge's read end — so any SIGPIPE it
     // suffers is from a pipe of its own making and is its own failure.
-    match outcome.classify(cause, confinement.is_some()) {
+    match outcome.classify(cause) {
         None => Ok(Value::Unit),
         Some(end) => {
             let err = Error::of_child(&cmd_name, end, shell);
-            // Only this child and its descendants may claim a kernel deny
-            // line; `augment_failure` short-circuits when no sandbox ran.
-            let mut pids = crate::sandbox::sample_descendants(child_pid);
-            pids.insert(child_pid);
-            let err = crate::sandbox::augment_failure(err, shell, &pids, started);
-            Err(Break::Error(err))
+            // Only this child and its descendants may claim a kernel deny line.
+            let pids = || {
+                let mut pids = crate::process::sample_descendants(child_pid);
+                pids.insert(child_pid);
+                pids
+            };
+            Err(Break::Error(with_denials(err, shell, pids, started)))
         }
     }
 }
 
-/// Who signals a child spawned under `role`: the group it `led`, else the
+/// Who signals a child spawned under `stage`: the group it `led`, else the
 /// pipeline's it joined, else nobody but its own pid.
-fn landed_in(led: Option<crate::process::Pgid>, role: &crate::io::LaunchRole) -> Option<Group> {
+fn landed_in(
+    led: Option<crate::process::Pgid>,
+    stage: Option<&crate::process::Membership>,
+) -> Option<Group> {
     led.map(Group::Owns)
-        .or_else(|| role.membership().cloned().map(Group::Joins))
+        .or_else(|| stage.cloned().map(Group::Joins))
 }
 
 /// Announce the running command via the terminal title (OSC 0).
@@ -149,9 +148,9 @@ fn announce_command_title(cmd: &str, shell: &Shell) {
     }
 }
 
-/// Debug-only single-line trace of the I/O wiring decisions.  The whole
-/// function is cfg-gated, not just `dbg_trace!`, which alone would leave
-/// the sink match running in release.
+/// Debug-only single-line trace of the I/O wiring decisions.  The function and
+/// its call are cfg-gated, not just `dbg_trace!`, which alone would leave the
+/// sink match running in release.
 #[cfg(debug_assertions)]
 fn trace_io_wiring(
     cmd_name: &str,
@@ -178,21 +177,9 @@ fn trace_io_wiring(
     );
 }
 
-#[cfg(not(debug_assertions))]
-fn trace_io_wiring(
-    _cmd_name: &str,
-    _resolved: &str,
-    _inherit_tty: bool,
-    _needs_pump: bool,
-    _fg: &ForegroundDecision,
-    _shell: &Shell,
-) {
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io::LaunchRole;
     use crate::process::{CancelScope, Membership, Pgid};
 
     fn pgid(raw: i32) -> Pgid {
@@ -203,15 +190,15 @@ mod tests {
     /// owner; a plain member joins; a top-level `Inherit` child has none.
     #[test]
     fn a_child_owns_what_it_leads_and_joins_what_it_only_entered() {
-        let stage = LaunchRole::PipelineStage(Membership::new(pgid(7), CancelScope::root()));
+        let stage = Membership::new(pgid(7), CancelScope::root());
         assert!(matches!(
-            landed_in(Some(pgid(9)), &stage),
+            landed_in(Some(pgid(9)), Some(&stage)),
             Some(Group::Owns(g)) if g == pgid(9)
         ));
         assert!(matches!(
-            landed_in(None, &stage),
+            landed_in(None, Some(&stage)),
             Some(Group::Joins(m)) if m.group() == pgid(7)
         ));
-        assert!(landed_in(None, &LaunchRole::TopLevel).is_none());
+        assert!(landed_in(None, None).is_none());
     }
 }

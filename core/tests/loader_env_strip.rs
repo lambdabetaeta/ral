@@ -18,7 +18,7 @@
 //! or the test would pass on env plumbing that never worked.
 //!
 //! Like the sibling fs tests this target imports `core/tests/common` for its
-//! `#[ctor::ctor]`, which runs `serve_pre_main` so the re-exec child
+//! `#[ctor::ctor]`, which runs `invocation::serve_process` so the re-exec child
 //! enters Seatbelt instead of landing in the libtest framework, and is gated
 //! to macOS, the backend that can confine an in-tree re-exec child without an
 //! external helper binary.
@@ -27,14 +27,16 @@
 
 mod common;
 
+use ral_core::RunIo;
+use ral_core::capability::{Capabilities, FsPolicy, GrantStack};
 use ral_core::path::FrozenPath;
-use ral_core::protocol::{Program, Run};
-use ral_core::types::{Capabilities, FsPolicy, GrantStack, Shell, Value};
-use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
+use ral_core::protocol::Run;
+use ral_core::run::RunReport;
+use ral_core::types::{Shell, Value};
 
 fn boot() -> Shell {
     ral_core::boot::boot_shell(
-        ral_core::io::TerminalState::default(),
+        ral_core::terminal::TerminalState::default(),
         common::prelude(),
         &ral_core::boot::HostSurface::default(),
     )
@@ -59,23 +61,10 @@ fn confined_child_env(src: &str) -> String {
     let dir = std::env::temp_dir().join(format!("ral_loader_env_{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("create work dir");
     let mut shell = boot();
-    let report = shell.run(RunRequest {
-        run: Run {
-            program: Program::Source(src.into()),
-            script_name: "<test>".into(),
-            caps: GrantStack::of(restrict_to(&dir.to_string_lossy())),
-            wall: None,
-            deferred_lease: None,
-            worker_cap: None,
-            io: RunIo::Inherit,
-            terminal: RequestedTerminalAccess::Denied,
-            stdin: RunStdin::Empty,
-            trail: None,
-        },
-        surface: None,
-        deferred: None,
-        desk: None,
-        fork: None,
+    let report = shell.run(Run {
+        io: RunIo::Inherit,
+        caps: GrantStack::of(restrict_to(&dir.to_string_lossy())),
+        ..Run::captured(src, "<test>")
     });
     let RunReport::Ran { ending, .. } = report else {
         panic!("well-formed source must run: {src:?}");

@@ -2,6 +2,8 @@
 //! structured-event sink, its enquiry desk, its session-[`Fork`] door, and
 //! its terminal-foreground authority.
 
+use super::error::Error;
+use super::flow::Break;
 use super::shell::Shell;
 use super::shell::workers::WorkerLease;
 use super::value::Value;
@@ -17,13 +19,13 @@ use std::sync::{Arc, Mutex};
 /// the child subtree; a deferred worker never gets the live sink, only a
 /// bounded buffering one it replays on `await`.
 pub trait EventSink: Send + Sync {
-    fn emit(&self, ev: &crate::serial::FOValue);
+    fn emit(&self, ev: &crate::first_order::FOValue);
 }
 
 /// The no-op surface, for a caller with no rail to speak into; an absent
 /// sink (`None`) behaves identically.
 impl EventSink for () {
-    fn emit(&self, _ev: &crate::serial::FOValue) {}
+    fn emit(&self, _ev: &crate::first_order::FOValue) {}
 }
 
 /// Shared handle to the run-local structured-event sink.
@@ -62,9 +64,9 @@ pub trait EnquiryDesk: Send + Sync {
     /// Returns `Err` when the host cannot answer `req`.
     fn enquire(
         &self,
-        req: crate::serial::FOValue,
+        req: crate::first_order::FOValue,
         cancel: &crate::process::CancelScope,
-    ) -> Result<crate::serial::FOValue, crate::types::Error>;
+    ) -> Result<crate::first_order::FOValue, crate::types::Error>;
 }
 
 /// Shared handle to the run-local enquiry desk.  Run-scoped like
@@ -72,7 +74,7 @@ pub trait EnquiryDesk: Send + Sync {
 pub type Desk = std::sync::Arc<dyn EnquiryDesk>;
 
 /// Identifier for a shell session parked in a [`Nursery`], redeemed once by
-/// [`IdentityTransport::adopt_parked`](crate::protocol::IdentityTransport::adopt_parked).
+/// [`IdentityTransport::adopt_parked`](crate::carrier::IdentityTransport::adopt_parked).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NurseryId(pub u64);
 
@@ -141,12 +143,12 @@ pub trait DeferredSink: Send + Sync {
     /// Deliver-once is the *caller's* discipline: the completion path wins the
     /// test-and-set on the `joined` latch it shares with the eliminators before
     /// invoking this, so an implementation cannot forget the latch.
-    fn deliver(&self, batch: Vec<crate::serial::FOValue>);
+    fn deliver(&self, batch: Vec<crate::first_order::FOValue>);
 }
 
 /// This run's authority to hand the controlling terminal to a child: the
 /// internal form of
-/// [`RequestedTerminalAccess`](crate::run::RequestedTerminalAccess), carrying
+/// [`RequestedTerminalAccess`](crate::process::RequestedTerminalAccess), carrying
 /// the extra `ExplicitLoan` no host can request at a run door.  Read by
 /// [`Shell::terminal_lease`](crate::types::Shell::terminal_lease); `Denied` is
 /// the safe [`Default`], so an unstated policy cannot reach the handoff.
@@ -183,7 +185,7 @@ pub struct Mooring {
     /// `None`: this host adopts no forked sessions.
     pub(crate) fork: Option<Fork>,
     /// The run's foreground work scope, consulted between effectful steps by
-    /// [`signal::check`](crate::process::signal::check) and always a descendant
+    /// [`Self::check`] and always a descendant
     /// of [`SessionState`](crate::types::SessionState)'s durable root.  The one
     /// `pub` member: a host clones a deadline child of it, or cancels it to
     /// interrupt the foreground work.
@@ -196,6 +198,22 @@ pub struct Mooring {
 }
 
 impl Mooring {
+    /// Whether the current evaluation should unwind.
+    ///
+    /// Fires when the foreground scope, or any ancestor, is cancelled: a
+    /// translated signal, a deadline, an explicit `cancel <handle>`, or a
+    /// Ctrl-\ root abort.  The error is unspanned: the break path stamps the
+    /// innermost node it unwinds through.
+    ///
+    /// # Errors
+    /// Returns `Err` carrying the strongest cause's message and exit code when
+    /// the chain is cancelled.
+    pub fn check(&self) -> Result<(), Break> {
+        self.cancel
+            .cause()
+            .map_or(Ok(()), |cause| Err(Break::Error(Error::cancelled(cause))))
+    }
+
     /// The mooring a detached worker runs under: a rebuild, not a share.
     ///
     /// `parent`'s cancel scope would let a foreground cancel reach a worker
@@ -265,19 +283,19 @@ impl Mooring {
 
     /// The sink door for a runtime [`Value`], such as a host builtin with no
     /// vocabulary of its own hands in.  Encoded here into the first-order
-    /// [`FOValue`](crate::serial::FOValue) the sink carries; inert with no
+    /// [`FOValue`](crate::first_order::FOValue) the sink carries; inert with no
     /// sink installed.  Total: a `Handle` or a closure reachable through `ev`
     /// crosses as its `opaque` placeholder rather than being dropped.
     pub fn surface(&self, ev: &Value) {
         if let Some(sink) = self.surface.as_ref() {
-            sink.emit(&crate::serial::FOValue::scrubbed(ev));
+            sink.emit(&crate::first_order::FOValue::scrubbed(ev));
         }
     }
 
     /// [`Self::surface`] for a host that already holds data.  Every door core
-    /// owns reaches it through `evaluator::audit::observe_stamped` with
+    /// owns reaches it through `Shell::observe_stamped` with
     /// [`crate::types::Observation::to_surface`].
-    pub fn surface_data(&self, ev: &crate::serial::FOValue) {
+    pub fn surface_data(&self, ev: &crate::first_order::FOValue) {
         if let Some(sink) = self.surface.as_ref() {
             sink.emit(ev);
         }
@@ -331,7 +349,7 @@ impl Drop for NurseryGuard {
 #[allow(clippy::disallowed_methods, reason = "test scaffolding")]
 mod tests {
     use super::*;
-    use crate::serial::{FOValue, OPAQUE_TAG};
+    use crate::first_order::{FOValue, OPAQUE_TAG};
     use crate::types::idle_handle;
     use std::sync::Mutex;
 

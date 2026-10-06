@@ -345,7 +345,7 @@ impl Log {
                         })
                         .map_err(|error| {
                             io::Error::other(format!(
-                                "line {seq} does not parse as the `Entry` envelope ({error}); a session recorded before this exarch's Entry-envelope change cannot be resumed — was this session started with an older exarch?"
+                                "line {seq} does not parse as the `Entry` envelope ({error}); a session recorded before this exarch's Entry-envelope change cannot be resumed: was this session started with an older exarch?"
                             ))
                         }),
                 );

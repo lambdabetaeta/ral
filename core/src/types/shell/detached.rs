@@ -113,9 +113,10 @@ mod tests {
             births: AtomicU64::new(0),
         });
         policy.admit().expect("first admission").commit();
-        let mut local = LocalState::default();
-        local.detach = Some(policy.clone());
-        drop(local);
+        drop(LocalState {
+            detach: Some(policy.clone()),
+            ..LocalState::default()
+        });
         policy.admit().expect("second admission").commit();
         assert_eq!(policy.admit().map(drop), Err(2));
     }

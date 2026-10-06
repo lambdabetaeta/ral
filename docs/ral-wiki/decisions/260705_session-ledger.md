@@ -274,3 +274,6 @@ deferred survivor warning), [[decisions/260629_agent-binding-reaping|agent-bindi
 [[invariants/probe-convention|probe-convention]] (the probe facet as a
 checkable rule), [[map/exarch/agent|agent]],
 [[map/core/builtins|map: builtins]], and `docs/SPEC.md` §11 and §11.6.
+
+> **Amended 2026-10-06.** The core `Resident` trait was retired unused; each
+> chapter's fold is hand-written.

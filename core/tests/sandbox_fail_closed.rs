@@ -8,7 +8,7 @@
 //! the control is load-bearing — a blanket deny would fail it, a disabled
 //! sandbox would let the denied write land.
 //!
-//! Imports `common` for its `#[ctor]`, which runs `serve_pre_main`
+//! Imports `common` for its `#[ctor]`, which runs `invocation::serve_process`
 //! so the re-exec child enters Seatbelt and `execve`s the target rather than
 //! landing in libtest and dying on `--warrant` — a failure for the
 //! wrong reason.  macOS-only: the one backend that confines an in-tree re-exec
@@ -19,16 +19,18 @@
 
 mod common;
 
+use ral_core::RunIo;
+use ral_core::capability::{Capabilities, FsPolicy, GrantStack};
 use ral_core::path::FrozenPath;
-use ral_core::protocol::{Program, Run};
-use ral_core::types::{Break, Capabilities, FsPolicy, GrantStack, Settled, Shell, Value};
-use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
+use ral_core::protocol::Run;
+use ral_core::run::RunReport;
+use ral_core::types::{Break, Settled, Shell, Value};
 
 /// A `Shell` matching what every front end ends up with after bootstrap:
 /// prelude registered, default env, root capabilities.
 fn boot() -> Shell {
     ral_core::boot::boot_shell(
-        ral_core::io::TerminalState::default(),
+        ral_core::terminal::TerminalState::default(),
         common::prelude(),
         &ral_core::boot::HostSurface::default(),
     )
@@ -68,23 +70,10 @@ fn restrict_to(dir: &str) -> Capabilities {
 /// exarch's per-tool flow: the run carries the attenuated capability
 /// ceiling in its request and compiles against the live bindings.
 fn top_level_under(shell: &mut Shell, caps: Capabilities, src: &str) -> Settled<Value> {
-    match shell.run(RunRequest {
-        run: Run {
-            program: Program::Source(src.into()),
-            script_name: "<test>".into(),
-            caps: GrantStack::of(caps),
-            wall: None,
-            deferred_lease: None,
-            worker_cap: None,
-            io: RunIo::Inherit,
-            terminal: RequestedTerminalAccess::Denied,
-            stdin: RunStdin::Empty,
-            trail: None,
-        },
-        surface: None,
-        deferred: None,
-        desk: None,
-        fork: None,
+    match shell.run(Run {
+        io: RunIo::Inherit,
+        caps: GrantStack::of(caps),
+        ..Run::captured(src, "<test>")
     }) {
         RunReport::Ran { ending, .. } => ending.into_result(),
         RunReport::Static { .. } => panic!("well-formed source must run: {src:?}"),

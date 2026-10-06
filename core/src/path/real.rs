@@ -4,12 +4,12 @@ use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 
-use super::{FrozenPath, Polarity};
+use super::{FrozenPath, PathRules, Polarity};
 
 /// A path with no symlink, `.` or `..`, as `realpath(3)` gives it.
 ///
 /// Ordered as the host identifies files: by path components off Windows, by
-/// [`windows_identity_components`](super::lex::windows_identity_components)
+/// [`windows_identity_components`](super::identity::windows_identity_components)
 /// on it — so two keys naming one file are one key in a map.
 #[derive(Clone, Debug)]
 pub struct RealPath(PathBuf);
@@ -33,13 +33,13 @@ impl RealPath {
     /// Whether this path lies inside `dir`, modulo firmlink aliases, as a
     /// rule of polarity `P` reads names.
     pub(crate) fn within<P: Polarity>(&self, dir: &Self) -> bool {
-        super::lex::path_within(&self.0, &dir.0, P::IDENTITY)
+        super::identity::path_within(&self.0, &dir.0, P::IDENTITY)
     }
 
     /// Depth in components of the alias-folded form, so a firmlink spelling
     /// buys no rank.
     pub(crate) fn depth(&self) -> usize {
-        super::lex::identity_depth(&self.0.to_string_lossy(), cfg!(windows))
+        super::identity::identity_depth(&self.0.to_string_lossy(), PathRules::HOST)
     }
 
     /// The entry `name` of this directory: real by construction, since a
@@ -63,12 +63,13 @@ impl RealPath {
 
 impl Ord for RealPath {
     fn cmp(&self, other: &Self) -> Ordering {
-        if cfg!(windows) {
-            let identity =
-                |p: &Self| super::lex::windows_identity_components(&p.0.to_string_lossy());
-            identity(self).cmp(&identity(other))
-        } else {
-            self.0.cmp(&other.0)
+        match PathRules::HOST {
+            PathRules::Windows => {
+                let identity =
+                    |p: &Self| super::identity::windows_identity_components(&p.0.to_string_lossy());
+                identity(self).cmp(&identity(other))
+            }
+            PathRules::Posix => self.0.cmp(&other.0),
         }
     }
 }

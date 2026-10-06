@@ -14,7 +14,7 @@ use crate::agent::seat::EngineLost;
 use crate::bus::card::{Card, Field, FieldVal, Mark, Role, Span};
 use crate::fleet::AGENT_LEASE_IDLE;
 use crate::shell_eval;
-use ral_core::protocol::{Severed, reading};
+use ral_core::carrier::Severed;
 use std::fmt;
 use std::path::Path;
 
@@ -102,7 +102,7 @@ pub(crate) fn rows_mark(rows: &[ProbeRow]) -> Mark {
             if let Some(note) = &row.note {
                 spans.push(Span {
                     role: Some(Role::Muted),
-                    text: format!(" — {note}"),
+                    text: format!(" ({note})"),
                 });
             }
             Field {
@@ -207,12 +207,10 @@ impl Avatar {
     /// # Errors
     /// The engine's severance.
     pub(super) fn scratch_bytes(&self) -> Result<Option<(String, u64)>, Severed> {
-        let Some(scratch) = self.seat.read(|t| reading::env_var(t, "EXARCH_SCRATCH"))? else {
+        let Some(scratch) = self.seat.read(|t| t.env_var("EXARCH_SCRATCH"))? else {
             return Ok(None);
         };
-        let bytes = self
-            .seat
-            .read(|t| reading::path_bytes(t, Path::new(&scratch)))?;
+        let bytes = self.seat.read(|t| t.path_bytes(Path::new(&scratch)))?;
         Ok(Some((scratch, bytes)))
     }
 
@@ -227,7 +225,7 @@ impl Avatar {
     fn resource_rows(&self) -> Result<Vec<ProbeRow>, Severed> {
         let mut rows = Vec::new();
 
-        let entries = self.seat.read(reading::workers)?;
+        let entries = self.seat.read(|t| t.workers())?;
         let mut running_worker = 0u64;
         let mut running_durable = 0u64;
         let mut settled = 0u64;
@@ -278,7 +276,7 @@ impl Avatar {
             running_durable,
             None,
             Policy::Unbounded,
-            Some("durable — dies by cancel, /clear, or process exit".to_string()),
+            Some("durable: dies by cancel, /clear, or process exit".to_string()),
         ));
         rows.push(ProbeRow::new(
             "workers.settled",
@@ -324,14 +322,14 @@ impl Avatar {
 
         rows.push(ProbeRow::new(
             "bindings.count",
-            self.seat.read(reading::binding_count)?,
+            self.seat.read(|t| t.binding_count())?,
             None,
             Policy::Reap,
             Some("baseline (prelude, agent library, host seeds) never expires".to_string()),
         ));
         rows.push(ProbeRow::new(
             "bindings.leased",
-            self.seat.read(reading::leased_binding_count)?,
+            self.seat.read(|t| t.leased_binding_count())?,
             None,
             Policy::Reap,
             Some(format!(
@@ -341,7 +339,7 @@ impl Avatar {
         ));
         rows.push(ProbeRow::new(
             "bindings.largest_bytes",
-            self.seat.read(reading::largest_binding_bytes)?,
+            self.seat.read(|t| t.largest_binding_bytes())?,
             Some(shell_eval::LARGE_BINDING_BYTES),
             Policy::Warn,
             Some("shallow estimate; a closure's captures are never chased".to_string()),
@@ -508,7 +506,7 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         while !session
             .seat
-            .read(reading::workers)
+            .read(|t| t.workers())
             .expect("an identity seat never severs")
             .iter()
             .any(|w| !w.running)
@@ -576,7 +574,7 @@ mod tests {
         assert_eq!(
             row(&rows, "agents.lease").current,
             AGENT_LEASE_IDLE.as_secs(),
-            "no live children — the lease row reports the full idle window"
+            "no live children: the lease row reports the full idle window"
         );
 
         // The settled spawn's deferred `Surface` batch may also sit queued —
@@ -596,7 +594,7 @@ mod tests {
         assert_eq!(
             row(&rows, "inbox[agent]").current,
             0,
-            "an idle source still emits its zero row — the row set is stable"
+            "an idle source still emits its zero row: the row set is stable"
         );
         assert_eq!(
             session.inbox.source_depths(),
@@ -609,7 +607,7 @@ mod tests {
             entry
                 .handle
                 .cancel
-                .cancel(ral_core::process::CancelCause::Explicit);
+                .cancel(ral_core::process::CancelCause::Cancelled);
         }
     }
 
@@ -636,7 +634,7 @@ mod tests {
         entry
             .handle
             .cancel
-            .cancel(ral_core::process::CancelCause::Explicit);
+            .cancel(ral_core::process::CancelCause::Cancelled);
     }
 
     /// The scripted test provider's model has no pricing-catalog entry (the

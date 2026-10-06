@@ -12,8 +12,8 @@
 use std::sync::Mutex;
 
 use exarch::agent::Dial;
+use ral_core::protocol::channel::WireStream;
 use ral_core::sync::LockExt;
-use ral_core::wire::WireStream;
 use vm_manager::Machine;
 
 /// `exarch::agent::Dial` over a real machine.
@@ -92,7 +92,7 @@ mod tests {
     #[cfg(windows)]
     #[allow(
         clippy::disallowed_methods,
-        reason = "[silent:wire-pair-windows] the same in-process loopback pair `ral_core::wire::WireChannel::pair` stands on, here so a test can hold both ends: the port is ephemeral and the peer is this process, so no outside name is reached."
+        reason = "[silent:wire-pair-windows] the same in-process loopback pair `ral_core::protocol::channel::WireChannel::pair` stands on, here so a test can hold both ends: the port is ephemeral and the peer is this process, so no outside name is reached."
     )]
     fn local_pair() -> std::io::Result<(GuestEnd, vm_manager::AgentDial)> {
         let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;

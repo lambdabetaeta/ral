@@ -8,9 +8,8 @@
 //! boot goes on — a broken startup file must not strand the user at no shell.
 
 use ral_core::errln;
-use ral_core::source::Span;
 use ral_core::types::{Break, DefaultPolicy, Escape, HookName, HookSig, Map, Mooring, Settled};
-use ral_core::{Shell, Value, diagnostic};
+use ral_core::{Shell, Value, terminal};
 
 use super::super::errfmt::report_failed_load;
 use super::{RcSettings, apply_rc_config, create_default_rc, find_ralrc};
@@ -30,7 +29,7 @@ fn tolerate<T>(outcome: Result<T, Stop>, fallback: T) -> Settled<T> {
         Ok(v) => Ok(v),
         Err(Stop::Exit(code)) => Err(Break::Escape(Escape::Exit(code))),
         Err(Stop::Failed(msg)) => {
-            diagnostic::cmd_error("ral", &msg);
+            terminal::cmd_error("ral", &msg);
             Ok(fallback)
         }
         Err(Stop::Reported) => Ok(fallback),
@@ -47,8 +46,8 @@ pub(crate) fn source_startup_files(
     shell: &mut Shell,
 ) -> Settled<RcSettings> {
     if login {
-        let user = ral_core::path::config::home_dot(".ral_profile")
-            .map(|p| p.to_string_lossy().into_owned());
+        let user =
+            ral_core::host::home_dot(".ral_profile").map(|p| p.to_string_lossy().into_owned());
         for path in [Some("/etc/ral/profile".to_string()), user]
             .into_iter()
             .flatten()
@@ -75,7 +74,7 @@ fn source_profile(path: &str, mooring: &Mooring, shell: &mut Shell) -> Result<()
     match evaluate(path, None, mooring, shell)? {
         Value::Unit => Ok(()),
         v => Err(Stop::Failed(format!(
-            "{path}: profile must return (); got {} — configuration belongs in the rc file",
+            "{path}: profile must return (); got {}; configuration belongs in the rc file",
             v.type_name()
         ))),
     }
@@ -94,10 +93,9 @@ fn source_rc(path: &str, mooring: &Mooring, shell: &mut Shell) -> Result<RcSetti
             block,
             HookSig::Prompt,
             DefaultPolicy::denied(),
-            Span::synthetic(),
         ) {
             Ok(()) => settings.startup = true,
-            Err(e) => diagnostic::cmd_error("ral", &format!("{path}: startup: {e}")),
+            Err(e) => terminal::cmd_error("ral", &format!("{path}: startup: {e}")),
         }
     }
     Ok(settings)
@@ -110,7 +108,7 @@ fn rc_config(path: &str, mooring: &Mooring, shell: &mut Shell) -> Result<Map, St
         Value::Unit => Ok(Map::new()),
         other => Err(Stop::Failed(format!(
             "{path}: rc file must return a record, a map, or `()` for nothing to set, \
-             e.g. `[edit_mode: 'vi']`; got {} — does the file end with `return [...]`?",
+             e.g. `[edit-mode: 'vi']`; got {}; does the file end with `return [...]`?",
             other.type_name()
         ))),
     }
@@ -132,7 +130,7 @@ fn evaluate(
 ) -> Result<Value, Stop> {
     let src = std::fs::read_to_string(path).map_err(|e| Stop::Failed(format!("{path}: {e}")))?;
     let src = ral_core::source::normalize_source_text(src);
-    match ral_core::builtins::modules::evaluate_source(mooring, shell, &src, path, contract) {
+    match ral_core::load::evaluate_source(mooring, shell, &src, path, contract) {
         Ok(v) => Ok(v),
         Err(Break::Error(e)) => {
             let ran = "sourcing stopped at the error above";
@@ -160,7 +158,7 @@ mod tests {
 
     fn booted_shell() -> Shell {
         ral_core::boot::boot_shell(
-            ral_core::io::TerminalState::default(),
+            ral_core::terminal::TerminalState::default(),
             &crate::PRELUDE,
             &ral_core::HostSurface::default(),
         )
@@ -191,7 +189,7 @@ mod tests {
     /// The error names the profile contract and points at the rc file.
     #[test]
     fn profile_returning_map_is_rejected() {
-        let err = failure(profile("return [edit_mode: 'vi']\n"));
+        let err = failure(profile("return [edit-mode: 'vi']\n"));
         assert!(err.contains("profile must return (); got Map"), "{err}");
         assert!(
             err.contains("configuration belongs in the rc file"),
@@ -235,13 +233,13 @@ mod tests {
     #[test]
     fn rc_bad_literal_field_is_a_type_error() {
         assert!(matches!(
-            rc("return [edit_mode: 42]\n"),
+            rc("return [edit-mode: 42]\n"),
             Err(Stop::Reported)
         ));
     }
 
     #[test]
     fn rc_well_typed_literal_field_sources_cleanly() {
-        assert!(rc("return [edit_mode: 'vi']\n").is_ok());
+        assert!(rc("return [edit-mode: 'vi']\n").is_ok());
     }
 }

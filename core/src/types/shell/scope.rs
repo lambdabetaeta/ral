@@ -1,95 +1,12 @@
-//! The `with_*` scope guards and the alias-frame lifecycle.
+//! The alias-frame lifecycle and the lexical scope doors.
 //!
 //! ral evaluation never unwinds for control flow, so each guard here is an
 //! inline save-modify-restore around the body rather than an RAII type.
 
 use super::Shell;
-use crate::types::{
-    Binding, Capabilities, Decision, GrantStack, HandlerEntry, HandlerRole, Observation, Observed,
-    Settled, Value,
-};
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use crate::types::{Binding, HandlerEntry, HandlerRole, Settled, Value};
 
 impl Shell {
-    /// Run `f` with `capabilities` pushed for its dynamic extent.  The single
-    /// gate into capability-checked code — `grant { … }` blocks and plugin
-    /// hook / keybinding / alias dispatch all funnel through here.  The push
-    /// sits on top of the caller's stack, so effective authority is always
-    /// caller ∩ this layer.
-    pub fn with_capabilities<R>(
-        &mut self,
-        capabilities: Capabilities,
-        f: impl FnOnce(&mut Self) -> R,
-    ) -> R {
-        let at = self.context.grants.len();
-        self.context.grants.push(capabilities);
-        self.audit_deputy_prefixes();
-        let r = f(self);
-        self.context.grants.remove(at, 1);
-        r
-    }
-
-    /// [`with_capabilities`](Self::with_capabilities) for a whole ceiling: every
-    /// layer of `stack` is pushed for `f`'s dynamic extent and popped after —
-    /// never folded into one frame, since the stack is the meet.
-    pub(crate) fn with_layers<R>(
-        &mut self,
-        stack: GrantStack,
-        f: impl FnOnce(&mut Self) -> R,
-    ) -> R {
-        let (at, depth) = (self.context.grants.len(), stack.len());
-        for layer in stack {
-            self.context.grants.push(layer);
-        }
-        self.audit_deputy_prefixes();
-        let r = f(self);
-        self.context.grants.remove(at, depth);
-        r
-    }
-
-    /// Push a capability frame with no paired pop: it survives to process
-    /// exit.  Where `ral --capabilities <file.ral>`'s session-wide ceiling
-    /// lands, above the [`Capabilities::root`] frame [`Shell::new`] installs.
-    /// Lexical attenuation (`grant {}`) wants [`Self::with_capabilities`].
-    pub fn push_session_capabilities(&mut self, capabilities: Capabilities) {
-        self.context.grants.push(capabilities);
-        self.audit_deputy_prefixes();
-    }
-
-    /// Observe a `deputy` capability check per flagged prefix of the stack
-    /// just pushed.  [`crate::capability::deputy_prefixes`] takes the stack
-    /// and only reports, never denies; this is its one call site.  No-op
-    /// unless a trail is open.
-    pub(crate) fn audit_deputy_prefixes(&mut self) {
-        if !self.local.audit.active() {
-            return;
-        }
-        let site = self.call_site();
-        let principal = self.context.principal();
-        for prefix in crate::capability::deputy_prefixes(&self.context.grants) {
-            let fields = BTreeMap::from([("prefix".to_string(), prefix.as_str().to_string())]);
-            // Pushed rather than sent through `evaluator::audit::observe_stamped`: a
-            // `Flagged` decision has no rail branch in the policy table, so the
-            // trail is the whole of this observation's audience and no `Mooring`
-            // needs reaching this deep into the scope guards.
-            self.local.audit.push(Observation::instant(
-                site.clone(),
-                principal.clone(),
-                Observed::Capability {
-                    resource: "deputy".into(),
-                    decision: Decision::Flagged,
-                    fields,
-                },
-            ));
-        }
-    }
-
-    /// True when a non-root capabilities layer is active.
-    pub(crate) fn has_active_capabilities(&self) -> bool {
-        self.context.grants.is_restrictive()
-    }
-
     /// Install `thunk` as the alias for `name`, replacing any existing one.
     /// Sibling of [`Self::with_handlers`]: same handler stack, but an alias
     /// frame is never popped at scope exit, only by [`Self::remove_alias`].
@@ -159,8 +76,7 @@ impl Shell {
     }
 
     /// Every lexical binding across the whole scope chain, innermost
-    /// shadowing outermost — what a host drives tab-completion and the
-    /// worksheet from.
+    /// shadowing outermost.
     pub fn bindings(&self) -> Vec<(String, Value)> {
         self.env.all_bindings(&self.sig)
     }
@@ -173,13 +89,6 @@ impl Shell {
         self.env.largest_shallow_size(&self.sig)
     }
 
-    /// Every bound name with its installed scheme, innermost binding wins —
-    /// the scope half of [`Self::session_schemes`], surfaced on its own for
-    /// the worksheet's type column.
-    pub fn binding_schemes(&self) -> Vec<(String, Option<Arc<crate::typecheck::Scheme>>)> {
-        self.env.binding_schemes(&self.sig)
-    }
-
     /// The names of every installed handler entry — `within` arms and aliases
     /// alike — for tab completion.  The handler-stack counterpart of
     /// [`Self::builtin_names`].
@@ -190,7 +99,7 @@ impl Shell {
     /// Run `f` under a fresh innermost lexical scope, popped on return — the
     /// isolation `use` and the REPL plugin loader share, so a loaded file's
     /// top-level helpers die with the frame instead of leaking into the
-    /// caller's scope.  [`crate::builtins::modules::evaluate_source`] owns the
+    /// caller's scope.  [`crate::load::evaluate_source`] owns the
     /// cycle and depth guards and the source registration; this owns only the
     /// scope frame.
     pub fn in_fresh_scope<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
@@ -207,7 +116,7 @@ impl Shell {
         crate::typecheck::SessionSchemes {
             bindings: self.env.binding_schemes(&self.sig),
             aliases: self.context.handlers.alias_schemes(),
-            builtins: self.session.builtins.clone(),
+            builtins: self.session.builtins.manifest().clone(),
         }
     }
 

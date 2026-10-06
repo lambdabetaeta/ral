@@ -18,7 +18,10 @@ The decisions are now free `pub(crate) fn`s over `&Context`:
 
 - `admits_head`, the editor/shell bool gates, and the audit-bearing exec/fs
   checks `check_exec_args` and `check_fs_op` in `enforce.rs`;
-- `sandbox_projection` and the projection builder in `sandbox.rs`;
+- `sandbox_projection` and the projection builder in `sandbox.rs`
+  (*amended: the checks are now `guard::check_*`, the model is `capability`,
+  and the builder is `SandboxProjection::of`, which takes a `GrantStack` and
+  a `Resolver` and no `Context`: [[decisions/261006_capability-is-data|capability-is-data]]*);
 - `evaluate_exec` and `canonical_grant_paths` take `&Context`.
 
 What the witness *named* survives unchanged as what the functions *do*: judging

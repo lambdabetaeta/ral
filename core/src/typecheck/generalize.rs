@@ -5,11 +5,13 @@
 //! re-anchors it at a fresh root instead of sharing the original slot.
 
 use super::env::TyEnv;
-use super::kind::Kind;
-use super::scheme::{Scheme, WeakVars};
-use super::ty::{CompTy, CompTyVar, Grade, GradeVar, Row, RowVar, Ty, TyVar};
-use super::unify::{Unifier, Visited};
+use super::unify::{Unifier, Var, Visited};
+use crate::ty::{
+    CompTy, CompTyVar, Grade, GradeVar, Kind, Row, RowVar, Scheme, Term, Ty, TyVar, WeakVars,
+};
 use std::collections::{BTreeSet, HashMap};
+use std::convert::Infallible;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 /// All four variable kinds, collected in one traversal.  Ordered, so a
@@ -32,7 +34,17 @@ impl FreeVars {
         }
     }
 
-    pub(crate) fn merge_cached(&mut self, cached: &super::scheme::CachedFreeVars) {
+    /// A variable met on a walk, at its root.
+    fn insert(&mut self, var: Var) {
+        match var {
+            Var::Ty(v) => self.tys.insert(v),
+            Var::Comp(v) => self.comps.insert(v),
+            Var::Row(v) => self.rows.insert(v),
+            Var::Grade(v) => self.grades.insert(v),
+        };
+    }
+
+    pub(crate) fn merge_cached(&mut self, cached: &crate::ty::CachedFreeVars) {
         self.tys.extend(&cached.ty_fv);
         self.comps.extend(&cached.comp_fv);
         self.rows.extend(&cached.row_fv);
@@ -95,8 +107,8 @@ impl FreeVars {
     }
 
     /// The *residual* free vars — mentioned by `env`, so left unquantified.
-    pub(crate) fn intersect_into_cached(&self, env: &Self) -> super::scheme::CachedFreeVars {
-        super::scheme::CachedFreeVars {
+    pub(crate) fn intersect_into_cached(&self, env: &Self) -> crate::ty::CachedFreeVars {
+        crate::ty::CachedFreeVars {
             ty_fv: self.tys.intersection(&env.tys).copied().collect(),
             comp_fv: self.comps.intersection(&env.comps).copied().collect(),
             row_fv: self.rows.intersection(&env.rows).copied().collect(),
@@ -106,74 +118,13 @@ impl FreeVars {
 }
 
 pub(crate) fn free_ty(u: &Unifier, ty: &Ty, out: &mut FreeVars) {
-    let mut visited = Visited::default();
-    free_ty_inner(u, ty, out, &mut visited);
-}
-
-fn free_ty_inner(u: &Unifier, ty: &Ty, out: &mut FreeVars, visited: &mut Visited) {
-    // Cycle guard.  Skipping a sibling revisit is sound because the walk never
-    // binds: the first visit collected every free var behind this root.
-    let root = match ty {
-        Ty::Var(TyVar(i)) => Some(u.ty_root(*i)),
-        _ => None,
+    let mut collect = |var: Var| {
+        if u.is_unbound(var) {
+            out.insert(var);
+        }
+        ControlFlow::<Infallible>::Continue(())
     };
-    if let Some(r) = root
-        && !visited.tys.insert(r)
-    {
-        return;
-    }
-    match &*u.head_ty(ty) {
-        Ty::Var(v) => {
-            out.tys.insert(*v);
-        }
-        Ty::List(a) | Ty::Map(a) | Ty::Handle(a) => free_ty_inner(u, a, out, visited),
-        Ty::Record(r) | Ty::Variant(r) => free_row_inner(u, r, out, visited),
-        Ty::Thunk(b) => free_comp_inner(u, b, out, visited),
-        // Enumerated, not `_`: a new `Ty` carrying variables then fails the
-        // build here instead of being dropped and silently under-generalised.
-        Ty::Unit | Ty::Bytes | Ty::Bool | Ty::Int | Ty::Float | Ty::String => {}
-    }
-}
-
-fn free_row_inner(u: &Unifier, row: &Row, out: &mut FreeVars, visited: &mut Visited) {
-    match &*u.head_row(row) {
-        Row::Empty => {}
-        Row::Var(v) => {
-            out.rows.insert(*v);
-        }
-        Row::Extend(_, ty, rest) => {
-            free_ty_inner(u, ty, out, visited);
-            free_row_inner(u, rest, out, visited);
-        }
-    }
-}
-
-fn free_comp_inner(u: &Unifier, cty: &CompTy, out: &mut FreeVars, visited: &mut Visited) {
-    // Cycle guard, same reasoning as `free_ty_inner`.
-    let root = match cty {
-        CompTy::Var(CompTyVar(i)) => Some(u.comp_root(*i)),
-        _ => None,
-    };
-    if let Some(r) = root
-        && !visited.comps.insert(r)
-    {
-        return;
-    }
-    match &*u.head_comp_ty(cty) {
-        CompTy::Var(v) => {
-            out.comps.insert(*v);
-        }
-        CompTy::Return(grade, a) => {
-            if let Grade::Var(v) = u.resolve_grade(*grade) {
-                out.grades.insert(v);
-            }
-            free_ty_inner(u, a, out, visited);
-        }
-        CompTy::Fun(a, b) => {
-            free_ty_inner(u, a, out, visited);
-            free_comp_inner(u, b, out, visited);
-        }
-    }
+    let _ = u.reach(Term::Ty(ty), &mut Visited::default(), &mut collect);
 }
 
 pub(crate) fn env_free_vars(u: &Unifier, env: &TyEnv) -> FreeVars {
@@ -217,7 +168,7 @@ pub(crate) fn generalize(u: &Unifier, env: &TyEnv, tied: &FreeVars, ty: &Ty) -> 
     // outlive every scheme mentioning them, so no later step moves or binds one.
     debug_assert!(
         residuals_are_live_roots(u, &residuals),
-        "a generalisation residual is not an unbound canonical root — the cache \
+        "a generalisation residual is not an unbound canonical root: the cache \
          would go stale under a later unite/bind"
     );
     let cached_fv = Some(residuals);
@@ -237,15 +188,15 @@ pub(crate) fn generalize(u: &Unifier, env: &TyEnv, tied: &FreeVars, ty: &Ty) -> 
 
     // Cyclic roots already appear in `*_bindings`; drop them from the plain
     // quantifier sets so instantiation does not mint two fresh ids for one var.
-    let cyclic_comp_roots: std::collections::HashSet<u32> =
+    let cyclic_comp_roots: std::collections::HashSet<CompTyVar> =
         comp_ty_bindings.iter().map(|(r, _)| *r).collect();
     let comp_ty_vars: Vec<CompTyVar> = comp_ty_vars
-        .filter(|v| !cyclic_comp_roots.contains(&v.0))
+        .filter(|v| !cyclic_comp_roots.contains(v))
         .collect();
-    let cyclic_ty_roots: std::collections::HashSet<u32> =
+    let cyclic_ty_roots: std::collections::HashSet<TyVar> =
         ty_bindings.iter().map(|(r, _)| *r).collect();
     let ty_vars: Vec<(TyVar, Kind)> = ty_vars
-        .filter(|v| !cyclic_ty_roots.contains(&v.0))
+        .filter(|v| !cyclic_ty_roots.contains(v))
         .map(|v| (v, u.kinded(v).kind))
         .collect();
 
@@ -263,7 +214,7 @@ pub(crate) fn generalize(u: &Unifier, env: &TyEnv, tied: &FreeVars, ty: &Ty) -> 
 }
 
 /// The computation and value cycles of a type, each a `(root, binding)`.
-type CycleBindings = (Vec<(u32, CompTy)>, Vec<(u32, Ty)>);
+type CycleBindings = (Vec<(CompTyVar, CompTy)>, Vec<(TyVar, Ty)>);
 
 /// The cycles reachable from `ty`, as `(root, binding)` snapshots of those
 /// roots `keep_comp` and `keep_ty` admit.
@@ -276,34 +227,32 @@ fn cyclic_bindings(
     let (comp_roots, ty_roots) = u.cyclic_roots_in_ty(ty);
     let comps = comp_roots
         .into_iter()
-        .filter(|&r| keep_comp(CompTyVar(r)))
+        .filter(|&r| keep_comp(r))
         .map(|root| {
             let binding = u
                 .resolved_comp_root_binding(root)
-                .unwrap_or(CompTy::Var(CompTyVar(root)));
+                .unwrap_or(CompTy::Var(root));
             (root, binding)
         })
         .collect();
     let tys = ty_roots
         .into_iter()
-        .filter(|&r| keep_ty(TyVar(r)))
+        .filter(|&r| keep_ty(r))
         .map(|root| {
-            let binding = u
-                .resolved_ty_root_binding(root)
-                .unwrap_or(Ty::Var(TyVar(root)));
+            let binding = u.resolved_ty_root_binding(root).unwrap_or(Ty::Var(root));
             (root, binding)
         })
         .collect();
     (comps, tys)
 }
 
-fn residuals_are_live_roots(u: &Unifier, residuals: &super::scheme::CachedFreeVars) -> bool {
+fn residuals_are_live_roots(u: &Unifier, residuals: &crate::ty::CachedFreeVars) -> bool {
     residuals
         .ty_fv
         .iter()
-        .all(|v| u.ty_root(v.0) == v.0 && matches!(u.resolve_ty(&Ty::Var(*v)), Ty::Var(_)))
+        .all(|v| u.ty_root(*v) == *v && matches!(u.resolve_ty(&Ty::Var(*v)), Ty::Var(_)))
         && residuals.comp_fv.iter().all(|v| {
-            u.comp_root(v.0) == v.0 && matches!(u.resolve_comp_ty(&CompTy::Var(*v)), CompTy::Var(_))
+            u.comp_root(*v) == *v && matches!(u.resolve_comp_ty(&CompTy::Var(*v)), CompTy::Var(_))
         })
         && residuals
             .row_fv
@@ -319,18 +268,16 @@ fn residuals_are_live_roots(u: &Unifier, residuals: &super::scheme::CachedFreeVa
 pub(crate) fn scheme_is_closed(u: &Unifier, scheme: &Scheme) -> bool {
     let mut fvs = FreeVars::new();
     free_ty(u, &scheme.ty, &mut fvs);
-    let ty_roots: std::collections::HashSet<u32> =
+    let ty_roots: std::collections::HashSet<TyVar> =
         scheme.ty_bindings.iter().map(|(r, _)| *r).collect();
-    let comp_roots: std::collections::HashSet<u32> =
+    let comp_roots: std::collections::HashSet<CompTyVar> =
         scheme.comp_ty_bindings.iter().map(|(r, _)| *r).collect();
     fvs.tys.iter().all(|v| {
         scheme.ty_vars.iter().any(|(q, _)| q == v)
-            || ty_roots.contains(&v.0)
+            || ty_roots.contains(v)
             || scheme.weak.tys.contains_key(v)
     }) && fvs.comps.iter().all(|v| {
-        scheme.comp_ty_vars.contains(v)
-            || comp_roots.contains(&v.0)
-            || scheme.weak.comps.contains(v)
+        scheme.comp_ty_vars.contains(v) || comp_roots.contains(v) || scheme.weak.comps.contains(v)
     }) && fvs
         .rows
         .iter()
@@ -390,13 +337,13 @@ pub(crate) fn settle_weak(u: &Unifier, scheme: Arc<Scheme>) -> Arc<Scheme> {
     let (comps, tys) = cyclic_bindings(
         u,
         &ty,
-        |v| !scheme.comp_ty_bindings.iter().any(|(r, _)| *r == v.0),
-        |v| !scheme.ty_bindings.iter().any(|(r, _)| *r == v.0),
+        |v| !scheme.comp_ty_bindings.iter().any(|(r, _)| *r == v),
+        |v| !scheme.ty_bindings.iter().any(|(r, _)| *r == v),
     );
     let mut fvs = FreeVars::new();
     free_ty(u, &ty, &mut fvs);
-    fvs.tys.retain(|v| !tys.iter().any(|(r, _)| *r == v.0));
-    fvs.comps.retain(|v| !comps.iter().any(|(r, _)| *r == v.0));
+    fvs.tys.retain(|v| !tys.iter().any(|(r, _)| r == v));
+    fvs.comps.retain(|v| !comps.iter().any(|(r, _)| r == v));
     Arc::new(Scheme {
         ty,
         weak: fvs.weak(u),
@@ -424,11 +371,11 @@ pub(crate) fn reseed_weak(u: &mut Unifier, scheme: Arc<Scheme>) -> Arc<Scheme> {
         .iter()
         .map(|(&v, &deep)| (v, u.fresh_deep_row_var(deep)))
         .collect();
-    let cm: HashMap<u32, u32> = scheme
+    let cm: HashMap<CompTyVar, CompTyVar> = scheme
         .weak
         .comps
         .iter()
-        .map(|v| (v.0, u.fresh_comp_root()))
+        .map(|&v| (v, u.fresh_comp_root()))
         .collect();
     let weak = WeakVars {
         tys: scheme
@@ -437,7 +384,7 @@ pub(crate) fn reseed_weak(u: &mut Unifier, scheme: Arc<Scheme>) -> Arc<Scheme> {
             .iter()
             .map(|(v, &kind)| (tm[v], kind))
             .collect(),
-        comps: cm.values().map(|&id| CompTyVar(id)).collect(),
+        comps: cm.values().copied().collect(),
         rows: scheme
             .weak
             .rows
@@ -475,14 +422,14 @@ pub(crate) fn instantiate(u: &mut Unifier, scheme: &Scheme) -> Ty {
         return scheme.ty.clone();
     }
     // A fresh union-find root per old id: two instantiations never share state.
-    let mut cm: HashMap<u32, u32> = HashMap::new();
+    let mut cm: HashMap<CompTyVar, CompTyVar> = HashMap::new();
     for v in &scheme.comp_ty_vars {
-        cm.insert(v.0, u.fresh_comp_root());
+        cm.insert(*v, u.fresh_comp_root());
     }
     for (old, _) in &scheme.comp_ty_bindings {
         cm.insert(*old, u.fresh_comp_root());
     }
-    let mut tcm: HashMap<u32, u32> = HashMap::new();
+    let mut tcm: HashMap<TyVar, TyVar> = HashMap::new();
     for (old, _) in &scheme.ty_bindings {
         tcm.insert(*old, u.fresh_ty_root());
     }
@@ -524,24 +471,22 @@ pub(crate) fn instantiate(u: &mut Unifier, scheme: &Scheme) -> Ty {
 struct SubstMap {
     tm: HashMap<TyVar, TyVar>,
     rm: HashMap<RowVar, RowVar>,
-    cm: HashMap<u32, u32>,
-    tcm: HashMap<u32, u32>,
+    cm: HashMap<CompTyVar, CompTyVar>,
+    tcm: HashMap<TyVar, TyVar>,
     gm: HashMap<GradeVar, GradeVar>,
 }
 
 impl SubstMap {
     fn ty(&self, ty: &Ty) -> Ty {
         match ty {
-            Ty::Var(TyVar(i)) => {
-                if let Some(&fresh) = self.tcm.get(i) {
-                    return Ty::Var(TyVar(fresh));
+            Ty::Var(v) => {
+                if let Some(&fresh) = self.tcm.get(v) {
+                    return Ty::Var(fresh);
                 }
-                self.tm
-                    .get(&TyVar(*i))
-                    .map_or_else(|| ty.clone(), |&f| Ty::Var(f))
+                self.tm.get(v).map_or_else(|| ty.clone(), |&f| Ty::Var(f))
             }
-            Ty::List(a) => Ty::List(Box::new(self.ty(a))),
-            Ty::Map(a) => Ty::Map(Box::new(self.ty(a))),
+            Ty::List(a) => Ty::list(self.ty(a)),
+            Ty::Map(a) => Ty::map(self.ty(a)),
             Ty::Handle(a) => Ty::Handle(Box::new(self.ty(a))),
             Ty::Record(r) => Ty::Record(self.row(r)),
             Ty::Variant(r) => Ty::Variant(self.row(r)),
@@ -564,10 +509,7 @@ impl SubstMap {
 
     fn comp(&self, cty: &CompTy) -> CompTy {
         match cty {
-            CompTy::Var(CompTyVar(i)) => {
-                let id = *self.cm.get(i).unwrap_or(i);
-                CompTy::Var(CompTyVar(id))
-            }
+            CompTy::Var(v) => CompTy::Var(*self.cm.get(v).unwrap_or(v)),
             CompTy::Return(grade, a) => CompTy::Return(self.grade(*grade), Box::new(self.ty(a))),
             CompTy::Fun(a, b) => CompTy::Fun(Box::new(self.ty(a)), Box::new(self.comp(b))),
         }
@@ -583,9 +525,9 @@ impl SubstMap {
 
 #[cfg(test)]
 mod tests {
-    use super::super::ty::Label;
     use super::super::unify::WeakSource;
     use super::*;
+    use crate::ty::Label;
 
     fn generalized(u: &Unifier, ty: &Ty) -> Scheme {
         generalize(u, &TyEnv::new(), &FreeVars::new(), ty)
@@ -612,7 +554,7 @@ mod tests {
     fn weak_rows_and_computations_survive_generalisation() {
         let mut u = Unifier::new();
         let (row, comp) = (u.fresh_row_var(), u.fresh_comp_ty());
-        let ty = Ty::List(Box::new(Ty::Record(Row::Var(row))));
+        let ty = Ty::list(Ty::Record(Row::Var(row)));
         let body = Ty::Thunk(Box::new(comp.clone()));
         u.mark_weak(&ty, &WeakSource::Index);
         u.mark_weak(&body, &WeakSource::Index);
@@ -651,7 +593,7 @@ mod tests {
         let mut u = Unifier::new();
         let (weak, inner) = (u.fresh_tyvar(), u.fresh_tyvar());
         u.mark_weak(&Ty::Var(weak), &WeakSource::Index);
-        u.unify_ty(&Ty::Var(weak), &Ty::List(Box::new(Ty::Var(inner))))
+        u.unify_ty(&Ty::Var(weak), &Ty::list(Ty::Var(inner)))
             .expect("a free variable binds");
         let scheme = generalized(&u, &arrow(Ty::Var(weak), Ty::Unit));
         assert_eq!(scheme.ty_vars, Vec::<(TyVar, Kind)>::new());
@@ -727,10 +669,7 @@ mod tests {
         let v = u.fresh_kinded_var(Kind::NUMBER);
         let scheme = generalized(&u, &arrow(Ty::Var(v), Ty::Var(v)));
         assert_eq!(scheme.ty_vars, vec![(v, Kind::NUMBER)]);
-        assert_eq!(
-            super::super::fmt::fmt_scheme(&scheme),
-            "∀α:number. α → Returns α"
-        );
+        assert_eq!(scheme.to_string(), "∀α:number. α → Returns α");
         let Ty::Thunk(body) = instantiate(&mut u, &scheme) else {
             panic!("a function scheme instantiates to a thunk")
         };

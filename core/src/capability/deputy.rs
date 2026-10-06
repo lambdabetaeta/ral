@@ -13,8 +13,8 @@
 
 use super::fs::Region;
 use super::table::Scope;
+use super::{ExecKey, GrantStack, Meet, Verdict};
 use crate::path::{Allow, FrozenPath};
-use crate::types::{ExecKey, GrantStack, Meet, Verdict};
 use std::collections::BTreeSet;
 
 /// The exec-admitted directory prefixes that are also writable under `stack`.
@@ -56,8 +56,8 @@ pub fn deputy_prefixes(stack: &GrantStack) -> Vec<FrozenPath> {
 #[cfg(test)]
 mod tests {
     use super::deputy_prefixes;
+    use crate::capability::{Capabilities, ExecGrant, ExecKey, FsPolicy, GrantStack, Verdict};
     use crate::path::FrozenPath;
-    use crate::types::{Capabilities, ExecGrant, ExecKey, FsPolicy, GrantStack, Verdict};
     use std::collections::BTreeMap;
 
     fn exec_dir(dir: FrozenPath) -> ExecGrant {

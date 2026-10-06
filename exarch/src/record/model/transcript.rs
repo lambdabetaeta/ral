@@ -36,7 +36,7 @@ fn read_at(reader: &mut File, locus: &Locus) -> io::Result<Protocol> {
     // record, and refusing it as bad JSON would name the wrong fault.
     if Locus::digest_of(line) != locus.digest() {
         return Err(io::Error::other(
-            "a record did not hash to the locus that named it — the log at this \
+            "a record did not hash to the locus that named it: the log at this \
              path is no longer the file those byte ranges were measured in; a \
              rotated segment, a copied session directory, or an edited log",
         ));
@@ -45,7 +45,7 @@ fn read_at(reader: &mut File, locus: &Locus) -> io::Result<Protocol> {
     match entry.record {
         Record::Protocol(p) => Ok(p),
         Record::Display(_) | Record::Forensic(_) => Err(io::Error::other(
-            "a pointer named a non-protocol record — a turn's address no longer \
+            "a pointer named a non-protocol record: a turn's address no longer \
              names the records it was measured over",
         )),
     }
@@ -232,7 +232,7 @@ impl Context {
     fn readable(&self, turns: &[u64]) -> Result<Vec<u64>, String> {
         let named: BTreeSet<u64> = turns.iter().copied().collect();
         if named.is_empty() {
-            return Err("`turns` names no turn — `!{range a b}` builds a run of ids".into());
+            return Err("`turns` names no turn: `!{range a b}` builds a run of ids".into());
         }
         for &id in &named {
             if self.turn(id).is_none() {
@@ -240,7 +240,7 @@ impl Context {
             }
             if self.unclosed_turn() == Some(id) {
                 return Err(format!(
-                    "turn {id} is being written now — it is the one turn the transcript cannot \
+                    "turn {id} is being written now: it is the one turn the transcript cannot \
                      read back yet"
                 ));
             }
@@ -299,7 +299,7 @@ impl Context {
             });
         };
         if narrowing.is_empty() {
-            return Err("`turns` names no turn — omit it to search the whole transcript".into());
+            return Err("`turns` names no turn: omit it to search the whole transcript".into());
         }
         Ok(TranscriptRead {
             turns: self.located(&self.readable(narrowing)?),
@@ -367,8 +367,7 @@ fn grep_messages(pattern: &Regex, turn: u64, messages: &[ChatMessage], tally: &m
                         turn,
                         role: message.role.clone(),
                         line: index + 1,
-                        text: line[..ral_core::text::floor_char_boundary(line, GREP_TEXT_BYTES)]
-                            .to_string(),
+                        text: line[..line.floor_char_boundary(GREP_TEXT_BYTES)].to_string(),
                     },
                 );
             }

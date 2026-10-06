@@ -31,6 +31,10 @@
 //! Usage: `broker-smoke [--read-only] <folder>`
 
 #![allow(
+    clippy::disallowed_macros,
+    reason = "[silent:example] an example prints its result"
+)]
+#![allow(
     clippy::disallowed_methods,
     reason = "example binary: its `main` owns the process, so an `exit` unwinds nothing another owner needs"
 )]

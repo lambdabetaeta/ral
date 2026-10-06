@@ -1,865 +1,136 @@
-//! Every user-visible parse, type, and runtime error is rendered here: through
-//! `ariadne` when a span points somewhere, as a one-liner when it does not.
+//! The report algebra and its one drawer.
+//!
+//! Every user-visible parse, type, and runtime error becomes a [`Report`] and
+//! is drawn here: through `ariadne` when a span points somewhere, as a
+//! one-liner when it does not.  Each error type builds its own report; none
+//! draws.
 
-use crate::ansi::{self, BOLD_CYAN, BOLD_RED, BOLD_YELLOW, RESET};
-use crate::run::StaticDiagnostics;
-use crate::source::{SourceDb, Span, byte_to_line_col};
-use crate::syntax::ast::Word;
-use crate::syntax::lexer::{LexErrorKind, Token, lex};
-use crate::syntax::parser::{ParseError, ParseErrorKind};
-use crate::syntax::quote::escape_for_interpolation;
-use crate::text::byte_to_char;
-use crate::typecheck::TypeError;
-use crate::{CompileError, Uncompiled};
+use crate::ansi::{BOLD_CYAN, BOLD_RED, RESET};
+use crate::source::{Source, Span};
+use crate::terminal::stderr_color;
+use ariadne::{Color, Config, IndexType, ReportKind};
 use std::fmt::Write;
-use std::sync::Arc;
+use std::ops::Range;
 
-// Frontends seed and read the gate through here: `ral::platform` and exarch's
-// bootstrap each call `diagnostic::set_terminal` once at startup.
-pub use ansi::{set_terminal, use_color};
+#[cfg(test)]
+mod tests;
 
-// ── Source location ───────────────────────────────────────────────────────
-
-/// A [`Span`] resolved against the session's [`SourceDb`] — script name and
-/// 1-indexed line/column, as it rides out on observations and capability checks.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct CallSite {
-    pub script: Arc<str>,
-    pub line: usize,
-    pub col: usize,
+/// A span and the phrase placed beside its underline; `None` is the end of
+/// the input.
+#[derive(Debug, Clone)]
+pub struct Label {
+    pub span: Option<Span>,
+    pub text: String,
 }
 
-impl std::fmt::Display for CallSite {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}, line {}", self.script, self.line)
+/// One diagnostic: a red primary label, an optional yellow secondary, an
+/// optional help line.  `at: None` draws no source at all.
+#[derive(Debug, Clone)]
+pub struct Report {
+    pub code: Option<&'static str>,
+    pub message: String,
+    pub at: Option<Label>,
+    pub also: Option<Label>,
+    pub hint: Option<String>,
+}
+
+/// A compile failure with the text its carets point into.
+///
+/// That text is never registered in the session's
+/// [`SourceDb`](crate::source::SourceDb): a failed compile leaves no live span
+/// behind, and the registry is append-only because live spans index it.
+#[derive(Debug, Clone)]
+pub struct Rejection {
+    pub source: Source,
+    pub reports: Vec<Report>,
+    /// The status a run that failed so exits on.
+    pub status: i32,
+}
+
+impl Rejection {
+    pub fn render(&self) -> String {
+        self.reports
+            .iter()
+            .map(|r| r.render(&self.source))
+            .collect()
     }
 }
 
-// ── Palette and spanless fallback ─────────────────────────────────────────
-
-/// `(error, hint, reset)` — empty strings when colour is off, so one
-/// `format!` serves both.
-fn error_palette() -> (&'static str, &'static str, &'static str) {
-    if use_color() {
+/// `(error, hint, reset)`; empty strings when colour is off, so one `format!`
+/// serves both.
+pub(crate) fn palette() -> (&'static str, &'static str, &'static str) {
+    if stderr_color() {
         (BOLD_RED, BOLD_CYAN, RESET)
     } else {
         ("", "", "")
     }
 }
 
-/// The spanless fallback: a type error carrying no position, or a runtime span
-/// the [`SourceDb`] cannot resolve.
-fn render_messageless(code: Option<&str>, message: &str, hint: Option<&str>) -> String {
-    let mut out = String::new();
-    let (head, cyan, reset) = error_palette();
-    match code {
-        Some(c) => {
-            let _ = writeln!(out, "{head}[{c}] Error{reset}: {message}");
-        }
-        None => {
-            let _ = writeln!(out, "{head}Error{reset}: {message}");
-        }
-    }
-    if let Some(h) = hint {
-        let _ = writeln!(out, "  {cyan}help{reset}: {h}");
-    }
-    out
-}
-
-// ── Ariadne render core ──────────────────────────────────────────────────
-
-/// Source range plus the phrase placed next to its underline.
-struct LabelRange {
-    range: std::ops::Range<usize>,
-    label: String,
-}
-
-/// The one report shape — red primary label, optional yellow secondary,
-/// optional help.  Callers differ only in how they derive the ranges.
-struct CaretReport {
-    code: &'static str,
-    message: String,
-    primary: LabelRange,
-    secondary: Option<LabelRange>,
-    hint: Option<String>,
-}
-
-fn render_ariadne(file: &str, source: &str, report: CaretReport) -> String {
-    let CaretReport {
-        code,
-        message,
-        primary,
-        secondary,
-        hint,
-    } = report;
-    let file_owned: String = file.to_string();
-    let mut builder = ariadne::Report::<(String, std::ops::Range<usize>)>::build(
-        ariadne::ReportKind::Error,
-        (file_owned.clone(), primary.range.clone()),
-    )
-    .with_config(ariadne::Config::default().with_color(use_color()))
-    .with_code(code)
-    .with_message(message)
-    .with_label(
-        ariadne::Label::new((file_owned.clone(), primary.range))
-            .with_message(primary.label)
-            .with_color(ariadne::Color::Red),
-    );
-    if let Some(s) = secondary {
-        builder = builder.with_label(
-            ariadne::Label::new((file_owned.clone(), s.range))
-                .with_message(s.label)
-                .with_color(ariadne::Color::Yellow),
-        );
-    }
-    if let Some(h) = hint {
-        builder = builder.with_help(h);
-    }
-    let mut buf: Vec<u8> = Vec::new();
-    let _ = builder.finish().write(
-        (file_owned, ariadne::Source::from(source.to_string())),
-        &mut buf,
-    );
-    String::from_utf8_lossy(&buf).into_owned()
-}
-
-/// Clamped so the caret still points at *some* character at end-of-source.
-fn caret_range(source: &str, start: usize, width: usize) -> std::ops::Range<usize> {
-    let char_len = source.chars().count();
-    let s = start.min(char_len);
-    let e = (s + width.max(1)).min(char_len.max(s + 1));
-    s..e
-}
-
-/// Render a parse error: a structured `kind` drives a two-label report,
-/// anything else gets one red label on the offending token.
-pub fn format_parse_error_ariadne(file: &str, source: &str, err: &ParseError) -> String {
-    let report = match &err.kind {
-        ParseErrorKind::Lex(kind) => lex_error_report(source, kind),
-        ParseErrorKind::Touching { first, second, run } => {
-            Some(touching_report(source, err, *first, *second, *run))
-        }
-        ParseErrorKind::Plain => None,
-    };
-    if let Some(report) = report {
-        return render_ariadne(file, source, report);
-    }
-    let range = err.span.map_or_else(
-        || eof_char_range(source),
-        |s| byte_span_to_char_range(source, s),
-    );
-    render_ariadne(
-        file,
-        source,
-        CaretReport {
-            code: "P0001",
-            message: err.message.clone(),
-            primary: LabelRange {
-                range,
-                label: "here".into(),
-            },
-            secondary: None,
-            hint: None,
-        },
-    )
-}
-
-// ── Spans and lex-error reports ───────────────────────────────────────────
-
-/// Spans count bytes; ariadne indexes by char, so every span crosses here.
-fn byte_span_to_char_range(source: &str, span: Span) -> std::ops::Range<usize> {
-    let s = byte_to_char(source, span.start as usize);
-    let e = byte_to_char(source, span.end.max(span.start + 1) as usize);
-    caret_range(source, s, e.saturating_sub(s).max(1))
-}
-
-/// End of input, anchored on the *last* char rather than one past it: a
-/// range outside the source is dropped by ariadne, and its label with it.
-fn eof_char_range(source: &str) -> std::ops::Range<usize> {
-    caret_range(source, source.chars().count().saturating_sub(1), 1)
-}
-
-/// Prose for the help line — "`{…}` opened at 1:6, which itself contains …".
-/// Line/column is recovered from `source` here, not carried on the error.
-fn describe_inner(source: &str, kind: &LexErrorKind) -> String {
-    let pos = |span: Span| {
-        let (line, col) = byte_to_line_col(source, span.start as usize);
-        format!("{line}:{col}")
-    };
-    match kind {
-        LexErrorKind::UnterminatedBalanced {
-            open,
-            close,
-            opened,
-            ..
-        } => format!("`{open}…{close}` opened at {}", pos(*opened)),
-        LexErrorKind::UnclosedDeref { opened, .. } => {
-            format!("`$(…)` opened at {}", pos(*opened))
-        }
-        LexErrorKind::UnterminatedString {
-            form,
-            opened,
-            inner,
-            ..
-        } => {
-            let head = format!("{form} opened at {}", pos(*opened));
-            match inner {
-                Some(i) => format!(
-                    "{head}, which itself contains {}",
-                    describe_inner(source, i)
-                ),
-                None => head,
-            }
-        }
-        LexErrorKind::Other(_) => "an unrelated lexer error".into(),
-    }
-}
-
-/// `None` for `Other(_)`, so the caller falls back to the single-label render.
-fn lex_error_report(source: &str, kind: &LexErrorKind) -> Option<CaretReport> {
-    match kind {
-        LexErrorKind::UnterminatedString {
-            form,
-            opened,
-            inner,
-            ..
-        } => {
-            let close = form.closing();
-            let primary = LabelRange {
-                range: byte_span_to_char_range(source, *opened),
-                label: format!("{form} opened here"),
-            };
-            let secondary = LabelRange {
-                range: eof_char_range(source),
-                label: format!("expected closing `{close}` here"),
-            };
-            let hint = inner.as_ref().map(|i| {
-                format!(
-                    "nested {} was not closed before EOF",
-                    describe_inner(source, i)
-                )
-            });
-            Some(CaretReport {
-                code: "L0001",
-                message: format!("unterminated {form}: expected closing `{close}`"),
-                primary,
-                secondary: Some(secondary),
-                hint,
-            })
-        }
-        LexErrorKind::UnterminatedBalanced {
-            open,
-            close,
-            opened,
-            ..
-        } => Some(CaretReport {
-            code: "L0002",
-            message: format!("unterminated `{open}…{close}`"),
-            primary: LabelRange {
-                range: byte_span_to_char_range(source, *opened),
-                label: format!("`{open}` opened here"),
-            },
-            secondary: None,
-            hint: Some(format!("expected closing `{close}` before end of input")),
-        }),
-        LexErrorKind::UnclosedDeref { opened, .. } => Some(CaretReport {
-            code: "L0003",
-            message: "unclosed `$(…)` dereference".into(),
-            primary: LabelRange {
-                range: byte_span_to_char_range(source, *opened),
-                label: "`$(` opened here".into(),
-            },
-            secondary: None,
-            hint: Some("expected closing `)` before end of input".into()),
-        }),
-        // Codes are never reused: the next lex diagnostic takes L0006.
-        LexErrorKind::Other(_) => None,
-    }
-}
-
-/// Two touching atoms, with both readings spelled out in the help.
-fn touching_report(
-    source: &str,
-    err: &ParseError,
-    first: Span,
-    second: Span,
-    run: Span,
-) -> CaretReport {
-    let text = |span: Span| &source[span.start as usize..span.end as usize];
-    CaretReport {
-        code: "P0002",
-        message: err.message.clone(),
-        primary: LabelRange {
-            range: byte_span_to_char_range(source, second),
-            label: "this word starts with no space before it".into(),
-        },
-        secondary: Some(LabelRange {
-            range: byte_span_to_char_range(source, first),
-            label: "this word ends here".into(),
-        }),
-        hint: Some(match one_word(text(run)) {
-            Some(one) => format!(
-                "two arguments: `{} {}`; one argument: {one}",
-                text(first),
-                text(second)
-            ),
-            None => format!("two arguments: `{} {}`", text(first), text(second)),
-        }),
-    }
-}
-
-/// `run` re-spelled as one `"…"`: literal text escaped, an interpolation's
-/// body inlined, splices and bracketed interiors copied as written.  A dup
-/// (`2>&1`) is no word, so a run it opens has no one-word reading.
-fn one_word(run: &str) -> Option<String> {
-    let tokens = lex(run).ok()?;
-    if matches!(tokens.first(), Some((Token::Dup { .. }, _))) {
-        return None;
-    }
-    let mut body = String::new();
-    let mut depth = 0usize;
-    for (i, (token, span)) in tokens.iter().enumerate() {
-        let (start, end) = (span.start as usize, span.end as usize);
-        let next = tokens.get(i + 1).map_or(end, |(_, s)| s.start as usize);
-        match token {
-            _ if depth > 0 => body.push_str(&run[start..next]),
-            Token::Word(Word::Plain(w) | Word::Slash(w)) | Token::SingleQuoted(w) => {
-                // A leading `~` in `"…"` is home-rooted; a literal one was not.
-                if body.is_empty() && w.starts_with('~') {
-                    body.push('\\');
-                }
-                body.push_str(&escape_for_interpolation(w));
-            }
-            Token::Word(Word::Tilde(_)) => body.push_str(&run[start..end]),
-            Token::DoubleQuoted(_) => body.push_str(&run[start + 1..end - 1]),
-            _ => body.push_str(&run[start..next]),
-        }
-        match token {
-            Token::LBrace | Token::LBracket => depth += 1,
-            Token::RBrace | Token::RBracket => depth = depth.saturating_sub(1),
-            _ => {}
-        }
-    }
-    Some(format!("\"{body}\""))
-}
-
-/// Render one type error, falling back to the spanless form when it carries
-/// no position.
-pub(crate) fn format_type_error_ariadne(file: &str, source: &str, err: &TypeError) -> String {
-    let message = err.kind.render_message();
-    let code = err.kind.code();
-    let hint = err.hint();
-    let Some(sp) = err.pos else {
-        return render_messageless(Some(code), &message, hint.as_deref());
-    };
-    let range = byte_span_to_char_range(source, sp);
-    let secondary = err
-        .kind
-        .witness(err.pos)
-        .filter(|(at, _)| at.file == sp.file)
-        .map(|(at, label)| LabelRange {
-            range: byte_span_to_char_range(source, at),
-            label,
-        });
-    render_ariadne(
-        file,
-        source,
-        CaretReport {
-            code,
-            message,
-            primary: LabelRange {
-                range,
-                label: err.kind.render_label(),
-            },
-            secondary,
-            hint,
-        },
-    )
-}
-
-/// Every error in `errs`, one caret report each.
-pub fn format_type_errors_ariadne(file: &str, source: &str, errs: &[TypeError]) -> String {
-    errs.iter()
-        .map(|e| format_type_error_ariadne(file, source, e))
-        .collect()
-}
-
-/// The one place a compile failure becomes text — a run's or a loaded file's —
-/// with the status a run that failed so exits on: 2 for a parse failure, 1 for
-/// a type failure.
-fn render_uncompiled(Uncompiled { error, source }: &Uncompiled) -> (String, i32) {
-    let (file, text) = (source.name(), source.as_str());
-    match error {
-        CompileError::Parse(e) => (format_parse_error_ariadne(file, text, e), 2),
-        CompileError::Types(errs) => (format_type_errors_ariadne(file, text, errs), 1),
-    }
-}
-
-/// A run that never reached evaluation, rendered whole, with its exit status:
-/// the compile failure's, or the host error's own.
-pub fn format_static_diagnostics(diagnostics: &StaticDiagnostics) -> (String, i32) {
-    match diagnostics {
-        StaticDiagnostics::Compile(uncompiled) => render_uncompiled(uncompiled),
-        StaticDiagnostics::Host(e) => (
-            render_messageless(None, &e.message, e.hint.as_deref()),
-            e.exit_code(),
-        ),
-    }
-}
-
-/// Draw the caret into the source `span` names, resolved through `db`.  A span
-/// `db` cannot resolve falls back to spanless: no caret beats one in the wrong
-/// file.
-pub(crate) fn format_runtime_error_ariadne(
-    db: &SourceDb,
-    span: Option<Span>,
-    witness: Option<Span>,
-    message: &str,
-    hint: Option<&str>,
-) -> String {
-    let Some((span, source)) = span.and_then(|sp| db.get(sp.file).map(|src| (sp, src))) else {
-        return render_messageless(Some("R0001"), message, hint);
-    };
-    render_ariadne(
-        source.name(),
-        source.as_str(),
-        CaretReport {
-            code: "R0001",
-            message: message.to_string(),
-            primary: LabelRange {
-                range: byte_span_to_char_range(source.as_str(), span),
-                label: "here".into(),
-            },
-            secondary: witness
-                .filter(|at| at.file == span.file)
-                .map(|at| LabelRange {
-                    range: byte_span_to_char_range(source.as_str(), at),
-                    label: "the use this script makes of it".into(),
-                }),
-            hint: hint.map(ToString::to_string),
-        },
-    )
-}
-
-/// A loaded file that failed to compile draws its own report.  Otherwise
-/// compact only when the error stayed inside `compact_root`'s file — the id
-/// of an input that compiled to a single command.
-///
-/// Shape alone will not do: `boom` at the prompt is one command, but as an
-/// alias its error lives in the rc, where only a caret can point.
-///
-/// Always ends in `\n`. A caller that hands it straight to a sink expecting
-/// a trailing newline (`eprint!`, `write_all`, a wire payload) keeps it as
-/// is; one that stores it for a later `println!`/`eprintln!` must
-/// `trim_end()` first, or that newline doubles.
-pub fn format_runtime_error_auto(
-    db: &SourceDb,
-    err: &crate::types::Error,
-    compact_root: Option<crate::source::FileId>,
-) -> String {
-    match (&err.uncompiled, compact_root) {
-        (Some(uncompiled), _) => render_uncompiled(uncompiled).0,
-        (None, Some(root)) if err.span.is_none_or(|sp| sp.file == root) => {
-            format_runtime_error_compact(err)
-        }
-        _ => format_runtime_error_ariadne(
-            db,
-            err.span,
-            err.witness.as_deref().copied(),
-            &err.message,
-            err.hint.as_deref(),
-        ),
-    }
-}
-
-// ── Ad-hoc error helpers ──────────────────────────────────────────────────
-
-/// Print `{cmd}: {msg}` to stderr.
-pub fn cmd_error(cmd: &str, msg: &str) {
-    if use_color() {
-        crate::errln!("{BOLD_RED}{cmd}{RESET}: {msg}");
-    } else {
-        crate::errln!("{cmd}: {msg}");
-    }
-}
-
-/// The one-liner for a single-command input, where a caret would only point
-/// back at the line the user just typed.
-pub(crate) fn format_runtime_error_compact(err: &crate::types::Error) -> String {
-    let (red, cyan, reset) = error_palette();
-    let mut out = format!("{red}error{reset}: {}", err.message);
-    if let Some(code) = err.status_code_for_display() {
-        let _ = write!(out, " (exit status {code})");
-    }
-    out.push('\n');
-    if let Some(hint) = err.hint.as_deref() {
-        let _ = writeln!(out, "{cyan}hint{reset}: {hint}");
-    }
-    out
-}
-
-/// Print `warning: {msg}` to stderr.
-pub fn shell_warning(msg: &str) {
-    if use_color() {
-        crate::errln!("{BOLD_YELLOW}warning{RESET}: {msg}");
-    } else {
-        crate::errln!("warning: {msg}");
-    }
-}
-
-// ── Writes that never panic ───────────────────────────────────────────────
-//
-// `println!` and `eprintln!` panic when the write fails, and once the terminal
-// hangs up every write does, with EIO. The shell's own output goes through
-// these instead, which drop the failed write: there is no one left to tell.
-
-/// `println!`, dropping a failed write.
-#[macro_export]
-macro_rules! outln {
-    ($($arg:tt)*) => {{
-        use ::std::io::Write as _;
-        let _ = ::std::writeln!(::std::io::stdout(), $($arg)*);
-    }};
-}
-
-/// `eprint!`, dropping a failed write.
-#[macro_export]
-macro_rules! err {
-    ($($arg:tt)*) => {{
-        use ::std::io::Write as _;
-        let _ = ::std::write!(::std::io::stderr(), $($arg)*);
-    }};
-}
-
-/// `eprintln!`, dropping a failed write.
-#[macro_export]
-macro_rules! errln {
-    ($($arg:tt)*) => {{
-        use ::std::io::Write as _;
-        let _ = ::std::writeln!(::std::io::stderr(), $($arg)*);
-    }};
-}
-
-// ── Debug tracing ────────────────────────────────────────────────────────
-//
-// Call sites of `dbg_trace!` are permanent instrumentation, not stray print
-// statements; leave them in.
-
-/// Emit a `[[DEBUG] tag]` line to stderr; nothing at all in release builds.
-#[cfg(debug_assertions)]
-#[macro_export]
-macro_rules! dbg_trace {
-    ($tag:expr, $($arg:tt)*) => {
-        // Same gate as the diagnostics: no ANSI under NO_COLOR, TERM=dumb, or a
-        // non-tty stderr — `use_color` probes inline until `set_terminal` seeds
-        // it, so a trace from before terminal setup is gated too.
-        if $crate::diagnostic::use_color() {
-            $crate::errln!("\x1b[1;91m[[DEBUG] {}]\x1b[0m {}", $tag, format!($($arg)*))
-        } else {
-            $crate::errln!("[[DEBUG] {}] {}", $tag, format!($($arg)*))
-        }
-    };
-}
-
-#[cfg(not(debug_assertions))]
-#[macro_export]
-macro_rules! dbg_trace {
-    ($tag:expr, $($arg:tt)*) => {
-        ()
-    };
-}
-
-// ── Tests ─────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::source::{FileId, Source};
-    use crate::syntax::lexer::StringForm;
-    use crate::typecheck::{TypeError, TypeErrorKind};
-
-    fn parse_error_with(message: &str, span: Option<Span>) -> ParseError {
-        ParseError {
-            message: message.into(),
-            span,
-            kind: ParseErrorKind::Plain,
-            incomplete: false,
-        }
-    }
-
-    fn parse_error_from(kind: LexErrorKind) -> ParseError {
-        ParseError {
-            message: kind.message(),
-            span: None,
-            kind: ParseErrorKind::Lex(kind),
-            incomplete: false,
-        }
-    }
-
-    #[test]
-    fn parse_error_ariadne_points_at_source() {
-        // `x = [a, b` — point at byte 8 (the trailing `b`).
-        let span = Span::new(crate::source::FileId::DUMMY, 8, 9);
-        let err = parse_error_with("expected ',' or ']' in list", Some(span));
-        let output = format_parse_error_ariadne("test.al", "x = [a, b", &err);
-        assert!(output.contains("P0001"));
-        assert!(output.contains("expected ',' or ']' in list"));
-        assert!(output.contains("test.al"));
-    }
-
-    #[test]
-    fn lex_error_ariadne_renders_unterminated_string_with_open_anchor() {
-        let err = parse_error_from(LexErrorKind::UnterminatedString {
-            form: StringForm::DoubleQuoted,
-            opened: Span::new(crate::source::FileId::DUMMY, 0, 1),
-            inner: None,
-        });
-        let output = format_parse_error_ariadne("test.al", "\"foo", &err);
-        assert!(output.contains("L0001"), "got:\n{output}");
-        assert!(output.contains("unterminated double-quoted string"));
-        assert!(output.contains("opened here"));
-    }
-
-    #[test]
-    fn lex_error_ariadne_names_the_bumped_closing_delimiter() {
-        // The `#` run is the whole difficulty of the form: a reader who is
-        // told only "unterminated" retypes `'` and fails again.  Both the
-        // headline and the end-of-input label must show `'##`.
-        let err = parse_error_from(LexErrorKind::UnterminatedString {
-            form: StringForm::BumpedSingle(2),
-            opened: Span::new(crate::source::FileId::DUMMY, 0, 1),
-            inner: None,
-        });
-        let output = format_parse_error_ariadne("test.al", "##'foo", &err);
-        assert!(
-            output.matches("expected closing `'##`").count() == 2,
-            "got:\n{output}"
-        );
-    }
-
-    #[test]
-    fn lex_error_ariadne_includes_inner_help_for_nested_unclosed() {
-        let inner = LexErrorKind::UnterminatedBalanced {
-            open: '{',
-            close: '}',
-            opened: Span::new(crate::source::FileId::DUMMY, 6, 7),
+impl Report {
+    /// Drawn into `src`, which `at` and `also` index; with no `at`, the
+    /// one-liner.
+    pub fn render(&self, src: &Source) -> String {
+        let Some(at) = &self.at else {
+            return self.plain();
         };
-        let err = parse_error_from(LexErrorKind::UnterminatedString {
-            form: StringForm::DoubleQuoted,
-            opened: Span::new(crate::source::FileId::DUMMY, 0, 1),
-            inner: Some(Box::new(inner)),
-        });
-        let output = format_parse_error_ariadne("test.al", "\"foo !{cmd", &err);
-        assert!(output.contains("L0001"));
-        assert!(output.contains("nested"));
-        assert!(output.contains("`{…}`"), "got:\n{output}");
-    }
-
-    fn touching_help(src: &str) -> String {
-        let err = crate::syntax::parser::parse(src).unwrap_err();
-        assert!(
-            matches!(err.kind, ParseErrorKind::Touching { .. }),
-            "{src}: {err}"
-        );
-        format_parse_error_ariadne("test.ral", src, &err)
-    }
-
-    #[test]
-    fn touching_words_render_both_readings() {
-        let cases = [
-            (
-                "echo --prefix=$d",
-                r#"two arguments: `--prefix= $d`; one argument: "--prefix=$d""#,
-            ),
-            ("echo 'a'\"b\"'c'", r#"one argument: "abc""#),
-            ("echo $h[k]'x'", r#"one argument: "$h[k]x""#),
-            (r"echo C:\tmp\$leaf", r#"one argument: "C:\\tmp\\$leaf""#),
-            ("echo a!{b c}", r#"one argument: "a!{b c}""#),
-            ("echo 'it''s'", r#"one argument: "its""#),
-            ("echo '~'/x", r#"one argument: "\~/x""#),
-        ];
-        for (src, help) in cases {
-            let output = touching_help(src);
-            assert!(output.contains("P0002"), "{src}:\n{output}");
-            assert!(output.contains(help), "{src}:\n{output}");
+        let name = &**src.name();
+        let label = |l: &Label, color| {
+            ariadne::Label::new((name, caret(src, l.span)))
+                .with_message(&l.text)
+                .with_color(color)
+        };
+        let mut report = ariadne::Report::build(ReportKind::Error, (name, caret(src, at.span)))
+            .with_config(
+                Config::default()
+                    .with_color(stderr_color())
+                    .with_index_type(IndexType::Byte),
+            )
+            .with_message(&self.message)
+            .with_label(label(at, Color::Red));
+        if let Some(code) = self.code {
+            report = report.with_code(code);
         }
+        if let Some(also) = &self.also {
+            report = report.with_label(label(also, Color::Yellow));
+        }
+        if let Some(hint) = &self.hint {
+            report = report.with_help(hint);
+        }
+        let mut buf = Vec::new();
+        let _ = report
+            .finish()
+            .write((name, ariadne::Source::from(src.as_str())), &mut buf);
+        String::from_utf8_lossy(&buf).into_owned()
     }
 
-    #[test]
-    fn touching_words_label_both_atoms() {
-        let output = touching_help("echo --prefix=$d");
-        assert!(output.contains("words touch: whitespace separates words, and nothing joins them"));
-        assert!(output.contains("this word starts with no space before it"));
-        assert!(output.contains("this word ends here"));
-    }
-
-    fn db_with(name: &str, text: &str) -> (SourceDb, FileId) {
-        let mut db = SourceDb::default();
-        let id = db.register(Source::from_text(name, text));
-        (db, id)
-    }
-
-    /// A loaded file's compile failure draws its own report, even where the
-    /// error would otherwise render compact.
-    #[test]
-    fn uncompiled_error_renders_its_compile_report() {
-        let span = Span::new(FileId::DUMMY, 4, 5);
-        let err = crate::types::Error::from(Uncompiled {
-            error: CompileError::Parse(parse_error_with("expected ]", Some(span))),
-            source: Source::from_text("plugin.ral", "let [x"),
-        });
-        let (db, root) = db_with("main.ral", "load-plugin plugin");
-        let out = format_runtime_error_auto(&db, &err, Some(root));
-        assert!(out.contains("P0001") && out.contains("plugin.ral"), "{out}");
-        assert_eq!(err.message, "parse error: expected ]");
-    }
-
-    #[test]
-    fn runtime_error_ariadne_points_at_source() {
-        let (db, file) = db_with("test.al", "x = 5\ny = 10\necho $undefined\n");
-        let output = format_runtime_error_ariadne(
-            &db,
-            Some(Span::new(file, 18, 28)),
-            None,
-            "undefined variable: $undefined",
-            None,
-        );
-        assert!(output.contains("R0001"));
-        assert!(output.contains("undefined variable: $undefined"));
-        assert!(output.contains("test.al"));
-    }
-
-    #[test]
-    fn runtime_error_ariadne_renders_hint() {
-        let (db, file) = db_with("test.al", "[a, b] = 5");
-        let output = format_runtime_error_ariadne(
-            &db,
-            Some(Span::new(file, 0, 6)),
-            None,
-            "list destructuring requires a list, got: 5",
-            Some("the right-hand side must evaluate to a list"),
-        );
-        assert!(output.contains("the right-hand side must evaluate to a list"));
-    }
-
-    /// `café` is 5 bytes and 4 chars; the underline must stop at the token.
-    #[test]
-    fn runtime_error_caret_width_is_char_count_for_multibyte() {
-        let range = byte_span_to_char_range("café bar", Span::new(FileId::DUMMY, 0, 5));
-        assert_eq!(range, 0..4, "caret must span 4 chars, not 5 bytes");
-    }
-
-    #[test]
-    fn type_error_ariadne_with_span() {
-        let sp = Span::new(FileId::DUMMY, 21, 28);
-        let err = TypeError {
-            pos: Some(sp),
-            kind: TypeErrorKind::TyMismatch {
-                expected: Box::new(crate::typecheck::Ty::Int),
-                actual: Box::new(crate::typecheck::Ty::String),
-            },
-            reason: Some(crate::typecheck::Reason::IfCond),
-            weak: None,
-            unit: None,
+    /// The spanless one-liner.
+    pub fn plain(&self) -> String {
+        let (head, cyan, reset) = palette();
+        let mut out = String::new();
+        let _ = match self.code {
+            Some(c) => writeln!(out, "{head}[{c}] Error{reset}: {}", self.message),
+            None => writeln!(out, "{head}Error{reset}: {}", self.message),
         };
-        let output = format_type_error_ariadne(
-            "test.ral",
-            "if 1 { return 42 } else { return \"hello\" }",
-            &err,
-        );
-        assert!(output.contains("T0010"));
-        assert!(output.contains("couldn't match"));
-        assert!(output.contains("Integer"));
-        assert!(output.contains("String"));
-        assert!(output.contains(
-            "the condition of an `if` must be a Bool — either `true`/`false` \
-             or an expression that produces one (e.g. `$[$x == 1]`)"
-        ));
+        if let Some(h) = &self.hint {
+            let _ = writeln!(out, "  {cyan}help{reset}: {h}");
+        }
+        out
     }
+}
 
-    #[test]
-    fn type_error_ariadne_without_span_is_messageless() {
-        let err = TypeError {
-            pos: None,
-            kind: TypeErrorKind::RecursiveRow,
-            reason: None,
-            weak: None,
-            unit: None,
-        };
-        let output = format_type_error_ariadne("test.ral", "let x = 1", &err);
-        assert!(output.contains("infinite row"));
-        assert!(output.contains("T0002"));
-    }
-
-    #[test]
-    fn runtime_error_resolved_source_draws_caret() {
-        let (db, file) = db_with("main.ral", "echo x");
-        let out =
-            format_runtime_error_ariadne(&db, Some(Span::new(file, 5, 6)), None, "boom", None);
-        assert!(out.contains("R0001"));
-        assert!(
-            out.contains("here"),
-            "a resolved span should draw a caret:\n{out}"
-        );
-        assert!(out.contains("main.ral"));
-    }
-
-    /// The placeholder id names no source, so no caret is drawn in any of them.
-    #[test]
-    fn runtime_error_in_unregistered_source_is_messageless() {
-        let (db, _) = db_with("main.ral", "echo x");
-        let span = Span::new(FileId::DUMMY, 2, 6);
-        let out = format_runtime_error_ariadne(&db, Some(span), None, "boom", None);
-        assert!(out.contains("R0001"));
-        assert!(out.contains("boom"));
-        assert!(
-            !out.contains("here"),
-            "an unresolved span must not draw a caret in any source:\n{out}"
-        );
-    }
-
-    /// Two sources in one db: the caret follows the span's file, not the
-    /// top-level's, even where the same byte range would land in both.
-    #[test]
-    fn runtime_error_in_module_draws_into_module_source() {
-        let mut db = SourceDb::default();
-        let _top = db.register(Source::from_text("main.ral", "use 'mod.ral'\n"));
-        let module = db.register(Source::from_text(
-            "mod.ral",
-            "let a = 1\nfail [status: 1, message: 'kaboom']\n",
-        ));
-        // Bytes 10..14 of the module are `fail`, past the top-level's end.  Strip
-        // ANSI: on a tty ariadne colours the span character by character, which
-        // splits `fail` with escapes.
-        let out = ansi::strip(&format_runtime_error_ariadne(
-            &db,
-            Some(Span::new(module, 10, 14)),
-            None,
-            "kaboom",
-            None,
-        ));
-        assert!(out.contains("R0001"));
-        assert!(
-            out.contains("mod.ral"),
-            "the caret must be drawn against the module's source:\n{out}"
-        );
-        assert!(
-            !out.contains("main.ral"),
-            "the top-level source must not appear:\n{out}"
-        );
-        assert!(
-            out.contains("fail"),
-            "the underlined line must be the module's line 2:\n{out}"
-        );
-    }
-
-    #[test]
-    fn no_color_output_has_no_ansi() {
-        // Absence of escapes is not assertable — `use_color` may be true in a
-        // tty — so only the content is checked.
-        let out = render_messageless(Some("T9999"), "message", Some("hint"));
-        assert!(out.contains("T9999"));
-        assert!(out.contains("message"));
-        assert!(out.contains("hint"));
+/// The bytes a caret underlines: `span` widened to one whole char where it is
+/// empty, the last char at the end of the input.  Ariadne drops a label that
+/// is out of range or empty, so every caret is made drawable here.
+fn caret(src: &Source, span: Option<Span>) -> Range<usize> {
+    let text = src.as_str();
+    let (start, end) = span.map_or((text.len(), text.len()), |s| {
+        (s.start as usize, s.end as usize)
+    });
+    let start = text.floor_char_boundary(start);
+    let end = text.ceil_char_boundary(end.max(start));
+    match (start < end, start < text.len()) {
+        (true, _) => start..end,
+        (false, true) => start..text.ceil_char_boundary(start + 1),
+        (false, false) => text.floor_char_boundary(start.saturating_sub(1))..start,
     }
 }

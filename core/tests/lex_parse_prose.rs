@@ -23,7 +23,7 @@
 //! English fragment — is the `tests/reject/parse-*.ral` corpus, which
 //! `ral/tests/corpus.rs` runs under the same jargon scan.
 
-use ral_core::diagnostic::format_parse_error_ariadne;
+use ral_core::source::Source;
 use ral_core::syntax::parser::ParseError;
 use ral_core::syntax::parser::parse;
 
@@ -97,6 +97,12 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
+/// The report `err` draws against `src`, as stderr shows it.
+fn rendered_report(src: &str, err: &ParseError) -> String {
+    let source = Source::from_text("fuzz.ral", src);
+    err.report(&source).render(&source)
+}
+
 /// Assert that `err`'s user-facing surfaces are intelligible:
 ///
 /// - the bare message has a position and no jargon;
@@ -126,7 +132,7 @@ fn assert_friendly(tag: &str, src: &str, err: &ParseError) {
         !looks_like_debug_dump(msg),
         "{tag}: error message looks like a Rust Debug dump\n  input: {src:?}\n  message: {msg}"
     );
-    let rendered = strip_ansi(&format_parse_error_ariadne("fuzz.ral", src, err));
+    let rendered = strip_ansi(&rendered_report(src, err));
     for bad in JARGON_FRAGMENTS {
         assert!(
             !rendered.contains(bad),
@@ -404,7 +410,7 @@ fn nested_stream_error_spans_point_into_the_outer_source() {
             *offender,
             "{tag}: span should cover the offending token in the outer source"
         );
-        let rendered = strip_ansi(&format_parse_error_ariadne("fuzz.ral", src, &err));
+        let rendered = strip_ansi(&rendered_report(src, &err));
         assert!(
             rendered.contains(position),
             "{tag}: report should point at {position}; rendered:\n{rendered}"

@@ -1,7 +1,7 @@
 ---
-generated_at_commit: dabb0978
+generated_at_commit: 446e3123
 generated_at_date: 2026-10-06
-covers_paths: [ral/src/repl.rs, ral/src/repl/session.rs, ral/src/repl/session/, ral/src/repl/exec.rs, ral/src/repl/host.rs, ral/src/repl/enquiry.rs, ral/src/repl/prompt.rs, ral/src/repl/config.rs, ral/src/repl/config/, ral/src/repl/theme.rs, ral/src/repl/errfmt.rs, ral/src/repl/cursor.rs, ral/src/repl/worksheet.rs, ral/src/boot_door.rs, ral/src/surface.rs]
+covers_paths: [ral/src/repl.rs, ral/src/repl/session.rs, ral/src/repl/session/, ral/src/repl/exec.rs, ral/src/repl/host.rs, ral/src/repl/enquiry.rs, ral/src/repl/prompt.rs, ral/src/repl/config.rs, ral/src/repl/config/, ral/src/repl/theme.rs, ral/src/repl/errfmt.rs, ral/src/repl/cursor.rs, ral/src/boot_door.rs, ral/src/surface.rs]
 ---
 
 # Map: repl / loop
@@ -21,10 +21,7 @@ protocol carries** ([[design/engine-protocol|engine-protocol]]).
 `session::Session` (`session.rs`) owns the transport, the REPL's `Host`
 (`ReplHost`), the boxed [[map/repl/frontend|`Frontend`]], a `pending` buffer
 queued for re-edit, the probed terminal, the exit code, and the
-`TerminalClaim` — last, so it drops last (below). On a
-`structural` build it also owns the `Worksheet` (`worksheet.rs`) — the
-retained binding-edge / effect-verdict model the structural surface
-projects, its effect verdict read through the `bind-effects` probe. There is
+`TerminalClaim` — last, so it drops last (below). There is
 no job table: ral does not suspend
 ([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]).
 
@@ -34,7 +31,7 @@ no job table: ral does not suspend
   does what precedes rc (below). A
   refusal prints its sentence and exits 2. Stage two is the host's first
   dispatch: `Program::Hook` on the `Session "boot"` hook, the `_ral-boot`
-  door, applied to `Boot {login, no_rc, recursion_limit, capabilities}`
+  door, applied to `Boot {login, no-rc, recursion-limit, capabilities}`
   (`ral/src/boot_door.rs`). `boot_door::settle` reads its `Ending`: `Settled`
   carries the rc's `RcSettings`, a `--capabilities` failure is `Raised`
   status 2, a profile's `exit N` is `Exited(N)`, and either ends the session
@@ -50,7 +47,7 @@ no job table: ral does not suspend
   `Read::Line` adds to history and evaluates; `Read::Edit` becomes next
   iteration's `pending`; `Read::Interrupt` clears the signal and sends
   `Control::Interrupt`; `Read::Eof` breaks. `read` is handed the transport,
-  the prompt, the pending buffer, and (structural) the worksheet.
+  the prompt, and the pending buffer.
 - `eval` runs one trimmed line through `exec::step`, recording an `exit` code
   so `run` breaks cleanly.
 - Teardown — the `workers` reading, transport detach, history flush, a
@@ -93,18 +90,18 @@ The boot door (`_ral-boot`, one-shot: it unregisters its own hook) does the
 rest in a run, since startup files evaluate ral: `source_startup_files`
 (`config/source.rs` — login profiles, then the rc), the CLI's
 `--recursion-limit` after the rc, `--capabilities` through
-`capability::apply_session_profiles` (the user's ceiling is the last word,
+`load::profile::apply_session_profiles` (the user's ceiling is the last word,
 and a session frame it pushes survives the door's run), and
 `install_default_prompt` (register the default `Session/"prompt"` hook,
 `{ return "❯ " }`, only when no rc `prompt:` key registered one). It answers
-the rc's `RcSettings {edit_mode, bell, surface, theme, startup}` — the only
+the rc's `RcSettings {edit-mode, bell, surface, theme, startup}` — the only
 part of the rc the host needs; everything else the rc configures lands on the
 engine's shell.
 
 Each startup file has one contract on its return value: a profile is sourced
 for its effects and returns `()`; the rc returns a configuration record. An
 `exit` in either ends the session with its status; any other failure is
-reported and the boot goes on. The rc goes through `modules::evaluate_source`,
+reported and the boot goes on. The rc goes through `load::evaluate_source`,
 compiled against the live session and the `FileId` its text is registered
 with, so an alias or function it defines keeps naming the rc for the whole
 session. It compiles under a **return contract**
@@ -151,8 +148,7 @@ It matches the one flat `Report`:
 - `Static` — a parse, type, or host failure that never reached evaluation; its
   `rendered` is the whole caret report, printed verbatim.
 - `Ran` — a run that compiled, matched on its `Ending`: `Settled` prints via
-  `print_result` (and, on a `structural` build, records the bind into the
-  worksheet); `Raised`, `Walled`, and `Unreturnable` (a settled value the
+  `print_result`; `Raised`, `Walled`, and `Unreturnable` (a settled value the
   wire cannot carry) print the diagnostic already rendered at the transport
   seam; `Exited(code)` ends the loop (clamped through
   `platform::exit_byte`). There is no `Stopped` arm
@@ -193,17 +189,12 @@ The loop drives a boxed `Frontend`, chosen after boot from the rc's
 
 - `Surface::Minimal` — the canonical-stdin editor.
 - `Surface::Readline` (the default) — the rustyline editor.
-- `Surface::Structural` — the ratatui projection surface, behind the
-  default-on `structural` feature.
 
 `create_frontend` resolves it: the capability gate forces the minimal editor
 on a dumb terminal whatever was asked, otherwise the surface preference
-decides; a `Structural` request that cannot be honoured (no raw mode, a
-terminal reporting no size — ratatui's `insert_before` never returns on a
-zero-row screen — or a build without the feature) warns with the reason and
-falls back to readline rather than degrading silently. The preference is set by the `--surface` flag (CLI wins)
-or the rc `surface:` key. The three implementations, the `Frontend` trait,
-the structural worksheet projection, and completion live in
+decides. The preference is set by the `--surface` flag (CLI wins)
+or the rc `surface:` key. The two implementations, the `Frontend` trait,
+and completion live in
 [[map/repl/frontend|frontend]].
 
 ## Prompt, rc, theme
@@ -218,15 +209,15 @@ the structural worksheet projection, and completion live in
   from the last one printed, and the session survives so the user can rebind
   it.
 - `config.rs` — the rc's eleven keys (`env`, `prompt` — registered as the
-  `Session/"prompt"` hook — `bindings`, `aliases`, `edit_mode`, `bell`,
-  `surface`, `recursion_limit`, `plugins`, `startup`, `theme`) are declared
+  `Session/"prompt"` hook — `bindings`, `aliases`, `edit-mode`, `bell`,
+  `surface`, `recursion-limit`, `plugins`, `startup`, `theme`) are declared
   once, in `Form::Rc`'s table, and `apply_rc_key` applies each engine-side,
   inside the boot door, to the shell or to the `RcSettings` it answers. A
   wrong type at one of the scalar keys is the table's static failure, above;
   the per-key runtime check catches those keys' further shape rules (e.g.
-  `edit_mode` must be `'emacs'`/`'vi'`, not just a `String`).
-- `theme.rs` — `OutputTheme` (the `value_prefix`, default `"=> "`, and an
-  optional `value_color`, default yellow) governs value rendering;
+  `edit-mode` must be `'emacs'`/`'vi'`, not just a `String`).
+- `theme.rs` — `OutputTheme` (the `value-prefix`, default `"=> "`, and an
+  optional `value-color`, default yellow) governs value rendering;
   process-global behind an `RwLock`, set once from the boot's answer.
 - `errfmt.rs` — the REPL-styled plugin notices (the breaker's disable notice,
   a plugin warning), beside core's full ariadne renderer, and

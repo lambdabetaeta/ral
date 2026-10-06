@@ -13,35 +13,33 @@
 //! two kinds of row, and the argv half's: `BuiltinBody` has no bodiless
 //! variant, so no entry is expressible without a live body.
 
-use super::flow::Settled;
-use super::site::Site;
+use super::flow::{Settled, name_failure};
 use super::value::Value;
-use crate::typecheck::builtins::{BuiltinDiagnostic, BuiltinTypeRule, scheme_curry_depth};
-use crate::typecheck::{CompTy, Scheme, Ty, Unifier};
+use super::{Mooring, Shell};
+use crate::ty::Site;
+use crate::typecheck::builtins::{
+    BuiltinDiagnostic, BuiltinTypeRule, Convention, Decl, LANGUAGE_CONSTANTS, Manifest,
+};
 use std::borrow::Cow;
-use std::collections::HashSet;
 use std::fmt;
-use std::sync::{Arc, OnceLock};
+use std::ops::Deref;
+use std::sync::Arc;
 
 /// Runtime closure backing a captured builtin body.
-pub(crate) type CapturedBuiltinFn = Arc<
-    dyn Fn(&[Value], &crate::types::Mooring, &mut crate::types::Shell) -> Settled<Value>
-        + Send
-        + Sync,
->;
+pub(crate) type CapturedBuiltinFn =
+    Arc<dyn Fn(&[Value], &Mooring, &mut Shell) -> Settled<Value> + Send + Sync>;
+
+/// A door: handed the [`Site`] the checker solved at its call, which it
+/// admits the value it lets in against.
+pub type BoundaryFn = fn(&[Value], &Arc<Site>, &Mooring, &mut Shell) -> Settled<Value>;
 
 /// Host implementation of a builtin command binding.
 ///
-/// The [`Mooring`](crate::types::Mooring) is borrowed, not owned: the run's
-/// fixed frame stays disjoint from the `&mut Shell` a body mutates.
-/// A door: handed the [`Site`] the checker solved at its call, which it
-/// admits the value it lets in against.
-pub type BoundaryFn =
-    fn(&[Value], &Arc<Site>, &crate::types::Mooring, &mut crate::types::Shell) -> Settled<Value>;
-
+/// The [`Mooring`] is borrowed, not owned: the run's fixed frame stays
+/// disjoint from the `&mut Shell` a body mutates.
 #[derive(Clone)]
 pub enum BuiltinBody {
-    Static(fn(&[Value], &crate::types::Mooring, &mut crate::types::Shell) -> Settled<Value>),
+    Static(fn(&[Value], &Mooring, &mut Shell) -> Settled<Value>),
     Captured(CapturedBuiltinFn),
     Boundary(BoundaryFn),
 }
@@ -56,44 +54,34 @@ impl fmt::Debug for BuiltinBody {
     }
 }
 
-/// Which of ral's two argument conventions a manifest row uses.  The manifest
-/// is authored as two, and what a name can do follows from which half it is in
-/// rather than from its arity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Convention {
-    /// Curried application at the arity the row's type declares, and
-    /// first-class as `$name`: the row seeds the base env scope as a
-    /// [`Value::Native`].
-    Value,
-    /// An argv, so the row seeds a base handler frame instead: intercepted,
-    /// stacked, reached by `^name`, and never a value.  Typed `List String`,
-    /// an argv's elements crossing rendered — though the body is handed the
-    /// values themselves, and renders what it writes (`echo`) or vets what it
-    /// launches (`detach`) as its own boundary demands.
-    Argv,
-}
+/// Proof that a body runs inside [`BuiltinEntry::framed`]'s dynamic extent,
+/// minted nowhere else, so [`BuiltinEntry::call_body`] cannot be reached
+/// unframed.
+pub(crate) struct Frame(());
 
-/// A builtin command binding; `doc` is the line `help` and `explain` print.
+/// A builtin command binding: its declaration, which the checker reads, and
+/// the body only the runtime runs.
+#[derive(Clone)]
 pub struct BuiltinEntry {
-    pub name: Cow<'static, str>,
-    pub convention: Convention,
-    pub(crate) type_rule: BuiltinTypeRule,
-    pub doc: &'static str,
-    /// Extra non-typing behaviour the checker's application path reads: which
-    /// diagnostic an over-application or a literal misuse earns.  `None` for
-    /// the overwhelming majority of rows.
-    pub(crate) diagnostic: BuiltinDiagnostic,
+    pub decl: Decl,
     body: BuiltinBody,
-    /// [`Self::fixed_arity`]'s cache: a `Scheme` rule needs a fresh
-    /// [`Unifier`] to derive its curry depth, so this spares every
-    /// application step of a native that re-derivation.
-    arity_cache: OnceLock<usize>,
-    /// [`Self::settles_at_unit`]'s cache, derived the same way and for the
-    /// same reason.
-    unit_cache: OnceLock<bool>,
 }
 
 impl BuiltinEntry {
+    const fn row(
+        name: Cow<'static, str>,
+        convention: Convention,
+        type_rule: BuiltinTypeRule,
+        doc: &'static str,
+        body: BuiltinBody,
+    ) -> Self {
+        let boundary = matches!(body, BuiltinBody::Boundary(_));
+        Self {
+            decl: Decl::new(name, convention, type_rule, doc, boundary),
+            body,
+        }
+    }
+
     /// A value row: applied at the arity `type_rule` declares.
     pub const fn new(
         name: Cow<'static, str>,
@@ -101,16 +89,7 @@ impl BuiltinEntry {
         doc: &'static str,
         body: BuiltinBody,
     ) -> Self {
-        Self {
-            name,
-            convention: Convention::Value,
-            type_rule,
-            doc,
-            diagnostic: BuiltinDiagnostic::None,
-            body,
-            arity_cache: OnceLock::new(),
-            unit_cache: OnceLock::new(),
-        }
+        Self::row(name, Convention::Value, type_rule, doc, body)
     }
 
     /// A value row that is a boundary: its result enters typed code through
@@ -124,83 +103,48 @@ impl BuiltinEntry {
         Self::new(name, type_rule, doc, BuiltinBody::Boundary(body))
     }
 
-    /// Whether the row is a boundary, so a call of it carries a [`Site`].
-    pub fn is_boundary(&self) -> bool {
-        matches!(self.body, BuiltinBody::Boundary(_))
-    }
-
     /// A base-frame row, typed by the scheme `argv` names.  A signature of
     /// argument templates is the value half's vocabulary and cannot be written
     /// here: this half has one argument, the argv, and one type for it.
     pub const fn base_frame(
         name: Cow<'static, str>,
-        argv: fn(&mut Unifier) -> Scheme,
+        argv: BuiltinTypeRule,
         doc: &'static str,
         body: BuiltinBody,
     ) -> Self {
-        Self {
-            name,
-            convention: Convention::Argv,
-            type_rule: argv,
-            doc,
-            diagnostic: BuiltinDiagnostic::None,
-            body,
-            arity_cache: OnceLock::new(),
-            unit_cache: OnceLock::new(),
-        }
+        Self::row(name, Convention::Argv, argv, doc, body)
     }
 
-    /// Attach a diagnostic facet to an otherwise-built entry — a builder
-    /// rather than a `new`/`base_frame` parameter, so the common case names
-    /// none.
+    /// Attach a diagnostic facet to an otherwise-built entry.
     pub(crate) const fn with_diagnostic(mut self, diagnostic: BuiltinDiagnostic) -> Self {
-        self.diagnostic = diagnostic;
+        self.decl.diagnostic = diagnostic;
         self
     }
 
-    /// The curry depth of this row's type — for a value row, the argument
-    /// count a `$name` reference saturates at, and the checker's own arity
-    /// diagnostics for a call at command position, not only the evaluator's
-    /// arity gate.  Structural, read off the type rule's curry spine
-    /// ([`scheme_curry_depth`]) once and cached: application calls this every
-    /// apply step, and instantiating a scheme fresh is not free.
-    pub(crate) fn fixed_arity(&self) -> usize {
-        *self
-            .arity_cache
-            .get_or_init(|| scheme_curry_depth(self.type_rule))
+    /// Run `f` in this entry's call frame, which only names a failure: a
+    /// builtin application is not an observation.
+    pub(crate) fn framed(
+        &self,
+        shell: &mut Shell,
+        f: impl FnOnce(&mut Shell, &Frame) -> Settled<Value>,
+    ) -> Settled<Value> {
+        let mut result = f(shell, &Frame(()));
+        name_failure(&self.decl.name, &mut result);
+        result
     }
 
-    /// Whether the row's declared scheme settles at `Unit`, read off the type
-    /// rule's curry spine and cached like [`Self::fixed_arity`].
-    fn settles_at_unit(&self) -> bool {
-        *self.unit_cache.get_or_init(|| {
-            fn settled(ct: &CompTy) -> Option<&Ty> {
-                match ct {
-                    CompTy::Fun(_, body) => settled(body),
-                    CompTy::Return(_, ty) => Some(ty),
-                    CompTy::Var(_) => None,
-                }
-            }
-            let scheme = (self.type_rule)(&mut Unifier::new());
-            let Ty::Thunk(inner) = &scheme.ty else {
-                return false;
-            };
-            matches!(settled(inner), Some(Ty::Unit))
-        })
-    }
-
-    /// Invoke the body — reachable only with a proof that a
-    /// [`crate::evaluator::audit::call_native`] frame is already open around it.
+    /// Invoke the body — reachable only with a proof that a [`Self::framed`]
+    /// frame is already open around it.
     ///
     /// # Errors
     /// Propagates a `Break` raised by the body.
     pub(crate) fn call_body(
         &self,
-        _frame: &crate::evaluator::audit::Frame,
+        _frame: &Frame,
         args: &[Value],
         site: Option<&Arc<Site>>,
-        mooring: &crate::types::Mooring,
-        shell: &mut crate::types::Shell,
+        mooring: &Mooring,
+        shell: &mut Shell,
     ) -> Settled<Value> {
         let value = match (&self.body, site) {
             (BuiltinBody::Static(f), _) => f(args, mooring, shell),
@@ -210,19 +154,16 @@ impl BuiltinEntry {
             // a door outside a checked program reaches this.
             (BuiltinBody::Boundary(_), None) => Err(crate::types::sig(format!(
                 "{}: reached without a checked site",
-                self.name
+                self.decl.name
             ))),
         }?;
-        // The declared scheme is the authority on what a row settles to, so a
-        // body cannot put an inhabitant of another type under `F Unit` — which
-        // a body and its scheme agreeing only by hand otherwise allows.
-        // Asserted in debug; coerced to `Unit` in release regardless of what
-        // the body answered, since the scheme, not the body, is authoritative.
-        if self.settles_at_unit() {
+        // The declared scheme, not the body, is authoritative: asserted in
+        // debug, coerced to `Unit` in release.
+        if self.decl.settles_at_unit() {
             debug_assert!(
                 matches!(value, Value::Unit),
                 "{}: typed `F Unit` but answered a {}",
-                self.name,
+                self.decl.name,
                 value.type_name()
             );
             return Ok(Value::Unit);
@@ -231,116 +172,95 @@ impl BuiltinEntry {
     }
 }
 
-impl Clone for BuiltinEntry {
-    /// Carries an already-computed arity/unit cache forward.
-    fn clone(&self) -> Self {
-        Self {
-            name: self.name.clone(),
-            convention: self.convention,
-            type_rule: self.type_rule,
-            doc: self.doc,
-            diagnostic: self.diagnostic,
-            body: self.body.clone(),
-            arity_cache: self.arity_cache.clone(),
-            unit_cache: self.unit_cache.clone(),
-        }
-    }
-}
-
 impl fmt::Debug for BuiltinEntry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BuiltinEntry")
-            .field("name", &self.name)
+            .field("name", &self.decl.name)
             .field("body", &self.body)
             .finish_non_exhaustive()
     }
 }
 
+/// One installed group of builtin rows, keeping the identity it was
+/// installed under so a reinstall is recognised by pointer.
+#[derive(Debug, Clone)]
+pub(crate) enum Set {
+    Static(&'static [BuiltinEntry]),
+    Captured(Arc<[BuiltinEntry]>),
+}
+
+impl Deref for Set {
+    type Target = [BuiltinEntry];
+
+    fn deref(&self) -> &[BuiltinEntry] {
+        match self {
+            Self::Static(rows) => rows,
+            Self::Captured(rows) => rows,
+        }
+    }
+}
+
+impl Set {
+    fn same(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Static(a), Self::Static(b)) => std::ptr::eq(*a, *b),
+            (Self::Captured(a), Self::Captured(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+}
+
 /// Per-shell builtin command bindings.  Names are disjoint across installed
-/// sets — a collision panics at install — so lookup order never shadows.
+/// sets, so lookup order never shadows; the [`Manifest`] is each set's
+/// declarations, projected once at install.
 #[derive(Debug, Clone, Default)]
 pub struct BuiltinTable {
-    sets: imbl::Vector<Arc<[BuiltinEntry]>>,
+    sets: imbl::Vector<Set>,
+    manifest: Manifest,
 }
 
 impl BuiltinTable {
     /// Install a group of builtin entries for this shell.  `true` if a new
     /// set was actually added, so a no-op reinstall does not seed the base
-    /// scope and frames twice.
+    /// scope and frames twice.  The same set again, or one carrying the names
+    /// of one already here, reinstalls as a no-op.
     ///
     /// # Panics
-    /// If a name collides with an installed builtin or repeats in `entries`.
-    pub(crate) fn install_static(&mut self, entries: &'static [BuiltinEntry]) -> bool {
-        self.install_arc(Arc::from(entries))
-    }
-
-    /// Install runtime-owned builtin entries for this shell.
-    ///
-    /// Idempotent: a set already here — by `Arc` identity, or by carrying the
-    /// same names — reinstalls as a no-op, reported by the `false` return.
-    ///
-    /// # Panics
-    /// If a name collides with a *different* installed set — host crates must
-    /// own disjoint surfaces — or repeats in `entries`.
-    pub(crate) fn install_arc(&mut self, entries: Arc<[BuiltinEntry]>) -> bool {
-        if self
-            .sets
-            .iter()
-            .any(|set| Arc::ptr_eq(set, &entries) || same_builtin_names(set, &entries))
-        {
+    /// If a name collides with a *different* installed set (host crates must
+    /// own disjoint surfaces) or repeats within `set`.
+    pub(crate) fn install(&mut self, set: Set) -> bool {
+        if self.sets.iter().any(|have| have.same(&set)) {
             return false;
         }
-        if let Err(e) = check_builtin_collisions(&entries, &self.sets) {
-            panic!("builtin installation failed: {e}");
+        let decls: Arc<[Decl]> = set.iter().map(|entry| entry.decl.clone()).collect();
+        if self.manifest.holds(&decls) {
+            return false;
         }
-        self.sets.push_back(entries);
+        self.manifest.push(decls);
+        self.sets.push_back(set);
         true
     }
 
-    /// Every installed row, newest installed set first.
+    pub fn manifest(&self) -> &Manifest {
+        &self.manifest
+    }
+
     fn rows(&self) -> impl Iterator<Item = &BuiltinEntry> {
         self.sets.iter().rev().flat_map(|set| set.iter())
     }
 
-    /// Any manifest row by name, either half — what `help` and `explain`
-    /// document.
+    /// Any row by name, either half, with its body.
     pub fn get(&self, name: &str) -> Option<BuiltinEntry> {
-        self.rows().find(|entry| entry.name == name).cloned()
+        self.rows().find(|entry| entry.decl.name == name).cloned()
     }
 
-    /// The *value* row for `name`: the half an application and a `$name`
-    /// reference reach.  `None` for a base frame, which command position and
-    /// `^name` reach through the handler stack instead.
-    pub fn value(&self, name: &str) -> Option<BuiltinEntry> {
+    /// The *value* row for `name`, with its body.
+    pub(crate) fn value(&self, name: &str) -> Option<BuiltinEntry> {
         self.rows()
-            .find(|entry| entry.name == name && entry.convention == Convention::Value)
+            .find(|entry| entry.decl.name == name && entry.decl.convention == Convention::Value)
             .cloned()
     }
-
-    /// Every base-frame row — what the handler stack and the checker's handler
-    /// bindings are both seeded from.
-    pub(crate) fn base_frames(&self) -> impl Iterator<Item = &BuiltinEntry> {
-        self.rows()
-            .filter(|entry| entry.convention == Convention::Argv)
-    }
-
-    /// Names a `$name` reference reaches: the value rows.
-    pub(crate) fn value_names(&self) -> impl Iterator<Item = &str> {
-        self.rows()
-            .filter(|entry| entry.convention == Convention::Value)
-            .map(|entry| entry.name.as_ref())
-    }
-
-    /// Names of installed builtins, newest installed set first.
-    pub(crate) fn names(&self) -> impl Iterator<Item = &str> {
-        self.rows().map(|entry| entry.name.as_ref())
-    }
 }
-
-/// `true` and `false` — language-given names in every base scope, live and
-/// hydrated alike, though they are not manifest entries.  The checker types
-/// them `Bool`.
-pub(crate) const LANGUAGE_CONSTANTS: [(&str, bool); 2] = [("true", true), ("false", false)];
 
 pub(crate) fn language_constants() -> impl Iterator<Item = (String, Value)> {
     LANGUAGE_CONSTANTS
@@ -357,38 +277,6 @@ pub(crate) fn native_value(entry: &BuiltinEntry) -> Value {
     }
 }
 
-fn same_builtin_names(a: &[BuiltinEntry], b: &[BuiltinEntry]) -> bool {
-    a.len() == b.len()
-        && a.iter()
-            .map(|entry| entry.name.as_ref())
-            .all(|name| b.iter().any(|entry| entry.name == name))
-}
-
-fn check_builtin_collisions(
-    new_entries: &[BuiltinEntry],
-    installed: &imbl::Vector<Arc<[BuiltinEntry]>>,
-) -> Result<(), String> {
-    let mut local = HashSet::new();
-    for entry in new_entries {
-        let name = entry.name.as_ref();
-        if !local.insert(name) {
-            return Err(format!(
-                "builtin `{name}` is installed twice in one builtin set"
-            ));
-        }
-        if installed
-            .iter()
-            .flat_map(|set| set.iter())
-            .any(|existing| existing.name == name)
-        {
-            return Err(format!(
-                "builtin `{name}` conflicts with an installed builtin"
-            ));
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,6 +284,7 @@ mod tests {
         BOUNDARY_BUILTINS, CORE_BASE_FRAMES, CORE_BUILTINS, SERVICE_BUILTIN, SURFACE_BUILTIN,
         WATCH_BUILTIN,
     };
+    use crate::typecheck::Unifier;
 
     /// The soundness perimeter: a value of a type the program did not decide
     /// enters typed code only through a boundary.  A row whose scheme
@@ -422,16 +311,16 @@ mod tests {
         #[cfg(not(unix))]
         let detach: &[BuiltinEntry] = &[];
         for entry in sets.into_iter().flatten().chain(detach) {
-            let name = entry.name.as_ref();
-            let scheme = (entry.type_rule)(&mut Unifier::new());
+            let name = entry.decl.name.as_ref();
+            let scheme = (entry.decl.type_rule)(&mut Unifier::new());
             let casts = crate::typecheck::has_result_only_var(&scheme);
-            let allowed = entry.is_boundary() || DIVERGENT.contains(&name);
+            let allowed = entry.decl.is_boundary() || DIVERGENT.contains(&name);
             assert!(
                 !casts || allowed,
                 "{name}: a result only its own call determines, and it is no boundary"
             );
             assert!(
-                casts || !entry.is_boundary() || name == "_ed-state",
+                casts || !entry.decl.is_boundary() || name == "_ed-state",
                 "{name}: a boundary whose result is decided by its arguments is no door"
             );
         }
@@ -441,8 +330,11 @@ mod tests {
     /// core rows whose result the program did not decide.
     #[test]
     fn the_core_boundaries_are_the_decoders_and_use() {
-        let names: Vec<&str> = BOUNDARY_BUILTINS.iter().map(|e| e.name.as_ref()).collect();
+        let names: Vec<&str> = BOUNDARY_BUILTINS
+            .iter()
+            .map(|e| e.decl.name.as_ref())
+            .collect();
         assert_eq!(names, ["from-json", "from-jsonl", "from-json-at", "use"]);
-        assert!(CORE_BUILTINS.iter().all(|e| !e.is_boundary()));
+        assert!(CORE_BUILTINS.iter().all(|e| !e.decl.is_boundary()));
     }
 }

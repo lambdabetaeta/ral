@@ -2,22 +2,22 @@
 //! verb (`run_phrases`) that threads a session or a `use` body over it.
 
 pub(crate) mod assemble;
-pub(crate) mod audit;
-pub(crate) mod capture;
+pub(crate) mod call;
 pub(crate) mod expr;
 pub(crate) mod machine;
 pub(crate) mod pattern;
-pub(crate) mod redirect;
 pub(crate) mod scope;
 pub(crate) mod val;
 
-use crate::ir::{Comp, Phrase};
+use crate::ir::{Comp, Pattern, Phrase};
 use crate::source::Spanned;
-use crate::types::{Break, Env, Mooring, Settled, Shell, Value};
+use crate::ty::Scheme;
+use crate::types::{Binding, Break, Env, Mooring, Settled, Shell, Value};
 use std::sync::Arc;
 
-pub(crate) use capture::with_audit_capture;
-pub use capture::with_capture;
+pub use crate::runtime::capture::with_capture;
+#[cfg(all(test, unix))]
+pub(crate) use machine::STAGE_EVAL;
 
 /// A halt in a non-final step abandons what follows it. Said the same way
 /// wherever a block is sequenced: a phrase list here, a `Bind` chain in
@@ -66,49 +66,100 @@ pub(crate) fn run_phrases(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Ran {
-    let mut env = env;
-    let mut defined = Vec::new();
+    let mut ran = Ran {
+        env,
+        defined: Vec::new(),
+        outcome: Ok(Value::Unit),
+    };
     let last = phrases.len().saturating_sub(1);
-    let mut outcome = Ok(Value::Unit);
     for (i, phrase) in phrases.iter().enumerate() {
-        let non_final = i != last;
-        let result = crate::process::check(mooring).and_then(|()| match &phrase.item {
-            Phrase::Run(m) => machine::evaluate(Arc::clone(m), env.clone(), mooring, shell),
+        let result = mooring.check().and_then(|()| match &phrase.item {
+            Phrase::Run(m) => machine::evaluate(Arc::clone(m), ran.env.clone(), mooring, shell),
             Phrase::Define {
                 pattern,
                 comp,
                 schemes,
-            } => run_phrase_define(
-                DefinePhrase {
-                    pattern,
-                    comp,
-                    schemes,
-                },
-                mode,
-                &mut env,
-                mooring,
-                shell,
-                &mut defined,
-            ),
+            } => ran.define(pattern, comp, schemes, mode, mooring, shell),
         });
         match result {
-            Ok(v) => outcome = Ok(v),
+            Ok(v) => ran.outcome = Ok(v),
             // A non-final phrase's own hintless error gets the same
             // abandonment hint `Frame::To`'s halt gives a chain step.
-            Err(Break::Error(e)) if non_final && e.hint.is_none() => {
-                outcome = Err(Break::Error(e.with_hint(ABANDONED_TAIL_HINT)));
+            Err(Break::Error(e)) if i != last && e.hint.is_none() => {
+                ran.outcome = Err(Break::Error(e.with_hint(ABANDONED_TAIL_HINT)));
                 break;
             }
             Err(err) => {
-                outcome = Err(err);
+                ran.outcome = Err(err);
                 break;
             }
         }
     }
-    Ran {
-        env,
-        defined,
-        outcome,
+    ran
+}
+
+impl Ran {
+    /// `Define { pattern, comp, schemes }`: the RHS's value is what the pattern
+    /// destructures; under `Mode::Session` alone, each landed binding is also
+    /// written to `shell.env`, and [`Shell::note_define`] runs beside it.
+    /// All-or-nothing, as [`pattern::destructure`] stages it.  A `Define`'s own
+    /// value is `Unit`.
+    fn define(
+        &mut self,
+        pattern: &Pattern,
+        comp: &Arc<Comp>,
+        schemes: &[(String, Arc<Scheme>)],
+        mode: Mode,
+        mooring: &Mooring,
+        shell: &mut Shell,
+    ) -> Settled<Value> {
+        let session = matches!(mode, Mode::Session);
+        let v = machine::evaluate(Arc::clone(comp), self.env.clone(), mooring, shell)?;
+        for (name, value) in pattern::destructure(pattern, &v)? {
+            let scheme = schemes
+                .iter()
+                .find(|(n, _)| **n == *name)
+                .map(|(_, scheme)| Arc::clone(scheme));
+            let binding = Binding { value, scheme };
+            if session {
+                shell.note_define(&name, &binding);
+            }
+            self.defined.push(name.to_string());
+            self.env.bind(name, binding);
+        }
+        if session {
+            shell.env = self.env.clone();
+        }
+        Ok(Value::Unit)
+    }
+}
+
+/// Apply a function value (`Block`, `Lambda`, or `Native`) to `args`, with a
+/// run frame already installed.
+///
+/// Builtins that take function arguments call this, as does the run
+/// door's hook arm ([`crate::Shell::run`]), which establishes that frame first.
+///
+/// # Errors
+/// If `val` is not a function value, or the applied body fails.
+pub fn apply(
+    val: &Value,
+    args: Vec<Value>,
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
+    match val {
+        // Zero arguments is a force, not an application (the machine's
+        // `apply` boundary demands at least one): the hook door's arity-0
+        // entries (`HookSig::Prompt` and the like) take this path.
+        Value::Thunk(_) | Value::Native { .. } if args.is_empty() => {
+            machine::force(val.clone(), mooring, shell)
+        }
+        Value::Thunk(_) | Value::Native { .. } => machine::apply(val.clone(), args, mooring, shell),
+        _ => Err(crate::types::sig_hint(
+            format!("cannot call {} '{}'", val.type_name(), val),
+            "only Blocks, Lambdas, and natives can be called",
+        )),
     }
 }
 
@@ -125,60 +176,10 @@ pub(crate) fn readmit(top: &crate::ir::Toplevel, shell: &Shell) -> Settled<()> {
     Ok(())
 }
 
-/// A `Phrase::Define`'s three fields, borrowed together — spreading them
-/// across `run_phrase_define`'s own parameter list would push it past
-/// clippy's argument-count lint.
-#[derive(Clone, Copy)]
-struct DefinePhrase<'a> {
-    pattern: &'a crate::ir::IrPattern,
-    comp: &'a Arc<Comp>,
-    schemes: &'a [(String, Arc<crate::typecheck::Scheme>)],
-}
-
-/// `Define { pattern, comp, schemes }`: the RHS's value is what the pattern
-/// destructures; under `Mode::Session` alone, the landed
-/// binding is written to `shell.env` beside `E`, and [`Shell::note_define`]
-/// runs beside each name's install.  All-or-nothing, as
-/// [`pattern::bind_pattern`] stages it.  A `Define`'s own value is `Unit` —
-/// like a block ending in `let`, it is a value boundary by being one.
-fn run_phrase_define(
-    define: DefinePhrase<'_>,
-    mode: Mode,
-    env: &mut Env,
-    mooring: &Mooring,
-    shell: &mut Shell,
-    defined: &mut Vec<String>,
-) -> Settled<Value> {
-    let DefinePhrase {
-        pattern,
-        comp,
-        schemes,
-    } = define;
-    let is_session = matches!(mode, Mode::Session);
-    let v = machine::evaluate(Arc::clone(comp), env.clone(), mooring, shell)?;
-    *env = pattern::bind_pattern_staged(
-        pattern,
-        &v,
-        schemes,
-        env.clone(),
-        shell,
-        |name, binding, shell| {
-            if is_session {
-                shell.note_define(name, binding);
-            }
-            defined.push(name.to_string());
-        },
-    )?;
-    if is_session {
-        shell.env = env.clone();
-    }
-    Ok(Value::Unit)
-}
-
 /// `source` compiled against `shell`'s session and run as the session.
 #[cfg(test)]
 pub(crate) fn run_source(source: &str, shell: &mut Shell) -> Settled<Value> {
-    let top = crate::compile_and_typecheck(
+    let top = crate::compile::compile_and_typecheck(
         source,
         shell.session_schemes(),
         crate::source::FileId::DUMMY,
@@ -203,9 +204,9 @@ mod tests {
 
     /// Real source text through the real front end, never hand-built IR.
     fn toplevel(source: &str) -> Vec<Spanned<Phrase>> {
-        crate::compile_and_typecheck(
+        crate::compile::compile_and_typecheck(
             source,
-            crate::typecheck::SessionSchemes::default(),
+            crate::test_helper::core_schemes(),
             crate::source::FileId::DUMMY,
             "<test>",
             None,
@@ -217,7 +218,7 @@ mod tests {
     #[test]
     fn run_phrases_installs_defines_into_scope_and_reports_them() {
         let phrases = toplevel("let rp_a = 1\nlet rp_b = 2");
-        let mut shell = Shell::default();
+        let mut shell = crate::test_helper::core_shell();
         let ran = run_phrases(
             &phrases,
             shell.env.clone(),
@@ -235,7 +236,7 @@ mod tests {
     #[test]
     fn run_phrases_halts_but_keeps_defines_made_before_the_halt() {
         let phrases = toplevel("let rp_before = 1\nexit 7\nlet rp_after = 2");
-        let mut shell = Shell::default();
+        let mut shell = crate::test_helper::core_shell();
         let ran = run_phrases(
             &phrases,
             shell.env.clone(),
@@ -252,7 +253,7 @@ mod tests {
     #[test]
     fn run_phrases_non_session_mode_defines_nothing_on_the_lease_ledger() {
         let phrases = toplevel("let rp_local = 1");
-        let mut shell = Shell::default();
+        let mut shell = crate::test_helper::core_shell();
         shell.arm_binding_lease(crate::types::BindingLease {
             idle_calls: 1,
             large_binding_bytes: u64::MAX,
@@ -275,7 +276,7 @@ mod tests {
 
     #[test]
     fn top_level_persists_let_on_error() {
-        let mut shell = Shell::default();
+        let mut shell = crate::test_helper::core_shell();
         let _ = run_source("let persist_top = 41\nexit 7", &mut shell);
         assert!(
             shell.env.get("persist_top").is_some(),
@@ -300,7 +301,7 @@ mod tests {
         let crate::ir::CompKind::Return(crate::ir::Val::Thunk(body)) = &comp.item else {
             panic!("expected a thunked block, got {:?}", comp.item);
         };
-        let mut shell = Shell::default();
+        let mut shell = crate::test_helper::core_shell();
         let _ = machine::evaluate(
             Arc::clone(body.shape()),
             shell.env.clone(),

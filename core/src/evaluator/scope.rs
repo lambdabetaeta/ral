@@ -1,90 +1,14 @@
 //! Vocabulary shared by the scope IR nodes — `within`, `grant`, `try`,
 //! `guard`, `audit` — whose machine arms live in `evaluator::machine`:
-//! parsing and installing `within`'s options, and classifying a delimited
-//! body's result into the record `try` and `poll` hand their handler.
+//! parsing and installing `within`'s options.
 
-use crate::process::{CommandFailure, SpawnFailure};
 use crate::types::{
-    CallSite, Cwd, Env, EnvVars, Error, FrameHandle, HandlerEntry, HandlerRole, Map, Settled,
-    Shell, Status, Value, as_map, refused_arm, sig, site_value, validate_handler_arity,
+    Cwd, Env, EnvVars, FrameHandle, HandlerEntry, HandlerRole, Map, Settled, Shell, Value,
+    refused_arm, sig, validate_handler_arity,
 };
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-
-/// A failed `try`/`guard`/`audit` body, flattened for the error record.
-pub(crate) struct Outcome {
-    pub status: Status,
-    pub message: String,
-    pub cmd: String,
-    pub site: Option<CallSite>,
-}
-
-/// The `{cmd, status, reason, message, site}` record `try` hands its handler
-/// and `poll` its `` `err `` payload; `status` is the projection of `reason`.
-/// Bytes are absent by design; `audit` is the forensic path.  Mirrors
-/// `typecheck::builtins::try_error_record`.
-pub(crate) fn error_record(
-    cmd: &str,
-    status: &Status,
-    message: &str,
-    site: Option<&CallSite>,
-) -> Value {
-    Value::map(vec![
-        ("cmd".into(), Value::string(cmd)),
-        ("status".into(), Value::Int(i64::from(status.code()))),
-        ("reason".into(), reason_value(status)),
-        ("message".into(), Value::string(message)),
-        ("site".into(), Value::from(site_value(site))),
-    ])
-}
-
-/// Why a failure happened, as the tagged value `$err[reason]` reads; mirrors
-/// `typecheck::builtins::reason_ty`.
-pub(crate) fn reason_value(status: &Status) -> Value {
-    let tag = |label: &str, payload: Option<Value>| Value::Variant {
-        label: label.into(),
-        payload: payload.map(Box::new),
-    };
-    match status {
-        Status::Raised(_) => tag("raised", None),
-        Status::Process(CommandFailure::ExitCode(code)) => {
-            tag("exited", Some(Value::Int(i64::from(*code))))
-        }
-        Status::Process(CommandFailure::Signal(sig)) => {
-            tag("signaled", Some(Value::Int(i64::from(sig.number()))))
-        }
-        Status::Process(CommandFailure::Spawn(SpawnFailure::NotFound)) => tag("not-found", None),
-        Status::Process(CommandFailure::Spawn(_)) => tag("not-runnable", None),
-        Status::Cancelled(cause) => tag("cancelled", Some(tag(cause.label(), None))),
-    }
-}
-
-/// A failed body's position comes from the error's own span; one outside the
-/// session's sources falls back to the run's call site.  The failing command
-/// is the one the innermost dispatch stamped onto the error
-/// (`evaluator::audit`'s `name_failure`); `<runtime>` names a failure no
-/// dispatch owns.
-pub(crate) fn classify(e: &Error, shell: &Shell) -> Outcome {
-    Outcome {
-        status: e.status.clone(),
-        message: e.message.clone(),
-        cmd: e.command.as_deref().unwrap_or("<runtime>").to_owned(),
-        site: shell.site_of(e.span).or_else(|| shell.call_site()),
-    }
-}
-
-/// [`classify`] then [`error_record`]: the whole way from an [`Error`] to the
-/// record `try`'s handler reads and the report envelope's `` `err ``.
-pub fn error_record_of(e: &Error, shell: &Shell) -> Value {
-    let Outcome {
-        status,
-        message,
-        cmd,
-        site,
-    } = classify(e, shell);
-    error_record(&cmd, &status, &message, site.as_ref())
-}
 
 /// Parsed `within [...]` options; each key becomes a `Shell::with_*` scope.
 pub(crate) struct WithinScope {
@@ -162,7 +86,7 @@ impl WithinScope {
 /// `env:` — a map of scalar overrides. `PWD` is the working directory and
 /// `OLDPWD` names none, so neither can be set here.
 fn parse_env(v: &Value) -> Settled<HashMap<String, String>> {
-    let overrides = as_map(v, "within env")?;
+    let overrides = v.as_map("within env")?;
     for k in overrides.keys() {
         let why = match k {
             "PWD" => "is the shell's working directory; use `cd` or `within [dir: …]` to change it",
@@ -175,19 +99,13 @@ fn parse_env(v: &Value) -> Settled<HashMap<String, String>> {
         .iter()
         .map(|(name, value)| {
             let name = name.to_string();
-            let text = match value.into_owned() {
-                Value::String(s) => s.into_string(),
-                Value::Int(n) => n.to_string(),
-                Value::Float(n) => crate::types::fmt_float(n),
-                Value::Bool(b) => b.to_string(),
-                other => {
-                    return Err(sig(format!(
-                        "within env: value for '{name}' must be a scalar (string, int, float, or \
-                         bool), got {}",
-                        other.type_name()
-                    )));
-                }
-            };
+            let text = value.scalar_text().ok_or_else(|| {
+                sig(format!(
+                    "within env: value for '{name}' must be a scalar (string, int, float, or \
+                     bool), got {}",
+                    value.type_name()
+                ))
+            })?;
             Ok((name, text))
         })
         .collect()
@@ -214,7 +132,7 @@ fn handler_schemes(env: &Env, shell: &Shell) -> crate::typecheck::SessionSchemes
     crate::typecheck::SessionSchemes {
         bindings: env.binding_schemes(&shell.sig),
         aliases: shell.context.handlers.alias_schemes(),
-        builtins: shell.session.builtins.clone(),
+        builtins: shell.session.builtins.manifest().clone(),
     }
 }
 
@@ -271,36 +189,15 @@ impl WithinUndo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{Program, Run};
-    use crate::run::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
+    use crate::protocol::Run;
+    use crate::run::RunReport;
     use crate::types::Mooring;
-    use crate::types::{BuiltinBody, BuiltinEntry, GrantStack};
-
-    fn capture_req(src: &str) -> RunRequest {
-        RunRequest {
-            run: Run {
-                program: Program::Source(src.into()),
-                script_name: "<test>".into(),
-                caps: GrantStack::root(),
-                wall: None,
-                deferred_lease: None,
-                worker_cap: None,
-                io: RunIo::Capture,
-                terminal: RequestedTerminalAccess::Denied,
-                stdin: RunStdin::Empty,
-                trail: None,
-            },
-            surface: None,
-            deferred: None,
-            desk: None,
-            fork: None,
-        }
-    }
+    use crate::types::{BuiltinBody, BuiltinEntry};
 
     /// Every command observation's own `argv[0]`, in order, from an
     /// `audit { … }` report's flat `trail`.
     fn command_argv0s(report: &Value) -> Vec<String> {
-        let map = as_map(report, "test").expect("audit returns a map");
+        let map = report.as_map("test").expect("audit returns a map");
         let trail_field = map.get("trail");
         let Some(Value::List(trail)) = trail_field.as_deref() else {
             panic!("an audit report must have a list `trail` field");
@@ -308,12 +205,12 @@ mod tests {
         trail
             .iter()
             .filter_map(|obs| {
-                let obs = as_map(&obs, "test").ok()?;
+                let obs = obs.as_map("test").ok()?;
                 let what = obs.get("what")?;
                 let Value::Variant { label, payload } = what.as_ref() else {
                     return None;
                 };
-                let fact = as_map(payload.as_deref()?, "test").ok()?;
+                let fact = payload.as_deref()?.as_map("test").ok()?;
                 match (label.as_ref(), fact.get("argv").as_deref()) {
                     ("command", Some(Value::List(argv))) => match argv.iter().next().as_deref() {
                         Some(Value::String(s)) => Some(s.to_string()),
@@ -331,9 +228,10 @@ mod tests {
     /// `Audit::active_policy` is exactly what `pipeline::thread` reads.
     #[test]
     fn try_names_the_failing_command_without_a_trail() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
-        let cmd = match shell.run(capture_req(
+        let mut shell = crate::test_helper::core_shell();
+        let cmd = match shell.run(Run::captured(
             r#"try { sh -c "exit 1"; return 'unreached' } { |e| return $e[cmd] }"#,
+            "<test>",
         )) {
             RunReport::Ran { ending, .. } => ending.into_result().expect("the handler must run"),
             RunReport::Static { .. } => panic!("well-formed source must run"),
@@ -351,9 +249,9 @@ mod tests {
         panic!("scope test: deliberate mid-body panic")
     }
 
-    fn panic_now_scheme(_u: &mut crate::typecheck::Unifier) -> crate::typecheck::Scheme {
+    fn panic_now_scheme(_u: &mut crate::typecheck::Unifier) -> crate::ty::Scheme {
         use crate::typecheck::builtins::{mk_scheme, pure, thunk};
-        mk_scheme(&[], &[], thunk(pure(crate::typecheck::Ty::Unit)))
+        mk_scheme(&[], &[], thunk(pure(crate::ty::Ty::Unit)))
     }
 
     static PANIC_BUILTINS_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new(
@@ -369,9 +267,9 @@ mod tests {
     /// leaves the trail exactly as closed as one that returns normally.
     #[test]
     fn a_panicking_audit_body_still_closes_the_trail() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let mut shell = crate::test_helper::core_shell();
         shell.install_builtins(PANIC_BUILTINS);
-        match shell.run(capture_req("audit { core-panic-now }")) {
+        match shell.run(Run::captured("audit { core-panic-now }", "<test>")) {
             RunReport::Static { .. } => {}
             RunReport::Ran { .. } => panic!("a panicking body must report Static"),
         }
@@ -389,14 +287,15 @@ mod tests {
     /// ordinary error leaves whatever `let`s landed before it (`docs/SPEC.md` §5.6).
     #[test]
     fn panic_mid_run_restores_the_pre_run_checkpoint() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let mut shell = crate::test_helper::core_shell();
         shell.install_builtins(PANIC_BUILTINS);
         let before_cwd = shell.cwd();
         let tmp = std::env::temp_dir().display().to_string();
 
-        match shell.run(capture_req(&format!(
-            "let checkpoint_leak = 1\ncd '{tmp}'\ncore-panic-now"
-        ))) {
+        match shell.run(Run::captured(
+            format!("let checkpoint_leak = 1\ncd '{tmp}'\ncore-panic-now"),
+            "<test>",
+        )) {
             RunReport::Static { .. } => {}
             RunReport::Ran { .. } => panic!("a panicking body must report Static"),
         }
@@ -418,9 +317,10 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn nested_delimiters_flat_merge() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
-        let report = match shell.run(capture_req(
+        let mut shell = crate::test_helper::core_shell();
+        let report = match shell.run(Run::captured(
             "audit { /bin/echo one; try { /bin/echo two } { |_e| return () }; /bin/echo three }",
+            "<test>",
         )) {
             RunReport::Ran { ending, .. } => ending.into_result().expect("audit body must succeed"),
             RunReport::Static { .. } => panic!("well-formed source must run"),
@@ -436,9 +336,10 @@ mod tests {
     /// Only the external does.
     #[test]
     fn builtins_leave_no_command_observation() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
-        let report = match shell.run(capture_req(
+        let mut shell = crate::test_helper::core_shell();
+        let report = match shell.run(Run::captured(
             "audit { echo one; length [1, 2]; /bin/echo two }",
+            "<test>",
         )) {
             RunReport::Ran { ending, .. } => ending.into_result().expect("audit body must succeed"),
             RunReport::Static { .. } => panic!("well-formed source must run"),
@@ -451,14 +352,14 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn audit_reports_ok_over_its_trail() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
-        let report = match shell.run(capture_req("audit { /bin/echo hi }")) {
+        let mut shell = crate::test_helper::core_shell();
+        let report = match shell.run(Run::captured("audit { /bin/echo hi }", "<test>")) {
             RunReport::Ran { ending, .. } => ending
                 .into_result()
                 .expect("audit { echo hi } must succeed"),
             RunReport::Static { .. } => panic!("well-formed source must run"),
         };
-        let map = as_map(&report, "test").expect("audit returns a map");
+        let map = report.as_map("test").expect("audit returns a map");
         match map.get("outcome").as_deref() {
             Some(Value::Variant { label, .. }) => assert_eq!(label.as_ref(), "ok"),
             other => panic!("a returning body must report `ok, got {other:?}"),
@@ -474,7 +375,7 @@ mod tests {
     /// (narrow) capture exactly as it would off the session `Env` directly.
     #[test]
     fn within_vets_an_arm_against_a_captured_scheme() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let mut shell = crate::test_helper::core_shell();
         let src = "let h = { |n| return $[$n + 1] }\n\
                    let blk = { within [handlers: [g: { |args| h 1; echo hi }]] { g } }\n\
                    !$blk";
@@ -489,7 +390,7 @@ mod tests {
     #[test]
     fn every_declared_within_key_is_handled_by_parse() {
         use crate::typecheck::contract::{Form, declared};
-        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let mut shell = crate::test_helper::core_shell();
         for key in declared(Form::Within).keys {
             let opts = Map::from_iter([(key.label.to_string(), Value::Unit)]);
             let _ = WithinScope::parse(&opts, None, &Env::default(), &mut shell);

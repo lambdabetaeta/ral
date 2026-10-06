@@ -1,5 +1,5 @@
 ---
-generated_at_commit: db591f00
+generated_at_commit: 446e3123
 generated_at_date: 2026-10-02
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/builtins.rs, exarch/data/agent.ral]
 ---
@@ -9,7 +9,7 @@ covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/builtins.rs, exar
 `shell_eval.rs` runs one tool call as a ral top-level run against the
 persistent [[map/core/shell-state|`Shell`]]. **`run_shell` is a pure *request
 supplier*: it builds a transport-level `Source` `Run`, dispatches it through
-`ral_core::protocol::dispatch_to_report` against the agent's seat transport —
+`ral_core::carrier::dispatch_to_report` against the agent's seat transport —
 the in-process `IdentityTransport`, or a wire engine's `WireTransport`
 ([[map/exarch/agent|agent]]) — and returns the terminal `Report` that comes
 back, or the `Severed` when the engine is gone before one arrives** — the
@@ -175,7 +175,7 @@ order, and exits 124:
    leaves the work running. What the sentence reports is reachability, and that
    splits: a handle bound by a step that *completed* before the failure is
    still bound, so the `recovery:` line's `await $h` reaches it; one the
-   failing step would have bound never landed — `bind_pattern` is
+   failing step would have bound never landed — `pattern::destructure` is
    all-or-nothing — and that work is orphaned. An `Ending::Unreturnable` —
    the run settled on a handle, block, or function, which the wire cannot
    carry — failed no step, so there the sentence says instead that a handle
@@ -186,7 +186,7 @@ order, and exits 124:
    `Observed::Worker` on the surface, ordered before the `Report`, and the
    call's `SurfaceApplier` keeps those ids; `shell_eval/report.rs`'s `render`
    joins them against the `` `workers `` probe, decoded into core's
-   `WorkerRow` by `reading::workers` at the run boundary — legal there on a wire seat
+   `WorkerRow` by `Transport::workers` at the run boundary — legal there on a wire seat
    exactly as on the identity seat, since the registry never crosses. A birth
    still present in the registry, running or settled-unclaimed, is named
    ([[map/core/shell-state|shell-state]]); one already claimed has left the

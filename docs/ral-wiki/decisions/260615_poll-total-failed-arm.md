@@ -55,7 +55,7 @@ therefore now precisely a guarantee about *settled* observations. A panicked wor
 `Disconnected` result channel) settles as an `err` outcome carrying the same panic
 error `await`'s blocking path reports, so `poll` reports it and `race` stops
 spinning. `poll`'s `` `err `` payload is built through the shared
-`evaluator::scope::error_record`, the same constructor `try`'s handler uses, so a
+`Error::record`, the same constructor `try`'s handler uses, so a
 caught error and a polled failure are the same shape.
 
 Why `await` keeps raising rather than also returning the settle: a blocking

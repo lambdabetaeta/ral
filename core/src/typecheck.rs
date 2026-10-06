@@ -9,35 +9,29 @@ pub mod contract;
 mod env;
 mod error;
 mod explain;
-mod fmt;
 mod generalize;
 mod grade;
 mod index;
 pub(crate) mod infer;
-mod kind;
-mod scheme;
 mod scope;
-mod ty;
+mod site;
 mod unify;
 
-pub use self::builtins::builtin_type_hint;
+pub use self::builtins::{Decl, Manifest, builtin_type_hint};
 pub use self::contract::{Form, Table};
 pub use self::env::{InferCtx, TyEnv};
 pub use self::error::{CycleVia, KindFound, Reason, Standing, TypeError, TypeErrorKind};
 pub(crate) use self::explain::NO_STATUS_REGISTER;
-pub use self::fmt::{FmtCtx, fmt_comp_ty_ctx, fmt_scheme, fmt_ty, fmt_ty_ctx};
-pub use self::kind::Kind;
-pub use self::scheme::Scheme;
-#[cfg(feature = "test-util")]
-pub(crate) use self::scheme::WeakVars;
-pub use self::ty::{CompTy, CompTyVar, Grade, GradeVar, Label, Row, RowVar, Ty, TyVar};
 pub use self::unify::Unifier;
 
+use self::env::HandlerOrigin;
 #[cfg(any(test, feature = "test-util"))]
 pub(crate) use self::generalize::has_result_only_var;
 use self::generalize::{FreeVars, generalize, settle_weak};
 pub(crate) use self::generalize::{instantiate, reseed_weak};
 use crate::ir::{Comp, Phrase, Toplevel};
+use crate::source::Spanned;
+use crate::ty::{CompTy, Scheme, Ty};
 use std::sync::Arc;
 
 /// What a form holds its programs' own return value to: the declared
@@ -59,35 +53,29 @@ pub type ReturnContract = &'static Table;
 pub struct SessionSchemes {
     pub(crate) bindings: Vec<(String, Option<Arc<Scheme>>)>,
     pub(crate) aliases: Vec<(String, Arc<Scheme>)>,
-    pub(crate) builtins: crate::types::BuiltinTable,
-}
-
-impl Default for SessionSchemes {
-    /// Core builtins alone, no host dressing: `bake_prelude` at build time and
-    /// the structural-frontend tests, which check with no live shell.
-    fn default() -> Self {
-        Self {
-            bindings: Vec::new(),
-            aliases: Vec::new(),
-            builtins: crate::builtins::core_builtin_table(),
-        }
-    }
+    pub(crate) builtins: Manifest,
 }
 
 impl SessionSchemes {
-    /// Seed from a fixed scheme list — the baked prelude — against a host
-    /// surface's table, for callers with no live shell: `--check`, batch, tests.
-    pub fn from_schemes(
-        schemes: &[(String, Scheme)],
-        builtins: crate::types::BuiltinTable,
-    ) -> Self {
+    /// No bindings, no aliases: only Σ.
+    pub fn new(builtins: Manifest) -> Self {
         Self {
-            bindings: schemes
-                .iter()
-                .map(|(name, scheme)| (name.clone(), Some(Arc::new(scheme.clone()))))
-                .collect(),
+            bindings: Vec::new(),
             aliases: Vec::new(),
             builtins,
+        }
+    }
+
+    /// Seed from the baked prelude's own schemes, against a host surface's
+    /// manifest, for callers with no live shell: `--check`, batch, tests.
+    pub fn from_prelude(prelude: &Toplevel, builtins: Manifest) -> Self {
+        Self {
+            bindings: prelude
+                .exported_schemes()
+                .into_iter()
+                .map(|(name, scheme)| (name, Some(scheme)))
+                .collect(),
+            ..Self::new(builtins)
         }
     }
 }
@@ -110,10 +98,10 @@ fn seed_env(
     let frames: Vec<(String, Scheme)> = env
         .builtins
         .base_frames()
-        .map(|entry| (entry.name.as_ref().to_string(), (entry.type_rule)(u)))
+        .map(|decl| (decl.name.as_ref().to_string(), (decl.type_rule)(u)))
         .collect();
     for (name, scheme) in frames {
-        env.bind_handler(name, scheme, false);
+        env.bind_handler(name, scheme, HandlerOrigin::Within);
     }
     let mut residuals = Vec::new();
     for (name, scheme) in schemes.bindings {
@@ -129,7 +117,7 @@ fn seed_env(
         env.bind(name, scheme);
     }
     for (name, scheme) in schemes.aliases {
-        env.bind_handler(name, reseed_weak(u, scheme), true);
+        env.bind_handler(name, reseed_weak(u, scheme), HandlerOrigin::Alias);
     }
     residuals
 }
@@ -181,7 +169,7 @@ fn close_thunk_scheme(
     scheme
 }
 
-/// Type-check `top`, seeding from the live session.
+/// Type-check `phrases`, seeding from the live session.
 ///
 /// Infer each phrase in order, extending `TyEnv` at each `Define`, then
 /// write back the verdict — each `Define`'s generalised per-name schemes
@@ -190,8 +178,8 @@ fn close_thunk_scheme(
 /// restart at zero, so an open scheme from run *N* would alias run
 /// *N+1*'s fresh variables.
 ///
-/// A [`ReturnContract`] additionally ascribes the declared table to `top`'s
-/// own return value, once inference has finished (`contract::ascribe`).  The
+/// A [`ReturnContract`] additionally ascribes the declared table to the
+/// phrases' own return value, once inference has finished (`contract::ascribe`).  The
 /// *inferred* type is what is checked, so a key misspelled inside a spread is
 /// caught with one written out.  A return typed at a variable, and a plugin
 /// factory's `return { |opts| … }`, stay on the caller's own runtime door,
@@ -202,19 +190,19 @@ fn close_thunk_scheme(
 /// Inference alone judges; the write-back pass runs only on a program it
 /// accepted, and places the coercions that verdict implies.
 pub fn typecheck(
-    top: &Toplevel,
+    phrases: &[Spanned<Phrase<()>>],
     schemes: SessionSchemes,
     contract: Option<ReturnContract>,
 ) -> Result<Toplevel, Vec<TypeError>> {
     let (mut ctx, mut env) = seeded_session(schemes);
 
-    let (mut phrase_schemes, tail) = infer::infer_toplevel(&mut ctx, &mut env, top);
+    let (mut phrase_schemes, tail) = infer::infer_toplevel(&mut ctx, &mut env, phrases);
     ctx.settle_pending_indexes();
     ctx.settle_pending_labels(None);
     if ctx.errors.is_empty()
         && let Some(table) = contract
     {
-        contract::ascribe(&mut ctx, top.phrases.last(), tail, table);
+        contract::ascribe(&mut ctx, phrases.last(), tail, table);
     }
     if !ctx.errors.is_empty() {
         return Err(ctx.errors);
@@ -224,49 +212,32 @@ pub fn typecheck(
     }
 
     ctx.snapshot_sites();
-    Ok(annotate::annotate_toplevel(top, &mut ctx, phrase_schemes))
+    Ok(annotate::annotate_toplevel(
+        phrases,
+        &mut ctx,
+        phrase_schemes,
+    ))
 }
 
-/// The (name, scheme) pairs on an *annotated* [`Toplevel`]'s `Phrase::Define`s,
-/// in phrase order — `Define.schemes` needs no tree walk, since every phrase
-/// already carries its own.  `bake_prelude` is a one-time build-time pass, so
-/// unwrapping each `Arc<Scheme>` back to an owned `Scheme` here — for
-/// `BakedPrelude::schemes`' postcard blob — costs nothing worth avoiding.
-fn harvest_schemes(top: &Toplevel) -> Vec<(String, Scheme)> {
-    top.phrases
-        .iter()
-        .flat_map(|phrase| match &phrase.item {
-            Phrase::Define { schemes, .. } => schemes
-                .iter()
-                .map(|(name, scheme)| (name.clone(), (**scheme).clone()))
-                .collect(),
-            Phrase::Run(_) => Vec::new(),
-        })
-        .collect()
-}
-
-/// Type-check the prelude IR, returning the annotated [`Toplevel`] and the
-/// schemes on its `Phrase::Define`s.
+/// Type-check the prelude IR against `manifest`, returning the annotated
+/// [`Toplevel`].
 ///
-/// Callers — `boot::bake_prelude_to_out_dir`, from each host's build script
-/// — serialise the *annotated* prelude, so the phrase blob and the scheme
-/// blob come out of one checked pass and running the prelude installs each
-/// binding's scheme beside its value.  A prelude binding named after a
-/// native seeds and shadows like any other.
+/// Callers (`boot::bake_prelude_to_out_dir`, from each host's build script)
+/// serialise the annotated prelude, so running it installs each binding's
+/// scheme beside its value, and [`SessionSchemes::from_prelude`] reads the
+/// same schemes back off it.  A prelude binding named after a native seeds and
+/// shadows like any other.
 ///
 /// # Panics
 /// If the prelude fails to type-check, reporting the errors.
-pub fn bake_prelude(top: &Toplevel) -> (Toplevel, Vec<(String, Scheme)>) {
-    let seed = SessionSchemes::default();
-    let annotated = match typecheck(top, seed, None) {
-        Ok(a) => a,
+pub fn bake_prelude(phrases: &[Spanned<Phrase<()>>], manifest: &Manifest) -> Toplevel {
+    match typecheck(phrases, SessionSchemes::new(manifest.clone()), None) {
+        Ok(annotated) => annotated,
         Err(errs) => {
             let msgs: Vec<String> = errs.iter().map(ToString::to_string).collect();
             panic!("prelude type errors:\n{}", msgs.join("\n"));
         }
-    };
-    let schemes = harvest_schemes(&annotated);
-    (annotated, schemes)
+    }
 }
 
 /// The scheme for a handler arm, computed by `HandlerEntry::vet` at install
@@ -281,7 +252,7 @@ pub fn bake_prelude(top: &Toplevel) -> (Toplevel, Vec<(String, Scheme)>) {
 /// The arm's result is not what its head returns.
 pub(crate) fn alias_arm_scheme(
     head: &str,
-    param: &crate::ir::IrPattern,
+    param: &crate::ir::Pattern,
     body: &Comp,
     schemes: SessionSchemes,
 ) -> Result<Scheme, Box<TypeError>> {
@@ -327,7 +298,7 @@ pub(crate) fn catch_all_stands_in(
 /// against its own unifier; with no head to pin to, the scheme comes back
 /// directly.
 pub(crate) fn binding_value_scheme(
-    param: Option<&crate::ir::IrPattern>,
+    param: Option<&crate::ir::Pattern>,
     body: &Comp,
     schemes: SessionSchemes,
 ) -> Scheme {

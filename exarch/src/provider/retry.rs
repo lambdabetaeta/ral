@@ -226,7 +226,7 @@ mod tests {
             let cancel_during_wait = cancel.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(20)).await;
-                cancel_during_wait.cancel(ral_core::process::CancelCause::Interrupt);
+                cancel_during_wait.cancel(ral_core::process::CancelCause::Interrupted);
             });
             let out: Result<(), ProviderError> =
                 retry_with_backoff(CancelSite::Backoff, &cancel, async |_| {

@@ -34,13 +34,14 @@ use windows_sys::Win32::System::SystemServices::SE_GROUP_ENABLED;
 
 use crate::process::Launch;
 use crate::process::cancel::CancelScope;
+use crate::sandbox::Refusal;
+use crate::sandbox::SandboxProjection;
 use crate::sync::LockExt as _;
-use crate::types::{Break, Error, SandboxProjection, Settled};
 
 use super::appcontainer::{AppContainerProfile, CapabilitySids, OwnedCapabilitySid};
 use super::dacl::{self, DaclError, DaclManager, GrantKind};
 
-/// One fs projection's identity, as [`FsRules`](crate::types::FsRules)
+/// One fs projection's identity, as [`FsRules`](crate::sandbox::FsRules)
 /// carries it. `net` is absent
 /// on purpose: network authority rides per-spawn on
 /// capability SIDs, never stamped on disk, so it needs no SID of its own.
@@ -107,8 +108,8 @@ fn cell() -> &'static Mutex<Option<SessionSandbox>> {
 }
 
 impl SessionSandbox {
-    fn create() -> Settled<Self> {
-        let dacl = DaclManager::new().map_err(|e| dacl_break(&e))?;
+    fn create() -> Result<Self, Refusal> {
+        let dacl = DaclManager::new()?;
         Ok(Self {
             dacl,
             network_caps: None,
@@ -123,18 +124,16 @@ impl SessionSandbox {
     /// ledger entry precedes the create so a crash between them leaves
     /// recovery deleting a profile that may not exist, never a registered
     /// profile the ledger does not know.
-    fn ensure_projection(&mut self, key: &ProjectionKey) -> Settled<()> {
+    fn ensure_projection(&mut self, key: &ProjectionKey) -> Result<(), Refusal> {
         if self.projections.contains_key(key) {
             return Ok(());
         }
         let index = self.next_profile_index;
         self.next_profile_index += 1;
         let name = profile_name(index);
-        self.dacl
-            .record_profile(&name)
-            .map_err(|e| dacl_break(&e))?;
+        self.dacl.record_profile(&name)?;
         let profile = AppContainerProfile::create_or_reuse(&name)
-            .map_err(|e| io_break("sandbox: create AppContainer profile", &e))?;
+            .map_err(|e| io_refusal("sandbox: create AppContainer profile", &e))?;
         self.projections.insert(
             key.clone(),
             ProjectionSandbox {
@@ -150,10 +149,12 @@ impl SessionSandbox {
 /// The network capability SIDs, derived once per session. A `net: false`
 /// projection never calls this — the empty array *is* the enforcement, since
 /// an `AppContainer` with no network capability cannot open a socket.
-fn ensure_network_caps(slot: &mut Option<CapabilitySids>) -> Settled<&[SID_AND_ATTRIBUTES]> {
+fn ensure_network_caps(
+    slot: &mut Option<CapabilitySids>,
+) -> Result<&[SID_AND_ATTRIBUTES], Refusal> {
     if slot.is_none() {
         let caps = CapabilitySids::build(true)
-            .map_err(|e| io_break("sandbox: derive network capability SIDs", &e))?;
+            .map_err(|e| io_refusal("sandbox: derive network capability SIDs", &e))?;
         *slot = Some(caps);
     }
     Ok(slot.as_ref().expect("network caps built above").entries())
@@ -192,14 +193,14 @@ fn profile_name(index: u32) -> String {
 /// every projection, not just this one.
 #[allow(
     clippy::significant_drop_tightening,
-    reason = "the session lock is deliberately held for the whole of `confine` — see the comment at the guard"
+    reason = "the session lock is deliberately held for the whole of `confine`: see the comment at the guard"
 )]
 pub(crate) fn confine(
     launch: &mut Launch,
     projection: &SandboxProjection,
     program_image: Option<&Path>,
     cancel: &CancelScope,
-) -> Settled<()> {
+) -> Result<(), Refusal> {
     // Traced in three parts, because each is a different kind of cost and only
     // the middle one is per-path kernel work: minting the profile, the
     // effective-access filter, and the stamp itself.
@@ -339,23 +340,22 @@ fn ensure_grants(
     paths: Vec<PathBuf>,
     kind: GrantKind,
     cancel: &CancelScope,
-) -> Settled<()> {
+) -> Result<(), Refusal> {
     for p in paths {
-        let canonical = dacl::canonicalize_grant_target(&p).map_err(|e| dacl_break(&e))?;
+        let canonical = dacl::canonicalize_grant_target(&p)?;
         let name = dacl::fs_capability_name(&canonical, kind);
         let cap = match fs_cap_sids.entry(name.clone()) {
             Entry::Occupied(e) => e.into_mut(),
             Entry::Vacant(v) => {
                 let sid = OwnedCapabilitySid::from_capability_name(&name)
-                    .map_err(|e| io_break("sandbox: derive fs capability SID", &e))?;
+                    .map_err(|e| io_refusal("sandbox: derive fs capability SID", &e))?;
                 let sid_string = sid
                     .sid_string()
-                    .map_err(|e| io_break("sandbox: fs capability SID string", &e))?;
+                    .map_err(|e| io_refusal("sandbox: fs capability SID string", &e))?;
                 v.insert(FsCap { sid, sid_string })
             }
         };
-        dacl::ensure_fs_grant(&canonical, &cap.sid_string, kind, cancel)
-            .map_err(|e| dacl_break(&e))?;
+        dacl::ensure_fs_grant(&canonical, &cap.sid_string, kind, cancel)?;
         // Allow grants are memoized under the path as spelled, not as
         // canonicalized: that is what the next `confine` will hand us. A stale
         // entry — the object replaced under that name — then costs the child
@@ -426,14 +426,14 @@ pub(crate) fn teardown() {
         match proj.profile.delete() {
             Ok(()) => {
                 if let Err(e) = dacl.forget_profile(&name) {
-                    crate::diagnostic::shell_warning(&format!(
+                    crate::terminal::shell_warning(&format!(
                         "sandbox session teardown: ledger update for profile {name} failed: {e}"
                     ));
                 }
             }
             Err(e) => {
                 // The name stays ledgered; the next boot's sweep retries.
-                crate::diagnostic::shell_warning(&format!(
+                crate::terminal::shell_warning(&format!(
                     "sandbox session teardown: delete AppContainer profile {name} failed: {e}"
                 ));
             }
@@ -471,18 +471,19 @@ fn filter_out_granted(
         .collect()
 }
 
-fn io_break(context: &str, e: &std::io::Error) -> Break {
-    Break::Error(Error::new(format!("{context}: {e}"), 1))
+fn io_refusal(context: &str, e: &std::io::Error) -> Refusal {
+    Refusal::Launch(format!("{context}: {e}"))
 }
 
-/// A cancel mid-stamp is not a sandbox failure, so it mints through
-/// `Error::cancelled`, as every poll point does, and never as
-/// `sandbox: fs grant failed`.
-fn dacl_break(e: &DaclError) -> Break {
-    if let DaclError::Cancelled(cause) = e {
-        return Break::Error(Error::cancelled(*cause));
+/// A cancel mid-stamp is not a sandbox failure, so it stays a cancellation
+/// and never reads as `sandbox: fs grant failed`.
+impl From<DaclError> for Refusal {
+    fn from(e: DaclError) -> Self {
+        match e {
+            DaclError::Cancelled(cause) => Self::Cancelled(cause),
+            e => Self::Launch(format!("sandbox: fs grant failed: {e}")),
+        }
     }
-    Break::Error(Error::new(format!("sandbox: fs grant failed: {e}"), 1))
 }
 
 #[cfg(test)]
@@ -566,7 +567,7 @@ mod tests {
         let _env = crate::test_env::env_guard();
         use crate::process::cancel::CancelScope;
         use crate::process::{Launch, PgidPolicy, StdioSpec, WaitOutcome};
-        use crate::types::{ExecProjection, FsProjection, FsRules, SandboxProjection};
+        use crate::sandbox::{ExecProjection, FsProjection, FsRules, SandboxProjection};
         use std::path::Path;
 
         // Siblings under one root, so the child can name the ungranted one
@@ -595,7 +596,7 @@ mod tests {
         // The `/c` string must carry no quote character, and so names its
         // target relative to the granted cwd the child runs in. That is not
         // tidiness: `CreateProcessW` takes one flat command line, so an
-        // embedded `"` leaves this process escaped as `\"` — and `cmd.exe`,
+        // embedded `"` leaves this process escaped as `\"`: and `cmd.exe`,
         // which has no backslash escape, would then redirect into a filename
         // beginning with a backslash and a quote, fail its own syntax check,
         // and exit nonzero having never asked the filesystem anything. A bare
@@ -629,7 +630,7 @@ mod tests {
             granted.join("ok.txt").exists(),
             "write inside the granted prefix must land, and did not; the child \
              ended {ended_inside:?}. A nonzero exit means it ran and the write \
-             was refused — the stamped capability ACE or the Low mandatory \
+             was refused: the stamped capability ACE or the Low mandatory \
              label failed to admit it. An exit that is neither 0 nor 1 means \
              the child never reached the write at all, and the grant is not \
              what is under test."

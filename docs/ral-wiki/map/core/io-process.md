@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 3c8afbc3
+generated_at_commit: 446e3123
 generated_at_date: 2026-10-06
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs]
 ---
@@ -16,15 +16,14 @@ a held [[map/core/shell-state|TerminalLease]].
 ## IO — `core/src/io/`
 
 `io.rs` holds `Io`, the per-`Shell` bundle (stdin / stdout / stderr /
-interactive / terminal / launch_role), where `stdout` is wherever the running
+interactive / terminal / stage), where `stdout` is wherever the running
 computation writes — a capture buffer, inside a capture — and
-*`LaunchRole`* — the process-group role distinguishing the top-level
-orchestrator (`TopLevel`) from a stage's own children
-(`PipelineStage(Membership)`, carrying the group an external spawned anywhere
-inside that stage must join — at the stage's own root or nested arbitrarily
-deep, thread or process alike — and the stage scope whose causes the group's
-owner delivers, so the member's own teardown opens only with a cause that
-scope does not hold).
+*`stage: Option<Membership>`* — `None` at the top level, the orchestrator;
+`Some` for a stage's own children, carrying the group an external spawned
+anywhere inside that stage must join — at the stage's own root or nested
+arbitrarily deep, thread or process alike — and the stage scope whose causes
+the group's owner delivers, so the member's own teardown opens only with a
+cause that scope does not hold.
 It decides pgid *placement* (a top-level standalone external may lead its own
 group so a watchdog cancel can `kill(-pgid, …)` the whole subtree; anything
 inside a stage joins that stage's pgid) and says whether a child's reader is
@@ -52,16 +51,25 @@ duplicate ([[internals/pipeline-execution|pipeline execution]]).
   separate effects.
 - `sink.rs` — `Sink`, byte output and child stdio routing (`ChildStdioPlan`):
   terminal, stderr, redirect file, in-memory `ByteBuffer` capture, tee, a
-  watched worker's line surface (`Watch`, each line a `` `watch [label, line] ``
-  batch of one through the deferred sink), a stage thread's pipe edge. `child_stdout` / `child_stderr`
+  watched worker's line surface (`Watch`, each whole line handed to a line
+  function the builtin builds around `watch_event`, so `io` knows no deferred
+  sink), a stage thread's pipe edge. `child_stdout` / `child_stderr`
   centralise the (stdio, pump) decision so no caller computes inherit-vs-pipe by
   hand; `same_destination` says whether two sinks deliver to one destination,
   which decides whether a child's stderr may share stdout's descriptor. A `ByteBuffer` is `Arc<CapturedBytes>`: the bytes under a mutex, and
-  beside them the `overflowed` flag `write_capped` raises at
-  `SINK_BUFFER_CAP`. The flag exists because the write path cannot report the
-  cap — a pump returns `()` from its own thread — so `buffer_overflowed` is
-  read once the writers have joined, by whoever means to make the bytes a
+  beside them the `overflowed` flag `CapturedBytes::append` raises at
+  `SINK_BUFFER_CAP` (`take`, `peek`, `overflowed` are its readers). The flag
+  exists because the write path cannot report the cap — a pump returns `()`
+  from its own thread — so `overflowed` is read once the writers have joined, by whoever means to make the bytes a
   value ([[design/capture|capture]]).
+- `wake.rs` — `Wake`, what ends a stage thread's blocked stdin read or
+  stdout write from another thread: a self-pipe `poll_beside`'d (rustix
+  `poll`, answering `Readiness::{Fired, Ready(PollFlags)}`) with the stage's own
+  fd on Unix, a flag plus `CancelSynchronousIo` on the stage's thread handle
+  on Windows. `fire` is the reader-visible surface, `is_fired` its
+  `cfg(windows)` half; a fired wake
+  is read as EOF by a `SourceReader` carrying it and written as success by a
+  `Sink::Pipe` carrying it, never as an interrupted I/O error.
 - `terminal.rs` — `TerminalState`: cached startup isatty / ANSI / NO_COLOR /
   mode bits. `startup_foreground` records whether ral's group owned the
   controlling terminal's foreground at entry; it is not a per-handoff
@@ -97,13 +105,6 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   the kill precedes the wait and cannot rewrite a recorded status
   ([[decisions/260820_a-stage-ral-stopped-has-no-failure|a-stage-ral-stopped-has-no-failure]],
   [[decisions/260905_the-cut-is-at-the-write|the-cut-is-at-the-write]]).
-- `wake.rs` — `Wake`, what ends a stage thread's blocked stdin read or
-  stdout write from another thread: a self-pipe polled beside the stage's own
-  fd on Unix, a flag plus `CancelSynchronousIo` on the stage's thread handle
-  on Windows. `fire` is the reader-visible surface, `is_fired` its
-  `cfg(windows)` half; a fired wake
-  is read as EOF by a `SourceReader` carrying it and written as success by a
-  `Sink::Pipe` carrying it, never as an interrupted I/O error.
 - `spawn_lock.rs` (`target_vendor = "apple"`) — the process-wide `RwLock`
   closing Apple's fork/`CLOEXEC` race: neither `pipe2` nor `SOCK_CLOEXEC` is
   atomic there, so a `fork` racing a pipe's create-then-`fcntl` window can hand
@@ -176,26 +177,15 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   foreground `Interrupt`, SIGTERM/SIGHUP → root `Terminate` — so one
   cancel-aware wait loop serves user interrupts, timeouts, and termination
   alike ([[decisions/260706_signals-are-causes|signals-are-causes]]).
-  `check` is scope-only; `clear` is the boundary acknowledgment; the
-  `ESCALATION` counter backs only the third-delivery `_exit` ladder
-  (`escalation_pending` is the probe). A raw-mode frontend's Esc drives the
-  same non-escalating foreground cancel
+  The poll point is `Mooring::check`, scope-only; `clear` is the boundary
+  acknowledgment; the `ESCALATION` counter backs only the third-delivery
+  `_exit` ladder (`escalation_pending` is the probe), whose `_exit` reads
+  `CancelCause::code`. A raw-mode frontend's Esc drives the same
+  non-escalating foreground cancel
   ([[decisions/260608_esc-non-escalating-interrupt|esc-non-escalating-interrupt]]).
-  Also `Pgid` /
-  `PgidPolicy` / `ChildHandle` and the platform `spawn_with_pgid` family for
-  process-group placement, and the two facts of who signals a group:
-  `Membership` (a joined pipeline group and its stage scope) and `Group`
-  (`Owns(Pgid)`, signalled and killed whole, or `Joins(Membership)`). Unix
-  `TerminalLoan` takes the `&TerminalLease` and the run's `ForegroundScope`,
-  performs the `tcsetpgrp` handoff, snapshots and restores tty foreground /
-  termios, blocks SIGTTOU for the parent-only restore window, hears the
-  tenant's key back (`hear`, `reclaim`; the private `gesture` reads
-  `GESTURES`) and strikes it on the frame on drop — uninhabited on Windows;
-  `signals_of`, one function over each platform's `grace_signal`,
-  `gesture_signal` and `KILL`; unix
-  `interrupt_foreground_child` re-sends raw-mode Esc/Ctrl-C to a foreground
-  external group, `interrupt_handler` is the interactive SIGINT disposition —
-  a bare `request_interrupt()`, with no delivery of its own,
+  `signals_of` is one function over each platform's `grace_signal`,
+  `gesture_signal` and `KILL`; `interrupt_handler` is the interactive SIGINT
+  disposition — a bare `request_interrupt()`, with no delivery of its own,
   since a pipeline's processes hear a cancellation through the collector — and
   `quit_handler` is the Ctrl-`\` root abort. `grace_signal(cause)` is the one
   cause→signal table both teardowns read (`RunningChild::terminate` and the
@@ -204,18 +194,42 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   Ctrl-Break, named by its `STATUS_CONTROL_C_EXIT`), `ReaderGone`/`RootAbort`
   → `None`, straight to the kill
   ([[decisions/260905_one-delivery-path|one-delivery-path]]).
-  Platform handlers live in
-  `signal/unix.rs` and `signal/windows.rs`. Every Unix child wait goes
-  through the reaper's `waitid`, the one funnel; a pgid is signalled directly
-  by `kill(-pgid, …)`, never waited on
+  Platform handlers live in `signal/unix.rs` and `signal/windows.rs`; the
+  Windows side carries the console-control ladder in the Unix shape (two
+  `request_interrupt()`s, then `ExitProcess`), which signals no process.
+- `child.rs` — `ChildHandle`, the spawned child, and `into_watch`, the one
+  door from it to the reaper. Every Unix child wait goes through the
+  reaper's `waitid`, the one funnel
   ([[decisions/260720_total-wait-status|total-wait-status]], superseded on
-  the pid side). The Windows side
-  carries the console-control ladder in the Unix shape (two
-  `request_interrupt()`s, then `ExitProcess`), which signals no process, and
-  `break_pipeline_group`, the grace an owned group's teardown sends —
+  the pid side).
+- `group.rs` — `Pgid` / `PgidPolicy` and the platform `spawn_with_pgid`
+  family (`group/unix.rs`) for process-group placement, and the two facts of
+  who signals a group: `Membership` (a joined pipeline group and its stage
+  scope) and `Group` (`Owns(Pgid)`, signalled and killed whole, or
+  `Joins(Membership)`). A pgid is signalled directly by `kill(-pgid, …)`,
+  never waited on. On Windows (`group/windows.rs`) a group is a Job Object
+  and `break_pipeline_group` is the grace an owned group's teardown sends —
   `RunningChild::terminate` for `Group::Owns`, the collector's
-  `Address::signal` for a group — before escalating to
-  `kill_pipeline_group`; a pid gets the kill alone.
+  `Address::signal` for a group — before escalating to `kill_pipeline_group`;
+  a pid gets the kill alone.
+- `foreground.rs` — unix `TerminalLoan` takes the `&TerminalLease` and the
+  run's `ForegroundScope`, performs the `tcsetpgrp` handoff, snapshots and
+  restores tty foreground / termios, blocks SIGTTOU for the parent-only
+  restore window, hears the tenant's key back (`hear`, `reclaim`; `gesture`
+  reads `GESTURES`) and strikes it on the frame on drop — uninhabited on
+  Windows; `interrupt_foreground_child` re-sends raw-mode Esc/Ctrl-C to a
+  foreground external group.
+- `limits.rs` — what a child spawned under an active grant may consume: no
+  core dump, and a process budget (macOS's fork brake,
+  `limits/fork_brake.rs`, a Windows Job Object cap).
+  `Launch::limit_resources` arms the pre-exec half and
+  `ChildHandle::limit_processes` the post-spawn one; a brake that cannot be
+  armed is an `Err`, never a warning. `runtime::command::brake` caps the job
+  the child already sits in; when it cannot, the child is killed, any group it
+  leads released, and the launch refused as sandbox-unavailable
+  ([[design/two-enforcers|two-enforcers]]).
+- `tree.rs` — `sample_descendants`, one `ps` sample of the process table,
+  which `with_denials` reads only for a sandboxed, uncancelled failure.
 - `launch.rs` — the owned launch value and its platform interpreters, and the
   two births: `spawn`, which hands back a child this process owns and the
   pgid of a group it leads — `NewLeader`, `NewSession`, or behind an envelope

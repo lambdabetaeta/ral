@@ -8,7 +8,7 @@
 let [root] = args
 let now = int !{date +%s}
 
-let files = filter { |e| equal $e[type] 'file' } !{list-dir $root}
+let files = filter { |e| equal $e[type] `file } !{list-dir $root}
 
 for $files { |[name: name, mtime: mtime]|
     echo "$[($now - $mtime) / 86400]\t$root/$name"

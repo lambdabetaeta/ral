@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 27edb27f
+generated_at_commit: 446e3123
 generated_at_date: 2026-09-25
 covers_paths: [core/src/prelude.ral]
 ---
@@ -15,8 +15,9 @@ bake — and the consumer build scripts serialise the annotated
 IR — typechecked by the same `bake_prelude` path the runtime uses,
 [[map/core/typecheck|typecheck]] — as a `postcard` blob (the schema hazard
 documented in `core/src/lib.rs`). It
-is evaluated once per process and its bindings are cloned into every fresh
-environment ([[map/core/builtins|register]]).
+is evaluated once per bake, on a core-only shell, and its bindings are seated
+whole in every shell by `BakedPrelude::seat`: a prelude that fails to run
+panics rather than seating a partial one.
 
 The prelude holds the *library-level* surface: higher-order list and string
 combinators (`for`, `reduce`, `take-while`, `drop-while`, `take`, `drop`,

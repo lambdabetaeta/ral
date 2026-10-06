@@ -1,5 +1,5 @@
 ---
-generated_at_commit: f4e88bce
+generated_at_commit: 446e3123
 generated_at_date: 2026-10-05
 covers_paths: [core/src/runtime.rs, core/src/runtime/]
 ---
@@ -8,12 +8,14 @@ covers_paths: [core/src/runtime.rs, core/src/runtime/]
 
 `core/src/runtime/` is the OS plumbing the CBPV [[map/core/evaluator|machine]]
 dispatches into — command execution, pipeline orchestration, and the
-per-child confinement choice. It re-enters evaluation only through
-`evaluator::machine::evaluate` (a stage's
-`(comp, env)`, from `pipeline/thread.rs`) — stages carry computation
-closures, so the mutual recursion is irreducible; the evaluator reaches it at
+per-child confinement choice. It re-enters evaluation only through the
+`pipeline::StageEval` the machine passes to `PipeNode::launch` (a stage's
+`(comp, env)`, run from `pipeline/thread.rs`) — stages carry computation
+closures, so the mutual recursion is irreducible, though runtime names no
+evaluator item; the evaluator reaches it at
 `PipeNode::launch`/`join` and, dispatching an `Exec` node, at
-`command_call::classify_command` → `run_base_frame` / `run_external`, and the `command` redirect guards
+`command_call::classify_command` → `run_base_frame` / `run_external`, and the redirect scope
+(`redirect::scope`), which the machine's `Frame::Redirect` enters
 ([[decisions/260610_evaluator-runtime-split|evaluator-runtime-split]]).
 
 - `command_call.rs` — `classify_command`, the single site that resolves a head
@@ -33,6 +35,17 @@ closures, so the mutual recursion is irreducible; the evaluator reaches it at
   — with the calling convention fixed by surface position, not inferred from a
   value's runtime shape
   ([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]).
+- `redirect.rs` — the doors that open a redirect target (`open_write`,
+  `open_read`, `install_stdin_redirect`, and `Shell::atomic_write`, which
+  every host write below the redirect frame shares), over `path::stage`'s pure
+  `PendingWrite` and `Located::stage`/`preview`: staging a write is the path's,
+  judging and committing it the shell's. `redirect/scope.rs` is the
+  `RedirectState` lifecycle (open, route fd 1/2 through the shell's sinks,
+  restore, settle each write) and `with_redirects`.
+- `capture.rs` — `with_capture` and the audit tee, both over one `SinkScope`
+  that restores the replaced sinks on `Drop`.
+- `command_call.rs` also holds `call_external`, an external's door: stamp the
+  start, tee its streams, name a failure, settle the one `Observed::Command`.
 - `command.rs` — the External arm: vet the resolved head, launch its
   admitted program, wire stdio from the sinks the call's redirects installed, spawn, and reap. `stdio.rs`
   `wire_stdio` hands a `>` file to the child as its own fd, no pump, and keeps
@@ -41,8 +54,9 @@ closures, so the mutual recursion is irreducible; the evaluator reaches it at
   `Program::Tool`, a host `Program::File` with its launch path and real path,
   or a `Missing`), `vet.rs` (existence → argv shape → grant policy, yielding a
   `SpawnPlan` that holds the guard's `Admitted`), `process.rs`, `child.rs`,
-  `stdio.rs`, `redirect.rs`, `foreground.rs`, `detach.rs`, plus `uutils.rs`
-  for [[map/core/builtins|bundled coreutils]].
+  `stdio.rs`, `foreground.rs`, `detach.rs`, plus `uutils.rs`
+  for [[map/core/builtins|bundled coreutils]]. `foreground.rs` decides once:
+  `ForegroundDecision(PgidPolicy)`, `NewLeader` being exactly the foreground.
   - **The program and the 126/127 verdict are two projections of one `PATH`
     walk.** `Head::resolve` calls `path::search` once, anchored through
     `Context::search_cwd`, the shell's one cwd cell; a miss is
@@ -55,8 +69,8 @@ closures, so the mutual recursion is irreducible; the evaluator reaches it at
     by its real path, under the spelling as `argv[0]`
     ([[decisions/261004_exec-rules|exec-rules]]).
   - **The argv-shape step is one refused set read at two moments.**
-    `vet::reject_exec_arg` maps each argument through `RefusedArg::of_value`
-    (`core/src/types/exec_arg.rs`) and carries the shape's own `remedy`; the
+    `vet::reject_exec_arg` maps each argument's head (`Value::heads`) through
+    `RefusedArg::of_head` (`core/src/ty/exec_arg.rs`) and carries the shape's own `remedy`; the
     checker maps the argument's *type* through `RefusedArg::of_ty` before the
     run, so this is the backstop for what a type variable hid from it
     ([[invariants/exec-argv-is-words|exec-argv-is-words]],
@@ -93,7 +107,7 @@ closures, so the mutual recursion is irreducible; the evaluator reaches it at
     `SIGCONT` inline, by whoever waits on it, the same rule everywhere
     ([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]).
   - Redirects install on the handler arm
-    ([[decisions/260526_redirect-drop-on-handler-dispatch|redirect-drop-on-handler-dispatch]]). One interpreter, `evaluator::redirect::RedirectState`, installs them for an external and a block alike ([[decisions/260930_redirects-are-bindings|redirects-are-bindings]]).
+    ([[decisions/260526_redirect-drop-on-handler-dispatch|redirect-drop-on-handler-dispatch]]). One interpreter, `runtime::redirect::scope::RedirectState`, installs them for an external and a block alike ([[decisions/260930_redirects-are-bindings|redirects-are-bindings]]).
     Child stdio routing — the `(Stdio, pump)` plan for a spawned child's
     stdout/stderr — is one shape, `Sink::child_stdout` / `child_stderr` yielding
     the shared `ChildStdioPlan` ([[map/core/io-process|io-process]]), through
@@ -103,14 +117,14 @@ closures, so the mutual recursion is irreducible; the evaluator reaches it at
   - The read door (`< file`), the write door (`> / >> / >|`, settled
     `committed`/`aborted`/`failed` at frame teardown), and the exec door (Host
     and `BundledTool` completion) each build an `Observation`
-    (`core/src/types/observation.rs`) and pass it to `observe`
-    (`core/src/evaluator/audit.rs`), the one fan-out door: it reports to the
+    (`core/src/types/audit/observation.rs`) and pass it to `Shell::observe`
+    (`core/src/types/audit/door.rs`), the one fan-out door: it reports to the
     run's `Mooring` and to the open audit trail alike, judging neither's
     interest — the host filters the rail. It judges only whether anything
     happened: a write onto the discard device is dropped there
     ([[design/audit|audit]]). Core emits plain `Value::Map`s through
-    `Observation::to_value`; a host (exarch) decodes their first-order wire
-    form (`Observation::to_wire`) back with `Observation::from_wire`. The observation *shapes* and their card
+    `Value::from_datum`; a host (exarch) decodes their first-order wire
+    form back with `Observation::decode`. The observation *shapes* and their card
     rendering live in [[map/exarch/io-surface|io-surface]]
     ([[decisions/260619_surface-reads-writes-execs|surface-reads-writes-execs]]).
 - `pipeline/` — pipeline planning and execution. A multi-stage `CompKind::Pipeline`
@@ -268,10 +282,10 @@ closures, so the mutual recursion is irreducible; the evaluator reaches it at
     `while live() { recv; step; run }`, no interval and
     no backoff, returning when every stage is observed;
     `PipeNode::join` is `drive()`, then `fold(mooring, shell)`, the
-    group dropped after). `helper.rs` is the hidden
-    `--ral-pipeline-anchor` / `--ral-bundled-tool` child entrypoints — the only
-    two multicall flags here, a ral-written stage running on a thread of the
-    parent process instead. On Windows every external a stage thread spawns still
+    group dropped after). `anchor.rs` is the hidden
+    `--ral-pipeline-anchor` child's entrypoint (`Role::Anchor`; a bundled tool's
+    `Role::BundledTool` is launched beside it by `sandbox::reexec::launch`), a
+    ral-written stage running on a thread of the parent process instead. On Windows every external a stage thread spawns still
     resolves `PgidPolicy::Join` against the anchor's registered Job Object,
     assigned at creation under the suspended create → assign → resume path
     ([[decisions/260702_windows-spawn-boundary|windows-spawn-boundary]]).
@@ -301,9 +315,9 @@ closures, so the mutual recursion is irreducible; the evaluator reaches it at
   cancel and settle kill the whole tree through `cgroup.kill` (a
   `setsid`'d grandchild cannot leave its cgroup) while the grace phase
   stays pgid-addressed (`docs/SPEC.md` §12.11).
-`core/src/engine_seed.rs` (crate root, beside the wire layer it rides, *not*
+`core/src/seed.rs` (crate root, beside the wire layer it rides, *not*
 under `runtime/`) carries only `EngineSeed`/`pack_seed`, the engine seat's
-own seed wire for a wire-hatched child (`hatch.rs`); a pipeline stage never
+own seed wire for a wire-hatched child (`seed/hatch.rs`); a pipeline stage never
 crosses a wire at all and this module carries no pipeline-stage type
 ([[decisions/260902_stages-are-threads|stages-are-threads]],
 [[decisions/260610_child-eval-unification|child-eval-unification]], superseded).

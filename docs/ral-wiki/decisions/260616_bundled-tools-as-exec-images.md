@@ -154,7 +154,7 @@ Audit remains a property of the parent command boundary.
   `RunningChild`, so Ctrl-C, deadlines, process groups / Job Objects, pipe
   drain, and stop/foreground rules are the same as for host executables.
 - Sandboxing stays compositional. The parent renders the child with
-  `sandbox::self_command`, so confined bundled tools run under the same pinned
+  `sandbox::reexec::launch`, so confined bundled tools run under the same pinned
   self-reexec discipline as helper children.
 - Tests should exercise the process boundary. Unit tests may cover the pure
   classifier and the hidden entrypoint's argv/status logic, but tests for env,

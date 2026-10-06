@@ -17,7 +17,7 @@ pub fn snapshot(exarch_state: &std::path::Path) -> String {
     use std::fmt::Write;
     let mut out = String::new();
     let _ = writeln!(out, "- os: {}", os_line());
-    if let Some(d) = ral_core::host::now() {
+    if let Some(d) = now() {
         let _ = writeln!(out, "- now: {d}");
     }
     if let Some(cwd) = ral_core::host::cwd() {
@@ -54,8 +54,26 @@ fn os_line() -> String {
     }
 }
 
+/// Local date, time and timezone; `None` if the format cannot render.
+pub fn now() -> Option<String> {
+    jiff::fmt::strtime::format("%Y-%m-%d %H:%M:%S %Z", &jiff::Zoned::now()).ok()
+}
+
 /// `branch (clean)` or `branch (dirty)`; `None` outside a git working tree.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[silent:git-launch] shells out to git(1) to probe the working tree; best-effort host info, not turn-time data I/O"
+)]
 fn git_line() -> Option<String> {
-    ral_core::host::git()
-        .map(|g| format!("{} ({})", g.branch, if g.dirty { "dirty" } else { "clean" }))
+    let git = |args: &[&str]| {
+        let out = ral_core::process::output(std::process::Command::new("git").args(args)).ok()?;
+        out.status.success().then_some(out.stdout)
+    };
+    let branch = String::from_utf8(git(&["rev-parse", "--abbrev-ref", "HEAD"])?).ok()?;
+    let dirty = !git(&["status", "--porcelain"])?.is_empty();
+    Some(format!(
+        "{} ({})",
+        branch.trim(),
+        if dirty { "dirty" } else { "clean" }
+    ))
 }

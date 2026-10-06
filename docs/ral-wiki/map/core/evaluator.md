@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 3c8afbc3
+generated_at_commit: 446e3123
 generated_at_date: 2026-10-06
 covers_paths: [core/src/evaluator.rs, core/src/evaluator/]
 ---
@@ -68,8 +68,13 @@ Internals:
 - `machine.rs` — the whole machine: `Machine { focus: Focus, stack:
   Vec<Frame> }`, `step_eval` and its rule table `eval_rules` (one arm per
   `CompKind` — the ξ-rules, each raising with `?` so `step_eval`'s
-  `stamp_focus` is their single exit), `step_return` and `step_halt` (one arm
-  per `Frame` each — the two frame-table columns). `Focus::Eval` and
+  `stamp` is their single exit), `step_return` and `step_halt` (one arm
+  per `Frame` each — the two frame-table columns). Every rule, `beta`,
+  `apply_rule` and `force` included, returns `Settled<Focus>`, and `step`
+  folds the `Err` into `Focus::Halt` once. `reserve` is the stack cap and
+  hands back the `Slot` that is the only way to push, so "infallible after
+  reserve" is a type; `Frame::abandon` is the one undo for `Unmask`, `Within`,
+  `Grant` and `Audit`, shared by the rules and the panic walk. `Focus::Eval` and
   `Terminal::Lambda` hold a computation closure `{ comp, env }`, a type apart
   from the thunk value's `Closure`; `Frame::To` alone carries an `Env`, and
   `Apply`, `Try` and `Guard` none. `CompKind::Capture(body)` pushes
@@ -119,9 +124,8 @@ Internals:
   `CompKind::Pipeline` launches and joins a `PipeNode` in one rule
   ([[map/core/runtime|runtime]]).
 - `scope.rs` — dynamic-frame installation implementing [[design/scoping|scoping]]
-  and the five [[design/control-operators|control operators]] (`WithinScope`,
-  `error_record`, and `classify`, which flattens a failed `try`/`guard`/`audit`
-  body into an `Outcome`). The
+  and the five [[design/control-operators|control operators]] (`WithinScope`; a failed `try`/`guard`/`audit`
+  body becomes an `ErrorRecord` through `Error::record`). The
   `within` form installs command handlers: a per-name handler and every alias
   must be a unary lambda `{ |args| ... }`, the catch-all a binary lambda `{
   |name args| ... }`; the calling convention is fixed by the surface form and
@@ -132,28 +136,29 @@ Internals:
   `WithinUndo` holds the whole cwd cell a `dir:` displaced, so a `cd` in the
   body is undone on every exit
   ([[decisions/260925_within-dir-is-local-state|within-dir-is-local-state]]).
-- `pattern.rs` — matching: `bind_pattern`/`bind_pattern_staged` destructure a
-  `Value` against a compiled `IrPattern` (wildcard, name, list with optional
-  `...rest`, map by key) and fold the result straight
+- `pattern.rs` — matching, pure: `destructure(pattern, value)` returns the
+  `(name, value)` pairs a compiled `IrPattern` (wildcard, name, list with
+  optional `...rest`, map by key) binds in a `Value`, and `bind` folds them
   into an `Env`. Without a `...rest` tail a list pattern must cover the value
   exactly — a longer list errors rather than silently dropping its extra
   elements. A mismatch is a located runtime error with an `expected … got …`
   message and a shape hint, propagating like any other failure and so
-  catchable by `try`. All-or-nothing: `stage_pattern` collects every binding
-  first, so a pattern that fails partway leaves the `Env` it was given
-  untouched. `bind_pattern_staged`'s `observe` callback is how
-  `evaluator.rs`'s `run_phrase_define` reaches [[map/core/shell-state|`Shell::note_define`]]
-  beside each name's install — under `Mode::Session` alone, so only a
-  session-scope write stamps the binding-lease ledger; a block, lambda, or
-  `Rec` group's fixpoint pre-install binds unobserved
+  catchable by `try`. All-or-nothing: `destructure` collects every binding
+  first, so a pattern that fails partway binds nothing. `Define` is the one
+  consumer that attaches schemes and observes: `Ran::define` in `evaluator.rs`
+  reaches [[map/core/shell-state|`Shell::note_define`]] beside each name's
+  install, under `Mode::Session` alone, so only a session-scope write stamps
+  the binding-lease ledger; a block, lambda, or `Rec` group's fixpoint
+  pre-install binds unobserved
   ([[decisions/260629_agent-binding-reaping|agent-binding-reaping]]).
-- `capture.rs` — `with_capture` for output capture; `redirect.rs` — the
-  redirect-frame open/route/restore lifecycle (`RedirectState`), the one
-  interpreter of a `Redirects` list: entered by `machine.rs`'s `Frame::Redirect`,
-  by `with_redirects` for a base-frame native's synchronous call, and for a
-  fused external, whose child then reads the installed sinks in
-  [[map/core/runtime|runtime]]'s `command/stdio.rs`. Targets open stdin, stdout,
-  stderr; every write is observed at settle, carrying its target before and after.
+- Output capture (`with_capture`, the audit tee, one `SinkScope`) and the
+  redirect-frame open/route/restore lifecycle (`RedirectState`, the one
+  interpreter of a `Redirects` list) live in [[map/core/runtime|runtime]]
+  (`runtime/capture.rs`, `runtime/redirect/scope.rs`); the machine enters the
+  latter from `Frame::Redirect`, and `with_redirects` serves a base-frame
+  native's synchronous call and a fused external, whose child then reads the
+  installed sinks in `command/stdio.rs`. Targets open stdin, stdout, stderr;
+  every write is observed at settle, carrying its target before and after.
 - `val.rs` holds the side-effect-free `Val` layer: `form(val, env, sig)` is
   CBPV's one-step rule — a constant is itself, a name is `lookup`, a variant
   forms its payload, `thunk M` builds `⟨M, ρ|occ(M)⟩` through `Closure::new`
@@ -170,23 +175,25 @@ Internals:
   persistent spine; explicit beats spread, first spread wins), `eval_map`
   is shared by record and map assembly (`MapParts`/`MapPart` read either
   entry enum uniformly) — explicit entries win over spreads, a computed key
-  must close to a `String`, and a duplicate discovered only here warns and
-  keeps the last (SPEC §4.5); a *static* duplicate is refused at check time
-  instead.
+  must close to a `String`, and a duplicate discovered only here is an error
+  ("key 'k' computed twice; which did you mean?", SPEC §4.5), as a *static*
+  duplicate is refused at check time.
 - The command/pipeline machinery — external-command dispatch,
   pipeline planning and execution, and the in-process-vs-sandboxed-child
   dispatch choice — lives in [[map/core/runtime|runtime]], which the machine
   reaches by dispatching an `Exec` node through `command_call::classify_command`
   → `run_base_frame` / `run_external`, and at
   `PipeNode::launch`/`join`; runtime re-enters the machine only through
-  `machine::evaluate` (a stage's `(comp, env)`, from `pipeline/thread.rs` —
+  `machine::STAGE_EVAL` (`evaluate` and `close_args`, passed to `PipeNode::launch`; a stage's `(comp, env)`, run from `pipeline/thread.rs` —
   a stage never rides a re-exec) — the boundary itself always evaluates its
   body in process, OS confinement being per-child in `build_launch`
   ([[decisions/260610_evaluator-runtime-split|evaluator-runtime-split]]).
-- `audit.rs` — trail recording (`run_native`, the one audited call site for
-  every native).
+- `call.rs` — `run_native`, the one call site for every native: it runs the
+  body in `BuiltinEntry::framed`'s frame, the only minter of the `Frame` proof
+  `call_body` demands. A builtin application is no observation; the fan-out
+  is `types::audit::door`.
 - A `~`-path (`CompKind::Tilde`, [[map/core/ir|ir]]) is read in `machine.rs`
-  through `builtins::ambient::home_dir`. The six ambient reads (`cwd`, `env`,
+  through `Context::home_dir`. The six ambient reads (`cwd`, `env`,
   `args`, `user`, `home`, `nproc`) are natives in `builtins/ambient.rs`
   ([[decisions/261005_ambient-reads-are-builtins|ambient-reads-are-builtins]]).
   `$SCRIPT` is neither — the elaborator bakes it to a literal.

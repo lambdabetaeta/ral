@@ -50,7 +50,7 @@ pub fn discover_all(cwd: &Path, config_dir: &Path) -> Vec<(String, PathBuf)> {
 /// Frontmatter for every readable skill, for the prompt's Skills section.
 ///
 /// Runs once at boot, before a `Shell` exists, so it asks the fs guard's own
-/// verdict — [`GrantStack::admits_fs`](ral_core::types::GrantStack::admits_fs)
+/// verdict — [`GrantStack::admits_fs`](ral_core::capability::GrantStack::admits_fs)
 /// over the session's whole grant stack — about each `SKILL.md` it opens,
 /// where `skill-list` and `skill` use `Shell::check_fs_read`.  At boot that
 /// stack is the one this agent will run under, so the two doors agree by
@@ -62,7 +62,7 @@ pub fn discover_all(cwd: &Path, config_dir: &Path) -> Vec<(String, PathBuf)> {
 pub fn discover_metadata(
     cwd: &Path,
     config_dir: &Path,
-    grants: &ral_core::types::GrantStack,
+    grants: &ral_core::capability::GrantStack,
 ) -> Vec<Skill> {
     // Shell-less as at the fff index: every candidate is `cwd`/`config_dir`
     // joined absolute, so the resolver's home and cwd are never consulted.
@@ -126,7 +126,7 @@ pub(crate) fn read_skill_body(dir: &Path) -> Result<String, String> {
 
 #[allow(
     clippy::disallowed_methods,
-    reason = "[silent:skill-list-dir] lists skill directory names; no file contents read — frontmatter/body reads are gated by check_fs_read"
+    reason = "[silent:skill-list-dir] lists skill directory names; no file contents read: frontmatter/body reads are gated by check_fs_read"
 )]
 fn scan_dir(root: &Path) -> Vec<(String, PathBuf)> {
     let mut skills = Vec::new();

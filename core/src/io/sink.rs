@@ -7,7 +7,7 @@
 
 use super::edge::{DeadEdge, Edge};
 use crate::sync::LockExt as _;
-use crate::types::DeferredSink;
+use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 /// marker, so a high-volume capture has to become an explicit redirect.  Two
 /// readings of the one event: a detached worker keeps the marked prefix, and a
 /// capture whose bytes are about to become a value refuses it
-/// (`evaluator::capture::with_capture`, and `machine.rs`'s `Frame::Capture` arm).
+/// (`runtime::capture::with_capture`, and `machine.rs`'s `Frame::Capture` arm).
 pub(crate) const SINK_BUFFER_CAP: usize = 16 * 1024 * 1024;
 const SINK_BUFFER_TRUNC_MARKER: &[u8] =
     b"\n[ral: buffer exceeded 16 MiB; remaining output dropped]\n";
@@ -32,9 +32,53 @@ pub struct CapturedBytes {
     overflowed: AtomicBool,
 }
 
+impl CapturedBytes {
+    /// Drain the buffer.
+    pub(crate) fn take(&self) -> Vec<u8> {
+        std::mem::take(&mut *self.bytes.lock_ignore_poison())
+    }
+
+    /// Whether [`SINK_BUFFER_CAP`] truncated what [`Self::take`] hands back,
+    /// so a caller for whom the bytes *are* a value can refuse them instead of
+    /// binding a prefix.  Only meaningful once every writer has joined; `join`
+    /// is what orders their stores against this load.
+    pub(crate) fn overflowed(&self) -> bool {
+        self.overflowed.load(Ordering::Relaxed)
+    }
+
+    /// Copy the buffer without draining it, so `poll` can sample a worker
+    /// still running and the eventual [`Self::take`] still sees the whole
+    /// output.  The price is that successive peeks overlap: each is a snapshot
+    /// of everything so far, not a delta.
+    pub(crate) fn peek(&self) -> Vec<u8> {
+        self.bytes.lock_ignore_poison().clone()
+    }
+
+    /// Append under `SINK_BUFFER_CAP`, emitting the truncation marker once at
+    /// the boundary and raising `overflowed` with it.  Sole enforcement point,
+    /// so shell writes and pump-thread appends cannot disagree about the cap.
+    fn append(&self, bytes: &[u8]) {
+        let mut g = self.bytes.lock_ignore_poison();
+        let cur = g.len();
+        if cur < SINK_BUFFER_CAP + SINK_BUFFER_TRUNC_MARKER.len() {
+            if cur + bytes.len() <= SINK_BUFFER_CAP {
+                g.extend_from_slice(bytes);
+            } else {
+                g.extend_from_slice(&bytes[..SINK_BUFFER_CAP.saturating_sub(cur)]);
+                g.extend_from_slice(SINK_BUFFER_TRUNC_MARKER);
+                drop(g);
+                self.overflowed.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
 /// Shared between writers and their eventual reader: writers run on pump and
 /// worker threads, the reader on the eval thread after they join.
 pub type ByteBuffer = Arc<CapturedBytes>;
+
+/// What a `Sink::Watch` hands each whole line of its stream.
+pub type LineFn = Arc<dyn Fn(&[u8]) + Send + Sync>;
 
 /// One child stream's routing, stdout or stderr.
 ///
@@ -75,7 +119,7 @@ pub enum Sink {
     Terminal,
     /// The inherited fd 2, and the default `Io::stderr`.
     Stderr,
-    /// Redirect target, opened by `evaluator::redirect`.  `Arc` so a nested frame
+    /// Redirect target, opened by `runtime::redirect`.  `Arc` so a nested frame
     /// under a redirect clones the sink rather than `dup`ing the fd — a `dup`
     /// shares the file offset anyway, so nothing about where bytes land changes.
     File(Arc<std::fs::File>),
@@ -83,22 +127,16 @@ pub enum Sink {
     Buffer(ByteBuffer),
     /// Both branches in order; a failure on the first skips the second.
     Tee(Box<Self>, Box<Self>),
-    /// A watched worker's stream: each line leaves as one
-    /// `` `watch [label, line] `` surface, a batch of one, through the
-    /// session's deferred sink — or, with none, is dropped. `pending` holds
-    /// the partial line `flush_pending` later emits.
-    Watch {
-        deferred: Option<Arc<dyn DeferredSink>>,
-        label: String,
-        pending: Vec<u8>,
-    },
+    /// A watched worker's stream: each whole line, terminator cut, is handed
+    /// to `line`. `pending` holds the partial line `flush_pending` later emits.
+    Watch { line: LineFn, pending: Vec<u8> },
     /// A stage thread's interior edge: the write end, the stage's wake, and
     /// the edge's fate.  The parent holds the read end, so no `EPIPE` — and
     /// no `SIGPIPE` to the whole shell — can reach a thread; a write to a
     /// dead edge ends the stage instead.
     Pipe {
         writer: Arc<os_pipe::PipeWriter>,
-        wake: Arc<crate::process::Wake>,
+        wake: Arc<crate::io::Wake>,
         edge: Arc<Edge>,
     },
 }
@@ -113,16 +151,16 @@ pub enum Sink {
 #[cfg(unix)]
 fn write_interruptible(
     w: &os_pipe::PipeWriter,
-    wake: &crate::process::Wake,
+    wake: &crate::io::Wake,
     edge: &Edge,
     mut bytes: &[u8],
 ) -> io::Result<()> {
-    use crate::process::wake::Readiness;
-    use std::os::fd::AsRawFd;
+    use super::Readiness;
+    use rustix::event::PollFlags;
     while !bytes.is_empty() {
-        match wake.poll_beside(w.as_raw_fd(), libc::POLLOUT)? {
+        match wake.poll_beside(w, PollFlags::OUT)? {
             Readiness::Fired => return Ok(()),
-            Readiness::Ready(revents) if revents & (libc::POLLERR | libc::POLLHUP) != 0 => {
+            Readiness::Ready(revents) if revents.intersects(PollFlags::ERR | PollFlags::HUP) => {
                 return Err(io::ErrorKind::BrokenPipe.into());
             }
             Readiness::Ready(_) => {
@@ -140,7 +178,7 @@ fn write_interruptible(
 #[cfg(windows)]
 fn write_interruptible(
     w: &os_pipe::PipeWriter,
-    wake: &crate::process::Wake,
+    wake: &crate::io::Wake,
     edge: &Edge,
     bytes: &[u8],
 ) -> io::Result<()> {
@@ -169,12 +207,8 @@ impl Sink {
     /// elsewhere.  End-of-stream only — nothing else ever emits that tail.
     pub(crate) fn flush_pending(&mut self) {
         match self {
-            Self::Watch {
-                deferred,
-                label,
-                pending,
-            } if !pending.is_empty() => {
-                surface_line(deferred.as_deref(), label, &std::mem::take(pending));
+            Self::Watch { line, pending } if !pending.is_empty() => {
+                line(&std::mem::take(pending));
             }
             Self::Tee(a, b) => {
                 a.flush_pending();
@@ -235,25 +269,7 @@ impl Sink {
             (Self::File(a), Self::File(b)) => Arc::ptr_eq(a, b),
             (Self::Buffer(a), Self::Buffer(b)) => Arc::ptr_eq(a, b),
             (Self::Pipe { writer: a, .. }, Self::Pipe { writer: b, .. }) => Arc::ptr_eq(a, b),
-            (
-                Self::Watch {
-                    deferred: da,
-                    label: la,
-                    ..
-                },
-                Self::Watch {
-                    deferred: db,
-                    label: lb,
-                    ..
-                },
-            ) => {
-                la == lb
-                    && match (da, db) {
-                        (Some(a), Some(b)) => Arc::ptr_eq(a, b),
-                        (None, None) => true,
-                        _ => false,
-                    }
-            }
+            (Self::Watch { line: a, .. }, Self::Watch { line: b, .. }) => Arc::ptr_eq(a, b),
             (Self::Tee(a1, a2), Self::Tee(b1, b2)) => {
                 a1.same_destination(b1) && a2.same_destination(b2)
             }
@@ -307,11 +323,8 @@ impl Clone for Sink {
             Self::File(f) => Self::File(f.clone()),
             Self::Buffer(b) => Self::Buffer(b.clone()),
             Self::Tee(a, b) => Self::Tee(Box::new((**a).clone()), Box::new((**b).clone())),
-            Self::Watch {
-                deferred, label, ..
-            } => Self::Watch {
-                deferred: deferred.clone(),
-                label: label.clone(),
+            Self::Watch { line, .. } => Self::Watch {
+                line: line.clone(),
                 // Each clone carries its own partial line: sharing `pending`
                 // would let two threads interleave halves of one.
                 pending: Vec::new(),
@@ -326,7 +339,7 @@ impl Clone for Sink {
 }
 
 /// Wrap `base` in a `Sink::Tee` whose other branch is a fresh buffer, so bytes
-/// are recorded and still seen.  `with_audit_capture` in `evaluator::capture` is
+/// are recorded and still seen.  `with_audit_capture` in `runtime::capture` is
 /// the caller; it drains the buffer once every writer has closed.
 pub(crate) fn tee_with_buffer(base: Sink) -> (Sink, ByteBuffer) {
     let buf = ByteBuffer::default();
@@ -337,31 +350,10 @@ pub(crate) fn tee_with_buffer(base: Sink) -> (Sink, ByteBuffer) {
 /// A fresh [`ByteBuffer`] and the sink that writes into it: callers wire the
 /// sink onto `shell.io` and keep the arc to drain later.  Every `Sink::Buffer`
 /// is minted here or in [`tee_with_buffer`], so nothing writes into a capture buffer
-/// past [`write_capped`].
+/// past [`CapturedBytes::append`].
 pub(crate) fn new_buffer() -> (Sink, ByteBuffer) {
     let buf = ByteBuffer::default();
     (Sink::Buffer(buf.clone()), buf)
-}
-
-/// Drain a [`ByteBuffer`].
-pub(crate) fn take_buffer(buf: &ByteBuffer) -> Vec<u8> {
-    std::mem::take(&mut *buf.bytes.lock_ignore_poison())
-}
-
-/// Whether [`SINK_BUFFER_CAP`] truncated what [`take_buffer`] hands back — so
-/// a caller for whom the bytes *are* a value can refuse them instead of binding
-/// a prefix.  Only meaningful once every writer has joined; `join` is what
-/// orders their stores against this load.
-pub(crate) fn buffer_overflowed(buf: &ByteBuffer) -> bool {
-    buf.overflowed.load(Ordering::Relaxed)
-}
-
-/// Copy a [`ByteBuffer`] without draining it, so `poll` can sample a worker
-/// still running and the eventual [`take_buffer`] still sees the whole output.
-/// The price is that successive peeks overlap: each is a snapshot of everything
-/// so far, not a delta.
-pub(crate) fn peek_buffer(buf: &ByteBuffer) -> Vec<u8> {
-    buf.bytes.lock_ignore_poison().clone()
 }
 
 /// Length of the line terminator ending `bytes`: 2 for `\r\n`, 1 for `\n`,
@@ -377,44 +369,6 @@ pub(crate) fn terminator_len(bytes: &[u8]) -> usize {
     }
 }
 
-/// Append under `SINK_BUFFER_CAP`, emitting the truncation marker once at the
-/// boundary and raising `overflowed` with it.  Sole enforcement point, so shell
-/// writes and pump-thread appends cannot disagree about the cap.
-fn write_capped(buf: &CapturedBytes, bytes: &[u8]) {
-    let mut g = buf.bytes.lock_ignore_poison();
-    let cur = g.len();
-    if cur < SINK_BUFFER_CAP + SINK_BUFFER_TRUNC_MARKER.len() {
-        if cur + bytes.len() <= SINK_BUFFER_CAP {
-            g.extend_from_slice(bytes);
-        } else {
-            g.extend_from_slice(&bytes[..SINK_BUFFER_CAP.saturating_sub(cur)]);
-            g.extend_from_slice(SINK_BUFFER_TRUNC_MARKER);
-            drop(g);
-            buf.overflowed.store(true, Ordering::Relaxed);
-        }
-    }
-}
-
-/// One line of a `Watch`, whole: shared by its mid-stream and tail paths.
-fn surface_line(deferred: Option<&dyn DeferredSink>, label: &str, line: &[u8]) {
-    let Some(deferred) = deferred else {
-        return;
-    };
-    let text = |value: String| crate::serial::FOValue::String { value };
-    deferred.deliver(vec![crate::serial::FOValue::Variant {
-        label: "watch".into(),
-        payload: Some(Box::new(crate::serial::FOValue::Map {
-            entries: vec![
-                ("label".into(), text(label.to_string())),
-                (
-                    "line".into(),
-                    text(String::from_utf8_lossy(line).into_owned()),
-                ),
-            ],
-        })),
-    }]);
-}
-
 impl Write for Sink {
     /// Consumes the whole slice or errors; no variant reports a short write.
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
@@ -428,7 +382,7 @@ impl Write for Sink {
             Self::Stderr => io::stderr().write_all(bytes),
             Self::File(f) => (&**f).write_all(bytes),
             Self::Buffer(b) => {
-                write_capped(b, bytes);
+                b.append(bytes);
                 Ok(())
             }
             Self::Tee(a, b) => {
@@ -436,19 +390,11 @@ impl Write for Sink {
                 b.write_all(bytes)
             }
             Self::Pipe { writer, wake, edge } => write_interruptible(writer, wake, edge, bytes),
-            Self::Watch {
-                deferred,
-                label,
-                pending,
-            } => {
+            Self::Watch { line, pending } => {
                 pending.extend_from_slice(bytes);
                 while let Some(pos) = pending.iter().position(|&b| b == b'\n') {
-                    let line = &pending[..=pos];
-                    surface_line(
-                        deferred.as_deref(),
-                        label,
-                        &line[..line.len() - terminator_len(line)],
-                    );
+                    let whole = &pending[..=pos];
+                    line(&whole[..whole.len() - terminator_len(whole)]);
                     pending.drain(..=pos);
                 }
                 Ok(())
@@ -480,8 +426,9 @@ impl Write for Sink {
 )]
 mod tests {
     use super::{Edge, Sink, terminator_len};
-    use crate::process::Wake;
-    use std::sync::Arc;
+    use crate::io::Wake;
+    use std::io::Write as _;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn terminator_len_is_the_one_line_rule() {
@@ -625,14 +572,29 @@ mod tests {
     }
 
     #[test]
-    fn same_destination_of_watch_needs_the_same_label() {
-        let watch = |label: &str| Sink::Watch {
-            deferred: None,
-            label: label.into(),
+    fn same_destination_of_watch_needs_the_same_line_function() {
+        let watch = || Sink::Watch {
+            line: Arc::new(|_| {}),
             pending: Vec::new(),
         };
-        assert!(watch("a").same_destination(&watch("a")));
-        assert!(!watch("a").same_destination(&watch("b")));
+        let a = watch();
+        assert!(a.same_destination(&a.clone()));
+        assert!(!a.same_destination(&watch()));
+    }
+
+    #[test]
+    fn a_watch_hands_over_each_whole_line_and_then_the_tail() {
+        let seen = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let log = seen.clone();
+        let mut sink = Sink::Watch {
+            line: Arc::new(move |line| log.lock().unwrap().push(line.to_vec())),
+            pending: Vec::new(),
+        };
+        sink.write_all(b"one\r\ntw").unwrap();
+        sink.write_all(b"o\nthree").unwrap();
+        sink.flush_pending();
+        let seen = seen.lock().unwrap();
+        assert_eq!(*seen, [b"one".to_vec(), b"two".to_vec(), b"three".to_vec()]);
     }
 
     #[test]
@@ -640,4 +602,12 @@ mod tests {
         let plan = file_sink().child_stdout(false).expect("plan");
         assert!(plan.pump.is_none());
     }
+}
+
+/// The byte streams captured under [`RunIo::Capture`](super::RunIo::Capture), carried verbatim onto
+/// the protocol [`Report`](crate::protocol::Report).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Captured {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
 }

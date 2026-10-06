@@ -15,14 +15,16 @@ use crate::types::{Closure, Env, Error, List, Map, Signature, Value};
 /// Renders one interpolation piece for `machine::eval_rules`'s
 /// `CompKind::Interpolation` rule.
 pub(crate) fn interpolate_piece(v: &Value) -> Result<String, Error> {
+    if let Some(text) = v.scalar_text() {
+        return Ok(text);
+    }
     match v {
-        Value::String(_) | Value::Int(_) | Value::Float(_) | Value::Bool(_) => Ok(v.to_string()),
-        Value::Unit => Err(Error::new("cannot interpolate Unit in string", 1)
+        Value::Unit => Err(Error::new("cannot interpolate Unit in string")
             .with_hint("`()` is nothing to print; to print the text, write '()'")),
-        Value::Bytes(_) => Err(Error::new("cannot interpolate Bytes in string", 1)
+        Value::Bytes(_) => Err(Error::new("cannot interpolate Bytes in string")
             .with_hint("render with str (lossy UTF-8), or decode with from-string")),
         _ => Err(
-            Error::new(format!("cannot interpolate {} in string", v.type_name()), 1)
+            Error::new(format!("cannot interpolate {} in string", v.type_name()))
                 .with_hint("use str to convert, or index into the value"),
         ),
     }
@@ -49,7 +51,7 @@ pub(crate) fn form(val: &Val, env: &Env, sig: &Signature) -> Result<Value, Error
                     "STATUS" => crate::typecheck::NO_STATUS_REGISTER,
                     _ => "check spelling, or ensure the variable is defined before this line",
                 };
-                Error::new(format!("undefined variable: ${name}"), 1).with_hint(hint)
+                Error::new(format!("undefined variable: ${name}")).with_hint(hint)
             }),
         Val::Thunk(node) => Ok(Value::Thunk(Closure::new(
             Arc::clone(node.shape()),
@@ -89,14 +91,8 @@ pub(crate) fn form(val: &Val, env: &Env, sig: &Signature) -> Result<Value, Error
             }
         }
         Val::Variant { label, payload } => {
-            let payload = match payload {
-                Some(p) => Some(Box::new(form(p, env, sig)?)),
-                None => None,
-            };
-            Ok(Value::Variant {
-                label: label.clone(),
-                payload,
-            })
+            let payload = payload.as_ref().map(|p| form(p, env, sig)).transpose()?;
+            Ok(Value::variant(label.clone(), payload))
         }
     }
 }
@@ -142,9 +138,6 @@ fn literal_names_bound(val: &Val, env: &Env) -> bool {
 /// Shared with argument-spread checking in `machine::close_args`, and with
 /// [`super::assemble`]'s list rule.
 pub(crate) fn spread_type_err(val: &Value) -> Error {
-    Error::new(
-        format!("spread requires a List, got {}", val.type_name()),
-        1,
-    )
-    .with_hint("spread (...) expands a list")
+    Error::new(format!("spread requires a List, got {}", val.type_name()))
+        .with_hint("spread (...) expands a list")
 }

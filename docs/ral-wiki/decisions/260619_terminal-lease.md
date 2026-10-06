@@ -42,7 +42,7 @@ An exarch tool turn runs `run_turn` under `TurnIo::Capture`
 
 1. passes the `startup_foreground` gate (`resolve.rs:302`): exarch boots an
    interactive TUI in the foreground, so its `probe_foreground` returns true
-   (`core/src/io/terminal.rs:312`);
+   (`core/src/terminal.rs:312`);
 2. skips the capture short-circuit (`resolve.rs:320`): `build_turn`
    (`core/src/turn.rs:143`) swaps the three Capture streams but never raises
    `capture_depth`, which only the `!{…}` audit guard touches
@@ -116,10 +116,10 @@ pub(crate) struct SessionState {
 `TerminalLease` is **not `Clone`, not `Copy`**, and has no public constructor or
 public `mint`. Core mints at most one token while constructing the session, from
 the same `tcgetpgrp(stdin) == getpgrp()` predicate that currently populates
-`startup_foreground` (`core/src/io/terminal.rs:312`). Hosts cannot re-run the
+`startup_foreground` (`core/src/terminal.rs:312`). Hosts cannot re-run the
 predicate later and cannot forge a new proof; they can only ask core to run a
 turn with a stated terminal policy. The `startup_foreground` bool
-(`io/terminal.rs:95`) may survive the first parcel as compatibility data, but it
+(`terminal.rs:95`) may survive the first parcel as compatibility data, but it
 is no longer an authority source once every handoff demands `&TerminalLease`.
 
 This is the witness discipline of

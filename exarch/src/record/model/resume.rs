@@ -74,7 +74,7 @@ fn quarantine_tail(path: &Path, tail: &CrashTail) -> io::Result<()> {
     let file = OpenOptions::new().write(true).open(path)?;
     file.set_len(tail.complete_len)?;
     file.sync_all()?;
-    eprintln!(
+    ral_core::errln!(
         "exarch: quarantined {} bytes from {} in {} before trimming the live log",
         tail.bytes.len(),
         path.display(),
@@ -125,13 +125,13 @@ pub fn resume(path: &Path) -> io::Result<(Context, String, String)> {
                     session_id, parent, ..
                 }) => {
                     return Err(io::Error::other(format!(
-                        "cannot resume {}: the first record starts session {session_id:?} with parent {parent:?}; expected SessionStarted {{ session_id: 0, parent: None }} — is this a child log?",
+                        "cannot resume {}: the first record starts session {session_id:?} with parent {parent:?}; expected SessionStarted {{ session_id: 0, parent: None }}; is this a child log?",
                         path.display()
                     )));
                 }
                 other @ (Record::Protocol(_) | Record::Display(_) | Record::Forensic(_)) => {
                     return Err(io::Error::other(format!(
-                        "cannot resume {}: the first record is {other:?}; expected SessionStarted {{ session_id: 0, parent: None }} — is this a copied child log?",
+                        "cannot resume {}: the first record is {other:?}; expected SessionStarted {{ session_id: 0, parent: None }}; is this a copied child log?",
                         path.display()
                     )));
                 }

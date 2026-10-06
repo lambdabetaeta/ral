@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 78d13526
+verified_at_commit: 446e3123
 verified_at_date: 2026-10-06
-anchors: [check_exec, Admitted, ExecRules, Head, carriers, check_fs_op, check_fs_exact, locate, walk, Located, admits_fs_exact, fs_verdict, pinned_binary, sandbox_projection, region, Region, Table, live, GrantStack, sandboxed_command, build_launch, projection_enforceable, serve_warrant, Warrant, Slot, Handoff, Landlocked, bwrap_argv, Binds, render_objects, SessionSandbox, fs_capability_name, ensure_fs_grant, deputy_prefixes, confinement_unavailable, spawn_error, Envelope, InfoFd, HostEnvelope, render_dev, cgroup_tree, default_ro_binds, Pinned, pin_envelope]
+anchors: [check_exec, Admitted, admit, ExecRules, for_kernel, Head, carriers, check_fs_exact, locate, walk, Located, admits_fs_exact, fs_verdict, pinned_binary, SandboxProjection, Flag, Denial, refused, region, Region, Table, live, GrantStack, sandboxed_command, build_launch, projection_enforceable, serve_warrant, Warrant, Slot, Handoff, Landlocked, bwrap_argv, Binds, render_objects, SessionSandbox, fs_capability_name, ensure_fs_grant, deputy_prefixes, Refusal, spawn_error, Envelope, InfoFd, HostEnvelope, render_dev, cgroup_tree, default_ro_binds, Pinned, pin_envelope]
 ---
 
 # Capability enforcement: one chokepoint, two enforcers
@@ -10,27 +10,34 @@ anchors: [check_exec, Admitted, ExecRules, Head, carriers, check_fs_op, check_fs
 intersection. This is how a check actually runs: an in-process decision layer and
 an OS sandbox that backs it for external commands, each authoritative exactly
 where the other is blind ([[design/two-enforcers|two enforcers]];
-`core/src/capability/`, `core/src/sandbox/`).
+`core/src/capability/`, `core/src/guard/`, `core/src/sandbox/`).
 
-**Every yes/no is a `capability::check_*(&Context, …)` that folds the whole
-stack.** Each decision (`capability/enforce.rs`, `capability/sandbox.rs`) is a free
-function over a borrowed `Context`, and each meets the dynamic `GrantStack`
-(`ctx.grants`) before answering, so a verdict reflects authority intersected
-across the *whole* stack, not a single frame:
+**The model is data, and the guard and the sandbox are its two consumers**
+([[decisions/261006_capability-is-data|capability-is-data]]; the order is
+`capability < sandbox < guard`). **Every in-process yes/no is a
+`guard::check_*(&Context, …)` that folds the whole stack.** Each decision
+(`guard/enforce.rs`) is a free function over a borrowed `Context`, and each
+meets the dynamic `GrantStack` (`ctx.grants`) before answering, so a verdict
+reflects authority intersected across the *whole* stack, not a single frame.
+The exec and fs checks return a typed `Denial`, which `Shell::refused`
+(`guard/shell.rs`) records on the trail at the one door:
 
-- `check_exec`, which returns the `Admitted` token every launch demands;
-- `check_fs_op`, a read *by name* — a predicate, a listing, a module load;
+- `check_exec`, which returns the `Admitted` token every launch demands,
+  minted by `GrantStack::admit` alone;
+- `Shell::check_fs_read`, a read *by name* — a predicate, a listing, a module
+  load;
 - `Shell::locate`, the door every open goes through, which judges the
   located object with `check_fs_exact`;
-- the editor/shell bool checks;
-- `sandbox_projection`, the OS-renderable `SandboxProjection`.
+- the boolean flags, one `Flag` and one `Shell::check(Flag, who)`;
+- and, on the sandbox's side, `SandboxProjection::of`, the OS-renderable
+  projection folded off the same tables.
 
-The `capability` module is the only place authority is decided — a module
-boundary, not a typestate
+The `capability` module is the only place authority is decided, and `guard`
+and `sandbox` the only places it is read — a module boundary, not a typestate
 ([[decisions/260605_witness-collapse|witness-collapse]]). **The fold composes
 verdicts over layers; it never flattens the layers into one frame.** A
 `Capabilities` is one layer and the `GrantStack` is the meet — each verdict
-(`capability::exec::rules`, `capability::fs::region`, `permits_detach`)
+(`capability::exec::rules`, `capability::fs::region`, `GrantStack::permits`)
 walks the stack and combines what each layer says about *this* access. There
 is no `Capabilities::meet`: an authored `ExecGrant` is not closed under
 intersection, because a bare key means the file the host `PATH` finds at
@@ -77,7 +84,7 @@ renamed by the kernel through an attribute-only handle, so an 8.3 alias
 meets the deny frozen under its long one; stored spellings cover *existing*
 names, and the deny relation covers absent ones: a deny rule of a
 `Region` holds a path whose components agree with it under
-`lex::collision_key`, so a create spelled `.ENV` meets an absent
+`identity::collision_key`, so a create spelled `.ENV` meets an absent
 `deny: [cwd:/.env]`, and the refusal says it was caught by another spelling
 ([[decisions/261006_denies-hold-under-every-spelling|denies-hold-under-every-spelling]]) — and
 judges the *object* it lands on (`check_fs_exact` on `Located::real`, which is
@@ -150,12 +157,13 @@ spawned process does on its own.**
   it over the tree at launch, a veto only where no trusted write reaches
   ([[decisions/260906_landlock-exec-layer|landlock-exec-layer]]); the
   AppContainer on Windows has no path-exec filter, so there the in-process
-  guard stands alone and check-to-exec timing stays open. The kernel's list is
-  `ExecRules::kernel` of the very table in the `Admitted`, ordered by `Rank`
-  so last-match-wins is the guard's precedence, with the carriers spliced in
-  ([[decisions/261004_exec-carriers|exec-carriers]]): guard and kernel cannot
+  guard stands alone and check-to-exec timing stays open. The kernel's rules
+  are `ExecRules::for_kernel` of the very table in the `Admitted`, with the
+  carriers spliced in ([[decisions/261004_exec-carriers|exec-carriers]]) and
+  each file at its final verdict; Seatbelt reads it in `precedence` order, so
+  last-match-wins is the guard's rank: guard and kernel cannot
   disagree, except that the kernel sees no argv and no bundled tool's name.
-- *Filesystem* — guarded in-process too (`check_fs_op`, read and write), and
+- *Filesystem* — guarded in-process too (`check_fs_exact`, read and write), and
   backed by an OS sandbox that confines a spawned child's own reads and writes:
   Seatbelt on macOS, bwrap on Linux, an AppContainer LowBox token on Windows.
   Guard and profile read *one* fold (`capability/fs.rs`: `region` meets each
@@ -204,7 +212,7 @@ already blocked — the Seatbelt profile renders a `subpath` deny for each — b
 an *ancestor* of that entry sits outside its subpath and inside the write
 prefix's own allow, so a confined `mv` or `rm` could relocate the ancestor
 directory and carry the denied bytes to a name nothing covers.
-`FsRules::pinned_dirs` (`core/src/types/capability.rs`) closes the
+`FsRules::pinned_dirs` (`core/src/sandbox/projection.rs`) closes the
 gap: every proper ancestor of a `deny_paths` entry that lies within some write
 prefix — the write prefix root included — is collected, over both a deny's
 surface spelling and its symlink-resolved target, so a symlink swapped in
@@ -240,7 +248,7 @@ private scratch at the name — memory the host never sees, never the denied
 directory, and the mask's stated limit
 ([[decisions/260905_an-envelope-does-not-touch-the-host|an-envelope-does-not-touch-the-host]]).
 Nothing mounts over a symlink, so a
-symlinked `deny` is masked at the resolved target `sandbox_projection` carries
+symlinked `deny` is masked at the resolved target `SandboxProjection` carries
 beside the surface spelling.
 
 **A name that does not exist gets no mask at all.** Every mount bwrap could lay
@@ -359,11 +367,11 @@ process, and any session after this one — a session cannot vet the enforcer it
 boots on — so where the pinned bwrap is writable by ral's uid a root-owned bwrap
 (the distro package) is the remedy. A host with no bwrap to pin
 is reported by `linux::envelope` at the first launch that needs it, through
-`confinement_unavailable`; `Launch::envelope` names the binary for a spawn
+`Refusal::Unavailable`; `Launch::envelope` names the binary for a spawn
 failure's wording only. Pinned by `sandbox::linux::tests::the_launcher_is_the_pinned_envelope_and_never_a_name`,
 `::the_envelope_binary_is_read_only_inside_every_envelope`,
 `::a_pinned_binary_inside_a_writable_prefix_is_locked` and
-`capability::enforce::tests::a_write_onto_a_pinned_binary_is_guarded_before_any_grant_is_consulted`.
+`guard::enforce::tests::a_write_onto_a_pinned_binary_is_guarded_before_any_grant_is_consulted`.
 
 **The sandbox is applied per external command, not by re-execing the grant
 body.** A `grant` is a *local* dynamic effect scope: its body evaluates in
@@ -483,7 +491,7 @@ everything. A launch therefore carries the envelope it execs
 (`Launch::confinement`), set by the one backend whose envelope is a separate
 binary, so blame is read off what the launcher did rather than re-derived from
 the shell's state. Both routes end in the same refusal,
-`sandbox::confinement_unavailable`: nothing ran, and the sandbox is why.
+`sandbox::Refusal::Unavailable`: nothing ran, and the sandbox is why.
 
 A ral-written pipeline stage is unrelated to this sandbox re-exec: it runs on
 its own thread of the parent process, sharing the parent's memory directly,

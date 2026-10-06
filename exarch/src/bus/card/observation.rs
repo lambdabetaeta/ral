@@ -8,7 +8,7 @@
 
 use std::borrow::Cow;
 
-use ral_core::types::{Decision, LeaseClass, Observed, WorkerId};
+use ral_core::types::{Check, Decision, LeaseClass, Observed, WorkerId};
 use std::collections::BTreeMap;
 
 use super::{Card, Mark, Role, Span};
@@ -29,19 +29,16 @@ pub(crate) enum Landing {
 
 pub(crate) fn landing(what: &Observed) -> Option<Landing> {
     Some(match what {
-        Observed::Read { .. } | Observed::Grep { .. } | Observed::Command { .. } => Landing::Effect,
+        Observed::Read(_) | Observed::Grep(_) | Observed::Command(_) => Landing::Effect,
         // A denial reads best whole, not dissolved into a tally.
-        Observed::Capability {
-            decision: Decision::Denied,
-            ..
-        } => Landing::Surfaced,
+        Observed::Check(check) if check.decision() == Decision::Denied => Landing::Surfaced,
         // A birth is the departure a settlement is the arrival of, and reads
         // as that mirror.
-        Observed::Worker { .. } => Landing::Announced,
+        Observed::Worker(_) => Landing::Announced,
         // A write lands as the change it made, decoded before it gets here; a
         // flagged check is the trail's alone; an `Act` is desk-fed and never
         // reaches the rail from the engine seam.
-        Observed::Write { .. } | Observed::Capability { .. } | Observed::Act { .. } => {
+        Observed::Write(_) | Observed::Check(_) | Observed::Act(_) => {
             return None;
         }
     })
@@ -55,28 +52,24 @@ pub(crate) fn landing(what: &Observed) -> Option<Landing> {
 /// on the rail.
 pub fn observation_spans(what: &Observed) -> Vec<Span> {
     match what {
-        Observed::Read { path } => read_spans(path),
-        Observed::Write { path, outcome, .. } => super::change::heading(path, *outcome),
-        Observed::Command { argv, status, .. } => {
+        Observed::Read(r) => read_spans(&r.path),
+        Observed::Write(w) => super::change::heading(&w.path, w.outcome),
+        Observed::Command(c) => {
             let mut spans = vec![Span::plain("$ ")];
-            spans.extend(exec_cmd_spans(argv));
-            let role = if *status == 0 { Role::Ok } else { Role::Bad };
+            spans.extend(exec_cmd_spans(&c.argv));
+            let role = if c.status == 0 { Role::Ok } else { Role::Bad };
             spans.push(Span::plain(" → "));
-            spans.push(Span::new(role, status.to_string()));
+            spans.push(Span::new(role, c.status.to_string()));
             spans
         }
-        Observed::Grep { scope, pattern } => {
+        Observed::Grep(g) => {
             let mut spans = vec![Span::new(Role::Muted, "grep ")];
-            spans.extend(grep_spans(scope, pattern));
+            spans.extend(grep_spans(&g.scope, &g.pattern));
             spans
         }
-        Observed::Capability {
-            resource,
-            decision,
-            fields,
-        } => capability_spans(resource, *decision, fields),
-        Observed::Worker { id, cmd, class } => worker_spans(*id, cmd, *class),
-        Observed::Act { .. } => {
+        Observed::Check(check) => capability_spans(check),
+        Observed::Worker(w) => worker_spans(w.id, &w.cmd, w.class),
+        Observed::Act(_) => {
             unreachable!("an `Act` never reaches the rail from the engine seam")
         }
     }
@@ -136,19 +129,18 @@ fn read_spans(path: &str) -> Vec<Span> {
 
 /// A capability check's heading, `check <resource> <decision> <fields…>`. The
 /// decision roles `Role::Bad` when denied — the only decision the rail ever
-/// surfaces, per the policy table in `evaluator/audit.rs`'s `observe_stamped`. The
+/// surfaces, per [`landing`]: core's door (`Shell::observe_stamped` in
+/// `core/src/types/audit/door.rs`) broadcasts every fact and leaves the rail's
+/// policy to the host. The
 /// trailing fields are core's own `fields` map (`name`/`resolved`/`args` for
 /// `exec`, `op`/`path` for `fs`, `prefix` for `deputy`) rendered as
 /// `key=value` pairs in the map's own order — whatever is present, nothing
 /// inferred.
-fn capability_spans(
-    resource: &str,
-    decision: Decision,
-    fields: &BTreeMap<String, String>,
-) -> Vec<Span> {
+fn capability_spans(check: &Check) -> Vec<Span> {
+    let (decision, fields) = (check.decision(), &check.fields);
     let mut spans = vec![
         Span::new(Role::Muted, "check "),
-        Span::new(Role::Path, resource),
+        Span::new(Role::Path, <&str>::from(check.resource)),
         Span::plain(" "),
         Span::new(
             if decision == Decision::Denied {
@@ -156,7 +148,7 @@ fn capability_spans(
             } else {
                 Role::Ok
             },
-            decision.as_str(),
+            <&str>::from(decision),
         ),
     ];
     if !fields.is_empty() {
@@ -164,13 +156,6 @@ fn capability_spans(
         spans.push(Span::new(Role::Muted, capability_fields(fields)));
     }
     spans
-}
-
-fn lease_class_label(class: LeaseClass) -> &'static str {
-    match class {
-        LeaseClass::Worker => "worker",
-        LeaseClass::Durable => "durable",
-    }
 }
 
 /// A worker birth's heading, `worker #id cmd class` — a mark of its own,
@@ -183,7 +168,7 @@ fn worker_spans(id: WorkerId, cmd: &str, class: LeaseClass) -> Vec<Span> {
         Span::plain(" "),
         Span::new(Role::Code, cmd),
         Span::plain(" "),
-        Span::new(Role::Muted, lease_class_label(class)),
+        Span::new(Role::Muted, <&str>::from(class)),
     ]
 }
 
@@ -225,8 +210,8 @@ pub(crate) fn execs_card(execs: &[&Observed]) -> Option<Card> {
     }
     let mut spans = vec![Span::plain("$ ")];
     join_spans(&mut spans, execs, |spans, e| {
-        if let Observed::Command { argv, .. } = *e {
-            spans.extend(exec_cmd_spans(argv));
+        if let Observed::Command(c) = *e {
+            spans.extend(exec_cmd_spans(&c.argv));
         }
     });
     Some(Card(vec![Mark::Text { spans }]))
@@ -239,8 +224,8 @@ pub(crate) fn greps_card(greps: &[&Observed]) -> Option<Card> {
     }
     let mut spans = vec![Span::new(Role::Muted, "grep ")];
     join_spans(&mut spans, greps, |spans, e| {
-        if let Observed::Grep { scope, pattern } = *e {
-            spans.extend(grep_spans(scope, pattern));
+        if let Observed::Grep(g) = *e {
+            spans.extend(grep_spans(&g.scope, &g.pattern));
         }
     });
     Some(Card(vec![Mark::Text { spans }]))
@@ -259,7 +244,7 @@ fn join_spans<T>(spans: &mut Vec<Span>, items: &[T], each: impl Fn(&mut Vec<Span
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ral_core::types::{AuditIo, CommandOrigin};
+    use ral_core::types::{AuditIo, CommandOrigin, Resource};
 
     /// The card's first [`Mark::Text`] flattened — the on-screen line, roling
     /// dropped.
@@ -272,13 +257,15 @@ mod tests {
     }
 
     fn command(argv: &[&str], status: i32) -> Observed {
-        Observed::Command {
-            argv: argv.iter().map(ToString::to_string).collect(),
+        let (shown, args) = argv.split_first().expect("a command names a program");
+        Observed::command(
+            shown,
+            args.iter().map(ToString::to_string),
             status,
-            origin: CommandOrigin::External,
-            io: AuditIo::default(),
-            error: None,
-        }
+            CommandOrigin::External,
+            AuditIo::default(),
+            None,
+        )
     }
 
     #[test]
@@ -306,16 +293,15 @@ mod tests {
 
     #[test]
     fn capability_card_denies_role_bad_and_shows_its_fields() {
-        let card = observation_card(&Observed::Capability {
-            resource: "fs".into(),
-            decision: Decision::Denied,
-            fields: [
+        let card = observation_card(&Observed::Check(Check::new(
+            Resource::Fs,
+            [
                 ("op".to_string(), "write".to_string()),
                 ("path".to_string(), "/etc/passwd".to_string()),
             ]
             .into_iter()
             .collect(),
-        });
+        )));
         assert_eq!(line(&card), "check fs denied op=write path=/etc/passwd");
         let Card(marks) = &card;
         let Mark::Text { spans } = &marks[0] else {

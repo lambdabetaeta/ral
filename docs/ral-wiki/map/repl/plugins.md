@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 22d70dff
+generated_at_commit: 446e3123
 generated_at_date: 2026-10-05
 covers_paths: [ral/src/repl/plugin.rs, ral/src/repl/plugin/, ral/src/repl/keybinding.rs, ral/src/repl/enquiry.rs]
 ---
@@ -15,8 +15,7 @@ through dispatches one way and two enquiry classes the other.** Editor state
 is a host concern, so core holds none of it
 ([[decisions/260514_repl-builtins-stay-in-repl|repl-builtins-stay-in-repl]]).
 The runtime is frontend-neutral: it drives the in-editor plugin surface —
-ghost text, highlight overlays, chord dispatch — that both the rustyline and
-structural editors render ([[map/repl/frontend|frontend]]); this page owns
+ghost text, highlight overlays, chord dispatch — that the rustyline editor renders ([[map/repl/frontend|frontend]]); this page owns
 the runtime, that page owns the rendering.
 
 ## The hook model
@@ -48,8 +47,8 @@ carries (`GrantStack::root()`).
 - **Prompt** — [[map/repl/loop|`prompt.rs`]] folds every plugin `prompt` hook
   over the session prompt's text.
 - **Buffer-change** — `run_buffer_change_hooks`, called from rustyline's
-  `Hinter` (and the structural surface's tick), dispatches each plugin's hook
-  whenever the line or cursor moves, with `{old_buf, line, pos, history,
+  `Hinter`, dispatches each plugin's hook
+  whenever the line or cursor moves, with `{old-buf, line, pos, history,
   keymap, state}` and a context with `in_readline` set, then gathers the
   ghost text and highlight spans the handlers left in it.
 - **Keybinding** — `keybinding.rs::dispatch_keybinding` (below).
@@ -89,7 +88,7 @@ them from `help`. They split into reads (`_ed-get`, `_ed-text`, `_ed-cursor`,
 and terminal escapes (`_ed-clipboard` for OSC 52, `_ed-hyperlink` for OSC 8).
 
 Each is a **thin engine-side door**: it keeps its own checks — interactive
-mode, `check_editor_read`/`check_editor_write` against the grant, its
+mode, `Shell::check(Flag::EditorRead | Flag::EditorWrite, …)` against the grant, its
 arguments' shape — and puts the rest to the host as one `` `repl-editor ``
 enquiry (`EditorOp`), decoding the answer strictly. The host answers only
 while a `PluginContext` is installed for the dispatch — inside a plugin
@@ -120,8 +119,7 @@ with a name. An unknown class or tag is refused by name.
 ## Runtime, manifests, loading
 
 `plugin.rs::PluginRuntime` is the `Arc<Mutex<…>>` the `ReplHost` holds,
-threaded between the loop, rustyline's `Hinter`/`Highlighter` callbacks, the
-structural surface's per-tick loop, and keybinding dispatch. It holds the
+threaded between the loop, rustyline's `Hinter`/`Highlighter` callbacks, and keybinding dispatch. It holds the
 host's plugin list (`LoadedPlugin`s, told by the load doors), the `KeyRouter`,
 and the `keybindings_dirty` flag directly and partitions the rest into
 `EditorHooks`, `Keybindings`, and `DeferredDiagnostics` so each call site
@@ -132,8 +130,7 @@ may refuse, which the door acts on.
 
 The frontend-neutral key vocabulary lives in `plugin/router.rs`:
 `parse_key_notation` yields a `KeyChord`/`KeyName` that rustyline adapts to its
-`KeyEvent` (`chord_to_key_event`) while the structural surface matches
-crossterm's against it; `Keymap` (`Emacs` / `Vi`) reduces rustyline's
+`KeyEvent` (`chord_to_key_event`); `Keymap` (`Emacs` / `Vi`) reduces rustyline's
 `EditMode`. **Keybinding dispatch is one ordered router**: `KeyRouter` — held
 on the runtime, rebuilt by `keybindings_changed` whenever the plugin list
 changes — flattens every binding in load order (then manifest order within a
@@ -141,8 +138,7 @@ plugin), and `resolve` returns the first entry whose chord matches and whose
 `guard` regex (matched against the text left of the cursor) allows.
 `Resolution::Claimed` names the owning plugin and binding index;
 `Resolution::Default` is the editor's built-in tail, which each backend
-realises natively (rustyline's per-chord `RouterKeyHandler` returns `None`,
-the structural surface falls into its own key arms) — precedence is decided
+realises natively (rustyline's per-chord `RouterKeyHandler` returns `None`,) — precedence is decided
 once, so the frontends cannot disagree. Resolution is pure host-side work,
 safe inside editor callbacks where no dispatch may run.
 
@@ -168,7 +164,7 @@ safe inside editor callbacks where no dispatch may run.
 - `plugin/load.rs` — the `load-plugin` and `unload-plugin` doors (`DOORS`),
   engine-side static builtins on the REPL surface. `load_plugin` resolves a
   plugin under `~/.config/ral/plugins/` or `RAL_PATH`, typechecks and
-  evaluates it through `modules::evaluate_source` in a fresh scope, under
+  evaluates it through `load::evaluate_source` in a fresh scope, under
   the return contract `contract::declared(Form::Manifest)`; `instantiate`
   applies a parameterised plugin's factory to its options map, nested under
   the door's own mooring, to yield its manifest (the contract sees only a

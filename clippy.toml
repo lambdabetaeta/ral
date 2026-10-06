@@ -13,7 +13,7 @@
 # `[silent:<slug>]` (raises none, and says why), or `[test]`, so `reason = "["`
 # finds every site and `core/tests/syscall_sites.rs` pins the set.
 #
-# `PathBuf::from` and `path::home(&EnvVars::new())` are disciplines with no
+# `PathBuf::from` and `EnvVars::home` are disciplines with no
 # ban: each resolves through a trait impl clippy cannot scope to a single
 # reachable function, so an entry would never fire.  Enforced by review.
 #
@@ -36,9 +36,9 @@ disallowed-methods = [
     { path = "std::path::Path::new", reason = "Use a named helper in crate::path (is_absolute / exists / basename / path_within_str / …) so the resolution rule lives in one place. FFI glue and env-var lifting #[allow] with a reason." },
     { path = "std::process::Child::wait", reason = "Use crate::process::ChildHandle::{into_watch, reap} — the reaper owns the wait and answers a stop itself; reap is the blocking reap after a confirmed kill." },
     { path = "std::process::Child::try_wait", reason = "Use crate::process::ChildHandle::try_reap. A raw try_wait reports a stopped child as still running (no WUNTRACED), which is the point: the reaper answers the stop for any pid it watches." },
-    { path = "std::env::var_os", reason = "An XDG basedir read goes through crate::path::basedir::resolve_xdg, which ignores a relative override per the spec. Other path-valued env reads #[allow] with a reason." },
-    { path = "ral_core::host::home", reason = "Host-only HOME read — a `within [env: …]` overlay does not apply. In language semantics thread the shell's overlay through crate::path::home instead." },
-    { path = "ral_core::host::user", reason = "Host-only USER read — a `within [env: …]` overlay does not apply. In language semantics thread the shell's overlay through crate::path::user_name instead." },
+    { path = "std::env::var_os", reason = "An XDG basedir read goes through crate::host::xdg, which ignores a relative override per the spec. Other path-valued env reads #[allow] with a reason." },
+    { path = "ral_core::host::home", reason = "Host-only HOME read — a `within [env: …]` overlay does not apply. In language semantics thread the shell's overlay through EnvVars::home instead." },
+    { path = "ral_core::host::user", reason = "Host-only USER read — a `within [env: …]` overlay does not apply. In language semantics thread the shell's overlay through EnvVars::user instead." },
     { path = "ignore::WalkBuilder::build", reason = "Use exarch::shell_eval::builtins::cancellable, the one sanctioned build() site: its walk polls ral_core::process::check per entry, so a long walk honours the tool-timeout / Esc cancel a bare ignore::Walk ignores." },
     { path = "std::fs::File::open", reason = "A model read is the redirect site that surfaces a read card; any other open is reasoned-silent." },
     { path = "std::fs::File::create", reason = "A model write is the redirect site that reports it; any other create is reasoned-silent." },
@@ -116,4 +116,14 @@ disallowed-methods = [
     { path = "std::sync::Condvar::wait_timeout_while", reason = "No door yet, on the same terms as wait_while above." },
     { path = "std::sync::Mutex::into_inner", reason = "Use crate::sync::LockExt::into_inner_ignore_poison — into_inner consumes the mutex, so the caller is its sole owner: poison can only record a panic that already finished, and there is no live writer left to tear anything." },
     { path = "std::sync::RwLock::into_inner", reason = "No door yet: no site needs one. Add into_inner_ignore_poison to RwLockExt rather than reaching past the policy." },
+]
+
+# The shell's own output goes through `outln!` / `errln!` (crate::terminal),
+# which drop a failed write: once the terminal hangs up, `println!` and
+# `eprintln!` panic on EIO or EPIPE.  A site that is not the shell's own
+# output (a tool's `--help`, a test) `#[allow]`s with a reason opening `[test]`
+# or `[silent:<slug>]`.
+disallowed-macros = [
+    { path = "std::println", reason = "Use ral_core::outln!, which drops a failed write rather than panicking on EPIPE." },
+    { path = "std::eprintln", reason = "Use ral_core::errln!, which drops a failed write rather than panicking on EPIPE." },
 ]

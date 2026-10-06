@@ -20,7 +20,7 @@ over a list of strings, typed `List String -> Command` and
 **The manifest is authored as two, and arity is the consequence.** A native
 table entry declares its arguments, so it has an arity — the curry-spine depth
 of its scheme, which is the one place any arity is read from
-(`BuiltinEntry::fixed_arity`, a `usize` for every entry there) — and it is a
+(`Decl::fixed_arity`, a `usize` for every entry there) — and it is a
 first-class *native* value. A base-frame manifest row takes an argv instead, so
 the argv half has no arity at all: the row is a *base frame* on the handler
 stack, whose arguments arrive as an argv like any command's

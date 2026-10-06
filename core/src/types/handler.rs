@@ -1,13 +1,13 @@
-//! The user handler stack — one flat `Vec<HandlerFrame>` shared by `alias` and
+//! The user handler stack — one flat stack of [`HandlerFrame`]s shared by `alias` and
 //! `within [handlers: …]`, ordered innermost-last.  Scoped frames come off by
 //! handle, alias frames by name.
 
 use super::builtin::BuiltinEntry;
 use super::value::Value;
-use crate::typecheck;
 use std::borrow::Cow;
 use std::fmt;
 use std::sync::Arc;
+use strum::IntoStaticStr;
 
 use super::flow::Settled;
 
@@ -37,7 +37,7 @@ pub(crate) struct HandlerEntry {
     pub(crate) thunk: Value,
     /// The arm's closed scheme, kept only on alias entries: their frames
     /// outlive the installing run and must seed the next run's check.
-    pub(crate) scheme: Option<Arc<typecheck::Scheme>>,
+    pub(crate) scheme: Option<Arc<crate::ty::Scheme>>,
 }
 
 impl HandlerEntry {
@@ -69,7 +69,7 @@ impl HandlerEntry {
         session_schemes: crate::typecheck::SessionSchemes,
         role: HandlerRole,
     ) -> Settled<Self> {
-        let label = role.label();
+        let label = <&str>::from(role);
         validate_handler_arity(&thunk, 1, &format!("{label}: `{name}`"))?;
         let Value::Thunk(closure) = &thunk else {
             unreachable!("validate_handler_arity guarantees a unary lambda");
@@ -89,23 +89,18 @@ impl HandlerEntry {
 
 /// Which install path is calling [`HandlerEntry::vet`] — picks the diagnostic's
 /// label and whether the inferred scheme is kept on the entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr)]
+#[strum(serialize_all = "kebab-case")]
 pub(crate) enum HandlerRole {
     /// `alias NAME { |args| … }` — the frame outlives its installing run, so
     /// its scheme seeds the next run's check.
     Alias,
     /// `within [handlers: …]` — the frame is popped before the run ends.
+    #[strum(serialize = "within handlers")]
     Scoped,
 }
 
 impl HandlerRole {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Alias => "alias",
-            Self::Scoped => "within handlers",
-        }
-    }
-
     fn persists_scheme(self) -> bool {
         matches!(self, Self::Alias)
     }
@@ -119,11 +114,9 @@ pub(crate) fn refused_arm(
     span: Option<crate::source::Span>,
 ) -> crate::types::Break {
     let sentence = error.hint().unwrap_or_else(|| error.kind.render_message());
-    let message = format!("{label}: {sentence}");
-    match span {
-        Some(span) => super::coerce::sig_at(message, span),
-        None => super::coerce::sig(message),
-    }
+    let mut error = crate::types::Error::new(format!("{label}: {sentence}"));
+    error.span = span;
+    error.into()
 }
 
 /// Check that `value` is a lambda of exactly `arity` arguments.
@@ -163,6 +156,15 @@ impl fmt::Debug for HandlerEntry {
     }
 }
 
+/// What installed a frame: `unalias` removes only an [`Self::Alias`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum FrameKind {
+    /// `within [handlers: …, handler: …]`: popped by handle when the scope ends.
+    Within,
+    /// `alias`: outlives its run.
+    Alias,
+}
+
 /// One frame of the handler stack, shared shape for scoped handlers and
 /// aliases.
 #[derive(Debug, Clone)]
@@ -170,9 +172,7 @@ pub(crate) struct HandlerFrame {
     pub(crate) entries: Vec<HandlerEntry>,
     /// `within [handler: thunk]`; `None` on alias frames.
     pub(crate) catch_all: Option<Value>,
-    pub handle: FrameHandle,
-    /// Set only by `alias`; scoped `within` frames come off by handle instead.
-    pub(crate) removable_by_unalias: bool,
+    pub(crate) kind: FrameKind,
 }
 
 impl HandlerFrame {
@@ -180,10 +180,7 @@ impl HandlerFrame {
     /// predicate behind both [`HandlerStack::remove_alias`] and
     /// `Shell::has_alias`.
     pub(crate) fn is_alias_for(&self, name: &str) -> bool {
-        self.removable_by_unalias
-            && self.catch_all.is_none()
-            && self.entries.len() == 1
-            && self.entries[0].name == name
+        self.kind == FrameKind::Alias && self.entries.first().is_some_and(|e| e.name == name)
     }
 }
 
@@ -196,20 +193,21 @@ pub(crate) enum HandlerLookup {
     Base(BuiltinEntry),
 }
 
-/// The handler stack: the innermost frame sits at the highest index.
+/// The handler stack: the innermost frame sits at the highest index, each
+/// beside the handle this stack minted for it.
 ///
 /// No `Serialize` / `Deserialize` — frames carry `Value`, whose closures must
-/// be interned through `serial::InternCtx` to cross an IPC boundary, which
-/// `subprocess`'s `WireHandlerFrame` does field by field.
+/// be interned through `seed`'s `InternCtx` to cross an IPC boundary, which
+/// `seed`'s `WireHandlerFrame` does field by field.
 ///
 /// `base` is a permanent layer below every run frame — manifest rows, not
 /// `HandlerFrame`s, so [`Self::strip_matched`] and [`Self::remove_alias`],
 /// which index `frames` alone, cannot reach it.  It never crosses the wire:
-/// the wire form is a `Vec<HandlerFrame>`, and a receiving shell's own boot
+/// the wire form is a `Vec` of frames, and a receiving shell's own boot
 /// installs its base layer.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct HandlerStack {
-    frames: Vec<HandlerFrame>,
+    frames: Vec<(FrameHandle, HandlerFrame)>,
     base: Vec<BuiltinEntry>,
     next_handle: u64,
 }
@@ -221,8 +219,7 @@ impl HandlerStack {
         self.push_frame(HandlerFrame {
             entries,
             catch_all,
-            handle: FrameHandle(u64::MAX),
-            removable_by_unalias: false,
+            kind: FrameKind::Within,
         })
     }
 
@@ -231,35 +228,34 @@ impl HandlerStack {
         self.push_frame(HandlerFrame {
             entries,
             catch_all: None,
-            handle: FrameHandle(u64::MAX),
-            removable_by_unalias: true,
+            kind: FrameKind::Alias,
         })
     }
 
-    /// Append a whole frame, minting a fresh handle and keeping every other
-    /// field — notably `removable_by_unalias`, so a wire-hydrated alias stays
-    /// removable.  The incoming handle is discarded: identity belongs to the
-    /// receiving stack.
-    pub(crate) fn push_frame(&mut self, mut frame: HandlerFrame) -> FrameHandle {
+    /// Append a whole frame under a fresh handle: identity belongs to this
+    /// stack, so a wire-hydrated alias stays removable by `unalias`.
+    pub(crate) fn push_frame(&mut self, frame: HandlerFrame) -> FrameHandle {
         let handle = FrameHandle(self.next_handle);
         self.next_handle += 1;
-        frame.handle = handle;
-        self.frames.push(frame);
+        self.frames.push((handle, frame));
         handle
     }
 
     /// Remove the frame carrying `handle`, searching innermost-first.
     pub(crate) fn remove_by_handle(&mut self, handle: FrameHandle) -> Option<HandlerFrame> {
-        let pos = self.frames.iter().rposition(|f| f.handle == handle)?;
-        Some(self.frames.remove(pos))
+        let pos = self.frames.iter().rposition(|(h, _)| *h == handle)?;
+        Some(self.frames.remove(pos).1)
     }
 
-    /// Remove the innermost alias frame for `name`.  The `removable_by_unalias`
-    /// bit excludes a `within [handlers: [foo: t]]` frame by construction, even
-    /// though it shares an alias's one-entry, no-catch-all shape.
+    /// Remove the innermost alias frame for `name`.  The [`FrameKind`] excludes
+    /// a `within [handlers: [foo: t]]` frame by construction, even though it
+    /// shares an alias's one-entry, no-catch-all shape.
     pub fn remove_alias(&mut self, name: &str) -> Option<HandlerFrame> {
-        let pos = self.frames.iter().rposition(|f| f.is_alias_for(name))?;
-        Some(self.frames.remove(pos))
+        let pos = self
+            .frames
+            .iter()
+            .rposition(|(_, f)| f.is_alias_for(name))?;
+        Some(self.frames.remove(pos).1)
     }
 
     /// The winning handler for `name`: a run-frame per-name entry (with its
@@ -269,15 +265,15 @@ impl HandlerStack {
     /// never sees a base frame's name.  `None` falls through to external
     /// command lookup.
     pub(crate) fn lookup(&self, name: &str) -> Option<HandlerLookup> {
-        for (depth, frame) in self.frames.iter().rev().enumerate() {
+        for (depth, (_, frame)) in self.frames.iter().rev().enumerate() {
             if let Some(entry) = frame.entries.iter().find(|e| e.name == name) {
                 return Some(HandlerLookup::Frame(Box::new(entry.clone()), depth + 1));
             }
         }
-        if let Some(entry) = self.base.iter().find(|e| e.name == name) {
+        if let Some(entry) = self.base.iter().find(|e| e.decl.name == name) {
             return Some(HandlerLookup::Base(entry.clone()));
         }
-        for (depth, frame) in self.frames.iter().rev().enumerate() {
+        for (depth, (_, frame)) in self.frames.iter().rev().enumerate() {
             if let Some(thunk) = &frame.catch_all {
                 return Some(HandlerLookup::Frame(
                     Box::new(HandlerEntry {
@@ -301,15 +297,14 @@ impl HandlerStack {
     /// Every per-name entry on the stack, innermost first.  A shadowed name
     /// appears once per frame that binds it.
     pub(crate) fn entries(&self) -> impl Iterator<Item = &HandlerEntry> {
-        self.frames.iter().rev().flat_map(|f| f.entries.iter())
+        self.iter().rev().flat_map(|f| f.entries.iter())
     }
 
     /// The installed alias arms' schemes, outermost first — the alias half of
     /// the seed `Shell::session_schemes` hands the next run's check.
-    pub(crate) fn alias_schemes(&self) -> Vec<(String, Arc<typecheck::Scheme>)> {
-        self.frames
-            .iter()
-            .filter(|f| f.removable_by_unalias)
+    pub(crate) fn alias_schemes(&self) -> Vec<(String, Arc<crate::ty::Scheme>)> {
+        self.iter()
+            .filter(|f| f.kind == FrameKind::Alias)
             .flat_map(|f| f.entries.iter())
             .filter_map(|entry| {
                 entry
@@ -320,14 +315,15 @@ impl HandlerStack {
             .collect()
     }
 
-    pub fn iter(&self) -> std::slice::Iter<'_, HandlerFrame> {
-        self.frames.iter()
+    /// The frames, outermost first.
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = &HandlerFrame> {
+        self.frames.iter().map(|(_, frame)| frame)
     }
 
     /// Every value a frame holds — each entry's `thunk`, then its
     /// `catch_all` — outermost frame first.
     pub(crate) fn values_mut(&mut self) -> impl Iterator<Item = &mut Value> {
-        self.frames.iter_mut().flat_map(|frame| {
+        self.frames.iter_mut().flat_map(|(_, frame)| {
             frame
                 .entries
                 .iter_mut()
@@ -339,7 +335,7 @@ impl HandlerStack {
     /// Lift the frame at `depth`, as returned by [`Self::lookup`], off the
     /// stack; pair with [`Self::restore_matched`].  Only that frame goes, so
     /// outer handlers for *other* names stay visible to the running body.
-    pub(crate) fn strip_matched(&mut self, depth: usize) -> HandlerFrame {
+    pub(crate) fn strip_matched(&mut self, depth: usize) -> (FrameHandle, HandlerFrame) {
         let index = self.frames.len() - depth;
         self.frames.remove(index)
     }
@@ -349,38 +345,12 @@ impl HandlerStack {
     /// Handles are monotonic, so inserting after the rightmost strictly older
     /// handle restores the original order; the only newer frames are those the
     /// masked body pushed itself.
-    pub(crate) fn restore_matched(&mut self, frame: HandlerFrame) {
+    pub(crate) fn restore_matched(&mut self, (handle, frame): (FrameHandle, HandlerFrame)) {
         let insert_at = self
             .frames
             .iter()
-            .rposition(|f| f.handle.0 < frame.handle.0)
+            .rposition(|(h, _)| h.0 < handle.0)
             .map_or(0, |i| i + 1);
-        self.frames.insert(insert_at, frame);
-    }
-}
-
-impl<'a> IntoIterator for &'a HandlerStack {
-    type Item = &'a HandlerFrame;
-    type IntoIter = std::slice::Iter<'a, HandlerFrame>;
-    fn into_iter(self) -> Self::IntoIter {
-        self.frames.iter()
-    }
-}
-
-impl From<Vec<HandlerFrame>> for HandlerStack {
-    /// Assigns fresh handles, the wire format not carrying them: this is how
-    /// frames hydrated from a subprocess envelope acquire identity.
-    fn from(v: Vec<HandlerFrame>) -> Self {
-        let mut stack = Self::default();
-        for frame in v {
-            stack.push_frame(frame);
-        }
-        stack
-    }
-}
-
-impl From<HandlerStack> for Vec<HandlerFrame> {
-    fn from(s: HandlerStack) -> Self {
-        s.frames
+        self.frames.insert(insert_at, (handle, frame));
     }
 }

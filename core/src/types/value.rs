@@ -2,7 +2,6 @@
 //! what a builtin returns.
 
 use super::builtin::BuiltinEntry;
-use super::bytes::Bytes;
 use super::closure::Closure;
 #[cfg(test)]
 use super::env::Binding;
@@ -11,10 +10,18 @@ use super::env::Env;
 use super::handle::HandleInner;
 use super::list::List;
 use super::map::Map;
-use super::string::Str;
-use crate::syntax::tag::TAG_PREFIX;
+use crate::first_order::Bytes;
+use crate::first_order::Finite;
+use crate::terminal::{InteractiveMode, TerminalState};
+use crate::text::Str;
+use crate::ty::{Head, TAG_PREFIX};
 use std::fmt;
+use std::ops::ControlFlow;
 use std::sync::Arc;
+
+mod compare;
+mod first_order;
+pub(crate) use first_order::Leaf;
 
 /// The runtime representation of every ral value.
 ///
@@ -31,7 +38,7 @@ pub enum Value {
     Unit,
     Bool(bool),
     Int(i64),
-    Float(f64),
+    Float(Finite),
     String(Str),
     Bytes(Bytes),
     List(List),
@@ -63,25 +70,11 @@ const _: () = assert!(
 );
 
 impl Value {
-    /// `Int` and whole `Float` only: a numeric-looking string is never
-    /// silently parsed, since that is the `int` builtin's job.
+    /// `Int` only: the checker keeps `Int` and `Float` apart, and a
+    /// numeric-looking string is the `int` builtin's job.
     pub fn as_int(&self) -> Option<i64> {
         match self {
             Self::Int(n) => Some(*n),
-            #[allow(
-                clippy::float_cmp,
-                reason = "integral test: exact by construction, comparing f to its own floor"
-            )]
-            Self::Float(f)
-                if *f == f.floor()
-                    && (-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(f) =>
-            {
-                #[allow(
-                    clippy::cast_possible_truncation,
-                    reason = "guard restricts f to integral values in [-2^63, 2^63); the cast is exact"
-                )]
-                Some(*f as i64)
-            }
             _ => None,
         }
     }
@@ -94,7 +87,7 @@ impl Value {
                 reason = "Int→Float coercion; loss beyond 2^53 is intrinsic to representing i64 in an f64 mantissa"
             )]
             Self::Int(n) => Some(*n as f64),
-            Self::Float(f) => Some(*f),
+            Self::Float(f) => Some(f.get()),
             _ => None,
         }
     }
@@ -103,6 +96,14 @@ impl Value {
     /// wrapping stays invisible to callers.
     pub fn list(items: Vec<Self>) -> Self {
         Self::List(items.into())
+    }
+
+    /// A tagged value; the label is stored without its backtick.
+    pub fn variant(label: impl Into<crate::ir::Name>, payload: Option<Self>) -> Self {
+        Self::Variant {
+            label: label.into(),
+            payload: payload.map(Box::new),
+        }
     }
 
     /// Every string-construction site goes through here, so the shared buffer
@@ -117,6 +118,34 @@ impl Value {
         Self::Bytes(b.into())
     }
 
+    /// The heads this value may be admitted at: a map is a `Map` or a
+    /// `Record`, which the runtime does not tell apart.
+    pub(crate) fn heads(&self) -> &'static [Head] {
+        match self {
+            Self::Unit => &[Head::Unit],
+            Self::Bool(_) => &[Head::Bool],
+            Self::Int(_) => &[Head::Int],
+            Self::Float(_) => &[Head::Float],
+            Self::String(_) => &[Head::String],
+            Self::Bytes(_) => &[Head::Bytes],
+            Self::List(_) => &[Head::List],
+            Self::Map(_) => &[Head::Map, Head::Record],
+            Self::Variant { .. } => &[Head::Variant],
+            Self::Thunk(_) | Self::Native { .. } => &[Head::Thunk],
+            Self::Handle(_) => &[Head::Handle],
+        }
+    }
+
+    /// The text of a scalar (`String`, `Int`, `Float`, `Bool`), the one
+    /// conversion an interpolation, an environment override and a printer share.
+    pub fn scalar_text(&self) -> Option<String> {
+        matches!(
+            self,
+            Self::String(_) | Self::Int(_) | Self::Float(_) | Self::Bool(_)
+        )
+        .then(|| self.to_string())
+    }
+
     /// Render an argv: every element through the total text conversion
     /// [`Display`](fmt::Display) performs and `str` exposes.
     ///
@@ -124,7 +153,7 @@ impl Value {
     /// `echo`'s write, a handler arm's argument list, the audit trail's record
     /// of a call — so an argv is a list of strings wherever it is read.  It is
     /// total on purpose, and so is unlike the exec boundary, which refuses the
-    /// shapes [`super::RefusedArg`] names because it is heading for `execve(2)`:
+    /// shapes [`crate::ty::RefusedArg`] names because it is heading for `execve(2)`:
     /// total inside, gated at the OS call.
     pub(crate) fn render_argv(args: &[Self]) -> Vec<String> {
         args.iter().map(ToString::to_string).collect()
@@ -135,6 +164,29 @@ impl Value {
     /// of spreads.
     pub fn map(pairs: Vec<(String, Self)>) -> Self {
         Self::Map(pairs.into())
+    }
+
+    /// Visit each direct component of data: a list's elements, a record's
+    /// values, a variant's payload, a native's collected arguments.  A closure
+    /// has none: its capture is never entered.
+    pub(crate) fn try_for_each_child<B>(
+        &self,
+        f: &mut impl FnMut(&Self) -> ControlFlow<B>,
+    ) -> ControlFlow<B> {
+        match self {
+            Self::List(items) => items.iter().try_for_each(|v| f(&v)),
+            Self::Map(pairs) => pairs.iter().try_for_each(|(_, v)| f(&v)),
+            Self::Variant { payload, .. } => payload.iter().try_for_each(|p| f(p)),
+            Self::Native { applied, .. } => applied.iter().try_for_each(f),
+            Self::Unit
+            | Self::Bool(_)
+            | Self::Int(_)
+            | Self::Float(_)
+            | Self::String(_)
+            | Self::Bytes(_)
+            | Self::Thunk(_)
+            | Self::Handle(_) => ControlFlow::Continue(()),
+        }
     }
 
     /// The name a diagnostic calls this value.
@@ -209,6 +261,7 @@ impl Value {
     }
 }
 
+/// Representational equality, the tests' oracle; ral's own `==` is [`Value::equals`].
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -230,19 +283,7 @@ impl PartialEq for Value {
                     payload: pb,
                 },
             ) => la == lb && pa == pb,
-            // A name is an intensional identity a closure lacks, so natives
-            // compare where closures never do.
-            (
-                Self::Native {
-                    entry: ea,
-                    applied: aa,
-                },
-                Self::Native {
-                    entry: eb,
-                    applied: ab,
-                },
-            ) => ea.name == eb.name && aa == ab,
-            // Closures and handles are never structurally equal.
+            // Suspensions are never structurally equal.
             _ => false,
         }
     }
@@ -254,7 +295,7 @@ impl fmt::Display for Value {
             Self::Unit => write!(f, "()"),
             Self::Bool(b) => write!(f, "{b}"),
             Self::Int(n) => write!(f, "{n}"),
-            Self::Float(n) => f.write_str(&fmt_float(*n)),
+            Self::Float(n) => write!(f, "{n}"),
             Self::String(s) => write!(f, "{s}"),
             Self::Bytes(b) => write!(f, "{}", String::from_utf8_lossy(b)),
             Self::List(items) => {
@@ -291,59 +332,17 @@ impl fmt::Display for Value {
                 Some((param, body)) => write!(f, "{}", fmt_lambda(param, body)),
                 None => write!(f, "<block>"),
             },
-            Self::Native { entry, applied } => write!(f, "{}", fmt_native(&entry.name, applied)),
+            Self::Native { entry, applied } => {
+                write!(f, "{}", fmt_native(&entry.decl.name, applied))
+            }
             Self::Handle(h) => write!(f, "<handle:{}>", h.cmd),
         }
     }
 }
 
-fn fmt_param(p: &crate::ir::IrPattern) -> String {
-    match p {
-        crate::ir::IrPattern::Wildcard => "_".into(),
-        crate::ir::IrPattern::Name(s) => s.to_string(),
-        crate::ir::IrPattern::List { elems, rest } => {
-            let mut parts: Vec<String> = elems.iter().map(fmt_param).collect();
-            if let Some(r) = rest {
-                parts.push(format!("...{r}"));
-            }
-            format!("[{}]", parts.join(" "))
-        }
-        crate::ir::IrPattern::Map(entries) => {
-            let parts: Vec<String> = entries
-                .iter()
-                .map(|entry| {
-                    let label = entry.key.clone();
-                    let v = fmt_param(&entry.pattern);
-                    if matches!(&entry.pattern, crate::ir::IrPattern::Name(n) if n.as_ref() == label) {
-                        label
-                    } else {
-                        format!("{label}: {v}")
-                    }
-                })
-                .collect();
-            format!("[{}]", parts.join(" "))
-        }
-    }
-}
-
-/// The one printed spelling of a `Float`.
-///
-/// ryu's shortest round trip, with the point restored to a bare exponent
-/// mantissa (`1e300` → `1.0e300`) so the printer's image stays inside the
-/// numeral grammar.  A `Float` is finite by construction; ryu's `NaN`/`inf`
-/// are the honest last resort.
-pub fn fmt_float(n: f64) -> String {
-    let mut buf = ryu::Buffer::new();
-    let s = buf.format(n);
-    match s.split_once('e') {
-        Some((mantissa, exp)) if !mantissa.contains('.') => format!("{mantissa}.0e{exp}"),
-        _ => s.to_owned(),
-    }
-}
-
 /// Format as `<native NAME>`, or `<native NAME +N>` for a partial with `N`
 /// collected arguments.
-pub fn fmt_native(name: &str, applied: &[Value]) -> String {
+fn fmt_native(name: &str, applied: &[Value]) -> String {
     if applied.is_empty() {
         format!("<native {name}>")
     } else {
@@ -352,14 +351,52 @@ pub fn fmt_native(name: &str, applied: &[Value]) -> String {
 }
 
 /// Format as `<|a b ...| block>`, flattening the curried `Lam` chain.
-pub fn fmt_lambda(param: &crate::ir::IrPattern, body: &crate::ir::Comp) -> String {
-    let mut params = vec![fmt_param(param)];
+fn fmt_lambda(param: &crate::ir::Pattern, body: &crate::ir::Comp) -> String {
+    let mut params = vec![param.to_string()];
     let mut comp = body;
     while let crate::ir::CompKind::Lam { param, body } = &comp.item {
-        params.push(fmt_param(param));
+        params.push(param.to_string());
         comp = body;
     }
     format!("<|{}| block>", params.join(" "))
+}
+
+/// The `$TERMINAL` map bound for RC files and plugins.  Scripts pattern-match
+/// these keys: adding one is safe, renaming or removing one breaks them.
+impl From<&TerminalState> for Value {
+    fn from(t: &TerminalState) -> Self {
+        let mode = match t.mode {
+            InteractiveMode::Auto => "auto",
+            InteractiveMode::Minimal => "minimal",
+            InteractiveMode::Full => "full",
+        };
+        let flags = [
+            ("stdin-tty", t.startup_stdin_tty),
+            ("stdout-tty", t.startup_stdout_tty),
+            ("stderr-tty", t.startup_stderr_tty),
+            ("supports-ansi", t.supports_ansi),
+            ("no-color", t.no_color),
+            ("is-tmux", t.is_tmux),
+            ("is-asciinema", t.is_asciinema),
+            ("is-ci", t.is_ci),
+            ("truecolor", t.truecolor),
+            ("hyperlinks", t.hyperlinks),
+            ("clipboard-write", t.clipboard_write),
+            ("bracketed-paste", t.bracketed_paste),
+            ("ui-ansi-ok", t.ui_ansi_ok()),
+            ("ui-truecolor-ok", t.ui_truecolor_ok()),
+            ("ui-hyperlinks-ok", t.ui_hyperlinks_ok()),
+            ("ui-clipboard-write-ok", t.ui_clipboard_write_ok()),
+            ("ui-bracketed-paste-ok", t.ui_bracketed_paste_ok()),
+        ];
+        Self::map(
+            flags
+                .into_iter()
+                .map(|(k, b)| (k.into(), Self::Bool(b)))
+                .chain([("mode".into(), Self::string(mode))])
+                .collect(),
+        )
+    }
 }
 
 /// A block mentioning every session name of `env`, so its capture is `env`
@@ -388,7 +425,7 @@ pub(crate) fn captured(v: Option<&Value>) -> &Env {
 
 /// A chain of `n` blocks over `foot`, each capturing the next in a one-binding
 /// env — the skeleton of a user-built lazy list.  Fixture for the walks that
-/// cross the captured-env seam once per link: the serial encoder, the fork's
+/// cross the captured-env seam once per link: the seed encoder, the fork's
 /// scrub, and `Env`'s drop.
 #[cfg(test)]
 pub(crate) fn deep_block_chain(n: usize, foot: Value) -> Value {

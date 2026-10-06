@@ -292,7 +292,7 @@ pub struct GuestLink {
 /// platform's owner type is the other's: on Unix a wire is an `AF_VSOCK`
 /// stream named by its file descriptor, on Windows an `AF_HYPERV` socket.
 /// Both are adopted into the same frame channel by
-/// [`ral_core::wire::WireStream`](../../core/src/wire.rs), whose docs explain
+/// [`ral_core::protocol::channel::WireStream`](../../core/src/protocol/channel.rs), whose docs explain
 /// why std's stream types can carry either.
 #[cfg(unix)]
 #[derive(Debug)]
@@ -320,7 +320,7 @@ pub struct Wires {
 /// The same one-word-per-platform shape [`Wires`] carries per field: a
 /// single owned socket handle, `OwnedFd` on Unix and `OwnedSocket` on
 /// Windows, because that is what each platform's dial produces and
-/// [`ral_core::wire::WireStream`](../../core/src/wire.rs) adopts either
+/// [`ral_core::protocol::channel::WireStream`](../../core/src/protocol/channel.rs) adopts either
 /// kind the same way.
 #[cfg(unix)]
 pub type AgentDial = std::os::fd::OwnedFd;

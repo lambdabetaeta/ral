@@ -21,8 +21,9 @@
 
 mod common;
 
+use ral_core::capability::{Capabilities, ExecKey, Verdict};
 use ral_core::path::FrozenPath;
-use ral_core::types::{Capabilities, ExecKey, ExecProjection, Verdict};
+use ral_core::test_access::exec_projection_restricts;
 
 #[test]
 fn exec_only_grant_still_projects() {
@@ -41,6 +42,6 @@ fn exec_only_grant_still_projects() {
         let projection = shell
             .sandbox_projection()
             .expect("an exec-only grant asks for kernel exec confinement");
-        assert!(matches!(projection.exec, ExecProjection::Restricted(_)));
+        assert!(exec_projection_restricts(&projection));
     });
 }

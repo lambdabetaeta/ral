@@ -12,8 +12,7 @@
 //! this working tree back, and a pointer nothing claims is a policy error
 //! rather than a wider grant.
 
-use ral_core::path::sigil::{FreezeCtx, freeze_one};
-use ral_core::types::PolicyError;
+use ral_core::guard::freeze::{FreezeCtx, PolicyError};
 use std::path::{Path, PathBuf};
 
 fn root(tag: &str) -> PathBuf {
@@ -24,13 +23,11 @@ fn root(tag: &str) -> PathBuf {
 }
 
 fn freeze(entry: &str, cwd: &Path) -> Result<String, PolicyError> {
-    freeze_one(
-        entry,
-        &FreezeCtx {
-            home: Some("/h"),
-            cwd,
-        },
-    )
+    FreezeCtx {
+        home: Some("/h".into()),
+        cwd: cwd.into(),
+    }
+    .path(entry)
     .map(|p| p.as_str().to_string())
 }
 
@@ -68,7 +65,7 @@ fn gitdir_takes_a_plain_clone_directory_as_it_stands() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// Outside a repository there is nothing to discover, and `freeze_one`'s
+/// Outside a repository there is nothing to discover, and `FreezeCtx::path`'s
 /// documented fallback is the cwd itself.
 #[test]
 fn gitdir_outside_a_repository_falls_back_to_the_cwd() {

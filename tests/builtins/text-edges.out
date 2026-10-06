@@ -10,5 +10,5 @@ ok: re-find-match
 ok: re-find-matches
 re-find-match: no match for pattern '[0-9]+'
 ok: string-replace
-string-replace: 'from' matches 2 times — must match exactly once; widen the pattern with surrounding context to disambiguate
+string-replace: 'from' matches 2 times; must match exactly once; widen the pattern with surrounding context to disambiguate
 text edge tests done

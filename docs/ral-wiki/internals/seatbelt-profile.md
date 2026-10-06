@@ -1,7 +1,7 @@
 ---
 verified_at_commit: 1eee86cd
 verified_at_date: 2026-10-05
-anchors: [apply_profile, build_profile, Profile, emit_fs_restricted, emit_exec_rules, Sbpl, emit_ancestor_metadata, existing_system_paths, system_paths, withheld_doors, rendered_ancestors, pinned_dirs, open_search_dir]
+anchors: [apply_profile, build_profile, Profile, emit_fs_restricted, emit_exec_rules, Clause, Filter, emit_ancestor_metadata, existing_system_paths, system_paths, withheld_doors, rendered_ancestors, pinned_dirs, open_search_dir]
 ---
 
 # The Seatbelt profile: an object policy in a name language
@@ -75,7 +75,7 @@ binary in one `(allow file-read* process-exec …)` — Seatbelt needs both
 operations to spawn; ral is admitted because a ral run inside the sandbox
 starts its own bundled tools and pipeline anchors by re-executing this binary.
 An operand-less form is an unconditional allow, so an empty base emits nothing. Then each of the projection's rules, already in
-`Rank` order, becomes one `Sbpl` form: an allowing dir or file
+`Rank` order, becomes one `Clause`: an allowing dir or file
 `(allow file-read* process-exec (subpath|literal …))`, a denying one
 `(deny process-exec …)`, a veto `(deny process-exec (regex #"/name$"))`,
 the name wherever it resolves. Seatbelt matches each form caselessly, as the

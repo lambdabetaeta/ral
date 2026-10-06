@@ -94,9 +94,10 @@ The chapters keep their own representations, locks, and homes
 the worker registry beside core's handles, the agent tree and schedules in
 exarch. What is shared is the
 small resident signature — identity, population, capability kind, lease
-row, state label, cancel, defined once in
-[[map/core/shell-state|`core/src/types/resident.rs`]] — and the folds
-written against it:
+row, state label, cancel — a convention each chapter's fold writes by hand
+(core's `Resident` trait was retired unused,
+[[decisions/260705_session-ledger|session-ledger]]), and the folds written
+against it:
 
 - **list** — project a set of chapters into one table, marked by kind in a
   designator namespace of its own (`[wN]`) so different chapters can never

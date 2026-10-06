@@ -1,5 +1,6 @@
 //! The shell-state builtins: `alias`, `unalias`, and `cd`.
 
+use crate::capability::Flag;
 use crate::types::{Settled, Shell, Value, sig};
 
 /// `alias NAME BODY` — the interactive door to [`Shell::install_alias`],
@@ -56,12 +57,12 @@ pub(super) fn builtin_unalias(args: &[Value], shell: &mut Shell) -> Settled<Valu
 /// `cd <path>` — move the shell's logical cwd, never the OS process cwd.
 pub(super) fn builtin_chdir(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     // The checker guarantees one String, but not a non-empty one, and
-    // `resolve_path` would read "" as the cwd — making `cd $d` a silent
+    // `resolve_path` would read "" as the cwd: making `cd $d` a silent
     // success that moved nowhere.
     let path = match &args[0] {
         Value::String(s) if s.is_empty() => {
             return Err(sig(
-                "cd: the empty string names no directory — did you mean `cd .`, or `cd ~`?"
+                "cd: the empty string names no directory; did you mean `cd .`, or `cd ~`?"
                     .to_string(),
             ));
         }
@@ -74,7 +75,7 @@ pub(super) fn builtin_chdir(args: &[Value], shell: &mut Shell) -> Settled<Value>
         }
     };
 
-    shell.check_shell_chdir()?;
+    shell.check(Flag::ShellChdir, "cd")?;
     shell.apply_chdir(path)?;
     Ok(Value::Unit)
 }

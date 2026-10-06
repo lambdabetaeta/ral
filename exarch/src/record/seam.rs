@@ -98,7 +98,7 @@ impl Emitter {
     pub fn report_fault(&self, error: &io::Error) {
         let text = format!("a record was not appended to record.jsonl: {error}");
         self.transient(Transient::Fault { text: text.clone() });
-        eprintln!("exarch: {text}");
+        ral_core::errln!("exarch: {text}");
     }
 }
 

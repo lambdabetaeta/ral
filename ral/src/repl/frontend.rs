@@ -5,48 +5,38 @@
 //! messages, escape sequences, or the internal buffer stack — each
 //! backend owns those concerns itself.
 //!
-//! Three implementations live in submodules:
+//! Two implementations live in submodules:
 //! - [`minimal::MinimalFrontend`] — canonical-stdin fallback for dumb
 //!   terminals and `RAL_INTERACTIVE_MODE=minimal`.  No raw mode, no
 //!   plugin features.
 //! - [`rustyline::RustylineFrontend`] — full editor with completion,
 //!   plugin keybindings, ghost text, highlights, and rustyline history.
-//! - `structural::StructuralFrontend` — the ratatui projection surface
-//!   ([`Surface::Structural`], `structural` builds only): a line editor
-//!   drawn in an inline viewport that projects the engine's typed spine,
-//!   worksheet bindings, and handles matrix around the prompt.
 //!
 //! Every frontend reads the engine only through the transport — probes, and
 //! hook dispatches — never a `Shell`.
 
 mod minimal;
 mod rustyline;
-#[cfg(feature = "structural")]
-mod structural;
 
 pub(super) use minimal::MinimalFrontend;
 pub(super) use rustyline::RustylineFrontend;
-#[cfg(feature = "structural")]
-pub(super) use structural::StructuralFrontend;
 
-use ral_core::protocol::Transport;
+use ral_core::carrier::Transport;
 
 use super::config::dirs_history;
 use super::host::Printer;
 use super::prompt::PromptText;
-#[cfg(feature = "structural")]
-use super::worksheet::Worksheet;
 
 // ── Surface selection ───────────────────────────────────────────────────────
 
 /// Which interactive surface the REPL presents, chosen by the `--surface`
 /// flag or the rc `surface:` key (flag wins).
 ///
-/// Distinct from [`InteractiveMode`](ral_core::io::InteractiveMode): that
+/// Distinct from [`InteractiveMode`](ral_core::terminal::InteractiveMode): that
 /// records what the terminal *can* do (ANSI, round-trips) and is the escape
 /// hatch for hostile setups; this records which frontend the user *wants*.
 /// The capability gate overrides this — a terminal resolved to
-/// [`Minimal`](ral_core::io::InteractiveMode::Minimal) gets the canonical
+/// [`Minimal`](ral_core::terminal::InteractiveMode::Minimal) gets the canonical
 /// editor whatever surface was asked for.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum Surface {
@@ -56,11 +46,6 @@ pub(crate) enum Surface {
     /// suggested text and highlighting. This is the default.
     #[default]
     Readline,
-    /// Show live types, bindings and running workers around the prompt. This
-    /// needs a build with the `structural` feature and a terminal that
-    /// supports raw mode. Ral falls back to readline if either is
-    /// unavailable.
-    Structural,
 }
 
 // ── Event types ───────────────────────────────────────────────────────────
@@ -165,12 +150,6 @@ impl History {
         }
     }
 
-    /// The entries available for navigation, oldest first.
-    #[cfg(feature = "structural")]
-    pub(super) fn entries(&self) -> &[String] {
-        &self.entries
-    }
-
     /// Append this session's new entries to the history file.
     #[allow(
         clippy::disallowed_methods,
@@ -207,19 +186,11 @@ pub(super) trait Frontend {
     /// (e.g. `_ed-push`).  The frontend is responsible for plugin sync,
     /// keybinding dispatch, continuation reads, line-erase escapes, and
     /// flushing deferred plugin diagnostics before returning.
-    ///
-    /// `worksheet` is the session's [`Worksheet`] model (the `structural`
-    /// build only), threaded so the structural surface can draw each user
-    /// binding's dependency edges and pure/effectful verdict — the data the
-    /// live env cannot reconstruct.  The session owns it so it accumulates
-    /// across runs; the frontend reads it.  The line-editor backends ignore
-    /// it.
     fn read(
         &mut self,
         engine: &dyn Transport,
         prompt: &PromptText,
         pending: Option<EditBuffer>,
-        #[cfg(feature = "structural")] worksheet: &Worksheet,
     ) -> Read;
 
     fn add_history(&mut self, entry: &str);

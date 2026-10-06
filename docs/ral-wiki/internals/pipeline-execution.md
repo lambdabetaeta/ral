@@ -194,7 +194,7 @@ A single-stage pipeline never reaches any of this: the machine's
 never sees it.
 
 **Every external a stage's own evaluation spawns joins the group.** A `Thread`
-stage's `Io` carries `LaunchRole::PipelineStage(membership)` — a `Membership`
+stage's `Io` carries `Some(membership)` as its `stage` — a `Membership`
 pairing the group's pgid with the stage thread's own cancel scope — so any
 external it spawns — at its own root, or nested arbitrarily deep — resolves
 `PgidPolicy::Join(pgid)` and lands in the same group as a `Direct` stage would.
@@ -209,7 +209,7 @@ once. An enveloped external is the exception that proves the rule: placed
 the child leads — so its waiter holds `Group::Owns` and signals the payload
 itself, which neither bwrap's pid nor the pipeline's group can reach.
 A `spawn` worker is outside that evaluation: its `Io` is minted fresh
-with `LaunchRole::TopLevel`, so the externals it launches lead groups of their
+with `stage: None`, so the externals it launches lead groups of their
 own and outlive the pipeline without ever touching its pgid. The member that
 outlives a stage is instead a descendant the stage forked
 (`sh -c 'sleep 30 &'`), which the group owns like any other. A stop reaching
@@ -219,8 +219,8 @@ by Ctrl-Z ([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]).
 **A stage thread can itself launch a pipeline, which joins rather than owns.**
 The machine's `Pipeline` arm is `PipeNode`'s only caller and steps identically
 inside a stage thread, so a stage whose body is itself a pipeline launches its
-own nested stages. That nested `PipeNode` reads `shell.io.launch_role`: for
-`PipelineStage(m)` it builds `PipelineGroup::joining(m)` instead of preparing
+own nested stages. That nested `PipeNode` reads `shell.io.stage`: for
+`Some(m)` it builds `PipelineGroup::joining(m)` instead of preparing
 one — no anchor, no foreground claim, and a `Group::Joins(m)` where an owner
 holds `Group::Owns(pgid)`, an anchor's presence being the whole of what
 ownership means: only the owning top-level group may address the pgid, so the
@@ -282,7 +282,7 @@ pipeline's `cancel_all` — the kill is outright. The kill addresses the stage's
 pid alone, so a descendant the stage forked outlives it and may still hold
 the pipe a pump of that stage reads; an external ended for a dead write
 therefore *detaches* its pumps rather than joining them
-(`command::Pumps::settle(detach: bool)`, read in `StageEnd::settle` from the
+(`command::Pumps::join`, skipped in `StageEnd::settle` from the
 `sent` the filed handle carried onto its `StageEnd`) — its remaining bytes are
 owed to nobody, and the join would otherwise wait on the descendant.
 Forgiveness for an external reads the wait status too, which a thread's `Break`

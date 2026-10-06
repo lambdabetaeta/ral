@@ -14,11 +14,10 @@ mod common;
 
 use common::fresh_shell;
 
-use ral_core::protocol::{Program, Run};
-use ral_core::types::{GrantStack, Observation, Settled, Shell, Value};
-use ral_core::{
-    EventSink, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, SurfaceSink,
-};
+use ral_core::protocol::Run;
+use ral_core::run::{RunReport, RunRequest};
+use ral_core::types::{Observation, Settled, Shell, Value};
+use ral_core::{EventSink, SurfaceSink};
 use std::sync::{Arc, Mutex};
 
 /// A sink that records every surfaced observation as the record a trail
@@ -26,9 +25,9 @@ use std::sync::{Arc, Mutex};
 struct Recorder(Arc<Mutex<Vec<Value>>>);
 
 impl EventSink for Recorder {
-    fn emit(&self, ev: &ral_core::serial::FOValue) {
+    fn emit(&self, ev: &ral_core::first_order::FOValue) {
         if let Some(obs) = Observation::from_surface(ev) {
-            self.0.lock().unwrap().push(obs.to_value());
+            self.0.lock().unwrap().push(Value::from_datum(obs));
         }
     }
 }
@@ -47,22 +46,8 @@ fn recording() -> (Arc<Mutex<Vec<Value>>>, SurfaceSink) {
 fn run(shell: &mut Shell, source: &str) -> (Settled<Value>, Vec<Value>) {
     let (log, sink) = recording();
     let result = match shell.run(RunRequest {
-        run: Run {
-            program: Program::Source(source.into()),
-            script_name: "<test>".into(),
-            caps: GrantStack::root(),
-            wall: None,
-            deferred_lease: None,
-            worker_cap: None,
-            io: RunIo::Inherit,
-            terminal: RequestedTerminalAccess::Leased,
-            stdin: RunStdin::Inherit,
-            trail: None,
-        },
         surface: Some(sink),
-        deferred: None,
-        desk: None,
-        fork: None,
+        ..RunRequest::from(Run::foreground(source, "<test>"))
     }) {
         RunReport::Ran { ending, .. } => ending.into_result(),
         RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
@@ -124,6 +109,9 @@ fn external_success_emits_command_observation() {
         m.get("argv").as_deref(),
         Some(&Value::list(vec![s("/usr/bin/true")]))
     );
-    assert_eq!(m.get("origin").as_deref(), Some(&s("external")));
+    assert_eq!(
+        m.get("origin").as_deref(),
+        Some(&Value::variant("external", None))
+    );
     assert_eq!(m.get("status").as_deref(), Some(&Value::Int(0)));
 }

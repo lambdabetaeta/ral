@@ -3,23 +3,15 @@
 //! All four take a Float only, since an integer is already rounded.  `round`
 //! stays in Float even at zero places: `round 3.7 0` is `4.0`.
 
-use crate::types::{Settled, Value, fmt_float, sig, sig_hint};
-
-use super::util::f64_to_i64;
+use crate::first_order::Finite;
+use crate::types::{Settled, Value, sig, sig_hint};
 
 /// The largest `places` for which `10^places` is still finite in `f64`.
 const MAX_PLACES: i64 = 308;
 
-/// Both arms are defensive: a Float is finite by construction, and
-/// `round`'s and `float_to_int`'s schemes in the typechecker admit a Float
-/// only.
-fn finite_float(name: &str, val: &Value) -> Settled<f64> {
+fn float(name: &str, val: &Value) -> Settled<Finite> {
     match val {
-        Value::Float(f) if f.is_finite() => Ok(*f),
-        Value::Float(f) => Err(sig(format!(
-            "{name}: {} is not a finite number",
-            fmt_float(*f)
-        ))),
+        Value::Float(f) => Ok(*f),
         other => Err(sig_hint(
             format!("{name}: expected Float, got {}", other.type_name()),
             "e.g. round 3.7 0",
@@ -28,12 +20,15 @@ fn finite_float(name: &str, val: &Value) -> Settled<f64> {
 }
 
 fn to_int(name: &str, args: &[Value], op: fn(f64) -> f64) -> Settled<Value> {
-    let x = finite_float(name, &args[0])?;
-    Ok(Value::Int(f64_to_i64(name, op(x))?))
+    let x = float(name, &args[0])?;
+    Finite::new(op(x.get()))
+        .and_then(Finite::to_i64)
+        .map(Value::Int)
+        .ok_or_else(|| sig(format!("{name}: {x} is outside the integer range")))
 }
 
 pub(super) fn builtin_round(args: &[Value]) -> Settled<Value> {
-    let x = finite_float("round", &args[0])?;
+    let x = float("round", &args[0])?;
     let places = match &args[1] {
         Value::Int(n) => *n,
         other => {
@@ -54,15 +49,13 @@ pub(super) fn builtin_round(args: &[Value]) -> Settled<Value> {
         reason = "places is range-checked to 0..=MAX_PLACES just above"
     )]
     let factor = 10f64.powi(places as i32);
-    let r = (x * factor).round() / factor;
-    if r.is_finite() {
-        Ok(Value::Float(r))
-    } else {
-        Err(sig(format!(
-            "round: rounding {} to {places} places is not representable as a Float",
-            fmt_float(x)
-        )))
-    }
+    Finite::new((x.get() * factor).round() / factor)
+        .map(Value::Float)
+        .ok_or_else(|| {
+            sig(format!(
+                "round: rounding {x} to {places} places is not representable as a Float"
+            ))
+        })
 }
 
 pub(super) fn builtin_floor(args: &[Value]) -> Settled<Value> {

@@ -14,7 +14,7 @@
 //! The observable half — the normalisation table, quoting, every position, the
 //! redirect target, printing — is the golden `tests/lang/numerals.ral`.  What
 //! stays here is what a golden cannot reach: the two fixed-point properties,
-//! read off `fmt_float` itself, and the interactive renderer, a library
+//! read off `Finite`'s `Display` itself, and the interactive renderer, a library
 //! function with no command name to reach it by.
 
 mod common;
@@ -22,33 +22,17 @@ mod common;
 use common::fresh_shell;
 
 use ral_core::builtins::{REPL_PRINT_PARAMS, pretty_print};
+use ral_core::first_order::Finite;
 use ral_core::ir::Val;
-use ral_core::protocol::{Program, Run};
-use ral_core::types::{GrantStack, Value, fmt_float};
-use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
+use ral_core::protocol::Run;
+use ral_core::run::RunReport;
+use ral_core::types::Value;
 
 /// A session as every front end builds one: prelude registered, env seeded,
 /// capabilities at root.
 /// What `src` writes to stdout, the run having succeeded.
 fn printed(src: &str) -> String {
-    match fresh_shell().run(RunRequest {
-        run: Run {
-            program: Program::Source(src.into()),
-            script_name: "<numeral-doctrine>".into(),
-            caps: GrantStack::root(),
-            wall: None,
-            deferred_lease: None,
-            worker_cap: None,
-            io: RunIo::Capture,
-            terminal: RequestedTerminalAccess::Denied,
-            stdin: RunStdin::Empty,
-            trail: None,
-        },
-        surface: None,
-        deferred: None,
-        desk: None,
-        fork: None,
-    }) {
+    match fresh_shell().run(Run::captured(src, "<numeral-doctrine>")) {
         RunReport::Ran {
             ending, captured, ..
         } => {
@@ -60,7 +44,7 @@ fn printed(src: &str) -> String {
         }
         RunReport::Static { diagnostics, .. } => panic!(
             "{src:?} must reach the evaluator, got {}",
-            ral_core::diagnostic::format_static_diagnostics(&diagnostics).0
+            diagnostics.render().0
         ),
     }
 }
@@ -69,6 +53,10 @@ fn printed(src: &str) -> String {
 /// integral values, the magnitudes at either end that print in exponent form,
 /// the representable extremes, and two irrationals whose shortest spelling
 /// uses every digit it is allowed.
+fn finite(f: f64) -> Finite {
+    Finite::new(f).expect("a probe is finite")
+}
+
 const FLOAT_PROBES: [f64; 16] = [
     0.0,
     -0.0,
@@ -100,7 +88,7 @@ fn a_canonical_spelling_is_a_fixed_point() {
     for spelling in ints
         .iter()
         .map(i64::to_string)
-        .chain(FLOAT_PROBES.into_iter().map(fmt_float))
+        .chain(FLOAT_PROBES.into_iter().map(|f| finite(f).to_string()))
     {
         assert_eq!(
             printed(&format!("echo {spelling}")),
@@ -118,10 +106,10 @@ fn a_canonical_spelling_is_a_fixed_point() {
 #[test]
 fn printing_a_float_then_classifying_returns_the_same_float() {
     for f in FLOAT_PROBES {
-        let spelling = Value::Float(f).to_string();
+        let spelling = Value::Float(finite(f)).to_string();
         match ral_core::test_access::val_from_word(&spelling) {
             Val::Float(g) => assert_eq!(
-                g.to_bits(),
+                g.get().to_bits(),
                 f.to_bits(),
                 "{spelling:?} must read back as the float it was printed from"
             ),
@@ -139,13 +127,10 @@ fn printing_a_float_then_classifying_returns_the_same_float() {
 #[test]
 fn the_renderer_and_the_classifier_agree_with_the_text_form() {
     assert_eq!(
-        pretty_print(&Value::Float(3.0), 0, &REPL_PRINT_PARAMS),
+        pretty_print(&Value::Float(finite(3.0)), 0, &REPL_PRINT_PARAMS),
         "3.0"
     );
-    assert_eq!(fmt_float(f64::MAX), "1.7976931348623157e308");
-    assert_eq!(fmt_float(f64::NAN), "NaN");
-    assert_eq!(fmt_float(f64::INFINITY), "inf");
-    assert_eq!(fmt_float(f64::NEG_INFINITY), "-inf");
+    assert_eq!(finite(f64::MAX).to_string(), "1.7976931348623157e308");
     assert_eq!(
         ral_core::test_access::val_from_word("unit"),
         Val::String("unit".into())

@@ -11,7 +11,7 @@
 //! Both types have private fields, and every door runs the one
 //! `.`/`..`-folding kernel [`fold_dots`](super::lex::fold_dots), so an
 //! access-side path and a grant-side prefix compare like-for-like under
-//! [`path_within`](super::lex::path_within).  There is no `From<&str>`
+//! [`path_within`](super::identity::path_within).  There is no `From<&str>`
 //! sugar: a `From` impl cannot consult the disk oracle `real` needs,
 //! so it would be a door for fabricating one.
 //!
@@ -23,7 +23,8 @@
 //! [`RealPath::frozen`](super::RealPath::frozen) for exec, and no other:
 //! `surface` leaves the type only as a `String`, for rendering.
 
-use super::lex::{Deny, Polarity, path_within};
+use super::PathRules;
+use super::identity::{Deny, Polarity, path_within};
 use super::resolver::Resolver;
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
@@ -76,24 +77,24 @@ impl LexicalPath {
     }
 
     /// True iff this path names the host's discard device — `/dev/null` on
-    /// Unix, `\\.\NUL` on Windows ([`super::lex::is_discard_device`] holds both
+    /// Unix, `\\.\NUL` on Windows ([`super::device::is_discard_device`] holds both
     /// tables).
     ///
     /// The one question two doors ask about such a write: the in-process
-    /// guard (`capability::check_fs_op`), which calls it no *access*, and the
-    /// observation fan-out (`evaluator::audit::observe_stamped`), which calls
+    /// guard (`Shell::check_fs_read`), which calls it no *access*, and the
+    /// observation fan-out (`Shell::observe_stamped`), which calls
     /// it no *mutation* — nothing changed in the world, so nothing is
     /// reported.
     pub(crate) fn is_discard(&self) -> bool {
-        super::lex::is_discard_device(&self.0.to_string_lossy(), cfg!(windows))
+        super::device::is_discard_device(&self.0.to_string_lossy(), PathRules::HOST)
     }
 
     /// The refusal owed this path if, on Windows, its last component is a DOS
-    /// reserved device name ([`super::lex::reserved_device_refusal`]); `None`
+    /// reserved device name ([`super::device::reserved_device_refusal`]); `None`
     /// everywhere else.  The fs doors ask it of every name they are about to
     /// act on, as they ask [`is_discard`](Self::is_discard).
     pub(crate) fn reserved_device_refusal(&self) -> Option<String> {
-        super::lex::reserved_device_refusal(&self.0.to_string_lossy(), cfg!(windows))
+        super::device::reserved_device_refusal(&self.0.to_string_lossy(), PathRules::HOST)
     }
 
     /// Strict `realpath(3)`.  The input is already absolute and folded, so
@@ -131,12 +132,14 @@ pub struct FrozenPath {
 }
 
 impl FrozenPath {
-    /// Fold `path`, follow its symlinks, and wrap both forms — the one
-    /// disk consultation this type ever makes, done here at the door so
-    /// authorised form and matched form are one normal form.  The
-    /// grant-side door is the freeze pass in [`super::sigil`].
-    pub(super) fn freeze(path: &Path) -> Self {
-        let folded = super::lex::fold_dots(path);
+    /// Mint a prefix from a surface form: fold `path`, follow its symlinks,
+    /// and wrap both forms.  The one disk consultation this type ever makes,
+    /// done here at the door so authorised form and matched form are one
+    /// normal form, and the one minting door, whose grant-side caller is the
+    /// freeze pass in `guard::freeze`.  Idempotent on a form already normal,
+    /// such as the OS-sandbox renderer emits.
+    pub fn from_surface(path: impl AsRef<Path>) -> Self {
+        let folded = super::lex::fold_dots(path.as_ref());
         // The root is the one path `realpath` must not be asked about.  It
         // answers with a *drive* on Windows — the process's own — so a
         // ceiling frozen here covered one volume and denied every other,
@@ -157,25 +160,18 @@ impl FrozenPath {
         }
     }
 
-    /// Mint a prefix from an already-normal surface form, such as the
-    /// OS-sandbox renderer emits.  Same fold-then-resolve kernel,
-    /// idempotent on such a form.
-    pub fn from_surface(path: impl AsRef<Path>) -> Self {
-        Self::freeze(path.as_ref())
-    }
-
     /// The filesystem root, as the prefix that covers every path: the
     /// implicit ceiling a policy attenuates down from.
     ///
     /// Minted rather than frozen, because freezing would *narrow* it.
-    /// `realpath("/")` is drive-relative on Windows — it answers `D:\` when
+    /// `realpath("/")` is drive-relative on Windows: it answers `D:\` when
     /// the process cwd sits on `D:` — so a ceiling built through
     /// [`from_surface`](Self::from_surface) covers one drive and silently
     /// denies every other, and a session whose checkout and whose `%TEMP%`
     /// are on different drives (GitHub's Windows runners are exactly that)
     /// loses the whole of the second.  Left unfrozen, `/` folds to zero
     /// components under
-    /// [`starts_with_identity`](super::lex::starts_with_identity) and is the
+    /// [`starts_with_identity`](super::identity::starts_with_identity) and is the
     /// universal prefix on either platform, which is what a ceiling means.
     #[must_use]
     pub fn root() -> Self {
@@ -215,7 +211,7 @@ impl FrozenPath {
     /// `HOME` as contained.
     #[allow(
         clippy::disallowed_methods,
-        reason = "lexical Path::new over a surface already in normal form — no I/O behind it"
+        reason = "lexical Path::new over a surface already in normal form: no I/O behind it"
     )]
     fn surface_path(&self) -> &Path {
         Path::new(&self.surface)
@@ -230,14 +226,14 @@ impl FrozenPath {
     /// against an access path that has itself been canonicalised.
     #[allow(
         clippy::disallowed_methods,
-        reason = "lexical Path::new over a real form already in normal form — no I/O behind it"
+        reason = "lexical Path::new over a real form already in normal form: no I/O behind it"
     )]
     pub(crate) fn real_path(&self) -> &Path {
         Path::new(&self.real)
     }
 
     /// The symlink-followed form, for messages.
-    pub(super) fn real(&self) -> &str {
+    pub(crate) fn real(&self) -> &str {
         &self.real
     }
 
@@ -250,7 +246,7 @@ impl FrozenPath {
     /// Depth in components of the alias-folded real form, as
     /// [`RealPath::depth`](super::RealPath::depth) counts it.
     pub(crate) fn depth(&self) -> usize {
-        super::lex::identity_depth(&self.real, cfg!(windows))
+        super::identity::identity_depth(&self.real, PathRules::HOST)
     }
 
     /// This prefix frozen afresh from its surface spelling against
@@ -282,7 +278,7 @@ impl FrozenPath {
         self.surface
     }
 
-    /// True iff this prefix is absolute; `capability::decode` rejects a
+    /// True iff this prefix is absolute; `guard::freeze` rejects a
     /// frozen entry that is not.
     pub fn is_absolute(&self) -> bool {
         self.surface_path().is_absolute()

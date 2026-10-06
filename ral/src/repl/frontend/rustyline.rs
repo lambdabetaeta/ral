@@ -2,9 +2,9 @@
 //! highlights, and history.  The real editor for interactive sessions
 //! on TTYs that support raw mode and ANSI.
 
-use ral_core::diagnostic;
-use ral_core::io::TerminalState;
-use ral_core::protocol::Transport;
+use ral_core::carrier::Transport;
+use ral_core::terminal;
+use ral_core::terminal::TerminalState;
 use rustyline::config::{BellStyle, Builder, CompletionType};
 use rustyline::error::ReadlineError;
 use rustyline::history::DefaultHistory;
@@ -96,7 +96,7 @@ impl RustylineFrontend {
             Err(ReadlineError::Interrupted) => return Err(Read::Interrupt),
             Err(ReadlineError::Eof) => return Err(Read::Eof),
             Err(e) => {
-                diagnostic::cmd_error("ral", &e.to_string());
+                terminal::cmd_error("ral", &e.to_string());
                 return Err(Read::Eof);
             }
         };
@@ -118,7 +118,7 @@ impl RustylineFrontend {
                 }
                 Err(ReadlineError::Eof) => super::Continuation::Discard,
                 Err(e) => {
-                    diagnostic::cmd_error("ral", &e.to_string());
+                    terminal::cmd_error("ral", &e.to_string());
                     super::Continuation::Discard
                 }
             }
@@ -132,7 +132,6 @@ impl Frontend for RustylineFrontend {
         engine: &dyn Transport,
         prompt: &PromptText,
         pending: Option<EditBuffer>,
-        #[cfg(feature = "structural")] _worksheet: &crate::repl::worksheet::Worksheet,
     ) -> Read {
         // Pre-readline housekeeping: partial-line marker, plugin sync,
         // helper refresh (cheap engine state only — the `PATH` enumeration

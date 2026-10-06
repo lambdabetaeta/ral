@@ -49,15 +49,9 @@ impl Pumps<Sink> {
 }
 
 impl Pumps {
-    /// Join both drainers, or detach them when `detach`.
-    pub(crate) fn settle(self, detach: bool) {
-        if detach {
-            return;
-        }
-        if let Some(jh) = self.stdout {
-            let _ = jh.join();
-        }
-        if let Some(jh) = self.stderr {
+    /// Join both drainers; dropping `self` instead detaches them.
+    pub(crate) fn join(self) {
+        for jh in [self.stdout, self.stderr].into_iter().flatten() {
             let _ = jh.join();
         }
     }
@@ -331,7 +325,7 @@ impl RunningChild {
 
 impl WaitedChild {
     /// Join the drainer threads — or, for a child ral killed because its
-    /// reader was gone, detach them; see [`Pumps::settle`].
+    /// reader was gone, detach them; see [`Pumps::join`].
     pub(crate) fn settle(self) {
         let detach = self.cause == Some(CancelCause::ReaderGone);
         crate::dbg_trace!(
@@ -341,7 +335,9 @@ impl WaitedChild {
             self.pid,
             self.t_enter.elapsed(),
         );
-        self.pumps.settle(detach);
+        if !detach {
+            self.pumps.join();
+        }
         crate::dbg_trace!(
             "wait",
             "drain-end name={} pid={} elapsed={:?}",
@@ -372,7 +368,7 @@ impl Drop for RunningChild {
         }
         // The abort path always joins, never detaches: nothing has decided
         // this child's remaining bytes are owed to nobody.
-        std::mem::take(&mut self.pumps).settle(false);
+        std::mem::take(&mut self.pumps).join();
         // `Watch::drop` reaps.
         drop(watch);
     }
@@ -408,15 +404,15 @@ mod tests {
         );
         let canceller = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(200));
-            scope.cancel(CancelCause::Deadline);
+            scope.cancel(CancelCause::TimedOut);
         });
 
         let waited = running.wait();
-        let end = waited.outcome.classify(waited.cause, false);
+        let end = waited.outcome.classify(waited.cause);
         waited.settle();
         canceller.join().expect("canceller thread");
 
-        assert_eq!(end, Some(ChildEnd::Cancelled(CancelCause::Deadline)));
+        assert_eq!(end, Some(ChildEnd::Cancelled(CancelCause::TimedOut)));
     }
 
     /// Run `sh` under a scope struck with `cause` — before the dispatch when
@@ -425,7 +421,7 @@ mod tests {
     fn struck(cause: CancelCause, early: bool) -> crate::types::Error {
         let dir = tempfile::tempdir().expect("a temp dir");
         let marker = dir.path().join("running");
-        let mut shell = crate::types::Shell::new(crate::io::TerminalState::default());
+        let mut shell = crate::test_helper::core_shell();
         let scope = shell.run_cancel_handle();
         if early {
             scope.cancel(cause);
@@ -433,27 +429,17 @@ mod tests {
         let canceller = (!early).then(|| {
             let (scope, marker) = (scope.clone(), marker.clone());
             std::thread::spawn(move || {
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-                while !marker.exists() {
-                    assert!(
-                        std::time::Instant::now() < deadline,
-                        "the child never touched its marker"
-                    );
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
+                crate::test_helper::eventually(std::time::Duration::from_secs(5), || {
+                    marker.exists().then_some(())
+                })
+                .expect("the child never touched its marker");
                 scope.cancel(cause);
             })
         });
         let src = format!("sh -c 'touch {}; exec sleep 30'", marker.display());
         let report = shell.run_under(
             &scope,
-            crate::run::RunRequest {
-                run: crate::engine::testkit::run(&src),
-                surface: None,
-                deferred: None,
-                desk: None,
-                fork: None,
-            },
+            crate::run::RunRequest::from(crate::protocol::Run::captured(src.as_str(), "<test>")),
         );
         if let Some(canceller) = canceller {
             canceller.join().expect("canceller thread");
@@ -474,17 +460,17 @@ mod tests {
     #[test]
     fn a_cancellation_reports_alike_before_and_during_a_command() {
         for cause in [
-            CancelCause::Interrupt,
-            CancelCause::Explicit,
-            CancelCause::Deadline,
-            CancelCause::Terminate,
-            CancelCause::RootAbort,
+            CancelCause::Interrupted,
+            CancelCause::Cancelled,
+            CancelCause::TimedOut,
+            CancelCause::Terminated,
+            CancelCause::Aborted,
         ] {
             let (before, during) = (struck(cause, true), struck(cause, false));
-            assert_eq!(before.exit_code(), during.exit_code(), "{cause:?}: code");
+            assert_eq!(before.code(), during.code(), "{cause:?}: code");
             assert_eq!(
-                crate::evaluator::scope::reason_value(&before.status),
-                crate::evaluator::scope::reason_value(&during.status),
+                crate::types::Reason::from(&before.status),
+                crate::types::Reason::from(&during.status),
                 "{cause:?}: reason"
             );
             assert_eq!(before.message, during.message, "{cause:?}: message");
@@ -530,7 +516,7 @@ mod tests {
         // still lands well inside it.
         let canceller = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(200));
-            scope.cancel(CancelCause::Interrupt);
+            scope.cancel(CancelCause::Interrupted);
         });
 
         let t0 = std::time::Instant::now();
@@ -635,16 +621,12 @@ mod tests {
                 None,
             );
             let striker = std::thread::spawn(move || {
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-                while !ready.exists() {
-                    assert!(
-                        std::time::Instant::now() < deadline,
-                        "the trapper never set its trap"
-                    );
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
+                crate::test_helper::eventually(std::time::Duration::from_secs(5), || {
+                    ready.exists().then_some(())
+                })
+                .expect("the trapper never set its trap");
                 let struck = if strike_stage { stage } else { own };
-                struck.cancel(CancelCause::Deadline);
+                struck.cancel(CancelCause::TimedOut);
             });
 
             let waited = running.wait();

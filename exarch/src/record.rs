@@ -36,7 +36,7 @@ use crate::bus::{AgentId, AgentState};
 use crate::provider::Tuning;
 use crate::provider::{ProviderError, Usage};
 use genai::chat::ChatMessage;
-use ral_core::serial::FOValue;
+use ral_core::first_order::FOValue;
 use serde::{Deserialize, Serialize};
 use std::ops::Range;
 use std::path::PathBuf;

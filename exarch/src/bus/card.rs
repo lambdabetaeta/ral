@@ -11,13 +11,14 @@
 //! magnitude can never reach hue.
 //!
 //! [`decode`] reads a kit's `` `card `` value into this model; [`diff`] and
-//! [`value`] are the substrates every decoder shares; [`done`] and [`notice`]
+//! [`value`] are the substrates every decoder shares; [`done`]
 //! each decode one class of event core surfaces; [`observation`] composes
 //! cards from core's one observation vocabulary
 //! (`ral_core::types::Observed`), which core itself decodes; and [`change`]
 //! is what a write or an edit did to a file.
 
-use ral_core::serial::FOValue;
+use ral_core::first_order::FOValue;
+use ral_core::first_order::datum::Datum as _;
 use ral_core::types::Observation;
 use serde::{Deserialize, Serialize};
 
@@ -26,7 +27,6 @@ mod decode;
 mod diff;
 mod done;
 mod encode;
-mod notice;
 mod observation;
 #[cfg(test)]
 pub(crate) mod testkit;
@@ -34,14 +34,12 @@ mod value;
 
 pub use change::{Change, change_card};
 pub use diff::{Diff, Hunk, Row, Seg};
-pub use notice::Notice;
 
 pub(crate) use change::settled;
 pub(crate) use decode::{value_to_card, value_to_edit};
 pub(crate) use diff::hunk_magnitude;
 pub(crate) use done::value_to_done;
 pub(crate) use encode::{encode_card, encode_edit};
-pub(crate) use notice::value_to_notice;
 pub(crate) use observation::{Landing, landing};
 /// The comma-joined bucket cards a run's effects render as; `pub(crate)`
 /// because only the mirror groups, and it groups at render time.
@@ -231,7 +229,7 @@ impl Card {
 }
 
 /// A `/context` survey's rows as one [`Mark::Fields`] matrix under a
-/// "context" header — the one rendering `tui` and `headless` both draw from,
+/// "context" header: the one rendering `tui` and `headless` both draw from,
 /// and `pub` for synod.
 ///
 /// The survey is one row per turn; the card groups them at draw time into a
@@ -307,7 +305,7 @@ fn context_groups(rows: &[crate::record::TurnRow]) -> Vec<ContextGroup> {
 /// built here, at render time, exactly as `record/view.rs` will for a
 /// resumed scrollback.
 pub fn observation_display_card(value: &FOValue) -> Option<Card> {
-    let observation = Observation::from_wire(value)?;
+    let observation = Observation::decode(value).ok()?;
     Some(observation_card(&observation.what))
 }
 

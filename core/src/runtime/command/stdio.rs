@@ -1,13 +1,12 @@
 //! Stdio routing for a spawned external child: wire stdin, stdout and stderr
 //! into the `Launch` from sources and sinks.  The call's redirects are
-//! already installed on the shell's by `evaluator::redirect`, and a pipeline
+//! already installed on the shell's by `runtime::redirect`, and a pipeline
 //! edge is just another source or sink.
 
 use crate::io::{Io, Sink, Source};
-use crate::types::{Break, Error, Settled, Shell};
+use crate::types::{Error, Settled, Shell};
 
 use super::Pumps;
-use super::process::pipe_err;
 
 /// Capability witness that the parent's fd 0 is safe to inherit into a
 /// spawned child's stdin, mintable only through the issuers below.
@@ -93,7 +92,10 @@ fn wire_stdin(
     if matches!(stdin, Source::Empty) {
         return Ok(StdinRoute::Null);
     }
-    if let Some(r) = stdin.reader().map_err(stdin_error)? {
+    if let Some(r) = stdin
+        .reader()
+        .map_err(|e| Error::io("could not duplicate stdin", &e))?
+    {
         return Ok(StdinRoute::Reader(r));
     }
     Ok(if startup_stdin_tty {
@@ -101,11 +103,6 @@ fn wire_stdin(
     } else {
         StdinRoute::Inherit(TtyInputPermit::for_non_tty_stdin())
     })
-}
-
-/// Shared by every door that duplicates a stdin source.
-pub(crate) fn stdin_error(e: impl std::fmt::Display) -> Break {
-    Break::Error(Error::new(format!("could not duplicate stdin: {e}"), 1))
 }
 
 /// Wire the child's stdin, stdout and stderr from `io`, returning the sinks
@@ -121,7 +118,7 @@ pub(crate) fn stdin_error(e: impl std::fmt::Display) -> Break {
 /// the child a second handle to that destination.
 ///
 /// Audit capture belongs elsewhere: it tees the shell's own sinks at dispatch
-/// level in `evaluator::with_audit_capture`.
+/// level in `runtime::capture::with_audit_capture`.
 pub(crate) fn wire_stdio(
     command: &mut crate::process::Launch,
     shell: &Shell,
@@ -134,12 +131,15 @@ pub(crate) fn wire_stdio(
     let out = io
         .stdout
         .child_stdout(inherit_tty)
-        .map_err(|e| pipe_err(&e))?;
+        .map_err(|e| Error::io("pipe", &e))?;
     command.stdout(out.stdio);
     let err_pump = if io.stderr.same_destination(io.stdout) {
         join_stderr(command, io.stdout)?
     } else {
-        let err = io.stderr.child_stderr().map_err(|e| pipe_err(&e))?;
+        let err = io
+            .stderr
+            .child_stderr()
+            .map_err(|e| Error::io("pipe", &e))?;
         command.stderr(err.stdio);
         err.pump
     };
@@ -163,10 +163,12 @@ fn join_stderr(command: &mut crate::process::Launch, stdout: &Sink) -> Settled<O
         let owned = std::io::stdout()
             .as_handle()
             .try_clone_to_owned()
-            .map_err(|e| pipe_err(&e))?;
+            .map_err(|e| Error::io("pipe", &e))?;
         (crate::process::StdioSpec::from_owned_handle(owned), None)
     } else {
-        let plan = stdout.child_stdio_plan().map_err(|e| pipe_err(&e))?;
+        let plan = stdout
+            .child_stdio_plan()
+            .map_err(|e| Error::io("pipe", &e))?;
         (plan.stdio, plan.pump)
     };
     command.stderr(stdio);
@@ -181,13 +183,12 @@ fn join_stderr(command: &mut crate::process::Launch, stdout: &Sink) -> Settled<O
 mod tests {
     use super::{StdinRoute, wire_stdin};
     use crate::io::Source;
-    use crate::types::Shell;
 
     /// Denial of byte input is its own effect, independent of foreground:
     /// `Empty` wires `/dev/null`, `Terminal` still inherits fd 0.
     #[test]
     fn empty_stdin_wires_null_but_terminal_inherits() {
-        let mut shell = Shell::default();
+        let mut shell = crate::test_helper::core_shell();
 
         shell.io.stdin = Source::Empty;
         assert!(
@@ -213,9 +214,9 @@ mod tests {
     #[test]
     fn wire_stdin_borrows_a_stage_shaped_source() {
         use crate::io::SourceReader;
-        use crate::process::Wake;
+        use crate::io::Wake;
 
-        let mut shell = Shell::default();
+        let mut shell = crate::test_helper::core_shell();
         let (r, _w) = crate::process::cloexec_pipe().expect("data pipe");
         let wake = Wake::new().expect("wake");
         shell.io.stdin = Source::Reader(SourceReader::pipe(r).interruptible(wake));

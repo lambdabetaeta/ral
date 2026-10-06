@@ -17,7 +17,7 @@ let slugs = map $slug $titles
 
 for $slugs { |s| echo $s }
 
-let buckets = group-by $id $slugs
+let buckets = group-by $identity $slugs
 for !{filter { |s| return $[!{length $buckets[$s]} > 1] } !{keys $buckets}} { |s|
     echo "clash: $s"
 }

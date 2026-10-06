@@ -13,6 +13,7 @@ use crate::provider::credential::Roster;
 use crate::provider::identity::{Account, AccountId, Meter};
 use crate::provider::listing::Fetches;
 use jiff::Timestamp;
+use ral_core::text::plural;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -140,14 +141,6 @@ fn window_words(d: Duration) -> String {
     }
 }
 
-fn plural(n: u64, unit: &str) -> String {
-    if n == 1 {
-        format!("1 {unit}")
-    } else {
-        format!("{n} {unit}s")
-    }
-}
-
 /// The raw figures, for a `Consumption::Counted` whose proportion is
 /// undisclosed (no cap) or degenerate (a cap of zero).
 fn inline_text(used: u64, limit: Option<u64>, unit: Unit) -> String {
@@ -200,7 +193,7 @@ pub fn limits_card(readings: &[(String, Reading)]) -> Card {
             "there are no accounts to check for a ration".to_string()
         } else {
             format!(
-                "none of {names} publishes a ration — /limits reports subscriptions and credit balances"
+                "none of {names} publishes a ration: /limits reports subscriptions and credit balances"
             )
         };
         return Card(vec![Mark::Text {
@@ -530,7 +523,7 @@ mod tests {
             card.0.len(),
             4,
             "a section mark plus a body mark for each account with something to \
-             report — the unmetered one draws nothing at all"
+             report: the unmetered one draws nothing at all"
         );
         let Mark::Fields { rows } = &card.0[1] else {
             panic!("the loaded account renders its allowances");

@@ -23,7 +23,7 @@ impl ServiceName {
     pub(crate) fn built_in(name: &'static str) -> Self {
         debug_assert!(
             Self::declared(name).is_ok(),
-            "a built-in service name must satisfy what `declared` refuses — \
+            "a built-in service name must satisfy what `declared` refuses: \
              the colon rule is what keeps AccountId renderings injective"
         );
         Self(name.to_string())

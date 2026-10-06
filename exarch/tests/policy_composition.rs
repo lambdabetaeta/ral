@@ -13,10 +13,11 @@ use exarch::bootstrap::{EXARCH, SYNOD, Scratch};
 use exarch::policy::for_invocation;
 use exarch::prompt::{SCRATCH_PLACEHOLDER, host_section};
 use ral_core::capability::FsOp;
-use ral_core::path::basedir::XdgKind;
+use ral_core::capability::GrantStack;
+use ral_core::host::XdgKind;
 use ral_core::path::{FrozenPath, Resolver, SearchCwd, resolve_in_path};
 use ral_core::test_access::check_file;
-use ral_core::types::{Break, GrantStack, Settled, Shell};
+use ral_core::types::{Break, Settled, Shell};
 use std::path::PathBuf;
 
 exarch::pre_main_ctor!();
@@ -97,7 +98,7 @@ fn an_extend_base_grant_cannot_survive_a_restrict_that_omits_it() {
     let (stack, _) =
         for_invocation(&cwd, "minimal", Some(&extend), &[restrict]).expect("profiles compose");
 
-    let mut shell = Shell::default();
+    let mut shell = ral_core::test_helper::core_shell();
     install(&mut shell, &stack);
     check_file(&mut shell, &on_path("rustc"), &[])
         .expect_err("--extend-base must not outlive a --restrict that omits it");
@@ -132,7 +133,7 @@ fn two_restricts_compose_to_the_same_grant_in_either_order() {
 
     let ls = on_path("ls");
     for stack in [&ab, &ba] {
-        let mut shell = Shell::default();
+        let mut shell = ral_core::test_helper::core_shell();
         install(&mut shell, stack);
         check_file(&mut shell, &ls, &[])
             .expect("what both files name is admitted regardless of restrict argv order");
@@ -191,7 +192,7 @@ fn a_restrict_file_is_refused_by_the_fs_guard_under_either_spelling() {
     let (stack, _) = for_invocation(&cwd, "dangerous", None, std::slice::from_ref(&restrict))
         .expect("profile composes");
 
-    let mut shell = Shell::default();
+    let mut shell = ral_core::test_helper::core_shell();
     install(&mut shell, &stack);
     for spelling in [&restrict, &canonical] {
         let path = shell.resolve(&spelling.to_string_lossy());
@@ -234,7 +235,7 @@ fn no_attenuated_base_can_read_a_credential_file() {
             stack.fs().next().is_some(),
             "{base} attenuates the filesystem"
         );
-        let mut shell = Shell::default();
+        let mut shell = ral_core::test_helper::core_shell();
         install(&mut shell, &stack);
         for secret in &secrets {
             let denied_somewhere = stack

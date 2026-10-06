@@ -47,6 +47,7 @@ test-util = []
 [dependencies]
 os_pipe       = "1"
 glob          = "0.3"
+either        = "1"
 imbl          = { version = "7", features = ["serde"] }
 rustc-hash    = { workspace = true }
 regex         = "1"
@@ -60,6 +61,7 @@ serde         = { workspace = true }
 serde_json    = { workspace = true }
 serde_stacker = "0.1"
 strsim = "0.11"
+strum         = { version = "0.28", features = ["derive"] }
 ryu           = "1"
 csv           = { workspace = true }
 postcard      = { version = "1", features = ["alloc"] }
@@ -129,7 +131,7 @@ ral-core = { path = ".", features = ["test-util"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
-rustix = { workspace = true, features = ["fs", "net", "process", "stdio", "termios"] }
+rustix = { workspace = true, features = ["event", "fs", "net", "process", "stdio", "termios"] }
 nix = { workspace = true, features = ["signal", "process"] }
 # Unix-only uu_* tools, activated by the `coreutils-unix-only` feature.
 # Each one pulls in uucore modules (entries / process / signals / perms)
@@ -151,9 +153,6 @@ ctrlc        = "3"
 sha2         = { workspace = true }
 windows-sys  = { workspace = true, features = [
     "Win32_Foundation",
-    # WSAPoll — the readability primitive `wire::WireChannel::poll_readable`
-    # measures a silent peer against, and the only Winsock call core makes.
-    "Win32_Networking_WinSock",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Security_Cryptography",

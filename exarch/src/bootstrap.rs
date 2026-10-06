@@ -6,8 +6,8 @@
 
 use crate::shell_eval;
 use crate::shell_eval::builtins;
-use ral_core::io::TerminalState;
-use ral_core::{Shell, diagnostic};
+use ral_core::Shell;
+use ral_core::terminal::TerminalState;
 use std::cmp::Ordering;
 use std::fs::{self, File, OpenOptions};
 use std::io;
@@ -56,7 +56,7 @@ pub fn face_process_signals(terminal: &TerminalState) {
     ral_core::process::clear();
     ral_core::process::install_handlers();
     crate::signals::install();
-    diagnostic::set_terminal(terminal);
+    terminal.seat();
 }
 
 /// Exarch's one `EngineInstaller::boot`, under either carrier.
@@ -82,7 +82,7 @@ pub fn engine_boot_shell(
     builtins::install_agent_library(&ral_core::types::Mooring::adrift(), &mut shell)
         .unwrap_or_else(|e| panic!("exarch: embedded agent library failed to load: {e:?}"));
     seed_no_color(&mut shell);
-    shell.set_exit_hints(ral_core::exit_hints::ExitHints::from_text(include_str!(
+    shell.set_exit_hints(ral_core::types::ExitHints::from_text(include_str!(
         "../../data/exit-hints.txt"
     )));
     #[cfg(unix)]
@@ -131,8 +131,8 @@ pub(crate) fn test_shell() -> Shell {
 
 /// An identity engine for a test, booted through the one recipe.
 #[cfg(test)]
-pub(crate) fn test_transport() -> ral_core::protocol::IdentityTransport {
-    ral_core::protocol::IdentityTransport::boot(&crate::INSTALLERS, &test_attach())
+pub(crate) fn test_transport() -> ral_core::carrier::IdentityTransport {
+    ral_core::carrier::IdentityTransport::boot(&crate::INSTALLERS, &test_attach())
         .expect("the recipe boots a test engine")
 }
 
@@ -176,7 +176,7 @@ pub struct Scratch {
 /// guard is read by nobody, because the test's own end deletes the directory.
 #[expect(
     dead_code,
-    reason = "each variant is held for what its Drop does — closing the lock's fd, deleting the test's directory — and so is never read"
+    reason = "each variant is held for what its Drop does (closing the lock's fd, deleting the test's directory) and so is never read"
 )]
 enum Hold {
     Session(fd_lock::RwLock<File>),
@@ -338,7 +338,7 @@ impl Scratch {
 ///
 /// `mine` is skipped by name rather than trusted to fail the test.  `flock`
 /// keys on the open file description, so a second attempt from this same
-/// process does answer "held" — but only on the platforms that have `flock`,
+/// process does answer "held": but only on the platforms that have `flock`,
 /// and a scratch must not depend on that to survive its own reaping.
 ///
 /// Failures are silent throughout: a scratch that resists deletion is a
@@ -431,8 +431,8 @@ impl App {
         clippy::disallowed_methods,
         reason = "host-env: exarch's own config/state directories live under the launching user's XDG bases"
     )]
-    pub fn xdg_dir(self, kind: ral_core::path::basedir::XdgKind) -> PathBuf {
-        ral_core::path::basedir::resolve_xdg(kind, ral_core::host::home().as_deref())
+    pub fn xdg_dir(self, kind: ral_core::host::XdgKind) -> PathBuf {
+        ral_core::host::xdg(kind)
             .unwrap_or_else(std::env::temp_dir)
             .join(self.0)
     }
@@ -443,7 +443,7 @@ impl App {
     /// launched, never scattered into cwd.
     #[must_use]
     pub fn project_dir(self, cwd: &str) -> PathBuf {
-        self.xdg_dir(ral_core::path::basedir::XdgKind::State)
+        self.xdg_dir(ral_core::host::XdgKind::State)
             .join(project_slug(cwd))
     }
 

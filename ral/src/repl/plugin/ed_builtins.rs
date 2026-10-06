@@ -7,17 +7,16 @@
 //! as a `` `repl-editor `` enquiry, which the host answers only while an
 //! editor context is installed for the dispatch — inside a plugin handler.
 
-use ral_core::builtins::util::as_str;
-use ral_core::serial::FOValue;
-use ral_core::serial::datum::Datum;
+use ral_core::capability::Flag;
+use ral_core::first_order::FOValue;
+use ral_core::first_order::datum::Datum;
 use ral_core::source::Span as ByteSpan;
 use ral_core::syntax::lexer::{LexError, LexErrorKind, Token, lex};
-use ral_core::typecheck::builtins::{
-    closed_record, closed_variant, fun, graded, mk_scheme as scheme, open_record, pure, thunk,
-};
-use ral_core::typecheck::{CompTy, Grade, Kind, Scheme, Ty, Unifier};
-use ral_core::types::as_list;
-use ral_core::types::{Break, BuiltinBody, BuiltinEntry, Mooring, Settled, Site, as_map, sig};
+use ral_core::ty::Site;
+use ral_core::ty::{CompTy, Grade, Kind, Scheme, Ty, closed_record, closed_variant, open_record};
+use ral_core::typecheck::Unifier;
+use ral_core::typecheck::builtins::{fun, graded, mk_scheme as scheme, pure, thunk};
+use ral_core::types::{Break, BuiltinBody, BuiltinEntry, Mooring, Settled, sig};
 use ral_core::{Shell, Value};
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -82,7 +81,7 @@ fn offset(n: i64) -> usize {
 /// `_ed-get` → `[text: Str, cursor: Int, keymap: Str]`
 pub fn builtin_ed_get(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-get", shell)?;
-    shell.check_editor_read("get")?;
+    shell.check(Flag::EditorRead, "_ed-get")?;
     let st = snapshot(shell, mooring)?;
     Ok(Value::map(vec![
         ("text".into(), Value::string(st.text)),
@@ -94,28 +93,28 @@ pub fn builtin_ed_get(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> 
 /// `_ed-text` → `Str` — current buffer text.
 pub fn builtin_ed_text(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-text", shell)?;
-    shell.check_editor_read("text")?;
+    shell.check(Flag::EditorRead, "_ed-text")?;
     Ok(Value::string(snapshot(shell, mooring)?.text))
 }
 
 /// `_ed-cursor` → `Int` — current cursor offset (chars).
 pub fn builtin_ed_cursor(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-cursor", shell)?;
-    shell.check_editor_read("cursor")?;
+    shell.check(Flag::EditorRead, "_ed-cursor")?;
     Ok(int(snapshot(shell, mooring)?.cursor))
 }
 
 /// `_ed-keymap` → `Str` — current keymap name.
 pub fn builtin_ed_keymap(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-keymap", shell)?;
-    shell.check_editor_read("keymap")?;
+    shell.check(Flag::EditorRead, "_ed-keymap")?;
     Ok(Value::string(snapshot(shell, mooring)?.keymap))
 }
 
 /// `_ed-lbuffer` → `Str` — text to the left of the cursor.
 pub fn builtin_ed_lbuffer(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-lbuffer", shell)?;
-    shell.check_editor_read("lbuffer")?;
+    shell.check(Flag::EditorRead, "_ed-lbuffer")?;
     let st = snapshot(shell, mooring)?;
     Ok(Value::string(split_at_cursor(&st.text, st.cursor).0))
 }
@@ -124,7 +123,7 @@ pub fn builtin_ed_lbuffer(_args: &[Value], mooring: &Mooring, shell: &mut Shell)
 
 /// `_ed-set`'s request: each field is `` `keep `` or `` `set v ``.
 fn set_op(arg: &Value) -> Settled<EditorOp> {
-    let map = as_map(arg, "_ed-set")?;
+    let map = arg.as_map("_ed-set")?;
     let choice = |key: &str| match map.get(key).as_deref() {
         Some(Value::Variant {
             label,
@@ -137,7 +136,7 @@ fn set_op(arg: &Value) -> Settled<EditorOp> {
         _ => Err(sig(format!("_ed-set: {key} must be `keep or `set <value>"))),
     };
     let text = choice("text")?
-        .map(|v| as_str(&v, "_ed-set text").map(str::to_owned))
+        .map(|v| v.as_str("_ed-set text").map(str::to_owned))
         .transpose()?;
     let cursor = match choice("cursor")? {
         Some(Value::Int(n)) => Some(offset(n)),
@@ -150,7 +149,7 @@ fn set_op(arg: &Value) -> Settled<EditorOp> {
 /// `_ed-set [text: `keep|`set Str, cursor: `keep|`set Int]` — partial write.
 pub fn builtin_ed_set(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-set", shell)?;
-    shell.check_editor_write("set")?;
+    shell.check(Flag::EditorWrite, "_ed-set")?;
     write(shell, mooring, set_op(&args[0])?)
 }
 
@@ -161,36 +160,36 @@ pub fn builtin_ed_set_lbuffer(
     shell: &mut Shell,
 ) -> Settled<Value> {
     require_interactive("_ed-set-lbuffer", shell)?;
-    shell.check_editor_write("set-lbuffer")?;
+    shell.check(Flag::EditorWrite, "_ed-set-lbuffer")?;
     write(
         shell,
         mooring,
-        EditorOp::SetLbuffer(as_str(&args[0], "_ed-set-lbuffer")?.to_owned()),
+        EditorOp::SetLbuffer(args[0].as_str("_ed-set-lbuffer")?.to_owned()),
     )
 }
 
 /// `_ed-insert <str>` — insert at cursor; cursor advances to end of insertion.
 pub fn builtin_ed_insert(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-insert", shell)?;
-    shell.check_editor_write("insert")?;
+    shell.check(Flag::EditorWrite, "_ed-insert")?;
     write(
         shell,
         mooring,
-        EditorOp::Insert(as_str(&args[0], "_ed-insert")?.to_owned()),
+        EditorOp::Insert(args[0].as_str("_ed-insert")?.to_owned()),
     )
 }
 
 /// `_ed-push` — save buffer to stack, clear.
 pub fn builtin_ed_push(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-push", shell)?;
-    shell.check_editor_write("push")?;
+    shell.check(Flag::EditorWrite, "_ed-push")?;
     write(shell, mooring, EditorOp::Push)
 }
 
 /// `_ed-accept` — mark buffer for immediate execution.
 pub fn builtin_ed_accept(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-accept", shell)?;
-    shell.check_editor_write("accept")?;
+    shell.check(Flag::EditorWrite, "_ed-accept")?;
     write(shell, mooring, EditorOp::Accept)
 }
 
@@ -234,7 +233,7 @@ fn decode_captured(bytes: &[u8]) -> String {
 /// [`Mooring::in_terminal_loan`] is the re-entrancy guard.
 pub fn builtin_ed_tui(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-tui", shell)?;
-    shell.check_editor_tui()?;
+    shell.check(Flag::EditorTui, "_ed-tui")?;
     if mooring.in_terminal_loan() {
         return Ok(tui_result(Value::string("_ed-tui: already in TUI mode"), 1));
     }
@@ -248,13 +247,13 @@ pub fn builtin_ed_tui(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
     // A TUI plugin's own screen output, not a value the program binds: the
     // truncation marker is the whole report a 16 MiB draw deserves.
     let (result, bytes, _overflowed) = ral_core::evaluator::with_capture(shell, |shell| {
-        ral_core::builtins::apply(&args[0], Vec::new(), &loaned, shell)
+        ral_core::evaluator::apply(&args[0], Vec::new(), &loaned, shell)
     });
     match result {
         Ok(_) => Ok(tui_result(Value::string(decode_captured(&bytes)), 0)),
         Err(Break::Error(e)) => Ok(tui_result(
             Value::string(e.message.clone()),
-            i64::from(e.exit_code()),
+            i64::from(e.code()),
         )),
         Err(other) => Err(other),
     }
@@ -265,8 +264,8 @@ pub fn builtin_ed_tui(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
 /// `_ed-history <prefix> <limit>` — prefix search over history; `limit=0` for unbounded.
 pub fn builtin_ed_history(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-history", shell)?;
-    shell.check_editor_read("history")?;
-    let prefix = as_str(&args[0], "_ed-history")?;
+    shell.check(Flag::EditorRead, "_ed-history")?;
+    let prefix = args[0].as_str("_ed-history")?;
     let limit = match &args[1] {
         Value::Int(n) => offset(*n),
         _ => return Err(sig("_ed-history: limit must be Int")),
@@ -328,7 +327,7 @@ fn word_text(text: &str, tok: &Token, span: ByteSpan) -> String {
 /// command at the cursor.  `words` is empty exactly when the buffer does not lex.
 pub fn builtin_ed_parse(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-parse", shell)?;
-    shell.check_editor_read("parse")?;
+    shell.check(Flag::EditorRead, "_ed-parse")?;
     let EditorSnapshot { text, cursor, .. } = snapshot(shell, mooring)?;
     let (words, current, offset) = parse_at(&text, cursor).unwrap_or_default();
     #[allow(
@@ -415,11 +414,11 @@ fn separates(tok: &Token) -> bool {
 /// `_ed-ghost <text>` — set ghost text (empty string clears).
 pub fn builtin_ed_ghost(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-ghost", shell)?;
-    shell.check_editor_write("ghost")?;
+    shell.check(Flag::EditorWrite, "_ed-ghost")?;
     write(
         shell,
         mooring,
-        EditorOp::Ghost(as_str(&args[0], "_ed-ghost")?.to_owned()),
+        EditorOp::Ghost(args[0].as_str("_ed-ghost")?.to_owned()),
     )
 }
 
@@ -440,8 +439,8 @@ pub fn builtin_ed_hyperlink(
     shell: &mut Shell,
 ) -> Settled<Value> {
     require_interactive("_ed-hyperlink", shell)?;
-    let uri = as_str(&args[0], "_ed-hyperlink")?;
-    let text = as_str(&args[1], "_ed-hyperlink")?;
+    let uri = args[0].as_str("_ed-hyperlink")?;
+    let text = args[1].as_str("_ed-hyperlink")?;
     let rendered = if shell.terminal().ui_hyperlinks_ok() {
         ral_core::ansi::osc8_link(uri, text)
     } else {
@@ -469,7 +468,7 @@ pub fn builtin_ed_clipboard(
     shell: &mut Shell,
 ) -> Settled<Value> {
     require_interactive("_ed-clipboard", shell)?;
-    shell.check_editor_write("clipboard")?;
+    shell.check(Flag::EditorWrite, "_ed-clipboard")?;
 
     if !shell.terminal().ui_clipboard_write_ok() {
         return Ok(Value::Bool(false));
@@ -478,7 +477,7 @@ pub fn builtin_ed_clipboard(
     use base64::Engine;
     use std::io::Write;
     let payload = base64::engine::general_purpose::STANDARD
-        .encode(as_str(&args[0], "_ed-clipboard")?.as_bytes());
+        .encode(args[0].as_str("_ed-clipboard")?.as_bytes());
     let sequence = ral_core::ansi::osc52_copy(&payload);
     let _ = std::io::stdout().write_all(sequence.as_bytes());
     let _ = std::io::stdout().flush();
@@ -492,8 +491,9 @@ pub fn builtin_ed_highlight(
     shell: &mut Shell,
 ) -> Settled<Value> {
     require_interactive("_ed-highlight", shell)?;
-    shell.check_editor_write("highlight")?;
-    let spans = as_list(&args[0], "_ed-highlight")?
+    shell.check(Flag::EditorWrite, "_ed-highlight")?;
+    let spans = args[0]
+        .as_list("_ed-highlight")?
         .iter()
         .map(|v| highlight_req(&v))
         .collect::<Settled<_>>()?;
@@ -506,7 +506,7 @@ fn highlight_req(v: &Value) -> Settled<HighlightReq> {
         Value::Int(n) => Ok(offset(*n)),
         _ => Err(sig(format!("highlight span: {field} must be Int"))),
     };
-    let m = as_map(v, "_ed-highlight span")?;
+    let m = v.as_map("_ed-highlight span")?;
     let mut span = HighlightReq {
         start: 0,
         end: 0,
@@ -547,7 +547,7 @@ pub fn builtin_ed_state(
     shell: &mut Shell,
 ) -> Settled<Value> {
     require_interactive("_ed-state", shell)?;
-    shell.check_editor_write("state")?;
+    shell.check(Flag::EditorWrite, "_ed-state")?;
     let current = match answer::<Option<Data>>(shell, mooring, EditorOp::StateGet)? {
         Some(Data(stored)) => {
             let stored = Value::from(stored);
@@ -560,7 +560,7 @@ pub fn builtin_ed_state(
         }
         None => args[0].clone(),
     };
-    let new_val = ral_core::builtins::apply(&args[1], vec![current], mooring, shell)?;
+    let new_val = ral_core::evaluator::apply(&args[1], vec![current], mooring, shell)?;
     let data = FOValue::try_from(&new_val).map_err(|e| {
         sig(format!(
             "_ed-state: the updater returned {}, but the state cell holds only data",
@@ -628,7 +628,7 @@ fn scheme_highlight(u: &mut Unifier) -> Scheme {
     scheme(
         &[],
         &[(rest, false)],
-        thunk(fun(Ty::List(Box::new(span)), pure(Ty::Unit))),
+        thunk(fun(Ty::list(span), pure(Ty::Unit))),
     )
 }
 
@@ -636,10 +636,7 @@ fn scheme_history(_u: &mut Unifier) -> Scheme {
     scheme(
         &[],
         &[],
-        thunk(fun(
-            Ty::String,
-            fun(Ty::Int, pure(Ty::List(Box::new(Ty::String)))),
-        )),
+        thunk(fun(Ty::String, fun(Ty::Int, pure(Ty::list(Ty::String))))),
     )
 }
 
@@ -648,7 +645,7 @@ fn scheme_parse(_u: &mut Unifier) -> Scheme {
         &[],
         &[],
         thunk(pure(closed_record(&[
-            ("words", Ty::List(Box::new(Ty::String))),
+            ("words", Ty::list(Ty::String)),
             ("current", Ty::Int),
             ("offset", Ty::Int),
         ]))),
@@ -810,25 +807,22 @@ pub static ED_BUILTINS: &[BuiltinEntry] = &ED_BUILTINS_ARR;
 mod tests {
     use super::*;
 
-    fn variant(label: &str, payload: Option<Value>) -> Value {
-        Value::Variant {
-            label: label.into(),
-            payload: payload.map(Box::new),
-        }
-    }
-
     /// Every `_ed-*` entry must carry all static facets directly.
     #[test]
     fn every_ed_name_has_all_facets() {
         for entry in ED_BUILTINS {
-            assert!(!entry.name.is_empty());
+            assert!(!entry.decl.name.is_empty());
             assert_eq!(
-                entry.convention,
+                entry.decl.convention,
                 ral_core::types::Convention::Value,
                 "the editor surface is applied, not an argv: {:?}",
-                entry.name
+                entry.decl.name
             );
-            assert!(!entry.doc.is_empty(), "no doc for {:?}", entry.name);
+            assert!(
+                !entry.decl.doc.is_empty(),
+                "no doc for {:?}",
+                entry.decl.name
+            );
         }
     }
 
@@ -839,15 +833,15 @@ mod tests {
         for entry in ED_BUILTINS.iter().chain(super::super::load::DOORS) {
             let scheme = ral_core::test_access::builtin_scheme(entry, &mut Unifier::new());
             assert!(
-                !ral_core::test_access::has_result_only_var(&scheme) || entry.is_boundary(),
+                !ral_core::test_access::has_result_only_var(&scheme) || entry.decl.is_boundary(),
                 "{}: a result only its own call determines, and it is no boundary",
-                entry.name
+                entry.decl.name
             );
         }
         let boundaries: Vec<&str> = ED_BUILTINS
             .iter()
-            .filter(|entry| entry.is_boundary())
-            .map(|entry| entry.name.as_ref())
+            .filter(|entry| entry.decl.is_boundary())
+            .map(|entry| entry.decl.name.as_ref())
             .collect();
         assert_eq!(boundaries, ["_ed-state"]);
     }
@@ -885,17 +879,16 @@ mod tests {
             stored,
             writes: std::sync::atomic::AtomicUsize::new(0),
         });
-        let mut shell = Shell::new(ral_core::io::TerminalState::default());
+        let mut shell = ral_core::test_helper::core_shell();
         shell.install_builtins(ED_BUILTINS);
         shell.set_interactive(true);
-        let report = shell.run(ral_core::RunRequest {
-            run: crate::repl::exec::line_run("_ed-state 0 { |n| return $[$n + 1] }"),
-            surface: None,
-            deferred: None,
+        let report = shell.run(ral_core::run::RunRequest {
             desk: Some(cell.clone()),
-            fork: None,
+            ..ral_core::run::RunRequest::from(crate::repl::exec::line_run(
+                "_ed-state 0 { |n| return $[$n + 1] }",
+            ))
         });
-        let ral_core::RunReport::Ran { ending, .. } = report else {
+        let ral_core::run::RunReport::Ran { ending, .. } = report else {
             panic!("the line must check and run");
         };
         (
@@ -979,8 +972,14 @@ mod tests {
     #[test]
     fn ed_set_rejects_non_int_cursor() {
         let arg = Value::map(vec![
-            ("text".into(), variant("set", Some(Value::string("new")))),
-            ("cursor".into(), variant("set", Some(Value::string("3")))),
+            (
+                "text".into(),
+                Value::variant("set", Some(Value::string("new"))),
+            ),
+            (
+                "cursor".into(),
+                Value::variant("set", Some(Value::string("3"))),
+            ),
         ]);
         assert!(set_op(&arg).is_err());
     }
@@ -989,8 +988,8 @@ mod tests {
     #[test]
     fn ed_set_floors_a_negative_cursor() {
         let arg = Value::map(vec![
-            ("text".into(), variant("keep", None)),
-            ("cursor".into(), variant("set", Some(Value::Int(-4)))),
+            ("text".into(), Value::variant("keep", None)),
+            ("cursor".into(), Value::variant("set", Some(Value::Int(-4)))),
         ]);
         assert!(matches!(
             set_op(&arg),

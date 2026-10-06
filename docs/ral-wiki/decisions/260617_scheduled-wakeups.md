@@ -78,9 +78,9 @@ Cron is *calendar* scheduling, and three facts make it the right surface:
   ("when does this next fire, in the host's timezone, across a DST boundary?")
   needs a calendar library — and `jiff`, the modern one, is already compiled in
   via the bundled `date`. Declaring it in exarch's `Cargo.toml` resolves to the
-  same built crate at zero marginal cost. (`host.rs` shells to `date(1)` to avoid
-  a *direct* `chrono` dep for one string; the irony is that the `date` it sidesteps
-  is what drags `jiff` in regardless.)
+  same built crate at zero marginal cost. (The host line's `now` was once a `date(1)` shell-out to avoid a
+  *direct* `chrono` dep; the `date` it sidestepped dragged `jiff` in regardless,
+  and `exarch/src/prompt/host.rs` now formats it with `jiff` directly.)
 
 Every occurrence is a wall-clock instant; the reaper is monotonic `Instant` and
 stops while the machine sleeps. The scheduler bridges the two: `jiff` computes

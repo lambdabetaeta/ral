@@ -9,11 +9,11 @@ let assert_eq = { |name expected actual|
     }
 }
 
-# id :: ∀α. α → Returns α
-let n = !{id 41}
-let s = !{id hello}
-assert_eq 'id at Int' 42 $[$n + 1]
-assert_eq 'id at String' hello $s
+# identity :: ∀α. α → Returns α
+let n = !{identity 41}
+let s = !{identity hello}
+assert_eq 'identity at Int' 42 $[$n + 1]
+assert_eq 'identity at String' hello $s
 
 # reverse :: ∀α. [α] → Returns [α] — the element type flows through the
 # instantiation, so the arithmetic below is legal only at [Int].

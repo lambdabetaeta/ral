@@ -609,7 +609,7 @@ impl Picker {
                 .iter()
                 .filter_map(|account| match self.models.get(&account.id) {
                     Some(ModelsState::Failed(reason)) => Some(format!(
-                        "{} — could not list its models: {reason}",
+                        "{}: could not list its models: {reason}",
                         self.label(account)
                     )),
                     _ => None,
@@ -785,7 +785,7 @@ impl Picker {
         Line::from(vec![
             Span::styled(FIELD_LABEL.left(label), dim),
             Span::styled(
-                "— not supported by this model",
+                "not supported by this model",
                 dim.add_modifier(Modifier::ITALIC),
             ),
         ])
@@ -817,7 +817,7 @@ impl Picker {
             return Line::from(vec![
                 label,
                 Span::styled(
-                    "— OpenRouter routing only",
+                    "OpenRouter routing only",
                     dim.add_modifier(Modifier::ITALIC),
                 ),
             ]);

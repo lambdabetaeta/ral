@@ -7,6 +7,10 @@
 //!
 //! One line on stdout, no label: a shell reads it with `$(…)`.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "[silent:example] an example prints its result"
+)]
 fn main() {
     println!("{}", ral_core::protocol::PROTOCOL_VERSION);
 }

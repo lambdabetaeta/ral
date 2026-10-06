@@ -14,10 +14,11 @@
 
 mod common;
 
+use ral_core::Scheme;
+use ral_core::compile::compile_and_typecheck;
 use ral_core::ir::Phrase;
 use ral_core::source::FileId;
 use ral_core::test_access::{has_result_only_var, has_weak_residuals};
-use ral_core::{Scheme, compile_and_typecheck};
 
 fn defined(src: &str) -> Vec<(String, std::sync::Arc<Scheme>)> {
     let shell = common::fresh_shell();

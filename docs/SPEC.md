@@ -1918,7 +1918,7 @@ receives this record:
   status: Int,
   reason: Reason,
   message: String,
-  site: `just [script: String, line: Int, col: Int] | `none,
+  site: `some [script: String, line: Int, col: Int] | `none,
 ]
 ```
 
@@ -3197,7 +3197,7 @@ do not abbreviate an error record.
     cmd:     String,
     status:  Int,
     message: String,
-    site:    `just [script: String, line: Int, col: Int] | `none,
+    site:    `some [script: String, line: Int, col: Int] | `none,
 ]
 ```
 
@@ -3310,7 +3310,7 @@ The report is not itself an observation. It has two fields:
 [
     outcome: <`ok A | `err [cmd: String, status: Int, reason: Reason,
                             message: String,
-                            site: `just [script: String, line: Int,
+                            site: `some [script: String, line: Int,
                                          col: Int] | `none]>,
     trail:   [Observation],
 ]
@@ -3368,26 +3368,28 @@ Every observation shares this common shape:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `site` | `` `just [script: String, line: Int, col: Int] \| `none `` | one-based source position; `` `none `` for a run root |
+| `site` | `` `some [script: String, line: Int, col: Int] \| `none `` | one-based source position; `` `none `` for a run root |
 | `start` | `Int` | microseconds since the Unix epoch |
 | `end` | `Int` | microseconds since the Unix epoch |
-| `principal` | `String` | shell principal when the observation was recorded; empty where nothing named one |
+| `principal` | `` `some String \| `none `` | shell principal when the observation was recorded; `` `none `` where nothing named one |
 | `what` | `Variant` | which kind of fact this is, together with its own fields |
 
 There is no `kind` field. The tag of `what` *is* the kind, so a reader
 dispatches with `case` and the checker decides exhaustiveness (§8.3):
 
 ```text
-what: `command [argv: [String], status: Int, origin: String,
-                stdout: Bytes, stderr: Bytes, error: String]
-    | `write   [path: String, mode: String, outcome: String,
-                new_bytes: <`just Bytes | `none>,
-                old_bytes: <`just Bytes | `none>]
+what: `command [argv: [String], status: Int, origin: <`external | `detached>,
+                stdout: Bytes, stderr: Bytes, error: <`some String | `none>]
+    | `write   [path: String, mode: <`write | `append | `stream>,
+                outcome: <`committed | `aborted | `failed>,
+                new-bytes: <`some Bytes | `none>,
+                old-bytes: <`some Bytes | `none>]
     | `read    [path: String]
     | `grep    [scope: String, pattern: String]
-    | `check   [resource: String, decision: String, fields: Map String]
-    | `worker  [id: Int, cmd: String, class: String]
-    | `act     [verb: String, subject: <`just String | `none>,
+    | `check   [resource: <`exec | `fs | `deputy>, decision: <`denied | `flagged>,
+                fields: Map String]
+    | `worker  [id: Int, cmd: String, class: <`worker | `durable>]
+    | `act     [verb: String, subject: <`some String | `none>,
                 payload: String, refused: Bool]
 ```
 
@@ -3401,10 +3403,10 @@ A `` `command `` observation records an external or bundled command, or a
 |---|---|---|
 | `argv` | `[String]` | the shown name first, then its evaluated arguments |
 | `status` | `Int` | the outcome's status: 0 for a command that returned, otherwise its error's exit code |
-| `origin` | `String` | `external` or `detached` |
+| `origin` | `` `external \| `detached `` | the door the command came through |
 | `stdout` | `Bytes` | raw bytes observed on fd 1 |
 | `stderr` | `Bytes` | raw bytes observed on fd 2 |
-| `error` | `String` | ral's runtime error message, or the empty string |
+| `error` | optional `String` | ral's runtime error message, `` `none `` when the outcome was not a runtime error |
 
 A command's returned value is not among them. `argv`, the status, and the bytes
 are the evidence a later reader can act on; a process-local or executable value
@@ -3415,12 +3417,12 @@ A `` `write `` observation records a `>` / `>>` / `>~` redirect settling:
 | Field | Type | Meaning |
 |---|---|---|
 | `path` | `String` | the redirect's resolved target |
-| `mode` | `String` | `write`, `append`, or `stream` |
-| `outcome` | `String` | `committed`, `aborted`, or `failed` |
-| `new_bytes` | optional `Bytes` | the target's whole content after the write |
-| `old_bytes` | optional `Bytes` | the target's whole content before it, empty for a new file |
+| `mode` | `` `write \| `append \| `stream `` | how the redirect opened its target |
+| `outcome` | `` `committed \| `aborted \| `failed `` | how the write settled |
+| `new-bytes` | optional `Bytes` | the target's whole content after the write |
+| `old-bytes` | optional `Bytes` | the target's whole content before it, empty for a new file |
 
-An optional field is a variant, `` `just `` of the value or `` `none ``. Both
+An optional field is a variant, `` `some `` of the value or `` `none ``. Both
 byte fields are always present: an absent image is `` `none ``, never a missing
 key, so a reader eliminates it with `case` rather than testing for a key, and
 "there was no before-image" stays a fact the trail states rather than one the
@@ -3439,7 +3441,7 @@ A `` `worker `` observation records a worker's birth:
 |---|---|---|
 | `id` | `Int` | the worker's registry identifier |
 | `cmd` | `String` | what it was born to run |
-| `class` | `String` | `worker` or `durable` |
+| `class` | `` `worker \| `durable `` | the lease class the worker registered under |
 
 An `` `act `` observation records an act the host committed:
 
@@ -3454,9 +3456,9 @@ When an atomic `>` commit fails after the command itself exited cleanly, the
 `` `command `` observation reports the failed commit, not the child's own
 status: `status` is nonzero and `error` names the commit failure.
 
-A `` `command ``'s `error` field is present even on success, where it is the
-empty string. It is populated only from ral's runtime-error path; it is not
-copied from `stderr`, and a nonzero status need not imply a nonempty `error`.
+A `` `command ``'s `error` field is present even on success, where it is
+`` `none ``. It is `` `some `` only from ral's runtime-error path; it is not
+copied from `stderr`, and a nonzero status need not imply a `` `some `` `error`.
 Conversely, `stderr` contains only bytes observed on fd 2. It never contains
 synthetic runtime prose merely because a command failed.
 
@@ -3516,8 +3518,8 @@ A check's fields are:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `resource` | `String` | `exec`, `fs`, or `deputy` |
-| `decision` | `String` | `denied`, or the advisory `flagged` |
+| `resource` | `` `exec \| `fs \| `deputy `` | the resource class judged |
+| `decision` | `` `denied \| `flagged `` | `` `denied ``, or the advisory `` `flagged ``; the resource's own, so a `` `deputy `` is never denied |
 | `fields` | `Map String` | the resource-specific detail |
 
 A check is a leaf: no arguments, no I/O, and equal `start` and `end`
@@ -3525,7 +3527,7 @@ timestamps. A denial is never encoded as a status, and it manufactures no raw
 `stderr` bytes.
 
 The confused-deputy advisory (§12.7) records one `` `check `` per flagged
-prefix, with `resource: deputy`, `decision: flagged`, and
+prefix, with `` resource: `deputy ``, `` decision: `flagged ``, and
 `fields: [prefix: …]` naming the writable executable-directory prefix. It
 reports that shape; it does not deny it.
 
@@ -3557,7 +3559,6 @@ The JSON projection favours legibility over round-trip fidelity:
 
 - `Bytes` become strings using lossy UTF-8 conversion;
 - `Unit` becomes `null`;
-- non-finite floats become `null`;
 - variants become objects with `tag` and, where present, `payload`;
 - executable or process-local values such as blocks, functions, natives, and
   handles become descriptive stubs.
@@ -3641,6 +3642,8 @@ For executable-level checks:
   without executing it;
 - `ral --dump-ast` parses and prints the debug AST to stderr without
   elaborating, type-checking, or executing it;
+- `ral --dump-ir` parses and elaborates, and prints the elaborated phrases to
+  stderr without type-checking or executing them;
 - `ral --audit` exercises the real program and exposes its audit trail.
 
 The repository's script harness discovers `tests/**/*.ral`, runs each runnable
@@ -3707,7 +3710,7 @@ programs should not.
 
 ### 14.2. Values, collections, and comparison
 
-The primitive collection family includes:
+The collection family includes:
 
 - `each`, `map`, and `filter` for applying a function to list elements;
 - `fold` for a left-to-right reduction;
@@ -3794,7 +3797,9 @@ active filesystem grant.
 
 `list-dir` returns records rather than formatted columns. `file-info` uses
 link metadata and reports fields including name, type, size, timestamps,
-readonly state, and symbolic-link target. An unavailable timestamp is 0.
+readonly state, and symbolic-link target. `type` is a tag, `` `file ``,
+`` `dir ``, `` `symlink ``, or `` `other ``; `target` is `` `some `` the link's
+contents for a symlink and `` `none `` otherwise. An unavailable timestamp is 0.
 
 `exists`, `is-link`, and `file-info` judge a symbolic link at the link itself,
 never at the name it points to: a dangling link is judged and reported there,
@@ -3945,7 +3950,6 @@ ral -i                      # force an interactive session
 ral -s                      # read a batch script from stdin
 ral --surface minimal       # choose the canonical-input frontend
 ral --surface readline      # choose the full line editor
-ral --surface structural    # request the structural frontend
 ral --norc                  # skip every startup file
 ```
 
@@ -3971,19 +3975,16 @@ supported.
 
 ### 15.2. Frontends
 
-The `ral` executable provides three interactive frontends:
+The `ral` executable provides two interactive frontends:
 
 | Surface | Contract |
 |---|---|
 | `minimal` | Canonical standard-input reads and a `> ` continuation prompt; no raw mode, completion, editor keybindings, ghost text, or highlighting. |
 | `readline` | The default full editor, with history, completion, vi or Emacs editing, plugin keybindings, ghost text, and highlighting. |
-| `structural` | A feature-gated terminal projection of the same session, including typed bindings, worksheet information, and handles. It uses the same completion and plugin dispatch rules as `readline`. |
 
 Terminal capability is stronger than preference. A dumb terminal, or
 `RAL_INTERACTIVE_MODE=minimal`, forces the minimal surface even when another
-surface was requested. If `structural` is requested but the binary lacks that
-feature or the terminal cannot enter raw mode, ral warns and falls back to
-`readline`.
+surface was requested.
 
 The full frontends complete variables, command-position names, and paths.
 Variable candidates come from live non-private bindings. Command candidates
@@ -4030,16 +4031,16 @@ result shape is rejected. For example:
 
 ```ral
 return [
-    edit_mode: vi,
+    edit-mode: vi,
     bell: false,
     surface: readline,
-    recursion_limit: 1024,
+    recursion-limit: 1024,
 
     prompt: { return "!{abbreviate-home !{cwd}} ❯ " },
     env: [EDITOR: 'vim', PAGER: 'less'],
     bindings: [work: '/srv/work'],
     aliases: [ll: { |args| ls -lh ...$args }],
-    theme: [value_prefix: '⇒ ', value_color: cyan],
+    theme: [value-prefix: '⇒ ', value-color: cyan],
     startup: { echo 'ready' },
 ]
 ```
@@ -4052,13 +4053,13 @@ The recognized fields are:
 | `prompt: Block` | Install the zero-argument base-prompt body. |
 | `bindings: Record` | Install lexical values, including functions. |
 | `aliases: Record` | Install block or function values as command aliases; other values become ordinary lexical bindings. |
-| `edit_mode: String` | `emacs` or `vi`; default `emacs`. |
+| `edit-mode: String` | `emacs` or `vi`; default `emacs`. |
 | `bell: Bool` | Enable or disable the audible line-editor bell; default `false`. |
-| `surface: String` | `minimal`, `readline`, or `structural`; default `readline`. |
-| `recursion_limit: Int` | A positive function-call recursion limit; default `100_000`. |
+| `surface: String` | `minimal` or `readline`; default `readline`. |
+| `recursion-limit: Int` | A positive function-call recursion limit; default `100_000`. |
 | `plugins: Record` | Names each plugin and its options; loaded before the first prompt; see below. |
 | `startup: Block` | A zero-argument block run once after the map is applied. |
-| `theme: Record` | `value_prefix: String` and `value_color: String`. The colour is one of `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, or `none`. |
+| `theme: Record` | `value-prefix: String` and `value-color: String`. The colour is one of `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, or `none`. |
 
 The eleven fields above are the RC file's whole keyset, and it is closed: an
 unknown top-level key is an error naming the key and the list. The check is
@@ -4224,7 +4225,7 @@ The recognized hooks are:
 
 | Hook | Argument and result | Time |
 |---|---|---|
-| `buffer-change` | `[old_buf: String, line: String, pos: Int, history: List<String>, keymap: String, state: Any]`; returns `Unit` | After the text or cursor changes. |
+| `buffer-change` | `[old-buf: String, line: String, pos: Int, history: List<String>, keymap: String, state: Any]`; returns `Unit` | After the text or cursor changes. |
 | `pre-exec` | `[src: String]`; returns `Unit` | Before one complete prompt input is evaluated. |
 | `post-exec` | `[src: String, status: Int]`; returns `Unit` | After evaluation settles. |
 | `chpwd` | `[old: String, new: String]`; returns `Unit` | After an input line that leaves the session working directory changed. |
@@ -4382,6 +4383,7 @@ The batch-only inspection flags are:
 
 - `-n`, `--check` — parse, elaborate, and typecheck without executing;
 - `--dump-ast` — parse and print the syntax tree to stderr without elaborating or executing;
+- `--dump-ir` — parse and elaborate, and print the phrases to stderr without typechecking or executing; at most one of `--check`, `--dump-ast`, `--dump-ir`;
 - `--audit` — execute and print the run's audit report as JSON on stderr;
 - `--pretty` — pretty-print that JSON; it requires `--audit`.
 
@@ -4442,9 +4444,9 @@ continues to the interactive shell.
 
 ### 16.5. Interactive surfaces
 
-`--surface minimal`, `--surface readline`, or `--surface structural` selects the frontend. Without the flag, the rc setting is used, then `readline` by default.
+`--surface minimal` or `--surface readline` selects the frontend. Without the flag, the rc setting is used, then `readline` by default.
 
-`RAL_INTERACTIVE_MODE=minimal` forces the canonical-stdin frontend regardless of the selected surface. An unknown value warns interactively and falls back to automatic probing. A structural surface that is unavailable in the build or cannot obtain raw terminal mode warns and falls back to readline.
+`RAL_INTERACTIVE_MODE=minimal` forces the canonical-stdin frontend regardless of the selected surface. An unknown value warns interactively and falls back to automatic probing.
 
 ### 16.6. Compatibility flags and environment
 
@@ -5123,7 +5125,7 @@ tag.
 
 Let `Error` be the closed error record
 `` {cmd:String, status:Int, message:String, site:S} ``, where
-`` S = `just {script:String, line:Int, col:Int} | `none `` — the one
+`` S = `some {script:String, line:Int, col:Int} | `none `` — the one
 vocabulary `try`, `poll`, and `audit` all report failure in. The scope forms
 take their bodies as thunks and are typed by them:
 
@@ -5251,7 +5253,7 @@ has installed exactly the `Define`s that ran before the halt.
 
 The stack is capped: a rule that would push a frame first checks `|κ| <
 stack_limit` (`session.stack_limit`, default 100 000, the `--recursion-limit` /
-rc `recursion_limit:` knob) and raises rather than pushing, *before* any
+rc `recursion-limit:` knob) and raises rather than pushing, *before* any
 effect the frame would hold undo for — a sink swap, a redirect's file open, a
 capability push — so a refused push commits nothing.
 

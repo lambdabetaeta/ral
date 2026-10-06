@@ -5,6 +5,13 @@
 //! [`agent::Avatar`] exchange driver, the [`provider::Provider`] transport, and
 //! the two frontends ([`tui::run`] / [`headless::run`]).  The `exarch` binary is
 //! a thin shell over [`run`]; integration tests link this library directly.
+#![cfg_attr(
+    test,
+    allow(
+        clippy::disallowed_macros,
+        reason = "[test] libtest captures print macros"
+    )
+)]
 #![allow(
     clippy::disallowed_methods,
     reason = "exarch is an application, not the ral shell; the clippy.toml invariants target ral-core's Shell path/cwd/fs discipline"
@@ -44,7 +51,7 @@ pub static INSTALLERS: [ral_core::engine::EngineInstaller; 1] =
     }];
 
 /// The full pre-`main` dispatch, shared by the binary's `main` and every test
-/// `#[ctor]`: core's [`serve_pre_main`](ral_core::sandbox::serve_pre_main) over
+/// `#[ctor]`: core's [`serve_process`](ral_core::invocation::serve_process) over
 /// exarch's [`INSTALLERS`].
 ///
 /// The pipeline anchor re-execs the running binary, which under `cargo test`
@@ -53,8 +60,7 @@ pub static INSTALLERS: [ral_core::engine::EngineInstaller; 1] =
 ///
 /// `Some(code)` means this process is a re-exec child that should exit now.
 pub fn dispatch_pre_main() -> Option<u8> {
-    let argv: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-    ral_core::sandbox::serve_pre_main(&ral_core::classify(&argv), &INSTALLERS)
+    ral_core::invocation::serve_process(&INSTALLERS)
 }
 
 /// [`dispatch_pre_main`], and the exit its answer calls for — one expression,
@@ -67,7 +73,7 @@ pub fn exit_if_re_exec_child() {
     if let Some(code) = dispatch_pre_main() {
         #[allow(
             clippy::disallowed_methods,
-            reason = "a re-exec child, served before any CLI: the anchor drains a pipe, the pgid probe writes a line, the sandbox stage has already exec'd or refused. None boots a shell, so none holds a lease, a watched child or a staged write — and in the `#[ctor]` form nothing at all is booted yet"
+            reason = "a re-exec child, served before any CLI: the anchor drains a pipe, the pgid probe writes a line, the sandbox stage has already exec'd or refused. None boots a shell, so none holds a lease, a watched child or a staged write; and in the `#[ctor]` form nothing at all is booted yet"
         )]
         std::process::exit(i32::from(code));
     }
@@ -113,10 +119,12 @@ pub fn run() -> Result<(), String> {
             cli::Command::Accounts => {
                 let accounts = provider::oauth::accounts();
                 if accounts.is_empty() {
-                    eprintln!("No ChatGPT accounts signed in. Run `exarch login` to add one.");
+                    ral_core::errln!(
+                        "No ChatGPT accounts signed in. Run `exarch login` to add one."
+                    );
                 } else {
                     for account in &accounts {
-                        println!("{}", provider::identity::label(account, &accounts));
+                        ral_core::outln!("{}", provider::identity::label(account, &accounts));
                     }
                 }
                 Ok(())
@@ -137,7 +145,7 @@ pub fn run() -> Result<(), String> {
     let available = store.available();
     if available.is_empty() {
         return Err(
-            "no provider available — set a provider API key (e.g. ANTHROPIC_API_KEY, \
+            "no provider available: set a provider API key (e.g. ANTHROPIC_API_KEY, \
              OPENAI_API_KEY, OPENROUTER_API_KEY, DEEPSEEK_API_KEY)"
                 .into(),
         );
@@ -172,11 +180,11 @@ pub fn run() -> Result<(), String> {
     let scratch = Arc::new(
         bootstrap::Scratch::new(bootstrap::EXARCH).map_err(|e| format!("scratch dir: {e}"))?,
     );
-    let (_mode, terminal, _warn) = ral_core::io::TerminalState::probe_from_env();
+    let (_mode, terminal, _warn) = ral_core::terminal::TerminalState::probe_from_env();
     bootstrap::face_process_signals(&terminal);
     // Held for the whole run: the lock is the launcher's, not the node's.
     let (run_dir, _run_lock, resumes) = resolve_run(&cwd, c.resume)?;
-    let config_dir = bootstrap::EXARCH.xdg_dir(ral_core::path::basedir::XdgKind::Config);
+    let config_dir = bootstrap::EXARCH.xdg_dir(ral_core::host::XdgKind::Config);
     let cwd_path = std::path::PathBuf::from(&cwd);
     // Chat registers no tools, so there is nothing for a system prompt to say.
     let system = if c.chat {
@@ -426,7 +434,7 @@ fn open(
     let choose = |among, why: Option<String>| {
         let Some(run_dir) = attended else {
             return Err(format!(
-                "{} — pass --model NAME for a headless run",
+                "{}: pass --model NAME for a headless run",
                 why.as_deref().unwrap_or("no model chosen")
             ));
         };

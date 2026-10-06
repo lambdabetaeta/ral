@@ -41,7 +41,7 @@ impl Token {
     /// [`Interrupt`](CancelCause).  A non-`Held` park ends the agent on this.
     pub fn terminated(&self) -> bool {
         let flag = self.0.load(Ordering::Relaxed);
-        flag != 0 && flag != CancelCause::Interrupt as u8
+        flag != 0 && flag != CancelCause::Interrupted as u8
     }
 
     /// Cancel this token and every share of it, recording `cause`.  Monotone,
@@ -57,7 +57,7 @@ impl Token {
     /// between the attend loop's pop and this reset.
     pub fn reset(&self) {
         let _ = self.0.compare_exchange(
-            CancelCause::Interrupt as u8,
+            CancelCause::Interrupted as u8,
             0,
             Ordering::Relaxed,
             Ordering::Relaxed,
@@ -68,14 +68,14 @@ impl Token {
 /// Where an agent's interrupt and terminate land: its seat's current control
 /// sender, republished at every rebuild, so the cell outlives any one engine.
 #[derive(Clone)]
-pub(crate) struct InterruptTarget(Arc<std::sync::Mutex<ral_core::protocol::ControlSender>>);
+pub(crate) struct InterruptTarget(Arc<std::sync::Mutex<ral_core::carrier::ControlSender>>);
 
 impl InterruptTarget {
-    pub(crate) fn new(control: ral_core::protocol::ControlSender) -> Self {
+    pub(crate) fn new(control: ral_core::carrier::ControlSender) -> Self {
         Self(Arc::new(std::sync::Mutex::new(control)))
     }
 
-    pub(crate) fn republish(&self, control: ral_core::protocol::ControlSender) {
+    pub(crate) fn republish(&self, control: ral_core::carrier::ControlSender) {
         *self.0.lock_ignore_poison() = control;
     }
 
@@ -97,16 +97,16 @@ mod tests {
     #[test]
     fn cancel_is_monotone_and_never_downgrades() {
         let token = Token::new();
-        token.cancel(CancelCause::Explicit);
-        token.cancel(CancelCause::Interrupt);
+        token.cancel(CancelCause::Cancelled);
+        token.cancel(CancelCause::Interrupted);
         assert!(
             token.terminated(),
             "a later Interrupt must not downgrade an already-recorded Explicit"
         );
-        token.cancel(CancelCause::Deadline);
+        token.cancel(CancelCause::TimedOut);
         assert_eq!(
             token.0.load(Ordering::Relaxed),
-            CancelCause::Deadline as u8,
+            CancelCause::TimedOut as u8,
             "a stronger later cause still escalates"
         );
     }
@@ -114,12 +114,12 @@ mod tests {
     #[test]
     fn reset_clears_only_a_bare_interrupt() {
         let token = Token::new();
-        token.cancel(CancelCause::Interrupt);
+        token.cancel(CancelCause::Interrupted);
         token.reset();
         assert!(!token.is_cancelled(), "reset clears a bare interrupt");
 
         let token = Token::new();
-        token.cancel(CancelCause::Explicit);
+        token.cancel(CancelCause::Cancelled);
         token.reset();
         assert!(
             token.terminated(),
@@ -127,7 +127,7 @@ mod tests {
         );
         assert_eq!(
             token.0.load(Ordering::Relaxed),
-            CancelCause::Explicit as u8,
+            CancelCause::Cancelled as u8,
             "the recorded cause survives the reset unchanged"
         );
     }

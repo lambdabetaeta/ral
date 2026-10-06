@@ -2,13 +2,11 @@
 
 use super::error::{Reason, TypeError, TypeErrorKind, UnitCall};
 use super::index::{Idx, Lbl};
-use super::kind::Kind;
-use super::scheme::Scheme;
-use super::ty::{CompTy, Ty};
 use super::unify::{Unifier, WeakSource};
-use crate::ir::{Comp, Val};
+use crate::ir::{Comp, GroupNode, Name, Val, synthetic};
 use crate::source::Span;
-use crate::types::{Fixings, Site};
+use crate::ty::{CompTy, Kind, Scheme, Ty};
+use crate::ty::{Fixings, Site};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -16,10 +14,17 @@ use std::sync::Arc;
 // Typing environment
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// What installed a handler: `unalias` removes only an [`Self::Alias`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HandlerOrigin {
+    Within,
+    Alias,
+}
+
 #[derive(Clone)]
 pub(crate) struct HandlerBinding {
     pub(crate) scheme: Arc<Scheme>,
-    pub(crate) removable_by_unalias: bool,
+    pub(crate) origin: HandlerOrigin,
 }
 
 #[derive(Clone, Default)]
@@ -33,9 +38,9 @@ struct NameScope {
 #[derive(Clone)]
 pub struct TyEnv {
     scopes: Vec<NameScope>,
-    /// The run's builtin table, seeded once by `seed_env`.  A name resolves
-    /// here after a lexical binding and before a handler.
-    pub(crate) builtins: crate::types::BuiltinTable,
+    /// The run's Σ, seeded once by `seed_env`.  A name resolves here after a
+    /// lexical binding and before a handler.
+    pub(crate) builtins: super::builtins::Manifest,
 }
 
 impl Default for TyEnv {
@@ -48,7 +53,7 @@ impl TyEnv {
     pub fn new() -> Self {
         Self {
             scopes: vec![NameScope::default()],
-            builtins: crate::types::BuiltinTable::default(),
+            builtins: super::builtins::Manifest::default(),
         }
     }
 
@@ -82,10 +87,12 @@ impl TyEnv {
             .find_map(|scope| scope.handlers.get(name))
     }
 
-    pub fn push(&mut self) {
+    /// Only [`Inferencer::with_scope`] opens and closes a scope.
+    pub(super) fn push(&mut self) {
         self.scopes.push(NameScope::default());
     }
-    pub(crate) fn pop(&mut self) {
+
+    pub(super) fn pop(&mut self) {
         self.scopes.pop();
     }
 
@@ -112,13 +119,13 @@ impl TyEnv {
         &mut self,
         name: String,
         scheme: impl Into<Arc<Scheme>>,
-        removable_by_unalias: bool,
+        origin: HandlerOrigin,
     ) {
         self.scopes.last_mut().unwrap().handlers.insert(
             name,
             HandlerBinding {
                 scheme: scheme.into(),
-                removable_by_unalias,
+                origin,
             },
         );
     }
@@ -139,7 +146,7 @@ impl TyEnv {
         for scope in self.scopes.iter_mut().rev() {
             if matches!(
                 scope.handlers.get(name),
-                Some(binding) if binding.removable_by_unalias
+                Some(binding) if binding.origin == HandlerOrigin::Alias
             ) {
                 scope.handlers.remove(name);
                 return true;
@@ -163,13 +170,27 @@ impl TyEnv {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// The key of a node in [`InferCtx`]'s side tables: its address in the one
-/// live tree both passes walk.
-pub(super) fn comp_key(comp: &Comp) -> usize {
-    std::ptr::from_ref::<Comp>(comp) as usize
+/// live tree both passes walk, tagged by the kind of node, so one kind's
+/// address can never find another's entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) enum Node {
+    Comp(usize),
+    Val(usize),
+    Group(usize),
 }
 
-pub(super) fn val_key(val: &Val) -> usize {
-    std::ptr::from_ref::<Val>(val) as usize
+impl Node {
+    pub(super) fn comp(comp: &Comp) -> Self {
+        Self::Comp(std::ptr::from_ref(comp) as usize)
+    }
+
+    pub(super) fn val(val: &Val) -> Self {
+        Self::Val(std::ptr::from_ref(val) as usize)
+    }
+
+    pub(super) fn group(group: &Arc<GroupNode>) -> Self {
+        Self::Group(Arc::as_ptr(group) as usize)
+    }
 }
 
 /// A boundary builtin used as a value: what `annotate` rebuilds into the block
@@ -189,14 +210,11 @@ pub struct InferCtx {
     pub pos: Option<Span>,
     /// The computations a value demand captures, keyed by node address:
     /// `annotate` wraps each in `cap … to d. decode d`.
-    pub(crate) captured: HashSet<usize>,
+    pub(super) captured: HashSet<Node>,
     /// The values in hand a value demand captures — a command block passed
     /// where a value producer was wanted — keyed by address, with the arity
     /// `annotate` η-wraps them at.
-    pub(crate) captured_vals: HashMap<usize, usize>,
-    /// The value flowing out of each pipeline stage.  Feeds the structural REPL's
-    /// typed spine; the evaluator never reads it.
-    pub(crate) stage_types: HashMap<usize, Ty>,
+    pub(super) captured_vals: HashMap<Node, usize>,
     /// Each read of a name bound to what a call returned, which was `()`, at the
     /// span it was read at: an error raised there says why the name is `()`.
     pub(super) unit_reads: Vec<(Span, UnitCall)>,
@@ -209,27 +227,27 @@ pub struct InferCtx {
     /// A `Rec` group's member types, inferred once per `Arc` within a run
     /// and keyed by its identity — every projection of the same group reads
     /// the same betas rather than re-inferring the group.
-    pub(crate) rec_groups: HashMap<*const (), Vec<CompTy>>,
+    pub(super) rec_groups: HashMap<Node, Vec<CompTy>>,
     /// `annotate`'s rebuilt `GroupNode` per source group's identity, so every
     /// `Rec` projection of one group shares the one node the elaborator
     /// built, rather than each rebuilding its own.
-    pub(crate) rec_group_rebuilds: HashMap<*const (), Arc<crate::ir::GroupNode>>,
+    pub(super) rec_group_rebuilds: HashMap<Node, Arc<GroupNode>>,
     /// A `Bind`/`Define`/tail-`Run` RHS's curried arity, recorded whenever
     /// its inferred type resolved to `Fun` — keyed by the RHS node's own
     /// address, read back by `annotate`'s η-expansion.
-    pub(crate) rhs_arrow_arity: HashMap<usize, usize>,
+    pub(super) rhs_arrow_arity: HashMap<Node, usize>,
     /// The result type of each boundary call, keyed by the `Exec` node's
     /// address, and of each boundary builtin used as a value, keyed by its
     /// `Val`'s; frozen into a [`Site`] once the unit is solved.
-    pub(super) boundary_results: HashMap<usize, Ty>,
+    pub(super) boundary_results: HashMap<Node, Ty>,
     /// What `annotate` rebuilds a boundary builtin used as a value into: a
     /// block holding the saturated call, keyed like [`Self::boundary_results`].
-    pub(super) boundary_values: HashMap<usize, BoundaryValue>,
+    pub(super) boundary_values: HashMap<Node, BoundaryValue>,
     /// How many arguments an under-applied boundary call lacks, keyed by its
     /// `Exec`: `annotate` η-expands it to a saturated call, where the site is.
-    pub(super) boundary_missing: HashMap<usize, usize>,
+    pub(super) boundary_missing: HashMap<Node, usize>,
     /// The sites [`Self::snapshot_sites`] froze, under the same keys.
-    pub(super) sites: HashMap<usize, Arc<Site>>,
+    pub(super) sites: HashMap<Node, Arc<Site>>,
     /// Stored session bindings that entered this unit with weak residuals, as
     /// seeded.
     pub(super) residuals: Vec<(String, Arc<Scheme>)>,
@@ -257,7 +275,6 @@ impl InferCtx {
             pos: None,
             captured: HashSet::new(),
             captured_vals: HashMap::new(),
-            stage_types: HashMap::new(),
             unit_reads: Vec::new(),
             pending_labels: Vec::new(),
             pending_indexes: Vec::new(),
@@ -276,18 +293,17 @@ impl InferCtx {
         }
     }
 
-    /// A fresh, distinctive name for a compiler-synthesized binder, tagged
-    /// with `purpose` (`"eta"`, `"decode"`) — never written by any surface
-    /// program, so no collision guard is needed beyond the counter itself.
-    pub(crate) fn fresh_name(&mut self, purpose: &str) -> String {
+    /// A fresh compiler-written binder tagged with `purpose` (`"eta"`,
+    /// `"decode"`).
+    pub(crate) fn fresh_name(&mut self, purpose: &str) -> Name {
         self.synth_counter += 1;
-        format!("__{purpose}{}", self.synth_counter)
+        synthetic(purpose, self.synth_counter)
     }
 
     /// Record `ty` as the result of the boundary node at `key`, and make what
     /// is free in it weak: its one type for the unit is what its door admits
     /// the value against.
-    pub(super) fn record_boundary(&mut self, key: usize, name: &str, ty: Ty) {
+    pub(super) fn record_boundary(&mut self, key: Node, name: &str, ty: Ty) {
         self.unifier
             .mark_weak(&ty, &WeakSource::Boundary(name.into()));
         self.boundary_results.insert(key, ty);

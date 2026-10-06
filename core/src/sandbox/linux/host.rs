@@ -6,7 +6,7 @@
 //! pure in it.
 
 use super::landlock::Landlock;
-use crate::runtime::pipeline::helper::ANCHOR_FLAG;
+use crate::Role;
 use crate::sandbox::reexec::Pinned;
 use crate::sandbox::warrant::{Handoff, Slot};
 use rustix::fs::OFlags;
@@ -105,7 +105,7 @@ fn bwrap_builds<'a>(
         .args(pieces)
         .arg("--")
         .arg(crate::path::proc_fd_path(Slot::Trampoline.fd()))
-        .arg(ANCHOR_FLAG)
+        .arg(Role::Anchor.flag())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());

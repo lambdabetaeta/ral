@@ -3,12 +3,8 @@
 //! ([`HeldEdge`]) keeps EPIPE off every writer: the sentinel hears it instead.
 
 use crate::io::Edge;
-use crate::types::{Break, Error, Settled};
+use crate::types::{Error, Settled};
 use std::sync::Arc;
-
-pub(super) fn pipe_error(e: impl std::fmt::Display) -> Break {
-    Break::Error(Error::new(format!("pipe: {e}"), 1))
-}
 
 /// Stdin source for one stage.
 pub(super) enum ByteIn {
@@ -42,14 +38,14 @@ pub(super) struct StageRoute {
 }
 
 fn open_edge() -> Settled<((ByteOut, Option<HeldEdge>), ByteIn)> {
-    let (r, w) = crate::process::cloexec_pipe().map_err(pipe_error)?;
+    let (r, w) = crate::process::cloexec_pipe().map_err(|e| Error::io("pipe", &e))?;
     let edge = Edge::new();
     Ok((
         (
             ByteOut::Downstream(w, Arc::clone(&edge)),
             Some(HeldEdge {
                 edge,
-                reader: Arc::new(r.try_clone().map_err(pipe_error)?),
+                reader: Arc::new(r.try_clone().map_err(|e| Error::io("pipe", &e))?),
             }),
         ),
         ByteIn::Upstream(r),

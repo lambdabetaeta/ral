@@ -22,7 +22,7 @@ pub(in crate::provider::allowance) fn read(
 ) -> Result<Vec<Allowance>, String> {
     let Credential::OAuth(cell) = credential else {
         return Err(format!(
-            "{} authenticates with an API key, not a ChatGPT login — the Codex \
+            "{} authenticates with an API key, not a ChatGPT login: the Codex \
              usage endpoint has nothing to read for it",
             roster.label(account)
         ));
@@ -60,7 +60,7 @@ pub(in crate::provider::allowance) fn read(
         // answer, never the wire's.
         usage_to_allowances(&body).ok_or_else(|| {
             format!(
-                "the Codex backend reported no rate-limit windows for {} — \
+                "the Codex backend reported no rate-limit windows for {}: \
                  is this login rationed by window at all?",
                 roster.label(account)
             )

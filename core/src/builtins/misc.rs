@@ -26,10 +26,9 @@ fn status_i32(who: &str, n: i64) -> Result<i32, Break> {
 /// is caught earlier by [`crate::typecheck::builtins::fail_status_is_zero_literal`].
 fn fail_status_code(status: i64) -> Result<i32, Break> {
     if status == 0 {
-        return Err(Break::Error(Error::new(
+        return Err(sig(
             "fail requires a nonzero status (use `return` for clean exit)",
-            1,
-        )));
+        ));
     }
     status_i32("fail", status)
 }
@@ -39,17 +38,11 @@ fn fail_status_code(status: i64) -> Result<i32, Break> {
 /// unchecked boundary — a decoder's result, or a module's asserted shape.
 pub(super) fn builtin_fail(args: &[Value]) -> Break {
     let Some(Value::Map(m)) = args.first() else {
-        return Break::Error(Error::new(
-            "fail expects an error record [status: Int, message: String, ...]",
-            1,
-        ));
+        return sig("fail expects an error record [status: Int, message: String, ...]");
     };
     let lookup = |k: &str| m.get(k);
     let Some(status) = lookup("status").as_deref().and_then(Value::as_int) else {
-        return Break::Error(Error::new(
-            "fail: error record missing or non-integer 'status' field",
-            1,
-        ));
+        return sig("fail: error record missing or non-integer 'status' field");
     };
     let code = match fail_status_code(status) {
         Ok(code) => code,
@@ -58,13 +51,12 @@ pub(super) fn builtin_fail(args: &[Value]) -> Break {
     let message = match lookup("message").as_deref() {
         Some(Value::String(s)) => s.to_string(),
         _ => {
-            return Break::Error(Error::new(
-                "fail: this error record has no String `message` — the message is the text the failure carries",
-                1,
-            ));
+            return sig(
+                "fail: this error record has no String `message`; the message is the text the failure carries",
+            );
         }
     };
-    Break::Error(Error::new(message, code))
+    Error::raised(message, code).into()
 }
 
 pub(super) fn builtin_exit(args: &[Value], _env: &mut Shell) -> Settled<Value> {
@@ -104,7 +96,7 @@ pub fn builtin_surface(args: &[Value], mooring: &Mooring, _shell: &mut Shell) ->
 /// A builtin rather than fd plumbing — ral has no `1>&2` for a diagnostic to
 /// borrow the byte channel through, and a diagnostic never was a payload.
 pub(super) fn builtin_warn(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    let mut line = super::util::as_str(&args[0], "warn")?.to_owned();
+    let mut line = args[0].as_str("warn")?.to_owned();
     line.push('\n');
     shell.write_stderr(line.as_bytes())?;
     Ok(Value::Unit)
@@ -119,7 +111,7 @@ pub(super) fn builtin_warn(args: &[Value], shell: &mut Shell) -> Settled<Value> 
 pub(super) fn builtin_ask(args: &[Value]) -> Result<Value, Error> {
     let prompt = args
         .first()
-        .ok_or_else(|| Error::new("ask requires a prompt string", 1))?;
+        .ok_or_else(|| Error::new("ask requires a prompt string"))?;
     #[cfg(unix)]
     const CON_OUT: &str = "/dev/tty";
     #[cfg(unix)]
@@ -133,17 +125,17 @@ pub(super) fn builtin_ask(args: &[Value]) -> Result<Value, Error> {
     let mut out = std::fs::OpenOptions::new()
         .write(true)
         .open(CON_OUT)
-        .map_err(|e| Error::new(format!("ask: {e}"), 1))?;
+        .map_err(|e| Error::new(format!("ask: {e}")))?;
     write!(out, "{prompt}").ok();
     out.flush().ok();
     drop(out);
-    let inp = std::fs::File::open(CON_IN).map_err(|e| Error::new(format!("ask: {e}"), 1))?;
+    let inp = std::fs::File::open(CON_IN).map_err(|e| Error::new(format!("ask: {e}")))?;
     let mut line = String::new();
     let n = std::io::BufReader::new(inp)
         .read_line(&mut line)
-        .map_err(|e| Error::new(format!("ask: {e}"), 1))?;
+        .map_err(|e| Error::new(format!("ask: {e}")))?;
     if n == 0 {
-        return Err(Error::new("ask: EOF", 1));
+        return Err(Error::new("ask: EOF"));
     }
     line.truncate(line.len() - crate::io::terminator_len(line.as_bytes()));
     Ok(Value::string(line))

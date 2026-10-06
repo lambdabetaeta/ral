@@ -117,7 +117,7 @@ impl AuditLog {
     /// Returns `Err` if the ledger cannot be created or opened.
     pub fn open(app: crate::bootstrap::App) -> std::io::Result<Self> {
         let path = app
-            .xdg_dir(ral_core::path::basedir::XdgKind::State)
+            .xdg_dir(ral_core::host::XdgKind::State)
             .join("net-audit.jsonl");
         Self::at(&path)
     }
@@ -158,7 +158,7 @@ impl AuditLog {
     )]
     #[allow(
         clippy::disallowed_methods,
-        reason = "outside the poison door on purpose: the guard spans the rotation that swaps `file` and the append that follows it, so a panic between them leaves the ledger handle and the bytes on disk disagreeing — and an unauditable proxy must stop proxying rather than resume writing into a ledger nobody can vouch for"
+        reason = "outside the poison door on purpose: the guard spans the rotation that swaps `file` and the append that follows it, so a panic between them leaves the ledger handle and the bytes on disk disagreeing; and an unauditable proxy must stop proxying rather than resume writing into a ledger nobody can vouch for"
     )]
     pub fn record(&self, r: Record<'_>) -> std::io::Result<()> {
         let mut line = match r {

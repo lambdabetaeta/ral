@@ -16,6 +16,10 @@
 //! that says *why* a kernel did not come up — is invisible in the mode users
 //! run. Run it in a console to watch a machine, and as a service to serve one.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "[silent:windows-host] a service diagnostic with no ral shell to print through"
+)]
 use std::ffi::c_void;
 
 use windows_sys::Win32::Foundation::NO_ERROR;

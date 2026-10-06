@@ -53,7 +53,7 @@ one of five things, and each is a real constraint rather than a concession:
   expand in the host crate, so every path inside them must resolve there.
 - **An example or a build script.** `ral/build.rs` and `exarch/build.rs` call
   `boot::bake_prelude_to_out_dir`; `vm-manager/examples/boot-smoke.rs` names
-  `io::TerminalState` and `protocol::Machine`. CI compiles both, so a
+  `terminal::TerminalState` and `protocol::Machine`. CI compiles both, so a
   narrowing checked with `cargo check` on the libraries alone passes and then
   breaks the build.
 - **The `scheme!` family.** Its arms expand to `pub fn`, and per-arm
@@ -141,3 +141,8 @@ rather than being relabelled.
   its homonyms public everywhere; an item-precise pass would go further.
 - **Rustdoc is safe by prior choice**: `private_intra_doc_links = "allow"`,
   so a `[link]` into a now-private item still resolves.
+
+> **Amended 2026-10-06.** The embedding surface is now `BakedPrelude` (`comp`,
+> `seat`), `boot_shell`, `HostSurface` (`shell`, `manifest`, `builtin_table`),
+> `bake_prelude_to_out_dir` and the macro: `Shell::new`, `builtins::register`
+> and `bake_runtime` left it, and `Shell::root` never entered it.

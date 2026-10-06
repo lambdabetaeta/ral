@@ -274,6 +274,10 @@ pub fn open_file(
 /// carry the mark at all, and refusing every file there would leave the
 /// card's button dead for no protection gained.
 #[cfg(windows)]
+#[allow(
+    clippy::disallowed_macros,
+    reason = "[silent:synod-gui] synod carries no ral shell to print through"
+)]
 fn mark_from_elsewhere(path: &Path) {
     let mut stream = path.as_os_str().to_os_string();
     stream.push(":Zone.Identifier");

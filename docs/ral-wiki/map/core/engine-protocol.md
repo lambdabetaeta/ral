@@ -1,17 +1,19 @@
 ---
-generated_at_commit: 4dc94095
-generated_at_date: 2026-09-24
-covers_paths: [core/src/protocol.rs, core/src/protocol/, core/src/engine.rs, core/src/engine/, core/src/wire.rs, core/src/hatch.rs, core/src/engine_seed.rs, core/src/spawn_grant.rs]
+generated_at_commit: 446e3123
+generated_at_date: 2026-10-06
+covers_paths: [core/src/protocol.rs, core/src/protocol/, core/src/carrier.rs, core/src/carrier/, core/src/engine.rs, core/src/engine/, core/src/run/report.rs, core/src/seed.rs, core/src/seed/hatch.rs, core/src/guard/grant.rs]
 ---
 
 # Map: core / engine protocol
 
 **`core/src/engine.rs` is the one engine; `core/src/protocol.rs` is the frame
-algebra and the two carriers that drive it — the identity transport in
-process, the wire transport's front-end half — with `engine/wire.rs` the
-wire's engine half; `protocol/reading.rs` types every probe class once;
-`core/src/wire.rs` is the duplex byte channel; `core/src/hatch.rs` is a
-wire-seat child's spawn machinery.** The why is
+algebra and nothing that carries it — `protocol/probe.rs` its probe
+vocabulary, `protocol/channel.rs` the duplex byte channel and the one
+liveness law; `core/src/carrier.rs` and `carrier/` are the two carriers that
+interpret the algebra — the identity transport in process, the wire
+transport's front-end half — with `carrier/wire/serve.rs` the wire's engine
+half; `core/src/run/report.rs` projects a run onto the algebra;
+`core/src/seed/hatch.rs` is a wire-seat child's spawn machinery.** The why is
 [[design/engine-protocol|engine-protocol]]; this page only points at symbols.
 
 ## `core/src/engine.rs`
@@ -29,7 +31,7 @@ wire-seat child's spawn machinery.** The why is
   lookup), the recipe, `seed_cwd`, the attach's env, the
   guest jail under `RAL_GUEST`, and `EngineSeed::apply` for a hatch.
   `Engine::run` runs one dispatch under the scope `Scopes::open` minted;
-  `Engine::probe` answers one reading.
+  `Engine::probe` (`engine/probe.rs`) answers one `Probe`.
 - `Rails` — one dispatch's host-facing rails as its carrier lays them: the
   `Outlet` its events leave by, the deferred sink, the desk, the `Fork` arm.
   The carriers differ in these and nowhere else.
@@ -43,14 +45,16 @@ wire-seat child's spawn machinery.** The why is
 
 ## `core/src/protocol.rs`
 
-- `PROTOCOL_VERSION` (currently 11) — checked at `Attach`; a mismatch refuses.
+The frame algebra. Everything on it is a wire type; nothing here carries.
+
+- `PROTOCOL_VERSION` (currently 14) — checked at `Attach`; a mismatch refuses.
 - `check_media` — the same number compared at *build* time, against the
   `proto_version=` line `vm-image/build-boot.sh` records for the engine in the
   guest media; `synod/examples/check-media.rs`, tauri's `beforeBuildCommand`,
   refuses to package media that disagrees.
 - `HATCH_ACK` — the guest's one-byte readiness signal, written from
-  `hatch.rs`; lives here for platform neutrality, not because it is ever a
-  `Frame`.
+  `seed/hatch.rs`; lives here for platform neutrality, not because it is ever
+  a `Frame`.
 - `Frame` — the whole wire enum: `Attach`, `Detach`, `Dispatch`, `Probe`,
   `Event`, `Session`, `Control`, `Answer`, `Ping`, `Pong`; `Frame::kind`
   names a variant for the diagnostic about a frame out of place.
@@ -60,15 +64,22 @@ wire-seat child's spawn machinery.** The why is
   `FOValue` its recipe decodes). `Attach::new` stamps this build's version;
   `with_config` sets the settings.
 - `Run` / `Program` — one dispatch's payload: the policy fields plus
-  `Program::Source`/`Program::Hook`.
+  `Program::Source`/`Program::Hook`. `Run`'s field types are the run regime,
+  held by session state, and live below the wire: `RunIo` and `RunStdin`
+  (`io/regime.rs`), `Captured` (`io/sink.rs`) and `RequestedTerminalAccess`
+  (`process/lease.rs`); `ral_core` re-exports them at the root.
 - `Event` — engine→front-end, inside a dispatch's window: `Surface`,
-  `Enquiry`, `Report`. Every surfaced value is a tagged variant; an audit
-  observation rides as `` `observed <record> `` (`Observation::to_surface`).
+  `Enquiry`, `Reading`, `Report`. Every surfaced value is a tagged variant; an
+  audit observation rides as `` `observed <record> `` (`Observation::to_surface`).
+  `Reading(Result<FOValue, String>)` answers a `Frame::Probe` under its
+  `DispatchId`: the probe's own event, not a run that ended.
 - `SessionEvent` — engine→front-end with no dispatch to ride: `Attached` /
   `Refused(String)` (the attach verdict) and `DeferredSurface(Vec<FOValue>)`
   (a detached worker's batch, and a watched worker's lines).
 - `EnquiryError` — message plus status, the wire shape of a refused enquiry;
-  `no_desk()` is the fixed wording for a host with nothing to answer.
+  `no_desk()` is the fixed wording for a host with nothing to answer, and
+  `From<EnquiryError> for Error` the one way a refusal becomes the error
+  both carriers' desks raise.
 - `Control` — `Interrupt`, `Cancel(DispatchId)`, `Terminate`, `Abort` (a
   `Terminate` whose cause is `RootAbort`); applied by `Scopes::apply` under
   both carriers.
@@ -83,26 +94,86 @@ wire-seat child's spawn machinery.** The why is
   and the two failing arms a `FailureStatus`, never a bare `i32`: it clamps
   into `1..=255` on the way in and on the way back off the wire, so no ending
   that failed can be reported with the code that means success.
-  `Report::host_fault` is the engine's own refusal (a panicked worker, a busy
-  engine) shaped as a `Static`, so a host never has to tell it from a run's
-  own failure.
-- `render_ending` / `RunReport::into_report` — project the engine's own
-  `run::Ending`/`RunReport` onto these wire shapes. Every diagnostic renders
-  here, runtime errors against the `SourceDb` and static ones against the
-  `Source` the diagnostic carries
-  ([[decisions/260902_static-diagnostics-render-at-the-seam|static-diagnostics-render-at-the-seam]]).
+
+## `core/src/run/report.rs`
+
+The projection is the run's. `RunReport::into_report` and `render_ending`
+project the engine's own `run::Ending`/`RunReport` onto the wire shapes above:
+every diagnostic renders here, runtime errors against the `SourceDb` and static
+ones against the `Source` the diagnostic carries
+([[decisions/260902_static-diagnostics-render-at-the-seam|static-diagnostics-render-at-the-seam]]).
+`not_data` / `unreturnable` word a value the wire cannot carry; `record_of`
+is the record `try` hands its handler. `Report::host_fault` is the engine's
+own refusal (a panicked worker, a busy engine) shaped as a `Static`, so a host
+never has to tell it from a run's own failure. The two seam test modules live
+here.
+
+## `core/src/protocol/probe.rs`
+
+The probe vocabulary, typed once for both ends.
+
+- `Probe` — the payload of `Frame::Probe`: `BindingCount`,
+  `LeasedBindingCount`, `LargestBindingBytes`, `EnvVar(String)`, `Cwd`,
+  `Home`, `BuiltinNames`, `PathBytes(PathBuf)`, `Workers`, `SessionEnded`,
+  `CompletionNames`, `Bindings`, `PathEntries(PathBuf)`; `WorkerCount` and
+  `GrantDepth` exist only under `test-util`. Each variant states what it
+  takes, so a payload its probe does not take is not representable.
+- The rows the answers come in, rendered engine-side, each a `record!`:
+  `WorkerRow`, `BindingRow`/`HandleRow`, `CompletionNames`, `PathEntry`.
+
+## `core/src/protocol/channel.rs`
+
+- `WireStream` — `UnixStream` on Unix, `TcpStream` on Windows: std's owner of
+  a *connected stream socket*, never a statement about address family
+  (`vm-manager` hands back `AF_VSOCK`/`AF_HYPERV` sockets through the same
+  type).
+- `WireChannel` — length-prefixed JSON framing (`frame.rs`) over one
+  `WireStream`; `pair()` (test-only: a socketpair on Unix, a loopback accept
+  on Windows), `from_stream`, `try_clone`.
+- `poll_readable` (Unix) — wait for a frame or a timeout, by
+  `rustix::event::poll` against a `Timespec` deadline, without blocking inside
+  `read_frame`; how `engine_session` notices a silent front-end with no
+  dedicated thread. Windows has no engine half, so no twin.
+- `set_write_deadline` — bounds every `write_frame` on every clone of the
+  channel (`SO_SNDTIMEO` lives on the shared file description), turning a
+  stalled write into the same fatal error a severed pipe already gives.
+- `write_or_sever` — the severance law itself, enforced once for both doors
+  (`carrier::write_through`, `engine_write`, which differ only in what they
+  record): a failed write is recorded *and* the channel shut down before the
+  lock is released, so nothing appends a frame after a truncated one and no
+  window leaves the record calling an already-shut socket healthy.
+- `Liveness` / `ticks` — how briskly a front-end pings and how much silence it
+  tolerates; the deadline is judged as a count of unanswered pings
+  (`Liveness::probes`), never as elapsed clock. `HOST_SILENCE_DEADLINE`, the
+  engine's armed read silence, is six default ping intervals, written beside
+  `Liveness::default`, so `seed/hatch.rs` bounds its seed write by it without
+  importing the engine.
+
+## `core/src/carrier.rs`
+
+The two interpretations of the algebra, and what they share.
+
 - `Severed` — why no further frame will cross: `Refused` / `Closed` /
   `Silent` / `Faulted`, `Display`ed as the sentence a front-end shows, and
   `code()` the stable name it is quoted by; the private `sever()` is
   first-cause-wins.
-- `ProbeError` — `Rejected` (a program error: an unknown class, a probe
-  mid-run) or `Severed`.
+- `ProbeError` — `Rejected` (a program error: a probe mid-run) or `Severed`.
 - `Host` trait — one run's host-facing surface: `surface`, `enquire`;
   `impl Host for ()` is the mute host.
-- `Transport` trait — `dispatch`, `probe`, `control`, `events`, `severed`,
-  `sever`, `detach`, `answer`, `set_deferred_sink`. Construction is attach, so
-  the trait has no attach of its own; `sever` lets a front-end record a fault
-  it observed, and on the wire also shuts the socket.
+- `Ends` — the front-end state both carriers hold in one value: the
+  `ControlSender`, the `EventReceiver`, the severance cell and the session
+  sink. A carrier supplies `Transport::ends` and the verbs that differ in
+  carriage (`dispatch`, `probe`, `detach`, `answer`); `control`, `events`,
+  `severed`, `sever` and `set_deferred_sink` are provided. The wire carrier
+  overrides `sever` only to shut the socket too.
+- `Transport` trait — the front-end side of the protocol. Construction is
+  attach, so the trait has no attach of its own; `sever` lets a front-end
+  record a fault it observed. It also provides the host's typed probe doors,
+  one per `Probe`: `cwd`, `home`, `env_var`, `builtin_names`, `path_bytes`,
+  `binding_count`, `leased_binding_count`, `largest_binding_bytes`,
+  `workers`, `session_ended`, `completion_names`, `bindings`,
+  `path_entries`, each decoding through `Datum` and severing the transport
+  `Faulted` on an answer outside its shape (`read`).
 - `forbid_reentry` / `Dispatching` — the carrier-uniform reentrancy law: a
   thread-local registry of the transports this thread is dispatching on,
   entered by `dispatch_to_report` and checked by every typed reading and the
@@ -113,9 +184,16 @@ wire-seat child's spawn machinery.** The why is
 - `ControlSender` — `interrupt()`, `cancel(id)`, `terminate()` over one of two
   doors: `Door::Identity` applies the verb straight onto the engine's
   `Scopes`, `Door::Wire` writes a `Control` frame through the severance cell.
+  `Control::hearing` is the verb an ambient cause asks.
 - `EventReceiver` — the front-end's single-drainer event queue; its `stash`
   hands back an event a probe's or a desk's pre-drain read past, in arrival
   order, rather than dropping it.
+- `write_through` — the front-end door `WireTransport::write` and
+  `ControlSender`'s wire arm both share: `write_or_sever` recording a
+  `Severed` cause.
+
+### `carrier/identity.rs`
+
 - `IdentityTransport` / `SessionLock` — the in-process carrier: an `Engine`
   behind a poison-recovering session lock, its `Scopes` and its `Nursery`
   held outside the lock so a `Control` and an adoption land mid-dispatch.
@@ -129,55 +207,29 @@ wire-seat child's spawn machinery.** The why is
 - `IdentityDesk` — the identity binding's `EnquiryDesk`: drains queued
   `Surface` events before calling `host.enquire`, so a handler can never
   outrun its own run's earlier output.
+
+### `carrier/wire/front.rs`
+
 - `WireTransport` — the wire carrier's front-end half. `adopt(stream,
   Liveness)` drives an existing duplex stream; `attach(Attach)` writes the
   only legal first frame and only then starts the heartbeat;
   `await_attached()` blocks on the reader's `Attached`/`Refused` verdict or
-  its own patience, counted in waits observed. `severed()` reads the cause.
+  its own patience, counted in waits observed. A probe writes `Frame::Probe`
+  and drains the event queue to the `Event::Reading` under its id, stashing
+  what it reads past.
 - `spawn_wire_reader` / `spawn_heartbeat` — the reader severs *before*
   dropping `event_tx`, on every exit path, and severs `Faulted` on a frame
   only a front-end sends; the heartbeat pings on `Liveness::interval`,
   severs `Silent` once `Liveness::probes` pings go unanswered, and never
   takes the write lock on that path.
-- `write_through` — the front-end door `WireTransport::write` and
-  `ControlSender`'s wire arm both share: `wire::write_or_sever` recording a
-  `Severed` cause.
 
-## `core/src/protocol/reading.rs`
-
-Every probe class, typed once for both ends.
-
-- `Class` / `CLASSES` — the label table: `binding-count`,
-  `leased-binding-count`, `largest-binding-bytes`, `env-var`, `cwd`, `home`,
-  `builtin-names`, `path-bytes`, `workers`, `session-ended`,
-  `completion-names`, `bindings`, `spine`, `bind-effects`, `path-entries`; `worker-count` and `grant-depth` exist only under
-  `test-util`. `reads_string` is the payload rule: the classes that read a
-  name, a path, or a source text take a string, the rest take none.
-- `answer` — the engine's answer against a `Shell`, refusing a non-variant,
-  an unknown class, or a payload its class does not take, each by name.
-- `report` / `unreport` — a probe's answer as the wire engine reports it,
-  and back.
-- `read` and one typed door per class — `cwd`, `home`, `env_var`,
-  `builtin_names`, `path_bytes`, `binding_count`, `leased_binding_count`,
-  `largest_binding_bytes`, `workers`, `session_ended`, `completion_names`,
-  `bindings`, `spine`, `bind_effects`, `path_entries` — each
-  decoding through `Datum` and severing the transport `Faulted` on an answer
-  outside its shape.
-- `reading/rows.rs` — the rows the answers come in, rendered engine-side:
-  `WorkerRow`, `BindingRow`/`HandleRow`, `CompletionNames`,
-  `Spine`/`SpineStage`/`SpineError`, `BindEffect`, `PathEntry`.
-- `reading/source.rs` — `spine` and `bind_effects`: a source text compiled
-  against the live session, never run.
-- `reading/fs.rs` — `tree_bytes` and `entries`: read-only metadata walks of
-  the engine's own filesystem, under its cwd.
-
-## `core/src/engine/wire.rs`
+### `carrier/wire/serve.rs`
 
 The wire carrier's engine half: a connection-lived engine process.
 
 - `run_engine(installers)` — adopts fd 3 as the wire channel and calls
   `engine_session`.
-- `engine_session` — takes a hatch seed first (`hatch::seed_from_env`),
+- `engine_session` — takes a hatch seed first (`seed::hatch::seed_from_env`),
   reads `Attach` (the only legal first frame), `restore_process_dirs` (the
   process-level half of an attach, which only a carrier owning its process
   performs), `Engine::boot`, writes `Attached`/`Refused`, moves the engine
@@ -190,6 +242,9 @@ The wire carrier's engine half: a connection-lived engine process.
 - The worker's `Rails` — an outlet writing `Frame::Event`, a
   `ChannelDeferredSink` writing `Frame::Session`, a `WireDesk`, and
   `Fork::Listen`.
+- `WorkItem` / `refusal` — what the worker is handed, a run or a probe, and
+  the refusal in the shape each waits on: a busy or panicked run ends in a
+  `Report::host_fault`, a probe in an `Event::Reading(Err(..))`.
 - `WireDesk` / `Parks` — the wire engine's `EnquiryDesk`: writes
   `Event::Enquiry`, then parks on a oneshot registered under its `EnquiryId`
   until `Frame::Answer` fills it or the run's own cancel scope fires. A park
@@ -197,36 +252,26 @@ The wire carrier's engine half: a connection-lived engine process.
 - `Dispatch` / `Writing` — the one-run-or-probe rendezvous and the guard
   spanning an item's report write; claiming is the only way to mint a
   `Dispatch`, so "engine busy" is never raised without work in flight.
-- `Patience` / `HOST_SILENCE_DEADLINE` — the engine's own read-silence and
-  write-stall deadlines, armed once the first `Ping` arrives; production
-  always runs `Patience::default`, a test gets a brisker one.
+- `Patience` — the engine's own read-silence and write-stall deadlines, armed
+  once the first `Ping` arrives (both `HOST_SILENCE_DEADLINE` in production,
+  a test gets a brisker pair).
 - The teardown settle — on any loop exit: `Scopes::end`,
   `hatch::teardown_hatched()`, then poll the busy and writing flags under
   `SETTLE_TIMEOUT`/`SETTLE_POLL` before exiting, so no run is abandoned
   mid-report.
 
-## `core/src/wire.rs`
+### `carrier/testkit.rs`
 
-- `WireStream` — `UnixStream` on Unix, `TcpStream` on Windows: std's owner of
-  a *connected stream socket*, never a statement about address family
-  (`vm-manager` hands back `AF_VSOCK`/`AF_HYPERV` sockets through the same
-  type).
-- `WireChannel` — length-prefixed JSON framing (`subprocess_codec`) over one
-  `WireStream`; `pair()` (test-only: a socketpair on Unix, a loopback accept
-  on Windows), `from_stream`, `try_clone`.
-- `poll_readable` — wait for a frame or a timeout without blocking inside
-  `read_frame`; how `engine_session` notices a silent front-end with no
-  dedicated thread.
-- `set_write_deadline` — bounds every `write_frame` on every clone of the
-  channel (`SO_SNDTIMEO` lives on the shared file description), turning a
-  stalled write into the same fatal error a severed pipe already gives.
-- `write_or_sever` — the severance law itself, enforced once for both doors
-  (`protocol::write_through`, `engine_write`, which differ only in what they
-  record): a failed write is recorded *and* the channel shut down before the
-  lock is released, so nothing appends a frame after a truncated one and no
-  window leaves the record calling an already-shut socket healthy.
+Core's own test engines, booted as every engine is (`BARE`, `boot`, `eval`).
 
-## `core/src/hatch.rs`
+## `core/src/engine/probe.rs`
+
+The engine's answers: `Engine::probe` reads one `Probe` off the shell
+(`answer`), rendering rows engine-side — never a live handle.
+`probe/fs.rs` — `tree_bytes` and `entries`: read-only
+metadata walks of the engine's own filesystem, under its cwd.
+
+## `core/src/seed/hatch.rs`
 
 A wire-seat spawn is one exchange: the guest binds an ephemeral port for one
 spawn and the host dials in — see [[design/engine-protocol|engine-protocol]]'s
@@ -236,7 +281,11 @@ hatch section for the why.
   one dial that hatches a child, checking the dialler's eight token bytes. It
   scrubs the shell it is handed (`Shell::fork_scrubbed`) and packs the fork
   into an `EngineSeed` on the caller's own thread, so every path onto the
-  seed wire is a scrubbed fork ([[map/core/transport|transport]]).
+  seed wire is a scrubbed fork ([[map/core/transport|transport]]). The
+  listener thread parks in `Wake::poll_beside`, the one self-pipe wake the
+  pipeline stages use, so `HatchListener::cancel` is `Wake::fire`.
+- `accept` — `accept_with(CLOEXEC)` on Linux, `accept` then `fcntl_setfd`
+  elsewhere (rustix drops the flag on Apple); the peer's address is discarded.
 - `hatch_over` — re-execs this binary (`--engine` in production) with the
   dialled connection on fd 3 and a seed socketpair named by
   `RAL_ENGINE_SEED_FD`; writes the framed seed while the child drains it, and
@@ -253,10 +302,10 @@ hatch section for the why.
   hatch and again at engine teardown (a hatched child closes its seed channel
   on hydration, not on death, so only `waitpid` tells running from gone).
 
-## `core/src/spawn_grant.rs`
+## `core/src/guard/grant.rs`
 
 - `SpawnGrant` — `Inherit`, `Base(name)`, or `Restrict(record)` carried
-  unfrozen. `layer` resolves it against a cwd and home; `narrow_onto` pushes
+  unfrozen. `layer` resolves it against a `FreezeCtx`; `narrow_onto` pushes
   that layer onto a shell as a session frame, frozen against the shell's own
   cwd — the one layering step an adopted identity fork
   (`IdentityTransport::adopt_parked`) and a hatched seed (`EngineSeed::apply`)
@@ -273,13 +322,13 @@ hatch section for the why.
   could forget to fill.
 
 The seed a hatch carries is `EngineSeed` — [[map/core/transport|transport]]'s
-`core/src/engine_seed.rs` section.
+`core/src/seed.rs` section.
 
 ## See also
 
 [[design/engine-protocol|engine-protocol]] (the why — one engine and two
 carriers, the channel table, the laws of an enquiry, liveness and severance),
-[[map/core/transport|transport]] (`subprocess_codec`'s framing, `Datum`,
+[[map/core/transport|transport]] (`frame.rs`'s framing, `Datum`,
 `EngineSeed`), [[map/exarch/agent|exarch / agent]] (the seat, the wire-seat
 spawn that dials a hatch), [[map/repl/loop|repl / loop]] (the REPL as an
 identity front-end), [[map/synod|synod]] (`WireTransport::adopt` over a

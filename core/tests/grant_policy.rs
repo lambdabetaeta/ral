@@ -7,11 +7,11 @@
 //! judge a file by the real path a test names.  The policies and their
 //! meet/widen semantics are the contract.
 
+use ral_core::capability::{Capabilities, ExecGrant, ExecKey, FsPolicy, Verdict};
 use ral_core::path::FrozenPath;
 use ral_core::test_access::check_file;
-use ral_core::types::{Capabilities, ExecGrant, ExecKey, FsPolicy, Shell, Verdict};
 #[cfg(unix)]
-use ral_core::types::{ExecProjection, ExecRule};
+use ral_core::test_access::{KernelExecRule, exec_projection_files, exec_projection_rules};
 #[cfg(unix)]
 use std::path::Path;
 
@@ -62,7 +62,7 @@ fn exec_only(exec: ExecGrant) -> Capabilities {
 /// relaxed by a sibling dir key admitting the directory cargo lives in.
 #[test]
 fn a_file_rule_restriction_beats_a_covering_allow_dir() {
-    let mut shell = Shell::default();
+    let mut shell = ral_core::test_helper::core_shell();
     let grant = exec_only(
         paths(&[("/bin/cargo", Verdict::Only(["build".to_string()].into()))])
             .chain(dirs(&[("/bin", true)]))
@@ -82,7 +82,7 @@ fn a_file_rule_restriction_beats_a_covering_allow_dir() {
 /// admits.
 #[test]
 fn a_deeper_deny_dir_carves_a_hole_in_an_allow_dir() {
-    let mut shell = Shell::default();
+    let mut shell = ral_core::test_helper::core_shell();
     let grant = exec_only(dirs(&[("/bin", true), ("/bin/sensitive", false)]).collect());
     shell
         .with_capabilities(grant.clone(), |sh| check_file(sh, &host("/bin/ls"), &[]))
@@ -100,7 +100,7 @@ fn a_deeper_deny_dir_carves_a_hole_in_an_allow_dir() {
 /// of that name.
 #[test]
 fn a_bare_allow_admits_no_other_file_of_its_name() {
-    let mut shell = Shell::default();
+    let mut shell = ral_core::test_helper::core_shell();
     let grant = exec_only(names(&[("git", Verdict::Allow)]).collect());
     let result = shell.with_capabilities(grant, |shell| {
         check_file(shell, &host("/fake-bin/git"), &["status".into()])
@@ -110,7 +110,7 @@ fn a_bare_allow_admits_no_other_file_of_its_name() {
 
 #[test]
 fn a_path_key_admits_its_file() {
-    let mut shell = Shell::default();
+    let mut shell = ral_core::test_helper::core_shell();
     let grant = exec_only(paths(&[("/fake-bin/git", Verdict::Allow)]).collect());
     shell
         .with_capabilities(grant, |shell| {
@@ -121,7 +121,7 @@ fn a_path_key_admits_its_file() {
 
 #[test]
 fn sandbox_projection_intersects_path_components() {
-    let mut shell = Shell::default();
+    let mut shell = ral_core::test_helper::core_shell();
     let outer = Capabilities {
         fs: Some(FsPolicy {
             read_prefixes: vec![FrozenPath::from_surface("/tmp/ral-prefix-a")],
@@ -156,7 +156,7 @@ fn sandbox_projection_does_not_leak_outer_raw_prefix() {
     std::fs::create_dir_all(&inner_dir).unwrap();
     std::os::unix::fs::symlink(&real, &link).unwrap();
 
-    let mut shell = Shell::default();
+    let mut shell = ral_core::test_helper::core_shell();
     let outer = Capabilities {
         fs: Some(FsPolicy {
             read_prefixes: vec![FrozenPath::from_surface(
@@ -193,7 +193,7 @@ fn sandbox_projection_does_not_leak_outer_raw_prefix() {
 /// still denied, however the head spelled it.
 #[test]
 fn a_bare_deny_vetoes_its_name_under_an_allow_dir() {
-    let mut shell = Shell::default();
+    let mut shell = ral_core::test_helper::core_shell();
     let grant = exec_only(
         names(&[("bash", Verdict::Deny)])
             .chain(dirs(&[("/bin", true)]))
@@ -210,7 +210,7 @@ fn a_bare_deny_vetoes_its_name_under_an_allow_dir() {
 /// the host's `rg`, and `evil/rg` is another file.
 #[test]
 fn a_bare_allow_does_not_admit_a_planted_file_of_its_name() {
-    let mut shell = Shell::default();
+    let mut shell = ral_core::test_helper::core_shell();
     let grant = exec_only(names(&[("rg", Verdict::Allow)]).collect());
     let result = shell.with_capabilities(grant, |sh| check_file(sh, &host("/evil/rg"), &[]));
     assert!(
@@ -222,7 +222,7 @@ fn a_bare_allow_does_not_admit_a_planted_file_of_its_name() {
 /// A path key's deny beats the allow dir the file sits in.
 #[test]
 fn a_path_key_deny_beats_a_covering_allow_dir() {
-    let mut shell = Shell::default();
+    let mut shell = ral_core::test_helper::core_shell();
     let grant = exec_only(
         paths(&[("/bin/git", Verdict::Deny)])
             .chain(dirs(&[("/bin", true)]))
@@ -247,30 +247,6 @@ fn projection_fs() -> FsPolicy {
     }
 }
 
-/// Model the kernel over the projection's rules: the last rule that matches
-/// a resolved path decides, and none denies.
-///
-/// Unix-only: its sole caller is `#[cfg(unix)]`.
-#[cfg(unix)]
-fn projection_admits(exec: &ExecProjection, resolved: &str) -> bool {
-    let ExecProjection::Restricted(rules) = exec else {
-        return true;
-    };
-    let base = Path::new(resolved).file_name().and_then(|n| n.to_str());
-    rules
-        .iter()
-        .rev()
-        .find_map(|rule| match rule {
-            ExecRule::Dir { path, allow } => {
-                let path = path.to_string();
-                (resolved == path || resolved.starts_with(&format!("{path}/"))).then_some(*allow)
-            }
-            ExecRule::File { path, allow } => (resolved == path.to_string()).then_some(*allow),
-            ExecRule::Veto(name) => (base == Some(name.as_str())).then_some(false),
-        })
-        .unwrap_or(false)
-}
-
 #[cfg(unix)]
 fn with_fs(exec: ExecGrant) -> Capabilities {
     Capabilities {
@@ -291,26 +267,41 @@ fn sandbox_projection_admits_a_path_key_covered_by_a_sibling_dir() {
     let inner = with_fs(paths(&[("/bin/git", Verdict::Allow)]).collect());
     let git = host("/bin/git");
 
-    let mut shell = Shell::default();
+    let mut shell = ral_core::test_helper::core_shell();
     let projection = shell.with_capabilities(outer.clone(), |sh| {
         sh.with_capabilities(inner.clone(), |sh| sh.sandbox_projection().unwrap())
     });
-    let ExecProjection::Restricted(rules) = &projection.exec else {
-        panic!("exec should be restricted, got {:?}", projection.exec);
-    };
+    let files = exec_projection_files(&projection);
     assert!(
-        rules.iter().any(
-            |rule| matches!(rule, ExecRule::File { path, allow: true } if path.to_string() == git)
-        ),
-        "the path key covered by the sibling allow dir must reach the rules, got {rules:?}"
+        files.contains(&git),
+        "the path key covered by the sibling allow dir must reach the rules, got {files:?}"
     );
 
-    let mut shell = Shell::default();
+    let mut shell = ral_core::test_helper::core_shell();
     shell
         .with_capabilities(outer, |sh| {
             sh.with_capabilities(inner, |sh| check_file(sh, &git, &[]))
         })
         .expect("the in-process guard must admit the file");
+}
+
+/// Model the kernel over the rules it is handed: the last rule that matches a
+/// real path decides, and none denies.
+#[cfg(unix)]
+fn kernel_admits(rules: Option<&[KernelExecRule]>, real: &str) -> bool {
+    let Some(rules) = rules else {
+        return true;
+    };
+    let real = Path::new(real);
+    (rules.iter().rev())
+        .find_map(|rule| match rule {
+            KernelExecRule::Dir { path, allow } => real.starts_with(path).then_some(*allow),
+            KernelExecRule::File { path, allow } => (real == Path::new(path)).then_some(*allow),
+            KernelExecRule::Name(name) => {
+                (real.file_name() == Some(name.as_ref())).then_some(false)
+            }
+        })
+        .unwrap_or(false)
 }
 
 /// Conservatism invariant (safety direction): the OS projection must never
@@ -363,19 +354,20 @@ fn exec_projection_never_out_permits_the_guard() {
     for (outer_exec, inner_exec, probes) in cases {
         let outer = with_fs(outer_exec);
         let inner = with_fs(inner_exec);
-        let mut shell = Shell::default();
+        let mut shell = ral_core::test_helper::core_shell();
         let projection = shell.with_capabilities(outer.clone(), |sh| {
             sh.with_capabilities(inner.clone(), |sh| sh.sandbox_projection().unwrap())
         });
+        let kernel = exec_projection_rules(&projection);
         for probe in probes {
             let real = host(probe);
-            let mut shell = Shell::default();
+            let mut shell = ral_core::test_helper::core_shell();
             let guard_ok = shell
                 .with_capabilities(outer.clone(), |sh| {
                     sh.with_capabilities(inner.clone(), |sh| check_file(sh, &real, &[]))
                 })
                 .is_ok();
-            if projection_admits(&projection.exec, &real) {
+            if kernel_admits(kernel.as_deref(), &real) {
                 assert!(
                     guard_ok,
                     "OS projection admits {real} but the in-process guard denies it (unsound)"

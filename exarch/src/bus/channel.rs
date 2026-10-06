@@ -119,7 +119,7 @@ fn merge_into(tail: &mut QueueEntry, mut incoming: Signal, bytes: &mut usize) {
             if acc.len() > MERGE_TEXT_CAP {
                 // Round the cut forward to a char boundary, or the retained
                 // tail is no longer valid UTF-8.
-                let cut = ral_core::text::ceil_char_boundary(acc, acc.len() - MERGE_TEXT_CAP);
+                let cut = acc.ceil_char_boundary(acc.len() - MERGE_TEXT_CAP);
                 acc.drain(..cut);
                 tail.elided += cut as u64;
                 *bytes -= cut;
@@ -217,7 +217,7 @@ impl BusSender {
     /// Returns `Err(SendError(sig))` when the receiver has been dropped.
     #[allow(
         clippy::result_large_err,
-        reason = "the Err payload is the undelivered Signal itself — handing it back is the contract, and its width is Signal's, not an error type's"
+        reason = "the Err payload is the undelivered Signal itself: handing it back is the contract, and its width is Signal's, not an error type's"
     )]
     pub fn send_signal(&self, sig: Signal) -> Result<(), SendError<Signal>> {
         if !self.0.receiver_alive.load(Ordering::Acquire) {
@@ -252,7 +252,7 @@ impl WeakSender {
     /// Returns `Err(SendError(sig))` when the receiver has been dropped.
     #[allow(
         clippy::result_large_err,
-        reason = "the Err payload is the undelivered Signal itself — the same contract as BusSender::send"
+        reason = "the Err payload is the undelivered Signal itself: the same contract as BusSender::send"
     )]
     pub(crate) fn send_signal(&self, sig: Signal) -> Result<(), SendError<Signal>> {
         if !self.0.receiver_alive.load(Ordering::Acquire) {

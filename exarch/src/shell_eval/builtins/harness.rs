@@ -19,15 +19,17 @@
 //! so its tags answer what they were asked for rather than a state.
 
 use crate::fleet::enquiry::{
-    Agents, Context, Family, ForkClaim, Pins, Request, Schedules, Start, Transcript, Word, family,
+    Agents, Context, Evict, Family, ForkClaim, Pins, Reading, Request, Schedules, Start, Survey,
+    Transcript, Turns, Word, family,
 };
-use ral_core::serial::FOValue;
-use ral_core::serial::datum::Datum;
-use ral_core::typecheck::builtins::{
-    closed_record, closed_variant, fun, mk_scheme as scheme, open_variant, pure, thunk,
-};
-use ral_core::typecheck::{Kind, Row, RowVar, Scheme, Ty, TyVar, Unifier};
-use ral_core::types::{BuiltinBody, BuiltinEntry, Fork, Mooring, Settled, Site, sig};
+use crate::fleet::schedule::ScheduleInfo;
+use ral_core::first_order::FOValue;
+use ral_core::first_order::datum::Datum;
+use ral_core::ty::Site;
+use ral_core::ty::{Kind, Row, RowVar, Scheme, Ty, TyVar, Typed as _, closed_record, open_variant};
+use ral_core::typecheck::Unifier;
+use ral_core::typecheck::builtins::{fun, mk_scheme as scheme, pure, thunk};
+use ral_core::types::{BuiltinBody, BuiltinEntry, Fork, Mooring, Settled, sig};
 use ral_core::{Shell, SpawnGrant, Value};
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -38,8 +40,8 @@ const AGENTS: &str = "exarch-agents";
 fn first_order(verb: &str, arg: &Value) -> Settled<FOValue> {
     FOValue::try_from(arg).map_err(|_| {
         sig(format!(
-            "{verb}: the argument must be first-order data — no closures, handles, or \
-             environments — since it crosses to the host as plain data"
+            "{verb}: the argument must be first-order data; no closures, handles, or \
+             environments: since it crosses to the host as plain data"
         ))
     })
 }
@@ -48,7 +50,7 @@ fn first_order(verb: &str, arg: &Value) -> Settled<FOValue> {
 fn ask(verb: &str, request: Request, mooring: &Mooring, shell: &Shell) -> Settled<Value> {
     let owed = request.owed();
     let answer = shell.enquire(mooring, request.encode())?;
-    owed(&answer).map_err(|why| sig(format!("{verb}: the host answered out of shape — {why}")))?;
+    owed(&answer).map_err(|why| sig(format!("{verb}: the host answered out of shape; {why}")))?;
     Ok(Value::from(answer))
 }
 
@@ -167,7 +169,7 @@ fn hatch_over_the_wire(
     let token = mint_token();
     let (socket, port) =
         super::guest_port::bind().map_err(|why| sig(format!("{AGENTS}: {why}")))?;
-    let listener = ral_core::hatch::listen_for_hatch(socket, token, shell, grant)
+    let listener = ral_core::seed::hatch::listen_for_hatch(socket, token, shell, grant)
         .map_err(|reason| sig(format!("{AGENTS}: {reason}")))?;
     let answer = ask(
         AGENTS,
@@ -181,7 +183,9 @@ fn hatch_over_the_wire(
         listener.cancel();
     }
     match listener.join() {
-        Err(ral_core::hatch::Unhatched::Failed(reason)) => Err(sig(format!("{AGENTS}: {reason}"))),
+        Err(ral_core::seed::hatch::Unhatched::Failed(reason)) => {
+            Err(sig(format!("{AGENTS}: {reason}")))
+        }
         _ => answer,
     }
 }
@@ -197,7 +201,7 @@ fn hatch_over_the_wire(
     _request: impl FnOnce(ForkClaim) -> Request,
 ) -> Settled<Value> {
     Err(sig(format!(
-        "{AGENTS}: this engine has no hatch support outside a Linux guest — a wire trunk's \
+        "{AGENTS}: this engine has no hatch support outside a Linux guest; a wire trunk's \
          helper spawn only ever reaches one"
     )))
 }
@@ -287,15 +291,6 @@ fn scheme_agents(u: &mut Unifier) -> Scheme {
     )
 }
 
-fn schedule_row_ty() -> Ty {
-    closed_record(&[
-        ("label", Ty::String),
-        ("trigger", Ty::String),
-        ("next-s", Ty::Int),
-        ("fires", Ty::Int),
-    ])
-}
-
 /// `exarch-schedules :: ∀ρ1 ρ2. <list | add [trigger: Variant ρ1, label: Str, prompt: Str] | remove Str | ρ2> → F [[label: Str, trigger: Str, next-s: Int, fires: Int]]`
 ///
 /// Same shape as [`scheme_agents`]: an open outer tag row so an unknown tag
@@ -327,7 +322,7 @@ fn scheme_schedules(u: &mut Unifier) -> Scheme {
                 ],
                 tag_row,
             ),
-            pure(Ty::List(Box::new(schedule_row_ty()))),
+            pure(Ty::list(ScheduleInfo::ty())),
         )),
     )
 }
@@ -375,23 +370,6 @@ fn scheme_pins(u: &mut Unifier) -> Scheme {
 /// One turn as both `` exarch-context `survey `` and `` exarch-transcript `index `` name
 /// it; the index adds `held`, which a closed row of this shape cannot carry,
 /// so `` `exarch-transcript ``'s own answer type is left free.
-fn context_turn_ty() -> Ty {
-    closed_record(&[
-        ("id", Ty::Int),
-        ("role", Ty::String),
-        ("kind", Ty::String),
-        ("label", Ty::String),
-        ("bytes", Ty::Int),
-    ])
-}
-
-fn context_receipt_ty() -> Ty {
-    closed_record(&[
-        ("rows", Ty::List(Box::new(context_turn_ty()))),
-        ("total-bytes", Ty::Int),
-    ])
-}
-
 /// `exarch-context :: ∀ρ. <survey | evict [turns: [Int], note: <none | some Str>] | ρ> → F [rows: [[id: Int, role: Str, kind: Str, label: Str, bytes: Int]], total-bytes: Int]`
 ///
 /// Same shape as [`scheme_agents`] and [`scheme_schedules`]: an open outer
@@ -412,23 +390,8 @@ fn scheme_context(u: &mut Unifier) -> Scheme {
         &[],
         &[tag_row],
         thunk(fun(
-            open_variant(
-                &[
-                    ("survey", Ty::Unit),
-                    (
-                        "evict",
-                        closed_record(&[
-                            ("turns", Ty::List(Box::new(Ty::Int))),
-                            (
-                                "note",
-                                closed_variant(&[("none", Ty::Unit), ("some", Ty::String)]),
-                            ),
-                        ]),
-                    ),
-                ],
-                tag_row,
-            ),
-            pure(context_receipt_ty()),
+            open_variant(&[("survey", Ty::Unit), ("evict", Evict::ty())], tag_row),
+            pure(Survey::ty()),
         )),
     )
 }
@@ -460,22 +423,10 @@ fn scheme_transcript(u: &mut Unifier) -> Scheme {
             open_variant(
                 &[
                     ("index", Ty::Unit),
-                    (
-                        "read",
-                        closed_record(&[("turns", Ty::List(Box::new(Ty::Int)))]),
-                    ),
+                    ("read", Reading::ty()),
                     (
                         "grep",
-                        closed_record(&[
-                            ("pattern", Ty::String),
-                            (
-                                "turns",
-                                closed_variant(&[
-                                    ("all", Ty::Unit),
-                                    ("only", Ty::List(Box::new(Ty::Int))),
-                                ]),
-                            ),
-                        ]),
+                        closed_record(&[("pattern", Ty::String), ("turns", Turns::ty())]),
                     ),
                 ],
                 tag_row,
@@ -491,13 +442,13 @@ static HARNESS_BUILTINS_ARR: [BuiltinEntry; 6] = [
     BuiltinEntry::boundary(
         Cow::Borrowed("exarch-agents"),
         scheme_agents,
-        "exarch-agents <tag>  — agent control: `list extant agents, `start a new one, `message them, `cancel them, `reply to your parent, `read the reply of a descendant.\n\nexarch-agents `list: every extant agent (including yourself), along with their `spawner` (or `root). `state` is `busy while working, `waiting-on-agents while held only by a descendant, `replied, or `waiting if it is parked but has not replied. `idle-s` is seconds since it parked.\n\nexarch-agents `start [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: <permission>, search: <Bool>, provider: `inherit|`named <Str>, model: `inherit|`named <Str>]  — launch an agent, asynchronously; a reply will arrive later as a notice. An agent with an `amnemon` `type` starts with an empty context, while `mnemon` inherits yours (also reusing cache). Every new agent has the same bindings, cwd, and env as you, except live job handles. `prompt` is the agent's prompt, and can be computed as part of a ral script. `name` is the child's identity (non-empty, at most 24 characters, unique, ASCII only). `grant` controls permissions: `inherit (same as your authority), `confined (offline, no home reads), `read-only (may write to scratch), `edit-only (edits the cwd, no build tooling), `reasonable (everyday tooling), or `restrict <record>, which takes a capability record of the same shape as `grant [...]` (exec, fs, net, detach, editor, shell); note that this may only restrict authority, not expand it. `search` states whether the child may use web search. `provider` and `model` control the inference provider and model: `inherit shares your own, and `named specifies a different one. A model the provider does not list is refused.\n\nexarch-agents `message [to: <Str>, text: <Str>]  — send `text` as a marked item to the agent named `to`.\n\nexarch-agents `cancel <name> — stop a descendant agent as soon as possible.\n\nexarch-agents `reply <value>  — hand `value` back to your parent agent. `value` must be first-order data (no blocks, handles, or environments).\n\nexarch-agents `read <name>  — fetch the value the descendant named `name` last handed to `reply, as [name: Str, reply: <value>].",
+        "exarch-agents <tag>  — agent control: `list extant agents, `start a new one, `message them, `cancel them, `reply to your parent, `read the reply of a descendant.\n\nexarch-agents `list: every extant agent (including yourself), along with their `spawner` (or `root). `state` is `busy while working, `waiting-on-agents while held only by a descendant, `replied, or `waiting if it is parked but has not replied. `idle-s` is seconds since it parked.\n\nexarch-agents `start [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: <permission>, search: <Bool>, provider: `inherit|`named <Str>, model: `inherit|`named <Str>]  — launch an agent, asynchronously; a reply will arrive later as a notice. An agent with an `amnemon` `type` starts with an empty context, while `mnemon` inherits yours (also reusing cache). Every new agent has the same bindings, cwd, and env as you, except live job handles. `prompt` is the agent's prompt, and can be computed as part of a ral script. `name` is the child's identity (non-empty, at most 24 characters, unique, ASCII only). `grant` controls permissions: `inherit (same as your authority), `confined (offline, no home reads), `read-only (may write to scratch), `edit-only (edits the cwd, no build tooling), `reasonable (everyday tooling), or `restrict <record>, which takes a capability record of the same shape as `grant [...]` (exec, fs, net, detach, editor, shell); note that this may only restrict authority, not expand it. `search` states whether the child may use web search. `provider` and `model` control the inference provider and model: `inherit shares your own, and `named specifies a different one. A model the provider does not list is refused.\n\nexarch-agents `message [to: <Str>, text: <Str>]  — send `text` as a marked item to the agent named `to`.\n\nexarch-agents `cancel <name>; stop a descendant agent as soon as possible.\n\nexarch-agents `reply <value>  — hand `value` back to your parent agent. `value` must be first-order data (no blocks, handles, or environments).\n\nexarch-agents `read <name>  — fetch the value the descendant named `name` last handed to `reply, as [name: Str, reply: <value>].",
         builtin_agents,
     ),
     BuiltinEntry::new(
         Cow::Borrowed("exarch-schedules"),
         scheme_schedules,
-        "exarch-schedules <tag>  — your self-wakeups: `list what is armed, `add one, `remove one. Every tag answers with the table afterwards, [[label: Str, trigger: Str, next-s: Int, fires: Int]], so what you read back is always what is armed now rather than a receipt for what you just did. Requires the self-wakeup grant (--allow-schedule) — an agent that can wake itself indefinitely holds real authority, so without the grant every tag is refused.\n\nexarch-schedules `list  — your live wakeups, oldest first: label as you named it, trigger as its source text (a cron expression, or `after 30m`), next-s the seconds until the next fire, recomputed as you ask, and fires how many times it has fired so far. Only live schedules appear: a spent one-shot has already removed itself, so a label you armed with `after and then see no more of has fired, not vanished. This is how you recover labels after an eviction.\n\nexarch-schedules `add [trigger: `cron <Str>|`after <Str>, label: <Str>, prompt: <Str>]  — arm a self-wakeup: at the chosen time a marked item carrying `prompt` is delivered to your inbox and re-engages you with no human present. It drains at your next exchange boundary — as soon as the tool batch in flight settles, not only at the end of the exchange — and arrives as marked chrome, `[scheduled '<label>' · <trigger>] <prompt>`, never read as a command even when the prompt opens with `/`. `trigger` is exactly one of two variants; any other shape is refused, naming both. `cron '<expr>'` is recurring: five whitespace-separated fields, minute hour day-of-month month day-of-week, read in the host's local timezone — e.g. `cron '0 9 * * 1-5'` for weekdays at 09:00. Each field is a comma list of `*`, a number, a range `a-b`, or a step over either (`*/15`, `a-b/2`, `N/step` meaning N up to the field's maximum); month and day-of-week also accept three-letter names (jan…dec, sun…sat), and day-of-week accepts 7 as a second spelling of Sunday. When both day fields are restricted, either one matching fires it (Vixie-cron's OR rule); when only one is, that one decides. Every fire recomputes the next occurrence in the host timezone, so DST shifts, clock steps, and suspends are absorbed rather than accumulated. `after '<n><unit>'` is a one-shot relative delay from the moment of arming, unit one of s/m/h/d and the count greater than zero — e.g. `after '30m'`, `after '2h'`. A trigger with no next occurrence at all — a parseable but impossible date such as `cron '0 0 30 2 *'` — is refused here rather than arming silently. `label` names the wakeup and is its identity: it must not be borne by another live schedule, and you must always supply one. `prompt` is the natural-language instruction you act on when woken, not code. Read the new row's next-s out of the answer to catch a cron expression that parsed but does not mean what you meant. Once armed: an `after removes itself when it fires; a cron re-arms itself, and drops itself only when nothing further lies inside its search horizon. A fire whose previous wakeup is still sitting undrained in your inbox is skipped, not queued behind it, and does not count as a fire. While any schedule is live this session parks for the next wakeup at quiescence instead of ending, so a recurring schedule you never remove keeps this agent alive indefinitely — that is what the grant buys. `/clear` drops every live schedule.\n\nexarch-schedules `remove <label>  — disarm the wakeup bearing `label`; its next occurrence goes with it and nothing further is delivered. The entry is gone in the answer, so the row's absence is the confirmation. A label that was never there answers the same way, and that is no evidence of a mistake: a one-shot may have fired and removed itself since you read it.\n\nEach tag is one exchange with the host, and the table it answers is the schedule registry as it stands once the transition has landed. A raise still does not prove nothing happened: the transition may have landed and its answer failed to reach you. Answered only on the run that calls it: inside spawn { … } this errors.",
+        "exarch-schedules <tag>  — your self-wakeups: `list what is armed, `add one, `remove one. Every tag answers with the table afterwards, [[label: Str, trigger: Str, next-s: Int, fires: Int]], so what you read back is always what is armed now rather than a receipt for what you just did. Requires the self-wakeup grant (--allow-schedule): an agent that can wake itself indefinitely holds real authority, so without the grant every tag is refused.\n\nexarch-schedules `list  — your live wakeups, oldest first: label as you named it, trigger as its source text (a cron expression, or `after 30m`), next-s the seconds until the next fire, recomputed as you ask, and fires how many times it has fired so far. Only live schedules appear: a spent one-shot has already removed itself, so a label you armed with `after and then see no more of has fired, not vanished. This is how you recover labels after an eviction.\n\nexarch-schedules `add [trigger: `cron <Str>|`after <Str>, label: <Str>, prompt: <Str>]  — arm a self-wakeup: at the chosen time a marked item carrying `prompt` is delivered to your inbox and re-engages you with no human present. It drains at your next exchange boundary (as soon as the tool batch in flight settles, not only at the end of the exchange) and arrives as marked chrome, `[scheduled '<label>' · <trigger>] <prompt>`, never read as a command even when the prompt opens with `/`. `trigger` is exactly one of two variants; any other shape is refused, naming both. `cron '<expr>'` is recurring: five whitespace-separated fields, minute hour day-of-month month day-of-week, read in the host's local timezone, e.g. `cron '0 9 * * 1-5'` for weekdays at 09:00. Each field is a comma list of `*`, a number, a range `a-b`, or a step over either (`*/15`, `a-b/2`, `N/step` meaning N up to the field's maximum); month and day-of-week also accept three-letter names (jan…dec, sun…sat), and day-of-week accepts 7 as a second spelling of Sunday. When both day fields are restricted, either one matching fires it (Vixie-cron's OR rule); when only one is, that one decides. Every fire recomputes the next occurrence in the host timezone, so DST shifts, clock steps, and suspends are absorbed rather than accumulated. `after '<n><unit>'` is a one-shot relative delay from the moment of arming, unit one of s/m/h/d and the count greater than zero, e.g. `after '30m'`, `after '2h'`. A trigger with no next occurrence at all (a parseable but impossible date such as `cron '0 0 30 2 *'`) is refused here rather than arming silently. `label` names the wakeup and is its identity: it must not be borne by another live schedule, and you must always supply one. `prompt` is the natural-language instruction you act on when woken, not code. Read the new row's next-s out of the answer to catch a cron expression that parsed but does not mean what you meant. Once armed: an `after removes itself when it fires; a cron re-arms itself, and drops itself only when nothing further lies inside its search horizon. A fire whose previous wakeup is still sitting undrained in your inbox is skipped, not queued behind it, and does not count as a fire. While any schedule is live this session parks for the next wakeup at quiescence instead of ending, so a recurring schedule you never remove keeps this agent alive indefinitely; that is what the grant buys. `/clear` drops every live schedule.\n\nexarch-schedules `remove <label>  — disarm the wakeup bearing `label`; its next occurrence goes with it and nothing further is delivered. The entry is gone in the answer, so the row's absence is the confirmation. A label that was never there answers the same way, and that is no evidence of a mistake: a one-shot may have fired and removed itself since you read it.\n\nEach tag is one exchange with the host, and the table it answers is the schedule registry as it stands once the transition has landed. A raise still does not prove nothing happened: the transition may have landed and its answer failed to reach you. Answered only on the run that calls it: inside spawn { … } this errors.",
         BuiltinBody::Static(builtin_family::<Schedules>),
     ),
     BuiltinEntry::boundary(
@@ -509,13 +460,13 @@ static HARNESS_BUILTINS_ARR: [BuiltinEntry; 6] = [
     BuiltinEntry::new(
         Cow::Borrowed("exarch-context"),
         scheme_context,
-        "exarch-context <tag>  — the context: the messages the provider is sent on your next request, as a list of turns. A turn is either a user turn — a prompt, or an import's opening — or an assistant turn — one assistant message, the tool results it called for, and any steering delivered before the next request. Turn ids are minted in one increasing sequence per lineage and never reused; every tool result ends with `TURN: <id>`, the id of the assistant turn it closes, and `exarch-context `survey` lists the rest. Every tag answers the survey after it has acted: [rows: [[id: Int, role: Str, kind: Str, label: Str, bytes: Int]], total-bytes: Int].\n\nexarch-context `survey  — acts on nothing. `rows` is one row per turn in the context, oldest first: `id` the turn's id; `role` `user` or `assistant`; `kind` `own` (recorded by this session), `import` (a note the harness imported, e.g. on resume), or `inherited` (recorded by an ancestor before you were forked); `label` the first 50 characters of the turn's first line, or of the `description` its first tool call declared where no prose opened one; `bytes` the serialised size of the turn's messages. `total-bytes` is the serialised size of what is actually sent — the resident turns plus every marker — and is the figure to weigh against the provider's context window.\n\nexarch-context `evict [turns: [Int], note: `none|`some Str]  — removes the named turns from the context. `turns` is a list of turn ids in any order, repeats ignored; `!{range 41 44}` is [41, 42, 43]. Refused, naming the turn: an id never recorded; an id that has already left; the id of the turn being written now, i.e. the assistant turn whose result this call is part of. Kept silently: a user turn while any assistant turn answering it — the assistant turns between it and the next user turn — is in the context and not named; a set left empty by this rule is refused. Every other named turn leaves at once, wherever it lies. Where a run of consecutive turns has left, the context carries one marker in their place stating which turns left, one line per turn (id, role, label, KB; at most 40 lines per marker, older ones collapsed to a count), the note of the eviction that took them, and how to read them back. `note` is `none for no note, or `some with one line of at most 240 bytes, which appears verbatim in that marker. Evicted turns remain in the transcript and are readable with `exarch-transcript `read`. Cost: the provider's cache holds only the prefix before the earliest change, so the next request re-reads everything from the first evicted turn onward.\n\nWhen the context nears the provider's window, the harness evicts the oldest turns itself at the next turn boundary, without a note; as the context grows into the reserve before that point you are warned once, at a tool boundary, naming the turns the cut would take. Making that cut yourself is how a note gets attached.\n\nEach tag is one exchange with the host, and the survey it answers is the context as it stands once the transition has landed; an eviction lands at the desk immediately and is recorded. A raise still does not prove nothing happened: the transition may have landed and its answer failed to reach you. Answered only on the run that calls it: inside spawn { … } this errors.",
+        "exarch-context <tag>  — the context: the messages the provider is sent on your next request, as a list of turns. A turn is either a user turn (a prompt, or an import's opening) or an assistant turn (one assistant message, the tool results it called for, and any steering delivered before the next request). Turn ids are minted in one increasing sequence per lineage and never reused; every tool result ends with `TURN: <id>`, the id of the assistant turn it closes, and `exarch-context `survey` lists the rest. Every tag answers the survey after it has acted: [rows: [[id: Int, role: Str, kind: Str, label: Str, bytes: Int]], total-bytes: Int].\n\nexarch-context `survey  — acts on nothing. `rows` is one row per turn in the context, oldest first: `id` the turn's id; `role` `user` or `assistant`; `kind` `own` (recorded by this session), `import` (a note the harness imported, e.g. on resume), or `inherited` (recorded by an ancestor before you were forked); `label` the first 50 characters of the turn's first line, or of the `description` its first tool call declared where no prose opened one; `bytes` the serialised size of the turn's messages. `total-bytes` is the serialised size of what is actually sent (the resident turns plus every marker) and is the figure to weigh against the provider's context window.\n\nexarch-context `evict [turns: [Int], note: `none|`some Str]  — removes the named turns from the context. `turns` is a list of turn ids in any order, repeats ignored; `!{range 41 44}` is [41, 42, 43]. Refused, naming the turn: an id never recorded; an id that has already left; the id of the turn being written now, i.e. the assistant turn whose result this call is part of. Kept silently: a user turn while any assistant turn answering it (the assistant turns between it and the next user turn) is in the context and not named; a set left empty by this rule is refused. Every other named turn leaves at once, wherever it lies. Where a run of consecutive turns has left, the context carries one marker in their place stating which turns left, one line per turn (id, role, label, KB; at most 40 lines per marker, older ones collapsed to a count), the note of the eviction that took them, and how to read them back. `note` is `none for no note, or `some with one line of at most 240 bytes, which appears verbatim in that marker. Evicted turns remain in the transcript and are readable with `exarch-transcript `read`. Cost: the provider's cache holds only the prefix before the earliest change, so the next request re-reads everything from the first evicted turn onward.\n\nWhen the context nears the provider's window, the harness evicts the oldest turns itself at the next turn boundary, without a note; as the context grows into the reserve before that point you are warned once, at a tool boundary, naming the turns the cut would take. Making that cut yourself is how a note gets attached.\n\nEach tag is one exchange with the host, and the survey it answers is the context as it stands once the transition has landed; an eviction lands at the desk immediately and is recorded. A raise still does not prove nothing happened: the transition may have landed and its answer failed to reach you. Answered only on the run that calls it: inside spawn { … } this errors.",
         BuiltinBody::Static(builtin_family::<Context>),
     ),
     BuiltinEntry::boundary(
         Cow::Borrowed("exarch-transcript"),
         scheme_transcript,
-        "exarch-transcript <tag>  — the complete record of this session, including turns that have been evicted from the context. Turns are specified as a list (e.g. `!{range 41 44}` or [41, 42, 43]). `exarch-context `survey` and `exarch-transcript `index` show the ids.\n\nexarch-transcript `index  — [[id: Int, role: Str, kind: Str, label: Str, bytes: Int, held: Str]], every recorded turn in order. The first five fields are the survey's; `held` is `resident` (in the context) or `evicted` (left it).\n\nexarch-transcript `read [turns: [Int]]  — [[turn: Int, role: Str, messages: [Message]]], one element per named turn in id order, each turn's messages exactly as the provider was sent them. A message is [role: `system|`user|`assistant|`tool, parts: [Part]]. A Part is one of: `text [content: Str]; `program [tool: Str, source: Str, keys: [Str]] — a tool call, where for the ral tool `source` is the script and `keys` is empty, and for any other tool `source` is empty and `keys` names its arguments; `result [content: Str] — a tool result as the model saw it; `reasoning [content: Str] — reasoning in full; `binary [content-type: Str, name: Str, bytes: Int] — a binary attachment's metadata (not the content); `custom [provider: Str, model: Str] — a provider extension's identity. \n\nexarch-transcript `grep [pattern: Str, turns: `all|`only [Int]]  — [hits: [[turn: Int, role: Str, line: Int, text: Str]], total: Int]: every line of every message in the searched turns matching `pattern` (a Rust regex). `turns` is `all to search every recorded turn, or `only followed by the list of turns to search. `hits` holds at most the 100 oldest matches, each `text` clipped to 200 bytes, `line` 1-based within its message; `total` is the count of all matches. `role` is the message's role.",
+        "exarch-transcript <tag>  — the complete record of this session, including turns that have been evicted from the context. Turns are specified as a list (e.g. `!{range 41 44}` or [41, 42, 43]). `exarch-context `survey` and `exarch-transcript `index` show the ids.\n\nexarch-transcript `index  — [[id: Int, role: Str, kind: Str, label: Str, bytes: Int, held: Str]], every recorded turn in order. The first five fields are the survey's; `held` is `resident` (in the context) or `evicted` (left it).\n\nexarch-transcript `read [turns: [Int]]  — [[turn: Int, role: Str, messages: [Message]]], one element per named turn in id order, each turn's messages exactly as the provider was sent them. A message is [role: `system|`user|`assistant|`tool, parts: [Part]]. A Part is one of: `text [content: Str]; `program [tool: Str, source: Str, keys: [Str]]: a tool call, where for the ral tool `source` is the script and `keys` is empty, and for any other tool `source` is empty and `keys` names its arguments; `result [content: Str]: a tool result as the model saw it; `reasoning [content: Str]: reasoning in full; `binary [content-type: Str, name: Str, bytes: Int]: a binary attachment's metadata (not the content); `custom [provider: Str, model: Str]: a provider extension's identity. \n\nexarch-transcript `grep [pattern: Str, turns: `all|`only [Int]]  — [hits: [[turn: Int, role: Str, line: Int, text: Str]], total: Int]: every line of every message in the searched turns matching `pattern` (a Rust regex). `turns` is `all to search every recorded turn, or `only followed by the list of turns to search. `hits` holds at most the 100 oldest matches, each `text` clipped to 200 bytes, `line` 1-based within its message; `total` is the count of all matches. `role` is the message's role.",
         boundary_family::<Transcript>,
     ),
     BuiltinEntry::new(
@@ -848,7 +799,7 @@ mod tests {
         );
         assert!(
             result.contains("live: 1"),
-            "a cancel is a request, not a transaction — the target is still \
+            "a cancel is a request, not a transaction: the target is still \
              counted by the summary answered afterwards, got: {result}"
         );
     }
@@ -1103,7 +1054,7 @@ mod tests {
     }
 
     /// A single armed schedule cannot tell "the removed row is gone" apart
-    /// from "the table is empty" — two distinguishable labels can.
+    /// from "the table is empty": two distinguishable labels can.
     #[test]
     fn schedule_remove_answer_omits_the_removed_row_but_keeps_the_other() {
         let session = granted_trunk();
@@ -1237,7 +1188,7 @@ mod tests {
                 let v = session.agent.reply().expect("the reply is deposited");
                 assert_eq!(
                     v,
-                    ral_core::serial::FOValue::String {
+                    ral_core::first_order::FOValue::String {
                         value: "second".into()
                     },
                     "the last reply in the exchange must win"
@@ -1638,7 +1589,7 @@ mod tests {
         }
     }
 
-    /// A card under "tasks" that `tasks-decode` does not recognise — the
+    /// A card under "tasks" that `tasks-decode` does not recognise: the
     /// model scribbled on the shared key — fails the next kit call with the
     /// didactic message naming the expected shape, rather than corrupting or
     /// silently discarding it.

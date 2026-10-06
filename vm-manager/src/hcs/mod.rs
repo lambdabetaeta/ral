@@ -40,6 +40,10 @@
 //! only threads in this backend serve blocking I/O — the console pump, and the
 //! accept that waits for the guest to dial.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "[silent:windows-host] a host diagnostic with no ral shell to print through"
+)]
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -605,7 +609,7 @@ impl Machine for Guest {
     ///
     /// Both are `AF_HYPERV` sockets, where the macOS backend's are `AF_VSOCK`
     /// descriptors; both are adopted by `ral-core`'s wire the same way, and
-    /// [`ral_core::wire::WireStream`](../../core/src/wire.rs) is where that is
+    /// [`ral_core::protocol::channel::WireStream`](../../core/src/protocol/channel.rs) is where that is
     /// explained.
     ///
     /// # Panics

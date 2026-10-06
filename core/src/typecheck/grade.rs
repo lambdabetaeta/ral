@@ -6,12 +6,12 @@
 //! them the same way.  A stdout redirect discharges a command to a value
 //! producer.
 
-use super::env::{comp_key, val_key};
+use super::env::Node;
 use super::error::Reason;
 use super::infer::Inferencer;
-use super::ty::{CompTy, Grade, Producer, Spine, Ty};
 use crate::ir::{Comp, CompKind, Val};
 use crate::source::{Span, Spanned, WithSpan};
+use crate::ty::{CompTy, Grade, Producer, Spine, Ty};
 
 /// What an arm of a joining form is checked as: the value written, the
 /// parameter types its form hands it, and the reason its own shape is held
@@ -131,7 +131,7 @@ impl Inferencer<'_> {
             CompTy::Fun(..) => Ty::Thunk(Box::new(cty)),
             CompTy::Return(Grade::Output, unit) => {
                 debug_assert!(self.is_unit(&unit));
-                self.ctx.captured.insert(comp_key(rhs));
+                self.ctx.captured.insert(Node::comp(rhs));
                 Ty::String
             }
             CompTy::Return(Grade::Value, ty) => *ty,
@@ -195,9 +195,9 @@ impl Inferencer<'_> {
         if let Val::Thunk(comp) = block
             && let Some(body) = Self::body_under(comp.shape(), arity)
         {
-            self.ctx.captured.insert(comp_key(body));
+            self.ctx.captured.insert(Node::comp(body));
         } else {
-            self.ctx.captured_vals.insert(val_key(block), arity);
+            self.ctx.captured_vals.insert(Node::val(block), arity);
         }
     }
 

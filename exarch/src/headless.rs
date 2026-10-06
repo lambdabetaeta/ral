@@ -16,7 +16,8 @@ use crate::provider::{Provider, Usage};
 use crate::record::{self, Blocks, Delta, Record, Recorded, Transient};
 use crate::shell_eval::user_json;
 use crate::tui::SessionInfo;
-use ral_core::serial::FOValue;
+use ral_core::first_order::FOValue;
+use ral_core::first_order::datum::Datum as _;
 use ral_core::types::{Observation, Observed};
 use std::collections::HashMap;
 use std::io::{self, Write};
@@ -59,7 +60,7 @@ pub struct Headless<'a> {
     last_stop: Option<String>,
     /// The root's deliberate `reply`, kept as a value until the consuming
     /// projection chooses ral text or [`user_json`].
-    reply: Option<ral_core::serial::FOValue>,
+    reply: Option<ral_core::first_order::FOValue>,
     /// `pump` recovers from a worker unwind and returns the worker value as
     /// normal, so without latching the panic here a crashed exchange would
     /// report as a clean, empty success.
@@ -310,7 +311,7 @@ impl Headless<'_> {
                     crate::bus::elapsed_phrase(std::time::Duration::from_millis(*elapsed_ms));
                 match error {
                     Some(reason) => {
-                        let _ = writeln!(self.err, "[agent {name} failed after {took} — {reason}]");
+                        let _ = writeln!(self.err, "[agent {name} failed after {took}: {reason}]");
                     }
                     None => {
                         let _ = writeln!(self.err, "[agent {name} finished after {took}]");
@@ -388,7 +389,7 @@ impl Headless<'_> {
     }
 
     fn print_observation(&mut self, value: &FOValue) {
-        let Some(obs) = Observation::from_wire(value) else {
+        let Ok(obs) = Observation::decode(value) else {
             return;
         };
         self.print_observed(&obs.what);
@@ -611,7 +612,7 @@ pub fn converse_settled<S: Sink>(
     if session.fleet.launch.allow_schedule || session.fleet.launch.resume_on_reset {
         return Err(
             "converse_settled ends an exchange only once the fleet quiesces, and an armed \
-             self-schedule or reset-resume wakeup may fire again with nothing to wait it out — \
+             self-schedule or reset-resume wakeup may fire again with nothing to wait it out: \
              refused rather than parked past quiescence"
                 .to_string(),
         );
@@ -653,7 +654,7 @@ mod tests {
         Avatar::root(
             RootConfig {
                 system: "system".into(),
-                caps: ral_core::types::GrantStack::root(),
+                caps: ral_core::capability::GrantStack::root(),
                 run_dir: dir,
                 account: RecordedAccount::for_test("test"),
                 trunk: Trunk::Embedded,
@@ -669,7 +670,7 @@ mod tests {
             RootSeat::Identity {
                 scratch,
                 cwd: std::env::current_dir().expect("test process has a cwd"),
-                terminal: ral_core::io::TerminalState::default(),
+                terminal: ral_core::terminal::TerminalState::default(),
             },
             Arc::new(Provider::scripted("test-model", script)),
         )
@@ -826,15 +827,15 @@ mod tests {
         let mut sink_out = Vec::new();
         let mut sink_err = Vec::new();
         let mut h = Headless::new(Projection::HeadlessJson, root, &mut sink_out, &mut sink_err);
-        h.reply = Some(ral_core::serial::FOValue::Map {
+        h.reply = Some(ral_core::first_order::FOValue::Map {
             entries: vec![(
                 "files".into(),
-                ral_core::serial::FOValue::List {
+                ral_core::first_order::FOValue::List {
                     items: vec![
-                        ral_core::serial::FOValue::String {
+                        ral_core::first_order::FOValue::String {
                             value: "a.rs".into(),
                         },
-                        ral_core::serial::FOValue::String {
+                        ral_core::first_order::FOValue::String {
                             value: "b.rs".into(),
                         },
                     ],
@@ -879,7 +880,7 @@ mod tests {
         let mut sink_out = Vec::new();
         let mut sink_err = Vec::new();
         let mut h = Headless::new(Projection::HeadlessJson, root, &mut sink_out, &mut sink_err);
-        let payload = ral_core::serial::FOValue::String {
+        let payload = ral_core::first_order::FOValue::String {
             value: "plain text reply".into(),
         };
         h.reply = Some(payload);
@@ -896,15 +897,15 @@ mod tests {
         let mut sink_out = Vec::new();
         let mut sink_err = Vec::new();
         let mut h = Headless::new(Projection::HeadlessJson, root, &mut sink_out, &mut sink_err);
-        let payload = ral_core::serial::FOValue::Map {
+        let payload = ral_core::first_order::FOValue::Map {
             entries: vec![(
                 "files".to_string(),
-                ral_core::serial::FOValue::List {
+                ral_core::first_order::FOValue::List {
                     items: vec![
-                        ral_core::serial::FOValue::String {
+                        ral_core::first_order::FOValue::String {
                             value: "a.rs".into(),
                         },
-                        ral_core::serial::FOValue::String {
+                        ral_core::first_order::FOValue::String {
                             value: "b.rs".into(),
                         },
                     ],
@@ -997,7 +998,7 @@ mod tests {
         Avatar::root(
             RootConfig {
                 system: "system".into(),
-                caps: ral_core::types::GrantStack::root(),
+                caps: ral_core::capability::GrantStack::root(),
                 run_dir: dir,
                 account: RecordedAccount::for_test("test"),
                 trunk: Trunk::Embedded,
@@ -1013,7 +1014,7 @@ mod tests {
             RootSeat::Identity {
                 scratch,
                 cwd: std::env::current_dir().expect("test process has a cwd"),
-                terminal: ral_core::io::TerminalState::default(),
+                terminal: ral_core::terminal::TerminalState::default(),
             },
             Arc::new(Provider::scripted("test-model", script)),
         )

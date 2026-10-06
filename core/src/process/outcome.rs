@@ -3,7 +3,7 @@
 
 use super::cancel::CancelCause;
 
-/// The exit code ral's every Windows kill uses — ASCII "RALK" — there being
+/// The exit code ral's every Windows kill uses (ASCII "RALK"), there being
 /// no signal a terminated Windows process could carry.  A child exiting with
 /// this exact code, or with Ctrl-Break's, while a cause was sent would be
 /// attributed too; Unix has no such residue, a signal death being
@@ -26,80 +26,29 @@ impl Signal {
         self.number
     }
 
-    /// The conventional name, for the standard signals only.
+    /// The shell status of a death by this signal.
+    pub(crate) const fn status(self) -> i32 {
+        128 + self.number
+    }
+
+    /// The signal a shell status reports, if it reports one.
     #[cfg(unix)]
-    pub fn name(self) -> Option<&'static str> {
-        let n = self.number;
-        let names = [
-            (libc::SIGHUP, "SIGHUP"),
-            (libc::SIGINT, "SIGINT"),
-            (libc::SIGQUIT, "SIGQUIT"),
-            (libc::SIGILL, "SIGILL"),
-            (libc::SIGTRAP, "SIGTRAP"),
-            (libc::SIGABRT, "SIGABRT"),
-            (libc::SIGBUS, "SIGBUS"),
-            (libc::SIGFPE, "SIGFPE"),
-            (libc::SIGKILL, "SIGKILL"),
-            (libc::SIGUSR1, "SIGUSR1"),
-            (libc::SIGSEGV, "SIGSEGV"),
-            (libc::SIGUSR2, "SIGUSR2"),
-            (libc::SIGPIPE, "SIGPIPE"),
-            (libc::SIGALRM, "SIGALRM"),
-            (libc::SIGTERM, "SIGTERM"),
-            (libc::SIGCHLD, "SIGCHLD"),
-            (libc::SIGCONT, "SIGCONT"),
-            (libc::SIGSTOP, "SIGSTOP"),
-            (libc::SIGTSTP, "SIGTSTP"),
-            (libc::SIGTTIN, "SIGTTIN"),
-            (libc::SIGTTOU, "SIGTTOU"),
-            (libc::SIGURG, "SIGURG"),
-            (libc::SIGXCPU, "SIGXCPU"),
-            (libc::SIGXFSZ, "SIGXFSZ"),
-            (libc::SIGVTALRM, "SIGVTALRM"),
-            (libc::SIGPROF, "SIGPROF"),
-            (libc::SIGWINCH, "SIGWINCH"),
-        ];
-        names
-            .iter()
-            .find_map(|(sig, name)| (*sig == n).then_some(*name))
-    }
-
-    #[cfg(not(unix))]
-    pub fn name(self) -> Option<&'static str> {
-        let _ = self;
-        None
-    }
-
-    /// Format the signal as `N (SIGNAME)` when known.
-    pub(crate) fn display(self) -> String {
-        match self.name() {
-            Some(name) => format!("{} ({name})", self.number),
-            None => self.number.to_string(),
+    pub(crate) const fn of_status(code: i32) -> Option<Self> {
+        match code.checked_sub(128) {
+            Some(number) if number > 0 => Some(Self::new(number)),
+            _ => None,
         }
     }
+}
 
-    pub(crate) fn is_sigkill(self) -> bool {
+impl std::fmt::Display for Signal {
+    /// `N (SIGNAME)` where the platform names it, else `N`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         #[cfg(unix)]
-        {
-            self.number == libc::SIGKILL
+        if let Ok(named) = nix::sys::signal::Signal::try_from(self.number) {
+            return write!(f, "{} ({named})", self.number);
         }
-        #[cfg(not(unix))]
-        {
-            let _ = self;
-            false
-        }
-    }
-
-    pub(crate) fn is_sigsegv(self) -> bool {
-        #[cfg(unix)]
-        {
-            self.number == libc::SIGSEGV
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = self;
-            false
-        }
+        write!(f, "{}", self.number)
     }
 }
 
@@ -112,6 +61,9 @@ pub(crate) enum WaitOutcome {
     #[cfg_attr(not(unix), allow(dead_code))]
     Signaled(Signal),
     NativeCode(i32),
+    /// An exit read behind an envelope: bwrap reports its payload's signal
+    /// death as `128 + n`.
+    Enveloped(i32),
 }
 
 /// How a child's end reads once ral's own teardown is accounted for.
@@ -144,19 +96,27 @@ impl WaitOutcome {
         }
     }
 
+    /// This outcome as an envelope's, when `envelope`: an unenveloped
+    /// `Exited(128 + n)` is the child's choice, an enveloped one its payload's.
+    pub(crate) fn enveloped(self, envelope: bool) -> Self {
+        match self {
+            Self::Exited(code) if envelope => Self::Enveloped(code),
+            other => other,
+        }
+    }
+
     #[cfg(all(test, unix))]
     pub(crate) fn is_success(self) -> bool {
         matches!(self, Self::Exited(0) | Self::NativeCode(0))
     }
 
     /// The signal this death was by: `Signaled(s)`, or `128 + n` behind an
-    /// envelope, bwrap reporting its payload's signal death as its own exit;
-    /// an unenveloped `Exited(128 + n)` is the child's choice.
+    /// envelope.
     #[cfg(unix)]
-    pub(crate) fn death(self, enveloped: bool) -> Option<Signal> {
+    pub(crate) fn death(self) -> Option<Signal> {
         match self {
             Self::Signaled(signal) => Some(signal),
-            Self::Exited(code) if enveloped && code > 128 => Some(Signal::new(code - 128)),
+            Self::Enveloped(code) => Signal::of_status(code),
             _ => None,
         }
     }
@@ -164,10 +124,11 @@ impl WaitOutcome {
     /// The exit status a console event or ral's kill leaves, and nothing
     /// else: every other exit is the child's choice.
     #[cfg(windows)]
-    pub(crate) fn death(self, _enveloped: bool) -> Option<Signal> {
+    pub(crate) fn death(self) -> Option<Signal> {
         use windows_sys::Win32::Foundation::STATUS_CONTROL_C_EXIT;
         match self {
-            Self::Exited(code @ (KILL_EXIT_CODE | STATUS_CONTROL_C_EXIT)) => {
+            Self::Exited(code @ (KILL_EXIT_CODE | STATUS_CONTROL_C_EXIT))
+            | Self::Enveloped(code @ (KILL_EXIT_CODE | STATUS_CONTROL_C_EXIT)) => {
                 Some(Signal::new(code))
             }
             _ => None,
@@ -176,8 +137,8 @@ impl WaitOutcome {
 
     /// Whether this death is by one of `cause`'s
     /// [`signals_of`](crate::process::signals_of).
-    fn is_death_by(self, cause: CancelCause, enveloped: bool) -> bool {
-        self.death(enveloped)
+    fn is_death_by(self, cause: CancelCause) -> bool {
+        self.death()
             .is_some_and(|signal| crate::process::signals_of(cause).any(|of| of == signal))
     }
 
@@ -186,13 +147,13 @@ impl WaitOutcome {
     /// that cause's signals is the cause's — forgiven outright for
     /// `ReaderGone`, the collector reclaiming a producer nobody read from —
     /// and anything else stays as the OS reported it: no death mints a cause.
-    pub(crate) fn classify(self, cause: Option<CancelCause>, enveloped: bool) -> Option<ChildEnd> {
-        match cause.filter(|&cause| self.is_death_by(cause, enveloped)) {
+    pub(crate) fn classify(self, cause: Option<CancelCause>) -> Option<ChildEnd> {
+        match cause.filter(|&cause| self.is_death_by(cause)) {
             Some(CancelCause::ReaderGone) => None,
             Some(cause) => Some(ChildEnd::Cancelled(cause)),
             None => match self {
-                Self::Exited(0) | Self::NativeCode(0) => None,
-                Self::Exited(code) | Self::NativeCode(code) => {
+                Self::Exited(0) | Self::NativeCode(0) | Self::Enveloped(0) => None,
+                Self::Exited(code) | Self::NativeCode(code) | Self::Enveloped(code) => {
                     Some(ChildEnd::Failed(CommandFailure::ExitCode(code)))
                 }
                 Self::Signaled(sig) => Some(ChildEnd::Failed(CommandFailure::Signal(sig))),
@@ -214,6 +175,16 @@ pub enum SpawnFailure {
     Io(Box<str>),
 }
 
+impl SpawnFailure {
+    /// The shell status: 127 for a command not found, 126 for any other.
+    pub const fn code(&self) -> u8 {
+        match self {
+            Self::NotFound => 127,
+            _ => 126,
+        }
+    }
+}
+
 impl From<&std::io::Error> for SpawnFailure {
     fn from(e: &std::io::Error) -> Self {
         match e.kind() {
@@ -233,6 +204,14 @@ pub enum CommandFailure {
 }
 
 impl CommandFailure {
+    pub fn code(&self) -> i32 {
+        match self {
+            Self::ExitCode(code) => *code,
+            Self::Signal(sig) => sig.status(),
+            Self::Spawn(failure) => failure.code().into(),
+        }
+    }
+
     pub fn message(&self, cmd: &str) -> String {
         match self {
             #[cfg(windows)]
@@ -240,7 +219,7 @@ impl CommandFailure {
                 format!("{cmd}: ended by Ctrl-C")
             }
             Self::ExitCode(code) => format!("{cmd}: exited with status {code}"),
-            Self::Signal(sig) => format!("{cmd}: killed by signal {}", sig.display()),
+            Self::Signal(sig) => format!("{cmd}: killed by signal {sig}"),
             Self::Spawn(SpawnFailure::NotFound) => format!("{cmd}: command not found"),
             Self::Spawn(SpawnFailure::PermissionDenied { found: None }) => {
                 format!("{cmd}: permission denied")
@@ -258,14 +237,16 @@ impl CommandFailure {
     pub(crate) fn default_hint(&self) -> Option<String> {
         match self {
             Self::ExitCode(_) | Self::Spawn(_) => None,
-            Self::Signal(sig) if sig.is_sigkill() => Some(
+            #[cfg(unix)]
+            Self::Signal(sig) if sig.number() == libc::SIGKILL => Some(
                 "the process was killed with SIGKILL; the kernel or another process may have terminated it"
                     .to_string(),
             ),
-            Self::Signal(sig) if sig.is_sigsegv() => {
+            #[cfg(unix)]
+            Self::Signal(sig) if sig.number() == libc::SIGSEGV => {
                 Some("the process crashed with a segmentation fault".to_string())
             }
-            Self::Signal(sig) => Some(format!("the process terminated from {}", sig.display())),
+            Self::Signal(sig) => Some(format!("the process terminated from {sig}")),
         }
     }
 }
@@ -273,7 +254,7 @@ impl CommandFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::Status;
+    use strum::VariantArray as _;
 
     /// What `sent` makes of a death it caused: its own cancellation, or, for
     /// `ReaderGone`, the collector's forgiven kill.
@@ -294,53 +275,49 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn signal_names_follow_platform_constants() {
-        assert_eq!(Signal::new(libc::SIGKILL).display(), "9 (SIGKILL)");
-        assert_eq!(Signal::new(libc::SIGTTOU).name(), Some("SIGTTOU"));
+        assert_eq!(Signal::new(libc::SIGKILL).to_string(), "9 (SIGKILL)");
+        assert_eq!(
+            Signal::new(libc::SIGTTOU).to_string(),
+            format!("{} (SIGTTOU)", libc::SIGTTOU)
+        );
+        assert_eq!(Signal::new(0).to_string(), "0");
     }
 
-    /// Every status's number, from the one table that holds them.
+    /// Every failure's number, from the type that owns it.
     #[test]
-    fn every_status_has_its_code() {
-        for (status, code) in [
-            (Status::Raised(7), 7),
-            (Status::Process(CommandFailure::ExitCode(3)), 3),
+    fn every_failure_has_its_code() {
+        for (failure, code) in [
+            (CommandFailure::ExitCode(3), 3),
+            (CommandFailure::Signal(Signal::new(11)), 139),
+            (CommandFailure::Spawn(SpawnFailure::NotFound), 127),
             (
-                Status::Process(CommandFailure::Signal(Signal::new(11))),
-                139,
-            ),
-            (
-                Status::Process(CommandFailure::Spawn(SpawnFailure::NotFound)),
-                127,
-            ),
-            (
-                Status::Process(CommandFailure::Spawn(SpawnFailure::PermissionDenied {
-                    found: None,
-                })),
+                CommandFailure::Spawn(SpawnFailure::PermissionDenied { found: None }),
                 126,
             ),
-            (
-                Status::Process(CommandFailure::Spawn(SpawnFailure::Io("boom".into()))),
-                126,
-            ),
-            (Status::Cancelled(CancelCause::Interrupt), 130),
-            (Status::Cancelled(CancelCause::Explicit), 143),
-            (Status::Cancelled(CancelCause::Deadline), 124),
-            (Status::Cancelled(CancelCause::Terminate), 143),
-            (Status::Cancelled(CancelCause::RootAbort), 131),
-            (Status::Cancelled(CancelCause::ReaderGone), 141),
+            (CommandFailure::Spawn(SpawnFailure::Io("boom".into())), 126),
         ] {
-            assert_eq!(status.code(), code, "{status:?}");
+            assert_eq!(failure.code(), code, "{failure:?}");
+        }
+        for (cause, code) in [
+            (CancelCause::Interrupted, 130),
+            (CancelCause::Cancelled, 143),
+            (CancelCause::TimedOut, 124),
+            (CancelCause::Terminated, 143),
+            (CancelCause::Aborted, 131),
+            (CancelCause::ReaderGone, 141),
+        ] {
+            assert_eq!(cause.code(), code, "{cause:?}");
         }
     }
 
     #[test]
     fn ordinary_exit_and_signal_death_stay_distinct() {
         assert_eq!(
-            WaitOutcome::Exited(137).classify(None, false),
+            WaitOutcome::Exited(137).classify(None),
             Some(ChildEnd::Failed(CommandFailure::ExitCode(137)))
         );
         assert_eq!(
-            WaitOutcome::Signaled(Signal::new(9)).classify(None, false),
+            WaitOutcome::Signaled(Signal::new(9)).classify(None),
             Some(ChildEnd::Failed(CommandFailure::Signal(Signal::new(9))))
         );
     }
@@ -353,11 +330,11 @@ mod tests {
     fn a_death_by_a_causes_signal_is_the_causes() {
         use libc::{SIGHUP, SIGINT, SIGKILL, SIGQUIT, SIGTERM};
         for (cause, expected) in [
-            (CancelCause::Interrupt, vec![SIGINT, SIGKILL]),
-            (CancelCause::Explicit, vec![SIGTERM, SIGKILL]),
-            (CancelCause::Deadline, vec![SIGTERM, SIGKILL]),
-            (CancelCause::Terminate, vec![SIGTERM, SIGHUP, SIGKILL]),
-            (CancelCause::RootAbort, vec![SIGKILL, SIGQUIT]),
+            (CancelCause::Interrupted, vec![SIGINT, SIGKILL]),
+            (CancelCause::Cancelled, vec![SIGTERM, SIGKILL]),
+            (CancelCause::TimedOut, vec![SIGTERM, SIGKILL]),
+            (CancelCause::Terminated, vec![SIGTERM, SIGHUP, SIGKILL]),
+            (CancelCause::Aborted, vec![SIGKILL, SIGQUIT]),
             (CancelCause::ReaderGone, vec![SIGKILL]),
         ] {
             let actual: std::collections::BTreeSet<i32> = crate::process::signals_of(cause)
@@ -370,12 +347,12 @@ mod tests {
             );
             for n in expected {
                 assert_eq!(
-                    signaled(n).classify(Some(cause), false),
+                    signaled(n).classify(Some(cause)),
                     attributed(cause),
                     "{cause:?}, signal {n}"
                 );
                 assert_eq!(
-                    WaitOutcome::Exited(128 + n).classify(Some(cause), true),
+                    WaitOutcome::Enveloped(128 + n).classify(Some(cause)),
                     attributed(cause),
                     "{cause:?}, enveloped exit {}",
                     128 + n
@@ -390,14 +367,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_death_off_the_causes_teardown_stays_a_signal() {
-        for cause in CancelCause::ALL {
+        for &cause in CancelCause::VARIANTS {
             assert_eq!(
-                signaled(libc::SIGSEGV).classify(Some(cause), false),
+                signaled(libc::SIGSEGV).classify(Some(cause)),
                 Some(died_of(libc::SIGSEGV)),
                 "{cause:?}"
             );
             assert_eq!(
-                WaitOutcome::Exited(128 + libc::SIGSEGV).classify(Some(cause), true),
+                WaitOutcome::Enveloped(128 + libc::SIGSEGV).classify(Some(cause)),
                 Some(ChildEnd::Failed(CommandFailure::ExitCode(
                     128 + libc::SIGSEGV
                 ))),
@@ -405,7 +382,7 @@ mod tests {
             );
         }
         assert_eq!(
-            WaitOutcome::Exited(128 + libc::SIGTERM).classify(Some(CancelCause::ReaderGone), true),
+            WaitOutcome::Enveloped(128 + libc::SIGTERM).classify(Some(CancelCause::ReaderGone)),
             Some(ChildEnd::Failed(CommandFailure::ExitCode(
                 128 + libc::SIGTERM
             )))
@@ -419,18 +396,18 @@ mod tests {
     #[test]
     fn a_death_is_a_cancellation_only_by_a_cause_in_force() {
         for n in 1..=31 {
-            assert_eq!(signaled(n).classify(None, false), Some(died_of(n)), "{n}");
+            assert_eq!(signaled(n).classify(None), Some(died_of(n)), "{n}");
         }
         assert_eq!(
-            signaled(libc::SIGQUIT).classify(Some(CancelCause::RootAbort), false),
-            Some(ChildEnd::Cancelled(CancelCause::RootAbort))
+            signaled(libc::SIGQUIT).classify(Some(CancelCause::Aborted)),
+            Some(ChildEnd::Cancelled(CancelCause::Aborted))
         );
         assert_eq!(
-            signaled(libc::SIGINT).classify(Some(CancelCause::Deadline), false),
+            signaled(libc::SIGINT).classify(Some(CancelCause::TimedOut)),
             Some(died_of(libc::SIGINT))
         );
         assert_eq!(
-            signaled(libc::SIGTERM).classify(Some(CancelCause::ReaderGone), false),
+            signaled(libc::SIGTERM).classify(Some(CancelCause::ReaderGone)),
             Some(died_of(libc::SIGTERM))
         );
     }
@@ -443,12 +420,12 @@ mod tests {
         let code = 128 + libc::SIGTERM;
         let own = Some(ChildEnd::Failed(CommandFailure::ExitCode(code)));
         assert_eq!(
-            WaitOutcome::Exited(code).classify(Some(CancelCause::Explicit), true),
-            Some(ChildEnd::Cancelled(CancelCause::Explicit))
+            WaitOutcome::Enveloped(code).classify(Some(CancelCause::Cancelled)),
+            Some(ChildEnd::Cancelled(CancelCause::Cancelled))
         );
-        assert_eq!(WaitOutcome::Exited(code).classify(None, true), own);
+        assert_eq!(WaitOutcome::Enveloped(code).classify(None), own);
         assert_eq!(
-            WaitOutcome::Exited(code).classify(Some(CancelCause::Explicit), false),
+            WaitOutcome::Exited(code).classify(Some(CancelCause::Cancelled)),
             own
         );
     }
@@ -458,7 +435,7 @@ mod tests {
     #[test]
     fn a_foreign_signal_is_still_reported_as_a_signal() {
         assert_eq!(
-            signaled(libc::SIGKILL).classify(None, false),
+            signaled(libc::SIGKILL).classify(None),
             Some(died_of(libc::SIGKILL))
         );
         assert_eq!(
@@ -479,9 +456,9 @@ mod tests {
     /// forgiveness.
     #[test]
     fn an_exit_status_is_kept_even_when_ral_ended_the_stage() {
-        for cause in CancelCause::ALL {
+        for &cause in CancelCause::VARIANTS {
             assert_eq!(
-                WaitOutcome::Exited(3).classify(Some(cause), false),
+                WaitOutcome::Exited(3).classify(Some(cause)),
                 Some(ChildEnd::Failed(CommandFailure::ExitCode(3))),
                 "{cause:?}"
             );
@@ -496,7 +473,7 @@ mod tests {
     fn a_sigpipe_death_is_kept_under_every_ending() {
         for sent in [Some(CancelCause::ReaderGone), None] {
             assert_eq!(
-                signaled(libc::SIGPIPE).classify(sent, false),
+                signaled(libc::SIGPIPE).classify(sent),
                 Some(died_of(libc::SIGPIPE))
             );
         }
@@ -508,11 +485,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_stronger_ending_outranks_forgiveness() {
-        let sent = Some(CancelCause::ReaderGone).max(Some(CancelCause::RootAbort));
-        assert_eq!(sent, Some(CancelCause::RootAbort));
+        let sent = Some(CancelCause::ReaderGone).max(Some(CancelCause::Aborted));
+        assert_eq!(sent, Some(CancelCause::Aborted));
         assert_eq!(
-            signaled(libc::SIGKILL).classify(sent, false),
-            Some(ChildEnd::Cancelled(CancelCause::RootAbort))
+            signaled(libc::SIGKILL).classify(sent),
+            Some(ChildEnd::Cancelled(CancelCause::Aborted))
         );
     }
 
@@ -521,15 +498,15 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn the_kill_exit_code_is_attributed_to_the_cause_sent() {
-        for cause in CancelCause::ALL {
+        for &cause in CancelCause::VARIANTS {
             assert_eq!(
-                WaitOutcome::Exited(KILL_EXIT_CODE).classify(Some(cause), false),
+                WaitOutcome::Exited(KILL_EXIT_CODE).classify(Some(cause)),
                 attributed(cause),
                 "{cause:?}"
             );
         }
         assert_eq!(
-            WaitOutcome::Exited(KILL_EXIT_CODE).classify(None, false),
+            WaitOutcome::Exited(KILL_EXIT_CODE).classify(None),
             Some(ChildEnd::Failed(CommandFailure::ExitCode(KILL_EXIT_CODE)))
         );
     }
@@ -542,11 +519,11 @@ mod tests {
         use windows_sys::Win32::Foundation::STATUS_CONTROL_C_EXIT;
         let ctrl_c = WaitOutcome::Exited(STATUS_CONTROL_C_EXIT);
         assert_eq!(
-            ctrl_c.classify(Some(CancelCause::Interrupt), false),
-            attributed(CancelCause::Interrupt)
+            ctrl_c.classify(Some(CancelCause::Interrupted)),
+            attributed(CancelCause::Interrupted)
         );
         assert_eq!(
-            ctrl_c.classify(None, false),
+            ctrl_c.classify(None),
             Some(ChildEnd::Failed(CommandFailure::ExitCode(
                 STATUS_CONTROL_C_EXIT
             )))
@@ -566,23 +543,23 @@ mod tests {
         use windows_sys::Win32::Foundation::STATUS_CONTROL_C_EXIT;
         let ctrl_break = WaitOutcome::Exited(STATUS_CONTROL_C_EXIT);
         assert_eq!(
-            ctrl_break.classify(Some(CancelCause::Deadline), false),
-            Some(ChildEnd::Cancelled(CancelCause::Deadline))
+            ctrl_break.classify(Some(CancelCause::TimedOut)),
+            Some(ChildEnd::Cancelled(CancelCause::TimedOut))
         );
         for cause in [
-            CancelCause::Interrupt,
-            CancelCause::Explicit,
-            CancelCause::Terminate,
+            CancelCause::Interrupted,
+            CancelCause::Cancelled,
+            CancelCause::Terminated,
         ] {
             assert_eq!(
-                ctrl_break.classify(Some(cause), false),
+                ctrl_break.classify(Some(cause)),
                 attributed(cause),
                 "{cause:?}"
             );
         }
-        for cause in [CancelCause::ReaderGone, CancelCause::RootAbort] {
+        for cause in [CancelCause::ReaderGone, CancelCause::Aborted] {
             assert_eq!(
-                ctrl_break.classify(Some(cause), false),
+                ctrl_break.classify(Some(cause)),
                 Some(ChildEnd::Failed(CommandFailure::ExitCode(
                     STATUS_CONTROL_C_EXIT
                 ))),

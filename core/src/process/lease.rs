@@ -5,6 +5,8 @@
 //! core for a run whose terminal policy makes the borrow reachable, but
 //! never mint the authority itself.
 
+use serde::{Deserialize, Serialize};
+
 /// The session's single witness that ral owns the controlling terminal's
 /// foreground and may hand it to a child.
 ///
@@ -32,4 +34,16 @@ impl TerminalLease {
             None
         }
     }
+}
+
+/// Whether a run may hand the controlling terminal to a child.
+///
+/// The host states it, and [`Shell::terminal_lease`](crate::types::Shell::terminal_lease) decides whether the
+/// session's [`TerminalLease`] is reachable
+/// from it.  `ExplicitLoan` is absent because no host can seed it — only a
+/// within-run loan token raises it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RequestedTerminalAccess {
+    Denied,
+    Leased,
 }

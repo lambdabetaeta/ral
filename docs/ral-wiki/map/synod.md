@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 64a3a121
+generated_at_commit: 446e3123
 generated_at_date: 2026-09-21
-covers_paths: [synod/, vm-manager/, ral-daemon/, ral-initramfs/, vm-image/, core/src/wire.rs, core/src/protocol.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/fleet/desk.rs]
+covers_paths: [synod/, vm-manager/, ral-daemon/, ral-initramfs/, vm-image/, core/src/protocol/channel.rs, core/src/carrier.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/fleet/desk.rs]
 ---
 
 # Map: synod
@@ -108,7 +108,7 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
   wrong order is unrepresentable rather than merely discouraged.
   `control_seat` carries no platform condition at all: `take_wires` hands
   back each platform's own owned handles and
-  `ral_core::protocol::WireTransport::adopt` takes either, so the protocol
+  `ral_core::carrier::WireTransport::adopt` takes either, so the protocol
   is one function ([[design/engine-protocol|engine-protocol]]).
   Before any of that, `begin` spawns the folder's opening walk on its own
   thread as a `session/baseline.rs` `Baseline`. That walk is stat-only —

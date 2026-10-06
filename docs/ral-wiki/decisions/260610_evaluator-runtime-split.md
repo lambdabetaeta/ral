@@ -33,13 +33,17 @@ it through clean seams. This relocates that machinery to
   single call `comp → pipeline::run_pipeline`, as intended
   ([[internals/pipeline-execution|pipeline-execution]]). Other
   evaluator→runtime edges remain — `call → command_call::run_call` and
-  `command::EvalRedirect`, `redirect → command` guards, `evaluator →
-  transport::dispatch` — pre-existing and not collapsible without a logic
-  change. `runtime.rs` names them rather than pretending one edge exists.
-- **The mutual recursion is irreducible.** A stage body contains
-  closures, so the stage runner must re-enter the evaluator; the seam
-  exists precisely because the recursion cannot be cut. The split makes
-  the boundary visible, not absent.
+  `command::EvalRedirect`, `runtime::redirect` (the redirect scope the
+  machine's `Frame::Redirect` enters, with the target-opening doors under it),
+  `evaluator → transport::dispatch` — pre-existing and not collapsible without
+  a logic change. `runtime.rs` names them rather than pretending one edge
+  exists.
+- **The mutual recursion is irreducible; the module edge is not.** A stage
+  body contains closures, so the stage runner must re-enter the evaluator;
+  the recursion cannot be cut. Amended: the evaluator hands the runtime the
+  re-entry as a parameter (`pipeline::StageEval`: `evaluate` and
+  `close_args`, passed to `PipeNode::launch`), `call_external` and the
+  redirect scope live in `runtime`, so `runtime` names no `evaluator` item.
 
 Realistic end state, achieved: `evaluator/` at the machine size and
 `runtime/` holding the fd/pgid/signal floor that any Unix shell pays.

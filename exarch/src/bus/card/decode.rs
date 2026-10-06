@@ -4,7 +4,7 @@
 //! text rather than dropping the card around it, since a card is a deliberate
 //! user-facing act.  `decode_surface` in `shell_eval.rs` calls in here.
 
-use ral_core::serial::FOValue;
+use ral_core::first_order::FOValue;
 use ral_core::types::WriteOutcome;
 
 use super::change::Change;

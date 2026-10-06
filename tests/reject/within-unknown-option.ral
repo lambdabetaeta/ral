@@ -1,4 +1,4 @@
 # codes: T0076
-# contains: unknown key 'dirr' — `within` takes dir, env, handler
+# contains: unknown key 'dirr': `within` takes dir, env, handler
 # contains: `within` also takes `handlers:`
 within [dirr: "x"] { return "ok" }

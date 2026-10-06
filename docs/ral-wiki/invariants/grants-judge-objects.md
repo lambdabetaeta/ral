@@ -29,7 +29,7 @@ spelling yet. So a **deny is judged by collision class and an allow by stored
 name** ([[decisions/261006_denies-hold-under-every-spelling|denies-hold-under-every-spelling]]):
 a rule of a `Table` speaks through `Scope::holds::<P>`, its verdict choosing
 the `Polarity`, and `path` maps `Deny` to `Identity::Collision`, keyed by
-`lex::collision_key`, and `Allow` to `Identity::Stored`. A deny then holds the
+`identity::collision_key`, and `Allow` to `Identity::Stored`. A deny then holds the
 create that would make its object under another spelling, where an allow never
 reaches a distinct name on a case-sensitive volume. Composition keeps the
 split: denies join, allows meet by stored name, and the meet writes a Deny only
@@ -46,7 +46,7 @@ kernel has always judged it.
 The rule is which form, so the only way to get it wrong is to be handed a
 choice. Nothing outside `core/src/path/` is:
 
-- `lex::path_within` and `lex::path_within_str`, the form-blind kernel, are
+- `identity::path_within` and `identity::path_within_str`, the form-blind kernel, are
   `pub(super)`, so no caller elsewhere re-derives a matcher over whichever
   form it holds, as exarch's skill check once did.
 - The identity is chosen by a rule's polarity, a type parameter: a table

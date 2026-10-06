@@ -343,7 +343,7 @@ impl AgentLog {
         let record_path = dir.join("record.jsonl");
         if !record_path.exists() {
             return Err(io::Error::other(format!(
-                "cannot resume {}: no record.jsonl was found here; a session recorded before this exarch's one-seam-one-log change cannot be resumed — was this session started with an older exarch, or is {} the right directory to resume?",
+                "cannot resume {}: no record.jsonl was found here; a session recorded before this exarch's one-seam-one-log change cannot be resumed; was this session started with an older exarch, or is {} the right directory to resume?",
                 record_path.display(),
                 dir.display()
             )));
@@ -1184,14 +1184,14 @@ mod tests {
         live.append_user("live".into(), None).unwrap();
         assert_eq!(
             live.evict(&[1], None, EditAuthority::Model).unwrap_err(),
-            "turn 1 is being written now — an eviction keeps the work in hand"
+            "turn 1 is being written now: an eviction keeps the work in hand"
         );
 
         let mut unknown = fresh_root();
         complete_round(&mut unknown, "one", "one");
         assert_eq!(
             unknown.evict(&[7], None, EditAuthority::User).unwrap_err(),
-            "turn 7 is not recorded — the latest is 2"
+            "turn 7 is not recorded: the latest is 2"
         );
         assert_eq!(
             unknown.evict(&[], None, EditAuthority::User).unwrap_err(),
@@ -1204,7 +1204,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             unknown.evict(&[1], None, EditAuthority::Model).unwrap_err(),
-            "turn 1 has already left your context — the earliest still in it is 3"
+            "turn 1 has already left your context: the earliest still in it is 3"
         );
     }
 
@@ -1226,7 +1226,7 @@ mod tests {
         assert_eq!(
             s.evict(&[1], None, EditAuthority::Model).unwrap_err(),
             "turn 1 is the prompt whose turns 2–3 are still in your context, and a prompt \
-             stays with them — name them too, or leave it"
+             stays with them: name them too, or leave it"
         );
         s.evict(&[1, 2], None, EditAuthority::Model).unwrap();
         assert_eq!(
@@ -1283,7 +1283,7 @@ mod tests {
         complete_round(&mut s, "third prompt", "third answer");
         assert_eq!(
             s.context().suffix_from(9).unwrap_err(),
-            "turn 9 is not recorded — the latest is 6"
+            "turn 9 is not recorded: the latest is 6"
         );
         assert_eq!(
             s.context().suffix_from(3).expect("a resident anchor"),
@@ -1440,7 +1440,7 @@ mod tests {
             .unwrap();
         let marker = head_marker(&s).expect("a cut renders a marker");
         assert!(
-            marker.contains("1–48  (48 earlier turns — exarch-transcript `index)"),
+            marker.contains("1–48  (48 earlier turns: exarch-transcript `index)"),
             "the rows past the cap collapse to one line, got: {marker}"
         );
         assert!(
@@ -1486,7 +1486,7 @@ mod tests {
         assert_eq!(
             marker.lines().count(),
             1 + 1 + 40 + 20,
-            "bounded by the row cap — 40 rows, and a note per cut that kept one"
+            "bounded by the row cap: 40 rows, and a note per cut that kept one"
         );
     }
 
@@ -1529,16 +1529,16 @@ mod tests {
             .unwrap();
         assert_eq!(
             s.evict(&[2], None, EditAuthority::Model).unwrap_err(),
-            "turn 2 has already left your context — the earliest still in it is 5"
+            "turn 2 has already left your context: the earliest still in it is 5"
         );
         s.append_user("four".into(), None).unwrap();
         assert_eq!(
             s.evict(&[7], None, EditAuthority::Model).unwrap_err(),
-            "turn 7 is being written now — an eviction keeps the work in hand"
+            "turn 7 is being written now: an eviction keeps the work in hand"
         );
         assert_eq!(
             s.evict(&[99], None, EditAuthority::Model).unwrap_err(),
-            "turn 99 is not recorded — the latest is 7"
+            "turn 99 is not recorded: the latest is 7"
         );
     }
 
@@ -1564,7 +1564,7 @@ mod tests {
         assert_eq!(after, before);
         assert_eq!(
             s.context().read_transcript(&[9]).unwrap_err(),
-            "turn 9 is not recorded — the latest is 4"
+            "turn 9 is not recorded: the latest is 4"
         );
     }
 
@@ -1654,7 +1654,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             s.context().read_transcript(&[1, 2]).unwrap_err(),
-            "turn 2 is being written now — it is the one turn the transcript cannot read back yet"
+            "turn 2 is being written now: it is the one turn the transcript cannot read back yet"
         );
         assert_eq!(
             s.context()
@@ -1665,7 +1665,7 @@ mod tests {
         );
         assert_eq!(
             s.context().read_transcript(&[]).unwrap_err(),
-            "`turns` names no turn — `!{range a b}` builds a run of ids"
+            "`turns` names no turn: `!{range a b}` builds a run of ids"
         );
     }
 
@@ -1709,13 +1709,13 @@ mod tests {
             s.context()
                 .grep_transcript(&regex("parser"), Some(&[9]))
                 .unwrap_err(),
-            "turn 9 is not recorded — the latest is 4"
+            "turn 9 is not recorded: the latest is 4"
         );
         assert_eq!(
             s.context()
                 .grep_transcript(&regex("parser"), Some(&[]))
                 .unwrap_err(),
-            "`turns` names no turn — omit it to search the whole transcript"
+            "`turns` names no turn: omit it to search the whole transcript"
         );
     }
 

@@ -4,7 +4,7 @@
 //! chooses the one tagged spelling it also accepts, so a round trip
 //! normalises rather than merely surviving.
 
-use ral_core::serial::FOValue;
+use ral_core::first_order::FOValue;
 
 use super::diff::{Diff, Hunk, Row, Seg};
 use super::{Card, Field, FieldVal, Mark, Measure, Readout, Role, Span};

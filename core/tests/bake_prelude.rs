@@ -1,25 +1,21 @@
 //! Regression test for the prelude bake.
 //!
 //! The prelude elaborates to a [`ral_core::ir::Toplevel`], one `Phrase` per
-//! top-level statement; `bake_prelude` checks the phrases in order and
-//! harvests each `Phrase::Define`'s generalised schemes straight off it — no
-//! separate `TyEnv` walk.  This test pins that the harvest actually reaches
-//! every top-level `let`, and that the checked pass's interior annotations
-//! (`Capture`, a pipeline's yield) land on the baked tree.
+//! top-level statement; `bake_prelude` checks the phrases in order, each
+//! `Phrase::Define` carrying its generalised schemes.  This test pins that
+//! they reach every top-level `let`, and that the checked pass's interior
+//! annotations (`Capture`, a pipeline's yield) land on the baked tree.
 
 mod common;
 
 use ral_core::ir::{CompKind, Phrase, Toplevel};
-use ral_core::typecheck::fmt_scheme;
 
-/// Re-bake the prelude from source so the test owns both the annotated
-/// toplevel and the schemes harvested off its `Phrase::Define`s.
-fn rebake() -> (Toplevel, Vec<(String, ral_core::Scheme)>) {
+/// Re-bake the prelude from source so the test owns the annotated toplevel.
+fn rebake() -> Toplevel {
     let src = include_str!("../src/prelude.ral");
     let ast = ral_core::syntax::parser::parse(src).expect("prelude parse");
-    let top = ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default(), "")
-        .expect("elaborate");
-    ral_core::bake_prelude(&top)
+    let top = ral_core::elaborator::elaborate(&ast, [], "").expect("elaborate");
+    ral_core::bake_prelude(&top, &common::manifest(&ral_core::HostSurface::default()))
 }
 
 /// Visit every `Comp` reachable from an annotated toplevel's phrases —
@@ -32,16 +28,13 @@ fn walk_toplevel(top: &Toplevel, visit: &mut impl FnMut(&ral_core::ir::Comp)) {
     }
 }
 
-/// Read the (name, scheme) pairs off an annotated toplevel's
-/// `Phrase::Define`s, in phrase order — the harvest `bake_prelude` performs.
-fn schemes_on_defines(top: &Toplevel) -> Vec<(String, String)> {
+/// The (name, scheme) pairs on an annotated toplevel's `Phrase::Define`s, in
+/// phrase order.
+fn schemes_on_defines(top: &Toplevel) -> Vec<(String, std::sync::Arc<ral_core::Scheme>)> {
     top.phrases
         .iter()
         .flat_map(|phrase| match &phrase.item {
-            Phrase::Define { schemes, .. } => schemes
-                .iter()
-                .map(|(name, scheme)| (name.clone(), fmt_scheme(scheme)))
-                .collect(),
+            Phrase::Define { schemes, .. } => schemes.clone(),
             Phrase::Run(_) => Vec::new(),
         })
         .collect()
@@ -49,7 +42,7 @@ fn schemes_on_defines(top: &Toplevel) -> Vec<(String, String)> {
 
 #[test]
 fn bake_returns_top_level_let_bindings() {
-    let (_, schemes) = rebake();
+    let schemes = schemes_on_defines(&rebake());
     let names: std::collections::HashSet<&str> = schemes.iter().map(|(n, _)| n.as_str()).collect();
     assert!(
         !schemes.is_empty(),
@@ -70,9 +63,11 @@ fn bake_returns_top_level_let_bindings() {
 fn a_prelude_binding_colliding_with_a_native_survives_the_harvest() {
     let ast =
         ral_core::syntax::parser::parse("let upper = { |x| return $x }").expect("fixture parse");
-    let top = ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default(), "")
-        .expect("elaborate");
-    let (_, schemes) = ral_core::bake_prelude(&top);
+    let top = ral_core::elaborator::elaborate(&ast, [], "").expect("elaborate");
+    let schemes = schemes_on_defines(&ral_core::bake_prelude(
+        &top,
+        &common::manifest(&ral_core::HostSurface::default()),
+    ));
     assert!(
         schemes.iter().any(|(name, _)| name == "upper"),
         "a prelude binding named after a native must survive the harvest, got {schemes:?}"
@@ -90,9 +85,9 @@ fn a_prelude_binding_colliding_with_a_native_survives_the_harvest() {
 fn bake_inserts_an_interior_capture() {
     let ast = ral_core::syntax::parser::parse("let count = { |p| int !{wc -l < $p} }")
         .expect("fixture parse");
-    let top = ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default(), "")
-        .expect("elaborate");
-    let (annotated, _) = ral_core::bake_prelude(&top);
+    let top = ral_core::elaborator::elaborate(&ast, [], "").expect("elaborate");
+    let annotated =
+        ral_core::bake_prelude(&top, &common::manifest(&ral_core::HostSurface::default()));
     let mut capture = false;
     walk_toplevel(&annotated, &mut |c| {
         if let CompKind::Capture(_) = &c.item {
@@ -105,39 +100,19 @@ fn bake_inserts_an_interior_capture() {
     );
 }
 
-/// The schemes `bake_prelude` returns are the ones written onto the
-/// annotated toplevel's `Phrase::Define`s — one harvest, not a separate
-/// `TyEnv` walk.  Comparing the toplevel's defines to the returned list
-/// within a *single* bake renders each scheme identically; an independent
-/// second bake would alpha-rename the quantified variables, so the
-/// comparison must stay inside one unifier run.
-#[test]
-fn annotated_binds_carry_the_harvested_schemes() {
-    let (annotated, schemes) = rebake();
-    let on_defines = schemes_on_defines(&annotated);
-    let returned: Vec<(String, String)> = schemes
-        .iter()
-        .map(|(n, s)| (n.clone(), fmt_scheme(s)))
-        .collect();
-    assert_eq!(
-        on_defines, returned,
-        "the returned schemes must be exactly the ones on the annotated toplevel's Phrase::Define"
-    );
-}
-
 /// The prelude's producers carry the grades the design gives them: a
 /// wrapper that runs a block produces what the block produces, a wrapper
 /// that binds a value demands one, and a stream combinator's callback may
 /// be a command.
 #[test]
 fn prelude_schemes_carry_their_grades() {
-    let (_, schemes) = rebake();
+    let schemes = schemes_on_defines(&rebake());
     let shown = |name: &str| {
         let (_, scheme) = schemes
             .iter()
             .find(|(n, _)| n == name)
             .unwrap_or_else(|| panic!("the prelude binds {name}"));
-        fmt_scheme(scheme)
+        scheme.to_string()
     };
     assert_eq!(shown("retry"), "∀α ν. Integer → {ν α} → ν α");
     assert_eq!(shown("attempt"), "∀α ν. {ν α} → Returns Unit");
@@ -169,7 +144,7 @@ fn prelude_schemes_carry_their_grades() {
 /// producer type.
 #[test]
 fn builtin_schemes_carry_their_grades() {
-    let table = ral_core::HostSurface::default().builtin_table();
+    let table = common::manifest(&ral_core::HostSurface::default());
     let shown = |name: &str| ral_core::typecheck::builtin_type_hint(&table, name).unwrap();
     assert_eq!(shown("echo"), "[String] → Command");
     assert_eq!(shown("to-json"), "∀α:data. α → Command");

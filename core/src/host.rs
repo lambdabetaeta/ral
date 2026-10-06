@@ -1,121 +1,99 @@
-//! What machine ral is running on: OS, architecture and family, current
-//! directory, user and home, git working-tree state, wall-clock time.
+//! The host process's facts: working directory, user and home, XDG bases and
+//! ral's dot-files.
 //!
-//! [`crate::boot`] boots a `Shell` *in* a host process; this only reports
-//! on one.  The live probes ([`git`], [`now`]) yield `None` rather than
-//! erroring, so a caller stitching them into a prompt or an `env`
-//! baseline stays well-formed on a bare or exotic host.
+//! [`crate::boot`] boots a `Shell` *in* a host process; this only reports on
+//! one.  Nothing here reads language state: a `within [env: …]` overlay never
+//! applies, and code holding a shell threads its overlay through
+//! [`EnvVars::home`](crate::types::EnvVars::home) instead.  This module imports
+//! nothing from the crate, so the host's facts are read here and only here.
+//!
+//! A fact that is absent stays absent: no `.`, no `/`, no placeholder.
+//! Substituting one would spend the caller's only chance to say something
+//! true, and every caller has a different true thing to say.
 
-use std::process::Command;
+mod basedir;
 
-use crate::path;
-use crate::types::EnvVars;
+use std::path::PathBuf;
 
-/// Grant a console child its console but withhold the window: synod is a
-/// windowless desktop binary (`windows_subsystem = "windows"`), and Windows
-/// answers a console child in such a parent by opening a real console that
-/// blinks for the child's lifetime.  Piped output is unaffected either way;
-/// off Windows there is nothing to suppress.
-#[cfg_attr(not(windows), allow(unused_mut))]
-fn without_a_console_window(mut cmd: Command) -> Command {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
-    }
-    cmd
-}
+pub use basedir::XdgKind;
+pub(crate) use basedir::resolve_xdg;
 
-/// The checked-out branch, and whether the tree carries uncommitted changes.
-pub struct GitStatus {
-    pub branch: String,
-    pub dirty: bool,
-}
+pub(crate) const HOME_VARS: [&str; 2] = ["HOME", "USERPROFILE"];
+pub(crate) const USER_VARS: [&str; 2] = ["USER", "USERNAME"];
 
-/// The working-tree state when the current directory is inside a
-/// repository; `None` on any failure, "not a repository" included.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:git-launch] shells out to git(1) to probe the working tree; best-effort host info, not turn-time data I/O"
-)]
-pub fn git() -> Option<GitStatus> {
-    let mut head_cmd = without_a_console_window(Command::new("git"));
-    head_cmd.args(["rev-parse", "--abbrev-ref", "HEAD"]);
-    let head = crate::process::output(&mut head_cmd).ok()?;
-    if !head.status.success() {
-        return None;
-    }
-    let branch = String::from_utf8(head.stdout).ok()?.trim().to_string();
-    let mut porcelain_cmd = without_a_console_window(Command::new("git"));
-    porcelain_cmd.args(["status", "--porcelain"]);
-    let porcelain = crate::process::output(&mut porcelain_cmd).ok()?;
-    if !porcelain.status.success() {
-        return None;
-    }
-    Some(GitStatus {
-        branch,
-        dirty: !porcelain.stdout.is_empty(),
-    })
-}
-
-/// The host OS — `"macos"`, `"linux"`, `"windows"`, …
-pub(crate) fn os_name() -> &'static str {
-    std::env::consts::OS
-}
-
-/// The host architecture — `"aarch64"`, `"x86_64"`, …
-pub(crate) fn arch() -> &'static str {
-    std::env::consts::ARCH
-}
-
-/// The host OS family — `"unix"` or `"windows"`.
-pub(crate) fn family() -> &'static str {
-    std::env::consts::FAMILY
-}
-
-/// Local date, time, and timezone via `date(1)`; `None` on any failure.
-/// One formatted string does not earn a dependency on `chrono` or `time`.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:date-launch] shells out to date(1) for the host info line; not turn-time data I/O"
-)]
-pub fn now() -> Option<String> {
-    let mut cmd = without_a_console_window(Command::new("date"));
-    cmd.arg("+%Y-%m-%d %H:%M:%S %Z");
-    let out = crate::process::output(&mut cmd).ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8(out.stdout).ok())
-        .flatten()
-        .map(|s| s.trim().to_string())
-}
-
-// Process cwd lives in `path`, which enforces the resolution discipline; it
-// is re-exported so host facts have one address.
-pub use crate::path::process_cwd as cwd;
-
-/// `HOME` (then `USERPROFILE` on Windows) read from the host process env
-/// alone; `None` when nothing binds one.
+/// The first of `keys` that `read` binds to a non-empty value.
 ///
-/// This is a host fact — where the tool itself is installed and who launched
-/// it — never language semantics: a `within [env: …]` overlay must not apply.
-/// Code holding a shell env threads its overlay through [`crate::path::home`]
-/// instead.  The clippy denylist bans this function so every call site is a
-/// written decision, carrying an `#[allow]` whose reason says why the read is
+/// An empty binding counts as none: `HOME=` names no directory, and admitting
+/// `Some("")` is what once let `~/x` expand to `/x`.  Overlay-holding code
+/// passes a `read` that consults its overlay first, so each key checks the
+/// overlay, then the host, before the next key is tried.
+pub(crate) fn first_bound(keys: &[&str], read: impl Fn(&str) -> Option<String>) -> Option<String> {
+    keys.iter().find_map(|k| read(k).filter(|v| !v.is_empty()))
+}
+
+fn host_var(key: &str) -> Option<String> {
+    std::env::var(key).ok()
+}
+
+/// Process working directory, for callers with no shell to ask; shells go
+/// through `Shell::cwd`, which honours a `within` override or a prior `cd`.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "host-env: the process cwd, for a caller with no shell to ask"
+)]
+pub fn cwd() -> Option<PathBuf> {
+    std::env::current_dir().ok()
+}
+
+/// `HOME` (then `USERPROFILE`) from the host process env alone.
+///
+/// The clippy denylist bans this function so every call site is a written
+/// decision, carrying an `#[allow]` whose reason says why the read is
 /// host-level.
-///
-/// A host fact that is absent stays absent: no `.`, no `/`, no placeholder.
-/// Substituting one here would spend the caller's only chance to say something
-/// true — and every caller has a different true thing to say.
 pub fn home() -> Option<String> {
-    path::home(&EnvVars::new())
+    first_bound(&HOME_VARS, host_var)
 }
 
-/// `USER` (then `USERNAME` on Windows) from the host process env alone.
-///
-/// `None` when nothing binds one.  Same discipline as [`home`] —
-/// overlay-holding code goes through [`crate::path::user_name`], and the
-/// prompt and audit trail each name their own placeholder.
+/// `USER` (then `USERNAME`) from the host process env alone; same discipline
+/// as [`home`].
 pub fn user() -> Option<String> {
-    path::user_name(&EnvVars::new())
+    first_bound(&USER_VARS, host_var)
+}
+
+/// ral's own config/data/state base: an absolute `XDG_*_HOME`, else the
+/// launching user's home joined with the kind's default.  `None` when nothing
+/// absolute resolves, a relative `HOME` included.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "ral's own config/data live where the tool is installed: a script's env overlay must not relocate them"
+)]
+pub fn xdg(kind: XdgKind) -> Option<PathBuf> {
+    resolve_xdg(kind, home().as_deref()).filter(|p| p.is_absolute())
+}
+
+/// `~/<name>` (e.g. `home_dot(".ralrc")`), the single-file convention rc
+/// loaders probe as a fallback to the XDG form.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the dot-file convention names the launching user's real home: a script's env overlay must not relocate it"
+)]
+pub fn home_dot(name: &str) -> Option<PathBuf> {
+    Some(PathBuf::from(home()?).join(name)).filter(|p| p.is_absolute())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_bound_skips_empty_and_keeps_key_order() {
+        let read = |k: &str| match k {
+            "A" => Some(String::new()),
+            "B" => Some("b".into()),
+            "C" => Some("c".into()),
+            _ => None,
+        };
+        assert_eq!(first_bound(&["A", "B", "C"], read), Some("b".into()));
+        assert_eq!(first_bound(&["X", "A"], read), None);
+    }
 }

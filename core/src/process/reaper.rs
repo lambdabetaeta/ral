@@ -15,7 +15,7 @@
 //!
 //! [`crate::process::ChildHandle::into_watch`] is the one door from a spawned
 //! child to a watch: `RunningChild::wait`, the pipeline collector, and
-//! `spawn_detached`'s intermediate all watch through it.  `hatch.rs`'s table
+//! `spawn_detached`'s intermediate all watch through it.  `seed/hatch.rs`'s table
 //! is the one caller that does not — it polls `ChildHandle::try_reap`
 //! directly, being a table swept on demand rather than a subscriber.
 

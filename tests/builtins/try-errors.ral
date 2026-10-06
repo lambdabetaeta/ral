@@ -49,7 +49,7 @@ try {
 # The record carries why the body failed, its status, and where it happened
 try { fail [status: 3, message: 'x'] } { |e| echo $e[reason] $e[status] }
 try { fail [status: 1, message: 'x'] } { |e|
-    case $e[site] [`just: { |s| echo $[$s[line] > 0] }, `none: { |_| echo none }]
+    case $e[site] [`some: { |s| echo $[$s[line] > 0] }, `none: { |_| echo none }]
 }
 
 # A failure raised by the evaluator itself passes through no command

@@ -3,26 +3,21 @@
 //!
 //! Two carriers drive it and differ only in carriage — how a dispatch's events
 //! leave, and how a forked session is adopted: [`IdentityTransport`] calls it
-//! in this process, [`wire`] frames it over a socket.
+//! in this process, the wire carrier frames it over a socket.
 //!
-//! [`IdentityTransport`]: crate::protocol::IdentityTransport
+//! [`IdentityTransport`]: crate::carrier::IdentityTransport
 
 use std::sync::{Arc, Mutex};
 
-use crate::engine_seed::EngineSeed;
+use crate::first_order::FOValue;
+use crate::guard::GrantNarrower;
 use crate::process::{CancelCause, DurableRoot, ForegroundScope};
 use crate::protocol::{Attach, Control, DispatchId, Event, PROTOCOL_VERSION, Report, Run};
-use crate::serial::FOValue;
-use crate::spawn_grant::GrantNarrower;
+use crate::seed::EngineSeed;
 use crate::sync::LockExt as _;
 use crate::types::{DeferredSink, Desk, Fork, Shell};
 
-#[cfg(unix)]
-mod wire;
-#[cfg(unix)]
-pub(crate) use wire::HOST_SILENCE_DEADLINE;
-#[cfg(unix)]
-pub use wire::run_engine;
+pub(crate) mod probe;
 
 /// One compiled-in boot recipe the engine can be told, at `Attach`, to become.
 ///
@@ -168,7 +163,6 @@ impl Engine {
         scope: &ForegroundScope,
     ) -> Report {
         let req = crate::run::RunRequest {
-            run,
             surface: Some(Arc::new(Surface {
                 id,
                 outlet: rails.outlet,
@@ -176,13 +170,9 @@ impl Engine {
             deferred: rails.deferred,
             desk: Some(rails.desk),
             fork: Some(rails.fork),
+            ..crate::run::RunRequest::from(run)
         };
         self.shell.run_under(scope, req).into_report(&self.shell)
-    }
-
-    /// Read one probe class, at a run boundary.
-    pub(crate) fn probe(&self, reading: &FOValue) -> Result<FOValue, String> {
-        crate::protocol::reading::answer(&self.shell, reading)
     }
 }
 
@@ -213,7 +203,7 @@ impl Scopes {
         let scope = self.dispatches.child();
         let mut slot = self.slot.lock_ignore_poison();
         if slot.foretold.take_if(|pending| *pending == id).is_some() {
-            scope.cancel(CancelCause::Explicit);
+            scope.cancel(CancelCause::Cancelled);
         }
         slot.current = Some((id, scope.clone()));
         scope
@@ -222,18 +212,18 @@ impl Scopes {
     /// One `Control` verb, meaning the same under either carrier.
     pub(crate) fn apply(&self, control: Control) {
         match control {
-            Control::Interrupt => self.strike(CancelCause::Interrupt),
+            Control::Interrupt => self.strike(CancelCause::Interrupted),
             Control::Cancel(id) => {
                 let mut slot = self.slot.lock_ignore_poison();
                 match &slot.current {
                     Some((current, scope)) if *current == id => {
-                        scope.cancel(CancelCause::Explicit);
+                        scope.cancel(CancelCause::Cancelled);
                     }
                     _ => slot.foretold = Some(id),
                 }
             }
-            Control::Terminate => self.end(CancelCause::Terminate),
-            Control::Abort => self.end(CancelCause::RootAbort),
+            Control::Terminate => self.end(CancelCause::Terminated),
+            Control::Abort => self.end(CancelCause::Aborted),
         }
     }
 
@@ -260,92 +250,13 @@ impl Scopes {
     }
 }
 
-/// Engines for core's own tests, booted as every engine is.
-#[cfg(test)]
-pub(crate) mod testkit {
-    use super::{Booted, EngineInstaller, Shell};
-    use crate::protocol::{Attach, IdentityTransport, Program, Report, Run};
-
-    /// An installer that never hatches, so it states the one policy a host
-    /// with no grant lexicon can: no seeded child.
-    pub(crate) const fn installer(
-        tag: &'static str,
-        boot: fn(&Attach) -> Result<Booted, String>,
-    ) -> EngineInstaller {
-        EngineInstaller {
-            tag,
-            boot,
-            narrow: |base, _| {
-                Err(format!(
-                    "this engine hatches no children, so it has no policy to resolve `{base}` by"
-                ))
-            },
-        }
-    }
-
-    #[allow(
-        clippy::unnecessary_wraps,
-        reason = "must match EngineInstaller::boot's signature, which can genuinely refuse"
-    )]
-    fn bare(_attach: &Attach) -> Result<Booted, String> {
-        Ok(Booted {
-            shell: Shell::new(crate::io::TerminalState::default()),
-            keep: Box::new(()),
-        })
-    }
-
-    /// A shell with no prelude and no surface.
-    pub(crate) static BARE: [EngineInstaller; 1] = [installer("bare", bare)];
-
-    /// An attach to `installers`' first recipe, seated in the temp dir.
-    pub(crate) fn attach(installers: &[EngineInstaller]) -> Attach {
-        let temp = std::env::temp_dir();
-        Attach::new(installers[0].tag, temp.clone(), temp)
-    }
-
-    /// Boot `attach` in this process.
-    pub(crate) fn boot_at(
-        installers: &'static [EngineInstaller],
-        attach: &Attach,
-    ) -> IdentityTransport {
-        IdentityTransport::boot(installers, attach).expect("a test recipe boots")
-    }
-
-    /// Boot `installers`' first recipe, seated in the temp dir.
-    pub(crate) fn boot(installers: &'static [EngineInstaller]) -> IdentityTransport {
-        boot_at(installers, &attach(installers))
-    }
-
-    /// One capturing run of `src` under the ⊤ capability ceiling.
-    pub(crate) fn run(src: &str) -> Run {
-        Run {
-            program: Program::Source(src.into()),
-            script_name: "<test>".into(),
-            caps: crate::types::GrantStack::root(),
-            wall: None,
-            deferred_lease: None,
-            worker_cap: None,
-            io: crate::run::RunIo::Capture,
-            terminal: crate::run::RequestedTerminalAccess::Denied,
-            stdin: crate::run::RunStdin::Empty,
-            trail: None,
-        }
-    }
-
-    /// Dispatch `src` under the mute host.
-    pub(crate) fn eval(transport: &IdentityTransport, src: &str) -> Report {
-        crate::protocol::dispatch_to_report(transport, run(src), std::sync::Arc::new(()))
-            .expect("an identity transport answers synchronously")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn resolve_installer_matches_known_tag() {
-        match resolve_installer(&testkit::BARE, PROTOCOL_VERSION, "bare") {
+        match resolve_installer(&crate::carrier::testkit::BARE, PROTOCOL_VERSION, "bare") {
             Ok(target) => assert_eq!(target.tag, "bare"),
             Err(msg) => panic!("known tag must resolve, got {msg}"),
         }
@@ -353,7 +264,11 @@ mod tests {
 
     #[test]
     fn resolve_installer_refuses_unknown_tag() {
-        match resolve_installer(&testkit::BARE, PROTOCOL_VERSION, "no-such-installer") {
+        match resolve_installer(
+            &crate::carrier::testkit::BARE,
+            PROTOCOL_VERSION,
+            "no-such-installer",
+        ) {
             Ok(_) => panic!("unknown tag must be refused"),
             Err(msg) => {
                 assert!(msg.contains("unknown builtin installer"));
@@ -364,7 +279,7 @@ mod tests {
 
     #[test]
     fn resolve_installer_refuses_protocol_mismatch_before_tag_lookup() {
-        match resolve_installer(&testkit::BARE, PROTOCOL_VERSION + 1, "bare") {
+        match resolve_installer(&crate::carrier::testkit::BARE, PROTOCOL_VERSION + 1, "bare") {
             Ok(_) => panic!("a mismatched protocol version must be refused"),
             Err(msg) => assert!(msg.contains("protocol version mismatch")),
         }

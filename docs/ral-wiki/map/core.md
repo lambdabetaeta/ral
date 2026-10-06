@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 1776d222
+generated_at_commit: 446e3123
 generated_at_date: 2026-09-30
 covers_paths: [core/src/lib.rs]
 ---
@@ -13,7 +13,7 @@ evaluation.** It is the bulk of the codebase (~100k lines of Rust); both
 binaries, `ral` and [[map/exarch|exarch]], embed it.
 
 `core/src/lib.rs` is the front door. The compilation ladder is *source → tokens →
-flat AST → CBPV IR → typed IR*, bundled as `compile_and_typecheck` (parse →
+flat AST → CBPV IR → typed IR*, bundled as `compile::compile_and_typecheck` (parse →
 elaborate → typecheck, failing with a `CompileError` of `Parse` or `Types`)
 and, crate-privately, `compile`
 (the same ladder without the checker), both returning a `Toplevel` — a sequence of phrases
@@ -56,10 +56,13 @@ reduction primitive behind it. A host states policy; core owns resources.
 
 The crate splits driving a `Shell` from probing the machine it runs on.
 
-- `boot` embeds a `Shell` in a host process: `boot_shell` constructs,
-  seeds, loads it from a `BakedPrelude`, and installs the host's `HostSurface` —
-  the builtin surface beyond the core set — at construction, so a half-dressed
-  production shell is unrepresentable. The prelude is baked ahead of time
+- `boot` embeds a `Shell` in a host process. `Shell::root` installs nothing and
+  is crate-private, so every shell chooses its surface through a door:
+  `HostSurface::shell` (core's `CORE_SETS`, then the host's sets, no env, no
+  prelude: a loader's scaffold) or `boot_shell`, which adds the host env and
+  seats a `BakedPrelude` whole (`BakedPrelude::seat`). A half-dressed
+  production shell is unrepresentable, and `HostSurface::manifest` hands the
+  checker the same list. The prelude is baked ahead of time
   into a schema-less `postcard` blob whose single encode site
   (`boot::bake_prelude_to_out_dir`) and single decode site
   (`boot::BakedPrelude`) sit together, and the build-dependency edge from each
@@ -80,6 +83,8 @@ Source text flows down a fixed ladder; each rung is a subsystem page.
   (`core/src/elaborator.rs`).
 - [[map/core/ir|ir]] — the `Val` / `Comp` intermediate representation
   (`core/src/ir.rs`).
+- [[map/core/ty|ty]] — the type language as data, below the IR
+  (`core/src/ty.rs`, `core/src/ty/`).
 - [[map/core/typecheck|typecheck]] — Hindley–Milner inference with row types
   (`core/src/typecheck/`), the sole inference engine, including the grade that places capture
   (`CompTy::Return(Grade, _)`).
@@ -87,7 +92,7 @@ Source text flows down a fixed ladder; each rung is a subsystem page.
   focus, frame stack, matching, audit (`core/src/evaluator/`).
 - [[map/core/runtime|runtime]] — the command/pipeline/transport machinery the
   machine dispatches into, and the shared re-exec'd-child eval runner
-  (`core/src/runtime/`, `core/src/engine_seed.rs`).
+  (`core/src/runtime/`, `core/src/seed.rs`).
 
 ## Authority, plumbing, surface
 
@@ -100,9 +105,9 @@ Source text flows down a fixed ladder; each rung is a subsystem page.
 - [[map/core/shell-state|shell-state]] — runtime values and the `Shell` interpreter state
   (`core/src/types/`).
 - [[map/core/transport|transport]] — the serde mirror and wire envelope that carry a
-  shell across a re-exec (`core/src/serial.rs`, `subprocess.rs`).
+  shell across a re-exec (`core/src/seed.rs`, `seed/table.rs`, `frame.rs`).
 - [[map/core/diagnostics|diagnostics]] — source locations and error rendering
-  (`core/src/source.rs`, `diagnostic.rs`, `ansi.rs`).
+  (`core/src/source.rs`, `diagnostic.rs`, `compile.rs`, `terminal.rs`, `ansi.rs`).
 - [[map/core/prelude|prelude]] — the embedded `prelude.ral` standard library
   (`core/src/prelude.ral`).
 

@@ -10,7 +10,7 @@ superseded_by: decisions/260619_terminal-lease
 **A shell hands the controlling terminal to a child exactly when it owns the
 terminal's foreground process group — `startup_foreground` — not when it is an
 interactive REPL.** `startup_foreground` is `tcgetpgrp(stdin) == getpgrp()`
-probed once at process entry (`io/terminal.rs`, `probe_foreground`), false when
+probed once at process entry (`terminal.rs`, `probe_foreground`), false when
 stdin is not a tty. It is the single predicate both the standalone-command path
 and the pipeline path read to decide the `tcsetpgrp` handoff.
 

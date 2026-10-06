@@ -467,7 +467,7 @@ pub(super) fn tail_bytes(text: &str, cap: usize) -> &str {
     if text.len() <= cap {
         return text;
     }
-    let start = ral_core::text::ceil_char_boundary(text, text.len() - cap);
+    let start = text.ceil_char_boundary(text.len() - cap);
     &text[start..]
 }
 

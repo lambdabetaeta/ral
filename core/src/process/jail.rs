@@ -178,7 +178,7 @@ mod tests {
             Ok(v) => Some(v),
             Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
                 eprintln!(
-                    "skipping: {e} — /run/ral/jail.seq needs a real guest boot's \
+                    "skipping: {e}; /run/ral/jail.seq needs a real guest boot's \
                      root, absent on this host"
                 );
                 None

@@ -9,13 +9,16 @@
 //! needs no renaming pass.
 
 use super::env::TyEnv;
-use super::fmt::fmt_scheme;
 use super::generalize::{FreeVars, generalize};
-use super::kind::Kind;
-use super::scheme::{CachedFreeVars, Scheme, WeakVars};
-use super::ty::{CompTy, Grade, GradeVar, Label, Row, RowVar, Ty, TyVar};
 use super::unify::Unifier;
-use crate::types::BuiltinTable;
+use crate::fact::{ErrorRecord, Io, Observation, Receipt};
+use crate::path::walk::{DirEntry, FileInfo};
+use crate::ty::{
+    CachedFreeVars, CompTy, Grade, GradeVar, Kind, Label, Row, RowVar, Scheme, Ty, TyVar, Typed,
+    WeakVars, closed_record, closed_variant,
+};
+use std::borrow::Cow;
+use std::sync::{Arc, OnceLock};
 
 /// How the type checker types a registered builtin: a scheme factory, run
 /// fresh against a live [`Unifier`].
@@ -24,34 +27,199 @@ use crate::types::BuiltinTable;
 /// is one argument of one type, not a list of slots to diagnose one by one.
 pub(crate) type BuiltinTypeRule = fn(&mut Unifier) -> Scheme;
 
-/// The `Fun`-nesting depth of a scheme factory's curried body — instantiated
-/// fresh, since a factory needs a live [`Unifier`] to run.  A builtin's
-/// arity: the checker's own arity diagnostics at command position read this,
-/// not only the evaluator's arity gate.
-pub(crate) fn scheme_curry_depth(factory: BuiltinTypeRule) -> usize {
-    let mut u = Unifier::new();
-    let scheme = factory(&mut u);
-    fn count(ct: &CompTy) -> usize {
-        match ct {
-            CompTy::Fun(_, body) => 1 + count(body),
-            _ => 0,
-        }
-    }
-    match &scheme.ty {
-        Ty::Thunk(inner) => count(inner),
-        _ => 0,
-    }
-}
-
-/// Extra non-typing behaviour a builtin's [`crate::types::BuiltinEntry`]
-/// carries: which diagnostic an over-application or a literal misuse earns.
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// Extra non-typing behaviour a builtin's [`Decl`] carries: which diagnostic
+/// an over-application or a literal misuse earns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BuiltinDiagnostic {
     None,
     FailStatusNonzero,
     /// A `from-*` decoder: an argument is not an arity slip but a misreading
     /// of where the bytes come from.
     Decoder,
+}
+
+/// Which of ral's two argument conventions a manifest row uses.  The manifest
+/// is authored as two, and what a name can do follows from which half it is in
+/// rather than from its arity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Convention {
+    /// Curried application at the arity the row's type declares, and
+    /// first-class as `$name`: the row seeds the base env scope as a
+    /// `Value::Native`.
+    Value,
+    /// An argv, so the row seeds a base handler frame instead: intercepted,
+    /// stacked, reached by `^name`, and never a value.  Typed `List String`,
+    /// an argv's elements crossing rendered — though the body is handed the
+    /// values themselves, and renders what it writes (`echo`) or vets what it
+    /// launches (`detach`) as its own boundary demands.
+    Argv,
+}
+
+/// `true` and `false` — language-given names in every base scope, live and
+/// hydrated alike, though they are not manifest entries.  The checker types
+/// them `Bool`.
+pub(crate) const LANGUAGE_CONSTANTS: [(&str, bool); 2] = [("true", true), ("false", false)];
+
+/// What a row's type rule fixes once: its curry depth and whether it settles
+/// at `Unit`.  One instantiation serves both.
+#[derive(Debug, Clone, Copy)]
+struct Spine {
+    arity: usize,
+    settles_at_unit: bool,
+}
+
+impl Spine {
+    fn of(rule: BuiltinTypeRule) -> Self {
+        fn settled(ct: &CompTy) -> (usize, Option<&Ty>) {
+            match ct {
+                CompTy::Fun(_, body) => {
+                    let (n, ty) = settled(body);
+                    (n + 1, ty)
+                }
+                CompTy::Return(_, ty) => (0, Some(ty)),
+                CompTy::Var(_) => (0, None),
+            }
+        }
+        match rule(&mut Unifier::new()).ty {
+            Ty::Thunk(inner) => {
+                let (arity, ty) = settled(&inner);
+                Self {
+                    arity,
+                    settles_at_unit: matches!(ty, Some(Ty::Unit)),
+                }
+            }
+            _ => Self {
+                arity: 0,
+                settles_at_unit: false,
+            },
+        }
+    }
+}
+
+/// A manifest row minus its body: all the checker may know of a builtin.
+/// `doc` is the line `help` and `explain` print.
+#[derive(Debug, Clone)]
+pub struct Decl {
+    pub name: Cow<'static, str>,
+    pub convention: Convention,
+    pub doc: &'static str,
+    pub(crate) type_rule: BuiltinTypeRule,
+    /// Which diagnostic an over-application or a literal misuse earns; `None`
+    /// for the overwhelming majority of rows.
+    pub(crate) diagnostic: BuiltinDiagnostic,
+    /// Set only by the boundary constructor: a call of the row carries a
+    /// [`crate::ty::Site`].
+    pub(crate) boundary: bool,
+    spine: OnceLock<Spine>,
+}
+
+impl Decl {
+    pub(crate) const fn new(
+        name: Cow<'static, str>,
+        convention: Convention,
+        type_rule: BuiltinTypeRule,
+        doc: &'static str,
+        boundary: bool,
+    ) -> Self {
+        Self {
+            name,
+            convention,
+            doc,
+            type_rule,
+            diagnostic: BuiltinDiagnostic::None,
+            boundary,
+            spine: OnceLock::new(),
+        }
+    }
+
+    pub fn is_boundary(&self) -> bool {
+        self.boundary
+    }
+
+    fn spine(&self) -> Spine {
+        *self.spine.get_or_init(|| Spine::of(self.type_rule))
+    }
+
+    /// The curry depth of the row's type: the argument count a `$name`
+    /// reference saturates at, and what the checker's arity diagnostics at
+    /// command position read.
+    pub(crate) fn fixed_arity(&self) -> usize {
+        self.spine().arity
+    }
+
+    /// The declared scheme is the authority on what a row settles to.
+    pub(crate) fn settles_at_unit(&self) -> bool {
+        self.spine().settles_at_unit
+    }
+}
+
+/// The checker's Σ: every installed set's declarations, newest set first.
+/// Names are disjoint across sets, so lookup order never shadows.
+#[derive(Debug, Clone, Default)]
+pub struct Manifest {
+    sets: imbl::Vector<Arc<[Decl]>>,
+}
+
+impl Manifest {
+    /// Panics when `set` repeats a name or collides with an installed one.
+    pub(crate) fn push(&mut self, set: Arc<[Decl]>) {
+        let mut seen = std::collections::HashSet::new();
+        for decl in set.iter() {
+            let name = decl.name.as_ref();
+            assert!(
+                seen.insert(name),
+                "builtin installation failed: builtin `{name}` is installed twice in one builtin set"
+            );
+            assert!(
+                self.get(name).is_none(),
+                "builtin installation failed: builtin `{name}` conflicts with an installed builtin"
+            );
+        }
+        self.sets.push_back(set);
+    }
+
+    /// Whether this exact set, or one carrying the same names, is installed.
+    pub(crate) fn holds(&self, set: &[Decl]) -> bool {
+        self.sets.iter().any(|have| {
+            have.len() == set.len() && set.iter().all(|d| have.iter().any(|h| h.name == d.name))
+        })
+    }
+
+    fn rows(&self) -> impl Iterator<Item = &Decl> {
+        self.sets.iter().rev().flat_map(|set| set.iter())
+    }
+
+    /// Any row by name, either half: what `help` and `explain` document.
+    pub fn get(&self, name: &str) -> Option<&Decl> {
+        self.rows().find(|decl| decl.name == name)
+    }
+
+    /// The *value* row for `name`: the half an application and a `$name`
+    /// reference reach.  `None` for a base frame, which command position and
+    /// `^name` reach through the handler stack instead.
+    pub fn value(&self, name: &str) -> Option<&Decl> {
+        self.rows()
+            .find(|decl| decl.name == name && decl.convention == Convention::Value)
+    }
+
+    /// Every base-frame row: what the checker's handler bindings are seeded
+    /// from.
+    pub(crate) fn base_frames(&self) -> impl Iterator<Item = &Decl> {
+        self.rows()
+            .filter(|decl| decl.convention == Convention::Argv)
+    }
+
+    /// Names a `$name` reference reaches: the value rows.
+    pub(crate) fn value_names(&self) -> impl Iterator<Item = &str> {
+        self.rows()
+            .filter(|decl| decl.convention == Convention::Value)
+            .map(|decl| decl.name.as_ref())
+    }
+
+    /// Names of installed builtins, newest installed set first.
+    pub(crate) fn names(&self) -> impl Iterator<Item = &str> {
+        self.rows().map(|decl| decl.name.as_ref())
+    }
 }
 
 /// Build a [`Scheme`] from its quantified vars and body.
@@ -129,12 +297,13 @@ macro_rules! scheme {
     // scheme!(str_to_str: [Ty::String] -> Ty::String);
     ($name:ident: [$($p:expr),*] -> $ret:expr) => { scheme!(@ $name: [$($p),*] => pure($ret)); };
     // scheme!(to_line<av: Kind::DATA>: [Ty::Var(av)] -> writes);
-    ($name:ident<$tv:ident: $kind:path>: [$($p:expr),*] -> writes) => {
-        scheme!(@ $name<$tv: $kind>: [$($p),*] => command());
+    ($name:ident<$($tv:ident: $kind:path),+>: [$($p:expr),*] -> writes) => {
+        scheme!(@ $name<$($tv: $kind),+>: [$($p),*] => command());
     };
     // scheme!(length<av: Kind::SIZED>: [Ty::Var(av)] -> Ty::Int);
-    ($name:ident<$tv:ident: $kind:path>: [$($p:expr),*] -> $ret:expr) => {
-        scheme!(@ $name<$tv: $kind>: [$($p),*] => pure($ret));
+    // scheme!(has<av: Kind::ANY, bv: Kind::ANY>: [..] -> ..): any number.
+    ($name:ident<$($tv:ident: $kind:path),+>: [$($p:expr),*] -> $ret:expr) => {
+        scheme!(@ $name<$($tv: $kind),+>: [$($p),*] => pure($ret));
     };
     // The two expansions: `tail` past the curried parameters, under no type
     // variable, or one of the kind declared.
@@ -143,70 +312,18 @@ macro_rules! scheme {
             mk_plain_scheme(&[], &[], thunk(CompTy::arrows([$($p),*], $tail)))
         }
     };
-    (@ $name:ident<$tv:ident: $kind:path>: [$($p:expr),*] => $tail:expr) => {
+    (@ $name:ident<$($tv:ident: $kind:path),+>: [$($p:expr),*] => $tail:expr) => {
         pub fn $name(u: &mut Unifier) -> Scheme {
-            let $tv = u.fresh_tyvar();
-            mk_scheme(&[($tv, $kind)], &[], thunk(CompTy::arrows([$($p),*], $tail)))
+            $(let $tv = u.fresh_tyvar();)+
+            mk_scheme(&[$(($tv, $kind)),+], &[], thunk(CompTy::arrows([$($p),*], $tail)))
         }
     };
-}
-
-/// A record type over a row of fields ending in `tail`.
-pub fn record_row(fields: &[(&str, Ty)], tail: Row) -> Ty {
-    let mut row = tail;
-    for (l, t) in fields.iter().rev() {
-        row = Row::Extend(
-            Label::Field((*l).to_string()),
-            Box::new(t.clone()),
-            Box::new(row),
-        );
-    }
-    Ty::Record(row)
-}
-
-/// A record type over a closed row: the tail is `Empty`, so no extension.
-pub fn closed_record(fields: &[(&str, Ty)]) -> Ty {
-    record_row(fields, Row::Empty)
-}
-
-/// A record type left open on `tail`: at least these fields, and any others.
-pub fn open_record(fields: &[(&str, Ty)], tail: RowVar) -> Ty {
-    record_row(fields, Row::Var(tail))
-}
-
-/// A variant type over a row of tags with stated payloads, ending in `tail`.
-pub fn variant_row(tags: &[(&str, Ty)], tail: Row) -> Ty {
-    let mut row = tail;
-    for (l, t) in tags.iter().rev() {
-        row = Row::Extend(
-            Label::Case((*l).to_string()),
-            Box::new(t.clone()),
-            Box::new(row),
-        );
-    }
-    Ty::Variant(row)
-}
-
-/// A variant type over a closed row of tags.
-///
-/// The tail is `Empty`, so a `case` on it must cover exactly these arms.  A
-/// payload-less tag takes `Unit`, as `Inferencer::infer_val` gives one at its
-/// construction site.
-pub fn closed_variant(arms: &[(&str, Ty)]) -> Ty {
-    variant_row(arms, Row::Empty)
-}
-
-/// A variant left open on `tail`, so an unknown tag reaches the runtime door
-/// that enumerates the legal ones rather than dying as a row-unification
-/// mismatch.
-pub fn open_variant(tags: &[(&str, Ty)], tail: RowVar) -> Ty {
-    variant_row(tags, Row::Var(tail))
 }
 
 /// The error record a raising form demands of its argument: `status` and
 /// `message`, over a fresh tail.  Open, because re-raising a caught error
 /// carries `cmd`, `site` and whatever else the record picked up along
-/// the way; the tail is what makes [`try_error_record`] an instance of this
+/// the way; the tail is what makes `ErrorRecord::ty` an instance of this
 /// shape.  The caller quantifies the row itself — [`scheme::fail`] — so this
 /// takes it directly rather than minting one.
 pub(in crate::typecheck) fn error_record_shape(row: RowVar) -> Ty {
@@ -221,200 +338,44 @@ pub(in crate::typecheck) fn error_record_shape(row: RowVar) -> Ty {
     ))
 }
 
-/// The error record `try` hands its handler, mirrored at runtime by
-/// `error_record` in `core/src/evaluator/scope.rs`.  `message` is synthetic
-/// status text, never the failing command's fd 2 bytes: those streamed live,
-/// and `audit` is the forensic path.
-pub(super) fn try_error_record() -> Ty {
-    closed_record(&[
-        ("status", Ty::Int),
-        ("reason", reason_ty()),
-        ("cmd", Ty::String),
-        ("message", Ty::String),
-        ("site", site_ty()),
-    ])
-}
-
-/// The `` `just x | `none `` an optional projected field carries: an absent
-/// before-image is a fact, not a missing key.
-fn optional_ty(payload: Ty) -> Ty {
-    closed_variant(&[("just", payload), ("none", Ty::Unit)])
-}
-
-/// Why a failure happened, mirrored at runtime by `reason_value` in
-/// `core/src/evaluator/scope.rs`.
-fn reason_ty() -> Ty {
-    let causes = crate::process::CancelCause::ALL.map(|c| (c.label(), Ty::Unit));
-    let cause = closed_variant(&causes);
-    closed_variant(&[
-        ("exited", Ty::Int),
-        ("signaled", Ty::Int),
-        ("cancelled", cause),
-        ("not-found", Ty::Unit),
-        ("not-runnable", Ty::Unit),
-        ("raised", Ty::Unit),
-    ])
-}
-
-/// A source position, mirrored at runtime by `site_value` in
-/// `core/src/types/observation.rs`.
-fn site_ty() -> Ty {
-    optional_ty(closed_record(&[
-        ("script", Ty::String),
-        ("line", Ty::Int),
-        ("col", Ty::Int),
-    ]))
-}
-
-/// One arm per [`Observed`](crate::types::Observed) variant, tagged by the
-/// kind, each a closed record of exactly the fields `Observation::to_value`
-/// projects for it.
-fn observed_ty() -> Ty {
-    closed_variant(&[
-        (
-            "command",
-            closed_record(&[
-                ("argv", Ty::List(Box::new(Ty::String))),
-                ("status", Ty::Int),
-                ("origin", Ty::String),
-                ("stdout", Ty::Bytes),
-                ("stderr", Ty::Bytes),
-                ("error", Ty::String),
-            ]),
-        ),
-        (
-            "write",
-            closed_record(&[
-                ("path", Ty::String),
-                ("mode", Ty::String),
-                ("outcome", Ty::String),
-                ("new_bytes", optional_ty(Ty::Bytes)),
-                ("old_bytes", optional_ty(Ty::Bytes)),
-            ]),
-        ),
-        ("read", closed_record(&[("path", Ty::String)])),
-        (
-            "grep",
-            closed_record(&[("scope", Ty::String), ("pattern", Ty::String)]),
-        ),
-        (
-            "check",
-            closed_record(&[
-                ("resource", Ty::String),
-                ("decision", Ty::String),
-                ("fields", Ty::Map(Box::new(Ty::String))),
-            ]),
-        ),
-        (
-            "worker",
-            closed_record(&[("id", Ty::Int), ("cmd", Ty::String), ("class", Ty::String)]),
-        ),
-        (
-            "act",
-            closed_record(&[
-                ("verb", Ty::String),
-                ("subject", optional_ty(Ty::String)),
-                ("payload", Ty::String),
-                ("refused", Ty::Bool),
-            ]),
-        ),
-    ])
-}
-
-/// The record one observation projects as, field for field
-/// `Observation::to_value`: the envelope, and the fact as a tagged `what`.
-fn observation_ty() -> Ty {
-    closed_record(&[
-        ("site", site_ty()),
-        ("start", Ty::Int),
-        ("end", Ty::Int),
-        ("principal", Ty::String),
-        ("what", observed_ty()),
-    ])
-}
-
-/// The record `audit { … }` produces, field for field the value shape
-/// `evaluator::audit::report_value` materialises.  The body's outcome is a
-/// variant, so a failure is read by `case` rather than by comparing a status
-/// against 0; the `` `err `` payload is the very record `try` hands its
-/// handler.
+/// The record `audit { … }` produces, field for field the value
+/// `report_value` materialises.  The body's outcome is a variant, so a failure
+/// is read by `case` rather than by comparing a status against 0; the
+/// `` `err `` payload is the very record `try` hands its handler.
 pub(super) fn audit_record(value_ty: Ty) -> Ty {
     closed_record(&[
-        (
-            "outcome",
-            closed_variant(&[("ok", value_ty), ("err", try_error_record())]),
-        ),
-        ("trail", Ty::List(Box::new(observation_ty()))),
+        ("outcome", outcome_ty(value_ty)),
+        ("trail", Vec::<Observation>::ty()),
     ])
+}
+
+/// The `` `ok α | `err `` a body's outcome is read as: the failure is the
+/// record `try` hands its handler.
+pub(crate) fn outcome_ty(value_ty: Ty) -> Ty {
+    closed_variant(&[("ok", value_ty), ("err", ErrorRecord::ty())])
 }
 
 /// The `{value, stdout, stderr}` record `await` and `race` return.  Failure
 /// raises rather than setting a flag, so there is no status field here; a
 /// failed block's status lives inside `poll`'s `` `err `` outcome.
-fn await_record(value_ty: Ty) -> Ty {
-    closed_record(&[
-        ("value", value_ty),
-        ("stdout", Ty::Bytes),
-        ("stderr", Ty::Bytes),
-    ])
+pub(crate) fn await_record(value_ty: Ty) -> Ty {
+    Io::ty().extend("value", value_ty)
 }
 
 /// The `{stdout, stderr, outcome}` record `poll` carries in its `` `settled ``
-/// arm.  The `` `err `` payload is the very record `try` hands its handler
-/// ([`try_error_record`]), so the block's status lives inside it.
+/// arm.  The `` `err `` payload is the very record `try` hands its handler,
+/// so the block's status lives inside it.
 fn settle_record(value_ty: Ty) -> Ty {
-    closed_record(&[
-        ("stdout", Ty::Bytes),
-        ("stderr", Ty::Bytes),
-        (
-            "outcome",
-            closed_variant(&[("ok", value_ty), ("err", try_error_record())]),
-        ),
-    ])
-}
-
-/// The `{stdout, stderr}` record `poll` carries in its `` `pending `` arm: a
-/// cumulative, non-destructive snapshot of what the running block has written
-/// so far, and no outcome, because there is none yet.
-fn pending_record() -> Ty {
-    closed_record(&[("stdout", Ty::Bytes), ("stderr", Ty::Bytes)])
+    Io::ty().extend("outcome", outcome_ty(value_ty))
 }
 
 /// The variant `poll` returns: [`settle_record`] once the block has finished —
-/// by returning, raising, or panicking — and [`pending_record`] while it runs.
-/// Being `await`'s non-blocking dual, `poll` reports a failure inside the
-/// settled outcome rather than re-raising it.
-fn poll_variant(value_ty: Ty) -> Ty {
-    closed_variant(&[
-        ("pending", pending_record()),
-        ("settled", settle_record(value_ty)),
-    ])
-}
-
-/// The record type returned by `list-dir` for each directory entry.
-pub(crate) fn fs_list_entry_ty() -> Ty {
-    closed_record(&[
-        ("name", Ty::String),
-        ("type", Ty::String),
-        ("size", Ty::Int),
-        ("mtime", Ty::Int),
-    ])
-}
-
-/// The record type returned by `file-info`: [`fs_list_entry_ty`]'s fields plus
-/// access and birth times, the readonly bit, and the symlink `target` (the
-/// empty string for non-symlinks).
-pub(crate) fn fs_file_info_ty() -> Ty {
-    closed_record(&[
-        ("name", Ty::String),
-        ("type", Ty::String),
-        ("size", Ty::Int),
-        ("mtime", Ty::Int),
-        ("atime", Ty::Int),
-        ("btime", Ty::Int),
-        ("readonly", Ty::Bool),
-        ("target", Ty::String),
-    ])
+/// by returning, raising, or panicking — and what it has written so far while
+/// it runs (a cumulative, non-destructive snapshot).  Being `await`'s
+/// non-blocking dual, `poll` reports a failure inside the settled outcome
+/// rather than re-raising it.
+pub(crate) fn poll_variant(value_ty: Ty) -> Ty {
+    closed_variant(&[("pending", Io::ty()), ("settled", settle_record(value_ty))])
 }
 
 /// Per-builtin scheme factories, one function per registered *shape*: entries
@@ -422,11 +383,11 @@ pub(crate) fn fs_file_info_ty() -> Ty {
 /// function here rather than duplicating the body.
 pub mod scheme {
     use super::{
-        CompTy, FreeVars, Grade, GradeVar, Kind, Row, Scheme, Ty, TyEnv, TyVar, Unifier,
-        await_record, closed_record, command, error_record_shape, fs_file_info_ty,
-        fs_list_entry_ty, fun, generalize, graded, mk_plain_scheme, mk_scheme, poll_variant, pure,
-        thunk,
+        CompTy, DirEntry, FileInfo, FreeVars, Grade, GradeVar, Kind, Receipt, Row, Scheme, Ty,
+        TyEnv, TyVar, Unifier, await_record, command, error_record_shape, fun, generalize, graded,
+        mk_plain_scheme, mk_scheme, poll_variant, pure, thunk,
     };
+    use crate::ty::Typed as _;
 
     // ── List operations ──────────────────────────────────────────────────
 
@@ -447,63 +408,23 @@ pub mod scheme {
         )
     }
 
-    /// `keys :: ∀α. Map<α> → F [Str]`
-    pub fn keys(u: &mut Unifier) -> Scheme {
-        let av = u.fresh_tyvar();
-        mk_plain_scheme(
-            &[av],
-            &[],
-            thunk(fun(
-                Ty::Map(Box::new(Ty::Var(av))),
-                pure(Ty::List(Box::new(Ty::String))),
-            )),
-        )
-    }
+    // keys :: ∀α. Map<α> → F [Str]
+    scheme!(keys<av: Kind::ANY>: [Ty::map(Ty::Var(av))] -> Ty::list(Ty::String));
 
-    /// `has :: ∀α. Map<α> → Str → F Bool`
-    pub(crate) fn has(u: &mut Unifier) -> Scheme {
-        let av = u.fresh_tyvar();
-        mk_plain_scheme(
-            &[av],
-            &[],
-            thunk(fun(
-                Ty::Map(Box::new(Ty::Var(av))),
-                fun(Ty::String, pure(Ty::Bool)),
-            )),
-        )
-    }
+    // has :: ∀α. Map<α> → Str → F Bool
+    scheme!(has<av: Kind::ANY>: [Ty::map(Ty::Var(av)), Ty::String] -> Ty::Bool);
 
-    scheme!(equal<av: Kind::DATA>: [Ty::Var(av), Ty::Var(av)] -> Ty::Bool);
+    // map :: ∀α β. U(α → F β) → [α] → F [β]
+    scheme!(map_op<av: Kind::ANY, bv: Kind::ANY>: [
+        thunk(fun(Ty::Var(av), pure(Ty::Var(bv)))),
+        Ty::list(Ty::Var(av))
+    ] -> Ty::list(Ty::Var(bv)));
 
-    scheme!(compare<av: Kind::COMPARABLE>: [Ty::Var(av), Ty::Var(av)] -> Ty::Bool);
-
-    /// `map :: ∀α β. U(α → F β) → [α] → F [β]`
-    pub(crate) fn map_op(u: &mut Unifier) -> Scheme {
-        let (av, bv) = (u.fresh_tyvar(), u.fresh_tyvar());
-        let (a, b) = (Ty::Var(av), Ty::Var(bv));
-        mk_plain_scheme(
-            &[av, bv],
-            &[],
-            thunk(fun(
-                thunk(fun(a.clone(), pure(b.clone()))),
-                fun(Ty::List(Box::new(a)), pure(Ty::List(Box::new(b)))),
-            )),
-        )
-    }
-
-    /// `filter :: ∀α. U(α → F Bool) → [α] → F [α]`
-    pub(crate) fn filter_op(u: &mut Unifier) -> Scheme {
-        let av = u.fresh_tyvar();
-        let a = Ty::Var(av);
-        mk_plain_scheme(
-            &[av],
-            &[],
-            thunk(fun(
-                thunk(fun(a.clone(), pure(Ty::Bool))),
-                fun(Ty::List(Box::new(a.clone())), pure(Ty::List(Box::new(a)))),
-            )),
-        )
-    }
+    // filter :: ∀α. U(α → F Bool) → [α] → F [α]
+    scheme!(filter_op<av: Kind::ANY>: [
+        thunk(fun(Ty::Var(av), pure(Ty::Bool))),
+        Ty::list(Ty::Var(av))
+    ] -> Ty::list(Ty::Var(av)));
 
     /// `each :: ∀ε α β. U(α → F^ε β) → [α] → F Unit` — the block's output
     /// streams, whatever it produces.
@@ -517,7 +438,7 @@ pub mod scheme {
                 &[],
                 thunk(fun(
                     thunk(fun(a.clone(), CompTy::Return(Grade::Var(ev), Box::new(b)))),
-                    fun(Ty::List(Box::new(a)), pure(Ty::Unit)),
+                    fun(Ty::list(a), pure(Ty::Unit)),
                 )),
             ),
         )
@@ -535,93 +456,48 @@ pub mod scheme {
                 &[],
                 thunk(fun(
                     thunk(fun(b.clone(), fun(a.clone(), step))),
-                    fun(b.clone(), fun(Ty::List(Box::new(a)), pure(b))),
+                    fun(b.clone(), fun(Ty::list(a), pure(b))),
                 )),
             ),
         )
     }
 
-    /// `sort-list :: ∀α:comparable. [α] → F [α]`
-    pub(crate) fn sort_list(u: &mut Unifier) -> Scheme {
-        let av = u.fresh_tyvar();
-        let a = Ty::Var(av);
-        mk_scheme(
-            &[(av, Kind::COMPARABLE)],
-            &[],
-            thunk(fun(
-                Ty::List(Box::new(a.clone())),
-                pure(Ty::List(Box::new(a))),
-            )),
-        )
-    }
-
-    /// `sort-list-by :: ∀α β:comparable. U(α → F β) → [α] → F [α]`
-    pub(crate) fn sort_list_by(u: &mut Unifier) -> Scheme {
-        let (av, bv) = (u.fresh_tyvar(), u.fresh_tyvar());
-        let (a, b) = (Ty::Var(av), Ty::Var(bv));
-        mk_scheme(
-            &[(av, Kind::ANY), (bv, Kind::COMPARABLE)],
-            &[],
-            thunk(fun(
-                thunk(fun(a.clone(), pure(b))),
-                fun(Ty::List(Box::new(a.clone())), pure(Ty::List(Box::new(a)))),
-            )),
-        )
-    }
+    // sort-list-by :: ∀α β:comparable. U(α → F β) → [α] → F [α]
+    scheme!(sort_list_by<av: Kind::ANY, bv: Kind::COMPARABLE>: [
+        thunk(fun(Ty::Var(av), pure(Ty::Var(bv)))),
+        Ty::list(Ty::Var(av))
+    ] -> Ty::list(Ty::Var(av)));
 
     // ── Strings & paths ──────────────────────────────────────────────────
 
     scheme!(str_to_str: [Ty::String] -> Ty::String);
 
-    scheme!(str_to_strs: [Ty::String] -> Ty::List(Box::new(Ty::String)));
+    scheme!(str_to_strs: [Ty::String] -> Ty::list(Ty::String));
 
     scheme!(re_match: [Ty::String, Ty::String] -> Ty::Bool);
 
     scheme!(re_find_match: [Ty::String, Ty::String] -> Ty::String);
 
-    scheme!(re_split: [Ty::String, Ty::String] -> Ty::List(Box::new(Ty::String)));
+    scheme!(re_split: [Ty::String, Ty::String] -> Ty::list(Ty::String));
 
     scheme!(replace_3: [Ty::String, Ty::String, Ty::String] -> Ty::String);
 
     scheme!(slice: [Ty::String, Ty::Int, Ty::Int] -> Ty::String);
 
-    /// `intercalate :: ∀α. Str → [α] → F Str`
-    pub(crate) fn intercalate(u: &mut Unifier) -> Scheme {
-        let av = u.fresh_tyvar();
-        mk_plain_scheme(
-            &[av],
-            &[],
-            thunk(fun(
-                Ty::String,
-                fun(Ty::List(Box::new(Ty::Var(av))), pure(Ty::String)),
-            )),
-        )
-    }
+    // intercalate :: ∀α. Str → [α] → F Str
+    scheme!(intercalate<av: Kind::ANY>: [Ty::String, Ty::list(Ty::Var(av))] -> Ty::String);
 
     // ── File system & paths ──────────────────────────────────────────────
 
-    /// `list-dir :: Str → F [{name, type, size, mtime}]`
-    pub(crate) fn list_dir(_u: &mut Unifier) -> Scheme {
-        mk_plain_scheme(
-            &[],
-            &[],
-            thunk(fun(
-                Ty::String,
-                pure(Ty::List(Box::new(fs_list_entry_ty()))),
-            )),
-        )
-    }
+    // list-dir :: Str → F [{name, type, size, mtime}]
+    scheme!(list_dir: [Ty::String] -> Ty::list(DirEntry::ty()));
 
-    /// `file-info :: Str → F {…full stat…}`
-    pub(crate) fn file_info(_u: &mut Unifier) -> Scheme {
-        mk_plain_scheme(&[], &[], thunk(fun(Ty::String, pure(fs_file_info_ty()))))
-    }
+    // file-info :: Str → F {…full stat…}
+    scheme!(file_info: [Ty::String] -> FileInfo::ty());
 
     scheme!(temp_path: pure Ty::String);
 
-    scheme!(glob: [Ty::String] -> Ty::List(Box::new(Ty::String)));
-
-    scheme!(is_empty<av: Kind::SIZED>: [Ty::Var(av)] -> Ty::Bool);
+    scheme!(glob: [Ty::String] -> Ty::list(Ty::String));
 
     // ── Streaming reducers ───────────────────────────────────────────────
 
@@ -707,7 +583,7 @@ pub mod scheme {
             &[av],
             &[],
             thunk(fun(
-                Ty::List(Box::new(Ty::Handle(Box::new(a.clone())))),
+                Ty::list(Ty::Handle(Box::new(a.clone()))),
                 pure(await_record(a)),
             )),
         )
@@ -741,10 +617,7 @@ pub mod scheme {
     /// `detach :: [Str] → F [pid: Int, desc: Str]` — the receipt of a process this
     /// session stops owning.
     pub fn detach(_u: &mut Unifier) -> Scheme {
-        base_frame(
-            &[],
-            pure(closed_record(&[("pid", Ty::Int), ("desc", Ty::String)])),
-        )
+        base_frame(&[], pure(Receipt::ty()))
     }
 
     // ── First-class constants / queries ──────────────────────────────────
@@ -753,9 +626,9 @@ pub mod scheme {
 
     scheme!(pure_int: pure Ty::Int);
 
-    scheme!(pure_strs: pure Ty::List(Box::new(Ty::String)));
+    scheme!(pure_strs: pure Ty::list(Ty::String));
 
-    scheme!(pure_string_map: pure Ty::Map(Box::new(Ty::String)));
+    scheme!(pure_string_map: pure Ty::map(Ty::String));
 
     scheme!(pure_bool: pure Ty::Bool);
 
@@ -782,11 +655,11 @@ pub mod scheme {
     scheme!(help: writes);
     scheme!(explain: [Ty::String] -> writes);
     scheme!(to_bytes: [Ty::Bytes] -> writes);
-    scheme!(ints_to_bytes: [Ty::List(Box::new(Ty::Int))] -> writes);
+    scheme!(ints_to_bytes: [Ty::list(Ty::Int)] -> writes);
     scheme!(to_any_bytes<av: Kind::DATA>: [Ty::Var(av)] -> writes);
     scheme!(to_line<av: Kind::DATA>: [Ty::Var(av)] -> writes);
-    scheme!(to_lines<av: Kind::DATA>: [Ty::List(Box::new(Ty::Var(av)))] -> writes);
-    scheme!(to_csv: [Ty::List(Box::new(Ty::Map(Box::new(Ty::String))))] -> writes);
+    scheme!(to_lines<av: Kind::DATA>: [Ty::list(Ty::Var(av))] -> writes);
+    scheme!(to_csv: [Ty::list(Ty::Map(Box::new(Ty::String)))] -> writes);
 
     // ── Decoders ─────────────────────────────────────────────────────────
     //
@@ -794,8 +667,8 @@ pub mod scheme {
 
     scheme!(from_bytes: pure Ty::Bytes);
     scheme!(from_string: pure Ty::String);
-    scheme!(from_lines: pure Ty::List(Box::new(Ty::String)));
-    scheme!(from_csv: pure Ty::List(Box::new(Ty::Map(Box::new(Ty::String)))));
+    scheme!(from_lines: pure Ty::list(Ty::String));
+    scheme!(from_csv: pure Ty::list(Ty::Map(Box::new(Ty::String))));
 
     /// `from-json` :: ∀α. F α — decode whatever the channel holds.
     pub fn from_json(u: &mut Unifier) -> Scheme {
@@ -807,20 +680,20 @@ pub mod scheme {
     /// holds.
     pub fn from_json_at(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
-        let tokens = Ty::List(Box::new(Ty::String));
+        let tokens = Ty::list(Ty::String);
         mk_plain_scheme(&[av], &[], thunk(fun(tokens, pure(Ty::Var(av)))))
     }
 
     /// `from-jsonl` :: ∀α. F [α] — a list of whatever each line holds.
     pub fn from_jsonl(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
-        let records = Ty::List(Box::new(Ty::Var(av)));
+        let records = Ty::list(Ty::Var(av));
         mk_plain_scheme(&[av], &[], thunk(pure(records)))
     }
 
     // ── Range, paths, parsing ────────────────────────────────────────────
 
-    scheme!(range: [Ty::Int, Ty::Int] -> Ty::List(Box::new(Ty::Int)));
+    scheme!(range: [Ty::Int, Ty::Int] -> Ty::list(Ty::Int));
     scheme!(chdir: [Ty::String] -> Ty::Unit);
     scheme!(path_bool: [Ty::String] -> Ty::Bool);
     scheme!(int_parse<av: Kind::COMPARABLE>: [Ty::Var(av)] -> Ty::Int);
@@ -896,9 +769,9 @@ pub mod scheme {
 /// What `help` and `explain` print: a base frame's argv type is worth printing
 /// even though no `$name` can hold it.  `None` only for a name the manifest
 /// does not carry.
-pub fn builtin_type_hint(table: &BuiltinTable, name: &str) -> Option<String> {
+pub fn builtin_type_hint(manifest: &Manifest, name: &str) -> Option<String> {
     let mut u = Unifier::new();
-    Some(fmt_scheme(&(table.get(name)?.type_rule)(&mut u)))
+    Some((manifest.get(name)?.type_rule)(&mut u).to_string())
 }
 
 /// Detect the literal `fail [status: 0, …]` shape, so the nonzero-status rule
@@ -907,7 +780,7 @@ pub fn builtin_type_hint(table: &BuiltinTable, name: &str) -> Option<String> {
 ///
 /// Computed statuses and spreads still defer to the runtime.
 pub(crate) fn fail_status_is_zero_literal(args: &crate::ir::Args) -> bool {
-    let Some(positional) = crate::ir::args::positional(args) else {
+    let Some(positional) = args.positional() else {
         return false;
     };
     matches!(
@@ -928,12 +801,12 @@ mod tests {
     /// form.
     #[test]
     fn no_builtin_doc_reads_as_optional() {
-        let table = crate::builtins::core_builtin_table();
-        for name in table.names() {
+        let manifest = crate::HostSurface::default().manifest();
+        for name in manifest.names() {
             if name == "exit" || name == "quit" {
                 continue;
             }
-            let entry = table.get(name).unwrap();
+            let entry = manifest.get(name).unwrap();
             let synopsis = entry.doc.split('—').next().unwrap_or(entry.doc);
             let optional_looking = synopsis.split('[').skip(1).any(|rest| {
                 let bracketed = rest.split(']').next().unwrap_or(rest);

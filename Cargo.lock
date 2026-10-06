@@ -78,19 +78,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ansi-to-tui"
-version = "8.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e42366bb9d958f042bf58f0a85e1b2d091997c1257ca49bddd7e4827aadc65fd"
-dependencies = [
- "nom 8.0.0",
- "ratatui-core",
- "simdutf8",
- "smallvec",
- "thiserror 2.0.21",
-]
-
-[[package]]
 name = "ansi-width"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5777,13 +5764,10 @@ dependencies = [
 name = "ral"
 version = "0.8.0"
 dependencies = [
- "ansi-to-tui",
  "base64 0.22.1",
  "clap",
  "libc",
- "prompt-editor",
  "ral-core",
- "ratatui",
  "regex",
  "rustix",
  "rustyline",
@@ -5804,6 +5788,7 @@ dependencies = [
  "ctor",
  "ctrlc",
  "diffutils",
+ "either",
  "fastrand",
  "glob",
  "icu_casemap",
@@ -5830,6 +5815,7 @@ dependencies = [
  "sha2 0.11.0",
  "shlex",
  "strsim",
+ "strum",
  "tempfile",
  "uu_base64",
  "uu_basename",

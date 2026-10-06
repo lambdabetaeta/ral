@@ -7,7 +7,6 @@
 //! fixed system path, never a per-user one, and evaluated under the same
 //! no-authority grant as [`crate::config::load`].
 
-use ral_core::Shell;
 use ral_core::types::Value;
 
 /// A system path, deliberately: the sandboxed guest writes only cwd and scratch.
@@ -128,7 +127,8 @@ pub fn load() -> Result<NetPolicy, String> {
         ),
     };
     let source = ral_core::source::normalize_source_text(source);
-    let mut shell = Shell::new(ral_core::io::TerminalState::default());
+    let mut shell =
+        ral_core::HostSurface::default().shell(ral_core::terminal::TerminalState::default());
     decode(
         crate::config::evaluate_no_authority(&mut shell, &source, &display, LABEL)?,
         &display,
@@ -150,25 +150,25 @@ fn decode(value: Value, display: &str) -> Result<NetPolicy, String> {
             "hosts" | "search" => {}
             "read" | "write" => {
                 return Err(format!(
-                    "network policy {display}: '{key}' is retired — name every admitted host \
+                    "network policy {display}: '{key}' is retired; name every admitted host \
                      in 'hosts'; this gate no longer judges HTTP methods"
                 ));
             }
             "max-bytes" => {
                 return Err(format!(
-                    "network policy {display}: 'max-bytes' is retired — this gate no longer \
+                    "network policy {display}: 'max-bytes' is retired; this gate no longer \
                      bounds response size"
                 ));
             }
             "rate-per-minute" => {
                 return Err(format!(
-                    "network policy {display}: 'rate-per-minute' is retired — this gate no \
+                    "network policy {display}: 'rate-per-minute' is retired; this gate no \
                      longer meters requests"
                 ));
             }
             _ => {
                 return Err(format!(
-                    "network policy {display}: unknown key '{key}' — expected hosts, search"
+                    "network policy {display}: unknown key '{key}'; expected hosts, search"
                 ));
             }
         }
@@ -217,7 +217,7 @@ fn decode(value: Value, display: &str) -> Result<NetPolicy, String> {
 #[must_use]
 pub fn refusal(host: &str) -> String {
     format!(
-        "'{host}' is not on the list of sites this assistant is allowed to reach — \
+        "'{host}' is not on the list of sites this assistant is allowed to reach: \
          ask whoever administers this computer to add it if you need this site"
     )
 }
@@ -228,7 +228,7 @@ mod tests {
 
     /// Evaluate and decode a policy the way [`load`] does; `config.rs` mirrors this.
     fn parse(source: &str) -> Result<NetPolicy, String> {
-        let mut shell = Shell::new(ral_core::io::TerminalState::default());
+        let mut shell = ral_core::test_helper::core_shell();
         let source = ral_core::source::normalize_source_text(source.to_string());
         decode(
             crate::config::evaluate_no_authority(&mut shell, &source, "<test:net-policy>", LABEL)?,

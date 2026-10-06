@@ -14,7 +14,7 @@
 //! emitted dependencies-first, which can lift a `let` ahead of its source
 //! position.
 
-use crate::source::Span;
+use crate::source::Spanned;
 use crate::syntax::ast::{Ast, Stmt};
 use std::collections::{HashMap, HashSet};
 
@@ -22,17 +22,24 @@ use std::collections::{HashMap, HashSet};
 pub(crate) enum StmtGroup {
     /// Every non-recursive `let`, and every non-binding statement.
     Single(Stmt),
-    /// A recursive knot, emitted as `CompKind::Rec`.  Each member carries
-    /// its own RHS span so the elaborator stamps them individually.
-    LetRec(Vec<(String, Box<Ast>, Option<Span>)>),
+    /// A recursive knot, emitted as `CompKind::Rec`.
+    LetRec(Vec<RecMember>),
 }
+
+/// One `let name = rhs` of a knot, both halves keeping their spans.
+pub(crate) struct RecMember {
+    pub name: Spanned<String>,
+    pub value: Spanned<Box<Ast>>,
+}
+
+/// A thunk-shaped `let name = rhs` at statement index `.0`.
+type Def<'a> = (usize, Spanned<&'a str>, &'a Spanned<Box<Ast>>);
 
 /// Partition `stmts` into [`StmtGroup`]s, dependencies before their dependents
 /// regardless of source order.
 pub(crate) fn group_stmts(stmts: &[Stmt]) -> Vec<StmtGroup> {
-    // def_list[i] = (stmt_idx, name, rhs, rhs_span); defs[name] = the def_list
-    // indices defining it, in stmt_idx order.
-    let mut def_list: Vec<(usize, &str, &Ast, Option<Span>)> = Vec::new();
+    // defs[name] = the def_list indices defining it, in stmt_idx order.
+    let mut def_list: Vec<Def> = Vec::new();
     let mut defs: HashMap<&str, Vec<usize>> = HashMap::new();
 
     for (stmt_idx, stmt) in stmts.iter().enumerate() {
@@ -40,8 +47,8 @@ pub(crate) fn group_stmts(stmts: &[Stmt]) -> Vec<StmtGroup> {
             && value.item.is_thunk_form()
         {
             let di = def_list.len();
-            def_list.push((stmt_idx, name, value.item.as_ref(), value.span));
-            defs.entry(name).or_default().push(di);
+            defs.entry(name.item).or_default().push(di);
+            def_list.push((stmt_idx, name, value));
         }
     }
 
@@ -57,8 +64,8 @@ pub(crate) fn group_stmts(stmts: &[Stmt]) -> Vec<StmtGroup> {
     // binding still belongs in the same SCC.
     let n = def_list.len();
     let mut adj: Vec<Vec<usize>> = vec![vec![]; n];
-    for (i, &(stmt_i, _, value, _)) in def_list.iter().enumerate() {
-        for name_ref in value.free_refs(&candidate_names) {
+    for (i, &(stmt_i, _, value)) in def_list.iter().enumerate() {
+        for name_ref in value.item.free_refs(&candidate_names) {
             if let Some(def_indices) = defs.get(name_ref.as_str()) {
                 let j = resolve_ref(stmt_i, def_indices, &def_list);
                 if !adj[i].contains(&j) {
@@ -188,7 +195,7 @@ fn emit_scc(
     cid: usize,
     scc_members: &[Vec<usize>],
     adj: &[Vec<usize>],
-    def_list: &[(usize, &str, &Ast, Option<Span>)],
+    def_list: &[Def],
     stmts: &[Stmt],
     out: &mut Vec<StmtGroup>,
 ) {
@@ -198,8 +205,11 @@ fn emit_scc(
         let bindings = members
             .iter()
             .map(|&di| {
-                let (_, name, value, span) = def_list[di];
-                (name.to_string(), Box::new(value.clone()), span)
+                let (_, name, value) = &def_list[di];
+                RecMember {
+                    name: Spanned::with_span(name.span, name.item.to_string()),
+                    value: (*value).clone(),
+                }
             })
             .collect();
         out.push(StmtGroup::LetRec(bindings));
@@ -213,11 +223,7 @@ fn emit_scc(
 
 /// Which of a name's definitions a use at `use_stmt_idx` sees: the nearest
 /// preceding one, or the first if every definition follows the use.
-fn resolve_ref(
-    use_stmt_idx: usize,
-    def_indices: &[usize],
-    def_list: &[(usize, &str, &Ast, Option<Span>)],
-) -> usize {
+fn resolve_ref(use_stmt_idx: usize, def_indices: &[usize], def_list: &[Def]) -> usize {
     // `def_indices` ascends by stmt_idx, so the last match is the nearest.
     let mut best = def_indices[0];
     for &di in def_indices {
@@ -311,7 +317,7 @@ fn strongconnect(v: usize, adj: &[Vec<usize>], st: &mut TarjanState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::syntax::ast::Pattern;
+    use crate::ir::Pattern;
     use crate::syntax::parser::parse;
     use std::fmt::Write;
 
@@ -331,7 +337,7 @@ mod tests {
                 },
                 StmtGroup::LetRec(bindings) => {
                     let mut names: Vec<&str> =
-                        bindings.iter().map(|(n, _, _)| n.as_str()).collect();
+                        bindings.iter().map(|m| m.name.item.as_str()).collect();
                     names.sort_unstable();
                     format!("rec [{}]", names.join(", "))
                 }

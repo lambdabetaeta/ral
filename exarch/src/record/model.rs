@@ -478,8 +478,8 @@ fn message_role(message: &ChatMessage) -> Role {
 
 fn not_recorded_refusal_turn(turn: u64, reach: Option<u64>) -> String {
     match reach {
-        Some(reach) => format!("turn {turn} is not recorded — the latest is {reach}"),
-        None => format!("turn {turn} is not recorded — nothing has been recorded yet"),
+        Some(reach) => format!("turn {turn} is not recorded: the latest is {reach}"),
+        None => format!("turn {turn} is not recorded: nothing has been recorded yet"),
     }
 }
 
@@ -797,7 +797,7 @@ mod tests {
         assert_eq!(
             context.resolve_cut(&[30]).unwrap_err(),
             "turn 30 is the prompt whose turns 31–32 are still in your context, and a prompt \
-             stays with them — name them too, or leave it"
+             stays with them: name them too, or leave it"
         );
         assert_eq!(
             context.resolve_cut(&[]).unwrap_err(),
@@ -818,16 +818,16 @@ mod tests {
         context.state = State::AwaitingAssistantAfterUser;
         assert_eq!(
             context.resolve_cut(&[2]).unwrap_err(),
-            "turn 2 is being written now — an eviction keeps the work in hand"
+            "turn 2 is being written now: an eviction keeps the work in hand"
         );
         assert_eq!(
             context.resolve_cut(&[9]).unwrap_err(),
-            "turn 9 is not recorded — the latest is 2"
+            "turn 9 is not recorded: the latest is 2"
         );
         assert_eq!(
             context.resolve_cut(&[1]).unwrap_err(),
             "turn 1 is the prompt whose turn 2 is still in your context, and a prompt stays with \
-             it — name it too, or leave it",
+             it: name it too, or leave it",
             "the prompt stays with the unclosed turn, which the set may not name"
         );
     }
@@ -1012,11 +1012,11 @@ mod tests {
         assert_eq!(context.rendered().len(), 1, "the marker stands alone");
         assert_eq!(
             context.suffix_from(1).unwrap_err(),
-            "turn 1 has already left your context — no turn is still in it"
+            "turn 1 has already left your context: no turn is still in it"
         );
         assert_eq!(
             context.suffix_from(9).unwrap_err(),
-            "turn 9 is not recorded — the latest is 3"
+            "turn 9 is not recorded: the latest is 3"
         );
     }
 

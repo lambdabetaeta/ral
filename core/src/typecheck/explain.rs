@@ -3,15 +3,17 @@
 //! written here and nowhere else.
 
 use super::contract::unknown_key_message;
-use super::error::{CycleVia, KindFound, Reason, SpreadHead, Standing, TypeErrorKind, UnitCall};
-use super::fmt::{FmtCtx, fmt_comp_ty_ctx, fmt_ty_ctx};
-use super::kind::Kind;
-use super::ty::{CompTy, Grade, Label, Row, Ty};
+use super::error::{
+    CycleVia, KindFound, Reason, SpreadHead, Standing, TypeError, TypeErrorKind, UnitCall,
+};
 use super::unify::WeakSource;
-use crate::serial::plural;
+use crate::diagnostic::{self, Report};
+use crate::ir::{ArithOp, BinaryOp};
 use crate::source::Span;
-use crate::syntax::ast::{ArithOp, BinaryOpKind};
-use crate::types::RefusedArg;
+use crate::text::plural;
+use crate::ty::{
+    CompTy, FmtCtx, Grade, Kind, Label, RefusedArg, Row, Ty, fmt_comp_ty_ctx, fmt_ty_ctx,
+};
 
 impl TypeErrorKind {
     /// The headline sentence for this error.
@@ -21,11 +23,11 @@ impl TypeErrorKind {
     pub fn render_message(&self) -> String {
         match self {
             Self::RecursiveRow => {
-                "infinite row — a record's field list would refer back to itself".into()
+                "infinite row: a record's field list would refer back to itself".into()
             }
             Self::TypeTooDeep => "type nesting exceeds the supported depth".into(),
             Self::CyclicType { via } => format!(
-                "this makes a type that contains itself without going through any data — \
+                "this makes a type that contains itself without going through any data: \
                  here a function {}",
                 match via {
                     CycleVia::Applied => "is applied to itself",
@@ -128,7 +130,7 @@ impl TypeErrorKind {
                 plural(*expected, "argument")
             ),
             Self::DecoderTakesNoArgument { name } => {
-                format!("`{name}` takes no argument — it reads the byte channel")
+                format!("`{name}` takes no argument: it reads the byte channel")
             }
             Self::DecoderMidPipeline { name, next } => format!(
                 "a decoder ends the byte pipeline: `{name}` returns a value and writes \
@@ -144,7 +146,7 @@ impl TypeErrorKind {
                     SpreadHead::Applied => "this head takes its arguments".into(),
                 };
                 format!(
-                    "{takes} by application, and `...` spreads an argv — \
+                    "{takes} by application, and `...` spreads an argv: \
                      which only a command, an external, or a handler has"
                 )
             }
@@ -167,7 +169,7 @@ impl TypeErrorKind {
             Self::MalformedAlias { .. } => "malformed alias definition".into(),
             Self::MalformedUnalias { .. } => "malformed unalias".into(),
             Self::IndexIntoThunk => {
-                "this is a block — you can't read a field from it directly".into()
+                "this is a block: you can't read a field from it directly".into()
             }
             Self::FieldOnNonRecord { label, ty } => {
                 let ctx = FmtCtx::for_value_types(&[ty]);
@@ -366,24 +368,20 @@ fn kind_hint(found: &KindFound, required: Kind, reason: Option<&Reason>) -> Opti
         ));
     }
     let lead = match reason {
-        Some(Reason::BinaryOperands(BinaryOpKind::Arith(ArithOp::Mod))) => Some("`%` takes Ints"),
-        Some(Reason::BinaryOperands(BinaryOpKind::Arith(_))) => {
+        Some(Reason::BinaryOperands(BinaryOp::Arith(ArithOp::Mod))) => Some("`%` takes Ints"),
+        Some(Reason::BinaryOperands(BinaryOp::Arith(_))) => {
             Some("`+ - * /` work on numbers (Int or Float)")
         }
         Some(Reason::Negation) => Some("`-` negates a number (Int or Float)"),
-        Some(Reason::BinaryOperands(BinaryOpKind::Compare(_))) => {
-            Some("`<` compares numbers or text")
-        }
-        Some(Reason::BinaryOperands(BinaryOpKind::Eq(_))) => Some("`==` compares data"),
+        Some(Reason::BinaryOperands(BinaryOp::Compare(_))) => Some("`<` compares numbers or text"),
+        Some(Reason::BinaryOperands(BinaryOp::Eq(_))) => Some("`==` compares data"),
         Some(Reason::Interpolation) => {
             Some("only text, numbers and `true`/`false` go into a string")
         }
         _ => None,
     };
     let way = match (reason, &**ty) {
-        (Some(Reason::BinaryOperands(BinaryOpKind::Arith(op))), Ty::String)
-            if *op != ArithOp::Mod =>
-        {
+        (Some(Reason::BinaryOperands(BinaryOp::Arith(op))), Ty::String) if *op != ArithOp::Mod => {
             Some("to join text, interpolate: `\"$a$b\"`")
         }
         (_, Ty::List(_) | Ty::Record(_) | Ty::Map(_)) if required == Kind::COMPARABLE => {
@@ -402,10 +400,10 @@ fn kind_hint(found: &KindFound, required: Kind, reason: Option<&Reason>) -> Opti
             Some("decode it with `from-string`, or render it with `str`")
         }
         (_, Ty::Thunk(_)) if required == Kind::DATA => {
-            Some("a block has no equality and no encoding — use what it computes, `!$f`")
+            Some("a block has no equality and no encoding: use what it computes, `!$f`")
         }
         (_, Ty::Handle(_)) if required == Kind::DATA => {
-            Some("a handle has no equality and no encoding — use what `await` gives")
+            Some("a handle has no equality and no encoding: use what `await` gives")
         }
         _ => None,
     };
@@ -438,7 +436,7 @@ fn fmt_comp_mismatch(expected: &CompTy, actual: &CompTy) -> String {
             )
         }
         _ => {
-            "two computations have incompatible shapes — one is a function, the other is not".into()
+            "two computations have incompatible shapes: one is a function, the other is not".into()
         }
     }
 }
@@ -486,11 +484,11 @@ fn grade_hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
     Some(match (form, command_found, value) {
         (Some(form), _, _) => format!(
             "one {form} is a command, whose value is its output (a String); the other gives \
-             {} — give the command {form} a value of that type too (`… | from-json`, or \
+             {}; give the command {form} a value of that type too (`… | from-json`, or \
              `return` one), or write the other {form}'s value out with `echo`",
             describe(value)
         ),
-        (None, true, Ty::Bool) => "this is a command, so its value is its output — text, not \
+        (None, true, Ty::Bool) => "this is a command, so its value is its output: text, not \
              a Bool; for a yes/no answer, `succeeds { … }`"
             .to_string(),
         (None, true, _) => format!(
@@ -499,7 +497,7 @@ fn grade_hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
             describe(value)
         ),
         (None, false, _) => format!(
-            "a command is wanted here, and this returns {} — write it out: `echo …`, \
+            "a command is wanted here, and this returns {}: write it out: `echo …`, \
              `to-json …`",
             describe(value)
         ),
@@ -511,7 +509,7 @@ fn grade_hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
 fn arm_join_hint(form: &str) -> String {
     format!(
         "exactly one {form} happens, so there is a single type that every {form} must \
-         produce — convert the odd one to that type, or have every one return a tagged \
+         produce: convert the odd one to that type, or have every one return a tagged \
          value and `case` on it downstream"
     )
 }
@@ -541,16 +539,16 @@ fn stands_in_hint(standing: &Standing, kind: &TypeErrorKind) -> String {
     match standing {
         Standing::Command(head) => format!(
             "an arm for `{head}` stands in for a command, so its value is its output; \
-             this one returns {returned} — write it, `echo …`"
+             this one returns {returned}: write it, `echo …`"
         ),
         Standing::Own(head) => format!(
             "an arm for `{head}` stands in for the `{head}` in force, so it produces what \
-             that produces — {}; this one returns {returned}",
+             that produces: {}; this one returns {returned}",
             describe_producer(expected)
         ),
         Standing::EveryCommand => format!(
             "the catch-all `handler:` stands in for every command in this block, so its \
-             value is its output; this one returns {returned} — write it, `echo …`, or \
+             value is its output; this one returns {returned}: write it, `echo …`, or \
              handle specific names with `handlers: [name: …]`"
         ),
     }
@@ -559,7 +557,7 @@ fn stands_in_hint(standing: &Standing, kind: &TypeErrorKind) -> String {
 /// The hint for a non-final pipeline stage that returns instead of writing.
 fn stage_writes_hint(stage: Option<&str>, next: Option<&str>, kind: &TypeErrorKind) -> String {
     let Some(stage) = stage else {
-        return "a value in stage position writes nothing to the pipe — a stage feeds the \
+        return "a value in stage position writes nothing to the pipe: a stage feeds the \
                 next by writing, so write it with `echo`, or put a command here"
             .to_string();
     };
@@ -575,7 +573,7 @@ fn stage_writes_hint(stage: Option<&str>, next: Option<&str>, kind: &TypeErrorKi
     );
     let reaches = next.map_or_else(|| "the next stage".to_string(), |next| format!("`{next}`"));
     format!(
-        "a stage feeds the next by writing, and `{stage}` returns {returned} instead — \
+        "a stage feeds the next by writing, and `{stage}` returns {returned} instead: \
          nothing reaches {reaches}. Did you mean `echo !{{{stage} …}} | {}`, or to bind it, \
          `let x = {stage} …`?",
         next.unwrap_or("…")
@@ -619,6 +617,28 @@ fn weak_note(source: &WeakSource) -> String {
              whole unit, and so does data of a shape the program did not decide. Write one \
              function per container type, or decode once and bind the result"
         ),
+    }
+}
+
+impl TypeError {
+    /// Spanless when `pos` is `None`; the secondary label is dropped when the
+    /// witness lies in another file.
+    pub fn report(&self) -> Report {
+        let at = |span, text| diagnostic::Label {
+            span: Some(span),
+            text,
+        };
+        Report {
+            code: Some(self.kind.code()),
+            message: self.kind.render_message(),
+            at: self.pos.map(|sp| at(sp, self.kind.render_label())),
+            also: self
+                .pos
+                .zip(self.kind.witness(self.pos))
+                .filter(|(sp, (w, _))| w.file == sp.file)
+                .map(|(_, (w, text))| at(w, text)),
+            hint: self.hint(),
+        }
     }
 }
 
@@ -679,7 +699,7 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
     let from_kind = match kind {
         TypeErrorKind::CommandNotFunction { .. } => Some(
             "a command head must be a function or a thunk; \
-             a value here is data, not something you can invoke — pass it \
+             a value here is data, not something you can invoke: pass it \
              as an argument, or wrap it in a function instead"
                 .to_string(),
         ),
@@ -691,7 +711,7 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
         TypeErrorKind::RefusedKey { advice, .. } => Some((*advice).to_string()),
         // `handlers:` is the parser's, so `offered` cannot name it.
         TypeErrorKind::UnknownKey { form: "within", .. } => Some(
-            "`within` also takes `handlers:`, written as a list of arms — \
+            "`within` also takes `handlers:`, written as a list of arms: \
              `within [handlers: [deploy: { |args| … }]] { … }`"
                 .to_string(),
         ),
@@ -746,7 +766,7 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
                 .to_string(),
         ),
         TypeErrorKind::DecoderMidPipeline { name, .. } => Some(format!(
-            "bind the value first — `let v = … | {name}` — and work on `$v`, or drop the \
+            "bind the value first (`let v = … | {name}`) and work on `$v`, or drop the \
              decoder to keep the bytes flowing"
         )),
         // Phrased as the runtime phrases its own missing-key hint, so a reader
@@ -754,7 +774,7 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
         TypeErrorKind::RowExtraField { known, .. }
             if !known.is_empty() && !matches!(reason, Some(Reason::RecordUpdate { .. })) => {
             Some(format!(
-                "available: {} — did you mean one of those?",
+                "available: {}; did you mean one of those?",
                 known.join(", ")
             ))
         }
@@ -789,7 +809,7 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
         )),
         TypeErrorKind::DynamicIndexOnScalar { .. } => Some(
             "only lists (key: Integer) and maps (key: String) \
-             accept a key computed at runtime — for a record \
+             accept a key computed at runtime: for a record \
              field, use a static name like $r[fieldname]"
                 .to_string(),
         ),
@@ -825,28 +845,28 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
 
     match reason? {
         Reason::ListPattern => Some(
-            "the pattern `[a, b, ...]` only destructures a list — \
+            "the pattern `[a, b, ...]` only destructures a list: \
              the value being bound has to be a list of the same shape"
                 .to_string(),
         ),
         Reason::RecordPattern => Some(
             "the pattern `[key: name, ...]` only destructures a \
-             record — the value being bound has to be a record \
+             record: the value being bound has to be a record \
              with at least the named fields"
                 .to_string(),
         ),
         Reason::Argument => Some(
             "the function's parameter type and the argument's type \
-             must agree — check what the function expects and what \
+             must agree: check what the function expects and what \
              you're passing in"
                 .to_string(),
         ),
         Reason::NotOperand => Some(
-            "`not` flips a Bool — its operand has to be a Bool (`true` / `false` or a comparison)"
+            "`not` flips a Bool: its operand has to be a Bool (`true` / `false` or a comparison)"
                 .to_string(),
         ),
         Reason::MapKey => {
-            Some("map keys must be Strings — quote a bare token or convert with `str`".to_string())
+            Some("map keys must be Strings: quote a bare token or convert with `str`".to_string())
         }
         Reason::ListSpread => list_spread_shape_hint(kind).or_else(|| {
             Some(
@@ -867,19 +887,19 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
         ),
         Reason::CaseArmHandler => Some(
             "an arm that names its handler runs that handler on the payload, \
-             so the name must stand for a function of one argument — to hand \
+             so the name must stand for a function of one argument: to hand \
              a value back instead, write the arm out, as in \
              `ok: { |_| return 5 }"
                 .to_string(),
         ),
         Reason::CaseArms => Some(arm_join_hint("arm")),
         Reason::ForceOperand => Some(
-            "the `!` operator runs a block — its operand must be a \
+            "the `!` operator runs a block: its operand must be a \
              block value (something built with `{ ... }`), not data"
                 .to_string(),
         ),
         Reason::IfCond => Some(
-            "the condition of an `if` must be a Bool — either `true`/`false` \
+            "the condition of an `if` must be a Bool: either `true`/`false` \
              or an expression that produces one (e.g. `$[$x == 1]`)"
                 .to_string(),
         ),
@@ -891,16 +911,14 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
         }
         Reason::BinaryOperands(op) => Some(
             match op {
-                BinaryOpKind::Arith(ArithOp::Mod) => {
-                    "`%` takes Ints — a float has no remainder here"
-                }
-                BinaryOpKind::Arith(_) => {
+                BinaryOp::Arith(ArithOp::Mod) => "`%` takes Ints: a float has no remainder here",
+                BinaryOp::Arith(_) => {
                     "the two sides of a `+` / `-` / `*` / `/` must have the same numeric type"
                 }
-                BinaryOpKind::Compare(_) => {
+                BinaryOp::Compare(_) => {
                     "you can only compare two values of the same type with `<` / `>` / `<=` / `>=`"
                 }
-                BinaryOpKind::Eq(_) => {
+                BinaryOp::Eq(_) => {
                     "you can only check equality between two values of the same type"
                 }
             }
@@ -908,14 +926,14 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
         ),
         Reason::PipelineStageShape => Some(
             "a pipeline stage must be ready to run, not still waiting for an \
-             argument — apply it to its argument (`f $x`) rather than piping \
+             argument: apply it to its argument (`f $x`) rather than piping \
              into it, or read the incoming bytes with a decoder such as \
              `from-line` if it should consume the stream instead"
                 .to_string(),
         ),
         Reason::DiscardedValueShape => Some(
             "a discarded statement's value is thrown away, so it must be \
-             ready to run, not still waiting for an argument — apply it to \
+             ready to run, not still waiting for an argument: apply it to \
              what's left, or write `$name` if you meant to keep the function \
              itself"
                 .to_string(),
@@ -923,11 +941,11 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
         Reason::OptionField { form, key } => Some(format!("{form} {key}: wrong value type")),
         Reason::HandlerArm => Some(
             "an arm installed under a name stands in for that command, so it is a block \
-             the call runs — `[handlers: [deploy: { |args| … }]]`, or a name bound to one"
+             the call runs: `[handlers: [deploy: { |args| … }]]`, or a name bound to one"
                 .to_string(),
         ),
         Reason::ListElem => Some(
-            "a list is homogeneous — every element has the one type — so this \
+            "a list is homogeneous: every element has the one type, so this \
              element must be what its neighbours are; give it their shape, or make \
              every element a tagged value and `case` on it downstream"
                 .to_string(),
@@ -935,20 +953,20 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
         Reason::MapElem => Some(
             "a map has computed keys, so every value must have the one type; if the \
              values are genuinely different shapes, write the keys out as labels \
-             (`[a: 1, b: \"two\"]`) — that is a record, and a record's fields each \
+             (`[a: 1, b: \"two\"]`): that is a record, and a record's fields each \
              keep their own type"
                 .to_string(),
         ),
         Reason::RecordUpdate { base } => Some(record_update_hint(base.as_deref(), kind)),
         Reason::MapSpread => Some(
             "a `...x` spread inside a map literal (`[:, …]`) copies another map's \
-             entries into it, so the value after `...` must itself be a map — a \
+             entries into it, so the value after `...` must itself be a map: a \
              record's fields are reached by name, so spread it into a record literal \
              (`[...$r, …]`) instead"
                 .to_string(),
         ),
         Reason::ScopeBody => Some(
-            "`within`, `grant`, `try`, `guard` and `audit` each run a block — the body \
+            "`within`, `grant`, `try`, `guard` and `audit` each run a block: the body \
              has to be a block value (something built with `{ ... }`), not data"
                 .to_string(),
         ),
@@ -959,7 +977,7 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
         ),
         Reason::ReturnShape => Some(
             "this position needs a computation that is ready to run, and this one is \
-             still waiting for an argument — apply it to what's missing (`f $x`), or \
+             still waiting for an argument: apply it to what's missing (`f $x`), or \
              write `$name` if you meant to hand over the function itself"
                 .to_string(),
         ),
@@ -994,13 +1012,13 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
 fn record_update_hint(base: Option<&str>, kind: &TypeErrorKind) -> String {
     let TypeErrorKind::RowExtraField { label, known } = kind else {
         return "a `...x` spread inside a record literal updates another record's fields, \
-                so the value after `...` must itself be a record — a map's keys are data, \
+                so the value after `...` must itself be a record: a map's keys are data, \
                 not labels, so a map has no fields to update"
             .to_string();
     };
     let subject = base.map_or_else(|| "this record".to_string(), |b| format!("`${b}`"));
     let lead = format!(
-        "{subject} has no field `{label}` to update — a spread replaces fields its record already has"
+        "{subject} has no field `{label}` to update: a spread replaces fields its record already has"
     );
     if let [near] = crate::text::near_names(label, known.iter().map(String::as_str), 1)[..] {
         return format!("{lead} (did you mean `{near}`?)");
@@ -1020,7 +1038,7 @@ fn list_spread_shape_hint(kind: &TypeErrorKind) -> Option<String> {
         return None;
     };
     (matches!(**expected, Ty::Record(_)) || matches!(**actual, Ty::Record(_))).then(|| {
-        "this is a list literal, and `...` here copies list elements — a record \
+        "this is a list literal, and `...` here copies list elements: a record \
          merge is written as a record literal (`[...$a, port: 1]`), a map merge as a \
          map literal (`[:, ...a, ...b]`)"
             .to_string()
@@ -1051,7 +1069,7 @@ fn shape_hint(kind: &TypeErrorKind) -> Option<String> {
     if (is_record(expected) && is_map(actual)) || (is_map(expected) && is_record(actual)) {
         let open_record = [expected, actual]
             .into_iter()
-            .any(|t| matches!(&**t, Ty::Record(row) if row_is_open(row)));
+            .any(|t| matches!(&**t, Ty::Record(row) if row.is_open()));
         let block_clause = if open_record {
             "a bare label on a block's parameter reads a record field; to read a map's key \
              in a block, index it with a computed key, `$m[$k]`. "
@@ -1061,7 +1079,7 @@ fn shape_hint(kind: &TypeErrorKind) -> Option<String> {
         return Some(format!(
             "{block_clause}a record and a map are different types over the same pairs: a \
              record's fields are reached by name (`$r[a]`), while a map's keys are data. If \
-             these keys are data, write each literal as a map — `[:, a: 1, b: 2]`, \
+             these keys are data, write each literal as a map: `[:, a: 1, b: 2]`, \
              `[$k: v]`, and `[:]` for the empty one, there being no empty-record literal"
         ));
     }
@@ -1077,7 +1095,7 @@ fn shape_hint(kind: &TypeErrorKind) -> Option<String> {
     if is_variant(expected) != is_variant(actual) {
         return Some(
             "one of these is a tagged value (something built with a backtick, like \
-             `` `ok 1 ``) and the other is not — tag the plain one, or take the tagged \
+             `` `ok 1 ``) and the other is not: tag the plain one, or take the tagged \
              one apart with `case` first"
                 .to_string(),
         );
@@ -1087,39 +1105,20 @@ fn shape_hint(kind: &TypeErrorKind) -> Option<String> {
         return Some(
             "a failure is raised with an error record: at least \
              `[status: Int, message: String]` with a nonzero status, and any other \
-             fields you care to carry — `fail $e` re-raises a caught error as it stands"
+             fields you care to carry: `fail $e` re-raises a caught error as it stands"
                 .to_string(),
         );
     }
     byte_writer_hint(expected, actual)
 }
 
-/// Whether a row ends in a variable: a record a read by label left open, not a
-/// literal.
-fn row_is_open(row: &Row) -> bool {
-    match row {
-        Row::Extend(_, _, tail) => row_is_open(tail),
-        Row::Var(_) => true,
-        Row::Empty => false,
-    }
-}
-
 /// Whether a row carries `status: Int`.  An error carries the row as it stood
 /// when the constraint failed, and nothing re-applies it here, so a `Var` tail
 /// reads as absent.  That only ever withholds a hint, never asserts one.
 fn row_has_status_int(row: &Row) -> bool {
-    let mut rest = row;
-    loop {
-        match rest {
-            Row::Extend(label, ty, tail) => {
-                if *label == Label::Field("status".into()) {
-                    return **ty == Ty::Int;
-                }
-                rest = tail;
-            }
-            Row::Empty | Row::Var(_) => return false,
-        }
-    }
+    row.fields()
+        .find(|(label, _)| **label == Label::Field("status".into()))
+        .is_some_and(|(_, ty)| *ty == Ty::Int)
 }
 
 /// A list where `Bytes` was wanted, or the reverse.  Every byte-channel writer
@@ -1137,7 +1136,7 @@ fn byte_writer_hint(expected: &Ty, actual: &Ty) -> Option<String> {
 /// Why `$STATUS` names nothing; the runtime's undefined-variable error says
 /// the same.
 pub(crate) const NO_STATUS_REGISTER: &str = "there is no status register: a failure raises an \
-    error record that carries its own status — catch it with `try` and read \
+    error record that carries its own status: catch it with `try` and read \
     `$err[status]` from the handler's argument";
 
 /// What an unbound `$name` most likely meant, most specific first.
@@ -1168,7 +1167,7 @@ fn return_not_record_hint(form: &str, found: &Ty, offered: &[&str]) -> String {
     let key = offered.first().copied().unwrap_or("key");
     match found {
         Ty::Map(_) => format!(
-            "the keys of `{form}` are its labels, so write a record — `[{key}: …]`, \
+            "the keys of `{form}` are its labels, so write a record: `[{key}: …]`, \
              not `[:, {key}: …]`"
         ),
         Ty::List(_) => format!(
@@ -1183,7 +1182,7 @@ fn return_not_record_hint(form: &str, found: &Ty, offered: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::typecheck::ty::CompTy;
+    use crate::ty::CompTy;
 
     fn mismatch(expected: Ty, actual: Ty) -> TypeErrorKind {
         TypeErrorKind::TyMismatch {

@@ -17,7 +17,7 @@
 //! puts a disk walk between a keypress and the character appearing.
 
 use ral_core::ansi;
-use ral_core::protocol::Transport;
+use ral_core::carrier::Transport;
 use rustyline::completion::{Completer, Pair};
 use rustyline::highlight::{CmdKind, Highlighter};
 use rustyline::hint::Hinter;
@@ -41,7 +41,7 @@ pub(super) struct RalHelper {
     sources: SourceCache,
     engine: Arc<dyn Transport>,
     host: Arc<ReplHost>,
-    terminal: ral_core::io::TerminalState,
+    terminal: ral_core::terminal::TerminalState,
 }
 
 impl RalHelper {
@@ -50,7 +50,7 @@ impl RalHelper {
     pub(super) fn new(
         engine: Arc<dyn Transport>,
         host: Arc<ReplHost>,
-        terminal: ral_core::io::TerminalState,
+        terminal: ral_core::terminal::TerminalState,
     ) -> Self {
         Self {
             sources: SourceCache::new(),

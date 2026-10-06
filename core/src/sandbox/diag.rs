@@ -1,19 +1,18 @@
-//! Turns a kernel-reported sandbox denial into an actionable hint on the
-//! failing command's [`Error`], which `crate::diagnostic` renders for whichever
-//! host is driving.
+//! Turns a kernel-reported sandbox denial into an actionable hint for the
+//! failing command, which `crate::diagnostic` renders for whichever host is
+//! driving.
 //!
 //! Seatbelt and the seccomp filter inside the bwrap envelope report denials into
 //! a system log keyed by `(comm, pid)`, while the caller sees only an opaque
-//! `EPERM` or nonzero exit.  So [`augment_failure`] reads that log over the
+//! `EPERM` or nonzero exit.  So [`denial_hint`] reads that log over the
 //! call's wall window and keeps the lines whose PID lay in the call's descendant
 //! tree.  `diag/macos.rs` and `diag/linux.rs` each supply the reader plus a
-//! parser triple; everywhere else a stub `platform` reports no denials.
+//! parser triple.
 //!
 //! Windows differs in kind: an `AppContainer` denial carries no audit record at
 //! all, so there the hint is gated on the exit code and never names a path.
 
-use crate::types::{Error, Shell};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 #[cfg(not(windows))]
 use std::fmt::Write;
 use std::time::Instant;
@@ -28,28 +27,6 @@ pub(super) mod platform;
 #[cfg(target_os = "linux")]
 #[path = "diag/linux.rs"]
 pub(super) mod platform;
-#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
-pub(super) mod platform {
-    use std::time::Duration;
-    pub(super) fn read_window(_: Duration) -> Option<String> {
-        None
-    }
-    pub(super) fn is_denial_line(_: &str) -> bool {
-        false
-    }
-    pub(super) fn extract_pid(_: &str) -> Option<u32> {
-        None
-    }
-    pub(super) fn parse_denial(_: &str) -> Option<(String, super::Denied<'_>)> {
-        None
-    }
-    pub(crate) fn describe_denial(_: &str) -> Option<String> {
-        None
-    }
-    pub(super) fn door_reason(_: &str) -> Option<&'static str> {
-        None
-    }
-}
 
 /// What a denial's record names, and so which remedy the hint owes.  A service
 /// never arrives as a path, so no wording can offer a door as something to
@@ -89,36 +66,11 @@ pub(super) enum Denied<'a> {
 #[cfg(not(windows))]
 const MAX_DENIAL_LINES: usize = 3;
 
-/// Append a kernel-denial diagnostic to `err`, below any hint it already
-/// carries, when an external command failed under an active OS sandbox.
-///
-/// Called only from the failure arms of the command runners, and returns `err`
-/// untouched unless a denial in the window is attributable to a PID in `pids` —
-/// the sandbox gate comes first so an ordinary failure never pays for the
-/// kernel-log read.
-pub(crate) fn augment_failure(
-    mut err: Error,
-    shell: &Shell,
-    pids: &HashSet<u32>,
-    since: Instant,
-) -> Error {
-    // A cancelled child reports exactly what a poll point would, hint and all.
-    if shell.sandbox_projection().is_none() || err.cancelled_by().is_some() {
-        return err;
-    }
-    let Some(diagnostic) = collect_denial_hint(pids, since, err.exit_code()) else {
-        return err;
-    };
-    let hint = match err.hint.take() {
-        Some(existing) => format!("{existing}\n\n{diagnostic}"),
-        None => diagnostic,
-    };
-    err.with_hint(hint)
-}
-
-/// The platform's denial hint, or `None` when there is nothing to say.
+/// The hint for a sandboxed command that failed with `exit_code`, or `None`
+/// when there is nothing to say: the denials in the window since `since` that
+/// are attributable to a PID in `pids`.
 #[cfg(not(windows))]
-fn collect_denial_hint(pids: &HashSet<u32>, since: Instant, _exit_code: i32) -> Option<String> {
+pub(crate) fn denial_hint(pids: &HashSet<u32>, since: Instant, _exit_code: i32) -> Option<String> {
     if pids.is_empty() {
         return None;
     }
@@ -150,7 +102,7 @@ fn plausible_access_denied_exit(code: i32) -> bool {
 /// With no denial log and no per-PID attribution, the exit code alone decides,
 /// and the hint is fixed text: there is no path here to name.
 #[cfg(windows)]
-fn collect_denial_hint(_pids: &HashSet<u32>, _since: Instant, exit_code: i32) -> Option<String> {
+pub(crate) fn denial_hint(_pids: &HashSet<u32>, _since: Instant, exit_code: i32) -> Option<String> {
     if !plausible_access_denied_exit(exit_code) {
         return None;
     }
@@ -159,7 +111,7 @@ fn collect_denial_hint(_pids: &HashSet<u32>, _since: Instant, exit_code: i32) ->
          filesystem access surfaces only as an access-denied error on the command, with no kernel \
          log naming the path, so the exact path cannot be shown here. If the command needs a file \
          or directory the active grant's fs allow-list does not admit, widen the grant's read (or \
-         write) set — the `grant [ fs: [read: […]] ] { … }` block in ral, or `--extend-base` for \
+         write) set: the `grant [ fs: [read: […]] ] { … }` block in ral, or `--extend-base` for \
          exarch. A `net: false` grant likewise withholds the network capability, so a command that \
          needs a socket will fail the same way."
             .to_string(),
@@ -171,7 +123,7 @@ fn collect_denial_hint(_pids: &HashSet<u32>, _since: Instant, exit_code: i32) ->
 /// colours the `hint:` line as a whole.
 #[cfg(not(windows))]
 fn build_hint(denials: &[&str]) -> String {
-    let mut out = String::from("the OS sandbox denied this command — the kernel reported:");
+    let mut out = String::from("the OS sandbox denied this command: the kernel reported:");
     for line in denials.iter().take(MAX_DENIAL_LINES) {
         out.push_str("\n  ");
         out.push_str(line.trim());
@@ -278,7 +230,7 @@ fn path_remedy(paths: &[&str], set: &str) -> String {
     out.push_str(&listing(paths));
     let _ = write!(
         out,
-        "\nAdd {} (or a parent directory) to the grant's {set} set — the \
+        "\nAdd {} (or a parent directory) to the grant's {set} set: the \
          `grant [ fs: [{set}: ['{}']] ] {{ … }}` block in ral, or `--extend-base` for \
          exarch. The sandbox matches fully-resolved paths, so a path reached through a \
          symlink inside a granted directory (e.g. ~/.config) needs the resolved path \
@@ -297,7 +249,7 @@ fn exec_remedy(paths: &[&str]) -> String {
     out.push_str(&listing(paths));
     let _ = write!(
         out,
-        "\nAdmit it by name or directory — the `grant [ exec: ['{}': 'allow'] ] {{ … }}` \
+        "\nAdmit it by name or directory: the `grant [ exec: ['{}': 'allow'] ] {{ … }}` \
          block in ral, or `--extend-base` for exarch. A re-exec (`sh -c`, `find -exec`) \
          reaches only this layer, so an in-process admit alone does not carry it.",
         paths[0]
@@ -315,13 +267,13 @@ fn door_remedy(doors: &[&str]) -> String {
         .collect();
     ranked.sort_by_key(|(_, why)| why.is_none());
     let mut out = String::from(
-        "the base profile withheld a door no grant opens — a Mach or IPC name is the \
+        "the base profile withheld a door no grant opens: a Mach or IPC name is the \
          profile's to decide, and the grant's fs, net and exec sets do not reach one:",
     );
     for (door, why) in ranked.iter().take(MAX_DENIAL_LINES) {
         match why {
             Some(why) => {
-                let _ = write!(out, "\n  {door} — {why}");
+                let _ = write!(out, "\n  {door}: {why}");
             }
             None => {
                 let _ = write!(out, "\n  {door}");
@@ -341,7 +293,7 @@ fn door_remedy(doors: &[&str]) -> String {
 }
 
 #[cfg(not(windows))]
-const NET_REMEDY: &str = "a socket was denied, so the active grant is `net: false` — and that bit is the whole of \
+const NET_REMEDY: &str = "a socket was denied, so the active grant is `net: false`; and that bit is the whole of \
      it. No fs or exec widening opens a socket, and a hostname cannot carry bytes out as a \
      query label either: the resolver is closed at the same layer.";
 
@@ -358,62 +310,16 @@ fn opaque_remedy(op: Option<&str>) -> String {
         |op| format!("the sandboxed operation `{op}` was denied"),
     );
     format!(
-        "{what}, and the kernel record names no operand — so this hint cannot say what to \
+        "{what}, and the kernel record names no operand: so this hint cannot say what to \
          widen. If the command needs a path the grant does not admit, add it to the grant's \
          read or write set: the `grant [ fs: [read: […]] ] {{ … }}` block in ral, or \
          `--extend-base` for exarch."
     )
 }
 
-/// The live descendants of `root`, `root` itself excluded: one `/bin/ps` sample
-/// of every `(pid, ppid)` pair, inverted and walked transitively.
-///
-/// Denial records carry only `(comm, pid)`, so a PID set is the only way to tell
-/// our subprocess tree from a system service that ran in the same wall second.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:ps-sample] sandbox diagnostics: shells out to `/bin/ps` to sample the live process tree for denial attribution; a diagnostic probe, not turn-time model data I/O, raises no surface card."
-)]
-pub(crate) fn sample_descendants(root: u32) -> HashSet<u32> {
-    let mut cmd = std::process::Command::new("/bin/ps");
-    cmd.args(["-axo", "pid=,ppid="]);
-    let Ok(out) = crate::process::output(&mut cmd) else {
-        return HashSet::new();
-    };
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut children_of: HashMap<u32, Vec<u32>> = HashMap::new();
-    for line in text.lines() {
-        let mut parts = line.split_whitespace();
-        let Some(pid_s) = parts.next() else {
-            continue;
-        };
-        let Some(ppid_s) = parts.next() else {
-            continue;
-        };
-        let Ok(pid) = pid_s.parse::<u32>() else {
-            continue;
-        };
-        let Ok(ppid) = ppid_s.parse::<u32>() else {
-            continue;
-        };
-        children_of.entry(ppid).or_default().push(pid);
-    }
-    let mut seen = HashSet::new();
-    let mut frontier = vec![root];
-    while let Some(p) = frontier.pop() {
-        if let Some(children) = children_of.get(&p) {
-            for &c in children {
-                if seen.insert(c) {
-                    frontier.push(c);
-                }
-            }
-        }
-    }
-    seen
-}
-
 #[cfg(test)]
 mod tests {
+    #[cfg(any(target_os = "macos", windows))]
     use super::*;
 
     /// The hint names the denied path verbatim, the symlink caveat, and both
@@ -483,7 +389,7 @@ mod tests {
             "a withheld door must carry the profile's reason; got {hint:?}"
         );
         assert!(
-            hint.contains("com.apple.SecurityServer —"),
+            hint.contains("com.apple.SecurityServer:"),
             "the reason must be attached to the door that has one; got {hint:?}"
         );
     }
@@ -539,13 +445,6 @@ mod tests {
             hint.contains("(2 more)"),
             "five denials over a cap of three must note two more; got {hint:?}"
         );
-    }
-
-    #[test]
-    fn sample_descendants_excludes_root() {
-        let me = std::process::id();
-        let kids = sample_descendants(me);
-        assert!(!kids.contains(&me), "root pid must be excluded");
     }
 
     #[cfg(windows)]

@@ -6,16 +6,15 @@
 use super::Mooring;
 use super::Shell;
 use super::TerminalAccess;
-use super::bindings::{BindingLease, BindingPruneNotice, LargeBindingNotice};
+use super::bindings::BindingLease;
 use super::detached::DetachPolicy;
 use super::repl::ReplScratch;
-use super::workers::ReapCause;
-use crate::exit_hints::ExitHints;
-use crate::io::{Sink, TerminalState};
+use crate::io::Sink;
 use crate::process::{DurableRoot, ForegroundScope, TerminalLease};
 use crate::source::SourceDb;
-use crate::types::{BuiltinEntry, Convention, ReapNotice, Value, WorkerEntry, WorkerId};
-use std::io::Write;
+use crate::terminal::TerminalState;
+use crate::types::ExitHints;
+use crate::types::{BuiltinEntry, Convention, ReapNotice, Set, WorkerEntry, WorkerId};
 use std::sync::Arc;
 
 impl Shell {
@@ -62,6 +61,12 @@ impl Shell {
         self.session.guest_jail = Some(jail);
     }
 
+    /// The guest process jail installed on this session — `None` anywhere but
+    /// a real Linux guest.
+    pub(crate) fn guest_jail(&self) -> Option<Arc<crate::process::jail::GuestJail>> {
+        self.session.guest_jail.clone()
+    }
+
     /// Terminal state probed once at startup (isatty / ANSI / mode bits).
     pub fn terminal(&self) -> TerminalState {
         self.io.terminal
@@ -89,22 +94,24 @@ impl Shell {
 
     /// Every installed builtin's name, for tab completion.
     pub fn builtin_names(&self) -> impl Iterator<Item = &str> {
-        self.session.builtins.names()
+        self.session.builtins.manifest().names()
     }
 
     /// The test-dressing door, with [`Self::install_captured_builtins`]; a
-    /// production host's surface rides [`boot_shell`](crate::boot::boot_shell).
-    /// Installs the manifest set, then seeds the base env scope and base
-    /// handler frames from it.
+    /// production host's surface rides [`HostSurface::shell`](crate::HostSurface::shell).
     pub fn install_builtins(&mut self, entries: &'static [BuiltinEntry]) {
-        if self.session.builtins.install_static(entries) {
-            seed_natives_and_base(self, entries);
-        }
+        self.install_set(&Set::Static(entries));
     }
 
     pub fn install_captured_builtins(&mut self, entries: &Arc<[BuiltinEntry]>) {
-        if self.session.builtins.install_arc(Arc::clone(entries)) {
-            seed_natives_and_base(self, entries);
+        self.install_set(&Set::Captured(Arc::clone(entries)));
+    }
+
+    /// Install `set`, then seed the base env scope and base handler frames
+    /// from it, unless it was already here.
+    pub(crate) fn install_set(&mut self, set: &Set) {
+        if self.session.builtins.install(set.clone()) {
+            seed_natives_and_base(self, set);
         }
     }
 
@@ -166,7 +173,6 @@ impl Shell {
 
     /// One notice per entry removed by policy — idle bound, backstop, retention
     /// expiry — never one an eliminator observed away first.
-    /// [`Self::emit_ready_boundary_notices`] is the only caller.
     pub(crate) fn take_worker_reap_notices(&self) -> Vec<ReapNotice> {
         self.local.workers.take_reap_notices()
     }
@@ -181,7 +187,7 @@ impl Shell {
     }
 
     /// Distinct lexical names visible in scope, a shadowed one counted once —
-    /// what `crate::protocol::reading` serves exarch's `/resources` fold.
+    /// what `crate::carrier::Transport::binding_count` serves exarch's `/resources` fold.
     /// Names only, never the values, and renewing nothing.
     pub(crate) fn binding_count(&self) -> usize {
         self.env.distinct_name_count(&self.sig)
@@ -191,106 +197,6 @@ impl Shell {
     /// narrower read than [`Self::binding_count`], and `0` when unarmed.
     pub(crate) fn leased_binding_count(&self) -> usize {
         self.local.bindings.leased_count()
-    }
-
-    /// One notice per session-scope install whose shallow-size estimate met the
-    /// armed lease's threshold, the binding itself untouched.
-    /// [`Self::emit_ready_boundary_notices`] is the only caller.
-    pub(crate) fn take_large_binding_notices(&mut self) -> Vec<LargeBindingNotice> {
-        self.local.bindings.take_large_binding_notices()
-    }
-
-    /// This run's ready-boundary housekeeping — [`crate::run::run_framed`] calls
-    /// it once per settled source run, *before* the frame tears down, so it
-    /// rides the run's own streams and lands ahead of its report.
-    ///
-    /// The large-binding warning goes to stderr, reaching the model in its tool
-    /// result rather than becoming a frontend card, and is ungated: stderr is
-    /// there whether a surface sink is or not.  Reap and prune push as
-    /// `` `notice [kind: `reap, cmd, cause] `` and
-    /// `` `notice [kind: `prune, names, idle-calls] `` for exarch's
-    /// `card::value_to_notice`; absent a sink that half leaves the ledgers
-    /// *untouched* rather than drained and dropped, so their notices wait for a
-    /// run that does install one.
-    pub(crate) fn emit_ready_boundary_notices(&mut self, mooring: &Mooring) {
-        // Above the sink guard: expiry is a fact regardless of anyone
-        // listening, and its notice waits in the ledger either way.
-        self.local.workers.sweep_retention();
-        for notice in self.take_large_binding_notices() {
-            let line = format!(
-                "note: large binding `{}` (~{} bytes) held in session memory; consider \
-                 writing it to a file and binding the path instead of the captured bytes\n",
-                notice.name, notice.bytes,
-            );
-            let _ = self.io.stderr.write_all(line.as_bytes());
-        }
-        if mooring.surface.is_none() {
-            return;
-        }
-        for notice in self.take_worker_reap_notices() {
-            let cause = match notice.cause {
-                ReapCause::Idle => "idle",
-                ReapCause::Backstop => "backstop",
-                ReapCause::Retention => "retention",
-            };
-            mooring.surface(&Value::Variant {
-                label: "notice".into(),
-                payload: Some(Box::new(Value::map(vec![
-                    (
-                        "kind".into(),
-                        Value::Variant {
-                            label: "reap".into(),
-                            payload: None,
-                        },
-                    ),
-                    ("cmd".into(), Value::string(notice.cmd)),
-                    ("cause".into(), Value::string(cause)),
-                ]))),
-            });
-        }
-        let pruned = self.prune_idle_bindings();
-        if !pruned.is_empty() {
-            mooring.surface(&Value::Variant {
-                label: "notice".into(),
-                payload: Some(Box::new(Value::map(vec![
-                    (
-                        "kind".into(),
-                        Value::Variant {
-                            label: "prune".into(),
-                            payload: None,
-                        },
-                    ),
-                    (
-                        "names".into(),
-                        Value::list(
-                            pruned
-                                .iter()
-                                .map(|n| Value::string(n.name.clone()))
-                                .collect(),
-                        ),
-                    ),
-                    (
-                        "idle-calls".into(),
-                        Value::list(
-                            pruned
-                                .iter()
-                                .map(|n| {
-                                    Value::Int({
-                                        #[allow(
-                                            clippy::cast_possible_wrap,
-                                            reason = "an idle-call count is far below i64::MAX"
-                                        )]
-                                        {
-                                            n.idle_calls as i64
-                                        }
-                                    })
-                                })
-                                .collect(),
-                        ),
-                    ),
-                ]))),
-            });
-        }
     }
 
     /// Arm the binding-lease ledger and seal the baseline: every name visible
@@ -304,55 +210,6 @@ impl Shell {
             .into_iter()
             .map(|(name, _)| name);
         self.local.bindings.arm(lease, baseline);
-    }
-
-    /// Prune every leased name idle past the armed lease's bound, at the ready
-    /// boundary [`Self::emit_ready_boundary_notices`] owns.  Nothing happens
-    /// off session scope: a mid-frame caller such as a lifecycle hook is
-    /// refused rather than allowed to unset from a transient frame.  A pruned
-    /// name cannot come back through a panic rollback either, since
-    /// [`Shell::run`] checkpoints at run entry, after any earlier prune.
-    ///
-    /// `run_phrases` never calls this: it is the ready boundary's own door,
-    /// reached only between runs, on the session scope by construction.
-    ///
-    /// One pass in sorted order: a name absent from scope had its install
-    /// rolled back, so the orphan drops silently; a value that structurally
-    /// reaches a running handle is pinned and re-examined next boundary; the
-    /// rest are unset, scheme and all, since a `Binding` couples both.  The
-    /// adoption sweep afterwards runs even on a pass that prunes nothing, so a
-    /// name a missed install path left untracked is leased late, not immortal.
-    pub(crate) fn prune_idle_bindings(&mut self) -> Vec<BindingPruneNotice> {
-        if !self.local.bindings.armed() {
-            return Vec::new();
-        }
-        let mut notices = Vec::new();
-        for (name, idle_calls) in self.local.bindings.expired() {
-            match self.env.get(&name) {
-                None => {
-                    // Orphaned by a rollback: nothing to prune.
-                    self.local.bindings.drop_entry(&name);
-                }
-                Some(value) if crate::types::pins_running_work(value) => {
-                    // Pinned: leave the entry exactly as it is.
-                }
-                Some(value) => {
-                    let kind = value.type_name();
-                    self.env.unset(&name);
-                    self.local.bindings.drop_entry(&name);
-                    notices.push(BindingPruneNotice {
-                        name,
-                        idle_calls,
-                        kind,
-                    });
-                }
-            }
-        }
-        let session_names: Vec<String> = self.env.names().map(ToString::to_string).collect();
-        for name in session_names {
-            self.local.bindings.adopt(&name);
-        }
-        notices
     }
 
     /// The terminal-foreground handoff borrow: `Some` iff `mooring`'s
@@ -375,7 +232,7 @@ impl Shell {
         self.session.stack_limit
     }
 
-    /// Set that ceiling — rc `recursion_limit:` and `--recursion-limit`.
+    /// Set that ceiling — rc `recursion-limit:` and `--recursion-limit`.
     pub fn set_stack_limit(&mut self, n: usize) {
         self.session.stack_limit = n;
     }
@@ -430,16 +287,16 @@ impl Shell {
 fn seed_natives_and_base(shell: &mut Shell, entries: &[BuiltinEntry]) {
     let natives = entries
         .iter()
-        .filter(|entry| entry.convention == Convention::Value)
+        .filter(|entry| entry.decl.convention == Convention::Value)
         .map(|entry| {
             (
-                entry.name.clone().into_owned(),
+                entry.decl.name.clone().into_owned(),
                 crate::types::builtin::native_value(entry),
             )
         });
     let base: Vec<BuiltinEntry> = entries
         .iter()
-        .filter(|entry| entry.convention == Convention::Argv)
+        .filter(|entry| entry.decl.convention == Convention::Argv)
         .cloned()
         .collect();
     Arc::make_mut(&mut shell.sig).install_natives(natives);
@@ -457,7 +314,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn terminal_lease_gated_by_access_and_session() {
-        let mut shell = Shell::default();
+        let mut shell = crate::test_helper::core_shell();
         shell.session.terminal_lease = TerminalLease::mint_at_startup(true);
         assert!(
             shell.session.terminal_lease.is_some(),
@@ -513,7 +370,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn denied_mooring_lend_does_not_elevate() {
-        let mut shell = Shell::default();
+        let mut shell = crate::test_helper::core_shell();
         shell.session.terminal_lease = TerminalLease::mint_at_startup(true);
         let denied = Mooring::adrift();
 

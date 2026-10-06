@@ -13,6 +13,10 @@
 //! One line on stdout, no label and no newline of ceremony, because a shell
 //! reads it with `$(…)` and nothing else ever will.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "[silent:example] an example prints its result"
+)]
 fn main() {
     println!("{}", ral_daemon::boot::CONTRACT);
 }

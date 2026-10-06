@@ -1,134 +1,30 @@
-//! Hidden multicall flags that let a test birth a detached survivor and
-//! observe runtime state (process group, controlling terminal) without
-//! shipping a helper binary.
-//!
-//! Every one is consumed before clap, so `--help` never names them.
+//! Helpers shared by core's tests and by hosts' tests under `test-util`.
 
-/// Serve a re-exec of `current_exe()` — under `cargo test`, the test binary
-/// itself — so a hidden tail flag never reaches libtest's argv parser.
-///
-/// `Some(code)` means this process was such a re-exec and must exit now.
-///
-/// Every test binary calls this from a `#[ctor]`; the integration binaries
-/// share the one in `core/tests/common/mod.rs`.  Core's dispatch serves every
-/// role, with no engine installers to offer, and leaves the detach-birth
-/// fixture pinned for this function to serve.
-pub fn run_pre_main_reexec_stages() -> Option<u8> {
-    #[cfg(unix)]
-    crate::uutils::init_signal_dispositions();
-    let argv: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-    let role = crate::classify(&argv);
-    let served = crate::sandbox::serve_pre_main(&role, &[]);
-    #[cfg(unix)]
-    if let crate::Invocation::DetachBirth { trace, marker } = role {
-        return Some(serve_detach_birth(trace, marker));
-    }
-    served
-}
+use std::time::{Duration, Instant};
 
-/// The prelude a test binary bakes at runtime, cached for every call this
-/// process makes — the detach-birth fixture needs one, and there is no
-/// build-script blob to embed here.
-#[cfg(unix)]
-fn test_prelude() -> &'static crate::boot::BakedPrelude {
-    static PRELUDE: std::sync::OnceLock<crate::boot::BakedPrelude> = std::sync::OnceLock::new();
-    PRELUDE.get_or_init(crate::boot::BakedPrelude::bake_runtime)
-}
-
-/// Tail flag of the detach-birth helper below, re-exec'd by `core/tests/detach.rs`.
-pub const DETACH_BIRTH_FLAG: &str = "--ral-test-detach-birth";
-
-/// Serve `--ral-test-detach-birth <trace> <marker>`: birth one `detach` that
-/// appends `<marker>` to `<trace>` — and writes it to both its streams, which
-/// go nowhere — until killed, print its pid, and exit 1 on a failed birth so
-/// the test sees a dead host rather than a missing survivor.
-///
-/// `detach` promises survival across the *full* exit of its host, so the host
-/// must be a process a test can outlive rather than a scope it can leave; the
-/// trace is the only sign of a survivor whose streams no one here can name.
-#[cfg(unix)]
-fn serve_detach_birth(trace: &std::ffi::OsStr, marker: &std::ffi::OsStr) -> u8 {
-    let (trace, marker) = (trace.to_string_lossy(), marker.to_string_lossy());
-    let mut shell = crate::boot::boot_shell(
-        crate::io::TerminalState::default(),
-        test_prelude(),
-        &crate::boot::HostSurface::default(),
-    );
-    shell.install_builtins(crate::builtins::DETACH_BUILTIN);
-    shell.arm_detach(1);
-    let report = shell.run(crate::RunRequest {
-        run: crate::protocol::Run {
-            program: crate::protocol::Program::Source(format!(
-                "let d = detach #'the survivor a test outlives'# \
-                 /bin/sh -c 'while :; do echo {marker}; echo {marker} >&2; \
-                 echo {marker} >> {trace}; sleep 0.05; done'; echo $d[pid]"
-            )),
-            script_name: "<detach-birth>".into(),
-            caps: crate::types::GrantStack::root(),
-            wall: None,
-            deferred_lease: None,
-            worker_cap: None,
-            io: crate::RunIo::Inherit,
-            terminal: crate::RequestedTerminalAccess::Leased,
-            stdin: crate::RunStdin::Inherit,
-            trail: None,
-        },
-        surface: None,
-        deferred: None,
-        desk: None,
-        fork: None,
-    });
-    u8::from(!matches!(
-        report,
-        crate::RunReport::Ran {
-            ending: crate::run::Ending::Settled { .. },
-            ..
+/// The first `Some` that `probe` answers within `within`, polled every 10ms;
+/// `None` if it never came.
+pub fn eventually<T>(within: Duration, mut probe: impl FnMut() -> Option<T>) -> Option<T> {
+    let deadline = Instant::now() + within;
+    loop {
+        if let found @ Some(_) = probe() {
+            return found;
         }
-    ))
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
-/// Tail flag of the pgid probe below, spelled out literally in `ral/tests/pipeline.rs`.
-#[cfg(unix)]
-pub(crate) const PGID_CHECK_FLAG: &str = "--ral-test-pgid-check";
+/// Core's Σ alone, no host dressing: what a checker with no live shell types
+/// against.
+pub fn core_schemes() -> crate::typecheck::SessionSchemes {
+    crate::typecheck::SessionSchemes::new(crate::HostSurface::default().manifest())
+}
 
-/// Serve `--ral-test-pgid-check <tag>`: write `pgid:<tag>=<getpgrp()>` to
-/// stderr — plus `tcpgrp:<tag>=<tcgetpgrp(2)>` when stderr is a tty — and
-/// exit 0.
-///
-/// A test can thus confirm a stage joined the pgid its parent set.
-///
-/// Core's pre-`main` dispatch serves it in every binary, the real `ral` the
-/// tests spawn as a pipeline stage included.  Stderr is the probe: a
-/// stage's stdin and stdout are rerouted through pipes while stderr is
-/// inherited, so it alone reports the parent's terminal — a tty under the
-/// PTY tests, a pipe under cargo's capture, whatever lies further upstream.
-#[cfg(unix)]
-pub(crate) fn serve_pgid_check(tag: Option<&std::ffi::OsStr>) -> u8 {
-    use std::fmt::Write as _;
-    use std::io::{IsTerminal, Write};
-
-    let tag = tag.map_or_else(|| "stage".into(), |t| t.to_string_lossy());
-    let pgid = unsafe { libc::getpgrp() };
-    let stderr_fd = libc::STDERR_FILENO;
-
-    // One buffer, one `write_all`: `eprintln!` emits a syscall per format
-    // substitution, and stages sharing a stderr interleave their bytes
-    // (`pgid:pgid:downup==…`).  A write under PIPE_BUF is atomic.
-    let mut buf = String::new();
-    let _ = writeln!(&mut buf, "pgid:{tag}={pgid}");
-    if std::io::stderr().is_terminal() {
-        let fg = unsafe { libc::tcgetpgrp(stderr_fd) };
-        if fg >= 0 {
-            let _ = writeln!(&mut buf, "tcpgrp:{tag}={fg}");
-        }
-    }
-    let _ = std::io::stderr().write_all(buf.as_bytes());
-    // A reader stage that exits before its writer is done makes ral end
-    // that writer (SPEC §7.6), so the probe holds its stdin open to EOF
-    // rather than racing its own upstream's report.  A tty never sees
-    // EOF; `/dev/null` sees it at once.
-    if !std::io::stdin().is_terminal() {
-        let _ = std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink());
-    }
-    0
+/// A shell over core's own surface alone: no env vars, no prelude.  The
+/// scaffold unit tests start from.
+pub fn core_shell() -> crate::Shell {
+    crate::HostSurface::default().shell(crate::terminal::TerminalState::default())
 }

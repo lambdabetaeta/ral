@@ -363,7 +363,7 @@ so the model has the address before it asks for one.
   one layer the child gets — `` `inherit ``, one of the four spawnable
   [[map/exarch/policy|base]] names (`confined`, `read-only`, `edit-only`,
   `reasonable`), or `` `restrict R `` with `R` a capability record in
-  `grant [...] { body }`'s own vocabulary. `spawn_grant` closes the row here,
+  `grant [...] { body }`'s own vocabulary. `Grant::decode` (`fleet/enquiry.rs`) closes the row,
   naming all six shapes and `R`'s own keys in its refusal and holding `R` to
   first-order data, since the ceiling crosses to the far side as data; the
   record itself is decoded by `decode_capability_map` off the `Form::Grant`

@@ -23,9 +23,11 @@ use super::linux::Envelope;
 use super::warrant::Seatbelt;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::warrant::{Handoff, Native, Slot, Warrant};
+use super::{Refusal, SandboxProjection};
+use crate::Role;
 use crate::capability::Admitted;
-use crate::types::{Break, Error, Settled, Shell};
 use std::ffi::OsString;
+use std::path::Path;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::{os::fd::AsFd, os::fd::OwnedFd, process::Command};
 
@@ -51,8 +53,8 @@ pub(crate) enum Ownership {
 /// cleared [`super::projection_enforceable`] and applies env, cwd and limits
 /// after.
 ///
-/// `shell` is taken only for the logical cwd Linux folds in as `--chdir`, and
-/// `ownership` likewise reaches Linux alone, the one backend that builds an
+/// `cwd` is the logical cwd Linux folds in as `--chdir`, and `ownership`
+/// likewise reaches Linux alone, the one backend that builds an
 /// envelope process to tie to us.
 ///
 /// macOS and Linux both launch the `ral --warrant` trampoline — Linux's under
@@ -62,16 +64,16 @@ pub(crate) enum Ownership {
     not(target_os = "linux"),
     allow(
         unused_variables,
-        reason = "shell.cwd() and ownership are consumed by the bwrap argv alone"
+        reason = "cwd and ownership are consumed by the bwrap argv alone"
     )
 )]
 pub(crate) fn sandboxed_command(
-    projection: &crate::types::SandboxProjection,
+    projection: &SandboxProjection,
     admitted: &Admitted,
     ownership: Ownership,
-    shell: &Shell,
+    cwd: &Path,
     cancel: &crate::process::cancel::CancelScope,
-) -> Settled<crate::process::Launch> {
+) -> Result<crate::process::Launch, Refusal> {
     // Only the Windows backend does work here a cancel could interrupt: bwrap
     // and Seatbelt render a profile in memory, while an `AppContainer` stamps
     // the projection's prefixes onto the filesystem before the child exists.
@@ -79,7 +81,7 @@ pub(crate) fn sandboxed_command(
     let _ = cancel;
     #[cfg(target_os = "linux")]
     {
-        let (cmd, info_fd) = linux_sandboxed_command(projection, admitted, ownership, shell)?;
+        let (cmd, info_fd) = linux_sandboxed_command(projection, admitted, ownership, cwd)?;
         let mut launch = crate::process::Launch::from_command(cmd);
         // A host package rather than part of ral, so it may simply be absent.
         launch.envelope(crate::process::launch::Envelope {
@@ -96,14 +98,6 @@ pub(crate) fn sandboxed_command(
     {
         windows_sandboxed_command(projection, admitted, cancel)
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-    {
-        let _ = (projection, admitted);
-        Err(Break::Error(Error::new(
-            "no per-command sandbox backend on this platform",
-            1,
-        )))
-    }
 }
 
 /// Windows: the parent applies the `LowBox` token at spawn time
@@ -113,10 +107,10 @@ pub(crate) fn sandboxed_command(
 /// Windows child has nothing to enter, and [`serve_warrant`] refuses one.
 #[cfg(windows)]
 fn windows_sandboxed_command(
-    projection: &crate::types::SandboxProjection,
+    projection: &SandboxProjection,
     admitted: &Admitted,
     cancel: &crate::process::cancel::CancelScope,
-) -> Settled<crate::process::Launch> {
+) -> Result<crate::process::Launch, Refusal> {
     use crate::capability::Program;
     let args = admitted.args();
     // The LowBox token reads only the ALL APPLICATION PACKAGES system paths,
@@ -131,11 +125,9 @@ fn windows_sandboxed_command(
                 (launch, Some(real.as_path().to_path_buf()))
             }
             Program::Tool(tool) => {
-                use crate::runtime::pipeline::helper::{BUNDLED_TOOL_FLAG, self_reexec};
-                let mut launch = self_reexec(BUNDLED_TOOL_FLAG).map_err(|e| {
-                    Break::Error(Error::new(
-                        format!("sandbox: cannot resolve self exe for bundled tool '{tool}': {e}"),
-                        1,
+                let mut launch = super::reexec::launch(Role::BundledTool).map_err(|e| {
+                    Refusal::Launch(format!(
+                        "sandbox: cannot resolve self exe for bundled tool '{tool}': {e}"
                     ))
                 })?;
                 launch.arg(tool);
@@ -155,32 +147,22 @@ fn windows_sandboxed_command(
 /// Issue the warrant for `admitted` under `confinement`, parcelled for
 /// [`Slot::Warrant`].
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn issue(confinement: Native, admitted: &Admitted) -> Settled<OwnedFd> {
-    Warrant::new(confinement, admitted)
-        .parcel()
-        .map_err(refused)
-}
-
-/// A launch that could not be built: nothing ran.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn refused(why: String) -> Break {
-    Break::Error(Error::new(why, 1))
+fn issue(confinement: Native, admitted: &Admitted) -> Result<OwnedFd, Refusal> {
+    Ok(Warrant::new(confinement, admitted).parcel()?)
 }
 
 /// Linux: the payload is always the trampoline, launched under this host's
 /// pinned bwrap.
 #[cfg(target_os = "linux")]
 fn linux_sandboxed_command(
-    projection: &crate::types::SandboxProjection,
+    projection: &SandboxProjection,
     admitted: &Admitted,
     ownership: Ownership,
-    shell: &Shell,
-) -> Settled<(Command, Option<super::linux::InfoFd>)> {
-    let bwrap = super::linux::envelope()
-        .map_err(|why| Break::Error(super::confinement_unavailable(why)))?;
-    let own = super::reexec::own().map_err(refused)?;
-    let cwd = shell.cwd();
-    let cwd = faithful(&cwd, "the working directory")?;
+    cwd: &Path,
+) -> Result<(Command, Option<super::linux::InfoFd>), Refusal> {
+    let bwrap = super::linux::envelope().map_err(|why| Refusal::Unavailable(why.into()))?;
+    let own = super::reexec::own()?;
+    let cwd = faithful(cwd, "the working directory")?;
     let env = Envelope::probe(bwrap, own);
     enveloped(&env, projection, admitted, Some(cwd), ownership)
 }
@@ -189,9 +171,9 @@ fn linux_sandboxed_command(
 /// `Rendered`, which refuses what is not Unicode rather than approximating it.
 #[cfg(target_os = "linux")]
 #[allow(clippy::unnecessary_debug_formatting)]
-fn faithful<'a>(path: &'a std::path::Path, what: &str) -> Settled<&'a str> {
+fn faithful<'a>(path: &'a Path, what: &str) -> Result<&'a str, Refusal> {
     path.to_str().ok_or_else(|| {
-        refused(format!(
+        Refusal::Launch(format!(
             "sandbox: {what} {path:?} is not valid UTF-8, and bwrap cannot be given it faithfully"
         ))
     })
@@ -203,16 +185,14 @@ fn faithful<'a>(path: &'a std::path::Path, what: &str) -> Settled<&'a str> {
 #[cfg(target_os = "linux")]
 pub(super) fn enveloped(
     env: &Envelope<'_>,
-    projection: &crate::types::SandboxProjection,
+    projection: &SandboxProjection,
     admitted: &Admitted,
     chdir: Option<&str>,
     ownership: Ownership,
-) -> Settled<(Command, Option<super::linux::InfoFd>)> {
-    let rendered = projection.rendered().map_err(refused)?;
+) -> Result<(Command, Option<super::linux::InfoFd>), Refusal> {
+    let rendered = projection.rendered()?;
     let (ruleset, confinement) =
-        super::linux::landlock::build(&rendered.exec, &rendered.fs, env.host.landlock)
-            .map_err(Break::Error)?
-            .unzip();
+        super::linux::landlock::build(&rendered.exec, &rendered.fs, env.host.landlock)?.unzip();
     let warrant = issue(confinement, admitted)?;
     let mut handoff = Handoff::default();
     handoff.lend(Slot::Warrant, warrant.as_fd());
@@ -223,7 +203,7 @@ pub(super) fn enveloped(
         crate::capability::Program::File { real, .. } => Some(real),
         crate::capability::Program::Tool(_) => None,
     };
-    super::linux::bwrap_command(env, image, handoff, &rendered, chdir, ownership).map_err(refused)
+    super::linux::bwrap_command(env, image, handoff, &rendered, chdir, ownership)
 }
 
 /// macOS: re-exec the pinned ral, with the compiled profile in its warrant,
@@ -233,18 +213,18 @@ pub(super) fn enveloped(
 /// confinement.
 #[cfg(target_os = "macos")]
 fn macos_sandboxed_command(
-    projection: &crate::types::SandboxProjection,
+    projection: &SandboxProjection,
     admitted: &Admitted,
-) -> Settled<Command> {
-    let own = super::reexec::own().map_err(refused)?;
-    own.verify().map_err(Break::Error)?;
-    let profile = super::macos::build_profile(projection).map_err(refused)?;
+) -> Result<Command, Refusal> {
+    let own = super::reexec::own()?;
+    own.verify()?;
+    let profile = super::macos::build_profile(projection)?;
     let warrant = issue(Seatbelt(profile), admitted)?;
     let mut cmd = own.command();
-    cmd.arg(super::WARRANT_FLAG);
+    cmd.arg(Role::Warrant.flag());
     let mut handoff = Handoff::default();
     handoff.lend(Slot::Warrant, warrant.as_fd());
-    handoff.install(&mut cmd).map_err(refused)?;
+    handoff.install(&mut cmd)?;
     Ok(cmd)
 }
 
@@ -266,14 +246,14 @@ pub fn serve_warrant(extra: &[OsString]) -> u8 {
     } else {
         Err(format!(
             "{} takes no arguments: its warrant arrives on fd {}",
-            super::WARRANT_FLAG,
+            Role::Warrant.flag(),
             Slot::Warrant.fd()
         ))
     };
     match confined {
         Ok(confined) => confined.run(),
         Err(e) => {
-            crate::diagnostic::cmd_error("ral", &e);
+            crate::terminal::cmd_error("ral", &e);
             126
         }
     }
@@ -284,12 +264,12 @@ pub fn serve_warrant(extra: &[OsString]) -> u8 {
 /// rather than run unconfined.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn serve_warrant(_extra: &[OsString]) -> u8 {
-    crate::diagnostic::cmd_error(
+    crate::terminal::cmd_error(
         "ral",
         &format!(
             "{} is not served on {}: confinement is applied to a child from outside, \
              never by the child itself; refusing to run unconfined",
-            super::WARRANT_FLAG,
+            Role::Warrant.flag(),
             std::env::consts::OS
         ),
     );
@@ -303,9 +283,9 @@ pub fn serve_warrant(_extra: &[OsString]) -> u8 {
     all(feature = "test-util", target_os = "linux")
 ))]
 pub(super) fn admitted(program: crate::capability::Program, args: &[String]) -> Admitted {
-    Shell::default()
-        .check_exec("test", program, args.to_vec())
-        .expect("an unrestricted shell admits everything")
+    crate::capability::GrantStack::root()
+        .admit(program, args.to_vec())
+        .expect("an unrestricted stack admits everything")
 }
 
 #[cfg(test)]
@@ -326,7 +306,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     use crate::{
         capability::Program,
-        types::{FsProjection, FsRules, SandboxProjection},
+        sandbox::{ExecProjection, FsProjection, FsRules},
     };
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -339,7 +319,7 @@ mod tests {
                 pinned_dirs: Vec::new(),
             }),
             net: true,
-            exec: crate::types::ExecProjection::default(),
+            exec: ExecProjection::default(),
         }
     }
 
@@ -358,7 +338,7 @@ mod tests {
         for program in [sh(), Program::Tool("ls".into())] {
             let cmd = macos_sandboxed_command(&restrictive(), &admitted(program, &["-l".into()]))
                 .expect("build macOS command");
-            assert_eq!(argv(&cmd), [super::super::WARRANT_FLAG]);
+            assert_eq!(argv(&cmd), [Role::Warrant.flag()]);
         }
     }
 
@@ -382,7 +362,7 @@ mod tests {
                 pinned_dirs: Vec::new(),
             }),
             net: true,
-            exec: crate::types::ExecProjection::default(),
+            exec: ExecProjection::default(),
         }
     }
 
@@ -404,10 +384,10 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         let mut child = cmd.spawn().expect("spawn sandboxed child");
-        // A one-shot child no user code can SIGSTOP, so routing this wait
-        // through the reaper — whose only extra service is answering a
-        // stop with SIGCONT — would buy nothing.
-        #[allow(clippy::disallowed_methods)]
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "[test] a one-shot child no user code can SIGSTOP; the reaper's one extra service, answering a stop, buys nothing"
+        )]
         let status = child.wait().expect("wait for sandboxed child");
         status.success()
     }
@@ -580,7 +560,7 @@ mod tests {
                 &restrictive(),
                 &admitted(program, &["-l".into()]),
                 Ownership::Kept,
-                &Shell::default(),
+                Path::new("/"),
             )
             .expect("build Linux command");
             assert!(
@@ -597,7 +577,7 @@ mod tests {
                     slot.as_str(),
                     "--",
                     "/proc/self/fd/102",
-                    super::super::WARRANT_FLAG
+                    Role::Warrant.flag()
                 ]
             );
         }

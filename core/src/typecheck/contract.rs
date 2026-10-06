@@ -20,10 +20,10 @@
 
 use super::env::InferCtx;
 use super::error::{Reason, Standing, TypeErrorKind};
-use super::ty::{CompTy, Label, Row, Ty};
 use super::unify::Unifier;
 use crate::ir::{CompKind, Phrase, Val};
 use crate::source::{Span, Spanned};
+use crate::ty::{CompTy, Label, Row, Ty};
 
 /// Which declared table.  An enum rather than a name, so a lookup cannot miss.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,7 +190,7 @@ static RC: Table = Table {
             reason: None,
         },
         Key {
-            label: "edit_mode",
+            label: "edit-mode",
             holds: Holds::At(Ty::String),
             reason: None,
         },
@@ -205,7 +205,7 @@ static RC: Table = Table {
             reason: None,
         },
         Key {
-            label: "recursion_limit",
+            label: "recursion-limit",
             holds: Holds::At(Ty::Int),
             reason: None,
         },
@@ -232,7 +232,7 @@ static RC: Table = Table {
 ///
 /// A plugin runs with host authority and the manifest cannot narrow it, so
 /// `capabilities:` earns its own sentence rather than being folded into
-/// "unknown key, here is the list" — the advice is the only thing that
+/// "unknown key, here is the list": the advice is the only thing that
 /// message carries.
 static MANIFEST: Table = Table {
     form: "plugin manifest",
@@ -260,7 +260,7 @@ static MANIFEST: Table = Table {
         Key {
             label: "capabilities",
             holds: Holds::Refused(
-                "manifest 'capabilities:' is not enforced — plugins run with host \
+                "manifest 'capabilities:' is not enforced: plugins run with host \
                  authority. Remove the key; to confine a plugin invocation, wrap it \
                  in `grant { ... }`.",
             ),
@@ -293,7 +293,7 @@ pub fn declared(form: Form) -> &'static Table {
 /// What a runtime door says about a key a table does not name.
 pub(super) fn unknown_key_message(form: &str, key: &str, offered: &[&str]) -> String {
     format!(
-        "unknown key '{key}' — `{form}` takes {list}",
+        "unknown key '{key}': `{form}` takes {list}",
         list = offered.join(", "),
     )
 }
@@ -328,7 +328,7 @@ pub(super) fn written_at(opts: &Val, label: &str) -> Option<Span> {
 /// admits one, a factory stay on the runtime door.
 pub(super) fn ascribe(
     ctx: &mut InferCtx,
-    tail: Option<&Spanned<Phrase>>,
+    tail: Option<&Spanned<Phrase<()>>>,
     cty: Option<CompTy>,
     table: &'static Table,
 ) {

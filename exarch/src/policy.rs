@@ -16,10 +16,10 @@ mod load;
 
 use base::{resolve_base, root_fs_policy};
 use load::{absolute_in, load_capabilities_ral};
+use ral_core::capability::{Capabilities, GrantStack};
+use ral_core::guard::freeze::FreezeCtx;
 use ral_core::host;
-use ral_core::io::TerminalState;
-use ral_core::path::{sigil::FreezeCtx, sigil::freeze_path_list};
-use ral_core::types::{Capabilities, GrantStack, Shell};
+use ral_core::terminal::TerminalState;
 use std::path::{Path, PathBuf};
 
 /// Compose a session's effective [`GrantStack`], with the restrict files'
@@ -39,7 +39,7 @@ use std::path::{Path, PathBuf};
 /// Unknown `base_name`, or a profile that fails to load.
 #[allow(
     clippy::disallowed_methods,
-    reason = "host-env: capability profiles freeze against the launching user's real home — no shell overlay exists yet"
+    reason = "host-env: capability profiles freeze against the launching user's real home; no shell overlay exists yet"
 )]
 pub fn for_invocation(
     cwd: &str,
@@ -50,13 +50,11 @@ pub fn for_invocation(
     // The loader evaluates ral source, so it needs a Shell.  This one is
     // scaffolding: the caller builds the session's real shell separately, from
     // the frozen GrantStack returned here.
-    let mut load_shell = Shell::new(TerminalState::default());
+    let mut load_shell = ral_core::HostSurface::default().shell(TerminalState::default());
 
-    let cwd_path = PathBuf::from(cwd);
-    let home = host::home();
     let ctx = FreezeCtx {
-        home: home.as_deref(),
-        cwd: &cwd_path,
+        home: host::home(),
+        cwd: PathBuf::from(cwd),
     };
 
     let mut ceiling: Capabilities = resolve_base(base_name, &ctx)?;
@@ -128,10 +126,9 @@ pub(crate) const SPAWN_BASES: [&str; 4] = ["confined", "read-only", "edit-only",
     reason = "host-env: the child's base freezes against the launching user's real home, like for_invocation's"
 )]
 pub fn base_layer(base_name: &str, cwd: &Path) -> Result<Capabilities, String> {
-    let home = host::home();
     let ctx = FreezeCtx {
-        home: home.as_deref(),
-        cwd,
+        home: host::home(),
+        cwd: cwd.to_path_buf(),
     };
     resolve_base(base_name, &ctx)
 }
@@ -142,17 +139,14 @@ pub fn base_layer(base_name: &str, cwd: &Path) -> Result<Capabilities, String> {
 /// into one already on the stack.
 ///
 /// Only the lexical form is pushed: the in-process check in
-/// `core/src/capability/enforce.rs` and the OS sandbox profiles each expand a
+/// `core/src/guard/enforce.rs` and the OS sandbox profiles each expand a
 /// deny entry to its canonical and macOS-firmlink variants themselves.
-fn deny_layer(paths: &[PathBuf], ctx: &FreezeCtx<'_>) -> Result<Capabilities, String> {
-    let mut frozen = freeze_path_list(
-        paths
-            .iter()
-            .map(|p| p.to_string_lossy().into_owned())
-            .collect(),
-        ctx,
-    )
-    .map_err(|e| e.message)?;
+fn deny_layer(paths: &[PathBuf], ctx: &FreezeCtx) -> Result<Capabilities, String> {
+    let entries: Vec<String> = paths
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    let mut frozen = ctx.paths(&entries).map_err(|e| e.message)?;
     frozen.sort();
     frozen.dedup();
     let mut fs = root_fs_policy();

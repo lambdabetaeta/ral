@@ -18,9 +18,10 @@
 
 #![cfg(unix)]
 
-use ral_core::protocol::{DispatchId, Host, Liveness, Program, Run, Transport, WireTransport};
-use ral_core::types::GrantStack;
-use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
+use ral_core::carrier::{Host, Transport, WireTransport};
+use ral_core::protocol::channel::Liveness;
+use ral_core::protocol::{DispatchId, Run};
+use ral_core::test_helper::eventually;
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -46,18 +47,7 @@ fn brisk_liveness() -> Liveness {
 /// buffer many times over, so a peer that never drains it reliably parks the
 /// write rather than merely slowing it down.
 fn big_run() -> Run {
-    Run {
-        program: Program::Source("x".repeat(16 * 1024 * 1024)),
-        script_name: "<test>".into(),
-        caps: GrantStack::root(),
-        wall: None,
-        deferred_lease: None,
-        worker_cap: None,
-        io: RunIo::Capture,
-        terminal: RequestedTerminalAccess::Denied,
-        stdin: RunStdin::Empty,
-        trail: None,
-    }
+    Run::captured("x".repeat(16 * 1024 * 1024), "<test>")
 }
 
 /// A generous bound against dev-fleet jitter, still an order of magnitude
@@ -163,12 +153,8 @@ fn liveness_refresh_cannot_mask_a_write_stall() {
         dispatcher.dispatch(DispatchId(1), big_run(), &no_seam());
     });
 
-    let deadline = Instant::now() + BOUND;
-    while transport.severed().is_none() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(10));
-    }
     assert!(
-        transport.severed().is_some(),
+        eventually(BOUND, || transport.severed()).is_some(),
         "a stalled write must still declare death despite continuous read-side traffic"
     );
 }
@@ -188,12 +174,8 @@ fn no_well_formed_frame_follows_a_severed_write() {
         dispatcher.dispatch(DispatchId(1), big_run(), &no_seam());
     });
 
-    let deadline = Instant::now() + BOUND;
-    while transport.severed().is_none() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(10));
-    }
     assert!(
-        transport.severed().is_some(),
+        eventually(BOUND, || transport.severed()).is_some(),
         "setup: the stalled write must declare death"
     );
 

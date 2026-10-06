@@ -9,8 +9,10 @@
 //! and the natives seeded, before any handle exists.
 
 use super::Shell;
-use crate::serial::opaque;
+use crate::first_order::Opaque;
 use crate::types::{Binding, Closure, Env, List, Map, Value};
+use std::convert::Infallible;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 impl Shell {
@@ -34,7 +36,6 @@ impl Shell {
                 *v = scrubbed;
             }
         }
-        fork.context.hooks.clear();
         fork
     }
 }
@@ -123,7 +124,7 @@ impl Scrub {
     /// If `v` holds a closure over an unsettled scope (see [`Self::replacement`]).
     fn rebuild(&self, v: &Value) -> Option<Value> {
         match v {
-            Value::Handle(_) => Some(Value::from(opaque(v))),
+            Value::Handle(_) => Some(Value::from(Opaque::Handle.placeholder())),
             Value::List(items) => match items.literal_parts() {
                 Some((node, env)) => {
                     let env = self.replacement(env)?;
@@ -215,40 +216,20 @@ fn patched<C: Clone, K, V>(
 /// Push the environment of every closure `v` holds, through data and a
 /// native's applied arguments, never entering a closure.
 fn captured_scopes(v: &Value, out: &mut Vec<Env>) {
-    match v {
-        Value::Thunk(closure) => out.push(closure.env().clone()),
-        Value::List(items) => match items.literal_parts() {
-            Some((_, env)) => out.push(env.clone()),
-            None => {
-                for item in items {
-                    captured_scopes(&item, out);
-                }
-            }
-        },
-        Value::Map(entries) => match entries.literal_parts() {
-            Some((_, env)) => out.push(env.clone()),
-            None => {
-                for (_, item) in entries {
-                    captured_scopes(&item, out);
-                }
-            }
-        },
-        Value::Variant {
-            payload: Some(p), ..
-        } => captured_scopes(p, out),
-        Value::Native { applied, .. } => {
-            for arg in applied {
-                captured_scopes(arg, out);
-            }
+    let capture = match v {
+        Value::Thunk(closure) => Some(closure.env()),
+        Value::List(items) => items.literal_parts().map(|(_, env)| env),
+        Value::Map(entries) => entries.literal_parts().map(|(_, env)| env),
+        _ => None,
+    };
+    match capture {
+        Some(env) => out.push(env.clone()),
+        None => {
+            let ControlFlow::Continue(()) = v.try_for_each_child::<Infallible>(&mut |c| {
+                captured_scopes(c, out);
+                ControlFlow::Continue(())
+            });
         }
-        Value::Variant { payload: None, .. }
-        | Value::Unit
-        | Value::Bool(_)
-        | Value::Int(_)
-        | Value::Float(_)
-        | Value::String(_)
-        | Value::Bytes(_)
-        | Value::Handle(_) => {}
     }
 }
 
@@ -258,12 +239,12 @@ mod tests {
     use crate::types::{block_over, captured, idle_handle};
 
     fn is_placeholder(v: Option<&Value>) -> bool {
-        matches!(v, Some(Value::Variant { label, .. }) if label.as_ref() == crate::serial::OPAQUE_TAG)
+        matches!(v, Some(Value::Variant { label, .. }) if label.as_ref() == crate::first_order::OPAQUE_TAG)
     }
 
     #[test]
     fn a_handle_free_scope_forks_as_itself() {
-        let mut parent = Shell::default();
+        let mut parent = crate::test_helper::core_shell();
         parent.set_var("big".into(), Value::string("x".repeat(1 << 20)));
         parent.set_var(
             "list".into(),
@@ -282,7 +263,7 @@ mod tests {
 
     #[test]
     fn a_handle_is_scrubbed_through_every_block_and_nothing_else_is_copied() {
-        let mut parent = Shell::default();
+        let mut parent = crate::test_helper::core_shell();
         parent.set_var("live".into(), idle_handle());
         let blocks = ["b1", "b2", "b3"];
         for name in blocks {
@@ -323,7 +304,7 @@ mod tests {
     /// memo takes 2^40 steps.
     #[test]
     fn a_chain_of_definitions_is_walked_once_per_scope() {
-        let mut parent = Shell::default();
+        let mut parent = crate::test_helper::core_shell();
         for i in 0..40 {
             let blk = block_over(&parent.env);
             parent.set_var(format!("d{i}"), blk);
@@ -340,7 +321,7 @@ mod tests {
     #[test]
     fn a_deep_chain_over_a_handle_scrubs_to_its_foot() {
         const LINKS: usize = 10_000;
-        let mut parent = Shell::default();
+        let mut parent = crate::test_helper::core_shell();
         parent.set_var(
             "chain".into(),
             crate::types::deep_block_chain(LINKS, idle_handle()),

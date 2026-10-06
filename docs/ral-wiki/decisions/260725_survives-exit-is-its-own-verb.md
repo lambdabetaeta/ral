@@ -157,7 +157,7 @@ drops it. Nothing on the shutdown path sleeps, flushes, or waits: `Egress`,
 have no `Drop`.
 
 Note also that this run used `--base dangerous`
-(`exarch/data/dangerous.exarch.ral`), so `core/src/capability/sandbox.rs:60-62`
+(`exarch/data/dangerous.exarch.ral`), so `SandboxProjection::of` (`core/src/sandbox/projection.rs`)
 returned `None` and no bwrap envelope existed —
 `core/src/sandbox/linux.rs:64`'s `--die-with-parent` never applied. Under a
 sandboxed base the kill would be deterministic and immediate, by a completely

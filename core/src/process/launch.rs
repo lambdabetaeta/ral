@@ -17,7 +17,7 @@ pub(crate) use windows::RawChild;
 
 #[cfg(not(windows))]
 pub(crate) struct Launch {
-    cmd: std::process::Command,
+    pub(super) cmd: std::process::Command,
     jail: Option<crate::process::jail::JailCgroup>,
     envelope: Option<Envelope>,
 }
@@ -275,11 +275,6 @@ impl Launch {
     }
 
     #[cfg(unix)]
-    pub(crate) fn limit_resources(&mut self) {
-        crate::sandbox::limit_resources(&mut self.cmd);
-    }
-
-    #[cfg(unix)]
     pub(crate) fn dup_stdout_to_stderr(&mut self) {
         use std::os::unix::process::CommandExt;
         unsafe {
@@ -321,7 +316,7 @@ impl Launch {
     ///
     /// # Errors
     /// The `fork`/`exec` itself, or the pre-exec `setpgid`/`setsid` that
-    /// `process::signal::spawn_with_pgid` installs.
+    /// `process::group::spawn_with_pgid` installs.
     pub fn spawn(
         &mut self,
         pgid: crate::process::PgidPolicy,
@@ -363,7 +358,7 @@ impl Launch {
     /// A failed fork or `execve`, or a pid handshake that comes up short.
     #[cfg(unix)]
     pub(crate) fn spawn_detached(&mut self) -> std::io::Result<u32> {
-        crate::process::signal::spawn_detached(&mut self.cmd)
+        crate::process::group::spawn_detached(&mut self.cmd)
     }
 }
 
@@ -390,7 +385,7 @@ impl Launch {
     /// re-set here, exactly as on the non-Windows arm.
     #[allow(
         dead_code,
-        reason = "shape, not use: every caller of the pair — `pipeline::helper::self_reexec`, `sandbox::launch` — is `cfg(unix)` or Linux/macOS-only today, and both arms present one signature for the day one is not"
+        reason = "shape, not use: every caller of the pair (`sandbox::reexec::launch`, `sandbox::launch`) is `cfg(unix)` or Linux/macOS-only today, and both arms present one signature for the day one is not"
     )]
     #[allow(
         clippy::needless_pass_by_value,
@@ -690,14 +685,14 @@ mod windows {
         policy: PgidPolicy,
     ) -> io::Result<(ChildHandle, Option<Pgid>)> {
         reject_batch(&launch.program)?;
-        let prepared = crate::process::signal::prepare_group(policy)?;
+        let prepared = crate::process::group::prepare_group(policy)?;
         match spawn_inner(launch, policy, &prepared) {
             Ok(child) => {
-                let pgid = crate::process::signal::register_prepared_group(prepared, &child);
+                let pgid = crate::process::group::register_prepared_group(prepared, &child);
                 Ok((child, pgid))
             }
             Err(err) => {
-                crate::process::signal::close_prepared_group(prepared);
+                crate::process::group::close_prepared_group(prepared);
                 Err(err)
             }
         }
@@ -706,7 +701,7 @@ mod windows {
     fn spawn_inner(
         launch: &mut Launch,
         policy: PgidPolicy,
-        prepared: &crate::process::signal::PreparedGroup,
+        prepared: &crate::process::group::PreparedGroup,
     ) -> io::Result<ChildHandle> {
         let stdin = ChildStdio::lower(
             std::mem::replace(&mut launch.stdin, StdioSpec::Null),
@@ -778,7 +773,7 @@ mod windows {
         ) {
             flags |= CREATE_NEW_PROCESS_GROUP;
         }
-        if crate::process::signal::prepared_job(prepared).is_some() {
+        if crate::process::group::prepared_job(prepared).is_some() {
             flags |= CREATE_SUSPENDED;
         }
 
@@ -806,7 +801,7 @@ mod windows {
 
         let process = OwnedHandleGuard(pi.hProcess);
         let thread = OwnedHandleGuard(pi.hThread);
-        if let Some(job) = crate::process::signal::prepared_job(prepared) {
+        if let Some(job) = crate::process::group::prepared_job(prepared) {
             let assigned = unsafe { AssignProcessToJobObject(job, process.0) };
             if assigned == 0 {
                 unsafe {
@@ -854,7 +849,7 @@ mod windows {
                     "refusing to launch '{}': .bat/.cmd images are not supported on the \
                      raw Windows launch path. ral will not synthesize a `cmd /c` wrapper \
                      to run it, because batch-file argument quoting has no safe general \
-                     encoding (the CVE-2024-24576 class of bug) — a crafted argument could \
+                     encoding (the CVE-2024-24576 class of bug): a crafted argument could \
                      inject additional commands through cmd.exe's own escaping rules. Invoke \
                      the batch file through cmd.exe yourself if you accept that risk, or run \
                      the underlying program directly.",

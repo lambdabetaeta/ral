@@ -27,7 +27,8 @@ use common::fresh_shell;
 
 use ral_core::Break;
 use ral_core::builtins::CORE_BUILTINS;
-use ral_core::typecheck::{CompTy, Grade, Row, Ty, Unifier};
+use ral_core::ty::{CompTy, Grade, Row, Ty};
+use ral_core::typecheck::Unifier;
 use ral_core::types::{Map, Mooring, Value};
 
 /// Builtins whose reducer reaches a resource a bare in-test call cannot
@@ -66,7 +67,7 @@ fn inhabitant(ty: &Ty) -> Option<Value> {
         Ty::Unit => Value::Unit,
         Ty::Bool => Value::Bool(true),
         Ty::Int | Ty::Var(_) => Value::Int(1),
-        Ty::Float => Value::Float(1.5),
+        Ty::Float => Value::Float(ral_core::first_order::Finite::new(1.5).expect("finite")),
         Ty::String => Value::string("ab"),
         Ty::Bytes => Value::bytes(vec![1, 2]),
         Ty::List(elem) => Value::list(vec![inhabitant(elem)?, inhabitant(elem)?]),
@@ -131,7 +132,7 @@ fn arg_and_return_types(u: &mut Unifier, ty: &Ty) -> Option<(Vec<Ty>, Ty)> {
 #[test]
 fn every_scheme_reducer_inhabits_its_return_type() {
     for entry in CORE_BUILTINS {
-        let name = entry.name.as_ref();
+        let name = entry.decl.name.as_ref();
         if RESOURCE_BACKED.iter().any(|(n, _)| *n == name) {
             continue;
         }
@@ -205,7 +206,7 @@ fn every_scheme_pairs_a_grade_with_one_value_type() {
         .chain(ral_core::builtins::BOUNDARY_BUILTINS)
         .chain(std::iter::once(&echo));
     for entry in rows {
-        let name = entry.name.as_ref();
+        let name = entry.decl.name.as_ref();
         let mut u = Unifier::new();
         let scheme = ral_core::test_access::builtin_scheme(entry, &mut u);
         let mut found = Vec::new();

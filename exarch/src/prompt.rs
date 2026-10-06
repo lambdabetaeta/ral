@@ -5,7 +5,7 @@ pub mod host;
 
 use crate::cli::EditScheme;
 use crate::shell_eval::skill;
-use ral_core::types::{Capabilities, ExecKey, GrantStack};
+use ral_core::capability::{Capabilities, ExecKey, GrantStack};
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
@@ -153,7 +153,7 @@ pub(crate) struct BuiltinIndex {
 }
 
 impl BuiltinIndex {
-    /// `builtins` is the engine's own table, as `reading::builtin_names`
+    /// `builtins` is the engine's own table, as `Transport::builtin_names`
     /// reads it.
     pub(crate) fn resolve(builtins: Vec<String>) -> std::sync::Arc<Self> {
         let prelude = ral_core::builtins::help::prelude_names()
@@ -190,7 +190,7 @@ impl BuiltinIndex {
             .filter(|n| !withheld(n))
             .collect();
         format!(
-            "Every builtin and prelude function, by name — call `explain <name>` for any one's signature and docs:\n\n{}",
+            "Every builtin and prelude function, by name: call `explain <name>` for any one's signature and docs:\n\n{}",
             names.join(", ")
         )
     }
@@ -310,7 +310,7 @@ pub fn render(sections: &[(Option<&str>, String)]) -> String {
 /// alone — synod's engine lives in a guest VM where none of them hold, so it
 /// builds its own around the shared [`grant_summary`].
 pub fn host_section(caps: &GrantStack, app: crate::bootstrap::App) -> String {
-    let state = app.xdg_dir(ral_core::path::basedir::XdgKind::State);
+    let state = app.xdg_dir(ral_core::host::XdgKind::State);
     let scratch_line = format!("`${}` = {SCRATCH_PLACEHOLDER}", app.scratch_var());
     format!(
         "You are an agent named '{NAME_PLACEHOLDER}'.\n\n{}\n{}",
@@ -346,7 +346,7 @@ fn stack_summary(stack: &GrantStack, scratch_line: &str) -> String {
 /// The live grant: a static legend teaching the notation and the runtime
 /// denial string, then one effect per line.
 ///
-/// `None` is "unrestricted" — no attenuation at this layer — and an empty
+/// `None` is "unrestricted" (no attenuation at this layer) and an empty
 /// container "(none)".
 ///
 /// `scratch_line` is the right-hand side of the `- scratch:` bullet, left to

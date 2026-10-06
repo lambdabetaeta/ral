@@ -11,12 +11,13 @@
 
 use super::error::{CycleVia, KindFound, TypeErrorKind};
 use super::generalize::{FreeVars, free_ty};
-use super::kind::{Head, Kind};
-use super::scheme::WeakVars;
-use super::ty::{CompTy, CompTyVar, Grade, GradeVar, Label, Row, RowVar, Ty, TyVar};
 use crate::source::Span;
+use crate::ty::{
+    CompTy, CompTyVar, Grade, GradeVar, Head, Kind, Label, Row, RowVar, Term, Ty, TyVar, WeakVars,
+};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 /// What made a variable weak, so a mismatch on it can say which use shares it.
@@ -30,34 +31,43 @@ pub(crate) enum WeakSource {
     Residual,
 }
 
-/// Cycle-tracking state, threaded through `apply_*` here and `free_*` in
-/// `generalize.rs`.  `tys`/`comps` are a stack for `apply_*` and a set for
-/// `free_*`, whose collection is idempotent.  A root that proves cyclic goes
+/// Cycle-tracking state, threaded through `apply_*` and `reach`.  `tys`/`comps`
+/// are a stack for `apply_*` and a set for `reach`, whose visits are
+/// idempotent.  A root that proves cyclic goes
 /// into `cyclic_*` and stays visited for the rest of the call, so siblings
 /// sharing that subtree keep getting back-edges — while a non-cyclic root stays
 /// out, letting a sibling `τ → Int` root re-resolve to `Int`.
 #[derive(Default)]
 pub(super) struct Visited {
-    pub(crate) tys: HashSet<u32>,
-    pub(crate) comps: HashSet<u32>,
-    cyclic_tys: HashSet<u32>,
-    cyclic_comps: HashSet<u32>,
+    pub(crate) tys: HashSet<TyVar>,
+    pub(crate) comps: HashSet<CompTyVar>,
+    cyclic_tys: HashSet<TyVar>,
+    cyclic_comps: HashSet<CompTyVar>,
     /// Leave a weak variable as itself instead of what it was fixed to.
     keep_weak: bool,
+}
+
+/// A variable met on a walk, at its root.
+#[derive(Clone, Copy)]
+pub(super) enum Var {
+    Ty(TyVar),
+    Comp(CompTyVar),
+    Row(RowVar),
+    Grade(GradeVar),
 }
 
 /// The free variables a `data` obligation lands on.
 #[derive(Default)]
 struct Owed {
-    tys: Vec<u32>,
-    rows: Vec<u32>,
+    tys: Vec<TyVar>,
+    rows: Vec<RowVar>,
 }
 
 /// The variable a binding must not reach again without crossing data.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Anchor {
-    Ty(u32),
-    Comp(u32),
+    Ty(TyVar),
+    Comp(CompTyVar),
 }
 
 /// Where the data-free search starts: the structure about to be bound.
@@ -75,10 +85,10 @@ enum Reach<'a> {
 /// `Var`-vs-structure, never as a `Var`/`Var` pair.
 #[derive(Default)]
 struct Pairs {
-    tys: HashSet<(u32, u32)>,
-    comps: HashSet<(u32, u32)>,
-    ty_expansions: HashSet<(u32, TyKey)>,
-    comp_expansions: HashSet<(u32, CompTyKey)>,
+    tys: HashSet<(TyVar, TyVar)>,
+    comps: HashSet<(CompTyVar, CompTyVar)>,
+    ty_expansions: HashSet<(TyVar, TyKey)>,
+    comp_expansions: HashSet<(CompTyVar, CompTyKey)>,
 }
 
 /// Ceiling on *true nesting depth*: descents into a strictly deeper subterm.
@@ -117,7 +127,7 @@ enum TyKey {
     Variant(RowKey),
     Thunk(Box<CompTyKey>),
     Handle(Box<Self>),
-    Var(u32),
+    Var(TyVar),
 }
 
 /// Fingerprint of a computation type.  See [`TyKey`].  The grade is stored
@@ -126,89 +136,81 @@ enum TyKey {
 enum CompTyKey {
     Return(Grade, Box<TyKey>),
     Fun(Box<TyKey>, Box<Self>),
-    Var(u32),
+    Var(CompTyVar),
 }
 
 /// Fingerprint of a row spine.  See [`TyKey`].
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum RowKey {
     Empty,
-    Var(u32),
+    Var(RowVar),
     Extend(Label, Box<TyKey>, Box<Self>),
 }
 
+/// A union-find variable of one sort: the id and nothing else, so a root of
+/// one store cannot index another's.
+trait VarId: Copy + Eq + std::hash::Hash {
+    fn raw(self) -> u32;
+    fn new(raw: u32) -> Self;
+}
+
+macro_rules! var_id {
+    ($($var:ident),*) => {$(
+        impl VarId for $var {
+            fn raw(self) -> u32 {
+                self.0
+            }
+            fn new(raw: u32) -> Self {
+                Self(raw)
+            }
+        }
+    )*};
+}
+var_id!(TyVar, CompTyVar, RowVar, GradeVar);
+
+/// A sort with variables in a union-find store: `as_var` projects the variable
+/// out of a bare one, `from_root` rebuilds one at a canonical root.
+trait Unifiable: Clone {
+    type Var: VarId;
+    fn as_var(&self) -> Option<Self::Var>;
+    fn from_root(root: Self::Var) -> Self;
+}
+
+macro_rules! unifiable {
+    ($($ty:ident => $var:ident),*) => {$(
+        impl Unifiable for $ty {
+            type Var = $var;
+            fn as_var(&self) -> Option<$var> {
+                match self {
+                    Self::Var(v) => Some(*v),
+                    _ => None,
+                }
+            }
+            fn from_root(root: $var) -> Self {
+                Self::Var(root)
+            }
+        }
+    )*};
+}
+unifiable!(Ty => TyVar, CompTy => CompTyVar, Row => RowVar, Grade => GradeVar);
+
 #[derive(Clone)]
-enum Slot<T> {
+enum Slot<T: Unifiable> {
     Free,
     Bound(T),
-    Parent(u32),
+    Parent(T::Var),
 }
 
 #[derive(Clone)]
-struct Store<T> {
+struct Store<T: Unifiable> {
     slots: Vec<Slot<T>>,
     next: u32,
     /// Roots that are weak: permanent for the unit, and inherited by whatever
     /// a weak variable is united with.
-    weak: HashMap<u32, WeakSource>,
+    weak: HashMap<T::Var, WeakSource>,
 }
 
-/// A sort with variables in a union-find store: `as_var` projects the id out of
-/// a bare variable, `from_root` rebuilds one at a canonical root.
-trait Unifiable: Clone {
-    fn as_var(&self) -> Option<u32>;
-    fn from_root(root: u32) -> Self;
-}
-
-impl Unifiable for Ty {
-    fn as_var(&self) -> Option<u32> {
-        match self {
-            Self::Var(TyVar(i)) => Some(*i),
-            _ => None,
-        }
-    }
-    fn from_root(root: u32) -> Self {
-        Self::Var(TyVar(root))
-    }
-}
-
-impl Unifiable for CompTy {
-    fn as_var(&self) -> Option<u32> {
-        match self {
-            Self::Var(CompTyVar(i)) => Some(*i),
-            _ => None,
-        }
-    }
-    fn from_root(root: u32) -> Self {
-        Self::Var(CompTyVar(root))
-    }
-}
-
-impl Unifiable for Row {
-    fn as_var(&self) -> Option<u32> {
-        match self {
-            Self::Var(RowVar(i)) => Some(*i),
-            _ => None,
-        }
-    }
-    fn from_root(root: u32) -> Self {
-        Self::Var(RowVar(root))
-    }
-}
-
-impl Unifiable for Grade {
-    fn as_var(&self) -> Option<u32> {
-        match self {
-            Self::Var(GradeVar(i)) => Some(*i),
-            _ => None,
-        }
-    }
-    fn from_root(root: u32) -> Self {
-        Self::Var(GradeVar(root))
-    }
-}
-
-impl<T: Clone> Store<T> {
+impl<T: Unifiable> Store<T> {
     fn new() -> Self {
         Self {
             slots: Vec::new(),
@@ -217,47 +219,47 @@ impl<T: Clone> Store<T> {
         }
     }
 
-    fn fresh(&mut self) -> u32 {
+    fn fresh(&mut self) -> T::Var {
         let id = self.next;
         self.next += 1;
         self.slots.push(Slot::Free);
-        id
+        T::Var::new(id)
     }
 
-    fn find(&mut self, i: u32) -> u32 {
+    fn find(&mut self, v: T::Var) -> T::Var {
         // Out-of-range ids belong to a foreign unifier — cached prelude schemes
         // loaded into a fresh `InferCtx`.  Treat them as free.
-        if i as usize >= self.slots.len() {
-            return i;
+        if v.raw() as usize >= self.slots.len() {
+            return v;
         }
-        match self.slots[i as usize] {
+        match self.slots[v.raw() as usize] {
             Slot::Parent(p) => {
                 let r = self.find(p);
-                self.slots[i as usize] = Slot::Parent(r);
+                self.slots[v.raw() as usize] = Slot::Parent(r);
                 r
             }
-            _ => i,
+            _ => v,
         }
     }
 
     /// [`Self::find`] without path compression, for the read-only traversals.
-    fn root(&self, mut i: u32) -> u32 {
-        while let Some(&Slot::Parent(p)) = self.slots.get(i as usize) {
-            i = p;
+    fn root(&self, mut v: T::Var) -> T::Var {
+        while let Some(&Slot::Parent(p)) = self.slots.get(v.raw() as usize) {
+            v = p;
         }
-        i
+        v
     }
 
-    fn get_ref(&self, i: u32) -> Option<&T> {
-        match self.slots.get(self.root(i) as usize)? {
+    fn get_ref(&self, v: T::Var) -> Option<&T> {
+        match self.slots.get(self.root(v).raw() as usize)? {
             Slot::Bound(t) => Some(t),
             _ => None,
         }
     }
 
-    /// Grow to cover `i`: cached prelude vars can arrive above a fresh `next`.
-    fn ensure(&mut self, i: u32) {
-        let needed = (i as usize) + 1;
+    /// Grow to cover `v`: cached prelude vars can arrive above a fresh `next`.
+    fn ensure(&mut self, v: T::Var) {
+        let needed = (v.raw() as usize) + 1;
         if needed > self.slots.len() {
             self.slots.resize_with(needed, || Slot::Free);
             #[allow(
@@ -270,17 +272,17 @@ impl<T: Clone> Store<T> {
         }
     }
 
-    fn bind(&mut self, i: u32, val: T) {
-        self.ensure(i);
-        self.slots[i as usize] = Slot::Bound(val);
+    fn bind(&mut self, v: T::Var, val: T) {
+        self.ensure(v);
+        self.slots[v.raw() as usize] = Slot::Bound(val);
     }
 
-    fn union(&mut self, a: u32, b: u32) {
-        self.ensure(a.max(b));
-        self.slots[a as usize] = Slot::Parent(b);
+    fn union(&mut self, a: T::Var, b: T::Var) {
+        self.ensure(T::Var::new(a.raw().max(b.raw())));
+        self.slots[a.raw() as usize] = Slot::Parent(b);
     }
 
-    fn unite(&mut self, a: u32, b: u32) {
+    fn unite(&mut self, a: T::Var, b: T::Var) {
         if a == b {
             return;
         }
@@ -294,30 +296,28 @@ impl<T: Clone> Store<T> {
         }
     }
 
-    fn mark_weak(&mut self, i: u32, source: WeakSource) {
-        let root = self.find(i);
+    fn mark_weak(&mut self, v: T::Var, source: WeakSource) {
+        let root = self.find(v);
         self.weak.entry(root).or_insert(source);
     }
 
-    fn weak_source(&self, i: u32) -> Option<&WeakSource> {
-        self.weak.get(&self.root(i))
+    fn weak_source(&self, v: T::Var) -> Option<&WeakSource> {
+        self.weak.get(&self.root(v))
     }
 
-    fn is_weak(&self, i: u32) -> bool {
-        self.weak_source(i).is_some()
+    fn is_weak(&self, v: T::Var) -> bool {
+        self.weak_source(v).is_some()
     }
-}
 
-impl<T: Unifiable> Store<T> {
     /// Follow a variable chain to canonical form.  The walk stops at the first
     /// non-variable head, so variables nested inside it — a cyclic binding's
     /// back-edges — survive untouched.  The head is borrowed; only a free
     /// variable is rebuilt, at its root.
     fn resolve<'a>(&'a self, x: &'a T) -> Cow<'a, T> {
         match x.as_var() {
-            Some(i) => match self.get_ref(i) {
+            Some(v) => match self.get_ref(v) {
                 Some(b) => self.resolve(b),
-                None => Cow::Owned(T::from_root(self.root(i))),
+                None => Cow::Owned(T::from_root(self.root(v))),
             },
             None => Cow::Borrowed(x),
         }
@@ -339,12 +339,12 @@ pub struct Unifier {
     /// Grades are atomic and never weak: no kind, no cycle, no `weak` entry.
     grades: Store<Grade>,
     /// The kind of each free type-variable root, where not `any`.
-    kinds: HashMap<u32, Kinded>,
+    kinds: HashMap<TyVar, Kinded>,
     /// The free row-variable roots that are deep, with the span that made them so.
-    deep_rows: HashMap<u32, Option<Span>>,
+    deep_rows: HashMap<RowVar, Option<Span>>,
     /// The span in force when a type-variable root was first bound to a
     /// structure: the use that imposed it.
-    bound_at: HashMap<u32, Span>,
+    bound_at: HashMap<TyVar, Span>,
     /// The span in force: the witness of any kind a unification narrows.
     pub(crate) at: Option<Span>,
 }
@@ -364,24 +364,24 @@ impl Unifier {
     }
 
     pub fn fresh_tyvar(&mut self) -> TyVar {
-        TyVar(self.tys.fresh())
+        self.tys.fresh()
     }
     pub(crate) fn fresh_ty(&mut self) -> Ty {
         Ty::Var(self.fresh_tyvar())
     }
 
     pub(crate) fn fresh_comp_ty(&mut self) -> CompTy {
-        CompTy::Var(CompTyVar(self.ctys.fresh()))
+        CompTy::Var(self.ctys.fresh())
     }
     pub fn fresh_row_var(&mut self) -> RowVar {
-        RowVar(self.rows.fresh())
+        self.rows.fresh()
     }
     pub(crate) fn fresh_row(&mut self) -> Row {
         Row::Var(self.fresh_row_var())
     }
 
     pub fn fresh_grade_var(&mut self) -> GradeVar {
-        GradeVar(self.grades.fresh())
+        self.grades.fresh()
     }
     pub(crate) fn fresh_grade(&mut self) -> Grade {
         Grade::Var(self.fresh_grade_var())
@@ -394,7 +394,7 @@ impl Unifier {
     /// Bind a free grade variable.  Its root is taken here, so the caller
     /// may hand in any variable of the class.
     pub(crate) fn bind_grade(&mut self, v: GradeVar, grade: Grade) {
-        let root = self.grades.find(v.0);
+        let root = self.grades.find(v);
         self.grades.bind(root, grade);
     }
 
@@ -403,7 +403,7 @@ impl Unifier {
     fn unify_grade(&mut self, a: Grade, b: Grade) -> bool {
         match (self.resolve_grade(a), self.resolve_grade(b)) {
             (Grade::Var(x), Grade::Var(y)) => {
-                self.grades.unite(x.0, y.0);
+                self.grades.unite(x, y);
                 true
             }
             (Grade::Var(v), grade) | (grade, Grade::Var(v)) => {
@@ -418,7 +418,7 @@ impl Unifier {
     pub(crate) fn fresh_kinded_var(&mut self, kind: Kind) -> TyVar {
         let v = self.fresh_tyvar();
         self.install_kind(
-            v.0,
+            v,
             Kinded {
                 kind,
                 witness: self.at,
@@ -434,17 +434,17 @@ impl Unifier {
     pub(crate) fn fresh_deep_row_var(&mut self, deep: bool) -> RowVar {
         let v = self.fresh_row_var();
         if deep {
-            self.deep_rows.insert(v.0, self.at);
+            self.deep_rows.insert(v, self.at);
         }
         v
     }
 
     /// The kind a free variable carries, and the span that narrowed it.
     pub(crate) fn kinded(&self, v: TyVar) -> Kinded {
-        self.kind_at(self.tys.root(v.0))
+        self.kind_at(self.tys.root(v))
     }
 
-    fn kind_at(&self, root: u32) -> Kinded {
+    fn kind_at(&self, root: TyVar) -> Kinded {
         self.kinds.get(&root).copied().unwrap_or(Kinded {
             kind: Kind::ANY,
             witness: None,
@@ -452,17 +452,17 @@ impl Unifier {
     }
 
     pub(crate) fn is_deep_row(&self, v: RowVar) -> bool {
-        self.deep_rows.contains_key(&self.rows.root(v.0))
+        self.deep_rows.contains_key(&self.rows.root(v))
     }
 
     /// The use that fixed the structure a type-variable root stands for.
-    pub(crate) fn bound_witness(&self, root: u32) -> Option<Span> {
+    pub(crate) fn bound_witness(&self, root: TyVar) -> Option<Span> {
         self.bound_at.get(&root).copied()
     }
 
     /// Record `kinded` on a free root.  A meet that leaves one nullary head
     /// makes the variable that type.
-    fn install_kind(&mut self, root: u32, kinded: Kinded) {
+    fn install_kind(&mut self, root: TyVar, kinded: Kinded) {
         match kinded.kind.pin() {
             Some(ty) => {
                 self.kinds.remove(&root);
@@ -477,7 +477,7 @@ impl Unifier {
         }
     }
 
-    fn unite_tys(&mut self, a: u32, b: u32) -> Result<(), TypeErrorKind> {
+    fn unite_tys(&mut self, a: TyVar, b: TyVar) -> Result<(), TypeErrorKind> {
         let (ar, br) = (self.tys.find(a), self.tys.find(b));
         if ar == br {
             return Ok(());
@@ -504,7 +504,7 @@ impl Unifier {
         Ok(())
     }
 
-    fn unite_rows(&mut self, a: u32, b: u32) {
+    fn unite_rows(&mut self, a: RowVar, b: RowVar) {
         let (ar, br) = (self.rows.find(a), self.rows.find(b));
         if ar == br {
             return;
@@ -519,7 +519,7 @@ impl Unifier {
     /// Narrow a free variable to the meet of its kind and `kind`.
     fn narrow(
         &mut self,
-        root: u32,
+        root: TyVar,
         kind: Kind,
         witness: Option<Span>,
     ) -> Result<(), TypeErrorKind> {
@@ -557,7 +557,7 @@ impl Unifier {
 
     /// Whether `val` may become the structure `root` stands for: its head is
     /// one the kind admits, and a deep kind's components are data.
-    fn admit(&mut self, root: u32, val: &Ty, depth: u32) -> Result<(), TypeErrorKind> {
+    fn admit(&mut self, root: TyVar, val: &Ty, depth: u32) -> Result<(), TypeErrorKind> {
         let Some(Kinded { kind, witness }) = self.kinds.get(&root).copied() else {
             return Ok(());
         };
@@ -575,7 +575,7 @@ impl Unifier {
     }
 
     /// The same, for a deep row variable about to become `val`.
-    fn admit_row(&mut self, root: u32, val: &Row, depth: u32) -> Result<(), TypeErrorKind> {
+    fn admit_row(&mut self, root: RowVar, val: &Row, depth: u32) -> Result<(), TypeErrorKind> {
         let Some(&witness) = self.deep_rows.get(&root) else {
             return Ok(());
         };
@@ -593,18 +593,18 @@ impl Unifier {
         &self,
         ty: &Ty,
         witness: Option<Span>,
-        seen: &mut HashSet<u32>,
+        seen: &mut HashSet<TyVar>,
         owed: &mut Owed,
         depth: u32,
     ) -> Result<(), TypeErrorKind> {
-        if let Ty::Var(TyVar(i)) = ty
-            && !seen.insert(self.tys.root(*i))
+        if let Ty::Var(v) = ty
+            && !seen.insert(self.tys.root(*v))
         {
             return Ok(());
         }
         let depth = deeper(depth)?;
         match &*self.head_ty(ty) {
-            Ty::Var(v) => owed.tys.push(v.0),
+            Ty::Var(v) => owed.tys.push(*v),
             Ty::Unit | Ty::Bool | Ty::Int | Ty::Float | Ty::String | Ty::Bytes => {}
             Ty::List(a) | Ty::Map(a) => self.data_ty(a, witness, seen, owed, depth)?,
             Ty::Record(r) | Ty::Variant(r) => self.data_row(r, witness, seen, owed, depth)?,
@@ -619,14 +619,14 @@ impl Unifier {
         &self,
         row: &Row,
         witness: Option<Span>,
-        seen: &mut HashSet<u32>,
+        seen: &mut HashSet<TyVar>,
         owed: &mut Owed,
         depth: u32,
     ) -> Result<(), TypeErrorKind> {
         match &*self.head_row(row) {
             Row::Empty => Ok(()),
             Row::Var(v) => {
-                owed.rows.push(v.0);
+                owed.rows.push(*v);
                 Ok(())
             }
             Row::Extend(_, ty, rest) => {
@@ -653,59 +653,59 @@ impl Unifier {
         let mut fvs = FreeVars::new();
         free_ty(self, ty, &mut fvs);
         for v in &fvs.tys {
-            self.tys.mark_weak(v.0, source.clone());
+            self.tys.mark_weak(*v, source.clone());
         }
         for v in &fvs.comps {
-            self.ctys.mark_weak(v.0, source.clone());
+            self.ctys.mark_weak(*v, source.clone());
         }
         for v in &fvs.rows {
-            self.rows.mark_weak(v.0, source.clone());
+            self.rows.mark_weak(*v, source.clone());
         }
     }
 
     pub(crate) fn mark_weak_vars(&mut self, weak: &WeakVars) {
         for v in weak.tys.keys() {
-            self.tys.mark_weak(v.0, WeakSource::Residual);
+            self.tys.mark_weak(*v, WeakSource::Residual);
         }
         for v in &weak.comps {
-            self.ctys.mark_weak(v.0, WeakSource::Residual);
+            self.ctys.mark_weak(*v, WeakSource::Residual);
         }
         for v in weak.rows.keys() {
-            self.rows.mark_weak(v.0, WeakSource::Residual);
+            self.rows.mark_weak(*v, WeakSource::Residual);
         }
     }
 
     fn weak_var(&self, ty: &Ty) -> Option<WeakSource> {
         match ty {
-            Ty::Var(v) => self.tys.weak_source(v.0).cloned(),
+            Ty::Var(v) => self.tys.weak_source(*v).cloned(),
             _ => None,
         }
     }
 
     fn weak_row_var(&self, row: &Row) -> Option<WeakSource> {
         match row {
-            Row::Var(v) => self.rows.weak_source(v.0).cloned(),
+            Row::Var(v) => self.rows.weak_source(*v).cloned(),
             _ => None,
         }
     }
 
     fn weak_comp_var(&self, cty: &CompTy) -> Option<WeakSource> {
         match cty {
-            CompTy::Var(v) => self.ctys.weak_source(v.0).cloned(),
+            CompTy::Var(v) => self.ctys.weak_source(*v).cloned(),
             _ => None,
         }
     }
 
     pub(crate) fn is_weak_ty(&self, v: TyVar) -> bool {
-        self.tys.is_weak(v.0)
+        self.tys.is_weak(v)
     }
 
     pub(crate) fn is_weak_comp(&self, v: CompTyVar) -> bool {
-        self.ctys.is_weak(v.0)
+        self.ctys.is_weak(v)
     }
 
     pub(crate) fn is_weak_row(&self, v: RowVar) -> bool {
-        self.rows.is_weak(v.0)
+        self.rows.is_weak(v)
     }
 
     /// Whether a weak variable stands anywhere in `ty`, bound ones included:
@@ -716,94 +716,121 @@ impl Unifier {
 
     /// What made the first weak variable in `ty` weak, bound ones included.
     pub(crate) fn weak_source_in_ty(&self, ty: &Ty) -> Option<WeakSource> {
-        self.weak_in_ty(ty, &mut Visited::default())
+        self.weak_source_in(Term::Ty(ty))
     }
 
     pub(crate) fn weak_source_in_comp(&self, cty: &CompTy) -> Option<WeakSource> {
-        self.weak_in_comp(cty, &mut Visited::default())
+        self.weak_source_in(Term::Comp(cty))
     }
 
-    fn weak_in_ty(&self, ty: &Ty, seen: &mut Visited) -> Option<WeakSource> {
-        match ty {
-            Ty::Var(v) => {
-                let root = self.tys.root(v.0);
-                self.tys.weak_source(root).cloned().or_else(|| {
-                    seen.tys
-                        .insert(root)
-                        .then(|| self.tys.get_ref(root))
-                        .flatten()
-                        .and_then(|b| self.weak_in_ty(b, seen))
-                })
+    fn weak_source_in(&self, term: Term<'_>) -> Option<WeakSource> {
+        let mut weak = |var: Var| match self.weak_source_of(var) {
+            Some(source) => ControlFlow::Break(source.clone()),
+            None => ControlFlow::Continue(()),
+        };
+        self.reach(term, &mut Visited::default(), &mut weak)
+            .break_value()
+    }
+
+    fn weak_source_of(&self, var: Var) -> Option<&WeakSource> {
+        match var {
+            Var::Ty(v) => self.tys.weak_source(v),
+            Var::Comp(v) => self.ctys.weak_source(v),
+            Var::Row(v) => self.rows.weak_source(v),
+            Var::Grade(_) => None,
+        }
+    }
+
+    /// The variable `term` is, at its root.
+    fn var_of(&self, term: Term<'_>) -> Option<Var> {
+        match term {
+            Term::Ty(Ty::Var(v)) => Some(Var::Ty(self.tys.root(*v))),
+            Term::Comp(CompTy::Var(v)) => Some(Var::Comp(self.ctys.root(*v))),
+            Term::Row(Row::Var(v)) => Some(Var::Row(self.rows.root(*v))),
+            _ => None,
+        }
+    }
+
+    /// Whether `var`, a root, stands for nothing yet.
+    pub(super) fn is_unbound(&self, var: Var) -> bool {
+        match var {
+            Var::Ty(v) => self.tys.get_ref(v).is_none(),
+            Var::Comp(v) => self.ctys.get_ref(v).is_none(),
+            Var::Row(v) => self.rows.get_ref(v).is_none(),
+            Var::Grade(_) => true,
+        }
+    }
+
+    /// Where a walk goes from `term`: through a bound variable to what it is
+    /// bound to, otherwise into its sub-terms.
+    fn successors<'a>(&'a self, term: Term<'a>) -> impl Iterator<Item = Term<'a>> {
+        let binding = match self.var_of(term) {
+            Some(Var::Ty(v)) => self.tys.get_ref(v).map(Term::Ty),
+            Some(Var::Comp(v)) => self.ctys.get_ref(v).map(Term::Comp),
+            Some(Var::Row(v)) => self.rows.get_ref(v).map(Term::Row),
+            _ => None,
+        };
+        binding.into_iter().chain(term.children())
+    }
+
+    /// Every variable reachable from `term`, bound ones included, at each
+    /// occurrence; `visit` may stop the walk.  Each type or computation root is
+    /// followed to its binding once, so a cycle ends at its back-edge.
+    pub(super) fn reach<'a, B>(
+        &'a self,
+        term: Term<'a>,
+        seen: &mut Visited,
+        visit: &mut impl FnMut(Var) -> ControlFlow<B>,
+    ) -> ControlFlow<B> {
+        if let Term::Comp(CompTy::Return(grade, _)) = term
+            && let Grade::Var(v) = self.resolve_grade(*grade)
+        {
+            visit(Var::Grade(v))?;
+        }
+        if let Some(var) = self.var_of(term) {
+            visit(var)?;
+            let first = match var {
+                Var::Ty(v) => seen.tys.insert(v),
+                Var::Comp(v) => seen.comps.insert(v),
+                Var::Row(_) | Var::Grade(_) => true,
+            };
+            if !first {
+                return ControlFlow::Continue(());
             }
-            Ty::List(a) | Ty::Map(a) | Ty::Handle(a) => self.weak_in_ty(a, seen),
-            Ty::Record(r) | Ty::Variant(r) => self.weak_in_row(r, seen),
-            Ty::Thunk(b) => self.weak_in_comp(b, seen),
-            Ty::Unit | Ty::Bytes | Ty::Bool | Ty::Int | Ty::Float | Ty::String => None,
         }
-    }
-
-    fn weak_in_comp(&self, cty: &CompTy, seen: &mut Visited) -> Option<WeakSource> {
-        match cty {
-            CompTy::Var(v) => {
-                let root = self.ctys.root(v.0);
-                self.ctys.weak_source(root).cloned().or_else(|| {
-                    seen.comps
-                        .insert(root)
-                        .then(|| self.ctys.get_ref(root))
-                        .flatten()
-                        .and_then(|b| self.weak_in_comp(b, seen))
-                })
-            }
-            CompTy::Return(_, a) => self.weak_in_ty(a, seen),
-            CompTy::Fun(a, b) => self
-                .weak_in_ty(a, seen)
-                .or_else(|| self.weak_in_comp(b, seen)),
-        }
-    }
-
-    fn weak_in_row(&self, row: &Row, seen: &mut Visited) -> Option<WeakSource> {
-        match row {
-            Row::Empty => None,
-            Row::Var(v) => self.rows.weak_source(v.0).cloned().or_else(|| {
-                self.rows
-                    .get_ref(v.0)
-                    .and_then(|b| self.weak_in_row(b, seen))
-            }),
-            Row::Extend(_, ty, rest) => self
-                .weak_in_ty(ty, seen)
-                .or_else(|| self.weak_in_row(rest, seen)),
-        }
+        self.successors(term)
+            .try_for_each(|next| self.reach(next, seen, visit))
     }
 
     /// Canonical comp-var root under union-find, for the cycle-aware traversals
     /// in `generalize.rs`.
-    pub(crate) fn comp_root(&self, i: u32) -> u32 {
-        self.ctys.root(i)
+    pub(crate) fn comp_root(&self, v: CompTyVar) -> CompTyVar {
+        self.ctys.root(v)
     }
 
     /// Canonical ty-var root under union-find.  Mirror of `comp_root`.
-    pub(crate) fn ty_root(&self, i: u32) -> u32 {
-        self.tys.root(i)
+    pub(crate) fn ty_root(&self, v: TyVar) -> TyVar {
+        self.tys.root(v)
     }
 
-    /// A fresh comp-var slot, as a root id.  Instantiation mints one per cyclic
+    /// A fresh comp-var slot, as a root.  Instantiation mints one per cyclic
     /// comp-var so each use of a recursive scheme gets independent slots.
-    pub(crate) fn fresh_comp_root(&mut self) -> u32 {
+    pub(crate) fn fresh_comp_root(&mut self) -> CompTyVar {
         self.ctys.fresh()
     }
 
     /// Mirror of `fresh_comp_root` for cyclic ty bindings.
-    pub(crate) fn fresh_ty_root(&mut self) -> u32 {
+    pub(crate) fn fresh_ty_root(&mut self) -> TyVar {
         self.tys.fresh()
     }
 
     /// Pairs with `fresh_comp_root`: the scheme's snapshot, substituted.
-    pub(crate) fn bind_comp_root(&mut self, root: u32, value: CompTy) {
+    pub(crate) fn bind_comp_root(&mut self, root: CompTyVar, value: CompTy) {
         self.ctys.bind(root, value);
     }
 
     /// Mirror of `bind_comp_root` for cyclic ty bindings.
-    pub(crate) fn bind_ty_root(&mut self, root: u32, value: Ty) {
+    pub(crate) fn bind_ty_root(&mut self, root: TyVar, value: Ty) {
         self.tys.bind(root, value);
     }
 
@@ -812,18 +839,18 @@ impl Unifier {
     /// the root*, never the stored body: one level below the anchor unrolls the
     /// cycle before the back-edge fires, so the snapshot comes out off by a
     /// level and leaks the original union-find slot there.
-    pub(crate) fn resolved_comp_root_binding(&self, root: u32) -> Option<CompTy> {
+    pub(crate) fn resolved_comp_root_binding(&self, root: CompTyVar) -> Option<CompTy> {
         match self.ctys.get_ref(root) {
             Some(CompTy::Var(_)) | None => None,
-            Some(_) => Some(self.apply_comp_ty(&CompTy::Var(CompTyVar(root)))),
+            Some(_) => Some(self.apply_comp_ty(&CompTy::Var(root))),
         }
     }
 
     /// Mirror of `resolved_comp_root_binding`; the same anchor-quoting applies.
-    pub(crate) fn resolved_ty_root_binding(&self, root: u32) -> Option<Ty> {
+    pub(crate) fn resolved_ty_root_binding(&self, root: TyVar) -> Option<Ty> {
         match self.tys.get_ref(root) {
             Some(Ty::Var(_)) | None => None,
-            Some(_) => Some(self.apply_ty(&Ty::Var(TyVar(root)))),
+            Some(_) => Some(self.apply_ty(&Ty::Var(root))),
         }
     }
 
@@ -831,11 +858,11 @@ impl Unifier {
     /// the traversal's tags, not its output: a mid-cycle root is tagged on
     /// detection but need not surface as a back-edge.  One walk populates both
     /// tag sets, so `generalize` asks once and reads both.
-    pub(super) fn cyclic_roots_in_ty(&self, ty: &Ty) -> (Vec<u32>, Vec<u32>) {
+    pub(super) fn cyclic_roots_in_ty(&self, ty: &Ty) -> (Vec<CompTyVar>, Vec<TyVar>) {
         let mut visited = Visited::default();
         let _applied = self.apply_ty_inner(ty, &mut visited);
-        let mut comps: Vec<u32> = visited.cyclic_comps.into_iter().collect();
-        let mut tys: Vec<u32> = visited.cyclic_tys.into_iter().collect();
+        let mut comps: Vec<CompTyVar> = visited.cyclic_comps.into_iter().collect();
+        let mut tys: Vec<TyVar> = visited.cyclic_tys.into_iter().collect();
         comps.sort_unstable();
         tys.sort_unstable();
         (comps, tys)
@@ -923,34 +950,34 @@ impl Unifier {
         // cycle truly anchored at a ty-var reaches a `Variant`, not a `Thunk`,
         // and takes the plain fallback.
         let root = match ty {
-            Ty::Var(TyVar(i)) => Some(self.tys.root(*i)),
+            Ty::Var(v) => Some(self.tys.root(*v)),
             _ => None,
         };
         if let Some(r) = root {
             if visited.cyclic_tys.contains(&r) {
-                return Ty::Var(TyVar(r));
+                return Ty::Var(r);
             }
             if visited.tys.contains(&r) {
                 // Match the raw binding, not `resolve_comp_ty` of it: the
                 // anchor is `C`'s root, not whatever `C` resolves to now.
                 if let Some(Ty::Thunk(b)) = self.tys.get_ref(r)
-                    && let CompTy::Var(CompTyVar(ci)) = **b
+                    && let CompTy::Var(c) = **b
                 {
-                    let c_root = self.ctys.root(ci);
+                    let c_root = self.ctys.root(c);
                     if visited.comps.contains(&c_root) {
                         visited.cyclic_comps.insert(c_root);
-                        return Ty::Thunk(Box::new(CompTy::Var(CompTyVar(c_root))));
+                        return Ty::Thunk(Box::new(CompTy::Var(c_root)));
                     }
                 }
                 visited.cyclic_tys.insert(r);
-                return Ty::Var(TyVar(r));
+                return Ty::Var(r);
             }
         }
         if visited.keep_weak
             && let Some(r) = root
             && self.tys.is_weak(r)
         {
-            return Ty::Var(TyVar(r));
+            return Ty::Var(r);
         }
         let resolved = self.head_ty(ty);
         if matches!(&*resolved, Ty::Var(_)) {
@@ -960,8 +987,8 @@ impl Unifier {
             visited.tys.insert(r);
         }
         let out = match &*resolved {
-            Ty::List(a) => Ty::List(Box::new(self.apply_ty_inner(a, visited))),
-            Ty::Map(a) => Ty::Map(Box::new(self.apply_ty_inner(a, visited))),
+            Ty::List(a) => Ty::list(self.apply_ty_inner(a, visited)),
+            Ty::Map(a) => Ty::map(self.apply_ty_inner(a, visited)),
             Ty::Handle(a) => Ty::Handle(Box::new(self.apply_ty_inner(a, visited))),
             Ty::Record(r) => Ty::Record(self.apply_row_inner(r, visited)),
             Ty::Variant(r) => Ty::Variant(self.apply_row_inner(r, visited)),
@@ -986,23 +1013,23 @@ impl Unifier {
         // cycle traverses both, so every root currently expanding belongs to it
         // and must enter its bindings list to be given a fresh id later.
         let root = match cty {
-            CompTy::Var(CompTyVar(i)) => Some(self.ctys.root(*i)),
+            CompTy::Var(v) => Some(self.ctys.root(*v)),
             _ => None,
         };
         if let Some(r) = root {
             if visited.comps.contains(&r) {
                 visited.cyclic_comps.insert(r);
-                return CompTy::Var(CompTyVar(r));
+                return CompTy::Var(r);
             }
             if visited.cyclic_comps.contains(&r) {
-                return CompTy::Var(CompTyVar(r));
+                return CompTy::Var(r);
             }
         }
         if visited.keep_weak
             && let Some(r) = root
             && self.ctys.is_weak(r)
         {
-            return CompTy::Var(CompTyVar(r));
+            return CompTy::Var(r);
         }
         let resolved = self.head_comp_ty(cty);
         if matches!(&*resolved, CompTy::Var(_)) {
@@ -1034,10 +1061,10 @@ impl Unifier {
 
     fn apply_row_inner(&self, row: &Row, visited: &mut Visited) -> Row {
         if visited.keep_weak
-            && let Row::Var(RowVar(i)) = row
-            && self.rows.is_weak(*i)
+            && let Row::Var(v) = row
+            && self.rows.is_weak(*v)
         {
-            return Row::Var(RowVar(self.rows.root(*i)));
+            return Row::Var(self.rows.root(*v));
         }
         match &*self.head_row(row) {
             Row::Empty => Row::Empty,
@@ -1089,7 +1116,7 @@ impl Unifier {
         depth: u32,
     ) -> Result<bool, TypeErrorKind> {
         let root = match ty {
-            Ty::Var(TyVar(i)) => Some(self.tys.root(*i)),
+            Ty::Var(v) => Some(self.tys.root(*v)),
             _ => None,
         };
         if let Some(r) = root
@@ -1119,7 +1146,7 @@ impl Unifier {
         depth: u32,
     ) -> Result<bool, TypeErrorKind> {
         let root = match cty {
-            CompTy::Var(CompTyVar(i)) => Some(self.ctys.root(*i)),
+            CompTy::Var(v) => Some(self.ctys.root(*v)),
             _ => None,
         };
         if let Some(r) = root
@@ -1154,7 +1181,7 @@ impl Unifier {
             Ty::Variant(r) => TyKey::Variant(self.row_key(r, deeper(depth)?)?),
             Ty::Thunk(c) => TyKey::Thunk(Box::new(self.comp_key(c, deeper(depth)?)?)),
             Ty::Handle(a) => TyKey::Handle(Box::new(self.ty_key(a, deeper(depth)?)?)),
-            Ty::Var(TyVar(i)) => TyKey::Var(self.tys.find(*i)),
+            Ty::Var(i) => TyKey::Var(self.tys.find(*i)),
         })
     }
 
@@ -1168,14 +1195,14 @@ impl Unifier {
                 Box::new(self.ty_key(a, deeper(depth)?)?),
                 Box::new(self.comp_key(b, deeper(depth)?)?),
             ),
-            CompTy::Var(CompTyVar(i)) => CompTyKey::Var(self.ctys.find(*i)),
+            CompTy::Var(i) => CompTyKey::Var(self.ctys.find(*i)),
         })
     }
 
     fn row_key(&mut self, row: &Row, depth: u32) -> Result<RowKey, TypeErrorKind> {
         Ok(match row {
             Row::Empty => RowKey::Empty,
-            Row::Var(RowVar(i)) => RowKey::Var(self.rows.find(*i)),
+            Row::Var(i) => RowKey::Var(self.rows.find(*i)),
             Row::Extend(l, ty, rest) => RowKey::Extend(
                 l.clone(),
                 Box::new(self.ty_key(ty, deeper(depth)?)?),
@@ -1203,7 +1230,7 @@ impl Unifier {
         depth: u32,
     ) -> Result<(), TypeErrorKind> {
         match (a, b) {
-            (Ty::Var(TyVar(ai)), Ty::Var(TyVar(bi))) => {
+            (Ty::Var(ai), Ty::Var(bi)) => {
                 let (ar, br) = (self.tys.find(*ai), self.tys.find(*bi));
                 if guard_pair(&mut pairs.tys, ar, br) {
                     return Ok(());
@@ -1211,7 +1238,7 @@ impl Unifier {
             }
             // One-sided, which is how a value-anchored cycle meets its
             // comp-anchored twin: the two never present as `Var`/`Var`.
-            (Ty::Var(TyVar(vi)), other) | (other, Ty::Var(TyVar(vi))) => {
+            (Ty::Var(vi), other) | (other, Ty::Var(vi)) => {
                 let (root, key) = (self.tys.find(*vi), self.ty_key(other, depth)?);
                 if guard_expansion(&mut pairs.ty_expansions, root, key) {
                     return Ok(());
@@ -1224,17 +1251,17 @@ impl Unifier {
         let a = self.resolve_ty(a);
         let b = self.resolve_ty(b);
 
-        if let (Ty::Var(TyVar(ai)), Ty::Var(TyVar(bi))) = (&a, &b) {
+        if let (Ty::Var(ai), Ty::Var(bi)) = (&a, &b) {
             return self.unite_tys(*ai, *bi);
         }
         // Unified with a weak variable, even one already fixed, is weak.
-        if let Ty::Var(TyVar(vi)) = &a {
+        if let Ty::Var(vi) = &a {
             if let Some(source) = b_weak {
                 self.tys.mark_weak(*vi, source);
             }
             return self.bind_ty(*vi, b, depth);
         }
-        if let Ty::Var(TyVar(vi)) = &b {
+        if let Ty::Var(vi) = &b {
             if let Some(source) = a_weak {
                 self.tys.mark_weak(*vi, source);
             }
@@ -1284,7 +1311,7 @@ impl Unifier {
     /// Bind `v`'s root to the structure `val`, unless `val` reaches it without
     /// crossing data.  Var–var unions cannot close a cycle, so binding is the
     /// only place one can form.
-    fn bind_ty(&mut self, v: u32, val: Ty, depth: u32) -> Result<(), TypeErrorKind> {
+    fn bind_ty(&mut self, v: TyVar, val: Ty, depth: u32) -> Result<(), TypeErrorKind> {
         let root = self.tys.find(v);
         self.refuse_data_free_cycle(Anchor::Ty(root), Reach::Ty(&val), depth)?;
         self.admit(root, &val, depth)?;
@@ -1299,13 +1326,13 @@ impl Unifier {
     }
 
     /// A weak row variable bound to a spine: what the spine mentions is weak too.
-    fn weaken_row(&mut self, root: u32, spine: &Row) {
+    fn weaken_row(&mut self, root: RowVar, spine: &Row) {
         if let Some(source) = self.rows.weak_source(root).cloned() {
             self.mark_weak(&Ty::Record(spine.clone()), &source);
         }
     }
 
-    fn bind_comp_ty(&mut self, v: u32, val: CompTy, depth: u32) -> Result<(), TypeErrorKind> {
+    fn bind_comp_ty(&mut self, v: CompTyVar, val: CompTy, depth: u32) -> Result<(), TypeErrorKind> {
         let root = self.ctys.find(v);
         self.refuse_data_free_cycle(Anchor::Comp(root), Reach::Comp(&val), depth)?;
         if let Some(source) = self.ctys.weak_source(root).cloned() {
@@ -1343,7 +1370,7 @@ impl Unifier {
         visited: &mut Visited,
         depth: u32,
     ) -> Result<Option<CycleVia>, TypeErrorKind> {
-        if let Ty::Var(TyVar(i)) = ty {
+        if let Ty::Var(i) = ty {
             let root = self.tys.root(*i);
             if anchor == Anchor::Ty(root) {
                 return Ok(Some(via));
@@ -1370,7 +1397,7 @@ impl Unifier {
         visited: &mut Visited,
         depth: u32,
     ) -> Result<Option<CycleVia>, TypeErrorKind> {
-        if let CompTy::Var(CompTyVar(i)) = cty {
+        if let CompTy::Var(i) = cty {
             let root = self.ctys.root(*i);
             if anchor == Anchor::Comp(root) {
                 return Ok(Some(via));
@@ -1458,16 +1485,16 @@ impl Unifier {
         loop {
             // Only the rows as given can be weak variables fixed to a spine.
             let (a_weak, b_weak) = std::mem::take(&mut entry_weak);
-            if let (Row::Var(RowVar(ai)), Row::Var(RowVar(bi))) = (&a, &b) {
+            if let (Row::Var(ai), Row::Var(bi)) = (&a, &b) {
                 self.unite_rows(*ai, *bi);
                 return Ok(());
             }
-            if let Row::Var(RowVar(vi)) = &a {
+            if let Row::Var(vi) = &a {
                 let vi = *vi;
                 if let Some(source) = b_weak {
                     self.rows.mark_weak(vi, source);
                 }
-                if self.row_occurs(RowVar(vi), &b, depth)? {
+                if self.row_occurs(vi, &b, depth)? {
                     return Err(TypeErrorKind::RecursiveRow);
                 }
                 let r = self.rows.find(vi);
@@ -1476,12 +1503,12 @@ impl Unifier {
                 self.rows.bind(r, b);
                 return Ok(());
             }
-            if let Row::Var(RowVar(vi)) = &b {
+            if let Row::Var(vi) = &b {
                 let vi = *vi;
                 if let Some(source) = a_weak {
                     self.rows.mark_weak(vi, source);
                 }
-                if self.row_occurs(RowVar(vi), &a, depth)? {
+                if self.row_occurs(vi, &a, depth)? {
                     return Err(TypeErrorKind::RecursiveRow);
                 }
                 let r = self.rows.find(vi);
@@ -1576,14 +1603,14 @@ impl Unifier {
         depth: u32,
     ) -> Result<(), TypeErrorKind> {
         match (a, b) {
-            (CompTy::Var(CompTyVar(ai)), CompTy::Var(CompTyVar(bi))) => {
+            (CompTy::Var(ai), CompTy::Var(bi)) => {
                 let (ar, br) = (self.ctys.find(*ai), self.ctys.find(*bi));
                 if guard_pair(&mut pairs.comps, ar, br) {
                     return Ok(());
                 }
             }
             // One-sided: the comp half of the anchoring mismatch, `F T ~= C`.
-            (CompTy::Var(CompTyVar(vi)), other) | (other, CompTy::Var(CompTyVar(vi))) => {
+            (CompTy::Var(vi), other) | (other, CompTy::Var(vi)) => {
                 let (root, key) = (self.ctys.find(*vi), self.comp_key(other, depth)?);
                 if guard_expansion(&mut pairs.comp_expansions, root, key) {
                     return Ok(());
@@ -1596,17 +1623,17 @@ impl Unifier {
         let a = self.resolve_comp_ty(a);
         let b = self.resolve_comp_ty(b);
 
-        if let (CompTy::Var(CompTyVar(ai)), CompTy::Var(CompTyVar(bi))) = (&a, &b) {
+        if let (CompTy::Var(ai), CompTy::Var(bi)) = (&a, &b) {
             self.ctys.unite(*ai, *bi);
             return Ok(());
         }
-        if let CompTy::Var(CompTyVar(vi)) = &a {
+        if let CompTy::Var(vi) = &a {
             if let Some(source) = b_weak {
                 self.ctys.mark_weak(*vi, source);
             }
             return self.bind_comp_ty(*vi, b, depth);
         }
-        if let CompTy::Var(CompTyVar(vi)) = &b {
+        if let CompTy::Var(vi) = &b {
             if let Some(source) = a_weak {
                 self.ctys.mark_weak(*vi, source);
             }
@@ -1656,19 +1683,19 @@ impl Default for Unifier {
 }
 
 /// Order a root pair so `(a, b)` and `(b, a)` key the same guard entry.
-fn ordered_pair(a: u32, b: u32) -> (u32, u32) {
+fn ordered_pair<V: Ord>(a: V, b: V) -> (V, V) {
     if a <= b { (a, b) } else { (b, a) }
 }
 
 /// Symmetric obligation: two var roots.  `true` when in progress or coincident.
-fn guard_pair(seen: &mut HashSet<(u32, u32)>, a: u32, b: u32) -> bool {
+fn guard_pair<V: Ord + std::hash::Hash>(seen: &mut HashSet<(V, V)>, a: V, b: V) -> bool {
     a == b || !seen.insert(ordered_pair(a, b))
 }
 
 /// One-sided obligation: a var root against a key.  `true` when in progress.
-fn guard_expansion<K: Eq + std::hash::Hash>(
-    seen: &mut HashSet<(u32, K)>,
-    root: u32,
+fn guard_expansion<V: Eq + std::hash::Hash, K: Eq + std::hash::Hash>(
+    seen: &mut HashSet<(V, K)>,
+    root: V,
     key: K,
 ) -> bool {
     !seen.insert((root, key))
@@ -1709,14 +1736,14 @@ mod tests {
         let mut u = Unifier::new();
 
         let t = u.fresh_tyvar();
-        let t_root = u.ty_root(t.0);
+        let t_root = u.ty_root(t);
         let t_body = step(CompTy::pure(Ty::Var(t)));
         u.bind_ty_root(t_root, t_body);
 
-        let CompTy::Var(CompTyVar(c_root)) = u.fresh_comp_ty() else {
+        let CompTy::Var(c_root) = u.fresh_comp_ty() else {
             unreachable!("fresh_comp_ty yields a Var")
         };
-        let step_c = step(CompTy::Var(CompTyVar(c_root)));
+        let step_c = step(CompTy::Var(c_root));
         u.bind_comp_root(c_root, CompTy::pure(step_c.clone()));
 
         u.unify_ty(&Ty::Var(t), &step_c)
@@ -1771,10 +1798,10 @@ mod tests {
     fn a_cycle_through_data_is_accepted() {
         let mut u = Unifier::new();
         let t = u.fresh_tyvar();
-        let body = Ty::List(Box::new(Ty::Thunk(Box::new(CompTy::Fun(
+        let body = Ty::list(Ty::Thunk(Box::new(CompTy::Fun(
             Box::new(Ty::Var(t)),
             Box::new(CompTy::pure(Ty::Unit)),
-        )))));
+        ))));
         u.unify_ty(&Ty::Var(t), &body)
             .expect("a cycle through a list is a legitimate recursive type");
     }
@@ -1783,7 +1810,7 @@ mod tests {
     fn deep_list(n: u32) -> Ty {
         let mut ty = Ty::Int;
         for _ in 0..n {
-            ty = Ty::List(Box::new(ty));
+            ty = Ty::list(ty);
         }
         ty
     }
@@ -2109,7 +2136,10 @@ mod tests {
     #[test]
     fn an_empty_meet_is_refused_citing_both_witnesses() {
         let mut u = Unifier::new();
-        let (first, second) = (Span::synthetic(), Span::new(FileId::DUMMY, 3, 9));
+        let (first, second) = (
+            Span::point(FileId::DUMMY, 0),
+            Span::new(FileId::DUMMY, 3, 9),
+        );
         u.at = Some(first);
         let a = u.fresh_kinded(Kind::NUMBER);
         u.at = Some(second);
@@ -2143,7 +2173,7 @@ mod tests {
         let mut u = Unifier::new();
         let data = u.fresh_kinded(Kind::DATA);
         let elem = u.fresh_ty();
-        u.unify_ty(&data, &Ty::List(Box::new(elem.clone())))
+        u.unify_ty(&data, &Ty::list(elem.clone()))
             .expect("a list of something");
         assert_eq!(kind_of(&u, &elem), Kind::DATA);
         let block = Ty::Thunk(Box::new(CompTy::pure(Ty::Int)));
@@ -2157,7 +2187,7 @@ mod tests {
         let mut u = Unifier::new();
         let data = u.fresh_kinded(Kind::DATA);
         let block = Ty::Thunk(Box::new(CompTy::pure(Ty::Int)));
-        kind_refusal(u.unify_ty(&data, &Ty::List(Box::new(block))));
+        kind_refusal(u.unify_ty(&data, &Ty::list(block)));
     }
 
     #[test]
@@ -2199,7 +2229,7 @@ mod tests {
     fn a_deep_kind_over_a_data_cycle_terminates() {
         let mut u = Unifier::new();
         let data = u.fresh_kinded(Kind::DATA);
-        u.unify_ty(&data, &Ty::Map(Box::new(data.clone())))
+        u.unify_ty(&data, &Ty::map(data.clone()))
             .expect("a map of itself is data all the way down");
         let other = u.fresh_kinded(Kind::DATA);
         u.unify_ty(&other, &data).expect("the same tree, twice");

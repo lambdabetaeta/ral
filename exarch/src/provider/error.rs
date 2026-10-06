@@ -380,7 +380,7 @@ fn root_cause(err: &(dyn std::error::Error + 'static)) -> Option<String> {
 
 /// The error-detail object inside a provider JSON body.  Providers wrap
 /// differently — `OpenAI` nests the detail under `error`, Anthropic sends
-/// `{"type":"error","error":{…}}` — so this is the single home of the
+/// `{"type":"error","error":{…}}`: so this is the single home of the
 /// nest-or-flat convention, read by classification, by
 /// [`ProviderError::summary`], and by the TUI's structured renderer alike.
 pub(crate) fn error_object(

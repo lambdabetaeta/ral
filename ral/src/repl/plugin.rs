@@ -35,11 +35,12 @@ pub(super) use self::router::{KeyChord, KeyName, KeyRouter, Resolution};
 pub(super) use self::router::parse_key_notation;
 
 use ral_core::HookName;
+use ral_core::carrier::Transport;
 use ral_core::errln;
-use ral_core::protocol::Transport;
-use ral_core::serial::FOValue;
-use ral_core::serial::datum::Datum;
+use ral_core::first_order::FOValue;
+use ral_core::first_order::datum::Datum;
 use ral_core::sync::LockExt as _;
+use ral_core::ty::{Ty, Typed};
 use std::time::Duration;
 
 use self::editor::{EditorState, HighlightSpan, PluginContext};
@@ -65,11 +66,11 @@ pub(super) fn lock(m: &Arc<Mutex<PluginRuntime>>) -> MutexGuard<'_, PluginRuntim
 /// display site that reports it owns any prefix, so it appears at most once.
 /// Shared by the loader, the unloader, and the manifest parser.
 pub(super) fn load_err(msg: impl std::fmt::Display) -> ral_core::types::Error {
-    ral_core::types::Error::new(msg.to_string(), 1)
+    ral_core::types::Error::new(msg.to_string())
 }
 
 /// Which keymap the editor is in — the frontend-neutral reduction of
-/// rustyline's `EditMode`, and the rc `edit_mode:` key's value.
+/// rustyline's `EditMode`, and the rc `edit-mode:` key's value.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum Keymap {
     #[default]
@@ -83,6 +84,12 @@ impl From<Keymap> for EditMode {
             Keymap::Vi => Self::Vi,
             Keymap::Emacs => Self::Emacs,
         }
+    }
+}
+
+impl Typed for Keymap {
+    fn ty() -> Ty {
+        Ty::String
     }
 }
 
@@ -317,7 +324,7 @@ pub(super) fn run_buffer_change_hooks(
         let state_cell = lock(runtime).state_cell(&name);
         let arg = FOValue::Map {
             entries: vec![
-                ("old_buf".into(), old_buf.clone().encode()),
+                ("old-buf".into(), old_buf.clone().encode()),
                 ("line".into(), line.to_string().encode()),
                 (
                     "pos".into(),

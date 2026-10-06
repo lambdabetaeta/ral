@@ -68,7 +68,7 @@ pub fn check_name(name: &str) -> Result<(), String> {
     }
     Err(format!(
         "`name` must be non-empty, at most 24 characters, and only ASCII letters, digits, `-`, \
-         or `_` (the tab-bar contract) — got {name:?}"
+         or `_` (the tab-bar contract); got {name:?}"
     ))
 }
 
@@ -115,7 +115,7 @@ impl Launch {
             bureau: Arc::new(Bureau::Scripted),
             system: Arc::from(""),
             index: BuiltinIndex::resolve(
-                ral_core::Shell::new(ral_core::io::TerminalState::default())
+                ral_core::test_helper::core_shell()
                     .builtin_names()
                     .map(str::to_string)
                     .collect(),
@@ -278,7 +278,7 @@ impl fmt::Display for Unborn {
             Self::SessionDead => write!(f, "this session is no longer live"),
             Self::NameTaken(name) => write!(
                 f,
-                "a live agent already bears the name '{name}' — pick another, or wait for it \
+                "a live agent already bears the name '{name}': pick another, or wait for it \
                  to settle"
             ),
             Self::NameMalformed(why) => write!(f, "{why}"),
@@ -306,7 +306,7 @@ fn lease_fire(fleet: &Arc<Fleet>, agent: &Weak<Agent>) {
     let idle = agent.idle();
     match ttl.checked_sub(idle) {
         Some(margin) if !margin.is_zero() => arm_lease(fleet, &agent, margin),
-        _ => agent.cancel_tree(CancelCause::Deadline),
+        _ => agent.cancel_tree(CancelCause::TimedOut),
     }
 }
 
@@ -315,24 +315,13 @@ mod tests {
     use super::*;
     use crate::agent::cancel::InterruptTarget;
     use crate::agent::cancel::Token;
-    use crate::agent::testkit::source_run;
     use crate::agent::testkit::{TestAgentSpec, bare_transport, test_agent};
     use crate::bus::{AgentOutcome, AgentResult, Inbox, Item, Next, ParkMode, Post, Stamped};
-    use ral_core::protocol::{IdentityTransport, Transport as _};
+    use ral_core::carrier::{IdentityTransport, Transport as _};
+    // The reaper fires on its own daemon thread, so a lease test asserts
+    // against wall time rather than a synchronous call.
+    use ral_core::test_helper::eventually;
     use std::time::Instant;
-
-    /// The reaper fires on its own daemon thread, so a lease test asserts
-    /// against wall time rather than a synchronous call.
-    fn eventually(timeout: Duration, pred: impl Fn() -> bool) -> bool {
-        let start = Instant::now();
-        while start.elapsed() < timeout {
-            if pred() {
-                return true;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        false
-    }
 
     /// A root (`parent` `None`) or a reporting child, with handles no test
     /// below inspects.  The caller holds the only strong reference: dropping
@@ -359,7 +348,9 @@ mod tests {
 
     /// The cause `engine`'s durable root was cancelled with, as its status.
     fn ended(engine: &IdentityTransport) -> Option<i32> {
-        ral_core::protocol::reading::session_ended(engine).expect("an identity transport answers")
+        engine
+            .session_ended()
+            .expect("an identity transport answers")
     }
 
     /// A lease is a consequence of having a reporting parent, and of nothing
@@ -376,7 +367,7 @@ mod tests {
         let _worker = born(&fleet, worker).expect("a fresh child of a live trunk");
 
         assert!(
-            eventually(Duration::from_secs(2), || ended(&worker_engine).is_some()),
+            eventually(Duration::from_secs(2), || ended(&worker_engine)).is_some(),
             "a reporting child is reaped once the bound elapses"
         );
         std::thread::sleep(Duration::from_millis(300));
@@ -421,7 +412,7 @@ mod tests {
         let trunk = agent(&fleet, "trunk", None);
         let child = agent(&fleet, "child", Some(&trunk));
 
-        trunk.cancel_descendants(CancelCause::Explicit);
+        trunk.cancel_descendants(CancelCause::Cancelled);
 
         assert!(
             child.token.terminated(),
@@ -435,7 +426,7 @@ mod tests {
         // A stamped terminate cause would survive this round trip and an
         // uncancelled token does not, so this proves the trunk carries no
         // terminate cause at all — not merely that this call skipped it.
-        trunk.token.cancel(CancelCause::Interrupt);
+        trunk.token.cancel(CancelCause::Interrupted);
         trunk.token.reset();
         assert!(
             !trunk.token.is_cancelled(),
@@ -456,7 +447,7 @@ mod tests {
         let branch = born(&fleet, branch).expect("a fresh child of a live trunk");
         let grandchild = agent(&fleet, "grandchild", Some(&branch));
 
-        branch.cancel_tree(CancelCause::Explicit);
+        branch.cancel_tree(CancelCause::Cancelled);
 
         assert!(
             branch.token.is_cancelled(),
@@ -514,7 +505,8 @@ mod tests {
     /// it: never `eval_root`, so the agent's *next* run is born uncancelled.
     #[test]
     fn interrupt_never_poisons_the_next_run() {
-        use ral_core::protocol::{Ending, Report, dispatch_to_report};
+        use ral_core::carrier::dispatch_to_report;
+        use ral_core::protocol::{Ending, Report};
 
         let fleet = Fleet::for_test();
         let trunk = agent(&fleet, "trunk", None);
@@ -526,7 +518,11 @@ mod tests {
         let running = {
             let transport = transport.clone();
             std::thread::spawn(move || {
-                dispatch_to_report(&*transport, source_run("sleep 30"), Arc::new(()))
+                dispatch_to_report(
+                    &*transport,
+                    ral_core::protocol::Run::captured("sleep 30", "<test>"),
+                    Arc::new(()),
+                )
             })
         };
         let deadline = Instant::now() + std::time::Duration::from_secs(10);
@@ -543,8 +539,12 @@ mod tests {
             .expect("the dispatch must not panic")
             .expect("identity never severs");
 
-        let next = dispatch_to_report(&*transport, source_run("$[1 + 1]"), Arc::new(()))
-            .expect("identity never severs");
+        let next = dispatch_to_report(
+            &*transport,
+            ral_core::protocol::Run::captured("$[1 + 1]", "<test>"),
+            Arc::new(()),
+        )
+        .expect("identity never severs");
         assert!(
             matches!(
                 next,
@@ -553,7 +553,7 @@ mod tests {
                     ..
                 }
             ),
-            "the next run is born uncancelled — the interrupt never poisoned eval_root: {next:?}"
+            "the next run is born uncancelled: the interrupt never poisoned eval_root: {next:?}"
         );
     }
 
@@ -576,7 +576,7 @@ mod tests {
             "the listing is the reader's whole tree, itself among them"
         );
 
-        lint.cancel_tree(CancelCause::Explicit);
+        lint.cancel_tree(CancelCause::Cancelled);
         assert!(lint.token.is_cancelled(), "cancel sets the token");
         assert!(
             ended(&engine).is_some(),
@@ -592,7 +592,7 @@ mod tests {
         let grandchild = agent(&fleet, "g", Some(&child));
         let sibling = agent(&fleet, "s", Some(&root));
 
-        child.cancel_tree(CancelCause::Explicit);
+        child.cancel_tree(CancelCause::Cancelled);
 
         assert!(child.token.is_cancelled(), "the cancelled node");
         assert!(grandchild.token.is_cancelled(), "its descendant cascades");
@@ -716,7 +716,7 @@ mod tests {
         assert_eq!(alone.live, 3, "trunk, sibling and child are all out there");
         assert_eq!(alone.replied, 0, "none of them holds a value yet");
 
-        child.deposit_reply(ral_core::serial::FOValue::Int { value: 1 });
+        child.deposit_reply(ral_core::first_order::FOValue::Int { value: 1 });
         let owed = roster::summary(&mid);
         assert_eq!(
             owed.live, 3,
@@ -767,7 +767,7 @@ mod tests {
         let fleet = Fleet::for_test();
         let trunk = agent(&fleet, "trunk", None);
         let parent = agent(&fleet, "parent", Some(&trunk));
-        parent.token.cancel(CancelCause::Explicit);
+        parent.token.cancel(CancelCause::Cancelled);
 
         assert_eq!(
             born(&fleet, spec("late-child", Some(&parent))).err(),
@@ -829,7 +829,7 @@ mod tests {
             "steered at half the ttl, still alive past the original bound"
         );
         assert!(
-            eventually(Duration::from_secs(2), || ended(&engine).is_some()),
+            eventually(Duration::from_secs(2), || ended(&engine)).is_some(),
             "reaped once the renewed span elapses"
         );
     }
@@ -865,7 +865,7 @@ mod tests {
         trunk.forget();
         assert_eq!(
             ended(&engine),
-            Some(ral_core::types::Status::Cancelled(CancelCause::Terminate).code()),
+            Some(ral_core::types::Status::Cancelled(CancelCause::Terminated).code()),
             "forget terminates the abandoned child's engine"
         );
 
@@ -875,7 +875,7 @@ mod tests {
         std::thread::sleep(ttl * 4);
         assert_eq!(
             ended(&engine),
-            Some(ral_core::types::Status::Cancelled(CancelCause::Terminate).code()),
+            Some(ral_core::types::Status::Cancelled(CancelCause::Terminated).code()),
             "the lease's late fire finds a settled agent and never overwrites the cause"
         );
     }

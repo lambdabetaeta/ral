@@ -472,7 +472,7 @@ pub fn listing_of<S: ModelSource + Clone>(
 /// `None` when no cache base resolves (`HOME` unset, no absolute override) —
 /// the catalog then runs memo-only.
 fn cache_path(app: crate::bootstrap::App) -> Option<PathBuf> {
-    let dir = app.xdg_dir(ral_core::path::basedir::XdgKind::Cache);
+    let dir = app.xdg_dir(ral_core::host::XdgKind::Cache);
     dir.is_absolute().then(|| dir.join("models.json"))
 }
 
@@ -486,7 +486,7 @@ fn read_cache(path: &PathBuf) -> Option<CacheFile> {
 }
 
 fn no_provider_error() -> String {
-    "no provider available — set a provider API key (e.g. ANTHROPIC_API_KEY)".into()
+    "no provider available: set a provider API key (e.g. ANTHROPIC_API_KEY)".into()
 }
 
 /// Resolve a stored `AccountId` rendering against the accounts present.
@@ -551,7 +551,7 @@ pub fn resolve_model_provider(
             ))
         }
         many => Err(format!(
-            "model '{name}' is listed by more than one available account ({}) — \
+            "model '{name}' is listed by more than one available account ({}): \
              pass --provider to say which",
             many.iter()
                 .map(|account| label(account))
@@ -597,7 +597,7 @@ pub fn resolve_pinned_provider(name: &str, available: &[Account]) -> Result<Acco
             identity::roster(available)
         )),
         many => Err(format!(
-            "'{name}' names {} signed-in accounts ({}) — pass the account id instead \
+            "'{name}' names {} signed-in accounts ({}): pass the account id instead \
              (`--provider <id>`) to say which",
             many.len(),
             many.iter()

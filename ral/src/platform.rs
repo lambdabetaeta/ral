@@ -6,10 +6,10 @@
 //! other's module.  Both Unix and Windows env-var fallbacks are encoded
 //! explicitly.
 
-use ral_core::diagnostic;
-use ral_core::exit_hints::ExitHints;
-use ral_core::io::{InteractiveMode, TerminalState};
 use ral_core::protocol::Attach;
+use ral_core::terminal;
+use ral_core::terminal::{InteractiveMode, TerminalState};
+use ral_core::types::ExitHints;
 
 /// Probe the terminal under the active `RAL_INTERACTIVE_MODE`, plumb
 /// it into the diagnostic subsystem, and return both halves.  When
@@ -18,9 +18,9 @@ use ral_core::protocol::Attach;
 pub(crate) fn probe_terminal(warn: bool) -> (InteractiveMode, TerminalState) {
     let (mode, terminal, mode_warn) = TerminalState::probe_from_env();
     if warn && let Some(msg) = mode_warn {
-        diagnostic::shell_warning(&msg);
+        terminal::shell_warning(&msg);
     }
-    diagnostic::set_terminal(&terminal);
+    terminal.seat();
     (mode, terminal)
 }
 
@@ -31,7 +31,7 @@ pub(crate) fn local_attach(installer: &str, terminal: TerminalState) -> Attach {
         reason = "host-env: an identity engine's home is this process's own"
     )]
     let home = ral_core::host::home().unwrap_or_default();
-    let cwd = ral_core::path::process_cwd().unwrap_or_else(|| ".".into());
+    let cwd = ral_core::host::cwd().unwrap_or_else(|| ".".into());
     Attach {
         terminal,
         ..Attach::new(installer, cwd, home.into())
@@ -46,7 +46,8 @@ static DEFAULT_EXIT_HINTS: &str = include_str!("../../data/exit-hints.txt");
     reason = "[silent:exit-hints-read] startup read of the optional exit-hints override file; not turn-time model I/O"
 )]
 pub(crate) fn load_exit_hints() -> ExitHints {
-    let text = ral_core::path::config::xdg_data_subpath("ral/exit-hints.txt")
+    let text = ral_core::host::xdg(ral_core::host::XdgKind::Data)
+        .map(|d| d.join("ral/exit-hints.txt"))
         .and_then(|p| std::fs::read_to_string(p).ok())
         .unwrap_or_default();
     let text = if text.is_empty() {

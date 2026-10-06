@@ -5,8 +5,11 @@ elaborator, typechecker, evaluator, the bundled coreutils and grep, and the
 capability sandbox are all linked into the one binary — none is a separate
 program ral shells out to. Every re-exec is a *multicall* of this same binary
 behind a hidden sentinel flag, never a sibling helper — the flag is the first
-argument, `ral_core::classify` is the one place that reads it, and
-`ral_core::sandbox::serve_pre_main` the one place that serves it:
+argument, `ral_core::Role` spells each flag once, `ral_core::classify` is the
+one place that reads it, and `ral_core::invocation::serve` the one place that
+serves it; a re-exec is launched from a `Role`, never a string
+(`sandbox::reexec::launch`). The test roles (`PgidCheck`, `DetachBirth`) exist
+only under `test-util`, so release binaries ship none:
 
 - a multi-stage pipeline pins its process group's pgid open for the
   pipeline's whole life with a lone anchor, `--ral-pipeline-anchor`

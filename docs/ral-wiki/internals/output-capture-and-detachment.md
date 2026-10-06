@@ -1,7 +1,7 @@
 ---
 verified_at_commit: 1776d222
 verified_at_date: 2026-09-30
-anchors: [Sink::pump, SINK_BUFFER_CAP, WaitedChild, spawn_child, PgidPolicy::NewLeader, process::deadline, WorkerLease, WorkerRegistry, lease_fire, Resident, spawn_detached, DetachPolicy, Capture, decode_utf8_strict, write_sink, buffer_overflowed]
+anchors: [Sink::pump, SINK_BUFFER_CAP, WaitedChild, spawn_child, PgidPolicy::NewLeader, process::deadline, WorkerLease, WorkerRegistry, LeaseChain, spawn_detached, DetachPolicy, Capture, decode_utf8_strict, write_sink, CapturedBytes::overflowed]
 ---
 
 # Output capture and detachment
@@ -106,14 +106,14 @@ The escape is detachment — the *handle* is its evidence
   milliseconds.
 - The worker's output goes to its *own* per-handle buffer — `spawn_child` wires the
   child's `stdout`/`stderr` to fresh `new_buffer()` sinks
-  (`core/src/builtins/concurrency.rs`), drained into the handle's cache only when it
+  (`core/src/builtins/concurrency/birth.rs`), drained into the handle's cache only when it
   settles. There is no run-owned pipe for it to hold open, so the run cannot
   stall on it.
 
 ## A chatty server is bounded, not unbounded
 
 - Every `Sink::Buffer` is capped at 16 MiB (`SINK_BUFFER_CAP`). Past the cap
-  `write_capped` appends a one-line truncation marker and drops the rest — yet the
+  `CapturedBytes::append` appends a one-line truncation marker and drops the rest — yet the
   write still returns `Ok` (`core/src/io/sink.rs`).
 - So the pump keeps reading and discarding after the cap. A server that spews to
   stdout never fills the kernel pipe — it never blocks on a full pipe — and the
@@ -125,7 +125,7 @@ The escape is detachment — the *handle* is its evidence
   or not the handle is ever awaited — so the report travels in band, and
   `await` hands on a prefix that says where it stopped. Where the bytes *are*
   the value — `capture` — the buffer is drained by the very step that would
-  bind them, so `Frame::Capture`'s return rule reads `buffer_overflowed` once
+  bind them, so `Frame::Capture`'s return rule reads `CapturedBytes::overflowed` once
   the writers have joined and fails, flushing the prefix visibly rather than binding it
   ([[design/capture|capture]]). One flag on the buffer, two readings of it.
 
@@ -162,9 +162,10 @@ The escape is detachment — the *handle* is its evidence
   Age alone no longer kills a worker: a build babysat every run via `poll`
   renews indefinitely, up to the backstop.
 - The mechanism is the deadline scheduler's own re-arming `Run` entry
-  (`process::arm_callback`, `lease_fire` in `core/src/builtins/concurrency.rs`):
-  each firing checks the backstop first, then the idle bound off the handle's
-  shared last-observed cell, and either reaps or re-arms itself for the sooner
+  (`process::arm_callback`, `LeaseChain::fire` in `core/src/types/shell/workers.rs`):
+  each firing asks `WorkerLease::verdict` — a pure function of the worker's age
+  and of the idle time off the handle's shared last-observed cell: the backstop
+  first, then the idle bound — and either reaps or re-arms itself for the sooner
   of the two remaining margins. A worker that has already settled (not
   `Running`) ends the chain silently — it lingers in the registry as an
   unclaimed result under its own, separate retention lease (256 idle ral
@@ -193,7 +194,7 @@ The escape is detachment — the *handle* is its evidence
   sparing the root-parented worker, via the cancel-aware `wait_first_settled`. But
   `poll $h` is a pull-based read of a *running* worker: its `` `pending `` arm
   carries a `{stdout, stderr}` snapshot of the bytes buffered so far, cloned
-  non-destructively (`peek_buffer`, not the completion `take_buffer`), so the buffer
+  non-destructively (`CapturedBytes::peek`, not the completion `take`), so the buffer
   is left intact and a later `await`/`` `settled `` `poll` still sees everything
   ([[decisions/260702_partial-poll-pending-output|partial-poll-pending-output]]).
   The snapshot is cumulative — each poll of a live worker reports monotonically more
@@ -251,7 +252,7 @@ of the child's pgid.
   `DetachPolicy` — a birth budget — in the same act that installs the builtin,
   and does so only off Windows, where the double fork exists. That is now the
   whole of the absence question: whether a given *call* may spend the verb is
-  asked of the live grant stack (`GrantStack::permits_detach`) and answered as
+  asked of the live grant stack (`GrantStack::permits(Flag::Detach)`) and answered as
   a refusal, `detach: false`
   ([[decisions/260727_detach-under-a-grant|detach-under-a-grant]]).
 - A survivor born under a projection **keeps it for life**. `build_launch`
@@ -265,11 +266,10 @@ of the child's pgid.
   invisible from inside any later grant. Nothing later can widen what it may
   touch, because nothing later can name it
   ([[decisions/260906_the-envelope-is-a-process-namespace|the-envelope-is-a-process-namespace]]).
-- A detached row could not implement `Resident` (`core/src/types/resident.rs`)
-  even if one wanted the ledger's uniformity, because that trait demands
-  `cancel()` and every answer is wrong — a no-op lies about the edge, a `kill`
-  re-asserts the ownership the verb exists to renounce
-  ([[design/residency|residency]]).
+- A detached row has no place in a resident fold even if one wanted the
+  ledger's uniformity, because that fold demands `cancel()` and every answer is
+  wrong — a no-op lies about the edge, a `kill` re-asserts the ownership the
+  verb exists to renounce ([[design/residency|residency]]).
 
 See also
 [[decisions/260725_survives-exit-is-its-own-verb|survives-exit-is-its-own-verb]]

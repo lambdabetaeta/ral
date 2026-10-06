@@ -59,7 +59,7 @@ impl Wire for std::os::unix::net::UnixStream {
 
 /// The Windows twin of the impl above: `TcpStream` purely as std's owner of
 /// a connected stream socket, never a TCP connection — the same pretence
-/// `ral_core::wire::WireStream` makes for the control plane, and for the
+/// `ral_core::protocol::channel::WireStream` makes for the control plane, and for the
 /// same reason. The net wire's `AF_HYPERV` socket is adopted into one
 /// through `From<OwnedSocket>`, at the one call site in `synod::session`.
 #[cfg(windows)]

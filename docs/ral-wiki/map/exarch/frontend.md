@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 3c8afbc3
+generated_at_commit: 446e3123
 generated_at_date: 2026-10-06
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/agent/log.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/signals.rs, exarch/src/prompt/host.rs]
 ---
@@ -438,7 +438,7 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
   identity: the popup then closes and declines the key, which falls through to
   the submit it looked like all along. Ctrl-C is never
   offered to it at all: the interrupt outranks every overlay. This is deliberately
-  unlike ral's structural frontend, which opens its menu only on Tab and splices
+  unlike a Tab-only menu that splices
   a lone match without showing one — typing here must never move the buffer on
   its own. Each row also carries the registry's own `SlashCommand.help` line —
   the same sentence `/help` lists — in a dimmer second column, so the popup

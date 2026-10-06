@@ -165,14 +165,50 @@ pub(crate) fn uutils_invoke(tool: &str, args: Vec<std::ffi::OsString>) -> i32 {
     }
 }
 
-/// Run bundled `tool` here, combining `uumain`'s return with the exit-code
-/// cell.  Argv slot 0 carries the tool name for every tool; [`uutils_invoke`]'s
-/// `rg` arm drops it again.  The sole caller is `run_bundled`, the body of a
-/// re-exec child — the `--ral-bundled-tool` multicall, or a confined warrant —
-/// which inherits its execution context from the exec, so the process-global
-/// cell is this process's own.
+/// Why [`run`] ran nothing.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Unbundled {
+    Tool(String),
+    Build,
+}
+
+impl std::fmt::Display for Unbundled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Tool(tool) => write!(f, "'{tool}' is not a bundled tool"),
+            Self::Build => f.write_str("no bundled tools are available in this build"),
+        }
+    }
+}
+
+/// Run bundled `tool` in this process, the body of a re-exec child: the
+/// `Role::BundledTool` multicall, or a confined warrant once confined.  It
+/// inherits its execution context from the exec, so uucore's process-global
+/// exit-code cell is this process's own.
+pub(crate) fn run(tool: &str, args: Vec<std::ffi::OsString>) -> Result<u8, Unbundled> {
+    #[cfg(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep"))]
+    {
+        // Rust's runtime ignores SIGPIPE, which would turn a write to a closed
+        // pipe into an error exit.
+        #[cfg(unix)]
+        init_signal_dispositions();
+        if !is_uutils_tool(tool) {
+            return Err(Unbundled::Tool(tool.into()));
+        }
+        Ok(u8::try_from(invoke(tool, args).clamp(0, 255)).unwrap_or(u8::MAX))
+    }
+    #[cfg(not(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")))]
+    {
+        let _ = (tool, args);
+        Err(Unbundled::Build)
+    }
+}
+
+/// `tool`'s exit code, combining `uumain`'s return with the exit-code cell.
+/// Argv slot 0 carries the tool name for every tool; [`uutils_invoke`]'s `rg`
+/// arm drops it again.
 #[cfg(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep"))]
-pub(crate) fn invoke_bundled(tool: &str, args: Vec<std::ffi::OsString>) -> i32 {
+fn invoke(tool: &str, args: Vec<std::ffi::OsString>) -> i32 {
     let os_args: Vec<std::ffi::OsString> = std::iter::once(std::ffi::OsString::from(tool))
         .chain(args)
         .collect();
@@ -183,7 +219,7 @@ pub(crate) fn invoke_bundled(tool: &str, args: Vec<std::ffi::OsString>) -> i32 {
 }
 
 /// `rg` shim.  `ral_ripgrep_core::run_cli` wants argv without argv[0], so
-/// drop the tool-name slot [`invoke_bundled`] puts there.
+/// drop the tool-name slot [`invoke`] puts there.
 #[cfg(feature = "ripgrep")]
 fn rg_main<I: Iterator<Item = std::ffi::OsString>>(mut args: I) -> i32 {
     let _argv0 = args.next();
@@ -279,7 +315,7 @@ fn cmp_main<I: Iterator<Item = std::ffi::OsString>>(args: I) -> i32 {
     let params = match cmp::parse_params(args.peekable()) {
         Ok(param) => param,
         Err(e) => {
-            eprintln!("{e}");
+            crate::errln!("{e}");
             return 2;
         }
     };
@@ -287,7 +323,7 @@ fn cmp_main<I: Iterator<Item = std::ffi::OsString>>(args: I) -> i32 {
         Ok(Cmp::Equal) => 0,
         Ok(Cmp::Different) => 1,
         Err(e) => {
-            eprintln!("{e}");
+            crate::errln!("{e}");
             2
         }
     }
@@ -308,13 +344,13 @@ fn diff_main<I: Iterator<Item = std::ffi::OsString>>(args: I) -> i32 {
     let params = match parse_params(args.peekable()) {
         Ok(p) => p,
         Err(error) => {
-            eprintln!("{error}");
+            crate::errln!("{error}");
             return 2;
         }
     };
     let maybe_report_identical_files = || {
         if params.report_identical_files {
-            println!(
+            crate::outln!(
                 "Files {} and {} are identical",
                 params.from.to_string_lossy(),
                 params.to.to_string_lossy(),
@@ -368,7 +404,7 @@ fn diff_main<I: Iterator<Item = std::ffi::OsString>>(args: I) -> i32 {
         Format::Ed => match diffutilslib::ed_diff(&from_content, &to_content, &params) {
             Ok(v) => v,
             Err(error) => {
-                eprintln!("{error}");
+                crate::errln!("{error}");
                 return 2;
             }
         },
@@ -378,13 +414,13 @@ fn diff_main<I: Iterator<Item = std::ffi::OsString>>(args: I) -> i32 {
         }
     };
     if params.brief && !result.is_empty() {
-        println!(
+        crate::outln!(
             "Files {} and {} differ",
             params.from.to_string_lossy(),
             params.to.to_string_lossy()
         );
     } else if let Err(error) = io::stdout().write_all(&result) {
-        eprintln!("{error}");
+        crate::errln!("{error}");
         return 2;
     }
     if result.is_empty() {

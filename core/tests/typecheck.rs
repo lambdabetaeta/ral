@@ -8,9 +8,10 @@
 
 mod common;
 
-use ral_core::ir::{Comp, CompKind, IrPattern, Phrase, Toplevel, Val};
+use ral_core::ir::{Comp, CompKind, Pattern, Phrase, Toplevel, Unchecked, Val};
+use ral_core::ty::{CompTy, CompTyVar, Ty};
+use ral_core::typecheck::Form;
 use ral_core::typecheck::contract::declared;
-use ral_core::typecheck::{CompTy, CompTyVar, Form, Ty, fmt_scheme};
 use ral_core::{TypeError, elaborator::elaborate, syntax::parser::parse, typecheck};
 
 fn raw_errors(src: &str) -> Vec<TypeError> {
@@ -23,15 +24,11 @@ fn raw_errors(src: &str) -> Vec<TypeError> {
 /// reads it as an external and answers about something else.
 fn errors_against(src: &str, surface: &ral_core::HostSurface) -> Vec<TypeError> {
     let ast = parse(src).unwrap_or_else(|e| panic!("parse error in {src:?}: {e:?}"));
-    let comp = elaborate(&ast, std::collections::HashSet::default(), "")
-        .unwrap_or_else(|e| panic!("elaborate error in {src:?}: {e:?}"));
-    typecheck(
-        &comp,
-        ral_core::SessionSchemes::from_schemes(common::prelude_schemes(), surface.builtin_table()),
-        None,
-    )
-    .err()
-    .unwrap_or_default()
+    let comp =
+        elaborate(&ast, [], "").unwrap_or_else(|e| panic!("elaborate error in {src:?}: {e:?}"));
+    typecheck(&comp, common::schemes_for(surface), None)
+        .err()
+        .unwrap_or_default()
 }
 
 /// A surface holding `detach`, the base frame core publishes but does not
@@ -80,20 +77,20 @@ fn fmt_scheme_shows_quantified_comp_vars() {
         Ty::Thunk(Box::new(CompTy::Var(beta))),
         vec![],
     );
-    let rendered = fmt_scheme(&scheme);
+    let rendered = scheme.to_string();
     assert_eq!(rendered, "∀ϕ. ϕ");
 }
 
 #[test]
 fn fmt_scheme_binds_cyclic_comp_roots_by_mu() {
     let root = CompTyVar(29);
-    let binding = CompTy::pure(Ty::List(Box::new(Ty::Thunk(Box::new(CompTy::Var(root))))));
+    let binding = CompTy::pure(Ty::list(Ty::Thunk(Box::new(CompTy::Var(root)))));
     let scheme = ral_core::test_access::scheme_over_comp_vars(
         vec![],
         Ty::Thunk(Box::new(binding.clone())),
-        vec![(root.0, binding)],
+        vec![(root, binding)],
     );
-    let rendered = fmt_scheme(&scheme);
+    let rendered = scheme.to_string();
     assert_eq!(rendered, "μϕ. Returns [{ϕ}]");
 }
 
@@ -159,19 +156,15 @@ fn an_arm_for_detach_returns_its_receipt() {
 
 // ─── Toplevel phrase typechecking ─────────────────────────────────────────
 
-fn toplevel(src: &str) -> Toplevel {
+fn toplevel(src: &str) -> Unchecked {
     let ast = parse(src).unwrap_or_else(|e| panic!("parse error in {src:?}: {e:?}"));
-    elaborate(&ast, std::collections::HashSet::default(), "")
-        .unwrap_or_else(|e| panic!("elaborate error in {src:?}: {e:?}"))
+    elaborate(&ast, [], "").unwrap_or_else(|e| panic!("elaborate error in {src:?}: {e:?}"))
 }
 
 fn toplevel_ok(src: &str) -> Toplevel {
     typecheck(
         &toplevel(src),
-        ral_core::SessionSchemes::from_schemes(
-            common::prelude_schemes(),
-            ral_core::HostSurface::default().builtin_table(),
-        ),
+        common::schemes_for(&ral_core::HostSurface::default()),
         None,
     )
     .unwrap_or_else(|errs| {
@@ -201,8 +194,8 @@ fn toplevel_rec_group_members_generalise_independently() {
     else {
         panic!("expected two Define phrases");
     };
-    let f_rendered = fmt_scheme(&f_schemes[0].1);
-    let g_rendered = fmt_scheme(&g_schemes[0].1);
+    let f_rendered = f_schemes[0].1.to_string();
+    let g_rendered = g_schemes[0].1.to_string();
     assert!(
         f_rendered.contains("Integer") && f_rendered.contains("Bool"),
         "expected f : Integer → F Bool, got: {f_rendered}"
@@ -234,7 +227,7 @@ fn toplevel_partial_application_eta_expands_to_thunked_lambda() {
         .shape()
         .arrow()
         .expect("g's thunk body must be a syntactic Lam");
-    assert!(matches!(param, IrPattern::Name(_)));
+    assert!(matches!(param, Pattern::Name(_)));
     let CompKind::App { args, .. } = &lam_body.item else {
         panic!("expected an App body, got {:?}", lam_body.item);
     };
@@ -245,7 +238,7 @@ fn toplevel_partial_application_eta_expands_to_thunked_lambda() {
     );
 
     assert_eq!(schemes.len(), 1);
-    let rendered = fmt_scheme(&schemes[0].1);
+    let rendered = schemes[0].1.to_string();
     assert!(
         rendered.starts_with('∀') && rendered.contains('→'),
         "expected g : U (B → C), got: {rendered}"
@@ -262,7 +255,7 @@ fn scheme_at(top: &Toplevel, index: usize) -> String {
             top.phrases[index].item
         );
     };
-    fmt_scheme(&schemes[0].1)
+    schemes[0].1.to_string()
 }
 
 fn codes(src: &str) -> Vec<&'static str> {
@@ -440,14 +433,11 @@ static REQUIRED_TABLE: ral_core::typecheck::Table = ral_core::typecheck::Table {
 
 fn contract_errors(table: &'static ral_core::typecheck::Table, src: &str) -> Vec<TypeError> {
     let ast = parse(src).unwrap_or_else(|e| panic!("parse error in {src:?}: {e:?}"));
-    let top = elaborate(&ast, std::collections::HashSet::default(), "")
-        .unwrap_or_else(|e| panic!("elaborate error in {src:?}: {e:?}"));
+    let top =
+        elaborate(&ast, [], "").unwrap_or_else(|e| panic!("elaborate error in {src:?}: {e:?}"));
     typecheck(
         &top,
-        ral_core::SessionSchemes::from_schemes(
-            common::prelude_schemes(),
-            ral_core::HostSurface::default().builtin_table(),
-        ),
+        common::schemes_for(&ral_core::HostSurface::default()),
         Some(table),
     )
     .err()
@@ -651,34 +641,6 @@ fn captures(src: &str) -> usize {
         }
     });
     found
-}
-
-/// Every `Pipeline` node's `stage_types` slot, reachable anywhere.
-fn all_pipeline_stage_types(top: &Toplevel) -> Vec<(usize, Vec<Ty>)> {
-    let mut out = Vec::new();
-    walk_toplevel(top, &mut |c| {
-        if let CompKind::Pipeline {
-            stages,
-            stage_types,
-        } = &c.item
-        {
-            out.push((stages.len(), stage_types.clone()));
-        }
-    });
-    out
-}
-
-#[test]
-fn top_level_pipeline_retains_per_stage_value_types() {
-    let comp = annotated(r"/bin/echo hi | /bin/cat");
-    let pipelines = all_pipeline_stage_types(&comp);
-    assert_eq!(pipelines.len(), 1, "expected exactly one pipeline node");
-    let (stage_count, types) = &pipelines[0];
-    assert_eq!(*stage_count, 2, "two-stage pipeline");
-    assert_eq!(types.len(), *stage_count, "one value type per stage");
-    // A command produces output, not a value: its stage value is `()`.
-    assert_eq!(types[0], Ty::Unit, "stage 0 value type retained");
-    assert_eq!(types[1], Ty::Unit, "stage 1 value type retained");
 }
 
 #[test]

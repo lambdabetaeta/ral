@@ -11,10 +11,13 @@
 //! Its standard descriptors are `/dev/null`: our end of an inherited pipe
 //! closes when we exit, and the survivor's next write would take a `SIGPIPE`.
 
-use crate::evaluator::audit::{command_fact, observe};
+use crate::capability::Flag;
+use crate::fact::Receipt;
 use crate::ir::CommandName;
 use crate::process::StdioSpec;
-use crate::types::{AuditIo, CommandOrigin, HandlerLookup, Mooring, Settled, Shell, Value, sig};
+use crate::types::{
+    AuditIo, CommandOrigin, HandlerLookup, Mooring, Observed, Settled, Shell, Value, sig,
+};
 
 use super::head::Head;
 use super::process::build_launch;
@@ -47,7 +50,7 @@ pub(crate) fn detach(
         match shell.lookup_handler(bare) {
             Some(HandlerLookup::Frame(..)) => {
                 return Err(sig(format!(
-                    "detach: `{bare}` is handled here — by an arm for it, or by the catch-all — \
+                    "detach: `{bare}` is handled here (by an arm for it, or by the catch-all) \
                      and a handler runs inside this session, so nothing can be detached. To \
                      stub `detach`, stand in for `detach` itself; to run the real program, \
                      `^{bare}`"
@@ -62,13 +65,7 @@ pub(crate) fn detach(
             None => {}
         }
     }
-    if !shell.permits_detach() {
-        return Err(sig(
-            "detach: an active grant withholds it, so nothing here may outlive this session. \
-             Would `spawn` or `service` do, since both end when the session does?"
-                .to_string(),
-        ));
-    }
+    shell.check(Flag::Detach, "detach")?;
     // Existence (127/126), argv shape, the grant's verdict on the whole call:
     // the same judgments an ordinary external passes, so a bundled uutils tool
     // falls out as its own image with no special case here.
@@ -111,10 +108,9 @@ pub(crate) fn detach(
         .map_err(|e| sig(format!("detach: cannot launch '{}': {e}", plan.shown)))?;
     reservation.commit();
 
-    observe(
-        shell,
+    shell.observe(
         mooring,
-        command_fact(
+        Observed::command(
             &plan.shown,
             plan.admitted.args().to_vec(),
             0,
@@ -123,8 +119,8 @@ pub(crate) fn detach(
             None,
         ),
     );
-    Ok(Value::map(vec![
-        ("pid".into(), Value::Int(i64::from(pid))),
-        ("desc".into(), Value::string(desc)),
-    ]))
+    Ok(Value::from_datum(Receipt {
+        pid,
+        desc: desc.into(),
+    }))
 }

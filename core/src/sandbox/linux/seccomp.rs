@@ -294,7 +294,7 @@ impl Filter {
                 mask: CLONE_NEWUSER,
             }),
             verdict: Verdict::Errno(libc::EPERM),
-            why: "a user namespace is root over a fresh mount tree — a container inside the \
+            why: "a user namespace is root over a fresh mount tree: a container inside the \
                   grant, which the envelope forbids",
         },
         Rule {

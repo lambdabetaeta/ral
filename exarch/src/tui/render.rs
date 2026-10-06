@@ -259,8 +259,8 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
         if let Some(toast) = gesture.toast() {
             let msg = match toast {
                 Toast::Copied(n) => format!("[{n} characters copied]"),
-                Toast::Reply(n) => format!("[copied the latest reply — {n} lines]"),
-                Toast::ReplyTail(n) => format!("[reply too long — copied its last {n} bytes]"),
+                Toast::Reply(n) => format!("[copied the latest reply: {n} lines]"),
+                Toast::ReplyTail(n) => format!("[reply too long: copied its last {n} bytes]"),
                 Toast::CopyFailed => "[copy failed]".to_owned(),
             };
             let w = u16::try_from(msg.len())
@@ -396,7 +396,7 @@ fn prompt_hint(
         return None;
     }
     Some(Line::from(Span::styled(
-        format!(" watching {name} — Tab to choose another agent "),
+        format!(" watching {name}: Tab to choose another agent "),
         Style::default()
             .fg(SLATE)
             .add_modifier(Modifier::DIM | Modifier::ITALIC),

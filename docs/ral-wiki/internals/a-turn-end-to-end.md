@@ -117,7 +117,7 @@ module's framed scaffold:
   capability ceiling, pushed layer by layer and removed by position after, so
   a session frame the program pushes survives the run — `run_phrases(&top.phrases, shell.env.clone(),
   Mode::Session, mooring, shell)` for the source arm, the in-frame
-  `builtins::apply` of the resolved hook for the hook arm
+  `evaluator::apply` of the resolved hook for the hook arm
   ([[internals/evaluator-machine|the machine]];
   [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]).
 - `run_phrases` writes each `let` straight into `shell.env` as its `Define`
@@ -126,7 +126,7 @@ module's framed scaffold:
   halted run keeps every write that landed before the halt and the run
   remains a resume point regardless of completion, error, or `exit`
   ([[invariants/turn-ends-ready|exchange-ends-ready]]). Before the status is
-  read, `run_framed` polls `process::check(mooring)` once more so a sticky
+  read, `run_framed` polls `Mooring::check` once more so a sticky
   cancellation — a key a terminal loan heard back and struck on the frame
   included — cannot be absorbed by `try`; it then computes the transport
   status and emits ready-boundary notices while the
@@ -155,10 +155,10 @@ module's framed scaffold:
   handler, `command_exit`/`status` computed alongside it; a `Settled` value
   the wire cannot carry (a handle, block, or function) becomes `Unreturnable`,
   its own rendered failure with a hint; a `Static` renders
-  the same way through `format_static_diagnostics`, which also settles its exit
+  the same way through `StaticDiagnostics::render`, which also settles its exit
   status (2 parse, 1 type) — onto the wire's own
   `protocol::Ending`, and projects each `Observation` through
-  [[design/audit|`to_wire`]] onto `Report::Ran.trail: Vec<FOValue>`, unbounded
+  [[design/audit|`encode`]] onto `Report::Ran.trail: Vec<FOValue>`, unbounded
   by declaration — the wire's frame fuse is the shared backstop, as it already
   is for `captured`.
 

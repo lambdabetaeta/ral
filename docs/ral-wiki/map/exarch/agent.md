@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 3c8afbc3
+generated_at_commit: 446e3123
 generated_at_date: 2026-10-06
 covers_paths: [exarch/src/agent.rs, exarch/src/latch.rs, exarch/src/agent/, exarch/src/signals.rs, exarch/src/fleet.rs, exarch/src/fleet/desk.rs, exarch/src/fleet/roster.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
@@ -324,7 +324,7 @@ sequence), and over each parked fork by `_exarch-branch`'s and `start`'s shared
 large-binding residency nudge rides the pushed `` `notice `` channel above,
 and the prune half is engine housekeeping too: idle top-level names fall at
 the engine's own ready boundary, announced as a pushed
-`` `notice [kind: `prune] `` class the host records as `Forensic::Prune`
+`` `notice `prune [...] `` class (core's `Notice`) the host records as `Forensic::Prune`
 — kept in the log, drawn by no fold. The engine's
 run-entry checkpoint orders after any prior boundary's prune, so a later
 panic rollback can never resurrect a name a pass just pruned.
@@ -336,11 +336,11 @@ thread that owns the agent —
 `Avatar::resource_rows` surveys what this thread may legally read — the worker
 registry's running/settled split with the nearest time-to-reap and the
 binding-ledger figures read as *data* over the transport's probe rail
-(`Frame::Probe`, through core's typed `reading::*` doors and `Seat::read`,
+(`Frame::Probe`, through core's typed `Transport` probe doors and `Seat::read`,
 which severs the seat on a refused answer,
 [[map/core/engine-protocol|engine-protocol]]), plus inbox depth per
 source, the event ledger's logical length and history bytes, the log dir
-walked host-side and the scratch sized engine-side (`reading::path_bytes`) at
+walked host-side and the scratch sized engine-side (`Transport::path_bytes`) at
 invocation, and the sub-agent idle lease as two rows (nearest
 time-to-reap) — and `emit_resources` posts one `Transient::Resources`
 carrying the rendered card — chrome only, so unlike a recorded observation
@@ -764,7 +764,7 @@ per `DISK_WARN_CHECK_INTERVAL` (a minute, off `Avatar::disk_checked`),
 weighed at the tool boundary with the other gauges.
 Crossing the ceiling (the session log dir, sized host-side by
 `resources::dir_size`, plus `EXARCH_SCRATCH`, read and sized in the engine by
-`reading::env_var` and `reading::path_bytes`) is told to the user once, as a
+`Transport::env_var` and `Transport::path_bytes`) is told to the user once, as a
 `Forensic::SystemNote`, on the disk ladder's `Latch` — one warning per
 excursion, not one per boundary.
 
@@ -856,7 +856,7 @@ bars a desk handler from holding the `&mut Shell` a fork needs:
   transport (`IdentityTransport::adopt_parked`), in the same process.
 - **Wire.** A guest engine's runs carry `Fork::Listen` (`core/src/engine.rs`),
   so the builtin body mints a `u64` token from OS randomness and calls
-  `ral_core::hatch::listen_for_hatch` (`core/src/hatch.rs`) with a listening
+  `ral_core::seed::hatch::listen_for_hatch` (`core/src/seed/hatch.rs`) with a listening
   descriptor `shell_eval/builtins/guest_port.rs` has already bound — the one
   `AF_VSOCK` endpoint exarch opens itself, and Linux-only because a guest port
   means nothing outside a VM, while core's half is plain Unix plumbing tested

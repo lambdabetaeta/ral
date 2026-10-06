@@ -12,12 +12,12 @@
 //! until the next launch, and a veto is carried only into hierarchies no
 //! trusted write reaches ([`vetoes_walk`]).
 
-use super::super::confinement_unavailable;
+use super::super::Refusal;
 use super::super::warrant::Slot;
 use super::{OpenError, open_real};
 use crate::capability::{ExecRules, ExecScope, Subject};
 use crate::path::{Deny, RealPath, Rendered, render_real};
-use crate::types::{ExecProjection, FsProjection, WriteReach};
+use crate::sandbox::{ExecProjection, FsProjection, WriteReach};
 use libc::{c_int, c_uint};
 use rustix::fs::{FileType, Mode, OFlags};
 use std::ffi::OsStr;
@@ -26,7 +26,7 @@ use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::LazyLock;
 
 /// `LANDLOCK_CREATE_RULESET_VERSION` in the UAPI; not exported by `libc`.
 const CREATE_RULESET_VERSION: c_uint = 1;
@@ -67,8 +67,7 @@ impl Landlock {
     /// The syscall is the only honest source: a version is not a feature list,
     /// so `uname` is never read.
     pub(crate) fn probe() -> Self {
-        static PROBED: OnceLock<Landlock> = OnceLock::new();
-        *PROBED.get_or_init(|| {
+        static PROBED: LazyLock<Landlock> = LazyLock::new(|| {
             // SAFETY: the version query takes a null attr and a zero size.
             let level = unsafe {
                 libc::syscall(
@@ -80,7 +79,8 @@ impl Landlock {
             };
             let errno = io::Error::last_os_error().raw_os_error().unwrap_or(0);
             classify(level, errno)
-        })
+        });
+        *PROBED
     }
 }
 
@@ -272,20 +272,21 @@ struct Plan {
 /// A failed probe, whatever the projection, which tells nothing; and an
 /// exec-restricting grant on a kernel without Landlock, which would otherwise
 /// run with no kernel exec layer.
-fn plan(exec: &ExecProjection, landlock: Landlock) -> Result<Option<Plan>, crate::types::Error> {
+fn plan(exec: &ExecProjection, landlock: Landlock) -> Result<Option<Plan>, Refusal> {
     let restricted = matches!(exec, ExecProjection::Restricted(_));
     let abi = match landlock {
         Landlock::At(abi) => abi,
         Landlock::Absent if !restricted => return Ok(None),
         Landlock::Absent => {
-            return Err(confinement_unavailable(
+            return Err(Refusal::Unavailable(
                 "landlock: this kernel cannot enforce the grant's limits on which programs \
                  may run, because Landlock is unavailable; ral refuses rather than run them \
-                 unchecked.  Is the kernel older than 5.13, or does it have Landlock disabled?",
+                 unchecked.  Is the kernel older than 5.13, or does it have Landlock disabled?"
+                    .into(),
             ));
         }
         Landlock::Unprobed(_) => {
-            return Err(confinement_unavailable(&format!(
+            return Err(Refusal::Unavailable(format!(
                 "landlock: {landlock}; refusing to launch confined"
             )));
         }
@@ -314,13 +315,13 @@ pub(crate) fn build(
     exec: &ExecProjection,
     fs: &FsProjection<Rendered>,
     landlock: Landlock,
-) -> Result<Option<(Ruleset, Landlocked)>, crate::types::Error> {
+) -> Result<Option<(Ruleset, Landlocked)>, Refusal> {
     let Some(Plan { handled, scoped }) = plan(exec, landlock)? else {
         return Ok(None);
     };
-    let failed = |why: String| crate::types::Error::new(why, 1);
-    let ruleset = Ruleset::create(handled, scoped).map_err(|e| failed(Error::Create(e).into()))?;
-    admit_exec(&ruleset, exec, fs).map_err(failed)?;
+    let ruleset = Ruleset::create(handled, scoped)
+        .map_err(|e| Refusal::Launch(Error::Create(e).to_string()))?;
+    admit_exec(&ruleset, exec, fs)?;
     let refer_root = handled.contains(Access::REFER);
     Ok(Some((ruleset, Landlocked { refer_root })))
 }
@@ -332,7 +333,7 @@ fn admit_exec(
     exec: &ExecProjection,
     fs: &FsProjection<Rendered>,
 ) -> Result<(), String> {
-    let ExecProjection::Restricted(rules) = exec else {
+    let ExecProjection::Restricted(table) = exec else {
         return Ok(());
     };
     let execute = |name: &Path, fd: BorrowedFd<'_>| {
@@ -342,7 +343,6 @@ fn admit_exec(
     // re-executing itself, so no policy names it: as macOS admits its own.
     let own = super::super::reexec::own()?;
     execute(own.arg0(), own.fd())?;
-    let table = ExecRules::from_kernel(rules);
     let base = platform_base();
     let files = table.allowed_files().map(RealPath::as_path);
     for name in base.iter().map(PathBuf::as_path).chain(files) {
@@ -356,8 +356,8 @@ fn admit_exec(
         }
         execute(name, fd.as_fd())?;
     }
-    let walks = vetoes_walk(exec, fs, &table)?;
-    expand(&table, &walks, &mut |admit| {
+    let walks = vetoes_walk(table, fs)?;
+    expand(table, &walks, &mut |admit| {
         ruleset.admit(admit.fd, Access::EXECUTE)
     })?;
     Ok(())
@@ -369,11 +369,10 @@ fn admit_exec(
 /// an unrestricted `fs` every write reaches it: covered when a veto asks for
 /// the freeze, trusted otherwise, as macOS reads it.
 pub(crate) fn write_reach<'a>(
-    exec: &ExecProjection,
-    fs: &'a FsProjection<Rendered>,
     table: &ExecRules,
+    fs: &'a FsProjection<Rendered>,
 ) -> Result<impl Fn(&Rendered) -> WriteReach + 'a, String> {
-    let unrestricted = if exec.carries_veto() {
+    let unrestricted = if table.denies().next().is_some() {
         WriteReach::Covered
     } else {
         WriteReach::Trusted
@@ -399,11 +398,10 @@ pub(crate) fn write_reach<'a>(
 /// an apart one unwritable, so the launch's snapshot stays exact.  Under a
 /// trusted write a bare-name veto is advisory.
 fn vetoes_walk<'a>(
-    exec: &ExecProjection,
-    fs: &'a FsProjection<Rendered>,
     table: &ExecRules,
+    fs: &'a FsProjection<Rendered>,
 ) -> Result<impl Fn(&RealPath) -> bool + 'a, String> {
-    let reach = write_reach(exec, fs, table)?;
+    let reach = write_reach(table, fs)?;
     // A name that does not render is walked: over-listing is cost.
     Ok(move |dir: &RealPath| {
         render_real(dir).map_or(true, |names| {
@@ -634,11 +632,17 @@ impl From<Error> for String {
 #[allow(clippy::disallowed_methods, reason = "[test] test fs scaffolding")]
 mod tests {
     use super::*;
-    use crate::types::ExecRule;
+    use crate::capability::Verdict;
     use std::collections::BTreeSet;
 
+    type Rule = (ExecScope, Verdict);
+
     fn restricted() -> ExecProjection {
-        ExecProjection::Restricted(Vec::new())
+        ExecProjection::Restricted(ExecRules::default())
+    }
+
+    fn table_of(rules: &[Rule]) -> ExecRules {
+        rules.iter().cloned().collect()
     }
 
     #[test]
@@ -660,7 +664,7 @@ mod tests {
     fn an_exec_restricting_grant_is_refused_without_landlock() {
         let why = plan(&restricted(), Landlock::Absent)
             .expect_err("a restricted exec grant needs Landlock")
-            .message;
+            .to_string();
         assert!(
             why.starts_with("sandbox confinement unavailable: "),
             "{why}"
@@ -673,7 +677,7 @@ mod tests {
         for exec in [restricted(), ExecProjection::Unrestricted] {
             let why = plan(&exec, Landlock::Unprobed(libc::EPERM))
                 .expect_err("a failed probe is not a kernel without Landlock")
-                .message;
+                .to_string();
             assert!(
                 why.starts_with("sandbox confinement unavailable: "),
                 "{why}"
@@ -734,25 +738,29 @@ mod tests {
             })
     }
 
-    fn rule(path: &Path, dir: bool, allow: bool) -> ExecRule {
+    fn rule(path: &Path, dir: bool, allow: bool) -> Rule {
         let path = RealPath::assumed(path);
-        if dir {
-            ExecRule::Dir { path, allow }
+        let scope = if dir {
+            ExecScope::Dir(path)
         } else {
-            ExecRule::File { path, allow }
-        }
+            ExecScope::File(path)
+        };
+        (scope, Verdict::from(allow))
     }
 
-    fn allow(path: &Path, dir: bool) -> ExecRule {
+    fn allow(path: &Path, dir: bool) -> Rule {
         rule(path, dir, true)
     }
 
-    fn deny(path: &Path, dir: bool) -> ExecRule {
+    fn deny(path: &Path, dir: bool) -> Rule {
         rule(path, dir, false)
     }
 
-    fn veto(name: &str) -> ExecRule {
-        ExecRule::Veto(crate::path::command_name_key(name))
+    fn veto(name: &str) -> Rule {
+        (
+            ExecScope::Name(crate::path::command_name_key(name)),
+            Verdict::Deny,
+        )
     }
 
     /// An admit naming nothing, and a file admit since replaced by a
@@ -769,7 +777,7 @@ mod tests {
             allow(tmp.path(), false),
         ];
         let built = build(
-            &ExecProjection::Restricted(rules),
+            &ExecProjection::Restricted(table_of(&rules)),
             &FsProjection::Unrestricted,
             landlock,
         )
@@ -789,13 +797,13 @@ mod tests {
         let allowed = tmp.path().join("allowed");
         std::os::unix::fs::symlink(&outside, &allowed).expect("symlink");
         let Err(why) = build(
-            &ExecProjection::Restricted(vec![allow(&allowed, true)]),
+            &ExecProjection::Restricted(table_of(&[allow(&allowed, true)])),
             &FsProjection::Unrestricted,
             landlock,
         ) else {
             panic!("a symlink would admit its target");
         };
-        assert!(why.message.contains("symbolic link"), "{}", why.message);
+        assert!(why.to_string().contains("symbolic link"), "{why}");
     }
 
     #[test]
@@ -848,10 +856,10 @@ mod tests {
 
     /// What [`expand`] hands its sink, each handle checked against its name,
     /// and whether it stands for a hierarchy.
-    fn expanded(rules: &[ExecRule], walks: bool) -> Result<BTreeSet<(PathBuf, bool)>, Error> {
+    fn expanded(rules: &[Rule], walks: bool) -> Result<BTreeSet<(PathBuf, bool)>, Error> {
         use std::os::unix::fs::MetadataExt;
         let mut seen = BTreeSet::new();
-        expand(&ExecRules::from_kernel(rules), &|_| walks, &mut |admit| {
+        expand(&table_of(rules), &|_| walks, &mut |admit| {
             let path = admit.path.as_path();
             let opened = rustix::fs::fstat(admit.fd)?;
             assert_eq!(
@@ -886,7 +894,7 @@ mod tests {
             allow(&d.join("s/t"), true),
             veto("n"),
         ];
-        let table = ExecRules::from_kernel(&rules);
+        let table = table_of(&rules);
         let model: BTreeSet<_> = (FILES.iter())
             .map(|f| d.join(f))
             .filter(|f| {
@@ -991,30 +999,32 @@ mod tests {
     #[test]
     fn a_veto_walks_every_hierarchy_but_a_trusted_one() {
         let bin = Path::new("/ral-test/w/bin");
+        let table = |rules: &[Rule]| ExecProjection::Restricted(table_of(rules));
         let walks = |exec: &ExecProjection, write: &[&str]| {
-            let ExecProjection::Restricted(rules) = exec else {
+            let ExecProjection::Restricted(table) = exec else {
                 unreachable!("an exec grant");
             };
             let write: Vec<String> = write.iter().map(ToString::to_string).collect();
-            let fs = FsProjection::Restricted(crate::types::FsRules {
+            let fs = FsProjection::Restricted(crate::sandbox::FsRules {
                 write_prefixes: crate::path::render_paths(&write).expect("renders"),
-                ..crate::types::FsRules::default()
+                ..crate::sandbox::FsRules::default()
             });
-            let table = ExecRules::from_kernel(rules);
-            vetoes_walk(exec, &fs, &table).expect("renders")(&RealPath::assumed(bin))
+            vetoes_walk(table, &fs).expect("renders")(&RealPath::assumed(bin))
         };
-        let exec = ExecProjection::Restricted(vec![allow(bin, true), veto("n")]);
+        let exec = table(&[allow(bin, true), veto("n")]);
         assert!(walks(&exec, &["/ral-test/w"]), "covered");
         assert!(walks(&exec, &[]), "apart");
         assert!(!walks(&exec, &["/ral-test/w/bin"]), "trusted");
         let unrestricted = |exec: &ExecProjection| {
-            let table = ExecRules::default();
-            vetoes_walk(exec, &FsProjection::Unrestricted, &table).expect("renders")(
-                &RealPath::assumed(bin),
-            )
+            let ExecProjection::Restricted(table) = exec else {
+                unreachable!("an exec grant");
+            };
+            vetoes_walk(table, &FsProjection::Unrestricted).expect("renders")(&RealPath::assumed(
+                bin,
+            ))
         };
         assert!(unrestricted(&exec), "a veto under an unrestricted fs");
-        let no_veto = ExecProjection::Restricted(vec![allow(bin, true)]);
+        let no_veto = table(&[allow(bin, true)]);
         assert!(!unrestricted(&no_veto), "nothing frozen, nothing to walk");
     }
 }

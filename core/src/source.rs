@@ -2,12 +2,10 @@
 //!
 //! A [`Span`] is a half-open byte range tagged with a [`FileId`]; "no narrower
 //! position known" is `Option<Span>` = `None` throughout the AST, IR, and
-//! typechecker, and there is no sentinel span.
+//! typechecker.  A span into text no `SourceDb` holds carries [`FileId::DUMMY`].
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-
-use crate::text::floor_char_boundary;
 
 /// A half-open byte range `[start, end)` within a single source file.
 ///
@@ -33,17 +31,6 @@ impl Span {
             start: pos,
             end: pos,
             file,
-        }
-    }
-
-    /// Origin for host-synthesised bindings such as hook registrations.  The
-    /// file must be [`FileId::DUMMY`]: the registry only grows, so a real id
-    /// would claim that source's first bytes forever.
-    pub fn synthetic() -> Self {
-        Self {
-            start: 0,
-            end: 0,
-            file: FileId::DUMMY,
         }
     }
 
@@ -212,23 +199,37 @@ impl Source {
 
     /// A byte offset as a 1-indexed (line, col) pair: binary search for the
     /// line, then one `chars()` walk of that line for the column.
-    pub(crate) fn byte_to_line_col(&self, byte_offset: usize) -> (usize, usize) {
-        let safe = floor_char_boundary(&self.text, byte_offset);
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "byte offset into a source that fits the u32 span system (< 4 GiB, compiler-standard)"
-        )]
-        let target = safe as u32;
-        // partition_point yields the first line starting past `target`; the
+    pub(crate) fn line_col(&self, byte_offset: u32) -> (u32, u32) {
+        let safe = self.text.floor_char_boundary(byte_offset as usize);
+        // partition_point yields the first line starting past the offset; the
         // line containing it is the one before.
         let line_idx = self
             .line_starts
-            .partition_point(|&start| start <= target)
+            .partition_point(|&start| start <= byte_offset)
             .saturating_sub(1);
         let line_start = self.line_starts[line_idx] as usize;
-        let line = line_idx + 1;
         let col = self.text[line_start..safe].chars().count() + 1;
-        (line, col)
+        (saturate(line_idx + 1), saturate(col))
+    }
+}
+
+/// A position's count, saturating: a source past 4 GiB already breaks spans.
+fn saturate(n: usize) -> u32 {
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
+
+/// A [`Span`] resolved against the session's [`SourceDb`]: script name and
+/// 1-indexed line/column, as it rides out on observations and capability checks.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallSite {
+    pub script: Arc<str>,
+    pub line: u32,
+    pub col: u32,
+}
+
+impl std::fmt::Display for CallSite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}, line {}", self.script, self.line)
     }
 }
 
@@ -261,6 +262,18 @@ impl SourceDb {
         self.sources.get(id.0 as usize)
     }
 
+    /// `span` resolved to a script name and line/column; `None` when its
+    /// source is not registered here.
+    pub fn site(&self, span: Span) -> Option<CallSite> {
+        let source = self.get(span.file)?;
+        let (line, col) = source.line_col(span.start);
+        Some(CallSite {
+            script: source.name().clone(),
+            line,
+            col,
+        })
+    }
+
     /// The [`FileId`] the next [`register`](Self::register) will mint, so a
     /// caller can stamp it onto spans before registering the source it names —
     /// sound exactly when nothing else registers in between.
@@ -271,17 +284,4 @@ impl SourceDb {
         )]
         FileId(self.sources.len() as u32)
     }
-}
-
-/// 1-indexed (line, col) by linear scan, for a caller holding source text but
-/// no [`Source`]; anything repeated should build one and use
-/// [`Source::byte_to_line_col`].
-pub(crate) fn byte_to_line_col(source: &str, byte_offset: usize) -> (usize, usize) {
-    let safe = floor_char_boundary(source, byte_offset);
-    let prefix = &source[..safe];
-    let line = prefix.bytes().filter(|&b| b == b'\n').count() + 1;
-    let last_nl = prefix.rfind('\n');
-    let line_start = last_nl.map_or(0, |i| i + 1);
-    let col = source[line_start..safe].chars().count() + 1;
-    (line, col)
 }

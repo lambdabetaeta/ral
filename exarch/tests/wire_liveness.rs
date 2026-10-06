@@ -24,12 +24,9 @@ use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ral_core::protocol::{
-    Attach, DispatchId, Event, Host, Liveness, Program, Report, Run, Transport, WireTransport,
-    dispatch_to_report,
-};
-use ral_core::types::GrantStack;
-use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
+use ral_core::carrier::{Host, Transport, WireTransport, dispatch_to_report};
+use ral_core::protocol::channel::Liveness;
+use ral_core::protocol::{Attach, DispatchId, Event, Report, Run};
 
 // Mirror the binary's pre-`main` re-exec dispatch: the `--engine` re-exec is
 // served here, before libtest sees a flag it would reject, so a re-exec'd
@@ -60,7 +57,7 @@ fn engine_over_socketpair(liveness: Liveness) -> (WireTransport, EngineChild) {
     let guest_fd = guest.as_raw_fd();
 
     let mut cmd = std::process::Command::new(std::env::current_exe().expect("current exe"));
-    cmd.arg("--engine");
+    cmd.arg(ral_core::Role::Engine.flag());
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::null());
     cmd.stderr(std::process::Stdio::null());
@@ -105,23 +102,6 @@ fn attach(transport: &WireTransport) -> tempfile::TempDir {
     dir
 }
 
-/// One capturing run under the ⊤ capability ceiling, uncapped and
-/// stdin-less — the shape `core/src/transport.rs`'s own `capture_req` mints.
-fn source_run(src: &str) -> Run {
-    Run {
-        program: Program::Source(src.into()),
-        script_name: "<test>".into(),
-        caps: GrantStack::root(),
-        wall: None,
-        deferred_lease: None,
-        worker_cap: None,
-        io: RunIo::Capture,
-        terminal: RequestedTerminalAccess::Denied,
-        stdin: RunStdin::Empty,
-        trail: None,
-    }
-}
-
 /// The §3 heartbeat keeps an *idle* session alive across a real child: adopt
 /// → attach → a run settles to a `Report::Ran { Ok }`, and then the
 /// session, left silent for wall-clock time well past its read deadline,
@@ -135,8 +115,12 @@ fn an_idle_session_stays_alive_on_the_heartbeat_alone() {
     });
     let _dir = attach(&transport);
 
-    let report = dispatch_to_report(&transport, source_run("$[1 + 1]"), Arc::new(()))
-        .expect("the engine must answer the dispatch with a Report");
+    let report = dispatch_to_report(
+        &transport,
+        Run::captured("$[1 + 1]", "<test>"),
+        Arc::new(()),
+    )
+    .expect("the engine must answer the dispatch with a Report");
 
     assert!(
         matches!(
@@ -175,7 +159,11 @@ fn a_cancel_that_overtakes_its_dispatch_still_stops_the_run() {
     let id = DispatchId(7);
     transport.control().cancel(id);
     let started = Instant::now();
-    transport.dispatch(id, source_run("sleep 30"), &(Arc::new(()) as Arc<dyn Host>));
+    transport.dispatch(
+        id,
+        Run::captured("sleep 30", "<test>"),
+        &(Arc::new(()) as Arc<dyn Host>),
+    );
 
     let report = loop {
         let (did, event) = transport.events().recv().expect("the engine must answer");
@@ -218,7 +206,7 @@ fn a_dead_peer_fails_the_in_flight_run_as_cancelled() {
     // A literal id suffices — nothing here correlates a reply.
     transport.dispatch(
         DispatchId(1),
-        source_run("sleep 30"),
+        Run::captured("sleep 30", "<test>"),
         &(Arc::new(()) as Arc<dyn Host>),
     );
 

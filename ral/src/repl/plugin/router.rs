@@ -9,8 +9,7 @@
 //! the built-in as the final arm.
 //!
 //! Each backend realizes `Default` natively: rustyline by returning `None`
-//! from its conditional handler (its run-the-default protocol), the
-//! structural frontend by falling into its own built-in key arms.
+//! from its conditional handler (its run-the-default protocol).
 //! Precedence is decided here, once, so it cannot vary by frontend.
 //! Resolution is pure host-side work (chord equality, one regex match) —
 //! safe inside editor callbacks, where the evaluator must never run.

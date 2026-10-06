@@ -331,8 +331,8 @@ pub type ScheduleId = u64;
 pub struct ScheduleInfo {
     pub label: String,
     pub trigger: String,
-    /// Until the next fire; zero once overdue.
-    pub next_in: Duration,
+    /// Seconds until the next fire; zero once overdue.
+    pub next_s: u64,
     pub fires: u64,
 }
 
@@ -409,7 +409,7 @@ impl ScheduleRegistry {
         let mut g = self.lock();
         if g.entries.values().any(|e| e.label == label) {
             return Err(format!(
-                "label '{label}' is already borne by a live schedule — pick another, or `exarch-schedules `remove` it first"
+                "label '{label}' is already borne by a live schedule: pick another, or `exarch-schedules `remove` it first"
             ));
         }
         let id = g.next_id;
@@ -468,7 +468,7 @@ impl ScheduleRegistry {
                         ScheduleInfo {
                             label: e.label.clone(),
                             trigger: e.trigger.describe(),
-                            next_in: clock::until(e.next, now),
+                            next_s: clock::until(e.next, now).as_secs(),
                             fires: e.fires,
                         },
                     )
@@ -815,7 +815,7 @@ mod tests {
             &inbox.mailbox(),
         )
         .unwrap();
-        let next_in = reg.list()[0].next_in;
+        let next_in = Duration::from_secs(reg.list()[0].next_s);
         assert!(
             next_in > Duration::from_mins(119) && next_in <= Duration::from_hours(2),
             "got {next_in:?}"

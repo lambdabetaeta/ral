@@ -99,7 +99,7 @@ pub struct Choice {
 ///
 /// An `OwnedFd` wearing an `AF_VSOCK` connection on Unix, an `OwnedSocket`
 /// wearing an `AF_HYPERV` one on Windows — [`guest_net::device::Wire`] is
-/// implemented for both, the same pretence [`ral_core::wire::WireStream`]
+/// implemented for both, the same pretence [`ral_core::protocol::channel::WireStream`]
 /// makes for the control plane.
 #[cfg(unix)]
 pub type NetWire = std::os::unix::net::UnixStream;
@@ -216,7 +216,7 @@ impl Conversation {
             .map_err(|e| format!("could not make a log folder: {e}"))?;
         let run_lock = exarch::bootstrap::RunLock::try_acquire(&run_dir)
             .map_err(|e| format!("could not lock the log folder {}: {e}", run_dir.display()))?;
-        let config_dir = SYNOD.xdg_dir(ral_core::path::basedir::XdgKind::Config);
+        let config_dir = SYNOD.xdg_dir(ral_core::host::XdgKind::Config);
 
         // The two slow arms of an opening wait on different things
         // entirely: the boot on a guest kernel coming up, the baseline on
@@ -256,7 +256,7 @@ impl Conversation {
 
         let config = exarch::agent::RootConfig {
             system,
-            caps: ral_core::types::GrantStack::of(caps),
+            caps: ral_core::capability::GrantStack::of(caps),
             run_dir,
             account: RecordedAccount {
                 label: label.clone(),
@@ -606,23 +606,23 @@ fn select_account(store: &Mutex<CredentialStore>, choice: Choice) -> Result<Sele
 /// No `#[cfg]` appears below, though what
 /// [`vm_manager::Machine::take_wires`] hands over differs by platform — an
 /// `AF_VSOCK` descriptor under Virtualization.framework, an `AF_HYPERV`
-/// socket under Hyper-V. [`ral_core::protocol::WireTransport::adopt`] takes
+/// socket under Hyper-V. [`ral_core::carrier::WireTransport::adopt`] takes
 /// whatever converts into its own
-/// [`WireStream`](ral_core::wire::WireStream), and each platform's owned
+/// [`WireStream`](ral_core::protocol::channel::WireStream), and each platform's owned
 /// handle does, so the frame protocol never learns which hypervisor it is
 /// talking through.
 ///
 /// # Errors
 /// Returns `Err` if the control plane cannot be adopted as a wire.
 fn control_seat(
-    control: impl Into<ral_core::wire::WireStream>,
+    control: impl Into<ral_core::protocol::channel::WireStream>,
     cwd: std::path::PathBuf,
 ) -> Result<exarch::agent::RootSeat, String> {
     Ok(exarch::agent::RootSeat::Wire {
         transport: Box::new(
-            ral_core::protocol::WireTransport::adopt(
+            ral_core::carrier::WireTransport::adopt(
                 control,
-                ral_core::protocol::Liveness::default(),
+                ral_core::protocol::channel::Liveness::default(),
             )
             .map_err(|e| format!("could not take control of the machine: {e}"))?,
         ),

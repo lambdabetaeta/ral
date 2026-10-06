@@ -21,6 +21,10 @@
 //! Usage: `boot-smoke <kernel> <initramfs> <rootfs> <folder>`
 
 #![allow(
+    clippy::disallowed_macros,
+    reason = "[silent:example] an example prints its result"
+)]
+#![allow(
     clippy::disallowed_methods,
     reason = "example binary: its `main` owns the process, so an `exit` unwinds nothing another owner needs"
 )]
@@ -29,10 +33,10 @@ use std::io::{Read as _, Write as _};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ral_core::protocol::{
-    Attach, Liveness, Program, Report, Run, Transport, WireTransport, dispatch_to_report,
-};
-use ral_core::types::GrantStack;
+use ral_core::capability::GrantStack;
+use ral_core::carrier::{Transport, WireTransport, dispatch_to_report};
+use ral_core::protocol::channel::Liveness;
+use ral_core::protocol::{Attach, Program, Report, Run};
 use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
 use vm_manager::{BootArtifact, Hypervisor, Machine, MachineSpec};
 
@@ -185,7 +189,7 @@ fn main() {
 /// scope is what lets it borrow the machine.
 fn prove_the_host_can_dial_in(
     machine: &dyn Machine,
-    control: impl Into<ral_core::wire::WireStream>,
+    control: impl Into<ral_core::protocol::channel::WireStream>,
     workspace: std::path::PathBuf,
 ) {
     let transport = match WireTransport::adopt(control, Liveness::default()) {

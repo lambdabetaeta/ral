@@ -2,15 +2,15 @@
 //! `` `repl-plugin `` enquiries, renders what the engine surfaces, and is
 //! the one door every plugin hook's dispatch goes through.
 
-use ral_core::protocol::reading::WorkerRow;
-use ral_core::protocol::{
-    Ending, EnquiryError, Host, Program, Report, Run, Severed, Transport, dispatch_to_report,
-};
-use ral_core::serial::FOValue;
-use ral_core::serial::datum::{Datum as _, untag};
+use ral_core::carrier::{Host, Severed, Transport, dispatch_to_report};
+use ral_core::first_order::FOValue;
+use ral_core::first_order::datum::{Datum as _, untag};
+use ral_core::protocol::probe::WorkerRow;
+use ral_core::protocol::{Ending, EnquiryError, Program, Report, Run};
 use ral_core::sync::LockExt as _;
-use ral_core::types::{DeferredSink, GrantStack, HookName};
-use ral_core::{Captured, RequestedTerminalAccess, RunIo, RunStdin, Value};
+use ral_core::text::plural;
+use ral_core::types::{DeferredSink, HookName};
+use ral_core::{Captured, RequestedTerminalAccess, Value};
 use ral_core::{errln, outln};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -47,16 +47,9 @@ pub(super) struct HookResult {
 /// terminal authority, and whether it runs aside.
 pub(super) fn hook_run(program: Program, wall: Option<Duration>) -> Run {
     Run {
-        program,
-        script_name: "<hook>".into(),
-        caps: GrantStack::root(),
-        wall,
-        deferred_lease: None,
-        worker_cap: None,
-        io: RunIo::Inherit,
         terminal: RequestedTerminalAccess::Denied,
-        stdin: RunStdin::Inherit,
-        trail: None,
+        wall,
+        ..Run::foreground(program, "<hook>")
     }
 }
 
@@ -213,9 +206,8 @@ pub(crate) fn teardown_notice(workers: &[WorkerRow]) -> Option<String> {
         return None;
     }
     Some(format!(
-        "ral: taking down {} still-running worker{}: {}",
-        running.len(),
-        if running.len() == 1 { "" } else { "s" },
+        "ral: taking down {} still running: {}",
+        plural(running.len(), "worker"),
         running.join(", ")
     ))
 }
@@ -257,7 +249,7 @@ mod tests {
             row(1, "spawn { done }", false),
         ];
         let notice = teardown_notice(&mixed).expect("two running workers must be named");
-        assert!(notice.contains("2 still-running workers"), "got: {notice}");
+        assert!(notice.contains("2 workers still running"), "got: {notice}");
         assert!(
             notice.contains("[w2] spawn { still_going }"),
             "got: {notice}"

@@ -3,11 +3,25 @@
 
 use super::flow::Settled;
 use super::value::Value;
-use crate::io::{ByteBuffer, take_buffer};
+use crate::io::ByteBuffer;
 use crate::sync::LockExt as _;
+use std::ops::ControlFlow;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+
+pub(crate) mod surface;
+
+/// A once-only claim, contested across threads: the first [`Self::claim`] wins.
+#[derive(Debug, Clone, Default)]
+pub struct Latch(Arc<AtomicBool>);
+
+impl Latch {
+    pub(crate) fn claim(&self) -> bool {
+        !self.0.swap(true, Ordering::AcqRel)
+    }
+}
 
 /// Whether `v` structurally reaches a running handle — the binding-lease
 /// reaper's pin check, so a name still holding live work is never pruned.
@@ -17,18 +31,15 @@ use std::time::Instant;
 pub(crate) fn pins_running_work(v: &Value) -> bool {
     match v {
         Value::Handle(h) => h.is_running(),
-        Value::List(items) => items.iter().any(|v| pins_running_work(&v)),
-        Value::Map(pairs) => pairs.iter().any(|(_, v)| pins_running_work(&v)),
-        Value::Variant { payload, .. } => payload.as_deref().is_some_and(pins_running_work),
-        // `applied` is collected argument data, walked like a list's elements.
-        Value::Native { applied, .. } => applied.iter().any(pins_running_work),
-        Value::Unit
-        | Value::Bool(_)
-        | Value::Int(_)
-        | Value::Float(_)
-        | Value::String(_)
-        | Value::Bytes(_)
-        | Value::Thunk(_) => false,
+        _ => v
+            .try_for_each_child(&mut |c| {
+                if pins_running_work(c) {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            })
+            .is_break(),
     }
 }
 
@@ -52,16 +63,16 @@ pub struct CompletedHandle {
     pub stderr: Vec<u8>,
     /// Drained once from [`HandleInner::surface_buf`], and replayed through
     /// the awaiting run's surface by `await`/`race` — never by `poll`.
-    pub surface: Vec<crate::serial::FOValue>,
+    pub surface: Vec<crate::first_order::FOValue>,
     pub(crate) outcome: super::flow::Settled<Value>,
 }
 
 /// Bounded buffer of the structured events a *detached* worker defers rather
 /// than emitting live, its spawning run having possibly ended.
 ///
-/// The bound lives in `builtins::concurrency`'s `DeferredSurface`, so a
-/// runaway emitter cannot grow this without limit.
-pub type SurfaceBuffer = Arc<Mutex<Vec<crate::serial::FOValue>>>;
+/// The bound lives in [`surface::DeferredSurface`], so a runaway emitter
+/// cannot grow this without limit.
+pub type SurfaceBuffer = Arc<Mutex<Vec<crate::first_order::FOValue>>>;
 
 /// Shared handle to a spawned computation.
 #[derive(Debug, Clone)]
@@ -90,7 +101,7 @@ pub struct HandleInner {
     /// batch: an eliminator's replay and the host's boundary delivery.  The
     /// loser skips, so a batch never renders twice and a never-awaited worker
     /// still delivers exactly once.
-    pub joined: Arc<Mutex<bool>>,
+    pub joined: Latch,
     /// When an eliminator last named this handle: renewed by `poll` and by
     /// every `await`/`race` sweep, read by the idle lease chain in
     /// `builtins::concurrency`.  Cancelling or listing never renews it.
@@ -100,7 +111,7 @@ pub struct HandleInner {
     /// `service-handle`: what the worker returns was decided by another unit,
     /// so the unit that reacquires its handle admits it against the type it
     /// uses it at.  Each `service-handle` call is a site of its own.
-    pub site: Option<Arc<super::Site>>,
+    pub site: Option<Arc<crate::ty::Site>>,
     /// The worker's own scope — a `DurableRoot::worker()` child of the
     /// *session* root, not of the spawning run, so a foreground interrupt
     /// cannot collaterally kill it.  `cancel` and `race`'s losers fire it, and
@@ -140,7 +151,7 @@ impl HandleInner {
             stdout_buf: ByteBuffer::default(),
             stderr_buf: ByteBuffer::default(),
             surface_buf: Arc::new(Mutex::new(Vec::new())),
-            joined: Arc::new(Mutex::new(false)),
+            joined: Latch::default(),
             last_observed: Observed(Arc::new(Mutex::new(Instant::now()))),
             cmd: cmd.into(),
             site: None,
@@ -231,8 +242,8 @@ impl HandleInner {
             *state = HandleState::Completed;
         }
         let completed = CompletedHandle {
-            stdout: take_buffer(&self.stdout_buf),
-            stderr: take_buffer(&self.stderr_buf),
+            stdout: self.stdout_buf.take(),
+            stderr: self.stderr_buf.take(),
             surface: std::mem::take(&mut *self.surface_buf.lock_ignore_poison()),
             outcome,
         };

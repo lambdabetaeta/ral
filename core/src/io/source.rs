@@ -3,7 +3,7 @@
 use std::io::{self, Read};
 use std::sync::Arc;
 
-use crate::process::Wake;
+use crate::io::Wake;
 
 /// Where a stage's byte input comes from.
 ///
@@ -149,9 +149,9 @@ impl Read for SourceReader {
 /// A fired wake always reads as EOF, never as data.
 #[cfg(unix)]
 fn read_interruptible(fd: &mut Fd, wake: &Wake, buf: &mut [u8]) -> io::Result<usize> {
-    use crate::process::wake::Readiness;
-    use std::os::fd::AsRawFd;
-    match wake.poll_beside(fd.as_raw_fd(), libc::POLLIN)? {
+    use super::Readiness;
+    use rustix::event::PollFlags;
+    match wake.poll_beside(&*fd, PollFlags::IN)? {
         Readiness::Fired => Ok(0),
         Readiness::Ready(_) => fd.read(buf),
     }
@@ -188,11 +188,11 @@ impl From<SourceReader> for crate::process::StdioSpec {
 }
 
 #[cfg(unix)]
-impl std::os::unix::io::AsRawFd for Fd {
-    fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
+impl std::os::fd::AsFd for Fd {
+    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
         match self {
-            Self::Pipe(r) => r.as_raw_fd(),
-            Self::File(f) => f.as_raw_fd(),
+            Self::Pipe(r) => r.as_fd(),
+            Self::File(f) => f.as_fd(),
         }
     }
 }

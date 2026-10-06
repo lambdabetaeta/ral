@@ -69,8 +69,7 @@ fn audit_cli_captures_command_stdout() {
     let o = run_with_timeout(&["--audit"], &script, Duration::from_secs(5))
         .expect("audited echo timed out");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    // The audit dump is compact JSON; with `value_to_json_lossy_bytes`
-    // the captured stdout bytes are rendered as a lossy-UTF-8 string
+    // The audit dump is compact JSON; the captured stdout bytes are rendered as a lossy-UTF-8 string
     // immediately following the `"stdout":"` key.  Anchoring the match
     // on `"stdout":"<marker>` rules out hits coming from `args` or
     // from the unrelated outer stdout passthrough.
@@ -323,15 +322,15 @@ fn many_sequential_pipelines_no_leak() {
     // loop runs on its own.
     let (open, close) = if cfg!(target_os = "linux") {
         (
-            r"
+            r#"
 let probe = { /bin/sh -c 'grep Threads: /proc/$PPID/status' | !{from-line} }
 let before = !{probe}
-echo threads:before=$before
-",
-            r"
+echo "threads:before=$before"
+"#,
+            r#"
 let after = !{probe}
-echo threads:after=$after
-",
+echo "threads:after=$after"
+"#,
         )
     } else {
         ("", "")
@@ -1686,7 +1685,7 @@ fn mkfifo(path: &std::path::Path) {
 }
 
 /// A stage's own kill addresses its pid, never the group; a non-interrupt
-/// cancel — here `cancel $job`'s `CancelCause::Explicit` — of a pipeline
+/// cancel — here `cancel $job`'s `CancelCause::Cancelled` — of a pipeline
 /// whose stage forks a grandchild must still take the whole group down, so
 /// the collector must signal the group itself.  The `sleep 300 &` the fixture
 /// forks never `setsid`s away, so it is the group member that would survive.

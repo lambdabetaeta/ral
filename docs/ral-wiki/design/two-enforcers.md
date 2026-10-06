@@ -109,7 +109,7 @@ the next launch finds it and the kernel holds it. macOS holds it from the
 start, Seatbelt's rules being negative over names.
 
 The two agree on what a deny means: every spelling some filesystem takes for
-its name. The guard's deny rules speak under `lex::collision_key`, its allows
+its name. The guard's deny rules speak under `identity::collision_key`, its allows
 under the name as stored; Seatbelt matches the same class; a bwrap mask and a Windows ACE hang on whatever object the
 volume's own lookup finds, which on an existing path is the same thing. On a
 case-sensitive volume the guard therefore over-denies relative to the Linux
@@ -128,8 +128,9 @@ profile it already has.
 
 **macOS's process row is a budget.** There is no pid namespace to hide the
 host's table; a confined child instead launches with `RLIMIT_NPROC` at the
-user's process count at launch plus 512, soft and hard (`sandbox::fork_brake`;
-reported as a warning when the count cannot be taken, never a refusal). Darwin
+user's process count at launch plus 512, soft and hard (`process::limits::fork_brake`;
+a count that cannot be taken refuses the launch, as an unarmed Windows Job
+Object cap does: a child under a grant never runs unbraked). Darwin
 counts processes per real UID but compares each `fork`/`posix_spawn` with the
 *forking* process's own limit, so only the confined subtree's forks are refused
 and every other process of the user keeps its own. The threshold is absolute:

@@ -19,7 +19,7 @@ use crate::fleet::schedule::Trigger;
 use crate::provider::{Limit, Provider, ProviderError, Recovery};
 use crate::record::Transient;
 use crate::shell_eval;
-use ral_core::protocol::{Severed, reading};
+use ral_core::carrier::Severed;
 use std::ops::ControlFlow;
 use std::time::{Duration, Instant};
 
@@ -225,7 +225,7 @@ impl Avatar {
         }
         // A boundary read, legal here: the batch has fully drained and no
         // dispatch is in flight.
-        let workers_idle = self.seat.read(reading::workers)?.is_empty();
+        let workers_idle = self.seat.read(|t| t.workers())?.is_empty();
         let facts = nudge::Facts {
             must_reply: self.agent.returns,
             pinned: self.pinned_digest(),
@@ -245,7 +245,7 @@ impl Avatar {
                 // Unreachable: every outcome `react` answers followed a
                 // deliberation whose prompt `append_user` committed.
                 None => self.note_error(&format!(
-                    "a nudge was decided with no prompt in hand to continue — dropping it: {text}"
+                    "a nudge was decided with no prompt in hand to continue: dropping it: {text}"
                 )),
             }
         }
@@ -404,13 +404,13 @@ impl Avatar {
             &self.agent.mailbox,
         ) {
             Ok(_) => self.note(format!(
-                "{} — resuming {}, in {}",
+                "{}: resuming {}, in {}",
                 limit.label(),
                 clock::local(resets_at),
                 clock::hms(clock::until(resets_at, now).as_secs())
             )),
             Err(refusal) => self.note_error(&format!(
-                "{} — the resume could not be scheduled: {refusal}",
+                "{}: the resume could not be scheduled: {refusal}",
                 limit.label()
             )),
         }
@@ -523,7 +523,7 @@ mod tests {
     use crate::provider::Refusal;
     use crate::provider::scripted::{Reply, Script};
     use crate::record::{Display, Forensic, Record};
-    use ral_core::serial::FOValue;
+    use ral_core::first_order::FOValue;
 
     /// Every item `announce` draws records its display commit: a prompt
     /// commits `Display::Prompt`, and a subagent's breadcrumb commits
@@ -867,7 +867,7 @@ mod tests {
 
         assert!(
             session.inbox.next_item().is_none(),
-            "a stationary pin must queue no second nudge — the loop would park, not relivelock"
+            "a stationary pin must queue no second nudge: the loop would park, not relivelock"
         );
     }
 

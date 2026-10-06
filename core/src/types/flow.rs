@@ -1,6 +1,7 @@
 //! The evaluator's control-flow currencies: `Escape` and `Break` for exits.
 
 use super::error::Error;
+use super::value::Value;
 
 /// Non-catchable exits from a delimited scope.
 #[derive(Debug, Clone)]
@@ -15,55 +16,32 @@ pub enum Break {
     Escape(Escape),
 }
 
-/// A capability-policy decode/freeze failure.
-///
-/// The capability decoder and the sigil freeze pass ([`crate::path::sigil`])
-/// answer a malformed grant with a "no", never a process exit; having no
-/// `Escape` arm is how the type checker holds them to it.  A `Break` is minted
-/// only at the boundary that needs one.
-#[derive(Debug, Clone)]
-pub struct PolicyError {
-    pub message: String,
-    pub hint: Option<String>,
-}
-
-impl PolicyError {
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-            hint: None,
-        }
-    }
-
-    pub(crate) fn with_hint(mut self, hint: impl Into<String>) -> Self {
-        self.hint = Some(hint.into());
-        self
-    }
-}
-
-impl From<PolicyError> for Break {
-    fn from(e: PolicyError) -> Self {
-        let err = Error::new(e.message, 1);
-        Self::Error(match e.hint {
-            Some(hint) => err.with_hint(hint),
-            None => err,
-        })
-    }
-}
-
-/// The `as_map`/`as_list` coercions raise a bare `Error` — a shape mismatch,
-/// never an exit — so the decoder absorbs one directly.
-impl From<Error> for PolicyError {
-    fn from(e: Error) -> Self {
-        match e.hint {
-            Some(hint) => Self::new(e.message).with_hint(hint),
-            None => Self::new(e.message),
+impl Break {
+    /// The exit status this break ends a run on.
+    pub fn code(&self) -> i32 {
+        match self {
+            Self::Error(error) => error.code(),
+            Self::Escape(Escape::Exit(code)) => *code,
         }
     }
 }
 
 /// Result whose error is a [`Break`].
 pub type Settled<T> = Result<T, Break>;
+
+/// Stamp `cmd` on an error that has no command yet, so the innermost dispatch
+/// wins — the rule `stamp` uses for a span.  Not an observation, and it
+/// happens whether or not anyone is listening: `try`'s record needs it with
+/// no trail open.  An `_`-prefixed internal name defers to the public wrapper
+/// that called it.
+pub(crate) fn name_failure(cmd: &str, result: &mut Settled<Value>) {
+    if let Err(Break::Error(e)) = result
+        && e.command.is_none()
+        && !cmd.starts_with('_')
+    {
+        e.command = Some(cmd.into());
+    }
+}
 
 impl From<Error> for Break {
     fn from(e: Error) -> Self {

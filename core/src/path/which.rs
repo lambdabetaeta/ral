@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use super::PathRules;
+
 /// The directory a `PATH` walk anchors its relative entries to.
 ///
 /// A newtype rather than an `Option<&Path>` because "here" is the shell's cwd
@@ -78,7 +80,7 @@ fn locate_at(
 ) -> Option<PathBuf> {
     // Answered before the memo is touched: one join and one stat is no
     // amplification to amortise, and a caller naming a file usually means
-    // "is it there *now*" — a binary this very run built.
+    // "is it there *now*": a binary this very run built.
     if name_has_separator(name) {
         let candidate = anchor_to_cwd(PathBuf::from(name), cwd);
         return is_executable_file(&candidate).then_some(candidate);
@@ -235,7 +237,7 @@ fn name_has_separator(name: &str) -> bool {
 /// Anchor a relative entry to `cwd`, folding `.` and `..` out of the join.
 ///
 /// The fold is not cosmetic: a resolved path travels on to the OS sandbox
-/// profile via [`capability::sandbox`](crate::capability::sandbox), which
+/// profile via [`SandboxProjection::of`](crate::sandbox::SandboxProjection::of), which
 /// matches literally, and the `/work/./bin/git` an unfolded `./bin` yields
 /// is covered by no `/work/bin/` the profile names.
 fn anchor_to_cwd(p: PathBuf, cwd: SearchCwd<'_>) -> PathBuf {
@@ -351,18 +353,17 @@ pub(crate) const WINDOWS_EXEC_EXTENSIONS: &[&str] = &["com", "exe", "bat", "cmd"
 /// A command name as a deny holds it: the host's name for it, under every
 /// spelling some filesystem takes for that.
 pub(crate) fn command_name_key(name: &str) -> String {
-    let name = name_key_on(name, cfg!(windows));
-    super::lex::collision_key(std::ffi::OsStr::new(name.as_ref()))
+    let name = name_key_on(name, PathRules::HOST);
+    super::identity::collision_key(std::ffi::OsStr::new(name.as_ref()))
         .to_string_lossy()
         .into_owned()
 }
 
 /// Off Windows the name itself; on Windows ASCII lower-case, a trailing
-/// executable extension stripped.  `windows` is a parameter so the Windows
-/// rule is tested on every host.
-fn name_key_on(name: &str, windows: bool) -> std::borrow::Cow<'_, str> {
+/// executable extension stripped.
+fn name_key_on(name: &str, rules: PathRules) -> std::borrow::Cow<'_, str> {
     use std::borrow::Cow;
-    if !windows {
+    if rules == PathRules::Posix {
         return Cow::Borrowed(name);
     }
     let lower = name.to_ascii_lowercase();
@@ -383,7 +384,7 @@ fn name_key_on(name: &str, windows: bool) -> std::borrow::Cow<'_, str> {
 #[cfg(windows)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "PATHEXT is the Windows resolver's suffix list, not an XDG basedir — a PATH-probe env read, allowed at the call site like the other which/PATH probes here"
+    reason = "PATHEXT is the Windows resolver's suffix list, not an XDG basedir: a PATH-probe env read, allowed at the call site like the other which/PATH probes here"
 )]
 fn windows_pathext_suffixes() -> Vec<String> {
     use std::ffi::OsStr;
@@ -746,7 +747,7 @@ mod name_key_tests {
 
     #[test]
     fn name_key_off_windows_is_the_name() {
-        assert_eq!(name_key_on("Git.exe", false), "Git.exe");
+        assert_eq!(name_key_on("Git.exe", PathRules::Posix), "Git.exe");
     }
 
     #[test]
@@ -754,10 +755,10 @@ mod name_key_tests {
         for name in [
             "git", "GIT", "git.exe", "Git.EXE", "git.cmd", "git.com", "git.bat",
         ] {
-            assert_eq!(name_key_on(name, true), "git", "{name}");
+            assert_eq!(name_key_on(name, PathRules::Windows), "git", "{name}");
         }
-        assert_eq!(name_key_on("git.tool", true), "git.tool");
-        assert_eq!(name_key_on("gitk.exe", true), "gitk");
+        assert_eq!(name_key_on("git.tool", PathRules::Windows), "git.tool");
+        assert_eq!(name_key_on("gitk.exe", PathRules::Windows), "gitk");
     }
 
     /// A deny holds a command name under every spelling, as it holds a path.

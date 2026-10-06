@@ -72,7 +72,7 @@ fn well_formed_endpoint(endpoint: &str) -> Result<String, String> {
     let endpoint = endpoint.trim();
     if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
         return Err(format!(
-            "'{endpoint}' does not look like an address — should it begin with https://?"
+            "'{endpoint}' does not look like an address: should it begin with https://?"
         ));
     }
     Ok(if endpoint.ends_with('/') {
@@ -102,7 +102,7 @@ pub fn withdraw_endpoint(store: &mut CredentialStore, id: &str) -> Result<(), St
 fn refuse_built_in(account: &Account) -> Result<(), String> {
     if identity::built_in(&account.service.name).is_some() {
         return Err(format!(
-            "{} is a built-in service — its key can be taken back, but the \
+            "{} is a built-in service: its key can be taken back, but the \
              service itself cannot be removed.",
             account.service.name
         ));
@@ -122,10 +122,10 @@ fn refuse_built_in(account: &Account) -> Result<(), String> {
 /// display label, not an id, since a human reads this.
 pub fn checked_key(label: &str, key: &str) -> Result<String, String> {
     if key.trim().is_empty() {
-        return Err(format!("No key was typed for {label} — paste it first?"));
+        return Err(format!("No key was typed for {label}: paste it first?"));
     }
     well_formed_key(key).ok_or_else(|| {
-        format!("That {label} key carries a line break — was more than the key copied?")
+        format!("That {label} key carries a line break: was more than the key copied?")
     })
 }
 

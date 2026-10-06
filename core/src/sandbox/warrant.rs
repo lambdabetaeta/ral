@@ -16,9 +16,9 @@
 
 #[cfg(target_os = "linux")]
 use super::linux::landlock::Landlocked;
+use crate::Role;
 use crate::capability::{Admitted, Program};
-use crate::process::{CommandFailure, SpawnFailure};
-use crate::types::Status;
+use crate::process::SpawnFailure;
 use libc::c_int;
 use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
@@ -222,7 +222,10 @@ impl Confined {
     pub(super) fn run(self) -> u8 {
         match self.0 {
             Run::File { real, arg0, args } => exec(&real, &arg0, args),
-            Run::Tool(tool, args) => crate::runtime::pipeline::helper::run_bundled(&tool, args),
+            Run::Tool(tool, args) => crate::uutils::run(&tool, args).unwrap_or_else(|e| {
+                crate::terminal::cmd_error("ral", &e.to_string());
+                127
+            }),
         }
     }
 }
@@ -250,16 +253,15 @@ fn exec(real: &std::path::Path, arg0: &std::path::Path, args: Vec<OsString>) -> 
             let interp = interp.display();
             format!(
                 "\nhint: its interpreter {interp} is not admitted by the grant: a script you \
-                 can edit carries no interpreter of its own — add '{interp}': 'allow' to the \
+                 can edit carries no interpreter of its own: add '{interp}': 'allow' to the \
                  exec grant"
             )
         });
-    crate::diagnostic::cmd_error(
+    crate::terminal::cmd_error(
         "ral",
         &format!("{}: {err}{}", real.display(), hint.unwrap_or_default()),
     );
-    let failure = SpawnFailure::from(&err);
-    u8::try_from(Status::Process(CommandFailure::Spawn(failure)).code()).unwrap_or(u8::MAX)
+    SpawnFailure::from(&err).code()
 }
 
 impl Warrant {
@@ -293,7 +295,7 @@ impl Warrant {
                 "no warrant at fd {}: `{}` is how ral starts its own confined children, \
                  never a command to run by hand",
                 Slot::Warrant.fd(),
-                super::WARRANT_FLAG
+                Role::Warrant.flag()
             )
         })?;
         Self::unparcel(fd)

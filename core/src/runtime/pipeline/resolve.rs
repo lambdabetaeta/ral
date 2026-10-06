@@ -4,7 +4,7 @@
 
 use super::super::command::Head;
 use super::super::command_call;
-use crate::evaluator::machine;
+use super::StageEval;
 use crate::ir::{Comp, CompKind};
 use crate::source::Span;
 use crate::types::{Env, Mooring, Settled, Shell, TerminalAccess, Value};
@@ -45,7 +45,7 @@ pub(super) struct StageSpec {
 /// byte-capturing audit in force — a redirect needs a thread's fd table, a
 /// capture its accounting.  Admission is `command::vet`'s at launch, so a head
 /// the grant denies still routes through here and refuses as an ordinary error.
-fn resolve_launch(stage: &Comp, env: &Env, shell: &Shell) -> Settled<StageLaunch> {
+fn resolve_launch(stage: &Comp, env: &Env, eval: StageEval, shell: &Shell) -> Settled<StageLaunch> {
     let CompKind::Exec(e) = &stage.item else {
         return Ok(StageLaunch::Thread);
     };
@@ -59,7 +59,7 @@ fn resolve_launch(stage: &Comp, env: &Env, shell: &Shell) -> Settled<StageLaunch
     }
     Ok(StageLaunch::Direct {
         head,
-        args: machine::close_args(&e.args, env, &shell.sig)?,
+        args: (eval.close_args)(&e.args, env, &shell.sig)?,
     })
 }
 
@@ -92,6 +92,7 @@ fn resolve_terminal_plan(mooring: &Mooring, shell: &Shell) -> TerminalPlan {
 pub(super) fn resolve_pipeline(
     stages: &[Arc<Comp>],
     env: &Env,
+    eval: StageEval,
     mooring: &Mooring,
     shell: &Shell,
 ) -> Settled<PipelinePlan> {
@@ -100,7 +101,7 @@ pub(super) fn resolve_pipeline(
         .iter()
         .map(|stage| {
             Ok(StageSpec {
-                launch: resolve_launch(stage, env, shell)?,
+                launch: resolve_launch(stage, env, eval, shell)?,
                 span: stage.span,
             })
         })
@@ -115,7 +116,7 @@ mod tests {
     /// A session owning a terminal lease plus a `Leased` mooring — the REPL, or
     /// a terminal-launched script.  Stdout defaults to `Sink::Terminal`.
     fn leased_shell() -> (Shell, Mooring) {
-        let mut shell = Shell::default();
+        let mut shell = crate::test_helper::core_shell();
         shell.io.interactive = true;
         shell.io.terminal.startup_stdin_tty = true;
         shell.io.terminal.startup_stdout_tty = true;

@@ -9,28 +9,18 @@
 
 mod common;
 
-use ral_core::protocol::{Program, Run};
+use ral_core::compile::{CompileError, compile_and_typecheck};
+use ral_core::protocol::Run;
+use ral_core::run::RunReport;
 use ral_core::source::FileId;
-use ral_core::types::{GrantStack, Settled};
-use ral_core::{
-    CompileError, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Shell,
-    TypeError, Value, builtins, compile_and_typecheck, typecheck::fmt_scheme,
-};
-use std::sync::Arc;
+use ral_core::test_access::binding_scheme as scheme_of;
+use ral_core::types::Settled;
+use ral_core::{Shell, TypeError, Value};
 
 fn shell() -> Shell {
-    let mut s = Shell::default();
-    builtins::register(&mut s, common::prelude_comp());
+    let mut s = ral_core::test_helper::core_shell();
+    common::prelude().seat(&mut s);
     s
-}
-
-/// The scheme `name` carries on the live scope, `None` when it is unbound
-/// or bound without one.
-fn scheme_of(sh: &Shell, name: &str) -> Option<Arc<ral_core::typecheck::Scheme>> {
-    sh.binding_schemes()
-        .into_iter()
-        .find(|(n, _)| n == name)
-        .and_then(|(_, scheme)| scheme)
 }
 
 /// One REPL run through the public `run` door, which checks `src`
@@ -38,24 +28,7 @@ fn scheme_of(sh: &Shell, name: &str) -> Option<Arc<ral_core::typecheck::Scheme>>
 /// failure — callers that expect a clean run pick source that compiles;
 /// callers probing an *eval* failure get the body's `Settled` back.
 fn run(shell: &mut Shell, src: &str) -> Settled<Value> {
-    match shell.run(RunRequest {
-        run: Run {
-            program: Program::Source(src.into()),
-            script_name: "<test>".into(),
-            caps: GrantStack::root(),
-            wall: None,
-            deferred_lease: None,
-            worker_cap: None,
-            io: RunIo::Inherit,
-            terminal: RequestedTerminalAccess::Leased,
-            stdin: RunStdin::Inherit,
-            trail: None,
-        },
-        surface: None,
-        deferred: None,
-        desk: None,
-        fork: None,
-    }) {
+    match shell.run(Run::foreground(src, "<test>")) {
         RunReport::Ran { ending, .. } => ending.into_result(),
         RunReport::Static { .. } => panic!("well-formed source must run: {src:?}"),
     }
@@ -261,16 +234,17 @@ fn alias_visible_to_next_run() {
 #[test]
 fn live_binding_scheme_matches_baked_entry() {
     let sh = shell();
-    let baked: std::collections::HashMap<&str, String> = common::prelude_schemes()
+    let schemes = common::prelude_schemes();
+    let baked: std::collections::HashMap<&str, String> = schemes
         .iter()
-        .map(|(n, s)| (n.as_str(), fmt_scheme(s)))
+        .map(|(n, s)| (n.as_str(), s.to_string()))
         .collect();
     for name in ["words", "reverse"] {
         let live = scheme_of(&sh, name).unwrap_or_else(|| {
             panic!("prelude binding {name:?} must be bound on the live scope and carry a scheme")
         });
         assert_eq!(
-            fmt_scheme(&live),
+            live.to_string(),
             baked[name],
             "live scope scheme for {name:?} must match the baked entry"
         );
@@ -287,7 +261,9 @@ fn live_binding_scheme_matches_baked_entry() {
 fn session_scheme_instantiates_at_two_types() {
     let mut sh = shell();
     run(&mut sh, "let idf = { |x| return $x }").unwrap();
-    let stored = fmt_scheme(&scheme_of(&sh, "idf").expect("idf must carry a scheme"));
+    let stored = scheme_of(&sh, "idf")
+        .expect("idf must carry a scheme")
+        .to_string();
     assert!(
         stored.starts_with('∀'),
         "the stored scheme must be quantified, got: {stored}"
@@ -376,11 +352,11 @@ fn set_var_block_is_bound_and_usable_as_a_command_head() {
 
 /// What an earlier unit stores for a name of type `[_α]`, `α` being the
 /// number that unit's unifier gave it.
-fn stored_weak_list(alpha: u32) -> ral_core::typecheck::Scheme {
-    let elem = ral_core::typecheck::TyVar(alpha);
+fn stored_weak_list(alpha: u32) -> ral_core::ty::Scheme {
+    let elem = ral_core::ty::TyVar(alpha);
     ral_core::test_access::scheme_with_weak_residuals(
         vec![elem],
-        ral_core::typecheck::Ty::List(Box::new(ral_core::typecheck::Ty::Var(elem))),
+        ral_core::ty::Ty::list(ral_core::ty::Ty::Var(elem)),
     )
 }
 
@@ -453,7 +429,9 @@ fn a_generalised_binding_is_used_at_two_types() {
 fn a_stored_scheme_keeps_its_kinds() {
     let mut sh = shell();
     run(&mut sh, "let log = { |n| echo \"n: $n\" }").unwrap();
-    let stored = fmt_scheme(&scheme_of(&sh, "log").expect("log must carry a scheme"));
+    let stored = scheme_of(&sh, "log")
+        .expect("log must carry a scheme")
+        .to_string();
     assert!(stored.starts_with("∀α:scalar."), "got: {stored}");
     assert!(check_errors(&sh, "log 5\nlog text").is_empty());
     let errs = check_errors(&sh, "log [1, 2]");
@@ -470,7 +448,7 @@ fn a_label_read_is_settled_by_a_kind_in_either_order() {
     let mut sh = shell();
     run(&mut sh, "let before = { |m| length $m; $m[a] }").unwrap();
     run(&mut sh, "let after = { |m| $m[a]; length $m }").unwrap();
-    let shown = |name: &str| fmt_scheme(&scheme_of(&sh, name).expect("a scheme"));
+    let shown = |name: &str| scheme_of(&sh, name).expect("a scheme").to_string();
     assert_eq!(shown("before"), "∀α. Map α → Returns α");
     assert_eq!(shown("after"), "∀α. Map α → Returns Integer");
 }
@@ -556,7 +534,9 @@ fn a_recursive_document_its_unit_fixed_is_used_later_as_fixed() {
          let first = fold { |node key| return $node[$key] } $doc ['a']",
     )
     .unwrap();
-    let stored = fmt_scheme(&scheme_of(&sh, "doc").expect("doc must carry a scheme"));
+    let stored = scheme_of(&sh, "doc")
+        .expect("doc must carry a scheme")
+        .to_string();
     assert!(stored.starts_with("μ"), "{stored}");
     let later = "let second = fold { |node key| return $node[$key] } $doc ['a', 'b']";
     assert!(check_errors(&sh, later).is_empty());

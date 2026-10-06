@@ -1,7 +1,7 @@
 ---
 verified_at_commit: dabb0978
 verified_at_date: 2026-10-06
-anchors: [ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, CancelScope, CancelCause, Terminate, DurableRoot, ForegroundScope, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, Status::code, ChildEnd, WaitOutcome::classify, KILL_EXIT_CODE, process::check, RunningChild::wait, watch_cancel, Membership::owes, break_pipeline_group, escalation_pending]
+anchors: [ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, CancelScope, CancelCause, Terminate, DurableRoot, ForegroundScope, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, Status::code, ChildEnd, WaitOutcome::classify, KILL_EXIT_CODE, Mooring::check, CancelCause::code, Signal::status, RunningChild::wait, watch_cancel, Membership::owes, break_pipeline_group, escalation_pending]
 ---
 
 # Cancellation
@@ -24,7 +24,7 @@ The two pieces answer different questions:
 - **The scope tree** (`CancelScope`) answers *"which subtree should unwind, and
   why?"* — a structured-concurrency primitive that names a *cause* and reaches
   exactly the workers that inherited the cancelled scope. It is the only thing
-  `process::check(mooring)` polls.
+  `Mooring::check` polls.
 - **The ladder** (`ESCALATION: AtomicU8`) answers *"is the user escalating
   toward kill?"* — the third delivery forces `_exit(128 + sig)`. It is a blunt,
   host-agnostic floor for a process whose cooperative delivery is wedged, never
@@ -155,7 +155,7 @@ into the signal handler.
 ## Where cancellation is observed: poll points
 
 A cancel is a *request*; nothing stops until the evaluator next polls. The poll is
-`process::check(mooring)`, called at:
+`Mooring::check`, called at:
 
 - the **machine's step arms** (`evaluator/machine.rs`) — the β-step, `Bind`,
   `App`, `Rec`, `Source`, and the exec step each poll, so any loop of `ral`
@@ -230,7 +230,10 @@ two-level sum, each level with its own messages and hints:
     Status         = Raised(i32) | Cancelled(CancelCause) | Process(CommandFailure)
     CommandFailure = ExitCode(i32) | Signal(Signal) | Spawn(SpawnFailure)
 
-`Status::code` is the sole home of `128 + n` and of the cause table:
+Each failure owns its code (`CancelCause::code`, `SpawnFailure::code`,
+`CommandFailure::code`, `Signal::status`/`Signal::of_status` for `128 + n`), and
+`Status::code` delegates, so one table answers each fact; a signal handler's
+`_exit` reads `CancelCause::code` directly:
 
 | status | code |
 |---|---:|
@@ -246,7 +249,7 @@ two-level sum, each level with its own messages and hints:
 | `Cancelled(ReaderGone)` | 141 (`128 + SIGPIPE`) |
 
 The same facts reach ral code as the error record's `reason`
-(`evaluator/scope.rs`, `reason_value`), of which `status` is the projection.
+(`types/error/record.rs`, `Reason`), of which `status` is the projection.
 `reader-gone` is among them because a `try` inside a stage body can observe
 its own cut.
 
@@ -279,7 +282,7 @@ SIGSEGV under any cause stays `Signal`.
 **Only a terminal ral lent can report a key pressed on it.** A key is what a
 terminal sends: the `GESTURES` table in `process/signal/unix.rs` — SIGINT →
 `Interrupt`, SIGQUIT → `RootAbort`, SIGHUP → `Terminate`; no terminal sends
-SIGTERM. Its reader `gesture` is private to the `TerminalLoan`, the one
+SIGTERM. Its reader `gesture` is read only by the `TerminalLoan` (`process/foreground/unix.rs`), the one
 lending of the session's `TerminalLease` to a group, for a run. While it is
 lent the key reaches the tenant's group and never ral, so the loan hears it
 back from the tenant — `TerminalLoan::hear` — and when the terminal returns

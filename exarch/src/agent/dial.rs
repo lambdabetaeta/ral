@@ -12,5 +12,5 @@
 pub trait Dial: Send + Sync {
     /// # Errors
     /// Returns a sentence naming the dial if nothing on `port` answers.
-    fn dial(&self, port: u32) -> Result<ral_core::wire::WireStream, String>;
+    fn dial(&self, port: u32) -> Result<ral_core::protocol::channel::WireStream, String>;
 }

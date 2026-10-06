@@ -1,6 +1,6 @@
 ---
-generated_at_commit: b499072e
-generated_at_date: 2026-10-05
+generated_at_commit: 446e3123
+generated_at_date: 2026-10-06
 covers_paths: [core/src/syntax/]
 ---
 
@@ -71,12 +71,16 @@ sees raw bytes and bare words.
 - `group.rs` — pre-pass detecting mutually recursive binding groups, consumed by
   the [[map/core/elaboration|elaborator]].
 - `quote.rs` — bare-word classification (`is_bare_word`, `quote_word`,
-  `quote_word_if_needed`), shared with the [[map/repl|REPL]] and the
+  returning a `Cow`), shared with the [[map/repl|REPL]] and the
   `ral-quote` builtin. It is the dual of `WordLiteral::classify`: a string may
   go bare only where the numeral grammar declines it, since a bare `007` would
   read back as the number 7.
-- `tag.rs` — `TAG_PREFIX`, the sigil that marks a variant label. `free_refs.rs`
-  — free-reference scans.
+- `keyword.rs` — the control-operator keywords (`try`, `guard`, `within`,
+  `grant`, `audit`): operand shapes and arity, read by the parser and, through
+  `is_keyword` / `is_control_operator`, by the checker and the highlighters.
+  `free_refs.rs` — free-reference scans. `Pattern`, `BinaryOp` and `Redirects`
+  are not here: the [[map/core/ir|IR]] owns them, and the parser builds them
+  (`redirect_word`/`redirect_dup` translate a redirect token).
 - `highlight.rs` — `classify(src)`, token classes (`Class`) read off the lexer
   for the exarch and synod highlighters, so neither carries a second parser of
   its own.

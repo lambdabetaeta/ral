@@ -1,14 +1,14 @@
 //! Two environment stores: [`Env`], the finite map a closure captures and
 //! carries itself, and [`EnvVars`], the `within [env: …]` process-env
-//! override map that rides the [`Context`] subtree through `inherit_from` /
-//! `spawn_thread`.
+//! override map that rides the [`Context`] subtree into every child shell.
 //!
 //! [`Context`]: super::shell::Context
 
 use crate::ir::{Name, Occ};
-use crate::typecheck::Scheme;
+use crate::ty::Scheme;
 use crate::types::Value;
 use crate::types::signature::Signature;
+use either::Either;
 use rustc_hash::FxBuildHasher;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, LazyLock};
@@ -193,16 +193,13 @@ impl Env {
     }
 
     pub(crate) fn names(&self) -> impl Iterator<Item = &Name> {
-        match &self.0 {
-            Entries::Small(a) => EnvNames::Small(a.iter()),
-            Entries::Large(m) => EnvNames::Large(m.keys()),
-        }
+        self.iter().map(|(name, _)| name)
     }
 
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&Name, &Binding)> {
         match &self.0 {
-            Entries::Small(a) => EnvIter::Small(a.iter()),
-            Entries::Large(m) => EnvIter::Large(m.iter()),
+            Entries::Small(a) => Either::Left(a.iter().map(|(name, binding)| (name, binding))),
+            Entries::Large(m) => Either::Right(m.iter()),
         }
     }
 
@@ -279,36 +276,6 @@ impl Default for Env {
     }
 }
 
-enum EnvIter<'a> {
-    Small(std::slice::Iter<'a, (Name, Binding)>),
-    Large(imbl::hashmap::Iter<'a, Name, Binding, imbl::shared_ptr::DefaultSharedPtr>),
-}
-
-impl<'a> Iterator for EnvIter<'a> {
-    type Item = (&'a Name, &'a Binding);
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            Self::Small(it) => it.next().map(|(n, b)| (n, b)),
-            Self::Large(it) => it.next(),
-        }
-    }
-}
-
-enum EnvNames<'a> {
-    Small(std::slice::Iter<'a, (Name, Binding)>),
-    Large(imbl::hashmap::Keys<'a, Name, Binding, imbl::shared_ptr::DefaultSharedPtr>),
-}
-
-impl<'a> Iterator for EnvNames<'a> {
-    type Item = &'a Name;
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            Self::Small(it) => it.next().map(|(n, _)| n),
-            Self::Large(it) => it.next(),
-        }
-    }
-}
-
 thread_local! {
     /// `Some` while a dismantling [`Env::dismantle`] is looping on this
     /// thread.  A closure dying inside that loop pushes its entries here
@@ -370,8 +337,8 @@ impl Env {
 /// Persistent string→string map of env-var overrides, cheap to clone.
 ///
 /// `Serialize` / `Deserialize` are required because
-/// [`crate::subprocess::WireContext`] embeds this type and round-trips it as
-/// JSON across IPC boundaries.
+/// the seed's [`Context`](crate::types::Context) embeds this type and
+/// round-trips it as JSON across IPC boundaries.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EnvVars(imbl::HashMap<String, String>);
 
@@ -391,6 +358,16 @@ impl EnvVars {
         self.get(key).cloned().or_else(|| std::env::var(key).ok())
     }
 
+    /// `HOME`, then `USERPROFILE`: each key overlay first, then the host.
+    pub fn home(&self) -> Option<String> {
+        crate::host::first_bound(&crate::host::HOME_VARS, |k| self.get_or_host(k))
+    }
+
+    /// `USER`, then `USERNAME`, as [`Self::home`].
+    pub fn user(&self) -> Option<String> {
+        crate::host::first_bound(&crate::host::USER_VARS, |k| self.get_or_host(k))
+    }
+
     /// The host process env as ral reads it: text only.  A pair that is not
     /// UTF-8 is left out, never mangled; children still inherit its bytes.
     pub(crate) fn host_text() -> impl Iterator<Item = (String, String)> {
@@ -400,11 +377,6 @@ impl EnvVars {
 
     pub(crate) fn insert(&mut self, key: String, value: String) -> Option<String> {
         self.0.insert(key, value)
-    }
-
-    /// Insert only if `key` is unbound, without leaking imbl's `Entry` type.
-    pub(crate) fn insert_or_keep(&mut self, key: String, value: String) {
-        self.0.entry(key).or_insert_with(|| value);
     }
 
     pub fn iter(&self) -> EnvVarsIter<'_> {

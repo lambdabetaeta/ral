@@ -26,10 +26,10 @@ every residual variable and resolves the body against the final unifier
   (`typecheck::alias_arm_scheme`).
 
 Every other carrier only transports what those two closed: the build-time
-prelude bake harvests the schemes off the annotated prelude's `Bind` nodes
-(`typecheck::bake_prelude`), and the serial scope tables carry the installed
-`(value, scheme)` pairs across the pipeline-stage helper wire
-(`serial::SerialBinding`).
+prelude bake carries the schemes on the annotated prelude's `Define` phrases
+(`typecheck::bake_prelude`), read back by `SessionSchemes::from_prelude`, and the seed's scope tables carry the installed
+`(value, scheme)` pairs to a hatched child engine
+(`seed::table::SerialBinding`).
 
 A weak residual is the one variable a scheme may carry unquantified, because it
 is marked: `Scheme.weak` lists it, `seed_env` re-seeds each listed variable as a
@@ -41,8 +41,8 @@ settled before it is stored, so no foreign id is ever read
 One consequence: α-equivalence is **not** quotiented. `Scheme`'s `PartialEq` is
 derived, hence structural on the listed ids, so two schemes minted by different
 unifier runs compare unequal even when they denote the same ∀-type. Scheme
-comparisons must stay within one unifier run, or go through `fmt_scheme`
-(`core/src/typecheck/fmt.rs`), which renames the prefix to canonical Greek
+comparisons must stay within one unifier run, or go through `Scheme`'s `Display`
+(`core/src/ty/fmt.rs`), which renames the prefix to canonical Greek
 letters before comparing.
 
 See [[decisions/260603_session-scheme-continuity|session-scheme-continuity]] for

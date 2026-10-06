@@ -1,7 +1,7 @@
 ---
 verified_at_commit: 1776d222
 verified_at_date: 2026-09-30
-anchors: [compile, compile_and_typecheck, CompileError, SessionSchemes, ReturnContract, contract::Table, bake_prelude, bake_prelude_to_out_dir, BakedPrelude, postcard, annotate, stage_types, Capture, captured_string, eta_expand_arrow]
+anchors: [compile, compile_and_typecheck, CompileError, SessionSchemes, ReturnContract, contract::Table, bake_prelude, bake_prelude_to_out_dir, BakedPrelude, postcard, annotate, Capture, captured_string, eta_expand_arrow]
 ---
 
 # The compilation ladder: source to typed IR
@@ -36,10 +36,8 @@ a `Result` whose `CompileError` is `Parse` or `Types`).
     closed against the empty environment so the scheme outlives the per-run
     unifier
     ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
-  - Each `Pipeline` carries `stage_types`, one resolved value type per
-    stage. Only the structural REPL's typed spine reads a stage type. Every
-    interior edge is a byte pipe allocated from position, so there is nothing
-    else per-stage to write
+  - A `Pipeline` carries nothing per stage: every interior edge is a byte pipe
+    allocated from position, so there is nothing to write
     ([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]]).
   - Each boundary call carries the `Site` inference recorded for it.
   - A command the checker recorded as captured is wrapped as
@@ -96,11 +94,11 @@ which reruns `bake_prelude_to_out_dir` (`core/src/boot.rs`), the only encode sit
 the only decode site (`BakedPrelude`) live there together as the host-embedding
 seam ([[decisions/260610_host-embedding-api|host-embedding-api]]). The bake runs
 the checker: it parses, elaborates, and hands the comp to `bake_prelude`
-(`core/src/typecheck.rs`), which serialises the *annotated* prelude and harvests
-its bind schemes from the same pass, so the baked list and a run's installed
-schemes come from one harvest. The two blobs — annotated IR and scheme list —
-land in `OUT_DIR`; a host embeds them through the `baked_prelude!` macro into a
-`BakedPrelude`, decoded lazily on first use. The typed IR is then handed to the
+(`core/src/typecheck.rs`), which checks it against core's manifest and returns
+the *annotated* prelude; each `Define` already carries its schemes, and
+`SessionSchemes::from_prelude` reads them back, so there is no second list. The
+one blob — annotated IR — lands in `OUT_DIR`; a host embeds it through the
+`baked_prelude!` macro into a `BakedPrelude`, decoded lazily on first use. The typed IR is then handed to the
 [[internals/evaluator-machine|evaluator]], which a host reaches only through the
 synchronous framed run doors ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]).
 

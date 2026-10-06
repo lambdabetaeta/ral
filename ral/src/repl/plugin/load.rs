@@ -9,15 +9,13 @@
 //! plugin's whole namespace back, so a rejected load leaves the session
 //! untouched.  Unloading is the exact inverse.
 
-use ral_core::builtins::util::as_str;
-use ral_core::serial::datum::Datum as _;
-use ral_core::source::Span;
+use ral_core::first_order::datum::Datum as _;
 use ral_core::typecheck::builtins::scheme;
 use ral_core::types::{
     Break, BuiltinBody, BuiltinEntry, DefaultPolicy, Error, HookName, HookSig, Map, Mooring,
     PluginEntry, Settled,
 };
-use ral_core::{Shell, Value, diagnostic};
+use ral_core::{Shell, Value, terminal};
 use std::borrow::Cow;
 
 use super::super::enquiry::{Enquiry, PluginNote};
@@ -36,7 +34,7 @@ fn position(shell: &Shell, name: &str) -> Option<usize> {
 fn load_door(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     // No options: `load-plugin` takes a name alone, so a plugin loaded
     // through it stands on its own defaults.
-    let name = as_str(&args[0], "load-plugin")?;
+    let name = args[0].as_str("load-plugin")?;
     if let Err(Break::Error(e)) = load_plugin(name, &Map::new(), mooring, shell) {
         report_failed_load(shell, &format!("plugin '{name}'"), &e, None);
     }
@@ -48,8 +46,8 @@ fn load_door(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Va
     reason = "a static builtin body's signature"
 )]
 fn unload_door(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    if let Err(e) = unload_plugin(as_str(&args[0], "unload-plugin")?, mooring, shell) {
-        diagnostic::cmd_error("unload-plugin", &e.message);
+    if let Err(e) = unload_plugin(args[0].as_str("unload-plugin")?, mooring, shell) {
+        terminal::cmd_error("unload-plugin", &e.message);
     }
     Ok(Value::Unit)
 }
@@ -94,7 +92,7 @@ pub(crate) fn load_plugin(
     // top-level helper bindings are discarded, since the manifest is the
     // file's *return value*, not its bindings.
     let value = shell.in_fresh_scope(|shell| {
-        ral_core::builtins::modules::evaluate_source(
+        ral_core::load::evaluate_source(
             mooring,
             shell,
             &source,
@@ -144,7 +142,6 @@ fn register_plugin_hooks(
     handlers: &ManifestHandlers,
     shell: &mut Shell,
 ) -> Result<(), Error> {
-    let origin = Span::synthetic();
     for (hook_event, handler) in &handlers.hooks {
         let (sig, policy) = match hook_event.as_str() {
             "buffer-change" => (
@@ -172,7 +169,6 @@ fn register_plugin_hooks(
                 handler.clone(),
                 sig,
                 policy,
-                origin,
             )
             .map_err(|e| load_err(format!("plugin '{plugin_name}': hook '{hook_event}': {e}")))?;
     }
@@ -185,7 +181,6 @@ fn register_plugin_hooks(
                     kind: "keybinding".into(),
                 },
                 DefaultPolicy::leased(),
-                origin,
             )
             .map_err(|e| load_err(format!("plugin '{plugin_name}': keybinding '{key}': {e}")))?;
     }
@@ -267,7 +262,7 @@ fn instantiate(
 ) -> Settled<Value> {
     match val {
         Value::Thunk(ref c) if c.comp().arrow().is_some() => {
-            ral_core::builtins::apply(&val, vec![Value::Map(options.clone())], mooring, shell)
+            ral_core::evaluator::apply(&val, vec![Value::Map(options.clone())], mooring, shell)
         }
         _ if !options.is_empty() => Err(Break::Error(load_err(format!(
             "plugin '{name}' takes no configuration; \
@@ -303,8 +298,9 @@ fn resolve_plugin_path(
     env_overrides: &ral_core::types::EnvVars,
 ) -> Result<String, Error> {
     let plugin_file = format!("{name_or_path}.ral");
-    let config_candidate =
-        ral_core::path::config::xdg_config_subpath("ral/plugins").map(|dir| dir.join(&plugin_file));
+    let config_candidate = ral_core::host::xdg(ral_core::host::XdgKind::Config)
+        .map(|d| d.join("ral/plugins"))
+        .map(|dir| dir.join(&plugin_file));
     let ral_path_candidates = ral_core::path::ral_path::entries(env_overrides)
         .into_iter()
         .map(|dir| dir.join(&plugin_file));
@@ -352,7 +348,7 @@ mod tests {
     /// A lifecycle handler taking the one event-record parameter registers.
     #[test]
     fn unary_lifecycle_handler_registers() {
-        let mut shell = Shell::new(ral_core::io::TerminalState::default());
+        let mut shell = ral_core::test_helper::core_shell();
         let h = crate::repl::eval(&mut shell, "{ |_ev| return () }");
         register_plugin_hooks("p", &hooks_only(vec![("post-exec".into(), h)]), &mut shell)
             .expect("a unary lifecycle handler registers");
@@ -362,7 +358,7 @@ mod tests {
     /// naming the hook and the arity mismatch.
     #[test]
     fn two_parameter_lifecycle_handler_is_rejected() {
-        let mut shell = Shell::new(ral_core::io::TerminalState::default());
+        let mut shell = ral_core::test_helper::core_shell();
         let h = crate::repl::eval(&mut shell, "{ |_src _status| return () }");
         let err =
             register_plugin_hooks("p", &hooks_only(vec![("post-exec".into(), h)]), &mut shell)

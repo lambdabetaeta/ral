@@ -46,10 +46,10 @@ let _by_cmd = [:,
     ssh: { |c|
         if !{elem $c[prev] [-i, -F, -E]} { _files $c } else {
             let u = re-find-match '^[^@]*@' $c[prefix] ? ''
-            _list [+m] !{map { |h| "$u$h" } !{_hosts}} $id $c
+            _list [+m] !{map { |h| "$u$h" } !{_hosts}} $identity $c
         }
     },
-    telnet: { |c| _list [+m] !{_hosts} $id $c },
+    telnet: { |c| _list [+m] !{_hosts} $identity $c },
     kill: { |c| _list [-m, --header-lines=1, --no-preview, --wrap] !{lines !{ps -eo user,pid,ppid,start,time,command 2> /dev/null ? ps -eo user,pid,ppid,time,args 2> /dev/null ? ps --everyone --full --windows}} { |l| !{words $l}[1] } $c },
 ]
 

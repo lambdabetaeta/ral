@@ -7,8 +7,8 @@
 
 use super::router::{KeyChord, builtin_action, parse_key_notation, reserved_action};
 use super::{HookHealth, load_err};
+use ral_core::first_order::FOValue;
 use ral_core::record;
-use ral_core::serial::FOValue;
 use ral_core::types::{Error, settings_map};
 use ral_core::{Map, Value};
 

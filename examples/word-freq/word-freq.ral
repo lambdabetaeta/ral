@@ -7,7 +7,7 @@
 
 let [path, n] = args
 
-let counted = group-by $id !{map $lower !{re-find-matches #'\p{L}+'# !{from-string < $path}}}
+let counted = group-by $identity !{map $lower !{re-find-matches #'\p{L}+'# !{from-string < $path}}}
 let ranked = reverse !{sort-list-by { |w| return !{length $counted[$w]} } !{keys $counted}}
 
 for !{take !{int $n} $ranked} { |w| echo "!{length $counted[$w]}\t$w" }

@@ -29,7 +29,7 @@ row forces every caller to supply it. Absence therefore travels as a variant
 
 The rule holds across the harness wire too. A family tag's record — `` exarch-agents
 `start ``'s spec, `` exarch-context `evict ``, `` exarch-transcript `grep `` — crosses to the
-desk by field name and is decoded through `Datum` (`core/src/serial/datum.rs`):
+desk by field name and is decoded through `Datum` (`core/src/first_order/datum.rs`):
 `record!` (or a hand-written decode over `exact_keys`) reads each named field and refuses
 any other, so the complete list of names the tag reads is
 the struct's own: `` `exarch-transcript `grep`: unknown field `turn — did you mean `turns? ``.

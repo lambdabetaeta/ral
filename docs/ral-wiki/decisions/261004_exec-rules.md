@@ -1,8 +1,8 @@
 ---
 status: active
 generated_at_commit: 7f61632a
-verified_at_commit: 90479dea
-anchors: [ExecGrant, ExecKey, ExecRules, ExecScope, Table, Verdict, Rank, Program, Subject, Head, Missing, Admitted, check_exec, admits_head, RealPath, meet_insert, holds, command_name_key, evicts]
+verified_at_commit: 446e3123
+anchors: [ExecGrant, ExecKey, ExecRules, ExecScope, Table, Verdict, Rank, Program, Subject, Head, Missing, Admitted, admit, admits, check_exec, RealPath, meet_insert, holds, command_name_key, evicts]
 ---
 
 > **Mechanics superseded 2026-10-06** by
@@ -258,12 +258,12 @@ program as stored.
 
 ## Where
 
-`core/src/types/capability.rs` (`ExecGrant`, `ExecKey`, `Verdict`,
-`meet_insert`), `core/src/capability/decode.rs` (keys to `ExecGrant`),
+`core/src/capability/lattice.rs` (`ExecGrant`, `ExecKey`, `Verdict`,
+`meet_insert`), `core/src/guard/decode.rs` (keys to `ExecGrant`),
 `core/src/capability/table.rs` (`Table`: `verdict`, `respelled`, the meet),
 `core/src/capability/exec.rs` (`ExecRules`, `ExecScope`, `Rank`, `Program`,
-`Subject`, `holds`),
-`core/src/capability/enforce.rs` (`check_exec`, `admits_head`, `Admitted`),
+`Subject`, `holds`, `GrantStack::admit`/`admits`, `Admitted`),
+`core/src/guard/enforce.rs` (`check_exec`),
 `core/src/runtime/command/head.rs` (`Head`, `Missing`),
 `core/src/path/real.rs` (`RealPath`, `within::<P>`),
 `core/src/path/forms.rs` (`evicts`),

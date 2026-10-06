@@ -4,8 +4,8 @@ hello
 3
 hello al
 b-b-b
-re-replace: pattern matches 2 times — must match exactly once; widen the pattern with surrounding context to disambiguate, or use re-replace-all to replace every match
-re-replace: pattern not found in input — is the file already updated, or did the pattern get whitespace-mangled?
+re-replace: pattern matches 2 times; must match exactly once; widen the pattern with surrounding context to disambiguate, or use re-replace-all to replace every match
+re-replace: pattern not found in input; is the file already updated, or did the pattern get whitespace-mangled?
 
 local
 -usr-local-bin

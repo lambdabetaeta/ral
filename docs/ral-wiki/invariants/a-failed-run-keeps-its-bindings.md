@@ -10,7 +10,7 @@ failed run of `let before = 1` / `failing-command` / `let after = 2`, `before`
 remains bound and `after` does not exist.
 
 **The mechanism.** `run_phrases` (`core/src/evaluator.rs`) runs each top-level
-phrase in order in one loop. Under `Mode::Session`, `run_phrase_define` writes
+phrase in order in one loop. Under `Mode::Session`, `Ran::define` writes
 the landed binding through `shell.note_define` and back into `shell.env`
 *before* the next phrase runs; a failure breaks the loop and touches neither.
 `Ran::env` is therefore `env` as extended by the phrases that ran before the

@@ -115,7 +115,7 @@ read back, and two states that render identically are the same state to
 
 Read-after-write within one run is sound for free: under the identity
 binding `IdentityDesk::enquire` drains queued surface frames before answering
-a request (`core/src/protocol.rs`), and under the wire frame order does the
+a request (`core/src/carrier/identity.rs`), and under the wire frame order does the
 same, so a pin written earlier in the same script is
 already in the mirror when the read is answered. Both enquiries are per-agent,
 same as the mirror they read — a sub-agent's register is its own, and

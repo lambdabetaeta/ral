@@ -2,7 +2,7 @@
 //!
 //! `ral` re-execs itself to be several things that are not a shell: a wire
 //! engine, a pipeline anchor, a bundled uutils tool, an OS-sandbox stage, a
-//! test helper. Core's `serve_pre_main` serves each and exits, never reaching
+//! test helper. Core's `invocation::serve` serves each and exits, never reaching
 //! clap — which would reject the argv that summoned it. Exarch opens through
 //! the same dispatch.
 
@@ -39,7 +39,7 @@ pub(crate) fn refuse_setuid() {
 /// alike.
 pub(crate) fn adopt_process_dispositions() {
     #[cfg(windows)]
-    ral_core::io::enable_virtual_terminal_processing();
+    ral_core::terminal::enable_virtual_terminal_processing();
 
     // Restore SIGPIPE to SIG_DFL once at startup so bundled uutils (this same
     // binary re-exec'd as `--ral-bundled-tool`) and the pipeline anchor see
@@ -52,8 +52,7 @@ pub(crate) fn adopt_process_dispositions() {
 /// invocation.
 pub(crate) fn identify() -> Invocation {
     let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
-    if let Some(code) =
-        ral_core::sandbox::serve_pre_main(&ral_core::classify(&argv), &engine::INSTALLERS)
+    if let Some(code) = ral_core::invocation::serve(&ral_core::classify(&argv), &engine::INSTALLERS)
     {
         return Invocation::Exit(ExitCode::from(code));
     }
@@ -88,9 +87,9 @@ fn text_args(argv: Vec<OsString>) -> Result<Vec<String>, String> {
 pub(crate) mod engine {
     use crate::boot_door;
     use ral_core::engine::{Booted, EngineInstaller};
+    use ral_core::first_order::datum::Datum as _;
     use ral_core::protocol::Attach;
     use ral_core::record;
-    use ral_core::serial::datum::Datum as _;
 
     pub(crate) static INSTALLERS: [EngineInstaller; 2] = [
         EngineInstaller {
@@ -138,7 +137,7 @@ pub(crate) mod engine {
             ral_core::boot::boot_shell(attach.terminal, &crate::PRELUDE, &repl_surface());
         shell.set_exit_hints(crate::platform::load_exit_hints());
         shell.set_interactive(true);
-        let terminal = shell.terminal().to_value();
+        let terminal = ral_core::Value::from(&shell.terminal());
         shell.set_var("TERMINAL".into(), terminal);
         boot_door::register(&mut shell)?;
         Ok(Booted {
@@ -177,10 +176,10 @@ pub(crate) mod engine {
     fn no_seeded_children(
         _grant: &str,
         _cwd: &std::path::Path,
-    ) -> Result<ral_core::types::Capabilities, String> {
+    ) -> Result<ral_core::capability::Capabilities, String> {
         Err(
             "the ral shell's engine spawns no child engines, so it has no grant policy to hold \
-             one to — was this meant to run under exarch?"
+             one to: was this meant to run under exarch?"
                 .to_string(),
         )
     }

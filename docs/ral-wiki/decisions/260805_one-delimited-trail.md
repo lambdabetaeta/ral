@@ -35,8 +35,8 @@ construction*. Every sentence the harness owes the model at a raise — the
 audit of what stands, the workers that outlived the wall, the per-stage
 journal this wiki once called "deliberately absent" — is a projection of the
 pair `(Ending, Trace)`, and core held all the machinery: `Observation`
-(`core/src/types/observation.rs`), `observe_stamped`
-(`core/src/evaluator/audit.rs`), the `Audit` collector
+(`core/src/types/audit/observation.rs`), `Shell::observe_stamped`
+(`core/src/types/audit/door.rs`), the `Audit` collector
 (`core/src/types/audit.rs`), and `audit { }`'s never-failing
 `(status, value, error, children)` reflection.
 
@@ -82,7 +82,7 @@ structurally: close is what turns stage inheritance back off.
 3. **Facts are authored where they commit.** The engine's doors observe
    engine-side; the desk observes host-side, at the commitment arm; helpers
    ship fragments. Authors are plural, the vocabulary is one.
-4. **The projection is total.** `Observation::to_wire` and the shared
+4. **The projection is total.** `Datum::encode` of the `Observation` and the shared
    `serial::placeholder` pass replace every leaf beyond first order with a
    tagged `` `opaque {type: …} `` variant — never a bare string, so no
    genuine string can impersonate it — and never drop the observation. The
@@ -123,7 +123,7 @@ client that cannot express its extent as a closure: `Shell::enter` holds its
 `TrailScope` *outside* the `catch_unwind` — load-bearing, because the
 `Mobile` checkpoint the panic arm rolls back does not cover `local.audit`, so
 only a scope the panic cannot skip keeps law 2 true at dispatch granularity.
-The capture merge (`merge_capture`) stays monotonic, so a dispatch's `Off`
+The capture merge stays monotonic (`Audit::open` takes the larger policy, `CapturePolicy: Ord`, and its `TrailScope` restores what it displaced), so a dispatch's `Off`
 nests inside a `--audit` session's `Bytes` without silencing it.
 
 For exarch the marginal cost is retention only: full observations are already
@@ -170,7 +170,7 @@ children, id and all.
 ### The trail rides the Report, unbounded
 
 `Run.trail: Option<CapturePolicy>` asks; `Report::Ran.trail: Vec<FOValue>`
-answers, each observation projected through `to_wire`. Not the event stream:
+answers, each observation projected through `Datum::encode`. Not the event stream:
 the engine already streams every observation live as surface events, but the
 stream is the *live* rendering — exarch decodes to rail rows and drops them —
 and accumulating it host-side per dispatch would be exactly the

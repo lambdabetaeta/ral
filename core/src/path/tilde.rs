@@ -3,11 +3,10 @@
 //! It stands alone or before a `/` (or a `\` under Windows); any other `~` is
 //! an ordinary character, so `~bob` and `a~b` are plain text.
 //! [`TildePath::expand`] and [`abbreviate_home`] are inverses.
-//!
-//! Also the `HOME`/`USER` lookups, which pin the env var each one reads;
-//! `path.rs` re-exports them.
 
 use serde::{Deserialize, Serialize};
+
+use super::PathRules;
 
 /// `~` or `~/sub`, the suffix keeping its separator.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -18,18 +17,18 @@ pub struct TildePath {
 impl TildePath {
     /// `~` or `~/rest`; `None` for any other spelling.
     pub fn parse(input: &str) -> Option<Self> {
-        Self::parse_for(input, cfg!(windows))
+        Self::parse_for(input, PathRules::HOST)
     }
 
-    /// [`Self::parse`] with `windows` a parameter, so its `~\rest` reading is
-    /// pinned on every host.  The suffix keeps the separator byte it was
-    /// written with: [`Self::to_literal`] returns the spelling.
-    fn parse_for(input: &str, windows: bool) -> Option<Self> {
+    /// [`Self::parse`] under given rules.  The suffix keeps the separator byte
+    /// it was written with: [`Self::to_literal`] returns the spelling.
+    fn parse_for(input: &str, rules: PathRules) -> Option<Self> {
         let rest = input.strip_prefix('~')?;
         if rest.is_empty() {
             return Some(Self { suffix: None });
         }
-        let separated = rest.starts_with('/') || (windows && rest.starts_with('\\'));
+        let separated =
+            rest.starts_with('/') || (rules == PathRules::Windows && rest.starts_with('\\'));
         separated.then(|| Self {
             suffix: Some(rest.to_string()),
         })
@@ -52,12 +51,10 @@ impl TildePath {
 /// The match is on component boundaries, so home `/home/al` leaves
 /// `/home/alex` alone where a `starts_with` on the raw string would clip it.
 pub fn abbreviate_home(path: &str, home: Option<&str>) -> String {
-    abbreviate_home_for(path, home, cfg!(windows))
+    abbreviate_home_for(path, home, PathRules::HOST)
 }
 
-/// [`abbreviate_home`] on strings, `windows` a parameter rather than a `cfg!`
-/// read as in `lex::starts_with_identity`, so the fold below is pinned on
-/// every host.
+/// [`abbreviate_home`] on strings, under given rules.
 ///
 /// Under Windows the result is folded to `/` separators: the `~/` head
 /// already commits the string to them, so a native-separator rest would print
@@ -67,12 +64,12 @@ pub fn abbreviate_home(path: &str, home: Option<&str>) -> String {
 /// ordinary filename byte, hence the gate.
 #[allow(
     clippy::disallowed_methods,
-    reason = "lexical Path::new for the component-boundary strip — no I/O behind it; this module is part of crate::path, where the path-construction rule lives"
+    reason = "lexical Path::new for the component-boundary strip: no I/O behind it; this module is part of crate::path, where the path-construction rule lives"
 )]
-fn abbreviate_home_for(path: &str, home: Option<&str>, windows: bool) -> String {
+fn abbreviate_home_for(path: &str, home: Option<&str>, rules: PathRules) -> String {
     let shown = match home {
         None => path.to_string(),
-        Some(home) if windows => windows_strip_home(path, home),
+        Some(home) if rules == PathRules::Windows => windows_strip_home(path, home),
         Some(home) => match std::path::Path::new(path).strip_prefix(home) {
             Ok(rest) => {
                 if rest.as_os_str().is_empty() {
@@ -83,7 +80,7 @@ fn abbreviate_home_for(path: &str, home: Option<&str>, windows: bool) -> String 
             Err(_) => path.to_string(),
         },
     };
-    if windows {
+    if rules == PathRules::Windows {
         shown.replace('\\', "/")
     } else {
         shown
@@ -91,7 +88,7 @@ fn abbreviate_home_for(path: &str, home: Option<&str>, windows: bool) -> String 
 }
 
 /// The Windows half of [`abbreviate_home_for`]'s strip: containment under
-/// [`super::lex::starts_with_identity`]'s identity rather than
+/// [`super::identity::starts_with_identity`]'s identity rather than
 /// `Path::strip_prefix`, which is separator-insensitive but
 /// case-*sensitive* — so `USERPROFILE`/`cwd` disagreeing on casing
 /// (`C:\Users\al` vs `c:\users\al`) would otherwise leave the prompt showing
@@ -102,13 +99,13 @@ fn abbreviate_home_for(path: &str, home: Option<&str>, windows: bool) -> String 
 /// the user's typed spelling survives — only the fold to `~`, never a fold to
 /// `home`'s case, happens here.
 fn windows_strip_home(path: &str, home: &str) -> String {
-    if !super::lex::starts_with_identity(path, home, true) {
+    if !super::identity::starts_with_identity(path, home, PathRules::Windows) {
         return path.to_string();
     }
-    let home_depth = super::lex::windows_identity_components(home).len();
+    let home_depth = super::identity::windows_identity_components(home).len();
     // The head fold without the case fold: the displayed tail must keep
     // `path`'s own casing, not `home`'s.
-    let head = super::lex::windows_head(path);
+    let head = super::identity::windows_head(path);
     let tail: Vec<&str> = head
         .split(['/', '\\'])
         .filter(|c| !c.is_empty())
@@ -119,32 +116,6 @@ fn windows_strip_home(path: &str, home: &str) -> String {
     } else {
         format!("~/{}", tail.join("/"))
     }
-}
-
-// ── HOME / USER lookup ──────────────────────────────────────────────
-
-/// `HOME`, then `USERPROFILE` (Windows), each read from `env_overrides`
-/// before the host env; `None` when nothing binds one.
-///
-/// An empty binding counts as none: `HOME=` names no directory, and admitting
-/// `Some("")` here is what once let `~/x` expand to `/x` — a syntactically
-/// ordinary path meaning something nobody asked for.  Every downstream `~`,
-/// `xdg:` and prompt fold therefore takes an `Option` and picks its own honest
-/// answer.
-pub fn home(env_overrides: &crate::types::EnvVars) -> Option<String> {
-    bound(env_overrides, "HOME").or_else(|| bound(env_overrides, "USERPROFILE"))
-}
-
-/// `USER`, then `USERNAME` (Windows), overrides before the host env; `None`
-/// when nothing binds one.  Same discipline as [`home`] — the prompt and the
-/// audit trail each name their own placeholder.
-pub fn user_name(env_overrides: &crate::types::EnvVars) -> Option<String> {
-    bound(env_overrides, "USER").or_else(|| bound(env_overrides, "USERNAME"))
-}
-
-/// One env var, overrides before the host env, an empty value read as unset.
-fn bound(env_overrides: &crate::types::EnvVars, key: &str) -> Option<String> {
-    env_overrides.get_or_host(key).filter(|v| !v.is_empty())
 }
 
 #[cfg(test)]
@@ -183,29 +154,29 @@ mod tests {
         }
     }
 
-    // `parse_for` rather than `parse` below: `windows` pinned as a parameter,
-    // so the Windows separator rule is exercised on every host.
+    // `parse_for` rather than `parse` below: the rules are pinned, so the
+    // Windows separator rule is exercised on every host.
 
     #[test]
     fn backslash_separates_on_windows_and_round_trips() {
-        let parsed = TildePath::parse_for(r"~\sub", true);
+        let parsed = TildePath::parse_for(r"~\sub", PathRules::Windows);
         assert_eq!(parsed, Some(tilde(Some(r"\sub"))));
         assert_eq!(parsed.unwrap().to_literal(), r"~\sub");
     }
 
     #[test]
     fn backslash_is_an_ordinary_byte_off_windows() {
-        assert_eq!(TildePath::parse_for(r"~\sub", false), None);
+        assert_eq!(TildePath::parse_for(r"~\sub", PathRules::Posix), None);
     }
 
     /// An unknown home folds nothing — the prompt shows the path whole rather
     /// than an accidental `~`-relative reading of it.
     #[test]
     fn abbreviation_without_home_leaves_the_path_alone() {
-        assert_eq!(abbreviate_home_for("/a/b", None, false), "/a/b");
+        assert_eq!(abbreviate_home_for("/a/b", None, PathRules::Posix), "/a/b");
     }
 
-    // No `cfg(windows)` on the fold tests below: `windows` is a parameter,
+    // No `cfg(windows)` on the fold tests below: the rules are a parameter,
     // and the fixtures are shaped so both hosts' `Path` parses agree (a
     // drive-letter *home* would strip only under a Windows-parsed `Path`,
     // so none appears here).
@@ -213,7 +184,7 @@ mod tests {
     #[test]
     fn abbreviation_renders_forward_slashes_on_windows() {
         assert_eq!(
-            abbreviate_home_for(r"/h/projects\ral", Some("/h"), true),
+            abbreviate_home_for(r"/h/projects\ral", Some("/h"), PathRules::Windows),
             "~/projects/ral"
         );
     }
@@ -221,7 +192,7 @@ mod tests {
     #[test]
     fn abbreviation_folds_separators_in_the_unabbreviated_fallback_on_windows() {
         assert_eq!(
-            abbreviate_home_for(r"D:\work\thing", Some(r"C:\Users\al"), true),
+            abbreviate_home_for(r"D:\work\thing", Some(r"C:\Users\al"), PathRules::Windows),
             "D:/work/thing"
         );
     }
@@ -231,7 +202,7 @@ mod tests {
     #[test]
     fn abbreviation_keeps_backslash_bytes_off_windows() {
         assert_eq!(
-            abbreviate_home_for(r"/h/we\ird", Some("/h"), false),
+            abbreviate_home_for(r"/h/we\ird", Some("/h"), PathRules::Posix),
             r"~/we\ird"
         );
     }
@@ -244,18 +215,22 @@ mod tests {
     #[test]
     fn abbreviation_is_case_insensitive_to_home_on_windows() {
         assert_eq!(
-            abbreviate_home_for("/h/users/MyProject", Some("/H/Users"), true),
+            abbreviate_home_for("/h/users/MyProject", Some("/H/Users"), PathRules::Windows),
             "~/MyProject"
         );
     }
 
-    /// Same identity rule as `lex::starts_with_identity`'s own tests: a
+    /// Same identity rule as `identity::starts_with_identity`'s own tests: a
     /// verbatim `\\?\` prefix and a case difference both fall away, and the
     /// tail keeps its own case regardless.
     #[test]
     fn abbreviation_strips_verbatim_prefix_and_case_on_windows() {
         assert_eq!(
-            abbreviate_home_for(r"\\?\C:\Users\Al\Work", Some(r"c:\users\al"), true),
+            abbreviate_home_for(
+                r"\\?\C:\Users\Al\Work",
+                Some(r"c:\users\al"),
+                PathRules::Windows
+            ),
             "~/Work"
         );
     }
@@ -266,7 +241,7 @@ mod tests {
     #[test]
     fn abbreviation_off_windows_stays_case_sensitive() {
         assert_eq!(
-            abbreviate_home_for("/h/users/x", Some("/H/Users"), false),
+            abbreviate_home_for("/h/users/x", Some("/H/Users"), PathRules::Posix),
             "/h/users/x"
         );
     }

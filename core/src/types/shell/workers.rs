@@ -7,22 +7,30 @@
 //! `race`'s winner and its cancelled losers, `poll`'s settled arm) or is
 //! `cancel`led, and only from the observing shell's own registry — a handle
 //! minted elsewhere lingers where it lives. Two policies also remove entries:
-//! the lease chain in `builtins::concurrency`, against a [`WorkerLease`], and
+//! the [`LeaseChain`], against a [`WorkerLease`], and
 //! [`WorkerRegistry::sweep_retention`]. Both leave a [`ReapNotice`] the host
 //! drains at its ready boundaries, so a vanished job still has an answer in
 //! the transcript.
 //!
 //! **Flow rule.** [`Shell::spawn_thread`](super::Shell::spawn_thread)
 //! `Arc`-shares the registry into a worker's own `Shell`, so a nested `spawn`
-//! registers into the owning shell's directory; `fork_session` / `child_from`
-//! / `child_of` / `inherit_from` do not, and a sub-agent fork starts empty.
+//! registers into the owning shell's directory; the other children of
+//! [`Shell::child`](super::Shell::child) do not, and a sub-agent fork starts
+//! empty.
 
+use crate::fact::{LeaseClass, WorkerId};
+use crate::first_order::FOValue;
+use crate::first_order::datum::{Datum, tag, untag};
 use crate::sync::LockExt as _;
-use crate::types::{HandleInner, Resident};
+use crate::types::ErrorRecord;
+use crate::types::HandleInner;
+use crate::{label, record, variant};
 use serde::{Deserialize, Serialize};
+use std::ops::{ControlFlow, Deref};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
+use strum::{IntoStaticStr, VariantArray};
 
 /// How long a teardown waits for cancelled workers to die. A child's wait loop
 /// sees a cancel within 100ms and grants its group a 500ms SIGTERM grace before
@@ -30,14 +38,6 @@ use std::time::{Duration, SystemTime};
 /// inside this; expiry means a wedged worker, and exiting anyway is the lesser
 /// harm.
 const WORKER_DRAIN_GRACE: Duration = Duration::from_millis(1500);
-
-/// Stable identifier for a registered worker, minted from a process-global
-/// counter rather than a per-registry one, so ids never collide across
-/// shells.
-///
-/// A fleet listing folds several agents' registries together.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct WorkerId(pub u64);
 
 impl WorkerId {
     pub(crate) fn mint() -> Self {
@@ -62,19 +62,74 @@ pub struct WorkerLease {
     pub backstop: Duration,
 }
 
-/// Which reaping policy governs a [`WorkerEntry`], declared at birth by the
-/// spawning door.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum LeaseClass {
-    /// Governed by the frame's [`WorkerLease`] when one is supplied.
-    Worker,
-    /// A `service`-born worker: the lease chain is never armed for it, so it
-    /// dies only by cancel, `/clear`, or process exit.
-    Durable,
+impl WorkerLease {
+    /// The lease's decision at a worker's `age` since spawn and `idle` since an
+    /// eliminator last named it: the cause to reap for, or how long until the
+    /// sooner bound can next bite.  The backstop outranks idleness.
+    pub fn verdict(self, age: Duration, idle: Duration) -> ControlFlow<ReapCause, Duration> {
+        if age >= self.backstop {
+            ControlFlow::Break(ReapCause::Backstop)
+        } else if idle >= self.idle {
+            ControlFlow::Break(ReapCause::Idle)
+        } else {
+            ControlFlow::Continue(
+                self.idle
+                    .saturating_sub(idle)
+                    .min(self.backstop.saturating_sub(age)),
+            )
+        }
+    }
+}
+
+/// Everything one firing of a worker's lease chain needs, cloned forward into
+/// each re-arm.  The whole handle, not its picked-apart cells: cheap to clone
+/// (all `Arc`s and a `Copy` scope) and cheap to run on the reaper daemon
+/// thread, and it is what lets [`Self::fire`] ask [`HandleInner::is_running`]
+/// rather than lock `state` itself.
+#[derive(Clone)]
+pub(crate) struct LeaseChain {
+    pub(crate) handle: HandleInner,
+    /// The backstop's clock; the registry entry's `SystemTime` is display-only.
+    pub(crate) started: Instant,
+    pub(crate) lease: WorkerLease,
+    pub(crate) registry: WorkerRegistry,
+    pub(crate) id: WorkerId,
+}
+
+impl LeaseChain {
+    /// One firing, the chain's one door: a worker no longer `Running` ends the
+    /// chain silently; else the lease's verdict reaps it or re-arms for the
+    /// margin it names.  A reap does the bookkeeping *before* firing the scope,
+    /// so the ledger never lags an observable cancellation, and deliberately
+    /// leaves the handle attached: the body settles as an error, so a later
+    /// `poll`/`await` still observes the partial output and the failure.
+    ///
+    /// Called on the reaper daemon thread, and once at birth for the first delay.
+    pub(crate) fn fire(self) {
+        if !self.handle.is_running() {
+            return;
+        }
+        let age = self.started.elapsed();
+        match self
+            .lease
+            .verdict(age, self.handle.last_observed().elapsed())
+        {
+            ControlFlow::Break(cause) => {
+                self.registry.reap(self.id, cause);
+                self.handle
+                    .cancel
+                    .cancel(crate::process::CancelCause::TimedOut);
+            }
+            ControlFlow::Continue(after) => {
+                crate::process::arm_callback(after, move || self.fire()).keep();
+            }
+        }
+    }
 }
 
 /// Why policy removed a worker's entry.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
 pub enum ReapCause {
     /// Unobserved for the lease's `idle` bound.
     Idle,
@@ -84,18 +139,71 @@ pub enum ReapCause {
     Retention,
 }
 
+label!(ReapCause);
+
+/// How a detached worker ended, as its `` `done `` event says: no return
+/// value, which only `await` hands over.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Done {
+    Ok,
+    Err(ErrorRecord),
+    Panic(String),
+}
+
+variant!(Done {
+    Ok: "ok",
+    Err(ErrorRecord): "err",
+    Panic(String): "panic",
+});
+
+/// The event a detached worker appends at completion.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DoneEvent {
+    pub cmd: String,
+    pub outcome: Done,
+}
+
+record!(DoneEvent {
+    cmd: "cmd",
+    outcome: "outcome",
+});
+
+impl DoneEvent {
+    /// The tag a completion carries on the surface channel.
+    pub const SURFACE_TAG: &str = "done";
+
+    pub fn to_surface(self) -> FOValue {
+        tag(Self::SURFACE_TAG, Some(self.encode()))
+    }
+
+    /// Inverse of [`Self::to_surface`]; `None` for any other surface event.
+    pub fn from_surface(v: &FOValue) -> Option<Self> {
+        match untag(v)? {
+            (Self::SURFACE_TAG, Some(body)) => Self::decode(body).ok(),
+            _ => None,
+        }
+    }
+}
+
 /// What a reap leaves for the transcript event, minus the handle it
 /// deliberately does not keep alive.
 ///
 /// Recorded only for an entry present at reap time, so a worker an
 /// eliminator observed away first leaves none.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReapNotice {
     pub id: WorkerId,
     pub cmd: String,
     pub class: LeaseClass,
-    pub(crate) cause: ReapCause,
+    pub cause: ReapCause,
 }
+
+record!(ReapNotice {
+    id: "id",
+    cmd: "cmd",
+    class: "class",
+    cause: "cause",
+});
 
 /// One registered worker, paired with the handle a caller observes or cancels
 /// it through.
@@ -115,43 +223,6 @@ pub struct WorkerEntry {
     /// at the next call rather than retroactively.
     pub settled_epoch: Option<u64>,
     pub handle: HandleInner,
-}
-
-/// The worker chapter's [`Resident`] facets, which the REPL's `jobs` fold and
-/// its exit-time teardown notice read rather than hand-formatting a
-/// `WorkerEntry` themselves.
-impl Resident for WorkerEntry {
-    fn designator(&self) -> String {
-        format!("w{}", self.id.0)
-    }
-
-    fn population(&self) -> &'static str {
-        "worker"
-    }
-
-    fn capability_kind(&self) -> &'static str {
-        "handle"
-    }
-
-    /// Core knows the *class*, never a frame's [`WorkerLease`] bounds — host
-    /// policy, not stored on the entry — so it names the mechanism rather than
-    /// fabricating numbers; a host holding the bounds renders its own row.
-    fn lease_row(&self) -> String {
-        match self.class {
-            LeaseClass::Worker => {
-                "idle-observation lease — idle bound under an absolute backstop, both host-configured".to_string()
-            }
-            LeaseClass::Durable => "none — durable; dies by cancel, /clear, or process exit, so it does not outlive this process — work that must still be running afterwards needs detach".to_string(),
-        }
-    }
-
-    fn state_label(&self) -> String {
-        if self.handle.is_running() {
-            "running (worker)".to_string()
-        } else {
-            "done (worker)".to_string()
-        }
-    }
 }
 
 /// The three ledgers behind [`WorkerRegistry`]'s one lock: live entries, reap
@@ -191,6 +262,46 @@ struct RegistryInner {
 /// steps holds its seat from the instant admission is granted.
 #[derive(Clone, Default)]
 pub(crate) struct WorkerRegistry(Arc<Mutex<RegistryInner>>);
+
+/// A shell's registry, and whether the shell answers for it: dropping an
+/// `Owned` roster cancels every worker in it, so every teardown path (an
+/// agent's end, a `/clear`'s replacement, a wire session's detach, a batch
+/// script's last line) reaps its workers, external children and their
+/// grandchildren included, without a host call site.  A worker's own shell
+/// holds a `Shared` one: its dropping must not cancel its parent's roster.
+pub(crate) enum Roster {
+    Owned(WorkerRegistry),
+    Shared(WorkerRegistry),
+}
+
+impl Roster {
+    pub(crate) fn share(&self) -> Self {
+        Self::Shared(WorkerRegistry::clone(self))
+    }
+}
+
+impl Default for Roster {
+    fn default() -> Self {
+        Self::Owned(WorkerRegistry::default())
+    }
+}
+
+impl Deref for Roster {
+    type Target = WorkerRegistry;
+
+    fn deref(&self) -> &WorkerRegistry {
+        let (Self::Owned(registry) | Self::Shared(registry)) = self;
+        registry
+    }
+}
+
+impl Drop for Roster {
+    fn drop(&mut self) {
+        if let Self::Owned(registry) = self {
+            registry.cancel_all();
+        }
+    }
+}
 
 /// Refusal from [`WorkerRegistry::reserve`], carrying the cap it was refused
 /// against so the caller's remedy message need not re-derive the number.
@@ -408,7 +519,7 @@ impl WorkerRegistry {
             entry
                 .handle
                 .cancel
-                .cancel(crate::process::CancelCause::Explicit);
+                .cancel(crate::process::CancelCause::Cancelled);
         }
         self.drain();
         entries.len()
@@ -419,49 +530,23 @@ impl WorkerRegistry {
 mod tests {
     use super::*;
 
-    fn fake_entry(id: u64, cmd: &str, class: LeaseClass, running: bool) -> WorkerEntry {
-        let handle = HandleInner::new(cmd, crate::process::CancelScope::default(), None);
-        if !running {
-            handle.complete();
-        }
-        WorkerEntry {
-            id: WorkerId(id),
-            cmd: cmd.to_string(),
-            started: SystemTime::now(),
-            class,
-            settled_epoch: None,
-            handle,
-        }
-    }
-
-    /// Every facet a running worker answers through [`Resident`]; the
-    /// designator is unbracketed, a fold bracketing it uniformly.
     #[test]
-    fn resident_facets_for_a_running_worker() {
-        let entry = fake_entry(3, "spawn { x }", LeaseClass::Worker, true);
-        assert_eq!(entry.designator(), "w3");
-        assert_eq!(entry.population(), "worker");
-        assert_eq!(entry.capability_kind(), "handle");
-        assert_eq!(entry.state_label(), "running (worker)");
-        assert!(entry.lease_row().contains("idle"));
-    }
-
-    /// A settled-but-unclaimed worker reads `done` — the POSIX-`Done`
-    /// analogue the REPL's `jobs` fold relies on.
-    #[test]
-    fn resident_state_label_for_a_settled_worker() {
-        let entry = fake_entry(7, "watch { x }", LeaseClass::Worker, false);
-        assert_eq!(entry.state_label(), "done (worker)");
-    }
-
-    /// A durable worker's lease row names the degenerate case honestly: no
-    /// idle bound, no backstop, so it never dies by an unobserved timeout.
-    #[test]
-    fn resident_lease_row_names_the_durable_degenerate_case() {
-        let entry = fake_entry(9, "service { x }", LeaseClass::Durable, true);
-        let row = entry.lease_row();
-        assert!(row.contains("durable"));
-        assert!(row.contains("/clear"));
+    fn a_lease_reaps_at_its_backstop_then_its_idle_bound_else_waits_the_sooner_margin() {
+        use ControlFlow::{Break, Continue};
+        let ms = Duration::from_millis;
+        let lease = WorkerLease {
+            idle: ms(100),
+            backstop: ms(500),
+        };
+        assert_eq!(lease.verdict(ms(0), ms(0)), Continue(ms(100)));
+        assert_eq!(lease.verdict(ms(450), ms(30)), Continue(ms(50)));
+        assert_eq!(lease.verdict(ms(200), ms(100)), Break(ReapCause::Idle));
+        assert_eq!(lease.verdict(ms(500), ms(0)), Break(ReapCause::Backstop));
+        let tight = WorkerLease {
+            idle: ms(100),
+            backstop: ms(40),
+        };
+        assert_eq!(tight.verdict(ms(0), ms(0)), Continue(ms(40)));
     }
 
     // ── reservation (the admission/registration TOCTOU close) ───────────

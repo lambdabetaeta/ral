@@ -11,14 +11,13 @@ mod common;
 use common::prelude;
 
 use ral_core::boot::{HostSurface, boot_shell};
-use ral_core::io::TerminalState;
-use ral_core::protocol::{Program, Run};
-use ral_core::serial::FOValue;
-use ral_core::serial::datum::untag;
-use ral_core::types::{GrantStack, Observation, Settled, Shell, Value};
-use ral_core::{
-    EventSink, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, SurfaceSink,
-};
+use ral_core::first_order::FOValue;
+use ral_core::first_order::datum::untag;
+use ral_core::protocol::Run;
+use ral_core::run::{RunReport, RunRequest};
+use ral_core::terminal::TerminalState;
+use ral_core::types::{Observation, Settled, Shell, Value};
+use ral_core::{EventSink, SurfaceSink};
 use std::sync::{Arc, Mutex};
 
 /// A shell booted the way a host with a rail boots one: core's surface plus
@@ -65,22 +64,8 @@ fn kit_events(events: &[FOValue]) -> Vec<FOValue> {
 /// a test bug.
 fn run(shell: &mut Shell, source: &str, surface: Option<SurfaceSink>) -> Settled<Value> {
     match shell.run(RunRequest {
-        run: Run {
-            program: Program::Source(source.into()),
-            script_name: "<test>".into(),
-            caps: GrantStack::root(),
-            wall: None,
-            deferred_lease: None,
-            worker_cap: None,
-            io: RunIo::Inherit,
-            terminal: RequestedTerminalAccess::Leased,
-            stdin: RunStdin::Inherit,
-            trail: None,
-        },
         surface,
-        deferred: None,
-        desk: None,
-        fork: None,
+        ..RunRequest::from(Run::foreground(source, "<test>"))
     }) {
         RunReport::Ran { ending, .. } => ending.into_result(),
         RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),

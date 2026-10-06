@@ -51,7 +51,7 @@ which is why it slipped.
 
 ## The fix: enumerate the names, ask the gate
 
-`admitted_literal_paths` (`core/src/capability/sandbox.rs`) draws candidates from
+`admitted_literal_paths` (then `core/src/capability/sandbox.rs`; the fold is now `SandboxProjection::of`) draws candidates from
 the **raw union** of every layer's literal keys — not a meet-folded map — resolves
 each to the absolute path the OS names, and keeps it only where `evaluate_exec`
 admits its natural invocation (allow-narrow = key + resolved path; deny-broad adds

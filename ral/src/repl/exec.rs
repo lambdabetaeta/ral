@@ -5,10 +5,10 @@
 //! `pre-exec` before; after, `chpwd` if the line moved the session's
 //! directory, then `post-exec` — each a dispatch of its own.
 
-use ral_core::protocol::{Ending, Program, Report, Run, Transport, reading};
-use ral_core::serial::FOValue;
-use ral_core::serial::datum::Datum as _;
-use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
+use ral_core::carrier::Transport;
+use ral_core::first_order::FOValue;
+use ral_core::first_order::datum::Datum as _;
+use ral_core::protocol::{Ending, Report, Run};
 use ral_core::{Value, builtins};
 use ral_core::{err, errln, outln};
 use std::sync::Arc;
@@ -36,7 +36,7 @@ fn print_result(val: &Value) {
                 _ => val.to_string(),
             };
             let theme = super::theme::output_theme();
-            if ral_core::ansi::use_ui_color()
+            if ral_core::terminal::ui_color()
                 && let Some(color) = &theme.value_color
             {
                 outln!("{color}{}{s}{}", theme.value_prefix, ral_core::ansi::RESET);
@@ -58,18 +58,7 @@ fn record(entries: Vec<(&str, FOValue)>) -> FOValue {
 
 /// An input line's run: the terminal leased, as a foreground command has it.
 pub(super) fn line_run(src: &str) -> Run {
-    Run {
-        program: Program::Source(src.to_string()),
-        script_name: "<stdin>".to_string(),
-        caps: ral_core::types::GrantStack::root(),
-        wall: None,
-        deferred_lease: None,
-        worker_cap: None,
-        io: RunIo::Inherit,
-        terminal: RequestedTerminalAccess::Leased,
-        stdin: RunStdin::Inherit,
-        trail: None,
-    }
+    Run::foreground(src, "<stdin>")
 }
 
 /// Dispatch one trimmed non-empty input line, firing the lifecycle hooks
@@ -79,15 +68,10 @@ pub(super) fn line_run(src: &str) -> Run {
 /// The session is the working directory's outermost handler, so `chpwd`
 /// compares its directory across the line: a `cd` that a `within [dir: …]`
 /// undid, or a `cd .`, fires nothing.
-pub(super) fn step(
-    trimmed: &str,
-    t: &dyn Transport,
-    host: &Arc<ReplHost>,
-    #[cfg(feature = "structural")] worksheet: &mut super::worksheet::Worksheet,
-) -> Step {
+pub(super) fn step(trimmed: &str, t: &dyn Transport, host: &Arc<ReplHost>) -> Step {
     let src = trimmed.to_string().encode();
     fire(t, host, "pre-exec", &record(vec![("src", src.clone())]));
-    let before = reading::cwd(t).ok();
+    let before = t.cwd().ok();
 
     let (report, _) = host.dispatch(t, line_run(trimmed), None);
     let (status, step) = match report {
@@ -104,11 +88,6 @@ pub(super) fn step(
             let step = match ending {
                 Ending::Settled { value, .. } => {
                     print_result(&Value::from(value));
-                    #[cfg(feature = "structural")]
-                    worksheet.record(
-                        trimmed,
-                        &reading::bind_effects(t, trimmed).unwrap_or_default(),
-                    );
                     Step::Continue
                 }
                 Ending::Raised { rendered, .. }
@@ -123,7 +102,7 @@ pub(super) fn step(
         }
     };
 
-    if let (Some(old), Ok(new)) = (before, reading::cwd(t))
+    if let (Some(old), Ok(new)) = (before, t.cwd())
         && old != new
     {
         let path = |p: std::path::PathBuf| p.to_string_lossy().into_owned().encode();
@@ -157,10 +136,10 @@ mod tests {
     use super::*;
     use crate::repl::plugin::PluginRuntime;
     use crate::repl::plugin::manifest::{LoadedPlugin, Manifest};
-    use ral_core::protocol::IdentityTransport;
-    use ral_core::source::Span;
+    use ral_core::carrier::IdentityTransport;
+    use ral_core::ty::{Scheme, Ty};
+    use ral_core::typecheck::Unifier;
     use ral_core::typecheck::builtins::{fun, mk_scheme, pure, thunk};
-    use ral_core::typecheck::{Scheme, Ty, Unifier};
     use ral_core::types::{BuiltinBody, BuiltinEntry, DefaultPolicy, HookName, HookSig};
     use std::borrow::Cow;
     use std::sync::Mutex;
@@ -178,7 +157,7 @@ mod tests {
         BuiltinEntry::base_frame(
             Cow::Borrowed("record"),
             sink_scheme,
-            "record — test sink appending its arguments.",
+            "record: test sink appending its arguments.",
             BuiltinBody::Captured(Arc::new(move |args, _mooring, _shell| {
                 sink.lock().unwrap().extend(args.iter().cloned());
                 Ok(Value::Unit)
@@ -197,7 +176,7 @@ mod tests {
         let (event, handler_src) = (hook_event.to_owned(), handler_src.to_owned());
         let recorder = sink_builtin(sink.clone());
         let t = crate::repl::engine(move |shell| {
-            ral_core::builtins::register(shell, crate::PRELUDE.comp());
+            crate::PRELUDE.seat(shell);
             shell.install_captured_builtins(&vec![recorder].into());
             let h = crate::repl::eval(shell, &handler_src);
             shell
@@ -206,7 +185,6 @@ mod tests {
                     h,
                     HookSig::Lifecycle { kind: event },
                     DefaultPolicy::denied(),
-                    Span::synthetic(),
                 )
                 .expect("register");
         });
@@ -222,13 +200,7 @@ mod tests {
     }
 
     fn run(line: &str, t: &IdentityTransport, host: &Arc<ReplHost>) {
-        step(
-            line,
-            t,
-            host,
-            #[cfg(feature = "structural")]
-            &mut super::super::worksheet::Worksheet::default(),
-        );
+        step(line, t, host);
     }
 
     /// `post-exec` hands the handler one event record carrying the source

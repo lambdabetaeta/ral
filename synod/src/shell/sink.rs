@@ -650,12 +650,14 @@ mod tests {
     use exarch::bus::AgentState;
     use exarch::bus::card::{Row, Seg};
     use exarch::record::DoneOutcome;
+    use ral_core::fact::Worker;
+    use ral_core::first_order::datum::Datum as _;
     use ral_core::types::{Observation, Observed};
     use std::path::PathBuf;
 
     /// The wire form a `Display::Observation` carries.
-    fn observation_wire(what: Observed) -> ral_core::serial::FOValue {
-        Observation::instant(None, None, what).to_wire()
+    fn observation_wire(what: Observed) -> ral_core::first_order::FOValue {
+        Observation::instant(None, None, what).encode()
     }
 
     #[test]
@@ -730,11 +732,11 @@ mod tests {
     fn context_and_a_lone_observation_both_collapse_to_process_card() {
         let context = Record::Display(Display::Context { turns: Vec::new() });
         let observation = Record::Display(Display::Observation {
-            value: observation_wire(Observed::Worker {
+            value: observation_wire(Observed::Worker(Worker {
                 id: ral_core::types::WorkerId(1),
                 cmd: "watch build".to_string(),
                 class: ral_core::types::LeaseClass::Worker,
-            }),
+            })),
         });
         for record in [context, observation] {
             let Some(SynodEvent::ProcessCard { marks }) = project(&record) else {

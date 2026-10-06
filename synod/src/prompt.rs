@@ -9,7 +9,7 @@
 //! situation report, whose every line is a host truth this agent, alone in
 //! its own machine, must never be told.
 
-use ral_core::types::Capabilities;
+use ral_core::capability::Capabilities;
 use std::path::Path;
 
 /// The office house rules, if the operator deployed any: a plain-language
@@ -131,7 +131,7 @@ fn host_section(caps: &Capabilities, workspace: &Path) -> String {
     use std::fmt::Write;
     let mut s = String::new();
     let _ = writeln!(s, "- os: Linux (Ubuntu userland)");
-    if let Some(now) = ral_core::host::now() {
+    if let Some(now) = exarch::prompt::host::now() {
         let _ = writeln!(s, "- now: {now}");
     }
     let _ = writeln!(s, "- cwd: {}", workspace.display());

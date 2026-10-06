@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 451d1ab5
+generated_at_commit: 446e3123
 generated_at_date: 2026-09-22
 covers_paths: [exarch/src/policy.rs, exarch/src/policy/]
 ---
@@ -48,7 +48,7 @@ directory, and the platform's live tool roots inside
 already-resolved `Capabilities` ([[design/capability-freeze|freeze boundary]]).
 An `xdg:` path escaping `HOME` is rejected at the profile that names it, before
 composition could discard it. Loading reuses
-`ral_core::capability::load_capabilities_from_*` — the same surface as ral's
+`ral_core::load::profile::load_capabilities_from_*` — the same surface as ral's
 `--capabilities <path>.ral` (`policy/load.rs` wraps it with exarch's error
 format and the `absolute_in` cwd-join helper).
 
@@ -68,7 +68,7 @@ stays offline even under `minimal`).
 `--base` and `--restrict` are the same act — the parent's stack is already
 underneath, so a base pushed here can only narrow, exactly as a restrict does
 ([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]]). The layer is
-resolved by `SpawnGrant::layer` (`core/src/spawn_grant.rs`), which both seats
+resolved by `SpawnGrant::layer` (`core/src/guard/grant.rs`), which both seats
 call: `` `inherit `` is ⊤, a layer the fold leaves no trace of;
 `` `confined ``/`` `read-only ``/`` `edit-only ``/`` `reasonable `` reach
 `base_layer` through the `GrantNarrower` the resolution is handed; and
@@ -137,7 +137,7 @@ as it does `dangerous` ([[design/agents|agents]]).
 
 Each is a ral script whose terminal expression is a map shaped like the argument
 of `grant [...] { body }`, loaded through
-`ral_core::capability::load_capabilities_from_str` — the same surface
+`ral_core::load::profile::load_capabilities_from_str` — the same surface
 `--capabilities <path>.ral` consumes at the ral CLI. Two surfaces, one model. The
 host reads the resulting authority only through core's accessors, never its
 representation ([[decisions/260615_no-core-repr-leak-into-exarch|no-core-repr-leak-into-exarch]]).

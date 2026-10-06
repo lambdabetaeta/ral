@@ -12,8 +12,6 @@
 
 mod common;
 
-use std::collections::HashSet;
-
 use ral_core::typecheck::TypeError;
 use ral_core::{elaborator::elaborate, syntax::parser::parse, typecheck};
 
@@ -21,13 +19,10 @@ fn raw_errors(src: &str) -> Vec<TypeError> {
     let Ok(ast) = parse(src) else {
         return Vec::new();
     };
-    let comp = elaborate(&ast, HashSet::default(), "").expect("elaborate");
+    let comp = elaborate(&ast, [], "").expect("elaborate");
     typecheck(
         &comp,
-        ral_core::SessionSchemes::from_schemes(
-            common::prelude_schemes(),
-            ral_core::HostSurface::default().builtin_table(),
-        ),
+        common::schemes_for(&ral_core::HostSurface::default()),
         None,
     )
     .err()

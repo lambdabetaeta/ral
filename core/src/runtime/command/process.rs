@@ -3,9 +3,20 @@
 //! Stdio routing lives in `stdio` and `redirect`, layered on before spawn.
 
 use crate::capability::Program;
-use crate::types::{Break, Error, Settled, Shell};
+use crate::sandbox::Refusal;
+use crate::types::{Break, Error, Settled, Shell, sig};
 
 use super::vet::SpawnPlan;
+
+impl From<Refusal> for Break {
+    fn from(refusal: Refusal) -> Self {
+        match refusal {
+            #[cfg(windows)]
+            Refusal::Cancelled(cause) => Self::Error(Error::cancelled(cause)),
+            other => sig(other.to_string()),
+        }
+    }
+}
 
 /// Build a launch for `plan` and apply the shell's scoped env and cwd.  Stdio
 /// and `pre_exec` hooks are the caller's: they differ between the standalone
@@ -25,14 +36,15 @@ pub(crate) fn build_launch(
     let jail = shell.guest_jail();
     let admitted = &plan.admitted;
     let mut cmd = if jail.is_none()
-        && let Some(projection) =
-            crate::capability::sandbox_projection(&shell.context, Some(admitted))
-    {
+        && let Some(projection) = crate::sandbox::SandboxProjection::of(
+            &shell.context.grants,
+            &shell.context.resolver(),
+            Some(admitted),
+        ) {
         // A `grant` body evaluates in this process unconfined; spawned children
         // are the only thing an OS sandbox reaches, and this is where it does.
-        crate::sandbox::projection_enforceable(&projection)
-            .map_err(|reason| Break::Error(crate::sandbox::confinement_unavailable(reason)))?;
-        crate::sandbox::sandboxed_command(&projection, admitted, ownership, shell, cancel)?
+        crate::sandbox::projection_enforceable(&projection)?;
+        crate::sandbox::sandboxed_command(&projection, admitted, ownership, &shell.cwd(), cancel)?
     } else {
         match admitted.program() {
             Program::File { path, real } => {
@@ -42,10 +54,8 @@ pub(crate) fn build_launch(
                 cmd
             }
             Program::Tool(tool) => {
-                use crate::runtime::pipeline::helper::{BUNDLED_TOOL_FLAG, self_reexec};
-                let mut cmd = self_reexec(BUNDLED_TOOL_FLAG).map_err(|e| {
-                    Break::Error(Error::new(format!("bundled tool '{tool}': {e}"), 1))
-                })?;
+                let mut cmd = crate::sandbox::reexec::launch(crate::Role::BundledTool)
+                    .map_err(|e| sig(format!("bundled tool '{tool}': {e}")))?;
                 cmd.arg(tool);
                 cmd.args(admitted.args());
                 cmd
@@ -55,38 +65,84 @@ pub(crate) fn build_launch(
     apply_env(&mut cmd, shell);
     #[cfg(unix)]
     if shell.has_active_capabilities() {
-        cmd.limit_resources();
+        cmd.limit_resources().map_err(|e| unbraked(&e))?;
     }
     #[cfg(target_os = "linux")]
     if let Some(jail) = jail {
-        let plan = jail
-            .plan()
-            .map_err(|e| Break::Error(Error::new(format!("guest jail: {e}"), 1)))?;
+        let plan = jail.plan().map_err(|e| sig(format!("guest jail: {e}")))?;
         cmd.apply_guest_jail(&plan)
-            .map_err(|e| Break::Error(Error::new(format!("guest jail: {e}"), 1)))?;
+            .map_err(|e| sig(format!("guest jail: {e}")))?;
     }
     Ok(cmd)
 }
 
-/// Spawn a standalone external child, then apply any active grant's post-spawn
-/// child limits.  Pipeline stages take the parallel path through
-/// `spawn_stage` / `launch_external_stage_direct` in `runtime/pipeline/launch.rs`:
-/// they join the group's pgid rather than lead their own, and their limits
-/// ride the group's job.
+/// Spawn external command `name` into `pgid`, braked under an active grant.
+/// A pipeline stage comes here with `Join`, and its brake caps the group's job.
 pub(crate) fn spawn(
     cmd: &mut crate::process::Launch,
     pgid: crate::process::PgidPolicy,
+    name: &str,
     shell: &Shell,
-) -> std::io::Result<(
+) -> Settled<(
     crate::process::ChildHandle,
     Option<crate::process::Pgid>,
     Option<crate::process::jail::JailCgroup>,
 )> {
-    let (child, leader, jail) = cmd.spawn(pgid)?;
+    let confinement = cmd.confinement();
+    let (mut child, led, jail) = cmd
+        .spawn(pgid)
+        .map_err(|e| spawn_error(confinement, name, &e))?;
     if shell.has_active_capabilities() {
-        crate::sandbox::apply_child_limits(&child);
+        brake(&mut child, pgid, led)?;
     }
-    Ok((child, leader, jail))
+    Ok((child, led, jail))
+}
+
+/// `err` with the kernel's denial hint, when a sandboxed child failed on its
+/// own account.  Only then are `pids` sampled: an unsandboxed or cancelled
+/// failure never pays for the process-table walk.
+pub(crate) fn with_denials(
+    err: Error,
+    shell: &Shell,
+    pids: impl FnOnce() -> std::collections::HashSet<u32>,
+    since: std::time::Instant,
+) -> Error {
+    if shell.sandbox_projection().is_none() || err.cancelled_by().is_some() {
+        return err;
+    }
+    match crate::sandbox::denial_hint(&pids(), since, err.code()) {
+        Some(hint) => err.append_hint(hint),
+        None => err,
+    }
+}
+
+/// Cap `child`'s process tree in the group `pgid` placed it in.  When the cap
+/// cannot be installed nothing the spawn made survives, the group it `led`
+/// included: a child under a grant never runs unbraked.
+pub(crate) fn brake(
+    child: &mut crate::process::ChildHandle,
+    pgid: crate::process::PgidPolicy,
+    led: Option<crate::process::Pgid>,
+) -> Result<(), Refusal> {
+    let joined = match pgid {
+        crate::process::PgidPolicy::Join(group) => Some(group),
+        _ => None,
+    };
+    child.limit_processes(led.or(joined)).map_err(|e| {
+        let _ = child.kill();
+        let _ = child.reap();
+        #[cfg(windows)]
+        if let Some(group) = led {
+            crate::process::release_win_group(group.as_raw());
+        }
+        unbraked(&e)
+    })
+}
+
+fn unbraked(e: &std::io::Error) -> Refusal {
+    Refusal::Unavailable(format!(
+        "{e}, so this command would run with no process budget"
+    ))
 }
 
 /// Render a spawn `io::Error` for command `name` as a [`Break`], through the
@@ -98,28 +154,17 @@ pub(crate) fn spawn(
 /// here, and an envelope execs its own target, so a missing one comes back as an
 /// exit status rather than a spawn failure.  Blaming `name` would accuse the one
 /// program we know exists.
-pub(crate) fn spawn_error(
-    confinement: Option<&'static str>,
-    name: &str,
-    e: &std::io::Error,
-) -> Break {
+fn spawn_error(confinement: Option<&'static str>, name: &str, e: &std::io::Error) -> Break {
     use crate::process::SpawnFailure;
 
     if let Some(envelope) = confinement {
-        return Break::Error(
-            crate::sandbox::confinement_unavailable(&format!("cannot start {envelope}: {e}"))
-                .with_hint(format!(
-                    "The envelope failed to launch, so {name} never ran."
-                )),
-        );
+        let why = Refusal::Unavailable(format!("cannot start {envelope}: {e}"));
+        return Break::Error(Error::new(why.to_string()).with_hint(format!(
+            "The envelope failed to launch, so {name} never ran."
+        )));
     }
 
     Break::Error(Error::spawn_failure(name, SpawnFailure::from(e)))
-}
-
-/// Wrap an I/O error from pipe creation or cloning as a [`Break`].
-pub(super) fn pipe_err(e: &std::io::Error) -> Break {
-    Break::Error(Error::new(format!("pipe: {e}"), 1))
 }
 
 /// Thread the shell's env overrides, logical cwd and `PWD` into the
@@ -225,7 +270,7 @@ mod judged_program {
     fn workdir() -> (tempfile::TempDir, Shell) {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir(tmp.path().join("tools")).unwrap();
-        let mut shell = Shell::default();
+        let mut shell = crate::test_helper::core_shell();
         shell.seed_cwd(tmp.path().to_path_buf());
         (tmp, shell)
     }

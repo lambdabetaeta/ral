@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 3c8afbc3
+generated_at_commit: 446e3123
 generated_at_date: 2026-10-06
 covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/bootstrap.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/fleet/desk.rs, exarch/data/system.md, exarch/data/agents.md, exarch/data/reply.md, exarch/data/ral.md, exarch/data/script-style.md, exarch/data/context.md]
 ---
@@ -31,7 +31,7 @@ exit code.
 - **Pre-`main` trampoline.** Before any setup, `dispatch_pre_main` short-circuits
   a re-exec child, returning `Option<u8>`: it hands the role
   `ral_core::classify(argv)` names to core's one pre-`main` dispatch,
-  `ral_core::sandbox::serve_pre_main` ([[map/repl/startup|startup]]), over
+  `ral_core::invocation::serve_process` ([[map/repl/startup|startup]]), over
   exarch's `INSTALLERS` (whose `narrow` is `policy::base_layer`, since core
   carries no base-tag lexicon of its own and a wire-seeded child resolves its own
   layer while booting). A confined child is served before any pin, the anchor
@@ -138,8 +138,9 @@ can inherit a live key.**
   and settled-worker retention for both seats — with no signal ceremony
   (a cancel arrives as a `Control` frame) and no terminal probe.
 - **Machine probing** — `prompt::host::snapshot` formats the live machine into
-  the prompt's `Host` section over core's `ral_core::host` probes (`os`, `now`, `cwd`,
-  `user`, `home`, `git`, `exarch logs`), best-effort: a missing value drops its line.
+  the prompt's `Host` section: `now` (via `jiff`) and `git` (via `git(1)`) are probed
+  there, `cwd`, `user` and `home` come from `ral_core::host`; best-effort, a missing
+  value drops its line.
 - **`Scratch`** — the disposable per-session directory, exposed under its
   `App`'s own name (`$EXARCH_SCRATCH`; synod's is `$SYNOD_SCRATCH`), with the
   legacy build-tool homes (`CARGO_HOME`, …) redirected

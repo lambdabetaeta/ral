@@ -10,32 +10,16 @@ mod common;
 
 use common::fresh_shell;
 
-use ral_core::protocol::{Program, Run};
-use ral_core::types::{GrantStack, Settled, Shell};
-use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Value};
+use ral_core::Value;
+use ral_core::protocol::Run;
+use ral_core::run::RunReport;
+use ral_core::types::{Settled, Shell};
 
 /// Run one top-level run of `source` through the public `run` door
 /// and return the body's `Settled<Value>`.  Every test below picks source
 /// it expects to compile, so a static diagnostic is a test bug.
 fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
-    match shell.run(RunRequest {
-        run: Run {
-            program: Program::Source(source.into()),
-            script_name: "<test>".into(),
-            caps: GrantStack::root(),
-            wall: None,
-            deferred_lease: None,
-            worker_cap: None,
-            io: RunIo::Inherit,
-            terminal: RequestedTerminalAccess::Leased,
-            stdin: RunStdin::Inherit,
-            trail: None,
-        },
-        surface: None,
-        deferred: None,
-        desk: None,
-        fork: None,
-    }) {
+    match shell.run(Run::foreground(source, "<test>")) {
         RunReport::Ran { ending, .. } => ending.into_result(),
         RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
     }

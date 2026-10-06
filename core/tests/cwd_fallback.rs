@@ -4,7 +4,6 @@
 //! failed `getcwd(3)` answers `"."`, which fails closed downstream.
 
 use ral_core::sync::LockExt as _;
-use ral_core::types::Shell;
 use std::sync::Mutex;
 
 static CWD_LOCK: Mutex<()> = Mutex::new(());
@@ -12,7 +11,7 @@ static CWD_LOCK: Mutex<()> = Mutex::new(());
 #[test]
 fn unseeded_shell_falls_back_to_the_process_cwd() {
     let _guard = CWD_LOCK.lock_ignore_poison();
-    let shell = Shell::default();
+    let shell = ral_core::test_helper::core_shell();
     assert_eq!(shell.cwd(), std::env::current_dir().unwrap());
 }
 
@@ -25,7 +24,7 @@ fn deleted_process_cwd_falls_back_to_dot() {
     std::env::set_current_dir(dir.path()).unwrap();
     drop(dir);
 
-    let shell = Shell::default();
+    let shell = ral_core::test_helper::core_shell();
     let cwd = shell.cwd();
 
     std::env::set_current_dir(&orig).unwrap();

@@ -13,7 +13,7 @@ use crate::agent::log::{Cut, EditAuthority};
 use crate::agent::nudge::Spent;
 use crate::bus::card::{Card, Change};
 use crate::provider::{ProviderError, Usage};
-use ral_core::serial::FOValue;
+use ral_core::first_order::FOValue;
 
 pub use super::DoneOutcome;
 

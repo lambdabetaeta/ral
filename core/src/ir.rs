@@ -7,15 +7,18 @@
 //! onto, so a span rides with the value rather than the parent; `None`
 //! means the node is synthetic — a builtin, the prelude, generated code.
 
+mod op;
+mod pattern;
+mod redirect;
+
+pub use op::{ArithOp, BinaryOp, CompareOp, EqOp};
+pub use pattern::{MapPatternEntry, Pattern};
+pub use redirect::{Redirect, Redirects, StderrTarget, StdinSource, WriteMode};
+
+use crate::first_order::Finite;
 use crate::path::tilde::TildePath;
 use crate::source::Spanned;
-use crate::syntax::ast::{BinaryOp, Pattern, Redirects};
-use crate::types::Str;
-
-/// A [`crate::syntax::ast::Pattern`] as elaboration hands it to the rest of
-/// the IR — the same shape, under the IR's own name.
-pub type IrPattern = Pattern;
-pub(crate) type Param = IrPattern;
+use crate::text::Str;
 
 // ── Values ──────────────────────────────────────────────────────────────
 use serde::{Deserialize, Serialize};
@@ -26,11 +29,13 @@ use std::sync::Arc;
 /// capture and a label clone a pointer.
 pub type Name = Arc<str>;
 
-/// What the elaborator's hoisted temporaries are named after: `_var1`, ….
-pub(crate) const GENSYM_PREFIX: &str = "_var";
+/// A binder only the compiler writes: no source text can name it.
+pub(crate) fn synthetic(tag: &str, n: usize) -> Name {
+    format!("%{tag}{n}").into()
+}
 
-pub(crate) fn is_gensym(name: &str) -> bool {
-    name.starts_with(GENSYM_PREFIX)
+pub(crate) fn is_synthetic(name: &str) -> bool {
+    name.starts_with('%')
 }
 
 /// Every name a node mentions, bound or free: sorted, distinct. Built only by
@@ -195,7 +200,7 @@ pub enum Val {
     Unit,
     String(Str),
     Int(i64),
-    Float(f64),
+    Float(Finite),
     Bool(bool),
     Variable(Name),
     /// A suspended computation, eliminated by [`CompKind::Force`]: `⟨M,
@@ -234,22 +239,6 @@ impl Val {
     /// `[:, key: val, …]`, entries already sorted by key.
     pub(crate) fn map(entries: impl Into<Box<[(Name, Spanned<Self>)]>>) -> Self {
         Self::Map(Node::new(entries.into()))
-    }
-
-    /// Classify a bare word into its most specific [`Val`] variant, by the
-    /// shape rules of [`crate::syntax::ast::WordLiteral::classify`].
-    ///
-    /// Eager and type-blind: a numeric-looking word meant as argv data is
-    /// read as a number, and stringifies back unchanged only where its
-    /// source was already canonical (`007` ⇒ `7`, `1.50` ⇒ `1.5`).
-    pub(crate) fn from_word(s: &str) -> Self {
-        use crate::syntax::ast::WordLiteral;
-        match WordLiteral::classify(s) {
-            Some(WordLiteral::Bool(b)) => Self::Bool(b),
-            Some(WordLiteral::Int(n)) => Self::Int(n),
-            Some(WordLiteral::Float(f)) => Self::Float(f),
-            None => Self::String(s.into()),
-        }
     }
 }
 
@@ -326,24 +315,67 @@ impl MapParts for ValMapEntry {
 }
 
 /// Positional arguments to a call — the same slots a list literal has.
-pub(crate) type Args = Vec<ValListElem>;
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Args(Vec<ValListElem>);
 
-/// Readers of an [`Args`].  Free functions, not methods — [`Args`] is a
-/// type alias.
-pub(crate) mod args {
-    use super::{Args, Val, ValListElem};
-
+impl Args {
     /// The args as a literal positional list, or `None` if any element is a
     /// `Spread` — dynamic arity, so callers fall back to weaker checks.
-    pub(crate) fn positional(args: &Args) -> Option<Vec<&Val>> {
-        let mut out = Vec::with_capacity(args.len());
-        for e in args {
-            match e {
-                ValListElem::Single(v) => out.push(&v.item),
-                ValListElem::Spread(_) => return None,
-            }
-        }
-        Some(out)
+    pub(crate) fn positional(&self) -> Option<Vec<&Val>> {
+        self.0
+            .iter()
+            .map(|e| match e {
+                ValListElem::Single(v) => Some(&v.item),
+                ValListElem::Spread(_) => None,
+            })
+            .collect()
+    }
+
+    /// How many arguments there are, unless a spread makes that dynamic.
+    pub(crate) fn arity(&self) -> Option<usize> {
+        self.positional().map(|p| p.len())
+    }
+}
+
+impl std::ops::Deref for Args {
+    type Target = [ValListElem];
+    fn deref(&self) -> &[ValListElem] {
+        &self.0
+    }
+}
+
+impl From<Vec<ValListElem>> for Args {
+    fn from(elems: Vec<ValListElem>) -> Self {
+        Self(elems)
+    }
+}
+
+impl FromIterator<ValListElem> for Args {
+    fn from_iter<I: IntoIterator<Item = ValListElem>>(iter: I) -> Self {
+        Self(iter.into_iter().collect())
+    }
+}
+
+impl Extend<ValListElem> for Args {
+    fn extend<I: IntoIterator<Item = ValListElem>>(&mut self, iter: I) {
+        self.0.extend(iter);
+    }
+}
+
+impl IntoIterator for Args {
+    type Item = ValListElem;
+    type IntoIter = std::vec::IntoIter<ValListElem>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a Args {
+    type Item = &'a ValListElem;
+    type IntoIter = std::slice::Iter<'a, ValListElem>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
     }
 }
 
@@ -356,32 +388,66 @@ pub struct Toplevel {
     pub phrases: Vec<Spanned<Phrase>>,
     /// Stored session data the checker solved this unit's uses of, each to be
     /// admitted against that type before the first phrase runs.
-    pub admits: Vec<(String, Arc<crate::types::Site>)>,
+    pub admits: Vec<(String, Arc<crate::ty::Site>)>,
 }
 
 /// A `Phrase::Define`'s names, each with its checker-closed scheme.
-pub type DefineSchemes = Vec<(String, Arc<crate::typecheck::Scheme>)>;
+pub type DefineSchemes = Vec<(String, Arc<crate::ty::Scheme>)>;
 
-/// One top-level statement.
+/// One top-level statement, checked unless `S` says it is not: the schemes
+/// are the checker's, so elaboration holds none.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Phrase {
+pub enum Phrase<S = DefineSchemes> {
     /// `let p = M` at the top level: run M, extend the session environment.
     /// `schemes` has one entry per name `pattern` binds, closed and
     /// generalised by the checker — a destructuring `let` carries one per
     /// component.
     Define {
-        pattern: Arc<IrPattern>,
+        pattern: Arc<Pattern>,
         comp: Arc<Comp>,
-        schemes: DefineSchemes,
+        schemes: S,
     },
     /// Any other statement.
     Run(Arc<Comp>),
 }
 
+/// What elaboration yields, and the checker alone turns into a [`Toplevel`].
+pub type Unchecked = Vec<Spanned<Phrase<()>>>;
+
+impl CompKind {
+    /// `comp` to `pattern`, then `rest`.
+    pub(crate) fn bind(
+        pattern: Pattern,
+        comp: impl Into<Arc<Comp>>,
+        rest: impl Into<Arc<Comp>>,
+    ) -> Self {
+        Self::Bind {
+            comp: comp.into(),
+            pattern: Arc::new(pattern),
+            rest: rest.into(),
+        }
+    }
+}
+
 impl Toplevel {
+    /// True if this is a single external/builtin command call.
+    ///
+    /// A fact about the input's shape, which hosts read to tailor what they say
+    /// about a failure: exactly one phrase, `Run(c)`, with `c` an `Exec`.  A
+    /// tail `Run` is never captured, so nothing wraps it.
+    pub(crate) fn is_single_command(&self) -> bool {
+        let [phrase] = self.phrases.as_slice() else {
+            return false;
+        };
+        let Phrase::Run(comp) = &phrase.item else {
+            return false;
+        };
+        matches!(comp.item, CompKind::Exec(_))
+    }
+
     /// The scheme each top-level name was closed at, the last `let` of a name
     /// winning as it does in the environment the phrases build.
-    pub(crate) fn exported_schemes(&self) -> Vec<(String, Arc<crate::typecheck::Scheme>)> {
+    pub(crate) fn exported_schemes(&self) -> Vec<(String, Arc<crate::ty::Scheme>)> {
         let last: std::collections::BTreeMap<_, _> = self
             .phrases
             .iter()
@@ -419,28 +485,13 @@ impl Comp {
     /// `Lam`: the checker's η-expansion guarantees the body of every
     /// function-typed thunk *is* a `Lam`, so reading the shape here is
     /// reading the type.
-    pub fn arrow(&self) -> Option<(&IrPattern, &Arc<Self>)> {
+    pub fn arrow(&self) -> Option<(&Pattern, &Arc<Self>)> {
         match &self.item {
             CompKind::Lam { param, body } => Some((param, body)),
             CompKind::Rec { group, index } => group.shape()[*index].1.arrow(),
             _ => None,
         }
     }
-}
-
-/// True if `top` is a single external/builtin command call.
-///
-/// A fact about the input's shape, which hosts read to tailor what they say
-/// about a failure: exactly one phrase, `Run(c)`, with `c` an `Exec`.  A
-/// tail `Run` is never captured, so nothing wraps it.
-pub(crate) fn is_single_command(top: &Toplevel) -> bool {
-    let [phrase] = top.phrases.as_slice() else {
-        return false;
-    };
-    let Phrase::Run(comp) = &phrase.item else {
-        return false;
-    };
-    matches!(comp.item, CompKind::Exec(_))
 }
 
 impl Mentions for Comp {
@@ -464,10 +515,7 @@ impl Mentions for Comp {
                 exec.args.mentions(out);
                 exec.redirects.mentions(out);
             }
-            CompKind::Pipeline {
-                stages,
-                stage_types: _,
-            } => {
+            CompKind::Pipeline { stages } => {
                 for stage in stages {
                     stage.mentions(out);
                 }
@@ -585,7 +633,7 @@ impl Mentions for Assembly {
     }
 }
 
-impl Mentions for Args {
+impl Mentions for [ValListElem] {
     fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
         for elem in self {
             elem.slot().item.mentions(out);
@@ -619,7 +667,7 @@ pub enum CompKind {
     /// force V — run a thunk.
     Force(Val),
     /// λ — evaluates to a closure.
-    Lam { param: Param, body: Arc<Comp> },
+    Lam { param: Pattern, body: Arc<Comp> },
     /// return V — produce a value.
     Return(Val),
     /// Build a list, record, or map some of whose parts are spread or keyed
@@ -629,7 +677,7 @@ pub enum CompKind {
     /// is `a to _. b`, on `Wildcard`.
     Bind {
         comp: Arc<Comp>,
-        pattern: Arc<IrPattern>,
+        pattern: Arc<Pattern>,
         rest: Arc<Comp>,
     },
     /// `M : A → B, V : A ⊢ M V : B` — the elimination form taken when the
@@ -644,13 +692,7 @@ pub enum CompKind {
     Exec(Exec),
     /// Concurrent stages joined by Unix pipes: stdout of stage N feeds
     /// stdin of stage N+1.
-    Pipeline {
-        stages: Vec<Arc<Comp>>,
-        /// The inferred value type out of each stage, parallel to `stages`.
-        /// Only the structural REPL's typed spine reads it, so an
-        /// un-annotated pipeline keeps the `Unit` placeholder harmlessly.
-        stage_types: Vec<crate::typecheck::Ty>,
-    },
+    Pipeline { stages: Vec<Arc<Comp>> },
     /// Binary primitive on already-evaluated values (`$[a + b]`, `$[a == b]`).
     Binary(BinaryOp, Val, Val),
     /// `-v` on a number.  Its own variant rather than a subtraction from a
@@ -762,8 +804,10 @@ pub struct Exec {
     pub(crate) args: Args,
     pub(crate) redirects: Redirects<Val>,
     /// The type the checker solved at a boundary call, which its door admits
-    /// the value it lets in against.  `None` for every other head.
-    pub(crate) site: Option<Arc<crate::types::Site>>,
+    /// the value it lets in against.  Unchecked, `None` everywhere; checked,
+    /// `None` means no boundary head, since that is decided by name resolution
+    /// at run time.
+    pub(crate) site: Option<Arc<crate::ty::Site>>,
 }
 
 /// Dispatch shape of an [`Exec`] head — a variant rather than a flag on
@@ -800,369 +844,4 @@ pub(crate) fn test_occ(names: &[&str]) -> Occ {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::path::tilde::TildePath;
-    use crate::syntax::ast::{BinaryOp, Redirects, StderrTarget, WriteMode};
-    use crate::typecheck::Ty;
-
-    #[test]
-    fn from_word_classifies_canonical_numbers() {
-        assert_eq!(Val::from_word("5"), Val::Int(5));
-        assert_eq!(Val::from_word("42"), Val::Int(42));
-        assert_eq!(Val::from_word("0"), Val::Int(0));
-        assert_eq!(Val::from_word("2.5"), Val::Float(2.5));
-        assert_eq!(Val::from_word("true"), Val::Bool(true));
-        assert_eq!(Val::from_word("unit"), Val::String("unit".into()));
-        assert_eq!(Val::from_word("hello"), Val::String("hello".into()));
-    }
-
-    // ── referenced_names: exhaustive walker coverage ─────────────────────
-
-    fn var(name: &str) -> Val {
-        Val::Variable(name.into())
-    }
-
-    fn svar(name: &str) -> Spanned<Val> {
-        Spanned::synthetic(var(name))
-    }
-
-    fn ret(name: &str) -> Arc<Comp> {
-        Arc::new(Spanned::synthetic(CompKind::Return(var(name))))
-    }
-
-    /// One synthetic `Comp` per `CompKind` and `Val` variant: `r_*` labels
-    /// what it references, `*_bound` what it merely binds.  The harvest is
-    /// asserted *exactly* — a subset would hide a wildcard-arm regression, a
-    /// superset a bound name over-renewing.
-    #[test]
-    fn referenced_names_walks_every_variant() {
-        let lam_param = IrPattern::Name("lam_param_bound".into());
-        let lam = Spanned::synthetic(CompKind::Lam {
-            param: lam_param,
-            body: ret("r_lam_body"),
-        });
-
-        let bind_pattern = IrPattern::List {
-            elems: vec![IrPattern::Name("bind_map_bound".into())],
-            rest: Some("bind_rest_bound".into()),
-        };
-        let bind = Spanned::synthetic(CompKind::Bind {
-            comp: ret("r_bind_comp"),
-            pattern: Arc::new(bind_pattern),
-            rest: ret("r_bind_rest"),
-        });
-
-        let app = Spanned::synthetic(CompKind::App {
-            head: Arc::new(Spanned::synthetic(CompKind::Force(var("r_app_head")))),
-            args: vec![
-                ValListElem::Single(svar("r_app_arg_single")),
-                ValListElem::Spread(svar("r_app_arg_spread")),
-            ],
-        });
-
-        let exec_name = Spanned::synthetic(CompKind::Exec(Exec {
-            head: CommandWord::Name(CommandName::Bare("r_exec_name_head".into())),
-            args: vec![ValListElem::Single(svar("r_exec_arg"))],
-            redirects: Redirects {
-                stdout: Some((WriteMode::Write, var("r_exec_redirect_target"))),
-                ..Redirects::default()
-            },
-            site: None,
-        }));
-        let exec_external = Spanned::synthetic(CompKind::Exec(Exec {
-            head: CommandWord::External(CommandName::Bare("r_exec_external_head".into())),
-            args: vec![],
-            // A dup has no operand, so contributes no reference to over-collect.
-            redirects: Redirects {
-                stderr: Some(StderrTarget::Stdout),
-                ..Redirects::default()
-            },
-            site: None,
-        }));
-
-        let pipeline = Spanned::synthetic(CompKind::Pipeline {
-            stages: vec![
-                Arc::new(Spanned::synthetic(CompKind::Force(var(
-                    "r_pipeline_stage1",
-                )))),
-                Arc::new(Spanned::synthetic(CompKind::Force(var(
-                    "r_pipeline_stage2",
-                )))),
-            ],
-            stage_types: vec![Ty::Unit, Ty::Unit],
-        });
-
-        let binary = Spanned::synthetic(CompKind::Binary(
-            BinaryOp::Add,
-            var("r_binary_a"),
-            var("r_binary_b"),
-        ));
-        let not = Spanned::synthetic(CompKind::Not(var("r_not")));
-        let index = Spanned::synthetic(CompKind::Index {
-            target: var("r_index_target"),
-            keys: vec![Spanned::synthetic(var("r_index_key"))],
-        });
-        let interpolation = Spanned::synthetic(CompKind::Interpolation(vec![
-            var("r_interp_a"),
-            var("r_interp_b"),
-        ]));
-        let rec_group: Arc<GroupNode> =
-            Node::new(vec![("rec_name_bound".into(), ret("r_rec_member"))].into());
-        let rec = Spanned::synthetic(CompKind::Rec {
-            group: rec_group,
-            index: 0,
-        });
-        let tilde = Spanned::synthetic(CompKind::Tilde(TildePath { suffix: None }));
-        let if_ = Spanned::synthetic(CompKind::If {
-            cond: Spanned::synthetic(var("r_if_cond")),
-            then: svar("r_if_then"),
-            else_: svar("r_if_else"),
-        });
-        let case = Spanned::synthetic(CompKind::Case {
-            scrutinee: Spanned::synthetic(var("r_case_scrutinee")),
-            arms: vec![CaseArm {
-                tag: Spanned::synthetic("some".into()),
-                body: svar("r_case_arm_body"),
-            }],
-        });
-
-        let scope_try = Spanned::synthetic(CompKind::Try {
-            body: var("r_try_body"),
-            handler: var("r_try_handler"),
-        });
-        let scope_guard = Spanned::synthetic(CompKind::Guard {
-            body: var("r_guard_body"),
-            cleanup: var("r_guard_cleanup"),
-        });
-        let scope_within = Spanned::synthetic(CompKind::Within {
-            opts: vec![("dir".into(), svar("r_within_opts"))].into(),
-            handlers: Some(vec![HandlerArmV {
-                name: "deploy".into(),
-                value: Spanned::synthetic(var("r_within_arm")),
-            }]),
-            body: var("r_within_body"),
-        });
-        let scope_grant = Spanned::synthetic(CompKind::Grant {
-            caps: vec![("net".into(), svar("r_grant_caps"))].into(),
-            body: var("r_grant_body"),
-        });
-        let scope_audit = Spanned::synthetic(CompKind::Audit {
-            body: var("r_audit_body"),
-        });
-        let scope_redirect = Spanned::synthetic(CompKind::Redirect {
-            body: ret("r_scope_redirect_body"),
-            redirects: Redirects {
-                stderr: Some(StderrTarget::File(
-                    WriteMode::Append,
-                    var("r_scope_redirect_target"),
-                )),
-                ..Redirects::default()
-            },
-        });
-        let val_list = Spanned::synthetic(CompKind::Return(Val::list(vec![
-            Spanned::synthetic(Val::Unit),
-            Spanned::synthetic(Val::String("s".into())),
-            Spanned::synthetic(Val::Int(1)),
-            Spanned::synthetic(Val::Float(1.0)),
-            Spanned::synthetic(Val::Bool(true)),
-            svar("r_list_single"),
-        ])));
-        let val_record = Spanned::synthetic(CompKind::Return(Val::record(vec![(
-            "lbl".into(),
-            svar("r_record_value"),
-        )])));
-        let val_map = Spanned::synthetic(CompKind::Return(Val::map(vec![(
-            "lbl".into(),
-            svar("r_map_value"),
-        )])));
-        let assemble_list = Spanned::synthetic(CompKind::Assemble(Assembly::List(vec![
-            ValListElem::Single(svar("r_assemble_list_single")),
-            ValListElem::Spread(svar("r_assemble_list_spread")),
-        ])));
-        let assemble_record = Spanned::synthetic(CompKind::Assemble(Assembly::Record(vec![
-            ValRecordEntry::Field("lbl".into(), svar("r_assemble_record_value")),
-            ValRecordEntry::Spread(svar("r_assemble_record_spread")),
-        ])));
-        let assemble_map = Spanned::synthetic(CompKind::Assemble(Assembly::Map(vec![
-            ValMapEntry::Entry(var("r_assemble_map_key"), svar("r_assemble_map_value")),
-            ValMapEntry::Spread(svar("r_assemble_map_spread")),
-        ])));
-        let val_variant = Spanned::synthetic(CompKind::Return(Val::Variant {
-            label: "lbl".into(),
-            payload: Some(Box::new(var("r_variant_payload"))),
-        }));
-        let val_variant_empty = Spanned::synthetic(CompKind::Return(Val::Variant {
-            label: "lbl_empty".into(),
-            payload: None,
-        }));
-        let val_thunk = Spanned::synthetic(CompKind::Return(Val::thunk(Arc::new(
-            Spanned::synthetic(CompKind::Return(var("r_thunk_body"))),
-        ))));
-        let capture = Spanned::synthetic(CompKind::Capture(ret("r_capture_body")));
-        let decode = Spanned::synthetic(CompKind::Decode(var("r_decode_body")));
-
-        // No single `CompKind` holds an arbitrary list of sub-`Comp`s to
-        // wrap all of the above in one tree, so each is walked on its own
-        // and the harvests are unioned.
-        let nodes: Vec<Arc<Comp>> = vec![
-            Arc::new(Spanned::synthetic(CompKind::Force(var("r_force")))),
-            Arc::new(Spanned::synthetic(CompKind::Return(var("r_return")))),
-            Arc::new(lam),
-            Arc::new(bind),
-            Arc::new(app),
-            Arc::new(exec_name),
-            Arc::new(exec_external),
-            Arc::new(pipeline),
-            Arc::new(binary),
-            Arc::new(not),
-            Arc::new(index),
-            Arc::new(interpolation),
-            Arc::new(rec),
-            Arc::new(tilde),
-            Arc::new(if_),
-            Arc::new(case),
-            Arc::new(scope_try),
-            Arc::new(scope_guard),
-            Arc::new(scope_within),
-            Arc::new(scope_grant),
-            Arc::new(scope_audit),
-            Arc::new(scope_redirect),
-            Arc::new(val_list),
-            Arc::new(val_record),
-            Arc::new(val_map),
-            Arc::new(assemble_list),
-            Arc::new(assemble_record),
-            Arc::new(assemble_map),
-            Arc::new(val_variant),
-            Arc::new(val_variant_empty),
-            Arc::new(val_thunk),
-            Arc::new(capture),
-            Arc::new(decode),
-        ];
-
-        let found: std::collections::HashSet<&str> = nodes
-            .iter()
-            .flat_map(|c| {
-                let mut out = Vec::new();
-                c.mentions(&mut out);
-                out.into_iter().map(AsRef::as_ref).collect::<Vec<_>>()
-            })
-            .collect();
-
-        let expected = [
-            "r_force",
-            "r_return",
-            "r_lam_body",
-            "r_bind_comp",
-            "r_bind_rest",
-            "r_app_head",
-            "r_app_arg_single",
-            "r_app_arg_spread",
-            "r_exec_name_head",
-            "r_exec_arg",
-            "r_exec_redirect_target",
-            "r_exec_external_head",
-            "r_pipeline_stage1",
-            "r_pipeline_stage2",
-            "r_binary_a",
-            "r_binary_b",
-            "r_not",
-            "r_index_target",
-            "r_index_key",
-            "r_interp_a",
-            "r_interp_b",
-            "r_rec_member",
-            "r_if_cond",
-            "r_if_then",
-            "r_if_else",
-            "r_case_scrutinee",
-            "r_case_arm_body",
-            "r_try_body",
-            "r_try_handler",
-            "r_guard_body",
-            "r_guard_cleanup",
-            "r_within_opts",
-            "r_within_arm",
-            "r_within_body",
-            "r_grant_caps",
-            "r_grant_body",
-            "r_audit_body",
-            "r_scope_redirect_body",
-            "r_scope_redirect_target",
-            "r_list_single",
-            "r_record_value",
-            "r_map_value",
-            "r_assemble_list_single",
-            "r_assemble_list_spread",
-            "r_assemble_record_value",
-            "r_assemble_record_spread",
-            "r_assemble_map_key",
-            "r_assemble_map_value",
-            "r_assemble_map_spread",
-            "r_variant_payload",
-            "r_thunk_body",
-            "r_capture_body",
-            "r_decode_body",
-        ];
-
-        for name in expected {
-            assert!(found.contains(name), "missing reference: {name}");
-        }
-        assert_eq!(
-            found.len(),
-            expected.len(),
-            "unexpected extra name in {found:?}; every bound-not-referenced \
-             name (lam_param_bound, bind_map_bound, bind_rest_bound, \
-             rec_name_bound) must be absent"
-        );
-
-        for bound in [
-            "lam_param_bound",
-            "bind_map_bound",
-            "bind_rest_bound",
-            "rec_name_bound",
-        ] {
-            assert!(
-                !found.contains(bound),
-                "a bound (not referenced) name leaked into the harvest: {bound}"
-            );
-        }
-    }
-
-    /// A thunk mentioning `b`, `a`, `b` and nesting a thunk over `c`, `a` has
-    /// occ `[a, b, c]`: sorted, distinct, and read off the inner node rather
-    /// than by re-walking its body.
-    #[test]
-    fn occ_is_sorted_distinct_and_nested_nodes_are_not_walked() {
-        let inner = Val::thunk(Arc::new(Spanned::synthetic(CompKind::Binary(
-            BinaryOp::Add,
-            var("c"),
-            var("a"),
-        ))));
-        let outer = ThunkNode::new(Arc::new(Spanned::synthetic(CompKind::Interpolation(vec![
-            var("b"),
-            var("a"),
-            var("b"),
-            inner,
-        ]))));
-        let occ = outer.occ();
-        assert_eq!(occ.len(), 3, "sorted and distinct: a, b, c");
-        for name in ["a", "b", "c"] {
-            assert!(occ.contains(name), "occ missing {name}");
-        }
-    }
-
-    /// A list node serialises to its shape alone, and decodes with the same
-    /// occ it was built with.
-    #[test]
-    fn a_node_crosses_the_wire_as_its_shape() {
-        let node = ListNode::new(vec![svar("a"), svar("a"), svar("b")].into());
-        let wire = serde_json::to_string(&node).expect("serialize node");
-        let shape_wire = serde_json::to_string(node.shape()).expect("serialize shape");
-        assert_eq!(wire, shape_wire, "the wire carries the shape alone");
-
-        let decoded: Arc<ListNode> = serde_json::from_str(&wire).expect("deserialize node");
-        assert_eq!(decoded.occ(), node.occ());
-    }
-}
+mod tests;

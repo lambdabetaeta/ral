@@ -3,8 +3,7 @@
 //! The completion *engine*, owned by no frontend: it classifies the token
 //! under the cursor (a `$`-variable, a command-position name, or a path),
 //! gathers candidates from a [`Sources`] view the engine's probes answer,
-//! and ranks them.  Both the rustyline helper ([`super::complete::RalHelper`]) and the
-//! structural surface's menu call [`complete`] against a shared
+//! and ranks them.  The rustyline helper ([`super::complete::RalHelper`]) calls [`complete`] against a shared
 //! [`SourceCache`]; neither owns the classification, the candidate sources,
 //! or the ranking.
 //!
@@ -21,8 +20,8 @@
 //! Ranking is fuzzy — the `nucleo` matcher, the Helix team's — for every
 //! surface; [`ral_core::text::rank`] is its single home.
 
-use ral_core::protocol::Transport;
-use ral_core::protocol::reading::{self, PathEntry};
+use ral_core::carrier::Transport;
+use ral_core::protocol::probe::PathEntry;
 use ral_core::text::rank;
 use std::cell::OnceCell;
 use std::path::{Path, PathBuf};
@@ -156,14 +155,15 @@ impl SourceCache {
         // immediately" stays true for free.  Holding it in its own fields is
         // also what makes it impossible for a binding change to invalidate a
         // `PATH` enumeration.
-        let (bindings, handlers) = reading::completion_names(engine)
+        let (bindings, handlers) = engine
+            .completion_names()
             .map_or_else(|_| Default::default(), |n| (n.bindings, n.handlers));
         self.variables = public(bindings).collect();
         let mut shell_commands: Vec<String> = self
             .variables
             .iter()
             .cloned()
-            .chain(public(reading::builtin_names(engine).unwrap_or_default()))
+            .chain(public(engine.builtin_names().unwrap_or_default()))
             .chain(public(handlers))
             .collect();
         shell_commands.sort();
@@ -175,8 +175,8 @@ impl SourceCache {
         // env overlay, so a `within [shell: PATH=…]` override keys differently
         // and drops the enclosing scope's answer.
         let key = PathKey {
-            path: reading::env_var(engine, "PATH").ok().flatten(),
-            cwd: reading::cwd(engine).unwrap_or_default(),
+            path: engine.env_var("PATH").ok().flatten(),
+            cwd: engine.cwd().unwrap_or_default(),
         };
         let aged = self
             .scan
@@ -233,7 +233,7 @@ impl SourceCache {
 
 /// `dir`'s entries in the engine's filesystem; none, if it will not say.
 fn entries(engine: &dyn Transport, dir: &Path) -> Vec<PathEntry> {
-    reading::path_entries(engine, dir).unwrap_or_default()
+    engine.path_entries(dir).unwrap_or_default()
 }
 
 // ── The entry point ──────────────────────────────────────────────────────────
@@ -387,7 +387,7 @@ pub(super) fn complete_path(
 /// Build ranked completion candidates for the `entries` matching
 /// `name_needle` and passing the dotfile gate.  Each replacement is `replacement_prefix` + name (+ `/` if a
 /// directory), quoted using ral source syntax (via
-/// [`ral_core::syntax::quote_word_if_needed`]) when `quote` is set and the
+/// [`ral_core::syntax::quote_word`]) when `quote` is set and the
 /// candidate name is not a bare word.
 ///
 /// Tilde-prefix completion passes `quote = false` so the trailing `~/` keeps
@@ -413,7 +413,7 @@ fn ranked_entries(
             };
             let body = format!("{replacement_prefix}{display}");
             let replacement = if quote {
-                ral_core::syntax::quote_word_if_needed(&body).into_owned()
+                ral_core::syntax::quote_word(&body).into_owned()
             } else {
                 body
             };
@@ -432,7 +432,7 @@ fn ranked_entries(
 mod tests {
     use super::*;
 
-    use ral_core::protocol::IdentityTransport;
+    use ral_core::carrier::IdentityTransport;
 
     /// Backing storage for a hand-built [`Sources`], which borrows its lists.
     struct Fixture {

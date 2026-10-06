@@ -7,7 +7,7 @@
 #   prompt    — String or Block returning the prompt string
 #   bindings  — Map of name → value bindings available at the prompt
 #   aliases   — Map of name → command aliases
-#   edit_mode — String: emacs (default) or vi
+#   edit-mode — String: emacs (default) or vi
 #
 # The following builtins are available inside a prompt block:
 #   user     — current username
@@ -20,7 +20,7 @@ let reset = "\e[0m"
 
 return [
     # Line-editing mode: emacs (default) or vi.
-    edit_mode: vi,
+    edit-mode: vi,
 
     # Environment variables set in every child process spawned from this shell.
     env: [

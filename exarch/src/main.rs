@@ -10,7 +10,7 @@ fn main() -> std::process::ExitCode {
     let code = match exarch::run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("exarch: {e}");
+            ral_core::errln!("exarch: {e}");
             std::process::ExitCode::from(1)
         }
     };

@@ -165,9 +165,7 @@ impl BootPlan {
 }
 
 fn cache_boot_dir() -> PathBuf {
-    SYNOD
-        .xdg_dir(ral_core::path::basedir::XdgKind::Cache)
-        .join("boot")
+    SYNOD.xdg_dir(ral_core::host::XdgKind::Cache).join("boot")
 }
 
 /// The rootfs at `target`, inflating `archive` into it if it is not already

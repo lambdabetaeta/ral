@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 3c8afbc3
+generated_at_commit: 446e3123
 generated_at_date: 2026-10-06
-covers_paths: [core/src/types/observation.rs, core/src/evaluator/audit.rs, core/src/path/walk.rs, core/src/types/shell/checks.rs, core/src/runtime/command/redirect.rs, core/src/runtime/command/detach.rs, core/src/runtime/pipeline/collect.rs, core/src/evaluator/redirect.rs, core/src/runtime/command.rs, core/src/runtime/command/stdio.rs, core/src/types/shell/mod.rs, core/src/types/mooring.rs, exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/encode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/commit.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, clippy.toml, core/tests/syscall_sites.rs]
+covers_paths: [core/src/types/audit/observation.rs, core/src/types/audit/door.rs, core/src/evaluator/call.rs, core/src/runtime/command_call.rs, core/src/path/walk.rs, core/src/guard/shell.rs, core/src/runtime/redirect.rs, core/src/path/stage.rs, core/src/runtime/command/detach.rs, core/src/runtime/pipeline/collect.rs, core/src/runtime/redirect/scope.rs, core/src/runtime/command.rs, core/src/runtime/command/stdio.rs, core/src/types/shell/mod.rs, core/src/types/mooring.rs, exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/encode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/commit.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, clippy.toml, core/tests/syscall_sites.rs]
 ---
 
 # Map: exarch / io surface
@@ -14,7 +14,7 @@ property of the **runtime**, not of kit discipline: the hooks sit at the
 syscall sites where the operation actually happens, so a read/write/exec
 surfaces no matter
 which helper — or no helper — issued it. Core emits a structural
-**`Observation`** (`core/src/types/observation.rs`) — the one vocabulary
+**`Observation`** (`core/src/types/audit/observation.rs`) — the one vocabulary
 shared with the [[design/audit|audit trail]], `--audit`'s JSON, and the wire;
 exarch binds it to a card from the existing [[map/exarch/cards|mark grammar]],
 exactly as it already binds a kit `` `card ``
@@ -30,8 +30,9 @@ else**, held not by a flag but by *where code lives* (below). See the decision,
 ## The syscall sites — core emits its own activity
 
 Three operation classes, each hooked at the sites that realise it. Every site
-builds one `Observation` (`types/observation.rs`) and hands it to `observe`
-(`evaluator/audit.rs`), the single fan-out point. It judges nothing: the
+builds one `Observation` (`types/audit/observation.rs`) and hands it to
+`Shell::observe` (`types/audit/door.rs`), the single fan-out point; `Shell::observation`
+stamps the call site and principal every door fetches. It judges nothing: the
 observation goes to the run's `Mooring::surface` (`types/mooring.rs`) and onto
 the open [[design/audit|audit trail]], each already inert when its consumer is
 absent. **Which observations matter is the host's call**, made once in
@@ -45,7 +46,7 @@ never does, and no `grant` has a dimension to change either — language
 semantics, not presentation ([[design/audit|audit]]). And only a head admission
 (`command_call.rs`) surfaces a *structured* denial — the `fs` and full-argv
 checks in
-`capability/enforce.rs` are entered from `types/shell/checks.rs`, whose
+`guard/enforce.rs` are entered from `guard/shell.rs`, whose
 callers in `builtins/` and exarch's own sites carry no `Mooring`, so their
 denials reach the trail alone. A refused *external* command still surfaces
 either way, as a failed command observation carrying the denial message.
@@ -57,11 +58,11 @@ an external's dispatch, a redirect, a birth — and never per builtin
 application, which is no door at all.
 
 - **Redirects** open through `open_file` and `install_stdin_redirect`
-  (`runtime/command/redirect.rs`). A **read** (`< file`, fd 0) emits eagerly
+  (`runtime/redirect.rs`). A **read** (`< file`, fd 0) emits eagerly
   when the file opens — `Observed::Read { path }`, no outcome — so it precedes
   the body it feeds. A **write** (`>`/`>>`/`>~`, fd 1/2) opens as an
   `OpenedWrite` — `Atomic`, staged beside a regular file, or `Stream` — that
-  `RedirectState` (`evaluator/redirect.rs`) holds as a `WriteIntent` and
+  `RedirectState` (`runtime/redirect/scope.rs`) holds as a `WriteIntent` and
   reports when the frame settles (`settle`), with the outcome the site alone
   can know: an atomic `>` is `committed` (body ok, commit succeeded),
   `aborted` (the body did not reach the commit) or `failed` (commit failed);
@@ -77,7 +78,7 @@ application, which is no door at all.
 
   Mode is `write` / `append` / `stream`. No byte count — path, mode, outcome,
   plus the content snapshots, each whole or `` `none `` and never a prefix:
-  `old_bytes` taken at the open, `new_bytes` at settle (the staged file for an
+  `old-bytes` taken at the open, `new-bytes` at settle (the staged file for an
   atomic `>`, the target for a stream), read only within 64 KiB
   (`PREVIEW_CAP`), of a regular file, under a grant that admits the read. A
   write that did not land carries neither. Exarch diffs the two into the
@@ -85,24 +86,24 @@ application, which is no door at all.
 - **Commands** are hooked *after* resolution, at the completion sites, never
   at the call site (where the head may still resolve to a closure or
   builtin). Every external or detached command is one
-  `Observed::Command { argv, status, origin, .. }`: `argv` is the shown name
-  first, then its arguments; `origin` is `external` or `detached`.
+  `Observed::Command(Command { argv, status, origin, .. })`: `argv` is the shown name
+  first, then its arguments; `origin` is `` `external `` or `` `detached ``.
   The external / bundled path — one site for both, since a bundled tool is a
   `ral --ral-bundled-tool` child like any host executable
   ([[decisions/260731_bundled-tools-always-reexec|bundled-tools-always-reexec]])
-  — emits from `call_external` (`evaluator/audit.rs`), which wraps the whole
+  — emits from `call_external` (`runtime/command_call.rs`), which wraps the whole
   dispatch and so covers a spawn failure too, since that never reaches
   `wait()` (the card derives ok/bad from the status directly; a spawn failure
   carries the synthesized 127/126/… code). `detach` (`runtime/command/detach.rs`)
   is the second site, and the one that surfaces at the spawn rather than the
   wait: a surrendered process is never waited for, so its observation carries
-  `origin: detached` and status `0` meaning *exec'd*, not *succeeded*. A
+  `` origin: `detached `` and status `0` meaning *exec'd*, not *succeeded*. A
   direct external *pipeline stage* is the third: the collector never enters
   `call_external`, so its settlement mints the fact itself
   (`runtime/pipeline/collect.rs`). All three assemble their argv through the
-  one constructor, `evaluator::audit::command_fact` — the rule that index 0
+  one constructor, `Observed::command` — the rule that index 0
   is the shown name lives there and nowhere else. A **builtin** application
-  is no command observation at all: its frame (`call_native`) stamps nothing
+  is no command observation at all: its frame (`BuiltinEntry::framed`) stamps nothing
   and tees nothing, and whatever it did to the world arrives from the door it
   did it through — `edit-hash` as the `` `write `` its `atomic_write`
   commits, `spawn` as its `` `worker `` ([[design/audit|audit]]).
@@ -138,11 +139,11 @@ over a row the typechecker closes.
 
 ```
 what: `read    [path]
-      `write   [path, mode:"write"|"append"|"stream", outcome:"committed"|"aborted"|"failed", new_bytes, old_bytes]   # each snapshot `just or `none
-      `command [argv:[prog, …args], status, origin:"external"|"detached", stdout, stderr, error]
+      `write   [path, mode:`write|`append|`stream, outcome:`committed|`aborted|`failed, new-bytes, old-bytes]   # each snapshot `some or `none
+      `command [argv:[prog, …args], status, origin:`external|`detached, stdout, stderr, error]   # error `some or `none
       `grep    [scope, pattern]                        # emitted by the grep builtin
-      `check   [resource, decision:"denied"|"flagged", fields]
-      `worker  [id, cmd, class:"worker"|"durable"]
+      `check   [resource:`exec|`fs|`deputy, decision:`denied|`flagged, fields]   # decision is the resource's own
+      `worker  [id, cmd, class:`worker|`durable]
       `act     [verb, subject, payload, refused]       # authored host-side by the desk
 ```
 
@@ -170,7 +171,7 @@ structured value and nothing a printer merely wants a copy of. The card is
 bound by `observation_card` only at draw time — from whichever printer's fold
 reads the recorded `Display::Observation` — never by the seam
 (`fleet/desk.rs`'s `absorb_surface`) that records it: the
-observation crosses the seam as its raw wire form alone (`Observation::to_wire`),
+observation crosses the seam as its raw wire form alone (`Datum::encode` of the `Observation`),
 and the card is rebuilt fresh wherever it is drawn. The other surface shapes
 (pin, notice, card, done) have their own arms; a value matching none drops,
 the same graceful degradation as before.

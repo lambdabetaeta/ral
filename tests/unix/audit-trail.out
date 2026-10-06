@@ -44,19 +44,19 @@ hi
 []
 [/bin/echo]
 false
-[exec denied /bin/sh]
-[fs denied write]
+[`exec `denied /bin/sh]
+[`fs `denied write]
 hi
 [/bin/echo, /bin/cat]
 hi
-[cat external]
+[cat `external]
 helper
 [/bin/echo]
-[write write committed a.txt, read a.txt, write append committed a.txt, write stream committed s.txt]
-[write write aborted never.txt, write write failed out.txt]
+[write `write `committed a.txt, read a.txt, write `append `committed a.txt, write `stream `committed s.txt]
+[write `write `aborted never.txt, write `write `failed out.txt]
 false
 [5]
-[printf external 0]
+[printf `external 0]
 hi
 [/bin/echo]
 one

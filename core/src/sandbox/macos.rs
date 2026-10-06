@@ -10,10 +10,9 @@
 //! Seatbelt has no per-address network rules, so `SandboxProjection::net` is
 //! one allow/deny bit rather than an endpoint list.
 
+use super::{ExecProjection, FsProjection, FsRules, SandboxProjection, WriteReach};
+use crate::capability::ExecScope;
 use crate::path::{Rendered, render_paths, render_real, rendered_ancestors};
-use crate::types::{
-    ExecProjection, ExecRule, FsProjection, FsRules, SandboxProjection, WriteReach,
-};
 use std::collections::BTreeSet;
 use std::ffi::{CStr, CString};
 use std::fmt::{self, Write};
@@ -159,12 +158,10 @@ pub(super) fn build_profile(policy: &SandboxProjection) -> Result<String, String
         .map(|r| r.deny_paths.as_slice())
         .unwrap_or_default()
     {
-        let escaped = escape_path(path);
-        profile.fs_denies.extend([
-            format!("(deny file-read* (subpath \"{escaped}\"))"),
-            format!("(deny file-write* (subpath \"{escaped}\"))"),
-            format!("(deny file-link (subpath \"{escaped}\"))"),
-        ]);
+        profile.fs_denies.extend(
+            ["file-read*", "file-write*", "file-link"]
+                .map(|op| Clause::deny(op, Filter::Subpath(path)).to_string()),
+        );
     }
     let pinned = rendered
         .fs
@@ -178,7 +175,7 @@ pub(super) fn build_profile(policy: &SandboxProjection) -> Result<String, String
     emit_pins(&mut profile.pins, pinned.iter().chain(&own_ancestors));
     profile.pins.extend(
         own.iter()
-            .map(|path| format!("(deny file-write* (literal \"{}\"))", escape_path(path))),
+            .map(|path| Clause::deny("file-write*", Filter::Literal(path)).to_string()),
     );
 
     Ok(profile.to_string())
@@ -192,10 +189,7 @@ pub(super) fn build_profile(policy: &SandboxProjection) -> Result<String, String
 fn emit_pins<'a>(pins: &mut Vec<String>, dirs: impl IntoIterator<Item = &'a Rendered>) {
     let mut seen = BTreeSet::new();
     for dir in dirs.into_iter().filter(|dir| seen.insert(*dir)) {
-        pins.push(format!(
-            "(deny file-write-unlink (literal \"{}\"))",
-            escape_path(dir)
-        ));
+        pins.push(Clause::deny("file-write-unlink", Filter::Literal(dir)).to_string());
     }
 }
 
@@ -216,10 +210,7 @@ fn emit_fs_restricted(lines: &mut Vec<String>, rules: &FsRules<Rendered>) -> Res
     emit_read_subpaths(lines, &rules.read_prefixes);
     emit_read_subpaths(lines, &rules.write_prefixes);
     for prefix in &rules.write_prefixes {
-        lines.push(format!(
-            "(allow file-write* (subpath \"{}\"))",
-            escape_path(prefix)
-        ));
+        lines.push(Clause::allow("file-write*", Filter::Subpath(prefix)).to_string());
     }
     Ok(())
 }
@@ -231,8 +222,8 @@ pub(crate) const RENDERS_EXEC: bool = true;
 /// Render the `process-exec` rules.  `Unrestricted` is a wildcard, so an
 /// fs-only grant does not attenuate exec here.  `Restricted` admits the
 /// loader base and `own`, ral's binary, first, then renders each rule in
-/// order, one [`Sbpl`] form each: Seatbelt is last-match-wins, the order the
-/// rules already carry.  Exec denies deny no reads: those are fs's.
+/// precedence order, one [`Clause`] each: Seatbelt is last-match-wins.  Exec
+/// denies deny no reads: those are fs's.
 /// Writes under an admitted dir are denied wherever the fs grant would
 /// otherwise let a child author what the dir runs, and a veto is hollow
 /// without it: for each dir a restricted `fs`'s write prefixes cover without
@@ -253,11 +244,6 @@ fn emit_exec_rules(
         profile.exec_rules.push("(allow process-exec)".to_string());
         return Ok(());
     };
-    let mut rendered = Vec::with_capacity(rules.len());
-    for rule in rules {
-        rendered.extend(rule.try_flat_map(render_real)?);
-    }
-    let rules = rendered;
     // Toolchains (`gcc → cc1 → as → ld`) arrive through the grant, `system:`
     // among them; only the loader base is ambient.
     let system_dirs = existing_system_paths(|k| k == SystemAccess::Exec)?;
@@ -265,10 +251,10 @@ fn emit_exec_rules(
     // re-executing this binary, so it is admitted without the grant naming it.
     let mut clauses = String::new();
     for path in own {
-        let _ = write!(clauses, "\n  (literal \"{}\")", escape_path(path));
+        let _ = write!(clauses, "\n  {}", Filter::Literal(path));
     }
     for dir in &system_dirs {
-        let _ = write!(clauses, "\n  (subpath \"{}\")", escape_path(dir));
+        let _ = write!(clauses, "\n  {}", Filter::Subpath(dir));
     }
     // An operand-less `(allow file-read* process-exec)` is an unconditional
     // allow under SBPL, so an empty base must emit nothing.
@@ -277,52 +263,60 @@ fn emit_exec_rules(
             .exec_rules
             .push(format!("(allow file-read* process-exec{clauses})"));
     }
-    profile
-        .exec_rules
-        .extend(rules.iter().map(|rule| Sbpl(rule).to_string()));
-    let granted_files: Vec<&Rendered> = rules
-        .iter()
-        .filter_map(|rule| match rule {
-            ExecRule::File { path, allow: true } => Some(path),
-            _ => None,
-        })
-        .filter(|path| !own.contains(path))
-        .collect();
-    let granted_dirs: Vec<&Rendered> = rules
-        .iter()
-        .filter_map(|rule| match rule {
-            ExecRule::Dir { path, allow: true } => Some(path),
-            _ => None,
-        })
-        .collect();
+    let (mut granted_files, mut granted_dirs): (Vec<Rendered>, Vec<Rendered>) =
+        (Vec::new(), Vec::new());
+    let mut push = |allow: bool, filter: Filter<'_>| {
+        profile
+            .exec_rules
+            .push(exec_clause(allow, filter).to_string());
+    };
+    for (scope, verdict) in rules.precedence() {
+        let allow = !verdict.is_denied();
+        match scope {
+            ExecScope::Dir(path) => {
+                for name in render_real(path)? {
+                    push(allow, Filter::Subpath(&name));
+                    if allow {
+                        granted_dirs.push(name);
+                    }
+                }
+            }
+            ExecScope::File(path) => {
+                for name in render_real(path)? {
+                    push(allow, Filter::Literal(&name));
+                    if allow && !own.contains(&name) {
+                        granted_files.push(name);
+                    }
+                }
+            }
+            ExecScope::Name(name) => push(false, Filter::Regex(name)),
+            ExecScope::Carrier(_) | ExecScope::Tool(_) => {}
+        }
+    }
     emit_ancestor_metadata(
         &mut profile.exec_ancestors,
-        own.iter()
-            .chain(granted_files.iter().copied())
-            .chain(granted_dirs.iter().copied()),
+        own.iter().chain(&granted_files).chain(&granted_dirs),
     );
-    let deny_writes = |filter: &str, path: &Rendered| {
-        format!("(deny file-write* ({filter} \"{}\"))", escape_path(path))
-    };
-    let admitted_dirs: Vec<&Rendered> = system_dirs.iter().chain(granted_dirs).collect();
+    let deny_writes = |filter| Clause::deny("file-write*", filter).to_string();
+    let admitted_dirs: Vec<&Rendered> = system_dirs.iter().chain(&granted_dirs).collect();
     match fs {
-        FsProjection::Unrestricted if exec.carries_veto() => {
+        FsProjection::Unrestricted if rules.denies().next().is_some() => {
             profile.exec_freeze.extend(
                 admitted_dirs
                     .into_iter()
-                    .map(|dir| deny_writes("subpath", dir)),
+                    .map(|dir| deny_writes(Filter::Subpath(dir))),
             );
             profile.exec_freeze.extend(
                 granted_files
-                    .into_iter()
-                    .map(|file| deny_writes("literal", file)),
+                    .iter()
+                    .map(|file| deny_writes(Filter::Literal(file))),
             );
         }
         FsProjection::Unrestricted => {}
         FsProjection::Restricted(writes) => {
             for &dir in &admitted_dirs {
                 if writes.write_reach(dir, &admitted_dirs) == WriteReach::Covered {
-                    profile.exec_freeze.push(deny_writes("subpath", dir));
+                    profile.exec_freeze.push(deny_writes(Filter::Subpath(dir)));
                 }
             }
         }
@@ -330,30 +324,64 @@ fn emit_exec_rules(
     Ok(())
 }
 
-/// One kernel exec rule as one SBPL form.  An allow admits `file-read*`
-/// beside `process-exec`, which Seatbelt needs to spawn; a deny is exec only.
-struct Sbpl<'a>(&'a ExecRule<Rendered>);
+/// What an SBPL clause matches.  `Display` escapes, so no name is spliced into
+/// a rule without it.
+enum Filter<'a> {
+    Subpath(&'a Rendered),
+    Literal(&'a Rendered),
+    /// A final path component, wherever the name resolves.
+    Regex(&'a str),
+}
 
-impl fmt::Display for Sbpl<'_> {
+impl fmt::Display for Filter<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (allow, filter, path) = match self.0 {
-            ExecRule::Dir { path, allow } => (allow, "subpath", path),
-            ExecRule::File { path, allow } => (allow, "literal", path),
-            // Wherever the name resolves: a final-component regex.
-            ExecRule::Veto(name) => {
-                return write!(
-                    f,
-                    "(deny process-exec (regex #\"/{}$\"))",
-                    escape_regex(name)
-                );
-            }
-        };
-        let op = if *allow {
-            "allow file-read* process-exec"
-        } else {
-            "deny process-exec"
-        };
-        write!(f, "({op} ({filter} \"{}\"))", escape_path(path))
+        match self {
+            Self::Subpath(path) => write!(f, "(subpath \"{}\")", escape_path(path)),
+            Self::Literal(path) => write!(f, "(literal \"{}\")", escape_path(path)),
+            Self::Regex(name) => write!(f, "(regex #\"/{}$\")", escape_regex(name)),
+        }
+    }
+}
+
+/// One SBPL rule: `(allow ops filter)` or `(deny ops filter)`.
+struct Clause<'a> {
+    allow: bool,
+    ops: &'static str,
+    filter: Filter<'a>,
+}
+
+impl<'a> Clause<'a> {
+    const fn allow(ops: &'static str, filter: Filter<'a>) -> Self {
+        Self {
+            allow: true,
+            ops,
+            filter,
+        }
+    }
+
+    const fn deny(ops: &'static str, filter: Filter<'a>) -> Self {
+        Self {
+            allow: false,
+            ops,
+            filter,
+        }
+    }
+}
+
+impl fmt::Display for Clause<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let verb = if self.allow { "allow" } else { "deny" };
+        write!(f, "({verb} {} {})", self.ops, self.filter)
+    }
+}
+
+/// One kernel exec rule as one clause.  An allow admits `file-read*` beside
+/// `process-exec`, which Seatbelt needs to spawn; a deny is exec only.
+fn exec_clause(allow: bool, filter: Filter<'_>) -> Clause<'_> {
+    if allow {
+        Clause::allow("file-read* process-exec", filter)
+    } else {
+        Clause::deny("process-exec", filter)
     }
 }
 
@@ -404,7 +432,7 @@ fn withheld_doors() -> &'static [(&'static str, &'static str)] {
         (
             "com.apple.coreservices.launchservicesd",
             "launchservicesd spawns `/usr/bin/open`'s target as a child of launchd, outside \
-             this profile — an escape, and for a URL an egress channel under `net: false`",
+             this profile: an escape, and for a URL an egress channel under `net: false`",
         ),
         (
             "com.apple.pasteboard",
@@ -437,10 +465,7 @@ fn existing_system_paths(wanted: impl Fn(SystemAccess) -> bool) -> Result<Vec<Re
 
 fn emit_read_subpaths<'a>(lines: &mut Vec<String>, paths: impl IntoIterator<Item = &'a Rendered>) {
     for path in paths {
-        lines.push(format!(
-            "(allow file-read* (subpath \"{}\"))",
-            escape_path(path)
-        ));
+        lines.push(Clause::allow("file-read*", Filter::Subpath(path)).to_string());
     }
 }
 
@@ -453,10 +478,7 @@ fn emit_ancestor_metadata<'a>(
     paths: impl IntoIterator<Item = &'a Rendered>,
 ) {
     for ancestor in rendered_ancestors(paths) {
-        lines.push(format!(
-            "(allow file-read-metadata (literal \"{}\"))",
-            escape_path(&ancestor)
-        ));
+        lines.push(Clause::allow("file-read-metadata", Filter::Literal(&ancestor)).to_string());
     }
 }
 
@@ -494,8 +516,10 @@ unsafe extern "C" {
 #[cfg(test)]
 mod tests {
     use super::{BASE_PROFILE, NET_PROFILE, Profile, build_profile, withheld_doors};
+    use crate::capability::{ExecScope, Verdict};
     use crate::path::proper_ancestors;
-    use crate::types::{ExecProjection, ExecRule, FsProjection, FsRules, SandboxProjection};
+    use crate::path::{RealPath, command_name_key};
+    use crate::sandbox::{ExecProjection, FsProjection, FsRules, SandboxProjection};
 
     /// The profile with its commentary dropped — what the kernel reads.  The
     /// `.sbpl` files argue at length for what they leave *out*, so a test
@@ -509,24 +533,30 @@ mod tests {
             .join("\n")
     }
 
-    fn dir(path: &str, allow: bool) -> ExecRule {
-        ExecRule::Dir {
-            path: crate::path::RealPath::assumed(path),
-            allow,
-        }
+    type Rule = (ExecScope, Verdict);
+
+    fn dir(path: &str, allow: bool) -> Rule {
+        (
+            ExecScope::Dir(RealPath::assumed(path)),
+            Verdict::from(allow),
+        )
     }
 
-    fn file(path: &str, allow: bool) -> ExecRule {
-        ExecRule::File {
-            path: crate::path::RealPath::assumed(path),
-            allow,
-        }
+    fn file(path: &str, allow: bool) -> Rule {
+        (
+            ExecScope::File(RealPath::assumed(path)),
+            Verdict::from(allow),
+        )
     }
 
-    fn restricted(fs: FsProjection, rules: Vec<ExecRule>) -> SandboxProjection {
+    fn veto(name: &str) -> Rule {
+        (ExecScope::Name(command_name_key(name)), Verdict::Deny)
+    }
+
+    fn restricted(fs: FsProjection, rules: Vec<Rule>) -> SandboxProjection {
         SandboxProjection {
             fs,
-            exec: ExecProjection::Restricted(rules),
+            exec: ExecProjection::Restricted(rules.into_iter().collect()),
             ..SandboxProjection::default()
         }
     }
@@ -630,7 +660,7 @@ mod tests {
                 dir("/x", true),
                 dir("/x/y", false),
                 file("/x/y/z", true),
-                ExecRule::Veto("z".into()),
+                veto("z"),
             ],
         );
         let profile = build_profile(&policy).unwrap();
@@ -651,7 +681,7 @@ mod tests {
     fn mac_profile_freezes_the_admitted_set_when_a_veto_meets_unrestricted_fs() {
         let vetoed = restricted(
             FsProjection::Unrestricted,
-            vec![dir("/usr/bin", true), ExecRule::Veto("git".into())],
+            vec![dir("/usr/bin", true), veto("git")],
         );
         let profile = build_profile(&vetoed).unwrap();
         assert!(
@@ -857,11 +887,7 @@ mod tests {
     fn mac_profile_emits_a_veto_as_a_final_component_regex() {
         let policy = restricted(
             FsProjection::default(),
-            vec![
-                dir("/usr/bin", true),
-                ExecRule::Veto("git".into()),
-                ExecRule::Veto("c++".into()),
-            ],
+            vec![dir("/usr/bin", true), veto("git"), veto("c++")],
         );
         let profile = build_profile(&policy).unwrap();
         let allow = at(
@@ -910,7 +936,7 @@ mod tests {
     /// `pin_self` pins this test binary, which is the only handle on what the
     /// profile will name; where that path touches no firmlink and
     /// no symlink its class is a singleton and the loop degenerates to "the
-    /// literal is present".  The compile-time guarantee — `escape_path` takes
+    /// literal is present".  The compile-time guarantee: `escape_path` takes
     /// only [`Rendered`] — is what holds on such a host.
     #[test]
     fn mac_profile_expands_firmlinks_in_self_exec_literal() {
@@ -988,7 +1014,7 @@ mod tests {
             vec![
                 file(own[0].as_str(), true),
                 dir("/usr/bin", true),
-                ExecRule::Veto("git".into()),
+                veto("git"),
             ],
         );
         let profile = build_profile(&policy).unwrap();
@@ -1194,7 +1220,7 @@ mod tests {
         }
         assert!(
             !profile.contains("(deny file-write-unlink (subpath"),
-            "pins must be literal, not subpath — subpath would also block \
+            "pins must be literal, not subpath: subpath would also block \
              unlinking every entry inside the pinned directory"
         );
     }

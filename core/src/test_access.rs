@@ -15,12 +15,22 @@
 //! `pub(crate)` and `dead_code` still names one whose last in-crate caller
 //! went away.
 
+#[cfg(unix)]
+use crate::capability::ExecScope;
 use crate::capability::Program;
+use crate::carrier::{IdentityTransport, ProbeError, Transport};
+use crate::first_order::FOValue;
 use crate::ir::{CaseArm, Comp, CompKind, Exec, Val, ValListElem};
 use crate::path::RealPath;
-use crate::runtime::command::Head;
-use crate::typecheck::{Scheme, Ty, TypeError, Unifier};
-use crate::types::{BuiltinEntry, FsProjection, FsRules, Settled, Shell};
+use crate::protocol::Frame;
+use crate::protocol::channel::{WireChannel, WireStream};
+use crate::protocol::probe::Probe;
+#[cfg(unix)]
+use crate::sandbox::{ExecProjection, SandboxProjection};
+use crate::sandbox::{FsProjection, FsRules};
+use crate::ty::{Scheme, Ty};
+use crate::typecheck::Unifier;
+use crate::types::{BuiltinEntry, Settled, Shell};
 
 /// The thunk a case arm forces: its literal block, or a thunk in hand.
 pub fn case_arm_val(arm: &CaseArm) -> &Val {
@@ -52,7 +62,7 @@ pub fn resolve_ty(unifier: &mut Unifier, ty: &Ty) -> Ty {
 /// The scheme a builtin's type rule mints against `unifier` — the rule
 /// itself is core's, so a caller runs it rather than holding it.
 pub fn builtin_scheme(entry: &BuiltinEntry, unifier: &mut Unifier) -> Scheme {
-    (entry.type_rule)(unifier)
+    (entry.decl.type_rule)(unifier)
 }
 
 /// The type a scheme quantifies over.
@@ -60,15 +70,68 @@ pub fn scheme_ty(scheme: &Scheme) -> &Ty {
     &scheme.ty
 }
 
-/// The constraint provenance behind a type error, which `hint` composes into
-/// prose and a test asserts on directly.
-pub fn type_error_reason(err: &TypeError) -> Option<&crate::typecheck::Reason> {
-    err.reason.as_ref()
-}
-
 /// `FsProjection::rules`: the rules when restricted, `None` at the top.
 pub fn fs_rules<N>(projection: &FsProjection<N>) -> Option<&FsRules<N>> {
     projection.rules()
+}
+
+/// One exec rule as the kernel is handed it, real paths spelled out.
+#[cfg(unix)]
+#[derive(Debug)]
+pub enum KernelExecRule {
+    /// The directory and everything beneath it.
+    Dir {
+        path: String,
+        allow: bool,
+    },
+    File {
+        path: String,
+        allow: bool,
+    },
+    /// A deny on every file of this final component.
+    Name(String),
+}
+
+/// The exec rules the kernel is handed, in the order a last-match-wins
+/// renderer emits them; `None` when exec is unrestricted.
+#[cfg(unix)]
+pub fn exec_projection_rules(projection: &SandboxProjection) -> Option<Vec<KernelExecRule>> {
+    let ExecProjection::Restricted(rules) = &projection.exec else {
+        return None;
+    };
+    let kernel = (rules.precedence().into_iter()).filter_map(|(scope, verdict)| {
+        let allow = !verdict.is_denied();
+        match scope {
+            ExecScope::Dir(path) => Some(KernelExecRule::Dir {
+                path: path.to_string(),
+                allow,
+            }),
+            ExecScope::File(path) => Some(KernelExecRule::File {
+                path: path.to_string(),
+                allow,
+            }),
+            ExecScope::Name(name) => Some(KernelExecRule::Name(name.clone())),
+            ExecScope::Carrier(_) | ExecScope::Tool(_) => None,
+        }
+    });
+    Some(kernel.collect())
+}
+
+/// Whether the projection restricts exec at all.
+#[cfg(unix)]
+pub fn exec_projection_restricts(projection: &SandboxProjection) -> bool {
+    matches!(projection.exec, ExecProjection::Restricted(_))
+}
+
+/// The files the projection's exec rules admit by name, as real paths.
+#[cfg(unix)]
+pub fn exec_projection_files(projection: &SandboxProjection) -> Vec<String> {
+    match &projection.exec {
+        ExecProjection::Unrestricted => Vec::new(),
+        ExecProjection::Restricted(rules) => {
+            rules.allowed_files().map(ToString::to_string).collect()
+        }
+    }
 }
 
 /// A host file whose real path, and launch path, is `real`.
@@ -81,20 +144,7 @@ fn file(real: &str) -> Program {
 
 /// Whether the live stack admits running the file whose real path is `real`.
 pub fn admits_file(shell: &Shell, real: &str) -> bool {
-    admits(shell, real, file(real))
-}
-
-/// Whether the live stack admits the bundled tool `name`.
-pub fn admits_tool(shell: &Shell, name: &str) -> bool {
-    admits(shell, name, Program::Tool(name.into()))
-}
-
-fn admits(shell: &Shell, shown: &str, program: Program) -> bool {
-    let head = Head {
-        shown: shown.into(),
-        program: Ok(program),
-    };
-    crate::capability::admits_head(&shell.context, &head)
+    shell.context.grants.admits(&file(real))
 }
 
 /// `Shell::check_exec` on the file whose real path is `real`, with `args`.
@@ -106,15 +156,26 @@ pub fn check_file(shell: &mut Shell, real: &str, args: &[String]) -> Settled<()>
     shell.check_exec(real, file(real), args.to_vec()).map(drop)
 }
 
+/// The scheme `name` carries on the live scope: `None` when it is unbound or
+/// bound without one.
+pub fn binding_scheme(shell: &Shell, name: &str) -> Option<std::sync::Arc<Scheme>> {
+    shell
+        .session_schemes()
+        .bindings
+        .into_iter()
+        .find(|(n, _)| n == name)
+        .and_then(|(_, scheme)| scheme)
+}
+
 /// `Shell::leased_binding_count`: how many bindings hold a terminal lease.
 pub fn leased_binding_count(shell: &Shell) -> usize {
     shell.leased_binding_count()
 }
 
-/// `Val::from_word`: the value a bare word denotes — the numeral doctrine's
+/// `elaborator::word_val`: the value a bare word denotes — the numeral doctrine's
 /// single point of decision.
 pub fn val_from_word(word: &str) -> Val {
-    Val::from_word(word)
+    crate::elaborator::word_val(word)
 }
 
 /// A scheme quantifying `comp_ty_vars` over `ty`.
@@ -123,9 +184,9 @@ pub fn val_from_word(word: &str) -> Val {
 /// the formatter's tests write by hand, so they need not know the rest of a
 /// scheme's fields.
 pub fn scheme_over_comp_vars(
-    comp_ty_vars: Vec<crate::typecheck::CompTyVar>,
+    comp_ty_vars: Vec<crate::ty::CompTyVar>,
     ty: Ty,
-    comp_ty_bindings: Vec<(u32, crate::typecheck::CompTy)>,
+    comp_ty_bindings: Vec<(crate::ty::CompTyVar, crate::ty::CompTy)>,
 ) -> Scheme {
     Scheme {
         comp_ty_vars,
@@ -137,12 +198,12 @@ pub fn scheme_over_comp_vars(
 
 /// A scheme over `ty` that leaves `weak` type variables unquantified, as a
 /// unit stores a binding that mentions a weak variable.
-pub fn scheme_with_weak_residuals(weak: Vec<crate::typecheck::TyVar>, ty: Ty) -> Scheme {
+pub fn scheme_with_weak_residuals(weak: Vec<crate::ty::TyVar>, ty: Ty) -> Scheme {
     Scheme {
-        weak: crate::typecheck::WeakVars {
+        weak: crate::ty::WeakVars {
             tys: weak
                 .into_iter()
-                .map(|v| (v, crate::typecheck::Kind::ANY))
+                .map(|v| (v, crate::ty::Kind::ANY))
                 .collect(),
             ..Default::default()
         },
@@ -165,18 +226,15 @@ pub fn with_stored_schemes(
 
 /// The peer end of a wire, driven directly: `core/tests/wire_write_stall.rs`
 /// plays the far side of a transport the host would own.
-pub fn wire_from_stream(stream: impl Into<crate::wire::WireStream>) -> crate::wire::WireChannel {
-    crate::wire::WireChannel::from_stream(stream)
+pub fn wire_from_stream(stream: impl Into<WireStream>) -> WireChannel {
+    WireChannel::from_stream(stream)
 }
 
 /// One frame written on such a peer channel.
 ///
 /// # Errors
 /// The write's own failure.
-pub fn wire_write_frame(
-    channel: &mut crate::wire::WireChannel,
-    frame: &crate::protocol::Frame,
-) -> std::io::Result<()> {
+pub fn wire_write_frame(channel: &mut WireChannel, frame: &Frame) -> std::io::Result<()> {
     channel.write_frame(frame)
 }
 
@@ -184,63 +242,44 @@ pub fn wire_write_frame(
 ///
 /// # Errors
 /// The read's own failure.
-pub fn wire_read_frame(
-    channel: &mut crate::wire::WireChannel,
-) -> std::io::Result<Option<crate::protocol::Frame>> {
+pub fn wire_read_frame(channel: &mut WireChannel) -> std::io::Result<Option<Frame>> {
     channel.read_frame()
 }
 
-/// The full ariadne rendering of one type error, as the REPL prints it.
-pub fn format_type_error_ariadne(file: &str, source: &str, err: &TypeError) -> String {
-    crate::diagnostic::format_type_error_ariadne(file, source, err)
-}
-
-/// The engine's answer to one probe request, read straight off `shell`.
-///
-/// # Errors
-/// The refusal a malformed or unknown request earns.
-pub fn answer_probe(
-    shell: &Shell,
-    req: &crate::serial::FOValue,
-) -> Result<crate::serial::FOValue, String> {
-    crate::protocol::reading::answer(shell, req)
+/// The engine's answer to one probe, read straight off `shell`.
+pub fn answer_probe(shell: &Shell, probe: &Probe) -> FOValue {
+    crate::engine::probe::answer(shell, probe)
 }
 
 /// How many workers the engine behind `transport` still holds.
 ///
 /// # Errors
-/// As [`crate::protocol::reading::cwd`].
-pub fn worker_count(
-    transport: &dyn crate::protocol::Transport,
-) -> Result<u64, crate::protocol::ProbeError> {
-    use crate::protocol::reading::{Class, read};
-    read(transport, Class::WorkerCount, None)
+/// As [`Transport::cwd`].
+pub fn worker_count(transport: &dyn Transport) -> Result<u64, ProbeError> {
+    crate::carrier::read(transport, &Probe::WorkerCount)
 }
 
 /// How many capability frames the engine behind `transport` carries.
 ///
 /// # Errors
-/// As [`crate::protocol::reading::cwd`].
-pub fn grant_depth(
-    transport: &dyn crate::protocol::Transport,
-) -> Result<u64, crate::protocol::ProbeError> {
-    use crate::protocol::reading::{Class, read};
-    read(transport, Class::GrantDepth, None)
+/// As [`Transport::cwd`].
+pub fn grant_depth(transport: &dyn Transport) -> Result<u64, ProbeError> {
+    crate::carrier::read(transport, &Probe::GrantDepth)
 }
 
 /// `Shell::workers` on the engine behind `transport`, each entry's handle
 /// included, for a test watching a worker outlive its engine.
-pub fn workers(transport: &crate::protocol::IdentityTransport) -> Vec<crate::types::WorkerEntry> {
+pub fn workers(transport: &IdentityTransport) -> Vec<crate::types::WorkerEntry> {
     transport.inspect(Shell::workers)
 }
 
 /// The site of a boundary call whose result the checker solved as `ty`: what a
 /// test hands a door it calls directly, bypassing the checker.
-pub fn site_of(ty: &Ty) -> std::sync::Arc<crate::types::Site> {
-    std::sync::Arc::new(crate::types::Site::snapshot(
+pub fn site_of(ty: &Ty) -> std::sync::Arc<crate::ty::Site> {
+    std::sync::Arc::new(crate::ty::Site::snapshot(
         &Unifier::new(),
         ty,
-        crate::types::Fixings::new(),
+        crate::ty::Fixings::new(),
     ))
 }
 

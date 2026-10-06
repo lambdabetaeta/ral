@@ -84,5 +84,5 @@ fn cap(s: &str) -> &str {
     if s.len() <= CAP {
         return s;
     }
-    &s[..ral_core::text::floor_char_boundary(s, CAP)]
+    &s[..s.floor_char_boundary(CAP)]
 }

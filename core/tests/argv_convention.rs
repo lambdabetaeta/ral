@@ -24,36 +24,17 @@ mod common;
 
 use common::fresh_shell;
 
-use ral_core::protocol::{Program, Run};
-use ral_core::types::{Break, GrantStack, Value};
-use ral_core::{
-    CompileError, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Settled,
-    StaticDiagnostics, Uncompiled,
-};
+use ral_core::Settled;
+use ral_core::protocol::Run;
+use ral_core::run::{RunReport, StaticDiagnostics};
+use ral_core::types::{Break, Value};
 
 /// A session as every front end builds one: prelude registered, env seeded,
 /// capabilities at root.
 /// One top-level dispatch through the public door, stdout captured — the report
 /// as a front end receives it, diagnosed or run.
 fn report(src: &str) -> RunReport {
-    fresh_shell().run(RunRequest {
-        run: Run {
-            program: Program::Source(src.into()),
-            script_name: "<argv-convention>".into(),
-            caps: GrantStack::root(),
-            wall: None,
-            deferred_lease: None,
-            worker_cap: None,
-            io: RunIo::Capture,
-            terminal: RequestedTerminalAccess::Denied,
-            stdin: RunStdin::Empty,
-            trail: None,
-        },
-        surface: None,
-        deferred: None,
-        desk: None,
-        fork: None,
-    })
+    fresh_shell().run(Run::captured(src, "<argv-convention>"))
 }
 
 /// A run that must reach the evaluator, with what it wrote to stdout.
@@ -70,7 +51,7 @@ fn run_capture(src: &str) -> (Settled<Value>, String) {
         }
         RunReport::Static { diagnostics, .. } => panic!(
             "{src:?} must reach the evaluator, got {}",
-            ral_core::diagnostic::format_static_diagnostics(&diagnostics).0
+            diagnostics.render().0
         ),
     }
 }
@@ -80,21 +61,20 @@ fn run_capture(src: &str) -> (Settled<Value>, String) {
 fn static_codes(src: &str) -> Vec<String> {
     match report(src) {
         RunReport::Static {
-            diagnostics:
-                StaticDiagnostics::Compile(Uncompiled {
-                    error: CompileError::Types(errors),
-                    ..
-                }),
+            diagnostics: StaticDiagnostics::Compile(r),
             ..
-        } => errors.iter().map(|e| e.kind.code().to_string()).collect(),
+        } if r.status == 1 => r
+            .reports
+            .iter()
+            .filter_map(|r| r.code.map(String::from))
+            .collect(),
         RunReport::Static {
-            diagnostics:
-                StaticDiagnostics::Compile(Uncompiled {
-                    error: CompileError::Parse(error),
-                    ..
-                }),
+            diagnostics: StaticDiagnostics::Compile(r),
             ..
-        } => panic!("{src:?}: expected type diagnostics, got parse {error:?}"),
+        } => panic!(
+            "{src:?}: expected type diagnostics, got parse {:?}",
+            r.reports
+        ),
         RunReport::Static {
             diagnostics: StaticDiagnostics::Host(e),
             ..

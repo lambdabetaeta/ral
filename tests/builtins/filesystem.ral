@@ -24,7 +24,7 @@ let finfo = file-info "$tmpdir/test.txt"
 if $[$finfo[mtime] > 0] { echo 'mtime ok' }
 # Expected: mtime ok
 echo $finfo[type]
-# Expected: file
+# Expected: `file
 
 # Cleanup
 rm "$tmpdir/test.txt" "$tmpdir/lines.txt"

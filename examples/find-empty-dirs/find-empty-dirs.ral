@@ -12,9 +12,10 @@ let scan = { |dir|
     case $listing [
         `denied: { |_| return [verdict: `unknown, rows: [[path: $dir, verdict: `unknown]]] },
         `ok: { |items|
-            let by-type = group-by { |e| return $e[type] } $items
-            let kids = map { |e| scan "$dir/$e[name]" } !{get $by-type 'dir' []}
-            let evidence = if !{is-empty !{get $by-type 'file' []}} {
+            let dirs = filter { |e| equal $e[type] `dir } $items
+            let files = filter { |e| equal $e[type] `file } $items
+            let kids = map { |e| scan "$dir/$e[name]" } $dirs
+            let evidence = if !{is-empty $files} {
                 return !{map { |k| return $k[verdict] } $kids}
             } else {
                 return [`files]

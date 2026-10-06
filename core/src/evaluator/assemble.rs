@@ -2,7 +2,6 @@
 //! are spread or keyed at run time — the one rule that does O(data) work
 //! over what would otherwise be value syntax.
 
-use crate::diagnostic;
 use crate::ir::{Assembly, MapPart, MapParts, ValListElem};
 use crate::types::{Env, Error, List, Signature, Value};
 
@@ -55,10 +54,10 @@ fn eval_list(elems: &[ValListElem], env: &Env, sig: &Signature) -> Result<Value,
     Ok(Value::List(items))
 }
 
-/// Evaluates a record or map literal — one carrier, so one rule. Explicit
-/// entries win over spreads: `seen` gates the spread pass, because
-/// `Value::map` collects into an ordered map where a later insert would
-/// otherwise overwrite the earlier.
+/// Evaluates a record or map literal — one carrier, so one rule. A key twice
+/// is an error. Explicit entries win over spreads: `seen` gates the spread
+/// pass, because `Value::map` collects into an ordered map where a later
+/// insert would otherwise overwrite the earlier.
 fn eval_map<E: MapParts>(entries: &[E], env: &Env, sig: &Signature) -> Result<Value, Error> {
     let mut pairs: Vec<(String, Value)> = Vec::new();
     let mut seen = std::collections::HashSet::<String>::new();
@@ -68,13 +67,10 @@ fn eval_map<E: MapParts>(entries: &[E], env: &Env, sig: &Signature) -> Result<Va
             MapPart::Computed(key_val, v) => {
                 let key_value = form(key_val, env, sig)?;
                 let Value::String(key) = key_value else {
-                    return Err(Error::new(
-                        format!(
-                            "map key must be a String, got {} '{key_value}'",
-                            key_value.type_name()
-                        ),
-                        1,
-                    )
+                    return Err(Error::new(format!(
+                        "map key must be a String, got {} '{key_value}'",
+                        key_value.type_name()
+                    ))
                     .with_hint("use str to convert"));
                 };
                 (key.into_string(), v)
@@ -82,7 +78,9 @@ fn eval_map<E: MapParts>(entries: &[E], env: &Env, sig: &Signature) -> Result<Va
             MapPart::Spread(_) => continue,
         };
         if !seen.insert(key.clone()) {
-            diagnostic::shell_warning(&format!("duplicate key '{key}'"));
+            return Err(Error::new(format!(
+                "map literal: key '{key}' computed twice; which did you mean?"
+            )));
         }
         pairs.push((key, form(&value.item, env, sig)?));
     }
@@ -97,10 +95,10 @@ fn eval_map<E: MapParts>(entries: &[E], env: &Env, sig: &Signature) -> Result<Va
                     }
                 }
                 val => {
-                    return Err(Error::new(
-                        format!("spread requires a Map, got {}", val.type_name()),
-                        1,
-                    )
+                    return Err(Error::new(format!(
+                        "spread requires a Map, got {}",
+                        val.type_name()
+                    ))
                     .with_hint("spread (...) in a map expands key-value pairs"));
                 }
             }

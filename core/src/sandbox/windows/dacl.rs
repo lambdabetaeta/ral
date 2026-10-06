@@ -178,7 +178,7 @@ const ACL_CB: u32 = std::mem::size_of::<ACL>() as u32;
 /// windows-sys types the flag constants `u32`, but the field is one byte.
 #[allow(
     clippy::cast_possible_truncation,
-    reason = "INHERITED_ACE is 0x10, and AceFlags — the field it is tested against — is a single byte"
+    reason = "INHERITED_ACE is 0x10, and AceFlags (the field it is tested against) is a single byte"
 )]
 const INHERITED_ACE_FLAG: u8 = INHERITED_ACE as u8;
 
@@ -186,7 +186,7 @@ const INHERITED_ACE_FLAG: u8 = INHERITED_ACE as u8;
 /// `AceFlags` field is, for the same reason as [`INHERITED_ACE_FLAG`].
 #[allow(
     clippy::cast_possible_truncation,
-    reason = "OI|CI is 0x3, and AceFlags — the field it is tested against — is a single byte"
+    reason = "OI|CI is 0x3, and AceFlags (the field it is tested against) is a single byte"
 )]
 const OICI_ACE_FLAGS: u8 = (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE) as u8;
 
@@ -469,7 +469,7 @@ pub(crate) fn fs_capability_name(canonical: &Path, kind: GrantKind) -> String {
 /// projection.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[silent:dacl-apply] Stats the grant target to choose OI|CI inheritance before stamping the capability ACE. Sandbox grant-application infrastructure, not model data I/O — raises no surface card."
+    reason = "[silent:dacl-apply] Stats the grant target to choose OI|CI inheritance before stamping the capability ACE. Sandbox grant-application infrastructure, not model data I/O: raises no surface card."
 )]
 pub(crate) fn ensure_fs_grant(
     canonical: &Path,
@@ -731,13 +731,10 @@ pub(crate) fn recover_orphaned_state() -> Result<RecoveryReport, DaclError> {
     reason = "host-env: the sandbox ledger is process state under the host's XDG state base, not script-visible data"
 )]
 fn ledger_dir() -> PathBuf {
-    let dir = crate::path::basedir::resolve_xdg(
-        crate::path::basedir::XdgKind::State,
-        crate::host::home().as_deref(),
-    )
-    .unwrap_or_else(std::env::temp_dir)
-    .join("ral")
-    .join("sandbox-dacl");
+    let dir = crate::host::xdg(crate::host::XdgKind::State)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("ral")
+        .join("sandbox-dacl");
     debug_assert!(
         dir.is_absolute(),
         "ledger dir must be absolute: {}",
@@ -1134,7 +1131,7 @@ fn win32_err_str(path: &Path, msg: &str) -> DaclError {
 /// inserts in canonical order — explicit deny, explicit allow, inherited — so
 /// a deny nested inside an allowed parent beats the allow the parent
 /// inherits down to it. The other direction never reaches this backend at
-/// all: `capability::sandbox::sandbox_projection` calls
+/// all: `SandboxProjection::of` calls
 /// [`Table::live`](crate::capability::table::Table::live) so an allow
 /// beneath a deny is dropped from the projection before any ACE is stamped,
 /// rather than relying on ACL order to bury it. A directory gets `OI|CI`,
@@ -2259,11 +2256,11 @@ mod tests {
             let td = tempfile::tempdir().unwrap();
             let canonical = canonicalize_grant_target(td.path()).unwrap();
             let cancel = CancelScope::default();
-            cancel.cancel(CancelCause::Deadline);
+            cancel.cancel(CancelCause::TimedOut);
 
             let err = ensure_fs_grant(&canonical, CAP_SID, GrantKind::ReadWrite, &cancel);
             assert!(
-                matches!(err, Err(DaclError::Cancelled(CancelCause::Deadline))),
+                matches!(err, Err(DaclError::Cancelled(CancelCause::TimedOut))),
                 "the poll must report the cause it saw, not a grant failure"
             );
             assert!(

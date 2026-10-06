@@ -15,7 +15,8 @@ missing type and the one function that deduplicate it.
 
 - **`BakedPrelude` is the missing type.** It holds the build-time IR and
   scheme blobs and their once-decoded forms (`from_blobs` const,
-  lazy `comp()` / `schemes()`); `bake_runtime()` bakes from the embedded
+  lazy `comp()` / `schemes()`; the scheme blob was later retired, the schemes
+  being read off the IR: `from_blob`); `BakedPrelude::runtime()` bakes from the embedded
   prelude source for test binaries, which have no build-time blob. The
   `baked_prelude!()` macro expands `include_bytes!(OUT_DIR/…)` in the host
   crate (each crate has its own `OUT_DIR`).
@@ -48,3 +49,12 @@ Lookup, completion, and scheme seeding all walk every scope, so the result
 is identical; only `which`'s provenance label for `TERMINAL` shifts from
 `prelude` to `local`, which is the more accurate description of a
 host-injected runtime value ([[map/core|core]], [[map/repl|repl]]).
+
+> **Amended 2026-10-06.** No shell exists without choosing its surface:
+> `Shell::new` and `Default for Shell` are gone, and `Shell::root` (crate-private)
+> installs nothing. `HostSurface::shell(terminal)` is the scaffold door (core
+> plus the surface, no env, no prelude), the one a loader or a test dresses;
+> `boot_shell` is that plus the host env and the prelude, seated whole by
+> `BakedPrelude::seat`, which replaces `builtins::register`. One list serves
+> both halves, `CORE_SETS` then the host's sets, and `HostSurface::manifest`
+> hands the checker the same rows the runtime dispatches.

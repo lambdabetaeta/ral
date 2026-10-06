@@ -28,7 +28,10 @@ pub(crate) const FIRMLINKS: &[(&str, &str)] = &[];
 /// [`LexicalPath::canonicalise_strict`](super::LexicalPath::canonicalise_strict),
 /// so nothing can `realpath` a path that was not first resolved through
 /// [`Resolver::resolve`](super::Resolver::resolve).
-#[allow(clippy::disallowed_methods)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "canon: the one strict `realpath(3)`, caged here behind `LexicalPath::canonicalise_strict`"
+)]
 pub(crate) fn canonicalise_strict(p: &Path) -> std::io::Result<PathBuf> {
     let real = std::fs::canonicalize(p)?;
     // Darwin's realpath(3) drops a trailing slash every lookup reads as "a directory".
@@ -49,7 +52,10 @@ pub(crate) fn canonicalise_strict(p: &Path) -> std::io::Result<PathBuf> {
 /// gives `canon(/a)/y` and never `canon(/a)/x/y`.  Callers arriving through
 /// [`LexicalPath::canonicalise_lenient`](super::LexicalPath::canonicalise_lenient)
 /// are already folded; [`match_variants`] hands over a bare `Path`.
-#[allow(clippy::disallowed_methods)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "canon: the lenient canonicaliser, an ancestor walk over `realpath(3)`"
+)]
 pub(crate) fn canonicalise_lenient(p: &Path) -> PathBuf {
     let folded = super::lex::fold_dots(p);
     let folded = if folded.as_os_str().is_empty() {
@@ -153,7 +159,6 @@ pub(crate) fn spelled<'a>(
 /// direction; `None` otherwise.  A pure byte splice — no filesystem, no UTF-8
 /// round-trip — so it holds on paths that do not exist, inside a sandbox where
 /// `realpath(3)` would fail, and on a tail that is not valid UTF-8.
-#[allow(clippy::disallowed_methods)]
 pub(crate) fn firmlink_toggle(p: &Path) -> Option<PathBuf> {
     let bytes = p.as_os_str().as_encoded_bytes();
     for (firm, canon) in FIRMLINKS {
@@ -181,7 +186,10 @@ pub(crate) fn firmlink_toggle(p: &Path) -> Option<PathBuf> {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[test] fixtures write and canonicalise real files"
+)]
 mod tests {
     use super::*;
     use std::path::Path;

@@ -38,13 +38,13 @@ interpreter opens the targets in one fixed order, stdin, stdout, stderr
 (`Redirects<Ast>`), the elaborated value (`Redirects<Val>`, inside the IR), the
 evaluated string (`Redirects<String>`, at the runtime). `map` and `try_map` carry
 one tier to the next, so no tier re-widens the type and every consumer — the
-in-process redirect frame (`core/src/evaluator/redirect.rs`), the external
+in-process redirect frame (`core/src/runtime/redirect/scope.rs`), the external
 command's stdio plan (`core/src/runtime/command/stdio.rs`), the write
-observation (`core/src/types/observation.rs`) — is an exhaustive case with no
+observation (`core/src/types/audit/observation.rs`) — is an exhaustive case with no
 unreachable arm. `WriteMode` is a write mode and nothing else, so a write
 observation cannot carry a read mode.
 
-**This closes the wire as well.** `Comp` crosses the wire (`core/src/serial.rs`)
+**This closes the wire as well.** `Comp` crosses the wire (`core/src/seed/table.rs`)
 and derives `Deserialize`; since the IR's redirect is the sum, a peer cannot
 hand this process a redirect that names fd 7 — it fails to decode instead of
 reaching a runtime check.

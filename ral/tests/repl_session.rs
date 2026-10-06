@@ -58,13 +58,13 @@ fn rc_home(rc: &str) -> (TempDir, Vec<(&'static str, PathBuf)>) {
 
 /// An rc under `XDG_CONFIG_HOME/ral/rc` is found, evaluated, and every part
 /// of it observed: the startup block runs, the bindings are in scope, and the
-/// theme's `value_prefix` is what the printer uses.  `--norc` on the identical
+/// theme's `value-prefix` is what the printer uses.  `--norc` on the identical
 /// invocation suppresses all of it — which is what proves the first half came
 /// from the rc rather than from the defaults.
 #[test]
 fn rc_theme_bindings_and_startup_reach_a_live_session() {
     let (_dir, env) = rc_home(
-        r#"return [theme: [value_prefix: "» "], bindings: [greeting: 'hi-from-rc'], startup: { echo started }]"#,
+        r#"return [theme: [value-prefix: "» "], bindings: [greeting: 'hi-from-rc'], startup: { echo started }]"#,
     );
 
     let out = repl(&["-i"], &env, "$greeting\n");
@@ -98,7 +98,7 @@ fn rc_theme_bindings_and_startup_reach_a_live_session() {
 /// cannot see, is the runtime door's (`rc_unknown_key_in_a_decoded_rc_fails_the_whole_file`).
 #[test]
 fn rc_bad_literal_key_fails_the_whole_file() {
-    let (_dir, env) = rc_home("return [edit_mode: 42, bindings: [okname: 'yes']]");
+    let (_dir, env) = rc_home("return [edit-mode: 42, bindings: [okname: 'yes']]");
 
     let out = repl(&["-i"], &env, "$okname\n");
     assert!(
@@ -161,7 +161,7 @@ fn rc_returning_a_map_is_a_static_error() {
 #[test]
 fn rc_unknown_key_in_a_decoded_rc_fails_the_whole_file() {
     let (_dir, env) =
-        rc_home(r#"return !{echo '{"surfase": "minimal", "edit_mode": "vi"}' | from-json}"#);
+        rc_home(r#"return !{echo '{"surfase": "minimal", "edit-mode": "vi"}' | from-json}"#);
 
     let out = repl(&["-i"], &env, "echo alive\n");
     assert!(
@@ -170,7 +170,7 @@ fn rc_unknown_key_in_a_decoded_rc_fails_the_whole_file() {
         out.stderr
     );
     assert!(
-        out.stderr.contains("recursion_limit"),
+        out.stderr.contains("recursion-limit"),
         "the refusal must offer the rc's own list: {}",
         out.stderr
     );
@@ -192,11 +192,11 @@ fn rc_unknown_key_in_a_decoded_rc_fails_the_whole_file() {
 #[test]
 fn rc_bad_value_in_a_decoded_rc_fails_the_whole_file() {
     let (_dir, env) =
-        rc_home(r#"return !{echo '{"edit_mode": 3, "recursion_limit": 4096}' | from-json}"#);
+        rc_home(r#"return !{echo '{"edit-mode": 3, "recursion-limit": 4096}' | from-json}"#);
 
     let out = repl(&["-i"], &env, "echo alive\n");
     assert!(
-        out.stderr.contains("'edit_mode'") && out.stderr.contains("must be a string"),
+        out.stderr.contains("'edit-mode'") && out.stderr.contains("must be a string"),
         "the bad value must name the field and what was wrong with it: {}",
         out.stderr
     );
@@ -460,103 +460,5 @@ fn an_interactive_shell_passes_inherited_ignored_signals_on() {
         "stdout: {}; stderr: {}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
-    );
-}
-
-// ── The structural surface refuses an unsized terminal ─────────────────────
-
-/// A pty reporting zero rows, as a harness that never sent `TIOCSWINSZ`
-/// leaves it: the structural surface must warn and fall back to readline
-/// rather than spin inside ratatui, which never returns on a zero-row screen.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-#[test]
-#[allow(
-    clippy::cast_lossless,
-    reason = "TIOCSCTTY's type differs per platform"
-)]
-fn structural_surface_refuses_zero_sized_terminal() {
-    use std::os::fd::{FromRawFd, OwnedFd};
-    use std::os::unix::process::CommandExt;
-    use std::sync::{Arc, Mutex};
-    use std::time::{Duration, Instant};
-
-    let (mut master, slave) = unsafe {
-        let (mut m, mut s) = (0, 0);
-        let ws = libc::winsize {
-            ws_row: 0,
-            ws_col: 80,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        };
-        let rc = libc::openpty(
-            &raw mut m,
-            &raw mut s,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::from_ref(&ws).cast_mut(),
-        );
-        assert_eq!(rc, 0, "openpty: {}", std::io::Error::last_os_error());
-        (
-            std::fs::File::from(OwnedFd::from_raw_fd(m)),
-            OwnedFd::from_raw_fd(s),
-        )
-    };
-
-    let home = tempfile::tempdir().unwrap();
-    let mut cmd = ral_command();
-    cmd.args(["-i", "--norc", "--surface", "structural"])
-        .env("HOME", home.path())
-        .stdin(slave.try_clone().unwrap())
-        .stdout(slave.try_clone().unwrap())
-        .stderr(slave);
-    unsafe {
-        cmd.pre_exec(|| {
-            if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    let mut child = cmd.spawn().expect("spawn ral");
-    drop(cmd);
-
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let reader = master.try_clone().unwrap();
-    let sink = Arc::clone(&seen);
-    std::thread::spawn(move || {
-        use std::io::Read;
-        let (mut reader, mut chunk) = (reader, [0u8; 4096]);
-        while let Ok(n @ 1..) = reader.read(&mut chunk) {
-            sink.lock().unwrap().extend_from_slice(&chunk[..n]);
-        }
-    });
-
-    let start = Instant::now();
-    let text_so_far = || String::from_utf8_lossy(&seen.lock().unwrap()).into_owned();
-    // Once the line editor is reading, Ctrl-D at the empty prompt ends it.
-    while !text_so_far().contains("❯") && start.elapsed() < Duration::from_secs(10) {
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    master.write_all(b"\x04").unwrap();
-    let exited = loop {
-        if child.try_wait().unwrap().is_some() {
-            break true;
-        }
-        if start.elapsed() > Duration::from_secs(10) {
-            break false;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    };
-    if !exited {
-        let _ = child.kill();
-        let _ = child.wait();
-    }
-    std::thread::sleep(Duration::from_millis(200));
-
-    let text = text_so_far();
-    assert!(exited, "ral never exited on a zero-row terminal:\n{text}");
-    assert!(
-        text.contains("structural surface unavailable"),
-        "no fallback warning:\n{text}"
     );
 }

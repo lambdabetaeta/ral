@@ -14,6 +14,9 @@ forced, and the boot-per-stage cost — is deleted.
 
 ## Decision
 
+- **A stage thread's shell is `Shell::child`'s one exhaustive literal**, built
+  on the spawning thread: it inherits scope, context, Σ, builtin table and
+  sources, and takes nothing else, so no partial boot is paid per stage.
 - **`StageLaunch::Thread` replaces `StageLaunch::HelperEval`.** A stage thread
   runs `machine::evaluate` over a closure captured at resolve time, its own
   stack empty by construction: no frame crosses into it, exactly as none

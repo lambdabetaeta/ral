@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 8d868e18
-generated_at_date: 2026-09-30
+generated_at_commit: 446e3123
+generated_at_date: 2026-10-06
 covers_paths: [core/src/elaborator.rs, core/src/syntax/group.rs]
 ---
 
@@ -20,17 +20,13 @@ statement boundaries via `wrap_binds`). No parser syntax survives — the IR the
 elaborator hands on carries no surface conveniences
 ([[invariants/ir-pure-cbpv|ir-pure-cbpv]]).
 
-A temporary's extent is bounded by two mechanisms, and both are load-bearing.
-`wrap_binds` wraps the chain in a `ScopeOp::Hoisted` frame, so the temporaries
-die with the computation that reads them; nothing else pops them, and a
-top-level `Phrase::Define` installs into the session scope, so without the
-frame a temporary stayed readable as `$_var1`, was PATH-shadow-checked on the
-way in, and was harvested by the binding-lease ledger. A `let`'s temporaries wrap its
-right-hand side rather than its `Bind`, since only the right-hand side reads
-them and a frame around the `Bind` would take the user's own binding down with
-it. `Elaborator::gensym` then skips any name already bound: `_` is ral's
-internal namespace — `use` hides it, the `_ed-*` builtins live in it — not an
-unwritable one, so a temporary must never capture a user's own `_var2`.
+A temporary is named by `ir::synthetic(tag, n)`, `%var1`, `%eta1`, …: a `%`
+never starts a token's identifier, so no source text names a compiler-written
+binder and `Elaborator::gensym` needs no skip-bound guard. `ir::is_synthetic`
+is the one reader the checker's diagnostics ask, so a temporary never leaks
+into an error sentence and a user's own `_variant` is never mistaken for one.
+A `let`'s temporaries wrap its right-hand side rather than its `Bind`, since
+only the right-hand side reads them.
 
 It also resolves command heads against lexical scope
 (`Elaborator::lexical_scopes`), realising the data-vs-authority split of
@@ -77,12 +73,8 @@ whose typing collapses to the external case (`exec_comp_ty` →
 `external_exec_comp_ty`), since a prelude function reaches the checker as a
 bound `App` head, never a bare `Exec`.
 
-A pipeline elaborates to a [[map/core/ir|`Pipeline`]] node carrying one
-annotation the elaborator can only fill with placeholders: a `Ty::Unit` per
-stage for the value type, overwritten by the
-[[map/core/typecheck|annotation pass]] once it has typed the pipeline. The
-evaluator never reads `stage_types`, which feeds the structural REPL's typed
-spine, so the placeholder is never observed.
+A pipeline elaborates to a [[map/core/ir|`Pipeline`]] node of its stages and
+nothing more: every interior edge is a byte pipe allocated from position.
 
 An arm of `if` and `case` elaborates to a thunk the form forces
 (`Elaborator::elab_arm`): a literal `{ … }` or `{ |p| … }`, or a name holding

@@ -6,10 +6,10 @@ use super::collect::{SettleOnDrop, Slot, StageObservation};
 use super::launch::LaunchCx;
 use super::resolve::StageSpec;
 use super::route::{ByteIn, ByteOut};
-use crate::evaluator::machine;
+use crate::io::Wake;
 use crate::io::{Io, Sink};
 use crate::ir::Comp;
-use crate::process::{CancelCause, CancelScope, Wake};
+use crate::process::{CancelCause, CancelScope};
 use crate::source::Span;
 use crate::types::{Break, Error, Mooring, Settled};
 use std::sync::Arc;
@@ -67,7 +67,7 @@ impl Drop for ThreadStage {
         if self.join.is_none() {
             return;
         }
-        self.cancel(CancelCause::Terminate);
+        self.cancel(CancelCause::Terminated);
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }
@@ -78,7 +78,7 @@ impl Drop for ThreadStage {
 fn stage_error(message: String, span: Option<Span>) -> Break {
     Break::Error(Error {
         span,
-        ..Error::new(message, 1)
+        ..Error::new(message)
     })
 }
 
@@ -92,7 +92,7 @@ fn panic_error(payload: &(dyn std::any::Any + Send), span: Option<Span>) -> Erro
         .unwrap_or_else(|| "unknown panic".to_string());
     Error {
         span,
-        ..Error::new(format!("ral pipeline stage panicked: {msg}"), 1)
+        ..Error::new(format!("ral pipeline stage panicked: {msg}"))
     }
 }
 
@@ -129,13 +129,12 @@ pub(super) fn launch_thread_stage(
         stderr: cx.shell.io.stderr.clone(),
         interactive: cx.shell.io.interactive,
         terminal: cx.shell.io.terminal,
-        launch_role: crate::io::LaunchRole::PipelineStage(
-            cx.group.membership(mooring.cancel.as_scope()),
-        ),
+        stage: Some(cx.group.membership(mooring.cancel.as_scope())),
     };
 
     let policy = cx.shell.local.audit.active_policy();
     let env = cx.env.clone();
+    let eval = cx.eval.run;
     let comp = Arc::clone(stage);
     let span = spec.span;
 
@@ -146,7 +145,7 @@ pub(super) fn launch_thread_stage(
             child.io = io;
             child.local.audit.install_active_policy(policy);
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                machine::evaluate(comp, env, mooring, child)
+                eval(comp, env, mooring, child)
             }));
             let settled = match result {
                 Ok(settled) => settled,
@@ -177,16 +176,15 @@ mod tests {
     use super::super::resolve::StageLaunch;
     use super::*;
     use crate::io::Edge;
-    use crate::types::{Shell, TerminalAccess};
+    use crate::types::TerminalAccess;
     use std::io::Read;
     use std::time::{Duration, Instant};
 
     fn compile_one(source: &str) -> Arc<Comp> {
-        let ast = crate::parse(source).expect("parse");
-        let top =
-            crate::elaborate(&ast, std::collections::HashSet::default(), "").expect("elaborate");
-        let [phrase] = top.phrases.as_slice() else {
-            panic!("expected one phrase, got {:?}", top.phrases);
+        let ast = crate::syntax::parser::parse(source).expect("parse");
+        let top = crate::elaborator::elaborate(&ast, [], "").expect("elaborate");
+        let [phrase] = top.as_slice() else {
+            panic!("expected one phrase, got {top:?}");
         };
         let crate::ir::Phrase::Run(comp) = &phrase.item else {
             panic!("expected a Run phrase, got {:?}", phrase.item);
@@ -204,19 +202,16 @@ mod tests {
     /// An owning group whose channel nobody reads: these tests watch a single
     /// stage's own reports, never the anchor's.
     fn prepared_group() -> PipelineGroup {
-        PipelineGroup::prepare(&Shell::default(), std::sync::mpsc::channel().0)
-            .expect("anchor spawns")
-    }
-
-    fn shell_with_builtins() -> Shell {
-        let mut shell = Shell::default();
-        shell.install_builtins(crate::builtins::CORE_BASE_FRAMES);
-        shell
+        PipelineGroup::prepare(
+            &crate::test_helper::core_shell(),
+            std::sync::mpsc::channel().0,
+        )
+        .expect("anchor spawns")
     }
 
     #[test]
     fn a_stage_writes_into_a_sink_pipe_and_finishes() {
-        let mut shell = shell_with_builtins();
+        let mut shell = crate::test_helper::core_shell();
         let env = shell.env.clone();
         let group = prepared_group();
         let stage = compile_one("echo hi");
@@ -227,6 +222,7 @@ mod tests {
             mooring: &mooring,
             shell: &mut shell,
             env: &env,
+            eval: crate::evaluator::STAGE_EVAL,
             group: &group,
             holds_terminal: false,
         };
@@ -256,7 +252,7 @@ mod tests {
 
     #[test]
     fn a_cancelled_spinning_stage_ends_within_500ms() {
-        let mut shell = shell_with_builtins();
+        let mut shell = crate::test_helper::core_shell();
         let env = shell.env.clone();
         let group = prepared_group();
         // A self-recursive, argument-incrementing call with no base case:
@@ -269,6 +265,7 @@ mod tests {
             mooring: &mooring,
             shell: &mut shell,
             env: &env,
+            eval: crate::evaluator::STAGE_EVAL,
             group: &group,
             holds_terminal: false,
         };
@@ -304,7 +301,7 @@ mod tests {
     /// stage's own span, its stack having none of its own.
     #[test]
     fn panic_error_carries_the_payload_and_span() {
-        let file = Shell::default().install_script_context("<test>", "boom");
+        let file = crate::test_helper::core_shell().install_script_context("<test>", "boom");
         let span = Span::new(file, 0, 4);
         let payload: Box<dyn std::any::Any + Send> = Box::new("boom");
 
@@ -319,7 +316,7 @@ mod tests {
 
     #[test]
     fn a_stages_terminal_lease_is_none() {
-        let mut parent = Shell::default();
+        let mut parent = crate::test_helper::core_shell();
         parent.session.terminal_lease = crate::process::TerminalLease::mint_at_startup(true);
         let outer = Mooring {
             terminal_access: TerminalAccess::Leased,

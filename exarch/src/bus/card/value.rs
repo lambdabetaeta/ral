@@ -2,7 +2,7 @@
 //! surfaced record, answering `None` on absence or wrong shape, so a malformed
 //! record costs a field rather than the decode.
 
-use ral_core::serial::FOValue;
+use ral_core::first_order::FOValue;
 
 /// `v` when it is a record, so a field lookup can follow.
 pub(super) fn record(v: &FOValue) -> Option<&FOValue> {
@@ -23,11 +23,6 @@ pub(super) fn count_field(m: &FOValue, field: &str) -> Option<u32> {
     )]
     let clamped = n.clamp(0, i64::from(u32::MAX)) as u32;
     Some(clamped)
-}
-
-/// An exit status, unclamped — a code to report, not a magnitude to scale.
-pub(super) fn int_field(m: &FOValue, field: &str) -> Option<i64> {
-    m.field(field)?.as_int()
 }
 
 /// A list field's items; empty when absent or not a list.

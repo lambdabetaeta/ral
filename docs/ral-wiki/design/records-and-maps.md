@@ -17,7 +17,7 @@ the checker is allowed to say about them.
 
 ## Two types
 
-The split lives in `Ty` (`core/src/typecheck/ty.rs`):
+The split lives in `Ty` (`core/src/ty.rs`):
 
 - ***Map*** — `Map<α>`: a homogeneous, string-keyed collection. Every value has
   the one type `α`; *which* keys are present is unknown to the checker, because
@@ -92,7 +92,7 @@ builtin's scheme (`core/src/typecheck/builtins.rs`). `from-json` returns a
 result the script decides — a weak type variable, one per unit, checked at the
 decode ([[decisions/260930_a-boundary-is-checked-against-its-type|a-boundary-is-checked-against-its-type]])
 — and a JSON object decodes to the `Map` carrier
-at run time (`json_to_value`, `core/src/builtins/util.rs`). The decoded value's
+at run time (`json_to_value`, `core/src/builtins/codecs.rs`). The decoded value's
 *type* is then fixed by how you use it: index it with a computed key and it
 pins to `Map<α>`; read a literal field off it and it pins toward `Record`.
 
@@ -166,7 +166,7 @@ unifier.
 
 One carrier, one order: `Map` is an `imbl::OrdMap` (`core/src/types/map.rs`), so
 both views iterate **sorted by key** and the order a literal was written in is
-not observable. That is what lets `values_equal` settle map equality with a
+not observable. That is what lets `Value::equals` settle map equality with a
 pointwise zip and makes `Value::PartialEq` order-independent for free — and it
 is why neither view can carry a sequence. Data that must keep an order is a
 list; data needing an order *and* a type per key is neither, and ral has no
@@ -223,7 +223,7 @@ property [[design/row-types|row-types]] classification does not have.
 This is not a cosmetic asymmetry. A record's keyset is part of its *type* —
 that is the entire content of the record/map split above — so a record with
 no keyset is not a smaller record, it is a value with no type to check
-statically. Concretely: shrinking `[edit_mode: 'vi']` to nothing does not
+statically. Concretely: shrinking `[edit-mode: 'vi']` to nothing does not
 leave a `[]` a checker could still hold to a table; it leaves `[:]`, a map,
 which meets that table only when something applies it at run time. Three
 places in `ral` hand a script's returned value straight to a fixed table

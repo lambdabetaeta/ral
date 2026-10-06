@@ -2,7 +2,7 @@
 //!
 //! CBPV splits inert `Val` from effectful `Comp`.  Where the IR wants a `Val`
 //! but the source has an effectful sub-expression, the elaborator binds it to
-//! a fresh `_gN` and substitutes a `Val::Variable`; those pending bindings ride
+//! a fresh `%varN` and substitutes a `Val::Variable`; those pending bindings ride
 //! a mutable *binds* accumulator threaded through `elab_expr`, which
 //! `wrap_binds` folds into a `Comp::Bind` chain at a statement boundary.
 //! A context that may not run — an `if` arm, a `?` chain arm, a pipeline stage
@@ -15,22 +15,22 @@
 //! `./x`, `~/x`, `$f`, `{ … }`) declares which it is syntactically.
 
 use crate::ir::{
-    Args, Assembly, CaseArm, CommandName, CommandWord, Comp, CompKind, Exec, GENSYM_PREFIX,
-    GroupNode, HandlerArmV, IrPattern, Name, OptionsV, Phrase, Toplevel, Val, ValListElem,
-    ValMapEntry, ValRecordEntry,
+    Args, Assembly, CaseArm, CommandName, CommandWord, Comp, CompKind, Exec, GroupNode,
+    HandlerArmV, Name, OptionsV, Pattern, Phrase, Redirects, Unchecked, Val, ValListElem,
+    ValMapEntry, ValRecordEntry, synthetic,
 };
 use crate::prelude_manifest;
 use crate::source::Span;
 use crate::source::Spanned;
 use crate::source::WithSpan;
 use crate::syntax::ast::{
-    self, Ast, Head, IfBranch, ListElem, MapEntry, MapPatternEntry, Options, Pattern, RecordEntry,
-    Redirects, ScopeAst, Stmt, Word,
+    self, Ast, Head, IfBranch, ListElem, MapEntry, Options, RecordEntry, ScopeAst, Stmt, Word,
+    WordLiteral,
 };
-use crate::syntax::group::{StmtGroup, group_stmts};
-use crate::syntax::parser::{ParseError, ParseErrorKind};
+use crate::syntax::group::{RecMember, StmtGroup, group_stmts};
+use crate::syntax::parser::ParseError;
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 /// State threaded through the elaboration pass.
 struct Elaborator {
@@ -40,7 +40,7 @@ struct Elaborator {
     /// mutated, so an elaboration bumps a refcount rather than cloning the set.
     prelude: Arc<HashSet<String>>,
     /// Bound names, innermost last; the base frame holds the caller's bindings.
-    lexical_scopes: Vec<HashSet<String>>,
+    lexical_scopes: Vec<HashSet<Name>>,
     /// Attached to every emitted `Comp`; narrowed and restored by `with_span`,
     /// which every traversal that knows a tighter byte range wraps its body in.
     current_span: Option<Span>,
@@ -69,11 +69,11 @@ impl WithSpan for Elaborator {
 impl Elaborator {
     /// `bindings` are names already live in the caller (REPL definitions, say);
     /// `name` is the source's own display name.
-    fn new_with_bindings(bindings: HashSet<String>, name: &str) -> Self {
+    fn new_with_bindings(bindings: impl IntoIterator<Item = Name>, name: &str) -> Self {
         Self {
             counter: 0,
             prelude: prelude_scope(),
-            lexical_scopes: vec![bindings],
+            lexical_scopes: vec![bindings.into_iter().collect()],
             current_span: None,
             script: crate::path::lex::has_script_identity(name).then(|| name.to_string()),
             error: None,
@@ -91,107 +91,68 @@ impl Elaborator {
         if let Some(s) = &self.script {
             return Val::String(s.clone().into());
         }
-        self.error.get_or_insert_with(|| ParseError {
-            message: "$SCRIPT: no script name here (the REPL, `-c`, and preloaded \
-                      sources have none)"
-                .into(),
-            span: self.current_span,
-            kind: ParseErrorKind::Plain,
-            incomplete: false,
-        });
+        self.refuse(
+            self.current_span,
+            "$SCRIPT: no script name here (the REPL, `-c`, and preloaded sources have none)",
+        );
         Val::Unit
     }
 
-    /// A name for a hoisted temporary.  Skips anything already bound: `_` is
-    /// ral's internal namespace, not an unwritable one, so a user's own `_var2`
-    /// must not be capturable by a temporary that happens to land on it.
-    fn gensym(&mut self) -> String {
-        loop {
-            self.counter += 1;
-            let name = format!("{GENSYM_PREFIX}{}", self.counter);
-            if !self.is_bound(&name) {
-                return name;
+    /// A name for a hoisted temporary.
+    fn gensym(&mut self) -> Name {
+        self.counter += 1;
+        synthetic("var", self.counter)
+    }
+
+    /// Elaboration's one failure: the first refusal stands.
+    fn refuse(&mut self, span: Option<Span>, message: &str) {
+        self.error
+            .get_or_insert_with(|| ParseError::new(span, message));
+    }
+
+    /// The one door into scope, hence the one place `SCRIPT` is refused as
+    /// a binder; `span` is the binder's own.
+    fn bind(&mut self, span: Option<Span>, names: impl IntoIterator<Item = Name>) {
+        for name in names {
+            if &*name == "SCRIPT" {
+                self.refuse(
+                    span,
+                    "$SCRIPT names the file being compiled, not a name you can bind; choose \
+                     another name",
+                );
             }
+            self.lexical_scopes
+                .last_mut()
+                .expect("lexical_scopes is initialised non-empty and never popped past 1")
+                .insert(name);
         }
     }
 
-    fn current_scope_mut(&mut self) -> &mut HashSet<String> {
-        self.lexical_scopes
-            .last_mut()
-            .expect("lexical_scopes is initialised non-empty and never popped past 1")
+    fn bind_pattern(&mut self, pat: &Spanned<Pattern>) {
+        self.bind(pat.span, pat.item.names().into_iter().cloned());
     }
 
-    fn bind_pattern(&mut self, pat: &Pattern) {
-        pat.collect_names(self.current_scope_mut());
+    /// A `{ |param| body }` binder together with the statements it scopes:
+    /// the body elaborates inside the frame the param's names open.  Both
+    /// readings of that spelling — the lambda it denotes and the `case` arm
+    /// that is a branch rather than a function — get their scope from here,
+    /// so it is stated once.
+    fn elab_binder_scope(&mut self, param: &Spanned<Pattern>, body: &[Stmt]) -> (Pattern, Comp) {
+        let body = self.with_new_scope(|this| {
+            this.bind_pattern(param);
+            this.stmts_nested(body)
+        });
+        (param.item.clone(), body)
     }
 
-    /// Translate an AST pattern into an [`IrPattern`].
-    fn elab_pattern(&mut self, pat: &Pattern) -> IrPattern {
-        match pat {
-            Pattern::Wildcard => IrPattern::Wildcard,
-            Pattern::Name(n) => {
-                if n.as_ref() == "SCRIPT" {
-                    self.error.get_or_insert_with(|| ParseError {
-                        message: "$SCRIPT names the file being compiled, not a name you can \
-                                  bind; choose another name"
-                            .into(),
-                        span: self.current_span,
-                        kind: ParseErrorKind::Plain,
-                        incomplete: false,
-                    });
-                }
-                IrPattern::Name(n.clone())
-            }
-            Pattern::List { elems, rest } => IrPattern::List {
-                elems: elems.iter().map(|e| self.elab_pattern(e)).collect(),
-                rest: rest.clone(),
-            },
-            Pattern::Map(entries) => IrPattern::Map(
-                entries
-                    .iter()
-                    .map(|entry| MapPatternEntry {
-                        key: entry.key.clone(),
-                        pattern: self.elab_pattern(&entry.pattern),
-                    })
-                    .collect(),
-            ),
-        }
-    }
-
-    /// A `{ |param| body }` binder together with the statements it scopes: the
-    /// param elaborates, then the body elaborates inside the frame its names
-    /// open.  Both readings of that spelling — the lambda it denotes and the
-    /// `case` arm that is a branch rather than a function — get their scope
-    /// from here, so it is stated once.
-    fn elab_binder_scope(
-        &mut self,
-        param: &Spanned<ast::Param>,
-        body: &[Stmt],
-    ) -> (IrPattern, Comp) {
-        let pattern = self.with_span(param.span, |this| this.elab_pattern(&param.item));
-        let mut names = HashSet::new();
-        param.item.collect_names(&mut names);
-        let body = self.with_bound_names(names, |this| this.stmts_nested(body));
-        (pattern, body)
-    }
-
-    fn with_bound_names<T>(
-        &mut self,
-        names: impl IntoIterator<Item = String>,
-        f: impl FnOnce(&mut Self) -> T,
-    ) -> T {
+    /// A fresh frame, so the body's `let`s shadow rather than leak outward.
+    fn with_new_scope<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
         let saved_span = self.current_span;
-        self.lexical_scopes.push(names.into_iter().collect());
+        self.lexical_scopes.push(HashSet::new());
         let out = f(self);
         self.lexical_scopes.pop();
         self.current_span = saved_span;
         out
-    }
-
-    /// For block and branch bodies, which introduce no names of their own but
-    /// still need a frame so their `let`s shadow rather than leak outward.
-    fn with_new_scope<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
-        self.with_bound_names(std::iter::empty::<String>(), f)
     }
 
     fn is_bound(&self, name: &str) -> bool {
@@ -204,18 +165,7 @@ impl Elaborator {
 
     /// Every name-dispatched head (`bare`, `^name`, `./path`, `~/path`) funnels
     /// through here.
-    fn exec(
-        &self,
-        name: CommandName,
-        args: Args,
-        redirects: Redirects<Val>,
-        external_only: bool,
-    ) -> Comp {
-        let head = if external_only {
-            CommandWord::External(name)
-        } else {
-            CommandWord::Name(name)
-        };
+    fn exec(&self, head: CommandWord, args: Args, redirects: Redirects<Val>) -> Comp {
         comp!(
             self,
             CompKind::Exec(Exec {
@@ -235,24 +185,17 @@ impl Elaborator {
         wrap_binds(self.current_span, binds, comp)
     }
 
-    /// A `let pattern = value`'s two halves, each under its own span so a
-    /// bind failure in `let [a, b] = 42` underlines `42` and a pattern-shape
-    /// one underlines the pattern, not the statement.  The pattern's names
-    /// are not yet in scope: the caller binds them once it decides where
-    /// `let x = x` should read the outer `x` from.
-    fn elab_let_parts(
-        &mut self,
-        pattern: &Spanned<Pattern>,
-        value: &Spanned<Box<Ast>>,
-    ) -> (Comp, IrPattern) {
+    /// A `let pattern = value`'s right-hand side, under its own span so a
+    /// bind failure in `let [a, b] = 42` underlines `42`, not the statement.
+    /// The pattern's names are not yet in scope: the caller binds them once
+    /// it decides where `let x = x` should read the outer `x` from.
+    fn elab_let_rhs(&mut self, value: &Spanned<Box<Ast>>) -> Comp {
         let mut binds = Vec::new();
         let comp = self.with_span(value.span, |this| this.elab_expr(&value.item, &mut binds));
-        let pattern_ir = self.with_span(pattern.span, |this| this.elab_pattern(&pattern.item));
         // The temporaries wrap the right-hand side, not the `Bind`: only the
         // RHS reads them, and a frame around the `Bind` would take the
         // user's own binding down with them.
-        let rhs = wrap_binds(self.current_span, binds, comp);
-        (rhs, pattern_ir)
+        wrap_binds(self.current_span, binds, comp)
     }
 
     /// Forward-declares a recursive knot's own names, then elaborates each
@@ -261,17 +204,16 @@ impl Elaborator {
     /// than scanning ahead over earlier statements, keeps a preceding
     /// command use of the same name lowering to `Exec` instead of a
     /// dangling `Force(Variable)`.
-    fn build_rec_group(&mut self, bindings: &[(String, Box<Ast>, Option<Span>)]) -> Arc<GroupNode> {
-        let scope = self.current_scope_mut();
-        for (name, _, _) in bindings {
-            scope.insert(name.clone());
+    fn build_rec_group(&mut self, members: &[RecMember]) -> Arc<GroupNode> {
+        for RecMember { name, .. } in members {
+            self.bind(name.span, [name.item.as_str().into()]);
         }
-        let members: Vec<(Name, Arc<Comp>)> = bindings
+        let members: Vec<(Name, Arc<Comp>)> = members
             .iter()
-            .map(|(name, value, span)| {
+            .map(|RecMember { name, value }| {
                 let mut empty = Vec::new();
                 let CompKind::Return(Val::Thunk(node)) = self
-                    .with_span(*span, |this| this.elab_expr(value, &mut empty))
+                    .with_span(value.span, |this| this.elab_expr(&value.item, &mut empty))
                     .item
                 else {
                     unreachable!(
@@ -283,7 +225,7 @@ impl Elaborator {
                     empty.is_empty(),
                     "lambda/block elaboration must not hoist into outer binds"
                 );
-                (name.as_str().into(), Arc::clone(node.shape()))
+                (name.item.as_str().into(), Arc::clone(node.shape()))
             })
             .collect();
         GroupNode::new(members.into())
@@ -292,18 +234,18 @@ impl Elaborator {
     /// One top-level phrase (depth 0): a `let` becomes a `Define`,
     /// anything else a `Run`.  The `Define` pattern's names enter scope only
     /// after the RHS is elaborated, as `nested_single`'s `let` arm does.
-    fn toplevel_phrase(&mut self, stmt: Stmt) -> Spanned<Phrase> {
+    fn toplevel_phrase(&mut self, stmt: Stmt) -> Spanned<Phrase<()>> {
         let Spanned { item: kind, span } = stmt;
         self.with_span(span, |this| {
             if let Ast::Let { pattern, value } = &kind {
-                let (rhs, pattern_ir) = this.elab_let_parts(pattern, value);
-                this.bind_pattern(&pattern.item);
+                let rhs = this.elab_let_rhs(value);
+                this.bind_pattern(pattern);
                 return Spanned::with_span(
                     span,
                     Phrase::Define {
-                        pattern: Arc::new(pattern_ir),
+                        pattern: Arc::new(pattern.item.clone()),
                         comp: Arc::new(rhs),
-                        schemes: vec![],
+                        schemes: (),
                     },
                 );
             }
@@ -316,32 +258,30 @@ impl Elaborator {
 
     /// A recursive knot at depth 0: *n* `Define`s, `xᵢ = Return(Thunk(Rec{group,
     /// i}))`, sharing one `group` `Arc`.
-    fn toplevel_rec_group(
-        &mut self,
-        bindings: &[(String, Box<Ast>, Option<Span>)],
-    ) -> Vec<Spanned<Phrase>> {
-        let group = self.build_rec_group(bindings);
-        bindings
+    fn toplevel_rec_group(&mut self, members: &[RecMember]) -> Unchecked {
+        let group = self.build_rec_group(members);
+        members
             .iter()
             .enumerate()
-            .map(|(index, (name, _, span))| {
+            .map(|(index, RecMember { name, value })| {
+                let span = value.span;
                 let rec = Spanned::with_span(
-                    *span,
+                    span,
                     CompKind::Rec {
                         group: Arc::clone(&group),
                         index,
                     },
                 );
                 let comp = Arc::new(Spanned::with_span(
-                    *span,
+                    span,
                     CompKind::Return(Val::thunk(Arc::new(rec))),
                 ));
                 Spanned::with_span(
-                    *span,
+                    span,
                     Phrase::Define {
-                        pattern: Arc::new(IrPattern::Name(name.as_str().into())),
+                        pattern: Arc::new(Pattern::Name(name.item.as_str().into())),
                         comp,
-                        schemes: vec![],
+                        schemes: (),
                     },
                 )
             })
@@ -367,7 +307,7 @@ impl Elaborator {
         };
         let mut rest = nested_tail(span, last);
         for (span, unit) in rev {
-            rest = nested_wrap(span, unit, rest);
+            rest = unit.into_bind(span, rest);
         }
         rest
     }
@@ -380,12 +320,12 @@ impl Elaborator {
         let Spanned { item: kind, span } = stmt;
         self.with_span(span, |this| {
             if let Ast::Let { pattern, value } = &kind {
-                let (rhs, pattern_ir) = this.elab_let_parts(pattern, value);
-                let pattern_ir = match pattern_ir {
-                    IrPattern::Wildcard => IrPattern::Name(this.gensym().into()),
-                    named => named,
+                let rhs = this.elab_let_rhs(value);
+                let pattern_ir = match &pattern.item {
+                    Pattern::Wildcard => Pattern::Name(this.gensym()),
+                    named => named.clone(),
                 };
-                this.bind_pattern(&pattern.item);
+                this.bind_pattern(pattern);
                 return (
                     span,
                     NestedUnit::Bind {
@@ -401,28 +341,26 @@ impl Elaborator {
 
     /// A recursive knot at depth > 0: *n* nested `Bind`s over `Return(Thunk(
     /// Rec{group, i}))`, sharing one `group` `Arc`, in source order.
-    fn nested_rec_group(
-        &mut self,
-        bindings: &[(String, Box<Ast>, Option<Span>)],
-    ) -> Vec<(Option<Span>, NestedUnit)> {
-        let group = self.build_rec_group(bindings);
-        bindings
+    fn nested_rec_group(&mut self, members: &[RecMember]) -> Vec<(Option<Span>, NestedUnit)> {
+        let group = self.build_rec_group(members);
+        members
             .iter()
             .enumerate()
-            .map(|(index, (name, _, span))| {
+            .map(|(index, RecMember { name, value })| {
+                let span = value.span;
                 let rec = Spanned::with_span(
-                    *span,
+                    span,
                     CompKind::Rec {
                         group: Arc::clone(&group),
                         index,
                     },
                 );
-                let rhs = Spanned::with_span(*span, CompKind::Return(Val::thunk(Arc::new(rec))));
+                let rhs = Spanned::with_span(span, CompKind::Return(Val::thunk(Arc::new(rec))));
                 (
-                    *span,
+                    span,
                     NestedUnit::Bind {
                         rhs,
-                        pattern: IrPattern::Name(name.as_str().into()),
+                        pattern: Pattern::Name(name.item.as_str().into()),
                     },
                 )
             })
@@ -431,10 +369,10 @@ impl Elaborator {
 
     /// Elaborate `ast` as a computation, pushing every sub-expression that must
     /// run before its parent into `binds` for the caller to `wrap_binds`.
-    fn elab_expr(&mut self, ast: &Ast, binds: &mut Vec<(IrPattern, Comp)>) -> Comp {
+    fn elab_expr(&mut self, ast: &Ast, binds: &mut Vec<(Pattern, Comp)>) -> Comp {
         match ast {
             Ast::Word(Word::Plain(s) | Word::Slash(s)) => {
-                comp!(self, CompKind::Return(Val::from_word(s)))
+                comp!(self, CompKind::Return(word_val(s)))
             }
             Ast::Literal(s) => comp!(self, CompKind::Return(Val::String(s.clone().into()))),
             Ast::Variable(s) => {
@@ -488,18 +426,6 @@ impl Elaborator {
                 // precede the arguments' in source order — so it is elaborated
                 // before the args below, or its binds land after theirs.
                 let value_head_comp = if let Head::Value(value) = head {
-                    // A block literal in head position stays `Return(Thunk(…))`
-                    // — a value, so nothing consumes the redirect.  A bound or
-                    // forced head gets the `Force` below, which the redirect
-                    // does bracket; hence a warning rather than an error.
-                    if matches!(value.as_ref(), Ast::Block(_)) && !redirects.is_empty() {
-                        crate::diagnostic::shell_warning(
-                            "redirect on a `{ … }` literal: the block is a \
-                             value, not a command — the redirect has no \
-                             consumer.  Bind first (`let f = { … }; f < file`) \
-                             or force (`!{ … } < file`).",
-                        );
-                    }
                     Some(self.elab_expr(value, binds))
                 } else {
                     None
@@ -524,10 +450,9 @@ impl Elaborator {
 
                 match head {
                     Head::ExternalName(s) => self.exec(
-                        CommandName::Bare(s.clone().into()),
+                        CommandWord::External(CommandName::Bare(s.clone().into())),
                         arg_vals,
                         redirect_vals,
-                        true,
                     ),
                     Head::Bare(s) if self.is_bound(s) => {
                         // The `Force` is what makes the `Force` rule run a
@@ -538,22 +463,19 @@ impl Elaborator {
                         self.apply_head(head_comp, arg_vals, redirect_vals)
                     }
                     Head::Bare(s) => self.exec(
-                        CommandName::Bare(s.clone().into()),
+                        CommandWord::Name(CommandName::Bare(s.clone().into())),
                         desugar_zero_arg_exit(s, arg_vals),
                         redirect_vals,
-                        false,
                     ),
                     Head::Path(path) => self.exec(
-                        CommandName::Path(path.clone()),
+                        CommandWord::Name(CommandName::Path(path.clone())),
                         arg_vals,
                         redirect_vals,
-                        false,
                     ),
                     Head::TildePath(path) => self.exec(
-                        CommandName::TildePath(path.clone()),
+                        CommandWord::Name(CommandName::TildePath(path.clone())),
                         arg_vals,
                         redirect_vals,
-                        false,
                     ),
                     Head::Value(_) => {
                         let head_comp = value_head_comp.expect("computed above for Head::Value");
@@ -640,16 +562,7 @@ impl Elaborator {
                         self.with_span(stage.span, |this| this.elab_isolated(&stage.item));
                     comps.push(Arc::new(stage_comp));
                 }
-                // Placeholders, overwritten by the annotation pass with the
-                // stages' value types.
-                let stage_types = vec![crate::typecheck::Ty::Unit; comps.len()];
-                comp!(
-                    self,
-                    CompKind::Pipeline {
-                        stages: comps,
-                        stage_types,
-                    }
-                )
+                comp!(self, CompKind::Pipeline { stages: comps })
             }
 
             Ast::Chain(parts) => {
@@ -676,7 +589,7 @@ impl Elaborator {
                                     let handler = Val::thunk(Arc::new(comp!(
                                         this,
                                         CompKind::Lam {
-                                            param: IrPattern::Wildcard,
+                                            param: Pattern::Wildcard,
                                             body: Arc::new(handler_body),
                                         }
                                     )));
@@ -838,8 +751,8 @@ impl Elaborator {
                 let v = self.with_span(inner.span, |this| this.to_val(&inner.item, binds));
                 comp!(self, CompKind::Not(v))
             }
-            Ast::And(l, r) => self.lower_short_circuit(l, r, binds, /*on_true_is_rhs=*/ true),
-            Ast::Or(l, r) => self.lower_short_circuit(l, r, binds, /*on_true_is_rhs=*/ false),
+            Ast::And(l, r) => self.lower_short_circuit(l, r, binds, Junction::And),
+            Ast::Or(l, r) => self.lower_short_circuit(l, r, binds, Junction::Or),
 
             Ast::Index { target, keys } => comp!(
                 self,
@@ -889,7 +802,7 @@ impl Elaborator {
         &mut self,
         branches: &[IfBranch],
         else_: Option<&Spanned<Box<Ast>>>,
-        binds: &mut Vec<(IrPattern, Comp)>,
+        binds: &mut Vec<(Pattern, Comp)>,
     ) -> Comp {
         let (first, rest) = branches
             .split_first()
@@ -945,14 +858,11 @@ impl Elaborator {
         let val = match comp.item {
             CompKind::Return(val) if hoisted.is_empty() => val,
             _ => {
-                self.error.get_or_insert_with(|| ParseError {
-                    message: "an arm is a block, or a name holding one; to compute the \
-                              block first, bind it: `let arm = $arms[a]`"
-                        .into(),
-                    span: arm.span.or(self.current_span),
-                    kind: ParseErrorKind::Plain,
-                    incomplete: false,
-                });
+                self.refuse(
+                    arm.span.or(self.current_span),
+                    "an arm is a block, or a name holding one; to compute the block first, \
+                     bind it: `let arm = $arms[a]`",
+                );
                 Val::Unit
             }
         };
@@ -972,11 +882,11 @@ impl Elaborator {
         };
         Self::thunk_of(comp!(
             self,
-            CompKind::Bind {
-                comp: body,
-                pattern: Arc::new(IrPattern::Wildcard),
-                rest: Arc::new(comp!(self, CompKind::Return(Val::Unit))),
-            }
+            CompKind::bind(
+                Pattern::Wildcard,
+                body,
+                comp!(self, CompKind::Return(Val::Unit))
+            )
         ))
     }
 
@@ -1013,19 +923,19 @@ impl Elaborator {
     }
 
     /// Yield the `Val` the parent consumes: `Return(v)` passes through, and
-    /// anything else is bound to a fresh `_gN` pushed onto `binds`.
-    fn hoist(&mut self, comp: Comp, binds: &mut Vec<(IrPattern, Comp)>) -> Val {
+    /// anything else is bound to a fresh `%varN` pushed onto `binds`.
+    fn hoist(&mut self, comp: Comp, binds: &mut Vec<(Pattern, Comp)>) -> Val {
         if let CompKind::Return(v) = comp.item {
             v
         } else {
-            let name: Name = self.gensym().into();
-            binds.push((IrPattern::Name(name.clone()), comp));
+            let name = self.gensym();
+            binds.push((Pattern::Name(name.clone()), comp));
             Val::Variable(name)
         }
     }
 
     #[allow(clippy::wrong_self_convention)]
-    fn to_val(&mut self, ast: &Ast, binds: &mut Vec<(IrPattern, Comp)>) -> Val {
+    fn to_val(&mut self, ast: &Ast, binds: &mut Vec<(Pattern, Comp)>) -> Val {
         let comp = self.elab_expr(ast, binds);
         self.hoist(comp, binds)
     }
@@ -1035,7 +945,7 @@ impl Elaborator {
     fn spanned_val(
         &mut self,
         ast: &Spanned<Ast>,
-        binds: &mut Vec<(IrPattern, Comp)>,
+        binds: &mut Vec<(Pattern, Comp)>,
     ) -> Spanned<Val> {
         Spanned::with_span(
             ast.span,
@@ -1048,7 +958,7 @@ impl Elaborator {
     fn sorted_fields(
         &mut self,
         items: Vec<(&String, &Spanned<Ast>)>,
-        binds: &mut Vec<(IrPattern, Comp)>,
+        binds: &mut Vec<(Pattern, Comp)>,
     ) -> Vec<(Name, Spanned<Val>)> {
         let mut fields: Vec<(Name, _)> = items
             .into_iter()
@@ -1097,13 +1007,13 @@ impl Elaborator {
     fn lower_redirects(
         &mut self,
         redirects: &Redirects<Ast>,
-        binds: &mut Vec<(IrPattern, Comp)>,
+        binds: &mut Vec<(Pattern, Comp)>,
     ) -> Redirects<Val> {
         redirects.map(|a| self.to_val(a, binds))
     }
 
     /// A form's written options, each value hoisted like any other value.
-    fn lower_options(&mut self, opts: &Options, binds: &mut Vec<(IrPattern, Comp)>) -> OptionsV {
+    fn lower_options(&mut self, opts: &Options, binds: &mut Vec<(Pattern, Comp)>) -> OptionsV {
         opts.iter()
             .map(|(name, value)| (Name::from(name.as_str()), self.spanned_val(value, binds)))
             .collect()
@@ -1115,19 +1025,21 @@ impl Elaborator {
         &mut self,
         l: &Spanned<Box<Ast>>,
         r: &Spanned<Box<Ast>>,
-        binds: &mut Vec<(IrPattern, Comp)>,
-        on_true_is_rhs: bool,
+        binds: &mut Vec<(Pattern, Comp)>,
+        junction: Junction,
     ) -> Comp {
         let cond = self.with_span(l.span, |this| this.to_val(&l.item, binds));
         let mut r_binds = Vec::new();
         let r_comp = self.with_span(r.span, |this| this.elab_expr(&r.item, &mut r_binds));
         let r_comp = wrap_binds(self.current_span, r_binds, r_comp);
         let rhs = Self::thunk_of(r_comp);
-        let short = Self::thunk_of(comp!(self, CompKind::Return(Val::Bool(!on_true_is_rhs))));
-        let (then_arm, else_arm) = if on_true_is_rhs {
-            (rhs, short)
-        } else {
-            (short, rhs)
+        let short = Self::thunk_of(comp!(
+            self,
+            CompKind::Return(Val::Bool(junction == Junction::Or))
+        ));
+        let (then_arm, else_arm) = match junction {
+            Junction::And => (rhs, short),
+            Junction::Or => (short, rhs),
         };
         comp!(
             self,
@@ -1142,21 +1054,21 @@ impl Elaborator {
     }
 }
 
+/// `&&` runs its right side when the left is true, `||` when it is false.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Junction {
+    And,
+    Or,
+}
+
 /// Fold `binds` into a chain of `Comp::Bind` nodes around `inner`, the first
 /// binding outermost so the chain runs in the order the hoists were pushed.
-fn wrap_binds(span: Option<Span>, binds: Vec<(IrPattern, Comp)>, inner: Comp) -> Comp {
+fn wrap_binds(span: Option<Span>, binds: Vec<(Pattern, Comp)>, inner: Comp) -> Comp {
     binds
         .into_iter()
         .rev()
         .fold(inner, |rest, (pattern, comp)| {
-            Spanned::with_span(
-                span,
-                CompKind::Bind {
-                    comp: Arc::new(comp),
-                    pattern: Arc::new(pattern),
-                    rest: Arc::new(rest),
-                },
-            )
+            Spanned::with_span(span, CompKind::bind(pattern, comp, rest))
         })
 }
 
@@ -1165,9 +1077,20 @@ fn wrap_binds(span: Option<Span>, binds: Vec<(IrPattern, Comp)>, inner: Comp) ->
 enum NestedUnit {
     /// A `let` or a recursive group's member: `rest` is the elaboration of
     /// what follows.
-    Bind { rhs: Comp, pattern: IrPattern },
+    Bind { rhs: Comp, pattern: Pattern },
     /// Any other statement, discarded on a `Wildcard` bind.
     Other { comp: Comp },
+}
+
+impl NestedUnit {
+    /// Nest over `rest`: a `let` binds its pattern, anything else is discarded.
+    fn into_bind(self, span: Option<Span>, rest: Comp) -> Comp {
+        let (pattern, comp) = match self {
+            Self::Bind { rhs, pattern } => (pattern, rhs),
+            Self::Other { comp } => (Pattern::Wildcard, comp),
+        };
+        Spanned::with_span(span, CompKind::bind(pattern, comp, rest))
+    }
 }
 
 /// The last unit of a block: a `let` still needs a `rest` — the block's own
@@ -1175,33 +1098,9 @@ enum NestedUnit {
 fn nested_tail(span: Option<Span>, unit: NestedUnit) -> Comp {
     match unit {
         NestedUnit::Other { comp } => comp,
-        bind @ NestedUnit::Bind { .. } => nested_wrap(
-            span,
-            bind,
-            Spanned::with_span(span, CompKind::Return(Val::Unit)),
-        ),
-    }
-}
-
-/// Nest one [`NestedUnit`] over `rest`.
-fn nested_wrap(span: Option<Span>, unit: NestedUnit, rest: Comp) -> Comp {
-    match unit {
-        NestedUnit::Bind { rhs, pattern } => Spanned::with_span(
-            span,
-            CompKind::Bind {
-                comp: Arc::new(rhs),
-                pattern: Arc::new(pattern),
-                rest: Arc::new(rest),
-            },
-        ),
-        NestedUnit::Other { comp } => Spanned::with_span(
-            span,
-            CompKind::Bind {
-                comp: Arc::new(comp),
-                pattern: Arc::new(IrPattern::Wildcard),
-                rest: Arc::new(rest),
-            },
-        ),
+        bind @ NestedUnit::Bind { .. } => {
+            bind.into_bind(span, Spanned::with_span(span, CompKind::Return(Val::Unit)))
+        }
     }
 }
 
@@ -1210,7 +1109,7 @@ fn nested_wrap(span: Option<Span>, unit: NestedUnit, rest: Comp) -> Comp {
 /// status here spares the typechecker a zero-arg special case.
 fn desugar_zero_arg_exit(name: &str, args: Args) -> Args {
     if args.is_empty() && (name == "exit" || name == "quit") {
-        vec![ValListElem::Single(Spanned::synthetic(Val::Int(0)))]
+        Args::from(vec![ValListElem::Single(Spanned::synthetic(Val::Int(0)))])
     } else {
         args
     }
@@ -1218,41 +1117,49 @@ fn desugar_zero_arg_exit(name: &str, args: Args) -> Args {
 
 /// The prelude's exported names, built once and shared by refcount thereafter.
 fn prelude_scope() -> Arc<HashSet<String>> {
-    static PRELUDE: std::sync::OnceLock<Arc<HashSet<String>>> = std::sync::OnceLock::new();
-    PRELUDE
-        .get_or_init(|| {
-            Arc::new(
-                prelude_manifest::PRELUDE_EXPORTS
-                    .iter()
-                    .map(std::string::ToString::to_string)
-                    .collect(),
-            )
-        })
-        .clone()
+    static PRELUDE: LazyLock<Arc<HashSet<String>>> = LazyLock::new(|| {
+        Arc::new(
+            prelude_manifest::PRELUDE_EXPORTS
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+        )
+    });
+    Arc::clone(&PRELUDE)
 }
 
-/// Elaborate a top-level statement sequence into a [`Toplevel`].
+/// The value a bare word denotes, by the shape rules of
+/// [`WordLiteral::classify`].
+///
+/// Eager and type-blind: a numeric-looking word meant as argv data is read as
+/// a number, and stringifies back unchanged only where its source was already
+/// canonical (`007` ⇒ `7`, `1.50` ⇒ `1.5`).
+pub(crate) fn word_val(s: &str) -> Val {
+    match WordLiteral::classify(s) {
+        Some(WordLiteral::Bool(b)) => Val::Bool(b),
+        Some(WordLiteral::Int(n)) => Val::Int(n),
+        Some(WordLiteral::Float(f)) => Val::Float(f),
+        None => Val::String(s.into()),
+    }
+}
+
+/// Elaborate a top-level statement sequence into unchecked phrases.
 ///
 /// Each `let` becomes a `Define`, a `let`-knot becomes one `Define` per
 /// member sharing a `Rec` group, and everything else a `Run`.
 ///
 /// `bindings` are the names already live in the calling environment (a REPL's
 /// accumulated definitions, say); the prelude is always in scope.  `name` is the
-/// source's own display name, the value `$SCRIPT` resolves to.  Setting
-/// `RAL_DUMP_IR` dumps the result to stderr on the way out.
+/// source's own display name, the value `$SCRIPT` resolves to.
 ///
 /// # Errors
 /// `$SCRIPT` referenced where `name` carries no script identity, or bound by
 /// a pattern.
-#[allow(
-    clippy::implicit_hasher,
-    reason = "elaboration entry point; every caller passes a default HashSet of REPL/prelude bindings, so generalizing over the hasher would be signature ceremony with no call site to exercise it."
-)]
 pub fn elaborate(
     ast: &[Stmt],
-    bindings: HashSet<String>,
+    bindings: impl IntoIterator<Item = Name>,
     name: &str,
-) -> Result<Toplevel, ParseError> {
+) -> Result<Unchecked, ParseError> {
     let mut elaborator = Elaborator::new_with_bindings(bindings, name);
     let mut phrases = Vec::new();
     for group in group_stmts(ast) {
@@ -1264,582 +1171,8 @@ pub fn elaborate(
     if let Some(e) = elaborator.error {
         return Err(e);
     }
-    if std::env::var("RAL_DUMP_IR").is_ok() {
-        eprintln!("{phrases:#?}");
-    }
-    Ok(Toplevel {
-        phrases,
-        admits: Vec::new(),
-    })
+    Ok(phrases)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::path::tilde::TildePath;
-    use crate::syntax::parser::parse;
-
-    /// Head name, args, and whether the head was written `^name`.
-    fn expect_exec_name(comp: &Comp) -> (&CommandName, &Args, bool) {
-        let CompKind::Exec(e) = &comp.item else {
-            panic!("expected exec, got {:?}", comp.item);
-        };
-        let caret = matches!(e.head, CommandWord::External(_));
-        (e.head.name(), &e.args, caret)
-    }
-
-    /// Strip spans so assertions match on shape alone.  Only lists and maps
-    /// hold one; a thunk's inner `Comp` spans are out of reach, so no fixture
-    /// here compares a thunk.
-    fn strip_slot(elem: &ValListElem) -> ValListElem {
-        match elem {
-            ValListElem::Single(v) => ValListElem::Single(Spanned::synthetic(strip_val(&v.item))),
-            ValListElem::Spread(v) => ValListElem::Spread(Spanned::synthetic(strip_val(&v.item))),
-        }
-    }
-
-    fn strip_val(val: &Val) -> Val {
-        match val {
-            Val::List(elems) => Val::list(
-                elems
-                    .shape()
-                    .iter()
-                    .map(|v| Spanned::synthetic(strip_val(&v.item)))
-                    .collect::<Vec<_>>(),
-            ),
-            Val::Record(entries) => Val::record(
-                entries
-                    .shape()
-                    .iter()
-                    .map(|(k, v)| (k.clone(), Spanned::synthetic(strip_val(&v.item))))
-                    .collect::<Vec<_>>(),
-            ),
-            Val::Map(entries) => Val::map(
-                entries
-                    .shape()
-                    .iter()
-                    .map(|(k, v)| (k.clone(), Spanned::synthetic(strip_val(&v.item))))
-                    .collect::<Vec<_>>(),
-            ),
-            other => other.clone(),
-        }
-    }
-
-    fn arg_items(args: &Args) -> Vec<ValListElem> {
-        args.iter().map(strip_slot).collect()
-    }
-
-    /// Elaborate one statement, unwrapped from its sole `Run` phrase — for
-    /// tests over a single non-`let` statement.
-    fn elaborate_one(ast: &[Stmt], bindings: HashSet<String>, name: &str) -> Arc<Comp> {
-        let top = elaborate(ast, bindings, name).expect("elaborate");
-        let [phrase] = top.phrases.as_slice() else {
-            panic!("expected one phrase, got {:?}", top.phrases);
-        };
-        let Phrase::Run(comp) = &phrase.item else {
-            panic!("expected a Run phrase, got {:?}", phrase.item);
-        };
-        comp.clone()
-    }
-
-    #[test]
-    fn tilde_path_command_head_elaborates_to_exec() {
-        let ast = parse("~/.local/bin/claude update").expect("parse");
-        let comp = elaborate_one(&ast, HashSet::new(), "");
-        let (name, args, _) = expect_exec_name(&comp);
-        assert_eq!(
-            name,
-            &CommandName::TildePath(TildePath {
-                suffix: Some("/.local/bin/claude".into()),
-            })
-        );
-        assert_eq!(
-            arg_items(args),
-            vec![ValListElem::Single(Spanned::synthetic(Val::String(
-                "update".into()
-            )))]
-        );
-    }
-
-    #[test]
-    fn tilde_path_command_head_without_args_elaborates_to_exec() {
-        let ast = parse("~/.local/bin/claude").expect("parse");
-        let comp = elaborate_one(&ast, HashSet::new(), "");
-        let (name, args, _) = expect_exec_name(&comp);
-        assert_eq!(
-            name,
-            &CommandName::TildePath(TildePath {
-                suffix: Some("/.local/bin/claude".into()),
-            })
-        );
-        assert_eq!(args.as_slice(), []);
-    }
-
-    #[test]
-    fn literal_path_head_elaborates_to_direct_exec() {
-        let ast = parse("./script").expect("parse");
-        let comp = elaborate_one(&ast, HashSet::new(), "");
-        let (name, args, _) = expect_exec_name(&comp);
-        assert_eq!(name, &CommandName::Path("./script".into()));
-        assert_eq!(args.as_slice(), []);
-    }
-
-    #[test]
-    fn external_name_head_elaborates_to_external_exec() {
-        let ast = parse("^git status").expect("parse");
-        let comp = elaborate_one(&ast, HashSet::new(), "");
-        let (name, args, caret) = expect_exec_name(&comp);
-        assert_eq!(name, &CommandName::Bare("git".into()));
-        assert_eq!(
-            arg_items(args),
-            vec![ValListElem::Single(Spanned::synthetic(Val::String(
-                "status".into()
-            )))]
-        );
-        assert!(caret);
-    }
-
-    #[test]
-    fn explicit_value_head_elaborates_to_app() {
-        // A value head takes no wrapping `Force`: `apply` forces a thunk in
-        // head position at runtime, which leaves a `<file` redirect on the
-        // `App` free to bracket the body.
-        let ast = parse("$map $upper ['a']").expect("parse");
-        let comp = elaborate_one(&ast, HashSet::new(), "");
-        let CompKind::App { head, args } = &comp.item else {
-            panic!("expected app, got {:?}", comp.item);
-        };
-        let CompKind::Return(Val::Variable(name)) = &head.item else {
-            panic!("expected returned-variable head, got {:?}", head.item);
-        };
-        assert_eq!(name.as_ref(), "map");
-        assert_eq!(
-            arg_items(args),
-            vec![
-                ValListElem::Single(Spanned::synthetic(Val::Variable("upper".into()))),
-                ValListElem::Single(Spanned::synthetic(Val::list(vec![Spanned::synthetic(
-                    Val::String("a".into())
-                )]))),
-            ]
-        );
-    }
-
-    /// Only thunk-form bindings are forward-declared — the shapes
-    /// `syntax::group` knots — so a command use preceding a non-thunk `let` on
-    /// the same name stays an `Exec`, not a `Force` of an unbound variable.
-    #[test]
-    fn command_use_before_non_thunk_let_is_exec() {
-        let ast = parse("date\nlet date = 5").expect("parse");
-        let top = elaborate(&ast, HashSet::new(), "").expect("elaborate");
-        assert_eq!(top.phrases.len(), 2);
-        let Phrase::Run(comp) = &top.phrases[0].item else {
-            panic!("expected a Run phrase, got {:?}", top.phrases[0].item);
-        };
-        let (name, _, _) = expect_exec_name(comp);
-        assert_eq!(name, &CommandName::Bare("date".into()));
-    }
-
-    /// An acyclic singleton `let f = { return 1 }` emits as a `Single`, whose
-    /// `Bind` runs after an earlier use of `f` — so that use must be an `Exec`.
-    #[test]
-    fn command_use_before_acyclic_thunk_let_is_exec() {
-        let ast = parse("f\nlet f = { return 1 }").expect("parse");
-        let top = elaborate(&ast, HashSet::new(), "").expect("elaborate");
-        assert_eq!(top.phrases.len(), 2);
-        let Phrase::Run(comp) = &top.phrases[0].item else {
-            panic!("expected a Run phrase, got {:?}", top.phrases[0].item);
-        };
-        let (name, _, _) = expect_exec_name(comp);
-        assert_eq!(name, &CommandName::Bare("f".into()));
-    }
-
-    /// A use of `g` ahead of its self-recursive definition still lowers to
-    /// `Exec`, while the self-reference inside the group resolves to the
-    /// forward-declared binding.
-    #[test]
-    fn command_use_before_recursive_thunk_let_is_exec() {
-        let ast = parse("g 3\nlet g = { |n| g $[$n - 1] }").expect("parse");
-        let top = elaborate(&ast, HashSet::new(), "").expect("elaborate");
-        assert_eq!(top.phrases.len(), 2);
-        let Phrase::Run(comp) = &top.phrases[0].item else {
-            panic!("expected a Run phrase, got {:?}", top.phrases[0].item);
-        };
-        let (name, _, _) = expect_exec_name(comp);
-        assert_eq!(name, &CommandName::Bare("g".into()));
-        let Phrase::Define {
-            pattern, comp: rhs, ..
-        } = &top.phrases[1].item
-        else {
-            panic!(
-                "expected a self-recursive Define, got {:?}",
-                top.phrases[1].item
-            );
-        };
-        assert!(matches!(pattern.as_ref(), IrPattern::Name(n) if n.as_ref() == "g"));
-        let CompKind::Return(Val::Thunk(rec)) = &rhs.item else {
-            panic!("expected Return(Thunk(Rec)), got {:?}", rhs.item);
-        };
-        assert!(
-            matches!(rec.shape().item, CompKind::Rec { index: 0, .. }),
-            "expected the self-recursive binding to emit a Rec{{index: 0}}, got {:?}",
-            rec.shape().item
-        );
-    }
-
-    /// The self-reference inside `f`'s body forces the forward-declared
-    /// variable rather than shelling out to a command named `f`.
-    #[test]
-    fn intra_group_recursion_resolves_to_binding() {
-        let ast = parse("let f = { |n| f $n }\nf 5").expect("parse");
-        let top = elaborate(&ast, HashSet::new(), "").expect("elaborate");
-        assert_eq!(top.phrases.len(), 2);
-        let Phrase::Define { comp: rhs, .. } = &top.phrases[0].item else {
-            panic!("expected a Define, got {:?}", top.phrases[0].item);
-        };
-        let CompKind::Return(Val::Thunk(rec)) = &rhs.item else {
-            panic!("expected Return(Thunk(Rec)), got {:?}", rhs.item);
-        };
-        let CompKind::Rec { group, index } = &rec.shape().item else {
-            panic!("expected a Rec node, got {:?}", rec.shape().item);
-        };
-        let (_, member) = &group.shape()[*index];
-        let CompKind::Lam { body, .. } = &member.item else {
-            panic!("expected a lambda RHS, got {:?}", member.item);
-        };
-        assert!(
-            matches!(body.item, CompKind::App { .. }),
-            "expected the self-reference to force the bound variable, got {:?}",
-            body.item
-        );
-    }
-
-    /// A `?`-chain arm is guarded, so the interpolation's `!{…}` hoist must
-    /// live inside the arm: the statement elaborates to a bare `Try`, never
-    /// to a `Bind` that would run the hoist before the chain.
-    #[test]
-    fn chain_arm_hoist_stays_inside_the_arm() {
-        let ast = parse(r#"return ok ? echo "fallback: !{hostname}""#).expect("parse");
-        let comp = elaborate_one(&ast, HashSet::new(), "");
-        assert!(
-            matches!(comp.item, CompKind::Try { .. }),
-            "chain arm hoist leaked into the caller: expected a bare Try, got {:?}",
-            comp.item
-        );
-    }
-
-    /// A sub-expression hoisted out of a command argument is emitted under
-    /// that argument's span, not the enclosing call's, so a runtime error in
-    /// it underlines the argument.
-    #[test]
-    fn a_hoisted_argument_keeps_its_own_span() {
-        let src = "echo $xs[9]";
-        let ast = parse(src).expect("parse");
-        let comp = elaborate_one(&ast, HashSet::new(), "");
-        let CompKind::Bind { comp: rhs, .. } = &comp.item else {
-            panic!(
-                "expected the index to hoist into a Bind, got {:?}",
-                comp.item
-            );
-        };
-        let span = rhs.span.expect("a hoisted argument must carry a span");
-        assert_eq!(
-            &src[span.start as usize..span.end as usize],
-            "$xs[9]",
-            "the hoist carried the whole call's span"
-        );
-    }
-
-    /// `$SCRIPT` resolves to a string literal, not a runtime lookup.
-    #[test]
-    fn script_bakes_to_a_string_literal() {
-        let ast = parse("return $SCRIPT").expect("parse");
-        let comp = elaborate_one(&ast, HashSet::new(), "/repo/lib.ral");
-        assert_eq!(
-            comp.item,
-            CompKind::Return(Val::String("/repo/lib.ral".into()))
-        );
-    }
-
-    /// Sources with no script identity — the REPL, `-c`, a preloaded `<...>`
-    /// source — reject `$SCRIPT` at elaboration time.
-    #[test]
-    fn script_with_no_identity_is_an_elaboration_error() {
-        let ast = parse("return $SCRIPT").expect("parse");
-        assert!(elaborate(&ast, HashSet::new(), "").is_err());
-        assert!(elaborate(&ast, HashSet::new(), "-c").is_err());
-        assert!(elaborate(&ast, HashSet::new(), "<stdin>").is_err());
-    }
-
-    // ── phrases and right-nested binders ─────────────────────────────────
-
-    #[test]
-    fn nested_sequence_is_wildcard_bind() {
-        let stmts = parse("date\necho hi").expect("parse");
-        let mut elaborator = Elaborator::new_with_bindings(HashSet::new(), "");
-        let seq = elaborator.stmts_nested(&stmts);
-        let CompKind::Bind {
-            pattern,
-            comp,
-            rest,
-            ..
-        } = &seq.item
-        else {
-            panic!("expected a Bind, got {:?}", seq.item);
-        };
-        assert!(matches!(pattern.as_ref(), IrPattern::Wildcard));
-        let (name, _, _) = expect_exec_name(comp);
-        assert_eq!(name, &CommandName::Bare("date".into()));
-        let (name, _, _) = expect_exec_name(rest);
-        assert_eq!(name, &CommandName::Bare("echo".into()));
-    }
-
-    #[test]
-    fn nested_let_wildcard_binds_a_fresh_name() {
-        let stmts = parse("let _ = date\necho hi").expect("parse");
-        let mut elaborator = Elaborator::new_with_bindings(HashSet::new(), "");
-        let seq = elaborator.stmts_nested(&stmts);
-        let CompKind::Bind { pattern, .. } = &seq.item else {
-            panic!("expected a Bind, got {:?}", seq.item);
-        };
-        match pattern.as_ref() {
-            IrPattern::Name(n) => assert!(crate::ir::is_gensym(n), "not a gensym: {n}"),
-            other => panic!("expected a fresh Name, never Wildcard, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn nested_let_right_nests_over_following_statements() {
-        let stmts = parse("let x = 1\necho hi\necho bye").expect("parse");
-        let mut elaborator = Elaborator::new_with_bindings(HashSet::new(), "");
-        let seq = elaborator.stmts_nested(&stmts);
-        let CompKind::Bind { pattern, rest, .. } = &seq.item else {
-            panic!("expected a Bind, got {:?}", seq.item);
-        };
-        assert!(matches!(pattern.as_ref(), IrPattern::Name(n) if n.as_ref() == "x"));
-        let CompKind::Bind {
-            pattern: inner_pattern,
-            rest: inner_rest,
-            ..
-        } = &rest.item
-        else {
-            panic!(
-                "expected the let to right-nest over echo hi, got {:?}",
-                rest.item
-            );
-        };
-        assert!(matches!(inner_pattern.as_ref(), IrPattern::Wildcard));
-        let (name, _, _) = expect_exec_name(inner_rest);
-        assert_eq!(name, &CommandName::Bare("echo".into()));
-    }
-
-    #[test]
-    fn nested_block_ending_in_let_has_unit_tail() {
-        let stmts = parse("let x = 1").expect("parse");
-        let mut elaborator = Elaborator::new_with_bindings(HashSet::new(), "");
-        let seq = elaborator.stmts_nested(&stmts);
-        let CompKind::Bind { rest, .. } = &seq.item else {
-            panic!("expected a Bind, got {:?}", seq.item);
-        };
-        assert_eq!(rest.item, CompKind::Return(Val::Unit));
-    }
-
-    #[test]
-    fn toplevel_phrases_classify_define_and_run() {
-        let ast = parse("let x = 1\necho hi").expect("parse");
-        let top = elaborate(&ast, HashSet::new(), "").expect("elaborate");
-        assert_eq!(top.phrases.len(), 2);
-        assert!(matches!(top.phrases[0].item, Phrase::Define { .. }));
-        assert!(matches!(top.phrases[1].item, Phrase::Run(_)));
-    }
-
-    #[test]
-    fn toplevel_self_recursive_let_is_a_rec_define() {
-        let ast = parse("let f = { |n| f $n }").expect("parse");
-        let top = elaborate(&ast, HashSet::new(), "").expect("elaborate");
-        assert_eq!(top.phrases.len(), 1);
-        let Phrase::Define { pattern, comp, .. } = &top.phrases[0].item else {
-            panic!("expected a Define, got {:?}", top.phrases[0].item);
-        };
-        assert!(matches!(pattern.as_ref(), IrPattern::Name(n) if n.as_ref() == "f"));
-        let CompKind::Return(Val::Thunk(rec)) = &comp.item else {
-            panic!("expected Return(Thunk(Rec)), got {:?}", comp.item);
-        };
-        let CompKind::Rec { group, index } = &rec.shape().item else {
-            panic!("expected a Rec node, got {:?}", rec.shape().item);
-        };
-        assert_eq!(*index, 0);
-        assert_eq!(
-            group.shape().len(),
-            1,
-            "a self-recursive let is a group of one"
-        );
-    }
-
-    #[test]
-    fn toplevel_mutual_recursion_shares_one_group_arc() {
-        let ast = parse("let f = { |x| g $x }\nlet g = { |y| f $y }").expect("parse");
-        let top = elaborate(&ast, HashSet::new(), "").expect("elaborate");
-        assert_eq!(top.phrases.len(), 2);
-        fn group_arc(phrase: &Phrase) -> Arc<GroupNode> {
-            let Phrase::Define { comp, .. } = phrase else {
-                panic!("expected a Define, got {phrase:?}");
-            };
-            let CompKind::Return(Val::Thunk(rec)) = &comp.item else {
-                panic!("expected Return(Thunk(Rec)), got {:?}", comp.item);
-            };
-            let CompKind::Rec { group, .. } = &rec.shape().item else {
-                panic!("expected a Rec node, got {:?}", rec.shape().item);
-            };
-            Arc::clone(group)
-        }
-        let g1 = group_arc(&top.phrases[0].item);
-        let g2 = group_arc(&top.phrases[1].item);
-        assert!(
-            Arc::ptr_eq(&g1, &g2),
-            "both binders must share one group Arc"
-        );
-        assert_eq!(g1.shape()[0].0.as_ref(), "f");
-        assert_eq!(g1.shape()[1].0.as_ref(), "g");
-    }
-
-    fn is_home_tilde(comp: &Comp) -> bool {
-        comp.item == CompKind::Tilde(TildePath { suffix: None })
-    }
-
-    /// The hoisted read and what follows it, from `comp`'s outermost bind.
-    fn hoisted(comp: &Comp) -> (&Comp, &IrPattern, &Comp) {
-        let CompKind::Bind {
-            comp: rhs,
-            pattern,
-            rest,
-        } = &comp.item
-        else {
-            panic!("expected a Bind over a hoisted read, got {:?}", comp.item);
-        };
-        (rhs, pattern, rest)
-    }
-
-    #[test]
-    fn tilde_path_hoists_one_tilde() {
-        let ast = parse("echo ~/x").expect("parse");
-        let comp = elaborate_one(&ast, HashSet::new(), "");
-        let (rhs, _, rest) = hoisted(&comp);
-        assert_eq!(
-            rhs.item,
-            CompKind::Tilde(TildePath {
-                suffix: Some("/x".into())
-            })
-        );
-        assert!(matches!(rest.item, CompKind::Exec(_)));
-    }
-
-    #[test]
-    fn leading_tilde_in_a_string_interpolates_the_home_tilde() {
-        let ast = parse(r#""~/x""#).expect("parse");
-        let comp = elaborate_one(&ast, HashSet::new(), "");
-        let (rhs, pattern, rest) = hoisted(&comp);
-        assert!(is_home_tilde(rhs), "got {:?}", rhs.item);
-        let IrPattern::Name(tmp) = pattern else {
-            panic!("expected a named temporary, got {pattern:?}");
-        };
-        let CompKind::Interpolation(parts) = &rest.item else {
-            panic!("expected an Interpolation, got {:?}", rest.item);
-        };
-        assert_eq!(
-            parts.as_slice(),
-            [Val::Variable(tmp.clone()), Val::String("/x".into())]
-        );
-    }
-
-    #[test]
-    fn let_of_lone_tilde_reads_rather_than_runs() {
-        let ast = parse("let h = ~").expect("parse");
-        let top = elaborate(&ast, HashSet::new(), "").expect("elaborate");
-        let Phrase::Define { comp, .. } = &top.phrases[0].item else {
-            panic!("expected a Define, got {:?}", top.phrases[0].item);
-        };
-        let (rhs, _, rest) = hoisted(comp);
-        assert!(is_home_tilde(rhs), "got {:?}", rhs.item);
-        assert!(matches!(rest.item, CompKind::Return(Val::Variable(_))));
-    }
-
-    /// A literal with no spread stays value syntax; one with a spread is a
-    /// computation, hoisted like any other under `to_val`.
-    #[test]
-    fn a_spread_literal_is_an_assembly_and_a_plain_one_a_value() {
-        let ast = parse("return [1, $x]").expect("parse");
-        let comp = elaborate_one(&ast, HashSet::new(), "");
-        assert!(
-            matches!(&comp.item, CompKind::Return(Val::List(_))),
-            "expected Return(Val::List(_)), got {:?}",
-            comp.item
-        );
-
-        let ast = parse("return [1, ...$xs]").expect("parse");
-        let comp = elaborate_one(&ast, HashSet::new(), "");
-        let CompKind::Bind {
-            comp: rhs, rest, ..
-        } = &comp.item
-        else {
-            panic!(
-                "expected a Bind over the hoisted assembly, got {:?}",
-                comp.item
-            );
-        };
-        assert!(
-            matches!(rhs.item, CompKind::Assemble(Assembly::List(_))),
-            "expected Assemble(List(_)), got {:?}",
-            rhs.item
-        );
-        assert!(
-            matches!(&rest.item, CompKind::Return(Val::Variable(_))),
-            "expected the rest to return the hoisted temporary, got {:?}",
-            rest.item
-        );
-    }
-
-    /// An arm is a literal block or a name holding one: anything else would be
-    /// hoisted, and so run before the form chose.
-    #[test]
-    fn an_arm_that_would_hoist_is_refused() {
-        for src in [
-            "if true \"a$[1 + 1]\" else { return () }",
-            "case `a () [`a: !{mk}]",
-        ] {
-            let ast = parse(src).expect("parse");
-            let err = elaborate(&ast, HashSet::new(), "").expect_err(src);
-            assert!(
-                err.message.contains("an arm is a block"),
-                "{src}: {}",
-                err.message
-            );
-        }
-        let ast = parse("let h = { return 1 }; if true $h else { return 2 }").expect("parse");
-        assert!(
-            elaborate(&ast, HashSet::new(), "").is_ok(),
-            "a name holding a block is an arm"
-        );
-    }
-
-    /// A literal arm is a thunk, forced by the form that took it; an `else`-less
-    /// `if` discards its lone arm's result.
-    #[test]
-    fn arms_are_thunks_and_a_lone_arm_returns_unit() {
-        let ast = parse("if true { echo hi }").expect("parse");
-        let comp = elaborate_one(&ast, HashSet::new(), "");
-        let CompKind::If { then, else_, .. } = &comp.item else {
-            panic!("expected an if, got {:?}", comp.item);
-        };
-        for arm in [then, else_] {
-            assert!(matches!(arm.item, Val::Thunk(_)), "arm {:?}", arm.item);
-        }
-        let Val::Thunk(node) = &then.item else {
-            unreachable!()
-        };
-        assert!(
-            matches!(&node.shape().item, CompKind::Bind { pattern, .. } if matches!(**pattern, IrPattern::Wildcard)),
-            "the lone arm is wrapped to discard its result, got {:?}",
-            node.shape().item
-        );
-    }
-}
+mod tests;

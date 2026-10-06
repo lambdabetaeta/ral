@@ -4,7 +4,7 @@
 
 use crate::fleet::schedule::ScheduleId;
 use jiff::fmt::friendly::{Designator, Spacing, SpanPrinter};
-use ral_core::serial::FOValue;
+use ral_core::first_order::FOValue;
 use std::time::Duration;
 
 use super::AgentId;
@@ -103,7 +103,7 @@ impl AgentOutcome {
         let took = elapsed_phrase(elapsed);
         match self {
             Self::Replied => format!(
-                "[agent '{name}' replied after {took} — run exarch-agents `read '{name}' to read it]"
+                "[agent '{name}' replied after {took}: run exarch-agents `read '{name}' to read it]"
             ),
             Self::Stopped(r) => format!("[agent '{name}' stopped after {took}: {r}]"),
             Self::Cancelled => format!("[agent '{name}' was cancelled after {took}]"),
@@ -400,7 +400,7 @@ mod tests {
         let took = Duration::from_secs(72);
         assert_eq!(
             AgentOutcome::Replied.marked_item("helper", took),
-            "[agent 'helper' replied after 1 min 12 secs — run exarch-agents `read 'helper' to read it]"
+            "[agent 'helper' replied after 1 min 12 secs: run exarch-agents `read 'helper' to read it]"
         );
         assert_eq!(
             AgentOutcome::Failed("boom".into()).marked_item("helper", took),

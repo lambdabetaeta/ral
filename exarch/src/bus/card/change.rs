@@ -21,21 +21,14 @@ impl Change {
     /// observation.  No diff without both sides: an unknown before-image must
     /// not read as a creation.
     pub(crate) fn of(what: &Observed) -> Option<Self> {
-        let Observed::Write {
-            path,
-            outcome,
-            new_bytes,
-            old_bytes,
-            ..
-        } = what
-        else {
+        let Observed::Write(w) = what else {
             return None;
         };
         Some(Self {
-            path: path.clone(),
-            outcome: *outcome,
-            diff: text(old_bytes.as_deref())
-                .zip(text(new_bytes.as_deref()))
+            path: w.path.clone(),
+            outcome: w.outcome,
+            diff: text(w.old_bytes.as_deref())
+                .zip(text(w.new_bytes.as_deref()))
                 .map(|(old, new)| Diff::between(old, new)),
         })
     }

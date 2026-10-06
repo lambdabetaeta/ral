@@ -4,7 +4,7 @@
 //! `&mut Avatar`/`&mut Shell`, since the reentrancy law bars a handler from
 //! taking the session lock. [`ExarchDesk`] answers one enquiry against that
 //! capture, paired with its [`SurfaceApplier`] in one [`RunHost`], which
-//! implements [`ral_core::protocol::Host`] — the object every dispatch
+//! implements [`ral_core::carrier::Host`] — the object every dispatch
 //! rides, so a handler's chrome can never outrun the run's earlier surface
 //! output.
 
@@ -22,9 +22,11 @@ use crate::fleet::roster::{listing, summary};
 use crate::provider::Provider;
 use crate::shell_eval::{self, Surface};
 use ral_core::SpawnGrant;
-use ral_core::protocol::{EnquiryError, Host};
-use ral_core::serial::FOValue;
-use ral_core::serial::datum::Datum;
+use ral_core::carrier::Host;
+use ral_core::fact::{Act, Worker};
+use ral_core::first_order::FOValue;
+use ral_core::first_order::datum::Datum;
+use ral_core::protocol::EnquiryError;
 use ral_core::sync::LockExt;
 use ral_core::types::{Error, Observation, Observed};
 use std::collections::HashSet;
@@ -39,9 +41,12 @@ use std::sync::{Arc, Mutex};
 /// The clock is the transport's own, so a dial carries no second deadline —
 /// and it is lifted again before the stream is adopted, since the reader
 /// thread must then park in `read_frame` for as long as the child lives.
-fn greet_hatch(stream: &mut ral_core::wire::WireStream, token: u64) -> Result<(), String> {
+fn greet_hatch(
+    stream: &mut ral_core::protocol::channel::WireStream,
+    token: u64,
+) -> Result<(), String> {
     use std::io::{Read, Write};
-    let patience = ral_core::protocol::Liveness::default().deadline;
+    let patience = ral_core::protocol::channel::Liveness::default().deadline;
     stream
         .set_write_timeout(Some(patience))
         .and_then(|()| stream.set_read_timeout(Some(patience)))
@@ -58,7 +63,7 @@ fn greet_hatch(stream: &mut ral_core::wire::WireStream, token: u64) -> Result<()
     })?;
     if ack[0] != ral_core::protocol::HATCH_ACK {
         return Err(format!(
-            "the guest answered the hatch with byte {:#04x} rather than the acknowledgement — \
+            "the guest answered the hatch with byte {:#04x} rather than the acknowledgement: \
              whatever is listening on that port is not a ral engine waiting to be hatched",
             ack[0]
         ));
@@ -177,8 +182,8 @@ impl ActFragment {
             }
             acts.iter()
                 .filter_map(|obs| match &obs.what {
-                    Observed::Act { verb, subject, .. } => {
-                        Some(DeskAct::from_verb(verb).done(subject.as_deref()))
+                    Observed::Act(act) => {
+                        Some(DeskAct::from_verb(&act.verb).done(act.subject.as_deref()))
                     }
                     _ => None,
                 })
@@ -186,7 +191,7 @@ impl ActFragment {
                 .join("; ")
         };
         Some(format!(
-            "audit: this call had already {done}; that work stands — do not repeat it.\n"
+            "audit: this call had already {done}; that work stands; do not repeat it.\n"
         ))
     }
 }
@@ -243,12 +248,12 @@ impl HostServices {
         let obs = Observation::instant(
             None,
             self.principal.clone(),
-            Observed::Act {
+            Observed::Act(Act {
                 verb: act.verb().to_string(),
                 subject: subject.map(str::to_string),
                 payload: payload.clone(),
                 refused,
-            },
+            }),
         );
         self.record_display(crate::record::Display::HarnessCall {
             verb: act.verb().to_string(),
@@ -303,7 +308,7 @@ impl ExarchDesk {
     /// # Errors
     /// The decoder's refusal, or the addressed handler's.
     pub(crate) fn handle(&self, req: &FOValue) -> Result<FOValue, Error> {
-        match Request::decode(req).map_err(|why| Error::new(why, 1))? {
+        match Request::decode(req).map_err(Error::new)? {
             Request::Agents(Agents::List) => Ok(listing(&self.services.agent).encode()),
             Request::Agents(Agents::Start(start)) => self.launch(start),
             Request::Agents(Agents::Message(message)) => self.message(message),
@@ -344,7 +349,7 @@ impl ExarchDesk {
                 },
             ),
             Request::Transcript(Transcript::Grep(grep)) => self.locate_then_read(
-                |log| log.context().locate_grep(grep.turns.as_deref()),
+                |log| log.context().locate_grep(grep.turns.only()),
                 |read| {
                     read.grep(&grep.pattern)
                         .map(|hits| Hits::from(hits).encode())
@@ -367,9 +372,8 @@ impl ExarchDesk {
         if s.stamp.is_stale() {
             return Err(Error::new(
                 "`exarch-agents `start` refused: the agent tree was cleared while this call was still in \
-                 flight, so the fuel and permissions snapshot it captured are now stale — \
+                 flight, so the fuel and permissions snapshot it captured are now stale: \
                  issue agent again on your next turn",
-                1,
             ));
         }
 
@@ -379,24 +383,20 @@ impl ExarchDesk {
             return Err(Error::new(
                 "`exarch-agents `start` refused: no spawn fuel remains at this depth, so you cannot \
                  delegate any further here. Fuel bounds how deep a chain of spawns may \
-                 recurse, never how many children you may start at any one depth — starting \
+                 recurse, never how many children you may start at any one depth: starting \
                  several agents here costs nothing extra. `exarch-agents `cancel` on any node stops \
                  its whole live subtree regardless of depth.",
-                1,
             ));
         }
 
         // Didactic, not race-free: `register` below re-checks under its own
         // lock, and that is what closes a same-name race.
         if s.fleet.name_live(&name) {
-            return Err(Error::new(
-                format!(
-                    "`exarch-agents `start` refused: a live agent already bears the name '{name}' — pick \
+            return Err(Error::new(format!(
+                "`exarch-agents `start` refused: a live agent already bears the name '{name}'; pick \
                      another, or wait for it to settle. Names identify live agents; agents \
                      lists yours."
-                ),
-                1,
-            ));
+            )));
         }
 
         // Before the seat split, so both arms share one resolution and a
@@ -428,7 +428,7 @@ impl ExarchDesk {
     ) -> Result<Arc<Provider>, Error> {
         let s = &self.services;
         let current = s.agent.current_provider();
-        let refused = |why: String| Error::new(format!("`exarch-agents `start` refused: {why}"), 1);
+        let refused = |why: String| Error::new(format!("`exarch-agents `start` refused: {why}"));
         let bureau = &s.fleet.launch.bureau;
         let account = match provider {
             Selection::Inherit => current.account().clone(),
@@ -451,8 +451,7 @@ impl ExarchDesk {
     /// listener it opened across the wire, whose engine narrows itself by the
     /// seed it carries.
     fn fork_seat(&self, verb: &str, fork: ForkClaim, grant: &SpawnGrant) -> Result<Seat, Error> {
-        let refused =
-            |why: String| Error::new(format!("`exarch-agents `{verb}` refused: {why}"), 1);
+        let refused = |why: String| Error::new(format!("`exarch-agents `{verb}` refused: {why}"));
         match (&self.services.kind, fork) {
             (SeatKind::Identity(parent), ForkClaim::Parked(id)) => parent
                 .adopt_parked(id, grant)
@@ -463,13 +462,13 @@ impl ExarchDesk {
                 .map_err(refused),
             (SeatKind::Identity(_), ForkClaim::Listening { .. }) => Err(refused(
                 "this host runs its children in its own process, so the fork must be `parked \
-                 <nursery id>` — a session that says it is listening for a dial is describing a \
+                 <nursery id>`: a session that says it is listening for a dial is describing a \
                  wire this desk does not have"
                     .into(),
             )),
             (SeatKind::Wire { .. }, ForkClaim::Parked(_)) => Err(refused(
                 "this host reaches its children across a wire, so the fork must be `listening \
-                 [port, token]` — a session that says it is parked in process is naming a \
+                 [port, token]`: a session that says it is parked in process is naming a \
                  nursery this desk does not have"
                     .into(),
             )),
@@ -488,19 +487,19 @@ impl ExarchDesk {
     ) -> Result<Seat, String> {
         let s = &self.services;
         let dial = s.fleet.launch.dial.as_ref().ok_or(
-            "this wire session has no dialler installed to reach a helper engine's listener — a \
+            "this wire session has no dialler installed to reach a helper engine's listener: a \
              construction bug, since a fuelled wire trunk is refused at Avatar::root without one",
         )?;
         let mut stream = dial.dial(port).map_err(|reason| {
-            format!("could not dial the helper engine's listener on guest port {port} — {reason}")
+            format!("could not dial the helper engine's listener on guest port {port}: {reason}")
         })?;
         greet_hatch(&mut stream, token)?;
         // Past the ack the child is alive, so a refusal from here on simply
         // drops the stream: the child reads EOF on fd 3 and the guest's own
         // table reaps it.
-        let transport = ral_core::protocol::WireTransport::adopt(
+        let transport = ral_core::carrier::WireTransport::adopt(
             stream,
-            ral_core::protocol::Liveness::default(),
+            ral_core::protocol::channel::Liveness::default(),
         )
         .map_err(|e| format!("could not adopt the hatched wire: {e}"))?;
         // Attached as the parent was; the seed carries the live cwd.  A
@@ -552,12 +551,11 @@ impl ExarchDesk {
                     &crate::agent::RecordedModel::of(&provider),
                     &account,
                 )
-                .map_err(|e| Error::new(format!("could not fork child session log: {e}"), 1))?;
+                .map_err(|e| Error::new(format!("could not fork child session log: {e}")))?;
             let inherited = inherit_context.then(|| parent_log.inherited_context());
             drop(parent_log);
             if let Some(inherited) = inherited {
-                log.import_context(inherited)
-                    .map_err(|e| Error::new(e, 1))?;
+                log.import_context(inherited).map_err(Error::new)?;
             }
             log
         };
@@ -576,7 +574,7 @@ impl ExarchDesk {
             search,
             fleet: s.fleet.clone(),
         })
-        .map_err(|why| Error::new(format!("`exarch-agents `{verb}` refused: {why}"), 1))
+        .map_err(|why| Error::new(format!("`exarch-agents `{verb}` refused: {why}")))
     }
 
     /// Hand `child` to `spawn_async` and answer the roster it now appears in —
@@ -602,7 +600,7 @@ impl ExarchDesk {
         );
         match spawned {
             Ok(_) => Ok(self.summary()),
-            Err(reason) => Err(Error::new(reason, 1)),
+            Err(reason) => Err(Error::new(reason)),
         }
     }
 
@@ -615,7 +613,6 @@ impl ExarchDesk {
             return Err(Error::new(
                 "`exarch-agents `branch` is the host's own `/branch` door, and no /branch is \
                  under way on this call",
-                1,
             ));
         };
         let seat = self.fork_seat("branch", fork, &SpawnGrant::Inherit)?;
@@ -653,7 +650,7 @@ impl ExarchDesk {
             None => Ok(false),
             Some(found) => match s.agent.descendant(&found) {
                 Some(target) => {
-                    target.cancel_tree(ral_core::process::CancelCause::Explicit);
+                    target.cancel_tree(ral_core::process::CancelCause::Cancelled);
                     Ok(true)
                 }
                 None => Err(()),
@@ -680,7 +677,7 @@ impl ExarchDesk {
         });
         // The raise is the model's only copy of a scope violation.
         if refused {
-            Err(Error::new(content, 1))
+            Err(Error::new(content))
         } else {
             Ok(self.summary())
         }
@@ -706,7 +703,7 @@ impl ExarchDesk {
             Some(to) if to.id == s.agent.id => (
                 "refused: that is you".to_string(),
                 format!(
-                    "agent '{name}' is you; `exarch-agents `message` reaches another agent — to wake yourself, arm a `exarch-schedules` fire"
+                    "agent '{name}' is you; `exarch-agents `message` reaches another agent: to wake yourself, arm a `exarch-schedules` fire"
                 ),
                 false,
             ),
@@ -724,7 +721,7 @@ impl ExarchDesk {
         if ok {
             Ok(self.summary())
         } else {
-            Err(Error::new(content, 1))
+            Err(Error::new(content))
         }
     }
 
@@ -735,15 +732,12 @@ impl ExarchDesk {
         if self.services.fleet.launch.allow_schedule {
             return Ok(());
         }
-        Err(Error::new(
-            format!(
-                "`{verb}` refused: this agent does not hold the self-wakeup grant. An agent \
+        Err(Error::new(format!(
+            "`{verb}` refused: this agent does not hold the self-wakeup grant. An agent \
                  that can wake itself indefinitely holds real authority, so the grant is off \
                  by default; relaunch with `--allow-schedule` if this session genuinely needs \
                  to schedule its own wakeups."
-            ),
-            1,
-        ))
+        )))
     }
 
     /// `` `add `` — arm a self-wakeup through
@@ -785,7 +779,7 @@ impl ExarchDesk {
         });
         match result {
             Ok(_) => Ok(self.schedule_table()),
-            Err(_) => Err(Error::new(content, 1)),
+            Err(_) => Err(Error::new(content)),
         }
     }
 
@@ -827,10 +821,9 @@ impl ExarchDesk {
         if !s.agent.returns {
             return Err(Error::new(
                 "exarch-agents `reply` refused: you converse with the user; you do not return. \
-                 `reply` parks you and hands your value to your parent's exarch-agents `read — \
+                 `reply` parks you and hands your value to your parent's exarch-agents `read: \
                  the interactive trunk and every /branch child instead keep talking, turn after \
                  turn, and hold no `reply` to call.",
-                1,
             ));
         }
         let display = shell_eval::ral_value_to_text(&value).unwrap_or_default();
@@ -867,7 +860,7 @@ impl ExarchDesk {
                 // until the descendant replies again.
                 Some(to) => to.reply().ok_or_else(|| {
                     format!(
-                        "agent '{name}' has not replied yet — it is still working; wait for its \
+                        "agent '{name}' has not replied yet: it is still working; wait for its \
                          notice instead of polling"
                     )
                 }),
@@ -882,7 +875,7 @@ impl ExarchDesk {
             }
             Err(text) => {
                 s.record_forensic(crate::record::Forensic::HarnessResult { text: text.clone() });
-                Err(Error::new(text, 1))
+                Err(Error::new(text))
             }
         }
     }
@@ -956,7 +949,7 @@ impl ExarchDesk {
         // Its own statement: the guard dies at this semicolon, so a long read
         // never holds the seam, the bus and `/resources` behind it.
         let located = locate(&mut self.services.log.lock());
-        located.and_then(read).map_err(|error| Error::new(error, 1))
+        located.and_then(read).map_err(Error::new)
     }
 
     /// `` `exarch-context `evict `` — the turns the address names leave the
@@ -992,13 +985,13 @@ impl ExarchDesk {
             .record_forensic(crate::record::Forensic::HarnessResult { text });
         survey
             .map(|survey| Survey::from(survey).encode())
-            .map_err(|error| Error::new(error, 1))
+            .map_err(Error::new)
     }
 }
 
 /// Decodes a surfaced value straight into the record.
 /// [`RunHost::apply`] is what every dispatch's drain loop
-/// ([`ral_core::protocol::dispatch_to_report`]) reaches through the protocol,
+/// ([`ral_core::carrier::dispatch_to_report`]) reaches through the protocol,
 /// so a call's surfaced values always render off the one applier it was built
 /// with.
 pub(crate) struct SurfaceApplier {
@@ -1039,7 +1032,7 @@ impl SurfaceApplier {
             }
         };
         if let Surface::Observation(event) = &surface
-            && let Observed::Worker { id, .. } = &event.what
+            && let Observed::Worker(Worker { id, .. }) = &event.what
         {
             self.births.lock_ignore_poison().insert(id.0);
         }
@@ -1082,7 +1075,7 @@ pub(crate) fn absorb_surface(
 ) -> std::io::Result<()> {
     match surface {
         Surface::Observation(event) => {
-            let value = event.to_wire();
+            let value = (**event).clone().encode();
             let _recorded = recorder.emit(crate::record::Display::Observation { value })?;
             Ok(())
         }
@@ -1103,22 +1096,17 @@ pub(crate) fn absorb_surface(
             })?;
             Ok(())
         }
-        Surface::Notice(crate::bus::card::Notice::Reap { cmd, cause }) => {
-            let cause = match cause {
-                ral_core::types::ReapCause::Idle => "idle",
-                ral_core::types::ReapCause::Backstop => "backstop",
-                ral_core::types::ReapCause::Retention => "retention",
-            };
+        Surface::Notice(ral_core::types::Notice::Reap(reap)) => {
             let _recorded = recorder.emit(crate::record::Forensic::Reap {
-                cmd: cmd.clone(),
-                cause: cause.to_string(),
+                cmd: reap.cmd.clone(),
+                cause: <&str>::from(reap.cause).to_string(),
             })?;
             Ok(())
         }
-        Surface::Notice(crate::bus::card::Notice::Prune { names, idle_calls }) => {
+        Surface::Notice(ral_core::types::Notice::Prune(pruned)) => {
             let _recorded = recorder.emit(crate::record::Forensic::Prune {
-                names: names.clone(),
-                idle_calls: idle_calls.clone(),
+                names: pruned.iter().map(|p| p.name.clone()).collect(),
+                idle_calls: pruned.iter().map(|p| p.idle_calls).collect(),
             })?;
             Ok(())
         }
@@ -1156,7 +1144,7 @@ impl Host for RunHost {
 
     fn enquire(&self, req: FOValue) -> Result<FOValue, EnquiryError> {
         self.desk.handle(&req).map_err(|e| EnquiryError {
-            status: e.exit_code(),
+            status: e.code(),
             message: e.message,
         })
     }
@@ -1172,7 +1160,7 @@ mod tests {
     use crate::agent::log::AgentLog;
     use crate::agent::testkit::ral_call;
     use crate::bus::{Inbox, Signal, channel};
-    use crate::fleet::enquiry::{Grant, Grep, Launch, Pin, Reading};
+    use crate::fleet::enquiry::{Grant, Grep, Launch, Pin, Reading, Turns};
     use crate::fleet::roster::AgentInfo;
     use crate::fleet::schedule::{Trigger, parse_duration};
     use crate::provider::{
@@ -1180,7 +1168,7 @@ mod tests {
         scripted::{Reply, Script},
     };
     use crate::record::{Display, FleetSink, Record, Transient};
-    use ral_core::serial::datum::tag;
+    use ral_core::first_order::datum::tag;
     use ral_core::types::NurseryId;
     use regex::Regex;
     use std::time::Duration;
@@ -1275,7 +1263,7 @@ mod tests {
     fn transcript_grep_request(pattern: &str, turns: Option<&[u64]>) -> Request {
         Request::Transcript(Transcript::Grep(Grep {
             pattern: Regex::new(pattern).expect("a test pattern compiles"),
-            turns: turns.map(<[u64]>::to_vec),
+            turns: turns.map_or(Turns::All, |t| Turns::Only(t.to_vec())),
         }))
     }
 
@@ -1456,9 +1444,9 @@ mod tests {
             f: Mutex::new(Some(Box::new(f))),
             out: Mutex::default(),
         });
-        let report = ral_core::protocol::dispatch_to_report(
+        let report = ral_core::carrier::dispatch_to_report(
             &**parent,
-            crate::agent::testkit::source_run("_exarch-branch"),
+            ral_core::protocol::Run::captured("_exarch-branch", "<test>"),
             host.clone(),
         )
         .expect("an identity engine never severs");
@@ -1498,7 +1486,7 @@ mod tests {
                 .expect_err("an unrecognised tag must not answer Ok");
             assert!(
                 err.message.starts_with(&format!(
-                    "unrecognised tag in `exarch-{class} `no-such-tag` — "
+                    "unrecognised tag in `exarch-{class} `no-such-tag`: "
                 )),
                 "got: {}",
                 err.message
@@ -1640,7 +1628,7 @@ mod tests {
         let error = desk
             .ask(transcript_read_request(&[9]))
             .expect_err("a read must not reach past what is recorded");
-        assert_eq!(error.message, "turn 9 is not recorded — the latest is 4");
+        assert_eq!(error.message, "turn 9 is not recorded: the latest is 4");
 
         desk.services
             .log
@@ -1652,7 +1640,7 @@ mod tests {
             .expect_err("the turn being written is not readable");
         assert_eq!(
             error.message,
-            "turn 5 is being written now — it is the one turn the transcript cannot read back yet"
+            "turn 5 is being written now: it is the one turn the transcript cannot read back yet"
         );
     }
 
@@ -1709,7 +1697,7 @@ mod tests {
             .expect_err("`turn` is not a field `grep` reads");
         assert_eq!(
             err.message,
-            "`exarch-transcript `grep`: unknown field `turn — did you mean `turns?"
+            "`exarch-transcript `grep`: unknown field `turn`: did you mean `turns`?"
         );
         desk.ask(transcript_grep_request("answer", Some(&[1, 2])))
             .expect("the spelt field still narrows the search");
@@ -1728,7 +1716,7 @@ mod tests {
             .expect_err("the turn being written is not editable");
         assert_eq!(
             err.message,
-            "turn 1 is being written now — an eviction keeps the work in hand"
+            "turn 1 is being written now: an eviction keeps the work in hand"
         );
 
         let unknown_desk = desk();
@@ -1739,7 +1727,7 @@ mod tests {
         let err = unknown_desk
             .ask(context_evict_request(&[7], None))
             .expect_err("an unrecorded turn is not editable");
-        assert_eq!(err.message, "turn 7 is not recorded — the latest is 2");
+        assert_eq!(err.message, "turn 7 is not recorded: the latest is 2");
 
         let evicted_desk = desk();
         {
@@ -1756,7 +1744,7 @@ mod tests {
             .expect_err("a turn that has left is not addressable");
         assert_eq!(
             err.message,
-            "turn 1 has already left your context — the earliest still in it is 3"
+            "turn 1 has already left your context: the earliest still in it is 3"
         );
 
         evicted_desk
@@ -1830,7 +1818,7 @@ mod tests {
             .expect_err("an empty note is not a note");
         assert_eq!(
             err.message,
-            "`exarch-context `evict`: `note: text must not be empty — `none leaves no note"
+            "`exarch-context `evict`: `note: text must not be empty: `none leaves no note"
         );
     }
 
@@ -1850,7 +1838,7 @@ mod tests {
             .expect_err("241 bytes is over the 240-byte cap");
         assert_eq!(
             err.message,
-            "`exarch-context `evict`: `note: text is 241 bytes; the marker keeps one short line — 240 at most. What is the one thing your future self needs to know?"
+            "`exarch-context `evict`: `note: text is 241 bytes; the marker keeps one short line: 240 at most. What is the one thing your future self needs to know?"
         );
     }
 
@@ -1871,7 +1859,7 @@ mod tests {
                 .expect_err("a note that breaks a line is not one row");
             assert_eq!(
                 err.message,
-                "`exarch-context `evict`: `note: text must be a single line — the marker draws one row per turn the cut takes, and a line break in a note reads as one of them."
+                "`exarch-context `evict`: `note: text must be a single line: the marker draws one row per turn the cut takes, and a line break in a note reads as one of them."
             );
         }
     }
@@ -1905,7 +1893,7 @@ mod tests {
             .expect_err("`through` is not a field `evict` reads");
         assert_eq!(
             err.message,
-            "`exarch-context `evict`: unknown field `through — expected `turns, `note"
+            "`exarch-context `evict`: unknown field `through`: expected `turns`, `note`"
         );
         desk.ask(context_evict_request(&[1, 2], Some("the parser is fixed")))
             .expect("the fields the tag does read still evict");
@@ -2094,61 +2082,31 @@ mod tests {
         let read = ral_core::types::Observation::instant(
             None,
             None,
-            ral_core::types::Observed::Read {
+            ral_core::types::Observed::Read(ral_core::fact::Read {
                 path: "a.rs".into(),
-            },
+            }),
         );
         applier.live(&read.to_surface());
         applier.live(&FOValue::Variant {
             label: "card".into(),
             payload: Some(Box::new(FOValue::List { items: vec![] })),
         });
-        applier.live(&FOValue::Variant {
-            label: "done".into(),
-            payload: Some(Box::new(FOValue::Map {
-                entries: vec![
-                    (
-                        "cmd".into(),
-                        FOValue::String {
-                            value: "<block>".into(),
-                        },
-                    ),
-                    (
-                        "outcome".into(),
-                        FOValue::Variant {
-                            label: "ok".into(),
-                            payload: Some(Box::new(FOValue::Unit)),
-                        },
-                    ),
-                ],
-            })),
-        });
-        applier.live(&FOValue::Variant {
-            label: "notice".into(),
-            payload: Some(Box::new(FOValue::Map {
-                entries: vec![
-                    (
-                        "kind".into(),
-                        FOValue::Variant {
-                            label: "reap".into(),
-                            payload: None,
-                        },
-                    ),
-                    (
-                        "cmd".into(),
-                        FOValue::String {
-                            value: "sleep 10".into(),
-                        },
-                    ),
-                    (
-                        "cause".into(),
-                        FOValue::String {
-                            value: "idle".into(),
-                        },
-                    ),
-                ],
-            })),
-        });
+        applier.live(
+            &ral_core::types::DoneEvent {
+                cmd: "<block>".into(),
+                outcome: ral_core::types::Done::Ok,
+            }
+            .to_surface(),
+        );
+        applier.live(
+            &ral_core::types::Notice::Reap(ral_core::types::ReapNotice {
+                id: ral_core::types::WorkerId(1),
+                cmd: "sleep 10".into(),
+                class: ral_core::types::LeaseClass::Worker,
+                cause: ral_core::types::ReapCause::Idle,
+            })
+            .to_surface(),
+        );
         d.ask(pin_set_req("tasks", "hi"))
             .expect("`exarch-pins `set` must answer Ok");
         d.ask(pin_clear_req("tasks"))
@@ -2432,7 +2390,7 @@ mod tests {
             .expect_err("`nmae` is not a field the spec carries");
         assert_eq!(
             err.message,
-            "`exarch-agents `start`: `spec: unknown field `nmae — did you mean `name?"
+            "`exarch-agents `start`: `spec: unknown field `nmae`: did you mean `name`?"
         );
     }
 
@@ -2705,7 +2663,7 @@ mod tests {
             });
             assert!(
                 answer.is_ok(),
-                "sibling {i} must not be refused for lack of fuel — fuel \
+                "sibling {i} must not be refused for lack of fuel: fuel \
                  bounds depth, not fan-out"
             );
         }
@@ -2764,7 +2722,7 @@ mod tests {
         assert!(
             !left_parked,
             "a refusal downstream of adopt must not leave the fork \
-             re-adoptable — it was already claimed and simply drops"
+             re-adoptable: it was already claimed and simply drops"
         );
     }
 
@@ -2801,7 +2759,7 @@ mod tests {
             .expect_err("a message to oneself must be refused");
         assert_eq!(
             err.message,
-            "agent 'mid' is you; `exarch-agents `message` reaches another agent — to wake yourself, arm a `exarch-schedules` fire"
+            "agent 'mid' is you; `exarch-agents `message` reaches another agent: to wake yourself, arm a `exarch-schedules` fire"
         );
 
         let cancel_err = desk1
@@ -3100,7 +3058,7 @@ mod tests {
             desk.services.acts.audit().as_deref(),
             Some(
                 "audit: this call had already armed the wakeup 'nightly'; removed the wakeup \
-                 'nightly'; staged your reply; that work stands — do not repeat it.\n"
+                 'nightly'; staged your reply; that work stands; do not repeat it.\n"
             )
         );
     }
@@ -3261,7 +3219,7 @@ mod tests {
             "the reply the second steer produced must be the one deposited"
         );
         // A replied child parks for a follow-up; only a terminate ends it.
-        child_agent.cancel_tree(ral_core::process::CancelCause::Explicit);
+        child_agent.cancel_tree(ral_core::process::CancelCause::Cancelled);
         handle.join().expect("worker thread must not panic");
     }
 
@@ -3339,7 +3297,7 @@ mod tests {
 
         // Wind the child down rather than leave its thread parked forever: per
         // `ParkMode`, a terminate-cause cancel ends an unengaged park at once.
-        agent.cancel_tree(ral_core::process::CancelCause::Explicit);
+        agent.cancel_tree(ral_core::process::CancelCause::Cancelled);
         let _ = wait_for_settle(&parent.inbox());
         handle.join().expect("worker thread must not panic");
     }
@@ -3383,7 +3341,7 @@ mod wire_tests {
     fn spawn_engine_on(guest: &UnixStream) -> std::process::Child {
         let guest_fd = guest.as_raw_fd();
         let mut cmd = std::process::Command::new(std::env::current_exe().expect("current exe"));
-        cmd.arg("--engine");
+        cmd.arg(ral_core::Role::Engine.flag());
         cmd.stdin(std::process::Stdio::null());
         cmd.stdout(std::process::Stdio::null());
         cmd.stderr(std::process::Stdio::null());
@@ -3447,7 +3405,7 @@ mod wire_tests {
     }
 
     impl crate::agent::Dial for FakeDial {
-        fn dial(&self, port: u32) -> Result<ral_core::wire::WireStream, String> {
+        fn dial(&self, port: u32) -> Result<ral_core::protocol::channel::WireStream, String> {
             self.ports.lock().unwrap().push(port);
             let hatches = match &self.guest {
                 Guest::Refuses(reason) => return Err(reason.clone()),
@@ -3486,10 +3444,12 @@ mod wire_tests {
         let (host, guest) = UnixStream::pair().expect("socketpair standing in for the dial");
         let mut child = spawn_engine_on(&guest);
         drop(guest);
-        let transport =
-            ral_core::protocol::WireTransport::adopt(host, ral_core::protocol::Liveness::default())
-                .expect("adopt host stream");
-        let control = ral_core::protocol::Transport::control(&transport).clone();
+        let transport = ral_core::carrier::WireTransport::adopt(
+            host,
+            ral_core::protocol::channel::Liveness::default(),
+        )
+        .expect("adopt host stream");
+        let control = ral_core::carrier::Transport::control(&transport).clone();
         let _ = child.kill();
         let _ = child.wait();
         InterruptTarget::new(control)

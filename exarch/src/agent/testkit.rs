@@ -14,8 +14,9 @@ use crate::shell_eval::tools::Toolset;
 use ral_core::Shell;
 use ral_core::Value;
 use ral_core::engine::EngineInstaller;
+use ral_core::ty::{Scheme, Ty};
+use ral_core::typecheck::Unifier;
 use ral_core::typecheck::builtins::{mk_scheme, pure, thunk};
-use ral_core::typecheck::{Scheme, Ty, Unifier};
 use ral_core::types::{BuiltinBody, BuiltinEntry, Mooring, Settled};
 use std::borrow::Cow;
 use std::path::PathBuf;
@@ -69,7 +70,7 @@ pub(crate) fn dressed_trunk(dress: impl FnOnce(&mut Shell) + 'static) -> Avatar 
 )]
 fn bare_boot(_attach: &ral_core::protocol::Attach) -> Result<ral_core::engine::Booted, String> {
     Ok(ral_core::engine::Booted {
-        shell: Shell::new(ral_core::io::TerminalState::default()),
+        shell: ral_core::test_helper::core_shell(),
         keep: Box::new(()),
     })
 }
@@ -82,9 +83,9 @@ static BARE: [EngineInstaller; 1] = [EngineInstaller {
 
 /// An engine over a bare shell: no prelude, no surface, nothing to reach
 /// but its control and its probes.
-pub(crate) fn bare_transport() -> ral_core::protocol::IdentityTransport {
+pub(crate) fn bare_transport() -> ral_core::carrier::IdentityTransport {
     let temp = std::env::temp_dir();
-    ral_core::protocol::IdentityTransport::boot(
+    ral_core::carrier::IdentityTransport::boot(
         &BARE,
         &ral_core::protocol::Attach::new("bare", temp.clone(), temp),
     )
@@ -118,7 +119,7 @@ pub(crate) struct TestAgentSpec {
     /// backdated by it, so a test can stand past an idle threshold without
     /// waiting the threshold out.
     pub(crate) idle: Duration,
-    pub(crate) caps: ral_core::types::GrantStack,
+    pub(crate) caps: ral_core::capability::GrantStack,
     pub(crate) fuel: u32,
     pub(crate) returns: bool,
     pub(crate) search: bool,
@@ -130,12 +131,12 @@ impl TestAgentSpec {
         Self {
             name: name.to_string(),
             reach: InterruptTarget::new(
-                ral_core::protocol::Transport::control(&bare_transport()).clone(),
+                ral_core::carrier::Transport::control(&bare_transport()).clone(),
             ),
             mailbox: crate::bus::Inbox::new().mailbox(),
             parent: None,
             idle: Duration::ZERO,
-            caps: ral_core::types::GrantStack::root(),
+            caps: ral_core::capability::GrantStack::root(),
             fuel: 0,
             returns: false,
             search: false,
@@ -200,29 +201,11 @@ pub(crate) fn test_agent(
     Ok(agent)
 }
 
-/// A capturing run of `src`, under the lattice top.
-pub(crate) fn source_run(src: &str) -> ral_core::protocol::Run {
-    ral_core::protocol::Run {
-        program: ral_core::protocol::Program::Source(src.into()),
-        script_name: "<test>".into(),
-        caps: ral_core::types::GrantStack::root(),
-        wall: None,
-        deferred_lease: None,
-        worker_cap: None,
-        io: ral_core::RunIo::Capture,
-        terminal: ral_core::RequestedTerminalAccess::Denied,
-        stdin: ral_core::RunStdin::Empty,
-        trail: None,
-    }
-}
-
 /// A boundary read through one of `test_access`'s count probes — unlike
 /// `scope_has` it ticks no epoch and no ledger.
 pub(crate) fn probe_count(
     session: &Avatar,
-    probe: impl FnOnce(
-        &dyn ral_core::protocol::Transport,
-    ) -> Result<u64, ral_core::protocol::ProbeError>,
+    probe: impl FnOnce(&dyn ral_core::carrier::Transport) -> Result<u64, ral_core::carrier::ProbeError>,
 ) -> u64 {
     session
         .seat
@@ -328,7 +311,7 @@ fn root(trunk: Trunk, tools: Toolset) -> Avatar {
     Avatar::root(
         RootConfig {
             system: "system".into(),
-            caps: ral_core::types::GrantStack::root(),
+            caps: ral_core::capability::GrantStack::root(),
             run_dir,
             account: RecordedAccount::for_test("test"),
             trunk,
@@ -344,7 +327,7 @@ fn root(trunk: Trunk, tools: Toolset) -> Avatar {
         RootSeat::Identity {
             scratch: Arc::new(scratch),
             cwd: std::env::current_dir().expect("test process has a cwd"),
-            terminal: ral_core::io::TerminalState::default(),
+            terminal: ral_core::terminal::TerminalState::default(),
         },
         scripted("test-model", Script::new()),
     )
@@ -370,7 +353,7 @@ pub(crate) fn drive_peer(child: &mut Avatar, provider: Arc<Provider>) -> AgentOu
         std::thread::spawn(move || {
             while attending.load(Ordering::Acquire) {
                 if agent.has_reply() {
-                    agent.cancel(ral_core::process::CancelCause::Explicit);
+                    agent.cancel(ral_core::process::CancelCause::Cancelled);
                     return;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(2));
@@ -393,7 +376,7 @@ pub(crate) fn builtin_test_clear_block_forever(
     _shell: &mut Shell,
 ) -> Settled<Value> {
     loop {
-        ral_core::process::check(mooring)?;
+        mooring.check()?;
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
 }
@@ -414,7 +397,7 @@ pub(crate) fn builtin_test_clear_block_until_released(
 ) -> Settled<Value> {
     loop {
         if CLEAR_RELEASE.load(std::sync::atomic::Ordering::Acquire) {
-            ral_core::process::check(mooring)?;
+            mooring.check()?;
         }
         std::thread::sleep(std::time::Duration::from_millis(2));
     }

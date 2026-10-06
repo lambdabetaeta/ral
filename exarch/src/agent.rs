@@ -71,8 +71,8 @@ use crate::bus::{
 use crate::fleet::Fleet;
 use crate::provider::Provider;
 use crate::shell_eval;
+use ral_core::first_order::FOValue;
 use ral_core::process::CancelCause;
-use ral_core::serial::FOValue;
 use ral_core::sync::LockExt;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -100,7 +100,7 @@ pub struct Agent {
     /// so a fork's per-turn read is a refcount bump, never a re-copy of the
     /// ~38 KB template.
     pub(crate) system: Arc<str>,
-    pub(crate) caps: ral_core::types::GrantStack,
+    pub(crate) caps: ral_core::capability::GrantStack,
     /// Strong and upward: `None` ⇔ this agent is a root — the trunk, or a
     /// `/branch` child, which converses and reports to nobody.  A parent
     /// whose avatar has gone is still reachable here, terminated token and
@@ -187,7 +187,7 @@ pub(crate) struct Birth {
     pub log_dir: PathBuf,
     pub started: Instant,
     pub system: Arc<str>,
-    pub caps: ral_core::types::GrantStack,
+    pub caps: ral_core::capability::GrantStack,
     pub parent: Option<Arc<Agent>>,
     pub fuel: u32,
     pub provider: ProviderHandle,
@@ -457,7 +457,7 @@ impl Agent {
     /// Unwind this agent's in-flight run without ending it: the Esc/Ctrl-C
     /// path, and the `` exarch-agents `cancel `` scoped verb's per-target primitive.
     pub(crate) fn interrupt(&self) {
-        self.token.cancel(CancelCause::Interrupt);
+        self.token.cancel(CancelCause::Interrupted);
         self.reach.interrupt();
     }
 
@@ -542,7 +542,7 @@ impl Agent {
     /// parent abandoning its children, and `/clear`.  Both rebuild in place,
     /// so this must never stamp the root's own [`cancel::Token`]: a terminate
     /// cause there is permanent ([`cancel::Token::reset`] clears only a bare
-    /// [`CancelCause::Interrupt`]) and every later run would fail.
+    /// [`CancelCause::Interrupted`]) and every later run would fail.
     pub(crate) fn cancel_descendants(&self, cause: CancelCause) {
         for node in self.walk() {
             node.cancel(cause);
@@ -554,7 +554,7 @@ impl Agent {
     /// wakeups, its pins.  The inbox fence is bumped by the drain in
     /// `Avatar::clear`, not here.
     pub(crate) fn forget(&self) {
-        self.cancel_descendants(CancelCause::Explicit);
+        self.cancel_descendants(CancelCause::Cancelled);
         self.status.lock_ignore_poison().awaiting.clear();
         self.schedules.clear();
         self.pins.lock_ignore_poison().clear();
@@ -603,7 +603,7 @@ impl Avatar {
     /// party that knows how to go and fetch it while the corpse is still
     /// warm.  synod reaches its guest's console this way; an exchange that
     /// merely went badly answers `None` and nothing is fetched.
-    pub fn severance(&self) -> Option<ral_core::protocol::Severed> {
+    pub fn severance(&self) -> Option<ral_core::carrier::Severed> {
         self.seat.severed()
     }
 

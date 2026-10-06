@@ -136,7 +136,7 @@ impl Engine {
             return;
         };
         if let Err(error) = self.runtime.block_on(oauth::refresh_cell_if_stale(cell)) {
-            eprintln!("exarch: ChatGPT token refresh failed: {error}");
+            ral_core::errln!("exarch: ChatGPT token refresh failed: {error}");
         }
     }
 

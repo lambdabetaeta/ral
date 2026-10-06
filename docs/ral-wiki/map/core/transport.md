@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 74f7d546
+generated_at_commit: 446e3123
 generated_at_date: 2026-09-26
-covers_paths: [core/src/serial.rs, core/src/serial/, core/src/subprocess.rs, core/src/subprocess_codec.rs, core/src/engine_seed.rs, core/src/spawn_grant.rs]
+covers_paths: [core/src/first_order.rs, core/src/first_order/, core/src/types/value/first_order.rs, core/src/seed.rs, core/src/seed/, core/src/frame.rs, core/src/guard/grant.rs]
 ---
 
 # Map: core / transport
@@ -26,10 +26,10 @@ indistinguishable from an in-process fork exactly when no hop drops a field or
 collapses a variant. The discipline is mechanical — an exhaustive match makes a
 new variant fail the build, a field-complete struct literal a new field:
 
-- *value walks* (`serial.rs`) match `Value` / `SerialValue` exhaustively;
+- *value walks* (`types/value/first_order.rs`) match `Value` / `FOValue` exhaustively, once forward and once back;
 - *hydration* installs a complete `HandlerFrame` through
   `HandlerStack::push_frame` rather than re-deriving fields like
-  `removable_by_unalias`, so a hydrated alias stays removable by `unalias`; a
+  its `FrameKind`, so a hydrated alias stays removable by `unalias`; a
   per-name entry is unary by construction and hydration does not re-check its
   arity, which the sender's install already validated
   ([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]);
@@ -37,14 +37,14 @@ new variant fail the build, a field-complete struct literal a new field:
   their IEEE-754 bits, total and exact where JSON's number turns NaN and ±∞
   into `null`.
 
-## Values — `core/src/serial.rs`
+## Values — `core/src/first_order.rs`, `core/src/seed/table.rs`
 
-**`FOValue<X>` is the one value vocabulary every seam speaks: first-order by
-construction, over an extension slot `X` uninhabited by default (`NoExt`).**
-Externally tagged on the wire, with typed accessors (`field`, `as_str`,
-`as_int`, …) for a host reading one.
+**`FOValue<X>` (`first_order.rs`, which knows no `Value`) is the one value
+vocabulary every seam speaks: first-order by construction, over an extension
+slot `X` uninhabited by default (`NoExt`).** Externally tagged on the wire, with
+typed accessors (`field`, `as_str`, `as_int`, …) for a host reading one.
 
-- `SerialValue = FOValue<SerialClosure>` fills the slot with what this wire
+- `SerialValue = FOValue<SerialClosure>` (`seed/table.rs`) fills the slot with what this wire
   adds: `SerialClosure::Thunk(SerialThunk)` — the closure's `comp` and a
   `SerialEnvSnapshot` naming its scope's row — and `SerialClosure::Native`,
   a builtin's name and applied arguments, re-linked against the receiver's own
@@ -52,13 +52,28 @@ Externally tagged on the wire, with typed accessors (`field`, `as_str`,
 - `SerialBinding` mirrors a scope entry, value *and* scheme, so a hatched child
   keeps each binding's type
   ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
-- `serial/datum.rs` — `Datum`, the one strict first-order codec every typed
+- `first_order/datum.rs` — `Datum`, the one strict first-order codec every typed
   protocol payload goes through (`encode`; a `decode` naming what arrived
   ill-shaped), with `tag` / `untag` / `field` / `exact_keys` and the `record!`
   macro, which derives a strict record: exact keys, each once, an unknown one
-  answered with the key it most likely meant.
+  answered with the key it most likely meant, and whose encoding is canonical
+  (keys sorted). `variant!` does the same for a payload enum, `label!` for an
+  enum of bare tags (kebab-case labels off `strum`'s `IntoStaticStr` and
+  `VariantArray`). With `typed`, each also implements `ty::Typed`, so a record
+  declared once yields both its encoding and its ral type; the
+  records ral reads back live in `fact` (`ErrorRecord`, `Observation`, `Io`,
+  `Receipt`, ...), below the checker, which reads their types off the
+  declarations (`ErrorRecord::ty()`); `await`'s and `poll`'s polymorphic shapes
+  are `Io::ty().extend(..)` over them. The doors that mint them sit above
+  (`types::error`, `types::audit`).
 
-**A leaf that is not data has three treatments, one per seam.** `Opaque::of`
+**One walk each way joins `Value` and `FOValue`
+(`types/value/first_order.rs`).** `FOValue::walk` folds a `Value`, handing each
+leaf that is not data to the caller as a borrowed `Leaf`; `unwalk` and
+`for_each_ext` are its converses. `from_runtime`, `try_from` and `scrubbed`
+differ only in that leaf function, and so do `into_runtime` and `From<FOValue>`.
+
+**A leaf that is not data has three treatments, one per seam.** `Value::opacity`
 classifies it — a block, a function, a handle:
 
 - `TryFrom<&Value> for FOValue` refuses it, naming the first such leaf and
@@ -94,51 +109,44 @@ them for any other, through the receiver's `Signature`.
   encodes every binding: every path onto this wire is a scrubbed fork, so a
   handle reaching `SerialValue::from_runtime` is a fault in ral, and its
   error says so.
-- `WireDecoder::for_shell` rebuilds the rows in dependency order
-  (`collect_scope_deps`), refusing an out-of-range reference or a cycle. It
+- `WireDecoder::for_shell` rebuilds the rows in dependency order by Kahn's
+  algorithm over `collect_scope_deps`' edges, so a stream chain decodes in
+  linear time, refusing an out-of-range reference or a cycle. It
   carries the receiver's builtin manifest, for a decoded `Native` to re-link
   its name against — nothing else, since neither Σ tier rides the wire.
 - `SerialEnvSnapshot::into_runtime`, given a `WireDecoder`, is the sole
   wire→runtime conversion of an environment.
 
-## The mirrored shell — `core/src/subprocess.rs`
+## The seed — `core/src/seed.rs`, `core/src/guard/grant.rs`
 
-**`serial.rs` carries values and scopes; this module carries the envelope
-around them.** No frame crosses: a hatched engine's
-[[internals/evaluator-machine|machine]] starts over the empty stack, so what
-rides is store, never continuation. Each `Wire*` type mirrors one subtree of the
-runtime tree, and a parent's `from_runtime` calls only its children's:
-
-- `WireShell { env, stack_limit, context }` — `env` is the row of one
-  [[design/scoping|`Env`]], ρ alone;
-- `WireContext` mirrors `Context` — `env_overrides`, `cwd`, `grants`,
-  `handlers`, `args`, `modules`; `hooks` stays behind and the receiver starts
-  with an empty table;
-- `WireHandlerFrame` — a [[internals/handler-dispatch|handler stack]] frame,
-  each alias arm with its scheme
-  ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
-
-`install_wire_shell` splices the wire's handler frames atop the receiver's own,
-so the builtin table the child's installer booted survives, never having ridden
-the wire (`bare_child_shell` is the tests' stand-in for that boot).
-
-## The seed — `core/src/engine_seed.rs`, `core/src/spawn_grant.rs`
-
-**`EngineSeed` is a forked shell reified for a hatch: `scope_table`, `shell`,
-`captured`, and the spawn's `grant`.**
+**`EngineSeed` is a forked shell reified for a hatch: `scope_table`, `env`,
+`stack_limit`, `context` and the spawn's `grant`.** No frame crosses: a
+hatched engine's [[internals/evaluator-machine|machine]] starts over the empty
+stack, so what rides is store, never continuation. The environment rides once,
+as the row of one [[design/scoping|`Env`]], ρ alone; the context is
+`Context<Vec<WireHandlerFrame>>`, the live `Context` with its handler stack
+swapped for interned frames (`Context::try_map_handlers`), so nothing mirrors
+a field and every other field crosses as itself — `env_overrides`, `cwd`,
+`grants`, `args`, `modules`. Hooks are session state and never ride.
+`WireHandlerFrame` is a [[internals/handler-dispatch|handler stack]] frame,
+each alias arm with its scheme
+([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
 
 - `pack_seed` builds one from a shell that `Shell::fork_scrubbed` produced — the
   fork both seats take, so an identity fork and a hatch snapshot the same
   fragment and `` exarch-agents `start `` means one thing regardless of seat
   ([[design/agents|agents]]'s one-snapshot law). `listen_for_hatch`
-  (`hatch.rs`) forks and scrubs the shell it is handed before packing it, and
-  `pack_seed` trusts that fork rather than re-checking it.
-- `seed_from_env` (in `hatch.rs`) takes the seed before the engine waits for
-  `Attach`, striking the fd's env var as it takes the fd; after `Attach`,
-  `Engine::boot` hands it to `EngineSeed::apply`, which hydrates through
-  `WireDecoder::for_shell` and `install_wire_shell`, then pushes the grant. The
-  take must not wait on the host; the application needs the booted installer's
-  shell.
+  (`seed/hatch.rs`) forks and scrubs the shell it is handed before packing it,
+  and `pack_seed` trusts that fork rather than re-checking it.
+- `seed_from_env` (in `seed/hatch.rs`) takes the seed before the engine waits
+  for `Attach`, striking the fd's env var as it takes the fd; after `Attach`,
+  `Engine::boot` hands it to `EngineSeed::apply`, which decodes everything
+  through one `WireDecoder` before touching the shell, splices the wire's
+  handler frames atop the receiver's own through `HandlerStack::push_frame`
+  (so the builtin table the child's installer booted survives, never having
+  ridden the wire, and a hydrated alias stays removable by `unalias`), then
+  pushes the grant. The take must not wait on the host; the application needs
+  the booted installer's shell.
 - `SpawnGrant` — `Inherit` (⊤), `Base(name)`, or `Restrict(record)` — crosses
   **unfrozen**: a `cwd:` sigil in a grant names the cwd of the shell it
   governs, so the freeze happens on the child's side. `SpawnGrant::narrow_onto`
@@ -146,14 +154,14 @@ the wire (`bare_child_shell` is the tests' stand-in for that boot).
   the step an adopted identity fork (`IdentityTransport::adopt_parked`) and a
   hatched seed share. `Base` reaches the host's `GrantNarrower`, since core has
   no base-tag lexicon; `Restrict` goes through
-  `capability::decode_capability_map`
+  `guard::decode_capability_map`
   ([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]]).
 
-## Framing — `core/src/subprocess_codec.rs`
+## Framing — `core/src/frame.rs`
 
 **`write_frame` / `read_frame` are length-prefixed JSON frames, carrying both
 the hatch's one `EngineSeed` frame and the engine protocol's `WireChannel`
-frames (`core/src/wire.rs`).**
+frames (`core/src/protocol/channel.rs`).**
 
 - `fuse` is the one frame-size check both doors apply — `MAX_FRAME_LEN`, 256 MiB
   — before the reader allocates a body and before the writer sends one, so an

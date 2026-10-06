@@ -11,9 +11,9 @@
 
 mod boot;
 
+use ral_core::carrier::{IdentityTransport, Transport};
 use ral_core::errln;
-use ral_core::io::TerminalState;
-use ral_core::protocol::{IdentityTransport, Transport, reading};
+use ral_core::terminal::TerminalState;
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -47,13 +47,6 @@ pub(super) struct Session {
     /// handler that returned [`Read::Edit`]).  The frontend may still drain
     /// its own internal stack when this is `None`.
     pending: Option<EditBuffer>,
-    /// The reactive-worksheet model: per-binding dependency edges and the
-    /// pure/effectful verdict, accumulated across runs and projected by the
-    /// structural surface.  Owned here so it persists; recorded after a
-    /// successful top-level bind and read by `frontend.read`.  Only the
-    /// `structural` build constructs and reads it.
-    #[cfg(feature = "structural")]
-    worksheet: super::worksheet::Worksheet,
     /// Exit status to return when the loop ends.  Set by `exit` inside
     /// the evaluator; otherwise stays 0 on a clean EOF.
     exit_code: u8,
@@ -126,8 +119,6 @@ impl Session {
             frontend,
             terminal,
             pending: None,
-            #[cfg(feature = "structural")]
-            worksheet: super::worksheet::Worksheet::default(),
             exit_code: 0,
             _claim: claim,
         })
@@ -151,7 +142,7 @@ impl Session {
         // so after a SIGTERM/SIGHUP or a Ctrl-\ every future iteration would
         // fail with the same cause; exit with its code instead of dealing the
         // user an unusable prompt.
-        if let Ok(Some(code)) = reading::session_ended(t) {
+        if let Ok(Some(code)) = t.session_ended() {
             self.exit_code = crate::platform::exit_byte(code);
             return Flow::Break;
         }
@@ -160,17 +151,11 @@ impl Session {
         // is done, and a stale escalation tick would otherwise creep the
         // next Ctrl-C toward the third-signal force-exit.
         ral_core::process::clear();
-        let cwd = reading::cwd(t).unwrap_or_default();
+        let cwd = t.cwd().unwrap_or_default();
         write_terminal_title(&self.terminal, &cwd.to_string_lossy());
         let prompt = render_prompt(t, &self.host);
 
-        let read_result = self.frontend.read(
-            t,
-            &prompt,
-            self.pending.take(),
-            #[cfg(feature = "structural")]
-            &self.worksheet,
-        );
+        let read_result = self.frontend.read(t, &prompt, self.pending.take());
         match read_result {
             Read::Line(input) => {
                 let trimmed = input.trim();
@@ -196,13 +181,7 @@ impl Session {
     /// Evaluate one non-empty trimmed input line, recording any exit
     /// code so [`run`](Self::run) can break cleanly.
     fn eval(&mut self, trimmed: &str) -> Flow {
-        match step(
-            trimmed,
-            &*self.transport,
-            &self.host,
-            #[cfg(feature = "structural")]
-            &mut self.worksheet,
-        ) {
+        match step(trimmed, &*self.transport, &self.host) {
             Step::Continue => Flow::Continue,
             Step::Exit(c) => {
                 self.exit_code = c;
@@ -222,7 +201,7 @@ impl Drop for Session {
     /// taken down — external children and all — when the transport's shell
     /// drops.  Naming never gates or delays the exit it announces.
     fn drop(&mut self) {
-        let workers = reading::workers(&*self.transport).unwrap_or_default();
+        let workers = self.transport.workers().unwrap_or_default();
         self.transport.detach();
         self.frontend.save_history();
         if let Some(notice) = teardown_notice(&workers) {

@@ -114,13 +114,17 @@ const PATIENCE: Duration = Duration::from_secs(5);
 /// How long to wait between attempts at the control plane.
 const RETRY: Duration = Duration::from_millis(100);
 
+/// `ral_core::Role::Engine.flag()`, spelled here because this crate cannot
+/// depend on core.
+const ENGINE_FLAG: &str = "--engine";
+
 /// The engine's command line.
 ///
-/// `--engine` is the flag both host binaries dispatch on before `main`, so
+/// [`ENGINE_FLAG`] is the flag both host binaries dispatch on before `main`, so
 /// this is the whole of it: the engine takes its configuration from the
 /// `Attach` frame the host sends over the socket, not from argv.
 pub fn command_line(boot: &Boot) -> Vec<String> {
-    vec![boot.engine.clone(), "--engine".to_string()]
+    vec![boot.engine.clone(), ENGINE_FLAG.to_string()]
 }
 
 /// Connect the guest's end of the control plane.
@@ -173,7 +177,7 @@ pub fn control_plane(port: u32) -> Result<OwnedFd, String> {
 pub fn spawn(boot: &Boot, control: &OwnedFd) -> Result<Pid, String> {
     let socket = control.as_raw_fd();
     let mut cmd = Command::new(&boot.engine);
-    cmd.arg("--engine");
+    cmd.arg(ENGINE_FLAG);
     cmd.env_clear();
     cmd.envs(environment(boot.net.as_ref().map(|net| net.gateway)));
     cmd.current_dir(WORK);

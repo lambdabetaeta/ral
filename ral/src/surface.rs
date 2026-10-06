@@ -1,9 +1,9 @@
 //! Surfaced values both front-ends print themselves: a watched worker's
 //! lines, and the note a value of no class they know is dropped with.
 
+use ral_core::first_order::FOValue;
+use ral_core::first_order::datum::{Datum as _, untag};
 use ral_core::record;
-use ral_core::serial::FOValue;
-use ral_core::serial::datum::{Datum as _, untag};
 use ral_core::types::Observation;
 
 /// One `'watch` line: the worker's label and what it wrote.

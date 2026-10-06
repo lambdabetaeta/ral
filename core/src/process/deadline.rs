@@ -4,7 +4,7 @@
 //! by a single lazily started daemon, so a session holding thousands of
 //! in-flight ceilings costs one thread rather than one watchdog apiece.
 //!
-//! An entry either cancels a [`CancelScope`] with [`CancelCause::Deadline`] or
+//! An entry either cancels a [`CancelScope`] with [`CancelCause::TimedOut`] or
 //! runs an opaque host closure — opaque so that no host notion of prompts,
 //! cron, or sessions leaks into core.  Entries are one-shot; recurrence is a
 //! producer re-arming the next occurrence from inside its own closure.
@@ -17,7 +17,7 @@
 
 use std::collections::BinaryHeap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use super::{CancelCause, CancelScope};
@@ -31,7 +31,7 @@ enum Action {
 impl Action {
     fn fire(self) {
         match self {
-            Self::Cancel(scope) => scope.cancel(CancelCause::Deadline),
+            Self::Cancel(scope) => scope.cancel(CancelCause::TimedOut),
             Self::Run(run) => run(),
         }
     }
@@ -79,9 +79,9 @@ struct Daemon {
 
 /// The one schedule, built on the first arm.  The daemon thread carries its own
 /// `Arc` clone, so it never reads back through this still-unfilled slot.
-static DAEMON: OnceLock<Arc<Daemon>> = OnceLock::new();
+static DAEMON: LazyLock<Arc<Daemon>> = LazyLock::new(start_daemon);
 
-/// Cancel `scope` with [`CancelCause::Deadline`] once `after` has elapsed from
+/// Cancel `scope` with [`CancelCause::TimedOut`] once `after` has elapsed from
 /// now.  A run's wall clock arms one of these over its foreground scope.
 pub fn arm_lifetime(scope: CancelScope, after: Duration) -> Deadline {
     arm(Action::Cancel(scope), after)
@@ -99,7 +99,7 @@ pub fn arm_callback(after: Duration, run: impl FnOnce() + Send + 'static) -> Dea
 /// The shared body of [`arm_lifetime`] and [`arm_callback`]; the first call
 /// starts the daemon.
 fn arm(action: Action, after: Duration) -> Deadline {
-    let daemon = DAEMON.get_or_init(start_daemon);
+    let daemon = &*DAEMON;
     let when = Instant::now() + after;
     let armed = Arc::new(AtomicBool::new(true));
     daemon.heap.lock_ignore_poison().push(Scheduled {
@@ -246,7 +246,7 @@ mod tests {
         assert!(fired, "a kept deadline must fire though its handle is gone");
         assert_eq!(
             scope.cause(),
-            Some(CancelCause::Deadline),
+            Some(CancelCause::TimedOut),
             "the daemon fires the Deadline cause"
         );
     }

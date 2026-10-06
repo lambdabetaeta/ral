@@ -1,59 +1,24 @@
 //! Unified stream plumbing: [`Io`], the per-`Shell` bundle of byte streams
 //! and terminal state.
 //!
-//! It sits over the [`edge`] / [`source`] / [`sink`] / [`terminal`]
-//! submodules, whose public items are re-exported here as `crate::io::*`.
+//! It sits over the [`edge`] / [`source`] / [`sink`] submodules, whose public
+//! items are re-exported here as `crate::io::*`.
 
 mod edge;
+mod regime;
 mod sink;
 mod source;
-mod terminal;
+mod wake;
 
+use crate::terminal::TerminalState;
 pub(crate) use edge::{DeadEdge, Edge};
-pub use sink::{ByteBuffer, CapturedBytes, Sink};
-pub(crate) use sink::{
-    SINK_BUFFER_CAP, buffer_overflowed, new_buffer, peek_buffer, take_buffer, tee_with_buffer,
-    terminator_len,
-};
+pub use regime::{RunIo, RunStdin};
+pub use sink::{ByteBuffer, Captured, CapturedBytes, LineFn, Sink};
+pub(crate) use sink::{SINK_BUFFER_CAP, new_buffer, tee_with_buffer, terminator_len};
 pub use source::{Source, SourceReader};
-pub use terminal::{InteractiveMode, TerminalState};
-#[cfg(windows)]
-pub(crate) use terminal::{STD_ERROR_HANDLE, is_console};
-#[cfg(windows)]
-pub use terminal::{
-    console_mode_snapshot, enable_virtual_terminal_processing, restore_console_mode,
-};
-
-/// Process-group role of a shell context: top-level orchestrator, or
-/// pipeline-local child.
-///
-/// It decides pgid placement — a top-level standalone external may lead its own
-/// group, so a watchdog cancel can `kill(-pgid, …)` the whole subtree — and
-/// names the reader a child's exit status is read against
-/// ([`Reader`](crate::process::Reader)).  Being top-level is also one conjunct
-/// of the foreground gate in `runtime/command/foreground.rs`; holding the
-/// session's [`TerminalLease`](crate::process::TerminalLease) is another.
-#[derive(Clone, Debug, Default)]
-pub(crate) enum LaunchRole {
-    /// A top-level eval or single-command exec.
-    #[default]
-    TopLevel,
-    /// Joins the pipeline's pgid; never leads a group of its own.
-    PipelineStage(crate::process::Membership),
-}
-
-impl LaunchRole {
-    pub(crate) fn is_top_level(&self) -> bool {
-        matches!(self, Self::TopLevel)
-    }
-
-    pub(crate) fn membership(&self) -> Option<&crate::process::Membership> {
-        match self {
-            Self::TopLevel => None,
-            Self::PipelineStage(m) => Some(m),
-        }
-    }
-}
+#[cfg(unix)]
+pub(crate) use wake::Readiness;
+pub(crate) use wake::Wake;
 
 /// All pipeline-stage IO state for a single Shell.
 pub(crate) struct Io {
@@ -67,7 +32,14 @@ pub(crate) struct Io {
     pub(crate) interactive: bool,
     /// Probed once at startup; nothing re-queries the OS mid-session.
     pub terminal: TerminalState,
-    pub(crate) launch_role: LaunchRole,
+    /// The pipeline group this context's externals join, never leading one of
+    /// their own; `None` at the top level.  It decides pgid placement (a
+    /// top-level standalone external may lead its own group, so a watchdog
+    /// cancel can `kill(-pgid, …)` the whole subtree), and top level is one
+    /// conjunct of the foreground gate in `runtime/command/foreground.rs`;
+    /// holding the session's [`TerminalLease`](crate::process::TerminalLease)
+    /// is another.
+    pub(crate) stage: Option<crate::process::Membership>,
 }
 
 impl Default for Io {
@@ -78,7 +50,7 @@ impl Default for Io {
             stderr: Sink::Stderr,
             interactive: false,
             terminal: TerminalState::default(),
-            launch_role: LaunchRole::default(),
+            stage: None,
         }
     }
 }

@@ -1,8 +1,12 @@
 //! The runtime error type.
 
+use crate::diagnostic::{Label, Rejection, Report, palette};
 use crate::process::{CancelCause, ChildEnd, CommandFailure, SpawnFailure};
-use crate::source::Span;
-use std::fmt;
+use crate::source::{FileId, SourceDb, Span};
+use std::fmt::{self, Write as _};
+
+mod record;
+pub use record::outcome_value;
 
 #[derive(Debug, Clone)]
 pub struct Error {
@@ -17,11 +21,11 @@ pub struct Error {
     /// every `Settled`, and a larger one trips `result_large_err`.
     pub witness: Option<Box<Span>>,
     /// The shown name of the command whose failure this is; `None` until
-    /// `evaluator::audit`'s `name_failure` stamps the innermost dispatch.
+    /// `types::flow::name_failure` stamps the innermost dispatch.
     pub(crate) command: Option<Box<str>>,
     /// A loaded file that failed to compile: renderers draw its report, not
     /// `message`.
-    pub uncompiled: Option<Box<crate::Uncompiled>>,
+    pub rejection: Option<Box<Rejection>>,
 }
 
 /// An error's exit status: one constructor per fact, whichever door reported it.
@@ -34,21 +38,12 @@ pub enum Status {
 }
 
 impl Status {
-    /// The numeric status: the only home of `128 + n` and of the cause table.
+    /// The numeric status; each failure owns its code.
     pub fn code(&self) -> i32 {
         match self {
-            Self::Raised(code) | Self::Process(CommandFailure::ExitCode(code)) => *code,
-            Self::Process(CommandFailure::Signal(sig)) => 128 + sig.number(),
-            Self::Process(CommandFailure::Spawn(SpawnFailure::NotFound)) => 127,
-            Self::Process(CommandFailure::Spawn(_)) => 126,
-            // A signal-born cause reports 128 + its signal; a deadline, timeout(1)'s 124.
-            Self::Cancelled(cause) => match cause {
-                CancelCause::ReaderGone => 141,
-                CancelCause::Interrupt => 130,
-                CancelCause::Explicit | CancelCause::Terminate => 143,
-                CancelCause::Deadline => 124,
-                CancelCause::RootAbort => 131,
-            },
+            Self::Raised(code) => *code,
+            Self::Process(failure) => failure.code(),
+            Self::Cancelled(cause) => cause.code().into(),
         }
     }
 
@@ -62,7 +57,12 @@ impl Status {
 }
 
 impl Error {
-    pub fn new(message: impl Into<String>, status: i32) -> Self {
+    /// An error with status 1.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self::raised(message, 1)
+    }
+
+    pub fn raised(message: impl Into<String>, status: i32) -> Self {
         Self::with_status(message, Status::Raised(status))
     }
 
@@ -74,7 +74,17 @@ impl Error {
             hint: None,
             witness: None,
             command: None,
-            uncompiled: None,
+            rejection: None,
+        }
+    }
+
+    /// An I/O failure on `what`, in the one phrasing every door shares.
+    pub fn io(what: impl fmt::Display, e: &std::io::Error) -> Self {
+        use std::io::ErrorKind::{NotFound, PermissionDenied};
+        match e.kind() {
+            NotFound => Self::new(format!("{what}: no such file or directory")),
+            PermissionDenied => Self::new(format!("{what}: permission denied")),
+            _ => Self::new(format!("{what}: {e}")),
         }
     }
 
@@ -134,6 +144,16 @@ impl Error {
         self
     }
 
+    /// Appends `more` below any hint already carried.
+    pub(crate) fn append_hint(mut self, more: impl Into<String>) -> Self {
+        let more = more.into();
+        self.hint = Some(match self.hint.take() {
+            Some(hint) => format!("{hint}\n\n{more}"),
+            None => more,
+        });
+        self
+    }
+
     pub(crate) fn with_witness(mut self, witness: Option<Span>) -> Self {
         self.witness = witness.map(Box::new);
         self
@@ -146,8 +166,71 @@ impl Error {
     }
 
     /// Numeric exit code for process exit and `$status`.
-    pub fn exit_code(&self) -> i32 {
+    pub fn code(&self) -> i32 {
         self.status.code()
+    }
+
+    /// A loaded file that failed to compile draws its own report.  Otherwise
+    /// compact only when the error stayed inside `compact_root`'s file, the id
+    /// of an input that compiled to a single command.
+    ///
+    /// Shape alone will not do: `boom` at the prompt is one command, but as an
+    /// alias its error lives in the rc, where only a caret can point.
+    ///
+    /// Always ends in `\n`.  A caller that hands it straight to a sink
+    /// expecting a trailing newline (`eprint!`, `write_all`, a wire payload)
+    /// keeps it as is; one that stores it for a later `println!`/`eprintln!`
+    /// must `trim_end()` first, or that newline doubles.
+    pub fn render(&self, db: &SourceDb, compact_root: Option<FileId>) -> String {
+        match (&self.rejection, compact_root) {
+            (Some(rejection), _) => rejection.render(),
+            (None, Some(root)) if self.span.is_none_or(|sp| sp.file == root) => self.compact(),
+            _ => self.draw(db),
+        }
+    }
+
+    /// The caret into the source `span` names, resolved through `db`.  A span
+    /// `db` cannot resolve falls back to spanless: no caret beats one in the
+    /// wrong file.
+    fn draw(&self, db: &SourceDb) -> String {
+        let label = |span, text: &str| Label {
+            span: Some(span),
+            text: text.into(),
+        };
+        let resolved = self.span.and_then(|sp| Some((sp, db.get(sp.file)?)));
+        let report = |at, also| Report {
+            code: Some("R0001"),
+            message: self.message.clone(),
+            at,
+            also,
+            hint: self.hint.clone(),
+        };
+        match resolved {
+            Some((sp, src)) => report(
+                Some(label(sp, "here")),
+                self.witness
+                    .as_deref()
+                    .filter(|w| w.file == sp.file)
+                    .map(|&w| label(w, "the use this script makes of it")),
+            )
+            .render(src),
+            None => report(None, None).plain(),
+        }
+    }
+
+    /// The one-liner for a single-command input, where a caret would only
+    /// point back at the line the user just typed.
+    pub fn compact(&self) -> String {
+        let (red, cyan, reset) = palette();
+        let mut out = format!("{red}error{reset}: {}", self.message);
+        if let Some(code) = self.status_code_for_display() {
+            let _ = write!(out, " (exit status {code})");
+        }
+        out.push('\n');
+        if let Some(hint) = &self.hint {
+            let _ = writeln!(out, "{cyan}hint{reset}: {hint}");
+        }
+        out
     }
 
     /// `None` for a process failure, whose message already names its status.
@@ -166,15 +249,3 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
-
-/// A loaded file's compile failure: a plain message for a handler to read,
-/// the whole report for a renderer to draw.
-impl From<crate::Uncompiled> for Error {
-    fn from(uncompiled: crate::Uncompiled) -> Self {
-        let message = uncompiled.error.to_string();
-        Self {
-            uncompiled: Some(Box::new(uncompiled)),
-            ..Self::new(message, 1)
-        }
-    }
-}

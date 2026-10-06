@@ -5,7 +5,7 @@
 //! ([`crate::provider::credential`]); a self-hosted or non-built-in endpoint is
 //! the one thing exarch cannot know, so it is declared here. The file is
 //! source, not data: it runs through the same
-//! [`ral_core::builtins::modules::evaluate_source`] core as any other `.ral` load,
+//! [`ral_core::load::evaluate_source`] core as any other `.ral` load,
 //! and its terminal map decodes into [`Service`]s.
 //!
 //! A redirected `endpoint` aims the agent's own traffic at an arbitrary server, so
@@ -17,7 +17,8 @@
 use crate::provider::{Auth, Service, ServiceName, built_in};
 use genai::adapter::AdapterKind;
 use ral_core::Shell;
-use ral_core::types::{Break, Capabilities, Escape, Mooring, Value};
+use ral_core::capability::Capabilities;
+use ral_core::types::{Break, Escape, Mooring, Value};
 
 const CONFIG_FILE: &str = "config.ral";
 
@@ -53,7 +54,7 @@ pub fn disk_warn_bytes() -> Result<Option<u64>, String> {
 /// default.
 pub fn load() -> Result<Vec<Service>, String> {
     let path = crate::bootstrap::EXARCH
-        .xdg_dir(ral_core::path::basedir::XdgKind::Config)
+        .xdg_dir(ral_core::host::XdgKind::Config)
         .join(CONFIG_FILE);
     load_declared(&path, LABEL)
 }
@@ -75,7 +76,8 @@ pub fn load_declared(path: &std::path::Path, label: &str) -> Result<Vec<Service>
     };
     let source = ral_core::source::normalize_source_text(source);
     let display = path.to_string_lossy().into_owned();
-    let mut shell = Shell::new(ral_core::io::TerminalState::default());
+    let mut shell =
+        ral_core::HostSurface::default().shell(ral_core::terminal::TerminalState::default());
     decode(
         evaluate_no_authority(&mut shell, &source, &display, label)?,
         &display,
@@ -110,7 +112,7 @@ pub fn save_declared(
             let name = quoted(service.name.as_str(), "name", label)?;
             let endpoint = service.endpoint.as_deref().ok_or_else(|| {
                 format!(
-                    "{label}: '{}' names no address to write — a declared endpoint \
+                    "{label}: '{}' names no address to write; a declared endpoint \
                      always has one; is this really a declared service?",
                     service.name
                 )
@@ -122,7 +124,7 @@ pub fn save_declared(
             };
             let protocol = protocol_for_adapter(service.adapter).ok_or_else(|| {
                 format!(
-                    "{label}: '{}' speaks a protocol this file has no name for — \
+                    "{label}: '{}' speaks a protocol this file has no name for; \
                      it can only hold one of {}.",
                     service.name,
                     protocols().join(", ")
@@ -154,9 +156,7 @@ const PREAMBLE: &str = "\
 /// to encode.
 fn quoted(text: &str, field: &str, label: &str) -> Result<String, String> {
     if text.is_empty() {
-        return Err(format!(
-            "{label}: the {field} is empty — what should it be?"
-        ));
+        return Err(format!("{label}: the {field} is empty; what should it be?"));
     }
     if text
         .bytes()
@@ -164,7 +164,7 @@ fn quoted(text: &str, field: &str, label: &str) -> Result<String, String> {
     {
         return Err(format!(
             "{label}: the {field} '{text}' contains a quote, a backslash, or a control \
-             character — is that really part of it?"
+             character: is that really part of it?"
         ));
     }
     Ok(format!("'{text}'"))
@@ -201,13 +201,13 @@ pub(crate) fn evaluate_no_authority(
     let mooring = Mooring::adrift();
     shell
         .with_capabilities(Capabilities::deny_all(), |sh| {
-            ral_core::builtins::modules::evaluate_source(&mooring, sh, source, display, None)
+            ral_core::load::evaluate_source(&mooring, sh, source, display, None)
         })
         .map_err(|e| match e {
             Break::Error(err) => format!("{label} {display}: {}", err.message),
             Break::Escape(Escape::Exit(code)) => format!(
                 "{label} {display}: the config called exit {code}, but a config file is \
-                 read for its declarations, not run to completion — is that really what it \
+                 read for its declarations, not run to completion: is that really what it \
                  should do?"
             ),
         })
@@ -240,7 +240,7 @@ fn decode_one(name: &str, decl: &Value, display: &str, label: &str) -> Result<Se
     for key in fields.keys() {
         if !matches!(key, "endpoint" | "key" | "protocol") {
             return Err(format!(
-                "{where_}: unknown key '{key}' — expected endpoint, key, protocol"
+                "{where_}: unknown key '{key}'; expected endpoint, key, protocol"
             ));
         }
     }
@@ -253,7 +253,7 @@ fn decode_one(name: &str, decl: &Value, display: &str, label: &str) -> Result<Se
     let name = ServiceName::declared(name).map_err(|e| format!("{label} {display}: {e}"))?;
     if built_in(&name).is_some() {
         return Err(format!(
-            "{where_}: '{name}' is already a built-in service — a declared \
+            "{where_}: '{name}' is already a built-in service; a declared \
              provider cannot reuse its name."
         ));
     }
@@ -290,7 +290,7 @@ fn optional_string_field(
     match value {
         None => Ok(None),
         Some(Value::String(s)) if s.is_empty() => Err(format!(
-            "{where_}: '{field}' is empty — omit it entirely for a no-auth endpoint"
+            "{where_}: '{field}' is empty; omit it entirely for a no-auth endpoint"
         )),
         Some(Value::String(s)) => Ok(Some(s.to_string())),
         Some(other) => Err(format!(
@@ -326,7 +326,7 @@ pub fn adapter_for_protocol(protocol: &str, where_: &str) -> Result<AdapterKind,
         .map(|(_, adapter)| *adapter)
         .ok_or_else(|| {
             format!(
-                "{where_}: unknown protocol '{protocol}' — expected {}",
+                "{where_}: unknown protocol '{protocol}'; expected {}",
                 protocols().join(", ")
             )
         })
@@ -356,7 +356,7 @@ mod tests {
 
     /// Evaluate and decode a config source the way [`load`] does.
     fn parse(source: &str) -> Result<Vec<Service>, String> {
-        let mut shell = Shell::new(ral_core::io::TerminalState::default());
+        let mut shell = ral_core::test_helper::core_shell();
         let source = ral_core::source::normalize_source_text(source.to_string());
         decode(
             evaluate_no_authority(&mut shell, &source, "<test:config>", LABEL)?,

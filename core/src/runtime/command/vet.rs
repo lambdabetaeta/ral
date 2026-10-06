@@ -7,7 +7,8 @@
 //! pipeline stages consume the plan, so the rules live in exactly one place.
 
 use crate::capability::Admitted;
-use crate::types::{Break, Error, RefusedArg, Settled, Shell, Value};
+use crate::ty::RefusedArg;
+use crate::types::{Break, Error, Settled, Shell, Value};
 
 use super::head::Head;
 
@@ -51,15 +52,12 @@ fn validate_argv(cmd: &str, args: &[Value]) -> Settled<Vec<String>> {
 /// a static error wherever an argument's type is concrete.  This is the backstop
 /// for what polymorphism hid from it — a `$x` whose shape only the run knows.
 fn reject_exec_arg(cmd: &str, arg: &Value) -> Option<Break> {
-    let refusal = RefusedArg::of_value(arg)?;
+    let refusal = arg.heads().first().copied().and_then(RefusedArg::of_head)?;
     Some(
-        Error::new(
-            format!(
-                "cannot pass {} to external command '{cmd}'",
-                arg.type_name()
-            ),
-            1,
-        )
+        Error::new(format!(
+            "cannot pass {} to external command '{cmd}'",
+            arg.type_name()
+        ))
         .with_hint(refusal.remedy(cmd))
         .into(),
     )
@@ -107,7 +105,7 @@ mod tests {
 
     /// The headline regression: a file sitting in the directory the user just
     /// `cd`'d into is not on `PATH`, and a `PATH` ending in `;` does not put it
-    /// there.  Naming it bare is 127 — "no such command" — never 126.
+    /// there.  Naming it bare is 127 ("no such command"), never 126.
     #[cfg(windows)]
     #[test]
     fn bare_name_of_a_cwd_file_is_127_not_126() {
@@ -116,7 +114,7 @@ mod tests {
         let elsewhere = tempfile::tempdir().unwrap();
         let name = plant(here.path(), "zzcwdonly");
 
-        let mut shell = Shell::default();
+        let mut shell = crate::test_helper::core_shell();
         shell.seed_cwd(here.path().to_path_buf());
         shell
             .context
@@ -124,7 +122,7 @@ mod tests {
 
         let head = Head::resolve(&CommandName::Bare(name.into()), &shell.context);
         let e = refused(&head, &mut shell);
-        assert_eq!(e.exit_code(), 127);
+        assert_eq!(e.code(), 127);
         assert!(
             !format!("{e:?}").contains("permission denied"),
             "a name no walk resolved must not be refused as unexecutable: {e:?}",
@@ -138,12 +136,12 @@ mod tests {
     fn an_extensionless_path_head_is_127_with_a_hint() {
         let here = tempfile::tempdir().unwrap();
         plant(here.path(), "zztool");
-        let mut shell = Shell::default();
+        let mut shell = crate::test_helper::core_shell();
         shell.seed_cwd(here.path().to_path_buf());
 
         let head = Head::resolve(&CommandName::Path(r".\zztool".into()), &shell.context);
         let e = refused(&head, &mut shell);
-        assert_eq!(e.exit_code(), 127);
+        assert_eq!(e.code(), 127);
         assert_eq!(e.hint.as_deref(), Some(r"did you mean '.\zztool.bat'?"));
     }
 
@@ -159,7 +157,7 @@ mod tests {
         let name = plant(&bin, "zzonewalk");
         let elsewhere = tempfile::tempdir().unwrap();
 
-        let mut shell = Shell::default();
+        let mut shell = crate::test_helper::core_shell();
         shell.context.set_env_var("PATH", "./bin");
         shell.seed_cwd(tmp.path().to_path_buf());
         let head = Head::resolve(&CommandName::Bare(name.as_str().into()), &shell.context);
@@ -170,7 +168,7 @@ mod tests {
 
         shell.seed_cwd(elsewhere.path().to_path_buf());
         let head = Head::resolve(&CommandName::Bare(name.into()), &shell.context);
-        assert_eq!(refused(&head, &mut shell).exit_code(), 127);
+        assert_eq!(refused(&head, &mut shell).code(), 127);
     }
 
     /// Bundled names short-circuit the disk probe: `ls` vets on an empty
@@ -179,7 +177,7 @@ mod tests {
     #[test]
     fn bundled_name_vets_with_empty_path() {
         let dir = tempfile::tempdir().unwrap();
-        let mut shell = Shell::default();
+        let mut shell = crate::test_helper::core_shell();
         shell
             .context
             .set_env_var("PATH", dir.path().to_string_lossy().into_owned());
@@ -193,14 +191,14 @@ mod tests {
     /// the path.
     #[test]
     fn a_path_head_naming_no_file_produces_127() {
-        let mut shell = Shell::default();
+        let mut shell = crate::test_helper::core_shell();
         let head = std::env::temp_dir().join("no-such-dir").join("tool");
         let head = Head::resolve(
             &CommandName::Path(head.to_string_lossy().into_owned()),
             &shell.context,
         );
         let e = refused(&head, &mut shell);
-        assert_eq!(e.exit_code(), 127);
+        assert_eq!(e.code(), 127);
         assert!(e.message.contains("no-such-dir"), "{}", e.message);
     }
 
@@ -208,7 +206,7 @@ mod tests {
     #[test]
     fn missing_non_bundled_name_produces_127() {
         let dir = tempfile::tempdir().unwrap();
-        let mut shell = Shell::default();
+        let mut shell = crate::test_helper::core_shell();
         shell
             .context
             .set_env_var("PATH", dir.path().to_string_lossy().into_owned());
@@ -217,6 +215,45 @@ mod tests {
             &CommandName::Bare("definitely-not-a-real-tool-xyz".into()),
             &shell.context,
         );
-        assert_eq!(refused(&head, &mut shell).exit_code(), 127);
+        assert_eq!(refused(&head, &mut shell).code(), 127);
+    }
+
+    /// A value and its type earn one verdict: the property the shared
+    /// classification exists to hold.  The `Thunk` and `Handle` pairs need an
+    /// `Env`, and are paired end to end instead
+    /// (`tests/reject/external-arg-*.ral`, `core/tests/argv_convention.rs`).
+    #[test]
+    fn a_value_and_its_type_earn_the_same_verdict() {
+        use crate::ty::{Row, Ty};
+        let of_value = |v: &Value| v.heads().first().copied().and_then(RefusedArg::of_head);
+        let pairs: [(Value, Ty); 9] = [
+            (Value::Unit, Ty::Unit),
+            (Value::Bool(true), Ty::Bool),
+            (Value::Int(1), Ty::Int),
+            (
+                Value::Float(crate::first_order::Finite::new(1.0).expect("finite")),
+                Ty::Float,
+            ),
+            (Value::string("x"), Ty::String),
+            (Value::bytes(vec![1]), Ty::Bytes),
+            (Value::List(vec![].into()), Ty::list(Ty::String)),
+            (Value::map(vec![]), Ty::map(Ty::Int)),
+            // A tagged value renders, so neither side refuses it.
+            (Value::variant("ok", None), Ty::Variant(Row::Empty)),
+        ];
+        for (value, ty) in pairs {
+            assert_eq!(
+                of_value(&value),
+                RefusedArg::of_ty(&ty),
+                "{value:?} and {ty:?} must earn the same verdict"
+            );
+        }
+        // A record is a map at run time, so it is refused as the map it is.
+        assert_eq!(
+            RefusedArg::of_ty(&Ty::Record(Row::Empty)),
+            Some(RefusedArg::Map)
+        );
+        // A variable is not a shape: the runtime keeps that question.
+        assert_eq!(RefusedArg::of_ty(&Ty::Var(crate::ty::TyVar(0))), None);
     }
 }

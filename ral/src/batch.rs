@@ -1,18 +1,22 @@
 //! Non-interactive execution for script, stdin, and `-c` modes.
 
-use ral_core::protocol::{
-    Ending, IdentityTransport, Program, Report, Run, Transport as _, dispatch_to_report,
-};
-use ral_core::serial::FOValue;
-use ral_core::serial::datum::Datum as _;
-use ral_core::types::{CapturePolicy, DeferredSink, GrantStack, Observation};
-use ral_core::{RequestedTerminalAccess, RunIo, RunStdin, diagnostic};
+use ral_core::carrier::{IdentityTransport, Transport as _, dispatch_to_report};
+use ral_core::compile::{CompileError, compile_and_typecheck};
+use ral_core::elaborator::elaborate;
+use ral_core::first_order::FOValue;
+use ral_core::first_order::datum::Datum as _;
+use ral_core::protocol::{Ending, Program, Report, Run};
+use ral_core::run::StaticDiagnostics;
+use ral_core::source::{FileId, Source};
+use ral_core::syntax::parser::parse;
+use ral_core::types::{CapturePolicy, DeferredSink, Observation};
+use ral_core::{RequestedTerminalAccess, SessionSchemes, terminal};
 use ral_core::{err, errln, outln};
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use crate::boot_door::{self, Boot};
-use crate::cli::{BatchOpts, RunOpts};
+use crate::cli::{BatchOpts, Halt, RunOpts};
 use crate::platform::{exit_byte, local_attach, probe_terminal};
 use crate::startup::engine::{BATCH, BatchConfig, INSTALLERS, batch_surface};
 
@@ -40,7 +44,7 @@ pub(crate) fn run_file(path: &str, script_args: Vec<String>, opts: BatchOpts) ->
     match std::fs::read_to_string(path) {
         Ok(source) => run_source(path, source, script_args, opts),
         Err(e) => {
-            diagnostic::cmd_error("ral", &format!("{path}: {e}"));
+            terminal::cmd_error("ral", &format!("{path}: {e}"));
             ExitCode::from(1)
         }
     }
@@ -52,7 +56,7 @@ pub(crate) fn run_stdin(run: RunOpts) -> ExitCode {
 
     let mut source = String::new();
     if let Err(e) = std::io::stdin().read_to_string(&mut source) {
-        diagnostic::cmd_error("ral", &format!("<stdin>: {e}"));
+        terminal::cmd_error("ral", &format!("<stdin>: {e}"));
         return ExitCode::from(1);
     }
     let batch = BatchOpts {
@@ -66,17 +70,24 @@ pub(crate) fn run_stdin(run: RunOpts) -> ExitCode {
 /// same envelope `audit { … }` returns, with the whole run as its body.  An
 /// escape (`exit`) is not a failure: the process still exits with its code,
 /// but the report reads `` `ok () ``.
-fn emit_audit_report(ending: &Ending, trail: &[ral_core::serial::FOValue], pretty: bool) {
-    use ral_core::types::{Value, report_value};
+fn emit_audit_report(ending: &Ending, trail: &[ral_core::first_order::FOValue], pretty: bool) {
+    use ral_core::first_order::datum::Datum as _;
+    use ral_core::types::{ErrorRecord, Status, Value, report_value};
     let outcome = match ending {
         Ending::Settled { value, .. } => Ok(Value::from(value.clone())),
         Ending::Raised { record, .. }
         | Ending::Walled { record, .. }
-        | Ending::Unreturnable { record, .. } => Err(Value::from(record.clone())),
+        | Ending::Unreturnable { record, .. } => Err(ErrorRecord::decode(record)
+            .unwrap_or_else(|why| ErrorRecord::new("<runtime>", &Status::Raised(1), &why, None))),
         Ending::Exited(_) => Ok(Value::Unit),
     };
-    let trail: Vec<Observation> = trail.iter().filter_map(Observation::from_wire).collect();
-    let json_val = ral_core::builtins::value_to_json_lossy_bytes(&report_value(outcome, &trail));
+    let trail: Vec<Observation> = trail
+        .iter()
+        .filter_map(|fo| Observation::decode(fo).ok())
+        .collect();
+    let json_val = FOValue::try_from(&report_value(outcome, trail))
+        .expect("a report is built from first-order values")
+        .to_json(|b| serde_json::Value::String(String::from_utf8_lossy(b).into_owned()));
     let json_str = if pretty {
         serde_json::to_string_pretty(&json_val).unwrap_or_default()
     } else {
@@ -90,7 +101,7 @@ fn emit_audit_report(ending: &Ending, trail: &[ral_core::serial::FOValue], prett
 ///
 /// Boots a `batch` engine, dispatches its boot door, then the script; when
 /// `--audit` is active, reports the script's run as one report envelope on
-/// stderr. `--check` and `--dump-ast` are static, and boot nothing.
+/// stderr. `--check`, `--dump-ast` and `--dump-ir` are static, and boot nothing.
 ///
 /// Every batch source passes through here, so line endings are normalised
 /// here too — one door, one rule.
@@ -104,15 +115,14 @@ pub(crate) fn run_source(
     let BatchOpts {
         audit,
         pretty,
-        check,
-        dump_ast,
+        halt,
         run: RunOpts {
             recursion_limit,
             capabilities,
         },
     } = opts;
-    if check || dump_ast {
-        return static_only(name, &source, dump_ast);
+    if let Some(halt) = halt {
+        return halted(halt, name, &source);
     }
     ral_core::process::install_handlers();
     // Seeds the ANSI color gate, so `_ansi-ok` and the prelude ansi-*
@@ -149,16 +159,9 @@ pub(crate) fn run_source(
     let _signals = transport.control().forward_signals();
     transport.set_deferred_sink(Arc::new(Stdout));
     let run = |program, trail| Run {
-        program,
-        script_name: name.to_string(),
-        caps: GrantStack::root(),
-        wall: None,
-        deferred_lease: None,
-        worker_cap: None,
-        io: RunIo::Inherit,
         terminal: terminal_access,
-        stdin: RunStdin::Inherit,
         trail,
+        ..Run::foreground(program, name)
     };
     let boot = Boot {
         login: false,
@@ -216,42 +219,29 @@ fn dispatch(transport: &IdentityTransport, run: Run, audit: Option<bool>) -> i32
     }
 }
 
-/// `--check` and `--dump-ast`: static work on the source alone.
-fn static_only(name: &str, source: &str, dump_ast: bool) -> ExitCode {
-    let parse_failed = |e| {
-        err!(
-            "{}",
-            diagnostic::format_parse_error_ariadne(name, source, &e)
-        );
-        ExitCode::from(2)
-    };
-    let ast = match ral_core::syntax::parser::parse(source) {
-        Ok(ast) => ast,
-        Err(e) => return parse_failed(e),
-    };
-    if dump_ast {
-        for node in &ast {
-            errln!("{node:#?}");
+/// `--check`, `--dump-ast` and `--dump-ir`: static work on the source alone.
+fn halted(halt: Halt, name: &str, source: &str) -> ExitCode {
+    let outcome = match halt {
+        Halt::Ast => parse(source)
+            .map(|ast| ast.iter().for_each(|node| errln!("{node:#?}")))
+            .map_err(CompileError::Parse),
+        Halt::Ir => parse(source)
+            .and_then(|ast| elaborate(&ast, [], name))
+            .map(|phrases| errln!("{phrases:#?}"))
+            .map_err(CompileError::Parse),
+        Halt::Checked => {
+            let schemes =
+                SessionSchemes::from_prelude(crate::PRELUDE.comp(), batch_surface().manifest());
+            compile_and_typecheck(source, schemes, FileId::DUMMY, name, None).map(drop)
         }
-        return ExitCode::SUCCESS;
-    }
-    let top =
-        match ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default(), name) {
-            Ok(top) => top,
-            Err(e) => return parse_failed(e),
-        };
-    let schemes = ral_core::SessionSchemes::from_schemes(
-        crate::PRELUDE.schemes(),
-        batch_surface().builtin_table(),
-    );
-    match ral_core::typecheck(&top, schemes, None) {
-        Ok(_) => ExitCode::SUCCESS,
-        Err(errors) => {
-            err!(
-                "{}",
-                diagnostic::format_type_errors_ariadne(name, source, &errors)
-            );
-            ExitCode::from(1)
+    };
+    match outcome {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            let (rendered, status) =
+                StaticDiagnostics::Compile(e.reject(Source::from_text(name, source))).render();
+            err!("{rendered}");
+            ExitCode::from(exit_byte(status))
         }
     }
 }

@@ -24,7 +24,7 @@ how it travels.**
   for the session's whole life precisely because live spans index it. Putting
   the text there would leave a slot that nothing can reach and nothing can
   reclaim, once per typo, forever.
-- `format_static_diagnostics` is the single renderer, and settles the exit
+- `StaticDiagnostics::render` is the single renderer, and settles the exit
   status alongside the text: 2 for a parse failure, 1 for a type failure, the
   host error's own otherwise. `Report::host_fault` shapes the engine's own
   refusals through it too.
@@ -49,10 +49,10 @@ no `lex_kind` — and `TypeError`'s `Display`, which prints raw byte offsets and
 drops `code()`, `render_label()` and `hint()`. Every host on the wire got a
 sentence: the REPL, exarch, and so the model reading exarch's tool output.
 
-Only two paths still looked right, and both by bypassing the wire: `batch.rs`
-runs its own parse/elaborate/typecheck ahead of the run door, and the
-`structural` REPL frontend re-typechecks locally before Enter. That the fix
-restores the *same* phrasing those two already print is the point — one
+Only one path still looked right, by bypassing the wire: `batch.rs`
+runs its own parse/elaborate/typecheck ahead of the run door (the `structural`
+REPL frontend did too, until it was retired). That the fix
+restores the *same* phrasing that path already prints is the point — one
 renderer, so they cannot drift.
 
 ## Alternatives rejected
@@ -67,8 +67,7 @@ renderer, so they cannot drift.
   plus the source text would let each host render for itself. It contradicts
   the standing rule that a live error cannot cross the protocol
   (`Ending::Raised` already carries `rendered`, not an `Error`), and it buys
-  nothing: the one host that wants structure, the structural frontend, has it
-  already by typechecking locally.
+  nothing: no host wants structure now that the structural frontend is retired.
 - **Restore the compact REPL parse-error heuristic.**
   `should_use_compact_parse_error` fired on a message that no longer exists
   anywhere in the tree; restoring it restores dead code. Every parse error

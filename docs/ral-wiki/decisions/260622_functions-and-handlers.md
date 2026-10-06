@@ -97,7 +97,7 @@ handler convention.
 
 `echo` looked like the hard case: it prints arguments of *different* types, and
 ral has no top type to hold them — `Ty`
-([`core/src/typecheck/ty.rs`](../../../core/src/typecheck/ty.rs)) has no ⊤, by
+([`core/src/ty.rs`](../../../core/src/ty.rs)) has no ⊤, by
 design, because presence and variation are data, never a hole in a type
 ([[invariants/optionality-via-variants|optionality-via-variants]]). But ral
 already has the pieces that compose into exactly what `echo` does, so it needs no

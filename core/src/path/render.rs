@@ -31,7 +31,7 @@ impl Rendered {
     /// Whether `spelled`, taken as written, is this name or lies under it.
     #[cfg(unix)]
     pub(crate) fn holds(&self, spelled: &str) -> bool {
-        super::lex::path_within_str(spelled, &self.0, super::lex::Identity::Stored)
+        super::identity::path_within_str(spelled, &self.0, super::identity::Identity::Stored)
     }
 
     /// This name as a mount of `from` shows it at `onto`; `None` where `from`
@@ -75,7 +75,10 @@ pub(crate) struct Object {
 /// valid Unicode.  An OS rule is a string literal, so a lossy rendering
 /// would name a different inode; a grant that cannot be expressed
 /// faithfully is refused, not approximated.
-#[allow(clippy::disallowed_methods)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "path-form: lifts grant strings for `match_variants_paths` to canonicalise"
+)]
 #[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn render_paths<S: AsRef<str>>(paths: &[S]) -> Result<Vec<Rendered>, String> {
     Ok(
@@ -171,9 +174,9 @@ pub(crate) fn rendered_pins(deny: &[Rendered], write: &[Rendered]) -> Vec<Render
     super::proper_ancestors(deny.iter().map(Rendered::as_str))
         .into_iter()
         .filter(|dir| {
-            write
-                .iter()
-                .any(|w| super::lex::path_within_str(dir, w.as_str(), super::lex::Identity::Stored))
+            write.iter().any(|w| {
+                super::identity::path_within_str(dir, w.as_str(), super::identity::Identity::Stored)
+            })
         })
         .map(Rendered)
         .collect()

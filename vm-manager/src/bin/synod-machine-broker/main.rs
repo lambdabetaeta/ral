@@ -25,6 +25,10 @@ fn main() {
 /// Off Windows there is no service to run, and saying so beats a program that
 /// starts and then brokers nothing.
 #[cfg(not(windows))]
+#[allow(
+    clippy::disallowed_macros,
+    reason = "[silent:broker-stub] a stub with no ral shell to print through"
+)]
 fn main() {
     eprintln!(
         "synod machine broker: a Windows service, and this is not Windows. Here synod starts its \

@@ -3,10 +3,8 @@
 //! Everything above this file (the hook primitive, the circuit breaker, the
 //! buffer-change driver) is frontend-neutral; this module is where the
 //! [`KeyChord`]/[`Resolution`] vocabulary and the runtime mutex meet
-//! rustyline's own event and key types. The structural frontend adapts the
-//! same vocabulary at its own boundary instead (`frontend::structural`), so
-//! precedence and dispatch stay decided once, in the router, while each
-//! backend does only its own translation here.
+//! rustyline's own event and key types. Precedence and dispatch stay decided
+//! once, in the router; this module does only the translation.
 
 use std::sync::{Arc, Mutex};
 
@@ -173,8 +171,8 @@ mod tests {
     use super::*;
 
     /// The rustyline boundary: a parsed chord adapts to exactly the `KeyEvent`
-    /// rustyline binds against, so `sync_plugins` and the structural matcher
-    /// agree on what a notation means.
+    /// rustyline binds against, so `sync_plugins` binds exactly the
+    /// notation the router resolves.
     #[test]
     fn chord_adapts_to_rustyline_key_event() {
         let ev = |s| parse_key_notation(s).map(chord_to_key_event);

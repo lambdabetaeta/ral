@@ -1,10 +1,9 @@
 //! The type errors the checker raises: a structural cause, the provenance of
 //! the failed constraint, and a span.  Their user-facing prose is in `explain.rs`.
 
-use super::kind::Kind;
-use super::ty::{CompTy, Ty};
+use crate::ir::BinaryOp;
 use crate::source::Span;
-use crate::syntax::ast::BinaryOpKind;
+use crate::ty::{CompTy, Kind, Ty};
 
 /// What an arm stands in for, which decides what it must produce.
 #[derive(Debug, Clone)]
@@ -92,7 +91,7 @@ pub enum Reason {
     Negation,
     /// One part of an interpolated string.
     Interpolation,
-    BinaryOperands(BinaryOpKind),
+    BinaryOperands(BinaryOp),
     ListIndexKey,
     MapIndexKey,
     RecordFieldRead,

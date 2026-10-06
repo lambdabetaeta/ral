@@ -11,7 +11,7 @@ use super::{LexicalPath, lex, sigil};
 /// The `HOME` and logical cwd one resolution runs against; `home` is `None`
 /// where nothing binds one, and a `~` then resolves to itself.
 ///
-/// Field-for-field [`sigil::FreezeCtx`] bar the one that matters: a freeze
+/// Field-for-field [`FreezeCtx`](crate::guard::freeze::FreezeCtx) bar the one that matters: a freeze
 /// resolves `cwd:` once and for good, so its cwd is total, where a runtime
 /// resolution may defer to the process cwd.
 pub struct Resolver<'a> {
@@ -47,7 +47,10 @@ impl Resolver<'_> {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[test] fixtures build literal paths and save and restore `XDG_DATA_HOME`"
+)]
 mod tests {
     use super::*;
 

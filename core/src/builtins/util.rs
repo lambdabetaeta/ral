@@ -1,28 +1,6 @@
 //! Shared builtin argument, IO, and conversion helpers.
 
-use crate::types::{
-    Break, Closure, Error, HandleInner, Settled, Shell, Value, fmt_float, sig, sig_hint,
-};
-
-/// `i64::MAX` is not itself an `f64` — it rounds up to exactly this, so the
-/// magnitude bound is strict.
-pub(crate) const I64_BOUND: f64 = 9_223_372_036_854_775_808.0;
-
-/// Cast an integral `f64` to `i64`, refusing what `as i64` would silently saturate.
-pub(crate) fn f64_to_i64(name: &str, f: f64) -> Settled<i64> {
-    if (-I64_BOUND..I64_BOUND).contains(&f) {
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "f is range-checked into [-2^63, 2^63) just above; the cast is exact"
-        )]
-        Ok(f as i64)
-    } else {
-        Err(sig(format!(
-            "{name}: {} is outside the integer range",
-            fmt_float(f)
-        )))
-    }
-}
+use crate::types::{Settled, Shell, Value, sig, sig_hint};
 
 /// Arity floor for a builtin; `name` rides the error text.
 ///
@@ -37,71 +15,10 @@ pub(crate) fn check_arity(args: &[Value], min: usize, name: &str) -> Settled<()>
     Ok(())
 }
 
-pub(crate) fn expect_handle<'a>(val: &'a Value, cmd: &str) -> Settled<&'a HandleInner> {
-    match val {
-        Value::Handle(h) => Ok(h),
-        other => Err(Break::Error(
-            Error::new(
-                format!(
-                    "{cmd} expects a Handle, got {} '{other}'",
-                    other.type_name()
-                ),
-                1,
-            )
-            .with_hint("use spawn to create a handle"),
-        )),
-    }
-}
-
-pub(crate) fn expect_thunk(val: &Value, cmd: &str) -> Settled<Closure> {
-    match val {
-        // A spawn body takes no parameters: `comp.arrow()` is `None` for a
-        // block-shaped thunk.
-        Value::Thunk(closure) if closure.comp().arrow().is_none() => Ok(closure.clone()),
-        other => Err(Break::Error(
-            Error::new(
-                format!("{cmd} expects a Block, got {} '{other}'", other.type_name()),
-                1,
-            )
-            .with_hint(format!("{cmd} requires a block: {cmd} {{ ... }}")),
-        )),
-    }
-}
-
-pub(crate) fn decode_utf8_strict(bytes: Vec<u8>, context: &str, hint: &str) -> Settled<String> {
-    String::from_utf8(bytes).map_err(|e| sig_hint(format!("{context}: {e}"), hint))
-}
-
-pub(crate) fn as_bytes<'v>(val: &'v Value, ctx: &str) -> Settled<&'v [u8]> {
-    match val {
-        Value::Bytes(b) => Ok(b),
-        other => Err(sig_hint(
-            format!("{ctx}: expected Bytes, got {}", other.type_name()),
-            "a list of numbers is `ints-to-bytes`; a Bytes value comes from `from-bytes`",
-        )),
-    }
-}
-
-/// Borrow a `String` argument without copying it — the checker guarantees
-/// this for every caller today, so the `other` arm is a checker-bug
-/// backstop, not a reachable user error.
-///
-/// # Errors
-/// If `val` is not a `String`.
-pub fn as_str<'v>(val: &'v Value, ctx: &str) -> Settled<&'v str> {
-    match val {
-        Value::String(s) => Ok(s.as_str()),
-        other => Err(sig(format!(
-            "{ctx}: expected String, got {}",
-            other.type_name()
-        ))),
-    }
-}
-
-/// Bytes written by number, one `Int` per byte — [`as_bytes`] is the other
-/// spelling, for a `Bytes` value already in hand.
+/// Bytes written by number, one `Int` per byte — [`Value::as_bytes`] is the
+/// other spelling, for a `Bytes` value already in hand.
 pub(crate) fn as_byte_list(val: &Value, ctx: &str) -> Settled<Vec<u8>> {
-    let items = crate::types::as_list(val, ctx)?;
+    let items = val.as_list(ctx)?;
     let mut out = Vec::with_capacity(items.len());
     for (idx, item) in items.iter().enumerate() {
         match item.as_ref() {
@@ -126,136 +43,6 @@ pub(crate) fn as_byte_list(val: &Value, ctx: &str) -> Settled<Vec<u8>> {
         }
     }
     Ok(out)
-}
-
-/// Suspensions have no extensional equality, so asking errors rather than
-/// answering a non-reflexive `false`.
-fn uncomparable(a: &Value, b: &Value, op: &str) -> Break {
-    sig_hint(
-        format!(
-            "{op}: cannot compare {} with {}",
-            a.type_name(),
-            b.type_name()
-        ),
-        "comparison is defined on scalars, strings, bytes, lists, maps, and variants",
-    )
-}
-
-/// Conjunction over pairwise equalities that short-circuits on `Err` only: an
-/// early `false` must not mask a later pair's uncomparability.
-fn all_equal(mut pairs: impl Iterator<Item = Settled<bool>>) -> Settled<bool> {
-    pairs.try_fold(true, |acc, eq| eq.map(|e| acc && e))
-}
-
-/// Structural equality, shared by `equal` and by `==`/`!=` in `$[…]`.
-pub(crate) fn values_equal(a: &Value, b: &Value) -> Settled<bool> {
-    Ok(match (a, b) {
-        (Value::Unit, Value::Unit) => true,
-        (Value::Bool(x), Value::Bool(y)) => x == y,
-        (Value::Int(x), Value::Int(y)) => x == y,
-        // Int·Int is answered exactly above; everything else in the numeric
-        // tower is decided by promotion, as `value_ordering` decides order.
-        #[allow(
-            clippy::float_cmp,
-            reason = "a Float is finite by construction, so IEEE `==` is reflexive here; epsilon would break that"
-        )]
-        (Value::Int(_) | Value::Float(_), Value::Int(_) | Value::Float(_)) => {
-            a.as_float() == b.as_float()
-        }
-        (Value::String(x), Value::String(y)) => x == y,
-        (Value::Bytes(x), Value::Bytes(y)) => x == y,
-        (Value::List(xs), Value::List(ys)) => {
-            if xs.len() == ys.len() {
-                all_equal(xs.iter().zip(ys.iter()).map(|(a, b)| values_equal(&a, &b)))?
-            } else {
-                false
-            }
-        }
-        (Value::Map(xs), Value::Map(ys)) => {
-            // Both sides iterate sorted by key, so a pointwise zip decides it.
-            if xs.len() == ys.len() {
-                all_equal(
-                    xs.iter()
-                        .zip(ys.iter())
-                        .map(|((kx, vx), (ky, vy))| Ok(kx == ky && values_equal(&vx, &vy)?)),
-                )?
-            } else {
-                false
-            }
-        }
-        (
-            Value::Variant {
-                label: lx,
-                payload: px,
-            },
-            Value::Variant {
-                label: ly,
-                payload: py,
-            },
-        ) => {
-            lx == ly
-                && match (px, py) {
-                    (Some(x), Some(y)) => values_equal(x, y)?,
-                    (None, None) => true,
-                    _ => false,
-                }
-        }
-        // A name is an intensional identity a closure lacks, so natives
-        // compare where lambdas refuse; a collected lambda argument still
-        // surfaces the refusal.
-        (
-            Value::Native {
-                entry: ea,
-                applied: aa,
-            },
-            Value::Native {
-                entry: eb,
-                applied: ab,
-            },
-        ) => {
-            if ea.name != eb.name || aa.len() != ab.len() {
-                false
-            } else {
-                all_equal(aa.iter().zip(ab.iter()).map(|(x, y)| values_equal(x, y)))?
-            }
-        }
-        (Value::Thunk(_) | Value::Handle(_), _) | (_, Value::Thunk(_) | Value::Handle(_)) => {
-            return Err(uncomparable(a, b, "equal"));
-        }
-        _ => false,
-    })
-}
-
-/// Ordering on numbers and strings.  Int·Int compares as `i64`, so integers
-/// past 2^53 order exactly rather than through f64.  Backs `lt`/`gt`,
-/// `sort-list`, and the `$[…]` comparisons, which therefore cannot drift.
-pub(crate) fn value_ordering(a: &Value, b: &Value, op: &str) -> Settled<std::cmp::Ordering> {
-    match (a, b) {
-        (Value::Int(x), Value::Int(y)) => Ok(x.cmp(y)),
-        (Value::Int(_) | Value::Float(_), Value::Int(_) | Value::Float(_)) => {
-            let (x, y) = (a.as_float().unwrap(), b.as_float().unwrap());
-            x.partial_cmp(&y)
-                .ok_or_else(|| sig(format!("{op}: cannot order NaN")))
-        }
-        (Value::String(x), Value::String(y)) => Ok(x.cmp(y)),
-        _ => Err(sig_hint(
-            format!(
-                "{op}: cannot compare {} with {}",
-                a.type_name(),
-                b.type_name()
-            ),
-            "ordering is defined on numbers and strings",
-        )),
-    }
-}
-
-pub(crate) fn order_cmp(
-    args: &[Value],
-    name: &str,
-    want: fn(std::cmp::Ordering) -> bool,
-) -> Settled<Value> {
-    let r = want(value_ordering(&args[0], &args[1], name)?);
-    Ok(Value::Bool(r))
 }
 
 /// Resolve `path` against the `within [dir: …]` scoped cwd and capability-check
@@ -292,7 +79,7 @@ pub(crate) fn stdin_reader(name: &str, shell: &Shell) -> Settled<Box<dyn std::io
         .io
         .stdin
         .reader()
-        .map_err(crate::runtime::command::stdin_error)?
+        .map_err(|e| crate::types::Error::io("could not duplicate stdin", &e))?
     {
         return Ok(Box::new(std::io::BufReader::new(reader)));
     }
@@ -363,62 +150,17 @@ pub fn regex_err(ctx: &str, pattern: &str, full: &str) -> String {
     format!("{ctx}: invalid pattern '{pattern}': {cause}")
 }
 
-/// Total JSON projection for the `--audit` dump: lossy UTF-8 for Bytes, `null`
-/// for non-finite Floats, type-tagged stubs for suspensions.  Legibility over
-/// round-trip fidelity — none of it decodes back.
-pub fn value_to_json_lossy_bytes(v: &Value) -> serde_json::Value {
-    match v {
-        Value::Unit => serde_json::Value::Null,
-        Value::Bool(b) => serde_json::Value::Bool(*b),
-        Value::Int(n) => serde_json::json!(*n),
-        Value::Float(f) => serde_json::json!(*f),
-        Value::String(s) => serde_json::Value::String(s.to_string()),
-        Value::List(items) => serde_json::Value::Array(
-            items
-                .iter()
-                .map(|v| value_to_json_lossy_bytes(&v))
-                .collect(),
-        ),
-        Value::Map(pairs) => serde_json::Value::Object(
-            pairs
-                .iter()
-                .map(|(k, v)| (k.to_string(), value_to_json_lossy_bytes(&v)))
-                .collect(),
-        ),
-        Value::Thunk(c) => match c.comp().arrow() {
-            Some((param, _)) => {
-                serde_json::json!({"type": "Lambda", "param": format!("{param:?}")})
-            }
-            None => serde_json::json!({"type": "Block"}),
-        },
-        Value::Native { entry, applied } => {
-            serde_json::json!({"type": "Native", "name": entry.name.as_ref(), "applied": applied.len()})
-        }
-        Value::Handle(_) => serde_json::json!({"type": "Handle"}),
-        Value::Bytes(b) => serde_json::Value::String(String::from_utf8_lossy(b).into_owned()),
-        Value::Variant { label, payload } => {
-            let mut obj = serde_json::Map::new();
-            obj.insert("tag".into(), serde_json::Value::String(label.to_string()));
-            if let Some(p) = payload {
-                obj.insert("payload".into(), value_to_json_lossy_bytes(p));
-            }
-            serde_json::Value::Object(obj)
-        }
-    }
-}
-
 #[cfg(test)]
 mod stdin_tests {
     use super::stdin_reader;
     use crate::io::Source;
-    use crate::types::Shell;
     use std::io::Read;
 
     /// The guarantee an exarch tool run (`RunStdin::Empty`) rests on: a tool
     /// command reading stdin can never steal the TUI's controlling terminal.
     #[test]
     fn empty_source_reads_as_eof() {
-        let mut shell = Shell::default();
+        let mut shell = crate::test_helper::core_shell();
         shell.io.stdin = Source::Empty;
         let mut reader = stdin_reader("test", &shell).expect("Empty must not error");
         let mut buf = Vec::new();

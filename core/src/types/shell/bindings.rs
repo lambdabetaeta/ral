@@ -12,6 +12,8 @@
 //! second thread ever reach `&mut Shell` for a live agent and this unlocked
 //! design is the first thing that must change.
 
+use crate::record;
+use crate::types::{Env, pins_running_work};
 use std::collections::{HashMap, HashSet};
 
 /// Host-stated per-agent policy.
@@ -31,14 +33,20 @@ pub struct BindingLease {
 }
 
 /// The transcript facts of one pruned name.
-#[derive(Clone, Debug)]
-pub struct BindingPruneNotice {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pruned {
     pub name: String,
     /// Epochs elapsed since last use at prune time (`>= lease.idle_calls`).
     pub idle_calls: u64,
     /// The pruned value's [`Value::type_name`](crate::types::Value::type_name).
-    pub kind: &'static str,
+    pub kind: String,
 }
+
+record!(Pruned {
+    name: "name",
+    idle_calls: "idle-calls",
+    kind: "kind",
+});
 
 /// The transcript facts of one session-scope install whose shallow-size
 /// estimate met [`BindingLease::large_binding_bytes`] as it was written.
@@ -46,9 +54,20 @@ pub struct BindingPruneNotice {
 /// This is a residency nudge that leaves the binding wholly untouched,
 /// re-queued by every rebind still over the threshold.
 #[derive(Clone, Debug)]
-pub struct LargeBindingNotice {
-    pub name: String,
+pub(crate) struct LargeBindingNotice {
+    pub(crate) name: String,
     pub(crate) bytes: u64,
+}
+
+impl std::fmt::Display for LargeBindingNotice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "note: large binding `{}` (~{} bytes) held in session memory; consider writing it \
+             to a file and binding the path instead of the captured bytes",
+            self.name, self.bytes,
+        )
+    }
 }
 
 /// The armed half of a [`BindingLedger`]: present only once a host has
@@ -182,6 +201,43 @@ impl BindingLedger {
         }
     }
 
+    /// Prune every leased name idle past the armed lease's bound, from `env`.
+    ///
+    /// One pass in sorted order: a name absent from `env` had its install
+    /// rolled back, so the orphan drops silently; a value that structurally
+    /// reaches a running handle is pinned and re-examined next boundary; the
+    /// rest are unset, scheme and all, since a `Binding` couples both.  The
+    /// adoption sweep afterwards runs even on a pass that prunes nothing, so a
+    /// name a missed install path left untracked is leased late, not immortal.
+    pub(crate) fn prune(&mut self, env: &mut Env) -> Vec<Pruned> {
+        if !self.armed() {
+            return Vec::new();
+        }
+        let mut pruned = Vec::new();
+        for (name, idle_calls) in self.expired() {
+            match env.get(&name) {
+                // Orphaned by a rollback: nothing to prune.
+                None => self.drop_entry(&name),
+                // Pinned: leave the entry exactly as it is.
+                Some(value) if pins_running_work(value) => {}
+                Some(value) => {
+                    let kind = value.type_name().to_string();
+                    env.unset(&name);
+                    self.drop_entry(&name);
+                    pruned.push(Pruned {
+                        name,
+                        idle_calls,
+                        kind,
+                    });
+                }
+            }
+        }
+        for name in env.names() {
+            self.adopt(name);
+        }
+        pruned
+    }
+
     /// Names currently leased. Counting renews nothing, the rule every
     /// enumeration in this ledger obeys.
     pub(crate) fn leased_count(&self) -> usize {
@@ -307,21 +363,15 @@ mod tests {
     reason = "[test] test fs/process scaffolding"
 )]
 mod chokepoint_tests {
+    use crate::RunIo;
     use crate::boot::BakedPrelude;
     use crate::protocol::{Program, Run};
-    use crate::types::{GrantStack, HandleState, Settled, Shell, Value};
-    use crate::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
-    use std::sync::OnceLock;
-    use std::time::{Duration, Instant};
+    use crate::run::RunReport;
+    use crate::test_helper::eventually;
+    use crate::types::{HandleState, Settled, Shell, Value};
+    use std::time::Duration;
 
     use super::BindingLease;
-
-    /// The prelude baked once per test binary — core's own unit tests get no
-    /// build-time blob.
-    fn prelude() -> &'static BakedPrelude {
-        static P: OnceLock<BakedPrelude> = OnceLock::new();
-        P.get_or_init(BakedPrelude::bake_runtime)
-    }
 
     /// A booted, armed shell whose large-binding threshold never fires.
     fn armed_shell(idle_calls: u64) -> Shell {
@@ -332,8 +382,8 @@ mod chokepoint_tests {
     /// order exarch's `Agent::assemble` follows.
     fn armed_shell_with(idle_calls: u64, large_binding_bytes: u64) -> Shell {
         let mut shell = crate::boot::boot_shell(
-            crate::io::TerminalState::default(),
-            prelude(),
+            crate::terminal::TerminalState::default(),
+            BakedPrelude::runtime(),
             &crate::boot::HostSurface::default(),
         );
         shell.arm_binding_lease(BindingLease {
@@ -346,24 +396,7 @@ mod chokepoint_tests {
     /// One top-level run through the public door. Every source below must
     /// compile; a `Static` report is a test bug.
     fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
-        match shell.run(RunRequest {
-            run: Run {
-                program: Program::Source(source.into()),
-                script_name: "<test>".into(),
-                caps: GrantStack::root(),
-                wall: None,
-                deferred_lease: None,
-                worker_cap: None,
-                io: RunIo::Inherit,
-                terminal: RequestedTerminalAccess::Leased,
-                stdin: RunStdin::Inherit,
-                trail: None,
-            },
-            surface: None,
-            deferred: None,
-            desk: None,
-            fork: None,
-        }) {
+        match shell.run(Run::foreground(source, "<test>")) {
             RunReport::Ran { ending, .. } => ending.into_result(),
             RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
         }
@@ -372,23 +405,9 @@ mod chokepoint_tests {
     /// One captured run's stderr — where the ready boundary writes the
     /// large-binding warning.
     fn top_level_stderr(shell: &mut Shell, source: &str) -> String {
-        match shell.run(RunRequest {
-            run: Run {
-                program: Program::Source(source.into()),
-                script_name: "<test>".into(),
-                caps: GrantStack::root(),
-                wall: None,
-                deferred_lease: None,
-                worker_cap: None,
-                io: RunIo::Capture,
-                terminal: RequestedTerminalAccess::Leased,
-                stdin: RunStdin::Inherit,
-                trail: None,
-            },
-            surface: None,
-            deferred: None,
-            desk: None,
-            fork: None,
+        match shell.run(Run {
+            io: RunIo::Capture,
+            ..Run::foreground(source, "<test>")
         }) {
             RunReport::Ran { captured, .. } => {
                 let captured = captured.expect("Capture must return buffers");
@@ -507,8 +526,8 @@ mod chokepoint_tests {
     #[test]
     fn prelude_and_host_seeds_are_baseline() {
         let mut shell = crate::boot::boot_shell(
-            crate::io::TerminalState::default(),
-            prelude(),
+            crate::terminal::TerminalState::default(),
+            BakedPrelude::runtime(),
             &crate::boot::HostSurface::default(),
         );
         let (prelude_name, _) = shell
@@ -556,24 +575,7 @@ mod chokepoint_tests {
         let epoch_before = epoch(&shell);
         let stale = last_used_of(&shell, "static_x");
 
-        match shell.run(RunRequest {
-            run: Run {
-                program: Program::Source("$[1 + true]".into()),
-                script_name: "<test>".into(),
-                caps: GrantStack::root(),
-                wall: None,
-                deferred_lease: None,
-                worker_cap: None,
-                io: RunIo::Inherit,
-                terminal: RequestedTerminalAccess::Leased,
-                stdin: RunStdin::Inherit,
-                trail: None,
-            },
-            surface: None,
-            deferred: None,
-            desk: None,
-            fork: None,
-        }) {
+        match shell.run(Run::foreground("$[1 + true]", "<test>")) {
             RunReport::Static { .. } => {}
             RunReport::Ran { .. } => panic!("ill-typed source must not run"),
         }
@@ -611,35 +613,16 @@ mod chokepoint_tests {
                 thunk,
                 crate::types::HookSig::Prompt,
                 crate::types::DefaultPolicy::denied(),
-                crate::source::Span {
-                    start: 0,
-                    end: 0,
-                    file: crate::source::FileId::DUMMY,
-                },
             )
             .expect("register the hook");
 
-        let report = shell.run(RunRequest {
-            run: Run {
-                program: Program::Hook {
-                    name: crate::types::HookName::session("test_prompt"),
-                    args: vec![],
-                },
-                script_name: "<test>".into(),
-                caps: GrantStack::root(),
-                wall: None,
-                deferred_lease: None,
-                worker_cap: None,
-                io: RunIo::Inherit,
-                terminal: RequestedTerminalAccess::Leased,
-                stdin: RunStdin::Inherit,
-                trail: None,
+        let report = shell.run(Run::foreground(
+            Program::Hook {
+                name: crate::types::HookName::session("test_prompt"),
+                args: vec![],
             },
-            surface: None,
-            deferred: None,
-            desk: None,
-            fork: None,
-        });
+            "<test>",
+        ));
         match report {
             RunReport::Ran { ending, .. } => {
                 ending.into_result().expect("the hook body must run");
@@ -665,11 +648,6 @@ mod chokepoint_tests {
     #[test]
     fn plugin_hooks_removed_by_namespace() {
         use crate::types::{DefaultPolicy, HookName, HookSig};
-        let span = crate::source::Span {
-            start: 0,
-            end: 0,
-            file: crate::source::FileId::DUMMY,
-        };
         let mut shell = armed_shell(64);
         top_level(&mut shell, "let body = { 1 }").expect("define a hook body");
         let thunk = shell
@@ -684,7 +662,6 @@ mod chokepoint_tests {
                     thunk.clone(),
                     HookSig::Prompt,
                     DefaultPolicy::denied(),
-                    span,
                 )
                 .expect("register");
         };
@@ -756,32 +733,15 @@ mod chokepoint_tests {
         top_level(&mut shell, "let prune_x = 1").expect("define");
         idle_spin(&mut shell, 2);
 
-        let notices = shell.prune_idle_bindings();
+        let notices = shell.local.bindings.prune(&mut shell.env);
         assert_eq!(notices.len(), 1, "prune_x must be idle enough to prune");
         assert_eq!(notices[0].name, "prune_x");
         assert_eq!(notices[0].kind, "Int");
         assert!(shell.scope_lookup("prune_x").is_none());
 
-        match shell.run(RunRequest {
-            run: Run {
-                program: Program::Source("return $prune_x".into()),
-                script_name: "<test>".into(),
-                caps: GrantStack::root(),
-                wall: None,
-                deferred_lease: None,
-                worker_cap: None,
-                io: RunIo::Inherit,
-                terminal: RequestedTerminalAccess::Leased,
-                stdin: RunStdin::Inherit,
-                trail: None,
-            },
-            surface: None,
-            deferred: None,
-            desk: None,
-            fork: None,
-        }) {
+        match shell.run(Run::foreground("return $prune_x", "<test>")) {
             RunReport::Static { diagnostics } => {
-                let msg = crate::diagnostic::format_static_diagnostics(&diagnostics).0;
+                let msg = diagnostics.render().0;
                 assert!(
                     msg.contains("undefined variable: $prune_x"),
                     "expected an undefined-variable diagnostic, got: {msg}"
@@ -804,24 +764,20 @@ mod chokepoint_tests {
         assert_eq!(handle_state(&shell, "h_pin"), HandleState::Running);
 
         assert!(
-            shell.prune_idle_bindings().is_empty(),
+            shell.local.bindings.prune(&mut shell.env).is_empty(),
             "a running handle must not be pruned"
         );
         assert!(shell.scope_lookup("h_pin").is_some());
 
         top_level(&mut shell, "cancel $h_pin").expect("cancel");
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while handle_state(&shell, "h_pin") == HandleState::Running {
-            assert!(
-                Instant::now() < deadline,
-                "the cancelled worker must settle within the budget"
-            );
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        eventually(Duration::from_secs(5), || {
+            (handle_state(&shell, "h_pin") != HandleState::Running).then_some(())
+        })
+        .expect("the cancelled worker must settle within the budget");
         // The `cancel $h_pin` run referenced, and so renewed, h_pin.
         idle_spin(&mut shell, 2);
 
-        let notices = shell.prune_idle_bindings();
+        let notices = shell.local.bindings.prune(&mut shell.env);
         assert_eq!(notices[0].name, "h_pin", "a settled handle must now prune");
     }
 
@@ -831,17 +787,13 @@ mod chokepoint_tests {
     fn settled_handle_is_ordinary_scratch() {
         let mut shell = armed_shell(2);
         top_level(&mut shell, "let h_settled = !{spawn { return 1 }}").expect("spawn");
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while handle_state(&shell, "h_settled") == HandleState::Running {
-            assert!(
-                Instant::now() < deadline,
-                "the instant worker must settle within the budget"
-            );
-            std::thread::sleep(Duration::from_millis(2));
-        }
+        eventually(Duration::from_secs(5), || {
+            (handle_state(&shell, "h_settled") != HandleState::Running).then_some(())
+        })
+        .expect("the instant worker must settle within the budget");
         idle_spin(&mut shell, 2);
 
-        let notices = shell.prune_idle_bindings();
+        let notices = shell.local.bindings.prune(&mut shell.env);
         assert!(
             !notices.is_empty(),
             "a settled handle prunes like any scratch"
@@ -867,11 +819,11 @@ mod chokepoint_tests {
         );
         assert!(
             is_leased(&shell, "orphan_x"),
-            "the ledger entry is not part of the rolled-back environment — it orphans"
+            "the ledger entry is not part of the rolled-back environment: it orphans"
         );
 
         idle_spin(&mut shell, 2);
-        let result = shell.prune_idle_bindings();
+        let result = shell.local.bindings.prune(&mut shell.env);
         assert!(
             result.is_empty(),
             "an orphan-only sweep drops the entry silently and yields no notice"
@@ -892,11 +844,11 @@ mod chokepoint_tests {
 
         idle_spin(&mut shell, 1);
         let epoch_at_sweep = epoch(&shell);
-        let _ = shell.prune_idle_bindings();
+        let _ = shell.local.bindings.prune(&mut shell.env);
 
         assert!(
             shell.scope_lookup("stray_y").is_some(),
-            "adoption must never prune — only start tracking"
+            "adoption must never prune: only start tracking"
         );
         assert_eq!(
             last_used_of(&shell, "stray_y"),
@@ -910,7 +862,7 @@ mod chokepoint_tests {
         let mut shell = armed_shell(64);
         top_level(&mut shell, "let fresh_z = 1").expect("define");
         assert!(
-            shell.prune_idle_bindings().is_empty(),
+            shell.local.bindings.prune(&mut shell.env).is_empty(),
             "nothing is idle enough to prune yet"
         );
     }

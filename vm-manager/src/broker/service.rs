@@ -24,6 +24,10 @@
 //! ever reaches [`crate::hcs`] without passing a check in this file, the
 //! argument in [`super`] stops being true.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "[silent:windows-host] a service diagnostic with no ral shell to print through"
+)]
 use std::io;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::io::{

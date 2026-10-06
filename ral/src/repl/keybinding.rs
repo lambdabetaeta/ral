@@ -8,9 +8,9 @@
 //! push a new buffer onto the stack.
 
 use ral_core::HookName;
-use ral_core::protocol::Transport;
-use ral_core::serial::FOValue;
-use ral_core::serial::datum::Datum as _;
+use ral_core::carrier::Transport;
+use ral_core::first_order::FOValue;
+use ral_core::first_order::datum::Datum as _;
 use std::sync::Arc;
 
 use super::frontend::EditBuffer;
@@ -148,7 +148,7 @@ mod tests {
         // Before unload, "a"'s binding resolves.
         assert_eq!(rt.resolve_keybinding("a", 0), Some("ctrl-t".into()));
 
-        // `unload_plugin` removes "a"; "b" shifts down to slot 0 — the
+        // `unload_plugin` removes "a"; "b" shifts down to slot 0: the
         // exact compaction that index-based dispatch would mishandle.
         rt.plugins.remove(0);
 

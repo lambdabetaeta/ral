@@ -10,7 +10,7 @@ let files = filter { |p| is-file $p } !{glob "$root/**/*"}
 
 let totals = fold { |acc p|
     let key   = case !{extension $p} [
-        `just: { |e| return ".$e" },
+        `some: { |e| return ".$e" },
         `none: { |_| return '(none)' }
     ]
     let bytes = !{file-info $p}[size]

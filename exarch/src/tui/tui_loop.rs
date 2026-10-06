@@ -150,15 +150,16 @@ pub fn run(
     drop(tui);
     if let Ok(paths) = &logs {
         for p in paths {
-            match p.parent() {
-                Some(dir) => println!("Agent logs: {} (user.log + record.jsonl)", dir.display()),
-                None => println!("Agent log: {}", p.display()),
+            if let Some(dir) = p.parent() {
+                ral_core::outln!("Agent logs: {} (user.log + record.jsonl)", dir.display());
+            } else {
+                ral_core::outln!("Agent log: {}", p.display());
             }
         }
     } else if let Err(e) = logs {
-        eprintln!("exarch: {e}");
+        ral_core::errln!("exarch: {e}");
     }
-    println!("{usage}");
+    ral_core::outln!("{usage}");
     Ok(())
 }
 

@@ -5,6 +5,10 @@
 //! refusal is worth one clear sentence on the console the host is reading,
 //! not a panic.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "[silent:guest-main] the guest daemon cannot depend on core, so no `errln!`"
+)]
 use std::process::ExitCode;
 
 fn main() -> ExitCode {

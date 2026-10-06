@@ -39,7 +39,7 @@ impl Context {
             }
             if self.unclosed_turn() == Some(id) {
                 return Err(format!(
-                    "turn {id} is being written now — an eviction keeps the work in hand"
+                    "turn {id} is being written now: an eviction keeps the work in hand"
                 ));
             }
         }
@@ -74,7 +74,7 @@ impl Context {
             };
             return Err(format!(
                 "turn {user} is the prompt whose {turns} {} {are} still in your context, and a \
-                 prompt stays with {them} — name {them} too, or leave it",
+                 prompt stays with {them}: name {them} too, or leave it",
                 runs(&rest)
             ));
         }
@@ -104,11 +104,11 @@ impl Context {
     fn departed_turn_refusal(&self, turn: u64) -> String {
         match self.resident().next() {
             Some(first) => format!(
-                "turn {turn} has already left your context — the earliest still in it is {}",
+                "turn {turn} has already left your context: the earliest still in it is {}",
                 first.id
             ),
             None => {
-                format!("turn {turn} has already left your context — no turn is still in it")
+                format!("turn {turn} has already left your context: no turn is still in it")
             }
         }
     }
@@ -270,7 +270,7 @@ impl Context {
             return Err(foreign(
                 if matches!(protocol, Protocol::ContextMessage { .. }) {
                     format!(
-                        "record {n} imports turn {id}, which the link says has already left the context — a fork re-records only what its parent still had"
+                        "record {n} imports turn {id}, which the link says has already left the context: a fork re-records only what its parent still had"
                     )
                 } else {
                     format!("record {n} extends turn {id}, which has already left the context")

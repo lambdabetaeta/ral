@@ -139,14 +139,18 @@ fn render(name: &CommandName, ctx: &Context) -> String {
 )]
 mod tests {
     use super::*;
-    use crate::capability::admits_head;
+    use crate::capability::{Capabilities, ExecGrant, ExecKey, GrantStack, Verdict};
     use crate::path::FrozenPath;
-    use crate::types::{Capabilities, ExecGrant, ExecKey, GrantStack, Shell, Verdict};
     use std::path::Path;
+
+    /// Head admission as dispatch asks it: a head with no program passes.
+    fn admits_head(ctx: &Context, head: &Head) -> bool {
+        (head.program.as_ref().ok()).is_none_or(|program| ctx.grants.admits(program))
+    }
 
     #[test]
     fn render_expands_tilde_against_env_home() {
-        let mut shell = Shell::default();
+        let mut shell = crate::test_helper::core_shell();
         shell.context.set_env_var("HOME", "/tmp/home");
         assert_eq!(
             render(
@@ -192,7 +196,7 @@ mod tests {
     fn a_relative_path_head_is_the_file_under_the_cwd() {
         let tmp = tempfile::tempdir().unwrap();
         let name = plant(tmp.path(), "configure");
-        let mut shell = Shell::default();
+        let mut shell = crate::test_helper::core_shell();
         shell.seed_cwd(tmp.path().to_path_buf());
 
         let head = Head::resolve(&CommandName::Path(format!("./{name}")), &shell.context);
@@ -213,7 +217,7 @@ mod tests {
         std::fs::create_dir_all(real.join("sub")).unwrap();
         plant(&real, "tool");
         std::os::unix::fs::symlink(real.join("sub"), tmp.path().join("link")).unwrap();
-        let mut shell = Shell::default();
+        let mut shell = crate::test_helper::core_shell();
         shell.seed_cwd(tmp.path().to_path_buf());
 
         let head = Head::resolve(&CommandName::Path("link/../tool".into()), &shell.context);
@@ -224,7 +228,7 @@ mod tests {
 
     #[test]
     fn a_path_head_naming_no_file_has_no_program() {
-        let shell = Shell::default();
+        let shell = crate::test_helper::core_shell();
         let head = std::env::temp_dir().join("no-such-dir").join("configure");
         let head = Head::resolve(&path_head(&head), &shell.context);
         assert!(matches!(head.program, Err(Missing::NotFound)));
@@ -237,7 +241,7 @@ mod tests {
     fn a_trailing_slash_on_a_file_is_not_found() {
         let tmp = tempfile::tempdir().unwrap();
         let name = plant(tmp.path(), "tool");
-        let shell = Shell::default();
+        let shell = crate::test_helper::core_shell();
         let head = tmp.path().join(name).to_string_lossy().into_owned() + "/";
         let head = Head::resolve(&CommandName::Path(head), &shell.context);
         assert!(matches!(head.program, Err(Missing::NotFound)));
@@ -251,7 +255,7 @@ mod tests {
         let file = tmp.path().join("plain");
         std::fs::write(&file, "").unwrap();
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let shell = Shell::default();
+        let shell = crate::test_helper::core_shell();
         for head in [file.as_path(), tmp.path()] {
             let head = Head::resolve(&path_head(head), &shell.context);
             assert!(
@@ -280,7 +284,7 @@ mod tests {
         let elsewhere = tempfile::tempdir().unwrap();
         let name = plant(here.path(), "zzcwdfile");
 
-        let mut shell = Shell::default();
+        let mut shell = crate::test_helper::core_shell();
         shell.seed_cwd(here.path().to_path_buf());
         shell
             .context
@@ -300,7 +304,7 @@ mod tests {
         let file = dir.path().join("zznoexec");
         std::fs::write(&file, "").unwrap();
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let mut shell = Shell::default();
+        let mut shell = crate::test_helper::core_shell();
         shell
             .context
             .set_env_var("PATH", dir.path().to_string_lossy().into_owned());
@@ -314,7 +318,7 @@ mod tests {
     #[test]
     fn a_bundled_name_is_its_tool() {
         let dir = tempfile::tempdir().unwrap();
-        let mut shell = Shell::default();
+        let mut shell = crate::test_helper::core_shell();
         shell
             .context
             .set_env_var("PATH", dir.path().to_string_lossy().into_owned());
@@ -506,7 +510,7 @@ mod tests {
         std::fs::create_dir(&bin).unwrap();
         let name = plant(&bin, "zzwalk");
 
-        let mut shell = Shell::default();
+        let mut shell = crate::test_helper::core_shell();
         shell.seed_cwd(tmp.path().to_path_buf());
         shell.context.set_env_var("PATH", "./bin");
 

@@ -5,8 +5,9 @@
 use crate::agent::cancel::InterruptTarget;
 use crate::bootstrap::Scratch;
 use crate::shell_eval::builtins;
+use ral_core::carrier::{IdentityTransport, ProbeError, Severed, Transport};
 use ral_core::engine::EngineInstaller;
-use ral_core::protocol::{Attach, IdentityTransport, ProbeError, Severed, Transport};
+use ral_core::protocol::Attach;
 use std::sync::Arc;
 
 /// How a fork of this seat's engine reaches the desk that adopts it: parked in
@@ -38,7 +39,7 @@ pub(crate) enum Seat {
     /// Out-of-process, one engine per session: a fork is hatched guest-side
     /// and dialled by the desk's wire arm, attached as this seat was.
     Wire {
-        transport: Box<ral_core::protocol::WireTransport>,
+        transport: Box<ral_core::carrier::WireTransport>,
         target: InterruptTarget,
         cwd: std::path::PathBuf,
         home: std::path::PathBuf,
@@ -180,7 +181,7 @@ impl Seat {
     pub(crate) fn root(
         installers: &'static [EngineInstaller],
         cwd: std::path::PathBuf,
-        terminal: ral_core::io::TerminalState,
+        terminal: ral_core::terminal::TerminalState,
         scratch: Arc<Scratch>,
         session_dir: &std::path::Path,
     ) -> Result<Self, Severed> {
@@ -220,7 +221,7 @@ impl Seat {
     /// The transport's severance, if the engine refuses the attach or falls
     /// silent before answering it.
     pub(crate) fn wire(
-        transport: ral_core::protocol::WireTransport,
+        transport: ral_core::carrier::WireTransport,
         cwd: std::path::PathBuf,
         home: std::path::PathBuf,
     ) -> Result<Self, Severed> {
@@ -325,7 +326,7 @@ impl Seat {
 #[cfg(test)]
 mod lost {
     use super::{EngineLost, EnginePhase};
-    use ral_core::protocol::Severed;
+    use ral_core::carrier::Severed;
 
     fn closed() -> Severed {
         Severed::Closed("the engine closed the connection".into())
@@ -431,11 +432,12 @@ mod lost {
 mod tests {
     use super::*;
     use crate::agent::log::AgentLog;
-    use crate::agent::testkit::source_run;
     use crate::bus::{Emitter, Inbox};
     use crate::fleet::Fleet;
     use crate::fleet::desk::{ExarchDesk, HostServices, RunHost, SurfaceApplier};
-    use ral_core::protocol::{EnquiryError, Host, Liveness, Report, WireTransport};
+    use ral_core::carrier::{Host, WireTransport};
+    use ral_core::protocol::channel::Liveness;
+    use ral_core::protocol::{EnquiryError, Report};
     use std::os::unix::io::AsRawFd;
     use std::os::unix::net::UnixStream;
     use std::sync::Arc;
@@ -456,7 +458,7 @@ mod tests {
         let (host, guest) = UnixStream::pair().expect("socketpair");
         let guest_fd = guest.as_raw_fd();
         let mut cmd = std::process::Command::new(std::env::current_exe().expect("current exe"));
-        cmd.arg("--engine");
+        cmd.arg(ral_core::Role::Engine.flag());
         cmd.stdin(std::process::Stdio::null());
         cmd.stdout(std::process::Stdio::null());
         cmd.stderr(std::process::Stdio::null());
@@ -523,16 +525,16 @@ mod tests {
 
     /// A `Host` that only records the values it is surfaced, for the
     /// round-trip below — this run raises no enquiry and forks nothing.
-    struct SurfaceCollector(std::sync::Mutex<Vec<ral_core::serial::FOValue>>);
+    struct SurfaceCollector(std::sync::Mutex<Vec<ral_core::first_order::FOValue>>);
 
     impl Host for SurfaceCollector {
-        fn surface(&self, val: &ral_core::serial::FOValue) {
+        fn surface(&self, val: &ral_core::first_order::FOValue) {
             self.0.lock().unwrap().push(val.clone());
         }
         fn enquire(
             &self,
-            _req: ral_core::serial::FOValue,
-        ) -> Result<ral_core::serial::FOValue, EnquiryError> {
+            _req: ral_core::first_order::FOValue,
+        ) -> Result<ral_core::first_order::FOValue, EnquiryError> {
             unreachable!("this run raises no enquiry")
         }
     }
@@ -542,9 +544,9 @@ mod tests {
         let (seat, mut child) = wire_seat(Liveness::default());
 
         let host = Arc::new(SurfaceCollector(std::sync::Mutex::new(Vec::new())));
-        let report = ral_core::protocol::dispatch_to_report(
+        let report = ral_core::carrier::dispatch_to_report(
             seat.transport(),
-            source_run("exarch-surface `ping"),
+            ral_core::protocol::Run::captured("exarch-surface `ping", "<test>"),
             host.clone() as Arc<dyn Host>,
         )
         .expect("the engine must answer the dispatch with a Report");
@@ -563,7 +565,7 @@ mod tests {
         // kit's own value is the variant among them.
         let surfaced = host.0.lock().unwrap().clone();
         assert!(
-            surfaced.contains(&ral_core::serial::FOValue::Variant {
+            surfaced.contains(&ral_core::first_order::FOValue::Variant {
                 label: "ping".into(),
                 payload: None
             }),
@@ -589,9 +591,9 @@ mod tests {
             apply: SurfaceApplier::new(crate::record::Emitter::none()),
         });
 
-        let report = ral_core::protocol::dispatch_to_report(
+        let report = ral_core::carrier::dispatch_to_report(
             seat.transport(),
-            source_run("exarch-agents `list"),
+            ral_core::protocol::Run::captured("exarch-agents `list", "<test>"),
             host,
         )
         .expect("the engine must answer the dispatch with a Report");
@@ -633,9 +635,9 @@ mod tests {
             apply: SurfaceApplier::new(crate::record::Emitter::none()),
         });
 
-        let report = ral_core::protocol::dispatch_to_report(
+        let report = ral_core::carrier::dispatch_to_report(
             seat.transport(),
-            source_run("let h = spawn { sleep 1 }"),
+            ral_core::protocol::Run::captured("let h = spawn { sleep 1 }", "<test>"),
             host,
         )
         .expect("the engine must answer the dispatch with a Report");
@@ -671,7 +673,7 @@ mod tests {
                 // this asserts on content rather than length.
                 assert!(
                     values.iter().any(
-                        |v| matches!(v, ral_core::serial::FOValue::Variant { label, .. } if label == "done")
+                        |v| matches!(v, ral_core::first_order::FOValue::Variant { label, .. } if label == "done")
                     ),
                     "the batch must carry the worker's completion marker, got {values:?}"
                 );
@@ -695,9 +697,9 @@ mod tests {
 
         let settled = std::thread::scope(|s| {
             let dispatch = s.spawn(|| {
-                ral_core::protocol::dispatch_to_report(
+                ral_core::carrier::dispatch_to_report(
                     seat.transport(),
-                    source_run("sleep 30"),
+                    ral_core::protocol::Run::captured("sleep 30", "<test>"),
                     Arc::new(()) as Arc<dyn Host>,
                 )
             });

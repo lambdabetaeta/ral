@@ -38,14 +38,13 @@ pub(super) fn args(shell: &Shell) -> Value {
 }
 
 pub(super) fn user(shell: &Shell) -> Result<Value, Error> {
-    crate::path::user_name(shell.env_overrides())
+    shell
+        .env_overrides()
+        .user()
         .map(Value::string)
         .ok_or_else(|| {
-            Error::new(
-                "`user` needs USER (or USERNAME on Windows), and neither is set",
-                1,
-            )
-            .with_hint("set USER, e.g. `within [env: [USER: \"me\"]] { … }`")
+            Error::new("`user` needs USER (or USERNAME on Windows), and neither is set")
+                .with_hint("set USER, e.g. `within [env: [USER: \"me\"]] { … }`")
         })
 }
 
@@ -55,21 +54,12 @@ pub(super) fn nproc() -> Value {
     )
 }
 
-/// The effective home directory; the one place that names an unset `HOME`,
-/// shared by `~` and `home`.
-pub(crate) fn home_dir(shell: &Shell) -> Result<String, Error> {
-    shell.context.home().ok_or_else(|| {
-        Error::new("HOME is unset, so `~` and `home` name no directory", 1)
-            .with_hint("set HOME, or spell out an explicit path")
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn new_shell() -> Shell {
-        Shell::new(crate::io::TerminalState::default())
+        crate::test_helper::core_shell()
     }
 
     #[test]

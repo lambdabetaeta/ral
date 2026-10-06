@@ -2,9 +2,9 @@
 //! stage's launch decision, `launch` places every stage in one process group,
 //! `join` folds their observations into one value.
 
+pub(crate) mod anchor;
 mod collect;
 mod group;
-pub(crate) mod helper;
 mod launch;
 pub(crate) mod resolve;
 mod route;
@@ -12,8 +12,8 @@ mod sentinel;
 mod stage;
 mod thread;
 
-use crate::ir::Comp;
-use crate::types::{Env, Mooring, Settled, Shell, Value};
+use crate::ir::{Args, Comp};
+use crate::types::{Env, Error, Mooring, Settled, Shell, Signature, Value};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -22,6 +22,15 @@ use group::PipelineGroup;
 use launch::{LaunchCx, spawn_stage};
 use resolve::{TerminalPlan, resolve_pipeline};
 use route::open_stage_routes;
+
+/// What a stage needs of the machine, handed in by the evaluator so the
+/// runtime never names it: `run` evaluates a ral stage under the node's
+/// environment, `close_args` closes a direct external's arguments.
+#[derive(Clone, Copy)]
+pub(crate) struct StageEval {
+    pub(crate) run: fn(Arc<Comp>, Env, &Mooring, &mut Shell) -> Settled<Value>,
+    pub(crate) close_args: fn(&Args, &Env, &Signature) -> Result<Vec<Value>, Error>,
+}
 
 /// A multi-stage pipeline between its launch and its join, its stages running
 /// in their own process group.
@@ -45,17 +54,18 @@ impl PipeNode {
     pub(crate) fn launch(
         stages: &[Arc<Comp>],
         env: &Env,
+        eval: StageEval,
         mooring: &Mooring,
         shell: &mut Shell,
     ) -> Settled<Self> {
-        crate::process::check(mooring)?;
-        let plan = resolve_pipeline(stages, env, mooring, shell)?;
+        mooring.check()?;
+        let plan = resolve_pipeline(stages, env, eval, mooring, shell)?;
 
         // Window start for the sandbox-denial reader.
         let started = Instant::now();
         let (tx, rx) = std::sync::mpsc::channel();
 
-        let group = match shell.io.launch_role.membership() {
+        let group = match shell.io.stage.as_ref() {
             Some(membership) => PipelineGroup::joining(membership.clone()),
             None => PipelineGroup::prepare(shell, tx.clone())?,
         };
@@ -73,11 +83,12 @@ impl PipeNode {
             mooring,
             shell,
             env,
+            eval,
             group: &node.group,
             holds_terminal: node.collect.holds_terminal(),
         };
         for (ix, ((stage, spec), route)) in stages.iter().zip(&plan.specs).zip(routes).enumerate() {
-            crate::process::check(mooring)?;
+            mooring.check()?;
             let handle = spawn_stage(stage, spec, route, &mut cx, Slot { ix, tx: tx.clone() })?;
             node.collect.push(handle);
         }
@@ -107,8 +118,9 @@ impl PipeNode {
 )]
 mod tests {
     use crate::process::{CancelCause, ForegroundScope};
+    use crate::test_helper::eventually;
     use std::path::PathBuf;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     /// A `sh` that appends a line to `hits` for every SIGINT or SIGTERM it
     /// hears and carries on, writing its pid to `ready` once the trap is set.
@@ -132,15 +144,11 @@ mod tests {
         }
 
         fn pid(&self) -> i32 {
-            let deadline = Instant::now() + Duration::from_secs(5);
-            loop {
+            eventually(Duration::from_secs(5), || {
                 let read = std::fs::read_to_string(self.path("ready")).unwrap_or_default();
-                if let Some(pid) = read.strip_suffix('\n').and_then(|p| p.parse().ok()) {
-                    return pid;
-                }
-                assert!(Instant::now() < deadline, "the trapper never set its trap");
-                std::thread::sleep(Duration::from_millis(10));
-            }
+                read.strip_suffix('\n').and_then(|p| p.parse().ok())
+            })
+            .expect("the trapper never set its trap")
         }
 
         fn hits(&self) -> usize {
@@ -154,19 +162,13 @@ mod tests {
     /// Run `src`, calling `strike` with the run's scope and the trapper's pid
     /// once its trap is set; the run's own end is not what these tests read.
     fn run_struck(src: &str, trapper: &Trapper, strike: impl FnOnce(&ForegroundScope, i32) + Send) {
-        let mut shell = crate::types::Shell::new(crate::io::TerminalState::default());
+        let mut shell = crate::test_helper::core_shell();
         let scope = shell.run_cancel_handle();
         std::thread::scope(|s| {
             s.spawn(|| strike(&scope, trapper.pid()));
             let _ = shell.run_under(
                 &scope,
-                crate::run::RunRequest {
-                    run: crate::engine::testkit::run(src),
-                    surface: None,
-                    deferred: None,
-                    desk: None,
-                    fork: None,
-                },
+                crate::run::RunRequest::from(crate::protocol::Run::captured(src, "<test>")),
             );
         });
     }
@@ -180,7 +182,7 @@ mod tests {
             &format!("!{{ {} }} | cat", trapper.command()),
             &trapper,
             |scope, _| {
-                scope.cancel(CancelCause::Interrupt);
+                scope.cancel(CancelCause::Interrupted);
             },
         );
         assert_eq!(trapper.hits(), 1);
@@ -201,14 +203,13 @@ mod tests {
                 // Past the window between the anchor's exec and its handler install.
                 std::thread::sleep(Duration::from_millis(300));
                 unsafe { libc::kill(-pgid.as_raw_nonzero().get(), libc::SIGINT) };
-                let deadline = Instant::now() + Duration::from_secs(5);
-                while trapper.hits() == 0 {
-                    assert!(Instant::now() < deadline, "the trapper never heard SIGINT");
-                    std::thread::sleep(Duration::from_millis(10));
-                }
+                eventually(Duration::from_secs(5), || {
+                    (trapper.hits() > 0).then_some(())
+                })
+                .expect("the trapper never heard SIGINT");
                 // Room for a second copy, were anything to send one.
                 std::thread::sleep(Duration::from_millis(300));
-                scope.cancel(CancelCause::RootAbort);
+                scope.cancel(CancelCause::Aborted);
             },
         );
         assert_eq!(trapper.hits(), 1);
@@ -222,7 +223,7 @@ mod tests {
         run_struck(
             &format!("!{{ {} | cat }} | cat", trapper.command()),
             &trapper,
-            |scope, _| scope.cancel(CancelCause::Deadline),
+            |scope, _| scope.cancel(CancelCause::TimedOut),
         );
         assert_eq!(trapper.hits(), 1);
     }

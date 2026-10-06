@@ -8,7 +8,7 @@ let [root, prefix] = args
 
 let ext = { |name|
     case !{extension $name} [
-        `just: { |e| return ".$e" },
+        `some: { |e| return ".$e" },
         `none: { |_| return '' }
     ]
 }

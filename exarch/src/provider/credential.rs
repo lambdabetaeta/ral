@@ -539,7 +539,7 @@ mod tests {
         assert_eq!(
             cell.lock().unwrap().access_token,
             "fresh-at",
-            "the pre-existing cell — the one a live provider reads through — sees the refresh"
+            "the pre-existing cell (the one a live provider reads through) sees the refresh"
         );
     }
 

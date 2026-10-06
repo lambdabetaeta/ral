@@ -23,7 +23,7 @@ Two interpreters read one redirect list and disagreed: a compound block and a fu
   `> a > b`, `2> e 2>&1`, `2>&1 2> e` and `< a << b` are not programs.
 - **`2>&1` is position-free.** It binds stderr to stdout's destination, so
   `2>&1 > f` and `> f 2>&1` are one command.
-- **One interpreter.** `RedirectState` (`evaluator/redirect.rs`) opens the
+- **One interpreter.** `RedirectState` (`runtime/redirect/scope.rs`) opens the
   targets and installs the sinks for a fused external and a `CompKind::Redirect`
   block alike; the IR keeps `Exec.redirects` and the redirect scope as two
   shapes, both read by it. Targets open in one fixed order — stdin, stdout,

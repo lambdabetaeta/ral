@@ -59,6 +59,7 @@ fn main() {
 
     #[allow(
         clippy::disallowed_methods,
+        clippy::disallowed_macros,
         reason = "whatever this expands to is Tauri's codegen, not ral's to annotate: the macro bakes the app config and the embedded frontend assets into a Context here"
     )]
     let context = tauri::generate_context!();

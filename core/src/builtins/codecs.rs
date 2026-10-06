@@ -8,13 +8,16 @@
 //! [`crate::ir::CompKind::Decode`], syntax whose meaning no session can
 //! redefine.
 
+use crate::ty::RefusedArg;
 use crate::types::{
-    Mooring, RefusedArg, Settled, Shell, Site, Value, as_list, as_map_ref, pointer_token, sig,
-    sig_hint,
+    Mooring, Settled, Shell, Value, decode_utf8_strict, pointer_token, sig, sig_hint,
 };
+
+use crate::first_order::{FOValue, Finite, Opaque};
+use crate::ty::Site;
 use std::sync::Arc;
 
-use super::util::{as_byte_list, as_bytes, decode_utf8_strict, lossy_line_list};
+use super::util::{as_byte_list, lossy_line_list};
 
 fn read_stdin_bytes(name: &str, shell: &Shell) -> Settled<Vec<u8>> {
     use std::io::Read;
@@ -28,13 +31,13 @@ fn read_stdin_bytes(name: &str, shell: &Shell) -> Settled<Vec<u8>> {
 
 /// Channel bytes for a `from-X` decoder.  The typechecker rejects a written
 /// argument outright, so this guard is for spread calls, whose arity it
-/// cannot see ([`crate::ir::args::positional`] gives up on them).
+/// cannot see ([`crate::ir::Args::positional`] gives up on them).
 fn no_arguments(args: &[Value], name: &str) -> Settled<()> {
     if args.is_empty() {
         return Ok(());
     }
     Err(sig_hint(
-        format!("{name}: takes no arguments — it reads the byte channel"),
+        format!("{name}: takes no arguments; it reads the byte channel"),
         "to decode a value in hand, pipe it through the matching encoder: `to-string $x | from-json`",
     ))
 }
@@ -83,32 +86,33 @@ impl std::fmt::Display for OutOfRange {
     }
 }
 
-fn json_to_value(j: serde_json::Value) -> Result<Value, OutOfRange> {
+fn json_to_fo(j: serde_json::Value) -> Result<FOValue, OutOfRange> {
     Ok(match j {
-        serde_json::Value::Null => Value::Unit,
-        serde_json::Value::Bool(b) => Value::Bool(b),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Value::Int(i)
-            } else if n.is_f64() {
-                // `is_f64` just held.
-                Value::Float(n.as_f64().unwrap())
-            } else {
-                return Err(OutOfRange(n));
-            }
-        }
-        serde_json::Value::String(s) => Value::string(s),
-        serde_json::Value::Array(arr) => Value::list(
-            arr.into_iter()
-                .map(json_to_value)
-                .collect::<Result<Vec<_>, _>>()?,
-        ),
-        serde_json::Value::Object(obj) => Value::Map(
-            obj.into_iter()
-                .map(|(k, v)| Ok((k, json_to_value(v)?)))
+        serde_json::Value::Null => FOValue::Unit,
+        serde_json::Value::Bool(value) => FOValue::Bool { value },
+        serde_json::Value::Number(n) => match (n.as_i64(), n.as_f64()) {
+            (Some(value), _) => FOValue::Int { value },
+            (None, Some(f)) if n.is_f64() => match Finite::new(f) {
+                Some(value) => FOValue::Float { value },
+                None => return Err(OutOfRange(n)),
+            },
+            _ => return Err(OutOfRange(n)),
+        },
+        serde_json::Value::String(value) => FOValue::String { value },
+        serde_json::Value::Array(arr) => FOValue::List {
+            items: arr.into_iter().map(json_to_fo).collect::<Result<_, _>>()?,
+        },
+        serde_json::Value::Object(obj) => FOValue::Map {
+            entries: obj
+                .into_iter()
+                .map(|(k, v)| Ok((k, json_to_fo(v)?)))
                 .collect::<Result<_, _>>()?,
-        ),
+        },
     })
+}
+
+fn json_to_value(j: serde_json::Value) -> Result<Value, OutOfRange> {
+    json_to_fo(j).map(Value::from)
 }
 
 /// Let a decoded `value` into the program if it is what the program makes of
@@ -194,7 +198,8 @@ pub(crate) fn builtin_from_json_at(
     shell: &mut Shell,
 ) -> Settled<Value> {
     const DOOR: &str = "from-json-at";
-    let tokens: Vec<String> = as_list(&args[0], DOOR)?
+    let tokens: Vec<String> = args[0]
+        .as_list(DOOR)?
         .iter()
         .map(|token| match &*token {
             Value::String(s) => Ok(s.to_string()),
@@ -299,17 +304,19 @@ pub(super) fn builtin_from_csv(args: &[Value], shell: &Shell) -> Settled<Value> 
 /// sorted order — `Map` is key-ordered, so no original column order survives
 /// into one to be recovered.
 pub(super) fn builtin_to_csv(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    let rows = as_list(&args[0], "to-csv")?;
+    let rows = args[0].as_list("to-csv")?;
     let mut wtr = csv::WriterBuilder::new().from_writer(Vec::new());
     if let Some(first) = rows.iter().next() {
-        let headers: Vec<String> = as_map_ref(first.as_ref(), "to-csv")?
+        let headers: Vec<String> = first
+            .as_ref()
+            .as_map_ref("to-csv")?
             .keys()
             .map(str::to_string)
             .collect();
         wtr.write_record(&headers)
             .map_err(|e| sig(format!("to-csv: {e}")))?;
         for row in &rows {
-            let map = as_map_ref(row.as_ref(), "to-csv")?;
+            let map = row.as_ref().as_map_ref("to-csv")?;
             let fields: Vec<String> = headers
                 .iter()
                 .map(|h| map.get(h).map_or_else(String::new, |v| v.to_string()))
@@ -328,7 +335,7 @@ fn write_encoded(bytes: &[u8], shell: &mut Shell) -> Settled<Value> {
 }
 
 pub(super) fn builtin_to_bytes(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    let bs = as_bytes(&args[0], "to-bytes")?;
+    let bs = args[0].as_bytes("to-bytes")?;
     write_encoded(bs, shell)
 }
 
@@ -368,15 +375,15 @@ pub(super) fn builtin_echo(
 
 pub(super) fn builtin_to_lines(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let mut text = String::new();
-    for item in &as_list(&args[0], "to-lines")? {
+    for item in &args[0].as_list("to-lines")? {
         text.push_str(&item.to_string());
         text.push('\n');
     }
     write_encoded(text.as_bytes(), shell)
 }
 
-/// What `value_to_json` refuses, named by its type or, for a `Float`, its value.
-struct Unrepresentable(String);
+/// What `value_to_json` refuses: a leaf that is not data.
+struct Unrepresentable(Opaque);
 
 impl std::fmt::Display for Unrepresentable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -388,49 +395,12 @@ impl std::fmt::Display for Unrepresentable {
 /// than erasing it; Bytes become the integer array `ints-to-bytes` accepts
 /// back.
 ///
-/// [`super::util::value_to_json_lossy_bytes`] is the total counterpart, where
-/// legibility outranks fidelity.
-///
 /// # Errors
-/// If `v` or anything nested within it is a non-finite `Float` or a
-/// computation value (`Lambda` / `Block` / `Handle`).
+/// If `v` or anything nested within it is a block, function or handle.
 fn value_to_json(v: &Value) -> Result<serde_json::Value, Unrepresentable> {
-    Ok(match v {
-        Value::Unit => serde_json::Value::Null,
-        Value::Bool(b) => serde_json::Value::Bool(*b),
-        Value::Int(n) => serde_json::json!(*n),
-        Value::Float(f) => serde_json::Number::from_f64(*f)
-            .map(serde_json::Value::Number)
-            .ok_or_else(|| Unrepresentable(f.to_string()))?,
-        Value::String(s) => serde_json::Value::String(s.to_string()),
-        Value::List(items) => serde_json::Value::Array(
-            items
-                .iter()
-                .map(|v| value_to_json(v.as_ref()))
-                .collect::<Result<_, _>>()?,
-        ),
-        Value::Map(pairs) => {
-            let obj: serde_json::Map<String, serde_json::Value> = pairs
-                .iter()
-                .map(|(k, v)| Ok((k.to_string(), value_to_json(v.as_ref())?)))
-                .collect::<Result<_, _>>()?;
-            serde_json::Value::Object(obj)
-        }
-        Value::Thunk(_) | Value::Native { .. } | Value::Handle(_) => {
-            return Err(Unrepresentable(v.type_name().into()));
-        }
-        Value::Bytes(b) => {
-            serde_json::Value::Array(b.iter().map(|byte| serde_json::json!(*byte)).collect())
-        }
-        Value::Variant { label, payload } => {
-            let mut obj = serde_json::Map::new();
-            obj.insert("tag".into(), serde_json::Value::String(label.to_string()));
-            if let Some(p) = payload {
-                obj.insert("payload".into(), value_to_json(p)?);
-            }
-            serde_json::Value::Object(obj)
-        }
-    })
+    FOValue::try_from(v)
+        .map(|fo| fo.to_json(|b| b.iter().map(|&byte| serde_json::json!(byte)).collect()))
+        .map_err(|e| Unrepresentable(e.leaf))
 }
 
 pub(super) fn builtin_to_json(args: &[Value], shell: &mut Shell) -> Settled<Value> {
@@ -442,7 +412,7 @@ pub(super) fn builtin_to_json(args: &[Value], shell: &mut Shell) -> Settled<Valu
 /// LF, then a `\n`.  Every element encodes before any byte is written.
 pub(super) fn builtin_to_jsonl(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let mut text = String::new();
-    for (i, item) in as_list(&args[0], "to-jsonl")?.iter().enumerate() {
+    for (i, item) in args[0].as_list("to-jsonl")?.iter().enumerate() {
         let json = value_to_json(item.as_ref())
             .map_err(|e| sig(format!("to-jsonl: element at index {i}: {e}")))?;
         text.push_str(&json.to_string());

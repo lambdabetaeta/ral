@@ -1,8 +1,8 @@
 ---
 status: active
 generated_at_commit: 90479dea
-verified_at_commit: 90479dea
-anchors: [Table, Scope, ExecScope, Subject, Region, ExecKey, ExecRules, live, respelled, kernel, region, rules, refreeze, contains, own, meet_insert]
+verified_at_commit: 446e3123
+anchors: [Table, Scope, ExecScope, Subject, Region, ExecKey, ExecRules, live, respelled, for_kernel, precedence, region, rules, refreeze, contains, own, meet_insert]
 ---
 
 # One table, two instances
@@ -133,8 +133,8 @@ synod's base to nothing. The fix that had mattered was the fold:
 `denies`, `respelled`, `Meet for Table`), `core/src/capability/fs.rs`
 (`Region`, `region`, `impl Scope for FrozenPath`),
 `core/src/capability/exec.rs` (`ExecScope`, `Subject`, `Rank`, `ExecRules`,
-`compile`, `kernel`, `allowed_files`, `rules`),
-`core/src/capability/sandbox.rs` (`surface`), `core/src/capability/deputy.rs`
+`compile`, `for_kernel`, `precedence`, `allowed_files`, `rules`),
+`core/src/sandbox/projection.rs` (`surface`), `core/src/capability/deputy.rs`
 (`deputy_prefixes`), `core/src/path/forms.rs` (`contains`, `refreeze`,
 `from_guest`), `core/src/path/lex.rs` (`Polarity`, `Allow`, `Deny`),
-`core/src/types/capability.rs` (`ExecKey`, `ExecGrant`, `meet_insert`).
+`core/src/capability/lattice.rs` (`ExecKey`, `ExecGrant`, `meet_insert`).

@@ -60,7 +60,7 @@ pub(crate) fn told(account: &Account, climbed: &[Allowance]) -> Vec<Warning> {
         .filter_map(|a| {
             let (pct, label) = (a.percent()?, a.field().label);
             Some(Warning::User(format!(
-                "usage: {service} at {pct}% — {label}"
+                "usage: {service} at {pct}%; {label}"
             )))
         })
         .collect()
@@ -183,7 +183,7 @@ mod tests {
             panic!("one line for the user");
         };
         assert!(
-            line.starts_with("usage: openrouter at 80% — 5 hours"),
+            line.starts_with("usage: openrouter at 80%; 5 hours"),
             "{line}"
         );
     }

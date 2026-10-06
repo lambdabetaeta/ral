@@ -4,26 +4,21 @@
 
 use super::super::command;
 use super::stage::StageHandle;
-use crate::evaluator::audit::{command_fact, observe_stamped};
 use crate::process::{
     CancelCause, CancelWatch, Group, Pgid, TerminalLoan, WaitOutcome, Watch, watch_cancel,
 };
 use crate::types::{
-    AuditFragment, AuditIo, Break, CommandOrigin, Error, Mooring, Observation, Settled, Shell,
-    Value, epoch_us,
+    AuditFragment, AuditIo, Break, CommandOrigin, Error, Mooring, Observed, Settled, Shell, Value,
 };
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Instant;
 
-/// Attach a kernel-denial diagnostic to a failed stage's error.  Best-effort:
+/// A failed stage's error with the kernel's denial hint.  Best-effort:
 /// siblings share the group, so the reader scopes deny lines to a descendant
-/// sample taken now, over the pipeline-wide window from `started`.
+/// sample taken at the failure, over the pipeline-wide window from `started`.
 fn augment_stage_failure(err: Error, shell: &Shell, started: Instant) -> Error {
-    if shell.sandbox_projection().is_none() {
-        return err;
-    }
-    let pids = crate::sandbox::sample_descendants(std::process::id());
-    crate::sandbox::augment_failure(err, shell, &pids, started)
+    let pids = || crate::process::sample_descendants(std::process::id());
+    command::with_denials(err, shell, pids, started)
 }
 
 /// Built whether or not anyone is listening: this phase performs no effects,
@@ -35,21 +30,14 @@ fn synth_external_stage_audit(
     args: Vec<String>,
     err: Option<&Error>,
 ) -> AuditFragment {
-    let now = epoch_us();
-    let obs = Observation::spanning(
-        shell.call_site(),
-        now,
-        now,
-        shell.context.principal(),
-        command_fact(
-            name,
-            args,
-            err.map_or(0, Error::exit_code),
-            CommandOrigin::External,
-            AuditIo::default(),
-            err.map(|e| e.message.clone()),
-        ),
-    );
+    let obs = shell.observation(Observed::command(
+        name,
+        args,
+        err.map_or(0, Error::code),
+        CommandOrigin::External,
+        AuditIo::default(),
+        err.map(|e| e.message.clone()),
+    ));
     AuditFragment::from_observations(vec![obs])
 }
 
@@ -60,12 +48,11 @@ fn finish_external_settlement(
     args: Vec<String>,
     outcome: WaitOutcome,
     sent: Option<CancelCause>,
-    enveloped: bool,
     shell: &Shell,
     started: Instant,
 ) -> StageObservation {
     let err = outcome
-        .classify(sent, enveloped)
+        .classify(sent)
         .map(|end| Error::of_child(name, end, shell));
     let audit = synth_external_stage_audit(shell, name, args, err.as_ref());
     let settled = match err {
@@ -85,7 +72,6 @@ pub(super) enum StageEnd {
         jail: Option<crate::process::jail::JailCgroup>,
         pumps: command::Pumps,
         sent: Option<CancelCause>,
-        enveloped: bool,
     },
 }
 
@@ -111,14 +97,15 @@ impl StageEnd {
                 jail,
                 pumps,
                 sent,
-                enveloped,
             } => {
                 if let Some(jail) = &jail {
                     jail.finish();
                 }
-                pumps.settle(sent == Some(CancelCause::ReaderGone));
+                if sent != Some(CancelCause::ReaderGone) {
+                    pumps.join();
+                }
                 let cause = sent.max(pressed);
-                finish_external_settlement(&name, args, outcome, cause, enveloped, shell, started)
+                finish_external_settlement(&name, args, outcome, cause, shell, started)
             }
         }
     }
@@ -227,7 +214,7 @@ impl Drop for SettleOnDrop {
             };
             slot.send(Event::Returned(
                 slot.ix,
-                StageObservation::failure(Error::new(msg.to_string(), 1)),
+                StageObservation::failure(Error::new(msg.to_string())),
             ));
         }
     }
@@ -543,12 +530,11 @@ impl CollectState {
             let end = end.unwrap_or_else(|| {
                 StageEnd::Thread(StageObservation::failure(Error::new(
                     "ral pipeline stage vanished without reporting".to_string(),
-                    1,
                 )))
             });
             let StageObservation { settled, audit } = end.settle(shell, self.started, pressed);
             for observation in audit.into_observations() {
-                observe_stamped(shell, mooring, observation);
+                shell.observe_stamped(Some(mooring), observation);
             }
             match settled {
                 Err(br) => {
@@ -607,7 +593,7 @@ mod tests {
     use crate::types::Escape;
 
     fn error_break(status: i32, msg: &str) -> Break {
-        Break::Error(Error::new(msg.to_string(), status))
+        Error::raised(msg, status).into()
     }
 
     /// The four laws of the join: an escape outranks an error, and within a
@@ -667,7 +653,7 @@ mod tests {
     /// `drive` over two real children folds what they settled.
     #[test]
     fn drive_folds_two_settling_stages_to_done() {
-        let mut shell = Shell::default();
+        let mut shell = crate::test_helper::core_shell();
         let mooring = Mooring::adrift();
         let (group, mut collect, tx) = owning_pipeline(&shell, &mooring);
 
@@ -679,7 +665,7 @@ mod tests {
 
         collect.drive();
         match collect.fold(&mooring, &mut shell) {
-            Err(Break::Error(error)) => assert_ne!(error.exit_code(), 0),
+            Err(Break::Error(error)) => assert_ne!(error.code(), 0),
             other => panic!("expected the final stage's exit to fold in, got {other:?}"),
         }
         drop(group);
@@ -751,17 +737,15 @@ mod tests {
 
     #[cfg(unix)]
     fn assert_dead_within_2s(pid: i32) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while std::time::Instant::now() < deadline {
-            let dead = unsafe { libc::kill(pid, 0) } != 0
-                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
-            if dead {
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
+        let dead = crate::test_helper::eventually(std::time::Duration::from_secs(2), || {
+            (unsafe { libc::kill(pid, 0) } != 0
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH))
+            .then_some(())
+        });
+        if dead.is_none() {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            panic!("grandchild pid {pid} outlived the collector's forced end");
         }
-        unsafe { libc::kill(pid, libc::SIGKILL) };
-        panic!("grandchild pid {pid} outlived the collector's forced end");
     }
 
     /// A grandchild no per-pid kill reaches dies of the group kill a forced
@@ -769,7 +753,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_collector_dropped_short_of_observation_kills_the_group() {
-        let shell = Shell::default();
+        let shell = crate::test_helper::core_shell();
         let mooring = Mooring::adrift();
         let (group, mut collect, tx) = owning_pipeline(&shell, &mooring);
         let (child, pid) = spawn_stage_with_grandchild(&group, true);
@@ -786,7 +770,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_collector_that_observed_every_stage_kills_nothing() {
-        let shell = Shell::default();
+        let shell = crate::test_helper::core_shell();
         let mooring = Mooring::adrift();
         let (group, mut collect, tx) = owning_pipeline(&shell, &mooring);
         let (child, pid) = spawn_stage_with_grandchild(&group, false);
@@ -808,7 +792,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_joining_collector_cancel_all_kills_its_externals_and_returns() {
-        let mut shell = Shell::default();
+        let mut shell = crate::test_helper::core_shell();
         let mooring = Mooring::adrift();
         let owner =
             PipelineGroup::prepare(&shell, std::sync::mpsc::channel().0).expect("anchor spawns");
@@ -837,7 +821,7 @@ mod tests {
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         std::thread::scope(|scope| {
             scope.spawn(|| {
-                collect.cancel_all(CancelCause::Deadline, false);
+                collect.cancel_all(CancelCause::TimedOut, false);
                 let _ = done_tx.send(());
             });
             done_rx
@@ -953,9 +937,9 @@ mod tests {
     fn a_cancelled_event_cancels_all() {
         let mut state = state_with(1);
         assert_eq!(
-            step(&mut state, Event::Cancelled(CancelCause::Deadline)),
+            step(&mut state, Event::Cancelled(CancelCause::TimedOut)),
             Some(Effect::CancelAll {
-                cause: CancelCause::Deadline,
+                cause: CancelCause::TimedOut,
                 delivered: false
             })
         );
@@ -975,7 +959,7 @@ mod tests {
         assert_eq!(
             step(&mut state, heard(libc::SIGINT)),
             Some(Effect::CancelAll {
-                cause: CancelCause::Interrupt,
+                cause: CancelCause::Interrupted,
                 delivered: true
             })
         );
@@ -1000,7 +984,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_stage_dead_of_the_key_is_cancelled_only_if_it_was_pressed() {
-        let shell = Shell::default();
+        let shell = crate::test_helper::core_shell();
         let end = || StageEnd::External {
             name: "sleep".to_string(),
             args: Vec::new(),
@@ -1008,11 +992,10 @@ mod tests {
             jail: None,
             pumps: command::Pumps::default(),
             sent: None,
-            enveloped: false,
         };
         let settled = |pressed| end().settle(&shell, Instant::now(), pressed).settled;
-        match settled(Some(CancelCause::Interrupt)) {
-            Err(Break::Error(e)) => assert_eq!(e.cancelled_by(), Some(CancelCause::Interrupt)),
+        match settled(Some(CancelCause::Interrupted)) {
+            Err(Break::Error(e)) => assert_eq!(e.cancelled_by(), Some(CancelCause::Interrupted)),
             other => panic!("expected the key's cancellation, got {other:?}"),
         }
         match settled(None) {
@@ -1033,13 +1016,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_torn_down_externals_death_names_the_cause_it_was_sent() {
-        let mut shell = Shell::default();
+        let mut shell = crate::test_helper::core_shell();
         let mooring = Mooring::adrift();
         let mut state = state_with(1);
         state.stages[0]
             .as_mut()
             .expect("a live stage")
-            .cancel(CancelCause::Explicit);
+            .cancel(CancelCause::Cancelled);
         let _ = step(
             &mut state,
             Event::Ended(
@@ -1051,7 +1034,7 @@ mod tests {
         match state.fold(&mooring, &mut shell) {
             Err(Break::Error(e)) => assert_eq!(
                 e.cancelled_by(),
-                Some(CancelCause::Explicit),
+                Some(CancelCause::Cancelled),
                 "expected the cause, not the signal: {e:?}"
             ),
             other => panic!("expected the teardown death to fold in as an error, got {other:?}"),
@@ -1066,20 +1049,14 @@ mod tests {
     fn a_try_in_a_stage_its_reader_cut_sees_reader_gone() {
         let src = "let spew = { |n| to-line y\n spew $n }\n\
                    !{ try { spew 0 } { |err| fail [status: $err[status], message: !{str $err[reason]}] } } | head -n 1";
-        let mut shell = Shell::new(crate::io::TerminalState::default());
-        let report = shell.run(crate::run::RunRequest {
-            run: crate::engine::testkit::run(src),
-            surface: None,
-            deferred: None,
-            desk: None,
-            fork: None,
-        });
+        let mut shell = crate::test_helper::core_shell();
+        let report = shell.run(crate::protocol::Run::captured(src, "<test>"));
         match report {
             crate::run::RunReport::Ran {
                 ending: crate::run::Ending::Raised { error, .. },
                 ..
             } => {
-                assert_eq!(error.exit_code(), 141, "{error:?}");
+                assert_eq!(error.code(), 141, "{error:?}");
                 assert!(
                     error.message.contains("`cancelled `reader-gone"),
                     "{error:?}"
@@ -1095,7 +1072,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_stage_kill_is_forgiven_by_sent_and_kept_without_it() {
-        let mut shell = Shell::default();
+        let mut shell = crate::test_helper::core_shell();
         let mooring = Mooring::adrift();
         let kill = WaitOutcome::Signaled(crate::process::Signal::new(libc::SIGKILL));
 
@@ -1123,7 +1100,7 @@ mod tests {
     /// again, and its break is its own `exit 3`, which `fold` must keep.
     #[test]
     fn a_thread_writers_honest_exit_survives_its_readers_earlier_end() {
-        let mut shell = Shell::default();
+        let mut shell = crate::test_helper::core_shell();
         let mooring = Mooring::adrift();
         let mut state = threads_with(2);
 
@@ -1135,11 +1112,11 @@ mod tests {
 
         let _ = step(
             &mut state,
-            Event::Returned(0, StageObservation::failure(Error::new("boom", 3))),
+            Event::Returned(0, StageObservation::failure(Error::raised("boom", 3))),
         );
 
         match state.fold(&mooring, &mut shell) {
-            Err(Break::Error(e)) => assert_eq!(e.exit_code(), 3),
+            Err(Break::Error(e)) => assert_eq!(e.code(), 3),
             other => panic!("expected the writer's own exit 3 to survive, got {other:?}"),
         }
     }
@@ -1149,7 +1126,7 @@ mod tests {
     /// sent to the stage.
     #[test]
     fn a_thread_writer_the_cancel_ended_is_forgiven() {
-        let mut shell = Shell::default();
+        let mut shell = crate::test_helper::core_shell();
         let mooring = Mooring::adrift();
         let mut state = threads_with(1);
         assert_eq!(sent_to(&state, 0), None, "nothing was sent to this stage");
@@ -1237,7 +1214,7 @@ mod tests {
     /// in `recv` forever, and the panic folds in as an `Error`.
     #[test]
     fn drive_settles_a_stage_whose_producer_unwound() {
-        let mut shell = Shell::default();
+        let mut shell = crate::test_helper::core_shell();
         let mooring = Mooring::adrift();
         let (group, mut collect, tx) = owning_pipeline(&shell, &mooring);
 

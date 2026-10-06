@@ -1,3 +1,7 @@
+#![allow(
+    clippy::disallowed_macros,
+    reason = "[test] libtest captures print macros"
+)]
 #![allow(clippy::disallowed_methods)]
 
 //! A stack's authority is the meet of its layers: denies join, allows meet
@@ -21,6 +25,7 @@ fn fs(read: &[&Path], write: &[&Path], deny: &[&Path]) -> String {
 
 /// An exec layer of `rules`, a directory key ending in `/`.  Each admits
 /// `/bin/` too, so a script's interpreter runs wherever the kernel checks it.
+#[cfg(unix)]
 fn exec(rules: &[(&str, &str)]) -> String {
     let rules: Vec<String> = (std::iter::once(&("/bin/", "allow")).chain(rules))
         .map(|(key, verdict)| format!("'{key}': '{verdict}'"))
@@ -45,6 +50,7 @@ fn read(path: &Path) -> String {
     format!("echo !{{from-string < '{}'}}", path.display())
 }
 
+#[cfg(unix)]
 fn assert_ran(out: &Output, what: &str) {
     assert_eq!(out.status, 0, "{what} must run; stderr:\n{}", out.stderr);
     assert!(
@@ -54,6 +60,7 @@ fn assert_ran(out: &Output, what: &str) {
     );
 }
 
+#[cfg(unix)]
 fn assert_not_run(out: &Output, what: &str) {
     assert_ne!(
         out.status, 0,

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 0055ee6f
-generated_at_date: 2026-10-01
+generated_at_commit: 446e3123
+generated_at_date: 2026-10-06
 covers_paths: [core/src/typecheck/, core/src/typecheck.rs]
 ---
 
@@ -21,19 +21,19 @@ Entry points (`typecheck.rs`):
   resolved against the final unifier and closed by quantifying its
   residuals, that is, generalised against the empty environment; and a
   `Capture`/`Decode` pair around each computation a value demand captured
-  ([[map/core/ir|ir]]). `infer_pipeline` records each stage's value
-  type in `InferCtx::stage_types`, keyed by stage address, and `annotate`
-  resolves them against the final unifier. The stage types are
-  typing metadata for the structural REPL, not a transport channel — the
-  evaluator never reads them, so an un-annotated stage keeps the elaborator's
-  `Unit` placeholder without harm. A pipeline's value is its final stage's, so
+  ([[map/core/ir|ir]]). A pipeline's value is its final stage's, so
   there is nothing per-pipeline to annotate
   ([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]]).
   The seed for a check is one `SessionSchemes { bindings, aliases,
   builtins }`
   ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]):
   the scope's name-to-`Option<Arc<Scheme>>` map, the alias arms' schemes, and
-  the shell's own `BuiltinTable`. A scheme never changes once built, so one
+  the shell's `Manifest` — Σ, the checker's own view of the builtins: one `Decl`
+  per row (name, `Convention`, doc, type rule, diagnostic, boundary flag, and
+  one cached curry spine for arity and settle-at-unit), never a body. The
+  table projects each installed set into it once; `SessionSchemes::new(manifest)`
+  and `SessionSchemes::from_prelude(&Toplevel, manifest)` build a seed with no
+  live shell. A scheme never changes once built, so one
   `Arc` carries it from the `TyEnv` onto `Phrase::Define`, into the scope's
   `Binding`, and back into the next run's `TyEnv`: neither seeding nor a
   lookup copies one. Builtins are shell-scoped, so the checker
@@ -47,12 +47,11 @@ Entry points (`typecheck.rs`):
   `$name` outside them is `UnboundVariable` (T0071), and a session binding of a
   non-thunk in head position is `HeadBoundToValue` (T0072)
   ([[internals/type-inference|type-inference]]).
-- `bake_prelude(top: &Toplevel) -> (Toplevel, Vec<(String, Scheme)>)` — called by
+- `bake_prelude(phrases, &Manifest) -> Toplevel` — called by
   `boot::bake_prelude_to_out_dir` from each host's build script: returns the
-  annotated prelude `Toplevel` alongside the schemes harvested off its
-  `Phrase::Define`s (`harvest_schemes`), which needs no tree walk since every
-  phrase already carries its own — one pass behind both the build-time bake
-  and a run's installs.
+  annotated prelude `Toplevel` and nothing else. Every phrase already carries
+  its schemes, and `SessionSchemes::from_prelude` reads them back through
+  `Toplevel::exported_schemes`, so no second blob of schemes is baked.
 - `alias_arm_scheme(head, param, body, SessionSchemes) -> Result<Scheme, Box<TypeError>>`
   — infers an alias arm under the runtime handler calling convention, holds it
   to what `head` stands in for (`Inferencer::stands_in`), and closes it, for
@@ -84,7 +83,7 @@ Internals:
   (`rhs_bound_ty`), a block meeting a demand of the other producer kind
   (`adapt` to an `Adaptation`, `coerce`), the join of a form's arms
   (`join_arms`; `join_target` takes the greatest `Verdict`), and a stdout
-  redirect's `discharge`. `spine` reads a `CompTy` as a `Spine` (`ty.rs`:
+  redirect's `discharge`. `spine` reads a `CompTy` as a `Spine` (`ty.rs`, [[map/core/ty|ty]]:
   parameters and tail; `producer()` the `Producer` past them, `over` the
   same parameters on another tail; `CompTy::arrows` is the constructor);
 - `index.rs` — the deferred reads `Lbl` (a bare label) and `Idx` (a computed key):
@@ -96,15 +95,22 @@ Internals:
 - `unify.rs` — `Unifier`; binding refuses a cycle that crosses no data (`CyclicType`, T0073)
   and a head its variable's kind does not admit (`KindMismatch`, T0074);
   the weak set (`mark_weak`, inherited through `unite`), which `generalize.rs` subtracts,
-  `seed_env` re-seeds (`reseed_weak`) and `typecheck` settles (`settle_weak`);
-- `Site` (`core/src/types/site.rs`) — the type solved at a boundary call, frozen
-  at the unit's end by `InferCtx::snapshot_sites` and written onto the `Exec` by
-  `annotate`; the unifier keeps the span that first bound each variable so a
+  `seed_env` re-seeds (`reseed_weak`) and `typecheck` settles (`settle_weak`).
+  Each union-find store is typed by its sort (`Store<T: Unifiable>`, keyed by
+  `T::Var`: `TyVar`, `CompTyVar`, `RowVar`, `GradeVar`), so a type root cannot
+  index the computation store, and `Scheme`'s cyclic bindings and `Visited`
+  carry typed roots too. `reach` is the one guarded walk over the variables
+  under a `ty::Term` (whose `children` is the one enumeration of sub-terms):
+  free-variable collection and the weak-source search are both a fold over it;
+- `Site` (data in `core/src/ty/site.rs`, built by `typecheck/site.rs`, walked
+  and admitted by `core/src/types/admit.rs`) — the type solved at a boundary
+  call, frozen at the unit's end by `InferCtx::snapshot_sites` and written onto
+  the `Exec` by `annotate`; `Site::exports` hands the module door one scratch
+  unifier over a whole export record, so export types that share variables are
+  checked together; the unifier keeps the span that first bound each variable so a
   refusal can point at the use that imposed what the value met;
-- `kind.rs` — `Kind`: the closed set of predicates a type variable carries (`number`,
-  `comparable`, `scalar`, `sized`, `data`), their meet, and what a head is;
-- `ty.rs` — the data-only type definitions (`Ty`, `CompTy`, `Grade`, rows);
-- `scheme.rs` — `Scheme`;
+- the type language (`Ty`, `CompTy`, `Grade`, rows, `Kind`, `Scheme`, `Site` data) is
+  [[map/core/ty|ty]], below this module;
 - `error.rs` — the error taxonomy: `TypeError` / `TypeErrorKind`, with
   constraint provenance as data (`Reason`, `Standing`, `UnitCall`);
 - `explain.rs` — the single home of every user-facing type-checker sentence
@@ -114,10 +120,17 @@ Internals:
   side is fresh, or the error kind is already its own diagnosis;
 - `annotate.rs` — the write-back pass (`annotate`) that rebuilds the checked
   IR with schemes, boundary sites, stage types, and `Capture`/`Decode` nodes;
+  its side tables in `InferCtx` are keyed by `Node`, a node address tagged
+  `Comp`, `Val` or `Group`;
 - `generalize.rs`;
 - `env.rs` — `TyEnv`, `InferCtx`;
-- `fmt.rs` — type display;
-- `builtins.rs` — the scheme factory each entry names, and the readings taken
+- `site.rs` — `impl Site { snapshot, instantiate, exports }`: freezing the solved
+  type at a boundary, and the scratch unifier the module door checks exports in;
+  type display is `Display` for `Ty` and `Scheme` (`core/src/ty/fmt.rs`);
+- `builtins.rs` — Σ: `Decl`, a manifest row minus its body (name, `Convention`,
+  doc, type rule, diagnostic, `boundary`, and one lazily computed `Spine` of arity
+  and settles-at-`Unit`), and `Manifest`, the sets of them a table projects at
+  install; the scheme factory each entry names, and the readings taken
   off it (`fixed_arity`, `builtin_type_hint`), which is where
   [[invariants/fixed-arity|fixed-arity]] is enforced: every entry in the table
   declares its arguments, so it has an arity and a value form. `audit_record`
@@ -160,7 +173,7 @@ must still spread a list, and every element crosses rendered
 It carries *which* boundary it is at — `ArgvBoundary::InShell` or
 `Exec(shown)` — and that is the whole of the difference between them. `Exec`
 sends each written element through `gate_exec_arg`, which reads
-`RefusedArg::of_ty` (`core/src/types/exec_arg.rs`) — the same declaration
+`RefusedArg::of_ty` (`core/src/ty/exec_arg.rs`) — the same declaration
 `runtime::command::vet` reads at the spawn — and raises
 `TypeErrorKind::ExecArgNotText` (T0057) where the resolved shape is refused,
 saying nothing about a type variable or about a spread's elements.
@@ -174,8 +187,7 @@ sentence per shape
 
 `infer_pipeline` (`infer.rs`) has no adjacency loop. It infers each stage,
 forces it to ready `Return` shape with `force_ready_shape` under
-`Reason::PipelineStageShape`, records the stage's value type in
-`InferCtx::stage_types`, and returns the *final* stage's value as the
+`Reason::PipelineStageShape`, and returns the *final* stage's value as the
 pipeline's own. Every stage but the last must write (`stage_writes`): it is
 accepted at `Unit` in any grade, but a decoder is refused by its own mark
 (`stage_decoder`, `DecoderMidPipeline`, T0078), and a value or block literal in
@@ -223,7 +235,7 @@ drop the lambda. `apply_args_capped` applies the two to a block argument, and
 `join_arms` to each arm against the join. `discharge` turns a redirected
 stdout's grade to `Value`.
 
-`annotate.rs` is a plain structural rebuild (`annotate_comp`, `annotate_val_at`).
+`annotate.rs` is a plain structural rebuild, the methods of `Annotate { ctx, eta }`.
 It wraps each recorded node through the one constructor `captured_string`,
 which builds `Capture(body) to x. Decode(x)` — `x` a fresh name from
 `InferCtx::fresh_name` — with the captured node's span on both the bind and

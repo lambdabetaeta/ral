@@ -17,11 +17,11 @@ oversight in either direction:
   the word `()` and a tagged value renders, so neither is refused.
 
 **One declaration, two readings.** `RefusedArg`
-(`core/src/types/exec_arg.rs`) names those shapes, with `of_value` for the
-spawn (`runtime::command::vet`), `of_ty` for the checker's argv rule
-(`typecheck::infer`), and one `remedy` per shape so a user meeting either
-refusal meets one language. Both maps are wildcard-free: a new `Value` or `Ty`
-constructor has to be given a verdict on both sides before it compiles. A second
+(`core/src/ty/exec_arg.rs`) names those shapes by a single wildcard-free match
+on a `Head`, `of_head`. The spawn (`runtime::command::vet`) reads it through
+`Value::heads`, the checker's argv rule (`typecheck::infer`) through `of_ty`, and
+one `remedy` per shape means a user meeting either refusal meets one language. A
+new head has to be given a verdict before it compiles, for both sides at once. A second
 statement of the set is the failure mode this rule exists to prevent — drift
 between them is invisible until a user meets one refusal and not the other.
 

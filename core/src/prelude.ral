@@ -1,5 +1,20 @@
 # ral prelude — standard library
 
+# Comparison and size — the `$[…]` operators and `length` under names.
+## Whether `a` and `b` are structurally equal; blocks, functions and handles refuse.
+let equal = { |a b| return $[$a == $b] }
+## Whether `a` < `b`: numbers numerically, strings lexicographically.
+let lt = { |a b| return $[$a < $b] }
+## Whether `a` > `b`: numbers numerically, strings lexicographically.
+let gt = { |a b| return $[$a > $b] }
+## Whether a list, map, bytes or string is empty.
+let is-empty = { |x| return $[!{length $x} == 0] }
+## The identity function: returns its argument unchanged.  Useful as the
+## key for `-by` combinators when the element is already the magnitude.
+let identity = { |x| return $x }
+## Sort a list ascending: numbers numerically (Int and Float exactly), strings lexicographically.
+let sort-list = { |xs| sort-list-by $identity $xs }
+
 # Strings — direct builtins: upper, lower, re-split, re-match,
 # re-replace, re-replace-all, string-replace, intercalate, slice,
 # re-find-match, re-find-matches, dedent, ral-quote, posix-quote, posix-split, lines.
@@ -24,7 +39,7 @@ let from-words = {
 # size/line-count wrappers live below under "Filesystem queries".
 
 # Control flow
-# `each`, `map`, `filter`, `sort-list`, `sort-list-by`, `fold`
+# `each`, `map`, `filter`, `sort-list-by`, `fold`
 # are builtins under their bare names, all data-last.
 # `for` is the traditional loop form: for <list> <fn>.
 ## Loop over a list for side effects.
@@ -113,9 +128,9 @@ let pad-left = { |w c s| return "!{repeat $[$w - !{length $s}] $c}$s" }
 ## Pad `s` on the right with `c` to width `w`; never truncates.
 let pad-right = { |w c s| return "$s!{repeat $[$w - !{length $s}] $c}" }
 ## The extension of a path's last component, as an Option: `a.tar.gz` has
-## `` `just 'gz'``, while `Makefile` and the dotfile `.bashrc` have `` `none``.
+## `` `some 'gz'``, while `Makefile` and the dotfile `.bashrc` have `` `none``.
 let extension = { |p|
-    if !{re-match '[^/]\.[^./]*$' $p} { return `just !{re-find-match '[^.]*$' $p} } else { return `none }
+    if !{re-match '[^/]\.[^./]*$' $p} { return `some !{re-find-match '[^.]*$' $p} } else { return `none }
 }
 ## Prepend n spaces to every non-empty line.
 let indent = { |n s|
@@ -242,10 +257,6 @@ let intersection = { |a b| fold { |m k| return [...$m, $k: $a[$k]] } [:] !{filte
 let difference = { |a b| fold { |m k| if !{has $b $k} { return $m } else { return [...$m, $k: $a[$k]] } } [:] !{keys $a} }
 
 # Standard library
-## The identity function: returns its argument unchanged.  Useful as the
-## key for `-by` combinators when the element is already the magnitude.
-let id = { |x| return $x }
-
 ## Sum a list of numbers.
 let sum = { |items| fold { |acc x| return $[$acc + $x] } 0 $items }
 
@@ -292,7 +303,7 @@ let median-by = { |key-fn xs|
 }
 
 ## The median element of `xs` ordered by its own value.
-let median = { |xs| median-by $id $xs }
+let median = { |xs| median-by $identity $xs }
 
 ## Zip two lists into a list of pairs (tail-recursive).
 let zip = { |a b|
@@ -315,20 +326,20 @@ let flat-map = { |f items|
     concat $mapped
 }
 
-## Find the first element matching pred, as an Option: `` `just`` the
+## Find the first element matching pred, as an Option: `` `some`` the
 ## matching element, or `` `none`` when nothing matches.
 let first = { |pred items|
     if !{is-empty $items} { return `none } else {
         let [head, ...rest] = $items
-        if !{$pred $head} { return `just $head } else { first $pred $rest }
+        if !{$pred $head} { return `some $head } else { first $pred $rest }
     }
 }
 
-## Eliminate an Option: the payload of `` `just``, or `default` for `` `none``.
+## Eliminate an Option: the payload of `` `some``, or `default` for `` `none``.
 let option-or = { |default opt|
     case $opt [
         `none: { |_| return $default },
-        `just: { |x| return $x }
+        `some: { |x| return $x }
     ]
 }
 

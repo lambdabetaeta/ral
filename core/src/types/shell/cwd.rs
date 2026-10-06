@@ -15,8 +15,8 @@ use std::path::PathBuf;
 /// it, and `within [dir: …]` is its local-state handler, restoring the cell on
 /// every exit.
 ///
-/// It keeps no previous directory, hence no `OLDPWD`.  `None` means unseeded — readers fall back through [`process_cwd`](crate::path::process_cwd) until
-/// [`Shell::seed_default_env_vars`] or [`Shell::seed_cwd`].
+/// It keeps no previous directory, hence no `OLDPWD`.  `None` means unseeded — readers fall back through [`cwd`](crate::host::cwd) until
+/// [`boot_shell`](crate::boot::boot_shell) or [`Shell::seed_cwd`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Cwd(pub(in crate::types::shell) Option<PathBuf>);
 
@@ -30,7 +30,7 @@ impl Shell {
     }
 
     /// State the logical cwd outright, overriding whatever
-    /// [`Shell::seed_default_env_vars`] adopted, for a host that never
+    /// [`boot_shell`](crate::boot::boot_shell) adopted, for a host that never
     /// `chdir`s the process — exarch's `boot_root_shell` seats a session here.
     pub fn seed_cwd(&mut self, cwd: PathBuf) {
         self.context.cwd = Cwd(Some(cwd));
@@ -61,12 +61,12 @@ impl Shell {
     pub(crate) fn apply_chdir(&mut self, target: &str) -> Result<(), Error> {
         let resolved = self.resolve(target).into_inner();
         let meta = std::fs::metadata(&resolved)
-            .map_err(|e| Error::new(format!("{}: {e}", resolved.display()), 1))?;
+            .map_err(|e| Error::new(format!("{}: {e}", resolved.display())))?;
         if !meta.is_dir() {
-            return Err(Error::new(
-                format!("{}: not a directory", resolved.display()),
-                1,
-            ));
+            return Err(Error::new(format!(
+                "{}: not a directory",
+                resolved.display()
+            )));
         }
 
         self.context.cwd = Cwd(Some(resolved));
@@ -83,7 +83,7 @@ impl Shell {
     /// Absolute path of the executable the shell would run for `name`, via the
     /// effective `PATH` and cwd; `None` if there is none.
     ///
-    /// A filesystem question only — admission is `capability::admits_head`
+    /// A filesystem question only — admission is [`GrantStack::admits`](crate::capability::GrantStack::admits)
     /// (head alone) and [`Self::check_exec`] (full call).  `which` pairs
     /// the two to tell denied-but-installed from absent.
     pub(crate) fn locate_command(&self, name: &str) -> Option<PathBuf> {

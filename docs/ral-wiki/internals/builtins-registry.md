@@ -22,11 +22,12 @@ each builtin as one row, collapsed into the `CORE_BUILTINS` static
 - runtime body.
 
 Because the facets are one entry, they cannot drift apart. Arity is not among
-them: `BuiltinEntry::fixed_arity` *derives* it from the type rule — the curry
-depth of the scheme — and answers a `usize` for every entry in the table, so
-the arity the checker enforces is the arity the body assumes with nothing to
-keep in agreement ([[invariants/fixed-arity|fixed-arity]]). The derivation runs
-a throwaway unifier, so it is cached; it feeds the checker's diagnostics as
+them: `Decl::fixed_arity` (the entry's checker-facing half) *derives* it from the
+type rule — the curry depth of the scheme — and answers a `usize` for every entry
+in the table, so the arity the checker enforces is the arity the body assumes with
+nothing to keep in agreement ([[invariants/fixed-arity|fixed-arity]]). The
+derivation runs a throwaway unifier once per row, together with the
+settles-at-`Unit` fact, so it is cached; it feeds the checker's diagnostics as
 well as the evaluator's application gate.
 
 The diagnostic facet is deliberately not a typing rule. It says what a wrong

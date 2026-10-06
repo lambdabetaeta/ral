@@ -11,7 +11,7 @@ let names = within [dir: $repo] {
     git log --format=%an | from-lines
 }
 
-let counts = group-by $id $names
+let counts = group-by $identity $names
 let rows = map { |k| return [name: $k, n: !{length $counts[$k]}] } !{keys $counts}
 
 for !{reverse !{sort-list-by { |r| return $r[n] } $rows}} { |r|

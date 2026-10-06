@@ -13,7 +13,7 @@ Every exarch directory resolves through `bootstrap::App::xdg_dir(kind)`
 (`exarch/src/bootstrap.rs`), with `bootstrap::EXARCH` supplying the `exarch`
 component — `$XDG_<kind>_HOME/exarch/` over the shared
 [[decisions/260601_xdg-resolver-consolidation|xdg-resolver-consolidation]]
-resolver (`core/src/path/basedir.rs`, `XdgKind`). Three roles, three relationships
+resolver (`core/src/host/basedir.rs`, `XdgKind`). Three roles, three relationships
 to trust:
 
 - **config home** — `$XDG_CONFIG_HOME/exarch/` — hand-authored, trusted files. The

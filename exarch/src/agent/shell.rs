@@ -13,8 +13,8 @@ use crate::agent::seat::EngineLost;
 use crate::bus::{AgentState, Emitter};
 use crate::fleet::desk;
 use crate::shell_eval;
-use ral_core::protocol::{Report, reading};
-use ral_core::serial::FOValue;
+use ral_core::first_order::FOValue;
+use ral_core::protocol::Report;
 use ral_core::sync::LockExt;
 use std::fmt::Write;
 use std::io;
@@ -65,7 +65,7 @@ impl LogCell {
             Ok(guard) => guard,
             Err(std::sync::TryLockError::WouldBlock) => panic!(
                 "log cell contended: the log may only be locked by the attend thread between \
-                 calls or by a desk handler while the attend thread is parked in run_shell — \
+                 calls or by a desk handler while the attend thread is parked in run_shell: \
                  concurrent access is a scheduling bug, not a wait"
             ),
             Err(std::sync::TryLockError::Poisoned(_)) => panic!("log poisoned"),
@@ -172,7 +172,7 @@ impl Avatar {
             &source,
             cmd,
             timeout_secs,
-            host.clone() as Arc<dyn ral_core::protocol::Host>,
+            host.clone() as Arc<dyn ral_core::carrier::Host>,
         );
         let lost = |s| EngineLost::running(&s, self.agent.run_dir()).to_string();
         // Only now, with the dispatch returned: the worker probe below is
@@ -180,7 +180,7 @@ impl Avatar {
         let (mut text, failed) = match report {
             Ok(Report::Ran {
                 ending, captured, ..
-            }) => match self.seat.read(reading::workers) {
+            }) => match self.seat.read(|t| t.workers()) {
                 Ok(workers) => {
                     let result = shell_eval::report::tool_result(
                         &ending,
@@ -231,8 +231,9 @@ mod tests {
     use crate::provider::scripted::{Reply, Script};
     use ral_core::Shell;
     use ral_core::Value;
+    use ral_core::ty::{Scheme, Ty};
+    use ral_core::typecheck::Unifier;
     use ral_core::typecheck::builtins::{mk_scheme, pure, thunk};
-    use ral_core::typecheck::{Scheme, Ty, Unifier};
     use ral_core::types::{BuiltinBody, BuiltinEntry, Mooring, Settled};
     use std::borrow::Cow;
 
@@ -554,7 +555,7 @@ mod tests {
 
         let boot_name = session
             .seat
-            .read(reading::bindings)
+            .read(|t| t.bindings())
             .expect("an identity seat never severs")
             .into_iter()
             .next()

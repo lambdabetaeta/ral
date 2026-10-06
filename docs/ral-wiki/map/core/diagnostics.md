@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 0948a758
+generated_at_commit: 446e3123
 generated_at_date: 2026-10-06
-covers_paths: [core/src/source.rs, core/src/diagnostic.rs, core/src/text.rs, core/src/ansi.rs, core/src/exit_hints.rs]
+covers_paths: [core/src/source.rs, core/src/diagnostic.rs, core/src/compile.rs, core/src/syntax/report.rs, core/src/terminal.rs, core/src/terminal/stderr.rs, core/src/text.rs, core/src/ansi.rs, core/src/types/exit_hints.rs]
 ---
 
 # Map: core / diagnostics
@@ -35,7 +35,7 @@ of every source the *session* has loaded, keyed by `FileId`, living on
 nested run can never re-mint a `FileId` an outer run's live spans still
 name. `Shell::install_script_context` registers a source and
 `install_root_context` additionally seeds `SessionState::root_file` with the
-current run's root (`FileId::DUMMY` between runs); `SourceDb::next_id` peeks
+current run's root (`None` between runs); `SourceDb::next_id` peeks
 the id a registration will mint, so a compiler can stamp a program's spans
 before the source they name is itself in the db. Hosts read the db after a
 run returns to render.
@@ -47,7 +47,7 @@ not the top-level script's. An id the renderer cannot resolve (the placeholder
 `FileId::DUMMY`, or an unregistered source) renders messageless rather than
 indexing an unrelated text. ([[decisions/260614_structural-bug-prevention|structural-bug-prevention]] class 9.)
 
-`CallSite` (`diagnostic.rs`) is the audit-and-wire shape a `Span` resolves
+`CallSite` (`source.rs`, resolved by `SourceDb::site`) is the audit-and-wire shape a `Span` resolves
 *to* — script name plus 1-indexed `(line, col)` — which hosts read off every
 observation, command or capability check alike. It rides the
 [[map/core/shell-state|audit collector]] rather than the run frame, so an
@@ -57,58 +57,60 @@ outside the session's sources — the baked prelude's — leaves it alone, so
 `defer`'s inner `spawn` is stamped at the line that applied `defer`. A dispatch with no position is
 `None` (`Shell::site_of`, `Observation.site`), and the ral records that
 project it — a trail entry, `try`'s error — carry an optional
-`` site: `just [script, line, col] | `none ``.
+`` site: `some [script, line, col] | `none ``.
 
-Parse and type errors render against the source they were just handed, so their
-entry points still take `(file, source)` strings. **A compile failure carries
-its own text**: `Uncompiled` (`lib.rs`) pairs the `CompileError`, of `Parse`
-or `Types`, with its `Source` instead of registering into the session's
+**A compile failure carries its own text**: `Rejection` (`diagnostic.rs`) pairs
+the failure's `Report`s with their `Source` and the status a run that failed so
+exits on (2 parse, 1 type), instead of registering into the session's
 `SourceDb`, since a failed compile leaves no live span to justify a permanent,
-unreclaimable registry slot. A run that never reached evaluation carries one
-in its `StaticDiagnostics` (`run.rs`) — `Compile(Uncompiled)`, beside `Host`, a
-spanless pre-run failure (an unknown hook, a non-ground argument) — which is
-what every host on the wire renders through `Report::Static`
-([[map/core/engine-protocol|engine-protocol]]). A file loaded at runtime — a
-`use`d module, the rc, a plugin, a capability profile — carries one on the
-runtime `Error` instead, as `Error::uncompiled`, from the loaders' one compile
-door (`modules::check_source`). Its `message` stays the plain sentence a `try`
+unreclaimable registry slot. `compile::CompileError` (`Parse` or `Types`)
+becomes one with `reject`. A run that never reached evaluation carries one in
+its `StaticDiagnostics` (`run.rs`) — `Compile(Rejection)`, beside `Host`, a
+spanless pre-run failure (an unknown hook, a non-ground argument) — whose
+`render` is what every host on the wire prints through `Report::Static`
+([[map/core/engine-protocol|engine-protocol]]). `Compile` is not folded into
+`Error`: a loaded file's parse error would then raise status 2, not 1. A file
+loaded at runtime — a `use`d module, the rc, a plugin, a capability profile —
+carries its rejection on the runtime `Error` instead, as `Error::rejection`,
+from `CompileError::into_error` at the loaders' one compile door
+(`modules::check_source`). Its `message` stays the plain sentence a `try`
 handler reads (`use: parse error: …`), and its `span` is left to the break
 path's stamp, so `$err[site]` names the `use` that failed: the compile span
 cannot go there, its peeked `FileId` being the one the next registration mints.
 
 ## Rendering — `core/src/diagnostic.rs`
 
-All structured errors funnel through one module and render via the `ariadne`
-crate with source-span underlining; when no span is available a compact
-one-liner is used instead. The per-stage entry points are
-`format_parse_error_ariadne`, `format_type_error_ariadne` (each taking
-`(file, source)`), and `format_runtime_error_ariadne` / `format_runtime_error_auto`
-(resolving the error's `Span` against a `SourceDb`) / `_compact`, with `cmd_error` and
-`shell_warning` for unstructured command-layer output. Every line they write
-goes through `outln!` / `err!` / `errln!`, exported for the front ends' own
-output too: unlike `println!` and `eprintln!` they drop a failed write rather
-than panic, since once the terminal hangs up every write fails with EIO. Every caret report is one `CaretReport` — code, message, primary and optional
-secondary `LabelRange`, hint — so the single ariadne core takes the bundle
-rather than a spread of arguments. Color is gated through `ansi::use_color`.
-`render_uncompiled` is the one place a compile failure becomes text, beside
-its exit status (2 parse, 1 type). `format_static_diagnostics` dispatches a
-static failure's `Uncompiled` to it, or renders a `Host` error with that
-error's own status; `format_runtime_error_auto` dispatches to it ahead of
-either runtime form whenever the `Error` carries one. So a broken plugin,
-module, rc or profile prints, at every door, the report its own run as a
-script would.
+**Each error draws itself; one drawer draws all.** `diagnostic` is the report
+algebra: a `Report` (code, message, primary `Label`, optional secondary, hint)
+and `Rejection`. `Report::render(&Source)` is the single ariadne call, with
+byte indexing (`IndexType::Byte`) so a `Span` is the label's own coordinate;
+`caret` widens an empty span to one whole char and anchors end of input on the
+last char, so every label is drawable. With no primary label, `Report::plain`
+is the compact one-liner. The builders sit with their errors:
+`ParseError::report` in `syntax/report.rs` (the `L000x` messages come from
+`LexErrorKind::headline` alone), `TypeError::report` in
+`typecheck/explain.rs`, and `Error::render` / `Error::compact`
+(`types/error.rs`, resolving the error's `Span` against a `SourceDb`).
 
-`format_runtime_error_auto` picks between the two by asking where the error
-came from, not what the input looked like: it takes `compact_root:
-Option<FileId>` — `Some(root)` when the input compiled to a single command,
-carrying that input's own id — and renders compact only when the error's span
-is absent or names `root`. A single command that dispatches into an rc alias,
-a `use`d function or a lambda from an earlier run faults in text the user
-cannot see, so it gets the caret.
+`Error::render` dispatches on where the error came from, not what the input
+looked like: a carried `rejection` draws its own report, so a broken plugin,
+module, rc or profile prints, at every door, the report its own run as a script
+would. Otherwise it takes `compact_root: Option<FileId>` — `Some(root)` when
+the input compiled to a single command, carrying that input's own id — and
+renders compact only when the error's span is absent or names `root`. A single
+command that dispatches into an rc alias, a `use`d function or a lambda from an
+earlier run faults in text the user cannot see, so it gets the caret.
+
+The shell's own stderr lines sit below the renderer, in
+`terminal/stderr.rs`: `cmd_error`, `shell_warning`, and the macros `outln!` /
+`err!` / `errln!`, exported for the front ends' own output too. Unlike
+`println!` and `eprintln!` they drop a failed write rather than panic, since
+once the terminal hangs up every write fails with EIO; `clippy.toml` bans the
+std pair.
 
 **The raw ingredients of a span underline are exposed so an external renderer
 can draw one in its own coordinate system.** `text::byte_to_char`
-(`core/src/text.rs`, the shared UTF-8 boundary snappers — byte offset →
+(`core/src/text.rs`, byte offset →
 character offset, the unit ariadne and a `TextArea` cursor both count in) and
 `TypeErrorKind::render_label` (`typecheck/explain.rs`, a kind → its under-caret
 label phrase) are `pub`. The structural [[map/repl/frontend|frontend]] reuses
@@ -122,27 +124,31 @@ lives beside the checker: provenance is data on the error (`Reason`,
 `typecheck/error.rs`) and every user-facing sentence is a pure function of it
 in `typecheck/explain.rs` ([[map/core/typecheck|typecheck]]).
 
-## Styling — `core/src/ansi.rs`
+## Styling and the colour gate — `core/src/ansi.rs`, `core/src/terminal.rs`
 
-Escape constants and the color-gating predicates `use_color` / `use_ui_color`,
-which consult a `TerminalState` cached once at REPL startup via `set_terminal`.
-When the cache is empty `use_color` falls back to inline probing (batch runs and
-early-startup errors); `use_ui_color` is cache-only and yields false until
-`set_terminal` has run. Also the OSC
-helpers: `osc_set_title`, `osc8_link`, `osc52_copy`. Value-output styling (the
-REPL's `=> ` prefix) lives instead in the `ral` crate's
-[[map/repl/loop|repl::theme]].
+`ansi` is vocabulary only: escape constants, the OSC helpers (`osc_set_title`,
+`osc8_link`, `osc52_copy`), `escape_seq_len`, `strip`, `visible`, `when`.
+**One colour decision, made once**: a front end probes a `TerminalState` and
+`seat`s it (`TerminalState::seat`, first wins); `terminal::stderr_color` and
+`terminal::ui_color` read that seat. A wire engine seats its `Attach.terminal`,
+the front end's, never a probe of its own null stdio. Before any seat,
+`stderr_color` answers from one memoised `Auto` probe, so early-startup errors
+still colour, and `ui_color` is false: only a front end has a UI. The
+`$TERMINAL` map is `impl From<&TerminalState> for Value` (`types/value.rs`).
+Value-output styling (the REPL's `=> ` prefix) lives instead in the `ral`
+crate's [[map/repl/loop|repl::theme]].
 
-## Exit-code hints — `core/src/exit_hints.rs`
+## Exit-code hints — `core/src/types/exit_hints.rs`
 
-`ExitHints` is a pure `(command, exit-status) → explanation` lookup table,
+`ExitHints` is a pure `(command basename, exit-status) → explanation` lookup table
+(two maps, `*` the wildcard),
 populated via `from_text` and installed into the `Shell`; `lookup` is consulted
 when an external command fails. Loading the table is the caller's concern.
 
 ## Debug tracing — `dbg_trace!`
 
 `dbg_trace!(tag, …)` is the single developer-facing trace primitive: a tagged
-stderr line in debug builds (red only where the `ansi` colour gate allows,
+stderr line in debug builds (red only where the `terminal::stderr_color` gate allows,
 and through `errln!`, so never a panic),
 nothing in release, no environment switch for the trace itself
 ([[decisions/260608_one-debug-path|one-debug-path]]). Its call sites are

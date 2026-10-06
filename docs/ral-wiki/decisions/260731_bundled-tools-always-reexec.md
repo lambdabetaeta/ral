@@ -19,7 +19,7 @@ admitted by a gate requiring terminal stdio, no redirects, no env overrides, no
 logical/process cwd divergence, and no sandbox projection.
 
 The env conjunct made that gate unsatisfiable in any booted shell.
-`Shell::seed_default_env_vars` — run by `boot_shell` for every front end —
+`boot::seed_env` — run by `boot_shell` for every front end —
 installs `HOME`/`USER`/`PATH`/`SHLVL`/`OS_*` into `env_overrides`
 ([[decisions/260531_env-is-dynamic-only|env-is-dynamic-only]]), so
 "no env overrides" held only for the unseeded shells unit tests construct. The

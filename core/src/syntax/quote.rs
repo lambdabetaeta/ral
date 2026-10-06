@@ -38,18 +38,18 @@ pub fn is_bare_word(s: &str) -> bool {
     )
 }
 
-/// Ral source for `s`: bare where it can be, else single-quoted, else
-/// hash-bumped to the smallest level the body leaves free.
-pub fn quote_word(s: &str) -> String {
+/// Ral source for `s`: bare (borrowed) where it can be, else single-quoted,
+/// else hash-bumped to the smallest level the body leaves free.
+pub fn quote_word(s: &str) -> Cow<'_, str> {
     if is_bare_word(s) {
-        return s.to_string();
+        return Cow::Borrowed(s);
     }
-    if !s.contains('\'') {
-        return format!("'{s}'");
-    }
-    let level = min_bump_level(s);
-    let hashes = "#".repeat(level);
-    format!("{hashes}'{s}'{hashes}")
+    Cow::Owned(if s.contains('\'') {
+        let hashes = "#".repeat(min_bump_level(s));
+        format!("{hashes}'{s}'{hashes}")
+    } else {
+        format!("'{s}'")
+    })
 }
 
 /// `s` escaped for use inside `"…"`; a leading `~` is the caller's concern.
@@ -70,13 +70,39 @@ pub fn escape_for_interpolation(s: &str) -> String {
     out
 }
 
-/// [`quote_word`] returning a `Cow`, so bare words pass through borrowed.
-pub fn quote_word_if_needed(s: &str) -> Cow<'_, str> {
-    if is_bare_word(s) {
-        Cow::Borrowed(s)
-    } else {
-        Cow::Owned(quote_word(s))
+/// `run` re-spelled as one `"…"`: literal text escaped, an interpolation's
+/// body inlined, splices and bracketed interiors copied as written.  A dup
+/// (`2>&1`) is no word, so a run it opens has no one-word reading.
+pub(crate) fn one_word(run: &str) -> Option<String> {
+    let tokens = lex(run).ok()?;
+    if matches!(tokens.first(), Some((Token::Dup { .. }, _))) {
+        return None;
     }
+    let mut body = String::new();
+    let mut depth = 0usize;
+    for (i, (token, span)) in tokens.iter().enumerate() {
+        let (start, end) = (span.start as usize, span.end as usize);
+        let next = tokens.get(i + 1).map_or(end, |(_, s)| s.start as usize);
+        match token {
+            _ if depth > 0 => body.push_str(&run[start..next]),
+            Token::Word(Word::Plain(w) | Word::Slash(w)) | Token::SingleQuoted(w) => {
+                // A leading `~` in `"…"` is home-rooted; a literal one was not.
+                if body.is_empty() && w.starts_with('~') {
+                    body.push('\\');
+                }
+                body.push_str(&escape_for_interpolation(w));
+            }
+            Token::Word(Word::Tilde(_)) => body.push_str(&run[start..end]),
+            Token::DoubleQuoted(_) => body.push_str(&run[start + 1..end - 1]),
+            _ => body.push_str(&run[start..next]),
+        }
+        match token {
+            Token::LBrace | Token::LBracket => depth += 1,
+            Token::RBrace | Token::RBracket => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    Some(format!("\"{body}\""))
 }
 
 /// Smallest `n ≥ 1` whose closer, `'` followed by `n` `#`s, is absent
@@ -260,21 +286,10 @@ mod tests {
         assert_eq!(quote_word("a 日 b"), "'a 日 b'");
     }
 
-    // ── quote_word_if_needed ─────────────────────────────────────────
-
     #[test]
-    fn quote_word_if_needed_borrows_bare() {
-        let s = "hello.txt";
-        let cow = quote_word_if_needed(s);
-        assert!(matches!(cow, Cow::Borrowed(_)));
-        assert_eq!(cow.as_ref(), "hello.txt");
-    }
-
-    #[test]
-    fn quote_word_if_needed_owned_on_quoting() {
-        let cow = quote_word_if_needed("a b");
-        assert!(matches!(cow, Cow::Owned(_)));
-        assert_eq!(cow.as_ref(), "'a b'");
+    fn quote_word_borrows_a_bare_word() {
+        assert!(matches!(quote_word("hello.txt"), Cow::Borrowed(_)));
+        assert!(matches!(quote_word("a b"), Cow::Owned(_)));
     }
 
     // ── lexer round-trips ────────────────────────────────────────────

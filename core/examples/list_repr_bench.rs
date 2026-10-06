@@ -6,6 +6,10 @@
 //!
 //! Each scenario is capped by both element count and a wall-clock timeout.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "[silent:example] an example prints its result"
+)]
 use imbl::Vector;
 use std::sync::Arc;
 use std::time::{Duration, Instant};

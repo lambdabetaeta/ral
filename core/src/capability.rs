@@ -1,30 +1,32 @@
-//! Runtime capability verdicts over the dynamic grant stack.
+//! The capability model: authority as data.
 //!
-//! Every decision here folds the whole stack (`ctx.grants`) with a
-//! `meet`, so a verdict is authority intersected across all layers and
-//! never a single frame.  The capability types and their lattice
-//! algebra live in `crate::types::capability` — as does the one verdict
-//! not taken here, [`crate::types::GrantStack::permits_detach`], which
-//! gates a verb rather than an access.
+//! A [`Capabilities`] frame is typed authority per effect, a [`GrantStack`]
+//! their dynamic composition, and every question over a stack a fold of its
+//! layers by `meet`: [`exec`]'s table of rules about programs, [`fs`]'s region
+//! per op, [`deputy`]'s overlap of the two.  The model reads no session and
+//! renders nothing; it has two consumers, the in-process guard
+//! (`crate::guard`) and the OS sandbox (`crate::sandbox`), which cannot
+//! disagree about what a stack permits because both ask these folds.
 
-mod decode;
 mod deputy;
-mod enforce;
 mod exec;
 mod fs;
-mod load;
-mod sandbox;
+mod lattice;
 mod table;
 
-pub use decode::decode_capability_map;
+#[cfg(test)]
+mod lattice_tests;
+
 pub use deputy::deputy_prefixes;
-pub(crate) use enforce::{
-    Admitted, admits_head, check_device_name, check_editor_read, check_editor_tui,
-    check_editor_write, check_exec, check_fs_exact, check_fs_op, check_shell_chdir, exec_respelled,
-};
-pub(crate) use exec::Program;
+#[cfg(unix)]
+pub(crate) use exec::ExecScope;
 #[cfg(target_os = "linux")]
-pub(crate) use exec::{ExecRules, ExecScope, Subject};
+pub(crate) use exec::Subject;
+pub(crate) use exec::{Admitted, ExecDenial, ExecRules, Program, Refused, rules};
 pub use fs::FsOp;
-pub use load::{apply_session_profiles, load_capabilities_from_path, load_capabilities_from_str};
-pub(crate) use sandbox::sandbox_projection;
+pub(crate) use fs::region;
+pub(crate) use lattice::meet_insert;
+pub use lattice::{
+    Capabilities, EditorPolicy, ExecGrant, ExecKey, Flag, FsPolicy, GrantStack, Meet, ShellPolicy,
+    Verdict, Widen,
+};

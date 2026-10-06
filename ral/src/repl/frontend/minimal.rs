@@ -6,8 +6,8 @@
 //! plugin runtime; ghost text, highlights, and plugin keybindings are
 //! unavailable here.
 
-use ral_core::diagnostic;
-use ral_core::protocol::Transport;
+use ral_core::carrier::Transport;
+use ral_core::terminal;
 use std::io::{BufRead, Write};
 
 use super::super::prompt::PromptText;
@@ -31,7 +31,6 @@ impl Frontend for MinimalFrontend {
         _engine: &dyn Transport,
         prompt: &PromptText,
         _pending: Option<EditBuffer>,
-        #[cfg(feature = "structural")] _worksheet: &crate::repl::worksheet::Worksheet,
     ) -> Read {
         let stdin = std::io::stdin();
         let write_prompt = |s: &[u8]| {
@@ -52,7 +51,7 @@ impl Frontend for MinimalFrontend {
             Ok(0) => return Read::Eof,
             Ok(_) => line.trim_end_matches(['\n', '\r']).to_string(),
             Err(e) => {
-                diagnostic::cmd_error("ral", &e.to_string());
+                terminal::cmd_error("ral", &e.to_string());
                 return Read::Eof;
             }
         };

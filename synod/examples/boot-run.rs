@@ -41,6 +41,10 @@
 //! Usage: `boot-run <kernel> <initramfs> <rootfs> <folder>`
 
 #![allow(
+    clippy::disallowed_macros,
+    reason = "[silent:example] an example prints its result"
+)]
+#![allow(
     clippy::disallowed_methods,
     reason = "example binary: its `main` owns the process, so an `exit` unwinds nothing another owner needs"
 )]
@@ -52,7 +56,7 @@ use exarch::headless::converse_settled;
 use exarch::provider::scripted::{Reply, Script};
 use exarch::provider::{Bureau, Provider, ToolCall};
 use exarch::record::{Display, Record, Recorded, Transient};
-use ral_core::types::GrantStack;
+use ral_core::capability::GrantStack;
 use std::path::PathBuf;
 use std::sync::Arc;
 use synod::session::{seat_machine, unseat_machine};

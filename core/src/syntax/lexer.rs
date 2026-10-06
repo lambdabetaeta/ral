@@ -10,14 +10,15 @@
 //! newlines, never across a `;`.
 //!
 //! Nested forms — the body of `$[…]`, and every `$…` / `!…` splice inside
-//! `"…"` — are lexed in place and stored as token streams inside
+//! `"…"`: are lexed in place and stored as token streams inside
 //! [`Token::Expr`] or [`StringPart::Splice`].  The parser sub-parses those
 //! streams instead of re-lexing the bytes, and their spans already point
 //! into the outer file, so diagnostics underline the right columns.
 
+use crate::ir::WriteMode;
 use crate::path::tilde::TildePath;
 use crate::source::{FileId, Span, Spanned};
-use crate::syntax::ast::{Word, WriteMode};
+use crate::syntax::ast::Word;
 use std::fmt;
 
 /// The identifier alphabet, `[a-zA-Z_][a-zA-Z0-9_-]*`, as the two
@@ -137,7 +138,7 @@ pub enum Token {
 }
 
 /// The operator of a word-taking redirect, as spelled; the parser's
-/// [`Redirect::word`](crate::syntax::ast::Redirect::word) assigns its stream.
+/// `parser::redirect_word` assigns its stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RedirectOp {
     Read,
@@ -251,7 +252,7 @@ pub enum LexErrorKind {
 }
 
 impl LexErrorKind {
-    /// True for the arms that mean "the user is still typing" — the REPL
+    /// True for the arms that mean "the user is still typing": the REPL
     /// prompts for more input, and an inner one is re-anchored into its
     /// enclosing string.
     pub(crate) fn is_incomplete(&self) -> bool {
@@ -263,24 +264,29 @@ impl LexErrorKind {
         )
     }
 
-    /// One user-facing line.  The opening position is deliberately absent:
-    /// the renderer draws a secondary label at `opened`, so a `(line, col)`
-    /// here would only repeat the underline.
-    pub fn message(&self) -> String {
+    /// This kind's own line, with no nested culprit.  The opening position is
+    /// deliberately absent: the renderer draws a secondary label at `opened`,
+    /// so a `(line, col)` here would only repeat the underline.
+    pub(crate) fn headline(&self) -> String {
         match self {
-            Self::UnterminatedString { form, inner, .. } => {
-                let mut msg = format!("unterminated {form}: expected closing `{}`", form.closing());
-                if let Some(inner) = inner {
-                    msg.push_str("; nested ");
-                    msg.push_str(&inner.message());
-                }
-                msg
+            Self::UnterminatedString { form, .. } => {
+                format!("unterminated {form}: expected closing `{}`", form.closing())
             }
             Self::UnterminatedBalanced { open, close, .. } => {
-                format!("unterminated '{open}…{close}'")
+                format!("unterminated `{open}…{close}`")
             }
             Self::UnclosedDeref { .. } => "unclosed `$(…)` dereference".into(),
             Self::Other(s) => s.clone(),
+        }
+    }
+
+    /// One user-facing line: the headline, then the nested one it hides.
+    pub fn message(&self) -> String {
+        match self {
+            Self::UnterminatedString {
+                inner: Some(inner), ..
+            } => format!("{}; nested {}", self.headline(), inner.message()),
+            _ => self.headline(),
         }
     }
 }
@@ -578,16 +584,16 @@ impl Lexer {
                 '&' if self.peek_n(1) == Some('&') => Err(Self::error(
                     Span::new(span.file, span.start, span.start + 2),
                     "ral has no `&&`: a newline or `;` sequences commands, and an \
-                     uncaught failure already stops the script — inside `$[…]`, \
+                     uncaught failure already stops the script: inside `$[…]`, \
                      `&&` is the Boolean connective",
                 )),
                 '&' if self.in_expr() => Err(Self::error(
                     Span::new(span.file, span.start, span.start + 1),
-                    "`&` is not an operator — the Boolean connective is `&&`",
+                    "`&` is not an operator: the Boolean connective is `&&`",
                 )),
                 '&' => Err(Self::error(
                     Span::new(span.file, span.start, span.start + 1),
-                    "`&` does not background a command in ral — wrap it in \
+                    "`&` does not background a command in ral: wrap it in \
                      `spawn { … }`, which returns a handle you `await`",
                 )),
                 ',' if self.suppress_newline() => Ok(self.bump_simple(Token::Comma, span)),
@@ -598,7 +604,7 @@ impl Lexer {
                         Some(tok) => Ok((tok, self.finish(span))),
                         None => Err(Self::error(
                             self.finish(span),
-                            "expected a name after `$` — write `$name`, `$(name)`, or `$[…]`",
+                            "expected a name after `$`: write `$name`, `$(name)`, or `$[…]`",
                         )),
                     }
                 }
@@ -1341,7 +1347,7 @@ impl Lexer {
                 span,
                 format!(
                     "file descriptor {digits}: ral has only standard input (0), \
-                     standard output (1) and standard error (2) — to send output \
+                     standard output (1) and standard error (2), so to send output \
                      to a file, redirect fd 1 or 2 (`> file`, `2> file`)"
                 ),
             )),
@@ -1377,7 +1383,7 @@ impl Lexer {
             if fd.unwrap_or(1) == 1 && n == 2 {
                 return Err(Self::error(
                     self.finish(span),
-                    "ral has no `1>&2` — to write a diagnostic, use \
+                    "ral has no `1>&2`: to write a diagnostic, use \
                      `warn \"…\"`, which puts one line on standard error. \
                      Did you mean `2>&1`, folding a command's standard error \
                      into its standard output?",
@@ -1396,7 +1402,7 @@ impl Lexer {
                 self.bump();
                 return Err(Self::error(
                     self.finish(span),
-                    "`<<<` is bash's here-string operator — ral's `<<` already \
+                    "`<<<` is bash's here-string operator: ral's `<<` already \
                      feeds a string to stdin, so drop one `<`",
                 ));
             }
@@ -1407,7 +1413,7 @@ impl Lexer {
                 return Err(Self::error(
                     self.finish(span),
                     format!(
-                        "`<<` takes a space before its payload — {}",
+                        "`<<` takes a space before its payload: {}",
                         crate::syntax::NO_HEREDOCS
                     ),
                 ));

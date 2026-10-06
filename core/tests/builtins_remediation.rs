@@ -12,35 +12,15 @@ mod common;
 
 use common::fresh_shell;
 
-use ral_core::protocol::{Program, Run};
-use ral_core::types::{Break, Escape, GrantStack, Settled, Shell, Value};
-use ral_core::{
-    CompileError, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin,
-    StaticDiagnostics, Uncompiled,
-};
+use ral_core::protocol::Run;
+use ral_core::run::{RunReport, StaticDiagnostics};
+use ral_core::types::{Break, Escape, Settled, Shell, Value};
 
 /// Run one top-level run of `source` through the public `run` door
 /// and return the body's `Settled<Value>`.  Every test below picks source
 /// it expects to compile, so a static diagnostic is a test bug.
 fn eval(shell: &mut Shell, source: &str) -> Settled<Value> {
-    match shell.run(RunRequest {
-        run: Run {
-            program: Program::Source(source.into()),
-            script_name: "<test>".into(),
-            caps: GrantStack::root(),
-            wall: None,
-            deferred_lease: None,
-            worker_cap: None,
-            io: RunIo::Inherit,
-            terminal: RequestedTerminalAccess::Leased,
-            stdin: RunStdin::Inherit,
-            trail: None,
-        },
-        surface: None,
-        deferred: None,
-        desk: None,
-        fork: None,
-    }) {
+    match shell.run(Run::foreground(source, "<test>")) {
         RunReport::Ran { ending, .. } => ending.into_result(),
         RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
     }
@@ -50,24 +30,7 @@ fn eval(shell: &mut Shell, source: &str) -> Settled<Value> {
 /// the diagnostics that refused it.
 fn expect_static(source: &str) -> StaticDiagnostics {
     let mut shell = fresh_shell();
-    match shell.run(RunRequest {
-        run: Run {
-            program: Program::Source(source.into()),
-            script_name: "<test>".into(),
-            caps: GrantStack::root(),
-            wall: None,
-            deferred_lease: None,
-            worker_cap: None,
-            io: RunIo::Inherit,
-            terminal: RequestedTerminalAccess::Leased,
-            stdin: RunStdin::Inherit,
-            trail: None,
-        },
-        surface: None,
-        deferred: None,
-        desk: None,
-        fork: None,
-    }) {
+    match shell.run(Run::foreground(source, "<test>")) {
         RunReport::Static { diagnostics } => diagnostics,
         RunReport::Ran { ending, .. } => {
             panic!("{source:?}: expected a static rejection, got {ending:?}")
@@ -78,15 +41,14 @@ fn expect_static(source: &str) -> StaticDiagnostics {
 /// Run `source` expecting one type error, whose code must be `code`.
 fn expect_type_code(source: &str, code: &str) {
     let codes: Vec<_> = match expect_static(source) {
-        StaticDiagnostics::Compile(Uncompiled {
-            error: CompileError::Types(errors),
-            ..
-        }) => errors.iter().map(|e| e.kind.code()).collect(),
-        StaticDiagnostics::Compile(Uncompiled {
-            error: CompileError::Parse(error),
-            ..
-        }) => {
-            panic!("{source:?}: expected a type error, got parse {error:?}")
+        StaticDiagnostics::Compile(r) if r.status == 1 => {
+            r.reports.iter().filter_map(|r| r.code).collect()
+        }
+        StaticDiagnostics::Compile(r) => {
+            panic!(
+                "{source:?}: expected a type error, got parse {:?}",
+                r.reports
+            )
         }
         StaticDiagnostics::Host(e) => panic!("{source:?}: expected a type error, got host {e:?}"),
     };

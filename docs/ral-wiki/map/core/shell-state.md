@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 0948a758
+generated_at_commit: 446e3123
 generated_at_date: 2026-10-06
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
@@ -14,10 +14,11 @@ everything `crate::types::*`.
 
 - `value.rs` — `Value` (the runtime [[design/cbpv|value]] category); beside it
   `handler.rs` (the user handler stack: `HandlerFrame`, `HandlerStack`,
-  `FrameHandle`), `builtin.rs` (`BuiltinEntry` / `BuiltinTable`, kept separate
-  from the handler stack — a `Returns` row whose declared scheme settles at `Unit`
-  has its answer coerced to `Unit` regardless of what the body returns,
-  `BuiltinEntry::settles_at_unit` reading the curry spine to decide and
+  `FrameHandle`), `builtin.rs` (`BuiltinEntry` — a checker-owned `Decl` plus the body — and
+  `BuiltinTable`, which projects each set into the checker's `Manifest`; kept
+  separate from the handler stack — a `Returns` row whose declared scheme settles
+  at `Unit` has its answer coerced to `Unit` regardless of what the body returns,
+  `Decl::settles_at_unit` reading the curry spine to decide and
   debug-asserting the body agrees), and `handle.rs` (the concurrency
   substrate behind `Value::Handle`: `HandleInner`, `CompletedHandle`,
   `SurfaceBuffer`).
@@ -29,11 +30,12 @@ everything `crate::types::*`.
   any non-lambda or wrong-arity value at every install boundary — the calling
   convention is never inferred from the runtime shape
   ([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]).
-- `exec_arg.rs` — `RefusedArg`, the shapes `execve(2)` has no argument for, with
-  `of_value` for the spawn, `of_ty` for the checker, and one `remedy` each.
-  Rendering an argv inside the shell is total (`Value::render_argv`); this is the
-  one gate, declared once so the static refusal and the pre-spawn one cannot
-  disagree ([[invariants/exec-argv-is-words|exec-argv-is-words]]).
+- `value.rs`'s `Value::heads` gives the heads a value may be admitted at; the
+  shapes `execve(2)` has no argument for are `RefusedArg` (`ty/exec_arg.rs`),
+  one match on a head with one `remedy` each. Rendering an argv inside the shell
+  is total (`Value::render_argv`); this is the one gate, declared once so the
+  static refusal and the pre-spawn one cannot disagree
+  ([[invariants/exec-argv-is-words|exec-argv-is-words]]).
 - `list.rs` / `map.rs` — `List` and `Map`, opaque over a private `Repr`
   wrapping `Arc<imbl::Vector<Value>>` / `Arc<imbl::OrdMap<String, Value>>`;
   `get`/`iter` lend a `Cow<'_, Value>` rather than `&Value`, so a caller
@@ -53,11 +55,11 @@ everything `crate::types::*`.
   optionality is open variants ([[invariants/optionality-via-variants|optionality-via-variants]]).
 - `error.rs` — `Error` and `Status` (`Raised(i32) | Cancelled(CancelCause) |
   Process(CommandFailure)`, one constructor per fact whichever door reports
-  it; `Status::code` is the one home of `128 + n` and the cause table).
+  it; `Status::code` delegates to each failure's own `code`).
   `audit.rs` — the
   `Audit` collector, over `observation.rs`'s `Observation` / `Observed` — the
   one vocabulary shared by the trail, the surface rail, `--audit`'s JSON, and
-  the wire. `closure.rs` — `Closure`, the thunk value `⟨M, ρ|occ(M)⟩`, its
+  the wire. `value.rs` — `Value` and, in `value/`, its two bridges: `first_order.rs` (the one walk each way to `FOValue`) and `compare.rs` (`Value::equals` and `Value::compare`, one equality and one order, exact across Int and Float). `closure.rs` — `Closure`, the thunk value `⟨M, ρ|occ(M)⟩`, its
   fields private and `Closure::new` its one constructor, which `restrict`s
   the environment to the names its body mentions
   ([[decisions/260926_a-closure-keeps-only-what-it-mentions|a-closure-keeps-only-what-it-mentions]]).
@@ -80,10 +82,10 @@ everything `crate::types::*`.
   per `Shell`, `Arc`-shared into every fork. `crate::types::lookup(name, env,
   sig)` is the one resolution rule, ρ then Σ's prelude then Σ's natives; nothing
   else in core spells the shadowing order out again.
-- `coerce.rs` — the `sig` / `sig_hint` / `sig_at` runtime-error constructors
-  (the last positioned at a span the caller already holds) and the `as_map`
-  family of `Value` → `Map` coercions, sitting below both the builtin and
-  capability layers so each reaches them through `crate::types::*`.
+- `coerce.rs` — the `sig` / `sig_hint` runtime-error constructors and the
+  `Value::as_str` / `as_list` / `as_map` / `expect_handle` family of argument
+  decoders, which share one wording (`Value::expected`), sitting below both the
+  builtin and capability layers so each reaches them through `crate::types::*`.
 
 ## Capabilities
 
@@ -112,7 +114,7 @@ field name *is* the invariant — joined by `Shell`
 `env` (ρ, the session environment, extended by every `Define` that lands),
 `sig` (Σ — natives and the frozen prelude, `Arc<Signature>`, one per shell,
 never checkpointed since nothing but boot and the one prelude bake ever
-writes it) and `context` (dynamic context — `cd`, aliases, hooks) — three
+writes it) and `context` (dynamic context — `cd`, aliases) — three
 flat fields, since a step's focus carries its own environment and there is no
 ambient `scope` for a bundle to snapshot — plus `Io`, `SessionState`, and
 `LocalState` below. The run door checkpoints and rolls back the `(env,
@@ -141,8 +143,9 @@ checkpoint, since a run never writes it.
   `root_file` naming the current run's root source, the `exit_hints` table,
   the host-installed
   `builtins` with the session's `library_docs`, the session's
-  `terminal_lease`, and the `guest_jail` (`Some` only inside a VM guest —
-  the spawn jail's shared uid counter, [[map/core/io-process|io-process]]).
+  `terminal_lease`, the `guest_jail` (`Some` only inside a VM guest —
+  the spawn jail's shared uid counter, [[map/core/io-process|io-process]]), and
+  the `hooks` table (a worker or a stage dispatches none; a hook registered by a run that then panics is not rolled back with the `(env, context)` checkpoint).
 - **`LocalState`** — host-local scratch carrying its own flow rules (audit
   trail, REPL scratch, the `workers` registry, the `bindings` ledger, the
   `detach` budget); the
@@ -169,18 +172,13 @@ checkpoint, since a run never writes it.
   notice) once its unclaimed result has sat a full retention of ral calls
   — a host that never arms (the REPL) retains settled entries
   indefinitely. Worker teardown is structural: dropping the shell cancels
-  every registered worker's scope through `LocalState`'s `Drop`, so a
+  every registered worker's scope through the `Drop` of `Roster`, so a
   session's workers die with its store — a host's `/clear`, which replaces
   the outgoing shell wholesale, needs no cancel call site, and explicit
   destruction outranks every lease, the durable class included. The
-  `workers_owned` flag is what keeps that edge honest: a `spawn_thread`
-  child shares its *parent's* registry by `Arc`, so its own drop must not
-  reap the parent's roster.
-  `WorkerEntry` also implements the small `Resident` signature
-  (`types/resident.rs`, [[design/residency|residency]]) — designator,
-  population, capability kind, lease row, state label, cancel — so the
-  REPL's `jobs` listing and its exit-time survivor warning read a worker's
-  facets through it instead of hand-formatting per population.
+  `Roster::Owned`/`Roster::Shared` split is what keeps that edge honest: a
+  `spawn_thread` child holds a `Shared` roster over its *parent's* registry,
+  so its own drop must not reap the parent's.
 
   The binding-lease ledger (`shell/bindings.rs`,
   [[decisions/260629_agent-binding-reaping|agent-binding-reaping]]) sits
@@ -192,8 +190,8 @@ checkpoint, since a run never writes it.
   committed-run clock. Every persistent top-level scope write funnels
   through one fused chokepoint, `Shell::note_define` (`scope.rs`,
   beside `bind_value`/`set_var`), so "write a scope entry" and "stamp the
-  ledger" can never be pulled apart: `run_phrase_define`'s single per-name
-  callback into `pattern::bind_pattern_staged` calls it for every name a
+  ledger" can never be pulled apart: `Ran::define`'s single per-name
+  loop over `pattern::destructure` calls it for every name a
   `Define` phrase installs under `Mode::Session` — a plain `let`, a
   destructuring pattern's `Name`/`...rest` arms, or a `LetRec` group's
   mutually-recursive members alike — and never under `Mode::Local`. Host verbs
@@ -202,7 +200,7 @@ checkpoint, since a run never writes it.
   re-installation: `Shell::dispatch`'s `Source` arm ticks the committed-run
   clock, and a lease is renewed by reference at both harvest seams — the
   run's own compiled program, and a runtime-compiled `use` load
-  (`check_source` in `core/src/builtins/modules.rs`) —
+  (`check_source` in `core/src/load.rs`) —
   each reading `ir::referenced_names` off what it just compiled
   ([[map/core/ir|ir]]). The same chokepoint runs a second, orthogonal
   check: `BindingLease` also carries `large_binding_bytes`, and an install
@@ -310,7 +308,7 @@ borrowed first-order `FOValue`
 method takes a borrowed `Value`, encodes it once at that door, and forwards onto
 the installed sink — inert when none is present (a bare REPL).
 `Mooring::surface_data` is its `FOValue`-typed sibling, for a caller that
-already holds the wire form: `evaluator::audit::observe_stamped` reaches it
+already holds the wire form: `Shell::observe_stamped` (`types/audit/door.rs`) reaches it
 with `Observation::to_surface`, tagged `` `observed `` so a host dispatches on
 the tag alone without re-encoding a `Value` it never had. Run-scoped, not
 a persistent capability — a run door installs it, so a clone of it has no
@@ -396,18 +394,21 @@ standing between the body and the store
 in its body, and `within [handlers:]` the scoped form for handlers
 ([[decisions/260925_within-dir-is-local-state|within-dir-is-local-state]]).
 
-The owned-`Shell` modes *are* genuine runtime forks — a different store — and so
-copy state explicitly. Each starts from a freshly-defaulted `SessionState` and so
-holds **no terminal authority**: no lease on the session, and the mooring the
-fork is handed carries `TerminalAccess::Denied` — the safe
-default for a store that is not the session's:
+The owned-`Shell` modes *are* genuine runtime forks — a different store — and are
+all built by the one exhaustive literal in `Shell::child`, so a field added to
+`Shell` cannot reach a child by defaulting. Each holds **no terminal
+authority**: no lease on the session, and the mooring the fork is handed
+carries `TerminalAccess::Denied` — the safe default for a store that is not
+the session's. Each also starts with stdin `Empty`, no hooks and no control
+counters; what rides along is the scope, context, Σ, builtin table, source
+registry, root file, call site and detach budget:
 
 - `spawn_thread` — a spawned worker (`spawn`, `par`, the detached-worker
   helper) *and* a ral-written pipeline stage
   ([[map/core/runtime|runtime]]'s `pipeline/thread.rs`) — a pipeline never
   rides a re-exec'd child — on a fresh OS thread that owns its own IO, seeded
-  from the spawning shell's session; the body's capture rides in its closure,
-  and nothing flows back. A worker's mooring is rebuilt by `Mooring::for_worker` on the
+  from the spawning shell's session, built on the spawning thread; the body's
+  capture rides in its closure, and nothing flows back. A worker's mooring is rebuilt by `Mooring::for_worker` on the
   calling thread (so the door can hand the caller the worker's scope) and moved
   into the thread, which is why it runs under a child of the durable root
   rather than the foreground scope, and a run timeout or Esc does not reach
@@ -415,19 +416,18 @@ default for a store that is not the session's:
   *node's own* cancel scope, so a pipeline-wide cancel reaches every stage
   transitively and the pipeline's own surface/deferred rail carries over
   rather than a worker's fresh one.
-- `child_from` — an aside: an independent sibling that clones the parent's
+- `join_session` — an aside: an independent sibling that clones the parent's
   `context`, source cursor, builtin table, and Σ (`sig`, by `Arc` clone)
-  without touching its IO / audit / REPL scratch; no flow-back. `join_session` is its aside
-  specialisation, sharing the parent's cancel root, so code there is
-  interruptible while it runs and older interrupts stay out of its reach; the
-  run door runs a hook there when its registered `DefaultPolicy` says
-  `aside` (the REPL's buffer-change hooks).
-- `fork_session` — the host session fork (the sub-agent case), the session-scoped
-  specialisation of `child_from`. `fork_scrubbed` (`scrub.rs`) is the door
+  without touching its IO / audit / REPL scratch; no flow-back. It shares the
+  parent's cancel root, so code there is interruptible while it runs and older
+  interrupts stay out of its reach; the run door runs a hook there when its
+  registered `DefaultPolicy` says `aside` (the REPL's buffer-change hooks).
+- `fork_session` — the host session fork (the sub-agent case), an aside with a
+  durable root of its own. `fork_scrubbed` (`scrub.rs`) is the door
   every sub-agent fork actually passes through: `fork_session`, then one
   `Scrub` over every root the fork holds — the session scope and each
-  handler frame's arms (`HandlerStack::values_mut`) — then an empty hook
-  table. The scrub replaces each `Value::Handle` it reaches with an
+  handler frame's arms (`HandlerStack::values_mut`). A fork's hook table is
+  empty by construction: hooks are session state, never inherited. The scrub replaces each `Value::Handle` it reaches with an
   `` `opaque `` placeholder, the binding's name and scheme surviving.
   - It walks *scopes*, not values: each scope the roots reach, once, by
     `ptr_eq` root identity, dependencies first, on an explicit stack — so a

@@ -61,7 +61,7 @@ is not a loosening.
 ## The authority is a dimension, because attenuation is what a grant does
 
 `detach: Option<bool>` joins `net` on the capability lattice, meets like every
-other axis, and is folded at the call by `GrantStack::permits_detach`.
+other axis, and is folded at the call by `GrantStack::permits(Flag::Detach)`.
 
 **Silence permits.** An ordinary `grant fs: […] { … }` says nothing about
 survivors, exactly as it says nothing about the network. The alternative — a

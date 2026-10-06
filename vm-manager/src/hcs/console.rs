@@ -67,6 +67,10 @@
 //! and no run to raise a card in — the same standing [`super::vhd`]'s disk
 //! writing has, and hence the same module-scoped allow.
 #![allow(
+    clippy::disallowed_macros,
+    reason = "[silent:windows-host] a host diagnostic with no ral shell to print through"
+)]
+#![allow(
     clippy::disallowed_methods,
     reason = "REASONED-SILENT: host-side diagnostic plumbing before any engine exists — the \
               guest's console log and the sweep of the ones nobody kept; no shell, no run, no \

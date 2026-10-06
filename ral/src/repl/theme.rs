@@ -1,11 +1,11 @@
 //! REPL value-output styling.
 //!
 //! `OutputTheme` controls how the REPL renders the result of a top-level
-//! expression — a `value_prefix` string (default `"=> "`) and an optional
-//! `value_color` (an ANSI SGR escape).  Both fields are configurable from
+//! expression — a `value-prefix` string (default `"=> "`) and an optional
+//! `value-color` (an ANSI SGR escape).  Both fields are configurable from
 //! the RC file's `theme` key.
 //!
-//! Color is suppressed automatically when [`ral_core::ansi::use_ui_color`]
+//! Color is suppressed automatically when [`ral_core::terminal::ui_color`]
 //! returns false, so the theme can store an unconditional `Some(color)`.
 //!
 //! The theme is process-global state — there is exactly one REPL per
@@ -33,9 +33,9 @@ pub(crate) struct OutputTheme {
     pub value_color: Option<String>,
 }
 
-ral_core::record!(OutputTheme {
-    value_prefix: "value_prefix",
-    value_color: "value_color",
+ral_core::record!(typed OutputTheme {
+    value_prefix: "value-prefix",
+    value_color: "value-color",
 });
 
 impl Default for OutputTheme {
@@ -49,8 +49,8 @@ impl Default for OutputTheme {
 
 impl OutputTheme {
     /// Build a theme from an RC `theme:` map, starting from the default and
-    /// overriding the `value_prefix` / `value_color` keys it carries.  A
-    /// `value_color` names an ANSI colour (see [`named_color`]) or `none` to
+    /// overriding the `value-prefix` / `value-color` keys it carries.  A
+    /// `value-color` names an ANSI colour (see [`named_color`]) or `none` to
     /// suppress color entirely.  An unknown key warns and is ignored; a
     /// recognised key with a malformed value is rejected with an error
     /// naming the key.
@@ -58,16 +58,16 @@ impl OutputTheme {
         let mut theme = Self::default();
         for (k, v) in pairs {
             match k {
-                "value_prefix" => match v.as_ref() {
+                "value-prefix" => match v.as_ref() {
                     Value::String(s) => theme.value_prefix = s.to_string(),
                     other => {
                         return Err(format!(
-                            "rc theme 'value_prefix' must be a string; got {}",
+                            "rc theme 'value-prefix' must be a string; got {}",
                             other.type_name()
                         ));
                     }
                 },
-                "value_color" => match v.as_ref() {
+                "value-color" => match v.as_ref() {
                     Value::String(s) if s.eq_ignore_ascii_case("none") => {
                         theme.value_color = None;
                     }
@@ -75,19 +75,19 @@ impl OutputTheme {
                         Some(color) => theme.value_color = Some(color),
                         None => {
                             return Err(format!(
-                                "rc theme 'value_color' must be one of black, red, green, \
+                                "rc theme 'value-color' must be one of black, red, green, \
                                  yellow, blue, magenta, cyan, white, or none; got '{s}'"
                             ));
                         }
                     },
                     other => {
                         return Err(format!(
-                            "rc theme 'value_color' must be a string; got {}",
+                            "rc theme 'value-color' must be a string; got {}",
                             other.type_name()
                         ));
                     }
                 },
-                other => ral_core::diagnostic::shell_warning(&format!(
+                other => ral_core::terminal::shell_warning(&format!(
                     "ral: theme: unknown key '{other}', ignoring"
                 )),
             }
@@ -122,7 +122,7 @@ mod tests {
 
     #[test]
     fn theme_value_color_none_suppresses_color() {
-        let pairs = map_of(vec![("value_color".into(), Value::string("none"))]);
+        let pairs = map_of(vec![("value-color".into(), Value::string("none"))]);
         let theme = OutputTheme::from_map(&pairs).unwrap();
         assert_eq!(theme.value_color, None);
         assert_eq!(theme.value_prefix, "=> ");
@@ -130,19 +130,19 @@ mod tests {
 
     #[test]
     fn theme_value_color_unknown_name_rejected() {
-        let pairs = map_of(vec![("value_color".into(), Value::string("purple"))]);
+        let pairs = map_of(vec![("value-color".into(), Value::string("purple"))]);
         assert!(OutputTheme::from_map(&pairs).is_err());
     }
 
     #[test]
     fn theme_value_color_wrong_type_rejected() {
-        let pairs = map_of(vec![("value_color".into(), Value::Int(3))]);
+        let pairs = map_of(vec![("value-color".into(), Value::Int(3))]);
         assert!(OutputTheme::from_map(&pairs).is_err());
     }
 
     #[test]
     fn theme_value_prefix_wrong_type_rejected() {
-        let pairs = map_of(vec![("value_prefix".into(), Value::Int(3))]);
+        let pairs = map_of(vec![("value-prefix".into(), Value::Int(3))]);
         assert!(OutputTheme::from_map(&pairs).is_err());
     }
 
@@ -150,7 +150,7 @@ mod tests {
     fn theme_unknown_key_ignored_known_keys_apply() {
         let pairs = map_of(vec![
             ("wat".into(), Value::string("x")),
-            ("value_prefix".into(), Value::string("> ")),
+            ("value-prefix".into(), Value::string("> ")),
         ]);
         let theme = OutputTheme::from_map(&pairs).unwrap();
         assert_eq!(theme.value_prefix, "> ");

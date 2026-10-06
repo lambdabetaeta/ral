@@ -10,14 +10,14 @@ let [from, dest] = args
 let info = !{file-info !{resolve-path $from}}
 
 let existing = if !{exists $dest} {
-    return `just !{file-info !{resolve-path $dest}}
+    return `some !{file-info !{resolve-path $dest}}
 } else {
     return `none
 }
 
 let stale = case $existing [
     `none: { |_| return true },
-    `just: { |d| return $[$info[mtime] > $d[mtime]] }
+    `some: { |d| return $[$info[mtime] > $d[mtime]] }
 ]
 
 if $stale {

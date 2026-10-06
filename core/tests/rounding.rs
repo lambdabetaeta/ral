@@ -12,32 +12,14 @@ mod common;
 
 use common::fresh_shell;
 
-use ral_core::protocol::{Program, Run};
-use ral_core::types::GrantStack;
-use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
+use ral_core::protocol::Run;
+use ral_core::run::RunReport;
 
 /// Run `source`, expecting it to be rejected by the type checker before it
 /// ever runs (a `RunReport::Static`).
 fn expect_static_reject(source: &str) {
     let mut shell = fresh_shell();
-    match shell.run(RunRequest {
-        run: Run {
-            program: Program::Source(source.into()),
-            script_name: "<test>".into(),
-            caps: GrantStack::root(),
-            wall: None,
-            deferred_lease: None,
-            worker_cap: None,
-            io: RunIo::Inherit,
-            terminal: RequestedTerminalAccess::Leased,
-            stdin: RunStdin::Inherit,
-            trail: None,
-        },
-        surface: None,
-        deferred: None,
-        desk: None,
-        fork: None,
-    }) {
+    match shell.run(Run::foreground(source, "<test>")) {
         RunReport::Static { .. } => {}
         RunReport::Ran { ending, .. } => {
             panic!("{source:?}: expected a static type error, but it ran: {ending:?}")

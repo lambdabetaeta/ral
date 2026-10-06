@@ -7,15 +7,14 @@ use crate::shell_eval::skill;
 use grep::regex::RegexMatcherBuilder;
 use grep::searcher::{BinaryDetection, SearcherBuilder, sinks::Lossy};
 use ignore::WalkBuilder;
-use ral_core::builtins::util::{as_str, regex_err};
+use ral_core::builtins::util::regex_err;
 use ral_core::capability::FsOp;
-use ral_core::typecheck::builtins::{
-    closed_record, fun, mk_plain_scheme, mk_scheme as scheme, pure, thunk,
-};
-use ral_core::typecheck::{Scheme, Ty, Unifier};
-use ral_core::types::{
-    Break, BuiltinBody, BuiltinEntry, Mooring, Observation, Observed, Settled, Site, sig,
-};
+use ral_core::fact::{Grep, Read};
+use ral_core::ty::Site;
+use ral_core::ty::{Scheme, Ty, closed_record};
+use ral_core::typecheck::Unifier;
+use ral_core::typecheck::builtins::{fun, mk_plain_scheme, mk_scheme as scheme, pure, thunk};
+use ral_core::types::{Break, BuiltinBody, BuiltinEntry, Mooring, Observed, Settled, sig};
 use ral_core::{HostSurface, Shell, Value};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -60,17 +59,12 @@ pub fn host_surface() -> HostSurface {
 /// # Errors
 /// If sourcing raises a ral error (re-surfaced as a signal) or escapes.
 pub fn install_agent_library(mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    let result = ral_core::builtins::modules::evaluate_source(
-        mooring,
-        shell,
-        AGENT_SOURCE,
-        "<exarch:agent>",
-        None,
-    )
-    .map_err(|e| match e {
-        Break::Error(err) => sig(format!("exarch agent library: {}", err.message)),
-        other @ Break::Escape(_) => other,
-    })?;
+    let result =
+        ral_core::load::evaluate_source(mooring, shell, AGENT_SOURCE, "<exarch:agent>", None)
+            .map_err(|e| match e {
+                Break::Error(err) => sig(format!("exarch agent library: {}", err.message)),
+                other @ Break::Escape(_) => other,
+            })?;
     shell.install_library_docs(agent_library_docs());
     Ok(result)
 }
@@ -82,7 +76,7 @@ pub(crate) fn agent_library_docs() -> Vec<(String, String)> {
     [
         ("view-text-around", "view-text-around PATH LINE PEEK  — show the 2*PEEK+1 lines of PATH centred on LINE, in `view-text`'s records, clamped at the top of the file."),
         ("view-hash-around", "view-hash-around PATH LINE PEEK  — the same window in `view-hash`'s records, each carrying its witness."),
-        ("exarch-tasks", "exarch-tasks <tag>  — your task list: `add a task, `remove one, `clear the whole list, `list to read it; `status`, `tag`, `untag`, `note`, and `retag` edit one task by id; `save`/`load` file it as JSON. Every tag answers the task list after the change, one record per task — id, desc, status, tags, notes — even `list, which changes nothing. A `status` this family does not recognise draws a warning and leaves the list unchanged rather than failing the call.\n\nexarch-tasks `add <desc>  — allocate a fresh id and append a task with status `open.\nexarch-tasks `remove <id>  — drop a task by id.\nexarch-tasks `clear  — empty the task list.\nexarch-tasks `list  — read the task list; changes nothing.\nexarch-tasks `status [id: <Int>, status: `open|`doing|`blocked|`done]  — change a task's status.\nexarch-tasks `tag [id: <Int>, tag: <Str>]  — add a tag to a task.\nexarch-tasks `untag [id: <Int>, tag: <Str>]  — remove a tag from a task.\nexarch-tasks `note [id: <Int>, note: <Str>]  — set a task's notes.\nexarch-tasks `retag [id: <Int>, tags: [<Str>]]  — replace all of a task's tags.\nexarch-tasks `save <path>  — write the task list to PATH as JSON.\nexarch-tasks `load <path>  — read a task list from PATH as JSON, replacing the current one."),
+        ("exarch-tasks", "exarch-tasks <tag>  — your task list: `add a task, `remove one, `clear the whole list, `list to read it; `status`, `tag`, `untag`, `note`, and `retag` edit one task by id; `save`/`load` file it as JSON. Every tag answers the task list after the change, one record per task (id, desc, status, tags, notes), even `list, which changes nothing. A `status` this family does not recognise draws a warning and leaves the list unchanged rather than failing the call.\n\nexarch-tasks `add <desc>  — allocate a fresh id and append a task with status `open.\nexarch-tasks `remove <id>  — drop a task by id.\nexarch-tasks `clear  — empty the task list.\nexarch-tasks `list  — read the task list; changes nothing.\nexarch-tasks `status [id: <Int>, status: `open|`doing|`blocked|`done]  — change a task's status.\nexarch-tasks `tag [id: <Int>, tag: <Str>]  — add a tag to a task.\nexarch-tasks `untag [id: <Int>, tag: <Str>]  — remove a tag from a task.\nexarch-tasks `note [id: <Int>, note: <Str>]  — set a task's notes.\nexarch-tasks `retag [id: <Int>, tags: [<Str>]]  — replace all of a task's tags.\nexarch-tasks `save <path>  — write the task list to PATH as JSON.\nexarch-tasks `load <path>  — read a task list from PATH as JSON, replacing the current one."),
         ("exarch-goal", "exarch-goal <tag>  — the one goal statement you keep in view: `set <text>` writes it, `clear` empties it."),
     ]
     .into_iter()
@@ -194,7 +188,7 @@ fn window_hashes(rows: &[String]) -> Vec<String> {
 }
 
 /// Split on raw `\n`, keeping the empty tail a terminal newline leaves, so
-/// `join("\n")` reproduces the body byte for byte — what lets a file's trailing
+/// `join("\n")` reproduces the body byte for byte: what lets a file's trailing
 /// newline survive an edit, where the edge-trimming `lines` would eat it.
 fn rows_of(body: &str) -> Vec<String> {
     body.split('\n').map(str::to_string).collect()
@@ -203,16 +197,10 @@ fn rows_of(body: &str) -> Vec<String> {
 /// Raise the one read observation for a whole-file read: the readers read in
 /// Rust below the ral line, so no redirect frame speaks for them.
 fn surface_read(shell: &Shell, mooring: &Mooring, path: &str) {
-    mooring.surface_data(
-        &Observation::instant(
-            shell.call_site(),
-            shell.principal(),
-            Observed::Read {
-                path: path.to_string(),
-            },
-        )
-        .to_surface(),
-    );
+    let read = Observed::Read(Read {
+        path: path.to_string(),
+    });
+    mooring.surface_data(&shell.observation(read).to_surface());
 }
 
 fn view_bound(arg: &Value, which: &str, tool: &str) -> Settled<usize> {
@@ -242,7 +230,7 @@ fn view_range(
     shell: &mut Shell,
     tool: &str,
 ) -> Settled<(Vec<String>, std::ops::Range<usize>)> {
-    let path = as_str(&args[0], tool)?;
+    let path = args[0].as_str(tool)?;
     let start = view_bound(&args[1], "start", tool)?;
     let end = view_bound(&args[2], "end", tool)?;
     if end <= start {
@@ -306,7 +294,7 @@ fn builtin_view_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
 
 /// The one sanctioned `WalkBuilder::build` site, backed by a clippy ban: an
 /// `ignore::Walk` runs to completion regardless of cancellation, so every caller
-/// must poll [`ral_core::process::check`] atop each iteration to surface a
+/// must poll [`Mooring::check`] atop each iteration to surface a
 /// timeout or Esc as a cancellation `Break` before the next entry.
 #[allow(
     clippy::disallowed_methods,
@@ -346,7 +334,7 @@ fn search_tree(mooring: &Mooring, shell: &mut Shell, pattern: &str) -> Settled<V
 
     let mut results = Vec::new();
     for raw in cancellable(WalkBuilder::new(&root).git_global(false)) {
-        ral_core::process::check(mooring)?;
+        mooring.check()?;
         let entry = match raw {
             Ok(e) if e.file_type().is_some_and(|ft| ft.is_file()) => e,
             _ => continue,
@@ -389,19 +377,13 @@ fn search_tree(mooring: &Mooring, shell: &mut Shell, pattern: &str) -> Settled<V
 /// `grep-files PATTERN` — [`search_tree`] over the cwd, emitting exactly one
 /// `grep` surface for the whole walk rather than a card per file read.
 fn builtin_grep_files(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    let pattern = as_str(&args[0], "grep-files")?;
+    let pattern = args[0].as_str("grep-files")?;
 
-    mooring.surface_data(
-        &Observation::instant(
-            shell.call_site(),
-            shell.principal(),
-            Observed::Grep {
-                scope: ".".to_string(),
-                pattern: pattern.to_string(),
-            },
-        )
-        .to_surface(),
-    );
+    let grep = Observed::Grep(Grep {
+        scope: ".".to_string(),
+        pattern: pattern.to_string(),
+    });
+    mooring.surface_data(&shell.observation(grep).to_surface());
 
     let results = search_tree(mooring, shell, pattern)?
         .into_iter()
@@ -463,7 +445,7 @@ fn note_edit(shell: &mut Shell, path: &str, lines: &str, plural: bool, any_escap
 /// the redirect frame, which observes nothing. So `edit-hash` owns its surface
 /// entirely, and speaks it as one whole-file diff card ([`surface_edit`]).
 fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    let path = as_str(&args[0], "edit-hash")?;
+    let path = args[0].as_str("edit-hash")?;
     let edits = match &args[1] {
         Value::List(items) => items,
         other => {
@@ -475,7 +457,7 @@ fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
     };
     if edits.is_empty() {
         return Err(sig(
-            "edit-hash: no edits given — pass a list of [hash: …, line: …] records.".to_string(),
+            "edit-hash: no edits given; pass a list of [hash: …, line: …] records.".to_string(),
         ));
     }
 
@@ -499,19 +481,19 @@ fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
             }
         };
         let want = match m.get("hash").map(std::borrow::Cow::into_owned) {
-            Some(v) => as_str(&v, "edit-hash")?.to_string(),
+            Some(v) => v.as_str("edit-hash")?.to_string(),
             None => {
                 return Err(sig(
-                    "edit-hash: each edit needs a `hash` field — the witness from view-hash/view-hash-around."
+                    "edit-hash: each edit needs a `hash` field; the witness from view-hash/view-hash-around."
                         .to_string(),
                 ));
             }
         };
         let new = match m.get("line").map(std::borrow::Cow::into_owned) {
-            Some(v) => as_str(&v, "edit-hash")?.to_string(),
+            Some(v) => v.as_str("edit-hash")?.to_string(),
             None => {
                 return Err(sig(
-                    "edit-hash: each edit needs a `line` field — the replacement text.".to_string(),
+                    "edit-hash: each edit needs a `line` field; the replacement text.".to_string(),
                 ));
             }
         };
@@ -519,7 +501,7 @@ fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
         match idxs.len() {
             0 => {
                 return Err(sig(format!(
-                    "edit-hash: no line in {path} hashes to {want} — did the file change? Re-read with view-hash/view-hash-around before editing."
+                    "edit-hash: no line in {path} hashes to {want}; did the file change? Re-read with view-hash/view-hash-around before editing."
                 )));
             }
             1 => resolved.push(ResolvedEdit { at: idxs[0], new }),
@@ -527,7 +509,7 @@ fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
                 let at: Vec<String> = idxs.iter().map(|i| (i + 1).to_string()).collect();
                 let r#where = at.join(", ");
                 return Err(sig(format!(
-                    "edit-hash: hash {want} matches lines {where} in {path} — re-read; the witness has gone stale."
+                    "edit-hash: hash {want} matches lines {where} in {path}; re-read; the witness has gone stale."
                 )));
             }
         }
@@ -592,7 +574,7 @@ fn read_text_file(shell: &mut Shell, path: &str, tool: &str) -> Settled<String> 
     let mut file = located.read().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             sig(format!(
-                "{tool}: {path} does not exist — {tool} never creates a file; \
+                "{tool}: {path} does not exist; {tool} never creates a file; \
                  `to-string BODY > path` writes a new one."
             ))
         } else {
@@ -604,7 +586,7 @@ fn read_text_file(shell: &mut Shell, path: &str, tool: &str) -> Settled<String> 
         .map_err(|e| sig(format!("{tool}: cannot read {path}: {e}")))?;
     String::from_utf8(bytes).map_err(|_| {
         sig(format!(
-            "{tool}: '{path}' is not valid UTF-8 — these tools read and edit text only."
+            "{tool}: '{path}' is not valid UTF-8; these tools read and edit text only."
         ))
     })
 }
@@ -614,9 +596,9 @@ fn read_text_file(shell: &mut Shell, path: &str, tool: &str) -> Settled<String> 
 /// doors as `edit-hash`: a silent read, then [`Shell::atomic_write`], surfacing
 /// one whole-file diff.
 fn builtin_edit_replace(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    let path = as_str(&args[0], "edit-replace")?;
-    let from = as_str(&args[1], "edit-replace")?;
-    let to = as_str(&args[2], "edit-replace")?;
+    let path = args[0].as_str("edit-replace")?;
+    let from = args[1].as_str("edit-replace")?;
+    let to = args[2].as_str("edit-replace")?;
     if from.is_empty() {
         return Err(sig("edit-replace: FROM must be non-empty."));
     }
@@ -670,31 +652,31 @@ fn no_unique_match(body: &str, from: &str, path: &str, starts: &[usize]) -> Brea
             }
         }
         return sig(format!(
-            "edit-replace: FROM matches {} times in {path}, on line{} {} — must match exactly \
+            "edit-replace: FROM matches {} times in {path}, on {}: {}; must match exactly \
              once. Widen FROM with a neighbouring line to make it unique, or change every \
              occurrence by composing string-replace / re-replace-all over from-string and \
              to-string.",
             starts.len(),
-            if lines.len() == 1 { "" } else { "s" },
+            ral_core::text::plural(lines.len(), "line"),
             lines.join(", ")
         ));
     }
     if has_suspicious_escapes(from) {
         return sig(format!(
             "edit-replace: FROM was not found in {path}, and FROM carries a literal backslash \
-             escape — ral strings are verbatim, so \\n is a backslash and an n. Write real \
+             escape: ral strings are verbatim, so \\n is a backslash and an n. Write real \
              newlines inside a raw #'…'# string."
         ));
     }
     if let Some(line) = unindented_match(body, from) {
         return sig(format!(
             "edit-replace: FROM was not found in {path}, but line {line} matches it apart from \
-             leading whitespace — copy the exact text, indentation included, from \
+             leading whitespace: copy the exact text, indentation included, from \
              view-text-around."
         ));
     }
     sig(format!(
-        "edit-replace: FROM was not found in {path} — is the file already what you intended? \
+        "edit-replace: FROM was not found in {path}; is the file already what you intended? \
          Re-read it with view-text-around before editing."
     ))
 }
@@ -745,7 +727,7 @@ fn builtin_explore_dir(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> 
     let mut results = Vec::new();
 
     for result in walker {
-        ral_core::process::check(mooring)?;
+        mooring.check()?;
         match result {
             Ok(entry) => {
                 if entry.depth() == 0 {
@@ -779,11 +761,11 @@ fn scheme_grep_files(_u: &mut Unifier) -> Scheme {
         &[],
         thunk(fun(
             Ty::String,
-            pure(Ty::List(Box::new(closed_record(&[
+            pure(Ty::list(closed_record(&[
                 ("file", Ty::String),
                 ("line", Ty::Int),
                 ("text", Ty::String),
-            ])))),
+            ]))),
         )),
     )
 }
@@ -809,10 +791,7 @@ fn scheme_view_range(row: &[(&str, Ty)]) -> Scheme {
         &[],
         thunk(fun(
             Ty::String,
-            fun(
-                Ty::Int,
-                fun(Ty::Int, pure(Ty::List(Box::new(closed_record(row))))),
-            ),
+            fun(Ty::Int, fun(Ty::Int, pure(Ty::list(closed_record(row))))),
         )),
     )
 }
@@ -825,10 +804,7 @@ fn scheme_edit_hash(_u: &mut Unifier) -> Scheme {
         thunk(fun(
             Ty::String,
             fun(
-                Ty::List(Box::new(closed_record(&[
-                    ("hash", Ty::String),
-                    ("line", Ty::String),
-                ]))),
+                Ty::list(closed_record(&[("hash", Ty::String), ("line", Ty::String)])),
                 pure(Ty::Unit),
             ),
         )),
@@ -850,7 +826,7 @@ const DEFAULT_LIMIT: usize = 50;
 
 /// `fff QUERY` — frecency-ranked fuzzy file-name search over the working tree.
 fn builtin_fff(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    let query = as_str(&args[0], "fff")?;
+    let query = args[0].as_str("fff")?;
     let cwd = checked_read_path(shell, ".")?;
     let idx = fff_index::index_for(&cwd).map_err(sig)?;
     let paths = fff_index::search_paths(idx, query, DEFAULT_LIMIT).map_err(sig)?;
@@ -863,18 +839,10 @@ fn builtin_fff(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled
 }
 
 fn scheme_explore_dir(_u: &mut Unifier) -> Scheme {
-    scheme(
-        &[],
-        &[],
-        thunk(fun(Ty::Int, pure(Ty::List(Box::new(Ty::String))))),
-    )
+    scheme(&[], &[], thunk(fun(Ty::Int, pure(Ty::list(Ty::String)))))
 }
 fn scheme_fff(_u: &mut Unifier) -> Scheme {
-    scheme(
-        &[],
-        &[],
-        thunk(fun(Ty::String, pure(Ty::List(Box::new(Ty::String))))),
-    )
+    scheme(&[], &[], thunk(fun(Ty::String, pure(Ty::list(Ty::String)))))
 }
 
 fn scheme_skill(_u: &mut Unifier) -> Scheme {
@@ -888,13 +856,13 @@ fn scheme_skill(_u: &mut Unifier) -> Scheme {
     reason = "installed as a `BuiltinBody::Static` fn pointer, whose signature fixes the `Settled` return; a skill that cannot be read answers with a message rather than raising."
 )]
 fn builtin_skill(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    let name = as_str(&args[0], "skill")?;
+    let name = args[0].as_str("skill")?;
     // Rejecting it here is what keeps `root.join(&name)` inside the skills root.
     if !skill::valid_skill_name(name) {
         return Settled::Ok(Value::string(format!("skill not found: {name}")));
     }
     let cwd = shell.cwd();
-    let config_dir = crate::bootstrap::EXARCH.xdg_dir(ral_core::path::basedir::XdgKind::Config);
+    let config_dir = crate::bootstrap::EXARCH.xdg_dir(ral_core::host::XdgKind::Config);
     for root in skill::skill_roots(&cwd, &config_dir) {
         let dir = root.join(name);
         let sk_md = dir.join("SKILL.md");
@@ -943,7 +911,7 @@ fn scheme_skill_list(_u: &mut Unifier) -> Scheme {
 )]
 fn builtin_skill_list(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let cwd = shell.cwd();
-    let config_dir = crate::bootstrap::EXARCH.xdg_dir(ral_core::path::basedir::XdgKind::Config);
+    let config_dir = crate::bootstrap::EXARCH.xdg_dir(ral_core::host::XdgKind::Config);
     let all = skill::discover_all(&cwd, &config_dir);
     let mut out = String::new();
     for (name, dir) in &all {
@@ -1014,7 +982,7 @@ fn builtin_service_handle(
             Ok(Value::Handle(Box::new(handle)))
         }
         _ => Err(sig(format!(
-            "service-handle: no durable service registered with id {} — an ephemeral \
+            "service-handle: no durable service registered with id {}; an ephemeral \
              spawn/watch worker is not reacquired by id, only by the binding that named it",
             id.0
         ))),
@@ -1051,13 +1019,13 @@ static EXARCH_BUILTINS_ARR: [BuiltinEntry; 11] = [
     BuiltinEntry::new(
         Cow::Borrowed("edit-hash"),
         scheme_edit_hash,
-        "edit-hash <path> <edits>  — apply a batch of [hash: HASH, line: TEXT] records in one read/write pass: each replaces the line whose witness is HASH with TEXT verbatim (a real newline inside '…' splits the line into several, \\n does not; empty deletes). Atomic — all hashes resolve against the file as read, so edits never interfere; fails writing nothing unless every hash picks exactly one line and no two records name the same one.",
+        "edit-hash <path> <edits>  — apply a batch of [hash: HASH, line: TEXT] records in one read/write pass: each replaces the line whose witness is HASH with TEXT verbatim (a real newline inside '…' splits the line into several, \\n does not; empty deletes). Atomic; all hashes resolve against the file as read, so edits never interfere; fails writing nothing unless every hash picks exactly one line and no two records name the same one.",
         BuiltinBody::Static(builtin_edit_hash),
     ),
     BuiltinEntry::new(
         Cow::Borrowed("edit-replace"),
         scheme_edit_replace,
-        "edit-replace <path> <from> <to>  — read PATH, replace the one literal occurrence of FROM with TO, write the result back; errors leaving the file untouched on zero or several matches, naming the count and the lines. FROM and TO are verbatim: \\n is a backslash and an n, so write real newlines inside a raw #'…'# string, which may span lines — so may FROM. It never creates a file (`to-string BODY > path` does). For a target that repeats, compose string-replace / re-replace-all over from-string and to-string instead.",
+        "edit-replace <path> <from> <to>  — read PATH, replace the one literal occurrence of FROM with TO, write the result back; errors leaving the file untouched on zero or several matches, naming the count and the lines. FROM and TO are verbatim: \\n is a backslash and an n, so write real newlines inside a raw #'…'# string, which may span lines; so may FROM. It never creates a file (`to-string BODY > path` does). For a target that repeats, compose string-replace / re-replace-all over from-string and to-string instead.",
         BuiltinBody::Static(builtin_edit_replace),
     ),
     BuiltinEntry::new(
@@ -1110,7 +1078,7 @@ mod tests {
 
     fn status(b: Break) -> i32 {
         match b {
-            Break::Error(e) => e.exit_code(),
+            Break::Error(e) => e.code(),
             other @ Break::Escape(_) => panic!("expected Break::Error, got {other:?}"),
         }
     }
@@ -1198,9 +1166,9 @@ mod tests {
     /// before any filesystem entry is touched.
     #[test]
     fn search_files_honours_a_cancelled_scope() {
-        let mut shell = Shell::new(ral_core::io::TerminalState::default());
+        let mut shell = ral_core::test_helper::core_shell();
         let m = Mooring::adrift();
-        m.cancel.cancel(ral_core::process::CancelCause::Interrupt);
+        m.cancel.cancel(ral_core::process::CancelCause::Interrupted);
         let err = builtin_grep_files(&[Value::string("x")], &m, &mut shell)
             .expect_err("a cancelled scope must abort the search walk");
         assert_eq!(status(err), 130);
@@ -1208,9 +1176,9 @@ mod tests {
 
     #[test]
     fn explore_dir_honours_a_cancelled_scope() {
-        let mut shell = Shell::new(ral_core::io::TerminalState::default());
+        let mut shell = ral_core::test_helper::core_shell();
         let m = Mooring::adrift();
-        m.cancel.cancel(ral_core::process::CancelCause::Interrupt);
+        m.cancel.cancel(ral_core::process::CancelCause::Interrupted);
         let err = builtin_explore_dir(&[Value::Int(3)], &m, &mut shell)
             .expect_err("a cancelled scope must abort the directory walk");
         assert_eq!(status(err), 130);
@@ -1223,7 +1191,7 @@ mod tests {
         ral_core::test_access::site_of(&Ty::Handle(Box::new(Ty::Int)))
     }
 
-    /// A worker body that blocks until cancelled, polling `process::check` so the
+    /// A worker body that blocks until cancelled, polling `Mooring::check` so the
     /// thread genuinely stays `Running` rather than settling instantly.  Named
     /// apart from `test-clear-block-forever` in `exarch/src/agent/testkit.rs` so
     /// registering both in one test binary cannot collide.
@@ -1233,7 +1201,7 @@ mod tests {
         _shell: &mut Shell,
     ) -> Settled<Value> {
         loop {
-            ral_core::process::check(mooring)?;
+            mooring.check()?;
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
     }
@@ -1253,26 +1221,10 @@ mod tests {
     /// Run `src` as one top-level run, deliberately without a deferred lease so
     /// nothing races a reap mid-test.  Panics on any failure.
     fn run_top_level(shell: &mut Shell, src: &str) {
-        use ral_core::protocol::{Program, Run};
-        use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
-        let req = RunRequest {
-            run: Run {
-                program: Program::Source(src.to_string()),
-                script_name: "<test>".to_string(),
-                caps: ral_core::types::GrantStack::root(),
-                wall: None,
-                deferred_lease: None,
-                worker_cap: None,
-                io: RunIo::Capture,
-                terminal: RequestedTerminalAccess::Denied,
-                stdin: RunStdin::Empty,
-                trail: None,
-            },
-            surface: None,
-            deferred: None,
-            desk: None,
-            fork: None,
-        };
+        use ral_core::protocol::Run;
+
+        use ral_core::run::{RunReport, RunRequest};
+        let req = RunRequest::from(Run::captured(src, "<test>"));
         match shell.run(req) {
             RunReport::Ran { ending, .. } => {
                 ending
@@ -1289,9 +1241,9 @@ mod tests {
     /// `service_is_external_on_a_bare_core_table` in `core/tests/typecheck.rs`.
     #[test]
     fn service_typechecks_on_an_exarch_dressed_shell() {
-        let mut shell = Shell::new(ral_core::io::TerminalState::default());
+        let mut shell = ral_core::test_helper::core_shell();
         dress(&mut shell);
-        match ral_core::compile_and_typecheck(
+        match ral_core::compile::compile_and_typecheck(
             r#"let h = service "birth" { return 1 }; cancel $h"#,
             shell.session_schemes(),
             ral_core::source::FileId::DUMMY,
@@ -1299,8 +1251,10 @@ mod tests {
             None,
         ) {
             Ok(_) => {}
-            Err(ral_core::CompileError::Parse(e)) => panic!("expected a clean parse, got: {e}"),
-            Err(ral_core::CompileError::Types(errs)) => panic!(
+            Err(ral_core::compile::CompileError::Parse(e)) => {
+                panic!("expected a clean parse, got: {e}")
+            }
+            Err(ral_core::compile::CompileError::Types(errs)) => panic!(
                 "expected `service`'s Handle to satisfy `cancel` on an exarch-dressed shell, got: {:?}",
                 errs.iter()
                     .map(|e| e.kind.render_message())
@@ -1313,10 +1267,10 @@ mod tests {
     /// refused where it is written, and data of any shape is not.
     #[test]
     fn a_family_door_refuses_a_block_in_its_argument_statically() {
-        let mut shell = Shell::new(ral_core::io::TerminalState::default());
+        let mut shell = ral_core::test_helper::core_shell();
         dress(&mut shell);
         let codes = |src: &str| -> Vec<&'static str> {
-            match ral_core::compile_and_typecheck(
+            match ral_core::compile::compile_and_typecheck(
                 src,
                 shell.session_schemes(),
                 ral_core::source::FileId::DUMMY,
@@ -1324,8 +1278,10 @@ mod tests {
                 None,
             ) {
                 Ok(_) => Vec::new(),
-                Err(ral_core::CompileError::Parse(e)) => panic!("{src:?} must parse, got: {e}"),
-                Err(ral_core::CompileError::Types(errs)) => {
+                Err(ral_core::compile::CompileError::Parse(e)) => {
+                    panic!("{src:?} must parse, got: {e}")
+                }
+                Err(ral_core::compile::CompileError::Types(errs)) => {
                     errs.iter().map(|e| e.kind.code()).collect()
                 }
             }
@@ -1350,9 +1306,9 @@ mod tests {
     /// fails the first, an under-generalised one the second.
     #[test]
     fn service_handle_typechecks_under_its_documented_eliminators() {
-        let mut shell = Shell::new(ral_core::io::TerminalState::default());
+        let mut shell = ral_core::test_helper::core_shell();
         dress(&mut shell);
-        match ral_core::compile_and_typecheck(
+        match ral_core::compile::compile_and_typecheck(
             "let a = await !{service-handle 3}\n\
              let n = $[$a[value] + 1]\n\
              let b = await !{service-handle 4}\n\
@@ -1364,8 +1320,10 @@ mod tests {
             None,
         ) {
             Ok(_) => {}
-            Err(ral_core::CompileError::Parse(e)) => panic!("expected a clean parse, got: {e}"),
-            Err(ral_core::CompileError::Types(errs)) => panic!(
+            Err(ral_core::compile::CompileError::Parse(e)) => {
+                panic!("expected a clean parse, got: {e}")
+            }
+            Err(ral_core::compile::CompileError::Types(errs)) => panic!(
                 "`service-handle`'s ∀α Handle must instantiate per call site, got: {:?}",
                 errs.iter()
                     .map(|e| e.kind.render_message())
@@ -1376,7 +1334,7 @@ mod tests {
 
     #[test]
     fn service_registers_as_durable_with_its_description() {
-        let mut shell = Shell::new(ral_core::io::TerminalState::default());
+        let mut shell = ral_core::test_helper::core_shell();
         dress(&mut shell);
         shell.install_builtins(WORKER_TEST_BUILTINS);
         run_top_level(
@@ -1392,7 +1350,7 @@ mod tests {
         entries[0]
             .handle
             .cancel
-            .cancel(ral_core::process::CancelCause::Explicit);
+            .cancel(ral_core::process::CancelCause::Cancelled);
     }
 
     /// The whole rediscovery idiom: birth a service without keeping its binding,
@@ -1400,7 +1358,7 @@ mod tests {
     /// binding that named it.
     #[test]
     fn service_handle_reacquires_a_durable_service_and_await_round_trips() {
-        let mut shell = Shell::new(ral_core::io::TerminalState::default());
+        let mut shell = ral_core::test_helper::core_shell();
         dress(&mut shell);
         run_top_level(&mut shell, r#"service "answer" { 42 }"#);
 
@@ -1435,7 +1393,7 @@ mod tests {
     /// resolves it as it would a running one.
     #[test]
     fn service_handle_reacquires_a_settled_but_unclaimed_service() {
-        let mut shell = Shell::new(ral_core::io::TerminalState::default());
+        let mut shell = ral_core::test_helper::core_shell();
         dress(&mut shell);
         run_top_level(&mut shell, r#"service "answer" { 42 }"#);
 
@@ -1482,7 +1440,7 @@ mod tests {
 
     #[test]
     fn service_handle_errors_on_an_unknown_id() {
-        let mut shell = Shell::new(ral_core::io::TerminalState::default());
+        let mut shell = ral_core::test_helper::core_shell();
         dress(&mut shell);
         let err = match builtin_service_handle(
             &[Value::Int(999_999)],
@@ -1500,7 +1458,7 @@ mod tests {
     /// rediscovering an ordinary worker is the binding-lease ledger's job.
     #[test]
     fn service_handle_refuses_an_ephemeral_worker_id() {
-        let mut shell = Shell::new(ral_core::io::TerminalState::default());
+        let mut shell = ral_core::test_helper::core_shell();
         dress(&mut shell);
         shell.install_builtins(WORKER_TEST_BUILTINS);
         run_top_level(&mut shell, "spawn { test-block-forever }");
@@ -1527,7 +1485,7 @@ mod tests {
         entry
             .handle
             .cancel
-            .cancel(ral_core::process::CancelCause::Explicit);
+            .cancel(ral_core::process::CancelCause::Cancelled);
     }
 
     /// `service-handle` is exarch's own affordance, never core's — so the REPL,
@@ -1537,13 +1495,13 @@ mod tests {
         assert!(
             EXARCH_BUILTINS
                 .iter()
-                .any(|e| e.name.as_ref() == "service-handle"),
+                .any(|e| e.decl.name.as_ref() == "service-handle"),
             "service-handle must be registered in EXARCH_BUILTINS"
         );
         assert!(
             !ral_core::builtins::CORE_BUILTINS
                 .iter()
-                .any(|e| e.name.as_ref() == "service-handle"),
+                .any(|e| e.decl.name.as_ref() == "service-handle"),
             "service-handle must never be a core builtin"
         );
     }
@@ -1553,7 +1511,7 @@ mod tests {
     /// decides about the answer is not what another decides.
     #[test]
     fn service_handle_twice_on_one_worker_admits_at_each_site() {
-        let mut shell = Shell::new(ral_core::io::TerminalState::default());
+        let mut shell = ral_core::test_helper::core_shell();
         dress(&mut shell);
         run_top_level(&mut shell, r#"service "answer" { 42 }"#);
         let entry = shell.workers().pop().expect("the service registered");
@@ -1600,16 +1558,16 @@ mod tests {
         for entry in EXARCH_BUILTINS.iter().chain(harness::HARNESS_BUILTINS) {
             let scheme = ral_core::test_access::builtin_scheme(entry, &mut Unifier::new());
             assert!(
-                !ral_core::test_access::has_result_only_var(&scheme) || entry.is_boundary(),
+                !ral_core::test_access::has_result_only_var(&scheme) || entry.decl.is_boundary(),
                 "{}: a result only its own call determines, and it is no boundary",
-                entry.name
+                entry.decl.name
             );
         }
         let boundaries: Vec<&str> = EXARCH_BUILTINS
             .iter()
             .chain(harness::HARNESS_BUILTINS)
-            .filter(|entry| entry.is_boundary())
-            .map(|entry| entry.name.as_ref())
+            .filter(|entry| entry.decl.is_boundary())
+            .map(|entry| entry.decl.name.as_ref())
             .collect();
         assert_eq!(
             boundaries,
@@ -1631,22 +1589,22 @@ mod tests {
         assert!(
             ral_core::builtins::SERVICE_BUILTIN
                 .iter()
-                .any(|e| e.name.as_ref() == "service"),
+                .any(|e| e.decl.name.as_ref() == "service"),
             "SERVICE_BUILTIN must carry the `service` entry"
         );
         assert!(
             !ral_core::builtins::CORE_BUILTINS
                 .iter()
-                .any(|e| e.name.as_ref() == "service"),
+                .any(|e| e.decl.name.as_ref() == "service"),
             "service must never be a core builtin"
         );
         assert!(
             !ral_core::builtins::WATCH_BUILTIN
                 .iter()
-                .any(|e| e.name.as_ref() == "service"),
+                .any(|e| e.decl.name.as_ref() == "service"),
             "the REPL's host surface (watch) must not smuggle service in"
         );
-        let mut shell = Shell::new(ral_core::io::TerminalState::default());
+        let mut shell = ral_core::test_helper::core_shell();
         assert!(
             shell.lookup_builtin("service").is_none(),
             "a bare shell (the REPL's baseline) must not dispatch service"
@@ -1664,7 +1622,7 @@ mod tests {
     /// installs it per boot instead, in the same act that arms its policy.
     #[test]
     fn detach_is_absent_from_the_host_surface() {
-        let mut shell = Shell::new(ral_core::io::TerminalState::default());
+        let mut shell = ral_core::test_helper::core_shell();
         dress(&mut shell);
         assert!(
             shell.lookup_builtin("detach").is_none(),
@@ -1706,7 +1664,7 @@ mod tests {
         let mut seat = crate::agent::seat::Seat::root(
             &crate::INSTALLERS,
             cwd,
-            ral_core::io::TerminalState::default(),
+            ral_core::terminal::TerminalState::default(),
             scratch,
             &dir,
         )
@@ -1714,7 +1672,7 @@ mod tests {
 
         seat.clear().expect("an identity root reboots");
         let names = seat
-            .read(ral_core::protocol::reading::builtin_names)
+            .read(|t| t.builtin_names())
             .expect("an identity seat never severs");
         assert!(
             names.iter().any(|n| n == "detach"),
@@ -1726,28 +1684,12 @@ mod tests {
     /// names the helpers on exactly the shells that have them.
     #[test]
     fn help_lists_a_library_section_only_on_a_shell_that_sourced_it() {
-        use ral_core::protocol::{Program, Run};
-        use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
+        use ral_core::protocol::Run;
+
+        use ral_core::run::{RunReport, RunRequest};
 
         let run_help = |shell: &mut Shell| -> String {
-            let req = RunRequest {
-                run: Run {
-                    program: Program::Source("help".to_string()),
-                    script_name: "<test>".to_string(),
-                    caps: ral_core::types::GrantStack::root(),
-                    wall: None,
-                    deferred_lease: None,
-                    worker_cap: None,
-                    io: RunIo::Capture,
-                    terminal: RequestedTerminalAccess::Denied,
-                    stdin: RunStdin::Empty,
-                    trail: None,
-                },
-                surface: None,
-                deferred: None,
-                desk: None,
-                fork: None,
-            };
+            let req = RunRequest::from(Run::captured("help", "<test>"));
             match shell.run(req) {
                 RunReport::Ran {
                     ending, captured, ..
@@ -1760,7 +1702,7 @@ mod tests {
             }
         };
 
-        let mut bare = Shell::new(ral_core::io::TerminalState::default());
+        let mut bare = ral_core::test_helper::core_shell();
         let bare_out = run_help(&mut bare);
         assert!(
             !bare_out.contains("Library:"),
@@ -1768,7 +1710,7 @@ mod tests {
         );
 
         let mut dressed = ral_core::boot::boot_shell(
-            ral_core::io::TerminalState::default(),
+            ral_core::terminal::TerminalState::default(),
             &crate::shell_eval::PRELUDE,
             &host_surface(),
         );

@@ -108,7 +108,7 @@ eval_turn(shell: &mut Shell, src: &str, frame: TurnFrame) -> TurnOutcome
     `Break::Escape` discriminant already classifies the outcome, so the host
     reads control flow off it directly. The one datum the host cannot otherwise
     recover is `single_command: bool` (from `ir::is_single_command(&comp)`),
-    needed to render a runtime error with `format_runtime_error_auto` since
+    needed to render a runtime error with `Error::render` since
     `comp` is consumed inside `eval_turn`. `eval_status` is computed once by the
     evaluator: `Ok` reads `shell.mobile.control.last_status`, runtime errors
     use their exit code, `exit N` uses `N`, and a stopped job uses

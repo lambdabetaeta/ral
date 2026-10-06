@@ -225,7 +225,7 @@ individual failures. A failing handler's error is logged as
 `plugin 'name': hook 'event' failed: <message>`.
 
 **`buffer-change`** receives
-`[old_buf: Str, line: Str, pos: Int, history: [Str], keymap: Str,
+`[old-buf: Str, line: Str, pos: Int, history: [Str], keymap: Str,
 state]`. Typical uses are highlighting and autosuggestion.
 
 **`pre-exec`** receives `[src: Str]`, the full command line as

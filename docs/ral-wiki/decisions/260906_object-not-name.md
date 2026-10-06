@@ -28,7 +28,7 @@ directory component swapped for a symlink between the two walks — by a
 concurrent sandboxed child, which may write in the same directory — was the
 same hole with a timer. And the write card's before-image was a *second* fs
 door that never consulted read authority, so a write-only grant leaked the
-old bytes into a script-readable `old_bytes`.
+old bytes into a script-readable `old-bytes`.
 
 **Decision.** One door. `Shell::locate(rp, op)` walks the name from the root
 through directory handles (`path/walk.rs`), never letting the kernel follow a
@@ -66,7 +66,7 @@ as a triple. `meet_literal_exec` chose to drop the one-sided key, and
 **Decision.** There is no `Capabilities::meet`. The `GrantStack` is the meet:
 every verdict folds the layers' answers to the concrete access, where the
 question *is* closed (`evaluate_exec`, `allow_region`, `deny_region`,
-`permits_detach`). Every composer pushes layers — `--capabilities a,b`,
+`permits(Flag)`). Every composer pushes layers — `--capabilities a,b`,
 exarch's `--restrict` files, the deny layers for restrict and credential
 files, the base a spawned child is narrowed to. The deputy lint folds the two
 prefix sets it compares, which are closed under `meet_prefixes`. `Join` stays

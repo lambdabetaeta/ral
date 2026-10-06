@@ -1,17 +1,18 @@
 //! Process-group lifecycle for a multi-stage pipeline, on every platform.
 //!
-//! An owning group spawns the anchor — `ral --ral-pipeline-anchor`, the one
+//! An owning group spawns the anchor — [`Role::Anchor`](crate::Role::Anchor), the one
 //! member outliving every stage, so the pgid stays joinable; a group joining
 //! an enclosing stage's pgid has no anchor.  The shell is not a member, so a
 //! signal the tty delivers to the group reaches it only as the anchor's
 //! [`Event::Heard`] — the kernel having already given that signal to every
 //! other member — which only the group's [`TerminalLoan`] reads as a key.
 
+use super::super::command;
 use super::collect::Event;
 #[cfg(unix)]
 use crate::process::CancelCause;
 use crate::process::{CancelScope, Group, Membership, Pgid, PgidPolicy, TerminalLoan};
-use crate::types::{Break, Mooring, Settled, Shell};
+use crate::types::{Error, Mooring, Settled, Shell, sig};
 use std::sync::mpsc::Sender;
 
 /// Pgid lifecycle for one pipeline: the anchor, finished before the fold or on
@@ -110,15 +111,11 @@ struct AnchorProcess {
     reporter: std::thread::JoinHandle<()>,
 }
 
-fn anchor_error(e: impl std::fmt::Display) -> Break {
-    Break::Error(crate::types::Error::new(format!("pipeline anchor: {e}"), 1))
-}
-
 /// The anchor's own death cancels the pipeline: nothing else in the group has
 /// heard of it.
 #[cfg(unix)]
 fn anchor_death(_: crate::process::WaitOutcome) -> Event {
-    Event::Cancelled(CancelCause::Terminate)
+    Event::Cancelled(CancelCause::Terminated)
 }
 
 impl AnchorProcess {
@@ -131,28 +128,32 @@ impl AnchorProcess {
     fn spawn(shell: &Shell, tx: Sender<Event>) -> Settled<Self> {
         #[cfg(windows)]
         let _ = tx;
-        let (reader, release) = crate::process::cloexec_pipe().map_err(anchor_error)?;
-        let mut cmd =
-            super::helper::self_reexec(super::helper::ANCHOR_FLAG).map_err(anchor_error)?;
+        let (reader, release) =
+            crate::process::cloexec_pipe().map_err(|e| Error::io("pipeline anchor", &e))?;
+        let mut cmd = crate::sandbox::reexec::launch(crate::Role::Anchor)
+            .map_err(|e| Error::io("pipeline anchor", &e))?;
         cmd.stdin(crate::process::StdioSpec::from_pipe_reader(reader));
         cmd.stderr(crate::process::StdioSpec::null());
         #[cfg(unix)]
         let report = {
-            let (report, writer) = crate::process::cloexec_pipe().map_err(anchor_error)?;
+            let (report, writer) =
+                crate::process::cloexec_pipe().map_err(|e| Error::io("pipeline anchor", &e))?;
             cmd.stdout(crate::process::StdioSpec::from_pipe_writer(writer));
             report
         };
         #[cfg(windows)]
         cmd.stdout(crate::process::StdioSpec::null());
-        let (mut child, leader, _jail) = cmd.spawn(PgidPolicy::NewLeader).map_err(anchor_error)?;
+        let (mut child, leader, _jail) = cmd
+            .spawn(PgidPolicy::NewLeader)
+            .map_err(|e| Error::io("pipeline anchor", &e))?;
         if shell.has_active_capabilities() {
-            crate::sandbox::apply_child_limits(&child);
+            command::brake(&mut child, PgidPolicy::NewLeader, leader)?;
         }
         let Some(pgid) = leader else {
             // `Child::drop` neither kills nor reaps.
             let _ = child.kill();
             let _ = child.reap();
-            return Err(anchor_error("failed to establish a process group"));
+            return Err(sig("pipeline anchor: failed to establish a process group"));
         };
         #[cfg(unix)]
         let (child, reporter) = {
@@ -160,7 +161,7 @@ impl AnchorProcess {
             let reporter = std::thread::Builder::new()
                 .name("ral pipeline anchor report reader".to_string())
                 .spawn(move || read_anchor_reports(report, &report_tx))
-                .map_err(anchor_error)?;
+                .map_err(|e| Error::io("pipeline anchor", &e))?;
             (child.into_watch(tx, anchor_death), reporter)
         };
         Ok(Self {
@@ -224,7 +225,7 @@ mod tests {
 
     #[test]
     fn prepare_yields_a_leader_on_every_platform() {
-        let group = prepared(&Shell::default());
+        let group = prepared(&crate::test_helper::core_shell());
         assert!(matches!(group.group(), Group::Owns(_)));
         assert!(group.leader_pgid().as_raw() > 0);
     }
@@ -233,7 +234,7 @@ mod tests {
     /// back its own membership whatever scope it is given.
     #[test]
     fn a_nested_stage_answers_to_the_outermost_owners_stage() {
-        let owner = prepared(&Shell::default());
+        let owner = prepared(&crate::test_helper::core_shell());
         let outer = CancelScope::root();
         let membership = owner.membership(&outer);
         assert_eq!(membership.group(), owner.leader_pgid());
@@ -244,14 +245,14 @@ mod tests {
         assert_eq!(nested.group(), owner.leader_pgid());
         #[cfg(unix)]
         {
-            outer.cancel(CancelCause::Interrupt);
+            outer.cancel(CancelCause::Interrupted);
             assert!(
-                !nested.owes(CancelCause::Interrupt),
+                !nested.owes(CancelCause::Interrupted),
                 "a nested stage's membership must read the outer stage's scope"
             );
-            inner.cancel(CancelCause::Deadline);
+            inner.cancel(CancelCause::TimedOut);
             assert!(
-                nested.owes(CancelCause::Deadline),
+                nested.owes(CancelCause::TimedOut),
                 "the inner scope must not stand in for the outer one"
             );
         }
@@ -260,7 +261,7 @@ mod tests {
     /// A default shell mints no terminal lease, so `lend` lends nothing.
     #[test]
     fn a_group_without_a_lease_lends_nothing() {
-        let shell = Shell::default();
+        let shell = crate::test_helper::core_shell();
         let group = prepared(&shell);
         assert!(group.lend(&shell, &Mooring::adrift()).is_none());
     }
@@ -268,11 +269,11 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn a_completed_group_releases_its_windows_job() {
-        let group = prepared(&Shell::default());
+        let group = prepared(&crate::test_helper::core_shell());
         let leader = group.leader_pgid().as_raw();
-        assert!(crate::process::is_known_group(leader));
+        assert!(crate::process::group::is_known_group(leader));
         drop(group);
-        assert!(!crate::process::is_known_group(leader));
+        assert!(!crate::process::group::is_known_group(leader));
     }
 
     #[cfg(unix)]
@@ -288,7 +289,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_signalled_anchor_reports_the_signal_and_lives_on() {
-        let shell = Shell::default();
+        let shell = crate::test_helper::core_shell();
         let (tx, rx) = std::sync::mpsc::channel();
         let group = PipelineGroup::prepare(&shell, tx).expect("anchor spawns");
         assert!(

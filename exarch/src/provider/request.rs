@@ -57,7 +57,7 @@ pub fn effort_by_label(label: &str) -> Result<Option<ReasoningEffort>, String> {
                 .map(|(candidate, _)| *candidate)
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("invalid effort '{label}' — expected one of: {valid}")
+            format!("invalid effort '{label}': expected one of: {valid}")
         })
 }
 

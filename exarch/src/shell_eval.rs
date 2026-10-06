@@ -16,7 +16,7 @@ use crate::bus::card::{Change, landing, value_to_card, value_to_done, value_to_e
 use crate::bus::{AgentId, Emitter, Stamp, Stamped};
 use base64::Engine;
 use ral_core::Value as RalValue;
-use ral_core::serial::FOValue;
+use ral_core::first_order::FOValue;
 use ral_core::types::{DeferredSink, Observation};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -105,7 +105,7 @@ pub enum Surface {
     /// What a write or an edit did to a file.
     Change(crate::bus::card::Change),
     Card(crate::bus::card::Card),
-    Notice(crate::bus::card::Notice),
+    Notice(ral_core::types::Notice),
     Done {
         cmd: String,
         outcome: crate::record::DoneOutcome,
@@ -157,7 +157,7 @@ pub fn decode_surface(ev: &FOValue) -> Decoded {
         }
     } else if let Some(change) = value_to_edit(ev) {
         Decoded::Surface(Surface::Change(change))
-    } else if let Some(notice) = crate::bus::card::value_to_notice(ev) {
+    } else if let Some(notice) = ral_core::types::Notice::from_surface(ev) {
         Decoded::Surface(Surface::Notice(notice))
     } else if let Some(card) = value_to_card(ev) {
         Decoded::Surface(Surface::Card(card))
@@ -223,23 +223,20 @@ pub(crate) fn deferred_sink(emit: &Emitter) -> Arc<dyn DeferredSink> {
 /// pin-less, desk-less [`crate::fleet::desk::SurfaceApplier`], every real
 /// caller a [`crate::fleet::desk::RunHost`].
 pub(crate) fn run_shell(
-    transport: &dyn ral_core::protocol::Transport,
-    caps: &ral_core::types::GrantStack,
+    transport: &dyn ral_core::carrier::Transport,
+    caps: &ral_core::capability::GrantStack,
     source: &str,
     cmd: &str,
     timeout_secs: u64,
-    host: Arc<dyn ral_core::protocol::Host>,
-) -> Result<ral_core::protocol::Report, ral_core::protocol::Severed> {
+    host: Arc<dyn ral_core::carrier::Host>,
+) -> Result<ral_core::protocol::Report, ral_core::carrier::Severed> {
     // Trace-only timing.
     #[cfg(debug_assertions)]
     let tool_start = std::time::Instant::now();
 
-    use ral_core::protocol::{Program, Run};
-    use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
+    use ral_core::protocol::Run;
 
     let run = Run {
-        program: Program::Source(cmd.to_string()),
-        script_name: source.to_string(),
         caps: caps.clone(),
         wall: Some(Duration::from_secs(timeout_secs)),
         deferred_lease: Some(ral_core::types::WorkerLease {
@@ -247,15 +244,10 @@ pub(crate) fn run_shell(
             backstop: DETACHED_WORKER_BACKSTOP,
         }),
         worker_cap: Some(LIVE_WORKER_CAP),
-        io: RunIo::Capture,
-        terminal: RequestedTerminalAccess::Denied,
-        stdin: RunStdin::Empty,
-        // No trail: the host hears every observation on the surface, and a
-        // trail would only hold a record per builtin call until the run ends.
-        trail: None,
+        ..Run::captured(cmd, source)
     };
 
-    let report = ral_core::protocol::dispatch_to_report(transport, run, host);
+    let report = ral_core::carrier::dispatch_to_report(transport, run, host);
     ral_core::dbg_trace!("shell", "eval in {:?}", tool_start.elapsed());
     report
 }
@@ -302,24 +294,14 @@ pub(crate) fn ral_value_to_text(value: &FOValue) -> Option<String> {
 /// headless `result`) reads — deliberately **not** [`FOValue`]'s own `serde`
 /// impl, which is the transport encoding (externally tagged, floats as
 /// IEEE-754 bits) and would hand the user a `{"string":{"value":…}}` wrapper
-/// where a bare JSON string was promised.  JSON has neither non-finite floats
-/// nor a byte type, so those cross as named strings and as base64.
+/// where a bare JSON string was promised.  JSON has no byte type, so bytes cross
+/// as base64.
 pub(crate) fn user_json(v: &FOValue) -> serde_json::Value {
     match v {
         FOValue::Unit => serde_json::Value::Null,
         FOValue::Bool { value } => serde_json::Value::Bool(*value),
         FOValue::Int { value } => serde_json::Value::Number((*value).into()),
-        FOValue::Float { value } if value.is_nan() => serde_json::Value::String("NaN".into()),
-        FOValue::Float { value } if value.is_infinite() => serde_json::Value::String(
-            if *value > 0.0 {
-                "Infinity"
-            } else {
-                "-Infinity"
-            }
-            .into(),
-        ),
-        FOValue::Float { value } => serde_json::Number::from_f64(*value)
-            .map_or(serde_json::Value::Null, serde_json::Value::Number),
+        FOValue::Float { value } => value.get().into(),
         FOValue::String { value } => serde_json::Value::String(value.clone()),
         FOValue::Bytes { value } => {
             serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(value))
@@ -371,9 +353,15 @@ mod tests {
     use crate::bus::card::Row;
     use crate::bus::{Emitter, Inbox, channel};
     use crate::shell_eval::builtins;
-    use ral_core::protocol::IdentityTransport;
+    use ral_core::capability::Capabilities;
+    use ral_core::carrier::IdentityTransport;
+    use ral_core::fact::Read;
+    use ral_core::first_order::datum::Datum as _;
     use ral_core::types::WriteOutcome;
-    use ral_core::types::{CallSite, Capabilities, Observed};
+    use ral_core::types::{
+        CallSite, Done, DoneEvent, LeaseClass, Notice, Observed, Pruned, ReapCause, ReapNotice,
+        WorkerId,
+    };
 
     /// Render a path without a trailing separator.  Some hosts return
     /// `"/tmp/"` from `std::env::temp_dir()` while `Shell::cwd()` never
@@ -406,7 +394,7 @@ mod tests {
         let applier = Arc::new(crate::fleet::desk::SurfaceApplier::new(recorder.clone()));
         let outcome = run_shell(
             transport,
-            &ral_core::types::GrantStack::of(caps.clone()),
+            &ral_core::capability::GrantStack::of(caps.clone()),
             "turn 1",
             cmd,
             timeout_secs,
@@ -449,7 +437,7 @@ mod tests {
     #[cfg(unix)]
     fn projecting_caps() -> Capabilities {
         Capabilities {
-            fs: Some(ral_core::types::FsPolicy {
+            fs: Some(ral_core::capability::FsPolicy {
                 read_prefixes: vec![ral_core::path::FrozenPath::root()],
                 write_prefixes: vec![ral_core::path::FrozenPath::root()],
                 deny_paths: Vec::new(),
@@ -482,7 +470,7 @@ mod tests {
 
         let walk = |denied: &str| -> String {
             let caps = Capabilities {
-                fs: Some(ral_core::types::FsPolicy {
+                fs: Some(ral_core::capability::FsPolicy {
                     read_prefixes: vec![ral_core::path::FrozenPath::root()],
                     write_prefixes: vec![ral_core::path::FrozenPath::root()],
                     deny_paths: vec![ral_core::path::FrozenPath::from_surface(tmp.join(denied))],
@@ -620,7 +608,7 @@ mod tests {
         // undefined name from ral elaborates to a type error and surfaces as
         // `Static`, the wrong shape for "simply absent".
         let bound = |name: &str| {
-            ral_core::protocol::reading::bindings(&engine)
+            ral_core::carrier::Transport::bindings(&engine)
                 .expect("an identity transport answers")
                 .iter()
                 .any(|row| row.name == name)
@@ -1011,7 +999,7 @@ keep-bottom
     /// `deliver` mints later.
     #[test]
     fn decode_surface_round_trips_each_class() {
-        use crate::bus::card::testkit::{card_value, int, list, map_value, s, variant};
+        use crate::bus::card::testkit::{card_value, s};
         assert!(matches!(
             decode_surface(
                 &Observation::instant(
@@ -1021,61 +1009,44 @@ keep-bottom
                         col: 1,
                     }),
                     Some("alex".into()),
-                    Observed::Read {
+                    Observed::Read(Read {
                         path: "a.rs".into()
-                    },
+                    }),
                 )
                 .to_surface()
             ),
             Decoded::Surface(Surface::Observation(_))
         ));
+        let reap = Notice::Reap(ReapNotice {
+            id: WorkerId(1),
+            cmd: "sleep 10".into(),
+            class: LeaseClass::Worker,
+            cause: ReapCause::Idle,
+        });
         assert!(matches!(
-            decode_surface(&variant(
-                "notice",
-                map_value(vec![
-                    (
-                        "kind",
-                        FOValue::Variant {
-                            label: "reap".into(),
-                            payload: None,
-                        },
-                    ),
-                    ("cmd", s("sleep 10")),
-                    ("cause", s("idle")),
-                ]),
-            )),
-            Decoded::Surface(Surface::Notice(crate::bus::card::Notice::Reap { .. }))
+            decode_surface(&reap.to_surface()),
+            Decoded::Surface(Surface::Notice(Notice::Reap(_)))
         ));
+        let prune = Notice::Prune(vec![Pruned {
+            name: "x".into(),
+            idle_calls: 256,
+            kind: "Int".into(),
+        }]);
         assert!(matches!(
-            decode_surface(&variant(
-                "notice",
-                map_value(vec![
-                    (
-                        "kind",
-                        FOValue::Variant {
-                            label: "prune".into(),
-                            payload: None,
-                        },
-                    ),
-                    ("names", list(vec![s("x")])),
-                    ("idle-calls", list(vec![int(256)])),
-                ]),
-            )),
-            Decoded::Surface(Surface::Notice(crate::bus::card::Notice::Prune { names, idle_calls }))
-                if names == ["x"] && idle_calls == [256]
+            decode_surface(&prune.to_surface()),
+            Decoded::Surface(Surface::Notice(Notice::Prune(pruned)))
+                if pruned.len() == 1 && pruned[0].idle_calls == 256
         ));
         assert!(matches!(
             decode_surface(&card_value(vec![])),
             Decoded::Surface(Surface::Card(_))
         ));
+        let done = DoneEvent {
+            cmd: "block at turn 1, line 1".into(),
+            outcome: Done::Ok,
+        };
         assert!(matches!(
-            decode_surface(&variant(
-                "done",
-                map_value(vec![
-                    ("cmd", s("block at turn 1, line 1")),
-                    ("outcome", variant("ok", FOValue::Unit)),
-                ]),
-            )),
+            decode_surface(&done.to_surface()),
             Decoded::Surface(Surface::Done {
                 cmd,
                 outcome: crate::record::DoneOutcome::Ok,
@@ -1101,7 +1072,7 @@ keep-bottom
         let emit = Emitter::with_mailbox(tx, agent.id, inbox.mailbox());
         let deferred = deferred_sink(&emit);
 
-        deferred.deliver(vec![ral_core::serial::FOValue::Unit]);
+        deferred.deliver(vec![ral_core::first_order::FOValue::Unit]);
         match inbox.next_item() {
             Some(crate::bus::Next::Item(crate::bus::Item::Surface { id, .. })) => {
                 assert_eq!(
@@ -1114,10 +1085,10 @@ keep-bottom
 
         // A `/clear` bumps this inbox past the sink's captured epoch.
         inbox.clear();
-        deferred.deliver(vec![ral_core::serial::FOValue::Unit]);
+        deferred.deliver(vec![ral_core::first_order::FOValue::Unit]);
         assert!(
             !inbox.is_empty(),
-            "the post-clear flush still posts — the sink neither checks nor withholds"
+            "the post-clear flush still posts: the sink neither checks nor withholds"
         );
         assert!(
             inbox.next_item().is_none(),
@@ -1268,7 +1239,7 @@ keep-bottom
         #[cfg(all(target_os = "linux", feature = "test-util"))]
         if !ral_core::sandbox::restricted_envelope_launches() {
             eprintln!(
-                "skip: this host cannot build a Restricted envelope — its /etc/hosts \
+                "skip: this host cannot build a Restricted envelope; its /etc/hosts \
                  and /etc/resolv.conf are locked mounts bwrap cannot rebind read-only"
             );
             return;
@@ -1352,7 +1323,7 @@ keep-bottom
     #[test]
     fn root_cancel_unwinds_inflight_run_shell() {
         let engine = fresh();
-        let control = ral_core::protocol::Transport::control(&engine).clone();
+        let control = ral_core::carrier::Transport::control(&engine).clone();
         let cmd = "/bin/sh -c 'sleep 30 & echo $!; wait'";
         let t0 = std::time::Instant::now();
         let r = std::thread::scope(|s| {
@@ -1652,7 +1623,7 @@ return !{{length $hits}}"
     /// `check_fs_read` is a prefix guard, not an existence test, so a root that
     /// simply lacks the skill passes the guard for a missing file. The loop must
     /// keep walking to later roots rather than reporting the first `ENOENT` as
-    /// "could not read" — otherwise a skill living only in the config root is
+    /// "could not read": otherwise a skill living only in the config root is
     /// shadowed by the empty local root.
     #[test]
     fn absent_skill_is_not_found_not_unreadable() {
@@ -1696,7 +1667,7 @@ return !{{length $hits}}"
             .iter()
             .filter_map(|r| match r {
                 crate::record::Record::Display(crate::record::Display::Observation { value }) => {
-                    Observation::from_wire(value).map(|o| o.what)
+                    Observation::decode(value).ok().map(|o| o.what)
                 }
                 _ => None,
             })
@@ -1772,7 +1743,7 @@ return !{{length $hits}}"
         );
         assert_eq!(
             obs[0],
-            Observed::Read { path },
+            Observed::Read(Read { path }),
             "the one observation is a read of the redirect path"
         );
     }
@@ -1864,13 +1835,14 @@ return !{{length $hits}}"
         );
         assert_eq!(
             obs[0],
-            Observed::Command {
-                argv: vec!["/usr/bin/true".into()],
-                status: 0,
-                origin: CommandOrigin::External,
-                io: AuditIo::default(),
-                error: None,
-            },
+            Observed::command(
+                "/usr/bin/true",
+                [],
+                0,
+                CommandOrigin::External,
+                AuditIo::default(),
+                None
+            ),
             "the one observation is a successful exec of the image"
         );
     }
@@ -1895,16 +1867,16 @@ return !{{length $hits}}"
         let obs = observations(&records);
         let reads = obs
             .iter()
-            .filter(|e| matches!(e, Observed::Read { .. }))
+            .filter(|e| matches!(e, Observed::Read(_)))
             .count();
         let execs = obs
             .iter()
-            .filter(|e| matches!(e, Observed::Command { .. }))
+            .filter(|e| matches!(e, Observed::Command(_)))
             .count();
         assert_eq!(reads, 1, "view-text surfaces one read card for its file");
         assert_eq!(
             execs, 0,
-            "view-text is a host builtin, not an external image — no exec card, got {obs:?}"
+            "view-text is a host builtin, not an external image: no exec card, got {obs:?}"
         );
     }
 
@@ -1935,22 +1907,23 @@ return !{{length $hits}}"
         assert_eq!(
             obs.len(),
             2,
-            "cat < a is two logical operations — one read, one exec — got {obs:?}"
+            "cat < a is two logical operations (one read, one exec); got {obs:?}"
         );
         assert_eq!(
             obs[0],
-            Observed::Read { path },
+            Observed::Read(Read { path }),
             "the read installs first, before the body runs"
         );
         assert_eq!(
             obs[1],
-            Observed::Command {
-                argv: vec!["/bin/cat".into()],
-                status: 0,
-                origin: CommandOrigin::External,
-                io: AuditIo::default(),
-                error: None,
-            },
+            Observed::command(
+                "/bin/cat",
+                [],
+                0,
+                CommandOrigin::External,
+                AuditIo::default(),
+                None
+            ),
             "then cat execs over that stdin"
         );
     }
@@ -1972,7 +1945,7 @@ return !{{length $hits}}"
         );
         assert!(
             observations(&use_records).is_empty(),
-            "use is code loading too — no io card, got {:?}",
+            "use is code loading too: no io card, got {:?}",
             observations(&use_records)
         );
     }
@@ -2001,29 +1974,10 @@ return !{{length $hits}}"
     #[test]
     fn user_json_finite_float_is_a_json_number() {
         assert_eq!(
-            super::user_json(&FOValue::Float { value: 1.5 }),
+            super::user_json(&FOValue::Float {
+                value: ral_core::first_order::Finite::new(1.5).expect("finite")
+            }),
             serde_json::json!(1.5)
-        );
-    }
-
-    /// Each crosses as its own named string rather than silently as `null`.
-    #[test]
-    fn user_json_non_finite_floats_become_named_strings() {
-        assert_eq!(
-            super::user_json(&FOValue::Float { value: f64::NAN }),
-            serde_json::json!("NaN")
-        );
-        assert_eq!(
-            super::user_json(&FOValue::Float {
-                value: f64::INFINITY
-            }),
-            serde_json::json!("Infinity")
-        );
-        assert_eq!(
-            super::user_json(&FOValue::Float {
-                value: f64::NEG_INFINITY
-            }),
-            serde_json::json!("-Infinity")
         );
     }
 

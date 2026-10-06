@@ -7,12 +7,11 @@
 //! its current position before lowering, so a form with no span of its own
 //! inherits the enclosing statement's.
 
-use crate::ir::Name;
+use crate::first_order::Finite;
+use crate::ir::{BinaryOp, Pattern, Redirects};
 use crate::path::tilde::TildePath;
 use crate::source::Spanned;
-use crate::syntax::lexer::RedirectOp;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 
 /// Unquoted word, shaped once by the lexer. A `/`, or a `~` standing for
 /// home, marks it as a path; a path head skips name lookup entirely.
@@ -78,7 +77,7 @@ pub enum Ast {
     /// `{ |param| … }` — always exactly one parameter; the parser curries the
     /// rest into nested lambdas.
     Lambda {
-        param: Spanned<Param>,
+        param: Spanned<Pattern>,
         body: Vec<Stmt>,
     },
     /// `()` — punctuation that denotes the unit value, like `[]` and `[:]`,
@@ -185,34 +184,6 @@ pub enum Head {
     Value(Box<Ast>),
 }
 
-/// Binding pattern, shared by `let` and lambda parameters. There is no
-/// alternative to fall through to, so a shape mismatch at bind time is an
-/// error rather than a failure to match.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Pattern {
-    /// `_` — discard the value.
-    Wildcard,
-    Name(Name),
-    /// `[a, b, ...rest]`, where `rest` takes the tail as a new list.
-    List {
-        elems: Vec<Self>,
-        rest: Option<Name>,
-    },
-    /// `[key: pat, …]`
-    Map(Vec<MapPatternEntry>),
-}
-
-/// One entry of a [`Pattern::Map`]: a static key and the sub-pattern bound to
-/// that field.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MapPatternEntry {
-    pub(crate) key: String,
-    pub(crate) pattern: Pattern,
-}
-
-/// Lambda parameter.
-pub(crate) type Param = Pattern;
-
 /// Element of a list literal.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ListElem {
@@ -240,285 +211,6 @@ pub enum MapEntry {
     /// `...expr` — splice another map's entries into this one.
     Spread(Spanned<Ast>),
 }
-
-/// Binary primitive on values: arithmetic, ordering, equality.
-///
-/// The flat enum is what crosses the wire, parser to IR to IPC; a caller that
-/// wants to dispatch on category projects it through [`BinaryOp::kind`] into
-/// [`BinaryOpKind`], whose sub-enums let each handler match exhaustively
-/// without a wildcard arm.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BinaryOp {
-    Add,
-    Sub,
-    Mul,
-    Div,
-    Mod,
-    Eq,
-    Ne,
-    Lt,
-    Gt,
-    Le,
-    Ge,
-}
-
-/// Numeric, and may overflow. Division and modulo reject a zero divisor;
-/// modulo also rejects floats.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ArithOp {
-    Add,
-    Sub,
-    Mul,
-    Div,
-    Mod,
-}
-
-/// Numeric operands only; always a [`bool`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CompareOp {
-    Lt,
-    Gt,
-    Le,
-    Ge,
-}
-
-/// Structural on any value; always a [`bool`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EqOp {
-    Eq,
-    Ne,
-}
-
-/// Category-tagged projection of [`BinaryOp`], built by [`BinaryOp::kind`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BinaryOpKind {
-    Arith(ArithOp),
-    Compare(CompareOp),
-    Eq(EqOp),
-}
-
-impl BinaryOp {
-    pub fn kind(self) -> BinaryOpKind {
-        match self {
-            Self::Add => BinaryOpKind::Arith(ArithOp::Add),
-            Self::Sub => BinaryOpKind::Arith(ArithOp::Sub),
-            Self::Mul => BinaryOpKind::Arith(ArithOp::Mul),
-            Self::Div => BinaryOpKind::Arith(ArithOp::Div),
-            Self::Mod => BinaryOpKind::Arith(ArithOp::Mod),
-            Self::Lt => BinaryOpKind::Compare(CompareOp::Lt),
-            Self::Gt => BinaryOpKind::Compare(CompareOp::Gt),
-            Self::Le => BinaryOpKind::Compare(CompareOp::Le),
-            Self::Ge => BinaryOpKind::Compare(CompareOp::Ge),
-            Self::Eq => BinaryOpKind::Eq(EqOp::Eq),
-            Self::Ne => BinaryOpKind::Eq(EqOp::Ne),
-        }
-    }
-}
-
-/// How a write redirect opens its file: `>` replaces it atomically, `>>`
-/// appends, `>~` truncates and streams.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum WriteMode {
-    Write,
-    Append,
-    Stream,
-}
-
-/// What `<` or `<<` feeds standard input.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum StdinSource<T> {
-    /// `< path`.
-    File(T),
-    /// `<< str`: the payload itself.  One leading newline is dropped at
-    /// evaluation, so a multiline body may start on the line below.
-    Here(T),
-}
-
-/// An I/O redirect onto one of ral's three streams.
-///
-/// Its operand `T` is the parsed word, then the elaborated value, then the
-/// evaluated string.  A field of [`Ast::Call`] and [`Ast::Scope`] rather than
-/// an argument, so it can never pass for a value.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Redirect<T> {
-    Stdin(StdinSource<T>),
-    Stdout(WriteMode, T),
-    Stderr(WriteMode, T),
-    /// `2>&1`.
-    StderrToStdout,
-}
-
-impl<T> Redirect<T> {
-    /// Eliminate a word-taking redirect token into the three streams.  ral
-    /// has no fd plumbing beyond them, so any other fd is refused rather
-    /// than reinterpreted.  (The lexer refuses fd ≥ 3 first, with advice
-    /// this rule cannot give; the last arm is the rule stated whole.)
-    pub(crate) fn word(fd: Option<u32>, op: RedirectOp, word: T) -> Result<Self, String> {
-        let fd = fd.unwrap_or(match op {
-            RedirectOp::Write(_) => 1,
-            RedirectOp::Read | RedirectOp::HereString => 0,
-        });
-        match (fd, op) {
-            (0, RedirectOp::Read) => Ok(Self::Stdin(StdinSource::File(word))),
-            (0, RedirectOp::HereString) => Ok(Self::Stdin(StdinSource::Here(word))),
-            (1, RedirectOp::Write(mode)) => Ok(Self::Stdout(mode, word)),
-            // Stderr streams: staging diagnostics for an atomic commit would
-            // withhold them until the frame settles.
-            (2, RedirectOp::Write(mode)) => Ok(Self::Stderr(
-                match mode {
-                    WriteMode::Write => WriteMode::Stream,
-                    other => other,
-                },
-                word,
-            )),
-            (_, RedirectOp::HereString) => {
-                Err("`<<` always feeds stdin — drop the file-descriptor prefix".into())
-            }
-            (_, RedirectOp::Read) => Err(format!(
-                "`<` always feeds standard input, so `{fd}<` reads nothing in ral — \
-                 drop the `{fd}`, or did you mean `{fd}> file` to write there?"
-            )),
-            (0, RedirectOp::Write(_)) => Err(STDIN_UNWRITABLE.into()),
-            (_, RedirectOp::Write(_)) => Err(format!(
-                "file descriptor {fd}: ral has only standard input (0), standard output (1) \
-                 and standard error (2)"
-            )),
-        }
-    }
-
-    /// Eliminate `fd>&to`.  `2>&1` is the one dup ral models; the identity
-    /// dups `1>&1` and `2>&2` name the stream they already are, and denote
-    /// no redirect at all.
-    pub(crate) fn dup(fd: Option<u32>, to: u32) -> Result<Option<Self>, String> {
-        match (fd.unwrap_or(1), to) {
-            (2, 1) => Ok(Some(Self::StderrToStdout)),
-            (1, 1) | (2, 2) => Ok(None),
-            (0, _) => Err(STDIN_UNWRITABLE.into()),
-            (fd, to) => Err(format!(
-                "ral has no fd plumbing beyond `2>&1`, so `{fd}>&{to}` has nothing to mean"
-            )),
-        }
-    }
-}
-
-/// Where standard error goes once its redirect is bound.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum StderrTarget<T> {
-    File(WriteMode, T),
-    /// `2>&1`: wherever standard output goes, position-independently.
-    Stdout,
-}
-
-/// A redirect list, checked: each stream is bound at most once, so there is
-/// one final destination per stream and nothing is opened only to be
-/// overridden.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Redirects<T> {
-    pub stdin: Option<StdinSource<T>>,
-    pub stdout: Option<(WriteMode, T)>,
-    pub stderr: Option<StderrTarget<T>>,
-}
-
-impl<T> Default for Redirects<T> {
-    fn default() -> Self {
-        Self {
-            stdin: None,
-            stdout: None,
-            stderr: None,
-        }
-    }
-}
-
-impl<T> Redirects<T> {
-    /// Binds `r` to its stream; `Err` says why a second binding is refused.
-    pub(crate) fn bind(&mut self, r: Redirect<T>) -> Result<(), &'static str> {
-        match r {
-            Redirect::Stdin(src) if self.stdin.is_none() => self.stdin = Some(src),
-            Redirect::Stdin(_) => {
-                return Err("standard input is fed twice; which one do you mean? \
-                            A command reads from one source.");
-            }
-            Redirect::Stdout(mode, t) if self.stdout.is_none() => self.stdout = Some((mode, t)),
-            Redirect::Stdout(..) => {
-                return Err(
-                    "standard output is redirected twice; which one do you mean? \
-                            To write to both files, pipe through `tee`.",
-                );
-            }
-            Redirect::Stderr(mode, t) => match self.stderr {
-                None => self.stderr = Some(StderrTarget::File(mode, t)),
-                Some(StderrTarget::File(..)) => {
-                    return Err("standard error is redirected twice; which one do you mean?");
-                }
-                Some(StderrTarget::Stdout) => {
-                    return Err(
-                        "standard error is redirected twice: `2>&1` already sends it \
-                                with standard output; which one do you mean?",
-                    );
-                }
-            },
-            Redirect::StderrToStdout => match self.stderr {
-                None => self.stderr = Some(StderrTarget::Stdout),
-                Some(StderrTarget::File(..)) => {
-                    return Err("standard error is redirected twice: `2>&1` would override \
-                                the `2>` before it; which one do you mean?");
-                }
-                Some(StderrTarget::Stdout) => {
-                    return Err("`2>&1` is written twice; write it once");
-                }
-            },
-        }
-        Ok(())
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.stdin.is_none() && self.stdout.is_none() && self.stderr.is_none()
-    }
-
-    /// The operands in opening order: stdin, stdout, stderr.
-    pub(crate) fn operands(&self) -> impl Iterator<Item = &T> {
-        let stdin = self
-            .stdin
-            .iter()
-            .map(|(StdinSource::File(t) | StdinSource::Here(t))| t);
-        let stdout = self.stdout.iter().map(|(_, t)| t);
-        let stderr = self.stderr.iter().filter_map(|e| match e {
-            StderrTarget::File(_, t) => Some(t),
-            StderrTarget::Stdout => None,
-        });
-        stdin.chain(stdout).chain(stderr)
-    }
-
-    pub(crate) fn try_map<U, E>(
-        &self,
-        mut f: impl FnMut(&T) -> Result<U, E>,
-    ) -> Result<Redirects<U>, E> {
-        Ok(Redirects {
-            stdin: match &self.stdin {
-                Some(StdinSource::File(t)) => Some(StdinSource::File(f(t)?)),
-                Some(StdinSource::Here(t)) => Some(StdinSource::Here(f(t)?)),
-                None => None,
-            },
-            stdout: match &self.stdout {
-                Some((mode, t)) => Some((*mode, f(t)?)),
-                None => None,
-            },
-            stderr: match &self.stderr {
-                Some(StderrTarget::File(mode, t)) => Some(StderrTarget::File(*mode, f(t)?)),
-                Some(StderrTarget::Stdout) => Some(StderrTarget::Stdout),
-                None => None,
-            },
-        })
-    }
-
-    pub(crate) fn map<U>(&self, mut f: impl FnMut(&T) -> U) -> Redirects<U> {
-        let Ok(r) = self.try_map(|t| Ok::<_, std::convert::Infallible>(f(t)));
-        r
-    }
-}
-
-const STDIN_UNWRITABLE: &str =
-    "standard input cannot be written to — did you mean `< file`, which reads one into it?";
 
 /// Operand shape of a control-operator scope form, one variant per surface
 /// keyword. Arity and construction are declared in [`ScopeAst::KEYWORDS`].
@@ -556,137 +248,11 @@ pub struct HandlerArm {
     pub value: Spanned<Ast>,
 }
 
-/// How a control operator reads the operand at one position.
-///
-/// Not every operand is an expression: a form's option bracket is the form's
-/// own syntax, where `[]` is the empty option set rather than a list.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Operand {
-    Atom,
-    /// `[]` or `[l: v, …]`, the labels written out.  `arms` marks the form
-    /// whose options include the `handlers:` arm list; `example` is an entry
-    /// the refusal of a bound bundle shows.
-    Options {
-        arms: bool,
-        example: &'static str,
-    },
-}
-
-/// What a control operator's operands parsed to, by kind.
-pub(crate) struct Operands {
-    pub atoms: Vec<Ast>,
-    pub options: Options,
-    pub handlers: Option<Vec<HandlerArm>>,
-}
-
-/// Everything the parser needs for one control-operator keyword.
-///
-/// The surface name, how each operand position is read, a description of the
-/// operands for the arity-mismatch message, and a constructor from the
-/// validated operands.
-pub(crate) struct ScopeKeyword {
-    pub name: &'static str,
-    pub(crate) operands: &'static [Operand],
-    pub(crate) operand_desc: &'static str,
-    pub(crate) build: fn(Operands) -> ScopeAst,
-}
-
-impl ScopeKeyword {
-    pub(crate) fn arity(&self) -> usize {
-        self.operands.len()
-    }
-}
-
-impl ScopeAst {
-    /// Every control-operator keyword. [`crate::syntax::is_keyword`] reads this
-    /// list, so the parser's ban on these names in binding positions and
-    /// exarch's syntax highlighter cannot drift apart.
-    pub(crate) const KEYWORDS: &'static [ScopeKeyword] = &[
-        ScopeKeyword {
-            name: "try",
-            operands: &[Operand::Atom, Operand::Atom],
-            operand_desc: "body, handler",
-            build: |ops| {
-                let [body, handler]: [Ast; 2] = ops.atoms.try_into().expect("arity validated");
-                Self::Try {
-                    body: Box::new(body),
-                    handler: Box::new(handler),
-                }
-            },
-        },
-        ScopeKeyword {
-            name: "guard",
-            operands: &[Operand::Atom, Operand::Atom],
-            operand_desc: "body, cleanup",
-            build: |ops| {
-                let [body, cleanup]: [Ast; 2] = ops.atoms.try_into().expect("arity validated");
-                Self::Guard {
-                    body: Box::new(body),
-                    cleanup: Box::new(cleanup),
-                }
-            },
-        },
-        ScopeKeyword {
-            name: "within",
-            operands: &[
-                Operand::Options {
-                    arms: true,
-                    example: "dir: $d",
-                },
-                Operand::Atom,
-            ],
-            operand_desc: "options, body",
-            build: |ops| {
-                let [body]: [Ast; 1] = ops.atoms.try_into().expect("arity validated");
-                Self::Within {
-                    opts: ops.options,
-                    handlers: ops.handlers,
-                    body: Box::new(body),
-                }
-            },
-        },
-        ScopeKeyword {
-            name: "grant",
-            operands: &[
-                Operand::Options {
-                    arms: false,
-                    example: "net: $n",
-                },
-                Operand::Atom,
-            ],
-            operand_desc: "capabilities, body",
-            build: |ops| {
-                let [body]: [Ast; 1] = ops.atoms.try_into().expect("arity validated");
-                Self::Grant {
-                    caps: ops.options,
-                    body: Box::new(body),
-                }
-            },
-        },
-        ScopeKeyword {
-            name: "audit",
-            operands: &[Operand::Atom],
-            operand_desc: "body",
-            build: |ops| {
-                let [body]: [Ast; 1] = ops.atoms.try_into().expect("arity validated");
-                Self::Audit {
-                    body: Box::new(body),
-                }
-            },
-        },
-    ];
-
-    /// Look up a control-operator keyword by surface name.
-    pub(crate) fn lookup_keyword(name: &str) -> Option<&'static ScopeKeyword> {
-        Self::KEYWORDS.iter().find(|kw| kw.name == name)
-    }
-}
-
 // ── Utilities ────────────────────────────────────────────────────────────
 
 /// The value-literal shape of a bare word: the one answer to "literal or
 /// command name?", read by the parser to skip the [`Ast::Call`] wrapper and
-/// by elaboration through [`crate::ir::Val::from_word`].
+/// by elaboration through [`crate::elaborator::word_val`].
 ///
 /// Purely lexical: the numeral grammar decides, never a round trip through
 /// printing.  A float wants a `.`, so `1e5`, which merely happens to f64-parse,
@@ -696,7 +262,7 @@ impl ScopeAst {
 pub(crate) enum WordLiteral {
     Bool(bool),
     Int(i64),
-    Float(f64),
+    Float(Finite),
 }
 
 impl WordLiteral {
@@ -710,54 +276,9 @@ impl WordLiteral {
                 } else if s.contains('.') {
                     // A Float is finite by construction; an overflowing
                     // literal like 1.0e999 stays a plain word.
-                    s.parse()
-                        .ok()
-                        .filter(|f: &f64| f.is_finite())
-                        .map(Self::Float)
+                    s.parse().ok().and_then(Finite::new).map(Self::Float)
                 } else {
                     None
-                }
-            }
-        }
-    }
-}
-
-impl Pattern {
-    /// The first name this pattern binds twice, if any. A pattern binds all
-    /// its names at once, so a repeat is an ambiguity, not a shadow — the
-    /// parser rejects it at both binder sites (`let` and lambda parameter).
-    pub(crate) fn duplicate_name(&self) -> Option<&str> {
-        fn walk<'a>(pat: &'a Pattern, seen: &mut HashSet<&'a str>) -> Option<&'a str> {
-            match pat {
-                Pattern::Wildcard => None,
-                Pattern::Name(n) => (!seen.insert(n.as_ref())).then_some(n.as_ref()),
-                Pattern::List { elems, rest } => elems
-                    .iter()
-                    .find_map(|e| walk(e, seen))
-                    .or_else(|| rest.as_deref().filter(|r| !seen.insert(*r))),
-                Pattern::Map(entries) => entries.iter().find_map(|e| walk(&e.pattern, seen)),
-            }
-        }
-        walk(self, &mut HashSet::new())
-    }
-
-    pub(crate) fn collect_names(&self, set: &mut HashSet<String>) {
-        match self {
-            Self::Wildcard => {}
-            Self::Name(n) => {
-                set.insert(n.to_string());
-            }
-            Self::List { elems, rest } => {
-                for e in elems {
-                    e.collect_names(set);
-                }
-                if let Some(r) = rest {
-                    set.insert(r.to_string());
-                }
-            }
-            Self::Map(entries) => {
-                for entry in entries {
-                    entry.pattern.collect_names(set);
                 }
             }
         }
@@ -775,12 +296,14 @@ impl Ast {
 
     /// The name and right-hand side of a `let name = rhs`. `None` for anything
     /// else, a destructuring `let [a, b] = …` included: it binds no single name
-    /// and so is neither a `LetRec` member nor a worksheet node. The [`Spanned`]
-    /// survives because `syntax::group` wants the RHS span.
-    pub fn as_name_let(&self) -> Option<(&str, &Spanned<Box<Self>>)> {
+    /// and so is no `LetRec` member. Both keep their spans: the elaborator
+    /// stamps a member with its RHS and refuses a bad binder at its name.
+    pub(crate) fn as_name_let(&self) -> Option<(Spanned<&str>, &Spanned<Box<Self>>)> {
         match self {
             Self::Let { pattern, value } => match &pattern.item {
-                Pattern::Name(name) => Some((name.as_ref(), value)),
+                Pattern::Name(name) => {
+                    Some((Spanned::with_span(pattern.span, name.as_ref()), value))
+                }
                 _ => None,
             },
             _ => None,

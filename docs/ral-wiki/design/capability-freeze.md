@@ -7,7 +7,7 @@ authority* is not a type split but a single pass inside the one constructor, so
 "an unresolved bundle reaches the dynamic stack or the IPC wire" is
 unrepresentable: there is nowhere for one to exist.
 
-The type (`core/src/types/capability.rs`):
+The type (`core/src/capability/lattice.rs`):
 
 - *`Capabilities`* — per-effect policies (`exec`, `fs`, `net`, `detach`,
   `editor`, `shell`), and nothing else: every member is authority, so a bundle
@@ -20,13 +20,13 @@ The type (`core/src/types/capability.rs`):
 ## `decode` is the one-way door
 
 The sole non-trivial constructor is `decode_capability_map`
-(`core/src/capability/decode.rs`), the single `Value::Map → Capabilities`
+(`core/src/guard/decode.rs`), the single `Value::Map → Capabilities`
 function. It walks a `.ral` profile's terminal map — or the inline
 `grant [...] { body }` map — into a bundle, then runs a *freeze pass* before
 returning. In that pass it:
 
 - **resolves** every `~` / `xdg:` / `cwd:` / `tempdir:` / `gitdir:` sigil against a
-  `FreezeCtx { home, cwd }` (and `tempdir:` against the process temp dir);
+  `FreezeCtx` (owned `home` and `cwd`, `FreezeCtx::of(&Shell)`; and `tempdir:` against the process temp dir). The freeze is `guard/freeze.rs`: `FreezeCtx::path` is the one place a grant string becomes a `FrozenPath`, and `FrozenPath::from_surface` the one minting door ([[decisions/261006_capability-is-data|capability-is-data]]);
 - **rejects** an `xdg:` value that escapes `home` — defence in depth against an
   attacker-set `XDG_*_HOME=/etc` silently widening a grant;
 - **rejects** a `~` or `xdg:` entry where nothing binds `HOME`: no base to
@@ -45,7 +45,7 @@ returning. In that pass it:
   here" once; a bare command name in `exec` is a name, not a path, and is exempt.
 
 Both callers — `eval_grant` (`core/src/evaluator/scope.rs`) and the profile
-loader (`core/src/capability/load.rs`) — are in-crate, and the path-free
+loader (`core/src/load/profile.rs`) — are in-crate, and the path-free
 `root` / `deny_all` / `default` are the only other ways to obtain a
 `Capabilities`. So *resolved by construction* is a visibility fact, not a
 discipline: no surface admits a sigil-bearing bundle.
@@ -135,7 +135,7 @@ legitimately lies outside the tree, so no region bounds it. What bounds it is
   config of a repository split off with `--separate-git-dir`, the two records git
   itself keeps. Both ends must agree, and only one end is writable from inside
   the tree.
-- A pointer nothing claims is a `PolicyError` at the door, like an escaping
+- A pointer nothing claims is a `PolicyError` at the door (`guard::freeze`, which holds the three `gitdir:` refusals), like an escaping
   `xdg:`. Silently narrowing to the cwd would be safe and unreadable — the same
   fail-closed-and-say-so reading the XDG guard takes.
 

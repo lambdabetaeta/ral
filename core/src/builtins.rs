@@ -2,8 +2,8 @@
 //!
 //! `builtin_registry!` binds each builtin's names, type rule, doc and
 //! runtime body in one entry — so those facets cannot drift apart — and expands
-//! them into the [`CORE_BUILTINS`] static every shell's builtin table is seeded
-//! from.  Arity is structural, read off the type rule by
+//! them into the [`CORE_BUILTINS`] static, one of the [`CORE_SETS`] every host
+//! surface lists first.  Arity is structural, read off the type rule by
 //! [`crate::types::BuiltinEntry::fixed_arity`].
 //!
 //! Those are the *value* half of the manifest.  The argv half — a name that
@@ -11,13 +11,9 @@
 //! is authored beside it in [`CORE_BASE_FRAMES`], because the two conventions
 //! share nothing but a body signature.
 
-use crate::diagnostic;
 use crate::typecheck::builtins::{BuiltinDiagnostic, scheme};
-use crate::types::{
-    Break, BuiltinBody, BuiltinEntry, Error, Escape, Mooring, Settled, Shell, Value,
-};
+use crate::types::{Break, BuiltinBody, BuiltinEntry, Mooring, Settled, Shell, Value};
 use std::borrow::Cow;
-use std::sync::{Arc, OnceLock};
 
 pub(crate) mod ambient;
 mod codecs;
@@ -33,7 +29,6 @@ mod predicates;
 mod print;
 mod shell;
 pub mod strings;
-pub use util::value_to_json_lossy_bytes;
 pub mod util;
 
 /// `CORE_BUILTINS_ARR`'s length, counted from the name literals.
@@ -121,9 +116,7 @@ macro_rules! builtin_registry {
 
         /// Every host-implemented name the language ships with.
         ///
-        /// Installed into each fresh [`Shell`] by [`Shell::new`]; the checker
-        /// seeds from that same table (`Shell::session_schemes`), so there is no
-        /// second lookup path to drift from it.
+        /// Part of [`CORE_SETS`], which runtime and checker both read.
         pub static CORE_BUILTINS: &[BuiltinEntry] = &CORE_BUILTINS_ARR;
     };
 }
@@ -144,9 +137,6 @@ builtin_registry! {
     Filter { names: ["filter"], ty: scheme::filter_op,
         doc: "filter <fn> <list>  — keep elements where fn returns true.",
         call: |args, mooring, shell| collections::builtin_filter(args, mooring, shell), },
-    SortList { names: ["sort-list"], ty: scheme::sort_list,
-        doc: "sort-list <list>  — sort a list in ascending order: numbers numerically (Int against Int exactly, mixed Int/Float by promotion), strings lexicographically.",
-        call: |args, _mooring, _shell| collections::builtin_sort(args), },
     SortListBy { names: ["sort-list-by"], ty: scheme::sort_list_by,
         doc: "sort-list-by <fn> <list>  — sort by a key function.",
         call: |args, mooring, shell| collections::builtin_sort_by(args, mooring, shell), },
@@ -227,13 +217,13 @@ builtin_registry! {
         doc: "abbreviate-home <path>  — fold a leading home directory to ~, for display.",
         call: |args, _mooring, shell| fs::builtin_abbreviate_home(args, shell), },
     Glob { names: ["glob"], ty: scheme::glob,
-        doc: "glob <pattern>  — list paths matching a Unix shell-style glob (`?`, `*`, `**`, `[…]`, `[!…]`; `**` spans directories). Patterns relative to the current working directory return matches relative to the current working directory; sigil-rooted (`~`, `xdg:`) and absolute patterns return absolute matches. Dotfiles are excluded from wildcard matches — match them by fully-literal name, or fall back to `list-dir | filter`.",
+        doc: "glob <pattern>  — list paths matching a Unix shell-style glob (`?`, `*`, `**`, `[…]`, `[!…]`; `**` spans directories). Patterns relative to the current working directory return matches relative to the current working directory; sigil-rooted (`~`, `xdg:`) and absolute patterns return absolute matches. Dotfiles are excluded from wildcard matches: match them by fully-literal name, or fall back to `list-dir | filter`.",
         call: |args, _mooring, shell| fs::builtin_glob(args, shell), },
     Exit { names: ["exit", "quit"], ty: scheme::exit,
         doc: "exit [status]  — exit the shell.",
         call: |args, _mooring, shell| misc::builtin_exit(args, shell), },
     Warn { names: ["warn"], ty: scheme::string_to_unit,
-        doc: "warn <message>  — write one diagnostic line to standard error: the message, then a newline. This is how a script says something to the human without putting it on the byte channel a caller might be binding; `2> f` files it, and a capture keeps it apart from the value. ral has no `1>&2` — diagnostics are this builtin, not fd plumbing.",
+        doc: "warn <message>  — write one diagnostic line to standard error: the message, then a newline. This is how a script says something to the human without putting it on the byte channel a caller might be binding; `2> f` files it, and a capture keeps it apart from the value. ral has no `1>&2`; diagnostics are this builtin, not fd plumbing.",
         call: |args, _mooring, shell| misc::builtin_warn(args, shell), },
     FoldLines { names: ["fold-lines"], ty: scheme::fold_lines,
         doc: "fold-lines <fn> <init>  — fold over stdin lines, split as from-lines splits them, in bounded memory.",
@@ -299,7 +289,7 @@ builtin_registry! {
         call: |_args, _mooring, shell| ambient::user(shell).map_err(Break::from), },
     Home { names: ["home"], ty: scheme::pure_string,
         doc: "home  — the current user's home directory, the one `~` abbreviates: HOME, or USERPROFILE where appropriate, from the effective environment.",
-        call: |_args, _mooring, shell| ambient::home_dir(shell).map(Value::string).map_err(Break::from), },
+        call: |_args, _mooring, shell| shell.context.home_dir().map(Value::string).map_err(Break::from), },
     Nproc { names: ["nproc"], ty: scheme::pure_int,
         doc: "nproc  — available processor parallelism as an Int, never less than 1.",
         call: |_args, _mooring, _shell| Ok(ambient::nproc()), },
@@ -312,9 +302,6 @@ builtin_registry! {
     Unalias { names: ["unalias"], ty: scheme::unalias,
         doc: "unalias NAME  — remove the alias for NAME. Errors if none is installed.",
         call: |args, _mooring, shell| shell::builtin_unalias(args, shell), },
-    IsEmpty { names: ["is-empty"], ty: scheme::is_empty,
-        doc: "is-empty <val>  — true if list, map, bytes, or string is empty.",
-        call: |args, _mooring, _shell| predicates::builtin_is_empty(args), },
     Exists { names: ["exists"], ty: scheme::path_bool,
         doc: "exists <path>  — true if path exists (any type); resolves against the within-scoped cwd.",
         call: |args, _mooring, shell| fs::builtin_exists(args, shell), },
@@ -333,15 +320,6 @@ builtin_registry! {
     IsWritable { names: ["is-writable"], ty: scheme::path_bool,
         doc: "is-writable <path>  — true if path is writable by the caller.",
         call: |args, _mooring, shell| fs::builtin_is_writable(args, shell), },
-    Equal { names: ["equal"], ty: scheme::equal,
-        doc: "equal <a> <b>  — true if a and b are equal.",
-        call: |args, _mooring, _shell| predicates::builtin_equal(args), },
-    Lt { names: ["lt"], ty: scheme::compare,
-        doc: "lt <a> <b>  — true if a < b (numeric on Int/Float, lexicographic on String).",
-        call: |args, _mooring, _shell| predicates::builtin_lt(args), },
-    Gt { names: ["gt"], ty: scheme::compare,
-        doc: "gt <a> <b>  — true if a > b (numeric on Int/Float, lexicographic on String).",
-        call: |args, _mooring, _shell| predicates::builtin_gt(args), },
     ListDir { names: ["list-dir"], ty: scheme::list_dir,
         doc: "list-dir <path>  — list directory contents as [{name, type, size, mtime}].",
         call: |args, _mooring, shell| fs::builtin_list_dir(args, shell), },
@@ -405,7 +383,7 @@ builtin_registry! {
     // `ral::repl::plugin::ed_builtins::ED_BUILTINS`.
     AnsiOk { names: ["_ansi-ok"], ty: scheme::pure_bool,
         doc: "_ansi-ok  — true if stdout supports ANSI colour (respects NO_COLOR / non-tty).",
-        call: |_args, _mooring, _shell| Ok(Value::Bool(crate::ansi::use_ui_color())), },
+        call: |_args, _mooring, _shell| Ok(Value::Bool(crate::terminal::ui_color())), },
 }
 
 /// The argv half of core's manifest: names that take an argv rather than
@@ -416,7 +394,7 @@ builtin_registry! {
 static CORE_BASE_FRAMES_ARR: [BuiltinEntry; 1] = [BuiltinEntry::base_frame(
     Cow::Borrowed("echo"),
     scheme::echo,
-    "echo <args...>  — write one line: every argument in its text form (what `str` gives, so a list or a map prints as it looks), joined by single spaces, with a trailing newline. It takes an argv rather than arguments, so there is no `$echo` to hold: a handler stacked on `echo` intercepts it, but `^echo` skips this frame — it is the operating system's `echo`, not ral's.",
+    "echo <args...>  — write one line: every argument in its text form (what `str` gives, so a list or a map prints as it looks), joined by single spaces, with a trailing newline. It takes an argv rather than arguments, so there is no `$echo` to hold: a handler stacked on `echo` intercepts it, but `^echo` skips this frame; it is the operating system's `echo`, not ral's.",
     BuiltinBody::Static(codecs::builtin_echo),
 )];
 pub(crate) static CORE_BASE_FRAMES: &[BuiltinEntry] = &CORE_BASE_FRAMES_ARR;
@@ -456,19 +434,11 @@ static BOUNDARY_BUILTINS_ARR: [BuiltinEntry; 4] = [
 ];
 pub static BOUNDARY_BUILTINS: &[BuiltinEntry] = &BOUNDARY_BUILTINS_ARR;
 
-/// A [`BuiltinTable`](crate::types::BuiltinTable) of core's manifest, every
-/// half, alone.
-///
-/// This is what a checker with no live shell
-/// ([`SessionSchemes`](crate::typecheck::SessionSchemes)'s `Default`) types
-/// against, absent any host dressing.
-pub(crate) fn core_builtin_table() -> crate::types::BuiltinTable {
-    let mut table = crate::types::BuiltinTable::default();
-    table.install_static(CORE_BUILTINS);
-    table.install_static(BOUNDARY_BUILTINS);
-    table.install_static(CORE_BASE_FRAMES);
-    table
-}
+/// Core's manifest, every half: the one list the runtime installs and the
+/// checker's Σ is read from.  A [`HostSurface`](crate::HostSurface) lists these
+/// first, then its own.
+pub(crate) static CORE_SETS: [&[BuiltinEntry]; 3] =
+    [CORE_BUILTINS, BOUNDARY_BUILTINS, CORE_BASE_FRAMES];
 
 /// `watch` — a spawn whose output lines surface live to the host as
 /// `` `watch [label, line] ``, kept out of [`CORE_BUILTINS`] for a host's boot
@@ -498,7 +468,7 @@ pub static WATCH_BUILTIN: &[BuiltinEntry] = &WATCH_BUILTIN_ARR;
 static SERVICE_BUILTIN_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new(
     Cow::Borrowed("service"),
     scheme::service,
-    "service <desc> <thunk>  — birth a durable worker: like spawn, but never idle-reaped and exempt from the 24 h backstop. <desc> is a required, single-line, non-empty description of what it's for — a durable service's only bound is legibility, so the host tracks it by this description rather than a lease. Dies only by `cancel` through its handle, /clear, or process exit. It does not outlive this process: work that must still be running after this process exits needs `detach`.",
+    "service <desc> <thunk>  — birth a durable worker: like spawn, but never idle-reaped and exempt from the 24 h backstop. <desc> is a required, single-line, non-empty description of what it's for; a durable service's only bound is legibility, so the host tracks it by this description rather than a lease. Dies only by `cancel` through its handle, /clear, or process exit. It does not outlive this process: work that must still be running after this process exits needs `detach`.",
     BuiltinBody::Static(concurrency::builtin_service),
 )];
 pub static SERVICE_BUILTIN: &[BuiltinEntry] = &SERVICE_BUILTIN_ARR;
@@ -526,7 +496,7 @@ pub static SURFACE_BUILTIN: &[BuiltinEntry] = &SURFACE_BUILTIN_ARR;
 /// diagnostic and never a veto.  Whether
 /// a call that does resolve may *spend* the verb is the separate capability
 /// question, asked of the live grant stack
-/// ([`crate::types::GrantStack::permits_detach`]) and answered as a refusal.
+/// ([`crate::capability::GrantStack::permits`]) and answered as a refusal.
 ///
 /// The other three verbs vary policy over one type; this one changes it — it
 /// takes an argv, hence a base frame and no `$detach`, returning a plain record
@@ -536,80 +506,10 @@ pub static SURFACE_BUILTIN: &[BuiltinEntry] = &SURFACE_BUILTIN_ARR;
 static DETACH_BUILTIN_ARR: [BuiltinEntry; 1] = [BuiltinEntry::base_frame(
     Cow::Borrowed("detach"),
     scheme::detach,
-    "detach <desc> <cmd> <args...>  — run a program that keeps running after this session is over. Returns a receipt {pid, desc}: data, not a handle — await, poll, race and cancel do not apply, and nothing in ral can stop it once it is born. It is also mute. Its stdin, stdout and stderr are all /dev/null, and its exit status is unrecoverable, since init reaps it and nothing here can ever wait for it: if it dies at startup — port already in use, bad flag, a missing import — nothing observes that, and a returned pid says only that the program was exec'd, never that it is alive or that it worked. The one way to learn whether it is running is to probe whatever it serves: connect to the port, fetch the URL, read the file it writes. Give it its own logging if you want a record of what it did. <pid> is the name it had at birth, not a capability over it — pids are recycled, so that number may later name something else entirely. Only cwd and env cross into it, from the enclosing `within`; bindings and the audit tree do not, and a head that a handler in scope intercepts is refused, since a handler runs inside this session and nothing could be detached — to stub `detach`, stand in for `detach` itself. A grant you birth it inside confines it for the rest of its life: it keeps the fs, net and exec limits in force at that moment, and nothing later can widen them, since nothing later can name it. A grant may also withhold the verb outright with `detach: false`, in which case the call is refused and no process is born. <desc> is required, single-line and non-empty: once this session is gone it is all that says what the pid was for.",
+    "detach <desc> <cmd> <args...>  — run a program that keeps running after this session is over. Returns a receipt {pid, desc}: data, not a handle: await, poll, race and cancel do not apply, and nothing in ral can stop it once it is born. It is also mute. Its stdin, stdout and stderr are all /dev/null, and its exit status is unrecoverable, since init reaps it and nothing here can ever wait for it: if it dies at startup (port already in use, bad flag, a missing import) nothing observes that, and a returned pid says only that the program was exec'd, never that it is alive or that it worked. The one way to learn whether it is running is to probe whatever it serves: connect to the port, fetch the URL, read the file it writes. Give it its own logging if you want a record of what it did. <pid> is the name it had at birth, not a capability over it; pids are recycled, so that number may later name something else entirely. Only cwd and env cross into it, from the enclosing `within`; bindings and the audit tree do not, and a head that a handler in scope intercepts is refused, since a handler runs inside this session and nothing could be detached; to stub `detach`, stand in for `detach` itself. A grant you birth it inside confines it for the rest of its life: it keeps the fs, net and exec limits in force at that moment, and nothing later can widen them, since nothing later can name it. A grant may also withhold the verb outright with `detach: false`, in which case the call is refused and no process is born. <desc> is required, single-line and non-empty: once this session is gone it is all that says what the pid was for.",
     BuiltinBody::Static(concurrency::builtin_detach),
 )];
 #[cfg(unix)]
 pub static DETACH_BUILTIN: &[BuiltinEntry] = &DETACH_BUILTIN_ARR;
 
-/// Run the prelude once per process and seat its bindings as `shell`'s Σ's
-/// prelude tier.
-///
-/// The prelude — a ral script baked into the binary — is evaluated once
-/// under a Σ of natives alone; every phrase is a `Define` of `Return(V)`
-/// (`bake_prelude`), so the run is a fold of closing values, and the
-/// resulting map, frozen, is the one every shell in this process starts
-/// from.
-pub fn register(shell: &mut Shell, prelude_top: &crate::ir::Toplevel) {
-    static PRELUDE: OnceLock<Arc<crate::types::PreludeMap>> = OnceLock::new();
-
-    let prelude = PRELUDE.get_or_init(|| {
-        let mut prelude_shell = Shell::new(crate::io::TerminalState::default());
-        let ran = crate::evaluator::run_phrases(
-            &prelude_top.phrases,
-            crate::types::Env::new(),
-            crate::evaluator::Mode::Prelude,
-            &Mooring::adrift(),
-            &mut prelude_shell,
-        );
-        if let Err(e) = ran.outcome {
-            let msg = match &e {
-                Break::Error(err) => err.to_string(),
-                Break::Escape(Escape::Exit(code)) => format!("exit {code}"),
-            };
-            diagnostic::cmd_error("prelude", &msg);
-        }
-        Arc::new(
-            ran.env
-                .iter()
-                .map(|(name, binding)| (name.to_string(), binding.clone()))
-                .collect(),
-        )
-    });
-
-    Arc::make_mut(&mut shell.sig).install_prelude(Arc::clone(prelude));
-}
-
 pub use print::{PrintParams, REPL_PRINT_PARAMS, pretty_print};
-
-/// Apply a function value (`Block`, `Lambda`, or `Native`) to `args`, with a
-/// run frame already installed.
-///
-/// Builtins that take function arguments call this, as does the run
-/// door's hook arm ([`crate::Shell::run`]), which establishes that frame first.
-///
-/// # Errors
-/// If `val` is not a function value, or the applied body fails.
-pub fn apply(
-    val: &Value,
-    args: Vec<Value>,
-    mooring: &Mooring,
-    shell: &mut Shell,
-) -> Settled<Value> {
-    match val {
-        // Zero arguments is a force, not an application (the machine's
-        // `apply` boundary demands at least one) — the hook door's arity-0
-        // entries (`HookSig::Prompt` and the like) are the one caller that
-        // takes this path; every other caller supplies at least one arg.
-        Value::Thunk(_) | Value::Native { .. } if args.is_empty() => {
-            crate::evaluator::machine::force(val.clone(), mooring, shell)
-        }
-        Value::Thunk(_) | Value::Native { .. } => {
-            crate::evaluator::machine::apply(val.clone(), args, mooring, shell)
-        }
-        _ => Err(Break::Error(
-            Error::new(format!("cannot call {} '{}'", val.type_name(), val), 1)
-                .with_hint("only Blocks, Lambdas, and natives can be called"),
-        )),
-    }
-}

@@ -1,7 +1,7 @@
 ---
 verified_at_commit: 1776d222
 verified_at_date: 2026-09-30
-anchors: [Machine, step_eval, eval_rules, step_return, step_halt, Frame, Focus, Terminal, Closure, Closure::new, Node::new, Env, restrict, Signature, lookup, form, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, WireShell, NESTED_MACHINE_LIMIT, force, force_val, launch_thread_stage, Assemble]
+anchors: [Machine, step_eval, eval_rules, step_return, step_halt, Frame, Focus, Terminal, Closure, Closure::new, Node::new, Env, restrict, Signature, lookup, form, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, EngineSeed, NESTED_MACHINE_LIMIT, force, force_val, launch_thread_stage, Assemble]
 ---
 
 # The evaluator: a CEK machine over computation closures
@@ -77,15 +77,22 @@ none of those, stays a `Return` and closes for free;
 `step_return` and `step_halt` have one arm per `Frame` — the two columns of
 the frame table. No arm calls another arm; no arm loops.
 
-**A rule cannot leave unlocated.** `eval_rules` returns `Result<Focus,
-Break>`, so every rule raises with `?` rather than by building a `Focus::Halt`
-of its own; `step_eval` is its sole caller and does
-`unwrap_or_else(Focus::Halt)` then `stamp_focus(focus, comp.span)`. There is
-exactly one exit, so a raising rule is stamped with the span of the node it
-is the rule for, and no arm can be written that skips the stamp. `step_case`
-and `step_exec` are rules under the same discipline and return the same
-`Result`. (Before this shape, a bare `return` in the `Rec` arm bypassed the
-stamp and cancelling a recursive definition rendered without a caret.)
+**A rule cannot leave unlocated.** Every rule returns `Settled<Focus>`
+(`eval_rules`, and `step_return`, `step_halt`, `beta`, `apply_rule` and
+`force` alike), so each raises with `?` rather than by building a
+`Focus::Halt` of its own; `step` folds the `Err` into `Focus::Halt` once, and
+`step_eval` first stamps it with `comp.span`. There is exactly one exit, so a
+raising rule is stamped with the span of the node it is the rule for, and no
+arm can be written that skips the stamp. `step_case` and `step_exec` are rules
+under the same discipline. (Before this shape, a bare `return` in the `Rec`
+arm bypassed the stamp and cancelling a recursive definition rendered without
+a caret.)
+
+**Pushing is a type.** `Machine::reserve` is the stack cap, checked before
+any effect, and returns the `Slot` that holds the stack's only `push`; a rule
+cannot push without having asked. `Frame::abandon` is the one undo for the
+frames whose effect is only undone (`Unmask`, `Within`, `Grant`, and `Audit`
+on an escape), used by the rules and by the panic walk alike.
 
 **`To` holds its environment, which is what makes extent structural.** `M to
 x. N` pushes `To { bind, env: E }` *before* M runs; when M
@@ -190,8 +197,8 @@ which it `launch`es and `join`s (collect, then finish) in one
 step: no frame, because nothing runs beneath the node; the outcome climbs the
 parent's frames like any other rule's terminal. **No frame ever crosses**: not
 to a stage, whose stack is empty by construction, nor to a hatched engine,
-which receives the engine seed's `WireShell { env, stack_limit, context }`
-(`core/src/engine_seed.rs`) — one environment, ρ alone, interned by its
+which receives the engine seed's `env`, `stack_limit` and `context`
+(`core/src/seed.rs`) — one environment, ρ alone, interned by its
 allocation's identity; Σ never crosses, so the receiver answers a decoded
 closure's Σ names from its own.
 

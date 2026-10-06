@@ -1,16 +1,106 @@
-//! Exec authority as a [`Table`] of rules about programs.
+//! Exec authority as a [`Table`] of rules about programs, and the judgment
+//! that mints [`Admitted`].
 //!
 //! Decode leaves each layer an authored [`ExecGrant`];
 //! [`ExecRules::compile`] turns it into rules over host files, bundled tools,
 //! directories and vetoed names, which judge a [`Program`] as any table
 //! judges a subject.  A stack's authority is the meet of its layers' tables,
-//! compiled afresh on every question.
+//! compiled afresh on every question.  [`GrantStack::admit`] is the one
+//! judgment; the guard words its refusals and the sandbox renders the table
+//! it judged with.
 
 use super::table::{Scope, Table};
+use super::{ExecGrant, ExecKey, GrantStack, Meet, Verdict};
 use crate::path::{Polarity, RealPath, SearchCwd, command_name_key};
-use crate::types::{ExecGrant, ExecKey, ExecRule, GrantStack, Meet, Verdict};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+
+/// A program the stack admitted with these arguments, and the table that
+/// admitted it.  Only [`GrantStack::admit`] makes one, so nothing launches
+/// unjudged.
+#[derive(Debug)]
+#[must_use]
+pub(crate) struct Admitted {
+    program: Program,
+    args: Vec<String>,
+    rules: Option<ExecRules>,
+}
+
+impl Admitted {
+    pub(crate) fn program(&self) -> &Program {
+        &self.program
+    }
+
+    pub(crate) fn args(&self) -> &[String] {
+        &self.args
+    }
+
+    /// The stack's exec table, `None` where no layer restricts exec.
+    pub(crate) fn rules(&self) -> Option<&ExecRules> {
+        self.rules.as_ref()
+    }
+}
+
+/// Why a stack refused a call.
+#[derive(Debug)]
+pub(crate) enum ExecDenial {
+    /// The program is denied; `respelled` names the deny that holds it only
+    /// under another spelling of its name, when no deny holds it as stored.
+    Denied { respelled: Option<ExecScope> },
+    /// Only these first arguments pass, and the call's first argument is none of them.
+    Subcommand { allowed: BTreeSet<String> },
+}
+
+/// A call the stack refused.
+#[derive(Debug)]
+pub(crate) struct Refused {
+    pub program: Program,
+    pub args: Vec<String>,
+    pub why: ExecDenial,
+}
+
+impl GrantStack {
+    /// Judge a program and its argv against the stack's exec rules.
+    pub(crate) fn admit(&self, program: Program, args: Vec<String>) -> Result<Admitted, Refused> {
+        let rules = rules(self);
+        let subject = program.subject();
+        let verdict = rules
+            .as_ref()
+            .map_or(Verdict::Allow, |r| r.verdict(subject));
+        let why = match verdict {
+            Verdict::Allow => None,
+            Verdict::Deny => Some(ExecDenial::Denied {
+                respelled: rules.as_ref().and_then(|r| r.respelled(subject)).cloned(),
+            }),
+            Verdict::Only(allowed) => (!args.first().is_some_and(|first| allowed.contains(first)))
+                .then_some(ExecDenial::Subcommand { allowed }),
+        };
+        match why {
+            None => Ok(Admitted {
+                program,
+                args,
+                rules,
+            }),
+            Some(why) => Err(Refused { program, args, why }),
+        }
+    }
+
+    /// Head-only admission, before any argv is known: a subcommand
+    /// restriction is not yet a refusal.
+    pub(crate) fn admits(&self, program: &Program) -> bool {
+        rules(self).is_none_or(|r| !r.verdict(program.subject()).is_denied())
+    }
+
+    /// The deny that refuses `program` only under another spelling of its
+    /// name, for a refusal raised before [`GrantStack::admit`].
+    pub(crate) fn respelled(&self, program: &Program) -> Option<ExecScope> {
+        let rules = rules(self)?;
+        let subject = program.subject();
+        (rules.verdict(subject).is_denied())
+            .then(|| rules.respelled(subject).cloned())
+            .flatten()
+    }
+}
 
 /// What a grant judges, and what the launcher runs.
 #[derive(Clone, Debug)]
@@ -55,7 +145,7 @@ pub(crate) enum Subject<'a> {
 pub(crate) enum ExecScope {
     Dir(RealPath),
     /// A file the kernel must admit for an admitted one to start; only
-    /// [`ExecRules::kernel`] writes one.
+    /// [`ExecRules::for_kernel`] writes one.
     Carrier(RealPath),
     File(RealPath),
     Tool(String),
@@ -162,14 +252,12 @@ impl ExecRules {
             .collect()
     }
 
-    /// The kernel's rules, in ascending [`Rank`] so last-match-wins is
-    /// highest-rank-wins; within a rank denies follow allows, as equal ranks
-    /// meet.  Each file is emitted once, at its verdict with `carriers`
-    /// allowed beneath an exact rule, so an allow-only renderer (Landlock)
-    /// may keep the allows as they stand.  The kernel cannot see argv, so
-    /// `Only` is an allow; tools are not rendered, the kernel seeing ral's
-    /// own binary for them.
-    pub(crate) fn kernel(&self, carriers: &BTreeSet<RealPath>) -> Vec<ExecRule> {
+    /// What the kernel is handed: this table with `carriers` admitted beneath
+    /// an exact rule, and each file at its final verdict, so an allow-only
+    /// renderer (Landlock) may keep the allows as they stand.  The kernel
+    /// cannot see argv, so `Only` is an allow; tools are not rendered, the
+    /// kernel seeing ral's own binary for them.
+    pub(crate) fn for_kernel(&self, carriers: &BTreeSet<RealPath>) -> Self {
         let mut with = self.clone();
         with.extend(
             carriers
@@ -184,49 +272,25 @@ impl ExecRules {
             .collect();
         let files = files.into_iter().map(|file| {
             let allow = !with.verdict(Subject::File(file)).is_denied();
-            let path = file.clone();
-            (Rank::Exact, ExecRule::File { path, allow })
+            (ExecScope::File(file.clone()), Verdict::from(allow))
         });
-        let dirs_and_vetoes = (with.rules()).filter_map(|(scope, v)| {
-            let rule = match scope {
-                ExecScope::Dir(path) => ExecRule::Dir {
-                    path: path.clone(),
-                    allow: !v.is_denied(),
-                },
-                ExecScope::Name(name) => ExecRule::Veto(name.clone()),
-                _ => return None,
-            };
-            Some((scope.rank(v), rule))
+        let others = (with.rules()).filter_map(|(scope, v)| match scope {
+            ExecScope::Dir(_) => Some((scope.clone(), v.clone())),
+            ExecScope::Name(_) => Some((scope.clone(), Verdict::Deny)),
+            _ => None,
         });
-        let mut ranked: Vec<_> = dirs_and_vetoes.chain(files).collect();
-        ranked.sort_by_key(|(rank, rule)| {
-            let allows = matches!(
-                rule,
-                ExecRule::Dir { allow: true, .. } | ExecRule::File { allow: true, .. }
-            );
-            (*rank, !allows)
-        });
-        ranked.into_iter().map(|(_, rule)| rule).collect()
+        others.chain(files).collect()
     }
 
-    /// The kernel's list read back as a table: each file at its final
-    /// verdict, so the carriers are already folded in; a dir at its verdict;
-    /// a veto a `Name` deny.  [`Table::verdict`] over it is the kernel's
-    /// last-match-wins, which `the_kernel_rules_judge_as_the_table_and_its_carriers`
-    /// asserts.
-    #[cfg(target_os = "linux")]
-    pub(crate) fn from_kernel(rules: &[ExecRule]) -> Self {
-        (rules.iter())
-            .map(|rule| match rule {
-                ExecRule::Dir { path, allow } => {
-                    (ExecScope::Dir(path.clone()), Verdict::from(*allow))
-                }
-                ExecRule::File { path, allow } => {
-                    (ExecScope::File(path.clone()), Verdict::from(*allow))
-                }
-                ExecRule::Veto(name) => (ExecScope::Name(name.clone()), Verdict::Deny),
-            })
-            .collect()
+    /// The rules in ascending precedence, a deny after the allows of its rank,
+    /// as a last-match-wins renderer (Seatbelt) emits them.
+    #[cfg(any(target_os = "macos", test, all(unix, feature = "test-util")))]
+    pub(crate) fn precedence(&self) -> Vec<(&ExecScope, &Verdict)> {
+        let mut ranked: Vec<_> = (self.rules())
+            .filter(|(scope, _)| !matches!(scope, ExecScope::Carrier(_) | ExecScope::Tool(_)))
+            .collect();
+        ranked.sort_by_key(|(scope, v)| (scope.rank(v), v.is_denied()));
+        ranked
     }
 
     /// The files a rule admits.
@@ -262,6 +326,7 @@ pub(super) mod tests {
     use super::*;
     use crate::capability::table::speaks;
     use crate::path::{Allow, Deny, FrozenPath};
+    #[cfg(unix)]
     use std::collections::BTreeMap;
 
     /// `p` as an absolute path on the host, which for Windows needs a drive.
@@ -579,17 +644,10 @@ pub(super) mod tests {
     }
 
     /// The kernel's last-match-wins over `kernel`, deny by default.
-    fn last_match(kernel: &[ExecRule], real: &RealPath) -> bool {
+    fn last_match(kernel: &ExecRules, real: &RealPath) -> bool {
         let program = Subject::File(real);
-        (kernel.iter().rev())
-            .find_map(|rule| {
-                let (scope, allow) = match rule {
-                    ExecRule::Dir { path, allow } => (ExecScope::Dir(path.clone()), *allow),
-                    ExecRule::File { path, allow } => (ExecScope::File(path.clone()), *allow),
-                    ExecRule::Veto(name) => (ExecScope::Name(name.clone()), false),
-                };
-                speaks(&scope, &Verdict::from(allow), program).then_some(allow)
-            })
+        (kernel.precedence().into_iter().rev())
+            .find_map(|(scope, v)| speaks(scope, v, program).then_some(!v.is_denied()))
             .unwrap_or(false)
     }
 
@@ -603,7 +661,7 @@ pub(super) mod tests {
                 .filter(|_| rng.below(4) == 0)
                 .cloned()
                 .collect();
-            let kernel = rules.kernel(&carriers);
+            let kernel = rules.for_kernel(&carriers);
             let mut with = rules.clone();
             with.extend(
                 carriers
@@ -617,30 +675,23 @@ pub(super) mod tests {
                     "{f}\nrules = {rules:?}\ncarriers = {carriers:?}\nkernel = {kernel:?}"
                 );
             }
-            #[cfg(target_os = "linux")]
-            {
-                let read_back = ExecRules::from_kernel(&kernel);
-                for p in &paths {
-                    for (s, kind) in [(Subject::File(p), "file"), (Subject::Under(p), "dir")] {
-                        assert_eq!(
-                            read_back.verdict(s).is_denied(),
-                            with.verdict(s).is_denied(),
-                            "{p} as a {kind}\nrules = {rules:?}\ncarriers = {carriers:?}\n\
-                             kernel = {kernel:?}"
-                        );
-                    }
+            for p in &paths {
+                for (s, kind) in [(Subject::File(p), "file"), (Subject::Under(p), "dir")] {
+                    assert_eq!(
+                        kernel.verdict(s).is_denied(),
+                        with.verdict(s).is_denied(),
+                        "{p} as a {kind}\nrules = {rules:?}\ncarriers = {carriers:?}\n\
+                         kernel = {kernel:?}"
+                    );
                 }
             }
         }
     }
 
-    fn kernel_file(kernel: &[ExecRule], f: &RealPath) -> Vec<bool> {
-        kernel
-            .iter()
-            .filter_map(|rule| match rule {
-                ExecRule::File { path, allow } if path == f => Some(*allow),
-                _ => None,
-            })
+    fn kernel_file(kernel: &ExecRules, f: &RealPath) -> Vec<bool> {
+        (kernel.rules())
+            .filter(|(scope, _)| matches!(scope, ExecScope::File(p) if p == f))
+            .map(|(_, v)| !v.is_denied())
             .collect()
     }
 
@@ -651,21 +702,21 @@ pub(super) mod tests {
     #[test]
     fn a_carrier_with_an_exact_deny_is_denied_to_the_kernel() {
         let rules: ExecRules = std::iter::once(file("/x/c", Verdict::Deny)).collect();
-        let kernel = rules.kernel(&carriers(&["/x/c"]));
+        let kernel = rules.for_kernel(&carriers(&["/x/c"]));
         assert_eq!(kernel_file(&kernel, &real("/x/c")), [false]);
     }
 
     #[test]
     fn a_carrier_outranks_a_covering_deny_dir() {
         let rules: ExecRules = std::iter::once(dir("/x", false)).collect();
-        let kernel = rules.kernel(&carriers(&["/x/c"]));
+        let kernel = rules.for_kernel(&carriers(&["/x/c"]));
         assert_eq!(kernel_file(&kernel, &real("/x/c")), [true]);
     }
 
     #[test]
     fn a_carrier_whose_name_is_vetoed_is_not_allowed() {
         let rules: ExecRules = std::iter::once(veto("c")).collect();
-        let kernel = rules.kernel(&carriers(&["/x/c"]));
+        let kernel = rules.for_kernel(&carriers(&["/x/c"]));
         assert_eq!(kernel_file(&kernel, &real("/x/c")), [false]);
     }
 
@@ -675,30 +726,11 @@ pub(super) mod tests {
             .into_iter()
             .collect();
         assert_eq!(
-            kernel_file(&rules.kernel(&BTreeSet::new()), &real("/x/bash")),
+            kernel_file(&rules.for_kernel(&BTreeSet::new()), &real("/x/bash")),
             [false]
         );
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         assert_eq!(rules.allowed_files().count(), 0);
-    }
-
-    #[test]
-    fn each_file_is_emitted_once() {
-        let mut rng = Rng(0x1234_5678_9abc_def1);
-        let files: Vec<RealPath> = FILES.iter().map(|p| real(p)).collect();
-        for _ in 0..500 {
-            let rules = random(&mut rng);
-            let carriers: BTreeSet<RealPath> = files
-                .iter()
-                .filter(|_| rng.below(2) == 0)
-                .cloned()
-                .collect();
-            let kernel = rules.kernel(&carriers);
-            for f in &files {
-                let n = kernel_file(&kernel, f).len();
-                assert!(n <= 1, "{f} appears {n} times in {kernel:?}");
-            }
-        }
     }
 
     /// One file, two path keys: a deny on the link `a` and an allow on its

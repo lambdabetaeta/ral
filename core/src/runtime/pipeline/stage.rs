@@ -105,11 +105,10 @@ impl StageHandle {
         StageEnd::External {
             name: e.name,
             args: e.args,
-            outcome,
+            outcome: outcome.enveloped(e.envelope.is_some()),
             jail: e.jail,
             pumps: e.pumps,
             sent,
-            enveloped: e.envelope.is_some(),
         }
     }
 

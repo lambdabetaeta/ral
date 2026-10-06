@@ -1,81 +1,86 @@
 //! The highlight-style vocabulary and the ANSI span renderer.
 //!
 //! [`STYLES`] is the single source of truth for the legal style names: each
-//! row names a style and gives its ANSI escape (the readline surface) and,
-//! under the `structural` feature, its ratatui cell style (the structural
-//! surface).  A style added to the vocabulary is given both in one place, so
-//! the two surfaces cannot drift.  `_ed-highlight` validates against the same
-//! table via [`style_ansi`].
+//! row names a style and gives its ANSI escape.  `_ed-highlight` validates
+//! against the same table via [`style_ansi`].
 
 use ral_core::ansi;
 
 use super::plugin::editor::HighlightSpan;
 
-#[cfg(feature = "structural")]
-use ratatui::style::{Color, Modifier, Style};
-
-/// One highlight style: its name, the ANSI escape the readline surface emits,
-/// and — under `structural` — the foreground colour and modifier the
-/// structural surface paints into a terminal cell.
+/// One highlight style: its name and the ANSI escape the readline surface emits.
 struct HighlightStyle {
     name: &'static str,
     ansi: &'static str,
-    #[cfg(feature = "structural")]
-    fg: Option<Color>,
-    #[cfg(feature = "structural")]
-    modifier: Modifier,
 }
 
-/// One row per style: `name, ansi, ratatui-fg, ratatui-modifier`.  The last
-/// two columns compile away when the `structural` feature is off.
-macro_rules! highlight_styles {
-    ($($name:literal, $ansi:expr, $fg:expr, $modifier:expr);+ $(;)?) => {
-        &[$(HighlightStyle {
-            name: $name,
-            ansi: $ansi,
-            #[cfg(feature = "structural")]
-            fg: $fg,
-            #[cfg(feature = "structural")]
-            modifier: $modifier,
-        }),+]
-    };
-}
-
-const STYLES: &[HighlightStyle] = highlight_styles![
-    "command",      ansi::BOLD_GREEN,    Some(Color::Green),   Modifier::BOLD;
-    "builtin",      ansi::BOLD_CYAN,     Some(Color::Cyan),    Modifier::BOLD;
-    "prelude",      ansi::BOLD_BLUE,     Some(Color::Blue),    Modifier::BOLD;
-    "argument",     "",                  None,                 Modifier::empty();
-    "option",       ansi::CYAN,          Some(Color::Cyan),    Modifier::empty();
-    "path-exists",  ansi::UNDERLINE,     None,                 Modifier::UNDERLINED;
-    "path-missing", ansi::UNDERLINE_RED, Some(Color::Red),     Modifier::UNDERLINED;
-    "string",       ansi::YELLOW,        Some(Color::Yellow),  Modifier::empty();
-    "number",       ansi::MAGENTA,       Some(Color::Magenta), Modifier::empty();
-    "comment",      ansi::DIM,           None,                 Modifier::DIM;
-    "error",        ansi::BOLD_RED,      Some(Color::Red),     Modifier::BOLD;
-    "match",        ansi::BOLD,          None,                 Modifier::BOLD;
-    "bracket-1",    ansi::CYAN,          Some(Color::Cyan),    Modifier::empty();
-    "bracket-2",    ansi::MAGENTA,       Some(Color::Magenta), Modifier::empty();
-    "bracket-3",    ansi::YELLOW,        Some(Color::Yellow),  Modifier::empty();
+const STYLES: &[HighlightStyle] = &[
+    HighlightStyle {
+        name: "command",
+        ansi: ansi::BOLD_GREEN,
+    },
+    HighlightStyle {
+        name: "builtin",
+        ansi: ansi::BOLD_CYAN,
+    },
+    HighlightStyle {
+        name: "prelude",
+        ansi: ansi::BOLD_BLUE,
+    },
+    HighlightStyle {
+        name: "argument",
+        ansi: "",
+    },
+    HighlightStyle {
+        name: "option",
+        ansi: ansi::CYAN,
+    },
+    HighlightStyle {
+        name: "path-exists",
+        ansi: ansi::UNDERLINE,
+    },
+    HighlightStyle {
+        name: "path-missing",
+        ansi: ansi::UNDERLINE_RED,
+    },
+    HighlightStyle {
+        name: "string",
+        ansi: ansi::YELLOW,
+    },
+    HighlightStyle {
+        name: "number",
+        ansi: ansi::MAGENTA,
+    },
+    HighlightStyle {
+        name: "comment",
+        ansi: ansi::DIM,
+    },
+    HighlightStyle {
+        name: "error",
+        ansi: ansi::BOLD_RED,
+    },
+    HighlightStyle {
+        name: "match",
+        ansi: ansi::BOLD,
+    },
+    HighlightStyle {
+        name: "bracket-1",
+        ansi: ansi::CYAN,
+    },
+    HighlightStyle {
+        name: "bracket-2",
+        ansi: ansi::MAGENTA,
+    },
+    HighlightStyle {
+        name: "bracket-3",
+        ansi: ansi::YELLOW,
+    },
 ];
 
 /// The ANSI escape for a highlight style name, or `None` if the name is not a
 /// known style.  The legal style vocabulary lives in [`STYLES`].
 pub(super) fn style_ansi(style: &str) -> Option<&'static str> {
     STYLES.iter().find(|s| s.name == style).map(|s| s.ansi)
-}
-
-/// The ratatui [`Style`] for a highlight style name, or `None` for an unknown
-/// name — the structural surface's analogue of [`style_ansi`], painting a
-/// terminal cell rather than emitting an escape.
-#[cfg(feature = "structural")]
-pub(super) fn style_ratatui(style: &str) -> Option<Style> {
-    let hs = STYLES.iter().find(|s| s.name == style)?;
-    let mut st = Style::default();
-    if let Some(fg) = hs.fg {
-        st = st.fg(fg);
-    }
-    Some(st.add_modifier(hs.modifier))
 }
 
 /// Render `line` with plugin highlight spans as an ANSI string: each span's

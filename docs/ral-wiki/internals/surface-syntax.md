@@ -55,7 +55,7 @@ reads a bare word and nothing else — no expected type, no scope, no head — s
 numeral denotes its number wherever it stands and a token meaning bytes is
 quoted ([[invariants/numerals-denote-numbers|numerals-denote-numbers]]). Both the
 parser (skipping the `Call` wrapper for a value head) and elaboration (through
-`Val::from_word`) read that one answer. Its dual is `quote.rs`'s
+`elaborator::word_val`) read that one answer. Its dual is `quote.rs`'s
 `is_bare_word`: whatever the numeral grammar claims cannot be emitted bare, or
 printed text would come back as a value. `is_bare_word` *lexes* rather than
 scanning characters, so it inherits `is_bare_char` and the positional splits

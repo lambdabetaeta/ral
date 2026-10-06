@@ -4,206 +4,189 @@
 //! `group` builds its dependency graph over `let`-bound lambdas from this, and
 //! the strongly connected components of that graph become the `LetRec` knots.
 
+use crate::ir::Name;
 use crate::syntax::ast::{Ast, Head, ListElem, MapEntry, RecordEntry, ScopeAst, Stmt, Word};
 use std::collections::HashSet;
 
-fn note_free(
-    n: &str,
-    candidates: &HashSet<String>,
-    scopes: &[HashSet<String>],
-    out: &mut HashSet<String>,
-) {
-    if candidates.contains(n) && !scopes.iter().any(|s| s.contains(n)) {
-        out.insert(n.to_string());
-    }
+/// The walk's state: the names asked about, the binders in scope, and what has
+/// been found free.
+struct FreeRefs<'a> {
+    candidates: &'a HashSet<String>,
+    scopes: Vec<HashSet<Name>>,
+    out: HashSet<String>,
 }
 
-/// Walk a block or lambda body.  Each `let`'s own RHS is visited before its
-/// names are pushed, so a `let` never binds itself, only the statements after
-/// it; `scopes` is restored on return.
-fn collect_stmts_free_refs(
-    stmts: &[Stmt],
-    candidates: &HashSet<String>,
-    scopes: &mut Vec<HashSet<String>>,
-    out: &mut HashSet<String>,
-) {
-    let mut pushed = 0;
-    for stmt in stmts {
-        stmt.item.collect_free_refs(candidates, scopes, out);
-        if let Ast::Let { pattern, .. } = &stmt.item {
-            let mut names = HashSet::new();
-            pattern.item.collect_names(&mut names);
-            scopes.push(names);
-            pushed += 1;
+impl FreeRefs<'_> {
+    fn note(&mut self, n: &str) {
+        if self.candidates.contains(n) && !self.scopes.iter().any(|s| s.contains(n)) {
+            self.out.insert(n.to_string());
         }
     }
-    for _ in 0..pushed {
-        scopes.pop();
+
+    /// Walk a block or lambda body.  Each `let`'s own RHS is visited before its
+    /// names are pushed, so a `let` never binds itself, only the statements after
+    /// it; `scopes` is restored on return.
+    fn stmts(&mut self, stmts: &[Stmt]) {
+        let mut pushed = 0;
+        for stmt in stmts {
+            self.ast(&stmt.item);
+            if let Ast::Let { pattern, .. } = &stmt.item {
+                self.scopes
+                    .push(pattern.item.names().into_iter().cloned().collect());
+                pushed += 1;
+            }
+        }
+        for _ in 0..pushed {
+            self.scopes.pop();
+        }
+    }
+
+    fn ast(&mut self, ast: &Ast) {
+        match ast {
+            Ast::Variable(n) => self.note(n),
+            Ast::Unit
+            | Ast::Literal(_)
+            | Ast::Word(Word::Plain(_) | Word::Slash(_) | Word::Tilde(_))
+            | Ast::Return(None) => {}
+            Ast::Lambda { param, body } => {
+                self.scopes
+                    .push(param.item.names().into_iter().cloned().collect());
+                self.stmts(body);
+                self.scopes.pop();
+            }
+            Ast::Block(stmts) => {
+                self.stmts(stmts);
+            }
+            Ast::Let { value, .. }
+            | Ast::Return(Some(value))
+            | Ast::Spread(value)
+            | Ast::Force(value) => {
+                self.ast(&value.item);
+            }
+            Ast::Call {
+                head,
+                args,
+                redirects,
+            } => {
+                self.head(head);
+                for arg in args {
+                    self.ast(&arg.item);
+                }
+                for r in redirects.operands() {
+                    self.ast(r);
+                }
+            }
+            Ast::Scope { op, redirects } => {
+                self.scope(op);
+                for r in redirects.operands() {
+                    self.ast(r);
+                }
+            }
+            Ast::Pipeline(stages) | Ast::Chain(stages) | Ast::Interpolation(stages) => {
+                for s in stages {
+                    self.ast(&s.item);
+                }
+            }
+            Ast::Tag { payload, .. } => {
+                if let Some(p) = payload {
+                    self.ast(&p.item);
+                }
+            }
+            Ast::Case { scrutinee, arms } => {
+                self.ast(&scrutinee.item);
+                for arm in arms {
+                    self.ast(&arm.body.item);
+                }
+            }
+            Ast::Binary(l, _, r) | Ast::And(l, r) | Ast::Or(l, r) => {
+                self.ast(&l.item);
+                self.ast(&r.item);
+            }
+            Ast::Negate(inner) | Ast::Not(inner) => {
+                self.ast(&inner.item);
+            }
+            Ast::Index { target, keys } => {
+                self.ast(&target.item);
+                for k in keys {
+                    self.ast(&k.item);
+                }
+            }
+            Ast::List(elems) => {
+                for elem in elems {
+                    match elem {
+                        ListElem::Single(a) | ListElem::Spread(a) => {
+                            self.ast(&a.item);
+                        }
+                    }
+                }
+            }
+            Ast::Record(entries) => {
+                for entry in entries {
+                    match entry {
+                        RecordEntry::Field { value, .. } => {
+                            self.ast(&value.item);
+                        }
+                        RecordEntry::Spread(a) => {
+                            self.ast(&a.item);
+                        }
+                    }
+                }
+            }
+            Ast::Map(entries) => {
+                for entry in entries {
+                    match entry {
+                        MapEntry::Entry { value, .. } => {
+                            self.ast(&value.item);
+                        }
+                        MapEntry::Deref { name, value } => {
+                            self.note(name);
+                            self.ast(&value.item);
+                        }
+                        MapEntry::Spread(a) => {
+                            self.ast(&a.item);
+                        }
+                    }
+                }
+            }
+            Ast::If { branches, else_ } => {
+                for branch in branches {
+                    self.ast(&branch.cond.item);
+                    self.ast(&branch.body.item);
+                }
+                if let Some(e) = else_ {
+                    self.ast(&e.item);
+                }
+            }
+        }
+    }
+
+    fn head(&mut self, head: &Head) {
+        match head {
+            // A bare head resolves through value lookup before PATH, so `f 1 2`
+            // may well be calling a `let`-bound lambda.
+            Head::Bare(n) => self.note(n),
+            Head::Value(ast) => self.ast(ast),
+            Head::ExternalName(_) | Head::Path(_) | Head::TildePath(_) => {}
+        }
+    }
+
+    fn scope(&mut self, scope: &ScopeAst) {
+        for op in scope.operands() {
+            self.ast(op);
+        }
     }
 }
 
 impl Ast {
     /// The names in `candidates` this AST references without binding.
     pub fn free_refs(&self, candidates: &HashSet<String>) -> HashSet<String> {
-        let mut out = HashSet::new();
-        let mut scopes: Vec<HashSet<String>> = Vec::new();
-        self.collect_free_refs(candidates, &mut scopes, &mut out);
-        out
-    }
-
-    fn collect_free_refs(
-        &self,
-        candidates: &HashSet<String>,
-        scopes: &mut Vec<HashSet<String>>,
-        out: &mut HashSet<String>,
-    ) {
-        match self {
-            Self::Variable(n) => note_free(n, candidates, scopes, out),
-            Self::Unit
-            | Self::Literal(_)
-            | Self::Word(Word::Plain(_) | Word::Slash(_) | Word::Tilde(_))
-            | Self::Return(None) => {}
-            Self::Lambda { param, body } => {
-                let mut names = HashSet::new();
-                param.item.collect_names(&mut names);
-                scopes.push(names);
-                collect_stmts_free_refs(body, candidates, scopes, out);
-                scopes.pop();
-            }
-            Self::Block(stmts) => {
-                collect_stmts_free_refs(stmts, candidates, scopes, out);
-            }
-            Self::Let { value, .. }
-            | Self::Return(Some(value))
-            | Self::Spread(value)
-            | Self::Force(value) => {
-                value.item.collect_free_refs(candidates, scopes, out);
-            }
-            Self::Call {
-                head,
-                args,
-                redirects,
-            } => {
-                head.collect_free_refs(candidates, scopes, out);
-                for arg in args {
-                    arg.item.collect_free_refs(candidates, scopes, out);
-                }
-                for r in redirects.operands() {
-                    r.collect_free_refs(candidates, scopes, out);
-                }
-            }
-            Self::Scope { op, redirects } => {
-                op.collect_free_refs(candidates, scopes, out);
-                for r in redirects.operands() {
-                    r.collect_free_refs(candidates, scopes, out);
-                }
-            }
-            Self::Pipeline(stages) | Self::Chain(stages) | Self::Interpolation(stages) => {
-                for s in stages {
-                    s.item.collect_free_refs(candidates, scopes, out);
-                }
-            }
-            Self::Tag { payload, .. } => {
-                if let Some(p) = payload {
-                    p.item.collect_free_refs(candidates, scopes, out);
-                }
-            }
-            Self::Case { scrutinee, arms } => {
-                scrutinee.item.collect_free_refs(candidates, scopes, out);
-                for arm in arms {
-                    arm.body.item.collect_free_refs(candidates, scopes, out);
-                }
-            }
-            Self::Binary(l, _, r) | Self::And(l, r) | Self::Or(l, r) => {
-                l.item.collect_free_refs(candidates, scopes, out);
-                r.item.collect_free_refs(candidates, scopes, out);
-            }
-            Self::Negate(inner) | Self::Not(inner) => {
-                inner.item.collect_free_refs(candidates, scopes, out);
-            }
-            Self::Index { target, keys } => {
-                target.item.collect_free_refs(candidates, scopes, out);
-                for k in keys {
-                    k.item.collect_free_refs(candidates, scopes, out);
-                }
-            }
-            Self::List(elems) => {
-                for elem in elems {
-                    match elem {
-                        ListElem::Single(a) | ListElem::Spread(a) => {
-                            a.item.collect_free_refs(candidates, scopes, out);
-                        }
-                    }
-                }
-            }
-            Self::Record(entries) => {
-                for entry in entries {
-                    match entry {
-                        RecordEntry::Field { value, .. } => {
-                            value.item.collect_free_refs(candidates, scopes, out);
-                        }
-                        RecordEntry::Spread(a) => {
-                            a.item.collect_free_refs(candidates, scopes, out);
-                        }
-                    }
-                }
-            }
-            Self::Map(entries) => {
-                for entry in entries {
-                    match entry {
-                        MapEntry::Entry { value, .. } => {
-                            value.item.collect_free_refs(candidates, scopes, out);
-                        }
-                        MapEntry::Deref { name, value } => {
-                            note_free(name, candidates, scopes, out);
-                            value.item.collect_free_refs(candidates, scopes, out);
-                        }
-                        MapEntry::Spread(a) => {
-                            a.item.collect_free_refs(candidates, scopes, out);
-                        }
-                    }
-                }
-            }
-            Self::If { branches, else_ } => {
-                for branch in branches {
-                    branch.cond.item.collect_free_refs(candidates, scopes, out);
-                    branch.body.item.collect_free_refs(candidates, scopes, out);
-                }
-                if let Some(e) = else_ {
-                    e.item.collect_free_refs(candidates, scopes, out);
-                }
-            }
-        }
-    }
-}
-
-impl Head {
-    fn collect_free_refs(
-        &self,
-        candidates: &HashSet<String>,
-        scopes: &mut Vec<HashSet<String>>,
-        out: &mut HashSet<String>,
-    ) {
-        match self {
-            // A bare head resolves through value lookup before PATH, so `f 1 2`
-            // may well be calling a `let`-bound lambda.
-            Self::Bare(n) => note_free(n, candidates, scopes, out),
-            Self::Value(ast) => ast.collect_free_refs(candidates, scopes, out),
-            Self::ExternalName(_) | Self::Path(_) | Self::TildePath(_) => {}
-        }
-    }
-}
-
-impl ScopeAst {
-    fn collect_free_refs(
-        &self,
-        candidates: &HashSet<String>,
-        scopes: &mut Vec<HashSet<String>>,
-        out: &mut HashSet<String>,
-    ) {
-        for op in self.operands() {
-            op.collect_free_refs(candidates, scopes, out);
-        }
+        let mut walk = FreeRefs {
+            candidates,
+            scopes: Vec::new(),
+            out: HashSet::new(),
+        };
+        walk.ast(self);
+        walk.out
     }
 }
 

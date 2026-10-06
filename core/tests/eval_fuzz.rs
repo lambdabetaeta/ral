@@ -8,49 +8,31 @@
 
 mod common;
 
-use ral_core::builtins;
-use ral_core::protocol::{Program, Run};
-use ral_core::types::{Break, GrantStack, Shell, Value};
-use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
+use ral_core::protocol::Run;
+use ral_core::run::RunReport;
+use ral_core::types::{Break, Shell, Value};
 
 /// Evaluate `input` through the public run door on an already-configured
 /// `shell` — parse, elaborate, typecheck against the prelude schemes, run
 /// the phrases.
 fn run_on(shell: &mut Shell, input: &str) -> ral_core::types::Settled<Value> {
-    match shell.run(RunRequest {
-        run: Run {
-            program: Program::Source(input.into()),
-            script_name: "<test>".into(),
-            caps: GrantStack::root(),
-            wall: None,
-            deferred_lease: None,
-            worker_cap: None,
-            io: RunIo::Inherit,
-            terminal: RequestedTerminalAccess::Leased,
-            stdin: RunStdin::Inherit,
-            trail: None,
-        },
-        surface: None,
-        deferred: None,
-        desk: None,
-        fork: None,
-    }) {
+    match shell.run(Run::foreground(input, "<test>")) {
         RunReport::Ran { ending, .. } => ending.into_result(),
         // A parse or type failure is a static diagnostic, not a run
         // outcome — `must_fail` reads it the same as a runtime error, since
         // both mean "this program never produced a value."
         RunReport::Static { diagnostics } => {
-            let msg = ral_core::diagnostic::format_static_diagnostics(&diagnostics).0;
-            Err(Break::Error(ral_core::types::Error::new(msg, 2)))
+            let msg = diagnostics.render().0;
+            Err(ral_core::types::Error::raised(msg, 2).into())
         }
     }
 }
 
 /// [`run_on`] against a fresh shell seeded with `path` on `PATH`.
 fn eval_on_path(input: &str, path: &str) -> ral_core::types::Settled<Value> {
-    let mut shell = Shell::new(ral_core::io::TerminalState::default());
+    let mut shell = ral_core::test_helper::core_shell();
     shell.set_env_var("PATH", path);
-    builtins::register(&mut shell, common::prelude_comp());
+    common::prelude().seat(&mut shell);
     run_on(&mut shell, input)
 }
 
@@ -100,7 +82,7 @@ fn try_error_record_carries_the_script() {
     assert_eq!(
         must_succeed(
             "try { fail [status: 1, message: 'x'] } { |err| \
-             case $err[site] [`just: { |s| return \"$s[script]:$s[line]\" }, `none: { |_| return none }] }"
+             case $err[site] [`some: { |s| return \"$s[script]:$s[line]\" }, `none: { |_| return none }] }"
         ),
         Value::string("<test>:1")
     );
@@ -113,9 +95,9 @@ fn len_on_int_is_error() {
 
 #[test]
 fn env_overrides_shadow_process_env_in_dollar_env() {
-    let mut shell = Shell::new(ral_core::io::TerminalState::default());
+    let mut shell = ral_core::test_helper::core_shell();
     shell.set_env_var("RAL_TEST_ENV", "override");
-    builtins::register(&mut shell, common::prelude_comp());
+    common::prelude().seat(&mut shell);
     let result = run_on(&mut shell, "return !{env}[RAL_TEST_ENV]").expect("evaluate env");
     assert_eq!(result, Value::string("override"));
 }
@@ -201,7 +183,7 @@ fn return_deref_name_is_bound_value() {
     let v = must_succeed("return $upper");
     match v {
         Value::Native { entry, applied } => {
-            assert_eq!(entry.name, "upper");
+            assert_eq!(entry.decl.name, "upper");
             assert!(applied.is_empty());
         }
         other => panic!("expected the native itself, got {other:?}"),
@@ -343,7 +325,7 @@ fn elaborator_never_wraps_exec_in_redirect() {
                 walk(rest, saw_exec_with_redirects);
             }
             CompKind::App { head, .. } => walk(head, saw_exec_with_redirects),
-            CompKind::Pipeline { stages, .. } => {
+            CompKind::Pipeline { stages } => {
                 for s in stages {
                     walk(s, saw_exec_with_redirects);
                 }
@@ -362,10 +344,9 @@ fn elaborator_never_wraps_exec_in_redirect() {
     for src in sources {
         let ast =
             ral_core::syntax::parser::parse(src).unwrap_or_else(|e| panic!("parse {src:?}: {e}"));
-        let top = ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default(), "")
-            .expect("elaborate");
+        let top = ral_core::elaborator::elaborate(&ast, [], "").expect("elaborate");
         let mut saw = false;
-        for phrase in &top.phrases {
+        for phrase in &top {
             let comp: &ral_core::ir::Comp = match &phrase.item {
                 ral_core::ir::Phrase::Define { comp, .. } | ral_core::ir::Phrase::Run(comp) => comp,
             };

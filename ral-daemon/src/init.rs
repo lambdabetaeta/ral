@@ -6,6 +6,10 @@
 //! [`crate::net`], [`crate::pump`], and [`crate::reap`], where they are data
 //! and can be tested; here they are only carried out.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "[silent:guest-main] the guest daemon cannot depend on core, so no `errln!`"
+)]
 use std::convert::Infallible;
 use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicBool, Ordering};

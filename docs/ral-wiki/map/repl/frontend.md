@@ -1,5 +1,5 @@
 ---
-generated_at_commit: d9abfb52
+generated_at_commit: 446e3123
 generated_at_date: 2026-09-11
 covers_paths: [ral/src/repl/frontend.rs, ral/src/repl/frontend/, ral/src/repl/completion.rs, ral/src/repl/complete.rs, ral/src/repl/highlight_style.rs, prompt-editor/src/completion.rs, core/src/text.rs]
 ---
@@ -38,36 +38,6 @@ dumb terminals whatever was asked):
   support raw mode and ANSI. Its `printer` hands rustyline's
   `ExternalPrinter` to the `ReplHost`, so a surfaced `` `watch `` line lands
   above the live prompt.
-- `structural.rs::StructuralFrontend` — the ratatui inline-viewport projection
-  surface (`structural` feature, `--surface structural`): the typed spine
-  (the `spine` reading of the buffer), worksheet and handles matrix (the
-  `bindings` reading's rows) around the prompt, plus Tab completion (below).
-  See [[decisions/260620_repl-as-structural-surface|repl-as-structural-surface]].
-  It drives the same in-editor plugin surface the rustyline backend does, off the
-  shared [[map/repl/plugins|`PluginRuntime`]] rather than a parallel copy: each
-  iteration runs `run_buffer_change_hooks` and reads back the fish-style ghost
-  suggestion and highlight spans (overlaid as ratatui cells via
-  `highlight_style::style_ratatui`), accepts the ghost on right-arrow at buffer end,
-  and resolves each keypress through a snapshot of the shared
-  [[map/repl/plugins|`KeyRouter`]] (`Resolution::Default` falls into the
-  surface's own built-in key arms). A claimed binding breaks the loop to a
-  `Composed::Keybinding` outcome — no new `Read` variant — tears
-  down the viewport and raw mode, then runs `dispatch_keybinding`, so an
-  `_ed-tui` handler (fzf, zoxide) gets the terminal exactly as the rustyline path
-  dispatches only after leaving `readline`; an `_ed-push` buffer is popped when
-  nothing is pending.
-
-The structural surface and exarch TUI share their prompt editor through
-the `prompt-editor` crate (backed by `edtui` 0.11): the `PromptEditor` facade
-owns all cursor positioning, key dispatch (Emacs and Vim via edtui
-`EditorEventHandler`), height hinting, and highlight rendering. Both
-frontends show the terminal native cursor in **every** mode, the same shape
-throughout (no painted vi modal-mode block). One implementation, not a copy each.
-The structural surface handles shell-line chords before the editor:
-**Ctrl-U kills to line-start** (readline unix-line-discard, not edtui
-undo), in emacs and in vi-Insert mode. vi Normal/Visual keep the edtui keymap.
-Ctrl-D on a non-empty buffer deletes the char under the cursor;
-only an empty buffer reads as `Eof`.
 
 ## Completion
 
@@ -79,7 +49,7 @@ enumeration lazily through `path-entries` in the engine's own filesystem,
 keyed by the `env-var PATH` and `cwd` readings and aged by `SCAN_TTL`;
 cwd-anchored path entries likewise — and ranks them.
 `completion::complete(line, pos, &Sources) -> (replace_from, Vec<Candidate>)`
-is the single entry point both surfaces call. Ranking is `nucleo` fuzzy
+is the single entry point the rustyline helper calls. Ranking is `nucleo` fuzzy
 matching for every surface — path-tuned for path entries, ties broken
 alphabetically — and lives in `ral_core::text::rank`, a generic `AsRef<str>`
 function with no UI in it, so exarch's pickers match the same way ral's menus
@@ -98,18 +68,4 @@ parallel vectors. `Candidate` is the engine's own type and stays here.
   [[map/repl/plugins|`PluginRuntime`]], and `RalHelper` only paints what the
   runtime last produced. `highlight_style.rs::STYLES` is the one data-driven
   table of legal highlight styles — each row gives the name, its ANSI escape
-  (`style_ansi`, which `_ed-highlight` validates against), and its ratatui cell
-  style (`style_ratatui`) — so the two surfaces cannot drift.
-- `structural.rs` drives the engine as a **drop-down menu band**: Tab completes
-  the token under the cursor — a unique match is spliced in place, several open
-  a bordered popup rendered over the top of the projection band, anchored under
-  the token. Tab/↓ and ⇧Tab/↑ cycle the selection, Enter accepts, Esc (or any
-  editing key) dismisses. The lower band reserves room for the menu so a fresh
-  session still has space to drop it down. The popup itself is
-  `prompt_editor::completion::Menu`, shared with exarch and painted in the
-  host's palette; it takes its own `Candidate` (`display`, `detail`,
-  `replacement`), which the engine's candidates convert into at the one call
-  to `Menu::open` — always with `detail: None`, since a filename or a binding
-  name is its own whole story and carries no gloss. exarch's slash commands
-  are the one caller that fills `detail`, from the registry's own `help` line;
-  see [[map/exarch/frontend]].
+  (`style_ansi`, which `_ed-highlight` validates against).

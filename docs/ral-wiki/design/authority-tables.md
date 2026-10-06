@@ -15,7 +15,7 @@ the two dimensions became one structure is
 ## The structure
 
 - **Verdicts.** `Deny < Only(s) < Allow`, `Only` meeting by intersection
-  (`Verdict`, `core/src/types/capability.rs`). Deny is the bottom.
+  (`Verdict`, `core/src/capability/lattice.rs`). Deny is the bottom.
 - **Subjects** `s ∈ S`: what a table judges. A path for fs; for exec a
   `Subject` — a file by its real path, a bundled tool by name, or `Under(d)`,
   the inside of a directory.
@@ -151,7 +151,7 @@ random pairs of a model.
 | where the denies live | each layer's `deny_paths`, in both the read and the write region | in the table, beside the allows |
 | tables per stack | two, one per `FsOp`, `None` when no layer holds an fs opinion | one, `None` when no layer holds an exec opinion |
 | when frozen | re-frozen against the live `Resolver` at every guard check, once at spawn for the projection | compiled afresh per question; path and dir keys are frozen forms, never re-read |
-| extra scope | — | `Carrier`, added only by `kernel()` |
+| extra scope | — | `Carrier`, added only by `for_kernel()` |
 
 **Exact beats a covering deny dir in exec; a deny wins at any depth in fs.**
 Each is its own dimension's law. An fs deny is a carve-out protecting
@@ -165,7 +165,7 @@ an exception: `deny dir /x/B` with `allow file /x/b/tool` admits `/x/b/tool`,
 and the deepest directory decides between nested ones. Deny-wins in exec
 would break both, for reasons unrelated to any spelling.
 
-**Exec has three languages, one map each.**
+**Exec has two languages, one map each, and the kernel reads the second.**
 
 - `ExecKey { Name, Path, Dir }` — the grant *as written*: `ExecGrant` is
   `BTreeMap<ExecKey, Verdict>`, entered through `meet_insert` (its
@@ -177,34 +177,33 @@ would break both, for reasons unrelated to any spelling.
   finds, and for a deny a `Name` veto; a path key a `File`, a dir key a `Dir`
   at `Verdict::from(!v.is_denied())`, so no dir carries `Only` into a table,
   each its frozen real form.
-- `ExecRule { Dir, File, Veto }` — the table *rendered for the kernel*
-  (`ExecRules::kernel`): a path and a bool, or a vetoed name. No `Only`, no
-  tools, no carriers as such.
 
-They cannot be one type. A bare key is no scope until the host `PATH` is
-consulted, so an authored grant is not closed under meet and must be compiled
-per question ([[decisions/260906_object-not-name|object-not-name]], fault B).
-And the kernel's vocabulary is strictly poorer than the guard's: it sees no
-argv and no bundled tool, and an allow-only renderer must be able to take the
-allows as they stand.
+There was a third: a list of `ExecRule { Dir, File, Veto }` rendered for the
+kernel, which the Linux parent read back into a table. It is gone
+([[decisions/261006_capability-is-data|capability-is-data]]): the model sits
+below the sandbox, so `ExecProjection::Restricted` carries the `ExecRules`
+itself, and the kernel's poorer vocabulary (no `Only`, no tools, no carriers as
+such) is what `for_kernel` leaves in the table, not a type of its own. A bare
+key is no scope until the host `PATH` is consulted, so an authored grant is
+not closed under meet and must be compiled per question
+([[decisions/260906_object-not-name|object-not-name]], fault B). And the
+kernel sees no argv and no bundled tool, and an allow-only renderer must be
+able to take the allows as they stand.
 
-**The kernel's list.** `kernel()` adds `(Carrier(c), Allow)` for each carrier,
-then emits each `Dir` at its own verdict and rank, each distinct file among
-`File` and `Carrier` scopes *once* at the table's verdict for it, and each
-`Name` as a `Veto`, sorted by rank with denies after allows within a rank. The
-kernel's last-match-wins is then the guard's highest-rank-wins by
-construction ([[decisions/261004_exec-carriers|exec-carriers]]).
-
-**The list read back.** Landlock can render allows only, so on Linux the
-parent reads the list back as a table, `ExecRules::from_kernel`, the fourth
-reader of the exec language: each `File` at its final verdict, carriers
-already folded in, each `Dir` at its own, each `Veto` a `Name` deny.
-`Table::verdict` over it is the kernel's last-match-wins, which the property
-test asserts at every `File` and `Under` subject, and it is the one judge of
-the expansion that renders a block inside an allowed directory: every entry
-along the spine to a block is judged by it, never by a second reading of
-`ExecRule`s, polarity coming off each rule's verdict, so a deny by another
-spelling holds in the kernel as in the guard
+**What the kernel is handed.** `for_kernel()` adds `(Carrier(c), Allow)` for
+each carrier, keeps each `Dir` at its own verdict and each `Name` as a deny,
+and keeps each distinct file among `File` and `Carrier` scopes *once* at the
+table's verdict for it (so carriers are already folded in, and a file an
+authored exact deny or a veto beats is a deny). The result is again an
+`ExecRules`. Seatbelt renders it by `precedence()`, sorted by rank with denies
+after allows within a rank, so the kernel's last-match-wins is the guard's
+highest-rank-wins by construction
+([[decisions/261004_exec-carriers|exec-carriers]]). Landlock can render allows
+only, and reads the very table: `Table::verdict` over it is the kernel's
+judgment, which the property test asserts at every `File` and `Under` subject,
+and it is the one judge of the expansion that renders a block inside an
+allowed directory: every entry along the spine to a block is judged by it, so a
+deny by another spelling holds in the kernel as in the guard
 ([[decisions/260906_landlock-exec-layer|landlock-exec-layer]]).
 
 ### Worked cases
@@ -319,10 +318,10 @@ marks a refusal that names the denied spelling.
   honours only the backslash form, but this matcher holds the separators
   interchangeable, and folding the two differently would leave a deny a
   differently spelled access slips past.
-- **`windows` is a parameter in `lex`, never a `cfg!` read**, in
+- **The platform rules are a `PathRules` parameter, never a `cfg!` read**, in
   `starts_with_identity`, `starts_with_collision`, `is_foreign_rooted`,
-  `is_discard_device` and `reserved_device_refusal`, with one platform gate at
-  each sole call site, so both tables are pinned by tests on every host and
+  `is_discard_device`, `reserved_device_refusal`, `identity_depth` and
+  the name key, with `PathRules::HOST` read once at each sole call site, so both tables are pinned by tests on every host and
   neither is dark on the other.
 - **8.3 short names are an alias, not a fold**, so no key closes them. With a
   deny on `C:\w\secretfile.txt`, a leaf left spelled `SECRET~1.TXT` misses the
@@ -424,7 +423,7 @@ marks a refusal that names the denied spelling.
   link-following walk from `/`); `env` is not followed, since following it
   reads a `PATH` the confined code controls.
 - **The guard never consults them; the kernel needs them.** They enter only
-  in `kernel()`, as `Carrier` scopes, ranked under `Exact` so an authored deny
+  in `for_kernel()`, as `Carrier` scopes, ranked under `Exact` so an authored deny
   on a carrier file wins and under `Name` so a vetoed name is not allowed
   (`a_carrier_with_an_exact_deny_is_denied_to_the_kernel`,
   `a_carrier_whose_name_is_vetoed_is_not_allowed`). A carrier holds a file by
@@ -453,7 +452,7 @@ marks a refusal that names the denied spelling.
 ### The projection
 
 - **The fs rendering is lexical surface strings.** Each live prefix flattens
-  to `surface` once, in `sandbox_projection`, and every backend widens it into
+  to `surface` once, in `SandboxProjection::of`, and every backend widens it into
   its own name class at render time; `real` has no reader below the fold.
 - **`live()` is why no allow beneath a deny ever reaches a backend.** Under
   deny-wins such an allow is dead, and a Windows ACL orders explicit allows
@@ -481,8 +480,9 @@ marks a refusal that names the denied spelling.
   is written. That freshness is the whole difference between the two readers
   of one fold.
 - **Exec tables are compiled afresh on every question**, because a bare key
-  follows the host `PATH`; the projection renders the very table in the
-  `Admitted` that judged the launch.
+  follows the host `PATH`; the projection carries the very table in the
+  `Admitted` that judged the launch (`ExecProjection::Restricted(ExecRules)`,
+  by `ExecRules::for_kernel`), so the kernel list is no third language.
 
 ### Absent denies
 

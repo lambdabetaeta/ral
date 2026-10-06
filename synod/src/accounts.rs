@@ -45,7 +45,7 @@ const KEYCHAIN: Keychain = Keychain::for_app(SYNOD);
 
 fn declarations_path() -> PathBuf {
     SYNOD
-        .xdg_dir(ral_core::path::basedir::XdgKind::Config)
+        .xdg_dir(ral_core::host::XdgKind::Config)
         .join(DECLARATIONS_FILE)
 }
 

@@ -16,9 +16,10 @@
 pub(crate) mod source;
 
 use ral_core::errln;
+use ral_core::first_order::FOValue;
+use ral_core::first_order::datum::Datum;
 use ral_core::record;
-use ral_core::serial::FOValue;
-use ral_core::serial::datum::Datum;
+use ral_core::ty::{Ty, Typed};
 use ral_core::typecheck::Form;
 use ral_core::types::{Break, DefaultPolicy, Error, HookName, HookSig, Map, Mooring};
 use ral_core::{Shell, Value};
@@ -42,13 +43,19 @@ pub(crate) struct RcSettings {
     pub(super) startup: bool,
 }
 
-record!(RcSettings {
-    edit_mode: "edit_mode",
+record!(typed RcSettings {
+    edit_mode: "edit-mode",
     bell: "bell",
     surface: "surface",
     theme: "theme",
     startup: "startup",
 });
+
+impl Typed for Surface {
+    fn ty() -> Ty {
+        Ty::String
+    }
+}
 
 impl Datum for Surface {
     fn encode(self) -> FOValue {
@@ -61,7 +68,7 @@ impl Datum for Surface {
     fn decode(v: &FOValue) -> Result<Self, String> {
         let name = String::decode(v)?;
         <Self as clap::ValueEnum>::from_str(&name, true)
-            .map_err(|_| format!("expected minimal, readline, or structural, got '{name}'"))
+            .map_err(|_| format!("expected minimal or readline, got '{name}'"))
     }
 }
 
@@ -75,10 +82,10 @@ const DEFAULT_RC: &str = "\
 # with the sections you want, and delete the final `return ()`.
 
 # return [
-    # edit_mode:        vi,          # emacs (default) or vi
+    # edit-mode:        vi,          # emacs (default) or vi
     # bell:             false,       # audible bell on readline error (default false)
-    # surface:          readline,    # readline (default), minimal, or structural
-    # recursion_limit:  100000,      # maximum machine-frame recursion depth
+    # surface:          readline,    # readline (default) or minimal
+    # recursion-limit:  100000,      # maximum machine-frame recursion depth
 
     # prompt: {
     #     return \"!{abbreviate-home !{cwd}} $ \"
@@ -104,8 +111,8 @@ const DEFAULT_RC: &str = "\
     # },
 
     # theme: [
-    #     value_prefix: \"=> \",
-    #     value_color:  yellow,   # black red green yellow blue magenta cyan white none
+    #     value-prefix: \"=> \",
+    #     value-color:  yellow,   # black red green yellow blue magenta cyan white none
     # ],
 # ]
 
@@ -118,13 +125,14 @@ return ()
     reason = "[silent:rc-write] persists the default repl config dir + rc file; not turn-time model I/O"
 )]
 pub(super) fn create_default_rc() -> Option<String> {
-    let (dir, path) = ral_core::path::config::xdg_config_subpath("ral")
+    let (dir, path) = ral_core::host::xdg(ral_core::host::XdgKind::Config)
+        .map(|d| d.join("ral"))
         .map(|dir| {
             let file = dir.join("rc");
             (dir, file)
         })
         .or_else(|| {
-            let dot = ral_core::path::config::home_dot(".ralrc")?;
+            let dot = ral_core::host::home_dot(".ralrc")?;
             // Legacy single-file layout: the "dir" is the home directory, since
             // there is no per-app subdirectory to create before
             // writing `.ralrc` itself.
@@ -229,16 +237,16 @@ pub(crate) fn apply_rc_config(
 /// key's failure is exactly a shape mismatch, so checking it here first is
 /// what lets `apply_rc_config` refuse a bad value without touching the shell.
 fn rc_value_shape_error(key: &str, val: &Value) -> Option<Error> {
-    let err = |msg: String| Some(Error::new(msg, 1));
+    let err = |msg: String| Some(Error::new(msg));
     match key {
         "env" | "bindings" if !matches!(val, Value::Map(_)) => {
             err(format!("rc '{key}' must be a map; got {}", val.type_name()))
         }
-        "edit_mode" => match val {
+        "edit-mode" => match val {
             Value::String(s) if matches!(s.to_ascii_lowercase().as_str(), "vi" | "emacs") => None,
-            Value::String(s) => err(format!("rc 'edit_mode' must be 'emacs' or 'vi'; got '{s}'")),
+            Value::String(s) => err(format!("rc 'edit-mode' must be 'emacs' or 'vi'; got '{s}'")),
             other => err(format!(
-                "rc 'edit_mode' must be a string; got {}",
+                "rc 'edit-mode' must be a string; got {}",
                 other.type_name()
             )),
         },
@@ -248,18 +256,18 @@ fn rc_value_shape_error(key: &str, val: &Value) -> Option<Error> {
         "surface" => match val {
             Value::String(s) if <Surface as clap::ValueEnum>::from_str(s, true).is_ok() => None,
             Value::String(s) => err(format!(
-                "rc 'surface' must be minimal, readline, or structural; got '{s}'"
+                "rc 'surface' must be minimal or readline; got '{s}'"
             )),
             other => err(format!(
                 "rc 'surface' must be a string; got {}",
                 other.type_name()
             )),
         },
-        "recursion_limit" => match val.as_int() {
+        "recursion-limit" => match val.as_int() {
             Some(n) if n > 0 => None,
-            Some(n) => err(format!("rc 'recursion_limit' must be positive; got {n}")),
+            Some(n) => err(format!("rc 'recursion-limit' must be positive; got {n}")),
             None => err(format!(
-                "rc 'recursion_limit' must be a positive int; got {}",
+                "rc 'recursion-limit' must be a positive int; got {}",
                 val.type_name()
             )),
         },
@@ -296,10 +304,10 @@ fn apply_rc_key(
     match key {
         "env" => {
             let Value::Map(m) = val else {
-                return Err(Error::new(
-                    format!("rc 'env' must be a map; got {}", val.type_name()),
-                    1,
-                ));
+                return Err(Error::new(format!(
+                    "rc 'env' must be a map; got {}",
+                    val.type_name()
+                )));
             };
             for (k, v) in &m {
                 // PWD lives on context.cwd, and a copy in env_overrides
@@ -316,24 +324,20 @@ fn apply_rc_key(
             }
             Ok(())
         }
-        "prompt" => {
-            let origin = ral_core::source::Span::synthetic();
-            shell
-                .register_hook(
-                    HookName::session("prompt"),
-                    val,
-                    HookSig::Prompt,
-                    DefaultPolicy::denied_capture(),
-                    origin,
-                )
-                .map_err(|e| Error::new(e.to_string(), 1))
-        }
+        "prompt" => shell
+            .register_hook(
+                HookName::session("prompt"),
+                val,
+                HookSig::Prompt,
+                DefaultPolicy::denied_capture(),
+            )
+            .map_err(|e| Error::new(e.to_string())),
         "aliases" => {
             let Value::Map(m) = val else {
-                return Err(Error::new(
-                    format!("rc 'aliases' must be a map; got {}", val.type_name()),
-                    1,
-                ));
+                return Err(Error::new(format!(
+                    "rc 'aliases' must be a map; got {}",
+                    val.type_name()
+                )));
             };
             // A function installs as an argv-handler alias; any other
             // value falls through to a plain scope binding so the key
@@ -346,7 +350,7 @@ fn apply_rc_key(
                     shell.install_alias(name, value).map_err(|err| match err {
                         Break::Error(e) => e.context(format!("ralrc alias '{alias}'")),
                         Break::Escape(_) => {
-                            Error::new(format!("ralrc alias '{alias}' installation escaped"), 1)
+                            Error::new(format!("ralrc alias '{alias}' installation escaped"))
                         }
                     })
                 } else {
@@ -357,10 +361,10 @@ fn apply_rc_key(
         }
         "bindings" => {
             let Value::Map(m) = val else {
-                return Err(Error::new(
-                    format!("rc 'bindings' must be a map; got {}", val.type_name()),
-                    1,
-                ));
+                return Err(Error::new(format!(
+                    "rc 'bindings' must be a map; got {}",
+                    val.type_name()
+                )));
             };
             // Every value installs as a lexical scope binding,
             // functions included; a function is typed by the checker
@@ -370,68 +374,62 @@ fn apply_rc_key(
             }
             Ok(())
         }
-        "edit_mode" => {
+        "edit-mode" => {
             let Value::String(s) = val else {
-                return Err(Error::new(
-                    format!("rc 'edit_mode' must be a string; got {}", val.type_name()),
-                    1,
-                ));
+                return Err(Error::new(format!(
+                    "rc 'edit-mode' must be a string; got {}",
+                    val.type_name()
+                )));
             };
             match s.to_ascii_lowercase().as_str() {
                 "vi" => settings.edit_mode = Keymap::Vi,
                 "emacs" => settings.edit_mode = Keymap::Emacs,
                 _ => {
-                    return Err(Error::new(
-                        format!("rc 'edit_mode' must be 'emacs' or 'vi'; got '{s}'"),
-                        1,
-                    ));
+                    return Err(Error::new(format!(
+                        "rc 'edit-mode' must be 'emacs' or 'vi'; got '{s}'"
+                    )));
                 }
             }
             Ok(())
         }
         "bell" => {
             let Value::Bool(b) = val else {
-                return Err(Error::new(
-                    format!("rc 'bell' must be a bool; got {}", val.type_name()),
-                    1,
-                ));
+                return Err(Error::new(format!(
+                    "rc 'bell' must be a bool; got {}",
+                    val.type_name()
+                )));
             };
             settings.bell = b;
             Ok(())
         }
         "surface" => {
             let Value::String(s) = val else {
-                return Err(Error::new(
-                    format!("rc 'surface' must be a string; got {}", val.type_name()),
-                    1,
-                ));
+                return Err(Error::new(format!(
+                    "rc 'surface' must be a string; got {}",
+                    val.type_name()
+                )));
             };
             match <Surface as clap::ValueEnum>::from_str(&s, true) {
                 Ok(surface) => {
                     settings.surface = surface;
                     Ok(())
                 }
-                Err(_) => Err(Error::new(
-                    format!("rc 'surface' must be minimal, readline, or structural; got '{s}'"),
-                    1,
-                )),
+                Err(_) => Err(Error::new(format!(
+                    "rc 'surface' must be minimal or readline; got '{s}'"
+                ))),
             }
         }
-        "recursion_limit" => {
+        "recursion-limit" => {
             let Some(n) = val.as_int() else {
-                return Err(Error::new(
-                    format!(
-                        "rc 'recursion_limit' must be a positive int; got {}",
-                        val.type_name()
-                    ),
-                    1,
-                ));
+                return Err(Error::new(format!(
+                    "rc 'recursion-limit' must be a positive int; got {}",
+                    val.type_name()
+                )));
             };
             if n <= 0 {
-                return Err(Error::new(
-                    format!("rc 'recursion_limit' must be positive; got {n}"),
-                    1,
-                ));
+                return Err(Error::new(format!(
+                    "rc 'recursion-limit' must be positive; got {n}"
+                )));
             }
             #[allow(
                 clippy::cast_possible_truncation,
@@ -444,14 +442,11 @@ fn apply_rc_key(
         }
         "plugins" => {
             let Value::Map(entries) = val else {
-                return Err(Error::new(
-                    format!(
-                        "rc 'plugins' must be a map from plugin name to its options, \
+                return Err(Error::new(format!(
+                    "rc 'plugins' must be a map from plugin name to its options, \
                          e.g. [zoxide: [key: 'alt-z'], autosuggestion: [:]]; got {}",
-                        val.type_name()
-                    ),
-                    1,
-                ));
+                    val.type_name()
+                )));
             };
             for (name, options) in &entries {
                 if let Err(err) = load_rc_plugin(name, options.into_owned(), mooring, shell) {
@@ -466,17 +461,16 @@ fn apply_rc_key(
         }
         "theme" => match val {
             Value::Map(pairs) => {
-                settings.theme = OutputTheme::from_map(&pairs).map_err(|msg| Error::new(msg, 1))?;
+                settings.theme = OutputTheme::from_map(&pairs).map_err(Error::new)?;
                 Ok(())
             }
-            other => Err(Error::new(
-                format!("rc 'theme' must be a map; got {}", other.type_name()),
-                1,
-            )),
+            other => Err(Error::new(format!(
+                "rc 'theme' must be a map; got {}",
+                other.type_name()
+            ))),
         },
         other => Err(Error::new(
             ral_core::typecheck::contract::declared(Form::Rc).unknown_key(other),
-            1,
         )),
     }
 }
@@ -491,14 +485,11 @@ fn load_rc_plugin(
     shell: &mut Shell,
 ) -> Result<(), Error> {
     let Value::Map(options) = options else {
-        return Err(Error::new(
-            format!(
-                "rc plugin '{name}': the value under a plugin name is its options map; got {}. \
+        return Err(Error::new(format!(
+            "rc plugin '{name}': the value under a plugin name is its options map; got {}. \
                  Write `{name}: [:]` if it takes no options.",
-                options.type_name()
-            ),
-            1,
-        ));
+            options.type_name()
+        )));
     };
     match super::plugin::load::load_plugin(name, &options, mooring, shell) {
         Err(Break::Error(e)) => Err(e.context(format!("plugin '{name}'"))),
@@ -511,8 +502,8 @@ fn load_rc_plugin(
 /// Search for an existing RC file in the standard locations.
 pub(super) fn find_ralrc() -> Option<String> {
     let candidates = [
-        ral_core::path::config::xdg_config_subpath("ral/rc"),
-        ral_core::path::config::home_dot(".ralrc"),
+        ral_core::host::xdg(ral_core::host::XdgKind::Config).map(|d| d.join("ral/rc")),
+        ral_core::host::home_dot(".ralrc"),
     ];
     for cand in candidates.into_iter().flatten() {
         let s = cand.to_string_lossy();
@@ -529,11 +520,11 @@ pub(super) fn find_ralrc() -> Option<String> {
     reason = "[silent:history-mkdir] ensures the repl config dir exists for the history file; not turn-time model I/O"
 )]
 pub(super) fn dirs_history() -> Option<String> {
-    if let Some(dir) = ral_core::path::config::xdg_config_subpath("ral") {
+    if let Some(dir) = ral_core::host::xdg(ral_core::host::XdgKind::Config).map(|d| d.join("ral")) {
         let _ = std::fs::create_dir_all(&dir);
         return Some(dir.join("history").to_string_lossy().into_owned());
     }
-    ral_core::path::config::home_dot(".ral_history").map(|p| p.to_string_lossy().into_owned())
+    ral_core::host::home_dot(".ral_history").map(|p| p.to_string_lossy().into_owned())
 }
 
 #[cfg(test)]
@@ -550,8 +541,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     fn prelude_shell() -> Shell {
-        let mut shell = Shell::new(ral_core::io::TerminalState::default());
-        ral_core::builtins::register(&mut shell, crate::PRELUDE.comp());
+        let mut shell = ral_core::test_helper::core_shell();
+        crate::PRELUDE.seat(&mut shell);
         shell
     }
 
@@ -582,7 +573,7 @@ mod tests {
 
     fn unit_thunk(_u: &mut ral_core::typecheck::Unifier) -> ral_core::Scheme {
         use ral_core::typecheck::builtins::{mk_scheme, pure, thunk};
-        mk_scheme(&[], &[], thunk(pure(ral_core::typecheck::Ty::Unit)))
+        mk_scheme(&[], &[], thunk(pure(ral_core::ty::Ty::Unit)))
     }
 
     /// Apply `rc_src` inside a dispatch with the REPL host, as the boot door
@@ -590,7 +581,7 @@ mod tests {
     fn loaded_plugins(rc_src: &str) -> Vec<String> {
         let rc_src = rc_src.to_owned();
         let t = crate::repl::engine(move |shell| {
-            ral_core::builtins::register(shell, crate::PRELUDE.comp());
+            crate::PRELUDE.seat(shell);
             let pairs = Mutex::new(Some(rc_map(shell, &rc_src)));
             let door = BuiltinEntry::new(
                 Cow::Borrowed("_apply-rc"),
@@ -680,51 +671,51 @@ mod tests {
         assert!(shell.scope_lookup("ll").is_none());
     }
 
-    /// rc `recursion_limit:` overrides the default on the shell.
+    /// rc `recursion-limit:` overrides the default on the shell.
     #[test]
     fn rc_recursion_limit_applied() {
-        let shell = apply_rc("return [recursion_limit: 256]\n");
+        let shell = apply_rc("return [recursion-limit: 256]\n");
         assert_eq!(shell.stack_limit(), 256);
     }
 
-    /// A non-positive `recursion_limit` refuses the whole map — agreeing
+    /// A non-positive `recursion-limit` refuses the whole map — agreeing
     /// with the record spelling, which fails the same way statically —
     /// naming the field rather than letting `0` through to disable the cap.
     #[test]
     fn rc_recursion_limit_zero_rejected() {
         let (shell, err) = apply_to_fresh_env_rejected(Value::map(vec![(
-            "recursion_limit".into(),
+            "recursion-limit".into(),
             Value::Int(0),
         )]));
         assert_eq!(shell.stack_limit(), ral_core::types::DEFAULT_STACK_LIMIT);
-        assert!(err.contains("recursion_limit") && err.contains("not applied"));
+        assert!(err.contains("recursion-limit") && err.contains("not applied"));
     }
 
-    /// A wrong-typed `recursion_limit` refuses the whole map; the default
+    /// A wrong-typed `recursion-limit` refuses the whole map; the default
     /// stays untouched.
     #[test]
     fn rc_recursion_limit_wrong_type_rejected() {
         let (shell, err) = apply_to_fresh_env_rejected(Value::map(vec![(
-            "recursion_limit".into(),
+            "recursion-limit".into(),
             Value::string("lots"),
         )]));
         assert_eq!(shell.stack_limit(), ral_core::types::DEFAULT_STACK_LIMIT);
-        assert!(err.contains("recursion_limit"));
+        assert!(err.contains("recursion-limit"));
     }
 
-    /// Both an unrecognised string and a wrong-typed `edit_mode` refuse the
+    /// Both an unrecognised string and a wrong-typed `edit-mode` refuse the
     /// whole map, naming the field.
     #[test]
     fn rc_edit_mode_invalid_rejected() {
         let (_, err) = apply_to_fresh_env_rejected(Value::map(vec![(
-            "edit_mode".into(),
+            "edit-mode".into(),
             Value::string("typo"),
         )]));
-        assert!(err.contains("edit_mode"));
+        assert!(err.contains("edit-mode"));
 
         let (_, err) =
-            apply_to_fresh_env_rejected(Value::map(vec![("edit_mode".into(), Value::Int(3))]));
-        assert!(err.contains("edit_mode"));
+            apply_to_fresh_env_rejected(Value::map(vec![("edit-mode".into(), Value::Int(3))]));
+        assert!(err.contains("edit-mode"));
     }
 
     /// A wrong-typed `bell` refuses the whole map, naming the field.
@@ -745,7 +736,7 @@ mod tests {
     /// Apply `config` to a fresh shell via `apply_rc_config` and return the
     /// full post-application state: shell and resolved settings.
     fn apply_to_fresh_env_full(config: Value) -> (Shell, RcSettings) {
-        let mut shell = Shell::new(ral_core::io::TerminalState::default());
+        let mut shell = ral_core::test_helper::core_shell();
         let Value::Map(pairs) = config else {
             panic!("test rc config must be a map; got {}", config.type_name());
         };
@@ -759,7 +750,7 @@ mod tests {
     /// `apply_to_fresh_env_full` exercises success.  Returns the shell
     /// (untouched by the refused keys) and the refusal text.
     fn apply_to_fresh_env_rejected(config: Value) -> (Shell, String) {
-        let mut shell = Shell::new(ral_core::io::TerminalState::default());
+        let mut shell = ral_core::test_helper::core_shell();
         let Value::Map(pairs) = config else {
             panic!("test rc config must be a map; got {}", config.type_name());
         };
@@ -778,10 +769,6 @@ mod tests {
     /// rc `surface:` selects the frontend, case-insensitively.
     #[test]
     fn rc_surface_selects_frontend() {
-        assert_eq!(
-            apply_rc_surface("return [surface: 'structural']\n"),
-            Surface::Structural
-        );
         assert_eq!(
             apply_rc_surface("return [surface: 'minimal']\n"),
             Surface::Minimal
@@ -871,19 +858,18 @@ mod tests {
     #[test]
     fn rc_bad_value_fails_the_whole_map() {
         let (shell, err) = apply_to_fresh_env_rejected(Value::map(vec![
-            ("edit_mode".into(), Value::Int(42)),
-            ("recursion_limit".into(), Value::Int(256)),
+            ("edit-mode".into(), Value::Int(42)),
+            ("recursion-limit".into(), Value::Int(256)),
         ]));
         assert_eq!(shell.stack_limit(), ral_core::types::DEFAULT_STACK_LIMIT);
-        assert!(err.contains("edit_mode") && err.contains("not applied"));
+        assert!(err.contains("edit-mode") && err.contains("not applied"));
     }
 
     /// Typecheck `src` against `shell`'s live session schemes — the same
     /// seed a real prompt run uses — and return the errors.
     fn typecheck_against_session(shell: &Shell, src: &str) -> Vec<ral_core::TypeError> {
         let ast = ral_core::syntax::parser::parse(src).unwrap();
-        let comp = ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default(), "")
-            .expect("elaborate");
+        let comp = ral_core::elaborator::elaborate(&ast, [], "").expect("elaborate");
         ral_core::typecheck(&comp, shell.session_schemes(), None)
             .err()
             .unwrap_or_default()
@@ -941,7 +927,7 @@ mod tests {
     #[test]
     fn every_declared_rc_key_is_handled_by_apply_rc_key() {
         let table = ral_core::typecheck::contract::declared(Form::Rc);
-        let mut shell = Shell::new(ral_core::io::TerminalState::default());
+        let mut shell = ral_core::test_helper::core_shell();
         for key in table.keys {
             let mut settings = RcSettings::default();
             let mut startup = None;

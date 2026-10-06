@@ -6,9 +6,9 @@ status: accepted
 
 **A lazy stream is a chain of closures — block → captured env → scope →
 binding → block — so any walk that crosses the captured-env link recursively
-spends stack once per line. Exactly two walks cross it: the serial encoder and
-drop glue. Both now cross it flat. `intern_scope` only reserves an id and
-queues the scope; `InternCtx::finish` — the table's sole accessor — drains the
+spends stack once per line. Exactly two walks cross it: the seed encoder
+(`seed::table`) and drop glue. Both now cross it flat.
+`intern_scope` only reserves an id and queues the scope; `InternCtx::finish` — the table's sole accessor — drains the
 queue. Teardown is cut by a thread-local drop trampoline on `Closure`: glue
 still does all traversal, but a closure dying inside another closure's drop
 hands its bindings to that dismantler's queue instead of letting glue recurse,
@@ -91,9 +91,9 @@ a sixty-thousand-line stream aborted the process in drop glue at teardown.
 - Pure-data depth (a deeply nested list/variant with no env links) still
   recurses in every walk, this module's included — such values cannot be built
   without tripping other recursion limits first.
-- `WireDecoder::for_shell` builds one row per pass over an n-link chain —
-  O(n²) passes. Correct, and cheap at the sizes this unblocks; a Kahn-style
-  topological build is available if streams ever cross the wire at 10⁵ links.
+- `WireDecoder::for_shell` once built one row per pass over an n-link chain,
+  O(n²) passes. It is now Kahn's algorithm over the rows' dependency edges,
+  linear in the chain.
 - Every non-scalar binding death costs one thread-local access and branch;
   the leader additionally allocates one small queue. `scope_escapes` measures
   at or below its pre-change time.

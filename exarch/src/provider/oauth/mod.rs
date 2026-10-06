@@ -73,7 +73,7 @@ pub struct OAuthToken {
     /// The workspace/organisation title, when the token names one — the
     /// handle's first-choice qualifier.
     pub workspace: Option<String>,
-    /// The plan type ("plus", "pro", "team", ...) — the handle's qualifier of
+    /// The plan type ("plus", "pro", "team", ...): the handle's qualifier of
     /// last resort.
     pub plan: Option<String>,
     /// Unix seconds at which `access_token` expires (its JWT `exp`).
@@ -212,7 +212,7 @@ pub fn login(device: bool) -> Result<(), String> {
         method,
         |phase| {
             if let Some(line) = phase.stderr_line() {
-                eprintln!("{line}");
+                ral_core::errln!("{line}");
             }
         },
         &Arc::new(AtomicBool::new(false)),
@@ -224,7 +224,7 @@ pub fn login(device: bool) -> Result<(), String> {
     };
     let accounts = accounts();
     let named = identity::label(&to_account(&token), &accounts);
-    eprintln!("{verb} ChatGPT account {named}.");
+    ral_core::errln!("{verb} ChatGPT account {named}.");
     Ok(())
 }
 
@@ -241,14 +241,14 @@ pub fn login(device: bool) -> Result<(), String> {
 pub fn logout(account: Option<String>, all: bool) -> Result<(), String> {
     if all {
         clear_at(&token_path())?;
-        eprintln!("Logged out of every ChatGPT account.");
+        ral_core::errln!("Logged out of every ChatGPT account.");
         return Ok(());
     }
     let tokens = load_all();
     let target = match (account, tokens.as_slice()) {
         (Some(name), _) => name,
         (None, []) => {
-            eprintln!("No ChatGPT account to log out of.");
+            ral_core::errln!("No ChatGPT account to log out of.");
             return Ok(());
         }
         (None, [only]) => only.issued.clone(),
@@ -262,7 +262,7 @@ pub fn logout(account: Option<String>, all: bool) -> Result<(), String> {
     };
     match remove(&target)? {
         Some(label) => {
-            eprintln!("Logged out of ChatGPT account {label}.");
+            ral_core::errln!("Logged out of ChatGPT account {label}.");
             Ok(())
         }
         None => Err(format!(
@@ -382,8 +382,8 @@ fn load_all_at(path: &std::path::Path) -> Vec<OAuthToken> {
             if expected.as_str() == key && entry.service == chatgpt.as_str() {
                 return Some(OAuthToken::from(entry));
             }
-            eprintln!(
-                "warning: {} names an entry as '{key}', but its own fields say '{expected}' — \
+            ral_core::errln!(
+                "warning: {} names an entry as '{key}', but its own fields say '{expected}'; \
                  dropping it rather than trusting a key that disagrees with the record.",
                 path.display(),
             );
@@ -681,7 +681,7 @@ fn jwt_payload<T: DeserializeOwned>(jwt: &str) -> Result<T, String> {
 #[derive(Deserialize)]
 struct AuthClaims {
     chatgpt_account_id: Option<String>,
-    /// The plan type ("plus", "pro", "team", ...) — confirmed present by
+    /// The plan type ("plus", "pro", "team", ...): confirmed present by
     /// decoding a live token. [`IdClaims::organizations`] sits beside it in
     /// the ladder but is not yet confirmed; correcting either's claim name is
     /// a one-line `#[serde(rename = ...)]` away.
@@ -764,7 +764,7 @@ fn finalize(raw: RawTokens) -> Result<OAuthToken, String> {
 /// account's tokens live here, so every grant has to carve this path out.
 pub(crate) fn token_path() -> PathBuf {
     crate::bootstrap::EXARCH
-        .xdg_dir(ral_core::path::basedir::XdgKind::State)
+        .xdg_dir(ral_core::host::XdgKind::State)
         .join("oauth.json")
 }
 

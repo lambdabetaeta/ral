@@ -11,12 +11,11 @@
 
 #![cfg(unix)]
 
+use ral_core::carrier::{IdentityTransport, Transport, dispatch_to_report};
 use ral_core::engine::{Booted, EngineInstaller};
-use ral_core::protocol::{
-    Attach, IdentityTransport, Program, Report, Run, Transport, dispatch_to_report,
-};
-use ral_core::types::{CapturePolicy, GrantStack, Observed, Shell};
-use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
+use ral_core::first_order::datum::Datum as _;
+use ral_core::protocol::{Attach, Report, Run};
+use ral_core::types::{CapturePolicy, Observed};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -26,7 +25,7 @@ use std::time::{Duration, Instant};
 )]
 fn bare(_attach: &Attach) -> Result<Booted, String> {
     Ok(Booted {
-        shell: Shell::new(ral_core::io::TerminalState::default()),
+        shell: ral_core::test_helper::core_shell(),
         keep: Box::new(()),
     })
 }
@@ -53,16 +52,8 @@ fn an_interrupt_through_the_control_door_stops_an_in_flight_run() {
     let report = dispatch_to_report(
         &transport,
         Run {
-            program: Program::Source("/bin/sleep 30".into()),
-            script_name: "<test>".into(),
-            caps: GrantStack::root(),
-            wall: None,
-            deferred_lease: None,
-            worker_cap: None,
-            io: RunIo::Capture,
-            terminal: RequestedTerminalAccess::Denied,
-            stdin: RunStdin::Empty,
             trail: Some(CapturePolicy::Off),
+            ..Run::captured("/bin/sleep 30", "<test>")
         },
         Arc::new(()),
     )
@@ -89,10 +80,10 @@ fn an_interrupt_through_the_control_door_stops_an_in_flight_run() {
     // run door — `Audit::close` reads that prefix regardless of how the run
     // ended.
     let struck = trail.into_iter().find_map(|fo| {
-        let obs = ral_core::types::Observation::from_wire(&fo)?;
+        let obs = ral_core::types::Observation::decode(&fo).ok()?;
         match obs.what {
-            Observed::Command { argv, .. } if argv.first().is_some_and(|a| a.contains("sleep")) => {
-                Some(argv)
+            Observed::Command(c) if c.argv.first().is_some_and(|a| a.contains("sleep")) => {
+                Some(c.argv)
             }
             _ => None,
         }

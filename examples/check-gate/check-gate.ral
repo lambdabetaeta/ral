@@ -21,7 +21,7 @@ for $settled { |c|
 }
 
 for $failed { |c|
-    let culprits = filter { |k| return $[$k[origin] == 'external' && $k[status] != 0] } !{commands $c[report]}
+    let culprits = filter { |k| return $[!{equal $k[origin] `external} && $k[status] != 0] } !{commands $c[report]}
     for $culprits { |k|
         let said = lines "!{bytes-to-string $k[stderr]}!{bytes-to-string $k[stdout]}"
         let gist = if !{is-empty $said} { return '' } else { return " — $said[0]" }

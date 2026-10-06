@@ -3,7 +3,7 @@
 //! A scope's cancellation is the join of its own flag with every ancestor's —
 //! walked, not flattened, so a subscope carries its own flag while still
 //! observing its parents.  Workers read it wherever
-//! [`check`](crate::process::check) is called.
+//! [`Mooring::check`](crate::types::Mooring::check) is called.
 //!
 //! A signal handler holds no scope, so it raises one of two ambient causes
 //! instead, and no scope folds either: a host hears them through
@@ -13,33 +13,41 @@
 //! listener registered after it never hears it.
 
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
+use strum::{IntoStaticStr, VariantArray};
 
 use crate::sync::LockExt as _;
 
 /// Why a [`CancelScope`] was cancelled.
 ///
-/// The causes escalate `ReaderGone < Interrupt < Explicit < Deadline <
-/// Terminate < RootAbort`; a scope records the highest ever applied to it and
+/// The causes escalate `ReaderGone < Interrupted < Cancelled < TimedOut <
+/// Terminated < Aborted`; a scope records the highest ever applied to it and
 /// never downgrades.  The numeric values are the on-flag encoding, `0`
-/// meaning uncancelled.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// meaning uncancelled.  The variant names are the tags `$err[reason]` names
+/// a cause by, under `` `cancelled ``.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, strum::FromRepr, IntoStaticStr, VariantArray,
+)]
+#[strum(serialize_all = "kebab-case")]
+#[repr(u8)]
 pub enum CancelCause {
     /// A pipeline stage's reader stage has already been observed; the
     /// mildest cause, and the one ending `WaitOutcome::classify` forgives.
     ReaderGone = 1,
     /// Ctrl-C / Esc.
-    Interrupt = 2,
+    Interrupted = 2,
     /// A targeted teardown: `cancel <handle>`, or a `race` loser reaped.
-    Explicit = 3,
+    Cancelled = 3,
     /// A wall-clock or lifetime ceiling expired.
-    Deadline = 4,
+    TimedOut = 4,
     /// SIGTERM / SIGHUP.  Lands on the durable root, so it reaches detached
     /// workers and not just the foreground run.
-    Terminate = 5,
+    Terminated = 5,
     /// Ctrl-\, reaping the session root.
-    RootAbort = 6,
+    Aborted = 6,
 }
+
+crate::label!(typed CancelCause);
 
 /// How long ral's teardown waits between its cause signal and the kill that
 /// ends the argument.  Short — a cancelled call is already over budget — but
@@ -47,25 +55,16 @@ pub enum CancelCause {
 pub(crate) const TEARDOWN_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
 
 impl CancelCause {
-    /// Every cause, mildest first.
-    pub const ALL: [Self; 6] = [
-        Self::ReaderGone,
-        Self::Interrupt,
-        Self::Explicit,
-        Self::Deadline,
-        Self::Terminate,
-        Self::RootAbort,
-    ];
-
-    fn from_u8(flag: u8) -> Option<Self> {
-        match flag {
-            1 => Some(Self::ReaderGone),
-            2 => Some(Self::Interrupt),
-            3 => Some(Self::Explicit),
-            4 => Some(Self::Deadline),
-            5 => Some(Self::Terminate),
-            6 => Some(Self::RootAbort),
-            _ => None,
+    /// The process exit status of a run this cause ended: a signal-born
+    /// cause reports 128 plus its signal, a deadline `timeout(1)`'s 124.
+    /// Async-signal-safe.
+    pub const fn code(self) -> u8 {
+        match self {
+            Self::ReaderGone => 141,
+            Self::Interrupted => 130,
+            Self::Cancelled | Self::Terminated => 143,
+            Self::TimedOut => 124,
+            Self::Aborted => 131,
         }
     }
 
@@ -78,23 +77,11 @@ impl CancelCause {
     pub fn message(self) -> &'static str {
         match self {
             Self::ReaderGone => "its reader ended",
-            Self::Interrupt => "interrupted",
-            Self::Explicit => "cancelled",
-            Self::Deadline => "timed out",
-            Self::Terminate => "terminated",
-            Self::RootAbort => "aborted",
-        }
-    }
-
-    /// The tag `$err[reason]` names this cause by, under `` `cancelled ``.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::ReaderGone => "reader-gone",
-            Self::Interrupt => "interrupted",
-            Self::Explicit => "cancelled",
-            Self::Deadline => "timed-out",
-            Self::Terminate => "terminated",
-            Self::RootAbort => "aborted",
+            Self::Interrupted => "interrupted",
+            Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed out",
+            Self::Terminated => "terminated",
+            Self::Aborted => "aborted",
         }
     }
 }
@@ -197,7 +184,7 @@ pub(crate) fn scan_ambient() {
         }
         if root > l.root_heard {
             l.root_heard = root;
-            if let Some(cause) = CancelCause::from_u8(root) {
+            if let Some(cause) = CancelCause::from_repr(root) {
                 let _ = l.tx.send(Ambient::Root(cause));
             }
         }
@@ -281,7 +268,7 @@ impl CancelScope {
 
     /// The strongest [`CancelCause`] in this scope's join, or `None`.
     pub fn cause(&self) -> Option<CancelCause> {
-        CancelCause::from_u8(self.fold())
+        CancelCause::from_repr(self.fold())
     }
 }
 
@@ -306,11 +293,7 @@ struct WatchEntry {
     armed: Arc<AtomicBool>,
 }
 
-static WATCHES: OnceLock<Mutex<Vec<WatchEntry>>> = OnceLock::new();
-
-fn watches() -> &'static Mutex<Vec<WatchEntry>> {
-    WATCHES.get_or_init(|| Mutex::new(Vec::new()))
-}
+static WATCHES: Mutex<Vec<WatchEntry>> = Mutex::new(Vec::new());
 
 /// Run `on_cancel` once, with the cause, as soon as `scope.cause()` is
 /// `Some`.  Dropping the returned [`CancelWatch`] disarms it.
@@ -319,7 +302,7 @@ pub fn watch_cancel(
     on_cancel: impl FnOnce(CancelCause) + Send + 'static,
 ) -> CancelWatch {
     let armed = Arc::new(AtomicBool::new(true));
-    let mut table = watches().lock_ignore_poison();
+    let mut table = WATCHES.lock_ignore_poison();
     table.push(WatchEntry {
         scope,
         on_cancel: Box::new(on_cancel),
@@ -347,7 +330,7 @@ pub fn watch_cancel(
 fn scan_cancels() {
     let mut fired: Vec<(OnCancel, CancelCause)> = Vec::new();
     {
-        let mut table = watches().lock_ignore_poison();
+        let mut table = WATCHES.lock_ignore_poison();
         let mut i = 0;
         while i < table.len() {
             if !table[i].armed.load(Ordering::Acquire) {
@@ -498,11 +481,11 @@ mod tests {
     fn cause_encoding_roundtrips_and_orders() {
         let causes = [
             CancelCause::ReaderGone,
-            CancelCause::Interrupt,
-            CancelCause::Explicit,
-            CancelCause::Deadline,
-            CancelCause::Terminate,
-            CancelCause::RootAbort,
+            CancelCause::Interrupted,
+            CancelCause::Cancelled,
+            CancelCause::TimedOut,
+            CancelCause::Terminated,
+            CancelCause::Aborted,
         ];
         for pair in causes.windows(2) {
             assert!(
@@ -514,12 +497,12 @@ mod tests {
         }
         for cause in causes {
             assert_eq!(
-                CancelCause::from_u8(cause as u8),
+                CancelCause::from_repr(cause as u8),
                 Some(cause),
                 "{cause:?} must round-trip through its flag encoding"
             );
         }
-        assert_eq!(CancelCause::from_u8(0), None, "0 means uncancelled");
+        assert_eq!(CancelCause::from_repr(0), None, "0 means uncancelled");
     }
 
     #[test]
@@ -527,7 +510,7 @@ mod tests {
         let parent = CancelScope::root();
         let child = parent.child();
         assert!(!child.is_cancelled(), "a fresh child starts uncancelled");
-        parent.cancel(CancelCause::Interrupt);
+        parent.cancel(CancelCause::Interrupted);
         assert!(
             child.is_cancelled(),
             "cancelling the parent must cancel the child"
@@ -539,7 +522,7 @@ mod tests {
         let parent = CancelScope::root();
         let one = parent.child();
         let two = parent.child();
-        one.cancel(CancelCause::Interrupt);
+        one.cancel(CancelCause::Interrupted);
         assert!(one.is_cancelled(), "the cancelled child observes its flag");
         assert!(
             !parent.is_cancelled(),
@@ -557,17 +540,17 @@ mod tests {
     fn a_nested_frame_observes_its_parents_interrupt() {
         let root = DurableRoot::new();
         let outer = root.worker().child();
-        outer.cancel(CancelCause::Interrupt);
+        outer.cancel(CancelCause::Interrupted);
         let inner = outer.child();
         assert_eq!(
             inner.cause(),
-            Some(CancelCause::Interrupt),
+            Some(CancelCause::Interrupted),
             "the nested run observes the interrupt through the frame it nests in"
         );
         assert_eq!(
             outer.cause(),
-            Some(CancelCause::Interrupt),
-            "and so does the run it nests in — sharing, not shadowing"
+            Some(CancelCause::Interrupted),
+            "and so does the run it nests in: sharing, not shadowing"
         );
     }
 
@@ -577,10 +560,10 @@ mod tests {
     fn an_outer_frames_deadline_reaches_the_nest() {
         let outer = DurableRoot::new().worker().child();
         let inner = outer.child();
-        outer.cancel(CancelCause::Deadline);
+        outer.cancel(CancelCause::TimedOut);
         assert_eq!(
             inner.cause(),
-            Some(CancelCause::Deadline),
+            Some(CancelCause::TimedOut),
             "the enclosing run's deadline must unwind the run nested in it"
         );
     }
@@ -592,16 +575,16 @@ mod tests {
         let root = DurableRoot::new();
         let frame = root.worker().child();
         let worker = root.worker();
-        frame.cancel(CancelCause::Interrupt);
+        frame.cancel(CancelCause::Interrupted);
         assert_eq!(
             worker.cause(),
             None,
             "a run's interrupt must not reach a detached worker"
         );
-        root.cancel(CancelCause::Terminate);
+        root.cancel(CancelCause::Terminated);
         assert_eq!(
             worker.cause(),
-            Some(CancelCause::Terminate),
+            Some(CancelCause::Terminated),
             "but a shutdown reaches it through its root"
         );
     }
@@ -611,13 +594,13 @@ mod tests {
     #[test]
     fn a_watch_registered_after_the_cause_fires_at_once() {
         let scope = CancelScope::root();
-        scope.cancel(CancelCause::Explicit);
+        scope.cancel(CancelCause::Cancelled);
         let seen = Arc::new(Mutex::new(None));
         let recorded = seen.clone();
         let _watch = watch_cancel(scope, move |cause| {
             *recorded.lock_ignore_poison() = Some(cause);
         });
-        assert_eq!(*seen.lock_ignore_poison(), Some(CancelCause::Explicit));
+        assert_eq!(*seen.lock_ignore_poison(), Some(CancelCause::Cancelled));
     }
 
     /// A watch registered before the cause fires when `cancel` scans.
@@ -630,8 +613,8 @@ mod tests {
             *recorded.lock_ignore_poison() = Some(cause);
         });
         assert_eq!(*seen.lock_ignore_poison(), None);
-        scope.cancel(CancelCause::Deadline);
-        assert_eq!(*seen.lock_ignore_poison(), Some(CancelCause::Deadline));
+        scope.cancel(CancelCause::TimedOut);
+        assert_eq!(*seen.lock_ignore_poison(), Some(CancelCause::TimedOut));
     }
 
     /// Dropping the guard disarms the registration: a later cancel never
@@ -644,7 +627,7 @@ mod tests {
         drop(watch_cancel(scope.clone(), move |_| {
             flag.store(true, Ordering::Release);
         }));
-        scope.cancel(CancelCause::Interrupt);
+        scope.cancel(CancelCause::Interrupted);
         assert!(
             !fired.load(Ordering::Acquire),
             "a disarmed watch must not fire"
@@ -666,7 +649,7 @@ mod tests {
         let _watch_b = watch_cancel(scope.clone(), move |_| {
             flag_b.store(true, Ordering::Release);
         });
-        scope.cancel(CancelCause::Interrupt);
+        scope.cancel(CancelCause::Interrupted);
         assert!(fired_a.load(Ordering::Acquire), "the first watch must fire");
         assert!(
             fired_b.load(Ordering::Acquire),
@@ -702,10 +685,10 @@ mod tests {
             Ok(Ambient::Interrupt),
             "an interrupt raised after it is forwarded"
         );
-        request_root_cancel(CancelCause::Terminate);
+        request_root_cancel(CancelCause::Terminated);
         assert_eq!(
             first.recv_timeout(owed),
-            Ok(Ambient::Root(CancelCause::Terminate)),
+            Ok(Ambient::Root(CancelCause::Terminated)),
             "a shutdown request is forwarded"
         );
 
@@ -714,7 +697,7 @@ mod tests {
         clear_root_request();
         assert_eq!(
             standing,
-            Ok(Ambient::Root(CancelCause::Terminate)),
+            Ok(Ambient::Root(CancelCause::Terminated)),
             "a shutdown request already standing is forwarded at once"
         );
         assert!(

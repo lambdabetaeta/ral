@@ -77,7 +77,7 @@ echo !{commands $gr}[1][argv][0]
 let checks = { |report key|
     fold { |acc o|
         case $o[what] [
-            `check:   { |c| return [...$acc, "$c[resource] $c[decision] !{get $c[fields] $key ''}"] },
+            `check:   { |c| return [...$acc, "!{str $c[resource]} !{str $c[decision]} !{get $c[fields] $key ''}"] },
             `command: { |_| return $acc },
             `write:   { |_| return $acc },
             `read:    { |_| return $acc },
@@ -111,7 +111,7 @@ echo !{argv0s !{audit { /bin/echo hi | /bin/cat }}}
 # `^name` reaches the binary, and the observation says so; the builtin stage
 # feeding it is no observation at all
 let caret = audit { echo hi | ^cat }
-echo !{map { |c| return "$c[argv][0] $c[origin]" } !{commands $caret}}
+echo !{map { |c| return "$c[argv][0] !{str $c[origin]}" } !{commands $caret}}
 
 # Observations made inside a pipeline stage merge into the parent's trail
 let relay = { from-line; /bin/echo helper }
@@ -122,7 +122,7 @@ echo !{argv0s !{audit { echo seed | !$relay }}}
 let io-facts = { |report|
     fold { |acc o|
         case $o[what] [
-            `write:   { |w| return [...$acc, "write $w[mode] $w[outcome] !{basename $w[path]}"] },
+            `write:   { |w| return [...$acc, "write !{str $w[mode]} !{str $w[outcome]} !{basename $w[path]}"] },
             `read:    { |r| return [...$acc, "read !{basename $r[path]}"] },
             `check:   { |_| return $acc },
             `command: { |_| return $acc },
@@ -149,7 +149,7 @@ echo !{exists "$io-dir/never.txt"}
 let write-cols = { |report|
     fold { |acc o|
         case $o[what] [
-            `write:   { |_| case $o[site] [`just: { |s| return [...$acc, $s[col]] }, `none: { |_| return $acc }] },
+            `write:   { |_| case $o[site] [`some: { |s| return [...$acc, $s[col]] }, `none: { |_| return $acc }] },
             `read:    { |_| return $acc },
             `check:   { |_| return $acc },
             `command: { |_| return $acc },
@@ -166,7 +166,7 @@ echo !{write-cols $stamped}
 rm -rf $io-dir
 
 # A bundled tool is observed as an external command
-echo !{map { |c| return "$c[argv][0] $c[origin] $c[status]" } !{commands !{audit { printf '' }}}}
+echo !{map { |c| return "$c[argv][0] !{str $c[origin]} $c[status]" } !{commands !{audit { printf '' }}}}
 
 # An audit that follows a `guard` still records its own commands
 let _ = audit { guard { return () } { return () } }

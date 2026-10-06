@@ -5,7 +5,7 @@
 //! `decisions/260617_sandbox-external-children` §"Safety invariant".
 //!
 //! Under an fs-restricting `grant`, every filesystem effect is either
-//! ral-owned (checked in process by `capability::check_fs_op`),
+//! ral-owned (checked in process by `Shell::check_fs_read`),
 //! child-owned (launched as a process under the effective
 //! `SandboxProjection`), or outside the grant effect surface. This file
 //! drives the **child-owned** path end-to-end through the public eval
@@ -38,7 +38,7 @@
 //! seam directly; this file proves the same enforcement *through eval*.
 //!
 //! Like `sandbox_fail_closed.rs`, this target imports `core/tests/common`
-//! so its `#[ctor::ctor]` runs `serve_pre_main` — that is what
+//! so its `#[ctor::ctor]` runs `invocation::serve_process` — that is what
 //! lets a per-command re-exec child actually enter Seatbelt and run the
 //! confined target. Without it the re-exec child would land in the
 //! libtest framework and crash on the unknown `--warrant`
@@ -54,16 +54,18 @@
 
 mod common;
 
+use ral_core::RunIo;
+use ral_core::capability::{Capabilities, FsPolicy, GrantStack};
 use ral_core::path::FrozenPath;
-use ral_core::protocol::{Program, Run};
-use ral_core::types::{Break, Capabilities, FsPolicy, GrantStack, Settled, Shell, Value};
-use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
+use ral_core::protocol::Run;
+use ral_core::run::RunReport;
+use ral_core::types::{Break, Settled, Shell, Value};
 
 /// A `Shell` matching what every front end ends up with after bootstrap:
 /// prelude registered, default env, root capabilities.
 fn boot() -> Shell {
     ral_core::boot::boot_shell(
-        ral_core::io::TerminalState::default(),
+        ral_core::terminal::TerminalState::default(),
         common::prelude(),
         &ral_core::boot::HostSurface::default(),
     )
@@ -109,23 +111,10 @@ fn restrict_to(dir: &str) -> Capabilities {
 /// exarch's per-tool flow: the run carries the attenuated capability
 /// ceiling in its request and compiles against the live bindings.
 fn top_level_under(shell: &mut Shell, caps: Capabilities, src: &str) -> Settled<Value> {
-    match shell.run(RunRequest {
-        run: Run {
-            program: Program::Source(src.into()),
-            script_name: "<test>".into(),
-            caps: GrantStack::of(caps),
-            wall: None,
-            deferred_lease: None,
-            worker_cap: None,
-            io: RunIo::Inherit,
-            terminal: RequestedTerminalAccess::Denied,
-            stdin: RunStdin::Empty,
-            trail: None,
-        },
-        surface: None,
-        deferred: None,
-        desk: None,
-        fork: None,
+    match shell.run(Run {
+        io: RunIo::Inherit,
+        caps: GrantStack::of(caps),
+        ..Run::captured(src, "<test>")
     }) {
         RunReport::Ran { ending, .. } => ending.into_result(),
         RunReport::Static { .. } => panic!("well-formed source must run: {src:?}"),

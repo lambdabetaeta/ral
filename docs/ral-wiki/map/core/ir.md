@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 1776d222
-generated_at_date: 2026-09-30
-covers_paths: [core/src/ir.rs]
+generated_at_commit: 446e3123
+generated_at_date: 2026-10-06
+covers_paths: [core/src/ir.rs, core/src/ir/]
 ---
 
 # Map: core / IR
@@ -44,7 +44,7 @@ The two categories:
   search) are its whole `pub(crate)` surface; a lookup by name never scans.
 - `Name = Arc<str>` is every identifier the IR binds or mentions:
   `Val::Variable`, a variant's label, the pattern's names (the syntax's own
-  `Pattern`, since `IrPattern = Pattern`), a `Rec` group's members,
+  `Pattern`), a `Rec` group's members,
   `CommandName::Bare`, and `Env`'s keys. A bind, a capture and a label clone a
   pointer.
 - `CompKind::Assemble(Assembly)` is the one rule that builds a collection some
@@ -71,11 +71,8 @@ annotated ([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]])
 — the slots are not optional: "the checker has not run yet" is not a
 representable state.
 
-- `CompKind::Pipeline` is a struct variant `{ stages, stage_types: Vec<Ty> }`.
-  `stage_types` holds one value type per stage, parallel to `stages`, as typing
-  metadata for the structural REPL rather than a transport channel; the
-  elaborator fills it with `Unit` placeholders the annotation pass overwrites.
-  The form's value is its final stage's. There is nothing per-stage to
+- `CompKind::Pipeline` is a struct variant `{ stages }`. The form's value is
+  its final stage's. There is nothing per-stage to
   annotate, because every interior edge is an operating-system byte pipe
   allocated from stage position and no rule relates one stage's type to its
   neighbour's
@@ -125,10 +122,16 @@ the evaluator needs from the checker is explicit syntax: a `Capture`/`Decode` pa
 unexpanded, for a diagnostic raised before there is a `HOME` to expand it
 against.
 
-`IrPattern = Pattern` — the same `Pattern` shape the AST uses, under the IR's
-own name: a pattern binds names, never carries a computation, so there is no
-parser syntax for elaboration to strip out
-([[invariants/ir-pure-cbpv|ir-pure-cbpv]]).
+The IR owns the vocabulary it shares with the AST (`ir/pattern.rs`,
+`ir/op.rs`, `ir/redirect.rs`): `Pattern` (with `names()` the one walk, and
+`Display`), `BinaryOp` (`Arith`/`Compare`/`Eq`, each category its own enum), and
+`Redirects` with its stream-once binding. A pattern binds names, never carries
+a computation, so there is no parser syntax for elaboration to strip out
+([[invariants/ir-pure-cbpv|ir-pure-cbpv]]). `Phrase<S>` is indexed by its
+schemes: elaboration yields `Unchecked` (`Phrase<()>`), and only the checker
+makes a `Toplevel` of checked phrases, so the evaluator cannot be handed
+unchecked IR. A call's arguments are `Args`, a newtype over the list slots
+(`positional()`, `arity()`).
 
 `Mentions` (`pub(crate)`) is the trait a `Comp`, a `Val`, and each of the four
 node shapes implement: `fn mentions(&self, out: &mut Vec<&Name>)`, one

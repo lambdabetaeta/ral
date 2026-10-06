@@ -12,24 +12,50 @@
 //! on loan through [`IoLoan`], which restores on `Drop` even on unwind, since a
 //! host may catch a worker panic and carry the same `Shell` on.
 
-use crate::io::{Io, Sink, Source};
-use crate::process::{CancelCause, ForegroundScope};
+use crate::capability::GrantStack;
+use crate::compile::compile_and_typecheck;
+use crate::diagnostic::{Rejection, Report};
+use crate::io::{Captured, Io, RunIo, RunStdin, Sink, Source};
+use crate::process::{CancelCause, ForegroundScope, RequestedTerminalAccess};
 use crate::protocol::{Program, Run};
 use crate::source::{FileId, Span};
 use crate::types::{
-    Break, DeferredSink, Desk, Error, Escape, Fork, GrantStack, Mooring, NurseryGuard, Observation,
-    Settled, Shell, SurfaceSink, TerminalPolicy, TrailScope, Value,
+    Break, DeferredSink, Desk, Error, Escape, Fork, Mooring, Notice, NurseryGuard, Observation,
+    Settled, Shell, SurfaceSink, TrailScope, Value,
 };
-use crate::{Uncompiled, compile_and_typecheck};
-use serde::{Deserialize, Serialize};
+use std::io::Write as _;
 use std::sync::Arc;
 
+mod report;
+
 /// Parse/type diagnostics from a run that never reached evaluation.
+///
+/// Not folded into [`Error`]: a loaded file's parse error would then raise
+/// status 2, not 1.
 pub enum StaticDiagnostics {
-    Compile(Uncompiled),
+    Compile(Rejection),
     /// A host-level error that stopped the run before it started: hook not
     /// found, non-ground argument, and the like. Spanless, so no text.
-    Host(crate::types::Error),
+    Host(Error),
+}
+
+impl StaticDiagnostics {
+    /// The run drawn whole, with the exit status it ends on.
+    pub fn render(&self) -> (String, i32) {
+        match self {
+            Self::Compile(rejection) => (rejection.render(), rejection.status),
+            Self::Host(e) => {
+                let report = Report {
+                    code: None,
+                    message: e.message.clone(),
+                    at: None,
+                    also: None,
+                    hint: e.hint.clone(),
+                };
+                (report.plain(), e.code())
+            }
+        }
+    }
 }
 
 // ── The run entry: one synchronous, runtime-agnostic host door ──────────────
@@ -37,43 +63,6 @@ pub enum StaticDiagnostics {
 // Hosts describe *policy*; core owns *resources*. The reduction primitive
 // behind the door is crate-private, so no host can start an unframed
 // evaluation that would foreground or capture against a stale frame.
-
-/// The IO regime of a run — intent, which the run doors turn into resources.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RunIo {
-    /// Clone the run's byte sinks from the ambient `shell.io`: the REPL and
-    /// batch.
-    Inherit,
-    /// Mint fresh stdout/stderr buffers, returned in [`RunReport::Ran`]'s
-    /// `captured`: exarch's tool runs.
-    Capture,
-}
-
-/// Whether a run may hand the controlling terminal to a child.
-///
-/// The host states it, and [`Shell::terminal_lease`] decides whether the
-/// session's [`TerminalLease`](crate::process::TerminalLease) is reachable
-/// from it.  `ExplicitLoan` is absent because no host can seed it — only a
-/// within-run loan token raises it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RequestedTerminalAccess {
-    Denied,
-    Leased,
-}
-
-/// The byte source a run's stdin reads from — orthogonal to [`RunIo`] (the
-/// *output* regime) and to [`RequestedTerminalAccess`] (foreground
-/// authority).
-///
-/// A piped `ral -c` is `Denied` yet still reads its inherited pipe.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RunStdin {
-    /// The inherited fd 0 — a terminal, a pipe, or a redirected file.
-    Inherit,
-    /// Immediate EOF, a child's stdin wired to `/dev/null`, no fall-through to
-    /// fd 0.
-    Empty,
-}
 
 /// The engine door for one run: the protocol [`Run`] plus the live,
 /// non-transportable handles the host lends it.
@@ -94,12 +83,18 @@ pub struct RunRequest {
     pub fork: Option<Fork>,
 }
 
-/// The byte streams captured under [`RunIo::Capture`], carried verbatim onto
-/// the protocol [`Report`](crate::protocol::Report).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Captured {
-    pub stdout: Vec<u8>,
-    pub stderr: Vec<u8>,
+impl From<Run> for RunRequest {
+    /// A request lending the host's run nothing: no surface, deferred sink,
+    /// desk or fork door.
+    fn from(run: Run) -> Self {
+        Self {
+            run,
+            surface: None,
+            deferred: None,
+            desk: None,
+            fork: None,
+        }
+    }
 }
 
 /// One report the host matches once — a `Static` run never ran.
@@ -128,20 +123,18 @@ pub enum Ending {
         value: Value,
         status: i32,
     },
-    /// `single_command` and `root` together pick the runtime-error
-    /// rendering.
+    /// `compact` is the root source of a one-command program, the one that
+    /// picks the compact runtime-error rendering.
     Raised {
         error: Error,
-        single_command: bool,
-        root: FileId,
+        compact: Option<FileId>,
     },
     /// A raise the wall itself caused — same shape as [`Self::Raised`], the
     /// tag alone is what a renderer needs to choose the timeout remedy over
     /// the exit-code one.
     Walled {
         error: Error,
-        single_command: bool,
-        root: FileId,
+        compact: Option<FileId>,
     },
     Exited(i32),
 }
@@ -153,7 +146,7 @@ impl Ending {
     pub fn status(&self) -> i32 {
         match self {
             Self::Settled { status, .. } => *status,
-            Self::Raised { error, .. } | Self::Walled { error, .. } => error.exit_code(),
+            Self::Raised { error, .. } | Self::Walled { error, .. } => error.code(),
             Self::Exited(code) => *code,
         }
     }
@@ -199,9 +192,9 @@ impl Shell {
     /// run alive. It is also the durability boundary — a panic anywhere in the
     /// run restores the `env`/`context` checkpointed at entry, so the shell
     /// rolls itself back and no snapshot crosses the engine protocol.
-    pub fn run(&mut self, req: RunRequest) -> RunReport {
+    pub fn run(&mut self, req: impl Into<RunRequest>) -> RunReport {
         let anchor = self.session.anchor.clone();
-        self.run_under(&anchor, req)
+        self.run_under(&anchor, req.into())
     }
 
     /// Run `req` with its frame under a scope the host minted with
@@ -223,25 +216,12 @@ impl Shell {
         // walk is paid once per name.
         crate::path::forget_located_commands();
         let checkpoint = (self.env.clone(), self.context.clone());
-        let saved_capture = self.local.audit.capture_policy();
-        let scope: Option<TrailScope> = req.run.trail.map(|policy| {
-            self.local
-                .audit
-                .set_capture(crate::evaluator::audit::merge_capture(
-                    saved_capture,
-                    policy,
-                ));
-            self.local.audit.open()
-        });
+        let scope: Option<TrailScope> = req.run.trail.map(|policy| self.local.audit.open(policy));
 
         let outcome =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.dispatch(under, req)));
 
-        let trail = scope.map(|scope| {
-            let observations = self.local.audit.close(scope);
-            self.local.audit.set_capture(saved_capture);
-            observations
-        });
+        let trail = scope.map(|scope| self.local.audit.close(scope));
 
         match outcome {
             Ok(mut report) => {
@@ -253,7 +233,7 @@ impl Shell {
             Err(payload) => {
                 (self.env, self.context) = checkpoint;
                 RunReport::Static {
-                    diagnostics: StaticDiagnostics::Host(crate::types::Error::new(
+                    diagnostics: StaticDiagnostics::Host(crate::types::Error::raised(
                         format!("run panicked: {}", panic_text(payload.as_ref())),
                         101,
                     )),
@@ -282,8 +262,7 @@ impl Shell {
                 self.local.bindings.tick();
                 self.local.workers.tick_epoch();
 
-                let (top, single_command, root) = match compile_run(self, src, &req.run.script_name)
-                {
+                let (top, compact) = match compile_run(self, src, &req.run.script_name) {
                     Ok(parts) => parts,
                     Err(diagnostics) => {
                         return RunReport::Static {
@@ -298,7 +277,7 @@ impl Shell {
                     self.local.bindings.renew(top.referenced_names());
                 }
 
-                self.run_built(req, foreground, wall, single_command, root, |m, s| {
+                self.run_built(req, foreground, wall, compact, |m, s| {
                     crate::evaluator::readmit(&top, s)?;
                     crate::evaluator::run_phrases(
                         &top.phrases,
@@ -311,12 +290,11 @@ impl Shell {
                 })
             }
             Program::Hook { ref name, ref args } => {
-                let Some(hook) = self.context.hooks.get(name).cloned() else {
+                let Some(hook) = self.session.hooks.get(name).cloned() else {
                     return RunReport::Static {
-                        diagnostics: StaticDiagnostics::Host(crate::types::Error::new(
-                            format!("hook '{name}' is not registered"),
-                            1,
-                        )),
+                        diagnostics: StaticDiagnostics::Host(crate::types::Error::new(format!(
+                            "hook '{name}' is not registered"
+                        ))),
                     };
                 };
 
@@ -326,34 +304,32 @@ impl Shell {
 
                 // Capture, terminal authority and aside are the registered
                 // hook's to decide, not the dispatching host's.
-                if hook.policy.capture {
+                if hook.policy.io == RunIo::Capture {
                     req.run.io = RunIo::Capture;
                 }
-                req.run.terminal = match hook.policy.terminal {
-                    TerminalPolicy::Denied => RequestedTerminalAccess::Denied,
-                    TerminalPolicy::Leased => RequestedTerminalAccess::Leased,
-                };
+                req.run.terminal = hook.policy.terminal;
 
                 let label = name.fault_label();
                 let body = move |m: &Mooring, s: &mut Self| {
-                    crate::builtins::apply(&hook.binding.value, args, m, s).map_err(|brk| match brk
-                    {
-                        Break::Error(e) => Break::Error(e.context(label)),
-                        escape @ Break::Escape(_) => escape,
-                    })
+                    crate::evaluator::apply(&hook.binding.value, args, m, s).map_err(
+                        |brk| match brk {
+                            Break::Error(e) => Break::Error(e.context(label)),
+                            escape @ Break::Escape(_) => escape,
+                        },
+                    )
                 };
                 if hook.policy.aside {
                     let mut aside = self.join_session();
                     aside.io = build_run(self, None, Source::Empty);
-                    return aside.run_built(req, foreground, wall, false, FileId::DUMMY, body);
+                    return aside.run_built(req, foreground, wall, None, body);
                 }
-                self.run_built(req, foreground, wall, false, FileId::DUMMY, body)
+                self.run_built(req, foreground, wall, None, body)
             }
         }
     }
 
     /// The framed scaffold both program arms share, `body` being the resolved
-    /// program — `run_phrases` for source, `builtins::apply` for a hook.
+    /// program — `run_phrases` for source, `evaluator::apply` for a hook.
     ///
     /// The [`Mooring`] is an owned local on *this* stack frame and is only ever
     /// lent onward, so an outer run's is restored by the unwinding rather than
@@ -364,8 +340,7 @@ impl Shell {
         req: RunRequest,
         foreground: ForegroundScope,
         wall: Option<crate::process::Deadline>,
-        single_command: bool,
-        root: FileId,
+        compact: Option<FileId>,
         body: impl FnOnce(&Mooring, &mut Self) -> Settled<Value>,
     ) -> RunReport {
         let RunRequest {
@@ -382,17 +357,7 @@ impl Shell {
             Program::Hook { .. } => None,
         };
 
-        let (capture, capture_bufs) = match run.io {
-            RunIo::Inherit => (None, None),
-            RunIo::Capture => {
-                let (stdout_sink, stdout_buf) = crate::io::new_buffer();
-                let (stderr_sink, stderr_buf) = crate::io::new_buffer();
-                (
-                    Some((stdout_sink, stderr_sink)),
-                    Some((stdout_buf, stderr_buf)),
-                )
-            }
-        };
+        let capture = (run.io == RunIo::Capture).then(Capture::default);
 
         let stdin = match run.stdin {
             RunStdin::Inherit => Source::Terminal,
@@ -414,7 +379,7 @@ impl Shell {
             worker_cap: run.worker_cap,
             terminal_access,
         };
-        let next = build_run(self, capture, stdin);
+        let next = build_run(self, capture.as_ref(), stdin);
         let (result, status) = run_framed(
             &mooring,
             self,
@@ -430,15 +395,11 @@ impl Shell {
         // finished inside its budget would be misread as timed out.
         drop(wall);
 
-        let timed_out = mooring.cancel.cause() == Some(CancelCause::Deadline);
-        let captured = capture_bufs.map(|(out, err)| Captured {
-            stdout: crate::io::take_buffer(&out),
-            stderr: crate::io::take_buffer(&err),
-        });
+        let timed_out = mooring.cancel.cause() == Some(CancelCause::TimedOut);
 
         RunReport::Ran {
-            ending: classify_ending(result, status, single_command, root, timed_out),
-            captured,
+            ending: classify_ending(result, status, compact, timed_out),
+            captured: capture.map(Capture::finish),
             // Filled in by `enter`, which holds this dispatch's scope.
             trail: Vec::new(),
         }
@@ -451,8 +412,7 @@ impl Shell {
 fn classify_ending(
     result: Settled<Value>,
     status: i32,
-    single_command: bool,
-    root: FileId,
+    compact: Option<FileId>,
     timed_out: bool,
 ) -> Ending {
     match result {
@@ -460,31 +420,13 @@ fn classify_ending(
         // The cancel is stamped on the innermost node it unwound through, so
         // the wall is no exception to the engine's own error rendering —
         // only the tag distinguishing it from an ordinary raise is new here.
-        Err(Break::Error(error)) if timed_out => Ending::Walled {
-            error,
-            single_command,
-            root,
-        },
-        Err(Break::Error(error)) => Ending::Raised {
-            error,
-            single_command,
-            root,
-        },
+        Err(Break::Error(error)) if timed_out => Ending::Walled { error, compact },
+        Err(Break::Error(error)) => Ending::Raised { error, compact },
         Err(Break::Escape(Escape::Exit(code))) => Ending::Exited(code),
     }
 }
 
 // ── The spine behind the door: compile, build, install, classify ────────────
-
-/// A run's status is a pure function of its settled outcome, computed once:
-/// `Ok` exits 0 whatever it returned; an error or escape carries its own.
-pub fn status(outcome: &Settled<Value>) -> i32 {
-    match outcome {
-        Ok(_) => 0,
-        Err(Break::Error(e)) => e.exit_code(),
-        Err(Break::Escape(Escape::Exit(code))) => *code,
-    }
-}
 
 /// Holds what a run takes on loan from the shell — the byte streams,
 /// `session.root_file`, `local.audit.call_site` — and restores it on `Drop`, so
@@ -494,7 +436,7 @@ pub fn status(outcome: &Settled<Value>) -> i32 {
 struct IoLoan<'s> {
     shell: &'s mut Shell,
     saved: Io,
-    saved_root: FileId,
+    saved_root: Option<FileId>,
     saved_site: Option<Span>,
 }
 
@@ -503,7 +445,7 @@ impl<'s> IoLoan<'s> {
     /// has no call site and no root file until it registers one.
     fn install(shell: &'s mut Shell, next: Io) -> Self {
         let saved = std::mem::replace(&mut shell.io, next);
-        let saved_root = std::mem::replace(&mut shell.session.root_file, FileId::DUMMY);
+        let saved_root = shell.session.root_file.take();
         let saved_site = shell.local.audit.call_site.take();
         Self {
             shell,
@@ -528,29 +470,51 @@ impl Drop for IoLoan<'_> {
 /// installed independently of `capture`, so [`RunIo::Capture`] does not imply
 /// `Source::Terminal`; terminal authority is not here at all, but on the
 /// [`Mooring`] the caller builds separately.
-pub(crate) fn build_run(shell: &Shell, capture: Option<(Sink, Sink)>, stdin: Source) -> Io {
-    let mut run_io = Io {
+pub(crate) fn build_run(shell: &Shell, capture: Option<&Capture>, stdin: Source) -> Io {
+    let (stdout, stderr) = capture.map_or_else(
+        || (shell.io.stdout.clone(), shell.io.stderr.clone()),
+        Capture::sinks,
+    );
+    Io {
         stdin,
-        stdout: shell.io.stdout.clone(),
-        stderr: shell.io.stderr.clone(),
+        stdout,
+        stderr,
         interactive: shell.io.interactive,
         terminal: shell.io.terminal,
-        launch_role: shell.io.launch_role.clone(),
-    };
-    if let Some((stdout, stderr)) = capture {
-        run_io.stdout = stdout;
-        run_io.stderr = stderr;
+        stage: shell.io.stage.clone(),
     }
-    run_io
+}
+
+/// The buffers a [`RunIo::Capture`] run's sinks fill.
+#[derive(Default)]
+pub(crate) struct Capture {
+    stdout: crate::io::ByteBuffer,
+    stderr: crate::io::ByteBuffer,
+}
+
+impl Capture {
+    fn sinks(&self) -> (Sink, Sink) {
+        (
+            Sink::Buffer(self.stdout.clone()),
+            Sink::Buffer(self.stderr.clone()),
+        )
+    }
+
+    fn finish(self) -> Captured {
+        Captured {
+            stdout: self.stdout.take(),
+            stderr: self.stderr.take(),
+        }
+    }
 }
 
 /// Clear signal state, then compile and typecheck `src` against the live
 /// session.
 ///
-/// `single_command` and the root [`FileId`] come back here because the host
-/// needs both to render runtime errors once `comp` is consumed, and `root`
-/// cannot be read back later: [`IoLoan`] restores `session.root_file` to
-/// [`FileId::DUMMY`] on drop. The id is *peeked* before compiling so the
+/// The root [`FileId`], when the program is one command, comes back here
+/// because the host needs it to render runtime errors once `comp` is
+/// consumed, and it cannot be read back later: [`IoLoan`] restores
+/// `session.root_file` on drop. The id is *peeked* before compiling so the
 /// program's spans carry this run's file identity, while
 /// [`Shell::install_root_context`] registers for real from [`run_framed`], once
 /// a frame exists to install into — sound only because nothing in between
@@ -559,7 +523,7 @@ pub(crate) fn compile_run(
     shell: &Shell,
     src: &str,
     name: &str,
-) -> Result<(Arc<crate::ir::Toplevel>, bool, FileId), Box<StaticDiagnostics>> {
+) -> Result<(Arc<crate::ir::Toplevel>, Option<FileId>), Box<StaticDiagnostics>> {
     crate::process::clear();
     let file = shell.session.sources.next_id();
 
@@ -586,14 +550,13 @@ pub(crate) fn compile_run(
     // The text is copied only here, on the failure path, and dies with the
     // report: `file` was peeked, never minted, so the registry is untouched.
     let top = Arc::new(outcome.map_err(|error| {
-        Box::new(StaticDiagnostics::Compile(Uncompiled {
-            error,
-            source: crate::source::Source::from_text(name, src),
-        }))
+        Box::new(StaticDiagnostics::Compile(
+            error.reject(crate::source::Source::from_text(name, src)),
+        ))
     })?);
 
-    let single_command = crate::ir::is_single_command(&top);
-    Ok((top, single_command, file))
+    let compact = top.is_single_command().then_some(file);
+    Ok((top, compact))
 }
 
 /// Install the built run state, run `body` under `capabilities`, compute the transport status, and tear the frame down. Both
@@ -626,9 +589,9 @@ pub(crate) fn run_framed(
     // monotone, so this final poll re-raises it before the status is read —
     // the transport sees the true verdict. Demotes only a
     // successful settle; an error or escape already carries its own.
-    let result = result.and_then(|value| crate::process::check(mooring).map(|()| value));
+    let result = result.and_then(|value| mooring.check().map(|()| value));
 
-    let status = status(&result);
+    let status = result.as_ref().err().map_or(0, Break::code);
 
     // Ready-boundary housekeeping — reap notices as `` `notice `` surface
     // classes, the large-binding warning onto stderr — must go out while this
@@ -644,34 +607,42 @@ pub(crate) fn run_framed(
     (result, status)
 }
 
+impl Shell {
+    /// This run's ready-boundary housekeeping: [`run_framed`] calls it once per
+    /// settled source run, *before* the frame tears down, so it rides the
+    /// run's own streams and lands ahead of its report.
+    ///
+    /// The large-binding warning goes to stderr, reaching the model in its tool
+    /// result rather than becoming a frontend card, and is ungated: stderr is
+    /// there whether a surface sink is or not.  Reap and prune go out as
+    /// [`Notice`]s; absent a sink that half leaves the ledgers *untouched*
+    /// rather than drained and dropped, so their notices wait for a run that
+    /// does install one.
+    fn emit_ready_boundary_notices(&mut self, mooring: &Mooring) {
+        // Above the sink guard: expiry is a fact regardless of anyone
+        // listening, and its notice waits in the ledger either way.
+        self.local.workers.sweep_retention();
+        for notice in self.local.bindings.take_large_binding_notices() {
+            let _ = writeln!(self.io.stderr, "{notice}");
+        }
+        if mooring.surface.is_none() {
+            return;
+        }
+        for reap in self.take_worker_reap_notices() {
+            mooring.surface_data(&Notice::Reap(reap).to_surface());
+        }
+        let pruned = self.local.bindings.prune(&mut self.env);
+        if !pruned.is_empty() {
+            mooring.surface_data(&Notice::Prune(pruned).to_surface());
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, reason = "test scaffolding")]
 pub(crate) mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
-
-    /// The minimal request, shaped like exarch's tool run: ⊤ ceiling, no
-    /// surface, foreground `Denied`, stdin `Empty`.
-    pub(crate) fn capture_req(src: &str) -> RunRequest {
-        RunRequest {
-            run: Run {
-                program: Program::Source(src.into()),
-                script_name: "<test>".into(),
-                caps: GrantStack::root(),
-                wall: None,
-                deferred_lease: None,
-                worker_cap: None,
-                io: RunIo::Capture,
-                terminal: RequestedTerminalAccess::Denied,
-                stdin: RunStdin::Empty,
-                trail: None,
-            },
-            surface: None,
-            deferred: None,
-            desk: None,
-            fork: None,
-        }
-    }
 
     /// Install `name`, a builtin running `act` inside whichever run calls it,
     /// with that run's mooring — how a test acts mid-run, as an engine-side
@@ -684,7 +655,7 @@ pub(crate) mod tests {
         use crate::typecheck::builtins::{mk_scheme, pure, thunk};
         let entry = crate::types::BuiltinEntry::new(
             std::borrow::Cow::Borrowed(name),
-            |_| mk_scheme(&[], &[], thunk(pure(crate::typecheck::Ty::Unit))),
+            |_| mk_scheme(&[], &[], thunk(pure(crate::ty::Ty::Unit))),
             "test-only: act from inside the run.",
             crate::types::BuiltinBody::Captured(Arc::new(move |_, mooring, shell| {
                 act(mooring, shell);
@@ -701,8 +672,8 @@ pub(crate) mod tests {
 
     #[test]
     fn clean_run_settles_with_zero_status() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
-        match shell.run(capture_req("$[1 + 1]")) {
+        let mut shell = crate::test_helper::core_shell();
+        match shell.run(Run::captured("$[1 + 1]", "<test>")) {
             RunReport::Ran { ending, .. } => {
                 assert_eq!(ending.status(), 0);
                 let result = ending.into_result();
@@ -714,16 +685,13 @@ pub(crate) mod tests {
 
     #[test]
     fn parse_failure_is_static() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
-        match shell.run(capture_req("let = ")) {
+        let mut shell = crate::test_helper::core_shell();
+        match shell.run(Run::captured("let = ", "<test>")) {
             RunReport::Static { diagnostics } => {
                 assert!(
                     matches!(
                         diagnostics,
-                        StaticDiagnostics::Compile(Uncompiled {
-                            error: crate::CompileError::Parse(_),
-                            ..
-                        })
+                        StaticDiagnostics::Compile(Rejection { status: 2, .. })
                     ),
                     "expected a parse diagnostic"
                 );
@@ -738,8 +706,8 @@ pub(crate) mod tests {
     /// draw, and one per keystroke under a `buffer-change` hook.
     #[test]
     fn a_hook_run_registers_no_source() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.run(capture_req("let body = { 1 }"));
+        let mut shell = crate::test_helper::core_shell();
+        shell.run(Run::captured("let body = { 1 }", "<test>"));
         let thunk = shell
             .scope_lookup("body")
             .cloned()
@@ -751,21 +719,13 @@ pub(crate) mod tests {
                 thunk,
                 crate::types::HookSig::Prompt,
                 crate::types::DefaultPolicy::denied(),
-                crate::source::Span {
-                    start: 0,
-                    end: 0,
-                    file: crate::source::FileId::DUMMY,
-                },
             )
             .expect("register the hook");
 
         let before = shell.sources().next_id();
-        let report = shell.run(RunRequest {
-            run: Run {
-                program: Program::Hook { name, args: vec![] },
-                ..capture_req("").run
-            },
-            ..capture_req("")
+        let report = shell.run(Run {
+            program: Program::Hook { name, args: vec![] },
+            ..Run::captured("", "<test>")
         });
         assert!(
             matches!(report, RunReport::Ran { .. }),
@@ -785,26 +745,17 @@ pub(crate) mod tests {
         src: &str,
         policy: crate::types::DefaultPolicy,
     ) -> Ending {
-        shell.run(capture_req(&format!("let hook_body = {src}")));
+        shell.run(Run::captured(format!("let hook_body = {src}"), "<test>"));
         let body = shell
             .scope_lookup("hook_body")
             .cloned()
             .expect("hook_body is bound");
         shell
-            .register_hook(
-                name.clone(),
-                body,
-                crate::types::HookSig::Prompt,
-                policy,
-                Span::synthetic(),
-            )
+            .register_hook(name.clone(), body, crate::types::HookSig::Prompt, policy)
             .expect("register the hook");
-        let RunReport::Ran { ending, .. } = shell.run(RunRequest {
-            run: Run {
-                program: Program::Hook { name, args: vec![] },
-                ..capture_req("").run
-            },
-            ..capture_req("")
+        let RunReport::Ran { ending, .. } = shell.run(Run {
+            program: Program::Hook { name, args: vec![] },
+            ..Run::captured("", "<test>")
         }) else {
             panic!("the registered hook must run");
         };
@@ -822,7 +773,7 @@ pub(crate) mod tests {
                 "plugin 'p' hook 'h': ",
             ),
         ] {
-            let mut shell = Shell::new(crate::io::TerminalState::default());
+            let mut shell = crate::test_helper::core_shell();
             let Ending::Raised { error, .. } =
                 run_block_hook(&mut shell, name, "{ cd '' }", deny())
             else {
@@ -840,7 +791,7 @@ pub(crate) mod tests {
             (crate::types::DefaultPolicy::denied(), true),
             (crate::types::DefaultPolicy::denied().aside(), false),
         ] {
-            let mut shell = Shell::new(crate::io::TerminalState::default());
+            let mut shell = crate::test_helper::core_shell();
             shell.seed_cwd(dir.path().to_path_buf());
             let start = shell.cwd();
             let name = crate::types::HookName::session("buffer-change");
@@ -852,16 +803,13 @@ pub(crate) mod tests {
 
     #[test]
     fn type_failure_is_static() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
-        match shell.run(capture_req("$[1 + true]")) {
+        let mut shell = crate::test_helper::core_shell();
+        match shell.run(Run::captured("$[1 + true]", "<test>")) {
             RunReport::Static { diagnostics } => {
                 assert!(
                     matches!(
                         diagnostics,
-                        StaticDiagnostics::Compile(Uncompiled {
-                            error: crate::CompileError::Types(_),
-                            ..
-                        })
+                        StaticDiagnostics::Compile(Rejection { status: 1, .. })
                     ),
                     "expected type diagnostics"
                 );
@@ -872,8 +820,8 @@ pub(crate) mod tests {
 
     #[test]
     fn exit_escape_reports_code() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
-        match shell.run(capture_req("exit 3")) {
+        let mut shell = crate::test_helper::core_shell();
+        match shell.run(Run::captured("exit 3", "<test>")) {
             RunReport::Ran { ending, .. } => {
                 assert_eq!(ending.status(), 3);
                 let result = ending.into_result();
@@ -888,8 +836,8 @@ pub(crate) mod tests {
 
     #[test]
     fn capture_returns_stdout_bytes() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
-        match shell.run(capture_req("echo hi")) {
+        let mut shell = crate::test_helper::core_shell();
+        match shell.run(Run::captured("echo hi", "<test>")) {
             RunReport::Ran { captured, .. } => {
                 let captured = captured.expect("Capture must return buffers");
                 assert!(
@@ -906,13 +854,13 @@ pub(crate) mod tests {
     /// the next top-level run hangs off the anchor and not off the last run's.
     #[test]
     fn a_settled_run_leaves_the_anchor_untouched() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let mut shell = crate::test_helper::core_shell();
         let pre = shell.session.anchor.clone();
         assert!(!pre.is_cancelled(), "pre-run anchor is live");
 
         let _ = shell.run(RunRequest {
             surface: Some(Arc::new(())),
-            ..capture_req("$[1 + 1]")
+            ..RunRequest::from(Run::captured("$[1 + 1]", "<test>"))
         });
 
         assert!(
@@ -922,7 +870,7 @@ pub(crate) mod tests {
         shell
             .session
             .anchor
-            .cancel(crate::process::CancelCause::Explicit);
+            .cancel(crate::process::CancelCause::Cancelled);
         assert!(
             pre.is_cancelled(),
             "the anchor must still be the pre-run scope, not the run's own child"
@@ -933,7 +881,7 @@ pub(crate) mod tests {
     /// through the clone, not just the run's copy.
     #[test]
     fn nursery_is_emptied_at_run_teardown() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let mut shell = crate::test_helper::core_shell();
 
         let nursery = crate::types::Nursery::default();
         let parked_id: Arc<Mutex<Option<crate::types::NurseryId>>> = Arc::new(Mutex::new(None));
@@ -947,7 +895,7 @@ pub(crate) mod tests {
 
         let _ = shell.run(RunRequest {
             fork: Some(crate::types::Fork::Park(nursery.clone())),
-            ..capture_req("park-fork")
+            ..RunRequest::from(Run::captured("park-fork", "<test>"))
         });
 
         let id = parked_id
@@ -965,33 +913,28 @@ pub(crate) mod tests {
     /// ordered before that run's own settling.
     #[test]
     fn ready_boundary_notice_surfaces_a_pending_worker_reap() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let mut shell = crate::test_helper::core_shell();
 
         // Never polled, under a millisecond-scale idle lease, so the background
         // lease chain reaps it quickly.
-        let mut req = capture_req("spawn { sleep 10 }");
-        req.run.deferred_lease = Some(crate::types::WorkerLease {
+        let mut req = Run::captured("spawn { sleep 10 }", "<test>");
+        req.deferred_lease = Some(crate::types::WorkerLease {
             idle: std::time::Duration::from_millis(20),
             backstop: std::time::Duration::from_secs(10),
         });
         let _ = shell.run(req);
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while shell.worker_count() > 0 {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the unpolled worker must be reaped within the budget"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
+        crate::test_helper::eventually(std::time::Duration::from_secs(2), || {
+            (shell.worker_count() == 0).then_some(())
+        })
+        .expect("the unpolled worker must be reaped within the budget");
 
         // The first live sink of the session: until this run, the pending reap
         // has nowhere to push through.
-        let reaps = surfaced_notices(&mut shell, "$[1 + 1]", "reap");
-        assert_eq!(
-            reaps.len(),
-            1,
-            "the settled run must surface the pending reap as a `notice`"
+        let notices = surfaced_notices(&mut shell, "$[1 + 1]");
+        assert!(
+            matches!(notices.as_slice(), [crate::types::Notice::Reap(_)]),
+            "the settled run must surface the pending reap as a `notice`, got {notices:?}"
         );
     }
 
@@ -999,73 +942,64 @@ pub(crate) mod tests {
     /// crosses its bound, and announced there exactly once.
     #[test]
     fn ready_boundary_notice_surfaces_an_idle_prune() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let mut shell = crate::test_helper::core_shell();
         shell.arm_binding_lease(crate::types::BindingLease {
             idle_calls: 2,
             large_binding_bytes: u64::MAX,
         });
 
-        let mut prunes = surfaced_notices(&mut shell, "let idle_x = 1", "prune");
-        prunes.extend(surfaced_notices(&mut shell, "$[0]", "prune"));
-        prunes.extend(surfaced_notices(&mut shell, "$[0]", "prune"));
-        let [prune] = prunes.as_slice() else {
-            panic!("exactly one prune across the bound, got {prunes:?}");
+        let mut notices = surfaced_notices(&mut shell, "let idle_x = 1");
+        notices.extend(surfaced_notices(&mut shell, "$[0]"));
+        notices.extend(surfaced_notices(&mut shell, "$[0]"));
+        let [crate::types::Notice::Prune(pruned)] = notices.as_slice() else {
+            panic!("exactly one prune across the bound, got {notices:?}");
         };
-        let names = prune.field("names").and_then(|v| v.as_list());
         assert!(
-            matches!(names, Some([name]) if name.as_str() == Some("idle_x")),
-            "the prune names the idle binding, got {prune:?}"
+            matches!(pruned.as_slice(), [p] if p.name == "idle_x"),
+            "the prune names the idle binding, got {pruned:?}"
         );
 
         assert!(
-            surfaced_notices(&mut shell, "$[0]", "prune").is_empty(),
-            "nothing left idle — no second prune"
+            surfaced_notices(&mut shell, "$[0]").is_empty(),
+            "nothing left idle: no second prune"
         );
     }
 
-    /// Run `src` under a capturing surface sink, answering the payloads of the
-    /// `` `notice `` values of `kind` it pushed.
-    fn surfaced_notices(shell: &mut Shell, src: &str, kind: &str) -> Vec<crate::serial::FOValue> {
-        struct CapturingSink(Arc<Mutex<Vec<crate::serial::FOValue>>>);
+    /// Run `src` under a capturing surface sink, answering the notices it pushed.
+    fn surfaced_notices(shell: &mut Shell, src: &str) -> Vec<crate::types::Notice> {
+        struct CapturingSink(Arc<Mutex<Vec<crate::first_order::FOValue>>>);
         impl crate::types::EventSink for CapturingSink {
-            fn emit(&self, ev: &crate::serial::FOValue) {
+            fn emit(&self, ev: &crate::first_order::FOValue) {
                 self.0.lock().unwrap().push(ev.clone());
             }
         }
-        let captured: Arc<Mutex<Vec<crate::serial::FOValue>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured: Arc<Mutex<Vec<crate::first_order::FOValue>>> =
+            Arc::new(Mutex::new(Vec::new()));
         let _ = shell.run(RunRequest {
             surface: Some(Arc::new(CapturingSink(captured.clone()))),
-            ..capture_req(src)
+            ..RunRequest::from(Run::captured(src, "<test>"))
         });
         let events = captured.lock().unwrap().clone();
         events
-            .into_iter()
-            .filter_map(|ev| match ev {
-                crate::serial::FOValue::Variant { label, payload } if label == "notice" => {
-                    payload.map(|p| *p)
-                }
-                _ => None,
-            })
-            .filter(|payload| {
-                matches!(
-                    payload.field("kind"),
-                    Some(crate::serial::FOValue::Variant { label, .. }) if label == kind
-                )
-            })
+            .iter()
+            .filter_map(crate::types::Notice::from_surface)
             .collect()
     }
 
     /// An interrupt struck mid-run is read at the next poll point, so
-    /// `process::check` unwinds the eval at 130.
+    /// `Mooring::check` unwinds the eval at 130.
     #[test]
     fn an_interrupt_mid_run_unwinds_the_eval() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let mut shell = crate::test_helper::core_shell();
         install_act(
             &mut shell,
             "interrupt",
-            strike(crate::process::CancelCause::Interrupt),
+            strike(crate::process::CancelCause::Interrupted),
         );
-        match shell.run(capture_req("interrupt\nlet rpv = 42\nreturn $rpv")) {
+        match shell.run(Run::captured(
+            "interrupt\nlet rpv = 42\nreturn $rpv",
+            "<test>",
+        )) {
             RunReport::Ran { ending, .. } => {
                 assert_eq!(
                     ending.status(),
@@ -1089,14 +1023,15 @@ pub(crate) mod tests {
     /// interrupt entirely.
     #[test]
     fn a_try_handler_cannot_settle_a_cancelled_run() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let mut shell = crate::test_helper::core_shell();
         install_act(
             &mut shell,
             "interrupt",
-            strike(crate::process::CancelCause::Interrupt),
+            strike(crate::process::CancelCause::Interrupted),
         );
-        match shell.run(capture_req(
+        match shell.run(Run::captured(
             "try { interrupt\nlet x = ()\nreturn $x } { |_| return () }",
+            "<test>",
         )) {
             RunReport::Ran { ending, .. } => {
                 assert_eq!(
@@ -1122,25 +1057,26 @@ pub(crate) mod tests {
     /// its own anchor, off the struck run's chain.
     #[test]
     fn an_aside_cannot_absorb_its_callers_interrupt() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let mut shell = crate::test_helper::core_shell();
         let aside = Mutex::new(shell.join_session());
         let hook_status = Arc::new(Mutex::new(None));
         let status = hook_status.clone();
         install_act(&mut shell, "interrupt-then-aside", move |mooring, _| {
             mooring
                 .cancel
-                .cancel(crate::process::CancelCause::Interrupt);
+                .cancel(crate::process::CancelCause::Interrupted);
             let report = aside
                 .lock()
                 .unwrap()
-                .run(capture_req("let y = 1\nreturn $y"));
+                .run(Run::captured("let y = 1\nreturn $y", "<test>"));
             match report {
                 RunReport::Ran { ending, .. } => *status.lock().unwrap() = Some(ending.status()),
                 RunReport::Static { .. } => panic!("valid source must reach evaluation"),
             }
         });
-        match shell.run(capture_req(
+        match shell.run(Run::captured(
             "interrupt-then-aside\nlet rpv = 42\nreturn $rpv",
+            "<test>",
         )) {
             RunReport::Ran { ending, .. } => assert_eq!(
                 ending.status(),
@@ -1160,14 +1096,14 @@ pub(crate) mod tests {
     /// it, so plugin code is interruptible for its whole life.
     #[test]
     fn an_aside_unwinds_on_an_interrupt_raised_while_it_runs() {
-        let shell = Shell::new(crate::io::TerminalState::default());
+        let shell = crate::test_helper::core_shell();
         let mut aside = shell.join_session();
         install_act(
             &mut aside,
             "interrupt",
-            strike(crate::process::CancelCause::Interrupt),
+            strike(crate::process::CancelCause::Interrupted),
         );
-        match aside.run(capture_req("interrupt\nlet y = 1\nreturn $y")) {
+        match aside.run(Run::captured("interrupt\nlet y = 1\nreturn $y", "<test>")) {
             RunReport::Ran { ending, .. } => assert_eq!(
                 ending.status(),
                 130,
@@ -1182,14 +1118,14 @@ pub(crate) mod tests {
     /// names the very root the aside shares.
     #[test]
     fn cancelling_a_session_by_handle_reaches_its_aside() {
-        let shell = Shell::new(crate::io::TerminalState::default());
+        let shell = crate::test_helper::core_shell();
         let mut aside = shell.join_session();
 
         shell
             .cancel_handle()
-            .cancel(crate::process::CancelCause::Explicit);
+            .cancel(crate::process::CancelCause::Cancelled);
 
-        match aside.run(capture_req("let y = 1\nreturn $y")) {
+        match aside.run(Run::captured("let y = 1\nreturn $y", "<test>")) {
             RunReport::Ran { ending, .. } => {
                 assert_eq!(
                     ending.status(),
@@ -1212,12 +1148,12 @@ pub(crate) mod tests {
     #[test]
     fn a_session_is_deaf_to_the_ambient_causes() {
         let _serial = crate::process::cancel::REQUEST_SERIAL.lock();
-        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let mut shell = crate::test_helper::core_shell();
         install_act(&mut shell, "raise", |_, _| {
             crate::process::request_interrupt();
-            crate::process::request_root_cancel(crate::process::CancelCause::RootAbort);
+            crate::process::request_root_cancel(crate::process::CancelCause::Aborted);
         });
-        let report = shell.run(capture_req("raise\nlet rpv = 42\nreturn $rpv"));
+        let report = shell.run(Run::captured("raise\nlet rpv = 42\nreturn $rpv", "<test>"));
         crate::process::cancel::clear_root_request();
         match report {
             RunReport::Ran { ending, .. } => {
@@ -1236,19 +1172,15 @@ pub(crate) mod tests {
     /// classification without sleeping on the reaper.
     #[test]
     fn deadline_cancel_reports_walled() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let mut shell = crate::test_helper::core_shell();
         install_act(
             &mut shell,
             "expire",
-            strike(crate::process::CancelCause::Deadline),
+            strike(crate::process::CancelCause::TimedOut),
         );
-        let req = capture_req("expire\nlet rpv = 42\nreturn $rpv");
-        match shell.run(RunRequest {
-            run: Run {
-                wall: Some(std::time::Duration::from_secs(30)),
-                ..req.run
-            },
-            ..req
+        match shell.run(Run {
+            wall: Some(std::time::Duration::from_secs(30)),
+            ..Run::captured("expire\nlet rpv = 42\nreturn $rpv", "<test>")
         }) {
             RunReport::Ran { ending, .. } => {
                 assert!(
@@ -1265,14 +1197,10 @@ pub(crate) mod tests {
     /// none has landed there for the wall to be measured against.
     #[test]
     fn mid_script_wall_keeps_the_bindings_that_landed() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
-        let req = capture_req("let pre_wall = 1\nsleep 30\nlet post_wall = 2");
-        match shell.run(RunRequest {
-            run: Run {
-                wall: Some(std::time::Duration::from_millis(500)),
-                ..req.run
-            },
-            ..req
+        let mut shell = crate::test_helper::core_shell();
+        match shell.run(Run {
+            wall: Some(std::time::Duration::from_millis(500)),
+            ..Run::captured("let pre_wall = 1\nsleep 30\nlet post_wall = 2", "<test>")
         }) {
             RunReport::Ran { ending, .. } => assert!(
                 matches!(ending, Ending::Walled { .. }),
@@ -1295,24 +1223,20 @@ pub(crate) mod tests {
     /// it.
     #[test]
     fn inherit_leaves_session_streams_untouched() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let mut shell = crate::test_helper::core_shell();
         let (marker_sink, marker) = crate::io::new_buffer();
         shell.io.stdout = marker_sink;
 
-        let req = capture_req("echo hi");
-        let _ = shell.run(RunRequest {
-            run: Run {
-                io: RunIo::Inherit,
-                ..req.run
-            },
-            ..req
+        let _ = shell.run(Run {
+            io: RunIo::Inherit,
+            ..Run::captured("echo hi", "<test>")
         });
 
         assert!(
             matches!(&shell.io.stdout, Sink::Buffer(b) if Arc::ptr_eq(b, &marker)),
             "Inherit must restore the session's stdout sink after the run"
         );
-        let written = crate::io::peek_buffer(&marker);
+        let written = marker.peek();
         assert!(
             !written.is_empty(),
             "the run's stdout must land in the inherited sink"
@@ -1337,9 +1261,9 @@ pub(crate) mod tests {
         panic!("run-door test: deliberate mid-eval panic");
     }
 
-    fn scheme_panic_now(_u: &mut crate::typecheck::Unifier) -> crate::typecheck::Scheme {
+    fn scheme_panic_now(_u: &mut crate::typecheck::Unifier) -> crate::ty::Scheme {
         use crate::typecheck::builtins::{mk_scheme, pure, thunk};
-        mk_scheme(&[], &[], thunk(pure(crate::typecheck::Ty::Unit)))
+        mk_scheme(&[], &[], thunk(pure(crate::ty::Ty::Unit)))
     }
 
     static PANIC_BUILTINS_ARR: [crate::types::BuiltinEntry; 1] = [crate::types::BuiltinEntry::new(
@@ -1354,15 +1278,15 @@ pub(crate) mod tests {
     /// partial binding goes, a pre-run one stays, and the shell runs on.
     #[test]
     fn panicking_run_reports_failed_and_rolls_back() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let mut shell = crate::test_helper::core_shell();
         shell.install_builtins(PANIC_BUILTINS);
 
-        match shell.run(capture_req("let pre_panic = 1")) {
+        match shell.run(Run::captured("let pre_panic = 1", "<test>")) {
             RunReport::Ran { ending, .. } => assert!(matches!(ending, Ending::Settled { .. })),
             RunReport::Static { .. } => panic!("the pre-run binding must evaluate"),
         }
 
-        match shell.run(capture_req("let mid_panic = 2\ncore-panic-now")) {
+        match shell.run(Run::captured("let mid_panic = 2\ncore-panic-now", "<test>")) {
             RunReport::Static {
                 diagnostics: StaticDiagnostics::Host(e),
             } => {
@@ -1389,7 +1313,7 @@ pub(crate) mod tests {
             "the panicking run's own partial binding must be rolled back"
         );
 
-        match shell.run(capture_req("$pre_panic")) {
+        match shell.run(Run::captured("$pre_panic", "<test>")) {
             RunReport::Ran { ending, .. } => {
                 assert!(
                     matches!(ending, Ending::Settled { .. }),
@@ -1406,23 +1330,23 @@ pub(crate) mod tests {
     impl crate::types::EnquiryDesk for PanickingDesk {
         fn enquire(
             &self,
-            _req: crate::serial::FOValue,
+            _req: crate::first_order::FOValue,
             _cancel: &crate::process::CancelScope,
-        ) -> Result<crate::serial::FOValue, crate::types::Error> {
+        ) -> Result<crate::first_order::FOValue, crate::types::Error> {
             panic!("run-door test: desk handler panic");
         }
     }
 
     #[test]
     fn desk_handler_panic_is_caught_at_the_door() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let mut shell = crate::test_helper::core_shell();
         install_act(&mut shell, "enquire", |mooring, shell| {
-            let _ = shell.enquire(mooring, crate::serial::FOValue::Unit);
+            let _ = shell.enquire(mooring, crate::first_order::FOValue::Unit);
         });
 
         match shell.run(RunRequest {
             desk: Some(Arc::new(PanickingDesk)),
-            ..capture_req("let desk_panic = 4\nenquire")
+            ..RunRequest::from(Run::captured("let desk_panic = 4\nenquire", "<test>"))
         }) {
             RunReport::Static {
                 diagnostics: StaticDiagnostics::Host(e),
@@ -1439,7 +1363,7 @@ pub(crate) mod tests {
 
     /// The rendered runtime error of a run that must fault.
     fn rendered_fault(shell: &mut Shell, src: &str) -> String {
-        let report = shell.run(capture_req(src)).into_report(shell);
+        let report = shell.run(Run::captured(src, "<test>")).into_report(shell);
         let crate::protocol::Report::Ran { ending, .. } = report else {
             panic!("{src:?} must reach evaluation");
         };
@@ -1454,7 +1378,7 @@ pub(crate) mod tests {
     /// remedy that kind of value suggests.
     #[test]
     fn a_result_that_is_not_data_says_what_it_holds() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let mut shell = crate::test_helper::core_shell();
         for (src, says, hint) in [
             ("spawn { echo hi }", "the result is a handle", "let h ="),
             ("{ echo hi }", "the result is a block", "!{ … }"),
@@ -1466,7 +1390,7 @@ pub(crate) mod tests {
             ),
             ("[k: { echo hi }]", "the result holds a block", "!{ … }"),
         ] {
-            let report = shell.run(capture_req(src)).into_report(&shell);
+            let report = shell.run(Run::captured(src, "<test>")).into_report(&shell);
             let crate::protocol::Report::Ran { ending, .. } = report else {
                 panic!("{src:?} must reach evaluation");
             };
@@ -1482,8 +1406,9 @@ pub(crate) mod tests {
     /// A shell whose `_narrow` pushes a `net: false` session ceiling and whose
     /// `_narrowed` reports whether any ceiling holds.
     fn narrowing_shell() -> Shell {
-        use crate::types::{BuiltinBody, BuiltinEntry, Capabilities};
-        let mut shell = Shell::new(crate::io::TerminalState::default());
+        use crate::capability::Capabilities;
+        use crate::types::{BuiltinBody, BuiltinEntry};
+        let mut shell = crate::test_helper::core_shell();
         let entries: Arc<[BuiltinEntry]> = vec![
             BuiltinEntry::new(
                 "_narrow".into(),
@@ -1513,7 +1438,7 @@ pub(crate) mod tests {
 
     /// Run `narrow`, then assert its session ceiling alone outlived it and
     /// narrows the next run.
-    fn assert_ceiling_survives(mut shell: Shell, narrow: RunRequest) {
+    fn assert_ceiling_survives(mut shell: Shell, narrow: Run) {
         let before = shell.context.grants.len();
         assert!(matches!(shell.run(narrow), RunReport::Ran { .. }));
         assert_eq!(
@@ -1525,7 +1450,7 @@ pub(crate) mod tests {
         let RunReport::Ran {
             ending: Ending::Settled { value, .. },
             ..
-        } = shell.run(capture_req("_narrowed"))
+        } = shell.run(Run::captured("_narrowed", "<test>"))
         else {
             panic!("the probe run must settle");
         };
@@ -1540,12 +1465,12 @@ pub(crate) mod tests {
     #[test]
     fn a_session_ceiling_pushed_in_a_run_outlives_it() {
         let mut caps = GrantStack::root();
-        caps.push(crate::types::Capabilities {
+        caps.push(crate::capability::Capabilities {
             detach: Some(false),
-            ..crate::types::Capabilities::root()
+            ..crate::capability::Capabilities::root()
         });
-        let mut narrow = capture_req("_narrow");
-        narrow.run.caps = caps;
+        let mut narrow = Run::captured("_narrow", "<test>");
+        narrow.caps = caps;
         assert_ceiling_survives(narrowing_shell(), narrow);
     }
 
@@ -1555,7 +1480,7 @@ pub(crate) mod tests {
     fn a_session_ceiling_pushed_in_a_grant_block_outlives_it() {
         assert_ceiling_survives(
             narrowing_shell(),
-            capture_req("grant [net: true] { _narrow }"),
+            Run::captured("grant [net: true] { _narrow }", "<test>"),
         );
     }
 
@@ -1564,10 +1489,11 @@ pub(crate) mod tests {
     /// costs a value nothing of its origin.
     #[test]
     fn a_lambda_faults_against_the_run_that_compiled_it() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let mut shell = crate::test_helper::core_shell();
         assert!(matches!(
-            shell.run(capture_req(
-                "let boom = { |x| fail [status: 1, message: nope] }"
+            shell.run(Run::captured(
+                "let boom = { |x| fail [status: 1, message: nope] }",
+                "<test>"
             )),
             RunReport::Ran {
                 ending: Ending::Settled { .. },
@@ -1584,7 +1510,7 @@ pub(crate) mod tests {
     /// A fault in text the user can already see needs no header and no caret.
     #[test]
     fn a_single_command_faulting_in_its_own_text_renders_compact() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let mut shell = crate::test_helper::core_shell();
         let rendered = crate::ansi::strip(&rendered_fault(&mut shell, "no-such-command-xyz"));
         assert!(
             !rendered.contains('╭'),
@@ -1596,17 +1522,17 @@ pub(crate) mod tests {
     /// anything after it, so the flag must keep reporting the input's shape.
     #[test]
     fn single_command_still_reports_the_input_shape() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let mut shell = crate::test_helper::core_shell();
         for (src, shape) in [
             ("no-such-command-xyz", true),
             ("no-such-command-xyz; true", false),
         ] {
-            match shell.run(capture_req(src)) {
+            match shell.run(Run::captured(src, "<test>")) {
                 RunReport::Ran {
-                    ending: Ending::Raised { single_command, .. },
+                    ending: Ending::Raised { compact, .. },
                     ..
                 } => {
-                    assert_eq!(single_command, shape, "{src:?} misreports its shape");
+                    assert_eq!(compact.is_some(), shape, "{src:?} misreports its shape");
                 }
                 RunReport::Ran { ending, .. } => panic!("{src:?} must fault, got {ending:?}"),
                 RunReport::Static { .. } => panic!("{src:?} must reach evaluation"),
@@ -1618,17 +1544,13 @@ pub(crate) mod tests {
 
     /// `Run.trail: Some` opens a scope at `enter`, closes it into the
     /// `RunReport`, and `into_report` projects each observation through
-    /// `to_wire` onto the wire — the whole path a dispatching host takes.
+    /// `encode` onto the wire — the whole path a dispatching host takes.
     #[test]
     fn a_dispatch_trail_projects_and_round_trips_through_the_wire() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
-        let req = capture_req("/bin/echo hi");
-        let report = shell.run(RunRequest {
-            run: Run {
-                trail: Some(crate::types::CapturePolicy::Off),
-                ..req.run
-            },
-            ..req
+        let mut shell = crate::test_helper::core_shell();
+        let report = shell.run(Run {
+            trail: Some(crate::types::CapturePolicy::Off),
+            ..Run::captured("/bin/echo hi", "<test>")
         });
         let crate::protocol::Report::Ran { trail, .. } = report.into_report(&shell) else {
             panic!("valid source must reach evaluation");
@@ -1638,10 +1560,14 @@ pub(crate) mod tests {
             "the dispatch's own trail must carry its one command"
         );
         let round_tripped = trail.iter().any(|fo| {
-            let Some(obs) = crate::types::Observation::from_wire(fo) else {
-                return false;
-            };
-            matches!(obs.what, crate::types::Observed::Command { .. })
+            let obs = crate::first_order::datum::Datum::decode(fo);
+            matches!(
+                obs,
+                Ok(crate::types::Observation {
+                    what: crate::types::Observed::Command(_),
+                    ..
+                })
+            )
         });
         assert!(
             round_tripped,
@@ -1650,11 +1576,11 @@ pub(crate) mod tests {
     }
 
     /// `Run.trail: None` neither opens a scope nor collects one — the REPL's
-    /// choice, and every other test's, `capture_req` included.
+    /// choice, and every other test's, `Run::captured` included.
     #[test]
     fn a_dispatch_asking_no_trail_reports_none() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
-        match shell.run(capture_req("$[1 + 1]")) {
+        let mut shell = crate::test_helper::core_shell();
+        match shell.run(Run::captured("$[1 + 1]", "<test>")) {
             RunReport::Ran { trail, .. } => assert!(
                 trail.is_empty(),
                 "an unasked dispatch must report no trail at all"
@@ -1670,16 +1596,12 @@ pub(crate) mod tests {
     /// fresh scope and sees nothing left over.
     #[test]
     fn a_panicked_dispatch_reports_static_and_leaves_the_next_trail_empty() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let mut shell = crate::test_helper::core_shell();
         shell.install_builtins(PANIC_BUILTINS);
 
-        let panicking = capture_req("core-panic-now");
-        match shell.run(RunRequest {
-            run: Run {
-                trail: Some(crate::types::CapturePolicy::Off),
-                ..panicking.run
-            },
-            ..panicking
+        match shell.run(Run {
+            trail: Some(crate::types::CapturePolicy::Off),
+            ..Run::captured("core-panic-now", "<test>")
         }) {
             RunReport::Static {
                 diagnostics: StaticDiagnostics::Host(e),
@@ -1687,13 +1609,9 @@ pub(crate) mod tests {
             _ => panic!("a panicking dispatch must report Static{{Host}}"),
         }
 
-        let next = capture_req("$[1 + 1]");
-        match shell.run(RunRequest {
-            run: Run {
-                trail: Some(crate::types::CapturePolicy::Off),
-                ..next.run
-            },
-            ..next
+        match shell.run(Run {
+            trail: Some(crate::types::CapturePolicy::Off),
+            ..Run::captured("$[1 + 1]", "<test>")
         }) {
             RunReport::Ran { trail, .. } => assert!(
                 trail.is_empty(),

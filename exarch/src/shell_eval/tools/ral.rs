@@ -77,7 +77,7 @@ pub(crate) fn schema() -> Value {
                 "type": "string",
                 "maxLength": DESCRIPTION_MAX,
                 "description": "One line (≤60 chars) stating the script's \
-        intent — what it is for, not what it types. Present continuous, e.g. \
+        intent: what it is for, not what it types. Present continuous, e.g. \
         \"Counting TODOs across src/.\". Shown on the rail; no newlines. Do not echo the source, or the mechanics of ral.",
             },
             "timeout_secs": {

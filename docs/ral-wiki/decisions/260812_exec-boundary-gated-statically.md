@@ -46,10 +46,12 @@ let show = { |v| cat $v }; show $r  # the parameter's shape is the run's busines
 
 ### 2. One declaration, two readings
 
-`RefusedArg` (`core/src/types/exec_arg.rs`) names the refused shapes — list,
-map, block, handle, bytes — with two total maps into it and one remedy out:
+`RefusedArg` (`core/src/ty/exec_arg.rs`, moved from `types/` once the checker no
+longer reads upward) names the refused shapes — list, map, block, handle, bytes
+— with one total map into it, `of_head`, read two ways, and one remedy out:
 
-- `of_value`, which `runtime::command::vet` reads at the spawn;
+- `of_value`, which `runtime::command::vet` reads at the spawn (a value's
+  `Value::heads` through `of_head`);
 - `of_ty`, which the argv rule reads before it;
 - `remedy`, one sentence per shape, so the static error and the pre-spawn one
   speak *one language* about the same mistake.

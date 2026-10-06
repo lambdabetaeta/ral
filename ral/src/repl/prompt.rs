@@ -4,9 +4,9 @@
 //! like any other hook.  The prompt body reads `cwd` and `user` directly.
 //! Plugins may transform the result via the `prompt` lifecycle hook.
 
+use ral_core::carrier::Transport;
 use ral_core::errln;
-use ral_core::protocol::Transport;
-use ral_core::serial::FOValue;
+use ral_core::first_order::FOValue;
 use ral_core::types::{Closure, DefaultPolicy, HookName, HookSig};
 use ral_core::{Captured, Shell, Value};
 use std::sync::Arc;
@@ -35,7 +35,6 @@ pub(crate) fn install_default_prompt(shell: &mut Shell) {
         block,
         HookSig::Prompt,
         DefaultPolicy::denied_capture(),
-        ral_core::source::Span::synthetic(),
     );
 }
 
@@ -86,7 +85,7 @@ fn prompt_text(value: FOValue, captured: Option<Captured>) -> String {
 /// Presentation-layer side effect, separate from the semantic prompt
 /// computation in [`render`], so the title updates whether or not the user
 /// changes the prompt.  No-op on terminals that can't render OSC titles.
-pub(super) fn write_terminal_title(terminal: &ral_core::io::TerminalState, cwd: &str) {
+pub(super) fn write_terminal_title(terminal: &ral_core::terminal::TerminalState, cwd: &str) {
     if !terminal.ui_title_ok() {
         return;
     }
@@ -133,7 +132,6 @@ pub(super) fn render(t: &dyn Transport, host: &Arc<ReplHost>) -> PromptText {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ral_core::source::Span;
 
     #[test]
     fn strips_sgr_sequences_from_prompt_width() {
@@ -147,7 +145,7 @@ mod tests {
     fn render_src(src: &str) -> String {
         let src = src.to_owned();
         let t = crate::repl::engine(move |shell| {
-            ral_core::builtins::register(shell, crate::PRELUDE.comp());
+            crate::PRELUDE.seat(shell);
             let prompt = crate::repl::eval(shell, &src);
             shell
                 .register_hook(
@@ -155,7 +153,6 @@ mod tests {
                     prompt,
                     HookSig::Prompt,
                     DefaultPolicy::denied_capture(),
-                    Span::synthetic(),
                 )
                 .expect("a block registers as the prompt");
         });

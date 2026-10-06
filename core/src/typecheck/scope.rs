@@ -17,15 +17,17 @@
 //! A scope form passes its body's producer through, grade included: what
 //! `within [dir: d] { hostname }` is, is a command.
 
-use super::builtins::{audit_record, try_error_record};
+use super::builtins::audit_record;
 use super::contract::{Form, Holds, Table, catch_all_shape, declared, field_reason};
+use super::env::HandlerOrigin;
 use super::error::{Reason, TypeErrorKind};
 use super::grade::JoinArm;
 use super::infer::Inferencer;
-use super::scheme::Scheme;
-use super::ty::{CompTy, Ty};
+use crate::fact::ErrorRecord;
 use crate::ir::{HandlerArmV, OptionsV, Val};
 use crate::source::WithSpan;
+use crate::ty::Typed as _;
+use crate::ty::{CompTy, Scheme, Ty};
 
 impl Inferencer<'_> {
     /// Hold each written option to what `table` says of its label, each
@@ -123,13 +125,12 @@ impl Inferencer<'_> {
         self.check_options(opts, declared(Form::Within));
         let bindings = self.handler_bindings(handlers);
 
-        self.env.push();
-        for (name, scheme) in bindings {
-            self.env.bind_handler(name, scheme, false);
-        }
-        let body_cty = self.scope_body(body);
-        self.env.pop();
-        body_cty
+        self.with_scope(|this| {
+            for (name, scheme) in bindings {
+                this.env.bind_handler(name, scheme, HandlerOrigin::Within);
+            }
+            this.scope_body(body)
+        })
     }
 
     pub(super) fn infer_grant(&mut self, caps: &OptionsV, body: &Val) -> CompTy {
@@ -142,7 +143,7 @@ impl Inferencer<'_> {
     pub(super) fn infer_try(&mut self, body: &Val, handler: &Val) -> CompTy {
         let arms = [
             JoinArm::in_hand(body, vec![], Reason::ScopeBody),
-            JoinArm::in_hand(handler, vec![try_error_record()], Reason::TryHandler),
+            JoinArm::in_hand(handler, vec![ErrorRecord::ty()], Reason::TryHandler),
         ];
         self.join_arms(&arms, &Reason::TryArms)
     }

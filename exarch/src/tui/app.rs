@@ -380,7 +380,7 @@ impl App {
             None => {
                 ral_core::dbg_trace!(
                     "tui",
-                    "scrollback event DROPPED — no scrollback for id={id}; known={:?}",
+                    "scrollback event DROPPED: no scrollback for id={id}; known={:?}",
                     self.tabs.ids()
                 );
             }
@@ -696,6 +696,8 @@ mod tests {
     #[test]
     fn a_pin_never_splits_a_coalesced_observation_run() {
         use crate::record::{Display, Locus, Record, Recorded, Seq};
+        use ral_core::fact::Read;
+        use ral_core::first_order::datum::Datum as _;
 
         let (mut app, rx, root) = app();
         let mut seq = 0;
@@ -707,7 +709,7 @@ mod tests {
             );
         };
         let read_at = |path: &str| {
-            Observation::instant(None, None, Observed::Read { path: path.into() }).to_wire()
+            Observation::instant(None, None, Observed::Read(Read { path: path.into() })).encode()
         };
 
         fact(

@@ -106,9 +106,9 @@ impl Call {
         let mut b = Buckets::default();
         for what in &self.effects {
             match what {
-                Observed::Read { path } => b.reads.push(path),
-                Observed::Command { .. } => b.execs.push(what),
-                Observed::Grep { .. } => b.greps.push(what),
+                Observed::Read(r) => b.reads.push(&r.path),
+                Observed::Command(_) => b.execs.push(what),
+                Observed::Grep(_) => b.greps.push(what),
                 _ => {}
             }
         }
@@ -124,18 +124,9 @@ impl Call {
 /// pattern searched again in the same scope.
 fn same_effect(a: &Observed, b: &Observed) -> bool {
     match (a, b) {
-        (Observed::Read { path: p }, Observed::Read { path: q }) => p == q,
-        (Observed::Command { argv: p, .. }, Observed::Command { argv: q, .. }) => p == q,
-        (
-            Observed::Grep {
-                scope: s,
-                pattern: p,
-            },
-            Observed::Grep {
-                scope: t,
-                pattern: q,
-            },
-        ) => (s, p) == (t, q),
+        (Observed::Read(p), Observed::Read(q)) => p.path == q.path,
+        (Observed::Command(p), Observed::Command(q)) => p.argv == q.argv,
+        (Observed::Grep(p), Observed::Grep(q)) => (&p.scope, &p.pattern) == (&q.scope, &q.pattern),
         _ => false,
     }
 }
@@ -239,7 +230,7 @@ fn tally(calls: &[Call], width: usize) -> Vec<Line<'static>> {
     ls
 }
 
-/// "Ran N scripts" always, then the non-empty buckets in fixed order — binaries
+/// "Ran N scripts" always, then the non-empty buckets in fixed order: binaries
 /// share the "Ran"; reads and searches bring their own verb.
 fn tally_line(scripts: usize, tally: Tally) -> String {
     let mut s = format!("Ran {}", count(scripts, "script", "scripts"));

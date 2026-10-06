@@ -25,6 +25,7 @@ use super::select::plain_slice;
 use crate::bus::card::{self, Card, Change, Landing, landing, observation_card};
 use crate::provider::Usage;
 use crate::record::{self, BlockId, Blocks, Delta, Seq, Transient};
+use ral_core::first_order::datum::Datum as _;
 use ral_core::types::{Observation, Observed};
 use std::fs;
 use std::io;
@@ -327,7 +328,7 @@ impl Scrollback {
         self.fold.usage()
     }
 
-    /// Per-turn "had a tool call" flags, oldest first — one bool per turn
+    /// Per-turn "had a tool call" flags, oldest first: one bool per turn
     /// block the fold holds, which the matrix renders `●` or `○`.
     pub(super) fn turns(&self) -> Vec<bool> {
         let mut turns: Vec<bool> = Vec::new();
@@ -1045,8 +1046,8 @@ fn surfaced(card: Card) -> Item {
 /// Decode one [`Display::Observation`](crate::record::Display::Observation),
 /// through the same [`landing`] the live rail draws from — a rendering, never
 /// recorded, built as the fact arrives.
-fn observation_items(value: &ral_core::serial::FOValue) -> Vec<Item> {
-    let Some(obs) = Observation::from_wire(value) else {
+fn observation_items(value: &ral_core::first_order::FOValue) -> Vec<Item> {
+    let Ok(obs) = Observation::decode(value) else {
         return Vec::new();
     };
     observed_items(&obs.what)
@@ -1327,7 +1328,7 @@ mod tests {
         assert_eq!(
             w1.lines.len(),
             height,
-            "the window fills every row — no blank space below the tail"
+            "the window fills every row: no blank space below the tail"
         );
         assert!(sb.sticky, "re-armed at the bottom after the clamp");
     }

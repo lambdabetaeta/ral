@@ -114,10 +114,11 @@ silently. Every surface class is a label, an audit observation included
 value's shape.
 
 **A payload is typed once, for both ends.** It is an `FOValue` on the wire
-and a Rust type on either side of it: `Datum` (`ral_core::serial::datum`) is
+and a Rust type on either side of it: `Datum` (`ral_core::first_order::datum`) is
 the one first-order codec — `encode`, and a strict `decode` naming whatever
 arrived ill-shaped — and `record!` derives it for a record whose keys must be
-exactly its own, answering an unknown key with the one it most likely meant.
+exactly its own, answering an unknown key with the one it most likely meant
+(`variant!` and `label!` are its siblings for payload enums and enums of bare tags).
 Probe classes, exarch's enquiries, the REPL's enquiries and an installer's
 `Attach.config` all cross through it, so a door and the desk behind it decode
 with one function and refuse in one wording.
@@ -218,24 +219,24 @@ the engine's single worker rendezvous with dispatches: a probe sent mid-run
 gets the same "engine busy" a second dispatch would, since probes are legal
 only at a run boundary.
 
-**A reading is typed once.** Core's `reading` module owns every class: its
-label, its payload rule (a payload on a class that takes none is refused, as
-is a missing one), the engine's answer, and the host's typed door —
-`reading::cwd(t) -> PathBuf`, `reading::workers(t) -> Vec<WorkerRow>`,
-`reading::spine(t, src)`, and one per class — so the two ends of a probe
-cannot disagree about what a class means. The classes span session state
+**A reading is typed once.** Core's `Probe` enum (`protocol/probe.rs`) is
+the frame's payload: each variant states what it takes, so a payload its probe
+does not take is not representable and the engine has nothing to refuse. The
+engine's answer (`engine/probe.rs`) and the host's typed door —
+`t.cwd() -> PathBuf`, `t.workers() -> Vec<WorkerRow>`, one per variant, provided
+methods of `Transport` — match on the one enum, so the two ends of a probe
+cannot disagree about what a probe means. The answer is its own event,
+`Event::Reading`, not a forged run report. The probes span session state
 (`cwd`, `home`, `env-var`, `builtin-names`, `session-ended`),
-the scope (`bindings`, `completion-names`, the binding counts), the engine's
-filesystem (`path-bytes`, `path-entries`) and static reads of source against
-the live session (`spine`, `bind-effects`). What a probe answers is *data*,
+the scope (`bindings`, `completion-names`, the binding counts) and the
+engine's filesystem (`path-bytes`, `path-entries`). What a probe answers is *data*,
 never a handle. An answer outside its class's shape is the engine breaking
 the protocol: the typed door severs the transport `Faulted` itself, which is
 why `Transport::sever` is on the trait, identity included.
 
-A failed probe distinguishes two unrelated causes: a class the engine would
-not read at all — an unknown reading, a malformed payload, a probe sent
-mid-run — is a program error on the caller's side, since a probe is legal
-only at a boundary; a probe for which no answer will ever come, because the
+A failed probe distinguishes two unrelated causes: a probe the engine would
+not read at all — one sent mid-run, or whose reading panicked — is a program
+error on the caller's side, since a probe is legal only at a boundary; a probe for which no answer will ever come, because the
 transport itself is gone, is the far side's death. The two are never
 conflated into one string a caller might pattern-match.
 

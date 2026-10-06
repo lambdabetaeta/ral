@@ -13,8 +13,8 @@ use crate::agent::log::{EditAuthority, QuiesceReason, ToolResult as SessionToolR
 use crate::bus::{AgentState, Emitter, Next};
 use crate::provider::{Delta, Provider, ProviderError, StepOut, StopReason, ToolCall};
 use crate::record::Transient;
-use ral_core::protocol::Severed;
-use ral_core::serial::FOValue;
+use ral_core::carrier::Severed;
+use ral_core::first_order::FOValue;
 use std::io;
 use std::sync::Arc;
 
@@ -388,7 +388,7 @@ impl Avatar {
     /// parentless agent's `attend` loop stops here.
     fn replied(&self, payload: FOValue) -> Outcome {
         self.agent
-            .cancel_descendants(ral_core::process::CancelCause::Explicit);
+            .cancel_descendants(ral_core::process::CancelCause::Cancelled);
         self.agent.deposit_reply(payload);
         self.log.lock().quiesce(QuiesceReason::Replied);
         Outcome::Replied
@@ -491,8 +491,9 @@ mod tests {
     use genai::chat::ChatRole;
     use ral_core::Shell;
     use ral_core::Value;
+    use ral_core::ty::{Scheme, Ty};
+    use ral_core::typecheck::Unifier;
     use ral_core::typecheck::builtins::{mk_scheme, pure, thunk};
-    use ral_core::typecheck::{Scheme, Ty, Unifier};
     use ral_core::types::{BuiltinBody, BuiltinEntry, Mooring, Settled};
     use std::borrow::Cow;
 
@@ -541,7 +542,7 @@ mod tests {
         direct.parent = Some(child.agent.clone());
         let transport = bare_transport();
         direct.reach =
-            InterruptTarget::new(ral_core::protocol::Transport::control(&transport).clone());
+            InterruptTarget::new(ral_core::carrier::Transport::control(&transport).clone());
         let direct = test_agent(&child.fleet, direct).expect("a live child of the replying agent");
         let mut grandchild = TestAgentSpec::new("grandchild");
         grandchild.parent = Some(direct.clone());
@@ -573,7 +574,7 @@ mod tests {
             "the direct child is cancelled by the reply itself"
         );
         assert!(
-            ral_core::protocol::reading::session_ended(&transport)
+            ral_core::carrier::Transport::session_ended(&transport)
                 .expect("an identity transport answers")
                 .is_some(),
             "the cascade cancels the abandoned child's eval layer too"
@@ -820,7 +821,7 @@ mod tests {
     ) -> Settled<Value> {
         T2_CANCEL_TOKEN.with(|cell| {
             if let Some(token) = cell.borrow().as_ref() {
-                token.cancel(ral_core::process::CancelCause::Interrupt);
+                token.cancel(ral_core::process::CancelCause::Interrupted);
             }
         });
         Ok(Value::Unit)
@@ -1251,7 +1252,7 @@ mod tests {
 
         child
             .agent
-            .cancel_tree(ral_core::process::CancelCause::Explicit);
+            .cancel_tree(ral_core::process::CancelCause::Cancelled);
 
         assert!(
             entries[0].handle.cancel.is_cancelled(),

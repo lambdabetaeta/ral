@@ -30,6 +30,8 @@ use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
 use super::LexicalPath;
+use crate::{label, record};
+use strum::{IntoStaticStr, VariantArray};
 
 /// `SYMLOOP_MAX`'s customary value: a name still splicing past this is a cycle.
 pub(crate) const MAX_HOPS: usize = 40;
@@ -47,7 +49,10 @@ pub struct Located {
 
 /// What the object is.  One of these and no other, so an enum rather than a
 /// row of bools that can contradict one another.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+///
+/// Its tag is the `type` ral's `list-dir` and `file-info` give it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
 pub(crate) enum Kind {
     File,
     Dir,
@@ -55,17 +60,7 @@ pub(crate) enum Kind {
     Other,
 }
 
-impl Kind {
-    /// The name ral's `list-dir` and `file-info` give this kind.
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::File => "file",
-            Self::Dir => "dir",
-            Self::Symlink => "symlink",
-            Self::Other => "other",
-        }
-    }
-}
+label!(typed Kind);
 
 /// What a `stat` of the object found, when it exists.
 ///
@@ -118,6 +113,86 @@ pub(crate) struct Entry {
     pub(crate) stat: Stat,
 }
 
+/// Seconds since the epoch, or 0 when the field is unrecorded or pre-epoch.
+fn secs_since_epoch(t: Option<SystemTime>) -> i64 {
+    t.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
+
+/// What `list-dir` reports of one entry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DirEntry {
+    name: String,
+    kind: Kind,
+    size: u64,
+    mtime: i64,
+}
+
+record!(typed DirEntry {
+    name: "name",
+    kind: "type",
+    size: "size",
+    mtime: "mtime",
+});
+
+impl DirEntry {
+    pub(crate) fn of(entry: &Entry) -> Self {
+        let Stat {
+            kind, len, mtime, ..
+        } = entry.stat;
+        Self {
+            name: entry.name.to_string_lossy().into_owned(),
+            kind,
+            size: len,
+            mtime: secs_since_epoch(mtime),
+        }
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+/// What `file-info` reports of one path: a [`DirEntry`]'s fields, access and
+/// birth times, the readonly bit, and the symlink `target` when it is one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FileInfo {
+    name: String,
+    kind: Kind,
+    size: u64,
+    mtime: i64,
+    atime: i64,
+    btime: i64,
+    readonly: bool,
+    target: Option<String>,
+}
+
+record!(typed FileInfo {
+    name: "name",
+    kind: "type",
+    size: "size",
+    mtime: "mtime",
+    atime: "atime",
+    btime: "btime",
+    readonly: "readonly",
+    target: "target",
+});
+
+impl FileInfo {
+    pub(crate) fn of(name: &OsStr, stat: &Stat, target: Option<String>) -> Self {
+        Self {
+            name: name.to_string_lossy().into_owned(),
+            kind: stat.kind,
+            size: stat.len,
+            mtime: secs_since_epoch(stat.mtime),
+            atime: secs_since_epoch(stat.atime),
+            btime: secs_since_epoch(stat.btime),
+            readonly: stat.readonly,
+            target,
+        }
+    }
+}
+
 enum Step {
     Object(Located),
     Link(PathBuf),
@@ -160,7 +235,7 @@ const LOOP_MESSAGE: &str = "too many levels of symbolic links";
 /// that itself crosses links is handled by the same rule.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[silent:walk-descend] Opens the root and then each directory component as a search handle with FollowSymlinks::No, to reach the object a grant will judge. Path resolution, not the model's data I/O — the card belongs to the site that then opens the leaf."
+    reason = "[silent:walk-descend] Opens the root and then each directory component as a search handle with FollowSymlinks::No, to reach the object a grant will judge. Path resolution, not the model's data I/O: the card belongs to the site that then opens the leaf."
 )]
 fn descend(path: &Path, leaf_mode: Leaf) -> io::Result<Step> {
     let mut comps = path.components().peekable();
@@ -400,7 +475,7 @@ fn final_path(f: &File) -> Option<PathBuf> {
     }
     buf.truncate(written as usize);
     let name = String::from_utf16(&buf).ok()?;
-    Some(PathBuf::from(super::lex::windows_head(&name)))
+    Some(PathBuf::from(super::identity::windows_head(&name)))
 }
 
 /// A search handle on `name` in `dir`: the right to resolve names through
@@ -410,7 +485,7 @@ fn final_path(f: &File) -> Option<PathBuf> {
 /// not know, so there it would fall back to a read handle.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[silent:walk-search] Opens one directory component of the walk as a search handle with FollowSymlinks::No. Path resolution, not the model's data I/O — the card belongs to the site that then opens the leaf."
+    reason = "[silent:walk-search] Opens one directory component of the walk as a search handle with FollowSymlinks::No. Path resolution, not the model's data I/O: the card belongs to the site that then opens the leaf."
 )]
 fn open_search_dir(dir: &File, name: &OsStr) -> io::Result<File> {
     #[cfg(target_os = "macos")]
@@ -466,7 +541,7 @@ impl Located {
 
     #[allow(
         clippy::disallowed_methods,
-        reason = "[surface:locate-open] The one open of a located object. Every caller surfaces it, each in its own way: a redirect's card is fused on by the frame that wrapped the locate — read recorded eagerly by install_stdin_redirect so it precedes what it feeds, write fired when the frame settles — while exarch's readers speak their own card and its editors emit a write event over a silent read. A write's before- and after-images and grep's per-file read ride the card of the operation that asked for them."
+        reason = "[surface:locate-open] The one open of a located object. Every caller surfaces it, each in its own way: a redirect's card is fused on by the frame that wrapped the locate (read recorded eagerly by install_stdin_redirect so it precedes what it feeds, write fired when the frame settles), while exarch's readers speak their own card and its editors emit a write event over a silent read. A write's before- and after-images and grep's per-file read ride the card of the operation that asked for them."
     )]
     fn open_leaf(&self, opts: &mut OpenOptions) -> io::Result<File> {
         open(&self.dir, self.leaf.as_ref(), nofollow(opts))
@@ -505,7 +580,7 @@ impl Located {
     /// Any `stat` failure other than absence.
     #[allow(
         clippy::disallowed_methods,
-        reason = "[silent:locate-stat] Stats the located object: for the write site, to choose atomic against streaming semantics, to carry the mode onto the staged file and to size a write's snapshots; for `exists`/`is-file`/`file-info`, as the predicate they are. A metadata read, never the model's turn-time data I/O — the write site's own card is its surface, and a predicate raises none."
+        reason = "[silent:locate-stat] Stats the located object: for the write site, to choose atomic against streaming semantics, to carry the mode onto the staged file and to size a write's snapshots; for `exists`/`is-file`/`file-info`, as the predicate they are. A metadata read, never the model's turn-time data I/O; the write site's own card is its surface, and a predicate raises none."
     )]
     pub(crate) fn stat(&self) -> io::Result<Option<Stat>> {
         match stat(&self.dir, self.leaf.as_ref(), FollowSymlinks::No) {
@@ -525,7 +600,7 @@ impl Located {
     /// The directory open's, including `NotADirectory`.
     #[allow(
         clippy::disallowed_methods,
-        reason = "[silent:locate-read-dir] `list-dir`'s enumeration of the located directory, relative to its own handle. A listing predicate, not turn-time model data I/O — the caller still judges each entry against the live grant, and raises no card."
+        reason = "[silent:locate-read-dir] `list-dir`'s enumeration of the located directory, relative to its own handle. A listing predicate, not turn-time model data I/O: the caller still judges each entry against the live grant, and raises no card."
     )]
     pub(crate) fn read_dir(&self) -> io::Result<Vec<Entry>> {
         let dir = open_dir_nofollow(&self.dir, self.leaf.as_ref())?;

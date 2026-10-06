@@ -9,7 +9,9 @@
 //! the lexical scope and the handler stack: a hook is never resolved by
 //! `$name` and never consulted at command position.
 
-use crate::source::Span;
+use crate::io::RunIo;
+use crate::process::RequestedTerminalAccess;
+use crate::text::plural;
 use crate::types::Binding;
 use crate::types::Shell;
 use crate::types::Value;
@@ -106,44 +108,37 @@ impl HookSig {
 
 // ── Per-hook policy ─────────────────────────────────────────────────────
 
-/// Whether a hook's runs may hand the controlling terminal to a child.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TerminalPolicy {
-    Denied,
-    Leased,
-}
-
 /// The host-stated policy for a hook's runs.
 ///
 /// [`Shell::run`] applies it over the dispatching request: `terminal` replaces
-/// the requested authority, `capture` can only tighten it, and `aside` runs it
-/// on [`Shell::join_session`], so nothing it does flows back.
+/// the requested authority, `io` can only tighten it to capture, and `aside`
+/// runs it on [`Shell::join_session`], so nothing it does flows back.
 #[derive(Debug, Clone)]
 pub struct DefaultPolicy {
-    pub terminal: TerminalPolicy,
-    pub(crate) capture: bool,
+    pub terminal: RequestedTerminalAccess,
+    pub(crate) io: RunIo,
     pub(crate) aside: bool,
 }
 
 impl DefaultPolicy {
     pub const fn denied() -> Self {
         Self {
-            terminal: TerminalPolicy::Denied,
-            capture: false,
+            terminal: RequestedTerminalAccess::Denied,
+            io: RunIo::Inherit,
             aside: false,
         }
     }
 
     pub const fn leased() -> Self {
         Self {
-            terminal: TerminalPolicy::Leased,
+            terminal: RequestedTerminalAccess::Leased,
             ..Self::denied()
         }
     }
 
     pub const fn denied_capture() -> Self {
         Self {
-            capture: true,
+            io: RunIo::Capture,
             ..Self::denied()
         }
     }
@@ -167,8 +162,6 @@ pub struct Hook {
     pub binding: Binding,
     pub(crate) sig: HookSig,
     pub(crate) policy: DefaultPolicy,
-    /// Declaration site, for diagnostics.
-    pub(crate) origin: Span,
 }
 impl Hook {
     /// The single registration gate: the bound value must be a function — a
@@ -182,11 +175,12 @@ impl Hook {
         let actual = match &self.binding.value {
             Value::Thunk(c) if c.comp().arrow().is_none() => 0,
             Value::Thunk(_) => self.binding.value.lambda_arity().unwrap_or(0),
-            Value::Native { entry, applied } => entry.fixed_arity().saturating_sub(applied.len()),
+            Value::Native { entry, applied } => {
+                entry.decl.fixed_arity().saturating_sub(applied.len())
+            }
             other => {
                 return Err(RegisterError::NotFunction {
                     name: name.clone(),
-                    origin: self.origin,
                     actual: format!("{other}"),
                 });
             }
@@ -194,7 +188,6 @@ impl Hook {
         if actual != expected {
             return Err(RegisterError::ArityMismatch {
                 name: name.clone(),
-                origin: self.origin,
                 expected,
                 actual,
                 sig_label: self.sig.label().into(),
@@ -209,19 +202,16 @@ impl Hook {
 pub enum RegisterError {
     NotFunction {
         name: HookName,
-        origin: Span,
         actual: String,
     },
     ArityMismatch {
         name: HookName,
-        origin: Span,
         expected: usize,
         actual: usize,
         sig_label: String,
     },
     AlreadyRegistered {
         name: HookName,
-        origin: Span,
     },
 }
 
@@ -245,11 +235,10 @@ impl fmt::Display for RegisterError {
                 write!(
                     f,
                     "cannot register '{}' as a {}: \
-                     expected {} parameter{}, got {}",
+                     expected {}, got {}",
                     name,
                     sig_label,
-                    expected,
-                    if *expected == 1 { "" } else { "s" },
+                    plural(*expected, "parameter"),
                     actual
                 )
             }
@@ -267,8 +256,7 @@ impl Shell {
     /// named run root in the session hook table.
     ///
     /// It fires only on a host-dispatched `Program::Hook` run, never as `$name`
-    /// and never as a command.  On failure the caller renders the
-    /// [`RegisterError`] as a diagnostic at `origin`.
+    /// and never as a command.
     ///
     /// # Errors
     /// [`RegisterError::AlreadyRegistered`] if `name` is taken, otherwise
@@ -279,11 +267,10 @@ impl Shell {
         value: Value,
         sig: HookSig,
         policy: DefaultPolicy,
-        origin: Span,
     ) -> Result<(), RegisterError> {
         // Short-circuit before any scheme inference.
-        if self.context.hooks.contains_key(&name) {
-            return Err(RegisterError::AlreadyRegistered { name, origin });
+        if self.session.hooks.contains_key(&name) {
+            return Err(RegisterError::AlreadyRegistered { name });
         }
 
         // The same scheme inference an ordinary session `let` uses.  A
@@ -295,40 +282,39 @@ impl Shell {
             binding,
             sig,
             policy,
-            origin,
         };
         hook.validate(&name)?;
 
-        self.context.hooks.insert(name, hook);
+        self.session.hooks.insert(name, hook);
         Ok(())
     }
 
     /// Whether a hook named `name` is registered.
     pub fn has_hook(&self, name: &HookName) -> bool {
-        self.context.hooks.contains_key(name)
+        self.session.hooks.contains_key(name)
     }
 
     /// The hook registered under `name`, for a host applying it directly
     /// inside an existing command frame rather than through a dispatch door.
     pub fn hook(&self, name: &HookName) -> Option<&Hook> {
-        self.context.hooks.get(name)
+        self.session.hooks.get(name)
     }
 
     /// Remove one hook by name, reporting whether it was there — the inverse of
     /// [`Self::register_hook`] for a spent one-shot entry point, such as a
     /// plugin factory.
     pub fn unregister_hook(&mut self, name: &HookName) -> bool {
-        self.context.hooks.remove(name).is_some()
+        self.session.hooks.remove(name).is_some()
     }
 
     /// Drop every hook under a plugin's namespace, returning the count.  One
     /// sweep at unload, so no dispatchable entry point outlives the plugin that
     /// owned it; also the rollback path for a load that fails partway.
     pub fn remove_plugin_hooks(&mut self, plugin_id: &str) -> usize {
-        let before = self.context.hooks.len();
-        self.context
+        let before = self.session.hooks.len();
+        self.session
             .hooks
             .retain(|name, _| !matches!(&name.namespace, Namespace::Plugin(id) if id == plugin_id));
-        before - self.context.hooks.len()
+        before - self.session.hooks.len()
     }
 }

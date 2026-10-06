@@ -7,8 +7,13 @@
 //! thread only *transports* its fragment back to the parent; nothing
 //! decides where an observation "belongs" beyond that flat merge.
 
-use super::observation::Observation;
-use super::value::Value;
+mod door;
+mod observation;
+
+pub(crate) use door::AuditStart;
+
+use super::{Value, outcome_value};
+use crate::fact::{ErrorRecord, Observation};
 use crate::source::Span;
 use serde::{Deserialize, Serialize};
 
@@ -22,8 +27,10 @@ pub struct AuditIo {
 
 /// Whether per-command bytes are teed into audit observations.  `Off` lets fd
 /// 1 and fd 2 stream live, unbuffered; `Bytes` installs the tee that
-/// `evaluator::capture` wraps each command in.
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// `runtime::capture` wraps each command in.
+///
+/// Ordered by how much it keeps.
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum CapturePolicy {
     #[default]
     Off,
@@ -52,10 +59,11 @@ impl AuditFragment {
 
 /// A claim on the trail returned by [`Audit::open`] and consumed by
 /// [`Audit::close`]. Not `Clone`, not `Copy`: exactly one close ends the
-/// scope it opened.
+/// scope it opened, and restores the capture policy it displaced.
 pub struct TrailScope {
     opened: bool,
     mark: usize,
+    saved: CapturePolicy,
 }
 
 /// Audit collector — one per `Shell`, collecting exactly while `trail` is
@@ -75,6 +83,15 @@ pub struct Audit {
 }
 
 impl Audit {
+    /// An inactive collector whose register already names `call_site`: a
+    /// child's, so its first observation resolves where its parent stood.
+    pub(crate) fn dispatched_from(call_site: Option<Span>) -> Self {
+        Self {
+            call_site,
+            ..Self::default()
+        }
+    }
+
     /// True when a scope is collecting.
     pub(crate) fn active(&self) -> bool {
         self.trail.is_some()
@@ -83,18 +100,6 @@ impl Audit {
     /// True when the tee should record each command's bytes.
     pub(crate) fn captures_bytes(&self) -> bool {
         matches!(self.capture, CapturePolicy::Bytes)
-    }
-
-    /// Overwrite the capture policy.  A scope wants `merge_capture` in
-    /// [`crate::evaluator::audit`], whose merge is monotonic: an inner `try`
-    /// must not silence an outer `audit`.
-    pub(crate) fn set_capture(&mut self, policy: CapturePolicy) {
-        self.capture = policy;
-    }
-
-    /// The current capture policy.
-    pub(crate) fn capture_policy(&self) -> CapturePolicy {
-        self.capture
     }
 
     /// The policy to inherit across a stage boundary, `Some` iff a scope is
@@ -126,11 +131,19 @@ impl Audit {
     /// Open a delimited scope on the trail: install one if none is open, or
     /// mark the open one's current length. `opened` records which happened,
     /// so the matching [`Self::close`] knows whether it owns the trail or is
-    /// only reading a suffix of an outer scope's.
-    pub(crate) fn open(&mut self) -> TrailScope {
+    /// only reading a suffix of an outer scope's.  Capture is monotonic: a
+    /// nested request for `Off` must not silence an enclosing `audit`'s
+    /// `Bytes`, so the policy in force is the larger of the two.
+    pub(crate) fn open(&mut self, policy: CapturePolicy) -> TrailScope {
+        let saved = self.capture;
+        self.capture = saved.max(policy);
         let opened = self.trail.is_none();
         let mark = self.trail.get_or_insert_default().len();
-        TrailScope { opened, mark }
+        TrailScope {
+            opened,
+            mark,
+            saved,
+        }
     }
 
     /// End a scope: the opener drains the trail to empty and closes it, for
@@ -142,7 +155,12 @@ impl Audit {
         reason = "a scope is a claim, spent exactly once: taking it by value is the discipline"
     )]
     pub(crate) fn close(&mut self, scope: TrailScope) -> Vec<Observation> {
-        let TrailScope { opened, mark } = scope;
+        let TrailScope {
+            opened,
+            mark,
+            saved,
+        } = scope;
+        self.capture = saved;
         if opened {
             self.trail.take().unwrap_or_default()
         } else {
@@ -179,52 +197,41 @@ pub fn epoch_us() -> i64 {
 /// The report `audit { … }` returns, and `--audit`'s root.
 ///
 /// The body's own outcome, over the flat trail of observations its dynamic
-/// extent produced.  `Err` carries the record `try` hands its handler,
-/// already built by `evaluator::scope`'s `error_record_of`.
+/// extent produced.  `Err` carries the record `try` hands its handler.
 ///
 /// This is not an observation itself — `audit` runs no command and owns no
 /// site of its own, only the outcome of what it forced into being recorded.
 /// Mirrored in the typechecker by `audit_record` in
 /// `core/src/typecheck/builtins.rs`.
-pub fn report_value(outcome: Result<Value, Value>, trail: &[Observation]) -> Value {
-    let (label, payload) = match outcome {
-        Ok(v) => ("ok", v),
-        Err(record) => ("err", record),
-    };
+pub fn report_value(outcome: Result<Value, ErrorRecord>, trail: Vec<Observation>) -> Value {
     Value::map(vec![
-        (
-            "outcome".into(),
-            Value::Variant {
-                label: label.into(),
-                payload: Some(Box::new(payload)),
-            },
-        ),
+        ("outcome".into(), outcome_value(outcome)),
         (
             "trail".into(),
-            Value::list(trail.iter().map(Observation::to_value).collect()),
+            Value::list(trail.into_iter().map(Value::from_datum).collect()),
         ),
     ])
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::observation::Observed;
     use super::*;
+    use crate::fact::{Grep, Observed};
 
     fn dummy(pattern: &str) -> Observation {
         Observation::instant(
             None,
             None,
-            Observed::Grep {
+            Observed::Grep(Grep {
                 scope: String::new(),
                 pattern: pattern.into(),
-            },
+            }),
         )
     }
 
     fn pattern_of(obs: &Observation) -> &str {
         match &obs.what {
-            Observed::Grep { pattern, .. } => pattern,
+            Observed::Grep(g) => &g.pattern,
             _ => unreachable!(),
         }
     }
@@ -234,7 +241,7 @@ mod tests {
     #[test]
     fn opener_close_drains_and_closes() {
         let mut audit = Audit::default();
-        let scope = audit.open();
+        let scope = audit.open(CapturePolicy::Off);
         audit.push(dummy("a"));
         audit.push(dummy("b"));
         let drained = audit.close(scope);
@@ -254,10 +261,10 @@ mod tests {
     #[test]
     fn nested_close_reads_suffix_and_leaves_trail_open() {
         let mut audit = Audit::default();
-        let outer = audit.open();
+        let outer = audit.open(CapturePolicy::Off);
         audit.push(dummy("outer-1"));
 
-        let inner = audit.open();
+        let inner = audit.open(CapturePolicy::Off);
         audit.push(dummy("inner-1"));
         let inner_trail = audit.close(inner);
         assert_eq!(
@@ -274,8 +281,25 @@ mod tests {
         assert_eq!(
             outer_trail.iter().map(pattern_of).collect::<Vec<_>>(),
             ["outer-1", "inner-1", "outer-2"],
-            "the outer scope sees the inner scope's entries too — the flat merge"
+            "the outer scope sees the inner scope's entries too: the flat merge"
         );
         assert!(!audit.active());
+    }
+
+    /// Capture only ever widens inside a scope, and each close puts back what
+    /// its open displaced.
+    #[test]
+    fn scopes_widen_capture_and_restore_it() {
+        let mut audit = Audit::default();
+        let outer = audit.open(CapturePolicy::Bytes);
+        let inner = audit.open(CapturePolicy::Off);
+        assert!(
+            audit.captures_bytes(),
+            "an inner Off must not silence Bytes"
+        );
+        audit.close(inner);
+        assert!(audit.captures_bytes());
+        audit.close(outer);
+        assert!(!audit.captures_bytes());
     }
 }

@@ -1,25 +1,22 @@
 //! Type synthesis for the CBPV pair: `infer_val` yields a `Ty`, `infer_comp` a
 //! `CompTy`, mutually recursive through thunks.
 
-use super::builtins::{BuiltinDiagnostic, fail_status_is_zero_literal};
-use super::env::{BoundaryValue, HandlerBinding, InferCtx, TyEnv, comp_key, val_key};
+use super::builtins::{BuiltinDiagnostic, Decl, LANGUAGE_CONSTANTS, fail_status_is_zero_literal};
+use super::env::{BoundaryValue, HandlerBinding, HandlerOrigin, InferCtx, Node, TyEnv};
 use super::error::{Reason, Standing, StdinFeed, TypeError, TypeErrorKind, UnitCall};
 use super::generalize::{FreeVars, generalize};
 use super::grade::JoinArm;
 use super::index::{Idx, Lbl, Settled};
-use super::kind::Kind;
-use super::scheme::Scheme;
-use super::ty::{CompTy, Grade, Label, Producer, Row, Ty};
 use super::unify::WeakSource;
 use crate::ir::{
-    Assembly, CaseArm, CommandName, CommandWord, Comp, CompKind, DefineSchemes, Exec, GroupNode,
-    IrPattern, Name, Phrase, Toplevel, Val, ValListElem, ValMapEntry, ValRecordEntry, is_gensym,
+    Args, Assembly, CaseArm, CommandName, CommandWord, Comp, CompKind, DefineSchemes, Exec,
+    GroupNode, Name, Pattern, Phrase, Val, ValListElem, ValMapEntry, ValRecordEntry, is_synthetic,
 };
+use crate::ir::{ArithOp, BinaryOp, StdinSource};
 use crate::source::Span;
 use crate::source::Spanned;
 use crate::source::WithSpan;
-use crate::syntax::ast::{ArithOp, BinaryOp, BinaryOpKind, ScopeAst, StdinSource};
-use crate::types::{BuiltinEntry, LANGUAGE_CONSTANTS, RefusedArg};
+use crate::ty::{CompTy, Grade, Kind, Label, Producer, RefusedArg, Row, Scheme, Ty};
 use std::sync::Arc;
 
 /// What a bare command head resolves to, by the lookup order the checker and
@@ -28,7 +25,7 @@ enum HeadClass {
     /// A lexical or session binding, called at its scheme.
     Binding(Arc<Scheme>),
     /// A value row of the builtin table, applied at its scheme.
-    Value(BuiltinEntry),
+    Value(Decl),
     /// A handler in scope — a user arm, else a base frame such as `echo` —
     /// standing in for the head it names.
     Arm(HandlerBinding),
@@ -63,16 +60,14 @@ enum ArgvBoundary<'a> {
 /// `None` when the two sets agree, which leaves the row error to speak for
 /// itself: the rows then differ in a payload rather than in coverage.
 fn coverage_verdict(scrutinee: &Row, arms: &[Label]) -> Option<TypeErrorKind> {
-    let produced: Vec<Label> = collect_extends(scrutinee)
-        .into_iter()
-        .map(|(l, _)| l)
-        .collect();
+    let produced: Vec<&Label> = scrutinee.fields().map(|(l, _)| l).collect();
     let missing: Vec<String> = produced
         .iter()
+        .copied()
         .filter(|l| !arms.contains(l))
-        .map(Label::to_string)
+        .map(ToString::to_string)
         .collect();
-    let extra: Vec<String> = if row_is_open(scrutinee) {
+    let extra: Vec<String> = if scrutinee.is_open() {
         Vec::new()
     } else {
         arms.iter()
@@ -82,38 +77,6 @@ fn coverage_verdict(scrutinee: &Row, arms: &[Label]) -> Option<TypeErrorKind> {
     };
     (!missing.is_empty() || !extra.is_empty())
         .then_some(TypeErrorKind::CaseNotExhaustive { missing, extra })
-}
-
-/// True while the row still ends in a tail variable, so a label it does not
-/// name may yet turn out to be there.
-fn row_is_open(row: &Row) -> bool {
-    let mut cur = row;
-    loop {
-        match cur {
-            Row::Extend(_, _, rest) => cur = rest,
-            Row::Var(_) => return true,
-            Row::Empty => return false,
-        }
-    }
-}
-
-/// Labels of a *resolved* row spine in first-appearance order, stopping at the
-/// first non-`Extend`.  A repeated label keeps the head payload, as selection
-/// and `unify_row` both do.
-fn collect_extends(row: &Row) -> Vec<(Label, Ty)> {
-    let mut out: Vec<(Label, Ty)> = Vec::new();
-    let mut cur = row;
-    loop {
-        match cur {
-            Row::Extend(l, ty, rest) => {
-                if !out.iter().any(|(k, _)| k == l) {
-                    out.push((l.clone(), (**ty).clone()));
-                }
-                cur = rest;
-            }
-            _ => return out,
-        }
-    }
 }
 
 /// A scalar literal as written, the target [`TypeErrorKind::IndexOnLiteral`]
@@ -128,13 +91,20 @@ fn spell_literal(v: &Val) -> Option<String> {
     }
 }
 
+/// The name a program wrote, not one the compiler bound.
+fn written(v: &Val) -> Option<&Name> {
+    match v {
+        Val::Variable(x) if !is_synthetic(x) => Some(x),
+        _ => None,
+    }
+}
+
 /// An index key as written between the brackets.
 fn spell_key(v: &Val) -> String {
     match v {
         Val::String(s) => s.to_string(),
         Val::Int(n) => n.to_string(),
-        Val::Variable(x) if !is_gensym(x) => format!("${x}"),
-        _ => "…".into(),
+        _ => written(v).map_or_else(|| "…".into(), |x| format!("${x}")),
     }
 }
 
@@ -198,7 +168,7 @@ impl<'a> HandlerStatement<'a> {
         if !exec.redirects.is_empty() {
             return Err(malformed("redirects are not allowed here"));
         }
-        let Some(positional) = crate::ir::args::positional(&exec.args) else {
+        let Some(positional) = exec.args.positional() else {
             return Err(malformed("spread arguments are not allowed here"));
         };
         match (head, &positional[..]) {
@@ -212,7 +182,7 @@ impl<'a> HandlerStatement<'a> {
     }
 }
 
-/// Type-check a whole [`Toplevel`]: infer each phrase in order, extending
+/// Type-check whole phrases: infer each phrase in order, extending
 /// `TyEnv` at each `Define`, and binding/unbinding an `alias`/`unalias` `Run`
 /// phrase's handler scheme for the phrases after it, as `Bind` on `Wildcard`
 /// does for a nested discarded
@@ -224,32 +194,9 @@ impl<'a> HandlerStatement<'a> {
 pub(crate) fn infer_toplevel(
     ctx: &mut InferCtx,
     env: &mut TyEnv,
-    top: &Toplevel,
+    phrases: &[Spanned<Phrase<()>>],
 ) -> (Vec<DefineSchemes>, Option<CompTy>) {
-    Inferencer { ctx, env }.infer_phrases(&top.phrases)
-}
-
-/// Every `Name` an `IrPattern` binds, in pattern order — the phrase-level
-/// analogue of [`Inferencer::bind_pattern`]'s own walk, kept separate since
-/// this one only collects, never binds.
-fn collect_pattern_names<'a>(pat: &'a IrPattern, out: &mut Vec<&'a str>) {
-    match pat {
-        IrPattern::Wildcard => {}
-        IrPattern::Name(name) => out.push(name.as_ref()),
-        IrPattern::List { elems, rest } => {
-            for elem in elems {
-                collect_pattern_names(elem, out);
-            }
-            if let Some(rest_name) = rest {
-                out.push(rest_name.as_ref());
-            }
-        }
-        IrPattern::Map(entries) => {
-            for entry in entries {
-                collect_pattern_names(&entry.pattern, out);
-            }
-        }
-    }
+    Inferencer { ctx, env }.infer_phrases(phrases)
 }
 
 /// Inference state, built directly by the entry points in `typecheck.rs`.
@@ -283,25 +230,25 @@ impl Inferencer<'_> {
         out
     }
 
-    fn bind_pattern(&mut self, pat: &IrPattern, ty: &Ty, mode: BindMode<'_>) {
+    fn bind_pattern(&mut self, pat: &Pattern, ty: &Ty, mode: BindMode<'_>) {
         match pat {
-            IrPattern::Wildcard => {}
-            IrPattern::Name(name) => {
+            Pattern::Wildcard => {}
+            Pattern::Name(name) => {
                 let scheme = match mode {
                     BindMode::Let(tied) => generalize(&self.ctx.unifier, self.env, tied, ty),
                     BindMode::Param => Scheme::mono(ty.clone()),
                 };
                 self.env.bind(name.to_string(), scheme);
             }
-            IrPattern::List { elems, rest } => {
+            Pattern::List { elems, rest } => {
                 let elem = self.ctx.unifier.fresh_ty();
                 self.ctx
-                    .unify_ty(ty, &Ty::List(Box::new(elem.clone())), Reason::ListPattern);
+                    .unify_ty(ty, &Ty::list(elem.clone()), Reason::ListPattern);
                 for elem_pat in elems {
                     self.bind_pattern(elem_pat, &elem, mode);
                 }
                 if let Some(rest_name) = rest {
-                    let list_ty = Ty::List(Box::new(elem));
+                    let list_ty = Ty::list(elem);
                     let scheme = match mode {
                         BindMode::Let(tied) => {
                             generalize(&self.ctx.unifier, self.env, tied, &list_ty)
@@ -311,7 +258,7 @@ impl Inferencer<'_> {
                     self.env.bind(rest_name.to_string(), scheme);
                 }
             }
-            IrPattern::Map(entries) => {
+            Pattern::Map(entries) => {
                 let tail = Row::Var(self.ctx.unifier.fresh_row_var());
                 let field_tys: Vec<Ty> = entries
                     .iter()
@@ -344,7 +291,7 @@ impl Inferencer<'_> {
     fn record_arrow_arity(&mut self, rhs: &Comp, cty: &CompTy) {
         let arity = self.spine(cty).arity();
         if arity > 0 {
-            self.ctx.rhs_arrow_arity.insert(comp_key(rhs), arity);
+            self.ctx.rhs_arrow_arity.insert(Node::comp(rhs), arity);
         }
     }
 
@@ -426,7 +373,7 @@ impl Inferencer<'_> {
         let HeadClass::Value(entry) = self.head_class(name) else {
             return None;
         };
-        let got = crate::ir::args::positional(&exec.args).map_or(0, |p| p.len());
+        let got = exec.args.arity().unwrap_or(0);
         Some((name.to_string(), entry.fixed_arity(), got))
     }
 
@@ -469,7 +416,7 @@ impl Inferencer<'_> {
     /// Refuse a spread that reached an application, blaming the spread itself
     /// rather than the whole call.  Only the first is named: the rest are the
     /// same mistake, and one fix answers them all.
-    pub(super) fn refuse_spread(&mut self, args: &crate::ir::Args, head: super::error::SpreadHead) {
+    pub(super) fn refuse_spread(&mut self, args: &Args, head: super::error::SpreadHead) {
         let Some(span) = args.iter().find_map(|e| match e {
             ValListElem::Spread(v) => Some(v.span),
             ValListElem::Single(_) => None,
@@ -482,7 +429,7 @@ impl Inferencer<'_> {
         });
     }
 
-    pub(super) fn apply_args(&mut self, cty: CompTy, args: &crate::ir::Args) -> CompTy {
+    pub(super) fn apply_args(&mut self, cty: CompTy, args: &Args) -> CompTy {
         self.apply_args_capped(cty, args, usize::MAX)
     }
 
@@ -491,13 +438,13 @@ impl Inferencer<'_> {
     /// against nothing — the same zip an over-applied builtin needs so its
     /// one arity diagnostic is not followed by an anonymous mismatch on the
     /// surplus.
-    fn apply_args_capped(&mut self, mut cty: CompTy, args: &crate::ir::Args, cap: usize) -> CompTy {
+    fn apply_args_capped(&mut self, mut cty: CompTy, args: &Args, cap: usize) -> CompTy {
         // A value takes its arguments by application, at an arity its own type
         // declares, so it has no argv and `...` has nothing to spread into.
         // Both callers are value-side, so the refusal needs no test on the head:
         // there is no such thing as an open-argv value for it to discriminate.
         // The subexpressions are still inferred, so errors inside them surface.
-        let Some(positional) = crate::ir::args::positional(args) else {
+        let Some(positional) = args.positional() else {
             for slot in args.iter().map(ValListElem::slot) {
                 self.with_span(slot.span, |this| {
                     let _ = this.infer_val(&slot.item);
@@ -594,18 +541,13 @@ impl Inferencer<'_> {
     /// [`Self::apply_alias_arm`] instead — which matters, because a base
     /// frame's argv scheme has curry depth 1 while an argv has no arity at
     /// all ([[invariants/fixed-arity]]).
-    pub(super) fn apply_builtin(
-        &mut self,
-        entry: &BuiltinEntry,
-        name: &str,
-        args: &crate::ir::Args,
-    ) -> CompTy {
+    pub(super) fn apply_builtin(&mut self, entry: &Decl, name: &str, args: &Args) -> CompTy {
         let fixed_arity = entry.fixed_arity();
 
         // There is no positional reading exactly when the call writes a
         // `...`, and a builtin takes its arguments by application, which has
         // no argv to spread into.
-        let Some(positional) = crate::ir::args::positional(args) else {
+        let Some(positional) = args.positional() else {
             self.infer_refused_args(args);
             self.refuse_spread(
                 args,
@@ -654,7 +596,7 @@ impl Inferencer<'_> {
     /// The `CompTy` a fresh instantiation of `entry`'s scheme names once all
     /// of it is (hypothetically) applied — what a refused spread into a
     /// builtin's type is.
-    fn saturated_result(&mut self, name: &str, entry: &BuiltinEntry) -> CompTy {
+    fn saturated_result(&mut self, name: &str, entry: &Decl) -> CompTy {
         let scheme = (entry.type_rule)(&mut self.ctx.unifier);
         let cty = self.instantiate_comp(name, &scheme);
         self.peel_curry_spine(&cty)
@@ -676,12 +618,7 @@ impl Inferencer<'_> {
     /// Instantiate `scheme`, strip its outer `Thunk`, and apply the body to
     /// `args`.  Instantiating here is what keeps quantified variables from
     /// being shared between call sites, so callers hand in a `Scheme` as is.
-    pub(super) fn apply_scheme(
-        &mut self,
-        name: &str,
-        scheme: &super::scheme::Scheme,
-        args: &crate::ir::Args,
-    ) -> CompTy {
+    pub(super) fn apply_scheme(&mut self, name: &str, scheme: &Scheme, args: &Args) -> CompTy {
         let head_cty = self.instantiate_comp(name, scheme);
         self.apply_args(head_cty, args)
     }
@@ -852,7 +789,7 @@ impl Inferencer<'_> {
     /// site's arguments.  A parameterised arm is `Fun(argv, body)`, and the
     /// argv rule says what that parameter is; a nullary arm discards its
     /// arguments, as the runtime does.
-    fn apply_alias_arm(&mut self, name: &str, scheme: &Scheme, args: &crate::ir::Args) -> CompTy {
+    fn apply_alias_arm(&mut self, name: &str, scheme: &Scheme, args: &Args) -> CompTy {
         let cty = self.instantiate_comp(name, scheme);
         let argv = self.argv_ty(args, ArgvBoundary::InShell(name));
         let CompTy::Fun(param, body) = self.ctx.unifier.resolve_comp_ty(&cty) else {
@@ -869,7 +806,7 @@ impl Inferencer<'_> {
     /// The parameter is `List String` at the arm, not a variable the call site
     /// pins later, so an arm that reads an element as anything else is refused
     /// where the mistake is written rather than where it is called.
-    pub(super) fn infer_alias_arm(&mut self, param: Option<&IrPattern>, body: &Comp) -> CompTy {
+    pub(super) fn infer_alias_arm(&mut self, param: Option<&Pattern>, body: &Comp) -> CompTy {
         match param {
             Some(param) => {
                 let argv_ty = Ty::argv();
@@ -886,7 +823,7 @@ impl Inferencer<'_> {
     /// The ordinary convention, for a value installed as a lexical binding: a
     /// lambda is `Fun(param, body)` over a fresh value type, a block is its
     /// bare body.  Contrast [`Self::infer_alias_arm`], which forces argv.
-    pub(super) fn infer_binding_value(&mut self, param: Option<&IrPattern>, body: &Comp) -> CompTy {
+    pub(super) fn infer_binding_value(&mut self, param: Option<&Pattern>, body: &Comp) -> CompTy {
         match param {
             Some(param) => {
                 let param_ty = self.ctx.unifier.fresh_ty();
@@ -952,20 +889,20 @@ impl Inferencer<'_> {
     fn infer_binary(&mut self, op: BinaryOp, lhs: &Val, rhs: &Val) -> Ty {
         let lhs_ty = self.infer_val(lhs);
         let rhs_ty = self.infer_val(rhs);
-        let why = Reason::BinaryOperands(op.kind());
-        let operand = match op.kind() {
-            BinaryOpKind::Arith(_) => self.ctx.fresh_kinded(Kind::NUMBER),
-            BinaryOpKind::Compare(_) => self.ctx.fresh_kinded(Kind::COMPARABLE),
-            BinaryOpKind::Eq(_) => self.ctx.fresh_kinded(Kind::DATA),
+        let why = Reason::BinaryOperands(op);
+        let operand = match op {
+            BinaryOp::Arith(_) => self.ctx.fresh_kinded(Kind::NUMBER),
+            BinaryOp::Compare(_) => self.ctx.fresh_kinded(Kind::COMPARABLE),
+            BinaryOp::Eq(_) => self.ctx.fresh_kinded(Kind::DATA),
         };
         self.ctx.unify_ty(&operand, &lhs_ty, why.clone());
         self.ctx.unify_ty(&operand, &rhs_ty, why.clone());
-        if op.kind() == BinaryOpKind::Arith(ArithOp::Mod) {
+        if op == BinaryOp::Arith(ArithOp::Mod) {
             self.ctx.unify_ty(&operand, &Ty::Int, why);
         }
-        match op.kind() {
-            BinaryOpKind::Eq(_) | BinaryOpKind::Compare(_) => Ty::Bool,
-            BinaryOpKind::Arith(_) => operand,
+        match op {
+            BinaryOp::Eq(_) | BinaryOp::Compare(_) => Ty::Bool,
+            BinaryOp::Arith(_) => operand,
         }
     }
 
@@ -980,7 +917,7 @@ impl Inferencer<'_> {
     /// calculus: arguments by application, at an arity the head's own type
     /// declares, so `...` has no argv to spread into and is refused.  The last
     /// two take an argv, and `...` is exactly its notation.
-    fn exec_comp_ty(&mut self, comp: &Comp, name: &str, args: &crate::ir::Args) -> CompTy {
+    fn exec_comp_ty(&mut self, comp: &Comp, name: &str, args: &Args) -> CompTy {
         match self.head_class(name) {
             HeadClass::Binding(scheme) => self.apply_scheme(name, &scheme, args),
             HeadClass::Value(entry) => {
@@ -1000,7 +937,7 @@ impl Inferencer<'_> {
             return HeadClass::Binding(Arc::clone(scheme));
         }
         if let Some(entry) = self.env.builtins.value(name) {
-            return HeadClass::Value(entry);
+            return HeadClass::Value(entry.clone());
         }
         if let Some(handler) = self.env.lookup_handler(name) {
             return HeadClass::Arm(handler.clone());
@@ -1009,23 +946,17 @@ impl Inferencer<'_> {
     }
 
     /// A call of a boundary row: its result is weak, and the node gets a site.
-    fn note_boundary_call(
-        &mut self,
-        comp: &Comp,
-        entry: &BuiltinEntry,
-        args: &crate::ir::Args,
-        cty: &CompTy,
-    ) {
+    fn note_boundary_call(&mut self, comp: &Comp, entry: &Decl, args: &Args, cty: &CompTy) {
         if !entry.is_boundary() {
             return;
         }
         let Some(producer) = self.spine(cty).producer() else {
             return;
         };
-        let key = comp_key(comp);
+        let key = Node::comp(comp);
         self.ctx.record_boundary(key, &entry.name, producer.ty);
         let arity = entry.fixed_arity();
-        let given = crate::ir::args::positional(args).map_or(arity, |given| given.len());
+        let given = args.arity().unwrap_or(arity);
         if given < arity {
             self.ctx.boundary_missing.insert(key, arity - given);
         }
@@ -1035,7 +966,7 @@ impl Inferencer<'_> {
     ///
     /// Nothing here declares a parameter for that argv to meet, so the rule's
     /// contribution is its walk and its refusals rather than its type.
-    fn external_exec_comp_ty(&mut self, shown: &str, args: &crate::ir::Args) -> CompTy {
+    fn external_exec_comp_ty(&mut self, shown: &str, args: &Args) -> CompTy {
         let _argv = self.argv_ty(args, ArgvBoundary::Exec(shown));
         CompTy::command()
     }
@@ -1051,7 +982,7 @@ impl Inferencer<'_> {
     /// whether `boundary` gates what crosses.  Each element is still inferred,
     /// under its own span, for the errors inside it, and a `...` must still
     /// spread a list: what its elements are is free, what it is is not.
-    fn argv_ty(&mut self, args: &crate::ir::Args, boundary: ArgvBoundary<'_>) -> Ty {
+    fn argv_ty(&mut self, args: &Args, boundary: ArgvBoundary<'_>) -> Ty {
         for entry in args {
             self.with_span(entry.slot().span, |this| match entry {
                 ValListElem::Single(arg) => {
@@ -1066,7 +997,7 @@ impl Inferencer<'_> {
                     let spread_ty = this.infer_val(&arg.item);
                     let elem = this.ctx.unifier.fresh_ty();
                     this.ctx
-                        .unify_ty(&spread_ty, &Ty::List(Box::new(elem)), Reason::ListSpread);
+                        .unify_ty(&spread_ty, &Ty::list(elem), Reason::ListSpread);
                 }
             });
         }
@@ -1101,7 +1032,7 @@ impl Inferencer<'_> {
 
     /// Infer every argument for the errors inside it, constraining nothing —
     /// what a refused call still owes its subexpressions.
-    pub(super) fn infer_refused_args(&mut self, args: &crate::ir::Args) {
+    pub(super) fn infer_refused_args(&mut self, args: &Args) {
         for slot in args.iter().map(ValListElem::slot) {
             self.with_span(slot.span, |this| {
                 let _ = this.infer_val(&slot.item);
@@ -1118,7 +1049,7 @@ impl Inferencer<'_> {
     /// without producing a value.
     fn infer_phrases(
         &mut self,
-        phrases: &[Spanned<Phrase>],
+        phrases: &[Spanned<Phrase<()>>],
     ) -> (Vec<DefineSchemes>, Option<CompTy>) {
         let mut schemes = Vec::with_capacity(phrases.len());
         let mut tail = None;
@@ -1133,13 +1064,12 @@ impl Inferencer<'_> {
     /// One phrase.  Every `Run`'s value is held to the discarded shape, the
     /// tail's included — its own writes are never captured into the report.
     /// Only a `Run` has a value, so only a `Run` hands a `CompTy` back.
-    fn infer_phrase(&mut self, phrase: &Phrase) -> (DefineSchemes, Option<CompTy>) {
+    fn infer_phrase(&mut self, phrase: &Phrase<()>) -> (DefineSchemes, Option<CompTy>) {
         match phrase {
             Phrase::Define { pattern, comp, .. } => {
                 self.infer_let(pattern, comp);
-                let mut names = Vec::new();
-                collect_pattern_names(pattern, &mut names);
-                let schemes = names
+                let schemes = pattern
+                    .names()
                     .into_iter()
                     .map(|name| {
                         let scheme = self
@@ -1158,7 +1088,7 @@ impl Inferencer<'_> {
 
     /// `let pattern = rhs`: the RHS inferred as the holder of the indexes it
     /// reads, bound by the bind rule, and generalised.
-    fn infer_let(&mut self, pattern: &IrPattern, rhs: &Comp) {
+    fn infer_let(&mut self, pattern: &Pattern, rhs: &Comp) {
         let cty = self.infer_held(pattern, rhs);
         self.record_arrow_arity(rhs, &cty);
         let bound_ty = self.rhs_bound_ty(rhs, cty);
@@ -1175,7 +1105,8 @@ impl Inferencer<'_> {
         let handled = match HandlerStatement::of(comp) {
             Ok(Some(HandlerStatement::Alias(name, body))) => {
                 let scheme = self.handler_comp_scheme(name, body);
-                self.env.bind_handler(name.to_string(), scheme, true);
+                self.env
+                    .bind_handler(name.to_string(), scheme, HandlerOrigin::Alias);
                 true
             }
             Ok(Some(HandlerStatement::Unalias(name))) => {
@@ -1278,10 +1209,7 @@ impl Inferencer<'_> {
                 Row::Extend(Label::Field(key.clone()), Box::new(old), Box::new(rest))
             });
             let reason = Reason::RecordUpdate {
-                base: match &value.item {
-                    Val::Variable(name) if !is_gensym(name) => Some(name.to_string()),
-                    _ => None,
-                },
+                base: written(&value.item).map(ToString::to_string),
             };
             self.with_span(value.span, |this| {
                 this.ctx.unify_ty(&base_ty, &Ty::Record(probe), reason);
@@ -1306,7 +1234,7 @@ impl Inferencer<'_> {
                 seen.push(key.clone());
             }
         }
-        Ty::Map(Box::new(elem))
+        Ty::map(elem)
     }
 
     /// A map literal with a computed key or a spread ([`Assembly::Map`]):
@@ -1341,16 +1269,13 @@ impl Inferencer<'_> {
                 ValMapEntry::Spread(value) => {
                     self.with_span(value.span, |this| {
                         let spread_ty = this.infer_val(&value.item);
-                        this.ctx.unify_ty(
-                            &spread_ty,
-                            &Ty::Map(Box::new(elem.clone())),
-                            Reason::MapSpread,
-                        );
+                        this.ctx
+                            .unify_ty(&spread_ty, &Ty::map(elem.clone()), Reason::MapSpread);
                     });
                 }
             }
         }
-        Ty::Map(Box::new(elem))
+        Ty::map(elem)
     }
 
     /// [`Assembly`], typed by its arm — the moved literal code, over a
@@ -1372,11 +1297,8 @@ impl Inferencer<'_> {
             let entry_ty = if spread {
                 let spread_ty = this.infer_val(&value.item);
                 let inner = this.ctx.unifier.fresh_ty();
-                this.ctx.unify_ty(
-                    &spread_ty,
-                    &Ty::List(Box::new(inner.clone())),
-                    Reason::ListSpread,
-                );
+                this.ctx
+                    .unify_ty(&spread_ty, &Ty::list(inner.clone()), Reason::ListSpread);
                 inner
             } else {
                 this.infer_val(&value.item)
@@ -1394,7 +1316,7 @@ impl Inferencer<'_> {
                 ValListElem::Spread(v) => self.infer_list_entry(v, true, &elem),
             }
         }
-        Ty::List(Box::new(elem))
+        Ty::list(elem)
     }
 
     /// `$name` is bound nowhere; the nearest names that are — bindings and
@@ -1418,14 +1340,14 @@ impl Inferencer<'_> {
     /// A builtin held as a value.  A boundary's result is weak here too, and
     /// `annotate` rebuilds the reference into the block holding its checked
     /// call, so a value is admitted like any call.
-    fn builtin_value(&mut self, val: &Val, entry: &BuiltinEntry) -> Ty {
+    fn builtin_value(&mut self, val: &Val, entry: &Decl) -> Ty {
         let scheme = (entry.type_rule)(&mut self.ctx.unifier);
         let ty = self.ctx.instantiate(&scheme);
         if entry.is_boundary()
             && let Ty::Thunk(body) = &ty
             && let Some(producer) = self.spine(body).producer()
         {
-            let key = val_key(val);
+            let key = Node::val(val);
             self.ctx.record_boundary(key, &entry.name, producer.ty);
             self.ctx.boundary_values.insert(
                 key,
@@ -1446,7 +1368,7 @@ impl Inferencer<'_> {
             Val::Float(_) => Ty::Float,
             Val::Bool(_) => Ty::Bool,
             Val::Variable(name) => {
-                if ScopeAst::lookup_keyword(name).is_some() {
+                if crate::syntax::is_control_operator(name) {
                     self.ctx.diagnose(TypeErrorKind::ControlOperatorAsValue {
                         name: name.to_string(),
                     });
@@ -1460,7 +1382,10 @@ impl Inferencer<'_> {
                             ty
                         }
                         None => match self.env.builtins.value(name) {
-                            Some(entry) => self.builtin_value(val, &entry),
+                            Some(entry) => {
+                                let entry = entry.clone();
+                                self.builtin_value(val, &entry)
+                            }
                             // A base frame is a builtin *and* a handler:
                             // name the builtin, which is what the user
                             // wrote and what `explain` documents.
@@ -1495,7 +1420,7 @@ impl Inferencer<'_> {
                 for entry in elems.shape() {
                     self.infer_list_entry(entry, false, &elem);
                 }
-                Ty::List(Box::new(elem))
+                Ty::list(elem)
             }
             Val::Record(entries) => self.infer_record_val(entries.shape()),
             Val::Map(entries) => self.infer_map_val(entries.shape()),
@@ -1552,9 +1477,6 @@ impl Inferencer<'_> {
                     this.stage_writes(stage, next, &producer);
                 });
             }
-            self.ctx
-                .stage_types
-                .insert(comp_key(stage), producer.ty.clone());
             last = Some(producer.into());
         }
         // The pipeline produces what its last stage does, at its own grade.
@@ -1599,9 +1521,9 @@ impl Inferencer<'_> {
     fn stage_head(stage: &Comp) -> Option<String> {
         match &Self::discard_tail(stage).item {
             CompKind::Exec(exec) => Some(exec.head.name().written().into_owned()),
-            CompKind::Force(Val::Variable(name)) => Some(name.to_string()),
+            CompKind::Force(v) => written(v).map(ToString::to_string),
             CompKind::App { head, .. } => match &head.item {
-                CompKind::Force(Val::Variable(name)) => Some(name.to_string()),
+                CompKind::Force(v) => written(v).map(ToString::to_string),
                 _ => None,
             },
             _ => None,
@@ -1621,10 +1543,8 @@ impl Inferencer<'_> {
         }
         let mut current_ty = self.infer_val(target);
         for (step, key) in keys.iter().enumerate() {
-            let names = match (step, target, &key.item) {
-                (0, Val::Variable(t), Val::Variable(k)) if !is_gensym(t) && !is_gensym(k) => {
-                    Some((t.to_string(), k.to_string()))
-                }
+            let names = match (step, written(target), written(&key.item)) {
+                (0, Some(t), Some(k)) => Some((t.to_string(), k.to_string())),
                 _ => None,
             };
             current_ty = self.with_span(key.span, |this| {
@@ -1741,8 +1661,10 @@ impl Inferencer<'_> {
         // Pre-resolved so each arm can unify its payload under its own pos; a
         // residual `Var` here waits for the final row-unify.
         let scrut_resolved_row = self.ctx.unifier.apply_row(&Row::Var(scrut_row_var));
-        let scrut_payloads: std::collections::HashMap<Label, Ty> =
-            collect_extends(&scrut_resolved_row).into_iter().collect();
+        let scrut_payloads: std::collections::HashMap<Label, Ty> = scrut_resolved_row
+            .fields()
+            .map(|(l, t)| (l.clone(), t.clone()))
+            .collect();
 
         // Exactly one arm runs, so they share one type: a literal `{ |p| … }`
         // binds its pattern to a fresh payload type, and a thunk in hand is
@@ -1806,7 +1728,7 @@ impl Inferencer<'_> {
     /// `Arc` identity, so a group is inferred once within a run however many
     /// of its members are projected.
     fn infer_rec(&mut self, group: &Arc<GroupNode>, index: usize) -> CompTy {
-        let key = Arc::as_ptr(group).cast::<()>();
+        let key = Node::group(group);
         if let Some(betas) = self.ctx.rec_groups.get(&key) {
             return betas[index].clone();
         }
@@ -1835,9 +1757,9 @@ impl Inferencer<'_> {
     }
 
     /// Note, for the `()` note, that `pattern` binds what a call returned.
-    fn note_called(&mut self, pattern: &IrPattern, rhs: &Comp) {
-        if let IrPattern::Name(name) = pattern
-            && !is_gensym(name)
+    fn note_called(&mut self, pattern: &Pattern, rhs: &Comp) {
+        if let Pattern::Name(name) = pattern
+            && !is_synthetic(name)
             && let Some(callee) = Self::called_head(rhs)
         {
             self.env.note_called(name.to_string(), callee);
@@ -1849,8 +1771,8 @@ impl Inferencer<'_> {
     fn called_head(rhs: &Comp) -> Option<String> {
         match &rhs.item {
             CompKind::Bind { rest, .. } => Self::called_head(rest),
-            CompKind::Pipeline { stages, .. } => stages.last().and_then(|s| Self::called_head(s)),
-            CompKind::Force(Val::Variable(name)) => Some(name.to_string()),
+            CompKind::Pipeline { stages } => stages.last().and_then(|s| Self::called_head(s)),
+            CompKind::Force(v) => written(v).map(ToString::to_string),
             CompKind::App { head, .. } => Self::called_head(head),
             CompKind::Exec(exec) => Some(exec.head.name().written().into_owned()),
             _ => None,
@@ -1872,11 +1794,9 @@ impl Inferencer<'_> {
     }
 
     /// A `let`'s right-hand side, inferred as the holder of the indexes it reads.
-    fn infer_held(&mut self, pattern: &IrPattern, rhs: &Comp) -> CompTy {
-        let mut names = Vec::new();
-        collect_pattern_names(pattern, &mut names);
+    fn infer_held(&mut self, pattern: &Pattern, rhs: &Comp) -> CompTy {
         let outer = self.ctx.holder;
-        if names.iter().any(|name| !is_gensym(name)) {
+        if pattern.names().into_iter().any(|name| !is_synthetic(name)) {
             self.ctx.holder = rhs.span.or(outer);
         }
         let cty = self.infer_comp(rhs);
@@ -1912,7 +1832,7 @@ impl Inferencer<'_> {
                 rest,
             } => {
                 match pattern.as_ref() {
-                    IrPattern::Wildcard => {
+                    Pattern::Wildcard => {
                         self.infer_statement(inner);
                     }
                     pattern => self.infer_let(pattern, inner),
@@ -1924,7 +1844,7 @@ impl Inferencer<'_> {
                 // Name a literal used as a command head before the general
                 // `Cmd a vs a → b` mismatch says it in jargon.  Needs a
                 // positional arg; a spread-only call wants the cascading check.
-                let positional = crate::ir::args::positional(args).unwrap_or_default();
+                let positional = args.positional().unwrap_or_default();
                 if !positional.is_empty()
                     && let Some(ty) = self.command_non_function_ty(&head_ty)
                 {
@@ -1957,7 +1877,7 @@ impl Inferencer<'_> {
                     cty
                 }
             }
-            CompKind::Pipeline { stages, .. } => self.infer_pipeline(stages),
+            CompKind::Pipeline { stages } => self.infer_pipeline(stages),
             CompKind::Binary(op, lhs, rhs) => CompTy::pure(self.infer_binary(*op, lhs, rhs)),
             CompKind::Negate(val) => {
                 let ty = self.infer_val(val);
@@ -2034,7 +1954,7 @@ impl Inferencer<'_> {
 #[cfg(test)]
 mod tests {
     use crate::syntax::parser::parse;
-    use crate::typecheck::{Scheme, Ty};
+    use crate::ty::{Scheme, Ty};
     use crate::{SessionSchemes, elaborator::elaborate, typecheck};
     use std::sync::Arc;
 
@@ -2050,11 +1970,11 @@ mod tests {
         bindings: Vec<(String, Option<Arc<Scheme>>)>,
     ) -> Vec<&'static str> {
         let ast = parse(src).unwrap_or_else(|e| panic!("parse error in {src:?}: {e:?}"));
-        let comp = elaborate(&ast, std::collections::HashSet::default(), "")
-            .unwrap_or_else(|e| panic!("elaborate error in {src:?}: {e:?}"));
+        let comp =
+            elaborate(&ast, [], "").unwrap_or_else(|e| panic!("elaborate error in {src:?}: {e:?}"));
         let schemes = SessionSchemes {
             bindings,
-            ..SessionSchemes::default()
+            ..crate::test_helper::core_schemes()
         };
         typecheck(&comp, schemes, None)
             .err()

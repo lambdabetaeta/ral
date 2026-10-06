@@ -5,8 +5,8 @@
 //! ties meet, and silence denies.  The fs [`Region`](super::fs::Region) and
 //! the [`ExecRules`](super::exec::ExecRules) are its two instances.
 
+use super::{Meet, Verdict, meet_insert};
 use crate::path::{Allow, Deny, Polarity};
-use crate::types::{Meet, Verdict, meet_insert};
 use std::collections::BTreeMap;
 
 /// Where a rule applies.
@@ -143,8 +143,8 @@ mod tests {
     use super::{Scope, Table};
     use crate::capability::exec::tests::{Rng, paths, random};
     use crate::capability::fs::Region;
+    use crate::capability::{Meet, Verdict};
     use crate::path::FrozenPath;
-    use crate::types::{Meet, Verdict};
     use std::path::Path;
 
     /// `⟦a ∧ b⟧ = ⟦a⟧ ∧ ⟦b⟧` at every subject, and the meet is a semilattice

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 22d70dff
+generated_at_commit: 446e3123
 generated_at_date: 2026-10-05
 covers_paths: [core/src/builtins/, core/src/builtins.rs, core/src/uutils.rs]
 ---
@@ -10,15 +10,19 @@ covers_paths: [core/src/builtins/, core/src/builtins.rs, core/src/uutils.rs]
 shell process. `builtins.rs` holds the `builtin_registry!` macro: each entry
 binds its facets at once — `names`, [[map/core/typecheck|type rule]] (`ty`),
 `doc` line, and runtime body (`call`) — into the `CORE_BUILTINS` static
-(`&[BuiltinEntry]`), so the facets cannot drift apart. Arity is no facet:
-`BuiltinEntry::fixed_arity` derives it from the type rule and caches it, a
-`usize` for every entry in the table. What a row does with stdout is
+(`&[BuiltinEntry]`), so the facets cannot drift apart. A `BuiltinEntry` is a
+`Decl` (everything the checker may know: name, `Convention`, doc, type rule,
+diagnostic, a `boundary` flag) plus the body only the runtime runs; its
+constructors set `boundary` from the body they are handed, so the flag and the
+body cannot disagree. Arity is no facet: `Decl::fixed_arity` derives it from the
+type rule and caches it with the settle-at-`Unit` fact in one `Spine`, a `usize`
+for every entry in the table. What a row does with stdout is
 in its scheme: a writing row (the encoders, `echo`, `help`, `explain`, `clear`,
 `reset`, `ints-to-bytes`) ends in `Command`, `F^w Unit`, and there is no
 separate declaration
 ([[decisions/260930_graded-f|graded-f]]). Settling at `Unit` is enforced at the
 same door as arity:
-`BuiltinEntry::settles_at_unit` reads the declared result off the curry spine,
+`Decl::settles_at_unit` reads the declared result off that curry spine,
 and a row whose scheme says `Unit` answers unit from `call_body`
 whatever its Rust body computed, so no builtin
 can hand a value of another type to a name the checker believes is `Unit`.
@@ -44,9 +48,10 @@ earns — a decoder handed an argument, `fail` handed a literal zero status
 form is its scheme, so it has one by construction, every entry in the table
 having declared its arguments ([[invariants/fixed-arity|fixed-arity]]).
 Builtins are *shell-scoped*: each shell's session carries a `BuiltinTable`
-([[map/core/shell-state|shell-state]]) seeded from `CORE_BUILTINS`
-(`core_builtin_table`), and a host's extra sets ride a `HostSurface` into
-`boot::boot_shell` (`core/src/boot.rs`), so the checker's rule table, the base
+([[map/core/shell-state|shell-state]]) seeded from `CORE_SETS`
+(the core rows, the boundaries and the base frames, one list), and a host's
+extra sets ride a `HostSurface` into `HostSurface::shell` and `boot::boot_shell`
+(`core/src/boot.rs`), so the checker's rule table, the base
 scope, and the base frames all come from the manifest the shell was booted with
 — there is no process-global registry, and every path that builds or hydrates a
 shell must seed through `install_builtins` or re-link a native by name.
@@ -73,7 +78,7 @@ base-frame manifest's second row — typed `List String -> F Any`, no arity to i
 arming the budget (`Shell::arm_detach`) are one act, so absence is an
 unknown-name diagnostic rather than a veto, while
 whether a given call may spend it is the live grant stack's question
-(`GrantStack::permits_detach`). The fourth, `SURFACE_BUILTIN`, wraps
+(`GrantStack::permits(Flag::Detach)`). The fourth, `SURFACE_BUILTIN`, wraps
 `misc::builtin_surface` / `scheme::surface_op` under the bare name `surface`;
 exarch declares its own entry over the same body under `exarch-surface`, with
 its own doc, so no host's name enters core's vocabulary. `builtin_surface` is
@@ -87,7 +92,10 @@ Bodies are grouped by concern, one submodule each:
   owns the raw-block framing rule: blank lines around a multiline block fall
   away before the common margin is stripped, while content-line whitespace is
   preserved;
-- `collections.rs`, `predicates.rs`, `fs.rs`, `codecs.rs` — the last is also
+- `collections.rs`, `predicates.rs` (`keys`, `has`: ordering and equality are
+  `Value::compare` / `Value::equals`, and `equal`, `lt`, `gt`, `is-empty`,
+  `sort-list`, `identity` are prelude one-liners over `==`, `<`, `>`, `length`
+  and `sort-list-by`), `fs.rs`, `codecs.rs` — the last is also
   home to `builtin_echo`, `to-line`'s neighbour by nature: every argument
   rendered through the total `to-string` — `Value`'s `Display`, mapped over the
   argv — single-space intercalation, a newline to stdout.
@@ -104,7 +112,12 @@ Bodies are grouped by concern, one submodule each:
 - `shell.rs` — `cd`, `alias` / `unalias`;
 - `concurrency.rs` — `spawn` / `watch` / `service` / `detach` and the handle
   verbs
-  `await` / `poll` / `race` / `cancel` (builtins under their bare names; `par`
+  `await` / `poll` / `race` / `cancel`, split by concern: the root keeps the
+  verbs of birth, `concurrency/birth.rs` the `Birth` door (`spawn_child`),
+  `concurrency/eliminate.rs` the eliminators, `concurrency/tests.rs` the
+  tests; the worker's deferred surface and its `FlushGuard` live in
+  `types/handle/surface.rs`, and the `joined` deliver-once cell is a
+  `Latch` whose `claim` one side wins (builtins under their bare names; `par`
   and the `is-done` predicate are prelude code over them, not builtins). All
   but the host-installed three seed through `CORE_BUILTINS`; those live here
   too but reach a session via `WATCH_BUILTIN` / `SERVICE_BUILTIN` /
@@ -132,10 +145,10 @@ Bodies are grouped by concern, one submodule each:
   documents. `await`/`race` `project_completed` the
   outcome to `{value, stdout, stderr}`, re-raising `` `err ``; `poll` is total,
   wrapping it as `` `settled `` `{stdout, stderr, outcome: `ok/`err}` (the `` `err ``
-  payload built through the shared `evaluator::scope::error_record`, the record
+  payload built through `Error::record`, the record
   `try` hands its handler) or `` `pending `` `{stdout, stderr}` (a *cumulative,
-  non-destructive* `peek_buffer` snapshot of the running worker's output — the
-  buffers are left for the one-shot completion `take_buffer`, so a partial poll
+  non-destructive* `CapturedBytes::peek` snapshot of the running worker's output — the
+  buffers are left for the one-shot completion `CapturedBytes::take`, so a partial poll
   never steals bytes) — the block's outcome is data, not a status. `await`
   and `poll` gate first on `ensure_live`, the cancelled pre-check
   ([[decisions/260615_poll-total-failed-arm|the settle decision]],
@@ -145,8 +158,10 @@ Bodies are grouped by concern, one submodule each:
   `race`'s cancel-aware wait loop (`wait_first_settled`), so a deadline unwinds
   the wait while the root-scoped worker survives
   ([[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]]).
-  Under a frame that grants a `WorkerLease`, `spawn` arms a self-re-arming
-  `process::deadline` callback — the idle-observation lease chain: a
+  Under a frame that grants a `WorkerLease`, `spawn` fires a `LeaseChain`
+  (`types/shell/workers.rs`) — a self-re-arming `process::deadline` callback
+  deciding by `WorkerLease::verdict`, a pure function of the worker's age and
+  idleness, so the first delay is already the sooner bound — the idle-observation lease chain: a
   still-running worker unobserved for `idle` is reaped, where every `poll`
   and every `await`/`race` sweep renews the handle's `last_observed` cell,
   under an absolute `backstop` no polling extends; a worker that finished
@@ -202,25 +217,21 @@ Bodies are grouped by concern, one submodule each:
   its cancelled losers, and a settled `poll` remove the entry from whichever
   shell observes it, an explicit `cancel` removes it too, and a pending
   `poll` or a bare listing never touches the registry. A `Handle` is
-  a resident, process-local reference: it cannot cross the pipeline-stage helper
-  wire, so returning one from a helper-evaluated stage raises the wire diagnostic
-  *"cannot return a handle from sandboxed evaluation"* (`core/src/serial.rs`)
-  rather than a generic failure
-  ([[internals/capability-enforcement|capability-enforcement]]);
+  process-local: `Shell::fork_scrubbed` scrubs it from every fork, and a run
+  whose result is or holds one ends `Unreturnable` (`core/src/run/report.rs`);
 - `modules.rs` — the cacheless `use` loader (a boundary: it builds the export
   record and admits it with `Site::admit_module`, holding each function to the
-  scheme the module was checked at),  and the host loading door every
-  runtime script load shares. `evaluate_source` is the shared parse +
-  elaborate + evaluate core — `check_source`, the compile door `use` shares,
-  checks against the live session, peeking the `FileId` its own registration
-  will mint so the module's spans carry its real identity, and hands back a
-  failure as an `Error` carrying its `Uncompiled` report
-  ([[map/core/diagnostics|diagnostics]]); `module_phrases` holds the
-  cycle stack and depth bound, the one door both `evaluate_source` and
-  `use` run their phrases through; `use` is a scope-projecting caller of
-  that door, running under the session environment rather than the caller's
-  own block-local scope. Module loads carry no cache, so the guards keep
-  re-evaluation terminating — see
+  scheme the module was checked at). It runs its phrases through
+  `load::module_phrases`, the cycle stack and depth bound it shares with the
+  host loading door `load::evaluate_source` (rank 10, `core/src/load.rs`,
+  which also holds `check_source`, the compile door both share: it checks
+  against the live session, registering the source first so the module's
+  spans carry its real identity, and hands back a failure
+  as an `Error` carrying its `Rejection`
+  ([[map/core/diagnostics|diagnostics]])); `use` is a scope-projecting caller
+  of that door, running under the session environment rather than the
+  caller's own block-local scope. Module loads carry no cache, so the guards
+  keep re-evaluation terminating — see
   [[decisions/260606_cacheless-module-loader|cacheless-module-loader]];
 - `misc.rs` — including `builtin_surface`, the body `SURFACE_BUILTIN` (above)
   wraps: it forwards a tagged variant to the host's
@@ -246,17 +257,16 @@ Bodies are grouped by concern, one submodule each:
   nested string is capped at all: the REPL cuts at a terminal row, exarch's
   `VALUE` section cuts nothing, since a payload's text is the identity a later
   `edit-hash` matches;
-- `util.rs` — shared helpers, JSON coercion. `as_str` borrows a checked
-  `String` argument. `read_lines` is the one line reader
+- `util.rs` — shared helpers. `read_lines` is the one line reader
   ([[design/codecs|codecs]]' line rule), generic over its byte source and
   leaving each line undecoded, since decoding is each caller's policy;
   `stdin_lines` runs it over `stdin_reader`, and `lossy_line_list` decodes
   its lines into the `[String]` that `from-lines` and `lines` return.
 
 The capability `Value`-map decoder is *not* a builtin: it lives beside the
-authority layer in `capability/decode.rs` (`decode_capability_map`), consumed by
+authority layer in `guard/decode.rs` (`decode_capability_map`), consumed by
 the `grant` control operator (`evaluator/scope.rs`) and the `--capabilities`
-ceiling (`capability/load.rs`) — see [[map/core/capabilities|capabilities]],
+ceiling (`load/profile.rs`) — see [[map/core/capabilities|capabilities]],
 [[design/grant|grant]].
 
 Why a capability lands in one of these layers rather than another — builtin vs.

@@ -43,9 +43,10 @@ fmt-check:
 # opt-out. Pedantry (pedantic + nursery, I/O-door denylist) lives in RUSTFLAGS
 # and `[workspace.lints.clippy]` instead.
 
-# Clippy across the workspace, warnings as errors.
+# Clippy across the workspace, warnings as errors; no em dash in string literals.
 lint $RUSTFLAGS=deny:
     cargo clippy --workspace {{gui}} --all-targets --keep-going
+    ! rg -n '"[^"]*[^ ] — ' core/src exarch/src ral/src --glob '!**/tests*'
 
 # Never links, so a Unix host can run it. `cargo xwin` (rust-cross/cargo-xwin)
 # splats the real MSVC CRT and Windows SDK headers exarch's `rustls ->

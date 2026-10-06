@@ -31,7 +31,7 @@ identically by `env`, `~`, the child-process environment, and PATH resolution.
 This sharpens the [[design/scoping|lexical-data / dynamic-authority]] split
 rather than straddling it.
 
-Realised in `core/src/types/shell/init.rs` (`seed_default_env_vars`).
+Realised in `core/src/boot.rs` (`seed_env`, private to `boot_shell`).
 See also [[map/core/shell-state|shell-state]].
 
 > **Amended 2026-10-05.** `$HOME` first returned as a *register*, a read of

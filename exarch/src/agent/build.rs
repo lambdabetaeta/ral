@@ -14,7 +14,8 @@ use crate::fleet::{AGENT_LEASE_IDLE, Fleet, Launch, Unborn};
 use crate::prompt::Grants;
 use crate::provider::Provider;
 use crate::shell_eval::tools::Toolset;
-use ral_core::protocol::{Ending, Report, Severed};
+use ral_core::carrier::Severed;
+use ral_core::protocol::{Ending, Report};
 use ral_core::sync::LockExt;
 use std::io;
 use std::path::Path;
@@ -69,7 +70,7 @@ pub(crate) struct Build {
     /// `SessionStarted` bookend records the resolved length, and the log must
     /// exist before the agent it describes does.
     pub(crate) system_prompt: String,
-    pub(crate) caps: ral_core::types::GrantStack,
+    pub(crate) caps: ral_core::capability::GrantStack,
     /// Already through its identity ceremony: `assemble` seats no engine of
     /// its own, so every construction site states which seat kind it builds.
     pub(crate) seat: Seat,
@@ -202,7 +203,7 @@ impl Trunk {
 /// Everything a trunk needs beyond the seat choice and the provider.
 pub struct RootConfig {
     pub system: String,
-    pub caps: ral_core::types::GrantStack,
+    pub caps: ral_core::capability::GrantStack,
     /// The run's directory — the one its `sessions/` hangs under, and the
     /// one [`Avatar::resume`] reads back.
     pub run_dir: std::path::PathBuf,
@@ -246,14 +247,14 @@ pub enum RootSeat {
     Identity {
         scratch: Arc<Scratch>,
         cwd: std::path::PathBuf,
-        terminal: ral_core::io::TerminalState,
+        terminal: ral_core::terminal::TerminalState,
     },
     /// Out-of-process: an already-built `transport` onto an engine elsewhere,
     /// a spawned `--engine` child or synod's adopted control-plane stream into
     /// a guest VM. `cwd`/`home` come from the caller because under a VM the
     /// workspace is a guest path this process cannot resolve.
     Wire {
-        transport: Box<ral_core::protocol::WireTransport>,
+        transport: Box<ral_core::carrier::WireTransport>,
         cwd: std::path::PathBuf,
         home: std::path::PathBuf,
     },
@@ -343,12 +344,12 @@ impl Avatar {
     ) -> io::Result<(Self, Resumed)> {
         if cfg.tools.is_empty() {
             return Err(io::Error::other(
-                "cannot resume a chat session — chat keeps no resumable harness history",
+                "cannot resume a chat session: chat keeps no resumable harness history",
             ));
         }
         if matches!(seat, RootSeat::Wire { .. }) {
             return Err(io::Error::other(
-                "--resume is unavailable for a wire seat — the engine process is gone; resume an identity session instead",
+                "--resume is unavailable for a wire seat: the engine process is gone; resume an identity session instead",
             ));
         }
         seed_id_counter(&cfg.run_dir.join("sessions"))?;
@@ -397,7 +398,7 @@ impl Avatar {
         // `` exarch-agents `start ``'s wire arm, so refuse the construction itself.
         if matches!(&root_seat, RootSeat::Wire { .. }) && fuel > 0 && dial.is_none() {
             return Err(io::Error::other(
-                "a wire trunk with spawn fuel needs a dialler to reach helper engines through — \
+                "a wire trunk with spawn fuel needs a dialler to reach helper engines through: \
                  pass one via RootConfig::dial, or build this trunk with fuel: 0",
             ));
         }
@@ -428,14 +429,12 @@ impl Avatar {
                 home,
             } => Seat::wire(*transport, cwd, home).map_err(lost)?,
         };
-        let index = crate::prompt::BuiltinIndex::resolve(
-            seat.read(ral_core::protocol::reading::builtin_names)
-                .map_err(lost)?,
-        );
+        let index =
+            crate::prompt::BuiltinIndex::resolve(seat.read(|t| t.builtin_names()).map_err(lost)?);
         // The scratch is the engine's to name, under either carrier.
         let scratch_var = crate::bootstrap::EXARCH.scratch_var();
         let scratch = seat
-            .read(|t| ral_core::protocol::reading::env_var(t, &scratch_var))
+            .read(|t| t.env_var(&scratch_var))
             .map_err(lost)?
             .ok_or_else(|| io::Error::other(format!("the engine names no ${scratch_var}")))?;
         let system: Arc<str> = system
@@ -652,13 +651,13 @@ impl Avatar {
         let seat = Seat::root(
             installers,
             cwd,
-            ral_core::io::TerminalState::default(),
+            ral_core::terminal::TerminalState::default(),
             scratch,
             &AgentLog::dir_of(&sessions_root, id),
         )
         .map_err(|s| io::Error::other(s.to_string()))?;
         let index = crate::prompt::BuiltinIndex::resolve(
-            seat.read(ral_core::protocol::reading::builtin_names)
+            seat.read(|t| t.builtin_names())
                 .map_err(|s| io::Error::other(s.to_string()))?,
         );
         let system_prompt = index.apply(
@@ -698,7 +697,7 @@ impl Avatar {
         Ok(Self::assemble(Build {
             name: TRUNK_NAME.to_string(),
             system_prompt,
-            caps: ral_core::types::GrantStack::root(),
+            caps: ral_core::capability::GrantStack::root(),
             seat,
             log,
             parent: None,
@@ -778,7 +777,7 @@ mod tests {
     fn root_config(run_dir: &Path, fuel: u32) -> RootConfig {
         RootConfig {
             system: "system".into(),
-            caps: ral_core::types::GrantStack::root(),
+            caps: ral_core::capability::GrantStack::root(),
             run_dir: run_dir.to_path_buf(),
             account: RecordedAccount::for_test("test"),
             trunk: Trunk::Attended,
@@ -797,18 +796,18 @@ mod tests {
         RootSeat::Identity {
             scratch: Arc::new(Scratch::for_test(crate::bootstrap::EXARCH, tag).expect("scratch")),
             cwd: std::env::current_dir().expect("test process has a cwd"),
-            terminal: ral_core::io::TerminalState::default(),
+            terminal: ral_core::terminal::TerminalState::default(),
         }
     }
 
     /// A forked child inherits the parent's installed builtin surface, not
-    /// just the core set a bare `Shell::new` seeds.
+    /// just the core set a bare `HostSurface::default().shell(..)` seeds.
     #[test]
     fn fork_inherits_host_builtins() {
         let names = |session: &Avatar| {
             session
                 .seat
-                .read(ral_core::protocol::reading::builtin_names)
+                .read(|t| t.builtin_names())
                 .expect("an identity seat never severs")
         };
         let session = Avatar::for_test("system").unwrap();
@@ -842,7 +841,7 @@ mod tests {
         }
         assert_eq!(
             parent.agent.fuel, SPAWN_FUEL,
-            "fork never touches the parent's own fuel — fan-out is unbounded"
+            "fork never touches the parent's own fuel: fan-out is unbounded"
         );
 
         let mut chain = parent;
@@ -1077,7 +1076,7 @@ mod tests {
         }
         assert!(
             !session.inbox.is_empty(),
-            "the settling worker still posts its late batch — the sink never withholds"
+            "the settling worker still posts its late batch: the sink never withholds"
         );
         assert!(
             session.inbox.next_item().is_none(),
@@ -1101,7 +1100,7 @@ mod tests {
 
         assert!(
             !session.inbox.is_empty(),
-            "the late result is posted, never withheld — deliver-then-retire is structural"
+            "the late result is posted, never withheld: deliver-then-retire is structural"
         );
         assert!(
             session.inbox.next_item().is_none(),
@@ -1147,7 +1146,7 @@ mod tests {
 
         assert!(
             entries[0].handle.cancel.is_cancelled(),
-            "dropping the agent (settle or cancel — however its life ended) \
+            "dropping the agent (settle or cancel: however its life ended) \
              must cancel its own still-running workers"
         );
     }
@@ -1217,7 +1216,7 @@ mod tests {
 
         assert_eq!(
             session.rewind(9, &emit).unwrap_err(),
-            "turn 9 is not recorded — the latest is 6"
+            "turn 9 is not recorded: the latest is 6"
         );
 
         session
@@ -1227,7 +1226,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             session.rewind(1, &emit).unwrap_err(),
-            "turn 1 has already left your context — the earliest still in it is 3"
+            "turn 1 has already left your context: the earliest still in it is 3"
         );
 
         session.inbox.push(Post::Nudge {
@@ -1291,7 +1290,7 @@ mod tests {
         }
         assert!(
             scope_has(&child, "parent_scratch"),
-            "inherited parent scratch is baseline in the child — never pruned, however \
+            "inherited parent scratch is baseline in the child: never pruned, however \
              many boundary prunes the idle calls above ran"
         );
     }

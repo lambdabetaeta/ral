@@ -1,33 +1,19 @@
 //! Text primitives the whole tree shares.
 //!
-//! Snapping byte offsets to UTF-8 char boundaries, byte↔char conversion, and
-//! fuzzy ranking.  std's `str::floor_char_boundary` / `ceil_char_boundary` are
-//! still unstable, hence the first of those.
+//! Byte↔char conversion, plurals, near-name suggestions, fuzzy ranking, and
+//! [`Str`], the shared immutable string.
 
 use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
-
-/// Snap `offset` to the nearest char boundary at or before it, clamped into `s`.
-pub fn floor_char_boundary(s: &str, offset: usize) -> usize {
-    let clamped = offset.min(s.len());
-    (0..=clamped)
-        .rev()
-        .find(|&i| s.is_char_boundary(i))
-        .unwrap_or(0)
-}
-
-/// Snap `offset` to the nearest char boundary at or after it, clamped to `s.len()`.
-pub fn ceil_char_boundary(s: &str, offset: usize) -> usize {
-    let mut i = offset.min(s.len());
-    while i < s.len() && !s.is_char_boundary(i) {
-        i += 1;
-    }
-    i
-}
+use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
+use std::fmt;
+use std::ops::Deref;
+use std::sync::Arc;
 
 /// Byte offset to character offset — ariadne and the REPL frontends index by char.
 pub fn byte_to_char(source: &str, byte_offset: usize) -> usize {
-    source[..floor_char_boundary(source, byte_offset)]
+    source[..source.floor_char_boundary(byte_offset)]
         .chars()
         .count()
 }
@@ -55,6 +41,15 @@ pub fn near_names<'a>(
     near.sort_unstable();
     near.dedup();
     near.into_iter().take(limit).map(|(_, c)| c).collect()
+}
+
+/// `n` of `noun`, agreeing in number: the one spelling of a count in prose.
+pub fn plural<N: std::fmt::Display + PartialEq + From<u8> + Copy>(n: N, noun: &str) -> String {
+    if n == N::from(1) {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
+    }
 }
 
 /// Fuzzy-rank `items` against `needle`, best first, dropping non-matches.
@@ -109,6 +104,74 @@ pub fn rank_by<T>(
     scored.into_iter().map(|(item, _)| item).collect()
 }
 
+/// An immutable string, shared on clone.
+///
+/// `Arc<String>`, not `Arc<str>`: an owned `String` moves in without a copy,
+/// and, while the count is one, back out.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Str(Arc<String>);
+
+impl Str {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Free while this is the only holder.
+    pub fn into_string(self) -> String {
+        Arc::unwrap_or_clone(self.0)
+    }
+}
+
+impl Deref for Str {
+    type Target = str;
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl AsRef<str> for Str {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl PartialEq<str> for Str {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl fmt::Display for Str {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self.as_str(), f)
+    }
+}
+
+impl fmt::Debug for Str {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self.as_str(), f)
+    }
+}
+
+impl From<String> for Str {
+    fn from(s: String) -> Self {
+        Self(Arc::new(s))
+    }
+}
+
+impl From<&str> for Str {
+    fn from(s: &str) -> Self {
+        Self::from(s.to_owned())
+    }
+}
+
+impl From<Cow<'_, str>> for Str {
+    fn from(s: Cow<'_, str>) -> Self {
+        Self::from(s.into_owned())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,19 +198,6 @@ mod tests {
         assert_eq!(char_to_byte(s, nchars), s.len());
     }
 
-    #[test]
-    fn floor_snaps_back_into_a_codepoint() {
-        // "λ" is two bytes (CE BB); offset 1 is mid-codepoint.
-        assert_eq!(floor_char_boundary("λx", 1), 0);
-        assert_eq!(floor_char_boundary("λx", 2), 2);
-    }
-
-    #[test]
-    fn ceil_snaps_forward_into_a_codepoint() {
-        assert_eq!(ceil_char_boundary("λx", 1), 2);
-        assert_eq!(ceil_char_boundary("λx", 0), 0);
-    }
-
     /// Two items may share a haystack — two providers listing one model name.
     /// Both survive, in the order they came in: the sort is stable, so the
     /// alphabetical tie-break cannot collapse them onto one another.
@@ -171,11 +221,5 @@ mod tests {
         );
         assert_eq!(near_names("lenght", pool, 1), ["lenght"]);
         assert_eq!(near_names("qqqqq", pool, 3), Vec::<&str>::new());
-    }
-
-    #[test]
-    fn both_clamp_past_the_end() {
-        assert_eq!(floor_char_boundary("ab", 9), 2);
-        assert_eq!(ceil_char_boundary("ab", 9), 2);
     }
 }

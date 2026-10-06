@@ -16,7 +16,7 @@ pub(in crate::provider::allowance) fn read(
 ) -> Result<Vec<Allowance>, String> {
     let Credential::ApiKey(key) = credential else {
         return Err(format!(
-            "{} authenticates with a ChatGPT login, not an API key — OpenRouter's \
+            "{} authenticates with a ChatGPT login, not an API key: OpenRouter's \
              credit endpoint has nothing to read for it",
             roster.label(account)
         ));
