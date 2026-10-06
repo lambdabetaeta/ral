@@ -4,8 +4,10 @@
 use crate::ansi::{self, BOLD_CYAN, BOLD_RED, BOLD_YELLOW, RESET};
 use crate::run::StaticDiagnostics;
 use crate::source::{SourceDb, Span, byte_to_line_col};
-use crate::syntax::lexer::LexErrorKind;
-use crate::syntax::parser::ParseError;
+use crate::syntax::ast::Word;
+use crate::syntax::lexer::{LexErrorKind, Token, lex};
+use crate::syntax::parser::{ParseError, ParseErrorKind};
+use crate::syntax::quote::escape_for_interpolation;
 use crate::text::byte_to_char;
 use crate::typecheck::TypeError;
 use crate::{CompileError, Uncompiled};
@@ -129,12 +131,17 @@ fn caret_range(source: &str, start: usize, width: usize) -> std::ops::Range<usiz
     s..e
 }
 
-/// Render a parse error: a structured `lex_kind` drives the two-label report
-/// (opener plus EOF), anything else gets one red label on the offending token.
+/// Render a parse error: a structured `kind` drives a two-label report,
+/// anything else gets one red label on the offending token.
 pub fn format_parse_error_ariadne(file: &str, source: &str, err: &ParseError) -> String {
-    if let Some(kind) = &err.lex_kind
-        && let Some(report) = lex_error_report(source, kind)
-    {
+    let report = match &err.kind {
+        ParseErrorKind::Lex(kind) => lex_error_report(source, kind),
+        ParseErrorKind::Touching { first, second, run } => {
+            Some(touching_report(source, err, *first, *second, *run))
+        }
+        ParseErrorKind::Plain => None,
+    };
+    if let Some(report) = report {
         return render_ariadne(file, source, report);
     }
     let range = err.span.map_or_else(
@@ -268,6 +275,72 @@ fn lex_error_report(source: &str, kind: &LexErrorKind) -> Option<CaretReport> {
         // Codes are never reused: the next lex diagnostic takes L0006.
         LexErrorKind::Other(_) => None,
     }
+}
+
+/// Two touching atoms, with both readings spelled out in the help.
+fn touching_report(
+    source: &str,
+    err: &ParseError,
+    first: Span,
+    second: Span,
+    run: Span,
+) -> CaretReport {
+    let text = |span: Span| &source[span.start as usize..span.end as usize];
+    CaretReport {
+        code: "P0002",
+        message: err.message.clone(),
+        primary: LabelRange {
+            range: byte_span_to_char_range(source, second),
+            label: "this word starts with no space before it".into(),
+        },
+        secondary: Some(LabelRange {
+            range: byte_span_to_char_range(source, first),
+            label: "this word ends here".into(),
+        }),
+        hint: Some(match one_word(text(run)) {
+            Some(one) => format!(
+                "two arguments: `{} {}`; one argument: {one}",
+                text(first),
+                text(second)
+            ),
+            None => format!("two arguments: `{} {}`", text(first), text(second)),
+        }),
+    }
+}
+
+/// `run` re-spelled as one `"…"`: literal text escaped, an interpolation's
+/// body inlined, splices and bracketed interiors copied as written.  A dup
+/// (`2>&1`) is no word, so a run it opens has no one-word reading.
+fn one_word(run: &str) -> Option<String> {
+    let tokens = lex(run).ok()?;
+    if matches!(tokens.first(), Some((Token::Dup { .. }, _))) {
+        return None;
+    }
+    let mut body = String::new();
+    let mut depth = 0usize;
+    for (i, (token, span)) in tokens.iter().enumerate() {
+        let (start, end) = (span.start as usize, span.end as usize);
+        let next = tokens.get(i + 1).map_or(end, |(_, s)| s.start as usize);
+        match token {
+            _ if depth > 0 => body.push_str(&run[start..next]),
+            Token::Word(Word::Plain(w) | Word::Slash(w)) | Token::SingleQuoted(w) => {
+                // A leading `~` in `"…"` is home-rooted; a literal one was not.
+                if body.is_empty() && w.starts_with('~') {
+                    body.push('\\');
+                }
+                body.push_str(&escape_for_interpolation(w));
+            }
+            Token::Word(Word::Tilde(_)) => body.push_str(&run[start..end]),
+            Token::DoubleQuoted(_) => body.push_str(&run[start + 1..end - 1]),
+            _ => body.push_str(&run[start..next]),
+        }
+        match token {
+            Token::LBrace | Token::LBracket => depth += 1,
+            Token::RBrace | Token::RBracket => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    Some(format!("\"{body}\""))
 }
 
 /// Render one type error, falling back to the spanless form when it carries
@@ -509,7 +582,7 @@ mod tests {
         ParseError {
             message: message.into(),
             span,
-            lex_kind: None,
+            kind: ParseErrorKind::Plain,
             incomplete: false,
         }
     }
@@ -518,7 +591,7 @@ mod tests {
         ParseError {
             message: kind.message(),
             span: None,
-            lex_kind: Some(kind),
+            kind: ParseErrorKind::Lex(kind),
             incomplete: false,
         }
     }
@@ -580,6 +653,44 @@ mod tests {
         assert!(output.contains("L0001"));
         assert!(output.contains("nested"));
         assert!(output.contains("`{…}`"), "got:\n{output}");
+    }
+
+    fn touching_help(src: &str) -> String {
+        let err = crate::syntax::parser::parse(src).unwrap_err();
+        assert!(
+            matches!(err.kind, ParseErrorKind::Touching { .. }),
+            "{src}: {err}"
+        );
+        format_parse_error_ariadne("test.ral", src, &err)
+    }
+
+    #[test]
+    fn touching_words_render_both_readings() {
+        let cases = [
+            (
+                "echo --prefix=$d",
+                r#"two arguments: `--prefix= $d`; one argument: "--prefix=$d""#,
+            ),
+            ("echo 'a'\"b\"'c'", r#"one argument: "abc""#),
+            ("echo $h[k]'x'", r#"one argument: "$h[k]x""#),
+            (r"echo C:\tmp\$leaf", r#"one argument: "C:\\tmp\\$leaf""#),
+            ("echo a!{b c}", r#"one argument: "a!{b c}""#),
+            ("echo 'it''s'", r#"one argument: "its""#),
+            ("echo '~'/x", r#"one argument: "\~/x""#),
+        ];
+        for (src, help) in cases {
+            let output = touching_help(src);
+            assert!(output.contains("P0002"), "{src}:\n{output}");
+            assert!(output.contains(help), "{src}:\n{output}");
+        }
+    }
+
+    #[test]
+    fn touching_words_label_both_atoms() {
+        let output = touching_help("echo --prefix=$d");
+        assert!(output.contains("words touch: whitespace separates words, and nothing joins them"));
+        assert!(output.contains("this word starts with no space before it"));
+        assert!(output.contains("this word ends here"));
     }
 
     fn db_with(name: &str, text: &str) -> (SourceDb, FileId) {

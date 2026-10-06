@@ -52,6 +52,24 @@ pub fn quote_word(s: &str) -> String {
     format!("{hashes}'{s}'{hashes}")
 }
 
+/// `s` escaped for use inside `"…"`; a leading `~` is the caller's concern.
+pub fn escape_for_interpolation(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' | '"' | '$' | '!' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// [`quote_word`] returning a `Cow`, so bare words pass through borrowed.
 pub fn quote_word_if_needed(s: &str) -> Cow<'_, str> {
     if is_bare_word(s) {

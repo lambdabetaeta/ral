@@ -116,21 +116,6 @@ fn collect_extends(row: &Row) -> Vec<(Label, Ty)> {
     }
 }
 
-/// Heuristic: did the lexer close a `"…"` on an unescaped inner quote?  The
-/// giveaway is a quoted head whose args mix a string chunk with a hoisted
-/// non-string fragment — the interpolation between the quotes, bound out into
-/// its own variable.  Bare words are all `Val::String` after [`Val::from_word`],
-/// so `'foo' bar baz` falls through to the generic hint.
-fn looks_like_nested_quote_mistake(head: &Comp, args: &[&Val]) -> bool {
-    let head_from_quoted = matches!(
-        head.item,
-        CompKind::Return(Val::String(_)) | CompKind::Interpolation(_)
-    );
-    let any_string_arg = args.iter().any(|a| matches!(a, Val::String(_)));
-    let any_non_string_arg = args.iter().any(|a| !matches!(a, Val::String(_)));
-    head_from_quoted && any_string_arg && any_non_string_arg
-}
-
 /// A scalar literal as written, the target [`TypeErrorKind::IndexOnLiteral`]
 /// refuses; `None` for anything an index may read.
 fn spell_literal(v: &Val) -> Option<String> {
@@ -1943,11 +1928,7 @@ impl Inferencer<'_> {
                 if !positional.is_empty()
                     && let Some(ty) = self.command_non_function_ty(&head_ty)
                 {
-                    let split_string_suspect = looks_like_nested_quote_mistake(head, &positional);
-                    let kind = TypeErrorKind::CommandNotFunction {
-                        ty,
-                        split_string_suspect,
-                    };
+                    let kind = TypeErrorKind::CommandNotFunction { ty };
                     self.ctx.diagnose(kind);
                     // Check the args anyway, then hand the enclosing pipeline
                     // or chain a coherent fresh result.

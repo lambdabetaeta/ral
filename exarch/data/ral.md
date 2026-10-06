@@ -125,7 +125,7 @@ In summary: `;` sequences, `attempt` tolerates a failure, `?` supplies a fallbac
 
       echo "hi $first-name $(last-name): $h[file] line $h[line], today !{date +%F | from-line}, sum $[2 + 3]"
 
-  `$(name)` delimits variables from post-fixes that do not belong to them. A composite path must be one quoted word: `echo hi > "$dir/file"`.
+  `$(name)` delimits variables from post-fixes that do not belong to them. Words never glue: `$dir/file` is a parse error, not a path; a composite word is one double-quoted word, `"$dir/file"`.
 - A double-quoted string that begins with `~/` (or is just `"~"`) is home-rooted, like a bare `~/x`: `ls "~/To process at work"`. `!{home}` is the same value. `'~/x'` is verbatim.
 
 * Escapes are a fixed set (`\n`, `\r`, `\t`, `\\`, `\"`, `\$`, `\!`, `\~`, `\0`, `\e`, `\xNN` for ASCII, `\u{…}`, and backslash-newline continuation).

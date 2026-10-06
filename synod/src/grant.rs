@@ -29,15 +29,13 @@
 //! the construction lives here and is not scattered across the session.
 
 use ral_core::path::FrozenPath;
-use ral_core::types::{
-    Capabilities, EditorPolicy, ExecGrant, ExecKey, FsPolicy, ShellPolicy, Verdict,
-};
+use ral_core::types::{Capabilities, EditorPolicy, ExecKey, FsPolicy, ShellPolicy, Verdict};
 use std::path::{Path, PathBuf};
 
 /// The image's office toolbox, as an allowlist of *bare command names*:
 /// no path or dir key.
 ///
-/// [`ExecGrant`] admits by bare name, by path or by directory prefix,
+/// [`ExecGrant`](ral_core::types::ExecGrant) admits by bare name, by path or by directory prefix,
 /// and exarch's profiles lean hard on the directory half because a
 /// developer's tool roots are open-ended: Homebrew, rustup toolchains,
 /// nvm and pyenv install binaries nobody can enumerate in advance, so

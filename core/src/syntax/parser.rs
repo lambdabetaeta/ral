@@ -30,14 +30,26 @@ pub struct ParseError {
     pub message: String,
     /// The offending token, or the opening delimiter for a lexer error.
     pub span: Option<Span>,
-    /// Set for a lexer-originating failure; carries the structure the
-    /// diagnostic layer needs to draw more than one label.
-    pub(crate) lex_kind: Option<LexErrorKind>,
+    pub(crate) kind: ParseErrorKind,
     /// The parse failed because the input *stopped short* rather than being
     /// malformed — an unclosed lexeme, a `let` still awaiting its right-hand
     /// side, or a consumed `|` / `?` / `if` / `elsif` / `else` whose stage,
     /// branch, or body never arrived.  Drives REPL line continuation.
     pub(crate) incomplete: bool,
+}
+
+/// The structure the diagnostic layer needs to draw more than one label.
+#[derive(Debug, Clone)]
+pub(crate) enum ParseErrorKind {
+    Plain,
+    Lex(LexErrorKind),
+    /// Two atoms with nothing between them: the unit before, the first atom
+    /// after it, and the whole touching run.
+    Touching {
+        first: Span,
+        second: Span,
+        run: Span,
+    },
 }
 
 impl fmt::Display for ParseError {
@@ -60,7 +72,7 @@ impl From<LexError> for ParseError {
             message: e.kind.message(),
             span: Some(e.span),
             incomplete: e.kind.is_incomplete(),
-            lex_kind: Some(e.kind),
+            kind: ParseErrorKind::Lex(e.kind),
         }
     }
 }
@@ -227,7 +239,7 @@ impl Parser {
         ParseError {
             message: message.into(),
             span: Some(self.span()),
-            lex_kind: None,
+            kind: ParseErrorKind::Plain,
             incomplete: false,
         }
     }
@@ -246,7 +258,7 @@ impl Parser {
         ParseError {
             message: message.into(),
             span: Some(span),
-            lex_kind: None,
+            kind: ParseErrorKind::Plain,
             incomplete: false,
         }
     }
@@ -1142,13 +1154,16 @@ impl Parser {
         prev_span.end == next_span.start
     }
 
-    /// `None` for an identity dup (`1>&1`, `2>&2`), which denotes no redirect.
-    fn parse_redirect(&mut self) -> Result<Option<Redirect<Ast>>, ParseError> {
+    /// The redirect and the span of its target word, if it has one.  The
+    /// redirect is `None` for an identity dup (`1>&1`, `2>&2`), which denotes
+    /// no redirect.
+    fn parse_redirect(&mut self) -> Result<(Option<Redirect<Ast>>, Option<Span>), ParseError> {
         let op_span = self.span();
         match self.peek().clone() {
             Token::Dup { fd, to } => {
                 self.advance();
-                Redirect::dup(fd, to).map_err(|m| Self::error_at(op_span, m))
+                let redirect = Redirect::dup(fd, to).map_err(|m| Self::error_at(op_span, m))?;
+                Ok((redirect, None))
             }
             Token::Redirect { fd, op } => {
                 self.advance();
@@ -1166,20 +1181,23 @@ impl Parser {
                     };
                     return Err(Self::error_at(word_span, message));
                 }
-                Ok(Some(redirect))
+                Ok((Some(redirect), Some(word_span)))
             }
             _ => Err(self.error("expected redirect")),
         }
     }
 
     /// One redirect, bound into `into`; a clash is reported at the whole
-    /// second redirect.
-    fn parse_redirect_into(&mut self, into: &mut Redirects<Ast>) -> Result<(), ParseError> {
-        let (span, redirect) = self.capture_span(Self::parse_redirect)?;
-        match redirect {
-            Some(r) => into.bind(r).map_err(|m| Self::error_at(span, m)),
-            None => Ok(()),
+    /// second redirect.  Returns the span of its target word.
+    fn parse_redirect_into(
+        &mut self,
+        into: &mut Redirects<Ast>,
+    ) -> Result<Option<Span>, ParseError> {
+        let (span, (redirect, target)) = self.capture_span(Self::parse_redirect)?;
+        if let Some(r) = redirect {
+            into.bind(r).map_err(|m| Self::error_at(span, m))?;
         }
+        Ok(target)
     }
 
     fn at_redirect(&self) -> bool {
@@ -1232,15 +1250,21 @@ impl Parser {
         if self.at_redirect() {
             return Err(self.error("redirect must follow a command"));
         }
-        let head = self.parse_head()?;
+        let (mut last, head) = self.capture_span(Self::parse_head)?;
         let mut args: Vec<Spanned<Ast>> = Vec::new();
         let mut redirects = Redirects::default();
         while !self.at_cmd_end() {
+            if self.touches_previous() {
+                return Err(self.touching(last));
+            }
             if self.at_redirect() {
-                self.parse_redirect_into(&mut redirects)?;
+                last = self
+                    .parse_redirect_into(&mut redirects)?
+                    .unwrap_or_else(|| self.prev_byte_span());
             } else {
                 let (arg_span, arg) = self.capture_span(Self::parse_arg)?;
                 args.push(Spanned::new(arg_span, arg));
+                last = arg_span;
             }
         }
 
@@ -1257,6 +1281,35 @@ impl Parser {
             args,
             redirects: Box::new(redirects),
         })
+    }
+
+    /// An atom ahead with nothing between it and the unit just parsed.
+    fn touches_previous(&self) -> bool {
+        self.next_token_is_adjacent() && !self.at_redirect() && !self.at_cmd_end()
+    }
+
+    /// The atom ahead touches `first`.  The run is parsed rather than
+    /// scanned, so `!{ a b }` and `[…]` inside it stay balanced; an error
+    /// inside the run is reported instead.
+    fn touching(&mut self, first: Span) -> ParseError {
+        let mut run = || -> Result<ParseError, ParseError> {
+            let (second, _) = self.capture_span(Self::parse_arg)?;
+            let mut last = second;
+            while self.touches_previous() {
+                (last, _) = self.capture_span(Self::parse_arg)?;
+            }
+            Ok(ParseError {
+                message: "words touch: whitespace separates words, and nothing joins them".into(),
+                span: Some(second),
+                kind: ParseErrorKind::Touching {
+                    first,
+                    second,
+                    run: first.join(last),
+                },
+                incomplete: false,
+            })
+        };
+        run().unwrap_or_else(|e| e)
     }
 
     /// Byte span of the last consumed token — where the production that just
@@ -1616,7 +1669,7 @@ fn numeric_operand(operand: &Spanned<Box<Ast>>) -> Result<(), ParseError> {
                 format!("`{w}` is the string '{w}' here, not a number")
             },
             span: operand.span,
-            lex_kind: None,
+            kind: ParseErrorKind::Plain,
             incomplete: false,
         }),
         _ => Ok(()),
@@ -1811,7 +1864,7 @@ fn error_at(span: Option<Span>, message: impl Into<String>) -> ParseError {
     ParseError {
         message: message.into(),
         span,
-        lex_kind: None,
+        kind: ParseErrorKind::Plain,
         incomplete: false,
     }
 }
@@ -2383,6 +2436,49 @@ mod tests {
             "expected the unit literal and `$[…]` both named, got: {}",
             err.message
         );
+    }
+
+    #[test]
+    fn touching_atoms_in_command_position_are_refused() {
+        for src in [
+            "echo --prefix=$d",
+            "echo --prefix='/opt/my dir'",
+            "echo $p/x",
+            "echo $n.txt",
+            "echo 'a'\"b\"'c'",
+            "echo $h[a]x",
+            "echo'x'",
+            "echo a > $dir/out",
+            "echo a$[1+1]b",
+        ] {
+            let err = parse(src).unwrap_err();
+            assert!(
+                matches!(err.kind, ParseErrorKind::Touching { .. }),
+                "{src:?} must be refused as touching, got: {}",
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn grammatical_adjacency_still_parses() {
+        for src in [
+            "echo $h[k]",
+            "echo !{f}[k]",
+            "echo ...$xs",
+            "echo a >file",
+            "echo a 2>x",
+            "echo a|cat",
+            "echo a;echo b",
+            "{ echo a }",
+            "echo a ? echo b",
+            "echo [1, 2]",
+            "echo a 'b' \"c\" $d",
+        ] {
+            if let Err(err) = parse(src) {
+                panic!("{src:?} must parse, got: {}", err.message);
+            }
+        }
     }
 
     /// With statements after the stray brace, "trailing input" would be doubly

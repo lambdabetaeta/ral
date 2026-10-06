@@ -222,10 +222,8 @@ pub enum TypeErrorKind {
         offered: Vec<&'static str>,
     },
     /// A non-function value in head position; shares T0011 with `CompTyMismatch`.
-    /// The flag marks a head/args shape suggesting a string split by a stray quote.
     CommandNotFunction {
         ty: Ty,
-        split_string_suspect: bool,
     },
     /// `case` arms do not match the scrutinee row — missing and extra, together.
     CaseNotExhaustive {

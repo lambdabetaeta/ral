@@ -28,7 +28,7 @@ use crate::syntax::ast::{
     Redirects, ScopeAst, Stmt, Word,
 };
 use crate::syntax::group::{StmtGroup, group_stmts};
-use crate::syntax::parser::ParseError;
+use crate::syntax::parser::{ParseError, ParseErrorKind};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -96,7 +96,7 @@ impl Elaborator {
                       sources have none)"
                 .into(),
             span: self.current_span,
-            lex_kind: None,
+            kind: ParseErrorKind::Plain,
             incomplete: false,
         });
         Val::Unit
@@ -136,7 +136,7 @@ impl Elaborator {
                                   bind; choose another name"
                             .into(),
                         span: self.current_span,
-                        lex_kind: None,
+                        kind: ParseErrorKind::Plain,
                         incomplete: false,
                     });
                 }
@@ -950,7 +950,7 @@ impl Elaborator {
                               block first, bind it: `let arm = $arms[a]`"
                         .into(),
                     span: arm.span.or(self.current_span),
-                    lex_kind: None,
+                    kind: ParseErrorKind::Plain,
                     incomplete: false,
                 });
                 Val::Unit

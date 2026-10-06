@@ -426,6 +426,13 @@ Some characters depend on their position:
 Quote a word when there is any doubt. Quoting prevents punctuation in its
 contents from changing the program structure.
 
+Whitespace separates words, and nothing joins them. Two words written with
+nothing between them, such as `--prefix=$d` or `'a'"b"`, are an error, not
+two arguments and not one: write `--prefix= $d` for two, or `"--prefix=$d"`
+for one. Only the grammar's own attachments touch: an index after a variable
+or a forced block (`$h[k]`, `!{f}[k]`), a spread before its list (`...$xs`),
+and a redirect before its target (`>file`).
+
 Backslash has no special meaning in a bare word. For example,
 `C:\Users\name` is one bare word. A dot is also ordinary, so `.env` and
 `archive.tar` are bare words.

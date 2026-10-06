@@ -69,7 +69,7 @@ impl TypeErrorKind {
                 "`{form}` takes a record of settings, and this file returns {}",
                 describe(found)
             ),
-            Self::CommandNotFunction { ty, .. } => {
+            Self::CommandNotFunction { ty } => {
                 let ctx = FmtCtx::for_value_types(&[ty]);
                 format!(
                     "value of type {} cannot be used as a command head",
@@ -215,7 +215,7 @@ impl TypeErrorKind {
                 ..
             } => describe(ty),
             Self::KindMismatch { kind, .. } => format!("also used as {}", role(*kind)),
-            Self::CommandNotFunction { ty, .. } => {
+            Self::CommandNotFunction { ty } => {
                 let ctx = FmtCtx::for_value_types(&[ty]);
                 format!("{} cannot be invoked as a command", fmt_ty_ctx(ty, &ctx))
             }
@@ -677,20 +677,7 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
         return kind_hint(found, *required, reason);
     }
     let from_kind = match kind {
-        TypeErrorKind::CommandNotFunction {
-            split_string_suspect: true,
-            ..
-        } => Some(
-            "this looks like a single \"...\" string broken \
-             apart by an unescaped inner \" — nested double \
-             quotes close the outer string. Escape them as \
-             \\\" inside the string, or drop the inner quoting"
-                .to_string(),
-        ),
-        TypeErrorKind::CommandNotFunction {
-            split_string_suspect: false,
-            ..
-        } => Some(
+        TypeErrorKind::CommandNotFunction { .. } => Some(
             "a command head must be a function or a thunk; \
              a value here is data, not something you can invoke — pass it \
              as an argument, or wrap it in a function instead"
