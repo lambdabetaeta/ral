@@ -4343,7 +4343,7 @@ ral -c 'echo $[2 + 2]'
 ral -s < build.ral
 ```
 
-`ral -c` does not accept POSIX shell syntax. Use `ral-sh` as the registered login shell when programs may call `$SHELL -c` with POSIX source.
+`ral -c` does not accept POSIX shell syntax. Use `ral-sh` (§16.7), `ral` invoked by that name, as the registered login shell when programs may call `$SHELL -c` with POSIX source.
 
 ### 16.1. Invocation modes
 
@@ -4466,11 +4466,11 @@ On Unix, `ral` refuses a setuid invocation (effective and real user id differ) b
 
 ral is intentionally not POSIX-compatible. Registering `ral` itself as `$SHELL` can break `ssh host command`, `scp`, `rsync`, Git-over-SSH, editors, multiplexers, and other programs that expect `$SHELL -c` to parse POSIX syntax.
 
-On Unix, install `ral-sh` as the login shell instead. It interprets no source; it only chooses a target and replaces itself:
+On Unix, install `ral-sh` as the login shell instead. `ral-sh` is `ral` invoked by that name, a symlink installed beside it: the name in `argv[0]` is the one bit a login shell's caller preserves. Under that name `ral` reads no source before choosing a target; the first matching rule over the arguments after `argv[0]` applies:
 
-- any short-option cluster containing `c` goes to `/bin/sh`, even `-lc`;
-- `-l`, `-i`, or `--login` without `-c` goes to `ral`;
-- no arguments with both stdin and stdout attached to terminals goes to `ral`;
+- any short-option cluster containing `c`, or any argument that is neither such a cluster nor `--login` (a positional, `--`, `-`, an opaque `--long` option), goes to `/bin/sh`, so `-lc …` and `-l script.sh` both do;
+- otherwise a short-option cluster containing `l` or `i`, or `--login`, goes to `ral`;
+- otherwise no arguments with both stdin and stdout attached to terminals goes to `ral`;
 - every other invocation goes to `/bin/sh`.
 
 ```text
@@ -4478,7 +4478,7 @@ On Unix, install `ral-sh` as the login shell instead. It interprets no source; i
 /usr/local/bin/ral-sh -l                       # ral
 ```
 
-`ral-sh` forwards arguments without requiring UTF-8. If its own executable name begins with `-`, it preserves that login-shell convention as `-ral` or `-sh`. It looks for `ral` beside itself, falling back to `ral` on `PATH`. Failure to replace itself exits 127. Both `ral` and `ral-sh` refuse a setuid invocation.
+The `/bin/sh` branch forwards arguments without requiring UTF-8, and replaces the process with the literal path `/bin/sh`: no `PATH` lookup. If the invoked name begins with `-`, it preserves that login-shell convention as `-sh`. The `ral` branch does not exec: the same process continues as `ral`, which sees the leading `-` itself. Failure to replace the process exits 127. The setuid refusal applies first, under either name.
 
 ### 16.8. Platform distinctions and limits
 

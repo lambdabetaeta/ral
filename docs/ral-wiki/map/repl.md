@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e2b7067b
-generated_at_date: 2026-09-23
+generated_at_commit: 143b008b
+generated_at_date: 2026-10-06
 covers_paths: [ral/src/]
 ---
 
@@ -65,6 +65,23 @@ REPL makes that state the thing the loop threads.
   every hook run is a dispatch
   (`ral/src/repl/plugin*`, `plugin/ed_builtins.rs`, `plugin/load.rs`,
   `keybinding.rs`).
+
+## The POSIX bridge
+
+`ral/src/bridge.rs` is `ral` invoked as `ral-sh`, a symlink registered in
+`/etc/shells` ([[invariants/single-binary|single-binary]], `docs/SPEC.md`
+§16.7). `main` asks it after `refuse_setuid` and before argv is read as text.
+`decide` is pure and takes the first match over the arguments: a short cluster
+with `c`, or any argument that is not a cluster or `--login` → `/bin/sh`; a
+cluster with `l`/`i`, or `--login` → ral; no arguments on a tty → ral;
+otherwise `/bin/sh`. So `-l script.sh` reaches `/bin/sh` and `-l` alone reaches
+ral.
+
+The bridge resolves nothing through the environment (`/bin/sh` is a literal
+path, and the ral branch does not exec but continues as `ral`), forwards argv
+as `OsString` untouched, and turns a leading dash on argv[0] into `-sh`. Its one
+exec is the silent syscall site `silent:respawn-posix-sh`
+([[map/exarch/io-surface|io-surface]]).
 
 ## Siblings
 

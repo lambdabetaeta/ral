@@ -266,5 +266,5 @@ A tool command that fails under an active OS sandbox carries a kernel-denial
 diagnostic — the blocked syscall, the exact path to grant, the symlink caveat —
 appended to the error's `hint`. That harvesting lives in core
 (`core::sandbox::diag`), driven by the command and pipeline runners over the
-failing call's wall window and rendered identically by both the `ral-sh` REPL and
+failing call's wall window and rendered identically by both the `ral` REPL and
 exarch ([[map/core/capabilities|capabilities]]).

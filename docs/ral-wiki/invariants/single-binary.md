@@ -30,8 +30,10 @@ The hard rule concerns the runtime: do not factor ral's functionality into a
 sibling helper crate or a second shipped executable, and do not introduce a
 runtime dependency on an external program for core behaviour.
 
-One deliberate piece stands *outside* the runtime: `ral-sh`, a thin POSIX-bridge
-login shell (`docs/SPEC.md` §16.7). It carries no `ral-core` dependency and
-forwards non-interactive invocations to `/bin/sh`; it exists so ral can be
-registered as a login shell, not to divide the runtime. It is a registration
-shim, not a functional split.
+One more multicall exists, and it is by *name* rather than by sentinel flag: the
+POSIX-bridge login shell (`docs/SPEC.md` §16.7), `ral` invoked as `ral-sh`, a
+symlink beside it. It is the one case where a flag cannot serve, since an
+`/etc/shells` entry takes no arguments and `argv[0]` is the one bit that
+survives `exec`. `ral/src/bridge.rs` is the one place that reads the name; it
+either replaces the process with `/bin/sh` or lets it continue as `ral`. It
+divides nothing: there is no second executable.

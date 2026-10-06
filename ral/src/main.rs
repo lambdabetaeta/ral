@@ -4,6 +4,8 @@
 
 mod batch;
 mod boot_door;
+#[cfg(unix)]
+mod bridge;
 mod cli;
 mod platform;
 mod repl;
@@ -19,6 +21,10 @@ pub(crate) static PRELUDE: ral_core::boot::BakedPrelude = ral_core::baked_prelud
 
 fn main() -> ExitCode {
     startup::refuse_setuid();
+    #[cfg(unix)]
+    if let Some(code) = bridge::serve() {
+        return code;
+    }
     startup::adopt_process_dispositions();
 
     match startup::identify() {

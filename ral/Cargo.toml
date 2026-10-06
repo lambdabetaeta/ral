@@ -53,15 +53,15 @@ license-file = ["../LICENSE-MIT", "4"]
 extended-description = """\
 ral is a shell based on algebraic effects. It provides a clean, typed
 command language with first-class pipelines, structured data, and
-job control. ral-sh is included as a POSIX-bridge login shell that
-forwards non-interactive invocations to /bin/sh."""
+job control. Invoked as ral-sh (a symlink installed beside it), ral is a
+POSIX-bridge login shell that forwards POSIX command strings and scripts
+to /bin/sh."""
 depends = "$auto"
 section = "shells"
 priority = "optional"
 maintainer-scripts = "../packaging/debian"
 assets = [
     { source = "../target/release/ral",    dest = "/usr/bin/ral",    mode = "755" },
-    { source = "../target/release/ral-sh", dest = "/usr/bin/ral-sh", mode = "755" },
     { source = "../docs/SPEC.md",          dest = "/usr/share/doc/ral/SPEC.md",          mode = "644" },
     { source = "../docs/TUTORIAL.md",      dest = "/usr/share/doc/ral/TUTORIAL.md",       mode = "644" },
 ]

@@ -83,6 +83,9 @@ main() {
     mv "$tmp/ral" "$staged" || die "could not write to $dir"
     mv "$staged" "$dir/ral" || { rm -f "$staged"; die "could not install into $dir"; }
     echo "Installed $dir/ral"
+    # ral-sh is ral by another name: the POSIX bridge for chsh (SPEC §16.7).
+    ln -sfn ral "$dir/ral-sh"
+    echo "Linked $dir/ral-sh"
 
     case ":$PATH:" in
         *":$dir:"*) ;;
@@ -98,6 +101,10 @@ main() {
 
     echo
     echo "ral is ready.  Run: ral"
+    echo "To make it your login shell, register the bridge and switch:"
+    echo
+    echo "  sudo sh -c 'echo $dir/ral-sh >> /etc/shells'"
+    echo "  chsh -s $dir/ral-sh"
 }
 
 main "$@"

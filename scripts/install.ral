@@ -13,19 +13,15 @@ if $[not !{is-file "$repo_root/ral/Cargo.toml"}] {
 cargo +stable install --force --locked --path ral
 cargo +stable install --force --locked --path exarch
 
-# ral-sh only where there is a POSIX shell for it to be the bridge to.  It is
-# a login-shell dispatcher: registered in /etc/shells, chosen with chsh, and
-# every path it takes either execs ral or forwards to /bin/sh.  Windows has
-# none of those, so a copy installed there answers every invocation with
-# `exec /bin/sh: The system cannot find the path specified`.  The gate is the
-# binary's own precondition rather than a kernel name, which on Windows
-# answers only because some POSIX environment happened to put `uname` on PATH.
-if $[!{is-file '/bin/sh'}] {
-    cargo +stable install --force --locked --path ral-sh
-}
-
 let cargo_home = try { return !{env}[CARGO_HOME] } { |_| return "~/.cargo" }
 let ral_bin    = "$cargo_home/bin/ral"
+
+# ral-sh is a name, not a binary: the POSIX bridge lives in ral and keys on
+# argv[0].  Only a host with /bin/sh has anything to bridge to.
+if $[!{is-file '/bin/sh'}] {
+    ln -sfn ral "$cargo_home/bin/ral-sh"
+}
+
 let kernel     = uname -s
 
 # Ad-hoc signing is a macOS ritual, so this step is a no-op everywhere else,

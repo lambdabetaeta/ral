@@ -75,8 +75,8 @@ ral --check script.ral    # type-check only
 ral --audit script.ral    # audit report as JSON on stderr
 ```
 
-`ral-sh` is a login-shell shim: interactive sessions get ral, everything else
-goes to `/bin/sh`, so scp and rsync never notice.
+`ral-sh` is ral by another name, for `chsh`: interactive sessions get ral,
+POSIX command strings and scripts go to `/bin/sh`, so scp and rsync never notice.
 
 ## Around the shell
 

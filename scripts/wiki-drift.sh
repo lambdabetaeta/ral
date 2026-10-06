@@ -23,7 +23,7 @@ strip_list() { # "[a, b]" -> "a b"
   tr -d '[]' <<<"$1" | tr ',' ' ' | xargs echo
 }
 
-srcs=(core ral ral-sh exarch)
+srcs=(core ral exarch)
 
 # A `Foo::bar` anchor names a member, and a member is written `fn bar` inside
 # `impl … Foo` — qualified nowhere, so a literal search alone cannot see it.
@@ -78,7 +78,7 @@ spec_stamp=$(sed -n '1s/^<!-- verified_at_commit: \([0-9a-f]*\) -->$/\1/p' docs/
 if [[ -z $spec_stamp ]]; then
   printf 'SPEC\tdocs/SPEC.md\tnone\t-\n'
 else
-  n=$(git rev-list --count "$spec_stamp"..HEAD -- core ral ral-sh exarch)
+  n=$(git rev-list --count "$spec_stamp"..HEAD -- core ral exarch)
   [[ $n -gt 0 ]] && printf 'SPEC\tdocs/SPEC.md\t%s\t%s\n' "$spec_stamp" "$n" || true
 fi
 exit 0

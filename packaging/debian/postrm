@@ -4,6 +4,7 @@ set -e
 RAL_SH=/usr/bin/ral-sh
 
 if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
+    rm -f "$RAL_SH"
     if [ -f /etc/shells ]; then
         grep -vxF "$RAL_SH" /etc/shells > /etc/shells.tmp || true
         mv /etc/shells.tmp /etc/shells

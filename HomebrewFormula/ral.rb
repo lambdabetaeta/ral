@@ -10,7 +10,7 @@ class Ral < Formula
 
   def install
     system "cargo", "install", *std_cargo_args(path: "ral")
-    system "cargo", "install", *std_cargo_args(path: "ral-sh")
+    bin.install_symlink bin/"ral" => "ral-sh"
   end
 
   def caveats
@@ -20,9 +20,9 @@ class Ral < Formula
         sudo sh -c 'echo #{opt_bin}/ral-sh >> /etc/shells'
         chsh -s #{opt_bin}/ral-sh
 
-      ral-sh forwards non-interactive invocations to /bin/sh so that
-      POSIX-assuming tools (scp, rsync, git-over-ssh) are unaffected.
-      ral itself is launched for interactive sessions.
+      ral-sh is ral invoked by that name: it forwards POSIX command strings
+      and scripts to /bin/sh so that POSIX-assuming tools (scp, rsync,
+      git-over-ssh) are unaffected, and runs ral for interactive sessions.
 
       To try ral without changing your login shell, add to ~/.zshrc or ~/.bashrc:
 

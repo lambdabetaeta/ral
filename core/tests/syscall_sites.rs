@@ -255,11 +255,10 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ("exarch/src/tui/terminal.rs", "silent:stderr-log-windows"),
     ("exarch/src/tui/scrollback.rs", "silent:export"),
     ("exarch/src/tui/scrollback.rs", "silent:scrollback-log"),
-    // ── ral / ral-sh ──────────────────────────────────────────────────────
-    ("ral-sh/src/main.rs", "silent:respawn-posix-sh"),
-    ("ral-sh/src/main.rs", "silent:respawn-ral"),
+    // ── ral ───────────────────────────────────────────────────────────────
     ("ral/build.rs", "silent:git-probe"),
     ("ral/src/batch.rs", "silent:script-read"),
+    ("ral/src/bridge.rs", "silent:respawn-posix-sh"),
     ("ral/src/platform.rs", "silent:exit-hints-read"),
     ("ral/src/repl/config.rs", "silent:history-mkdir"),
     ("ral/src/repl/config.rs", "silent:rc-write"),
@@ -276,13 +275,7 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
 /// excluded here.  `guest-net` is here because the CONNECT proxy is on the
 /// model's own egress path; the host-side crates (`synod`, `vm-manager`) are
 /// not yet.
-const SRC_ROOTS: &[&str] = &[
-    "core/src",
-    "exarch/src",
-    "guest-net/src",
-    "ral/src",
-    "ral-sh/src",
-];
+const SRC_ROOTS: &[&str] = &["core/src", "exarch/src", "guest-net/src", "ral/src"];
 
 /// Build scripts are production code too, and `ral/build.rs` spawns `git`.
 const BUILD_SCRIPTS: &[&str] = &["core/build.rs", "ral/build.rs", "exarch/build.rs"];

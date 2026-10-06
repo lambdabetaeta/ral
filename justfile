@@ -167,7 +167,7 @@ linux-box:
 site:
     uv run scripts/render-site.py
 
-# Build and install ral, exarch, and ral-sh from source.
+# Build and install ral and exarch from source.
 install:
     cargo run -p ral --quiet -- scripts/install.ral
 
