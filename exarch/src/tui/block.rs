@@ -922,11 +922,9 @@ impl Block {
                 elapsed,
             } => line::subagent_header(name, error.as_deref(), *elapsed),
             // Opens on the one blank an unframed card opens on.
-            BlockKind::Changes { changes, .. } => {
-                std::iter::once(Line::default())
-                    .chain(super::diff::changes_body(changes, width.into(), at))
-                    .collect()
-            }
+            BlockKind::Changes { changes, .. } => std::iter::once(Line::default())
+                .chain(super::diff::changes_body(changes, width.into(), at))
+                .collect(),
             // A surfaced general card is a deliberate bounded artifact. Diffs
             // already carry the patch rail and gutters, and an effect card
             // that reached the mirror with no run to join belongs to none, so

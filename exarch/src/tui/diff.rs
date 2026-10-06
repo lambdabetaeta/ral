@@ -88,7 +88,11 @@ fn by_path(changes: &[Change]) -> Vec<(&str, Vec<&Change>)> {
 /// Rows across every hunk satisfying `pred` — the tallies a kit diff's header
 /// reads, having no counts of its own.
 fn count_rows(hunks: &[&Hunk], pred: impl Fn(&DiffRow) -> bool) -> u32 {
-    let n = hunks.iter().flat_map(|h| h.rows.iter()).filter(|r| pred(r)).count();
+    let n = hunks
+        .iter()
+        .flat_map(|h| h.rows.iter())
+        .filter(|r| pred(r))
+        .count();
     u32::try_from(n).unwrap_or(u32::MAX)
 }
 
@@ -156,7 +160,10 @@ fn hunk_rows(hunks: &[&Hunk], width: usize, cap: usize, cut: u32) -> Vec<Line<'s
     if peeked {
         ls.push(elision_row(cols.gutter, ""));
     } else if cut > 0 {
-        ls.push(elision_row(cols.gutter, &format!("{cut} more changed lines")));
+        ls.push(elision_row(
+            cols.gutter,
+            &format!("{cut} more changed lines"),
+        ));
     }
     ls
 }

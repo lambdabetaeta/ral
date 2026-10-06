@@ -113,9 +113,7 @@ fn snapshot(target: &Located, shell: &Shell) -> Option<Vec<u8>> {
     }
     match target.stat().ok()? {
         None => Some(Vec::new()),
-        Some(s) if s.kind == Kind::File && s.len <= PREVIEW_CAP => {
-            read_capped(target.read().ok()?)
-        }
+        Some(s) if s.kind == Kind::File && s.len <= PREVIEW_CAP => read_capped(target.read().ok()?),
         Some(_) => None,
     }
 }

@@ -119,7 +119,11 @@ fn settle(
             (command::OpenedWrite::Stream(_), _) => (WriteOutcome::Committed, true),
         };
         // An atomic write that did not land left its target as it was.
-        let (old_bytes, new_bytes) = if landed { (before, after) } else { (None, None) };
+        let (old_bytes, new_bytes) = if landed {
+            (before, after)
+        } else {
+            (None, None)
+        };
         let what = Observed::Write {
             path,
             mode,
