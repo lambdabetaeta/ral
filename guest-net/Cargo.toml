@@ -23,7 +23,7 @@ ral-core = { path = "../core" }
 # A sans-io TCP/IP stack: this process *is* the guest's peer, so it has to
 # speak IP itself. `medium-ip` because a tun carries bare IP with no ethernet
 # header; no `socket-udp`, since this crate answers no UDP traffic at all.
-smoltcp = { version = "0.13", default-features = false, features = [
+smoltcp = { version = "0.14", default-features = false, features = [
     "std", "medium-ip", "proto-ipv4", "socket-tcp",
 ] }
 # The CONNECT head's HTTP/1 parse.
@@ -35,4 +35,4 @@ http = "1"
 # The loopback suite reads the audit ledger back, one JSON object per line.
 serde_json = { workspace = true }
 # Serializes the loopback suite; see its module doc.
-serial_test = "3"
+serial_test = "4"
