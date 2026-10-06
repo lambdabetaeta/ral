@@ -50,6 +50,8 @@ pub(crate) use render::render_real;
 #[cfg(target_os = "macos")]
 pub(crate) use render::rendered_ancestors;
 pub(crate) use render::rendered_pins;
+#[cfg(target_os = "linux")]
+pub(crate) use render::{Object, render_objects};
 pub(crate) use render::{Rendered, render_paths};
 pub use resolver::Resolver;
 pub use walk::Located;

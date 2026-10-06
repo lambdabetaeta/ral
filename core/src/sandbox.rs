@@ -167,22 +167,21 @@ pub fn restricted_envelope_launches() -> bool {
             net: true,
             exec: crate::types::ExecProjection::default(),
         };
+        reexec::pin_self();
         linux::pin_envelope();
         let Ok(envelope) = linux::envelope() else {
             return false;
         };
-        linux::bwrap_command(
+        let Ok(program) = crate::capability::Program::file("/bin/true".into()) else {
+            return false;
+        };
+        launch::enveloped(
             envelope,
-            linux::Payload {
-                program: "/bin/true",
-                args: &[],
-                image: None,
-            },
-            warrant::Handoff::default(),
+            linux::HostEnvelope::probe(envelope),
             &projection,
+            &launch::admitted(program, &[]),
             None,
             launch::Ownership::Surrendered,
-            linux::HostEnvelope::probe(envelope),
         )
         .is_ok_and(|(mut cmd, _no_info_fd)| {
             cmd.stdout(std::process::Stdio::null())

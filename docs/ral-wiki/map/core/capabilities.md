@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 7f4d7d11
+generated_at_commit: 13b47f27
 generated_at_date: 2026-10-06
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
@@ -322,7 +322,7 @@ device for `net` to govern; the in-process guards apply unchanged
   defined once as `Slot` in `warrant.rs`: 98 bwrap `--args`, 99 the warrant,
   100 `--info-fd` (a socketpair, which unlike a pipe cannot be reopened through
   `/proc`), 101 the Landlock ruleset, 103.. the seccomp programs (sealed
-  memfds). One `Handoff` lifts every source above every target and a
+  memfds), 107.. one mount handle per bind, open-ended and last. One `Handoff` lifts every source above every target and a
   single `pre_exec` `dup2`s each home; the child sweeps everything from 98 up
   with `close_range` once confined, and `Landlocked::enter` consumes the ruleset. `bwrap_command` refuses to launch if
   bwrap's pin fd sits on one of these slots: the `dup2` would close it before
@@ -330,7 +330,7 @@ device for `net` to govern; the in-process guards apply unchanged
   macOS spawns the trampoline directly; Linux spawns it under `bwrap`
   (`bwrap_command`), giving the full shape **bwrap → ral trampoline
   → Landlock → `execve`**. The real argv is `bwrap --args 98 -- <ral>
-  --warrant`: `bwrap_options` is pure and returns bwrap's options alone, which
+  --warrant`: `bwrap_argv` is pure in descriptors and returns bwrap's options alone, which
   bwrap takes from `--args`. The order is forced rather than chosen: a Landlock
   domain handling any fs right forbids `mount(2)`, bwrap's first act, so the
   layer can only be entered *inside* the envelope bwrap has already built.
@@ -345,19 +345,24 @@ device for `net` to govern; the in-process guards apply unchanged
   since planted refuses the launch as a race, and a restricting exec projection
   is refused where Landlock is unavailable. The payload probes nothing: it takes
   the ruleset at its slot, adds only `Refer` on its own root, which exists
-  nowhere else, and fails closed if a promised ruleset never arrived. `bwrap_command` takes a `Payload { program, args, image,
-  handoff }` — `program` is the trampoline, `args` its `--warrant`, `image` the
-  host binary it will exec in turn, `handoff` the `(fd, slot)` pairs the payload
-  inherits past bwrap — and `bwrap_options` binds both executables read-only where
-  absolute, since bwrap cannot exec what it cannot see, with every allowing
-  `ExecRule::File`, carriers included, not already under a bind. Both go in by
-  their real names, so where the image's spelled name — a link, or under one —
-  lies under no bind, a restricted envelope adds `--symlink <real> <image>` in
-  its own tmpfs: one more name for the file the grant admits, no more bytes;
-  such a spelling with a `..` is refused instead, bwrap being unable to make it
-  faithfully. `--chdir`,
-  ral's own path, the image path and the real names both executables are bound
-  by refuse non-UTF-8 rather than go lossy into bwrap's argv. Windows builds the
+  nowhere else, and fails closed if a promised ruleset never arrived.
+  `bwrap_command` takes the envelope and ral's pins, the image
+  (`Program::File`'s real path, the file the trampoline execs in turn), the
+  handoff so far and the rendered projection, and refuses outright under a bwrap
+  without `--ro-bind-fd` (`HostEnvelope::binds_by_fd`). `Binds::open` is the one
+  place a launch opens what it mounts: the read-only defaults, the read and
+  write prefixes, the image, each allowed file and live allowed directory of
+  `ExecRules::from_kernel`, and the cgroup tree in the `Over` layer, each object
+  (`render_objects`: a path's canonical spelling, its other spellings mounted
+  too unless within another bind) opened once with `RESOLVE_NO_SYMLINKS` and
+  lent per bind at `Slot::Mount(i)`. A read-only bind within another bind is
+  dropped, a writable one only within a writable one; an absent object drops
+  its binds, a name now reaching outside what was rendered refuses the launch
+  as a race. `bwrap_argv` emits `--ro-bind-fd`/`--bind-fd` from the same
+  vector, `Shown` before `/proc` and `/dev`, `Over` after; the pinned
+  binaries are still bound read-only by name after them. `--chdir` refuses
+  non-UTF-8, and so does every rendered name, rather than go lossy into
+  bwrap's argv. Windows builds the
   target's `Launch` directly and `windows::session::confine` attaches its
   projection's AppContainer LowBox `SECURITY_CAPABILITIES`, so the parent's own
   spawn is the confinement point — never a re-exec child; a bundled tool there

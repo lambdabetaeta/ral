@@ -201,9 +201,8 @@ fn faithful<'a>(path: &'a std::path::Path, what: &str) -> Settled<&'a str> {
 }
 
 /// The trampoline under `envelope`, handed its warrant and the Landlock
-/// ruleset built here.  It re-execs *us* through the on-disk `arg0`, not the
-/// fd-pinned `/proc/self/fd/N` exec path: bwrap mounts a fresh `/proc`, where
-/// that target would neither bind nor resolve.
+/// ruleset built here, the program's image shown read-only beside it.  It
+/// re-execs *us* through the on-disk `arg0`.
 #[cfg(target_os = "linux")]
 pub(super) fn enveloped(
     envelope: &Pinned,
@@ -214,7 +213,6 @@ pub(super) fn enveloped(
     ownership: Ownership,
 ) -> Settled<(Command, Option<super::linux::InfoFd>)> {
     let own = super::reexec::own().map_err(refused)?;
-    let program = faithful(own.arg0(), "ral's own path")?;
     let rendered = projection.rendered().map_err(refused)?;
     let (ruleset, confinement) =
         super::linux::landlock::build(&projection.exec, &rendered.fs, host.landlock)
@@ -227,23 +225,11 @@ pub(super) fn enveloped(
         handoff.lend(Slot::Ruleset, ruleset.as_fd());
     }
     let image = match admitted.program() {
-        crate::capability::Program::File { path, .. } => {
-            Some(faithful(path, "the program's path")?)
-        }
+        crate::capability::Program::File { real, .. } => Some(real),
         crate::capability::Program::Tool(_) => None,
     };
     super::linux::bwrap_command(
-        envelope,
-        super::linux::Payload {
-            program,
-            args: &[super::WARRANT_FLAG],
-            image,
-        },
-        handoff,
-        projection,
-        chdir,
-        ownership,
-        host,
+        envelope, own, image, handoff, &rendered, chdir, ownership, host,
     )
     .map_err(refused)
 }
@@ -317,7 +303,10 @@ pub fn serve_warrant(_extra: &[OsString]) -> u8 {
 
 /// What an unrestricted in-process guard admits, for a test that builds a launch without
 /// a dispatch.
-#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[cfg(any(
+    all(test, any(target_os = "linux", target_os = "macos")),
+    all(feature = "test-util", target_os = "linux")
+))]
 pub(super) fn admitted(program: crate::capability::Program, args: &[String]) -> Admitted {
     Shell::default()
         .check_exec("test", program, args.to_vec())

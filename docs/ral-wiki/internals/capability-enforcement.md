@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 7f4d7d11
+verified_at_commit: 13b47f27
 verified_at_date: 2026-10-06
-anchors: [check_exec, Admitted, ExecRules, Head, carriers, check_fs_op, check_fs_exact, locate, walk, Located, admits_fs_exact, fs_verdict, pinned_binary, sandbox_projection, region, Region, Table, live, GrantStack, sandboxed_command, build_launch, projection_enforceable, serve_warrant, Warrant, Slot, Handoff, Landlocked, bwrap_options, SessionSandbox, fs_capability_name, ensure_fs_grant, deputy_prefixes, confinement_unavailable, spawn_error, Envelope, InfoFd, HostEnvelope, render_dev, render_cgroup, default_ro_binds, Pinned, pin_envelope]
+anchors: [check_exec, Admitted, ExecRules, Head, carriers, check_fs_op, check_fs_exact, locate, walk, Located, admits_fs_exact, fs_verdict, pinned_binary, sandbox_projection, region, Region, Table, live, GrantStack, sandboxed_command, build_launch, projection_enforceable, serve_warrant, Warrant, Slot, Handoff, Landlocked, bwrap_argv, Binds, render_objects, SessionSandbox, fs_capability_name, ensure_fs_grant, deputy_prefixes, confinement_unavailable, spawn_error, Envelope, InfoFd, HostEnvelope, render_dev, cgroup_tree, default_ro_binds, Pinned, pin_envelope]
 ---
 
 # Capability enforcement: one chokepoint, two enforcers
@@ -102,9 +102,10 @@ head naming no file has no program: 127 or 126, never a denial.
 with the user's spelling as `argv[0]` (`Launch::arg0`; the warrant's `file`
 carries both), so a link retargeted between judgment and `execve` — by an
 earlier pipeline stage, say — cannot run another program. A renamed
-*ancestor* still can: closing that is a handle-based exec on Linux, which
-belongs to the envelope-by-handle plan
-(`dev/docs/plans/261005_linux-sandbox-by-handle.md`). A `#!` script reached
+*ancestor* still can, up to the `execve` on macOS and on Linux up to the
+moment the envelope opens the image to mount it
+([[decisions/261006_the-envelope-mounts-by-handle|the-envelope-mounts-by-handle]]);
+closing that wants `Program` to carry a handle from `Head::resolve`. A `#!` script reached
 through a link sees its real path as `$0`: the kernel hands the interpreter
 the exec path, not `argv[0]`.
 
@@ -268,6 +269,25 @@ launch, and the next launch finds an object to mask or stamp
 (`docs/SPEC.md` §12.3); macOS's end of the pair is
 `capabilities::seatbelt_holds_an_absent_deny_inside_a_write_prefix`.
 
+**bwrap mounts what ral opened, never a name it resolves.** `Binds::open` plans
+every bind a launch shows — the read-only defaults, the read and write prefixes,
+the program's real image, each file and live directory the exec table allows,
+and over everything the cgroup tree — opens each object once without following
+a symlink, and lends a copy per bind at `Slot::Mount(i)`; `bwrap_argv` emits
+`--ro-bind-fd`/`--bind-fd` from the same vector. A path is its canonical object
+and the spellings that reach it (`render_objects`): `/bin` shows `/usr/bin`'s
+handle, except within another bind, where the host's own link already stands.
+A read-only bind within another bind adds nothing and a writable one is dropped
+only within a writable one. An absent object drops its binds at the open; a
+name now reaching outside what was rendered, or an open through a symlink,
+refuses the launch as a race; a bwrap without `--ro-bind-fd` refuses every
+confined launch
+([[decisions/261006_the-envelope-mounts-by-handle|the-envelope-mounts-by-handle]]).
+Pinned by `sandbox::linux::tests::a_bind_is_opened_for_each_name_no_other_bind_shows`,
+`::a_prefix_whose_component_became_a_symlink_since_render_is_refused`,
+`::every_bind_is_a_handle_by_slot_in_layer_order` and, spawning,
+`::a_prefix_swapped_for_a_symlink_after_the_open_shows_what_was_opened`.
+
 **Where the host refuses bwrap a mount, the envelope rebuilds what the mount
 would have provided.** A rootless container's mount layer will not hand bwrap a
 fresh devpts, so `--dev` dies in setup and no `Restricted` envelope launches
@@ -284,7 +304,7 @@ lifts both. The render is a pure function of the probed `HostEnvelope`, so
 the argv tests assert both shapes from literals rather than from whichever
 host runs them.
 Such hosts still refuse the read-only rebind of their own locked `/etc/hosts`
-and `/etc/resolv.conf`, which remains open.
+and `/etc/resolv.conf`, by descriptor as by name, which remains open.
 
 **A kernel pseudo-filesystem inside the envelope describes the envelope; one
 that cannot is a host bind like any other, present only where something needs
@@ -296,7 +316,7 @@ sizes a program — `devices/system/cpu`, `kernel/mm/transparent_hugepage` — a
 grant that wants the rest reads `/sys` by name. `/sys/fs/cgroup` is the case
 that is *wrong* rather than revealing: under the cgroup namespace a child's
 `/proc/self/cgroup` reads `0::/`, and a runtime joining that onto the host's
-tree reads the root's limits, which are none. `render_cgroup` re-roots the tree
+tree reads the root's limits, which are none. `cgroup_tree` re-roots the tree
 on ral's own cgroup — the namespace's root, what a fresh cgroup2 mount inside it
 would show — on both projections, over the projection's binds; where the host
 builds no cgroup namespace (`HostEnvelope::private_cgroup`) the host's tree is
@@ -318,7 +338,7 @@ and every launch execs `/proc/self/fd/N`, so neither a `PATH` override nor a
 replace-by-rename at the pinned path reaches it. In-place rewriting of the
 pinned inode — the one change a pin by descriptor cannot see — is closed on
 both sides of the dispatch boundary: for a confined child by the envelope
-itself, `bwrap_options` read-only binding the envelope's own file
+itself, `bwrap_argv` read-only binding the envelope's own file
 after the projection's binds, `/` wholesale under `Unrestricted` included, and
 before the masks, the Linux twin of the write-deny macOS lays on ral's own
 file in every profile (`build_profile`; [[internals/seatbelt-profile|seatbelt-profile]]); for ral's
@@ -381,10 +401,10 @@ and checked once sealed; on macOS, which has no `/proc`, the read end of a
 socketpair whose writer closes before the child exists. The child refuses an
 unsealed memfd, a non-socket, and a warrant not in canonical form: decoding
 re-encodes and compares. On Linux the real argv is `bwrap --args 98 -- <ral>
---warrant`: `bwrap_options` is pure and returns bwrap's options alone, which bwrap
+--warrant`: `bwrap_argv` is pure in descriptors and returns bwrap's options alone, which bwrap
 takes from `--args`. The descriptors a confined launch hands down — bwrap's
-`--args`, the warrant, `--info-fd`, the Landlock ruleset, the seccomp programs —
-sit at fixed slots defined once (`Slot`), and one `Handoff` places them all; the
+`--args`, the warrant, `--info-fd`, the Landlock ruleset, the seccomp programs, the mount handles —
+sit at slots defined once (`Slot`, the mounts an open-ended run last), and one `Handoff` places them all; the
 child sweeps everything from the first slot up once it is confined, so the program inherits none.
 `serve_warrant` runs before `sandbox::boot`, so the trampoline pins and opens
 nothing ahead of its confinement. Nothing runs unconfined: a failure before

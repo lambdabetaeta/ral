@@ -91,7 +91,7 @@ serves ([[decisions/260906_the-envelope-is-a-process-namespace|the-envelope-is-a
 
 | | held by | when the host lacks it |
 |---|---|---|
-| `fs` read/write prefixes, `deny` masks | bwrap mounts | refuse: `confinement_unavailable` |
+| `fs` read/write prefixes, `deny` masks; what the exec table admits is readable | bwrap mounts, each source a handle ral opened without following a symlink ([[decisions/261006_the-envelope-mounts-by-handle]]) | refuse: `confinement_unavailable`, a bwrap without `--ro-bind-fd` (before 0.8.0) included |
 | `net: false` | `--unshare-net` | refuse: `projection_enforceable` |
 | `exec` — which path may be `execve`d (not which code runs), a deny inside an allowed directory included, over the tree at launch: a program added afterwards to a directory holding a block is denied until the next launch | Landlock `Execute` ruleset, the parent subtracting each block from the directory that holds it | refuse: `confinement_unavailable`, an exec opinion alone asking for the envelope |
 | `exec` — which subcommand, a veto under a trusted write, and a veto under an admitted directory a write prefix covers without naming (frozen on macOS: [[decisions/261006_a-veto-freezes-what-a-write-covers]]) | in-process guard | the guard stands alone; Linux carries the covered veto into the kernel but does not yet freeze the covered admits |

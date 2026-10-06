@@ -526,9 +526,9 @@ fn reached<T>(opened: rustix::io::Result<T>, at: &RealPath) -> Result<Option<T>,
     }
 }
 
-/// `name`, opened here in the host; `None` where it names nothing, or not
-/// the shape `flags` asks for.
-fn open_admit(name: &Path, flags: OFlags) -> Result<Option<OwnedFd>, Error> {
+/// `name`, opened here in the host never through a symlink; `None` where it
+/// names nothing, or not the shape `flags` asks for.
+pub(super) fn open_admit(name: &Path, flags: OFlags) -> Result<Option<OwnedFd>, Error> {
     match open_nosym(name, flags) {
         Ok(fd) => Ok(Some(fd)),
         Err(e) if matches!(e.raw_os_error(), Some(libc::ENOENT | libc::ENOTDIR)) => Ok(None),
@@ -540,7 +540,7 @@ fn open_admit(name: &Path, flags: OFlags) -> Result<Option<OwnedFd>, Error> {
 }
 
 /// Never through a symlink: a rule attaches to the inode the open reaches.
-fn open_nosym(path: &Path, flags: OFlags) -> io::Result<OwnedFd> {
+pub(super) fn open_nosym(path: &Path, flags: OFlags) -> io::Result<OwnedFd> {
     use rustix::fs::{CWD, ResolveFlags, openat2};
     Ok(openat2(
         CWD,
@@ -590,7 +590,7 @@ fn platform_base() -> Vec<PathBuf> {
 
 /// Which stage refused, and what the user can do about it.
 #[derive(Debug)]
-enum Error {
+pub(super) enum Error {
     Create(io::Error),
     Admit { name: String, source: io::Error },
     Race { name: String },
@@ -605,7 +605,7 @@ impl fmt::Display for Error {
             Self::Admit { name, source } => write!(f, "landlock: cannot admit {name}: {source}"),
             Self::Race { name } => write!(
                 f,
-                "landlock: {name} was a real path when the grant was rendered and now \
+                "sandbox: {name} was a real path when the grant was rendered and now \
                  resolves through a symlink: a race, not a policy error"
             ),
             Self::Restrict(e) => write!(

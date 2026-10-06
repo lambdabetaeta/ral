@@ -47,6 +47,9 @@ pub(super) enum Slot {
     /// bwrap's `--add-seccomp-fd`s, one per program.
     #[cfg(target_os = "linux")]
     Seccomp(u8),
+    /// One per bind, by `--ro-bind-fd` or `--bind-fd`; open-ended, so last.
+    #[cfg(target_os = "linux")]
+    Mount(u16),
 }
 
 impl Slot {
@@ -56,7 +59,7 @@ impl Slot {
     #[cfg(target_os = "linux")]
     const SECCOMP_SLOTS: u8 = 4;
 
-    /// 98, 99, 100, 101, 103 + i.
+    /// 98, 99, 100, 101, 103 + i, 107 + i.
     pub(super) const fn fd(self) -> c_int {
         Self::FIRST
             + match self {
@@ -69,6 +72,8 @@ impl Slot {
                 Self::Ruleset => 3,
                 #[cfg(target_os = "linux")]
                 Self::Seccomp(i) => 5 + i as c_int,
+                #[cfg(target_os = "linux")]
+                Self::Mount(i) => 9 + i as c_int,
             }
     }
 
@@ -743,9 +748,10 @@ mod tests {
         let fds: Vec<_> = [Slot::Args, Slot::Warrant, Slot::Info, Slot::Ruleset]
             .into_iter()
             .chain(seccomp)
+            .chain([Slot::Mount(0), Slot::Mount(1)])
             .map(Slot::fd)
             .collect();
-        assert_eq!(fds, [98, 99, 100, 101, 103, 104, 105, 106]);
+        assert_eq!(fds, [98, 99, 100, 101, 103, 104, 105, 106, 107, 108]);
         assert_eq!(fds[0], Slot::FIRST);
         assert!(Slot::seccomp(4).is_err(), "a fifth program has no slot");
     }
