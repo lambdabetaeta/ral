@@ -1,8 +1,8 @@
 ---
 status: active
 generated_at_commit: b49b3823
-verified_at_commit: 7f4d7d11
-anchors: [WriteReach, write_reach, emit_exec_rules, carries_veto]
+verified_at_commit: b6bb51b5
+anchors: [WriteReach, write_reach, emit_exec_rules, carries_veto, Binds, vetoes_walk]
 ---
 
 # A veto freezes what a write covers
@@ -12,8 +12,7 @@ that tree, or one that holds it: writes named at or below an admit at or above
 this one keep it writable on purpose; a broad prefix that no admit holds does
 not.** Under a restricted `fs` the freeze fires whenever exec is restricted,
 veto or none: the hole needs an admitted set, not a veto. The kernel renders it
-on macOS; Linux renders it once the envelope is built by handle, and until then
-its covered admits stay writable.
+on macOS and Linux alike.
 
 ## Context
 
@@ -81,15 +80,17 @@ silent ability to author binaries inside the admitted directories within it.
 
 ## Consequences
 
-- **Linux does not render it yet.** bwrap leaves a covered admit writable, so
-  an exec veto under it is advisory there. The freeze would be a read-only bind
-  of the covered admit laid after the write prefix's read-write bind, which
-  belongs in the mount table the envelope-by-handle redesign
-  (`dev/docs/plans/261005_linux-sandbox-by-handle.md`) rewrites; it is not
-  patched into the old one. The Landlock exec layer already carries a veto
-  into every covered and apart admit by subtraction, and not into a trusted
-  one, so it walks exactly what the freeze will hold; until then a child can
-  author around it in a covered admit.
+- **Linux renders it in the envelope.** `Binds::open` lays a read-only bind
+  over each covered admit, by the handle it opened, in a layer of its own
+  (`Frozen`) after the writable prefix that covers it and before `/proc`;
+  under `fs: Unrestricted` with a veto, over the whole admitted set, files
+  included, after `--dev-bind / /`
+  ([[decisions/261006_the-envelope-mounts-by-handle|the-envelope-mounts-by-handle]]).
+  The Landlock exec layer carries a veto into every covered and apart admit by
+  subtraction, and not into a trusted one, and both read one classification
+  (`landlock::write_reach`, over `FsRules::write_reach`): the hierarchies a
+  veto walks are exactly those the envelope keeps unwritable. A trusted
+  admit's bare-name veto stays advisory on both platforms.
 - **Only directories are classified.** An admitted file under a covering prefix
   stays writable, as it did; files are frozen only under `fs: Unrestricted`
   with a veto.

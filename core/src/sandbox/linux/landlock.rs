@@ -372,17 +372,21 @@ fn admit_exec(
     Ok(())
 }
 
-/// Where a veto is carried into an allowed directory: everywhere under an
-/// unrestricted `fs` holding one, which the envelope freezes whole; under a
-/// restricted one, wherever no trusted write reaches, since a covered
-/// directory is frozen and an apart one unwritable, so the launch's snapshot
-/// stays exact.  Under a trusted write a bare-name veto is advisory.
-fn vetoes_walk<'a>(
+/// How the write region stands to one name of an allowed directory: the one
+/// classification the envelope and this layer share, the envelope freezing a
+/// covered directory and a veto walking every one but a trusted one.  Under
+/// an unrestricted `fs` every write reaches it: covered when a veto asks for
+/// the freeze, trusted otherwise, as macOS reads it.
+pub(crate) fn write_reach<'a>(
     exec: &ExecProjection,
     fs: &'a FsProjection<Rendered>,
     table: &ExecRules,
-) -> Result<impl Fn(&RealPath) -> bool + 'a, String> {
-    let frozen = exec.carries_veto();
+) -> Result<impl Fn(&Rendered) -> WriteReach + 'a, String> {
+    let unrestricted = if exec.carries_veto() {
+        WriteReach::Covered
+    } else {
+        WriteReach::Trusted
+    };
     let reach = match fs {
         FsProjection::Unrestricted => None,
         FsProjection::Restricted(writes) => {
@@ -393,12 +397,27 @@ fn vetoes_walk<'a>(
             Some((writes, admitted))
         }
     };
-    Ok(move |dir: &RealPath| match &reach {
-        None => frozen,
-        // A name that does not render is walked: over-listing is cost.
-        Some((writes, admitted)) => render_real(dir).map_or(true, |names| {
-            (names.iter()).any(|name| writes.write_reach(name, admitted) != WriteReach::Trusted)
-        }),
+    Ok(move |name: &Rendered| match &reach {
+        None => unrestricted,
+        Some((writes, admitted)) => writes.write_reach(name, admitted),
+    })
+}
+
+/// Where a veto is carried into an allowed directory: wherever no trusted
+/// write reaches ([`write_reach`]), since a covered directory is frozen and
+/// an apart one unwritable, so the launch's snapshot stays exact.  Under a
+/// trusted write a bare-name veto is advisory.
+fn vetoes_walk<'a>(
+    exec: &ExecProjection,
+    fs: &'a FsProjection<Rendered>,
+    table: &ExecRules,
+) -> Result<impl Fn(&RealPath) -> bool + 'a, String> {
+    let reach = write_reach(exec, fs, table)?;
+    // A name that does not render is walked: over-listing is cost.
+    Ok(move |dir: &RealPath| {
+        render_real(dir).map_or(true, |names| {
+            (names.iter()).any(|name| reach(name) != WriteReach::Trusted)
+        })
     })
 }
 

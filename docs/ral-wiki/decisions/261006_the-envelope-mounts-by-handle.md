@@ -49,6 +49,14 @@ table, and its signature holds no descriptor.
   trampoline execs; nothing at the spelling, which nothing inside looks up),
   every allowed file of the exec table and every live allowed directory, as on
   macOS. Over everything, the cgroup tree.
+- **What is frozen.** Between the shown binds and `/proc`, read-only, each
+  live allowed directory a write prefix covers without naming, so the writable
+  prefix around it still takes writes and a veto carried into it cannot be
+  authored around; under `fs: Unrestricted` with a veto, the whole admitted
+  set, files included, over `--dev-bind / /`
+  ([[decisions/261006_a-veto-freezes-what-a-write-covers|a-veto-freezes-what-a-write-covers]]).
+  The freeze and the Landlock walk read one classification,
+  `landlock::write_reach`.
 - **Absent and raced.** `ENOENT` and `ENOTDIR` drop a bind: the open decides,
   with no window between a check and the mount. A name that now reaches an
   object outside what was rendered, or an open that meets a symlink, refuses
