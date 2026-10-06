@@ -53,7 +53,7 @@ pub(crate) fn discover_git_dir(cwd: &Path) -> Result<Option<PathBuf>, PolicyErro
 
 /// A worktree's `.git` is a file whose body is `gitdir: <path>`, relative to
 /// the file's own directory when it is not absolute.  Folded through the same
-/// kernel that mints a `NormalizedPrefix`, so what comes back can be matched
+/// kernel that mints a `FrozenPath`, so what comes back can be matched
 /// against grant prefixes.
 #[allow(
     clippy::disallowed_methods,

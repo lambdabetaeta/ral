@@ -1,7 +1,7 @@
 //! Lattice-algebra tests for the capability types.
 //!
 //! In-crate rather than under `core/tests/` because these reach crate-private
-//! doors: `decode_capability_map`, `NormalizedPrefix::for_test`,
+//! doors: `decode_capability_map`, `FrozenPath::for_test`,
 //! `RealPath::assumed`.
 
 use super::*;
@@ -32,8 +32,8 @@ fn np(s: &str) -> String {
 
 /// A prefix witness for the fixtures that build `FsPolicy`/`ExecGrant`
 /// directly rather than through `decode_capability_map`.
-fn nprefix(s: &str) -> crate::path::NormalizedPrefix {
-    crate::path::NormalizedPrefix::from_surface(s)
+fn nprefix(s: &str) -> crate::path::FrozenPath {
+    crate::path::FrozenPath::from_surface(s)
 }
 
 fn break_msg(e: PolicyError) -> String {
@@ -240,7 +240,7 @@ fn ipc_roundtrip_preserves_a_frozen_grant_stack() {
     assert_eq!(stack, back);
 }
 
-fn fs_of(p: &crate::path::NormalizedPrefix) -> FsPolicy {
+fn fs_of(p: &crate::path::FrozenPath) -> FsPolicy {
     FsPolicy {
         read_prefixes: vec![p.clone()],
         write_prefixes: vec![p.clone()],
@@ -248,13 +248,13 @@ fn fs_of(p: &crate::path::NormalizedPrefix) -> FsPolicy {
     }
 }
 
-fn exec_of(p: &crate::path::NormalizedPrefix) -> ExecGrant {
+fn exec_of(p: &crate::path::FrozenPath) -> ExecGrant {
     grant([(ExecKey::Dir(p.clone()), Verdict::Allow)])
 }
 
 /// Both dimensions at once, so the laws below also exercise the `Option` lift
 /// and the cross-field composition, not one policy type in isolation.
-fn caps_of(p: &crate::path::NormalizedPrefix) -> Capabilities {
+fn caps_of(p: &crate::path::FrozenPath) -> Capabilities {
     Capabilities {
         exec: Some(exec_of(p)),
         fs: Some(fs_of(p)),
@@ -264,12 +264,12 @@ fn caps_of(p: &crate::path::NormalizedPrefix) -> Capabilities {
 
 /// Covers nesting, aliasing (`/a/alias` resolves to `/a`) and symlink
 /// divergence (`/a/link` resolves to `/elsewhere`).
-fn prefix_universe() -> Vec<crate::path::NormalizedPrefix> {
+fn prefix_universe() -> Vec<crate::path::FrozenPath> {
     vec![
-        crate::path::NormalizedPrefix::for_test("/a", "/a"),
-        crate::path::NormalizedPrefix::for_test("/a/sub", "/a/sub"),
-        crate::path::NormalizedPrefix::for_test("/a/alias", "/a"),
-        crate::path::NormalizedPrefix::for_test("/a/link", "/elsewhere"),
+        crate::path::FrozenPath::for_test("/a", "/a"),
+        crate::path::FrozenPath::for_test("/a/sub", "/a/sub"),
+        crate::path::FrozenPath::for_test("/a/alias", "/a"),
+        crate::path::FrozenPath::for_test("/a/link", "/elsewhere"),
     ]
 }
 
@@ -317,7 +317,7 @@ fn widen_idempotent_over_prefix_universe() {
     }
 }
 
-fn exec_deny_of(p: &crate::path::NormalizedPrefix) -> ExecGrant {
+fn exec_deny_of(p: &crate::path::FrozenPath) -> ExecGrant {
     grant([(ExecKey::Dir(p.clone()), Verdict::Deny)])
 }
 
@@ -328,7 +328,7 @@ fn stack_of(exec: ExecGrant) -> GrantStack {
     })
 }
 
-fn allow_dirs(exec: &ExecGrant) -> Vec<&crate::path::NormalizedPrefix> {
+fn allow_dirs(exec: &ExecGrant) -> Vec<&crate::path::FrozenPath> {
     (exec.0.iter())
         .filter_map(|(key, v)| match key {
             ExecKey::Dir(dir) if !v.is_denied() => Some(dir),
@@ -350,8 +350,8 @@ fn exec_widen_keeps_allow_and_deny_that_share_a_surface_but_resolve_apart() {
     } else {
         ("/x", "/y", "/x/bin", "/y/bin")
     };
-    let allow = crate::path::NormalizedPrefix::for_test(surface, surface);
-    let deny = crate::path::NormalizedPrefix::for_test(surface, divergent);
+    let allow = crate::path::FrozenPath::for_test(surface, surface);
+    let deny = crate::path::FrozenPath::for_test(surface, divergent);
 
     let composed = exec_of(&allow).widen(exec_deny_of(&deny));
     assert_eq!(
@@ -379,8 +379,8 @@ fn exec_widen_drops_allow_resolving_to_the_same_dir_as_a_deny() {
     } else {
         ("/a", "/b", "/x", "/x/bin")
     };
-    let allow = crate::path::NormalizedPrefix::for_test(link_a, target);
-    let deny = crate::path::NormalizedPrefix::for_test(link_b, target);
+    let allow = crate::path::FrozenPath::for_test(link_a, target);
+    let deny = crate::path::FrozenPath::for_test(link_b, target);
 
     let composed = exec_of(&allow).widen(exec_deny_of(&deny));
     assert!(
@@ -403,8 +403,8 @@ fn exec_widen_drops_allow_naming_a_deny_dirs_target() {
     } else {
         ("/l", "/x", "/x/bin")
     };
-    let allow = crate::path::NormalizedPrefix::for_test(target, target);
-    let deny = crate::path::NormalizedPrefix::for_test(link, target);
+    let allow = crate::path::FrozenPath::for_test(target, target);
+    let deny = crate::path::FrozenPath::for_test(link, target);
 
     let composed = exec_of(&allow).widen(exec_deny_of(&deny));
     assert!(
@@ -424,10 +424,8 @@ fn exec_widen_drops_allow_naming_a_deny_dirs_target() {
 #[cfg(target_os = "macos")]
 #[test]
 fn exec_widen_drops_allow_clashing_with_deny_on_firmlink_alias() {
-    let allow = exec_of(&crate::path::NormalizedPrefix::from_surface(
-        "/private/tmp/x",
-    ));
-    let deny = exec_deny_of(&crate::path::NormalizedPrefix::from_surface("/tmp/x"));
+    let allow = exec_of(&crate::path::FrozenPath::from_surface("/private/tmp/x"));
+    let deny = exec_deny_of(&crate::path::FrozenPath::from_surface("/tmp/x"));
 
     let composed = allow.widen(deny);
     assert!(
@@ -445,7 +443,7 @@ fn exec_widen_drops_allow_clashing_with_deny_on_firmlink_alias() {
 /// another spelling of its directory, and not one on its parent.
 #[test]
 fn exec_widen_drops_allow_on_another_spelling_of_a_deny() {
-    let p = |s: &str| crate::path::NormalizedPrefix::from_surface(s);
+    let p = |s: &str| crate::path::FrozenPath::from_surface(s);
     let composed = exec_of(&p("/a/b")).widen(exec_deny_of(&p("/a/B")));
     assert!(
         allow_dirs(&composed).is_empty(),

@@ -35,7 +35,7 @@ authorise the object; this does the same for exec.
   key is three rules at most: the file the *host* `PATH` finds (the process's
   own environment, never a scoped override), the bundled tool of that name,
   and for a deny a veto on the name everywhere. Path and dir keys are their
-  frozen resolved forms, never re-read from disk. Every rule enters through
+  frozen real forms, never re-read from disk. Every rule enters through
   `meet_insert`, so two keys reaching one file meet. A rule holds a name as
   its polarity reads it (`holds`, over `RealPath::within::<P>`): an allow dir
   covers by stored containment and an allow file names by stored equality; a
@@ -266,5 +266,5 @@ program as stored.
 `core/src/capability/enforce.rs` (`check_exec`, `admits_head`, `Admitted`),
 `core/src/runtime/command/head.rs` (`Head`, `Missing`),
 `core/src/path/real.rs` (`RealPath`, `within::<P>`),
-`core/src/path/resolved.rs` (`evicts`),
+`core/src/path/forms.rs` (`evicts`),
 `core/src/path/which.rs` (`command_name_key`).

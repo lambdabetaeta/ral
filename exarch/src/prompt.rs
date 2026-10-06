@@ -448,7 +448,7 @@ fn or_none<S: AsRef<str>>(v: &[S]) -> String {
 }
 
 /// Comma-join any slice whose items borrow as `&str` — the prefix lists hold
-/// `NormalizedPrefix`es, not strings.
+/// `FrozenPath`es, not strings.
 fn join_str<S: AsRef<str>>(v: &[S]) -> String {
     v.iter().map(AsRef::as_ref).collect::<Vec<_>>().join(", ")
 }

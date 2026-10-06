@@ -1,12 +1,12 @@
 //! Stages 1–3 of `crate::path` composed against one `HOME`/cwd pair.
 //!
-//! [`Resolver::resolve`] is the sole constructor of a [`ResolvedPath`], and
+//! [`Resolver::resolve`] is the sole constructor of a [`LexicalPath`], and
 //! outside `crate::path` the canonicalisers are reachable only through one —
 //! so the stage order is enforced by the types, not by convention.
 
 use std::path::{Path, PathBuf};
 
-use super::{ResolvedPath, lex, sigil};
+use super::{LexicalPath, lex, sigil};
 
 /// The `HOME` and logical cwd one resolution runs against; `home` is `None`
 /// where nothing binds one, and a `~` then resolves to itself.
@@ -33,9 +33,9 @@ impl Resolver<'_> {
 
     /// Stages 1 and 2: expand `~`/`xdg:`, then anchor and fold against `cwd`.
     /// Pure — no filesystem access.
-    pub fn resolve(&self, raw: &str) -> ResolvedPath {
+    pub fn resolve(&self, raw: &str) -> LexicalPath {
         let expanded = sigil::expand_path_prefix(raw, self.home.as_deref());
-        ResolvedPath::from_lexed(lex::resolve_path(self.cwd, &expanded))
+        LexicalPath::from_lexed(lex::resolve_path(self.cwd, &expanded))
     }
 
     /// The whole pipeline: [`Self::resolve`], then canonicalise leniently —

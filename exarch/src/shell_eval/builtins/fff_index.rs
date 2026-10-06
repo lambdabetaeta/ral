@@ -32,7 +32,7 @@ fn registry() -> &'static Mutex<HashMap<PathBuf, &'static Index>> {
 
 /// Sound only because `base` is already absolute: `shell_less` carries no `HOME`
 /// to expand `~` against and no cwd to anchor to.
-fn resolve_base(base: &Path) -> ral_core::path::ResolvedPath {
+fn resolve_base(base: &Path) -> ral_core::path::LexicalPath {
     ral_core::path::Resolver::shell_less().resolve(&base.to_string_lossy())
 }
 

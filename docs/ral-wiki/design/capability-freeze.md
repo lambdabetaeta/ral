@@ -97,17 +97,17 @@ intersected it away.
 
 The guard asks its containment question on the form the *in-process guard*
 matches, here the `fs` one, which authorises objects, so the form is the
-symlink-followed `resolved` one, asked with `path_within` — the same alias-aware
-predicate every fs rule speaks through, `NormalizedPrefix::contains` — and with `HOME` canonicalised on the
+symlink-followed `real` one, asked with `path_within` — the same alias-aware
+predicate every fs rule speaks through, `FrozenPath::contains` — and with `HOME` canonicalised on the
 other side. Asking it of the surface spelling instead read
 `XDG_DATA_HOME=~/link`, with `link → /etc`, as contained: the surface stayed
-under `HOME` while the frozen `resolved` form — the only one `fs` enforcement
+under `HOME` while the frozen `real` form — the only one `fs` enforcement
 ever sees — was `/etc`.
 
 A freeze guard and an in-process guard that judge different forms of the same
 prefix do not guard it. The general rule is
 [[invariants/grants-judge-objects|grants judge objects]]: every authority is
-judged on the resolved form, and the choice is made once inside
+judged on the real form, and the choice is made once inside
 `core/src/path/`, where the containment kernel now
 stays, and each authority reaches it through its own door. No caller elsewhere
 holds two paths and picks.

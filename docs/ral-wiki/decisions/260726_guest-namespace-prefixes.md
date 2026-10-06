@@ -6,7 +6,7 @@ status: active
 > ([[decisions/261006_one-table-two-instances|one-table-two-instances]]). The
 > fold stands: guest prefixes are minted through `fold_dots_posix`. The
 > `Namespace` tag later added to every prefix, keying containment on
-> `(namespace, resolved)`, is gone: minted relative to the host but compared
+> `(namespace, real)`, is gone: minted relative to the host but compared
 > as absolute, it made every nested `grant` inside the guest meet synod's base
 > to nothing. A prefix carries no namespace, as the last section below first
 > said. The constraint on reducing on the host is superseded too: the meet no
@@ -16,7 +16,7 @@ status: active
 # A grant prefix is folded by the rule of the namespace that will match it
 
 **Synod's grant names paths inside the Linux guest, so those prefixes are minted
-through a POSIX kernel (`NormalizedPrefix::from_guest`, `lex::fold_dots_posix`)
+through a POSIX kernel (`FrozenPath::from_guest`, `lex::fold_dots_posix`)
 rather than the host's — because the gate that matches them runs in the machine,
 and on Windows the host's own kernel rebuilt `/work` as `\work` and denied the
 agent the one folder it had just been given.** The freeze pipeline's promise was
@@ -28,8 +28,8 @@ difference the first time it ran outside a checkout.
 ## Context
 
 [[design/capability-freeze|capability-freeze]] rests on a kernel: every path
-that reaches a grant decision — the access-side `ResolvedPath` and the
-grant-side `NormalizedPrefix` alike — is folded by `lex::fold_dots`, so
+that reaches a grant decision — the access-side `LexicalPath` and the
+grant-side `FrozenPath` alike — is folded by `lex::fold_dots`, so
 authorised-form and matched-form are one form and
 [[design/grant|grant]] containment compares like-for-like. That argument is
 sound and remains so. What it quietly assumes is that both sides are folded by
@@ -62,7 +62,7 @@ fs read: \work, \tmp        …but the mounted folder is /work
 ## Decision
 
 **A second kernel and a second door, not a flag on the first.** `fold_dots_posix`
-runs the identical law over `/`-separated components; `NormalizedPrefix::from_guest`
+runs the identical law over `/`-separated components; `FrozenPath::from_guest`
 is its only caller. Two functions rather than one parameterised function because
 they answer to two operating systems, and the caller always knows which one it
 means — the same reason `starts_with_identity` takes `windows` as a parameter

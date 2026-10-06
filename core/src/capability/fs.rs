@@ -15,7 +15,7 @@
 //! at spawn, because that is when the OS profile is written.
 
 use super::table::{Scope, Table};
-use crate::path::{NormalizedPrefix, Polarity, Resolver};
+use crate::path::{FrozenPath, Polarity, Resolver};
 use crate::types::{FsPolicy, GrantStack, Meet, Verdict};
 use std::path::Path;
 
@@ -33,7 +33,7 @@ impl FsOp {
         }
     }
 
-    fn prefixes<'a>(&self, fs: &'a FsPolicy) -> &'a [NormalizedPrefix] {
+    fn prefixes<'a>(&self, fs: &'a FsPolicy) -> &'a [FrozenPath] {
         match self {
             Self::Read => &fs.read_prefixes,
             Self::Write => &fs.write_prefixes,
@@ -43,9 +43,9 @@ impl FsOp {
 
 /// Fs authority over one op: prefixes judged by their resolved form, a deny
 /// outranking every allow.
-pub(crate) type Region = Table<NormalizedPrefix>;
+pub(crate) type Region = Table<FrozenPath>;
 
-impl Scope for NormalizedPrefix {
+impl Scope for FrozenPath {
     type Subject<'a> = &'a Path;
     type Rank = (bool, usize);
 
@@ -59,7 +59,7 @@ impl Scope for NormalizedPrefix {
     }
 
     fn own(&self) -> &Path {
-        self.resolved_path()
+        self.real_path()
     }
 }
 
@@ -90,16 +90,16 @@ mod tests {
 
     /// A divergent `surface`/`resolved` pair — what a symlink freezes to,
     /// without touching disk.
-    fn p(surface: &str, resolved: &str) -> NormalizedPrefix {
-        NormalizedPrefix::for_test(surface, resolved)
+    fn p(surface: &str, resolved: &str) -> FrozenPath {
+        FrozenPath::for_test(surface, resolved)
     }
 
     /// The ordinary, no-symlink case: both forms coincide.
-    fn lit(s: &str) -> NormalizedPrefix {
+    fn lit(s: &str) -> FrozenPath {
         p(s, s)
     }
 
-    fn table(allows: &[NormalizedPrefix], denies: &[NormalizedPrefix]) -> Region {
+    fn table(allows: &[FrozenPath], denies: &[FrozenPath]) -> Region {
         let allows = allows.iter().map(|p| (p.clone(), Verdict::Allow));
         allows
             .chain(denies.iter().map(|p| (p.clone(), Verdict::Deny)))
@@ -107,7 +107,7 @@ mod tests {
     }
 
     fn live(region: &Region) -> Vec<&str> {
-        region.live().map(NormalizedPrefix::as_str).collect()
+        region.live().map(FrozenPath::as_str).collect()
     }
 
     #[test]
@@ -201,8 +201,8 @@ mod tests {
     /// `C:`, the shape GitHub's Windows runners have.
     #[test]
     fn the_root_survives_a_re_freeze_as_the_universal_prefix() {
-        let root = NormalizedPrefix::root().refreeze(&Resolver::shell_less());
-        assert_eq!(root.resolved_path(), Path::new("/"), "got {root:?}");
+        let root = FrozenPath::root().refreeze(&Resolver::shell_less());
+        assert_eq!(root.real_path(), Path::new("/"), "got {root:?}");
         let region = table(&[root], &[]);
         // A drive spelling is a path only on Windows.
         let mut paths = vec!["/etc/hosts"];

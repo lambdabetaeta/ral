@@ -74,9 +74,9 @@ impl Shell {
     }
 
     /// Resolve `path` against the effective cwd, minting a
-    /// [`crate::path::ResolvedPath`] that the fs guards consume directly; a
+    /// [`crate::path::LexicalPath`] that the fs guards consume directly; a
     /// caller that opens the file takes `.into_inner()` / `.as_path()`.
-    pub fn resolve(&self, path: &str) -> crate::path::ResolvedPath {
+    pub fn resolve(&self, path: &str) -> crate::path::LexicalPath {
         self.context.resolver().resolve(path)
     }
 

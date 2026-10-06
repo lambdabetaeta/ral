@@ -7,25 +7,25 @@
 //! through* — symlink-free location of the object itself (`walk`), so the
 //! guard judges what the kernel will touch.
 //!
-//! Stage 2 mints a [`ResolvedPath`]; the grant side mints a
-//! [`NormalizedPrefix`] through the same folding kernel, so an access-side
+//! Stage 2 mints a [`LexicalPath`]; the grant side mints a
+//! [`FrozenPath`] through the same folding kernel, so an access-side
 //! path and a grant-side prefix compare like-for-like.
 //!
 //! `lex::path_within` and its string twin are `pub(super)` here, so the
 //! containment kernel does not leave this module: a prefix carries two
 //! forms, and *which* one a question is asked of is settled here, not by a
-//! caller — both fs (`NormalizedPrefix::contains`) and exec (`RealPath::within`,
-//! over a prefix's frozen `resolved` form) judge the object.
+//! caller — both fs (`FrozenPath::contains`) and exec (`RealPath::within`,
+//! over a prefix's frozen `real` form) judge the object.
 
 pub mod basedir;
 pub(crate) mod canon;
 pub mod config;
+pub(crate) mod forms;
 pub mod git;
 pub mod lex;
 pub mod ral_path;
 mod real;
 pub(crate) mod render;
-pub(crate) mod resolved;
 pub(crate) mod resolver;
 pub mod sigil;
 pub mod tilde;
@@ -37,6 +37,7 @@ pub use tilde::{abbreviate_home, home, user_name};
 pub use git::find_git_entry;
 // `crate::path::discover_git_dir` is how `sigil` and its rustdoc name it, so
 // the re-export outlives the item's own narrowing.
+pub use forms::{FrozenPath, LexicalPath};
 pub(crate) use git::discover_git_dir;
 pub(crate) use lex::{Allow, Deny, Polarity, proper_ancestors};
 pub use lex::{
@@ -50,7 +51,6 @@ pub(crate) use render::render_real;
 pub(crate) use render::rendered_ancestors;
 pub(crate) use render::rendered_pins;
 pub(crate) use render::{Rendered, render_paths};
-pub use resolved::{NormalizedPrefix, ResolvedPath};
 pub use resolver::Resolver;
 pub use walk::Located;
 pub(crate) use which::is_executable_file;

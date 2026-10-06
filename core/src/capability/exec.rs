@@ -232,7 +232,7 @@ pub(crate) fn rules(grants: &GrantStack) -> Option<ExecRules> {
 pub(super) mod tests {
     use super::*;
     use crate::capability::table::speaks;
-    use crate::path::{Allow, Deny, NormalizedPrefix};
+    use crate::path::{Allow, Deny, FrozenPath};
     use std::collections::BTreeMap;
 
     /// `p` as an absolute path on the host, which for Windows needs a drive.
@@ -670,11 +670,11 @@ pub(super) mod tests {
         std::os::unix::fs::symlink(&target, &link).unwrap();
         let grant = ExecGrant(BTreeMap::from([
             (
-                ExecKey::Path(NormalizedPrefix::from_surface(&link)),
+                ExecKey::Path(FrozenPath::from_surface(&link)),
                 Verdict::Deny,
             ),
             (
-                ExecKey::Path(NormalizedPrefix::from_surface(&target)),
+                ExecKey::Path(FrozenPath::from_surface(&target)),
                 Verdict::Allow,
             ),
         ]));
@@ -687,8 +687,8 @@ pub(super) mod tests {
 
     /// A table of one dir key `/l` frozen as resolving to `/x`.
     fn linked_dir(allow: bool, extra_allow: Option<&str>) -> ExecRules {
-        let linked = NormalizedPrefix::for_test(&host("/l"), &host("/x"));
-        let extra = extra_allow.map(|e| (NormalizedPrefix::from_surface(host(e)), Verdict::Allow));
+        let linked = FrozenPath::for_test(&host("/l"), &host("/x"));
+        let extra = extra_allow.map(|e| (FrozenPath::from_surface(host(e)), Verdict::Allow));
         let dirs = std::iter::once((linked, Verdict::from(allow))).chain(extra);
         ExecRules::compile(&ExecGrant(
             dirs.map(|(dir, v)| (ExecKey::Dir(dir), v)).collect(),

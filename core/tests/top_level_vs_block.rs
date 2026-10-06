@@ -66,8 +66,8 @@ fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
 fn projecting_caps() -> Capabilities {
     Capabilities {
         fs: Some(FsPolicy {
-            read_prefixes: vec![ral_core::path::NormalizedPrefix::root()],
-            write_prefixes: vec![ral_core::path::NormalizedPrefix::root()],
+            read_prefixes: vec![ral_core::path::FrozenPath::root()],
+            write_prefixes: vec![ral_core::path::FrozenPath::root()],
             deny_paths: Vec::new(),
         }),
         ..Capabilities::root()

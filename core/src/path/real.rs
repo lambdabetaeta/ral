@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 
-use super::{NormalizedPrefix, Polarity};
+use super::{FrozenPath, Polarity};
 
 /// A path with no symlink, `.` or `..`, as `realpath(3)` gives it.
 ///
@@ -21,8 +21,8 @@ impl RealPath {
     }
 
     /// The prefix's `resolved` form, as it froze: no disk access.
-    pub(crate) fn frozen(prefix: &NormalizedPrefix) -> Self {
-        Self(prefix.resolved_path().to_path_buf())
+    pub(crate) fn frozen(prefix: &FrozenPath) -> Self {
+        Self(prefix.real_path().to_path_buf())
     }
 
     #[cfg(any(test, feature = "test-util"))]

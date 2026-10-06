@@ -7,7 +7,7 @@
 //! judge a file by the real path a test names.  The policies and their
 //! meet/widen semantics are the contract.
 
-use ral_core::path::NormalizedPrefix;
+use ral_core::path::FrozenPath;
 use ral_core::test_access::check_file;
 use ral_core::types::{Capabilities, ExecGrant, ExecKey, FsPolicy, Shell, Verdict};
 #[cfg(unix)]
@@ -36,7 +36,7 @@ fn names(entries: &[(&str, Verdict)]) -> impl Iterator<Item = (ExecKey, Verdict)
 fn paths(entries: &[(&str, Verdict)]) -> impl Iterator<Item = (ExecKey, Verdict)> {
     entries.iter().map(|(path, v)| {
         (
-            ExecKey::Path(NormalizedPrefix::from_surface(host(path))),
+            ExecKey::Path(FrozenPath::from_surface(host(path))),
             v.clone(),
         )
     })
@@ -45,7 +45,7 @@ fn paths(entries: &[(&str, Verdict)]) -> impl Iterator<Item = (ExecKey, Verdict)
 fn dirs(entries: &[(&str, bool)]) -> impl Iterator<Item = (ExecKey, Verdict)> {
     entries.iter().map(|(dir, v)| {
         (
-            ExecKey::Dir(NormalizedPrefix::from_surface(host(dir))),
+            ExecKey::Dir(FrozenPath::from_surface(host(dir))),
             Verdict::from(*v),
         )
     })
@@ -124,7 +124,7 @@ fn sandbox_projection_intersects_path_components() {
     let mut shell = Shell::default();
     let outer = Capabilities {
         fs: Some(FsPolicy {
-            read_prefixes: vec![NormalizedPrefix::from_surface("/tmp/ral-prefix-a")],
+            read_prefixes: vec![FrozenPath::from_surface("/tmp/ral-prefix-a")],
             write_prefixes: Vec::new(),
             deny_paths: Vec::new(),
         }),
@@ -132,7 +132,7 @@ fn sandbox_projection_intersects_path_components() {
     };
     let inner = Capabilities {
         fs: Some(FsPolicy {
-            read_prefixes: vec![NormalizedPrefix::from_surface("/tmp/ral-prefix-ab")],
+            read_prefixes: vec![FrozenPath::from_surface("/tmp/ral-prefix-ab")],
             write_prefixes: Vec::new(),
             deny_paths: Vec::new(),
         }),
@@ -159,7 +159,7 @@ fn sandbox_projection_does_not_leak_outer_raw_prefix() {
     let mut shell = Shell::default();
     let outer = Capabilities {
         fs: Some(FsPolicy {
-            read_prefixes: vec![NormalizedPrefix::from_surface(
+            read_prefixes: vec![FrozenPath::from_surface(
                 link.to_string_lossy().into_owned(),
             )],
             write_prefixes: Vec::new(),
@@ -169,7 +169,7 @@ fn sandbox_projection_does_not_leak_outer_raw_prefix() {
     };
     let inner = Capabilities {
         fs: Some(FsPolicy {
-            read_prefixes: vec![NormalizedPrefix::from_surface(
+            read_prefixes: vec![FrozenPath::from_surface(
                 inner_dir.to_string_lossy().into_owned(),
             )],
             write_prefixes: Vec::new(),
@@ -241,7 +241,7 @@ fn a_path_key_deny_beats_a_covering_allow_dir() {
 #[cfg(unix)]
 fn projection_fs() -> FsPolicy {
     FsPolicy {
-        read_prefixes: vec![NormalizedPrefix::root()],
+        read_prefixes: vec![FrozenPath::root()],
         write_prefixes: Vec::new(),
         deny_paths: Vec::new(),
     }

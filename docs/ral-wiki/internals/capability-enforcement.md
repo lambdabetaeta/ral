@@ -169,7 +169,7 @@ spawned process does on its own.**
   its target's ([[internals/seatbelt-profile|seatbelt-profile]]).
   One target is excused before either region is consulted: the *discard
   device* — `/dev/null`, or `\\.\NUL` on Windows — which
-  `ResolvedPath::is_discard` names on either host, and which needs no
+  `LexicalPath::is_discard` names on either host, and which needs no
   authority because nothing reaches the disk through it. Its Windows
   neighbours are refused rather than excused: a path ending in a DOS reserved
   device name (`C:\x\NUL`, `nul.txt`, `CON`, `COM1.log`) is no file ral will

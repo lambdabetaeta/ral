@@ -10,7 +10,7 @@
 //! `exarch::policy::base::drop_dead_exec_grants` gives a bundled tool
 //! Windows cannot back.
 
-use crate::path::NormalizedPrefix;
+use crate::path::FrozenPath;
 use crate::typecheck::contract::{Form as ContractForm, declared};
 use crate::types::{
     Capabilities, EditorPolicy, ExecGrant, ExecKey, FsPolicy, List, PolicyError, ShellPolicy,
@@ -90,7 +90,7 @@ fn freeze_absolute(
     entry: &str,
     ctx: &crate::path::sigil::FreezeCtx<'_>,
     err_prefix: &str,
-) -> Result<Option<crate::path::NormalizedPrefix>, PolicyError> {
+) -> Result<Option<crate::path::FrozenPath>, PolicyError> {
     let frozen = crate::path::sigil::freeze_one(entry, ctx)?;
     if frozen.is_absolute() {
         return Ok(Some(frozen));
@@ -109,7 +109,7 @@ fn freeze_prefix_list(
     raw: Vec<String>,
     ctx: &crate::path::sigil::FreezeCtx<'_>,
     err_prefix: &str,
-) -> Result<Vec<crate::path::NormalizedPrefix>, PolicyError> {
+) -> Result<Vec<crate::path::FrozenPath>, PolicyError> {
     let mut out = Vec::new();
     for entry in raw {
         if let Some(frozen) = freeze_absolute(&entry, ctx, err_prefix)? {
@@ -286,14 +286,14 @@ fn freeze_exec_grant(
 /// Split `$PATH` on the platform separator, keeping the absolute entries.
 /// A relative `$PATH` entry is the environment's business, not the grant
 /// author's, so unlike a relative grant path it is dropped in silence.
-fn path_dirs(err_prefix: &str) -> Result<Vec<NormalizedPrefix>, PolicyError> {
+fn path_dirs(err_prefix: &str) -> Result<Vec<FrozenPath>, PolicyError> {
     let path = std::env::var("PATH").unwrap_or_default();
     let mut dirs = Vec::new();
     for entry in std::env::split_paths(&path) {
         if entry.as_os_str().is_empty() || !entry.is_absolute() {
             continue;
         }
-        dirs.push(NormalizedPrefix::from_surface(&entry));
+        dirs.push(FrozenPath::from_surface(&entry));
     }
     if dirs.is_empty() {
         return Err(PolicyError::new(format!(
@@ -307,10 +307,10 @@ fn path_dirs(err_prefix: &str) -> Result<Vec<NormalizedPrefix>, PolicyError> {
 /// `system:` expansion.  Unlike `path:` it can never come back empty —
 /// the platform's own tool roots are unconditional — so there is no
 /// empty-expansion error to raise here.
-fn system_dirs() -> Vec<NormalizedPrefix> {
+fn system_dirs() -> Vec<FrozenPath> {
     crate::path::sigil::system_tool_roots()
         .into_iter()
-        .map(|p| NormalizedPrefix::from_surface(&p))
+        .map(|p| FrozenPath::from_surface(&p))
         .collect()
 }
 
@@ -508,9 +508,9 @@ mod tests {
     /// authority.
     #[test]
     fn meet_insert_lets_deny_win_regardless_of_insertion_order() {
-        let x = NormalizedPrefix::from_surface("/x");
+        let x = FrozenPath::from_surface("/x");
         for order in [[true, false], [false, true]] {
-            let mut dirs: BTreeMap<NormalizedPrefix, bool> = BTreeMap::new();
+            let mut dirs: BTreeMap<FrozenPath, bool> = BTreeMap::new();
             for allow in order {
                 meet_insert(&mut dirs, x.clone(), allow);
             }

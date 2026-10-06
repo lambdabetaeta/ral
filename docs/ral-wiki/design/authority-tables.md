@@ -31,7 +31,7 @@ the two dimensions became one structure is
   ([[invariants/grants-judge-objects|grants-judge-objects]]).
 - **Rank.** `rank(k, v)` says how specific a rule is; the greater decides.
 - **Own subject.** `k̂ = k.own()` is the subject a rule at `k` is itself judged
-  at: a prefix's resolved path, a directory's inside, a file itself, a tool's
+  at: a prefix's real path, a directory's inside, a file itself, a tool's
   name.
 
 **Denotation.**
@@ -143,10 +143,10 @@ random pairs of a model.
 
 | | fs — `Region` | exec — `ExecRules` |
 |---|---|---|
-| scope `K` | `NormalizedPrefix` | `ExecScope { Dir, Carrier, File, Tool, Name }` |
+| scope `K` | `FrozenPath` | `ExecScope { Dir, Carrier, File, Tool, Name }` |
 | subject | a plain `&Path`, the access canonicalised or walked | `Subject { Tool, File, Under }`, from a `Program` |
-| `k̂` | the prefix's `resolved` path | `Under(d)`, `File(f)`, `Tool(t)` |
-| holds | `NormalizedPrefix::contains::<P>`, `path_within(path, resolved, P::IDENTITY)` | `RealPath::within::<P>`; a file or carrier by mutual containment; a tool by name; a name by `command_name_key` |
+| `k̂` | the prefix's `real` path | `Under(d)`, `File(f)`, `Tool(t)` |
+| holds | `FrozenPath::contains::<P>`, `path_within(path, real, P::IDENTITY)` | `RealPath::within::<P>`; a file or carrier by mutual containment; a tool by name; a name by `command_name_key` |
 | rank | `(is a deny, depth)`: a deny outranks every allow at any depth, the deeper ranking above among each; verdicts read as deny-wins, since every fs allow is `Allow` | `Dir(depth) < Carrier < Exact < Name`, verdict-blind |
 | where the denies live | each layer's `deny_paths`, in both the read and the write region | in the table, beside the allows |
 | tables per stack | two, one per `FsOp`, `None` when no layer holds an fs opinion | one, `None` when no layer holds an exec opinion |
@@ -176,7 +176,7 @@ would break both, for reasons unrelated to any spelling.
   a bare name becomes the bundled tool of that name, the file the host `PATH`
   finds, and for a deny a `Name` veto; a path key a `File`, a dir key a `Dir`
   at `Verdict::from(!v.is_denied())`, so no dir carries `Only` into a table,
-  each its frozen resolved form.
+  each its frozen real form.
 - `ExecRule { Dir, File, Veto }` — the table *rendered for the kernel*
   (`ExecRules::kernel`): a path and a bool, or a vetoed name. No `Only`, no
   tools, no carriers as such.
@@ -263,8 +263,8 @@ marks a refusal that names the denied spelling.
   exists (`ENOENT` for an absent path), a same-uid writer can create the tail
   with the other flag after the query, Linux has no query for virtiofs or 9p,
   and it would make the algebra depend on the disk at check time. Storing the
-  key in `resolved` instead would rename a distinct object on a case-sensitive
-  volume, `resolved` being rendered into bwrap destinations, Seatbelt rules and
+  key in `real` instead would rename a distinct object on a case-sensitive
+  volume, `real` being rendered into bwrap destinations, Seatbelt rules and
   the Windows SID hash. Refusing a deny on an absent path breaks the documented
   `cwd:/.env`. Masking every colliding sibling on Linux and Windows enumerates
   directories, races, and builds machinery to enforce an over-approximation.
@@ -296,7 +296,7 @@ marks a refusal that names the denied spelling.
   would compare equal
   (`path_within_does_not_collide_distinct_non_utf8_paths`). The Windows branch
   necessarily accepts the lossy form: its identity fold is defined on strings,
-  a `NormalizedPrefix` already freezes to lossy strings, and failing closed
+  a `FrozenPath` already freezes to lossy strings, and failing closed
   there would make a *deny* fail open.
 
 ### Windows path identity
@@ -342,13 +342,13 @@ marks a refusal that names the denied spelling.
   *current drive* on Windows, so a frozen ceiling covered one volume, and a
   session launched from `D:` lost a `%TEMP%` on `C:` — the shape GitHub's
   Windows runners have. Folded to zero components it is the universal prefix;
-  `NormalizedPrefix::root` and `refreeze` both special-case the bare root
+  `FrozenPath::root` and `refreeze` both special-case the bare root
   (`the_root_survives_a_re_freeze_as_the_universal_prefix`).
 
 ### Symlinks
 
-- **A prefix carries `surface` and `resolved`, and containment is on
-  `resolved` on both sides.** A grant that lexically nests under a shallower
+- **A prefix carries `surface` and `real`, and containment is on
+  `real` on both sides.** A grant that lexically nests under a shallower
   ceiling but resolves outside it collapses to the empty meet: `{allow /a}`
   met with `{allow /a/link}`, `link → /x`, keeps nothing. A survivor would
   reach the OS sandbox, where `bwrap --bind` follows the source symlink and
@@ -365,12 +365,12 @@ marks a refusal that names the denied spelling.
 ### Namespaces
 
 - **synod mints guest prefixes with the POSIX fold**
-  (`NormalizedPrefix::from_guest`, `lex::fold_dots_posix`), because the guard
+  (`FrozenPath::from_guest`, `lex::fold_dots_posix`), because the guard
   that matches them runs inside the machine, and on a Windows host
   `fold_dots` rebuilt `/work` as `\work`, a relative path in the namespace it
   claimed to name ([[decisions/260726_guest-namespace-prefixes|guest-namespace-prefixes]]).
 - **A prefix carries no namespace.** Whose machine a path names is settled by
-  the door that mints it; the meet compares resolved forms and nothing else,
+  the door that mints it; the meet compares real forms and nothing else,
   and a guest prefix is re-frozen only by the guard that matches it, inside the
   machine ([[decisions/261006_one-table-two-instances|one-table-two-instances]]).
 
@@ -382,7 +382,7 @@ marks a refusal that names the denied spelling.
   `rg: allow`, and `git: allow` admits `/usr/bin/git` typed as a path.
 - **A bare deny is also a veto on its `command_name_key`**, outranking every
   other rule, so it stops an absolute `/bin/bash` and a link to it alike.
-- **Path and dir keys are frozen resolved forms, never re-read**, and two keys
+- **Path and dir keys are frozen real forms, never re-read**, and two keys
   naming one file meet: `RealPath`'s `Ord` is the host's file identity, by
   components off Windows and by Windows identity components on it
   (`two_path_keys_naming_one_file_meet`).
@@ -441,7 +441,7 @@ marks a refusal that names the denied spelling.
 
 - **The fs rendering is lexical surface strings.** Each live prefix flattens
   to `surface` once, in `sandbox_projection`, and every backend widens it into
-  its own name class at render time; `resolved` has no reader below the fold.
+  its own name class at render time; `real` has no reader below the fold.
 - **`live()` is why no allow beneath a deny ever reaches a backend.** Under
   deny-wins such an allow is dead, and a Windows ACL orders explicit allows
   before inherited denies, so handing one over would invert the rule

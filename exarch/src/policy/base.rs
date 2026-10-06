@@ -85,7 +85,7 @@ fn drop_dead_exec_grants(caps: &mut Capabilities, unix_available: bool) {
 /// restriction file's carve-outs land on a policy rather than on nothing.  `/`
 /// is minted in the normal form every other grant-side prefix carries.
 pub(super) fn root_fs_policy() -> FsPolicy {
-    let root = ral_core::path::NormalizedPrefix::root;
+    let root = ral_core::path::FrozenPath::root;
     FsPolicy {
         read_prefixes: vec![root()],
         write_prefixes: vec![root()],
@@ -137,7 +137,7 @@ mod tests {
     /// so an equality against it agrees with a frozen grant only by
     /// coincidence — and disagrees exactly where the freeze would have failed.
     #[cfg(unix)]
-    fn frozen(entry: &str, ctx: &FreezeCtx<'_>) -> ral_core::path::NormalizedPrefix {
+    fn frozen(entry: &str, ctx: &FreezeCtx<'_>) -> ral_core::path::FrozenPath {
         freeze_one(entry, ctx).unwrap_or_else(|e| panic!("'{entry}' should freeze: {}", e.message))
     }
 
@@ -348,7 +348,7 @@ mod tests {
         };
         // Freeze folds away the trailing separator macOS `$TMPDIR` carries, so
         // compare in the same normal form the frozen keys hold.
-        let normal = |p: &str| ral_core::path::NormalizedPrefix::from_surface(p).into_string();
+        let normal = |p: &str| ral_core::path::FrozenPath::from_surface(p).into_string();
         let cwd_resolved = normal(&cwd.to_string_lossy());
         let tempdir_resolved = normal(&std::env::temp_dir().to_string_lossy());
         for (name, text) in [("minimal", MINIMAL_RAL), ("reasonable", REASONABLE_RAL)] {
@@ -647,7 +647,7 @@ mod tests {
                 .as_ref()
                 .unwrap_or_else(|| panic!("{name} should declare exec"));
             for root in &roots {
-                let normalized = ral_core::path::NormalizedPrefix::from_surface(root).into_string();
+                let normalized = ral_core::path::FrozenPath::from_surface(root).into_string();
                 let expected = !(name == "minimal" && root == "/opt/homebrew");
                 assert!(
                     dirs(exec).any(|(p, v)| p == normalized && v == expected),

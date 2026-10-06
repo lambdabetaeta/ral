@@ -14,7 +14,7 @@
 use super::enforce::Admitted;
 use super::exec::{ExecRules, rules};
 use super::fs::{FsOp, region};
-use crate::path::{NormalizedPrefix, RealPath};
+use crate::path::{FrozenPath, RealPath};
 use crate::types::{Context, ExecProjection, FsProjection, FsRules, SandboxProjection};
 use std::collections::BTreeSet;
 
@@ -111,14 +111,14 @@ fn carriers(_: &ExecRules, _: Option<&Admitted>) -> BTreeSet<RealPath> {
 /// The fs projection is lexical: `resolved` has no reader below this fold,
 /// so each prefix flattens to its surface spelling here, once, and every
 /// backend widens that into its own name class at render time.
-fn surface<'a>(prefixes: impl Iterator<Item = &'a NormalizedPrefix>) -> Vec<String> {
-    let unique: BTreeSet<&str> = prefixes.map(NormalizedPrefix::as_str).collect();
+fn surface<'a>(prefixes: impl Iterator<Item = &'a FrozenPath>) -> Vec<String> {
+    let unique: BTreeSet<&str> = prefixes.map(FrozenPath::as_str).collect();
     unique.into_iter().map(str::to_owned).collect()
 }
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
-    use crate::path::{NormalizedPrefix, render_real};
+    use crate::path::{FrozenPath, render_real};
     use crate::types::{
         Capabilities, ExecGrant, ExecKey, ExecProjection, ExecRule, FsPolicy, Shell, Verdict,
         WriteReach,
@@ -126,7 +126,7 @@ mod tests {
 
     /// A layer with an opinion on writes, on exec, or both.
     fn layer(write: Option<&str>, admit: Option<&str>) -> Capabilities {
-        let prefix = NormalizedPrefix::from_surface;
+        let prefix = FrozenPath::from_surface;
         Capabilities {
             fs: write.map(|w| FsPolicy {
                 read_prefixes: vec![prefix(w)],

@@ -91,7 +91,7 @@ pub(super) fn collision_key(name: &OsStr) -> Cow<'_, OsStr> {
 /// `pub(super)`: the kernel is form-blind, and *which* of a prefix's two
 /// forms a containment question is asked of, under which identity, is
 /// settled inside `path` — by a [`Polarity`] through
-/// [`NormalizedPrefix::contains`](super::NormalizedPrefix::contains) for fs and
+/// [`FrozenPath::contains`](super::FrozenPath::contains) for fs and
 /// [`RealPath::within`](super::RealPath::within) for exec — and never by a
 /// caller holding two bare paths.
 pub(super) fn path_within(path: &Path, prefix: &Path, identity: Identity) -> bool {
@@ -101,7 +101,7 @@ pub(super) fn path_within(path: &Path, prefix: &Path, identity: Identity) -> boo
         qs.iter().any(|q| match identity {
             // The identity fold is defined on strings, so this arm
             // necessarily accepts the lossy form: two distinct non-UTF-8
-            // paths that decode alike compare equal here.  `NormalizedPrefix`
+            // paths that decode alike compare equal here.  `FrozenPath`
             // already freezes to `to_string_lossy` strings, so nothing is
             // closed by fixing only the matcher — and failing closed here
             // would make a *deny* prefix fail open.
@@ -252,7 +252,7 @@ pub(crate) fn is_foreign_rooted(path: &str, windows: bool) -> bool {
 /// `windows` is a parameter rather than a `cfg!` read, as in
 /// [`starts_with_identity`], so both tables are pinned on every host; the
 /// platform gate sits at the sole call site,
-/// [`ResolvedPath::is_discard`](super::ResolvedPath::is_discard).
+/// [`LexicalPath::is_discard`](super::LexicalPath::is_discard).
 pub(crate) fn is_discard_device(path: &str, windows: bool) -> bool {
     if !windows {
         return path == "/dev/null";
@@ -277,7 +277,7 @@ pub(crate) fn is_discard_device(path: &str, windows: bool) -> bool {
 ///
 /// `windows` is a parameter for the reason [`is_discard_device`]'s is; the
 /// gate is
-/// [`ResolvedPath::reserved_device_refusal`](super::ResolvedPath::reserved_device_refusal).
+/// [`LexicalPath::reserved_device_refusal`](super::LexicalPath::reserved_device_refusal).
 pub(crate) fn reserved_device_refusal(path: &str, windows: bool) -> Option<String> {
     if !windows || is_discard_device(path, true) {
         return None;
@@ -388,7 +388,7 @@ pub(crate) fn fold_dots(path: &Path) -> PathBuf {
 /// a flag on the first.  Every rule is [`fold_dots`]'s, down to the `..` that
 /// survives only on a relative path: unreachable from the absolute prefixes
 /// the sole caller
-/// [`NormalizedPrefix::from_guest`](super::NormalizedPrefix::from_guest)
+/// [`FrozenPath::from_guest`](super::FrozenPath::from_guest)
 /// hands it, mirrored anyway, since two normalisers that agree except in the
 /// dark are worse than one.
 pub(crate) fn fold_dots_posix(path: &str) -> String {

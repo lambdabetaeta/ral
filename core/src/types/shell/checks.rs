@@ -74,7 +74,7 @@ impl Shell {
     /// # Errors
     /// `Err` if, at some layer with an `fs` opinion, `path` falls under a
     /// `deny_paths` entry or outside every read prefix.
-    pub fn check_fs_read(&mut self, path: &crate::path::ResolvedPath) -> Settled<()> {
+    pub fn check_fs_read(&mut self, path: &crate::path::LexicalPath) -> Settled<()> {
         self.audit_call(|ctx, audit, site| {
             crate::capability::check_fs_op(ctx, path, &FsOp::Read, audit, site)
         })
@@ -92,7 +92,7 @@ impl Shell {
     /// refusal; or the refusal of a reserved device name.
     pub fn locate(
         &mut self,
-        path: &crate::path::ResolvedPath,
+        path: &crate::path::LexicalPath,
         op: &FsOp,
     ) -> Settled<crate::path::Located> {
         crate::capability::check_device_name(path)?;
@@ -127,7 +127,7 @@ impl Shell {
     /// reserved device name.
     pub(crate) fn locate_existing(
         &mut self,
-        path: &crate::path::ResolvedPath,
+        path: &crate::path::LexicalPath,
         op: &FsOp,
         leaf: Leaf,
     ) -> Settled<Option<crate::path::Located>> {
@@ -149,7 +149,7 @@ impl Shell {
     /// aborting.  One off-limits entry must not blank a whole listing.
     pub fn locate_if_admitted(
         &mut self,
-        path: &crate::path::ResolvedPath,
+        path: &crate::path::LexicalPath,
         op: &FsOp,
     ) -> Option<crate::path::Located> {
         let located = crate::path::walk::walk(path, Leaf::Resolve).ok()?;

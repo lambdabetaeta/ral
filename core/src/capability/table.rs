@@ -143,7 +143,7 @@ mod tests {
     use super::{Scope, Table};
     use crate::capability::exec::tests::{Rng, paths, random};
     use crate::capability::fs::Region;
-    use crate::path::NormalizedPrefix;
+    use crate::path::FrozenPath;
     use crate::types::{Meet, Verdict};
     use std::path::Path;
 
@@ -181,15 +181,15 @@ mod tests {
     }
 
     /// A case pair, a symlink-divergent pair, the root and nested dirs.
-    fn prefixes() -> [NormalizedPrefix; 8] {
-        let lit = |s: &str| NormalizedPrefix::for_test(s, s);
+    fn prefixes() -> [FrozenPath; 8] {
+        let lit = |s: &str| FrozenPath::for_test(s, s);
         [
             lit("/"),
             lit("/d"),
             lit("/d/Secrets"),
             lit("/d/secrets"),
             lit("/d/secrets/f"),
-            NormalizedPrefix::for_test("/d/link", "/e"),
+            FrozenPath::for_test("/d/link", "/e"),
             lit("/e"),
             lit("/e/sub"),
         ]

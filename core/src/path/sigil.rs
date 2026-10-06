@@ -18,8 +18,8 @@
 
 use crate::path::basedir::{XdgKind, resolve_xdg};
 use crate::path::canon::canonicalise_lenient;
+use crate::path::forms::FrozenPath;
 use crate::path::lex::{Identity, fold_dots, path_within};
-use crate::path::resolved::NormalizedPrefix;
 use crate::path::tilde::TildePath;
 use crate::types::PolicyError;
 use std::path::{Path, PathBuf};
@@ -118,7 +118,7 @@ impl FreezeCtx<'_> {
 pub fn freeze_path_list(
     paths: Vec<String>,
     ctx: &FreezeCtx<'_>,
-) -> Result<Vec<NormalizedPrefix>, PolicyError> {
+) -> Result<Vec<FrozenPath>, PolicyError> {
     paths
         .into_iter()
         .map(|entry| freeze_one(&entry, ctx))
@@ -140,7 +140,7 @@ pub fn freeze_path_list(
 /// unset `HOME` under a home-relative sigil (`~`, `xdg:`), or a `.git` pointer
 /// no git directory claims.
 #[allow(clippy::disallowed_methods)]
-pub fn freeze_one(entry: &str, ctx: &FreezeCtx<'_>) -> Result<NormalizedPrefix, PolicyError> {
+pub fn freeze_one(entry: &str, ctx: &FreezeCtx<'_>) -> Result<FrozenPath, PolicyError> {
     if looks_like_xdg(entry) {
         let (kind, sub) =
             parse_xdg_token(entry).ok_or_else(|| PolicyError::new(unknown_xdg_message(entry)))?;
@@ -161,9 +161,9 @@ pub fn freeze_one(entry: &str, ctx: &FreezeCtx<'_>) -> Result<NormalizedPrefix, 
             .home()
             .map(|home| t.expand(home))
             .ok_or_else(|| PolicyError::new(home_unknown_message()))?;
-        return Ok(NormalizedPrefix::freeze(Path::new(&expanded)));
+        return Ok(FrozenPath::freeze(Path::new(&expanded)));
     }
-    Ok(NormalizedPrefix::freeze(Path::new(entry)))
+    Ok(FrozenPath::freeze(Path::new(entry)))
 }
 
 /// The one answer for a home-relative sigil where nothing binds `HOME`: `~`
@@ -190,12 +190,12 @@ fn parse_literal_sigil<'a>(input: &'a str, name: &str) -> Option<Option<&'a str>
     })
 }
 
-fn join_sub(base: PathBuf, sub: Option<&str>) -> NormalizedPrefix {
+fn join_sub(base: PathBuf, sub: Option<&str>) -> FrozenPath {
     let full = match sub {
         None | Some("") => base,
         Some(s) => base.join(s),
     };
-    NormalizedPrefix::freeze(&full)
+    FrozenPath::freeze(&full)
 }
 
 /// Resolve an XDG kind plus sub-path, and require the result under `home`:
@@ -219,13 +219,13 @@ fn resolve_xdg_safe(
     kind: XdgKind,
     sub: Option<&str>,
     home: Option<&str>,
-) -> Result<NormalizedPrefix, PolicyError> {
+) -> Result<FrozenPath, PolicyError> {
     let (Some(home), Some(base)) = (home, resolve_xdg(kind, home)) else {
         return Err(PolicyError::new(home_unknown_message()));
     };
     let resolved = join_sub(base, sub);
     let canonical_home = canonicalise_lenient(&fold_dots(Path::new(home)));
-    if path_within(resolved.resolved_path(), &canonical_home, Identity::Stored) {
+    if path_within(resolved.real_path(), &canonical_home, Identity::Stored) {
         return Ok(resolved);
     }
     let val = std::env::var(kind.env_var()).unwrap_or_default();
@@ -248,7 +248,7 @@ fn resolve_xdg_safe(
             name = kind.token_name(),
         )
     };
-    let via = if resolved.resolved() == resolved.as_str() {
+    let via = if resolved.real() == resolved.as_str() {
         String::new()
     } else {
         format!(
@@ -260,7 +260,7 @@ fn resolve_xdg_safe(
         "xdg:{name} resolves to '{path}'{via}, outside HOME; refusing to \
          widen the grant.  {clause}",
         name = kind.token_name(),
-        path = resolved.resolved(),
+        path = resolved.real(),
         clause = env_clause,
     )))
 }

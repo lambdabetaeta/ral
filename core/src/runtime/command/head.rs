@@ -140,7 +140,7 @@ fn render(name: &CommandName, ctx: &Context) -> String {
 mod tests {
     use super::*;
     use crate::capability::admits_head;
-    use crate::path::NormalizedPrefix;
+    use crate::path::FrozenPath;
     use crate::types::{Capabilities, ExecGrant, ExecKey, GrantStack, Shell, Verdict};
     use std::path::Path;
 
@@ -353,10 +353,7 @@ mod tests {
     }
 
     fn dir_allow(dir: &Path) -> (ExecKey, Verdict) {
-        (
-            ExecKey::Dir(NormalizedPrefix::from_surface(dir)),
-            Verdict::Allow,
-        )
+        (ExecKey::Dir(FrozenPath::from_surface(dir)), Verdict::Allow)
     }
 
     /// A policy that denies `bash` by bare name yet allows all of its bin
@@ -422,10 +419,7 @@ mod tests {
         let ctx = under(
             [
                 dir_allow(&planted),
-                (
-                    ExecKey::Dir(NormalizedPrefix::from_surface(&bin)),
-                    Verdict::Deny,
-                ),
+                (ExecKey::Dir(FrozenPath::from_surface(&bin)), Verdict::Deny),
             ]
             .into_iter()
             .collect(),
@@ -443,7 +437,7 @@ mod tests {
         let (bin, _planted, link) = planted_symlink(tmp.path());
         let ctx = under(
             std::iter::once((
-                ExecKey::Path(NormalizedPrefix::from_surface(bin.join("bash"))),
+                ExecKey::Path(FrozenPath::from_surface(bin.join("bash"))),
                 Verdict::Allow,
             ))
             .collect(),

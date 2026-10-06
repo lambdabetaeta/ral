@@ -97,7 +97,7 @@ only narrow past it. **Only the user-supplied lexical form is pushed** — both
 capability enforcers expand a deny entry to its canonical (and, on macOS,
 firmlink) variants themselves, so canonicalising here would duplicate, less
 completely, work that belongs to core. Each path is frozen through the same
-lexer the grant decoder uses, so deny entries land as `NormalizedPrefix`es in
+lexer the grant decoder uses, so deny entries land as `FrozenPath`es in
 the grant-side normal form. The `--extend-base` file is *not* denied: it
 widens the ceiling, so denying writes to it is a trust-source concern, not a
 self-protection one. The credential deny is skipped for `dangerous` alone: it

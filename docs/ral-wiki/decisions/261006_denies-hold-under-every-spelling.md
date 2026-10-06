@@ -11,7 +11,7 @@ anchors: [collision_key, Identity, Polarity, Allow, Deny, Region, live, Respelle
 > `Identity::Stored`, the rule's `Polarity` choosing — and the measurements
 > below stand as written. The prefix sets that carried it are gone: fs is a
 > `Region`, a table whose rules speak by polarity through
-> `NormalizedPrefix::contains::<P>`; `outside` is `Table::live`, and the
+> `FrozenPath::contains::<P>`; `outside` is `Table::live`, and the
 > stored-holding test behind the respelled refusal is `Table::respelled`. The
 > corner cases are gathered in [[design/authority-tables|authority-tables]].
 
@@ -173,7 +173,7 @@ is a refusal.**
     case-sensitive volume, which Seatbelt refuses anyway.
 - **Fold allows too.** The over-grant above; the Windows allow side's ASCII
   fold is a residual, not a precedent.
-- **Store the key in `resolved`.** It is rendered into bwrap destinations,
+- **Store the key in `real`.** It is rendered into bwrap destinations,
   Seatbelt rules and the Windows SID hash, and on a case-sensitive volume a
   folded spelling names a different object. A comparison key belongs in the
   comparison, not in the name.

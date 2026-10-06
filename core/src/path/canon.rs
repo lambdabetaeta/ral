@@ -25,7 +25,7 @@ pub(crate) const FIRMLINKS: &[(&str, &str)] = &[];
 /// `realpath(3)`: errors when the file or an intermediate directory is
 /// missing.  Wraps `fs::canonicalize` so the workspace `disallowed_methods`
 /// lint can cage that call inside this file; the door outside `path` is
-/// [`ResolvedPath::canonicalise_strict`](super::ResolvedPath::canonicalise_strict),
+/// [`LexicalPath::canonicalise_strict`](super::LexicalPath::canonicalise_strict),
 /// so nothing can `realpath` a path that was not first resolved through
 /// [`Resolver::resolve`](super::Resolver::resolve).
 #[allow(clippy::disallowed_methods)]
@@ -47,7 +47,7 @@ pub(crate) fn canonicalise_strict(p: &Path) -> std::io::Result<PathBuf> {
 /// The `fold_dots` first step is load-bearing, not tidiness: it stops a `..`
 /// in the unresolved tail from smuggling past the ancestor walk, so `/a/x/../y`
 /// gives `canon(/a)/y` and never `canon(/a)/x/y`.  Callers arriving through
-/// [`ResolvedPath::canonicalise_lenient`](super::ResolvedPath::canonicalise_lenient)
+/// [`LexicalPath::canonicalise_lenient`](super::LexicalPath::canonicalise_lenient)
 /// are already folded; [`match_variants`] hands over a bare `Path`.
 #[allow(clippy::disallowed_methods)]
 pub(crate) fn canonicalise_lenient(p: &Path) -> PathBuf {

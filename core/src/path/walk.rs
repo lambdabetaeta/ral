@@ -29,7 +29,7 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
-use super::ResolvedPath;
+use super::LexicalPath;
 
 /// `SYMLOOP_MAX`'s customary value: a name still splicing past this is a cycle.
 pub(crate) const MAX_HOPS: usize = 40;
@@ -141,7 +141,7 @@ pub(crate) enum Leaf {
 /// # Errors
 /// A missing or untraversable intermediate directory, a link cycle past
 /// [`MAX_HOPS`], or the root itself, which is nobody's leaf.
-pub(crate) fn walk(rp: &ResolvedPath, leaf: Leaf) -> io::Result<Located> {
+pub(crate) fn walk(rp: &LexicalPath, leaf: Leaf) -> io::Result<Located> {
     let mut path = rp.as_path().to_path_buf();
     for _ in 0..=MAX_HOPS {
         match descend(&path, leaf)? {
@@ -677,7 +677,7 @@ impl Located {
     clippy::disallowed_methods,
     reason = "[silent:discard-device] `/dev/null` / `NUL` opened by name: no bytes reach or leave the model, and no grant region can contain a device that is not a file."
 )]
-pub(crate) fn open_discard(rp: &ResolvedPath) -> io::Result<File> {
+pub(crate) fn open_discard(rp: &LexicalPath) -> io::Result<File> {
     std::fs::OpenOptions::new()
         .read(true)
         .write(true)

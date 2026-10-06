@@ -21,7 +21,7 @@
 
 mod common;
 
-use ral_core::path::NormalizedPrefix;
+use ral_core::path::FrozenPath;
 use ral_core::types::{Capabilities, ExecKey, ExecProjection, Verdict};
 
 #[test]
@@ -30,7 +30,7 @@ fn exec_only_grant_still_projects() {
     let caps = Capabilities {
         exec: Some(
             std::iter::once((
-                ExecKey::Path(NormalizedPrefix::from_surface("/bin/sh")),
+                ExecKey::Path(FrozenPath::from_surface("/bin/sh")),
                 Verdict::Allow,
             ))
             .collect(),

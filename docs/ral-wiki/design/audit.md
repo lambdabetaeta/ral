@@ -161,8 +161,8 @@ What builds up the trail is itself scoped:
 **A write that changed nothing in the world is not a fact.** A redirect onto
 the discard device — `/dev/null`, or `\\.\NUL` on Windows — records nothing: no
 card, no rail barrier, and no line in an agent's trail claiming it wrote a
-file. One predicate says so, `ResolvedPath::is_discard`
-(`core/src/path/resolved.rs`), asked at both doors that have an opinion: the
+file. One predicate says so, `LexicalPath::is_discard`
+(`core/src/path/forms.rs`), asked at both doors that have an opinion: the
 in-process guard, which excuses such a target from an *access*
 ([[internals/capability-enforcement|capability-enforcement]]), and
 `observe_stamped` itself, the one fan-out door, which excuses it from a

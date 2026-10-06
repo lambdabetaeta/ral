@@ -264,7 +264,7 @@ pub(crate) fn order_cmp(
 ///
 /// # Errors
 /// Returns `Err` if the read capability check denies the resolved path.
-pub fn checked_read_path(shell: &mut Shell, path: &str) -> Settled<crate::path::ResolvedPath> {
+pub fn checked_read_path(shell: &mut Shell, path: &str) -> Settled<crate::path::LexicalPath> {
     let rp = shell.resolve(path);
     shell.check_fs_read(&rp)?;
     Ok(rp)

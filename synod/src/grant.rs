@@ -28,7 +28,7 @@
 //! path names nothing.  One substitution, in one function, which is why
 //! the construction lives here and is not scattered across the session.
 
-use ral_core::path::NormalizedPrefix;
+use ral_core::path::FrozenPath;
 use ral_core::types::{
     Capabilities, EditorPolicy, ExecGrant, ExecKey, FsPolicy, ShellPolicy, Verdict,
 };
@@ -370,7 +370,7 @@ impl Grant {
     /// *there*, the paths are guest paths: the folder at its mount point, never the
     /// host path the user picked, which names nothing inside the machine.
     /// They are also *spelled* there — minted through
-    /// [`NormalizedPrefix::from_guest`], because a host that writes its
+    /// [`FrozenPath::from_guest`], because a host that writes its
     /// separator `\` must not be the one to write the guest's.
     ///
     /// - **fs** — the granted folder at
@@ -416,8 +416,8 @@ impl Grant {
         // it judges a guest path absolute with `starts_with('/')`.
         let prefixes = || {
             vec![
-                NormalizedPrefix::from_guest(vm_manager::MachineSpec::GUEST_WORKSPACE),
-                NormalizedPrefix::from_guest(GUEST_SCRATCH),
+                FrozenPath::from_guest(vm_manager::MachineSpec::GUEST_WORKSPACE),
+                FrozenPath::from_guest(GUEST_SCRATCH),
             ]
         };
         Capabilities {
@@ -899,7 +899,7 @@ mod tests {
             .expect("the office grant restricts the filesystem");
         let guest = [vm_manager::MachineSpec::GUEST_WORKSPACE, GUEST_SCRATCH];
         for (which, prefixes) in [("read", &fs.read_prefixes), ("write", &fs.write_prefixes)] {
-            let spelled: Vec<&str> = prefixes.iter().map(NormalizedPrefix::as_str).collect();
+            let spelled: Vec<&str> = prefixes.iter().map(FrozenPath::as_str).collect();
             assert_eq!(
                 spelled, guest,
                 "the fs {which} set must name the guest's paths as the guest spells them"

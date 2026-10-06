@@ -90,7 +90,7 @@ impl SpawnGrant {
 )]
 mod tests {
     use super::*;
-    use crate::path::NormalizedPrefix;
+    use crate::path::FrozenPath;
     use crate::types::Value;
     use std::path::Path;
 
@@ -129,9 +129,7 @@ mod tests {
             .expect("a well-formed restriction record");
         let read = layer.fs.expect("an fs policy").read_prefixes;
         assert_eq!(
-            read.iter()
-                .map(NormalizedPrefix::as_str)
-                .collect::<Vec<_>>(),
+            read.iter().map(FrozenPath::as_str).collect::<Vec<_>>(),
             vec!["/work/proj"],
             "`cwd:` must name the cwd the layer is frozen against, not the process's"
         );

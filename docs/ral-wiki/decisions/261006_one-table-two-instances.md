@@ -32,7 +32,7 @@ subject, and which of the speakers decides — with two unrelated mechanisms.
   with a hand-written `met`, `dirs_over`, `dir_verdict` and `kernel_verdict`;
   the authored `ExecGrant` was itself three maps, `names`, `paths` and `dirs`,
   the last keyed to a `bool`.
-- **A namespace tag.** Every `NormalizedPrefix` carried a `Namespace`, `Host`
+- **A namespace tag.** Every `FrozenPath` carried a `Namespace`, `Host`
   or `Guest`, and fs containment keyed on `(namespace, resolved)`, so a guest
   prefix never overlapped a host one.
 
@@ -61,7 +61,7 @@ synod's base to nothing. The fix that had mattered was the fold:
   wrote is left absent. The pointwise law is the meet's definition, and the
   lattice laws are property-tested once, over a universe of case and NFC/NFD
   pairs.
-- **fs is `Region = Table<NormalizedPrefix>`**, subject a plain `&Path`, rank
+- **fs is `Region = Table<FrozenPath>`**, subject a plain `&Path`, rank
   `(is a deny, depth)`, one region per `FsOp` carrying the layer's `deny_paths`,
   re-frozen against the caller's `Resolver` (`refreeze`), folded by `region`.
   The projection renders `live()` and `denies()` as surface strings; the
@@ -131,10 +131,10 @@ synod's base to nothing. The fix that had mattered was the fold:
 
 `core/src/capability/table.rs` (`Table`, `Scope`, `verdict`, `live`,
 `denies`, `respelled`, `Meet for Table`), `core/src/capability/fs.rs`
-(`Region`, `region`, `impl Scope for NormalizedPrefix`),
+(`Region`, `region`, `impl Scope for FrozenPath`),
 `core/src/capability/exec.rs` (`ExecScope`, `Subject`, `Rank`, `ExecRules`,
 `compile`, `kernel`, `allowed_files`, `rules`),
 `core/src/capability/sandbox.rs` (`surface`), `core/src/capability/deputy.rs`
-(`deputy_prefixes`), `core/src/path/resolved.rs` (`contains`, `refreeze`,
+(`deputy_prefixes`), `core/src/path/forms.rs` (`contains`, `refreeze`,
 `from_guest`), `core/src/path/lex.rs` (`Polarity`, `Allow`, `Deny`),
 `core/src/types/capability.rs` (`ExecKey`, `ExecGrant`, `meet_insert`).

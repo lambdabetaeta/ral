@@ -14,7 +14,7 @@ use exarch::policy::for_invocation;
 use exarch::prompt::{SCRATCH_PLACEHOLDER, host_section};
 use ral_core::capability::FsOp;
 use ral_core::path::basedir::XdgKind;
-use ral_core::path::{NormalizedPrefix, Resolver, SearchCwd, resolve_in_path};
+use ral_core::path::{FrozenPath, Resolver, SearchCwd, resolve_in_path};
 use ral_core::test_access::check_file;
 use ral_core::types::{Break, GrantStack, Settled, Shell};
 use std::path::PathBuf;
@@ -319,7 +319,7 @@ fn the_grant_summary_agrees_with_an_attenuated_grant() {
         bullet(&text, "- exec deny:").contains(veto),
         "minimal's {veto} veto must reach the model:\n{text}"
     );
-    let frozen_cwd = NormalizedPrefix::from_surface(&cwd).into_string();
+    let frozen_cwd = FrozenPath::from_surface(&cwd).into_string();
     assert!(bullet(&text, "- fs read:").contains(&frozen_cwd), "{text}");
     assert!(bullet(&text, "- fs write:").contains(&frozen_cwd), "{text}");
     assert!(bullet(&text, "- scratch:").contains(SCRATCH_PLACEHOLDER));

@@ -14,7 +14,7 @@
 //! backends render; `detach` gates a verb instead of an OS rule, so it is folded
 //! at the call by [`GrantStack::permits_detach`] and reaches no projection.
 
-use crate::path::{NormalizedPrefix, RealPath, Rendered, render_paths, rendered_pins};
+use crate::path::{FrozenPath, RealPath, Rendered, render_paths, rendered_pins};
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "macos")]
 use std::borrow::Borrow;
@@ -91,9 +91,9 @@ pub enum ExecKey {
     /// A bare name: `git`.
     Name(String),
     /// A path, frozen: `/usr/bin/git`, `~/bin/x`.
-    Path(NormalizedPrefix),
+    Path(FrozenPath),
     /// A directory, frozen, and the expansions of `path:` and `system:`.
-    Dir(NormalizedPrefix),
+    Dir(FrozenPath),
 }
 
 /// The key as a grant spells it: a dir with its trailing `/`.
@@ -174,17 +174,17 @@ mod pairs {
 #[serde(deny_unknown_fields)]
 pub struct FsPolicy {
     #[serde(default)]
-    pub read_prefixes: Vec<NormalizedPrefix>,
+    pub read_prefixes: Vec<FrozenPath>,
     #[serde(default)]
-    pub write_prefixes: Vec<NormalizedPrefix>,
+    pub write_prefixes: Vec<FrozenPath>,
     #[serde(default)]
-    pub deny_paths: Vec<NormalizedPrefix>,
+    pub deny_paths: Vec<FrozenPath>,
 }
 
 /// The fs half of a projection, its paths named in `N`.
 ///
 /// Not [`FsPolicy`]: that is the grant-layer lattice element, whose
-/// [`NormalizedPrefix`]es carry the `resolved` form the meet keys on.  Nothing
+/// [`FrozenPath`]es carry the `resolved` form the meet keys on.  Nothing
 /// below the fold reads it, so the projection holds plain surface spellings
 /// and each backend widens them into its own name class at render time,
 /// which is exactly what `N` is.
@@ -745,13 +745,13 @@ impl Widen for ShellPolicy {
 }
 
 /// Keys widen one by one, then an
-/// [`evicts`](NormalizedPrefix::evicts) sweep drops any allow dir that clashes
+/// [`evicts`](FrozenPath::evicts) sweep drops any allow dir that clashes
 /// with a deny dir — whatever spelling either side used — so an overlay that
 /// re-grants a directory the base vetoed still loses it.
 impl Widen for ExecGrant {
     fn widen(self, other: Self) -> Self {
         let mut keys = widen_keys(self.0, other.0);
-        let denied: Vec<NormalizedPrefix> = (keys.iter())
+        let denied: Vec<FrozenPath> = (keys.iter())
             .filter_map(|(key, v)| match key {
                 ExecKey::Dir(dir) if v.is_denied() => Some(dir.clone()),
                 _ => None,
@@ -779,7 +779,7 @@ fn widen_keys<K: Ord, V: Widen>(mut a: BTreeMap<K, V>, b: BTreeMap<K, V>) -> BTr
     a
 }
 
-fn union_prefixes(a: Vec<NormalizedPrefix>, b: Vec<NormalizedPrefix>) -> Vec<NormalizedPrefix> {
+fn union_prefixes(a: Vec<FrozenPath>, b: Vec<FrozenPath>) -> Vec<FrozenPath> {
     a.into_iter()
         .chain(b)
         .collect::<BTreeSet<_>>()

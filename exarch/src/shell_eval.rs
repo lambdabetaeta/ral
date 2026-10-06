@@ -450,8 +450,8 @@ mod tests {
     fn projecting_caps() -> Capabilities {
         Capabilities {
             fs: Some(ral_core::types::FsPolicy {
-                read_prefixes: vec![ral_core::path::NormalizedPrefix::root()],
-                write_prefixes: vec![ral_core::path::NormalizedPrefix::root()],
+                read_prefixes: vec![ral_core::path::FrozenPath::root()],
+                write_prefixes: vec![ral_core::path::FrozenPath::root()],
                 deny_paths: Vec::new(),
             }),
             ..Capabilities::root()
@@ -483,11 +483,9 @@ mod tests {
         let walk = |denied: &str| -> String {
             let caps = Capabilities {
                 fs: Some(ral_core::types::FsPolicy {
-                    read_prefixes: vec![ral_core::path::NormalizedPrefix::root()],
-                    write_prefixes: vec![ral_core::path::NormalizedPrefix::root()],
-                    deny_paths: vec![ral_core::path::NormalizedPrefix::from_surface(
-                        tmp.join(denied),
-                    )],
+                    read_prefixes: vec![ral_core::path::FrozenPath::root()],
+                    write_prefixes: vec![ral_core::path::FrozenPath::root()],
+                    deny_paths: vec![ral_core::path::FrozenPath::from_surface(tmp.join(denied))],
                 }),
                 ..Capabilities::root()
             };

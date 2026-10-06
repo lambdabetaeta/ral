@@ -53,7 +53,7 @@ pub(crate) struct AuditStart {
 /// filters the rail, and `audit { }` filters the trail.
 ///
 /// It does judge what *happened*.  A redirect onto the [discard
-/// device](crate::path::ResolvedPath::is_discard) left the world as it found
+/// device](crate::path::LexicalPath::is_discard) left the world as it found
 /// it, so there is nothing to report: no card, no rail barrier, and no line
 /// in an agent's trail claiming it wrote a file.  The same predicate
 /// `capability::check_fs_op` asks, of the same resolver — what is not an

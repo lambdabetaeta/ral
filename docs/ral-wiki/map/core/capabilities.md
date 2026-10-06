@@ -39,7 +39,7 @@ Submodules:
   (`sandbox::pinned_binary`, by inode), before any grant is folded —
   `check_fs_exact` audits it and mints the `Break` for a symlink-free path,
   and `check_fs_op` is the read-by-name layer over it that canonicalises
-  leniently, excuses the discard device (`ResolvedPath::is_discard`) and
+  leniently, excuses the discard device (`LexicalPath::is_discard`) and
   refuses a reserved device name (`check_device_name`) before either region is
   consulted. `Shell::locate` (`types/shell/checks.rs`) is the door every open
   takes: the same name refusal, `path::walk` to the object, then
@@ -66,10 +66,10 @@ Submodules:
   denies), `live`, `denies`, `respelled`, and `Meet for Table`, denies joining
   and allows meeting at their own subjects; the meet's law and lattice laws are
   its property tests;
-- `fs.rs` — the fs instance: `FsOp`, `Region = Table<NormalizedPrefix>`
+- `fs.rs` — the fs instance: `FsOp`, `Region = Table<FrozenPath>`
   (subject a `&Path`, rank `(is a deny, depth)`: a deny outranking every allow, the deeper above among each), and `region`, each
   opining layer's prefixes for the op and its `deny_paths`, re-frozen against
-  the caller's `Resolver` (`NormalizedPrefix::refreeze`) and met;
+  the caller's `Resolver` (`FrozenPath::refreeze`) and met;
 - `exec.rs` — the exec instance
   ([[decisions/261004_exec-rules|exec-rules]]): `Program` (`Tool` or `File {
   path, real }`) and the `Subject` it is judged as (`Tool`, `File`, `Under`);
@@ -143,7 +143,7 @@ plus `which.rs` for PATH search.
   on Windows `walk::dealias` names a `~`-bearing leaf by its long name, and
   refuses one it cannot name;
 - name a device — `lex::is_discard_device`, behind
-  `ResolvedPath::is_discard`: `/dev/null`, or on Windows exactly the
+  `LexicalPath::is_discard`: `/dev/null`, or on Windows exactly the
   device-namespace spelling `\\.\NUL` (either slash, any case), and no other
   path. Every other Windows path whose last component is a DOS reserved device
   name — `NUL`, `CON`, `PRN`, `AUX`, `COM1`–`COM9`, `LPT1`–`LPT9`, any case,
@@ -157,8 +157,8 @@ plus `which.rs` for PATH search.
   table is dark on the other host.
 
 `resolver.rs` composes the stages — `Resolver::resolve` is the *sole*
-constructor of a `ResolvedPath` (`resolved.rs`, with its grant-side twin
-`NormalizedPrefix`), so canonicalisation cannot run before
+constructor of a `LexicalPath` (`forms.rs`, with its grant-side twin
+`FrozenPath`), so canonicalisation cannot run before
 sigil-expansion-then-lex: the ordering is in the types, not convention.
 
 (`ral_path.rs` in the same directory owns `RAL_PATH` module search, used by `use`
@@ -182,20 +182,20 @@ from a named provenance — `Context::search_cwd`, `Resolver::search_cwd`,
   `SearchCwd::nowhere`, so neither a scoped `PATH` nor a relative entry can
   redirect a bare key.
 
-A `NormalizedPrefix` (`resolved.rs`) carries its `surface` form (lexical — what
-the author wrote, kept for display) and its `resolved` form (symlinks
+A `FrozenPath` (`forms.rs`) carries its `surface` form (lexical — what
+the author wrote, kept for display) and its `real` form (symlinks
 followed), both fixed by one disk consultation at the freeze door; a guest
 prefix is minted by `from_guest` under the POSIX fold, and `refreeze`
 re-resolves a prefix against a live `Resolver`, the bare root minted rather
 than frozen.
-[[invariants/grants-judge-objects|Every authority is judged on `resolved`]]:
+[[invariants/grants-judge-objects|Every authority is judged on `real`]]:
 `contains::<P>` for fs, `RealPath::frozen` (`real.rs`) for the exec table,
 and `evicts` for composition — and no other door: `lex::path_within` and its string twin are `pub(super)`,
 so the form-blind kernel does not leave `core/src/path/`, `surface_path` is
-private to `resolved.rs`, and outside the module the surface leaves the type
+private to `forms.rs`, and outside the module the surface leaves the type
 only as a *string* (`as_str`, `into_string`) for rendering. That is enforced
 rather than documented because the `xdg:` freeze guard once chose the form for
-itself — asking on the surface while the check it guarded matched the resolved
+itself — asking on the surface while the check it guarded matched the real
 form — and read a symlink out of `HOME` as contained.
 
 The set-level algebra over prefixes is not in `path/`: it is

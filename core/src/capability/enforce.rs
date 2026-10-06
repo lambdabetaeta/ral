@@ -12,7 +12,7 @@
 
 use super::exec::{ExecRules, Program, rules};
 use super::fs::{FsOp, region};
-use crate::path::{NormalizedPrefix, Resolver};
+use crate::path::{FrozenPath, Resolver};
 use crate::runtime::command::Head;
 use crate::types::{
     Audit, CallSite, Capabilities, Context, Decision, GrantStack, Observation, Observed, Settled,
@@ -122,7 +122,7 @@ pub(super) enum FsVerdict {
     Unrestricted,
     Granted,
     Denied,
-    Respelled(NormalizedPrefix),
+    Respelled(FrozenPath),
     Guarded(&'static str),
 }
 
@@ -163,14 +163,14 @@ impl GrantStack {
     /// one-frame [`GrantStack::of`].  The same [`fs_verdict`] the guard runs,
     /// canonicalising leniently inside as [`check_fs_op`] does, so there is no
     /// surface-form spelling of the question.  The
-    /// [`ResolvedPath::is_discard`](crate::path::ResolvedPath::is_discard)
+    /// [`LexicalPath::is_discard`](crate::path::LexicalPath::is_discard)
     /// exemption is [`check_fs_op`]'s alone: it excuses a discard device from
     /// an *access*, and this door decides membership, not access.
     pub fn admits_fs(
         &self,
         op: &FsOp,
         resolver: &Resolver,
-        path: &crate::path::ResolvedPath,
+        path: &crate::path::LexicalPath,
     ) -> bool {
         self.admits_fs_exact(op, resolver, &path.canonicalise_lenient())
     }
@@ -188,7 +188,7 @@ impl GrantStack {
 
 /// Refuse a name the host would read as a DOS device (Windows only).  No grant
 /// can admit it: it names no object to judge.
-pub(crate) fn check_device_name(path: &crate::path::ResolvedPath) -> Settled<()> {
+pub(crate) fn check_device_name(path: &crate::path::LexicalPath) -> Settled<()> {
     path.reserved_device_refusal()
         .map_or(Ok(()), |m| Err(sig(m)))
 }
@@ -198,13 +198,13 @@ pub(crate) fn check_device_name(path: &crate::path::ResolvedPath) -> Settled<()>
 /// by name* — predicates, listings, module loading — where nothing is
 /// written through the name.  A write goes through `Shell::locate`, which
 /// judges the located object with [`check_fs_exact`].
-/// A [discard device](crate::path::ResolvedPath::is_discard) is exempt from
+/// A [discard device](crate::path::LexicalPath::is_discard) is exempt from
 /// both regions, and a [reserved device name](check_device_name) is refused
 /// before either — asked before canonicalisation, since the question is about
 /// the name, not about what is on the disk under it.
 pub(crate) fn check_fs_op(
     ctx: &Context,
-    path: &crate::path::ResolvedPath,
+    path: &crate::path::LexicalPath,
     op: &FsOp,
     audit: &mut Audit,
     site: Option<CallSite>,
@@ -394,7 +394,7 @@ fn emit_capability_denial(
 )]
 mod tests {
     use super::FsOp;
-    use crate::path::{NormalizedPrefix, Resolver};
+    use crate::path::{FrozenPath, Resolver};
     use crate::types::{Capabilities, FsPolicy, GrantStack};
 
     fn stack(fs: FsPolicy) -> GrantStack {
@@ -420,7 +420,7 @@ mod tests {
         std::os::unix::fs::symlink(&real, &link).unwrap();
 
         let grants = stack(FsPolicy {
-            read_prefixes: vec![NormalizedPrefix::from_surface(&link)],
+            read_prefixes: vec![FrozenPath::from_surface(&link)],
             ..FsPolicy::default()
         });
         assert!(
@@ -481,8 +481,8 @@ mod tests {
         std::os::unix::fs::symlink(&secret, &link).unwrap();
 
         let grants = stack(FsPolicy {
-            read_prefixes: vec![NormalizedPrefix::from_surface(&real)],
-            deny_paths: vec![NormalizedPrefix::from_surface(&link)],
+            read_prefixes: vec![FrozenPath::from_surface(&real)],
+            deny_paths: vec![FrozenPath::from_surface(&link)],
             ..FsPolicy::default()
         });
         assert!(
@@ -504,9 +504,9 @@ mod tests {
         let root = std::fs::canonicalize(tmp.path()).unwrap();
         let under = |denies: &[&str]| {
             stack(FsPolicy {
-                read_prefixes: vec![NormalizedPrefix::from_surface(&root)],
+                read_prefixes: vec![FrozenPath::from_surface(&root)],
                 deny_paths: (denies.iter())
-                    .map(|d| NormalizedPrefix::from_surface(root.join(d)))
+                    .map(|d| FrozenPath::from_surface(root.join(d)))
                     .collect(),
                 ..FsPolicy::default()
             })
@@ -540,8 +540,8 @@ mod tests {
             return;
         }
         let grants = stack(FsPolicy {
-            read_prefixes: vec![NormalizedPrefix::from_surface(&root)],
-            deny_paths: vec![NormalizedPrefix::from_surface(&secret)],
+            read_prefixes: vec![FrozenPath::from_surface(&root)],
+            deny_paths: vec![FrozenPath::from_surface(&secret)],
             ..FsPolicy::default()
         });
         let resolver = Resolver::shell_less();

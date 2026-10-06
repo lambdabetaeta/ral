@@ -30,9 +30,9 @@ follow-ups, each tracked as its own slice.
 1. **Check/use path mismatch — the path *authorised* ≠ the path *used*.** The XDG
    under-HOME guard compared an un-normalised prefix while the gate later
    collapsed `..`; `resolve-path` canonicalised against the process cwd while its
-   gate lexed against the logical cwd. *Missing type:* one `ResolvedPath`
+   gate lexed against the logical cwd. *Missing type:* one `LexicalPath`
    (absolute, `.`/`..`-collapsed, logical-cwd-anchored), the sole input to both
-   `capability::check_fs_*` and any canonicaliser, and a `NormalizedPrefix` for
+   `capability::check_fs_*` and any canonicaliser, and a `FrozenPath` for
    the frozen grant minted by the same lexer the check uses. Extends
    [[decisions/260605_capability-stage-collapse|capability-stage-collapse]] (the
    always-frozen prefix) and
@@ -119,7 +119,7 @@ cross-target checks for any cfg-gated code.
 
 - **Class 6.** Drive continuation off a real `Incompleteness` signal, parsing on
   the REPL submit path (one parse per Enter — negligible).
-- **Class 1.** Full sweep: `ResolvedPath` is the *sole* path input at every
+- **Class 1.** Full sweep: `LexicalPath` is the *sole* path input at every
   `capability::check_*` and canonicaliser, not a localised patch.
 - **Class 3.** Adopt the full structural prevention — the RAII `IpcEndpoint`,
   the `Tokened<ChildEvalResponse>`, and the `ConfinedSpawn` handle-list builder —
