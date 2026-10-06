@@ -58,14 +58,7 @@ fn hear(trunk: &Weak<Agent>, ambient: Ambient) {
 /// and SIGHUP on the escalating `term_handler` `install_handlers` set.
 #[cfg(unix)]
 pub(crate) fn install() {
-    // SAFETY: `interrupt_handler` is a plain fn item doing one atomic
-    // read-modify-write and a `write(2)` — async-signal-safe throughout.
-    unsafe {
-        libc::signal(
-            libc::SIGINT,
-            ral_core::process::interrupt_handler() as *const () as libc::sighandler_t,
-        );
-    }
+    ral_core::process::install(libc::SIGINT, ral_core::process::interrupt_handler());
 }
 
 /// The process-wide half of the trunk's interrupt, beside the per-agent one

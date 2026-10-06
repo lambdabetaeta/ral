@@ -5,6 +5,7 @@
 //! into an ambient cause its host forwards to the engine as `Control`, and
 //! ticks an escalation ladder whose third delivery forces `_exit`.
 
+use std::sync::Once;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use nix::sys::signal::{SigSet, SigmaskHow};
@@ -22,18 +23,32 @@ use crate::process::cancel::{
 
 /// Install handlers for SIGINT, SIGTERM, SIGHUP.
 ///
-/// Snapshots the inherited `SIG_IGN` dispositions first, since afterwards ral's
-/// own are indistinguishable from the parent's.  Never name SIGWINCH or SIGSEGV
-/// here: crossterm's `signal-hook-registry` owns one and fff-search's crash hook
-/// may own the other, and a raw `signal(2)` install unhooks it for good.
+/// [`install`] snapshots the inherited `SIG_IGN` dispositions first, since
+/// afterwards ral's own are indistinguishable from the parent's.  Never name
+/// SIGWINCH or SIGSEGV here: crossterm's `signal-hook-registry` owns one and
+/// fff-search's crash hook may own the other, and a raw `signal(2)` install
+/// unhooks it for good.
 pub fn install_handlers() {
-    snapshot_inherited_ignored();
-    unsafe {
-        libc::signal(libc::SIGINT, handler as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGTERM, handler as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGHUP, handler as *const () as libc::sighandler_t);
+    for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+        install(sig, handler);
     }
     crate::process::reaper::ensure_installed();
+}
+
+/// Ignore `sig`, snapshotting the inherited dispositions first.
+pub fn ignore(sig: libc::c_int) {
+    snapshot_once();
+    unsafe {
+        libc::signal(sig, libc::SIG_IGN);
+    }
+}
+
+/// Point `sig` at `handler`, snapshotting the inherited dispositions first.
+pub fn install(sig: libc::c_int, handler: extern "C" fn(libc::c_int)) {
+    snapshot_once();
+    unsafe {
+        libc::signal(sig, handler as *const () as libc::sighandler_t);
+    }
 }
 
 extern "C" fn handler(sig: libc::c_int) {
@@ -107,6 +122,14 @@ const MANAGED_SIGNALS: &[libc::c_int] = &[
 /// Bitmask of the signals that were `SIG_IGN` when ral started, indexed by
 /// signal number — every managed number is under 64, so one `u64` suffices.
 static INHERITED_IGNORED: AtomicU64 = AtomicU64::new(0);
+
+static SNAPSHOT: Once = Once::new();
+
+/// The one snapshot, taken before the first disposition change [`ignore`] or
+/// [`install`] makes.
+fn snapshot_once() {
+    SNAPSHOT.call_once(snapshot_inherited_ignored);
+}
 
 fn snapshot_inherited_ignored() {
     let mut mask: u64 = 0;

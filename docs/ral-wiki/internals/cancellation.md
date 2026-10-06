@@ -1,6 +1,6 @@
 ---
-verified_at_commit: afc5d952
-verified_at_date: 2026-09-23
+verified_at_commit: dabb0978
+verified_at_date: 2026-10-06
 anchors: [ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, CancelScope, CancelCause, Terminate, DurableRoot, ForegroundScope, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, Status::code, ChildEnd, WaitOutcome::classify, KILL_EXIT_CODE, process::check, RunningChild::wait, watch_cancel, Membership::owes, break_pipeline_group, escalation_pending]
 ---
 
@@ -351,7 +351,10 @@ The same two mechanisms are driven by different keys on different surfaces.
 ### ral interactive signal dispositions
 
 `boot::setup_signals` (`ral/src/repl/session/boot.rs`)
-fixes the interactive dispositions:
+fixes the interactive dispositions, each through core's `process::ignore` /
+`process::install` — the only door a disposition changes by, and the one that
+snapshots the inherited `SIG_IGN`s (once, before the first change) so every
+child gets them back in `reset_child_signals`:
 
 - **SIGINT → `interrupt_handler`** (the `sigint_handler` it names). It raises
   the interrupt and does nothing else — no delivery of its own. The session

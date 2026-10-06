@@ -31,6 +31,9 @@ use super::super::host::ReplHost;
 /// - SIGTTIN → `SIG_IGN`  (shell reads stdin without being stopped if not fg)
 /// - SIGPIPE → `SIG_IGN`  (writing to a closed pipe yields an error, not death)
 ///
+/// Every disposition goes through core's `ignore` / `install`, which snapshot
+/// the inherited ignores first so children get them back (the nohup rule).
+///
 /// SIGWINCH (owned in-process by crossterm's `signal-hook-registry` master
 /// handler) and SIGSEGV (claimed by fff-search's crash hook, if installed)
 /// must never be named here: a raw install would silently and permanently
@@ -40,12 +43,11 @@ use super::super::host::ReplHost;
 pub(super) fn setup_signals() -> TerminalClaim {
     #[cfg(unix)]
     {
+        use ral_core::process::{ignore, install};
         // Ignore SIGTTOU before the claim, whose `tcsetpgrp` runs from a
         // group not yet in the foreground; leave SIGTTIN at its default
         // until after, since the claim parks the shell on it.
-        unsafe {
-            libc::signal(libc::SIGTTOU, libc::SIG_IGN);
-        }
+        ignore(libc::SIGTTOU);
         let claim = claim_terminal().unwrap_or_else(|msg| {
             // A REPL that can't claim its tty is awkward (job control
             // won't work, ^C delivery may misroute) but not fatal — many
@@ -57,29 +59,19 @@ pub(super) fn setup_signals() -> TerminalClaim {
             ));
             TerminalClaim::default()
         });
-        unsafe {
-            // The non-escalating interrupt handler rather than SIG_IGN: a
-            // no-op between commands, and a cancel of the foreground scope —
-            // whence the pipeline's own teardown — during a run.
-            libc::signal(
-                libc::SIGINT,
-                ral_core::process::interrupt_handler() as *const () as libc::sighandler_t,
-            );
-            // Ctrl-\ cancels the durable root — the reap-everything gesture.
-            libc::signal(
-                libc::SIGQUIT,
-                ral_core::process::quit_handler() as *const () as libc::sighandler_t,
-            );
-            let term = ral_core::process::term_handler() as *const () as libc::sighandler_t;
-            libc::signal(libc::SIGTERM, term);
-            libc::signal(libc::SIGHUP, term);
-            // Ignore SIGTSTP (the shell never suspends; a stop is answered
-            // with SIGCONT by the reaper) and SIGTTIN so the shell reads
-            // stdin without being stopped when backgrounded.
-            libc::signal(libc::SIGTSTP, libc::SIG_IGN);
-            libc::signal(libc::SIGTTIN, libc::SIG_IGN);
-            libc::signal(libc::SIGPIPE, libc::SIG_IGN);
-        }
+        // The non-escalating interrupt handler rather than SIG_IGN: a
+        // no-op between commands, and a cancel of the foreground scope —
+        // whence the pipeline's own teardown — during a run.
+        install(libc::SIGINT, ral_core::process::interrupt_handler());
+        // Ctrl-\ cancels the durable root — the reap-everything gesture.
+        install(libc::SIGQUIT, ral_core::process::quit_handler());
+        install(libc::SIGTERM, ral_core::process::term_handler());
+        install(libc::SIGHUP, ral_core::process::term_handler());
+        // The shell never suspends, and reads stdin without being stopped
+        // when backgrounded.
+        ignore(libc::SIGTSTP);
+        ignore(libc::SIGTTIN);
+        ignore(libc::SIGPIPE);
         claim
     }
     #[cfg(windows)]
@@ -256,15 +248,16 @@ pub(super) fn create_frontend(
     }
     match settings.surface {
         Surface::Minimal => return Box::new(MinimalFrontend::new()),
-        // The structural surface needs raw mode; its `new` probes for it and
-        // errors when unavailable, so a failure warns and falls through.
+        // The structural surface's `new` probes raw mode and the terminal's
+        // size and errors when either is unavailable, so a failure warns and
+        // falls through.
         Surface::Structural => {
             #[cfg(feature = "structural")]
             match StructuralFrontend::new(settings.edit_mode, host.clone()) {
                 Ok(fe) => return Box::new(fe),
-                Err(_) => diagnostic::shell_warning(
-                    "ral: structural surface needs a raw-mode terminal; using readline",
-                ),
+                Err(e) => diagnostic::shell_warning(&format!(
+                    "ral: structural surface unavailable: {e}; using readline"
+                )),
             }
             #[cfg(not(feature = "structural"))]
             diagnostic::shell_warning("ral: this build has no structural surface; using readline");

@@ -29,9 +29,9 @@ pub(crate) use unix::grace_signal;
 use unix::{KILL, gesture_signal};
 #[cfg(unix)]
 pub use unix::{
-    TerminalLoan, install_handlers, interrupt_foreground_child, interrupt_handler, quit_handler,
-    reset_child_signals, spawn_detached, spawn_with_pgid, spawn_with_pgid_after, term_handler,
-    termios_snapshot,
+    TerminalLoan, ignore, install, install_handlers, interrupt_foreground_child, interrupt_handler,
+    quit_handler, reset_child_signals, spawn_detached, spawn_with_pgid, spawn_with_pgid_after,
+    term_handler, termios_snapshot,
 };
 
 #[cfg(windows)]

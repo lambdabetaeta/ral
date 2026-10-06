@@ -154,7 +154,10 @@ mod tests {
 
     #[test]
     fn a_positional_after_a_login_flag_is_a_script_for_sh() {
-        assert_eq!(decide(&args(&["-l", "foo.sh"]), true, true), Target::PosixSh);
+        assert_eq!(
+            decide(&args(&["-l", "foo.sh"]), true, true),
+            Target::PosixSh
+        );
         assert_eq!(
             decide(&args(&["--login", "foo.sh"]), true, true),
             Target::PosixSh

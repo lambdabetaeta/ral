@@ -107,14 +107,17 @@ pub(in crate::repl) struct StructuralFrontend {
 }
 
 impl StructuralFrontend {
-    /// Construct the frontend, verifying the terminal supports raw mode (so
-    /// the boot selector can fall back when it does not).  Loads persisted
-    /// history like the other frontends.
+    /// Construct the frontend, verifying the terminal supports raw mode and
+    /// reports a size (so the boot selector can fall back when it does not).
+    /// Loads persisted history like the other frontends.
     pub(in crate::repl) fn new(keymap: Keymap, host: Arc<ReplHost>) -> io::Result<Self> {
-        // Probe raw mode once: if the terminal cannot do it, the structural
-        // surface cannot run and the caller degrades to a line editor.
+        // Probe raw mode and size once: if the terminal cannot do either, the
+        // structural surface cannot run and the caller degrades to a line editor.
         enable_raw_mode()?;
         disable_raw_mode()?;
+        if matches!(size()?, (0, _) | (_, 0)) {
+            return Err(io::Error::other("the terminal reports no size"));
+        }
         Ok(Self {
             history: History::load(),
             baseline: None,
@@ -1270,6 +1273,10 @@ fn commit_line(
         reason = "terminal coordinates are u16 (ratatui/crossterm cap columns and rows at u16)"
     )]
     let height = lines.len().max(1) as u16;
+    // `insert_before` never returns on a zero-row screen.
+    if terminal.size()?.height == 0 {
+        return Ok(());
+    }
     terminal.insert_before(height, |b| {
         Paragraph::new(Text::from(lines))
             .wrap(Wrap { trim: false })

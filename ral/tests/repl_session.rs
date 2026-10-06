@@ -432,3 +432,131 @@ fn a_login_shell_keeps_the_inherited_umask() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// An interactive shell passes on the signals it inherited ignored: the nohup
+/// rule, so a child `sh` run under `nohup ral` survives a SIGHUP to itself.
+#[cfg(unix)]
+#[test]
+fn an_interactive_shell_passes_inherited_ignored_signals_on() {
+    let home = tempfile::tempdir().unwrap();
+    let mut child = std::process::Command::new("/bin/sh")
+        .args(["-c", "trap \"\" HUP; exec \"$0\" -i --norc"])
+        .arg(common::ral_bin())
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn sh");
+    let mut stdin = child.stdin.take().unwrap();
+    stdin
+        .write_all(b"/bin/sh -c 'kill -HUP $$; echo survived'\n")
+        .unwrap();
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("survived"),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+// ── The structural surface refuses an unsized terminal ─────────────────────
+
+/// A pty reporting zero rows, as a harness that never sent `TIOCSWINSZ`
+/// leaves it: the structural surface must warn and fall back to readline
+/// rather than spin inside ratatui, which never returns on a zero-row screen.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+#[allow(
+    clippy::cast_lossless,
+    reason = "TIOCSCTTY's type differs per platform"
+)]
+fn structural_surface_refuses_zero_sized_terminal() {
+    use std::os::fd::{FromRawFd, OwnedFd};
+    use std::os::unix::process::CommandExt;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    let (mut master, slave) = unsafe {
+        let (mut m, mut s) = (0, 0);
+        let ws = libc::winsize {
+            ws_row: 0,
+            ws_col: 80,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        let rc = libc::openpty(
+            &raw mut m,
+            &raw mut s,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::from_ref(&ws).cast_mut(),
+        );
+        assert_eq!(rc, 0, "openpty: {}", std::io::Error::last_os_error());
+        (
+            std::fs::File::from(OwnedFd::from_raw_fd(m)),
+            OwnedFd::from_raw_fd(s),
+        )
+    };
+
+    let home = tempfile::tempdir().unwrap();
+    let mut cmd = ral_command();
+    cmd.args(["-i", "--norc", "--surface", "structural"])
+        .env("HOME", home.path())
+        .stdin(slave.try_clone().unwrap())
+        .stdout(slave.try_clone().unwrap())
+        .stderr(slave);
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = cmd.spawn().expect("spawn ral");
+    drop(cmd);
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let reader = master.try_clone().unwrap();
+    let sink = Arc::clone(&seen);
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let (mut reader, mut chunk) = (reader, [0u8; 4096]);
+        while let Ok(n @ 1..) = reader.read(&mut chunk) {
+            sink.lock().unwrap().extend_from_slice(&chunk[..n]);
+        }
+    });
+
+    let start = Instant::now();
+    let text_so_far = || String::from_utf8_lossy(&seen.lock().unwrap()).into_owned();
+    // Once the line editor is reading, Ctrl-D at the empty prompt ends it.
+    while !text_so_far().contains("❯") && start.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    master.write_all(b"\x04").unwrap();
+    let exited = loop {
+        if child.try_wait().unwrap().is_some() {
+            break true;
+        }
+        if start.elapsed() > Duration::from_secs(10) {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    if !exited {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    std::thread::sleep(Duration::from_millis(200));
+
+    let text = text_so_far();
+    assert!(exited, "ral never exited on a zero-row terminal:\n{text}");
+    assert!(
+        text.contains("structural surface unavailable"),
+        "no fallback warning:\n{text}"
+    );
+}

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 0948a758
+generated_at_commit: dabb0978
 generated_at_date: 2026-10-06
 covers_paths: [ral/src/repl.rs, ral/src/repl/session.rs, ral/src/repl/session/, ral/src/repl/exec.rs, ral/src/repl/host.rs, ral/src/repl/enquiry.rs, ral/src/repl/prompt.rs, ral/src/repl/config.rs, ral/src/repl/config/, ral/src/repl/theme.rs, ral/src/repl/errfmt.rs, ral/src/repl/cursor.rs, ral/src/repl/worksheet.rs, ral/src/boot_door.rs, ral/src/surface.rs]
 ---
@@ -65,7 +65,10 @@ no job table: ral does not suspend
 the frontend the rc settles on after it: `setup_signals` (the whole Unix
 disposition table in one place — SIGINT `interrupt_handler`, which raises the
 foreground interrupt and nothing else, SIGQUIT root-abort, SIGTERM/SIGHUP term
-handler, SIGTSTP/SIGTTOU/SIGTTIN/SIGPIPE ignore), `claim_terminal` (run after
+handler, SIGTSTP/SIGTTOU/SIGTTIN/SIGPIPE ignore — every entry set through
+core's `process::ignore` / `process::install`, the one door that snapshots the
+inherited `SIG_IGN`s before the first change so `reset_child_signals` can hand
+them on: the nohup rule), `claim_terminal` (run after
 SIGTTOU is ignored, since its `tcsetpgrp` runs from a group not yet in the
 foreground, and before SIGTTIN is: it parks the shell on SIGTTIN until it is
 foregrounded, so `ral &` does not seize the terminal from a parent shell's
@@ -195,9 +198,10 @@ The loop drives a boxed `Frontend`, chosen after boot from the rc's
 
 `create_frontend` resolves it: the capability gate forces the minimal editor
 on a dumb terminal whatever was asked, otherwise the surface preference
-decides; a `Structural` request that cannot be honoured (no raw mode, or a
-build without the feature) warns and falls back to readline rather than
-degrading silently. The preference is set by the `--surface` flag (CLI wins)
+decides; a `Structural` request that cannot be honoured (no raw mode, a
+terminal reporting no size — ratatui's `insert_before` never returns on a
+zero-row screen — or a build without the feature) warns with the reason and
+falls back to readline rather than degrading silently. The preference is set by the `--surface` flag (CLI wins)
 or the rc `surface:` key. The three implementations, the `Frontend` trait,
 the structural worksheet projection, and completion live in
 [[map/repl/frontend|frontend]].

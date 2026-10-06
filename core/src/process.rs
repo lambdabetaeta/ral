@@ -43,8 +43,9 @@ pub(crate) use wake::Wake;
 
 #[cfg(unix)]
 pub use signal::{
-    TerminalLoan, install_handlers, interrupt_foreground_child, interrupt_handler, quit_handler,
-    reset_child_signals, spawn_with_pgid, spawn_with_pgid_after, term_handler, termios_snapshot,
+    TerminalLoan, ignore, install, install_handlers, interrupt_foreground_child, interrupt_handler,
+    quit_handler, reset_child_signals, spawn_with_pgid, spawn_with_pgid_after, term_handler,
+    termios_snapshot,
 };
 
 #[cfg(unix)]
