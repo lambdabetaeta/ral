@@ -429,7 +429,7 @@ contents from changing the program structure.
 Whitespace separates words, and nothing joins them. Two words written with
 nothing between them, such as `--prefix=$d` or `'a'"b"`, are an error, not
 two arguments and not one: write `--prefix= $d` for two, or `"--prefix=$d"`
-for one. Only the grammar's own attachments touch: an index after a variable
+for one. Only the grammar's own attachments touch: an index after a `$name`
 or a forced block (`$h[k]`, `!{f}[k]`), a spread before its list (`...$xs`),
 and a redirect before its target (`>file`).
 
@@ -611,11 +611,11 @@ of it. A splice is `$name`, `$(name)`, `$[...]`, `!{...}`, or `!$name`, and
 means what the same text means outside the string. A `$` or `!` that opens
 none of these is text.
 
-A splice ends where its own closing delimiter does, so a `[` written after
-`$(name)`, `$[...]`, or `!{...}` is text: `"$(red)[$host]"` is a colour
-followed by a bracketed host. Only `$name` and `!$name`, which have no
-closing delimiter, continue into the `[key]` groups written immediately
-after them. To index a delimited form, wrap it: `"$[!{cmd}[k]]"`.
+`$(name)` takes nothing after it, inside a string or out: `"$(red)[$host]"`
+is a colour followed by a bracketed host, and `$(red)[x]` outside a string
+is two words that touch (§3.5). Every other splice is indexed by the
+`[key]` groups written immediately after it, exactly as outside a string:
+`"$h[k]"`, `"!{f}[k]"`, and `"$[$xs][0]"` select from the value.
 
 A double-quoted string that begins with `~` followed by `/` or by the closing
 quote begins with the home directory, exactly as a bare word does (§3.5):
@@ -4566,7 +4566,7 @@ word-value    ::= lexical-word
                 | expr-block
                 | force
                 | tag
-index         ::= "[" word-value "]"        /* adjacent to its target */
+index         ::= "[" word-value "]"        /* adjacent to a target other than $(name) */
 force         ::= "!" variable index* | "!" primary
 variable      ::= "$" identifier | "$(" identifier ")"
 expr-block    ::= "$[" expression "]"

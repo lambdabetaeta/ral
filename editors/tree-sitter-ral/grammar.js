@@ -262,10 +262,10 @@ module.exports = grammar({
       $.indexed,
     ),
 
-    // Postfix indexing on a force or parenthesised dereference value:
-    // !{f $x}[k], $(name)[k].  `$name[k]` is captured by `deref_index`.
+    // Postfix indexing on a forced block: !{f $x}[k].  `$name[k]` is
+    // captured by `deref_index`; `$(name)` takes no keys.
     indexed: $ => prec.left(seq(
-      choice($.force_brace, $.deref_paren),
+      $.force_brace,
       repeat1(seq(token.immediate('['), /[^\]\n]+/, ']')),
     )),
 

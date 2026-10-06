@@ -48,7 +48,7 @@ pub fn classify(src: &str) -> Vec<(Range<usize>, Class)> {
 fn class(tok: &Token) -> Class {
     match tok {
         Token::SingleQuoted(_) | Token::DoubleQuoted(_) => Class::String,
-        Token::Variable(_) => Class::Variable,
+        Token::Variable { .. } => Class::Variable,
         Token::Tag(_) => Class::Tag,
         Token::LBrace
         | Token::RBrace

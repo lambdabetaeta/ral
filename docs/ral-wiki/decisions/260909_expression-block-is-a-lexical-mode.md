@@ -71,6 +71,14 @@ closing delimiter does; only the undelimited `$name` and `!$name` continue
 into `[key]`, and `"$[!{f}[k]]"` says the rest explicitly. `$(name)` is again
 what `docs/TUTORIAL.md` always called it: the mark for the end of a name.
 
+**Amended again.** The amendment left `$(name)` meaning two things:
+the end of a name inside a string, and the same as `$name` outside
+one, where `$(red)[x]` still indexed. With words that touch now an
+error ([[design/words|words]]), the rule is one: `$(name)` takes
+nothing after it anywhere, and every other splice, `!{…}` and `$[…]`
+included, takes `[key]` groups anywhere. `"!{f}[k]"` indexes as
+`!{f}[k]` does, and the "wrap it in `$[…]`" exception is gone.
+
 ## Rejected
 
 - *Keep the redirect reinterpretation and add diagnostics.* It was already

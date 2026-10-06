@@ -111,8 +111,12 @@ pub enum Token {
     Spread,
     /// Variant tag `` `ident ``, stored without its backtick.
     Tag(String),
-    /// `$name` or `$(name)`, stored without its sigil.
-    Variable(String),
+    /// `$name` or `$(name)`, stored without its sigil; `delimited` records
+    /// which.
+    Variable {
+        name: String,
+        delimited: bool,
+    },
     /// Expression block `$[…]`, carrying its body's token stream.
     Expr(Vec<(Self, Span)>),
     Bang,
@@ -162,7 +166,7 @@ impl fmt::Display for Token {
             Self::Comma => write!(f, ","),
             Self::Spread => write!(f, "..."),
             Self::Tag(s) => write!(f, "`{s}"),
-            Self::Variable(n) => write!(f, "${n}"),
+            Self::Variable { name, .. } => write!(f, "${name}"),
             Self::Expr(_) => write!(f, "$[...]"),
             Self::Bang => write!(f, "!"),
             Self::Newline => write!(f, "newline"),
@@ -1106,18 +1110,15 @@ impl Lexer {
     /// `$(name)`, `$[…]`, `!{…}` or `!$name`.  `None` when the sigil opens
     /// nothing and is text.
     ///
-    /// A splice ends at its own closing delimiter, so the `[` after one is
-    /// string text; only the undelimited `$name` and `!$name` continue into
-    /// `[key]` groups.
+    /// `$(name)` marks the end of a name, so the `[` after it is string
+    /// text; every other splice continues into adjacent `[key]` groups.
     fn scan_splice(&mut self) -> Result<Option<Vec<(Token, Span)>>, LexError> {
         let start = self.span();
         let mut tokens = Vec::new();
-        let undelimited;
         if self.peek() == Some('!') {
             self.bump();
             match self.peek() {
                 Some('{') => {
-                    undelimited = false;
                     tokens.push((Token::Bang, self.finish(start)));
                     let open = self.span();
                     self.bump();
@@ -1130,8 +1131,6 @@ impl Lexer {
                     tokens.push((Token::Bang, self.finish(start)));
                     let dollar = self.span();
                     self.bump();
-                    // From the source char: `$(name)` lexes to `Variable` too.
-                    undelimited = self.peek().is_some_and(is_ident_start);
                     let Some(tok) = self.scan_dollar()? else {
                         // Hand the `$` back: the next iteration reads it.
                         self.pos -= 1;
@@ -1143,13 +1142,22 @@ impl Lexer {
             }
         } else {
             self.bump();
-            undelimited = self.peek().is_some_and(is_ident_start);
             match self.scan_dollar()? {
                 Some(tok) => tokens.push((tok, self.finish(start))),
                 None => return Ok(None),
             }
         }
-        while undelimited && self.peek() == Some('[') {
+        let delimited = matches!(
+            tokens.last(),
+            Some((
+                Token::Variable {
+                    delimited: true,
+                    ..
+                },
+                _
+            ))
+        );
+        while !delimited && self.peek() == Some('[') {
             let open = self.span();
             self.bump();
             let (body, close) = self.scan_token_group(open, DelimKind::Bracket)?;
@@ -1167,7 +1175,10 @@ impl Lexer {
     /// lexes as an ordinary bracket group and the parser reads the adjacency.
     fn scan_dollar(&mut self) -> Result<Option<Token>, LexError> {
         match self.peek() {
-            Some(ch) if is_ident_start(ch) => Ok(Some(Token::Variable(self.scan_deref_ident()))),
+            Some(ch) if is_ident_start(ch) => Ok(Some(Token::Variable {
+                name: self.scan_deref_ident(),
+                delimited: false,
+            })),
             Some('(') => {
                 let span = self.span();
                 self.bump();
@@ -1191,7 +1202,10 @@ impl Lexer {
                     ));
                 }
                 self.bump();
-                Ok(Some(Token::Variable(name)))
+                Ok(Some(Token::Variable {
+                    name,
+                    delimited: true,
+                }))
             }
             Some('[') => {
                 let open = self.span();
@@ -1464,7 +1478,17 @@ mod tests {
     }
 
     fn variable(name: &str) -> Token {
-        Token::Variable(name.into())
+        Token::Variable {
+            name: name.into(),
+            delimited: false,
+        }
+    }
+
+    fn delimited(name: &str) -> Token {
+        Token::Variable {
+            name: name.into(),
+            delimited: true,
+        }
     }
 
     /// A bad escape underlines the escape — `\q` at bytes 4..6 — not the
@@ -1519,10 +1543,7 @@ mod tests {
         assert_eq!(parts.len(), 2);
         let var = parts[0].span.unwrap();
         let lit = parts[1].span.unwrap();
-        assert_eq!(
-            splice_kinds(&parts[0].item),
-            vec![&Token::Variable("x".into())]
-        );
+        assert_eq!(splice_kinds(&parts[0].item), vec![&variable("x")]);
         assert_eq!((var.start, var.end), (3, 5));
         assert_eq!(parts[1].item, StringPart::Literal(" y".into()));
         assert_eq!((lit.start, lit.end), (5, 7));
@@ -1558,7 +1579,7 @@ mod tests {
     }
 
     /// Outside a string `$x[0]` is two tokens and a bracket group; the
-    /// parser reads the adjacency, as it does for `$(x)[0]` and `!{f}[0]`.
+    /// parser reads the adjacency, as it does for `!{f}[0]`.
     #[test]
     fn indexed_variable_is_not_fused() {
         let toks = tok_types("$xs[0]");
@@ -1869,7 +1890,7 @@ mod tests {
     fn explicit_boundary_keeps_trailing_dash() {
         let parts = string_parts("\"$(foo-)\"");
         assert_eq!(parts.len(), 1);
-        assert_eq!(splice_kinds(&parts[0].item), vec![&variable("foo-")]);
+        assert_eq!(splice_kinds(&parts[0].item), vec![&delimited("foo-")]);
     }
 
     /// A bare deref outside strings obeys the same rule.
@@ -1907,8 +1928,9 @@ mod tests {
         );
     }
 
-    /// Adjacent `[key]` groups extend a splice, and each closer keeps its own
-    /// span so the parser sees the same stream the outer lexer would emit.
+    /// Adjacent `[key]` groups extend every splice but `$(name)`, whose `[`
+    /// is text, and each closer keeps its own span so the parser sees the
+    /// same stream the outer lexer would emit.
     #[test]
     fn double_quoted_splice_takes_postfix_keys() {
         let src = "\"$h[file][0]\"";
@@ -1931,6 +1953,25 @@ mod tests {
         };
         assert_eq!(&src[tokens[3].1.range()], "]");
         assert_eq!(&src[tokens[6].1.range()], "]");
+
+        for splice in ["$x[k]", "!$x[k]", "!{f}[k]", "$[xs][0]"] {
+            let parts = string_parts(&format!("\"{splice}\""));
+            assert_eq!(parts.len(), 1, "{splice}");
+            // The space stands in for the `"`, so nested spans line up.
+            let outside = tok_types(&format!(" {splice}"));
+            let outside: Vec<&Token> = outside[..outside.len() - 1].iter().collect();
+            assert_eq!(splice_kinds(&parts[0].item), outside, "{splice}");
+        }
+
+        for (src, head) in [
+            ("\"$(x)[k]\"", vec![&delimited("x")]),
+            ("\"!$(x)[k]\"", vec![&Token::Bang, &delimited("x")]),
+        ] {
+            let parts = string_parts(src);
+            assert_eq!(parts.len(), 2, "{src}");
+            assert_eq!(splice_kinds(&parts[0].item), head, "{src}");
+            assert_eq!(parts[1].item, StringPart::Literal("[k]".into()), "{src}");
+        }
     }
 
     /// A sigil that opens nothing is text, `!$` included.

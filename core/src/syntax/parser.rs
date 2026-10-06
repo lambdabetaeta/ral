@@ -1077,9 +1077,9 @@ impl Parser {
             Token::SingleQuoted(_) | Token::Tag(_) => {
                 Ok(MapKeyForm::Static(self.parse_static_key()?))
             }
-            Token::Variable(k) => {
+            Token::Variable { name, .. } => {
                 self.advance();
-                Ok(MapKeyForm::Deref(k))
+                Ok(MapKeyForm::Deref(name))
             }
             Token::Word(Word::Plain(k)) if WordLiteral::classify(&k).is_some() => Err(self.error(
                 "map keys must be identifiers or quoted strings, not numbers; use '0': val",
@@ -1119,9 +1119,14 @@ impl Parser {
     /// `atom = primary ('[' word ']')*`
     ///
     /// A run of postfix keys becomes one flat `Ast::Index`, never a nest of
-    /// single-key ones.
+    /// single-key ones.  `$(name)` marks the end of a name and takes none,
+    /// forced or not.
     fn parse_atom(&mut self) -> Result<Ast, ParseError> {
+        let delimited = self.at_delimited_name();
         let (node_span, node) = self.capture_span(Self::parse_primary)?;
+        if delimited {
+            return Ok(node);
+        }
         let mut new_keys: Vec<Spanned<Ast>> = Vec::new();
         while self.peek() == &Token::LBracket && self.next_token_is_adjacent() {
             // Brackets included, so the caret underlines what the user wrote.
@@ -1140,6 +1145,21 @@ impl Parser {
             target: Spanned::boxed(node_span, node),
             keys: new_keys,
         })
+    }
+
+    /// `$(name)` or `!$(name)` ahead.
+    fn at_delimited_name(&self) -> bool {
+        let at = self.pos + usize::from(self.peek() == &Token::Bang);
+        matches!(
+            self.tokens.get(at),
+            Some((
+                Token::Variable {
+                    delimited: true,
+                    ..
+                },
+                _
+            ))
+        )
     }
 
     /// No gap since the previous token — what separates `$xs[0]` (an index)
@@ -1342,7 +1362,7 @@ impl Parser {
                 self.advance();
                 Self::parse_interpolation_parts(&parts, at)
             }
-            Token::Variable(name) => {
+            Token::Variable { name, .. } => {
                 self.advance();
                 Ok(Ast::Variable(name))
             }
@@ -1398,7 +1418,7 @@ impl Parser {
     fn parse_bang(&mut self) -> Result<Ast, ParseError> {
         let (span, inner) = self.capture_span(|p| {
             p.advance(); // consume `!`
-            if matches!(p.peek(), Token::Variable(_)) {
+            if matches!(p.peek(), Token::Variable { .. }) {
                 p.parse_atom()
             } else {
                 p.parse_primary()
@@ -1525,7 +1545,10 @@ impl Parser {
             self.tokens.get(i).map(|(t, _)| t),
             Some(Token::Word(Word::Plain(_)) | Token::SingleQuoted(_) | Token::Tag(_))
         ) || (allow_deref
-            && matches!(self.tokens.get(i).map(|(t, _)| t), Some(Token::Variable(_))));
+            && matches!(
+                self.tokens.get(i).map(|(t, _)| t),
+                Some(Token::Variable { .. })
+            ));
         is_key && matches!(self.tokens.get(i + 1).map(|(t, _)| t), Some(Token::Colon))
     }
 
@@ -2741,8 +2764,7 @@ mod tests {
 
     /// `!` reaches over a dereference's keys but not over a block's: the
     /// prelude's `!$p[tail]` forces the field, while `!{cmd}[k]` indexes the
-    /// forced result.  Inside a string only the bare name still carries its
-    /// keys; the block's `}` closes its splice, so that `[k]` is text.
+    /// forced result, inside a string or out.
     #[test]
     fn force_reaches_over_a_dereference_but_not_a_block() {
         let field = Ast::Force(Spanned::synthetic_boxed(Ast::Index {
@@ -2759,50 +2781,67 @@ mod tests {
             unwrap_stmts(parse("!$p[tail]").unwrap()),
             vec![field.clone()]
         );
-        assert_eq!(unwrap_stmts(parse("!{cmd}[k]").unwrap()), vec![result]);
-        let forced_block = Ast::Force(Spanned::synthetic_boxed(Ast::Block(body(vec![plain(
-            "cmd",
-        )]))));
+        assert_eq!(
+            unwrap_stmts(parse("!{cmd}[k]").unwrap()),
+            vec![result.clone()]
+        );
         assert_eq!(
             unwrap_stmts(parse("\"!$p[tail]!{cmd}[k]\"").unwrap()),
-            vec![Ast::Interpolation(vec![
-                sp(field),
-                sp(forced_block),
-                sp(Ast::Literal("[k]".into())),
-            ])]
+            vec![Ast::Interpolation(vec![sp(field), sp(result)])]
         );
     }
 
-    /// A splice ends where its delimiter does, so only the undelimited
-    /// `$name` — and the `!$name` that is one — continues into `[key]`.
+    /// `$(name)` marks the end of a name and takes no `[key]`, inside a
+    /// string or out; every other splice is indexed by the keys after it.
     #[test]
-    fn only_a_bare_name_splice_takes_postfix_keys() {
-        for src in ["\"$h[file]\"", "\"!$h[file]\""] {
+    fn a_delimited_name_takes_no_postfix_keys() {
+        for src in [
+            "\"$h[file]\"",
+            "\"!$h[file]\"",
+            "\"!{h}[file]\"",
+            "\"$[h][file]\"",
+        ] {
             let ast = unwrap_stmts(parse(src).unwrap());
             let Ast::Interpolation(parts) = &ast[0] else {
                 panic!("{src:?}: expected an interpolation, got {ast:?}");
             };
             assert_eq!(parts.len(), 1, "{src:?}: expected one part, got {parts:?}");
-            // `!` reaches over the keys, so the force is outside the index.
-            let indexed = match &parts[0].item {
-                Ast::Force(inner) => &inner.item,
-                other => other,
+            // `!$h` reaches over its keys; `!{h}` is forced, then indexed.
+            let (indexed, forced_outside) = match &parts[0].item {
+                Ast::Force(inner) => (&*inner.item, true),
+                other => (other, false),
             };
-            assert!(
-                matches!(indexed, Ast::Index { keys, .. } if keys.len() == 1),
-                "{src:?}: expected one index, got {:?}",
-                parts[0].item
+            let Ast::Index { target, keys } = indexed else {
+                panic!("{src:?}: expected an index, got {:?}", parts[0].item);
+            };
+            assert_eq!(keys.len(), 1, "{src:?}");
+            assert_eq!(forced_outside, src.starts_with("\"!$"), "{src:?}");
+            assert_eq!(
+                matches!(*target.item, Ast::Force(_)),
+                src.starts_with("\"!{"),
+                "{src:?}"
             );
         }
-        for src in ["\"$(h)[file]\"", "\"!{h}[file]\"", "\"$[h][file]\""] {
+
+        let ast = unwrap_stmts(parse("\"$(h)[file]\"").unwrap());
+        let Ast::Interpolation(parts) = &ast[0] else {
+            panic!("expected an interpolation, got {ast:?}");
+        };
+        assert_eq!(parts[1].item, Ast::Literal("[file]".into()));
+
+        for src in ["echo $(h)[file]", "echo !$(h)[file]"] {
+            let err = parse(src).unwrap_err();
+            assert!(
+                matches!(err.kind, ParseErrorKind::Touching { .. }),
+                "{src:?} must be refused as touching, got: {}",
+                err.message
+            );
+        }
+        for src in ["echo $h[file]", "echo !{h}[file]"] {
             let ast = unwrap_stmts(parse(src).unwrap());
-            let Ast::Interpolation(parts) = &ast[0] else {
-                panic!("{src:?}: expected an interpolation, got {ast:?}");
-            };
-            assert_eq!(
-                parts[1].item,
-                Ast::Literal("[file]".into()),
-                "{src:?}: expected the keys to be text"
+            assert!(
+                matches!(&ast[0], Ast::Call { args, .. } if matches!(args[0].item, Ast::Index { .. })),
+                "{src:?}: expected an index, got {ast:?}"
             );
         }
     }

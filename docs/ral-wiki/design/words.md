@@ -167,11 +167,14 @@ a force of `bar`. A rule that scans bare words as strings makes it the text
 `foo!bar` and `a!$b` a splice: `Hello!` would work, and an existing program
 would silently change meaning.
 
-*Indexing inside a string.* Outside a string `!{f}[k]` indexes; inside,
-§4.2 says `"!{f}[k]"` is the forced value followed by the text `[k]`, and
-only `$name` and `!$name` continue into `[k]`. Any rule that scans bare words
-as strings must say which of the two `$h[dir]/file` follows. This discrepancy
-predates the question and is independent of it.
+*Indexing inside a string.* Outside a string `!{f}[k]` indexed while
+inside one `"!{f}[k]"` was the forced value followed by the text `[k]`,
+and `$(name)` indexed outside but not inside. A rule that scans bare
+words as strings would have had to pick one. The chosen rule let the
+two be reconciled instead: `$(name)` takes nothing after it anywhere,
+every other splice takes `[key]` anywhere, and `$(red)[x]` outside a
+string is a touching error whose one-word reading, `"$(red)[x]"`, is
+the colour-and-text the string rule gives.
 
 *Command heads.* A string is not invocable (`"$d/printf" hi` is T0011), so a
 glued head `$cmd/bin hi` would fail the same way. Fine, but it means gluing

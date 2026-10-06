@@ -40,16 +40,15 @@ escapes it, and a literal string never splices.
 Outside a string nothing is fused: `$xs[0]` is a variable followed by a
 bracket group, and `parse_atom` reads the adjacency, as it does for `!{f}[k]`.
 
-**A splice ends where its delimiter does.** Inside a string `[` is otherwise
-text, so what a splice may swallow is decided by how it closes: `$(name)`,
-`$[…]` and `!{…}` end at their own `)`, `]`, `}`, and the `[` after one is
-text — `"$(red)[$host]"` is a colour and a bracketed host. Only the
-undelimited `$name` and `!$name` have nothing to end them, so `scan_splice`
-lets those two continue into adjacent `[key]` groups; `"$[!{f}[k]]"` indexes
-a delimited form explicitly. This is why the string and the bare text
-disagree for `"$(h)[file]"` alone: outside a string brackets are structure,
-inside one they are prose, and only a form that closes itself can tell them
-apart.
+**`$(name)` ends its splice; every other splice takes keys.** Inside a
+string `[` is otherwise text, so a splice must say whether the `[` after
+it is its own: `$(name)` exists to mark the end of a name and takes
+nothing, so `"$(red)[$host]"` is a colour and a bracketed host, while
+`$name`, `!$name`, `!{…}` and `$[…]` continue into adjacent `[key]`
+groups, and `scan_splice` lexes those keys into the splice. The same
+rule holds outside a string: `parse_atom` declines a postfix for a
+delimited name, so `$(red)[x]` is two words that touch
+([[design/words|words]]), and `$red[x]` is the index.
 
 **A word's *literal* shape is lexical too.** `WordLiteral::classify` (`ast.rs`)
 reads a bare word and nothing else — no expected type, no scope, no head — so a

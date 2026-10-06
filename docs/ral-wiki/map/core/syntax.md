@@ -19,8 +19,8 @@ sees raw bytes and bare words.
   inside a word is ordinary (`?a=1&b=2`); a bare `$` is refused naming
   the three things it can open. A splice inside `"…"` (`scan_splice`) is the
   token stream the same text has outside the string, so `"!$d"` and `!$d` are
-  one form; it ends at its own closing delimiter, and only the undelimited
-  `$name` and `!$name` continue into `[key]`. An unterminated string names
+  one form; `$(name)` ends it, and every other splice continues into
+  `[key]`. An unterminated string names
   the exact closer it still wants, `StringForm::closing()` — a bumped literal
   wants its `#` run back after the `'`, so the bare reflex never closes it.
   Folding fd 1 onto fd 2 (`1>&2`, and `>&2`, which is the same redirect
