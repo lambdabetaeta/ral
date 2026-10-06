@@ -215,9 +215,11 @@ pub(super) fn enveloped(
 ) -> Settled<(Command, Option<super::linux::InfoFd>)> {
     let own = super::reexec::own().map_err(refused)?;
     let program = faithful(own.arg0(), "ral's own path")?;
-    let (ruleset, confinement) = super::linux::landlock::build(&projection.exec, host.landlock)
-        .map_err(Break::Error)?
-        .unzip();
+    let rendered = projection.rendered().map_err(refused)?;
+    let (ruleset, confinement) =
+        super::linux::landlock::build(&projection.exec, &rendered.fs, host.landlock)
+            .map_err(Break::Error)?
+            .unzip();
     let warrant = issue(own, confinement, admitted)?;
     let mut handoff = Handoff::default();
     handoff.lend(Slot::Warrant, warrant.as_fd());

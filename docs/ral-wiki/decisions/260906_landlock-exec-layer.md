@@ -19,6 +19,25 @@ status: active
 > to enter. The rename test reads the inode, not `mv`'s exit: uutils `mv`
 > (Fedora 42 and later) hides `EXDEV` by copying and unlinking, so a refused
 > rename passes any test that asks only whether the file moved.
+>
+> **Amended 2026-10-06: blocks hold in the kernel.** Finding 1 no longer
+> leaves a deny inside an admit to the gate. The parent reads the kernel list
+> back as a table (`ExecRules::from_kernel`) and admits each allowed directory
+> with nothing blocked beneath it as one hierarchy rule; one holding a deny
+> dir, a deny file or a walked veto is listed along the spine to each block
+> only, every entry judged by `Table::verdict`, so a deny by another spelling
+> holds as in the guard, and each subdirectory in turn. That is a snapshot:
+> a program added to an expanded directory after launch is denied until the
+> next launch, where Seatbelt admits it at once, the fail-closed side of a
+> declared asymmetry; a directory with no block beneath it, `target/` under
+> `exec: cwd:/`, is never expanded. A veto is walked only where no trusted
+> write reaches (`write_reach`), since under a trusted admit the child can
+> author a renamed copy and the veto is advisory
+> ([[decisions/261006_a-veto-freezes-what-a-write-covers|a-veto-freezes-what-a-write-covers]]);
+> walking the user's own tree per launch would buy nothing for it. What stays
+> with the gate: those vetoes, programs added after launch in an expanded
+> directory, and anything beneath a directory the walk cannot read, which is
+> admitted nowhere. A hard link aliases an inode, as Seatbelt's `literal` does.
 
 Closes [[decisions/260530_linux-exec-confinement|linux-exec-confinement]]. A
 confined payload now enters a Landlock domain of its own
@@ -35,11 +54,11 @@ make / slave`). The order is therefore bwrap, then the payload's own
 Four findings shape it.
 
 1. **Landlock is allow-list only.** It cannot express "everything but this", so
-   the filesystem half stays with bwrap's mounts, and on the exec half
-   `deny_paths` / `deny_dirs` / `deny_basenames` render nothing: a deny outside
-   every admit is already absence, and a deny *inside* an admit stays with the
-   in-ral gate. That is a declared asymmetry against macOS, whose Seatbelt
-   profile carries `deny_basenames` into the kernel.
+   the filesystem half stays with bwrap's mounts, and on the exec half a deny
+   outside every admit is already absence, while a deny *inside* an admit is
+   rendered by subtraction, the admit's entries the table still allows (see
+   the second amendment). Where Seatbelt carries a deny into the kernel as a
+   rule, Landlock carries it as an absence over the tree at launch.
 
 2. **A layer restricts only what it handles — except `Refer`.** Any domain
    refuses *every* cross-directory rename and link with `EXDEV` unless it both

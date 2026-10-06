@@ -11,8 +11,8 @@
 //! re-execs that check never sees (`sh -c`, `find -exec`): macOS a Seatbelt
 //! `process-exec` clause, Linux a Landlock `Execute` ruleset the payload
 //! enters inside the bwrap envelope (`linux::landlock`).  Landlock being
-//! allow-list only, a deny *inside* an allow stays with the in-process guard
-//! there; Seatbelt carries it into the kernel.
+//! allow-list only, a deny *inside* an allow is rendered by subtraction, over
+//! the tree as it stands at launch; Seatbelt carries it into the kernel as is.
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod carriers;

@@ -6,20 +6,25 @@
 //! it at [`Slot::Ruleset`] and enters it ([`Landlocked::enter`]), never before
 //! bwrap: a domain handling any fs right forbids `mount(2)`, bwrap's first act.
 //!
-//! Declared gap: Landlock is allow-list only and cannot remove part of an
-//! allowed directory, so denies and vetoes render nothing here: a deny
-//! outside every allow is already absence, and a deny inside an allowed
-//! directory holds only at the in-process guard on Linux, where Seatbelt
-//! would carry it into the kernel.
+//! Landlock is allow-list only, so a block inside an allowed directory is
+//! rendered by subtraction ([`expand`]): the entries the table still admits,
+//! as the tree stands at launch.  A program added there afterwards is denied
+//! until the next launch, and a veto is carried only into hierarchies no
+//! trusted write reaches ([`vetoes_walk`]).
 
 use super::super::confinement_unavailable;
 use super::super::warrant::Slot;
-use crate::path::render_real;
-use crate::types::{ExecProjection, ExecRule};
+use crate::capability::{ExecRules, ExecScope, Subject};
+use crate::path::{Deny, RealPath, Rendered, render_real};
+use crate::types::{ExecProjection, FsProjection, WriteReach};
 use libc::{c_int, c_uint};
+use rustix::fs::{FileType, Mode, OFlags};
+use std::ffi::OsStr;
 use std::fmt;
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 /// `LANDLOCK_CREATE_RULESET_VERSION` in the UAPI; not exported by `libc`.
@@ -254,12 +259,9 @@ impl Landlocked {
     pub(crate) fn enter(&self) -> Result<(), String> {
         let ruleset = Ruleset::take(Slot::Ruleset)?;
         if self.refer_root {
-            open_nosym("/")
+            open_nosym("/".as_ref(), OFlags::empty())
                 .and_then(|root| ruleset.admit(root.as_fd(), Access::REFER))
-                .map_err(|source| Error::Admit {
-                    name: "/".to_string(),
-                    source,
-                })?;
+                .map_err(|source| Error::admit("/", source))?;
         }
         Ok(ruleset.restrict_self()?)
     }
@@ -311,13 +313,15 @@ fn plan(exec: &ExecProjection, landlock: Landlock) -> Result<Option<Plan>, crate
 }
 
 /// The ruleset for `exec` on a kernel at `landlock`, and what the payload is
-/// promised; `None` where there is nothing to enter.
+/// promised; `None` where there is nothing to enter.  `fs` decides where a
+/// veto is carried into an allowed directory.
 ///
 /// # Errors
 /// As [`plan`]; a ruleset or rule the kernel refuses; an admit that cannot be
 /// opened, or that a symlink has replaced since the grant was rendered.
 pub(crate) fn build(
     exec: &ExecProjection,
+    fs: &FsProjection<Rendered>,
     landlock: Landlock,
 ) -> Result<Option<(Ruleset, Landlocked)>, crate::types::Error> {
     let Some(Plan { handled, scoped }) = plan(exec, landlock)? else {
@@ -325,85 +329,230 @@ pub(crate) fn build(
     };
     let failed = |why: String| crate::types::Error::new(why, 1);
     let ruleset = Ruleset::create(handled, scoped).map_err(|e| failed(Error::Create(e).into()))?;
-    if let ExecProjection::Restricted(rules) = exec {
-        admit_exec(&ruleset, rules).map_err(failed)?;
-    }
+    admit_exec(&ruleset, exec, fs).map_err(failed)?;
     let refer_root = handled.contains(Access::REFER);
     Ok(Some((ruleset, Landlocked { refer_root })))
 }
 
-/// ral's own pinned inode, the loader base, and every allow rule: a dir as
-/// the hierarchy beneath it, a file as itself.
-fn admit_exec(ruleset: &Ruleset, rules: &[ExecRule]) -> Result<(), String> {
-    let execute = |name: &str, fd: BorrowedFd<'_>| {
-        ruleset
-            .admit(fd, Access::EXECUTE)
-            .map_err(|source| Error::Admit {
-                name: name.to_string(),
-                source,
-            })
+/// ral's own pinned inode, the loader base, every allowed file as itself, and
+/// every allowed directory less what the table blocks beneath it.
+fn admit_exec(
+    ruleset: &Ruleset,
+    exec: &ExecProjection,
+    fs: &FsProjection<Rendered>,
+) -> Result<(), String> {
+    let ExecProjection::Restricted(rules) = exec else {
+        return Ok(());
+    };
+    let execute = |name: &Path, fd: BorrowedFd<'_>| {
+        (ruleset.admit(fd, Access::EXECUTE)).map_err(|source| Error::admit(name.display(), source))
     };
     // A ral run inside starts its own bundled tools and pipeline anchors by
     // re-executing itself, so no policy names it: as macOS admits its own.
     let own = super::super::reexec::own()?;
-    execute(&own.arg0().to_string_lossy(), own.fd())?;
-    let mut named: Vec<(String, bool)> = platform_base().into_iter().map(|n| (n, true)).collect();
-    for rule in rules {
-        let (path, file) = match rule {
-            ExecRule::Dir { path, allow: true } => (path, false),
-            ExecRule::File { path, allow: true } => (path, true),
-            _ => continue,
-        };
-        named.extend(render_real(path)?.iter().map(|n| (n.as_str().to_owned(), file)));
-    }
-    for (name, file) in &named {
-        let Some(fd) = open_admit(name)? else {
+    execute(own.arg0(), own.fd())?;
+    let table = ExecRules::from_kernel(rules);
+    let base = platform_base();
+    let files = table.allowed_files().map(RealPath::as_path);
+    for name in base.iter().map(PathBuf::as_path).chain(files) {
+        let Some(fd) = open_admit(name, OFlags::empty())? else {
             continue;
         };
         // A file admit names that file alone, never what a directory since
         // put there holds.
-        if *file && is_directory(name, &fd)? {
+        if shape(&fd).map_err(|e| Error::admit(name.display(), e))? == FileType::Directory {
             continue;
         }
         execute(name, fd.as_fd())?;
     }
+    let walks = vetoes_walk(exec, fs, &table)?;
+    expand(&table, &walks, &mut |admit| {
+        ruleset.admit(admit.fd, Access::EXECUTE)
+    })?;
     Ok(())
 }
 
-/// `name`, opened here in the host; `None` where it names nothing.
-fn open_admit(name: &str) -> Result<Option<OwnedFd>, Error> {
-    match open_nosym(name) {
+/// Where a veto is carried into an allowed directory: everywhere under an
+/// unrestricted `fs` holding one, which the envelope freezes whole; under a
+/// restricted one, wherever no trusted write reaches, since a covered
+/// directory is frozen and an apart one unwritable, so the launch's snapshot
+/// stays exact.  Under a trusted write a bare-name veto is advisory.
+fn vetoes_walk<'a>(
+    exec: &ExecProjection,
+    fs: &'a FsProjection<Rendered>,
+    table: &ExecRules,
+) -> Result<impl Fn(&RealPath) -> bool + 'a, String> {
+    let frozen = exec.carries_veto();
+    let reach = match fs {
+        FsProjection::Unrestricted => None,
+        FsProjection::Restricted(writes) => {
+            let admitted = (table.allowed_dirs())
+                .map(render_real)
+                .collect::<Result<Vec<_>, _>>()?
+                .concat();
+            Some((writes, admitted))
+        }
+    };
+    Ok(move |dir: &RealPath| match &reach {
+        None => frozen,
+        // A name that does not render is walked: over-listing is cost.
+        Some((writes, admitted)) => render_real(dir).map_or(true, |names| {
+            (names.iter()).any(|name| writes.write_reach(name, admitted) != WriteReach::Trusted)
+        }),
+    })
+}
+
+/// One object [`expand`] admits; `whole` when it stands for its hierarchy,
+/// which only a recording sink reads: Landlock's rule on a file is the file.
+#[derive(Clone, Copy)]
+struct Admit<'a> {
+    path: &'a RealPath,
+    fd: BorrowedFd<'a>,
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "read by the recording sink alone")
+    )]
+    whole: bool,
+}
+
+/// What `table` admits of this host's tree, into `sink`: a live directory
+/// with no block beneath it whole; one with a block beneath it entry by
+/// entry, each judged by the table, each subdirectory in turn.  A denied
+/// directory is never entered: what the table allows beneath it is a live
+/// scope of its own, admitted from the top.
+fn expand(
+    table: &ExecRules,
+    vetoes_walk: &dyn Fn(&RealPath) -> bool,
+    sink: &mut dyn FnMut(Admit<'_>) -> io::Result<()>,
+) -> Result<(), Error> {
+    let mut walk = Walk {
+        table,
+        walks: vetoes_walk,
+        sink,
+    };
+    for root in table.allowed_dirs() {
+        if let Some(fd) = open_admit(root.as_path(), OFlags::DIRECTORY)? {
+            walk.dir(root, fd.as_fd())?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether a rule could speak strictly beneath `d` other than through `d`'s
+/// own verdict: a deny dir or file strictly within `d` under `Deny`'s
+/// identity (over-listing is cost, never a hole), or any veto where vetoes
+/// walk `d`.
+fn listed(table: &ExecRules, d: &RealPath, vetoes_walk: bool) -> bool {
+    table.denies().any(|scope| match scope {
+        ExecScope::Dir(p) | ExecScope::File(p) => p.within::<Deny>(d) && !d.within::<Deny>(p),
+        ExecScope::Name(_) => vetoes_walk,
+        ExecScope::Carrier(_) | ExecScope::Tool(_) => false,
+    })
+}
+
+/// One expansion in progress.  Every handle is opened relative to its
+/// parent's, never through a symlink, handed to the sink, and closed.
+struct Walk<'w> {
+    table: &'w ExecRules,
+    walks: &'w dyn Fn(&RealPath) -> bool,
+    sink: &'w mut dyn FnMut(Admit<'_>) -> io::Result<()>,
+}
+
+impl Walk<'_> {
+    fn dir(&mut self, d: &RealPath, fd: BorrowedFd<'_>) -> Result<(), Error> {
+        use rustix::fs::{RawDir, openat};
+        if !listed(self.table, d, (self.walks)(d)) {
+            return self.admit(Admit {
+                path: d,
+                fd,
+                whole: true,
+            });
+        }
+        let read = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
+        let Some(listing) = reached(openat(fd, c".", read, Mode::empty()), d)? else {
+            return Ok(());
+        };
+        let mut buf = Vec::with_capacity(8192);
+        let mut entries = RawDir::new(listing, buf.spare_capacity_mut());
+        while let Some(entry) = entries.next() {
+            let entry = entry.map_err(|errno| Error::admit(d, errno))?;
+            let name = OsStr::from_bytes(entry.file_name().to_bytes());
+            // Symlinks are nothing: a rule attaches to the inode one
+            // reaches, and the guard judges the real path.
+            let shaped = matches!(
+                entry.file_type(),
+                FileType::Directory | FileType::RegularFile | FileType::Unknown
+            );
+            if !shaped || name == "." || name == ".." {
+                continue;
+            }
+            let e = d.entry(name);
+            let flags = OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+            let Some(object) = reached(openat(fd, entry.file_name(), flags, Mode::empty()), &e)?
+            else {
+                continue;
+            };
+            // The inode opened decides, not the type listed before it.
+            match shape(&object).map_err(|errno| Error::admit(&e, errno))? {
+                FileType::Directory if !self.table.verdict(Subject::Under(&e)).is_denied() => {
+                    self.dir(&e, object.as_fd())?;
+                }
+                FileType::RegularFile if !self.table.verdict(Subject::File(&e)).is_denied() => {
+                    self.admit(Admit {
+                        path: &e,
+                        fd: object.as_fd(),
+                        whole: false,
+                    })?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn admit(&mut self, admit: Admit<'_>) -> Result<(), Error> {
+        (self.sink)(admit).map_err(|source| Error::admit(admit.path, source))
+    }
+}
+
+/// `None` where the walk cannot reach an entry: gone since it was listed, a
+/// symlink now, or unreadable, which admits it nowhere and fails closed.
+fn reached<T>(opened: rustix::io::Result<T>, at: &RealPath) -> Result<Option<T>, Error> {
+    use rustix::io::Errno;
+    match opened {
+        Ok(object) => Ok(Some(object)),
+        Err(Errno::NOENT | Errno::NOTDIR | Errno::LOOP | Errno::ACCESS) => Ok(None),
+        Err(errno) => Err(Error::admit(at, errno)),
+    }
+}
+
+/// `name`, opened here in the host; `None` where it names nothing, or not
+/// the shape `flags` asks for.
+fn open_admit(name: &Path, flags: OFlags) -> Result<Option<OwnedFd>, Error> {
+    match open_nosym(name, flags) {
         Ok(fd) => Ok(Some(fd)),
         Err(e) if matches!(e.raw_os_error(), Some(libc::ENOENT | libc::ENOTDIR)) => Ok(None),
         Err(e) if e.raw_os_error() == Some(libc::ELOOP) => Err(Error::Race {
-            name: name.to_string(),
+            name: name.display().to_string(),
         }),
-        Err(source) => Err(Error::Admit {
-            name: name.to_string(),
-            source,
-        }),
+        Err(source) => Err(Error::admit(name.display(), source)),
     }
 }
 
 /// Never through a symlink: a rule attaches to the inode the open reaches.
-fn open_nosym(path: &str) -> io::Result<OwnedFd> {
-    use rustix::fs::{CWD, Mode, OFlags, ResolveFlags, openat2};
+fn open_nosym(path: &Path, flags: OFlags) -> io::Result<OwnedFd> {
+    use rustix::fs::{CWD, ResolveFlags, openat2};
     Ok(openat2(
         CWD,
         path,
-        OFlags::PATH | OFlags::CLOEXEC,
+        OFlags::PATH | OFlags::CLOEXEC | flags,
         Mode::empty(),
         ResolveFlags::NO_SYMLINKS,
     )?)
 }
 
-fn is_directory(name: &str, fd: &OwnedFd) -> Result<bool, Error> {
-    use rustix::fs::{FileType, fstat};
-    let stat = fstat(fd).map_err(|errno| Error::Admit {
-        name: name.to_string(),
-        source: errno.into(),
-    })?;
-    Ok(FileType::from_raw_mode(stat.st_mode) == FileType::Directory)
+fn shape(fd: &OwnedFd) -> rustix::io::Result<FileType> {
+    Ok(FileType::from_raw_mode(rustix::fs::fstat(fd)?.st_mode))
 }
 
 /// The dynamic linkers, and nothing else.  `execve` of a dynamic binary needs
@@ -412,7 +561,7 @@ fn is_directory(name: &str, fd: &OwnedFd) -> Result<bool, Error> {
 /// libraries the loader then maps need no right from this layer.  So the base
 /// is a set of regular files — never a directory, which under `/usr/bin`
 /// would be a layer that denies nothing.
-fn platform_base() -> Vec<String> {
+fn platform_base() -> Vec<PathBuf> {
     const PATTERNS: &[&str] = &[
         "/lib/ld*.so*",
         "/lib64/ld*.so*",
@@ -424,7 +573,7 @@ fn platform_base() -> Vec<String> {
         "/lib/*/ld*.so*",
         "/usr/lib/*/ld*.so*",
     ];
-    let mut found: Vec<String> = PATTERNS
+    let mut found: Vec<PathBuf> = PATTERNS
         .iter()
         .filter_map(|p| glob::glob(p).ok())
         .flatten()
@@ -433,7 +582,6 @@ fn platform_base() -> Vec<String> {
         // the two spellings collapse to one rule.
         .filter_map(|p| crate::path::canon::canonicalise_strict(&p).ok())
         .filter(|p| p.is_file())
-        .filter_map(|p| p.into_os_string().into_string().ok())
         .collect();
     found.sort();
     found.dedup();
@@ -473,6 +621,15 @@ impl fmt::Display for Error {
     }
 }
 
+impl Error {
+    fn admit(name: impl fmt::Display, source: impl Into<io::Error>) -> Self {
+        Self::Admit {
+            name: name.to_string(),
+            source: source.into(),
+        }
+    }
+}
+
 impl From<Error> for String {
     fn from(e: Error) -> Self {
         e.to_string()
@@ -483,6 +640,8 @@ impl From<Error> for String {
 #[allow(clippy::disallowed_methods, reason = "[test] test fs scaffolding")]
 mod tests {
     use super::*;
+    use crate::types::ExecRule;
+    use std::collections::BTreeSet;
 
     fn restricted() -> ExecProjection {
         ExecProjection::Restricted(Vec::new())
@@ -508,7 +667,10 @@ mod tests {
         let why = plan(&restricted(), Landlock::Absent)
             .expect_err("a restricted exec grant needs Landlock")
             .message;
-        assert!(why.starts_with("sandbox confinement unavailable: "), "{why}");
+        assert!(
+            why.starts_with("sandbox confinement unavailable: "),
+            "{why}"
+        );
         assert!(why.contains("Landlock") && why.contains("5.13"), "{why}");
         assert_eq!(
             plan(&ExecProjection::Unrestricted, Landlock::Absent).expect("nothing to enforce"),
@@ -518,7 +680,10 @@ mod tests {
             let why = plan(&exec, Landlock::Unprobed(libc::EPERM))
                 .expect_err("a failed probe is not a kernel without Landlock")
                 .message;
-            assert!(why.starts_with("sandbox confinement unavailable: "), "{why}");
+            assert!(
+                why.starts_with("sandbox confinement unavailable: "),
+                "{why}"
+            );
             assert!(why.contains("probe failed"), "{why}");
         }
     }
@@ -567,19 +732,33 @@ mod tests {
     /// there is no ruleset to create.
     fn landlock() -> Option<Landlock> {
         let probed = Landlock::probe();
-        matches!(probed, Landlock::At(_)).then_some(probed).or_else(|| {
-            eprintln!("skipping: {probed}");
-            None
-        })
+        matches!(probed, Landlock::At(_))
+            .then_some(probed)
+            .or_else(|| {
+                eprintln!("skipping: {probed}");
+                None
+            })
     }
 
-    fn allow(path: &std::path::Path, dir: bool) -> ExecRule {
-        let path = crate::path::RealPath::assumed(path);
+    fn rule(path: &Path, dir: bool, allow: bool) -> ExecRule {
+        let path = RealPath::assumed(path);
         if dir {
-            ExecRule::Dir { path, allow: true }
+            ExecRule::Dir { path, allow }
         } else {
-            ExecRule::File { path, allow: true }
+            ExecRule::File { path, allow }
         }
+    }
+
+    fn allow(path: &Path, dir: bool) -> ExecRule {
+        rule(path, dir, true)
+    }
+
+    fn deny(path: &Path, dir: bool) -> ExecRule {
+        rule(path, dir, false)
+    }
+
+    fn veto(name: &str) -> ExecRule {
+        ExecRule::Veto(crate::path::command_name_key(name))
     }
 
     /// An admit naming nothing, and a file admit since replaced by a
@@ -595,7 +774,12 @@ mod tests {
             allow(&tmp.path().join("absent/beneath"), false),
             allow(tmp.path(), false),
         ];
-        let built = build(&ExecProjection::Restricted(rules), landlock).expect("builds");
+        let built = build(
+            &ExecProjection::Restricted(rules),
+            &FsProjection::Unrestricted,
+            landlock,
+        )
+        .expect("builds");
         assert!(built.is_some(), "a restricted projection is entered");
     }
 
@@ -610,8 +794,11 @@ mod tests {
         std::fs::create_dir(&outside).expect("outside");
         let allowed = tmp.path().join("allowed");
         std::os::unix::fs::symlink(&outside, &allowed).expect("symlink");
-        let Err(why) = build(&ExecProjection::Restricted(vec![allow(&allowed, true)]), landlock)
-        else {
+        let Err(why) = build(
+            &ExecProjection::Restricted(vec![allow(&allowed, true)]),
+            &FsProjection::Unrestricted,
+            landlock,
+        ) else {
             panic!("a symlink would admit its target");
         };
         assert!(why.message.contains("a race"), "{}", why.message);
@@ -624,13 +811,13 @@ mod tests {
             !base.is_empty(),
             "a Linux host runs dynamic binaries, so it has a loader"
         );
-        for entry in &base {
-            let path = std::path::Path::new(entry);
-            assert!(path.is_file(), "{entry} is not a regular file");
+        for path in &base {
+            assert!(path.is_file(), "{} is not a regular file", path.display());
             assert!(
                 path.file_name()
                     .is_some_and(|n| n.to_string_lossy().starts_with("ld")),
-                "{entry} is not a linker"
+                "{} is not a linker",
+                path.display()
             );
             for dir in [
                 "/bin/",
@@ -640,10 +827,195 @@ mod tests {
                 "/usr/local/bin/",
             ] {
                 assert!(
-                    !entry.starts_with(dir),
-                    "{entry} would make the base admit a whole command directory"
+                    !path.starts_with(dir),
+                    "{} would make the base admit a whole command directory",
+                    path.display()
                 );
             }
         }
+    }
+
+    // ── Expansion ────────────────────────────────────────────────────────
+
+    /// Every regular file of [`tree`].
+    const FILES: [&str; 8] = ["a", "x", "n", "s/f", "s/t/g", "s/t/n", "sub/h", "sub/n"];
+
+    /// [`FILES`] under a real `d`.
+    fn tree() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let d = RealPath::of(tmp.path()).expect("real").as_path().join("d");
+        for file in FILES {
+            let path = d.join(file);
+            std::fs::create_dir_all(path.parent().expect("a parent")).expect("dirs");
+            std::fs::write(&path, "").expect("file");
+        }
+        (tmp, d)
+    }
+
+    /// What [`expand`] hands its sink, each handle checked against its name.
+    fn expanded(rules: &[ExecRule], walks: bool) -> Result<BTreeSet<(PathBuf, bool)>, Error> {
+        use std::os::unix::fs::MetadataExt;
+        let mut seen = BTreeSet::new();
+        expand(&ExecRules::from_kernel(rules), &|_| walks, &mut |admit| {
+            let path = admit.path.as_path();
+            let opened = rustix::fs::fstat(admit.fd)?.st_ino;
+            assert_eq!(
+                opened,
+                std::fs::symlink_metadata(path)?.ino(),
+                "{}",
+                admit.path
+            );
+            seen.insert((path.to_path_buf(), admit.whole));
+            Ok(())
+        })?;
+        Ok(seen)
+    }
+
+    fn admits(d: &Path, admitted: &[(&str, bool)]) -> BTreeSet<(PathBuf, bool)> {
+        (admitted.iter())
+            .map(|&(rel, whole)| (d.join(rel), whole))
+            .collect()
+    }
+
+    /// Each admit is the table's own verdict on a file the walk reached: a
+    /// denied file absent, a denied directory never entered, an allow inside
+    /// it a root of its own, a vetoed name absent wherever it lies.
+    #[test]
+    fn an_expansion_admits_exactly_what_the_table_allows() {
+        let (_tmp, d) = tree();
+        let rules = [
+            allow(&d, true),
+            deny(&d.join("x"), false),
+            deny(&d.join("s"), true),
+            allow(&d.join("s/t"), true),
+            veto("n"),
+        ];
+        let table = ExecRules::from_kernel(&rules);
+        let model: BTreeSet<_> = (FILES.iter())
+            .map(|f| d.join(f))
+            .filter(|f| {
+                !table
+                    .verdict(Subject::File(&RealPath::assumed(f)))
+                    .is_denied()
+            })
+            .map(|f| (f, false))
+            .collect();
+        assert_eq!(
+            model,
+            admits(&d, &[("a", false), ("s/t/g", false), ("sub/h", false)])
+        );
+        assert_eq!(expanded(&rules, true).expect("expands"), model);
+    }
+
+    /// Only the spine to a block is listed; every directory off it is one
+    /// rule, however much lies beneath.
+    #[test]
+    fn a_directory_with_no_block_beneath_it_is_one_whole_admit() {
+        let (_tmp, d) = tree();
+        assert_eq!(
+            expanded(&[allow(&d, true)], true).expect("expands"),
+            admits(&d, &[("", true)])
+        );
+        let spine = admits(
+            &d,
+            &[
+                ("a", false),
+                ("x", false),
+                ("n", false),
+                ("sub", true),
+                ("s/t", true),
+            ],
+        );
+        let rules = [allow(&d, true), deny(&d.join("s/f"), false)];
+        assert_eq!(expanded(&rules, true).expect("expands"), spine);
+    }
+
+    /// A deny holds every spelling of its name, in the kernel as in the guard.
+    #[test]
+    fn a_deny_by_another_spelling_blocks_the_entry() {
+        let (_tmp, d) = tree();
+        let rules = [allow(&d, true), deny(&d.join("X"), false)];
+        let seen = expanded(&rules, true).expect("expands");
+        assert!(!seen.contains(&(d.join("x"), false)), "{seen:?}");
+        assert!(seen.contains(&(d.join("a"), false)), "{seen:?}");
+    }
+
+    /// Where vetoes do not walk, a vetoed name costs no listing; where they
+    /// do, it is gone from every directory.
+    #[test]
+    fn a_veto_is_carried_only_where_vetoes_walk() {
+        let (_tmp, d) = tree();
+        let rules = [allow(&d, true), veto("n")];
+        assert_eq!(
+            expanded(&rules, false).expect("expands"),
+            admits(&d, &[("", true)])
+        );
+        let seen = expanded(&rules, true).expect("expands");
+        for vetoed in ["n", "sub/n", "s/t/n"] {
+            assert!(
+                !seen.contains(&(d.join(vetoed), false)),
+                "{vetoed}: {seen:?}"
+            );
+        }
+        assert!(seen.contains(&(d.join("sub/h"), false)), "{seen:?}");
+    }
+
+    /// A file admit names a file; a directory since put at its name is no
+    /// root, so nothing beneath it is admitted.
+    #[test]
+    fn a_file_admit_now_a_directory_admits_nothing_beneath() {
+        let (_tmp, d) = tree();
+        let seen = expanded(&[allow(&d.join("sub"), false)], true).expect("expands");
+        assert!(seen.is_empty(), "{seen:?}");
+    }
+
+    #[test]
+    fn an_absent_root_is_dropped() {
+        let (_tmp, d) = tree();
+        let seen = expanded(&[allow(&d.join("absent"), true)], true).expect("expands");
+        assert!(seen.is_empty(), "{seen:?}");
+    }
+
+    /// A grant renders real paths, so a root that is a symlink now was
+    /// planted since: a race, which refuses rather than admit its target.
+    #[test]
+    fn a_root_now_a_symlink_refuses_the_expansion() {
+        let (_tmp, d) = tree();
+        let link = d.join("link");
+        std::os::unix::fs::symlink(d.join("sub"), &link).expect("symlink");
+        let refused = expanded(&[allow(&link, true)], true);
+        assert!(matches!(refused, Err(Error::Race { .. })), "{refused:?}");
+    }
+
+    /// A veto walks the hierarchies the envelope keeps unwritable, frozen or
+    /// apart, and never a trusted one.
+    #[test]
+    fn a_veto_walks_every_hierarchy_but_a_trusted_one() {
+        let bin = Path::new("/ral-test/w/bin");
+        let walks = |exec: &ExecProjection, write: &[&str]| {
+            let ExecProjection::Restricted(rules) = exec else {
+                unreachable!("an exec grant");
+            };
+            let write: Vec<String> = write.iter().map(ToString::to_string).collect();
+            let fs = FsProjection::Restricted(crate::types::FsRules {
+                write_prefixes: crate::path::render_paths(&write).expect("renders"),
+                ..crate::types::FsRules::default()
+            });
+            let table = ExecRules::from_kernel(rules);
+            vetoes_walk(exec, &fs, &table).expect("renders")(&RealPath::assumed(bin))
+        };
+        let exec = ExecProjection::Restricted(vec![allow(bin, true), veto("n")]);
+        assert!(walks(&exec, &["/ral-test/w"]), "covered");
+        assert!(walks(&exec, &[]), "apart");
+        assert!(!walks(&exec, &["/ral-test/w/bin"]), "trusted");
+        let unrestricted = |exec: &ExecProjection| {
+            let table = ExecRules::default();
+            vetoes_walk(exec, &FsProjection::Unrestricted, &table).expect("renders")(
+                &RealPath::assumed(bin),
+            )
+        };
+        assert!(unrestricted(&exec), "a veto under an unrestricted fs");
+        let no_veto = ExecProjection::Restricted(vec![allow(bin, true)]);
+        assert!(!unrestricted(&no_veto), "nothing frozen, nothing to walk");
     }
 }

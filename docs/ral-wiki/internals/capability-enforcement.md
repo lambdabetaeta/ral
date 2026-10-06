@@ -1,5 +1,5 @@
 ---
-verified_at_commit: e524fe51
+verified_at_commit: 7f4d7d11
 verified_at_date: 2026-10-06
 anchors: [check_exec, Admitted, ExecRules, Head, carriers, check_fs_op, check_fs_exact, locate, walk, Located, admits_fs_exact, fs_verdict, pinned_binary, sandbox_projection, region, Region, Table, live, GrantStack, sandboxed_command, build_launch, projection_enforceable, serve_warrant, Warrant, Slot, Handoff, Landlocked, bwrap_options, SessionSandbox, fs_capability_name, ensure_fs_grant, deputy_prefixes, confinement_unavailable, spawn_error, Envelope, InfoFd, HostEnvelope, render_dev, render_cgroup, default_ro_binds, Pinned, pin_envelope]
 ---
@@ -140,10 +140,10 @@ spawned process does on its own.**
   `build_launch` launches from. On macOS the Seatbelt profile additionally
   renders the rules as `process-exec` forms, catching re-execs the in-process
   guard never sees (`sh -c`, `find -exec`); on Linux a Landlock ruleset the
-  parent builds and the payload enters inside the bwrap envelope carries their
-  allows into the kernel, Landlock being unable to subtract inside an
-  allowed directory, so on Linux an exec deny or veto under an allowed
-  directory is not yet enforced by the kernel layer ([[decisions/260906_landlock-exec-layer|landlock-exec-layer]]); the
+  parent builds and the payload enters inside the bwrap envelope carries them
+  into the kernel, each allowed directory less what the table blocks beneath
+  it over the tree at launch, a veto only where no trusted write reaches
+  ([[decisions/260906_landlock-exec-layer|landlock-exec-layer]]); the
   AppContainer on Windows has no path-exec filter, so there the in-process
   guard stands alone and check-to-exec timing stays open. The kernel's list is
   `ExecRules::kernel` of the very table in the `Admitted`, ordered by `Rank`

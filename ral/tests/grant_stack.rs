@@ -271,26 +271,27 @@ fn an_exact_exec_allow_beats_a_covering_deny_dir() {
 }
 
 /// A veto holds every spelling of the name, and refuses plainly: its key is
-/// folded already, so no respelling is named.
+/// folded already, so no respelling is named.  The vetoed name is not the
+/// scripts' interpreter, which the kernel would refuse the control too.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_veto_holds_every_spelling_of_the_name() {
     let d = Scratch::new("stack_exec_veto");
     let bin = d.join("bin");
-    let (upper, longer) = (bin.join("SH"), bin.join("shx"));
+    let (upper, longer) = (bin.join("TOOL"), bin.join("toolx"));
     common::script(&upper);
     common::script(&longer);
-    let layer = exec(&[(&format!("{}/", bin.display()), "allow"), ("sh", "deny")]);
+    let layer = exec(&[(&format!("{}/", bin.display()), "allow"), ("tool", "deny")]);
 
     let out = under(&layer, &upper.display().to_string());
-    assert_not_run(&out, "`SH` under a veto on `sh`");
+    assert_not_run(&out, "`TOOL` under a veto on `tool`");
     assert!(
         !out.stderr.contains("another spelling"),
         "a veto must refuse plainly; stderr:\n{}",
         out.stderr
     );
     let out = under(&layer, &longer.display().to_string());
-    assert_ran(&out, "`shx`, a different name");
+    assert_ran(&out, "`toolx`, a different name");
 }
 
 /// Allows meet by their stored names: two layers admitting one directory

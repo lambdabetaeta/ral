@@ -527,7 +527,11 @@ impl<'a> Handoff<'a> {
     }
 
     fn above(&self) -> c_int {
-        self.0.iter().map(|&(slot, _)| slot.fd() + 1).max().unwrap_or(0)
+        self.0
+            .iter()
+            .map(|&(slot, _)| slot.fd() + 1)
+            .max()
+            .unwrap_or(0)
     }
 
     /// Every source lifted to `above` or higher, so no `dup2` can land on a

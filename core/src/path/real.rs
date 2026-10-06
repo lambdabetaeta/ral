@@ -42,6 +42,13 @@ impl RealPath {
         super::lex::identity_depth(&self.0.to_string_lossy(), cfg!(windows))
     }
 
+    /// The entry `name` of this directory: real by construction, since a
+    /// directory entry of a real directory opened without following is.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn entry(&self, name: &std::ffi::OsStr) -> Self {
+        Self(self.0.join(name))
+    }
+
     pub(crate) fn as_path(&self) -> &Path {
         &self.0
     }

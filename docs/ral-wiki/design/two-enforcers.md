@@ -61,14 +61,17 @@ the launcher runs that real path, under the user's spelling as `argv[0]`
 - *Hence the asymmetry by dimension.* A spawned child's reads and writes are held
   by the sandbox; `net` has no in-process guard at all, because ral dispatches no
   network operation for the guard to see ([[design/grant|grant]]).
-- *Linux exec is a Landlock domain, minus the denies.* bwrap cannot path-filter
-  a child's re-execs, so the payload enters a Landlock layer of its own inside
-  the envelope. Two gaps stay with the in-process guard, which sees neither once
-  a child re-execs: Landlock is allow-list only, so a deny *inside* an allowed
-  directory is the guard's alone; and the kernel filters the path passed to
-  `execve`, not the code a process runs, so an admitted loader or interpreter
-  handed an unadmitted file as an argument runs it
-  ([[decisions/260906_landlock-exec-layer|landlock-exec-layer]]). What the
+- *Linux exec is a Landlock domain, the denies subtracted.* bwrap cannot
+  path-filter a child's re-execs, so the payload enters a Landlock layer of its
+  own inside the envelope, built by the parent. Landlock is allow-list only, so
+  a deny *inside* an allowed directory is rendered as that directory's entries
+  the table still admits, over the tree as it stands at launch. Two gaps stay
+  with the in-process guard, which sees neither once a child re-execs: a
+  bare-name veto under a trusted write, which a child can sidestep by authoring
+  a renamed copy and which is therefore not carried into the kernel; and the
+  kernel filters the path passed to `execve`, not the code a process runs, so
+  an admitted loader or interpreter handed an unadmitted file as an argument
+  runs it ([[decisions/260906_landlock-exec-layer|landlock-exec-layer]]). What the
   kernel admits is one law on every platform — the guard's own rules, ordered
   so last-match-wins is its most-specific-wins precedence
   ([[related/access-control-algebra|access-control-algebra]]), plus their carriers, the platform's
@@ -90,8 +93,8 @@ serves ([[decisions/260906_the-envelope-is-a-process-namespace|the-envelope-is-a
 |---|---|---|
 | `fs` read/write prefixes, `deny` masks | bwrap mounts | refuse: `confinement_unavailable` |
 | `net: false` | `--unshare-net` | refuse: `projection_enforceable` |
-| `exec` — which path may be `execve`d (not which code runs) | Landlock `Execute` ruleset | refuse: `confinement_unavailable`, an exec opinion alone asking for the envelope |
-| `exec` — which subcommand, a deny inside an allowed directory, and a veto under an admitted directory a write prefix covers without naming (frozen on macOS: [[decisions/261006_a-veto-freezes-what-a-write-covers]]) | in-process guard | the guard stands alone; Linux does not yet freeze the covered admits |
+| `exec` — which path may be `execve`d (not which code runs), a deny inside an allowed directory included, over the tree at launch: a program added afterwards to a directory holding a block is denied until the next launch | Landlock `Execute` ruleset, the parent subtracting each block from the directory that holds it | refuse: `confinement_unavailable`, an exec opinion alone asking for the envelope |
+| `exec` — which subcommand, a veto under a trusted write, and a veto under an admitted directory a write prefix covers without naming (frozen on macOS: [[decisions/261006_a-veto-freezes-what-a-write-covers]]) | in-process guard | the guard stands alone; Linux carries the covered veto into the kernel but does not yet freeze the covered admits |
 | die with parent, new session, no core, the seccomp deny-set (kills kernel attack surface; refuses mounting, user namespaces and `TIOCSTI` with an errno) | bwrap + `pre_exec` | applied where possible |
 | private ipc / uts | `--unshare-*` | never refused |
 | `/sys/fs/cgroup` is the payload's own tree | cgroup namespace + re-rooted bind | the tree is the host's |

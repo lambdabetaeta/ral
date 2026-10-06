@@ -12,7 +12,7 @@ pub(crate) use signature::{PreludeMap, Signature, lookup};
 pub use shell::repl::{PluginEntry, ReplScratch};
 
 mod capability;
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 pub(crate) use capability::WriteReach;
 pub(crate) use capability::meet_insert;
 pub use capability::{

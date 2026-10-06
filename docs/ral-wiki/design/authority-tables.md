@@ -193,8 +193,19 @@ then emits each `Dir` at its own verdict and rank, each distinct file among
 `File` and `Carrier` scopes *once* at the table's verdict for it, and each
 `Name` as a `Veto`, sorted by rank with denies after allows within a rank. The
 kernel's last-match-wins is then the guard's highest-rank-wins by
-construction, and Landlock, which renders allows only, may keep them as they
-stand ([[decisions/261004_exec-carriers|exec-carriers]]).
+construction ([[decisions/261004_exec-carriers|exec-carriers]]).
+
+**The list read back.** Landlock can render allows only, so on Linux the
+parent reads the list back as a table, `ExecRules::from_kernel`, the fourth
+reader of the exec language: each `File` at its final verdict, carriers
+already folded in, each `Dir` at its own, each `Veto` a `Name` deny.
+`Table::verdict` over it is the kernel's last-match-wins, which the property
+test asserts at every `File` and `Under` subject, and it is the one judge of
+the expansion that renders a block inside an allowed directory: every entry
+along the spine to a block is judged by it, never by a second reading of
+`ExecRule`s, polarity coming off each rule's verdict, so a deny by another
+spelling holds in the kernel as in the guard
+([[decisions/260906_landlock-exec-layer|landlock-exec-layer]]).
 
 ### Worked cases
 
@@ -426,8 +437,10 @@ marks a refusal that names the denied spelling.
   guard's alone.
 - **Which bundled tool a re-exec of ral runs**: a tool is ral's own binary to
   the kernel.
-- **Landlock is allow-list only**: a deny or veto inside an allowed directory
-  is the guard's alone on Linux
+- **Landlock is allow-list only**: a block inside an allowed directory is
+  rendered by subtraction over the tree as it stands at launch, so a program
+  added afterwards to an expanded directory is denied until the next launch,
+  and a veto under a trusted write is the guard's alone on Linux
   ([[decisions/260906_landlock-exec-layer|landlock-exec-layer]]).
 - **Windows has no kernel exec layer**, so the window between check and exec
   stays open there.

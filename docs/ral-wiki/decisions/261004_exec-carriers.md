@@ -1,7 +1,7 @@
 ---
 status: active
 generated_at_commit: 7f61632a
-verified_at_commit: e524fe51
+verified_at_commit: 7f4d7d11
 anchors: [carriers, trusted_real, shebang, kernel, Rank, ExecScope, ExecRule, allowed_files, emit_exec_rules, Sbpl]
 ---
 
@@ -68,8 +68,9 @@ visible in the grant.
 **Renderers.** Seatbelt emits one form per rule in order: an allow admits
 `file-read* process-exec`, a deny or veto `process-exec` only — exec denies do
 not deny reads, which are fs's. Landlock is allow-list only: it admits the
-base, ral and every allowing rule, and renders no deny; each file being
-emitted once at its final verdict, the allows stand as they are. Exec rules
+base, ral, every allowed file, and every allowed directory less what the
+list, read back as a table, blocks beneath it; each file being emitted once at
+its final verdict, that table judges as the guard does. Exec rules
 carry `RealPath`s to the backends, and `render_real`, the one way from one to
 a kernel spelling, adds only the firmlink twin and never reads the disk, so a
 frozen grant cannot widen to a symlink's new target. Landlock judges inside
@@ -84,7 +85,10 @@ the ruleset itself; the payload only enters it.
   loader runs any readable binary handed to it; macOS's `dyld` cannot be
   executed directly (measured)
   ([[decisions/260906_landlock-exec-layer|landlock-exec-layer]]).
-- **Landlock cannot subtract inside an allowed directory**, so on Linux a deny
-  or veto under an allowed directory holds only at the in-process guard.
+- **Landlock subtracts inside an allowed directory only over the tree at
+  launch**: a program added afterwards to a directory holding a block is
+  denied until the next launch, and a veto under a trusted write holds only at
+  the in-process guard
+  ([[decisions/260906_landlock-exec-layer|landlock-exec-layer]]).
 - **The kernel cannot see argv**, so `Only` renders as an allow.
 - **Windows has no kernel exec layer.**

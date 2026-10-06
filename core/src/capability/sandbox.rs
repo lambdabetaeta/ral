@@ -116,7 +116,7 @@ fn surface<'a>(prefixes: impl Iterator<Item = &'a FrozenPath>) -> Vec<String> {
     unique.into_iter().map(str::to_owned).collect()
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, unix))]
 mod tests {
     use crate::path::{FrozenPath, render_real};
     use crate::types::{

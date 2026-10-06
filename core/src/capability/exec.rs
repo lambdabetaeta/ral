@@ -209,11 +209,40 @@ impl ExecRules {
         ranked.into_iter().map(|(_, rule)| rule).collect()
     }
 
+    /// The kernel's list read back as a table: each file at its final
+    /// verdict, so the carriers are already folded in; a dir at its verdict;
+    /// a veto a `Name` deny.  [`Table::verdict`] over it is the kernel's
+    /// last-match-wins, which `the_kernel_rules_judge_as_the_table_and_its_carriers`
+    /// asserts.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn from_kernel(rules: &[ExecRule]) -> Self {
+        (rules.iter())
+            .map(|rule| match rule {
+                ExecRule::Dir { path, allow } => {
+                    (ExecScope::Dir(path.clone()), Verdict::from(*allow))
+                }
+                ExecRule::File { path, allow } => {
+                    (ExecScope::File(path.clone()), Verdict::from(*allow))
+                }
+                ExecRule::Veto(name) => (ExecScope::Name(name.clone()), Verdict::Deny),
+            })
+            .collect()
+    }
+
     /// The files a rule admits.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn allowed_files(&self) -> impl Iterator<Item = &RealPath> {
         self.live().filter_map(|scope| match scope {
             ExecScope::File(file) => Some(file),
+            _ => None,
+        })
+    }
+
+    /// The directories a rule admits.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn allowed_dirs(&self) -> impl Iterator<Item = &RealPath> {
+        self.live().filter_map(|scope| match scope {
+            ExecScope::Dir(dir) => Some(dir),
             _ => None,
         })
     }
@@ -587,6 +616,20 @@ pub(super) mod tests {
                     !with.verdict(Subject::File(f)).is_denied(),
                     "{f}\nrules = {rules:?}\ncarriers = {carriers:?}\nkernel = {kernel:?}"
                 );
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let read_back = ExecRules::from_kernel(&kernel);
+                for p in &paths {
+                    for (s, kind) in [(Subject::File(p), "file"), (Subject::Under(p), "dir")] {
+                        assert_eq!(
+                            read_back.verdict(s).is_denied(),
+                            with.verdict(s).is_denied(),
+                            "{p} as a {kind}\nrules = {rules:?}\ncarriers = {carriers:?}\n\
+                             kernel = {kernel:?}"
+                        );
+                    }
+                }
             }
         }
     }

@@ -1,7 +1,7 @@
 ---
 status: active
 generated_at_commit: b49b3823
-verified_at_commit: b49b3823
+verified_at_commit: 7f4d7d11
 anchors: [WriteReach, write_reach, emit_exec_rules, carries_veto]
 ---
 
@@ -86,7 +86,10 @@ silent ability to author binaries inside the admitted directories within it.
   of the covered admit laid after the write prefix's read-write bind, which
   belongs in the mount table the envelope-by-handle redesign
   (`dev/docs/plans/261005_linux-sandbox-by-handle.md`) rewrites; it is not
-  patched into the old one. The Landlock exec layer is unchanged.
+  patched into the old one. The Landlock exec layer already carries a veto
+  into every covered and apart admit by subtraction, and not into a trusted
+  one, so it walks exactly what the freeze will hold; until then a child can
+  author around it in a covered admit.
 - **Only directories are classified.** An admitted file under a covering prefix
   stays writable, as it did; files are frozen only under `fs: Unrestricted`
   with a veto.

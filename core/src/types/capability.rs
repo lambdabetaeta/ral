@@ -16,7 +16,7 @@
 
 use crate::path::{FrozenPath, RealPath, Rendered, render_paths, rendered_pins};
 use serde::{Deserialize, Serialize};
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -221,7 +221,7 @@ impl<N> Default for FsRules<N> {
 }
 
 /// How the write region stands to one admitted exec directory.
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WriteReach {
     /// A write prefix that reaches it lies within an admit that holds it: the
@@ -234,7 +234,7 @@ pub(crate) enum WriteReach {
     Apart,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 impl FsRules<Rendered> {
     /// The reach of the write prefixes over `admit`, itself among `admitted`.
     /// Trusted when some write prefix `w` that covers `admit` or lies inside it
@@ -361,7 +361,7 @@ impl<N> ExecProjection<N> {
     /// Whether some rule denies rather than merely not admitting — the
     /// distinction between an allow-set that is narrow and one that is
     /// narrowed on purpose, which is what a backend must protect.
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     pub(crate) fn carries_veto(&self) -> bool {
         match self {
             Self::Unrestricted => false,
@@ -885,7 +885,7 @@ mod rendered_tests {
     /// The reach of `write` over the admit `dir`, itself one of `admits`,
     /// through the real renderers: every spelling of the admit must agree, or
     /// the freeze would split one directory.
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     fn reach(write: &[&str], admits: &[&str], dir: &str) -> WriteReach {
         let projection = SandboxProjection {
             fs: FsProjection::Restricted(FsRules {
@@ -913,12 +913,12 @@ mod rendered_tests {
     }
 
     /// [`reach`] over `dir` as the only admit.
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     fn reach_alone(write: &[&str], dir: &str) -> WriteReach {
         reach(write, &[dir], dir)
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     #[test]
     fn a_write_prefix_identical_to_the_admit_is_trusted() {
         assert_eq!(
@@ -927,7 +927,7 @@ mod rendered_tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     #[test]
     fn a_write_prefix_inside_the_admit_is_trusted() {
         assert_eq!(
@@ -936,7 +936,7 @@ mod rendered_tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     #[test]
     fn a_shallower_write_prefix_covers_the_admit() {
         assert_eq!(
@@ -946,7 +946,7 @@ mod rendered_tests {
         assert_eq!(reach_alone(&["/"], "/ral-test/w/bin"), WriteReach::Covered);
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     #[test]
     fn a_disjoint_write_prefix_leaves_the_admit_apart() {
         assert_eq!(
@@ -957,7 +957,7 @@ mod rendered_tests {
     }
 
     /// Containment is by component: `/ral-test/w2` is no part of `/ral-test/w`.
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     #[test]
     fn a_sibling_that_shares_a_name_prefix_is_apart() {
         assert_eq!(
@@ -967,7 +967,7 @@ mod rendered_tests {
     }
 
     /// Naming the tree outranks a shallower prefix that also reaches it.
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     #[test]
     fn a_named_tree_stays_trusted_beside_a_covering_prefix() {
         assert_eq!(
@@ -979,7 +979,7 @@ mod rendered_tests {
     /// `write: cwd` with `cwd/` admitted: an admit nested under it, such as a
     /// `$PATH` entry inside the project, is written at or below an admit above
     /// it.
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     #[test]
     fn an_admit_nested_in_a_trusted_admit_is_trusted() {
         let admits = ["/ral-test/proj", "/ral-test/proj/node_modules/.bin"];
@@ -994,7 +994,7 @@ mod rendered_tests {
 
     /// No admit holds both `~` and `~/.cargo/bin`, so a broad prefix over a
     /// lone admit stays covered.
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     #[test]
     fn a_broad_prefix_over_a_lone_admit_stays_covered() {
         assert_eq!(
@@ -1006,7 +1006,7 @@ mod rendered_tests {
     /// Trust does not leak sideways: the carve-out `~/.cargo/registry` lies in
     /// `~/.cargo/`, which holds it, but does not reach `~/.cargo/bin`, and `~`
     /// lies within no admit.
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     #[test]
     fn trust_does_not_leak_to_a_sibling_admit() {
         let write = ["/ral-test/home", "/ral-test/home/.cargo/registry"];

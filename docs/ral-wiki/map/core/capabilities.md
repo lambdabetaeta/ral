@@ -1,5 +1,5 @@
 ---
-generated_at_commit: e524fe51
+generated_at_commit: 7f4d7d11
 generated_at_date: 2026-10-06
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
@@ -227,8 +227,8 @@ re-execs the in-process guard never sees (`sh -c`, `find -exec`) — macOS as
 Seatbelt `process-exec` forms in rule order, Linux as a Landlock `Execute`
 ruleset the payload enters inside the bwrap envelope over admits the parent
 opened in the host (`linux/landlock.rs`;
-Landlock being allow-list only, a deny *inside* an allowed directory stays
-with the in-process guard there). `carriers.rs` computes what the kernel
+Landlock being allow-list only, a deny *inside* an allowed directory is
+subtracted from it, entry by entry over the tree at launch). `carriers.rs` computes what the kernel
 must admit beside them for a script to start: system-vouched `#!`
 interpreters and macOS shims, by `trusted_real` — regular files only, judged
 against the effective uid — never `env`'s target

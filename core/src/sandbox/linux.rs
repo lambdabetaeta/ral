@@ -1585,7 +1585,10 @@ mod tests {
         let pin = stand_in().lifted(Slot::Warrant.fd());
         let at = pin.raw_fd();
         if at > Slot::Info.fd() {
-            eprintln!("skipping: descriptors up to {} are all busy", Slot::Info.fd());
+            eprintln!(
+                "skipping: descriptors up to {} are all busy",
+                Slot::Info.fd()
+            );
             return;
         }
         let lent = std::fs::File::open("/dev/null").expect("open /dev/null");
@@ -2045,6 +2048,158 @@ mod tests {
         assert!(
             emitted(&stdout, "ADMITTED-RAN"),
             "the layer denied an admitted command two levels down: {stdout}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// [`admitting`] less `blocks`, which Landlock renders by subtracting
+    /// them from the allowed directories that hold them.
+    fn admitting_less(dirs: &[&str], blocks: impl IntoIterator<Item = ExecRule>) -> ExecProjection {
+        let ExecProjection::Restricted(mut rules) = admitting(dirs, &[]) else {
+            unreachable!("admitting restricts");
+        };
+        rules.extend(blocks);
+        ExecProjection::Restricted(rules)
+    }
+
+    /// A command of `/usr/bin` with an inode of its own: a hard link or a
+    /// multi-call alias would share an inode the layer admits.
+    fn own_command(names: &[&str]) -> Option<std::path::PathBuf> {
+        use std::os::unix::fs::MetadataExt;
+        (names.iter())
+            .map(|name| std::path::Path::new("/usr/bin").join(name))
+            .find(|p| {
+                p.symlink_metadata()
+                    .is_ok_and(|m| m.is_file() && m.nlink() == 1)
+            })
+    }
+
+    /// A deny and a veto inside an allowed directory hold in the kernel, so
+    /// `sh -c`, which the guard never sees, reaches neither at any depth.
+    #[test]
+    fn an_exec_block_inside_an_allowed_directory_holds_for_grandchildren() {
+        if !landlock_at_least(super::landlock::Abi::EXEC) {
+            return;
+        }
+        let (Some(denied), Some(vetoed)) = (
+            own_command(&["id", "whoami", "tty"]),
+            own_command(&["uname", "nproc", "logname"]),
+        ) else {
+            eprintln!("skipping: /usr/bin has no command with an inode of its own to block");
+            return;
+        };
+        let name = vetoed.file_name().expect("a name").to_string_lossy();
+        let policy = exec_policy(admitting_less(
+            &[],
+            [
+                ExecRule::File {
+                    path: RealPath::of(&denied).expect("the command exists"),
+                    allow: false,
+                },
+                ExecRule::Veto(crate::path::command_name_key(&name)),
+            ],
+        ));
+        let Some(envelope) = envelope_launches(&policy) else {
+            return;
+        };
+        let script = format!(
+            "echo READY\n\
+             sh -c '{denied}' >/dev/null 2>&1 && echo DENIED-RAN\n\
+             sh -c \"sh -c '{denied}'\" >/dev/null 2>&1 && echo DENIED-NESTED-RAN\n\
+             sh -c '{vetoed}' >/dev/null 2>&1 && echo VETOED-RAN\n\
+             sh -c \"sh -c '{vetoed}'\" >/dev/null 2>&1 && echo VETOED-NESTED-RAN\n\
+             sh -c /usr/bin/true && echo ADMITTED-RAN\n\
+             sh -c 'sh -c /usr/bin/true' && echo ADMITTED-NESTED-RAN\n",
+            denied = denied.display(),
+            vetoed = vetoed.display(),
+        );
+        let out =
+            run_confined(envelope, HostEnvelope::probe(envelope), &policy, &script).expect("spawn");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("READY"),
+            "the envelope did not launch: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        for ran in [
+            "DENIED-RAN",
+            "DENIED-NESTED-RAN",
+            "VETOED-RAN",
+            "VETOED-NESTED-RAN",
+        ] {
+            assert!(!emitted(&stdout, ran), "a blocked command ran: {stdout}");
+        }
+        for ran in ["ADMITTED-RAN", "ADMITTED-NESTED-RAN"] {
+            assert!(
+                emitted(&stdout, ran),
+                "the layer denied an admitted sibling, so the blocks prove nothing: {stdout}"
+            );
+        }
+    }
+
+    /// An expanded directory is the tree as it stood at launch, so a program
+    /// added there is denied until the next launch; a directory with no block
+    /// beneath it is one hierarchy rule, which admits it at once.
+    #[test]
+    fn a_program_added_after_launch_runs_only_under_a_hierarchy_admit() {
+        if !landlock_at_least(super::landlock::Abi::EXEC) {
+            return;
+        }
+        let dir = workdir("exec-added");
+        let (expanded, whole) = (dir.join("expanded"), dir.join("whole"));
+        for at in [&expanded, &whole] {
+            std::fs::create_dir(at).expect("create an admitted dir");
+        }
+        let present = expanded.join("present");
+        let blocked = expanded.join("blocked");
+        for copy in [&present, &blocked] {
+            std::fs::copy("/bin/true", copy).expect("copy /bin/true");
+        }
+        let policy = exec_policy(admitting_less(
+            &[&expanded.to_string_lossy(), &whole.to_string_lossy()],
+            [ExecRule::File {
+                path: RealPath::of(&blocked).expect("the block exists"),
+                allow: false,
+            }],
+        ));
+        let Some(envelope) = envelope_launches(&policy) else {
+            return;
+        };
+        let script = format!(
+            "echo READY\n\
+             '{present}' && echo PRESENT-RAN\n\
+             '{blocked}' && echo BLOCKED-RAN\n\
+             cp /bin/true '{expanded}/added' && cp /bin/true '{whole}/added' || echo COPY-FAILED\n\
+             '{expanded}/added' && echo EXPANDED-ADDED-RAN\n\
+             '{whole}/added' && echo WHOLE-ADDED-RAN\n",
+            present = present.display(),
+            blocked = blocked.display(),
+            expanded = expanded.display(),
+            whole = whole.display(),
+        );
+        let out =
+            run_confined(envelope, HostEnvelope::probe(envelope), &policy, &script).expect("spawn");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("READY") && !emitted(&stdout, "COPY-FAILED"),
+            "nothing was added, so nothing was tested: {stdout} {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            emitted(&stdout, "PRESENT-RAN"),
+            "the expanded directory admitted nothing: {stdout}"
+        );
+        assert!(
+            !emitted(&stdout, "BLOCKED-RAN"),
+            "the block did not hold: {stdout}"
+        );
+        assert!(
+            !emitted(&stdout, "EXPANDED-ADDED-RAN"),
+            "a program added after launch ran in an expanded directory: {stdout}"
+        );
+        assert!(
+            emitted(&stdout, "WHOLE-ADDED-RAN"),
+            "a program added after launch did not run under a hierarchy admit: {stdout}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
