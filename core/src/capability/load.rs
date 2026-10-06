@@ -121,7 +121,7 @@ fn wrap(virtual_path: &str, e: Break) -> Break {
 #[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
-    use crate::types::Verdict;
+    use crate::types::{ExecKey, Verdict};
 
     fn shell() -> Shell {
         Shell::new(crate::io::TerminalState::default())
@@ -146,7 +146,10 @@ mod tests {
         )
         .unwrap();
         let exec = caps.exec.expect("exec dimension present");
-        assert_eq!(exec.names.get("ls"), Some(&Verdict::Allow));
+        assert_eq!(
+            exec.0.get(&ExecKey::Name("ls".into())),
+            Some(&Verdict::Allow)
+        );
         // `None` is no opinion, so an unmentioned dimension inherits the caller.
         assert!(
             caps.fs.is_none()
@@ -167,7 +170,10 @@ mod tests {
             &ctx(),
         )
         .unwrap();
-        assert_eq!(caps.exec.unwrap().names.get("bash"), Some(&Verdict::Deny));
+        assert_eq!(
+            caps.exec.unwrap().0.get(&ExecKey::Name("bash".into())),
+            Some(&Verdict::Deny)
+        );
     }
 
     #[test]

@@ -175,7 +175,8 @@ mod tests {
         assert_eq!(render_src(src), "[ ok ]");
     }
 
-    // the ambient reads `cwd` and `user` are live.
+    // The ambient reads `cwd` and `user` are live; `USER` is pinned because
+    // a container shell may run with none.
 
     #[test]
     #[allow(
@@ -183,7 +184,8 @@ mod tests {
         reason = "`!{…}` is ral splice syntax in the source under test"
     )]
     fn prompt_block_sees_ambient_reads() {
-        let result = render_src("return { return \"!{user}:!{cwd}\" }");
+        let result =
+            render_src("return { within [env: [USER: 'someone']] { return \"!{user}:!{cwd}\" } }");
         // Split at the first colon: a Windows `cwd` carries a drive
         // colon of its own, and it lies to the right of this one.
         let (user, cwd) = result

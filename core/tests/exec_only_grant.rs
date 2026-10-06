@@ -22,16 +22,19 @@
 mod common;
 
 use ral_core::path::NormalizedPrefix;
-use ral_core::types::{Capabilities, ExecGrant, ExecProjection, Verdict};
+use ral_core::types::{Capabilities, ExecKey, ExecProjection, Verdict};
 
 #[test]
 fn exec_only_grant_still_projects() {
     let mut shell = common::fresh_shell();
     let caps = Capabilities {
-        exec: Some(ExecGrant {
-            paths: [(NormalizedPrefix::from_surface("/bin/sh"), Verdict::Allow)].into(),
-            ..ExecGrant::default()
-        }),
+        exec: Some(
+            std::iter::once((
+                ExecKey::Path(NormalizedPrefix::from_surface("/bin/sh")),
+                Verdict::Allow,
+            ))
+            .collect(),
+        ),
         ..Capabilities::root()
     };
     shell.with_capabilities(caps, |shell| {

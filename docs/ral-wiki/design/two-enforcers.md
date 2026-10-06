@@ -73,9 +73,10 @@ the launcher runs that real path, under the user's spelling as `argv[0]`
   so last-match-wins is its most-specific-wins precedence
   ([[related/access-control-algebra|access-control-algebra]]), plus their carriers, the platform's
   loader and ral ([[decisions/261004_exec-carriers|exec-carriers]]). Those
-  rules carry only the denies a layer wrote: a stack's meet keeps no default
-  as a deny, which Seatbelt's caseless match would turn on every spelling of
-  the name.
+  rules carry only the denies a layer wrote: the meet of two tables joins
+  their denies and keeps an allow only where both admit its own subject, never
+  writing a default as a deny, which Seatbelt's caseless match would turn on
+  every spelling of the name ([[design/authority-tables|authority-tables]]).
 
 **What a grant's guarantee means on Linux, row by row.** Rows above the rule
 are *promises*: a grant names them, and a host that cannot hold one refuses
@@ -105,13 +106,14 @@ the next launch finds it and the kernel holds it. macOS holds it from the
 start, Seatbelt's rules being negative over names.
 
 The two agree on what a deny means: every spelling some filesystem takes for
-its name. The guard keys a deny by `lex::collision_key`; Seatbelt matches the
-same class; a bwrap mask and a Windows ACE hang on whatever object the
+its name. The guard's deny rules speak under `lex::collision_key`, its allows
+under the name as stored; Seatbelt matches the same class; a bwrap mask and a Windows ACE hang on whatever object the
 volume's own lookup finds, which on an existing path is the same thing. On a
 case-sensitive volume the guard therefore over-denies relative to the Linux
 and Windows kernels — a distinct `secrets` beside a denied `Secrets` is
 refused in process and not to a child — an over-approximation, stated in the
-refusal ([[decisions/261006_denies-hold-under-every-spelling|denies-hold-under-every-spelling]]).
+refusal ([[decisions/261006_denies-hold-under-every-spelling|denies-hold-under-every-spelling]];
+every platform's case in [[design/authority-tables|authority-tables]]).
 
 **macOS has no stacking.** Landlock layers inside the envelope; Seatbelt
 profiles do not stack. A process already inside one gets `EPERM` entering a

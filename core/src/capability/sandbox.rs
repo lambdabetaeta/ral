@@ -5,7 +5,7 @@
 //! [`SandboxProjection`] the sandbox backends render.  The in-process
 //! guards over that same authority live in the sibling [`super::enforce`],
 //! and consume the same per-dimension folds this module renders —
-//! [`super::fs::allow_region`], and for exec the very table
+//! [`super::fs::region`], and for exec the very table
 //! [`super::enforce::check_exec`] judged with — so guard and profile cannot
 //! disagree about what the stack permits.  All that separates them is when
 //! the fold runs: here once, because the OS profile is written once at
@@ -13,8 +13,8 @@
 
 use super::enforce::Admitted;
 use super::exec::{ExecRules, rules};
-use super::fs::{FsOp, allow_region, deny_region};
-use crate::path::{NormalizedPrefix, Polarity, PrefixSet, RealPath};
+use super::fs::{FsOp, region};
+use crate::path::{NormalizedPrefix, RealPath};
 use crate::types::{Context, ExecProjection, FsProjection, FsRules, SandboxProjection};
 use std::collections::BTreeSet;
 
@@ -31,20 +31,15 @@ pub(crate) fn sandbox_projection(
     let grants = &ctx.grants;
     let resolver = ctx.resolver();
     // Traced because this fold is not the pure reduction it reads as: every
-    // `PrefixSet::resolve` canonicalises against the filesystem, and compiling
+    // re-freeze canonicalises against the filesystem, and compiling
     // the exec table walks the host `PATH` for every bare key, so its cost
     // tracks the host's fs latency and is paid again on each rebuild.
     #[cfg(debug_assertions)]
     let t_fold = std::time::Instant::now();
-    // Computed once so read and write are each projected against the same
-    // deny region: under deny-wins an allow beneath a deny is dead
-    // authority, and no backend may ever be handed one to reorder.
-    let deny = deny_region(grants, &resolver);
-    // Zipped because the two allow regions are `Some` on the same condition —
+    // Zipped because the two regions are `Some` on the same condition —
     // some layer held an `fs` opinion — so there is no mixed case to weigh.
-    let read = allow_region(grants, &resolver, &FsOp::Read).map(|r| r.outside(&deny));
-    let write = allow_region(grants, &resolver, &FsOp::Write).map(|w| w.outside(&deny));
-    let regions = read.zip(write);
+    let regions =
+        region(grants, &resolver, &FsOp::Read).zip(region(grants, &resolver, &FsOp::Write));
     let mut net_allowed = true;
     let mut saw_net = false;
     for net in grants.net() {
@@ -77,9 +72,11 @@ pub(crate) fn sandbox_projection(
 
     let fs = match regions {
         Some((read, write)) => FsProjection::Restricted(FsRules {
-            read_prefixes: surface_strings(&read),
-            write_prefixes: surface_strings(&write),
-            deny_paths: surface_strings(&deny),
+            read_prefixes: surface(read.live()),
+            write_prefixes: surface(write.live()),
+            // Both regions carry the same denies; a disk change between the two
+            // folds can only drop a write allow, which fails closed.
+            deny_paths: surface(read.denies()),
             pinned_dirs: Vec::new(),
         }),
         None => FsProjection::Unrestricted,
@@ -111,21 +108,20 @@ fn carriers(_: &ExecRules, _: Option<&Admitted>) -> BTreeSet<RealPath> {
     BTreeSet::new()
 }
 
-/// The fs projection is lexical: `resolved`/`namespace` have no reader below
-/// this fold, so each prefix flattens to its surface spelling here, once, and
-/// every backend widens that into its own name class at render time.
-fn surface_strings<P: Polarity>(set: &PrefixSet<P>) -> Vec<String> {
-    set.surface()
-        .into_iter()
-        .map(NormalizedPrefix::into_string)
-        .collect()
+/// The fs projection is lexical: `resolved` has no reader below this fold,
+/// so each prefix flattens to its surface spelling here, once, and every
+/// backend widens that into its own name class at render time.
+fn surface<'a>(prefixes: impl Iterator<Item = &'a NormalizedPrefix>) -> Vec<String> {
+    let unique: BTreeSet<&str> = prefixes.map(NormalizedPrefix::as_str).collect();
+    unique.into_iter().map(str::to_owned).collect()
 }
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use crate::path::{NormalizedPrefix, render_real};
     use crate::types::{
-        Capabilities, ExecGrant, ExecProjection, ExecRule, FsPolicy, Shell, WriteReach,
+        Capabilities, ExecGrant, ExecKey, ExecProjection, ExecRule, FsPolicy, Shell, Verdict,
+        WriteReach,
     };
 
     /// A layer with an opinion on writes, on exec, or both.
@@ -137,10 +133,7 @@ mod tests {
                 write_prefixes: vec![prefix(w)],
                 deny_paths: Vec::new(),
             }),
-            exec: admit.map(|dir| ExecGrant {
-                dirs: [(prefix(dir), true)].into(),
-                ..ExecGrant::default()
-            }),
+            exec: admit.map(|dir| ExecGrant([(ExecKey::Dir(prefix(dir)), Verdict::Allow)].into())),
             ..Capabilities::root()
         }
     }

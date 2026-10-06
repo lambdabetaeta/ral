@@ -14,6 +14,7 @@ mod exec;
 mod fs;
 mod load;
 mod sandbox;
+mod table;
 
 pub use decode::decode_capability_map;
 pub use deputy::deputy_prefixes;

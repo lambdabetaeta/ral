@@ -14,15 +14,14 @@
 //! `lex::path_within` and its string twin are `pub(super)` here, so the
 //! containment kernel does not leave this module: a prefix carries two
 //! forms, and *which* one a question is asked of is settled here, not by a
-//! caller — both fs (`prefix_set::covers`) and exec (`RealPath::within`, over
-//! a prefix's frozen `resolved` form) judge the object.
+//! caller — both fs (`NormalizedPrefix::contains`) and exec (`RealPath::within`,
+//! over a prefix's frozen `resolved` form) judge the object.
 
 pub mod basedir;
 pub(crate) mod canon;
 pub mod config;
 pub mod git;
 pub mod lex;
-pub(crate) mod prefix_set;
 pub mod ral_path;
 mod real;
 pub(crate) mod render;
@@ -39,12 +38,11 @@ pub use git::find_git_entry;
 // `crate::path::discover_git_dir` is how `sigil` and its rustdoc name it, so
 // the re-export outlives the item's own narrowing.
 pub(crate) use git::discover_git_dir;
-pub(crate) use lex::proper_ancestors;
+pub(crate) use lex::{Allow, Deny, Polarity, proper_ancestors};
 pub use lex::{
     PathShape, basename, exists, is_absolute, is_dir, resolve_path, resolve_relative_to_script,
     resolve_str, shape,
 };
-pub(crate) use prefix_set::{Allow, Deny, Polarity, PrefixSet, covers, meet_prefixes};
 pub(crate) use real::RealPath;
 #[cfg(unix)]
 pub(crate) use render::render_real;
@@ -52,7 +50,7 @@ pub(crate) use render::render_real;
 pub(crate) use render::rendered_ancestors;
 pub(crate) use render::rendered_pins;
 pub(crate) use render::{Rendered, render_paths};
-pub use resolved::{Namespace, NormalizedPrefix, ResolvedPath};
+pub use resolved::{NormalizedPrefix, ResolvedPath};
 pub use resolver::Resolver;
 pub use walk::Located;
 pub(crate) use which::is_executable_file;

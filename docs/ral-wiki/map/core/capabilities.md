@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 3c8afbc3
+generated_at_commit: 90479dea
 generated_at_date: 2026-10-06
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
@@ -45,30 +45,42 @@ Submodules:
   takes: the same name refusal, `path::walk` to the object, then
   `check_fs_exact` on `Located::real`; `GrantStack::admits_fs_exact` is the
   quiet twin a write asks before reading its before- and after-images;
-- `sandbox.rs` — the OS-renderable `sandbox_projection` builder; exec is
+- `sandbox.rs` — the OS-renderable `sandbox_projection` builder; fs is the
+  read and write `Region`s, re-frozen once at spawn, rendered as the surface
+  strings of their `live()` allows and their `denies()` (`surface`); exec is
   `ExecRules::kernel` of the `Admitted`'s own table, with the carriers of its
   allowed files and its program (`sandbox::carriers`), so the profile renders
   the table that judged the launch rather than a second compile;
 - `deputy.rs` — `deputy_prefixes`, the confused-deputy report: the prefixes a
-  grant makes both `exec`-admitted and `fs`-writable, judged with
-  `path::covers` on the `GrantStack`'s two prefix sets folded by
-  `meet_prefixes` (neither layer is guilty alone). **What it locates is where a write becomes runnable, not an
+  grant makes both `exec`-admitted and `fs`-writable, each dimension folded
+  across the `GrantStack` as a `Region` of allows and read through `live()`,
+  pairs judged by `holds::<Allow>` at the other's own subject (neither layer is
+  guilty alone). **What it locates is where a write becomes runnable, not an
   escalation**: within one projection the dropped binary is spawned under the
   confinement that wrote it, and only a runner outside the projection turns
   the shape into an escape — so it reports and never denies. Findings surface at grant push and at an exarch profile load
   ([[design/grant|grant]]);
-- `exec.rs` — exec authority as rules about programs
+- `table.rs` — `Table<K: Scope>`, authority as a table of scoped rules
+  ([[design/authority-tables|authority-tables]]): `Scope` (`rank`,
+  `holds::<P>`, `own`), `verdict` (most specific decides, ties meet, silence
+  denies), `live`, `denies`, `respelled`, and `Meet for Table`, denies joining
+  and allows meeting at their own subjects; the meet's law and lattice laws are
+  its property tests;
+- `fs.rs` — the fs instance: `FsOp`, `Region = Table<NormalizedPrefix>`
+  (subject a `&Path`, rank `(is a deny, depth)`: a deny outranking every allow, the deeper above among each), and `region`, each
+  opining layer's prefixes for the op and its `deny_paths`, re-frozen against
+  the caller's `Resolver` (`NormalizedPrefix::refreeze`) and met;
+- `exec.rs` — the exec instance
   ([[decisions/261004_exec-rules|exec-rules]]): `Program` (`Tool` or `File {
-  path, real }`) and its view `Subject`; `ExecRules::compile`, one layer's
-  `ExecGrant` to a table over real paths, tools, dirs and vetoes, a bare key
-  resolved on the host `PATH`; `ExecRules::verdict`, the only verdict, by
-  `Rank` (`Dir(depth) < Carrier < Exact < Veto`, the greatest deciding, equal
-  ranks meeting), each rule reading names by its polarity through `holds`;
-  `Meet for ExecRules` through `met`, allows meeting and denies joining;
-  `respelled`, the deny a refusal names when it holds the program only under
-  another spelling; `rules`, the stack's table, compiled per question;
-  `ExecRules::kernel`, the same rules in `Rank` order for last-match-wins.
-  Vetoes key on `path::command_name_key`;
+  path, real }`) and the `Subject` it is judged as (`Tool`, `File`, `Under`);
+  `ExecScope` (`Dir`, `Carrier`, `File`, `Tool`, `Name`) ranked by `Rank`
+  (`Dir(depth) < Carrier < Exact < Name`); `ExecRules = Table<ExecScope>`;
+  `ExecRules::compile`, one layer's `ExecGrant` against this host, a bare key
+  resolved on the host `PATH`; `rules`, the stack's table, compiled per
+  question; `ExecRules::kernel`, the table with its carriers as `Carrier`
+  scopes, rendered in `Rank` order for last-match-wins; `allowed_files`, the
+  live file scopes the carriers are computed over. Vetoes key on
+  `path::command_name_key`;
 - `decode.rs` — `decode_capability_map`, which walks a `grant [...]` /
   `--capabilities` `Value` map into a frozen `Capabilities`, one dimension
   decoder per `exec` / `fs` / `net` / `detach` / `editor` / `shell` key —
@@ -76,7 +88,7 @@ Submodules:
   ([[design/audit|audit]]); its
   exec-map freeze expands the two *exec-only* sigils `path:` (every `$PATH`
   component) and `system:` (the platform's tool roots,
-  `sigil::system_tool_roots`) into the `ExecGrant`'s dirs, every entry through
+  `sigil::system_tool_roots`) into `ExecKey::Dir` entries, every entry through
   `meet_insert`, and drops bundled-tool grants for coreutils a
   host does not ship (`COREUTILS_UNIX_ONLY_TOOLS`);
 - `load.rs` — `load_capabilities_from_path` / `_from_str` for `.ral`
@@ -90,11 +102,12 @@ single always-frozen `Capabilities`, resolved at decode by the freeze pass
 inside `decode_capability_map` ([[design/capability-freeze|freeze boundary]]);
 plus `FsPolicy`, `GrantStack`,
 `Meet`, `Widen`, and the authored exec grant
-`ExecGrant { names, paths, dirs }` — bare keys, frozen path keys and frozen
-dir keys, names and paths under `Verdict` (`Deny < Only(s) < Allow`), dirs
-under a `bool`, since a dir cannot restrict argv; every entry added by
-`meet_insert`. It rides the wire (path-keyed maps as pair sequences) and is
-never matched directly; `ExecRules` is what judges. The kernel's view is
+`ExecGrant(BTreeMap<ExecKey, Verdict>)` — `ExecKey::{Name, Path, Dir}`, bare
+keys, frozen path keys and frozen dir keys, under `Verdict`
+(`Deny < Only(s) < Allow`), a dir taking only `Allow` or `Deny` since it cannot
+restrict argv; every entry added by `meet_insert`, and `Display` spelling a key
+as a grant does. It rides the wire (as a pair sequence) and is never matched
+directly; `ExecRules` is what judges. The kernel's view is
 `ExecProjection::Restricted(Vec<ExecRule>)`, an ordered `Dir`/`File`/`Veto`
 list.
 
@@ -124,8 +137,8 @@ plus `which.rs` for PATH search.
   Windows path semantics `starts_with_identity`, unifying ASCII case, `/` vs
   `\`, and `\\?\`-verbatim spellings; `Collision` compares components by
   `lex::collision_key`, canonical caseless matching of the uppercase image
-  (ICU4X), the coarsest identity any filesystem gives a name. A
-  `PrefixSet<Allow>` judges `Stored` and a `PrefixSet<Deny>` `Collision`
+  (ICU4X), the coarsest identity any filesystem gives a name. A rule's
+  `Polarity` (`lex::Allow`, `lex::Deny`) picks `Stored` or `Collision`
   ([[decisions/261006_denies-hold-under-every-spelling|denies-hold-under-every-spelling]]);
   on Windows `walk::dealias` names a `~`-bearing leaf by its long name, and
   refuses one it cannot name;
@@ -170,10 +183,13 @@ from a named provenance — `Context::search_cwd`, `Resolver::search_cwd`,
   redirect a bare key.
 
 A `NormalizedPrefix` (`resolved.rs`) carries its `surface` form (lexical — what
-the author wrote, kept for display), its `resolved` form (symlinks followed),
-and its `Namespace`, all fixed by one disk consultation at the freeze door.
+the author wrote, kept for display) and its `resolved` form (symlinks
+followed), both fixed by one disk consultation at the freeze door; a guest
+prefix is minted by `from_guest` under the POSIX fold, and `refreeze`
+re-resolves a prefix against a live `Resolver`, the bare root minted rather
+than frozen.
 [[invariants/grants-judge-objects|Every authority is judged on `resolved`]]:
-`covers` (below) for fs, `RealPath::frozen` (`real.rs`) for the exec table,
+`contains::<P>` for fs, `RealPath::frozen` (`real.rs`) for the exec table,
 and `evicts` for composition — and no other door: `lex::path_within` and its string twin are `pub(super)`,
 so the form-blind kernel does not leave `core/src/path/`, `surface_path` is
 private to `resolved.rs`, and outside the module the surface leaves the type
@@ -182,15 +198,10 @@ rather than documented because the `xdg:` freeze guard once chose the form for
 itself — asking on the surface while the check it guarded matched the resolved
 form — and read a symlink out of `HOME` as contained.
 
-`prefix_set.rs` therefore contributes only the *set*-level algebra, pure and
-disk-free: `covers` is the one *fs* containment judgment, keyed on
-`(namespace, resolved)` so prefixes in different namespaces never overlap and
-a cross-namespace meet is the empty, fail-closed intersection; `meet_prefixes`
-is the kernel `PrefixSet::meet` and the deputy fold share;
-`PrefixSet::outside` drops the allows a deny region covers, so no projection
-carries an allow beneath a deny. `PrefixSet::resolve` is the lone door here that still holds a
-`Resolver` — the sandbox-projection fold, which must render a prefix that was
-never frozen (a `~`-headed fs prefix).
+The set-level algebra over prefixes is not in `path/`: it is
+`capability::table`, which names polarities and never identities, so every
+spelling question stays here. `real.rs` holds `RealPath`, the exec subject,
+ordered as the host identifies files and ranked by `identity_depth`.
 
 XDG base directories resolve through one resolver, `basedir.rs`
 (`XdgKind`, `resolve_xdg`): an absolute `XDG_*_HOME` override else the

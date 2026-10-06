@@ -13,7 +13,9 @@ status: active
 > property tests pin the meet and the render instead. A bare deny is still a
 > final-component veto in Seatbelt. See
 > [[decisions/261004_exec-rules|exec-rules]] and
-> [[decisions/261004_exec-carriers|exec-carriers]].
+> [[decisions/261004_exec-carriers|exec-carriers]]; since 2026-10-06 the table
+> is the generic `Table<ExecScope>`
+> ([[decisions/261006_one-table-two-instances|one-table-two-instances]]).
 
 # The exec projection defers admission to the gate
 

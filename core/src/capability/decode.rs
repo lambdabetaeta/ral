@@ -13,8 +13,8 @@
 use crate::path::NormalizedPrefix;
 use crate::typecheck::contract::{Form as ContractForm, declared};
 use crate::types::{
-    Capabilities, EditorPolicy, ExecGrant, FsPolicy, List, PolicyError, ShellPolicy, Value,
-    Verdict, as_map, as_map_ref, meet_insert, settings_map,
+    Capabilities, EditorPolicy, ExecGrant, ExecKey, FsPolicy, List, PolicyError, ShellPolicy,
+    Value, Verdict, as_map, as_map_ref, meet_insert, settings_map,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -55,7 +55,7 @@ fn decode_fs(
             "deny" => fp.deny_paths = frozen,
             _ => {
                 return Err(PolicyError::new(format!(
-                    "{err_prefix}: unknown key '{sub}' — expected one of read, write, deny"
+                    "{err_prefix}: unknown key '{sub}'; expected one of read, write, deny"
                 )));
             }
         }
@@ -70,7 +70,7 @@ fn string_list(items: &List, what: &str, err_prefix: &str) -> Result<Vec<String>
         .map(|item| match item.as_ref() {
             Value::String(s) => Ok(s.to_string()),
             other => Err(PolicyError::new(format!(
-                "{err_prefix}: {what} must be strings — expected a string, got {}",
+                "{err_prefix}: {what} must be strings; expected a string, got {}",
                 other.type_name()
             ))),
         })
@@ -99,7 +99,7 @@ fn freeze_absolute(
         return Ok(None);
     }
     Err(PolicyError::new(format!(
-        "{err_prefix}: relative path '{entry}' is not allowed — \
+        "{err_prefix}: relative path '{entry}' is not allowed; \
          use an absolute path, or cwd:{entry} for \"relative to here\""
     )))
 }
@@ -226,10 +226,9 @@ fn freeze_exec_grant(
     err_prefix: &str,
 ) -> Result<ExecGrant, PolicyError> {
     use crate::path::sigil::looks_like_path_or_sigil;
-    let dir_verdict = |sigil: &str, verdict: Verdict| -> Result<bool, PolicyError> {
+    let dir_verdict = |sigil: &str, verdict: Verdict| -> Result<Verdict, PolicyError> {
         match verdict {
-            Verdict::Allow => Ok(true),
-            Verdict::Deny => Ok(false),
+            Verdict::Allow | Verdict::Deny => Ok(verdict),
             Verdict::Only(_) => Err(PolicyError::new(format!(
                 "{err_prefix}: '{sigil}' only takes 'allow' or 'deny', not a subcommand list \
                  (a subcommand list matches a command's first argument, so it needs a literal command)"
@@ -240,14 +239,14 @@ fn freeze_exec_grant(
     let mut grant = ExecGrant::default();
     for (key, verdict) in raw.literals {
         if key == "path:" {
-            let allow = dir_verdict("path:", verdict)?;
+            let verdict = dir_verdict("path:", verdict)?;
             for dir in path_dirs(err_prefix)? {
-                meet_insert(&mut grant.dirs, dir, allow);
+                meet_insert(&mut grant.0, ExecKey::Dir(dir), verdict.clone());
             }
         } else if key == "system:" {
-            let allow = dir_verdict("system:", verdict)?;
+            let verdict = dir_verdict("system:", verdict)?;
             for dir in system_dirs() {
-                meet_insert(&mut grant.dirs, dir, allow);
+                meet_insert(&mut grant.0, ExecKey::Dir(dir), verdict.clone());
             }
         } else if looks_like_path_or_sigil(&key) {
             // `None` is `freeze_absolute`'s dead grant: skip the key.
@@ -257,13 +256,13 @@ fn freeze_exec_grant(
                 if crate::path::is_dir(frozen.as_str()) {
                     return Err(PolicyError::new(format!(
                         "{err_prefix}: '{key}' is a directory, so as a literal command key it \
-                         names a binary that cannot exist — did you mean '{key}/'?"
+                         names a binary that cannot exist; did you mean '{key}/'?"
                     )));
                 }
-                meet_insert(&mut grant.paths, frozen, verdict);
+                meet_insert(&mut grant.0, ExecKey::Path(frozen), verdict);
             }
         } else {
-            meet_insert(&mut grant.names, key, verdict);
+            meet_insert(&mut grant.0, ExecKey::Name(key), verdict);
         }
     }
 
@@ -272,12 +271,12 @@ fn freeze_exec_grant(
     for (key, allow) in raw.dirs {
         if key == "path:" || key == "system:" {
             return Err(PolicyError::new(format!(
-                "{err_prefix}: '{key}/' is not a directory grant — \
+                "{err_prefix}: '{key}/' is not a directory grant; \
                  use '{key}' with no trailing slash"
             )));
         }
         if let Some(frozen) = freeze_absolute(&key, ctx, err_prefix)? {
-            meet_insert(&mut grant.dirs, frozen, allow);
+            meet_insert(&mut grant.0, ExecKey::Dir(frozen), Verdict::from(allow));
         }
     }
 
@@ -298,7 +297,7 @@ fn path_dirs(err_prefix: &str) -> Result<Vec<NormalizedPrefix>, PolicyError> {
     }
     if dirs.is_empty() {
         return Err(PolicyError::new(format!(
-            "{err_prefix}: 'path:' expands to zero absolute directories — \
+            "{err_prefix}: 'path:' expands to zero absolute directories; \
              PATH is empty, unset, or contains only relative entries"
         )));
     }
@@ -371,7 +370,7 @@ fn decode_exec_grant(value: &Value, err_prefix: &str) -> Result<RawExecGrant, Po
                         .collect();
                 if subs.is_empty() {
                     return Err(PolicyError::new(format!(
-                        "{err_prefix}: empty subcommand list for '{cmd}' — \
+                        "{err_prefix}: empty subcommand list for '{cmd}'; \
                          use 'allow' to admit any arguments, or 'deny' to refuse the command"
                     )));
                 }

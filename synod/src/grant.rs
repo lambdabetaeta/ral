@@ -29,12 +29,13 @@
 //! the construction lives here and is not scattered across the session.
 
 use ral_core::path::NormalizedPrefix;
-use ral_core::types::{Capabilities, EditorPolicy, ExecGrant, FsPolicy, ShellPolicy, Verdict};
-use std::collections::BTreeMap;
+use ral_core::types::{
+    Capabilities, EditorPolicy, ExecGrant, ExecKey, FsPolicy, ShellPolicy, Verdict,
+};
 use std::path::{Path, PathBuf};
 
-/// The image's office toolbox, as an allowlist of *bare command names* —
-/// `ExecGrant::paths` and `ExecGrant::dirs` stay empty.
+/// The image's office toolbox, as an allowlist of *bare command names*:
+/// no path or dir key.
 ///
 /// [`ExecGrant`] admits by bare name, by path or by directory prefix,
 /// and exarch's profiles lean hard on the directory half because a
@@ -426,13 +427,11 @@ impl Grant {
                 deny_paths: Vec::new(),
             }),
             net: Some(true),
-            exec: Some(ExecGrant {
-                names: TOOLBOX
-                    .iter()
-                    .map(|name| ((*name).to_string(), Verdict::Allow))
-                    .collect::<BTreeMap<_, _>>(),
-                ..ExecGrant::default()
-            }),
+            exec: Some(
+                (TOOLBOX.iter())
+                    .map(|name| (ExecKey::Name((*name).to_string()), Verdict::Allow))
+                    .collect(),
+            ),
             editor: Some(EditorPolicy::default()),
             shell: Some(ShellPolicy { chdir: true }),
             // Unattenuated: the guest VM already bounds every survivor a
@@ -936,7 +935,7 @@ mod tests {
         let exec = caps.exec.as_ref().expect("the office grant restricts exec");
         for tool in ["pandoc", "soffice", "python3", "qpdf", "csvcut"] {
             assert_eq!(
-                exec.names.get(tool),
+                exec.0.get(&ExecKey::Name(tool.into())),
                 Some(&Verdict::Allow),
                 "the office toolbox must admit {tool}"
             );

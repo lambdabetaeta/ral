@@ -1,8 +1,8 @@
 ---
-verified_at_commit: f4e88bce
-verified_at_date: 2026-10-05
-anchors: [GrantStack, Capabilities::widen, FsPolicy::widen, Verdict::meet, Verdict::widen, ExecGrant::widen, ExecRules::meet, ExecRules::verdict, allow_region, deny_region, check_fs_op, for_invocation]
-against: [design/grant, internals/capability-enforcement, design/two-enforcers, decisions/260906_object-not-name]
+verified_at_commit: 90479dea
+verified_at_date: 2026-10-06
+anchors: [GrantStack, Capabilities::widen, FsPolicy::widen, Verdict::meet, Verdict::widen, ExecGrant::widen, Table::meet, Table::verdict, region, rules, check_fs_op, for_invocation]
+against: [design/grant, design/authority-tables, internals/capability-enforcement, design/two-enforcers, decisions/260906_object-not-name]
 ---
 
 # Composing capability policies
@@ -82,9 +82,10 @@ These composition rules have standard names; ral picks the conservative one.
   *generalization*, *correlation*, *redundancy*. A broad allow over a narrow deny
   is *generalization*; "most-specific match wins" is the discipline that tames
   it, and in exec it is literal: the derived `Ord` on `Rank`
-  (`Dir(depth) < Carrier < Exact < Veto`), the greatest matching rank
-  deciding, over paths `path_within` has already resolved
-  ([[internals/capability-enforcement|capability-enforcement]]).
+  (`Dir(depth) < Carrier < Exact < Name`), the greatest matching rank
+  deciding, over paths `path_within` has already resolved. In fs the rank is
+  `(is a deny, depth)`, so the same rule reads as deny-overrides: a deny
+  outranks every allow at any depth ([[design/authority-tables|authority-tables]]).
 - **The operators form an algebra.** Bonatti, di Vimercati & Samarati give policy
   *union*, *intersection*, and *difference*; ral's restrict/extend-base are the
   intersection and a deny-respecting union.
@@ -102,31 +103,32 @@ operation never "absorbs" the other; that is expected, not a defect.
 
 ## Why restrict is stacking and not a flattened meet
 
-An exec layer is `(allow_dirs, deny_dirs, literals)`, and a literal keyed by a
-bare name — `git: [status]` — is admission-or-restriction for *whatever `git`
-resolves to at check time*. Take A = `/usr/bin/` allowed and `git: [status]`,
-B = `/usr/bin/` allowed and silent on `git`. `A ∧ B` should refuse `git push`
-(A does). No `(dirs, literals)` triple says that: keep A's literal and the
-result also refuses `git` where B's directories never admitted it; drop it and
-the result admits `git push`. The meaning of the one-sided key is "A's
-restriction ∧ B's directory verdict on the resolved path", which exists only
-at the access. So the representation is not closed under intersection, and
-the meet is the stack: `evaluate_exec` asks each layer about the concrete
-command and intersects the answers, where the same question *is* closed.
-(This was a real hole: a flattened `meet_literal_exec` dropped the one-sided
-restriction — [[decisions/260906_object-not-name|object-not-name]].)
+An authored exec layer maps keys — bare names, paths, directories — to
+verdicts, and a key that is a bare name — `git: [status]` — is
+admission-or-restriction for *whatever `git` resolves to at check time*. Take
+A = `/usr/bin/` allowed and `git: [status]`, B = `/usr/bin/` allowed and silent
+on `git`. `A ∧ B` should refuse `git push` (A does). No authored map says
+that: keep A's key and the result also refuses `git` where B's directories
+never admitted it; drop it and the result admits `git push`. The meaning of
+the one-sided key is "A's restriction ∧ B's directory verdict on the resolved
+path", which exists only once the name is a file. So the authored form is not
+closed under intersection, and the meet is the stack: every question compiles
+each layer against the host and intersects the answers, where the same
+question *is* closed. (This was a real hole: a flattened `meet_literal_exec`
+dropped the one-sided restriction —
+[[decisions/260906_object-not-name|object-not-name]].)
 
-> **Amended 2026-10-04.** The argument holds of the *authored* form: an
-> `ExecGrant { names, paths, dirs }` is still not closed under intersection,
-> and the stack still keeps its layers. But each layer now compiles, on every
-> question, to an `ExecRules` table keyed by objects — real paths, bundled
-> tools, directories, vetoed names — and those tables *are* closed under
-> meet. `ExecRules::meet` is pointwise over the union of supports, storing at
-> each key both sides' total verdicts met, so
-> `verdict(a ∧ b, p) = verdict(a, p) ∧ verdict(b, p)`, pinned by a property
-> test. The one-sided key above survives as exactly "A's restriction ∧ B's
-> directory verdict on the resolved path", computed once the name is a file
-> ([[decisions/261004_exec-rules|exec-rules]]).
+**Restrict is a meet of tables.** Compiled, a layer is a table of scoped rules
+over objects — real paths, bundled tools, directories, vetoed names for exec;
+resolved prefixes for fs — denoting a function from subjects to verdicts, and
+`Table::meet` is defined by the pointwise law
+`⟦a ∧ b⟧(s) = ⟦a⟧(s) ∧ ⟦b⟧(s)`. Deny-overrides survives representation: the
+meet joins denies and keeps an allow only at its own subject's met verdict,
+since a default written down as a deny would, under the spelling-folding deny
+relation, refuse names neither layer denied. The one-sided key above is then
+exactly "A's restriction ∧ B's directory verdict on the resolved path",
+computed once the name is a file. The proof sketch and the lattice laws, both
+property-tested, are [[design/authority-tables|authority-tables]].
 
 ## Cross-check: the code matches
 
@@ -134,15 +136,16 @@ The composition site is `exarch::policy::for_invocation`, which produces a
 `GrantStack` whose layers are `base ∨ extend`, then each `restrict`, then the
 deny layers for the restrict files and the credential files.
 
-- **restrict** — each file is a layer; `allow_region` intersects fs regions
-  across layers, `deny_region` unions them, `ExecRules::meet` meets the
-  layers' compiled exec tables. Deny-overrides. ✔
+- **restrict** — each file is a layer; `capability::fs::region` and
+  `capability::exec::rules` meet the layers' tables with `Table::meet`,
+  allows meeting and denies joining. Deny-overrides. ✔
 - **extend-base** — `FsPolicy::widen` unions denies *and* prefixes;
   `Verdict::widen` makes `Deny` win key by key; `ExecGrant::widen` lets a
   deny-dir evict a clashing allow-dir. Deny-overrides, uniform with fs. ✔
 - **at the point of use** — `check_fs_op` and `Shell::locate` test denies
-  before grants and fold every stack layer; `ExecRules::verdict` ranks a veto
-  above every other rule. Any layer's deny denies. ✔
+  before grants and fold every stack layer; `Table::verdict` ranks an fs
+  deny above every allow and an exec veto above every other rule. Any layer's
+  deny denies. ✔
 
 ## See also
 

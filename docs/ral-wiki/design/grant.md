@@ -7,7 +7,9 @@ everything it calls. Authority is never amplified:
 
 - a dimension omitted from a grant inherits the ambient authority;
 - a dimension present can only narrow it;
-- nested grants compose by meet, deny-overrides, the algebra read against the
+- nested grants compose by meet, deny-overrides: each of `fs` and `exec` is a
+  table of scoped rules whose meet is the pointwise meet of verdicts
+  ([[design/authority-tables|authority-tables]]), the algebra read against the
   literature in [[related/access-control-algebra|access-control-algebra]];
 - a deny is anti-monotonic — further layers can add denies but never reopen a
   denied region.

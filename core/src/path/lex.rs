@@ -28,8 +28,8 @@ fn path_aliases(p: &Path) -> Vec<PathBuf> {
 }
 
 /// Which spellings of a name count as one name.  An allow is judged under
-/// [`Stored`](Self::Stored), a deny under [`Collision`](Self::Collision): the
-/// polarity of a [`PrefixSet`](super::PrefixSet) picks, never a caller.
+/// [`Stored`](Self::Stored), a deny under [`Collision`](Self::Collision): a
+/// rule's [`Polarity`] picks, never a caller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Identity {
     /// The name as stored: bytes off Windows, ASCII case on Windows, where
@@ -38,6 +38,25 @@ pub(crate) enum Identity {
     /// Every name some filesystem takes for the same: [`collision_key`] per
     /// component.
     Collision,
+}
+
+/// Which way a rule speaks, and so which [`Identity`] it reads names under.
+pub(crate) trait Polarity {
+    const IDENTITY: Identity;
+}
+
+/// An allow holds a name as stored.
+pub(crate) enum Allow {}
+
+/// A deny holds every spelling of a name.
+pub(crate) enum Deny {}
+
+impl Polarity for Allow {
+    const IDENTITY: Identity = Identity::Stored;
+}
+
+impl Polarity for Deny {
+    const IDENTITY: Identity = Identity::Collision;
 }
 
 /// The name a filesystem may take `name` for: canonical caseless matching
@@ -67,13 +86,12 @@ pub(super) fn collision_key(name: &OsStr) -> Cow<'_, OsStr> {
 /// lies inside `prefix` modulo firmlinks and `identity` — on Windows, the
 /// path identity [`starts_with_identity`] applies, at the least.
 ///
-/// The in-process guard (`capability::enforce`) and the prefix intersector
-/// (`super::prefix_set`) both decide containment through it.
+/// Every authority judgment, fs and exec, decides containment through it.
 ///
 /// `pub(super)`: the kernel is form-blind, and *which* of a prefix's two
 /// forms a containment question is asked of, under which identity, is
-/// settled inside `path` — by [`super::prefix_set::covers`] and
-/// [`PrefixSet`](super::PrefixSet)'s polarity for fs and
+/// settled inside `path` — by a [`Polarity`] through
+/// [`NormalizedPrefix::contains`](super::NormalizedPrefix::contains) for fs and
 /// [`RealPath::within`](super::RealPath::within) for exec — and never by a
 /// caller holding two bare paths.
 pub(super) fn path_within(path: &Path, prefix: &Path, identity: Identity) -> bool {

@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 1eee86cd
-verified_at_date: 2026-10-05
-anchors: [check_exec, Admitted, ExecRules, Head, carriers, check_fs_op, check_fs_exact, locate, walk, Located, admits_fs_exact, fs_verdict, pinned_binary, sandbox_projection, allow_region, deny_region, GrantStack, sandboxed_command, build_launch, projection_enforceable, serve_warrant, Warrant, inherit, bwrap_options, SessionSandbox, fs_capability_name, ensure_fs_grant, deputy_prefixes, confinement_unavailable, spawn_error, Envelope, InfoFd, HostEnvelope, render_dev, render_cgroup, default_ro_binds, Pinned, pin_envelope]
+verified_at_commit: 90479dea
+verified_at_date: 2026-10-06
+anchors: [check_exec, Admitted, ExecRules, Head, carriers, check_fs_op, check_fs_exact, locate, walk, Located, admits_fs_exact, fs_verdict, pinned_binary, sandbox_projection, region, Region, Table, live, GrantStack, sandboxed_command, build_launch, projection_enforceable, serve_warrant, Warrant, inherit, bwrap_options, SessionSandbox, fs_capability_name, ensure_fs_grant, deputy_prefixes, confinement_unavailable, spawn_error, Envelope, InfoFd, HostEnvelope, render_dev, render_cgroup, default_ro_binds, Pinned, pin_envelope]
 ---
 
 # Capability enforcement: one chokepoint, two enforcers
@@ -30,14 +30,16 @@ boundary, not a typestate
 ([[decisions/260605_witness-collapse|witness-collapse]]). **The fold composes
 verdicts over layers; it never flattens the layers into one frame.** A
 `Capabilities` is one layer and the `GrantStack` is the meet — each verdict
-(`capability::exec::rules`, `allow_region`, `deny_region`, `permits_detach`)
+(`capability::exec::rules`, `capability::fs::region`, `permits_detach`)
 walks the stack and combines what each layer says about *this* access. There
 is no `Capabilities::meet`: an authored `ExecGrant` is not closed under
 intersection, because a bare key means the file the host `PATH` finds at
 check time ([[decisions/260906_object-not-name|object-not-name]]). Its
 compiled form is: `rules` compiles every layer into an `ExecRules` table on
-each question and meets the tables pointwise
-([[decisions/261004_exec-rules|exec-rules]]); restrict as meet and
+each question and meets the tables, and `region` re-freezes every layer's
+prefixes for one op into a `Region` and meets those. Both are a `Table`,
+whose meet is the pointwise law `⟦a ∧ b⟧ = ⟦a⟧ ∧ ⟦b⟧`
+([[design/authority-tables|authority-tables]]); restrict as meet and
 extend-base as widen, deny-overriding both ways, are read against the
 literature in [[related/access-control-algebra|access-control-algebra]].
 `Widen` serves the one place a union is meant — exarch's `--extend-base` widening a single base layer — with
@@ -73,8 +75,8 @@ spelled as the directory stores it, so a case-variant name meets the deny
 frozen under its stored spelling, and on Windows a `~`-bearing name is
 renamed by the kernel through an attribute-only handle, so an 8.3 alias
 meets the deny frozen under its long one; stored spellings cover *existing*
-names, and the deny relation covers absent ones: a deny region
-(`PrefixSet<Deny>`) holds a path whose components agree with it under
+names, and the deny relation covers absent ones: a deny rule of a
+`Region` holds a path whose components agree with it under
 `lex::collision_key`, so a create spelled `.ENV` meets an absent
 `deny: [cwd:/.env]`, and the refusal says it was caught by another spelling
 ([[decisions/261006_denies-hold-under-every-spelling|denies-hold-under-every-spelling]]) — and
@@ -151,12 +153,14 @@ spawned process does on its own.**
 - *Filesystem* — guarded in-process too (`check_fs_op`, read and write), and
   backed by an OS sandbox that confines a spawned child's own reads and writes:
   Seatbelt on macOS, bwrap on Linux, an AppContainer LowBox token on Windows.
-  Guard and profile read *one* fold (`capability/fs.rs`: `allow_region` meets a
-  region across layers, `deny_region` unions it), so here the conservatism
-  invariant needs no differential test — the two cannot disagree. All that
-  separates them is when the fold runs: afresh on every check for the guard,
-  once at spawn for the profile, because that is when the profile is written.
-  The projection carries no allow beneath a deny (`PrefixSet::outside`):
+  Guard and profile read *one* fold (`capability/fs.rs`: `region` meets each
+  layer's `Region` for the op, its allows meeting and its `deny_paths`
+  joining), so here the conservatism invariant needs no differential test —
+  the two cannot disagree. All that separates them is when the fold runs:
+  afresh on every check for the guard, once at spawn for the profile, because
+  that is when the profile is written. The guard asks `verdict`, and on a
+  refusal `respelled`; the profile renders `live()` and `denies()` as surface
+  strings. The projection carries no allow beneath a deny (`live()`):
   under deny-wins such an allow is dead, and a backend whose primitive orders
   explicit allows before inherited denies — a Windows ACL — must never be
   handed one. On macOS the directories a deny needs kept in place
@@ -195,7 +199,7 @@ already blocked — the Seatbelt profile renders a `subpath` deny for each — b
 an *ancestor* of that entry sits outside its subpath and inside the write
 prefix's own allow, so a confined `mv` or `rm` could relocate the ancestor
 directory and carry the denied bytes to a name nothing covers.
-`SandboxBindSpec::pinned_dirs` (`core/src/types/capability.rs`) closes the
+`FsRules::pinned_dirs` (`core/src/types/capability.rs`) closes the
 gap: every proper ancestor of a `deny_paths` entry that lies within some write
 prefix — the write prefix root included — is collected, over both a deny's
 surface spelling and its symlink-resolved target, so a symlink swapped in

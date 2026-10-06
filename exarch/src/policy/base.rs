@@ -10,7 +10,7 @@
 //! policy and exarch never injects it dynamically.
 
 use ral_core::io::TerminalState;
-use ral_core::types::{Capabilities, FsPolicy, Shell};
+use ral_core::types::{Capabilities, ExecKey, FsPolicy, Shell};
 
 const MINIMAL_RAL: &str = include_str!("../../data/minimal.exarch.ral");
 const REASONABLE_RAL: &str = include_str!("../../data/reasonable.exarch.ral");
@@ -74,8 +74,9 @@ fn drop_dead_exec_grants(caps: &mut Capabilities, unix_available: bool) {
         return;
     }
     if let Some(exec) = caps.exec.as_mut() {
-        exec.names.retain(|name, _| {
-            !ral_core::uutils::COREUTILS_UNIX_ONLY_TOOLS.contains(&name.as_str())
+        exec.0.retain(|key, _| {
+            !matches!(key, ExecKey::Name(name)
+                if ral_core::uutils::COREUTILS_UNIX_ONLY_TOOLS.contains(&name.as_str()))
         });
     }
 }
@@ -101,7 +102,19 @@ mod tests {
     #[cfg(unix)]
     use ral_core::path::sigil::freeze_one;
     #[cfg(unix)]
-    use ral_core::types::Verdict;
+    use ral_core::types::{ExecGrant, Verdict};
+
+    fn bare(s: &str) -> ExecKey {
+        ExecKey::Name(s.into())
+    }
+
+    /// Each dir key's surface, and whether it admits.
+    fn dirs(exec: &ExecGrant) -> impl Iterator<Item = (&str, bool)> {
+        exec.0.iter().filter_map(|(key, v)| match key {
+            ExecKey::Dir(dir) => Some((dir.as_str(), !v.is_denied())),
+            _ => None,
+        })
+    }
     use ral_core::types::{Capabilities, Shell};
     use std::path::Path;
 
@@ -226,7 +239,7 @@ mod tests {
         );
         let exec = caps.exec.as_ref().expect("minimal declares exec");
         assert!(
-            !exec.dirs.keys().any(|p| p.as_str() == "/opt/homebrew"),
+            !dirs(exec).any(|(p, _)| p == "/opt/homebrew"),
             "the foreign-rooted '/opt/homebrew/' override must not survive freeze on Windows"
         );
     }
@@ -245,16 +258,12 @@ mod tests {
         assert_eq!(caps.net, Some(false), "confined must have net off");
         let exec = caps.exec.as_ref().expect("confined declares exec");
         let bundled = ral_core::uutils::bundled_tools();
-        let host_named: Vec<&str> = exec
-            .names
-            .keys()
-            .map(String::as_str)
-            .filter(|name| !bundled.contains(name))
-            .chain(
-                exec.paths
-                    .keys()
-                    .map(ral_core::path::NormalizedPrefix::as_str),
-            )
+        let host_named: Vec<&str> = (exec.0.keys())
+            .filter_map(|key| match key {
+                ExecKey::Name(name) if !bundled.contains(&name.as_str()) => Some(name.as_str()),
+                ExecKey::Path(path) => Some(path.as_str()),
+                _ => None,
+            })
             .collect();
         assert!(
             host_named.is_empty(),
@@ -319,8 +328,8 @@ mod tests {
         let exec = caps.exec.as_ref().expect("reasonable should declare exec");
         let xdg_bin = frozen("xdg:bin", &ctx);
         assert_eq!(
-            exec.dirs.get(&xdg_bin),
-            Some(&true),
+            exec.0.get(&ExecKey::Dir(xdg_bin.clone())),
+            Some(&Verdict::Allow),
             "reasonable should list the resolved xdg:bin ({}) in exec dirs",
             xdg_bin.as_str()
         );
@@ -348,7 +357,7 @@ mod tests {
                 .exec
                 .as_ref()
                 .unwrap_or_else(|| panic!("{name} should declare exec"));
-            let allows = |dir: &str| exec.dirs.iter().any(|(p, v)| p.as_str() == dir && *v);
+            let allows = |dir: &str| dirs(exec).any(|(p, v)| p == dir && v);
             assert!(allows(&cwd_resolved), "{name} exec missing resolved cwd");
             assert!(
                 allows(&tempdir_resolved),
@@ -407,10 +416,9 @@ mod tests {
         };
         let caps = load("reasonable", REASONABLE_RAL, &ctx);
         assert!(
-            caps.exec.as_ref().is_some_and(|m| m
-                .dirs
-                .iter()
-                .any(|(p, v)| p.as_str() == "/opt/homebrew" && *v)),
+            caps.exec
+                .as_ref()
+                .is_some_and(|m| dirs(m).any(|(p, v)| p == "/opt/homebrew" && v)),
             "reasonable should list /opt/homebrew in exec dirs when it exists on this host"
         );
         assert!(
@@ -501,7 +509,7 @@ mod tests {
             let caps = load(name, text, &ctx);
             let exec = caps.exec.as_ref().expect("base declares exec");
             assert_eq!(
-                exec.names.get("git"),
+                exec.0.get(&bare("git")),
                 Some(&Verdict::Allow),
                 "{name} should admit git"
             );
@@ -538,7 +546,10 @@ mod tests {
         let widened =
             load("minimal", MINIMAL_RAL, &ctx).widen(load("git-ext", GIT_EXTENSION_RAL, &ctx));
         assert_eq!(
-            widened.exec.as_ref().and_then(|exec| exec.names.get("git")),
+            widened
+                .exec
+                .as_ref()
+                .and_then(|exec| exec.0.get(&bare("git"))),
             Some(&Verdict::Allow)
         );
         if let Some(git) = host_real("git") {
@@ -574,7 +585,7 @@ mod tests {
             .exec
             .as_ref()
             .expect("extension should keep exec map");
-        assert_eq!(exec.names.get("git"), Some(&Verdict::Allow));
+        assert_eq!(exec.0.get(&bare("git")), Some(&Verdict::Allow));
         let fs = widened_minimal
             .fs
             .as_ref()
@@ -639,9 +650,7 @@ mod tests {
                 let normalized = ral_core::path::NormalizedPrefix::from_surface(root).into_string();
                 let expected = !(name == "minimal" && root == "/opt/homebrew");
                 assert!(
-                    exec.dirs
-                        .iter()
-                        .any(|(p, v)| p.as_str() == normalized && *v == expected),
+                    dirs(exec).any(|(p, v)| p == normalized && v == expected),
                     "{name} should carry allow={expected} for the live system tool root {normalized}"
                 );
             }
@@ -677,7 +686,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} should declare exec"));
             let unsettled: Vec<&str> = ral_core::uutils::bundled_tools()
                 .into_iter()
-                .filter(|tool| !exec.names.contains_key(*tool))
+                .filter(|tool| !exec.0.contains_key(&bare(tool)))
                 .collect();
             assert!(
                 unsettled.is_empty(),
@@ -702,11 +711,11 @@ mod tests {
         {
             let exec = caps.exec.as_ref().expect("reasonable declares exec");
             assert!(
-                exec.names.contains_key("tac"),
+                exec.0.contains_key(&bare("tac")),
                 "host build should still bundle tac"
             );
             assert!(
-                exec.names.contains_key("test"),
+                exec.0.contains_key(&bare("test")),
                 "host build should still bundle test"
             );
         }
@@ -716,16 +725,16 @@ mod tests {
         let exec = caps.exec.as_ref().expect("reasonable declares exec");
         for dead in ral_core::uutils::COREUTILS_UNIX_ONLY_TOOLS {
             assert!(
-                !exec.names.contains_key(*dead),
+                !exec.0.contains_key(&bare(dead)),
                 "'{dead}' should be dropped when the platform can't bundle it"
             );
         }
         assert!(
-            exec.names.contains_key("git"),
+            exec.0.contains_key(&bare("git")),
             "an ordinary named binary must survive the drop"
         );
         assert!(
-            exec.names.contains_key("cat"),
+            exec.0.contains_key(&bare("cat")),
             "a cross-platform bundled tool must survive the drop"
         );
     }

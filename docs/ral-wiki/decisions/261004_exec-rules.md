@@ -1,9 +1,17 @@
 ---
 status: active
 generated_at_commit: 7f61632a
-verified_at_commit: f4e88bce
-anchors: [ExecGrant, ExecRules, Verdict, Rank, Program, Subject, Head, Missing, Admitted, check_exec, admits_head, RealPath, meet_insert, holds, met, command_name_key, evicts]
+verified_at_commit: 90479dea
+anchors: [ExecGrant, ExecKey, ExecRules, ExecScope, Table, Verdict, Rank, Program, Subject, Head, Missing, Admitted, check_exec, admits_head, RealPath, meet_insert, holds, command_name_key, evicts]
 ---
+
+> **Mechanics superseded 2026-10-06** by
+> [[decisions/261006_one-table-two-instances|one-table-two-instances]]. The
+> law stands: one function gives the verdict, and guard and kernel read one
+> table. What changed is the table: `ExecRules` is `Table<ExecScope>`, its
+> meet the generic one, its proof and worked cases in
+> [[design/authority-tables|authority-tables]]; the authored `ExecGrant` is
+> one map over `ExecKey`, and the veto's rank is `Rank::Name`.
 
 # Exec rules: one table, one function
 
@@ -250,9 +258,11 @@ program as stored.
 
 ## Where
 
-`core/src/types/capability.rs` (`ExecGrant`, `Verdict`,
+`core/src/types/capability.rs` (`ExecGrant`, `ExecKey`, `Verdict`,
 `meet_insert`), `core/src/capability/decode.rs` (keys to `ExecGrant`),
-`core/src/capability/exec.rs` (`ExecRules`, `Rank`, `Program`, `Subject`),
+`core/src/capability/table.rs` (`Table`: `verdict`, `respelled`, the meet),
+`core/src/capability/exec.rs` (`ExecRules`, `ExecScope`, `Rank`, `Program`,
+`Subject`, `holds`),
 `core/src/capability/enforce.rs` (`check_exec`, `admits_head`, `Admitted`),
 `core/src/runtime/command/head.rs` (`Head`, `Missing`),
 `core/src/path/real.rs` (`RealPath`, `within::<P>`),

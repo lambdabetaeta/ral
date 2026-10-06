@@ -9,6 +9,7 @@
 
 mod common;
 
+use common::refused_by_a_confined_runner;
 use std::process::{Command, Stdio};
 
 fn ral(args: &[&str]) -> common::Output {
@@ -25,32 +26,6 @@ fn ral(args: &[&str]) -> common::Output {
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         status: out.status.code().unwrap_or(1),
     }
-}
-
-/// Whether `out` is the refusal a confined runner gives a launch that must
-/// enter Seatbelt: one profile per lineage, so the launch cannot run.  The
-/// refusal then stands in for the run, asserted exactly, so any other failure
-/// to enter still fails.
-#[cfg(target_os = "macos")]
-fn refused_by_a_confined_runner(out: &common::Output) -> bool {
-    use ral_core::sandbox::ALREADY_PROFILED;
-    const ENTRY_REFUSED: &str = "ral: cannot enter the Seatbelt sandbox: ";
-    let Some(reason) = out
-        .stderr
-        .lines()
-        .find_map(|line| line.strip_prefix(ENTRY_REFUSED))
-    else {
-        return false;
-    };
-    assert_eq!(reason, ALREADY_PROFILED, "the refusal is not attributed");
-    assert_eq!(out.status, 126, "a refused launch exits 126");
-    eprintln!("skip: this runner is inside a Seatbelt profile; asserted the attributed refusal");
-    true
-}
-
-#[cfg(not(target_os = "macos"))]
-fn refused_by_a_confined_runner(_: &common::Output) -> bool {
-    false
 }
 
 fn write_profile(suffix: &str, body: &str) -> std::path::PathBuf {
@@ -479,20 +454,16 @@ fn confined_forks_run_under_a_process_budget() {
 
 /// A canonical scratch directory holding `bin/good/x` and an executable
 /// stash script `x` outside `bin`, which a grant body copies in after the
-/// grant froze; removed on drop.
+/// grant froze.
 #[cfg(unix)]
-struct ExecScratch(std::path::PathBuf);
+struct ExecScratch(common::Scratch);
 
 #[cfg(unix)]
 impl ExecScratch {
     fn new(tag: &str) -> Self {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = common::fresh_tmp_path(&format!("exec_spelling_{tag}"), "dir");
-        std::fs::create_dir_all(dir.join("bin/good")).unwrap();
-        let s = Self(std::fs::canonicalize(&dir).unwrap());
-        std::fs::write(s.stash(), "#!/bin/sh\necho ran\n").unwrap();
-        std::fs::set_permissions(s.stash(), std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::fs::copy(s.stash(), s.bin().join("good/x")).unwrap();
+        let s = Self(common::Scratch::new(&format!("exec_spelling_{tag}")));
+        common::script(&s.stash());
+        common::script(&s.bin().join("good/x"));
         s
     }
 
@@ -502,13 +473,6 @@ impl ExecScratch {
 
     fn stash(&self) -> std::path::PathBuf {
         self.0.join("x")
-    }
-}
-
-#[cfg(unix)]
-impl Drop for ExecScratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
@@ -538,6 +502,11 @@ const RESPELLED: &str =
 #[cfg(unix)]
 #[test]
 fn an_absent_exec_deny_holds_a_case_variant() {
+    #[cfg(target_os = "linux")]
+    if !common::bwrap_functional() {
+        eprintln!("skip: bwrap cannot confine a child here");
+        return;
+    }
     let scratch = ExecScratch::new("dir");
     let (bin, stash) = (scratch.bin(), scratch.stash());
     let (b, s) = (bin.display(), stash.display());
@@ -587,6 +556,11 @@ fn an_absent_exec_deny_holds_a_case_variant() {
 #[cfg(unix)]
 #[test]
 fn an_absent_exec_path_deny_holds_a_case_variant() {
+    #[cfg(target_os = "linux")]
+    if !common::bwrap_functional() {
+        eprintln!("skip: bwrap cannot confine a child here");
+        return;
+    }
     let scratch = ExecScratch::new("path");
     let (bin, stash) = (scratch.bin(), scratch.stash());
     let (b, s) = (bin.display(), stash.display());
@@ -666,4 +640,57 @@ fn a_stacked_one_sided_allow_denies_no_other_spelling() {
     }
     assert_eq!(out.status, 0, "`B/x` must run; stderr:\n{}", out.stderr);
     assert!(out.stdout.contains("ran"), "stdout:\n{}", out.stdout);
+}
+
+/// An allow beneath a deny never reaches the OS backend, so a child is
+/// refused what the guard refuses: a deny outranks an allow at any depth.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn an_allow_beneath_a_deny_never_reaches_the_backend() {
+    #[cfg(target_os = "linux")]
+    if !common::bwrap_functional() {
+        eprintln!("skip: bwrap cannot confine a child here");
+        return;
+    }
+    let d = common::Scratch::new("caps_beneath");
+    let (beneath, beside) = (d.join("Secrets/sub/f"), d.join("other/f"));
+    for (file, text) in [(&beneath, "beneath"), (&beside, "beside")] {
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, text).unwrap();
+    }
+    let allows = common::quoted(&[&d.0, &d.join("Secrets/sub")]);
+    let cat = |file: &std::path::Path| {
+        common::run(
+            "caps_beneath",
+            &format!(
+                "grant [fs: [read: [{allows}], write: [{allows}], deny: ['{}']]] \
+                 {{ sh -c 'cat {}' }}",
+                d.join("Secrets").display(),
+                file.display()
+            ),
+        )
+    };
+
+    let out = cat(&beside);
+    if refused_by_a_confined_runner(&out) {
+        return;
+    }
+    assert_eq!(
+        out.status, 0,
+        "a child's read beside the deny must be admitted; stderr:\n{}",
+        out.stderr
+    );
+    assert_eq!(out.stdout, "beside");
+
+    let out = cat(&beneath);
+    assert_ne!(
+        out.status, 0,
+        "a child's read beneath the deny must be refused; stderr:\n{}",
+        out.stderr
+    );
+    assert!(
+        !out.stdout.contains("beneath"),
+        "the denied file reached the child; stdout:\n{}",
+        out.stdout
+    );
 }

@@ -3,9 +3,8 @@
 //! side.
 //!
 //! A prefix carries its symlink-followed `resolved` form on the value, so
-//! the set algebra over prefixes ([`meet_prefixes`](super::meet_prefixes),
-//! [`covers`](super::covers)) is a total pure function of two policies: the
-//! disk is consulted once, at freeze.  Enforcement still re-resolves
+//! the meet of two policies is a total pure function of them: the disk is
+//! consulted once, at freeze.  Enforcement still re-resolves
 //! against the live filesystem — the algebra speaks about the policy,
 //! enforcement about the world.
 //!
@@ -19,10 +18,13 @@
 //! A prefix's two forms are not a normal form and a spelling of it: fs and
 //! exec alike are judged over *objects*, on `resolved`; `surface` is the
 //! author's spelling, kept for display and for the order of a set.  Hence
-//! the containment doors, [`covers`](super::prefix_set::covers) for fs and
+//! the containment doors, [`contains`](NormalizedPrefix::contains) and
+//! [`resolved_path`](NormalizedPrefix::resolved_path) for fs and
 //! [`RealPath::frozen`](super::RealPath::frozen) for exec, and no other:
 //! `surface` leaves the type only as a `String`, for rendering.
 
+use super::lex::{Deny, Polarity, path_within};
+use super::resolver::Resolver;
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 
@@ -112,25 +114,10 @@ impl ResolvedPath {
     }
 }
 
-/// Which operating system's namespace a [`NormalizedPrefix`]'s
-/// `resolved` form was resolved in.
-///
-/// [`super::meet_prefixes`] keys overlap on `(namespace, resolved)`, so a
-/// prefix minted for one namespace never overlaps one minted for another:
-/// the meet is fail-closed across namespaces rather than silently
-/// comparing spellings that were never meant to agree.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Serialize, Deserialize)]
-pub enum Namespace {
-    /// This process's own filesystem.
-    Host,
-    /// A Linux guest's filesystem — see [`NormalizedPrefix::from_guest`].
-    Guest,
-}
-
 /// A frozen grant prefix: `surface` as the author wrote it (absolute and
 /// `.`/`..`-collapsed, the normal form a [`ResolvedPath`] also carries).
 ///
-/// `resolved` is that same path with symlinks followed in `namespace`.
+/// `resolved` is that same path with symlinks followed.
 ///
 /// Field order is load-bearing: the derived `Ord` sorts by `surface`
 /// first, so a `BTreeSet` dedups two spellings of one directory by the
@@ -141,7 +128,6 @@ pub enum Namespace {
 pub struct NormalizedPrefix {
     surface: String,
     resolved: String,
-    namespace: Namespace,
 }
 
 impl NormalizedPrefix {
@@ -162,20 +148,17 @@ impl NormalizedPrefix {
             return Self {
                 surface: "/".into(),
                 resolved: "/".into(),
-                namespace: Namespace::Host,
             };
         }
         let resolved = super::canon::canonicalise_lenient(&folded);
         Self {
             surface: folded.to_string_lossy().into_owned(),
             resolved: resolved.to_string_lossy().into_owned(),
-            namespace: Namespace::Host,
         }
     }
 
-    /// Mint a prefix from an already-normal surface form — what
-    /// [`PrefixSet::surface`](super::PrefixSet::surface) yields and what
-    /// the OS-sandbox renderer emits.  Same fold-then-resolve kernel,
+    /// Mint a prefix from an already-normal surface form, such as the
+    /// OS-sandbox renderer emits.  Same fold-then-resolve kernel,
     /// idempotent on such a form.
     pub fn from_surface(path: impl AsRef<Path>) -> Self {
         Self::freeze(path.as_ref())
@@ -209,10 +192,7 @@ impl NormalizedPrefix {
     /// [`from_surface`](Self::from_surface), for prefixes matched on
     /// *this* computer, takes an `AsRef<Path>`.  There is no `realpath(3)`
     /// on this host for another machine's path, so `resolved` is `surface`
-    /// again, tagged [`Namespace::Guest`]: a host-side meet against a
-    /// guest prefix is then the empty, fail-closed intersection, leaving
-    /// the guest's own kernel as the only thing that can narrow a guest
-    /// grant.
+    /// again.
     #[must_use]
     pub fn from_guest(path: &str) -> Self {
         debug_assert!(
@@ -223,7 +203,6 @@ impl NormalizedPrefix {
         Self {
             surface: folded.clone(),
             resolved: folded,
-            namespace: Namespace::Guest,
         }
     }
 
@@ -253,34 +232,48 @@ impl NormalizedPrefix {
         clippy::disallowed_methods,
         reason = "lexical Path::new over a resolved form already in normal form — no I/O behind it"
     )]
-    pub(super) fn resolved_path(&self) -> &Path {
+    pub(crate) fn resolved_path(&self) -> &Path {
         Path::new(&self.resolved)
     }
 
-    /// The symlink-followed form, for composition overlap.
+    /// The symlink-followed form, for messages.
     pub(super) fn resolved(&self) -> &str {
         &self.resolved
     }
 
-    /// Which namespace `resolved` was resolved in.
-    pub(super) fn namespace(&self) -> Namespace {
-        self.namespace
+    /// Whether `path` lies within this prefix as a rule of polarity `P`
+    /// reads names.
+    pub(crate) fn contains<P: Polarity>(&self, path: &Path) -> bool {
+        path_within(path, self.resolved_path(), P::IDENTITY)
+    }
+
+    /// Depth in components of the alias-folded resolved form, as
+    /// [`RealPath::depth`](super::RealPath::depth) counts it.
+    pub(crate) fn depth(&self) -> usize {
+        super::lex::identity_depth(&self.resolved, cfg!(windows))
+    }
+
+    /// This prefix frozen afresh from its surface spelling against
+    /// `resolver`: unchanged but for a re-resolution of its symlinks.
+    pub(crate) fn refreeze(&self, resolver: &Resolver) -> Self {
+        // `Resolver::resolve` anchors a driveless path to a cwd, which on
+        // Windows would narrow the universal root to one drive.
+        if super::lex::is_bare_root(&self.surface) {
+            return Self::root();
+        }
+        Self::from_surface(resolver.resolve(&self.surface).as_path())
     }
 
     /// True iff the in-process exec guard would let this deny decide everything the allow
     /// `other` covers, so composition may drop the allow: the two resolved
-    /// forms contain each other under the deny's identity, in one namespace.
+    /// forms contain each other under the deny's identity.
     /// Mutual containment is one rank, where the guard's tie denies.
     ///
     /// Not byte equality: containment folds macOS firmlink aliases (`/tmp` ↔
     /// `/private/tmp`) and every spelling some filesystem takes for a name,
     /// so the derived `Eq`/`Ord` cannot answer this.
     pub(crate) fn evicts(&self, other: &Self) -> bool {
-        use super::lex::path_within_str;
-        use super::{Deny, Polarity};
-        self.namespace == other.namespace
-            && path_within_str(&other.resolved, &self.resolved, Deny::IDENTITY)
-            && path_within_str(&self.resolved, &other.resolved, Deny::IDENTITY)
+        self.contains::<Deny>(other.resolved_path()) && other.contains::<Deny>(self.resolved_path())
     }
 
     /// Consume into the owned surface `String`, for the wire and render
@@ -299,11 +292,10 @@ impl NormalizedPrefix {
     /// symlink freezes to, without a disk.  `#[cfg(test)]` so it can never
     /// become a production door for fabricating a resolved form.
     #[cfg(test)]
-    pub(crate) fn for_test(surface: &str, resolved: &str, namespace: Namespace) -> Self {
+    pub(crate) fn for_test(surface: &str, resolved: &str) -> Self {
         Self {
             surface: surface.to_string(),
             resolved: resolved.to_string(),
-            namespace,
         }
     }
 }
@@ -353,8 +345,9 @@ mod tests {
             r"D:\a\repo\y",
             r"Z:\z",
         ] {
+            let p = NormalizedPrefix::from_surface(path);
             assert!(
-                crate::path::prefix_set::covers(&root, &NormalizedPrefix::from_surface(path)),
+                root.contains::<crate::path::Allow>(p.resolved_path()),
                 "the ceiling must cover {path}"
             );
         }

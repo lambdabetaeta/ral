@@ -9,10 +9,9 @@
 
 use ral_core::path::NormalizedPrefix;
 use ral_core::test_access::check_file;
-use ral_core::types::{Capabilities, ExecGrant, FsPolicy, Shell, Verdict};
+use ral_core::types::{Capabilities, ExecGrant, ExecKey, FsPolicy, Shell, Verdict};
 #[cfg(unix)]
 use ral_core::types::{ExecProjection, ExecRule};
-use std::collections::BTreeMap;
 #[cfg(unix)]
 use std::path::Path;
 
@@ -28,25 +27,28 @@ fn host(p: &str) -> String {
     }
 }
 
-fn names(entries: &[(&str, Verdict)]) -> BTreeMap<String, Verdict> {
+fn names(entries: &[(&str, Verdict)]) -> impl Iterator<Item = (ExecKey, Verdict)> {
     entries
         .iter()
-        .map(|(name, v)| ((*name).to_string(), v.clone()))
-        .collect()
+        .map(|(name, v)| (ExecKey::Name((*name).to_string()), v.clone()))
 }
 
-fn paths(entries: &[(&str, Verdict)]) -> BTreeMap<NormalizedPrefix, Verdict> {
-    entries
-        .iter()
-        .map(|(path, v)| (NormalizedPrefix::from_surface(host(path)), v.clone()))
-        .collect()
+fn paths(entries: &[(&str, Verdict)]) -> impl Iterator<Item = (ExecKey, Verdict)> {
+    entries.iter().map(|(path, v)| {
+        (
+            ExecKey::Path(NormalizedPrefix::from_surface(host(path))),
+            v.clone(),
+        )
+    })
 }
 
-fn dirs(entries: &[(&str, bool)]) -> BTreeMap<NormalizedPrefix, bool> {
-    entries
-        .iter()
-        .map(|(dir, v)| (NormalizedPrefix::from_surface(host(dir)), *v))
-        .collect()
+fn dirs(entries: &[(&str, bool)]) -> impl Iterator<Item = (ExecKey, Verdict)> {
+    entries.iter().map(|(dir, v)| {
+        (
+            ExecKey::Dir(NormalizedPrefix::from_surface(host(dir))),
+            Verdict::from(*v),
+        )
+    })
 }
 
 fn exec_only(exec: ExecGrant) -> Capabilities {
@@ -61,11 +63,11 @@ fn exec_only(exec: ExecGrant) -> Capabilities {
 #[test]
 fn a_file_rule_restriction_beats_a_covering_allow_dir() {
     let mut shell = Shell::default();
-    let grant = exec_only(ExecGrant {
-        paths: paths(&[("/bin/cargo", Verdict::Only(["build".to_string()].into()))]),
-        dirs: dirs(&[("/bin", true)]),
-        ..ExecGrant::default()
-    });
+    let grant = exec_only(
+        paths(&[("/bin/cargo", Verdict::Only(["build".to_string()].into()))])
+            .chain(dirs(&[("/bin", true)]))
+            .collect(),
+    );
     let result = shell.with_capabilities(grant, |shell| {
         check_file(shell, &host("/bin/cargo"), &["install".into()])
     });
@@ -81,10 +83,7 @@ fn a_file_rule_restriction_beats_a_covering_allow_dir() {
 #[test]
 fn a_deeper_deny_dir_carves_a_hole_in_an_allow_dir() {
     let mut shell = Shell::default();
-    let grant = exec_only(ExecGrant {
-        dirs: dirs(&[("/bin", true), ("/bin/sensitive", false)]),
-        ..ExecGrant::default()
-    });
+    let grant = exec_only(dirs(&[("/bin", true), ("/bin/sensitive", false)]).collect());
     shell
         .with_capabilities(grant.clone(), |sh| check_file(sh, &host("/bin/ls"), &[]))
         .expect("ls under the allow dir should be admitted");
@@ -102,10 +101,7 @@ fn a_deeper_deny_dir_carves_a_hole_in_an_allow_dir() {
 #[test]
 fn a_bare_allow_admits_no_other_file_of_its_name() {
     let mut shell = Shell::default();
-    let grant = exec_only(ExecGrant {
-        names: names(&[("git", Verdict::Allow)]),
-        ..ExecGrant::default()
-    });
+    let grant = exec_only(names(&[("git", Verdict::Allow)]).collect());
     let result = shell.with_capabilities(grant, |shell| {
         check_file(shell, &host("/fake-bin/git"), &["status".into()])
     });
@@ -115,10 +111,7 @@ fn a_bare_allow_admits_no_other_file_of_its_name() {
 #[test]
 fn a_path_key_admits_its_file() {
     let mut shell = Shell::default();
-    let grant = exec_only(ExecGrant {
-        paths: paths(&[("/fake-bin/git", Verdict::Allow)]),
-        ..ExecGrant::default()
-    });
+    let grant = exec_only(paths(&[("/fake-bin/git", Verdict::Allow)]).collect());
     shell
         .with_capabilities(grant, |shell| {
             check_file(shell, &host("/fake-bin/git"), &["status".into()])
@@ -201,11 +194,11 @@ fn sandbox_projection_does_not_leak_outer_raw_prefix() {
 #[test]
 fn a_bare_deny_vetoes_its_name_under_an_allow_dir() {
     let mut shell = Shell::default();
-    let grant = exec_only(ExecGrant {
-        names: names(&[("bash", Verdict::Deny)]),
-        dirs: dirs(&[("/bin", true)]),
-        ..ExecGrant::default()
-    });
+    let grant = exec_only(
+        names(&[("bash", Verdict::Deny)])
+            .chain(dirs(&[("/bin", true)]))
+            .collect(),
+    );
     let result = shell.with_capabilities(grant, |sh| check_file(sh, &host("/bin/bash"), &[]));
     assert!(
         result.is_err(),
@@ -218,10 +211,7 @@ fn a_bare_deny_vetoes_its_name_under_an_allow_dir() {
 #[test]
 fn a_bare_allow_does_not_admit_a_planted_file_of_its_name() {
     let mut shell = Shell::default();
-    let grant = exec_only(ExecGrant {
-        names: names(&[("rg", Verdict::Allow)]),
-        ..ExecGrant::default()
-    });
+    let grant = exec_only(names(&[("rg", Verdict::Allow)]).collect());
     let result = shell.with_capabilities(grant, |sh| check_file(sh, &host("/evil/rg"), &[]));
     assert!(
         result.is_err(),
@@ -233,11 +223,11 @@ fn a_bare_allow_does_not_admit_a_planted_file_of_its_name() {
 #[test]
 fn a_path_key_deny_beats_a_covering_allow_dir() {
     let mut shell = Shell::default();
-    let grant = exec_only(ExecGrant {
-        paths: paths(&[("/bin/git", Verdict::Deny)]),
-        dirs: dirs(&[("/bin", true)]),
-        ..ExecGrant::default()
-    });
+    let grant = exec_only(
+        paths(&[("/bin/git", Verdict::Deny)])
+            .chain(dirs(&[("/bin", true)]))
+            .collect(),
+    );
     let result = shell.with_capabilities(grant, |sh| check_file(sh, &host("/bin/git"), &[]));
     assert!(result.is_err(), "a path key's deny must veto its file");
 }
@@ -297,14 +287,8 @@ fn with_fs(exec: ExecGrant) -> Capabilities {
 #[cfg(unix)]
 #[test]
 fn sandbox_projection_admits_a_path_key_covered_by_a_sibling_dir() {
-    let outer = with_fs(ExecGrant {
-        dirs: dirs(&[("/bin", true)]),
-        ..ExecGrant::default()
-    });
-    let inner = with_fs(ExecGrant {
-        paths: paths(&[("/bin/git", Verdict::Allow)]),
-        ..ExecGrant::default()
-    });
+    let outer = with_fs(dirs(&[("/bin", true)]).collect());
+    let inner = with_fs(paths(&[("/bin/git", Verdict::Allow)]).collect());
     let git = host("/bin/git");
 
     let mut shell = Shell::default();
@@ -336,48 +320,36 @@ fn sandbox_projection_admits_a_path_key_covered_by_a_sibling_dir() {
 #[cfg(unix)]
 #[test]
 fn exec_projection_never_out_permits_the_guard() {
-    let allow_dir = |d: &str| ExecGrant {
-        dirs: dirs(&[(d, true)]),
-        ..ExecGrant::default()
-    };
+    let allow_dir = |d: &str| dirs(&[(d, true)]).collect::<ExecGrant>();
     let cases: Vec<(ExecGrant, ExecGrant, Vec<&str>)> = vec![
         // A path key admitted by inner, covered only by outer's allow dir.
         (
             allow_dir("/bin"),
-            ExecGrant {
-                paths: paths(&[("/bin/git", Verdict::Allow)]),
-                ..ExecGrant::default()
-            },
+            paths(&[("/bin/git", Verdict::Allow)]).collect(),
             vec!["/bin/git", "/bin/ls", "/evil"],
         ),
         // A path key's deny carves a hole in a shared allow dir.
         (
             allow_dir("/bin"),
-            ExecGrant {
-                paths: paths(&[("/bin/sudo", Verdict::Deny)]),
-                dirs: dirs(&[("/bin", true)]),
-                ..ExecGrant::default()
-            },
+            paths(&[("/bin/sudo", Verdict::Deny)])
+                .chain(dirs(&[("/bin", true)]))
+                .collect(),
             vec!["/bin/ls", "/bin/sudo"],
         ),
         // A bare deny vetoes its name wherever it lands under the allow dir.
         (
             allow_dir("/bin"),
-            ExecGrant {
-                names: names(&[("bash", Verdict::Deny)]),
-                dirs: dirs(&[("/bin", true)]),
-                ..ExecGrant::default()
-            },
+            names(&[("bash", Verdict::Deny)])
+                .chain(dirs(&[("/bin", true)]))
+                .collect(),
             vec!["/bin/ls", "/bin/bash", "/bin/nested/bash"],
         ),
         // A path key's deny must veto a file both dirs would admit.
         (
             allow_dir("/bin"),
-            ExecGrant {
-                paths: paths(&[("/bin/bash", Verdict::Deny)]),
-                dirs: dirs(&[("/bin", true)]),
-                ..ExecGrant::default()
-            },
+            paths(&[("/bin/bash", Verdict::Deny)])
+                .chain(dirs(&[("/bin", true)]))
+                .collect(),
             vec!["/bin/ls", "/bin/bash"],
         ),
         // Disjoint allow dirs meet to nothing.

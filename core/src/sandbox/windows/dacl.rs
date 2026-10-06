@@ -1135,7 +1135,7 @@ fn win32_err_str(path: &Path, msg: &str) -> DaclError {
 /// a deny nested inside an allowed parent beats the allow the parent
 /// inherits down to it. The other direction never reaches this backend at
 /// all: `capability::sandbox::sandbox_projection` calls
-/// [`PrefixSet::outside`](crate::path::PrefixSet::outside) so an allow
+/// [`Table::live`](crate::capability::table::Table::live) so an allow
 /// beneath a deny is dropped from the projection before any ACE is stamped,
 /// rather than relying on ACL order to bury it. A directory gets `OI|CI`,
 /// whose propagation Win32 handles in both directions, which is why nothing

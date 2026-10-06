@@ -1,9 +1,17 @@
 ---
 status: active
 generated_at_commit: 7f61632a
-verified_at_commit: f4e88bce
-anchors: [carriers, trusted_real, shebang, kernel, Rank, ExecRule, emit_exec_rules, Sbpl]
+verified_at_commit: 90479dea
+anchors: [carriers, trusted_real, shebang, kernel, Rank, ExecScope, ExecRule, allowed_files, emit_exec_rules, Sbpl]
 ---
+
+> **Amended 2026-10-06**
+> ([[decisions/261006_one-table-two-instances|one-table-two-instances]]):
+> `kernel()` enters each carrier into a copy of the table as an
+> `ExecScope::Carrier` allow, ranked `Dir < Carrier < Exact < Name`, and asks
+> the table's own `verdict` for each file once, so an authored exact deny or a
+> veto beats a carrier by rank alone. A carrier holds a file by mutual
+> containment, as a `File` rule does.
 
 # The kernel exec set is one law on every platform
 

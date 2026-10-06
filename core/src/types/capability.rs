@@ -3,7 +3,7 @@
 //! A [`Capabilities`] frame bundles the per-effect policies.  Composition
 //! downward is the [`GrantStack`]: a `grant { ... }` or a loaded profile
 //! pushes one more layer, and every verdict folds the layers afresh —
-//! `capability::exec::rules`, `allow_region`/`deny_region`, `permits_detach` —
+//! `capability::exec::rules`, `capability::fs::region`, `permits_detach` —
 //! rather than flattening them into one `Capabilities` first.
 //! [`Capabilities::widen`] is the one place a frame still composes eagerly:
 //! `--extend-base` widens a base ceiling at load time, before any attenuation
@@ -84,22 +84,45 @@ pub enum Verdict {
     Deny,
 }
 
+/// An exec key as the author wrote it: the written twin of
+/// `capability::exec::ExecScope`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum ExecKey {
+    /// A bare name: `git`.
+    Name(String),
+    /// A path, frozen: `/usr/bin/git`, `~/bin/x`.
+    Path(NormalizedPrefix),
+    /// A directory, frozen, and the expansions of `path:` and `system:`.
+    Dir(NormalizedPrefix),
+}
+
+/// The key as a grant spells it: a dir with its trailing `/`.
+impl std::fmt::Display for ExecKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Name(name) => f.write_str(name),
+            Self::Path(path) => f.write_str(path.as_str()),
+            Self::Dir(dir) => write!(f, "{}/", dir.as_str()),
+        }
+    }
+}
+
 /// Exec authority as authored, per layer.
 ///
-/// Bare names, path keys and directory keys, each with its verdict.  The
-/// author's spellings survive for display; `capability::exec` compiles the
-/// grant into rules over programs, and nothing matches it directly.
+/// The author's spellings survive for display; `capability::exec` compiles
+/// the grant into rules over programs, and nothing matches it directly.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExecGrant {
-    /// Bare keys: `git`.
-    #[serde(default)]
-    pub names: BTreeMap<String, Verdict>,
-    /// Path keys, frozen: `/usr/bin/git`, `~/bin/x`.
-    #[serde(default, with = "pairs")]
-    pub paths: BTreeMap<NormalizedPrefix, Verdict>,
-    /// Dir keys, and the expansions of `path:` and `system:`; `true` admits.
-    #[serde(default, with = "pairs")]
-    pub dirs: BTreeMap<NormalizedPrefix, bool>,
+pub struct ExecGrant(#[serde(with = "pairs")] pub BTreeMap<ExecKey, Verdict>);
+
+/// A key written twice meets.
+impl FromIterator<(ExecKey, Verdict)> for ExecGrant {
+    fn from_iter<I: IntoIterator<Item = (ExecKey, Verdict)>>(keys: I) -> Self {
+        let mut grant = Self::default();
+        for (key, v) in keys {
+            meet_insert(&mut grant.0, key, v);
+        }
+        grant
+    }
 }
 
 /// The one way an exec entry is added: a key already present meets.
@@ -161,12 +184,10 @@ pub struct FsPolicy {
 /// The fs half of a projection, its paths named in `N`.
 ///
 /// Not [`FsPolicy`]: that is the grant-layer lattice element, whose
-/// [`NormalizedPrefix`]es carry the `resolved` and `namespace` forms the meet
-/// keys on.  Nothing below the fold reads those, so the projection holds plain
-/// surface spellings and each backend widens them into its own name class at
-/// render time — which is exactly what `N` is.  Flattening away `namespace`
-/// forecloses a projection that distinguishes guest prefixes from host ones;
-/// no backend ever saw that distinction, so enforcement is unchanged.
+/// [`NormalizedPrefix`]es carry the `resolved` form the meet keys on.  Nothing
+/// below the fold reads it, so the projection holds plain surface spellings
+/// and each backend widens them into its own name class at render time,
+/// which is exactly what `N` is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FsRules<N> {
     pub read_prefixes: Vec<N>,
@@ -723,24 +744,24 @@ impl Widen for ShellPolicy {
     }
 }
 
-/// Names, paths and dirs widen key by key, then an
+/// Keys widen one by one, then an
 /// [`evicts`](NormalizedPrefix::evicts) sweep drops any allow dir that clashes
 /// with a deny dir — whatever spelling either side used — so an overlay that
 /// re-grants a directory the base vetoed still loses it.
 impl Widen for ExecGrant {
     fn widen(self, other: Self) -> Self {
-        let mut dirs = widen_keys(self.dirs, other.dirs);
-        let denied: Vec<NormalizedPrefix> = dirs
-            .iter()
-            .filter(|(_, allow)| !**allow)
-            .map(|(dir, _)| dir.clone())
+        let mut keys = widen_keys(self.0, other.0);
+        let denied: Vec<NormalizedPrefix> = (keys.iter())
+            .filter_map(|(key, v)| match key {
+                ExecKey::Dir(dir) if v.is_denied() => Some(dir.clone()),
+                _ => None,
+            })
             .collect();
-        dirs.retain(|dir, allow| !*allow || !denied.iter().any(|d| d.evicts(dir)));
-        Self {
-            names: widen_keys(self.names, other.names),
-            paths: widen_keys(self.paths, other.paths),
-            dirs,
-        }
+        keys.retain(|key, v| match key {
+            ExecKey::Dir(dir) => v.is_denied() || !denied.iter().any(|d| d.evicts(dir)),
+            _ => true,
+        });
+        Self(keys)
     }
 }
 

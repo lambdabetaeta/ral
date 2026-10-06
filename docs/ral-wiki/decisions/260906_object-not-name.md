@@ -2,6 +2,14 @@
 status: active
 ---
 
+> **Amended 2026-10-06.** Both decisions stand; the folds named below are now
+> one structure ([[decisions/261006_one-table-two-instances|one-table-two-instances]],
+> [[design/authority-tables|authority-tables]]). `evaluate_exec` is
+> `capability::exec::rules`, a table compiled per layer per question and met;
+> `allow_region` and `deny_region` are one `capability::fs::region` per op;
+> the deputy lint folds a `Region` of allows per dimension instead of
+> `meet_prefixes`; and `PrefixSet::outside` is `Table::live`.
+
 # Authorise the object, not the name; compose by stacking, not flattening
 
 Prompted by an external review of the sandbox (`dev/docs/260906_sandbox_astra.md`,

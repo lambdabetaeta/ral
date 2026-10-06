@@ -12,7 +12,10 @@ The type (`core/src/types/capability.rs`):
 - *`Capabilities`* — per-effect policies (`exec`, `fs`, `net`, `detach`,
   `editor`, `shell`), and nothing else: every member is authority, so a bundle
   carries no switch over what is recorded about it. Path lists hold concrete
-  absolute paths. The lattice `meet` / `join` compose two of them into a third.
+  absolute paths. Bundles compose by stacking on a `GrantStack`, every
+  verdict meeting the layers' tables at the access
+  ([[design/authority-tables|authority-tables]]); `widen` unions a base with
+  an extension into one bundle.
 
 ## `decode` is the one-way door
 
@@ -95,7 +98,7 @@ intersected it away.
 The guard asks its containment question on the form the *in-process guard*
 matches, here the `fs` one, which authorises objects, so the form is the
 symlink-followed `resolved` one, asked with `path_within` — the same alias-aware
-predicate `covers` and `covering` use — and with `HOME` canonicalised on the
+predicate every fs rule speaks through, `NormalizedPrefix::contains` — and with `HOME` canonicalised on the
 other side. Asking it of the surface spelling instead read
 `XDG_DATA_HOME=~/link`, with `link → /etc`, as contained: the surface stayed
 under `HOME` while the frozen `resolved` form — the only one `fs` enforcement
@@ -143,7 +146,7 @@ When several profiles merge into one ceiling — exarch's
 `--capabilities` fold in `apply_session_profiles` — each is frozen as it loads
 and the lattice operations run on the resolved bundles.
 
-- `meet` / `join` compare **concrete paths**, so prefix containment is exact
+- the meet and the widen compare **concrete paths**, so prefix containment is exact
   (`/work/proj/src ⊂ /work/proj` is seen as such). Strictly more precise than
   comparing sigil strings; no soundness change.
 - the `FreezeCtx` is built **once** per composition site, home and cwd in hand
@@ -152,9 +155,9 @@ and the lattice operations run on the resolved bundles.
   session cwd.
 
 The frozen prefixes and the runtime fold are then two fidelities of one
-algebra — lexical over the resolved strings here, canonical over
-symlink-resolved paths at enforcement time — sharing their atom
-(`meet_prefixes`) but kept apart deliberately:
+algebra — over the forms frozen at decode here, over forms re-frozen against
+the live disk at enforcement time — sharing one meet, `Table::meet`
+([[design/authority-tables|authority-tables]]), but kept apart deliberately:
 [[decisions/260602_exec-authority-partitioned|exec-authority-partitioned]]
 §"one combinator at two fidelities" and §"the two folds stay separate".
 Composition itself is stacking, not a fold over frozen values: the

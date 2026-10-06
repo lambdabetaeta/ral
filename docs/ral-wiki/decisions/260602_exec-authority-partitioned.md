@@ -2,6 +2,13 @@
 status: active
 ---
 
+> **Amended 2026-10-06.** The partitioned exec type and the prefix-set
+> combinator below are gone: an exec grant is one map over `ExecKey`, and fs
+> and exec are two instances of one table whose meet is the pointwise law
+> ([[decisions/261006_one-table-two-instances|one-table-two-instances]],
+> [[design/authority-tables|authority-tables]]). The guard and the projection
+> still read one fold apiece per question, at two freshnesses.
+
 # Exec authority gets its partitioned type; the two folds stay two
 
 A simplification pass over the capability layer following the

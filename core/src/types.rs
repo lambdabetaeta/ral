@@ -16,8 +16,8 @@ mod capability;
 pub(crate) use capability::WriteReach;
 pub(crate) use capability::meet_insert;
 pub use capability::{
-    Capabilities, EditorPolicy, ExecGrant, ExecProjection, ExecRule, FsPolicy, FsProjection,
-    FsRules, GrantStack, Meet, SandboxProjection, ShellPolicy, Verdict, Widen,
+    Capabilities, EditorPolicy, ExecGrant, ExecKey, ExecProjection, ExecRule, FsPolicy,
+    FsProjection, FsRules, GrantStack, Meet, SandboxProjection, ShellPolicy, Verdict, Widen,
 };
 
 mod value;

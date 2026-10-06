@@ -7,11 +7,11 @@
 //! guards reach a real OS resource, and only they audit.  The sibling
 //! [`super::sandbox`] projects the same authority onto the OS sandbox, and
 //! does so off the same per-dimension folds this module tests against —
-//! [`super::fs::allow_region`] and the table [`check_exec`] hands over in
+//! [`super::fs::region`] and the table [`check_exec`] hands over in
 //! its [`Admitted`] — so the two cannot drift.
 
 use super::exec::{ExecRules, Program, rules};
-use super::fs::{FsOp, allow_region, deny_region};
+use super::fs::{FsOp, region};
 use crate::path::{NormalizedPrefix, Resolver};
 use crate::runtime::command::Head;
 use crate::types::{
@@ -126,10 +126,8 @@ pub(super) enum FsVerdict {
     Guarded(&'static str),
 }
 
-/// Test the resolved path against the regions [`super::fs`] folds: it passes
-/// when the path lies inside `op`'s allow region and outside the deny
-/// region.  Membership is region containment, alias-aware, via
-/// [`PrefixSet::covering`](crate::path::PrefixSet::covering).
+/// Judge the resolved path by `op`'s [`Region`](super::fs::Region): a deny
+/// outranks every allow, and a path no prefix holds is denied.
 ///
 /// The fold runs against a live [`Resolver`] on every check, so the regions
 /// this decides against are the ones the disk describes now — where the
@@ -148,20 +146,14 @@ pub(super) fn fs_verdict(
     {
         return FsVerdict::Guarded(pinned);
     }
-    let Some(allowed) = allow_region(grants, resolver, op) else {
+    let Some(region) = region(grants, resolver, op) else {
         return FsVerdict::Unrestricted;
     };
-    let denied = deny_region(grants, resolver);
-    if let Some(deny) = denied.covering(resolved) {
-        return if denied.holds_as_stored(resolved) {
-            FsVerdict::Denied
-        } else {
-            FsVerdict::Respelled(deny.clone())
-        };
-    }
-    match allowed.covering(resolved) {
-        Some(_) => FsVerdict::Granted,
-        None => FsVerdict::Denied,
+    match region.verdict(resolved) {
+        Verdict::Deny => region
+            .respelled(resolved)
+            .map_or(FsVerdict::Denied, |deny| FsVerdict::Respelled(deny.clone())),
+        _ => FsVerdict::Granted,
     }
 }
 

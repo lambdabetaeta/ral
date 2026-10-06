@@ -5,7 +5,7 @@ pub mod host;
 
 use crate::cli::EditScheme;
 use crate::shell_eval::skill;
-use ral_core::types::{Capabilities, GrantStack};
+use ral_core::types::{Capabilities, ExecKey, GrantStack};
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
@@ -402,11 +402,11 @@ fn exec_line(caps: &Capabilities) -> String {
     let Some(grant) = &caps.exec else {
         return "unrestricted".into();
     };
-    let names = grant.names.iter().map(|(name, v)| (name.as_str(), v));
-    let paths = grant.paths.iter().map(|(path, v)| (path.as_str(), v));
-    let admitted: Vec<String> = names
-        .chain(paths)
-        .filter_map(|(key, v)| v.admit_label(key))
+    let admitted: Vec<String> = (grant.0.iter())
+        .filter_map(|(key, v)| match key {
+            ExecKey::Dir(_) => None,
+            _ => v.admit_label(&key.to_string()),
+        })
         .collect();
     if admitted.is_empty() {
         "(none)".into()
@@ -419,11 +419,9 @@ fn exec_line(caps: &Capabilities) -> String {
 /// directory.  Empty when nothing admits by directory.
 fn exec_dirs_line(caps: &Capabilities) -> String {
     caps.exec.as_ref().map_or_else(String::new, |grant| {
-        grant
-            .dirs
-            .iter()
-            .filter(|(_, allow)| **allow)
-            .map(|(dir, _)| format!("{}/", dir.as_str()))
+        (grant.0.iter())
+            .filter(|(key, v)| matches!(key, ExecKey::Dir(_)) && !v.is_denied())
+            .map(|(key, _)| key.to_string())
             .collect::<Vec<_>>()
             .join(", ")
     })
@@ -434,22 +432,10 @@ fn exec_dirs_line(caps: &Capabilities) -> String {
 /// the path.
 fn exec_denies(caps: &Capabilities) -> Vec<String> {
     caps.exec.as_ref().map_or_else(Vec::new, |grant| {
-        let names = grant
-            .names
-            .iter()
+        (grant.0.iter())
             .filter(|(_, v)| v.is_denied())
-            .map(|(name, _)| name.clone());
-        let paths = grant
-            .paths
-            .iter()
-            .filter(|(_, v)| v.is_denied())
-            .map(|(path, _)| path.as_str().to_string());
-        let dirs = grant
-            .dirs
-            .iter()
-            .filter(|(_, allow)| !**allow)
-            .map(|(dir, _)| format!("{}/", dir.as_str()));
-        names.chain(paths).chain(dirs).collect()
+            .map(|(key, _)| key.to_string())
+            .collect()
     })
 }
 

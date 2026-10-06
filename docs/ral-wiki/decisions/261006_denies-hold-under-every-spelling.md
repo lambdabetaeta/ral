@@ -1,9 +1,19 @@
 ---
 status: active
 generated_at_commit: b49b3823
-verified_at_commit: b49b3823
-anchors: [collision_key, Identity, Polarity, Allow, Deny, PrefixSet, covering, outside, holds_as_stored, Respelled, dealias, open_attributes, holds, met, command_name_key, respelled]
+verified_at_commit: 90479dea
+anchors: [collision_key, Identity, Polarity, Allow, Deny, Region, live, Respelled, dealias, open_attributes, holds, command_name_key, respelled, evicts]
 ---
+
+> **Mechanics superseded 2026-10-06** by
+> [[decisions/261006_one-table-two-instances|one-table-two-instances]]. The
+> decision stands — a deny under `Identity::Collision`, an allow under
+> `Identity::Stored`, the rule's `Polarity` choosing — and the measurements
+> below stand as written. The prefix sets that carried it are gone: fs is a
+> `Region`, a table whose rules speak by polarity through
+> `NormalizedPrefix::contains::<P>`; `outside` is `Table::live`, and the
+> stored-holding test behind the respelled refusal is `Table::respelled`. The
+> corner cases are gathered in [[design/authority-tables|authority-tables]].
 
 # Denies hold under every spelling
 

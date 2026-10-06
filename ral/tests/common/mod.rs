@@ -230,3 +230,109 @@ pub fn discover(dir: &Path, prune: &[&str]) -> Vec<PathBuf> {
     scripts.sort();
     scripts
 }
+
+/// A canonical scratch directory, removed on drop.
+pub struct Scratch(pub PathBuf);
+
+impl Scratch {
+    pub fn new(tag: &str) -> Self {
+        let dir = fresh_tmp_path(tag, "d");
+        std::fs::create_dir_all(&dir).unwrap();
+        Self(std::fs::canonicalize(&dir).unwrap())
+    }
+
+    pub fn join(&self, rel: &str) -> PathBuf {
+        self.0.join(rel)
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// An executable `#!/bin/sh` script at `path` printing `ran`, its directory
+/// made.
+#[cfg(unix)]
+pub fn script(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, "#!/bin/sh\necho ran\n").unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// An fs refusal by the grant.
+pub fn assert_refused(out: &Output, what: &str) {
+    assert_ne!(
+        out.status, 0,
+        "{what} must be refused; stderr:\n{}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("denied by grant"),
+        "{what} must be refused by the grant; stderr:\n{}",
+        out.stderr
+    );
+}
+
+pub fn assert_admitted(out: &Output, what: &str) {
+    assert_eq!(
+        out.status, 0,
+        "{what} must be admitted; stderr:\n{}",
+        out.stderr
+    );
+}
+
+/// Whether `out` is the refusal a confined runner gives a launch that must
+/// enter Seatbelt: one profile per lineage, so the launch cannot run.  The
+/// refusal then stands in for the run, asserted exactly, so any other failure
+/// to enter still fails.
+#[cfg(target_os = "macos")]
+pub fn refused_by_a_confined_runner(out: &Output) -> bool {
+    use ral_core::sandbox::ALREADY_PROFILED;
+    const ENTRY_REFUSED: &str = "ral: cannot enter the Seatbelt sandbox: ";
+    let Some(reason) = out
+        .stderr
+        .lines()
+        .find_map(|line| line.strip_prefix(ENTRY_REFUSED))
+    else {
+        return false;
+    };
+    assert_eq!(reason, ALREADY_PROFILED, "the refusal is not attributed");
+    assert_eq!(out.status, 126, "a refused launch exits 126");
+    eprintln!("skip: this runner is inside a Seatbelt profile; asserted the attributed refusal");
+    true
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn refused_by_a_confined_runner(_: &Output) -> bool {
+    false
+}
+
+/// Whether bwrap can confine a child here, asked once of a real fs-confined
+/// launch: a container may refuse any of its mounts (devpts, a remount of a
+/// `nosuid` `/etc/hosts`), and only the launch itself says which.
+#[cfg(target_os = "linux")]
+pub fn bwrap_functional() -> bool {
+    static FUNCTIONAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FUNCTIONAL.get_or_init(|| {
+        let tmp = std::env::temp_dir();
+        let out = run(
+            "bwrap_probe",
+            &format!(
+                "grant [fs: [read: ['{t}'], write: ['{t}']]] {{ /bin/echo ok }}",
+                t = tmp.display()
+            ),
+        );
+        out.status == 0 || !out.stderr.contains("bwrap")
+    })
+}
+
+/// `paths` as a ral list body: each quoted, comma-separated.
+pub fn quoted(paths: &[&Path]) -> String {
+    (paths.iter())
+        .map(|p| format!("'{}'", p.display()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}

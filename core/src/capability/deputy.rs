@@ -11,70 +11,57 @@
 //! overlay are each innocent alone, and only the stack's meet-fold of both
 //! dimensions is a deputy.
 
-use crate::path::{NormalizedPrefix, covers, meet_prefixes};
-use crate::types::GrantStack;
+use super::fs::Region;
+use super::table::Scope;
+use crate::path::{Allow, NormalizedPrefix};
+use crate::types::{ExecKey, GrantStack, Meet, Verdict};
+use std::collections::BTreeSet;
 
 /// The exec-admitted directory prefixes that are also writable under `stack`.
 ///
-/// Each dimension folds by [`meet_prefixes`] across every opining layer;
-/// `None` — no layer opined — means unrestricted, not "everything
+/// Each dimension folds as a [`Region`] of allows across every opining
+/// layer; `None` — no layer opined — means unrestricted, not "everything
 /// writable", so it yields no finding.  Directory prefixes never partly
 /// overlap, so containment either way fires, and the narrower prefix —
 /// the region that is both — is what's reported.
 pub fn deputy_prefixes(stack: &GrantStack) -> Vec<NormalizedPrefix> {
-    let allow_dirs = stack.exec().fold(None, |acc: Option<Vec<_>>, exec| {
-        let dirs: Vec<NormalizedPrefix> = exec
-            .dirs
-            .iter()
-            .filter(|(_, allow)| **allow)
-            .map(|(dir, _)| dir.clone())
-            .collect();
-        Some(match acc {
-            Some(prev) => meet_prefixes(&prev, &dirs),
-            None => dirs,
+    let admits = |prefix: &NormalizedPrefix| (prefix.clone(), Verdict::Allow);
+    let dirs = (stack.exec())
+        .map(|exec| {
+            (exec.0.iter())
+                .filter_map(|(key, v)| match key {
+                    ExecKey::Dir(dir) if !v.is_denied() => Some(admits(dir)),
+                    _ => None,
+                })
+                .collect::<Region>()
         })
-    });
-    let write_prefixes = stack.fs().fold(None, |acc: Option<Vec<_>>, fs| {
-        Some(match acc {
-            Some(prev) => meet_prefixes(&prev, &fs.write_prefixes),
-            None => fs.write_prefixes.clone(),
-        })
-    });
-    let (Some(allow_dirs), Some(write_prefixes)) = (allow_dirs, write_prefixes) else {
+        .reduce(Meet::meet);
+    let writes = (stack.fs())
+        .map(|fs| fs.write_prefixes.iter().map(admits).collect::<Region>())
+        .reduce(Meet::meet);
+    let (Some(dirs), Some(writes)) = (dirs, writes) else {
         return Vec::new();
     };
-    let mut found: Vec<NormalizedPrefix> = allow_dirs
-        .iter()
+    let covers = |a: &NormalizedPrefix, b: &NormalizedPrefix| a.holds::<Allow>(b.own());
+    let found: BTreeSet<&NormalizedPrefix> = (dirs.live())
         .filter_map(|dir| {
-            write_prefixes
-                .iter()
+            (writes.live())
                 .find(|w| covers(w, dir) || covers(dir, w))
-                .map(|w| {
-                    if covers(w, dir) {
-                        dir.clone()
-                    } else {
-                        w.clone()
-                    }
-                })
+                .map(|w| if covers(w, dir) { dir } else { w })
         })
         .collect();
-    found.sort();
-    found.dedup();
-    found
+    found.into_iter().cloned().collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::deputy_prefixes;
-    use crate::path::{Namespace, NormalizedPrefix};
-    use crate::types::{Capabilities, ExecGrant, FsPolicy, GrantStack};
+    use crate::path::NormalizedPrefix;
+    use crate::types::{Capabilities, ExecGrant, ExecKey, FsPolicy, GrantStack, Verdict};
     use std::collections::BTreeMap;
 
     fn exec_dir(dir: NormalizedPrefix) -> ExecGrant {
-        ExecGrant {
-            dirs: BTreeMap::from([(dir, true)]),
-            ..ExecGrant::default()
-        }
+        ExecGrant(BTreeMap::from([(ExecKey::Dir(dir), Verdict::Allow)]))
     }
 
     fn fs_write(prefix: &str) -> FsPolicy {
@@ -88,52 +75,16 @@ mod tests {
     fn symlinked_write_region_is_reported_via_resolved_form() {
         // `/data` is a symlink: lexically disjoint from `/usr/bin`, resolved inside it.
         let stack = GrantStack::of(Capabilities {
-            exec: Some(exec_dir(NormalizedPrefix::for_test(
-                "/usr/bin",
-                "/usr/bin",
-                Namespace::Host,
-            ))),
+            exec: Some(exec_dir(NormalizedPrefix::for_test("/usr/bin", "/usr/bin"))),
             fs: Some(FsPolicy {
-                write_prefixes: vec![NormalizedPrefix::for_test(
-                    "/data",
-                    "/usr/bin/sub",
-                    Namespace::Host,
-                )],
+                write_prefixes: vec![NormalizedPrefix::for_test("/data", "/usr/bin/sub")],
                 ..FsPolicy::default()
             }),
             ..Capabilities::default()
         });
         assert_eq!(
             deputy_prefixes(&stack),
-            vec![NormalizedPrefix::for_test(
-                "/data",
-                "/usr/bin/sub",
-                Namespace::Host
-            )]
-        );
-    }
-
-    #[test]
-    fn cross_namespace_overlap_is_not_reported() {
-        let stack = GrantStack::of(Capabilities {
-            exec: Some(exec_dir(NormalizedPrefix::for_test(
-                "/usr/bin",
-                "/usr/bin",
-                Namespace::Host,
-            ))),
-            fs: Some(FsPolicy {
-                write_prefixes: vec![NormalizedPrefix::for_test(
-                    "/usr/bin",
-                    "/usr/bin",
-                    Namespace::Guest,
-                )],
-                ..FsPolicy::default()
-            }),
-            ..Capabilities::default()
-        });
-        assert!(
-            deputy_prefixes(&stack).is_empty(),
-            "a shared spelling across namespaces names different machines, not an overlap"
+            vec![NormalizedPrefix::for_test("/data", "/usr/bin/sub")]
         );
     }
 

@@ -597,7 +597,7 @@ fn ext_command_non_utf8_gives_named_error() {
 fn sandbox_functional() -> bool {
     #[cfg(target_os = "linux")]
     {
-        bwrap_functional()
+        common::bwrap_functional()
     }
     #[cfg(target_os = "macos")]
     {
@@ -607,38 +607,6 @@ fn sandbox_functional() -> bool {
     {
         true
     }
-}
-
-#[cfg(target_os = "linux")]
-fn bwrap_functional() -> bool {
-    // Dynamic `/usr/bin/true` needs `/lib` for ld.so; on modern Debian
-    // `/bin` is a symlink to `/usr/bin`, so binding `/usr` and `/lib`
-    // is the minimum to actually execute inside the new namespace.
-    //
-    // `--dev /dev` mirrors what the real `FsProjection::Restricted`
-    // sandbox uses (see `core/src/sandbox/linux.rs`).  Mounting a fresh
-    // devpts requires either CAP_SYS_ADMIN or a kernel that lets
-    // unprivileged user namespaces do it — both absent under many
-    // container runtimes.  Probing for it here keeps the IPC subprocess
-    // tests skipped (instead of mass-failing with `bwrap: Can't mount
-    // devpts: Permission denied`) in those environments.
-    std::process::Command::new("bwrap")
-        .args([
-            "--ro-bind",
-            "/usr",
-            "/usr",
-            "--ro-bind",
-            "/lib",
-            "/lib",
-            "--dev",
-            "/dev",
-            "--",
-            "/usr/bin/true",
-        ])
-        .stderr(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
 }
 
 #[cfg(target_os = "macos")]

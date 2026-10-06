@@ -44,15 +44,20 @@ fn only(subs: &[&str]) -> Verdict {
     Verdict::Only(subs.iter().map(ToString::to_string).collect())
 }
 
-fn names(entries: &[(&str, Verdict)]) -> BTreeMap<String, Verdict> {
-    entries
-        .iter()
-        .map(|(name, v)| ((*name).to_string(), v.clone()))
-        .collect()
+fn grant<const N: usize>(entries: [(ExecKey, Verdict); N]) -> ExecGrant {
+    entries.into_iter().collect()
 }
 
-fn dirs(entries: &[(&str, bool)]) -> BTreeMap<crate::path::NormalizedPrefix, bool> {
-    entries.iter().map(|(dir, v)| (nprefix(dir), *v)).collect()
+fn name(s: &str) -> ExecKey {
+    ExecKey::Name(s.into())
+}
+
+fn path_key(s: &str) -> ExecKey {
+    ExecKey::Path(nprefix(s))
+}
+
+fn dir_key(s: &str) -> ExecKey {
+    ExecKey::Dir(nprefix(s))
 }
 
 /// A host file whose real path, and launch path, is `real`.
@@ -95,11 +100,12 @@ fn with_xdg_defaults<R>(f: impl FnOnce() -> R) -> R {
 
 fn witness_a() -> Capabilities {
     Capabilities {
-        exec: Some(ExecGrant {
-            names: names(&[("cargo", Verdict::Allow), ("git", only(&["log", "status"]))]),
-            paths: BTreeMap::from([(nprefix("/opt/tool"), Verdict::Allow)]),
-            dirs: dirs(&[("/usr/bin", true)]),
-        }),
+        exec: Some(grant([
+            (name("cargo"), Verdict::Allow),
+            (name("git"), only(&["log", "status"])),
+            (path_key("/opt/tool"), Verdict::Allow),
+            (dir_key("/usr/bin"), Verdict::Allow),
+        ])),
         fs: Some(FsPolicy {
             read_prefixes: vec![nprefix("/tmp")],
             write_prefixes: vec![nprefix("/tmp")],
@@ -118,11 +124,13 @@ fn witness_a() -> Capabilities {
 
 fn witness_b() -> Capabilities {
     Capabilities {
-        exec: Some(ExecGrant {
-            names: names(&[("cargo", only(&["build"])), ("ls", Verdict::Allow)]),
-            paths: BTreeMap::from([(nprefix("/opt/tool"), Verdict::Deny)]),
-            dirs: dirs(&[("/usr/bin", true), ("/usr/local/bin", true)]),
-        }),
+        exec: Some(grant([
+            (name("cargo"), only(&["build"])),
+            (name("ls"), Verdict::Allow),
+            (path_key("/opt/tool"), Verdict::Deny),
+            (dir_key("/usr/bin"), Verdict::Allow),
+            (dir_key("/usr/local/bin"), Verdict::Allow),
+        ])),
         fs: Some(FsPolicy {
             read_prefixes: vec![nprefix("/tmp/work")],
             write_prefixes: vec![nprefix("/tmp/work")],
@@ -141,10 +149,7 @@ fn witness_b() -> Capabilities {
 
 fn witness_c() -> Capabilities {
     Capabilities {
-        exec: Some(ExecGrant {
-            names: names(&[("cargo", Verdict::Allow)]),
-            ..ExecGrant::default()
-        }),
+        exec: Some(grant([(name("cargo"), Verdict::Allow)])),
         fs: Some(FsPolicy {
             read_prefixes: vec![nprefix("/tmp")],
             write_prefixes: Vec::new(),
@@ -188,16 +193,13 @@ fn detach_is_permitted_until_some_layer_withholds_it() {
 /// `bash: 'deny'` leaves bash denied.  To permit it, change the base.
 #[test]
 fn widen_exec_regrant_does_not_lift_deny() {
-    let grant = |v: Verdict| Capabilities {
-        exec: Some(ExecGrant {
-            names: names(&[("bash", v)]),
-            ..ExecGrant::default()
-        }),
+    let caps = |v: Verdict| Capabilities {
+        exec: Some(grant([(name("bash"), v)])),
         ..Default::default()
     };
-    let widened = grant(Verdict::Deny).widen(grant(Verdict::Allow));
+    let widened = caps(Verdict::Deny).widen(caps(Verdict::Allow));
     assert_eq!(
-        widened.exec.unwrap().names.get("bash"),
+        widened.exec.unwrap().0.get(&name("bash")),
         Some(&Verdict::Deny)
     );
 }
@@ -206,27 +208,23 @@ fn widen_exec_regrant_does_not_lift_deny() {
 /// command must not re-admit every shell the base pinned out.
 #[test]
 fn widen_exec_keeps_one_sided_deny() {
-    let grant = |name: &str, v: Verdict| ExecGrant {
-        names: names(&[(name, v)]),
-        ..ExecGrant::default()
-    };
-    let exec = grant("bash", Verdict::Deny).widen(grant("rg", Verdict::Allow));
-    assert_eq!(exec.names.get("bash"), Some(&Verdict::Deny));
-    assert_eq!(exec.names.get("rg"), Some(&Verdict::Allow));
+    let exec = grant([(name("bash"), Verdict::Deny)]).widen(grant([(name("rg"), Verdict::Allow)]));
+    assert_eq!(exec.0.get(&name("bash")), Some(&Verdict::Deny));
+    assert_eq!(exec.0.get(&name("rg")), Some(&Verdict::Allow));
 }
 
 /// Deny-overrides on dirs: re-granting the exact denied tree does not lift it.
 #[test]
 fn widen_exec_dirs_regrant_does_not_lift_deny() {
     let exec = exec_deny_of(&nprefix("/x")).widen(exec_of(&nprefix("/x")));
-    assert_eq!(exec.dirs.get(&nprefix("/x")), Some(&false));
+    assert_eq!(exec.0.get(&dir_key("/x")), Some(&Verdict::Deny));
 }
 
 #[test]
 fn widen_exec_dirs_keep_one_sided_deny() {
     let exec = exec_deny_of(&nprefix("/opt/danger")).widen(exec_of(&nprefix("/usr/bin")));
-    assert_eq!(exec.dirs.get(&nprefix("/opt/danger")), Some(&false));
-    assert_eq!(exec.dirs.get(&nprefix("/usr/bin")), Some(&true));
+    assert_eq!(exec.0.get(&dir_key("/opt/danger")), Some(&Verdict::Deny));
+    assert_eq!(exec.0.get(&dir_key("/usr/bin")), Some(&Verdict::Allow));
 }
 
 /// A stack is sigil-free by construction, so the wire form carries concrete
@@ -251,10 +249,7 @@ fn fs_of(p: &crate::path::NormalizedPrefix) -> FsPolicy {
 }
 
 fn exec_of(p: &crate::path::NormalizedPrefix) -> ExecGrant {
-    ExecGrant {
-        dirs: BTreeMap::from([(p.clone(), true)]),
-        ..ExecGrant::default()
-    }
+    grant([(ExecKey::Dir(p.clone()), Verdict::Allow)])
 }
 
 /// Both dimensions at once, so the laws below also exercise the `Option` lift
@@ -267,18 +262,14 @@ fn caps_of(p: &crate::path::NormalizedPrefix) -> Capabilities {
     }
 }
 
-/// Covers nesting, aliasing (`/a/alias` resolves to `/a`), symlink divergence
-/// (`/a/link` resolves to `/elsewhere`), and both namespaces, so every law
-/// below sees cross-namespace overlap too.
+/// Covers nesting, aliasing (`/a/alias` resolves to `/a`) and symlink
+/// divergence (`/a/link` resolves to `/elsewhere`).
 fn prefix_universe() -> Vec<crate::path::NormalizedPrefix> {
-    use crate::path::Namespace;
     vec![
-        crate::path::NormalizedPrefix::for_test("/a", "/a", Namespace::Host),
-        crate::path::NormalizedPrefix::for_test("/a/sub", "/a/sub", Namespace::Host),
-        crate::path::NormalizedPrefix::for_test("/a/alias", "/a", Namespace::Host),
-        crate::path::NormalizedPrefix::for_test("/a/link", "/elsewhere", Namespace::Host),
-        crate::path::NormalizedPrefix::for_test("/a", "/a", Namespace::Guest),
-        crate::path::NormalizedPrefix::for_test("/a/sub", "/a/sub", Namespace::Guest),
+        crate::path::NormalizedPrefix::for_test("/a", "/a"),
+        crate::path::NormalizedPrefix::for_test("/a/sub", "/a/sub"),
+        crate::path::NormalizedPrefix::for_test("/a/alias", "/a"),
+        crate::path::NormalizedPrefix::for_test("/a/link", "/elsewhere"),
     ]
 }
 
@@ -327,10 +318,7 @@ fn widen_idempotent_over_prefix_universe() {
 }
 
 fn exec_deny_of(p: &crate::path::NormalizedPrefix) -> ExecGrant {
-    ExecGrant {
-        dirs: BTreeMap::from([(p.clone(), false)]),
-        ..ExecGrant::default()
-    }
+    grant([(ExecKey::Dir(p.clone()), Verdict::Deny)])
 }
 
 fn stack_of(exec: ExecGrant) -> GrantStack {
@@ -341,10 +329,11 @@ fn stack_of(exec: ExecGrant) -> GrantStack {
 }
 
 fn allow_dirs(exec: &ExecGrant) -> Vec<&crate::path::NormalizedPrefix> {
-    exec.dirs
-        .iter()
-        .filter(|(_, allow)| **allow)
-        .map(|(dir, _)| dir)
+    (exec.0.iter())
+        .filter_map(|(key, v)| match key {
+            ExecKey::Dir(dir) if !v.is_denied() => Some(dir),
+            _ => None,
+        })
         .collect()
 }
 
@@ -354,8 +343,6 @@ fn allow_dirs(exec: &ExecGrant) -> Vec<&crate::path::NormalizedPrefix> {
 /// guard as well as the allow dirs.
 #[test]
 fn exec_widen_keeps_allow_and_deny_that_share_a_surface_but_resolve_apart() {
-    use crate::path::Namespace;
-
     // Spelled for the host: a rooted path with no drive is not absolute to
     // Windows.
     let (surface, divergent, allowed, denied) = if cfg!(windows) {
@@ -363,8 +350,8 @@ fn exec_widen_keeps_allow_and_deny_that_share_a_surface_but_resolve_apart() {
     } else {
         ("/x", "/y", "/x/bin", "/y/bin")
     };
-    let allow = crate::path::NormalizedPrefix::for_test(surface, surface, Namespace::Host);
-    let deny = crate::path::NormalizedPrefix::for_test(surface, divergent, Namespace::Host);
+    let allow = crate::path::NormalizedPrefix::for_test(surface, surface);
+    let deny = crate::path::NormalizedPrefix::for_test(surface, divergent);
 
     let composed = exec_of(&allow).widen(exec_deny_of(&deny));
     assert_eq!(
@@ -387,21 +374,19 @@ fn exec_widen_keeps_allow_and_deny_that_share_a_surface_but_resolve_apart() {
 /// though neither spelling is the other's.
 #[test]
 fn exec_widen_drops_allow_resolving_to_the_same_dir_as_a_deny() {
-    use crate::path::Namespace;
-
     let (link_a, link_b, target, candidate) = if cfg!(windows) {
         (r"C:\a", r"C:\b", r"C:\x", r"C:\x\bin")
     } else {
         ("/a", "/b", "/x", "/x/bin")
     };
-    let allow = crate::path::NormalizedPrefix::for_test(link_a, target, Namespace::Host);
-    let deny = crate::path::NormalizedPrefix::for_test(link_b, target, Namespace::Host);
+    let allow = crate::path::NormalizedPrefix::for_test(link_a, target);
+    let deny = crate::path::NormalizedPrefix::for_test(link_b, target);
 
     let composed = exec_of(&allow).widen(exec_deny_of(&deny));
     assert!(
         allow_dirs(&composed).is_empty(),
         "the deny must evict the allow it shares a target with, got {:?}",
-        composed.dirs
+        composed.0
     );
     assert!(
         !admits(&stack_of(composed), candidate),
@@ -413,21 +398,19 @@ fn exec_widen_drops_allow_resolving_to_the_same_dir_as_a_deny() {
 /// allow written as that target.
 #[test]
 fn exec_widen_drops_allow_naming_a_deny_dirs_target() {
-    use crate::path::Namespace;
-
     let (link, target, candidate) = if cfg!(windows) {
         (r"C:\l", r"C:\x", r"C:\x\bin")
     } else {
         ("/l", "/x", "/x/bin")
     };
-    let allow = crate::path::NormalizedPrefix::for_test(target, target, Namespace::Host);
-    let deny = crate::path::NormalizedPrefix::for_test(link, target, Namespace::Host);
+    let allow = crate::path::NormalizedPrefix::for_test(target, target);
+    let deny = crate::path::NormalizedPrefix::for_test(link, target);
 
     let composed = exec_of(&allow).widen(exec_deny_of(&deny));
     assert!(
         allow_dirs(&composed).is_empty(),
         "the deny must evict the allow on its target, got {:?}",
-        composed.dirs
+        composed.0
     );
     assert!(
         !admits(&stack_of(composed), candidate),
@@ -450,7 +433,7 @@ fn exec_widen_drops_allow_clashing_with_deny_on_firmlink_alias() {
     assert!(
         allow_dirs(&composed).is_empty(),
         "the deny must evict the alias-clashing allow, got {:?}",
-        composed.dirs
+        composed.0
     );
     assert!(
         !admits(&stack_of(composed), "/tmp/x/bin"),
@@ -467,7 +450,7 @@ fn exec_widen_drops_allow_on_another_spelling_of_a_deny() {
     assert!(
         allow_dirs(&composed).is_empty(),
         "a deny on `/a/B` must evict the allow on `/a/b`, got {:?}",
-        composed.dirs
+        composed.0
     );
     let composed = exec_of(&p("/a/b")).widen(exec_deny_of(&p("/a/B/c")));
     assert_eq!(
@@ -569,10 +552,10 @@ fn widen_boolean_vetoes_are_sticky() {
 #[test]
 fn widen_exec_widens_verdicts_and_unions_keys() {
     let exec = witness_a().widen(witness_b()).exec.unwrap();
-    assert_eq!(exec.names.get("cargo"), Some(&Verdict::Allow));
-    assert_eq!(exec.names.get("ls"), Some(&Verdict::Allow));
-    assert_eq!(exec.names.get("git"), Some(&only(&["log", "status"])));
-    assert_eq!(exec.paths.get(&nprefix("/opt/tool")), Some(&Verdict::Deny));
+    assert_eq!(exec.0.get(&name("cargo")), Some(&Verdict::Allow));
+    assert_eq!(exec.0.get(&name("ls")), Some(&Verdict::Allow));
+    assert_eq!(exec.0.get(&name("git")), Some(&only(&["log", "status"])));
+    assert_eq!(exec.0.get(&path_key("/opt/tool")), Some(&Verdict::Deny));
 }
 
 /// The stack keeps a one-sided `Only` restriction: layer A restricts `git`
@@ -591,11 +574,10 @@ fn stack_keeps_a_one_sided_subcommand_restriction() {
         ("/ral-test/bin", "/ral-test/bin/git")
     };
     let restricting = Capabilities {
-        exec: Some(ExecGrant {
-            paths: BTreeMap::from([(nprefix(git_path), only(&["status"]))]),
-            dirs: dirs(&[(bin_dir, true)]),
-            ..ExecGrant::default()
-        }),
+        exec: Some(grant([
+            (path_key(git_path), only(&["status"])),
+            (dir_key(bin_dir), Verdict::Allow),
+        ])),
         ..Default::default()
     };
     let silent = Capabilities {
@@ -782,7 +764,7 @@ fn decode_accepts_bare_exec_name() {
     let v = map(vec![("exec", map(vec![("git", Value::string("allow"))]))]);
     let caps =
         decode_capability_map(&v, "test", &test_ctx("/h")).expect("bare command name is exempt");
-    assert!(caps.exec.unwrap().names.contains_key("git"));
+    assert!(caps.exec.unwrap().0.contains_key(&name("git")));
 }
 
 /// `cwd:proj` freezes to an absolute path — the sanctioned "relative to here"

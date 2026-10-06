@@ -2,6 +2,17 @@
 status: active
 ---
 
+> **Amended 2026-10-06**
+> ([[decisions/261006_one-table-two-instances|one-table-two-instances]]). The
+> fold stands: guest prefixes are minted through `fold_dots_posix`. The
+> `Namespace` tag later added to every prefix, keying containment on
+> `(namespace, resolved)`, is gone: minted relative to the host but compared
+> as absolute, it made every nested `grant` inside the guest meet synod's base
+> to nothing. A prefix carries no namespace, as the last section below first
+> said. The constraint on reducing on the host is superseded too: the meet no
+> longer re-mints through the host's fold, and a guest prefix is re-frozen only
+> by `refreeze` in the guard that matches it, inside the machine.
+
 # A grant prefix is folded by the rule of the namespace that will match it
 
 **Synod's grant names paths inside the Linux guest, so those prefixes are minted
