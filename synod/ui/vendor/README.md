@@ -8,8 +8,8 @@ unmodified, as their authors published them to npm, each beside its licence.
 | Library | Version | Files | Licence | Source |
 |---|---|---|---|---|
 | [DOMPurify](https://github.com/cure53/DOMPurify) | 3.4.16 | `dompurify/purify.min.js` | Apache-2.0 OR MPL-2.0 (used under Apache-2.0) | `dompurify@3.4.16`, `dist/` |
-| [marked](https://github.com/markedjs/marked) | 12.0.2 | `marked/marked.min.js` | MIT, with the BSD-style notice of the original `Markdown.pl` | `marked@12.0.2`, root |
-| [KaTeX](https://github.com/KaTeX/KaTeX) | 0.18.1 | `katex/katex.min.js`, `katex/katex.min.css`, `katex/fonts/*.woff2` | MIT (code and fonts) | `katex@0.18.1`, `dist/` |
+| [marked](https://github.com/markedjs/marked) | 18.1.0 | `marked/marked.umd.js` | MIT, with the BSD-style notice of the original `Markdown.pl` | `marked@18.1.0`, `lib/` |
+| [KaTeX](https://github.com/KaTeX/KaTeX) | 0.19.0 | `katex/katex.min.js`, `katex/katex.min.css`, `katex/fonts/*.woff2` | MIT (code and fonts) | `katex@0.19.0`, `dist/` |
 
 - **Licences.** Each directory holds its library's licence file, copied from the
   same npm release; the minified files also keep their own licence headers.
@@ -19,7 +19,7 @@ unmodified, as their authors published them to npm, each beside its licence.
     release's `LICENSE` is the Apache-2.0 text, the licence it is used under
     here, and its copyright notice is the header's "(c) Cure53 and other
     contributors".
-  - marked's `LICENSE.md` carries, beside its own MIT terms, John Gruber's
+  - marked's `LICENSE` carries, beside its own MIT terms, John Gruber's
     BSD-style licence for `Markdown.pl`, whose notice must travel with any
     redistribution; it does, in that file.
 - **KaTeX is a subset.** Only the `woff2` faces are kept: `katex.min.css` also
