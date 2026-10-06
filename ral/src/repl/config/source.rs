@@ -7,6 +7,7 @@
 //! ends the session with its status. Any other failure is reported and the
 //! boot goes on — a broken startup file must not strand the user at no shell.
 
+use ral_core::errln;
 use ral_core::source::Span;
 use ral_core::types::{Break, DefaultPolicy, Escape, HookName, HookSig, Map, Mooring, Settled};
 use ral_core::{Shell, Value, diagnostic};
@@ -59,7 +60,7 @@ pub(crate) fn source_startup_files(
     }
     let rc = find_ralrc().or_else(|| {
         let path = create_default_rc()?;
-        eprintln!("note: created {path}");
+        errln!("note: created {path}");
         Some(path)
     });
     match rc {

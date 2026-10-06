@@ -15,6 +15,7 @@
 
 pub(crate) mod source;
 
+use ral_core::errln;
 use ral_core::record;
 use ral_core::serial::FOValue;
 use ral_core::serial::datum::Datum;
@@ -131,14 +132,14 @@ pub(super) fn create_default_rc() -> Option<String> {
             Some((dir, dot))
         })?;
     if let Err(e) = std::fs::create_dir_all(&dir) {
-        eprintln!(
+        errln!(
             "ral: warning: could not create config directory {}: {e}",
             dir.display()
         );
         return None;
     }
     if let Err(e) = std::fs::write(&path, DEFAULT_RC) {
-        eprintln!("ral: warning: could not write {}: {e}", path.display());
+        errln!("ral: warning: could not write {}: {e}", path.display());
         return None;
     }
     Some(path.to_string_lossy().into_owned())

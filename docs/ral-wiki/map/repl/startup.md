@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1eee86cd
-generated_at_date: 2026-10-05
+generated_at_commit: 0948a758
+generated_at_date: 2026-10-06
 covers_paths: [ral/src/main.rs, ral/src/startup.rs, ral/src/cli.rs, ral/src/batch.rs, ral/src/boot_door.rs, ral/src/platform.rs, ral/build.rs]
 ---
 
@@ -18,7 +18,8 @@ roles.
 the process dispositions, asks `startup::identify()` what this process is, and
 runs the session named. `identify` answers with a two-armed `Invocation`:
 `Shell(Mode)`, or `Exit(ExitCode)` for a re-exec child that has already done
-its work.
+its work — or for an argv that is not text: ral's arguments become strings,
+so one that is not UTF-8 is refused with status 2, never mangled.
 
 ## Pre-`main` dispatch
 
@@ -59,7 +60,7 @@ dispositions. Then, per role:
     `ral` passes `startup::engine::INSTALLERS`, so a wire-engine child boots
     through the very recipes the in-process front-ends boot through. The table
     holds two `EngineInstaller`s: `repl` (`boot_repl` over the REPL surface,
-    decoding `Attach.config` as `ReplConfig {login}`) and `batch`
+    configured by nothing) and `batch`
     (`boot_batch` over the batch surface, decoding `BatchConfig {args}`), each
     registering the boot door. Both share one grant policy, a refusal
     (`no_seeded_children`), because the shell spawns no child engines and has
@@ -134,7 +135,8 @@ one ending law and one typecheck
   decodes `Attach.config` — `{args}` — strictly, boots the batch surface, sets
   exit hints and args, and registers the boot door. `platform::local_attach`
   builds the attach at this process's cwd and home, the probed terminal in
-  `Attach.terminal`. A refusal exits 2 with its sentence on stderr.
+  `Attach.terminal`, and batch adds its config. A refusal exits 2 with its
+  sentence on stderr.
 - **Boot, stage two.** The first dispatch is `Program::Hook` on
   `Session "boot"`, the `_ral-boot` builtin itself (`ral/src/boot_door.rs`),
   applied to the REPL's own record, `{login: false, no_rc: true,

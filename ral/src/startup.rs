@@ -7,6 +7,7 @@
 //! the same dispatch.
 
 use crate::cli::Mode;
+use ral_core::errln;
 use std::ffi::OsString;
 use std::process::ExitCode;
 
@@ -25,7 +26,7 @@ pub(crate) enum Invocation {
 pub(crate) fn refuse_setuid() {
     #[cfg(unix)]
     if rustix::process::geteuid() != rustix::process::getuid() {
-        eprintln!("ral: refusing to run setuid");
+        errln!("ral: refusing to run setuid");
         #[allow(
             clippy::disallowed_methods,
             reason = "`main`'s first statement, asked before any re-exec child is served: nothing is booted yet, so nothing is held"
@@ -51,15 +52,35 @@ pub(crate) fn adopt_process_dispositions() {
 /// invocation.
 pub(crate) fn identify() -> Invocation {
     let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
-    match ral_core::sandbox::serve_pre_main(&ral_core::classify(&argv), &engine::INSTALLERS) {
-        Some(code) => Invocation::Exit(ExitCode::from(code)),
-        None => Invocation::Shell(Mode::from_argv(
-            &argv
-                .iter()
-                .map(|arg| arg.to_string_lossy().into_owned())
-                .collect::<Vec<_>>(),
-        )),
+    if let Some(code) =
+        ral_core::sandbox::serve_pre_main(&ral_core::classify(&argv), &engine::INSTALLERS)
+    {
+        return Invocation::Exit(ExitCode::from(code));
     }
+    match text_args(argv) {
+        Ok(args) => Invocation::Shell(Mode::from_argv(&args)),
+        Err(refusal) => {
+            errln!("{refusal}");
+            Invocation::Exit(ExitCode::from(2))
+        }
+    }
+}
+
+/// argv as text. ral's arguments become strings, so one that is not UTF-8 is
+/// refused rather than mangled.
+fn text_args(argv: Vec<OsString>) -> Result<Vec<String>, String> {
+    argv.into_iter()
+        .enumerate()
+        .map(|(i, arg)| {
+            arg.into_string().map_err(|arg| {
+                format!(
+                    "ral: argument {} is not UTF-8 text: {}",
+                    i + 1,
+                    arg.to_string_lossy()
+                )
+            })
+        })
+        .collect()
 }
 
 /// What an engine of this binary boots into: `repl` for the interactive
@@ -111,35 +132,19 @@ pub(crate) mod engine {
         }
     }
 
-    /// The `repl` installer's `Attach.config`.
-    pub(crate) struct ReplConfig {
-        pub(crate) login: bool,
-    }
-
-    record!(ReplConfig { login: "login" });
-
     /// Everything an interactive session is before rc.
     fn boot_repl(attach: &Attach) -> Result<Booted, String> {
-        let config = ReplConfig::decode(&attach.config)?;
         let mut shell =
             ral_core::boot::boot_shell(attach.terminal, &crate::PRELUDE, &repl_surface());
         shell.set_exit_hints(crate::platform::load_exit_hints());
         shell.set_interactive(true);
         let terminal = shell.terminal().to_value();
         shell.set_var("TERMINAL".into(), terminal);
-        if config.login {
-            set_login_umask();
-        }
         boot_door::register(&mut shell)?;
         Ok(Booted {
             shell,
             keep: Box::new(()),
         })
-    }
-
-    fn set_login_umask() {
-        #[cfg(unix)]
-        rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o022));
     }
 
     /// Everything a script's session is before its boot dispatch.

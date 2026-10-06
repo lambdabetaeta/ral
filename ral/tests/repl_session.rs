@@ -375,3 +375,60 @@ fn dash_s_reads_stdin_as_a_script_despite_dash_i() {
         script_run.stdout
     );
 }
+
+// ── A login session's terminal ─────────────────────────────────────────────
+
+/// A write the shell cannot deliver is dropped, not a panic.  A hung-up
+/// terminal fails every write with EIO; an unread stderr pipe stands in for
+/// it here, with EPIPE, since the REPL ignores SIGPIPE.
+#[cfg(unix)]
+#[test]
+fn an_undeliverable_diagnostic_is_dropped_not_a_panic() {
+    let home = tempfile::tempdir().unwrap();
+    let mut child = ral_command()
+        .args(["-i", "--norc"])
+        .env("HOME", home.path())
+        .env("XDG_STATE_HOME", home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn ral");
+    drop(child.stderr.take());
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"no-such-command-anywhere\n").unwrap();
+    drop(stdin);
+    assert_eq!(
+        child.wait().unwrap().code(),
+        Some(0),
+        "the session must end at EOF, not in a panic"
+    );
+}
+
+/// A login shell keeps the umask it inherited: login(1) and PAM set it, and
+/// the profile is where a user changes it.
+#[cfg(unix)]
+#[test]
+fn a_login_shell_keeps_the_inherited_umask() {
+    let home = tempfile::tempdir().unwrap();
+    let mut child = std::process::Command::new("/bin/sh")
+        .args(["-c", "umask 077; exec \"$0\" -l -i --norc"])
+        .arg(common::ral_bin())
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn sh");
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"/bin/sh -c umask\n").unwrap();
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("0077"),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

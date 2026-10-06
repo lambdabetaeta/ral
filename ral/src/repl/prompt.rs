@@ -4,6 +4,7 @@
 //! like any other hook.  The prompt body reads `cwd` and `user` directly.
 //! Plugins may transform the result via the `prompt` lifecycle hook.
 
+use ral_core::errln;
 use ral_core::protocol::Transport;
 use ral_core::serial::FOValue;
 use ral_core::types::{Closure, DefaultPolicy, HookName, HookSig};
@@ -103,7 +104,7 @@ pub(super) fn write_terminal_title(terminal: &ral_core::io::TerminalState, cwd: 
 pub(super) fn render(t: &dyn Transport, host: &Arc<ReplHost>) -> PromptText {
     let base = host.run_hook(t, HookName::session("prompt"), vec![], None, None);
     if let Some(fault) = host.prompt_fault(base.fault) {
-        eprintln!("{fault}");
+        errln!("{fault}");
     }
     let mut prompt = base.value.map_or_else(
         || DEFAULT_PROMPT.to_string(),
@@ -122,7 +123,7 @@ pub(super) fn render(t: &dyn Transport, host: &Arc<ReplHost>) -> PromptText {
         );
         match (hr.value, hr.fault) {
             (Some(FOValue::String { value }), _) => prompt = value,
-            (_, Some(fault)) => eprintln!("{fault}"),
+            (_, Some(fault)) => errln!("{fault}"),
             _ => {}
         }
     }

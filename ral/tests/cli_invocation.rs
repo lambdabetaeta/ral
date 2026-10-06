@@ -145,3 +145,73 @@ fn a_file_descriptor_prefix_on_input_redirects_is_a_parse_error() {
         assert!(o.stderr.contains(message), "{source:?} gave {}", o.stderr);
     }
 }
+
+// ── Bytes that are not text ────────────────────────────────────────────────
+
+/// Run `ral -c <code> [extra…]` under `envs`, with an empty stdin.
+#[cfg(unix)]
+fn run_c_os(
+    code: &str,
+    extra: &[&std::ffi::OsStr],
+    envs: &[(&str, &std::ffi::OsStr)],
+) -> std::process::Output {
+    let mut cmd = ral_command();
+    cmd.arg("-c").arg(code).args(extra).stdin(Stdio::null());
+    for (key, val) in envs {
+        cmd.env(key, val);
+    }
+    cmd.output().expect("spawn ral")
+}
+
+/// `env` reads past a variable that is not UTF-8, leaving it out rather than
+/// panicking or mangling it.
+#[cfg(unix)]
+#[test]
+fn env_leaves_out_a_variable_that_is_not_utf8() {
+    use std::os::unix::ffi::OsStrExt as _;
+    let out = run_c_os(
+        "echo !{has !{env} RAL_TEST_BYTES} !{has !{env} PATH}",
+        &[],
+        &[("RAL_TEST_BYTES", std::ffi::OsStr::from_bytes(b"\xff\xfe"))],
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "false true\n",
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A default fills only an absent variable: one the host binds in bytes that
+/// are not UTF-8 reaches a child exactly as inherited.
+#[cfg(unix)]
+#[test]
+fn a_variable_that_is_not_utf8_reaches_children_untouched() {
+    use std::os::unix::ffi::OsStrExt as _;
+    let out = run_c_os(
+        "/usr/bin/printenv LANG",
+        &[],
+        &[("LANG", std::ffi::OsStr::from_bytes(b"C.\xff"))],
+    );
+    assert_eq!(
+        out.stdout,
+        b"C.\xff\n",
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// An argument that is not UTF-8 is refused, never mangled into one that is.
+#[cfg(unix)]
+#[test]
+fn an_argument_that_is_not_utf8_is_refused() {
+    use std::os::unix::ffi::OsStrExt as _;
+    let out = run_c_os("echo ran", &[std::ffi::OsStr::from_bytes(b"caf\xe9")], &[]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "stderr: {stderr}");
+    assert!(out.stdout.is_empty(), "nothing may run");
+    assert!(
+        stderr.contains("argument 3 is not UTF-8 text"),
+        "the refusal names the argument: {stderr}"
+    );
+}

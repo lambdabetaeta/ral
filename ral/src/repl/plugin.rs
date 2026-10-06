@@ -35,6 +35,7 @@ pub(super) use self::router::{KeyChord, KeyName, KeyRouter, Resolution};
 pub(super) use self::router::parse_key_notation;
 
 use ral_core::HookName;
+use ral_core::errln;
 use ral_core::protocol::Transport;
 use ral_core::serial::FOValue;
 use ral_core::serial::datum::Datum;
@@ -188,7 +189,7 @@ pub(super) fn defer_plugin_message(runtime: &Arc<Mutex<PluginRuntime>>, message:
 pub(crate) fn flush_pending_messages(runtime: &Arc<Mutex<PluginRuntime>>) {
     let msgs: Vec<String> = std::mem::take(&mut lock(runtime).diagnostics.messages);
     for m in msgs {
-        eprintln!("{m}");
+        errln!("{m}");
     }
 }
 
@@ -511,7 +512,7 @@ pub(crate) fn fire(t: &dyn Transport, host: &Arc<ReplHost>, event: &str, record:
         // already stable, and a deferred message would wait for a next prompt
         // the last command before exit never reaches.
         if let Some(fault) = hr.fault {
-            eprintln!("{fault}");
+            errln!("{fault}");
         }
     }
 }

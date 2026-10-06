@@ -4361,7 +4361,7 @@ ral -- task.ral --force
 ral -c '--version'
 ```
 
-Script arguments are returned by `args`. `$SCRIPT` is a lexical string containing the source file’s name. It is available in script files, including sourced modules under their own names, but is rejected in the REPL, `-c`, and synthetic preloaded source.
+Script arguments are returned by `args`. Arguments are text: one that is not UTF-8 is refused with status 2 rather than altered. `$SCRIPT` is a lexical string containing the source file’s name. It is available in script files, including sourced modules under their own names, but is rejected in the REPL, `-c`, and synthetic preloaded source.
 
 ### 16.2. Batch processing
 
@@ -4443,7 +4443,7 @@ For tools that pass traditional shell flags blindly, ral accepts:
 - `-u` — accepted with no effect;
 - `-i`, `-s`, and `-l` — with the meanings above.
 
-ral seeds a stable dynamic environment at boot. Inherited values win; otherwise it supplies defaults for `PATH`, `SHELL`, `TERM`, and `LANG`. `HOME`, `USER`, and `LOGNAME` are seeded from the host alone: where the host binds none, the variable stays unbound rather than taking an invented value, and `~` is then an error naming `HOME` rather than a directory. It increments `SHLVL` and supplies `OS_NAME`, `OS_ARCH`, and `OS_FAMILY`. Recognised terminal and multiplexer variables are retained when present.
+ral seeds a stable dynamic environment at boot. Inherited values win; a variable the host does not bind at all takes a default for `PATH`, `SHELL`, `TERM`, and `LANG`. ral reads the environment as text: a variable whose value is not UTF-8 is absent from `env` and from ral's own lookups, and reaches children with its bytes untouched. `HOME`, `USER`, and `LOGNAME` are seeded from the host alone: where the host binds none, the variable stays unbound rather than taking an invented value, and `~` is then an error naming `HOME` rather than a directory. It increments `SHLVL` and supplies `OS_NAME`, `OS_ARCH`, and `OS_FAMILY`. Recognised terminal and multiplexer variables are retained when present.
 
 `PWD` and `OLDPWD` are not exposed through `env`. ral owns the working directory as shell state so parallel work cannot race through the process-wide current directory. Each external child receives the correct `PWD` and actual launch directory; an inherited `OLDPWD` is removed, since ral keeps no previous directory.
 
@@ -4471,7 +4471,7 @@ On Unix, install `ral-sh` as the login shell instead. It interprets no source; i
 
 ### 16.8. Platform distinctions and limits
 
-**Unix.** Terminal detection selects a bare REPL or stdin-script mode. Login-shell `argv[0]`, process-group foreground ownership, immediate resume-on-stop (§11.6), and `ral-sh` are Unix facilities. Signals are translated into cancellation and conventional process statuses; the shell restores terminal ownership after foreground children.
+**Unix.** Terminal detection selects a bare REPL or stdin-script mode. Login-shell `argv[0]`, process-group foreground ownership, immediate resume-on-stop (§11.6), and `ral-sh` are Unix facilities. Signals are translated into cancellation and conventional process statuses; the shell restores terminal ownership after foreground children, and on exit hands the terminal back to the process group it started in.
 
 **Windows.** A bare invocation defaults to the interactive mode because the CLI does not infer stdin-script mode from Windows terminal state; use `-s` for source redirected on stdin. ral enables virtual-terminal processing where available. Unix process groups and stop signals do not exist. Direct execution refuses `.bat` and `.cmd` images because their additional `cmd.exe` quoting pass has no safe general argument encoding; invoke `cmd.exe` explicitly only if that risk is acceptable. `ral-sh` is a Unix login-shell bridge and is not a usable Windows shell dispatcher.
 

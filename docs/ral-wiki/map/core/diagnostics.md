@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 22d70dff
-generated_at_date: 2026-10-05
+generated_at_commit: 0948a758
+generated_at_date: 2026-10-06
 covers_paths: [core/src/source.rs, core/src/diagnostic.rs, core/src/text.rs, core/src/ansi.rs, core/src/exit_hints.rs]
 ---
 
@@ -84,7 +84,10 @@ one-liner is used instead. The per-stage entry points are
 `format_parse_error_ariadne`, `format_type_error_ariadne` (each taking
 `(file, source)`), and `format_runtime_error_ariadne` / `format_runtime_error_auto`
 (resolving the error's `Span` against a `SourceDb`) / `_compact`, with `cmd_error` and
-`shell_warning` for unstructured command-layer output. Every caret report is one `CaretReport` — code, message, primary and optional
+`shell_warning` for unstructured command-layer output. Every line they write
+goes through `outln!` / `err!` / `errln!`, exported for the front ends' own
+output too: unlike `println!` and `eprintln!` they drop a failed write rather
+than panic, since once the terminal hangs up every write fails with EIO. Every caret report is one `CaretReport` — code, message, primary and optional
 secondary `LabelRange`, hint — so the single ariadne core takes the bundle
 rather than a spread of arguments. Color is gated through `ansi::use_color`.
 `render_uncompiled` is the one place a compile failure becomes text, beside
@@ -139,7 +142,8 @@ when an external command fails. Loading the table is the caller's concern.
 ## Debug tracing — `dbg_trace!`
 
 `dbg_trace!(tag, …)` is the single developer-facing trace primitive: a tagged
-stderr line in debug builds (red only where the `ansi` colour gate allows),
+stderr line in debug builds (red only where the `ansi` colour gate allows,
+and through `errln!`, so never a panic),
 nothing in release, no environment switch for the trace itself
 ([[decisions/260608_one-debug-path|one-debug-path]]). Its call sites are
 permanent instrumentation.

@@ -10,6 +10,7 @@ use ral_core::serial::FOValue;
 use ral_core::serial::datum::Datum as _;
 use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
 use ral_core::{Value, builtins};
+use ral_core::{err, errln, outln};
 use std::sync::Arc;
 
 use super::host::ReplHost;
@@ -38,9 +39,9 @@ fn print_result(val: &Value) {
             if ral_core::ansi::use_ui_color()
                 && let Some(color) = &theme.value_color
             {
-                println!("{color}{}{s}{}", theme.value_prefix, ral_core::ansi::RESET);
+                outln!("{color}{}{s}{}", theme.value_prefix, ral_core::ansi::RESET);
             } else {
-                println!("{}{s}", theme.value_prefix);
+                outln!("{}{s}", theme.value_prefix);
             }
         }
     }
@@ -91,11 +92,11 @@ pub(super) fn step(
     let (report, _) = host.dispatch(t, line_run(trimmed), None);
     let (status, step) = match report {
         Err(severed) => {
-            eprintln!("ral: {severed}");
+            errln!("ral: {severed}");
             return Step::Exit(1);
         }
         Ok(Report::Static { rendered, status }) => {
-            eprint!("{rendered}");
+            err!("{rendered}");
             (status, Step::Continue)
         }
         Ok(Report::Ran { ending, .. }) => {
@@ -113,7 +114,7 @@ pub(super) fn step(
                 Ending::Raised { rendered, .. }
                 | Ending::Walled { rendered, .. }
                 | Ending::Unreturnable { rendered, .. } => {
-                    eprint!("{rendered}");
+                    err!("{rendered}");
                     Step::Continue
                 }
                 Ending::Exited(code) => Step::Exit(crate::platform::exit_byte(code)),

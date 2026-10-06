@@ -1,6 +1,6 @@
 //! The ambient reads — the dynamic `Context` and the machine — as nullary natives.
 
-use crate::types::{Error, Shell, Value};
+use crate::types::{EnvVars, Error, Shell, Value};
 
 pub(super) fn cwd(shell: &Shell) -> Value {
     Value::string(shell.cwd().to_string_lossy())
@@ -11,7 +11,7 @@ pub(super) fn cwd(shell: &Shell) -> Value {
 /// `context.cwd` — and its `OLDPWD` names the launcher's history, so both are
 /// dropped at the source.
 pub(super) fn env(shell: &Shell) -> Value {
-    let host = std::env::vars().filter(|(k, _)| !matches!(k.as_str(), "PWD" | "OLDPWD"));
+    let host = EnvVars::host_text().filter(|(k, _)| !matches!(k.as_str(), "PWD" | "OLDPWD"));
     let overrides = shell
         .context
         .env_overrides

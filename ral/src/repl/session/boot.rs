@@ -14,9 +14,10 @@ use super::super::frontend::StructuralFrontend;
 use super::super::frontend::{Frontend, MinimalFrontend, RustylineFrontend, Surface};
 use super::super::host::ReplHost;
 
-/// Install signal handlers and job-control signal masks for interactive use.
-/// The handlers raise ambient causes, which [`Session`](super::Session)
-/// forwards to its engine as `Control`.
+/// Install signal handlers and job-control signal masks for interactive use,
+/// and claim the terminal for the session to hold until it ends.  The
+/// handlers raise ambient causes, which [`Session`](super::Session) forwards
+/// to its engine as `Control`.
 ///
 /// Unix disposition table:
 /// - SIGINT  → interrupt handler (no-op when idle; raises the foreground interrupt)
@@ -36,13 +37,16 @@ use super::super::host::ReplHost;
 /// disconnect that registry's dispatch for the signal.
 ///
 /// Windows: installs `SetConsoleCtrlHandler` via `signal::install_handlers`.
-pub(super) fn setup_signals() {
+pub(super) fn setup_signals() -> TerminalClaim {
     #[cfg(unix)]
     {
-        // Claim the terminal first, while SIGTTIN still has its default
-        // disposition: `claim_terminal` parks the shell on SIGTTIN until it
-        // is foregrounded, which the SIG_IGN below would defeat.
-        if let Err(msg) = claim_terminal() {
+        // Ignore SIGTTOU before the claim, whose `tcsetpgrp` runs from a
+        // group not yet in the foreground; leave SIGTTIN at its default
+        // until after, since the claim parks the shell on it.
+        unsafe {
+            libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+        }
+        let claim = claim_terminal().unwrap_or_else(|msg| {
             // A REPL that can't claim its tty is awkward (job control
             // won't work, ^C delivery may misroute) but not fatal — many
             // unusual terminal setups (nested shell-in-pipe, container
@@ -51,7 +55,8 @@ pub(super) fn setup_signals() {
             diagnostic::shell_warning(&format!(
                 "ral: could not claim terminal: {msg}; job control may misbehave"
             ));
-        }
+            TerminalClaim::default()
+        });
         unsafe {
             // The non-escalating interrupt handler rather than SIG_IGN: a
             // no-op between commands, and a cancel of the foreground scope —
@@ -69,17 +74,39 @@ pub(super) fn setup_signals() {
             libc::signal(libc::SIGTERM, term);
             libc::signal(libc::SIGHUP, term);
             // Ignore SIGTSTP (the shell never suspends; a stop is answered
-            // with SIGCONT by the reaper) and SIGTTOU/SIGTTIN so the shell
-            // manipulates the terminal and reads stdin without being stopped
-            // when backgrounded.
+            // with SIGCONT by the reaper) and SIGTTIN so the shell reads
+            // stdin without being stopped when backgrounded.
             libc::signal(libc::SIGTSTP, libc::SIG_IGN);
-            libc::signal(libc::SIGTTOU, libc::SIG_IGN);
             libc::signal(libc::SIGTTIN, libc::SIG_IGN);
             libc::signal(libc::SIGPIPE, libc::SIG_IGN);
         }
+        claim
     }
     #[cfg(windows)]
-    ral_core::process::install_handlers();
+    {
+        ral_core::process::install_handlers();
+        TerminalClaim::default()
+    }
+}
+
+/// The terminal's foreground, taken from the process group the shell started
+/// in and handed back to it on drop.  Without the handback a parent that does
+/// no job control — `vim`'s `:sh`, `su` — is left in the background, and
+/// stops on its next terminal read.
+#[derive(Default)]
+pub(super) struct TerminalClaim {
+    /// The group left behind; `None` when the shell already led its own.
+    #[cfg(unix)]
+    left: Option<rustix::process::Pid>,
+}
+
+#[cfg(unix)]
+impl Drop for TerminalClaim {
+    fn drop(&mut self) {
+        if let Some(group) = self.left {
+            let _ = rustix::termios::tcsetpgrp(rustix::stdio::stdin(), group);
+        }
+    }
 }
 
 /// Ensure the shell is the foreground process-group leader of its controlling terminal.
@@ -100,14 +127,15 @@ pub(super) fn setup_signals() {
 ///
 /// `setpgid` is skipped when pgid already equals pid — that covers both the
 /// trivial no-op case and a session leader, on which `setpgid` returns EPERM.
+/// Otherwise the group left is recorded, for the claim to hand back.
 ///
 /// Failure of either `setpgid` or `tcsetpgrp` is reported as the underlying
 /// `errno` message; callers decide whether to abort or carry on degraded.
 #[cfg(unix)]
-fn claim_terminal() -> Result<(), String> {
+fn claim_terminal() -> Result<TerminalClaim, String> {
     use std::io::IsTerminal;
     if !std::io::stdin().is_terminal() {
-        return Ok(());
+        return Ok(TerminalClaim::default());
     }
     let stdin = rustix::stdio::stdin();
     // Park ourselves out of the parent's way until foregrounded.  Each
@@ -119,15 +147,15 @@ fn claim_terminal() -> Result<(), String> {
         }
     }
     let pid = rustix::process::getpid();
-    if rustix::process::getpgrp() != pid
-        && let Err(e) = rustix::process::setpgid(None, None)
-    {
-        return Err(format!("setpgid: {e}"));
-    }
-    if let Err(e) = rustix::termios::tcsetpgrp(stdin, pid) {
-        return Err(format!("tcsetpgrp: {e}"));
-    }
-    Ok(())
+    let group = rustix::process::getpgrp();
+    let left = if group == pid {
+        None
+    } else {
+        rustix::process::setpgid(None, None).map_err(|e| format!("setpgid: {e}"))?;
+        Some(group)
+    };
+    rustix::termios::tcsetpgrp(stdin, pid).map_err(|e| format!("tcsetpgrp: {e}"))?;
+    Ok(TerminalClaim { left })
 }
 
 /// Save terminal state and install a panic hook that restores it and writes a crash log.

@@ -404,9 +404,9 @@ pub fn format_runtime_error_auto(
 /// Print `{cmd}: {msg}` to stderr.
 pub fn cmd_error(cmd: &str, msg: &str) {
     if use_color() {
-        eprintln!("{BOLD_RED}{cmd}{RESET}: {msg}");
+        crate::errln!("{BOLD_RED}{cmd}{RESET}: {msg}");
     } else {
-        eprintln!("{cmd}: {msg}");
+        crate::errln!("{cmd}: {msg}");
     }
 }
 
@@ -428,10 +428,43 @@ pub(crate) fn format_runtime_error_compact(err: &crate::types::Error) -> String 
 /// Print `warning: {msg}` to stderr.
 pub fn shell_warning(msg: &str) {
     if use_color() {
-        eprintln!("{BOLD_YELLOW}warning{RESET}: {msg}");
+        crate::errln!("{BOLD_YELLOW}warning{RESET}: {msg}");
     } else {
-        eprintln!("warning: {msg}");
+        crate::errln!("warning: {msg}");
     }
+}
+
+// ── Writes that never panic ───────────────────────────────────────────────
+//
+// `println!` and `eprintln!` panic when the write fails, and once the terminal
+// hangs up every write does, with EIO. The shell's own output goes through
+// these instead, which drop the failed write: there is no one left to tell.
+
+/// `println!`, dropping a failed write.
+#[macro_export]
+macro_rules! outln {
+    ($($arg:tt)*) => {{
+        use ::std::io::Write as _;
+        let _ = ::std::writeln!(::std::io::stdout(), $($arg)*);
+    }};
+}
+
+/// `eprint!`, dropping a failed write.
+#[macro_export]
+macro_rules! err {
+    ($($arg:tt)*) => {{
+        use ::std::io::Write as _;
+        let _ = ::std::write!(::std::io::stderr(), $($arg)*);
+    }};
+}
+
+/// `eprintln!`, dropping a failed write.
+#[macro_export]
+macro_rules! errln {
+    ($($arg:tt)*) => {{
+        use ::std::io::Write as _;
+        let _ = ::std::writeln!(::std::io::stderr(), $($arg)*);
+    }};
 }
 
 // ── Debug tracing ────────────────────────────────────────────────────────
@@ -448,9 +481,9 @@ macro_rules! dbg_trace {
         // non-tty stderr — `use_color` probes inline until `set_terminal` seeds
         // it, so a trace from before terminal setup is gated too.
         if $crate::diagnostic::use_color() {
-            eprintln!("\x1b[1;91m[[DEBUG] {}]\x1b[0m {}", $tag, format!($($arg)*))
+            $crate::errln!("\x1b[1;91m[[DEBUG] {}]\x1b[0m {}", $tag, format!($($arg)*))
         } else {
-            eprintln!("[[DEBUG] {}] {}", $tag, format!($($arg)*))
+            $crate::errln!("[[DEBUG] {}] {}", $tag, format!($($arg)*))
         }
     };
 }

@@ -11,6 +11,7 @@ use ral_core::serial::datum::{Datum as _, untag};
 use ral_core::sync::LockExt as _;
 use ral_core::types::{DeferredSink, GrantStack, HookName};
 use ral_core::{Captured, RequestedTerminalAccess, RunIo, RunStdin, Value};
+use ral_core::{errln, outln};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -143,7 +144,7 @@ impl ReplHost {
         {
             return;
         }
-        println!("{line}");
+        outln!("{line}");
     }
 
     fn render(&self, v: &FOValue) {
@@ -159,7 +160,7 @@ impl ReplHost {
             )),
             _ => {
                 if let Some(note) = crate::surface::dropped(v) {
-                    eprintln!("{note}");
+                    errln!("{note}");
                 }
             }
         }

@@ -10,7 +10,6 @@ use ral_core::diagnostic;
 use ral_core::exit_hints::ExitHints;
 use ral_core::io::{InteractiveMode, TerminalState};
 use ral_core::protocol::Attach;
-use ral_core::serial::FOValue;
 
 /// Probe the terminal under the active `RAL_INTERACTIVE_MODE`, plumb
 /// it into the diagnostic subsystem, and return both halves.  When
@@ -26,7 +25,7 @@ pub(crate) fn probe_terminal(warn: bool) -> (InteractiveMode, TerminalState) {
 }
 
 /// An in-process engine's attach: its cwd and home are this process's own.
-pub(crate) fn local_attach(installer: &str, terminal: TerminalState, config: FOValue) -> Attach {
+pub(crate) fn local_attach(installer: &str, terminal: TerminalState) -> Attach {
     #[allow(
         clippy::disallowed_methods,
         reason = "host-env: an identity engine's home is this process's own"
@@ -35,7 +34,7 @@ pub(crate) fn local_attach(installer: &str, terminal: TerminalState, config: FOV
     let cwd = ral_core::path::process_cwd().unwrap_or_else(|| ".".into());
     Attach {
         terminal,
-        ..Attach::new(installer, cwd, home.into()).with_config(config)
+        ..Attach::new(installer, cwd, home.into())
     }
 }
 

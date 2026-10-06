@@ -65,22 +65,22 @@ impl Shell {
     pub(crate) fn seed_default_env_vars(&mut self) {
         let home = crate::host::home();
         let user = crate::host::user();
-        let path = std::env::var("PATH").unwrap_or_else(|_| {
-            if cfg!(windows) {
+        let path = inherited_or("PATH", || {
+            Some(if cfg!(windows) {
                 "C:\\Windows\\System32;C:\\Windows;C:\\Windows\\System32\\Wbem".into()
             } else {
                 "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into()
-            }
+            })
         });
-        let shell_path = std::env::var("SHELL").unwrap_or_else(|_| {
+        let shell_path = inherited_or("SHELL", || {
             std::env::current_exe()
                 .ok()
                 .and_then(|p| p.into_os_string().into_string().ok())
-                .unwrap_or_else(|| "ral".into())
+                .or_else(|| Some("ral".into()))
         });
-        let term = std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".into());
-        let lang = std::env::var("LANG").unwrap_or_else(|_| "C.UTF-8".into());
-        let logname = std::env::var("LOGNAME").ok().or_else(|| user.clone());
+        let term = inherited_or("TERM", || Some("xterm-256color".into()));
+        let lang = inherited_or("LANG", || Some("C.UTF-8".into()));
+        let logname = inherited_or("LOGNAME", || user.clone());
 
         // Only when unseeded: a front end whose working directory is not the
         // process cwd states it first through `Shell::seed_cwd`.
@@ -93,15 +93,14 @@ impl Shell {
             context.set_env_var_or_keep(k, v);
         };
         // A host fact nothing binds stays unbound: seeding `HOME=.` once made
-        // every `~` in the session mean "here".  The four with a default of
-        // their own are `Some` by construction.
+        // every `~` in the session mean "here".
         for (k, v) in [
             ("HOME", home),
             ("USER", user),
-            ("PATH", Some(path)),
-            ("SHELL", Some(shell_path)),
-            ("TERM", Some(term)),
-            ("LANG", Some(lang)),
+            ("PATH", path),
+            ("SHELL", shell_path),
+            ("TERM", term),
+            ("LANG", lang),
             ("LOGNAME", logname),
         ] {
             if let Some(v) = v {
@@ -137,5 +136,16 @@ impl Shell {
         ] {
             self.context.set_env_var(k, v);
         }
+    }
+}
+
+/// The host's `key`, else `default()` where the host binds nothing. A value
+/// that is not UTF-8 is `None`: no overlay entry, so children inherit its
+/// bytes rather than a default in their place.
+fn inherited_or(key: &str, default: impl FnOnce() -> Option<String>) -> Option<String> {
+    match std::env::var(key) {
+        Ok(v) => Some(v),
+        Err(std::env::VarError::NotPresent) => default(),
+        Err(std::env::VarError::NotUnicode(_)) => None,
     }
 }

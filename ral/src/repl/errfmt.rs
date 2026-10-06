@@ -8,12 +8,13 @@
 use ral_core::ansi::{self, BOLD_YELLOW, RESET};
 use ral_core::types::Error;
 use ral_core::{Shell, diagnostic};
+use ral_core::{err, errln};
 
 /// Print a failed load's report, then `ral: {what}: …` saying how far it got:
 /// skipped whole if it never compiled, which a compile report cannot say, or
 /// else `ran`, for a caller with that to say.
 pub(super) fn report_failed_load(shell: &Shell, what: &str, e: &Error, ran: Option<&str>) {
-    eprint!(
+    err!(
         "{}",
         diagnostic::format_runtime_error_auto(shell.sources(), e, None)
     );
@@ -42,5 +43,5 @@ pub(super) fn format_plugin_disabled(plugin_name: &str, kind: &str, reason: &str
 pub(super) fn plugin_warning(plugin_name: &str, msg: &str) {
     let c = ansi::use_color();
     let (yellow, reset) = (ansi::when(c, BOLD_YELLOW), ansi::when(c, RESET));
-    eprintln!("{yellow}plugin{reset} '{plugin_name}': warning: {msg}");
+    errln!("{yellow}plugin{reset} '{plugin_name}': warning: {msg}");
 }

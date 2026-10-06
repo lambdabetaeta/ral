@@ -7,6 +7,7 @@ use ral_core::serial::FOValue;
 use ral_core::serial::datum::Datum as _;
 use ral_core::types::{CapturePolicy, DeferredSink, GrantStack, Observation};
 use ral_core::{RequestedTerminalAccess, RunIo, RunStdin, diagnostic};
+use ral_core::{err, errln, outln};
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -22,9 +23,9 @@ impl DeferredSink for Stdout {
     fn deliver(&self, batch: Vec<FOValue>) {
         for v in &batch {
             if let Some(line) = crate::surface::watch_line(v) {
-                println!("{line}");
+                outln!("{line}");
             } else if let Some(note) = crate::surface::dropped(v) {
-                eprintln!("{note}");
+                errln!("{note}");
             }
         }
     }
@@ -81,7 +82,7 @@ fn emit_audit_report(ending: &Ending, trail: &[ral_core::serial::FOValue], prett
     } else {
         serde_json::to_string(&json_val).unwrap_or_default()
     };
-    eprintln!("{json_str}");
+    errln!("{json_str}");
 }
 
 /// Execute `source` non-interactively, under the name diagnostics will use
@@ -124,7 +125,7 @@ pub(crate) fn run_source(
     let t0 = std::time::Instant::now();
     let tick = |label: &str| {
         if timing {
-            eprintln!(
+            errln!(
                 "[timing] {label:12} {:.3}ms",
                 t0.elapsed().as_secs_f64() * 1000.0
             );
@@ -136,11 +137,12 @@ pub(crate) fn run_source(
     } else {
         RequestedTerminalAccess::Denied
     };
-    let attach = local_attach(BATCH, terminal, BatchConfig { args: script_args }.encode());
+    let attach =
+        local_attach(BATCH, terminal).with_config(BatchConfig { args: script_args }.encode());
     let transport = match IdentityTransport::boot(&INSTALLERS, &attach) {
         Ok(transport) => transport,
         Err(severed) => {
-            eprintln!("ral: {severed}");
+            errln!("ral: {severed}");
             return ExitCode::from(2);
         }
     };
@@ -189,13 +191,13 @@ fn dispatch(transport: &IdentityTransport, run: Run, audit: Option<bool>) -> i32
     let report = match dispatch_to_report(transport, run, Arc::new(())) {
         Ok(report) => report,
         Err(severed) => {
-            eprintln!("ral: {severed}");
+            errln!("ral: {severed}");
             return 1;
         }
     };
     match report {
         Report::Static { rendered, status } => {
-            eprint!("{rendered}");
+            err!("{rendered}");
             status
         }
         Report::Ran { ending, trail, .. } => {
@@ -206,7 +208,7 @@ fn dispatch(transport: &IdentityTransport, run: Run, audit: Option<bool>) -> i32
                     | Ending::Walled { rendered, .. }
                     | Ending::Unreturnable { rendered, .. },
                     None,
-                ) => eprint!("{rendered}"),
+                ) => err!("{rendered}"),
                 _ => {}
             }
             ending.status()
@@ -217,7 +219,7 @@ fn dispatch(transport: &IdentityTransport, run: Run, audit: Option<bool>) -> i32
 /// `--check` and `--dump-ast`: static work on the source alone.
 fn static_only(name: &str, source: &str, dump_ast: bool) -> ExitCode {
     let parse_failed = |e| {
-        eprint!(
+        err!(
             "{}",
             diagnostic::format_parse_error_ariadne(name, source, &e)
         );
@@ -229,7 +231,7 @@ fn static_only(name: &str, source: &str, dump_ast: bool) -> ExitCode {
     };
     if dump_ast {
         for node in &ast {
-            eprintln!("{node:#?}");
+            errln!("{node:#?}");
         }
         return ExitCode::SUCCESS;
     }
@@ -245,7 +247,7 @@ fn static_only(name: &str, source: &str, dump_ast: bool) -> ExitCode {
     match ral_core::typecheck(&top, schemes, None) {
         Ok(_) => ExitCode::SUCCESS,
         Err(errors) => {
-            eprint!(
+            err!(
                 "{}",
                 diagnostic::format_type_errors_ariadne(name, source, &errors)
             );

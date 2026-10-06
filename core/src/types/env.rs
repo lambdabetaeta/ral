@@ -385,9 +385,17 @@ impl EnvVars {
     }
 
     /// Look up `key`, this override map first, then the host process env.  The
-    /// one home of that fallback: no caller should spell it out again.
+    /// one home of that fallback: no caller should spell it out again.  A host
+    /// value that is not UTF-8 reads as unbound, as in [`Self::host_text`].
     pub(crate) fn get_or_host(&self, key: &str) -> Option<String> {
         self.get(key).cloned().or_else(|| std::env::var(key).ok())
+    }
+
+    /// The host process env as ral reads it: text only.  A pair that is not
+    /// UTF-8 is left out, never mangled; children still inherit its bytes.
+    pub(crate) fn host_text() -> impl Iterator<Item = (String, String)> {
+        std::env::vars_os()
+            .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
     }
 
     pub(crate) fn insert(&mut self, key: String, value: String) -> Option<String> {

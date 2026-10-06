@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 22d70dff
-generated_at_date: 2026-10-05
+generated_at_commit: 0948a758
+generated_at_date: 2026-10-06
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
 
@@ -349,7 +349,9 @@ never mint authority.
 Methods on `Shell` live by concern, one submodule each:
 
 - `init.rs` — construction, the startup env-var seeding pass into
-  `context.env_overrides` ([[decisions/260531_env-is-dynamic-only|env-is-dynamic-only]]),
+  `context.env_overrides` ([[decisions/260531_env-is-dynamic-only|env-is-dynamic-only]];
+  a default fills only an absent variable, and one the host binds in bytes
+  that are not UTF-8 gets no entry, so children inherit it untouched),
   and the machine facts (`OS_NAME` / `OS_ARCH` / `OS_FAMILY`) seeded into the environment (`env`);
 - `host.rs` — the host-embedding accessor surface;
 - `context.rs` — the `Context` dynamic-context verbs;

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 22d70dff
-generated_at_date: 2026-10-05
+generated_at_commit: 0948a758
+generated_at_date: 2026-10-06
 covers_paths: [ral/src/repl.rs, ral/src/repl/session.rs, ral/src/repl/session/, ral/src/repl/exec.rs, ral/src/repl/host.rs, ral/src/repl/enquiry.rs, ral/src/repl/prompt.rs, ral/src/repl/config.rs, ral/src/repl/config/, ral/src/repl/theme.rs, ral/src/repl/errfmt.rs, ral/src/repl/cursor.rs, ral/src/repl/worksheet.rs, ral/src/boot_door.rs, ral/src/surface.rs]
 ---
 
@@ -20,7 +20,8 @@ protocol carries** ([[design/engine-protocol|engine-protocol]]).
 
 `session::Session` (`session.rs`) owns the transport, the REPL's `Host`
 (`ReplHost`), the boxed [[map/repl/frontend|`Frontend`]], a `pending` buffer
-queued for re-edit, the probed terminal, and the exit code. On a
+queued for re-edit, the probed terminal, the exit code, and the
+`TerminalClaim` — last, so it drops last (below). On a
 `structural` build it also owns the `Worksheet` (`worksheet.rs`) — the
 retained binding-edge / effect-verdict model the structural surface
 projects, its effect verdict read through the `bind-effects` probe. There is
@@ -28,8 +29,9 @@ no job table: ral does not suspend
 ([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]).
 
 - `Session::boot` is two-staged. Stage one is `IdentityTransport::boot` with
-  `startup::engine::INSTALLERS` and an `Attach` whose `config` is
-  `ReplConfig {login}`; the `repl` recipe does what precedes rc (below). A
+  `startup::engine::INSTALLERS` and an `Attach` that configures nothing —
+  login matters only to the boot door's profile sourcing; the `repl` recipe
+  does what precedes rc (below). A
   refusal prints its sentence and exits 2. Stage two is the host's first
   dispatch: `Program::Hook` on the `Session "boot"` hook, the `_ral-boot`
   door, applied to `Boot {login, no_rc, recursion_limit, capabilities}`
@@ -63,10 +65,14 @@ no job table: ral does not suspend
 the frontend the rc settles on after it: `setup_signals` (the whole Unix
 disposition table in one place — SIGINT `interrupt_handler`, which raises the
 foreground interrupt and nothing else, SIGQUIT root-abort, SIGTERM/SIGHUP term
-handler, SIGTSTP/SIGTTOU/SIGTTIN/SIGPIPE ignore), `claim_terminal` (run first,
-while SIGTTIN still has its default disposition: it parks the shell on SIGTTIN
-until it is foregrounded before `tcsetpgrp`, so `ral &` does not seize the
-terminal from a parent shell's current job), `setup_panic_hook` (restore the
+handler, SIGTSTP/SIGTTOU/SIGTTIN/SIGPIPE ignore), `claim_terminal` (run after
+SIGTTOU is ignored, since its `tcsetpgrp` runs from a group not yet in the
+foreground, and before SIGTTIN is: it parks the shell on SIGTTIN until it is
+foregrounded, so `ral &` does not seize the terminal from a parent shell's
+current job; it answers a `TerminalClaim` naming the group it left, if it
+left one, which hands the terminal back on drop — else a parent doing no job
+control, `vim`'s `:sh` or `su`, stops on its next terminal read),
+`setup_panic_hook` (restore the
 pre-raw terminal state — termios on Unix, console mode on Windows — then write
 a crash log, to a state-dir path resolved at install time so a changed `HOME`
 cannot redirect it), and `create_frontend`.
@@ -77,8 +83,8 @@ The `repl` installer's recipe (`startup::engine::boot_repl`) boots the REPL
 surface — the batch surface plus the [[map/repl/plugins|`_ed-*` doors and
 the plugin load doors]] — through `boot_shell`, so the typechecker and the
 runtime see one surface by construction; then exit hints, the
-interactive flag, `$TERMINAL`, the login umask, and the boot door's
-registration.
+interactive flag, `$TERMINAL`, and the boot door's registration. The umask
+is the login's own, set by `login(1)` or PAM; the shell does not touch it.
 
 The boot door (`_ral-boot`, one-shot: it unregisters its own hook) does the
 rest in a run, since startup files evaluate ral: `source_startup_files`

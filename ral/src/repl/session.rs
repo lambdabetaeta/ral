@@ -11,9 +11,9 @@
 
 mod boot;
 
+use ral_core::errln;
 use ral_core::io::TerminalState;
 use ral_core::protocol::{IdentityTransport, Transport, reading};
-use ral_core::serial::datum::Datum as _;
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -22,7 +22,7 @@ use super::frontend::{EditBuffer, Frontend, Read};
 use super::host::{ReplHost, hook_run, teardown_notice};
 use super::prompt::{render as render_prompt, write_terminal_title};
 use crate::boot_door::{self, Boot};
-use crate::startup::engine::{INSTALLERS, REPL, ReplConfig};
+use crate::startup::engine::{INSTALLERS, REPL};
 
 /// Per-iteration loop control: stay in the loop, or break out and return
 /// the recorded exit code.
@@ -57,6 +57,9 @@ pub(super) struct Session {
     /// Exit status to return when the loop ends.  Set by `exit` inside
     /// the evaluator; otherwise stays 0 on a clean EOF.
     exit_code: u8,
+    /// Last, so the terminal goes back only after everything above is done
+    /// with it.
+    _claim: boot::TerminalClaim,
 }
 
 impl Session {
@@ -65,15 +68,14 @@ impl Session {
     /// `--capabilities` failure, or an `exit` in a startup file.
     pub(super) fn boot(opts: &crate::cli::InteractiveOpts) -> Result<Self, ExitCode> {
         let exit = |status| ExitCode::from(crate::platform::exit_byte(status));
-        boot::setup_signals();
+        let claim = boot::setup_signals();
         let (interactive_mode, terminal) = crate::platform::probe_terminal(true);
         boot::setup_panic_hook();
 
-        let config = ReplConfig { login: opts.login }.encode();
-        let attach = crate::platform::local_attach(REPL, terminal, config);
+        let attach = crate::platform::local_attach(REPL, terminal);
         let transport = Arc::new(IdentityTransport::boot(&INSTALLERS, &attach).map_err(
             |severed| {
-                eprintln!("ral: {severed}");
+                errln!("ral: {severed}");
                 ExitCode::from(2)
             },
         )?);
@@ -104,7 +106,7 @@ impl Session {
                 .run_hook(&*transport, startup, vec![], None, None)
                 .fault
             {
-                eprintln!("{fault}");
+                errln!("{fault}");
             }
         }
 
@@ -127,6 +129,7 @@ impl Session {
             #[cfg(feature = "structural")]
             worksheet: super::worksheet::Worksheet::default(),
             exit_code: 0,
+            _claim: claim,
         })
     }
 
@@ -223,7 +226,7 @@ impl Drop for Session {
         self.transport.detach();
         self.frontend.save_history();
         if let Some(notice) = teardown_notice(&workers) {
-            eprintln!("{notice}");
+            errln!("{notice}");
         }
         // Windows-only, no-op elsewhere: reverts this session's AppContainer
         // grant ACEs and deletes its profile.

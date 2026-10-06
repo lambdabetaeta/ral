@@ -15,6 +15,7 @@ use ral_core::types::{
     Status,
 };
 use ral_core::{Shell, Value};
+use ral_core::{err, errln};
 use std::borrow::Cow;
 
 use crate::repl::{RcSettings, install_default_prompt, source_startup_files};
@@ -147,11 +148,11 @@ fn refuse(message: &str) -> Break {
 pub(crate) fn settle(report: Result<Report, Severed>) -> Result<RcSettings, i32> {
     let ending = match report {
         Err(severed) => {
-            eprintln!("ral: {severed}");
+            errln!("ral: {severed}");
             return Err(1);
         }
         Ok(Report::Static { rendered, status }) => {
-            eprint!("{rendered}");
+            err!("{rendered}");
             return Err(status);
         }
         Ok(Report::Ran { ending, .. }) => ending,
@@ -159,14 +160,14 @@ pub(crate) fn settle(report: Result<Report, Severed>) -> Result<RcSettings, i32>
     let status = ending.status();
     match ending {
         Ending::Settled { value, .. } => RcSettings::decode(&value).map_err(|e| {
-            eprintln!("ral: {NAME} answered settings this front-end cannot read: {e}");
+            errln!("ral: {NAME} answered settings this front-end cannot read: {e}");
             1
         }),
         Ending::Exited(_) => Err(status),
         Ending::Raised { rendered, .. }
         | Ending::Walled { rendered, .. }
         | Ending::Unreturnable { rendered, .. } => {
-            eprint!("{rendered}");
+            err!("{rendered}");
             Err(status)
         }
     }
