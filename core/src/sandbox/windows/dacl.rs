@@ -22,13 +22,17 @@
 //! intersects the normal pass, so an ACE no live token names is inert and can
 //! never widen any process's reach beyond the owning user's own.
 //!
-//! The capability ACE alone does not admit a write: Windows runs the
-//! mandatory-integrity check before the `AppContainer` pass, and an
-//! unlabeled object defaults to `Medium` with an implicit no-write-up policy,
-//! which refuses every `Low`-IL `LowBox` child regardless of the DACL. A
-//! read-write grant therefore also stamps a `SYSTEM_MANDATORY_LABEL_ACE` at
-//! `Low` ([`ensure_low_integrity_label`]) — its own permanent mutation,
-//! witnessed the same way under its own stamp-key namespace.
+//! The capability ACE alone does not admit *creating* an entry: Windows runs
+//! the mandatory-integrity check before the `AppContainer` pass, and an
+//! unlabeled directory refuses every `Low`-IL `LowBox` child's create
+//! regardless of the DACL. A read-write grant on a directory therefore also
+//! stamps a `SYSTEM_MANDATORY_LABEL_ACE` at `Low` ([`ensure_low_integrity_label`])
+//! — its own permanent mutation, witnessed the same way under its own
+//! stamp-key namespace. The label is container-inherit only, never
+//! object-inherit: Windows caps a process at the label on its image file, so a
+//! `Low` label reaching files would run every host-built executable under the
+//! tree at `Low`. Files stay unlabeled, and the capability ACE alone admits
+//! writing an existing one.
 //!
 //! Two witnesses must agree before a stamp is skipped: the stamp store (a
 //! grow-only set beside the ledgers) says the propagation ran to completion,
@@ -190,13 +194,24 @@ const INHERITED_ACE_FLAG: u8 = INHERITED_ACE as u8;
 )]
 const OICI_ACE_FLAGS: u8 = (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE) as u8;
 
+/// `CONTAINER_INHERIT_ACE` alone, as an `AceFlags` byte: the inheritance of the
+/// mandatory label, which must reach subdirectories but never files (see
+/// [`LOW_INTEGRITY_SID`]).
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "CI is 0x2, and AceFlags — the field it is tested against — is a single byte"
+)]
+const CI_ACE_FLAGS: u8 = CONTAINER_INHERIT_ACE as u8;
+
 /// `Low`, the mandatory label a `LowBox`/`AppContainer` child's token
 /// carries. Windows runs the mandatory-integrity check *before* the
-/// DACL/capability-SID pass: an object with no explicit label defaults to
-/// `Medium` with an implicit no-write-up policy, so a `Low`-IL child's write
+/// DACL/capability-SID pass: a directory with no explicit label defaults to
+/// `Medium` with an implicit no-write-up policy, so a `Low`-IL child's create
 /// is refused there regardless of any capability ACE the DACL grants. A
-/// read-write grant must therefore also lower the object's own label to
-/// `Low`, or no capability SID can ever admit the write.
+/// read-write grant on a directory must therefore also lower its label to
+/// `Low`, or no capability SID can ever admit a create. Only directories: the
+/// same `Low` on a file would cap the integrity of the process launched from
+/// it, and an existing file's write needs no label.
 const LOW_INTEGRITY_SID: &str = "S-1-16-4096";
 
 /// `SYSTEM_MANDATORY_LABEL_NO_WRITE_UP`, absent from `windows_sys`'s constant
@@ -453,7 +468,8 @@ pub(crate) fn fs_capability_name(canonical: &Path, kind: GrantKind) -> String {
 
 /// Ensure the persistent ACE for `(canonical, kind)` under `sid_str` — the
 /// SID [`fs_capability_name`] derives to — and, for a read-write grant, the
-/// mandatory label alongside it (see [`ensure_low_integrity_label`]).
+/// mandatory label alongside it when the target is a directory (see
+/// [`ensure_low_integrity_label`]).
 ///
 /// A read-write grant is two mutations, so each answers for itself and
 /// neither may speak for the other: the label is asked *before* the ACE's
@@ -484,12 +500,13 @@ pub(crate) fn ensure_fs_grant(
             reason: format!("metadata: {e}"),
         })?
         .is_dir();
-    // A capability ACE alone cannot admit the write: the mandatory-integrity
-    // check runs first, and a `Low`-IL child clears it only if the object's
+    // A capability ACE alone cannot admit a create: the mandatory-integrity
+    // check runs first, and a `Low`-IL child clears it only if the directory's
     // own label is `Low` or below. Read-only and deny grants need no label —
-    // `Low` already reads `Medium` under the default no-write-up-only policy.
-    if kind == GrantKind::ReadWrite {
-        ensure_low_integrity_label(canonical, inheritable)?;
+    // `Low` already reads `Medium` under the default no-write-up-only policy —
+    // and neither does a file, whose write the capability ACE alone admits.
+    if kind == GrantKind::ReadWrite && inheritable {
+        ensure_low_integrity_label(canonical)?;
     }
     let key = stamp_key(canonical, kind);
     if stamp_recorded(&key) && capability_ace_present(canonical, sid_str, kind, inheritable) {
@@ -514,12 +531,12 @@ pub(crate) fn ensure_fs_grant(
 /// same way [`ensure_fs_grant`] treats the capability ACE — its own stamp-key
 /// namespace, so the two mutations' idempotency never entangles, and its own
 /// probe, so a label removed or never stamped is seen whatever the DACL says.
-fn ensure_low_integrity_label(canonical: &Path, inheritable: bool) -> Result<(), DaclError> {
+fn ensure_low_integrity_label(canonical: &Path) -> Result<(), DaclError> {
     let key = label_stamp_key(canonical);
-    if stamp_recorded(&key) && low_integrity_label_present(canonical, inheritable) {
+    if stamp_recorded(&key) && low_integrity_label_present(canonical) {
         return Ok(());
     }
-    apply_mandatory_label_ace(canonical, inheritable)?;
+    apply_mandatory_label_ace(canonical)?;
     record_stamp(&key)
 }
 
@@ -1218,19 +1235,14 @@ fn apply_explicit_ace(
 }
 
 /// Stamp a single `SYSTEM_MANDATORY_LABEL_ACE` at [`LOW_INTEGRITY_SID`] into
-/// `path`'s SACL, replacing whatever mandatory label the object had — this
-/// module ever writes at most one, so there is nothing to merge. Built with
-/// [`AddMandatoryAce`] rather than the manual `EXPLICIT_ACCESS_W`/
-/// `SetEntriesInAclW` path [`apply_explicit_ace`] takes, since that API only
-/// merges DACL entries — mandatory labels are a SACL of their own, and
-/// `AddMandatoryAce` is the dedicated primitive for building one.
-fn apply_mandatory_label_ace(path: &Path, inheritable: bool) -> Result<(), DaclError> {
+/// the directory `path`'s SACL, container-inherit only, replacing whatever
+/// mandatory label it had — this module ever writes at most one, so there is
+/// nothing to merge. Built with [`AddMandatoryAce`] rather than the manual
+/// `EXPLICIT_ACCESS_W`/`SetEntriesInAclW` path [`apply_explicit_ace`] takes,
+/// since that API only merges DACL entries — mandatory labels are a SACL of
+/// their own, and `AddMandatoryAce` is the dedicated primitive for building one.
+fn apply_mandatory_label_ace(path: &Path) -> Result<(), DaclError> {
     let sid = OwnedSid::parse(LOW_INTEGRITY_SID)?;
-    let inheritance: u32 = if inheritable {
-        OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
-    } else {
-        0
-    };
 
     // SAFETY: `sid` owns a valid PSID for the duration of this call.
     let sid_len: u32 = unsafe { GetLengthSid(sid.as_psid()) };
@@ -1257,7 +1269,7 @@ fn apply_mandatory_label_ace(path: &Path, inheritable: bool) -> Result<(), DaclE
         AddMandatoryAce(
             acl_ptr,
             ACL_REVISION,
-            inheritance,
+            CONTAINER_INHERIT_ACE,
             MANDATORY_LABEL_NO_WRITE_UP,
             sid.as_psid(),
         )
@@ -1291,10 +1303,10 @@ fn apply_mandatory_label_ace(path: &Path, inheritable: bool) -> Result<(), DaclE
 
 /// Whether `path`'s SACL already carries the mandatory label
 /// [`apply_mandatory_label_ace`] stamps: a `SYSTEM_MANDATORY_LABEL_ACE_TYPE`
-/// entry for [`LOW_INTEGRITY_SID`] with the no-write-up bit set, inheritable
-/// when the target is a directory. An unreadable SACL answers `false` —
-/// attempt the real stamp and let it fail loudly.
-fn low_integrity_label_present(path: &Path, inheritable: bool) -> bool {
+/// entry for [`LOW_INTEGRITY_SID`] with the no-write-up bit set, inheriting to
+/// containers and not to objects. An unreadable SACL answers `false` — attempt
+/// the real stamp and let it fail loudly.
+fn low_integrity_label_present(path: &Path) -> bool {
     let Ok(sid) = OwnedSid::parse(LOW_INTEGRITY_SID) else {
         return false;
     };
@@ -1354,9 +1366,7 @@ fn low_integrity_label_present(path: &Path, inheritable: bool) -> bool {
         if header.AceType != SYSTEM_MANDATORY_LABEL_ACE_TYPE {
             continue;
         }
-        let inherited = (header.AceFlags & INHERITED_ACE_FLAG) != 0;
-        let flags = header.AceFlags & !INHERITED_ACE_FLAG;
-        if inheritable && !inherited && (flags & OICI_ACE_FLAGS) != OICI_ACE_FLAGS {
+        if header.AceFlags & OICI_ACE_FLAGS != CI_ACE_FLAGS {
             continue;
         }
         // SYSTEM_MANDATORY_LABEL_ACE shares ACCESS_ALLOWED_ACE's layout up to
@@ -2245,6 +2255,49 @@ mod tests {
                 true
             ));
             assert!(stamp_recorded(&stamp_key(&canonical, GrantKind::ReadWrite)));
+        });
+    }
+
+    /// The `Low` label must reach subdirectories and never files: Windows
+    /// caps a process at its image file's label, so a labeled file would run
+    /// every host-built executable under the tree at `Low`.
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[silent:dacl-test] Builds a scratch tree to probe label inheritance. Test fixture, not model data I/O."
+    )]
+    fn a_read_write_label_reaches_directories_and_never_files() {
+        with_scoped_state_dir(|| {
+            let td = tempfile::tempdir().unwrap();
+            let before = td.path().join("before.exe");
+            let sub = td.path().join("sub");
+            fs::write(&before, b"").unwrap();
+            fs::create_dir(&sub).unwrap();
+            let canonical = canonicalize_grant_target(td.path()).unwrap();
+            ensure_fs_grant(&canonical, CAP_SID, GrantKind::ReadWrite, &live()).unwrap();
+            let after = td.path().join("after.exe");
+            fs::write(&after, b"").unwrap();
+
+            assert!(low_integrity_label_present(&canonical));
+            assert!(low_integrity_label_present(&sub));
+            assert!(!low_integrity_label_present(&before));
+            assert!(!low_integrity_label_present(&after));
+        });
+    }
+
+    #[test]
+    fn only_a_read_write_directory_grant_takes_the_label() {
+        with_scoped_state_dir(|| {
+            let td = tempfile::tempdir().unwrap();
+            let canonical = canonicalize_grant_target(td.path()).unwrap();
+            ensure_fs_grant(&canonical, CAP_SID, GrantKind::ReadOnly, &live()).unwrap();
+            assert!(!low_integrity_label_present(&canonical));
+
+            let file = td.path().join("f.txt");
+            fs::write(&file, b"").unwrap();
+            let file = canonicalize_grant_target(&file).unwrap();
+            ensure_fs_grant(&file, CAP_SID, GrantKind::ReadWrite, &live()).unwrap();
+            assert!(!low_integrity_label_present(&file));
         });
     }
 

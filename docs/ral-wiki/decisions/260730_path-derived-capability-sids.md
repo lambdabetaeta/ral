@@ -73,16 +73,30 @@ Split the two: derive the SID from the path, and let the token select.
   ledger; teardown no longer restores ACEs, so exit no longer hangs. The boot
   sweep still restores *legacy* pre-capability ledgers' per-session ACEs, since
   a recycled pid could resurrect a profile name those ACEs still reference.
-- **A read-write grant also lowers the object's mandatory label to `Low`.**
+- **A read-write grant on a directory also lowers its mandatory label to `Low`.**
   The capability ACE is necessary but not sufficient: Windows runs the
-  mandatory-integrity check *before* the AppContainer pass, and an object with
-  no explicit label defaults to `Medium` with an implicit no-write-up policy —
-  which refuses a `Low`-IL `LowBox` child's write regardless of what the DACL
-  grants. `dacl::ensure_fs_grant` stamps a `SYSTEM_MANDATORY_LABEL_ACE` at
-  `S-1-16-4096` (`Low`) alongside the capability ACE, witnessed and
-  memoized the same way, under its own stamp-key namespace. Read-only and deny
-  grants need no label, since `Low` already reads `Medium` under the default
-  policy.
+  mandatory-integrity check *before* the AppContainer pass, and a directory
+  with no explicit label defaults to `Medium` with an implicit no-write-up
+  policy — which refuses a `Low`-IL `LowBox` child's *create* regardless of
+  what the DACL grants. `dacl::ensure_fs_grant` stamps a
+  `SYSTEM_MANDATORY_LABEL_ACE` at `S-1-16-4096` (`Low`) alongside the
+  capability ACE, witnessed and memoized the same way, under its own stamp-key
+  namespace. Read-only and deny grants need no label, since `Low` already
+  reads `Medium` under the default policy.
+- **The label inherits to containers only, never to files.** Windows caps a
+  new process at the label on its image file, so an object-inheriting `Low`
+  label ran every host-built executable under a granted tree — cargo build
+  scripts under `target/` — at `Low`, which cannot spawn `rustc`. Measured on
+  a Windows 11 host with a real AppContainer child: a `CI`-only label leaves
+  host exes at `Medium` while the child can still create, `mkdir`, and modify
+  existing files at every depth; modifying an existing file needs no label at
+  all, only a create does. A `Medium` label with any non-write-up mask does
+  not admit a create, and a zero mask is rejected by the OS. Re-stamping a
+  root an earlier ral labeled `OI|CI` replaces the label and strips it from
+  the files below; the probe demands exactly `CI`, so such roots re-stamp
+  once. A single-file grant takes no label. Not reverted at exit: the label is
+  now inert for execution, a revert is a second recursive propagation, and a
+  concurrent session sharing the path would lose it.
 - **Two mutations, two witnesses, and neither may speak for the other.** A
   read-write grant is complete only when both have landed, so the label is
   asked *before* the ACE's witness is consulted rather than inside the branch
