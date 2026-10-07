@@ -102,8 +102,8 @@ where each one is**
   or `There { at, cut }`, a `Pointer` to the file and byte ranges that hold
   them; the *context* is the `Here` subsequence;
 - `notes: Vec<Option<String>>`, one slot per eviction, which `There::cut`
-  indexes — `None` is a cut made without a note, the user's rewind and the
-  harness's own, and the marker then has no line to draw;
+  indexes — `None` is a cut made without a note, the harness's own, and the
+  marker then has no line to draw;
 - `source`, this log's own `record.jsonl`, where a turn recorded here points
   once it leaves; the protocol's resting state; and the count of records
   folded, beside the index of the newest context edit.
@@ -111,7 +111,9 @@ where each one is**
 Those first three live in a `Table` private to `model/table.rs`, which hands
 the rest of the module a `&[Turn]` and nothing writable. A turn therefore
 changes where it is only through `Table::evict`, the one function that moves a
-turn from here to there — so the invariant *the
+turn from here to there, and leaves only through `Table::rewind`, which
+truncates the table at the anchor a `Protocol::Rewound { anchor }` names — so
+the invariant *the
 first resident turn is a user turn* is kept by construction rather than by
 every caller remembering the survivor rule.
 

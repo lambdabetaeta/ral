@@ -241,8 +241,9 @@ so the model has the address before it asks for one.
     answers keeps the prompt, and the context always opens with a user
     message. `note` is the model's own line
     to its future self, drawn beneath the rows of the cut that took them; the
-    harness's own eviction and `/rewind` are this same edit under another
-    authority and write none. `note` is `` `none `` or `` `some Str ``, so absence is data and the
+    harness's own eviction is this same edit under another authority and
+    writes none; `/rewind` is a different record, `Protocol::Rewound`, which
+    truncates the table and leaves no marker at all. `note` is `` `none `` or `` `some Str ``, so absence is data and the
     `evict` record stays closed. The desk refuses a note it will not draw — a
     marker reading `Your note at eviction: ""` is a defect, which is why an
     empty `` `some `` is refused and `` `none `` is the spelling of no note. Its size and shape are

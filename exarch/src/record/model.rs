@@ -495,7 +495,9 @@ fn into_chat_messages(protocol: Protocol) -> Vec<ChatMessage> {
             .into_iter()
             .map(|r| ChatMessage::from(ToolResponse::new(&r.id, &r.content)))
             .collect(),
-        Protocol::Evicted { .. } | Protocol::Inherited { .. } => Vec::new(),
+        Protocol::Evicted { .. } | Protocol::Rewound { .. } | Protocol::Inherited { .. } => {
+            Vec::new()
+        }
     }
 }
 
@@ -1002,21 +1004,61 @@ mod tests {
             ],
             Vec::new(),
         );
-        assert_eq!(
-            context.suffix_from(1).expect("a resident anchor"),
-            vec![1, 2, 3]
-        );
         evict(&mut context, &[1, 2, 3], None);
         assert_eq!(resident_ids(&context), Vec::<u64>::new());
         assert_eq!(markers(&context).len(), 1, "one hole, one marker");
         assert_eq!(context.rendered().len(), 1, "the marker stands alone");
-        assert_eq!(
-            context.suffix_from(1).unwrap_err(),
-            "turn 1 has already left your context: no turn is still in it"
+    }
+
+    /// A rewind drops rows outright — departed ones too — leaving no hole
+    /// where they stood, and the notes the rows before it still index.
+    #[test]
+    fn a_rewind_truncates_the_table_and_keeps_no_hole() {
+        let mut context = context(
+            vec![
+                there(1, Role::User, "one", 10, 0),
+                there(2, Role::Assistant, "", 10, 0),
+                here(3, Role::User, "three", 10),
+                here(4, Role::Assistant, "", 10),
+                there(5, Role::User, "five", 10, 1),
+                here(6, Role::Assistant, "", 10),
+            ],
+            vec![Some("first".into()), None],
         );
         assert_eq!(
-            context.suffix_from(9).unwrap_err(),
-            "turn 9 is not recorded: the latest is 3"
+            context.rewindable(9).unwrap_err(),
+            "turn 9 is not recorded: the latest is 6"
+        );
+        step(&mut context, Protocol::Rewound { anchor: 5 }).expect("a recorded anchor");
+        assert_eq!(
+            held(&context),
+            vec![
+                (1, Held::Evicted { cut: 0 }),
+                (2, Held::Evicted { cut: 0 }),
+                (3, Held::Resident),
+                (4, Held::Resident)
+            ]
+        );
+        assert_eq!(markers(&context).len(), 1);
+        assert_eq!(context.notes().len(), 2, "notes are never dropped");
+        assert_eq!(context.next_id(), 5);
+        assert!(context.is_ready());
+        assert!(context.token_measure_is_stale(0));
+
+        step(&mut context, Protocol::Rewound { anchor: 1 }).expect("a departed anchor");
+        assert_eq!(held(&context), Vec::new());
+        assert_eq!(
+            context.rendered().len(),
+            0,
+            "nothing stands where the hole was"
+        );
+        assert_eq!(context.next_id(), 1);
+        assert!(
+            matches!(
+                step(&mut context, Protocol::Rewound { anchor: 1 }),
+                Err(Refusal::Foreign { reason, .. }) if reason.contains("never recorded")
+            ),
+            "a rewind to a turn that is not there is foreign"
         );
     }
 

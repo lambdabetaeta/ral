@@ -1,6 +1,6 @@
 //! The turns and the cuts made in them. The `Vec`s are private to this
-//! module, so a turn changes where it is only through [`Table::evict`] —
-//! which departs exactly the ids
+//! module, so a turn changes where it is only through [`Table::evict`] and
+//! leaves only through [`Table::rewind`] — the former departs exactly the ids
 //! [`Context::resolve_cut`](super::Context::resolve_cut) handed it, that
 //! being the one place the survivor rule lives.
 
@@ -119,6 +119,17 @@ impl Table {
             })
             .collect();
         self.notes = notes.to_vec();
+    }
+
+    /// `/rewind`: turn `anchor` and every row after it leave the structure.
+    /// Notes stay, since rows before the anchor may still index them.
+    pub(super) fn rewind(&mut self, anchor: u64) {
+        let kept = self
+            .turns
+            .iter()
+            .take_while(|turn| turn.id < anchor)
+            .count();
+        self.turns.truncate(kept);
     }
 
     /// Move the turns `leaving` from here to there, and record the model's

@@ -33,7 +33,6 @@ pub struct ToolResult {
 #[serde(rename_all = "snake_case")]
 pub enum EditAuthority {
     Model,
-    User,
     Harness,
 }
 
@@ -41,7 +40,6 @@ impl EditAuthority {
     pub fn name(self) -> &'static str {
         match self {
             Self::Model => "model",
-            Self::User => "user",
             Self::Harness => "harness",
         }
     }
@@ -687,13 +685,16 @@ impl AgentLog {
         Ok(cut)
     }
 
-    /// Every resident turn from `anchor` on — what a user rewind takes. The
-    /// anchor is checked before the suffix is derived.
+    /// `/rewind`: turn `anchor` and every turn after it leave the structure.
+    /// Its row on screen is the caller's to author.
     ///
     /// # Errors
-    /// Refuses an absent anchor or one that has already left the context.
-    pub fn suffix_from(&self, anchor: u64) -> Result<Vec<u64>, String> {
-        self.context.suffix_from(anchor)
+    /// Refuses an anchor not recorded, already departed, or in a batch still
+    /// awaiting tool results.
+    pub fn rewind(&mut self, anchor: u64) -> Result<(), String> {
+        self.context.rewindable(anchor)?;
+        self.record_protocol(Protocol::Rewound { anchor })
+            .map_err(|e| e.to_string())
     }
 
     /// `/clear`: wipe the record in memory and on disk, then restart with a
@@ -1190,11 +1191,11 @@ mod tests {
         let mut unknown = fresh_root();
         complete_round(&mut unknown, "one", "one");
         assert_eq!(
-            unknown.evict(&[7], None, EditAuthority::User).unwrap_err(),
+            unknown.evict(&[7], None, EditAuthority::Model).unwrap_err(),
             "turn 7 is not recorded: the latest is 2"
         );
         assert_eq!(
-            unknown.evict(&[], None, EditAuthority::User).unwrap_err(),
+            unknown.evict(&[], None, EditAuthority::Model).unwrap_err(),
             "an eviction must name at least one turn"
         );
 
@@ -1282,13 +1283,78 @@ mod tests {
 
         complete_round(&mut s, "third prompt", "third answer");
         assert_eq!(
-            s.context().suffix_from(9).unwrap_err(),
+            s.rewind(9).unwrap_err(),
             "turn 9 is not recorded: the latest is 6"
         );
+    }
+
+    /// A rewind leaves the structure as it stood before the anchor opened:
+    /// no row, no hole, the anchor's id minted again by the next prompt, and
+    /// the whole of it rebuilt by replay.
+    #[test]
+    fn a_rewind_removes_the_anchor_on_and_the_next_prompt_takes_its_id() {
+        let sessions = sessions_root("rewind");
+        let mut s = AgentLog::root(
+            sessions.path(),
+            0,
+            &RecordedModel::for_test("model"),
+            &RecordedAccount::for_test("provider"),
+            0,
+        )
+        .unwrap();
+        complete_round(&mut s, "one", "one");
+        complete_round(&mut s, "two", "two");
+        complete_round(&mut s, "three", "three");
+        s.evict(&answered(&s, &[1]), None, EditAuthority::Model)
+            .unwrap();
+
+        s.rewind(3).expect("a recorded anchor");
         assert_eq!(
-            s.context().suffix_from(3).expect("a resident anchor"),
-            vec![3, 4, 5, 6],
-            "a rewind takes every resident turn from its anchor on"
+            s.context()
+                .transcript_index()
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![1, 2],
+            "the index reaches nothing from the anchor on"
+        );
+        assert_eq!(
+            s.context().rendered().len(),
+            1,
+            "the hole's marker stands alone"
+        );
+        assert!(s.context().is_ready());
+        assert_eq!(s.context().next_id(), 3);
+
+        complete_round(&mut s, "three again", "again");
+        assert_eq!(s.context().current_turn(), Some(4));
+        s.rewind(1).expect("a departed anchor may be rewound to");
+        assert_eq!(s.context().rendered().len(), 0, "the context may empty");
+        assert_eq!(s.context().next_id(), 1);
+        complete_round(&mut s, "fresh", "fresh");
+
+        let expected =
+            serde_json::to_vec(&s.context().rendered().iter().collect::<Vec<_>>()).unwrap();
+        drop(s);
+        let resumed = AgentLog::resume(sessions.path(), 0).expect("resume after rewinds");
+        assert_eq!(
+            serde_json::to_vec(&resumed.context().rendered().iter().collect::<Vec<_>>()).unwrap(),
+            expected
+        );
+        assert_eq!(resumed.context().current_turn(), Some(2));
+    }
+
+    /// A rewind is refused while a batch is in flight; the anchor named must
+    /// exist.
+    #[test]
+    fn a_rewind_waits_for_the_batch_in_flight() {
+        let mut s = fresh_root();
+        s.append_user("first".into(), None).unwrap();
+        s.append_assistant(assistant_with_tool("call"), vec!["call".into()], None)
+            .unwrap();
+        assert_eq!(
+            s.rewind(1).unwrap_err(),
+            "cannot rewind while the session is waiting for 1 tool result"
         );
     }
 
@@ -1946,7 +2012,7 @@ mod tests {
         s.evict(
             &[1, 2, 3],
             Some("the parser is fixed".into()),
-            EditAuthority::User,
+            EditAuthority::Model,
         )
         .unwrap();
 
@@ -1956,7 +2022,7 @@ mod tests {
                     record,
                     Record::Protocol(Protocol::Evicted {
                         cut,
-                        by: EditAuthority::User,
+                        by: EditAuthority::Model,
                     }) if cut.turns == [1, 2] && cut.note.as_deref() == Some("the parser is fixed")
                 )
             }),
@@ -2053,7 +2119,7 @@ mod tests {
         let mut s = fresh_root();
         complete_round(&mut s, "one", "one");
         complete_round(&mut s, "two", "two");
-        s.evict(&answered(&s, &[3]), None, EditAuthority::User)
+        s.evict(&answered(&s, &[3]), None, EditAuthority::Model)
             .unwrap();
 
         let record = s.dir().join("record.jsonl");
@@ -2067,7 +2133,7 @@ mod tests {
     fn a_departed_turn_keeps_no_resident_state() {
         let mut s = fresh_root();
         complete_round(&mut s, "one", "one");
-        s.evict(&answered(&s, &[1]), None, EditAuthority::User)
+        s.evict(&answered(&s, &[1]), None, EditAuthority::Model)
             .unwrap();
         assert_eq!(
             s.context().event_count(),
@@ -2374,7 +2440,7 @@ mod tests {
 
     #[test]
     fn resume_matches_live_after_a_small_edit_sequence_family() {
-        for pattern in 0..8 {
+        for pattern in 0..9 {
             let sessions = sessions_root(&format!("resume-edits-{pattern}"));
             let mut live = AgentLog::root(
                 sessions.path(),
@@ -2390,7 +2456,7 @@ mod tests {
             match pattern {
                 0 => {}
                 1 => {
-                    live.evict(&answered(&live, &[3]), None, EditAuthority::User)
+                    live.evict(&answered(&live, &[3]), None, EditAuthority::Model)
                         .unwrap();
                 }
                 2 => {
@@ -2400,7 +2466,7 @@ mod tests {
                 3 => {
                     live.evict(&answered(&live, &[1]), None, EditAuthority::Model)
                         .unwrap();
-                    live.evict(&answered(&live, &[3]), None, EditAuthority::User)
+                    live.evict(&answered(&live, &[3]), None, EditAuthority::Model)
                         .unwrap();
                 }
                 4 => {
@@ -2414,7 +2480,7 @@ mod tests {
                         .unwrap();
                 }
                 5 => {
-                    live.evict(&answered(&live, &[3]), None, EditAuthority::User)
+                    live.evict(&answered(&live, &[3]), None, EditAuthority::Model)
                         .unwrap();
                     complete_round(&mut live, "four", "four");
                 }
@@ -2432,6 +2498,12 @@ mod tests {
                     live.record_error("forensics".into()).unwrap();
                     live.record_nudge("retry".into(), Some(Spent { used: 1, max: 2 }))
                         .unwrap();
+                }
+                8 => {
+                    live.evict(&prefix(&live, 2), None, EditAuthority::Harness)
+                        .unwrap();
+                    live.rewind(3).unwrap();
+                    complete_round(&mut live, "three again", "again");
                 }
                 _ => unreachable!(),
             }
@@ -2810,7 +2882,7 @@ mod tests {
         complete_round(&mut parent, "one", "one");
         complete_round(&mut parent, "two", "two");
         parent
-            .evict(&answered(&parent, &[1, 3]), None, EditAuthority::User)
+            .evict(&answered(&parent, &[1, 3]), None, EditAuthority::Model)
             .unwrap();
         assert_eq!(parent.context().context_survey().rows.len(), 0);
 

@@ -93,6 +93,9 @@ pub enum BlockKind {
         cut: Cut,
         by: EditAuthority,
     },
+    Rewound {
+        anchor: u64,
+    },
 }
 
 /// What a result told the call it answers: how much it moved, and whether
@@ -131,6 +134,9 @@ pub enum Delta {
     Grew(BlockId),
     /// A result was attached to the named call.
     Patched(BlockId),
+    /// Every block from the named one on was dropped — `None` when that block
+    /// had already left the window — and a block opened at the tail.
+    Rewound(Option<BlockId>),
     /// The record moved no block: ambient totals, or a class this fold skips.
     Quiet,
 }
@@ -319,6 +325,13 @@ impl Blocks {
             Display::Context { turns } => self.push(seq, BlockKind::Context { turns }),
             Display::Turn { id } => self.push(seq, BlockKind::Turn { id }),
             Display::Evicted { cut, by } => self.push(seq, BlockKind::Evicted { cut, by }),
+            Display::Rewound { anchor } => {
+                let from = rewind_point(&self.blocks, anchor);
+                let cut = from.map(|at| self.blocks[at].id());
+                self.blocks.truncate(from.unwrap_or(self.blocks.len()));
+                let _ = self.push(seq, BlockKind::Rewound { anchor });
+                Delta::Rewound(cut)
+            }
         }
     }
 
@@ -389,6 +402,33 @@ impl Blocks {
 /// [`super::Protocol`] by an explicit arm rather than a wildcard.
 pub struct View;
 
+/// The first block turn `anchor` owns, if any is resident.  A prompt stands
+/// just before the breadcrumb of the request it provoked, so the prompt
+/// before `Turn { id }` is turn `id - 1`'s; a prompt after the last breadcrumb
+/// opened the turn past it.
+fn rewind_point(blocks: &[Block], anchor: u64) -> Option<usize> {
+    let is_prompt = |at: usize| matches!(blocks[at].kind, BlockKind::Prompt { .. });
+    let turn = |b: &Block| {
+        if let BlockKind::Turn { id } = b.kind {
+            Some(id)
+        } else {
+            None
+        }
+    };
+    let breadcrumb = blocks
+        .iter()
+        .enumerate()
+        .find_map(|(at, b)| turn(b).filter(|&id| id >= anchor).map(|id| (at, id)));
+    if let Some((at, id)) = breadcrumb {
+        return Some(at - usize::from(at > 0 && id > anchor && is_prompt(at - 1)));
+    }
+    let last = blocks
+        .iter()
+        .rposition(|b| turn(b).is_some())
+        .map_or(0, |at| at + 1);
+    (last..blocks.len()).find(|&at| is_prompt(at))
+}
+
 impl Fold for View {
     type Memo = Blocks;
 
@@ -406,6 +446,60 @@ mod tests {
     /// counts blocks rather than the lanes that grow.
     fn push(memo: &mut Blocks, seq: u64, text: &str) -> Delta {
         memo.step_forensic(Seq::new(seq), Forensic::SystemNote { text: text.into() })
+    }
+
+    /// A rewind cuts the view back to the first block the anchor owns: the
+    /// prompt that provoked a request is that request's turn minus one.
+    #[test]
+    fn a_rewind_cuts_from_the_anchors_first_block() {
+        let prompt = |text: &str| Display::Prompt { text: text.into() };
+        let turn = |id| Display::Turn { id };
+        let answer = |text: &str| Display::Answer { text: text.into() };
+        let mut memo = Blocks::default();
+        for (seq, d) in [
+            (1, prompt("one")),
+            (2, turn(2)),
+            (3, answer("two")),
+            (4, prompt("three")),
+            (5, turn(4)),
+            (6, answer("four")),
+            (7, prompt("five")),
+        ] {
+            let _ = memo.step_display(Seq::new(seq), d);
+        }
+        assert_eq!(
+            rewind_point(memo.blocks(), 3),
+            Some(3),
+            "the prompt of turn 3 goes with it"
+        );
+        assert_eq!(
+            rewind_point(memo.blocks(), 4),
+            Some(4),
+            "turn 3's prompt stays"
+        );
+        assert_eq!(
+            rewind_point(memo.blocks(), 5),
+            Some(6),
+            "a trailing prompt is the turn past the last breadcrumb"
+        );
+        assert_eq!(
+            rewind_point(memo.blocks(), 2),
+            Some(1),
+            "turn 2's own breadcrumb, its prompt kept"
+        );
+        assert_eq!(
+            memo.step_display(Seq::new(8), Display::Rewound { anchor: 3 }),
+            Delta::Rewound(Some(BlockId::new(Seq::new(4))))
+        );
+        assert!(matches!(
+            memo.blocks(),
+            [_, _, _, b] if matches!(b.kind, BlockKind::Rewound { anchor: 3 })
+        ));
+        assert_eq!(
+            memo.step_display(Seq::new(9), Display::Rewound { anchor: 1 }),
+            Delta::Rewound(Some(BlockId::new(Seq::new(1))))
+        );
+        assert_eq!(memo.blocks().len(), 1);
     }
 
     /// One lane, many records, one block: consecutive prose grows the block it

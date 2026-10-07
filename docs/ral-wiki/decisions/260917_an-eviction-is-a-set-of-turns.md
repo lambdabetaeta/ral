@@ -12,6 +12,18 @@ the transcript speaks turn ids, as a list.** `` context `evict [turns: [Int],
 note: Str] `` is the model's spelling; `/rewind <turn>` and the harness's own
 pressure eviction are the same record under a different `EditAuthority`.
 
+> **Superseding note (261007, `/rewind` only).** The user's rewind is no
+> longer an eviction. An eviction leaves a marker that names each departed
+> turn and invites the model to read it back through `exarch-transcript`,
+> which is the opposite of what `/rewind` means: after it the model still
+> "saw" everything. `/rewind <turn>` now records `Protocol::Rewound { anchor }`
+> in the same file, and the fold truncates the table at the anchor: no row,
+> no hole, no address, the next prompt minted `anchor` again, the prefix's
+> prompt cache intact; the records stay in `record.jsonl` as forensic fact.
+> The view fold truncates its blocks likewise (`Display::Rewound`), so the
+> screen shows the conversation as it was, plus one line. `EditAuthority::User`
+> is gone; point 5 below is withdrawn. The shell is not rewound.
+
 ## Why
 
 The previous vocabulary had three edits that were one operation seen through
@@ -67,10 +79,8 @@ name a turn; neither carried a note that stood *where the hole is*.
    and the head hole leaves message 0 untouched, and the provider re-reads
    from the hole, not from the start.
 
-5. **The user's rewind leaves a marker with no note.** The harness states
-   facts about the conversation; a model that knows a path was rewound does
-   not walk it again. `/rewind <turn>` takes every resident turn from that id
-   on.
+5. ~~**The user's rewind leaves a marker with no note.**~~ Withdrawn, see
+   the superseding note above: a rewind leaves nothing.
 
 6. **The read door speaks the same address.** `` transcript `read [turns:
    [Int]] `` and `` transcript `grep [pattern, turns: [Int]] `` name turns by

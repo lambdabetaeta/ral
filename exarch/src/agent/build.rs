@@ -4,7 +4,7 @@
 //! place rather than ending it; `Drop` is the one exit every life takes.
 
 use crate::agent::dial::Dial;
-use crate::agent::log::{AgentLog, EditAuthority, Resumed};
+use crate::agent::log::{AgentLog, Resumed};
 use crate::agent::seat::{self, Seat};
 use crate::agent::shell::LogCell;
 use crate::agent::{Agent, Avatar, Birth, ProviderHandle, Readings, ReplyCell, SPAWN_FUEL};
@@ -519,15 +519,17 @@ impl Avatar {
         record.rotation_error.map_or(Ok(()), Err)
     }
 
-    /// Evict `anchor` and every resident turn after it, no note: the harness
-    /// states facts about the conversation.  Descendants and the shell are
-    /// untouched.
+    /// `/rewind`: turn `anchor` and every turn after it cease to be, for the
+    /// model and the screen alike.  Descendants and the shell are untouched.
     pub(crate) fn rewind(&mut self, anchor: u64, emit: &Emitter) -> Result<(), String> {
         // Coupled first, so the edit's record — the one notification there is
         // — publishes live.
         self.couple(emit);
-        let turns = self.log.lock().context().suffix_from(anchor)?;
-        self.evict_unbidden(&turns, EditAuthority::User)?;
+        self.log.lock().rewind(anchor)?;
+        self.recorder()
+            .emit(crate::record::Display::Rewound { anchor })
+            .map(drop)
+            .map_err(|e| e.to_string())?;
         // A nudge decided for the rewound prompt must neither commit nor
         // leave its edges consumed.
         self.inbox.drop_nudges();
@@ -1197,7 +1199,7 @@ mod tests {
     }
 
     #[test]
-    fn rewind_validates_the_anchor_refuses_what_has_gone_and_sheds_nudges() {
+    fn rewind_validates_the_anchor_and_sheds_nudges() {
         let mut session = Avatar::for_test("system").unwrap();
         {
             let mut log = session.log.lock();
@@ -1219,16 +1221,6 @@ mod tests {
             "turn 9 is not recorded: the latest is 6"
         );
 
-        session
-            .log
-            .lock()
-            .evict(&[1, 2], None, EditAuthority::Harness)
-            .unwrap();
-        assert_eq!(
-            session.rewind(1, &emit).unwrap_err(),
-            "turn 1 has already left your context: the earliest still in it is 3"
-        );
-
         session.inbox.push(Post::Nudge {
             prompt: 5,
             text: "stale continuation".into(),
@@ -1237,9 +1229,17 @@ mod tests {
             .rewind(3, &emit)
             .expect("an anchor still in context is legal");
         assert_eq!(
-            session.log.lock().context().context_survey().rows.len(),
-            0,
-            "the rewind removes the whole suffix"
+            session
+                .log
+                .lock()
+                .context()
+                .context_survey()
+                .rows
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![1, 2],
+            "the rewind removes the anchor and everything after it"
         );
         assert!(
             !matches!(
@@ -1248,20 +1248,20 @@ mod tests {
             ),
             "a queued nudge for a rewound prompt must not commit"
         );
-        // The eviction applied above published its own record once the first
-        // rewind attempt coupled the bus, so the cut is asserted anywhere on
-        // the channel rather than at a fixed position.
+        let records = crate::bus::drain_records(&rx);
         assert!(
-            crate::bus::drain_records(&rx)
-                .into_iter()
-                .any(|record| matches!(
-                    record,
-                    crate::record::Record::Protocol(crate::record::Protocol::Evicted {
-                        cut,
-                        by: EditAuthority::User,
-                    }) if cut.turns == vec![3, 4, 5, 6]
-                )),
+            records.iter().any(|record| matches!(
+                record,
+                crate::record::Record::Protocol(crate::record::Protocol::Rewound { anchor: 3 })
+            )),
             "rewind must be durable on the trace"
+        );
+        assert!(
+            records.iter().any(|record| matches!(
+                record,
+                crate::record::Record::Display(crate::record::Display::Rewound { anchor: 3 })
+            )),
+            "and drawn"
         );
     }
 

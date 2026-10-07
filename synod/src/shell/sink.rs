@@ -280,7 +280,8 @@ fn project_protocol(protocol: &Protocol) -> Option<SynodEvent> {
         | Protocol::Inherited { .. }
         | Protocol::AssistantMessage { .. }
         | Protocol::ToolResults { .. }
-        | Protocol::Evicted { .. } => None,
+        | Protocol::Evicted { .. }
+        | Protocol::Rewound { .. } => None,
     }
 }
 
@@ -334,7 +335,8 @@ fn project_display(display: &Display) -> Option<SynodEvent> {
         | Display::Answer { .. }
         | Display::Result { .. }
         | Display::Turn { .. }
-        | Display::Evicted { .. } => None,
+        | Display::Evicted { .. }
+        | Display::Rewound { .. } => None,
         // Intercepted by `Router::route_fact` before this fold ever runs.
         Display::SubagentDone { .. } => None,
     }
@@ -360,7 +362,8 @@ fn project_display_helper(display: &Display) -> Option<SynodEvent> {
         | Display::HarnessCall { .. }
         | Display::Result { .. }
         | Display::Turn { .. }
-        | Display::Evicted { .. } => None,
+        | Display::Evicted { .. }
+        | Display::Rewound { .. } => None,
         Display::SubagentDone { .. } => None,
     }
 }

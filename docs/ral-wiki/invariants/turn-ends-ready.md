@@ -85,7 +85,8 @@ system prompt instead.
 Eviction is not stated at this granularity at all. The rule is that **no
 edit touches the unclosed turn** — the one being written, which exists only
 while a turn is open, so at `ReadyForUser` nothing is unclosed
-and a user rewind may empty the context. `Context::resolve_cut` refuses that
+and a user rewind (`Protocol::Rewound`, a truncation rather than a cut, admitted
+whenever a new turn is) may empty the context. `Context::resolve_cut` refuses that
 turn by name, and `plan_eviction` draws its candidates from every resident turn
 *but the last*, so a harness plan cannot name it either. The reading door
 refuses the same turn, and that refusal names the closed turns of the work in

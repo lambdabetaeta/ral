@@ -3,7 +3,7 @@
 
 use super::Context;
 use crate::agent::log::{QuiesceReason, ToolResult, validate_result_ids};
-use crate::record::Protocol;
+use crate::record::{Protocol, Recorded};
 use genai::chat::{ChatMessage, ChatRole};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -100,10 +100,19 @@ pub(super) fn advance(state: &State, protocol: &Protocol) -> State {
         },
         Protocol::AssistantMessage { .. } => State::ReadyForUser,
         Protocol::ToolResults { .. } => State::AwaitingAssistantAfterToolResults,
-        Protocol::ContextMessage { .. } | Protocol::Evicted { .. } | Protocol::Inherited { .. } => {
-            state.clone()
-        }
+        Protocol::ContextMessage { .. }
+        | Protocol::Evicted { .. }
+        | Protocol::Rewound { .. }
+        | Protocol::Inherited { .. } => state.clone(),
     }
+}
+
+/// Where the automaton rests after one turn's records, the turn having
+/// opened from rest — what a rewind leaves it at.
+pub(super) fn resting(records: &[Recorded<Protocol>]) -> State {
+    records.iter().fold(State::default(), |state, record| {
+        advance(&state, record.value())
+    })
 }
 
 /// Protocol sequencing legality.
@@ -126,6 +135,7 @@ pub(super) fn admissible(state: &State, protocol: &Protocol) -> bool {
                 false
             }
         }
+        Protocol::Rewound { .. } => admits_new_turn(state),
         Protocol::Evicted { .. }
         // Sequencing-neutral; where a link may stand is its own rule in
         // [`Context::judge`], needing more than a [`State`].

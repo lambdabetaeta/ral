@@ -154,6 +154,12 @@ pub enum Protocol {
         cut: Cut,
         by: EditAuthority,
     },
+    /// The user's `/rewind`: turn `anchor` and every turn after it leave the
+    /// structure outright — no marker, no address, the next prompt minted
+    /// `anchor` again.  Their records stay in the file as forensic fact.
+    Rewound {
+        anchor: u64,
+    },
 }
 
 /// The commits the view fold needs — cut, coalesced, and reduced *before*
@@ -251,6 +257,11 @@ pub enum Display {
     Evicted {
         cut: Cut,
         by: EditAuthority,
+    },
+    /// Beside `Protocol::Rewound`: the view cuts back to where turn `anchor`
+    /// opened.
+    Rewound {
+        anchor: u64,
     },
 }
 

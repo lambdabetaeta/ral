@@ -1035,6 +1035,7 @@ impl Scrollback {
                 let runs = crate::record::model::runs(&cut.turns);
                 note(&format!("[turns {runs} left the context ({})]", by.name()))
             }
+            K::Rewound { anchor } => note(&format!("[rewound to turn {anchor}]")),
         }
     }
 }
@@ -1145,6 +1146,17 @@ impl Scrollback {
             }
             Delta::Grew(id) => self.grew(id),
             Delta::Patched(id) => self.patched(id),
+            Delta::Rewound(cut) => {
+                let gone =
+                    cut.and_then(|id| self.blocks.iter().position(|b| b.seq() == Some(id.seq())));
+                if let Some(at) = gone {
+                    self.blocks.truncate(at);
+                    self.log.seeded = self.log.seeded.min(at);
+                }
+                if let Some(at) = self.fold.blocks().len().checked_sub(1) {
+                    self.opened(at);
+                }
+            }
             Delta::Quiet => {}
         }
         self.trim();

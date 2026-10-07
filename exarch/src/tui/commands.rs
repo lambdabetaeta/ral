@@ -159,7 +159,7 @@ impl Verb {
                 &[],
                 Some("<turn>"),
                 false,
-                "Evict a turn and every turn after it; descendants and the shell are untouched.",
+                "Undo a turn and every turn after it; descendants and the shell are untouched.",
             ),
             Self::Resources => meta(
                 "/resources",
@@ -172,8 +172,7 @@ impl Verb {
         }
     }
 
-    const REWIND_USAGE: &str =
-        "usage: /rewind <turn>; name a turn still in your context; it and every later turn leave";
+    const REWIND_USAGE: &str = "usage: /rewind <turn>; that turn and every later one cease to be, for the model and the screen; the shell is not rewound";
 
     /// Type the trailing argument, or say how it is malformed — the usage
     /// hints live here, so [`run`] receives only well-formed commands.

@@ -2,7 +2,7 @@
 //! eviction is the one step that moves a turn from here to there — its
 //! resolution and its planning live beside it.
 
-use super::state::{admissible, advance};
+use super::state::{admissible, advance, resting};
 use super::{
     Context, Held, Turn, into_chat_messages, message_bytes, message_label, message_role,
     not_recorded_refusal_turn, opening_line, runs,
@@ -81,24 +81,22 @@ impl Context {
         Ok(named.into_iter().collect())
     }
 
-    /// Every resident turn from `anchor` on — what a user rewind takes. The
-    /// anchor is checked before the suffix is derived; at a ready boundary
-    /// nothing is unclosed, so the suffix may be the whole context.
+    /// Whether `/rewind anchor` may be recorded now: the anchor is a turn the
+    /// lineage recorded, resident or not, and no batch is awaiting results.
     ///
     /// # Errors
-    /// Refuses an absent anchor or one that has already left the context.
-    pub(crate) fn suffix_from(&self, anchor: u64) -> Result<Vec<u64>, String> {
-        let Some(turn) = self.turn(anchor) else {
+    /// Names the bad anchor, or what the session is waiting for.
+    pub(crate) fn rewindable(&self, anchor: u64) -> Result<(), String> {
+        if self.turn(anchor).is_none() {
             return Err(not_recorded_refusal_turn(anchor, self.reach()));
-        };
-        if !turn.is_resident() {
-            return Err(self.departed_turn_refusal(anchor));
         }
-        Ok(self
-            .resident()
-            .filter(|turn| turn.id >= anchor)
-            .map(|turn| turn.id)
-            .collect())
+        if !self.is_ready() {
+            return Err(format!(
+                "cannot rewind while the session is {}",
+                self.waiting_for()
+            ));
+        }
+        Ok(())
     }
 
     fn departed_turn_refusal(&self, turn: u64) -> String {
@@ -184,6 +182,13 @@ impl Context {
                 self.newest_edit = Some(index);
                 return Ok(());
             }
+            Protocol::Rewound { anchor } => {
+                self.table.rewind(*anchor);
+                // The automaton rests where the kept prefix leaves it.
+                self.state = resting(self.table.turns().last().map_or(&[], Turn::records));
+                self.newest_edit = Some(index);
+                return Ok(());
+            }
             Protocol::UserPrompt { .. }
             | Protocol::Steering { .. }
             | Protocol::ContextMessage { .. }
@@ -243,6 +248,13 @@ impl Context {
                 )));
             }
         }
+        if let Protocol::Rewound { anchor } = protocol
+            && self.turn(*anchor).is_none()
+        {
+            return Err(foreign(format!(
+                "record {n} rewinds to turn {anchor}, which was never recorded; was record.jsonl hand-edited?"
+            )));
+        }
         if let Protocol::Evicted { cut, .. } = protocol {
             if cut.turns.is_empty() {
                 return Err(foreign(format!(
@@ -295,6 +307,7 @@ impl Context {
             Protocol::Steering { .. }
             | Protocol::ToolResults { .. }
             | Protocol::Evicted { .. }
+            | Protocol::Rewound { .. }
             | Protocol::Inherited { .. } => None,
         }
     }
@@ -308,6 +321,7 @@ impl Context {
             Protocol::UserPrompt { .. }
             | Protocol::AssistantMessage { .. }
             | Protocol::Evicted { .. }
+            | Protocol::Rewound { .. }
             | Protocol::Inherited { .. } => None,
         }
     }
@@ -349,7 +363,9 @@ impl Context {
                 })
             }
             Protocol::Steering { .. } | Protocol::ToolResults { .. } => last,
-            Protocol::Evicted { .. } | Protocol::Inherited { .. } => None,
+            Protocol::Evicted { .. } | Protocol::Rewound { .. } | Protocol::Inherited { .. } => {
+                None
+            }
         }
     }
 }

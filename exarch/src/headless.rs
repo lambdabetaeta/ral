@@ -348,6 +348,9 @@ impl Headless<'_> {
                 let runs = crate::record::model::runs(&cut.turns);
                 let _ = writeln!(self.err, "[turns {runs} left the context ({})]", by.name());
             }
+            K::Rewound { anchor } => {
+                let _ = writeln!(self.err, "[rewound to turn {anchor}]");
+            }
             // Interactive-only, pure presentation, or — the nudge — the agent
             // steering itself, which stays forensic and never addresses the
             // caller.
