@@ -1382,6 +1382,7 @@ mod tests {
         let _recorded = recorder
             .emit(crate::record::Display::Prompt {
                 text: "after the clear".into(),
+                turn: Some(1),
             })
             .expect("the pre-clear recorder still appends");
         recorder.transient(crate::record::Transient::Cleared);
@@ -1394,7 +1395,7 @@ mod tests {
         assert!(
             current_records.iter().any(|r| matches!(
                 r,
-                crate::record::Record::Display(crate::record::Display::Prompt { text })
+                crate::record::Record::Display(crate::record::Display::Prompt { text, .. })
                     if text == "after the clear"
             )),
             "the pre-clear recorder must write into the new segment, not the rotated one"
@@ -1406,7 +1407,7 @@ mod tests {
                 s,
                 crate::bus::Signal::Fact(_, rec)
                     if matches!(rec.value(), crate::record::Record::Display(
-                        crate::record::Display::Prompt { text }) if text == "after the clear")
+                        crate::record::Display::Prompt { text, .. }) if text == "after the clear")
             )),
             "and the bus coupled before the clear must still see it"
         );

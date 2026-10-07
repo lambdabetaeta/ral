@@ -635,7 +635,7 @@ fn span_run_width(spans: &[Span<'static>]) -> usize {
 
 /// Truncate a styled span run to `max_w` columns, appending an `…` when
 /// anything is dropped.
-fn truncate_spans(spans: &[Span<'static>], max_w: usize) -> Vec<Span<'static>> {
+pub(super) fn truncate_spans(spans: &[Span<'static>], max_w: usize) -> Vec<Span<'static>> {
     if span_run_width(spans) <= max_w {
         return spans.to_vec();
     }

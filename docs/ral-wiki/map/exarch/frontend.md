@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 446e3123
-generated_at_date: 2026-10-06
+generated_at_commit: 4f112999
+generated_at_date: 2026-10-07
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/agent/log.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/signals.rs, exarch/src/prompt/host.rs]
 ---
 
@@ -414,8 +414,17 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  toast of `gesture::Toast`, never a block in the transcript;
  session commands are parsed at submit into a `Read` (`/branch`,
  `/context`, `/resources`) or a `Rewrite` (`/clear`, `/evict`, `/rewind`,
- `/quit`) and enter the trunk's inbox; a `/rewind` with a bad turn is refused
- there, at once. `/branch [name]`
+ `/quit`) and enter the trunk's inbox. `/rewind` takes no argument: it opens
+ the `tui/rewind.rs` overlay over the trunk's turn-opening prompts (the
+ fold's `Blocks::prompts`, since `Display::Prompt` carries the `turn` it
+ opens — `None` for a steering line, which opens none), the latest
+ highlighted; while it is up the transcript previews the cut, every row from
+ `Scrollback::cut_row` on repainted as a `palette::GHOST` silhouette
+ (`Row::ghost`, `render::paint_cut`) and scrolled to sit two rows below the
+ top, the viewport put back when the overlay closes. ⏎ posts
+ `Rewrite::Rewind(turn)`; the cut the preview draws and the cut the landed
+ `Display::Rewound` makes are the one function, `Blocks::rewind_point`.
+ `/branch [name]`
  forks a *conversing* tab from the focused context — a peer conversation
  under [[decisions/260705_branch-minimal|branch-minimal]], named by the human
  or by a minted `branch-{N}`, and parked for them rather than seeded with a
@@ -449,9 +458,11 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
   row matches by rather than the row itself, so a row and its haystack travel
   together and two providers listing one model name stay two rows. Rows read
   best-match first and, an empty query included, alphabetically within a score.
-- `/model` and `/login` share `picker::overlay_frame`: one centred double-line
-  bezel, shadow, palette, padding, title, and hint frame around distinct
-  bodies. The login body drives browser or device OAuth on a background thread,
+- `/model`, `/login` and `/rewind` share `picker::overlay_frame`: one
+  double-line bezel, shadow, palette, padding, title, and hint frame around
+  distinct bodies — centred for the first two, in the frame's bottom-right
+  corner over the inert prompt box for `/rewind`, so the transcript it
+  previews stays uncovered. The login body drives browser or device OAuth on a background thread,
   receives typed `LoginPhase`s over a channel, and carries the device expiry
   label from the flow rather than reconstructing it in the view. Every body row
   is a `(label, value)` pair over one shared column, and a value too long for it
@@ -541,3 +552,4 @@ user, home, git state, exarch's log directory) once at startup for the [[map/exa
         - `tui/palette.rs` — the TUI colour constants (`CODE_BG`, `SLATE`, `PROMPT_INK`, the agent hues) and the width vocabulary: `RAIL_W`, `READ_W`, `content_w`, and `Col`, the one column primitive every gutter that holds a cell is built from ([[map/exarch/cards|cards]])
         - `tui/model_picker.rs` — model choice: `drive` over a `Stage` (the live `Tui` for `pick_model` and `apply_model_switch`, or the picker `Alone` for a launch's `choose`); list fetching rides [[map/exarch/provider|provider]]'s `Listing`/`Fetches` pumps
         - `tui/login.rs` — the `/login` overlay: `LoginOverlay`, `drive_login`, `apply_login`
+        - `tui/rewind.rs` — the `/rewind` overlay: `RewindOverlay`, `rewind`, the cut preview's `reveal_cut`

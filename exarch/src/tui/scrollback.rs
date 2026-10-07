@@ -127,6 +127,13 @@ impl StateSpan {
     }
 }
 
+/// A window's place in the buffer, saved and restored around a preview.
+#[derive(Clone, Copy)]
+pub(super) struct Viewport {
+    offset: usize,
+    sticky: bool,
+}
+
 pub(super) struct RenderWindow {
     pub(super) lines: Vec<Row>,
     pub(super) offset: usize,
@@ -758,6 +765,50 @@ impl Scrollback {
         }
     }
 
+    /// Where the window stands, to put it back after a preview moved it.
+    pub(super) fn viewport(&self) -> Viewport {
+        Viewport {
+            offset: self.offset,
+            sticky: self.sticky,
+        }
+    }
+
+    pub(super) fn set_viewport(&mut self, viewport: Viewport) {
+        self.offset = viewport.offset;
+        self.sticky = viewport.sticky;
+    }
+
+    /// Scroll so visual row `row` is the top one; the next render clamps.
+    pub(super) fn scroll_to(&mut self, row: usize) {
+        self.sticky = false;
+        self.offset = row;
+    }
+
+    // ── rewind ───────────────────────────────────────────────────────────
+
+    /// The turn-opening prompts on screen, oldest first, with their turns.
+    pub(super) fn prompts(&self) -> Vec<(u64, String)> {
+        self.fold
+            .prompts()
+            .map(|(turn, text)| (turn, text.to_owned()))
+            .collect()
+    }
+
+    /// The first visual row `/rewind anchor` would cut — valid against the
+    /// most recent [`Self::render_window`].  Chrome drawn before the cut
+    /// block stays, as the mirror's trim would keep it.
+    pub(super) fn cut_row(&self, anchor: u64) -> Option<usize> {
+        let cut = self.fold.rewind_point(anchor)?.seq();
+        let mut at = 0;
+        for (block, rows) in self.screen() {
+            if self.blocks[block].seq().is_some_and(|seq| seq >= cut) {
+                return Some(at);
+            }
+            at += rows.len();
+        }
+        None
+    }
+
     /// Plain text a drag selection copies, `lo <= hi` in buffer order; the rail
     /// glyph is stripped automatically.
     pub(super) fn selection_text(&self, lo: Cell, hi: Cell) -> String {
@@ -967,7 +1018,7 @@ impl Scrollback {
         let note = |text: &str| chrome(Chrome::Note(text.to_owned()));
         match kind {
             K::Thinking { text } => vec![Item::Member(Member::Thinking(text.clone()))],
-            K::Prompt { text } => chrome(Chrome::Prompt(text.clone())),
+            K::Prompt { text, .. } => chrome(Chrome::Prompt(text.clone())),
             K::Answer { text } => vec![Item::Barrier(BlockKind::Prose {
                 src: text.clone(),
                 fidelity: self.fidelity(text),
@@ -1492,6 +1543,7 @@ mod tests {
             &mut sb,
             Record::Display(Display::Prompt {
                 text: "hello".into(),
+                turn: Some(1),
             }),
         );
         log.say(&mut sb, "hi back");
@@ -1604,12 +1656,18 @@ mod tests {
         let mut log = Stream::new();
         let _ = log.land(
             &mut sb,
-            Record::Display(Display::Prompt { text: "one".into() }),
+            Record::Display(Display::Prompt {
+                text: "one".into(),
+                turn: Some(1),
+            }),
         );
         sb.push_chrome(Chrome::Note("between".into()));
         let _ = log.land(
             &mut sb,
-            Record::Display(Display::Prompt { text: "two".into() }),
+            Record::Display(Display::Prompt {
+                text: "two".into(),
+                turn: Some(3),
+            }),
         );
 
         let rendered = sb
@@ -1710,7 +1768,10 @@ mod tests {
         let path = first.log_path.clone();
         let _ = log.land(
             &mut first,
-            Record::Display(Display::Prompt { text: "one".into() }),
+            Record::Display(Display::Prompt {
+                text: "one".into(),
+                turn: Some(1),
+            }),
         );
         first.flush_log().expect("the transcript flushes");
         assert_eq!(logged(&path, "one"), 1);
@@ -1720,7 +1781,10 @@ mod tests {
         resumed.seed(replayed);
         let _ = log.land(
             &mut resumed,
-            Record::Display(Display::Prompt { text: "two".into() }),
+            Record::Display(Display::Prompt {
+                text: "two".into(),
+                turn: Some(3),
+            }),
         );
         resumed.flush_log().expect("the transcript flushes");
 

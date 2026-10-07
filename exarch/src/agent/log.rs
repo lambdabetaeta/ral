@@ -551,17 +551,20 @@ impl AgentLog {
                 self.context.waiting_for()
             ));
         }
-        // A continuation extends the newest turn, so it is honoured only while
-        // that turn is in the context and `id` is the prompt it answers.
-        let record = if continues.is_some_and(|id| self.context.live_prompt() == Some(id)) {
-            Protocol::Steering { text }
-        } else {
-            Protocol::UserPrompt {
-                turn: self.context.next_id(),
-                text,
-            }
+        let record = match self.opens(continues) {
+            None => Protocol::Steering { text },
+            Some(turn) => Protocol::UserPrompt { turn, text },
         };
         self.record_protocol(record).map_err(|e| e.to_string())
+    }
+
+    /// The turn a prompt arriving now opens, or `None` where it extends the
+    /// one `continues` names: a continuation is honoured only while that
+    /// turn is in the context and is the prompt it answers.  Decided here
+    /// once, for the record and for the echo the screen draws of it.
+    pub fn opens(&self, continues: Option<u64>) -> Option<u64> {
+        let extends = continues.is_some_and(|id| self.context.live_prompt() == Some(id));
+        (!extends).then(|| self.context.next_id())
     }
 
     /// Append a user message between a complete tool-result batch and the next

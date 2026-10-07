@@ -10,8 +10,8 @@
 //! `super::scrollback`.
 
 use super::line::{self, is_blank};
-use super::palette::{RAIL_W, content_w};
-use ratatui::style::{Color, Modifier};
+use super::palette::{GHOST, RAIL_W, content_w};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
@@ -111,6 +111,16 @@ impl Row {
     /// Light the margin: the hovered block's one mark.
     pub(super) fn hover(&mut self) {
         self.gutter.style = self.gutter.style.add_modifier(Modifier::REVERSED);
+    }
+
+    /// Repaint the row as a silhouette, margin included: the preview of text
+    /// a `/rewind` would cut.
+    pub(super) fn ghost(&mut self) {
+        let ink = Style::default().fg(GHOST);
+        self.gutter.style = ink;
+        for span in &mut self.content.spans {
+            span.style = ink;
+        }
     }
 
     /// Lay a background stratum across the whole row, margin included, and fill

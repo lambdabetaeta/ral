@@ -166,6 +166,7 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
     };
     paint_selection(app, &mut rows, offset);
     paint_hover(app, &mut rows, offset);
+    paint_cut(app, &mut rows, offset);
     // The screen flatten — one of the two seams where a margin rejoins its
     // content, the other being `user.log`.
     let lines: Vec<Line<'static>> = rows.into_iter().map(Row::into_line).collect();
@@ -277,6 +278,7 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
         match overlay {
             Some(Overlay::Picker(p)) => p.render(f, area),
             Some(Overlay::Login(l)) => l.render(f, area),
+            Some(Overlay::Rewind(r)) => r.render(f, area),
             None => {}
         }
     });
@@ -381,6 +383,24 @@ fn paint_hover(app: &App, rows: &mut [Row], offset: usize) {
         .and_then(|i| rows.get_mut(i))
     {
         row.hover();
+    }
+}
+
+/// Ghost every row from the cut a `/rewind` overlay highlights: the preview
+/// of what ⏎ would undo, drawn on the trunk, whose transcript it is.
+fn paint_cut(app: &App, rows: &mut [Row], offset: usize) {
+    let Some(Overlay::Rewind(overlay)) = &app.overlay else {
+        return;
+    };
+    let Some(cut) = app
+        .tabs
+        .scrollback(app.tabs.root())
+        .and_then(|sb| sb.cut_row(overlay.anchor()))
+    else {
+        return;
+    };
+    for row in rows.iter_mut().skip(cut.saturating_sub(offset)) {
+        row.ghost();
     }
 }
 

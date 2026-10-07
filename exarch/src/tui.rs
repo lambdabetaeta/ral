@@ -29,6 +29,7 @@ mod prompt;
 mod rail;
 mod render;
 mod resources;
+mod rewind;
 mod row;
 mod scrollback;
 mod select;

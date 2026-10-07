@@ -24,6 +24,10 @@ pub(super) const QUEUED_PROMPT_BG: Color = Color::Rgb(72, 78, 94);
 /// The `/model` overlay's plane ([`super::picker`]) — the one areal mark that
 /// means the modal holds the focus.
 pub(super) const OVERLAY_BG: Color = Color::Rgb(28, 34, 66);
+/// The silhouette of text a pending `/rewind` would cut: one ink for every
+/// span, margin included, so the doomed stretch reads as a shape and nothing
+/// in it competes with the kept text above.
+pub(super) const GHOST: Color = Color::Rgb(66, 72, 90);
 /// The human's ink — prompt body and the `❖` fence in the rail.  Neutral where
 /// the agents own hues, so a prompt never aliases an agent's mark.
 pub(super) const PROMPT_INK: Color = Color::Rgb(170, 180, 200);

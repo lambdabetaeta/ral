@@ -262,7 +262,7 @@ impl Avatar {
                     Next::Read(read) => self.read(&read, emit),
                     Next::Item(item) => {
                         self.heard(&item);
-                        announce(&item, &recorder);
+                        announce(&item, None, &recorder);
                         self.log
                             .lock()
                             .append_steering(item.text())
@@ -650,7 +650,7 @@ mod tests {
                 .into_iter()
                 .any(|record| matches!(
                     record,
-                    crate::record::Record::Display(crate::record::Display::Prompt { text })
+                    crate::record::Record::Display(crate::record::Display::Prompt { text, .. })
                         if text.contains("and report")
                 )),
             "the arrival must be announced as it enters context"
@@ -1089,7 +1089,7 @@ mod tests {
                     crate::bus::Signal::Fact(_, rec) if matches!(
                         rec.value(),
                         crate::record::Record::Display(
-                            crate::record::Display::Prompt { text }
+                            crate::record::Display::Prompt { text, .. }
                         ) if text == "queued prompt"
                     )
                 )

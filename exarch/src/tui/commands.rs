@@ -10,6 +10,7 @@ use super::block::Chrome;
 use super::gesture::Toast;
 use super::login;
 use super::model_picker::pick_model;
+use super::rewind;
 use super::scrollback;
 use super::terminal::{YANK_CAP, osc52_copy, tail_bytes};
 use super::tui_loop::Tui;
@@ -157,9 +158,9 @@ impl Verb {
             Self::Rewind => meta(
                 "/rewind",
                 &[],
-                Some("<turn>"),
+                None,
                 false,
-                "Undo a turn and every turn after it; descendants and the shell are untouched.",
+                "Pick a prompt to go back to; descendants and the shell are untouched.",
             ),
             Self::Resources => meta(
                 "/resources",
@@ -171,8 +172,6 @@ impl Verb {
             Self::Quit => meta("/quit", &["/exit"], None, false, "Leave exarch."),
         }
     }
-
-    const REWIND_USAGE: &str = "usage: /rewind <turn>; that turn and every later one cease to be, for the model and the screen; the shell is not rewound";
 
     /// Type the trailing argument, or say how it is malformed — the usage
     /// hints live here, so [`run`] receives only well-formed commands.
@@ -190,16 +189,13 @@ impl Verb {
             Self::Evict => Command::Evict,
             Self::Context => Command::Context,
             Self::Resources => Command::Resources,
+            Self::Rewind => Command::Rewind,
             Self::Quit => Command::Quit,
             Self::Branch => Command::Branch((!arg.is_empty()).then(|| arg.to_string())),
             Self::Export if arg.is_empty() => return Err("usage: /export <path>".into()),
             Self::Export => Command::Export(arg.to_string()),
             Self::Focus if arg.is_empty() => return Err("usage: /focus <name>".into()),
             Self::Focus => Command::Focus(arg.to_string()),
-            Self::Rewind if arg.is_empty() => return Err(Self::REWIND_USAGE.into()),
-            Self::Rewind => Command::Rewind(arg.parse().map_err(|_| {
-                format!("/rewind expects one non-negative turn number, got `{arg}`")
-            })?),
         })
     }
 }
@@ -221,7 +217,7 @@ pub(super) enum Command {
     Focus(String),
     Evict,
     Context,
-    Rewind(u64),
+    Rewind,
     Resources,
     Quit,
 }
@@ -483,7 +479,8 @@ pub(super) fn route_submit(
 /// `/export`, `/model`, `/login`, `/limits`, `/thinking`) touches only the App,
 /// clipboard, file, or picker, so it runs here on the UI thread; a session
 /// command becomes its [`Read`] or [`Rewrite`] and rides the trunk's inbox to
-/// the attend thread, which owns the context.
+/// the attend thread, which owns the context.  `/rewind` is both: its picker
+/// runs here, and the choice rides the inbox.
 fn run(
     command: Command,
     tui: &mut Tui,
@@ -536,7 +533,7 @@ fn run(
         }
         Command::Evict => mailbox.push(Post::Rewrite(Rewrite::Evict)),
         Command::Quit => mailbox.push(Post::Rewrite(Rewrite::Quit)),
-        Command::Rewind(anchor) => mailbox.push(Post::Rewrite(Rewrite::Rewind(anchor))),
+        Command::Rewind => rewind::rewind(tui, mailbox),
         Command::Branch(name) => mailbox.push(Post::Read(Read::Branch(name))),
         Command::Context => mailbox.push(Post::Read(Read::Context)),
         Command::Resources => mailbox.push(Post::Read(Read::Resources)),
@@ -573,6 +570,8 @@ mod tests {
         assert_eq!(dispatch("/exit"), Some(("/quit", String::new())));
         assert_eq!(dispatch("/resources"), Some(("/resources", String::new())));
         assert_eq!(dispatch("/context"), Some(("/context", String::new())));
+        assert_eq!(parse("/rewind"), Some(Ok(Command::Rewind)));
+        assert_eq!(dispatch("/rewind 7"), None);
     }
 
     #[test]
@@ -585,12 +584,10 @@ mod tests {
             dispatch("/export   /tmp/a.txt  "),
             Some(("/export", "/tmp/a.txt".to_string()))
         );
-        assert_eq!(parse("/rewind 7"), Some(Ok(Command::Rewind(7))));
         // A bare command matches; the parse turns the empty argument into the
         // usage hint rather than letting the line fall through to the model.
         assert_eq!(dispatch("/export"), Some(("/export", String::new())));
         assert!(matches!(parse("/export"), Some(Err(usage)) if usage.starts_with("usage:")));
-        assert!(matches!(parse("/rewind x"), Some(Err(e)) if e.contains("`x`")));
     }
 
     #[test]

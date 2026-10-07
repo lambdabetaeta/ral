@@ -33,7 +33,7 @@ fn envelope_line(record: &record::Record) -> String {
 /// the fold's kinds directly (`Prompt`/`Answer`), not a rendered string.
 fn kind_contains(blocks: &Blocks, needle: &str) -> bool {
     blocks.blocks().iter().any(|b| match b.kind() {
-        record::BlockKind::Prompt { text } | record::BlockKind::Answer { text } => {
+        record::BlockKind::Prompt { text, .. } | record::BlockKind::Answer { text } => {
             text.contains(needle)
         }
         _ => false,

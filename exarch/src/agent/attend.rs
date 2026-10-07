@@ -175,7 +175,8 @@ impl Avatar {
             self.agent.token.reset();
             self.inbox.drop_nudges();
         }
-        announce(item, &self.recorder());
+        let opens = self.log.lock().opens(item.continues());
+        announce(item, opens, &self.recorder());
         // Read once, so a `/model` swap on the UI thread lands on the next
         // item rather than mid-item.
         let active = self.agent.provider.current();
@@ -425,16 +426,20 @@ impl Avatar {
     }
 }
 
-/// Emit the chrome an item's source shows as it enters context.  A nudge is an
-/// internal continuation and a command never reaches the model, so both are quiet.
-pub(super) fn announce(item: &Item, recorder: &crate::record::Emitter) {
+/// Emit the chrome an item's source shows as it enters context, `opens` being
+/// the turn a prompt opens ([`AgentLog::opens`]).  A nudge is an internal
+/// continuation and a command never reaches the model, so both are quiet.
+pub(super) fn announce(item: &Item, opens: Option<u64>, recorder: &crate::record::Emitter) {
     match item {
         Item::Human(_) | Item::Wakeup(_) | Item::Message(_) => {
             // The live row derives from the published `Display::Prompt`
             // record, so this is the one authoring site.
             record_commit(
                 recorder,
-                crate::record::Display::Prompt { text: item.text() },
+                crate::record::Display::Prompt {
+                    text: item.text(),
+                    turn: opens,
+                },
             );
         }
         Item::Agent(r) => {
@@ -540,7 +545,7 @@ mod tests {
             meter: crate::bus::UsageMeter::default(),
         });
 
-        announce(&Item::Human("hello".into()), &recorder);
+        announce(&Item::Human("hello".into()), Some(1), &recorder);
         announce(
             &Item::Agent(AgentResult {
                 id: 7,
@@ -548,14 +553,15 @@ mod tests {
                 outcome: AgentOutcome::Failed("boom".into()),
                 elapsed: std::time::Duration::from_millis(1500),
             }),
+            None,
             &recorder,
         );
 
         let mut facts: Vec<&'static str> = Vec::new();
         for record in crate::bus::drain_records(&rx) {
             match record {
-                Record::Display(Display::Prompt { text }) => {
-                    assert_eq!(text, "hello");
+                Record::Display(Display::Prompt { text, turn }) => {
+                    assert_eq!((text.as_str(), turn), ("hello", Some(1)));
                     facts.push("prompt");
                 }
                 Record::Display(Display::SubagentDone {

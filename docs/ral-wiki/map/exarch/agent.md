@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 446e3123
-generated_at_date: 2026-10-06
+generated_at_commit: 4f112999
+generated_at_date: 2026-10-07
 covers_paths: [exarch/src/agent.rs, exarch/src/latch.rs, exarch/src/agent/, exarch/src/signals.rs, exarch/src/fleet.rs, exarch/src/fleet/desk.rs, exarch/src/fleet/roster.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
 
@@ -747,7 +747,8 @@ model reaches the other two: `` exarch-context `survey ``/``
 `index ``/`` `read ``/`` `grep `` read the record, an edit recording
 `Protocol::Evicted` with `EditAuthority::Model` rather than `Harness`; only the
 model's own `` `evict `` carries a `note`. The user's own hand is
-`/rewind <turn>`, which is **not an eviction**: `AgentLog::rewind(anchor)`
+`/rewind`, a picker over the prompts on screen ([[map/exarch/frontend|frontend]]),
+which is **not an eviction**: `AgentLog::rewind(anchor)`
 records `Protocol::Rewound { anchor }` and the fold step truncates the table
 at the anchor, so the anchor and every later turn — departed rows included —
 leave the structure outright, with no hole, no marker and no door; the next
@@ -756,7 +757,11 @@ leaves it (`state::resting`), and `exarch-transcript` cannot reach what the
 table no longer holds, their records staying in `record.jsonl` as forensic
 fact. `Avatar::rewind` publishes `Display::Rewound { anchor }` beside it, sheds
 queued self-nudges, and rebuilds the nudge state. The shell is not rewound,
-and `/rewind`'s usage line says so;
+and the picker says so. `AgentLog::opens(continues)` decides once whether a
+prompt opens a turn (`UserPrompt { turn }`) or extends the live one
+(`Steering`), and `announce` stamps that same verdict on the prompt's
+`Display::Prompt { turn }` echo, so the screen knows exactly which turn each
+prompt opened;
 `/context` surveys the context without editing it — `emit_context_survey`
 posts the survey's turns as a `Display::Context` fact, and `context_rows_card`
 groups them off their roles at draw time, one field per prompt with the

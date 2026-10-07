@@ -182,9 +182,11 @@ pub enum Display {
     Thinking {
         text: String,
     },
-    /// Any item entering context — prompt, wakeup, or peer message.
+    /// Any item entering context — prompt, wakeup, or peer message — and
+    /// the user turn it opens; `None` for a line extending the turn in hand.
     Prompt {
         text: String,
+        turn: Option<u64>,
     },
     /// One line of the assistant's own prose, cut at the newline that
     /// completed it — so one `AssistantMessage` yields many of these, and a

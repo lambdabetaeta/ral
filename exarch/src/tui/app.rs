@@ -12,6 +12,7 @@ use super::picker::Picker;
 use super::prompt::PromptState;
 use super::render::draw;
 use super::resources::{BusFigures, ScrollbackFigures, frontend_rows};
+use super::rewind::RewindOverlay;
 use super::scrollback::Scrollback;
 use super::tabs::{TabRow, Tabs};
 use super::terminal::{Term, osc52_copy};
@@ -39,6 +40,7 @@ const SCROLL_STEP: isize = 3;
 pub(super) enum Overlay {
     Picker(Picker),
     Login(LoginOverlay),
+    Rewind(RewindOverlay),
 }
 
 /// The focused tab's committed lines flow into the host terminal's native
@@ -197,6 +199,14 @@ impl App {
     pub(super) fn login_mut(&mut self) -> Option<&mut LoginOverlay> {
         match self.overlay.as_mut() {
             Some(Overlay::Login(l)) => Some(l),
+            _ => None,
+        }
+    }
+
+    /// Mutable access to the active `/rewind` overlay, for `rewind::drive`.
+    pub(super) fn rewind_mut(&mut self) -> Option<&mut RewindOverlay> {
+        match self.overlay.as_mut() {
+            Some(Overlay::Rewind(r)) => Some(r),
             _ => None,
         }
     }
@@ -406,8 +416,9 @@ impl App {
         if k.kind != KeyEventKind::Press {
             return;
         }
-        // An overlay is exclusive; its own keys are handled by `model_picker::drive`
-        // and `drive_login`. This guard only stops a stray key leaking through.
+        // An overlay is exclusive; its own keys are handled by its driver
+        // (`model_picker`, `login`, `rewind`). This guard only stops a stray
+        // key leaking through.
         if self.overlay.is_some() {
             return;
         }
