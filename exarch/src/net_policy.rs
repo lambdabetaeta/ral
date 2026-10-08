@@ -5,7 +5,7 @@
 //! A destination allowlist, not an information-flow policy: an admitted host
 //! receives whatever the guest sends once the tunnel is open. Read from a
 //! fixed system path, never a per-user one, and evaluated under the same
-//! no-authority grant as [`crate::config::load`].
+//! no-authority grant as [`crate::config::load_declared`].
 
 use ral_core::types::Value;
 

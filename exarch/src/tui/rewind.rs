@@ -170,7 +170,7 @@ fn drive(tui: &mut Tui) -> Option<u64> {
     loop {
         reveal_cut(tui);
         match overlay_tick(tui) {
-            OverlayTick::Idle => {}
+            OverlayTick::Idle | OverlayTick::Save | OverlayTick::Paste(_) => {}
             OverlayTick::Key(code) => {
                 if let Some(anchor) = tui.app.rewind_mut()?.key(code) {
                     return Some(anchor);

@@ -1,18 +1,108 @@
-//! Provider knowledge an embedding product needs about the accounts a
-//! [`CredentialStore`] holds.
+//! Provider knowledge a product needs about the accounts a
+//! [`CredentialStore`] holds: the rows a screen draws, and the declarations
+//! behind them.
 //!
-//! Everything a product wants beyond what exarch's own CLI and TUI do:
-//! declaring another endpoint, taking a key back, and finding one account
-//! among the rest by its [`identity::AccountId`]'s rendering.
-//!
-//! Nothing here is exarch- or synod-specific. What *is* product-specific —
-//! where a declaration file lives, how a row is drawn, whether one is
-//! offered for withdrawal — stays with the product that asked; this module
-//! only ever answers "is this name available", "is this account a built-in",
-//! and "which of the known accounts is this".
+//! Nothing here is exarch- or synod-specific; how a row is drawn stays with
+//! the product that asked.
 
 use super::credential::{CredentialStore, well_formed_key};
 use super::identity::{self, Account, Auth, Service, ServiceName};
+
+/// Where a row's credential in force comes from.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Source {
+    /// No key yet.
+    None,
+    /// A `ChatGPT` login: the one case a key is never typed.
+    SignedIn,
+    /// A server that checks no key: a state, not a key anyone typed, so it
+    /// has no tail to show.
+    Keyless,
+    /// The vault's key, no variable outranking it.
+    Vault,
+    /// The launch environment's key, which outranks the vault's.
+    Environment,
+}
+
+/// One account as a screen draws it.
+#[derive(Clone, Debug)]
+pub struct Entry {
+    /// The [`identity::AccountId`] rendering commands name this row by.
+    pub id: String,
+    /// This account's name among every account currently known.
+    pub label: String,
+    pub source: Source,
+    /// The last four characters of the key in force, never more.
+    pub hint: Option<String>,
+    /// The last four of a saved key the environment's outranks.
+    pub shadowed: Option<String>,
+    /// The environment variable a key-bearing account reads.
+    pub env_var: Option<String>,
+    /// A declared endpoint's address and protocol; `None` for a built-in
+    /// service, whose address is not the user's business.
+    pub endpoint: Option<String>,
+    pub protocol: Option<String>,
+    /// Whether the service can be withdrawn outright, rather than merely
+    /// having its key taken back: a declared endpoint, never a built-in.
+    pub withdrawable: bool,
+}
+
+/// Every account, in the store's own order: built-in services first, then
+/// signed-in `ChatGPT` accounts, then declared endpoints.
+pub fn entries(store: &CredentialStore) -> Vec<Entry> {
+    let available = store.available();
+    store
+        .known()
+        .iter()
+        .map(|account| entry(store, account, &available))
+        .collect()
+}
+
+fn entry(store: &CredentialStore, account: &Account, available: &[Account]) -> Entry {
+    let (env, saved) = (
+        store.from_environment(&account.id),
+        store.from_vault(&account.id),
+    );
+    let (source, env_var) = match &account.service.auth {
+        Auth::OAuth => (Source::SignedIn, None),
+        Auth::Keyless => (Source::Keyless, None),
+        Auth::Key(var) => (
+            match (env, saved) {
+                (Some(_), _) => Source::Environment,
+                (None, Some(_)) => Source::Vault,
+                (None, None) => Source::None,
+            },
+            Some(var.clone()),
+        ),
+    };
+    let withdrawable = identity::built_in(&account.service.name).is_none();
+    let (endpoint, protocol) = if withdrawable {
+        (
+            account.service.endpoint.clone(),
+            identity::protocol_for_adapter(account.service.adapter).map(str::to_string),
+        )
+    } else {
+        (None, None)
+    };
+    Entry {
+        id: account.id.as_str().to_string(),
+        label: identity::label(account, available),
+        source,
+        hint: env.or(saved).map(tail),
+        shadowed: env.and(saved).map(tail),
+        env_var,
+        endpoint,
+        protocol,
+        withdrawable,
+    }
+}
+
+/// The last four characters of a key: enough to recognise which key is set,
+/// useless to anyone reading over a shoulder.
+fn tail(key: &str) -> String {
+    let at = key.char_indices().rev().nth(3).map_or(0, |(i, _)| i);
+    key[at..].to_string()
+}
 
 /// The endpoints declared beyond the built-in table.
 ///
@@ -28,8 +118,8 @@ pub fn declared_endpoints(store: &CredentialStore) -> Vec<Service> {
         .collect()
 }
 
-/// Declare another endpoint to talk to: a name, an address, and the wire
-/// protocol it speaks.
+/// Declare another endpoint to talk to: a name, an address, the wire
+/// protocol it speaks, and whether it checks a key at all.
 ///
 /// `label` opens the complaints, naming the settings file the declaration
 /// came from, as it does throughout [`crate::config`].
@@ -48,6 +138,7 @@ pub fn declare_endpoint(
     name: &str,
     endpoint: &str,
     protocol: &str,
+    keyless: bool,
     label: &str,
 ) -> Result<Service, String> {
     let name = ServiceName::declared(name.trim())?;
@@ -55,8 +146,13 @@ pub fn declare_endpoint(
         return Err(format!("There is already a service called {name}."));
     }
     let endpoint = well_formed_endpoint(endpoint)?;
-    let adapter = super::identity::adapter_for_protocol(protocol, label)?;
-    Ok(Service::declared(name, endpoint, adapter, Auth::Unnamed))
+    let adapter = identity::adapter_for_protocol(protocol, label)?;
+    let auth = if keyless {
+        Auth::Keyless
+    } else {
+        Auth::Key(identity::key_var(&name))
+    };
+    Ok(Service::declared(name, endpoint, adapter, auth))
 }
 
 /// Whether `name` is already spoken for — by the built-in table or by an
@@ -82,21 +178,16 @@ fn well_formed_endpoint(endpoint: &str) -> Result<String, String> {
     })
 }
 
-/// Withdraw a declared endpoint from the live store entirely, out of every
-/// map keyed by its account.
-///
-/// The declarations file and the vault are each the caller's to clear, before
-/// or after; a built-in service refuses outright, since only its key can be
-/// taken back, never the service.
+/// The declared endpoint `id` names, refusing a built-in service, whose key
+/// can be taken back but never the service itself.
 ///
 /// # Errors
 /// Returns a plain sentence if `id` names no known account, or one whose
 /// service is a built-in rather than a declared endpoint.
-pub fn withdraw_endpoint(store: &mut CredentialStore, id: &str) -> Result<(), String> {
+pub fn withdrawable(store: &CredentialStore, id: &str) -> Result<Account, String> {
     let account = find(store, id)?;
     refuse_built_in(&account)?;
-    store.retire(&account.id);
-    Ok(())
+    Ok(account)
 }
 
 fn refuse_built_in(account: &Account) -> Result<(), String> {
@@ -155,16 +246,6 @@ fn find_in(known: &[Account], id: &str) -> Result<Account, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use genai::adapter::AdapterKind;
-
-    fn declared(name: &str) -> Account {
-        Account::of_service(Service::declared(
-            ServiceName::declared(name).unwrap(),
-            format!("https://{name}.example/v1/"),
-            AdapterKind::OpenAI,
-            Auth::Unnamed,
-        ))
-    }
 
     #[test]
     fn a_built_in_name_is_already_taken() {
@@ -176,7 +257,10 @@ mod tests {
     fn a_declared_name_is_taken_only_once_declared() {
         let house = ServiceName::declared("house-llm").unwrap();
         assert!(!taken(&[], &house));
-        assert!(taken(std::slice::from_ref(&declared("house-llm")), &house));
+        assert!(taken(
+            std::slice::from_ref(&Account::declared("house-llm")),
+            &house
+        ));
     }
 
     #[test]
@@ -206,12 +290,13 @@ mod tests {
 
     #[test]
     fn a_declared_endpoint_may_be_withdrawn() {
-        refuse_built_in(&declared("house-llm")).expect("a declared endpoint is not built in");
+        refuse_built_in(&Account::declared("house-llm"))
+            .expect("a declared endpoint is not built in");
     }
 
     #[test]
     fn find_in_resolves_by_id_rendering_alone() {
-        let house = declared("house-llm");
+        let house = Account::declared("house-llm");
         let found = find_in(std::slice::from_ref(&house), "house-llm").unwrap();
         assert_eq!(found.id, house.id);
         let err = find_in(std::slice::from_ref(&house), "missing").unwrap_err();

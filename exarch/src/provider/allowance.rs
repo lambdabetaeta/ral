@@ -361,14 +361,12 @@ mod tests {
     }
 
     fn roster_of(accounts: &[Account]) -> Roster {
-        let mut roster = Roster::default();
+        let mut store = crate::provider::credential::CredentialStore::default();
         for account in accounts {
-            roster.admit(
-                account.clone(),
-                crate::provider::credential::Credential::ApiKey("test-key".into()),
-            );
+            store.declare(account.clone());
+            store.save_key(&account.id, "test-key".into());
         }
-        roster
+        store.roster()
     }
 
     /// Follows `listing.rs`'s own `FakeSource` pattern, so a survey is

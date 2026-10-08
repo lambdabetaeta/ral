@@ -1,15 +1,9 @@
 //! Signing a `ChatGPT` account into this computer, in the window's own
 //! words — see [`crate::session::sign_in`].
 
-use exarch::provider::{
-    self,
-    credential::CredentialStore,
-    models::{LiveSource, ModelCatalog},
-    oauth,
-};
-use ral_core::sync::LockExt;
+use exarch::provider::{self, Holdings, oauth};
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
 
 /// One step of a sign-in in progress, in the words the window says out
 /// loud.
@@ -74,8 +68,7 @@ pub struct SignedIn {
 /// browser that never came back, a network that would not carry the
 /// exchange.
 pub fn sign_in(
-    store: &Mutex<CredentialStore>,
-    catalog: &Mutex<ModelCatalog<LiveSource>>,
+    holdings: &Holdings,
     on_phase: impl Fn(SignInStep),
     cancel: &Arc<AtomicBool>,
 ) -> Result<SignedIn, String> {
@@ -84,10 +77,6 @@ pub fn sign_in(
         |phase| on_phase(SignInStep::from(phase)),
         cancel,
     )?;
-    let (_, label) = provider::admit_login(
-        &mut store.lock_ignore_poison(),
-        &mut catalog.lock_ignore_poison(),
-        &token,
-    );
+    let (_, label) = provider::admit_login(holdings, &token);
     Ok(SignedIn { label, replaced })
 }

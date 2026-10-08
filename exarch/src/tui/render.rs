@@ -279,6 +279,7 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
             Some(Overlay::Picker(p)) => p.render(f, area),
             Some(Overlay::Login(l)) => l.render(f, area),
             Some(Overlay::Rewind(r)) => r.render(f, area),
+            Some(Overlay::Providers(p)) => p.render(f, area),
             None => {}
         }
     });

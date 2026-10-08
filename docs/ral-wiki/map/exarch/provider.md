@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 6a8d848f
+generated_at_commit: 73bc87ff
 generated_at_date: 2026-10-08
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs]
 ---
@@ -57,16 +57,20 @@ the protocol mapped onto genai's `AdapterKind` at decode time; provenance is
 not a type. See [[decisions/260613_provider-config-ral-script|provider-config-ral-script]].
 `Service::routes` is true for OpenRouter alone, and carries route pinning, so
 no code compares a service name against the string `"openrouter"`.
-`Service::auth` says what a *declaration* knows about the bearer token —
-`Env(var)`, `OAuth`, or `Unnamed` — and never where the secret is kept, which
-is the one thing exarch and synod disagree about.
+`Service::auth` says how a service authenticates — `Key(var)`, `OAuth`, or
+`Keyless` — and never the secret itself. A declared endpoint's `var` is
+`identity::key_var`'s `{NAME}_API_KEY`, never written in the declaration;
+`Keyless` is the declaration's `` key: `none ``, a fact about the server.
 
 **Every map keys on an `AccountId`.** Accounts are owned once, in
-`CredentialStore::all: Vec<Account>`; the store's `ready`, `admitted` and
-`environment` layers, the model catalog's memo and its disk cache, the
-listing's states and in-flight fetches, the transport cache's key, and the
-picker's model states are all keyed by id. `available()` filters `all` by
-membership in `ready`, so no view holds a copy that can go stale.
+`CredentialStore::all: Vec<Account>`; the store's `environment`, `vault` and
+`logins` layers, the model catalog's memo and its disk cache, the listing's
+states and in-flight fetches, the transport cache's key, and the picker's
+model states are all keyed by id. The credential in force is derived from the
+layers, never stored beside them: a key is the environment's, else the
+vault's; a login is its token cell; a keyless endpoint is the inert bearer.
+`available()` is every account with one, so no view holds a copy that can go
+stale.
 
 ### A handle is local; a label is set-relative
 
@@ -202,16 +206,25 @@ TLS and names the account): its `nonce` must match the attempt, its `sub` be
 present, and `chatgpt.tokens.use.direct` be among the granted scopes. See
 [[decisions/261008_sign-in-with-chatgpt-token-sharing|sign-in-with-chatgpt-token-sharing]].
 
-## Two sources for a key, and one door to each
+## Two layers for a key, the environment's on top
 
 Environment resolution is exarch's own story: `CredentialStore::resolve_and_scrub`
-sweeps the conventional key variables once, at single-threaded startup, and
-scrubs what it found so no child of a tool call inherits a live key. The
-sweep is therefore un-repeatable by construction, which is why every
-mid-session admission has its own door.
+sweeps every `Auth::Key` service's variable once, at single-threaded startup,
+into the store's `environment` layer, and scrubs what it found so no child of
+a tool call inherits a live key. The sweep is therefore un-repeatable by
+construction, and that layer never changes after it.
 
-The **other** source is the computer's own credential manager, and it exists
-for [[map/synod|synod]]'s sake — **exarch calls none of it**:
+The **other** layer is the computer's own credential manager. [[map/synod|synod]]
+was built for it; exarch reads it too, at startup in `lib.rs` through
+`CredentialStore::read_vault`, an ordinary second call that scrubs nothing,
+and writes it through the shared `Wallet` (below). **The environment's key
+outranks the vault's**, in both products: a variable set for one run is the
+narrower, more deliberate act, and a vault key beneath one is kept and shown,
+not discarded. A vaulted key, unlike a scrubbed variable, is somewhere a child
+could ask for it: a confined child cannot, since the macOS profile admits no
+`securityd` and the Linux envelope binds no session bus unless a grant reads
+`/run/user`, but an unconfined session can, like any process of the user's.
+Each launch reads the vault once per key-bearing account:
 
 - `provider/keychain.rs` — `Keychain::for_app(App)` reaches the macOS
   Keychain, the Windows Credential Manager, or a Linux desktop's Secret
@@ -238,32 +251,44 @@ for [[map/synod|synod]]'s sake — **exarch calls none of it**:
   the `0600`-at-`open` and owner-only-DACL-at-`CreateFileW` promise instead of
   two copies.
 
-`credential.rs` carries four mid-session mutators that exist for a *window*,
-not for exarch: `known` (every account, bound or not — the list an accounts
-screen is drawn from, since one with no key is precisely the one a user has
-come to give a key to), `admit_key` (bind a key now, `add_oauth`'s sibling for
-the un-repeatable sweep), `forget` (unbind, leaving the account known), and
-`retire` (drop it entirely — what withdrawing a declaration means). The store
-also remembers which door each key came through (`was_admitted`), because only
-it knows, and an application re-deriving that by interrogating its vault would
-pay a round trip per account every time it drew a list. See
-[[decisions/260807_synod-keeps-its-own-accounts|synod-keeps-its-own-accounts]].
+The store's mid-session mutators exist for an accounts screen: `known` (every
+account, bound or not, since one with no key is precisely the one a user has
+come to give a key to), `declare` (a declared endpoint's arrival),
+`save_key`/`forget_key` (the vault layer only; the environment's is fixed),
+and `retire` (drop an account entirely: a withdrawn declaration, a signed-out
+login). `from_environment` and `from_vault` read the two layers apart, so a
+screen can say which key is in force and which lies beneath it without asking
+the vault again. See
+[[decisions/260807_synod-keeps-its-own-accounts|synod-keeps-its-own-accounts]],
+whose order this reverses.
 
-The vault itself reaches the store through one seam: `SecretVault::read` by
-account, and `CredentialStore::admit_from`, an ordinary second call after the
-sweep that lays the vault over the top — so a key typed into an accounts screen
-outranks a stale environment variable. It scrubs nothing, which is why
-`resolve_and_scrub`'s single-threaded contract is untouched by its existence.
-`provider/accounts.rs` holds the rest of what a window needs and exarch knows:
-`declared_endpoints`, `declare_endpoint`, `withdraw_endpoint`, `checked_key`,
-and a `find` that resolves by `AccountId` alone.
+`provider/accounts.rs` holds the rest of what an accounts screen needs:
+`declared_endpoints`, `declare_endpoint`, `withdrawable`, `checked_key`, a
+`find` that resolves by `AccountId` alone, and the plain `Entry`/`Source` row
+derivation (`entries`) both products draw from: the source in force
+(`Environment`, `Vault`, `Keyless`, `SignedIn`, or `None`), the last four of
+its key, the last four of a vault key the environment's outranks
+(`shadowed`), and the variable a key is read from. `wallet.rs`, above both
+`config` and `provider`, holds **`Wallet { keychain, declarations, label }`**:
+the one door through which a product changes its keys and declarations
+(`set_key`, `forget_key`, `add_endpoint`, `forget_endpoint`), each checking
+everything before writing anything, touching the vault with the store
+unlocked, and applying the change live through `Holdings::change`.
+`Wallet::exarch()` is `Keychain::for_app(EXARCH)` over `config::path()`, read
+at startup as well as written by `/providers`; synod's `accounts::wallet()` is
+its own. A ChatGPT login is no wallet's: the token store is exarch's whichever
+product signed in, so `Bureau::sign_out`, `admit`'s mirror, removes the token
+and retires the account locally and hands the token back, and the caller
+revokes it at the issuer off its UI thread (`oauth::revoke_blocking`).
 
-`config.rs` is likewise generalised without changing exarch's path: `load()`
-is `load_declared(path, label)` over exarch's own file, and `save_declared`
-writes the same `.ral` source back — a file a program wrote and a person can
-still edit, which is the whole reason declarations are `.ral` and not an
-opaque blob. A label or address carrying a quote is refused with a question
-rather than escaped.
+`config.rs` is likewise generalised: `load_declared(path, label)` reads either
+product's file, and `save_declared` writes the same `.ral` source back — a
+file a program wrote and a person can still edit, which is the whole reason
+declarations are `.ral` and not an opaque blob. A declaration is an address,
+a protocol, and at most `` key: `none ``; anything else under `key` is refused
+without being echoed, since what was written there may be the key itself. A
+label or address carrying a quote is refused with a question rather than
+escaped.
 
 ## Building the transport
 
@@ -352,12 +377,13 @@ disk-caches both paths:
   value; the record carries it (`SessionStarted`, `SessionResumed`,
   `ModelChanged`), so a tab's fold reads it without a catalog. The status line
   draws an unknown window as `?`.
-- `/login` admits an account mid-session through
-  `CredentialStore::add_oauth`; that operation returns the id and the exact
-  shared `Credential`, which `ModelCatalog::add_credential` admits through
-  its narrow live-source seam. Re-login updates the cell in place; a login
-  that has since learnt its email is renamed where it stands, its identity
-  being the account id throughout.
+- `/login` admits an account mid-session through `provider::admit_login`,
+  which runs `CredentialStore::add_oauth` inside `Holdings::change`: every
+  change to the store goes through that one door, which hands the catalog the
+  store's fresh `Roster` (`ModelCatalog::set_roster`), so a key saved, a key
+  forgotten and an endpoint withdrawn reach the listing as a login does.
+  Re-login updates the cell in place; a login that has since learnt its email
+  is renamed where it stands, its identity being the account id throughout.
 - OpenRouter serving endpoints remain a separate, intent-driven request after
   a model is selected.
 - `listing.rs` states the picker-side orchestration once for every front-end

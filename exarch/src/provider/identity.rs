@@ -133,20 +133,32 @@ pub enum Meter {
     Unpublished,
 }
 
-/// What a *declaration* knows about a request's bearer token. Not where the
-/// secret is kept: that is the one difference between exarch and synod, and it
-/// must not reach this type.
+/// How a service's requests authenticate.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Auth {
-    /// The environment variable naming it.
-    Env(String),
+    /// A key: this environment variable's at launch, else the vault's.
+    Key(String),
     /// A signed-in login. `ChatGPT`'s flow, named for its shape.
     OAuth,
-    /// The declaration names no source. Whatever the embedding product's vault
-    /// supplies for this account, else the inert `NO_AUTH_PLACEHOLDER` for a
-    /// local server that wants no `Authorization` at all — one arm serving
-    /// both, because no declaration file has ever recorded which it is.
-    Unnamed,
+    /// A server that checks no key, sent the inert `NO_AUTH_PLACEHOLDER`.
+    Keyless,
+}
+
+/// The variable a declared service's key is read from: `{NAME}_API_KEY`, as a
+/// built-in's is, with what a shell cannot export folded to `_`.
+pub fn key_var(name: &ServiceName) -> String {
+    let stem: String = name
+        .as_str()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("{stem}_API_KEY")
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -220,13 +232,14 @@ impl Account {
         Self::of_service(built_in(&ServiceName::declared(name).unwrap()).unwrap())
     }
 
-    /// A declared endpoint's sole account, keyed by `{NAME}_KEY`.
+    /// A declared endpoint's sole account, keyed by `{NAME}_API_KEY`.
     pub(crate) fn declared(name: &str) -> Self {
+        let name = ServiceName::declared(name).unwrap();
         Self::of_service(Service::declared(
-            ServiceName::declared(name).unwrap(),
+            name.clone(),
             format!("https://{name}.example/v1/"),
             AdapterKind::OpenAI,
-            Auth::Env(format!("{}_KEY", name.to_uppercase())),
+            Auth::Key(key_var(&name)),
         ))
     }
 }
@@ -295,7 +308,7 @@ pub fn built_in_services() -> Vec<Service> {
         name: ServiceName::built_in(name),
         endpoint: endpoint.map(str::to_string),
         adapter,
-        auth: Auth::Env(String::from(env)),
+        auth: Auth::Key(String::from(env)),
         billing,
         routes: false,
         meter,
@@ -408,7 +421,7 @@ pub fn scripted_service() -> Service {
         name: ServiceName::built_in("scripted"),
         endpoint: None,
         adapter: AdapterKind::OpenAIResp,
-        auth: Auth::Unnamed,
+        auth: Auth::Keyless,
         billing: Billing::Metered,
         routes: false,
         meter: Meter::Unpublished,
@@ -584,6 +597,12 @@ mod tests {
         ];
         let distinct: std::collections::BTreeSet<&String> = labels.iter().collect();
         assert_eq!(distinct.len(), 3, "{labels:?}");
+    }
+
+    #[test]
+    fn a_declared_key_is_read_from_a_variable_a_shell_can_export() {
+        let name = ServiceName::declared("house-llm.v2").unwrap();
+        assert_eq!(key_var(&name), "HOUSE_LLM_V2_API_KEY");
     }
 
     #[test]

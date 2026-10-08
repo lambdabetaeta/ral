@@ -361,7 +361,7 @@ fn drive_login(tui: &mut Tui) -> Option<(OAuthToken, bool)> {
 
         match overlay_tick(tui) {
             OverlayTick::TerminalLost => return None,
-            OverlayTick::Idle => {}
+            OverlayTick::Idle | OverlayTick::Save | OverlayTick::Paste(_) => {}
             OverlayTick::Cancel => {
                 if let Some(handle) = &flow {
                     // `Relaxed` suffices: the flag publishes no data of its own,

@@ -1,10 +1,12 @@
 //! The unusual-provider config (`$XDG_CONFIG_HOME/exarch/config.ral`), plus one
 //! environment knob the binary reads at boot.
 //!
-//! Built-in services auto-populate from the environment
-//! ([`crate::provider::credential`]); a self-hosted or non-built-in endpoint is
-//! the one thing exarch cannot know, so it is declared here. The file is
-//! source, not data: it runs through the same
+//! Built-in services need no declaration; a self-hosted or non-built-in
+//! endpoint is the one thing exarch cannot know, so it is declared here: where
+//! it lives, how it speaks, and whether it checks a key. Never the key itself,
+//! which comes from the environment or the vault
+//! ([`crate::provider::credential`]). The file is source, not data: it runs
+//! through the same
 //! [`ral_core::load::evaluate_source`] core as any other `.ral` load,
 //! and its terminal map decodes into [`Service`]s.
 //!
@@ -14,7 +16,7 @@
 //! write, and it evaluates under [`Capabilities::deny_all`] — with `exec` denied
 //! there is no route to the network, so the in-process guard suffices.
 
-use crate::provider::identity::{adapter_for_protocol, protocol_for_adapter, protocols};
+use crate::provider::identity::{adapter_for_protocol, key_var, protocol_for_adapter, protocols};
 use crate::provider::{Auth, Service, ServiceName, built_in};
 use ral_core::Shell;
 use ral_core::capability::Capabilities;
@@ -23,7 +25,7 @@ use ral_core::types::{Break, Escape, Mooring, Value};
 const CONFIG_FILE: &str = "config.ral";
 
 /// Error-message prefix; `net_policy` passes its own to the shared helpers below.
-const LABEL: &str = "exarch config";
+pub(crate) const LABEL: &str = "exarch config";
 
 /// The operator-set disk-warn ceiling in bytes, read once at boot — there is
 /// deliberately no live reload. Absent means the log and scratch dirs are never
@@ -41,30 +43,20 @@ pub fn disk_warn_bytes() -> Result<Option<u64>, String> {
     }
 }
 
-/// Load the services declared in `$XDG_CONFIG_HOME/exarch/config.ral`; an
-/// absent file is the empty list, so built-in services need no config at all.
-///
-/// It evaluates in a throwaway shell, never the session shell: a value to compute,
-/// not bindings to leak into the agent's scope — as `crate::policy::base` does for
-/// the built-in capability profiles.
-///
-/// # Errors
-/// A present file that is unreadable, that raises, or that fails to decode is a
-/// hard error: a mistyped endpoint is a misdirected agent, not a recoverable
-/// default.
-pub fn load() -> Result<Vec<Service>, String> {
-    let path = crate::app::EXARCH
+/// Where exarch's declarations live.
+pub fn path() -> std::path::PathBuf {
+    crate::app::EXARCH
         .xdg_dir(ral_core::host::XdgKind::Config)
-        .join(CONFIG_FILE);
-    load_declared(&path, LABEL)
+        .join(CONFIG_FILE)
 }
 
 /// The service declarations in `path`, an absent file being the empty list.
 ///
-/// [`load`]'s body over a path the caller names, so a second product's
-/// declarations parse through this one decoder.  `label` opens every
-/// complaint, so the file says what it is ("exarch config", "provider
-/// settings") before it says what is wrong.
+/// It evaluates in a throwaway shell, never the session shell: a value to
+/// compute, not bindings to leak into the agent's scope — as
+/// `crate::policy::base` does for the built-in capability profiles. `label`
+/// opens every complaint, so the file says what it is ("exarch config",
+/// "provider settings") before it says what is wrong.
 ///
 /// # Errors
 /// A present file that is unreadable, that raises, or that fails to decode is
@@ -88,9 +80,7 @@ pub fn load_declared(path: &std::path::Path, label: &str) -> Result<Vec<Service>
 /// Write `services` back to `path` as the very source [`load_declared`]
 /// reads — a file a program wrote and a person can still edit.
 ///
-/// A `key` field is written only for a service that names an environment
-/// variable; a key held in this computer's credential manager
-/// ([`crate::provider::keychain`]) is not written here at all, so this file
+/// A `key` field is written only for a server that checks none; this file
 /// carries no secret and needs no special permissions.
 ///
 /// # Errors
@@ -118,9 +108,9 @@ pub fn save_declared(
                 )
             })?;
             let endpoint = quoted(endpoint, "address", label)?;
-            let key = match &service.auth {
-                Auth::Env(var) => format!(", key: {}", quoted(var, "key", label)?),
-                Auth::Unnamed | Auth::OAuth => String::new(),
+            let key = match service.auth {
+                Auth::Keyless => ", key: `none",
+                Auth::Key(_) | Auth::OAuth => "",
             };
             let protocol = protocol_for_adapter(service.adapter).ok_or_else(|| {
                 format!(
@@ -147,6 +137,8 @@ pub fn save_declared(
 const PREAMBLE: &str = "\
 # Written by the accounts screen, and safe to edit by hand.
 # Each entry is one service to talk to: where it lives, and how it speaks.
+# Never a key: one is read from NAME_API_KEY, else the saved keys.
+# key: `none marks a server that checks none.
 ";
 
 /// `text` as a single-quoted ral string — refused outright if it holds a
@@ -218,7 +210,7 @@ fn decode(value: Value, display: &str, label: &str) -> Result<Vec<Service>, Stri
     let Value::Map(map) = value else {
         return Err(format!(
             "{label} {display}: expected a map of provider declarations \
-             (`[name: [endpoint: ..., key: ..., protocol: ...]]`), got {}",
+             (`[name: [endpoint: ..., protocol: ...]]`), got {}",
             value.type_name()
         ));
     };
@@ -233,7 +225,7 @@ fn decode_one(name: &str, decl: &Value, display: &str, label: &str) -> Result<Se
     let where_ = format!("{label} {display}: provider '{name}'");
     let Value::Map(fields) = decl else {
         return Err(format!(
-            "{where_}: expected a map [endpoint: ..., key: ..., protocol: ...], got {}",
+            "{where_}: expected a map [endpoint: ..., protocol: ...], got {}",
             decl.type_name()
         ));
     };
@@ -245,9 +237,6 @@ fn decode_one(name: &str, decl: &Value, display: &str, label: &str) -> Result<Se
         }
     }
     let endpoint = string_field(fields.get("endpoint").as_deref(), "endpoint", &where_)?;
-    // Omitting `key` declares a no-auth local endpoint (Ollama et al.), which
-    // `provider::credential` resolves to an inert placeholder bearer.
-    let key_env = optional_string_field(fields.get("key").as_deref(), "key", &where_)?;
     let protocol = string_field(fields.get("protocol").as_deref(), "protocol", &where_)?;
 
     let name = ServiceName::declared(name).map_err(|e| format!("{label} {display}: {e}"))?;
@@ -257,12 +246,28 @@ fn decode_one(name: &str, decl: &Value, display: &str, label: &str) -> Result<Se
              provider cannot reuse its name."
         ));
     }
+    let auth = match fields.get("key").as_deref() {
+        None => Auth::Key(key_var(&name)),
+        Some(Value::Variant {
+            label,
+            payload: None,
+        }) if &**label == "none" => Auth::Keyless,
+        // Never echoed: what was written may be the key itself.
+        Some(_) => {
+            return Err(format!(
+                "{where_}: 'key' can only be `none, for a server that checks no key. \
+                 A key is read from {}, else from the saved keys, and never from \
+                 this file: drop the field?",
+                key_var(&name)
+            ));
+        }
+    };
 
     Ok(Service::declared(
         name,
         endpoint,
         adapter_for_protocol(&protocol, &where_)?,
-        key_env.map_or(Auth::Unnamed, Auth::Env),
+        auth,
     ))
 }
 
@@ -277,35 +282,12 @@ fn string_field(value: Option<&Value>, field: &str, where_: &str) -> Result<Stri
     }
 }
 
-/// A present-but-non-string value is still an error: an omission is
-/// deliberate, a wrong type is a mistake to surface. An empty string is
-/// rejected too — [`save_declared`]'s `quoted` never writes one, so a decoded
-/// `Auth::Env("")` could only be hand-written, and it would silently resolve
-/// as though the key were absent rather than the typo it is.
-fn optional_string_field(
-    value: Option<&Value>,
-    field: &str,
-    where_: &str,
-) -> Result<Option<String>, String> {
-    match value {
-        None => Ok(None),
-        Some(Value::String(s)) if s.is_empty() => Err(format!(
-            "{where_}: '{field}' is empty; omit it entirely for a no-auth endpoint"
-        )),
-        Some(Value::String(s)) => Ok(Some(s.to_string())),
-        Some(other) => Err(format!(
-            "{where_}: '{field}' must be a string, got {}",
-            other.type_name()
-        )),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use genai::adapter::AdapterKind;
 
-    /// Evaluate and decode a config source the way [`load`] does.
+    /// Evaluate and decode a config source the way [`load_declared`] does.
     fn parse(source: &str) -> Result<Vec<Service>, String> {
         let mut shell = ral_core::test_helper::core_shell();
         let source = ral_core::source::normalize_source_text(source.to_string());
@@ -333,13 +315,13 @@ mod tests {
                 ServiceName::declared("house-llm").unwrap(),
                 "https://llm.house.example/v1/".into(),
                 AdapterKind::OpenAIResp,
-                Auth::Env("HOUSE_LLM_KEY".into()),
+                Auth::Key("HOUSE_LLM_API_KEY".into()),
             ),
             Service::declared(
                 ServiceName::declared("ollama").unwrap(),
                 "http://localhost:11434/v1/".into(),
                 AdapterKind::OpenAI,
-                Auth::Unnamed,
+                Auth::Keyless,
             ),
         ];
         save_declared(&path, &written, LABEL).expect("write");
@@ -368,7 +350,7 @@ mod tests {
                 ServiceName::declared("it's-llm").unwrap(),
                 "https://x.example/v1/".into(),
                 AdapterKind::OpenAI,
-                Auth::Unnamed,
+                Auth::Keyless,
             )],
             LABEL,
         )
@@ -381,16 +363,16 @@ mod tests {
     fn three_protocols_map_to_adapters() {
         let services = parse(
             "return [
-               a-anthropic: [endpoint: 'https://a.example/', key: 'A_KEY', protocol: 'anthropic'],
-               b-completions: [endpoint: 'https://b.example/v1/', key: 'B_KEY', protocol: 'completions'],
-               c-responses: [endpoint: 'https://c.example/v1/', key: 'C_KEY', protocol: 'responses'],
+               a-anthropic: [endpoint: 'https://a.example/', protocol: 'anthropic'],
+               b-completions: [endpoint: 'https://b.example/v1/', protocol: 'completions'],
+               c-responses: [endpoint: 'https://c.example/v1/', protocol: 'responses'],
              ]",
         )
         .expect("valid config should parse");
         assert_eq!(services.len(), 3);
         assert_eq!(services[0].name.as_str(), "a-anthropic");
         assert_eq!(services[0].adapter, AdapterKind::Anthropic);
-        assert_eq!(services[0].auth, Auth::Env("A_KEY".to_string()));
+        assert_eq!(services[0].auth, Auth::Key("A_ANTHROPIC_API_KEY".into()));
         assert_eq!(services[0].endpoint.as_deref(), Some("https://a.example/"));
         assert_eq!(services[1].adapter, AdapterKind::OpenAI);
         assert_eq!(services[2].adapter, AdapterKind::OpenAIResp);
@@ -398,33 +380,38 @@ mod tests {
 
     #[test]
     fn unknown_protocol_errors() {
-        let err = parse("return [weird: [endpoint: 'https://w/', key: 'W', protocol: 'grpc']]")
-            .unwrap_err();
+        let err = parse("return [weird: [endpoint: 'https://w/', protocol: 'grpc']]").unwrap_err();
         assert!(err.contains("unknown protocol 'grpc'"), "got: {err}");
         assert!(err.contains("weird"), "should name the provider: {err}");
     }
 
     #[test]
     fn missing_field_errors() {
-        let err = parse("return [x: [key: 'X_KEY', protocol: 'completions']]").unwrap_err();
+        let err = parse("return [x: [protocol: 'completions']]").unwrap_err();
         assert!(err.contains("missing 'endpoint'"), "got: {err}");
     }
 
-    /// `endpoint` and `protocol` stay required when `key` is dropped.
     #[test]
-    fn missing_key_is_a_no_auth_provider() {
+    fn key_none_declares_a_server_that_checks_no_key() {
         let services = parse(
-            "return [ollama: [endpoint: 'http://localhost:11434/v1/', protocol: 'completions']]",
+            "return [ollama: [endpoint: 'http://localhost:11434/v1/', protocol: 'completions', key: `none]]",
         )
         .expect("a keyless declared service should decode");
-        assert_eq!(services.len(), 1);
-        assert_eq!(services[0].name.as_str(), "ollama");
-        assert_eq!(services[0].auth, Auth::Unnamed);
-        assert_eq!(
-            services[0].endpoint.as_deref(),
-            Some("http://localhost:11434/v1/")
-        );
-        assert_eq!(services[0].adapter, AdapterKind::OpenAI);
+        assert_eq!(services[0].auth, Auth::Keyless);
+    }
+
+    /// The file never holds a key, nor names where one is: what was written
+    /// in its place may be the key itself, so it is refused without an echo.
+    #[test]
+    fn a_key_written_into_the_file_is_refused_unechoed() {
+        for key in ["'sk-secret'", "7", "`some 'sk-secret'"] {
+            let err = parse(&format!(
+                "return [x: [endpoint: 'https://x/', key: {key}, protocol: 'completions']]"
+            ))
+            .unwrap_err();
+            assert!(err.contains("X_API_KEY"), "got: {err}");
+            assert!(!err.contains("sk-secret"), "got: {err}");
+        }
     }
 
     /// A declared name cannot shadow a built-in: once an account id is a
@@ -438,20 +425,12 @@ mod tests {
         assert!(err.contains("built-in"), "{err}");
     }
 
-    #[test]
-    fn non_string_key_errors() {
-        let err = parse("return [x: [endpoint: 'https://x/', key: 7, protocol: 'completions']]")
-            .unwrap_err();
-        assert!(err.contains("'key' must be a string"), "got: {err}");
-    }
-
     /// Rejected, rather than silently dropped.
     #[test]
     fn unknown_field_errors() {
-        let err = parse(
-            "return [x: [endpoint: 'https://x/', key: 'K', protocol: 'completions', model: 'm']]",
-        )
-        .unwrap_err();
+        let err =
+            parse("return [x: [endpoint: 'https://x/', protocol: 'completions', model: 'm']]")
+                .unwrap_err();
         assert!(err.contains("unknown key 'model'"), "got: {err}");
     }
 

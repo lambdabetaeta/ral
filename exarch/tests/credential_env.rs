@@ -78,8 +78,8 @@ fn with_env(values: &[(&str, Option<&str>)], body: impl FnOnce()) {
     let mut names: Vec<String> = built_in_services()
         .into_iter()
         .filter_map(|service| match service.auth {
-            Auth::Env(var) => Some(var),
-            Auth::OAuth | Auth::Unnamed => None,
+            Auth::Key(var) => Some(var),
+            Auth::OAuth | Auth::Keyless => None,
         })
         .collect();
     names.push("XDG_STATE_HOME".to_string());
@@ -284,7 +284,7 @@ fn multiple_chatgpt_accounts_stay_distinct_and_available() {
 }
 
 /// A declared service from `config.ral` is swept exactly like a built-in
-/// one: its declared key env var is read into the store, scrubbed from the
+/// one: its `{NAME}_API_KEY` is read into the store, scrubbed from the
 /// environment, and it appears in `available()` after the built-in
 /// services. An absent declared key leaves it unavailable while the
 /// built-in ones still resolve — the declaration is additive, never a
@@ -295,7 +295,7 @@ fn declared_service_resolves_and_scrubs_its_key() {
         ServiceName::declared("local-llama").unwrap(),
         "https://llama.example/v1/".into(),
         genai::adapter::AdapterKind::OpenAI,
-        Auth::Env("LOCAL_LLAMA_KEY".into()),
+        Auth::Key("LOCAL_LLAMA_API_KEY".into()),
     );
     with_env(
         &[
@@ -303,7 +303,7 @@ fn declared_service_resolves_and_scrubs_its_key() {
             ("OPENAI_API_KEY", None),
             ("OPENROUTER_API_KEY", None),
             ("DEEPSEEK_API_KEY", None),
-            ("LOCAL_LLAMA_KEY", Some("  llama-secret  ")),
+            ("LOCAL_LLAMA_API_KEY", Some("  llama-secret  ")),
         ],
         || {
             let store = CredentialStore::resolve_and_scrub(vec![declared.clone()]);
@@ -313,7 +313,7 @@ fn declared_service_resolves_and_scrubs_its_key() {
                 _ => panic!("a declared service should resolve to a trimmed ApiKey"),
             }
             assert!(
-                std::env::var("LOCAL_LLAMA_KEY").is_err(),
+                std::env::var("LOCAL_LLAMA_API_KEY").is_err(),
                 "a declared service's key var must be scrubbed too"
             );
             assert_eq!(
@@ -328,8 +328,8 @@ fn declared_service_resolves_and_scrubs_its_key() {
     );
 }
 
-/// A declared service with no `key` (a no-auth local endpoint like Ollama)
-/// is available with no env var set at all, resolving to the inert
+/// A declared service that checks no key (a local server like Ollama) is
+/// available with no env var set at all, resolving to the inert
 /// [`NO_AUTH_PLACEHOLDER`] bearer rather than a real credential. Nothing is
 /// read from or scrubbed from the environment on its behalf.
 #[test]
@@ -338,7 +338,7 @@ fn keyless_declared_service_resolves_to_placeholder() {
         ServiceName::declared("ollama").unwrap(),
         "http://localhost:11434/v1/".into(),
         genai::adapter::AdapterKind::OpenAI,
-        Auth::Unnamed,
+        Auth::Keyless,
     );
     with_env(
         &[

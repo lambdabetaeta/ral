@@ -15,8 +15,7 @@
 //! written through [`secret_file::write_private`].
 //!
 //! Nothing here reads or writes the environment: a key from the
-//! environment is [`super::credential`]'s business.  Exarch does not use
-//! this store; synod does.
+//! environment is [`super::credential`]'s business, and outranks this one.
 
 use crate::app::App;
 use crate::provider::credential::SecretVault;
@@ -183,9 +182,8 @@ impl Keychain {
 impl SecretVault for Keychain {
     /// Read `account`'s key by its id — a key-bearing service's id *is* its
     /// service name, so this is the same entry [`Keychain::store`] filed a
-    /// typed key under. A `ChatGPT` account holds no key and is never asked:
-    /// [`super::credential::CredentialStore::admit_from`] offers this vault
-    /// only the accounts that authenticate with one.
+    /// typed key under. [`super::credential::CredentialStore::read_vault`]
+    /// asks only for the accounts that take a key.
     fn read(&self, account: &Account) -> Option<String> {
         Self::read(*self, account.id.as_str())
     }

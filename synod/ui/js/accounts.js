@@ -92,7 +92,7 @@ function accountRow(account, i) {
   // Every account that authenticates with a key gets the key input —
   // a declared endpoint included, since a key rotated at the far end
   // has to be retypeable at this one.
-  if (account.source !== "signed_in" && account.source !== "no_key") {
+  if (account.source !== "signed_in" && account.source !== "keyless") {
     row.appendChild(keyForm(account, i));
   }
   if (account.withdrawable) {
@@ -110,38 +110,35 @@ function accountRow(account, i) {
 // be read as one still waiting for one.
 function keyState(account) {
   if (account.source === "signed_in") return "Signed in";
-  if (account.source === "no_key") return "Used without a key";
+  if (account.source === "keyless") return "Used without a key";
   return account.hint ? "•••• " + account.hint : "No key yet";
 }
 
 function accountNotes(account) {
-  if (account.source === "signed_in") {
-    return ["You are signed in with your ChatGPT plan, so this one needs no key."];
-  }
-  if (account.withdrawable) {
-    const notes = [];
-    if (account.endpoint) notes.push("Address: " + account.endpoint);
-    if (account.protocol) notes.push("Way of speaking: " + account.protocol);
-    if (account.source === "no_key") {
+  const notes = [];
+  if (account.endpoint) notes.push("Address: " + account.endpoint);
+  if (account.protocol) notes.push("Way of speaking: " + account.protocol);
+  switch (account.source) {
+    case "signed_in":
+      notes.push("You are signed in with your ChatGPT plan, so this one needs no key.");
+      break;
+    case "keyless":
       notes.push("This one asks for no key, so there is none to type.");
-    }
-    return notes;
+      break;
+    case "environment":
+      notes.push(
+        "This key comes from " + account.env_var + " in the environment synod was"
+          + " started in, and is used ahead of any key saved here."
+          + (account.shadowed
+            ? " The saved key (•••• " + account.shadowed + ") is used when it isn't set."
+            : ""),
+      );
+      break;
+    case "none":
+      notes.push("Paste the key this service gave you to start using it.");
+      break;
   }
-  if (account.source === "no_key") {
-    return ["This one asks for no key, so there is none to type."];
-  }
-  if (account.source === "environment") {
-    return [
-      "This key came from the environment synod was started in"
-        + (account.env_var ? ", as " + account.env_var : "")
-        + ". It cannot be changed or removed from this window, but a key typed"
-        + " here is used instead of it.",
-    ];
-  }
-  if (account.source === "none") {
-    return ["Paste the key this service gave you to start using it."];
-  }
-  return [];
+  return notes;
 }
 
 // The one input a key is ever typed into: it starts empty and is thrown
@@ -155,8 +152,10 @@ function keyForm(account, i) {
   const label = document.createElement("label");
   label.className = "field-label";
   label.htmlFor = inputId;
-  label.textContent = account.hint
-    ? "Replace the key for " + account.label
+  label.textContent = account.source === "vault"
+    ? "Replace the saved key for " + account.label
+    : account.source === "environment"
+    ? "Save a key for " + account.label + ", for when " + account.env_var + " isn't set"
     : "Key for " + account.label;
 
   const input = document.createElement("input");
@@ -174,8 +173,8 @@ function keyForm(account, i) {
   save.className = "btn-mini keep";
   save.textContent = "Save";
   actions.appendChild(save);
-  // Only a key this window put away can this window take back.
-  if (account.source === "keychain") {
+  // Only a saved key can this window take back.
+  if (account.source === "vault" || account.shadowed) {
     actions.appendChild(actionButton("Forget", "btn-mini", () =>
       accountCommand("forget_key", { account: account.id })));
   }
@@ -194,20 +193,28 @@ function keyForm(account, i) {
 
 $("add-service").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const key = /** @type {HTMLInputElement} */ ($("add-key")).value.trim();
+  const keyless = /** @type {HTMLInputElement} */ ($("add-keyless")).checked;
   /** @type {HTMLButtonElement} */ ($("add-save")).disabled = true;
+  // `null` is a server that checks no key; a blank one waits for its variable or a save.
   const added = await accountCommand("save_endpoint", {
     name: /** @type {HTMLInputElement} */ ($("add-name")).value,
     endpoint: /** @type {HTMLInputElement} */ ($("add-address")).value,
     protocol: /** @type {HTMLSelectElement} */ ($("add-protocol")).value,
-    key: key === "" ? null : key,
+    key: keyless ? null : /** @type {HTMLInputElement} */ ($("add-key")).value,
   });
   /** @type {HTMLButtonElement} */ ($("add-save")).disabled = false;
   if (added) {
     for (const id of ["add-name", "add-address", "add-key"]) {
       /** @type {HTMLInputElement} */ ($(id)).value = "";
     }
+    /** @type {HTMLInputElement} */ ($("add-keyless")).checked = false;
+    /** @type {HTMLInputElement} */ ($("add-key")).disabled = false;
   }
+});
+
+$("add-keyless").addEventListener("change", (event) => {
+  /** @type {HTMLInputElement} */ ($("add-key")).disabled =
+    /** @type {HTMLInputElement} */ (event.target).checked;
 });
 
 $("open-accounts").addEventListener("click", () => {

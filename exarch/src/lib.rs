@@ -40,6 +40,7 @@ pub mod shell_eval;
 pub(crate) mod signals;
 pub mod skill;
 pub mod tui;
+pub mod wallet;
 
 use agent::Avatar;
 use clap::Parser;
@@ -151,7 +152,8 @@ pub fn run() -> Result<(), String> {
     }
     let seed = cli::load_seed(c.prompt, c.file)?;
 
-    let custom = config::load()?;
+    let wallet = wallet::Wallet::exarch();
+    let custom = config::load_declared(&wallet.declarations, wallet.label)?;
     let disk_warn_bytes = config::disk_warn_bytes()?;
     // Opened once at the trunk; every spawned child inherits this ledger.
     let egress = egress::Egress::open(app::EXARCH)?;
@@ -159,12 +161,13 @@ pub fn run() -> Result<(), String> {
     // SAFETY: startup is still single-threaded — the tokio runtime and the
     // session's workers come later — so nothing races this env mutation.  It is
     // the only scrub, so every child inherits an environment free of keys.
-    let store = provider::credential::CredentialStore::resolve_and_scrub(custom);
+    let mut store = provider::credential::CredentialStore::resolve_and_scrub(custom);
+    store.read_vault(&wallet.keychain);
     let available = store.available();
     if available.is_empty() {
         return Err(
             "no provider available: set a provider API key (e.g. ANTHROPIC_API_KEY, \
-             OPENAI_API_KEY, OPENROUTER_API_KEY, DEEPSEEK_API_KEY)"
+             OPENAI_API_KEY, OPENROUTER_API_KEY, DEEPSEEK_API_KEY), then store others with /providers"
                 .into(),
         );
     }

@@ -389,6 +389,10 @@ pub(super) enum OverlayTick {
     Key(KeyCode),
     /// Ctrl-C, Ctrl-D, or Esc: every overlay's one cancel chord.
     Cancel,
+    /// Ctrl-S: the save chord of an overlay that holds a form.
+    Save,
+    /// Bracketed paste; only an overlay with a text field reads it.
+    Paste(String),
     TerminalLost,
 }
 
@@ -405,14 +409,16 @@ pub(super) fn overlay_key() -> OverlayTick {
     if !ct_poll(Duration::from_millis(100)).unwrap_or(false) {
         return OverlayTick::Idle;
     }
-    let Ok(CtEvent::Key(k)) = ct_read() else {
-        return OverlayTick::Idle;
+    let k = match ct_read() {
+        Ok(CtEvent::Key(k)) if k.kind == KeyEventKind::Press => k,
+        Ok(CtEvent::Paste(text)) => return OverlayTick::Paste(text),
+        _ => return OverlayTick::Idle,
     };
-    if k.kind != KeyEventKind::Press {
-        return OverlayTick::Idle;
-    }
     if ctrl_key(&k, 'c') || ctrl_key(&k, 'd') || k.code == KeyCode::Esc {
         return OverlayTick::Cancel;
+    }
+    if ctrl_key(&k, 's') {
+        return OverlayTick::Save;
     }
     OverlayTick::Key(k.code)
 }

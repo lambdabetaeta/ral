@@ -10,6 +10,7 @@ use super::matrix::{self, Matrix, MatrixSort, Nav};
 use super::palette::AGENT_HUES;
 use super::picker::Picker;
 use super::prompt::PromptState;
+use super::providers::ProvidersOverlay;
 use super::render::draw;
 use super::resources::{BusFigures, ScrollbackFigures, frontend_rows};
 use super::rewind::RewindOverlay;
@@ -43,6 +44,7 @@ pub(super) enum Overlay {
     Picker(Picker),
     Login(LoginOverlay),
     Rewind(RewindOverlay),
+    Providers(ProvidersOverlay),
 }
 
 /// The focused tab's committed lines flow into the host terminal's native
@@ -207,6 +209,14 @@ impl App {
     pub(super) fn login_mut(&mut self) -> Option<&mut LoginOverlay> {
         match self.overlay.as_mut() {
             Some(Overlay::Login(l)) => Some(l),
+            _ => None,
+        }
+    }
+
+    /// Mutable access to the active `/providers` overlay, for `providers::drive`.
+    pub(super) fn providers_mut(&mut self) -> Option<&mut ProvidersOverlay> {
+        match self.overlay.as_mut() {
+            Some(Overlay::Providers(p)) => Some(p),
             _ => None,
         }
     }

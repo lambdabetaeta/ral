@@ -349,9 +349,7 @@ impl Tabs {
         }
     }
 
-    /// The ids a scrollback event can legitimately name — read only by the trace
-    /// that reports a dropped one.
-    #[cfg(debug_assertions)]
+    /// Every tab's agent id.
     pub(super) fn ids(&self) -> Vec<AgentId> {
         self.tabs.iter().map(|t| t.id).collect()
     }

@@ -42,10 +42,11 @@ cargo run -p exarch -- --headless --file task.md
 
 ## Providers and models
 
-Every provider whose conventional key variable is set in the environment
-is auto-discovered and available; no flag names a provider. The keys are
-read into memory and scrubbed from the environment at startup so no
-spawned child inherits them.
+Every provider with a key is auto-discovered and available; no flag names a
+provider. A key comes from its conventional variable in the environment, else
+from the one saved with `/providers` in this computer's credential manager;
+the environment's wins. Variables are read into memory and scrubbed from the
+environment at startup so no spawned child inherits them.
 
 | provider       | key env var          |
 |----------------|----------------------|
@@ -65,9 +66,9 @@ stray control character (e.g. a pasted newline) is rejected as malformed, but
 still scrubbed.
 
 A **custom or self-hosted endpoint** exarch has no built-in knowledge of is
-declared in `$XDG_CONFIG_HOME/exarch/config.ral` with its base URL, the *name*
-of the env var holding its key, and its wire protocol; the key itself still
-comes from the environment and is scrubbed like a famous provider's. See
+declared in `$XDG_CONFIG_HOME/exarch/config.ral` with its base URL and wire
+protocol, and `` key: `none `` if it checks no key. The file never holds a
+key: an endpoint named `groq` reads `GROQ_API_KEY`, else its saved key. See
 [`examples/config.ral`](examples/config.ral) for the format.
 
 A **signed-in ChatGPT account** is the one credential not read from the
@@ -85,6 +86,10 @@ service owns exactly one account and goes by its own name, which is why
 `--provider deepseek` names a credential unambiguously and `--provider
 alex@example.com` may not: if two accounts answer to a name, exarch refuses it
 and prints both rather than choosing for you.
+
+Type `/providers` to save or clear an API key, add or remove a custom endpoint,
+or sign in to ChatGPT; changes are saved and take effect at once, except that a
+key set in the environment stays in force over a saved one.
 
 Type `/model` in the REPL for a searchable picker over every available
 provider's live model list (fetched from the provider and cached); the

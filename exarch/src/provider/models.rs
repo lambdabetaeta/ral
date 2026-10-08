@@ -104,10 +104,6 @@ impl LiveSource {
                 .expect("with_reqwest supplies the client, so build() cannot fail"),
         }
     }
-
-    pub fn add_credential(&mut self, account: Account, credential: Credential) {
-        self.roster.admit(account, credential);
-    }
 }
 
 /// A runtime for one blocking listing call — listing happens a handful of
@@ -443,9 +439,9 @@ impl<S: ModelSource> ModelCatalog<S> {
 }
 
 impl ModelCatalog<LiveSource> {
-    /// Admit a freshly signed-in account without exposing the generic source.
-    pub fn add_credential(&mut self, account: Account, credential: Credential) {
-        self.source.add_credential(account, credential);
+    /// List with `roster`'s credentials from now on.
+    pub fn set_roster(&mut self, roster: Roster) {
+        self.source.roster = roster;
     }
 }
 

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 6c9047b6
+generated_at_commit: 73bc87ff
 generated_at_date: 2026-10-08
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/record/session.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/cancel.rs, exarch/src/boot.rs, exarch/src/agent/seat.rs, exarch/src/signals.rs, exarch/src/prompt/host.rs]
 ---
@@ -173,7 +173,7 @@ scrollback's own fold and draws the delta) and a `Signal::Transient` to
 Two presentation surfaces, both folding the one `Signal` vocabulary through
 `fact`/`transient`:
 
- `tui.rs` (+ `tui/{app,banner,block,commands,diff,fidelity,gesture,group,highlight,line,login,matrix,md,model_picker,palette,picker,prompt,rail,render,row,scrollback,select,status,tabs,terminal,tui_loop}.rs`) — the full-screen
+ `tui.rs` (+ `tui/{app,banner,block,commands,diff,fidelity,gesture,group,highlight,line,login,matrix,md,model_picker,palette,picker,prompt,providers,rail,render,row,scrollback,select,status,tabs,terminal,tui_loop}.rs`) — the full-screen
  TUI. It owns the alternate screen and its own scrollback: each session is a
  `Vec<Block>` (`tui/block.rs`) mirroring the view fold one incident at a time,
  and the whole frame is redrawn each tick from each block's own memoised visual
@@ -412,7 +412,7 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  Slash-prefixed prompts
  stay on the REPL command path (`tui/commands.rs`, parsed uniformly on every
  tab). View commands (`/help`, `/legend`, `/copy`,
- `/export`, `/model`, `/login`, `/limits`, `/thinking`, `/close`, `/focus`) run
+ `/export`, `/model`, `/login`, `/providers`, `/limits`, `/thinking`, `/close`, `/focus`) run
  on the UI thread; `/help` answers with a framed card of `(command, gloss)`
  rows, and `/copy` answers where every copy does — the transient corner
  toast of `gesture::Toast`, never a block in the transcript;
@@ -462,6 +462,18 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
   row matches by rather than the row itself, so a row and its haystack travel
   together and two providers listing one model name stay two rows. Rows read
   best-match first and, an empty query included, alphabetically within a score.
+- `/providers` (`tui/providers.rs`) is a terminal-form table of every known
+  account in the same bezel: save or clear a key, declare or remove an
+  endpoint (a four-field form whose key row ←→ toggles to "checks no key"),
+  sign in or out of ChatGPT. A row whose key comes from the environment names
+  the variable, in its own colour, with any saved key beneath it; saving or
+  clearing a key there says the variable stays in force. `ProvidersOverlay` is display
+  and input only; its `Action`s are applied by the driver through exarch's
+  `Wallet`, so each change is persisted and live at once. Overlay ticks carry
+  `Paste` and `Save` (Ctrl-S) for it; the other overlays ignore both. Sign-in
+  closes the screen, runs the `/login` flow, and reopens it; sign-out is
+  local at once (`Bureau::sign_out`), and the issuer's revocation runs on its
+  own thread, its outcome landing in the status line.
 - `/model`, `/login` and `/rewind` share `picker::overlay_frame`: one
   double-line bezel, shadow, palette, padding, title, and hint frame around
   distinct bodies — centred for the first two, in the frame's bottom-right
@@ -501,7 +513,7 @@ agent's exchange and eval root. The trunk alone also calls `raise_interrupt`,
 the process-wide half: on Unix it re-creates the SIGINT raw mode swallowed, for
 a foreground external child's own process group; its Windows form follows.
 The TUI key table keeps UI control separate from cancellation: a modal
-overlay's (`/model`, `/login`) Ctrl-C/Ctrl-D/Esc close it (`overlay_tick`), only
+overlay's (`/model`, `/login`, `/providers`) Ctrl-C/Ctrl-D/Esc close it (`overlay_tick`), only
 `/quit`/`/exit` end the session, and Ctrl-C/Esc otherwise always drive the
 focused tab's non-escalating cancel (`key_action`). A single press stops the exchange /
 in-flight HTTP future and unwinds the in-flight eval at its next poll point;
@@ -557,4 +569,5 @@ user, home, git state, exarch's log directory) once at startup for the [[map/exa
         - `tui/palette.rs` — the TUI colour constants (`CODE_BG`, `SLATE`, `PROMPT_INK`, the agent hues) and the width vocabulary: `RAIL_W`, `READ_W`, `content_w`, and `Col`, the one column primitive every gutter that holds a cell is built from ([[map/exarch/cards|cards]])
         - `tui/model_picker.rs` — model choice: `drive` over a `Stage` (the live `Tui` for `pick_model` and `apply_model_switch`, or the picker `Alone` for a launch's `choose`); list fetching rides [[map/exarch/provider|provider]]'s `Listing`/`Fetches` pumps
         - `tui/login.rs` — the `/login` overlay: `LoginOverlay`, `drive_login`, `apply_login`
+        - `tui/providers.rs` — the `/providers` overlay: `ProvidersOverlay`, `Action`, `providers`, `drive`
         - `tui/rewind.rs` — the `/rewind` overlay: `RewindOverlay`, `rewind`, the cut preview's `reveal_cut`

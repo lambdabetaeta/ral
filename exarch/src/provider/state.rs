@@ -196,7 +196,7 @@ mod tests {
             ServiceName::declared("local-llama").unwrap(),
             "https://llama.example/v1/".into(),
             genai::adapter::AdapterKind::OpenAI,
-            Auth::Env("LOCAL_LLAMA_KEY".into()),
+            Auth::Key("LOCAL_LLAMA_API_KEY".into()),
         ));
         let available = [llama.clone()];
         let state = State::new(&llama, &available, "model-a");

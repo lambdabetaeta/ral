@@ -263,8 +263,10 @@ pub fn logout(account: Option<String>, all: bool) -> Result<(), String> {
     {
         revoke_all(std::slice::from_ref(token));
     }
-    match remove(&target)? {
-        Some(label) => {
+    match sign_out(&target)? {
+        Some(removed) => {
+            let among: Vec<_> = tokens.iter().map(to_account).collect();
+            let label = identity::label(&to_account(&removed), &among);
             ral_core::errln!("Logged out of ChatGPT account {label}.");
             Ok(())
         }
@@ -275,18 +277,27 @@ pub fn logout(account: Option<String>, all: bool) -> Result<(), String> {
     }
 }
 
+/// Remove the login matched by `account` (handle, issued id, or account id)
+/// from the local store, returning it, or `None` when nothing matched.
+/// Revoking it at the issuer is [`revoke_blocking`]'s job.
+///
+/// # Errors
+/// Returns `Err` when the handle names more than one account, or when the
+/// store cannot be rewritten.
+pub(crate) fn sign_out(account: &str) -> Result<Option<OAuthToken>, String> {
+    remove_at(&token_path(), account)
+}
+
+/// Revoke `token` at the issuer, blocking on the network: never call it from
+/// the UI thread.
+pub(crate) fn revoke_blocking(token: &OAuthToken) -> Result<(), String> {
+    runtime()?.block_on(revoke(token))
+}
+
 /// Best-effort revocation at the issuer: the local record goes regardless.
 fn revoke_all(tokens: &[OAuthToken]) {
-    if tokens.is_empty() {
-        return;
-    }
-    let Ok(rt) = runtime().inspect_err(|e| {
-        ral_core::errln!("warning: could not revoke ChatGPT tokens: {e}");
-    }) else {
-        return;
-    };
     for token in tokens {
-        if let Err(e) = rt.block_on(revoke(token)) {
+        if let Err(e) = revoke_blocking(token) {
             ral_core::errln!(
                 "warning: could not revoke the ChatGPT token for {}: {e}",
                 token.handle()
@@ -320,16 +331,6 @@ pub fn accounts() -> Vec<Account> {
 /// Returns `Err` when the token store cannot be written.
 pub fn save_one(token: &OAuthToken) -> Result<bool, String> {
     save_one_at(&token_path(), token)
-}
-
-/// Remove the login matched by `account` (handle, issued id, or account id),
-/// returning its disambiguated label, or `None` when nothing matched.
-///
-/// # Errors
-/// Returns `Err` when the handle names more than one account, or when the
-/// store cannot be rewritten.
-pub(crate) fn remove(account: &str) -> Result<Option<String>, String> {
-    remove_at(&token_path(), account)
 }
 
 // The `*_at` core takes the path as an argument so tests drive it against a
@@ -472,7 +473,7 @@ fn names(token: &OAuthToken, account: &str) -> bool {
     token.issued == account || account_id(token).as_str() == account || token.handle() == account
 }
 
-fn remove_at(path: &std::path::Path, account: &str) -> Result<Option<String>, String> {
+fn remove_at(path: &std::path::Path, account: &str) -> Result<Option<OAuthToken>, String> {
     let _guard = STORE_LOCK.lock_ignore_poison();
     let (host, mut all) = read_at(path);
     let matched: Vec<usize> = all
@@ -488,11 +489,7 @@ fn remove_at(path: &std::path::Path, account: &str) -> Result<Option<String>, St
         let among: Vec<&OAuthToken> = matched.iter().map(|&i| &all[i]).collect();
         return Err(ambiguous(account, "log out", &among));
     };
-    // Named against its fellows while it is still among them, so the report
-    // says which of a colliding pair went.
-    let accounts: Vec<Account> = all.iter().map(to_account).collect();
-    let removed = identity::label(&accounts[pos], &accounts);
-    all.remove(pos);
+    let removed = all.remove(pos);
     // A fully logged-out machine carries no store at all, not an empty one.
     if all.is_empty() {
         clear_at(path)?;
@@ -915,7 +912,7 @@ mod tests {
         assert_eq!(load_all_at(&path).len(), 2, "neither was taken");
 
         let removed = remove_at(&path, "acc_team").expect("an account id is unambiguous");
-        assert!(removed.unwrap().contains("acc_team"));
+        assert_eq!(removed.unwrap().issued, "acc_team");
         assert_eq!(load_all_at(&path).len(), 1);
     }
 
@@ -930,7 +927,7 @@ mod tests {
         }
 
         let removed = remove_at(&path, "chatgpt:acc_team").expect("a rendering is unambiguous");
-        assert!(removed.unwrap().contains("acc_team"));
+        assert_eq!(removed.unwrap().issued, "acc_team");
         assert_eq!(load_all_at(&path).len(), 1);
     }
 

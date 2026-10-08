@@ -49,8 +49,6 @@ pub use genai::chat::{ReasoningEffort, StopReason, ToolCall};
 
 use crate::cancel;
 use allowance::{Allowance, LiveMeters};
-use credential::CredentialStore;
-use models::{LiveSource, ModelCatalog};
 use std::sync::Arc;
 use transport::Transport;
 
@@ -233,17 +231,13 @@ impl Provider {
 /// facts. The id comes back as well as the label because a label answers only
 /// *which of the accounts on offer*, and a caller asking whether this is the
 /// account it already holds is asking about identity, not about display.
-pub fn admit_login(
-    store: &mut CredentialStore,
-    catalog: &mut ModelCatalog<LiveSource>,
-    token: &oauth::OAuthToken,
-) -> (AccountId, String) {
-    let (account, credential) = store.add_oauth(token);
-    // The store's name for it, which says which account when two share an email.
-    let label = identity::label(&account, &store.available());
-    let id = account.id.clone();
-    catalog.add_credential(account, credential);
-    (id, label)
+pub fn admit_login(holdings: &Holdings, token: &oauth::OAuthToken) -> (AccountId, String) {
+    holdings.change(|store| {
+        let account = store.add_oauth(token);
+        // The store's name for it, which says which account when two share an email.
+        let label = identity::label(&account, &store.available());
+        (account.id, label)
+    })
 }
 
 #[cfg(test)]

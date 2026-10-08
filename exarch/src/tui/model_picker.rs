@@ -169,7 +169,7 @@ fn drive(stage: &mut impl Stage, bureau: &Bureau, mut listing: Listing) -> Optio
         }
         match stage.tick() {
             OverlayTick::TerminalLost | OverlayTick::Cancel => return None,
-            OverlayTick::Idle => {}
+            OverlayTick::Idle | OverlayTick::Save | OverlayTick::Paste(_) => {}
             OverlayTick::Key(code) => {
                 if let Some(pick) = stage.picker()?.key(code) {
                     return Some(pick);

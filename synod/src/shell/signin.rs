@@ -18,7 +18,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use exarch::provider::Holdings;
 use ral_core::sync::LockExt;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter as _, Manager, State};
@@ -80,15 +79,14 @@ pub fn sign_in(
 
     std::thread::spawn(move || {
         let accounts = app.state::<super::Accounts>();
-        let Ok(Holdings { store, catalog, .. }) = accounts.resolved() else {
+        let Ok(holdings) = accounts.resolved() else {
             // Refused above, before this thread was ever spawned.
             return;
         };
 
         let stepping = app.clone();
         let outcome = synod::session::sign_in(
-            store,
-            catalog,
+            holdings,
             |step| {
                 let _ = stepping.emit("sign-in-step", step);
             },

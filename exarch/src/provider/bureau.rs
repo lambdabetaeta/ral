@@ -30,8 +30,8 @@ use crate::app::App;
 /// its lock.
 ///
 /// Lock discipline: the store and catalog are locked briefly, and never across
-/// a network call, a picker frame, or a machine boot. [`Bureau::admit`] is the
-/// one place both are held at once, store first. [`Rations`]' own lock is a
+/// a network call, a picker frame, or a machine boot. [`Holdings::change`] is
+/// the one place both are held at once, store first. [`Rations`]' own lock is a
 /// leaf, held for one map access and never with either. A UI thread must never
 /// hold the store or catalog while waiting on an agent thread, which takes
 /// both, one after the other, whenever it mints a child's provider.
@@ -51,6 +51,15 @@ impl Holdings {
             catalog: Arc::new(Mutex::new(catalog)),
             rations: Arc::new(Rations::default()),
         }
+    }
+
+    /// Change the credentials, and have the catalog list with them as they
+    /// now stand.
+    pub fn change<R>(&self, f: impl FnOnce(&mut CredentialStore) -> R) -> R {
+        let mut store = self.store.lock_ignore_poison();
+        let out = f(&mut store);
+        self.catalog.lock_ignore_poison().set_roster(store.roster());
+        out
     }
 }
 
@@ -194,18 +203,42 @@ impl Bureau {
     /// Admit a freshly signed-in `ChatGPT` token, returning who it now is and
     /// what it is now called.
     ///
-    /// The one door that holds both halves at once — store, then catalog —
-    /// so no caller has to nest them itself.
-    ///
     /// # Errors
     /// If the bureau is scripted, which has no store to admit into.
     pub fn admit(&self, token: &oauth::OAuthToken) -> Result<(super::AccountId, String), String> {
         let Self::Live { holdings, .. } = self else {
             return Err(mints_nothing());
         };
-        let mut store = holdings.store.lock_ignore_poison();
-        let mut catalog = holdings.catalog.lock_ignore_poison();
-        Ok(super::admit_login(&mut store, &mut catalog, token))
+        Ok(super::admit_login(holdings, token))
+    }
+
+    /// Sign out of the `ChatGPT` login named `id`: delete its stored token and
+    /// retire the account, returning the token for the caller to revoke.
+    ///
+    /// # Errors
+    /// If the bureau is scripted, if `id` names no known account or no
+    /// signed-in login, or if the token store could not be rewritten.
+    pub fn sign_out(&self, id: &str) -> Result<oauth::OAuthToken, String> {
+        let Self::Live { holdings, .. } = self else {
+            return Err(mints_nothing());
+        };
+        holdings.change(|store| {
+            let account = super::accounts::find(store, id)?;
+            let label = super::identity::label(&account, &store.available());
+            let token = oauth::sign_out(account.id.as_str())?
+                .ok_or_else(|| format!("{label} is not signed in to ChatGPT"))?;
+            store.retire(&account.id);
+            Ok(token)
+        })
+    }
+
+    /// The shared credentials and catalog; `None` when the bureau is scripted
+    /// and keeps no accounts.
+    pub fn holdings(&self) -> Option<&Holdings> {
+        match self {
+            Self::Live { holdings, .. } => Some(holdings),
+            Self::Scripted => None,
+        }
     }
 
     /// Run `f` against the model catalog, locked for exactly that call —

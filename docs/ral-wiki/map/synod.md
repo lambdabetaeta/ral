@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 6a8d848f
+generated_at_commit: 73bc87ff
 generated_at_date: 2026-10-08
 covers_paths: [synod/, vm-manager/, ral-daemon/, ral-initramfs/, vm-image/, core/src/protocol/channel.rs, core/src/carrier.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs]
 ---
@@ -187,16 +187,14 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
   stops borrowing exarch's. A key reaches exarch through the environment
   because exarch is started from a shell; synod is double-clicked, inherits
   the desktop's environment, and faces someone with no `.zshrc` to export
-  from. So there are two sources in one order: the computer's credential
-  manager (`exarch::provider::keychain`, entries named `(synod, account-id)`,
-  the app being `app::SYNOD` re-exported from the engine so the
-  credential deny and synod's own directories cannot drift apart)
-  first, because it is the one a person can see and change from inside
-  synod, and the environment underneath it — the same sweep and scrub as
-  exarch, still run first because it is the step that must happen while the
-  process is single-threaded. That order is one call:
-  `CredentialStore::admit_from` over a `SecretVault`, which `Keychain`
-  implements — one call, not a two-step synod performs by hand.
+  from. So there are two layers, in exarch's one order: the launch
+  environment's key first, the same sweep and scrub as exarch, and the
+  computer's credential manager beneath it (`exarch::provider::keychain`,
+  entries named `(synod, account-id)`, the app being `app::SYNOD`
+  re-exported from the engine so the credential deny and synod's own
+  directories cannot drift apart), read by `CredentialStore::read_vault` over
+  a `SecretVault`, which `Keychain` implements. A row whose key comes from the
+  environment says so, naming the variable and any saved key beneath it.
   Which services *exist* is a third thing and no secret, and synod re-derives
   none of it: the table is `exarch::provider::identity::built_in_services`,
   and further endpoints are declared in
@@ -204,13 +202,20 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
   holding addresses and protocols but never keys — read through
   `exarch::provider::accounts`.
 
+  Writing is `exarch::wallet::Wallet`'s: `accounts::wallet()`
+  builds synod's (its vault, its `providers.ral`), and `shell/keys.rs` calls
+  its `set_key`, `forget_key`, `add_endpoint` and `forget_endpoint`; the row
+  derivation is exarch's `accounts::entries`, which synod's wire `Account`
+  maps from.
+
   What stays synod's is what is about synod's *window*. A row carries the
   account's `identity::label`, where the credential in force came from, the
   hint naming this computer's vault, whether the row can be withdrawn, and at
-  most the key's last four characters; the `source` is read off the store's own
-  record of which door the key came through, so drawing the list costs the
-  vault nothing. A keyless local server is reported as `no-key` outright rather
-  than left to be inferred from a missing hint. The old three-way `kind` is
+  most the last four characters of the key in force and of a saved key it
+  outranks; the `source` is read off the store's two layers, so drawing the
+  list costs the vault nothing. A server that checks no key is reported as
+  `keyless` outright rather than left to be inferred from a missing hint, and
+  is declared so by the add form's own checkbox, never by a blank key. The old three-way `kind` is
   gone with the provenance it encoded — "is this a login" is `source ==
   SignedIn` — and since one service may own several ChatGPT accounts, the
   static sign-in card gives way to rows drawn from `store.available()`.

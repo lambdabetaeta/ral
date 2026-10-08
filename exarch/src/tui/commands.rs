@@ -9,6 +9,7 @@ use super::block::Chrome;
 use super::gesture::Toast;
 use super::login;
 use super::model_picker::pick_model;
+use super::providers;
 use super::rewind;
 use super::scrollback;
 use super::terminal::{YANK_CAP, osc52_copy, tail_bytes};
@@ -35,7 +36,7 @@ macro_rules! verbs {
 }
 
 verbs! {
-    Help, Legend, Thinking, Clear, Copy, Export, Model, Login, Limits, Branch,
+    Help, Legend, Thinking, Clear, Copy, Export, Model, Login, Providers, Limits, Branch,
     Close, Focus, Evict, Context, Rewind, Resources, Quit,
 }
 
@@ -115,6 +116,13 @@ impl Verb {
                 false,
                 "Sign in with ChatGPT: adds a plan-backed provider.",
             ),
+            Self::Providers => meta(
+                "/providers",
+                &[],
+                None,
+                false,
+                "Manage providers: API keys, custom endpoints, ChatGPT sign-in.",
+            ),
             Self::Limits => meta(
                 "/limits",
                 &[],
@@ -186,6 +194,7 @@ impl Verb {
             Self::Copy => Command::Copy,
             Self::Model => Command::Model,
             Self::Login => Command::Login,
+            Self::Providers => Command::Providers,
             Self::Limits => Command::Limits,
             Self::Close => Command::Close,
             Self::Evict => Command::Evict,
@@ -213,6 +222,7 @@ pub(super) enum Command {
     Export(String),
     Model,
     Login,
+    Providers,
     Limits,
     Branch(Option<String>),
     Close,
@@ -581,6 +591,7 @@ fn run(
         Command::Export(path) => cmd_export(&mut tui.app, &path, info),
         Command::Model => pick_model(tui, ctx),
         Command::Login => login::login(tui, ctx),
+        Command::Providers => providers::providers(tui, ctx),
         Command::Limits => cmd_limits(&mut tui.app, ctx),
         // Cancel before blanking: tokens already in flight would otherwise
         // paint into the cleared scrollback until the worker's next poll, and

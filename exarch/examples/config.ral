@@ -23,42 +23,43 @@
 #
 # This file is only for endpoints exarch cannot know: self-hosted or
 # non-famous.  The terminal expression must be a map
-#   [name: [endpoint: ..., key: ..., protocol: ...], ...]
+#   [name: [endpoint: ..., protocol: ...], ...]
 # with, per entry:
 #   endpoint  base URL of the API
-#   key       NAME OF THE ENV VAR holding the bearer key — never the key
-#             itself.  The key still comes from the environment, read and
-#             scrubbed exactly like a famous provider's.
 #   protocol  the wire protocol, one of:
 #               completions  OpenAI v1 (/v1/chat/completions)
 #               responses    OpenAI v2 (/v1/responses)
 #               anthropic    Anthropic native
+#   key       optional, and only ever `none: a server that checks no key.
+#
+# A key never goes here.  An entry's key is read from NAME_API_KEY (its
+# name upper-cased, every other character an underscore) and scrubbed like
+# a famous provider's, else from the key saved with /providers; the
+# environment's wins.
 #
 # It is source code, not a static file, so you may compute values:
 
 let host = 'http://localhost:11434'
 
 return [
-  # A local OpenAI-compatible server (llama.cpp, Ollama, vLLM, ...).
-  # The bearer comes from $LOCAL_LLAMA_KEY at startup.
+  # A local OpenAI-compatible server (llama.cpp, Ollama, vLLM, ...) that
+  # checks no key.
   local-llama: [
     endpoint: "$host/v1/",
-    key:      'LOCAL_LLAMA_KEY',
     protocol: 'completions',
+    key:      `none,
   ],
 
   # A gateway that speaks the OpenAI Responses (v2) protocol; its key is
-  # read from $GATEWAY_API_KEY.
+  # $WORK_GATEWAY_API_KEY, or the one saved with /providers.
   work-gateway: [
     endpoint: 'https://llm.internal.example/v1/',
-    key:      'GATEWAY_API_KEY',
     protocol: 'responses',
   ],
 
-  # An Anthropic-compatible proxy; bearer from $PROXY_ANTHROPIC_KEY.
+  # An Anthropic-compatible proxy; its key is $ANTHROPIC_PROXY_API_KEY.
   anthropic-proxy: [
     endpoint: 'https://proxy.example/anthropic/',
-    key:      'PROXY_ANTHROPIC_KEY',
     protocol: 'anthropic',
   ],
 ]

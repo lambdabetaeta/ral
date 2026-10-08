@@ -102,6 +102,16 @@
       line-height: 1.55;
       color: var(--ink-faint);
     }
+    .add-keyless {
+      display: flex;
+      gap: 8px;
+      align-items: baseline;
+      margin: 10px 0 0;
+      font-size: 13px;
+      line-height: 1.55;
+      color: var(--ink-soft);
+    }
+    .add-keyless input { accent-color: var(--accent); }
 
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { animation: none !important; transition: none !important; }

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 6a8d848f
+generated_at_commit: 73bc87ff
 generated_at_date: 2026-10-08
 covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/data/system.md, exarch/data/agents.md, exarch/data/reply.md, exarch/data/ral.md, exarch/data/script-style.md, exarch/data/context.md]
 ---
@@ -104,7 +104,7 @@ can inherit a live key.**
 
 - **`CredentialStore::resolve_and_scrub`** sweeps every known account — the
   built-in table and the endpoints declared in `config.ral` — reading each
-  `Auth::Env` service's conventional key variable into the in-memory store, then
+  `Auth::Key` service's key variable into the store's environment layer, then
   removing from the environment *every key variable that was present*, whether or
   not it yielded a usable key. A malformed value (a pasted newline) is still a
   live secret, so it is swept too.

@@ -4,6 +4,9 @@ status: accepted
 
 # synod keeps its own accounts, in the computer's credential manager
 
+*Amended 2026-10-08: the order is reversed, the launch environment's key
+outranking the vault's in both products; see [[map/exarch/provider|provider]].*
+
 **A key reaches exarch through the environment, because exarch is started
 from a shell by someone who has one. Synod is double-clicked, inherits the
 desktop's environment, and faces someone with no `.zshrc` to export from — so

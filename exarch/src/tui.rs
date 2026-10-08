@@ -26,6 +26,7 @@ mod model_picker;
 mod palette;
 mod picker;
 mod prompt;
+mod providers;
 mod rail;
 mod render;
 mod resources;

@@ -43,12 +43,13 @@ pub fn save_key(
     account: String,
     key: String,
 ) -> Result<AccountList, String> {
-    let Holdings { store, catalog, .. } = accounts_state.resolved()?;
-    accounts::set_key(store, catalog, &account, &key)?;
-    Ok(settled(&app, store))
+    let holdings = accounts_state.resolved()?;
+    accounts::wallet().set_key(holdings, &account, &key)?;
+    Ok(settled(&app, holdings))
 }
 
-/// Take back the key for `account`, leaving it known but keyless.
+/// Forget the key saved for `account`, leaving it known, on the
+/// environment's key if it has one.
 ///
 /// # Errors
 /// Returns a plain sentence if the account is unknown, or if the
@@ -59,12 +60,13 @@ pub fn forget_key(
     accounts_state: State<'_, super::Accounts>,
     account: String,
 ) -> Result<AccountList, String> {
-    let Holdings { store, .. } = accounts_state.resolved()?;
-    accounts::forget_key(store, &account)?;
-    Ok(settled(&app, store))
+    let holdings = accounts_state.resolved()?;
+    accounts::wallet().forget_key(holdings, &account)?;
+    Ok(settled(&app, holdings))
 }
 
-/// Declare another service to talk to.
+/// Declare another service to talk to; `key` is `None` for a server that
+/// checks none.
 ///
 /// # Errors
 /// Returns a plain sentence if the name is taken, the address is not one,
@@ -79,9 +81,9 @@ pub fn save_endpoint(
     protocol: String,
     key: Option<String>,
 ) -> Result<AccountList, String> {
-    let Holdings { store, catalog, .. } = accounts_state.resolved()?;
-    accounts::add_endpoint(store, catalog, &name, &endpoint, &protocol, key.as_deref())?;
-    Ok(settled(&app, store))
+    let holdings = accounts_state.resolved()?;
+    accounts::wallet().add_endpoint(holdings, &name, &endpoint, &protocol, key.as_deref())?;
+    Ok(settled(&app, holdings))
 }
 
 /// Withdraw a declared endpoint entirely.
@@ -96,9 +98,9 @@ pub fn forget_endpoint(
     accounts_state: State<'_, super::Accounts>,
     account: String,
 ) -> Result<AccountList, String> {
-    let Holdings { store, .. } = accounts_state.resolved()?;
-    accounts::forget_endpoint(store, &account)?;
-    Ok(settled(&app, store))
+    let holdings = accounts_state.resolved()?;
+    accounts::wallet().forget_endpoint(holdings, &account)?;
+    Ok(settled(&app, holdings))
 }
 
 /// The account list to answer with, and a background refresh of the
@@ -108,11 +110,8 @@ pub fn forget_endpoint(
 /// on a thread of its own and arrives as the same `models-refreshed` event
 /// a sign-in emits; the screen redraws immediately from the list returned
 /// here, which needs no network at all.
-fn settled(
-    app: &AppHandle,
-    store: &std::sync::Mutex<exarch::provider::credential::CredentialStore>,
-) -> AccountList {
-    let list = accounts::list(store);
+fn settled(app: &AppHandle, holdings: &Holdings) -> AccountList {
+    let list = accounts::list(&holdings.store);
     super::refresh_menu_async(app);
     list
 }
