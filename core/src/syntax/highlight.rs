@@ -11,7 +11,7 @@ use std::ops::Range;
 /// The classes a highlighter distinguishes.
 ///
 /// Not one variant per [`Token`] case: several tokens (the braces, brackets,
-/// parens, comma, pipe, colon, spread, caret, question, bang) share
+/// parens, comma, pipe, colon, spread, caret, question, bang, operators) share
 /// [`Class::Punct`], and every token with no hue of its own — an identifier,
 /// `Newline`, `Semi`, a redirect, `$[…]` — is [`Class::Plain`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,7 +62,8 @@ fn class(tok: &Token) -> Class {
         | Token::Spread
         | Token::Caret
         | Token::Question
-        | Token::Bang => Class::Punct,
+        | Token::Bang
+        | Token::Op(_) => Class::Punct,
         _ => match tok.as_plain_word() {
             Some(word) if is_keyword(word) => Class::Keyword,
             _ => Class::Plain,

@@ -1,0 +1,2 @@
+# contains: expected `|` to close the parameter list
+let f = { |x }

@@ -204,9 +204,9 @@ impl Elaborator {
     /// than scanning ahead over earlier statements, keeps a preceding
     /// command use of the same name lowering to `Exec` instead of a
     /// dangling `Force(Variable)`.
-    fn build_rec_group(&mut self, members: &[RecMember]) -> Arc<GroupNode> {
+    fn build_rec_group(&mut self, members: &[RecMember<'_>]) -> Arc<GroupNode> {
         for RecMember { name, .. } in members {
-            self.bind(name.span, [name.item.as_str().into()]);
+            self.bind(name.span, [name.item.into()]);
         }
         let members: Vec<(Name, Arc<Comp>)> = members
             .iter()
@@ -225,7 +225,7 @@ impl Elaborator {
                     empty.is_empty(),
                     "lambda/block elaboration must not hoist into outer binds"
                 );
-                (name.item.as_str().into(), Arc::clone(node.shape()))
+                (name.item.into(), Arc::clone(node.shape()))
             })
             .collect();
         GroupNode::new(members.into())
@@ -234,10 +234,11 @@ impl Elaborator {
     /// One top-level phrase (depth 0): a `let` becomes a `Define`,
     /// anything else a `Run`.  The `Define` pattern's names enter scope only
     /// after the RHS is elaborated, as `nested_single`'s `let` arm does.
-    fn toplevel_phrase(&mut self, stmt: Stmt) -> Spanned<Phrase<()>> {
+    fn toplevel_phrase(&mut self, stmt: &Stmt) -> Spanned<Phrase<()>> {
         let Spanned { item: kind, span } = stmt;
+        let span = *span;
         self.with_span(span, |this| {
-            if let Ast::Let { pattern, value } = &kind {
+            if let Ast::Let { pattern, value } = kind {
                 let rhs = this.elab_let_rhs(value);
                 this.bind_pattern(pattern);
                 return Spanned::with_span(
@@ -250,7 +251,7 @@ impl Elaborator {
                 );
             }
             let mut binds = Vec::new();
-            let comp = this.elab_expr(&kind, &mut binds);
+            let comp = this.elab_expr(kind, &mut binds);
             let comp = wrap_binds(this.current_span, binds, comp);
             Spanned::with_span(span, Phrase::Run(Arc::new(comp)))
         })
@@ -258,7 +259,7 @@ impl Elaborator {
 
     /// A recursive knot at depth 0: *n* `Define`s, `xᵢ = Return(Thunk(Rec{group,
     /// i}))`, sharing one `group` `Arc`.
-    fn toplevel_rec_group(&mut self, members: &[RecMember]) -> Unchecked {
+    fn toplevel_rec_group(&mut self, members: &[RecMember<'_>]) -> Unchecked {
         let group = self.build_rec_group(members);
         members
             .iter()
@@ -279,7 +280,7 @@ impl Elaborator {
                 Spanned::with_span(
                     span,
                     Phrase::Define {
-                        pattern: Arc::new(Pattern::Name(name.item.as_str().into())),
+                        pattern: Arc::new(Pattern::Name(name.item.into())),
                         comp,
                         schemes: (),
                     },
@@ -316,10 +317,11 @@ impl Elaborator {
     /// `Wildcard` — a surface `_` gets the hygienic gensym `$[…]` temporaries
     /// already use), and anything else is a discard, marked `Wildcard`,
     /// which no surface pattern ever produces.
-    fn nested_single(&mut self, stmt: Stmt) -> (Option<Span>, NestedUnit) {
+    fn nested_single(&mut self, stmt: &Stmt) -> (Option<Span>, NestedUnit) {
         let Spanned { item: kind, span } = stmt;
+        let span = *span;
         self.with_span(span, |this| {
-            if let Ast::Let { pattern, value } = &kind {
+            if let Ast::Let { pattern, value } = kind {
                 let rhs = this.elab_let_rhs(value);
                 let pattern_ir = match &pattern.item {
                     Pattern::Wildcard => Pattern::Name(this.gensym()),
@@ -334,14 +336,14 @@ impl Elaborator {
                     },
                 );
             }
-            let comp = this.stmt(&kind);
+            let comp = this.stmt(kind);
             (span, NestedUnit::Other { comp })
         })
     }
 
     /// A recursive knot at depth > 0: *n* nested `Bind`s over `Return(Thunk(
     /// Rec{group, i}))`, sharing one `group` `Arc`, in source order.
-    fn nested_rec_group(&mut self, members: &[RecMember]) -> Vec<(Option<Span>, NestedUnit)> {
+    fn nested_rec_group(&mut self, members: &[RecMember<'_>]) -> Vec<(Option<Span>, NestedUnit)> {
         let group = self.build_rec_group(members);
         members
             .iter()
@@ -360,11 +362,80 @@ impl Elaborator {
                     span,
                     NestedUnit::Bind {
                         rhs,
-                        pattern: Pattern::Name(name.item.as_str().into()),
+                        pattern: Pattern::Name(name.item.into()),
                     },
                 )
             })
             .collect()
+    }
+
+    /// A head applied to `args`, with the stage's trailing `redirects`.
+    fn elab_call(
+        &mut self,
+        head: &Head,
+        args: &[Spanned<Ast>],
+        redirects: &Redirects<Ast>,
+        binds: &mut Vec<(Pattern, Comp)>,
+    ) -> Comp {
+        // A value head can hoist binds of its own, and its effects
+        // precede the arguments' in source order — so it is elaborated
+        // before the args below, or its binds land after theirs.
+        let value_head_comp = if let Head::Value(value) = head {
+            Some(self.elab_expr(value, binds))
+        } else {
+            None
+        };
+
+        // Only an argument-position spread splices here: a list-literal
+        // argument `f [...$xs]` stays one arg carrying its own spread.
+        let arg_vals: Args = args
+            .iter()
+            .map(|a| match &a.item {
+                Ast::Spread(inner) => ValListElem::Spread(Spanned::with_span(
+                    a.span,
+                    self.with_span(a.span, |this| this.to_val(&inner.item, binds)),
+                )),
+                other => ValListElem::Single(Spanned::with_span(
+                    a.span,
+                    self.with_span(a.span, |this| this.to_val(other, binds)),
+                )),
+            })
+            .collect();
+        let redirect_vals = self.lower_redirects(redirects, binds);
+
+        match head {
+            Head::ExternalName(s) => self.exec(
+                CommandWord::External(CommandName::Bare(s.clone().into())),
+                arg_vals,
+                redirect_vals,
+            ),
+            Head::Bare(s) if self.is_bound(s) => {
+                // The `Force` is what makes the `Force` rule run a
+                // bound block inside the redirect frame wrapped
+                // around it.
+                let head_comp = comp!(self, CompKind::Force(Val::Variable(s.clone().into())));
+                self.apply_head(head_comp, arg_vals, redirect_vals)
+            }
+            Head::Bare(s) => self.exec(
+                CommandWord::Name(CommandName::Bare(s.clone().into())),
+                desugar_zero_arg_exit(s, arg_vals),
+                redirect_vals,
+            ),
+            Head::Path(path) => self.exec(
+                CommandWord::Name(CommandName::Path(path.clone())),
+                arg_vals,
+                redirect_vals,
+            ),
+            Head::TildePath(path) => self.exec(
+                CommandWord::Name(CommandName::TildePath(path.clone())),
+                arg_vals,
+                redirect_vals,
+            ),
+            Head::Value(_) => {
+                let head_comp = value_head_comp.expect("computed above for Head::Value");
+                self.apply_head(head_comp, arg_vals, redirect_vals)
+            }
+        }
     }
 
     /// Elaborate `ast` as a computation, pushing every sub-expression that must
@@ -417,132 +488,75 @@ impl Elaborator {
                 comp!(this, CompKind::Force(this.to_val(&value.item, binds)))
             }),
 
-            Ast::Call {
-                head,
-                args,
-                redirects,
-            } => {
-                // A value head can hoist binds of its own, and its effects
-                // precede the arguments' in source order — so it is elaborated
-                // before the args below, or its binds land after theirs.
-                let value_head_comp = if let Head::Value(value) = head {
-                    Some(self.elab_expr(value, binds))
-                } else {
-                    None
-                };
+            Ast::Call { head, args } => self.elab_call(head, args, &Redirects::default(), binds),
 
-                // Only an argument-position spread splices here: a list-literal
-                // argument `f [...$xs]` stays one arg carrying its own spread.
-                let arg_vals: Args = args
-                    .iter()
-                    .map(|a| match &a.item {
-                        Ast::Spread(inner) => ValListElem::Spread(Spanned::with_span(
-                            a.span,
-                            self.with_span(a.span, |this| this.to_val(&inner.item, binds)),
-                        )),
-                        other => ValListElem::Single(Spanned::with_span(
-                            a.span,
-                            self.with_span(a.span, |this| this.to_val(other, binds)),
-                        )),
-                    })
-                    .collect();
-                let redirect_vals = self.lower_redirects(redirects, binds);
-
-                match head {
-                    Head::ExternalName(s) => self.exec(
-                        CommandWord::External(CommandName::Bare(s.clone().into())),
-                        arg_vals,
-                        redirect_vals,
-                    ),
-                    Head::Bare(s) if self.is_bound(s) => {
-                        // The `Force` is what makes the `Force` rule run a
-                        // bound block inside the redirect frame wrapped
-                        // around it.
-                        let head_comp =
-                            comp!(self, CompKind::Force(Val::Variable(s.clone().into())));
-                        self.apply_head(head_comp, arg_vals, redirect_vals)
-                    }
-                    Head::Bare(s) => self.exec(
-                        CommandWord::Name(CommandName::Bare(s.clone().into())),
-                        desugar_zero_arg_exit(s, arg_vals),
-                        redirect_vals,
-                    ),
-                    Head::Path(path) => self.exec(
-                        CommandWord::Name(CommandName::Path(path.clone())),
-                        arg_vals,
-                        redirect_vals,
-                    ),
-                    Head::TildePath(path) => self.exec(
-                        CommandWord::Name(CommandName::TildePath(path.clone())),
-                        arg_vals,
-                        redirect_vals,
-                    ),
-                    Head::Value(_) => {
-                        let head_comp = value_head_comp.expect("computed above for Head::Value");
-                        self.apply_head(head_comp, arg_vals, redirect_vals)
-                    }
+            // The stage's own operands lower first, then its redirects.
+            Ast::Redirected { stage, redirects } => match &*stage.item {
+                Ast::Call { head, args } => self.with_span(stage.span, |this| {
+                    this.elab_call(head, args, redirects, binds)
+                }),
+                other => {
+                    let body = self.with_span(stage.span, |this| this.elab_expr(other, binds));
+                    let redirects = self.lower_redirects(redirects, binds);
+                    self.wrap_redirect(body, redirects)
                 }
-            }
+            },
 
-            Ast::Scope { op, redirects } => {
-                let redirect_vals = self.lower_redirects(redirects, binds);
-                let inner = match op {
-                    ScopeAst::Try { body, handler } => comp!(
-                        self,
-                        CompKind::Try {
-                            body: self.to_val(body, binds),
-                            handler: self.to_val(handler, binds),
-                        }
-                    ),
-                    ScopeAst::Guard { body, cleanup } => comp!(
-                        self,
-                        CompKind::Guard {
-                            body: self.to_val(body, binds),
-                            cleanup: self.to_val(cleanup, binds),
-                        }
-                    ),
-                    ScopeAst::Within {
-                        opts,
-                        handlers,
-                        body,
-                    } => {
-                        let opts = self.lower_options(opts, binds);
-                        let handlers = handlers.as_ref().map(|arms| {
-                            arms.iter()
-                                .map(|arm| HandlerArmV {
-                                    name: arm.name.clone(),
-                                    value: Spanned::with_span(
-                                        arm.value.span,
-                                        self.to_val(&arm.value.item, binds),
-                                    ),
-                                })
-                                .collect()
-                        });
-                        comp!(
-                            self,
-                            CompKind::Within {
-                                opts,
-                                handlers,
-                                body: self.to_val(body, binds),
-                            }
-                        )
+            Ast::Scope(op) => match op {
+                ScopeAst::Try { body, handler } => comp!(
+                    self,
+                    CompKind::Try {
+                        body: self.to_val(body, binds),
+                        handler: self.to_val(handler, binds),
                     }
-                    ScopeAst::Grant { caps, body } => comp!(
+                ),
+                ScopeAst::Guard { body, cleanup } => comp!(
+                    self,
+                    CompKind::Guard {
+                        body: self.to_val(body, binds),
+                        cleanup: self.to_val(cleanup, binds),
+                    }
+                ),
+                ScopeAst::Within {
+                    opts,
+                    handlers,
+                    body,
+                } => {
+                    let opts = self.lower_options(opts, binds);
+                    let handlers = handlers.as_ref().map(|arms| {
+                        arms.iter()
+                            .map(|arm| HandlerArmV {
+                                name: arm.name.clone(),
+                                value: Spanned::with_span(
+                                    arm.value.span,
+                                    self.to_val(&arm.value.item, binds),
+                                ),
+                            })
+                            .collect()
+                    });
+                    comp!(
                         self,
-                        CompKind::Grant {
-                            caps: self.lower_options(caps, binds),
+                        CompKind::Within {
+                            opts,
+                            handlers,
                             body: self.to_val(body, binds),
                         }
-                    ),
-                    ScopeAst::Audit { body } => comp!(
-                        self,
-                        CompKind::Audit {
-                            body: self.to_val(body, binds),
-                        }
-                    ),
-                };
-                self.wrap_redirect(inner, redirect_vals)
-            }
+                    )
+                }
+                ScopeAst::Grant { caps, body } => comp!(
+                    self,
+                    CompKind::Grant {
+                        caps: self.lower_options(caps, binds),
+                        body: self.to_val(body, binds),
+                    }
+                ),
+                ScopeAst::Audit { body } => comp!(
+                    self,
+                    CompKind::Audit {
+                        body: self.to_val(body, binds),
+                    }
+                ),
+            },
 
             // `return` with no value and `()` name the same value.
             Ast::Unit | Ast::Return(None) => comp!(self, CompKind::Return(Val::Unit)),
@@ -647,7 +661,7 @@ impl Elaborator {
                 let plain: Option<Vec<(&String, &Spanned<Ast>)>> = entries
                     .iter()
                     .map(|e| match e {
-                        RecordEntry::Field { key, value } => Some((key, value)),
+                        RecordEntry::Field { key, value } => Some((&key.item, value)),
                         RecordEntry::Spread(_) => None,
                     })
                     .collect();
@@ -663,7 +677,7 @@ impl Elaborator {
                                 .iter()
                                 .map(|e| match e {
                                     RecordEntry::Field { key, value } => ValRecordEntry::Field(
-                                        key.clone(),
+                                        key.item.clone(),
                                         self.spanned_val(value, binds),
                                     ),
                                     RecordEntry::Spread(a) => {
@@ -987,7 +1001,7 @@ impl Elaborator {
 
     /// Attach trailing `redirects` to `body` as a [`CompKind::Redirect`] frame.
     /// `Exec` carries its own redirects instead, and pipelines and chains take
-    /// none at the surface, so this covers every remaining body.
+    /// X
     fn wrap_redirect(&self, body: Comp, redirects: Redirects<Val>) -> Comp {
         if redirects.is_empty() {
             return body;

@@ -1,0 +1,2 @@
+# contains: `<` needs a file to read
+cat <

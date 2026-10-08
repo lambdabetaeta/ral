@@ -1,0 +1,3 @@
+# contains: `$(…)` holds one name
+# contains: write `!{ls -la}`
+echo $(ls -la)

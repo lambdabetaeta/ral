@@ -100,6 +100,14 @@ impl<T> Spanned<T> {
     pub(crate) fn with_span(span: Option<Span>, item: T) -> Self {
         Self { span, item }
     }
+
+    /// Transform the item, keeping the span.
+    pub(crate) fn map<U>(self, f: impl FnOnce(T) -> U) -> Spanned<U> {
+        Spanned {
+            span: self.span,
+            item: f(self.item),
+        }
+    }
 }
 
 impl<T> Spanned<Box<T>> {
@@ -115,12 +123,15 @@ impl<T> Spanned<Box<T>> {
     }
 }
 
-/// Fold CRLF and lone CR to LF, so a Windows-authored script parses like any
-/// other.
+/// Drop one leading byte-order mark and fold CRLF and lone CR to LF, so a
+/// Windows-authored script parses like any other.
 ///
-/// A carriage return means nothing in the shell language, and every load of
-/// source — disk, wire, stdin, argv — passes through here.
-pub fn normalize_source_text(source: String) -> String {
+/// Neither means anything in the shell language, and every load of source —
+/// disk, wire, stdin, argv — passes through here.
+pub fn normalize_source_text(mut source: String) -> String {
+    if source.starts_with('\u{feff}') {
+        source.remove(0);
+    }
     if source.contains('\r') {
         source.replace("\r\n", "\n").replace('\r', "\n")
     } else {
@@ -283,5 +294,18 @@ impl SourceDb {
             reason = "FileId is u32; a run registers a handful of sources, far below 2^32"
         )]
         FileId(self.sources.len() as u32)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_source_text as normalize;
+
+    #[test]
+    fn one_leading_bom_is_stripped_before_line_endings_fold() {
+        assert_eq!(normalize("\u{feff}echo hi".into()), "echo hi");
+        assert_eq!(normalize("\u{feff}a\r\nb".into()), "a\nb");
+        assert_eq!(normalize("\u{feff}\u{feff}x".into()), "\u{feff}x");
+        assert_eq!(normalize("echo \u{feff}hi".into()), "echo \u{feff}hi");
     }
 }

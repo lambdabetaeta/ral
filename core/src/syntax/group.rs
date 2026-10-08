@@ -19,17 +19,17 @@ use crate::syntax::ast::{Ast, Stmt};
 use std::collections::{HashMap, HashSet};
 
 /// A statement group produced by the pre-pass.
-pub(crate) enum StmtGroup {
+pub(crate) enum StmtGroup<'a> {
     /// Every non-recursive `let`, and every non-binding statement.
-    Single(Stmt),
+    Single(&'a Stmt),
     /// A recursive knot, emitted as `CompKind::Rec`.
-    LetRec(Vec<RecMember>),
+    LetRec(Vec<RecMember<'a>>),
 }
 
 /// One `let name = rhs` of a knot, both halves keeping their spans.
-pub(crate) struct RecMember {
-    pub name: Spanned<String>,
-    pub value: Spanned<Box<Ast>>,
+pub(crate) struct RecMember<'a> {
+    pub name: Spanned<&'a str>,
+    pub value: &'a Spanned<Box<Ast>>,
 }
 
 /// A thunk-shaped `let name = rhs` at statement index `.0`.
@@ -37,9 +37,9 @@ type Def<'a> = (usize, Spanned<&'a str>, &'a Spanned<Box<Ast>>);
 
 /// Partition `stmts` into [`StmtGroup`]s, dependencies before their dependents
 /// regardless of source order.
-pub(crate) fn group_stmts(stmts: &[Stmt]) -> Vec<StmtGroup> {
+pub(crate) fn group_stmts(stmts: &[Stmt]) -> Vec<StmtGroup<'_>> {
     // defs[name] = the def_list indices defining it, in stmt_idx order.
-    let mut def_list: Vec<Def> = Vec::new();
+    let mut def_list: Vec<Def<'_>> = Vec::new();
     let mut defs: HashMap<&str, Vec<usize>> = HashMap::new();
 
     for (stmt_idx, stmt) in stmts.iter().enumerate() {
@@ -53,7 +53,7 @@ pub(crate) fn group_stmts(stmts: &[Stmt]) -> Vec<StmtGroup> {
     }
 
     if def_list.is_empty() {
-        return stmts.iter().map(|s| StmtGroup::Single(s.clone())).collect();
+        return stmts.iter().map(StmtGroup::Single).collect();
     }
 
     let candidate_names: HashSet<String> =
@@ -130,13 +130,13 @@ pub(crate) fn group_stmts(stmts: &[Stmt]) -> Vec<StmtGroup> {
     // At a head statement, flush the topo order up to and including its SCC,
     // so every dependency lands before it.
     let mut emitted: Vec<bool> = vec![false; num_sccs];
-    let mut out: Vec<StmtGroup> = Vec::new();
+    let mut out: Vec<StmtGroup<'_>> = Vec::new();
     for (stmt_idx, stmt) in stmts.iter().enumerate() {
         if consumed.contains(&stmt_idx) {
             continue;
         }
         match head_at.get(&stmt_idx).copied() {
-            None => out.push(StmtGroup::Single(stmt.clone())),
+            None => out.push(StmtGroup::Single(stmt)),
             Some(this_scc) if emitted[this_scc] => {
                 // Already placed as a dependency of an earlier head.
             }
@@ -191,13 +191,13 @@ fn topo_dfs(
 }
 
 /// Emit one SCC: a `LetRec` if it has several members or a self-edge.
-fn emit_scc(
+fn emit_scc<'a>(
     cid: usize,
     scc_members: &[Vec<usize>],
     adj: &[Vec<usize>],
-    def_list: &[Def],
-    stmts: &[Stmt],
-    out: &mut Vec<StmtGroup>,
+    def_list: &[Def<'a>],
+    stmts: &'a [Stmt],
+    out: &mut Vec<StmtGroup<'a>>,
 ) {
     let members = &scc_members[cid];
     let is_recursive = members.len() > 1 || adj[members[0]].contains(&members[0]);
@@ -207,8 +207,8 @@ fn emit_scc(
             .map(|&di| {
                 let (_, name, value) = &def_list[di];
                 RecMember {
-                    name: Spanned::with_span(name.span, name.item.to_string()),
-                    value: (*value).clone(),
+                    name: name.clone(),
+                    value,
                 }
             })
             .collect();
@@ -217,13 +217,13 @@ fn emit_scc(
         // The original stmt, unchanged, so it lowers to `CompKind::Bind` and
         // generalises in the normal way.
         let stmt_idx = def_list[members[0]].0;
-        out.push(StmtGroup::Single(stmts[stmt_idx].clone()));
+        out.push(StmtGroup::Single(&stmts[stmt_idx]));
     }
 }
 
 /// Which of a name's definitions a use at `use_stmt_idx` sees: the nearest
 /// preceding one, or the first if every definition follows the use.
-fn resolve_ref(use_stmt_idx: usize, def_indices: &[usize], def_list: &[Def]) -> usize {
+fn resolve_ref(use_stmt_idx: usize, def_indices: &[usize], def_list: &[Def<'_>]) -> usize {
     // `def_indices` ascends by stmt_idx, so the last match is the nearest.
     let mut best = def_indices[0];
     for &di in def_indices {
@@ -336,8 +336,7 @@ mod tests {
                     _ => "stmt".to_string(),
                 },
                 StmtGroup::LetRec(bindings) => {
-                    let mut names: Vec<&str> =
-                        bindings.iter().map(|m| m.name.item.as_str()).collect();
+                    let mut names: Vec<&str> = bindings.iter().map(|m| m.name.item).collect();
                     names.sort_unstable();
                     format!("rec [{}]", names.join(", "))
                 }

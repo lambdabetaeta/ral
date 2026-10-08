@@ -231,14 +231,31 @@ bound variables at each use. Generalisation walks the
 type structurally and unbudgeted, where unification charges a depth ceiling:
 the walks are linear in a type the source built one constructor per statement,
 and only unification descends past what the parser saw
-([[decisions/260812_depth-is-guarded-where-it-multiplies|depth-is-guarded-where-it-multiplies]],
-which also records checking's superlinear cost in nesting depth). The order
+([[invariants/term-depth|term-depth]]). The order
 follows the SCC
 structure the elaborator found — a non-recursive group generalises at its binding
 point, a mutually recursive group stays monomorphic until its fixed point — which
 is what keeps generalisation sound. A type error aborts with a positioned
 expected-vs-inferred message (`fmt.rs`), where a computation reads `Returns A`, `Command`, or `ν A` for a grade
 variable: `{ echo hi }` is `{Command}` and `{ 'hi' }` is `{Returns String}`.
+
+**Deep types are checked without a guard, and checking them is superlinear.**
+The shape that reaches the structural walks without ever charging `deeper()`
+nests one constructor per binding (`let x1 = [f: x0]`, `let x2 = [f: x1]`, and
+so on). Under `ral --check`, release build, 8 MB stack:
+
+| nesting depth | wall clock | result |
+| --- | --- | --- |
+| 20,000 | ~1s | exit 0 |
+| 50,000 | 54s | exit 0 |
+| 150,000 | 11min | exit 0 |
+
+- *No overflow and no `TypeTooDeep`* at 293x `MAX_UNIFY_DEPTH`: the unify
+  budget never fires on this shape, and the walks survive alone.
+- *Cost is superlinear*: 3x the depth is 12x the time, consistent with
+  generalisation at each binding walking a type grown one constructor per
+  binding, Θ(N²) visits (inferred from the curve, not profiled). A 50,000-deep
+  type needs a 50,000-line file, so it is recorded, not urgent.
 
 **Weak variables are the one subtraction.** `generalize` quantifies every
 variable of the type that is neither free in the environment nor *weak*. A

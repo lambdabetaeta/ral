@@ -1,0 +1,6 @@
+# codes: L0006
+# contains: mismatched `]`: the innermost open delimiter is `{`
+# contains: `]` closes nothing
+# contains: `{` opened here
+{ echo a
+]

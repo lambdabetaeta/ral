@@ -118,12 +118,13 @@ fn spell_key(v: &Val) -> String {
 /// A read redirected deeper answers one command's reads and no others, which
 /// is that command's business alone, so this walk never sees it.
 fn stage_root_stdin_feed(stage: &Comp) -> Option<StdinFeed> {
+    let mut stage = stage;
+    while let CompKind::Bind { rest, .. } = &stage.item {
+        stage = rest;
+    }
     let redirects = match &stage.item {
         CompKind::Exec(exec) => &exec.redirects,
         CompKind::Redirect { redirects, .. } => redirects,
-        CompKind::Bind { rest, .. } => {
-            return stage_root_stdin_feed(rest);
-        }
         _ => return None,
     };
     match redirects.stdin {
@@ -357,10 +358,11 @@ impl Inferencer<'_> {
     /// type is its `rest`'s, all the way down, so `let a = 1; let b = 2;
     /// cd`'s discarded value is `cd`'s, not the outermost node's.
     fn discard_tail(comp: &Comp) -> &Comp {
-        match &comp.item {
-            CompKind::Bind { rest, .. } => Self::discard_tail(rest),
-            _ => comp,
+        let mut comp = comp;
+        while let CompKind::Bind { rest, .. } = &comp.item {
+            comp = rest;
         }
+        comp
     }
 
     /// `comp`'s own name and written argument count, when it is an `Exec`
@@ -380,9 +382,12 @@ impl Inferencer<'_> {
     /// The span of the expression a computation's result comes from: its tail,
     /// through lambda bodies and the rest of each bind.
     pub(super) fn result_span(comp: &Comp) -> Option<Span> {
+        let mut comp = comp;
+        while let CompKind::Bind { rest, .. } = &comp.item {
+            comp = rest;
+        }
         match &comp.item {
             CompKind::Lam { body, .. } => Self::result_span(body),
-            CompKind::Bind { rest, .. } => Self::result_span(rest),
             _ => comp.span,
         }
     }
@@ -1769,8 +1774,11 @@ impl Inferencer<'_> {
     /// The head of the call whose value a right-hand side ends in: an `App`, a
     /// `Force`, or a pipeline ending in one.
     fn called_head(rhs: &Comp) -> Option<String> {
+        let mut rhs = rhs;
+        while let CompKind::Bind { rest, .. } = &rhs.item {
+            rhs = rest;
+        }
         match &rhs.item {
-            CompKind::Bind { rest, .. } => Self::called_head(rest),
             CompKind::Pipeline { stages } => stages.last().and_then(|s| Self::called_head(s)),
             CompKind::Force(v) => written(v).map(ToString::to_string),
             CompKind::App { head, .. } => Self::called_head(head),

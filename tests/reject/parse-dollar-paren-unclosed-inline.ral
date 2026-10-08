@@ -1,2 +1,2 @@
-# contains: ')'
+# contains: write `!{name 42}`
 echo $(name 42

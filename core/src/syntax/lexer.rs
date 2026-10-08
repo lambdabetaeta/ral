@@ -4,8 +4,8 @@
 //! The innermost open delimiter sets the lexical mode.  Newlines separate
 //! statements except inside `[…]` and `$[…]`, where they are whitespace, so
 //! `{ [ ] }` and `[ { } ]` both behave.  Inside `$[…]` the operators are
-//! words of their own — `<` is a comparison, not a redirect, and `1+1` is
-//! three tokens — while everywhere else they keep their shell meaning.  A `;`
+//! tokens of their own, [`Token::Op`] — `<` is a comparison, not a redirect, and
+//! `1+1` is three tokens — while everywhere else they keep their shell meaning.  A `;`
 //! is a hard separator: the parser continues pipelines and chains across
 //! newlines, never across a `;`.
 //!
@@ -15,7 +15,7 @@
 //! streams instead of re-lexing the bytes, and their spans already point
 //! into the outer file, so diagnostics underline the right columns.
 
-use crate::ir::WriteMode;
+use crate::ir::{ArithOp, BinaryOp, CompareOp, EqOp, WriteMode};
 use crate::path::tilde::TildePath;
 use crate::source::{FileId, Span, Spanned};
 use crate::syntax::ast::Word;
@@ -75,10 +75,20 @@ fn is_bare_char(ch: char) -> bool {
 }
 
 /// The bare-word characters that are operators inside `$[…]`, where they end
-/// a word instead: `1+1` is a sum there and a word everywhere else.  `&`
-/// takes its own arms, for `&&`; `<` `>` `!` `|` are not bare anywhere.
-fn is_operator_char(ch: char) -> bool {
-    matches!(ch, '+' | '-' | '*' | '/' | '%' | '=' | '&')
+/// a word instead: `1+1` is a sum there and a word everywhere else.  `=` is
+/// `Assign` until a second `=` makes it `==`; `&` takes its own arms, for
+/// `&&`; `<` `>` `!` `|` are not bare anywhere.
+fn operator_char(ch: char) -> Option<Operator> {
+    let arith = |op| Operator::Binary(BinaryOp::Arith(op));
+    Some(match ch {
+        '+' => arith(ArithOp::Add),
+        '-' => arith(ArithOp::Sub),
+        '*' => arith(ArithOp::Mul),
+        '/' => arith(ArithOp::Div),
+        '%' => arith(ArithOp::Mod),
+        '=' => Operator::Assign,
+        _ => return None,
+    })
 }
 
 /// Parts of an interpolated (double-quoted) string.
@@ -121,6 +131,8 @@ pub enum Token {
     /// Expression block `$[…]`, carrying its body's token stream.
     Expr(Vec<(Self, Span)>),
     Bang,
+    /// An operator of `$[…]`, emitted nowhere else.
+    Op(Operator),
     Newline,
     /// Separator run containing a `;` — never crossed by continuation.
     Semi,
@@ -135,6 +147,28 @@ pub enum Token {
         to: u32,
     },
     Eof,
+}
+
+/// An operator inside `$[…]`: the binary ones the IR already names, the two
+/// connectives, and the one spelling that is an error wherever it stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Operator {
+    Binary(BinaryOp),
+    And,
+    Or,
+    /// A lone `=`.
+    Assign,
+}
+
+impl fmt::Display for Operator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Binary(op) => fmt::Display::fmt(op, f),
+            Self::And => f.write_str("&&"),
+            Self::Or => f.write_str("||"),
+            Self::Assign => f.write_str("="),
+        }
+    }
 }
 
 /// The operator of a word-taking redirect, as spelled; the parser's
@@ -170,6 +204,7 @@ impl fmt::Display for Token {
             Self::Variable { name, .. } => write!(f, "${name}"),
             Self::Expr(_) => write!(f, "$[...]"),
             Self::Bang => write!(f, "!"),
+            Self::Op(op) => write!(f, "{op}"),
             Self::Newline => write!(f, "newline"),
             Self::Semi => write!(f, "';'"),
             Self::Redirect { .. } | Self::Dup { .. } => write!(f, "redirect"),
@@ -246,6 +281,13 @@ pub enum LexErrorKind {
     },
     /// A `$(…)` that never closed.
     UnclosedDeref { opened: Span },
+    /// A closer that is not the innermost opener's, as `}` in `[a }`.  Not
+    /// incomplete: no further input can make it right.
+    Mismatched {
+        open: char,
+        opened: Span,
+        close: char,
+    },
     /// Everything unstructured: bad escapes, unexpected characters,
     /// expected-X-found-Y, redirect faults.
     Other(String),
@@ -276,6 +318,9 @@ impl LexErrorKind {
                 format!("unterminated `{open}…{close}`")
             }
             Self::UnclosedDeref { .. } => "unclosed `$(…)` dereference".into(),
+            Self::Mismatched { open, close, .. } => {
+                format!("mismatched `{close}`: the innermost open delimiter is `{open}`")
+            }
             Self::Other(s) => s.clone(),
         }
     }
@@ -295,7 +340,7 @@ impl LexErrorKind {
 pub struct LexError {
     pub kind: LexErrorKind,
     /// The opening delimiter for the "unterminated" kinds, the offending
-    /// position for free-form ones.
+    /// position for free-form ones and a mismatched closer.
     pub span: Span,
 }
 
@@ -492,7 +537,7 @@ impl Lexer {
         matches!(self.innermost(), Some(DelimKind::Bracket | DelimKind::Expr))
     }
 
-    /// Inside `$[…]`, where the operators are words of their own.
+    /// Inside `$[…]`, where the operators are tokens of their own.
     fn in_expr(&self) -> bool {
         self.innermost() == Some(DelimKind::Expr)
     }
@@ -569,17 +614,17 @@ impl Lexer {
                 }
                 '\n' | ';' => Ok(self.scan_separator(span)),
                 '{' => Ok(self.open_delim(Token::LBrace, DelimKind::Brace)),
-                '}' => Ok(self.close_delim(Token::RBrace)),
+                '}' => self.close_delim(Token::RBrace),
                 '[' => Ok(self.open_delim(Token::LBracket, DelimKind::Bracket)),
-                ']' => Ok(self.close_delim(Token::RBracket)),
+                ']' => self.close_delim(Token::RBracket),
                 '(' => Ok(self.bump_simple(Token::LParen, span)),
                 ')' => Ok(self.bump_simple(Token::RParen, span)),
                 '|' if self.in_expr() && self.peek_n(1) == Some('|') => {
-                    Ok(self.two_char_word("||", span))
+                    Ok(self.two_char_op(Operator::Or, span))
                 }
                 '|' => Ok(self.bump_simple(Token::Pipe, span)),
                 '&' if self.in_expr() && self.peek_n(1) == Some('&') => {
-                    Ok(self.two_char_word("&&", span))
+                    Ok(self.two_char_op(Operator::And, span))
                 }
                 '&' if self.peek_n(1) == Some('&') => Err(Self::error(
                     Span::new(span.file, span.start, span.start + 2),
@@ -610,7 +655,7 @@ impl Lexer {
                 }
                 '^' => Ok(self.bump_simple(Token::Caret, span)),
                 '!' if self.in_expr() && self.peek_n(1) == Some('=') => {
-                    Ok(self.two_char_word("!=", span))
+                    Ok(self.two_char_op(Operator::Binary(BinaryOp::Eq(EqOp::Ne)), span))
                 }
                 '!' => Ok(self.bump_simple(Token::Bang, span)),
                 '?' => Ok(self.bump_simple(Token::Question, span)),
@@ -634,13 +679,16 @@ impl Lexer {
                     if label.is_empty() {
                         Err(Self::error(
                             span,
-                            "expected tag label after backtick; quote literal backticks",
+                            "expected a tag label after the backtick, as in `` `ok ``: \
+                             a backtick never runs a command here; write `!{cmd}` for that",
                         ))
                     } else {
                         Ok((Token::Tag(label), self.finish(span)))
                     }
                 }
-                _ if self.in_expr() && is_operator_char(ch) => Ok(self.scan_operator(span)),
+                _ if let Some(op) = operator_char(ch).filter(|_| self.in_expr()) => {
+                    Ok(self.scan_operator(op, span))
+                }
                 _ if self.in_expr() && self.at_numeral() => Ok(self.scan_numeral_word(span)),
                 _ if is_bare_char(ch) => Ok(self.scan_bare_word(span)),
                 _ => {
@@ -656,33 +704,42 @@ impl Lexer {
         (token, self.finish(span))
     }
 
-    /// Operators lex as plain words, not as tokens of their own: the Pratt
-    /// parser reads them by spelling, as it does `+` and `==`.
-    fn two_char_word(&mut self, op: &str, span: Span) -> (Token, Span) {
+    fn two_char_op(&mut self, op: Operator, span: Span) -> (Token, Span) {
         self.bump();
         self.bump();
-        (Token::Word(Word::Plain(op.into())), self.finish(span))
+        (Token::Op(op), self.finish(span))
     }
 
     /// `<`, `>`, `<=`, `>=` inside `$[…]`.
     fn scan_comparison(&mut self, span: Span) -> (Token, Span) {
-        let mut op = String::from(self.bump().expect("caller peeked `<` or `>`"));
-        if self.peek() == Some('=') {
+        let lt = self.bump() == Some('<');
+        let or_eq = self.peek() == Some('=');
+        if or_eq {
             self.bump();
-            op.push('=');
         }
-        (Token::Word(Word::Plain(op)), self.finish(span))
+        let op = match (lt, or_eq) {
+            (true, false) => CompareOp::Lt,
+            (true, true) => CompareOp::Le,
+            (false, false) => CompareOp::Gt,
+            (false, true) => CompareOp::Ge,
+        };
+        (
+            Token::Op(Operator::Binary(BinaryOp::Compare(op))),
+            self.finish(span),
+        )
     }
 
-    /// One of the word characters that is an operator inside `$[…]`: a
-    /// single char, or `==`.
-    fn scan_operator(&mut self, span: Span) -> (Token, Span) {
-        let mut op = String::from(self.bump().expect("caller peeked an operator char"));
-        if op == "=" && self.peek() == Some('=') {
+    /// `op` is the operator under the cursor; a second `=` after `Assign`
+    /// makes it `==`.
+    fn scan_operator(&mut self, op: Operator, span: Span) -> (Token, Span) {
+        self.bump();
+        let op = if op == Operator::Assign && self.peek() == Some('=') {
             self.bump();
-            op.push('=');
-        }
-        (Token::Word(Word::Plain(op)), self.finish(span))
+            Operator::Binary(BinaryOp::Eq(EqOp::Eq))
+        } else {
+            op
+        };
+        (Token::Op(op), self.finish(span))
     }
 
     /// A digit, or a `.` with a digit after it, under the cursor.
@@ -726,18 +783,28 @@ impl Lexer {
         (token, opened)
     }
 
-    /// Emit the closing token under the cursor, popping only when it closes
-    /// the innermost opener.  A wrong-kind closer (`}` while a `[` is open)
-    /// or one at depth 0 leaves the stack alone, so the lexical mode stays in
-    /// step with the genuinely open delimiters and the parser reports the
-    /// mismatch.
-    fn close_delim(&mut self, token: Token) -> (Token, Span) {
-        let span = self.span();
+    /// Emit the closing token under the cursor, popping the innermost opener
+    /// it closes.  A closer that closes something else is an error; one at
+    /// depth 0 is a token, which the parser reports as unmatched.
+    fn close_delim(&mut self, token: Token) -> Result<(Token, Span), LexError> {
+        let start = self.span();
         let close = self.bump().expect("caller peeked a closer");
-        if self.innermost().is_some_and(|kind| kind.chars().1 == close) {
-            self.delim_stack.pop();
+        let span = self.finish(start);
+        match self.delim_stack.last().copied() {
+            Some(open) if open.kind.chars().1 == close => {
+                self.delim_stack.pop();
+            }
+            Some(open) => {
+                let kind = LexErrorKind::Mismatched {
+                    open: open.kind.chars().0,
+                    opened: open.opened,
+                    close,
+                };
+                return Err(Self::typed_error(span, kind));
+            }
+            None => {}
         }
-        (token, self.finish(span))
+        Ok((token, span))
     }
 
     /// Merge a maximal run of newlines, semicolons, whitespace, and comments
@@ -801,7 +868,8 @@ impl Lexer {
                 break;
             }
 
-            if self.in_expr() && is_operator_char(ch) {
+            // `&` ends a word here because `&&` is a connective.
+            if self.in_expr() && (operator_char(ch).is_some() || ch == '&') {
                 break;
             }
 
@@ -1185,9 +1253,18 @@ impl Lexer {
                 name: self.scan_deref_ident(),
                 delimited: false,
             })),
+            Some('{') => {
+                let dollar = Span::new(self.file, self.byte_pos() - 1, self.byte_pos());
+                Err(Self::error(
+                    dollar,
+                    "`${…}` is bash: write `$name`, `$(name)` to mark where a name ends, \
+                     or `!{…}` to run a command",
+                ))
+            }
             Some('(') => {
                 let span = self.span();
                 self.bump();
+                let body = self.pos;
                 let name = self.scan_ident();
                 // `$(123)` is a mistake; `$(` at EOF is merely unfinished,
                 // and only that one may be re-anchored as still-open by an
@@ -1201,11 +1278,24 @@ impl Lexer {
                 if name.is_empty() {
                     return Err(Self::error(span, "expected identifier after '$('"));
                 }
-                if self.peek() != Some(')') {
-                    return Err(Self::error(
-                        span,
-                        "expected ')' to close '$(...)' dereference",
-                    ));
+                match self.peek() {
+                    Some(')') => {}
+                    Some(' ' | '\t') => {
+                        return Err(Self::error(
+                            span,
+                            format!(
+                                "`$(…)` holds one name, `$(name)`; to run a command and use \
+                                 its output, write `!{{{}}}`",
+                                self.command_text(body)
+                            ),
+                        ));
+                    }
+                    _ => {
+                        return Err(Self::error(
+                            span,
+                            "expected ')' to close '$(...)' dereference",
+                        ));
+                    }
                 }
                 self.bump();
                 Ok(Some(Token::Variable {
@@ -1220,6 +1310,22 @@ impl Lexer {
                 Ok(Some(Token::Expr(body)))
             }
             _ => Ok(None),
+        }
+    }
+
+    /// The text from char index `from` to the next `)` or the end of the
+    /// line, trimmed and capped: what a bash `$(cmd args)` would have run.
+    fn command_text(&self, from: usize) -> String {
+        const CAP: usize = 40;
+        let line: String = self.chars[from..]
+            .iter()
+            .map(|&(_, c)| c)
+            .take_while(|&c| !matches!(c, ')' | '\n'))
+            .collect();
+        let line = line.trim_end();
+        match line.char_indices().nth(CAP) {
+            Some((end, _)) => format!("{}…", &line[..end]),
+            None => line.to_owned(),
         }
     }
 
@@ -1291,8 +1397,7 @@ impl Lexer {
             };
             match (&tok, kind) {
                 // Our closer: `close_delim` already popped us, so the stack
-                // sits below the entry depth.  A mismatched one (`]` while
-                // scanning `{…}`) falls through and the parser reports it.
+                // sits below the entry depth.
                 (Token::RBrace, DelimKind::Brace)
                 | (Token::RBracket, DelimKind::Bracket | DelimKind::Expr)
                     if self.delim_stack.len() < entry_depth =>
@@ -1430,6 +1535,29 @@ mod tests {
 
     fn plain(s: &str) -> Token {
         Token::Word(Word::Plain(s.into()))
+    }
+
+    fn op(s: &str) -> Token {
+        let arith = |op| Operator::Binary(BinaryOp::Arith(op));
+        let compare = |op| Operator::Binary(BinaryOp::Compare(op));
+        let eq = |op| Operator::Binary(BinaryOp::Eq(op));
+        Token::Op(match s {
+            "+" => arith(ArithOp::Add),
+            "-" => arith(ArithOp::Sub),
+            "*" => arith(ArithOp::Mul),
+            "/" => arith(ArithOp::Div),
+            "%" => arith(ArithOp::Mod),
+            "<" => compare(CompareOp::Lt),
+            ">" => compare(CompareOp::Gt),
+            "<=" => compare(CompareOp::Le),
+            ">=" => compare(CompareOp::Ge),
+            "==" => eq(EqOp::Eq),
+            "!=" => eq(EqOp::Ne),
+            "&&" => Operator::And,
+            "||" => Operator::Or,
+            "=" => Operator::Assign,
+            _ => panic!("no operator spelled {s:?}"),
+        })
     }
 
     fn slash(s: &str) -> Token {
@@ -1664,23 +1792,53 @@ mod tests {
         );
     }
 
-    /// A wrong-kind closer must not pop the stack, or newline suppression
-    /// desyncs for the rest of the group: the stray `}` leaves the `[` open,
-    /// so no `Newline` follows it.
+    /// A closer that is not the innermost opener's is a definite error at the
+    /// closer, naming the opener; no more input can repair it.
     #[test]
-    fn mismatched_closer_does_not_desync_newline_suppression() {
-        let toks = tok_types("[a }\nb]");
+    fn a_mismatched_closer_is_a_definite_error() {
+        let err = lex("[a }\nb]").expect_err("`}` does not close `[`");
+        assert!(
+            matches!(
+                err.kind,
+                LexErrorKind::Mismatched {
+                    open: '[',
+                    close: '}',
+                    ..
+                }
+            ),
+            "got {:?}",
+            err.kind
+        );
+        assert!(!err.kind.is_incomplete());
+        assert_eq!(err.span.range(), 3..4);
         assert_eq!(
-            toks,
-            vec![
-                Token::LBracket,
-                plain("a"),
-                Token::RBrace,
-                plain("b"),
-                Token::RBracket,
-                Token::Eof,
-            ],
-            "the stray `}}` must not pop the bracket and re-enable newlines"
+            lex_err("{ ]"),
+            "mismatched `]`: the innermost open delimiter is `{`"
+        );
+    }
+
+    /// The same law inside a nested form, and for every kind of opener.
+    #[test]
+    fn a_mismatched_closer_is_refused_inside_every_nested_form() {
+        for src in ["$[1 }", "{ [a }", "echo \"!{ a ]\"", "echo \"$h[k }\""] {
+            assert!(
+                matches!(
+                    lex(src).map_err(|e| e.kind),
+                    Err(LexErrorKind::Mismatched { .. })
+                ),
+                "{src:?}"
+            );
+        }
+    }
+
+    /// At depth 0 there is no opener to mismatch: the closer is a token, and
+    /// the parser calls it unmatched.
+    #[test]
+    fn a_closer_at_depth_zero_is_a_token() {
+        assert_eq!(tok_types("}"), vec![Token::RBrace, Token::Eof]);
+        assert_eq!(
+            tok_types("{ } ]"),
+            vec![Token::LBrace, Token::RBrace, Token::RBracket, Token::Eof]
         );
     }
 
@@ -1713,7 +1871,8 @@ mod tests {
     #[test]
     fn bare_backtick_is_lex_error() {
         let err = lex_err("echo `");
-        assert!(err.contains("expected tag label after backtick"));
+        assert!(err.contains("expected a tag label after the backtick, as in `` `ok ``"));
+        assert!(err.contains("a backtick never runs a command here; write `!{cmd}` for that"));
     }
 
     #[test]
@@ -2033,7 +2192,7 @@ mod tests {
             panic!("expected Expr token");
         };
         let kinds: Vec<&Token> = inner.iter().map(|(t, _)| t).collect();
-        assert_eq!(kinds, vec![&plain("2"), &plain("+"), &plain("3")]);
+        assert_eq!(kinds, vec![&plain("2"), &op("+"), &plain("3")]);
     }
 
     /// Inside `$[…]` the operator characters end a word, so no spacing is
@@ -2049,24 +2208,24 @@ mod tests {
             kinds,
             vec![
                 &plain("1"),
-                &plain("+"),
+                &op("+"),
                 &plain("1"),
-                &plain("*"),
+                &op("*"),
                 &plain("2"),
-                &plain("=="),
-                &plain("-"),
+                &op("=="),
+                &op("-"),
                 &plain("3"),
-                &plain("/"),
+                &op("/"),
                 &plain("4"),
-                &plain("%"),
+                &op("%"),
                 &plain("5"),
-                &plain("&&"),
+                &op("&&"),
                 &plain("1.5e+3"),
-                &plain("-"),
+                &op("-"),
                 &plain(".5"),
-                &plain("&&"),
+                &op("&&"),
                 &plain("a"),
-                &plain("-"),
+                &op("-"),
                 &plain("b"),
             ]
         );
@@ -2077,9 +2236,9 @@ mod tests {
         );
     }
 
-    /// Inside `$[…]` the operators are words, redirect spellings included.
+    /// Inside `$[…]` the operators are `Token::Op`, redirect spellings included.
     #[test]
-    fn dollar_bracket_operators_are_words() {
+    fn dollar_bracket_operators_are_ops() {
         let toks = tok_types("$[1 && 0 || 2>3 && 2>=3 && 1<2 && 1<=2 && 1!=2]");
         let Token::Expr(inner) = &toks[0] else {
             panic!("expected Expr token");
@@ -2089,29 +2248,44 @@ mod tests {
             kinds,
             vec![
                 &plain("1"),
-                &plain("&&"),
+                &op("&&"),
                 &plain("0"),
-                &plain("||"),
+                &op("||"),
                 &plain("2"),
-                &plain(">"),
+                &op(">"),
                 &plain("3"),
-                &plain("&&"),
+                &op("&&"),
                 &plain("2"),
-                &plain(">="),
+                &op(">="),
                 &plain("3"),
-                &plain("&&"),
+                &op("&&"),
                 &plain("1"),
-                &plain("<"),
+                &op("<"),
                 &plain("2"),
-                &plain("&&"),
+                &op("&&"),
                 &plain("1"),
-                &plain("<="),
+                &op("<="),
                 &plain("2"),
-                &plain("&&"),
+                &op("&&"),
                 &plain("1"),
-                &plain("!="),
+                &op("!="),
                 &plain("2"),
             ]
+        );
+    }
+
+    /// A lone `=` is an `Op` as well; that it is no operator is the parser's
+    /// to say.
+    #[test]
+    fn dollar_bracket_lone_equals_is_an_op() {
+        let toks = tok_types("$[1 = 2 == 3]");
+        let Token::Expr(inner) = &toks[0] else {
+            panic!("expected Expr token");
+        };
+        let kinds: Vec<&Token> = inner.iter().map(|(t, _)| t).collect();
+        assert_eq!(
+            kinds,
+            vec![&plain("1"), &op("="), &plain("2"), &op("=="), &plain("3")]
         );
     }
 
@@ -2428,11 +2602,54 @@ mod tests {
         );
         assert!(err.message().contains("unclosed"));
 
-        // A non-`)` char before EOF still reaches the explicit-paren error.
-        let err = lex("$(name ]").expect_err("expected lex error");
+        // Any other non-`)` char still reaches the explicit-paren error.
+        let err = lex("$(name]").expect_err("expected lex error");
         assert!(
             err.message()
                 .contains("expected ')' to close '$(...)' dereference")
+        );
+    }
+
+    /// Bash's `${…}` is refused at the `$`, in a string as out of one.
+    #[test]
+    fn dollar_brace_is_bash() {
+        let said = "`${…}` is bash: write `$name`, `$(name)` to mark where a name ends, \
+                    or `!{…}` to run a command";
+        for (src, at) in [
+            ("echo ${x}", 5),
+            ("echo \"a ${x} b\"", 8),
+            ("echo !${x}", 6),
+        ] {
+            assert_eq!(lex_err(src), said, "{src:?}");
+            assert_eq!(lex_err_span(src).range(), at..at + 1, "{src:?}");
+        }
+    }
+
+    /// Bash's `$(cmd args)` is told the form that runs a command, with the
+    /// command as written, capped.
+    #[test]
+    fn dollar_paren_command_is_bash() {
+        for (src, shown) in [
+            ("echo $(ls -la)", "ls -la"),
+            ("echo $(ls -la", "ls -la"),
+            ("echo $(ls   )", "ls"),
+            ("echo \"$(date +%s)\"", "date +%s"),
+            ("echo $(ls\t-la)\necho a", "ls\t-la"),
+        ] {
+            assert_eq!(
+                lex_err(src),
+                format!(
+                    "`$(…)` holds one name, `$(name)`; to run a command and use its \
+                     output, write `!{{{shown}}}`"
+                ),
+                "{src:?}"
+            );
+        }
+        let long = format!("echo $(ls {})", "x".repeat(60));
+        let shown = format!("ls {}…", "x".repeat(37));
+        assert!(
+            lex_err(&long).ends_with(&format!("write `!{{{shown}}}`")),
+            "{long:?}"
         );
     }
 

@@ -31,7 +31,7 @@ pub enum StdinSource<T> {
 /// An I/O redirect onto one of ral's three streams.
 ///
 /// Its operand `T` is the parsed word, then the elaborated value, then the
-/// evaluated string.  A field of [`Ast::Call`] and [`Ast::Scope`] rather than
+/// evaluated string.  Held by [`Ast::Redirected`] rather than
 /// an argument, so it can never pass for a value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Redirect<T> {

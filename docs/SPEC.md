@@ -294,19 +294,12 @@ generate; | consume
 
 #### Failure chains
 
-`?` can occur at the start of the line after the command that it follows. The
-next branch must start on the same line as `?`.
+`?` can occur before or after a newline, exactly as `|` can. Blank lines and
+comment lines are also allowed at that point.
 
 ```ral
 read-primary
 ? read-backup
-```
-
-Do not put a newline after `?`:
-
-```ral
-read-primary ?
-read-backup       # error
 ```
 
 #### Bindings and control forms
@@ -431,7 +424,11 @@ nothing between them, such as `--prefix=$d` or `'a'"b"`, are an error, not
 two arguments and not one: write `--prefix= $d` for two, or `"--prefix=$d"`
 for one. Only the grammar's own attachments touch: an index after a `$name`
 or a forced block (`$h[k]`, `!{f}[k]`), a spread before its list (`...$xs`),
-and a redirect before its target (`>file`).
+and a redirect before its target (`>file`). Except for redirects, these
+attachments must touch: `^ls`, `...$xs`, `!$x`, `$h[k]`. A space after `^`,
+`...`, or `!` is an error. The rule holds in every position, not only in a
+command's arguments: `if $c{a}`, `try{a}{b}`, and `[a'b']` are errors like
+`--prefix=$d`.
 
 Backslash has no special meaning in a bare word. For example,
 `C:\Users\name` is one bare word. A dot is also ordinary, so `.env` and
@@ -743,8 +740,11 @@ let answer = `ok 42
 let problem = `error [message: 'not found']
 ```
 
-The tag takes the next value atom as its payload. A statement boundary, comma,
-closing bracket, pipe, `?`, or redirect leaves it without a payload.
+The tag takes the next value atom as its payload. So two tags in a row nest:
+`` `a `b `` is one value, `` `a `` carrying `` `b ``. To pass two tags as two
+arguments, bind the first: `` let a = `a `` and then `` f $a `b ``. A statement
+boundary, comma, closing bracket, pipe, `?`, or redirect leaves it without a
+payload.
 Section 8 defines `case`, which chooses one arm by tag.
 
 A tag says *which of* several alternatives, and a key says *which part of* one
@@ -1689,6 +1689,8 @@ Redirects attach input or output to one command or compound command:
 | `2>&1` | Send standard error wherever standard output goes. |
 | `< path` | Read standard input from a file. |
 | `<< value` | Read standard input from a string value. |
+
+Any stage takes trailing redirects, `if` and `case` included: `if $ok { a } { b } > log`. A command's redirects may also stand between its arguments: `cmd a > f b`.
 
 The default descriptor is 0 for input redirects and 1 for output redirects. A redirect list binds streams: each of standard input, output, and error is bound at most once, and a second binding is a parse error with a caret on the second redirect. `cmd > a > b`, `cmd 2> e 2>&1`, `cmd 2>&1 2> e`, and `cmd < a << b` are all refused with "standard output is redirected twice; which one do you mean?" or its input and error counterpart. Position carries no meaning: `2>&1` sends standard error wherever standard output ends up, so `cmd 2>&1 > f` and `cmd > f 2>&1` are one command. Redirect targets are evaluated before their files are opened, and the files open in one fixed order: standard input, output, error. Relative paths use the scoped logical working directory.
 
@@ -4519,8 +4521,8 @@ The lexer supplies words, quoted strings, interpolation segments, tags,
 redirect tokens, newlines, and punctuation. Its mode is set by the innermost
 open delimiter: inside `[...]` and `$[...]` newlines are whitespace and commas
 punctuate, and inside `$[...]` alone the spellings `<`, `>`, `<=`, `>=`, `!=`,
-`&&`, `||`, `+`, `-`, `*`, `/`, `%`, `=`, and `==` are operator words that end
-the word before them, a numeral being read whole. A newline or `;` separates
+`&&`, `||`, `+`, `-`, `*`, `/`, `%`, `=`, and `==` are operator tokens of their own,
+ending the word before them, a numeral being read whole. A newline or `;` separates
 statements. The
 shared stage parser requires every stage to end at a statement boundary, `|`,
 `?`, a closing delimiter, or end of input; juxtaposed same-line statements are
@@ -4533,29 +4535,29 @@ The following EBNF omits lexical escape details and source-span bookkeeping.
 program       ::= sep* (statement sep+)* statement? sep*
 statement     ::= binding | chain
 
-binding       ::= "let" pattern "=" chain
-chain         ::= pipeline (NL? "?" pipeline)*
+binding       ::= "let" pattern "=" NL* chain
+chain         ::= pipeline ((NL* "?" NL*) pipeline)*
 pipeline      ::= stage ((NL* "|" NL*) stage)*
 
-stage         ::= return
-                | conditional
-                | case
-                | scope-form
-                | command
+stage         ::= (return | conditional | case | scope-form | command)
+                  redirects
 
 return        ::= "return" atom?
-conditional   ::= "if" atom atom
-                  (NL* "elsif" atom atom)*
-                  (NL* "else" atom)?
-case          ::= "case" atom "[" case-arm ("," case-arm)* ","? "]"
+conditional   ::= "if" NL* atom NL* atom
+                  (NL* "elsif" NL* atom NL* atom)*
+                  (NL* "else" NL* atom)?
+case          ::= "case" NL* atom NL* "[" case-arm ("," case-arm)* ","? "]"
 case-arm      ::= tag-key ":" atom
 tag-key       ::= "`" identifier
 
-scope-form    ::= "try" atom atom redirects
-                | "guard" atom atom redirects
-                | "within" atom atom redirects
-                | "grant" atom atom redirects
-                | "audit" atom redirects
+scope-form    ::= "try" atom atom
+                | "guard" atom atom
+                | "within" options atom
+                | "grant" options atom
+                | "audit" atom
+options       ::= "[" "]"
+                | "[" option ("," option)* ","? "]"
+option        ::= identifier ":" atom
 
 command       ::= head (argument | redirect)*
 head          ::= "^" bare-name | atom
@@ -4649,8 +4651,9 @@ The parser curries a multi-parameter block:
 Each pattern binds all its names simultaneously and may not bind one name more
 than once. A list rest pattern is terminal.
 
-The `?` continuation admits at most one newline before `?` and none after it.
-`|` admits newlines on either side.
+`?` and `|` admit newlines on either side.
+
+An operator spelling inside `$[...]` is a token of its own, not a word.
 
 Inside `$[...]`, expressions have the following precedence, from low to high:
 

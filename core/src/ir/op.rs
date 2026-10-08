@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
+use std::fmt;
 
 /// Arithmetic, ordering, equality: the category is the constructor, so a
 /// handler matches exhaustively without a wildcard arm.
@@ -37,6 +38,49 @@ pub enum CompareOp {
 pub enum EqOp {
     Eq,
     Ne,
+}
+
+/// The surface spelling, as written inside `$[…]`.
+impl fmt::Display for BinaryOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Arith(op) => fmt::Display::fmt(op, f),
+            Self::Compare(op) => fmt::Display::fmt(op, f),
+            Self::Eq(op) => fmt::Display::fmt(op, f),
+        }
+    }
+}
+
+impl fmt::Display for ArithOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Add => "+",
+            Self::Sub => "-",
+            Self::Mul => "*",
+            Self::Div => "/",
+            Self::Mod => "%",
+        })
+    }
+}
+
+impl fmt::Display for CompareOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Lt => "<",
+            Self::Gt => ">",
+            Self::Le => "<=",
+            Self::Ge => ">=",
+        })
+    }
+}
+
+impl fmt::Display for EqOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Eq => "==",
+            Self::Ne => "!=",
+        })
+    }
 }
 
 impl CompareOp {

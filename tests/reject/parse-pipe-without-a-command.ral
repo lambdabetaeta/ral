@@ -1,0 +1,2 @@
+# contains: a pipeline needs a command before `|`
+| cat

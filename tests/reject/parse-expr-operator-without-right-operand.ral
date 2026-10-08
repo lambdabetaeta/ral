@@ -1,0 +1,2 @@
+# contains: `+` needs an operand on its right
+return $[1 +]

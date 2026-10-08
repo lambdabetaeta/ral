@@ -1,7 +1,7 @@
 //! Non-interactive execution for script, stdin, and `-c` modes.
 
 use ral_core::carrier::{IdentityTransport, Transport as _, dispatch_to_report};
-use ral_core::compile::{CompileError, compile_and_typecheck};
+use ral_core::compile::{CompileError, compile_and_typecheck, on_compile_stack};
 use ral_core::elaborator::elaborate;
 use ral_core::first_order::FOValue;
 use ral_core::first_order::datum::Datum as _;
@@ -222,13 +222,17 @@ fn dispatch(transport: &IdentityTransport, run: Run, audit: Option<bool>) -> i32
 /// `--check`, `--dump-ast` and `--dump-ir`: static work on the source alone.
 fn halted(halt: Halt, name: &str, source: &str) -> ExitCode {
     let outcome = match halt {
-        Halt::Ast => parse(source)
-            .map(|ast| ast.iter().for_each(|node| errln!("{node:#?}")))
-            .map_err(CompileError::Parse),
-        Halt::Ir => parse(source)
-            .and_then(|ast| elaborate(&ast, [], name))
-            .map(|phrases| errln!("{phrases:#?}"))
-            .map_err(CompileError::Parse),
+        Halt::Ast => on_compile_stack(|| {
+            parse(source)
+                .map(|ast| ast.iter().for_each(|node| errln!("{node:#?}")))
+                .map_err(CompileError::Parse)
+        }),
+        Halt::Ir => on_compile_stack(|| {
+            parse(source)
+                .and_then(|ast| elaborate(&ast, [], name))
+                .map(|phrases| errln!("{phrases:#?}"))
+                .map_err(CompileError::Parse)
+        }),
         Halt::Checked => {
             let schemes =
                 SessionSchemes::from_prelude(crate::PRELUDE.comp(), batch_surface().manifest());

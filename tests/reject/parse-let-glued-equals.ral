@@ -1,0 +1,3 @@
+# contains: `x=5` is one word
+# contains: `let` wants spaces around `=`
+let x=5

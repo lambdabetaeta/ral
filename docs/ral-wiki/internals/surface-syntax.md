@@ -1,7 +1,7 @@
 ---
-verified_at_commit: f52a58a9
-verified_at_date: 2026-09-30
-anchors: [lex, parse, Head, DelimKind, scan_token_group, scan_splice, WordLiteral::classify, is_bare_word]
+verified_at_commit: 870865ed
+verified_at_date: 2026-10-08
+anchors: [lex, parse, Head, DelimKind, Operator, scan_token_group, scan_splice, end_unit, touches_after, eat_continuation, parse_control_op, collect_trailing_redirects, Ast::Redirected, LexErrorKind::Mismatched, WordLiteral::classify, is_bare_word]
 ---
 
 # Surface syntax: lexing and parsing
@@ -14,9 +14,12 @@ produces `Vec<(Token, Span)>` in one pass; the delimiter stack (`DelimKind`)
 picks among three modes and nothing else does. In a `{…}` block newlines
 separate statements. In a `[…]` collection newlines are whitespace and `,`
 punctuates. `$[…]` is a bracket in which, additionally, the comparison and
-Boolean spellings `<` `>` `<=` `>=` `!=` `&&` `||` are operator *words* and the
-arithmetic characters `+ - * / % =` end a word (a numeral is read whole, sign
-of exponent included) — so `$[2>3]` is a comparison, `$[1+1]` a sum, and
+Boolean spellings `<` `>` `<=` `>=` `!=` `&&` `||` and the arithmetic
+characters `+ - * / % =` are *operators*, a token of their own
+(`Token::Op(Operator)`, a closed enum over `ir::BinaryOp` plus `And`, `Or` and
+the lone `=`, which is an error wherever it stands), and end a word (a numeral
+is read whole, sign of exponent included); an operator is never a word, which is
+what lets the [[design/words|words rule]] tell `1+1` from touching atoms. So `$[2>3]` is a comparison, `$[1+1]` a sum, and
 `$[!{wc -l < f} > 1]` reads a file inside its `!{…}` and compares outside it.
 Everywhere else those characters keep their shell meaning: `1+1` is a word,
 `>` begins a redirect, `&` and `&&` and `||` are refused by name (`spawn`, `;`,
@@ -28,6 +31,15 @@ word in head position is a command token. A bare `$name` never absorbs a
 *trailing* `-` even though `-` is a name character, so `"$os-$arch"` splits
 into two derefs around a literal `-`; `$(name)` is the explicit interpolation
 boundary and keeps such a dash.
+
+**A mismatched closer is a definite lexer error, not an incomplete input.**
+`close_delim` meeting a closer that is not the innermost opener's returns
+`LexErrorKind::Mismatched` (L0006, labelled at the closer with the opener as
+its `also`), so the REPL never waits for a line that cannot repair it; a closer
+at depth 0 still lexes and the parser reports it as unmatched. A leading BOM is
+stripped when a source is loaded (`normalize_source_text`), before the line
+endings fold. The lexer also refuses bash's reflexes by name: `${…}` at the
+`$`, and `$(cmd args)`, which holds one name, pointing at `!{…}`.
 
 **A splice in `"…"` is the tokens it would be outside the string.**
 `scan_splice` lexes `$name`, `$(name)`, `$[…]`, `!{…}`, `!$name` in place and
@@ -50,6 +62,14 @@ rule holds outside a string: `parse_atom` declines a postfix for a
 delimited name, so `$(red)[x]` is two words that touch
 ([[design/words|words]]), and `$red[x]` is the index.
 
+**The words rule is one check at the end of a unit.** `Parser::end_unit(span)`
+refuses the unit when `touches_after` finds an atom starting where it ended;
+`parse_atom`, a keyword head (`try{a}{b}`, `return'x'`), a redirect's target,
+a parenthesised group and `not` in `$[…]` each end their unit there, and
+nowhere else, so the rule holds in every position, brackets and `$[…]`
+included. The grammar's attachments (`^`, `...`, `!`, an index) are the
+exceptions that must *touch*: `^ ls` is an error naming `^ls`, not a spacing.
+
 **A word's *literal* shape is lexical too.** `WordLiteral::classify` (`ast.rs`)
 reads a bare word and nothing else — no expected type, no scope, no head — so a
 numeral denotes its number wherever it stands and a token meaning bytes is
@@ -69,7 +89,7 @@ spelling of a name can collide with them.
 **Parsing is recursive descent with a Pratt core for `$[…]`.**
 `parse(source)` returns `Vec<Stmt>` or a `ParseError`. Statement and pipeline
 productions descend recursively (`parse_stmt`, `parse_pipeline`, `parse_primary`)
-under a depth counter that fails cleanly on pathological nesting rather than
+(a `case` arm's lambda included) under a depth counter that fails cleanly on pathological nesting rather than
 overflowing the host stack. The body of `$[…]` is one Pratt parser by binding
 power (`parse_expr_prec`), not bash's partitioned `(( ))` / `[[ ]]`, and its
 operands are the ordinary atoms of the value grammar: `$[$s == 'quit']` is
@@ -79,11 +99,12 @@ under `-`, arithmetic or ordering it can never typecheck, and `numeric_operand`
 refuses `$[x + 1]` asking whether `$x` was meant — the old sublanguage's best
 diagnostic, kept without its leaf grammar. The five operator forms —
 `Binary`, `Negate`, `Not`, `And`, `Or` — are `Ast` variants like any other;
-there is no `Expr` type, and `$[…]` leaves no node behind.
+there is no `Expr` type, and `$[…]` leaves no node behind. `""` is a
+literal (the empty string), not an interpolation.
 
 **Newlines bend around a continuation, on both sides of it.** A trailing `|`
 or `?` promises a stage or a branch, so the parser skips the newlines after it
-and the REPL's continuation prompt is telling the truth when it asks for the
+(`?` continues exactly as `|` does, both through `eat_continuation`) and the REPL's continuation prompt is telling the truth when it asks for the
 next line (`needs_continuation` runs the real parser and reads the `ParseError`'s
 own `incomplete` verdict; `join_continuation` folds lines in with `'\n'`). A
 newline *before* `?` is allowed too, so `cmd\n? fallback` and `cmd ?\nfallback`
@@ -91,10 +112,15 @@ both parse. A `;` never continues anything.
 
 **Redirects are the three standard streams.** `parse_redirect_into` eliminates the
 lexer's `Redirect` and `Dup` tokens, fd numbers and all, into the sum
-`Redirect<Ast>` through `Redirect::word` and `Redirect::dup`, which refuse any
+`Redirect<Ast>` through `redirect_word` and `redirect_dup`, which refuse any
 fd that names no stream — so no fd number exists anywhere downstream
 ([[invariants/redirects-are-the-three-standard-streams|redirects-are-the-three-standard-streams]]). Each is then bound into `Redirects<Ast>` by `Redirects::bind`, which refuses a second binding of a stream with a caret on the second redirect
 ([[decisions/260930_redirects-are-bindings|redirects-are-bindings]]).
+Redirects belong to the stage: every pipeline stage takes trailing redirects
+(`collect_trailing_redirects`), and one node, `Ast::Redirected`, holds them,
+minted only when the list is non-empty; `Call` and `Scope` carry none. An
+external head's redirects fuse into its `Exec` at elaboration; any other stage
+takes a `Redirect` frame.
 
 **The AST is flat by decision.** `Ast` (expressions) and `Stmt` are wide flat
 enums ([[decisions/260530_ast-stays-flat|ast-stays-flat]]); no desugaring happens
@@ -116,7 +142,9 @@ then resolves binding → handler → PATH at *evaluation* time
 (`ir.rs` `CommandWord`), so handler installation and PATH state are read when
 the command runs, not when it was parsed. The five reserved
 [[design/control-operators|control operators]] are recognised at the parser
-layer and everything else is a library binding. `group.rs` is a pre-pass
+layer, by a `match` in `parse_control_op` over `syntax::CONTROL_OPERATORS`;
+`else` and `elsif` are refused as heads (they continue an `if`), and
+everything else is a library binding. `group.rs` is a pre-pass
 marking mutually recursive binding groups for the elaborator.
 
 See also [[internals/compilation-ladder|compilation-ladder]]; map

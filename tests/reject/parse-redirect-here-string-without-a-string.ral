@@ -1,0 +1,2 @@
+# contains: `<<` needs a string to feed
+cat <<

@@ -1,0 +1,3 @@
+# contains: `return` takes one value, and `if` begins a statement
+# contains: return !{if …}
+return if $c { a } else { b }

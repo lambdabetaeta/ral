@@ -5,6 +5,11 @@ generated_at_commit: 8d868e18
 
 # Redirects are bindings
 
+> **Amended 2026-10-08.** Redirects belong to the stage: every pipeline stage
+> takes trailing redirects, and one AST node, `Ast::Redirected`, holds them;
+> `Call` and `Scope` no longer carry a field. The binding rule and
+> `RedirectState` are unchanged.
+
 **A redirect list binds each of stdin, stdout and stderr at most once, and one
 interpreter, `RedirectState`, serves every shape that carries one.** A stream
 has one final destination, written once; nothing is opened only to be

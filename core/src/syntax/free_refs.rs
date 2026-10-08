@@ -63,25 +63,19 @@ impl FreeRefs<'_> {
             | Ast::Force(value) => {
                 self.ast(&value.item);
             }
-            Ast::Call {
-                head,
-                args,
-                redirects,
-            } => {
+            Ast::Call { head, args } => {
                 self.head(head);
                 for arg in args {
                     self.ast(&arg.item);
                 }
+            }
+            Ast::Redirected { stage, redirects } => {
+                self.ast(&stage.item);
                 for r in redirects.operands() {
                     self.ast(r);
                 }
             }
-            Ast::Scope { op, redirects } => {
-                self.scope(op);
-                for r in redirects.operands() {
-                    self.ast(r);
-                }
-            }
+            Ast::Scope(op) => self.scope(op),
             Ast::Pipeline(stages) | Ast::Chain(stages) | Ast::Interpolation(stages) => {
                 for s in stages {
                     self.ast(&s.item);

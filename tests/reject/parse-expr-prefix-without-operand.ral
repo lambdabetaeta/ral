@@ -1,0 +1,2 @@
+# contains: `not` needs an operand
+return $[not]

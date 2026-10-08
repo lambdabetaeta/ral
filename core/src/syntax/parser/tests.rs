@@ -1,5 +1,5 @@
 use super::*;
-use crate::ir::StderrTarget;
+use crate::ir::{CompareOp, EqOp, StderrTarget};
 use crate::path::tilde::TildePath;
 use crate::syntax::ast::ScopeAst;
 
@@ -37,16 +37,31 @@ fn app(head: Head, args: Vec<Ast>) -> Ast {
     Ast::Call {
         head,
         args: args.into_iter().map(Spanned::synthetic).collect(),
-        redirects: Box::default(),
+    }
+}
+
+fn redirected(stage: Ast, redirects: Box<Redirects<Ast>>) -> Ast {
+    Ast::Redirected {
+        stage: Spanned::synthetic_boxed(stage),
+        redirects,
     }
 }
 
 fn app_redir(head: Head, args: Vec<Ast>, redirects: Box<Redirects<Ast>>) -> Ast {
-    Ast::Call {
-        head,
-        args: args.into_iter().map(Spanned::synthetic).collect(),
-        redirects,
+    redirected(app(head, args), redirects)
+}
+
+/// The stage and redirects of a parsed `Ast::Redirected`.
+fn unwrap_redirected(ast: &Ast) -> (&Ast, &Redirects<Ast>) {
+    match ast {
+        Ast::Redirected { stage, redirects } => (&stage.item, redirects),
+        other => panic!("expected a redirected stage, got {other:?}"),
     }
+}
+
+/// The redirects of `src`, the one statement it parses to.
+fn redirects_of(src: &str) -> Redirects<Ast> {
+    unwrap_redirected(&sole_stmt(src)).1.clone()
 }
 
 /// Bare `Ast`s in the `Vec<Stmt>` shape a block, lambda, or pipeline body
@@ -90,11 +105,7 @@ fn strip_head(head: Head) -> Head {
 /// can name the shape without predicting byte positions.
 fn strip_one(n: Ast) -> Ast {
     match n {
-        Ast::Call {
-            head,
-            args,
-            redirects,
-        } if args.is_empty() && redirects.is_empty() => match head {
+        Ast::Call { head, args } if args.is_empty() => match head {
             Head::Bare(s) => plain(&s),
             Head::Path(s) => Ast::Word(Word::Slash(s)),
             Head::TildePath(path) => tilde_word(path),
@@ -109,18 +120,18 @@ fn strip_one(n: Ast) -> Ast {
             target: Spanned::synthetic_boxed(strip_one(*target.item)),
             keys: strip_spanned_args(keys),
         },
-        Ast::Call {
-            head,
-            args,
-            redirects,
-        } => {
+        Ast::Call { head, args } => {
             let plain_args: Vec<Ast> = args.into_iter().map(|sp| sp.item).collect();
-            app_redir(strip_head(head), strip_args(plain_args), redirects)
+            app(strip_head(head), strip_args(plain_args))
         }
-        Ast::Scope { op, redirects } => Ast::Scope {
-            op: strip_scope(op),
-            redirects,
+        Ast::Redirected { stage, redirects } => match *stage.item {
+            Ast::Call { head, args } => {
+                let plain_args: Vec<Ast> = args.into_iter().map(|sp| sp.item).collect();
+                app_redir(strip_head(head), strip_args(plain_args), redirects)
+            }
+            other => redirected(strip_one(other), redirects),
         },
+        Ast::Scope(op) => Ast::Scope(strip_scope(op)),
         Ast::Block(body) => Ast::Block(strip_stmts(body)),
         Ast::Lambda { param, body } => Ast::Lambda {
             param: Spanned::synthetic(param.item),
@@ -143,7 +154,7 @@ fn strip_one(n: Ast) -> Ast {
                 .into_iter()
                 .map(|e| match e {
                     RecordEntry::Field { key, value } => RecordEntry::Field {
-                        key,
+                        key: Spanned::synthetic(key.item),
                         value: Spanned::synthetic(strip_one(value.item)),
                     },
                     RecordEntry::Spread(a) => {
@@ -475,15 +486,25 @@ fn juxtaposed_operands_name_the_missing_operator() {
     );
 }
 
+/// `=` is the one spelling the lexer emits inside `$[…]` that is no operator:
+/// equality is `==`, and binding is `let`.
+#[test]
+fn a_lone_equals_in_an_expression_names_the_equality_operator() {
+    for src in ["$[1 = 1]", "$[$x = 2 && true]", "$[= 1]"] {
+        let err = parse(src).unwrap_err();
+        assert!(
+            err.message.contains("`=` is not an operator") && err.message.contains("`==`"),
+            "{src:?}: {}",
+            err.message
+        );
+    }
+}
+
 /// Outside `$[…]` the shell meaning of `>` stands, so `>=` is a redirect
 /// to a file named `=…`, exactly as §3.5 lists `>` among the word-enders.
 #[test]
 fn comparison_spellings_are_redirects_outside_expressions() {
-    let ast = unwrap_stmts(parse("echo a >= b").unwrap());
-    let Ast::Call { redirects, .. } = &ast[0] else {
-        panic!("expected a call, got {ast:?}");
-    };
-    assert!(redirects.stdout.is_some());
+    assert!(redirects_of("echo a >= b").stdout.is_some());
 }
 
 /// The bash reflexes `&&` and `||` each earn an error naming ral's own
@@ -531,6 +552,38 @@ fn touching_atoms_in_command_position_are_refused() {
     }
 }
 
+/// The words rule is checked once, where a unit ends: whatever begins there
+/// is the second word, and the run is everything that keeps touching.
+#[test]
+fn touching_is_refused_naming_both_words_and_the_run() {
+    for (src, first, second, run) in [
+        ("try{a}{b}", "try", "{a}", "try{a}{b}"),
+        ("try{a} {b}", "try", "{a}", "try{a}"),
+        ("if $c{a}", "$c", "{a}", "$c{a}"),
+        ("return'x'", "return", "'x'", "return'x'"),
+        ("[a'b']", "a", "'b'", "a'b'"),
+        ("$[1'a']", "1", "'a'", "1'a'"),
+        ("$[(1)'a']", "(1)", "'a'", "(1)'a'"),
+        ("$(red)[x]", "$(red)", "[x]", "$(red)[x]"),
+        ("cmd >$x'a'", "$x", "'a'", "$x'a'"),
+        ("{a}'b'", "{a}", "'b'", "{a}'b'"),
+        ("$[not$x]", "not", "$x", "not$x"),
+        ("^ls$x", "^ls", "$x", "^ls$x"),
+    ] {
+        let err = parse(src).unwrap_err();
+        let ParseErrorKind::Touching {
+            first: f,
+            second: s,
+            run: r,
+        } = err.kind
+        else {
+            panic!("{src:?} must be refused as touching, got: {}", err.message);
+        };
+        let text = |span: Span| &src[span.range()];
+        assert_eq!((text(f), text(s), text(r)), (first, second, run), "{src:?}");
+    }
+}
+
 #[test]
 fn grammatical_adjacency_still_parses() {
     for src in [
@@ -545,10 +598,48 @@ fn grammatical_adjacency_still_parses() {
         "echo a ? echo b",
         "echo [1, 2]",
         "echo a 'b' \"c\" $d",
+        "a>f",
+        "cmd >file",
+        "cmd a> f",
+        "$[1+1]",
+        "$[-1]",
+        "$[1+-1]",
+        "$x[0]",
+        "[1][2]",
+        "!{f}[k]",
+        "`ok 5",
     ] {
         if let Err(err) = parse(src) {
             panic!("{src:?} must parse, got: {}", err.message);
         }
+    }
+}
+
+/// `^`, `...` and `!` mark what follows them, so each must touch it.
+#[test]
+fn an_attachment_must_touch_what_it_marks() {
+    for (src, said) in [
+        ("^ ls", "`^` attaches to the name it marks: write `^ls`"),
+        (
+            "echo ... $x",
+            "`...` attaches to the value it spreads: write `...$xs`",
+        ),
+        ("echo [... $x]", "`...` attaches to the value it spreads"),
+        (
+            "let [a, ... r] = $x",
+            "`...` attaches to the value it spreads",
+        ),
+        (
+            "echo ! $x",
+            "`!` attaches to what it forces: write `!{…}` or `!$x`",
+        ),
+    ] {
+        let err = parse(src).unwrap_err();
+        assert!(
+            err.message.contains(said),
+            "{src:?} must say {said:?}, got: {}",
+            err.message
+        );
     }
 }
 
@@ -640,6 +731,20 @@ fn parse_return_stage() {
 }
 
 #[test]
+fn the_empty_string_is_a_literal() {
+    assert_eq!(
+        unwrap_stmts(parse("return \"\"").unwrap()),
+        vec![Ast::Return(Some(Spanned::synthetic_boxed(Ast::Literal(
+            String::new()
+        ))))]
+    );
+    assert_eq!(
+        unwrap_stmts(parse("echo \"\"").unwrap()),
+        vec![app(bare_head("echo"), vec![Ast::Literal(String::new())])]
+    );
+}
+
+#[test]
 fn parse_return_unit_stage() {
     let ast = unwrap_stmts(parse("return").unwrap());
     assert_eq!(ast, vec![Ast::Return(None)]);
@@ -679,11 +784,11 @@ fn parse_record() {
         vec![Ast::Return(Some(Spanned::synthetic_boxed(Ast::Record(
             vec![
                 RecordEntry::Field {
-                    key: "host".into(),
+                    key: Spanned::synthetic("host".into()),
                     value: sp(plain("localhost")),
                 },
                 RecordEntry::Field {
-                    key: "port".into(),
+                    key: Spanned::synthetic("port".into()),
                     value: sp(plain("8080")),
                 },
             ]
@@ -1132,7 +1237,7 @@ fn parse_leading_spread_disambiguates_to_record() {
         vec![Ast::Record(vec![
             RecordEntry::Spread(sp(Ast::Variable("d".into()))),
             RecordEntry::Field {
-                key: "k".into(),
+                key: Spanned::synthetic("k".into()),
                 value: sp(Ast::Literal("v".into())),
             },
         ])]
@@ -1170,11 +1275,11 @@ fn parse_leading_spread_of_nested_collection_disambiguates_to_record() {
         ast,
         vec![Ast::Record(vec![
             RecordEntry::Spread(sp(Ast::Record(vec![RecordEntry::Field {
-                key: "a".into(),
+                key: Spanned::synthetic("a".into()),
                 value: sp(plain("1")),
             }]))),
             RecordEntry::Field {
-                key: "b".into(),
+                key: Spanned::synthetic("b".into()),
                 value: sp(plain("2")),
             },
         ])]
@@ -1517,45 +1622,29 @@ fn parse_case_still_allowed_as_a_pipeline_stage() {
 
 #[test]
 fn parse_redirect() {
-    let ast = unwrap_stmts(parse("echo hello > out.txt").unwrap());
-    match &ast[0] {
-        Ast::Call {
-            args, redirects, ..
-        } => {
-            assert_eq!(args.len(), 1);
-            assert!(redirects.stdout.is_some());
-        }
-        _ => panic!("expected command"),
-    }
+    let ast = sole_stmt("echo hello > out.txt");
+    let (Ast::Call { args, .. }, redirects) = unwrap_redirected(&ast) else {
+        panic!("expected a redirected command, got {ast:?}");
+    };
+    assert_eq!(args.len(), 1);
+    assert!(redirects.stdout.is_some());
 }
 
 #[test]
 fn parse_herestring_redirect() {
-    let ast = unwrap_stmts(parse("cat << #'body'#").unwrap());
-    match &ast[0] {
-        Ast::Call { redirects, .. } => {
-            assert_eq!(
-                redirects.stdin,
-                Some(StdinSource::Here(Ast::Literal("body".into())))
-            );
-        }
-        other => panic!("expected command, got {other:?}"),
-    }
+    assert_eq!(
+        redirects_of("cat << #'body'#").stdin,
+        Some(StdinSource::Here(Ast::Literal("body".into())))
+    );
 }
 
 /// A here-string payload takes any value form a redirect operand does.
 #[test]
 fn parse_herestring_variable_payload() {
-    let ast = unwrap_stmts(parse("cat << $body").unwrap());
-    match &ast[0] {
-        Ast::Call { redirects, .. } => {
-            assert_eq!(
-                redirects.stdin,
-                Some(StdinSource::Here(Ast::Variable("body".into())))
-            );
-        }
-        other => panic!("expected command, got {other:?}"),
-    }
+    assert_eq!(
+        redirects_of("cat << $body").stdin,
+        Some(StdinSource::Here(Ast::Variable("body".into())))
+    );
 }
 
 /// The bash-heredoc reflex earns an error naming the raw-string form, not
@@ -1583,10 +1672,7 @@ fn herestring_path_word_is_rejected() {
 /// identity dup picks none.
 #[test]
 fn fd_prefixes_name_streams() {
-    let ast = unwrap_stmts(parse("cmd 1>&1 2>&2 2>&1 > o").unwrap());
-    let Ast::Call { redirects, .. } = &ast[0] else {
-        panic!("expected command, got {:?}", ast[0]);
-    };
+    let redirects = redirects_of("cmd 1>&1 2>&2 2>&1 > o");
     assert!(matches!(redirects.stdout, Some((WriteMode::Write, _))));
     assert!(matches!(redirects.stderr, Some(StderrTarget::Stdout)));
     assert!(redirects.stdin.is_none());
@@ -1595,12 +1681,8 @@ fn fd_prefixes_name_streams() {
 /// `2>` streams, so the AST states that stderr is never atomic.
 #[test]
 fn stderr_write_is_a_stream() {
-    let ast = unwrap_stmts(parse("cmd 2> e").unwrap());
-    let Ast::Call { redirects, .. } = &ast[0] else {
-        panic!("expected command, got {:?}", ast[0]);
-    };
     assert!(matches!(
-        redirects.stderr,
+        redirects_of("cmd 2> e").stderr,
         Some(StderrTarget::File(WriteMode::Stream, _))
     ));
 }
@@ -1650,13 +1732,10 @@ fn distinct_streams_bind_in_any_order() {
 /// stream errors here (an fd past 2 never leaves the lexer).
 #[test]
 fn herestring_fd_prefix() {
-    let ast = unwrap_stmts(parse("cat 0<< #'x'#").unwrap());
-    match &ast[0] {
-        Ast::Call { redirects, .. } => {
-            assert!(matches!(redirects.stdin, Some(StdinSource::Here(_))));
-        }
-        other => panic!("expected command, got {other:?}"),
-    }
+    assert!(matches!(
+        redirects_of("cat 0<< #'x'#").stdin,
+        Some(StdinSource::Here(_))
+    ));
     let err = parse("cat 2<< #'x'#").expect_err("fd 2 herestring must not parse");
     assert!(
         err.message.contains("always feeds stdin"),
@@ -2063,30 +2142,56 @@ fn if_with_else_keyword_is_valid() {
     assert!(parse("if $c { a } else { b }").is_ok());
 }
 
+/// `else` and `elsif` continue an `if`; as a stage head they have nothing
+/// to continue.
+#[test]
+fn else_and_elsif_are_refused_as_stage_heads() {
+    for (src, word) in [
+        ("else { b }", "else"),
+        ("elsif $c { b }", "elsif"),
+        ("echo hi\nelse { b }", "else"),
+        ("echo hi | elsif $c { b }", "elsif"),
+    ] {
+        let err = parse(src).unwrap_err();
+        assert!(
+            err.message
+                .contains(&format!("`{word}` continues an `if` on the line above")),
+            "{src:?}: {}",
+            err.message
+        );
+    }
+}
+
 // ── Control operators (try / guard / within / grant / audit) ────────
 
-fn unwrap_single_scope(ast: Vec<Stmt>) -> (ScopeAst, Redirects<Ast>) {
+fn unwrap_single_scope(ast: Vec<Stmt>) -> ScopeAst {
     let stripped: Vec<_> = ast.into_iter().map(|s| s.item).collect();
     match stripped.as_slice() {
-        [Ast::Scope { op, redirects, .. }] => (op.clone(), (**redirects).clone()),
+        [Ast::Scope(op)] => op.clone(),
         _ => panic!("expected a single Ast::Scope, got {stripped:?}"),
     }
+}
+
+/// The scope and trailing redirects of the one statement `src` parses to.
+fn redirected_scope(src: &str) -> (ScopeAst, Redirects<Ast>) {
+    let ast = sole_stmt(src);
+    let (Ast::Scope(op), redirects) = unwrap_redirected(&ast) else {
+        panic!("expected a redirected scope, got {ast:?}");
+    };
+    (op.clone(), redirects.clone())
 }
 
 fn unwrap_single_exec(ast: Vec<Stmt>) -> (Head, Vec<Ast>) {
     let stripped: Vec<_> = ast.into_iter().map(|s| s.item).collect();
     match stripped.as_slice() {
-        [Ast::Call { head, args, .. }] => {
-            (head.clone(), args.iter().map(|s| s.item.clone()).collect())
-        }
+        [Ast::Call { head, args }] => (head.clone(), args.iter().map(|s| s.item.clone()).collect()),
         _ => panic!("expected a single Ast::Call, got {stripped:?}"),
     }
 }
 
 #[test]
 fn parse_try_two_blocks() {
-    let (op, redirects) = unwrap_single_scope(parse("try { body } { handler }").unwrap());
-    assert!(redirects.is_empty());
+    let op = unwrap_single_scope(parse("try { body } { handler }").unwrap());
     match op {
         ScopeAst::Try { body, handler } => {
             assert!(matches!(*body, Ast::Block(_)));
@@ -2099,8 +2204,7 @@ fn parse_try_two_blocks() {
 #[test]
 fn parse_try_body_then_lambda() {
     // The shape the prelude writes: a bound body, a lambda handler.
-    let (op, redirects) = unwrap_single_scope(parse("try $body { |err| return () }").unwrap());
-    assert!(redirects.is_empty());
+    let op = unwrap_single_scope(parse("try $body { |err| return () }").unwrap());
     match op {
         ScopeAst::Try { body, handler } => {
             assert!(matches!(*body, Ast::Variable(ref n) if n == "body"));
@@ -2112,7 +2216,7 @@ fn parse_try_body_then_lambda() {
 
 #[test]
 fn parse_try_with_trailing_redirect() {
-    let (op, redirects) = unwrap_single_scope(parse("try { body } { handler } > out").unwrap());
+    let (op, redirects) = redirected_scope("try { body } { handler } > out");
     assert!(redirects.stdout.is_some());
     match op {
         ScopeAst::Try { body, handler } => {
@@ -2125,11 +2229,26 @@ fn parse_try_with_trailing_redirect() {
 
 #[test]
 fn parse_try_with_two_trailing_redirects() {
-    let (op, redirects) =
-        unwrap_single_scope(parse("try { body } { handler } > out 2>&1").unwrap());
+    let (op, redirects) = redirected_scope("try { body } { handler } > out 2>&1");
     assert!(redirects.stdout.is_some());
     assert!(matches!(redirects.stderr, Some(StderrTarget::Stdout)));
     assert!(matches!(op, ScopeAst::Try { .. }));
+}
+
+#[test]
+fn parse_if_case_and_return_take_trailing_redirects() {
+    let ast = sole_stmt("if $c {a} else {b} > f");
+    assert!(matches!(unwrap_redirected(&ast), (Ast::If { .. }, r) if r.stdout.is_some()));
+    let ast = sole_stmt("case $x [`a: { |v| b }] 2> e");
+    assert!(matches!(unwrap_redirected(&ast), (Ast::Case { .. }, r) if r.stderr.is_some()));
+    let ast = sole_stmt("return 1 > f");
+    assert!(matches!(unwrap_redirected(&ast), (Ast::Return(Some(_)), r) if r.stdout.is_some()));
+}
+
+#[test]
+fn parse_value_head_with_redirect_keeps_its_stage() {
+    let ast = sole_stmt("$f > out");
+    assert!(matches!(unwrap_redirected(&ast), (Ast::Variable(_), r) if r.stdout.is_some()));
 }
 
 #[test]
@@ -2171,13 +2290,13 @@ fn parse_try_three_args_is_error() {
 
 #[test]
 fn parse_guard_two_blocks() {
-    let (op, _) = unwrap_single_scope(parse("guard { body } { cleanup }").unwrap());
+    let op = unwrap_single_scope(parse("guard { body } { cleanup }").unwrap());
     assert!(matches!(op, ScopeAst::Guard { .. }));
 }
 
 #[test]
 fn parse_within_opts_and_body() {
-    let (op, _) = unwrap_single_scope(parse("within [dir: '/tmp'] { body }").unwrap());
+    let op = unwrap_single_scope(parse("within [dir: '/tmp'] { body }").unwrap());
     match op {
         ScopeAst::Within { opts, body, .. } => {
             assert_eq!(opts.len(), 1);
@@ -2193,7 +2312,7 @@ fn parse_within_opts_and_body() {
 #[test]
 fn an_empty_option_bracket_is_no_options() {
     for src in ["within [] { body }", "grant [] { body }"] {
-        let (op, _) = unwrap_single_scope(parse(src).unwrap());
+        let op = unwrap_single_scope(parse(src).unwrap());
         let opts = match op {
             ScopeAst::Within { opts, .. } | ScopeAst::Grant { caps: opts, .. } => opts,
             other => panic!("expected an option-taking form, got {other:?}"),
@@ -2287,7 +2406,7 @@ fn a_computed_handler_table_is_refused() {
 /// `[]` keeps the empty handler set.
 #[test]
 fn handler_arms_are_lifted_out_of_the_options() {
-    let (op, _) = unwrap_single_scope(
+    let op = unwrap_single_scope(
         parse("within [dir: '/tmp', handlers: [deploy: { echo hi }]] { body }").unwrap(),
     );
     match op {
@@ -2301,7 +2420,7 @@ fn handler_arms_are_lifted_out_of_the_options() {
         }
         other => panic!("expected ScopeAst::Within, got {other:?}"),
     }
-    let (op, _) = unwrap_single_scope(parse("within [handlers: []] { body }").unwrap());
+    let op = unwrap_single_scope(parse("within [handlers: []] { body }").unwrap());
     match op {
         ScopeAst::Within { handlers, .. } => assert_eq!(handlers, Some(Vec::new())),
         other => panic!("expected ScopeAst::Within, got {other:?}"),
@@ -2320,13 +2439,13 @@ fn a_repeated_handler_name_is_refused() {
 
 #[test]
 fn parse_grant_caps_and_body() {
-    let (op, _) = unwrap_single_scope(parse("grant [exec: [:]] { body }").unwrap());
+    let op = unwrap_single_scope(parse("grant [exec: [:]] { body }").unwrap());
     assert!(matches!(op, ScopeAst::Grant { .. }));
 }
 
 #[test]
 fn parse_audit_one_block() {
-    let (op, _) = unwrap_single_scope(parse("audit { body }").unwrap());
+    let op = unwrap_single_scope(parse("audit { body }").unwrap());
     assert!(matches!(op, ScopeAst::Audit { .. }));
 }
 
@@ -2347,7 +2466,7 @@ fn parse_audit_zero_args_is_error() {
 
 #[test]
 fn parse_audit_with_trailing_redirect() {
-    let (op, redirects) = unwrap_single_scope(parse("audit { body } > out").unwrap());
+    let (op, redirects) = redirected_scope("audit { body } > out");
     assert!(matches!(op, ScopeAst::Audit { .. }));
     assert!(redirects.stdout.is_some());
 }
@@ -2389,4 +2508,227 @@ fn parse_leading_redirect_after_newline_rejected() {
         err.message.contains("redirect must follow a command"),
         "msg: {err}"
     );
+}
+
+// ── Targeted diagnostics ────────────────────────────────────────────
+
+/// Every program is refused, and its message contains what is paired with it.
+fn refused_saying(cases: &[(&str, &str)]) {
+    for (src, said) in cases {
+        let err = parse(src).expect_err(src);
+        assert!(
+            err.message.contains(said),
+            "{src:?} must say {said:?}, got: {}",
+            err.message
+        );
+    }
+}
+
+/// A closer that closes nothing open is the lexer's definite error, so the
+/// REPL does not wait for the line that cannot repair it.
+#[test]
+fn a_mismatched_closer_never_asks_for_more_input() {
+    assert!(!needs_continuation("{ ]"));
+    refused_saying(&[("{ ]", "mismatched `]`: the innermost open delimiter is `{`")]);
+}
+
+#[test]
+fn a_function_header_opens_on_the_brace_line() {
+    refused_saying(&[
+        (
+            "let f = {\n|x| echo $x }",
+            "a function's parameters open on the same line as `{`: write `{ |x|`",
+        ),
+        ("{ # header\n|x| 1 }", "open on the same line as `{`"),
+    ]);
+}
+
+#[test]
+fn an_unclosed_parameter_list_names_the_closing_bar() {
+    refused_saying(&[
+        (
+            "{ |x }",
+            "expected `|` to close the parameter list: `{ |x| … }`",
+        ),
+        (
+            "{ |x\n echo $x }",
+            "expected `|` to close the parameter list",
+        ),
+        (
+            "{ |x; echo $x }",
+            "expected `|` to close the parameter list",
+        ),
+    ]);
+}
+
+#[test]
+fn a_spread_with_nothing_after_it_says_what_it_spreads() {
+    let said = "`...` spreads the value after it: write `...$xs`";
+    refused_saying(&[
+        ("echo ...", said),
+        ("echo ...\necho a", said),
+        ("echo ... | cat", said),
+        ("echo ... ? a", said),
+    ]);
+}
+
+#[test]
+fn a_redirect_with_nothing_after_it_says_what_it_needs() {
+    let write = "`>` needs a file to write to";
+    let read = "`<` needs a file to read";
+    let feed = "`<<` needs a string to feed";
+    refused_saying(&[
+        ("echo >", write),
+        ("echo >>\n", write),
+        ("echo 2>", write),
+        ("echo > | cat", write),
+        ("cat <", read),
+        ("cat <\necho a", read),
+        ("cat <<", feed),
+        ("cat <<\necho a", feed),
+    ]);
+}
+
+#[test]
+fn an_index_without_a_key_gives_the_two_forms() {
+    let said = "an index needs a key: `$x[name]` or `$x[0]`";
+    refused_saying(&[
+        ("echo $x[]", said),
+        ("echo $x[a][]", said),
+        ("echo \"$x[]\"", said),
+    ]);
+}
+
+#[test]
+fn an_empty_expression_block_gives_examples() {
+    let said = "`$[…]` holds an expression: `$[1 + 2]`, `$[$n > 0]`";
+    refused_saying(&[("$[]", said), ("echo $[ ]", said), ("echo \"$[]\"", said)]);
+}
+
+#[test]
+fn an_operator_with_nothing_after_it_says_which() {
+    refused_saying(&[
+        ("$[1 +]", "`+` needs an operand on its right"),
+        ("$[$a && ]", "`&&` needs an operand on its right"),
+        ("$[$a == ]", "`==` needs an operand on its right"),
+        ("$[$a <= ]", "`<=` needs an operand on its right"),
+        ("$[-]", "`-` needs an operand"),
+        ("$[1 + -]", "`-` needs an operand"),
+        ("$[not]", "`not` needs an operand"),
+    ]);
+}
+
+#[test]
+fn a_stage_with_no_command_says_what_precedes_it() {
+    let pipe = "a pipeline needs a command before `|`";
+    let question = "`?` needs a command before it to fall back from";
+    refused_saying(&[
+        ("| cat", pipe),
+        ("echo a ? | cat", pipe),
+        ("? echo a", question),
+        ("echo a | ? b", question),
+        ("|| cat", "ral has no `||`"),
+    ]);
+}
+
+#[test]
+fn a_rest_pattern_comes_last() {
+    let said = "`...rest` takes the remaining elements, so it comes last";
+    refused_saying(&[
+        ("let [...r, a] = $x", said),
+        ("let [a, ...r, b] = $x", said),
+        ("let [a, ...r b] = $x", said),
+    ]);
+    for src in ["let [a, ...r] = $x", "let [a, ...r,] = $x"] {
+        assert!(parse(src).is_ok(), "{src:?} must parse");
+    }
+}
+
+#[test]
+fn a_return_before_a_statement_keyword_says_why() {
+    refused_saying(&[
+        (
+            "return if $c { a } else { b }",
+            "`return` takes one value, and `if` begins a statement: put the `return` \
+             inside each branch, or write `return !{if …}`",
+        ),
+        (
+            "return case $x [`a: { |v| 1 }]",
+            "and `case` begins a statement",
+        ),
+        ("return let x = 1", "and `let` begins a statement"),
+        ("return try { a } { b }", "or write `return !{try …}`"),
+    ]);
+}
+
+#[test]
+fn a_glued_equals_in_a_binding_says_to_space_it() {
+    refused_saying(&[
+        (
+            "let x=5",
+            "`x=5` is one word: `let` wants spaces around `=`, as in `let x = 5`",
+        ),
+        ("let x= 5", "`x=` is one word"),
+        ("let x =5", "`=5` is one word"),
+        ("let dir=/tmp/x", "`dir=/tmp/x` is one word"),
+        ("let x foo", "expected '=' after the binding name"),
+    ]);
+}
+
+#[test]
+fn a_key_with_its_colon_glued_to_its_value_says_to_space_it() {
+    refused_saying(&[
+        (
+            "echo [host:\"h\"]",
+            "`host:` is one word; for the key `host`, put a space after the colon: \
+             `host: value`",
+        ),
+        (
+            "echo [a: 1, port:$p]",
+            "`port:` is one word; for the key `port`",
+        ),
+        (
+            "within [dir:$d] { a }",
+            "`dir:` is one word; for the key `dir`",
+        ),
+    ]);
+    assert!(parse("echo [http://x, y]").is_ok());
+}
+
+#[test]
+fn an_option_bracket_ends_its_unit() {
+    for src in [
+        "within [dir: $d]{ a }",
+        "within []{ a }",
+        "grant [net: $n]{ a }",
+    ] {
+        let err = parse(src).expect_err(src);
+        assert!(
+            err.message.contains("words touch"),
+            "{src:?}: {}",
+            err.message
+        );
+    }
+}
+
+#[test]
+fn else_and_elsif_end_their_unit() {
+    for src in ["if $c {a} else{b}", "if $c {a} elsif$d {b}"] {
+        let err = parse(src).expect_err(src);
+        assert!(
+            err.message.contains("words touch"),
+            "{src:?}: {}",
+            err.message
+        );
+    }
+}
+
+#[test]
+fn a_forced_variable_touching_an_atom_is_reported_whole() {
+    let err = parse("f !$x'a'").unwrap_err();
+    let ParseErrorKind::Touching { first, .. } = err.kind else {
+        panic!("expected a touching error, got {err:?}");
+    };
+    let src = "f !$x'a'";
+    assert_eq!(&src[first.start as usize..first.end as usize], "!$x");
 }

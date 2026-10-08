@@ -208,8 +208,9 @@ ssh, as fish does), and it is orthogonal to how ral's own words are read.
 ## Where it lives
 
 The atom list is `is_bare_char` and the quote and splice scanners in
-`core/src/syntax/lexer.rs`; the word rule is checked where adjacency is
-already read, beside the `$name[k]` and `!{f}[k]` productions in the parser;
+`core/src/syntax/lexer.rs`; the word rule is checked once at the end of every unit
+(`Parser::end_unit`, with `touches_after`), in every position, and the
+grammar's attachments (`^`, `...`, `!`, an index) must touch;
 the diagnostic is `P0002`, with a two-reading help. Spec
 §3.5 states the rule after "Quote a word when there is any doubt"; `ral.md`
 no longer needs to tell the agent that a composite path is one quoted word,

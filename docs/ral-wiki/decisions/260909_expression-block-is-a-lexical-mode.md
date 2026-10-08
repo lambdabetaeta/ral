@@ -4,6 +4,10 @@ status: active
 
 # `$[…]` is a lexical mode, not a sublanguage
 
+> **Amended 2026-10-08.** The operator spellings are now a token of their own,
+> `Token::Op(Operator)`, rather than words: the words rule has to tell `1+1`
+> from touching atoms by token kind. The rest of the decision stands.
+
 **Inside `$[…]` the spellings `<` `>` `<=` `>=` `!=` `&&` `||` lex as operator
 words, exactly as `+` and `==` always did; the parser reads the body with one
 Pratt loop whose operands are the ordinary atoms of the value grammar; the five

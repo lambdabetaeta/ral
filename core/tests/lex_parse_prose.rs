@@ -365,6 +365,10 @@ fn pathological_structural_inputs() {
         ("escape_storm", "\"".to_string() + &r"\".repeat(200)),
         ("interleaved_tokens", "$ | ? & < > ".repeat(50)),
         ("pattern_vs_list_backtrack_100", pattern_backtrack),
+        (
+            "case_arm_lambda_nesting",
+            "case $x [`a: {|p| ".repeat(200) + "1" + &"}]".repeat(200),
+        ),
     ];
     for (tag, src) in cases {
         must_not_panic_and_be_friendly(tag, src);

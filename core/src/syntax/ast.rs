@@ -53,21 +53,24 @@ pub enum Ast {
     },
     /// `return [<value>]` — the explicit lift from value to command.
     Return(Option<Spanned<Box<Self>>>),
-    /// A head applied to arguments, plus any trailing redirects. One surface
+    /// A head applied to arguments. One surface
     /// form, two lowerings: the elaborator emits
     /// [`crate::ir::CompKind::Exec`] for a name it dispatches, and
     /// [`crate::ir::CompKind::App`] when the head resolves to a bound value.
     Call {
         head: Head,
         args: Vec<Spanned<Self>>,
+    },
+    /// A stage with its redirects, the stage being any of the five forms. One
+    /// node for all of them, so the elaborator wraps once: an external command
+    /// fuses them into its `Exec`; everything else takes a `Redirect` frame.
+    Redirected {
+        stage: Spanned<Box<Self>>,
         redirects: Box<Redirects<Self>>,
     },
-    /// `try`/`guard`/`within`/`grant`/`audit`, plus any trailing redirects.
-    /// Operand shape is fixed per [`ScopeAst`] variant; the parser checks arity.
-    Scope {
-        op: ScopeAst,
-        redirects: Box<Redirects<Self>>,
-    },
+    /// `try`/`guard`/`within`/`grant`/`audit`. Operand shape is fixed per
+    /// [`ScopeAst`] variant; the parser checks arity.
+    Scope(ScopeAst),
     /// `cmd1 | cmd2 | cmd3`
     Pipeline(Vec<Stmt>),
     /// `cmd1 ? cmd2 ? cmd3`
@@ -196,7 +199,10 @@ pub enum ListElem {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RecordEntry {
     /// `key: value` or `'key': value` — a label known statically.
-    Field { key: String, value: Spanned<Ast> },
+    Field {
+        key: Spanned<String>,
+        value: Spanned<Ast>,
+    },
     /// `...expr` — splice another record's fields into this one.
     Spread(Spanned<Ast>),
 }
@@ -206,13 +212,16 @@ pub enum RecordEntry {
 pub enum MapEntry {
     /// `key: value` — the key a string: a label written out is a literal,
     /// `"…"` and `$name` are computed.
-    Entry { key: Spanned<Ast>, value: Spanned<Ast> },
+    Entry {
+        key: Spanned<Ast>,
+        value: Spanned<Ast>,
+    },
     /// `...expr` — splice another map's entries into this one.
     Spread(Spanned<Ast>),
 }
 
 /// Operand shape of a control-operator scope form, one variant per surface
-/// keyword. Arity and construction are declared in [`ScopeAst::KEYWORDS`].
+/// keyword.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ScopeAst {
     /// `try BODY HANDLER` — run `body`; on error, dispatch to `handler`.
@@ -311,10 +320,9 @@ impl Ast {
 }
 
 impl ScopeAst {
-    /// Every sub-expression in source order: the operands of
-    /// [`Self::KEYWORDS`], plus `within`'s handler arms, which are syntax and
-    /// so sit beside the operands rather than inside one.  Free-variable
-    /// collection walks them.
+    /// Every sub-expression in source order: the operands, plus `within`'s
+    /// handler arms, which are syntax and so sit beside the operands rather
+    /// than inside one.  Free-variable collection walks them.
     pub(crate) fn operands(&self) -> Vec<&Ast> {
         match self {
             Self::Try { body, handler } => vec![body, handler],

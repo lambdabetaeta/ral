@@ -55,6 +55,27 @@ impl CompileError {
     }
 }
 
+/// The front end's stack. A term's depth sizes its walks and its syntax does
+/// not bound it; address space, committed only as touched.
+const COMPILE_STACK: usize = 64 << 20;
+
+/// Run `f` on a thread with [`COMPILE_STACK`].  Every recursive walk of a
+/// term, parse to typecheck and the printers, runs through here.
+///
+/// # Panics
+/// If the thread cannot be spawned; a panic in `f` resumes here.
+pub fn on_compile_stack<R: Send>(f: impl FnOnce() -> R + Send) -> R {
+    std::thread::scope(|s| {
+        std::thread::Builder::new()
+            .name("compile".into())
+            .stack_size(COMPILE_STACK)
+            .spawn_scoped(s, f)
+            .expect("spawn the compile thread")
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    })
+}
+
 /// Parse, elaborate, and typecheck `source` against the live session.
 ///
 /// `schemes` is one map off the live scope split two ways: the elaborator
@@ -83,12 +104,14 @@ pub fn compile_and_typecheck(
     name: &str,
     contract: Option<ReturnContract>,
 ) -> Result<Toplevel, CompileError> {
-    let ast = parse_with(source, file).map_err(CompileError::Parse)?;
-    let comp = elaborate(
-        &ast,
-        schemes.bindings.iter().map(|(n, _)| Name::from(n.as_str())),
-        name,
-    )
-    .map_err(CompileError::Parse)?;
-    typecheck(&comp, schemes, contract).map_err(CompileError::Types)
+    on_compile_stack(|| {
+        let ast = parse_with(source, file).map_err(CompileError::Parse)?;
+        let comp = elaborate(
+            &ast,
+            schemes.bindings.iter().map(|(n, _)| Name::from(n.as_str())),
+            name,
+        )
+        .map_err(CompileError::Parse)?;
+        typecheck(&comp, schemes, contract).map_err(CompileError::Types)
+    })
 }

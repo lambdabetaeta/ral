@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 6ef5d710
+generated_at_commit: 870865ed
 generated_at_date: 2026-10-08
 covers_paths: [core/src/syntax/]
 ---
@@ -13,8 +13,12 @@ sees raw bytes and bare words.
   `Token` enum. The innermost open delimiter (`DelimKind`: `Brace`,
   `Bracket`, `Expr`) is the lexer's whole context: it decides whether a
   newline separates, whether `,` punctuates, and — inside `$[…]` only —
-  whether `<` `>` `<=` `>=` `!=` `&&` `||` are operator words rather than a
-  redirect and refused punctuation. Outside `$[…]` a word starting with `&`
+  whether `<` `>` `<=` `>=` `!=` `&&` `||` and the arithmetic characters are
+  `Token::Op(Operator)` (a closed enum over `ir::BinaryOp` plus `And`, `Or`,
+  `Assign`) rather than a redirect, refused punctuation or word characters. A
+  closer that is not the innermost opener's is `LexErrorKind::Mismatched`
+  (L0006), a definite error. The bash reflexes `${…}` and `$(cmd args)` are
+  refused at `scan_dollar`. Outside `$[…]` a word starting with `&`
   is refused naming `spawn { … }`, one starting `&&` naming `;`, while a `&`
   inside a word is ordinary (`?a=1&b=2`); a bare `$` is refused naming
   the three things it can open. A splice inside `"…"` (`scan_splice`) is the
@@ -30,8 +34,13 @@ sees raw bytes and bare words.
   A redirect list is bound stream by stream, `Redirects::bind` refusing a second
   binding of stdin, stdout or stderr at the second redirect
   ([[decisions/260930_redirects-are-bindings|redirects-are-bindings]]).
+- `syntax.rs` — the module root: `CONTROL_OPERATORS` (`try`, `guard`,
+  `within`, `grant`, `audit`), read by the parser's `parse_control_op` and, through
+  `is_control_operator` / `is_keyword`, by the checker and the highlighters;
+  `NESTING_DEPTH_LIMIT`.
 - `parser.rs` — `parse(source) -> Result<Vec<Stmt>, ParseError>`; `parse_with`
-  carries a `FileId`. A `||` after a pipe is refused naming `?`. `[:]` is the
+  carries a `FileId`. A `||` after a pipe is refused naming `?`. The words rule is checked once
+  per unit by `end_unit`. `[:]` is the
   empty map and the only literal opening with `:`; otherwise a bracket's keys
   decide — any data key (`"…"` or `$k`, `MapKeyForm::Data`) makes a map, labels
   alone an `Ast::Record`, no entry at all a list. `parse_static_key` admits a
@@ -59,6 +68,9 @@ sees raw bytes and bare words.
   `Binary`, `Negate`, `Not`, `And`, `Or` are ordinary variants with `Ast`
   operands; `$[…]` itself leaves no node
   ([[decisions/260909_expression-block-is-a-lexical-mode|expression-block-is-a-lexical-mode]]).
+  `Ast::Redirected` holds a stage's trailing redirects, one node for every stage
+  form; `Call` and `Scope` carry none
+  ([[decisions/260930_redirects-are-bindings|redirects-are-bindings]]).
   `Ast::Unit` is the `()`
   literal — punctuation denoting the unit value, like `[]` and `[:]`, so not a
   word. `Ast::Case` carries `arms: Vec<CaseArm>`, a finite list of tag-and-body
@@ -75,10 +87,7 @@ sees raw bytes and bare words.
   `ral-quote` builtin. It is the dual of `WordLiteral::classify`: a string may
   go bare only where the numeral grammar declines it, since a bare `007` would
   read back as the number 7.
-- `keyword.rs` — the control-operator keywords (`try`, `guard`, `within`,
-  `grant`, `audit`): operand shapes and arity, read by the parser and, through
-  `is_keyword` / `is_control_operator`, by the checker and the highlighters.
-  `free_refs.rs` — free-reference scans. `Pattern`, `BinaryOp` and `Redirects`
+- `free_refs.rs` — free-reference scans. `Pattern`, `BinaryOp` and `Redirects`
   are not here: the [[map/core/ir|IR]] owns them, and the parser builds them
   (`redirect_word`/`redirect_dup` translate a redirect token).
 - `highlight.rs` — `classify(src)`, token classes (`Class`) read off the lexer

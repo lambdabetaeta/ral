@@ -5,7 +5,6 @@ pub mod ast;
 mod free_refs;
 pub(crate) mod group;
 pub mod highlight;
-pub(crate) mod keyword;
 pub mod lexer;
 pub mod parser;
 pub(crate) mod quote;
@@ -13,10 +12,12 @@ mod report;
 
 pub use quote::{is_bare_word, quote_word};
 
-/// True when `word` is a control operator: `try`, `guard`, `within`, `grant`,
-/// `audit`.
+/// The control operators: the stage heads `parse_control_op` reads.
+pub(crate) const CONTROL_OPERATORS: [&str; 5] = ["try", "guard", "within", "grant", "audit"];
+
+/// True when `word` is a control operator.
 pub fn is_control_operator(word: &str) -> bool {
-    keyword::lookup(word).is_some()
+    CONTROL_OPERATORS.contains(&word)
 }
 
 /// True when `word` is a ral keyword: control flow, or a control operator.

@@ -18,7 +18,7 @@ impl ParseError {
     /// label on the offending token, or on the end of input.
     pub fn report(&self, src: &Source) -> Report {
         match &self.kind {
-            ParseErrorKind::Lex(kind) => lex_report(src, kind),
+            ParseErrorKind::Lex(kind) => lex_report(src, kind, self.span),
             ParseErrorKind::Touching { first, second, run } => {
                 Some(self.touching(src, *first, *second, *run))
             }
@@ -78,13 +78,16 @@ fn describe_inner(src: &Source, kind: &LexErrorKind) -> String {
                 None => head,
             }
         }
-        LexErrorKind::Other(_) => "an unrelated lexer error".into(),
+        LexErrorKind::Mismatched { .. } | LexErrorKind::Other(_) => {
+            "an unrelated lexer error".into()
+        }
     }
 }
 
 /// `None` for `Other(_)`, so the caller falls back to the single-label form.
-/// Codes are never reused: the next lex diagnostic takes L0006.
-fn lex_report(src: &Source, kind: &LexErrorKind) -> Option<Report> {
+/// `at` is where the lexer stopped.  Codes are never reused: the next lex
+/// diagnostic takes L0007.
+fn lex_report(src: &Source, kind: &LexErrorKind, at: Option<Span>) -> Option<Report> {
     let report = |code, opened: &Span, text, also, hint| Report {
         code: Some(code),
         message: kind.headline(),
@@ -130,6 +133,17 @@ fn lex_report(src: &Source, kind: &LexErrorKind) -> Option<Report> {
             None,
             Some("expected closing `)` before end of input".into()),
         ),
+        LexErrorKind::Mismatched {
+            open,
+            opened,
+            close,
+        } => Report {
+            code: Some("L0006"),
+            message: kind.headline(),
+            at: Some(label(at, format!("`{close}` closes nothing"))),
+            also: Some(label(Some(*opened), format!("`{open}` opened here"))),
+            hint: None,
+        },
         LexErrorKind::Other(_) => return None,
     })
 }

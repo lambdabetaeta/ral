@@ -1,0 +1,2 @@
+# contains: `...rest` takes the remaining elements, so it comes last
+let [...rest, last] = $xs

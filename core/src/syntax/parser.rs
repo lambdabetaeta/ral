@@ -3,9 +3,9 @@
 //! The grammar is statement-oriented: a program is statements separated by
 //! newlines or `;`; a statement is a `let` binding or a `?`-chain of
 //! `|`-pipelines; a stage is `return`, `if`, `case`, a control operator, or a
-//! command.  Newlines bend around continuations — freely either side of `|`,
-//! one before `?`, any number after a binder's `=` — and inside `[…]` the
-//! lexer drops them.
+//! command.  Newlines bend around continuations — freely either side of `|`
+//! and `?`, any number after a binder's `=` — and inside `[…]` the lexer drops
+//! them.
 //!
 //! Each [`Stmt`] carries the span of its own tokens and the elaborator stamps
 //! that span on the IR it emits, so no constructor here threads a span.
@@ -14,16 +14,15 @@
 //! operands are the ordinary atoms of the value grammar.
 
 use crate::ir::{
-    ArithOp, BinaryOp, CompareOp, EqOp, MapPatternEntry, Pattern, Redirect, Redirects, StdinSource,
-    WriteMode,
+    ArithOp, BinaryOp, MapPatternEntry, Pattern, Redirect, Redirects, StdinSource, WriteMode,
 };
 use crate::source::{Span, Spanned};
+use crate::syntax::CONTROL_OPERATORS;
 use crate::syntax::ast::{
-    Ast, CaseArm, HandlerArm, Head, IfBranch, ListElem, MapEntry, Options, RecordEntry, Stmt, Word,
-    WordLiteral,
+    Ast, CaseArm, HandlerArm, Head, IfBranch, ListElem, MapEntry, Options, RecordEntry, ScopeAst,
+    Stmt, Word, WordLiteral,
 };
-use crate::syntax::keyword::{self, Operand, Operands, ScopeKeyword};
-use crate::syntax::lexer::{self, LexError, LexErrorKind, RedirectOp, StringPart, Token};
+use crate::syntax::lexer::{self, LexError, LexErrorKind, Operator, RedirectOp, StringPart, Token};
 use crate::text::plural;
 use std::fmt;
 
@@ -153,6 +152,36 @@ enum SepFlow {
     Stop,
 }
 
+/// A control operator's operands for the arity message: how many it takes,
+/// what they are, and how many have been read.
+#[derive(Clone, Copy)]
+struct Form {
+    name: &'static str,
+    desc: &'static str,
+    arity: usize,
+    seen: usize,
+}
+
+impl Form {
+    fn new(name: &'static str, desc: &'static str, arity: usize) -> Self {
+        Self {
+            name,
+            desc,
+            arity,
+            seen: 0,
+        }
+    }
+
+    fn arity_error(self, got: usize) -> String {
+        format!(
+            "{name} requires {args} ({desc}); got {got}",
+            name = self.name,
+            args = plural(self.arity, "argument"),
+            desc = self.desc,
+        )
+    }
+}
+
 struct Parser {
     tokens: Vec<(Token, Span)>,
     pos: usize,
@@ -209,7 +238,14 @@ impl Parser {
     }
 
     fn peek(&self) -> &Token {
-        self.tokens.get(self.pos).map_or(&Token::Eof, |(t, _)| t)
+        self.peek_at(0)
+    }
+
+    /// The token `ahead` of the cursor, `Eof` past the end.
+    fn peek_at(&self, ahead: usize) -> &Token {
+        self.tokens
+            .get(self.pos + ahead)
+            .map_or(&Token::Eof, |(t, _)| t)
     }
 
     /// Span of the current token, of the last one past the end, or — for an
@@ -361,13 +397,16 @@ impl Parser {
         }
     }
 
-    /// chain = pipeline (NL? '?' pipeline)*
+    /// chain = pipeline (NL* '?' NL* pipeline)*
     ///
     /// A singleton chain collapses to its bare arm, so `Ast::Chain` always
     /// means two or more branches and downstream passes need no length guard.
+    /// A trailing `?` is a continuation exactly as a trailing `|` is, so the
+    /// REPL's continuation prompt is telling the truth rather than baiting the
+    /// user.
     fn parse_chain(&mut self) -> Result<Ast, ParseError> {
         let mut arms = vec![self.spanned(Self::parse_pipeline)?];
-        while self.eat_chain_question() {
+        while self.eat_continuation(&Token::Question) {
             self.require_continuation("a chain branch")?;
             arms.push(self.spanned(Self::parse_pipeline)?);
         }
@@ -378,32 +417,13 @@ impl Parser {
         })
     }
 
-    /// Consume `?` with at most one preceding newline and any number after;
-    /// rewinds and returns false if no `?` follows.  A trailing `?` is a
-    /// continuation exactly as a trailing `|` is, so the REPL's continuation
-    /// prompt is telling the truth rather than baiting the user.
-    fn eat_chain_question(&mut self) -> bool {
-        let save = self.pos;
-        self.eat(&Token::Newline);
-        if self.eat(&Token::Question) {
-            self.skip_newlines();
-            true
-        } else {
-            self.pos = save;
-            false
-        }
-    }
-
     /// pipeline = stage ('|' stage)*
     fn parse_pipeline(&mut self) -> Result<Ast, ParseError> {
         let mut stages = vec![self.spanned(Self::parse_stage)?];
 
         while self.eat_continuation(&Token::Pipe) {
             if self.peek() == &Token::Pipe {
-                return Err(self.error(
-                    "ral has no `||`: `a ? b` runs `b` when `a` fails; inside \
-                     `$[…]`, `||` is the Boolean connective",
-                ));
+                return Err(self.error(NO_OR_OR));
             }
             self.require_continuation("a pipeline stage")?;
             stages.push(self.spanned(Self::parse_stage)?);
@@ -417,8 +437,7 @@ impl Parser {
     }
 
     /// Consume `tok` with any number of newlines on either side; rewinds and
-    /// returns false on a miss.  The narrower `?` rule lives in
-    /// [`Self::eat_chain_question`].
+    /// returns false on a miss.
     fn eat_continuation(&mut self, tok: &Token) -> bool {
         let save = self.pos;
         self.skip_newlines();
@@ -440,27 +459,47 @@ impl Parser {
     /// here rather than trusted of each arm, so a fixed-shape form that stops
     /// short (like `case`'s scrutinee-then-arms) can't hand its leftover
     /// tokens to `parse_program` as a silent, separator-less next statement.
+    ///
+    /// A keyword is a word like any other for the words rule: `return'x'` and
+    /// `try{a}{b}` are refused before dispatch.
     fn parse_stage(&mut self) -> Result<Ast, ParseError> {
         let head = self.peek().as_plain_word().map(str::to_owned);
-        let stage = match head.as_deref() {
+        if head.as_deref().is_some_and(is_stage_keyword) {
+            let keyword = self.span();
+            if self.atom_starts_at(1, keyword.end) {
+                self.advance();
+                return Err(self.touching(keyword));
+            }
+        }
+        let (span, (form, redirects)) = self.capture_span(|p| match head.as_deref() {
             // `parse_stmt` peels `let` off first, so arriving here means a
             // binding embedded in pipeline or chain position.
-            Some("let") => Err(self.error(
+            Some("let") => Err(p.error(
                 "`let` is a statement, not a pipeline stage or chain branch: \
                  move the binding to its own line, or wrap the consumer in a \
                  block: `{ let x = …; … }`",
             )),
-            Some("return") => self.parse_return_stage(),
-            Some("if") => self.parse_if(),
-            Some("case") => self.parse_case(),
+            Some(word @ ("else" | "elsif")) => Err(p.error(format!(
+                "`{word}` continues an `if` on the line above; there is none here"
+            ))),
+            Some("return") => p.trailed(Self::parse_return_stage),
+            Some("if") => p.trailed(Self::parse_if),
+            Some("case") => p.trailed(Self::parse_case),
             // `^try` and friends stay external: a `Token::Caret` head yields
             // no plain word, so it falls to `parse_command` below.
-            Some(name) => match keyword::lookup(name) {
-                Some(kw) => self.parse_control_op(kw),
-                None => self.parse_command(),
-            },
-            None => self.parse_command(),
-        }?;
+            Some(name) if CONTROL_OPERATORS.contains(&name) => {
+                p.trailed(|p| p.parse_control_op(name))
+            }
+            _ => p.parse_command(),
+        })?;
+        let stage = if redirects.is_empty() {
+            form
+        } else {
+            Ast::Redirected {
+                stage: Spanned::boxed(span, form),
+                redirects: Box::new(redirects),
+            }
+        };
         if self.at_cmd_end() {
             return Ok(stage);
         }
@@ -471,53 +510,105 @@ impl Parser {
         )))
     }
 
-    /// Parse the keyword `kw` names, then exactly `kw.arity()` operands and any
-    /// trailing redirects, into an [`Ast::Scope`].  Each position is read the
-    /// way [`ScopeKeyword::operands`] declares: an atom, not an argument —
-    /// `parse_arg` would admit an `Ast::Spread` that these fixed positions have
-    /// no lowering for — or the form's own option bracket.
-    fn parse_control_op(&mut self, kw: &ScopeKeyword) -> Result<Ast, ParseError> {
-        self.advance(); // consume the head name
-        let mut ops = Operands {
-            atoms: Vec::with_capacity(kw.arity()),
-            options: Vec::new(),
-            handlers: None,
-        };
-        let mut seen = 0;
-        while !self.at_cmd_end() && !self.at_redirect() {
-            if self.peek() == &Token::Spread {
-                return Err(self.error(format!(
-                    "`{name}` takes its operands by position ({operands_desc}); \
-                     a spread `...` has no meaning here",
-                    name = kw.name,
-                    operands_desc = kw.operand_desc,
-                )));
-            }
-            match kw.operands.get(seen) {
-                Some(Operand::Options { arms, example }) => {
-                    (ops.options, ops.handlers) = self.parse_options(kw, *arms, example)?;
-                }
-                // A surplus operand is an atom, and the arity check below is
-                // what it meets.
-                Some(Operand::Atom) | None => ops.atoms.push(self.parse_atom()?),
-            }
-            seen += 1;
+    /// A stage form followed by its trailing redirects.
+    fn trailed(
+        &mut self,
+        parse: impl FnOnce(&mut Self) -> Result<Ast, ParseError>,
+    ) -> Result<(Ast, Redirects<Ast>), ParseError> {
+        let form = parse(self)?;
+        Ok((form, self.collect_trailing_redirects()?))
+    }
+
+    /// Only a fixed-arity form can collect redirects at the end like this;
+    /// `parse_command` interleaves them, since a command takes them anywhere.
+    fn collect_trailing_redirects(&mut self) -> Result<Redirects<Ast>, ParseError> {
+        let mut redirects = Redirects::default();
+        while !self.at_cmd_end() && self.at_redirect() {
+            self.parse_redirect_into(&mut redirects)?;
         }
-        if seen != kw.arity() {
+        Ok(redirects)
+    }
+
+    /// The control operator `name` and exactly its operands, each an atom or
+    /// the form's own option bracket — not an argument: `parse_arg` would
+    /// admit an `Ast::Spread` that these fixed positions have no lowering for.
+    fn parse_control_op(&mut self, name: &str) -> Result<Ast, ParseError> {
+        self.advance(); // consume the head name
+        let op = match name {
+            "try" => {
+                let mut form = Form::new("try", "body, handler", 2);
+                let body = Box::new(self.operand(&mut form)?);
+                let handler = Box::new(self.operand(&mut form)?);
+                self.no_more_operands(form)?;
+                ScopeAst::Try { body, handler }
+            }
+            "guard" => {
+                let mut form = Form::new("guard", "body, cleanup", 2);
+                let body = Box::new(self.operand(&mut form)?);
+                let cleanup = Box::new(self.operand(&mut form)?);
+                self.no_more_operands(form)?;
+                ScopeAst::Guard { body, cleanup }
+            }
+            "within" => {
+                let mut form = Form::new("within", "options, body", 2);
+                self.operand_slot(&mut form)?;
+                let (opts, handlers) = self.parse_options(form, true, "dir: $d")?;
+                let body = Box::new(self.operand(&mut form)?);
+                self.no_more_operands(form)?;
+                ScopeAst::Within {
+                    opts,
+                    handlers,
+                    body,
+                }
+            }
+            "grant" => {
+                let mut form = Form::new("grant", "capabilities, body", 2);
+                self.operand_slot(&mut form)?;
+                let (caps, _) = self.parse_options(form, false, "net: $n")?;
+                let body = Box::new(self.operand(&mut form)?);
+                self.no_more_operands(form)?;
+                ScopeAst::Grant { caps, body }
+            }
+            "audit" => {
+                let mut form = Form::new("audit", "body", 1);
+                let body = Box::new(self.operand(&mut form)?);
+                self.no_more_operands(form)?;
+                ScopeAst::Audit { body }
+            }
+            _ => unreachable!("parse_stage admits only CONTROL_OPERATORS"),
+        };
+        Ok(Ast::Scope(op))
+    }
+
+    /// Room for one more operand, counted into `form`: refuses a missing one
+    /// and a spread.
+    fn operand_slot(&self, form: &mut Form) -> Result<(), ParseError> {
+        if self.at_cmd_end() || self.at_redirect() {
+            return Err(self.error(form.arity_error(form.seen)));
+        }
+        if self.peek() == &Token::Spread {
             return Err(self.error(format!(
-                "{name} requires {args} ({operands_desc}); got {got}",
-                name = kw.name,
-                args = plural(kw.arity(), "argument"),
-                operands_desc = kw.operand_desc,
-                got = seen,
+                "`{name}` takes its operands by position ({desc}); \
+                 a spread `...` has no meaning here",
+                name = form.name,
+                desc = form.desc,
             )));
         }
-        let redirects = self.collect_trailing_redirects()?;
-        let op = (kw.build)(ops);
-        Ok(Ast::Scope {
-            op,
-            redirects: Box::new(redirects),
-        })
+        form.seen += 1;
+        Ok(())
+    }
+
+    fn operand(&mut self, form: &mut Form) -> Result<Ast, ParseError> {
+        self.operand_slot(form)?;
+        self.parse_atom()
+    }
+
+    /// A surplus operand is an arity error, counted one past the form's own.
+    fn no_more_operands(&self, form: Form) -> Result<(), ParseError> {
+        if self.at_cmd_end() || self.at_redirect() {
+            return Ok(());
+        }
+        Err(self.error(form.arity_error(form.arity + 1)))
     }
 
     /// `options = '[' ']' | '[' item (',' item)* ']'`
@@ -534,7 +625,7 @@ impl Parser {
     /// no computed table can spell them.
     fn parse_options(
         &mut self,
-        kw: &ScopeKeyword,
+        form: Form,
         arms: bool,
         example: &str,
     ) -> Result<(Options, Option<Vec<HandlerArm>>), ParseError> {
@@ -543,22 +634,24 @@ impl Parser {
                 "`{name}` takes its options written in its own bracket. The values may be \
                  bound (`{name} [{example}]`) but the option names are written here, \
                  the way `case` writes its arms.",
-                name = kw.name,
+                name = form.name,
             )
         };
         if self.peek() != &Token::LBracket {
             return Err(self.error(written()));
         }
+        let open = self.span();
         self.advance(); // consume `[`
         if self.eat(&Token::RBracket) {
+            self.end_unit(open.join(self.prev_byte_span()))?;
             return Ok((Vec::new(), None));
         }
         if self.peek() == &Token::Colon {
             return Err(self.error(format!(
                 "`{name}` takes its options by name ({operands_desc}), so `[:]` (a map, \
                  whose keys are data) names none of them; write `[]` for no options",
-                name = kw.name,
-                operands_desc = kw.operand_desc,
+                name = form.name,
+                operands_desc = form.desc,
             )));
         }
         let mut items = Vec::new();
@@ -566,6 +659,7 @@ impl Parser {
             items.push(p.parse_collection_item()?);
             Ok(SepFlow::Cont)
         })?;
+        self.end_unit(open.join(self.prev_byte_span()))?;
 
         let mut options: Options = Vec::new();
         let mut handlers = None;
@@ -582,7 +676,7 @@ impl Parser {
                             "`handlers:` is written once; put every arm in the one list",
                         ));
                     }
-                    handlers = Some(Self::handler_arms(kw, value)?);
+                    handlers = Some(Self::handler_arms(form, value)?);
                 }
                 CollectionItem::Entry {
                     key: MapKeyForm::Label(key),
@@ -594,7 +688,7 @@ impl Parser {
                             format!(
                                 "`{key}` is written twice in `{name}`'s options; write it once",
                                 key = key.item,
-                                name = kw.name,
+                                name = form.name,
                             ),
                         ));
                     }
@@ -610,7 +704,7 @@ impl Parser {
                             "`{name}`'s options are named in writing, so a key that is data \
                              (`\"…\"` or `$var`) cannot be one; write the name out, as in \
                              `{name} [{example}]`",
-                            name = kw.name,
+                            name = form.name,
                         ),
                     ));
                 }
@@ -620,8 +714,8 @@ impl Parser {
                         format!(
                             "`{name}` takes `option: value` entries ({operands_desc}); \
                              this one has no name",
-                            name = kw.name,
-                            operands_desc = kw.operand_desc,
+                            name = form.name,
+                            operands_desc = form.desc,
                         ),
                     ));
                 }
@@ -634,11 +728,11 @@ impl Parser {
     /// is written out here for the same reason `case`'s arms are: the labels
     /// are the names bound in the body, and a table assembled elsewhere hides
     /// them.  An arm's *value* is any atom, the name being what is syntax.
-    fn handler_arms(kw: &ScopeKeyword, value: Spanned<Ast>) -> Result<Vec<HandlerArm>, ParseError> {
+    fn handler_arms(form: Form, value: Spanned<Ast>) -> Result<Vec<HandlerArm>, ParseError> {
         let spelling = format!(
             "write the arms out (`{name} [handlers: [deploy: {{ |args| … }}]] …`) \
              since each name is bound in the body",
-            name = kw.name,
+            name = form.name,
         );
         let entries = match value.item {
             Ast::List(ref elems) if elems.is_empty() => Vec::new(),
@@ -669,13 +763,19 @@ impl Parser {
         for entry in entries {
             match entry {
                 RecordEntry::Field { key, value } => {
-                    if arms.iter().any(|arm| arm.name == key) {
+                    if arms.iter().any(|arm| arm.name == key.item) {
                         return Err(ParseError::new(
                             value.span,
-                            format!("`{key}` already has an arm; one name, one arm"),
+                            format!(
+                                "`{key}` already has an arm; one name, one arm",
+                                key = key.item
+                            ),
                         ));
                     }
-                    arms.push(HandlerArm { name: key, value });
+                    arms.push(HandlerArm {
+                        name: key.item,
+                        value,
+                    });
                 }
                 RecordEntry::Spread(base) => {
                     return Err(ParseError::new(
@@ -686,16 +786,6 @@ impl Parser {
             }
         }
         Ok(arms)
-    }
-
-    /// Only a fixed-arity form can collect redirects at the end like this;
-    /// `parse_command` interleaves them, since a command takes them anywhere.
-    fn collect_trailing_redirects(&mut self) -> Result<Redirects<Ast>, ParseError> {
-        let mut redirects = Redirects::default();
-        while !self.at_cmd_end() && self.at_redirect() {
-            self.parse_redirect_into(&mut redirects)?;
-        }
-        Ok(redirects)
     }
 
     /// case = 'case' atom '[' arm (',' arm)* trailing-comma? ']'
@@ -786,7 +876,7 @@ impl Parser {
         }
         self.advance(); // consume `:`
         let (body_span, body) = if self.peek() == &Token::LBrace {
-            self.capture_span(|p| p.parse_case_arm_lambda(&label))?
+            self.capture_span(|p| p.nested(|p| p.parse_case_arm_lambda(&label)))?
         } else {
             self.capture_span(Self::parse_atom)?
         };
@@ -846,13 +936,17 @@ impl Parser {
             self.skip_newlines();
             match self.peek() {
                 tok if tok.as_plain_word() == Some("elsif") => {
+                    let keyword = self.span();
                     self.advance();
+                    self.end_unit(keyword)?;
                     self.skip_newlines();
                     self.require_continuation("the `elsif` condition")?;
                     branches.push(self.parse_if_branch()?);
                 }
                 tok if tok.as_plain_word() == Some("else") => {
+                    let keyword = self.span();
                     self.advance();
+                    self.end_unit(keyword)?;
                     self.skip_newlines();
                     self.require_continuation("the `else` body")?;
                     let (body_span, body) = self.capture_span(Self::parse_atom)?;
@@ -892,12 +986,18 @@ impl Parser {
     fn parse_return_stage(&mut self) -> Result<Ast, ParseError> {
         self.advance(); // consume `return`
 
-        if self.at_cmd_end() {
+        if self.at_cmd_end() || self.at_redirect() {
             return Ok(Ast::Return(None));
+        }
+        if let Some(word) = self.peek().as_plain_word().filter(|w| begins_statement(w)) {
+            return Err(self.error(format!(
+                "`return` takes one value, and `{word}` begins a statement: put the \
+                 `return` inside each branch, or write `return !{{{word} …}}`"
+            )));
         }
 
         let (val_span, val) = self.capture_span(Self::parse_atom)?;
-        if !self.at_cmd_end() {
+        if !(self.at_cmd_end() || self.at_redirect()) {
             return Err(self.error("return expects at most one value argument"));
         }
         Ok(Ast::Return(Some(Spanned::boxed(val_span, val))))
@@ -917,7 +1017,11 @@ impl Parser {
             tok if tok.as_plain_word() == Some("=") => {
                 self.advance();
             }
-            _ => return Err(self.error("expected '=' after the binding name in `let`")),
+            _ => {
+                return Err(self.glued_equals().unwrap_or_else(|| {
+                    self.error("expected '=' after the binding name in `let`")
+                }));
+            }
         }
         // The RHS may start on the next line: `let x =\n  expr`.
         self.skip_newlines();
@@ -966,10 +1070,24 @@ impl Parser {
                 p.advance();
                 Ok(Pattern::Name(name.into()))
             }
-            _ => Err(p.error(
-                "expected a pattern: a name like `x`, `_` to ignore, \
-                 or a destructuring `[a, b]` / `[host: h, port: p]`",
-            )),
+            _ => Err(p.glued_equals().unwrap_or_else(|| {
+                p.error(
+                    "expected a pattern: a name like `x`, `_` to ignore, \
+                     or a destructuring `[a, b]` / `[host: h, port: p]`",
+                )
+            })),
+        })
+    }
+
+    /// The bash `x=5` where `let x = 5` is meant: a word with the `=` inside.
+    fn glued_equals(&self) -> Option<ParseError> {
+        let Token::Word(Word::Plain(word) | Word::Slash(word)) = self.peek() else {
+            return None;
+        };
+        word.contains('=').then(|| {
+            self.error(format!(
+                "`{word}` is one word: `let` wants spaces around `=`, as in `let x = 5`"
+            ))
         })
     }
 
@@ -1002,6 +1120,7 @@ impl Parser {
             // `...name` is terminal: `SepFlow::Stop` is what forbids elements
             // after it.
             if p.eat(&Token::Spread) {
+                p.attached(SPREAD_ATTACHES)?;
                 let Token::Word(Word::Plain(name)) = p.peek().clone() else {
                     return Err(p.error("expected name after '...'"));
                 };
@@ -1015,6 +1134,10 @@ impl Parser {
                     ));
                 }
                 p.advance();
+                let closes = |ahead| p.peek_at(ahead) == &Token::RBracket;
+                if !(closes(0) || p.peek() == &Token::Comma && closes(1)) {
+                    return Err(p.error("`...rest` takes the remaining elements, so it comes last"));
+                }
                 rest = Some(name.into());
                 return Ok(SepFlow::Stop);
             }
@@ -1097,9 +1220,9 @@ impl Parser {
             Token::Word(Word::Plain(k)) if WordLiteral::classify(&k).is_some() => Err(self.error(
                 "map keys must be identifiers or quoted strings, not numbers; use '0': val",
             )),
-            _ => Err(self.error(
-                "expected a key: a name, a 'quoted string', a \"string\", or $var",
-            )),
+            _ => {
+                Err(self.error("expected a key: a name, a 'quoted string', a \"string\", or $var"))
+            }
         }
     }
 
@@ -1130,12 +1253,19 @@ impl Parser {
         ))
     }
 
+    /// An atom, and no atom touching it: the words rule.
+    fn parse_atom(&mut self) -> Result<Ast, ParseError> {
+        let (span, atom) = self.capture_span(Self::parse_atom_unchecked)?;
+        self.end_unit(span)?;
+        Ok(atom)
+    }
+
     /// `atom = primary ('[' word ']')*`
     ///
     /// A run of postfix keys becomes one flat `Ast::Index`, never a nest of
     /// single-key ones.  `$(name)` marks the end of a name and takes none,
     /// forced or not.
-    fn parse_atom(&mut self) -> Result<Ast, ParseError> {
+    fn parse_atom_unchecked(&mut self) -> Result<Ast, ParseError> {
         let delimited = self.at_delimited_name();
         let (node_span, node) = self.capture_span(Self::parse_primary)?;
         if delimited {
@@ -1146,6 +1276,9 @@ impl Parser {
             // Brackets included, so the caret underlines what the user wrote.
             let (span, k) = self.capture_span(|p| {
                 p.advance();
+                if p.peek() == &Token::RBracket {
+                    return Err(p.error("an index needs a key: `$x[name]` or `$x[0]`"));
+                }
                 let k = p.parse_word()?;
                 p.expect(&Token::RBracket)?;
                 Ok(k)
@@ -1176,6 +1309,69 @@ impl Parser {
         )
     }
 
+    /// The token `ahead` of the cursor starts an atom exactly at byte `end`.
+    fn atom_starts_at(&self, ahead: usize, end: u32) -> bool {
+        self.tokens
+            .get(self.pos + ahead)
+            .is_some_and(|(tok, span)| is_atom_start(tok) && span.start == end)
+    }
+
+    /// Nothing separates the token at the cursor from the one after it.
+    fn touches_next(&self) -> bool {
+        let end = self.span().end;
+        self.tokens
+            .get(self.pos + 1)
+            .is_some_and(|(_, next)| next.start == end)
+    }
+
+    /// An atom begins where `unit` ends.
+    fn touches_after(&self, unit: Span) -> bool {
+        self.atom_starts_at(0, unit.end)
+    }
+
+    /// The words rule, checked once at the end of a unit: nothing may begin
+    /// where it ends.
+    fn end_unit(&mut self, unit: Span) -> Result<(), ParseError> {
+        if self.touches_after(unit) {
+            return Err(self.touching(unit));
+        }
+        Ok(())
+    }
+
+    /// The atom ahead touches `first`.  The run is parsed rather than
+    /// scanned, so `!{ a b }` and `[…]` inside it stay balanced; an error
+    /// inside the run is reported instead.
+    fn touching(&mut self, first: Span) -> ParseError {
+        let mut run = || -> Result<ParseError, ParseError> {
+            let (second, _) = self.capture_span(Self::parse_arg_unchecked)?;
+            let mut last = second;
+            while self.touches_after(last) {
+                (last, _) = self.capture_span(Self::parse_arg_unchecked)?;
+            }
+            Ok(ParseError {
+                kind: ParseErrorKind::Touching {
+                    first,
+                    second,
+                    run: first.join(last),
+                },
+                ..ParseError::new(
+                    Some(second),
+                    "words touch: whitespace separates words, and nothing joins them",
+                )
+            })
+        };
+        run().unwrap_or_else(|e| e)
+    }
+
+    /// A marker (`^`, `...`, `!`) must touch what it marks.
+    fn attached(&self, message: &str) -> Result<(), ParseError> {
+        if self.next_token_is_adjacent() {
+            Ok(())
+        } else {
+            Err(self.error(message))
+        }
+    }
+
     /// No gap since the previous token — what separates `$xs[0]` (an index)
     /// from `cmd $xs [0]` (a second argument).
     fn next_token_is_adjacent(&self) -> bool {
@@ -1188,20 +1384,20 @@ impl Parser {
         prev_span.end == next_span.start
     }
 
-    /// The redirect and the span of its target word, if it has one.  The
-    /// redirect is `None` for an identity dup (`1>&1`, `2>&2`), which denotes
-    /// no redirect.
-    fn parse_redirect(&mut self) -> Result<(Option<Redirect<Ast>>, Option<Span>), ParseError> {
+    /// The redirect, which is `None` for an identity dup (`1>&1`, `2>&2`): it
+    /// denotes no redirect.
+    fn parse_redirect(&mut self) -> Result<Option<Redirect<Ast>>, ParseError> {
         let op_span = self.span();
         match self.peek().clone() {
             Token::Dup { fd, to } => {
                 self.advance();
-                let redirect =
-                    redirect_dup(fd, to).map_err(|m| ParseError::new(Some(op_span), m))?;
-                Ok((redirect, None))
+                redirect_dup(fd, to).map_err(|m| ParseError::new(Some(op_span), m))
             }
             Token::Redirect { fd, op } => {
                 self.advance();
+                if self.at_cmd_end() {
+                    return Err(ParseError::new(Some(op_span), redirect_needs_a_target(op)));
+                }
                 let (word_span, word) = self.capture_span(Self::parse_word)?;
                 // The fd rule first: `1<< x` is a misplaced fd, not a heredoc.
                 let redirect =
@@ -1216,23 +1412,21 @@ impl Parser {
                     };
                     return Err(ParseError::new(Some(word_span), message));
                 }
-                Ok((Some(redirect), Some(word_span)))
+                self.end_unit(word_span)?;
+                Ok(Some(redirect))
             }
             _ => Err(self.error("expected redirect")),
         }
     }
 
     /// One redirect, bound into `into`; a clash is reported at the whole
-    /// second redirect.  Returns the span of its target word.
-    fn parse_redirect_into(
-        &mut self,
-        into: &mut Redirects<Ast>,
-    ) -> Result<Option<Span>, ParseError> {
-        let (span, (redirect, target)) = self.capture_span(Self::parse_redirect)?;
+    /// second redirect.
+    fn parse_redirect_into(&mut self, into: &mut Redirects<Ast>) -> Result<(), ParseError> {
+        let (span, redirect) = self.capture_span(Self::parse_redirect)?;
         if let Some(r) = redirect {
             into.bind(r).map_err(|m| ParseError::new(Some(span), m))?;
         }
-        Ok(target)
+        Ok(())
     }
 
     fn at_redirect(&self) -> bool {
@@ -1244,19 +1438,42 @@ impl Parser {
     /// The [`Ast::Spread`] node tells the elaborator to splice `x`'s elements
     /// into the argument list; `[...x]` is a literal and stays one argument.
     fn parse_arg(&mut self) -> Result<Ast, ParseError> {
+        self.arg_of(Self::parse_atom)
+    }
+
+    /// [`Self::parse_arg`] without the words rule on its atom, which
+    /// [`Self::touching`] needs to read the run it refuses.
+    fn parse_arg_unchecked(&mut self) -> Result<Ast, ParseError> {
+        self.arg_of(Self::parse_atom_unchecked)
+    }
+
+    fn arg_of(
+        &mut self,
+        atom: fn(&mut Self) -> Result<Ast, ParseError>,
+    ) -> Result<Ast, ParseError> {
         if self.eat(&Token::Spread) {
-            let (span, inner) = self.capture_span(Self::parse_atom)?;
+            if self.at_cmd_end() {
+                return Err(ParseError::new(
+                    Some(self.prev_byte_span()),
+                    SPREAD_NEEDS_A_VALUE,
+                ));
+            }
+            self.attached(SPREAD_ATTACHES)?;
+            let (span, inner) = self.capture_span(atom)?;
             Ok(Ast::Spread(Spanned::boxed(span, inner)))
         } else {
-            self.parse_atom()
+            atom(self)
         }
     }
 
     fn parse_head(&mut self) -> Result<Head, ParseError> {
         if self.eat(&Token::Caret) {
+            let caret = self.prev_byte_span();
+            self.attached("`^` attaches to the name it marks: write `^ls`")?;
             return match self.peek().clone() {
                 Token::Word(Word::Plain(name)) => {
                     self.advance();
+                    self.end_unit(caret.join(self.prev_byte_span()))?;
                     Ok(Head::ExternalName(name))
                 }
                 Token::Word(Word::Slash(_) | Word::Tilde(_)) => {
@@ -1279,71 +1496,38 @@ impl Parser {
     }
 
     /// command = head (arg | redir)*
-    fn parse_command(&mut self) -> Result<Ast, ParseError> {
+    fn parse_command(&mut self) -> Result<(Ast, Redirects<Ast>), ParseError> {
         if self.at_redirect() {
             return Err(self.error("redirect must follow a command"));
         }
-        let (mut last, head) = self.capture_span(Self::parse_head)?;
+        let headless = match self.peek() {
+            Token::Pipe if self.peek_at(1) == &Token::Pipe => Some(NO_OR_OR),
+            Token::Pipe => Some("a pipeline needs a command before `|`"),
+            Token::Question => Some("`?` needs a command before it to fall back from"),
+            _ => None,
+        };
+        if let Some(message) = headless {
+            return Err(self.error(message));
+        }
+        let head = self.parse_head()?;
         let mut args: Vec<Spanned<Ast>> = Vec::new();
         let mut redirects = Redirects::default();
         while !self.at_cmd_end() {
-            if self.touches_previous() {
-                return Err(self.touching(last));
-            }
             if self.at_redirect() {
-                last = self
-                    .parse_redirect_into(&mut redirects)?
-                    .unwrap_or_else(|| self.prev_byte_span());
+                self.parse_redirect_into(&mut redirects)?;
             } else {
-                let (arg_span, arg) = self.capture_span(Self::parse_arg)?;
-                args.push(Spanned::new(arg_span, arg));
-                last = arg_span;
+                args.push(self.spanned(Self::parse_arg)?);
             }
         }
 
         // A value head with nothing applied sheds the `Ast::Call` wrapper,
         // so downstream passes see the value itself.
         if args.is_empty()
-            && redirects.is_empty()
             && let Head::Value(value) = head
         {
-            return Ok(*value);
+            return Ok((*value, redirects));
         }
-        Ok(Ast::Call {
-            head,
-            args,
-            redirects: Box::new(redirects),
-        })
-    }
-
-    /// An atom ahead with nothing between it and the unit just parsed.
-    fn touches_previous(&self) -> bool {
-        self.next_token_is_adjacent() && !self.at_redirect() && !self.at_cmd_end()
-    }
-
-    /// The atom ahead touches `first`.  The run is parsed rather than
-    /// scanned, so `!{ a b }` and `[…]` inside it stay balanced; an error
-    /// inside the run is reported instead.
-    fn touching(&mut self, first: Span) -> ParseError {
-        let mut run = || -> Result<ParseError, ParseError> {
-            let (second, _) = self.capture_span(Self::parse_arg)?;
-            let mut last = second;
-            while self.touches_previous() {
-                (last, _) = self.capture_span(Self::parse_arg)?;
-            }
-            Ok(ParseError {
-                kind: ParseErrorKind::Touching {
-                    first,
-                    second,
-                    run: first.join(last),
-                },
-                ..ParseError::new(
-                    Some(second),
-                    "words touch: whitespace separates words, and nothing joins them",
-                )
-            })
-        };
-        run().unwrap_or_else(|e| e)
+        Ok((Ast::Call { head, args }, redirects))
     }
 
     /// Byte span of the last consumed token — where the production that just
@@ -1432,8 +1616,9 @@ impl Parser {
     fn parse_bang(&mut self) -> Result<Ast, ParseError> {
         let (span, inner) = self.capture_span(|p| {
             p.advance(); // consume `!`
+            p.attached("`!` attaches to what it forces: write `!{…}` or `!$x`")?;
             if matches!(p.peek(), Token::Variable { .. }) {
-                p.parse_atom()
+                p.parse_atom_unchecked()
             } else {
                 p.parse_primary()
             }
@@ -1444,9 +1629,19 @@ impl Parser {
     /// block = '{' program '}' | '{' '|' pattern+ '|' program '}'
     fn parse_block(&mut self) -> Result<Ast, ParseError> {
         self.expect(&Token::LBrace)?;
+        if self.peek() == &Token::Newline && self.peek_at(1) == &Token::Pipe {
+            self.advance();
+            return Err(self.error(
+                "a function's parameters open on the same line as `{`: \
+                 write `{ |x|` and break the line after it",
+            ));
+        }
         if self.eat(&Token::Pipe) {
             let mut params: Vec<Spanned<Pattern>> = Vec::new();
             while self.peek() != &Token::Pipe {
+                if self.at_stmt_end() {
+                    return Err(self.error("expected `|` to close the parameter list: `{ |x| … }`"));
+                }
                 let (sp, p) = self.parse_binder()?;
                 params.push(Spanned::new(sp, p));
             }
@@ -1525,6 +1720,7 @@ impl Parser {
     /// item = '...' atom | mapkey ':' atom | atom
     fn parse_collection_item(&mut self) -> Result<CollectionItem, ParseError> {
         if self.eat(&Token::Spread) {
+            self.attached(SPREAD_ATTACHES)?;
             return Ok(CollectionItem::Spread(self.spanned(Self::parse_atom)?));
         }
         if self.key_colon_here(KeyAlphabet::Data) {
@@ -1534,6 +1730,15 @@ impl Parser {
                 key,
                 value: self.spanned(Self::parse_atom)?,
             });
+        }
+        if let Token::Word(Word::Plain(word)) = self.peek()
+            && let Some(key) = word.strip_suffix(':')
+            && self.touches_next()
+        {
+            return Err(self.error(format!(
+                "`{word}` is one word; for the key `{key}`, put a space after the \
+                 colon: `{key}: value`"
+            )));
         }
         Ok(CollectionItem::Elem(self.spanned(Self::parse_atom)?))
     }
@@ -1559,10 +1764,15 @@ impl Parser {
         parts: &[Spanned<StringPart>],
         at: Span,
     ) -> Result<Ast, ParseError> {
-        if parts.len() == 1
-            && let StringPart::Literal(s) = &parts[0].item
-        {
-            return Ok(Ast::Literal(s.clone()));
+        match parts {
+            [] => return Ok(Ast::Literal(String::new())),
+            [
+                Spanned {
+                    item: StringPart::Literal(s),
+                    ..
+                },
+            ] => return Ok(Ast::Literal(s.clone())),
+            _ => {}
         }
 
         let mut ast_parts = Vec::new();
@@ -1584,35 +1794,61 @@ impl Parser {
 
     // ── Expression blocks (Pratt parser) ────────────────────────────
 
-    /// Precedence-climbing loop.  It needs no depth guard of its own: every
-    /// depth-growing recursion bottoms out in [`Self::parse_expr_operand`],
-    /// and the binary right-hand side is bounded by the precedence ladder.
+    /// Precedence-climbing loop over [`Token::Op`]s, the tokens the lexer emits
+    /// for operators inside `$[…]` and nowhere else.  It needs no depth guard
+    /// of its own: every depth-growing recursion bottoms out in
+    /// [`Self::parse_expr_operand`], and the binary right-hand side is bounded
+    /// by the precedence ladder.
     fn parse_expr_prec(&mut self, min_prec: u8) -> Result<Spanned<Box<Ast>>, ParseError> {
         let start = self.span();
         let (span, first) = self.capture_span(Self::parse_expr_operand)?;
         let mut left = Spanned::boxed(span, first);
 
-        while let Some((op, prec)) = self.peek_expr_op() {
+        loop {
+            let (op, prec) = match *self.peek() {
+                Token::Op(Operator::Assign) => return Err(self.error(ASSIGN_IS_NO_OPERATOR)),
+                Token::Op(op) => (op, precedence(op)),
+                _ => break,
+            };
             if prec < min_prec {
                 break;
             }
+            let at = self.span();
             self.advance(); // consume operator token
+            if self.peek() == &Token::Eof {
+                return Err(ParseError::new(
+                    Some(at),
+                    format!("`{op}` needs an operand on its right"),
+                ));
+            }
             let right = self.parse_expr_prec(prec + 1)?;
             let node = match op {
-                InfixOp::And => Ast::And(left, right),
-                InfixOp::Or => Ast::Or(left, right),
-                InfixOp::Op(o) => {
+                Operator::And => Ast::And(left, right),
+                Operator::Or => Ast::Or(left, right),
+                Operator::Binary(o) => {
                     if !matches!(o, BinaryOp::Eq(_)) {
                         numeric_operand(&left)?;
                         numeric_operand(&right)?;
                     }
                     Ast::Binary(left, o, right)
                 }
+                Operator::Assign => return Err(self.error(ASSIGN_IS_NO_OPERATOR)),
             };
             left = Spanned::boxed(start.join(self.prev_byte_span()), node);
         }
 
         Ok(left)
+    }
+
+    /// The prefix operator `name`, at `at`, has its operand ahead.
+    fn operand_after(&self, at: Span, name: &str) -> Result<(), ParseError> {
+        if self.peek() == &Token::Eof {
+            return Err(ParseError::new(
+                Some(at),
+                format!("`{name}` needs an operand"),
+            ));
+        }
+        Ok(())
     }
 
     /// operand = '(' expr ')' | '-' operand | 'not' operand | atom
@@ -1627,55 +1863,40 @@ impl Parser {
             // `()` is the unit literal, an atom; anything else `(` opens
             // here is a grouped sub-expression.
             Token::LParen if p.tokens.get(p.pos + 1).map(|(t, _)| t) != Some(&Token::RParen) => {
-                p.advance();
-                let expr = p.parse_expr_prec(0)?;
-                p.expect(&Token::RParen)?;
+                let (span, expr) = p.capture_span(|p| {
+                    p.advance();
+                    let expr = p.parse_expr_prec(0)?;
+                    p.expect(&Token::RParen)?;
+                    Ok(expr)
+                })?;
+                p.end_unit(span)?;
                 Ok(*expr.item)
             }
-            Token::Word(Word::Plain(s)) if s == "-" => {
+            Token::Op(Operator::Binary(BinaryOp::Arith(ArithOp::Sub))) => {
+                let minus = p.span();
                 p.advance();
+                p.operand_after(minus, "-")?;
                 let (span, inner) = p.capture_span(Self::parse_expr_operand)?;
                 let inner = Spanned::boxed(span, inner);
                 numeric_operand(&inner)?;
                 Ok(Ast::Negate(inner))
             }
             Token::Word(Word::Plain(s)) if s == "not" => {
+                let word = p.span();
                 p.advance();
+                p.end_unit(word)?;
+                p.operand_after(word, "not")?;
                 // An operand, not an expression: `not` binds tighter than
                 // every binary operator, so `not $x == 0` is `(not $x) == 0`.
                 let (span, inner) = p.capture_span(Self::parse_expr_operand)?;
                 Ok(Ast::Not(Spanned::boxed(span, inner)))
             }
-            Token::Word(Word::Plain(op)) if p.peek_expr_op().is_some() => Err(p.error(format!(
+            Token::Op(Operator::Assign) => Err(p.error(ASSIGN_IS_NO_OPERATOR)),
+            Token::Op(op) => Err(p.error(format!(
                 "`{op}` is an operator and needs an operand on each side"
             ))),
             _ => p.parse_atom(),
         })
-    }
-
-    /// The operator at the cursor and its binding power, low to high: `||`,
-    /// `&&`, comparison, add/sub, mul/div/mod.  The unary prefixes bind tighter
-    /// than all of these.
-    fn peek_expr_op(&self) -> Option<(InfixOp, u8)> {
-        match self.peek() {
-            Token::Word(Word::Plain(s)) => match s.as_str() {
-                "||" => Some((InfixOp::Or, 1)),
-                "&&" => Some((InfixOp::And, 2)),
-                "+" => Some((InfixOp::Op(BinaryOp::Arith(ArithOp::Add)), 4)),
-                "-" => Some((InfixOp::Op(BinaryOp::Arith(ArithOp::Sub)), 4)),
-                "*" => Some((InfixOp::Op(BinaryOp::Arith(ArithOp::Mul)), 5)),
-                "/" => Some((InfixOp::Op(BinaryOp::Arith(ArithOp::Div)), 5)),
-                "%" => Some((InfixOp::Op(BinaryOp::Arith(ArithOp::Mod)), 5)),
-                "==" => Some((InfixOp::Op(BinaryOp::Eq(EqOp::Eq)), 3)),
-                "!=" => Some((InfixOp::Op(BinaryOp::Eq(EqOp::Ne)), 3)),
-                "<" => Some((InfixOp::Op(BinaryOp::Compare(CompareOp::Lt)), 3)),
-                ">" => Some((InfixOp::Op(BinaryOp::Compare(CompareOp::Gt)), 3)),
-                "<=" => Some((InfixOp::Op(BinaryOp::Compare(CompareOp::Le)), 3)),
-                ">=" => Some((InfixOp::Op(BinaryOp::Compare(CompareOp::Ge)), 3)),
-                _ => None,
-            },
-            _ => None,
-        }
     }
 }
 
@@ -1716,6 +1937,15 @@ fn redirect_word<T>(fd: Option<u32>, op: RedirectOp, word: T) -> Result<Redirect
     }
 }
 
+/// What a word-taking redirect is missing when nothing follows it.
+fn redirect_needs_a_target(op: RedirectOp) -> &'static str {
+    match op {
+        RedirectOp::Write(_) => "`>` needs a file to write to",
+        RedirectOp::Read => "`<` needs a file to read",
+        RedirectOp::HereString => "`<<` needs a string to feed",
+    }
+}
+
 /// Eliminate `fd>&to`.  `2>&1` is the one dup ral models; the identity
 /// dups `1>&1` and `2>&2` name the stream they already are, and denote
 /// no redirect at all.
@@ -1751,12 +1981,28 @@ fn numeric_operand(operand: &Spanned<Box<Ast>>) -> Result<(), ParseError> {
     }
 }
 
-#[derive(Clone, Copy)]
-enum InfixOp {
-    Op(BinaryOp),
-    And,
-    Or,
+/// Binding power, low to high: `||`, `&&`, comparison, add/sub, mul/div/mod.
+/// The unary prefixes bind tighter than all of these.  `=` binds nothing: it
+/// is refused wherever it stands.
+fn precedence(op: Operator) -> u8 {
+    match op {
+        Operator::Assign => 0,
+        Operator::Or => 1,
+        Operator::And => 2,
+        Operator::Binary(BinaryOp::Eq(_) | BinaryOp::Compare(_)) => 3,
+        Operator::Binary(BinaryOp::Arith(ArithOp::Add | ArithOp::Sub)) => 4,
+        Operator::Binary(BinaryOp::Arith(ArithOp::Mul | ArithOp::Div | ArithOp::Mod)) => 5,
+    }
 }
+
+const NO_OR_OR: &str = "ral has no `||`: `a ? b` runs `b` when `a` fails; inside \
+     `$[…]`, `||` is the Boolean connective";
+
+const ASSIGN_IS_NO_OPERATOR: &str = "`=` is not an operator in `$[…]`: did you mean `==`?";
+
+const SPREAD_ATTACHES: &str = "`...` attaches to the value it spreads: write `...$xs`";
+
+const SPREAD_NEEDS_A_VALUE: &str = "`...` spreads the value after it: write `...$xs`";
 
 const KEYED_ELEM_ERROR: &str = "this collection has `key: value` entries, so every entry \
      needs a key: or drop the keys to make it a list";
@@ -1765,13 +2011,8 @@ const KEYED_ELEM_ERROR: &str = "this collection has `key: value` entries, so eve
 /// own kind along list < record < map, so no item meets a kind already ruled out.
 enum Literal {
     List(Vec<ListElem>),
-    Record(Vec<StaticItem>),
+    Record(Vec<RecordEntry>),
     Map(Vec<MapEntry>),
-}
-
-enum StaticItem {
-    Spread(Spanned<Ast>),
-    Field { key: Spanned<String>, value: Spanned<Ast> },
 }
 
 impl Literal {
@@ -1789,14 +2030,14 @@ impl Literal {
                 let items = elems
                     .into_iter()
                     .map(|elem| match elem {
-                        ListElem::Spread(a) => Ok(StaticItem::Spread(a)),
+                        ListElem::Spread(a) => Ok(RecordEntry::Spread(a)),
                         ListElem::Single(a) => Err(ParseError::new(a.span, KEYED_ELEM_ERROR)),
                     })
                     .collect::<Result<_, _>>()?;
                 Self::Record(items).push(entry)
             }
             (Self::Record(mut items), CollectionItem::Spread(a)) => {
-                items.push(StaticItem::Spread(a));
+                items.push(RecordEntry::Spread(a));
                 Ok(Self::Record(items))
             }
             (
@@ -1806,16 +2047,16 @@ impl Literal {
                     value,
                 },
             ) => {
-                items.push(StaticItem::Field { key, value });
+                items.push(RecordEntry::Field { key, value });
                 Ok(Self::Record(items))
             }
             (Self::Record(items), entry @ CollectionItem::Entry { .. }) => {
                 let entries = items
                     .into_iter()
                     .map(|item| match item {
-                        StaticItem::Spread(a) => MapEntry::Spread(a),
-                        StaticItem::Field { key, value } => MapEntry::Entry {
-                            key: Spanned::with_span(key.span, Ast::Literal(key.item)),
+                        RecordEntry::Spread(a) => MapEntry::Spread(a),
+                        RecordEntry::Field { key, value } => MapEntry::Entry {
+                            key: key.map(Ast::Literal),
                             value,
                         },
                     })
@@ -1842,18 +2083,7 @@ impl Literal {
     fn into_ast(self) -> Result<Ast, ParseError> {
         match self {
             Self::List(elems) => Ok(Ast::List(elems)),
-            Self::Record(items) => record_literal(
-                items
-                    .into_iter()
-                    .map(|item| match item {
-                        StaticItem::Spread(a) => RecordEntry::Spread(a),
-                        StaticItem::Field { key, value } => RecordEntry::Field {
-                            key: key.item,
-                            value,
-                        },
-                    })
-                    .collect(),
-            ),
+            Self::Record(entries) => record_literal(entries),
             Self::Map(entries) => Ok(Ast::Map(entries)),
         }
     }
@@ -1899,7 +2129,7 @@ fn map_entry(key: MapKeyForm, value: Spanned<Ast>) -> MapEntry {
 impl MapKeyForm {
     fn into_ast(self) -> Spanned<Ast> {
         match self {
-            Self::Label(key) => Spanned::with_span(key.span, Ast::Literal(key.item)),
+            Self::Label(key) => key.map(Ast::Literal),
             Self::Data(key) => key,
         }
     }
@@ -1920,12 +2150,47 @@ fn trailing_input(found: &Token) -> String {
 /// Parse the pre-lexed body of `$[…]` as one expression.  `at` is the `$[…]`
 /// token itself, the only span an empty body can be reported against.
 fn parse_expr_block(tokens: Vec<(Token, Span)>, at: Span) -> Result<Ast, ParseError> {
+    if tokens.is_empty() {
+        return Err(ParseError::new(
+            Some(at),
+            "`$[…]` holds an expression: `$[1 + 2]`, `$[$n > 0]`",
+        ));
+    }
     Parser::run_complete(
         tokens,
         at,
         |found| format!("expected an operator before {found}: `$[…]` holds one expression"),
         |p| Ok(*p.parse_expr_prec(0)?.item),
     )
+}
+
+/// The tokens an atom may begin with.
+fn is_atom_start(tok: &Token) -> bool {
+    matches!(
+        tok,
+        Token::Word(_)
+            | Token::SingleQuoted(_)
+            | Token::DoubleQuoted(_)
+            | Token::Variable { .. }
+            | Token::Expr(_)
+            | Token::Bang
+            | Token::Tag(_)
+            | Token::LBrace
+            | Token::LBracket
+            | Token::LParen
+            | Token::Spread
+    )
+}
+
+/// The words that open a stage and take what follows them: no atom may touch
+/// one.
+fn is_stage_keyword(word: &str) -> bool {
+    matches!(word, "return" | "if" | "case" | "else" | "elsif") || CONTROL_OPERATORS.contains(&word)
+}
+
+/// The words that begin a statement of their own, which no value can be.
+fn begins_statement(word: &str) -> bool {
+    matches!(word, "if" | "case" | "let") || CONTROL_OPERATORS.contains(&word)
 }
 
 /// Names no binding may take: a keyword by [`crate::syntax::is_keyword`], or a
