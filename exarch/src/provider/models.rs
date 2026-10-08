@@ -2,7 +2,7 @@
 //!
 //! An account's model list is that account's to know: Anthropic, `DeepSeek` and
 //! Gemini list through their own endpoints ([`native`]), other API-key services
-//! through genai, `ChatGPT` accounts through the Codex backend. A listing
+//! through genai, `ChatGPT` accounts through `OpenAI`'s public model list. A listing
 //! carries each model's context window where the wire reports one. The
 //! listing is the authority on which models an account serves: a model it
 //! does not name is never run on that account.
@@ -31,7 +31,7 @@ mod native;
 /// How long a cached model list stays fresh.
 const TTL: Duration = Duration::from_hours(6);
 
-const CHATGPT_MODELS_URL: &str = "https://chatgpt.com/backend-api/codex/models";
+const PLAN_MODELS_URL: &str = "https://api.openai.com/v1/models";
 
 /// A model a listing names, with the context window its provider reports.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -200,11 +200,9 @@ impl LiveSource {
             .map_err(|e| e.to_string())
     }
 
-    /// The subscription catalog. `client_version` must be a real Codex CLI
-    /// version (`oauth::codex_client_version`), never exarch's own: the backend
-    /// gates the returned models on it and answers a low one with an empty
-    /// list. Authenticated from the live OAuth cell, so a token refreshed here
-    /// needs no new source.
+    /// The plan's own catalog, as `OpenAI` lists it for this account;
+    /// authenticated from the live cell, so a token refreshed here needs no
+    /// new source.
     fn list_chatgpt(
         &self,
         account: &Account,
@@ -216,16 +214,9 @@ impl LiveSource {
                 .await
                 .map_err(|e| format!("refresh login for {}: {e}", self.roster.label(account)))?;
             let token = cell.lock_ignore_poison().clone();
-            let url = format!(
-                "{CHATGPT_MODELS_URL}?client_version={}",
-                oauth::codex_client_version()
-            );
-            let request = oauth::request_headers(&token, "application/json")
-                .into_iter()
-                .fold(crate::provider::tls::client().get(url), |r, (k, v)| {
-                    r.header(k, v)
-                });
-            let response = request
+            let response = crate::provider::tls::client()
+                .get(PLAN_MODELS_URL)
+                .bearer_auth(token.access_token)
                 .send()
                 .await
                 .map_err(|e| format!("list models for {}: {e}", self.roster.label(account)))?;
@@ -233,37 +224,51 @@ impl LiveSource {
             if !status.is_success() {
                 let body = response.text().await.unwrap_or_default();
                 return Err(format!(
-                    "list models for {}: Codex backend returned HTTP {status}: {}",
+                    "list models for {}: OpenAI returned HTTP {status}: {}",
                     self.roster.label(account),
                     body_detail(&body)
                 ));
             }
-            let body: CodexModelsResponse = response
+            let body: PlanModels = response
                 .json()
                 .await
                 .map_err(|e| format!("parse models for {}: {e}", self.roster.label(account)))?;
-            Ok(body
-                .models
-                .into_iter()
-                .map(|model| Listed {
-                    id: model.slug,
-                    context_window: model.context_window.filter(|&n| n > 0),
-                })
-                .collect())
+            Ok(body.listed())
         })
     }
 }
 
 #[derive(Deserialize)]
-struct CodexModelsResponse {
-    models: Vec<CodexModel>,
+struct PlanModels {
+    models: Vec<PlanModel>,
 }
 
 #[derive(Deserialize)]
-struct CodexModel {
+struct PlanModel {
     slug: String,
+    /// `"list"` is what the picker may show; absent reads as listed.
+    #[serde(default = "listed")]
+    visibility: String,
     #[serde(default)]
     context_window: Option<u64>,
+}
+
+fn listed() -> String {
+    "list".to_string()
+}
+
+impl PlanModels {
+    /// The pickable models, in server order.
+    fn listed(self) -> Vec<Listed> {
+        self.models
+            .into_iter()
+            .filter(|model| model.visibility == "list")
+            .map(|model| Listed {
+                id: model.slug,
+                context_window: model.context_window.filter(|&n| n > 0),
+            })
+            .collect()
+    }
 }
 
 /// `OpenRouter`'s `/endpoints` envelope; only the fields the picker shows are
@@ -561,8 +566,8 @@ pub fn resolve_model_provider(
     }
 }
 
-/// Resolve an explicit `--provider` name: an account id, then a service name,
-/// then a handle.
+/// Resolve an explicit `--provider` name: an account id, then a label as
+/// `exarch accounts` prints it, then a service name, then a handle.
 ///
 /// That is the order a human is likely to type, and the order that lets a bare
 /// service name still mean something once it names several `ChatGPT` accounts.
@@ -576,6 +581,12 @@ pub fn resolve_pinned_provider(name: &str, available: &[Account]) -> Result<Acco
         return Err(no_provider_error());
     }
     if let Some(account) = available.iter().find(|account| account.id.as_str() == name) {
+        return Ok(account.clone());
+    }
+    if let Some(account) = available
+        .iter()
+        .find(|account| identity::label(account, available) == name)
+    {
         return Ok(account.clone());
     }
     let by_service: Vec<&Account> = available
@@ -593,7 +604,8 @@ pub fn resolve_pinned_provider(name: &str, available: &[Account]) -> Result<Acco
     match candidates.as_slice() {
         [one] => Ok((*one).clone()),
         [] => Err(format!(
-            "provider '{name}' is not available ({}); set its API key or name one that is",
+            "provider '{name}' is not available; pass one of these exactly as shown: {}; \
+             or set its API key",
             identity::roster(available)
         )),
         many => Err(format!(
@@ -855,13 +867,41 @@ mod tests {
         );
     }
 
+    /// Two accounts sharing an email: the label `exarch accounts` prints picks
+    /// one; the bare handle stays ambiguous.
     #[test]
-    fn codex_models_parse_their_windows() {
-        let body: CodexModelsResponse = serde_json::from_value(serde_json::json!({
-            "models": [{"slug": "model-a", "context_window": 272_000}, {"slug": "model-b"}],
+    fn pin_a_full_label_resolves_exactly() {
+        let a = Account::chatgpt("acc-1", "alex@bristol.ac.uk");
+        let b = Account::chatgpt("acc-2", "alex@bristol.ac.uk");
+        let available = [a, b];
+        let label = identity::label(&available[1], &available);
+        let got = resolve_pinned_provider(&label, &available).unwrap();
+        assert_eq!(got.id, available[1].id);
+        let err = resolve_pinned_provider("alex@bristol.ac.uk", &available).unwrap_err();
+        assert!(err.contains("names 2 signed-in accounts"), "{err}");
+    }
+
+    #[test]
+    fn plan_models_keep_only_the_listed() {
+        let body: PlanModels = serde_json::from_value(serde_json::json!({
+            "models": [
+                {"slug": "model-a", "visibility": "list", "context_window": 272_000},
+                {"slug": "model-b", "visibility": "list"},
+                {"slug": "model-c", "visibility": "hidden", "context_window": 8_000},
+            ],
         }))
         .unwrap();
-        assert_eq!(body.models[0].context_window, Some(272_000));
-        assert_eq!(body.models[1].context_window, None);
+        let ids_and_windows: Vec<_> = body
+            .listed()
+            .into_iter()
+            .map(|m| (m.id, m.context_window))
+            .collect();
+        assert_eq!(
+            ids_and_windows,
+            [
+                ("model-a".to_string(), Some(272_000)),
+                ("model-b".to_string(), None)
+            ]
+        );
     }
 }

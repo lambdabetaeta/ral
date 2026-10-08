@@ -197,7 +197,6 @@ impl MeterSource for LiveMeters {
     fn read(&self, account: &Account) -> Result<Vec<Allowance>, String> {
         let read = match account.service.meter {
             Meter::Unpublished => return Ok(Vec::new()),
-            Meter::Codex => meters::codex::read,
             Meter::OpenRouterCredits => meters::openrouter::read,
         };
         let credential = self

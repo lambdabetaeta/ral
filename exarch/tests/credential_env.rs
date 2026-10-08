@@ -38,10 +38,10 @@ fn oauth_token(issued: &str, email: Option<&str>) -> OAuthToken {
     OAuthToken {
         access_token: "at".into(),
         refresh_token: "rt".into(),
+        id_token: "id".into(),
+        client_id: "oaiapp_test".into(),
         issued: issued.into(),
         email: email.map(str::to_string),
-        workspace: None,
-        plan: None,
         expires_at: u64::MAX,
     }
 }

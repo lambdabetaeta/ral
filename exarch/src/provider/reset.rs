@@ -25,6 +25,8 @@ const UNWAITABLE: &[&str] = &[
     "organization_spend_limit_exceeded",
     "project_spend_limit_exceeded",
     "organization_usage_limit_exceeded",
+    // The plan's cap, whose reset the route does not name: no wait the loop could sit out.
+    "subscription_sharing_usage_limit_exceeded",
 ];
 
 /// Error `type`s and `code`s of a plan's allowance spent, account-wide.

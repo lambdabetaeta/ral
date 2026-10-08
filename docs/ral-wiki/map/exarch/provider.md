@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 6c9047b6
+generated_at_commit: 6a8d848f
 generated_at_date: 2026-10-08
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs]
 ---
@@ -71,11 +71,12 @@ membership in `ready`, so no view holds a copy that can go stale.
 ### A handle is local; a label is set-relative
 
 An `Account::handle` is derived from that account's own credential alone: the
-`id_token`'s email claim, else the issued account id, qualified by the
-workspace title or the plan type when the token carries one. For a key-bearing
+`id_token`'s email claim, else the issued account id. For a key-bearing
 service it is simply the service's name. Being local is the point — admitting
 one account is complete and correct on its own, so `add_oauth` needs no set,
 and a refresh that rewrites claims into the token cell leaves nothing stale.
+`exarch logout` revokes the refresh token at the issuer, best-effort, before
+removing the local record.
 
 `identity::label(account, among)` computes the **set-relative** name, and is
 the one place in either product that names an account. It takes the set
@@ -93,11 +94,11 @@ label.
 anthropic
 opencode-go
 chatgpt · alex@bristol.ac.uk
-chatgpt · alex@work (Acme Ltd)
+chatgpt · alex@bristol.ac.uk · <issued id>
 ```
 
 The honest limit: a live session's status line keeps the handle it started
-with, because a mid-session refresh does not re-derive it. A renamed workspace
+with, because a mid-session refresh does not re-derive it. A changed email
 appears at the next launch.
 
 The one place the log may hold a label is `record.jsonl`, where it is a
@@ -118,11 +119,13 @@ from `billing`. `Billing` says *does this turn cost money*; `Meter` says *does
 this account publish what is left*. The two are orthogonal and the table says
 both: OpenRouter is `Metered` and publishes a credit balance, a declared local
 endpoint is `Metered` and publishes nothing, chatgpt is `FlatRate` and
-publishes two rolling windows. A derivation either way would have to guess at
-one of those rows. Publishing nothing is itself a variant, `Meter::Unpublished`,
-and the field is no `Option`: the `keyed` builder takes the meter as an
+publishes nothing: OpenAI's token-sharing route has no usage readout, and the
+plan's usage is shown only in ChatGPT Settings → Usage. A derivation either way would have to guess at
+one of those rows. `Meter` has two readouts, one for OpenRouter's credit balance, and publishing
+nothing is itself a variant, `Meter::Unpublished`, which chatgpt and
+`opencode-go` carry. The field is no `Option`: the `keyed` builder takes the meter as an
 argument, so every row states one and no row can default it — which is how
-`opencode-go`, a subscription, is visibly unpublished rather than forgotten.
+a subscription is visibly unpublished rather than forgotten.
 
 What a meter reports is one value type, `provider/allowance.rs`'s `Allowance`:
 a quantity of entitlement, consumed against a bound, renewing over a span. Its
@@ -177,10 +180,27 @@ On disk the login store is persisted through one door, `write_private`
 opens it mode `0600`; the Windows arm passes an owner-only,
 inheritance-protected DACL in the `SECURITY_ATTRIBUTES` of `CreateFileW`
 itself, so at no instant does the token file wear the parent directory's
-inherited ACL. The document is an object keyed by the rendering of an
+inherited ACL. The document holds the host id and an object keyed by the rendering of an
 `AccountId`, one entry per account; an entry whose key disagrees with its own
 fields is dropped with a warning rather than trusted, the key being an index
 and the fields the truth.
+
+### The sign-in
+
+`provider/oauth/` is OpenAI's "Sign in with ChatGPT" token-sharing route for
+open-source apps: a browser redirect to a loopback listener (`127.0.0.1:1455`,
+else any free port; only the port may vary), an authorization-code exchange
+with PKCE, and no device-code flow. The store carries one **host id**
+(`urn:uuid:<v4>`, minted once, never user-identifying) and, per account, the
+**issued client id** (`oaiapp_…`) and the retained ID token. A first sign-in
+presents the dynamic client and learns the issued id from the callback;
+`SignIn::Register` or `SignIn::Reauthorize(token)` says which, so signing an
+account in again presents its own client and `id_token_hint` and never
+registers exarch twice. The ID token's payload is decoded, not
+signature-verified (it comes straight from the issuer's token endpoint over
+TLS and names the account): its `nonce` must match the attempt, its `sub` be
+present, and `chatgpt.tokens.use.direct` be among the granted scopes. See
+[[decisions/261008_sign-in-with-chatgpt-token-sharing|sign-in-with-chatgpt-token-sharing]].
 
 ## Two sources for a key, and one door to each
 
@@ -259,9 +279,10 @@ genai `Client`:
   authority, so a misspelled model fails at its provider rather than silently
   hitting `localhost`.
 - An **OAuth** login branches to `build_oauth_client`: the Responses adapter
-  renders the body, and an `AuthResolver` redirects every request to the Codex
-  backend with the login's bearer and account headers, read live from the
-  shared cell so a mid-session refresh is picked up without rebuilding.
+  renders the body, and an `AuthResolver` hands every request the login's
+  access token as the bearer, read live from the shared cell so a mid-session
+  refresh is picked up without rebuilding. There is no endpoint override and
+  no extra header: requests go to genai's default, `api.openai.com/v1/responses`.
   `refresh_cell_if_stale` is the common renewal door for inference and catalog
   requests, upserting just that account's entry. A refresh may rename the
   account — fresh claims update the handle's ingredients — but never re-keys
@@ -316,10 +337,14 @@ disk-caches both paths:
   parser — and `Native::of` is the only place an adapter picks one. Every
   listing is `Vec<Listed { id, context_window }>`, and the picker sees only
   the names.
-- ChatGPT accounts list through `/backend-api/codex/models`, authenticated by
-  their live OAuth cell after the common stale-token check; each entry's
-  `context_window` is kept.
-- `Bureau::build` is the one door a selection passes. It reads the serving
+- ChatGPT accounts list through `https://api.openai.com/v1/models`,
+  authenticated by their live OAuth cell after the common stale-token check;
+  only entries whose `visibility` is `"list"` are kept, in server order, with
+  each entry's `context_window`.
+- `Bureau::build` is the one door a selection passes. A plan account
+  (`Service::shares_a_plan`) gets a selection carrying reasoning effort alone:
+  the token-sharing route refuses `temperature`, `top_p` and
+  `max_output_tokens`, so none rides one. It reads the serving
   account's listing once (`models::listing_of`: the cache, else one fetch made
   with the catalog unlocked), refuses a model the listing does not name, and
   resolves the context window from it: the listing's own figure, else the
@@ -481,13 +506,11 @@ different depths, so a diverging tail (retry, fork, a self-nudge) still lands on
 a cached prefix. The marks land on `manufacture`'s own fresh clone of the
 transcript's shared messages, never on the shared segments themselves. On
 OpenAI the same marks would select the metered *explicit* prompt cache, which
-the ChatGPT and Codex Responses endpoints reject outright (rust-genai #273),
+the ChatGPT plan route rejects outright (rust-genai #273),
 so every other adapter carries its system prompt in the request's own
 `system` field — where the Responses adapter's `instructions` string wants it
 anyway — and leans on the per-process `prompt_cache_key` alone, which genai
 reads as intent for the free implicit cache. `tool_defs(adapter, request)`, also in `wire.rs`, builds the request's tool array: the agent's
 [[map/exarch/tools|`Toolset`]] (`provider/tools.rs`) on the wire, plus the provider's own hosted web-search tool
 under `search` — carried only on the three adapters genai maps it for
-(`OpenAIResp`, `Anthropic`, `Gemini`), and `OpenAIResp` alone adds the
-`external_web_access` config that switches codex from its cached index to the
-live internet; the bit is [[map/exarch/agent|agent]]'s `search`.
+(`OpenAIResp`, `Anthropic`, `Gemini`), bare on each; the bit is [[map/exarch/agent|agent]]'s `search`.

@@ -5,7 +5,7 @@ use super::identity::{Account, AccountId, Billing, Service, adapter_for_model};
 use super::oauth;
 use genai::adapter::AdapterKind;
 use genai::resolver::{AuthData, AuthResolver, Endpoint, ServiceTargetResolver};
-use genai::{Client, Headers, ModelIden, ServiceTarget};
+use genai::{Client, ModelIden, ServiceTarget};
 use ral_core::sync::LockExt;
 use std::collections::HashMap;
 use std::future::Future;
@@ -203,15 +203,13 @@ fn build_client(service: &Service, model: &str, credential: &Credential) -> (Cli
 }
 
 /// The auth resolver reads the cell on every request, so a refresh by
-/// [`Engine::refresh_if_stale`] reaches the next call without rebuilding the client.
+/// [`Engine::refresh_if_stale`] reaches the next call without rebuilding the
+/// client; the endpoint is genai's default, `api.openai.com`.
 fn build_oauth_client(cell: Arc<Mutex<oauth::OAuthToken>>) -> Client {
     let auth = AuthResolver::from_resolver_fn(move |identity: ModelIden| {
         if identity.adapter_kind == AdapterKind::OpenAIResp {
-            let token = cell.lock_ignore_poison();
-            Ok(Some(AuthData::RequestOverride {
-                url: oauth::RESPONSES_URL.to_string(),
-                headers: Headers::from(oauth::request_headers(&token, "text/event-stream")),
-            }))
+            let access_token = cell.lock_ignore_poison().access_token.clone();
+            Ok(Some(AuthData::from_single(access_token)))
         } else {
             Ok(None)
         }
@@ -238,10 +236,10 @@ mod tests {
         oauth::OAuthToken {
             access_token: access_token.into(),
             refresh_token: format!("refresh-{access_token}"),
+            id_token: "id".into(),
+            client_id: "oaiapp_test".into(),
             issued: "account".into(),
             email: Some("me@example.com".into()),
-            workspace: None,
-            plan: None,
             expires_at: u64::MAX,
         }
     }

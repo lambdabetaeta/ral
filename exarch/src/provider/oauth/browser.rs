@@ -1,7 +1,9 @@
 //! Browser login: the authorize page opens in the user's browser and redirects
 //! to a loopback listener here, whose captured code is exchanged for tokens.
 
-use super::{CLIENT_ID, ISSUER, LoginPhase, ORIGINATOR, SCOPE};
+use super::{
+    AGENT_NAME, AUTHORIZE_URL, DYNAMIC_CLIENT, Granted, LoginPhase, RESOURCE, SCOPE, SignIn,
+};
 use std::io::BufRead;
 use std::io::Write;
 use std::net::TcpListener;
@@ -10,26 +12,29 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-/// Bounds an abandoned sign-in's wait; in step with `device`'s poll deadline.
+/// Bounds an abandoned sign-in's wait.
 const MAX_WAIT: Duration = Duration::from_mins(15);
 
-/// Drive the browser flow to completion and return the issued tokens.
+/// Drive the browser flow to completion and return the granted tokens.
 pub(super) async fn run(
     client: &reqwest::Client,
+    host_id: &str,
+    sign_in: &SignIn,
     on_phase: impl Fn(LoginPhase),
     cancel: &Arc<AtomicBool>,
-) -> Result<super::RawTokens, String> {
+) -> Result<Granted, String> {
     let (verifier, challenge) = super::pkce();
     let state = super::random_b64url(32);
+    let nonce = super::random_b64url(32);
 
     let listener = bind_listener()?;
     let port = listener
         .local_addr()
         .map_err(|e| format!("could not read listener address: {e}"))?
         .port();
-    let redirect_uri = format!("http://localhost:{port}/auth/callback");
+    let redirect_uri = format!("http://127.0.0.1:{port}/auth/callback");
 
-    let url = authorize_url(&redirect_uri, &challenge, &state)?;
+    let url = authorize_url(&redirect_uri, &challenge, &state, &nonce, host_id, sign_in)?;
     // Best effort, and its outcome is not worth reporting: a launcher that
     // reports success has still shown the user nothing when it started a text
     // browser on a box they reached over ssh. The phase carries the URL.
@@ -39,40 +44,81 @@ pub(super) async fn run(
     // Cloned because `spawn_blocking` needs `'static`; the caller keeps the flag it trips.
     let expected_state = state.clone();
     let cancel = Arc::clone(cancel);
-    let code =
+    let (code, issued) =
         tokio::task::spawn_blocking(move || accept_callback(&listener, &expected_state, &cancel))
             .await
             .map_err(|e| format!("callback listener panicked: {e}"))??;
 
+    let client_id = match (sign_in, issued) {
+        (SignIn::Register, Some(issued)) => issued,
+        (SignIn::Register, None) => {
+            return Err("the sign-in callback carried no issued client id; OpenAI's registration did not complete".to_string());
+        }
+        (SignIn::Reauthorize(token), Some(issued)) if issued != token.client_id => {
+            return Err("the sign-in callback names a different client than this account's; nothing was changed".to_string());
+        }
+        (SignIn::Reauthorize(token), _) => token.client_id.clone(),
+    };
+
     on_phase(LoginPhase::ExchangingCode);
-    super::exchange_code(client, &redirect_uri, &code, &verifier).await
+    let raw = super::exchange_code(client, &client_id, &redirect_uri, &code, &verifier).await?;
+    Ok(Granted {
+        raw,
+        client_id,
+        nonce,
+    })
 }
 
 #[allow(
     clippy::disallowed_methods,
-    reason = "[silent:callback-listener] binds the loopback port the authorize page redirects back to, one of the two the issuer has registered. Sign-in machinery the user started, on this machine only, and no turn is running to card it: the browser handoff beside it is silent on the same ground."
+    reason = "[silent:callback-listener] binds the loopback port the authorize page redirects back to: 1455 by convention, else any free one; only the port may vary. Sign-in machinery the user started, on this machine only, and no turn is running to card it: the browser handoff beside it is silent on the same ground."
 )]
 fn bind_listener() -> Result<TcpListener, String> {
     TcpListener::bind("127.0.0.1:1455")
-        .or_else(|_| TcpListener::bind("127.0.0.1:1457"))
-        .map_err(|e| format!("could not bind callback listener on 127.0.0.1:1455 or :1457: {e}"))
+        .or_else(|_| TcpListener::bind("127.0.0.1:0"))
+        .map_err(|e| format!("could not bind a callback listener on 127.0.0.1: {e}"))
 }
 
-fn authorize_url(redirect_uri: &str, challenge: &str, state: &str) -> Result<String, String> {
-    let mut url = reqwest::Url::parse(&format!("{ISSUER}/oauth/authorize"))
+fn authorize_url(
+    redirect_uri: &str,
+    challenge: &str,
+    state: &str,
+    nonce: &str,
+    host_id: &str,
+    sign_in: &SignIn,
+) -> Result<String, String> {
+    let client_id = match sign_in {
+        SignIn::Register => DYNAMIC_CLIENT,
+        SignIn::Reauthorize(token) => &token.client_id,
+    };
+    let mut url = reqwest::Url::parse(AUTHORIZE_URL)
         .map_err(|e| format!("could not build authorize URL: {e}"))?;
-    url.query_pairs_mut().extend_pairs([
-        ("response_type", "code"),
-        ("client_id", CLIENT_ID),
-        ("redirect_uri", redirect_uri),
-        ("scope", SCOPE),
-        ("code_challenge", challenge),
-        ("code_challenge_method", "S256"),
-        ("id_token_add_organizations", "true"),
-        ("codex_cli_simplified_flow", "true"),
-        ("state", state),
-        ("originator", ORIGINATOR),
-    ]);
+    {
+        let mut pairs = url.query_pairs_mut();
+        pairs.extend_pairs([
+            ("response_type", "code"),
+            ("client_id", client_id),
+            ("redirect_uri", redirect_uri),
+            ("scope", SCOPE),
+            ("resource", RESOURCE),
+            ("state", state),
+            ("nonce", nonce),
+            ("code_challenge", challenge),
+            ("code_challenge_method", "S256"),
+            ("ext_agent_host_id", host_id),
+        ]);
+        match sign_in {
+            SignIn::Register => {
+                pairs.append_pair("agent_name_hint", AGENT_NAME);
+            }
+            SignIn::Reauthorize(token) => {
+                pairs.append_pair("id_token_hint", &token.id_token);
+                if let Some(email) = &token.email {
+                    pairs.append_pair("login_hint", email);
+                }
+            }
+        }
+    }
     Ok(url.into())
 }
 
@@ -148,7 +194,7 @@ fn accept_callback(
     listener: &TcpListener,
     expected_state: &str,
     cancel: &Arc<AtomicBool>,
-) -> Result<String, String> {
+) -> Result<(String, Option<String>), String> {
     let mut stream = accept_within(listener, MAX_WAIT, cancel)?;
     let request_line = read_request_line(&mut stream)?;
 
@@ -160,30 +206,38 @@ fn accept_callback(
         .map_err(|e| format!("could not parse callback URL: {e}"))?;
 
     let mut code = None;
+    let mut client_id = None;
     let mut state = None;
     let mut error = None;
+    let mut description = None;
     for (key, value) in url.query_pairs() {
         match key.as_ref() {
             "code" => code = Some(value.into_owned()),
+            "client_id" => client_id = Some(value.into_owned()),
             "state" => state = Some(value.into_owned()),
             "error" => error = Some(value.into_owned()),
+            "error_description" => description = Some(value.into_owned()),
             _ => {}
         }
     }
 
-    if let Some(error) = error {
-        write_page(&mut stream, "Sign-in failed. You can close this tab.");
-        return Err(format!("sign-in failed: {error}"));
-    }
-    // `state` guards an open loopback port: only this flow's minted value passes.
+    // `state` guards an open loopback port: only this flow's minted value passes,
+    // and it is checked first so a stray request cannot abort the sign-in.
     if state.as_deref() != Some(expected_state) {
         write_page(&mut stream, "Sign-in failed. You can close this tab.");
         return Err("state mismatch".to_string());
     }
+    if let Some(error) = error {
+        write_page(&mut stream, "Sign-in failed. You can close this tab.");
+        return Err(match description {
+            Some(d) => format!("sign-in failed: {error}: {d}"),
+            None => format!("sign-in failed: {error}"),
+        });
+    }
     let code = code.ok_or_else(|| "callback did not carry an authorization code".to_string())?;
 
     write_page(&mut stream, "Signed in to exarch. You can close this tab.");
-    Ok(code)
+    Ok((code, client_id))
 }
 
 /// Accept one connection, giving up on `timeout` or `cancel`; a blocking

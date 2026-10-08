@@ -201,7 +201,7 @@ impl CredentialStore {
         };
         // Re-placed under its current handle: an arrival takes its spot among
         // the other logins, and a refresh that has finally learned the email
-        // or workspace claim moves there without disturbing its identity.
+        // or plan claim moves there without disturbing its identity.
         self.all.retain(|listed| listed.id != account.id);
         self.insert_login(account.clone());
         (account, credential)
@@ -414,10 +414,10 @@ mod tests {
         OAuthToken {
             access_token: "at".into(),
             refresh_token: "rt".into(),
+            id_token: "id".into(),
+            client_id: "oaiapp_test".into(),
             issued: issued.into(),
             email: email.map(str::to_string),
-            workspace: None,
-            plan: None,
             expires_at: 0,
         }
     }
@@ -543,7 +543,7 @@ mod tests {
         );
     }
 
-    /// A workspace claim arriving on re-login updates the handle without
+    /// An email claim arriving on re-login updates the handle without
     /// disturbing the account's identity.
     #[test]
     fn add_oauth_relogin_with_a_new_claim_renames_the_handle_in_place() {

@@ -33,7 +33,7 @@ pub struct Cli {
     /// Choose the provider or signed-in account that Exarch uses when it starts.
     ///
     /// Give an account ID, a service name such as `anthropic` or `openai`, or
-    /// an account handle shown by `exarch accounts`. Exarch asks you to be more
+    /// an account exactly as `exarch accounts` lists it. Exarch asks you to be more
     /// specific if the name matches several accounts. Without `--model`,
     /// Exarch restores the model saved for this account in the current
     /// project, or else asks you to pick one of its models before the session
@@ -176,16 +176,13 @@ pub enum Command {
     /// Sign in to `ChatGPT` and add the account as a model provider.
     ///
     /// You can sign in to several accounts and choose between them with
-    /// `/model`. Use this command on a machine where you cannot first open an
-    /// Exarch session; `/login` provides the same sign-in flow inside a live
-    /// session.
+    /// `/model`. Name an account that is already signed in to renew its
+    /// sign-in; otherwise a new account is registered. Use this command on a
+    /// machine where you cannot first open an Exarch session; `/login`
+    /// provides the same sign-in flow inside a live session.
     Login {
-        /// Print a sign-in address and device code instead of opening a browser.
-        ///
-        /// Use this on a remote or text-only machine. Open the address on
-        /// another device, then enter the displayed code.
-        #[arg(long = "device-auth")]
-        device_auth: bool,
+        /// An account to sign in again, by its email address or account ID.
+        account: Option<String>,
     },
     /// Remove a stored `ChatGPT` login.
     ///

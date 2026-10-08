@@ -1961,6 +1961,7 @@ dependencies = [
  "tui-math",
  "two-face",
  "unicode-width 0.2.2",
+ "uuid",
  "webpki-roots",
  "windows-sys 0.61.2",
 ]

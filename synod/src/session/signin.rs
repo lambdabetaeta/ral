@@ -30,21 +30,6 @@ impl From<oauth::LoginPhase> for SignInStep {
                     .to_string(),
                 link: Some(url),
             },
-            // The window never runs the device flow — a sign-in in a window
-            // is a sign-in on the machine the browser is on — so this arm
-            // completes the phase vocabulary rather than describing
-            // anything synod shows.
-            oauth::LoginPhase::AwaitingDevice {
-                user_code,
-                url,
-                expires_in,
-            } => Self {
-                say: format!(
-                    "Follow this link and enter the code {user_code} to sign in.  \
-                     The code expires in {expires_in}."
-                ),
-                link: Some(url),
-            },
             oauth::LoginPhase::ExchangingCode => Self {
                 say: "Signing you in…".to_string(),
                 link: None,
@@ -95,7 +80,7 @@ pub fn sign_in(
     cancel: &Arc<AtomicBool>,
 ) -> Result<SignedIn, String> {
     let (token, replaced) = oauth::login_flow(
-        oauth::LoginMethod::Browser,
+        &oauth::SignIn::Register,
         |phase| on_phase(SignInStep::from(phase)),
         cancel,
     )?;

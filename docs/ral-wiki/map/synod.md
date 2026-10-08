@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 6c9047b6
+generated_at_commit: 6a8d848f
 generated_at_date: 2026-10-08
 covers_paths: [synod/, vm-manager/, ral-daemon/, ral-initramfs/, vm-image/, core/src/protocol/channel.rs, core/src/carrier.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs]
 ---
@@ -165,7 +165,7 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
   `label` on the wire, so an id and a display string cannot be mistaken for
   one another in either direction.
 - `session/signin.rs` — `sign_in` drives exarch's browser login flow
-  (`exarch::provider::oauth::login_flow`) and admits the fresh account to the
+  (`exarch::provider::oauth::login_flow`, always `SignIn::Register`) and admits the fresh account to the
   live store and catalog through `exarch::provider::admit_login` — the same
   call exarch's own front end uses — so a ChatGPT plan signed in from the
   window is usable without a restart. The credential store is behind a

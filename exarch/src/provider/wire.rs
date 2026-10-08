@@ -17,7 +17,7 @@
 
 use super::request::Request;
 use genai::adapter::AdapterKind;
-use genai::chat::{CacheControl, ChatMessage, ChatRequest, MessageOptions, Tool, ToolConfig};
+use genai::chat::{CacheControl, ChatMessage, ChatRequest, MessageOptions, Tool};
 
 /// A wire request: one manufacture, one send.
 pub(super) struct Sealed(ChatRequest); // deliberately not Clone
@@ -34,7 +34,7 @@ impl Sealed {
 ///
 /// Shapes the transcript for prompt caching. Breakpoints are
 /// Anthropic-only: on `OpenAI` the same `CacheControl` selects the
-/// metered explicit cache, which the `ChatGPT` and Codex endpoints reject
+/// metered explicit cache, which the `ChatGPT` plan route rejects
 /// outright; elsewhere the prompt-cache key carries the intent alone.
 /// Marking the system prompt and the last two messages leaves two anchors
 /// of different depths: the shallower is free (it writes the same
@@ -71,11 +71,6 @@ pub(super) fn manufacture(
 /// Search rides only the adapters genai maps `Tool::new_web_search()` to a
 /// native tool for; the rest, plain `OpenAI` included, would serialise
 /// `ToolName::WebSearch` into the function-name slot as junk on the wire.
-/// `external_web_access` — codex's switch from its cached index to the live
-/// internet — is `Custom` because genai's Responses arm drops the typed
-/// `ToolConfig::WebSearch`, and `OpenAIResp`-only because genai merges a
-/// `Custom` config onto the tool object, where Anthropic's
-/// `web_search_20250305` would reject the unknown field.
 pub(super) fn tool_defs(adapter: AdapterKind, request: Request<'_>) -> Vec<Tool> {
     let Request {
         tools: offered,
@@ -89,13 +84,7 @@ pub(super) fn tool_defs(adapter: AdapterKind, request: Request<'_>) -> Vec<Tool>
             AdapterKind::OpenAIResp | AdapterKind::Anthropic | AdapterKind::Gemini
         )
     {
-        let mut web_search = Tool::new_web_search();
-        if adapter == AdapterKind::OpenAIResp {
-            web_search = web_search.with_config(ToolConfig::Custom(serde_json::json!({
-                "external_web_access": true
-            })));
-        }
-        tools.push(web_search);
+        tools.push(Tool::new_web_search());
     }
     tools
 }
@@ -178,24 +167,17 @@ mod tests {
     }
 
     #[test]
-    fn openai_resp_search_carries_live_internet_access() {
-        let tools = tool_defs(AdapterKind::OpenAIResp, searching(true));
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name, ToolName::WebSearch);
-        assert_eq!(
-            tools[0].config,
-            Some(ToolConfig::Custom(
-                serde_json::json!({"external_web_access": true})
-            ))
-        );
-    }
-
-    #[test]
-    fn anthropic_search_carries_the_bare_tool() {
-        let tools = tool_defs(AdapterKind::Anthropic, searching(true));
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name, ToolName::WebSearch);
-        assert_eq!(tools[0].config, None);
+    fn search_carries_the_bare_tool_on_every_adapter_that_takes_one() {
+        for adapter in [
+            AdapterKind::OpenAIResp,
+            AdapterKind::Anthropic,
+            AdapterKind::Gemini,
+        ] {
+            let tools = tool_defs(adapter, searching(true));
+            assert_eq!(tools.len(), 1);
+            assert_eq!(tools[0].name, ToolName::WebSearch);
+            assert_eq!(tools[0].config, None);
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 0714e80c
-verified_at_date: 2026-09-29
+verified_at_commit: 6a8d848f
+verified_at_date: 2026-10-08
 anchors: [from_genai, refused, error_object, Fault, of_webc, of_boxed, of_reqwest, ProviderError, Refused, Refusal, Limit, Recovery, recovery, Transient, Api, Truncated, retry_with_backoff, Attempt, backoff_sleep, parse_retry_after, unwaitable, BODY_KEYS, epoch_or_delta, Wait::patient, RATE_LIMIT_MAX_DELAY_MS, json_status_code, CutShort, stall_cause, root_cause, body_detail, Readout, stalled_step_out, STREAM_IDLE_TIMEOUT, MAX_ATTEMPTS, RATE_LIMIT_MAX_ATTEMPTS, manufacture, Sealed]
 ---
 
@@ -121,8 +121,9 @@ three ways:
 
 A 429 is read by `refused`. A body whose error `type` or `code` names a quota
 or credit spent (`insufficient_quota`, `usage_not_included`, the spend- and
-usage-limit codes — the set Codex itself treats as unwaitable) is `Api`:
-waiting does not refill a purse. Every other 429 is stated whole as a
+usage-limit codes, and `subscription_sharing_usage_limit_exceeded`, a
+sign-in plan's cap, whose reset the route does not name) is `Api`: waiting
+does not refill a purse. Every other 429 is stated whole as a
 `Refusal`: what ran out (`Limit`: `Allowance` when the body's `type` or `code`
 is `usage_limit_reached`, else `Rate`), when it was `received`, and the reset,
 which `provider/reset.rs`'s `at` reads from every convention one is named by,
@@ -134,7 +135,7 @@ runs out is only refused again:
 | `retry-after-ms` header | delta milliseconds | OpenAI SDK convention, opencode |
 | `retry-after` header | delta seconds, or an HTTP-date (jiff's RFC 2822 parser) | RFC 9110 |
 | `x-ratelimit-reset`, `ratelimit-reset` headers | `epoch_or_delta` | GitHub-style, IETF draft |
-| body `resets_at`, `resets_in_seconds`, `retry_after_seconds`, `retry_after` | `epoch_or_delta` | Codex `usage_limit_reached` (an epoch), older Codex and others (a delta) |
+| body `resets_at`, `resets_in_seconds`, `retry_after_seconds`, `retry_after` | `epoch_or_delta` | a `usage_limit_reached` body (an epoch), others (a delta) |
 | body `details[]` `google.rpc.RetryInfo` → `retryDelay` | `"38s"` | Gemini |
 | body `metadata.headers` `x-ratelimit-reset` | `epoch_or_delta` | OpenRouter's relayed limit |
 
@@ -353,9 +354,9 @@ carried the fault) and the *outcome* (`Refused` / `Transient` / `Api` /
 `Other`) — and pins each **once**, not their cross product. A handful of
 hand-built `genai::Error` fixtures cover every source: a `WebStream` boxing an
 `HttpError` (recursion + 4xx, the named 400 regression), a `WebModelCall` with a
-`Retry-After` header (429 + the header read), a Codex-shaped
+`Retry-After` header (429 + the header read), a
 `usage_limit_reached` body (`Refused` as an `Allowance`, deferred to its instant), an
-`insufficient_quota` body (`Api`), a non-streamed 5xx, a `ChatResponse`
+`insufficient_quota` body and a `subscription_sharing_usage_limit_exceeded` one (each `Api`), a non-streamed 5xx, a `ChatResponse`
 JSON frame, a non-JSON `WebModelCall` (the contract-breach `Terminal`), and a
 `WebStream` with an unrecognised boxed cause (the `Terminal` floor).
 

@@ -776,7 +776,7 @@ mod tests {
     /// A reset hours off is stated whole, as the allowance the body names: the
     /// retry policy defers it.
     #[test]
-    fn from_genai_classifies_a_codex_usage_limit_as_a_deferred_allowance() {
+    fn from_genai_classifies_a_usage_limit_with_a_named_reset_as_a_deferred_allowance() {
         let resets_at = Timestamp::now().as_second() + 5 * 3600;
         let e = too_many_requests(&serde_json::json!({
             "error": {
@@ -793,6 +793,27 @@ mod tests {
             }
             other => panic!("expected Refused, got {other:?}"),
         }
+    }
+
+    /// The plan route names no reset, so its cap is surfaced at once.
+    #[test]
+    fn from_genai_classifies_a_plan_cap_without_a_reset_as_api() {
+        let e = too_many_requests(&serde_json::json!({
+            "error": {
+                "code": "subscription_sharing_usage_limit_exceeded",
+                "message": "You have hit your usage limit.",
+            }
+        }));
+        assert!(
+            matches!(
+                e,
+                ProviderError::Api {
+                    status: Some(429),
+                    ..
+                }
+            ),
+            "got {e:?}"
+        );
     }
 
     /// A quota spent is cleared by no wait, so it must not be retried or scheduled.

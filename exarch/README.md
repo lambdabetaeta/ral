@@ -71,12 +71,16 @@ comes from the environment and is scrubbed like a famous provider's. See
 [`examples/config.ral`](examples/config.ral) for the format.
 
 A **signed-in ChatGPT account** is the one credential not read from the
-environment: it authorises over OAuth. `chatgpt` is a service like any other
-above, but unlike them it can own **several accounts** — a login email carries
-a personal account and one per workspace, and OpenAI issues each its own id.
-Sign in as many as you like with `exarch login`; each is separately selectable
-in the `/model` picker, listed by `exarch accounts`, and named by its email,
-qualified by its workspace when two would otherwise read alike. Every other
+environment: it signs in through OpenAI's "Sign in with ChatGPT" for
+open-source apps, an OAuth redirect to a browser on this machine. `chatgpt`
+is a service like any other above, but unlike them it can own **several
+accounts** — a login email carries a personal account and one per workspace,
+and OpenAI issues each its own id.
+Sign in as many as you like with `exarch login`; `exarch login <account>`
+renews an existing sign-in. Each is separately selectable in the `/model`
+picker, listed by `exarch accounts`, and named by its email, qualified by its
+account id when two would otherwise read alike. A plan's usage is shown in
+ChatGPT Settings → Usage, not by `/limits`. Every other
 service owns exactly one account and goes by its own name, which is why
 `--provider deepseek` names a credential unambiguously and `--provider
 alex@example.com` may not: if two accounts answer to a name, exarch refuses it

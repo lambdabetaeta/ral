@@ -366,7 +366,7 @@ pub enum Forensic {
         context_window: Option<u64>,
         /// What the account was called when the session started — a
         /// snapshot, the right thing for a log to hold even once a sibling
-        /// account arrives or a workspace is renamed.
+        /// account arrives or a plan changes.
         #[serde(rename = "provider")]
         label: String,
         /// `service` and `account` join `label` once an account carries a

@@ -132,7 +132,7 @@ pub fn run() -> Result<(), String> {
     // since `login` is how the OpenAI provider becomes available.
     if let Some(command) = c.command {
         return match command {
-            cli::Command::Login { device_auth } => provider::oauth::login(device_auth),
+            cli::Command::Login { account } => provider::oauth::login(account),
             cli::Command::Logout { account, all } => provider::oauth::logout(account, all),
             cli::Command::Accounts => {
                 let accounts = provider::oauth::accounts();

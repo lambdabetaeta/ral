@@ -125,13 +125,11 @@ pub struct Service {
 /// `allowance`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Meter {
-    /// The Codex backend's rate-limit readout: a 5-hour and a weekly window,
-    /// each a used-percentage.
-    Codex,
     /// `GET /api/v1/key`: credits spent against the key's cap, in dollars.
     OpenRouterCredits,
     /// Every key-bearing vendor that simply bills what you use, and a
-    /// subscription with no readout (`opencode-go`).
+    /// subscription with no readout: `opencode-go`, and a `ChatGPT` plan,
+    /// whose usage is shown only in `ChatGPT`'s own settings.
     Unpublished,
 }
 
@@ -160,6 +158,12 @@ pub enum Billing {
 }
 
 impl Service {
+    /// Whether requests ride a `ChatGPT` plan over `OpenAI`'s token-sharing
+    /// route, which refuses sampling controls and an output cap.
+    pub fn shares_a_plan(&self) -> bool {
+        matches!(self.auth, Auth::OAuth)
+    }
+
     /// An endpoint the user declared: metered, unrouted, and unmetered by any
     /// readout.
     pub fn declared(name: ServiceName, endpoint: String, adapter: AdapterKind, auth: Auth) -> Self {
@@ -181,8 +185,7 @@ pub struct Account {
     pub id: AccountId,
     pub service: Service,
     /// What this account calls itself, from its own credential alone: a login
-    /// email (qualified by workspace or plan when the token says so), or the
-    /// service's name for a key. A local fact — never unique, never a display
+    /// email, or the service's name for a key. A local fact — never unique, never a display
     /// string on its own, and therefore never needing reconciliation when a
     /// sibling account arrives or leaves.
     pub handle: String,
@@ -250,7 +253,7 @@ const HANDLE_SEPARATOR: &str = " · ";
 /// anthropic
 /// opencode-go
 /// chatgpt · alex@bristol.ac.uk
-/// chatgpt · alex@work (Acme Ltd)
+/// chatgpt · alex@work · chatgpt:acct-2
 /// ```
 pub fn label(account: &Account, among: &[Account]) -> String {
     let named = unqualified(account);
@@ -384,8 +387,8 @@ pub fn built_in(name: &ServiceName) -> Option<Service> {
 
 /// The chatgpt row by name, since `oauth` mints accounts against it.
 ///
-/// It names no endpoint: the Codex backend a login talks to is reached by a
-/// per-request URL override carrying the bearer token, not by a base URL.
+/// It names no endpoint: a login speaks the public Responses API at genai's
+/// default for `OpenAIResp`, with its access token as the bearer.
 pub fn chatgpt_service() -> Service {
     Service {
         name: ServiceName::built_in("chatgpt"),
@@ -394,7 +397,7 @@ pub fn chatgpt_service() -> Service {
         auth: Auth::OAuth,
         billing: Billing::FlatRate,
         routes: false,
-        meter: Meter::Codex,
+        meter: Meter::Unpublished,
     }
 }
 
@@ -490,10 +493,9 @@ mod tests {
     /// Asserts the whole table; `opencode-go` documents that a subscription
     /// with no readout is a choice the row states.
     #[test]
-    fn only_chatgpt_and_openrouter_meter_anything() {
+    fn only_openrouter_meters_anything() {
         for service in built_in_services() {
             let expected = match service.name.as_str() {
-                "chatgpt" => Meter::Codex,
                 "openrouter" => Meter::OpenRouterCredits,
                 _ => Meter::Unpublished,
             };

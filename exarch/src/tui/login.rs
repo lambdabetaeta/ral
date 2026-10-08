@@ -8,11 +8,12 @@
 
 use super::app::Overlay;
 use super::line;
-use super::palette::{BANNER_GOLD, CYAN, Col, OVERLAY_BG, RED, SLATE};
+use super::palette::{CYAN, Col, OVERLAY_BG, RED, SLATE};
 use super::picker::{PAD_X, PAD_Y, centered, overlay_frame};
 use super::terminal::osc52_copy;
 use super::tui_loop::{CommandCtx, OverlayTick, Tui, overlay_tick};
-use crate::provider::oauth::{self, LoginMethod, LoginPhase, OAuthToken};
+use crate::provider::identity;
+use crate::provider::oauth::{self, LoginPhase, OAuthToken, SignIn};
 use ratatui::Frame;
 use ratatui::crossterm::event::KeyCode;
 use ratatui::layout::Rect;
@@ -23,7 +24,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
-const OVERLAY_W: u16 = 56;
+/// Wide enough for an id-qualified account label beside its blurb.
+const OVERLAY_W: u16 = 72;
 /// Wrap width for the body rows: [`OVERLAY_W`] less bezel and padding.
 const BODY_W: usize = OVERLAY_W as usize - 2 - 2 * PAD_X as usize;
 /// The indent every body row shares.
@@ -31,8 +33,6 @@ const INDENT: &str = "  ";
 /// The column every row's value starts after, so that no value is placed by
 /// a hand-counted literal.  Two wider than the longest label.
 const LABEL: Col = Col::wide(8);
-/// The method-name column beside it.
-const METHOD: Col = Col::wide(7);
 /// What a labelled row leaves for its value.
 const VALUE_W: usize = BODY_W - INDENT.len() - LABEL.cells();
 
@@ -46,8 +46,16 @@ enum Mode {
     Failed(String),
 }
 
+/// One row of the selector: a sign-in and how the row names it.
+struct Choice {
+    sign_in: SignIn,
+    label: String,
+    blurb: &'static str,
+}
+
 pub(super) struct LoginOverlay {
-    method: LoginMethod,
+    choices: Vec<Choice>,
+    cursor: usize,
     mode: Mode,
     /// Whether this phase's value has gone to the terminal's clipboard.
     /// OSC 52 is never acknowledged, so this records what exarch sent, not
@@ -56,9 +64,28 @@ pub(super) struct LoginOverlay {
 }
 
 impl LoginOverlay {
+    /// A new registration first, then each signed-in account to sign in again.
     fn new() -> Self {
+        let tokens = oauth::load_all();
+        let accounts: Vec<_> = tokens.iter().map(oauth::to_account).collect();
+        let renewals = tokens
+            .into_iter()
+            .zip(&accounts)
+            .map(|(token, account)| Choice {
+                label: identity::label(account, &accounts),
+                sign_in: SignIn::Reauthorize(token),
+                blurb: "sign in again",
+            });
+        let choices = std::iter::once(Choice {
+            sign_in: SignIn::Register,
+            label: "new account".to_string(),
+            blurb: "register exarch with ChatGPT",
+        })
+        .chain(renewals)
+        .collect();
         Self {
-            method: LoginMethod::Browser,
+            choices,
+            cursor: 0,
             mode: Mode::Choosing,
             yanked: false,
         }
@@ -78,36 +105,35 @@ impl LoginOverlay {
 /// the cancel chord before a key ever reaches [`LoginOverlay::key`].
 pub(super) enum LoginAction {
     None,
-    Start(LoginMethod),
+    Start(SignIn),
     /// Send this phase's one transcribable value to the host clipboard.
     Yank(String),
 }
 
 impl LoginOverlay {
-    /// Handle one key press, mirroring `Picker::key` in `picker.rs`. With two
-    /// methods, every movement key simply toggles.
+    /// Handle one key press, mirroring `Picker::key` in `picker.rs`; movement
+    /// wraps.
     pub(super) fn key(&mut self, code: KeyCode) -> LoginAction {
+        let n = self.choices.len();
         match &self.mode {
             Mode::Choosing => match code {
                 KeyCode::Enter => {
-                    let method = self.method;
+                    let sign_in = self.choices[self.cursor].sign_in.clone();
                     self.mode = Mode::Running(None);
-                    LoginAction::Start(method)
+                    LoginAction::Start(sign_in)
                 }
-                KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right | KeyCode::Tab => {
-                    self.method = match self.method {
-                        LoginMethod::Browser => LoginMethod::Device,
-                        LoginMethod::Device => LoginMethod::Browser,
-                    };
+                KeyCode::Down | KeyCode::Tab => {
+                    self.cursor = (self.cursor + 1) % n;
+                    LoginAction::None
+                }
+                KeyCode::Up => {
+                    self.cursor = (self.cursor + n - 1) % n;
                     LoginAction::None
                 }
                 _ => LoginAction::None,
             },
             Mode::Running(Some(phase)) if code == KeyCode::Char('y') => match phase {
                 LoginPhase::AwaitingBrowser { url } => LoginAction::Yank(url.clone()),
-                LoginPhase::AwaitingDevice { user_code, .. } => {
-                    LoginAction::Yank(user_code.clone())
-                }
                 LoginPhase::ExchangingCode => LoginAction::None,
             },
             Mode::Running(_) => LoginAction::None,
@@ -163,12 +189,10 @@ impl LoginOverlay {
         let plane = Style::default().bg(OVERLAY_BG);
 
         let hint = match &self.mode {
-            Mode::Choosing => " ↑↓ method · ⏎ start · esc cancel ",
+            Mode::Choosing => " ↑↓ account · ⏎ start · esc cancel ",
             Mode::Failed(_) => " ⏎ retry · esc close ",
             Mode::Running(_) if self.yanked => " copied · esc cancel ",
-            Mode::Running(Some(
-                LoginPhase::AwaitingBrowser { .. } | LoginPhase::AwaitingDevice { .. },
-            )) => " y copy · esc cancel ",
+            Mode::Running(Some(LoginPhase::AwaitingBrowser { .. })) => " y copy · esc cancel ",
             Mode::Running(_) => " esc cancel ",
         };
         let inner = overlay_frame(f, area, " SIGN IN ", hint);
@@ -184,42 +208,32 @@ impl LoginOverlay {
     }
 
     fn body_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = vec![
-            self.method_line(LoginMethod::Browser, "browser", "open a browser tab", true),
-            self.method_line(
-                LoginMethod::Device,
-                "device",
-                "type a code elsewhere",
-                false,
-            ),
-            Line::default(),
-            self.phase_line(),
-        ];
+        let mut lines: Vec<_> = self
+            .choices
+            .iter()
+            .enumerate()
+            .map(|(i, choice)| self.choice_line(i, choice))
+            .collect();
+        lines.push(Line::default());
+        lines.push(self.phase_line());
         lines.extend(self.detail_lines());
         lines
     }
 
-    /// One row of the method selector. `show_field_label` prints the `method`
-    /// column header on the first row only.
-    fn method_line(
-        &self,
-        method: LoginMethod,
-        label: &str,
-        blurb: &str,
-        show_field_label: bool,
-    ) -> Line<'static> {
-        let active = self.method == method;
+    /// One row of the selector; the `account` column header sits on the first.
+    fn choice_line(&self, index: usize, choice: &Choice) -> Line<'static> {
+        let active = self.cursor == index;
         let name_style = if active {
             Style::default().fg(CYAN).add_modifier(Modifier::BOLD)
         } else {
             dim()
         };
-        let lead = if show_field_label { "method" } else { "" };
+        let lead = if index == 0 { "account" } else { "" };
         let marker = if active { "▸ " } else { "  " };
         Line::from(vec![
             Span::styled(format!("{INDENT}{}{marker}", LABEL.left(lead)), dim()),
-            Span::styled(METHOD.left(label), name_style),
-            Span::styled(format!("  {blurb}"), dim()),
+            Span::styled(choice.label.clone(), name_style),
+            Span::styled(format!("  {}", choice.blurb), dim()),
         ])
     }
 
@@ -261,24 +275,6 @@ impl LoginOverlay {
         match &self.mode {
             Mode::Choosing | Mode::Running(None | Some(LoginPhase::ExchangingCode)) => Vec::new(),
             Mode::Running(Some(LoginPhase::AwaitingBrowser { url })) => field("open", url, dim()),
-            Mode::Running(Some(LoginPhase::AwaitingDevice {
-                user_code,
-                url,
-                expires_in,
-            })) => {
-                let mut lines = vec![Line::from(vec![
-                    Span::styled(format!("{INDENT}{}", LABEL.left("code")), dim()),
-                    Span::styled(
-                        user_code.clone(),
-                        Style::default()
-                            .fg(BANNER_GOLD)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(format!("   expires in {expires_in}"), dim()),
-                ])];
-                lines.extend(field("open", url, dim()));
-                lines
-            }
             Mode::Failed(reason) => field("error", reason, Style::default().fg(RED)),
         }
     }
@@ -375,14 +371,14 @@ fn drive_login(tui: &mut Tui) -> Option<(OAuthToken, bool)> {
                 return None;
             }
             OverlayTick::Key(code) => match tui.app.login_mut()?.key(code) {
-                LoginAction::Start(method) => {
+                LoginAction::Start(sign_in) => {
                     let (tx, rx) = mpsc::channel();
                     let cancel = Arc::new(AtomicBool::new(false));
                     let flag = Arc::clone(&cancel);
                     let phase_tx = tx.clone();
                     std::thread::spawn(move || {
                         let result = oauth::login_flow(
-                            method,
+                            &sign_in,
                             move |p| {
                                 let _ = phase_tx.send(LoginMsg::Phase(p));
                             },

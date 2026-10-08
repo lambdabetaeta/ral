@@ -81,6 +81,35 @@ fn window_of(
     Ok(entry.context_window.or_else(|| fallback(model)))
 }
 
+/// The selection `account` can carry: a plan refuses sampling and an output
+/// cap, so neither rides one; effort does.
+fn selection(
+    account: &Account,
+    model: String,
+    tuning: &Tuning,
+    route: Option<String>,
+    max_tokens: Option<u32>,
+) -> Selection {
+    if account.service.shares_a_plan() {
+        Selection {
+            model,
+            max_tokens_override: None,
+            tuning: Tuning {
+                effort: tuning.effort.clone(),
+                ..Tuning::default()
+            },
+            route,
+        }
+    } else {
+        Selection {
+            model,
+            max_tokens_override: max_tokens,
+            tuning: tuning.clone(),
+            route,
+        }
+    }
+}
+
 /// What a scripted bureau answers every request for a provider with.
 fn mints_nothing() -> String {
     "this session replays a scripted provider and mints no others".into()
@@ -133,12 +162,7 @@ impl Bureau {
         Ok(Arc::new(Provider::build(
             backend,
             account,
-            Selection {
-                model,
-                max_tokens_override: max_tokens,
-                tuning: tuning.clone(),
-                route,
-            },
+            selection(account, model, tuning, route, max_tokens),
             context_window,
         )))
     }
@@ -212,6 +236,7 @@ impl Bureau {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use genai::chat::ReasoningEffort;
 
     fn listed(id: &str, window: Option<u64>) -> Listed {
         Listed {
@@ -231,6 +256,26 @@ mod tests {
         let models = [listed("m", None)];
         assert_eq!(window_of(&models, "m", "acct", |_| Some(99)), Ok(Some(99)));
         assert_eq!(window_of(&models, "m", "acct", |_| None), Ok(None));
+    }
+
+    #[test]
+    fn a_plan_selection_carries_effort_alone() {
+        let tuning = Tuning {
+            effort: Some(ReasoningEffort::Medium),
+            temperature: Some(0.5),
+            top_p: Some(0.9),
+        };
+        let pick = |account: &Account| selection(account, "m".into(), &tuning, None, Some(10));
+
+        let plan = pick(&Account::chatgpt("a", "a@x"));
+        assert!(matches!(plan.tuning.effort, Some(ReasoningEffort::Medium)));
+        assert_eq!((plan.tuning.temperature, plan.tuning.top_p), (None, None));
+        assert_eq!(plan.max_tokens_override, None);
+
+        let keyed = pick(&Account::built_in("openai"));
+        assert_eq!(keyed.tuning.temperature, Some(0.5));
+        assert_eq!(keyed.tuning.top_p, Some(0.9));
+        assert_eq!(keyed.max_tokens_override, Some(10));
     }
 
     #[test]

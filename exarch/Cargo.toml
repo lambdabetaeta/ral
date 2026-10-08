@@ -62,6 +62,7 @@ tempfile   = "3.27"
 base64     = { workspace = true }
 sha2       = { workspace = true }
 getrandom  = "0.4"
+uuid       = { version = "1", features = ["v4"] }
 # Line-level structured diffing: every file change is one grouped-hunk diff,
 # taken by `Diff::between`. `inline` and `unicode` serve its intra-line word
 # diff (`iter_inline_changes_deadline`/`iter_strings_lossy`).

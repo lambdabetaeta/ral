@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 /// The stand-in system prompt for `--chat`, which assembles none.
 ///
-/// A bare period: the Codex/Responses adapter rejects an empty system prompt
+/// A bare period: the Responses adapter rejects an empty system prompt
 /// and Anthropic a whitespace-only one, and chat does not branch on the
 /// adapter.
 pub const CHAT_SYSTEM: &str = ".";

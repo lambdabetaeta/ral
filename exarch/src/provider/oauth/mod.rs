@@ -1,17 +1,16 @@
 //! "Sign in with ChatGPT": `ChatGPT`-plan accounts authorised through
-//! `OpenAI`'s OAuth issuer rather than an API key.
+//! `OpenAI`'s token-sharing route for open-source apps rather than an API key.
 //!
-//! Both flows — a browser redirect to a loopback listener ([`browser`]), a
-//! device code typed into a verification page ([`device`]) — end in the same
-//! authorization-code exchange, yielding a JWT `access_token` whose `exp` is
-//! the expiry and an `id_token` carrying the issued account id, the login
-//! email, and (when the claims name one) a plan type or workspace. Several
-//! logins coexist in one store keyed by [`identity::AccountId`], each a
-//! selectable [`Account`]; [`refresh`] upserts, so renewing one never
-//! disturbs the others.
+//! A browser redirect to a loopback listener ([`browser`]) ends in an
+//! authorization-code exchange, yielding a JWT `access_token`, a rotating
+//! refresh token, and an `id_token` naming the account. Each account is its
+//! own issued client (`oaiapp_…`), registered once and presented on every
+//! later request; one host id per machine ties them together. Several logins
+//! coexist in one store keyed by [`identity::AccountId`], each a selectable
+//! [`Account`]; [`refresh`] upserts, so renewing one never disturbs the
+//! others.
 
 mod browser;
-mod device;
 
 use crate::provider::error::body_detail;
 use crate::provider::identity::{self, Account, AccountId};
@@ -30,33 +29,22 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-pub(crate) const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
-pub(crate) const ORIGINATOR: &str = "codex_cli_rs";
-pub(crate) const RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
+const AUTHORIZE_URL: &str = "https://auth.openai.com/api/accounts/authorize";
+const TOKEN_URL: &str = "https://auth.openai.com/api/accounts/oauth/token";
+const DISCOVERY_URL: &str = "https://auth.openai.com/.well-known/openid-configuration";
+/// The first-registration client; the callback answers with the issued one.
+const DYNAMIC_CLIENT: &str = "dynamic_agent_client";
+const AGENT_NAME: &str = "exarch";
+const SCOPE: &str = "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct";
+/// The one scope that authorises plan usage; a grant without it is refused.
+const PLAN_SCOPE: &str = "chatgpt.tokens.use.direct";
+const RESOURCE: &str = "https://api.openai.com/v1";
 
-/// The Codex CLI version exarch presents as `client_version` and in the
-/// `codex_cli_rs/<v>` user-agent. It must be a real, current Codex release,
-/// **not** exarch's own `CARGO_PKG_VERSION`: each model carries a
-/// `minimal_client_version`, so a low version is served a *shortened* model
-/// list — a newly released model is simply absent until the pin catches up.
-const DEFAULT_CODEX_CLIENT_VERSION: &str = "0.153.4";
+/// How long before expiry a token is renewed.
+const REFRESH_WINDOW_SECS: u64 = 5 * 60;
 
-/// [`DEFAULT_CODEX_CLIENT_VERSION`], or a non-blank
-/// `EXARCH_CODEX_CLIENT_VERSION` override — the valve for when the backend
-/// raises its floor before the pinned default is bumped.
-pub(crate) fn codex_client_version() -> String {
-    std::env::var("EXARCH_CODEX_CLIENT_VERSION")
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| DEFAULT_CODEX_CLIENT_VERSION.to_string())
-}
-
-const ISSUER: &str = "https://auth.openai.com";
-const SCOPE: &str = "openid profile email offline_access api.connectors.read api.connectors.invoke";
-
-/// A persisted `ChatGPT` login: a short-lived JWT access token and the refresh
-/// token that mints its successors.
+/// A persisted `ChatGPT` login: a short-lived JWT access token, the refresh
+/// token that mints its successors, and the client `OpenAI` issued the account.
 ///
 /// One per signed-in account, keyed by [`Self::issued`] under the `chatgpt`
 /// service — see [`to_account`].
@@ -64,48 +52,42 @@ const SCOPE: &str = "openid profile email offline_access api.connectors.read api
 pub struct OAuthToken {
     pub access_token: String,
     pub refresh_token: String,
-    /// The id the issuer minted for this account: `AccountId::of_login`'s
-    /// second half.
+    /// Retained for `id_token_hint` on a re-login; may be expired by then.
+    pub id_token: String,
+    /// The client `OpenAI` issued this account's registration (`oaiapp_…`):
+    /// every token request for this account names it, never `DYNAMIC_CLIENT`.
+    pub client_id: String,
+    /// The ID token's `sub`: `AccountId::of_login`'s second half.
     pub issued: String,
     /// From the `id_token`'s `email` claim; `None` when it carried none, and
     /// then [`Self::issued`] stands in for [`Self::handle`].
     pub email: Option<String>,
-    /// The workspace/organisation title, when the token names one — the
-    /// handle's first-choice qualifier.
-    pub workspace: Option<String>,
-    /// The plan type ("plus", "pro", "team", ...): the handle's qualifier of
-    /// last resort.
-    pub plan: Option<String>,
-    /// Unix seconds at which `access_token` expires (its JWT `exp`).
+    /// Unix seconds at which `access_token` expires.
     pub expires_at: u64,
 }
 
 impl OAuthToken {
-    /// True when the access token has expired or is within 60s of expiring.
+    /// True when the access token has expired or is within
+    /// [`REFRESH_WINDOW_SECS`] of expiring.
     pub fn is_stale(&self) -> bool {
-        self.expires_at <= crate::app::now_secs() + 60
+        self.expires_at <= crate::app::now_secs() + REFRESH_WINDOW_SECS
     }
 
     /// This account's local handle: its login email, or the issued id when
-    /// none was given, qualified by a workspace or plan when the token names
-    /// one. Computed from this token alone — see [`identity::label`] for how
-    /// a whole set of accounts is then told apart.
+    /// none was given. Computed from this token alone; see
+    /// [`identity::label`] for how a whole set of accounts is then told apart.
     pub fn handle(&self) -> String {
-        let handle = self.email.clone().unwrap_or_else(|| self.issued.clone());
-        match self.workspace.clone().or_else(|| self.plan.clone()) {
-            Some(qualifier) => format!("{handle} ({qualifier})"),
-            None => handle,
-        }
+        self.email.clone().unwrap_or_else(|| self.issued.clone())
     }
 }
 
 /// The `chatgpt` [`Account`] a persisted login names — the one conversion
 /// every other reader of the token store goes through.
-pub(super) fn to_account(token: &OAuthToken) -> Account {
+pub(crate) fn to_account(token: &OAuthToken) -> Account {
     Account::chatgpt(&token.issued, token.handle())
 }
 
-/// The token-endpoint success body shared by both interactive flows.
+/// The token-endpoint success body of a code exchange.
 #[derive(Deserialize)]
 // The `_token` suffix is the token-endpoint wire format; renaming would break serde.
 #[allow(clippy::struct_field_names)]
@@ -113,30 +95,37 @@ pub(super) struct RawTokens {
     pub id_token: String,
     pub access_token: String,
     pub refresh_token: String,
+    pub expires_in: u64,
+    pub scope: String,
 }
 
-/// Which interactive flow to run. Mirrors the CLI's `--device-auth` toggle.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum LoginMethod {
-    Browser,
-    Device,
+/// A completed authorization: the exchanged tokens and what finalising them
+/// is checked against.
+pub(super) struct Granted {
+    pub raw: RawTokens,
+    pub client_id: String,
+    /// This attempt's nonce, checked against the ID token's claim.
+    pub nonce: String,
+}
+
+/// Which client a sign-in presents: a new registration, or an account's own
+/// issued client, so signing in again never registers exarch twice.
+#[derive(Clone)]
+pub enum SignIn {
+    Register,
+    Reauthorize(OAuthToken),
 }
 
 /// One staged report from a running login flow.
 ///
 /// The CLI adapter ([`Self::stderr_line`]) and the TUI's `/login` overlay both
-/// render exactly these three phases; there is no percentage or elapsed clock.
+/// render exactly these two phases; there is no percentage or elapsed clock.
 pub enum LoginPhase {
     /// `url` is offered whatever the launcher did with it: a launch that
     /// reports success still shows nothing when the browser it started lives
     /// on a machine the user is not sitting at.
     AwaitingBrowser {
         url: String,
-    },
-    AwaitingDevice {
-        user_code: String,
-        url: String,
-        expires_in: String,
     },
     ExchangingCode,
 }
@@ -148,16 +137,16 @@ impl LoginPhase {
             Self::AwaitingBrowser { url } => Some(format!(
                 "Open this URL in your browser to sign in:\n  {url}\nWaiting for sign-in to complete..."
             )),
-            Self::AwaitingDevice {
-                user_code,
-                url,
-                expires_in,
-            } => Some(format!(
-                "To sign in, open {url} and enter this code (expires in {expires_in}):\n  {user_code}"
-            )),
             Self::ExchangingCode => None,
         }
     }
+}
+
+fn runtime() -> Result<tokio::runtime::Runtime, String> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("could not start runtime: {e}"))
 }
 
 /// Drive one interactive login to a persisted token, reporting whether an
@@ -170,27 +159,20 @@ impl LoginPhase {
 /// Returns `Err` if the runtime or HTTP client cannot be built, if the flow
 /// fails or is cancelled, or if finalising or persisting the token fails.
 pub fn login_flow(
-    method: LoginMethod,
+    sign_in: &SignIn,
     on_phase: impl Fn(LoginPhase),
     cancel: &Arc<AtomicBool>,
 ) -> Result<(OAuthToken, bool), String> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| format!("could not start runtime: {e}"))?;
+    let rt = runtime()?;
     let client = http_client()?;
-    let raw = rt.block_on(async move {
-        match method {
-            LoginMethod::Device => device::run(&client, on_phase, cancel).await,
-            LoginMethod::Browser => browser::run(&client, on_phase, cancel).await,
-        }
-    })?;
+    let host = host_id()?;
+    let granted = rt.block_on(browser::run(&client, &host, sign_in, on_phase, cancel))?;
     // The exchange itself does not poll the flag, so a cancel landing after
-    // the wait loops returned `Ok` would otherwise still persist a token.
+    // the wait loop returned `Ok` would otherwise still persist a token.
     if cancel.load(Ordering::Relaxed) {
         return Err("sign-in cancelled".to_string());
     }
-    let token = finalize(raw)?;
+    let token = finalize(granted, sign_in)?;
     let replaced = save_one(&token)?;
     Ok((token, replaced))
 }
@@ -200,16 +182,29 @@ pub fn login_flow(
 /// Ctrl-C kills the process.
 ///
 /// # Errors
-/// Returns `Err` if the runtime or HTTP client cannot be built, if the flow
-/// fails, or if finalising or persisting the token fails.
-pub fn login(device: bool) -> Result<(), String> {
-    let method = if device {
-        LoginMethod::Device
-    } else {
-        LoginMethod::Browser
+/// Returns `Err` if `account` names no signed-in account or several, if the
+/// runtime or HTTP client cannot be built, if the flow fails, or if finalising
+/// or persisting the token fails.
+pub fn login(account: Option<String>) -> Result<(), String> {
+    let sign_in = match account {
+        None => SignIn::Register,
+        Some(name) => {
+            let tokens = load_all();
+            let matched: Vec<_> = tokens.iter().filter(|t| names(t, &name)).collect();
+            match matched.as_slice() {
+                [token] => SignIn::Reauthorize((*token).clone()),
+                [] => {
+                    return Err(format!(
+                        "no ChatGPT account matches '{name}' (signed in: {})",
+                        joined_labels(&tokens),
+                    ));
+                }
+                many => return Err(ambiguous(&name, "sign in", many)),
+            }
+        }
     };
     let (token, replaced) = login_flow(
-        method,
+        &sign_in,
         |phase| {
             if let Some(line) = phase.stderr_line() {
                 ral_core::errln!("{line}");
@@ -240,6 +235,7 @@ pub fn login(device: bool) -> Result<(), String> {
 /// it matches none.
 pub fn logout(account: Option<String>, all: bool) -> Result<(), String> {
     if all {
+        revoke_all(&load_all());
         clear_at(&token_path())?;
         ral_core::errln!("Logged out of every ChatGPT account.");
         return Ok(());
@@ -260,6 +256,13 @@ pub fn logout(account: Option<String>, all: bool) -> Result<(), String> {
             ));
         }
     };
+    if let [token] = tokens
+        .iter()
+        .filter(|t| names(t, &target))
+        .collect::<Vec<_>>()[..]
+    {
+        revoke_all(std::slice::from_ref(token));
+    }
     match remove(&target)? {
         Some(label) => {
             ral_core::errln!("Logged out of ChatGPT account {label}.");
@@ -269,6 +272,26 @@ pub fn logout(account: Option<String>, all: bool) -> Result<(), String> {
             "no ChatGPT account matches '{target}' (signed in: {})",
             joined_labels(&tokens),
         )),
+    }
+}
+
+/// Best-effort revocation at the issuer: the local record goes regardless.
+fn revoke_all(tokens: &[OAuthToken]) {
+    if tokens.is_empty() {
+        return;
+    }
+    let Ok(rt) = runtime().inspect_err(|e| {
+        ral_core::errln!("warning: could not revoke ChatGPT tokens: {e}");
+    }) else {
+        return;
+    };
+    for token in tokens {
+        if let Err(e) = rt.block_on(revoke(token)) {
+            ral_core::errln!(
+                "warning: could not revoke the ChatGPT token for {}: {e}",
+                token.handle()
+            );
+        }
     }
 }
 
@@ -312,23 +335,31 @@ pub(crate) fn remove(account: &str) -> Result<Option<String>, String> {
 // The `*_at` core takes the path as an argument so tests drive it against a
 // temp file without mutating the process environment.
 
-/// Serializes `save_one_at` and `remove_at`'s load-modify-write: two
+/// Serializes `save_one_at`, `remove_at` and `host_id_at`'s load-modify-write: two
 /// concurrent refreshes, one per stale account, would otherwise each write
 /// back a stale copy of the *other*, silently reverting it. `load_all_at`
 /// stays lock-free — a bare read is never part of that race.
 static STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// The object `oauth.json` keeps under one account's key. `service` and
-/// `issued` are read back only to check them against that key — see
-/// [`load_all_at`] — never to mint one: the key is the index, these fields
+/// `oauth.json`: the host id and every account, keyed by [`AccountId`].
+#[derive(Serialize, Deserialize, Default)]
+struct Store {
+    /// `ext_agent_host_id`: opaque, minted once per host, never user-identifying.
+    host: Option<String>,
+    accounts: BTreeMap<String, StoredToken>,
+}
+
+/// The object [`Store`] keeps under one account's key. `service` and
+/// `issued` are read back only to check them against that key (see
+/// [`read_at`]), never to mint one: the key is the index, these fields
 /// are the truth it is checked against.
 #[derive(Serialize, Deserialize)]
 struct StoredToken {
     service: String,
     issued: String,
     email: Option<String>,
-    workspace: Option<String>,
-    plan: Option<String>,
+    id_token: String,
+    client_id: String,
     access_token: String,
     refresh_token: String,
     expires_at: u64,
@@ -340,8 +371,8 @@ impl From<&OAuthToken> for StoredToken {
             service: identity::chatgpt_service().name.as_str().to_string(),
             issued: token.issued.clone(),
             email: token.email.clone(),
-            workspace: token.workspace.clone(),
-            plan: token.plan.clone(),
+            id_token: token.id_token.clone(),
+            client_id: token.client_id.clone(),
             access_token: token.access_token.clone(),
             refresh_token: token.refresh_token.clone(),
             expires_at: token.expires_at,
@@ -354,28 +385,31 @@ impl From<StoredToken> for OAuthToken {
         Self {
             access_token: stored.access_token,
             refresh_token: stored.refresh_token,
+            id_token: stored.id_token,
+            client_id: stored.client_id,
             issued: stored.issued,
             email: stored.email,
-            workspace: stored.workspace,
-            plan: stored.plan,
             expires_at: stored.expires_at,
         }
     }
 }
 
+/// The store's host id and its trustworthy accounts. An absent or unreadable
+/// store reads as empty.
 #[allow(
     clippy::disallowed_methods,
     reason = "[silent:token-read] reads the persisted OAuth tokens; credential store infra, not turn-time data I/O"
 )]
-fn load_all_at(path: &std::path::Path) -> Vec<OAuthToken> {
-    let Some(bytes) = std::fs::read(path).ok() else {
-        return Vec::new();
-    };
-    let Ok(stored) = serde_json::from_slice::<BTreeMap<String, StoredToken>>(&bytes) else {
-        return Vec::new();
+fn read_at(path: &std::path::Path) -> (Option<String>, Vec<OAuthToken>) {
+    let Some(store) = std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Store>(&bytes).ok())
+    else {
+        return (None, Vec::new());
     };
     let chatgpt = identity::chatgpt_service().name;
-    stored
+    let tokens = store
+        .accounts
         .into_iter()
         .filter_map(|(key, entry)| {
             let expected = AccountId::of_login(&chatgpt, &entry.issued);
@@ -389,12 +423,17 @@ fn load_all_at(path: &std::path::Path) -> Vec<OAuthToken> {
             );
             None
         })
-        .collect()
+        .collect();
+    (store.host, tokens)
+}
+
+fn load_all_at(path: &std::path::Path) -> Vec<OAuthToken> {
+    read_at(path).1
 }
 
 fn save_one_at(path: &std::path::Path, token: &OAuthToken) -> Result<bool, String> {
     let _guard = STORE_LOCK.lock_ignore_poison();
-    let mut all = load_all_at(path);
+    let (host, mut all) = read_at(path);
     let replaced = if let Some(existing) = all.iter_mut().find(|t| t.issued == token.issued) {
         *existing = token.clone();
         true
@@ -402,40 +441,52 @@ fn save_one_at(path: &std::path::Path, token: &OAuthToken) -> Result<bool, Strin
         all.push(token.clone());
         false
     };
-    write_all_at(path, &all)?;
+    write_all_at(path, host.as_deref(), &all)?;
     Ok(replaced)
+}
+
+/// This host's id, minting and persisting one on first use.
+fn host_id_at(path: &std::path::Path) -> Result<String, String> {
+    let _guard = STORE_LOCK.lock_ignore_poison();
+    let (host, all) = read_at(path);
+    if let Some(host) = host {
+        return Ok(host);
+    }
+    let host = uuid::Uuid::new_v4().urn().to_string();
+    write_all_at(path, Some(&host), &all)?;
+    Ok(host)
+}
+
+/// This host's id: opaque, minted on first use and kept in the token store.
+///
+/// # Errors
+/// Returns `Err` when a freshly minted id cannot be persisted.
+pub fn host_id() -> Result<String, String> {
+    host_id_at(&token_path())
+}
+
+/// Whether `account` (handle, issued id, or account id) names `token`. The
+/// account-id arm accepts what a disambiguated label ends with, so a name
+/// copied off `exarch accounts` logs out the account it names.
+fn names(token: &OAuthToken, account: &str) -> bool {
+    token.issued == account || account_id(token).as_str() == account || token.handle() == account
 }
 
 fn remove_at(path: &std::path::Path, account: &str) -> Result<Option<String>, String> {
     let _guard = STORE_LOCK.lock_ignore_poison();
-    let mut all = load_all_at(path);
-    let chatgpt = identity::chatgpt_service().name;
-    let id_of = |token: &OAuthToken| AccountId::of_login(&chatgpt, &token.issued);
-    // The account-id arm accepts what a disambiguated label ends with, so a
-    // name copied off `exarch accounts` logs out the account it names.
+    let (host, mut all) = read_at(path);
     let matched: Vec<usize> = all
         .iter()
         .enumerate()
-        .filter(|(_, t)| {
-            t.issued == account || id_of(t).as_str() == account || t.handle() == account
-        })
+        .filter(|(_, t)| names(t, account))
         .map(|(i, _)| i)
         .collect();
-    // One handle, several accounts: only an id says which to drop.
     let [pos] = matched[..] else {
         if matched.is_empty() {
             return Ok(None);
         }
-        return Err(format!(
-            "'{account}' names {} signed-in accounts; \
-             log out by account id instead ({})",
-            matched.len(),
-            matched
-                .iter()
-                .map(|&i| id_of(&all[i]).to_string())
-                .collect::<Vec<_>>()
-                .join(", "),
-        ));
+        let among: Vec<&OAuthToken> = matched.iter().map(|&i| &all[i]).collect();
+        return Err(ambiguous(account, "log out", &among));
     };
     // Named against its fellows while it is still among them, so the report
     // says which of a colliding pair went.
@@ -446,28 +497,54 @@ fn remove_at(path: &std::path::Path, account: &str) -> Result<Option<String>, St
     if all.is_empty() {
         clear_at(path)?;
     } else {
-        write_all_at(path, &all)?;
+        write_all_at(path, host.as_deref(), &all)?;
     }
     Ok(Some(removed))
+}
+
+/// One handle, several accounts: only an id says which.
+fn ambiguous(account: &str, action: &str, among: &[&OAuthToken]) -> String {
+    format!(
+        "'{account}' names {} signed-in accounts; {action} by account id instead ({})",
+        among.len(),
+        among
+            .iter()
+            .map(|t| account_id(t).to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
+}
+
+fn account_id(token: &OAuthToken) -> AccountId {
+    AccountId::of_login(&identity::chatgpt_service().name, &token.issued)
 }
 
 #[allow(
     clippy::disallowed_methods,
     reason = "[silent:token-dir] creates the OAuth token store dir; credential store infra, not turn-time data I/O"
 )]
-fn write_all_at(path: &std::path::Path, all: &[OAuthToken]) -> Result<(), String> {
+fn write_all_at(
+    path: &std::path::Path,
+    host: Option<&str>,
+    all: &[OAuthToken],
+) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
     }
-    let keyed: BTreeMap<String, StoredToken> = all
-        .iter()
-        .map(|token| {
-            let id = AccountId::of_login(&identity::chatgpt_service().name, &token.issued);
-            (id.as_str().to_string(), StoredToken::from(token))
-        })
-        .collect();
-    let json = serde_json::to_string_pretty(&keyed)
+    let store = Store {
+        host: host.map(str::to_string),
+        accounts: all
+            .iter()
+            .map(|token| {
+                (
+                    account_id(token).as_str().to_string(),
+                    StoredToken::from(token),
+                )
+            })
+            .collect(),
+    };
+    let json = serde_json::to_string_pretty(&store)
         .map_err(|e| format!("could not serialize tokens: {e}"))?;
     write_private(path, json.as_bytes())
         .map_err(|e| format!("could not write {}: {e}", path.display()))
@@ -486,72 +563,141 @@ fn clear_at(path: &std::path::Path) -> Result<(), String> {
     }
 }
 
-pub(crate) async fn refresh(current: &OAuthToken) -> Result<OAuthToken, String> {
-    #[derive(Deserialize)]
-    // The `_token` suffix is the token-endpoint wire format; renaming would break serde.
-    #[allow(clippy::struct_field_names)]
-    struct RefreshResponse {
-        id_token: Option<String>,
-        access_token: Option<String>,
-        refresh_token: Option<String>,
-    }
+/// The token-endpoint success body of a refresh.
+#[derive(Deserialize)]
+// The `_token` suffix is the token-endpoint wire format; renaming would break serde.
+#[allow(clippy::struct_field_names)]
+struct RefreshResponse {
+    access_token: String,
+    refresh_token: Option<String>,
+    id_token: Option<String>,
+    expires_in: Option<u64>,
+}
 
+pub(crate) async fn refresh(current: &OAuthToken) -> Result<OAuthToken, String> {
     let client = http_client()?;
     let resp = client
-        .post(token_endpoint())
-        .header("Content-Type", "application/json")
-        .json(&serde_json::json!({
-            "client_id": CLIENT_ID,
-            "grant_type": "refresh_token",
-            "refresh_token": current.refresh_token,
-        }))
+        .post(TOKEN_URL)
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("client_id", current.client_id.as_str()),
+            ("refresh_token", current.refresh_token.as_str()),
+            ("resource", RESOURCE),
+        ])
         .send()
         .await
         .map_err(|e| format!("token refresh request failed: {e}"))?;
-    let resp: RefreshResponse = json_or_error(resp, "token refresh").await?;
-    let access_token = resp
-        .access_token
-        .ok_or_else(|| "token refresh did not return an access token".to_string())?;
-    Ok(renewed(
-        current,
-        access_token,
-        resp.refresh_token,
-        resp.id_token.as_deref(),
-    ))
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(refresh_failure(status, &body, current));
+    }
+    let resp: RefreshResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("could not parse token refresh response: {e}"))?;
+    Ok(renewed(current, resp))
+}
+
+/// Best-effort revocation of `token`'s refresh token at the issuer's
+/// advertised revocation endpoint.
+async fn revoke(token: &OAuthToken) -> Result<(), String> {
+    #[derive(Deserialize)]
+    struct Discovery {
+        revocation_endpoint: String,
+    }
+
+    let client = http_client()?;
+    let discovery = client
+        .get(DISCOVERY_URL)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("discovery request failed: {e}"))?;
+    let Discovery {
+        revocation_endpoint,
+    } = json_or_error(discovery, "discovery").await?;
+    let resp = client
+        .post(revocation_endpoint)
+        .timeout(Duration::from_secs(10))
+        .form(&[
+            ("token", token.refresh_token.as_str()),
+            ("token_type_hint", "refresh_token"),
+            ("client_id", token.client_id.as_str()),
+        ])
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+    let status = resp.status();
+    if status.is_success() {
+        Ok(())
+    } else {
+        Err(format!("issuer answered {status}"))
+    }
+}
+
+/// Error codes after which the refresh token will never work again.
+const DEAD_REFRESH_CODES: [&str; 6] = [
+    "invalid_grant",
+    "invalid_refresh_token",
+    "token_expired",
+    "refresh_token_expired",
+    "refresh_token_invalidated",
+    "refresh_token_reused",
+];
+
+/// The message for a non-success refresh response: a login the issuer has
+/// killed says to sign in again; anything else keeps the transient wording.
+fn refresh_failure(status: reqwest::StatusCode, body: &str, current: &OAuthToken) -> String {
+    let json: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+    let code = [
+        json.get("error").filter(|e| e.is_string()),
+        json.pointer("/error/code"),
+        json.get("error_code"),
+        json.get("code"),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|c| c.as_str());
+    let dead = status == reqwest::StatusCode::UNAUTHORIZED
+        || code.is_some_and(|c| DEAD_REFRESH_CODES.contains(&c));
+    if dead {
+        let name = current.email.as_deref().unwrap_or(&current.issued);
+        let code = code.unwrap_or("unauthorized");
+        format!(
+            "the ChatGPT login for {name} has expired or been revoked ({code}); \
+             run `exarch login {name}` to sign in again"
+        )
+    } else {
+        format!("token refresh failed ({status}): {}", body_detail(body))
+    }
 }
 
 /// Fold a token-endpoint refresh into `current`'s successor.
 ///
-/// The issued id is pinned to `current`'s: a refresh renews a credential, it
-/// never changes who the account is — every map keys on that id, and adopting
-/// a fresh claim's would strand the live cell under a key its own token
-/// disputes. Fresh claims may update the handle's ingredients; a response
-/// omitting the `id_token` keeps the current ones, so a refresh never loses
-/// the account's name either.
-fn renewed(
-    current: &OAuthToken,
-    access_token: String,
-    refresh_token: Option<String>,
-    id_token: Option<&str>,
-) -> OAuthToken {
-    let claims = id_token.and_then(decode_claims);
-    let auth = claims.as_ref().and_then(|c| c.auth.as_ref());
+/// The issued id and client are pinned to `current`'s: a refresh renews a
+/// credential, it never changes who the account is; every map keys on that
+/// id, and adopting a fresh claim's would strand the live cell under a key
+/// its own token disputes. A fresh ID token may update the email; a response
+/// omitting one keeps the current, so a refresh never loses the account's
+/// name either.
+fn renewed(current: &OAuthToken, resp: RefreshResponse) -> OAuthToken {
+    let email = resp
+        .id_token
+        .as_deref()
+        .and_then(|jwt| jwt_payload::<IdClaims>(jwt).ok())
+        .and_then(|claims| claims.email)
+        .or_else(|| current.email.clone());
     OAuthToken {
-        expires_at: expiry_secs(&access_token, id_token),
-        access_token,
-        refresh_token: refresh_token.unwrap_or_else(|| current.refresh_token.clone()),
+        access_token: resp.access_token,
+        refresh_token: resp
+            .refresh_token
+            .unwrap_or_else(|| current.refresh_token.clone()),
+        id_token: resp.id_token.unwrap_or_else(|| current.id_token.clone()),
+        client_id: current.client_id.clone(),
         issued: current.issued.clone(),
-        email: claims
-            .as_ref()
-            .and_then(|c| c.email.clone())
-            .or_else(|| current.email.clone()),
-        workspace: claims
-            .as_ref()
-            .and_then(workspace_title)
-            .or_else(|| current.workspace.clone()),
-        plan: auth
-            .and_then(|a| a.chatgpt_plan_type.clone())
-            .or_else(|| current.plan.clone()),
+        email,
+        expires_at: crate::app::now_secs() + resp.expires_in.unwrap_or(3600),
     }
 }
 
@@ -577,32 +723,9 @@ pub(crate) async fn refresh_cell_if_stale(
     Ok(())
 }
 
-/// The headers a Codex-backend request carries for this token, as lowercase
-/// `(name, value)` pairs.
-pub(crate) fn request_headers(token: &OAuthToken, accept: &str) -> Vec<(String, String)> {
-    vec![
-        (
-            "authorization".into(),
-            format!("Bearer {}", token.access_token),
-        ),
-        ("chatgpt-account-id".into(), token.issued.clone()),
-        ("openai-beta".into(), "responses=experimental".into()),
-        ("originator".into(), ORIGINATOR.into()),
-        (
-            "user-agent".into(),
-            format!("codex_cli_rs/{}", codex_client_version()),
-        ),
-        ("accept".into(), accept.into()),
-    ]
-}
-
-fn token_endpoint() -> String {
-    format!("{ISSUER}/oauth/token")
-}
-
 #[allow(
     clippy::disallowed_methods,
-    reason = "[silent:oauth-client] the client every login flow and token refresh talks to the issuer's token endpoint with. Sign-in machinery the user started, carrying credentials and no session data; raises no card for the same reason the loopback receiver does not."
+    reason = "[silent:oauth-client] the client every login flow and token refresh talks to the issuer's endpoints with. Sign-in machinery the user started, carrying credentials and no session data; raises no card for the same reason the loopback receiver does not."
 )]
 fn http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
@@ -634,19 +757,20 @@ pub(super) async fn json_or_error<T: DeserializeOwned>(
 
 pub(super) async fn exchange_code(
     client: &reqwest::Client,
+    client_id: &str,
     redirect_uri: &str,
     code: &str,
     verifier: &str,
 ) -> Result<RawTokens, String> {
     let resp = client
-        .post(token_endpoint())
-        .header("Content-Type", "application/x-www-form-urlencoded")
+        .post(TOKEN_URL)
         .form(&[
             ("grant_type", "authorization_code"),
             ("code", code),
-            ("redirect_uri", redirect_uri),
-            ("client_id", CLIENT_ID),
             ("code_verifier", verifier),
+            ("redirect_uri", redirect_uri),
+            ("client_id", client_id),
+            ("resource", RESOURCE),
         ])
         .send()
         .await
@@ -678,85 +802,52 @@ fn jwt_payload<T: DeserializeOwned>(jwt: &str) -> Result<T, String> {
     serde_json::from_slice(&bytes).map_err(|e| format!("could not parse JWT payload: {e}"))
 }
 
-#[derive(Deserialize)]
-struct AuthClaims {
-    chatgpt_account_id: Option<String>,
-    /// The plan type ("plus", "pro", "team", ...): confirmed present by
-    /// decoding a live token. [`IdClaims::organizations`] sits beside it in
-    /// the ladder but is not yet confirmed; correcting either's claim name is
-    /// a one-line `#[serde(rename = ...)]` away.
-    chatgpt_plan_type: Option<String>,
-}
-
+/// The ID token's payload, decoded but not signature-verified: it reaches us
+/// straight from the issuer's token endpoint over TLS and names the account,
+/// nothing more.
 #[derive(Deserialize)]
 struct IdClaims {
-    #[serde(rename = "https://api.openai.com/auth")]
-    auth: Option<AuthClaims>,
-    /// The standard OIDC claim; present only because [`SCOPE`] asks for it.
+    sub: String,
+    nonce: Option<String>,
     email: Option<String>,
-    /// One workspace per login, requested by `browser.rs`'s
-    /// `id_token_add_organizations=true`; not yet confirmed against a live
-    /// token — see [`AuthClaims::chatgpt_plan_type`].
-    organizations: Option<Vec<Organization>>,
 }
 
-#[derive(Deserialize)]
-struct Organization {
-    title: Option<String>,
-    is_default: Option<bool>,
-}
-
-/// The default organization's title, or `None` when the claim, the array, or
-/// the title itself is absent — the handle ladder then falls through to the
-/// plan type.
-fn workspace_title(claims: &IdClaims) -> Option<String> {
-    claims
-        .organizations
-        .as_ref()?
-        .iter()
-        .find(|org| org.is_default == Some(true))?
-        .title
-        .clone()
-}
-
-fn decode_claims(jwt: &str) -> Option<IdClaims> {
-    jwt_payload(jwt).ok()
-}
-
-#[derive(Deserialize)]
-struct ExpClaims {
-    exp: Option<i64>,
-}
-
-fn jwt_exp(jwt: &str) -> Option<u64> {
-    let exp = jwt_payload::<ExpClaims>(jwt).ok()?.exp?;
-    u64::try_from(exp).ok()
-}
-
-/// The access token's own `exp`, else the `id_token`'s, else an hour out.
-fn expiry_secs(access_token: &str, id_token: Option<&str>) -> u64 {
-    jwt_exp(access_token)
-        .or_else(|| id_token.and_then(jwt_exp))
-        .unwrap_or_else(|| crate::app::now_secs() + 3600)
-}
-
-/// Turn a token-endpoint response into an [`OAuthToken`]. A login without an
-/// account id is rejected outright: nothing downstream can key on it.
-fn finalize(raw: RawTokens) -> Result<OAuthToken, String> {
-    let claims = decode_claims(&raw.id_token);
-    let auth = claims.as_ref().and_then(|c| c.auth.as_ref());
-    let issued = auth
-        .and_then(|a| a.chatgpt_account_id.clone())
-        .ok_or_else(|| "login did not return a ChatGPT account id".to_string())?;
-    let expires_at = expiry_secs(&raw.access_token, Some(&raw.id_token));
+/// Turn a granted authorization into an [`OAuthToken`], refusing a grant that
+/// lacks the plan scope, answers another attempt, or (for a renewal) names
+/// another account.
+fn finalize(granted: Granted, sign_in: &SignIn) -> Result<OAuthToken, String> {
+    let Granted {
+        raw,
+        client_id,
+        nonce,
+    } = granted;
+    if !raw.scope.split_whitespace().any(|s| s == PLAN_SCOPE) {
+        return Err(format!(
+            "the sign-in granted no ChatGPT plan usage (scope: {}); does this account's plan allow sharing with apps?",
+            raw.scope
+        ));
+    }
+    let claims: IdClaims = jwt_payload(&raw.id_token)?;
+    if claims.nonce.as_deref() != Some(nonce.as_str()) {
+        return Err("the sign-in's ID token answers a different attempt; try again".to_string());
+    }
+    if let SignIn::Reauthorize(prev) = sign_in
+        && claims.sub != prev.issued
+    {
+        return Err(format!(
+            "you signed in as {}, but this sign-in was to renew {}; pick that account in the browser, or register the new one instead",
+            claims.email.as_deref().unwrap_or(&claims.sub),
+            prev.handle(),
+        ));
+    }
     Ok(OAuthToken {
         access_token: raw.access_token,
         refresh_token: raw.refresh_token,
-        issued,
-        email: claims.as_ref().and_then(|c| c.email.clone()),
-        workspace: claims.as_ref().and_then(workspace_title),
-        plan: auth.and_then(|a| a.chatgpt_plan_type.clone()),
-        expires_at,
+        id_token: raw.id_token,
+        client_id,
+        issued: claims.sub,
+        email: claims.email,
+        expires_at: crate::app::now_secs() + raw.expires_in,
     })
 }
 
@@ -776,10 +867,10 @@ mod tests {
         OAuthToken {
             access_token: "at".into(),
             refresh_token: "rt".into(),
+            id_token: "id".into(),
+            client_id: "oaiapp_test".into(),
             issued: issued.into(),
             email: email.map(str::to_string),
-            workspace: None,
-            plan: None,
             expires_at: 0,
         }
     }
@@ -850,6 +941,15 @@ mod tests {
         )
     }
 
+    fn refresh_response(id_token: Option<&str>, refresh_token: Option<&str>) -> RefreshResponse {
+        RefreshResponse {
+            access_token: "fresh-at".into(),
+            refresh_token: refresh_token.map(str::to_string),
+            id_token: id_token.map(str::to_string),
+            expires_in: Some(3600),
+        }
+    }
+
     /// A refresh renews the credential and the name's ingredients, never the
     /// identity: a claims set naming a different account id must not re-key
     /// the account out from under the maps that hold it.
@@ -857,21 +957,19 @@ mod tests {
     fn a_refresh_renames_but_never_rekeys_the_account() {
         let current = token("acct-1", Some("old@work"));
         let id_token = fake_id_token(&serde_json::json!({
-            "https://api.openai.com/auth": {
-                "chatgpt_account_id": "acct-other",
-                "chatgpt_plan_type": "pro",
-            },
+            "sub": "acct-other",
             "email": "new@work",
         }));
 
-        let fresh = renewed(&current, "fresh-at".into(), None, Some(&id_token));
+        let fresh = renewed(&current, refresh_response(Some(&id_token), None));
 
         assert_eq!(
             fresh.issued, "acct-1",
             "identity is pinned across a refresh"
         );
+        assert_eq!(fresh.client_id, "oaiapp_test", "the client is pinned too");
         assert_eq!(fresh.email.as_deref(), Some("new@work"));
-        assert_eq!(fresh.plan.as_deref(), Some("pro"));
+        assert_eq!(fresh.id_token, id_token);
         assert_eq!(
             fresh.refresh_token, "rt",
             "an omitted refresh token keeps the current one"
@@ -881,14 +979,22 @@ mod tests {
     /// A refresh response carrying no `id_token` keeps every claim it has.
     #[test]
     fn a_refresh_without_claims_keeps_the_name() {
-        let current = OAuthToken {
-            workspace: Some("Acme Ltd".into()),
-            ..token("acct-1", Some("alex@work"))
-        };
-        let fresh = renewed(&current, "fresh-at".into(), Some("fresh-rt".into()), None);
+        let current = token("acct-1", Some("alex@work"));
+        let fresh = renewed(&current, refresh_response(None, Some("fresh-rt")));
         assert_eq!(fresh.email.as_deref(), Some("alex@work"));
-        assert_eq!(fresh.workspace.as_deref(), Some("Acme Ltd"));
+        assert_eq!(fresh.id_token, "id");
         assert_eq!(fresh.refresh_token, "fresh-rt");
+    }
+
+    #[test]
+    fn a_revoked_grant_asks_for_a_new_sign_in() {
+        let message = refresh_failure(
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"error":"invalid_grant"}"#,
+            &token("acct-1", Some("alex@work")),
+        );
+        assert!(message.contains("alex@work"), "{message}");
+        assert!(message.contains("exarch login"), "{message}");
     }
 
     #[test]
@@ -931,9 +1037,9 @@ mod tests {
         let path = dir.path().join("oauth.json");
         std::fs::write(
             &path,
-            r#"{"chatgpt:wrong-key":{"service":"chatgpt","issued":"acc_1",
-                "email":null,"workspace":null,"plan":null,
-                "access_token":"at","refresh_token":"rt","expires_at":0}}"#,
+            r#"{"host":null,"accounts":{"chatgpt:wrong-key":{"service":"chatgpt",
+                "issued":"acc_1","email":null,"id_token":"id","client_id":"oaiapp_test",
+                "access_token":"at","refresh_token":"rt","expires_at":0}}}"#,
         )
         .expect("write a mismatched entry directly");
 
@@ -941,6 +1047,68 @@ mod tests {
             load_all_at(&path),
             Vec::new(),
             "a mismatched key is not trusted"
+        );
+    }
+
+    #[test]
+    fn the_host_id_is_minted_once() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("oauth.json");
+        let first = host_id_at(&path).expect("mint");
+        assert!(first.starts_with("urn:uuid:"), "{first}");
+        save_one_at(&path, &token("acc_1", Some("alex@work"))).expect("seed");
+
+        assert_eq!(host_id_at(&path).expect("read"), first);
+        assert_eq!(load_all_at(&path).len(), 1, "minting kept the accounts");
+    }
+
+    fn granted(scope: &str, claims: &serde_json::Value) -> Granted {
+        Granted {
+            raw: RawTokens {
+                id_token: fake_id_token(claims),
+                access_token: "at".into(),
+                refresh_token: "rt".into(),
+                expires_in: 3600,
+                scope: scope.into(),
+            },
+            client_id: "oaiapp_test".into(),
+            nonce: "n1".into(),
+        }
+    }
+
+    const FULL_SCOPE: &str = "openid email chatgpt.tokens.use.direct";
+
+    #[test]
+    fn a_grant_without_plan_scope_is_refused() {
+        let granted = granted(
+            "openid email",
+            &serde_json::json!({"sub": "a", "nonce": "n1"}),
+        );
+        let error = finalize(granted, &SignIn::Register).expect_err("no plan scope");
+        assert!(error.contains("plan"), "{error}");
+    }
+
+    #[test]
+    fn a_mismatched_nonce_is_refused() {
+        let granted = granted(
+            FULL_SCOPE,
+            &serde_json::json!({"sub": "a", "nonce": "other"}),
+        );
+        let error = finalize(granted, &SignIn::Register).expect_err("wrong attempt");
+        assert!(error.contains("different attempt"), "{error}");
+    }
+
+    #[test]
+    fn renewing_a_different_account_is_refused() {
+        let granted = granted(
+            FULL_SCOPE,
+            &serde_json::json!({"sub": "acct-2", "nonce": "n1", "email": "two@work"}),
+        );
+        let sign_in = SignIn::Reauthorize(token("acct-1", Some("one@work")));
+        let error = finalize(granted, &sign_in).expect_err("another account");
+        assert!(
+            error.contains("two@work") && error.contains("one@work"),
+            "{error}"
         );
     }
 }
