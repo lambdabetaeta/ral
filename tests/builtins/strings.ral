@@ -51,7 +51,7 @@ echo !{ral-quote hello} !{ral-quote 'hello world'} !{ral-quote '007'} !{ral-quot
 # Expected: hello 'hello world' '007' #'it's'# ##'a'#b'##
 
 # has
-let m = [:, a: 1, b: 2]
+let m = ["a": 1, "b": 2]
 if !{has $m a} { echo 'has a' }
 if $[not !{has $m c}] { echo 'no c' }
 # Expected: has a, no c

@@ -273,11 +273,11 @@ Lists and records share square brackets:
     "$server[host]:$server[port]"
 
 Entries use commas. `[]` is an empty list; `[:]` is an empty map. A record has
-known fields, possibly of different types. A map has computed string keys and
-values of one type:
+known fields, possibly of different types. A map has string keys that are data
+and values of one type; a `"quoted"` key is data, as a computed one is:
 
     let key   = 'staging'
-    let ports = [$key: 8080, production: 443]
+    let ports = [$key: 8080, "production": 443]
 
 `...` spreads collections and command arguments:
 

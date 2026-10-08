@@ -1,5 +1,5 @@
 # contains: couldn't match
 # contains: a record and a map are different types
 # contains: `[:]` for the empty one
-let k = if true { [:, a: "x"] } else { [a: ""] }
+let k = if true { ["a": "x"] } else { [a: ""] }
 return $k

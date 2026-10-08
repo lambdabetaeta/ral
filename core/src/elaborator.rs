@@ -680,8 +680,11 @@ impl Elaborator {
                 let plain: Option<Vec<(&String, &Spanned<Ast>)>> = entries
                     .iter()
                     .map(|e| match e {
-                        MapEntry::Entry { key, value } => Some((key, value)),
-                        MapEntry::Deref { .. } | MapEntry::Spread(_) => None,
+                        MapEntry::Entry { key, value } => match &key.item {
+                            Ast::Literal(key) => Some((key, value)),
+                            _ => None,
+                        },
+                        MapEntry::Spread(_) => None,
                     })
                     .collect();
                 match plain {
@@ -696,13 +699,9 @@ impl Elaborator {
                                 .iter()
                                 .map(|e| match e {
                                     MapEntry::Entry { key, value } => ValMapEntry::Entry(
-                                        Val::String(key.clone().into()),
+                                        self.spanned_val(key, binds).item,
                                         self.spanned_val(value, binds),
                                     ),
-                                    MapEntry::Deref { name, value } => {
-                                        let key = self.variable_val(name);
-                                        ValMapEntry::Entry(key, self.spanned_val(value, binds))
-                                    }
                                     MapEntry::Spread(a) => {
                                         ValMapEntry::Spread(self.spanned_val(a, binds))
                                     }

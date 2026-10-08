@@ -2,4 +2,4 @@
 # contains: shared by every use in its unit
 let pick = { |m k| $m[$k] }
 let a = pick [1, 2] 0
-let b = pick [:, y: 2] 'y'
+let b = pick ["y": 2] 'y'

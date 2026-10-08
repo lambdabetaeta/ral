@@ -1,0 +1,2 @@
+# contains: `[:]` is the empty map, and the only literal that opens with `:`
+[:, a: 1, b: 2]

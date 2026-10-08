@@ -764,8 +764,8 @@ impl Lexer {
     }
 
     /// Does the `:` under `peek()` break the bare word?  Only when space,
-    /// newline, `]`, or `,` follows: `host: val` and the record marker
-    /// `[:, ...]` split, `host:5432` does not.
+    /// newline, `]`, or `,` follows: `host: val` and `[:]` split, `host:5432`
+    /// does not.
     fn colon_splits_here(&self) -> bool {
         self.peek_n(1)
             .is_none_or(|next| matches!(next, ' ' | '\t' | '\r' | '\n' | ']' | ','))

@@ -42,7 +42,7 @@ an *update* of one base, and rows are the textbook Rémy rows.
   field `tokne` to update — a spread replaces fields its record already has
   (did you mean `token`?)*; when no field is within edit distance 2, it offers
   the idioms instead — give the record the field from the start, nest it
-  (`[cfg: $cfg, total: …]`), or use a map (`[:, ...$cfg, total: …]`).
+  (`[cfg: $cfg, total: …]`), or make `$cfg` a map (`[...$cfg, "total": …]`).
 
 ## Why
 

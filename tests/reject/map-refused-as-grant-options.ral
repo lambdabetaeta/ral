@@ -1,2 +1,2 @@
 # contains: `grant` takes its options written in its own bracket
-let m = [:, net: true]; grant $m { return "ok" }
+let m = ["net": true]; grant $m { return "ok" }

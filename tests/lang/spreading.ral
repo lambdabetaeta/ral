@@ -35,9 +35,9 @@ let front = [...$base_opts, port: 1]
 echo $front[port]
 echo $front[host]
 
-# A marked map spread stays a map
-let subject = [:, host: 'local', port: 'x']
-let copy = [:, ...$subject]
+# A quoted key makes the literal a map, so the spread is a map's
+let subject = ["host": 'local', "port": 'x']
+let copy = [...$subject, "port": 'y']
 echo !{get $copy host ''}
 
 echo 'spreading tests done'

@@ -211,7 +211,7 @@ mod tests {
     /// table's labels, so it is written as a record.
     #[test]
     fn a_mapped_profile_is_refused_before_the_file_runs() {
-        let msg = load_err_message("return [:, fss: [read: ['/tmp']]]", "<test:typo-map>");
+        let msg = load_err_message("return [\"fss\": [read: ['/tmp']]]", "<test:typo-map>");
         assert!(msg.contains("`grant` takes a record of settings"), "{msg}");
     }
 

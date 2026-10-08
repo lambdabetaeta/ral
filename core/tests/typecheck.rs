@@ -273,8 +273,8 @@ fn a_computed_index_nothing_decides_is_refused_at_the_units_end() {
 fn a_computed_index_helper_is_accepted_at_the_one_container_type_its_unit_uses() {
     let top = toplevel_ok(
         "let pick = { |m k| $m[$k] }\n\
-         let a = pick [:, x: 1] 'x'\n\
-         let b = pick [:, y: 2] 'y'\n\
+         let a = pick [\"x\": 1] 'x'\n\
+         let b = pick [\"y\": 2] 'y'\n\
          return ()",
     );
     assert_eq!(scheme_at(&top, 0), "Map Integer → String → Returns Integer");
@@ -284,7 +284,7 @@ fn a_computed_index_helper_is_accepted_at_the_one_container_type_its_unit_uses()
 fn a_computed_index_helper_used_on_a_list_and_a_map_is_a_mismatch() {
     let src = "let pick = { |m k| $m[$k] }\n\
                let a = pick [1, 2] 0\n\
-               let b = pick [:, y: 2] 'y'\n\
+               let b = pick [\"y\": 2] 'y'\n\
                return ()";
     let errs = raw_errors(src);
     assert_eq!(codes(src), ["T0010"], "{errs:?}");
@@ -532,10 +532,10 @@ fn return_schema_names_an_unknown_key_in_the_tables_words() {
 #[test]
 fn return_schema_refuses_a_map() {
     for form in [Form::Rc, Form::Grant, Form::Manifest] {
-        let errs = contract_errors(declared(form), "return [:, nn: 1]");
+        let errs = contract_errors(declared(form), "return [\"nn\": 1]");
         assert_eq!(codes_of(&errs), ["T0077"], "{form:?}: {errs:?}");
         let hint = errs[0].hint().unwrap();
-        assert!(hint.contains("not `[:, "), "{hint}");
+        assert!(hint.contains("not a map"), "{hint}");
     }
 }
 

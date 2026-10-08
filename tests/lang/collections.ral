@@ -41,8 +41,8 @@ let trailing = [
 echo !{length $trailing}
 
 # `has` tests for a key
-echo !{has [:, a: 1, b: 2] a}
-echo !{has [:, a: 1, b: 2] c}
+echo !{has ["a": 1, "b": 2] a}
+echo !{has ["a": 1, "b": 2] c}
 
 # A computed duplicate key is an error, not a silent overwrite
 let k = 'a'
@@ -61,8 +61,8 @@ echo ...[upper, hello]
 echo !{[label: upper, fn: $upper][label]}
 
 # keys, values, entries
-echo ...!{keys [:, a: 1, b: 2, c: 3]}
-echo ...!{values [:, a: 1, b: 2]}
+echo ...!{keys ["a": 1, "b": 2, "c": 3]}
+echo ...!{values ["a": 1, "b": 2]}
 echo !{length !{keys [:]}}
-let pairs = entries [:, x: hello]
+let pairs = entries ["x": hello]
 echo $pairs[0][0] $pairs[0][1]

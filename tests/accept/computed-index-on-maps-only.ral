@@ -1,4 +1,4 @@
 let pick = { |m k| $m[$k] }
-let a = pick [:, x: 1] 'x'
-let b = pick [:, y: 2] 'y'
+let a = pick ["x": 1] 'x'
+let b = pick ["y": 2] 'y'
 echo "$a $b"

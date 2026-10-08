@@ -175,9 +175,9 @@ Arithmetic and Boolean expressions must be in `$[…]` blocks: `$[$x == 0]`, `$[
 
 Indexing `$h[key]` works in any context (pipelines, blocks, double quoted): e.g. `view-text-around $h[file] $h[line] 3`.
 
-A map is not a record: its keys are runtime data and its values all share one type. A literal is a map if it opens with `[:` — `[:]` is the empty one, `[:, a: 1, b: 2]` a map on keys written out — or if any key is computed (`[$k: 1]`); otherwise static keys make a record. Only maps support `keys`, `values`, `has`, `get` (with default), `union`, `entries`, and only a map is read by a computed key (`$m[$k]`); a bare key like `$r[host]` always reads a record field. 
+A map is not a record: its keys are runtime data and its values all share one type. A literal is a map if any key is data: `"quoted"` (`["a": 1, "b": 2]`) or computed (`[$k: 1]`). A bare or `'single-quoted'` key is a label, and labels alone make a record; `[:]` is the empty map. Only maps support `keys`, `values`, `has`, `get` (with default), `union`, `entries`, and only a map is read by a computed key (`$m[$k]`); a bare key like `$r[host]` always reads a record field. 
 
-When you write an rc file, a plugin manifest, or a capability profile — anything whose terminal `return` a host checks against a fixed keyset — write a record: `return [edit-mode: 'vi']`. A misspelled key is then a type error before the file runs at all. `return [:, edit-mode: 'vi']` is a map, not a record, and `[]` is the empty *list*; both are type errors too. A file with nothing to set returns `()`.
+When you write an rc file, a plugin manifest, or a capability profile — anything whose terminal `return` a host checks against a fixed keyset — write a record: `return [edit-mode: 'vi']`. A misspelled key is then a type error before the file runs at all. `return ["edit-mode": 'vi']` is a map, not a record, and `[]` is the empty *list*; both are type errors too. A file with nothing to set returns `()`.
 
 A variant is a value tagged by a `` `tag ``, recording one of several outcomes along with some data, e.g. `` `file [bytes: 4096] ``:
 

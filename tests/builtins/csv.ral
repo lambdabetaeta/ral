@@ -1,7 +1,7 @@
 # Test: from-csv / to-csv codecs
 
 # Encode to the byte channel, decode back: the value survives the round trip.
-let rows = [[:, b: '2', a: '1'], [:, a: '3', b: '4']]
+let rows = [["b": '2', "a": '1'], ["a": '3', "b": '4']]
 let back = !{to-csv $rows | from-csv}
 echo !{length $back}
 echo $back[0][a]

@@ -137,7 +137,7 @@ fn rc_unknown_key_behind_a_spread_is_a_static_error() {
 /// labels, so it is written as a record.
 #[test]
 fn rc_returning_a_map_is_a_static_error() {
-    let (_dir, env) = rc_home("return [:, surfase: 'minimal', edit_mode: 'vi']");
+    let (_dir, env) = rc_home("return [\"surfase\": 'minimal', \"edit_mode\": 'vi']");
 
     let out = repl(&["-i"], &env, "echo alive\n");
     assert!(

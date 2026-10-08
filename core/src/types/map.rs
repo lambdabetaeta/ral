@@ -6,7 +6,7 @@
 //! map equality with a pointwise zip, and what makes `Value::PartialEq`
 //! order-independent for free.
 //!
-//! A literal (`[key: val, …]` or `[:, key: val, …]` with no spread, no
+//! A literal (`[key: val, …]` or `["key": val, …]` with no spread, no
 //! computed key) is the value closure `⟨V, ρ|occ(V)⟩` instead: `Repr::Literal`
 //! holds the node — entries already sorted by key — and the environment
 //! `form` restricted it to. A lookup takes the first of an equal run, as

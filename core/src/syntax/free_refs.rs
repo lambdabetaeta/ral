@@ -135,11 +135,8 @@ impl FreeRefs<'_> {
             Ast::Map(entries) => {
                 for entry in entries {
                     match entry {
-                        MapEntry::Entry { value, .. } => {
-                            self.ast(&value.item);
-                        }
-                        MapEntry::Deref { name, value } => {
-                            self.note(name);
+                        MapEntry::Entry { key, value } => {
+                            self.ast(&key.item);
                             self.ast(&value.item);
                         }
                         MapEntry::Spread(a) => {

@@ -2,7 +2,7 @@ let home = !{env}[HOME]
 echo "home: $home"
 let names = keys !{env}
 echo !{length $names}
-let m = [:, a: 1]
+let m = ["a": 1]
 echo $[$m[a] + 1]
 let key_after = { |m| $m[a]; keys $m }
 let key_before = { |m| keys $m; $m[a] }

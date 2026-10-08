@@ -381,8 +381,9 @@ module.exports = grammar({
 
     _list_item: $ => choice($._value_bracket, $.spread),
 
-    // A map literal is either '[:] ' (empty) or '[entries...]' where each
-    // entry is `key: value` or `...$expr` (spread).
+    // A map literal is either '[:]' (empty) or '[entries...]' where each
+    // entry is `key: value` or `...$expr` (spread). The parser classifies
+    // record against map by the keys' form; a "string" or $deref key is data.
     map_literal: $ => choice(
       seq('[', ':', ']'),
       seq(
@@ -398,9 +399,10 @@ module.exports = grammar({
 
     _map_entry: $ => choice($.map_entry, $.spread),
 
-    // Keys: identifier, single-quoted string, backtick tag, or $deref.
+    // Keys: identifier, single-quoted string, double-quoted string, backtick
+    // tag, or $deref.
     map_entry: $ => seq(
-      field('key', choice($.identifier, $.string_single, $.tag, $.deref)),
+      field('key', choice($.identifier, $.string_single, $.string_double, $.tag, $.deref)),
       ':',
       field('value', $._value_bracket),
     ),

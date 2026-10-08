@@ -2018,7 +2018,7 @@ mod tests {
     #[test]
     fn a_map_literal_refuses_a_static_duplicate_key() {
         assert_eq!(error_codes("return [a: 1, a: 2]"), ["T0022"]);
-        assert_eq!(error_codes("return [:, a: 1, a: 2]"), ["T0022"]);
+        assert_eq!(error_codes("return [\"a\": 1, a: 2]"), ["T0022"]);
         assert_eq!(
             error_codes("let k = 'x'\nreturn [$k: 1, a: 1, a: 2]"),
             ["T0022"]

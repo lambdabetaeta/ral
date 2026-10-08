@@ -43,42 +43,52 @@ domain is a run-time value. Neither contains the other.
 A key is a `String` either way (`docs/SPEC.md` §4.5). The *form* you write it in
 decides which type the literal takes:
 
-- **Bare word** — `host: 5432` — a static label.
-- **Quoted string** — `'content-type': "json"` — a static label that may carry
+- **Bare word** — `host: 5432` — a label.
+- **Single-quoted word** — `'content-type': "json"` — a label that may carry
   characters a bare word cannot.
-- **Deref / computed** — `[$k: $v]` — the key is evaluated at run time and must
-  be a `String`.
+- **Double-quoted string** — `["a": 1]` — data: a string expression, whether
+  or not it interpolates.
+- **Deref** — `[$k: $v]` — data: the key is evaluated at run time and must be
+  a `String`.
 
 The first two are *labels*: known at elaboration, so they make a record. They
-are the **bare** alphabet, and it is the only one a key may draw on. Backtick
-labels are the *tag* alphabet, and a tag names a constructor rather than a
-part, so it keys nothing. Each alphabet belongs to one type former: bare to
-`Record`, tag to `Variant` and to the `case` arms that eliminate one. In the
-row that carries them the alphabet is a constructor of `Label`
-([[design/row-types|row-types]]), so a field's *spelling* cannot make it a
-tag.
+are the **bare** alphabet, and it is the only one a key may draw on. The last
+two are *data*: the split is the one the shell already draws between a quoted
+word and a string that is built, and the one a map's index draws, since
+`$m["a"]` and `$m[$k]` both read a map where `$r[a]` reads a record's field.
+(Elixir's `%{a: 1}` against `%{"a" => 1}` is the precedent.)
+
+Backtick labels are the *tag* alphabet, and a tag names a constructor rather
+than a part, so it keys nothing. Each label alphabet belongs to one type
+former: bare to `Record`, tag to `Variant` and to the `case` arms that
+eliminate one. In the row that carries them the alphabet is a constructor of
+`Label` ([[design/row-types|row-types]]), so a field's *spelling* cannot make
+it a tag.
 
 ## Which one a literal becomes
 
 **The classification is syntax, not inference.** The parser reads the keys and
 emits `Ast::Record` or `Ast::Map` (`core/src/syntax/parser.rs`), and each has
-its own entry type, so a record literal cannot hold a computed key:
+its own entry type, so a record literal cannot hold a data key:
 
-- **`[:` marks a map.** `[:]` is the empty one and `[:, a: 1, b: 2]` a map whose
-  keys are written out: `Map<Int>`.
+- **`[:]` is the empty map**, the one entry with both sides erased, and the
+  only literal that opens with `:`. There is no map *marker*: `[:, a: 1]` was
+  one, and went when the quoted key arrived, so that every colon in a bracket
+  is an entry's.
 - **A form's bracket is the form's own.** `within`'s and `grant`'s first
   operand is read by the form, not by the collection rule, so `[]` there is the
   empty *option set* and `[:]` names no options at all. That is the one place
   the `[]`/`[:]` ambiguity bites, and closing it there is what makes
   `grant [] { … }` mean what it reads as.
-- **Every key a static label** → `Record`. `[host: "db", port: 5432]` infers
+- **Every key a label** → `Record`. `[host: "db", port: 5432]` infers
   `[host: String, port: Int]`.
-- **Any key computed** → `Map<α>`. `[$k: 1, $j: 2]` infers `Map<Int>` — one
-  computed key collapses the whole literal to homogeneous, because a runtime
-  keyset cannot carry per-label types.
+- **Any key data** → `Map<α>`. `["a": 1, "b": 2]` and `[$k: 1, $j: 2]` infer
+  `Map<Int>` — one data key collapses the whole literal to homogeneous, because
+  a keyset that is data cannot carry per-label types.
 - **Spreads alone settle nothing**, so a literal built only of them is a list.
   A spread in a record literal must be a record and in a map literal a map; the
-  two never merge into one another.
+  two never merge into one another, and two maps merge by `union`, not by a
+  literal.
 - **A spread in a record literal shadows by prepending.** `[...$cfg, port: 9090]`
   unifies `$cfg` as a row — see [[design/row-types|row-types]].
 
@@ -131,12 +141,12 @@ A record and a map never unify — not directly, and not under `List`, `Thunk`,
 `Fun` or `Handle`. The map-keyed builtins are typed on `Map` — `keys :: ∀α. Map<α> → F [Str]`,
 `has :: ∀α. Map<α> → Str → F Bool` (`core/src/typecheck/builtins.rs`) — so they
 take a map and only a map: `keys [a: 1, b: 2]` is a type error and
-`keys [:, a: 1, b: 2]` is the program that was meant.
+`keys ["a": 1, "b": 2]` is the program that was meant.
 
 The refusal is derived from the two types' shapes rather than from the site
 that raised it (`core/src/typecheck/explain.rs`), so the same sentence answers
 an argument, a spread and a branch join alike — the last being the commonest
-way in, as in `if c { [:, k: $v] } else { [k: ''] }`, where the fix is `[:]`
+way in, as in `if c { ["k": $v] } else { [k: ''] }`, where the fix is `[:]`
 for the empty map, there being no empty-record literal. A map type prints as
 `Map α`, so the diagnosis names the two kinds before the help does.
 
@@ -160,7 +170,7 @@ would then stand where a record is expected, closing that record's row and
 answering for fields nobody wrote, and which of the two a literal is asked to
 be would depend on the order the solver reached it in. The sound direction — a
 homogeneous record where a map is wanted — is recoverable by writing the
-literal as a map (`[:, …]`), which says it in the source rather than in the
+literal as a map (`["k": …]`), which says it in the source rather than in the
 unifier.
 ## Order is not data
 
@@ -200,7 +210,7 @@ homogeneous association on a runtime keyset (a map). The split is forced by the
 data, not chosen for tidiness.
 
 A *set* is the degenerate homogeneous map `Map<Unit>` — keys present, values
-carrying no information — written `[:, alice: (), bob: ()]`, with `has` for
+carrying no information — written `["alice": (), "bob": ()]`, with `has` for
 membership and `union` / `intersection` / `difference` in the prelude
 (`docs/SPEC.md` §4.5).
 
@@ -247,7 +257,7 @@ form-bracket exception was built to avoid in the first place, one level up.
 **Superseded for contract files.** A contract file's return is now ascribed its
 table after inference, in a scratch copy of the unifier, so `[]` stays the empty
 list everywhere but a list or a map returned at a contract boundary is refused
-statically, with the spelling to use: `[:, k: v]` is a map whose keys are data,
+statically, with the spelling to use: `["k": v]` is a map whose keys are data,
 not the table's labels, and `[]` is not the empty record. A file with nothing
 to set returns `()`, which the checker and each door read as the empty keyset —
 the exception is a value's own, not a second meaning for `[]`. The cliff above

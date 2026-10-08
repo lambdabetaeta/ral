@@ -10,7 +10,7 @@ echo !{gt abc xyz}
 echo !{is-empty []}
 echo !{is-empty [1, 2]}
 echo !{is-empty [:]}
-echo !{is-empty [:, a: 1]}
+echo !{is-empty ["a": 1]}
 
 # is-empty on strings
 echo !{is-empty ''}

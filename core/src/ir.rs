@@ -210,7 +210,7 @@ pub enum Val {
     List(Arc<ListNode>),
     /// `[key: val, …]`: static labels, no spread.
     Record(Arc<FieldsNode>),
-    /// `[:, key: val, …]`: static labels, no spread.
+    /// `["key": val, …]`: keys written out, no spread.
     Map(Arc<FieldsNode>),
     /// `` `label `` or `` `label payload ``; the label is stored without
     /// its leading backtick.
@@ -236,7 +236,7 @@ impl Val {
         Self::Record(Node::new(entries.into()))
     }
 
-    /// `[:, key: val, …]`, entries already sorted by key.
+    /// `["key": val, …]`, entries already sorted by key.
     pub(crate) fn map(entries: impl Into<Box<[(Name, Spanned<Self>)]>>) -> Self {
         Self::Map(Node::new(entries.into()))
     }

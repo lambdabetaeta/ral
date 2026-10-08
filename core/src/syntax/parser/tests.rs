@@ -157,11 +157,7 @@ fn strip_one(n: Ast) -> Ast {
                 .into_iter()
                 .map(|e| match e {
                     MapEntry::Entry { key, value } => MapEntry::Entry {
-                        key,
-                        value: Spanned::synthetic(strip_one(value.item)),
-                    },
-                    MapEntry::Deref { name, value } => MapEntry::Deref {
-                        name,
+                        key: Spanned::synthetic(strip_one(key.item)),
                         value: Spanned::synthetic(strip_one(value.item)),
                     },
                     MapEntry::Spread(a) => MapEntry::Spread(Spanned::synthetic(strip_one(a.item))),
@@ -695,25 +691,33 @@ fn parse_record() {
     );
 }
 
-/// `[:, …]` is a map however its keys are written, so a value of another
-/// type under a second key is the map element rule's business, not the
-/// parser's.
+/// A `"quoted"` key is data, so one makes the literal a map, and a value of
+/// another type under a second key is the map element rule's business, not
+/// the parser's.
 #[test]
-fn parse_marked_map_with_static_keys() {
-    let ast = unwrap_stmts(parse("[:, a: 1, b: 2]").unwrap());
+fn parse_quoted_key_makes_a_map() {
+    let ast = unwrap_stmts(parse("[\"a\": 1, 'b': 2]").unwrap());
     assert_eq!(
         ast,
         vec![Ast::Map(vec![
             MapEntry::Entry {
-                key: "a".into(),
+                key: sp(Ast::Literal("a".into())),
                 value: sp(plain("1")),
             },
             MapEntry::Entry {
-                key: "b".into(),
+                key: sp(Ast::Literal("b".into())),
                 value: sp(plain("2")),
             },
         ])]
     );
+}
+
+/// `[:]` is the one literal that opens with `:`; the old `[:, …]` marker is
+/// refused with the quoted-key spelling.
+#[test]
+fn parse_colon_then_entries_is_refused() {
+    let err = parse("[:, a: 1, b: 2]").unwrap_err();
+    assert!(err.message.contains("[\"a\": 1, \"b\": 2]"), "{err}");
 }
 
 /// A tag names a variant, so it keys nothing: not a record, not a map,
@@ -722,7 +726,7 @@ fn parse_marked_map_with_static_keys() {
 fn parse_tag_key_errors_everywhere() {
     for src in [
         "[`dev: 8080]",
-        "[:, `dev: 8080]",
+        "[\"x\": 1, `dev: 8080]",
         "[$k: 1, `dev: 2]",
         "let [`dev: p] = $x",
     ] {
@@ -1086,27 +1090,13 @@ fn parse_empty_list() {
 }
 
 #[test]
-fn parse_marked_map_of_only_spreads() {
-    // `[:, ...a, ...b]` — a map with no entries at all, otherwise
-    // indistinguishable from a list until the leading `:` marks it.
-    let ast = unwrap_stmts(parse("[:, ...$a, ...$b]").unwrap());
-    assert_eq!(
-        ast,
-        vec![Ast::Map(vec![
-            MapEntry::Spread(sp(Ast::Variable("a".into()))),
-            MapEntry::Spread(sp(Ast::Variable("b".into()))),
-        ])]
-    );
-}
-
-#[test]
-fn parse_marked_map_with_entry() {
-    let ast = unwrap_stmts(parse("[:, k: 'v', ...$d]").unwrap());
+fn parse_quoted_key_with_spread() {
+    let ast = unwrap_stmts(parse("[\"k\": 'v', ...$d]").unwrap());
     assert_eq!(
         ast,
         vec![Ast::Map(vec![
             MapEntry::Entry {
-                key: "k".into(),
+                key: sp(Ast::Literal("k".into())),
                 value: sp(Ast::Literal("v".into())),
             },
             MapEntry::Spread(sp(Ast::Variable("d".into()))),
@@ -1114,9 +1104,22 @@ fn parse_marked_map_with_entry() {
     );
 }
 
+/// An interpolating key is computed, exactly as `$k` is.
 #[test]
-fn parse_marked_map_bare_element_errors() {
-    assert!(parse("[:, 5]").is_err());
+fn parse_interpolated_key_is_computed() {
+    let ast = unwrap_stmts(parse("[\"$a-x\": 1]").unwrap());
+    let [Ast::Map(entries)] = &ast[..] else {
+        panic!("{ast:?}")
+    };
+    let [MapEntry::Entry { key, .. }] = &entries[..] else {
+        panic!("{entries:?}")
+    };
+    assert!(matches!(key.item, Ast::Interpolation(_)), "{key:?}");
+}
+
+#[test]
+fn parse_keyed_map_bare_element_errors() {
+    assert!(parse("[\"k\": 1, 5]").is_err());
 }
 
 #[test]
@@ -1186,11 +1189,11 @@ fn parse_computed_key_disambiguates_to_map() {
         ast,
         vec![Ast::Map(vec![
             MapEntry::Entry {
-                key: "a".into(),
+                key: sp(Ast::Literal("a".into())),
                 value: sp(plain("1")),
             },
-            MapEntry::Deref {
-                name: "k".into(),
+            MapEntry::Entry {
+                key: sp(Ast::Variable("k".into())),
                 value: sp(plain("2")),
             },
         ])]
@@ -2261,7 +2264,7 @@ fn a_repeated_option_is_refused() {
 fn a_computed_handler_table_is_refused() {
     for src in [
         "within [handlers: $hs] { body }",
-        "within [handlers: [:, foo: { echo }]] { body }",
+        "within [handlers: [\"foo\": { echo }]] { body }",
         "within [handlers: [...$hs]] { body }",
     ] {
         let err = parse(src).unwrap_err();

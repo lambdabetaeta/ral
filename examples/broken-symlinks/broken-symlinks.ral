@@ -14,4 +14,4 @@ let broken = filter { |p|
     $[not !{succeeds { resolve-path $p }} && not !{contains $waived $p}]
 } $links
 
-to-csv !{map { |p| return [:, link: $p, target: !{option-or '' !{file-info $p}[target]}] } $broken}
+to-csv !{map { |p| return ["link": $p, "target": !{option-or '' !{file-info $p}[target]}] } $broken}

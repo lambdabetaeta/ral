@@ -87,7 +87,7 @@ pub enum Ast {
     List(Vec<ListElem>),
     /// `[key: val, key: val]` — every key a static label.
     Record(Vec<RecordEntry>),
-    /// `[:]`, `[:, key: val]`, `[$k: val]` — the keys are data.
+    /// `[:]`, `["key": val]`, `[$k: val]`: the keys are data.
     Map(Vec<MapEntry>),
     /// `"hello $name"`, one segment per literal fragment or `$…` insertion.
     Interpolation(Vec<Spanned<Self>>),
@@ -204,10 +204,9 @@ pub enum RecordEntry {
 /// Entry of a map literal; a key is data, so no variant can carry a tag.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MapEntry {
-    /// `key: value` or `'key': value` — written out, but still data.
-    Entry { key: String, value: Spanned<Ast> },
-    /// `$name: value` — the key is `name`'s value at runtime.
-    Deref { name: String, value: Spanned<Ast> },
+    /// `key: value` — the key a string: a label written out is a literal,
+    /// `"…"` and `$name` are computed.
+    Entry { key: Spanned<Ast>, value: Spanned<Ast> },
     /// `...expr` — splice another map's entries into this one.
     Spread(Spanned<Ast>),
 }

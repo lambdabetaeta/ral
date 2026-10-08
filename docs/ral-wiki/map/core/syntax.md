@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 446e3123
-generated_at_date: 2026-10-06
+generated_at_commit: 6ef5d710
+generated_at_date: 2026-10-08
 covers_paths: [core/src/syntax/]
 ---
 
@@ -31,12 +31,12 @@ sees raw bytes and bare words.
   binding of stdin, stdout or stderr at the second redirect
   ([[decisions/260930_redirects-are-bindings|redirects-are-bindings]]).
 - `parser.rs` — `parse(source) -> Result<Vec<Stmt>, ParseError>`; `parse_with`
-  carries a `FileId`. A `||` after a pipe is refused naming `?`. A bracketed
-  literal that opens with `:` is a map (`[:]`, or `[:, …]`); otherwise its
-  keys decide — any computed key makes a map, static keys alone an
-  `Ast::Record`, no entry at all a list. `parse_static_key` admits a name or a
-  quoted string; a tag is refused there for literal and pattern alike, since a
-  tag keys nothing. The items are read in one pass, each
+  carries a `FileId`. A `||` after a pipe is refused naming `?`. `[:]` is the
+  empty map and the only literal opening with `:`; otherwise a bracket's keys
+  decide — any data key (`"…"` or `$k`, `MapKeyForm::Data`) makes a map, labels
+  alone an `Ast::Record`, no entry at all a list. `parse_static_key` admits a
+  name or a single-quoted word; a tag is refused there for literal and pattern
+  alike, since a tag keys nothing. The items are read in one pass, each
   lifting the literal to at least its own kind, so no token-level lookahead has
   to skip a spread's nested brackets. The `$[…]`
   body is a Pratt parser whose operands are

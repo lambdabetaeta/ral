@@ -799,7 +799,7 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
         ),
         TypeErrorKind::FieldOnNonRecord { .. } => {
             Some(
-                "check that the value you're indexing is a record like `[a: 1, b: 2]` or a map like `[:, a: 1]`"
+                "check that the value you're indexing is a record like `[a: 1, b: 2]` or a map like `[\"a\": 1]`"
                     .to_string(),
             )
         }
@@ -951,7 +951,7 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
                 .to_string(),
         ),
         Reason::MapElem => Some(
-            "a map has computed keys, so every value must have the one type; if the \
+            "a map's keys are data, so every value must have the one type; if the \
              values are genuinely different shapes, write the keys out as labels \
              (`[a: 1, b: \"two\"]`): that is a record, and a record's fields each \
              keep their own type"
@@ -959,10 +959,10 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
         ),
         Reason::RecordUpdate { base } => Some(record_update_hint(base.as_deref(), kind)),
         Reason::MapSpread => Some(
-            "a `...x` spread inside a map literal (`[:, …]`) copies another map's \
-             entries into it, so the value after `...` must itself be a map: a \
-             record's fields are reached by name, so spread it into a record literal \
-             (`[...$r, …]`) instead"
+            "a `...x` spread inside a map literal (one with a `\"quoted\"` or `$computed` \
+             key) copies another map's entries into it, so the value after `...` must \
+             itself be a map: a record's fields are reached by name, so spread it into \
+             a record literal (`[...$r, k: v]`) instead"
                 .to_string(),
         ),
         Reason::ScopeBody => Some(
@@ -1026,21 +1026,22 @@ fn record_update_hint(base: Option<&str>, kind: &TypeErrorKind) -> String {
     let r = base.unwrap_or("r");
     format!(
         "{lead}; to carry a new field, give the record the field from the start, \
-         nest it (`[{r}: ${r}, total: …]`), or use a map (`[:, ...${r}, total: …]`)"
+         nest it (`[{r}: ${r}, total: …]`), or make `${r}` a map (`[...${r}, \"total\": …]`)"
     )
 }
 
-/// A spread that mismatches because the value is a record, not a list —
-/// blaming `[...x]`'s list shape rather than the caller's record. Which side
-/// lands in `expected` is an accident of the call site, so both are checked.
+/// A spread that mismatches because the value is a record or a map, not a
+/// list — blaming `[...x]`'s list shape rather than the caller's value. Which
+/// side lands in `expected` is an accident of the call site, so both are checked.
 fn list_spread_shape_hint(kind: &TypeErrorKind) -> Option<String> {
     let TypeErrorKind::TyMismatch { expected, actual } = kind else {
         return None;
     };
-    (matches!(**expected, Ty::Record(_)) || matches!(**actual, Ty::Record(_))).then(|| {
+    let keyed = |t: &Ty| matches!(t, Ty::Record(_) | Ty::Map(_));
+    (keyed(expected) || keyed(actual)).then(|| {
         "this is a list literal, and `...` here copies list elements: a record \
-         merge is written as a record literal (`[...$a, port: 1]`), a map merge as a \
-         map literal (`[:, ...a, ...b]`)"
+         update is written as a record literal (`[...$a, port: 1]`), a map merge as \
+         `union $a $b`"
             .to_string()
     })
 }
@@ -1079,7 +1080,7 @@ fn shape_hint(kind: &TypeErrorKind) -> Option<String> {
         return Some(format!(
             "{block_clause}a record and a map are different types over the same pairs: a \
              record's fields are reached by name (`$r[a]`), while a map's keys are data. If \
-             these keys are data, write each literal as a map: `[:, a: 1, b: 2]`, \
+             these keys are data, write each literal as a map: `[\"a\": 1, \"b\": 2]`, \
              `[$k: v]`, and `[:]` for the empty one, there being no empty-record literal"
         ));
     }
@@ -1168,7 +1169,7 @@ fn return_not_record_hint(form: &str, found: &Ty, offered: &[&str]) -> String {
     match found {
         Ty::Map(_) => format!(
             "the keys of `{form}` are its labels, so write a record: `[{key}: …]`, \
-             not `[:, {key}: …]`"
+             not a map (`[\"{key}\": …]`)"
         ),
         Ty::List(_) => format!(
             "`[]` is the empty list, not the empty record; a file with nothing to set \

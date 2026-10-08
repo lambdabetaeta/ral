@@ -199,7 +199,7 @@ const OICI_ACE_FLAGS: u8 = (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE) as u8;
 /// [`LOW_INTEGRITY_SID`]).
 #[allow(
     clippy::cast_possible_truncation,
-    reason = "CI is 0x2, and AceFlags — the field it is tested against — is a single byte"
+    reason = "CI is 0x2, and AceFlags, the field it is tested against, is a single byte"
 )]
 const CI_ACE_FLAGS: u8 = CONTAINER_INHERIT_ACE as u8;
 

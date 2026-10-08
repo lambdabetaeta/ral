@@ -685,27 +685,29 @@ let ports = [$key: 5432]
 let empty_map = [:]
 ```
 
-A static key can be a bare name or a quoted string. A computed key uses a
-string value such as `$key`. Any computed key that is not a `String` is an
-error. Keys are unique in the resulting value and iterate in sorted order. A
-tag is not a key, in a literal or in a pattern (§4.6).
+A key is a label or data, and its form says which. A label is a bare name or
+a `'single-quoted'` word. A data key is a string: `"double-quoted"`, whether
+or not it interpolates, or a value such as `$key`. Any computed key that is
+not a `String` is an error. Keys are unique in the resulting value and iterate
+in sorted order. A tag is not a key, in a literal or in a pattern (§4.6).
 
-A bracketed literal that opens with `:` is a map: `[:]` is the empty one and
-`[:, a: 1, b: 2]` a map on keys written out. Otherwise its keys decide. A
-literal every one of whose entries has a static key is a record; a literal
-with any computed key is a map, because a keyset settled at run time cannot
-carry a type per key; a literal with no entry at all is a list.
+`[:]` is the empty map, and the only literal that opens with `:`. Otherwise a
+literal's keys decide. A literal every one of whose keys is a label is a
+record; a literal with any data key is a map, because a keyset that is data
+cannot carry a type per key; a literal with no entry at all is a list. So
+`["a": 1, "b": 2]` is a map on keys written out, where `[a: 1, b: 2]` is a
+record.
 
 There is no empty-record literal: `[]` is the empty list, not `[a: 1]` with
 its fields removed. A contract file (an rc file, a plugin manifest, a
 capability profile; §12.12, §15.3, §15.5) that has nothing to set returns
 `()`, which it reads as the empty keyset; one that returns a record is
 ascribed its declared keyset before the file runs at all, and one that returns
-`[:, …]` or `[]` is refused there, with the spelling to use.
+a map or `[]` is refused there, with the spelling to use.
 
 ```ral
 let record = [host: 'db', port: 5432]
-let by_data = [:, host: 'db', port: 'https']
+let by_data = ["host": 'db', "port": 'https']
 let computed = [$key: 5432]
 ```
 
@@ -723,7 +725,7 @@ the base already has, each at whatever type it is written, and the rest of the
 base keeps its place in the result. A spread never adds a field: naming one
 the base lacks is refused, with the three ways to carry a new field: give the
 record the field from the start, nest the record (`[cfg: $cfg, total: 3]`), or
-use a map (`[:, ...$cfg, total: 3]`). Nothing is appended after an unknown
+make `$cfg` a map (`[...$cfg, "total": 3]`). Nothing is appended after an unknown
 remainder, so defaults are not merged over an unknown record; absence over an
 unknown record travels as a variant.
 
@@ -3115,7 +3117,7 @@ rejected.
 A profile is ascribed `grant`'s table after inference, as at the rc file
 (§15.3) and the plugin manifest (§15.5). `return [exec: …, net: false]` is a
 record, so `exec`'s misspelling as `exect` is caught statically, before the
-profile script runs at all. `return [:, exec: …, net: false]` is a map, whose
+profile script runs at all. `return ["exec": …, "net": false]` is a map, whose
 keys are data rather than the table's labels, and is refused statically with
 the spelling to use. A profile whose return the checker cannot type — one
 decoded from JSON — runs to completion first, and its keys are then checked
@@ -4072,7 +4074,7 @@ return [...$extra, env: [:]]        # refused — 'surfase' is not an RC key
 ```
 
 The table is ascribed to the file once it has been inferred, as ML ascribes a
-signature. The return must be a record, or `()`: `return [:, edit_mde: 'vi']`
+signature. The return must be a record, or `()`: `return ["edit_mde": 'vi']`
 is a map, whose keys are data, and `return []` the empty list; each is refused
 before the file runs, with the spelling to use. A file whose return the
 checker cannot type — `return !{from-json < rc.json}` — meets the same keyset,
@@ -4165,7 +4167,7 @@ four are the manifest's whole keyset: an unknown top-level key is an error
 naming the key and the list. A manifest the file returns is ascribed the
 table before the file runs, as at the rc file (§15.3): `return [nam: 'example']`
 is a record, so the misspelled `name` is caught statically and the plugin file
-never runs, and `return [:, nam: 'example']` is a map, refused statically with
+never runs, and `return ["nam": 'example']` is a map, refused statically with
 the spelling to use. `return ()` lacks `name`, and is refused for that. One a
 factory returns is checked as it is parsed, against the same table. Each
 declared field is checked exactly: ral does not stringify a value of the wrong
@@ -4586,10 +4588,9 @@ list-item     ::= atom | "..." atom
 record        ::= "[" record-entry ("," record-entry)* ","? "]"
 record-entry  ::= static-key ":" atom | "..." atom
 map           ::= "[:]"
-                | "[:," map-entry ("," map-entry)* ","? "]"
                 | "[" map-entry ("," map-entry)* ","? "]"
 map-entry     ::= map-key ":" atom | "..." atom
-map-key       ::= identifier | quoted-string | variable
+map-key       ::= identifier | quoted-string | interpolated-string | variable
 
 unit-literal  ::= "(" ")"
 
@@ -4616,10 +4617,9 @@ For `<<`, an explicit descriptor, if present, must be 0. For `>&`, the source
 descriptor must not be 1 when the target is 2: `1>&2` and its short spelling
 `>&2` are rejected in favour of `warn` (§7.4). `[]` is the empty
 list and `[:]` the empty map. Otherwise a collection's entries decide: any
-computed key makes it a map, static keys alone a record, no entry at all a
-list (§4.5). A map literal may additionally use a dynamic `$name` key, which a
-pattern cannot bind through. A tag is no key at all: `tag-key` occurs only in
-a `case` arm.
+data key, `"…"` or `$name`, makes it a map, labels alone a record, no entry
+at all a list (§4.5). A pattern's keys are labels only, since it cannot bind
+through data. A tag is no key at all: `tag-key` occurs only in a `case` arm.
 
 A `case`'s arm list is a production of its own, and no expression may stand in
 its place: a spread among the arms and
