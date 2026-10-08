@@ -1420,11 +1420,10 @@ mod tests {
         std::os::unix::fs::symlink("real", &link).unwrap();
         let mut policy = SandboxProjection {
             exec: ExecProjection::Restricted(
-                [dir_rule(
+                std::iter::once(dir_rule(
                     RealPath::of(&bin).expect("the admit exists"),
                     true,
-                )]
-                .into_iter()
+                ))
                 .collect(),
             ),
             ..restricted(&[], &[&link])

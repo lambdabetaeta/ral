@@ -26,6 +26,10 @@ impl Launch {
     ///
     /// # Errors
     /// Returns `Err` when the budget cannot be measured.
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "only macOS can fail: it measures the fork-brake budget"
+    )]
     pub(crate) fn limit_resources(&mut self) -> io::Result<()> {
         use std::os::unix::process::CommandExt;
         #[cfg(target_os = "macos")]
