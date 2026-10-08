@@ -337,7 +337,7 @@ impl Headless<'_> {
                 let _ = writeln!(self.err, "{}", card::settled_text(cmd, outcome));
             }
             K::Context { turns } => {
-                self.print_card(&card::context_rows_card(turns));
+                self.print_card(&record::context_rows_card(turns));
             }
             K::Turn { id: turn } => {
                 if id == self.root_id {

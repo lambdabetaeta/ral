@@ -9,9 +9,10 @@
 //! record into.
 
 use super::{
-    BlockId, Cut, Display, EditAuthority, Fold, Forensic, Recorded, Refusal, Seq, Spent, TurnRow,
+    BlockId, Cut, Display, EditAuthority, Fold, Forensic, Recorded, Refusal, Role, Seq, Spent,
+    TurnRow,
 };
-use crate::card::{Card, Change, DoneOutcome};
+use crate::card::{Card, Change, DoneOutcome, Field, FieldVal, Mark, Role as Ink, Span};
 use crate::provider::{ProviderError, Usage};
 use ral_core::first_order::FOValue;
 
@@ -440,6 +441,75 @@ impl Fold for View {
     fn step(memo: &mut Blocks, record: &Recorded<super::Record>) -> Result<(), Refusal> {
         memo.step(record).map(drop)
     }
+}
+
+/// A `/context` survey's rows as one [`Mark::Fields`] matrix under a
+/// "context" header: the one rendering `tui`, `headless` and synod all draw from.
+///
+/// The survey is one row per turn; the card groups them at draw time into a
+/// prompt and the turns answering it, since two hundred tool turns under one
+/// prompt are one thing the human is reading about. No live marker: the
+/// newest turn is the one an eviction structurally cannot name, so saying so
+/// twice would say nothing.
+pub fn context_rows_card(rows: &[TurnRow]) -> Card {
+    let fields = context_groups(rows)
+        .into_iter()
+        .map(|group| Field {
+            label: format!("turn {}", group.prompt),
+            value: FieldVal::Inline(vec![
+                Span::plain(group.label),
+                Span::new(
+                    Ink::Muted,
+                    format!("  {} · {} KB", group.turns, group.bytes / 1024),
+                ),
+            ]),
+        })
+        .collect();
+    let mut marks = vec![Mark::Text {
+        spans: vec![Span::new(Ink::Strong, "context")],
+    }];
+    marks.push(Mark::Fields { rows: fields });
+    Card(marks)
+}
+
+/// One drawn group: the prompt it opens on, its opening line, the turns of it
+/// still in the context, and what they weigh together.
+struct ContextGroup {
+    prompt: u64,
+    label: String,
+    /// `turns 13–15`, or `turn 13` where one stands alone.
+    turns: String,
+    bytes: usize,
+}
+
+/// The survey's turns grouped as a prompt and the turns answering it: a group
+/// opens at every user row, so rows before the first one — an ancestor's
+/// turns, or an answer whose prompt a cut took — form a group of their own.
+/// The label is the opening line of whichever row opens the group.
+fn context_groups(rows: &[TurnRow]) -> Vec<ContextGroup> {
+    let mut drawn: Vec<(&TurnRow, u64, usize)> = Vec::new();
+    for row in rows {
+        match drawn.last_mut() {
+            Some((_, last, bytes)) if !matches!(row.role, Role::User) => {
+                *last = row.id;
+                *bytes += row.bytes;
+            }
+            _ => drawn.push((row, row.id, row.bytes)),
+        }
+    }
+    drawn
+        .into_iter()
+        .map(|(first, last, bytes)| ContextGroup {
+            prompt: first.id,
+            label: first.label.clone(),
+            turns: if first.id == last {
+                format!("turn {last}")
+            } else {
+                format!("turns {}–{last}", first.id)
+            },
+            bytes,
+        })
+        .collect()
 }
 
 #[cfg(test)]

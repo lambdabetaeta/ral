@@ -1072,7 +1072,7 @@ impl Scrollback {
             // red status in the row here just as it does on an exec.
             K::Done { cmd, outcome } => chrome(Chrome::Settled(card::settled_spans(cmd, outcome))),
             K::Context { turns } => {
-                vec![surfaced(card::context_rows_card(turns))]
+                vec![surfaced(record::context_rows_card(turns))]
             }
             K::Cancelled => chrome(Chrome::Cancelled),
             K::Error { text } => chrome(Chrome::Error(text.clone())),

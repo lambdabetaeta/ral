@@ -18,13 +18,14 @@
 
 use exarch::bus::Sink;
 use exarch::card::{
-    Card, Field, Hunk, Mark, Measure, Span, change_card, context_rows_card,
-    observation_display_card,
+    Card, Field, Hunk, Mark, Measure, Span, change_card, observation_display_card,
 };
 use exarch::clock;
 use exarch::provider::{CutShort, ProviderError, Recovery};
 use exarch::record::AgentId;
-use exarch::record::{Display, Forensic, Protocol, Record, Recorded, Transient};
+use exarch::record::{
+    Display, Forensic, Protocol, Record, Recorded, Transient, context_rows_card,
+};
 use serde::Serialize;
 use ts_rs::TS;
 

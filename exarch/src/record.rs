@@ -30,7 +30,7 @@ pub use session::{
     AgentLog, GrepAnswer, GrepHit, Inherited, Resumed, TranscriptMessage, TranscriptPart,
     TranscriptTurn,
 };
-pub use view::{BLOCKS_WINDOW, Block, BlockKind, Delta, Verdict, View};
+pub use view::{BLOCKS_WINDOW, Block, BlockKind, Delta, Verdict, View, context_rows_card};
 
 use crate::card::{Card, Change, DoneOutcome};
 use crate::provider::{Provider, ProviderError, Tuning, Usage};
