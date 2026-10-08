@@ -158,12 +158,8 @@ pub fn run() -> Result<(), String> {
     let state_dir = bootstrap::EXARCH.project_dir(&cwd);
 
     let holdings = Holdings::new(store, bootstrap::EXARCH);
-    // The saved selection is the ground each flag is laid over, so pinning a
-    // model keeps the effort rung the picker last chose rather than resetting it.
     let saved = provider::state::load(&state_dir);
-    let mut tuning = saved
-        .as_ref()
-        .map_or_else(provider::Tuning::initial, provider::state::State::tuning);
+    let mut tuning = provider::Tuning::initial();
     if let Some(rung) = c.effort.as_deref() {
         tuning.effort = provider::effort_by_label(rung)?;
     }
@@ -338,12 +334,10 @@ fn resolve_run(
     Ok((run_dir, lock, false))
 }
 
-/// An account, one of its models, and the `OpenRouter` route chosen for that
-/// model.
+/// An account and one of its models.
 struct Pair {
     account: provider::Account,
     model: String,
-    route: Option<String>,
 }
 
 /// What a launch opens on, before the bureau weighs it.
@@ -364,8 +358,7 @@ enum Opening {
 /// `--model` names a pair outright, on `--provider`'s account or else the one
 /// whose listing names the model. `--provider` alone restores the model saved
 /// for that account, else asks for one. With neither, the saved pair is
-/// restored, else the user is asked. A saved route rides only with the pair it
-/// was chosen for.
+/// restored, else the user is asked.
 fn opening(
     provider_flag: Option<&str>,
     model_flag: Option<&str>,
@@ -373,16 +366,7 @@ fn opening(
     available: &[provider::Account],
     listing: impl FnMut(&provider::Account) -> Result<Vec<provider::models::Listed>, String>,
 ) -> Result<Opening, String> {
-    let pair = |account: provider::Account, model: String| {
-        let route = saved
-            .filter(|s| s.provider == account.id.as_str() && s.model == model)
-            .and_then(|s| s.route.clone());
-        Pair {
-            account,
-            model,
-            route,
-        }
-    };
+    let pair = |account: provider::Account, model: String| Pair { account, model };
     let pinned = provider_flag
         .map(|name| provider::models::resolve_pinned_provider(name, available))
         .transpose()?;
@@ -430,7 +414,7 @@ fn open(
     max_tokens: Option<u32>,
 ) -> Result<(Arc<provider::Provider>, Option<tui::TerminalGuard>), String> {
     let build =
-        |pair: Pair| bureau.build(&pair.account, pair.model, tuning, pair.route, max_tokens);
+        |pair: Pair| bureau.build(&pair.account, pair.model, tuning, None, max_tokens);
     let choose = |among, why: Option<String>| {
         let Some(run_dir) = attended else {
             return Err(format!(
@@ -469,14 +453,8 @@ mod tests {
     use provider::models::Listed;
     use provider::state::State;
 
-    fn saved(account: &Account, model: &str, route: Option<&str>) -> State {
-        State::new(
-            account,
-            std::slice::from_ref(account),
-            model,
-            &provider::Tuning::default(),
-            route,
-        )
+    fn saved(account: &Account, model: &str) -> State {
+        State::new(account, std::slice::from_ref(account), model)
     }
 
     fn lists(models: &[&str]) -> impl FnMut(&Account) -> Result<Vec<Listed>, String> {
@@ -485,28 +463,9 @@ mod tests {
     }
 
     #[test]
-    fn a_saved_route_rides_only_with_its_own_pair() {
-        let openrouter = Account::built_in("openrouter");
-        let state = saved(&openrouter, "vendor/model-a", Some("deepinfra"));
-        let available = [openrouter];
-        let route_for = |model| match opening(
-            None,
-            Some(model),
-            Some(&state),
-            &available,
-            lists(&["vendor/model-a", "vendor/model-b"]),
-        ) {
-            Ok(Opening::Named(pair)) => pair.route,
-            _ => panic!("--model names a pair"),
-        };
-        assert_eq!(route_for("vendor/model-a").as_deref(), Some("deepinfra"));
-        assert_eq!(route_for("vendor/model-b"), None);
-    }
-
-    #[test]
     fn provider_alone_restores_that_accounts_saved_model() {
         let anthropic = Account::built_in("anthropic");
-        let state = saved(&anthropic, "model-a", None);
+        let state = saved(&anthropic, "model-a");
         let available = [anthropic.clone(), Account::built_in("deepseek")];
         match opening(
             Some("anthropic"),
@@ -530,7 +489,7 @@ mod tests {
     fn provider_alone_with_nothing_saved_for_it_asks_among_its_models() {
         let anthropic = Account::built_in("anthropic");
         let deepseek = Account::built_in("deepseek");
-        let state = saved(&deepseek, "model-a", None);
+        let state = saved(&deepseek, "model-a");
         let available = [anthropic.clone(), deepseek];
         match opening(
             Some("anthropic"),
@@ -547,7 +506,7 @@ mod tests {
     #[test]
     fn a_vanished_saved_account_asks_and_says_why() {
         let gone = Account::declared("gone");
-        let state = saved(&gone, "model-a", None);
+        let state = saved(&gone, "model-a");
         let available = [Account::built_in("anthropic")];
         match opening(None, None, Some(&state), &available, lists(&[])) {
             Ok(Opening::Choose(among, Some(why))) => {

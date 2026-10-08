@@ -48,9 +48,9 @@ config file or a shell script.
 
 ## State lives per-project under XDG, not config
 
-- **The active model and tuning are runtime state.** `state.json` holds the
-  selected model and the tuning overrides (temperature, reasoning effort,
-  verbosity, max-tokens). The pickers write it; startup loads it; it
+- **The active model is runtime state.** `state.json` holds the selected
+  provider and model only; tuning and route are not persisted (a replayed
+  knob can be one the model rejects). The pickers write it; startup loads it; it
   overrides until changed — "set it once, it sticks." It is *not*
   hand-authored config.
 - **Per-project, keyed by a slug, under the XDG state home — reusing the
@@ -136,8 +136,7 @@ config file or a shell script.
   concealing it.
 - **One command, its own surface.** `/tune` is the sole entry; the model
   picker stays a pure nominal pick and does not hand off to it. The picker
-  writes the same per-project `state.json` — tuning fields added with
-  `#[serde(default)]` so an older binary tolerates a newer file — startup
+  writes the same per-project `state.json` — startup
   loads it, and a compact tuning glyph joins the live model in the status
   bar. Structurally it mirrors `/model`: the same modal drive-loop and
   state-write path, diverging only where the level of measurement demands a

@@ -8,15 +8,15 @@
 
 use crate::provider::identity::{self, Account};
 use crate::provider::models::resolve_account;
-use crate::provider::{Provider, ReasoningEffort, Tuning};
+use crate::provider::Provider;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 const STATE_FILE: &str = "state.json";
 
-/// The persisted selection. An absent knob means auto, and unknown keys are
+/// The persisted selection: provider and model only. Unknown keys are
 /// ignored, so a file written by another version of exarch still loads.
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct State {
     /// The selected account's [`identity::AccountId::as_str`] rendering,
     /// which [`State::account`] matches against the live accounts. For a
@@ -29,17 +29,6 @@ pub struct State {
     #[serde(default)]
     pub provider_name: String,
     pub model: String,
-    /// A [`ReasoningEffort::as_keyword`] spelling, so the file stays readable.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effort: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub top_p: Option<f64>,
-    /// The `OpenRouter` serving-provider slug pinned through `provider.order` —
-    /// routing, not sampling, hence outside [`Tuning`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub route: Option<String>,
 }
 
 impl State {
@@ -47,51 +36,17 @@ impl State {
     /// was chosen from — needed only to compute [`Self::provider_name`]'s
     /// snapshot, per [`identity::label`]'s own rule that a label is always
     /// computed against the set in hand, never cached on the account itself.
-    /// An effort with no keyword — genai's `Budget`, absent from the effort
-    /// ladder — is stored as auto.
-    pub fn new(
-        account: &Account,
-        available: &[Account],
-        model: &str,
-        tuning: &Tuning,
-        route: Option<&str>,
-    ) -> Self {
+    pub fn new(account: &Account, available: &[Account], model: &str) -> Self {
         Self {
             provider: account.id.as_str().to_string(),
             provider_name: identity::label(account, available),
             model: model.to_string(),
-            effort: tuning
-                .effort
-                .as_ref()
-                .and_then(|e| e.as_keyword().map(str::to_string)),
-            temperature: tuning.temperature,
-            top_p: tuning.top_p,
-            route: route.map(str::to_string),
         }
     }
 
     /// The persisted form of `provider`, the selection in force.
     pub fn of(provider: &Provider, available: &[Account]) -> Self {
-        Self::new(
-            &provider.account,
-            available,
-            &provider.model,
-            &provider.tuning,
-            provider.route.as_deref(),
-        )
-    }
-
-    /// The stored tuning as live values; a keyword that no longer parses
-    /// ([`ReasoningEffort::from_keyword`]) reads as auto.
-    pub fn tuning(&self) -> Tuning {
-        Tuning {
-            effort: self
-                .effort
-                .as_deref()
-                .and_then(ReasoningEffort::from_keyword),
-            temperature: self.temperature,
-            top_p: self.top_p,
-        }
+        Self::new(&provider.account, available, &provider.model)
     }
 
     /// The stored account-id rendering matched against the live `available`
@@ -160,13 +115,7 @@ mod tests {
         let dir = tmp_dir();
         let deepseek = Account::built_in("deepseek");
         let available = [Account::built_in("anthropic"), deepseek.clone()];
-        let state = State::new(
-            &deepseek,
-            &available,
-            "deepseek-reasoner",
-            &Tuning::default(),
-            None,
-        );
+        let state = State::new(&deepseek, &available, "deepseek-reasoner");
         save(&dir, &state).unwrap();
         let loaded = load(&dir).expect("state should load");
         assert_eq!(loaded, state);
@@ -184,7 +133,7 @@ mod tests {
             Auth::Env("LOCAL_LLAMA_KEY".into()),
         ));
         let available = [llama.clone()];
-        let state = State::new(&llama, &available, "model-a", &Tuning::default(), None);
+        let state = State::new(&llama, &available, "model-a");
         save(&dir, &state).unwrap();
         let loaded = load(&dir).expect("state should load");
         assert_eq!(loaded.provider, "local-llama");
@@ -213,52 +162,9 @@ mod tests {
             provider: "mistral".into(),
             provider_name: "mistral".into(),
             model: "m".into(),
-            effort: None,
-            temperature: None,
-            top_p: None,
-            route: None,
         };
         let available = [Account::built_in("anthropic")];
         assert!(state.account(&available).is_none());
-    }
-
-    #[test]
-    fn tuning_round_trips() {
-        let dir = tmp_dir();
-        let anthropic = Account::built_in("anthropic");
-        let available = [anthropic.clone()];
-        let tuning = Tuning {
-            effort: Some(ReasoningEffort::High),
-            temperature: Some(0.7),
-            top_p: Some(0.95),
-        };
-        let state = State::new(
-            &anthropic,
-            &available,
-            "model-a",
-            &tuning,
-            Some("deepinfra"),
-        );
-        assert_eq!(state.effort.as_deref(), Some("high"));
-        assert_eq!(state.route.as_deref(), Some("deepinfra"));
-        save(&dir, &state).unwrap();
-        let loaded = load(&dir).expect("state should load");
-        assert_eq!(loaded.tuning(), tuning);
-        assert_eq!(loaded.route.as_deref(), Some("deepinfra"));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn tuning_defaults_to_auto() {
-        let dir = tmp_dir();
-        std::fs::write(
-            path_in(&dir),
-            br#"{"provider":"anthropic","model":"model-a"}"#,
-        )
-        .unwrap();
-        let loaded = load(&dir).expect("state should load");
-        assert_eq!(loaded.tuning(), Tuning::default());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A `state.json` written before this change carries no `provider_name`
