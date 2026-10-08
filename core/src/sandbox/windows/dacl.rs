@@ -2262,10 +2262,6 @@ mod tests {
     /// caps a process at its image file's label, so a labeled file would run
     /// every host-built executable under the tree at `Low`.
     #[test]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:dacl-test] Builds a scratch tree to probe label inheritance. Test fixture, not model data I/O."
-    )]
     fn a_read_write_label_reaches_directories_and_never_files() {
         with_scoped_state_dir(|| {
             let td = tempfile::tempdir().unwrap();
