@@ -6,6 +6,7 @@ mod free_refs;
 pub(crate) mod group;
 pub mod highlight;
 pub mod lexer;
+pub(crate) mod numeral;
 pub mod parser;
 pub(crate) mod quote;
 mod report;

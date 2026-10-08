@@ -509,7 +509,10 @@ impl<'a> Lexer<'a> {
 
     /// Byte offset of the next char, i.e. one past the last consumed.
     fn byte_pos(&self) -> u32 {
-        let byte = self.chars.get(self.pos).map_or(self.source.len(), |(b, _)| *b);
+        let byte = self
+            .chars
+            .get(self.pos)
+            .map_or(self.source.len(), |(b, _)| *b);
         #[allow(
             clippy::cast_possible_truncation,
             reason = "byte offset in a source in the u32 span system (< 4 GiB)"

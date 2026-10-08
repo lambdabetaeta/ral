@@ -197,7 +197,19 @@ impl SplitMix64 {
 #[test]
 fn random_chars_never_panics_and_messages_are_friendly() {
     let alphabet: Vec<char> = (' '..='~')
-        .chain(['\n', '\t', '\r', '\0', '\u{1}', '\u{7F}', '\u{202E}', '\u{2066}', 'é', '日', '\u{1F600}'])
+        .chain([
+            '\n',
+            '\t',
+            '\r',
+            '\0',
+            '\u{1}',
+            '\u{7F}',
+            '\u{202E}',
+            '\u{2066}',
+            'é',
+            '日',
+            '\u{1F600}',
+        ])
         .collect();
     for i in 0..4096u64 {
         let mut rng = SplitMix64::new(i);
