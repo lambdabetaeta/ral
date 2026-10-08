@@ -21,7 +21,9 @@ long as it meets criteria 3 and 4 above.
 pub(crate) fn generate() -> String {
     let hyperlink_alias_descriptions = grep::printer::hyperlink_aliases()
         .iter()
-        .map(|alias| format!(r#"    {}:"{}""#, alias.name(), alias.description()))
+        .map(|alias| {
+            format!(r#"    {}:"{}""#, alias.name(), alias.description())
+        })
         .collect::<Vec<String>>()
         .join("\n");
     include_str!("rg.zsh")

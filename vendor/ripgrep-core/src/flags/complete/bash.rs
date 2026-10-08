@@ -83,9 +83,7 @@ pub(crate) fn generate() -> String {
     for flag in FLAGS.iter() {
         let template = if !flag.doc_choices().is_empty() {
             let choices = flag.doc_choices().join(" ");
-            TEMPLATE_CASE_CHOICES
-                .trim_end()
-                .replace("!CHOICES!", &choices)
+            TEMPLATE_CASE_CHOICES.trim_end().replace("!CHOICES!", &choices)
         } else {
             TEMPLATE_CASE.trim_end().to_string()
         };

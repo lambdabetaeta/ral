@@ -69,7 +69,8 @@ pub(crate) fn generate_pcre2() -> (String, bool) {
 
     #[cfg(not(feature = "pcre2"))]
     {
-        writeln!(out, "PCRE2 is not available in this build of ripgrep.").unwrap();
+        writeln!(out, "PCRE2 is not available in this build of ripgrep.")
+            .unwrap();
         (out, false)
     }
 }

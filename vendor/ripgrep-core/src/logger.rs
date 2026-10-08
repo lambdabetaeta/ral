@@ -56,7 +56,12 @@ impl Log for Logger {
                 );
             }
             _ => {
-                eprintln_locked!("{}|{}: {}", record.level(), record.target(), record.args());
+                eprintln_locked!(
+                    "{}|{}: {}",
+                    record.level(),
+                    record.target(),
+                    record.args()
+                );
             }
         }
     }

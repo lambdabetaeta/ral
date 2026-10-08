@@ -24,9 +24,10 @@ use {anyhow::Context as AnyhowContext, bstr::ByteVec};
 use crate::flags::{
     Category, Flag, FlagValue,
     lowargs::{
-        BinaryMode, BoundaryMode, BufferMode, CaseMode, ColorChoice, ContextMode, EncodingMode,
-        EngineChoice, GenerateMode, LoggingMode, LowArgs, MmapMode, Mode, PatternSource,
-        SearchMode, SortMode, SortModeKind, SpecialMode, TypeChange,
+        BinaryMode, BoundaryMode, BufferMode, CaseMode, ColorChoice,
+        ContextMode, EncodingMode, EngineChoice, GenerateMode, LoggingMode,
+        LowArgs, MmapMode, Mode, PatternSource, SearchMode, SortMode,
+        SortModeKind, SpecialMode, TypeChange,
     },
 };
 
@@ -306,10 +307,14 @@ fn test_auto_hybrid_regex() {
     let args = parse_low_raw(["--auto-hybrid-regex"]).unwrap();
     assert_eq!(EngineChoice::Auto, args.engine);
 
-    let args = parse_low_raw(["--auto-hybrid-regex", "--no-auto-hybrid-regex"]).unwrap();
+    let args =
+        parse_low_raw(["--auto-hybrid-regex", "--no-auto-hybrid-regex"])
+            .unwrap();
     assert_eq!(EngineChoice::Default, args.engine);
 
-    let args = parse_low_raw(["--no-auto-hybrid-regex", "--auto-hybrid-regex"]).unwrap();
+    let args =
+        parse_low_raw(["--no-auto-hybrid-regex", "--auto-hybrid-regex"])
+            .unwrap();
     assert_eq!(EngineChoice::Auto, args.engine);
 
     let args = parse_low_raw(["--auto-hybrid-regex", "-P"]).unwrap();
@@ -318,13 +323,16 @@ fn test_auto_hybrid_regex() {
     let args = parse_low_raw(["-P", "--auto-hybrid-regex"]).unwrap();
     assert_eq!(EngineChoice::Auto, args.engine);
 
-    let args = parse_low_raw(["--engine=auto", "--auto-hybrid-regex"]).unwrap();
+    let args =
+        parse_low_raw(["--engine=auto", "--auto-hybrid-regex"]).unwrap();
     assert_eq!(EngineChoice::Auto, args.engine);
 
-    let args = parse_low_raw(["--engine=default", "--auto-hybrid-regex"]).unwrap();
+    let args =
+        parse_low_raw(["--engine=default", "--auto-hybrid-regex"]).unwrap();
     assert_eq!(EngineChoice::Auto, args.engine);
 
-    let args = parse_low_raw(["--auto-hybrid-regex", "--engine=default"]).unwrap();
+    let args =
+        parse_low_raw(["--auto-hybrid-regex", "--engine=default"]).unwrap();
     assert_eq!(EngineChoice::Default, args.engine);
 }
 
@@ -557,7 +565,8 @@ fn test_block_buffered() {
     let args = parse_low_raw(["--block-buffered"]).unwrap();
     assert_eq!(BufferMode::Block, args.buffer);
 
-    let args = parse_low_raw(["--block-buffered", "--no-block-buffered"]).unwrap();
+    let args =
+        parse_low_raw(["--block-buffered", "--no-block-buffered"]).unwrap();
     assert_eq!(BufferMode::Auto, args.buffer);
 
     let args = parse_low_raw(["--block-buffered", "--line-buffered"]).unwrap();
@@ -785,10 +794,12 @@ fn test_color() {
     let args = parse_low_raw(["--color=never"]).unwrap();
     assert_eq!(ColorChoice::Never, args.color);
 
-    let args = parse_low_raw(["--color", "always", "--color", "never"]).unwrap();
+    let args =
+        parse_low_raw(["--color", "always", "--color", "never"]).unwrap();
     assert_eq!(ColorChoice::Never, args.color);
 
-    let args = parse_low_raw(["--color", "never", "--color", "always"]).unwrap();
+    let args =
+        parse_low_raw(["--color", "never", "--color", "always"]).unwrap();
     assert_eq!(ColorChoice::Always, args.color);
 
     let result = parse_low_raw(["--color", "foofoo"]);
@@ -895,8 +906,13 @@ fn test_colors() {
     let args = parse_low_raw(["--colors", "match:fg:magenta"]).unwrap();
     assert_eq!(args.colors, vec!["match:fg:magenta".parse().unwrap()]);
 
-    let args =
-        parse_low_raw(["--colors", "match:fg:magenta", "--colors", "line:bg:yellow"]).unwrap();
+    let args = parse_low_raw([
+        "--colors",
+        "match:fg:magenta",
+        "--colors",
+        "line:bg:yellow",
+    ])
+    .unwrap();
     assert_eq!(
         args.colors,
         vec![
@@ -1185,10 +1201,20 @@ fn test_context_separator() {
     let args = parse_low_raw(["--no-context-separator"]).unwrap();
     assert_eq!(None, getbytes(args.context_separator));
 
-    let args = parse_low_raw(["--context-separator", "XYZ", "--no-context-separator"]).unwrap();
+    let args = parse_low_raw([
+        "--context-separator",
+        "XYZ",
+        "--no-context-separator",
+    ])
+    .unwrap();
     assert_eq!(None, getbytes(args.context_separator));
 
-    let args = parse_low_raw(["--no-context-separator", "--context-separator", "XYZ"]).unwrap();
+    let args = parse_low_raw([
+        "--no-context-separator",
+        "--context-separator",
+        "XYZ",
+    ])
+    .unwrap();
     assert_eq!(Some(BString::from("XYZ")), getbytes(args.context_separator));
 
     // This checks that invalid UTF-8 can be used. This case isn't too tricky
@@ -1196,10 +1222,7 @@ fn test_context_separator() {
     // that is itself valid UTF-8. It doesn't become invalid UTF-8 until after
     // the argument is parsed and then unescaped.
     let args = parse_low_raw(["--context-separator", r"\xFF"]).unwrap();
-    assert_eq!(
-        Some(BString::from(b"\xFF")),
-        getbytes(args.context_separator)
-    );
+    assert_eq!(Some(BString::from(b"\xFF")), getbytes(args.context_separator));
 
     // In this case, we specifically try to pass an invalid UTF-8 argument to
     // the flag. In theory we might be able to support this, but because we do
@@ -1532,7 +1555,9 @@ fn test_dfa_size_limit() {
         let args = parse_low_raw(["--dfa-size-limit=9G"]).unwrap();
         assert_eq!(Some(9 * (1 << 30)), args.dfa_size_limit);
 
-        let args = parse_low_raw(["--dfa-size-limit=9G", "--dfa-size-limit=0"]).unwrap();
+        let args =
+            parse_low_raw(["--dfa-size-limit=9G", "--dfa-size-limit=0"])
+                .unwrap();
         assert_eq!(Some(0), args.dfa_size_limit);
     }
 
@@ -1732,19 +1757,24 @@ fn test_engine() {
     let args = parse_low_raw(["--engine=pcre2"]).unwrap();
     assert_eq!(EngineChoice::PCRE2, args.engine);
 
-    let args = parse_low_raw(["--auto-hybrid-regex", "--engine=pcre2"]).unwrap();
+    let args =
+        parse_low_raw(["--auto-hybrid-regex", "--engine=pcre2"]).unwrap();
     assert_eq!(EngineChoice::PCRE2, args.engine);
 
-    let args = parse_low_raw(["--engine=pcre2", "--auto-hybrid-regex"]).unwrap();
+    let args =
+        parse_low_raw(["--engine=pcre2", "--auto-hybrid-regex"]).unwrap();
     assert_eq!(EngineChoice::Auto, args.engine);
 
-    let args = parse_low_raw(["--auto-hybrid-regex", "--engine=auto"]).unwrap();
+    let args =
+        parse_low_raw(["--auto-hybrid-regex", "--engine=auto"]).unwrap();
     assert_eq!(EngineChoice::Auto, args.engine);
 
-    let args = parse_low_raw(["--auto-hybrid-regex", "--engine=default"]).unwrap();
+    let args =
+        parse_low_raw(["--auto-hybrid-regex", "--engine=default"]).unwrap();
     assert_eq!(EngineChoice::Default, args.engine);
 
-    let args = parse_low_raw(["--engine=pcre2", "--no-auto-hybrid-regex"]).unwrap();
+    let args =
+        parse_low_raw(["--engine=pcre2", "--no-auto-hybrid-regex"]).unwrap();
     assert_eq!(EngineChoice::Default, args.engine);
 }
 
@@ -1793,10 +1823,7 @@ fn test_field_context_separator() {
     use bstr::BString;
 
     let args = parse_low_raw(None::<&str>).unwrap();
-    assert_eq!(
-        BString::from("-"),
-        args.field_context_separator.into_bytes()
-    );
+    assert_eq!(BString::from("-"), args.field_context_separator.into_bytes());
 
     let args = parse_low_raw(["--field-context-separator", "XYZ"]).unwrap();
     assert_eq!(
@@ -1823,10 +1850,7 @@ fn test_field_context_separator() {
     );
 
     let args = parse_low_raw(["--field-context-separator", r"\t"]).unwrap();
-    assert_eq!(
-        BString::from("\t"),
-        args.field_context_separator.into_bytes()
-    );
+    assert_eq!(BString::from("\t"), args.field_context_separator.into_bytes());
 
     let args = parse_low_raw(["--field-context-separator", r"\x00"]).unwrap();
     assert_eq!(
@@ -1910,16 +1934,10 @@ fn test_field_match_separator() {
     assert_eq!(BString::from(":"), args.field_match_separator.into_bytes());
 
     let args = parse_low_raw(["--field-match-separator", "XYZ"]).unwrap();
-    assert_eq!(
-        BString::from("XYZ"),
-        args.field_match_separator.into_bytes()
-    );
+    assert_eq!(BString::from("XYZ"), args.field_match_separator.into_bytes());
 
     let args = parse_low_raw(["--field-match-separator=XYZ"]).unwrap();
-    assert_eq!(
-        BString::from("XYZ"),
-        args.field_match_separator.into_bytes()
-    );
+    assert_eq!(BString::from("XYZ"), args.field_match_separator.into_bytes());
 
     let args = parse_low_raw([
         "--field-match-separator",
@@ -1928,19 +1946,13 @@ fn test_field_match_separator() {
         "ABC",
     ])
     .unwrap();
-    assert_eq!(
-        BString::from("ABC"),
-        args.field_match_separator.into_bytes()
-    );
+    assert_eq!(BString::from("ABC"), args.field_match_separator.into_bytes());
 
     let args = parse_low_raw(["--field-match-separator", r"\t"]).unwrap();
     assert_eq!(BString::from("\t"), args.field_match_separator.into_bytes());
 
     let args = parse_low_raw(["--field-match-separator", r"\x00"]).unwrap();
-    assert_eq!(
-        BString::from("\x00"),
-        args.field_match_separator.into_bytes()
-    );
+    assert_eq!(BString::from("\x00"), args.field_match_separator.into_bytes());
 
     // This checks that invalid UTF-8 can be used. This case isn't too tricky
     // to handle, because it passes the invalid UTF-8 as an escape sequence
@@ -2027,28 +2039,16 @@ fn test_file() {
     assert_eq!(Vec::<PatternSource>::new(), args.patterns);
 
     let args = parse_low_raw(["--file", "foo"]).unwrap();
-    assert_eq!(
-        vec![PatternSource::File(PathBuf::from("foo"))],
-        args.patterns
-    );
+    assert_eq!(vec![PatternSource::File(PathBuf::from("foo"))], args.patterns);
 
     let args = parse_low_raw(["--file=foo"]).unwrap();
-    assert_eq!(
-        vec![PatternSource::File(PathBuf::from("foo"))],
-        args.patterns
-    );
+    assert_eq!(vec![PatternSource::File(PathBuf::from("foo"))], args.patterns);
 
     let args = parse_low_raw(["-f", "foo"]).unwrap();
-    assert_eq!(
-        vec![PatternSource::File(PathBuf::from("foo"))],
-        args.patterns
-    );
+    assert_eq!(vec![PatternSource::File(PathBuf::from("foo"))], args.patterns);
 
     let args = parse_low_raw(["-ffoo"]).unwrap();
-    assert_eq!(
-        vec![PatternSource::File(PathBuf::from("foo"))],
-        args.patterns
-    );
+    assert_eq!(vec![PatternSource::File(PathBuf::from("foo"))], args.patterns);
 
     let args = parse_low_raw(["--file", "-foo"]).unwrap();
     assert_eq!(
@@ -2098,10 +2098,18 @@ fn test_file() {
         let bytes = &[b'A', 0xFF, b'Z'][..];
         let path = PathBuf::from(OsString::from_vec(bytes.to_vec()));
 
-        let args = parse_low_raw([OsStr::from_bytes(b"--file"), OsStr::from_bytes(bytes)]).unwrap();
+        let args = parse_low_raw([
+            OsStr::from_bytes(b"--file"),
+            OsStr::from_bytes(bytes),
+        ])
+        .unwrap();
         assert_eq!(vec![PatternSource::File(path.clone())], args.patterns);
 
-        let args = parse_low_raw([OsStr::from_bytes(b"-f"), OsStr::from_bytes(bytes)]).unwrap();
+        let args = parse_low_raw([
+            OsStr::from_bytes(b"-f"),
+            OsStr::from_bytes(bytes),
+        ])
+        .unwrap();
         assert_eq!(vec![PatternSource::File(path.clone())], args.patterns);
 
         let mut bytes = b"--file=A".to_vec();
@@ -2198,10 +2206,7 @@ This overrides \flag{files-without-match}.
     }
 
     fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        assert!(
-            v.unwrap_switch(),
-            "--files-with-matches can only be enabled"
-        );
+        assert!(v.unwrap_switch(), "--files-with-matches can only be enabled");
         args.mode.update(Mode::Search(SearchMode::FilesWithMatches));
         Ok(())
     }
@@ -2250,8 +2255,7 @@ This overrides \flag{files-with-matches}.
             v.unwrap_switch(),
             "--files-without-match can only be enabled"
         );
-        args.mode
-            .update(Mode::Search(SearchMode::FilesWithoutMatch));
+        args.mode.update(Mode::Search(SearchMode::FilesWithoutMatch));
         Ok(())
     }
 }
@@ -2265,10 +2269,14 @@ fn test_files_without_match() {
     let args = parse_low_raw(["--files-without-match"]).unwrap();
     assert_eq!(Mode::Search(SearchMode::FilesWithoutMatch), args.mode);
 
-    let args = parse_low_raw(["--files-with-matches", "--files-without-match"]).unwrap();
+    let args =
+        parse_low_raw(["--files-with-matches", "--files-without-match"])
+            .unwrap();
     assert_eq!(Mode::Search(SearchMode::FilesWithoutMatch), args.mode);
 
-    let args = parse_low_raw(["--files-without-match", "--files-with-matches"]).unwrap();
+    let args =
+        parse_low_raw(["--files-without-match", "--files-with-matches"])
+            .unwrap();
     assert_eq!(Mode::Search(SearchMode::FilesWithMatches), args.mode);
 }
 
@@ -2476,7 +2484,9 @@ fn test_generate() {
     let args = parse_low_raw(["--generate", "complete-powershell"]).unwrap();
     assert_eq!(Mode::Generate(GenerateMode::CompletePowerShell), args.mode);
 
-    let args = parse_low_raw(["--generate", "complete-bash", "--generate=man"]).unwrap();
+    let args =
+        parse_low_raw(["--generate", "complete-bash", "--generate=man"])
+            .unwrap();
     assert_eq!(Mode::Generate(GenerateMode::Man), args.mode);
 
     let args = parse_low_raw(["--generate", "man", "-l"]).unwrap();
@@ -2484,7 +2494,8 @@ fn test_generate() {
 
     // An interesting quirk of how the modes override each other that lets
     // you get back to the "default" mode of searching.
-    let args = parse_low_raw(["--generate", "man", "--json", "--no-json"]).unwrap();
+    let args =
+        parse_low_raw(["--generate", "man", "--json", "--no-json"]).unwrap();
     assert_eq!(Mode::Search(SearchMode::Standard), args.mode);
 }
 
@@ -2620,10 +2631,18 @@ fn test_glob_case_insensitive() {
     let args = parse_low_raw(["--glob-case-insensitive"]).unwrap();
     assert_eq!(true, args.glob_case_insensitive);
 
-    let args = parse_low_raw(["--glob-case-insensitive", "--no-glob-case-insensitive"]).unwrap();
+    let args = parse_low_raw([
+        "--glob-case-insensitive",
+        "--no-glob-case-insensitive",
+    ])
+    .unwrap();
     assert_eq!(false, args.glob_case_insensitive);
 
-    let args = parse_low_raw(["--no-glob-case-insensitive", "--glob-case-insensitive"]).unwrap();
+    let args = parse_low_raw([
+        "--no-glob-case-insensitive",
+        "--glob-case-insensitive",
+    ])
+    .unwrap();
     assert_eq!(true, args.glob_case_insensitive);
 }
 
@@ -2855,11 +2874,8 @@ ripgrep uses your system's hostname for producing hyperlinks.
 
     fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
         let path = PathBuf::from(v.unwrap_value());
-        args.hostname_bin = if path.as_os_str().is_empty() {
-            None
-        } else {
-            Some(path)
-        };
+        args.hostname_bin =
+            if path.as_os_str().is_empty() { None } else { Some(path) };
         Ok(())
     }
 }
@@ -2913,7 +2929,9 @@ Alternatively, a format string may correspond to one of the following aliases:
             );
 
             let mut aliases = grep::printer::hyperlink_aliases();
-            aliases.sort_by_key(|alias| alias.display_priority().unwrap_or(i16::MAX));
+            aliases.sort_by_key(|alias| {
+                alias.display_priority().unwrap_or(i16::MAX)
+            });
             for (i, alias) in aliases.iter().enumerate() {
                 doc.push_str(r"\fB");
                 doc.push_str(alias.name());
@@ -3010,11 +3028,10 @@ https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda
     fn doc_choices(&self) -> &'static [&'static str] {
         static CHOICES: LazyLock<Vec<String>> = LazyLock::new(|| {
             let mut aliases = grep::printer::hyperlink_aliases();
-            aliases.sort_by_key(|alias| alias.display_priority().unwrap_or(i16::MAX));
-            aliases
-                .iter()
-                .map(|alias| alias.name().to_string())
-                .collect()
+            aliases.sort_by_key(|alias| {
+                alias.display_priority().unwrap_or(i16::MAX)
+            });
+            aliases.iter().map(|alias| alias.name().to_string()).collect()
         });
         static BORROWED: LazyLock<Vec<&'static str>> =
             LazyLock::new(|| CHOICES.iter().map(|name| &**name).collect());
@@ -3033,7 +3050,9 @@ https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda
 #[cfg(test)]
 #[test]
 fn test_hyperlink_format() {
-    let parseformat = |format: &str| format.parse::<grep::printer::HyperlinkFormat>().unwrap();
+    let parseformat = |format: &str| {
+        format.parse::<grep::printer::HyperlinkFormat>().unwrap()
+    };
 
     let args = parse_low_raw(None::<&str>).unwrap();
     assert_eq!(parseformat("none"), args.hyperlink_format);
@@ -3047,10 +3066,17 @@ fn test_hyperlink_format() {
     let args = parse_low_raw(["--hyperlink-format", "file"]).unwrap();
     assert_eq!(parseformat("file://{host}{path}"), args.hyperlink_format);
 
-    let args = parse_low_raw(["--hyperlink-format", "file", "--hyperlink-format=grep+"]).unwrap();
+    let args = parse_low_raw([
+        "--hyperlink-format",
+        "file",
+        "--hyperlink-format=grep+",
+    ])
+    .unwrap();
     assert_eq!(parseformat("grep+://{path}:{line}"), args.hyperlink_format);
 
-    let args = parse_low_raw(["--hyperlink-format", "file://{host}{path}#{line}"]).unwrap();
+    let args =
+        parse_low_raw(["--hyperlink-format", "file://{host}{path}#{line}"])
+            .unwrap();
     assert_eq!(
         parseformat("file://{host}{path}#{line}"),
         args.hyperlink_format
@@ -3233,7 +3259,8 @@ fn test_ignore_file() {
     let args = parse_low_raw(["--ignore-file", "foo"]).unwrap();
     assert_eq!(vec![PathBuf::from("foo")], args.ignore_file);
 
-    let args = parse_low_raw(["--ignore-file", "foo", "--ignore-file", "bar"]).unwrap();
+    let args = parse_low_raw(["--ignore-file", "foo", "--ignore-file", "bar"])
+        .unwrap();
     assert_eq!(
         vec![PathBuf::from("foo"), PathBuf::from("bar")],
         args.ignore_file
@@ -3561,7 +3588,8 @@ fn test_line_buffered() {
     let args = parse_low_raw(["--line-buffered"]).unwrap();
     assert_eq!(BufferMode::Line, args.buffer);
 
-    let args = parse_low_raw(["--line-buffered", "--no-line-buffered"]).unwrap();
+    let args =
+        parse_low_raw(["--line-buffered", "--no-line-buffered"]).unwrap();
     assert_eq!(BufferMode::Auto, args.buffer);
 
     let args = parse_low_raw(["--line-buffered", "--block-buffered"]).unwrap();
@@ -3835,7 +3863,9 @@ fn test_max_columns_preview() {
     let args = parse_low_raw(["--max-columns-preview"]).unwrap();
     assert_eq!(true, args.max_columns_preview);
 
-    let args = parse_low_raw(["--max-columns-preview", "--no-max-columns-preview"]).unwrap();
+    let args =
+        parse_low_raw(["--max-columns-preview", "--no-max-columns-preview"])
+            .unwrap();
     assert_eq!(false, args.max_columns_preview);
 }
 
@@ -4022,7 +4052,8 @@ fn test_max_filesize() {
     let args = parse_low_raw(["--max-filesize", "1K"]).unwrap();
     assert_eq!(Some(1024), args.max_filesize);
 
-    let args = parse_low_raw(["--max-filesize", "1K", "--max-filesize=1M"]).unwrap();
+    let args =
+        parse_low_raw(["--max-filesize", "1K", "--max-filesize=1M"]).unwrap();
     assert_eq!(Some(1024 * 1024), args.max_filesize);
 }
 
@@ -4235,7 +4266,8 @@ fn test_multiline_dotall() {
     let args = parse_low_raw(["--multiline-dotall"]).unwrap();
     assert_eq!(true, args.multiline_dotall);
 
-    let args = parse_low_raw(["--multiline-dotall", "--no-multiline-dotall"]).unwrap();
+    let args = parse_low_raw(["--multiline-dotall", "--no-multiline-dotall"])
+        .unwrap();
     assert_eq!(false, args.multiline_dotall);
 }
 
@@ -4447,7 +4479,8 @@ fn test_no_ignore_exclude() {
     let args = parse_low_raw(["--no-ignore-exclude"]).unwrap();
     assert_eq!(true, args.no_ignore_exclude);
 
-    let args = parse_low_raw(["--no-ignore-exclude", "--ignore-exclude"]).unwrap();
+    let args =
+        parse_low_raw(["--no-ignore-exclude", "--ignore-exclude"]).unwrap();
     assert_eq!(false, args.no_ignore_exclude);
 }
 
@@ -4540,7 +4573,8 @@ fn test_no_ignore_global() {
     let args = parse_low_raw(["--no-ignore-global"]).unwrap();
     assert_eq!(true, args.no_ignore_global);
 
-    let args = parse_low_raw(["--no-ignore-global", "--ignore-global"]).unwrap();
+    let args =
+        parse_low_raw(["--no-ignore-global", "--ignore-global"]).unwrap();
     assert_eq!(false, args.no_ignore_global);
 }
 
@@ -4588,7 +4622,8 @@ fn test_no_ignore_messages() {
     let args = parse_low_raw(["--no-ignore-messages"]).unwrap();
     assert_eq!(true, args.no_ignore_messages);
 
-    let args = parse_low_raw(["--no-ignore-messages", "--ignore-messages"]).unwrap();
+    let args =
+        parse_low_raw(["--no-ignore-messages", "--ignore-messages"]).unwrap();
     assert_eq!(false, args.no_ignore_messages);
 }
 
@@ -4636,7 +4671,8 @@ fn test_no_ignore_parent() {
     let args = parse_low_raw(["--no-ignore-parent"]).unwrap();
     assert_eq!(true, args.no_ignore_parent);
 
-    let args = parse_low_raw(["--no-ignore-parent", "--ignore-parent"]).unwrap();
+    let args =
+        parse_low_raw(["--no-ignore-parent", "--ignore-parent"]).unwrap();
     assert_eq!(false, args.no_ignore_parent);
 }
 
@@ -4786,7 +4822,8 @@ fn test_no_pcre2_unicode() {
     let args = parse_low_raw(["--no-pcre2-unicode"]).unwrap();
     assert_eq!(true, args.no_unicode);
 
-    let args = parse_low_raw(["--no-pcre2-unicode", "--pcre2-unicode"]).unwrap();
+    let args =
+        parse_low_raw(["--no-pcre2-unicode", "--pcre2-unicode"]).unwrap();
     assert_eq!(false, args.no_unicode);
 }
 
@@ -5092,7 +5129,8 @@ fn test_one_file_system() {
     let args = parse_low_raw(["--one-file-system"]).unwrap();
     assert_eq!(true, args.one_file_system);
 
-    let args = parse_low_raw(["--one-file-system", "--no-one-file-system"]).unwrap();
+    let args =
+        parse_low_raw(["--one-file-system", "--no-one-file-system"]).unwrap();
     assert_eq!(false, args.one_file_system);
 }
 
@@ -5124,10 +5162,7 @@ part on a separate output line.
     }
 
     fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        assert!(
-            v.unwrap_switch(),
-            "--only-matching does not have a negation"
-        );
+        assert!(v.unwrap_switch(), "--only-matching does not have a negation");
         args.only_matching = true;
         Ok(())
     }
@@ -5223,7 +5258,9 @@ fn test_path_separator() {
     let args = parse_low_raw(["--path-separator", "\0"]).unwrap();
     assert_eq!(Some(0), args.path_separator);
 
-    let args = parse_low_raw(["--path-separator", r"\x00", "--path-separator=/"]).unwrap();
+    let args =
+        parse_low_raw(["--path-separator", r"\x00", "--path-separator=/"])
+            .unwrap();
     assert_eq!(Some(b'/'), args.path_separator);
 
     let result = parse_low_raw(["--path-separator", "foo"]);
@@ -5499,11 +5536,7 @@ This overrides the \flag{search-zip} flag.
                 return Ok(());
             }
         };
-        args.pre = if path.as_os_str().is_empty() {
-            None
-        } else {
-            Some(path)
-        };
+        args.pre = if path.as_os_str().is_empty() { None } else { Some(path) };
         if args.pre.is_some() {
             args.search_zip = false;
         }
@@ -5597,7 +5630,8 @@ fn test_pre_glob() {
     let args = parse_low_raw(["--pre-glob", "*.pdf"]).unwrap();
     assert_eq!(vec!["*.pdf".to_string()], args.pre_glob);
 
-    let args = parse_low_raw(["--pre-glob", "*.pdf", "--pre-glob=foo"]).unwrap();
+    let args =
+        parse_low_raw(["--pre-glob", "*.pdf", "--pre-glob=foo"]).unwrap();
     assert_eq!(vec!["*.pdf".to_string(), "foo".to_string()], args.pre_glob);
 }
 
@@ -5782,7 +5816,9 @@ fn test_regex_size_limit() {
         let args = parse_low_raw(["--regex-size-limit=9G"]).unwrap();
         assert_eq!(Some(9 * (1 << 30)), args.regex_size_limit);
 
-        let args = parse_low_raw(["--regex-size-limit=9G", "--regex-size-limit=0"]).unwrap();
+        let args =
+            parse_low_raw(["--regex-size-limit=9G", "--regex-size-limit=0"])
+                .unwrap();
         assert_eq!(Some(0), args.regex_size_limit);
     }
 
@@ -5795,7 +5831,8 @@ fn test_regex_size_limit() {
     let args = parse_low_raw(["--regex-size-limit=0G"]).unwrap();
     assert_eq!(Some(0), args.regex_size_limit);
 
-    let result = parse_low_raw(["--regex-size-limit", "9999999999999999999999"]);
+    let result =
+        parse_low_raw(["--regex-size-limit", "9999999999999999999999"]);
     assert!(result.is_err(), "{result:?}");
 
     let result = parse_low_raw(["--regex-size-limit", "9999999999999999G"]);
@@ -5864,52 +5901,28 @@ fn test_regexp() {
     assert_eq!(Vec::<PatternSource>::new(), args.patterns);
 
     let args = parse_low_raw(["--regexp", "foo"]).unwrap();
-    assert_eq!(
-        vec![PatternSource::Regexp("foo".to_string())],
-        args.patterns
-    );
+    assert_eq!(vec![PatternSource::Regexp("foo".to_string())], args.patterns);
 
     let args = parse_low_raw(["--regexp=foo"]).unwrap();
-    assert_eq!(
-        vec![PatternSource::Regexp("foo".to_string())],
-        args.patterns
-    );
+    assert_eq!(vec![PatternSource::Regexp("foo".to_string())], args.patterns);
 
     let args = parse_low_raw(["-e", "foo"]).unwrap();
-    assert_eq!(
-        vec![PatternSource::Regexp("foo".to_string())],
-        args.patterns
-    );
+    assert_eq!(vec![PatternSource::Regexp("foo".to_string())], args.patterns);
 
     let args = parse_low_raw(["-efoo"]).unwrap();
-    assert_eq!(
-        vec![PatternSource::Regexp("foo".to_string())],
-        args.patterns
-    );
+    assert_eq!(vec![PatternSource::Regexp("foo".to_string())], args.patterns);
 
     let args = parse_low_raw(["--regexp", "-foo"]).unwrap();
-    assert_eq!(
-        vec![PatternSource::Regexp("-foo".to_string())],
-        args.patterns
-    );
+    assert_eq!(vec![PatternSource::Regexp("-foo".to_string())], args.patterns);
 
     let args = parse_low_raw(["--regexp=-foo"]).unwrap();
-    assert_eq!(
-        vec![PatternSource::Regexp("-foo".to_string())],
-        args.patterns
-    );
+    assert_eq!(vec![PatternSource::Regexp("-foo".to_string())], args.patterns);
 
     let args = parse_low_raw(["-e", "-foo"]).unwrap();
-    assert_eq!(
-        vec![PatternSource::Regexp("-foo".to_string())],
-        args.patterns
-    );
+    assert_eq!(vec![PatternSource::Regexp("-foo".to_string())], args.patterns);
 
     let args = parse_low_raw(["-e-foo"]).unwrap();
-    assert_eq!(
-        vec![PatternSource::Regexp("-foo".to_string())],
-        args.patterns
-    );
+    assert_eq!(vec![PatternSource::Regexp("-foo".to_string())], args.patterns);
 
     let args = parse_low_raw(["--regexp=foo", "--regexp", "bar"]).unwrap();
     assert_eq!(
@@ -5927,7 +5940,10 @@ fn test_regexp() {
         use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
 
         let bytes = &[b'A', 0xFF, b'Z'][..];
-        let result = parse_low_raw([OsStr::from_bytes(b"-e"), OsStr::from_bytes(bytes)]);
+        let result = parse_low_raw([
+            OsStr::from_bytes(b"-e"),
+            OsStr::from_bytes(bytes),
+        ]);
         assert!(result.is_err(), "{result:?}");
     }
 
@@ -6226,10 +6242,7 @@ This flag overrides \flag{sort} and \flag{sortr}.
 
     fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
         args.sort = if v.unwrap_switch() {
-            Some(SortMode {
-                reverse: false,
-                kind: SortModeKind::Path,
-            })
+            Some(SortMode { reverse: false, kind: SortModeKind::Path })
         } else {
             None
         };
@@ -6245,10 +6258,7 @@ fn test_sort_files() {
 
     let args = parse_low_raw(["--sort-files"]).unwrap();
     assert_eq!(
-        Some(SortMode {
-            reverse: false,
-            kind: SortModeKind::Path
-        }),
+        Some(SortMode { reverse: false, kind: SortModeKind::Path }),
         args.sort
     );
 
@@ -6257,37 +6267,25 @@ fn test_sort_files() {
 
     let args = parse_low_raw(["--sort", "created", "--sort-files"]).unwrap();
     assert_eq!(
-        Some(SortMode {
-            reverse: false,
-            kind: SortModeKind::Path
-        }),
+        Some(SortMode { reverse: false, kind: SortModeKind::Path }),
         args.sort
     );
 
     let args = parse_low_raw(["--sort-files", "--sort", "created"]).unwrap();
     assert_eq!(
-        Some(SortMode {
-            reverse: false,
-            kind: SortModeKind::Created
-        }),
+        Some(SortMode { reverse: false, kind: SortModeKind::Created }),
         args.sort
     );
 
     let args = parse_low_raw(["--sortr", "created", "--sort-files"]).unwrap();
     assert_eq!(
-        Some(SortMode {
-            reverse: false,
-            kind: SortModeKind::Path
-        }),
+        Some(SortMode { reverse: false, kind: SortModeKind::Path }),
         args.sort
     );
 
     let args = parse_low_raw(["--sort-files", "--sortr", "created"]).unwrap();
     assert_eq!(
-        Some(SortMode {
-            reverse: true,
-            kind: SortModeKind::Created
-        }),
+        Some(SortMode { reverse: true, kind: SortModeKind::Created }),
         args.sort
     );
 
@@ -6369,10 +6367,7 @@ parallelism and run in a single thread.
             "created" => SortModeKind::Created,
             unk => anyhow::bail!("choice '{unk}' is unrecognized"),
         };
-        args.sort = Some(SortMode {
-            reverse: false,
-            kind,
-        });
+        args.sort = Some(SortMode { reverse: false, kind });
         Ok(())
     }
 }
@@ -6385,19 +6380,13 @@ fn test_sort() {
 
     let args = parse_low_raw(["--sort", "path"]).unwrap();
     assert_eq!(
-        Some(SortMode {
-            reverse: false,
-            kind: SortModeKind::Path
-        }),
+        Some(SortMode { reverse: false, kind: SortModeKind::Path }),
         args.sort
     );
 
     let args = parse_low_raw(["--sort", "path", "--sort=created"]).unwrap();
     assert_eq!(
-        Some(SortMode {
-            reverse: false,
-            kind: SortModeKind::Created
-        }),
+        Some(SortMode { reverse: false, kind: SortModeKind::Created }),
         args.sort
     );
 
@@ -6480,10 +6469,7 @@ parallelism and run in a single thread.
             "created" => SortModeKind::Created,
             unk => anyhow::bail!("choice '{unk}' is unrecognized"),
         };
-        args.sort = Some(SortMode {
-            reverse: true,
-            kind,
-        });
+        args.sort = Some(SortMode { reverse: true, kind });
         Ok(())
     }
 }
@@ -6496,19 +6482,13 @@ fn test_sortr() {
 
     let args = parse_low_raw(["--sortr", "path"]).unwrap();
     assert_eq!(
-        Some(SortMode {
-            reverse: true,
-            kind: SortModeKind::Path
-        }),
+        Some(SortMode { reverse: true, kind: SortModeKind::Path }),
         args.sort
     );
 
     let args = parse_low_raw(["--sortr", "path", "--sortr=created"]).unwrap();
     assert_eq!(
-        Some(SortMode {
-            reverse: true,
-            kind: SortModeKind::Created
-        }),
+        Some(SortMode { reverse: true, kind: SortModeKind::Created }),
         args.sort
     );
 
@@ -6520,19 +6500,13 @@ fn test_sortr() {
 
     let args = parse_low_raw(["--sort=path", "--sortr=path"]).unwrap();
     assert_eq!(
-        Some(SortMode {
-            reverse: true,
-            kind: SortModeKind::Path
-        }),
+        Some(SortMode { reverse: true, kind: SortModeKind::Path }),
         args.sort
     );
 
     let args = parse_low_raw(["--sortr=path", "--sort=path"]).unwrap();
     assert_eq!(
-        Some(SortMode {
-            reverse: false,
-            kind: SortModeKind::Path
-        }),
+        Some(SortMode { reverse: false, kind: SortModeKind::Path }),
         args.sort
     );
 }
@@ -6646,7 +6620,8 @@ fn test_stop_on_nonmatch() {
     assert_eq!(false, args.multiline);
     assert_eq!(true, args.stop_on_nonmatch);
 
-    let args = parse_low_raw(["--stop-on-nonmatch", "--no-multiline"]).unwrap();
+    let args =
+        parse_low_raw(["--stop-on-nonmatch", "--no-multiline"]).unwrap();
     assert_eq!(false, args.multiline);
     assert_eq!(true, args.stop_on_nonmatch);
 }
@@ -6937,9 +6912,7 @@ To see the list of available file types, use the \flag{type-list} flag.
 #[cfg(test)]
 #[test]
 fn test_type() {
-    let select = |name: &str| TypeChange::Select {
-        name: name.to_string(),
-    };
+    let select = |name: &str| TypeChange::Select { name: name.to_string() };
 
     let args = parse_low_raw(None::<&str>).unwrap();
     assert_eq!(Vec::<TypeChange>::new(), args.type_changes);
@@ -7019,9 +6992,8 @@ Punctuation characters are not allowed.
     }
 
     fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.type_changes.push(TypeChange::Add {
-            def: convert::string(v.unwrap_value())?,
-        });
+        args.type_changes
+            .push(TypeChange::Add { def: convert::string(v.unwrap_value())? });
         Ok(())
     }
 }
@@ -7034,21 +7006,15 @@ fn test_type_add() {
 
     let args = parse_low_raw(["--type-add", "foo"]).unwrap();
     assert_eq!(
-        vec![TypeChange::Add {
-            def: "foo".to_string()
-        }],
+        vec![TypeChange::Add { def: "foo".to_string() }],
         args.type_changes
     );
 
     let args = parse_low_raw(["--type-add", "foo", "--type-add=bar"]).unwrap();
     assert_eq!(
         vec![
-            TypeChange::Add {
-                def: "foo".to_string()
-            },
-            TypeChange::Add {
-                def: "bar".to_string()
-            }
+            TypeChange::Add { def: "foo".to_string() },
+            TypeChange::Add { def: "bar".to_string() }
         ],
         args.type_changes
     );
@@ -7101,21 +7067,16 @@ fn test_type_clear() {
 
     let args = parse_low_raw(["--type-clear", "foo"]).unwrap();
     assert_eq!(
-        vec![TypeChange::Clear {
-            name: "foo".to_string()
-        }],
+        vec![TypeChange::Clear { name: "foo".to_string() }],
         args.type_changes
     );
 
-    let args = parse_low_raw(["--type-clear", "foo", "--type-clear=bar"]).unwrap();
+    let args =
+        parse_low_raw(["--type-clear", "foo", "--type-clear=bar"]).unwrap();
     assert_eq!(
         vec![
-            TypeChange::Clear {
-                name: "foo".to_string()
-            },
-            TypeChange::Clear {
-                name: "bar".to_string()
-            }
+            TypeChange::Clear { name: "foo".to_string() },
+            TypeChange::Clear { name: "bar".to_string() }
         ],
         args.type_changes
     );
@@ -7173,12 +7134,8 @@ To see the list of available file types, use the \flag{type-list} flag.
 #[cfg(test)]
 #[test]
 fn test_type_not() {
-    let select = |name: &str| TypeChange::Select {
-        name: name.to_string(),
-    };
-    let negate = |name: &str| TypeChange::Negate {
-        name: name.to_string(),
-    };
+    let select = |name: &str| TypeChange::Select { name: name.to_string() };
+    let negate = |name: &str| TypeChange::Negate { name: name.to_string() };
 
     let args = parse_low_raw(None::<&str>).unwrap();
     assert_eq!(Vec::<TypeChange>::new(), args.type_changes);
@@ -7660,16 +7617,16 @@ mod tests {
         let mut total = vec![false; 128];
         for byte in 0..=0x7F {
             match byte {
-                b'.' | b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' => total[usize::from(byte)] = true,
+                b'.' | b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' => {
+                    total[usize::from(byte)] = true
+                }
                 _ => continue,
             }
         }
 
         let mut taken = vec![false; 128];
         for flag in FLAGS.iter() {
-            let Some(short) = flag.name_short() else {
-                continue;
-            };
+            let Some(short) = flag.name_short() else { continue };
             taken[usize::from(short)] = true;
         }
 
@@ -7683,9 +7640,7 @@ mod tests {
     #[test]
     fn shorts_all_ascii_alphanumeric() {
         for flag in FLAGS.iter() {
-            let Some(byte) = flag.name_short() else {
-                continue;
-            };
+            let Some(byte) = flag.name_short() else { continue };
             let long = flag.name_long();
             assert!(
                 byte.is_ascii_alphanumeric() || byte == b'.',
@@ -7712,14 +7667,14 @@ mod tests {
                      less than 2 characters",
                 );
                 assert!(
-                    alias.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
+                    alias
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-'),
                     "flag '{long}' has alias '{alias}' that does not \
                      match ^[-0-9A-Za-z]+$",
                 );
             }
-            let Some(negated) = flag.name_negated() else {
-                continue;
-            };
+            let Some(negated) = flag.name_negated() else { continue };
             let count = negated.chars().count();
             assert!(
                 count >= 2,
@@ -7727,9 +7682,7 @@ mod tests {
                  less than 2 characters",
             );
             assert!(
-                negated
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '-'),
+                negated.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
                 "flag '{long}' has negation '{negated}' that \
                  does not match ^[-0-9A-Za-z]+$",
             );
@@ -7740,9 +7693,7 @@ mod tests {
     fn shorts_no_duplicates() {
         let mut taken = vec![false; 128];
         for flag in FLAGS.iter() {
-            let Some(short) = flag.name_short() else {
-                continue;
-            };
+            let Some(short) = flag.name_short() else { continue };
             let long = flag.name_long();
             assert!(
                 !taken[usize::from(short)],
@@ -7767,9 +7718,7 @@ mod tests {
                     "flag {long} has an alias {alias} that is duplicative"
                 );
             }
-            let Some(negated) = flag.name_negated() else {
-                continue;
-            };
+            let Some(negated) = flag.name_negated() else { continue };
             assert!(
                 taken.insert(negated),
                 "negated flag {negated} has a duplicate name"
@@ -7813,9 +7762,10 @@ mod tests {
             let long = flag.name_long();
             for choice in flag.doc_choices() {
                 assert!(
-                    choice
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == ':' || c == '+'),
+                    choice.chars().all(|c| c.is_ascii_alphanumeric()
+                        || c == '-'
+                        || c == ':'
+                        || c == '+'),
                     "choice '{choice}' for flag '{long}' does not match \
                      ^[-+:0-9A-Za-z]+$",
                 )

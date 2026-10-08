@@ -14,9 +14,10 @@ use {
 
 use crate::{
     flags::lowargs::{
-        BinaryMode, BoundaryMode, BufferMode, CaseMode, ColorChoice, ContextMode, ContextSeparator,
-        EncodingMode, EngineChoice, FieldContextSeparator, FieldMatchSeparator, LowArgs, MmapMode,
-        Mode, PatternSource, SearchMode, SortMode, SortModeKind, TypeChange,
+        BinaryMode, BoundaryMode, BufferMode, CaseMode, ColorChoice,
+        ContextMode, ContextSeparator, EncodingMode, EngineChoice,
+        FieldContextSeparator, FieldMatchSeparator, LowArgs, MmapMode, Mode,
+        PatternSource, SearchMode, SortMode, SortModeKind, TypeChange,
     },
     haystack::{Haystack, HaystackBuilder},
     search::{PatternMatcher, Printer, SearchWorker, SearchWorkerBuilder},
@@ -151,7 +152,9 @@ impl HiArgs {
         let pre_globs = preprocessor_globs(&state, &low)?;
 
         let color = match low.color {
-            ColorChoice::Auto if !state.is_terminal_stdout => ColorChoice::Never,
+            ColorChoice::Auto if !state.is_terminal_stdout => {
+                ColorChoice::Never
+            }
             _ => low.color,
         };
         let column = low.column.unwrap_or(low.vimgrep);
@@ -167,9 +170,7 @@ impl HiArgs {
         } else if let Some(threads) = low.threads {
             threads
         } else {
-            std::thread::available_parallelism()
-                .map_or(1, |n| n.get())
-                .min(12)
+            std::thread::available_parallelism().map_or(1, |n| n.get()).min(12)
         };
         log::debug!("using {threads} thread(s)");
         let with_filename = low
@@ -198,9 +199,7 @@ impl HiArgs {
             if low.quiet {
                 return false;
             }
-            let Mode::Search(ref search_mode) = low.mode else {
-                return false;
-            };
+            let Mode::Search(ref search_mode) = low.mode else { return false };
             match *search_mode {
                 SearchMode::FilesWithMatches
                 | SearchMode::FilesWithoutMatch
@@ -213,7 +212,9 @@ impl HiArgs {
                     // default when printing to a tty for human consumption,
                     // except for one interesting case: when we're only
                     // searching stdin. This makes pipelines work as expected.
-                    (state.is_terminal_stdout && !paths.is_only_stdin()) || column || low.vimgrep
+                    (state.is_terminal_stdout && !paths.is_only_stdin())
+                        || column
+                        || low.vimgrep
                 }
             }
         });
@@ -232,7 +233,9 @@ impl HiArgs {
             let never = grep::searcher::MmapChoice::never();
             match low.mmap {
                 MmapMode::Auto => {
-                    if paths.paths.len() <= 10 && paths.paths.iter().all(|p| p.is_file()) {
+                    if paths.paths.len() <= 10
+                        && paths.paths.iter().all(|p| p.is_file())
+                    {
                         // If we're only searching a few paths and all of them
                         // are files, then memory maps are probably faster.
                         maybe
@@ -326,7 +329,8 @@ impl HiArgs {
     /// complete, a buffer can be given to the buffer writer to write to
     /// stdout.
     pub(crate) fn buffer_writer(&self) -> termcolor::BufferWriter {
-        let mut wtr = termcolor::BufferWriter::stdout(self.color.to_termcolor());
+        let mut wtr =
+            termcolor::BufferWriter::stdout(self.color.to_termcolor());
         wtr.separator(self.file_separator.clone());
         wtr
     }
@@ -375,7 +379,9 @@ impl HiArgs {
                     Ok(m) => return Ok(m),
                     Err(err) => err,
                 };
-                log::debug!("error building Rust regex in hybrid mode:\n{rust_err}",);
+                log::debug!(
+                    "error building Rust regex in hybrid mode:\n{rust_err}",
+                );
 
                 let pcre_err = match self.matcher_pcre2() {
                     Ok(m) => return Ok(m),
@@ -476,9 +482,7 @@ impl HiArgs {
                 builder.crlf(true).line_terminator(None);
             }
         } else {
-            builder
-                .line_terminator(Some(b'\n'))
-                .dot_matches_new_line(false);
+            builder.line_terminator(Some(b'\n')).dot_matches_new_line(false);
             if self.crlf {
                 builder.crlf(true);
             }
@@ -538,7 +542,9 @@ impl HiArgs {
     /// This is useful for the `--files` mode in ripgrep, where the printer
     /// just needs to emit paths and not need to worry about the functionality
     /// of searching.
-    pub(crate) fn path_printer_builder(&self) -> grep::printer::PathPrinterBuilder {
+    pub(crate) fn path_printer_builder(
+        &self,
+    ) -> grep::printer::PathPrinterBuilder {
         let mut builder = grep::printer::PathPrinterBuilder::new();
         builder
             .color_specs(self.colors.clone())
@@ -564,7 +570,9 @@ impl HiArgs {
                 | SearchMode::CountMatches
                 | SearchMode::JSON
                 | SearchMode::Standard => SummaryKind::QuietWithMatch,
-                SearchMode::FilesWithoutMatch => SummaryKind::QuietWithoutMatch,
+                SearchMode::FilesWithoutMatch => {
+                    SummaryKind::QuietWithoutMatch
+                }
             }
         } else {
             match search_mode {
@@ -584,7 +592,10 @@ impl HiArgs {
     }
 
     /// Builds a JSON printer.
-    fn printer_json<W: std::io::Write>(&self, wtr: W) -> grep::printer::JSON<W> {
+    fn printer_json<W: std::io::Write>(
+        &self,
+        wtr: W,
+    ) -> grep::printer::JSON<W> {
         grep::printer::JSONBuilder::new()
             .pretty(false)
             .always_begin_end(false)
@@ -594,7 +605,10 @@ impl HiArgs {
 
     /// Builds a "standard" grep printer where matches are printed as plain
     /// text lines.
-    fn printer_standard<W: termcolor::WriteColor>(&self, wtr: W) -> grep::printer::Standard<W> {
+    fn printer_standard<W: termcolor::WriteColor>(
+        &self,
+        wtr: W,
+    ) -> grep::printer::Standard<W> {
         let mut builder = grep::printer::StandardBuilder::new();
         builder
             .byte_offset(self.byte_offset)
@@ -611,8 +625,12 @@ impl HiArgs {
             .per_match(self.vimgrep)
             .replacement(self.replace.clone().map(|r| r.into()))
             .separator_context(self.context_separator.clone().into_bytes())
-            .separator_field_context(self.field_context_separator.clone().into_bytes())
-            .separator_field_match(self.field_match_separator.clone().into_bytes())
+            .separator_field_context(
+                self.field_context_separator.clone().into_bytes(),
+            )
+            .separator_field_match(
+                self.field_match_separator.clone().into_bytes(),
+            )
             .separator_path(self.path_separator.clone())
             .stats(self.stats.is_some())
             .trim_ascii(self.trim);
@@ -741,7 +759,10 @@ impl HiArgs {
     /// any additional sorting. This is done because `walk_builder()` will sort
     /// the iterator it yields during directory traversal, so no additional
     /// sorting is needed.
-    pub(crate) fn sort<'a, I>(&self, haystacks: I) -> Box<dyn Iterator<Item = Haystack> + 'a>
+    pub(crate) fn sort<'a, I>(
+        &self,
+        haystacks: I,
+    ) -> Box<dyn Iterator<Item = Haystack> + 'a>
     where
         I: Iterator<Item = Haystack> + 'a,
     {
@@ -757,14 +778,14 @@ impl HiArgs {
             })
         }
 
-        let Some(ref sort) = self.sort else {
-            return Box::new(haystacks);
-        };
+        let Some(ref sort) = self.sort else { return Box::new(haystacks) };
         let mut with_timestamps: Vec<_> = match sort.kind {
             SortModeKind::Path if !sort.reverse => return Box::new(haystacks),
             SortModeKind::Path => {
                 let mut haystacks = haystacks.collect::<Vec<Haystack>>();
-                haystacks.sort_by(|ref h1, ref h2| h1.path().cmp(h2.path()).reverse());
+                haystacks.sort_by(|ref h1, ref h2| {
+                    h1.path().cmp(h2.path()).reverse()
+                });
                 return Box::new(haystacks.into_iter());
             }
             SortModeKind::LastModified => {
@@ -773,7 +794,9 @@ impl HiArgs {
             SortModeKind::LastAccessed => {
                 attach_timestamps(haystacks, |md| md.accessed()).collect()
             }
-            SortModeKind::Created => attach_timestamps(haystacks, |md| md.created()).collect(),
+            SortModeKind::Created => {
+                attach_timestamps(haystacks, |md| md.created()).collect()
+            }
         };
         with_timestamps.sort_by(|(_, t1), (_, t2)| {
             let ordering = match (*t1, *t2) {
@@ -786,11 +809,7 @@ impl HiArgs {
                 // When both error, we can't distinguish, so treat as equal.
                 (None, None) => Ordering::Equal,
             };
-            if sort.reverse {
-                ordering.reverse()
-            } else {
-                ordering
-            }
+            if sort.reverse { ordering.reverse() } else { ordering }
         });
         Box::new(with_timestamps.into_iter().map(|(s, _)| s))
     }
@@ -958,7 +977,10 @@ impl Patterns {
     /// If the invocation implies that the first positional argument is a
     /// pattern (the common case), then the first positional argument is
     /// extracted as well.
-    fn from_low_args(state: &mut State, low: &mut LowArgs) -> anyhow::Result<Patterns> {
+    fn from_low_args(
+        state: &mut State,
+        low: &mut LowArgs,
+    ) -> anyhow::Result<Patterns> {
         // The first positional is only a pattern when ripgrep is instructed to
         // search and neither -e/--regexp nor -f/--file is given. Basically,
         // the first positional is a pattern only when a pattern hasn't been
@@ -980,9 +1002,7 @@ impl Patterns {
             let Ok(pat) = ospat.into_string() else {
                 anyhow::bail!("pattern given is not valid UTF-8")
             };
-            return Ok(Patterns {
-                patterns: vec![pat],
-            });
+            return Ok(Patterns { patterns: vec![pat] });
         }
         // Otherwise, we need to slurp up our patterns from -e/--regexp and
         // -f/--file. We de-duplicate as we go. If we don't de-duplicate,
@@ -1048,7 +1068,11 @@ struct Paths {
 
 impl Paths {
     /// Drain the search paths out of the given low arguments.
-    fn from_low_args(state: &mut State, _: &Patterns, low: &mut LowArgs) -> anyhow::Result<Paths> {
+    fn from_low_args(
+        state: &mut State,
+        _: &Patterns,
+        low: &mut LowArgs,
+    ) -> anyhow::Result<Paths> {
         // We require a `&Patterns` even though we don't use it to ensure that
         // patterns have already been read from LowArgs. This let's us safely
         // assume that all remaining positional arguments are intended to be
@@ -1077,11 +1101,7 @@ impl Paths {
                 // See: https://github.com/BurntSushi/ripgrep/issues/2736
                 && (paths[0] == Path::new("-") || !paths[0].is_dir());
             log::debug!("is_one_file? {is_one_file:?}");
-            return Ok(Paths {
-                paths,
-                has_implicit_path: false,
-                is_one_file,
-            });
+            return Ok(Paths { paths, has_implicit_path: false, is_one_file });
         }
         // N.B. is_readable_stdin is a heuristic! Part of the issue is that a
         // lot of "exec process" APIs will open a stdin pipe even though stdin
@@ -1091,8 +1111,9 @@ impl Paths {
         // consequence of letting the user type 'rg foo' and "guessing" that
         // they meant to search the CWD.
         let is_readable_stdin = grep::cli::is_readable_stdin();
-        let use_cwd =
-            !is_readable_stdin || state.stdin_consumed || !matches!(low.mode, Mode::Search(_));
+        let use_cwd = !is_readable_stdin
+            || state.stdin_consumed
+            || !matches!(low.mode, Mode::Search(_));
         log::debug!(
             "using heuristics to determine whether to read from \
              stdin or search ./ (\
@@ -1109,11 +1130,7 @@ impl Paths {
             log::debug!("heuristic chose to search stdin");
             (PathBuf::from("-"), true)
         };
-        Ok(Paths {
-            paths: vec![path],
-            has_implicit_path: true,
-            is_one_file,
-        })
+        Ok(Paths { paths: vec![path], has_implicit_path: true, is_one_file })
     }
 
     /// Returns true if ripgrep will only search stdin and nothing else.
@@ -1190,7 +1207,10 @@ fn types(low: &LowArgs) -> anyhow::Result<ignore::types::Types> {
 
 /// Builds the glob "override" matcher from the CLI `-g/--glob` and `--iglob`
 /// flags.
-fn globs(state: &State, low: &LowArgs) -> anyhow::Result<ignore::overrides::Override> {
+fn globs(
+    state: &State,
+    low: &LowArgs,
+) -> anyhow::Result<ignore::overrides::Override> {
     if low.globs.is_empty() && low.iglobs.is_empty() {
         return Ok(ignore::overrides::Override::empty());
     }
@@ -1211,7 +1231,10 @@ fn globs(state: &State, low: &LowArgs) -> anyhow::Result<ignore::overrides::Over
 }
 
 /// Builds a glob matcher for all of the preprocessor globs (via `--pre-glob`).
-fn preprocessor_globs(state: &State, low: &LowArgs) -> anyhow::Result<ignore::overrides::Override> {
+fn preprocessor_globs(
+    state: &State,
+    low: &LowArgs,
+) -> anyhow::Result<ignore::overrides::Override> {
     if low.pre_glob.is_empty() {
         return Ok(ignore::overrides::Override::empty());
     }
@@ -1256,7 +1279,9 @@ fn take_hyperlink_config(
         env.host(Some(hostname));
     }
     if let Some(wsl_prefix) = wsl_prefix() {
-        log::debug!("found wsl_prefix for hyperlink configuration: {wsl_prefix}");
+        log::debug!(
+            "found wsl_prefix for hyperlink configuration: {wsl_prefix}"
+        );
         env.wsl_prefix(Some(wsl_prefix));
     }
     let fmt = std::mem::take(&mut low.hyperlink_format);
@@ -1298,9 +1323,7 @@ fn current_dir() -> anyhow::Result<PathBuf> {
 /// The purpose of `bin` is to make it possible for end users to override how
 /// ripgrep determines the hostname.
 fn hostname(bin: Option<&Path>) -> Option<String> {
-    let Some(bin) = bin else {
-        return platform_hostname();
-    };
+    let Some(bin) = bin else { return platform_hostname() };
     let bin = match grep::cli::resolve_binary(bin) {
         Ok(bin) => bin,
         Err(err) => {
@@ -1358,7 +1381,10 @@ fn platform_hostname() -> Option<String> {
         }
     };
     let Some(hostname) = hostname_os.to_str() else {
-        log::debug!("got hostname {:?}, but it's not valid UTF-8", hostname_os);
+        log::debug!(
+            "got hostname {:?}, but it's not valid UTF-8",
+            hostname_os
+        );
         return None;
     };
     Some(hostname.to_string())

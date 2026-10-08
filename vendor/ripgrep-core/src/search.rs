@@ -55,10 +55,7 @@ impl SearchWorkerBuilder {
         let mut command_builder = grep::cli::CommandReaderBuilder::new();
         command_builder.async_stderr(true);
 
-        SearchWorkerBuilder {
-            config: Config::default(),
-            command_builder,
-        }
+        SearchWorkerBuilder { config: Config::default(), command_builder }
     }
 
     /// Create a new search worker using the given searcher, matcher and
@@ -72,7 +69,8 @@ impl SearchWorkerBuilder {
         let config = self.config.clone();
         let command_builder = self.command_builder.clone();
         let decomp_builder = config.search_zip.then(|| {
-            let mut decomp_builder = grep::cli::DecompressionReaderBuilder::new();
+            let mut decomp_builder =
+                grep::cli::DecompressionReaderBuilder::new();
             decomp_builder.async_stderr(true);
             decomp_builder
         });
@@ -122,7 +120,10 @@ impl SearchWorkerBuilder {
     ///
     /// Note that if a preprocessor command is set, then it overrides this
     /// setting.
-    pub(crate) fn search_zip(&mut self, yes: bool) -> &mut SearchWorkerBuilder {
+    pub(crate) fn search_zip(
+        &mut self,
+        yes: bool,
+    ) -> &mut SearchWorkerBuilder {
         self.config.search_zip = yes;
         self
     }
@@ -273,9 +274,9 @@ impl<W: WriteColor> SearchWorker<W> {
     /// Returns true if and only if the given file path should be
     /// decompressed before searching.
     fn should_decompress(&self, path: &Path) -> bool {
-        self.decomp_builder
-            .as_ref()
-            .is_some_and(|decomp_builder| decomp_builder.get_matcher().has_command(path))
+        self.decomp_builder.as_ref().is_some_and(|decomp_builder| {
+            decomp_builder.get_matcher().has_command(path)
+        })
     }
 
     /// Returns true if and only if the given file path should be run through
@@ -287,16 +288,15 @@ impl<W: WriteColor> SearchWorker<W> {
         if self.config.preprocessor_globs.is_empty() {
             return true;
         }
-        !self
-            .config
-            .preprocessor_globs
-            .matched(path, false)
-            .is_ignore()
+        !self.config.preprocessor_globs.matched(path, false).is_ignore()
     }
 
     /// Search the given file path by first asking the preprocessor for the
     /// data to search instead of opening the path directly.
-    fn search_preprocessor(&mut self, path: &Path) -> io::Result<SearchResult> {
+    fn search_preprocessor(
+        &mut self,
+        path: &Path,
+    ) -> io::Result<SearchResult> {
         use std::{fs::File, process::Stdio};
 
         let bin = self.config.preprocessor.as_ref().unwrap();
@@ -306,7 +306,9 @@ impl<W: WriteColor> SearchWorker<W> {
         let mut rdr = self.command_builder.build(&mut cmd).map_err(|err| {
             io::Error::new(
                 io::ErrorKind::Other,
-                format!("preprocessor command could not start: '{cmd:?}': {err}",),
+                format!(
+                    "preprocessor command could not start: '{cmd:?}': {err}",
+                ),
             )
         })?;
         let result = self.search_reader(path, &mut rdr).map_err(|err| {
@@ -357,7 +359,11 @@ impl<W: WriteColor> SearchWorker<W> {
     /// Generally speaking, this method should only be used when there is no
     /// other choice. Searching via `search_path` provides more opportunities
     /// for optimizations (such as memory maps).
-    fn search_reader<R: io::Read>(&mut self, path: &Path, rdr: &mut R) -> io::Result<SearchResult> {
+    fn search_reader<R: io::Read>(
+        &mut self,
+        path: &Path,
+        rdr: &mut R,
+    ) -> io::Result<SearchResult> {
         use self::PatternMatcher::*;
 
         let (searcher, printer) = (&mut self.searcher, &mut self.printer);

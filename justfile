@@ -32,8 +32,8 @@ test $RUSTFLAGS=deny: _build
     cargo test --workspace {{gui}} --features ral-core/test-util,exarch/test-util
 
 # Compiles nothing, so it is the cheapest step CI has and the one worth failing
-# first. `--all` reaches vendored ral-ripgrep-core too — unlike the clippy
-# opt-out, upstream is already rustfmt-clean, so nothing there is reformatted.
+# first. `--all` reaches vendor/ too, where vendor/rustfmt.toml turns formatting
+# off: vendored code stays upstream's bytes.
 
 # Check the whole workspace is rustfmt-clean.
 fmt-check:

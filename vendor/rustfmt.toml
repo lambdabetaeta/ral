@@ -1,0 +1,2 @@
+# Vendored code stays upstream's bytes, bar the shims each VENDOR.md names.
+disable_all_formatting = true

@@ -22,17 +22,20 @@ macro_rules! write {
 
 /// Generate short documentation, i.e., for `-h`.
 pub(crate) fn generate_short() -> String {
-    let mut cats: BTreeMap<Category, (Vec<String>, Vec<String>)> = BTreeMap::new();
+    let mut cats: BTreeMap<Category, (Vec<String>, Vec<String>)> =
+        BTreeMap::new();
     let (mut maxcol1, mut maxcol2) = (0, 0);
     for flag in FLAGS.iter().copied() {
-        let columns = cats.entry(flag.doc_category()).or_insert((vec![], vec![]));
+        let columns =
+            cats.entry(flag.doc_category()).or_insert((vec![], vec![]));
         let (col1, col2) = generate_short_flag(flag);
         maxcol1 = maxcol1.max(col1.len());
         maxcol2 = maxcol2.max(col2.len());
         columns.0.push(col1);
         columns.1.push(col2);
     }
-    let mut out = TEMPLATE_SHORT.replace("!!VERSION!!", &version::generate_digits());
+    let mut out =
+        TEMPLATE_SHORT.replace("!!VERSION!!", &version::generate_digits());
     for (cat, (col1, col2)) in cats.iter() {
         let var = format!("!!{name}!!", name = cat.as_str());
         let val = format_short_columns(col1, col2, maxcol1, maxcol2);
@@ -115,7 +118,8 @@ pub(crate) fn generate_long() -> String {
         generate_long_flag(flag, &mut cat);
     }
 
-    let mut out = TEMPLATE_LONG.replace("!!VERSION!!", &version::generate_digits());
+    let mut out =
+        TEMPLATE_LONG.replace("!!VERSION!!", &version::generate_digits());
     for (cat, value) in cats.iter() {
         let var = format!("!!{name}!!", name = cat.as_str());
         out = out.replace(&var, value);
@@ -155,7 +159,9 @@ fn generate_long_flag(flag: &dyn Flag, out: &mut String) {
     });
     let doc = super::render_custom_markup(&doc, "flag-negate", |name, out| {
         let Some(flag) = crate::flags::parse::lookup(name) else {
-            unreachable!(r"found unrecognized \flag-negate{{{name}}} in --help docs")
+            unreachable!(
+                r"found unrecognized \flag-negate{{{name}}} in --help docs"
+            )
         };
         let Some(name) = flag.name_negated() else {
             let long = flag.name_long();
@@ -222,9 +228,15 @@ fn remove_roff(v: &str) -> String {
                     .replace(r"\fP", ":");
                 lines.push(format!("{item_label}"));
             } else if line.starts_with(".IB ") || line.starts_with(".BI ") {
-                let pieces = line.split_whitespace().skip(1).collect::<Vec<_>>().concat();
+                let pieces = line
+                    .split_whitespace()
+                    .skip(1)
+                    .collect::<Vec<_>>()
+                    .concat();
                 lines.push(format!("{pieces}"));
-            } else if line.starts_with(".sp") || line.starts_with(".PP") || line.starts_with(".TP")
+            } else if line.starts_with(".sp")
+                || line.starts_with(".PP")
+                || line.starts_with(".TP")
             {
                 lines.push("".to_string());
             }

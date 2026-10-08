@@ -77,7 +77,9 @@ fn generate_flag(flag: &'static dyn Flag, out: &mut String) {
     // Convert \flag-negate{foo} into something nicer.
     let doc = super::render_custom_markup(&doc, "flag-negate", |name, out| {
         let Some(flag) = crate::flags::parse::lookup(name) else {
-            unreachable!(r"found unrecognized \flag-negate{{{name}}} in roff docs")
+            unreachable!(
+                r"found unrecognized \flag-negate{{{name}}} in roff docs"
+            )
         };
         let Some(name) = flag.name_negated() else {
             let long = flag.name_long();
@@ -98,7 +100,10 @@ fn generate_flag(flag: &'static dyn Flag, out: &mut String) {
         // But for switches, the behavior is always the same.
         if flag.is_switch() {
             writeln!(out, ".sp");
-            writeln!(out, r"This flag can be disabled with \fB\-\-{negated}\fP.");
+            writeln!(
+                out,
+                r"This flag can be disabled with \fB\-\-{negated}\fP."
+            );
         }
     }
     writeln!(out, ".RE");

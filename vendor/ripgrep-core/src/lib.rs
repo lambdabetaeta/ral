@@ -375,7 +375,9 @@ fn generate(mode: crate::flags::GenerateMode) -> anyhow::Result<u8> {
         GenerateMode::CompleteBash => flags::generate_complete_bash(),
         GenerateMode::CompleteZsh => flags::generate_complete_zsh(),
         GenerateMode::CompleteFish => flags::generate_complete_fish(),
-        GenerateMode::CompletePowerShell => flags::generate_complete_powershell(),
+        GenerateMode::CompletePowerShell => {
+            flags::generate_complete_powershell()
+        }
     };
     writeln!(std::io::stdout(), "{}", output.trim_end())?;
     Ok(0)

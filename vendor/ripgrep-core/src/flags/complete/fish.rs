@@ -5,8 +5,7 @@ Provides completions for ripgrep's CLI for the fish shell.
 use crate::flags::{CompletionType, defs::FLAGS};
 
 const TEMPLATE: &'static str = "complete -c rg !SHORT! -l !LONG! -d '!DOC!'";
-const TEMPLATE_NEGATED: &'static str =
-    "complete -c rg -l !NEGATED! -n '__rg_contains_opt !LONG! !SHORT!' -d '!DOC!'\n";
+const TEMPLATE_NEGATED: &'static str = "complete -c rg -l !NEGATED! -n '__rg_contains_opt !LONG! !SHORT!' -d '!DOC!'\n";
 
 /// Generate completions for Fish.
 ///
@@ -35,7 +34,9 @@ pub(crate) fn generate() -> String {
                 completion.push_str(" -r -f -a '(__fish_complete_command)'");
             }
             CompletionType::Filetype => {
-                completion.push_str(" -r -f -a '(rg --type-list | string replace : \\t)'");
+                completion.push_str(
+                    " -r -f -a '(rg --type-list | string replace : \\t)'",
+                );
             }
             CompletionType::Encoding => {
                 completion.push_str(" -r -f -a '");

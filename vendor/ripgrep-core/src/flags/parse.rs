@@ -33,7 +33,10 @@ pub(crate) enum ParseResult<T> {
 impl<T> ParseResult<T> {
     /// If this result is `Ok`, then apply `then` to it. Otherwise, return this
     /// result unchanged.
-    fn and_then<U>(self, mut then: impl FnMut(T) -> ParseResult<U>) -> ParseResult<U> {
+    fn and_then<U>(
+        self,
+        mut then: impl FnMut(T) -> ParseResult<U>,
+    ) -> ParseResult<U> {
         match self {
             ParseResult::Special(mode) => ParseResult::Special(mode),
             ParseResult::Ok(t) => then(t),
@@ -125,8 +128,12 @@ fn set_log_levels(low: &LowArgs) {
     crate::messages::set_messages(!low.no_messages);
     crate::messages::set_ignore_messages(!low.no_ignore_messages);
     match low.logging {
-        Some(LoggingMode::Trace) => log::set_max_level(log::LevelFilter::Trace),
-        Some(LoggingMode::Debug) => log::set_max_level(log::LevelFilter::Debug),
+        Some(LoggingMode::Trace) => {
+            log::set_max_level(log::LevelFilter::Trace)
+        }
+        Some(LoggingMode::Debug) => {
+            log::set_max_level(log::LevelFilter::Debug)
+        }
         None => log::set_max_level(log::LevelFilter::Warn),
     }
 }
@@ -282,10 +289,9 @@ impl Parser {
             } else if mat.flag.is_switch() {
                 FlagValue::Switch(true)
             } else {
-                FlagValue::Value(
-                    p.value()
-                        .with_context(|| format!("missing value for flag {mat}"))?,
-                )
+                FlagValue::Value(p.value().with_context(|| {
+                    format!("missing value for flag {mat}")
+                })?)
             };
             mat.flag
                 .update(value, args)
@@ -457,9 +463,10 @@ type BagOfWords<'a> = BTreeSet<Cow<'a, [u8]>>;
 
 /// Returns the jaccard index (a measure of similarity) between sets of ngrams.
 fn jaccard_index(ngrams1: &BagOfWords<'_>, ngrams2: &BagOfWords<'_>) -> f64 {
-    let union = u32::try_from(ngrams1.union(ngrams2).count()).expect("fewer than u32::MAX flags");
-    let intersection =
-        u32::try_from(ngrams1.intersection(ngrams2).count()).expect("fewer than u32::MAX flags");
+    let union = u32::try_from(ngrams1.union(ngrams2).count())
+        .expect("fewer than u32::MAX flags");
+    let intersection = u32::try_from(ngrams1.intersection(ngrams2).count())
+        .expect("fewer than u32::MAX flags");
     f64::from(intersection) / f64::from(union)
 }
 

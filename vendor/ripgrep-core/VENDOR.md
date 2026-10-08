@@ -20,25 +20,26 @@ feature) instead of shelling out to an external `rg`.
 The diff is intentionally minimal and contained, so a future security
 rebase is a near-mechanical re-apply:
 
-- `crates/core/main.rs` → `src/lib.rs`. The `fn main()` is replaced by two
-  library entry points (`lib.rs:42`):
-  - `run_cli(rawargs)` — run with explicit argv (argv[0] excluded);
-  - `run_env()` — run with the process argv (`std::env::args_os`).
-  Both wrap the upstream `run` / `finish` logic unchanged.
+- `main.rs` → `lib.rs`: `fn main` removed; `run_cli` / `run_env` / `finish`
+  added; `ExitCode` replaced by `u8` throughout.
+- `flags/parse.rs`: `parse_from` / `parse_low_from` thread explicit argv.
+- `flags/mod.rs`: re-exports `parse_from`.
 - `Cargo.toml`: renamed to `ral-ripgrep-core`, `publish = false`,
   `[lib] path = "src/lib.rs"`, and `[lints.clippy] all = "allow"` so the
   vendored source stays diffable against upstream (the workspace lints are
   not applied here).
 
-No other source file is modified from upstream `crates/core/`.
+`vendor/rustfmt.toml` turns formatting off beneath `vendor/`, so everything
+else is upstream's bytes and the shim edits are hand-written in its
+79-column style.
 
 ## Re-syncing to a newer ripgrep
 
 1. Check out the target ripgrep tag upstream.
-2. Copy `crates/core/{flags,haystack.rs,logger.rs,messages.rs,search.rs}`
-   over `src/` here, replacing them wholesale.
-3. Re-apply the `main.rs` → `lib.rs` shim: take upstream `crates/core/main.rs`,
-   delete `fn main`, and add back the `run_cli` / `run_env` wrappers above.
+2. Copy every file under `crates/core/` except `main.rs` and `README.md`
+   over `src/` here, wholesale (the data files included).
+3. Re-apply all three shims (`main.rs` → `lib.rs`, `flags/parse.rs`,
+   `flags/mod.rs`) by hand onto upstream's text.
 4. Refresh the dependency pins in `Cargo.toml` to match the new tag's
    `crates/core/Cargo.toml` (`grep`, `ignore`, `bstr`, …), keeping the
    ral-local `[package]` / `[lib]` / `[lints]` stanzas.
