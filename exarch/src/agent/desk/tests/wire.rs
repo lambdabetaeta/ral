@@ -253,12 +253,7 @@ fn wire_spawn_refuses_a_parked_fork_without_dialling() {
     let (desk, _fleet, _parent_inbox) = wire_spawnable_desk(3, dial.clone());
 
     let err = desk
-        .ask(super::start_req(
-            NurseryId(0),
-            "go",
-            "in-process",
-            false,
-        ))
+        .ask(super::start_req(NurseryId(0), "go", "in-process", false))
         .expect_err("a wire desk has no nursery to adopt a parked fork from");
     assert!(
         err.message.contains("`listening [port, token]`"),
