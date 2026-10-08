@@ -5898,7 +5898,7 @@ dependencies = [
 
 [[package]]
 name = "ral-ripgrep-core"
-version = "15.1.0+ral.0"
+version = "15.2.0+ral.0"
 dependencies = [
  "anyhow",
  "bstr",

@@ -109,7 +109,7 @@ pub(crate) struct LowArgs {
     pub(crate) with_filename: Option<bool>,
 }
 
-/// A "special" mode that supercedes everything else.
+/// A "special" mode that supersedes everything else.
 ///
 /// When one of these modes is present, it overrides everything else and causes
 /// ripgrep to short-circuit. In particular, we avoid converting low-level
@@ -229,13 +229,14 @@ pub(crate) enum GenerateMode {
 }
 
 /// Indicates how ripgrep should treat binary data.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Default, Eq, PartialEq)]
 pub(crate) enum BinaryMode {
     /// Automatically determine the binary mode to use. Essentially, when
     /// a file is searched explicitly, then it will be searched using the
     /// `SearchAndSuppress` strategy. Otherwise, it will be searched in a way
     /// that attempts to skip binary files as much as possible. That is, once
     /// a file is classified as binary, searching will immediately stop.
+    #[default]
     Auto,
     /// Search files even when they have binary data, but if a match is found,
     /// suppress it and emit a warning.
@@ -251,28 +252,23 @@ pub(crate) enum BinaryMode {
     AsText,
 }
 
-impl Default for BinaryMode {
-    fn default() -> BinaryMode {
-        BinaryMode::Auto
-    }
-}
-
 /// Indicates what kind of boundary mode to use (line or word).
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum BoundaryMode {
-    /// Only allow matches when surrounded by line bounaries.
+    /// Only allow matches when surrounded by line boundaries.
     Line,
-    /// Only allow matches when surrounded by word bounaries.
+    /// Only allow matches when surrounded by word boundaries.
     Word,
 }
 
 /// Indicates the buffer mode that ripgrep should use when printing output.
 ///
 /// The default is `Auto`.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Default, Eq, PartialEq)]
 pub(crate) enum BufferMode {
     /// Select the buffer mode, 'line' or 'block', automatically based on
     /// whether stdout is connected to a tty.
+    #[default]
     Auto,
     /// Flush the output buffer whenever a line terminator is seen.
     ///
@@ -287,18 +283,13 @@ pub(crate) enum BufferMode {
     Block,
 }
 
-impl Default for BufferMode {
-    fn default() -> BufferMode {
-        BufferMode::Auto
-    }
-}
-
 /// Indicates the case mode for how to interpret all patterns given to ripgrep.
 ///
 /// The default is `Sensitive`.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Default, Eq, PartialEq)]
 pub(crate) enum CaseMode {
     /// Patterns are matched case sensitively. i.e., `a` does not match `A`.
+    #[default]
     Sensitive,
     /// Patterns are matched case insensitively. i.e., `a` does match `A`.
     Insensitive,
@@ -308,21 +299,16 @@ pub(crate) enum CaseMode {
     Smart,
 }
 
-impl Default for CaseMode {
-    fn default() -> CaseMode {
-        CaseMode::Sensitive
-    }
-}
-
 /// Indicates whether ripgrep should include color/hyperlinks in its output.
 ///
 /// The default is `Auto`.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Default, Eq, PartialEq)]
 pub(crate) enum ColorChoice {
     /// Color and hyperlinks will never be used.
     Never,
     /// Color and hyperlinks will be used only when stdout is connected to a
     /// tty.
+    #[default]
     Auto,
     /// Color will always be used.
     Always,
@@ -333,12 +319,6 @@ pub(crate) enum ColorChoice {
     /// if ANSI coloring isn't believed to be possible. This option will force
     /// ripgrep to use ANSI coloring.
     Ansi,
-}
-
-impl Default for ColorChoice {
-    fn default() -> ColorChoice {
-        ColorChoice::Auto
-    }
 }
 
 impl ColorChoice {
@@ -510,7 +490,7 @@ impl ContextSeparator {
         Ok(ContextSeparator(Some(Vec::unescape_bytes(string).into())))
     }
 
-    /// Creates a new separator that intructs the printer to disable contextual
+    /// Creates a new separator that instructs the printer to disable contextual
     /// separators entirely.
     pub(crate) fn disabled() -> ContextSeparator {
         ContextSeparator(None)
@@ -529,9 +509,10 @@ impl ContextSeparator {
 /// The encoding mode the searcher will use.
 ///
 /// The default is `Auto`.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Default, Eq, PartialEq)]
 pub(crate) enum EncodingMode {
     /// Use only BOM sniffing to auto-detect an encoding.
+    #[default]
     Auto,
     /// Use an explicit encoding forcefully, but let BOM sniffing override it.
     Some(grep::searcher::Encoding),
@@ -541,21 +522,16 @@ pub(crate) enum EncodingMode {
     Disabled,
 }
 
-impl Default for EncodingMode {
-    fn default() -> EncodingMode {
-        EncodingMode::Auto
-    }
-}
-
 /// The regex engine to use.
 ///
 /// The default is `Default`.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Default, Eq, PartialEq)]
 pub(crate) enum EngineChoice {
     /// Uses the default regex engine: Rust's `regex` crate.
     ///
     /// (Well, technically it uses `regex-automata`, but `regex-automata` is
     /// the implementation of the `regex` crate.)
+    #[default]
     Default,
     /// Dynamically select the right engine to use.
     ///
@@ -564,12 +540,6 @@ pub(crate) enum EngineChoice {
     Auto,
     /// Uses the PCRE2 regex engine if it's available.
     PCRE2,
-}
-
-impl Default for EngineChoice {
-    fn default() -> EngineChoice {
-        EngineChoice::Default
-    }
 }
 
 /// The field context separator to use to between metadata for each contextual
@@ -651,10 +621,11 @@ pub(crate) enum LoggingMode {
 /// Indicates when to use memory maps.
 ///
 /// The default is `Auto`.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Default, Eq, PartialEq)]
 pub(crate) enum MmapMode {
     /// This instructs ripgrep to use heuristics for selecting when to and not
     /// to use memory maps for searching.
+    #[default]
     Auto,
     /// This instructs ripgrep to always try memory maps when possible. (Memory
     /// maps are not possible to use in all circumstances, for example, for
@@ -664,12 +635,6 @@ pub(crate) enum MmapMode {
     /// when multi-line search is enabled where ripgrep will read the entire
     /// contents of a file on to the heap before searching it.
     Never,
-}
-
-impl Default for MmapMode {
-    fn default() -> MmapMode {
-        MmapMode::Auto
-    }
 }
 
 /// Represents a source of patterns that ripgrep should search for.

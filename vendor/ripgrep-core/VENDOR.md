@@ -7,7 +7,7 @@ feature) instead of shelling out to an external `rg`.
 ## Upstream baseline
 
 - Project: <https://github.com/BurntSushi/ripgrep>
-- Tag: **`15.1.0`** (encoded in this crate's version `15.1.0+ral.0`; the
+- Tag: **`15.2.0`** (encoded in this crate's version `15.2.0+ral.0`; the
   `+ral.0` build-metadata suffix counts ral-local revisions of the same
   upstream tag — bump it to `+ral.1`, … on each re-sync).
 - Vendored source: ripgrep's `crates/core/` (its `main.rs` binary crate),
