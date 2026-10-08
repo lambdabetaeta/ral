@@ -4,8 +4,8 @@
 //! own tests already use, since a genuine vsock dial only means anything
 //! inside a real guest.
 
-use super::tests::{confined, message_req, spec, start};
-use super::*;
+use super::super::*;
+use super::{confined, message_req, spec, start};
 use crate::agent::roster::summary;
 use crate::bus::Inbox;
 use crate::cancel::InterruptTarget;
@@ -154,7 +154,7 @@ fn fake_wire_reach() -> InterruptTarget {
 }
 
 /// A wire-seat desk fixture whose parent holds the very inbox this
-/// returns, exactly [`super::tests::spawnable_desk`]'s identity shape with
+/// returns, exactly [`super::spawnable_desk`]'s identity shape with
 /// `kind: SeatKind::Wire` and a dialler installed.
 fn wire_spawnable_desk(fuel: u32, dial: Arc<FakeDial>) -> (ExarchDesk, Arc<Fleet>, Inbox) {
     let parent_inbox = Inbox::new();
@@ -253,7 +253,7 @@ fn wire_spawn_refuses_a_parked_fork_without_dialling() {
     let (desk, _fleet, _parent_inbox) = wire_spawnable_desk(3, dial.clone());
 
     let err = desk
-        .ask(super::tests::start_req(
+        .ask(super::start_req(
             NurseryId(0),
             "go",
             "in-process",

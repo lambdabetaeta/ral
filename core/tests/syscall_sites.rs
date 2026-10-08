@@ -165,16 +165,16 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
         "exarch/src/shell_eval/builtins/fff_index.rs",
         "silent:fff-db-dir",
     ),
-    ("exarch/src/bootstrap.rs", "silent:log-run-dir"),
-    ("exarch/src/bootstrap.rs", "silent:scratch-bootstrap"),
-    ("exarch/src/bootstrap.rs", "silent:scratch-reap"),
+    ("exarch/src/app.rs", "silent:log-run-dir"),
+    ("exarch/src/app.rs", "silent:scratch-bootstrap"),
+    ("exarch/src/app.rs", "silent:scratch-reap"),
     ("exarch/src/cli.rs", "silent:seed-file"),
     ("exarch/src/config.rs", "silent:config-load"),
     ("exarch/src/egress.rs", "silent:net-audit-open"),
     ("exarch/src/egress.rs", "silent:net-audit-rotate"),
     ("exarch/src/egress.rs", "silent:net-audit-size"),
-    ("exarch/src/agent/log.rs", "silent:record-file"),
-    ("exarch/src/agent/log.rs", "silent:session-dir"),
+    ("exarch/src/record/session.rs", "silent:record-file"),
+    ("exarch/src/record/session.rs", "silent:session-dir"),
     ("exarch/src/prompt/host.rs", "silent:git-launch"),
     ("exarch/src/record/log.rs", "silent:record-file-append"),
     ("exarch/src/record/log.rs", "silent:record-file-create"),
@@ -233,10 +233,10 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ("core/src/path/git.rs", "silent:git-dir-pointer"),
     ("core/src/path/lex.rs", "silent:mount-shape"),
     ("exarch/src/prompt.rs", "silent:system-prompt-files"),
-    ("exarch/src/shell_eval/skill.rs", "silent:skill-list-dir"),
-    ("exarch/src/shell_eval/skill.rs", "silent:skill-metadata"),
-    ("exarch/src/shell_eval/skill.rs", "surface:skill-body"),
-    ("exarch/src/shell_eval/skill.rs", "surface:skill-list"),
+    ("exarch/src/skill.rs", "silent:skill-list-dir"),
+    ("exarch/src/skill.rs", "silent:skill-metadata"),
+    ("exarch/src/skill.rs", "surface:skill-body"),
+    ("exarch/src/skill.rs", "surface:skill-list"),
     ("exarch/src/provider/state.rs", "silent:state-read"),
     ("exarch/src/provider/state.rs", "silent:state-write"),
     (
@@ -330,16 +330,21 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// Recursively collect every `.rs` file under `dir`.
+/// Recursively collect every production `.rs` file under `dir`: a unit-test
+/// module lives out of line as `tests.rs` or under a `tests/` directory, and
+/// is scaffolding, not a site.
 fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
+        let name = entry.file_name();
         if path.is_dir() {
-            rs_files(&path, out);
-        } else if path.extension().is_some_and(|e| e == "rs") {
+            if name != "tests" {
+                rs_files(&path, out);
+            }
+        } else if path.extension().is_some_and(|e| e == "rs") && name != "tests.rs" {
             out.push(path);
         }
     }

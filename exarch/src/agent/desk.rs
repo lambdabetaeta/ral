@@ -477,10 +477,3 @@ mod schedules;
     reason = "[test] test fs/process scaffolding"
 )]
 mod tests;
-
-#[cfg(all(test, unix))]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
-mod wire_tests;

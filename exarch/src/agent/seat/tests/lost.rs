@@ -1,4 +1,4 @@
-use super::{EngineLost, EnginePhase};
+use super::super::{EngineLost, EnginePhase};
 use ral_core::carrier::Severed;
 
 fn closed() -> Severed {

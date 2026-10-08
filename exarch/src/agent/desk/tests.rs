@@ -2171,3 +2171,6 @@ fn ms_lease_child_renewed_at_half_the_ttl_survives_the_bound() {
     let _ = wait_for_settle(&parent.inbox());
     handle.join().expect("worker thread must not panic");
 }
+
+#[cfg(unix)]
+mod wire;

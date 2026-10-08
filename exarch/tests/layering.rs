@@ -8,7 +8,7 @@ exarch::pre_main_ctor!();
 
 type Graph = BTreeMap<String, BTreeSet<String>>;
 
-const SKIPPED: [&str; 4] = ["tests.rs", "wire_tests.rs", "lost.rs", "testkit.rs"];
+const SKIPPED: [&str; 2] = ["tests.rs", "testkit.rs"];
 
 const LAYERED: [(&str, &str); 6] = [
     ("provider", "record"),
