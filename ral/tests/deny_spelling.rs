@@ -99,31 +99,36 @@ fn a_deny_holding_the_stored_name_refuses_plainly() {
 }
 
 /// T6's pairs, in a case-sensitive `d` holding the distinct `Work` and
-/// `work`.  An allow on `Work` does not reach `work`; a deny on `Work` does —
-/// the over-deny a deny accepts, so that it holds on every volume.
+/// `work`.  A deny on `Work` reaches `work` — the over-deny a deny accepts,
+/// so that it holds on every volume; an allow on `Work` does not.
 fn allow_side_pairs(d: &Path) {
     let (upper, lower) = (d.join("Work"), d.join("work"));
     std::fs::create_dir(&upper).unwrap();
     std::fs::create_dir(&lower).unwrap();
     let echo = |path: PathBuf| format!("echo key > '{}'", path.display());
 
+    let out = under(d, &upper, &[], &echo(upper.join("f")));
+    assert_admitted(&out, "a write into the granted `Work`");
+    let denied = under(d, d, &[&upper], &echo(lower.join("g")));
+    assert_refused(
+        &denied,
+        "a write into `work` under a deny on the distinct `Work`",
+    );
+
+    // Windows' allow side keeps its ASCII fold, a stated residual: there an
+    // allow on `Work` reaches `work`, and a deny holds it as stored.
+    if cfg!(windows) {
+        return;
+    }
+    assert!(
+        denied.stderr.contains("a deny holds under every spelling"),
+        "the over-deny must say why; stderr:\n{}",
+        denied.stderr
+    );
     let out = under(d, &upper, &[], &echo(lower.join("f")));
     assert_ne!(
         out.status, 0,
         "an allow on `Work` must not reach the distinct `work`; stderr:\n{}",
-        out.stderr
-    );
-    let out = under(d, &upper, &[], &echo(upper.join("f")));
-    assert_admitted(&out, "a write into the granted `Work`");
-
-    let out = under(d, d, &[&upper], &echo(lower.join("g")));
-    assert_refused(
-        &out,
-        "a write into `work` under a deny on the distinct `Work`",
-    );
-    assert!(
-        out.stderr.contains("a deny holds under every spelling"),
-        "the over-deny must say why; stderr:\n{}",
         out.stderr
     );
 }
@@ -177,10 +182,11 @@ fn the_allow_side_keeps_case_on_a_case_sensitive_volume() {
     }
 }
 
-/// T6 on Windows, in a directory made case-sensitive with `fsutil`.
+/// T6 on Windows, in a directory made case-sensitive with `fsutil`: the
+/// deny side, the allow side keeping its ASCII fold.
 #[cfg(windows)]
 #[test]
-fn the_allow_side_keeps_case_in_a_case_sensitive_folder() {
+fn a_deny_over_denies_in_a_case_sensitive_folder() {
     let d = Scratch::new("deny_spelling_cs");
     let enabled = std::process::Command::new("fsutil")
         .args(["file", "setCaseSensitiveInfo"])
@@ -225,9 +231,7 @@ fn seatbelt_refuses_a_case_variant_of_an_absent_deny() {
 }
 
 /// T9: NTFS does not fold normalisation but does fold non-ASCII case, which
-/// the ASCII stored identity misses and the deny relation does not.  And
-/// NTFS's `$UpCase` merges dotless ı with I, which is why the key is taken
-/// on the uppercase image.
+/// the ASCII stored identity misses and the deny relation does not.
 #[cfg(windows)]
 #[test]
 fn ntfs_non_ascii_case_meets_the_deny() {
@@ -236,11 +240,4 @@ fn ntfs_non_ascii_case_meets_the_deny() {
     assert_refused(&out, "a create of `éclair` under a deny on `Éclair`");
     let out = write_under_deny(&d.0, "\u{c9}clair", &d.join("eclair"));
     assert_admitted(&out, "a write to `eclair`, a different name");
-
-    std::fs::write(d.join("f\u{131}le"), "x").unwrap();
-    assert!(
-        d.join("FILE").exists(),
-        "NTFS took `fıle` and `FILE` for two names; the collision key merges \
-         them, so it over-merges one letter here: revisit the uppercase image"
-    );
 }

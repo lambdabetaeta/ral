@@ -18,9 +18,10 @@ cost of saying the second in the first:
   `subpath` and `regex` all match modulo canonical caseless equivalence, for
   absent names as for existing ones, on case-insensitive and case-sensitive
   APFS alike: a deny on `Secrets` refuses `mkdir secrets`, and an NFC deny an
-  NFD create. That is the guard's deny relation less {ı ≡ i}
+  NFD create. On APFS that is all the guard's deny relation holds
   ([[decisions/261006_denies-hold-under-every-spelling|denies-hold-under-every-spelling]]),
-  so a deny is rendered once. The residual is on the allow side: on a
+  the classes it adds for ZFS (ı ≡ I, compatibility forms) being distinct
+  objects there, so a deny is rendered once. The residual is on the allow side: on a
   case-sensitive volume an allow on `Work` also admits the distinct `work` to
   a child, which the guard refuses; SBPL has no exact match to say otherwise.
 - **Ancestor chains.** `(allow file-read* (subpath P))` does not make `P`

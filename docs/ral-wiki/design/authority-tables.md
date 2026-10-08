@@ -250,20 +250,30 @@ marks a refusal that names the denied spelling.
   distinct objects, `subpath Work`, `subpath WORK` and `literal …/Work/t`
   each admit reading `work/t`: a Seatbelt allow over-grants a child across
   case there. SBPL cannot say otherwise; it is a stated residual. Hence
-  **macOS renders nothing differently**: a rendered deny and the guard already
-  mean one thing.
+  **macOS renders nothing differently**: on APFS the classes the key adds
+  beyond Seatbelt's are distinct objects. On an OpenZFS volume under macOS
+  they are not, and a child can create an absent denied name spelled with ı
+  or a compatibility form: a stated residual.
 - **NTFS upcases each UTF-16 unit through `$UpCase` and does not normalise**,
-  and simple uppercase sends ı to I, so ı, i and I merge. Hence
-  `collision_key` is D145 *of the uppercase image*,
-  `NFD(casefold(NFD(upper(name))))` through ICU4X (`icu_normalizer`,
-  `icu_casemap`, one Unicode version for every step). Measured over every code
-  point of Unicode 16, the uppercase image differs from D145 in exactly the
-  class {I, i, ı}. `lower(upper(·))` without casefold misses ß≡ẞ, which APFS
-  merges. NFKC_Casefold is coarser than any filesystem: fullwidth Ａ≡a is
-  distinct on APFS and under Seatbelt. ASCII keys are their lowercase, and a
-  non-ASCII character whose key is ASCII (K, ſ, ﬁ) lands on that same
-  lowercase, so the ASCII fast path is exact. Unicode's stability policies
-  mean a newer table never splits a class an older one merged.
+  and its table keeps ı apart from I, though Unicode's simple uppercase joins
+  them: measured on the Windows runner, `fıle` and `FILE` are two names.
+- **ZFS upcases by Unicode 5.0's simple uppercase, then normalises as the
+  dataset says**, both fixed at creation (OpenZFS `u8_textprep`, its tables
+  decoded). `casesensitivity=insensitive` or `mixed` sends ı to I;
+  `normalization=formKC` or `formKD` merges compatibility equivalents
+  (fullwidth Ａ≡A, 𝐚≡a, no-break space ≡ space). Hence `collision_key` is
+  compatibility caseless matching (D147) of the uppercase image of the
+  compatibility decomposition,
+  `NFKD(casefold(NFKD(casefold(NFD(upper(NFKD(name)))))))` through ICU4X
+  (`icu_normalizer`, `icu_casemap`, one Unicode version for every step).
+  Measured over every code point, it splits no class APFS, Seatbelt or ZFS
+  under any setting merges. NFKD comes first: `𝚤` decomposes to ı, which ZFS
+  upcases, yet has no uppercase of its own. `lower(upper(·))` without
+  casefold misses ß≡ẞ, which APFS merges; NFKC_Casefold misses ı≡I. ASCII
+  keys are their lowercase, and a non-ASCII character whose key is ASCII (K,
+  ſ, ﬁ, Ａ) lands on that same lowercase, so the ASCII fast path is exact.
+  Unicode's stability policies mean a newer table never splits a class an
+  older one merged.
 - **Linux ext4 and f2fs casefold is NFD plus casefold, per directory.** The
   volume, not the OS, owns case-insensitivity: synod's Linux guest reads APFS
   and NTFS shares, and APFS has a case-sensitive variant. So the fold is

@@ -110,7 +110,8 @@ start, Seatbelt's rules being negative over names.
 
 The two agree on what a deny means: every spelling some filesystem takes for
 its name. The guard's deny rules speak under `identity::collision_key`, its allows
-under the name as stored; Seatbelt matches the same class; a bwrap mask and a Windows ACE hang on whatever object the
+under the name as stored; Seatbelt matches its canonical caseless part, all
+of it on APFS; a bwrap mask and a Windows ACE hang on whatever object the
 volume's own lookup finds, which on an existing path is the same thing. On a
 case-sensitive volume the guard therefore over-denies relative to the Linux
 and Windows kernels — a distinct `secrets` beside a denied `Secrets` is

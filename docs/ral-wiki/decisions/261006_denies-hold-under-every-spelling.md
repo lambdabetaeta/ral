@@ -68,24 +68,34 @@ non-matching control that was admitted.
   and `work` are distinct objects, a deny on `Work` refuses `work`, and an
   allow over-grants: `subpath Work`, `subpath WORK` (a name nothing stores)
   and `literal …/Work/t` each admit reading `work/t`.
-- **The uppercase image against D145.** Over every code point (Unicode 16)
-  they differ in exactly one class, {I, i, ı}. `lower(upper(·))` without
-  `casefold` misses ß≡ẞ, which APFS merges.
-- **NTFS and Linux, from documentation.** NTFS upcases each UTF-16 unit
-  through the volume's `$UpCase` table (simple uppercase) and does not
-  normalise; simple uppercase sends ı to I, so ı, i and I merge, which a
-  Windows test pins. Linux casefold (ext4, f2fs: NFD plus casefold) is
+- **NTFS**, on the Windows CI runner, upcases each UTF-16 unit through the
+  volume's `$UpCase` table and does not normalise. The table keeps ı apart
+  from I, though Unicode's simple uppercase joins them: `fıle` and `FILE` are
+  two names.
+- **ZFS, from its source** (OpenZFS `zfs_vfsops.c`, `u8_textprep.c`, its
+  tables decoded over every code point). `casesensitivity=insensitive` or
+  `mixed` upcases each character by Unicode 5.0's simple uppercase, which
+  sends ı to I, then applies the dataset's `normalization`: none, `formC`,
+  `formD`, `formKC` or `formKD`, both fixed at creation. Under `formKC` and
+  `formKD` it merges compatibility equivalents: fullwidth Ａ≡A, 𝐚≡a,
+  no-break space ≡ space.
+- **Linux, from documentation.** Casefold (ext4, f2fs: NFD plus casefold) is
   canonical caseless matching by construction.
 
 ## Decision
 
-- **The key.** `collision_key(name)` is `NFD(casefold(NFD(upper(name))))`:
-  canonical caseless matching (Unicode D145) of the uppercase image, through
-  ICU4X (`icu_normalizer`, `icu_casemap`, one Unicode version for every
-  step). ASCII is its lowercase; a name that is not UTF-8 is its own key.
-  Measured, it equals case-insensitive APFS and Seatbelt plus {ı ≡ i}, which
-  NTFS's `$UpCase` merges; it is coarser than a case-sensitive volume, which
-  is fail-closed.
+- **The key.** `collision_key(name)` is
+  `NFKD(casefold(NFKD(casefold(NFD(upper(NFKD(name)))))))`: compatibility
+  caseless matching (Unicode D147) of the uppercase image of the
+  compatibility decomposition, through ICU4X (`icu_normalizer`,
+  `icu_casemap`, one Unicode version for every step). ASCII is its
+  lowercase; a name that is not UTF-8 is its own key. Measured over every
+  code point, the shipped key splits no class that APFS, Seatbelt or ZFS
+  under any setting merges; NTFS, Linux casefold and a case-sensitive volume
+  are finer, which is fail-closed. NFKD comes first: `𝚤` decomposes to ı,
+  which ZFS upcases, yet has no uppercase of its own. A key is a function,
+  so it holds the join of the classes: `𝚤` meets I, though no one volume
+  merges them.
 - **Two relations, one kernel.** `lex::path_within` takes an `Identity`:
   `Stored` (bytes; ASCII case on Windows) or `Collision` (`collision_key` per
   component, so no fold crosses a component boundary).
@@ -129,12 +139,12 @@ non-matching control that was admitted.
 ## Why this key
 
 - **At least as coarse as every identity in play.** A deny that under-merges
-  lets a spelling through, so the key takes case-insensitive APFS and Seatbelt
-  (D145), NTFS's `$UpCase` (the uppercase image adds exactly {ı, i, I} to D145)
-  and Linux casefold together. Where a volume is finer, down to byte-exact
-  ext4 and case-sensitive APFS, it over-merges: fail-closed.
+  lets a spelling through, so the key takes case-insensitive APFS and
+  Seatbelt, NTFS's `$UpCase`, Linux casefold and ZFS under every setting
+  together. Where a volume is finer, down to byte-exact ext4 and
+  case-sensitive APFS, it over-merges: fail-closed.
 - **Exact on ASCII.** The key of an ASCII name is its lowercase, and a
-  non-ASCII character whose key is ASCII (K, ſ, ﬁ) lands on that same
+  non-ASCII character whose key is ASCII (K, ſ, ﬁ, Ａ) lands on that same
   lowercase, so the ASCII fast path is no approximation.
 - **Stable.** Unicode's case-folding and normalisation stability policies
   mean a newer table never splits a class an older one merged.
@@ -182,8 +192,9 @@ is a refusal.**
 - **Mask every existing colliding sibling** on Linux and Windows, so that the
   kernel matches the guard's over-deny. It enumerates directories, races, and
   adds machinery to enforce an over-approximation.
-- **NFKC_Casefold.** It is coarser than any filesystem: fullwidth Ａ≡a is
-  distinct on APFS and under Seatbelt.
+- **NFKC_Casefold.** It misses ı≡I, which ZFS merges, and deletes
+  default-ignorable code points (ZWJ, soft hyphen), which no filesystem in
+  play ignores.
 - **std `to_lowercase(to_uppercase(·))`.** It misses ß≡ẞ, which APFS merges.
 - **Leave exec deny keys stored.** One grant would mean two things, fs
   folding and exec not, and on macOS the kernel folds exec denies anyway, so
@@ -196,7 +207,8 @@ is a refusal.**
 
 - **macOS renders nothing differently.** Seatbelt matches every rule under
   canonical caseless equivalence, absent and existing names alike, on every
-  volume, so a rendered deny and the guard mean one thing.
+  volume. On APFS that is all a rendered deny needs: the classes the key adds
+  are distinct objects there.
 - **Linux and Windows hold an existing deny under every spelling already.** A
   bwrap mask is mounted over whatever object the kernel's lookup finds, under
   the volume's own identity; Landlock rules are by descriptor; a Windows ACE
@@ -209,8 +221,10 @@ is a refusal.**
 - **Over-deny, accepted.** On a case-sensitive volume — Linux, case-sensitive
   APFS, a case-sensitive NTFS folder — a deny on `Secrets` also refuses the
   distinct `secrets` in process, where the Linux and Windows kernels would
-  not. That is an over-approximation in the guard, not a weakness in either
-  enforcer. The denial says why.
+  not; and on every volume but a compatibility-normalised ZFS one, a deny on
+  `secrets` also refuses the distinct `ｓｅｃｒｅｔｓ`. That is an
+  over-approximation in the guard, not a weakness in either enforcer. The
+  denial says why.
 - **Residuals, stated.** On a case-sensitive APFS volume Seatbelt's *allows*
   also admit case variants for a spawned child, which SBPL cannot express
   otherwise. The Windows allow side keeps its ASCII fold, so the guard
@@ -218,7 +232,11 @@ is a refusal.**
   exact; making the Windows walk spell stored names is its own change. On
   Linux an exec deny inside an admitted dir never reaches the kernel, so a
   child is not refused the distinct `/x/evil/t` the guard refuses under a
-  deny on `/x/Evil`.
+  deny on `/x/Evil`. On an OpenZFS volume under macOS, Seatbelt's canonical
+  fold lets a child create an absent denied name spelled with ı or a
+  compatibility form. HFS+ is not in play: its case-insensitive compare skips
+  sixteen invisible format characters (ZWJ, bidi marks, BOM) and pairs
+  Georgian Asomtavruli with Mkhedruli, neither of which the key folds.
 
 See [[invariants/grants-judge-objects|grants-judge-objects]],
 [[design/two-enforcers|two-enforcers]],

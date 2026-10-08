@@ -58,14 +58,16 @@ impl Polarity for Deny {
     const IDENTITY: Identity = Identity::Collision;
 }
 
-/// The name a filesystem may take `name` for: canonical caseless matching
-/// (Unicode D145) of its uppercase image.  A name that is not UTF-8 is its
-/// own key; no filesystem folds one.
+/// The name a filesystem may take `name` for: compatibility caseless
+/// matching (Unicode D147) of the uppercase image of its compatibility
+/// decomposition.  A name that is not UTF-8 is its own key; no filesystem
+/// folds one.
 ///
 /// Coarser than or equal to every identity in play (case-insensitive APFS
-/// and Seatbelt, NTFS `$UpCase`, Linux casefold) and so fail-closed where a
-/// volume is finer.  The uppercase image adds exactly {ı, i, I} to D145,
-/// which `$UpCase` merges.
+/// and Seatbelt, NTFS `$UpCase`, Linux casefold, ZFS under every
+/// `casesensitivity` and `normalization`) and so fail-closed where a volume
+/// is finer.  NFKD comes first: `𝚤` decomposes to ı, which ZFS upcases to I,
+/// yet has no uppercase of its own.
 pub(super) fn collision_key(name: &OsStr) -> Cow<'_, OsStr> {
     let Some(s) = name.to_str() else {
         return Cow::Borrowed(name);
@@ -74,11 +76,15 @@ pub(super) fn collision_key(name: &OsStr) -> Cow<'_, OsStr> {
         return Cow::Owned(s.to_ascii_lowercase().into());
     }
     let nfd = DecomposingNormalizerBorrowed::new_nfd();
+    let nfkd = DecomposingNormalizerBorrowed::new_nfkd();
     let case = CaseMapper::new();
-    let upper = case.uppercase_to_string(s, &LanguageIdentifier::UNKNOWN);
-    let decomposed = nfd.normalize(&upper);
-    let folded = case.fold_string(&decomposed);
-    Cow::Owned(nfd.normalize(&folded).into_owned().into())
+    let upper = case
+        .uppercase_to_string(&nfkd.normalize(s), &LanguageIdentifier::UNKNOWN)
+        .into_owned();
+    let once = nfkd
+        .normalize(&case.fold_string(&nfd.normalize(&upper)))
+        .into_owned();
+    Cow::Owned(nfkd.normalize(&case.fold_string(&once)).into_owned().into())
 }
 
 /// True iff some alias of `path` starts with some alias of `prefix`: `path`
@@ -403,12 +409,13 @@ mod tests {
             ("\u{212a}ey", "key"),
             ("\u{3c3}", "\u{3c2}"),
             ("\u{130}", "i\u{307}"),
-            ("f\u{131}le", "file"),
             ("f\u{131}le", "FILE"),
+            ("\u{1d6a4}", "\u{131}"),
+            ("\u{ff21}", "a"),
         ] {
             assert_eq!(key(a), key(b), "{a:?} and {b:?} must collide");
         }
-        for (a, b) in [("\u{ff21}", "a"), ("abc", "abd"), ("secret", "secrets")] {
+        for (a, b) in [("abc", "abd"), ("secret", "secrets")] {
             assert_ne!(key(a), key(b), "{a:?} and {b:?} must stay distinct");
         }
     }

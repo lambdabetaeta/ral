@@ -24,7 +24,7 @@ consultation and offers containment on the real form alone:
   `Collision` both ways.
 
 An object can answer to several names — case and Unicode normalisation on
-APFS, NTFS and Linux casefold directories — and an absent one has no stored
+APFS, NTFS, ZFS and Linux casefold directories — and an absent one has no stored
 spelling yet. So a **deny is judged by collision class and an allow by stored
 name** ([[decisions/261006_denies-hold-under-every-spelling|denies-hold-under-every-spelling]]):
 a rule of a `Table` speaks through `Scope::holds::<P>`, its verdict choosing

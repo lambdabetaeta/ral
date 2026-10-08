@@ -156,8 +156,8 @@ plus `which.rs` for PATH search.
   an `Identity` and folds it over the alias pairs. `Stored` is bytes, or under
   Windows path semantics `starts_with_identity`, unifying ASCII case, `/` vs
   `\`, and `\\?\`-verbatim spellings; `Collision` compares components by
-  `identity::collision_key`, canonical caseless matching of the uppercase image
-  (ICU4X), the coarsest identity any filesystem gives a name. A rule's
+  `identity::collision_key`, compatibility caseless matching of the uppercase
+  image (ICU4X), the coarsest identity any filesystem gives a name. A rule's
   `Polarity` (`identity::Allow`, `identity::Deny`) picks `Stored` or `Collision`
   ([[decisions/261006_denies-hold-under-every-spelling|denies-hold-under-every-spelling]]);
   on Windows `walk::dealias` names a `~`-bearing leaf by its long name, and
