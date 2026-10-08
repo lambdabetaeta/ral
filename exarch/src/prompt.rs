@@ -3,8 +3,7 @@
 
 pub mod host;
 
-use crate::cli::EditScheme;
-use crate::shell_eval::skill;
+use crate::skill;
 use ral_core::capability::{Capabilities, ExecKey, GrantStack};
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
@@ -15,6 +14,18 @@ use std::path::{Path, PathBuf};
 /// and Anthropic a whitespace-only one, and chat does not branch on the
 /// adapter.
 pub const CHAT_SYSTEM: &str = ".";
+
+/// The editing scheme `--edit` selects: one system-prompt section, since both
+/// editing builtins are registered regardless.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum EditScheme {
+    /// Teach the agent to inspect text and replace an exact string. This is the
+    /// default.
+    Replace,
+    /// Teach the agent to inspect line hashes and make changes tied to the
+    /// lines it inspected.
+    Hash,
+}
 
 /// Build the ordered `(heading, body)` sections [`render`] walks.
 ///
@@ -28,7 +39,7 @@ pub const CHAT_SYSTEM: &str = ".";
 pub fn assemble(
     files: &[PathBuf],
     caps: &GrantStack,
-    app: crate::bootstrap::App,
+    app: crate::app::App,
     cwd: &Path,
     config_dir: &Path,
     interactive: bool,
@@ -146,7 +157,7 @@ pub(crate) struct BuiltinIndex {
     /// Sorted and deduped: the shell's installed builtins, the documented
     /// prelude, and the agent library — ral closures sourced from `agent.ral`,
     /// not registered builtins, hence
-    /// [`agent_library_docs`](crate::shell_eval::builtins::agent_library_docs).
+    /// [`agent_library_docs`](crate::library::agent_library_docs).
     /// The engine's names keep the `_`-prefixed internals, so the filter
     /// lives here and covers all three.
     names: Vec<String>,
@@ -159,7 +170,7 @@ impl BuiltinIndex {
         let prelude = ral_core::builtins::help::prelude_names()
             .into_iter()
             .map(str::to_string);
-        let library = crate::shell_eval::builtins::agent_library_docs()
+        let library = crate::library::agent_library_docs()
             .into_iter()
             .map(|(name, _doc)| name);
         let mut names: Vec<String> = builtins
@@ -309,7 +320,7 @@ pub fn render(sections: &[(Option<&str>, String)]) -> String {
 /// Every line is a *host* truth, which is why the composition is exarch's
 /// alone — synod's engine lives in a guest VM where none of them hold, so it
 /// builds its own around the shared [`grant_summary`].
-pub fn host_section(caps: &GrantStack, app: crate::bootstrap::App) -> String {
+pub fn host_section(caps: &GrantStack, app: crate::app::App) -> String {
     let state = app.xdg_dir(ral_core::host::XdgKind::State);
     let scratch_line = format!("`${}` = {SCRATCH_PLACEHOLDER}", app.scratch_var());
     format!(
@@ -454,7 +465,7 @@ fn join_str<S: AsRef<str>>(v: &[S]) -> String {
 }
 
 /// The Skills section: `name: description` per skill, the same
-/// progressive-disclosure shape as [`builtin_index`].
+/// progressive-disclosure shape as [`BuiltinIndex`].
 fn skills_section(skills: &[skill::Skill]) -> String {
     let mut body =
         String::from("Available skills (call `skill <name>` to load, `skill-list` to refresh):\n");
@@ -477,7 +488,7 @@ mod tests {
     }
 
     fn index_of_boot() -> std::sync::Arc<BuiltinIndex> {
-        let shell = crate::bootstrap::test_shell();
+        let shell = crate::boot::test_shell();
         BuiltinIndex::resolve(shell.builtin_names().map(str::to_string).collect())
     }
 

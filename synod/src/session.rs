@@ -30,7 +30,7 @@ mod signin;
 use crate::grant::Grant;
 use crate::workspace;
 use baseline::Baseline;
-use exarch::agent::{Avatar, RecordedAccount};
+use exarch::agent::Avatar;
 use exarch::provider::{
     self, Bureau, Engine, Holdings, Provider,
     credential::CredentialStore,
@@ -38,6 +38,7 @@ use exarch::provider::{
     models::resolve_account,
     pricing,
 };
+use exarch::record::RecordedAccount;
 use ral_core::sync::LockExt;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -53,10 +54,10 @@ pub use signin::{SignInStep, SignedIn, sign_in};
 /// The agent's working area is not among these: it is the guest's own
 /// scratch tmpfs ([`crate::grant::GUEST_SCRATCH`]), no host directory.
 ///
-/// The name is the engine's ([`exarch::bootstrap::SYNOD`]) because exarch's
+/// The name is the engine's ([`exarch::app::SYNOD`]) because exarch's
 /// grant composition must deny these directories, and a second spelling here
 /// would let the two drift apart into a hole.
-pub use exarch::bootstrap::SYNOD;
+pub use exarch::app::SYNOD;
 
 /// Resolve the credential store, once, at startup — see
 /// [`crate::accounts::prepare`], which is where synod's accounts actually
@@ -117,7 +118,7 @@ pub struct Conversation {
     dial: Arc<crate::machine_dial::MachineDial>,
     agent: Avatar,
     /// The run's advisory lock, held for the conversation's life.
-    _run_lock: exarch::bootstrap::RunLock,
+    _run_lock: exarch::app::RunLock,
     baseline: Baseline,
     /// What the folder's shape says this conversation has changed so far,
     /// remade after every exchange against the one baseline — so the
@@ -214,7 +215,7 @@ impl Conversation {
         let run_dir = SYNOD
             .log_run_dir(&grant.root().to_string_lossy())
             .map_err(|e| format!("could not make a log folder: {e}"))?;
-        let run_lock = exarch::bootstrap::RunLock::try_acquire(&run_dir)
+        let run_lock = exarch::app::RunLock::try_acquire(&run_dir)
             .map_err(|e| format!("could not lock the log folder {}: {e}", run_dir.display()))?;
         let config_dir = SYNOD.xdg_dir(ral_core::host::XdgKind::Config);
 
@@ -276,7 +277,7 @@ impl Conversation {
             // [`exarch::headless::converse_settled`], so it waits on its
             // fleet alone.
             trunk: exarch::agent::Trunk::Embedded,
-            tools: exarch::shell_eval::tools::Toolset::offered(false),
+            tools: exarch::provider::Toolset::offered(false),
             disk_warn_bytes,
             // Every agent may delegate: the office assistant hatches
             // helpers that run concurrently in the same guest, and

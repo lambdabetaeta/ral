@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 446e3123
-generated_at_date: 2026-10-06
-covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/bootstrap.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/fleet/desk.rs, exarch/data/system.md, exarch/data/agents.md, exarch/data/reply.md, exarch/data/ral.md, exarch/data/script-style.md, exarch/data/context.md]
+generated_at_commit: 6c9047b6
+generated_at_date: 2026-10-08
+covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/data/system.md, exarch/data/agents.md, exarch/data/reply.md, exarch/data/ral.md, exarch/data/script-style.md, exarch/data/context.md]
 ---
 
 # Map: exarch
@@ -123,20 +123,24 @@ can inherit a live key.**
 
 ## Bootstrap
 
-`bootstrap.rs` holds the once-per-process pieces; nothing here is per-run.
+Two modules hold the once-per-process pieces; nothing here is per-run.
+`app.rs` is the apps and their directories (`App`, `EXARCH`, `SYNOD`, the XDG
+and project dirs, `Scratch`, `RunLock`, the time and slug helpers); `boot.rs` is
+the shell every seat starts from.
 
-- **`boot_shell`** — the identity seat's constructor: clear stale ral
-  interrupts, install ral's handlers, chain exarch's cancel over them, then
-  dress the shell via the shared `exarch_shell` — core's
-  [[map/repl/startup|`ral_core::boot::boot_shell`]] with exarch's
-  host surface (`builtins::host_surface()`) so the host builtins ride
-  construction, the `agent.ral` library, ANSI colour suppressed at the
-  source, the exit hints. Its sibling **`engine_boot_shell`** is the wire
-  engine's boot recipe (`EngineInstaller::boot`, run engine-side at
-  Attach): `exarch_shell` plus an engine-local `Scratch` and
-  **`arm_session_ledgers`** — the one policy site arming the binding lease
-  and settled-worker retention for both seats — with no signal ceremony
-  (a cancel arrives as a `Control` frame) and no terminal probe.
+- **`engine_boot_shell`** (`boot.rs`) — the one boot recipe for both seats
+  (`EngineInstaller::boot`, run engine-side at Attach): core's
+  [[map/repl/startup|`ral_core::boot::boot_shell`]] with exarch's host surface
+  (`builtins::host_surface()`) so the host builtins ride construction, then
+  `library::install_agent_library` for the `agent.ral` helpers, ANSI colour
+  suppressed at the source (`seed_no_color`), an engine-local `Scratch`, and
+  **`shell_eval::arm_session_ledgers`** — the one policy site arming the
+  binding lease and settled-worker retention. It has no signal ceremony and no
+  terminal probe (a cancel arrives as a `Control` frame).
+- **`face_process_signals`** (`boot.rs`) — the signal ceremony, once at each
+  entry point that hosts an identity engine: clear stale ral interrupts,
+  install ral's handlers, chain exarch's cancel over them
+  (`signals::install`), seat the terminal.
 - **Machine probing** — `prompt::host::snapshot` formats the live machine into
   the prompt's `Host` section: `now` (via `jiff`) and `git` (via `git(1)`) are probed
   there, `cwd`, `user` and `home` come from `ral_core::host`; best-effort, a missing
@@ -245,8 +249,8 @@ the per-agent index and optional sections still resolve from the stored base.
 - [[map/exarch/policy|policy]] — capability composition (base ∨ extend ⊓ restrict) and
   the bake-in profiles; the boundary *is* ral's [[design/grant|grant]].
 - [[map/exarch/tools|tools]] — `ral` is the tool, and `thinking` a hidden-flag
-  relay beside it; `tools.rs` is a static `Tool` record and a `Copy` `Toolset`
-  the agent carries, with no registry. Every other harness verb — the
+  relay beside it; `provider/tools.rs` holds the wire half (a static `ToolSpec` and a
+  `Copy` `Toolset` the agent carries, with no registry) and `agent/tools.rs` the dispatch. Every other harness verb — the
   `` exarch-agents `start `` spawn (one record-spec tag, `` `amnemon ``/`` `mnemon ``
   by field, fuel-gated, `` `reply ``/`` `read `` gated on `returns`), the schedule family — is a builtin reached
   through it, answered by the desk. The sub-agent model is [[design/agents|agents]].

@@ -1,0 +1,1689 @@
+//! Documented-semantics tests for exarch's tool-call evaluator.
+//!
+//! They hold one engine across two `run_shell` calls — the harness shape
+//! exarch uses between consecutive tool calls — to pin what routing through
+//! `run_phrases` buys: `let` bindings persist, effects before a failing
+//! line persist while those after it never ran, and `cd` persists.  The
+//! contract itself is covered in `core/tests/top_level_vs_block.rs`; these
+//! pin that `run_shell`'s wrapping does not perturb it.
+
+use super::*;
+use crate::bus::{Emitter, Inbox, channel};
+use crate::card::Row;
+use ral_core::capability::Capabilities;
+use ral_core::carrier::IdentityTransport;
+use ral_core::fact::Read;
+use ral_core::first_order::datum::Datum as _;
+use ral_core::types::WriteOutcome;
+use ral_core::types::{
+    CallSite, Done, DoneEvent, LeaseClass, Notice, Observed, Pruned, ReapCause, ReapNotice,
+    WorkerId,
+};
+
+/// Render a path without a trailing separator.  Some hosts return
+/// `"/tmp/"` from `std::env::temp_dir()` while `Shell::cwd()` never
+/// carries one; the `len > 1` guard keeps "/" itself intact.
+fn display_no_trailing_sep(path: &std::path::Path) -> String {
+    let s = path.display().to_string();
+    if s.len() > 1 {
+        s.trim_end_matches(std::path::MAIN_SEPARATOR).to_string()
+    } else {
+        s
+    }
+}
+
+fn fresh() -> IdentityTransport {
+    crate::boot::test_transport()
+}
+
+/// One tool run through the **real** production `run_shell`, composed via
+/// `report::tool_result` exactly as the boundary does — with no audit or
+/// worker rows to join, since this bare harness installs no desk and
+/// probes no registry.  Panics on a static failure: every call site below
+/// expects a completed run.
+fn run_shell_direct(
+    transport: &IdentityTransport,
+    caps: &Capabilities,
+    cmd: &str,
+    timeout_secs: u64,
+    recorder: &crate::record::Emitter,
+) -> ToolResult {
+    let applier = Arc::new(crate::agent::desk::SurfaceApplier::new(recorder.clone()));
+    let outcome = run_shell(
+        transport,
+        &ral_core::capability::GrantStack::of(caps.clone()),
+        "turn 1",
+        cmd,
+        timeout_secs,
+        applier.clone(),
+    );
+    match outcome {
+        Ok(ral_core::protocol::Report::Ran {
+            ending, captured, ..
+        }) => report::tool_result(
+            &ending,
+            captured,
+            &applier.births(),
+            None,
+            &[],
+            timeout_secs,
+        ),
+        Ok(ral_core::protocol::Report::Static { rendered, .. }) => {
+            panic!("static failure: {rendered}")
+        }
+        Err(s) => panic!("an identity seat never severs: {s}"),
+    }
+}
+
+/// One tool run under `Capabilities::root()` — exarch's least-restricted
+/// default, so every source here runs without exercising the OS sandbox,
+/// which `core/tests/top_level_vs_block.rs` covers separately.
+fn run_once(engine: &IdentityTransport, cmd: &str) -> ToolResult {
+    run_shell_direct(
+        engine,
+        &Capabilities::root(),
+        cmd,
+        30,
+        &crate::record::Emitter::none(),
+    )
+}
+
+/// A restrictive exarch base: the body evaluates locally under an `fs`
+/// projection, and every external command it spawns is confined
+/// per-command under the OS sandbox.
+#[cfg(unix)]
+fn projecting_caps() -> Capabilities {
+    Capabilities {
+        fs: Some(ral_core::capability::FsPolicy {
+            read_prefixes: vec![ral_core::path::FrozenPath::root()],
+            write_prefixes: vec![ral_core::path::FrozenPath::root()],
+            deny_paths: Vec::new(),
+        }),
+        ..Capabilities::root()
+    }
+}
+
+/// A denied subtree drops out of both tree walks: `grep-files` and
+/// `explore-dir` filter each entry through the live grant, so a narrowed
+/// agent neither reads a denied file's lines nor learns its name — and the
+/// skip is a `continue`, so one off-limits path cannot blank the listing
+/// around it.
+#[cfg(unix)]
+#[test]
+fn a_denied_subtree_is_skipped_by_grep_and_explore() {
+    let scratch = scratch_dir("denied-walk");
+    // Canonical, because the walk reports the paths it resolved: on macOS
+    // the temp directory is itself a symlink.
+    let tmp = scratch
+        .path()
+        .canonicalize()
+        .expect("canonical scratch dir");
+    for sub in ["public", "secret"] {
+        std::fs::create_dir_all(tmp.join(sub)).expect("create subtree");
+        std::fs::write(tmp.join(sub).join("hit.txt"), format!("NEEDLE {sub}\n"))
+            .expect("write fixture");
+    }
+    let root = display_no_trailing_sep(&tmp);
+
+    let walk = |denied: &str| -> String {
+        let caps = Capabilities {
+            fs: Some(ral_core::capability::FsPolicy {
+                read_prefixes: vec![ral_core::path::FrozenPath::root()],
+                write_prefixes: vec![ral_core::path::FrozenPath::root()],
+                deny_paths: vec![ral_core::path::FrozenPath::from_surface(tmp.join(denied))],
+            }),
+            ..Capabilities::root()
+        };
+        let engine = fresh();
+        let cmd = format!(
+            "cd '{root}'\n\
+             let hits = grep-files 'NEEDLE'\n\
+             let listing = explore-dir 3\n\
+             return [hits: $hits, listing: $listing]"
+        );
+        let r = run_shell_direct(&engine, &caps, &cmd, 30, &crate::record::Emitter::none());
+        assert_eq!(
+            r.exit,
+            0,
+            "a denied entry is skipped, never raised; stderr was: {}",
+            String::from_utf8_lossy(&r.stderr)
+        );
+        r.value.expect("both walks return a value")
+    };
+
+    // Both directions, so a walk that answers with nothing at all fails one.
+    for (denied, granted) in [("secret", "public"), ("public", "secret")] {
+        let val = walk(denied);
+        assert!(
+            val.contains(&format!("{granted}/hit.txt")),
+            "the granted subtree still lists with {denied} denied: {val}"
+        );
+        assert!(
+            !val.contains(&format!("{denied}/hit.txt")),
+            "a denied path must not be named: {val}"
+        );
+        assert!(
+            !val.contains(&format!("NEEDLE {denied}")),
+            "a denied file's contents must not leak through grep: {val}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// `view-hash` returns one record per line: its number, its witness hash,
+/// and its text.
+#[cfg(unix)]
+#[test]
+fn view_tags_lines_with_hash() {
+    let engine = fresh();
+    let (_tmp, path_str) = scratch_file("view-tag", "alpha.txt", "alpha\n");
+    let r = run_once(
+        &engine,
+        &format!(
+            "let rows = view-hash '{path_str}' 1 2; [line: $rows[0][line], hash: $rows[0][hash], text: $rows[0][text]]"
+        ),
+    );
+    assert_eq!(
+        r.exit,
+        0,
+        "view-hash must run; stderr was: {}",
+        String::from_utf8_lossy(&r.stderr)
+    );
+    let val = r.value.as_deref().expect("view-hash must return value");
+    assert!(
+        val.contains("line: 1"),
+        "line renders as a ral field: {val:?}"
+    );
+    assert!(
+        val.contains("text: #'alpha'#"),
+        "text renders as a ral field: {val:?}"
+    );
+    let hash_start = val.find("hash: #'").expect("hash field") + "hash: #'".len();
+    let hash = &val[hash_start..hash_start + 7];
+    assert_eq!(
+        hash.len(),
+        7,
+        "hash is an `h` tag plus six hex, got {hash:?}"
+    );
+    assert!(
+        hash.starts_with('h') && hash[1..].bytes().all(|b| b.is_ascii_hexdigit()),
+        "hash is `h` followed by six hex chars, got {hash:?}"
+    );
+}
+
+/// The prompt's index lists the agent helpers and tells the model to
+/// `explain` any name for its docs, so every helper must answer with one.
+/// They are plain locals, which could shadow the library table their own
+/// docs live in.
+#[test]
+fn explain_answers_every_agent_helper_with_its_doc() {
+    let engine = fresh();
+    for (name, doc) in crate::library::agent_library_docs() {
+        let run = run_once(&engine, &format!("explain {name}"));
+        // `explain` indents every line it prints; a family's doc spans lines.
+        let out = String::from_utf8_lossy(&run.stdout).replace("\n  ", "\n");
+        assert!(
+            out.contains(&doc),
+            "`explain {name}` must print its indexed doc, got:\n{out}"
+        );
+    }
+}
+
+/// The second call must see the first's binding: exarch's per-call
+/// `run_phrases` install survives the tool-call boundary.
+#[test]
+fn tool_call_let_persists_across_calls() {
+    let engine = fresh();
+    let _ = run_once(&engine, "let persist_n = 41");
+    let second = run_once(&engine, "return $[$persist_n + 1]");
+    assert_eq!(
+        second.exit,
+        0,
+        "second tool call must succeed; stderr was: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(
+        second.value.as_deref(),
+        Some("42"),
+        "expected the second call's returned value to be 42"
+    );
+}
+
+/// The install-on-Error rule across the tool-call boundary: the middle
+/// command fails, so `pre_x` is defined and `post_y` never ran.
+#[test]
+fn tool_call_partial_effects_persist_on_error() {
+    let engine = fresh();
+    let failing = run_once(&engine, "let pre_x = 1\ncat /nonexistent\nlet post_y = 2");
+    assert_ne!(
+        failing.exit, 0,
+        "the failing tool call must surface a non-zero exit"
+    );
+
+    // Through the probe, not a follow-up tool call: looking up an
+    // undefined name from ral elaborates to a type error and surfaces as
+    // `Static`, the wrong shape for "simply absent".
+    let bound = |name: &str| {
+        ral_core::carrier::Transport::bindings(&engine)
+            .expect("an identity transport answers")
+            .iter()
+            .any(|row| row.name == name)
+    };
+    assert!(
+        bound("pre_x"),
+        "pre-failure `let` must persist into the next tool call"
+    );
+    assert!(
+        !bound("post_y"),
+        "post-failure `let` never ran, must not be present"
+    );
+}
+
+/// `logical_cwd` rides the shell across the tool-call boundary: a `cd` in
+/// one call is observable to `cwd` in the next.
+#[test]
+fn tool_call_cd_persists_across_calls() {
+    let engine = fresh();
+    // Beneath the temp dir the engine boots in, so the `cd` moves it.
+    let dir = scratch_dir("cd-persists");
+    let tmp = dir.path().to_path_buf();
+    let tmp_disp = display_no_trailing_sep(&tmp);
+    let cd = run_once(&engine, &format!("cd '{tmp_disp}'"));
+    assert_eq!(
+        cd.exit,
+        0,
+        "cd should succeed; stderr was: {}",
+        String::from_utf8_lossy(&cd.stderr)
+    );
+    let pwd = run_once(&engine, "cwd");
+    assert_eq!(pwd.exit, 0, "cwd in the second call should succeed");
+    let canon = display_no_trailing_sep(&tmp.canonicalize().unwrap_or_else(|_| tmp.clone()));
+    let got = pwd
+        .value
+        .as_deref()
+        .expect("cwd must return a String tool value");
+    assert!(
+        got == tmp_disp || got == canon,
+        "expected the second call's cwd to be {tmp_disp:?} or {canon:?}, got {got:?}"
+    );
+}
+
+/// A witness is the smallest context that makes its line unique, so two
+/// identical lines in different surroundings differ — which a bare line
+/// hash could not manage — and a line buried in a run of identical lines
+/// grows its window to the run's edge rather than going unaddressable.
+#[test]
+fn edit_window_hash_addresses_repeated_lines() {
+    let engine = fresh();
+    let tmp = scratch_dir("window-edit");
+
+    let repeated = tmp.path().join("repeated.txt");
+    let original = "\
+section one:
+target
+    delete me
+
+section two:
+target
+    keep me
+";
+    std::fs::write(&repeated, original).expect("write repeated fixture");
+    let repeated_str = display_no_trailing_sep(&repeated);
+    // `target` is line 2 = index 1; its witness differs from line 6's.
+    let edited = run_once(
+        &engine,
+        &format!(
+            "let nlines = line-count '{repeated_str}'\n\
+             let rows = view-hash '{repeated_str}' 1 $[$nlines + 1]\n\
+             edit-hash '{repeated_str}' [[hash: $rows[1][hash], line: 'FIRST']]"
+        ),
+    );
+    assert_eq!(
+        edited.exit,
+        0,
+        "editing the first `target` by its witness must succeed; stderr was: {}",
+        String::from_utf8_lossy(&edited.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&repeated).expect("read repeated fixture"),
+        "\
+section one:
+FIRST
+    delete me
+
+section two:
+target
+    keep me
+",
+        "only the first `target` changes; the second is untouched"
+    );
+
+    let run = tmp.path().join("run.txt");
+    let run_original = "head\ndup\ndup\ndup\ndup\ndup\ndup\ndup\ndup\ntail\n";
+    std::fs::write(&run, run_original).expect("write run fixture");
+    let run_str = display_no_trailing_sep(&run);
+    let buried = run_once(
+        &engine,
+        &format!(
+            "let nlines = line-count '{run_str}'\n\
+             let rows = view-hash '{run_str}' 1 $[$nlines + 1]\n\
+             edit-hash '{run_str}' [[hash: $rows[5][hash], line: 'Z']]"
+        ),
+    );
+    let after_run = std::fs::read_to_string(&run).expect("read run fixture after edit");
+    assert_eq!(
+        buried.exit,
+        0,
+        "a line deep in an identical run is now uniquely addressable; stderr was: {}",
+        String::from_utf8_lossy(&buried.stderr)
+    );
+    assert_eq!(
+        after_run, "head\ndup\ndup\ndup\ndup\nZ\ndup\ndup\ndup\ntail\n",
+        "exactly the witnessed line in the run changes; the rest stand"
+    );
+}
+
+/// Every hash resolves against one read before anything is written, so
+/// edits cannot interfere — not even adjacent lines, which per-call edits
+/// could not touch together without one invalidating the next.  Both
+/// halves: one stale hash writes nothing, a clean batch applies in a pass.
+#[test]
+fn edit_batch_is_atomic_and_non_interfering() {
+    let engine = fresh();
+    let tmp = scratch_dir("batch-edit");
+    let path = tmp.path().join("batch.txt");
+    let original = "\
+keep-top
+replace-me
+delete-me
+expand-me
+keep-bottom
+";
+    std::fs::write(&path, original).expect("write batch fixture");
+    let path_str = display_no_trailing_sep(&path);
+
+    // `hzzzzzz` is not `h` + six hex, so it can match no witness.
+    let poisoned = run_once(
+        &engine,
+        &format!(
+            "let nlines = line-count '{path_str}'\n\
+             let rows = view-hash '{path_str}' 1 $[$nlines + 1]\n\
+             edit-hash '{path_str}' [[hash: $rows[1][hash], line: 'X'], [hash: 'hzzzzzz', line: 'Y']]"
+        ),
+    );
+    assert_ne!(poisoned.exit, 0, "a batch with a stale hash must fail");
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read after poisoned batch"),
+        original,
+        "a failed batch must leave the file untouched"
+    );
+
+    let ok = run_once(
+        &engine,
+        &format!(
+            "let nlines = line-count '{path_str}'\n\
+             let rows = view-hash '{path_str}' 1 $[$nlines + 1]\n\
+             edit-hash '{path_str}' [[hash: $rows[1][hash], line: 'REPLACED'], [hash: $rows[2][hash], line: ''], [hash: $rows[3][hash], line: 'X\nY']]"
+        ),
+    );
+    let after = std::fs::read_to_string(&path).expect("read after clean batch");
+
+    assert_eq!(
+        ok.exit,
+        0,
+        "a clean adjacent batch must succeed; stderr was: {}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+    assert_eq!(
+        after,
+        "\
+keep-top
+REPLACED
+X
+Y
+keep-bottom
+"
+    );
+}
+
+/// The other half of the batch law: two records naming one line are caught
+/// in the same pre-write scan a stale hash is, so neither rewrite lands and
+/// the model is told which line they collided on rather than silently
+/// getting one of them.
+#[test]
+fn edit_batch_rejects_two_edits_naming_one_line() {
+    let engine = fresh();
+    let (dir, path) = scratch_file("dup-edit", "f.txt", "a\nb\nc\n");
+
+    let clash = run_once(
+        &engine,
+        &format!(
+            "let rows = view-hash '{path}' 1 4\n\
+             edit-hash '{path}' [[hash: $rows[1][hash], line: 'FIRST'], [hash: $rows[1][hash], line: 'SECOND']]"
+        ),
+    );
+    assert_ne!(clash.exit, 0, "two edits on one line must fail the batch");
+    let stderr = String::from_utf8_lossy(&clash.stderr);
+    assert!(
+        stderr.contains(&format!("two edits name line 2 in {path}")),
+        "the diagnostic names the colliding line and the file, got: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("f.txt")).expect("read after clashing batch"),
+        "a\nb\nc\n",
+        "a rejected batch rebuilds nothing"
+    );
+
+    // The control: distinct lines in one batch still apply, so the test
+    // cannot pass by refusing every batch.
+    let ok = run_once(
+        &engine,
+        &format!(
+            "let rows = view-hash '{path}' 1 4\n\
+             edit-hash '{path}' [[hash: $rows[1][hash], line: 'FIRST'], [hash: $rows[2][hash], line: 'SECOND']]"
+        ),
+    );
+    let after = std::fs::read_to_string(dir.path().join("f.txt")).expect("read after clean batch");
+    assert_eq!(
+        ok.exit,
+        0,
+        "a batch over distinct lines must succeed; stderr was: {}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+    assert_eq!(after, "a\nFIRST\nSECOND\n");
+}
+
+/// A committed `edit-hash` notes what it changed on stderr for the model,
+/// plus a warning when a replacement looks like it carries an unintended
+/// `\n`/`\t`-style escape rather than the real character.
+#[test]
+fn edit_notes_changed_lines_on_stderr() {
+    let engine = fresh();
+    let (_dir, path) = scratch_file("edit-note", "f.txt", "a\nb\nc\n");
+
+    let one = run_once(
+        &engine,
+        &format!(
+            "let rows = view-hash '{path}' 1 4\n\
+             edit-hash '{path}' [[hash: $rows[0][hash], line: 'A']]"
+        ),
+    );
+    assert_eq!(one.exit, 0, "single edit must succeed");
+    assert_eq!(
+        String::from_utf8_lossy(&one.stderr),
+        format!("[EXARCH] Replaced line 1 of {path}.\n"),
+        "a single-line edit notes the singular form with no warning"
+    );
+
+    let batch = run_once(
+        &engine,
+        &format!(
+            "let rows = view-hash '{path}' 1 4\n\
+             edit-hash '{path}' [[hash: $rows[1][hash], line: 'B'], [hash: $rows[2][hash], line: 'C\\n']]"
+        ),
+    );
+    assert_eq!(batch.exit, 0, "batch edit must succeed");
+    assert_eq!(
+        String::from_utf8_lossy(&batch.stderr),
+        format!(
+            "[EXARCH] Replaced lines 2, 3 of {path}. \
+             [WARNING: replacements contain escapes, did you mean to do that?]\n"
+        ),
+        "a multi-line batch notes the plural form, sorted, with an escape warning"
+    );
+}
+
+/// `edit-replace` notes its changed lines as `edit-hash` does, counted
+/// from where its unique match starts: `line n`, or `lines n-m` when the
+/// match spans a real newline in `from`.
+#[test]
+fn edit_replace_notes_changed_line_range_on_stderr() {
+    let engine = fresh();
+    let (_dir, path) = scratch_file("edit-replace-note", "f.txt", "x\nhello world\ny\n");
+    let r = run_once(
+        &engine,
+        &format!("edit-replace '{path}' 'hello world' 'hi\\tthere'"),
+    );
+    assert_eq!(r.exit, 0, "edit-replace must succeed");
+    assert_eq!(
+        String::from_utf8_lossy(&r.stderr),
+        format!(
+            "[EXARCH] Replaced line 2 of {path}. \
+             [WARNING: replacements contain escapes, did you mean to do that?]\n"
+        ),
+        "a single-line match notes the singular form with an escape warning"
+    );
+
+    let (_dir2, path2) = scratch_file("edit-replace-note-span", "g.txt", "one\ntwo\nthree\n");
+    let spanning = run_once(
+        &engine,
+        &format!("edit-replace '{path2}' 'two\nthree' 'TWO\nTHREE'"),
+    );
+    assert_eq!(
+        spanning.exit, 0,
+        "a match spanning a real newline must succeed"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&spanning.stderr),
+        format!("[EXARCH] Replaced lines 2-3 of {path2}.\n"),
+        "a match spanning two lines notes the plural range, no escapes here"
+    );
+}
+
+/// The agent types a witness as a *bare* argument, so an all-digit one
+/// lexes as an `Int` against the `String` `edit-hash` recomputes, the check
+/// rejects a correct hash, and the agent loops forever re-issuing the same
+/// edit.  The leading-zero case is sharper: its integer reading drops the
+/// zero, so only an un-numeric witness format can recover it.
+#[cfg(unix)]
+#[test]
+fn edit_accepts_numeric_witness_hash() {
+    // Mirror the adaptive-context hash to search for an all-digit one.  A
+    // file written "{content}\n" has lines [content, ""], shorter than a
+    // ±MIN_RADIUS (5) window, so line 1 clamps to the whole file at the
+    // floor radius: its witness is lh("5:0:" ++ lh(content) ++ lh("")).
+    fn lh(s: &str) -> String {
+        format!(
+            "h{}",
+            &blake3::hash(s.trim_end().as_bytes()).to_hex().as_str()[..6]
+        )
+    }
+    fn view_witness_line1(content: &str) -> String {
+        lh(&format!("5:0:{}{}", lh(content), lh("")))
+    }
+    fn line_with_digit_digest(leading_zero: bool) -> String {
+        for n in 0u64..2_000_000 {
+            let s = format!("witness fixture line {n}");
+            let tag = &view_witness_line1(&s)[1..7];
+            if tag.bytes().all(|b| b.is_ascii_digit()) && tag.starts_with('0') == leading_zero {
+                return s;
+            }
+        }
+        panic!("no all-digit six-hex witness in search space (leading_zero={leading_zero})");
+    }
+
+    fn assert_round_trips(label: &str, content: &str) {
+        let engine = fresh();
+        let (tmp, path_str) = scratch_file(
+            &format!("numeric-witness-{label}"),
+            "fixture.txt",
+            &format!("{content}\n"),
+        );
+
+        // Read the witness as the agent would: from `view-hash`.
+        let vr = run_once(
+            &engine,
+            &format!("let rows = view-hash '{path_str}' 1 2; $rows[0][hash]"),
+        );
+        assert_eq!(
+            vr.exit,
+            0,
+            "view-hash must read the fixture; stderr was: {}",
+            String::from_utf8_lossy(&vr.stderr)
+        );
+        let witness = vr
+            .value
+            .as_deref()
+            .expect("view-hash must return a hash")
+            .trim_matches('"')
+            .to_string();
+
+        // Feed it back as a *bare* token, the way the agent copies it.
+        let er = run_once(
+            &engine,
+            &format!("edit-hash '{path_str}' [[hash: {witness}, line: 'REPLACED']]"),
+        );
+        let after = std::fs::read_to_string(tmp.path().join("fixture.txt")).unwrap_or_default();
+
+        assert_eq!(
+            er.exit,
+            0,
+            "witnessed edit with numeric hash {witness:?} must succeed; stderr was: {}",
+            String::from_utf8_lossy(&er.stderr)
+        );
+        assert_eq!(after.trim_end(), "REPLACED");
+    }
+
+    assert_round_trips("plain", &line_with_digit_digest(false));
+    assert_round_trips("leading-zero", &line_with_digit_digest(true));
+}
+
+/// Every surface class round-trips to its `Surface`, structured payload
+/// kept without a rendered card, and junk decodes to `Decoded::Unknown`.
+/// One decoder, so what the live sink emits now is what a deferred
+/// `deliver` mints later.
+#[test]
+fn decode_surface_round_trips_each_class() {
+    use crate::card::testkit::{card_value, s};
+    assert!(matches!(
+        decode_surface(
+            &Observation::instant(
+                Some(CallSite {
+                    script: "run.ral".into(),
+                    line: 1,
+                    col: 1,
+                }),
+                Some("alex".into()),
+                Observed::Read(Read {
+                    path: "a.rs".into()
+                }),
+            )
+            .to_surface()
+        ),
+        Decoded::Surface(Surface::Observation(_))
+    ));
+    let reap = Notice::Reap(ReapNotice {
+        id: WorkerId(1),
+        cmd: "sleep 10".into(),
+        class: LeaseClass::Worker,
+        cause: ReapCause::Idle,
+    });
+    assert!(matches!(
+        decode_surface(&reap.to_surface()),
+        Decoded::Surface(Surface::Notice(Notice::Reap(_)))
+    ));
+    let prune = Notice::Prune(vec![Pruned {
+        name: "x".into(),
+        idle_calls: 256,
+        kind: "Int".into(),
+    }]);
+    assert!(matches!(
+        decode_surface(&prune.to_surface()),
+        Decoded::Surface(Surface::Notice(Notice::Prune(pruned)))
+            if pruned.len() == 1 && pruned[0].idle_calls == 256
+    ));
+    assert!(matches!(
+        decode_surface(&card_value(vec![])),
+        Decoded::Surface(Surface::Card(_))
+    ));
+    let done = DoneEvent {
+        cmd: "block at turn 1, line 1".into(),
+        outcome: Done::Ok,
+    };
+    assert!(matches!(
+        decode_surface(&done.to_surface()),
+        Decoded::Surface(Surface::Done {
+            cmd,
+            outcome: crate::card::DoneOutcome::Ok,
+        }) if cmd == "block at turn 1, line 1"
+    ));
+    assert!(matches!(decode_surface(&s("nope")), Decoded::Unknown));
+}
+
+/// The sink always posts, stamped with the root id and its birth
+/// epoch — even after a `/clear` advanced the inbox past it.  Staleness
+/// is the inbox's own pop that rejects it; the sink itself neither
+/// checks nor withholds.
+#[test]
+fn inbox_deferred_always_pushes_stamped_with_its_birth_epoch() {
+    use crate::agent::testkit::{TestAgentSpec, test_agent};
+
+    let fleet = crate::agent::fleet::Fleet::for_test();
+    let inbox = Inbox::new();
+    let mut spec = TestAgentSpec::new("root");
+    spec.mailbox = inbox.mailbox();
+    let agent = test_agent(&fleet, spec).expect("a fresh trunk");
+    let (tx, _rx) = channel();
+    let emit = Emitter::with_mailbox(tx, agent.id, inbox.mailbox());
+    let deferred = deferred_sink(&emit);
+
+    deferred.deliver(vec![ral_core::first_order::FOValue::Unit]);
+    match inbox.next_item() {
+        Some(crate::bus::Next::Item(crate::bus::Item::Surface { id, .. })) => {
+            assert_eq!(
+                id, agent.id,
+                "the batch is stamped with the root session id"
+            );
+        }
+        other => panic!("a delivered batch surfaces as Item::Surface, got {other:?}"),
+    }
+
+    // A `/clear` bumps this inbox past the sink's captured epoch.
+    inbox.clear();
+    deferred.deliver(vec![ral_core::first_order::FOValue::Unit]);
+    assert!(
+        !inbox.is_empty(),
+        "the post-clear flush still posts: the sink neither checks nor withholds"
+    );
+    assert!(
+        inbox.next_item().is_none(),
+        "its stale birth epoch is refused at the pop"
+    );
+}
+
+/// `boot::seed_no_color`'s suppression reaches spawned commands
+/// through the environment, not just the host's own rendering.
+#[cfg(unix)]
+#[test]
+fn spawned_commands_inherit_color_suppression() {
+    let engine = fresh();
+    let r = run_once(
+        &engine,
+        "/bin/sh -c 'printf %s \"$NO_COLOR/$CLICOLOR_FORCE\"'",
+    );
+    assert_eq!(r.exit, 0);
+    assert_eq!(String::from_utf8_lossy(&r.stdout), "1/0");
+}
+
+/// A timeout is a hard wall-clock bound, and the *whole* spawned tree must
+/// be dead after it — including a grandchild the direct child forked off.
+///
+/// The fixture is the `python runtests.py` shape: `/bin/sh` forks a `sleep`
+/// grandchild holding the stdout pipe open, then blocks in `wait`.  A
+/// standalone external leads its own process group, so cancel tears the
+/// group down by pgid; killing the leader by pid would leave the orphan
+/// holding the pipe and the stdout pump's `drain()` join blocked.
+#[cfg(unix)]
+#[test]
+fn timeout_kills_external_subprocess_tree() {
+    let engine = fresh();
+    // The leader blocks in `wait`, holding the call open unless the
+    // timeout tears the group down; the grandchild prints its pid so the
+    // test can prove it was reaped.
+    let cmd = "/bin/sh -c 'sleep 30 & echo $!; wait'";
+    let t0 = std::time::Instant::now();
+    let r = run_shell_direct(
+        &engine,
+        &Capabilities::root(),
+        cmd,
+        2,
+        &crate::record::Emitter::none(),
+    );
+    let elapsed = t0.elapsed();
+
+    assert!(
+        elapsed.as_secs() < 10,
+        "timeout must bound wall-clock: returned after {elapsed:?} (sleep was 30s)"
+    );
+    assert_eq!(
+        r.exit, 124,
+        "a timed-out call reports the timeout exit code"
+    );
+
+    // `kill(pid, 0)` returns ESRCH once the grandchild is reaped.  Poll to
+    // absorb the window between the group SIGKILL and the kernel reaping.
+    let gc_pid: i32 = String::from_utf8_lossy(&r.stdout)
+        .lines()
+        .next()
+        .and_then(|l| l.trim().parse().ok())
+        .expect("the grandchild printed its pid on stdout");
+    let mut alive = true;
+    for _ in 0..50 {
+        if rustix::process::test_kill_process(rustix::process::Pid::from_raw(gc_pid).unwrap())
+            .is_err()
+        {
+            alive = false;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        !alive,
+        "the forked grandchild (pid {gc_pid}) outlived the timeout"
+    );
+}
+
+/// `timeout_kills_external_subprocess_tree`'s fixture, asserted on the
+/// surfaced message rather than the process tree.  The elapsed budget and
+/// the `timeout_secs` name are load-bearing for steering the model, so
+/// they must stay in the text.
+#[cfg(unix)]
+#[test]
+fn timeout_message_names_budget_and_knob() {
+    let engine = fresh();
+    let cmd = "/bin/sh -c 'sleep 30 & echo $!; wait'";
+    let r = run_shell_direct(
+        &engine,
+        &Capabilities::root(),
+        cmd,
+        2,
+        &crate::record::Emitter::none(),
+    );
+    assert_eq!(
+        r.exit, 124,
+        "a timed-out call reports the timeout exit code"
+    );
+    let stderr = String::from_utf8_lossy(&r.stderr);
+    assert!(
+        stderr.contains("timed out after 2s"),
+        "the timeout message names the elapsed budget; stderr was: {stderr}"
+    );
+    assert!(
+        stderr.contains("timeout_secs"),
+        "the timeout message names the `timeout_secs` knob; stderr was: {stderr}"
+    );
+}
+
+/// A command's own exit code reaches the tool exit uncollapsed: the host
+/// must not flatten every non-zero status to 1, since the code is often
+/// the tool's signal (grep no-match=1, diff differs=1).
+#[cfg(unix)]
+#[test]
+fn command_exit_is_the_tool_exit() {
+    let engine = fresh();
+    let r = run_shell_direct(
+        &engine,
+        &Capabilities::root(),
+        "/bin/sh -c 'exit 3'",
+        10,
+        &crate::record::Emitter::none(),
+    );
+    assert_eq!(r.exit, 3, "the command's true exit code is the tool exit");
+}
+
+/// A raised error's status travels the same way a command's does.
+#[test]
+fn raised_error_status_is_the_tool_exit() {
+    let engine = fresh();
+    let r = run_shell_direct(
+        &engine,
+        &Capabilities::root(),
+        "fail [status: 7, message: 'raised error']",
+        10,
+        &crate::record::Emitter::none(),
+    );
+    assert_eq!(r.exit, 7, "the raised error's status is the tool exit");
+}
+
+/// The same timeout must tear down a sandbox-confined eval child.  The
+/// parent is blocked in IPC while the helper runs the body, so cooperative
+/// cancel polling cannot reach it: the tree must be killed out of band.
+#[cfg(unix)]
+#[test]
+fn timeout_kills_sandboxed_subprocess_tree() {
+    #[cfg(all(target_os = "linux", feature = "test-util"))]
+    if !ral_core::sandbox::restricted_envelope_launches() {
+        eprintln!(
+            "skip: this host cannot build a Restricted envelope; its /etc/hosts \
+             and /etc/resolv.conf are locked mounts bwrap cannot rebind read-only"
+        );
+        return;
+    }
+    let engine = fresh();
+    // Found by its argv: under `--unshare-pid` a pid it printed would be
+    // the namespace's, not the host's.
+    let marker = format!("sleep 30.{}", std::process::id());
+    let cmd = format!("/bin/sh -c '{marker} & wait'");
+    let t0 = std::time::Instant::now();
+    let r = run_shell_direct(
+        &engine,
+        &projecting_caps(),
+        &cmd,
+        2,
+        &crate::record::Emitter::none(),
+    );
+    let elapsed = t0.elapsed();
+    let stderr = String::from_utf8_lossy(&r.stderr);
+    #[cfg(target_os = "macos")]
+    {
+        const ENTRY_REFUSED: &str = "ral: cannot enter the Seatbelt sandbox: ";
+        if let Some(reason) = stderr
+            .lines()
+            .find_map(|line| line.strip_prefix(ENTRY_REFUSED))
+        {
+            assert_eq!(
+                reason,
+                ral_core::sandbox::ALREADY_PROFILED,
+                "the refusal is not attributed"
+            );
+            assert_eq!(r.exit, 126, "a refused launch exits 126");
+            eprintln!(
+                "skip: this runner is inside a Seatbelt profile; asserted the attributed refusal"
+            );
+            return;
+        }
+    }
+    if r.exit != 124 && (stderr.contains("sandbox eval") || stderr.contains("bwrap")) {
+        eprintln!("skip: OS sandbox unavailable on this host: {stderr}");
+        return;
+    }
+
+    assert!(
+        elapsed.as_secs() < 10,
+        "sandboxed timeout must bound wall-clock: returned after {elapsed:?}"
+    );
+    assert_eq!(
+        r.exit, 124,
+        "a timed-out sandboxed call reports the timeout exit code; stderr was: {stderr}"
+    );
+
+    let alive = || {
+        let ps = std::process::Command::new("ps")
+            .args(["-A", "-o", "args="])
+            .output()
+            .expect("ps lists the host's processes");
+        String::from_utf8_lossy(&ps.stdout)
+            .lines()
+            .any(|args| args.trim() == marker)
+    };
+    let mut survived = true;
+    for _ in 0..50 {
+        if !alive() {
+            survived = false;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        !survived,
+        "the sandboxed forked grandchild (`{marker}`) outlived the timeout"
+    );
+}
+
+/// The eval-layer half of the fleet's cascade: an agent's terminate
+/// cancels the durable root, which unwinds an in-flight `run_shell` and
+/// tears down its tree.  A 30 s budget, so only the terminate can explain
+/// a fast return.
+#[cfg(unix)]
+#[test]
+fn root_cancel_unwinds_inflight_run_shell() {
+    let engine = fresh();
+    let control = ral_core::carrier::Transport::control(&engine).clone();
+    let cmd = "/bin/sh -c 'sleep 30 & echo $!; wait'";
+    let t0 = std::time::Instant::now();
+    let r = std::thread::scope(|s| {
+        let worker = s.spawn(|| {
+            run_shell_direct(
+                &engine,
+                &Capabilities::root(),
+                cmd,
+                30,
+                &crate::record::Emitter::none(),
+            )
+        });
+        // Let the eval reach the blocking external wait, then cancel from
+        // outside — the registry cascade's move.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        control.terminate();
+        worker.join().expect("run_shell worker")
+    });
+    let elapsed = t0.elapsed();
+
+    assert!(
+        elapsed.as_secs() < 10,
+        "a root cancel must unwind the eval promptly: returned after \
+         {elapsed:?} (sleep was 30s, budget 30s)"
+    );
+    // Two shapes, both the unwind under test: blocked in the child wait,
+    // teardown SIGTERMs the group and the signal death is the statement
+    // error; between statements, `check` raises Terminate as "terminated".
+    assert_ne!(r.exit, 0, "a cancelled run must not report success");
+    let stderr = String::from_utf8_lossy(&r.stderr);
+    assert!(
+        stderr.contains("terminated") || stderr.contains("SIGTERM"),
+        "the unwind surfaces the cancel or the torn-down child; stderr was: {stderr}"
+    );
+
+    let gc_pid: i32 = String::from_utf8_lossy(&r.stdout)
+        .lines()
+        .next()
+        .and_then(|l| l.trim().parse().ok())
+        .expect("the grandchild printed its pid on stdout");
+    let mut alive = true;
+    for _ in 0..50 {
+        if rustix::process::test_kill_process(rustix::process::Pid::from_raw(gc_pid).unwrap())
+            .is_err()
+        {
+            alive = false;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        !alive,
+        "the forked grandchild (pid {gc_pid}) outlived the root cancel"
+    );
+}
+
+/// A `Bytes` field renders to the model as lossy UTF-8, not the decimal
+/// array `to-json` uses for data round-trips: captured diagnostics — a
+/// job's or `audit` node's `stderr` — are byte-typed but text by intent,
+/// and the model must read the message, not a wall of codes.
+#[test]
+fn byte_fields_render_as_lossy_text_not_decimal() {
+    let engine = fresh();
+    let r = run_once(
+        &engine,
+        "return [stderr: !{ints-to-bytes [107, 105, 108, 108, 101, 100, 255] | from-bytes}]",
+    );
+    assert_eq!(
+        r.exit,
+        0,
+        "minting a byte value must succeed; stderr was: {}",
+        String::from_utf8_lossy(&r.stderr)
+    );
+    let value = r.value.as_deref().expect("structured result");
+    assert!(
+        value.contains("stderr: #'killed"),
+        "the readable prefix renders inside a ral string, got {value:?}"
+    );
+    assert!(
+        !value.contains("107") && !value.contains("255"),
+        "no byte renders as a decimal code, got {value:?}"
+    );
+}
+
+/// The bulk-edit pipeline end to end, entirely in ral: `grep-files` finds
+/// every `[TODO]`, the hits fold per file, and each file's lines are
+/// rewritten in one atomic `edit-hash`.  The hashes come from a whole-file
+/// `view-hash`, so they match what `edit-hash` recomputes — no witness is
+/// ever read by eye.
+#[test]
+fn programmatic_todo_sweep_rewrites_every_match() {
+    let engine = fresh();
+    let tmp = scratch_dir("todo-sweep");
+    std::fs::write(
+        tmp.path().join("a.txt"),
+        "alpha [TODO] one\nplain\nbeta [TODO] two\n",
+    )
+    .expect("write a");
+    std::fs::write(tmp.path().join("b.txt"), "gamma\ndelta [TODO] three\n").expect("write b");
+    let tmp_str = display_no_trailing_sep(tmp.path());
+
+    let src = format!(
+        r"cd '{tmp_str}'
+let hits = grep-files #'\[TODO\]'#
+let files = nub !{{map {{ |h| $h[file] }} $hits}}
+each {{ |f|
+    let lc = line-count $f
+    let rows = view-hash $f 1 $[$lc + 1]
+    let mine = filter {{ |h| equal $h[file] $f }} $hits
+    edit-hash $f !{{map {{ |h|
+        [ hash: $rows[$[$h[line] - 1]][hash], line: !{{re-replace #'\[TODO\]'# '[DONE]' $h[text]}} ]
+    }} $mine}}
+}} $files
+return !{{length $hits}}"
+    );
+    let r = run_once(&engine, &src);
+    assert_eq!(
+        r.exit,
+        0,
+        "the todo sweep must succeed; stderr was {:?}",
+        String::from_utf8_lossy(&r.stderr)
+    );
+    assert_eq!(
+        r.value.as_deref(),
+        Some("3"),
+        "three [TODO] hits across the tree"
+    );
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("a.txt")).expect("read a"),
+        "alpha [DONE] one\nplain\nbeta [DONE] two\n",
+        "both TODOs in a.txt rewritten in one atomic edit"
+    );
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("b.txt")).expect("read b"),
+        "gamma\ndelta [DONE] three\n"
+    );
+}
+
+/// `edit-replace` collapses the read/`string-replace`/write idiom into one
+/// call: a unique match rewrites the file, and 0 or >1 matches error rather
+/// than guess.
+#[test]
+fn edit_replace_replaces_unique_match_and_rejects_ambiguity() {
+    let engine = fresh();
+    let (tmp, file_str) = scratch_file(
+        "edit-replace",
+        "config.txt",
+        "USE_OPENCV := 0\nUSE_LEVELDB := 1\n",
+    );
+
+    let r = run_once(
+        &engine,
+        &format!("edit-replace '{file_str}' 'USE_OPENCV := 0' 'USE_OPENCV := 1'"),
+    );
+    assert_eq!(
+        r.exit,
+        0,
+        "a unique match must rewrite the file; stderr was: {}",
+        String::from_utf8_lossy(&r.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("config.txt")).expect("read after edit"),
+        "USE_OPENCV := 1\nUSE_LEVELDB := 1\n"
+    );
+
+    let r = run_once(
+        &engine,
+        &format!("edit-replace '{file_str}' 'USE_MISSING := 0' 'x'"),
+    );
+    assert_ne!(r.exit, 0, "0 matches must error, not write");
+    assert!(
+        String::from_utf8_lossy(&r.stderr).contains("not found"),
+        "stderr should explain the 0-match failure, got {:?}",
+        String::from_utf8_lossy(&r.stderr)
+    );
+
+    let r = run_once(&engine, &format!("edit-replace '{file_str}' ':=' '='"));
+    assert_ne!(
+        r.exit, 0,
+        "a repeated match must error, not guess which one"
+    );
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("config.txt")).expect("read after failed edit"),
+        "USE_OPENCV := 1\nUSE_LEVELDB := 1\n",
+        "a rejected batch must leave the file untouched"
+    );
+}
+
+/// An edit holds both texts, so it reads as its change however large the
+/// file around it, and as nothing but that change.
+#[test]
+fn an_edit_reads_as_its_change_whatever_the_file_size() {
+    let engine = fresh();
+    let tail = "x".repeat(70_000);
+    let (_dir, path) = scratch_file("edit", "big.txt", &format!("HEAD\n{tail}"));
+
+    let (r, records) = run_capturing(&engine, &format!("edit-replace '{path}' 'HEAD' 'TAIL'"));
+    assert_eq!(
+        r.exit,
+        0,
+        "stderr: {:?}",
+        String::from_utf8_lossy(&r.stderr)
+    );
+    assert!(
+        observations(&records).is_empty(),
+        "no write beside the change"
+    );
+    let [change] = changes(&records).try_into().expect("one edit, one change");
+    assert_eq!(change.path, path);
+    assert_eq!(unified(&change)[..2], ["-HEAD", "+TAIL"]);
+}
+
+/// An edit that rebuilds the file byte-for-byte changed nothing to show.
+#[test]
+fn edit_changing_nothing_surfaces_nothing() {
+    let engine = fresh();
+    let (_dir, path) = scratch_file("edit-noop", "same.txt", "one\ntwo\n");
+
+    let (r, records) = run_capturing(&engine, &format!("edit-replace '{path}' 'two' 'two'"));
+    assert_eq!(r.exit, 0, "a no-op edit still succeeds");
+    assert!(changes(&records).is_empty() && observations(&records).is_empty());
+}
+
+/// Editing an executable leaves its `0o755` intact: a plain
+/// temp-file-then-rename would narrow it to the temp file's own `0o600`,
+/// stripping the exec bit off a script.
+#[cfg(unix)]
+#[test]
+fn edit_replace_preserves_the_target_file_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    let engine = fresh();
+    let (dir, path) = scratch_file("edit-replace-mode", "run.sh", "#!/bin/sh\necho old\n");
+    std::fs::set_permissions(
+        dir.path().join("run.sh"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .expect("chmod the fixture executable");
+
+    let r = run_once(&engine, &format!("edit-replace '{path}' 'old' 'new'"));
+    let mode = std::fs::metadata(dir.path().join("run.sh")).map(|m| m.permissions().mode() & 0o777);
+
+    assert_eq!(
+        r.exit,
+        0,
+        "edit-replace must succeed; stderr was {:?}",
+        String::from_utf8_lossy(&r.stderr)
+    );
+    assert_eq!(
+        mode.ok(),
+        Some(0o755),
+        "the executable mode must survive the edit, not narrow to 0o600"
+    );
+}
+
+/// `skill NAME`'s charset check *is* its path-traversal guard: the name is
+/// joined straight onto a skills root, so anything that could climb out of
+/// one must be refused at the door, unread.
+#[test]
+fn skill_name_validation_confines_the_join_to_the_skills_root() {
+    let engine = fresh();
+    let tmp = scratch_dir("skill-root");
+    let skills = tmp.path().join(".exarch").join("skills");
+    std::fs::create_dir_all(skills.join("demo")).expect("create skill dir");
+    std::fs::write(
+        skills.join("demo").join("SKILL.md"),
+        "---\nname: demo\ndescription: d\n---\n# Demo\nbody line\n",
+    )
+    .expect("write skill fixture");
+    // A sibling of the skills root, reachable by `..` and nothing else.
+    std::fs::create_dir_all(tmp.path().join(".exarch").join("secret")).expect("create secret dir");
+    std::fs::write(
+        tmp.path().join(".exarch").join("secret").join("SKILL.md"),
+        "TOPSECRET\n",
+    )
+    .expect("write secret fixture");
+    let root = display_no_trailing_sep(tmp.path());
+
+    let loaded = run_once(&engine, &format!("cd '{root}'; skill 'demo'"));
+    let body = loaded.value.as_deref().expect("skill returns its body");
+    assert!(
+        body.contains("// skill root:") && body.contains("body line"),
+        "a valid name loads the body under its root banner, got: {body}"
+    );
+
+    for name in ["../secret", "demo/../../secret", ".", "../../etc/passwd"] {
+        let r = run_once(&engine, &format!("skill '{name}'"));
+        assert_eq!(
+            r.value.as_deref(),
+            Some(format!("skill not found: {name}").as_str()),
+            "a name that could climb out of the root is refused unread"
+        );
+    }
+}
+
+/// `check_fs_read` is a prefix guard, not an existence test, so a root that
+/// simply lacks the skill passes the guard for a missing file. The loop must
+/// keep walking to later roots rather than reporting the first `ENOENT` as
+/// "could not read": otherwise a skill living only in the config root is
+/// shadowed by the empty local root.
+#[test]
+fn absent_skill_is_not_found_not_unreadable() {
+    let engine = fresh();
+    let tmp = scratch_dir("skill-absent");
+    let root = display_no_trailing_sep(tmp.path());
+    // `root` has no `.exarch/skills`, so the local root lacks `nowhere`;
+    // the config root must still be consulted before declaring it missing.
+    let r = run_once(&engine, &format!("cd '{root}'; skill 'nowhere'"));
+    assert_eq!(
+        r.value.as_deref(),
+        Some("skill not found: nowhere"),
+        "a skill missing from every root is not-found, never could-not-read"
+    );
+}
+
+/// One tool call through `run_shell`, over a real record-seam channel,
+/// returning the result and every [`crate::record::Record`] the run
+/// witnessed — the whole `core surface → decode_surface → Surface →
+/// Display` path the surface tests assert on.
+fn run_capturing(
+    engine: &IdentityTransport,
+    cmd: &str,
+) -> (ToolResult, Vec<crate::record::Record>) {
+    let (tx, rx) = channel();
+    let recorder = crate::record::Emitter::none();
+    recorder.attach(Box::new(crate::bus::FleetSink {
+        id: AgentId::new(0),
+        tx: tx.downgrade(),
+        meter: crate::bus::UsageMeter::default(),
+    }));
+    let result = run_shell_direct(engine, &Capabilities::root(), cmd, 30, &recorder);
+    (result, crate::bus::drain_records(&rx))
+}
+
+/// The [`Observed`] fact carried by each captured [`Display::Observation`],
+/// in order, decoded off its recorded wire form and dropping the envelope
+/// (site/time/principal) and the card composed beside it.
+fn observations(records: &[crate::record::Record]) -> Vec<Observed> {
+    records
+        .iter()
+        .filter_map(|r| match r {
+            crate::record::Record::Display(crate::record::Display::Observation { value }) => {
+                Observation::decode(value).ok().map(|o| o.what)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The [`Change`] carried by each captured [`Display::Change`], in order.
+fn changes(records: &[crate::record::Record]) -> Vec<Change> {
+    records
+        .iter()
+        .filter_map(|r| match r {
+            crate::record::Record::Display(crate::record::Display::Change { change }) => {
+                Some(change.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// A change's rows as a unified diff spells them.
+fn unified(change: &Change) -> Vec<String> {
+    let diff = change.diff.as_ref().expect("a change with a diff");
+    diff.hunks
+        .iter()
+        .flat_map(|h| &h.rows)
+        .map(|r| match r {
+            Row::Context(_) => format!(" {}", r.text()),
+            Row::Del(_) => format!("-{}", r.text()),
+            Row::Add(_) => format!("+{}", r.text()),
+        })
+        .collect()
+}
+
+/// A directory for one test, deleted when the returned guard falls.  Hold
+/// the guard: binding only its path deletes the directory on the spot.
+fn scratch_dir(tag: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("exarch-{tag}-"))
+        .tempdir()
+        .expect("create scratch dir")
+}
+
+/// Write `body` into a directory of this test's own, returning the guard
+/// and the display path of the file inside it.
+fn scratch_file(tag: &str, name: &str, body: &str) -> (tempfile::TempDir, String) {
+    let dir = scratch_dir(tag);
+    let path = dir.path().join(name);
+    std::fs::write(&path, body).expect("write scratch fixture");
+    let disp = display_no_trailing_sep(&path);
+    (dir, disp)
+}
+
+/// The READ door end to end: one `<` redirect raises exactly one `Read`
+/// event, and no exec card — `from-string` is a builtin, not an image.
+#[test]
+fn bare_read_redirect_surfaces_one_read_card() {
+    let engine = fresh();
+    let (_dir, path) = scratch_file("cov-read", "a", "hello\n");
+
+    let (r, records) = run_capturing(&engine, &format!("from-string < '{path}'"));
+    assert_eq!(
+        r.exit,
+        0,
+        "the read redirect must succeed; stderr was {:?}",
+        String::from_utf8_lossy(&r.stderr)
+    );
+
+    let obs = observations(&records);
+    assert_eq!(
+        obs.len(),
+        1,
+        "a bare `from-string < a` raises exactly one observation, got {obs:?}"
+    );
+    assert_eq!(
+        obs[0],
+        Observed::Read(Read { path }),
+        "the one observation is a read of the redirect path"
+    );
+}
+
+/// A `>` over a file reads as the change it made against what stood
+/// there, never as a creation.
+#[test]
+fn a_write_reads_as_the_change_it_made() {
+    let engine = fresh();
+    let (_dir, path) = scratch_file("write", "b", "hello\nworld\n");
+
+    let (r, records) = run_capturing(
+        &engine,
+        &format!("to-string \"hello\\nfriend\\n\" > '{path}'"),
+    );
+    assert_eq!(
+        r.exit,
+        0,
+        "stderr: {:?}",
+        String::from_utf8_lossy(&r.stderr)
+    );
+    let [change] = changes(&records).try_into().expect("one write, one change");
+    assert_eq!(
+        (change.path.as_str(), change.outcome),
+        (path.as_str(), WriteOutcome::Committed)
+    );
+    assert_eq!(unified(&change), [" hello", "-world", "+friend"]);
+}
+
+/// An append reads as the lines it added to what stood there.
+#[test]
+fn an_append_reads_as_the_lines_it_added() {
+    let engine = fresh();
+    let (_dir, path) = scratch_file("append", "b", "one\n");
+
+    let (r, records) = run_capturing(&engine, &format!("to-string \"two\\n\" >> '{path}'"));
+    assert_eq!(
+        r.exit,
+        0,
+        "stderr: {:?}",
+        String::from_utf8_lossy(&r.stderr)
+    );
+    let [change] = changes(&records)
+        .try_into()
+        .expect("one append, one change");
+    assert_eq!(unified(&change), [" one", "+two"]);
+}
+
+/// A file too large to read whole has no before-image, so a write over it
+/// shows no diff rather than pass for a creation.
+#[test]
+fn a_write_over_a_file_too_large_to_read_shows_no_diff() {
+    let engine = fresh();
+    let (_dir, path) = scratch_file("write-big", "b", &"x".repeat(70_000));
+
+    let (r, records) = run_capturing(&engine, &format!("to-string 'short' > '{path}'"));
+    assert_eq!(
+        r.exit,
+        0,
+        "stderr: {:?}",
+        String::from_utf8_lossy(&r.stderr)
+    );
+    let [change] = changes(&records).try_into().expect("one write, one change");
+    assert_eq!(change.outcome, WriteOutcome::Committed);
+    assert!(change.diff.is_none());
+}
+
+/// The EXEC door end to end: a bare external raises exactly one `Command`
+/// observation, carrying the resolved argv and exit status.
+#[cfg(unix)]
+#[test]
+fn bare_external_surfaces_one_exec_card() {
+    use ral_core::types::{AuditIo, CommandOrigin};
+    let engine = fresh();
+
+    let (r, records) = run_capturing(&engine, "/usr/bin/true");
+    assert_eq!(
+        r.exit,
+        0,
+        "/usr/bin/true must exit zero; stderr was {:?}",
+        String::from_utf8_lossy(&r.stderr)
+    );
+
+    let obs = observations(&records);
+    assert_eq!(
+        obs.len(),
+        1,
+        "a bare external raises exactly one observation, got {obs:?}"
+    );
+    assert_eq!(
+        obs[0],
+        Observed::command(
+            "/usr/bin/true",
+            [],
+            0,
+            CommandOrigin::External,
+            AuditIo::default(),
+            None
+        ),
+        "the one observation is a successful exec of the image"
+    );
+}
+
+/// `view-text` reads its path in Rust, below the ral line, so like
+/// `grep-files` and `edit-hash` it surfaces its own single READ card and no
+/// exec card at all.
+#[cfg(unix)]
+#[test]
+fn view_is_a_helper_not_an_exec_image() {
+    let engine = fresh();
+    let (_dir, path) = scratch_file("cov-view", "a", "alpha\nbeta\ngamma\n");
+
+    let (r, records) = run_capturing(&engine, &format!("view-text '{path}' 1 2"));
+    assert_eq!(
+        r.exit,
+        0,
+        "view-text must read the fixture; stderr was {:?}",
+        String::from_utf8_lossy(&r.stderr)
+    );
+
+    let obs = observations(&records);
+    let reads = obs
+        .iter()
+        .filter(|e| matches!(e, Observed::Read(_)))
+        .count();
+    let execs = obs
+        .iter()
+        .filter(|e| matches!(e, Observed::Command(_)))
+        .count();
+    assert_eq!(reads, 1, "view-text surfaces one read card for its file");
+    assert_eq!(
+        execs, 0,
+        "view-text is a host builtin, not an external image: no exec card, got {obs:?}"
+    );
+}
+
+/// `cat < a` is two operations: the redirect's READ, then the EXEC over
+/// that stdin.  The read comes first because the door announces eagerly on
+/// install, before the body it feeds runs.
+#[cfg(unix)]
+#[test]
+fn cat_redirect_surfaces_read_then_exec_in_order() {
+    use ral_core::types::{AuditIo, CommandOrigin};
+    let engine = fresh();
+    let (_dir, path) = scratch_file("cov-cat", "a", "one\ntwo\n");
+
+    let (r, records) = run_capturing(&engine, &format!("/bin/cat < '{path}'"));
+    assert_eq!(
+        r.exit,
+        0,
+        "cat must read the fixture; stderr was {:?}",
+        String::from_utf8_lossy(&r.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&r.stdout),
+        "one\ntwo\n",
+        "cat echoes the redirected stdin"
+    );
+
+    let obs = observations(&records);
+    assert_eq!(
+        obs.len(),
+        2,
+        "cat < a is two logical operations (one read, one exec); got {obs:?}"
+    );
+    assert_eq!(
+        obs[0],
+        Observed::Read(Read { path }),
+        "the read installs first, before the body runs"
+    );
+    assert_eq!(
+        obs[1],
+        Observed::command(
+            "/bin/cat",
+            [],
+            0,
+            CommandOrigin::External,
+            AuditIo::default(),
+            None
+        ),
+        "then cat execs over that stdin"
+    );
+}
+
+/// Code loading is not turn-time data I/O: `use` reads through `std::fs`
+/// below the redirect frame, so it raises no io card.  Only the loaded
+/// file's own effects would surface, and this one is pure bindings.
+#[test]
+fn using_a_ral_file_raises_no_io_card() {
+    let engine = fresh();
+    let (_dir, path) = scratch_file("cov-use", "lib.ral", "let answer = 42\n");
+
+    let (ur, use_records) = run_capturing(&engine, &format!("use '{path}'"));
+    assert_eq!(
+        ur.exit,
+        0,
+        "use must load the file; stderr was {:?}",
+        String::from_utf8_lossy(&ur.stderr)
+    );
+    assert!(
+        observations(&use_records).is_empty(),
+        "use is code loading too: no io card, got {:?}",
+        observations(&use_records)
+    );
+}
+
+// ── `user_json` ──────────────────────────────────────────────────────
+//
+// The reply projection's policy table, one case per `FOValue` variant.
+
+#[test]
+fn user_json_unit_is_null() {
+    assert_eq!(super::user_json(&FOValue::Unit), serde_json::Value::Null);
+}
+
+#[test]
+fn user_json_bool_and_int_are_scalars() {
+    assert_eq!(
+        super::user_json(&FOValue::Bool { value: true }),
+        serde_json::json!(true)
+    );
+    assert_eq!(
+        super::user_json(&FOValue::Int { value: -7 }),
+        serde_json::json!(-7)
+    );
+}
+
+#[test]
+fn user_json_finite_float_is_a_json_number() {
+    assert_eq!(
+        super::user_json(&FOValue::Float {
+            value: ral_core::first_order::Finite::new(1.5).expect("finite")
+        }),
+        serde_json::json!(1.5)
+    );
+}
+
+#[test]
+fn user_json_string_passes_through_raw() {
+    assert_eq!(
+        super::user_json(&FOValue::String { value: "hi".into() }),
+        serde_json::json!("hi")
+    );
+}
+
+#[test]
+fn user_json_bytes_become_a_base64_string() {
+    let encoded = base64::engine::general_purpose::STANDARD.encode(b"hi");
+    assert_eq!(
+        super::user_json(&FOValue::Bytes {
+            value: b"hi".to_vec()
+        }),
+        serde_json::Value::String(encoded)
+    );
+}
+
+#[test]
+fn user_json_list_becomes_an_array() {
+    let v = FOValue::List {
+        items: vec![FOValue::Int { value: 1 }, FOValue::Int { value: 2 }],
+    };
+    assert_eq!(super::user_json(&v), serde_json::json!([1, 2]));
+}
+
+#[test]
+fn user_json_map_becomes_an_object() {
+    let v = FOValue::Map {
+        entries: vec![("a".into(), FOValue::Int { value: 1 })],
+    };
+    assert_eq!(super::user_json(&v), serde_json::json!({"a": 1}));
+}
+
+#[test]
+fn user_json_variant_with_payload_becomes_a_label_keyed_object() {
+    let v = FOValue::Variant {
+        label: "some".into(),
+        payload: Some(Box::new(FOValue::Int { value: 3 })),
+    };
+    assert_eq!(super::user_json(&v), serde_json::json!({"some": 3}));
+}
+
+#[test]
+fn user_json_payload_less_variant_becomes_the_bare_label_string() {
+    let v = FOValue::Variant {
+        label: "none".into(),
+        payload: None,
+    };
+    assert_eq!(super::user_json(&v), serde_json::json!("none"));
+}

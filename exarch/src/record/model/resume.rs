@@ -4,7 +4,7 @@
 
 use super::Context;
 use crate::record::log::Log;
-use crate::record::{Forensic, Record, Recorded};
+use crate::record::{AgentId, Forensic, Record, Recorded};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -115,17 +115,17 @@ pub fn resume(path: &Path) -> io::Result<(Context, String, String)> {
         if identity.is_none() {
             identity = Some(match record.value() {
                 Record::Forensic(Forensic::SessionStarted {
-                    session_id: 0,
+                    session_id,
                     parent: None,
                     model,
                     label,
                     ..
-                }) => (model.clone(), label.clone()),
+                }) if *session_id == AgentId::new(0) => (model.clone(), label.clone()),
                 Record::Forensic(Forensic::SessionStarted {
                     session_id, parent, ..
                 }) => {
                     return Err(io::Error::other(format!(
-                        "cannot resume {}: the first record starts session {session_id:?} with parent {parent:?}; expected SessionStarted {{ session_id: 0, parent: None }}; is this a child log?",
+                        "cannot resume {}: the first record starts session {session_id} with parent {parent:?}; expected SessionStarted {{ session_id: 0, parent: None }}; is this a child log?",
                         path.display()
                     )));
                 }

@@ -216,7 +216,7 @@ fn apply_model_switch(tui: &mut Tui, ctx: &CommandCtx<'_>, pick: &Pick) {
     let context_window = built.context_window();
     provider.swap(built);
     tui.app.update_live_model(&provider.current(), &available);
-    let state_dir = crate::bootstrap::EXARCH.project_dir(ctx.info.cwd);
+    let state_dir = crate::app::EXARCH.project_dir(ctx.info.cwd);
     if let Err(e) = state::save(&state_dir, &saved) {
         tui.app
             .push_error(focused, &format!("could not persist selection: {e}"));

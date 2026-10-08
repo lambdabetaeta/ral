@@ -42,7 +42,6 @@ use std::path::Path;
 use std::time::Duration;
 
 pub(super) use app::App;
-pub use banner::SessionInfo;
 pub use model_picker::choose;
 pub use picker::Pick;
 pub use terminal::TerminalGuard;

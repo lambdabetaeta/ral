@@ -9,7 +9,7 @@
 //! grant is a fact about files, and the assertions here are worth only as much
 //! as the loader they went through.
 
-use exarch::bootstrap::{EXARCH, SYNOD, Scratch};
+use exarch::app::{EXARCH, SYNOD, Scratch};
 use exarch::policy::for_invocation;
 use exarch::prompt::{SCRATCH_PLACEHOLDER, host_section};
 use ral_core::capability::FsOp;

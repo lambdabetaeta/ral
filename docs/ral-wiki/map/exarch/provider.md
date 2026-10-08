@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 3c8afbc3
-generated_at_date: 2026-10-06
+generated_at_commit: 6c9047b6
+generated_at_date: 2026-10-08
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs]
 ---
 
@@ -12,11 +12,13 @@ history; the provider only sends bytes and parses replies. Invariants are
 local below the facade: `provider/identity.rs` owns selectable identity,
 `request.rs` per-request `ChatOptions` and tuning (`Tuning`, the
 `EFFORT_LADDER` rungs — the TUI keeps only the glyphs), `wire.rs` the one door
-that turns a `Transcript` into an owned `genai::ChatRequest` (below),
+that turns the transcript's `ChatMessage`s into an owned `genai::ChatRequest` (below),
 `transport.rs` credential binding and caching, `stream.rs` completion
 execution, `retry.rs` recovery timing, `usage.rs` accounting,
-`error.rs` fault classification, and `listing.rs` model-list fetch
-orchestration. The public facade
+`error.rs` fault classification, `listing.rs` model-list fetch
+orchestration, `tools.rs` the tools a request may advertise (`ToolSpec`,
+`Toolset`, wire definitions only; dispatch is `agent::tools`'), and `state.rs`
+the persisted selection. The public facade
 re-exports their established types; sibling modules meet through narrow
 methods on `Engine` and `Transport`, not visible fields.
 
@@ -205,7 +207,7 @@ for [[map/synod|synod]]'s sake — **exarch calls none of it**:
   not there. A blank or control-bearing entry reads as *no key*, the rule
   `credential.rs` already applies to a key read from the environment.
 - `provider::credential_files` — every file on the computer holding one of our
-  credentials: each app in `bootstrap::APPS` contributing its keychain
+  credentials: each app in `app::APPS` contributing its keychain
   fallback path plus `oauth::token_path`. `policy::for_invocation` denies all
   of them to every grant that attenuates the filesystem at all, since the
   base profiles read `xdg:config`/`xdg:state` wholesale and would otherwise
@@ -337,10 +339,18 @@ disk-caches both paths:
   (the `/model` overlay and synod's window alike): the `FetchState` vocabulary,
   a keyed background-fetch pump (`Fetches`), and the per-provider `Listing`
   that seeds from the catalog's cache and fills misses in as they land.
+- `state.rs` remembers the *pair alone* — provider and model — as the
+  project's `state.json`, so tuning and route are never replayed: a remembered
+  effort or route can be one the new model rejects, and the flags and the
+  picker set the rest. `opening(flags, saved, available, listing)` decides what
+  a launch opens on (`Opening::Named` from the flags, `Restored` from the saved
+  pair, else `Choose` — the picker); a refused restore opens the picker instead
+  of ending the launch.
 
 ## The streaming path
 
-- `complete(system, transcript, tools, search, on_delta, cancel)` —
+- `complete(request, on_delta, cancel)`, a `Request { system, transcript,
+  tools, search }` —
   streams one assistant reply, calling `on_delta` with a `Delta::Say` per text
   chunk and a `Delta::Think` per reasoning chunk, and projects the `StreamEnd`
   into a `StepOut` (assistant message, tool calls, `Usage`, `StopReason`). One
@@ -459,9 +469,9 @@ panic (X8).
 `provider/wire.rs` is the one place an owned `genai::ChatRequest` is built —
 [[decisions/260827_the-transcript-is-a-value|the-transcript-is-a-value]] is the
 ADR, [[internals/session-record|session-record]] covers the persistent
-`Transcript` value it consumes. `Sealed(ChatRequest)` wraps the result and is
+`render_messages` projection it consumes. `Sealed(ChatRequest)` wraps the result and is
 deliberately not `Clone`, so a built request cannot be kept alive and cloned
-for a later retry; `manufacture(adapter, system, transcript: &Transcript,
+for a later retry; `manufacture(adapter, system, transcript: &[ChatMessage],
 tools)` is called fresh inside each retry attempt in `stream.rs`'s
 `Engine::complete`, and is the only place a request is built.
 
@@ -475,9 +485,8 @@ the ChatGPT and Codex Responses endpoints reject outright (rust-genai #273),
 so every other adapter carries its system prompt in the request's own
 `system` field — where the Responses adapter's `instructions` string wants it
 anyway — and leans on the per-process `prompt_cache_key` alone, which genai
-reads as intent for the free implicit cache. `tool_defs(adapter, tools,
-search)`, also in `wire.rs`, builds the request's tool array: the agent's
-[[map/exarch/tools|`Toolset`]] on the wire, plus the provider's own hosted web-search tool
+reads as intent for the free implicit cache. `tool_defs(adapter, request)`, also in `wire.rs`, builds the request's tool array: the agent's
+[[map/exarch/tools|`Toolset`]] (`provider/tools.rs`) on the wire, plus the provider's own hosted web-search tool
 under `search` — carried only on the three adapters genai maps it for
 (`OpenAIResp`, `Anthropic`, `Gemini`), and `OpenAIResp` alone adds the
 `external_web_access` config that switches codex from its cached index to the

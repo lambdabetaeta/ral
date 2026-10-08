@@ -6,7 +6,6 @@
 
 mod meters;
 
-use crate::bus::card::{Card, Field, FieldVal, Mark, Readout, Span};
 use crate::clock::{self, hms};
 use crate::provider::Rations;
 use crate::provider::credential::Roster;
@@ -91,14 +90,8 @@ impl Allowance {
         }
     }
 
-    /// This allowance as one aligned row.
-    pub fn field(&self) -> Field {
-        self.field_at(Timestamp::now())
-    }
-
-    /// [`field`](Self::field) with `now` supplied rather than read from the
-    /// clock, so the label's reset clause is exactly testable.
-    fn field_at(&self, now: Timestamp) -> Field {
+    /// The window and, while it is still ahead, its reset, as the row's label.
+    pub fn label_at(&self, now: Timestamp) -> String {
         let window_part = self
             .window
             .map_or_else(|| "balance".to_string(), window_words);
@@ -106,23 +99,24 @@ impl Allowance {
             .resets_at
             .filter(|&r| r > now)
             .map(|r| format!("resets in {}", hms(clock::until(r, now).as_secs())));
-        let label = match reset_part {
+        match reset_part {
             Some(rp) => format!("{window_part} · {rp}"),
             None => window_part,
-        };
-        let value = if let Some(value) = self.percent() {
-            FieldVal::Readout(Readout {
-                value,
-                max: Some(100),
-                unit: Some("%".into()),
-            })
-        } else {
-            let Consumption::Counted { used, limit, unit } = &self.used else {
-                unreachable!("percent() is None only for Consumption::Counted")
-            };
-            FieldVal::Inline(vec![Span::plain(inline_text(*used, *limit, *unit))])
-        };
-        Field { label, value }
+        }
+    }
+
+    pub fn label(&self) -> String {
+        self.label_at(Timestamp::now())
+    }
+
+    /// The figure as plain text: the counted form, or the percentage.
+    pub fn figure_text(&self) -> String {
+        match &self.used {
+            Consumption::Counted { used, limit, unit } if self.percent().is_none() => {
+                inline_text(*used, *limit, *unit)
+            }
+            _ => format!("{}%", self.percent().unwrap_or_default()),
+        }
     }
 }
 
@@ -175,52 +169,6 @@ pub enum Reading {
     Failed(String),
 }
 
-/// One section per account — its label as the heading — over its rows.
-///
-/// Unmetered accounts draw no section; when every account is one, the card
-/// names them in a sentence rather than reading as a claim of no limit.
-pub fn limits_card(readings: &[(String, Reading)]) -> Card {
-    if readings
-        .iter()
-        .all(|(_, r)| matches!(r, Reading::Unmetered))
-    {
-        let names = readings
-            .iter()
-            .map(|(label, _)| label.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let sentence = if readings.is_empty() {
-            "there are no accounts to check for a ration".to_string()
-        } else {
-            format!(
-                "none of {names} publishes a ration: /limits reports subscriptions and credit balances"
-            )
-        };
-        return Card(vec![Mark::Text {
-            spans: vec![Span::plain(sentence)],
-        }]);
-    }
-    let mut marks = Vec::new();
-    for (label, reading) in readings {
-        let mark = match reading {
-            Reading::Allowances(allowances) => {
-                let mut sorted: Vec<&Allowance> = allowances.iter().collect();
-                sorted.sort_by_key(|a| (a.window.is_none(), a.window));
-                Mark::Fields {
-                    rows: sorted.iter().map(|a| a.field()).collect(),
-                }
-            }
-            Reading::Unmetered => continue,
-            Reading::Failed(reason) => Mark::Text {
-                spans: vec![Span::plain(format!("{label}: {reason}"))],
-            },
-        };
-        marks.push(Mark::heading(label));
-        marks.push(mark);
-    }
-    Card(marks)
-}
-
 /// What an account's service will say about its own ration. The one seam the
 /// network sits behind, so a survey is testable without it. `Clone` is cheap:
 /// a survey hands a copy to each background thread.
@@ -270,7 +218,7 @@ impl MeterSource for LiveMeters {
 pub struct Survey {
     fetches: Fetches<AccountId, Vec<Allowance>>,
     /// Computed at [`Self::open`], on the caller's thread, from the full
-    /// account set — [`identity::label`] needs the set, and the set must not
+    /// account set — [`label`](crate::provider::identity::label) needs the set, and the set must not
     /// cross to a background thread piecemeal.
     labels: Vec<(AccountId, String)>,
     rations: Arc<Rations>,
@@ -296,14 +244,14 @@ impl Survey {
     }
 
     /// Block until every fetch has reported, land each reading in the record,
-    /// then compose the card. Called on the survey thread, never the UI thread.
-    pub fn settle(self) -> Card {
+    /// then hand back the readings in roster order. Called on the survey
+    /// thread, never the UI thread.
+    pub fn settle(self) -> Vec<(String, Reading)> {
         let mut results: BTreeMap<AccountId, Result<Vec<Allowance>, String>> =
             self.fetches.settle().into_iter().collect();
         // Sorted back into the roster's order — the fetches' arrival order is
         // not a fact anyone should read anything into.
-        let readings: Vec<(String, Reading)> = self
-            .labels
+        self.labels
             .into_iter()
             .map(|(id, label)| {
                 let reading = match results.remove(&id) {
@@ -320,8 +268,7 @@ impl Survey {
                 };
                 (label, reading)
             })
-            .collect();
-        limits_card(&readings)
+            .collect()
     }
 }
 
@@ -357,37 +304,31 @@ mod tests {
     }
 
     #[test]
-    fn field_percent_never_rounds_a_nonzero_fraction_to_zero() {
+    fn percent_never_rounds_a_nonzero_fraction_to_zero() {
         let barely_started = Allowance {
             window: None,
             used: Consumption::Fraction(0.004),
             resets_at: None,
         };
-        let FieldVal::Readout(r) = barely_started.field_at(Timestamp::UNIX_EPOCH).value else {
-            panic!("a disclosed fraction renders as a readout");
-        };
-        assert_eq!(r.value, 1);
+        assert_eq!(barely_started.percent(), Some(1));
 
         let untouched = Allowance {
             window: None,
             used: Consumption::Fraction(0.0),
             resets_at: None,
         };
-        let FieldVal::Readout(r) = untouched.field_at(Timestamp::UNIX_EPOCH).value else {
-            panic!("a disclosed fraction renders as a readout");
-        };
-        assert_eq!(r.value, 0);
+        assert_eq!(untouched.percent(), Some(0));
     }
 
     #[test]
-    fn field_label_states_window_and_reset() {
+    fn label_states_window_and_reset() {
         let now = Timestamp::from_second(1_000_000).unwrap();
         let five_hours = Allowance {
             window: Some(Duration::from_hours(5)),
             used: Consumption::Fraction(0.1),
             resets_at: Some(now + Duration::from_mins(62)),
         };
-        let label = five_hours.field_at(now).label;
+        let label = five_hours.label_at(now);
         assert!(label.contains("5 hours"));
         assert!(label.contains("resets in"));
 
@@ -396,14 +337,14 @@ mod tests {
             used: Consumption::Fraction(0.1),
             resets_at: None,
         };
-        assert_eq!(no_window.field_at(now).label, "balance");
+        assert_eq!(no_window.label_at(now), "balance");
 
         let already_past = Allowance {
             window: Some(Duration::from_hours(1)),
             used: Consumption::Fraction(0.1),
             resets_at: Some(now - Duration::from_secs(10)),
         };
-        let label = already_past.field_at(now).label;
+        let label = already_past.label_at(now);
         assert!(
             !label.contains("resets in"),
             "a past reset yields no clause"
@@ -412,56 +353,12 @@ mod tests {
     }
 
     #[test]
-    fn field_value_renders_raw_figures_with_and_without_a_cap() {
+    fn figure_text_renders_raw_figures_with_and_without_a_cap() {
         let capless = counted(1240, None, Unit::Dollars);
-        let FieldVal::Inline(spans) = capless.field_at(Timestamp::UNIX_EPOCH).value else {
-            panic!("an undisclosed cap renders inline");
-        };
-        assert_eq!(spans[0].text, "$12.40 used · no cap");
-    }
+        assert_eq!(capless.figure_text(), "$12.40 used · no cap");
 
-    #[test]
-    fn sort_orders_five_hour_before_weekly() {
-        let weekly = Allowance {
-            window: Some(Duration::from_hours(7 * 24)),
-            used: Consumption::Fraction(0.2),
-            resets_at: None,
-        };
-        let five_hour = Allowance {
-            window: Some(Duration::from_hours(5)),
-            used: Consumption::Fraction(0.5),
-            resets_at: None,
-        };
-        let card = limits_card(&[(
-            "anthropic".to_string(),
-            Reading::Allowances(vec![weekly, five_hour]),
-        )]);
-        let Mark::Fields { rows } = &card.0[1] else {
-            panic!("an allowances reading renders one fields mark");
-        };
-        assert!(rows[0].label.contains("5 hours"));
-        assert!(rows[1].label.contains("7 days"));
-    }
-
-    #[test]
-    fn all_unmetered_collapses_to_one_sentence_naming_the_accounts() {
-        let card = limits_card(&[
-            ("anthropic".to_string(), Reading::Unmetered),
-            ("openai".to_string(), Reading::Unmetered),
-            ("deepseek".to_string(), Reading::Unmetered),
-        ]);
-        assert_eq!(card.0.len(), 1);
-        let Mark::Text { spans } = &card.0[0] else {
-            panic!("the collapsed card is one text mark");
-        };
-        assert!(spans[0].text.contains("anthropic, openai, deepseek"));
-        assert!(spans[0].text.contains("publishes a ration"));
-    }
-
-    #[test]
-    fn empty_readings_say_something_sensible() {
-        let card = limits_card(&[]);
-        assert_eq!(card.0.len(), 1);
+        let capped = counted(30, Some(100), Unit::Requests);
+        assert_eq!(capped.figure_text(), "30%");
     }
 
     fn roster_of(accounts: &[Account]) -> Roster {
@@ -512,7 +409,7 @@ mod tests {
         };
 
         let rations = Arc::new(Rations::default());
-        let card = Survey::open(&roster, &source, Arc::clone(&rations)).settle();
+        let readings = Survey::open(&roster, &source, Arc::clone(&rations)).settle();
         assert_eq!(
             rations.reading(&loaded.id),
             vec![allowance.clone()],
@@ -520,38 +417,24 @@ mod tests {
         );
 
         assert_eq!(
-            card.0.len(),
-            4,
-            "a section mark plus a body mark for each account with something to \
-             report: the unmetered one draws nothing at all"
+            readings.len(),
+            3,
+            "one reading per account, in the roster's order"
         );
-        let Mark::Fields { rows } = &card.0[1] else {
-            panic!("the loaded account renders its allowances");
+        let (label, Reading::Allowances(rows)) = &readings[0] else {
+            panic!("the loaded account reads its allowances");
         };
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].label, allowance.field().label);
+        assert_eq!(label, &roster.label(&loaded));
+        assert_eq!(rows, &vec![allowance]);
 
-        let Mark::Text { spans } = &card.0[3] else {
-            panic!("the failing account renders its failure sentence");
+        let (label, reading) = &readings[1];
+        assert_eq!(label, &roster.label(&unmetered));
+        assert!(matches!(reading, Reading::Unmetered));
+
+        let (label, Reading::Failed(reason)) = &readings[2] else {
+            panic!("the failing account reads its failure");
         };
-        assert!(spans[0].text.contains("network is down"));
-        assert!(
-            spans[0].text.contains(&roster.label(&failing)),
-            "the failure sentence names the account by its label: {}",
-            spans[0].text
-        );
-
-        let named = card
-            .0
-            .iter()
-            .filter_map(|mark| match mark {
-                Mark::Text { spans } => Some(spans[0].text.clone()),
-                _ => None,
-            })
-            .collect::<String>();
-        assert!(
-            !named.contains(&roster.label(&unmetered)),
-            "an account with no ration to report is not mentioned: {named}"
-        );
+        assert_eq!(label, &roster.label(&failing));
+        assert_eq!(reason, "network is down");
     }
 }

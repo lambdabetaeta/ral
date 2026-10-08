@@ -28,7 +28,7 @@
 //! # A known race, accepted rather than hidden
 //!
 //! A hatched helper's provider is a *snapshot of the trunk's own live one*
-//! (`` agents `start ``'s wire arm, `exarch::fleet::desk`), taken the instant its
+//! (`` agents `start ``'s wire arm, `exarch::agent::desk`), taken the instant its
 //! wire is adopted — the same queue the trunk's own next turn also pulls
 //! from, and the helper's detached thread starts before the trunk's tool
 //! call has finished unwinding back to its own next turn. A scripted queue
@@ -49,12 +49,14 @@
     reason = "example binary: its `main` owns the process, so an `exit` unwinds nothing another owner needs"
 )]
 
-use exarch::agent::{RecordedAccount, RootConfig, SPAWN_FUEL};
-use exarch::bus::{AgentId, Sink};
+use exarch::agent::{RootConfig, SPAWN_FUEL};
+use exarch::bus::Sink;
 use exarch::egress::Egress;
 use exarch::headless::converse_settled;
 use exarch::provider::scripted::{Reply, Script};
 use exarch::provider::{Bureau, Provider, ToolCall};
+use exarch::record::AgentId;
+use exarch::record::RecordedAccount;
 use exarch::record::{Display, Record, Recorded, Transient};
 use ral_core::capability::GrantStack;
 use std::path::PathBuf;
@@ -151,7 +153,7 @@ fn main() {
             id: "test".to_string(),
         },
         trunk: exarch::agent::Trunk::Embedded,
-        tools: exarch::shell_eval::tools::Toolset::offered(false),
+        tools: exarch::provider::Toolset::offered(false),
         allow_schedule: false,
         resume_on_reset: false,
         disk_warn_bytes: None,
@@ -213,7 +215,7 @@ fn main() {
 
 /// One `ral` tool call: `fn_name` is always `"ral"`, `cmd` the ral source the
 /// engine evaluates — the shape every real provider integration sends, and
-/// the one `exarch::fleet::desk`'s own scripted-provider tests build by
+/// the one `exarch::agent::desk`'s own scripted-provider tests build by
 /// hand rather than exposing as a test-only helper across crates.
 fn ral_call(id: &str, cmd: &str) -> ToolCall {
     ToolCall {

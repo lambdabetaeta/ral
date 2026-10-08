@@ -17,36 +17,42 @@
     reason = "exarch is an application, not the ral shell; the clippy.toml invariants target ral-core's Shell path/cwd/fs discipline"
 )]
 pub mod agent;
-pub mod bootstrap;
+pub mod app;
+pub mod boot;
 pub mod bus;
+pub mod cancel;
+pub mod card;
 pub mod cli;
 pub mod clock;
 pub mod config;
 pub mod egress;
-pub mod fleet;
+pub mod enquiry;
 pub mod headless;
 pub(crate) mod latch;
+pub mod library;
 pub mod net_policy;
 pub mod policy;
 pub mod prompt;
 pub mod provider;
 pub mod record;
+pub mod schedule;
 pub mod shell_eval;
 pub(crate) mod signals;
+pub mod skill;
 pub mod tui;
 
 use agent::Avatar;
 use clap::Parser;
+use provider::state::{Opening, Pair, opening};
 use provider::{Bureau, Engine, Holdings};
 use std::sync::Arc;
-use tui::SessionInfo;
 
 /// The one boot recipe table, for the identity seat and the `--engine` child
 /// alike.
 pub static INSTALLERS: [ral_core::engine::EngineInstaller; 1] =
     [ral_core::engine::EngineInstaller {
         tag: shell_eval::builtins::INSTALLER_TAG,
-        boot: bootstrap::engine_boot_shell,
+        boot: boot::engine_boot_shell,
         narrow: policy::base_layer,
     }];
 
@@ -96,6 +102,18 @@ macro_rules! pre_main_ctor {
 #[cfg(test)]
 pre_main_ctor!();
 
+/// Metadata shown in the startup banner.
+pub struct SessionInfo<'a> {
+    pub system_size: usize,
+    pub system_files: &'a [std::path::PathBuf],
+    pub base: &'a str,
+    pub extend_base: Option<&'a std::path::Path>,
+    pub restrict_files: &'a [std::path::PathBuf],
+    pub cwd: &'a str,
+    /// What a `--resume` picked up, `None` for a fresh session.
+    pub resumed: Option<crate::record::Resumed>,
+}
+
 /// The binary's entry point, lifted into the library so integration tests can
 /// link the whole crate.
 ///
@@ -136,7 +154,7 @@ pub fn run() -> Result<(), String> {
     let custom = config::load()?;
     let disk_warn_bytes = config::disk_warn_bytes()?;
     // Opened once at the trunk; every spawned child inherits this ledger.
-    let egress = egress::Egress::open(bootstrap::EXARCH)?;
+    let egress = egress::Egress::open(app::EXARCH)?;
 
     // SAFETY: startup is still single-threaded — the tokio runtime and the
     // session's workers come later — so nothing races this env mutation.  It is
@@ -155,9 +173,9 @@ pub fn run() -> Result<(), String> {
         .map_err(|e| format!("launch cwd: {e}"))?
         .to_string_lossy()
         .into_owned();
-    let state_dir = bootstrap::EXARCH.project_dir(&cwd);
+    let state_dir = app::EXARCH.project_dir(&cwd);
 
-    let holdings = Holdings::new(store, bootstrap::EXARCH);
+    let holdings = Holdings::new(store, app::EXARCH);
     let saved = provider::state::load(&state_dir);
     let mut tuning = provider::Tuning::initial();
     if let Some(rung) = c.effort.as_deref() {
@@ -173,14 +191,13 @@ pub fn run() -> Result<(), String> {
 
     let (caps, restrict_files) =
         policy::for_invocation(&cwd, &c.base, c.extend_base.as_deref(), &c.restrict)?;
-    let scratch = Arc::new(
-        bootstrap::Scratch::new(bootstrap::EXARCH).map_err(|e| format!("scratch dir: {e}"))?,
-    );
+    let scratch =
+        Arc::new(app::Scratch::new(app::EXARCH).map_err(|e| format!("scratch dir: {e}"))?);
     let (_mode, terminal, _warn) = ral_core::terminal::TerminalState::probe_from_env();
-    bootstrap::face_process_signals(&terminal);
+    boot::face_process_signals(&terminal);
     // Held for the whole run: the lock is the launcher's, not the node's.
     let (run_dir, _run_lock, resumes) = resolve_run(&cwd, c.resume)?;
-    let config_dir = bootstrap::EXARCH.xdg_dir(ral_core::host::XdgKind::Config);
+    let config_dir = app::EXARCH.xdg_dir(ral_core::host::XdgKind::Config);
     let cwd_path = std::path::PathBuf::from(&cwd);
     // Chat registers no tools, so there is nothing for a system prompt to say.
     let system = if c.chat {
@@ -189,7 +206,7 @@ pub fn run() -> Result<(), String> {
         prompt::assemble(
             &c.system_files,
             &caps,
-            bootstrap::EXARCH,
+            app::EXARCH,
             &cwd_path,
             &config_dir,
             !headless,
@@ -217,7 +234,7 @@ pub fn run() -> Result<(), String> {
         system,
         caps,
         run_dir: run_dir.clone(),
-        account: agent::RecordedAccount::of(provider.account(), &available),
+        account: record::RecordedAccount::of(provider.account(), &available),
         // An attended trunk parks for the human; a headless one terminates
         // once its seeded work is idle.
         trunk: if headless {
@@ -226,9 +243,9 @@ pub fn run() -> Result<(), String> {
             agent::Trunk::Attended
         },
         tools: if c.chat {
-            shell_eval::tools::Toolset::default()
+            provider::Toolset::default()
         } else {
-            shell_eval::tools::Toolset::offered(c.thinking_tool)
+            provider::Toolset::offered(c.thinking_tool)
         },
         allow_schedule: c.allow_schedule,
         resume_on_reset: !headless,
@@ -280,12 +297,12 @@ pub fn run() -> Result<(), String> {
 fn resolve_run(
     cwd: &str,
     resume: Option<Option<std::path::PathBuf>>,
-) -> Result<(std::path::PathBuf, bootstrap::RunLock, bool), String> {
+) -> Result<(std::path::PathBuf, app::RunLock, bool), String> {
     if let Some(target) = resume {
         let explicit = target.is_some();
         let candidates = match target {
-            Some(target) => vec![bootstrap::normalize_resume_target(&target)?],
-            None => bootstrap::EXARCH
+            Some(target) => vec![app::normalize_resume_target(&target)?],
+            None => app::EXARCH
                 .resume_candidates(cwd)
                 .map_err(|error| format!("could not inspect resumable runs: {error}"))?,
         };
@@ -301,7 +318,7 @@ fn resolve_run(
                 }
                 continue;
             }
-            match bootstrap::RunLock::try_acquire(&run_dir) {
+            match app::RunLock::try_acquire(&run_dir) {
                 Ok(lock) => return Ok((run_dir, lock, true)),
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     if explicit {
@@ -322,80 +339,16 @@ fn resolve_run(
         }
         return Err(format!(
             "--resume found no unlocked run with sessions/0/record.jsonl under {}",
-            bootstrap::EXARCH.project_dir(cwd).display()
+            app::EXARCH.project_dir(cwd).display()
         ));
     }
 
-    let run_dir = bootstrap::EXARCH
+    let run_dir = app::EXARCH
         .log_run_dir(cwd)
         .map_err(|error| format!("log dir: {error}"))?;
-    let lock = bootstrap::RunLock::try_acquire(&run_dir)
+    let lock = app::RunLock::try_acquire(&run_dir)
         .map_err(|error| format!("could not lock {}: {error}", run_dir.display()))?;
     Ok((run_dir, lock, false))
-}
-
-/// An account and one of its models.
-struct Pair {
-    account: provider::Account,
-    model: String,
-}
-
-/// What a launch opens on, before the bureau weighs it.
-enum Opening {
-    /// The pair the flags named; its refusal ends the launch.
-    Named(Pair),
-    /// The pair remembered for this project; its refusal opens the picker over
-    /// these accounts instead.
-    Restored(Pair, Vec<provider::Account>),
-    /// No pair to try: the picker over these accounts, saying why when that
-    /// is news.
-    Choose(Vec<provider::Account>, Option<String>),
-}
-
-/// What the flags and `saved`, the selection remembered for this project, ask
-/// a launch to open on.
-///
-/// `--model` names a pair outright, on `--provider`'s account or else the one
-/// whose listing names the model. `--provider` alone restores the model saved
-/// for that account, else asks for one. With neither, the saved pair is
-/// restored, else the user is asked.
-fn opening(
-    provider_flag: Option<&str>,
-    model_flag: Option<&str>,
-    saved: Option<&provider::state::State>,
-    available: &[provider::Account],
-    listing: impl FnMut(&provider::Account) -> Result<Vec<provider::models::Listed>, String>,
-) -> Result<Opening, String> {
-    let pair = |account: provider::Account, model: String| Pair { account, model };
-    let pinned = provider_flag
-        .map(|name| provider::models::resolve_pinned_provider(name, available))
-        .transpose()?;
-    Ok(match (pinned, model_flag) {
-        (Some(account), Some(model)) => Opening::Named(pair(account, model.to_string())),
-        (None, Some(model)) => Opening::Named(pair(
-            provider::models::resolve_model_provider(model, available, listing)?,
-            model.to_string(),
-        )),
-        (Some(account), None) => match saved.filter(|s| s.provider == account.id.as_str()) {
-            Some(s) => Opening::Restored(pair(account.clone(), s.model.clone()), vec![account]),
-            None => Opening::Choose(vec![account], None),
-        },
-        (None, None) => match saved {
-            None => Opening::Choose(available.to_vec(), None),
-            Some(s) => match s.account(available) {
-                Some(account) => {
-                    Opening::Restored(pair(account, s.model.clone()), available.to_vec())
-                }
-                None => Opening::Choose(
-                    available.to_vec(),
-                    Some(format!(
-                        "could not restore the saved model: '{}' is no longer available",
-                        s.provider_name
-                    )),
-                ),
-            },
-        },
-    })
 }
 
 /// The provider a launch opens with: `opening` built, or — when it names no
@@ -413,8 +366,7 @@ fn open(
     bureau: &Bureau,
     max_tokens: Option<u32>,
 ) -> Result<(Arc<provider::Provider>, Option<tui::TerminalGuard>), String> {
-    let build =
-        |pair: Pair| bureau.build(&pair.account, pair.model, tuning, None, max_tokens);
+    let build = |pair: Pair| bureau.build(&pair.account, pair.model, tuning, None, max_tokens);
     let choose = |among, why: Option<String>| {
         let Some(run_dir) = attended else {
             return Err(format!(
@@ -443,89 +395,5 @@ fn open(
             ),
         },
         Opening::Choose(among, why) => choose(among, why),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use provider::Account;
-    use provider::models::Listed;
-    use provider::state::State;
-
-    fn saved(account: &Account, model: &str) -> State {
-        State::new(account, std::slice::from_ref(account), model)
-    }
-
-    fn lists(models: &[&str]) -> impl FnMut(&Account) -> Result<Vec<Listed>, String> {
-        let listed: Vec<Listed> = models.iter().map(|m| Listed::bare(*m)).collect();
-        move |_| Ok(listed.clone())
-    }
-
-    #[test]
-    fn provider_alone_restores_that_accounts_saved_model() {
-        let anthropic = Account::built_in("anthropic");
-        let state = saved(&anthropic, "model-a");
-        let available = [anthropic.clone(), Account::built_in("deepseek")];
-        match opening(
-            Some("anthropic"),
-            None,
-            Some(&state),
-            &available,
-            lists(&[]),
-        ) {
-            Ok(Opening::Restored(pair, among)) => {
-                assert_eq!(
-                    (pair.account, pair.model.as_str()),
-                    (anthropic.clone(), "model-a")
-                );
-                assert_eq!(among, [anthropic]);
-            }
-            _ => panic!("the saved model is restored"),
-        }
-    }
-
-    #[test]
-    fn provider_alone_with_nothing_saved_for_it_asks_among_its_models() {
-        let anthropic = Account::built_in("anthropic");
-        let deepseek = Account::built_in("deepseek");
-        let state = saved(&deepseek, "model-a");
-        let available = [anthropic.clone(), deepseek];
-        match opening(
-            Some("anthropic"),
-            None,
-            Some(&state),
-            &available,
-            lists(&[]),
-        ) {
-            Ok(Opening::Choose(among, None)) => assert_eq!(among, [anthropic]),
-            _ => panic!("a choice among the named account's models"),
-        }
-    }
-
-    #[test]
-    fn a_vanished_saved_account_asks_and_says_why() {
-        let gone = Account::declared("gone");
-        let state = saved(&gone, "model-a");
-        let available = [Account::built_in("anthropic")];
-        match opening(None, None, Some(&state), &available, lists(&[])) {
-            Ok(Opening::Choose(among, Some(why))) => {
-                assert_eq!(among, available);
-                assert!(why.contains("'gone'"), "got: {why}");
-            }
-            _ => panic!("a choice, saying why"),
-        }
-    }
-
-    #[test]
-    fn nothing_saved_and_no_flags_asks_among_every_account() {
-        let available = [
-            Account::built_in("anthropic"),
-            Account::built_in("deepseek"),
-        ];
-        match opening(None, None, None, &available, lists(&[])) {
-            Ok(Opening::Choose(among, None)) => assert_eq!(among, available),
-            _ => panic!("a choice among every account"),
-        }
     }
 }

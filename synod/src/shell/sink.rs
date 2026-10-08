@@ -16,13 +16,14 @@
 //! so a new variant on either is a compile error here, not a silent drop.
 #![deny(clippy::wildcard_enum_match_arm)]
 
-use exarch::bus::card::{
+use exarch::bus::Sink;
+use exarch::card::{
     Card, Field, Hunk, Mark, Measure, Span, change_card, context_rows_card,
     observation_display_card,
 };
-use exarch::bus::{AgentId, Sink};
 use exarch::clock;
 use exarch::provider::{CutShort, ProviderError, Recovery};
+use exarch::record::AgentId;
 use exarch::record::{Display, Forensic, Protocol, Record, Recorded, Transient};
 use serde::Serialize;
 use ts_rs::TS;
@@ -650,9 +651,9 @@ impl Sink for TauriSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use exarch::bus::AgentState;
-    use exarch::bus::card::{Row, Seg};
-    use exarch::record::DoneOutcome;
+    use exarch::card::DoneOutcome;
+    use exarch::card::{Row, Seg};
+    use exarch::record::AgentState;
     use ral_core::fact::Worker;
     use ral_core::first_order::datum::Datum as _;
     use ral_core::types::{Observation, Observed};
@@ -779,7 +780,7 @@ mod tests {
     fn the_first_signal_seen_names_the_root_whatever_its_id() {
         let mut router = Router::default();
         let Some(SynodEvent::Token { text }) =
-            router.route_transient(7, &Transient::Token("hi".into()))
+            router.route_transient(AgentId::new(7), &Transient::Token("hi".into()))
         else {
             panic!("the first signal, from whatever id, is the root's own");
         };
@@ -789,16 +790,20 @@ mod tests {
     #[test]
     fn a_helpers_token_and_state_are_dropped_but_its_process_card_folds_in() {
         let mut router = Router::default();
-        router.route_transient(0, &Transient::Token("root warms up".into()));
+        router.route_transient(AgentId::new(0), &Transient::Token("root warms up".into()));
 
         assert!(
             router
-                .route_transient(1, &Transient::Token("a helper's prose".into()))
+                .route_transient(
+                    AgentId::new(1),
+                    &Transient::Token("a helper's prose".into())
+                )
                 .is_none()
         );
 
         let context = Record::Display(Display::Context { turns: Vec::new() });
-        let Some(SynodEvent::ProcessCard { marks }) = router.route_fact(1, &context) else {
+        let Some(SynodEvent::ProcessCard { marks }) = router.route_fact(AgentId::new(1), &context)
+        else {
             panic!("a helper's structural facts still fold into the dial");
         };
         assert!(
@@ -810,7 +815,7 @@ mod tests {
     #[test]
     fn a_helpers_usage_still_counts_toward_the_one_bill() {
         let mut router = Router::default();
-        router.route_transient(0, &Transient::State(AgentState::Ready));
+        router.route_transient(AgentId::new(0), &Transient::State(AgentState::Ready));
 
         let usage = exarch::provider::Usage {
             input: 7,
@@ -821,7 +826,8 @@ mod tests {
             unmetered: false,
         };
         let fact = Record::Forensic(Forensic::UsageDelta { usage });
-        let Some(SynodEvent::Usage { input, .. }) = router.route_fact(1, &fact) else {
+        let Some(SynodEvent::Usage { input, .. }) = router.route_fact(AgentId::new(1), &fact)
+        else {
             panic!("a helper's usage must still reach the window");
         };
         assert_eq!(input, 7);
@@ -830,23 +836,28 @@ mod tests {
     #[test]
     fn born_and_died_accumulate_into_one_live_helper_count() {
         let mut router = Router::default();
-        router.route_transient(0, &Transient::State(AgentState::Ready));
+        router.route_transient(AgentId::new(0), &Transient::State(AgentState::Ready));
 
         let born = |id: AgentId| Transient::Born {
-            agent: std::sync::Weak::new(),
             log_dir: PathBuf::new(),
             name: format!("helper-{id}"),
-            parent: Some(0),
+            parent: Some(AgentId::new(0)),
         };
-        let Some(SynodEvent::Helpers { live }) = router.route_transient(1, &born(1)) else {
+        let Some(SynodEvent::Helpers { live }) =
+            router.route_transient(AgentId::new(1), &born(AgentId::new(1)))
+        else {
             panic!("a Born must announce the live count");
         };
         assert_eq!(live, 1);
-        let Some(SynodEvent::Helpers { live }) = router.route_transient(2, &born(2)) else {
+        let Some(SynodEvent::Helpers { live }) =
+            router.route_transient(AgentId::new(2), &born(AgentId::new(2)))
+        else {
             panic!("a second Born must announce the live count");
         };
         assert_eq!(live, 2);
-        let Some(SynodEvent::Helpers { live }) = router.route_transient(1, &Transient::Died) else {
+        let Some(SynodEvent::Helpers { live }) =
+            router.route_transient(AgentId::new(1), &Transient::Died)
+        else {
             panic!("a Died must announce the live count");
         };
         assert_eq!(live, 1);
@@ -855,7 +866,7 @@ mod tests {
     #[test]
     fn subagent_done_becomes_a_named_helper_done_whatever_its_outcome() {
         let mut router = Router::default();
-        router.route_transient(0, &Transient::State(AgentState::Ready));
+        router.route_transient(AgentId::new(0), &Transient::State(AgentState::Ready));
 
         let done = |error: Option<String>| {
             Record::Display(Display::SubagentDone {
@@ -868,7 +879,7 @@ mod tests {
             name,
             ok,
             elapsed_secs,
-        }) = router.route_fact(0, &done(None))
+        }) = router.route_fact(AgentId::new(0), &done(None))
         else {
             panic!("expected a HelperDone event");
         };
@@ -877,7 +888,7 @@ mod tests {
         assert!((elapsed_secs - 2.0).abs() < f64::EPSILON);
 
         let Some(SynodEvent::HelperDone { ok, .. }) =
-            router.route_fact(0, &done(Some("boom".to_string())))
+            router.route_fact(AgentId::new(0), &done(Some("boom".to_string())))
         else {
             panic!("expected a HelperDone event");
         };
@@ -887,10 +898,10 @@ mod tests {
     #[test]
     fn a_seam_fault_reaches_the_window_as_an_error() {
         let mut router = Router::default();
-        router.route_transient(0, &Transient::State(AgentState::Ready));
+        router.route_transient(AgentId::new(0), &Transient::State(AgentState::Ready));
 
         let Some(SynodEvent::Error { message }) = router.route_transient(
-            0,
+            AgentId::new(0),
             &Transient::Fault {
                 text: "record.jsonl: permission denied".to_string(),
             },

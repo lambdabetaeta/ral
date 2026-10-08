@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 446e3123
-generated_at_date: 2026-09-21
-covers_paths: [synod/, vm-manager/, ral-daemon/, ral-initramfs/, vm-image/, core/src/protocol/channel.rs, core/src/carrier.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/fleet/desk.rs]
+generated_at_commit: 6c9047b6
+generated_at_date: 2026-10-08
+covers_paths: [synod/, vm-manager/, ral-daemon/, ral-initramfs/, vm-image/, core/src/protocol/channel.rs, core/src/carrier.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs]
 ---
 
 # Map: synod
@@ -189,7 +189,7 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
   the desktop's environment, and faces someone with no `.zshrc` to export
   from. So there are two sources in one order: the computer's credential
   manager (`exarch::provider::keychain`, entries named `(synod, account-id)`,
-  the app being `bootstrap::SYNOD` re-exported from the engine so the
+  the app being `app::SYNOD` re-exported from the engine so the
   credential deny and synod's own directories cannot drift apart)
   first, because it is the one a person can see and change from inside
   synod, and the environment underneath it — the same sweep and scrub as

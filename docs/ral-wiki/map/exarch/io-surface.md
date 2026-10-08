@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 446e3123
-generated_at_date: 2026-10-06
-covers_paths: [core/src/types/audit/observation.rs, core/src/types/audit/door.rs, core/src/evaluator/call.rs, core/src/runtime/command_call.rs, core/src/path/walk.rs, core/src/guard/shell.rs, core/src/runtime/redirect.rs, core/src/path/stage.rs, core/src/runtime/command/detach.rs, core/src/runtime/pipeline/collect.rs, core/src/runtime/redirect/scope.rs, core/src/runtime/command.rs, core/src/runtime/command/stdio.rs, core/src/types/shell/mod.rs, core/src/types/mooring.rs, exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/encode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/commit.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, clippy.toml, core/tests/syscall_sites.rs]
+generated_at_commit: 6c9047b6
+generated_at_date: 2026-10-08
+covers_paths: [core/src/types/audit/observation.rs, core/src/types/audit/door.rs, core/src/evaluator/call.rs, core/src/runtime/command_call.rs, core/src/path/walk.rs, core/src/guard/shell.rs, core/src/runtime/redirect.rs, core/src/path/stage.rs, core/src/runtime/command/detach.rs, core/src/runtime/pipeline/collect.rs, core/src/runtime/redirect/scope.rs, core/src/runtime/command.rs, core/src/runtime/command/stdio.rs, core/src/types/shell/mod.rs, core/src/types/mooring.rs, exarch/src/card.rs, exarch/src/card/diff.rs, exarch/src/card/value.rs, exarch/src/card/decode.rs, exarch/src/card/encode.rs, exarch/src/card/observation.rs, exarch/src/card/done.rs, exarch/src/card/testkit.rs, exarch/src/agent/desk.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/commit.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, clippy.toml, core/tests/syscall_sites.rs]
 ---
 
 # Map: exarch / io surface
@@ -36,7 +36,7 @@ stamps the call site and principal every door fetches. It judges nothing: the
 observation goes to the run's `Mooring::surface` (`types/mooring.rs`) and onto
 the open [[design/audit|audit trail]], each already inert when its consumer is
 absent. **Which observations matter is the host's call**, made once in
-`landing` (`bus/card/observation.rs`) and applied at `decode_surface` — so
+`landing` (`card/observation.rs`) and applied at `decode_surface` — so
 a builtin command and an allowed capability check are reported by core and
 dropped by exarch, never drawn and never journalled.
 
@@ -170,10 +170,10 @@ alone — no card built yet, since the decoder's own codomain carries the
 structured value and nothing a printer merely wants a copy of. The card is
 bound by `observation_card` only at draw time — from whichever printer's fold
 reads the recorded `Display::Observation` — never by the seam
-(`fleet/desk.rs`'s `absorb_surface`) that records it: the
+(`agent/desk.rs`'s `absorb_surface`) that records it: the
 observation crosses the seam as its raw wire form alone (`Datum::encode` of the `Observation`),
 and the card is rebuilt fresh wherever it is drawn. The other surface shapes
-(pin, notice, card, done) have their own arms; a value matching none drops,
+(edit, notice, card, done) have their own arms; a value matching none drops,
 the same graceful degradation as before.
 
 `observation_card` composes from the existing marks ([[map/exarch/cards|cards]]).

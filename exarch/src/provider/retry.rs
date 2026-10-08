@@ -3,7 +3,7 @@
 
 use super::tls::STREAM_IDLE_TIMEOUT;
 use super::{CancelSite, ProviderError, Refusal};
-use crate::agent::cancel;
+use crate::cancel;
 use crate::clock;
 use jiff::Timestamp;
 use std::time::Duration;

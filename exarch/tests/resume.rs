@@ -3,13 +3,14 @@
 //! Process-boundary resume coverage: a scripted child leaves a mid-exchange
 //! ledger, the parent terminates it, and a fresh root continues the session.
 
-use exarch::agent::{Avatar, RecordedAccount, RootConfig, RootSeat, Trunk, deliberate};
-use exarch::bootstrap::{EXARCH, Scratch};
+use exarch::agent::{Avatar, RootConfig, RootSeat, Trunk, deliberate};
+use exarch::app::{EXARCH, Scratch};
 use exarch::bus::{Emitter, channel};
 use exarch::provider::Provider;
+use exarch::provider::Toolset;
 use exarch::provider::scripted::{Reply, Script};
+use exarch::record::RecordedAccount;
 use exarch::record::{self, Blocks, Refusal, View};
-use exarch::shell_eval::tools::Toolset;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;

@@ -78,7 +78,7 @@ pub enum ProviderError {
         body: Option<Body>,
     },
     /// The turn was cut off short of the model finishing.  Raised by
-    /// [`crate::agent::Avatar::deliberate`] *after* it appends the partial
+    /// `Avatar::deliberate` *after* it appends the partial
     /// assistant message, so a re-prompt keeps that work as context.  Boxed:
     /// a stall's cause is a `ProviderError` in turn.
     Truncated { cause: Box<CutShort> },

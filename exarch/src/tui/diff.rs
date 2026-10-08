@@ -4,7 +4,7 @@
 use super::block::Detail;
 use super::line::{card_span, grain_run, hang, size_bar};
 use super::palette::{Col, LIME_HOT, RED_HOT, SLATE};
-use crate::bus::card::{self, Change, Diff, Hunk, Row as DiffRow, Seg};
+use crate::card::{self, Change, Diff, Hunk, Row as DiffRow, Seg};
 use ral_core::types::WriteOutcome;
 use ratatui::{
     style::{Color, Modifier, Style},
@@ -15,7 +15,7 @@ use ratatui::{
 /// not enough to bury the transcript under it.
 pub(super) const DIFF_PEEK_ROWS: usize = 10;
 
-/// A [`crate::bus::card::Mark::Diff`]'s body at `width`, graded by disclosure: `Tally` the header
+/// A [`crate::card::Mark::Diff`]'s body at `width`, graded by disclosure: `Tally` the header
 /// alone, `Summary` its first [`DIFF_PEEK_ROWS`] rows, `Full` every hunk.  No
 /// leading blank — the unframed card renderer owns the one blank that opens the
 /// block.  The densest object on screen: size in the header bar, grain in the

@@ -26,6 +26,7 @@ mod secret_file;
 pub mod state;
 mod stream;
 pub mod tls;
+pub mod tools;
 mod transport;
 mod usage;
 mod wire;
@@ -36,17 +37,17 @@ pub(crate) use error::{error_object, extract_url};
 pub use identity::{Account, AccountId, Auth, Billing, Meter, Service, ServiceName};
 pub use identity::{built_in, built_in_services, chatgpt_service, scripted_service};
 pub use rations::Rations;
+pub(crate) use request::Request;
 pub use request::{EFFORT_LADDER, Tuning, default_effort_label, effort_by_label, effort_label};
 pub use retry::Recovery;
 pub use stream::{Delta, StepOut};
+pub use tools::Toolset;
 pub use transport::Engine;
 pub use usage::{Usage, UsageParts, humanize_tokens};
 
-use crate::shell_eval::tools::Toolset;
-use genai::chat::ChatMessage;
 pub use genai::chat::{ReasoningEffort, StopReason, ToolCall};
 
-use crate::agent::cancel;
+use crate::cancel;
 use allowance::{Allowance, LiveMeters};
 use credential::CredentialStore;
 use models::{LiveSource, ModelCatalog};
@@ -64,11 +65,19 @@ use transport::Transport;
 /// a thing the agent may read back.  Environment-borne keys need no entry:
 /// [`credential`] sweeps them out of the process before any session runs.
 pub(crate) fn credential_files() -> Vec<std::path::PathBuf> {
-    crate::bootstrap::APPS
+    crate::app::APPS
         .iter()
         .map(|app| keychain::Keychain::for_app(*app).fallback_path())
         .chain(std::iter::once(oauth::token_path()))
         .collect()
+}
+
+/// The model and the knobs a selection fixes, apart from the account.
+pub(crate) struct Selection {
+    pub(crate) model: String,
+    pub(crate) max_tokens_override: Option<u32>,
+    pub(crate) tuning: Tuning,
+    pub(crate) route: Option<String>,
 }
 
 /// A session's chosen model, tuning, and routing, plus the backend its
@@ -76,10 +85,7 @@ pub(crate) fn credential_files() -> Vec<std::path::PathBuf> {
 pub struct Provider {
     backend: Backend,
     account: Account,
-    model: String,
-    max_tokens_override: Option<u32>,
-    tuning: Tuning,
-    route: Option<String>,
+    selection: Selection,
     /// Resolved once, when the bureau mints this selection.
     context_window: Option<u64>,
 }
@@ -107,19 +113,13 @@ impl Provider {
     pub(in crate::provider) fn build(
         backend: Backend,
         account: &Account,
-        model: String,
-        max_tokens_override: Option<u32>,
-        tuning: Tuning,
-        route: Option<String>,
+        selection: Selection,
         context_window: Option<u64>,
     ) -> Self {
         Self {
             backend,
             account: account.clone(),
-            model,
-            max_tokens_override,
-            tuning,
-            route,
+            selection,
             context_window,
         }
     }
@@ -129,27 +129,29 @@ impl Provider {
         Self::build(
             Backend::Scripted(script),
             &Account::of_service(scripted_service()),
-            model.to_string(),
-            None,
-            Tuning::default(),
-            None,
+            Selection {
+                model: model.to_string(),
+                max_tokens_override: None,
+                tuning: Tuning::default(),
+                route: None,
+            },
             None,
         )
     }
 
     /// The user-supplied output cap, or `None` for the adapter default.
     pub fn max_tokens_override(&self) -> Option<u32> {
-        self.max_tokens_override
+        self.selection.max_tokens_override
     }
 
     /// The request tuning bound to this selection.
     pub fn tuning(&self) -> &Tuning {
-        &self.tuning
+        &self.selection.tuning
     }
 
     /// The resolved model name.
     pub fn model(&self) -> &str {
-        &self.model
+        &self.selection.model
     }
 
     /// The account this selection authenticates as.
@@ -183,15 +185,10 @@ impl Provider {
 
     /// Stream one assistant turn; `on_delta` fires per chunk, prose and
     /// reasoning in arrival order. Raced against `cancel`, so an interrupt
-    /// need not wait on the next network chunk. `tools` is the agent's own
-    /// offer, `search` the provider's built-in web search.
-    #[allow(clippy::too_many_arguments)]
+    /// need not wait on the next network chunk.
     pub(crate) fn complete<F: FnMut(Delta<'_>)>(
         &self,
-        system: &str,
-        transcript: &[ChatMessage],
-        tools: Toolset,
-        search: bool,
+        request: Request<'_>,
         on_delta: &mut F,
         cancel: &cancel::Token,
     ) -> Result<StepOut, ProviderError> {
@@ -202,24 +199,19 @@ impl Provider {
                 meters,
                 rations,
             } => {
-                rations.admit(&self.account, &self.model, meters)?;
+                rations.admit(&self.account, self.model(), meters)?;
                 let outcome = engine.complete(
                     transport,
-                    &self.model,
-                    self.max_tokens_override,
-                    &self.tuning,
+                    &self.selection,
                     self.openrouter_route(),
-                    system,
-                    transcript,
-                    tools,
-                    search,
+                    request,
                     on_delta,
                     cancel,
                 );
-                rations.settle(&self.account.id, &self.model, &outcome);
+                rations.settle(&self.account.id, self.model(), &outcome);
                 outcome
             }
-            Backend::Scripted(script) => script.complete(&self.model, on_delta),
+            Backend::Scripted(script) => script.complete(self.model(), on_delta),
         }
     }
 
@@ -227,7 +219,8 @@ impl Provider {
     /// actually routes — never sent to a service for which the string would
     /// mean nothing.  What the request carries, hence what the trace records.
     pub fn openrouter_route(&self) -> Option<&str> {
-        self.route
+        self.selection
+            .route
             .as_deref()
             .filter(|_| self.account.service.routes)
     }
@@ -260,7 +253,7 @@ mod tests {
     #[test]
     fn openrouter_route_is_ignored_by_other_providers() {
         let mut provider = Provider::scripted("model-a", scripted::Script::new());
-        provider.route = Some("deepinfra".into());
+        provider.selection.route = Some("deepinfra".into());
         assert_eq!(provider.openrouter_route(), None);
 
         provider.account = Account::built_in("openrouter");

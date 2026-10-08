@@ -1,6 +1,6 @@
 ---
-verified_at_commit: dabb0978
-verified_at_date: 2026-10-06
+verified_at_commit: 6c9047b6
+verified_at_date: 2026-10-08
 anchors: [ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, CancelScope, CancelCause, Terminate, DurableRoot, ForegroundScope, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, Status::code, ChildEnd, WaitOutcome::classify, KILL_EXIT_CODE, Mooring::check, CancelCause::code, Signal::status, RunningChild::wait, watch_cancel, Membership::owes, break_pipeline_group, escalation_pending]
 ---
 
@@ -423,7 +423,7 @@ exarch layers a *per-agent* cancellation `Token` over ral's machinery
 - **`install`** points SIGINT at ral's non-escalating `interrupt_handler`,
   leaving SIGTERM/SIGHUP on ral's `handler`, so the escalation ladder survives.
   Install order matters — ral's handlers first, then exarch's — and
-  `bootstrap::face_process_signals` runs it once, at the process entry; each
+  `boot::face_process_signals` (`exarch/src/boot.rs`) runs it once, at the process entry; each
   site that launches a process trunk holds `signals::face` for the attend, which
   forwards the ambient causes to that trunk's `Agent`. `/clear` touches no
   process-wide state: SIGINT no longer ticks the ladder, so there is nothing

@@ -1,0 +1,650 @@
+use super::*;
+use crate::agent::roster;
+use crate::agent::testkit::{TestAgentSpec, bare_transport, test_agent};
+use crate::bus::{AgentOutcome, AgentResult, Inbox, Item, Next, ParkMode, Post, Stamped};
+use crate::cancel::InterruptTarget;
+use crate::cancel::Token;
+use crate::enquiry::Spawner;
+use ral_core::carrier::{IdentityTransport, Transport as _};
+// The reaper fires on its own daemon thread, so a lease test asserts
+// against wall time rather than a synchronous call.
+use ral_core::test_helper::eventually;
+use std::time::Instant;
+
+/// A root (`parent` `None`) or a reporting child, with handles no test
+/// below inspects.  The caller holds the only strong reference: dropping
+/// it is what settles the agent.
+fn agent(fleet: &Arc<Fleet>, name: &str, parent: Option<&Arc<Agent>>) -> Arc<Agent> {
+    born(fleet, spec(name, parent)).expect("a fresh name under a live parent is always born")
+}
+
+fn spec(name: &str, parent: Option<&Arc<Agent>>) -> TestAgentSpec {
+    let mut spec = TestAgentSpec::new(name);
+    spec.parent = parent.cloned();
+    spec
+}
+
+fn born(fleet: &Arc<Fleet>, spec: TestAgentSpec) -> Result<Arc<Agent>, Unborn> {
+    test_agent(fleet, spec)
+}
+
+/// A reach into a real engine, and the engine it reaches.
+fn reach_into() -> (InterruptTarget, IdentityTransport) {
+    let engine = bare_transport();
+    (InterruptTarget::new(engine.control().clone()), engine)
+}
+
+/// The cause `engine`'s durable root was cancelled with, as its status.
+fn ended(engine: &IdentityTransport) -> Option<i32> {
+    engine
+        .session_ended()
+        .expect("an identity transport answers")
+}
+
+/// A lease is a consequence of having a reporting parent, and of nothing
+/// else.  Asserted behaviourally, since there is no guard to peek at: the
+/// reap only stamps the cancel layers.
+#[test]
+fn a_lease_is_armed_only_for_a_reporting_child() {
+    let fleet = Fleet::leased_for_test(Duration::from_millis(50));
+    let trunk = agent(&fleet, "trunk", None);
+    let branch = agent(&fleet, "branch", None);
+    let (reach, worker_engine) = reach_into();
+    let mut worker = spec("worker", Some(&trunk));
+    worker.reach = reach;
+    let _worker = born(&fleet, worker).expect("a fresh child of a live trunk");
+
+    assert!(
+        eventually(Duration::from_secs(2), || ended(&worker_engine)).is_some(),
+        "a reporting child is reaped once the bound elapses"
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        !branch.token.is_cancelled(),
+        "a root arms no reaper deadline"
+    );
+}
+
+/// The fence lives on the inbox ([`bus::inbox`]'s epoch tests); this
+/// test covers only the cascade: an abandoned child's in-flight eval
+/// unwinds instead of grinding on as an orphan whose result nobody will
+/// collect.
+#[test]
+fn forget_cancels_the_subtree() {
+    let fleet = Fleet::for_test();
+    let trunk = agent(&fleet, "trunk", None);
+    let (reach, child_engine) = reach_into();
+    let mut child = spec("child", Some(&trunk));
+    child.reach = reach;
+    let child = born(&fleet, child).expect("a fresh child of a live trunk");
+
+    trunk.forget();
+
+    assert!(
+        child.token.terminated(),
+        "the abandoned child's token is terminate-stamped"
+    );
+    assert!(
+        ended(&child_engine).is_some(),
+        "the reap cancels the child's eval layer, not just its token"
+    );
+}
+
+/// The invariant the `/clear` UI handler leans on.  A sticky [`Token`]
+/// never forgets a terminate-class cause, so no gesture that leaves the
+/// trunk live may stamp one on the trunk's own token; the inclusive
+/// [`Agent::cancel_tree`] would, and every later run would fail forever.
+#[test]
+fn the_clear_gesture_cancels_descendants_but_spares_the_trunks_token() {
+    let fleet = Fleet::for_test();
+    let trunk = agent(&fleet, "trunk", None);
+    let child = agent(&fleet, "child", Some(&trunk));
+
+    trunk.cancel_descendants(CancelCause::Cancelled);
+
+    assert!(
+        child.token.terminated(),
+        "the descendant's token is terminate-stamped"
+    );
+    assert!(
+        !trunk.token.is_cancelled(),
+        "cancel_descendants never touches the trunk's own token"
+    );
+
+    // A stamped terminate cause would survive this round trip and an
+    // uncancelled token does not, so this proves the trunk carries no
+    // terminate cause at all — not merely that this call skipped it.
+    trunk.token.cancel(CancelCause::Interrupted);
+    trunk.token.reset();
+    assert!(
+        !trunk.token.is_cancelled(),
+        "the trunk's token round-trips through an interrupt and reset \
+         uncancelled, so the next run after /clear would run"
+    );
+}
+
+/// Where the `/clear` cascade would have left the root live, `/close`
+/// takes it with the subtree.
+#[test]
+fn cancel_tree_takes_the_root_too() {
+    let fleet = Fleet::for_test();
+    let trunk = agent(&fleet, "trunk", None);
+    let (reach, branch_engine) = reach_into();
+    let mut branch = spec("branch", Some(&trunk));
+    branch.reach = reach;
+    let branch = born(&fleet, branch).expect("a fresh child of a live trunk");
+    let grandchild = agent(&fleet, "grandchild", Some(&branch));
+
+    branch.cancel_tree(CancelCause::Cancelled);
+
+    assert!(
+        branch.token.is_cancelled(),
+        "the closed branch's token is set"
+    );
+    assert!(
+        ended(&branch_engine).is_some(),
+        "close reaches the branch's eval layer, not just its token"
+    );
+    assert!(
+        grandchild.token.is_cancelled(),
+        "a spawned descendant cascades"
+    );
+    assert!(
+        !trunk.token.is_cancelled(),
+        "the trunk above the closed subtree survives"
+    );
+}
+
+/// An interrupt drops the run without ending the agent, so the child's
+/// token is cancelled but not `terminated`, and it walks no descendants.
+/// Contrast `cancel_tree`, which would trip the grandchild too, and with a
+/// terminate cause.
+#[test]
+fn interrupt_unwinds_exactly_one_agent() {
+    let fleet = Fleet::for_test();
+    let trunk = agent(&fleet, "trunk", None);
+    let (reach, child_engine) = reach_into();
+    let mut child = spec("child", Some(&trunk));
+    child.reach = reach;
+    let child = born(&fleet, child).expect("a fresh child of a live trunk");
+    let grandchild = agent(&fleet, "grandchild", Some(&child));
+
+    child.interrupt();
+
+    assert!(
+        child.token.is_cancelled(),
+        "interrupt trips the child's token"
+    );
+    assert!(
+        !child.token.terminated(),
+        "an interrupt is not a terminate cause"
+    );
+    assert!(
+        ended(&child_engine).is_none(),
+        "eval_root itself is never touched by an interrupt"
+    );
+    assert!(
+        !grandchild.token.is_cancelled(),
+        "no descendant walk: the grandchild is untouched"
+    );
+}
+
+/// The interrupt reaches the run in flight through the target, and only
+/// it: never `eval_root`, so the agent's *next* run is born uncancelled.
+#[test]
+fn interrupt_never_poisons_the_next_run() {
+    use ral_core::carrier::dispatch_to_report;
+    use ral_core::protocol::{Ending, Report};
+
+    let fleet = Fleet::for_test();
+    let trunk = agent(&fleet, "trunk", None);
+    let transport = Arc::new(bare_transport());
+    let mut child = spec("child", Some(&trunk));
+    child.reach = InterruptTarget::new(transport.control().clone());
+    let child = born(&fleet, child).expect("a fresh child of a live trunk");
+
+    let running = {
+        let transport = transport.clone();
+        std::thread::spawn(move || {
+            dispatch_to_report(
+                &*transport,
+                ral_core::protocol::Run::captured("sleep 30", "<test>"),
+                Arc::new(()),
+            )
+        })
+    };
+    let deadline = Instant::now() + std::time::Duration::from_secs(10);
+    while !running.is_finished() {
+        assert!(
+            Instant::now() < deadline,
+            "the interrupt must reach the in-flight run"
+        );
+        child.interrupt();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    running
+        .join()
+        .expect("the dispatch must not panic")
+        .expect("identity never severs");
+
+    let next = dispatch_to_report(
+        &*transport,
+        ral_core::protocol::Run::captured("$[1 + 1]", "<test>"),
+        Arc::new(()),
+    )
+    .expect("identity never severs");
+    assert!(
+        matches!(
+            next,
+            Report::Ran {
+                ending: Ending::Settled { .. },
+                ..
+            }
+        ),
+        "the next run is born uncancelled: the interrupt never poisoned eval_root: {next:?}"
+    );
+}
+
+#[test]
+fn cancel_sets_the_token_and_the_roster_reports_the_subtree() {
+    let fleet = Fleet::for_test();
+    let trunk = agent(&fleet, "trunk", None);
+    let (reach, engine) = reach_into();
+    let mut lint = spec("lint", Some(&trunk));
+    lint.reach = reach;
+    let lint = born(&fleet, lint).expect("a fresh child of a live trunk");
+
+    let names: Vec<String> = roster::listing(&trunk)
+        .into_iter()
+        .map(|row| row.name)
+        .collect();
+    assert_eq!(
+        names,
+        vec!["trunk".to_string(), "lint".to_string()],
+        "the listing is the reader's whole tree, itself among them"
+    );
+
+    lint.cancel_tree(CancelCause::Cancelled);
+    assert!(lint.token.is_cancelled(), "cancel sets the token");
+    assert!(
+        ended(&engine).is_some(),
+        "cancel reaches the worker's eval layer through its session root"
+    );
+}
+
+#[test]
+fn cancel_cascades_to_the_whole_subtree() {
+    let fleet = Fleet::for_test();
+    let root = agent(&fleet, "r", None);
+    let child = agent(&fleet, "c", Some(&root));
+    let grandchild = agent(&fleet, "g", Some(&child));
+    let sibling = agent(&fleet, "s", Some(&root));
+
+    child.cancel_tree(CancelCause::Cancelled);
+
+    assert!(child.token.is_cancelled(), "the cancelled node");
+    assert!(grandchild.token.is_cancelled(), "its descendant cascades");
+    assert!(!sibling.token.is_cancelled(), "a sibling is untouched");
+    assert!(!root.token.is_cancelled(), "the parent is untouched");
+}
+
+/// Liveness is the avatar: an agent leaves both fleet doors and its
+/// parent's subtree by being dropped, and by nothing else.
+#[test]
+fn an_agent_resolves_only_while_something_holds_it() {
+    let fleet = Fleet::for_test();
+    let trunk = agent(&fleet, "trunk", None);
+    let child = agent(&fleet, "child", Some(&trunk));
+
+    assert!(fleet.name_live("child"), "a live agent resolves by name");
+    assert_eq!(
+        roster::listing(&trunk).len(),
+        2,
+        "and stands in its parent's listing, beside the parent"
+    );
+
+    drop(child);
+
+    assert!(
+        !fleet.name_live("child"),
+        "a settled agent resolves nowhere, and frees its name"
+    );
+    assert_eq!(
+        roster::listing(&trunk).len(),
+        1,
+        "and the walk that looked for it pruned it, leaving the trunk alone"
+    );
+}
+
+#[test]
+fn a_message_posts_a_marked_note_to_a_descendant() {
+    let fleet = Fleet::for_test();
+    let trunk = agent(&fleet, "trunk", None);
+    let inbox = Inbox::new();
+    let mut worker = spec("worker", Some(&trunk));
+    worker.mailbox = inbox.mailbox();
+    let worker = born(&fleet, worker).expect("a fresh child of a live trunk");
+
+    let to = trunk
+        .descendant(&worker)
+        .expect("a proper descendant is reachable");
+    trunk.message(&to, "check the lexer".into());
+
+    let Some(Next::Item(Item::Message(msg))) = inbox.next_item() else {
+        panic!("expected a peer message");
+    };
+    assert_eq!(msg.from, trunk.id);
+    assert_eq!(msg.from_name, "trunk");
+    assert_eq!(msg.text, "check the lexer");
+}
+
+/// An ancestor, a sibling, and the caller's own self are all refused, even
+/// though all three are live agents an existence check alone would admit.
+#[test]
+fn the_scope_climb_refuses_self_and_non_descendants() {
+    let fleet = Fleet::for_test();
+    let trunk = agent(&fleet, "trunk", None);
+    let child = agent(&fleet, "child", Some(&trunk));
+    let sibling = agent(&fleet, "sibling", Some(&trunk));
+    let grandchild = agent(&fleet, "grandchild", Some(&child));
+
+    assert!(child.descendant(&child).is_none(), "self is refused");
+    assert!(child.descendant(&sibling).is_none(), "a sibling is refused");
+    assert!(child.descendant(&trunk).is_none(), "an ancestor is refused");
+    assert!(
+        trunk.descendant(&grandchild).is_some(),
+        "a descendant at any depth is reachable"
+    );
+}
+
+/// The listing is a tree flattened, so every row carries the edge that put
+/// it there — and a root's `spawner` is nobody, because a human started it.
+#[test]
+fn every_row_names_who_started_it() {
+    let fleet = Fleet::for_test();
+    let trunk = agent(&fleet, "trunk", None);
+    let mid = agent(&fleet, "mid", Some(&trunk));
+    let _leaf = agent(&fleet, "leaf", Some(&mid));
+
+    let edges: Vec<(String, Option<String>)> = roster::listing(&trunk)
+        .into_iter()
+        .map(|row| {
+            (
+                row.name,
+                match row.spawner {
+                    Spawner::Root => None,
+                    Spawner::Agent(up) => Some(up),
+                },
+            )
+        })
+        .collect();
+    assert_eq!(
+        edges,
+        vec![
+            ("trunk".to_string(), None),
+            ("mid".to_string(), Some("trunk".to_string())),
+            ("leaf".to_string(), Some("mid".to_string())),
+        ],
+        "the flat listing still reads as the spawn tree"
+    );
+}
+
+/// `live` is company and `replied` is an obligation, so they are scoped
+/// differently on purpose: a sibling is out there but owes this agent
+/// nothing, while a descendant holding a value owes it a `` `read ``.
+#[test]
+fn the_summary_counts_company_and_what_is_owed() {
+    let fleet = Fleet::for_test();
+    let trunk = agent(&fleet, "trunk", None);
+    let mid = agent(&fleet, "mid", Some(&trunk));
+    let _sibling = agent(&fleet, "sibling", Some(&trunk));
+    let child = agent(&fleet, "child", Some(&mid));
+
+    let alone = roster::summary(&mid);
+    assert_eq!(alone.live, 3, "trunk, sibling and child are all out there");
+    assert_eq!(alone.replied, 0, "none of them holds a value yet");
+
+    child.deposit_reply(ral_core::first_order::FOValue::Int { value: 1 });
+    let owed = roster::summary(&mid);
+    assert_eq!(
+        owed.live, 3,
+        "a reply does not settle the agent that made it"
+    );
+    assert_eq!(
+        owed.replied, 1,
+        "and the descendant holding it asks for a `read"
+    );
+    assert_eq!(
+        roster::summary(&trunk).replied,
+        0,
+        "the value is owed to the spawner alone, not to everyone above it"
+    );
+}
+
+/// A `/branch` child roots its own tree rather than joining its creator's:
+/// the listing climbs to a root and stops, so one tab never lists another's
+/// agents, and the model's own cancel verb cannot reach them either.  Only
+/// `` `message `` crosses, by a name the human must have carried over.
+#[test]
+fn a_branch_is_a_root_outside_its_spawners_fleet() {
+    let fleet = Fleet::for_test();
+    let trunk = agent(&fleet, "trunk", None);
+    let branch = agent(&fleet, "branch", None);
+
+    let names: Vec<String> = roster::listing(&trunk)
+        .into_iter()
+        .map(|row| row.name)
+        .collect();
+    assert_eq!(
+        names,
+        vec!["trunk".to_string()],
+        "the trunk's listing omits a branch that shares its fleet but no edge"
+    );
+    assert!(
+        trunk.descendant(&branch).is_none(),
+        "the scope climb refuses a target the caller never spawned"
+    );
+}
+
+/// The tail of a spawn racing a `/clear` or `` exarch-agents `cancel `` on its
+/// parent is refused outright, rather than landing orphaned and
+/// uncancellable.  The cascade never drops an agent, so "gone" alone would
+/// miss this window.
+#[test]
+fn a_terminated_parent_bears_no_more_children() {
+    let fleet = Fleet::for_test();
+    let trunk = agent(&fleet, "trunk", None);
+    let parent = agent(&fleet, "parent", Some(&trunk));
+    parent.token.cancel(CancelCause::Cancelled);
+
+    assert_eq!(
+        born(&fleet, spec("late-child", Some(&parent))).err(),
+        Some(Unborn::SessionDead),
+        "a parent already carrying a terminate cause refuses new children"
+    );
+    assert!(!fleet.name_live("late-child"), "and the name stays free");
+    assert!(
+        parent.children().is_empty(),
+        "a refused child is never adopted"
+    );
+}
+
+/// Two same-name births never both succeed, even with nothing settled
+/// between them: the desk's [`Fleet::name_live`] pre-check is the cheap
+/// half, this the check that closes the race.
+#[test]
+fn a_name_borne_by_a_live_agent_refuses_a_second() {
+    let fleet = Fleet::for_test();
+    let trunk = agent(&fleet, "trunk", None);
+    let helper = agent(&fleet, "helper", Some(&trunk));
+
+    assert_eq!(
+        born(&fleet, spec("helper", Some(&trunk))).err(),
+        Some(Unborn::NameTaken("helper".to_string())),
+        "a second live agent may not bear the same name"
+    );
+    assert!(
+        fleet
+            .resolve("helper")
+            .is_some_and(|found| Arc::ptr_eq(&found, &helper)),
+        "the name still resolves to the agent that actually holds it"
+    );
+    assert_eq!(
+        trunk.children().len(),
+        1,
+        "the refused child is not adopted"
+    );
+}
+
+/// `steer` is the one door that stamps the exchange clock, and it always
+/// delivers too.
+#[test]
+fn a_steer_defers_the_fire() {
+    let ttl = Duration::from_millis(300);
+    let fleet = Fleet::leased_for_test(ttl);
+    let trunk = agent(&fleet, "trunk", None);
+    let (reach, engine) = reach_into();
+    let mut child = spec("child", Some(&trunk));
+    child.reach = reach;
+    let child = born(&fleet, child).expect("a fresh child of a live trunk");
+
+    std::thread::sleep(ttl / 2);
+    child.mailbox.steer("still there".into());
+
+    std::thread::sleep(ttl / 2 + Duration::from_millis(50));
+    assert!(
+        ended(&engine).is_none(),
+        "steered at half the ttl, still alive past the original bound"
+    );
+    assert!(
+        eventually(Duration::from_secs(2), || ended(&engine)).is_some(),
+        "reaped once the renewed span elapses"
+    );
+}
+
+#[test]
+fn settling_before_the_fire_ends_the_chain_silently() {
+    let ttl = Duration::from_millis(80);
+    let fleet = Fleet::leased_for_test(ttl);
+    let trunk = agent(&fleet, "trunk", None);
+    let child = born(&fleet, spec("child", Some(&trunk))).expect("a fresh child of a live trunk");
+    let token = child.token.clone();
+
+    drop(child);
+
+    std::thread::sleep(ttl * 4);
+    assert!(
+        !token.is_cancelled(),
+        "the chain's late fire found nothing to upgrade and never touched the settled token"
+    );
+}
+
+#[test]
+fn a_clear_outranks_the_lease() {
+    let ttl = Duration::from_millis(80);
+    let fleet = Fleet::leased_for_test(ttl);
+    let trunk = agent(&fleet, "trunk", None);
+    let (reach, engine) = reach_into();
+    let mut child = spec("child", Some(&trunk));
+    child.reach = reach;
+    let child = born(&fleet, child).expect("a fresh child of a live trunk");
+
+    trunk.forget();
+    assert_eq!(
+        ended(&engine),
+        Some(ral_core::types::Status::Cancelled(CancelCause::Terminated).code()),
+        "forget terminates the abandoned child's engine"
+    );
+
+    // The cancelled child's own loop would retire it; here the drop is
+    // that retirement, and it is what ends the lease chain.
+    drop(child);
+    std::thread::sleep(ttl * 4);
+    assert_eq!(
+        ended(&engine),
+        Some(ral_core::types::Status::Cancelled(CancelCause::Terminated).code()),
+        "the lease's late fire finds a settled agent and never overwrites the cause"
+    );
+}
+
+/// Notably, a raw push onto the mailbox, bypassing `steer`, is not an
+/// exchange.
+#[test]
+fn engaged_and_idle_read_the_exchange_clock() {
+    let fleet = Fleet::for_test();
+    let trunk = agent(&fleet, "trunk", None);
+    let inbox = Inbox::new();
+    let mut child = spec("child", Some(&trunk));
+    child.mailbox = inbox.mailbox();
+    let child = born(&fleet, child).expect("a fresh child of a live trunk");
+
+    assert!(!child.engaged(), "a fresh agent has never been engaged");
+
+    inbox.push(Post::UserSteering("hello".into()));
+    assert!(!child.engaged(), "a raw mailbox push is not an exchange");
+    // Drained, so the steer below lands as its own item rather than
+    // coalescing into this one.
+    inbox.next_item();
+
+    child.mailbox.steer("hi".into());
+    assert!(child.engaged(), "steered at least once");
+    assert!(
+        child.idle() < Duration::from_secs(1),
+        "idle resets to (near) zero right after a steer"
+    );
+
+    let Some(Next::Item(Item::Human(text))) = inbox.next_item() else {
+        panic!("expected the steered text to have actually landed");
+    };
+    assert_eq!(text, "hi", "a steer delivers as well as stamping");
+}
+
+/// The fleet's ordering law: a settling child delivers *before* it retires,
+/// so the parent's park verdict — computed ahead of the pop — can never
+/// quiesce between the two facts.
+#[test]
+fn a_settling_childs_result_outruns_the_quiesce_verdict() {
+    let fleet = Fleet::for_test();
+    let trunk = agent(&fleet, "trunk", None);
+    let child = agent(&fleet, "child", Some(&trunk));
+    let inbox = Inbox::new();
+    let park = |_engaged| {
+        if trunk.has_busy_children() {
+            ParkMode::HeldByChildren
+        } else {
+            ParkMode::Quiesce
+        }
+    };
+    assert_eq!(
+        park(false),
+        ParkMode::HeldByChildren,
+        "a live direct child holds its parent's park"
+    );
+
+    // The worker epilogue in production order: deliver, then retire.
+    inbox
+        .mailbox()
+        .stamp()
+        .post(Stamped::AgentResult(AgentResult {
+            id: child.id,
+            name: "child".into(),
+            outcome: AgentOutcome::Stopped("done".into()),
+            elapsed: Duration::ZERO,
+        }));
+    drop(child);
+    assert_eq!(
+        park(false),
+        ParkMode::Quiesce,
+        "the last child settling drains the fleet"
+    );
+
+    let token = Token::new();
+    assert!(
+        matches!(inbox.next_or_idle(park, &token), Some(Next::Item(Item::Agent(r))) if r.name == "child"),
+        "a quiescing fleet still hands over the result it was already owed"
+    );
+    assert!(
+        inbox.next_or_idle(park, &token).is_none(),
+        "and with nothing left queued it quiesces rather than parking forever"
+    );
+}

@@ -83,7 +83,7 @@ pub struct OAuthToken {
 impl OAuthToken {
     /// True when the access token has expired or is within 60s of expiring.
     pub fn is_stale(&self) -> bool {
-        self.expires_at <= crate::bootstrap::now_secs() + 60
+        self.expires_at <= crate::app::now_secs() + 60
     }
 
     /// This account's local handle: its login email, or the issued id when
@@ -737,7 +737,7 @@ fn jwt_exp(jwt: &str) -> Option<u64> {
 fn expiry_secs(access_token: &str, id_token: Option<&str>) -> u64 {
     jwt_exp(access_token)
         .or_else(|| id_token.and_then(jwt_exp))
-        .unwrap_or_else(|| crate::bootstrap::now_secs() + 3600)
+        .unwrap_or_else(|| crate::app::now_secs() + 3600)
 }
 
 /// Turn a token-endpoint response into an [`OAuthToken`]. A login without an
@@ -763,7 +763,7 @@ fn finalize(raw: RawTokens) -> Result<OAuthToken, String> {
 /// `pub(crate)` for [`super::credential_files`]: a signed-in `ChatGPT`
 /// account's tokens live here, so every grant has to carve this path out.
 pub(crate) fn token_path() -> PathBuf {
-    crate::bootstrap::EXARCH
+    crate::app::EXARCH
         .xdg_dir(ral_core::host::XdgKind::State)
         .join("oauth.json")
 }

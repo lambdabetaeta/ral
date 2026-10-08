@@ -2,12 +2,13 @@
 //! in birth order, root first.  [`super::App`]'s `tabs` field.
 
 use std::path::Path;
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::resources::ViewFigures;
 use crate::agent::Agent;
-use crate::bus::AgentId;
+use crate::agent::fleet::Fleet;
+use crate::record::AgentId;
 
 use super::block::{AgentSlot, Detail};
 use super::scrollback::Scrollback;
@@ -17,11 +18,8 @@ use super::{DEMOTE_IDLE, LINGER};
 pub(super) struct Tab {
     /// Wire identity: what every `Signal` names, so what a lookup matches on.
     id: AgentId,
-    /// Reach.  Upgraded for the duration of one handler and never stored
-    /// strong: the frontend must not hold an agent past its avatar.
-    agent: Weak<Agent>,
     /// Birth facts, off the `Born` notice; immutable, like `Agent::parent`, and
-    /// still readable once the `Weak` is dead — which is what a lingering row's
+    /// still readable once the agent has settled — which is what a lingering row's
     /// label and indentation need.
     name: String,
     /// The spawning agent, so focus can climb toward the trunk when the focused
@@ -49,17 +47,21 @@ impl Tab {
         self.retired.is_some() && self.in_bar()
     }
 
-    fn live(&self) -> Option<Arc<Agent>> {
-        self.agent.upgrade()
+    /// Resolved afresh each time and never stored: the frontend must not hold
+    /// an agent past its avatar.  The id test rules out a namesake born later.
+    fn live(&self, fleet: &Fleet) -> Option<Arc<Agent>> {
+        fleet
+            .resolve(&self.name)
+            .filter(|agent| agent.id == self.id)
     }
 
     /// Idle span if this tab is parked past the compact-row threshold. Root
     /// and the focused tab never demote.
-    fn demotion(&self, focused: AgentId, root: AgentId) -> Option<Duration> {
+    fn demotion(&self, fleet: &Fleet, focused: AgentId, root: AgentId) -> Option<Duration> {
         if self.id == root || self.id == focused {
             return None;
         }
-        let agent = self.live()?;
+        let agent = self.live(fleet)?;
         let idle = agent.idle();
         (agent.mailbox.waiting_for_input() && idle >= DEMOTE_IDLE).then_some(idle)
     }
@@ -92,17 +94,18 @@ pub(super) struct Tabs {
     /// tab born after the command was typed inherits it.
     thinking: Detail,
     title_frame: u64,
+    /// Resolves a tab's name to its live agent.
+    fleet: Arc<Fleet>,
 }
 
 impl Tabs {
-    pub fn new(root: &Arc<Agent>, append: bool) -> Self {
+    pub fn new(root: &Arc<Agent>, fleet: Arc<Fleet>, append: bool) -> Self {
         // Born collapsed: deliberation reads as its grain and bulk, and `/thinking`
         // opens the text for whoever wants it.
         let thinking = Detail::Summary;
         Self {
             tabs: vec![Tab {
                 id: root.id,
-                agent: Arc::downgrade(root),
                 name: root.name.clone(),
                 parent: None,
                 scrollback: Scrollback::new(
@@ -116,6 +119,7 @@ impl Tabs {
             focus: root.id,
             thinking,
             title_frame: 0,
+            fleet,
         }
     }
 
@@ -149,7 +153,7 @@ impl Tabs {
     /// The live agent behind `id`, for one handler's duration — the frontend's
     /// one door onto an agent, and never held past the statement that opens it.
     pub(super) fn agent(&self, id: AgentId) -> Option<Arc<Agent>> {
-        self.tab(id)?.live()
+        self.tab(id)?.live(&self.fleet)
     }
 
     pub(super) fn focused_agent(&self) -> Option<Arc<Agent>> {
@@ -162,7 +166,7 @@ impl Tabs {
     pub(super) fn by_name(&self, name: &str) -> Option<AgentId> {
         self.tabs
             .iter()
-            .find(|t| t.name == name && t.in_bar() && t.live().is_some())
+            .find(|t| t.name == name && t.in_bar() && t.live(&self.fleet).is_some())
             .map(|t| t.id)
     }
 
@@ -214,7 +218,6 @@ impl Tabs {
     pub(super) fn born(
         &mut self,
         id: AgentId,
-        agent: Weak<Agent>,
         log_dir: &Path,
         name: String,
         parent: Option<AgentId>,
@@ -225,7 +228,6 @@ impl Tabs {
         }
         self.tabs.push(Tab {
             id,
-            agent,
             name,
             parent,
             scrollback: Scrollback::new(log_dir.join("user.log"), slot, false, self.thinking),
@@ -329,7 +331,7 @@ impl Tabs {
                 parent: t.parent,
                 sb: &t.scrollback,
                 lingering: t.lingering(),
-                demoted: t.demotion(focused, root),
+                demoted: t.demotion(&self.fleet, focused, root),
             })
             .collect()
     }
@@ -361,85 +363,4 @@ impl Tabs {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::super::block::Chrome;
-    use super::*;
-    use crate::agent::testkit::{TestAgentSpec, test_agent};
-    use crate::fleet::Fleet;
-
-    /// A trunk whose `Weak` upgrades for as long as the returned `Arc` lives,
-    /// which is the whole of each test.
-    fn trunk(idle: Duration) -> Arc<Agent> {
-        let fleet = Fleet::for_test();
-        test_agent(
-            &fleet,
-            TestAgentSpec {
-                idle,
-                ..TestAgentSpec::new("main")
-            },
-        )
-        .expect("a fresh trunk")
-    }
-
-    /// A subagent tab whose agent has already settled — the ordinary state of a
-    /// tab the frontend still draws.
-    fn born(tabs: &mut Tabs, id: AgentId, name: &str, parent: Option<AgentId>) {
-        tabs.born(
-            id,
-            Weak::new(),
-            Path::new("/tmp/exarch-tabs-test"),
-            name.into(),
-            parent,
-            AgentSlot(1),
-        );
-    }
-
-    #[test]
-    fn parent_focus_climbs_past_a_lingering_ancestor() {
-        let root = trunk(Duration::ZERO);
-        let mut tabs = Tabs::new(&root, false);
-        let (child, grandchild) = (root.id + 1, root.id + 2);
-        born(&mut tabs, child, "child", Some(root.id));
-        born(&mut tabs, grandchild, "grandchild", Some(child));
-        tabs.died(child);
-
-        assert_eq!(
-            tabs.parent_focus(grandchild),
-            root.id,
-            "focus climbs past the lingering parent to the nearest attended ancestor"
-        );
-    }
-
-    /// Killing one agent is never paid for out of a sibling's scrollback:
-    /// tombstoning frees only the expired view.
-    #[test]
-    fn tick_tombstones_only_the_expired_view_leaving_a_live_sibling_untouched() {
-        let root = trunk(Duration::ZERO);
-        let mut tabs = Tabs::new(&root, false);
-        let child = root.id + 1;
-        born(&mut tabs, child, "child", Some(root.id));
-        for (id, text) in [(child, "child says hi"), (root.id, "root says hi")] {
-            tabs.scrollback_mut(id)
-                .expect("both tabs have a scrollback")
-                .push_chrome(Chrome::Note(text.into()));
-        }
-        tabs.died(child);
-        // Backdate rather than wait LINGER out in a test.
-        tabs.tab_mut(child).expect("the child has a tab").retired =
-            Instant::now().checked_sub(LINGER + Duration::from_secs(1));
-
-        assert!(tabs.tick(), "the expiry is a repaint cue");
-
-        assert_eq!(
-            tabs.scrollback(child).unwrap().probe_figures().0,
-            0,
-            "the dead child is tombstoned once past LINGER, its scrollback gone"
-        );
-        assert_eq!(
-            tabs.scrollback(root.id).unwrap().probe_figures().0,
-            1,
-            "the live root's own block survives the sibling's tombstoning untouched"
-        );
-        assert_eq!(tabs.len(), 1, "and the bar is back to root alone");
-    }
-}
+mod tests;

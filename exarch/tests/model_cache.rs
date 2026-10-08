@@ -7,7 +7,7 @@
 //! no bystander test shares the mutated environment. One scenario, because the
 //! stages share one file: fetch, serve from disk, upsert, expire.
 
-use exarch::bootstrap::App;
+use exarch::app::App;
 use exarch::provider::identity::{AccountId, ServiceName};
 use exarch::provider::models::{Listed, ModelCatalog, ModelSource, ProviderEndpoint, listing_of};
 use std::path::Path;

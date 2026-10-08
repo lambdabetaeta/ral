@@ -1,6 +1,6 @@
 //! The syscall site for `sessions/<n>/record.jsonl`: the only file handle in the
 //! tree for this log.  `append` is reachable only from [`super::seam`], and
-//! `read` only from [`super::replay`] — Rust cannot restrict a `pub` item to
+//! `read` only from [`super::replay()`] — Rust cannot restrict a `pub` item to
 //! one specific sibling module, so both are `pub(super)`, visible across
 //! `record/` and nowhere past it; the narrower promise is a matter of review,
 //! not the type system, exactly as the module map's own risk note admits.
@@ -31,43 +31,12 @@
 //! channel stays a no-op on purpose — the record is already durable, and a
 //! consumer that stopped listening catches up from the file.
 
-use super::{Entry, Locus, Record, Recorded, Seq, Transient};
-use crate::bootstrap::now_unix_ms;
-use crate::bus::{AgentId, Signal, UsageMeter, WeakSender};
+use super::{Entry, Locus, Publish, Record, Recorded, Seq, Transient};
+use crate::app::now_unix_ms;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 use std::sync::Mutex;
-
-/// Where a witnessed record goes beside the file: the fleet-wide channel a
-/// frontend drains, tagged with the owning session's id, and the run's usage
-/// meter — accounting follows the fact through the seam, so a display-muted
-/// child on a dead channel still counts toward the run total.
-pub(crate) struct FleetSink {
-    pub(crate) id: AgentId,
-    /// Weak on purpose: the log outlives any one bus and its facts are
-    /// durable without one, so this handle must never hold a channel open or
-    /// stall a drain's disconnect on a session object's lifetime.
-    pub(crate) tx: WeakSender,
-    pub(crate) meter: UsageMeter,
-}
-
-/// Meter one witnessed record and publish it — the one publish rule, shared
-/// by a live [`Log::append`] and the backlog [`Log::attach`] delivers.
-fn publish(sink: &FleetSink, recorded: Recorded<Record>) {
-    if let Record::Forensic(super::Forensic::UsageDelta { usage }) = recorded.value() {
-        sink.meter.add(*usage);
-    }
-    if sink
-        .tx
-        .send_signal(Signal::Fact(sink.id, recorded))
-        .is_err()
-    {
-        // No live receiver — the record is already durable on disk, which is
-        // the whole point: a pressured or absent consumer catches up from the
-        // file, never from the channel.
-    }
-}
 
 /// `inner` is outside the workspace's poison door ([`ral_core::sync::LockExt`])
 /// on purpose: `seq` and `pos` are the file's own position, restated in memory,
@@ -88,7 +57,7 @@ struct Inner {
     /// a diagnostic that cannot be written is not a reason to fail a session
     /// whose real record is going down fine.
     plain: Option<BufWriter<File>>,
-    sink: Option<FleetSink>,
+    sink: Option<Box<dyn Publish>>,
     /// What was appended before any sink attached — a session's bookend, a
     /// fork's inherited context — held so the first sink to arrive is not
     /// missing the head of its own log.  Emptied by [`Log::attach`] and never
@@ -233,12 +202,12 @@ impl Log {
     /// re-attaching over a dead per-exchange channel is the ordinary way a
     /// headless session's next exchange comes back on air.
     #[allow(clippy::disallowed_methods, reason = "see [`Log`]")]
-    pub(super) fn attach(&self, sink: FleetSink) {
+    pub(super) fn attach(&self, sink: Box<dyn Publish>) {
         let Ok(mut inner) = self.inner.lock() else {
             return;
         };
         for recorded in std::mem::take(&mut inner.pending) {
-            publish(&sink, recorded);
+            sink.fact(recorded);
         }
         inner.sink = Some(sink);
     }
@@ -286,7 +255,7 @@ impl Log {
         let locus = Locus::over(Seq::new(inner.seq), start, body);
         let recorded = Recorded::new(locus.clone(), record);
         match &inner.sink {
-            Some(sink) => publish(sink, recorded),
+            Some(sink) => sink.fact(recorded),
             None => inner.pending.push(recorded),
         }
         drop(inner);
@@ -300,16 +269,13 @@ impl Log {
         let Ok(inner) = self.inner.lock() else {
             return;
         };
-        if let Some(sink) = &inner.sink
-            && sink.tx.send_signal(Signal::Transient(sink.id, t)).is_err()
-        {
-            // No live receiver; a transient has no durable form to catch up
-            // from, so there is nothing else to do.
+        if let Some(sink) = &inner.sink {
+            sink.transient(t);
         }
     }
 
     /// Stream every record back, in file order, each located by the `Seq`
-    /// and byte range it occupies — what [`super::replay`] folds.
+    /// and byte range it occupies — what [`super::replay()`] folds.
     ///
     /// One line is in memory at a time, so replaying a session costs the size
     /// of its fold's memo and never the size of its log.
@@ -475,161 +441,4 @@ fn clip(text: &str, width: usize) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::record::Forensic;
-
-    fn temp_path(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "exarch-log-test-{name}-{}-{:?}.jsonl",
-            std::process::id(),
-            std::thread::current().id()
-        ))
-    }
-
-    /// The readable mirror is the file a person opens after being told a
-    /// session would not start, so what matters is that it exists beside the
-    /// machine record, that it holds one line per fact, and that the line
-    /// says when, what and something of the detail — without a timestamp
-    /// anyone has to convert in their head.
-    #[test]
-    fn every_record_gets_one_readable_line_beside_the_jsonl() {
-        let path = temp_path("readable-mirror");
-        let log = Log::create(&path).expect("temp record log");
-        for text in ["first", "second"] {
-            let _locus = log
-                .append(Record::Forensic(Forensic::Error { text: text.into() }))
-                .expect("append");
-        }
-
-        let mirror = path.with_extension("log");
-        let read = std::fs::read_to_string(&mirror).expect("the mirror sits beside record.jsonl");
-        let lines: Vec<_> = read.lines().collect();
-        assert_eq!(lines.len(), 2, "one line per record, got {read:?}");
-        for (line, text) in lines.iter().zip(["first", "second"]) {
-            assert!(
-                line.contains("forensic/error"),
-                "the class and kind name the fact: {line}"
-            );
-            assert!(
-                line.contains(text),
-                "the fact's own detail survives: {line}"
-            );
-            assert!(
-                line.starts_with("20") && line.contains('-') && line.contains(':'),
-                "the moment is a date a person reads, not milliseconds: {line}"
-            );
-        }
-    }
-
-    /// A record carrying a whole transcript must still be one line, or the
-    /// file's one promise — a fact per line — is worth nothing on exactly the
-    /// records a debugger cares about.
-    #[test]
-    fn a_multi_line_fact_is_still_one_line_in_the_mirror() {
-        let path = temp_path("readable-flattened");
-        let log = Log::create(&path).expect("temp record log");
-        let _locus = log
-            .append(Record::Forensic(Forensic::Error {
-                text: "a stack trace\nwith several lines\nin it".to_string(),
-            }))
-            .expect("append");
-
-        let read = std::fs::read_to_string(path.with_extension("log")).expect("the mirror");
-        assert_eq!(
-            read.lines().count(),
-            1,
-            "a record with newlines in it is still one line: {read:?}"
-        );
-    }
-
-    #[test]
-    fn a_record_round_trips_through_the_entry_envelope() {
-        let path = temp_path("round-trip");
-        let log = Log::create(&path).expect("temp record log");
-        let record = Record::Forensic(Forensic::Error {
-            text: "boom".into(),
-        });
-        let _locus = log.append(record).expect("append");
-
-        let back: Vec<_> = Log::read(&path).expect("read back").collect();
-        assert_eq!(back.len(), 1);
-        let recorded = back.into_iter().next().unwrap().expect("parses");
-        assert!(matches!(
-            recorded.into_value(),
-            Record::Forensic(Forensic::Error { text }) if text == "boom"
-        ));
-
-        let bytes = std::fs::read(&path).unwrap();
-        let line = String::from_utf8(bytes).unwrap();
-        assert!(
-            line.contains("\"at_unix_ms\""),
-            "the line on disk must carry the Entry envelope: {line}"
-        );
-    }
-
-    #[test]
-    fn a_pre_envelope_line_is_refused_by_name() {
-        let path = temp_path("pre-envelope");
-        let record = Record::Forensic(Forensic::Error {
-            text: "boom".into(),
-        });
-        let mut line = serde_json::to_vec(&record).unwrap();
-        line.push(b'\n');
-        std::fs::write(&path, &line).unwrap();
-
-        let back: Vec<_> = Log::read(&path)
-            .expect("the file itself reads back")
-            .collect();
-        assert_eq!(back.len(), 1);
-        let error = back.into_iter().next().unwrap().expect_err("no envelope");
-        let text = error.to_string();
-        assert!(text.contains("Entry"), "{text}");
-        assert!(text.contains("older exarch"), "{text}");
-    }
-
-    #[test]
-    fn a_locus_round_trips_identically_through_append_and_read() {
-        let path = temp_path("locus-round-trip");
-        let log = Log::create(&path).expect("temp record log");
-        let first = log
-            .append(Record::Forensic(Forensic::Error {
-                text: "first".into(),
-            }))
-            .expect("append");
-        let second = log
-            .append(Record::Forensic(Forensic::Error {
-                text: "second".into(),
-            }))
-            .expect("append");
-
-        let back: Vec<_> = Log::read(&path).expect("read back").collect();
-        assert_eq!(back.len(), 2);
-        let mut back = back.into_iter();
-        let first_back = back.next().unwrap().expect("parses");
-        let second_back = back.next().unwrap().expect("parses");
-        assert_eq!(*first_back.locus(), first);
-        assert_eq!(*second_back.locus(), second);
-    }
-
-    #[test]
-    fn a_mismatched_body_misses_the_digest() {
-        let path = temp_path("digest-mismatch");
-        let log = Log::create(&path).expect("temp record log");
-        let _locus = log
-            .append(Record::Forensic(Forensic::Error {
-                text: "boom".into(),
-            }))
-            .expect("append");
-
-        let recorded = Log::read(&path)
-            .expect("read back")
-            .next()
-            .expect("one record")
-            .expect("parses");
-        assert_ne!(
-            Locus::digest_of(b"something else"),
-            recorded.locus().digest()
-        );
-    }
-}
+mod tests;

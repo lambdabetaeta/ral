@@ -15,7 +15,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Padding, Paragraph},
 };
 
-use crate::bus::{AgentId, AgentState};
+use crate::record::{AgentId, AgentState};
 
 use super::App;
 use super::app::Overlay;

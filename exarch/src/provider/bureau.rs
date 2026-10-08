@@ -17,8 +17,8 @@ use ral_core::sync::LockExt;
 use super::allowance::{LiveMeters, Survey};
 use super::credential::CredentialStore;
 use super::models::{Listed, LiveSource, ModelCatalog, listing_of};
-use super::{Account, Backend, Engine, Provider, Rations, Tuning, oauth, pricing};
-use crate::bootstrap::App;
+use super::{Account, Backend, Engine, Provider, Rations, Selection, Tuning, oauth, pricing};
+use crate::app::App;
 
 /// The credentials, model catalog, and allowance record an application shares.
 ///
@@ -133,10 +133,12 @@ impl Bureau {
         Ok(Arc::new(Provider::build(
             backend,
             account,
-            model,
-            max_tokens,
-            tuning.clone(),
-            route,
+            Selection {
+                model,
+                max_tokens_override: max_tokens,
+                tuning: tuning.clone(),
+                route,
+            },
             context_window,
         )))
     }
@@ -159,9 +161,9 @@ impl Bureau {
         self.build(
             account,
             model,
-            &current.tuning,
+            current.tuning(),
             None,
-            current.max_tokens_override,
+            current.max_tokens_override(),
         )
     }
 

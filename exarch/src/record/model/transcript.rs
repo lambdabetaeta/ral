@@ -4,10 +4,11 @@
 //! is parsed.
 
 use super::{Body, Context, Pointer, Turn, into_chat_messages, not_recorded_refusal_turn};
-use crate::agent::log::{
-    GrepAnswer, GrepHit, Role, TranscriptMessage, TranscriptPart, TranscriptTurn,
+use crate::provider::tools::RAL_TOOL;
+use crate::record::{
+    Entry, GrepAnswer, GrepHit, Locus, Protocol, Record, Role, TranscriptMessage, TranscriptPart,
+    TranscriptTurn,
 };
-use crate::record::{Entry, Locus, Protocol, Record};
 use genai::chat::{Binary, BinarySource, ChatMessage, ContentPart, CustomPart, ToolCall};
 use regex::Regex;
 use std::collections::BTreeSet;
@@ -210,12 +211,12 @@ impl Context {
         self.locate_read(turns)?.turns()
     }
 
-    /// [`Self::read_transcript`]'s first half: resolve every turn the read
+    /// `Self::read_transcript`'s first half: resolve every turn the read
     /// names under the caller's lock, borrowing nothing, so the read itself
     /// can run once that lock is gone.
     ///
     /// # Errors
-    /// Refuses whatever [`Self::read_transcript`] refuses at location time.
+    /// Refuses whatever `Self::read_transcript` refuses at location time.
     pub(crate) fn locate_read(&self, turns: &[u64]) -> Result<TranscriptRead, String> {
         Ok(TranscriptRead {
             turns: self.located(&self.readable(turns)?),
@@ -273,7 +274,7 @@ impl Context {
     /// only the first runs under the session lock.
     ///
     /// # Errors
-    /// Refuses a narrowing [`Self::read_transcript`] refuses.
+    /// Refuses a narrowing `Self::read_transcript` refuses.
     #[cfg(test)]
     pub(crate) fn grep_transcript(
         &self,
@@ -283,14 +284,14 @@ impl Context {
         self.locate_grep(turns)?.grep(pattern)
     }
 
-    /// [`Self::grep_transcript`]'s first half: where every searchable turn
+    /// `Self::grep_transcript`'s first half: where every searchable turn
     /// lies, resolved under the caller's lock and borrowing nothing.
     ///
     /// With no narrowing at all the whole transcript is searched, bar the
     /// turn in hand.
     ///
     /// # Errors
-    /// Refuses whatever [`Self::grep_transcript`] refuses at location time.
+    /// Refuses whatever `Self::grep_transcript` refuses at location time.
     pub(crate) fn locate_grep(&self, turns: Option<&[u64]>) -> Result<TranscriptRead, String> {
         let Some(narrowing) = turns else {
             return Ok(TranscriptRead {
@@ -432,7 +433,7 @@ fn transcript_program(call: &ToolCall) -> TranscriptPart {
         .as_object()
         .map(|args| args.keys().cloned().collect())
         .unwrap_or_default();
-    let source = if call.fn_name == crate::shell_eval::tools::ral::NAME {
+    let source = if call.fn_name == RAL_TOOL {
         call.fn_arguments
             .get("cmd")
             .and_then(serde_json::Value::as_str)

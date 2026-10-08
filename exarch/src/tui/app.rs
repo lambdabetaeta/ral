@@ -1,6 +1,6 @@
 //! One [`App`] owns the tabs, scrollbacks, prompt, and gesture state, and folds
-//! the [`crate::bus::Signal`] stream — [`Signal::Fact`] through [`Self::fact`],
-//! [`Signal::Transient`] through [`Self::transient`] — into scrollback blocks.
+//! the [`crate::bus::Signal`] stream — `Fact` through [`App::fact`],
+//! `Transient` through [`App::transient`] — into scrollback blocks.
 
 use super::banner;
 use super::block::{AgentSlot, Chrome};
@@ -17,9 +17,11 @@ use super::scrollback::Scrollback;
 use super::tabs::{TabRow, Tabs};
 use super::terminal::{Term, osc52_copy};
 use crate::agent::Agent;
-use crate::bus::{AgentId, AgentState, BusReceiver, Inbox};
+use crate::agent::fleet::Fleet;
+use crate::bus::{BusReceiver, Inbox};
 use crate::provider::identity::Account;
 use crate::provider::{Provider, Usage};
+use crate::record::{AgentId, AgentState};
 use crate::record::{Display, Forensic, Record, Recorded, Transient};
 
 use ratatui::crossterm::event::{
@@ -72,7 +74,7 @@ pub(crate) struct App {
     /// Armed by [`Self::clear`]: drops root's straggler events — tokens the
     /// worker emitted before the streaming select noticed the cancel — until
     /// the clear acknowledgement. Sub-agent tabs are covered instead by the
-    /// `dying` window in [`Self::handle`].
+    /// `dying` window in [`Self::admits`].
     root_clear_drain: bool,
     pub(super) cwd_basename: String,
     /// Lets `render::emit_tab_title` skip the write when the title is unchanged.
@@ -80,8 +82,14 @@ pub(crate) struct App {
 }
 
 impl App {
-    pub fn new(root: &Arc<Agent>, vi: bool, append_log: bool, inbox: Inbox) -> Self {
-        let tabs = Tabs::new(root, append_log);
+    pub fn new(
+        root: &Arc<Agent>,
+        fleet: Arc<Fleet>,
+        vi: bool,
+        append_log: bool,
+        inbox: Inbox,
+    ) -> Self {
+        let tabs = Tabs::new(root, fleet, append_log);
         let cwd_basename = std::env::current_dir()
             .ok()
             .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
@@ -235,7 +243,7 @@ impl App {
     /// Age out sub-session tabs, reset root scrollback, zero cost, redraw the
     /// banner. The workers `/clear` cancels fade out through the usual
     /// `dying`/`LINGER` path, so their scrollbacks still reach `flush_logs`.
-    pub fn clear(&mut self, info: &banner::SessionInfo<'_>, term: &mut Term) -> io::Result<()> {
+    pub fn clear(&mut self, info: &crate::SessionInfo<'_>, term: &mut Term) -> io::Result<()> {
         let root = self.tabs.root();
         // A tab already dying keeps its earlier death instant, so a child that
         // died just before the clear is not given a fresh full window.
@@ -256,8 +264,8 @@ impl App {
     }
 
     /// The dying-tab guard and the `/clear` drain gate, shared by every
-    /// entry point a `Signal` reaches `App` through ([`Self::handle`],
-    /// [`Self::fact`], [`Self::transient`]).
+    /// entry point a `Signal` reaches `App` through ([`Self::fact`],
+    /// [`Self::transient`]).
     ///
     /// A tab in the linger window is frozen: it still renders its final frame
     /// and ages out, but no further event belongs in it, so a worker
@@ -314,7 +322,7 @@ impl App {
 
     /// Draw one live-only transient directly, with no log-backed fold: the
     /// mirror of [`Self::fact`] for [`crate::bus::Signal::Transient`].
-    /// [`Transient::Born`]/[`Died`]/[`Resources`] need the tabs a bare
+    /// [`Transient::Born`]/[`Transient::Died`]/[`Transient::Resources`] need the tabs a bare
     /// `Scrollback` cannot see, so they are answered here; everything else
     /// forwards to [`Scrollback::transient`] on the recording scrollback.
     pub fn transient(&mut self, id: AgentId, t: Transient, bus: &BusReceiver) {
@@ -330,7 +338,6 @@ impl App {
         }
         match t {
             Transient::Born {
-                agent,
                 log_dir,
                 name,
                 parent,
@@ -340,8 +347,7 @@ impl App {
                     reason = "modulus by AGENT_HUES.len() yields 0..6, fits u8"
                 )]
                 let agent_slot = AgentSlot((self.tabs.len() % AGENT_HUES.len()) as u8);
-                self.tabs
-                    .born(id, agent, &log_dir, name, parent, agent_slot);
+                self.tabs.born(id, &log_dir, name, parent, agent_slot);
             }
             // Root never enters the linger window; it outlives the session.
             Transient::Died => self.tabs.died(id),
@@ -355,12 +361,7 @@ impl App {
     /// appends the accumulators it owns.  Here, at the render seam, because
     /// only this thread may read the tabs and scrollbacks.  Chrome, never
     /// recorded — no `Display` twin exists to draw it instead.
-    fn frontend_resources(
-        &mut self,
-        id: AgentId,
-        mut card: crate::bus::card::Card,
-        bus: &BusReceiver,
-    ) {
+    fn frontend_resources(&mut self, id: AgentId, mut card: crate::card::Card, bus: &BusReceiver) {
         let (blocks, rows, bytes) = self
             .tabs
             .scrollback(id)
@@ -378,7 +379,7 @@ impl App {
                 bytes: bus.bytes() as u64,
             },
         );
-        card.0.push(crate::bus::card::Mark::heading("frontend"));
+        card.0.push(crate::card::Mark::heading("frontend"));
         card.0.push(crate::agent::resources::rows_mark(&frontend));
         self.push_chrome(id, Chrome::Framed(card));
     }
@@ -568,7 +569,7 @@ impl App {
         Ok(sb.flush_log()?.to_path_buf())
     }
 
-    pub fn banner(&mut self, term: &mut Term, s: &banner::SessionInfo<'_>) -> io::Result<()> {
+    pub fn banner(&mut self, term: &mut Term, s: &crate::SessionInfo<'_>) -> io::Result<()> {
         if let Some(sb) = self.tabs.scrollback_mut(self.tabs.root()) {
             sb.push_chrome(Chrome::Opening(banner::session_card(s)));
         }
@@ -577,265 +578,4 @@ impl App {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::agent::testkit::{TestAgentSpec, test_agent};
-    use crate::bus::card::{Card, Mark};
-    use crate::fleet::Fleet;
-    use crate::tui::palette::READ_W;
-    use crate::tui::row::Row;
-    use ral_core::types::{Observation, Observed};
-
-    /// The trunk is returned alongside its `App` because the frontend holds it
-    /// only weakly: dropping it here would settle the agent mid-test.
-    fn app() -> (App, BusReceiver, Arc<Agent>) {
-        let (_tx, rx) = crate::bus::channel();
-        let fleet = Fleet::for_test();
-        let root = test_agent(&fleet, TestAgentSpec::new("main")).expect("a fresh trunk");
-        let app = App::new(&root, false, false, Inbox::new());
-        (app, rx, root)
-    }
-
-    fn text(app: &mut App, id: AgentId) -> String {
-        let w = app
-            .tabs
-            .scrollback_mut(id)
-            .expect("the tab under test has a scrollback")
-            .render_window(READ_W, 40);
-        w.lines
-            .iter()
-            .map(Row::plain)
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    #[test]
-    fn matrix_cursor_does_not_change_focus_until_enter() {
-        let (mut app, rx, root) = app();
-        let child = root.id + 1;
-        app.transient(
-            child,
-            Transient::Born {
-                agent: std::sync::Weak::new(),
-                log_dir: std::env::temp_dir(),
-                name: "child".into(),
-                parent: Some(root.id),
-            },
-            &rx,
-        );
-
-        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
-        app.key(key(KeyCode::Tab));
-        assert!(app.matrix_navigating(), "Tab enters the matrix");
-        assert_eq!(
-            app.matrix_cursor(&app.tabs.rows()),
-            Some(root.id),
-            "the cursor starts on the attached agent"
-        );
-
-        app.key(key(KeyCode::Down));
-        assert_eq!(
-            app.matrix_cursor(&app.tabs.rows()),
-            Some(child),
-            "arrows move the matrix cursor"
-        );
-        assert_eq!(
-            app.tabs.focused(),
-            root.id,
-            "moving the cursor does not retarget the prompt"
-        );
-
-        app.key(key(KeyCode::Enter));
-        assert_eq!(app.tabs.focused(), child, "Enter attaches to the cursor");
-        assert!(!app.matrix_navigating(), "and leaves the matrix");
-    }
-
-    #[test]
-    fn esc_leaves_the_matrix_without_moving_focus() {
-        let (mut app, rx, root) = app();
-        app.transient(
-            root.id + 1,
-            Transient::Born {
-                agent: std::sync::Weak::new(),
-                log_dir: std::env::temp_dir(),
-                name: "child".into(),
-                parent: Some(root.id),
-            },
-            &rx,
-        );
-
-        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
-        app.key(key(KeyCode::Tab));
-        app.key(key(KeyCode::Down));
-        app.key(key(KeyCode::Esc));
-
-        assert!(!app.matrix_navigating(), "Esc leaves the surface");
-        assert_eq!(
-            app.tabs.focused(),
-            root.id,
-            "an abandoned cursor attaches to nothing"
-        );
-    }
-
-    #[test]
-    fn matrix_mode_swallows_prompt_editing() {
-        let (mut app, rx, root) = app();
-        app.transient(
-            root.id + 1,
-            Transient::Born {
-                agent: std::sync::Weak::new(),
-                log_dir: std::env::temp_dir(),
-                name: "child".into(),
-                parent: Some(root.id),
-            },
-            &rx,
-        );
-        app.prompt_state.set_prompt("draft");
-        app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        app.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
-        assert_eq!(
-            app.prompt_state.prompt_text(),
-            "draft",
-            "matrix keys cannot edit the prompt"
-        );
-    }
-
-    /// A pin is ambient register state: it lands in the scrollback's own
-    /// register, never in the mirror, so it cannot split the run it is offered
-    /// to no block of.  The call and its two reads are one group either side
-    /// of it.
-    #[test]
-    fn a_pin_never_splits_a_coalesced_observation_run() {
-        use crate::record::{Display, Locus, Record, Recorded, Seq};
-        use ral_core::fact::Read;
-        use ral_core::first_order::datum::Datum as _;
-
-        let (mut app, rx, root) = app();
-        let mut seq = 0;
-        let mut fact = |app: &mut App, display| {
-            seq += 1;
-            app.fact(
-                root.id,
-                &Recorded::new(Locus::placeholder(Seq::new(seq)), Record::Display(display)),
-            );
-        };
-        let read_at = |path: &str| {
-            Observation::instant(None, None, Observed::Read(Read { path: path.into() })).encode()
-        };
-
-        fact(
-            &mut app,
-            Display::ToolCall {
-                tool: "ral".into(),
-                cmd: "read 'a.rs'".into(),
-                summary: Some("look around".into()),
-            },
-        );
-        fact(
-            &mut app,
-            Display::Observation {
-                value: read_at("a.rs"),
-            },
-        );
-        app.transient(
-            root.id,
-            Transient::Pin {
-                key: "tasks".into(),
-                card: Card(vec![Mark::Raw {
-                    bytes: b"one left".to_vec(),
-                }]),
-            },
-            &rx,
-        );
-        fact(
-            &mut app,
-            Display::Observation {
-                value: read_at("b.rs"),
-            },
-        );
-
-        let sb = app.tabs.scrollback(root.id).expect("root has a scrollback");
-        assert_eq!(
-            sb.probe_figures().0,
-            1,
-            "the call and the two reads it produced are one block"
-        );
-        assert_eq!(
-            sb.pins()
-                .iter()
-                .map(|(k, _)| k.as_str())
-                .collect::<Vec<_>>(),
-            ["tasks"],
-            "the pin lands in the register, never in scrollback"
-        );
-        let all = text(&mut app, root.id);
-        assert!(
-            all.contains("a.rs") && all.contains("b.rs"),
-            "both reads render in the one block: {all:?}"
-        );
-    }
-
-    /// A tab in the linger window has rendered its final frame: a straggler
-    /// from a worker whose cancel it outran must not paint into it.
-    #[test]
-    fn a_dying_tab_admits_no_straggler() {
-        use crate::record::{Display, Locus, Record, Recorded, Seq};
-
-        let (mut app, rx, root) = app();
-        let helper = root.id + 1;
-        app.transient(
-            helper,
-            Transient::Born {
-                agent: std::sync::Weak::new(),
-                log_dir: std::env::temp_dir(),
-                name: "helper".into(),
-                parent: Some(root.id),
-            },
-            &rx,
-        );
-        let locus = Locus::placeholder(Seq::new(1));
-        app.fact(
-            helper,
-            &Recorded::new(
-                locus,
-                Record::Display(Display::Answer {
-                    text: "alive".into(),
-                }),
-            ),
-        );
-        app.transient(helper, Transient::Died, &rx);
-        let blocks = app
-            .tabs
-            .scrollback(helper)
-            .expect("the child keeps its scrollback through the linger window")
-            .probe_figures()
-            .0;
-
-        let locus = Locus::placeholder(Seq::new(2));
-        app.fact(
-            helper,
-            &Recorded::new(
-                locus,
-                Record::Display(Display::Answer {
-                    text: "straggler".into(),
-                }),
-            ),
-        );
-
-        let all = text(&mut app, helper);
-        assert!(all.contains("alive"), "the final frame survives: {all:?}");
-        assert!(
-            !all.contains("straggler"),
-            "a dying tab admits no post-mortem text: {all:?}"
-        );
-        assert_eq!(
-            app.tabs
-                .scrollback(helper)
-                .expect("scrollback")
-                .probe_figures()
-                .0,
-            blocks,
-            "and gains no block from the events it dropped"
-        );
-    }
-}
+mod tests;

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 446e3123
-generated_at_date: 2026-10-02
+generated_at_commit: 6c9047b6
+generated_at_date: 2026-10-08
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/builtins.rs, exarch/data/agent.ral]
 ---
 
@@ -78,7 +78,7 @@ through `report::tool_result`, which also reports whether the run failed:
 Surface delivery and enquiry answering are not `Run` fields: `dispatch_to_report`
 takes one `host: Arc<dyn Host>` —
 [[map/core/engine-protocol|engine-protocol]]'s single object for a run's whole
-host-facing surface. Every real caller builds `fleet::desk::RunHost`, pairing
+host-facing surface. Every real caller builds `agent::desk::RunHost`, pairing
 the per-call `ExarchDesk` with a `SurfaceApplier`
 ([[map/exarch/builtins|builtins]]); a bare `SurfaceApplier` alone is the mute
 host the harness runs under, whose `enquire` answers the honest
@@ -87,8 +87,8 @@ host the harness runs under, whose `enquire` answers the honest
 `BINDING_IDLE_CALLS` (256, beside `DETACHED_WORKER_CEILING`) is the other
 lease constant this module owns but does not put on the request: it is not
 per-run policy, it is per-*shell* policy, armed once by
-`bootstrap::arm_session_ledgers` — the one ledger-policy site, applied by
-the one recipe both carriers boot through (`bootstrap::engine_boot_shell`)
+`shell_eval::arm_session_ledgers` — the one ledger-policy site, applied by
+the one recipe both carriers boot through (`boot::engine_boot_shell`)
 and to each fork before it is parked
 ([[map/exarch/agent|agent]]; [[decisions/260629_agent-binding-reaping|agent-binding-reaping]]).
 Reusing the settled-worker-retention figure is deliberate: one ral-call

@@ -115,7 +115,7 @@ impl AuditLog {
     ///
     /// # Errors
     /// Returns `Err` if the ledger cannot be created or opened.
-    pub fn open(app: crate::bootstrap::App) -> std::io::Result<Self> {
+    pub fn open(app: crate::app::App) -> std::io::Result<Self> {
         let path = app
             .xdg_dir(ral_core::host::XdgKind::State)
             .join("net-audit.jsonl");
@@ -220,7 +220,7 @@ impl Egress {
     ///
     /// # Errors
     /// Returns `Err` naming whichever of the two failed.
-    pub fn open(app: crate::bootstrap::App) -> Result<Self, String> {
+    pub fn open(app: crate::app::App) -> Result<Self, String> {
         let policy = crate::net_policy::load()?;
         Ok(Self {
             policy: Arc::new(policy),

@@ -1,16 +1,15 @@
 //! Fixtures shared by two or more `mod tests` across the crate; a helper only
 //! one of them needs belongs in that file instead.
 
-use crate::agent::cancel::InterruptTarget;
-use crate::agent::{
-    Agent, Avatar, Birth, ProviderHandle, RecordedAccount, RootConfig, RootSeat, SPAWN_FUEL, Trunk,
-};
-use crate::bootstrap::Scratch;
+use crate::agent::fleet::Fleet;
+use crate::agent::{Agent, Avatar, Birth, ProviderHandle, RootConfig, RootSeat, SPAWN_FUEL, Trunk};
+use crate::app::Scratch;
 use crate::bus::{AgentOutcome, Emitter, Mailbox};
-use crate::fleet::Fleet;
+use crate::cancel::InterruptTarget;
+use crate::provider::Toolset;
 use crate::provider::scripted::Script;
 use crate::provider::{Provider, ToolCall};
-use crate::shell_eval::tools::Toolset;
+use crate::record::RecordedAccount;
 use ral_core::Shell;
 use ral_core::Value;
 use ral_core::engine::EngineInstaller;
@@ -34,7 +33,7 @@ thread_local! {
     reason = "must match EngineInstaller::boot's signature, which can genuinely refuse"
 )]
 fn dressed_boot(attach: &ral_core::protocol::Attach) -> Result<ral_core::engine::Booted, String> {
-    let mut booted = crate::bootstrap::engine_boot_shell(attach)?;
+    let mut booted = crate::boot::engine_boot_shell(attach)?;
     if let Some(dress) = DRESS.take() {
         dress(&mut booted.shell);
     }
@@ -108,7 +107,7 @@ pub(crate) fn scripted(model: &str, script: Script) -> Arc<Provider> {
 /// What a fleet-focused test varies about a synthetic agent — no seat, no
 /// shell, nothing an attend loop would touch.  Every other field is the inert
 /// placeholder [`test_agent`] fills in; what the run shares is the fleet's
-/// own [`Launch`](crate::fleet::Launch).
+/// own [`Launch`](crate::agent::fleet::Launch).
 pub(crate) struct TestAgentSpec {
     pub(crate) name: String,
     pub(crate) reach: InterruptTarget,
@@ -168,7 +167,7 @@ const UNWRITABLE_LOG_DIR: &str = r"\\.\NUL\test-agent";
 pub(crate) fn test_agent(
     fleet: &Arc<Fleet>,
     spec: TestAgentSpec,
-) -> Result<Arc<Agent>, crate::fleet::Unborn> {
+) -> Result<Arc<Agent>, crate::agent::fleet::Unborn> {
     let TestAgentSpec {
         name,
         reach,
@@ -234,7 +233,7 @@ pub(crate) fn scope_has(session: &Avatar, name: &str) -> bool {
 /// test needs before it has anything addressable to name. The log is private
 /// to this module, so a test outside it reaches an exchange through here.
 pub(crate) fn close_exchange(session: &Avatar, prompt: &str, answer: &str) {
-    let mut log = session.log.lock();
+    let mut log = session.log.borrow_mut();
     log.append_user(prompt.to_string(), None)
         .expect("a test prompt");
     log.append_assistant(
@@ -306,7 +305,7 @@ pub(crate) fn searchless_trunk() -> Avatar {
 fn root(trunk: Trunk, tools: Toolset) -> Avatar {
     // The run dir sits beside the scratch, which the seat below owns, so the
     // trunk's whole footprint goes when the trunk does.
-    let scratch = Scratch::for_test(crate::bootstrap::EXARCH, "trunk").expect("scratch dir");
+    let scratch = Scratch::for_test(crate::app::EXARCH, "trunk").expect("scratch dir");
     let run_dir = scratch.test_sibling("run").expect("run dir");
     Avatar::root(
         RootConfig {

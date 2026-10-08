@@ -7,7 +7,7 @@ use unicode_width::UnicodeWidthStr;
 // ── Color palette ────────────────────────────────────────────────────────────
 
 /// Muted chrome hues; card spans reach them through a nominal
-/// [`crate::bus::card::Role`] rather than naming a colour.
+/// [`crate::card::Role`] rather than naming a colour.
 pub(super) const CYAN: Color = Color::Rgb(135, 200, 215);
 pub(super) const LIME: Color = Color::Rgb(165, 210, 155);
 pub(super) const PURPLE: Color = Color::Rgb(175, 145, 210);

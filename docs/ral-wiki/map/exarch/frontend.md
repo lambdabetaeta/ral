@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 4f112999
-generated_at_date: 2026-10-07
-covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/agent/log.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/signals.rs, exarch/src/prompt/host.rs]
+generated_at_commit: 6c9047b6
+generated_at_date: 2026-10-08
+covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/record/session.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/cancel.rs, exarch/src/boot.rs, exarch/src/agent/seat.rs, exarch/src/signals.rs, exarch/src/prompt/host.rs]
 ---
 
 # Map: exarch / frontend
@@ -109,6 +109,10 @@ stepped by `Scrollback::fact`. Resume hands the scrollback a replayed memo
 (`Scrollback::seed`) and builds its mirror block by block the way a live commit
 does — so the live path and resume are one construction.
 
+The layering is a DAG ([[invariants/exarch-is-a-dag|exarch-is-a-dag]]): `record`
+publishes through its `Publish` trait and knows no `bus`, and `bus` knows no
+`agent`, so the seam above is the only way a worker's fact reaches a frontend.
+
 The TUI mints one **session-lived** bus, so a detached async agent clones its
 sender and streams a live tab through the same id-routed draw path a sync child
 uses ([[decisions/260621_session-lifetime-event-bus|session-lifetime-event-bus]]);
@@ -116,7 +120,7 @@ the one-shot/headless conversational drivers use a **per-exchange** bus with
 muted children, while `converse_settled` uses `per_exchange_live` so fleet work
 stays visible until quiescence.
 
-`agent/log.rs` is the canonical per-session record. `AgentLog` owns two things:
+`record/session.rs` is the canonical per-session record. `AgentLog` owns two things:
 
 - the model fold's `Context` (`record/model.rs`) — its only session state,
   and the one every query about the context is asked of (`AgentLog::context`):
@@ -147,7 +151,7 @@ rather than repeating
 So the file keeps the whole session however long it runs, while the window
 keeps only what fits; crash durability still lives in `record.jsonl`, which is
 flushed per record. Both files live under the durable per-run log directory
-(`bootstrap::log_run_dir`,
+(`App::log_run_dir`, `app.rs`,
 `$XDG_STATE_HOME/exarch/<project>/<run>/sessions/<id>/`). Every touch of that
 file lives in one place: `tui/scrollback.rs` keeps both the writer (`Log`) and
 the `/export` copy (`export_log`) beside each other, the single `user.log` I/O
@@ -449,7 +453,7 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
   offered to it at all: the interrupt outranks every overlay. This is deliberately
   unlike a Tab-only menu that splices
   a lone match without showing one — typing here must never move the buffer on
-  its own. Each row also carries the registry's own `SlashCommand.help` line —
+  its own. Each row also carries the registry's own `Meta.help` line —
   the same sentence `/help` lists — in a dimmer second column, so the popup
   never says less than the listing does; `Menu` drops that column first when
   the terminal is too narrow to hold it.
@@ -483,9 +487,9 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
   `Headless` takes `Sink::drive` as it comes and keeps one `Blocks` memo per
   source agent; it takes a per-exchange bus, so its async children stay muted.
   It is a display only — the durable `record.jsonl` is written by each
-  session's own `agent/log.rs`, in headless exactly as in the TUI.
+  session's own `AgentLog` (`record/session.rs`), in headless exactly as in the TUI.
 
-`agent/cancel.rs` is the per-agent exchange cancellation layered on ral's interrupt
+`cancel.rs` is the per-agent exchange cancellation layered on ral's interrupt
 handling, and `signals.rs` the process's half: the signal dispositions and
 `face`, which forwards an ambient cause to the trunk that launched. Every
 agent holds one **sticky** `Token` (an `Arc<AtomicU8>`) for its
@@ -518,12 +522,13 @@ and `raise_interrupt` calls `request_interrupt` in-process — never a
 group and tick ral's escalation counter.
 A genuine external signal still routes through ral's one cause-carrying
 delivery path ([[decisions/260706_signals-are-causes|signals-are-causes]]).
-`bootstrap::face_process_signals` runs once per entry point: it discards
+`boot::face_process_signals` (`boot.rs`) runs once per entry point: it discards
 stale ral interrupts and installs the cancel chain over ral's handlers. Every
-session shell boots through `bootstrap::engine_boot_shell`, the one
-`EngineInstaller::boot`; `/clear` reboots the seat and then clears the
-escalation tick again (`agent/build.rs`), so `/clear` works after Esc and
-SIGINT after `/clear` still raises cancel. `prompt/host.rs` snapshots the machine (OS, date, cwd,
+session shell boots through `boot::engine_boot_shell`, the one
+`EngineInstaller::boot`; `/clear` reboots the seat (`Seat::clear`,
+`agent/seat.rs`) and republishes the fresh engine's control sender to the
+agent's `InterruptTarget` (`cancel.rs`), so Esc and SIGINT after `/clear` still
+reach the new shell. `prompt/host.rs` snapshots the machine (OS, date, cwd,
 user, home, git state, exarch's log directory) once at startup for the [[map/exarch/policy|system prompt]].
         - `tui.rs` — thin façade: module declarations, re-exports, `LINGER`, `DEMOTE_IDLE`
         - `tui/app.rs` — the `App` orchestrator: event routing, the `root_clear_drain` guard, per-kind push methods
@@ -537,10 +542,10 @@ user, home, git state, exarch's log directory) once at startup for the [[map/exa
         - `tui/render.rs` — `strips` lays the frame out as a value, `draw` paints it; `paint_selection`, `paint_hover`, `footer_hint`, `emit_tab_title`; the screen-side `Row::into_line` flatten
         - `tui/row.rs` — the transcript row: `Row { gutter, content }`, `rail`/`wash`/`hover`/`plain`/`into_line`, the `RAIL_W` gutter-width invariant
         - `tui/banner.rs` — startup metadata: `SessionInfo`, `session_card` (including the compile-time package version, omitting the disposable scratch path), `legend_panel`, ART/EAGLE constants; `opening` lays the wordmark over the width-matched card as the one rail-free `Chrome::Opening`, neither paying an inset of its own so both start in the column the rail margin already opens
-        - `tui/commands.rs` — slash command registry: `SlashCommand`, `lookup_command`, `command_candidates`, `route_submit`, handler functions
+        - `tui/commands.rs` — slash command registry: the `Verb` list and its `Meta`, `Command`, `lookup_command`, `command_candidates`, `route_submit`, handler functions
         - `tui/status.rs` — status line: `rule_line`, `ctx_ramp`, `wait_bar`, `wait_step`
         - `tui/matrix.rs` — bounded agent-tree matrix: `Matrix` (the one retained value, an agent identity), `Nav`/`nav` reading a key as a gesture, `MatrixSort`, `forest`/`TreeRow` and their connectors, the closed-form `view` and its boundary lines, `neighbour`, `strip`'s justified row projection, `turn_cells`
-        - `tui/diff.rs` — a patch as a block: `DIFF_PEEK_ROWS`, `diff_body` and its graded `diff_capped`, `patch_header`'s size and grain, the hunk rows numbered against one `DiffCols` gutter, `elision_row`
+        - `tui/diff.rs` — a patch as a block: `DIFF_PEEK_ROWS`, `diff_body`'s graded rungs, `header`'s size and grain, the hunk rows numbered against one `DiffCols` gutter, `elision_row`
         - `tui/group.rs` — the `▸` part of a group: `Call`, one burst of `ral` work that its effects join, `aggregate_magnitude`, `body`
         - `tui/line.rs` — line builders turning a typed `Card` into rows: `text`, `size_bar`, `thinking_header`, `user_prompt`, `act_row`, `wash`; no rail glyph, which `Block::railed` sets
         - `tui/rail.rs` — the marginal rail: `RailKind` for shape, hue from `palette::AGENT_HUES`, `value_step`/`lighten` for lightness

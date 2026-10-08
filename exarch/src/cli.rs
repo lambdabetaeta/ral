@@ -3,6 +3,7 @@
 //! `prompt::assemble`.
 
 use crate::headless::OutputFormat;
+use crate::prompt::EditScheme;
 use clap::{ArgGroup, Parser, Subcommand};
 
 /// All flags are long-form only: short letters would collide, and there are
@@ -167,18 +168,6 @@ impl Cli {
     pub(crate) fn is_headless(&self) -> bool {
         self.headless || self.prompt.is_some()
     }
-}
-
-/// The editing scheme `--edit` selects: one system-prompt section, since both
-/// editing builtins are registered regardless.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
-pub enum EditScheme {
-    /// Teach the agent to inspect text and replace an exact string. This is the
-    /// default.
-    Replace,
-    /// Teach the agent to inspect line hashes and make changes tied to the
-    /// lines it inspected.
-    Hash,
 }
 
 /// An out-of-band action that runs and exits instead of starting a session.

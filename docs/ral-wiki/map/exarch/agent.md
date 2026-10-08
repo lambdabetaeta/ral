@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 4f112999
-generated_at_date: 2026-10-07
-covers_paths: [exarch/src/agent.rs, exarch/src/latch.rs, exarch/src/agent/, exarch/src/signals.rs, exarch/src/fleet.rs, exarch/src/fleet/desk.rs, exarch/src/fleet/roster.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
+generated_at_commit: 6c9047b6
+generated_at_date: 2026-10-08
+covers_paths: [exarch/src/agent.rs, exarch/src/latch.rs, exarch/src/agent/, exarch/src/signals.rs, exarch/src/cancel.rs, exarch/src/schedule.rs, exarch/src/enquiry.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
 
 # Map: exarch / agent
@@ -11,7 +11,7 @@ may touch what ([[decisions/260827_agent-and-avatar|agent-and-avatar]]).
 
 **`Agent` is the public half**, held behind an `Arc` the fleet shares:
 identity (`id`, `name`, `log_dir`), the two cancel layers (`token:
-cancel::Token` and the eval-layer `reach: InterruptTarget`), the sender half
+cancel::Token` and the eval-layer `reach: InterruptTarget`, both in the crate-level `cancel.rs`), the sender half
 of its own `mailbox`, an owned hot-swappable `provider: ProviderHandle`, the
 per-node config fixed at birth (`caps`, `fuel`, `returns`, `search`, the
 resolved `system` prompt), the single-writer `status: Mutex<Status>` — `{
@@ -31,10 +31,10 @@ with a stamp forgotten, skewed to another inbox, or refreshed at push time;
 the destination judges it at its own pop.
 
 **`Avatar` is the private half**: the canonical
-[[internals/session-record|model projection]] (`AgentLog`), a **seat**
+[[internals/session-record|model projection]] (`AgentLog`, `record/session.rs`), a **seat**
 (`agent/seat.rs`) carrying the transport this run drives through —
 `Seat::Identity`, an `IdentityTransport` booted through the one recipe
-(`bootstrap::engine_boot_shell`, the table `exarch::INSTALLERS` both carriers
+(`boot::engine_boot_shell`, the table `exarch::INSTALLERS` both carriers
 share) — a root keeps the `Attach` it was born from and the session `Scratch`
 that `Attach` names, an adopted fork keeps neither — or `Seat::Wire`, a
 `WireTransport` driving a remote engine, one process per session, keeping the
@@ -42,7 +42,7 @@ that `Attach` names, an adopted fork keeps neither — or `Seat::Wire`, a
 ([[map/core/engine-protocol|engine-protocol]]) — the
 canonical run and probe vocabulary either way
 ([[map/core/engine-protocol|engine-protocol]]) — plus the `inbox`, the
-`reply: ReplyCell` the desk's `reply` handler stages into, the `readings`
+`reply: ReplyCell` (an `Arc<AtomicRefCell<_>>`, borrowed rather than locked, as `LogCell` is for the `AgentLog`) the desk's `reply` handler stages into, the `readings`
 (the token `Measure`, the `Gauges`, the `Nudges` — everything this avatar has
 measured and told about one context, reborn whole with it), the
 `disk_checked` instant, and the `Arc<Agent>` it embodies (`.agent`,
@@ -110,13 +110,13 @@ parent whose own avatar has gone is still a reachable `Agent` with a
 terminated token, not an absence. `Agent::children` holds `Weak`, so there
 is no cycle to reason about and a walk prunes what has settled. **Nothing
 holds an `Arc<Agent>` to a descendant** — every reaper closure
-(`fleet.rs`'s `lease_fire`) and every upward result (`AgentResult`) carries
+(`agent/fleet.rs`'s `lease_fire`) and every upward result (`AgentResult`) carries
 a name or a `Weak`, never a strong handle down the tree.
 
 The **trunk** is the parent-less node (`parent = None`), built by
 `Avatar::root(RootConfig, RootSeat, provider)` over a fresh log, or by
 `Avatar::resume(RootConfig, RootSeat, provider)` over session 0's record in
-`run_dir` replayed, which also hands back the `Resumed { turn, bytes }`
+`run_dir` replayed, which also hands back the `Resumed { turn, bytes }` (`record/session.rs`)
 summary the TUI's banner shows. `RootConfig` carries the prompt, caps, `fuel`
 (exarch's and synod's launch sites pass `SPAWN_FUEL`), how the trunk is driven
 (`Trunk::{Headless, Attended, Embedded}`), the `Toolset` requests advertise
@@ -196,7 +196,7 @@ nothing — a bare conversation, the same attend loop.
 Three nested loops, the same for trunk and child alike:
 
 - `attend` — the per-agent lifetime. The trunk hears the OS signals
-  (`signals::face`, held at each site that launches a process trunk —
+  (`signals::face(reach)`, taking a `cancel::Reach`, held at each site that launches a process trunk —
   `headless::run`, `headless::converse_settled`, and `tui::tui_loop::run` — for
   the whole attend), which forwards each to its `Agent::interrupt` or
   `Agent::cancel`; a sub-agent hears none, being reached through the tree
@@ -314,8 +314,8 @@ the calls until a settled entry expires, on the engine's own clock — which
 `/resources` renders as the nearest expiry. Retention notices need no
 plumbing of their own: they ride the same drain above.
 
-**The binding-lease ledger** is armed by `bootstrap::arm_session_ledgers` —
-the one policy site, run by the one recipe (`engine_boot_shell`) right after
+**The binding-lease ledger** is armed by `shell_eval::arm_session_ledgers` —
+the one policy site, run by the one recipe (`boot::engine_boot_shell`) right after
 the `Attach`'s env is seeded as bindings (seeding then arming stay one visible
 sequence), and over each parked fork by `_exarch-branch`'s and `start`'s shared
 `fork_then_enquire`, as a hatched child's recipe arms its own — with
@@ -515,7 +515,7 @@ refused, `Provider::complete` refuses every later request the hold covers
 
 ## The Fleet
 
-`fleet.rs`'s `Fleet` is `{ names: Mutex<HashMap<String, Weak<Agent>>>, roots:
+`agent/fleet.rs`'s `Fleet` is `{ names: Mutex<HashMap<String, Weak<Agent>>>, roots:
 Mutex<Vec<Weak<Agent>>>, lease: Duration, launch: Launch }` — two `Weak`
 indices, the idle-lease bound, and the **`Launch`**: what every node of one
 run shares, fixed once — `attended`, `allow_schedule`, `resume_on_reset`,
@@ -558,7 +558,7 @@ shares through `Fleet` is only identity resolution and the lease.
   lease is a consequence of having a reporting parent and of nothing else,
   no caller chooses it — is reaped once its idle span (`Agent::idle`,
   measured off the *inbox's* last-exchange clock, seeded at birth) exceeds
-  the fleet's bound: the reaper (`fleet.rs`'s `lease_fire`, on the process
+  the fleet's bound: the reaper (`agent/fleet.rs`'s `lease_fire`, on the process
   reaper daemon thread) re-arms itself for the remaining margin on every
   fire that finds the agent's `Weak` still upgrading and under bound, and
   cancels the subtree with `CancelCause::Deadline`
@@ -584,7 +584,7 @@ earlier, before it forks a log or dials anything, but only `enrol` is
 authoritative. A name is also the handle `` exarch-agents `message ``/`` `cancel `` resolve by,
 through `Fleet::resolve` — and then, for `` `cancel `` and `` `read `` alone,
 the scope climb (`Agent::descendant`); a message needs no climb. The roster
-(`fleet::roster::listing`) walks the same tree instead — `Agent::walk` from
+(`agent/roster.rs`'s `listing`) walks the same tree instead — `Agent::walk` from
 the reader's own root — never the name map, yet lands on the same set: every
 enrolled agent is at once named and placed, so what a model can see through
 `` `list `` is exactly what it can reach through `` `message ``/`` `cancel ``.
@@ -616,7 +616,7 @@ ambient foreground cause, which only the trunk's session is minted facing
 [[internals/cancellation|cancellation]]). `Esc` / Ctrl-C, by contrast, are a
 **per-tab exchange interrupt**, not a cascade: they stop only the *focused* agent's
 current exchange (`Agent::interrupt`, reached through the focused tab's own
-`Weak`, plus `cancel::raise_interrupt`
+`Weak`, plus `signals::raise_interrupt`
 on the trunk), leaving its descendants running
 ([[decisions/260705_cancel-per-tab|cancel-per-tab]]); the focused agent's
 sticky token is cleared at each exchange boundary (`Token::reset`).
@@ -813,7 +813,7 @@ controlling terminal the TUI owns).
   ([[map/core/shell-state|the flow matrix]]). Closures stay live, and a parent
   that reaches no handle forks with its scope shared, not copied.
 - **The lease.** On the in-process (`Fork::Park`) arm the fork is dressed with
-  `bootstrap::arm_session_ledgers`, which seals every name visible at that
+  `shell_eval::arm_session_ledgers`, which seals every name visible at that
   instant as baseline: inherited scratch is never pruned in the child
   (`fork_child_inherited_scratch_is_baseline`).
 There is no flow-back: the child's `cd`, env, and new bindings die with it. An

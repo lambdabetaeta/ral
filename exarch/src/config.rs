@@ -14,8 +14,8 @@
 //! write, and it evaluates under [`Capabilities::deny_all`] — with `exec` denied
 //! there is no route to the network, so the in-process guard suffices.
 
+use crate::provider::identity::{adapter_for_protocol, protocol_for_adapter, protocols};
 use crate::provider::{Auth, Service, ServiceName, built_in};
-use genai::adapter::AdapterKind;
 use ral_core::Shell;
 use ral_core::capability::Capabilities;
 use ral_core::types::{Break, Escape, Mooring, Value};
@@ -53,7 +53,7 @@ pub fn disk_warn_bytes() -> Result<Option<u64>, String> {
 /// hard error: a mistyped endpoint is a misdirected agent, not a recoverable
 /// default.
 pub fn load() -> Result<Vec<Service>, String> {
-    let path = crate::bootstrap::EXARCH
+    let path = crate::app::EXARCH
         .xdg_dir(ral_core::host::XdgKind::Config)
         .join(CONFIG_FILE);
     load_declared(&path, LABEL)
@@ -300,59 +300,10 @@ fn optional_string_field(
     }
 }
 
-/// The wire protocols a declaration may name, and the adapter each means:
-/// `completions` is `OpenAI` v1, `responses` is `OpenAI` v2, `anthropic` the
-/// Anthropic native protocol.
-///
-/// One table read in both directions, so a protocol written out is the one
-/// that was read in and neither direction can drift from the other. It is
-/// also the list a window offers, in the order it should offer them — most
-/// familiar first.
-const PROTOCOL_ADAPTERS: &[(&str, AdapterKind)] = &[
-    ("completions", AdapterKind::OpenAI),
-    ("responses", AdapterKind::OpenAIResp),
-    ("anthropic", AdapterKind::Anthropic),
-];
-
-/// The adapter `protocol` names.
-///
-/// # Errors
-/// Returns a sentence naming the admissible protocols, so a window can hand a
-/// typed-in one straight here rather than keeping a second list of its own.
-pub fn adapter_for_protocol(protocol: &str, where_: &str) -> Result<AdapterKind, String> {
-    PROTOCOL_ADAPTERS
-        .iter()
-        .find(|(name, _)| *name == protocol)
-        .map(|(_, adapter)| *adapter)
-        .ok_or_else(|| {
-            format!(
-                "{where_}: unknown protocol '{protocol}'; expected {}",
-                protocols().join(", ")
-            )
-        })
-}
-
-/// The protocol keyword an adapter was decoded from.
-///
-/// `None` for an adapter no declaration could have named: [`save_declared`]
-/// refuses to write one rather than silently filing it under the wrong
-/// protocol.
-pub fn protocol_for_adapter(adapter: AdapterKind) -> Option<&'static str> {
-    PROTOCOL_ADAPTERS
-        .iter()
-        .find(|(_, known)| *known == adapter)
-        .map(|(name, _)| *name)
-}
-
-/// The protocol keywords a window offers, most familiar first — the one table
-/// above, read as a list.
-pub fn protocols() -> Vec<&'static str> {
-    PROTOCOL_ADAPTERS.iter().map(|(name, _)| *name).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use genai::adapter::AdapterKind;
 
     /// Evaluate and decode a config source the way [`load`] does.
     fn parse(source: &str) -> Result<Vec<Service>, String> {

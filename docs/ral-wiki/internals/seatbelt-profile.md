@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 1eee86cd
-verified_at_date: 2026-10-05
+verified_at_commit: 6c9047b6
+verified_at_date: 2026-10-08
 anchors: [apply_profile, build_profile, Profile, emit_fs_restricted, emit_exec_rules, Clause, Filter, emit_ancestor_metadata, existing_system_paths, system_paths, withheld_doors, rendered_ancestors, pinned_dirs, open_search_dir]
 ---
 
@@ -148,7 +148,7 @@ admits being variable-length.
   securityd and, denied, fails as `ssl handshake -9808` and blames a missing
   revision; Apple's `curl` and `git` reach trust through trustd alone. So
   exarch tells cargo to fetch through the `git` binary
-  (`bootstrap::CONFINED_TOOL_SETTINGS`) rather than admit a door that hands the
+  (`app::CONFINED_TOOL_SETTINGS`) rather than admit a door that hands the
   agent the login keychain. `mac_profile_names_every_mach_service` holds the
   shape.
 - **`(allow signal (target same-sandbox))`** binds sending only: a timeout's

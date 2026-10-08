@@ -433,6 +433,56 @@ pub(super) fn adapter_for_model(service: &Service, model: &str) -> AdapterKind {
     }
 }
 
+/// The wire protocols a declaration may name, and the adapter each means:
+/// `completions` is `OpenAI` v1, `responses` is `OpenAI` v2, `anthropic` the
+/// Anthropic native protocol.
+///
+/// One table read in both directions, so a protocol written out is the one
+/// that was read in and neither direction can drift from the other. It is
+/// also the list a window offers, in the order it should offer them — most
+/// familiar first.
+const PROTOCOL_ADAPTERS: &[(&str, AdapterKind)] = &[
+    ("completions", AdapterKind::OpenAI),
+    ("responses", AdapterKind::OpenAIResp),
+    ("anthropic", AdapterKind::Anthropic),
+];
+
+/// The adapter `protocol` names.
+///
+/// # Errors
+/// Returns a sentence naming the admissible protocols, so a window can hand a
+/// typed-in one straight here rather than keeping a second list of its own.
+pub fn adapter_for_protocol(protocol: &str, where_: &str) -> Result<AdapterKind, String> {
+    PROTOCOL_ADAPTERS
+        .iter()
+        .find(|(name, _)| *name == protocol)
+        .map(|(_, adapter)| *adapter)
+        .ok_or_else(|| {
+            format!(
+                "{where_}: unknown protocol '{protocol}'; expected {}",
+                protocols().join(", ")
+            )
+        })
+}
+
+/// The protocol keyword an adapter was decoded from.
+///
+/// `None` for an adapter no declaration could have named: [`crate::config::save_declared`]
+/// refuses to write one rather than silently filing it under the wrong
+/// protocol.
+pub fn protocol_for_adapter(adapter: AdapterKind) -> Option<&'static str> {
+    PROTOCOL_ADAPTERS
+        .iter()
+        .find(|(_, known)| *known == adapter)
+        .map(|(name, _)| *name)
+}
+
+/// The protocol keywords a window offers, most familiar first — the one table
+/// above, read as a list.
+pub fn protocols() -> Vec<&'static str> {
+    PROTOCOL_ADAPTERS.iter().map(|(name, _)| *name).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

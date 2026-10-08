@@ -3,7 +3,7 @@
 //!
 //! Everything a product wants beyond what exarch's own CLI and TUI do:
 //! declaring another endpoint, taking a key back, and finding one account
-//! among the rest by its [`AccountId`]'s rendering.
+//! among the rest by its [`identity::AccountId`]'s rendering.
 //!
 //! Nothing here is exarch- or synod-specific. What *is* product-specific —
 //! where a declaration file lives, how a row is drawn, whether one is
@@ -55,7 +55,7 @@ pub fn declare_endpoint(
         return Err(format!("There is already a service called {name}."));
     }
     let endpoint = well_formed_endpoint(endpoint)?;
-    let adapter = crate::config::adapter_for_protocol(protocol, label)?;
+    let adapter = super::identity::adapter_for_protocol(protocol, label)?;
     Ok(Service::declared(name, endpoint, adapter, Auth::Unnamed))
 }
 

@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 3c8afbc3
-generated_at_date: 2026-10-06
-covers_paths: [exarch/src/record/fault.rs, exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/change.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/encode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/headless.rs, exarch/src/tui/line.rs, exarch/src/tui/diff.rs, exarch/src/tui/palette.rs, exarch/src/tui/block.rs, exarch/src/tui/group.rs, exarch/src/tui/rail.rs, exarch/src/record.rs, exarch/src/record/commit.rs, exarch/src/record/view.rs, exarch/src/tui/scrollback.rs, exarch/data/agent.ral]
+generated_at_commit: 6c9047b6
+generated_at_date: 2026-10-08
+covers_paths: [exarch/src/record/fault.rs, exarch/src/card.rs, exarch/src/card/diff.rs, exarch/src/card/change.rs, exarch/src/card/value.rs, exarch/src/card/decode.rs, exarch/src/card/encode.rs, exarch/src/card/observation.rs, exarch/src/card/done.rs, exarch/src/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/agent/desk.rs, exarch/src/bus/post.rs, exarch/src/headless.rs, exarch/src/tui/line.rs, exarch/src/tui/diff.rs, exarch/src/tui/palette.rs, exarch/src/tui/block.rs, exarch/src/tui/group.rs, exarch/src/tui/rail.rs, exarch/src/record.rs, exarch/src/record/commit.rs, exarch/src/record/view.rs, exarch/src/tui/scrollback.rs, exarch/data/agent.ral]
 ---
 
 # Map: exarch / cards
@@ -21,7 +21,7 @@ owns the binding to visual variables. See
 ## The marks
 
 A `` `card `` is a `List` of marks rendered top-to-bottom on one scrollback
-[[map/exarch/frontend|block]]. Five marks, closed (`exarch/src/bus/card.rs`):
+[[map/exarch/frontend|block]]. Five marks, closed (`exarch/src/card.rs`):
 
 - **`text`** — the qualitative mark: a run of spans. A span carries an optional
   nominal **`Role`** (`path`/`code`/`ok`/`warn`/`bad`/`muted`/`strong`) mapped to
@@ -50,9 +50,9 @@ Composability is one rule at three scales: the plane stacks marks (`card`),
 
 ## Decode — `value_to_card`
 
-`value_to_card` (`bus/card/decode.rs`) is the card decoder, reading marks off the
-first-order `FOValue` the surface sink carries, as `encode_card` writes them; `decode_surface` ([[map/exarch/shell-eval|shell-eval]]) tries the pin,
-io, and notice shapes first ([[map/exarch/io-surface|io-surface]]). The wire
+`value_to_card` (`card/decode.rs`) is the card decoder, reading marks off the
+first-order `FOValue` the surface sink carries, as `encode_card` writes them; `decode_surface` ([[map/exarch/shell-eval|shell-eval]]) tries the observation, edit,
+and notice shapes first ([[map/exarch/io-surface|io-surface]]), then the card, then `done`. The wire
 shape is `Variant{label:"card", payload: List<mark>}`; each mark is
 `Variant{label, payload: Map}`. A bare known mark surfaced unwrapped
 (`` `diff [...] ``) is lifted into a one-mark card for convenience; any other
@@ -66,7 +66,7 @@ lifts to empty so a bare diff still renders. Detached workers buffer their
 
 ## Encode — `encode_card`
 
-`encode_card` (`bus/card/encode.rs`) is `value_to_card`'s inverse on the
+`encode_card` (`card/encode.rs`) is `value_to_card`'s inverse on the
 decoder's image: `value_to_card(&encode_card(&card)) == card` for every `Card`
 the decoder can produce. It exists because
 [[decisions/260803_register-is-read-write|register-is-read-write]]'s
@@ -93,7 +93,7 @@ fault) or a cancelled turn, while a nonzero worker exit remains the settled
 outcome rather than a turn error.
 `settled_text` flattens the spans for the two sinks with
 no ink to spend — the headless tee and the model's wake-up notice
-(`surface_notice`, [[map/exarch/agent|agent]]) — so none of the three can drift;
+(`surface_notice`, `bus/post.rs`) — so none of the three can drift;
 only `record::view`'s ledger keeps its own `[done: …]`, the bracketed register
 every fact wears there. It names no worker.
 
@@ -105,10 +105,11 @@ agent's answer arriving, whatever produced it — and synod's fold drops
 `Display::Done` unnarrated, a worker thread being exarch's own bookkeeping
 rather than anything the window's reader has business with.
 
-Core's ready-boundary housekeeping (`value_to_notice` → a `Notice`) has no
-card. A reaped worker and a pruned binding are each something nobody observed
+Core's ready-boundary housekeeping (`ral_core::types::Notice`, decoded by
+`Notice::from_surface` in `decode_surface`) has no card. A reaped worker and a pruned binding are each something nobody observed
 for a long while — housekeeping, not news — so they are recorded as
-`Forensic::Reap` and `Forensic::Prune`, breadcrumbs no fold projects
+`Forensic::Reap` and `Forensic::Prune`, written by `agent::desk`'s
+`absorb_surface` — breadcrumbs no fold projects
 ([[map/core/engine-protocol|engine-protocol]], [[map/exarch/agent|agent]]).
 
 ## Render — one interpreter, one binding table
@@ -167,7 +168,7 @@ placement, framing in its agent's hue at the register's own margin.
 
 `BlockKind::Card { card, landing, dial }` (`tui/block.rs`) carries the render
 document, a `Landing` (`Effect`/`Surfaced`/`Announced`, shared with
-`bus/card`'s own `landing()`) telling the mirror whether the card is a
+`card`'s own `landing()`) telling the mirror whether the card is a
 foldable effect or a barrier, and its `Dial`, the rung it is read at.
 Disclosure is **derived**, not named: `BlockKind::card` gives a card a `Dial`
 exactly when it holds a `diff` (`Card::has_diff()`), and such a card reads as
@@ -180,9 +181,9 @@ group rather than carrying its own rail. `magnitude()` is the summed diff
 magnitude, feeding the rail's value-step; `lines_changed()` exposes the same
 total as the matrix's write footprint, distinct from prose volume.
 
-A file change is not a card but a fact, `bus/card/change.rs`'s `Change { path,
+A file change is not a card but a fact, `card/change.rs`'s `Change { path,
 outcome, diff }` ([[decisions/261006_a-file-change-is-one-fact|a-file-change-is-one-fact]]),
-its `Diff` cut at the source by `Diff::between` (`bus/card/diff.rs`) to 2000
+its `Diff` cut at the source by `Diff::between` (`card/diff.rs`) to 2000
 rows with exact `added`/`removed` counts. The mirror holds a run of them as
 `BlockKind::Changes`: a change joins the run standing at the tail
 (`Block::admit_change`, `Scrollback::absorb`) or opens one, and

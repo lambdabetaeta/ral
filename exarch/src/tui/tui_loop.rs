@@ -16,6 +16,7 @@ use crossterm::event::{
 };
 
 use crate::{
+    SessionInfo,
     agent::Avatar,
     bus::{BusReceiver, FleetBus, Pass, Post, Rewrite, Signal},
     provider::{Bureau, Provider},
@@ -23,9 +24,8 @@ use crate::{
 };
 use std::sync::mpsc::TryRecvError;
 
-use super::banner::SessionInfo;
 use super::{
-    App, banner, commands,
+    App, commands,
     render::draw,
     terminal::{self, TerminalGuard},
 };
@@ -50,14 +50,20 @@ pub fn run(
     screen: TerminalGuard,
     session: &mut Avatar,
     provider: &Arc<Provider>,
-    info: &banner::SessionInfo<'_>,
+    info: &SessionInfo<'_>,
     bureau: &Bureau,
     seed: Option<String>,
     vi: bool,
 ) -> Result<(), String> {
     let mut tui = Tui {
         guard: screen,
-        app: App::new(&session.agent, vi, info.resumed.is_some(), session.inbox()),
+        app: App::new(
+            &session.agent,
+            session.fleet(),
+            vi,
+            info.resumed.is_some(),
+            session.inbox(),
+        ),
     };
     tui.app.update_live_model(provider, &bureau.available());
     // A *session*-lived bus, not per-exchange: a detached async child keeps
@@ -83,7 +89,7 @@ pub fn run(
     // satisfied.  A cheap `Arc<Log>` clone, so a `/model` switch or a login
     // records through the same seam the worker's own commits use.
     let recorder = session.recorder();
-    if let Some(crate::agent::Resumed { turn, bytes }) = info.resumed {
+    if let Some(crate::record::Resumed { turn, bytes }) = info.resumed {
         // Fold the record log into a memo *before* the note below, so the
         // note is the boundary: everything ahead of it is replayed history,
         // everything after is the live session.  The memo becomes the
@@ -121,7 +127,7 @@ pub fn run(
     // This is the process's trunk — a fact of the launch, not of any position
     // in the tree — so it is what an OS signal must reach, for as long as it
     // attends.
-    let _signals = crate::signals::face(&session.agent);
+    let _signals = crate::signals::face(session.agent.reach());
     std::thread::scope(|scope| -> Result<(), String> {
         let worker = std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024)

@@ -338,7 +338,7 @@ pub struct ModelCatalog<S: ModelSource> {
 
 impl<S: ModelSource> ModelCatalog<S> {
     /// A catalog persisting to `app`'s XDG cache path, when one resolves.
-    pub fn new(source: S, app: crate::bootstrap::App) -> Self {
+    pub fn new(source: S, app: crate::app::App) -> Self {
         Self {
             source,
             cache_path: cache_path(app),
@@ -406,7 +406,7 @@ impl<S: ModelSource> ModelCatalog<S> {
         let path = self.cache_path.as_ref()?;
         let file = read_cache(path)?;
         let entry = file.providers.get(account.as_str())?;
-        let age = crate::bootstrap::now_secs().saturating_sub(entry.fetched_at);
+        let age = crate::app::now_secs().saturating_sub(entry.fetched_at);
         (age < TTL.as_secs()).then(|| entry.models.clone())
     }
 
@@ -424,7 +424,7 @@ impl<S: ModelSource> ModelCatalog<S> {
         file.providers.insert(
             account.as_str().to_string(),
             CacheEntry {
-                fetched_at: crate::bootstrap::now_secs(),
+                fetched_at: crate::app::now_secs(),
                 models: models.to_vec(),
             },
         );
@@ -471,7 +471,7 @@ pub fn listing_of<S: ModelSource + Clone>(
 
 /// `None` when no cache base resolves (`HOME` unset, no absolute override) —
 /// the catalog then runs memo-only.
-fn cache_path(app: crate::bootstrap::App) -> Option<PathBuf> {
+fn cache_path(app: crate::app::App) -> Option<PathBuf> {
     let dir = app.xdg_dir(ral_core::host::XdgKind::Cache);
     dir.is_absolute().then(|| dir.join("models.json"))
 }

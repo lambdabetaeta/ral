@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 8d868e18
-verified_at_date: 2026-09-30
-anchors: [BindingLedger, arm_binding_lease, note_define, referenced_names, Mentions, Closure::new, prune_idle_bindings, pins_running_work, emit_ready_boundary_notices, BINDING_IDLE_CALLS]
+verified_at_commit: 6c9047b6
+verified_at_date: 2026-10-08
+anchors: [BindingLedger, arm_binding_lease, note_define, referenced_names, Mentions, Closure::new, BindingLedger::prune, pins_running_work, emit_ready_boundary_notices, BINDING_IDLE_CALLS]
 ---
 
 # Binding leases
@@ -25,7 +25,7 @@ entry at all, so it is not a candidate to prune rather than merely exempt
 from it. Everything else visible when exarch arms the ledger — agent
 library, rc and host seeds, and on a fork the entire inherited parent scope —
 is sealed as baseline, permanently exempt (`Shell::arm_binding_lease`, armed
-by `bootstrap::arm_session_ledgers` in the engine's own boot recipe and on
+by `shell_eval::arm_session_ledgers` in the engine's own boot recipe and on
 each fork before it is parked, so `/clear`'s rebooted engine re-seals for
 free). Its baseline read, `Env::all_bindings`, still folds in Σ's prelude
 beside ρ, so a prelude name that has not been shadowed is sealed as a
@@ -62,15 +62,18 @@ enumeration is not observation.
 ## What pruning does — and deliberately does not do
 
 At each ready boundary — the tail of every run door —
-`Shell::emit_ready_boundary_notices` calls `Shell::prune_idle_bindings`
-beside the worker-reap drain (`take_worker_reap_notices`). Every entry idle
+`Shell::emit_ready_boundary_notices` calls `BindingLedger::prune`
+beside the worker-reap drain (`take_worker_reap_notices`), both only when a
+surface sink is installed — absent one the ledgers are left untouched, so the
+notices wait for a run that has one. Every entry idle
 past the bound is examined: a name whose value still structurally reaches a
 *running* worker handle is pinned and re-checked next boundary
 (`pins_running_work` — it recurses lists, maps, and variant payloads, and
 deliberately never looks inside a closure's captured environment);
 everything else is unset — value and type-scheme seed
-in one act — and one `Forensic::Prune` record names what fell, shown to no
-one. A pruned name cannot
+in one act — and one `Notice::Prune` surfaces to the host, which records it as a
+`Forensic::Prune` naming what fell (`agent::desk`'s `absorb_surface`), shown to
+no one. A pruned name cannot
 come back through a panic rollback: `Shell::run` checkpoints `env` / `context`
 at *run entry*, after any earlier prune, so the rollback target
 already excludes what fell. Pruning is the ready boundary's own door — reached

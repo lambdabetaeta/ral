@@ -2,12 +2,33 @@
 //! boundary yields a [`Next`] — an [`Item`] for the model, or a command for
 //! the attend loop.  The queue itself is `bus::inbox`.
 
-use crate::fleet::schedule::ScheduleId;
 use jiff::fmt::friendly::{Designator, Spacing, SpanPrinter};
 use ral_core::first_order::FOValue;
+use std::fmt;
 use std::time::Duration;
 
-use super::AgentId;
+use crate::record::AgentId;
+
+/// A schedule's id: monotonic, and never reused, not even across `/clear`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct ScheduleId(u64);
+
+impl ScheduleId {
+    pub(crate) const fn new(id: u64) -> Self {
+        Self(id)
+    }
+
+    #[must_use]
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl fmt::Display for ScheduleId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
 
 /// How long something took, in prose: `47 secs`, `1 min 12 secs`, `1 hr 3 mins`.
 /// Whole seconds — a child's runtime is not a stopwatch reading — and jiff
@@ -296,10 +317,10 @@ fn surface_notice(values: &[FOValue]) -> String {
     let settled = values
         .iter()
         .rev()
-        .find_map(crate::bus::card::value_to_done)
+        .find_map(crate::card::value_to_done)
         .map_or_else(
             || "background block settled".to_string(),
-            |(cmd, outcome)| crate::bus::card::settled_text(&cmd, &outcome),
+            |(cmd, outcome)| crate::card::settled_text(&cmd, &outcome),
         );
     format!("{settled}. Await its handle for the value.")
 }

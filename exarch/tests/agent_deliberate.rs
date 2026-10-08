@@ -13,11 +13,12 @@
 //! round-tripping the committed messages through the same genai
 //! `ChatMessage` serialisation the live request uses.
 
-use exarch::agent::log::{Cut, EditAuthority};
 use exarch::agent::{Avatar, deliberate};
-use exarch::bus::{AgentId, AgentState, Emitter, channel};
+use exarch::bus::{Emitter, channel};
 use exarch::provider::scripted::{Reply, Script};
 use exarch::provider::{CutShort, Provider, ProviderError};
+use exarch::record::{AgentId, AgentState};
+use exarch::record::{Cut, EditAuthority};
 use exarch::record::{Display, Forensic, Protocol, Record, Transient};
 use genai::chat::{ChatRole, ContentPart, ToolCall};
 use std::sync::Arc;

@@ -1,14 +1,13 @@
 //! Streaming turns and partial-response projection.
 
-use super::ProviderError;
 use super::error::{CancelSite, CutShort};
-use super::request::{Tuning, complete_options};
+use super::request::{Request, complete_options};
 use super::retry::{Attempt, idle_timeout, retry_with_backoff, wait_for_cancel};
 use super::transport::{Engine, Transport};
 use super::usage::{Usage, usage_from};
 use super::wire::{manufacture, tool_defs};
-use crate::agent::cancel;
-use crate::shell_eval::tools::Toolset;
+use super::{ProviderError, Selection};
+use crate::cancel;
 use futures_util::StreamExt;
 use genai::adapter::AdapterKind;
 use genai::chat::{ChatMessage, ChatStreamEvent, StopReason, StreamEnd, ToolCall};
@@ -35,31 +34,32 @@ pub enum Delta<'a> {
 }
 
 impl Engine {
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn complete<F: FnMut(Delta<'_>)>(
         &self,
         transport: &Transport,
-        model: &str,
-        max_tokens_override: Option<u32>,
-        tuning: &Tuning,
+        selection: &Selection,
         route: Option<&str>,
-        system: &str,
-        transcript: &[ChatMessage],
-        tools: Toolset,
-        search: bool,
+        request: Request<'_>,
         on_delta: &mut F,
         cancel: &cancel::Token,
     ) -> Result<StepOut, ProviderError> {
         self.refresh_if_stale(transport);
+        let model = selection.model.as_str();
         let adapter = transport.adapter();
-        let tools = tool_defs(adapter, tools, search);
-        let options = complete_options(self.cache_key(), max_tokens_override, tuning, route);
+        let tools = tool_defs(adapter, request);
+        let options = complete_options(
+            self.cache_key(),
+            selection.max_tokens_override,
+            &selection.tuning,
+            route,
+        );
 
         self.block_on(retry_with_backoff(
             CancelSite::BeforeRequest,
             cancel,
             async |attempt| {
-                let request = manufacture(adapter, system, transcript, &tools).into_request();
+                let wire =
+                    manufacture(adapter, request.system, request.transcript, &tools).into_request();
                 let mut seen_streamed_content = false;
                 let mut streamed = String::new();
                 let mut streamed_reasoning = String::new();
@@ -76,7 +76,7 @@ impl Engine {
                         }
                         result = transport.client().exec_chat_stream(
                             model,
-                            request,
+                            wire,
                             Some(&options),
                         ) => result.map_err(|error| ProviderError::from_genai(&error, model))?,
                     };

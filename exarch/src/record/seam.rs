@@ -9,8 +9,8 @@
 //! pressured consumer's escape is the log itself, since every fact carries a
 //! sequence number.
 
-use super::log::{FleetSink, Log};
-use super::{Class, Recorded, Transient};
+use super::log::Log;
+use super::{Class, Publish, Recorded, Transient};
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
@@ -66,10 +66,10 @@ impl Emitter {
         self.log.rotate(path)
     }
 
-    /// Point this session's log at a live fleet channel; facts append and
+    /// Point this session's log at a [`Publish`]er; facts append and
     /// publish under one lock from then on.  Idempotent, and re-attaching
     /// after a per-exchange bus died is the ordinary path back on air.
-    pub(crate) fn attach(&self, sink: FleetSink) {
+    pub(crate) fn attach(&self, sink: Box<dyn Publish>) {
         self.log.attach(sink);
     }
 
@@ -105,7 +105,8 @@ impl Emitter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bus::{Signal, UsageMeter, channel};
+    use crate::bus::{FleetSink, Signal, UsageMeter, channel};
+    use crate::record::AgentId;
 
     #[test]
     fn a_seam_fault_reaches_the_screen_as_a_transient() {
@@ -116,17 +117,17 @@ mod tests {
         ));
         let emit = Emitter::create(&path).expect("temp record log");
         let (tx, rx) = channel();
-        emit.attach(FleetSink {
-            id: 7,
+        emit.attach(Box::new(FleetSink {
+            id: AgentId::new(7),
             tx: tx.downgrade(),
             meter: UsageMeter::default(),
-        });
+        }));
 
         emit.report_fault(&io::Error::other("disk is full"));
 
         match rx.recv().expect("the fault publishes") {
             Signal::Transient(id, Transient::Fault { text }) => {
-                assert_eq!(id, 7);
+                assert_eq!(id, AgentId::new(7));
                 assert!(text.contains("disk is full"), "{text}");
             }
             Signal::Fact(..) | Signal::Transient(..) => {

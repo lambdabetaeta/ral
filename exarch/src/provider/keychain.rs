@@ -18,7 +18,7 @@
 //! environment is [`super::credential`]'s business.  Exarch does not use
 //! this store; synod does.
 
-use crate::bootstrap::App;
+use crate::app::App;
 use crate::provider::credential::SecretVault;
 use crate::provider::identity::Account;
 use crate::provider::secret_file;

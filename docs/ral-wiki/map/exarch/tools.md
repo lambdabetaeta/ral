@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 2339a364
-generated_at_date: 2026-09-22
-covers_paths: [exarch/src/shell_eval/tools.rs, exarch/src/shell_eval/tools/]
+generated_at_commit: 6c9047b6
+generated_at_date: 2026-10-08
+covers_paths: [exarch/src/agent/tools.rs, exarch/src/agent/tools/, exarch/src/provider/tools.rs, exarch/src/agent/spawn.rs]
 ---
 
 # Map: exarch / tools
@@ -15,19 +15,21 @@ migration; see [[map/exarch/builtins|builtins]] for the verbs and
 [[map/core/engine-protocol|engine-protocol]] for the desk they speak
 through.
 
-`shell_eval/tools.rs` holds the two-line seam that makes this parametric. A
-`Tool` is a static record — name, description, schema, dispatch `fn` — and
+Two files hold the seam that makes this parametric. `provider/tools.rs` is the
+wire half: a `ToolSpec` is a static record — name, description, schema `fn` —
+(`RAL`, `THINKING`; `RAL_TOOL` names the one every agent is offered), and
 `Toolset` is a `Copy` slice of them: `Toolset::offered(thinking)` is `ral`
-alone or `ral` plus `thinking`; `Toolset::default()` is empty (`--chat`). The
-agent carries one `Toolset`, and both `provider.complete` (which puts
-`Toolset::wire()` on the request) and `Avatar::invoke` (which dispatches through
-`Toolset::get`) read it, so what was advertised and what is recognised cannot
-disagree; an unadvertised name earns `unknown tool` and a `Forensic::Error`.
+alone or `ral` plus `thinking`; `Toolset::default()` is empty (`--chat`).
+`agent/tools.rs` is the dispatch half: `dispatch` matches a name to its
+module. The fleet's `Launch` carries one `Toolset`, and both `provider.complete`
+(which puts `Toolset::wire()` on the request) and `Avatar::invoke` (which asks
+`Toolset::contains` before it dispatches) read it, so what was advertised and
+what is recognised cannot disagree; an unadvertised name earns `unknown tool` and a `Forensic::Error`.
 Every fork and desk spawn inherits its parent's set verbatim. Malformed input is
-answered through the shared `required_str`/`input_error`, in the same words
+answered through the shared `required_str`/`input_error` (`agent/tools.rs`), in the same words
 for every tool.
 
-- **`ral`** (`shell_eval/tools/ral.rs`) — the one call that crosses the provider
+- **`ral`** (`agent/tools/ral.rs`) — the one call that crosses the provider
   boundary: evaluate ral source against the session shell, synchronously,
   through `Avatar::ral` and [[map/exarch/shell-eval|`run_shell`]]. Its input is a required `cmd`
   (the ral source) and a required one-line `description` (shown on the
@@ -49,7 +51,7 @@ for every tool.
   call label but still gets a paired diagnostic result; if the call row itself
   cannot be appended, the seam reports a transient fault and cannot invent a
   result target.
-- **`thinking`** (`shell_eval/tools/thinking.rs`) — offered only under the
+- **`thinking`** (`agent/tools/thinking.rs`) — offered only under the
   hidden `--thinking-tool` flag: a relay whose one field, `thought`, is recorded
   as a single `Display::Thinking` — the same lane the provider's own reasoning
   commits on, so a thought wears the `∴` rail, the drained ink, and the
@@ -58,14 +60,14 @@ for every tool.
   bare `relayed`. Nothing else happens — no call row, no model-view twin — so a
   model may narrate between calls without ending its turn. A record failure is
   a seam fault, not a tool error: the model still gets its acknowledgement.
-- **`shell_eval/tools/agent.rs`** — not a tool module but the
+- **`agent/spawn.rs`** — not a tool module but the
   fork-detach-register spine every launch shares: `spawn_async`, `AsyncSpawn`,
   `SpawnedChild`. Both `/branch`'s `spawn_branch` and the desk's
   `` exarch-agents `start `` handler build on it — either arm of it, in-process or
   across a wire — so `/branch` and the harness spawn verb share one
   mechanism ([[design/agents|agents]], [[map/exarch/agent|agent]]).
 
-The harness verbs are answered by the `ExarchDesk` (`exarch/src/fleet/desk.rs`),
+The harness verbs are answered by the `ExarchDesk` (`exarch/src/agent/desk.rs`),
 installed per `ral` call and reached through `shell.enquire(...)` from the
 builtin's body; acting verbs emit `Display::HarnessCall`/`Forensic::HarnessResult` and, on
 the arm where the act genuinely landed, file it in the call's act ledger for the

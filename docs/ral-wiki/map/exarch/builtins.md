@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 451d1ab5
-generated_at_date: 2026-09-22
-covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/shell_eval/skill.rs, exarch/src/fleet/desk.rs, exarch/src/fleet/enquiry.rs, exarch/data/agent.ral]
+generated_at_commit: 6c9047b6
+generated_at_date: 2026-10-08
+covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/skill.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/src/enquiry.rs, exarch/src/library.rs, exarch/data/agent.ral]
 ---
 
 # Map: exarch / builtins
@@ -34,7 +34,7 @@ harness verbs and core's host-selected `SERVICE_BUILTIN`. Core's `boot_shell`
 takes the surface and installs it at construction (a half-dressed production
 shell is unrepresentable), and the wire engine boots the same dressing
 through its `EngineInstaller` *boot recipe*
-(`bootstrap::engine_boot_shell`), named on the wire by `INSTALLER_TAG` in
+(`boot::engine_boot_shell`), named on the wire by `INSTALLER_TAG` in
 `Frame::Attach`.
 The bulk-I/O atoms read in Rust, **below the redirect frame**, so each is one
 logical operation with one surface ([[map/exarch/io-surface|io-surface]]).
@@ -78,7 +78,7 @@ logical operation with one surface ([[map/exarch/io-surface|io-surface]]).
 - `skill-list` / `skill <name>` — Agent Skills with progressive disclosure: list
   the available skills (fresh scan each call, filtered by the grant), then load
   one skill's full `SKILL.md` body on demand; the scan and frontmatter parse
-  live in `shell_eval/skill.rs`.
+  live in `skill.rs`.
 - `fff <query>` → `[String]`. Frecency-ranked fuzzy filename search over the
   working tree (`fff_index`, the `fff-search` crate); the per-directory index is
   cached process-globally, so forked children sharing the cwd reuse it.
@@ -168,7 +168,7 @@ surface for the boot install and the prompt's `builtin_index` alike), landed by
 [[decisions/260702_agent-tool-to-exarch-builtin|agent-tool-to-exarch-builtin]]
 over the rail [[map/core/engine-protocol|engine-protocol]] built. A verb's
 body reads the model's argument, as first-order data, into a `Request` and
-calls `shell.enquire` with it; `exarch/src/fleet/desk.rs`'s `ExarchDesk`
+calls `shell.enquire` with it; `exarch/src/agent/desk.rs`'s `ExarchDesk`
 decodes the same `Request` and matches it exhaustively, answering from shared
 handles (`HostServices`) captured at install — never `&mut Agent` — installed
 per `ral` call in `Agent::run_shell` and swapped back to an absent desk
@@ -178,7 +178,7 @@ at the door instead of a closed variant type: an unknown label errors before
 any enquiry crosses, naming the legal set, rather than a static
 row-unification error with no room for a didactic message.
 
-**One vocabulary, typed once: `exarch/src/fleet/enquiry.rs`.** The desk
+**One vocabulary, typed once: `exarch/src/enquiry.rs`.** The desk
 answers five classes, each a `Family` of tags — `` `exarch-agents ``,
 `` `exarch-schedules ``, `` `exarch-context ``, `` `exarch-transcript `` and
 `` `exarch-pins `` — every class, tag, field and answer a `Datum`, with one
@@ -354,7 +354,7 @@ so the model has the address before it asks for one.
   spawn: launch-only and always asynchronous, a one-line notice arriving
   through the inbox when the child replies, and the child's row in the answer carrying the `name` and
   `log-dir` the old receipt did. `name` is the child's identity — the tab-bar
-  contract (`check_name`, in `fleet.rs` beside the rule it belongs
+  contract (`check_name`, in `enquiry.rs` beside the rule it belongs
   with), unique among live agents or the call is refused; this door refuses a
   malformed one early and in the model's own words, and `Fleet::enrol` refuses it
   again for peers that never came through a door
@@ -364,7 +364,7 @@ so the model has the address before it asks for one.
   one layer the child gets — `` `inherit ``, one of the four spawnable
   [[map/exarch/policy|base]] names (`confined`, `read-only`, `edit-only`,
   `reasonable`), or `` `restrict R `` with `R` a capability record in
-  `grant [...] { body }`'s own vocabulary. `Grant::decode` (`fleet/enquiry.rs`) closes the row,
+  `grant [...] { body }`'s own vocabulary. `Grant::decode` (`enquiry.rs`) closes the row,
   naming all six shapes and `R`'s own keys in its refusal and holding `R` to
   first-order data, since the ceiling crosses to the far side as data; the
   record itself is decoded by `decode_capability_map` off the `Form::Grant`
@@ -453,11 +453,11 @@ is a second, narration-only tool outside this harness/tool boundary
   atoms, their type schemes, and `EXARCH_BUILTINS`.
 - `exarch/src/shell_eval/builtins/harness.rs` — the harness verbs above,
   `HARNESS_BUILTINS`.
-- `exarch/src/shell_eval/skill.rs` — the skill scan behind
+- `exarch/src/skill.rs` — the skill scan behind
   `skill-list`/`skill`.
-- `exarch/src/fleet/desk.rs` — `HostServices`, `ExarchDesk`, and the handler
+- `exarch/src/agent/desk.rs` and `agent/desk/` — `HostServices`, `ExarchDesk`, and the handler
   for each enquiry class.
-- `exarch/data/agent.ral` — the helper library; seeded by `boot_shell`
+- `exarch/data/agent.ral` — the helper library; installed by `library::install_agent_library`, which `boot::engine_boot_shell` calls
   ([[map/exarch|exarch]] hub).
 - The model-facing tool that carries every one of these calls is
   [[map/exarch/tools|`ral`]].

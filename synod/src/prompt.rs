@@ -137,7 +137,7 @@ fn host_section(caps: &Capabilities, workspace: &Path) -> String {
     let _ = writeln!(s, "- cwd: {}", workspace.display());
     let scratch_line = format!(
         "`${}` = {} — this machine's own temporary space, gone when the conversation ends",
-        exarch::bootstrap::EXARCH.scratch_var(),
+        exarch::app::EXARCH.scratch_var(),
         exarch::prompt::SCRATCH_PLACEHOLDER
     );
     format!(

@@ -1,8 +1,8 @@
 //! The uniform agent node: canonical record log, persistent shell, capability
 //! set, hot-swappable provider, and the attend loop every node runs.
 //!
-//! A run is a tree of these; [`Fleet`](crate::fleet::Fleet) holds what they
-//! share — the lookup by name, and the [`Launch`](crate::fleet::Launch) fixed
+//! A run is a tree of these; [`Fleet`] holds what they
+//! share — the lookup by name, and the [`Launch`](fleet::Launch) fixed
 //! once for the whole run.
 //!
 //! No node is privileged by special-case code — the distinctions reduce to
@@ -40,36 +40,37 @@
 
 mod attend;
 mod build;
-pub mod cancel;
 mod command;
 pub mod deliberate;
+pub(crate) mod desk;
 mod dial;
 pub mod digest;
+pub mod fleet;
 pub(crate) mod gauge;
-pub mod log;
 pub mod nudge;
 pub mod resources;
+pub mod roster;
 pub(crate) mod seat;
 mod shell;
+pub(crate) mod spawn;
 #[cfg(test)]
 pub(crate) mod testkit;
+pub(crate) mod tools;
 
 #[cfg(test)]
 pub(crate) use build::TestTrunk;
 pub(crate) use build::{Build, fresh_id};
-pub use build::{RecordedAccount, RecordedModel, RootConfig, RootSeat, Trunk};
+pub use build::{RootConfig, RootSeat, Trunk};
 pub use dial::Dial;
-pub use log::Resumed;
 pub use seat::{EngineLost, EnginePhase};
 pub(crate) use shell::{Evaluated, LogCell, ReplyCell};
 
-use crate::agent::cancel::InterruptTarget;
+use crate::agent::fleet::Fleet;
 use crate::agent::seat::Seat;
-use crate::bus::{
-    AgentId, AgentMessage, AgentOutcome, AgentResult, Inbox, Mailbox, Post, Stamp, Stamped,
-};
-use crate::fleet::Fleet;
+use crate::bus::{AgentMessage, AgentOutcome, AgentResult, Inbox, Mailbox, Post, Stamp, Stamped};
+use crate::cancel::{self, InterruptTarget};
 use crate::provider::Provider;
+use crate::record::AgentId;
 use crate::shell_eval;
 use ral_core::first_order::FOValue;
 use ral_core::process::CancelCause;
@@ -86,11 +87,11 @@ use std::time::{Duration, Instant};
 /// [`Self::children`], which the spawn site pushes onto.  Live exactly while
 /// its [`Avatar`] holds the `Arc`: its parent and the fleet's [`Fleet`] hold
 /// only [`Weak`], and every walk prunes what fails to upgrade.  What every
-/// node shares is the fleet's [`Launch`](crate::fleet::Launch), not a field
+/// node shares is the fleet's [`Launch`](fleet::Launch), not a field
 /// here.
 pub struct Agent {
     pub id: AgentId,
-    /// The tab-bar identity [`crate::fleet::check_name`] validates — unique
+    /// The tab-bar identity [`crate::enquiry::check_name`] validates — unique
     /// among live agents, enforced at [`Fleet::enrol`].
     pub(crate) name: String,
     /// Where this agent's own session log is written.
@@ -141,7 +142,7 @@ pub struct Agent {
     /// builtins that arm them gate on the launch's `allow_schedule`.  Public
     /// agent state: the desk writes it and other threads read it, so it lives
     /// here rather than on [`Avatar`].
-    pub(crate) schedules: crate::fleet::schedule::ScheduleRegistry,
+    pub(crate) schedules: crate::schedule::ScheduleRegistry,
     /// Pins flow straight past the session to the frontend; the periodic
     /// [`nudge`] reminder reads this mirror to name what the model has
     /// pinned.  Public agent state, for the same reason as [`Self::schedules`].
@@ -205,8 +206,8 @@ pub struct Avatar {
     /// caller outside the `agent` module reaches identity and config at
     /// `.agent.…` rather than through a delegator for every field.
     pub(crate) agent: Arc<Agent>,
-    /// Under its own lock so a per-call desk can capture it off `&mut Avatar`.
-    /// [`LogCell::lock`] panics on contention rather than blocking — the desk
+    /// Under its own cell so a per-call desk can capture it off `&mut Avatar`.
+    /// [`LogCell::borrow_mut`] panics on contention rather than blocking — the desk
     /// runs only while the attend thread is parked in `run_shell`.
     log: LogCell,
     /// Every engine-side reach goes through this seat's methods.
@@ -262,7 +263,7 @@ impl Readings {
 /// The depth budget exarch's trunks start with.
 ///
 /// At zero the desk refuses `` exarch-agents `start ``
-/// ([`crate::fleet::desk::ExarchDesk::launch`]), so a runaway spawn chain
+/// ([`crate::agent::desk::ExarchDesk::launch`]), so a runaway spawn chain
 /// exhausts fuel instead of threads.  Fan-out is unbounded.
 pub const SPAWN_FUEL: u32 = 3;
 
@@ -330,7 +331,7 @@ impl Agent {
             returns,
             reach,
             mailbox,
-            schedules: crate::fleet::schedule::ScheduleRegistry::new(),
+            schedules: crate::schedule::ScheduleRegistry::new(),
             pins: Arc::default(),
             status: Mutex::new(Status {
                 rest: None,
@@ -352,8 +353,8 @@ impl Agent {
     /// first turn has nothing in its session directory worth opening.
     ///
     /// Derived rather than stored: the layout is `<run>/sessions/<id>`, fixed
-    /// by [`App::log_run_dir`](crate::bootstrap::App::log_run_dir) and by
-    /// [`AgentLog`](crate::agent::log::AgentLog) between them, and a second
+    /// by [`App::log_run_dir`](crate::app::App::log_run_dir) and by
+    /// [`AgentLog`](crate::record::AgentLog) between them, and a second
     /// copy of the path would be a second thing to keep true.  `None` only
     /// for a log rooted somewhere shallower than that shape, which is the
     /// test fixtures' business and not a run's.
@@ -447,18 +448,24 @@ impl Agent {
             .elapsed()
     }
 
+    /// This agent's cancellation handle.
+    pub(crate) fn reach(&self) -> cancel::Reach {
+        cancel::Reach {
+            token: self.token.clone(),
+            target: self.reach.clone(),
+        }
+    }
+
     /// Cancel this agent across both terminate-class layers: the cooperative
     /// [`cancel::Token`] the attend loop polls and its engine's durable root.
     pub(crate) fn cancel(&self, cause: CancelCause) {
-        self.token.cancel(cause);
-        self.reach.terminate();
+        self.reach().cancel(cause);
     }
 
     /// Unwind this agent's in-flight run without ending it: the Esc/Ctrl-C
     /// path, and the `` exarch-agents `cancel `` scoped verb's per-target primitive.
     pub(crate) fn interrupt(&self) {
-        self.token.cancel(CancelCause::Interrupted);
-        self.reach.interrupt();
+        self.reach().interrupt();
     }
 
     /// Take `child` under this agent — the one downward edge, weak, written
@@ -568,6 +575,11 @@ impl Avatar {
         self.agent.id
     }
 
+    /// The fleet this avatar's agent is enrolled in, for a frontend that resolves tabs by name.
+    pub fn fleet(&self) -> Arc<Fleet> {
+        self.fleet.clone()
+    }
+
     /// Deliver `outcome` to the parent, then retire: dropping the avatar is the
     /// retirement, and consuming `self` here is what keeps the two in order.
     /// A replied child was already reported at deposit time, so `outcome` is
@@ -622,17 +634,17 @@ impl Avatar {
     /// Every deliberation must hand the session back at a ready boundary.
     ///
     /// # Panics
-    /// Panics if the log cell is contended — see [`LogCell::lock`].
+    /// Panics if the log cell is contended — see [`LogCell::borrow`].
     pub fn is_ready(&self) -> bool {
-        self.log.lock().context().is_ready()
+        self.log.borrow().context().is_ready()
     }
 
     /// The model-view messages the next request would carry.
     ///
     /// # Panics
-    /// Panics if the log cell is contended — see [`LogCell::lock`].
+    /// Panics if the log cell is contended — see [`LogCell::borrow`].
     pub fn rendered_messages(&self) -> Vec<genai::chat::ChatMessage> {
-        self.log.lock().context().rendered()
+        self.log.borrow().context().rendered()
     }
 
     /// For a test polling an async spawn's settle without a full deliberation.
@@ -640,12 +652,4 @@ impl Avatar {
     pub(crate) fn next_item_for_test(&self) -> Option<crate::bus::Next> {
         self.inbox.next_item()
     }
-}
-
-/// The message of a recovered panic payload, for either string shape.
-pub(crate) fn panic_msg(p: &Box<dyn std::any::Any + Send>) -> String {
-    p.downcast_ref::<String>()
-        .cloned()
-        .or_else(|| p.downcast_ref::<&'static str>().map(|s| (*s).into()))
-        .unwrap_or_else(|| "non-string payload".into())
 }

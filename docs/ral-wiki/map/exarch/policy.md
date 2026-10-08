@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 446e3123
-generated_at_date: 2026-09-22
+generated_at_commit: 6c9047b6
+generated_at_date: 2026-10-08
 covers_paths: [exarch/src/policy.rs, exarch/src/policy/]
 ---
 
@@ -44,7 +44,7 @@ one `deputy` check per flagged prefix when a grant frame is entered
 Every profile is *frozen* as it loads — resolving each `~` / `xdg:` / `cwd:` /
 `tempdir:` / `gitdir:` / `system:` sigil against the session's home, working
 directory, and the platform's live tool roots inside
-`ral_core::capability`'s decode pass — so composition runs entirely on
+`ral_core::guard`'s decode pass (`guard/decode.rs`, `guard/freeze.rs`) — so composition runs entirely on
 already-resolved `Capabilities` ([[design/capability-freeze|freeze boundary]]).
 An `xdg:` path escaping `HOME` is rejected at the profile that names it, before
 composition could discard it. Loading reuses
@@ -56,8 +56,10 @@ format and the `absolute_in` cwd-join helper).
 child's working directory, as one way of naming the single layer a
 [[design/agents|sub-agent]] spawn pushes. It does not take the parent: the
 desk behind the [[map/exarch/builtins|`` exarch-agents `start `` tag]]
-(`fleet/desk.rs`'s `fork_child`) clones the parent's own `GrantStack` and
-pushes this layer onto the clone, so the same stack that carries the root's
+(`agent/desk/agents.rs`'s `fork_seat`, through core's
+`IdentityTransport::adopt_parked`) takes the parent's forked shell — which
+carries the parent's own `GrantStack` — and pushes this layer onto it
+(`SpawnGrant::narrow_onto`), so the same stack that carries the root's
 authority also carries a spawned child's attenuation. The stack's per-check
 fold ANDs every layer's verdict, so an added layer can only remove authority:
 a spawn can reduce a child's reach but never escalate it past the parent's —
@@ -73,7 +75,7 @@ call: `` `inherit `` is ⊤, a layer the fold leaves no trace of;
 `` `confined ``/`` `read-only ``/`` `edit-only ``/`` `reasonable `` reach
 `base_layer` through the `GrantNarrower` the resolution is handed; and
 `` `restrict R `` hands the record to
-`ral_core`'s `decode_capability_map` — the same walker, off the same
+`ral_core::guard::decode_capability_map` — the same walker, off the same
 `Form::Grant` declared table, that `grant [...] { body }` and each bake-in
 profile below already pass through, so one keyset earns one wording.
 `` `dangerous `` is a `--base` name only: at a spawn the lattice top is a layer
@@ -132,7 +134,7 @@ and it fails, naming the tool.
 The consequence for spawning: a base whose `exec` is prefixes alone is
 unusable as a child's `grant`, since the child cannot widen its own ceiling to
 recover `ls`. `minimal` is such a base, and is offered by `--base` only —
-`harness.rs::PERMISSION_LABELS` withholds it from `` exarch-agents `start ``,
+`policy::SPAWN_BASES` withholds it from `` exarch-agents `start ``,
 as it does `dangerous` ([[design/agents|agents]]).
 
 Each is a ral script whose terminal expression is a map shaped like the argument
@@ -144,7 +146,7 @@ representation ([[decisions/260615_no-core-repr-leak-into-exarch|no-core-repr-le
 
 **The bake-ins name exec authority portably through the `system:` sigil** —
 [[map/core/capabilities|core]]'s spelling of the platform's live tool roots
-(`ral_core::path::sigil::system_tool_roots`): the standard binary dirs plus a
+(`ral_core::guard::freeze::system_tool_roots`): the standard binary dirs plus a
 Homebrew tree when the host has one on Unix; `%SystemRoot%\System32`, the
 PowerShell home, and Git-for-Windows' `usr\bin` on Windows. Two consequences
 ride it:

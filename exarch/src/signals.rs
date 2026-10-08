@@ -32,26 +32,19 @@
 //! hears Ctrl-Break only from the teardown of the run that owns it, so a
 //! detached worker's children are never reached.
 //!
-//! On both, [`crate::bootstrap::face_process_signals`] owns the install
+//! On both, [`crate::boot::face_process_signals`] owns the install
 //! ceremony, once per process.
 
-use crate::agent::Agent;
+use crate::cancel;
 use ral_core::process::{Ambient, AmbientForward};
-use std::sync::{Arc, Weak};
 
-/// Forward this process's signals to `trunk` for as long as the guard lives:
+/// Forward this process's signals to `reach` for as long as the guard lives:
 /// an interrupt unwinds its exchange, a shutdown ends it.
-pub(crate) fn face(trunk: &Arc<Agent>) -> AmbientForward {
-    let trunk = Arc::downgrade(trunk);
-    ral_core::process::forward_ambient(move |ambient| hear(&trunk, ambient))
-}
-
-fn hear(trunk: &Weak<Agent>, ambient: Ambient) {
-    let Some(trunk) = trunk.upgrade() else { return };
-    match ambient {
-        Ambient::Interrupt => trunk.interrupt(),
-        Ambient::Root(cause) => trunk.cancel(cause),
-    }
+pub(crate) fn face(reach: cancel::Reach) -> AmbientForward {
+    ral_core::process::forward_ambient(move |ambient| match ambient {
+        Ambient::Interrupt => reach.interrupt(),
+        Ambient::Root(cause) => reach.cancel(cause),
+    })
 }
 
 /// Point SIGINT at ral's non-escalating `interrupt_handler`, leaving SIGTERM
@@ -171,44 +164,6 @@ mod cancels_exchange_tests {
     }
 }
 
-/// `hear` is the whole mapping from an ambient cause to the trunk, so it is
-/// exercised directly: raising a real root request would latch it for every
-/// later forwarder in the test binary.
-#[cfg(test)]
-mod hear_tests {
-    use super::*;
-    use crate::agent::testkit::{TestAgentSpec, test_agent};
-    use ral_core::process::CancelCause;
-
-    #[test]
-    fn each_ambient_cause_reaches_the_trunk_as_its_own() {
-        let fleet = crate::fleet::Fleet::for_test();
-        let trunk = test_agent(&fleet, TestAgentSpec::new("trunk")).expect("a fresh trunk");
-        let weak = Arc::downgrade(&trunk);
-
-        hear(&weak, Ambient::Interrupt);
-        assert!(
-            trunk.token.is_cancelled() && !trunk.token.terminated(),
-            "SIGINT interrupts the trunk's exchange and never ends it"
-        );
-
-        hear(&weak, Ambient::Root(CancelCause::Terminated));
-        assert!(
-            trunk.token.terminated(),
-            "SIGTERM stamps Terminate, which ends the agent"
-        );
-    }
-
-    #[test]
-    fn a_settled_trunk_hears_nothing() {
-        let fleet = crate::fleet::Fleet::for_test();
-        let trunk = test_agent(&fleet, TestAgentSpec::new("trunk")).expect("a fresh trunk");
-        let weak = Arc::downgrade(&trunk);
-        drop(trunk);
-        hear(&weak, Ambient::Root(CancelCause::Terminated));
-    }
-}
-
 #[cfg(all(test, unix))]
 #[allow(
     clippy::disallowed_methods,
@@ -258,10 +213,10 @@ mod tests {
         // A raw ral install models any clobber before the exarch session
         // constructor runs.
         ral_core::process::install_handlers();
-        crate::bootstrap::face_process_signals(&ral_core::terminal::TerminalState::default());
-        let fleet = crate::fleet::Fleet::for_test();
+        crate::boot::face_process_signals(&ral_core::terminal::TerminalState::default());
+        let fleet = crate::agent::fleet::Fleet::for_test();
         let trunk = test_agent(&fleet, TestAgentSpec::new("trunk")).expect("a fresh trunk");
-        let _signals = face(&trunk);
+        let _signals = face(trunk.reach());
 
         assert_eq!(unsafe { libc::raise(libc::SIGINT) }, 0, "raise SIGINT");
         assert!(

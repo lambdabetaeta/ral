@@ -5,7 +5,7 @@
 //! model fold folds), [`Display`] (commits the view fold folds), [`Forensic`]
 //! (breadcrumbs neither fold projects but which are worth keeping).  Nothing
 //! outside this module tree may mint a fourth class, invent a variant absent
-//! from the disposition, or read the log back except through [`replay`].
+//! from the disposition, or read the log back except through [`replay()`].
 //!
 //! [`Transient`] is the disjoint, unrecorded half of the channel: deltas, the
 //! provisional open thinking line, and chrome that dies with the process.
@@ -19,28 +19,111 @@ mod log;
 pub(crate) mod model;
 mod replay;
 mod seam;
+mod session;
 mod view;
 
 pub use model::{Held, Linked, Pointer, TurnRow};
 pub use replay::{Refusal, replay};
 pub use seam::Emitter;
+pub(crate) use session::role_label;
+pub use session::{
+    AgentLog, GrepAnswer, GrepHit, Inherited, Resumed, TranscriptMessage, TranscriptPart,
+    TranscriptTurn,
+};
 pub use view::{BLOCKS_WINDOW, Block, BlockKind, Delta, Verdict, View};
 
-pub(crate) use log::FleetSink;
-
-use crate::agent::Agent;
-use crate::agent::log::{Cut, EditAuthority, ToolResult};
-use crate::agent::nudge::Spent;
-use crate::bus::card::{Card, Change};
-use crate::bus::{AgentId, AgentState};
-use crate::provider::Tuning;
-use crate::provider::{ProviderError, Usage};
+use crate::card::{Card, Change, DoneOutcome};
+use crate::provider::{Provider, ProviderError, Tuning, Usage};
 use genai::chat::ChatMessage;
 use ral_core::first_order::FOValue;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::ops::Range;
 use std::path::PathBuf;
-use std::sync::Weak;
+
+/// The identity of an agent node — the trunk and every forked child alike.
+///
+/// Opaque, and what crosses the wire: every `exarch-agents` tag and every `Signal`
+/// names a node by this.  It is a routing key, not a door — an `exarch-agents` tag
+/// resolves by name through the fleet, and the frontend matches an arriving
+/// id against the tab it was handed at that agent's birth.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AgentId(u64);
+
+impl AgentId {
+    pub const fn new(id: u64) -> Self {
+        Self(id)
+    }
+
+    #[must_use]
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl fmt::Display for AgentId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// What an agent is doing — a total state, not a label the next event erases.
+///
+/// Every moment of a session's life is one of these five, so a frontend can
+/// always name the one it is in, including the idle one no label ever announced.
+/// The transition is the delta ([`Transient::State`]); the states themselves
+/// carry no clock and no counter.  A frontend times its own residence in one, which is
+/// what makes a silent provider stream legible: [`Self::AwaitingModel`] standing
+/// for minutes with no token arriving is a stall, where a label reset by each
+/// arriving chunk could not tell the two apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentState {
+    /// Parked at a human-input boundary, or between one and the next: nothing
+    /// is in flight and the prompt is the agent's own next move.
+    Ready,
+    /// A step is open — the request in flight, or its response streaming.  The
+    /// two are one state because the boundary between them is not the worker's
+    /// to know; a frontend tells them apart by whether anything has arrived.
+    AwaitingModel,
+    /// A `ral` call is evaluating.
+    Evaluating,
+    /// The momentary state around the eviction edit.
+    Evicting,
+    /// Parked on a live child's result: a wait on the fleet, not on the human.
+    WaitingOnAgents,
+}
+
+impl AgentState {
+    /// The status-line label — lower case, unpunctuated; a frontend adds its
+    /// own continuation mark to the [`Self::pending`] ones.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::AwaitingModel => "awaiting model",
+            Self::Evaluating => "evaluating",
+            Self::Evicting => "evicting",
+            Self::WaitingOnAgents => "waiting on agents",
+        }
+    }
+
+    /// Whether work is outstanding.  [`Self::Ready`] is the one settled state,
+    /// so this is what a frontend keys a spinner, a repaint tick, or an elapsed
+    /// clock on.
+    #[must_use]
+    pub fn pending(self) -> bool {
+        self != Self::Ready
+    }
+}
+
+/// Where the seam publishes a fact it has just appended, and the transients
+/// that ride beside them: the one door onto the live channel, attachable after
+/// the log exists because the log outlives any bus.
+pub(crate) trait Publish: Send {
+    fn fact(&self, recorded: Recorded<Record>);
+    fn transient(&self, t: Transient);
+}
 
 /// One fact a session recorded, in one of three classes.
 ///
@@ -267,16 +350,6 @@ pub enum Display {
     },
 }
 
-/// A detached worker's `` `done `` completion, minus the one-line card the
-/// view fold rebuilds.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
-pub enum DoneOutcome {
-    Ok,
-    Err { message: String, status: i64 },
-    Panic { message: String },
-}
-
 /// Breadcrumbs that determine no model projection but are worth keeping.
 ///
 /// `Error`, `Nudge`, and `ProviderError` are each the one record their
@@ -413,13 +486,8 @@ pub enum Transient {
     /// whatever line each lane still has open, since no record will cover it.
     Boundary,
     Born {
-        /// The frontend's one handle on the agent, weak: a failed upgrade is a
-        /// settled agent, and nothing but its avatar may keep it alive.
-        agent: Weak<Agent>,
+        /// What the frontend must still know once the agent has settled: the row's label and indentation, the tombstone's log path.
         log_dir: PathBuf,
-        /// Carried rather than read back off `agent`, because these are what
-        /// the frontend must still know once the `Weak` is dead: a lingering
-        /// row's label and indentation, the tombstone's log path.
         name: String,
         /// `None` for a `/branch` child: it roots its own tab tree, and that
         /// is what `/close` reads to know what it may kill.
@@ -453,6 +521,165 @@ pub enum Transient {
     Fault {
         text: String,
     },
+}
+
+/// One tool result as the model sees it: the rendered, per-section-capped
+/// string, never the raw stdout or stderr bytes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolResult {
+    pub id: String,
+    pub content: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EditAuthority {
+    Model,
+    Harness,
+}
+
+impl EditAuthority {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Model => "model",
+            Self::Harness => "harness",
+        }
+    }
+}
+
+/// One eviction as recorded: the resident turns it took — resolved by the
+/// writer, so replay departs exactly these — and the model's note.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Cut {
+    pub turns: Vec<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// Why the work in hand is ending with no real assistant reply: decides whether it
+/// is owed a capstone, and whether it earns a `Forensic::Cancelled`
+/// breadcrumb.
+#[derive(Clone, Copy)]
+pub enum QuiesceReason {
+    Cancelled,
+    /// A surfaced error — transport failure, exhausted retry budget — before
+    /// the assistant replied.
+    Aborted,
+    /// A sub-agent called `reply`: that round-trip never asked for a closing
+    /// assistant message, so the machine sits awaiting one on purpose, not in
+    /// error.
+    Replied,
+}
+
+/// Who took a turn: a prompt (or an import's opening) is the user's; the
+/// assistant message, its tool results and any steering are the assistant's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    User,
+    Assistant,
+}
+
+impl Role {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Assistant => "assistant",
+        }
+    }
+}
+
+/// Where a turn came from: this session's own work, a harness-authored
+/// import, or a turn a fork inherited from its parent's table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnKind {
+    Own,
+    Import,
+    Inherited,
+}
+
+impl TurnKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Own => "own",
+            Self::Import => "import",
+            Self::Inherited => "inherited",
+        }
+    }
+}
+
+/// What a repair spent of the per-exchange budget, as the record keeps it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Spent {
+    pub used: u32,
+    pub max: u32,
+}
+
+/// A session's provider identity, snapshotted for the record.
+///
+/// What the account was called, and which service and account it was, at the
+/// moment the session began. `Clone` because [`AgentLog::fork`] carries it
+/// into every child's own `SessionStarted` bookend unchanged.
+#[derive(Clone, Debug)]
+pub struct RecordedAccount {
+    pub label: String,
+    pub service: String,
+    pub id: String,
+}
+
+impl RecordedAccount {
+    /// The snapshot of `account`, labelled as it reads among `available` —
+    /// the one place a live account becomes a log header.
+    pub fn of(account: &crate::provider::Account, available: &[crate::provider::Account]) -> Self {
+        Self {
+            label: crate::provider::identity::label(account, available),
+            service: account.service.name.as_str().to_string(),
+            id: account.id.as_str().to_string(),
+        }
+    }
+
+    /// A snapshot for tests that only care that *something* is recorded.
+    /// Not `#[cfg(test)]`: integration test binaries link the library built
+    /// without it, so a fixture they share with the unit tests must be an
+    /// ordinary function, as `Avatar::for_test` already is.
+    #[doc(hidden)]
+    pub fn for_test(name: &str) -> Self {
+        Self {
+            label: name.to_string(),
+            service: name.to_string(),
+            id: name.to_string(),
+        }
+    }
+}
+
+/// A session's model, snapshotted for the record: its name and the context
+/// window its provider reported when the selection was minted.
+#[derive(Clone, Debug)]
+pub struct RecordedModel {
+    pub name: String,
+    pub context_window: Option<u64>,
+}
+
+impl RecordedModel {
+    /// The one place a live selection becomes a log header's model.
+    pub fn of(provider: &Provider) -> Self {
+        Self {
+            name: provider.model().to_string(),
+            context_window: provider.context_window(),
+        }
+    }
+
+    /// A snapshot for tests that only care that *something* is recorded; not
+    /// `#[cfg(test)]` for the reason [`RecordedAccount::for_test`] is not.
+    #[doc(hidden)]
+    pub fn for_test(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            context_window: None,
+        }
+    }
 }
 
 /// A record's position in the log — the line it was assigned at append.
@@ -590,7 +817,7 @@ impl BlockId {
 pub use view::Blocks;
 
 /// One fold over the log, replayed identically whether it is driven live
-/// (from the channel) or from disk (from [`replay`]) — the same `step`
+/// (from the channel) or from disk (from [`replay()`]) — the same `step`
 /// function, two drivers.
 ///
 /// An impl's `step` is one outer-class match over `Record` delegating to
@@ -599,7 +826,7 @@ pub use view::Blocks;
 /// [`Refusal`] during replay refuses the whole session.
 pub trait Fold {
     /// No `Default` bound: a memo the fold cannot build from nothing — the
-    /// model's, which needs its log's path — seeds [`replay`] by value.
+    /// model's, which needs its log's path — seeds [`replay()`] by value.
     type Memo;
 
     /// # Errors
@@ -611,7 +838,7 @@ pub trait Fold {
 /// Read `path`'s [`Record`]s back, past their `Entry` envelope, for tests
 /// across the crate that assert on the raw log rather than on a fold's
 /// memo — the one sanctioned exception to this module's own "read the log
-/// back only through [`replay`]" rule, since what these tests exercise is
+/// back only through [`replay()`]" rule, since what these tests exercise is
 /// the wire shape itself.
 ///
 /// # Errors

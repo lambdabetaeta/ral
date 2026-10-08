@@ -1,10 +1,12 @@
 //! The producing end of the bus: [`Emitter`], the handle a worker stamps its
 //! events through, and [`FleetBus`], which owns the channel and mints emitters.
 
-use super::AgentId;
-use super::channel::{BusReceiver, BusSender, channel};
+use super::channel::{BusReceiver, BusSender, WeakSender, channel};
 use super::inbox::{Inbox, Mailbox};
+use super::signal::Signal;
 use crate::provider::Usage;
+use crate::record::AgentId;
+use crate::record::{Forensic, Publish, Record, Recorded, Transient};
 use ral_core::sync::LockExt;
 use std::sync::{Arc, Mutex};
 
@@ -22,6 +24,43 @@ impl UsageMeter {
 
     pub(crate) fn total(&self) -> Usage {
         *self.0.lock_ignore_poison()
+    }
+}
+
+/// Where a witnessed record goes beside the file: the fleet-wide channel a
+/// frontend drains, tagged with the owning session's id, and the run's usage
+/// meter; accounting follows the fact through the seam, so a display-muted
+/// child on a dead channel still counts toward the run total.
+pub(crate) struct FleetSink {
+    pub(crate) id: AgentId,
+    /// Weak on purpose: the log outlives any one bus and its facts are
+    /// durable without one, so this handle must never hold a channel open or
+    /// stall a drain's disconnect on a session object's lifetime.
+    pub(crate) tx: WeakSender,
+    pub(crate) meter: UsageMeter,
+}
+
+impl Publish for FleetSink {
+    fn fact(&self, recorded: Recorded<Record>) {
+        if let Record::Forensic(Forensic::UsageDelta { usage }) = recorded.value() {
+            self.meter.add(*usage);
+        }
+        if self
+            .tx
+            .send_signal(Signal::Fact(self.id, recorded))
+            .is_err()
+        {
+            // No live receiver; the record is already durable on disk, which is
+            // the whole point: a pressured or absent consumer catches up from the
+            // file, never from the channel.
+        }
+    }
+
+    fn transient(&self, t: Transient) {
+        if self.tx.send_signal(Signal::Transient(self.id, t)).is_err() {
+            // No live receiver; a transient has no durable form to catch up
+            // from, so there is nothing else to do.
+        }
     }
 }
 
@@ -92,12 +131,12 @@ impl Emitter {
     /// Where a session's record log publishes: this emitter's channel and run
     /// meter, tagged with its agent id — what `Avatar::couple` attaches to the
     /// seam at every point a session meets a live bus.
-    pub(crate) fn fleet_sink(&self) -> crate::record::FleetSink {
-        crate::record::FleetSink {
+    pub(crate) fn fleet_sink(&self) -> Box<dyn Publish> {
+        Box::new(FleetSink {
             id: self.id,
             tx: self.tx.downgrade(),
             meter: self.meter.clone(),
-        }
+        })
     }
 
     /// The owning session's mailbox, for `shell_eval::deferred_sink`, which
@@ -189,7 +228,7 @@ impl FleetBus {
 #[cfg(test)]
 pub(crate) fn dummy_emitter() -> (Emitter, BusReceiver) {
     let (tx, rx) = channel();
-    (Emitter::new(tx, 0), rx)
+    (Emitter::new(tx, AgentId::new(0)), rx)
 }
 
 #[cfg(test)]
@@ -203,7 +242,7 @@ mod tests {
     #[test]
     fn usage_meter_counts_a_muted_child_on_a_dead_channel() {
         use crate::provider::Usage;
-        use crate::record::{Emitter as Recorder, Forensic};
+        use crate::record::{AgentId, Emitter as Recorder, Forensic};
 
         let root_usage = Usage {
             input: 100,
@@ -219,8 +258,8 @@ mod tests {
         };
 
         let bus = FleetBus::per_exchange(&Inbox::new());
-        let root = bus.emitter(0);
-        let child = root.muted_child(1);
+        let root = bus.emitter(AgentId::new(0));
+        let child = root.muted_child(AgentId::new(1));
 
         let root_seam = Recorder::none();
         root_seam.attach(root.fleet_sink());

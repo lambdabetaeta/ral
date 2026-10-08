@@ -1,14 +1,16 @@
 //! The active model selection, persisted as JSON in the project's state
-//! directory ([`crate::bootstrap::App::project_dir`]) beside that project's
+//! directory ([`crate::app::App::project_dir`]) beside that project's
 //! session logs.
 //!
 //! That directory is keyed by where exarch was launched, and sits outside
 //! cwd, so the sandboxed agent has no path to it and needs no deny-list
 //! entry.
 
-use crate::provider::identity::{self, Account};
-use crate::provider::models::resolve_account;
 use crate::provider::Provider;
+use crate::provider::identity::{self, Account};
+use crate::provider::models::{
+    Listed, resolve_account, resolve_model_provider, resolve_pinned_provider,
+};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -46,7 +48,7 @@ impl State {
 
     /// The persisted form of `provider`, the selection in force.
     pub fn of(provider: &Provider, available: &[Account]) -> Self {
-        Self::new(&provider.account, available, &provider.model)
+        Self::new(&provider.account, available, provider.model())
     }
 
     /// The stored account-id rendering matched against the live `available`
@@ -56,6 +58,70 @@ impl State {
     pub fn account(&self, available: &[Account]) -> Option<Account> {
         resolve_account(&self.provider, available)
     }
+}
+
+/// An account and one of its models.
+pub(crate) struct Pair {
+    pub(crate) account: Account,
+    pub(crate) model: String,
+}
+
+/// What a launch opens on, before the bureau weighs it.
+pub(crate) enum Opening {
+    /// The pair the flags named; its refusal ends the launch.
+    Named(Pair),
+    /// The pair remembered for this project; its refusal opens the picker over
+    /// these accounts instead.
+    Restored(Pair, Vec<Account>),
+    /// No pair to try: the picker over these accounts, saying why when that
+    /// is news.
+    Choose(Vec<Account>, Option<String>),
+}
+
+/// What the flags and `saved`, the selection remembered for this project, ask
+/// a launch to open on.
+///
+/// `--model` names a pair outright, on `--provider`'s account or else the one
+/// whose listing names the model. `--provider` alone restores the model saved
+/// for that account, else asks for one. With neither, the saved pair is
+/// restored, else the user is asked.
+pub(crate) fn opening(
+    provider_flag: Option<&str>,
+    model_flag: Option<&str>,
+    saved: Option<&State>,
+    available: &[Account],
+    listing: impl FnMut(&Account) -> Result<Vec<Listed>, String>,
+) -> Result<Opening, String> {
+    let pair = |account: Account, model: String| Pair { account, model };
+    let pinned = provider_flag
+        .map(|name| resolve_pinned_provider(name, available))
+        .transpose()?;
+    Ok(match (pinned, model_flag) {
+        (Some(account), Some(model)) => Opening::Named(pair(account, model.to_string())),
+        (None, Some(model)) => Opening::Named(pair(
+            resolve_model_provider(model, available, listing)?,
+            model.to_string(),
+        )),
+        (Some(account), None) => match saved.filter(|s| s.provider == account.id.as_str()) {
+            Some(s) => Opening::Restored(pair(account.clone(), s.model.clone()), vec![account]),
+            None => Opening::Choose(vec![account], None),
+        },
+        (None, None) => match saved {
+            None => Opening::Choose(available.to_vec(), None),
+            Some(s) => match s.account(available) {
+                Some(account) => {
+                    Opening::Restored(pair(account, s.model.clone()), available.to_vec())
+                }
+                None => Opening::Choose(
+                    available.to_vec(),
+                    Some(format!(
+                        "could not restore the saved model: '{}' is no longer available",
+                        s.provider_name
+                    )),
+                ),
+            },
+        },
+    })
 }
 
 fn path_in(dir: &Path) -> PathBuf {
@@ -187,5 +253,81 @@ mod tests {
             Some(Account::built_in("anthropic"))
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn saved(account: &Account, model: &str) -> State {
+        State::new(account, std::slice::from_ref(account), model)
+    }
+
+    fn lists(models: &[&str]) -> impl FnMut(&Account) -> Result<Vec<Listed>, String> {
+        let listed: Vec<Listed> = models.iter().map(|m| Listed::bare(*m)).collect();
+        move |_| Ok(listed.clone())
+    }
+
+    #[test]
+    fn provider_alone_restores_that_accounts_saved_model() {
+        let anthropic = Account::built_in("anthropic");
+        let state = saved(&anthropic, "model-a");
+        let available = [anthropic.clone(), Account::built_in("deepseek")];
+        match opening(
+            Some("anthropic"),
+            None,
+            Some(&state),
+            &available,
+            lists(&[]),
+        ) {
+            Ok(Opening::Restored(pair, among)) => {
+                assert_eq!(
+                    (pair.account, pair.model.as_str()),
+                    (anthropic.clone(), "model-a")
+                );
+                assert_eq!(among, [anthropic]);
+            }
+            _ => panic!("the saved model is restored"),
+        }
+    }
+
+    #[test]
+    fn provider_alone_with_nothing_saved_for_it_asks_among_its_models() {
+        let anthropic = Account::built_in("anthropic");
+        let deepseek = Account::built_in("deepseek");
+        let state = saved(&deepseek, "model-a");
+        let available = [anthropic.clone(), deepseek];
+        match opening(
+            Some("anthropic"),
+            None,
+            Some(&state),
+            &available,
+            lists(&[]),
+        ) {
+            Ok(Opening::Choose(among, None)) => assert_eq!(among, [anthropic]),
+            _ => panic!("a choice among the named account's models"),
+        }
+    }
+
+    #[test]
+    fn a_vanished_saved_account_asks_and_says_why() {
+        let gone = Account::declared("gone");
+        let state = saved(&gone, "model-a");
+        let available = [Account::built_in("anthropic")];
+        match opening(None, None, Some(&state), &available, lists(&[])) {
+            Ok(Opening::Choose(among, Some(why))) => {
+                assert_eq!(among, available);
+                assert!(why.contains("'gone'"), "got: {why}");
+            }
+            _ => panic!("a choice, saying why"),
+        }
+    }
+
+    #[test]
+    fn nothing_saved_and_no_flags_asks_among_every_account() {
+        let available = [
+            Account::built_in("anthropic"),
+            Account::built_in("deepseek"),
+        ];
+        match opening(None, None, None, &available, lists(&[])) {
+            Ok(Opening::Choose(among, None)) => assert_eq!(among, available),
+            _ => panic!("a choice among every account"),
+        }
     }
 }

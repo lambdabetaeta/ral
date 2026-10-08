@@ -1,6 +1,6 @@
 //! Line builders: each returns `Vec<Line<'static>>` ready for the scrollback,
-//! drawing colour and width from [`super::palette`].  [`super::App::handle`]
-//! calls in here to turn a typed [`crate::bus::card::Card`] into rows.
+//! drawing colour and width from [`super::palette`].  [`super::App::fact`]
+//! calls in here to turn a typed [`crate::card::Card`] into rows.
 //!
 //! No builder here draws a rail glyph: `Block::railed` in `block.rs` sets it
 //! on the first content row, so a selection through a block copies clean.
@@ -9,7 +9,7 @@ use super::block::Detail;
 use super::highlight::highlight_ral_spans;
 use super::palette::{CYAN, Col, LIME, ORANGE, PROMPT_INK, RAIL_W, RED, RED_HOT, SLATE, content_w};
 use super::row::Row;
-use crate::bus::card::{
+use crate::card::{
     Card, Field as CardField, FieldVal, Mark, Measure, Readout as CardReadout, Role,
     Span as CardSpan,
 };

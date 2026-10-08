@@ -2,9 +2,9 @@
 //! [`Context::step`] runs, and the readings of it the agent asks for.
 
 use super::Context;
-use crate::agent::log::{QuiesceReason, ToolResult, validate_result_ids};
-use crate::record::{Protocol, Recorded};
+use crate::record::{Protocol, QuiesceReason, Recorded, ToolResult};
 use genai::chat::{ChatMessage, ChatRole};
+use std::collections::HashSet;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) enum State {
@@ -207,4 +207,28 @@ fn quiesce_records(state: &State, reason: QuiesceReason, turn: u64) -> Vec<Proto
         });
     }
     records
+}
+
+pub(crate) fn validate_result_ids(
+    pending_ids: &[String],
+    results: &[ToolResult],
+) -> Result<(), String> {
+    if pending_ids.len() != results.len() {
+        return Err(format!(
+            "tool result count mismatch: expected {}, got {}",
+            pending_ids.len(),
+            results.len()
+        ));
+    }
+    let expected: HashSet<&str> = pending_ids.iter().map(String::as_str).collect();
+    let mut seen: HashSet<&str> = HashSet::with_capacity(results.len());
+    for r in results {
+        if !expected.contains(r.id.as_str()) {
+            return Err(format!("unknown tool result id {}", r.id));
+        }
+        if !seen.insert(r.id.as_str()) {
+            return Err(format!("duplicate tool result id {}", r.id));
+        }
+    }
+    Ok(())
 }

@@ -147,7 +147,7 @@ pub fn list(store: &Mutex<CredentialStore>) -> AccountList {
     AccountList {
         accounts,
         vault: KEYCHAIN.vault().to_string(),
-        protocols: config::protocols()
+        protocols: identity::protocols()
             .into_iter()
             .map(str::to_string)
             .collect(),
@@ -177,7 +177,7 @@ fn row(
     let (endpoint, protocol) = if withdrawable {
         (
             account.service.endpoint.clone(),
-            config::protocol_for_adapter(account.service.adapter).map(str::to_string),
+            identity::protocol_for_adapter(account.service.adapter).map(str::to_string),
         )
     } else {
         (None, None)
@@ -275,7 +275,7 @@ pub fn forget_key(store: &Mutex<CredentialStore>, id: &str) -> Result<(), String
 ///
 /// # Errors
 /// Returns a plain sentence if the name is taken, the address is not one,
-/// the protocol is not one of [`config::protocols`], or the declarations
+/// the protocol is not one of [`identity::protocols`], or the declarations
 /// file or credential manager refused the write.
 pub fn add_endpoint(
     store: &Mutex<CredentialStore>,

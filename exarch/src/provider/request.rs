@@ -1,7 +1,17 @@
 //! Provider-independent request shaping.
 
-use genai::chat::{ChatOptions, ReasoningEffort};
+use super::Toolset;
+use genai::chat::{ChatMessage, ChatOptions, ReasoningEffort};
 use serde::{Deserialize, Serialize};
+
+/// What one turn asks of the model, apart from who answers it.
+#[derive(Clone, Copy)]
+pub(crate) struct Request<'a> {
+    pub system: &'a str,
+    pub transcript: &'a [ChatMessage],
+    pub tools: Toolset,
+    pub search: bool,
+}
 
 /// Per-selection reasoning and sampling controls. A `None` field sends no
 /// option at all, unlike `ReasoningEffort::Zero` — an explicit "no reasoning".
