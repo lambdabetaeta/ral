@@ -1,8 +1,13 @@
 name: CI
 # The step list is scripts/ci.sh, the same one `just ci` and `just linux-ci`
-# run, and its steps are justfile recipes.  This file only provisions the
-# runner: the sandbox image the cargo steps run in, the site toolchain
-# render-site.py needs, and `just` itself.
+# run, and its steps are justfile recipes.  This file only provisions each
+# runner: what the cargo steps run in, the site toolchain render-site.py
+# needs, and `just` itself.
+#
+# Three legs.  Both Linux ones run `linux-box`, musl as every Linux artefact
+# ships, so each architecture's seccomp filter executes rather than merely
+# compiles.  macOS runs `native`, the only way to exercise Seatbelt or to
+# build synod.  Windows is windows.yml's.
 #
 # Runs on a `v*` tag and on manual dispatch.  Cross-target release builds live
 # in build-binaries.yml (same tags); the Windows job in windows.yml, which
@@ -18,7 +23,25 @@ env:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    # One platform's red must not hide another's.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            mode: linux-box
+            tree_sitter: linux-x64
+          - name: linux-arm64
+            os: ubuntu-24.04-arm
+            mode: linux-box
+            tree_sitter: linux-arm64
+          - name: macos-arm64
+            os: macos-latest
+            mode: native
+            tree_sitter: macos-arm64
     steps:
       - uses: actions/checkout@v7
 
@@ -30,24 +53,56 @@ jobs:
       # that denial is the host kernel's, so `--privileged` does not lift it:
       # bwrap, run as the image's non-root user, dies at "setting up uid map".
       - name: Allow unprivileged user namespaces
+        if: matrix.mode == 'linux-box'
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       - name: Build the Linux sandbox image
+        if: matrix.mode == 'linux-box'
         run: docker build -t ral-linux-box -f scripts/linux-box.Dockerfile scripts
+
+      # `native` runs cargo on the runner itself.  An explicit step, so
+      # installing rust-toolchain.toml's channel, components and targets is not
+      # the first cargo call's.
+      - name: Install toolchain
+        if: matrix.mode == 'native'
+        run: rustup toolchain install
+
+      # `just check-windows`: cargo-xwin wants clang and lld on PATH, both
+      # keg-only (the recipe's comment gives the same host setup).
+      - name: Install the Windows cross-check's tools
+        if: matrix.mode == 'native'
+        run: |
+          brew install llvm lld
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix lld)/bin" >> "$GITHUB_PATH"
+
+      - uses: taiki-e/install-action@v2
+        if: matrix.mode == 'native'
+        with:
+          tool: cargo-xwin
+
+      # `just ui-check` type-checks synod's renderer with deno.
+      - uses: denoland/setup-deno@v2
+        if: matrix.mode == 'native'
+        with:
+          deno-version: v2.x
 
       # tree-sitter CLI (prebuilt binary): render-site.py has no highlighting
       # fallback, so this is load-bearing, not optional.  Mirrors pages.yml.
       - name: Install tree-sitter CLI
         run: |
-          curl -fsSL https://github.com/tree-sitter/tree-sitter/releases/download/v0.26.9/tree-sitter-linux-x64.gz \
-            | gunzip > /usr/local/bin/tree-sitter
-          chmod +x /usr/local/bin/tree-sitter
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL https://github.com/tree-sitter/tree-sitter/releases/download/v0.26.9/tree-sitter-${{ matrix.tree_sitter }}.gz \
+            | gunzip > "$RUNNER_TEMP/bin/tree-sitter"
+          chmod +x "$RUNNER_TEMP/bin/tree-sitter"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
       - uses: astral-sh/setup-uv@v10.0.1
 
-      # scripts/ci.sh runs its steps as justfile recipes; the cargo ones go
-      # through the image above, but `just site` runs on the runner itself.
+      # scripts/ci.sh runs its steps as justfile recipes; in linux-box mode the
+      # cargo ones go through the image above, but `just site` runs on the
+      # runner itself.
       - uses: extractions/setup-just@v4
 
       - name: Lint, build, test, site, examples
-        run: scripts/ci.sh linux-box
+        run: scripts/ci.sh ${{ matrix.mode }}
