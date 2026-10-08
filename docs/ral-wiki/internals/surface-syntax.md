@@ -10,7 +10,7 @@ The front of the [[internals/compilation-ladder|ladder]]. `core/src/syntax/` is
 the only code that sees raw bytes and bare words.
 
 **The lexer's only context is the innermost open delimiter.** `lex(source)`
-produces `Vec<(Token, Span)>` in one pass; the delimiter stack (`DelimKind`)
+produces `Vec<Lexeme>` in one pass; the delimiter stack (`DelimKind`)
 picks among three modes and nothing else does. In a `{…}` block newlines
 separate statements. In a `[…]` collection newlines are whitespace and `,`
 punctuates. `$[…]` is a bracket in which, additionally, the comparison and
@@ -18,7 +18,7 @@ Boolean spellings `<` `>` `<=` `>=` `!=` `&&` `||` and the arithmetic
 characters `+ - * / % =` are *operators*, a token of their own
 (`Token::Op(Operator)`, a closed enum over `ir::BinaryOp` plus `And`, `Or` and
 the lone `=`, which is an error wherever it stands), and end a word (a numeral
-is read whole, sign of exponent included); an operator is never a word, which is
+is read whole, sign of exponent included, per `numeral.rs`); an operator is never a word, which is
 what lets the [[design/words|words rule]] tell `1+1` from touching atoms. So `$[2>3]` is a comparison, `$[1+1]` a sum, and
 `$[!{wc -l < f} > 1]` reads a file inside its `!{…}` and compares outside it.
 Everywhere else those characters keep their shell meaning: `1+1` is a word,
@@ -71,7 +71,7 @@ included. The grammar's attachments (`^`, `...`, `!`, an index) are the
 exceptions that must *touch*: `^ ls` is an error naming `^ls`, not a spacing.
 
 **A word's *literal* shape is lexical too.** `WordLiteral::classify` (`ast.rs`)
-reads a bare word and nothing else — no expected type, no scope, no head — so a
+reads a bare word, by the grammar in `syntax/numeral.rs` that the lexer also scans by, and nothing else — no expected type, no scope, no head — so a
 numeral denotes its number wherever it stands and a token meaning bytes is
 quoted ([[invariants/numerals-denote-numbers|numerals-denote-numbers]]). Both the
 parser (skipping the `Call` wrapper for a value head) and elaboration (through

@@ -29,6 +29,8 @@ normalises on the way out.**
   least as often as it is a number, and a shell that silently turned `1e6` into
   a float would be the footgun the whole doctrine exists to avoid. The printer
   moved; the reader did not.
+- **One grammar, one file.** It lives in `core/src/syntax/numeral.rs`; the
+  lexer and `classify` both read it.
 - **Canonical spellings are fixed points.** Print a number, hand the spelling
   back as a bare word, and the same number comes back; classifying then
   printing normalises (`007` → `7`, `1.50` → `1.5`, `+5` → `5`, `.5` → `0.5`,

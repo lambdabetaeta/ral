@@ -22,7 +22,10 @@ use crate::syntax::ast::{
     Ast, CaseArm, HandlerArm, Head, IfBranch, ListElem, MapEntry, Options, RecordEntry, ScopeAst,
     Stmt, Word, WordLiteral,
 };
-use crate::syntax::lexer::{self, LexError, LexErrorKind, Operator, RedirectOp, StringPart, Token};
+use crate::syntax::lexer::{
+    self, LexError, LexErrorKind, Lexeme, Operator, RedirectOp, StringPart, Token,
+};
+use crate::syntax::numeral::{self, Shape};
 use crate::text::plural;
 use std::fmt;
 
@@ -183,7 +186,7 @@ impl Form {
 }
 
 struct Parser {
-    tokens: Vec<(Token, Span)>,
+    tokens: Vec<Lexeme>,
     pos: usize,
     /// Where the stream came from: the `$[…]` or `$(…)` token for a
     /// sub-stream, the file's start at the top level.  A sub-stream carries
@@ -201,7 +204,7 @@ impl Parser {
     /// a production that stops early silently drop the remainder.  `leftover`
     /// says what an unconsumed token means for this particular stream.
     fn run_complete<T>(
-        tokens: Vec<(Token, Span)>,
+        tokens: Vec<Lexeme>,
         at: Span,
         leftover: fn(&Token) -> String,
         body: impl FnOnce(&mut Self) -> Result<T, ParseError>,
@@ -245,7 +248,7 @@ impl Parser {
     fn peek_at(&self, ahead: usize) -> &Token {
         self.tokens
             .get(self.pos + ahead)
-            .map_or(&Token::Eof, |(t, _)| t)
+            .map_or(&Token::Eof, |l| &l.token)
     }
 
     /// Span of the current token, of the last one past the end, or — for an
@@ -255,11 +258,11 @@ impl Parser {
         self.tokens
             .get(self.pos)
             .or_else(|| self.tokens.last())
-            .map_or(self.at, |(_, s)| *s)
+            .map_or(self.at, |l| l.span)
     }
 
     fn advance(&mut self) -> &Token {
-        let tok = self.tokens.get(self.pos).map_or(&Token::Eof, |(t, _)| t);
+        let tok = self.tokens.get(self.pos).map_or(&Token::Eof, |l| &l.token);
         if self.pos < self.tokens.len() {
             self.pos += 1;
         }
@@ -1299,13 +1302,13 @@ impl Parser {
         let at = self.pos + usize::from(self.peek() == &Token::Bang);
         matches!(
             self.tokens.get(at),
-            Some((
-                Token::Variable {
+            Some(Lexeme {
+                token: Token::Variable {
                     delimited: true,
                     ..
                 },
-                _
-            ))
+                ..
+            })
         )
     }
 
@@ -1313,7 +1316,7 @@ impl Parser {
     fn atom_starts_at(&self, ahead: usize, end: u32) -> bool {
         self.tokens
             .get(self.pos + ahead)
-            .is_some_and(|(tok, span)| is_atom_start(tok) && span.start == end)
+            .is_some_and(|l| is_atom_start(&l.token) && l.span.start == end)
     }
 
     /// Nothing separates the token at the cursor from the one after it.
@@ -1321,7 +1324,7 @@ impl Parser {
         let end = self.span().end;
         self.tokens
             .get(self.pos + 1)
-            .is_some_and(|(_, next)| next.start == end)
+            .is_some_and(|l| l.span.start == end)
     }
 
     /// An atom begins where `unit` ends.
@@ -1375,10 +1378,16 @@ impl Parser {
     /// No gap since the previous token — what separates `$xs[0]` (an index)
     /// from `cmd $xs [0]` (a second argument).
     fn next_token_is_adjacent(&self) -> bool {
-        let Some((_, prev_span)) = self.tokens.get(self.pos.saturating_sub(1)) else {
+        let Some(Lexeme {
+            span: prev_span, ..
+        }) = self.tokens.get(self.pos.saturating_sub(1))
+        else {
             return false;
         };
-        let Some((_, next_span)) = self.tokens.get(self.pos) else {
+        let Some(Lexeme {
+            span: next_span, ..
+        }) = self.tokens.get(self.pos)
+        else {
             return false;
         };
         prev_span.end == next_span.start
@@ -1529,7 +1538,7 @@ impl Parser {
     fn prev_byte_span(&self) -> Span {
         self.tokens
             .get(self.pos.saturating_sub(1))
-            .map_or_else(|| self.span(), |(_, s)| *s)
+            .map_or_else(|| self.span(), |l| l.span)
     }
 
     /// End of a command's argument list: a statement end, or the `?` / `|`
@@ -1742,7 +1751,7 @@ impl Parser {
     /// key is.  A tag is key-*shaped* but is no key: it is admitted only so
     /// [`Self::parse_static_key`] gets to say why.
     fn key_colon_here(&self, alphabet: KeyAlphabet) -> bool {
-        let at = |i: usize| self.tokens.get(self.pos + i).map(|(t, _)| t);
+        let at = |i: usize| self.tokens.get(self.pos + i).map(|l| &l.token);
         let is_key = match at(0) {
             Some(Token::Word(Word::Plain(_)) | Token::SingleQuoted(_) | Token::Tag(_)) => true,
             Some(Token::Variable { .. } | Token::DoubleQuoted(_)) => alphabet == KeyAlphabet::Data,
@@ -1856,7 +1865,7 @@ impl Parser {
         self.nested(|p| match p.peek().clone() {
             // `()` is the unit literal, an atom; anything else `(` opens
             // here is a grouped sub-expression.
-            Token::LParen if p.tokens.get(p.pos + 1).map(|(t, _)| t) != Some(&Token::RParen) => {
+            Token::LParen if p.tokens.get(p.pos + 1).map(|l| &l.token) != Some(&Token::RParen) => {
                 let (span, expr) = p.capture_span(|p| {
                     p.advance();
                     let expr = p.parse_expr_prec(0)?;
@@ -1932,12 +1941,27 @@ fn numeric_operand(operand: &Spanned<Box<Ast>>) -> Result<(), ParseError> {
             operand.span,
             if lexer::is_ident(w) {
                 format!("`{w}` is the string '{w}' here, not a number: did you mean `${w}`?")
+            } else if let Some(mantissa) = exponent_only(w) {
+                format!(
+                    "`{w}` is the string '{w}' here, not a number; a float needs a point: write `{mantissa}.0{}`",
+                    &w[mantissa.len()..]
+                )
             } else {
                 format!("`{w}` is the string '{w}' here, not a number")
             },
         )),
         _ => Ok(()),
     }
+}
+
+/// The integer mantissa of an exponent-only spelling such as `1e5`.
+fn exponent_only(w: &str) -> Option<&str> {
+    let (n, Shape::Int) = numeral::prefix(w)? else {
+        return None;
+    };
+    let (mantissa, exp) = w.split_at(n);
+    let digits = exp.strip_prefix(['e', 'E'])?.trim_start_matches(['+', '-']);
+    (!digits.is_empty() && digits.bytes().all(|c| c.is_ascii_digit())).then_some(mantissa)
 }
 
 /// Binding power, low to high: `||`, `&&`, comparison, add/sub, mul/div/mod.
@@ -2108,7 +2132,7 @@ fn trailing_input(found: &Token) -> String {
 
 /// Parse the pre-lexed body of `$[…]` as one expression.  `at` is the `$[…]`
 /// token itself, the only span an empty body can be reported against.
-fn parse_expr_block(tokens: Vec<(Token, Span)>, at: Span) -> Result<Ast, ParseError> {
+fn parse_expr_block(tokens: Vec<Lexeme>, at: Span) -> Result<Ast, ParseError> {
     if tokens.is_empty() {
         return Err(ParseError::new(
             Some(at),

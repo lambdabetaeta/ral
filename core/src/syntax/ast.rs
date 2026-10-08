@@ -11,6 +11,7 @@ use crate::first_order::Finite;
 use crate::ir::{BinaryOp, Pattern, Redirects};
 use crate::path::tilde::TildePath;
 use crate::source::Spanned;
+use crate::syntax::numeral::{self, Shape};
 use serde::{Deserialize, Serialize};
 
 /// Unquoted word, shaped once by the lexer. A `/`, or a `~` standing for
@@ -262,9 +263,9 @@ pub struct HandlerArm {
 /// command name?", read by the parser to skip the [`Ast::Call`] wrapper and
 /// by elaboration through [`crate::elaborator::word_val`].
 ///
-/// Purely lexical: the numeral grammar decides, never a round trip through
-/// printing.  A float wants a `.`, so `1e5`, which merely happens to f64-parse,
-/// stays a string; `007` and `1.50` are numerals all the same, and normalise
+/// Purely lexical: the grammar of [`numeral::prefix`] decides, never a round
+/// trip through printing.  A float wants a `.`, so `1e5`, which merely happens
+/// to f64-parse, stays a string; `007` and `1.50` are numerals all the same, and normalise
 /// to `7` and `1.5` wherever they are printed.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum WordLiteral {
@@ -278,17 +279,13 @@ impl WordLiteral {
         match s {
             "true" => Some(Self::Bool(true)),
             "false" => Some(Self::Bool(false)),
-            _ => {
-                if let Ok(i) = s.parse::<i64>() {
-                    Some(Self::Int(i))
-                } else if s.contains('.') {
-                    // A Float is finite by construction; an overflowing
-                    // literal like 1.0e999 stays a plain word.
-                    s.parse().ok().and_then(Finite::new).map(Self::Float)
-                } else {
-                    None
-                }
-            }
+            _ => match numeral::prefix(s)? {
+                (n, _) if n != s.len() => None,
+                (_, Shape::Int) => s.parse().ok().map(Self::Int),
+                // A Float is finite by construction; an overflowing
+                // literal like 1.0e999 stays a plain word.
+                (_, Shape::Float) => s.parse().ok().and_then(Finite::new).map(Self::Float),
+            },
         }
     }
 }

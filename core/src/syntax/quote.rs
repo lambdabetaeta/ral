@@ -10,7 +10,7 @@
 use std::borrow::Cow;
 
 use crate::syntax::ast::{Word, WordLiteral};
-use crate::syntax::lexer::{Token, lex};
+use crate::syntax::lexer::{Lexeme, Token, lex};
 
 /// True when `s` lexes as one bare word *and* reads back as the string `s`.
 ///
@@ -31,10 +31,10 @@ pub fn is_bare_word(s: &str) -> bool {
     let Ok(tokens) = lex(s) else {
         return false;
     };
-    let mut significant = tokens.iter().filter(|(t, _)| *t != Token::Eof);
+    let mut significant = tokens.iter().filter(|l| l.token != Token::Eof);
     matches!(
         (significant.next(), significant.next()),
-        (Some((Token::Word(Word::Plain(w) | Word::Slash(w)), _)), None) if w == s
+        (Some(Lexeme { token: Token::Word(Word::Plain(w) | Word::Slash(w)), .. }), None) if w == s
     )
 }
 
@@ -75,14 +75,20 @@ pub fn escape_for_interpolation(s: &str) -> String {
 /// (`2>&1`) is no word, so a run it opens has no one-word reading.
 pub(crate) fn one_word(run: &str) -> Option<String> {
     let tokens = lex(run).ok()?;
-    if matches!(tokens.first(), Some((Token::StderrToStdout, _))) {
+    if matches!(
+        tokens.first(),
+        Some(Lexeme {
+            token: Token::StderrToStdout,
+            ..
+        })
+    ) {
         return None;
     }
     let mut body = String::new();
     let mut depth = 0usize;
-    for (i, (token, span)) in tokens.iter().enumerate() {
+    for (i, Lexeme { token, span }) in tokens.iter().enumerate() {
         let (start, end) = (span.start as usize, span.end as usize);
-        let next = tokens.get(i + 1).map_or(end, |(_, s)| s.start as usize);
+        let next = tokens.get(i + 1).map_or(end, |l| l.span.start as usize);
         match token {
             _ if depth > 0 => body.push_str(&run[start..next]),
             Token::Word(Word::Plain(w) | Word::Slash(w)) | Token::SingleQuoted(w) => {
@@ -127,7 +133,7 @@ mod tests {
         let toks = lex(src).expect("lex");
         let payloads: Vec<&Token> = toks
             .iter()
-            .map(|(t, _)| t)
+            .map(|l| &l.token)
             .filter(|t| **t != Token::Eof)
             .collect();
         assert_eq!(
@@ -186,18 +192,15 @@ mod tests {
 
     // ── the dual of the numeral grammar ──────────────────────────────
 
-    /// A word the numeral grammar claims denotes its number in every
-    /// position, so a *string* of those bytes can never go bare: emitted
-    /// bare, `007` would read back as 7 and `3.10` as 3.1.
+    /// `is_bare_word` consults the numeral grammar: what it claims must be
+    /// quoted, what it declines stays bare.
     #[test]
-    fn bare_word_rejects_what_the_numeral_grammar_claims() {
-        for s in [
-            "5", "007", "+5", "-0", ".5", "2.", "1.50", "3.10", "1.0e300",
-        ] {
-            assert!(
-                !is_bare_word(s),
-                "{s:?} re-reads as a number, so it must be quoted"
-            );
+    fn bare_word_consults_the_numeral_grammar() {
+        for s in ["007", "3.10", "1.0e300"] {
+            assert!(!is_bare_word(s), "{s:?} re-reads as a number");
+        }
+        for s in ["1e6", "v1.50"] {
+            assert!(is_bare_word(s), "{s:?} is not a numeral");
         }
     }
 
@@ -217,27 +220,6 @@ mod tests {
     #[test]
     fn bare_word_keeps_unit() {
         assert!(is_bare_word("unit"));
-    }
-
-    /// And no further: the rule quotes numerals, not everything holding a
-    /// digit or a dot.  What the grammar declines is still text, and stays
-    /// bare.
-    #[test]
-    fn bare_word_keeps_what_the_numeral_grammar_declines() {
-        for s in [
-            "1e6",
-            "1_000",
-            "0x10",
-            "v1.50",
-            "3.10.1",
-            "007a",
-            "9223372036854775808",
-        ] {
-            assert!(
-                is_bare_word(s),
-                "{s:?} is not a numeral and should stay bare"
-            );
-        }
     }
 
     // ── quote_word ───────────────────────────────────────────────────

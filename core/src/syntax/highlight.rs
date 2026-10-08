@@ -5,7 +5,7 @@
 //! own.
 
 use super::is_keyword;
-use crate::syntax::lexer::{Token, lex};
+use crate::syntax::lexer::{Lexeme, Token, lex};
 use std::ops::Range;
 
 /// The classes a highlighter distinguishes.
@@ -37,9 +37,9 @@ pub fn classify(src: &str) -> Vec<(Range<usize>, Class)> {
     };
     tokens
         .iter()
-        .filter_map(|(tok, span)| {
+        .filter_map(|Lexeme { token, span }| {
             let range = span.range();
-            (!range.is_empty()).then(|| (range, class(tok)))
+            (!range.is_empty()).then(|| (range, class(token)))
         })
         .collect()
 }

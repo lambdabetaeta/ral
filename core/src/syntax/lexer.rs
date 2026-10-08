@@ -1,4 +1,4 @@
-//! Lexer: source text → a flat `Vec<(Token, Span)>`.  Spans carry byte
+//! Lexer: source text → a flat `Vec<Lexeme>`.  Spans carry byte
 //! offsets and a [`FileId`]; line and column are recovered at render time.
 //!
 //! The innermost open delimiter sets the lexical mode.  Newlines separate
@@ -19,6 +19,7 @@ use crate::ir::{ArithOp, BinaryOp, CompareOp, EqOp, WriteMode};
 use crate::path::tilde::TildePath;
 use crate::source::{FileId, Span, Spanned};
 use crate::syntax::ast::Word;
+use crate::syntax::numeral;
 use std::fmt;
 
 /// The identifier alphabet, `[a-zA-Z_][a-zA-Z0-9_-]*`, as the two
@@ -53,28 +54,29 @@ pub(crate) fn is_ident(s: &str) -> bool {
 /// [`crate::syntax::quote::is_bare_word`], which lexes rather than scanning
 /// chars.
 fn continues_bare_word(ch: char) -> bool {
-    !(ch.is_ascii_control() || matches!(
-        ch,
-        ' ' | '\t'
-            | '\r'
-            | '\n'
-            | '|'
-            | '{'
-            | '}'
-            | '['
-            | ']'
-            | '$'
-            | '^'
-            | '!'
-            | '<'
-            | '>'
-            | '"'
-            | '\''
-            | '`'
-            | '('
-            | ')'
-            | ';'
-    ))
+    !(ch.is_ascii_control()
+        || matches!(
+            ch,
+            ' ' | '\t'
+                | '\r'
+                | '\n'
+                | '|'
+                | '{'
+                | '}'
+                | '['
+                | ']'
+                | '$'
+                | '^'
+                | '!'
+                | '<'
+                | '>'
+                | '"'
+                | '\''
+                | '`'
+                | '('
+                | ')'
+                | ';'
+        ))
 }
 
 /// The Unicode bidirectional controls, refused everywhere in the source
@@ -120,7 +122,15 @@ pub enum StringPart {
     /// undelimited forms with their `[key]` groups (see [`Lexer::scan_splice`])
     /// — so the parser reads it as one atom.  Also a leading `~` before `/`
     /// or the closing quote, as a lone tilde word.
-    Splice(Vec<(Token, Span)>),
+    Splice(Vec<Lexeme>),
+}
+
+/// A token with its location.  Always located, unlike an AST node's
+/// `Spanned<T>`, whose span may be synthetic.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Lexeme {
+    pub token: Token,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -149,7 +159,7 @@ pub enum Token {
         delimited: bool,
     },
     /// Expression block `$[…]`, carrying its body's token stream.
-    Expr(Vec<(Self, Span)>),
+    Expr(Vec<Lexeme>),
     Bang,
     /// An operator of `$[…]`, emitted nowhere else.
     Op(Operator),
@@ -380,7 +390,7 @@ impl fmt::Display for LexError {
 /// # Errors
 /// An unterminated string, delimiter, or `$(…)`, or a lexical fault such as
 /// an invalid escape or an unexpected character.
-pub fn lex(source: &str) -> Result<Vec<(Token, Span)>, LexError> {
+pub fn lex(source: &str) -> Result<Vec<Lexeme>, LexError> {
     lex_with(source, FileId::DUMMY)
 }
 
@@ -389,7 +399,7 @@ pub fn lex(source: &str) -> Result<Vec<(Token, Span)>, LexError> {
 /// # Errors
 /// An unterminated string, delimiter, or `$(…)`, or a lexical fault such as
 /// an invalid escape or an unexpected character.
-pub(crate) fn lex_with(source: &str, file: FileId) -> Result<Vec<(Token, Span)>, LexError> {
+pub(crate) fn lex_with(source: &str, file: FileId) -> Result<Vec<Lexeme>, LexError> {
     if let Some((at, ch, name)) = source
         .char_indices()
         .find_map(|(i, ch)| bidi_control_name(ch).map(|n| (i, ch, n)))
@@ -409,9 +419,9 @@ pub(crate) fn lex_with(source: &str, file: FileId) -> Result<Vec<(Token, Span)>,
     let mut lexer = Lexer::new(source, file);
     let mut tokens = Vec::new();
     loop {
-        let (tok, span) = lexer.next_token()?;
-        let is_eof = tok == Token::Eof;
-        tokens.push((tok, span));
+        let lexeme = lexer.next_token()?;
+        let is_eof = lexeme.token == Token::Eof;
+        tokens.push(lexeme);
         if is_eof {
             break;
         }
@@ -447,11 +457,11 @@ impl LiteralRun {
     }
 }
 
-struct Lexer {
+struct Lexer<'a> {
     /// (`byte_offset`, char) per char: the offsets stamp byte-range spans,
     /// the vector keeps peek-by-char-index at O(1).
     chars: Vec<(usize, char)>,
-    source_len: u32,
+    source: &'a str,
     pos: usize,
     file: FileId,
     /// Open delimiters, innermost last.  The innermost decides newline
@@ -486,16 +496,11 @@ struct OpenDelim {
     opened: Span,
 }
 
-impl Lexer {
-    fn new(source: &str, file: FileId) -> Self {
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "byte length of a source in the u32 span system (< 4 GiB)"
-        )]
-        let source_len = source.len() as u32;
+impl<'a> Lexer<'a> {
+    fn new(source: &'a str, file: FileId) -> Self {
         Self {
             chars: source.char_indices().collect(),
-            source_len,
+            source,
             pos: 0,
             file,
             delim_stack: Vec::new(),
@@ -504,15 +509,14 @@ impl Lexer {
 
     /// Byte offset of the next char, i.e. one past the last consumed.
     fn byte_pos(&self) -> u32 {
-        self.chars.get(self.pos).map_or(self.source_len, |(b, _)| {
-            #[allow(
-                clippy::cast_possible_truncation,
-                reason = "byte length of a source in the u32 span system (< 4 GiB)"
-            )]
-            {
-                *b as u32
-            }
-        })
+        let byte = self.chars.get(self.pos).map_or(self.source.len(), |(b, _)| *b);
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "byte offset in a source in the u32 span system (< 4 GiB)"
+        )]
+        {
+            byte as u32
+        }
     }
 
     /// Zero-width span at the cursor; [`Self::finish`] stretches it over the
@@ -636,7 +640,7 @@ impl Lexer {
     /// unterminated delimiter anchored at the innermost opener rather than a
     /// clean EOF, and is what lets the REPL prompt for the rest.  `span` is
     /// where a clean `Eof` token sits.
-    fn eof_or_unterminated(&self, span: Span) -> Result<(Token, Span), LexError> {
+    fn eof_or_unterminated(&self, span: Span) -> Result<Lexeme, LexError> {
         if let Some(open) = self.delim_stack.last().copied() {
             let (o, c) = open.kind.chars();
             return Err(Self::typed_error(
@@ -648,10 +652,13 @@ impl Lexer {
                 },
             ));
         }
-        Ok((Token::Eof, span))
+        Ok(Lexeme {
+            token: Token::Eof,
+            span,
+        })
     }
 
-    fn next_token(&mut self) -> Result<(Token, Span), LexError> {
+    fn next_token(&mut self) -> Result<Lexeme, LexError> {
         self.skip_inline_whitespace();
 
         let span = self.span();
@@ -701,7 +708,10 @@ impl Lexer {
             '$' => {
                 self.bump();
                 match self.scan_dollar()? {
-                    Some(tok) => Ok((tok, self.finish(span))),
+                    Some(token) => Ok(Lexeme {
+                        token,
+                        span: self.finish(span),
+                    }),
                     None => Err(Self::error(
                         self.finish(span),
                         "expected a name after `$`: write `$name`, `$(name)`, or `$[…]`",
@@ -726,7 +736,10 @@ impl Lexer {
                 self.bump();
                 self.bump();
                 self.bump();
-                Ok((Token::Spread, self.finish(span)))
+                Ok(Lexeme {
+                    token: Token::Spread,
+                    span: self.finish(span),
+                })
             }
             '`' => {
                 self.bump();
@@ -738,7 +751,10 @@ impl Lexer {
                              a backtick never runs a command here; write `!{cmd}` for that",
                     ))
                 } else {
-                    Ok((Token::Tag(label), self.finish(span)))
+                    Ok(Lexeme {
+                        token: Token::Tag(label),
+                        span: self.finish(span),
+                    })
                 }
             }
             _ if let Some(op) = operator_char(ch).filter(|_| self.in_expr()) => {
@@ -762,19 +778,25 @@ impl Lexer {
         }
     }
 
-    fn bump_simple(&mut self, token: Token, span: Span) -> (Token, Span) {
+    fn bump_simple(&mut self, token: Token, span: Span) -> Lexeme {
         self.bump();
-        (token, self.finish(span))
+        Lexeme {
+            token,
+            span: self.finish(span),
+        }
     }
 
-    fn two_char_op(&mut self, op: Operator, span: Span) -> (Token, Span) {
+    fn two_char_op(&mut self, op: Operator, span: Span) -> Lexeme {
         self.bump();
         self.bump();
-        (Token::Op(op), self.finish(span))
+        Lexeme {
+            token: Token::Op(op),
+            span: self.finish(span),
+        }
     }
 
     /// `<`, `>`, `<=`, `>=` inside `$[…]`.
-    fn scan_comparison(&mut self, span: Span) -> (Token, Span) {
+    fn scan_comparison(&mut self, span: Span) -> Lexeme {
         let lt = self.bump() == Some('<');
         let or_eq = self.peek() == Some('=');
         if or_eq {
@@ -786,15 +808,15 @@ impl Lexer {
             (false, false) => CompareOp::Gt,
             (false, true) => CompareOp::Ge,
         };
-        (
-            Token::Op(Operator::Binary(BinaryOp::Compare(op))),
-            self.finish(span),
-        )
+        Lexeme {
+            token: Token::Op(Operator::Binary(BinaryOp::Compare(op))),
+            span: self.finish(span),
+        }
     }
 
     /// `op` is the operator under the cursor; a second `=` after `Assign`
     /// makes it `==`.
-    fn scan_operator(&mut self, op: Operator, span: Span) -> (Token, Span) {
+    fn scan_operator(&mut self, op: Operator, span: Span) -> Lexeme {
         self.bump();
         let op = if op == Operator::Assign && self.peek() == Some('=') {
             self.bump();
@@ -802,54 +824,50 @@ impl Lexer {
         } else {
             op
         };
-        (Token::Op(op), self.finish(span))
+        Lexeme {
+            token: Token::Op(op),
+            span: self.finish(span),
+        }
     }
 
-    /// A digit, or a `.` with a digit after it, under the cursor.
+    /// The unscanned source.
+    fn rest(&self) -> &str {
+        &self.source[self.byte_pos() as usize..]
+    }
+
     fn at_numeral(&self) -> bool {
-        self.peek().is_some_and(|c| c.is_ascii_digit())
-            || (self.peek() == Some('.') && self.peek_n(1).is_some_and(|c| c.is_ascii_digit()))
+        numeral::prefix(self.rest()).is_some()
     }
 
-    /// A word beginning with a numeral inside `$[…]`, where `+` and `-` are
-    /// operators: the numeral grammar of `WordLiteral::classify` is followed
-    /// through its exponent sign, so `1.5e+3` stays one word, and whatever
-    /// bare text is glued after it (`1abc`) stays in the word too.
-    fn scan_numeral_word(&mut self, span: Span) -> (Token, Span) {
-        let mut word = self.take_while(|c| c.is_ascii_digit());
-        if self.peek() == Some('.') {
-            word.push('.');
-            self.bump();
-            word.push_str(&self.take_while(|c| c.is_ascii_digit()));
-        }
-        if matches!(self.peek(), Some('e' | 'E')) {
-            let (sign, digit) = match self.peek_n(1) {
-                Some('+' | '-') => (1, 2),
-                _ => (0, 1),
-            };
-            if self.peek_n(digit).is_some_and(|c| c.is_ascii_digit()) {
-                for _ in 0..=sign {
-                    word.push(self.bump().expect("peeked"));
-                }
-                word.push_str(&self.take_while(|c| c.is_ascii_digit()));
-            }
-        }
+    /// In `$[…]` `+` and `-` are operators, so the word is the numeral prefix
+    /// plus any bare text glued to it.
+    fn scan_numeral_word(&mut self, span: Span) -> Lexeme {
+        let (len, _) = numeral::prefix(self.rest()).expect("caller saw a numeral");
+        let mut word: String = (0..len)
+            .map(|_| self.bump().expect("prefix is in range"))
+            .collect();
         word.push_str(&self.scan_bare_fragment());
-        (Token::Word(Word::Plain(word)), self.finish(span))
+        Lexeme {
+            token: Token::Word(Word::Plain(word)),
+            span: self.finish(span),
+        }
     }
 
-    fn open_delim(&mut self, token: Token, kind: DelimKind) -> (Token, Span) {
+    fn open_delim(&mut self, token: Token, kind: DelimKind) -> Lexeme {
         let span = self.span();
         self.bump();
         let opened = self.finish(span);
         self.delim_stack.push(OpenDelim { kind, opened });
-        (token, opened)
+        Lexeme {
+            token,
+            span: opened,
+        }
     }
 
     /// Emit the closing token under the cursor, popping the innermost opener
     /// it closes.  A closer that closes something else is an error; one at
     /// depth 0 is a token, which the parser reports as unmatched.
-    fn close_delim(&mut self, token: Token) -> Result<(Token, Span), LexError> {
+    fn close_delim(&mut self, token: Token) -> Result<Lexeme, LexError> {
         let start = self.span();
         let close = self.bump().expect("caller peeked a closer");
         let span = self.finish(start);
@@ -867,13 +885,13 @@ impl Lexer {
             }
             None => {}
         }
-        Ok((token, span))
+        Ok(Lexeme { token, span })
     }
 
     /// Merge a maximal run of newlines, semicolons, whitespace, and comments
     /// into one separator token: [`Token::Semi`] if the run contains a `;`,
     /// soft [`Token::Newline`] otherwise.
-    fn scan_separator(&mut self, span: Span) -> (Token, Span) {
+    fn scan_separator(&mut self, span: Span) -> Lexeme {
         let mut hard = self.peek() == Some(';');
         self.bump();
         loop {
@@ -890,7 +908,10 @@ impl Lexer {
             }
         }
         let token = if hard { Token::Semi } else { Token::Newline };
-        (token, self.finish(span))
+        Lexeme {
+            token,
+            span: self.finish(span),
+        }
     }
 
     /// Does the `:` under `peek()` break the bare word?  Only when whitespace,
@@ -901,10 +922,13 @@ impl Lexer {
             .is_none_or(|next| matches!(next, ' ' | '\t' | '\r' | '\n' | ']' | '}' | ')' | ','))
     }
 
-    fn scan_bare_word(&mut self, span: Span) -> (Token, Span) {
+    fn scan_bare_word(&mut self, span: Span) -> Lexeme {
         if self.peek() == Some(':') && self.colon_splits_here() {
             self.bump();
-            return (Token::Colon, self.finish(span));
+            return Lexeme {
+                token: Token::Colon,
+                span: self.finish(span),
+            };
         }
 
         let word = self.scan_bare_fragment();
@@ -915,7 +939,10 @@ impl Lexer {
         } else {
             Word::Plain(word)
         };
-        (Token::Word(word), self.finish(span))
+        Lexeme {
+            token: Token::Word(word),
+            span: self.finish(span),
+        }
     }
 
     fn scan_bare_fragment(&mut self) -> String {
@@ -1005,14 +1032,17 @@ impl Lexer {
 
     /// The leading `#`s are already consumed; the opening `'` is not.  Body
     /// bytes are verbatim — no escapes, no interpolation.
-    fn scan_quoted(&mut self, span: Span, level: usize) -> Result<(Token, Span), LexError> {
+    fn scan_quoted(&mut self, span: Span, level: usize) -> Result<Lexeme, LexError> {
         self.bump();
         let mut body = String::new();
         self.scan_quoted_body(span, level, &mut body)?;
-        Ok((Token::SingleQuoted(body), self.finish(span)))
+        Ok(Lexeme {
+            token: Token::SingleQuoted(body),
+            span: self.finish(span),
+        })
     }
 
-    fn scan_double_quoted(&mut self, span: Span) -> Result<(Token, Span), LexError> {
+    fn scan_double_quoted(&mut self, span: Span) -> Result<Lexeme, LexError> {
         self.bump();
         let file = span.file;
         let mut parts: Vec<Spanned<StringPart>> = Vec::new();
@@ -1058,7 +1088,13 @@ impl Lexer {
                     self.bump();
                     let tilde = Span::new(file, cursor, self.byte_pos());
                     let home = Token::Word(Word::Tilde(TildePath { suffix: None }));
-                    parts.push(Spanned::new(tilde, StringPart::Splice(vec![(home, tilde)])));
+                    parts.push(Spanned::new(
+                        tilde,
+                        StringPart::Splice(vec![Lexeme {
+                            token: home,
+                            span: tilde,
+                        }]),
+                    ));
                 }
                 Some(ch) => {
                     run.push(cursor, ch);
@@ -1067,7 +1103,10 @@ impl Lexer {
             }
         }
 
-        Ok((Token::DoubleQuoted(parts), self.finish(span)))
+        Ok(Lexeme {
+            token: Token::DoubleQuoted(parts),
+            span: self.finish(span),
+        })
     }
 
     /// Consume one escape after the `\`, which the caller has bumped.
@@ -1220,19 +1259,28 @@ impl Lexer {
     ///
     /// `$(name)` marks the end of a name, so the `[` after it is string
     /// text; every other splice continues into adjacent `[key]` groups.
-    fn scan_splice(&mut self) -> Result<Option<Vec<(Token, Span)>>, LexError> {
+    fn scan_splice(&mut self) -> Result<Option<Vec<Lexeme>>, LexError> {
         let start = self.span();
         let mut tokens = Vec::new();
         if self.peek() == Some('!') {
             self.bump();
             match self.peek() {
                 Some('{') => {
-                    tokens.push((Token::Bang, self.finish(start)));
+                    tokens.push(Lexeme {
+                        token: Token::Bang,
+                        span: self.finish(start),
+                    });
                     let open = self.bump_spanned();
                     let (body, close) = self.scan_token_group(open, DelimKind::Brace)?;
-                    tokens.push((Token::LBrace, open));
+                    tokens.push(Lexeme {
+                        token: Token::LBrace,
+                        span: open,
+                    });
                     tokens.extend(body);
-                    tokens.push((Token::RBrace, close));
+                    tokens.push(Lexeme {
+                        token: Token::RBrace,
+                        span: close,
+                    });
                 }
                 // `{` is kept so the `${…}` diagnostic still fires.
                 Some('$')
@@ -1240,37 +1288,52 @@ impl Lexer {
                         .peek_n(1)
                         .is_some_and(|c| is_ident_start(c) || matches!(c, '(' | '[' | '{')) =>
                 {
-                    tokens.push((Token::Bang, self.finish(start)));
+                    tokens.push(Lexeme {
+                        token: Token::Bang,
+                        span: self.finish(start),
+                    });
                     let dollar = self.span();
                     self.bump();
-                    let tok = self.scan_dollar()?.expect("guard saw a `$` form");
-                    tokens.push((tok, self.finish(dollar)));
+                    let token = self.scan_dollar()?.expect("guard saw a `$` form");
+                    tokens.push(Lexeme {
+                        token,
+                        span: self.finish(dollar),
+                    });
                 }
                 _ => return Ok(None),
             }
         } else {
             self.bump();
             match self.scan_dollar()? {
-                Some(tok) => tokens.push((tok, self.finish(start))),
+                Some(token) => tokens.push(Lexeme {
+                    token,
+                    span: self.finish(start),
+                }),
                 None => return Ok(None),
             }
         }
         let delimited = matches!(
             tokens.last(),
-            Some((
-                Token::Variable {
+            Some(Lexeme {
+                token: Token::Variable {
                     delimited: true,
                     ..
                 },
-                _
-            ))
+                ..
+            })
         );
         while !delimited && self.peek() == Some('[') {
             let open = self.bump_spanned();
             let (body, close) = self.scan_token_group(open, DelimKind::Bracket)?;
-            tokens.push((Token::LBracket, open));
+            tokens.push(Lexeme {
+                token: Token::LBracket,
+                span: open,
+            });
             tokens.extend(body);
-            tokens.push((Token::RBracket, close));
+            tokens.push(Lexeme {
+                token: Token::RBracket,
+                span: close,
+            });
         }
         Ok(Some(tokens))
     }
@@ -1406,7 +1469,7 @@ impl Lexer {
         &mut self,
         opener: Span,
         kind: DelimKind,
-    ) -> Result<(Vec<(Token, Span)>, Span), LexError> {
+    ) -> Result<(Vec<Lexeme>, Span), LexError> {
         // Every lexer recursion runs through here, so `delim_stack.len()`
         // bounds the recursion depth.  Cap it, or `$[$[$[$[…` overflows the
         // call stack instead of failing cleanly.
@@ -1424,28 +1487,28 @@ impl Lexer {
         let mut tokens = Vec::new();
 
         loop {
-            let (tok, span) = match self.next_token() {
-                Ok(pair) => pair,
+            let lexeme = match self.next_token() {
+                Ok(lexeme) => lexeme,
                 Err(e) => {
                     self.delim_stack.pop();
                     return Err(e);
                 }
             };
-            match (&tok, kind) {
+            match (&lexeme.token, kind) {
                 // Our closer: `close_delim` already popped us, so the stack
                 // sits below the entry depth.
                 (Token::RBrace, DelimKind::Brace)
                 | (Token::RBracket, DelimKind::Bracket | DelimKind::Expr)
                     if self.delim_stack.len() < entry_depth =>
                 {
-                    return Ok((tokens, span));
+                    return Ok((tokens, lexeme.span));
                 }
                 // With our delim open, `eof_or_unterminated` turns end of
                 // input into the `Err` caught above.
                 (Token::Eof, _) => {
                     unreachable!("next_token cannot yield Eof while a delim is open")
                 }
-                _ => tokens.push((tok, span)),
+                _ => tokens.push(lexeme),
             }
         }
     }
@@ -1460,7 +1523,7 @@ impl Lexer {
 
     /// A digit run glued to `>`/`<`: read whole, then judged against the
     /// nine-spelling vocabulary by `redirect` and `dup`.
-    fn scan_fd_redirect(&mut self, span: Span) -> Result<(Token, Span), LexError> {
+    fn scan_fd_redirect(&mut self, span: Span) -> Result<Lexeme, LexError> {
         let digits = self.take_while(|ch| ch.is_ascii_digit());
         match self.peek() {
             Some('>') => self.scan_redirect_gt(Some(&digits), span),
@@ -1484,13 +1547,13 @@ impl Lexer {
 
     /// Judge a redirect spelled with `fd`, which is gone from the token.
     /// `stderr` is set only for `2` with a write, by construction.
-    fn redirect(
-        &self,
-        fd: Option<&str>,
-        op: RedirectOp,
-        span: Span,
-    ) -> Result<(Token, Span), LexError> {
-        let token = |stderr| Ok((Token::Redirect { stderr, op }, self.finish(span)));
+    fn redirect(&self, fd: Option<&str>, op: RedirectOp, span: Span) -> Result<Lexeme, LexError> {
+        let token = |stderr| {
+            Ok(Lexeme {
+                token: Token::Redirect { stderr, op },
+                span: self.finish(span),
+            })
+        };
         let Some(digits) = fd else {
             return token(false);
         };
@@ -1516,12 +1579,15 @@ impl Lexer {
     }
 
     /// `fd>&to`: `2>&1` is the one dup ral models.
-    fn dup(&self, fd: Option<&str>, to: &str, span: Span) -> Result<(Token, Span), LexError> {
+    fn dup(&self, fd: Option<&str>, to: &str, span: Span) -> Result<Lexeme, LexError> {
         let refuse = |m: String| Err(Self::error(self.finish(span), m));
         let fd = fd.unwrap_or("1");
         match (fd.parse::<u32>(), to.parse::<u32>()) {
             (Ok(0), Ok(0..=2)) => refuse(STDIN_UNWRITABLE.into()),
-            (Ok(2), Ok(1)) => Ok((Token::StderrToStdout, self.finish(span))),
+            (Ok(2), Ok(1)) => Ok(Lexeme {
+                token: Token::StderrToStdout,
+                span: self.finish(span),
+            }),
             // A bare `>` writes fd 1, so `>&2` is `1>&2` spelled short.  Both
             // are the bash idiom for a diagnostic, and a diagnostic is a
             // builtin here rather than a second name for the byte channel.
@@ -1543,11 +1609,7 @@ impl Lexer {
         }
     }
 
-    fn scan_redirect_gt(
-        &mut self,
-        fd: Option<&str>,
-        span: Span,
-    ) -> Result<(Token, Span), LexError> {
+    fn scan_redirect_gt(&mut self, fd: Option<&str>, span: Span) -> Result<Lexeme, LexError> {
         self.bump();
         if self.peek() == Some('>') {
             self.bump();
@@ -1573,11 +1635,7 @@ impl Lexer {
         self.redirect(fd, RedirectOp::Write(WriteMode::Write), span)
     }
 
-    fn scan_redirect_lt(
-        &mut self,
-        fd: Option<&str>,
-        span: Span,
-    ) -> Result<(Token, Span), LexError> {
+    fn scan_redirect_lt(&mut self, fd: Option<&str>, span: Span) -> Result<Lexeme, LexError> {
         self.bump();
         if self.peek() == Some('<') {
             self.bump();
@@ -1673,14 +1731,14 @@ mod tests {
     }
 
     fn tok_types(source: &str) -> Vec<Token> {
-        lex(source).unwrap().into_iter().map(|(t, _)| t).collect()
+        lex(source).unwrap().into_iter().map(|l| l.token).collect()
     }
 
     fn lex_ok(source: &str) -> Vec<Token> {
         lex(source)
             .unwrap_or_else(|e| panic!("expected Ok: {source:?}\n  error: {}", e.message()))
             .into_iter()
-            .map(|(t, _)| t)
+            .map(|l| l.token)
             .collect()
     }
 
@@ -1710,7 +1768,7 @@ mod tests {
         let StringPart::Splice(tokens) = part else {
             panic!("expected a splice, got {part:?}");
         };
-        tokens.iter().map(|(t, _)| t).collect()
+        tokens.iter().map(|l| &l.token).collect()
     }
 
     fn variable(name: &str) -> Token {
@@ -1740,7 +1798,7 @@ mod tests {
     #[test]
     fn trailing_comment_eof_spans_end_of_input() {
         let src = "echo a # tail";
-        let (tok, span) = lex(src).unwrap().pop().unwrap();
+        let Lexeme { token: tok, span } = lex(src).unwrap().pop().unwrap();
         assert_eq!(tok, Token::Eof);
         #[allow(
             clippy::cast_possible_truncation,
@@ -1773,7 +1831,7 @@ mod tests {
     #[test]
     fn line_continuation_does_not_stretch_literal_span() {
         let toks = lex("\"\\\n$x y\"").unwrap();
-        let Token::DoubleQuoted(parts) = &toks[0].0 else {
+        let Token::DoubleQuoted(parts) = &toks[0].token else {
             panic!("expected DoubleQuoted");
         };
         assert_eq!(parts.len(), 2);
@@ -1790,7 +1848,7 @@ mod tests {
     #[test]
     fn line_continuation_does_not_stretch_following_literal() {
         let toks = lex("\"\\\nabc\"").unwrap();
-        let Token::DoubleQuoted(parts) = &toks[0].0 else {
+        let Token::DoubleQuoted(parts) = &toks[0].token else {
             panic!("expected DoubleQuoted");
         };
         assert_eq!(parts.len(), 1);
@@ -2021,7 +2079,10 @@ mod tests {
     fn redirect_stderr_to_stdout() {
         let toks = tok_types("cmd 2>&1");
         assert!(matches!(toks[1], Token::StderrToStdout));
-        assert_eq!(lex("cmd 2>&1").unwrap()[1].1, Span::new(FileId::DUMMY, 4, 8));
+        assert_eq!(
+            lex("cmd 2>&1").unwrap()[1].span,
+            Span::new(FileId::DUMMY, 4, 8)
+        );
     }
 
     /// If `>~` swallowed the `~` in `>~/path`, the redirect would target
@@ -2219,8 +2280,8 @@ mod tests {
         let StringPart::Splice(tokens) = &parts[0].item else {
             unreachable!()
         };
-        assert_eq!(&src[tokens[3].1.range()], "]");
-        assert_eq!(&src[tokens[6].1.range()], "]");
+        assert_eq!(&src[tokens[3].span.range()], "]");
+        assert_eq!(&src[tokens[6].span.range()], "]");
 
         for splice in ["$x[k]", "!$x[k]", "!{f}[k]", "$[xs][0]"] {
             let parts = string_parts(&format!("\"{splice}\""));
@@ -2294,7 +2355,7 @@ mod tests {
         let Token::Expr(inner) = &toks[0] else {
             panic!("expected Expr token");
         };
-        let kinds: Vec<&Token> = inner.iter().map(|(t, _)| t).collect();
+        let kinds: Vec<&Token> = inner.iter().map(|l| &l.token).collect();
         assert_eq!(kinds, vec![&plain("2"), &op("+"), &plain("3")]);
     }
 
@@ -2306,7 +2367,7 @@ mod tests {
         let Token::Expr(inner) = &toks[0] else {
             panic!("expected Expr token");
         };
-        let kinds: Vec<&Token> = inner.iter().map(|(t, _)| t).collect();
+        let kinds: Vec<&Token> = inner.iter().map(|l| &l.token).collect();
         assert_eq!(
             kinds,
             vec![
@@ -2340,13 +2401,24 @@ mod tests {
     }
 
     /// Inside `$[…]` the operators are `Token::Op`, redirect spellings included.
+    /// An exponent is part of a float only: `1e+5` is `1e`, `+`, `5`.
+    #[test]
+    fn dollar_bracket_exponent_without_a_point_splits() {
+        let toks = tok_types("$[1e+5]");
+        let Token::Expr(inner) = &toks[0] else {
+            panic!("expected Expr token");
+        };
+        let kinds: Vec<&Token> = inner.iter().map(|l| &l.token).collect();
+        assert_eq!(kinds, vec![&plain("1e"), &op("+"), &plain("5")]);
+    }
+
     #[test]
     fn dollar_bracket_operators_are_ops() {
         let toks = tok_types("$[1 && 0 || 2>3 && 2>=3 && 1<2 && 1<=2 && 1!=2]");
         let Token::Expr(inner) = &toks[0] else {
             panic!("expected Expr token");
         };
-        let kinds: Vec<&Token> = inner.iter().map(|(t, _)| t).collect();
+        let kinds: Vec<&Token> = inner.iter().map(|l| &l.token).collect();
         assert_eq!(
             kinds,
             vec![
@@ -2385,7 +2457,7 @@ mod tests {
         let Token::Expr(inner) = &toks[0] else {
             panic!("expected Expr token");
         };
-        let kinds: Vec<&Token> = inner.iter().map(|(t, _)| t).collect();
+        let kinds: Vec<&Token> = inner.iter().map(|l| &l.token).collect();
         assert_eq!(
             kinds,
             vec![&plain("1"), &op("="), &plain("2"), &op("=="), &plain("3")]
@@ -2401,8 +2473,8 @@ mod tests {
         let Token::Expr(inner) = &toks[0] else {
             panic!("expected Expr token");
         };
-        assert!(inner.iter().any(|(t, _)| matches!(
-            t,
+        assert!(inner.iter().any(|l| matches!(
+            l.token,
             Token::Redirect {
                 op: RedirectOp::Read,
                 ..
@@ -2463,7 +2535,7 @@ mod tests {
             panic!("expected Expr token");
         };
         assert_eq!(inner.len(), 1);
-        let (_, span) = &inner[0];
+        let span = &inner[0].span;
         // The `$` and `[` take one byte each, so `42` is at bytes 2..4.
         assert_eq!(span.start, 2);
         assert_eq!(span.end, 4);
@@ -2779,8 +2851,8 @@ mod tests {
     fn herestring_redirect() {
         let tokens = lex("cat << x").unwrap();
         assert!(
-            tokens.iter().any(|(t, _)| matches!(
-                t,
+            tokens.iter().any(|l| matches!(
+                l.token,
                 Token::Redirect {
                     stderr: false,
                     op: RedirectOp::HereString,
@@ -2993,7 +3065,7 @@ mod tests {
     fn bumped_string_byte_span() {
         let src = "#'hi'#";
         let toks = lex(src).unwrap();
-        assert_eq!(&src[toks[0].1.range()], "#'hi'#");
+        assert_eq!(&src[toks[0].span.range()], "#'hi'#");
     }
 
     // ── byte-range span sanity checks ─────────────────────────────────────
@@ -3001,11 +3073,11 @@ mod tests {
     #[test]
     fn byte_spans_cover_full_tokens() {
         let toks = lex("echo hi").unwrap();
-        assert_eq!(toks[0].1.start, 0);
-        assert_eq!(toks[0].1.end, 4);
-        assert_eq!(toks[1].1.start, 5);
-        assert_eq!(toks[1].1.end, 7);
-        assert!(matches!(toks[2].0, Token::Eof));
+        assert_eq!(toks[0].span.start, 0);
+        assert_eq!(toks[0].span.end, 4);
+        assert_eq!(toks[1].span.start, 5);
+        assert_eq!(toks[1].span.end, 7);
+        assert!(matches!(toks[2].token, Token::Eof));
     }
 
     #[test]
@@ -3014,16 +3086,16 @@ mod tests {
         // 6 bytes, so slicing by them would panic if the two disagreed.
         let src = "日本 = hi";
         let toks = lex(src).unwrap();
-        assert_eq!(&src[toks[0].1.range()], "日本");
-        assert_eq!(&src[toks[1].1.range()], "=");
-        assert_eq!(&src[toks[2].1.range()], "hi");
+        assert_eq!(&src[toks[0].span.range()], "日本");
+        assert_eq!(&src[toks[1].span.range()], "=");
+        assert_eq!(&src[toks[2].span.range()], "hi");
     }
 
     #[test]
     fn byte_spans_quoted_string() {
         let src = "'héllo'";
         let toks = lex(src).unwrap();
-        assert_eq!(&src[toks[0].1.range()], "'héllo'");
+        assert_eq!(&src[toks[0].span.range()], "'héllo'");
     }
 
     #[test]
@@ -3032,7 +3104,8 @@ mod tests {
         let StringPart::Splice(tokens) = &parts[0].item else {
             panic!("expected a splice");
         };
-        let (_, lbracket) = tokens.iter().find(|(t, _)| *t == Token::LBracket).unwrap();
+        let Lexeme { span: lbracket, .. } =
+            tokens.iter().find(|l| l.token == Token::LBracket).unwrap();
         assert_eq!((lbracket.start, lbracket.end), (3, 4));
         let span = lex_err_span("$[1 +");
         assert_eq!((span.start, span.end), (1, 2));

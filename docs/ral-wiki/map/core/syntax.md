@@ -9,7 +9,7 @@ covers_paths: [core/src/syntax/]
 `core/src/syntax/` turns source text into the surface AST — the only place that
 sees raw bytes and bare words.
 
-- `lexer.rs` — `lex(source) -> Result<Vec<(Token, Span)>, LexError>`; the
+- `lexer.rs` — `lex(source) -> Result<Vec<Lexeme>, LexError>`; the
   `Token` enum. The innermost open delimiter (`DelimKind`: `Brace`,
   `Bracket`, `Expr`) is the lexer's whole context: it decides whether a
   newline separates, whether `,` punctuates, and — inside `$[…]` only —
@@ -76,10 +76,12 @@ sees raw bytes and bare words.
   word. `Ast::Case` carries `arms: Vec<CaseArm>`, a finite list of tag-and-body
   alternatives the parser hands on whole
   ([[decisions/260811_case-is-syntax-try-is-not|case-is-syntax-try-is-not]]).
-  `WordLiteral::classify` is the numeral grammar: purely lexical, never a round
+  `WordLiteral::classify` decides by the numeral grammar: purely lexical, never a round
   trip through printing, so `007` and `1.50` are numerals while `1e5`, which
   merely happens to f64-parse, is text
   ([[decisions/260824_a-numeral-denotes-its-number|a-numeral-denotes-its-number]]).
+- `numeral.rs` — the single home of the numeral grammar (`prefix`); the lexer's
+  numeral scanning and `WordLiteral::classify` both read it.
 - `group.rs` — pre-pass detecting mutually recursive binding groups, consumed by
   the [[map/core/elaboration|elaborator]].
 - `quote.rs` — bare-word classification (`is_bare_word`, `quote_word`,

@@ -11,7 +11,7 @@ use ral_core::capability::Flag;
 use ral_core::first_order::FOValue;
 use ral_core::first_order::datum::Datum;
 use ral_core::source::Span as ByteSpan;
-use ral_core::syntax::lexer::{LexError, LexErrorKind, Token, lex};
+use ral_core::syntax::lexer::{LexError, LexErrorKind, Lexeme, Token, lex};
 use ral_core::ty::Site;
 use ral_core::ty::{CompTy, Grade, Kind, Scheme, Ty, closed_record, closed_variant, open_record};
 use ral_core::typecheck::Unifier;
@@ -354,19 +354,19 @@ fn parse_at(text: &str, cursor: usize) -> Option<(Vec<String>, usize, usize)> {
     let tokens = lex_open(text)?;
     let start = tokens
         .iter()
-        .rposition(|(tok, span)| separates(tok) && span.end as usize <= at)
+        .rposition(|l| separates(&l.token) && l.span.end as usize <= at)
         .map_or(0, |i| i + 1);
     let end = tokens[start..]
         .iter()
-        .position(|(tok, _)| separates(tok))
+        .position(|l| separates(&l.token))
         .map_or(tokens.len(), |i| start + i);
     let (spans, mut words): (Vec<(usize, usize)>, Vec<String>) = tokens[start..end]
         .iter()
-        .filter(|(tok, _)| is_word_token(tok))
-        .map(|(tok, span)| {
+        .filter(|l| is_word_token(&l.token))
+        .map(|Lexeme { token, span }| {
             (
                 (span.start as usize, span.end as usize),
-                word_text(text, tok, *span),
+                word_text(text, token, *span),
             )
         })
         .unzip();
@@ -380,7 +380,7 @@ fn parse_at(text: &str, cursor: usize) -> Option<(Vec<String>, usize, usize)> {
 
 /// `text`'s tokens, closing each `{` or `[` still open at the end — an
 /// editor's buffer is routinely mid-block.  `None` for any other lex failure.
-fn lex_open(text: &str) -> Option<Vec<(Token, ByteSpan)>> {
+fn lex_open(text: &str) -> Option<Vec<Lexeme>> {
     let mut source = Cow::Borrowed(text);
     loop {
         match lex(&source) {
