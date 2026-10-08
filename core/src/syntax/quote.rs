@@ -16,7 +16,7 @@ use crate::syntax::lexer::{Token, lex};
 ///
 /// Bareness is positional — `#` opens a comment only at token start, `:`
 /// splits only before whitespace or `]` — so it is settled by lexing
-/// rather than by a per-character scan like the lexer's `is_bare_char`,
+/// rather than by a per-character scan like the lexer's `continues_bare_word`,
 /// which would call `#foo`, `...` and `foo:` bare.  `,` is the case
 /// lexing cannot settle: it stays inside a word at top level and
 /// punctuates inside `[…]`, so it always forces quoting.
@@ -75,7 +75,7 @@ pub fn escape_for_interpolation(s: &str) -> String {
 /// (`2>&1`) is no word, so a run it opens has no one-word reading.
 pub(crate) fn one_word(run: &str) -> Option<String> {
     let tokens = lex(run).ok()?;
-    if matches!(tokens.first(), Some((Token::Dup { .. }, _))) {
+    if matches!(tokens.first(), Some((Token::StderrToStdout, _))) {
         return None;
     }
     let mut body = String::new();

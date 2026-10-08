@@ -1384,24 +1384,20 @@ impl Parser {
         prev_span.end == next_span.start
     }
 
-    /// The redirect, which is `None` for an identity dup (`1>&1`, `2>&2`): it
-    /// denotes no redirect.
-    fn parse_redirect(&mut self) -> Result<Option<Redirect<Ast>>, ParseError> {
+    fn parse_redirect(&mut self) -> Result<Redirect<Ast>, ParseError> {
         let op_span = self.span();
         match self.peek().clone() {
-            Token::Dup { fd, to } => {
+            Token::StderrToStdout => {
                 self.advance();
-                redirect_dup(fd, to).map_err(|m| ParseError::new(Some(op_span), m))
+                Ok(Redirect::StderrToStdout)
             }
-            Token::Redirect { fd, op } => {
+            Token::Redirect { stderr, op } => {
                 self.advance();
                 if self.at_cmd_end() {
                     return Err(ParseError::new(Some(op_span), redirect_needs_a_target(op)));
                 }
                 let (word_span, word) = self.capture_span(Self::parse_word)?;
-                // The fd rule first: `1<< x` is a misplaced fd, not a heredoc.
-                let redirect =
-                    redirect_word(fd, op, word).map_err(|m| ParseError::new(Some(op_span), m))?;
+                let redirect = redirect_word(stderr, op, word);
                 if let Redirect::Stdin(StdinSource::Here(Ast::Word(w))) = &redirect {
                     let message = match w {
                         Word::Plain(_) => crate::syntax::NO_HEREDOCS,
@@ -1413,7 +1409,7 @@ impl Parser {
                     return Err(ParseError::new(Some(word_span), message));
                 }
                 self.end_unit(word_span)?;
-                Ok(Some(redirect))
+                Ok(redirect)
             }
             _ => Err(self.error("expected redirect")),
         }
@@ -1423,14 +1419,12 @@ impl Parser {
     /// second redirect.
     fn parse_redirect_into(&mut self, into: &mut Redirects<Ast>) -> Result<(), ParseError> {
         let (span, redirect) = self.capture_span(Self::parse_redirect)?;
-        if let Some(r) = redirect {
-            into.bind(r).map_err(|m| ParseError::new(Some(span), m))?;
-        }
-        Ok(())
+        into.bind(redirect)
+            .map_err(|m| ParseError::new(Some(span), m))
     }
 
     fn at_redirect(&self) -> bool {
-        matches!(self.peek(), Token::Redirect { .. } | Token::Dup { .. })
+        matches!(self.peek(), Token::Redirect { .. } | Token::StderrToStdout)
     }
 
     /// arg = atom | '...' atom
@@ -1602,7 +1596,7 @@ impl Parser {
                 | Token::Colon
                 | Token::Spread
                 | Token::Redirect { .. }
-                | Token::Dup { .. }
+                | Token::StderrToStdout
         )
     }
 
@@ -1900,40 +1894,22 @@ impl Parser {
     }
 }
 
-/// Eliminate a word-taking redirect token into the three streams.  ral
-/// has no fd plumbing beyond them, so any other fd is refused rather
-/// than reinterpreted.  (The lexer refuses fd ≥ 3 first, with advice
-/// this rule cannot give; the last arm is the rule stated whole.)
-fn redirect_word<T>(fd: Option<u32>, op: RedirectOp, word: T) -> Result<Redirect<T>, String> {
-    let fd = fd.unwrap_or(match op {
-        RedirectOp::Write(_) => 1,
-        RedirectOp::Read | RedirectOp::HereString => 0,
-    });
-    match (fd, op) {
-        (0, RedirectOp::Read) => Ok(Redirect::Stdin(StdinSource::File(word))),
-        (0, RedirectOp::HereString) => Ok(Redirect::Stdin(StdinSource::Here(word))),
-        (1, RedirectOp::Write(mode)) => Ok(Redirect::Stdout(mode, word)),
+/// Eliminate a word-taking redirect token into the three streams.  The
+/// lexer has already refused every fd spelling but `2`, which is `stderr`.
+fn redirect_word<T>(stderr: bool, op: RedirectOp, word: T) -> Redirect<T> {
+    match (stderr, op) {
+        (_, RedirectOp::Read) => Redirect::Stdin(StdinSource::File(word)),
+        (_, RedirectOp::HereString) => Redirect::Stdin(StdinSource::Here(word)),
+        (false, RedirectOp::Write(mode)) => Redirect::Stdout(mode, word),
         // Stderr streams: staging diagnostics for an atomic commit would
         // withhold them until the frame settles.
-        (2, RedirectOp::Write(mode)) => Ok(Redirect::Stderr(
+        (true, RedirectOp::Write(mode)) => Redirect::Stderr(
             match mode {
                 WriteMode::Write => WriteMode::Stream,
                 other => other,
             },
             word,
-        )),
-        (_, RedirectOp::HereString) => {
-            Err("`<<` always feeds stdin: drop the file-descriptor prefix".into())
-        }
-        (_, RedirectOp::Read) => Err(format!(
-            "`<` always feeds standard input, so `{fd}<` reads nothing in ral: \
-             drop the `{fd}`, or did you mean `{fd}> file` to write there?"
-        )),
-        (0, RedirectOp::Write(_)) => Err(STDIN_UNWRITABLE.into()),
-        (_, RedirectOp::Write(_)) => Err(format!(
-            "file descriptor {fd}: ral has only standard input (0), standard output (1) \
-             and standard error (2)"
-        )),
+        ),
     }
 }
 
@@ -1945,23 +1921,6 @@ fn redirect_needs_a_target(op: RedirectOp) -> &'static str {
         RedirectOp::HereString => "`<<` needs a string to feed",
     }
 }
-
-/// Eliminate `fd>&to`.  `2>&1` is the one dup ral models; the identity
-/// dups `1>&1` and `2>&2` name the stream they already are, and denote
-/// no redirect at all.
-fn redirect_dup<T>(fd: Option<u32>, to: u32) -> Result<Option<Redirect<T>>, String> {
-    match (fd.unwrap_or(1), to) {
-        (2, 1) => Ok(Some(Redirect::StderrToStdout)),
-        (1, 1) | (2, 2) => Ok(None),
-        (0, _) => Err(STDIN_UNWRITABLE.into()),
-        (fd, to) => Err(format!(
-            "ral has no fd plumbing beyond `2>&1`, so `{fd}>&{to}` has nothing to mean"
-        )),
-    }
-}
-
-const STDIN_UNWRITABLE: &str =
-    "standard input cannot be written to: did you mean `< file`, which reads one into it?";
 
 /// A bare non-numeral word is a string in `$[…]` as everywhere, so under an
 /// operator that wants numbers it is a certain type error — and almost always

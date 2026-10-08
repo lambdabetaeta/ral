@@ -1,0 +1,2 @@
+# contains: control character U+0001
+echo ab

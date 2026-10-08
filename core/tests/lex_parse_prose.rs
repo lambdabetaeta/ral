@@ -191,22 +191,19 @@ impl SplitMix64 {
 
 // ── Random-byte fuzz ──────────────────────────────────────────────────────
 
-/// 4096 short, fully-random ASCII inputs.  The lexer's metacharacter set
-/// is mostly printable, so restricting the alphabet to printable + a few
-/// control bytes exercises real code paths rather than spending most
-/// iterations on UTF-8-error handling we already cover elsewhere.
+/// 4096 short, fully-random inputs.  The lexer's metacharacter set is mostly
+/// printable ASCII, so that dominates the alphabet; the few non-ASCII and
+/// control code points exercise the bidi and control-character refusals.
 #[test]
-fn random_ascii_never_panics_and_messages_are_friendly() {
-    let alphabet: Vec<u8> = (b' '..=b'~').chain(*b"\n\t\0").collect();
+fn random_chars_never_panics_and_messages_are_friendly() {
+    let alphabet: Vec<char> = (' '..='~')
+        .chain(['\n', '\t', '\r', '\0', '\u{1}', '\u{7F}', '\u{202E}', '\u{2066}', 'é', '日', '\u{1F600}'])
+        .collect();
     for i in 0..4096u64 {
         let mut rng = SplitMix64::new(i);
         let len = rng.range(0, 96);
-        let bytes: Vec<u8> = (0..len).map(|_| rng.pick(&alphabet)).collect();
-        // Bytes are guaranteed printable ASCII (+ \n \t \0) so to_str
-        // never fails — but use from_utf8_lossy to keep the fuzz robust
-        // if the alphabet is expanded later.
-        let src = String::from_utf8_lossy(&bytes).into_owned();
-        must_not_panic_and_be_friendly(&format!("random_ascii[{i}]"), &src);
+        let src: String = (0..len).map(|_| rng.pick(&alphabet)).collect();
+        must_not_panic_and_be_friendly(&format!("random_chars[{i}]"), &src);
     }
 }
 

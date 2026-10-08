@@ -1,0 +1,2 @@
+# contains: names the stream it already is
+cmd 1>&1

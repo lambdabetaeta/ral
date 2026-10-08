@@ -78,10 +78,14 @@ parser (skipping the `Call` wrapper for a value head) and elaboration (through
 `elaborator::word_val`) read that one answer. Its dual is `quote.rs`'s
 `is_bare_word`: whatever the numeral grammar claims cannot be emitted bare, or
 printed text would come back as a value. `is_bare_word` *lexes* rather than
-scanning characters, so it inherits `is_bare_char` and the positional splits
-together — which is why a metacharacter added to `is_bare_char` also starts
+scanning characters, so it inherits `continues_bare_word` and the positional splits
+together — which is why a metacharacter added to `continues_bare_word` also starts
 being quoted on the way out, and why `&` (added when `echo hi&` was found to
 lex as one word ending in `&`) makes `http://h/?a=1&b=2` an emitted `'…'`.
+The ASCII control characters are not bare-word characters and are refused
+outside strings; the nine Unicode bidirectional controls are refused anywhere in
+the source, before lexing begins. In a double-quoted string `\u{…}` is the
+spelling for all of them.
 The remaining literals are
 *punctuation*, not words — `()` for unit beside `[]` and `[:]` — so no
 spelling of a name can collide with them.
@@ -110,10 +114,11 @@ own `incomplete` verdict; `join_continuation` folds lines in with `'\n'`). A
 newline *before* `?` is allowed too, so `cmd\n? fallback` and `cmd ?\nfallback`
 both parse. A `;` never continues anything.
 
-**Redirects are the three standard streams.** `parse_redirect_into` eliminates the
-lexer's `Redirect` and `Dup` tokens, fd numbers and all, into the sum
-`Redirect<Ast>` through `redirect_word` and `redirect_dup`, which refuse any
-fd that names no stream — so no fd number exists anywhere downstream
+**Redirects are the three standard streams.** The lexer refuses every fd-prefixed
+spelling but `2>`, `2>>`, `2>~` and `2>&1`, so its `Redirect { stderr, op }` and
+`StderrToStdout` tokens carry no fd number; `parse_redirect_into` eliminates them
+into the sum `Redirect<Ast>` through the total `redirect_word` — so no fd number
+exists anywhere downstream
 ([[invariants/redirects-are-the-three-standard-streams|redirects-are-the-three-standard-streams]]). Each is then bound into `Redirects<Ast>` by `Redirects::bind`, which refuses a second binding of a stream with a caret on the second redirect
 ([[decisions/260930_redirects-are-bindings|redirects-are-bindings]]).
 Redirects belong to the stage: every pipeline stage takes trailing redirects

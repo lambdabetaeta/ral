@@ -1668,11 +1668,19 @@ fn herestring_path_word_is_rejected() {
     assert!(err.message.contains("use `< path`"), "got: {}", err.message);
 }
 
-/// The fd prefix is spelling: it picks a stream and is gone, and an
-/// identity dup picks none.
+/// The fd prefix is refused at the lexer, identity dups included; `2>&1`
+/// binds stderr to stdout wherever it stands.
 #[test]
 fn fd_prefixes_name_streams() {
-    let redirects = redirects_of("cmd 1>&1 2>&2 2>&1 > o");
+    for src in ["cmd 1>&1", "cmd 2>&2"] {
+        let err = parse(src).expect_err("identity dup must not parse");
+        assert!(
+            err.message.contains("names the stream it already is"),
+            "for {src:?} got: {}",
+            err.message
+        );
+    }
+    let redirects = redirects_of("cmd 2>&1 > o");
     assert!(matches!(redirects.stdout, Some((WriteMode::Write, _))));
     assert!(matches!(redirects.stderr, Some(StderrTarget::Stdout)));
     assert!(redirects.stdin.is_none());
@@ -1728,20 +1736,17 @@ fn distinct_streams_bind_in_any_order() {
     assert!(parse("cmd 2>&1 > o").is_ok());
 }
 
-/// `<<` always feeds stdin: fd 0 may be spelled out, another standard
-/// stream errors here (an fd past 2 never leaves the lexer).
+/// `<<` always feeds stdin: every fd prefix is refused, `0` with its own
+/// advice.
 #[test]
 fn herestring_fd_prefix() {
-    assert!(matches!(
-        redirects_of("cat 0<< #'x'#").stdin,
-        Some(StdinSource::Here(_))
-    ));
-    let err = parse("cat 2<< #'x'#").expect_err("fd 2 herestring must not parse");
-    assert!(
-        err.message.contains("always feeds stdin"),
-        "got: {}",
-        err.message
-    );
+    for (src, message) in [
+        ("cat 0<< #'x'#", "drop the `0`"),
+        ("cat 2<< #'x'#", "always feeds stdin"),
+    ] {
+        let err = parse(src).expect_err("fd-prefixed herestring must not parse");
+        assert!(err.message.contains(message), "got: {}", err.message);
+    }
 }
 
 /// The one statement `src` parses to, spans and `Call` wrappers intact.

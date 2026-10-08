@@ -1686,13 +1686,15 @@ Redirects attach input or output to one command or compound command:
 | `>~ path` | Truncate the file and stream output into it. |
 | `>> path` | Append output. |
 | `2> path` | Stream standard error into a truncated file. |
+| `2>> path` | Append standard error to a file. |
+| `2>~ path` | Truncate the file and stream standard error into it. |
 | `2>&1` | Send standard error wherever standard output goes. |
 | `< path` | Read standard input from a file. |
 | `<< value` | Read standard input from a string value. |
 
 Any stage takes trailing redirects, `if` and `case` included: `if $ok { a } { b } > log`. A command's redirects may also stand between its arguments: `cmd a > f b`.
 
-The default descriptor is 0 for input redirects and 1 for output redirects. A redirect list binds streams: each of standard input, output, and error is bound at most once, and a second binding is a parse error with a caret on the second redirect. `cmd > a > b`, `cmd 2> e 2>&1`, `cmd 2>&1 2> e`, and `cmd < a << b` are all refused with "standard output is redirected twice; which one do you mean?" or its input and error counterpart. Position carries no meaning: `2>&1` sends standard error wherever standard output ends up, so `cmd 2>&1 > f` and `cmd > f 2>&1` are one command. Redirect targets are evaluated before their files are opened, and the files open in one fixed order: standard input, output, error. Relative paths use the scoped logical working directory.
+These nine spellings are the whole redirect vocabulary: `< path`, `<< value`, `> path`, `>> path`, `>~ path`, `2> path`, `2>> path`, `2>~ path` and `2>&1`. The digit `2` names standard error and is the only fd prefix; `1>` is refused with advice to put a space before the `>` to pass `1` as an argument (`echo 1>file` would otherwise write an empty file). A redirect list binds streams: each of standard input, output, and error is bound at most once, and a second binding is a parse error with a caret on the second redirect. `cmd > a > b`, `cmd 2> e 2>&1`, `cmd 2>&1 2> e`, and `cmd < a << b` are all refused with "standard output is redirected twice; which one do you mean?" or its input and error counterpart. Position carries no meaning: `2>&1` sends standard error wherever standard output ends up, so `cmd 2>&1 > f` and `cmd > f 2>&1` are one command. Redirect targets are evaluated before their files are opened, and the files open in one fixed order: standard input, output, error. Relative paths use the scoped logical working directory.
 
 ral has no numbered descriptors beyond these three streams. A redirect naming any other file descriptor — `3> path`, `4< path`, `>&5` — is rejected outright, with a diagnostic naming standard input, output, and error as the only three that exist; there is no general facility for managing a spawned process's own inherited handles.
 

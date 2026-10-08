@@ -1,0 +1,2 @@
+# contains: put a space before
+echo 1>file

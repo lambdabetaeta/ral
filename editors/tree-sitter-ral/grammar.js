@@ -2,7 +2,7 @@
 // @ts-check
 
 // Bare-word stems: anything that is not a delimiter, sigil, or whitespace.
-// Mirrors Lexer::is_bare_char in core/src/syntax/lexer.rs, plus two positional
+// Mirrors Lexer::continues_bare_word in core/src/syntax/lexer.rs, plus two positional
 // rules the character predicate alone can't express:
 //
 // - `,` is punctuation only while the real lexer is inside `[...]` (list/map

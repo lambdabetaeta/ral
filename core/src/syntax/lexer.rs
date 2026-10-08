@@ -41,16 +41,19 @@ pub(crate) fn is_ident(s: &str) -> bool {
     chars.all(is_ident_cont)
 }
 
-/// True when `ch` may appear in a bare word; the rest are metacharacters
-/// that always need quoting.
+/// The word-*continuation* predicate: true when `ch` may appear after the
+/// first char of a bare word; the rest are metacharacters that always need
+/// quoting.
 ///
-/// The per-character source of truth, mirrored by the tree-sitter grammar.
-/// It cannot see position, though: `scan_bare_fragment` still splits a `:`
-/// before space, newline, or `]`, and punctuates a `,` inside `[…]`.  The
-/// whole-string question is answered by [`crate::syntax::quote::is_bare_word`],
-/// which lexes rather than scanning chars.
-fn is_bare_char(ch: char) -> bool {
-    !matches!(
+/// Word *start* is narrower: `?`, `&`, `#`, `...`, `~`-forms, a digit run
+/// before `>`/`<`, `:` and `,` all begin something else when they open a
+/// token and are ordinary mid-word.  Position matters beyond that too:
+/// `scan_bare_fragment` splits a `:` before whitespace, `,`, or a closer (`]`, `}`, `)`), and
+/// punctuates a `,` inside `[…]`.  The whole-string question is answered by
+/// [`crate::syntax::quote::is_bare_word`], which lexes rather than scanning
+/// chars.
+fn continues_bare_word(ch: char) -> bool {
+    !(ch.is_ascii_control() || matches!(
         ch,
         ' ' | '\t'
             | '\r'
@@ -71,7 +74,24 @@ fn is_bare_char(ch: char) -> bool {
             | '('
             | ')'
             | ';'
-    )
+    ))
+}
+
+/// The Unicode bidirectional controls, refused everywhere in the source
+/// (Trojan Source: they reorder how code displays relative to how it runs).
+fn bidi_control_name(ch: char) -> Option<&'static str> {
+    Some(match ch {
+        '\u{202A}' => "left-to-right embedding",
+        '\u{202B}' => "right-to-left embedding",
+        '\u{202C}' => "pop directional formatting",
+        '\u{202D}' => "left-to-right override",
+        '\u{202E}' => "right-to-left override",
+        '\u{2066}' => "left-to-right isolate",
+        '\u{2067}' => "right-to-left isolate",
+        '\u{2068}' => "first strong isolate",
+        '\u{2069}' => "pop directional isolate",
+        _ => return None,
+    })
 }
 
 /// The bare-word characters that are operators inside `$[…]`, where they end
@@ -136,16 +156,14 @@ pub enum Token {
     Newline,
     /// Separator run containing a `;` — never crossed by continuation.
     Semi,
-    /// A redirect operator that takes a word, with its fd prefix if written.
+    /// A redirect operator that takes a word; `stderr` is set only for
+    /// `2>`, `2>>`, `2>~`, so it implies `op` is a write.
     Redirect {
-        fd: Option<u32>,
+        stderr: bool,
         op: RedirectOp,
     },
-    /// `fd>&to`.
-    Dup {
-        fd: Option<u32>,
-        to: u32,
-    },
+    /// `2>&1`.
+    StderrToStdout,
     Eof,
 }
 
@@ -207,7 +225,7 @@ impl fmt::Display for Token {
             Self::Op(op) => write!(f, "{op}"),
             Self::Newline => write!(f, "newline"),
             Self::Semi => write!(f, "';'"),
-            Self::Redirect { .. } | Self::Dup { .. } => write!(f, "redirect"),
+            Self::Redirect { .. } | Self::StderrToStdout => write!(f, "redirect"),
             Self::Eof => write!(f, "end of input"),
         }
     }
@@ -372,6 +390,22 @@ pub fn lex(source: &str) -> Result<Vec<(Token, Span)>, LexError> {
 /// An unterminated string, delimiter, or `$(…)`, or a lexical fault such as
 /// an invalid escape or an unexpected character.
 pub(crate) fn lex_with(source: &str, file: FileId) -> Result<Vec<(Token, Span)>, LexError> {
+    if let Some((at, ch, name)) = source
+        .char_indices()
+        .find_map(|(i, ch)| bidi_control_name(ch).map(|n| (i, ch, n)))
+    {
+        let byte = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+        let (at, end) = (byte(at), byte(at + ch.len_utf8()));
+        return Err(Lexer::error(
+            Span::new(file, at, end),
+            format!(
+                "bidirectional control character U+{:04X} ({name}) is not allowed in ral source: \
+                 it can make the text read differently from how it runs; \
+                 to put it in a string, write `\\u{{{:X}}}`",
+                ch as u32, ch as u32
+            ),
+        ));
+    }
     let mut lexer = Lexer::new(source, file);
     let mut tokens = Vec::new();
     loop {
@@ -383,6 +417,34 @@ pub(crate) fn lex_with(source: &str, file: FileId) -> Result<Vec<(Token, Span)>,
         }
     }
     Ok(tokens)
+}
+
+/// The literal text buffered inside a double-quoted string, anchored at the
+/// offset of its first char; `start` is `Some` exactly when `text` is
+/// non-empty, so a `\<newline>` continuation, which pushes nothing, anchors
+/// nothing.
+#[derive(Default)]
+struct LiteralRun {
+    start: Option<u32>,
+    text: String,
+}
+
+impl LiteralRun {
+    fn push(&mut self, at: u32, ch: char) {
+        self.start.get_or_insert(at);
+        self.text.push(ch);
+    }
+
+    /// Emit the run as a `Literal` spanning `start..end`, if non-empty.
+    fn flush(&mut self, parts: &mut Vec<Spanned<StringPart>>, end: u32, file: FileId) {
+        let text = std::mem::take(&mut self.text);
+        if let Some(start) = self.start.take() {
+            parts.push(Spanned::new(
+                Span::new(file, start, end),
+                StringPart::Literal(text),
+            ));
+        }
+    }
 }
 
 struct Lexer {
@@ -513,6 +575,13 @@ impl Lexer {
         Some(ch)
     }
 
+    /// Consume one char; the span covers exactly it.
+    fn bump_spanned(&mut self) -> Span {
+        let start = self.span();
+        self.bump();
+        self.finish(start)
+    }
+
     fn take_while(&mut self, mut pred: impl FnMut(char) -> bool) -> String {
         let mut out = String::new();
         while let Some(ch) = self.peek() {
@@ -542,6 +611,8 @@ impl Lexer {
         self.innermost() == Some(DelimKind::Expr)
     }
 
+    /// Whitespace and `#` comments, up to but not including a significant
+    /// newline.
     fn skip_inline_whitespace(&mut self) {
         while let Some(ch) = self.peek() {
             match ch {
@@ -551,14 +622,13 @@ impl Lexer {
                 '\n' if self.suppress_newline() => {
                     self.bump();
                 }
+                '#' if !self.hash_opens_quoted() => {
+                    while self.peek().is_some_and(|ch| ch != '\n') {
+                        self.bump();
+                    }
+                }
                 _ => break,
             }
-        }
-    }
-
-    fn skip_comment(&mut self) {
-        while self.peek().is_some_and(|ch| ch != '\n') {
-            self.bump();
         }
     }
 
@@ -582,120 +652,113 @@ impl Lexer {
     }
 
     fn next_token(&mut self) -> Result<(Token, Span), LexError> {
-        loop {
-            self.skip_inline_whitespace();
+        self.skip_inline_whitespace();
 
-            let span = self.span();
-            let Some(ch) = self.peek() else {
-                return self.eof_or_unterminated(span);
-            };
+        let span = self.span();
+        let Some(ch) = self.peek() else {
+            return self.eof_or_unterminated(span);
+        };
 
-            return match ch {
-                '#' => {
-                    if self.hash_opens_quoted() {
-                        let level = self.count_hash_run();
-                        for _ in 0..level {
-                            self.bump();
-                        }
-                        self.scan_quoted(span, level)
-                    } else {
-                        self.skip_comment();
-                        match self.peek() {
-                            Some('\n') if self.suppress_newline() => {
-                                self.bump();
-                                continue;
-                            }
-                            Some('\n') => Ok(self.scan_separator(span)),
-                            // The comment ran to end of input: the `Eof`
-                            // token sits there, not at the opening `#`.
-                            _ => self.eof_or_unterminated(self.span()),
-                        }
-                    }
+        match ch {
+            '#' if self.hash_opens_quoted() => {
+                let level = self.count_hash_run();
+                for _ in 0..level {
+                    self.bump();
                 }
-                '\n' | ';' => Ok(self.scan_separator(span)),
-                '{' => Ok(self.open_delim(Token::LBrace, DelimKind::Brace)),
-                '}' => self.close_delim(Token::RBrace),
-                '[' => Ok(self.open_delim(Token::LBracket, DelimKind::Bracket)),
-                ']' => self.close_delim(Token::RBracket),
-                '(' => Ok(self.bump_simple(Token::LParen, span)),
-                ')' => Ok(self.bump_simple(Token::RParen, span)),
-                '|' if self.in_expr() && self.peek_n(1) == Some('|') => {
-                    Ok(self.two_char_op(Operator::Or, span))
-                }
-                '|' => Ok(self.bump_simple(Token::Pipe, span)),
-                '&' if self.in_expr() && self.peek_n(1) == Some('&') => {
-                    Ok(self.two_char_op(Operator::And, span))
-                }
-                '&' if self.peek_n(1) == Some('&') => Err(Self::error(
-                    Span::new(span.file, span.start, span.start + 2),
-                    "ral has no `&&`: a newline or `;` sequences commands, and an \
-                     uncaught failure already stops the script: inside `$[…]`, \
+                self.scan_quoted(span, level)
+            }
+            '\n' | ';' => Ok(self.scan_separator(span)),
+            '{' => Ok(self.open_delim(Token::LBrace, DelimKind::Brace)),
+            '}' => self.close_delim(Token::RBrace),
+            '[' => Ok(self.open_delim(Token::LBracket, DelimKind::Bracket)),
+            ']' => self.close_delim(Token::RBracket),
+            '(' => Ok(self.bump_simple(Token::LParen, span)),
+            ')' => Ok(self.bump_simple(Token::RParen, span)),
+            '|' if self.in_expr() && self.peek_n(1) == Some('|') => {
+                Ok(self.two_char_op(Operator::Or, span))
+            }
+            '|' => Ok(self.bump_simple(Token::Pipe, span)),
+            '&' if self.in_expr() && self.peek_n(1) == Some('&') => {
+                Ok(self.two_char_op(Operator::And, span))
+            }
+            '&' if self.peek_n(1) == Some('&') => Err(Self::error(
+                Span::new(span.file, span.start, span.start + 2),
+                "ral has no `&&`: a newline or `;` sequences commands, and an \
+                     uncaught failure already stops the script. Inside `$[…]`, \
                      `&&` is the Boolean connective",
-                )),
-                '&' if self.in_expr() => Err(Self::error(
-                    Span::new(span.file, span.start, span.start + 1),
-                    "`&` is not an operator: the Boolean connective is `&&`",
-                )),
-                '&' => Err(Self::error(
-                    Span::new(span.file, span.start, span.start + 1),
-                    "`&` does not background a command in ral: wrap it in \
+            )),
+            '&' if self.in_expr() => Err(Self::error(
+                Span::new(span.file, span.start, span.start + 1),
+                "`&` is not an operator: the Boolean connective is `&&`",
+            )),
+            '&' => Err(Self::error(
+                Span::new(span.file, span.start, span.start + 1),
+                "`&` does not background a command in ral: wrap it in \
                      `spawn { … }`, which returns a handle you `await`",
-                )),
-                ',' if self.suppress_newline() => Ok(self.bump_simple(Token::Comma, span)),
-                ',' => Ok(self.scan_bare_word(span)),
-                '$' => {
-                    self.bump();
-                    match self.scan_dollar()? {
-                        Some(tok) => Ok((tok, self.finish(span))),
-                        None => Err(Self::error(
-                            self.finish(span),
-                            "expected a name after `$`: write `$name`, `$(name)`, or `$[…]`",
-                        )),
-                    }
+            )),
+            ',' if self.suppress_newline() => Ok(self.bump_simple(Token::Comma, span)),
+            ',' => Ok(self.scan_bare_word(span)),
+            '$' => {
+                self.bump();
+                match self.scan_dollar()? {
+                    Some(tok) => Ok((tok, self.finish(span))),
+                    None => Err(Self::error(
+                        self.finish(span),
+                        "expected a name after `$`: write `$name`, `$(name)`, or `$[…]`",
+                    )),
                 }
-                '^' => Ok(self.bump_simple(Token::Caret, span)),
-                '!' if self.in_expr() && self.peek_n(1) == Some('=') => {
-                    Ok(self.two_char_op(Operator::Binary(BinaryOp::Eq(EqOp::Ne)), span))
-                }
-                '!' => Ok(self.bump_simple(Token::Bang, span)),
-                '?' => Ok(self.bump_simple(Token::Question, span)),
-                '\'' => self.scan_quoted(span, 0),
-                '"' => self.scan_double_quoted(span),
-                '<' | '>' if self.in_expr() => Ok(self.scan_comparison(span)),
-                '>' => self.scan_redirect_gt(None, span),
-                '<' => self.scan_redirect_lt(None, span),
-                _ if !self.in_expr() && ch.is_ascii_digit() && self.is_fd_redirect_start() => {
-                    self.scan_fd_redirect(span)
-                }
-                '.' if self.peek_n(1) == Some('.') && self.peek_n(2) == Some('.') => {
-                    self.bump();
-                    self.bump();
-                    self.bump();
-                    Ok((Token::Spread, self.finish(span)))
-                }
-                '`' => {
-                    self.bump();
-                    let label = self.scan_ident();
-                    if label.is_empty() {
-                        Err(Self::error(
-                            span,
-                            "expected a tag label after the backtick, as in `` `ok ``: \
+            }
+            '^' => Ok(self.bump_simple(Token::Caret, span)),
+            '!' if self.in_expr() && self.peek_n(1) == Some('=') => {
+                Ok(self.two_char_op(Operator::Binary(BinaryOp::Eq(EqOp::Ne)), span))
+            }
+            '!' => Ok(self.bump_simple(Token::Bang, span)),
+            '?' => Ok(self.bump_simple(Token::Question, span)),
+            '\'' => self.scan_quoted(span, 0),
+            '"' => self.scan_double_quoted(span),
+            '<' | '>' if self.in_expr() => Ok(self.scan_comparison(span)),
+            '>' => self.scan_redirect_gt(None, span),
+            '<' => self.scan_redirect_lt(None, span),
+            _ if !self.in_expr() && ch.is_ascii_digit() && self.is_fd_redirect_start() => {
+                self.scan_fd_redirect(span)
+            }
+            '.' if self.peek_n(1) == Some('.') && self.peek_n(2) == Some('.') => {
+                self.bump();
+                self.bump();
+                self.bump();
+                Ok((Token::Spread, self.finish(span)))
+            }
+            '`' => {
+                self.bump();
+                let label = self.scan_ident();
+                if label.is_empty() {
+                    Err(Self::error(
+                        self.finish(span),
+                        "expected a tag label after the backtick, as in `` `ok ``: \
                              a backtick never runs a command here; write `!{cmd}` for that",
-                        ))
-                    } else {
-                        Ok((Token::Tag(label), self.finish(span)))
-                    }
+                    ))
+                } else {
+                    Ok((Token::Tag(label), self.finish(span)))
                 }
-                _ if let Some(op) = operator_char(ch).filter(|_| self.in_expr()) => {
-                    Ok(self.scan_operator(op, span))
-                }
-                _ if self.in_expr() && self.at_numeral() => Ok(self.scan_numeral_word(span)),
-                _ if is_bare_char(ch) => Ok(self.scan_bare_word(span)),
-                _ => {
-                    self.bump();
-                    Err(Self::error(span, format!("unexpected character: '{ch}'")))
-                }
-            };
+            }
+            _ if let Some(op) = operator_char(ch).filter(|_| self.in_expr()) => {
+                Ok(self.scan_operator(op, span))
+            }
+            _ if self.in_expr() && self.at_numeral() => Ok(self.scan_numeral_word(span)),
+            // Every metacharacter `continues_bare_word` rejects is matched above;
+            // what is left over is exactly the ASCII controls.
+            _ if continues_bare_word(ch) => Ok(self.scan_bare_word(span)),
+            _ => {
+                let span = self.bump_spanned();
+                Err(Self::error(
+                    span,
+                    format!(
+                        "control character U+{:04X} cannot appear bare in ral source: \
+                         inside a double-quoted string it is written `\\u{{{:X}}}`",
+                        ch as u32, ch as u32
+                    ),
+                ))
+            }
         }
     }
 
@@ -814,15 +877,15 @@ impl Lexer {
         let mut hard = self.peek() == Some(';');
         self.bump();
         loop {
+            self.skip_inline_whitespace();
             match self.peek() {
                 Some(';') => {
                     hard = true;
                     self.bump();
                 }
-                Some('\n' | '\r' | ' ' | '\t') => {
+                Some('\n') => {
                     self.bump();
                 }
-                Some('#') if !self.hash_opens_quoted() => self.skip_comment(),
                 _ => break,
             }
         }
@@ -830,12 +893,12 @@ impl Lexer {
         (token, self.finish(span))
     }
 
-    /// Does the `:` under `peek()` break the bare word?  Only when space,
-    /// newline, `]`, or `,` follows: `host: val` and `[:]` split, `host:5432`
-    /// does not.
+    /// Does the `:` under `peek()` break the bare word?  Only when whitespace,
+    /// `,`, a closer (`]`, `}`, `)`), or end of input follows: `host: val`,
+    /// `[a:]` and `{a:}` split, `host:5432` does not.
     fn colon_splits_here(&self) -> bool {
         self.peek_n(1)
-            .is_none_or(|next| matches!(next, ' ' | '\t' | '\r' | '\n' | ']' | ','))
+            .is_none_or(|next| matches!(next, ' ' | '\t' | '\r' | '\n' | ']' | '}' | ')' | ','))
     }
 
     fn scan_bare_word(&mut self, span: Span) -> (Token, Span) {
@@ -858,7 +921,7 @@ impl Lexer {
     fn scan_bare_fragment(&mut self) -> String {
         let mut word = String::new();
         while let Some(ch) = self.peek() {
-            if !is_bare_char(ch) {
+            if !continues_bare_word(ch) {
                 break;
             }
 
@@ -893,7 +956,8 @@ impl Lexer {
     }
 
     /// A `#` run followed by `'` opens `#'…'#`; anything else is a comment.
-    /// Shared by `next_token` and `scan_separator` so they cannot disagree.
+    /// Shared by `next_token` and `skip_inline_whitespace` so they cannot
+    /// disagree.
     fn hash_opens_quoted(&self) -> bool {
         self.peek_n(self.count_hash_run()) == Some('\'')
     }
@@ -952,10 +1016,7 @@ impl Lexer {
         self.bump();
         let file = span.file;
         let mut parts: Vec<Spanned<StringPart>> = Vec::new();
-        let mut literal = String::new();
-        // Offset of the first char buffered since the last flush; `None`
-        // while the buffer is empty.
-        let mut literal_start: Option<u32> = None;
+        let mut run = LiteralRun::default();
         let form = StringForm::DoubleQuoted;
 
         loop {
@@ -967,33 +1028,20 @@ impl Lexer {
                     return Err(Self::err_unterminated_string(span, form, None));
                 }
                 Some('"') => {
-                    Self::flush_literal(&mut parts, &mut literal, &mut literal_start, cursor, file);
+                    run.flush(&mut parts, cursor, file);
                     self.bump();
                     break;
                 }
                 Some('\\') => {
-                    let before = literal.len();
                     self.bump();
-                    self.scan_double_quoted_escape(cursor, &mut literal)?;
-                    // A `\<newline>` continuation emits nothing, so anchor
-                    // the run only when a char actually appeared — else the
-                    // following literal's span stretches back over it.
-                    if literal.len() > before {
-                        literal_start.get_or_insert(cursor);
-                    }
+                    self.scan_double_quoted_escape(cursor, &mut run)?;
                 }
                 Some(sigil @ ('$' | '!')) => {
                     let splice = self
                         .scan_splice()
                         .map_err(|inner| Self::rewrap_inner_into_string(span, form, inner))?;
                     if let Some(tokens) = splice {
-                        Self::flush_literal(
-                            &mut parts,
-                            &mut literal,
-                            &mut literal_start,
-                            cursor,
-                            file,
-                        );
+                        run.flush(&mut parts, cursor, file);
                         let part_end = self.byte_pos();
                         parts.push(Spanned::new(
                             Span::new(file, cursor, part_end),
@@ -1001,8 +1049,7 @@ impl Lexer {
                         ));
                     } else {
                         // A sigil that opens nothing is text: `"$ 5"`, `"hi!"`.
-                        literal_start.get_or_insert(cursor);
-                        literal.push(sigil);
+                        run.push(cursor, sigil);
                     }
                 }
                 Some('~')
@@ -1014,8 +1061,7 @@ impl Lexer {
                     parts.push(Spanned::new(tilde, StringPart::Splice(vec![(home, tilde)])));
                 }
                 Some(ch) => {
-                    literal_start.get_or_insert(cursor);
-                    literal.push(ch);
+                    run.push(cursor, ch);
                     self.bump();
                 }
             }
@@ -1030,7 +1076,7 @@ impl Lexer {
     fn scan_double_quoted_escape(
         &mut self,
         escape_start: u32,
-        literal: &mut String,
+        run: &mut LiteralRun,
     ) -> Result<(), LexError> {
         // The escape so far, from the `\` to the cursor; built at each error
         // site once the offending char is consumed.
@@ -1042,43 +1088,43 @@ impl Lexer {
         match self.peek() {
             Some('n') => {
                 self.bump();
-                literal.push('\n');
+                run.push(escape_start, '\n');
             }
             Some('r') => {
                 self.bump();
-                literal.push('\r');
+                run.push(escape_start, '\r');
             }
             Some('t') => {
                 self.bump();
-                literal.push('\t');
+                run.push(escape_start, '\t');
             }
             Some('\\') => {
                 self.bump();
-                literal.push('\\');
+                run.push(escape_start, '\\');
             }
             Some('0') => {
                 self.bump();
-                literal.push('\0');
+                run.push(escape_start, '\0');
             }
             Some('e') => {
                 self.bump();
-                literal.push('\x1b');
+                run.push(escape_start, '\x1b');
             }
             Some('"') => {
                 self.bump();
-                literal.push('"');
+                run.push(escape_start, '"');
             }
             Some('$') => {
                 self.bump();
-                literal.push('$');
+                run.push(escape_start, '$');
             }
             Some('!') => {
                 self.bump();
-                literal.push('!');
+                run.push(escape_start, '!');
             }
             Some('~') => {
                 self.bump();
-                literal.push('~');
+                run.push(escape_start, '~');
             }
             Some('\n') => {
                 self.bump();
@@ -1105,19 +1151,20 @@ impl Lexer {
                 if n >= 0x80 {
                     return Err(Self::error(
                         span!(),
-                        "\\xNN must be \\x00..\\x7F (use Bytes for non-ASCII)",
+                        "\\xNN is limited to \\x00 through \\x7F; write non-ASCII characters \
+                         directly or as \\u{…}",
                     ));
                 }
                 #[allow(
                     clippy::cast_possible_truncation,
                     reason = "the `n >= 0x80` guard above has already returned; fits u8"
                 )]
-                literal.push(n as u8 as char);
+                run.push(escape_start, n as u8 as char);
             }
             Some('u') => {
                 self.bump();
                 if self.peek() != Some('{') {
-                    return Err(Self::error(span!(), "\\u escape must be \\u{X..}"));
+                    return Err(Self::error(span!(), "\\u escape is written \\u{…}"));
                 }
                 self.bump();
                 let mut digits = String::new();
@@ -1129,19 +1176,26 @@ impl Lexer {
                             self.bump();
                         }
                         _ => {
-                            return Err(Self::error(span!(), "\\u{X..} expects 1–6 hex digits"));
+                            return Err(Self::error(span!(), "\\u{…} takes one to six hex digits"));
                         }
                     }
                 }
                 if digits.is_empty() {
-                    return Err(Self::error(span!(), "\\u{X..} expects 1–6 hex digits"));
+                    return Err(Self::error(span!(), "\\u{…} takes one to six hex digits"));
                 }
                 self.bump();
                 let cp = u32::from_str_radix(&digits, 16).unwrap();
                 let ch = char::from_u32(cp).ok_or_else(|| {
                     Self::error(span!(), format!("\\u{{{digits}}} is not a Unicode scalar"))
                 })?;
-                literal.push(ch);
+                run.push(escape_start, ch);
+            }
+            Some('\'') => {
+                self.bump();
+                return Err(Self::error(
+                    span!(),
+                    "`'` needs no escape inside a double-quoted string: write it directly",
+                ));
             }
             Some(ch) => {
                 self.bump();
@@ -1160,26 +1214,6 @@ impl Lexer {
         Ok(())
     }
 
-    /// Push the buffered literal spanned `start..end`, or nothing if the
-    /// buffer is empty.  `start` is cleared either way: a no-op flush must
-    /// not leave a stale offset for the next literal run to inherit.
-    fn flush_literal(
-        parts: &mut Vec<Spanned<StringPart>>,
-        literal: &mut String,
-        start: &mut Option<u32>,
-        end: u32,
-        file: FileId,
-    ) {
-        let start = start.take();
-        if !literal.is_empty() {
-            let s = start.expect("literal_start set when buffer is non-empty");
-            parts.push(Spanned::new(
-                Span::new(file, s, end),
-                StringPart::Literal(std::mem::take(literal)),
-            ));
-        }
-    }
-
     /// A splice inside `"…"`, at its `$` or `!`: the tokens of `$name`,
     /// `$(name)`, `$[…]`, `!{…}` or `!$name`.  `None` when the sigil opens
     /// nothing and is text.
@@ -1194,22 +1228,22 @@ impl Lexer {
             match self.peek() {
                 Some('{') => {
                     tokens.push((Token::Bang, self.finish(start)));
-                    let open = self.span();
-                    self.bump();
+                    let open = self.bump_spanned();
                     let (body, close) = self.scan_token_group(open, DelimKind::Brace)?;
                     tokens.push((Token::LBrace, open));
                     tokens.extend(body);
                     tokens.push((Token::RBrace, close));
                 }
-                Some('$') => {
+                // `{` is kept so the `${…}` diagnostic still fires.
+                Some('$')
+                    if self
+                        .peek_n(1)
+                        .is_some_and(|c| is_ident_start(c) || matches!(c, '(' | '[' | '{')) =>
+                {
                     tokens.push((Token::Bang, self.finish(start)));
                     let dollar = self.span();
                     self.bump();
-                    let Some(tok) = self.scan_dollar()? else {
-                        // Hand the `$` back: the next iteration reads it.
-                        self.pos -= 1;
-                        return Ok(None);
-                    };
+                    let tok = self.scan_dollar()?.expect("guard saw a `$` form");
                     tokens.push((tok, self.finish(dollar)));
                 }
                 _ => return Ok(None),
@@ -1232,8 +1266,7 @@ impl Lexer {
             ))
         );
         while !delimited && self.peek() == Some('[') {
-            let open = self.span();
-            self.bump();
+            let open = self.bump_spanned();
             let (body, close) = self.scan_token_group(open, DelimKind::Bracket)?;
             tokens.push((Token::LBracket, open));
             tokens.extend(body);
@@ -1262,8 +1295,9 @@ impl Lexer {
                 ))
             }
             Some('(') => {
-                let span = self.span();
+                let dollar = Span::new(self.file, self.byte_pos() - 1, self.byte_pos());
                 self.bump();
+                let opened = self.finish(dollar);
                 let body = self.pos;
                 let name = self.scan_ident();
                 // `$(123)` is a mistake; `$(` at EOF is merely unfinished,
@@ -1271,18 +1305,21 @@ impl Lexer {
                 // enclosing double-quoted string.
                 if self.peek().is_none() {
                     return Err(Self::typed_error(
-                        span,
-                        LexErrorKind::UnclosedDeref { opened: span },
+                        opened,
+                        LexErrorKind::UnclosedDeref { opened },
                     ));
                 }
                 if name.is_empty() {
-                    return Err(Self::error(span, "expected identifier after '$('"));
+                    return Err(Self::error(
+                        self.finish(dollar),
+                        "expected identifier after `$(`",
+                    ));
                 }
                 match self.peek() {
                     Some(')') => {}
                     Some(' ' | '\t') => {
                         return Err(Self::error(
-                            span,
+                            self.finish(dollar),
                             format!(
                                 "`$(…)` holds one name, `$(name)`; to run a command and use \
                                  its output, write `!{{{}}}`",
@@ -1292,8 +1329,8 @@ impl Lexer {
                     }
                     _ => {
                         return Err(Self::error(
-                            span,
-                            "expected ')' to close '$(...)' dereference",
+                            self.finish(dollar),
+                            "expected `)` to close `$(...)` dereference",
                         ));
                     }
                 }
@@ -1304,8 +1341,7 @@ impl Lexer {
                 }))
             }
             Some('[') => {
-                let open = self.span();
-                self.bump();
+                let open = self.bump_spanned();
                 let (body, _) = self.scan_token_group(open, DelimKind::Expr)?;
                 Ok(Some(Token::Expr(body)))
             }
@@ -1422,84 +1458,126 @@ impl Lexer {
         matches!(self.peek_n(offset), Some('>' | '<'))
     }
 
+    /// A digit run glued to `>`/`<`: read whole, then judged against the
+    /// nine-spelling vocabulary by `redirect` and `dup`.
     fn scan_fd_redirect(&mut self, span: Span) -> Result<(Token, Span), LexError> {
-        let fd_digits = self.take_while(|ch| ch.is_ascii_digit());
-
+        let digits = self.take_while(|ch| ch.is_ascii_digit());
         match self.peek() {
-            Some('>') => {
-                let fd = Some(Self::parse_fd(&fd_digits, span)?);
-                self.scan_redirect_gt(fd, span)
-            }
-            Some('<') => {
-                let fd = Some(Self::parse_fd(&fd_digits, span)?);
-                self.scan_redirect_lt(fd, span)
-            }
+            Some('>') => self.scan_redirect_gt(Some(&digits), span),
+            Some('<') => self.scan_redirect_lt(Some(&digits), span),
             // `is_fd_redirect_start` already saw a `>`/`<` past the digits,
             // and `take_while` consumed exactly those digits.
             _ => unreachable!("scan_fd_redirect entered without a trailing '>' or '<'"),
         }
     }
 
-    /// Parse the digit prefix of an fd redirect.  Only the three standard
-    /// streams exist: ral has no numbered descriptors, so `3>` is refused
-    /// here rather than left to mean whatever fd 3 happens to be in the
-    /// process — a pipe or a pinned binary of the runtime's own.
-    fn parse_fd(digits: &str, span: Span) -> Result<u32, LexError> {
-        debug_assert!(!digits.is_empty(), "scan_fd_redirect called without digits");
-        match digits.parse::<u32>() {
-            Ok(fd @ 0..=2) => Ok(fd),
-            _ => Err(Self::error(
-                span,
-                format!(
-                    "file descriptor {digits}: ral has only standard input (0), \
-                     standard output (1) and standard error (2), so to send output \
-                     to a file, redirect fd 1 or 2 (`> file`, `2> file`)"
-                ),
+    /// ral has no numbered descriptors, so anything but `2>` is refused here
+    /// rather than left to mean whatever that fd happens to be in the
+    /// process: a pipe or a pinned binary of the runtime's own.
+    fn fd_refusal(digits: &str) -> String {
+        format!(
+            "file descriptor {digits}: ral has only standard input (0), \
+             standard output (1) and standard error (2), so write a file \
+             with `> file` or `2> file`"
+        )
+    }
+
+    /// Judge a redirect spelled with `fd`, which is gone from the token.
+    /// `stderr` is set only for `2` with a write, by construction.
+    fn redirect(
+        &self,
+        fd: Option<&str>,
+        op: RedirectOp,
+        span: Span,
+    ) -> Result<(Token, Span), LexError> {
+        let token = |stderr| Ok((Token::Redirect { stderr, op }, self.finish(span)));
+        let Some(digits) = fd else {
+            return token(false);
+        };
+        let refuse = |m: String| Err(Self::error(self.finish(span), m));
+        match (digits.parse::<u32>(), op) {
+            (Ok(2), RedirectOp::Write(_)) => token(true),
+            (Ok(0), RedirectOp::Write(_)) => refuse(STDIN_UNWRITABLE.into()),
+            (Ok(0), _) => refuse("`<` already reads standard input: drop the `0`".into()),
+            (Ok(1), RedirectOp::Write(_)) => refuse(
+                "`>` already writes standard output: drop the `1`; \
+                 to pass `1` as an argument, put a space before `>`"
+                    .into(),
+            ),
+            (Ok(n @ (1 | 2)), RedirectOp::Read) => refuse(format!(
+                "`<` always feeds standard input, so `{n}<` reads nothing in ral: \
+                 drop the `{n}`, or did you mean `{n}> file` to write there?"
             )),
-        }
-    }
-
-    fn finish_redirect(&self, fd: Option<u32>, op: RedirectOp, span: Span) -> (Token, Span) {
-        (Token::Redirect { fd, op }, self.finish(span))
-    }
-
-    fn scan_redirect_gt(&mut self, fd: Option<u32>, span: Span) -> Result<(Token, Span), LexError> {
-        self.bump();
-        if self.peek() == Some('>') {
-            self.bump();
-            return Ok(self.finish_redirect(fd, RedirectOp::Write(WriteMode::Append), span));
-        }
-        // `>~` is the stream-write operator only when the `~` stands alone:
-        // a bare char after it makes a word, so `>~/path` writes to `~/path`.
-        if self.peek() == Some('~') && !self.peek_n(1).is_some_and(is_bare_char) {
-            self.bump();
-            return Ok(self.finish_redirect(fd, RedirectOp::Write(WriteMode::Stream), span));
-        }
-        if self.peek() == Some('&') {
-            self.bump();
-            let target_digits = self.take_while(|ch| ch.is_ascii_digit());
-            if target_digits.is_empty() {
-                return Err(Self::error(span, "expected file descriptor after '>&'"));
+            (Ok(1 | 2), RedirectOp::HereString) => {
+                refuse("`<<` always feeds stdin: drop the file-descriptor prefix".into())
             }
-            let n = Self::parse_fd(&target_digits, span)?;
+            _ => refuse(Self::fd_refusal(digits)),
+        }
+    }
+
+    /// `fd>&to`: `2>&1` is the one dup ral models.
+    fn dup(&self, fd: Option<&str>, to: &str, span: Span) -> Result<(Token, Span), LexError> {
+        let refuse = |m: String| Err(Self::error(self.finish(span), m));
+        let fd = fd.unwrap_or("1");
+        match (fd.parse::<u32>(), to.parse::<u32>()) {
+            (Ok(0), Ok(0..=2)) => refuse(STDIN_UNWRITABLE.into()),
+            (Ok(2), Ok(1)) => Ok((Token::StderrToStdout, self.finish(span))),
             // A bare `>` writes fd 1, so `>&2` is `1>&2` spelled short.  Both
             // are the bash idiom for a diagnostic, and a diagnostic is a
             // builtin here rather than a second name for the byte channel.
-            if fd.unwrap_or(1) == 1 && n == 2 {
-                return Err(Self::error(
-                    self.finish(span),
-                    "ral has no `1>&2`: to write a diagnostic, use \
-                     `warn \"…\"`, which puts one line on standard error. \
-                     Did you mean `2>&1`, folding a command's standard error \
-                     into its standard output?",
-                ));
-            }
-            return Ok((Token::Dup { fd, to: n }, self.finish(span)));
+            (Ok(1), Ok(2)) => refuse(
+                "ral has no `1>&2`: to write a diagnostic, use \
+                 `warn \"…\"`, which puts one line on standard error. \
+                 Did you mean `2>&1`, folding a command's standard error \
+                 into its standard output?"
+                    .into(),
+            ),
+            (Ok(a @ (1 | 2)), Ok(b @ (1 | 2))) if a == b => refuse(format!(
+                "`{a}>&{a}` names the stream it already is: drop it"
+            )),
+            (Ok(a @ 1..=2), Ok(b @ 0..=2)) => refuse(format!(
+                "ral has no fd plumbing beyond `2>&1`, so `{a}>&{b}` has nothing to mean"
+            )),
+            (Ok(0..=2), _) => refuse(Self::fd_refusal(to)),
+            _ => refuse(Self::fd_refusal(fd)),
         }
-        Ok(self.finish_redirect(fd, RedirectOp::Write(WriteMode::Write), span))
     }
 
-    fn scan_redirect_lt(&mut self, fd: Option<u32>, span: Span) -> Result<(Token, Span), LexError> {
+    fn scan_redirect_gt(
+        &mut self,
+        fd: Option<&str>,
+        span: Span,
+    ) -> Result<(Token, Span), LexError> {
+        self.bump();
+        if self.peek() == Some('>') {
+            self.bump();
+            return self.redirect(fd, RedirectOp::Write(WriteMode::Append), span);
+        }
+        // `>~` is the stream-write operator only when the `~` stands alone:
+        // a bare char after it makes a word, so `>~/path` writes to `~/path`.
+        if self.peek() == Some('~') && !self.peek_n(1).is_some_and(continues_bare_word) {
+            self.bump();
+            return self.redirect(fd, RedirectOp::Write(WriteMode::Stream), span);
+        }
+        if self.peek() == Some('&') {
+            self.bump();
+            let to = self.take_while(|ch| ch.is_ascii_digit());
+            if to.is_empty() {
+                return Err(Self::error(
+                    self.finish(span),
+                    "expected file descriptor after `>&`",
+                ));
+            }
+            return self.dup(fd, &to, span);
+        }
+        self.redirect(fd, RedirectOp::Write(WriteMode::Write), span)
+    }
+
+    fn scan_redirect_lt(
+        &mut self,
+        fd: Option<&str>,
+        span: Span,
+    ) -> Result<(Token, Span), LexError> {
         self.bump();
         if self.peek() == Some('<') {
             self.bump();
@@ -1523,11 +1601,14 @@ impl Lexer {
                     ),
                 ));
             }
-            return Ok(self.finish_redirect(fd, RedirectOp::HereString, span));
+            return self.redirect(fd, RedirectOp::HereString, span);
         }
-        Ok(self.finish_redirect(fd, RedirectOp::Read, span))
+        self.redirect(fd, RedirectOp::Read, span)
     }
 }
+
+const STDIN_UNWRITABLE: &str =
+    "standard input cannot be written to: did you mean `< file`, which reads one into it?";
 
 #[cfg(test)]
 mod tests {
@@ -1568,6 +1649,27 @@ mod tests {
         Token::Word(Word::Tilde(TildePath {
             suffix: suffix.map(str::to_owned),
         }))
+    }
+
+    #[test]
+    fn bidi_controls_refused_everywhere() {
+        let m = lex_err("echo a\u{202E}b");
+        assert!(m.contains("U+202E") && m.contains("right-to-left override"));
+        let sp = lex_err_span("echo a\u{202E}b");
+        assert_eq!((sp.start, sp.end), (6, 9));
+        lex_err("'\u{202E}'");
+        lex_err("\"\u{202E}\"");
+        lex_ok("\"\\u{202E}\"");
+    }
+
+    #[test]
+    fn c0_controls_refused_bare_only() {
+        assert!(lex_err("echo a\u{1}b").contains("U+0001"));
+        let sp = lex_err_span("echo a\u{1}b");
+        assert_eq!((sp.start, sp.end), (6, 7));
+        assert!(lex_err("echo \u{7F}").contains("U+007F"));
+        lex_ok("echo '\u{1}'");
+        lex_ok("\"\u{1}\"");
     }
 
     fn tok_types(source: &str) -> Vec<Token> {
@@ -1897,7 +1999,7 @@ mod tests {
         assert!(matches!(
             toks[2],
             Token::Redirect {
-                fd: None,
+                stderr: false,
                 op: RedirectOp::Write(WriteMode::Write),
             }
         ));
@@ -1909,7 +2011,7 @@ mod tests {
         assert!(matches!(
             toks[1],
             Token::Redirect {
-                fd: Some(2),
+                stderr: true,
                 op: RedirectOp::Write(WriteMode::Write),
             }
         ));
@@ -1918,7 +2020,8 @@ mod tests {
     #[test]
     fn redirect_stderr_to_stdout() {
         let toks = tok_types("cmd 2>&1");
-        assert!(matches!(toks[1], Token::Dup { fd: Some(2), to: 1 }));
+        assert!(matches!(toks[1], Token::StderrToStdout));
+        assert_eq!(lex("cmd 2>&1").unwrap()[1].1, Span::new(FileId::DUMMY, 4, 8));
     }
 
     /// If `>~` swallowed the `~` in `>~/path`, the redirect would target
@@ -1930,7 +2033,7 @@ mod tests {
             matches!(
                 toks[2],
                 Token::Redirect {
-                    fd: None,
+                    stderr: false,
                     op: RedirectOp::Write(WriteMode::Write),
                 }
             ),
@@ -1948,7 +2051,7 @@ mod tests {
             matches!(
                 toks[2],
                 Token::Redirect {
-                    fd: None,
+                    stderr: false,
                     op: RedirectOp::Write(WriteMode::Stream),
                 }
             ),
@@ -2180,9 +2283,9 @@ mod tests {
         // Surrogate, out of range, too many digits, no braces.
         assert!(lex_err(r#""\u{D800}""#).contains("Unicode scalar"));
         assert!(lex_err(r#""\u{110000}""#).contains("Unicode scalar"));
-        assert!(lex_err(r#""\u{1234567}""#).contains("1–6 hex digits"));
-        assert!(lex_err(r#""\u{}""#).contains("1–6 hex digits"));
-        assert!(lex_err(r#""\u41""#).contains("\\u escape must be"));
+        assert!(lex_err(r#""\u{1234567}""#).contains("one to six hex digits"));
+        assert!(lex_err(r#""\u{}""#).contains("one to six hex digits"));
+        assert!(lex_err(r#""\u41""#).contains("\\u escape is written"));
     }
 
     #[test]
@@ -2336,7 +2439,7 @@ mod tests {
                 plain("echo"),
                 plain("a"),
                 Token::Redirect {
-                    fd: None,
+                    stderr: false,
                     op: RedirectOp::Write(WriteMode::Write),
                 },
                 plain("="),
@@ -2409,6 +2512,24 @@ mod tests {
         );
         let toks = tok_types("localhost:5432");
         assert_eq!(toks, vec![plain("localhost:5432"), Token::Eof]);
+    }
+
+    #[test]
+    fn colon_splits_before_every_closer() {
+        for (open, close, o, c) in [
+            (Token::LBracket, Token::RBracket, '[', ']'),
+            (Token::LBrace, Token::RBrace, '{', '}'),
+            (Token::LParen, Token::RParen, '(', ')'),
+        ] {
+            let src = format!("{o}a:{c}");
+            assert_eq!(
+                tok_types(&src),
+                vec![open, plain("a"), Token::Colon, close, Token::Eof],
+                "source: {src:?}"
+            );
+        }
+        assert_eq!(tok_types("host:8080"), vec![plain("host:8080"), Token::Eof]);
+        assert_eq!(tok_types("a:b"), vec![plain("a:b"), Token::Eof]);
     }
 
     #[test]
@@ -2588,7 +2709,7 @@ mod tests {
 
         // A real mistake: the body is not an identifier.
         let err = lex("$(1)").expect_err("expected lex error");
-        assert!(err.message().contains("expected identifier after '$('"));
+        assert!(err.message().contains("expected identifier after `$(`"));
     }
 
     #[test]
@@ -2606,7 +2727,7 @@ mod tests {
         let err = lex("$(name]").expect_err("expected lex error");
         assert!(
             err.message()
-                .contains("expected ')' to close '$(...)' dereference")
+                .contains("expected `)` to close `$(...)` dereference")
         );
     }
 
@@ -2653,7 +2774,7 @@ mod tests {
         );
     }
 
-    /// `<<` is the here-string redirect, fd-prefixable like the others.
+    /// `<<` is the here-string redirect.
     #[test]
     fn herestring_redirect() {
         let tokens = lex("cat << x").unwrap();
@@ -2661,23 +2782,13 @@ mod tests {
             tokens.iter().any(|(t, _)| matches!(
                 t,
                 Token::Redirect {
-                    fd: None,
+                    stderr: false,
                     op: RedirectOp::HereString,
                 }
             )),
             "got {tokens:?}"
         );
-        let tokens = lex("cat 0<< x").unwrap();
-        assert!(
-            tokens.iter().any(|(t, _)| matches!(
-                t,
-                Token::Redirect {
-                    fd: Some(0),
-                    op: RedirectOp::HereString,
-                }
-            )),
-            "got {tokens:?}"
-        );
+        assert!(lex_err("cat 0<< x").contains("drop the `0`"));
     }
 
     /// A payload glued to `<<` is the bash heredoc reflex; a here-string
@@ -2728,12 +2839,25 @@ mod tests {
         }
     }
 
+    /// `1>` is refused with advice, so `echo 1>file` cannot write an empty
+    /// file; the other fd-prefixed spellings are refused alike.
+    #[test]
+    fn fd_prefixed_spellings_are_refused() {
+        assert!(lex_err("echo 1>file").contains("put a space before `>`"));
+        assert!(lex_err("cat 0< f").contains("drop the `0`"));
+        assert!(lex_err("cat 1< f").contains("did you mean `1> file`"));
+        assert!(lex_err("cmd 0> f").contains("standard input cannot be written to"));
+        assert!(lex_err("cmd 1>&1").contains("names the stream it already is"));
+        assert!(lex_err("cmd 2>&2").contains("names the stream it already is"));
+        assert!(lex_err("cmd 1>&0").contains("nothing to mean"));
+    }
+
     #[test]
     fn redirect_dup_requires_target_fd() {
         let err = lex("cmd 2>&").expect_err("expected lex error");
         assert!(
             err.message()
-                .contains("expected file descriptor after '>&'")
+                .contains("expected file descriptor after `>&`")
         );
     }
 
@@ -2900,5 +3024,35 @@ mod tests {
         let src = "'héllo'";
         let toks = lex(src).unwrap();
         assert_eq!(&src[toks[0].1.range()], "'héllo'");
+    }
+
+    #[test]
+    fn splice_openers_are_one_char_wide() {
+        let parts = string_parts("\"$x[0]\"");
+        let StringPart::Splice(tokens) = &parts[0].item else {
+            panic!("expected a splice");
+        };
+        let (_, lbracket) = tokens.iter().find(|(t, _)| *t == Token::LBracket).unwrap();
+        assert_eq!((lbracket.start, lbracket.end), (3, 4));
+        let span = lex_err_span("$[1 +");
+        assert_eq!((span.start, span.end), (1, 2));
+    }
+
+    #[test]
+    fn unterminated_bumped_string_wants_quote_and_hash() {
+        let msg = lex_err("echo a #'tis");
+        assert!(msg.contains("bumped single-quoted string"), "{msg}");
+        assert!(msg.contains("`'#`"), "{msg}");
+    }
+
+    #[test]
+    fn bang_dollar_without_a_name_is_text() {
+        assert_eq!(
+            string_parts("\"!$ !$-\""),
+            vec![Spanned::new(
+                Span::new(FileId::DUMMY, 1, 7),
+                StringPart::Literal("!$ !$-".into())
+            )]
+        );
     }
 }

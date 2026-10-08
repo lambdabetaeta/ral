@@ -14,13 +14,14 @@ An fd number is therefore not a general mechanism with three supported cases;
 three streams are the whole of it, and an fd prefix in the source only *names*
 one.
 
-**The fd number is spelling, eliminated at the parser.** The lexer's tokens
-keep what was written — `Token::Redirect { fd, op }` for a word-taking
-operator, `Token::Dup { fd, to }` for `fd>&to` — and `Redirect::word` and
-`Redirect::dup` eliminate them into the sum, refusing with a message any fd
-that names no stream (`1< f`, `0> f`, `3> f`, `1>&2`). The identity dups `1>&1`
-and `2>&2` name the stream they already are, so they denote no redirect:
-`dup` returns `None` and nothing is built.
+**The fd number is spelling, eliminated at the lexer.** The vocabulary is
+exactly nine spellings: `< f`, `<< str`, `> f`, `>> f`, `>~ f`, `2> f`,
+`2>> f`, `2>~ f` and `2>&1`. A digit run glued to `>` or `<` is read whole and
+judged; the token stream never carries an fd number. `Token::Redirect { stderr,
+op }` is a word-taking operator, with `stderr` set only for the `2` writes (by
+construction, so a stderr read cannot be built), and `Token::StderrToStdout` is
+`2>&1`. The parser's `redirect_word` is then a total function of `(stderr, op)`
+into the sum.
 
 **A list of redirects is a set of bindings, one per stream.** `Redirects<T>`
 (`core/src/syntax/ast.rs`) is the checked list: `stdin`, `stdout` and `stderr`
@@ -49,10 +50,14 @@ and derives `Deserialize`; since the IR's redirect is the sum, a peer cannot
 hand this process a redirect that names fd 7 — it fails to decode instead of
 reaching a runtime check.
 
-The lexer refuses two of the excluded forms earlier than the parser, and
-should: `1>&2` earns advice about `warn` and `2>&1` that the fd rule has no
-way to give, and fd ≥ 3 earns the sentence naming the three streams. Those are
-better diagnostics for the same rule, not a second gate.
+The lexer refuses every excluded form, each with its own advice: `0<` and
+`0<<` (`<` already reads standard input), `1>`, `1>>` and `1>~` (`>` already
+writes standard output; put a space before it to pass `1` as an argument, as
+in `echo 1>file`), `1<`, `2<`, `1<<` and `2<<` (`<` always feeds stdin), `0>`
+and friends (standard input cannot be written to), fd ≥ 3 (the sentence naming
+the three streams), `1>&2` and `>&2` (use `warn`), the identity dups `1>&1` and
+`2>&2` (they name the stream they already are), and any other `a>&b` (no fd
+plumbing beyond `2>&1`).
 
 This is a hard rule. Do not reintroduce an fd number below the lexer's tokens,
 and do not widen the sum without giving the new form plumbing that means
