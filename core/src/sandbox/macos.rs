@@ -133,7 +133,7 @@ pub(super) fn build_profile(policy: &SandboxProjection) -> Result<String, String
     };
     let rendered = policy.rendered()?;
     match &rendered.fs {
-        FsProjection::Restricted(rules) => emit_fs_restricted(&mut profile.fs_allows, rules)?,
+        FsProjection::Restricted(rules) => emit_fs_restricted(&mut profile.fs_allows, rules),
         FsProjection::Unrestricted => {
             // Pass fs through, so an exec-only grant can enter the sandbox
             // for exec gating without clamping the agent's cwd or HOME.
@@ -195,24 +195,17 @@ fn emit_pins<'a>(pins: &mut Vec<String>, dirs: impl IntoIterator<Item = &'a Rend
 
 /// Emit the allow rules and ancestor-metadata carve-outs for a restricted fs
 /// projection.
-///
-/// `Err` when the system paths' own name-class expansion is not valid UTF-8,
-/// which [`render_paths`] refuses rather than approximates.
-fn emit_fs_restricted(lines: &mut Vec<String>, rules: &FsRules<Rendered>) -> Result<(), String> {
-    // `Exec` implies read.
-    let system_read_paths = existing_system_paths(|_| true)?;
-    emit_ancestor_metadata(lines, &system_read_paths);
-    emit_read_subpaths(lines, &system_read_paths);
-    emit_ancestor_metadata(
-        lines,
-        rules.read_prefixes.iter().chain(&rules.write_prefixes),
-    );
-    emit_read_subpaths(lines, &rules.read_prefixes);
-    emit_read_subpaths(lines, &rules.write_prefixes);
+fn emit_fs_restricted(lines: &mut Vec<String>, rules: &FsRules<Rendered>) {
+    let readable = || {
+        (rules.read_prefixes.iter())
+            .chain(&rules.floor)
+            .chain(&rules.write_prefixes)
+    };
+    emit_ancestor_metadata(lines, readable());
+    emit_read_subpaths(lines, readable());
     for prefix in &rules.write_prefixes {
         lines.push(Clause::allow("file-write*", Filter::Subpath(prefix)).to_string());
     }
-    Ok(())
 }
 
 /// Seatbelt carries the exec allow-list into the kernel via the
@@ -232,7 +225,7 @@ pub(crate) const RENDERS_EXEC: bool = true;
 /// a veto asks.  `own` is frozen by [`build_profile`] whatever the grant.
 /// Rule by rule: `docs/ral-wiki/internals/seatbelt-profile.md`.
 ///
-/// `Err` when the platform base's own name-class expansion is not valid
+/// `Err` when the loader base's own name-class expansion is not valid
 /// UTF-8, which [`render_paths`] refuses.
 fn emit_exec_rules(
     profile: &mut Profile,
@@ -245,15 +238,16 @@ fn emit_exec_rules(
         return Ok(());
     };
     // Toolchains (`gcc → cc1 → as → ld`) arrive through the grant, `system:`
-    // among them; only the loader base is ambient.
-    let system_dirs = existing_system_paths(|k| k == SystemAccess::Exec)?;
+    // among them; only the loader base, Rosetta's runtime, is ambient.
+    let rosetta = std::iter::once("/Library/Apple/usr").filter(|p| crate::path::exists(p));
+    let loader = render_paths(&rosetta.collect::<Vec<_>>())?;
     // A ral run in here starts its bundled tools and pipeline anchors by
     // re-executing this binary, so it is admitted without the grant naming it.
     let mut clauses = String::new();
     for path in own {
         let _ = write!(clauses, "\n  {}", Filter::Literal(path));
     }
-    for dir in &system_dirs {
+    for dir in &loader {
         let _ = write!(clauses, "\n  {}", Filter::Subpath(dir));
     }
     // An operand-less `(allow file-read* process-exec)` is an unconditional
@@ -298,7 +292,7 @@ fn emit_exec_rules(
         own.iter().chain(&granted_files).chain(&granted_dirs),
     );
     let deny_writes = |filter| Clause::deny("file-write*", filter).to_string();
-    let admitted_dirs: Vec<&Rendered> = system_dirs.iter().chain(&granted_dirs).collect();
+    let admitted_dirs: Vec<&Rendered> = loader.iter().chain(&granted_dirs).collect();
     match fs {
         FsProjection::Unrestricted if rules.denies().next().is_some() => {
             profile.exec_freeze.extend(
@@ -385,39 +379,6 @@ fn exec_clause(allow: bool, filter: Filter<'_>) -> Clause<'_> {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SystemAccess {
-    Read,
-    Exec, // implies read; emitted in the folded `file-read* process-exec` rule
-}
-
-/// Baseline system paths the runtime needs regardless of user grant.  User
-/// temp and workspace paths are deliberately absent — they must arrive via
-/// the active fs grant.
-fn system_paths() -> &'static [(&'static str, SystemAccess)] {
-    use SystemAccess::{Exec, Read};
-    &[
-        ("/bin", Read),
-        ("/usr", Read),
-        // Rosetta's runtime, the loader analogue: no grant should name it.
-        ("/Library/Apple/usr", Exec),
-        ("/Library/Developer/CommandLineTools", Read),
-        ("/Applications/Xcode.app/Contents/Developer", Read),
-        ("/opt/homebrew", Read),
-        ("/lib", Read),
-        ("/System", Read),
-        ("/dev", Read),
-        ("/private/var/db/dyld", Read),
-        // Wholesale: tools read whatever they read (gitconfig, paths.d,
-        // zshenv, nix.conf, …); nothing user-secret sits here unprotected.
-        ("/private/etc", Read),
-        // xcode-select state; denied, build drivers report a broken install.
-        ("/private/var/select", Read),
-        // resolv.conf's target and the mDNSResponder socket.
-        ("/private/var/run", Read),
-    ]
-}
-
 /// Mach doors the base profile withholds on purpose, each with its reason as
 /// data: a comment cannot reach the agent holding the `EPERM`, and a deliberate
 /// refusal read as an accident is chased instead of worked around.
@@ -450,17 +411,6 @@ pub(super) fn withheld_door(name: &str) -> Option<&'static str> {
         .iter()
         .find(|(door, _)| name.starts_with(door))
         .map(|(_, why)| *why)
-}
-
-/// The host-existing `system_paths` whose access `wanted` selects, rendered
-/// to every firmlink spelling (`/private/etc` → `[/etc, /private/etc]`).
-fn existing_system_paths(wanted: impl Fn(SystemAccess) -> bool) -> Result<Vec<Rendered>, String> {
-    let existing: Vec<String> = system_paths()
-        .iter()
-        .filter(|(p, k)| wanted(*k) && crate::path::exists(p))
-        .map(|(p, _)| (*p).to_string())
-        .collect();
-    render_paths(&existing)
 }
 
 fn emit_read_subpaths<'a>(lines: &mut Vec<String>, paths: impl IntoIterator<Item = &'a Rendered>) {
@@ -811,7 +761,13 @@ mod tests {
     #[test]
     fn mac_profile_admits_no_ambient_exec_beyond_the_loader_base() {
         let policy = restricted(
-            FsProjection::Restricted(FsRules::default()),
+            FsProjection::Restricted(FsRules {
+                floor: crate::capability::floor()
+                    .iter()
+                    .map(|p| p.as_str().into())
+                    .collect(),
+                ..FsRules::default()
+            }),
             vec![dir("/usr/bin", true)],
         );
         let profile = build_profile(&policy).unwrap();
@@ -1146,10 +1102,15 @@ mod tests {
         if !crate::path::exists("/Library/Developer/CommandLineTools") {
             return;
         }
-        // System read paths are emitted explicitly only when fs is
-        // Restricted; otherwise the wildcard `(allow file-read*)` covers them.
+        // The floor arrives as read prefixes, ancestor metadata with them.
         let policy = SandboxProjection {
-            fs: FsProjection::Restricted(FsRules::default()),
+            fs: FsProjection::Restricted(FsRules {
+                floor: crate::capability::floor()
+                    .iter()
+                    .map(|p| p.as_str().into())
+                    .collect(),
+                ..FsRules::default()
+            }),
             ..SandboxProjection::default()
         };
         let profile = build_profile(&policy).unwrap();

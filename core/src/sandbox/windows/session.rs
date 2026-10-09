@@ -580,6 +580,7 @@ mod tests {
         let projection = SandboxProjection {
             fs: FsProjection::Restricted(FsRules {
                 read_prefixes: vec![granted.to_string_lossy().into_owned()],
+                floor: Vec::new(),
                 write_prefixes: vec![granted.to_string_lossy().into_owned()],
                 deny_paths: Vec::new(),
                 pinned_dirs: Vec::new(),

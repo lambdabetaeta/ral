@@ -195,6 +195,23 @@ fn external_read_outside_grant_denied() {
     let _ = std::fs::remove_file(&secret);
 }
 
+/// The floor is one fold: under a read grant that never names `/etc/hosts`,
+/// the in-process guard and a confined child both read it.
+#[test]
+fn a_floor_file_reads_alike_in_process_and_in_a_child() {
+    let (work, work_s) = unique_workdir("floor");
+    let mut shell = boot();
+    let read = |shell: &mut Shell, src: &str| {
+        top_level_under(shell, restrict_to(&work_s), src)
+            .expect("a floor file is readable under any restricted read")
+    };
+    let guard = read(&mut shell, "from-lines < /etc/hosts");
+    let child = read(&mut shell, "!{/bin/cat /etc/hosts | from-string}");
+    assert_ne!(guard, Value::list(vec![]), "the guard read nothing");
+    assert_ne!(child, Value::string(""), "the child read nothing");
+    let _ = std::fs::remove_dir_all(&work);
+}
+
 // ── 2. Bundled command WRITE denial (end-to-end through eval) ────────────
 
 /// Positive control: a bundled coreutil (`touch`) creating a file *inside*

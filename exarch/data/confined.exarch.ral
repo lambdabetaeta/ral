@@ -15,8 +15,8 @@ return [
 
   # The working tree, plus scratch directories.  Nothing else readable;
   # nothing else writable.  System paths needed by the platform runtime
-  # (libc, dyld, /private/etc, …) come automatically from the macOS
-  # sandbox base — see `core/src/sandbox/macos.rs::system_paths`.
+  # (libc, dyld, /private/etc, …) come automatically from the read
+  # floor — see `core/src/capability/fs.rs::floor`.
   fs: [
     read: [
       'cwd:',                         # working tree

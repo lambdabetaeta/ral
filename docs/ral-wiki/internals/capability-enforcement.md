@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 446e3123
+verified_at_commit: 8928f5de
 verified_at_date: 2026-10-06
-anchors: [check_exec, Admitted, admit, ExecRules, for_kernel, Head, carriers, check_fs_exact, locate, walk, Located, admits_fs_exact, fs_verdict, pinned_binary, SandboxProjection, Flag, Denial, refused, region, Region, Table, live, GrantStack, sandboxed_command, build_launch, projection_enforceable, serve_warrant, Warrant, Slot, Handoff, Landlocked, bwrap_argv, Binds, render_objects, SessionSandbox, fs_capability_name, ensure_fs_grant, deputy_prefixes, Refusal, spawn_error, Envelope, InfoFd, HostEnvelope, render_dev, cgroup_tree, default_ro_binds, Pinned, pin_envelope]
+anchors: [check_exec, Admitted, admit, ExecRules, for_kernel, Head, carriers, check_fs_exact, locate, walk, Located, admits_fs_exact, fs_verdict, pinned_binary, SandboxProjection, Flag, Denial, refused, region, Region, Table, live, GrantStack, sandboxed_command, build_launch, projection_enforceable, serve_warrant, Warrant, Slot, Handoff, Landlocked, bwrap_argv, Binds, render_objects, SessionSandbox, fs_capability_name, ensure_fs_grant, deputy_prefixes, Refusal, spawn_error, Envelope, InfoFd, HostEnvelope, render_dev, cgroup_tree, floor, Pinned, pin_envelope]
 ---
 
 # Capability enforcement: one chokepoint, two enforcers
@@ -168,8 +168,10 @@ spawned process does on its own.**
   Seatbelt on macOS, bwrap on Linux, an AppContainer LowBox token on Windows.
   Guard and profile read *one* fold (`capability/fs.rs`: `region` meets each
   layer's `Region` for the op, its allows meeting and its `deny_paths`
-  joining), so here the conservatism invariant needs no differential test —
-  the two cannot disagree. All that separates them is when the fold runs:
+  joining; a read then joins `floor()`, the platform's system paths, after the
+  meet, so no `read` narrows it and only a `deny` removes it), so here the
+  conservatism invariant needs no differential test — the two cannot disagree,
+  by construction: no backend carries a system set of its own. All that separates them is when the fold runs:
   afresh on every check for the guard, once at spawn for the profile, because
   that is when the profile is written. The guard asks `verdict`, and on a
   refusal `respelled`; the profile renders `live()` and `denies()` as surface
@@ -327,7 +329,7 @@ that cannot is a host bind like any other, present only where something needs
 it.** `--proc /proc` is fresh with the pid namespace. bwrap has no sysfs op,
 and a bound `/sys` is the *mounter's*: its `class/net` lists the host's
 interfaces whatever `--unshare-net` did, its `class/dmi` and `bus` name the
-machine. So `default_ro_binds` narrows `/sys` as it narrows `/etc`, to what
+machine. So the Linux `floor` narrows `/sys` as it narrows `/etc`, to what
 sizes a program — `devices/system/cpu`, `kernel/mm/transparent_hugepage` — and a
 grant that wants the rest reads `/sys` by name. `/sys/fs/cgroup` is the case
 that is *wrong* rather than revealing: under the cgroup namespace a child's

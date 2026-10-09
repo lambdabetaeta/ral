@@ -314,6 +314,7 @@ mod tests {
         SandboxProjection {
             fs: FsProjection::Restricted(FsRules {
                 read_prefixes: vec!["/tmp".into()],
+                floor: Vec::new(),
                 write_prefixes: vec!["/tmp".into()],
                 deny_paths: vec!["/etc".into()],
                 pinned_dirs: Vec::new(),
@@ -357,6 +358,7 @@ mod tests {
         SandboxProjection {
             fs: FsProjection::Restricted(FsRules {
                 read_prefixes: vec![write_dir.to_string()],
+                floor: Vec::new(),
                 write_prefixes: vec![write_dir.to_string()],
                 deny_paths: Vec::new(),
                 pinned_dirs: Vec::new(),

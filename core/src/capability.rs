@@ -24,7 +24,7 @@ pub(crate) use exec::ExecScope;
 pub(crate) use exec::Subject;
 pub(crate) use exec::{Admitted, ExecDenial, ExecRules, Program, Refused, rules};
 pub use fs::FsOp;
-pub(crate) use fs::region;
+pub(crate) use fs::{floor, region};
 pub(crate) use lattice::meet_insert;
 pub use lattice::{
     Capabilities, EditorPolicy, ExecGrant, ExecKey, Flag, FsPolicy, GrantStack, Meet, ShellPolicy,

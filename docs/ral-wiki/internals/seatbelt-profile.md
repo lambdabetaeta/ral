@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 6c9047b6
+verified_at_commit: 8928f5de
 verified_at_date: 2026-10-08
-anchors: [apply_profile, build_profile, Profile, emit_fs_restricted, emit_exec_rules, Clause, Filter, emit_ancestor_metadata, existing_system_paths, system_paths, withheld_doors, rendered_ancestors, pinned_dirs, open_search_dir]
+anchors: [apply_profile, build_profile, Profile, emit_fs_restricted, emit_exec_rules, Clause, Filter, emit_ancestor_metadata, withheld_doors, rendered_ancestors, pinned_dirs, open_search_dir]
 ---
 
 # The Seatbelt profile: an object policy in a name language
@@ -53,14 +53,14 @@ that — before making the profile say more.
 
 ## What `build_profile` renders, rule by rule
 
-**fs.** `Restricted` renders the host-existing `system_paths` (`Exec` implies
-read) and the grant's read and write prefixes as `file-read*` subpaths with
+**fs.** `Restricted` renders the grant's read prefixes — which already carry
+the read `floor`, joined by the fold — and its write prefixes as `file-read*` subpaths with
 their ancestor chains, the write prefixes as `file-write*` subpaths, and then
 the denies. `Unrestricted` passes both through — `(allow file-read*)`,
 `(allow file-write*)` — so an exec-only grant can enter the sandbox for exec
 confinement without clamping the agent's cwd or `HOME`.
 
-`system_paths` is wholesale where cherry-picking breaks tools mysteriously:
+The macOS `floor` is wholesale where cherry-picking breaks tools mysteriously:
 `/private/etc` (gitconfig, paths.d, zshenv, nix.conf; nothing user-secret sits
 there unprotected — `master.passwd` is 0600, and Seatbelt enforces inode
 permissions atop the profile), `/private/var/select` (xcode-select's
@@ -71,7 +71,7 @@ through the grant.
 
 **exec.** `Unrestricted` is `(allow process-exec)`, so an fs-only grant does
 not attenuate exec at the OS layer. `Restricted` first admits Rosetta's
-runtime (`/Library/Apple/usr`, the one `Exec`-tagged system path) and ral's own
+runtime (`/Library/Apple/usr`, the one path the backend adds itself; its read half is in the floor) and ral's own
 binary in one `(allow file-read* process-exec …)` — Seatbelt needs both
 operations to spawn; ral is admitted because a ral run inside the sandbox
 starts its own bundled tools and pipeline anchors by re-executing this binary.

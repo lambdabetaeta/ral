@@ -9,6 +9,10 @@
 //! two consumers — rather than a property two independent folds have to be
 //! tested into.
 //!
+//! A restricted read region is the layers' meet joined with the [`floor`]:
+//! the platform's fixed read-only system paths any program needs to start.
+//! No layer's `read` narrows it; only a `deny` removes a floor path.
+//!
 //! Prefixes are re-frozen against the caller's [`Resolver`] here rather
 //! than read off the frozen policy, so the caller decides how fresh the
 //! answer is: composition is a statement about the policy, these about the
@@ -19,6 +23,7 @@ use super::table::{Scope, Table};
 use super::{FsPolicy, GrantStack, Meet, Verdict};
 use crate::path::{FrozenPath, Polarity, Resolver};
 use std::path::Path;
+use std::sync::LazyLock;
 use strum::IntoStaticStr;
 
 /// Which fs region a check consults: the read or the write prefix set.
@@ -60,21 +65,98 @@ impl Scope for FrozenPath {
     }
 }
 
+/// The read-only system paths admitted under every restricted `read`, frozen
+/// once per process: they are root-owned, and the guard refolds on every check.
+/// Those absent on this host are dropped.
+pub(crate) fn floor() -> &'static [FrozenPath] {
+    static FLOOR: LazyLock<Vec<FrozenPath>> = LazyLock::new(|| {
+        #[cfg(windows)]
+        let listed = ["SystemRoot", "ProgramFiles", "ProgramFiles(x86)"]
+            .map(|k| std::env::var(k).unwrap_or_default());
+        #[cfg(target_os = "linux")]
+        let listed = [
+            "/bin",
+            "/usr",
+            "/lib",
+            "/lib64",
+            // `/dev`, `/proc` and `/sys/fs/cgroup` are absent: the envelope
+            // mounts its own.  `/etc` and `/sys` wholesale are excluded: only what dynamic
+            // linking, name resolution, user lookup, toolchain resolution and
+            // hardware sizing need.  The rest of `/sys` describes the host,
+            // not the envelope: `class/net` is the mounter's netns whatever
+            // `--unshare-net` did, `class/dmi` and `bus` name the machine.  A
+            // grant that wants it reads `/sys` by name.
+            "/sys/devices/system/cpu",
+            "/sys/kernel/mm/transparent_hugepage",
+            "/etc/ld.so.conf",
+            "/etc/ld.so.conf.d",
+            "/etc/ld.so.cache",
+            "/etc/resolv.conf",
+            "/etc/nsswitch.conf",
+            "/etc/hosts",
+            "/etc/ssl",
+            "/etc/ca-certificates",
+            "/etc/pki",
+            // getpwuid/getgrgid sit in libc startup paths: without these many
+            // programs cannot even resolve HOME.
+            "/etc/passwd",
+            "/etc/group",
+            // Debian/Ubuntu toolchain symlinks (cc → gcc-13, etc.).
+            "/etc/alternatives",
+            // Linuxbrew: a system prefix that happens to live under /home.
+            "/home/linuxbrew/.linuxbrew",
+        ];
+        #[cfg(target_os = "macos")]
+        let listed = [
+            "/bin",
+            "/usr",
+            // Rosetta's runtime, the loader analogue: no grant should name it.
+            "/Library/Apple/usr",
+            "/Library/Developer/CommandLineTools",
+            "/Applications/Xcode.app/Contents/Developer",
+            "/opt/homebrew",
+            "/lib",
+            "/System",
+            "/dev",
+            "/private/var/db/dyld",
+            // Wholesale: tools read whatever they read (gitconfig, paths.d,
+            // zshenv, nix.conf, …); nothing user-secret sits here unprotected.
+            "/private/etc",
+            // xcode-select state; denied, build drivers report a broken install.
+            "/private/var/select",
+            // resolv.conf's target and the mDNSResponder socket.
+            "/private/var/run",
+        ];
+        #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+        let listed: [&str; 0] = [];
+        (listed.iter())
+            .filter(|p| crate::path::exists(p))
+            .map(FrozenPath::from_surface)
+            .collect()
+    });
+    &FLOOR
+}
+
 /// The stack's region for `op`: each opining layer's prefixes for `op` and
-/// its denies, re-frozen, met.  `None` exactly when no layer held an `fs`
-/// opinion, so the guard is unrestricted and the projection needs no fs
-/// rules; a layer that opined and admitted nothing denies.
+/// its denies, re-frozen, met; for `Read`, joined with the [`floor`], which
+/// only a deny removes.  `None` exactly when no layer held an `fs` opinion,
+/// so the guard is unrestricted and the projection needs no fs rules; a layer
+/// that opined and admitted nothing denies (beyond the floor).
 pub(crate) fn region(grants: &GrantStack, resolver: &Resolver, op: &FsOp) -> Option<Region> {
-    grants
+    let mut met = grants
         .fs()
         .map(|fs| {
             let allows = op.prefixes(fs).iter().map(|p| (p, Verdict::Allow));
             let denies = fs.deny_paths.iter().map(|p| (p, Verdict::Deny));
             (allows.chain(denies))
                 .map(|(p, v)| (p.refreeze(resolver), v))
-                .collect()
+                .collect::<Region>()
         })
-        .reduce(Meet::meet)
+        .reduce(Meet::meet)?;
+    if matches!(op, FsOp::Read) {
+        met.extend(floor().iter().map(|p| (p.clone(), Verdict::Allow)));
+    }
+    Some(met)
 }
 
 #[cfg(test)]
@@ -209,6 +291,53 @@ mod tests {
         for path in paths {
             assert_eq!(region.verdict(Path::new(path)), Verdict::Allow, "{path}");
         }
+    }
+
+    /// The region for `op` of one layer allowing `allow` for both ops.
+    fn region_of(op: &FsOp, allow: &[FrozenPath], deny: &[FrozenPath]) -> Region {
+        let stack = GrantStack::of(crate::capability::Capabilities {
+            fs: Some(FsPolicy {
+                read_prefixes: allow.to_vec(),
+                write_prefixes: allow.to_vec(),
+                deny_paths: deny.to_vec(),
+            }),
+            ..Default::default()
+        });
+        region(&stack, &Resolver::shell_less(), op).expect("fs opined")
+    }
+
+    #[test]
+    fn the_read_region_admits_the_floor_a_layer_never_named() {
+        let read = region_of(&FsOp::Read, &[lit("/work")], &[]);
+        for f in floor() {
+            assert_eq!(read.verdict(f.real_path()), Verdict::Allow, "{f:?}");
+        }
+    }
+
+    #[test]
+    fn a_deny_refuses_a_floor_path() {
+        let f = floor().first().expect("a host has a floor");
+        let read = region_of(&FsOp::Read, &[lit("/work")], std::slice::from_ref(f));
+        assert_eq!(read.verdict(f.real_path()), Verdict::Deny);
+    }
+
+    #[test]
+    fn the_write_region_admits_no_floor_path() {
+        let write = region_of(&FsOp::Write, &[lit("/work")], &[]);
+        for f in floor() {
+            assert_eq!(write.verdict(f.real_path()), Verdict::Deny, "{f:?}");
+        }
+    }
+
+    #[test]
+    fn an_empty_read_admits_exactly_the_floor() {
+        let read = region_of(&FsOp::Read, &[], &[]);
+        assert!(
+            floor()
+                .iter()
+                .all(|f| read.verdict(f.real_path()) == Verdict::Allow)
+        );
+        assert_eq!(read.verdict(Path::new("/no/such/place")), Verdict::Deny);
     }
 
     /// Gated because the case- and separator-folding branch of

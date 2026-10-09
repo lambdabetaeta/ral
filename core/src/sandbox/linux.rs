@@ -34,9 +34,7 @@ use super::warrant::{Handoff, Slot, nul_terminated, parcel};
 use super::{ExecProjection, FsProjection, SandboxProjection, WriteReach};
 use crate::Role;
 use crate::capability::ExecRules;
-use crate::path::{
-    Object, PathShape, RealPath, Rendered, render_objects, render_paths, render_real,
-};
+use crate::path::{Object, PathShape, RealPath, Rendered, render_objects, render_real};
 use rustix::fs::OFlags;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
@@ -405,7 +403,7 @@ impl Binds {
             ExecProjection::Restricted(rules) => rules,
             ExecProjection::Unrestricted => &none,
         };
-        let (shown, system) = shown(image, policy, exec)?;
+        let (shown, tolerated) = shown(image, policy, exec)?;
         let frozen = frozen(policy, exec, &shown)?;
         let mut planned: Vec<_> = shown.into_iter().chain(frozen).collect();
         if let Some(tree) = cgroup_tree(env.host)
@@ -416,7 +414,7 @@ impl Binds {
         let mut opened = BTreeMap::new();
         for Bind { object, .. } in &planned {
             if !opened.contains_key(object) {
-                let handle = open_object(object, system.contains(object))?;
+                let handle = open_object(object, tolerated.contains(object))?;
                 opened.insert(object.clone(), handle);
             }
         }
@@ -486,13 +484,12 @@ impl Binds {
     }
 }
 
-/// What a restricted projection shows: the system's read-only defaults, the
-/// read and write prefixes, the image and every file and directory the exec
-/// table admits, each name by the object it reaches, less what another
-/// bind already shows; read-only before writable, each sorted by name, so
-/// a parent precedes its children and a writable prefix inside a read-only
-/// one wins.  Beside them, the defaults no grant names, which a host may
-/// keep from this user.
+/// What a restricted projection shows: the floor, the read and write
+/// prefixes, the image and every file and directory the exec table admits,
+/// each name by the object it reaches, less what another bind already shows;
+/// read-only before writable, each sorted by name, so a parent precedes its
+/// children and a writable prefix inside a read-only one wins.  Beside them,
+/// the floor's objects, which a host may keep from this user.
 fn shown(
     image: Option<&RealPath>,
     policy: &SandboxProjection<Rendered>,
@@ -501,8 +498,10 @@ fn shown(
     let FsProjection::Restricted(rules) = &policy.fs else {
         return Ok(Default::default());
     };
-    let system = objects(&render_paths(default_ro_binds())?, Access::ReadOnly)?;
-    let mut names = objects(&rules.read_prefixes, Access::ReadOnly)?;
+    let floor = objects(&rules.floor, Access::ReadOnly)?;
+    let tolerated = floor.iter().map(|bind| bind.object.clone()).collect();
+    let mut names = floor;
+    names.extend(objects(&rules.read_prefixes, Access::ReadOnly)?);
     names.extend(objects(&rules.write_prefixes, Access::Writable)?);
     for real in image
         .into_iter()
@@ -515,19 +514,13 @@ fn shown(
                 .map(|name| Bind::read_only(Layer::Shown, name.clone(), name)),
         );
     }
-    let unnamed = (system.iter())
-        .map(|bind| &bind.object)
-        .filter(|object| names.iter().all(|bind| bind.object != **object))
-        .cloned()
-        .collect();
-    names.extend(system);
     names.sort();
     names.dedup();
     let shown = (names.iter())
         .filter(|inner| !names.iter().any(|outer| outer.covers(inner)))
         .cloned()
         .collect();
-    Ok((shown, unnamed))
+    Ok((shown, tolerated))
 }
 
 /// What the envelope keeps read-only over the writes that reach it, as
@@ -856,43 +849,6 @@ impl DenyMask {
     }
 }
 
-/// System paths always bound read-only.  `/etc` and `/sys` wholesale are
-/// excluded — only what dynamic linking, name resolution, user lookup,
-/// toolchain resolution and hardware sizing need.  The rest of `/sys`
-/// describes the host, not the envelope: `class/net` is the mounter's netns
-/// whatever `--unshare-net` did, `class/dmi` and `bus` name the machine.  A
-/// grant that wants it reads `/sys` by name.
-fn default_ro_binds() -> &'static [&'static str] {
-    &[
-        "/bin",
-        "/usr",
-        "/lib",
-        "/lib64",
-        // `/dev`, `/proc` and `/sys/fs/cgroup` are absent: the mounts
-        // emitted around these supply the envelope's own, and a real bind
-        // here would shadow them.
-        "/sys/devices/system/cpu",
-        "/sys/kernel/mm/transparent_hugepage",
-        "/etc/ld.so.conf",
-        "/etc/ld.so.conf.d",
-        "/etc/ld.so.cache",
-        "/etc/resolv.conf",
-        "/etc/nsswitch.conf",
-        "/etc/hosts",
-        "/etc/ssl",
-        "/etc/ca-certificates",
-        "/etc/pki",
-        // getpwuid/getgrgid sit in libc startup paths: without these many
-        // programs cannot even resolve HOME.
-        "/etc/passwd",
-        "/etc/group",
-        // Debian/Ubuntu toolchain symlinks (cc → gcc-13, etc.).
-        "/etc/alternatives",
-        // Linuxbrew: a system prefix that happens to live under /home.
-        "/home/linuxbrew/.linuxbrew",
-    ]
-}
-
 #[cfg(test)]
 #[allow(
     clippy::disallowed_methods,
@@ -904,9 +860,9 @@ mod tests {
         bwrap_command, seccomp_programs,
     };
     use crate::Role;
-    use crate::capability::{Admitted, Program};
+    use crate::capability::{Admitted, Capabilities, FsPolicy, GrantStack, Program};
     use crate::capability::{ExecScope, Verdict};
-    use crate::path::RealPath;
+    use crate::path::{FrozenPath, RealPath, Resolver};
     use crate::sandbox::launch::{Ownership, admitted, enveloped};
     use crate::sandbox::warrant::{Handoff, Slot};
     use crate::sandbox::{ExecProjection, FsProjection, FsRules, SandboxProjection};
@@ -946,18 +902,7 @@ mod tests {
     }
 
     fn deny_within(dir: &std::path::Path, denied: &[&std::path::Path]) -> SandboxProjection {
-        SandboxProjection {
-            fs: FsProjection::Restricted(FsRules {
-                write_prefixes: vec![dir.to_string_lossy().into_owned()],
-                deny_paths: denied
-                    .iter()
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .collect(),
-                ..FsRules::default()
-            }),
-            net: true,
-            exec: ExecProjection::default(),
-        }
+        restricted(&[], &[dir], denied)
     }
 
     fn unrestricted() -> SandboxProjection {
@@ -1122,15 +1067,7 @@ mod tests {
         let under_write = dir.join("secret-not-yet-created");
         let under_read = config.join("gcloud");
 
-        let read_only = SandboxProjection {
-            fs: FsProjection::Restricted(FsRules {
-                read_prefixes: vec![config.to_string_lossy().into_owned()],
-                deny_paths: vec![under_read.to_string_lossy().into_owned()],
-                ..FsRules::default()
-            }),
-            net: true,
-            exec: ExecProjection::default(),
-        };
+        let read_only = restricted(&[&config], &[], &[&under_read]);
         for (bind, denied, policy) in [
             ("writable", &under_write, deny_within(&dir, &[&under_write])),
             ("read-only", &under_read, read_only),
@@ -1257,24 +1194,28 @@ mod tests {
         let _ = std::fs::remove_dir_all(&elsewhere);
     }
 
-    fn restricted(read: &[&std::path::Path], write: &[&std::path::Path]) -> SandboxProjection {
-        let names = |paths: &[&std::path::Path]| {
-            (paths.iter())
-                .map(|p| p.to_string_lossy().into_owned())
-                .collect()
+    /// Through the fold, as a launch projects a grant: the floor included.
+    fn restricted(
+        read: &[&std::path::Path],
+        write: &[&std::path::Path],
+        deny: &[&std::path::Path],
+    ) -> SandboxProjection {
+        let frozen =
+            |paths: &[&std::path::Path]| paths.iter().map(FrozenPath::from_surface).collect();
+        let fs = FsPolicy {
+            read_prefixes: frozen(read),
+            write_prefixes: frozen(write),
+            deny_paths: frozen(deny),
         };
-        SandboxProjection {
-            fs: FsProjection::Restricted(FsRules {
-                read_prefixes: names(read),
-                write_prefixes: names(write),
-                ..FsRules::default()
-            }),
-            net: true,
-            exec: ExecProjection::default(),
-        }
+        let caps = Capabilities {
+            fs: Some(fs),
+            ..Capabilities::root()
+        };
+        SandboxProjection::of(&GrantStack::of(caps), &Resolver::shell_less(), None)
+            .expect("an fs grant projects")
     }
 
-    /// The `Shown` binds beneath `dir`, the defaults left out.
+    /// The `Shown` binds beneath `dir`, the floor left out.
     fn shown_within(binds: &Binds, dir: &std::path::Path) -> Vec<(String, Access)> {
         (binds.layer(Layer::Shown))
             .map(|(_, bind)| (bind.dest.as_str().to_string(), bind.access))
@@ -1304,7 +1245,7 @@ mod tests {
         }
         std::fs::write(&file, "x").unwrap();
         let absent = dir.join("absent");
-        let mut policy = restricted(&[&ro, &inner, &file, &absent], &[&w]);
+        let mut policy = restricted(&[&ro, &inner, &file, &absent], &[&w], &[]);
         policy.exec = ExecProjection::Restricted(
             [&tools, &w.join("bin")]
                 .into_iter()
@@ -1342,7 +1283,7 @@ mod tests {
         std::fs::create_dir(&real).unwrap();
         std::os::unix::fs::symlink("real", &link).unwrap();
         let name = |p: &std::path::Path| p.to_string_lossy().into_owned();
-        let both = binds(None, &restricted(&[&link], &[]), WHOLE);
+        let both = binds(None, &restricted(&[&link], &[], &[]), WHOLE);
         assert_eq!(
             shown_within(&both, &dir),
             [
@@ -1350,7 +1291,7 @@ mod tests {
                 (name(&real), Access::ReadOnly)
             ]
         );
-        let covered = binds(None, &restricted(&[&dir, &link], &[]), WHOLE);
+        let covered = binds(None, &restricted(&[&dir, &link], &[], &[]), WHOLE);
         assert_eq!(
             shown_within(&covered, &dir),
             [(name(&dir), Access::ReadOnly)]
@@ -1384,7 +1325,7 @@ mod tests {
         };
         let under = |write: &std::path::Path| SandboxProjection {
             exec: admit(false),
-            ..restricted(&[], &[write])
+            ..restricted(&[], &[write], &[])
         };
         let covered = binds(None, &under(&w), WHOLE);
         assert_eq!(frozen(&covered), [name(&bin)], "covered");
@@ -1426,7 +1367,7 @@ mod tests {
                 ))
                 .collect(),
             ),
-            ..restricted(&[], &[&link])
+            ..restricted(&[], &[&link], &[])
         };
         if let FsProjection::Restricted(rules) = &mut policy.fs {
             rules.deny_paths = vec![secret.to_string_lossy().into_owned()];
@@ -1467,8 +1408,8 @@ mod tests {
         }
     }
 
-    /// A system default this user may not reach is left out, as an absent
-    /// one is; a prefix the grant names is refused instead.
+    /// A floor path this user may not reach is left out, as an absent
+    /// one is; any other prefix the grant names is refused instead.
     #[test]
     fn an_unreachable_object_is_absent_only_where_no_grant_names_it() {
         use std::os::unix::fs::PermissionsExt;
@@ -1498,7 +1439,7 @@ mod tests {
         let (parent, elsewhere) = (dir.join("parent"), dir.join("elsewhere"));
         std::fs::create_dir_all(parent.join("data")).unwrap();
         std::fs::create_dir_all(elsewhere.join("data")).unwrap();
-        let rendered = restricted(&[&parent.join("data")], &[])
+        let rendered = restricted(&[&parent.join("data")], &[], &[])
             .rendered()
             .expect("ASCII paths render");
         std::fs::rename(&parent, dir.join("moved")).unwrap();
@@ -1531,7 +1472,7 @@ mod tests {
         };
         let mut policy = SandboxProjection {
             exec: admit(&[]),
-            ..restricted(&[&ro], &[&w])
+            ..restricted(&[&ro], &[&w], &[])
         };
         if let FsProjection::Restricted(rules) = &mut policy.fs {
             rules.deny_paths = vec![secret.to_string_lossy().into_owned()];
@@ -1705,17 +1646,8 @@ mod tests {
         std::fs::create_dir_all(&work).unwrap();
         let denied = config.join("gcloud");
 
-        let policy = |deny_paths: Vec<String>| SandboxProjection {
-            fs: FsProjection::Restricted(FsRules {
-                read_prefixes: vec![config.to_string_lossy().into_owned()],
-                write_prefixes: vec![work.to_string_lossy().into_owned()],
-                deny_paths,
-                ..FsRules::default()
-            }),
-            net: true,
-            exec: ExecProjection::default(),
-        };
-        let Some(env) = envelope_launches(&policy(vec![])) else {
+        let policy = |deny: &[&std::path::Path]| restricted(&[&config], &[&work], deny);
+        let Some(env) = envelope_launches(&policy(&[])) else {
             return;
         };
 
@@ -1724,12 +1656,7 @@ mod tests {
              mkdir -p '{denied}' 2>/dev/null || echo DENY-CREATE-REFUSED\n",
             denied = denied.display(),
         );
-        let out = run_confined(
-            &env,
-            &policy(vec![denied.to_string_lossy().into_owned()]),
-            &script,
-        )
-        .expect("spawn bwrap");
+        let out = run_confined(&env, &policy(&[&denied]), &script).expect("spawn bwrap");
         let stdout = String::from_utf8_lossy(&out.stdout);
 
         assert!(
@@ -1912,7 +1839,7 @@ mod tests {
             std::fs::create_dir(at).unwrap();
             std::fs::write(at.join("f"), bytes).unwrap();
         }
-        let policy = restricted(&[&data], &[]);
+        let policy = restricted(&[&data], &[], &[]);
         let Some(env) = envelope_launches(&policy) else {
             return;
         };
@@ -1943,7 +1870,7 @@ mod tests {
         let dir = workdir("dest-link");
         let (outer, inner) = (dir.join("outer"), dir.join("outer/inner"));
         std::fs::create_dir_all(&inner).unwrap();
-        let policy = restricted(&[&outer], &[&inner]);
+        let policy = restricted(&[&outer], &[&inner], &[]);
         let Some(env) = envelope_launches(&policy) else {
             return;
         };
@@ -2841,7 +2768,7 @@ mod tests {
                     false,
                 )],
             ),
-            ..restricted(&[], &[&expanded, &whole])
+            ..restricted(&[], &[&expanded, &whole], &[])
         };
         let Some(env) = envelope_launches(&policy) else {
             return;

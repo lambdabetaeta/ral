@@ -4,14 +4,14 @@
 //! [`SandboxProjection::of`] folds a stack once, at spawn, because that is
 //! when the OS profile is written.  The in-process guard (`crate::guard`)
 //! folds the same per-dimension tables afresh on every check: the fs
-//! [`region`] per op, and for exec the very table [`GrantStack::admit`]
-//! judged with.  So guard and profile cannot disagree about what the stack
+//! [`region`] per op, the read one carrying the [`floor`], and for exec the
+//! very table [`GrantStack::admit`] judged with.  So guard and profile cannot disagree about what the stack
 //! permits; all that separates them is when the fold runs.  `detach` gates a
 //! verb rather than an OS rule, so it reaches no projection.
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::capability::Program;
-use crate::capability::{Admitted, ExecRules, FsOp, GrantStack, region, rules};
+use crate::capability::{Admitted, ExecRules, FsOp, GrantStack, floor, region, rules};
 use crate::path::{FrozenPath, Rendered, Resolver, render_paths, rendered_pins};
 #[cfg(unix)]
 use std::borrow::Borrow;
@@ -26,7 +26,11 @@ use std::collections::BTreeSet;
 /// which is exactly what `N` is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FsRules<N> {
+    /// The grant's own live reads, the floor apart.
     pub read_prefixes: Vec<N>,
+    /// The live part of [`floor`]: read as `read_prefixes` are, held apart
+    /// because a host may keep some of it from this user.
+    pub(crate) floor: Vec<N>,
     pub write_prefixes: Vec<N>,
     pub deny_paths: Vec<N>,
     /// The ancestor closure of every *rendered* `deny_paths` entry that lies
@@ -49,6 +53,7 @@ impl<N> Default for FsRules<N> {
     fn default() -> Self {
         Self {
             read_prefixes: Vec::new(),
+            floor: Vec::new(),
             write_prefixes: Vec::new(),
             deny_paths: Vec::new(),
             pinned_dirs: Vec::new(),
@@ -216,6 +221,7 @@ impl SandboxProjection<String> {
             FsProjection::Unrestricted => FsProjection::Unrestricted,
             FsProjection::Restricted(FsRules {
                 read_prefixes,
+                floor,
                 write_prefixes,
                 deny_paths,
                 // Derived below, so nothing a caller or the wire supplied is
@@ -227,6 +233,7 @@ impl SandboxProjection<String> {
                 let pinned_dirs = rendered_pins(&deny_paths, &write_prefixes);
                 FsProjection::Restricted(FsRules {
                     read_prefixes: render_paths(&ordered(read_prefixes))?,
+                    floor: render_paths(&ordered(floor))?,
                     write_prefixes,
                     deny_paths,
                     pinned_dirs,
@@ -289,7 +296,8 @@ impl SandboxProjection<String> {
 
         let fs = match regions {
             Some((read, write)) => FsProjection::Restricted(FsRules {
-                read_prefixes: surface(read.live()),
+                floor: surface(read.live().filter(|p| floor().contains(p))),
+                read_prefixes: surface(read.live().filter(|p| !floor().contains(p))),
                 write_prefixes: surface(write.live()),
                 // Both regions carry the same denies; a disk change between the two
                 // folds can only drop a write allow, which fails closed.
@@ -352,6 +360,7 @@ mod rendered_tests {
         let projection = SandboxProjection {
             fs: FsProjection::Restricted(FsRules {
                 read_prefixes: Vec::new(),
+                floor: Vec::new(),
                 write_prefixes: strings(write),
                 deny_paths: strings(deny),
                 pinned_dirs: Vec::new(),
@@ -400,6 +409,7 @@ mod rendered_tests {
         let forged = SandboxProjection {
             fs: FsProjection::Restricted(FsRules {
                 read_prefixes: Vec::new(),
+                floor: Vec::new(),
                 write_prefixes: vec!["/repo".to_string()],
                 deny_paths: vec!["/repo/a/secret".to_string()],
                 pinned_dirs: vec!["/somewhere/else".to_string()],
