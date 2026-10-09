@@ -10,10 +10,12 @@ use super::reset;
 use super::retry::Recovery;
 use crate::clock;
 use jiff::Timestamp;
+use regex::Regex;
 use reqwest::StatusCode;
 use reqwest::header::HeaderMap;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::sync::LazyLock;
 
 /// A provider's JSON error frame, boxed: `genai` turns on `serde_json`'s
 /// `preserve_order`, so a `Value` is 72 bytes here, and three variants carry
@@ -75,6 +77,19 @@ pub enum ProviderError {
         status: Option<u16>,
         model: String,
         message: String,
+        body: Option<Body>,
+    },
+    /// The request outgrew the window the serving endpoint enforces, whatever it
+    /// lists.  Never retried by `retry.rs`; `Avatar::deliberate` recovers once.
+    Overflow {
+        model: String,
+        /// The serving provider, when a gateway named it.
+        provider: Option<String>,
+        sent: Option<u64>,
+        limit: Option<u64>,
+        /// The window exarch was working to, before the overflow narrowed it;
+        /// stamped by `Provider::complete`.
+        listed: Option<u64>,
         body: Option<Body>,
     },
     /// The turn was cut off short of the model finishing.  Raised by
@@ -184,6 +199,7 @@ impl ProviderError {
             Self::Transient { status, .. } => transient_label(*status),
             Self::Refused(r) => r.limit.label(),
             Self::Api { .. } => "api error",
+            Self::Overflow { .. } => "context too long",
             Self::Truncated { .. } => "truncated",
             Self::Other(_) => "provider error",
         }
@@ -220,11 +236,26 @@ impl ProviderError {
                 body,
                 status: Some(status.as_u16()),
             },
-            Fault::Status { status, body, .. } => Self::Api {
-                status: Some(status.as_u16()),
-                model: model.to_string(),
-                message: msg,
-                body,
+            Fault::Status { status, body, .. } => match overflow(body.as_deref(), &msg) {
+                Some((sent, limit)) => Self::Overflow {
+                    model: model.to_string(),
+                    provider: body
+                        .as_deref()
+                        .and_then(error_object)
+                        .and_then(|o| o.get("provider"))
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                    sent,
+                    limit,
+                    listed: None,
+                    body,
+                },
+                None => Self::Api {
+                    status: Some(status.as_u16()),
+                    model: model.to_string(),
+                    message: msg,
+                    body,
+                },
             },
             Fault::Transport(detail) => Self::Transient {
                 cause: detail.unwrap_or(msg),
@@ -260,6 +291,39 @@ impl ProviderError {
             body,
         })
     }
+}
+
+/// Each provider's phrasing of a context overflow, naming `sent` and `limit`.
+static OVERFLOW_PHRASINGS: LazyLock<[Regex; 4]> = LazyLock::new(|| {
+    [
+        r"input \((?<sent>\d+) tokens\) is longer than the model's context length \((?<limit>\d+) tokens\)",
+        r"maximum context length is (?<limit>\d+) tokens.*?(?:resulted in|requested(?: about)?) (?<sent>\d+) tokens",
+        r"prompt is too long: (?<sent>\d+) tokens > (?<limit>\d+) maximum",
+        r"input token count \((?<sent>\d+)\) exceeds the maximum number of tokens allowed \((?<limit>\d+)\)",
+    ]
+    .map(|p| Regex::new(&format!("(?is){p}")).expect("a phrasing is a regex"))
+});
+
+/// `(sent, limit)` when a 4xx body is a context overflow: a known phrasing
+/// matched, or the body's own `type`/`code` says so.
+fn overflow(body: Option<&serde_json::Value>, msg: &str) -> Option<(Option<u64>, Option<u64>)> {
+    let text = body
+        .and_then(body_message)
+        .unwrap_or_else(|| msg.to_string());
+    let count = |c: &regex::Captures, name| c.name(name).and_then(|m| m.as_str().parse().ok());
+    OVERFLOW_PHRASINGS
+        .iter()
+        .find_map(|re| re.captures(&text))
+        .map(|c| (count(&c, "sent"), count(&c, "limit")))
+        .or_else(|| {
+            let o = error_object(body?)?;
+            ["type", "code"]
+                .iter()
+                .any(|k| {
+                    o.get(*k).and_then(serde_json::Value::as_str) == Some("context_length_exceeded")
+                })
+                .then_some((None, None))
+        })
 }
 
 /// The leaf of a genai error that decides how the boundary recovers.  The walk
@@ -467,6 +531,23 @@ impl ProviderError {
                     Some(s) => format!("api error {s}: {detail}"),
                     None => format!("api error: {detail}"),
                 }
+            }
+            Self::Overflow {
+                provider,
+                sent,
+                limit,
+                ..
+            } => {
+                let host = provider
+                    .as_deref()
+                    .map_or(String::new(), |p| format!(" for {p}"));
+                let counts = match (sent, limit) {
+                    (Some(s), Some(l)) => format!(": {s} tokens sent, {l} allowed"),
+                    (Some(s), None) => format!(": {s} tokens sent"),
+                    (None, Some(l)) => format!(": {l} tokens allowed"),
+                    (None, None) => String::new(),
+                };
+                format!("context too long{host}{counts}")
             }
             Self::Truncated { cause } => format!("reply cut off: {}", cause.summary()),
             Self::Other(s) => first_line(s).to_string(),
@@ -1022,5 +1103,75 @@ mod tests {
     fn body_detail_names_an_empty_body() {
         assert_eq!(body_detail(""), "the endpoint sent no detail");
         assert_eq!(body_detail("   \n  "), "the endpoint sent no detail");
+    }
+
+    fn http_400(body: &str) -> genai::Error {
+        genai::Error::HttpError {
+            status: StatusCode::BAD_REQUEST,
+            canonical_reason: "Bad Request".into(),
+            body: body.into(),
+            headers: Box::new(HeaderMap::new()),
+        }
+    }
+
+    /// The incident: a gateway relaying an endpoint whose window is smaller
+    /// than the one the catalog lists.
+    #[test]
+    fn from_genai_classifies_a_relayed_vllm_overflow() {
+        let raw = r#"{"object":"error","message":"Failed to create completion, non-200 status code returned. Text: '{\"object\":\"error\",\"message\":\"The input (250015 tokens) is longer than the model's context length (250000 tokens).\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}'","type":"context_length_exceeded"}"#;
+        let body = serde_json::json!({"error": {
+            "code": "400",
+            "message": "Provider returned error",
+            "metadata": {"raw": raw, "provider_name": "InferenceNet"},
+        }});
+        let e = ProviderError::from_genai(&http_400(&body.to_string()), "z-ai/glm-5.3");
+        assert!(
+            matches!(
+                &e,
+                ProviderError::Overflow {
+                    sent: Some(250_015),
+                    limit: Some(250_000),
+                    provider: Some(p),
+                    ..
+                } if p == "InferenceNet"
+            ),
+            "got {e:?}"
+        );
+        assert_eq!(
+            e.summary(),
+            "context too long for InferenceNet: 250015 tokens sent, 250000 allowed"
+        );
+    }
+
+    #[test]
+    fn from_genai_classifies_an_anthropic_overflow() {
+        let e = ProviderError::from_genai(
+            &http_400(
+                r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 210000 tokens > 200000 maximum"}}"#,
+            ),
+            "claude",
+        );
+        assert!(
+            matches!(
+                e,
+                ProviderError::Overflow {
+                    sent: Some(210_000),
+                    limit: Some(200_000),
+                    ..
+                }
+            ),
+            "got {e:?}"
+        );
+    }
+
+    #[test]
+    fn from_genai_keeps_an_ordinary_400_an_api_error() {
+        let e = ProviderError::from_genai(
+            &http_400(
+                r#"{"error":{"message":"unsupported schema keyword","type":"invalid_request_error"}}"#,
+            ),
+            "m",
+        );
+        assert!(matches!(e, ProviderError::Api { .. }), "got {e:?}");
     }
 }

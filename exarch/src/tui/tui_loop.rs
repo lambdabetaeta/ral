@@ -101,10 +101,7 @@ pub fn run(
             crate::record::Blocks::default(),
         )
         .map_err(|e| format!("record.jsonl did not replay cleanly: {e}"))?;
-        // The fold's usage is cumulative, matching `total_usage`'s own running
-        // sum exactly; it carries no *last* turn's prompt size, so
-        // `last_input` — the ctx gauge's numerator — stays at zero until the
-        // next live turn reports one, same as a fresh session's opening frame.
+        // The fold's usage is cumulative, matching `total_usage`'s running sum.
         tui.app.total_usage = blocks.usage();
         if let Some(sb) = tui.app.tabs.scrollback_mut(session.agent.id) {
             sb.seed(blocks);

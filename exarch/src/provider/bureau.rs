@@ -16,7 +16,7 @@ use ral_core::sync::LockExt;
 
 use super::allowance::{LiveMeters, Survey};
 use super::credential::CredentialStore;
-use super::models::{Listed, LiveSource, ModelCatalog, listing_of};
+use super::models::{Listed, LiveSource, ModelCatalog, ModelSource, ProviderEndpoint, listing_of};
 use super::{Account, Backend, Engine, Provider, Rations, Selection, Tuning, oauth, pricing};
 use crate::app::App;
 
@@ -51,6 +51,23 @@ impl Holdings {
             catalog: Arc::new(Mutex::new(catalog)),
             rations: Arc::new(Rations::default()),
         }
+    }
+
+    /// `model`'s serving endpoints: the catalog's, else fetched and recorded;
+    /// `None` when the fetch fails.
+    fn endpoints_of(&self, model: &str) -> Option<Vec<ProviderEndpoint>> {
+        let source = {
+            let catalog = self.catalog.lock_ignore_poison();
+            if let Some(cached) = catalog.cached_endpoints(model) {
+                return Some(cached);
+            }
+            catalog.source().clone()
+        };
+        let fetched = source.endpoints(model).ok()?;
+        self.catalog
+            .lock_ignore_poison()
+            .record_endpoints(model, fetched.clone());
+        Some(fetched)
     }
 
     /// Change the credentials, and have the catalog list with them as they
@@ -88,6 +105,11 @@ fn window_of(
         .find(|m| m.id == model)
         .ok_or_else(|| format!("'{label}' does not list model '{model}'"))?;
     Ok(entry.context_window.or_else(|| fallback(model)))
+}
+
+/// The window of the endpoint `slug` among `endpoints`, when it lists one.
+fn pinned_window(endpoints: &[ProviderEndpoint], slug: &str) -> Option<u64> {
+    endpoints.iter().find(|e| e.slug == slug)?.context_length
 }
 
 /// The selection `account` can carry: a plan refuses sampling and an output
@@ -160,7 +182,12 @@ impl Bureau {
             .ok_or_else(|| format!("{label} has no resolved credential"))?;
         let listed = listing_of(&holdings.catalog, &account.id)
             .map_err(|why| format!("could not list the models '{label}' serves: {why}"))?;
-        let context_window = window_of(&listed, &model, &label, pricing::context_window)?;
+        // A pinned endpoint's own window binds, not the model's.
+        let context_window = route
+            .as_deref()
+            .filter(|_| account.service.routes)
+            .and_then(|slug| pinned_window(&holdings.endpoints_of(&model)?, slug))
+            .or(window_of(&listed, &model, &label, pricing::context_window)?);
         let transport = engine.transport_for(account, &model, credential);
         let backend = Backend::Live {
             engine: Arc::clone(engine),
@@ -289,6 +316,20 @@ mod tests {
         let models = [listed("m", None)];
         assert_eq!(window_of(&models, "m", "acct", |_| Some(99)), Ok(Some(99)));
         assert_eq!(window_of(&models, "m", "acct", |_| None), Ok(None));
+    }
+
+    #[test]
+    fn a_pinned_endpoint_names_its_own_window() {
+        let endpoint = |slug: &str, n| ProviderEndpoint {
+            provider_name: slug.into(),
+            slug: slug.into(),
+            context_length: n,
+            quantization: None,
+        };
+        let eps = [endpoint("ionet", Some(262_000)), endpoint("bare", None)];
+        assert_eq!(pinned_window(&eps, "ionet"), Some(262_000));
+        assert_eq!(pinned_window(&eps, "bare"), None);
+        assert_eq!(pinned_window(&eps, "absent"), None);
     }
 
     #[test]

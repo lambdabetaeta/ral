@@ -15,6 +15,7 @@ use crate::bus::{AgentOutcome, FleetBus, Sink, pump};
 use crate::card::{self, Card, Landed, Mark, Row, observation_card};
 use crate::provider::{Provider, Usage};
 use crate::record::AgentId;
+use crate::record::fault::Remedy;
 use crate::record::{self, Blocks, Delta, Record, Recorded, Transient};
 use crate::shell_eval::user_json;
 use ral_core::first_order::FOValue;
@@ -389,6 +390,19 @@ impl Headless<'_> {
             for line in lines {
                 let _ = writeln!(self.err, "    {line}");
             }
+        }
+        for remedy in &readout.remedies {
+            let hint = match remedy {
+                Remedy::Evict => continue,
+                Remedy::Reroute => {
+                    "rerun with --model to pick a model or endpoint with a larger window"
+                }
+                Remedy::RaiseMaxTokens => {
+                    "rerun with --max-tokens N, or split the turn into smaller writes"
+                }
+                Remedy::SignIn => "run `exarch login`",
+            };
+            let _ = writeln!(self.err, "  hint: {hint}");
         }
     }
 

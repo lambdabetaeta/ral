@@ -483,6 +483,16 @@ The `_ => Terminal` floor makes the walk total — a contract breach (a non-JSON
 tutorial is [[internals/provider-fault-recovery|provider-fault-recovery]]
 ([[invariants/transcript-admission|transcript-admission]]).
 
+A 4xx whose text matches a known overflow phrasing (vLLM, OpenAI/OpenRouter,
+Anthropic, Gemini), or whose `type`/`code` is `context_length_exceeded`, is
+`Overflow` rather than `Api`: it carries the `sent` and `limit` token counts
+when stated, and is never retried by `retry.rs`. A stated `limit` narrows the
+`Provider`'s interior-mutable window (it only ever shrinks, and dies with a
+`/model` swap), recorded as `Forensic::WindowNarrowed` so every reader agrees;
+`Avatar::deliberate` then sheds the older half and retries the turn once.
+A resume replays the learned window for the same model; a pinned endpoint
+is minted at its own listed window, not the model's.
+
 Each retryable and 4xx variant carries the parsed body (boxed at the error
 boundary) as an optional JSON value, so the renderer can print a
 labelled, structured error from the JSON rather than scraping the cause text;

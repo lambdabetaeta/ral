@@ -117,6 +117,8 @@ pub struct AgentLog {
     /// query in this file answers from; advanced inline through
     /// [`Self::advance`] on every fact this log authors.
     context: Context,
+    /// The `(model, window)` a prior run's overflow taught; set by `resume`.
+    learned: Option<(String, u64)>,
     /// The one seam: every fact this log authors crosses here as a `Record` —
     /// appended to `sessions/<n>/record.jsonl` and published on whatever bus
     /// `Avatar::couple` has attached, in that order, under one lock.
@@ -247,7 +249,7 @@ impl AgentLog {
                 dir.display()
             )));
         }
-        let (context, name, label) =
+        let (context, name, label, learned) =
             crate::record::model::resume(&record_path).map_err(|error| {
                 io::Error::new(
                     error.kind(),
@@ -277,11 +279,17 @@ impl AgentLog {
             _scratch: None,
             context,
             seam,
+            learned,
         };
         if !resumed.context.is_ready() {
             resumed.quiesce(QuiesceReason::Aborted);
         }
         Ok(resumed)
+    }
+
+    /// The `(model, window)` a prior run's overflow taught its provider.
+    pub fn learned_window(&self) -> Option<&(String, u64)> {
+        self.learned.as_ref()
     }
 
     pub fn resumed_summary(&self) -> Resumed {
@@ -744,6 +752,7 @@ impl AgentLog {
             #[cfg(test)]
             _scratch: None,
             context: Context::new(source),
+            learned: None,
             seam,
         })
     }

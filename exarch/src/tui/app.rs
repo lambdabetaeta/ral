@@ -57,11 +57,6 @@ pub(crate) struct App {
     /// (`Inbox::next_or_idle`).
     pub(super) inbox: Inbox,
     pub(super) total_usage: Usage,
-    /// Last turn's prompt size — genai's `prompt_tokens`, which already folds
-    /// the cache counts in. Overwritten, not accumulated.
-    pub(super) last_input: u64,
-    /// Hidden when `None` (native providers with no fetched catalog).
-    pub(super) context_window: Option<u64>,
     pub(super) status_model: String,
     /// Modal in behaviour — an early-return guard in [`Self::key`] — and in
     /// rendering: drawn last, over the dimmed session.
@@ -101,8 +96,6 @@ impl App {
             prompt_state: PromptState::new(vi),
             inbox,
             total_usage: Usage::default(),
-            last_input: 0,
-            context_window: None,
             status_model: String::new(),
             overlay: None,
             gesture: GestureState::new(),
@@ -118,8 +111,8 @@ impl App {
         self.total_usage
     }
 
-    /// Set the status bar label and the ctx-gauge denominator from the focused
-    /// agent's provider. Call at startup and after every focus or model change.
+    /// Set the status bar label from the focused agent's provider. Call at
+    /// startup and after every focus or model change.
     /// `accounts` is the set the label is drawn relative to, so two logins on
     /// one email still read apart on the status line.
     pub fn update_live_model(&mut self, p: &Provider, accounts: &[Account]) {
@@ -129,7 +122,6 @@ impl App {
         // goes on the wire.
         let effort = crate::provider::effort_label(&p.tuning().effort).unwrap_or("custom");
         self.status_model = format!("{status_provider}/{} ({effort})", p.model());
-        self.context_window = p.context_window();
     }
 
     /// Whether the focused tab has an agent to steer.  Root's own handle
@@ -266,7 +258,6 @@ impl App {
             sb.reset();
         }
         self.total_usage = Usage::default();
-        self.last_input = 0;
         self.gesture.clear_selection();
         // Queued prompts and undrained wakeups belong to the old context.
         self.inbox.clear();
@@ -318,9 +309,6 @@ impl App {
         // reads off the view fold it is stepped alongside below.
         if let Record::Forensic(Forensic::UsageDelta { usage }) = rec.value() {
             let u = *usage;
-            if id == self.tabs.root() {
-                self.last_input = u.input;
-            }
             self.total_usage += u;
         }
         let target = match rec.value() {

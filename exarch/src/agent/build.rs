@@ -289,15 +289,26 @@ impl Avatar {
             ));
         }
         seed_id_counter(&cfg.run_dir.join("sessions"))?;
+        let live = provider.clone();
         let (avatar, resumed) = Self::trunk(
             cfg,
             seat,
             provider,
             AgentId::new(0),
-            |sessions, model, account, bytes| {
+            |sessions, _, account, bytes| {
                 let mut log = AgentLog::resume(sessions, AgentId::new(0))?;
                 let resumed = log.resumed_summary();
-                log.record_resumed(model, account, bytes, crate::app::now_unix_ms())?;
+                if let Some((model, window)) = log.learned_window()
+                    && model == live.model()
+                {
+                    live.narrow_window(*window);
+                }
+                log.record_resumed(
+                    &RecordedModel::of(&live),
+                    account,
+                    bytes,
+                    crate::app::now_unix_ms(),
+                )?;
                 Ok((log, resumed))
             },
         )?;

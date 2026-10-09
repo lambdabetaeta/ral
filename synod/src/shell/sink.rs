@@ -19,8 +19,9 @@
 use exarch::bus::Sink;
 use exarch::card::{Card, Field, Hunk, Mark, Measure, Span, change_card, observation_display_card};
 use exarch::clock;
-use exarch::provider::{CutShort, ProviderError, Recovery};
+use exarch::provider::ProviderError;
 use exarch::record::AgentId;
+use exarch::record::fault::{Datum, Readout, Remedy};
 use exarch::record::{Display, Forensic, Protocol, Record, Recorded, Transient, context_rows_card};
 use serde::Serialize;
 use ts_rs::TS;
@@ -109,69 +110,68 @@ pub enum Severity {
     Bad,
 }
 
-/// `text` beside `suffix` if `text` is non-empty, else nothing — the shared
-/// shape of every optional clause [`provider_error_text`] appends.
-fn suffix(prefix: &str, text: &str) -> String {
-    if text.is_empty() {
-        String::new()
-    } else {
-        format!("{prefix}{text}")
-    }
-}
-
-/// A [`ProviderError`] as the one-line bracketed sentence the dial
-/// shows, exhaustively over its variants — `label` is the tag word
-/// ("provider" or "stalled") the two events that carry one prefix it with.
-fn provider_error_text(label: &str, record: &ProviderError) -> String {
-    let detail = match record {
-        ProviderError::Cancelled(site) => suffix(" at ", &site.to_string()),
-        ProviderError::Transient {
-            cause, attempts, ..
-        } => format!("{} (attempt {attempts})", suffix(" — ", cause)),
-        ProviderError::Refused(r) => {
-            let wait = match r.recovery() {
-                Recovery::InPlace(Some(wait)) => format!(" — retry in {}s", wait.get().as_secs()),
-                Recovery::InPlace(None) => String::new(),
-                Recovery::Deferred(at) => format!(" — resets {}", clock::local(at)),
-            };
-            wait + &suffix(" — ", &r.cause)
-        }
-        ProviderError::Api {
-            status,
-            model,
-            message,
-            ..
-        } => {
-            let status = status.map(|s| s.to_string()).unwrap_or_default();
-            [status.as_str(), model, message]
-                .into_iter()
-                .map(|part| suffix(" ", part))
-                .collect()
-        }
-        ProviderError::Truncated { cause } => match cause.as_ref() {
-            CutShort::OutputCap { stop_reason } => format!(" — output cap ({stop_reason})"),
-            // A stall's sentence is its cause's: `project` reaches one only
-            // through `stall_cause`, with the cause already unwrapped.
-            CutShort::Stalled(error) => return provider_error_text(label, error),
-        },
-        ProviderError::Other(cause) if cause.is_empty() => {
-            return format!("[{label}: error]");
-        }
-        ProviderError::Other(cause) => return format!("[{label}: {cause}]"),
-    };
-    format!("[{label}: {}{detail}]", record.kind())
-}
-
 /// An API failure or an unclassified one reads as a failure the exchange
 /// cannot recover from; every other kind is a warning.
 fn provider_error_severity(record: &ProviderError) -> Severity {
     match record {
-        ProviderError::Api { .. } | ProviderError::Other(_) => Severity::Bad,
+        ProviderError::Api { .. } | ProviderError::Overflow { .. } | ProviderError::Other(_) => {
+            Severity::Bad
+        }
         ProviderError::Cancelled(_)
         | ProviderError::Transient { .. }
         | ProviderError::Refused(_)
         | ProviderError::Truncated { .. } => Severity::Warn,
     }
+}
+
+/// A provider failure's [`Readout`] on the wire: `hints` are synod's own
+/// spellings of its remedies, `value` a field's datum as text.
+#[derive(Clone, Serialize, TS)]
+#[ts(export, export_to = "../ui/js/bindings/")]
+pub struct ReadoutDto {
+    headline: String,
+    fields: Vec<RowDto>,
+    hints: Vec<String>,
+    severity: Severity,
+}
+
+#[derive(Clone, Serialize, TS)]
+#[ts(export, export_to = "../ui/js/bindings/")]
+pub struct RowDto {
+    label: String,
+    value: String,
+}
+
+impl ReadoutDto {
+    fn new(r: Readout, severity: Severity) -> Self {
+        Self {
+            headline: r.headline,
+            fields: r
+                .fields
+                .into_iter()
+                .map(|f| RowDto {
+                    label: f.label,
+                    value: match f.datum {
+                        Datum::Text(text) => text,
+                        Datum::Seconds(secs) => clock::hms(secs),
+                    },
+                })
+                .collect(),
+            hints: r.remedies.into_iter().filter_map(hint).collect(),
+            severity,
+        }
+    }
+}
+
+/// What the window user can do about a remedy; the window has no slash
+/// commands, no eviction and no token flag, so those are left unspoken.
+fn hint(remedy: Remedy) -> Option<String> {
+    match remedy {
+        Remedy::Reroute => Some("start again with a model that has a larger window"),
+        Remedy::SignIn => Some("sign in again under Accounts, then start again"),
+        Remedy::Evict | Remedy::RaiseMaxTokens => None,
+    }
+    .map(str::to_string)
 }
 
 /// The wire shape of one exchange's worth of narration, as the window's own
@@ -243,19 +243,13 @@ pub enum SynodEvent {
     Error {
         message: String,
     },
-    ProviderError {
-        text: String,
-        severity: Severity,
-    },
-    /// A stream that broke mid-turn.  Carries the same sentence shape as
+    ProviderError(ReadoutDto),
+    /// A stream that broke mid-turn.  Carries the same readout shape as
     /// [`Self::ProviderError`] and is deliberately a separate type: the window
     /// grades it below a failure that ended the exchange, because the partial
     /// reply already on screen stands and the turn resumes from it — so its
     /// `severity` is always [`Severity::Warn`], whatever the record beneath.
-    Stalled {
-        text: String,
-        severity: Severity,
-    },
+    Stalled(ReadoutDto),
     /// A conversation failure, emitted directly by `commands.rs` — never by
     /// [`project`], since no [`Record`] carries this fact.  A
     /// `Conversation::begin` refusal is terminal, and `synod-ended` follows;
@@ -380,14 +374,13 @@ fn project_forensic(forensic: &Forensic) -> Option<SynodEvent> {
             message: text.clone(),
         }),
         Forensic::ProviderError { error } => Some(match error.stall_cause() {
-            Some(cause) => SynodEvent::Stalled {
-                text: provider_error_text("stalled", cause),
-                severity: Severity::Warn,
-            },
-            None => SynodEvent::ProviderError {
-                text: provider_error_text("provider", error),
-                severity: provider_error_severity(error),
-            },
+            Some(cause) => {
+                SynodEvent::Stalled(ReadoutDto::new(Readout::stall(cause), Severity::Warn))
+            }
+            None => SynodEvent::ProviderError(ReadoutDto::new(
+                Readout::fatal(error),
+                provider_error_severity(error),
+            )),
         }),
         // The harness minding itself, a forensic pairing whose act row
         // already said everything, a cancellation with nothing to pair
@@ -402,6 +395,7 @@ fn project_forensic(forensic: &Forensic) -> Option<SynodEvent> {
         | Forensic::Prune { .. }
         | Forensic::Unpin { .. }
         | Forensic::ModelChanged { .. }
+        | Forensic::WindowNarrowed { .. }
         | Forensic::SessionStarted { .. }
         | Forensic::SessionResumed { .. }
         | Forensic::SessionEnded
@@ -430,6 +424,7 @@ fn project_forensic_helper(forensic: &Forensic) -> Option<SynodEvent> {
         | Forensic::Prune { .. }
         | Forensic::Unpin { .. }
         | Forensic::ModelChanged { .. }
+        | Forensic::WindowNarrowed { .. }
         | Forensic::SessionStarted { .. }
         | Forensic::SessionResumed { .. }
         | Forensic::SessionEnded

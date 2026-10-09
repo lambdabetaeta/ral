@@ -8,15 +8,15 @@ use std::borrow::Cow;
 
 /// A field's value before presentation: text, or a wait the TUI also draws as
 /// a bar.
-pub(crate) enum Datum {
+pub enum Datum {
     Text(String),
     Seconds(u64),
 }
 
 /// One labelled row of a failure's readout.
-pub(crate) struct Field {
-    pub(crate) label: String,
-    pub(crate) datum: Datum,
+pub struct Field {
+    pub label: String,
+    pub datum: Datum,
 }
 
 fn text_field(label: impl Into<String>, value: impl Into<String>) -> Field {
@@ -26,11 +26,22 @@ fn text_field(label: impl Into<String>, value: impl Into<String>) -> Field {
     }
 }
 
+/// What the reader can do about a failure.  Each surface spells it its own
+/// way — a slash command in the TUI, a flag headless — or not at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Remedy {
+    Evict,
+    Reroute,
+    RaiseMaxTokens,
+    SignIn,
+}
+
 /// A provider failure as a headline and ordered fields — the one description
 /// both the TUI block and the headless printer render.
-pub(crate) struct Readout {
-    pub(crate) headline: String,
-    pub(crate) fields: Vec<Field>,
+pub struct Readout {
+    pub headline: String,
+    pub fields: Vec<Field>,
+    pub remedies: Vec<Remedy>,
 }
 
 impl Readout {
@@ -38,7 +49,7 @@ impl Readout {
     /// an ordered field list.  A parsed `body` supplies the fields
     /// ([`body_fields`]); without one the free-text `cause`/`message` is
     /// shown honestly rather than dressed as structure.
-    pub(crate) fn fatal(e: &ProviderError) -> Self {
+    pub fn fatal(e: &ProviderError) -> Self {
         let headline = if let ProviderError::Cancelled(site) = e {
             format!("cancelled ({site})")
         } else {
@@ -47,6 +58,7 @@ impl Readout {
         Self {
             headline,
             fields: error_fields(e),
+            remedies: remedies(e),
         }
     }
 
@@ -54,13 +66,34 @@ impl Readout {
     /// gets, under a headline that says so.  The `continuing` field is the
     /// whole distinction — without it the readout would read as the end of
     /// the run, which is precisely what a stall is not.
-    pub(crate) fn stall(e: &ProviderError) -> Self {
+    pub fn stall(e: &ProviderError) -> Self {
         let mut fields = error_fields(e);
         fields.push(text_field("continuing", "partial reply kept"));
         Self {
             headline: "stream stalled".to_string(),
             fields,
+            remedies: vec![],
         }
+    }
+}
+
+/// What can be done about `e`, derived from it and never stored.
+fn remedies(e: &ProviderError) -> Vec<Remedy> {
+    match e {
+        ProviderError::Overflow { .. } => vec![Remedy::Evict, Remedy::Reroute],
+        ProviderError::Truncated { cause } => match **cause {
+            CutShort::OutputCap { .. } => vec![Remedy::RaiseMaxTokens],
+            CutShort::Stalled(_) => vec![],
+        },
+        ProviderError::Api {
+            status: Some(401 | 403),
+            ..
+        } => vec![Remedy::SignIn],
+        ProviderError::Cancelled(_)
+        | ProviderError::Transient { .. }
+        | ProviderError::Refused(_)
+        | ProviderError::Api { .. }
+        | ProviderError::Other(_) => vec![],
     }
 }
 
@@ -109,18 +142,42 @@ fn error_fields(e: &ProviderError) -> Vec<Field> {
             }
             fs
         }
+        ProviderError::Overflow {
+            provider,
+            model,
+            sent,
+            limit,
+            listed,
+            body,
+        } => {
+            let tokens = |n: u64| format!("{n} tokens");
+            [
+                provider.clone().map(|p| text_field("provider", p)),
+                Some(text_field("model", model.clone())),
+                sent.map(|n| text_field("sent", tokens(n))),
+                limit.map(|n| text_field("limit", tokens(n))),
+                listed
+                    .filter(|l| Some(*l) != *limit)
+                    .map(|n| text_field("listed", tokens(n))),
+                body.as_deref()
+                    .filter(|_| limit.is_none())
+                    .and_then(provider::error_object)
+                    .and_then(|o| o.get("message"))
+                    .and_then(value_display)
+                    .map(|m| text_field("message", m)),
+            ]
+            .into_iter()
+            .flatten()
+            .collect()
+        }
         // A stall's fields are its cause's: `record::view` routes one to
         // [`Readout::stall`] with the cause already unwrapped, so the
         // delegation here is what keeps this match total rather than a path
         // either renderer walks.
         ProviderError::Truncated { cause } => match cause.as_ref() {
-            CutShort::OutputCap { stop_reason } => vec![
-                text_field("stop_reason", stop_reason.clone()),
-                text_field(
-                    "remedy",
-                    "raise `--max-tokens N` or split the turn into smaller writes",
-                ),
-            ],
+            CutShort::OutputCap { stop_reason } => {
+                vec![text_field("stop_reason", stop_reason.clone())]
+            }
             CutShort::Stalled(error) => error_fields(error),
         },
         ProviderError::Other(cause) => vec![text_field("cause", prettify(cause))],

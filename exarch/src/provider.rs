@@ -50,6 +50,7 @@ pub use genai::chat::{ReasoningEffort, StopReason, ToolCall};
 use crate::cancel;
 use allowance::{Allowance, LiveMeters};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use transport::Transport;
 
 /// Every file on this computer holding one of our own credentials: each
@@ -84,8 +85,9 @@ pub struct Provider {
     backend: Backend,
     account: Account,
     selection: Selection,
-    /// Resolved once, when the bureau mints this selection.
-    context_window: Option<u64>,
+    /// Resolved when the bureau mints this selection, then only ever narrowed
+    /// by an overflow; 0 for unknown.
+    context_window: AtomicU64,
 }
 
 /// A live transport over the shared [`Engine`], or a scripted replay so
@@ -118,7 +120,7 @@ impl Provider {
             backend,
             account: account.clone(),
             selection,
-            context_window,
+            context_window: AtomicU64::new(context_window.unwrap_or(0)),
         }
     }
 
@@ -175,10 +177,19 @@ impl Provider {
         }
     }
 
-    /// This model's context window as its provider, or failing that the
-    /// pricing catalog, reported it when the selection was minted.
+    /// This model's context window: the catalog's figure, or a tighter one an
+    /// overflow taught.
     pub fn context_window(&self) -> Option<u64> {
+        Some(self.context_window.load(Ordering::Relaxed)).filter(|&w| w > 0)
+    }
+
+    /// Learn that the endpoint holds only `limit`; whether that narrowed the window.
+    pub(crate) fn narrow_window(&self, limit: u64) -> bool {
         self.context_window
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |w| {
+                (w == 0 || w > limit).then_some(limit)
+            })
+            .is_ok()
     }
 
     /// Stream one assistant turn; `on_delta` fires per chunk, prose and
@@ -190,7 +201,7 @@ impl Provider {
         on_delta: &mut F,
         cancel: &cancel::Token,
     ) -> Result<StepOut, ProviderError> {
-        match &self.backend {
+        let outcome = match &self.backend {
             Backend::Live {
                 engine,
                 transport,
@@ -210,7 +221,16 @@ impl Provider {
                 outcome
             }
             Backend::Scripted(script) => script.complete(self.model(), on_delta),
-        }
+        };
+        outcome.map_err(|mut error| {
+            if let ProviderError::Overflow { limit, listed, .. } = &mut error {
+                *listed = self.context_window();
+                if let Some(l) = *limit {
+                    self.narrow_window(l);
+                }
+            }
+            error
+        })
     }
 
     /// The `OpenRouter` serving-provider pin, when this selection's service

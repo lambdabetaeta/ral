@@ -279,6 +279,98 @@ fn provider_error_mid_deliberation_does_not_wedge_session() {
     }
 }
 
+/// An overflow stating its limit narrows the provider's window, sheds the
+/// older turns, and the retried turn completes the exchange.
+#[test]
+fn an_overflow_narrows_the_window_evicts_and_retries_once() {
+    let mut session = Avatar::for_test("system").unwrap();
+    for i in 0..4 {
+        let mut log = session.log.borrow_mut();
+        let prompt = if i == 0 {
+            "OLDEST".into()
+        } else {
+            "x".repeat(1000)
+        };
+        log.append_user(prompt, None).unwrap();
+        log.append_assistant(
+            genai::chat::ChatMessage::assistant("y".repeat(1000)),
+            vec![],
+            None,
+        )
+        .unwrap();
+    }
+    let overflow = || {
+        Reply::error(ProviderError::Overflow {
+            model: "test-model".into(),
+            provider: None,
+            sent: Some(250_015),
+            limit: Some(250_000),
+            listed: None,
+            body: None,
+        })
+    };
+    let provider = scripted(
+        "test-model",
+        Script::new().then(overflow()).then(Reply::text("done")),
+    );
+    let (tx, _rx) = crate::bus::channel();
+    let emit = Emitter::new(tx, session.agent.id);
+    let outcome = session.deliberate(&provider, Some("go".into()), None, &emit);
+    assert!(matches!(outcome, Ok(Outcome::Complete)), "got {outcome:?}");
+    assert_eq!(provider.context_window(), Some(250_000));
+    assert!(
+        !session
+            .rendered_messages()
+            .iter()
+            .any(|m| m.content.first_text() == Some("OLDEST")),
+        "the older turns should have been shed"
+    );
+}
+
+/// A second overflow in a row is the exchange's end, the error carrying the
+/// window exarch had been working to.
+#[test]
+fn a_second_overflow_ends_the_exchange_with_the_listed_window_stamped() {
+    let mut session = Avatar::for_test("system").unwrap();
+    for i in 0..4 {
+        let mut log = session.log.borrow_mut();
+        let prompt = if i == 0 {
+            "OLDEST".into()
+        } else {
+            "x".repeat(1000)
+        };
+        log.append_user(prompt, None).unwrap();
+        log.append_assistant(
+            genai::chat::ChatMessage::assistant("y".repeat(1000)),
+            vec![],
+            None,
+        )
+        .unwrap();
+    }
+    let overflow = || {
+        Reply::error(ProviderError::Overflow {
+            model: "test-model".into(),
+            provider: None,
+            sent: Some(250_015),
+            limit: Some(250_000),
+            listed: None,
+            body: None,
+        })
+    };
+    let provider = scripted(
+        "test-model",
+        Script::new().then(overflow()).then(overflow()),
+    );
+    let (tx, _rx) = crate::bus::channel();
+    let emit = Emitter::new(tx, session.agent.id);
+    match session.deliberate(&provider, Some("go".into()), None, &emit) {
+        Err(Fault::Provider(ProviderError::Overflow { limit, listed, .. })) => {
+            assert_eq!((limit, listed), (Some(250_000), Some(250_000)));
+        }
+        other => panic!("expected the overflow to surface, got {other:?}"),
+    }
+}
+
 #[test]
 fn stale_token_measure_is_unknown_until_the_next_completion() {
     let mut session = Avatar::for_test("system").unwrap();

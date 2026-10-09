@@ -37,8 +37,11 @@ impl Avatar {
                 }
             }
             Rewrite::Evict => {
-                let provider = self.agent.current_provider();
-                self.evict(&provider, true);
+                if self.log.borrow().context().can_evict() {
+                    self.shed();
+                } else {
+                    self.note_error("cannot evict while tool results are pending");
+                }
             }
             Rewrite::Rewind(anchor) => {
                 if let Err(error) = self.rewind(*anchor, emit) {

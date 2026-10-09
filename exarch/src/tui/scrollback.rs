@@ -335,6 +335,11 @@ impl Scrollback {
         self.fold.usage()
     }
 
+    /// The focused gauge's `(last prompt size, context window)`.
+    pub(super) fn gauge(&self) -> (u64, Option<u64>) {
+        (self.fold.last_input(), self.fold.context_window())
+    }
+
     /// Per-turn "had a tool call" flags, oldest first: one bool per turn
     /// block the fold holds, which the matrix renders `●` or `○`.
     pub(super) fn turns(&self) -> Vec<bool> {
@@ -679,10 +684,10 @@ impl Scrollback {
         }
     }
 
-    /// The turn's degradation floor, graded against the session's billed input.
+    /// The turn's degradation floor, graded against the last prompt's size.
     /// Both terms are the fold's own: the model in force carries its window.
     fn context_floor(&self) -> u8 {
-        super::fidelity::context_floor(self.fold.usage().input, self.fold.context_window())
+        super::fidelity::context_floor(self.fold.last_input(), self.fold.context_window())
     }
 
     // ── interaction ──────────────────────────────────────────────────────

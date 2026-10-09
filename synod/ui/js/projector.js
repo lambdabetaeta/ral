@@ -8,6 +8,7 @@ import {
   openStreamingProse,
   addSystemMessage,
   dialAddNote,
+  dialAddReadout,
   dialAddCall,
   dialAddHarness,
   addCardBlock,
@@ -213,13 +214,13 @@ export function onSynodEvent(p) {
       dialAddNote("error: " + p.message, "bad");
       break;
     case "provider_error":
-      dialAddNote(p.text, p.severity);
+      dialAddReadout(p);
       break;
     // Always "warn", never "bad", whatever the cause: the exchange survived
     // it and the partial reply above the note stands. `sink.rs` pins this
     // severity itself, rather than deriving it here from the record.
     case "stalled":
-      dialAddNote(p.text, p.severity);
+      dialAddReadout(p);
       break;
     case "failure":
       addSystemMessage(p.message);

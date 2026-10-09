@@ -192,6 +192,7 @@ export function renderDialBlock(block) {
 // of empty rows.
 function renderDialEntry(entry, rung) {
   if (entry.kind === "note") return noteLine(entry);
+  if (entry.kind === "readout") return readoutBlock(entry);
   if (entry.kind === "helper") return rung >= 2 ? helperLine(entry) : null;
   const children = [
     rung >= 1 && entry.intent ? entryHeading(entry) : null,
@@ -235,6 +236,34 @@ function noteLine(note) {
   line.className = "dial-note" + (note.cls ? " " + note.cls : "");
   line.textContent = note.text;
   return line;
+}
+
+// A provider failure's readout: headline, aligned label/value rows, then
+// the hints muted beneath. Urgent like a note, so it shows at every rung.
+function readoutBlock(r) {
+  const box = document.createElement("div");
+  box.className = "dial-entry";
+  const line = (text, cls) => noteLine({ text, cls });
+  const grid = document.createElement("div");
+  grid.className = "fields";
+  for (const { label, value } of r.fields) {
+    const l = document.createElement("div");
+    l.className = "f-label";
+    l.textContent = label;
+    const v = document.createElement("div");
+    v.className = "f-value";
+    v.textContent = value;
+    grid.append(l, v);
+  }
+  box.append(line(r.headline, r.severity), ...(r.fields.length ? [grid] : []),
+    ...r.hints.map((h) => line("↳ " + h, "muted")));
+  return box;
+}
+
+export function dialAddReadout(p) {
+  const dial = ensureDial();
+  dial.entries.push({ kind: "readout", ...p });
+  bump(dial);
 }
 
 function helperLine(entry) {

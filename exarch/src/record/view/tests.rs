@@ -208,3 +208,18 @@ fn a_model_change_carries_its_window_and_a_bare_one_clears_it() {
     let _ = memo.step_forensic(Seq::new(2), change(None));
     assert_eq!(memo.context_window(), None);
 }
+
+#[test]
+fn last_input_is_the_latest_turn_while_usage_sums() {
+    let delta = |input| Forensic::UsageDelta {
+        usage: Usage {
+            input,
+            ..Usage::default()
+        },
+    };
+    let mut memo = Blocks::default();
+    let _ = memo.step_forensic(Seq::new(1), delta(100));
+    let _ = memo.step_forensic(Seq::new(2), delta(250));
+    assert_eq!(memo.last_input(), 250);
+    assert_eq!(memo.usage().input, 350);
+}

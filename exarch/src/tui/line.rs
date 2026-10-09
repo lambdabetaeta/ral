@@ -14,7 +14,7 @@ use crate::card::{
     Span as CardSpan,
 };
 use crate::provider;
-use crate::record::fault::{Datum, Field as FaultField, Readout};
+use crate::record::fault::{Datum, Field as FaultField, Readout, Remedy};
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -919,6 +919,22 @@ pub(super) fn render_readout(readout: Readout, width: u16) -> Vec<Line<'static>>
     let mut ls: Vec<Line<'static>> = vec![Line::default(), headline(&readout.headline)];
     let rows: Vec<FieldRow> = readout.fields.into_iter().map(field_row).collect();
     ls.extend(render_field_rows(&rows, label_col(&rows), width.into()));
+    let dim = Style::default().fg(SLATE).add_modifier(Modifier::DIM);
+    for remedy in readout.remedies {
+        let text = match remedy {
+            Remedy::Evict => "/evict to shed the older half of the context?",
+            Remedy::Reroute => "/model to pick an endpoint or model with a larger window?",
+            Remedy::RaiseMaxTokens => {
+                "restart with --max-tokens N, or split the turn into smaller writes?"
+            }
+            Remedy::SignIn => "/login to sign in again?",
+        };
+        ls.extend(hang(
+            &[Span::styled("  ↳ ", dim)],
+            vec![Span::styled(text, dim)],
+            width.into(),
+        ));
+    }
     ls
 }
 

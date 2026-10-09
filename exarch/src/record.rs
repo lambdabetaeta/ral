@@ -14,7 +14,7 @@
 #![deny(clippy::wildcard_enum_match_arm)]
 
 pub(crate) mod commit;
-pub(crate) mod fault;
+pub mod fault;
 mod log;
 pub(crate) mod model;
 mod replay;
@@ -466,6 +466,11 @@ pub enum Forensic {
         service: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         account: Option<String>,
+    },
+    /// An overflow taught the selection a tighter window than its catalog
+    /// listed.
+    WindowNarrowed {
+        context_window: u64,
     },
 }
 

@@ -180,6 +180,10 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
         .tabs
         .scrollback(focused)
         .map_or_else(|| StateSpan::new(AgentState::Ready), Scrollback::state);
+    let (last_input, context_window) = app
+        .tabs
+        .scrollback(focused)
+        .map_or((0, None), Scrollback::gauge);
     // Field-wise from here: the editor draws through `&mut prompt_state` while
     // the rest of the frame reads its siblings.
     let App {
@@ -187,8 +191,6 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
         gesture,
         overlay,
         total_usage,
-        last_input,
-        context_window,
         status_model,
         ..
     } = &mut *app;
@@ -213,8 +215,8 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
                 state,
                 scroll_pct,
                 total_usage,
-                *last_input,
-                *context_window,
+                last_input,
+                context_window,
                 status_model,
             )),
             s.status,

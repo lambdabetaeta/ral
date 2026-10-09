@@ -16,6 +16,9 @@ struct CrashTail {
     complete_len: u64,
 }
 
+/// The `(model, window)` an overflow taught the live provider.
+pub type Learned = Option<(String, u64)>;
+
 /// Scanned backwards from the end, a window at a time, rather than forwards
 /// through the whole file: the tail is one torn record long however long the
 /// log behind it is.
@@ -96,20 +99,23 @@ fn quarantine_tail(path: &Path, tail: &CrashTail) -> io::Result<()> {
 /// the structure it is building and never the log it is building it from.
 ///
 /// Returns the structure alongside the `(model, label)` pair the head record
-/// identifies the session by — `AgentLog::resume` reads its own identity from
-/// here rather than re-deriving it, since a session's identity is a fact about
+/// identifies the session by, and the `(model, window)` an overflow last taught
+/// the live provider unless a later selection forgot it. `AgentLog::resume`
+/// reads its own identity from here rather than re-deriving it, since a session's identity is a fact about
 /// its first record, not a second thing to keep in step.
 ///
 /// # Errors
 /// Returns an error if the file cannot be read, cannot be quarantined, has no
 /// `SessionStarted { session_id: 0, parent: None }` head record, or holds a
 /// protocol record the fold refuses.
-pub fn resume(path: &Path) -> io::Result<(Context, String, String)> {
+pub fn resume(path: &Path) -> io::Result<(Context, String, String, Learned)> {
     if let Some(tail) = find_crash_tail(path)? {
         quarantine_tail(path, &tail)?;
     }
     let mut context = Context::new(path.to_path_buf());
     let mut identity = None;
+    let mut in_force = String::new();
+    let mut learned: Learned = None;
     for record in Log::read(path)? {
         let record = record?;
         if identity.is_none() {
@@ -137,8 +143,25 @@ pub fn resume(path: &Path) -> io::Result<(Context, String, String)> {
                 }
             });
         }
-        let Record::Protocol(protocol) = record.value() else {
-            continue;
+        let protocol = match record.value() {
+            Record::Protocol(protocol) => protocol,
+            Record::Forensic(
+                Forensic::SessionStarted { model, .. } | Forensic::ModelChanged { model, .. },
+            ) => {
+                in_force.clone_from(model);
+                learned = None;
+                continue;
+            }
+            Record::Forensic(Forensic::SessionResumed { model, .. }) => {
+                in_force.clone_from(model);
+                learned = learned.filter(|(learned, _)| learned == model);
+                continue;
+            }
+            Record::Forensic(Forensic::WindowNarrowed { context_window }) => {
+                learned = Some((in_force.clone(), *context_window));
+                continue;
+            }
+            Record::Display(_) | Record::Forensic(_) => continue,
         };
         context
             .step(Recorded::new(record.locus().clone(), protocol.clone()))
@@ -150,5 +173,5 @@ pub fn resume(path: &Path) -> io::Result<(Context, String, String)> {
             path.display()
         )));
     };
-    Ok((context, model, label))
+    Ok((context, model, label, learned))
 }

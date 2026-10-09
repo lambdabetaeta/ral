@@ -12,8 +12,8 @@ use crate::agent::gauge::{self, EVICT_THRESHOLD, Measure, suffix_keep_budget};
 use crate::agent::tools;
 use crate::bus::{Emitter, Next};
 use crate::provider::{Delta, Provider, ProviderError, StepOut, StopReason, ToolCall};
-use crate::record::AgentState;
 use crate::record::Transient;
+use crate::record::{AgentState, Forensic};
 use crate::record::{EditAuthority, QuiesceReason, ToolResult as SessionToolResult};
 use ral_core::carrier::Severed;
 use ral_core::first_order::FOValue;
@@ -104,11 +104,14 @@ impl Avatar {
                 .append_user(p, continues)
                 .map_err(Fault::Log)?;
         }
+        let mut recovering = false;
         loop {
             // Every turn boundary is weighed, this one included: the turn a
             // cut would take is never the one in hand, so there is no point in
             // the loop where the work at issue could leave.
-            self.evict(provider, false);
+            if self.eviction_due(provider) {
+                self.shed();
+            }
             // The turn's live row derives from the published `Display::Turn`
             // record, which `record_turn_start` authors alongside the
             // protocol one — so this is the one authoring site.
@@ -162,10 +165,33 @@ impl Avatar {
                 stop_reason,
                 cut_short,
             } = match taken {
-                Ok(s) => s,
+                Ok(s) => {
+                    recovering = false;
+                    s
+                }
                 Err(ProviderError::Cancelled(_)) => {
                     abandon_turn(&mut stream, unrecorded, &recorder);
                     return Ok(self.cancelled());
+                }
+                Err(error @ ProviderError::Overflow { .. }) => {
+                    abandon_turn(&mut stream, unrecorded, &recorder);
+                    if let (Some(w), ProviderError::Overflow { listed, .. }) =
+                        (provider.context_window(), &error)
+                        && *listed != Some(w)
+                        && let Err(e) =
+                            recorder.emit(Forensic::WindowNarrowed { context_window: w })
+                    {
+                        recorder.report_fault(&e);
+                    }
+                    if !recovering && self.shed() {
+                        recovering = true;
+                        self.note(format!(
+                            "[{}; evicted the older turns and retrying]",
+                            error.summary()
+                        ));
+                        continue;
+                    }
+                    return Err(error.into());
                 }
                 Err(e) => {
                     abandon_turn(&mut stream, unrecorded, &recorder);
@@ -304,42 +330,41 @@ impl Avatar {
         plan.flatten()
     }
 
-    /// Shed the older half of the context, the harness writing no note of its
-    /// own: the model's own `` exarch-context `evict `` is where a note comes from.
-    pub(crate) fn evict(&self, provider: &Arc<Provider>, requested: bool) {
-        if !self.log.borrow().context().can_evict() {
-            if requested {
-                self.note_error("cannot evict while tool results are pending");
-            }
-            return;
-        }
-        // Auto-eviction tracks real context pressure: the tokens the model
-        // last saw against its window, firing once they grow into the reserve.
-        // An unknown window falls back to the byte heuristic; a manual
-        // `/evict` overrides the trigger entirely.
-        let due = match provider.context_window() {
-            Some(window) if window > 0 => self
+    /// Auto-eviction tracks real context pressure: the tokens the model last
+    /// saw against its window, firing once they grow into the reserve. An
+    /// unknown window falls back to the byte heuristic.
+    fn eviction_due(&self, provider: &Provider) -> bool {
+        match provider.context_window() {
+            Some(window) => self
                 .measured_input()
                 .is_some_and(|tokens| gauge::eviction_due(tokens, window)),
-            _ => self.log.borrow().context().history_bytes() >= EVICT_THRESHOLD,
-        };
-        if !requested && !due {
-            return;
+            None => self.log.borrow().context().history_bytes() >= EVICT_THRESHOLD,
+        }
+    }
+
+    /// Shed the older half of the context, the harness writing no note of its
+    /// own: the model's own `` exarch-context `evict `` is where a note comes
+    /// from. Whether anything was shed.
+    pub(crate) fn shed(&self) -> bool {
+        if !self.log.borrow().context().can_evict() {
+            return false;
         }
         // A boundary Esc leaves the context as it lies; the next boundary
         // weighs it again.
         if self.agent.token.is_cancelled() {
-            return;
+            return false;
         }
         // No turn old enough to shed is a no-op, not an event.
         let Some(turns) = self.planned_eviction() else {
-            return;
+            return false;
         };
         self.recorder()
             .transient(Transient::State(AgentState::Evicting));
         if let Err(e) = self.evict_unbidden(&turns, EditAuthority::Harness) {
             self.note_error(&format!("evict failed: {e}"));
+            return false;
         }
+        true
     }
 
     /// Run a batch of tool calls in order, short-circuiting the rest to

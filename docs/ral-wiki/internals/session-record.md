@@ -61,7 +61,7 @@ The outer `Record` vocabulary is closed:
 - `Forensic` is durable evidence that is not model context: the session
   bookends (`SessionStarted`, `SessionResumed`, `SessionEnded`), the shape a
   turn's request goes out under — sampling and routing both (`TurnStarted`),
-  usage deltas, cancellation,
+  usage deltas, cancellation, an overflow-learned window (`WindowNarrowed`),
   provider/stall/error rows, nudges, and other breadcrumbs. The view fold
   admits the rows that belong on scrollback; the model fold ignores them.
 

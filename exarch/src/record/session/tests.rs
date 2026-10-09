@@ -2193,3 +2193,36 @@ fn an_unnarrowed_grep_passes_over_an_unreadable_file() {
         "{refusal}"
     );
 }
+
+#[test]
+fn resume_replays_a_learned_window_until_a_selection_forgets_it() {
+    let sessions = sessions_root("resume-learned");
+    let mut live = AgentLog::root(
+        sessions.path(),
+        AgentId::new(0),
+        &RecordedModel::for_test("m"),
+        &RecordedAccount::for_test("provider"),
+        0,
+    )
+    .unwrap();
+    live.record_forensic(Forensic::WindowNarrowed {
+        context_window: 250_000,
+    })
+    .unwrap();
+    let learned = |sessions: &tempfile::TempDir| {
+        AgentLog::resume(sessions.path(), AgentId::new(0))
+            .expect("resume")
+            .learned_window()
+            .cloned()
+    };
+    assert_eq!(learned(&sessions), Some(("m".into(), 250_000)));
+    live.record_forensic(Forensic::ModelChanged {
+        model: "m".into(),
+        context_window: None,
+        label: "provider".into(),
+        service: None,
+        account: None,
+    })
+    .unwrap();
+    assert_eq!(learned(&sessions), None);
+}

@@ -160,6 +160,8 @@ pub struct Blocks {
     /// Cumulative usage this session has billed, per the forensic usage trail
     /// — one of the fidelity inputs this fold admits Forensic for.
     usage: Usage,
+    /// The last turn's prompt size — the context gauge's numerator.
+    last_input: u64,
     /// The model in force: the one the session opened under, and then each
     /// [`Forensic::ModelChanged`]'s.
     model: Option<(String, String)>,
@@ -193,6 +195,11 @@ impl Blocks {
     /// context-floor numerator a printer grades committed prose against.
     pub fn usage(&self) -> Usage {
         self.usage
+    }
+
+    /// The last turn's prompt size, overwritten (not summed) by each usage delta.
+    pub fn last_input(&self) -> u64 {
+        self.last_input
     }
 
     /// `(model, provider)` in force — total from the session's first record,
@@ -338,6 +345,7 @@ impl Blocks {
     fn step_forensic(&mut self, seq: Seq, f: Forensic) -> Delta {
         match f {
             Forensic::UsageDelta { usage } => {
+                self.last_input = usage.input;
                 self.usage += usage;
                 Delta::Quiet
             }
@@ -392,6 +400,10 @@ impl Blocks {
             } => {
                 self.model = Some((model, label));
                 self.context_window = context_window;
+                Delta::Quiet
+            }
+            Forensic::WindowNarrowed { context_window } => {
+                self.context_window = Some(context_window);
                 Delta::Quiet
             }
         }

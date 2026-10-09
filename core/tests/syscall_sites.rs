@@ -293,7 +293,11 @@ const BANNED_TOKENS: &[&str] = &[
     "fs::rename(",
     "fs::copy(",
     "fs::set_permissions",
-    "Command::new",
+    // The process type is named by its path or import, not bare `Command::new`,
+    // which also spells the audit fact `fact::Command`; the brace import is
+    // caught by `imports_process_command`.
+    "process::Command::new",
+    "process::Command;",
     "CommandExt::exec",
     // The pipe door: `cloexec_pipe` closes a CLOEXEC window Apple leaves open
     // between `pipe()` and the flag, so a raw `os_pipe::pipe()` is a site too.
@@ -316,6 +320,16 @@ const BANNED_TOKENS: &[&str] = &[
     "reqwest::Client::builder",
     "reqwest::Client::new",
 ];
+
+/// Whether `code` brace-imports `Command` from a `process` module,
+/// as in `use std::process::{Child, Command}`.
+fn imports_process_command(code: &str) -> bool {
+    code.split("process::{").skip(1).any(|rest| {
+        rest.split('}')
+            .next()
+            .is_some_and(|l| l.split(',').any(|i| i.trim() == "Command"))
+    })
+}
 
 /// A banned token restricted to exactly one production file: the token may
 /// appear in no production file but its door, tagged allow or not.
@@ -490,7 +504,10 @@ fn every_production_disallowed_allow_is_a_tagged_site() {
             .any(|r| parse_tag(&r).is_some());
         if !has_any_tag {
             let code = strip_line_comments(&text);
-            if let Some(tok) = BANNED_TOKENS.iter().find(|t| code.contains(**t)) {
+            let tok = BANNED_TOKENS.iter().find(|t| code.contains(**t)).copied();
+            if let Some(tok) =
+                tok.or_else(|| imports_process_command(&code).then_some("process::{Command}"))
+            {
                 failures.push(format!(
                     "{rel_str}: calls a banned fs/process constructor (`{tok}`) but declares no \
                      tagged allow. Route it through a reviewed syscall site or add a tagged allow."
