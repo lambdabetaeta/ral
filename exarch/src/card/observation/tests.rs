@@ -11,16 +11,16 @@ fn line(card: &Card) -> String {
     }
 }
 
-fn command(argv: &[&str], status: i32) -> Observed {
+fn command(argv: &[&str], status: i32) -> Landed {
     let (shown, args) = argv.split_first().expect("a command names a program");
-    Observed::command(
+    Landed::Effect(Effect::Command(Command::new(
         shown,
         args.iter().map(ToString::to_string),
         status,
         CommandOrigin::External,
         AuditIo::default(),
         None,
-    )
+    )))
 }
 
 #[test]
@@ -48,7 +48,7 @@ fn exec_requotes_only_where_the_shell_would_reparse() {
 
 #[test]
 fn capability_card_denies_role_bad_and_shows_its_fields() {
-    let card = observation_card(&Observed::Check(Check::new(
+    let card = observation_card(&Landed::Surfaced(Check::new(
         Resource::Fs,
         [
             ("op".to_string(), "write".to_string()),

@@ -1020,23 +1020,20 @@ impl Picker {
     /// Each note wrapped to `width`, a `⚠ ` opening the first row and
     /// continuations hanging under it. The reason is wrapped rather than
     /// truncated — it is the point of the note. Wrapping through
-    /// [`line::push_wrapped`] lets these lines double as the exact height
+    /// [`line::hang`] lets these lines double as the exact height
     /// [`Self::desired_size`] reserves.
     fn note_lines(&self, width: u16) -> Vec<Line<'static>> {
         const MARKER: &str = "⚠ ";
-        const HANG: &str = "  ";
         let style = Style::default().fg(RED).add_modifier(Modifier::BOLD);
-        // Leave the marker gutter out of the wrap width, so neither it nor the
-        // hanging indent can push a row past `width`.
-        let body_w = (width as usize).saturating_sub(MARKER.chars().count());
-        let mut out = Vec::new();
-        for text in self.notes() {
-            line::push_wrapped(&mut out, &text, body_w, |chunk, first| {
-                let lead = if first { MARKER } else { HANG };
-                Line::from(Span::styled(format!("{lead}{chunk}"), style))
-            });
-        }
-        out
+        self.notes()
+            .flat_map(|text| {
+                line::hang(
+                    &[Span::styled(MARKER, style)],
+                    vec![Span::styled(text, style)],
+                    width as usize,
+                )
+            })
+            .collect()
     }
 }
 

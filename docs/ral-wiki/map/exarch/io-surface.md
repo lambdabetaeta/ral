@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 6c9047b6
-generated_at_date: 2026-10-08
-covers_paths: [core/src/types/audit/observation.rs, core/src/types/audit/door.rs, core/src/evaluator/call.rs, core/src/runtime/command_call.rs, core/src/path/walk.rs, core/src/guard/shell.rs, core/src/runtime/redirect.rs, core/src/path/stage.rs, core/src/runtime/command/detach.rs, core/src/runtime/pipeline/collect.rs, core/src/runtime/redirect/scope.rs, core/src/runtime/command.rs, core/src/runtime/command/stdio.rs, core/src/types/shell/mod.rs, core/src/types/mooring.rs, exarch/src/card.rs, exarch/src/card/diff.rs, exarch/src/card/value.rs, exarch/src/card/decode.rs, exarch/src/card/encode.rs, exarch/src/card/observation.rs, exarch/src/card/done.rs, exarch/src/card/testkit.rs, exarch/src/agent/desk.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/commit.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, clippy.toml, core/tests/syscall_sites.rs]
+generated_at_commit: a3c336a3
+generated_at_date: 2026-10-09
+covers_paths: [core/src/types/audit/observation.rs, exarch/src/tui/group.rs, core/src/types/audit/door.rs, core/src/evaluator/call.rs, core/src/runtime/command_call.rs, core/src/path/walk.rs, core/src/guard/shell.rs, core/src/runtime/redirect.rs, core/src/path/stage.rs, core/src/runtime/command/detach.rs, core/src/runtime/pipeline/collect.rs, core/src/runtime/redirect/scope.rs, core/src/runtime/command.rs, core/src/runtime/command/stdio.rs, core/src/types/shell/mod.rs, core/src/types/mooring.rs, exarch/src/card.rs, exarch/src/card/diff.rs, exarch/src/card/value.rs, exarch/src/card/decode.rs, exarch/src/card/encode.rs, exarch/src/card/observation.rs, exarch/src/card/done.rs, exarch/src/card/testkit.rs, exarch/src/agent/desk.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/commit.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, clippy.toml, core/tests/syscall_sites.rs]
 ---
 
 # Map: exarch / io surface
@@ -36,7 +36,8 @@ stamps the call site and principal every door fetches. It judges nothing: the
 observation goes to the run's `Mooring::surface` (`types/mooring.rs`) and onto
 the open [[design/audit|audit trail]], each already inert when its consumer is
 absent. **Which observations matter is the host's call**, made once in
-`landing` (`card/observation.rs`) and applied at `decode_surface` — so
+`Landed::of` (`card/observation.rs`), the one refinement of an observation to
+what the rail draws (so renderers are total), applied at `decode_surface` — so
 a builtin command and an allowed capability check are reported by core and
 dropped by exarch, never drawn and never journalled.
 
@@ -101,7 +102,7 @@ application, which is no door at all.
   direct external *pipeline stage* is the third: the collector never enters
   `call_external`, so its settlement mints the fact itself
   (`runtime/pipeline/collect.rs`). All three assemble their argv through the
-  one constructor, `Observed::command` — the rule that index 0
+  one constructor, `Command::new` — the rule that index 0
   is the shown name lives there and nowhere else. A **builtin** application
   is no command observation at all: its frame (`BuiltinEntry::framed`) stamps nothing
   and tees nothing, and whatever it did to the world arrives from the door it
@@ -201,7 +202,7 @@ online by [[map/exarch/frontend|the mirror]] from three tail rules. Core
 surfaces each effect as its own observation, so a burst would otherwise read
 as `read…`, `$…`, `read…`, `$…` — noisy clutter at the rail. The rules:
 
-- **An effect joins the most recent call.** `Landing::Effect` walks back from
+- **An effect joins the most recent call.** `Landed::Effect` walks back from
   the mirror's tail past whatever landed since to the nearest group holding a
   call, and folds onto it (`Scrollback::absorb`); with no such group it
   renders alone, unframed. A redirect writes at the *seam*, mid-call, so
@@ -212,25 +213,29 @@ as `read…`, `$…`, `read…`, `$…` — noisy clutter at the rail. The rules
 - **A change joins the run of changes.** A mutation, not a foldable
   observation: it joins the always-visible `▎` run standing at the tail or
   opens one, which *closes* the group, so the next call opens a new one.
-- **Dedupe and comma-join at render.** `group::Call` holds its effects as the
+- **Dedupe and list at render.** `group::Call` holds its effects as the
   facts themselves and drops a repeat — a read by path, an exec by argv, a
-  grep by `(scope, pattern)` — then renders **one card per non-empty kind** in
-  a fixed Read → Exec → Grep order, the order-independence being the point: a
-  reader does not care how a burst interleaved. Cards and `Tally` read one
-  partition of those facts (`Call::buckets`), so the tally is the three bucket
-  lengths rather than a second sort that has to be kept in agreement.
+  grep by `(scope, pattern)` — then renders each non-empty effect bucket
+  (reads, greps) and each exec as a `card::Listing`, a head and items split
+  between items, never within, in a fixed Read → Exec → Grep order, the
+  order-independence being the point: a reader does not care how a burst
+  interleaved. Listings and `Tally` read one partition of those facts
+  (`Call::buckets`), so the tally is the three bucket lengths rather than a
+  second sort that has to be kept in agreement.
 
 A capability check or worker birth joins no call — rare and high-signal enough
 to earn its own line. A denial stands as its own card; a **worker birth** is
 not a card at all but a rail notice wearing the `↗` of the fleet act that made
 it, mirroring the `↘` its settlement arrives on — the departure and the return
-of the same detached work read as a pair of announcements around the run. Each
-group reuses the exact `observation_card` span vocabulary, so a lone surface
-renders identically; the one departure is that the exec group **drops the
-`→ status` tail** — a comma-joined run reads as the *set* of commands run, and
-per-command status survives in the structured observation. The render path is
-shared with a deliberately `surface`d `Display::Card` (`render_card`), so
-width-reflow and the rest are free.
+of the same detached work read as a pair of announcements around the run. A
+lone surface and the grouped rows both read a `Listing`, so they cannot drift;
+the one departure is that an exec row **drops the `→ status` tail** — a run
+reads as the *set* of commands run, and per-command status survives in the
+structured observation. The run's dial reaches every effect row: at `Summary` a
+row keeps the items that fit plus a muted `… +N more`, at `Full` every item
+hangs under the first (as a diff shows its peek, then every hunk). The render
+path is shared with a deliberately `surface`d `Display::Card` (`render_card`),
+so width-reflow and the rest are free.
 
 ## One surface per operation — bulk plumbing below the ral line
 

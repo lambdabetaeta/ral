@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 6c9047b6
-generated_at_date: 2026-10-08
+generated_at_commit: a3c336a3
+generated_at_date: 2026-10-09
 covers_paths: [exarch/src/record/fault.rs, exarch/src/card.rs, exarch/src/card/diff.rs, exarch/src/card/change.rs, exarch/src/card/value.rs, exarch/src/card/decode.rs, exarch/src/card/encode.rs, exarch/src/card/observation.rs, exarch/src/card/done.rs, exarch/src/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/agent/desk.rs, exarch/src/bus/post.rs, exarch/src/headless.rs, exarch/src/tui/line.rs, exarch/src/tui/diff.rs, exarch/src/tui/palette.rs, exarch/src/tui/block.rs, exarch/src/tui/group.rs, exarch/src/tui/rail.rs, exarch/src/record.rs, exarch/src/record/commit.rs, exarch/src/record/view.rs, exarch/src/tui/scrollback.rs, exarch/data/agent.ral]
 ---
 
@@ -166,10 +166,9 @@ placement, framing in its agent's hue at the register's own margin.
 
 ## Block — derived disclosure and aggregation
 
-`BlockKind::Card { card, landing, dial }` (`tui/block.rs`) carries the render
-document, a `Landing` (`Effect`/`Surfaced`/`Announced`, shared with
-`card`'s own `landing()`) telling the mirror whether the card is a
-foldable effect or a barrier, and its `Dial`, the rung it is read at.
+`BlockKind::Card { card, framed, dial }` (`tui/block.rs`) carries the render
+document, a `framed` flag (a surfaced denial is framed; a lone effect is not),
+and its `Dial`, the rung it is read at.
 Disclosure is **derived**, not named: `BlockKind::card` gives a card a `Dial`
 exactly when it holds a `diff` (`Card::has_diff()`), and such a card reads as
 its header alone at `Tally`, its first `DIFF_PEEK_ROWS` rows at `Summary` —

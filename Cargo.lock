@@ -1956,7 +1956,6 @@ dependencies = [
  "similar",
  "syntect",
  "tempfile",
- "textwrap",
  "tokio",
  "tui-math",
  "two-face",

@@ -1,8 +1,8 @@
 //! The constructors of an [`Observation`]: stamping a fact with a clock.  The
 //! records themselves are `fact::observation`'s.
 
-use super::{AuditIo, epoch_us};
-use crate::fact::{Command, CommandOrigin, Observation, Observed};
+use super::epoch_us;
+use crate::fact::{Observation, Observed};
 use crate::source::CallSite;
 
 impl Observation {
@@ -32,35 +32,15 @@ impl Observation {
     }
 }
 
-impl Observed {
-    /// The one place a [`Command`] fact is built, so every door that mints
-    /// one spells its argv the same way: the shown name, then its arguments.
-    pub fn command(
-        shown: &str,
-        args: impl IntoIterator<Item = String>,
-        status: i32,
-        origin: CommandOrigin,
-        io: AuditIo,
-        error: Option<String>,
-    ) -> Self {
-        Self::Command(Command {
-            argv: std::iter::once(shown.to_string()).chain(args).collect(),
-            status,
-            origin,
-            stdout: io.stdout.into(),
-            stderr: io.stderr.into(),
-            error,
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::fact::{Act, Check, Decision, Grep, Read, Resource, Worker, Write, WriteOutcome};
+    use crate::fact::{Command, CommandOrigin};
     use crate::first_order::datum::{Datum, tag, untag};
     use crate::first_order::{Bytes, FOValue};
     use crate::ir::WriteMode;
+    use crate::types::AuditIo;
     use crate::types::{LeaseClass, Map, Value, WorkerId};
     use std::collections::BTreeMap;
 
@@ -80,7 +60,14 @@ mod tests {
     fn command(origin: CommandOrigin, io: AuditIo, error: Option<&str>) -> Observed {
         let argv = ["git", "status"].map(String::from);
         let [shown, arg] = argv;
-        Observed::command(&shown, [arg], 128, origin, io, error.map(Into::into))
+        Observed::Command(Command::new(
+            &shown,
+            [arg],
+            128,
+            origin,
+            io,
+            error.map(Into::into),
+        ))
     }
 
     fn every_kind() -> Vec<Observed> {

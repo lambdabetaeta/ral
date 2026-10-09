@@ -4,6 +4,7 @@
 
 use super::super::command;
 use super::stage::StageHandle;
+use crate::fact::Command;
 use crate::process::{
     CancelCause, CancelWatch, Group, Pgid, TerminalLoan, WaitOutcome, Watch, watch_cancel,
 };
@@ -30,14 +31,14 @@ fn synth_external_stage_audit(
     args: Vec<String>,
     err: Option<&Error>,
 ) -> AuditFragment {
-    let obs = shell.observation(Observed::command(
+    let obs = shell.observation(Observed::Command(Command::new(
         name,
         args,
         err.map_or(0, Error::code),
         CommandOrigin::External,
         AuditIo::default(),
         err.map(|e| e.message.clone()),
-    ));
+    )));
     AuditFragment::from_observations(vec![obs])
 }
 

@@ -11,7 +11,7 @@ pub mod builtins;
 pub(crate) mod report;
 
 use crate::bus::{Emitter, Stamp, Stamped};
-use crate::card::{Change, landing, value_to_card, value_to_done, value_to_edit};
+use crate::card::{Change, Landed, value_to_card, value_to_done, value_to_edit};
 use crate::record::AgentId;
 use base64::Engine;
 use ral_core::Shell;
@@ -133,7 +133,7 @@ pub enum Surface {
 pub enum Decoded {
     /// A recognised surface class, ready to apply.
     Surface(Surface),
-    /// An observation `landing` declines to render: a known shape this host
+    /// An observation `Landed::of` declines to render: a known shape this host
     /// chooses to keep off the rail, not a decode failure.
     Landed,
     /// No surface class recognises this value's shape at all.
@@ -153,12 +153,12 @@ pub enum Decoded {
 pub fn decode_surface(ev: &FOValue) -> Decoded {
     if let Some(event) = Observation::from_surface(ev) {
         // Core reports every observation it makes and judges none of them;
-        // `landing` is where this host says which it wants, and a write is
+        // `Landed::of` is where this host says which it wants, and a write is
         // wanted as the change it made.  One core dispatch is one
         // observation, so a rejected one is dropped outright rather than
         // offered to the decoders below — deliberately, so it is `Landed`,
         // not `Unknown`.
-        match (Change::of(&event.what), landing(&event.what)) {
+        match (Change::of(&event.what), Landed::of(&event.what)) {
             (Some(change), _) => Decoded::Surface(Surface::Change(change)),
             (None, Some(_)) => Decoded::Surface(Surface::Observation(Box::new(event))),
             (None, None) => Decoded::Landed,

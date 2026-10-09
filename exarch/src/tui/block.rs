@@ -18,11 +18,10 @@ use super::md::{self, MD_INDENT};
 use super::palette::{QUEUED_PROMPT_BG, READ_W, SLATE, content_w};
 use super::rail::{self, RailKind};
 use super::row::Row;
-use crate::card::{Card, Change, Landing, Span as CardSpan};
+use crate::card::{Card, Change, Effect, Span as CardSpan};
 use crate::provider::ProviderError;
 use crate::record::fault::Readout;
 use crate::record::{Seq, Verdict};
-use ral_core::types::Observed;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::time::Duration;
@@ -225,7 +224,7 @@ pub(super) enum Member {
     Call(group::Call),
     /// One of a call's `|>` effects, as the fact itself: the group dedupes it
     /// and renders its bucket at every width.
-    Effect(Observed),
+    Effect(Effect),
     /// A turn boundary interior to a burst: each call is its own provider
     /// round-trip, so one lands between consecutive calls.  Bookkeeping,
     /// drawn as nothing — left a barrier it would cut every burst to one call.
@@ -266,11 +265,11 @@ impl Group {
                 self.calls.push(call);
                 self.last = Part::Run;
             }
-            Member::Effect(what) => {
+            Member::Effect(e) => {
                 let Some(call) = self.calls.last_mut() else {
                     return false;
                 };
-                call.absorb(what);
+                call.absorb(e);
             }
             Member::Turn => return false,
         }
@@ -352,7 +351,8 @@ pub(super) enum BlockKind {
     /// when it holds a `diff` mark.
     Card {
         card: Card,
-        landing: Landing,
+        /// A surfaced denial is framed; a lone effect is not.
+        framed: bool,
         dial: Option<Dial>,
     },
     /// A summary-less tool call, inert under the shut triangle.  `details` is
@@ -399,16 +399,12 @@ impl BlockKind {
     /// A card at its opening rung: a diff arrives as its first rows, so the
     /// change is read before it is measured; every other card is inert and
     /// renders whole.
-    pub(super) fn card(card: Card, landing: Landing) -> Self {
+    pub(super) fn card(card: Card, framed: bool) -> Self {
         let dial = card.has_diff().then_some(Dial {
             at: Detail::Summary,
             floor: Detail::Tally,
         });
-        Self::Card {
-            card,
-            landing,
-            dial,
-        }
+        Self::Card { card, framed, dial }
     }
 }
 
@@ -929,8 +925,8 @@ impl Block {
             // already carry the patch rail and gutters, and an effect card
             // that reached the mirror with no run to join belongs to none, so
             // both render unframed.
-            BlockKind::Card { card, landing, .. } => {
-                if !card.has_diff() && *landing == Landing::Surfaced {
+            BlockKind::Card { card, framed, .. } => {
+                if !card.has_diff() && *framed {
                     line::render_card_framed(card, line::CARD_INDENT, width, at)
                 } else {
                     line::render_card_unframed(card, width.into(), at)

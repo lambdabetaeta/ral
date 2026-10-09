@@ -20,25 +20,15 @@ use std::fmt::Write;
 
 use super::block::Detail;
 use super::highlight::highlight_ral;
-use super::line::{self, push_wrapped, wash, wrap_line};
+use super::line::{self, wash, wrap_line};
 use super::md;
 use super::palette::{CODE_BG, EFFECT_BG, RED, SLATE};
-use crate::card::{execs_card, greps_card, reads_card};
+use crate::card::{self, Effect, Listing, Role, exec_listing, greps_listing, reads_listing};
 use crate::record::{Seq, Verdict};
-use ral_core::types::Observed;
+use ral_core::fact::Grep;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
-
-/// The run's `|>` effects by tally bucket, summed over its calls.  A write is a
-/// barrier, never a run member, so it has no bucket; the script count is the
-/// call count, not a field.
-#[derive(Clone, Copy, Default)]
-struct Tally {
-    binaries: usize,
-    files: usize,
-    searches: usize,
-}
 
 /// One call's effects sorted by verb, the one partition both the tally and the
 /// rendered rows read.  The facts are deduped on arrival, so a bucket's length
@@ -46,8 +36,8 @@ struct Tally {
 #[derive(Default)]
 struct Buckets<'a> {
     reads: Vec<&'a str>,
-    execs: Vec<&'a Observed>,
-    greps: Vec<&'a Observed>,
+    execs: Vec<&'a [String]>,
+    greps: Vec<&'a Grep>,
 }
 
 /// One observation call as rendered: its verdict's magnitude drives its
@@ -63,7 +53,7 @@ pub(super) struct Call {
     cmd: String,
     verdict: Option<Verdict>,
     context: u8,
-    effects: Vec<Observed>,
+    effects: Vec<Effect>,
 }
 
 impl Call {
@@ -83,7 +73,7 @@ impl Call {
     /// Fold one of this call's effects in, dropping a repeat: a call that read
     /// one file twice, ran one argv twice, or searched one pattern in one
     /// scope twice did the one thing worth showing.
-    pub(super) fn absorb(&mut self, what: Observed) {
+    pub(super) fn absorb(&mut self, what: Effect) {
         if !self.effects.iter().any(|seen| same_effect(seen, &what)) {
             self.effects.push(what);
         }
@@ -106,10 +96,9 @@ impl Call {
         let mut b = Buckets::default();
         for what in &self.effects {
             match what {
-                Observed::Read(r) => b.reads.push(&r.path),
-                Observed::Command(_) => b.execs.push(what),
-                Observed::Grep(_) => b.greps.push(what),
-                _ => {}
+                Effect::Read(r) => b.reads.push(&r.path),
+                Effect::Command(c) => b.execs.push(&c.argv),
+                Effect::Grep(g) => b.greps.push(g),
             }
         }
         b
@@ -122,30 +111,80 @@ impl Call {
 
 /// When two effects are the one fact: a path read again, an argv run again, a
 /// pattern searched again in the same scope.
-fn same_effect(a: &Observed, b: &Observed) -> bool {
+fn same_effect(a: &Effect, b: &Effect) -> bool {
     match (a, b) {
-        (Observed::Read(p), Observed::Read(q)) => p.path == q.path,
-        (Observed::Command(p), Observed::Command(q)) => p.argv == q.argv,
-        (Observed::Grep(p), Observed::Grep(q)) => (&p.scope, &p.pattern) == (&q.scope, &q.pattern),
+        (Effect::Read(p), Effect::Read(q)) => p.path == q.path,
+        (Effect::Command(p), Effect::Command(q)) => p.argv == q.argv,
+        (Effect::Grep(p), Effect::Grep(q)) => (&p.scope, &p.pattern) == (&q.scope, &q.pattern),
         _ => false,
     }
 }
 
-/// One call's effects as rail-less rows at `width`: its reads, then its execs,
-/// then its greps, each bucket one comma-joined card.  The order is fixed
-/// rather than the arrival order — the user does not care in what order a burst
-/// interleaved, only what the call touched.
-fn effect_rows(call: &Call, width: usize) -> Vec<Line<'static>> {
+/// One call's effects as rail-less rows at `width`: its reads, then each exec,
+/// then its greps, each as a [`Listing`].  The order is fixed rather than the
+/// arrival order — the user does not care in what order a burst interleaved,
+/// only what the call touched.
+fn effect_rows(call: &Call, at: Detail, width: usize) -> Vec<Line<'static>> {
     let Buckets {
         reads,
         execs,
         greps,
     } = call.buckets();
-    [reads_card(&reads), execs_card(&execs), greps_card(&greps)]
+    (!reads.is_empty())
+        .then(|| reads_listing(&reads))
         .into_iter()
-        .flatten()
-        .flat_map(|card| line::render_card_unframed(&card, width, Detail::Full))
+        .chain(execs.into_iter().map(exec_listing))
+        .chain((!greps.is_empty()).then(|| greps_listing(&greps)))
+        .flat_map(|l| listing_rows(&l, at, width))
         .collect()
+}
+
+/// A listing as `head item…`, with no exec ` → status` tail: a run reads as the
+/// commands it ran, and each status rides its own observation.  At `Full` every
+/// item hangs under the first; at `Summary`, the items that fit one row and a
+/// count of the rest, as a diff shows its peek.
+fn listing_rows(l: &Listing, at: Detail, width: usize) -> Vec<Line<'static>> {
+    let mut head: Vec<_> = l.head.iter().map(line::card_span).collect();
+    head.push(Span::raw(" "));
+    let items: Vec<Vec<Span<'static>>> = l
+        .items
+        .iter()
+        .map(|i| i.iter().map(line::card_span).collect())
+        .collect();
+    let n = items.len();
+    let sep_w = l.sep.width();
+    let head_w: usize = head.iter().map(Span::width).sum();
+    // ends[k]: the row's width carrying the first k items.
+    let ends: Vec<usize> = std::iter::once(head_w)
+        .chain(items.iter().enumerate().scan(head_w, |w, (i, item)| {
+            *w += (if i > 0 { sep_w } else { 0 }) + item.iter().map(Span::width).sum::<usize>();
+            Some(*w)
+        }))
+        .collect();
+    let more =
+        |k: usize| line::card_span(&card::Span::new(Role::Muted, format!("… +{} more", n - k)));
+    let kept = if at >= Detail::Full || ends[n] <= width {
+        n
+    } else {
+        let fit = ends.partition_point(|&e| e <= width).saturating_sub(1);
+        (0..=fit)
+            .rev()
+            .find(|&k| ends[k] + (if k > 0 { sep_w } else { 0 }) + more(k).width() <= width)
+            .unwrap_or(0)
+    };
+    // The count rides as one more item, so it joins on the listing's own separator.
+    let shown = items
+        .into_iter()
+        .take(kept)
+        .chain((kept < n).then(|| vec![more(kept)]));
+    let mut body = Vec::new();
+    for (i, item) in shown.enumerate() {
+        if i > 0 {
+            body.push(Span::raw(l.sep));
+        }
+        body.extend(item);
+    }
+    line::hang(&head, body, width)
 }
 
 /// Columns held clear at the right edge, so the per-call bars and the tip's
@@ -200,7 +239,6 @@ fn live_tip(calls: &[Call], width: usize) -> Vec<Line<'static>> {
         .unwrap_or_else(|| calls.last().expect("a run has at least one call"));
     let mut ls = vec![Line::default()];
     ls.extend(pinned_intent(
-        &[],
         &tip.intent,
         tip.context,
         &sparkline(calls),
@@ -208,40 +246,46 @@ fn live_tip(calls: &[Call], width: usize) -> Vec<Line<'static>> {
     ));
     // The effects open in the intent's own column, so each reads as belonging
     // to the call above it.
-    ls.extend(indent_rows(effect_rows(tip, width), "", width, EFFECT_BG));
+    ls.extend(
+        effect_rows(tip, Detail::Summary, width)
+            .into_iter()
+            .map(|l| wash_inset(l, "", width, EFFECT_BG)),
+    );
     ls
 }
 
 /// `Tally`: the run in one slate line — its calls counted as scripts, its `|>`
 /// effects summed by bucket and named by verb.
 fn tally(calls: &[Call], width: usize) -> Vec<Line<'static>> {
-    let mut total = Tally::default();
-    for call in calls {
-        let b = call.buckets();
-        total.binaries += b.execs.len();
-        total.files += b.reads.len();
-        total.searches += b.greps.len();
-    }
-    let text = tally_line(calls.len(), total);
+    let (execs, reads, greps) = calls
+        .iter()
+        .map(Call::buckets)
+        .fold((0, 0, 0), |(e, r, g), b| {
+            (e + b.execs.len(), r + b.reads.len(), g + b.greps.len())
+        });
     let mut ls = vec![Line::default()];
-    push_wrapped(&mut ls, &text, width, |chunk, _| {
-        Line::from(Span::styled(chunk, Style::default().fg(SLATE)))
-    });
+    ls.extend(wrap_line(
+        &Line::from(Span::styled(
+            tally_line(calls.len(), execs, reads, greps),
+            Style::default().fg(SLATE),
+        )),
+        width,
+    ));
     ls
 }
 
 /// "Ran N scripts" always, then the non-empty buckets in fixed order: binaries
 /// share the "Ran"; reads and searches bring their own verb.
-fn tally_line(scripts: usize, tally: Tally) -> String {
+fn tally_line(scripts: usize, execs: usize, reads: usize, greps: usize) -> String {
     let mut s = format!("Ran {}", count(scripts, "script", "scripts"));
-    if tally.binaries > 0 {
-        let _ = write!(s, ", {}", count(tally.binaries, "binary", "binaries"));
+    if execs > 0 {
+        let _ = write!(s, ", {}", count(execs, "binary", "binaries"));
     }
-    if tally.files > 0 {
-        let _ = write!(s, ", read {}", count(tally.files, "file", "files"));
+    if reads > 0 {
+        let _ = write!(s, ", read {}", count(reads, "file", "files"));
     }
-    if tally.searches > 0 {
-        let _ = write!(s, ", searched {}", count(tally.searches, "time", "times"));
+    if greps > 0 {
+        let _ = write!(s, ", searched {}", count(greps, "time", "times"));
     }
     s.push('.');
     s
@@ -262,12 +306,11 @@ fn full_list(calls: &[Call], width: usize) -> Vec<Line<'static>> {
         }
         ls.extend(intent_row(call, width));
         ls.extend(source_rows(call, width));
-        ls.extend(indent_rows(
-            effect_rows(call, body_w),
-            BODY_INDENT,
-            body_w,
-            EFFECT_BG,
-        ));
+        ls.extend(
+            effect_rows(call, Detail::Full, body_w)
+                .into_iter()
+                .map(|l| wash_inset(l, BODY_INDENT, body_w, EFFECT_BG)),
+        );
     }
     ls
 }
@@ -276,56 +319,34 @@ fn full_list(calls: &[Call], width: usize) -> Vec<Line<'static>> {
 /// intent opens flush in content space — the margin is the only indent, and the
 /// rail glyph the first call wears sits in it.
 fn intent_row(call: &Call, width: usize) -> Vec<Line<'static>> {
-    pinned_intent(
-        &[],
-        &call.intent,
-        call.context,
-        &bar(call.magnitude()),
-        width,
-    )
+    pinned_intent(&call.intent, call.context, &bar(call.magnitude()), width)
 }
 
 /// Lay one intent out as a left text block with its `bars` pinned right, in
-/// content columns: `lead` is the row's whole indent and the bars target
-/// [`bar_col`] directly.  The `context` floor drains a row's ink, never a bar's
-/// height.
+/// content columns: the bars target [`bar_col`] directly.  The `context`
+/// floor drains a row's ink, never a bar's height.
 fn pinned_intent(
-    lead: &[Span<'static>],
     intent: &str,
     context: u8,
     bars: &Span<'static>,
     width: usize,
 ) -> Vec<Line<'static>> {
-    let lead_w: usize = lead.iter().map(Span::width).sum();
-    let cont_indent = lead_w;
-    let bar_last = bar_col(width);
-    let bars_w = bars.width();
-    let bars_left = (bar_last + 1).saturating_sub(bars_w);
-    let body_w = bars_left.saturating_sub(lead_w + GAP).max(8);
+    let bars_left = (bar_col(width) + 1).saturating_sub(bars.width());
+    let body_w = bars_left.saturating_sub(GAP).max(8);
     // The intent is work-narration, not the answer: SLATE sets it below the
     // model's prose and gives the context drain a hue to desaturate.
-    let ink = Style::default().fg(SLATE);
-    let mut out: Vec<Line<'static>> = Vec::new();
-    push_wrapped(&mut out, intent, body_w, |chunk, first| {
-        let mut row = if first {
-            let pad = bars_left
-                .saturating_sub(lead_w + UnicodeWidthStr::width(chunk.as_str()))
-                .max(GAP);
-            let mut spans = lead.to_vec();
-            spans.push(Span::styled(chunk, ink));
-            spans.push(Span::raw(" ".repeat(pad)));
-            spans.push(bars.clone());
-            Line::from(spans)
-        } else {
-            Line::from(vec![
-                Span::raw(" ".repeat(cont_indent)),
-                Span::styled(chunk, ink),
-            ])
-        };
-        md::apply_context(&mut row, context);
-        row
-    });
-    out
+    let mut rows = wrap_line(
+        &Line::from(Span::styled(intent.to_string(), Style::default().fg(SLATE))),
+        body_w,
+    );
+    let pad = bars_left.saturating_sub(rows[0].width()).max(GAP);
+    rows[0]
+        .spans
+        .extend([Span::raw(" ".repeat(pad)), bars.clone()]);
+    for row in &mut rows {
+        md::apply_context(row, context);
+    }
+    rows
 }
 
 /// A call's ral `cmd` at the `Full` rung, syntax-highlighted — or solid red
@@ -333,8 +354,7 @@ fn pinned_intent(
 /// the recessed [`CODE_BG`] panel inset under [`BODY_INDENT`].
 fn source_rows(call: &Call, width: usize) -> Vec<Line<'static>> {
     let body_w = inset_w(BODY_INDENT, width);
-    let mut ls = Vec::new();
-    let lines = if call.failed() {
+    let lines: Vec<Line<'static>> = if call.failed() {
         call.cmd
             .lines()
             .map(|l| Line::from(Span::styled(l.to_owned(), Style::default().fg(RED))))
@@ -342,12 +362,11 @@ fn source_rows(call: &Call, width: usize) -> Vec<Line<'static>> {
     } else {
         highlight_ral(&call.cmd)
     };
-    for line in lines {
-        for vrow in wrap_line(&line, body_w) {
-            wash_inset(&mut ls, vrow, BODY_INDENT, body_w, CODE_BG);
-        }
-    }
-    ls
+    lines
+        .iter()
+        .flat_map(|l| wrap_line(l, body_w))
+        .map(|v| wash_inset(v, BODY_INDENT, body_w, CODE_BG))
+        .collect()
 }
 
 /// The whole-run sparkline: one [`line::spark_glyph`] per call in call order, as
@@ -375,38 +394,14 @@ fn inset_w(indent: &str, width: usize) -> usize {
     width.saturating_sub(UnicodeWidthStr::width(indent)).max(1)
 }
 
-/// Re-indent a call's effect rows — dropping the leading blank
-/// [`line::render_card_unframed`] opens with — and wash each into the
-/// [`CODE_BG`] panel at `indent`; the list passes the script's own margin, so
-/// the two read as one rectangle.  `body_w` is the width the rows were built
-/// at, so each is already one visual row.
-fn indent_rows(
-    rows: Vec<Line<'static>>,
-    indent: &str,
-    body_w: usize,
-    bg: Color,
-) -> Vec<Line<'static>> {
-    let mut out = Vec::new();
-    for l in rows.into_iter().filter(|l| !line::is_blank(l)) {
-        wash_inset(&mut out, l, indent, body_w, bg);
-    }
-    out
-}
-
 /// Inset `body` under `indent` and wash its content into the recessed `bg`
 /// plane: one row in, one row out.  The indent stays unwashed so the panel's
 /// left edge aligns with the content, but the wash runs the whole `body_w` so
 /// the region reads as a stratum, not a swatch.
-fn wash_inset(
-    out: &mut Vec<Line<'static>>,
-    body: Line<'static>,
-    indent: &str,
-    body_w: usize,
-    bg: Color,
-) {
+fn wash_inset(body: Line<'static>, indent: &str, body_w: usize, bg: Color) -> Line<'static> {
     let mut spans = vec![Span::raw(indent.to_string())];
     spans.extend(wash(body, bg, Some(body_w)).spans);
-    out.push(Line::from(spans));
+    Line::from(spans)
 }
 
 #[cfg(test)]

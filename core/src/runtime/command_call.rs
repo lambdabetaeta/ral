@@ -7,6 +7,7 @@
 //! `resolve_command_word`/`classify_command` directly.
 
 use crate::capability::Program;
+use crate::fact::Command;
 use crate::guard::{Denial, deny_head};
 use crate::ir::{CommandName, CommandWord};
 use crate::types::{
@@ -171,14 +172,14 @@ fn finish_command(
         start.time,
         epoch_us(),
         shell.context.principal(),
-        Observed::command(
+        Observed::Command(Command::new(
             shown,
             Value::render_argv(args),
             status,
             CommandOrigin::External,
             io,
             error,
-        ),
+        )),
     );
     shell.observe_stamped(Some(mooring), obs);
 }

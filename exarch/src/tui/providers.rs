@@ -414,9 +414,11 @@ impl ProvidersOverlay {
                         "{var} is set in your environment and takes priority; \
                          a key saved here is used when it isn't."
                     );
-                    line::push_wrapped(&mut lines, &note, BODY_W - 2, |chunk, _| {
-                        Line::styled(format!("  {chunk}"), DIM)
-                    });
+                    lines.extend(line::hang(
+                        &[Span::raw("  ")],
+                        vec![Span::styled(note, DIM)],
+                        BODY_W,
+                    ));
                 }
             }
             Mode::Form(form) => lines.extend(form.fields.iter().enumerate().map(|(i, field)| {
@@ -450,9 +452,11 @@ impl ProvidersOverlay {
                 Ok(text) => (text, LIME),
                 Err(text) => (text, RED),
             };
-            line::push_wrapped(&mut lines, text, BODY_W - 2, |chunk, _| {
-                Line::styled(format!("  {chunk}"), Style::new().fg(ink))
-            });
+            lines.extend(line::hang(
+                &[Span::raw("  ")],
+                vec![Span::styled(text.clone(), Style::new().fg(ink))],
+                BODY_W,
+            ));
         }
         lines.push(Line::default());
         lines.push(Line::styled(format!("  vault: {}", self.vault), DIM));

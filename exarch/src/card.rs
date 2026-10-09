@@ -41,15 +41,14 @@ pub(crate) use decode::{value_to_card, value_to_edit};
 pub(crate) use diff::hunk_magnitude;
 pub(crate) use done::value_to_done;
 pub(crate) use encode::{encode_card, encode_edit};
-pub(crate) use observation::{Landing, landing};
-/// The comma-joined bucket cards a run's effects render as; `pub(crate)`
-/// because only the mirror groups, and it groups at render time.
-pub(crate) use observation::{execs_card, greps_card, reads_card};
+pub(crate) use observation::{Effect, Landed, observation_card, observation_spans};
+/// The listings a run's effects lay out as; `pub(crate)` because only the
+/// mirror groups, and it groups at render time.
+pub(crate) use observation::{Listing, exec_listing, greps_listing, reads_listing};
 
 /// A settlement is a line on the rail, so `done` exports spans and their
 /// flattening rather than a [`Card`] nothing would draw.
 pub use done::{settled_spans, settled_text};
-pub use observation::{observation_card, observation_spans};
 
 /// The closed nominal role set — the identity channel a [`Span`] may carry.
 /// An unrecognised tag degrades to plain ink rather than dropping the span.
@@ -231,13 +230,13 @@ impl Card {
 
 /// The one observation a producer didn't group.
 ///
-/// A worker birth, a capability denial, a desk-fed act. `pub` for
+/// A worker birth or a capability denial. `pub` for
 /// synod's fold: `record::Display` keeps only the wire value, so the card is
 /// built here, at render time, exactly as `record/view.rs` will for a
 /// resumed scrollback.
 pub fn observation_display_card(value: &FOValue) -> Option<Card> {
     let observation = Observation::decode(value).ok()?;
-    Some(observation_card(&observation.what))
+    Landed::of(&observation.what).map(|l| observation_card(&l))
 }
 
 /// A [`Card`] as one line — the digest the periodic nudge shows the model of

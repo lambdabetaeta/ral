@@ -14,6 +14,7 @@ use crate::first_order::{Bytes, FOValue};
 use crate::ir::WriteMode;
 use crate::source::CallSite;
 use crate::ty::{Ty, Typed, closed_record};
+use crate::types::AuditIo;
 use crate::{label, record, variant};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -83,6 +84,28 @@ pub struct Command {
     /// outcome was a runtime error.  The streams hold only what the child
     /// wrote; this is the one place ral speaks in its own voice.
     pub error: Option<String>,
+}
+
+impl Command {
+    /// The one place a [`Command`] fact is built, so every door that mints
+    /// one spells its argv the same way: the shown name, then its arguments.
+    pub fn new(
+        shown: &str,
+        args: impl IntoIterator<Item = String>,
+        status: i32,
+        origin: CommandOrigin,
+        io: AuditIo,
+        error: Option<String>,
+    ) -> Self {
+        Self {
+            argv: std::iter::once(shown.to_string()).chain(args).collect(),
+            status,
+            origin,
+            stdout: io.stdout.into(),
+            stderr: io.stderr.into(),
+            error,
+        }
+    }
 }
 
 record!(typed Command {

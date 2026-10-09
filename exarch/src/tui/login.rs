@@ -287,18 +287,18 @@ fn dim() -> Style {
 }
 
 /// A labelled row whose value wraps on under the value column, through the
-/// shared display-width-aware [`line::push_wrapped`].  Wrapping is what stops
+/// shared display-width-aware [`line::hang`].  Wrapping is what stops
 /// a long value clipping at the bezel and reading as a shorter one.
 fn field(label: &str, text: &str, style: Style) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    line::push_wrapped(&mut lines, text, VALUE_W, |chunk, first| {
-        let lead = if first { label } else { "" };
-        Line::from(vec![
-            Span::styled(format!("{INDENT}{}", LABEL.left(lead)), dim()),
-            Span::styled(chunk, style),
-        ])
-    });
-    lines
+    let head = [Span::styled(
+        format!("{INDENT}{}", LABEL.left(label)),
+        dim(),
+    )];
+    line::hang(
+        &head,
+        vec![Span::styled(text.to_string(), style)],
+        head[0].width() + VALUE_W,
+    )
 }
 
 // ---------------------------------------------------------------------------

@@ -12,7 +12,7 @@ use crate::bus::{Emitter, Inbox, channel};
 use crate::card::Row;
 use ral_core::capability::Capabilities;
 use ral_core::carrier::IdentityTransport;
-use ral_core::fact::Read;
+use ral_core::fact::{Command, Read};
 use ral_core::first_order::datum::Datum as _;
 use ral_core::types::WriteOutcome;
 use ral_core::types::{
@@ -1489,14 +1489,14 @@ fn bare_external_surfaces_one_exec_card() {
     );
     assert_eq!(
         obs[0],
-        Observed::command(
+        Observed::Command(Command::new(
             "/usr/bin/true",
             [],
             0,
             CommandOrigin::External,
             AuditIo::default(),
             None
-        ),
+        )),
         "the one observation is a successful exec of the image"
     );
 }
@@ -1570,14 +1570,14 @@ fn cat_redirect_surfaces_read_then_exec_in_order() {
     );
     assert_eq!(
         obs[1],
-        Observed::command(
+        Observed::Command(Command::new(
             "/bin/cat",
             [],
             0,
             CommandOrigin::External,
             AuditIo::default(),
             None
-        ),
+        )),
         "then cat execs over that stdin"
     );
 }

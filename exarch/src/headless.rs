@@ -12,7 +12,7 @@
 use crate::SessionInfo;
 use crate::agent::Avatar;
 use crate::bus::{AgentOutcome, FleetBus, Sink, pump};
-use crate::card::{self, Card, Mark, Row, landing, observation_card};
+use crate::card::{self, Card, Landed, Mark, Row, observation_card};
 use crate::provider::{Provider, Usage};
 use crate::record::AgentId;
 use crate::record::{self, Blocks, Delta, Record, Recorded, Transient};
@@ -400,10 +400,10 @@ impl Headless<'_> {
     }
 
     fn print_observed(&mut self, what: &Observed) {
-        if landing(what).is_none() {
+        let Some(landed) = Landed::of(what) else {
             return;
-        }
-        let card = observation_card(what);
+        };
+        let card = observation_card(&landed);
         self.print_card(&card);
     }
 }

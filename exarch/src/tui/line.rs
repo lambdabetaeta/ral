@@ -193,20 +193,14 @@ fn tool_call_header(label: &str, size: Option<u32>, width: u16) -> Vec<Line<'sta
         0
     };
     let body_w = (width as usize).saturating_sub(bar_w).max(8);
-    let mut out = Vec::new();
-    push_wrapped(&mut out, label, body_w, |chunk, first| {
-        if first {
-            let mut spans = vec![Span::styled(chunk, Style::default().fg(SLATE))];
-            if let Some(magnitude) = size {
-                spans.push(Span::raw("  "));
-                spans.push(size_bar(magnitude));
-            }
-            Line::from(spans)
-        } else {
-            Line::from(Span::styled(chunk, Style::default().fg(SLATE)))
-        }
-    });
-    out
+    let mut rows = wrap_line(
+        &Line::from(Span::styled(label.to_string(), Style::default().fg(SLATE))),
+        body_w,
+    );
+    if let Some(magnitude) = size {
+        rows[0].spans.extend([Span::raw("  "), size_bar(magnitude)]);
+    }
+    rows
 }
 /// Repaint `row` on background `bg`, keeping every foreground and modifier —
 /// the one place a background stratum is laid down.  `fill_to` pads it
@@ -857,22 +851,6 @@ pub(super) fn hang(
             Line::from(spans)
         })
         .collect()
-}
-
-/// Wrap `text` to `body_w` and push `row(chunk, first)` per chunk.
-/// [`textwrap::wrap`] always yields at least one chunk, empty input included,
-/// so a blank value still renders its marker via `row("", true)`.
-pub(super) fn push_wrapped(
-    out: &mut Vec<Line<'static>>,
-    text: &str,
-    body_w: usize,
-    mut row: impl FnMut(String, bool) -> Line<'static>,
-) {
-    let mut first = true;
-    for chunk in textwrap::wrap(text, body_w) {
-        out.push(row(chunk.into_owned(), first));
-        first = false;
-    }
 }
 
 // ── Aligned-field rendering (the `fields` mark + provider errors) ────────────

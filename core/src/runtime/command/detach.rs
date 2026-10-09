@@ -12,7 +12,7 @@
 //! closes when we exit, and the survivor's next write would take a `SIGPIPE`.
 
 use crate::capability::Flag;
-use crate::fact::Receipt;
+use crate::fact::{Command, Receipt};
 use crate::ir::CommandName;
 use crate::process::StdioSpec;
 use crate::types::{
@@ -110,14 +110,14 @@ pub(crate) fn detach(
 
     shell.observe(
         mooring,
-        Observed::command(
+        Observed::Command(Command::new(
             &plan.shown,
             plan.admitted.args().to_vec(),
             0,
             CommandOrigin::Detached,
             AuditIo::default(),
             None,
-        ),
+        )),
     );
     Ok(Value::from_datum(Receipt {
         pid,

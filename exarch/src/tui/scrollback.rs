@@ -22,7 +22,7 @@ use super::line::is_blank;
 use super::palette::READ_W;
 use super::row::Row;
 use super::select::plain_slice;
-use crate::card::{self, Card, Change, Landing, landing, observation_card};
+use crate::card::{self, Card, Change, Landed, observation_card, observation_spans};
 use crate::provider::Usage;
 use crate::record::{self, BlockId, Blocks, Delta, Seq, Transient};
 use ral_core::first_order::datum::Datum as _;
@@ -622,10 +622,10 @@ impl Scrollback {
     fn open(&mut self, seq: Seq, member: Member) {
         let block = match member {
             Member::Thinking(_) | Member::Call(_) => Block::group(member, self.thinking, Some(seq)),
-            Member::Effect(what) => {
-                let place = landing(&what).expect("an effect member has an effect landing");
-                Block::new(BlockKind::card(observation_card(&what), place), Some(seq))
-            }
+            Member::Effect(e) => Block::new(
+                BlockKind::card(observation_card(&Landed::Effect(e)), false),
+                Some(seq),
+            ),
             Member::Turn => Block::chrome(Chrome::Turn, Some(seq)),
         };
         self.blocks.push(block);
@@ -1091,11 +1091,11 @@ impl Scrollback {
 }
 
 fn surfaced(card: Card) -> Item {
-    Item::Barrier(BlockKind::card(card, Landing::Surfaced))
+    Item::Barrier(BlockKind::card(card, true))
 }
 
 /// Decode one [`Display::Observation`](crate::record::Display::Observation),
-/// through the same [`landing`] the live rail draws from — a rendering, never
+/// through the same [`Landed::of`] the live rail draws from — a rendering, never
 /// recorded, built as the fact arrives.
 fn observation_items(value: &ral_core::first_order::FOValue) -> Vec<Item> {
     let Ok(obs) = Observation::decode(value) else {
@@ -1105,14 +1105,12 @@ fn observation_items(value: &ral_core::first_order::FOValue) -> Vec<Item> {
 }
 
 fn observed_items(what: &Observed) -> Vec<Item> {
-    let Some(place) = landing(what) else {
-        return Vec::new();
-    };
-    match place {
-        Landing::Effect => vec![Item::Member(Member::Effect(what.clone()))],
-        Landing::Surfaced => vec![surfaced(observation_card(what))],
-        Landing::Announced => vec![Item::Barrier(BlockKind::Chrome(Chrome::Spawned(
-            card::observation_spans(what),
+    match Landed::of(what) {
+        None => Vec::new(),
+        Some(Landed::Effect(e)) => vec![Item::Member(Member::Effect(e))],
+        Some(l @ Landed::Surfaced(_)) => vec![surfaced(observation_card(&l))],
+        Some(l @ Landed::Announced(_)) => vec![Item::Barrier(BlockKind::Chrome(Chrome::Spawned(
+            observation_spans(&l),
         )))],
     }
 }

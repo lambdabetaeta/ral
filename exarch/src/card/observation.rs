@@ -8,128 +8,142 @@
 
 use std::borrow::Cow;
 
-use ral_core::types::{Check, Decision, LeaseClass, Observed, WorkerId};
+use ral_core::fact::{Check, Command, Grep, Read, Worker};
+use ral_core::types::{Decision, LeaseClass, Observed, WorkerId};
 use std::collections::BTreeMap;
 
 use super::{Card, Mark, Role, Span};
 
-/// Where an observation the rail draws lands, or `None` for one it does not
-/// draw: evaluation (a `builtin` command), or a capability check that was not
-/// a denial. Core reports every observation it makes; this is where the host
-/// says which of them it wants.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Landing {
+/// An observation the rail draws, by where it lands; evaluation, a write (drawn
+/// as its change), an allowed check and a desk-fed act have none.
+pub(crate) enum Landed {
     /// Folds onto the call above it, which buckets the fact itself.
-    Effect,
-    /// Its own bounded block — a denial, a surfaced kit card, a notice.
-    Surfaced,
-    /// A line on the rail rather than a card: a worker's birth.
-    Announced,
+    Effect(Effect),
+    /// Its own bounded block: a denial reads best whole, not dissolved into a tally.
+    Surfaced(Check),
+    /// A line on the rail, the mirror of the settlement it departs for: a worker's birth.
+    Announced(Worker),
 }
 
-pub(crate) fn landing(what: &Observed) -> Option<Landing> {
-    Some(match what {
-        Observed::Read(_) | Observed::Grep(_) | Observed::Command(_) => Landing::Effect,
-        // A denial reads best whole, not dissolved into a tally.
-        Observed::Check(check) if check.decision() == Decision::Denied => Landing::Surfaced,
-        // A birth is the departure a settlement is the arrival of, and reads
-        // as that mirror.
-        Observed::Worker(_) => Landing::Announced,
-        // A write lands as the change it made, decoded before it gets here; a
-        // flagged check is the trail's alone; an `Act` is desk-fed and never
-        // reaches the rail from the engine seam.
-        Observed::Write(_) | Observed::Check(_) | Observed::Act(_) => {
-            return None;
-        }
-    })
+#[derive(Clone, Debug)]
+pub(crate) enum Effect {
+    Read(Read),
+    Command(Command),
+    Grep(Grep),
 }
 
-/// The one line an [`Observed`] reads as.
+impl Landed {
+    pub(crate) fn of(what: &Observed) -> Option<Self> {
+        Some(match what {
+            Observed::Read(r) => Self::Effect(Effect::Read(r.clone())),
+            Observed::Command(c) => Self::Effect(Effect::Command(c.clone())),
+            Observed::Grep(g) => Self::Effect(Effect::Grep(g.clone())),
+            Observed::Check(c) if c.decision() == Decision::Denied => Self::Surfaced(c.clone()),
+            Observed::Worker(w) => Self::Announced(w.clone()),
+            Observed::Write(_) | Observed::Check(_) | Observed::Act(_) => return None,
+        })
+    }
+}
+
+/// The one line a [`Landed`] reads as.
 ///
 /// A muted verb, the path, program, or resource as its [`Role::Path`] subject,
 /// and the outcome, status, or decision roled by its level.  A card wraps this
-/// as its heading; a [`Landing::Announced`] observation is only this, drawn
+/// as its heading; a [`Landed::Announced`] observation is only this, drawn
 /// on the rail.
-pub fn observation_spans(what: &Observed) -> Vec<Span> {
+pub(crate) fn observation_spans(what: &Landed) -> Vec<Span> {
     match what {
-        Observed::Read(r) => read_spans(&r.path),
-        Observed::Write(w) => super::change::heading(&w.path, w.outcome),
-        Observed::Command(c) => {
-            let mut spans = vec![Span::plain("$ ")];
-            spans.extend(exec_cmd_spans(&c.argv));
+        Landed::Effect(Effect::Read(r)) => reads_listing(&[&r.path]).spans(),
+        Landed::Effect(Effect::Command(c)) => {
+            let mut spans = exec_listing(&c.argv).spans();
             let role = if c.status == 0 { Role::Ok } else { Role::Bad };
             spans.push(Span::plain(" → "));
             spans.push(Span::new(role, c.status.to_string()));
             spans
         }
-        Observed::Grep(g) => {
-            let mut spans = vec![Span::new(Role::Muted, "grep ")];
-            spans.extend(grep_spans(&g.scope, &g.pattern));
-            spans
-        }
-        Observed::Check(check) => capability_spans(check),
-        Observed::Worker(w) => worker_spans(w.id, &w.cmd, w.class),
-        Observed::Act(_) => {
-            unreachable!("an `Act` never reaches the rail from the engine seam")
-        }
+        Landed::Effect(Effect::Grep(g)) => greps_listing(&[g]).spans(),
+        Landed::Surfaced(check) => capability_spans(check),
+        Landed::Announced(w) => worker_spans(w.id, &w.cmd, w.class),
     }
 }
 
-/// Compose an [`Observed`] into a [`Card`]: its [`observation_spans`] line.
-pub fn observation_card(what: &Observed) -> Card {
+/// Compose a [`Landed`] into a [`Card`]: its [`observation_spans`] line.
+pub(crate) fn observation_card(what: &Landed) -> Card {
     Card(vec![Mark::Text {
         spans: observation_spans(what),
     }])
 }
 
-/// An exec's command alone, without the `$ ` prompt or ` → status` tail, so
-/// [`execs_card`] can comma-join several under one prompt.
+/// An effect as a head and the items after it, which a renderer may fold or
+/// clip between but never within.  A lone surface and the mirror's grouped
+/// rows both read one, so the two cannot drift apart.
+pub(crate) struct Listing {
+    pub(crate) head: Vec<Span>,
+    pub(crate) items: Vec<Vec<Span>>,
+    pub(crate) sep: &'static str,
+}
+
+impl Listing {
+    fn spans(self) -> Vec<Span> {
+        let mut spans = self.head;
+        for (i, item) in self.items.into_iter().enumerate() {
+            spans.push(Span::plain(if i == 0 { " " } else { self.sep }));
+            spans.extend(item);
+        }
+        spans
+    }
+}
+
+/// `$ prog arg…`, one item per argument.
 ///
 /// The surfaced `argv` is post-shell — already word-split, quotes consumed — so
 /// each token is re-quoted *only* where the shell would otherwise reparse it,
 /// and the rendered line word-splits back to the exact argv rather than to a
 /// lie. `try_quote`'s sole error is an interior nul, which no real argv carries.
-fn exec_cmd_spans(argv: &[String]) -> Vec<Span> {
-    let quote = |t: &str| {
-        const CAP: usize = 80;
-        let s = if t.chars().count() > CAP {
-            format!("{}…", t.chars().take(CAP - 1).collect::<String>())
-        } else {
-            t.to_string()
-        };
-        shlex::try_quote(&s).map_or_else(|_| s.clone(), Cow::into_owned)
+pub(crate) fn exec_listing(argv: &[String]) -> Listing {
+    let quote = |t: &str| shlex::try_quote(t).map_or_else(|_| t.to_string(), Cow::into_owned);
+    let (prog, args) = match argv.split_first() {
+        Some((prog, args)) => (Span::new(Role::Path, quote(prog)), args),
+        None => (Span::plain("(no command)"), &[][..]),
     };
-    match argv.split_first() {
-        Some((prog, args)) => {
-            let mut spans = vec![Span::new(Role::Path, quote(prog))];
-            for arg in args {
-                spans.push(Span::plain(format!(" {}", quote(arg))));
-            }
-            spans
-        }
-        None => vec![Span::plain("(no command)")],
+    Listing {
+        head: vec![Span::plain("$ "), prog],
+        items: args.iter().map(|a| vec![Span::plain(quote(a))]).collect(),
+        sep: " ",
     }
 }
 
-/// A grep's `pattern in scope`, *without* the leading `grep ` verb, so a
-/// comma-joined run can carry one shared verb at its head.
-fn grep_spans(scope: &str, pattern: &str) -> Vec<Span> {
-    vec![
-        Span::new(Role::Code, pattern),
-        Span::plain(" in "),
-        Span::new(Role::Path, scope),
-    ]
+/// `read p1, p2, …`
+pub(crate) fn reads_listing(paths: &[&str]) -> Listing {
+    Listing {
+        head: vec![Span::new(Role::Muted, "read")],
+        items: paths
+            .iter()
+            .map(|p| vec![Span::new(Role::Path, *p)])
+            .collect(),
+        sep: ", ",
+    }
 }
 
-/// A read row, `read <path>` — reused verbatim per entry in [`reads_card`], so a
-/// lone read and a grouped one share one shape.
-fn read_spans(path: &str) -> Vec<Span> {
-    vec![Span::new(Role::Muted, "read "), Span::new(Role::Path, path)]
+/// `grep p1 in s1, p2 in s2, …`
+pub(crate) fn greps_listing(greps: &[&Grep]) -> Listing {
+    let item = |g: &&Grep| {
+        vec![
+            Span::new(Role::Code, &g.pattern),
+            Span::plain(" in "),
+            Span::new(Role::Path, &g.scope),
+        ]
+    };
+    Listing {
+        head: vec![Span::new(Role::Muted, "grep")],
+        items: greps.iter().map(item).collect(),
+        sep: ", ",
+    }
 }
 
 /// A capability check's heading, `check <resource> <decision> <fields…>`. The
 /// decision roles `Role::Bad` when denied — the only decision the rail ever
-/// surfaces, per [`landing`]: core's door (`Shell::observe_stamped` in
+/// surfaces, per [`Landed::of`]: core's door (`Shell::observe_stamped` in
 /// `core/src/types/audit/door.rs`) broadcasts every fact and leaves the rail's
 /// policy to the host. The
 /// trailing fields are core's own `fields` map (`name`/`resolved`/`args` for
@@ -178,67 +192,6 @@ fn capability_fields(fields: &BTreeMap<String, String>) -> String {
         .map(|(k, v)| format!("{k}={v}"))
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-// ── Observation groups: a call's effects of one kind → one card ─────────────
-//
-// Each reuses the exact `observation_card` span vocabulary, so a run of one
-// renders like its own card, modulo the deliberate exec departure below.
-// Capability checks never reach here: a denial lands alone.
-
-/// `read p1, read p2, …`
-pub(crate) fn reads_card(reads: &[&str]) -> Option<Card> {
-    if reads.is_empty() {
-        return None;
-    }
-    let mut spans = Vec::new();
-    join_spans(&mut spans, reads, |spans, path| {
-        spans.extend(read_spans(path));
-    });
-    Some(Card(vec![Mark::Text { spans }]))
-}
-
-/// `$ cmd1, cmd2, …` under one prompt.
-///
-/// Drops the ` → status` tail a lone [`observation_card`] exec row carries: a
-/// joined run reads as the *set of commands run*, where per-command statuses
-/// would be noise. Nothing is lost — each status still rides its own bus
-/// event; only this presentation omits it.
-pub(crate) fn execs_card(execs: &[&Observed]) -> Option<Card> {
-    if execs.is_empty() {
-        return None;
-    }
-    let mut spans = vec![Span::plain("$ ")];
-    join_spans(&mut spans, execs, |spans, e| {
-        if let Observed::Command(c) = *e {
-            spans.extend(exec_cmd_spans(&c.argv));
-        }
-    });
-    Some(Card(vec![Mark::Text { spans }]))
-}
-
-/// `grep p1 in s1, p2 in s2, …` under one verb.
-pub(crate) fn greps_card(greps: &[&Observed]) -> Option<Card> {
-    if greps.is_empty() {
-        return None;
-    }
-    let mut spans = vec![Span::new(Role::Muted, "grep ")];
-    join_spans(&mut spans, greps, |spans, e| {
-        if let Observed::Grep(g) = *e {
-            spans.extend(grep_spans(&g.scope, &g.pattern));
-        }
-    });
-    Some(Card(vec![Mark::Text { spans }]))
-}
-
-/// The comma-join every observation group shares.
-fn join_spans<T>(spans: &mut Vec<Span>, items: &[T], each: impl Fn(&mut Vec<Span>, &T)) {
-    for (i, item) in items.iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::plain(", "));
-        }
-        each(spans, item);
-    }
 }
 
 #[cfg(test)]
