@@ -145,9 +145,7 @@ fn drive(stage: &mut impl Stage, bureau: &Bureau, mut listing: Listing) -> Optio
         }
         // Seeding the state is also the dedup: the next poll no longer reports
         // this model as needing a fetch.
-        let needed = stage
-            .picker()
-            .and_then(|p| p.focused_or_model_needing_endpoints());
+        let needed = stage.picker().and_then(|p| p.model_needing_endpoints());
         if let Some(model) = needed {
             let cached = bureau
                 .with_catalog(|catalog| catalog.cached_endpoints(&model))

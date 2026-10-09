@@ -9,7 +9,7 @@ use super::app::Overlay;
 use super::line;
 use super::login;
 use super::palette::{CYAN, Col, LIME, ORANGE, OVERLAY_BG, PURPLE, RED, SLATE};
-use super::picker::{PAD_X, PAD_Y, centered, overlay_frame};
+use super::picker::{CHROME_H, CHROME_W, centered, overlay_frame};
 use super::tui_loop::{CommandCtx, OverlayTick, Tui, overlay_tick};
 use crate::provider::Holdings;
 use crate::provider::accounts::{Entry, Source, entries};
@@ -26,8 +26,8 @@ use ratatui::widgets::Paragraph;
 use std::sync::mpsc;
 use std::thread;
 
-const OVERLAY_W: u16 = 104;
-const BODY_W: usize = OVERLAY_W as usize - 2 - 2 * PAD_X as usize;
+const OVERLAY_W: u16 = 108;
+const BODY_W: usize = (OVERLAY_W - CHROME_W) as usize;
 const HEADS: [&str; 3] = ["SERVICE", "ENDPOINT / KIND", "KEY"];
 const FORM: [&str; 4] = ["name", "address", "protocol", "key"];
 const PROTOCOL: usize = 2;
@@ -375,7 +375,7 @@ impl ProvidersOverlay {
     pub(super) fn render(&self, f: &mut Frame, frame: Rect) {
         let lines = self.body_lines();
         let rows = u16::try_from(lines.len()).unwrap_or(u16::MAX);
-        let h = (2 + 2 * PAD_Y + rows).min(frame.height.max(3));
+        let h = (CHROME_H + rows).min(frame.height.max(3));
         let area = centered(OVERLAY_W.min(frame.width), h, frame);
         let hint = match &self.mode {
             Mode::List => {

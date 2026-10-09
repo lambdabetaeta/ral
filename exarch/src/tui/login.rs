@@ -9,7 +9,7 @@
 use super::app::Overlay;
 use super::line;
 use super::palette::{CYAN, Col, OVERLAY_BG, RED, SLATE};
-use super::picker::{PAD_X, PAD_Y, centered, overlay_frame};
+use super::picker::{CHROME_H, CHROME_W, centered, overlay_frame};
 use super::terminal::osc52_copy;
 use super::tui_loop::{CommandCtx, OverlayTick, Tui, overlay_tick};
 use crate::provider::identity;
@@ -25,9 +25,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
 /// Wide enough for an id-qualified account label beside its blurb.
-const OVERLAY_W: u16 = 72;
-/// Wrap width for the body rows: [`OVERLAY_W`] less bezel and padding.
-const BODY_W: usize = OVERLAY_W as usize - 2 - 2 * PAD_X as usize;
+const OVERLAY_W: u16 = 76;
+/// Wrap width for the body rows: [`OVERLAY_W`] less the overlay's chrome.
+const BODY_W: usize = (OVERLAY_W - CHROME_W) as usize;
 /// The indent every body row shares.
 const INDENT: &str = "  ";
 /// The column every row's value starts after, so that no value is placed by
@@ -203,7 +203,7 @@ impl LoginOverlay {
         let w = OVERLAY_W.min(frame.width);
         #[allow(clippy::cast_possible_truncation, reason = "a handful of body rows")]
         let body_rows = self.body_lines().len() as u16;
-        let h = 2 + 2 * PAD_Y + body_rows;
+        let h = CHROME_H + body_rows;
         (w, h.min(frame.height.max(3)))
     }
 

@@ -24,21 +24,22 @@
 //! The picker is pure display+input. `model_picker.rs` owns the credential
 //! store, the catalog, and the network seam, and feeds results in through
 //! [`Picker::set_models`] and [`Picker::set_endpoints`], so a list reads
-//! "loading…" until its background fetch lands. The serving-provider fetch is
-//! intent-driven: the driver reads
-//! [`Picker::focused_or_model_needing_endpoints`] and fetches a model's
-//! providers only once the provider control is focused on it.
+//! "loading…" until its background fetch lands. The driver reads
+//! [`Picker::model_needing_endpoints`] and fetches the serving providers of
+//! whichever `OpenRouter` model is highlighted, so the row is filled before
+//! the control is focused.
 
 use super::line;
 use super::palette::{BANNER_GOLD, CYAN, Col, OVERLAY_BG, RED, SLATE};
 
-/// The label gutter every row of the picker aligns to.
-const FIELD_LABEL: Col = Col::wide(7);
+/// The label gutter every row of the picker aligns to: two wider than
+/// `provider`, the longest label.
+const FIELD_LABEL: Col = Col::wide(10);
 use crate::provider::identity::{self, Account, AccountId};
 use crate::provider::models::ProviderEndpoint;
 use crate::provider::{EFFORT_LADDER, Tuning};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph};
@@ -114,18 +115,30 @@ const TRACK_W: usize = 24;
 
 const VISIBLE_ROWS: u16 = 8;
 /// The overlay's fixed content width; clamped to the frame when narrower.
-const OVERLAY_W: u16 = 74;
+const OVERLAY_W: u16 = 78;
 
+/// The plane left showing outside the bezel, so the frame floats on the modal
+/// rather than being its edge. Cells are about 2:1, hence two columns a row.
+const MARGIN_X: u16 = 2;
+const MARGIN_Y: u16 = 1;
 /// The airy margin inside the bezel, so the controls never crowd the frame.
-/// `pub(super)`: `login.rs` renders its modal through the same chrome.
-pub(super) const PAD_X: u16 = 4;
-pub(super) const PAD_Y: u16 = 1;
-/// Columns of shade cast to the right, against one row below: cells are about
-/// 2:1, so two columns read as square as a single row.
+const PAD_X: u16 = 4;
+const PAD_Y: u16 = 1;
+/// What [`overlay_frame`] takes of the overlay's width and height — margin,
+/// bezel and padding on both sides. `login.rs` sizes through the same chrome.
+pub(super) const CHROME_W: u16 = 2 * (MARGIN_X + 1 + PAD_X);
+pub(super) const CHROME_H: u16 = 2 * (MARGIN_Y + 1 + PAD_Y);
+/// Columns of shade cast to the right, against one row below, for the same
+/// 2:1 cells.
 const SHADOW_DEPTH: u16 = 2;
-/// A shadowed cell keeps its glyph and is repainted this near-black, so what
-/// lies beneath shows as a faint silhouette rather than being blanked.
-const SHADOW_FG: Color = Color::Rgb(14, 16, 22);
+/// The shadow is translucent: a cell beneath it keeps its glyph and both its
+/// colours are drawn this far toward [`UMBRA`], so the session shows through.
+const SHADOW_ALPHA: f32 = 0.7;
+const UMBRA: Color = Color::Rgb(2, 3, 8);
+/// Stand-ins for the terminal's own colours, which a `Reset` cell does not
+/// reveal and so cannot be darkened.
+const GROUND_BG: Color = Color::Rgb(24, 26, 34);
+const GROUND_FG: Color = SLATE;
 
 /// Endpoints of the temperature gradient (cold blue → warm red) and of the
 /// effort ramp (dim → bright cyan), interpolated by `rail::mix`.
@@ -194,15 +207,23 @@ pub(super) fn centered(w: u16, h: u16, area: Rect) -> Rect {
     }
 }
 
-/// Cast a drop shadow down-and-right of `area`, so the modal reads as lifted
-/// off the session rather than punched into it. `cell_mut` bounds-checks, so
-/// cells falling off the frame are simply skipped.
-pub(super) fn render_shadow(f: &mut Frame, area: Rect) {
-    let shadow = Style::default().fg(SHADOW_FG).bg(Color::Black);
+/// Cast a translucent drop shadow down-and-right of `area`, so the modal reads
+/// as lifted off the session rather than punched into it. `cell_mut`
+/// bounds-checks, so cells falling off the frame are simply skipped.
+fn render_shadow(f: &mut Frame, area: Rect) {
+    let shade = |c: Color, ground: Color| {
+        let c = if matches!(c, Color::Rgb(..)) {
+            c
+        } else {
+            ground
+        };
+        super::rail::mix(c, UMBRA, SHADOW_ALPHA)
+    };
     let buf = f.buffer_mut();
     let mut cast = |x: u16, y: u16| {
         if let Some(cell) = buf.cell_mut((x, y)) {
-            cell.set_style(shadow);
+            cell.fg = shade(cell.fg, GROUND_FG);
+            cell.bg = shade(cell.bg, GROUND_BG);
         }
     };
     // The bottom edge, shifted right by the depth so the corner squares off.
@@ -218,13 +239,15 @@ pub(super) fn render_shadow(f: &mut Frame, area: Rect) {
     }
 }
 
-/// Cast the shadow, clear the box, and draw the double-line bezel around
-/// `area`, returning the inner content rect. The one shell both `/model` and
-/// `/login` render into.
+/// Cast the shadow, clear the box to the plane, and draw the double-line bezel
+/// inset by the margin, returning the inner content rect. The one shell both
+/// `/model` and `/login` render into.
 pub(super) fn overlay_frame(f: &mut Frame, area: Rect, title: &str, hint: &str) -> Rect {
     let plane = Style::default().bg(OVERLAY_BG);
     render_shadow(f, area);
     f.render_widget(Clear, area);
+    f.render_widget(Block::default().style(plane), area);
+    let area = area.inner(Margin::new(MARGIN_X, MARGIN_Y));
     let bezel = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Double)
@@ -256,8 +279,8 @@ pub struct Picker {
     /// [`identity::label`] disambiguates a row's account within.
     providers: Vec<Account>,
     models: BTreeMap<AccountId, ModelsState>,
-    /// Keyed by `OpenRouter` model id; absent until the provider control is
-    /// first focused on that model.
+    /// Keyed by `OpenRouter` model id; absent until that model is first
+    /// highlighted.
     endpoints: BTreeMap<String, EndpointsState>,
     /// Index into the current filtered [`Self::rows`].
     selected: usize,
@@ -341,13 +364,9 @@ impl Picker {
     }
 
     /// `model_picker.rs`'s cue to spawn a serving-provider fetch: the
-    /// highlighted `OpenRouter` model, once the provider control is focused on
-    /// it and no [`EndpointsState`] is recorded — so seeding `Loading` before
-    /// spawning is what dedups the fetch.
-    pub fn focused_or_model_needing_endpoints(&self) -> Option<String> {
-        if self.focus != Focus::Provider {
-            return None;
-        }
+    /// highlighted `OpenRouter` model, while no [`EndpointsState`] is recorded
+    /// for it — so seeding `Loading` before spawning is what dedups the fetch.
+    pub fn model_needing_endpoints(&self) -> Option<String> {
         let model = self.highlighted_or_model(&self.rows())?;
         (!self.endpoints.contains_key(&model)).then_some(model)
     }
@@ -601,20 +620,24 @@ impl Picker {
         self.selected = if n == 0 { 0 } else { self.selected.min(n - 1) };
     }
 
-    /// The notes under the controls: why the picker opened, then each
-    /// provider whose listing failed, so its absent models are explained.
-    fn notes(&self) -> impl Iterator<Item = String> {
+    /// The notes under the controls, each a headline and perhaps its reason:
+    /// why the picker opened, then each provider whose listing failed, so its
+    /// absent models are explained.
+    fn notes(&self) -> impl Iterator<Item = (String, Option<String>)> {
         let failures =
             self.providers
                 .iter()
                 .filter_map(|account| match self.models.get(&account.id) {
-                    Some(ModelsState::Failed(reason)) => Some(format!(
-                        "{}: could not list its models: {reason}",
-                        self.label(account)
+                    Some(ModelsState::Failed(reason)) => Some((
+                        format!("{} could not list its models", self.label(account)),
+                        Some(reason.clone()),
                     )),
                     _ => None,
                 });
-        self.note.iter().cloned().chain(failures)
+        self.note
+            .iter()
+            .map(|note| (note.clone(), None))
+            .chain(failures)
     }
 
     // --- rendering -----------------------------------------------------------
@@ -623,19 +646,18 @@ impl Picker {
     /// height that fits every row [`Self::render`] emits.
     fn desired_size(&self, frame: Rect) -> (u16, u16) {
         let w = OVERLAY_W.min(frame.width);
-        // The inner text column: the width less the two bezel cells and the
-        // padding on each side. Counting the pre-wrapped note lines reserves
-        // exactly the rows the render emits.
-        let note_width = w.saturating_sub(2 + 2 * PAD_X);
+        // Counting the pre-wrapped note lines reserves exactly the rows the
+        // render emits.
+        let note_width = w.saturating_sub(CHROME_W);
         #[allow(
             clippy::cast_possible_truncation,
             reason = "wrapped note-row count; bounded by the tiny catalog"
         )]
         let notes = self.note_lines(note_width).len() as u16;
-        // bezel + pad + search + status + list + provider + effort + temp +
-        // top-p + notes. The provider row is reserved even for a model that
-        // does not route, so the overlay's height never jumps.
-        let h = 2 + 2 * PAD_Y + 1 + 1 + (VISIBLE_ROWS + 2) + 1 + 1 + 1 + 1 + notes;
+        // chrome + search + status + list + provider + effort + temp + top-p +
+        // notes. The provider row is reserved even for a model that does not
+        // route, so the overlay's height never jumps.
+        let h = CHROME_H + 1 + 1 + (VISIBLE_ROWS + 2) + 1 + 1 + 1 + 1 + notes;
         (w, h.min(frame.height.max(3)))
     }
 
@@ -652,7 +674,7 @@ impl Picker {
             f,
             area,
             " MODEL ",
-            " ⇥ field · ↑↓ pick · ←→ adjust · ⏎ apply · esc cancel ",
+            " tab field · ↑↓ pick · ←→ adjust · ⏎ apply · esc cancel ",
         );
 
         // The eight rows `desired_size` sums the height of; the list carries
@@ -923,6 +945,8 @@ impl Picker {
             }
             spans.push(Span::styled(*glyph, style));
         }
+        // Pad the ramp to a track's width, so every readout starts level.
+        spans.push(Span::raw(" ".repeat(TRACK_W - GLYPHS.len())));
         let chosen = EFFORT_LADDER[self.effort_idx].0;
         let label_style = if focused {
             Style::default().fg(CYAN).add_modifier(Modifier::BOLD)
@@ -1017,21 +1041,29 @@ impl Picker {
         )
     }
 
-    /// Each note wrapped to `width`, a `⚠ ` opening the first row and
-    /// continuations hanging under it. The reason is wrapped rather than
-    /// truncated — it is the point of the note. Wrapping through
-    /// [`line::hang`] lets these lines double as the exact height
+    /// Each note set off by a blank row and wrapped to `width`: a bold
+    /// headline under a `⚠ `, its reason hanging plain beneath. The reason is
+    /// wrapped rather than truncated — it is the point of the note. Wrapping
+    /// through [`line::hang`] lets these lines double as the exact height
     /// [`Self::desired_size`] reserves.
     fn note_lines(&self, width: u16) -> Vec<Line<'static>> {
-        const MARKER: &str = "⚠ ";
-        let style = Style::default().fg(RED).add_modifier(Modifier::BOLD);
+        let width = width as usize;
+        let bold = Style::default().fg(RED).add_modifier(Modifier::BOLD);
+        let plain = Style::default().fg(RED);
         self.notes()
-            .flat_map(|text| {
-                line::hang(
-                    &[Span::styled(MARKER, style)],
-                    vec![Span::styled(text, style)],
-                    width as usize,
-                )
+            .flat_map(|(headline, reason)| {
+                let head = line::hang(
+                    &[Span::styled("⚠ ", bold)],
+                    vec![Span::styled(headline, bold)],
+                    width,
+                );
+                let body = reason.into_iter().flat_map(|reason| {
+                    line::hang(&[Span::raw("  ")], vec![Span::styled(reason, plain)], width)
+                });
+                std::iter::once(Line::default())
+                    .chain(head)
+                    .chain(body)
+                    .collect::<Vec<_>>()
             })
             .collect()
     }

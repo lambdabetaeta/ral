@@ -69,7 +69,7 @@ pub trait ModelSource {
     /// `account`'s full model list.
     ///
     /// # Errors
-    /// Returns `Err` with a message describing why the fetch failed.
+    /// Returns `Err` saying why the fetch failed; the caller names the account.
     fn list(&self, account: &AccountId) -> Result<Vec<Listed>, String>;
 
     /// The upstream serving providers `OpenRouter` lists for `model`. Only a
@@ -122,13 +122,10 @@ impl ModelSource for LiveSource {
             .roster
             .account(id)
             .ok_or_else(|| format!("{id} is not a known account"))?;
-        let credential = self
-            .roster
-            .credential(id)
-            .ok_or_else(|| format!("{} has no resolved credential", self.roster.label(account)))?;
+        let credential = self.roster.credential(id).ok_or("no resolved credential")?;
         match credential {
             Credential::ApiKey(key) => self.list_api_key(account, key),
-            Credential::OAuth(cell) => self.list_chatgpt(account, cell),
+            Credential::OAuth(cell) => Self::list_chatgpt(cell),
         }
     }
 
@@ -174,11 +171,10 @@ impl ModelSource for LiveSource {
 impl LiveSource {
     fn list_api_key(&self, account: &Account, key: &str) -> Result<Vec<Listed>, String> {
         let runtime = blocking_runtime("listing")?;
-        let listing = match Native::of(account.service.adapter) {
+        match Native::of(account.service.adapter) {
             Some(native) => runtime.block_on(native.list(account, key)),
             None => runtime.block_on(self.list_genai(account, key)),
-        };
-        listing.map_err(|e| format!("list models for {}: {e}", self.roster.label(account)))
+        }
     }
 
     /// Endpoint and key passed explicitly, so a catalog request never leans on
@@ -200,35 +196,32 @@ impl LiveSource {
     /// authenticated from the live cell, so a token refreshed here needs no
     /// new source.
     fn list_chatgpt(
-        &self,
-        account: &Account,
         cell: &std::sync::Arc<std::sync::Mutex<oauth::OAuthToken>>,
     ) -> Result<Vec<Listed>, String> {
         let runtime = blocking_runtime("subscription model-list")?;
         runtime.block_on(async {
             oauth::refresh_cell_if_stale(cell)
                 .await
-                .map_err(|e| format!("refresh login for {}: {e}", self.roster.label(account)))?;
+                .map_err(|e| format!("could not refresh the login: {e}"))?;
             let token = cell.lock_ignore_poison().clone();
             let response = crate::provider::tls::client()
                 .get(PLAN_MODELS_URL)
                 .bearer_auth(token.access_token)
                 .send()
                 .await
-                .map_err(|e| format!("list models for {}: {e}", self.roster.label(account)))?;
+                .map_err(|e| e.to_string())?;
             let status = response.status();
             if !status.is_success() {
                 let body = response.text().await.unwrap_or_default();
                 return Err(format!(
-                    "list models for {}: OpenAI returned HTTP {status}: {}",
-                    self.roster.label(account),
+                    "OpenAI returned HTTP {status}: {}",
                     body_detail(&body)
                 ));
             }
             let body: PlanModels = response
                 .json()
                 .await
-                .map_err(|e| format!("parse models for {}: {e}", self.roster.label(account)))?;
+                .map_err(|e| format!("could not parse the model list: {e}"))?;
             Ok(body.listed())
         })
     }

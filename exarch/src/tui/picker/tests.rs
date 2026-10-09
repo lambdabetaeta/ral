@@ -461,27 +461,23 @@ fn provider_control_skipped_for_non_openrouter_model() {
     assert!(p.highlighted_model(&p.rows()).is_some());
     p.key(KeyCode::Tab);
     assert_eq!(p.focus, Focus::Effort);
-    assert!(p.focused_or_model_needing_endpoints().is_none());
+    assert!(p.model_needing_endpoints().is_none());
 }
 
-/// Focusing the provider control is the cue to fetch, and once the driver
-/// seeds the in-flight state the fetch is not requested again.
+/// Highlighting an `OpenRouter` model is the cue to fetch, before the
+/// provider control is focused; once the driver seeds the in-flight state the
+/// fetch is not requested again.
 #[test]
-fn focusing_provider_requests_endpoints_once() {
+fn highlighting_requests_endpoints_once() {
     let mut p = openrouter_picker(); // first row: vendor-a/model-a
-    assert!(
-        p.focused_or_model_needing_endpoints().is_none(),
-        "nothing requested before the control is focused"
-    );
-    p.key(KeyCode::Tab); // Search → Provider
-    assert_eq!(p.focus, Focus::Provider);
+    assert_eq!(p.focus, Focus::Search);
     assert_eq!(
-        p.focused_or_model_needing_endpoints().as_deref(),
+        p.model_needing_endpoints().as_deref(),
         Some("vendor-a/model-a")
     );
     p.set_endpoints("vendor-a/model-a", EndpointsState::Loading);
     assert!(
-        p.focused_or_model_needing_endpoints().is_none(),
+        p.model_needing_endpoints().is_none(),
         "seeding Loading dedups the fetch"
     );
 }

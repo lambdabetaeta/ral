@@ -8,7 +8,7 @@
 use super::app::Overlay;
 use super::line::truncate_spans;
 use super::palette::{CYAN, Col, OVERLAY_BG, SLATE};
-use super::picker::{PAD_Y, overlay_frame};
+use super::picker::{CHROME_H, overlay_frame};
 use super::tui_loop::{OverlayTick, Tui, overlay_tick};
 use crate::bus::{Mailbox, Post, Rewrite};
 use ratatui::Frame;
@@ -18,7 +18,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-const OVERLAY_W: u16 = 64;
+const OVERLAY_W: u16 = 68;
 const VISIBLE_ROWS: usize = 8;
 /// Under the list: a blank, then the reminder of what a rewind spares.
 const NOTE_ROWS: u16 = 2;
@@ -63,8 +63,7 @@ impl RewindOverlay {
         let plane = Style::default().bg(OVERLAY_BG);
         let rows = self.prompts.len().min(VISIBLE_ROWS);
         let list_h = u16::try_from(rows).unwrap_or(u16::MAX);
-        // The bezel's two rows around the padded body.
-        let h = list_h + NOTE_ROWS + 2 * PAD_Y + 2;
+        let h = list_h + NOTE_ROWS + CHROME_H;
         let area = corner(OVERLAY_W, h, frame);
         let inner = overlay_frame(f, area, " REWIND ", " ↑↓ choose · ⏎ rewind · esc keep ");
         let [list, _, note] = Layout::vertical([
