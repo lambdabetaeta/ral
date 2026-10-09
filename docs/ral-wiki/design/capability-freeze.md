@@ -73,7 +73,7 @@ path a running body asks to open.
   filesystem thereafter.
 
 So the runtime fold resolves paths against the live environment rather than
-reading a fully-canonical bundle: the [[internals/capability-enforcement|four-stage
+reading a fully-canonical bundle: the [[internals/path-judgment|four-stage
 rule]] (expand → lex → canonicalise → `path_within`) runs *per access*, and
 "canonicalise before match" is exactly what closes symlink and `..` escape. This
 is the access-time complement to the load-time freeze — the same reason the

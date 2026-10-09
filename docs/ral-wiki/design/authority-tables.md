@@ -502,7 +502,7 @@ marks a refusal that names the denied spelling.
   the name in that launch, and the next launch finds an object to mask or
   stamp. macOS holds it from the start, Seatbelt's rules being negative over
   names (`docs/SPEC.md` §12.3;
-  [[internals/capability-enforcement|capability-enforcement]]).
+  [[internals/holding-a-deny|holding-a-deny]]).
 
 See also [[design/grant|grant]], [[design/two-enforcers|two-enforcers]],
 [[related/access-control-algebra|access-control-algebra]] (restrict as meet

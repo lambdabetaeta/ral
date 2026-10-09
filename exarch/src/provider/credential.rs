@@ -17,7 +17,7 @@
 use crate::provider::identity::{self, Account, AccountId, Auth, Service};
 use crate::provider::oauth::{self, OAuthToken};
 use ral_core::sync::LockExt;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 /// The inert bearer bound to a keyless declared endpoint.
@@ -66,6 +66,7 @@ impl CredentialStore {
     /// Sweep every built-in and declared service's key variable, then scrub
     /// every one that was *present* — the malformed one too, since a value
     /// with a pasted newline is still a live secret for a child to inherit.
+    /// The process is sealed first (`seal`), and each variable erased (`erase`).
     /// `ChatGPT` logins are folded in from the token store.
     ///
     /// SAFETY: call this while the process is still single-threaded (before any
@@ -75,6 +76,7 @@ impl CredentialStore {
         reason = "the one read of the key variables, and their scrub"
     )]
     pub fn resolve_and_scrub(declared: Vec<Service>) -> Self {
+        seal();
         let all: Vec<Account> = identity::built_in_services()
             .into_iter()
             .filter(|service| service.auth != Auth::OAuth)
@@ -82,22 +84,20 @@ impl CredentialStore {
             .map(Account::of_service)
             .collect();
         let mut environment = BTreeMap::new();
-        let mut scrub = Vec::new();
+        let mut scrub = BTreeSet::new();
         for account in &all {
             if let Auth::Key(var) = &account.service.auth
                 && let Ok(raw) = std::env::var(var)
             {
-                scrub.push(var.clone());
+                scrub.insert(var.clone());
                 if let Some(key) = well_formed_key(&raw) {
                     environment.insert(account.id.clone(), key);
                 }
             }
         }
-        scrub.sort_unstable();
-        scrub.dedup();
         for var in &scrub {
             // SAFETY: single-threaded startup, per this function's contract.
-            unsafe { std::env::remove_var(var) };
+            unsafe { erase(var) };
         }
 
         let mut store = Self {
@@ -291,6 +291,50 @@ impl Roster {
 pub fn well_formed_key(raw: &str) -> Option<String> {
     let key = raw.trim();
     (!key.is_empty() && !key.bytes().any(|b| b < 0x20 || b == 0x7f)).then(|| key.to_string())
+}
+
+/// Make this process non-dumpable, so its `/proc/<pid>/{environ,mem,maps}`
+/// belong to root and no same-uid process, itself included, can read the keys
+/// it holds. `execve` restores dumpability, so children are unaffected.
+#[cfg(target_os = "linux")]
+fn seal() {
+    // SAFETY: changes only this process's dumpable flag.
+    let rc = unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) };
+    debug_assert_eq!(rc, 0, "PR_SET_DUMPABLE is infallible with valid arguments");
+}
+
+#[cfg(not(target_os = "linux"))]
+fn seal() {}
+
+/// Unset `var`, overwriting its value first: `unsetenv` drops only libc's
+/// pointer, while `/proc/<pid>/environ` (Linux) and `KERN_PROCARGS2` (macOS)
+/// read the launch bytes themselves.
+///
+/// SAFETY: no other thread may touch the environment.
+#[cfg(unix)]
+#[allow(clippy::disallowed_methods, reason = "the scrub's one unset")]
+unsafe fn erase(var: &str) {
+    let name = std::ffi::CString::new(var).expect("a variable `std::env::var` read holds no NUL");
+    // SAFETY: per this function's contract.
+    let value = unsafe { libc::getenv(name.as_ptr()) };
+    if !value.is_null() {
+        // SAFETY: POSIX forbids writing through `getenv`'s result only because
+        // libc may share it; nothing here reads it again, `unsetenv` follows at
+        // once, and the bytes are writable: the `execve` stack or libc's own copy.
+        unsafe {
+            let len = std::ffi::CStr::from_ptr(value).count_bytes();
+            std::ptr::write_bytes(value, 0, len);
+        }
+    }
+    // SAFETY: per this function's contract.
+    unsafe { std::env::remove_var(var) };
+}
+
+#[cfg(not(unix))]
+#[allow(clippy::disallowed_methods, reason = "the scrub's one unset")]
+unsafe fn erase(var: &str) {
+    // SAFETY: per this function's contract.
+    unsafe { std::env::remove_var(var) };
 }
 
 #[cfg(test)]

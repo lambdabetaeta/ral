@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 73bc87ff
-generated_at_date: 2026-10-08
+generated_at_commit: 0dc4a920
+generated_at_date: 2026-10-09
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs]
 ---
 
@@ -210,8 +210,10 @@ present, and `chatgpt.tokens.use.direct` be among the granted scopes. See
 
 Environment resolution is exarch's own story: `CredentialStore::resolve_and_scrub`
 sweeps every `Auth::Key` service's variable once, at single-threaded startup,
-into the store's `environment` layer, and scrubs what it found so no child of
-a tool call inherits a live key. The sweep is therefore un-repeatable by
+into the store's `environment` layer, and scrubs what it found (see
+[[invariants/a-grant-never-reaches-its-own-key|a-grant-never-reaches-its-own-key]])
+so neither a child of a tool call nor the session itself can read a live key
+back. The sweep is therefore un-repeatable by
 construction, and that layer never changes after it.
 
 The **other** layer is the computer's own credential manager. [[map/synod|synod]]
@@ -245,7 +247,7 @@ Each launch reads the vault once per key-bearing account:
   of them to every grant that attenuates the filesystem at all, since the
   base profiles read `xdg:config`/`xdg:state` wholesale and would otherwise
   hand the agent the key that pays for its own turn — see
-  [[decisions/260905_a-grant-does-not-hand-out-its-own-key|a-grant-does-not-hand-out-its-own-key]].
+  [[invariants/a-grant-never-reaches-its-own-key|a-grant-never-reaches-its-own-key]].
 - `provider/secret_file.rs` — `write_private`, the owner-only writer the
   `ChatGPT` token store and that fallback file share: one implementation of
   the `0600`-at-`open` and owner-only-DACL-at-`CreateFileW` promise instead of

@@ -142,11 +142,11 @@ pub struct Cli {
 
     /// Choose the file-editing method that Exarch teaches the agent to use.
     ///
-    /// `replace`, the default, replaces exact text. `hash` identifies lines by
-    /// hashes before changing them. Both methods remain available as tools;
+    /// `hash` identifies lines by hashes before changing them.
+    /// `replace` replaces exact text. Both methods remain available as tools;
     /// this option changes the instructions, not the installed tools. It is
     /// unavailable in chat mode.
-    #[arg(long = "edit", value_enum, default_value_t = EditScheme::Replace, conflicts_with = "chat")]
+    #[arg(long = "edit", value_enum, default_value_t = EditScheme::Hash, conflicts_with = "chat")]
     pub edit: EditScheme,
 
     /// Start a simple interactive conversation with the model.

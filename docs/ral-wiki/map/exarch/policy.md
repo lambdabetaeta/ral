@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 6c9047b6
-generated_at_date: 2026-10-08
+generated_at_commit: 0dc4a920
+generated_at_date: 2026-10-09
 covers_paths: [exarch/src/policy.rs, exarch/src/policy/]
 ---
 
@@ -29,7 +29,7 @@ pushed layer**:
 - pushes each `--restrict` file as its own layer (attenuates);
 - pushes a deny layer carving out each restrict file's own path (below);
 - pushes a deny layer for
-  [[decisions/260905_a-grant-does-not-hand-out-its-own-key|exarch's and synod's own credential files]]
+  [[invariants/a-grant-never-reaches-its-own-key|exarch's and synod's own credential files]]
   the same way, for every base but `dangerous`.
 
 Composition emits no confused-deputy warning naming every prefix both
@@ -92,7 +92,7 @@ of bytes structurally unreachable: a restrict file's own path, so the agent
 cannot edit the file that shapes its authority, and — once some layer already
 holds an `fs` opinion — `provider::credential_files()`, so the agent cannot
 read the credentials that authorise its own turn
-([[decisions/260905_a-grant-does-not-hand-out-its-own-key|a-grant-does-not-hand-out-its-own-key]]).
+([[invariants/a-grant-never-reaches-its-own-key|a-grant-never-reaches-its-own-key]]).
 Pushed as its own layer, a credential deny is one no profile can omit by
 neglect and no `--extend-base` can widen back open — the stack's fold can
 only narrow past it. **Only the user-supplied lexical form is pushed** — both

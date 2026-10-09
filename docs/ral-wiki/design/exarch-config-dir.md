@@ -51,7 +51,7 @@ could omit ([[map/exarch/policy|policy]]).
   and `xdg:state` whole, so tools find their own configuration — which is why
   the files holding our credentials are denied by name, in composition, on the
   same footing as a restrict file
-  ([[decisions/260905_a-grant-does-not-hand-out-its-own-key|a-grant-does-not-hand-out-its-own-key]]).
+  ([[invariants/a-grant-never-reaches-its-own-key|a-grant-never-reaches-its-own-key]]).
   Everything else here the agent may read, and some of it it is meant to: the
   global `AGENTS.md` and the skill roots are addressed to it.
 

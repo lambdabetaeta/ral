@@ -6,10 +6,10 @@ line together with the smallest window of neighbours that makes it unique in the
 file. An edit is a batch of `[hash: …, line: …]` records, each naming one line
 and the text that replaces it.
 
-This is the scheme `--edit hash` teaches. The taught default is literal string
-replacement — `edit-replace path from to`, one unique occurrence — and only the
-prompt section switches: `edit-hash` stays registered either way, so everything
-below remains live ([[map/exarch|exarch]]).
+This is the scheme `--edit hash` teaches. `--edit replace`
+teaches literal string replacement — `edit-replace path from to`, one unique
+occurrence. Only the prompt section switches: both editing builtins stay
+registered either way ([[map/exarch|exarch]]).
 
 The witness has two jobs ([[map/exarch/builtins|builtins]] is the *where*):
 

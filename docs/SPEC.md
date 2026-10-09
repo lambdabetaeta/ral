@@ -2942,7 +2942,7 @@ ral resolves the accessed path, including symlinks, before testing prefix member
 
 ral checks filesystem operations that it performs itself. A spawned program’s own filesystem access is instead confined by the host sandbox where supported.
 
-A `deny` naming a path that does not exist at launch, inside a `write` prefix, is held against spawned programs by the kernel from the start on macOS. On Linux and Windows it is held by ral’s own check alone until the path exists, since neither kernel can refuse the creation of a single name: a child can create it in that launch, and the next launch finds it and the kernel holds it.
+A `deny` may name a path that does not exist yet, inside a `write` prefix. On macOS the kernel refuses spawned programs its creation. On Linux and Windows neither kernel can refuse the creation of a single name, so ral’s own check alone holds it: ral never creates the path, but a spawned program can, and that program and the processes it starts can use what it created. Each external command is confined afresh, so every later command finds the path and is refused it, and what was created stays on disk. A symbolic link created at the path extends the deny to the link’s target.
 
 One write no grant admits: onto a binary the sandbox pinned at startup — bubblewrap on Linux, ral’s own executable where it re-execs itself — judged by inode, so a hard link or a rename since startup names it too. The refusal names the binary and is not a grant denial. Replacing the file by rename is permitted; the session keeps running the copy it pinned.
 

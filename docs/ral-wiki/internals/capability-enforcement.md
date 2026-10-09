@@ -1,526 +1,153 @@
 ---
-verified_at_commit: 8928f5de
-verified_at_date: 2026-10-06
-anchors: [check_exec, Admitted, admit, ExecRules, for_kernel, Head, carriers, check_fs_exact, locate, walk, Located, admits_fs_exact, fs_verdict, pinned_binary, SandboxProjection, Flag, Denial, refused, region, Region, Table, live, GrantStack, sandboxed_command, build_launch, projection_enforceable, serve_warrant, Warrant, Slot, Handoff, Landlocked, bwrap_argv, Binds, render_objects, SessionSandbox, fs_capability_name, ensure_fs_grant, deputy_prefixes, Refusal, spawn_error, Envelope, InfoFd, HostEnvelope, render_dev, cgroup_tree, floor, Pinned, pin_envelope]
+verified_at_commit: 0dc4a920
+verified_at_date: 2026-10-09
+anchors: [check_exec, Admitted, admit, Flag, Denial, refused, region, Region, Table, GrantStack, SandboxProjection, Widen, sandboxed_command, build_launch, projection_enforceable]
 ---
 
-# Capability enforcement: one chokepoint, two enforcers
+# Capability enforcement: one model, two enforcers
 
-[[design/grant|The grant design]] states the lattice — authority attenuated by
-intersection. This is how a check actually runs: an in-process decision layer and
-an OS sandbox that backs it for external commands, each authoritative exactly
-where the other is blind ([[design/two-enforcers|two enforcers]];
-`core/src/capability/`, `core/src/guard/`, `core/src/sandbox/`).
+**A grant is data, and two enforcers read it: an in-process guard for what ral
+does itself, and an OS sandbox for what a spawned program does on its own.**
+Each is the authority exactly where the other is blind
+([[design/two-enforcers|two enforcers]]). [[design/grant|The grant design]]
+states the lattice; this page says how a check runs. The code lives in
+`core/src/capability/`, `core/src/guard/` and `core/src/sandbox/`.
 
-**The model is data, and the guard and the sandbox are its two consumers**
-([[decisions/261006_capability-is-data|capability-is-data]]; the order is
-`capability < sandbox < guard`). **Every in-process yes/no is a
-`guard::check_*(&Context, …)` that folds the whole stack.** Each decision
-(`guard/enforce.rs`) is a free function over a borrowed `Context`, and each
-meets the dynamic `GrantStack` (`ctx.grants`) before answering, so a verdict
-reflects authority intersected across the *whole* stack, not a single frame.
-The exec and fs checks return a typed `Denial`, which `Shell::refused`
-(`guard/shell.rs`) records on the trail at the one door:
+The detail is split by mechanism:
 
-- `check_exec`, which returns the `Admitted` token every launch demands,
-  minted by `GrantStack::admit` alone;
-- `Shell::check_fs_read`, a read *by name* — a predicate, a listing, a module
-  load;
-- `Shell::locate`, the door every open goes through, which judges the
-  located object with `check_fs_exact`;
-- the boolean flags, one `Flag` and one `Shell::check(Flag, who)`;
-- and, on the sandbox's side, `SandboxProjection::of`, the OS-renderable
-  projection folded off the same tables.
+- [[internals/path-judgment|path-judgment]] — how ral judges a filesystem path,
+  and the one walk every open goes through;
+- [[internals/exec-judgment|exec-judgment]] — how ral judges which program may
+  run, and the limit of a name veto;
+- [[internals/holding-a-deny|holding-a-deny]] — how a `deny` holds against a
+  child that moves, links or creates files, and the one case Linux cannot hold;
+- [[internals/linux-envelope|linux-envelope]] — the bwrap envelope: what it
+  mounts, and how it copes with hosts that refuse it;
+- [[internals/confined-launch|confined-launch]] — how one external command is
+  confined on each platform, and how it fails closed;
+- [[internals/seatbelt-profile|seatbelt-profile]] — the macOS profile, rule by
+  rule.
 
-The `capability` module is the only place authority is decided, and `guard`
-and `sandbox` the only places it is read — a module boundary, not a typestate
-([[decisions/260605_witness-collapse|witness-collapse]]). **The fold composes
-verdicts over layers; it never flattens the layers into one frame.** A
-`Capabilities` is one layer and the `GrantStack` is the meet — each verdict
-(`capability::exec::rules`, `capability::fs::region`, `GrantStack::permits`)
-walks the stack and combines what each layer says about *this* access. There
-is no `Capabilities::meet`: an authored `ExecGrant` is not closed under
-intersection, because a bare key means the file the host `PATH` finds at
-check time ([[decisions/260906_object-not-name|object-not-name]]). Its
-compiled form is: `rules` compiles every layer into an `ExecRules` table on
-each question and meets the tables, and `region` re-freezes every layer's
-prefixes for one op into a `Region` and meets those. Both are a `Table`,
-whose meet is the pointwise law `⟦a ∧ b⟧ = ⟦a⟧ ∧ ⟦b⟧`
-([[design/authority-tables|authority-tables]]); restrict as meet and
-extend-base as widen, deny-overriding both ways, are read against the
-literature in [[related/access-control-algebra|access-control-algebra]].
-`Widen` serves the one place a union is meant — exarch's `--extend-base` widening a single base layer — with
-its own "silence lifts no veto" rule.
+## One model, read in two places
 
-- a dimension omitted from a layer inherits the ambient authority;
-- a dimension present can only narrow;
-- a deny is anti-monotonic — a later layer adds denies but never reopens a denied
-  region ([[design/scoping|dynamic frames]]).
+**The `capability` module decides authority; `guard` and `sandbox` only read
+it** ([[decisions/261006_capability-is-data|capability-is-data]]). The
+dependency order is `capability < sandbox < guard`. This is a module boundary,
+not a typestate ([[decisions/260605_witness-collapse|witness-collapse]]).
 
-Exec is three-valued (`Verdict`: Allow / Only / Deny). The bundled coreutils and the
-structured primitives route through this same chokepoint
-([[internals/builtins-registry|builtins]]), which closes the bypass and lets ral
+**Every in-process yes or no is a `guard::check_*(&Context, …)`.** Each check
+in `guard/enforce.rs` is a free function over a borrowed `Context`. It folds
+the whole dynamic `GrantStack` (`ctx.grants`) before it answers, so a verdict
+reflects every frame on the stack, not just the top one. The exec and fs checks
+return a typed `Denial`, and `Shell::refused` (`guard/shell.rs`) records it on
+the trail. The doors are:
+
+- `check_exec`, which returns the `Admitted` token every launch needs. Only
+  `GrantStack::admit` mints one.
+- `Shell::check_fs_read`, a read *by name*: a predicate, a listing, a module
+  load.
+- `Shell::locate`, the door every open goes through. It judges the object it
+  lands on with `check_fs_exact`.
+- the boolean flags: one `Flag`, checked by one `Shell::check(Flag, who)`.
+- on the sandbox's side, `SandboxProjection::of`, the part of the policy the OS
+  can render, folded from the same tables.
+
+## The fold keeps the layers apart
+
+**A verdict combines what each layer says about *this* access. It never
+flattens the layers into one frame.** A `Capabilities` is one layer, and the
+`GrantStack` is their meet. Each verdict (`capability::exec::rules`,
+`capability::fs::region`, `GrantStack::permits`) walks the stack.
+
+There is no `Capabilities::meet`, because an authored `ExecGrant` is not closed
+under intersection: a bare key means whatever file the host `PATH` finds at
+check time ([[decisions/260906_object-not-name|object-not-name]]). So the fold
+compiles first, then meets:
+
+- `rules` compiles every layer into an `ExecRules` table for each question, and
+  meets the tables.
+- `region` re-freezes every layer's prefixes for one operation into a `Region`,
+  and meets those.
+
+Both are a `Table`, whose meet is the pointwise law `⟦a ∧ b⟧ = ⟦a⟧ ∧ ⟦b⟧`
+([[design/authority-tables|authority-tables]]).
+[[related/access-control-algebra|access-control-algebra]] reads restrict-as-meet
+and extend-base-as-widen, both deny-overriding, against the literature.
+
+**One place means a union, and it has its own rule.** `Widen` serves exarch's
+`--extend-base`, which widens a single base layer. There, silence lifts no
+veto.
+
+Three rules govern how layers compose:
+
+- A dimension a layer omits inherits the ambient authority.
+- A dimension a layer states can only narrow.
+- A deny is anti-monotonic. A later layer can add denies, but never reopens a
+  denied region ([[design/scoping|dynamic frames]]).
+
+Exec has three verdicts (`Verdict`: Allow / Only / Deny). The bundled coreutils
+and the structured primitives go through the same chokepoint
+([[internals/builtins-registry|builtins]]). That closes the bypass, and lets ral
 stay a [[invariants/single-binary|single binary]].
 
-**Path matching is a fixed rule** (`core/src/path/`):
+## Who enforces what
 
-- expand sigils and `~`;
-- lex;
-- canonicalise (resolving symlinks);
-- match by prefix (`path_within`).
+**The guard covers what ral dispatches. The OS sandbox covers what a spawned
+process does on its own.**
 
-Canonicalising *before* matching is why a directory scoped by a grant cannot be
-escaped through a symlink or `..` — for a read *by name*. **An open takes a
-fifth stage instead** (`path/walk.rs`): `Shell::locate` walks the name from
-the root through *search* handles — the right to resolve names through a
-directory, not to read it, so the walk asks of an ancestor exactly what the
-kernel's resolver asks and a sandbox's metadata-only ancestor rule suffices —
-never letting the kernel follow a symlink, splicing each link it meets into
-the remaining name itself — a `..` is the kernel's, physical, climbing out
-of a link's target rather than its place, and on macOS each component is
-spelled as the directory stores it, so a case-variant name meets the deny
-frozen under its stored spelling, and on Windows a `~`-bearing name is
-renamed by the kernel through an attribute-only handle, so an 8.3 alias
-meets the deny frozen under its long one; stored spellings cover *existing*
-names, and the deny relation covers absent ones: a deny rule of a
-`Region` holds a path whose components agree with it under
-`identity::collision_key`, so a create spelled `.ENV` meets an absent
-`deny: [cwd:/.env]`, and the refusal says it was caught by another spelling
-([[decisions/261006_denies-hold-under-every-spelling|denies-hold-under-every-spelling]]) — and
-judges the *object* it lands on (`check_fs_exact` on `Located::real`, which is
-canonical by construction). The `Located` then performs the open, stat,
-staging, rename and unlink relative to the directory handle with
-`FollowSymlinks::No`, so what was judged is what is touched: a dangling link
-is judged at its target, and a component swapped after the judgment is never
-followed. `check_fs_write` no longer exists — every write is a `locate`.
+- **Exec.** The guard checks every platform. `check_exec` judges the program
+  and its argv *before* the spawn and returns `Admitted`, which `build_launch`
+  launches from. The kernel then holds the same rules against programs the
+  child starts itself (`sh -c`, `find -exec`): Seatbelt on macOS, Landlock on
+  Linux. Windows has no kernel exec filter
+  ([[internals/exec-judgment|exec-judgment]]).
+- **Filesystem.** The guard checks ral's own reads and writes
+  (`check_fs_exact`). An OS sandbox confines the child's: Seatbelt on macOS,
+  bwrap on Linux, an AppContainer LowBox token on Windows.
+- **Network.** There is no guard, because ral performs no network operation
+  itself. The OS sandbox is the only enforcer. On Windows it is the withheld
+  network capability SIDs: a LowBox token without them cannot open a socket.
 
-**A command head is judged by the program it will run.** `Head::resolve`
-(`runtime/command/head.rs`) finds a `Program` once — a bundled `Tool`, or a
-host `File` with its spelling and its real path — and
-`ExecRules::verdict` judges it, the one function that does
-([[decisions/261004_exec-rules|exec-rules]]). A path key matches the real
-path by equality and a directory by containment, the deepest deciding; a bare
-key is the file the host `PATH` finds, so a planted `/tmp/evil/rg` does not
-inherit `rg: allow`, and a bare deny also vetoes the name wherever it
-resolves, so it stops an absolute `/bin/bash` and a symlink to it alike. A
-head naming no file has no program: 127 or 126, never a denial.
+**For the filesystem, guard and sandbox cannot disagree, by construction.**
+Both read one fold (`capability/fs.rs`). `region` meets each layer's `Region`
+for the operation: the allows meet and the `deny_paths` join. A read then joins
+`floor()`, the platform's system paths, after the meet, so no `read` narrows the
+floor and only a `deny` removes part of it. No backend carries a system set of
+its own. So the conservatism invariant needs no differential test. The only
+difference is *when* the fold runs:
 
-**ral runs the object it judged.** The launcher execs the `File`'s real path
-with the user's spelling as `argv[0]` (`Launch::arg0`; the warrant's `file`
-carries both), so a link retargeted between judgment and `execve` — by an
-earlier pipeline stage, say — cannot run another program. A renamed
-*ancestor* still can, up to the `execve` on macOS and on Linux up to the
-moment the envelope opens the image to mount it
-([[decisions/261006_the-envelope-mounts-by-handle|the-envelope-mounts-by-handle]]);
-closing that wants `Program` to carry a handle from `Head::resolve`. A `#!` script reached
-through a link sees its real path as `$0`: the kernel hands the interpreter
-the exec path, not `argv[0]`.
+- the guard folds afresh on every check, and asks `verdict`, then `respelled`
+  on a refusal;
+- the sandbox folds once at spawn, when it writes the profile, and renders
+  `live()` and `denies()` as surface strings.
 
-The limit is worth knowing rather than discovering: **a name veto is not a
-containment boundary.** A *copy* of a denied binary under another name is a
-different file, carrying no trace of the name refused, and an allow dir admits
-it — in the in-process guard and, since Seatbelt's `(deny process-exec (regex #"/bash$"))`
-also sees only the new name, in the macOS profile too. What holds there is the
-projection, not the name: the copy is spawned under the same confinement as its
-author, so it reaches nothing new. `capability/deputy.rs` reports the writable
-exec-admitted prefixes that make such a copy runnable — only where a grant
-restricts *both* dimensions, since an unrestricted `fs` is not "everything
-writable" — but it reports rather than denies, and the overlap is not itself an
-escalation ([[design/grant|grant]] §Concessions,
-[[decisions/261004_exec-rules|exec-rules]]).
+**The projection never carries an allow beneath a deny (`live()`).** Under
+deny-wins such an allow is dead. It must never reach a backend whose primitive
+puts explicit allows before inherited denies, as a Windows ACL does.
 
-That premise is true of the folded grant but was false of the backends, which
-render an unrestricted `fs` as every write allowed and a broad write prefix as
-writes into every admitted directory it covers: a veto could be answered with
-a copy authored there. So both kernels freeze what a write reaches without
-naming it, Linux at every name a writable bind shows the admit, since a prefix
-written through a symlink is two binds of one handle and a mount laid in one
-does not show at the other ([[decisions/261006_a-veto-freezes-what-a-write-covers|a-veto-freezes-what-a-write-covers]]):
-under an unrestricted `fs` the whole exec allow-set when a veto is in force,
-under a restricted one each admitted directory a write prefix *covers*. An
-overlap the grant names, a write at or below an admit at or above the
-directory, stays writable and reported: `reasonable` admits `cwd:/` for the
-very scripts it lets the agent write, while `edit-only` and `read-only` admit
-no directory they can write, which is what lets their `git`/`bash` denies mean
-something.
+## Confinement is per command
 
-**The in-process guard covers what ral dispatches; the OS sandbox covers what a
-spawned process does on its own.**
+**The sandbox wraps each external command. It never re-runs the grant body.**
+A `grant` is a *local* dynamic effect scope: its body evaluates in process, and
+`transport::dispatch` runs it locally. Nested grants compose by intersection on
+the `GrantStack`, which is not a process boundary ([[design/grant|grant]]).
+Confinement happens one level down: when `build_launch` spawns an admitted
+external or bundled child under a restrictive projection, it calls
+`sandboxed_command`, which confines that one child
+([[internals/confined-launch|confined-launch]]).
 
-- *Exec* — guarded in-process on every platform: `check_exec` judges the
-  program and its argv *before* the spawn and returns `Admitted`, the token
-  `build_launch` launches from. On macOS the Seatbelt profile additionally
-  renders the rules as `process-exec` forms, catching re-execs the in-process
-  guard never sees (`sh -c`, `find -exec`); on Linux a Landlock ruleset the
-  parent builds and the payload enters inside the bwrap envelope carries them
-  into the kernel, each allowed directory less what the table blocks beneath
-  it over the tree at launch, a veto only where no trusted write reaches
-  ([[decisions/260906_landlock-exec-layer|landlock-exec-layer]]); the
-  AppContainer on Windows has no path-exec filter, so there the in-process
-  guard stands alone and check-to-exec timing stays open. The kernel's rules
-  are `ExecRules::for_kernel` of the very table in the `Admitted`, with the
-  carriers spliced in ([[decisions/261004_exec-carriers|exec-carriers]]) and
-  each file at its final verdict; Seatbelt reads it in `precedence` order, so
-  last-match-wins is the guard's rank: guard and kernel cannot
-  disagree, except that the kernel sees no argv and no bundled tool's name.
-- *Filesystem* — guarded in-process too (`check_fs_exact`, read and write), and
-  backed by an OS sandbox that confines a spawned child's own reads and writes:
-  Seatbelt on macOS, bwrap on Linux, an AppContainer LowBox token on Windows.
-  Guard and profile read *one* fold (`capability/fs.rs`: `region` meets each
-  layer's `Region` for the op, its allows meeting and its `deny_paths`
-  joining; a read then joins `floor()`, the platform's system paths, after the
-  meet, so no `read` narrows it and only a `deny` removes it), so here the
-  conservatism invariant needs no differential test — the two cannot disagree,
-  by construction: no backend carries a system set of its own. All that separates them is when the fold runs:
-  afresh on every check for the guard, once at spawn for the profile, because
-  that is when the profile is written. The guard asks `verdict`, and on a
-  refusal `respelled`; the profile renders `live()` and `denies()` as surface
-  strings. The projection carries no allow beneath a deny (`live()`):
-  under deny-wins such an allow is dead, and a backend whose primitive orders
-  explicit allows before inherited denies — a Windows ACL — must never be
-  handed one. On macOS the directories a deny needs kept in place
-  (`FsRules::pinned_dirs`) are the ancestor closure of every *rendered* deny
-  name within a rendered write name, so an alias's chain is pinned alongside
-  its target's ([[internals/seatbelt-profile|seatbelt-profile]]).
-  One target is excused before either region is consulted: the *discard
-  device* — `/dev/null`, or `\\.\NUL` on Windows — which
-  `LexicalPath::is_discard` names on either host, and which needs no
-  authority because nothing reaches the disk through it. Its Windows
-  neighbours are refused rather than excused: a path ending in a DOS reserved
-  device name (`C:\x\NUL`, `nul.txt`, `CON`, `COM1.log`) is no file ral will
-  open or judge, so the same door turns it away with an error before any
-  region is consulted (`check_device_name`). `GrantStack::admits_fs`
-  deliberately does not share the
-  exemption: it decides *membership* in a region, and a device excused from an
-  access is not thereby a member of anything. The same predicate settles
-  whether the act is a fact at all ([[design/audit|audit]]). Its twin on the
-  other side is the one write no grant admits: `fs_verdict` answers `Guarded`
-  for a write onto a binary the sandbox pinned at boot — bwrap on Linux, ral's
-  own executable — *before* the stack is folded, because a stack with no `fs`
-  opinion is `Unrestricted` and exactly the case to catch. `sandbox::pinned_binary`
-  judges by inode, so a hard link or a rename since boot names the pin too,
-  and a replace-by-rename stays admitted: the pinned copy survives it
-  ([[design/two-enforcers|two-enforcers]]).
-- *Network* — no in-process guard at all, since ral dispatches no network
-  operation itself, so the OS sandbox is the sole enforcer; on Windows the
-  enforcement is the withheld network capability SIDs — a LowBox token
-  without them cannot open a socket.
+Two consequences follow:
 
-**A `deny` must survive the filesystem moving around it, not just name a path
-to refuse.** [[design/grant|grant]] states the invariant: no confined child can
-cause a denied path's contents to become reachable under a name the deny does
-not cover. Writing, unlinking, or hard-linking a `deny_paths` entry itself is
-already blocked — the Seatbelt profile renders a `subpath` deny for each — but
-an *ancestor* of that entry sits outside its subpath and inside the write
-prefix's own allow, so a confined `mv` or `rm` could relocate the ancestor
-directory and carry the denied bytes to a name nothing covers.
-`FsRules::pinned_dirs` (`core/src/sandbox/projection.rs`) closes the
-gap: every proper ancestor of a `deny_paths` entry that lies within some write
-prefix — the write prefix root included — is collected, over both a deny's
-surface spelling and its symlink-resolved target, so a symlink swapped in
-after sandbox entry is covered too. `build_profile`
-(`core/src/sandbox/macos.rs`) emits `(deny file-write-unlink (literal
-"<dir>"))` for each pinned directory, after the write prefix's own covering
-allow (Seatbelt is last-match-wins); `literal`, never `subpath`, is what keeps
-a pinned directory's *entries* mutable — only its own name-in-parent is
-frozen. The price lands on macOS specifically: a grant that writes a repo and
-denies `.git/config` also refuses `mv .git .git.bak` and `rmdir .git`, since
-both `.git` and the repo root are pinned ancestors of the denied entry.
+- Each command is its own *launch*. Two commands in one grant body run in two
+  envelopes, each rendered afresh from the filesystem as it then stands.
+- Confinement engages only when a child is actually spawned. A
+  `grant [net: false] { … }` that runs no external command does not fail
+  closed. An offline request on a backend that cannot enforce it fails closed at
+  the spawn (`projection_enforceable`).
 
-**Linux renders no pin, and that is not an oversight.** bwrap realizes a
-`deny` as a mount laid over the denied path (`DenyMask`,
-`core/src/sandbox/linux.rs`); a mount is anchored to the inode it covers, not
-to the path string that named it at mount time, so renaming a non-mountpoint
-ancestor carries the mask along and it keeps covering the real file at its new
-location, while renaming or removing the mountpoint itself fails with `EBUSY`.
-The invariant already holds by construction, so Linux pays a narrower price
-than macOS: only the denied path's own name is frozen, and every ancestor —
-the write prefix root included — stays freely renameable and removable.
+[[design/exarch-architecture|exarch]] reuses this boundary unchanged: an agent
+run is a host-pushed grant frame over the same stack.
 
-**The shape of the denied path forces which mount, and the cost of confusing
-them is the launch.** `--tmpfs` mkdirs its own mountpoint, so over an existing
-regular file it dies with `ENOTDIR` before bwrap execs anything — a deny that
-denies nothing because nothing runs. Hence `DenyMask::over` as the only
-constructor: an existing non-directory takes `--ro-bind /dev/null`, bound
-without `MS_DEV` and so unopenable either way; a directory takes `--perms 0000
---tmpfs`, whose missing bits refuse the owner as much as anyone, so a tool
-writing there is refused rather than told it succeeded. That tmpfs is the
-sandboxed uid's own, so a child that deliberately `chmod`s the bits back has
-private scratch at the name — memory the host never sees, never the denied
-directory, and the mask's stated limit
-([[decisions/260905_an-envelope-does-not-touch-the-host|an-envelope-does-not-touch-the-host]]).
-Nothing mounts over a symlink, so a
-symlinked `deny` is masked at the resolved target `SandboxProjection` carries
-beside the surface spelling.
-
-**A name that does not exist gets no mask at all.** Every mount bwrap could lay
-there it must `mkdir` a mountpoint for first, and the writable binds are
-identity binds of real host directories, so that mkdir is a write to the host —
-`EROFS` and a dead envelope under a read-only bind, and under a writable one a
-deny that creates the very name it forbids
-([[decisions/260905_an-envelope-does-not-touch-the-host|an-envelope-does-not-touch-the-host]]).
-Under a read-only bind nothing is lost, creation being the only access an
-absent name has. Under a writable bind the deny falls to the in-process guard
-alone, which is a seam on Linux and Windows and named as one: macOS's rules are
-negative and range over names, so Seatbelt enforces the same deny in full. The
-masks that do land refuse with `EACCES` against macOS's `EPERM`, so a
-cross-platform test should assert the bytes are unreachable rather than an
-errno — and because the failure modes here are a sandbox that never launches
-and a mount that lies, they are pinned by tests that spawn the envelope for real
-(`sandbox::linux::tests::a_denied_path_refuses_every_access_while_the_body_still_runs`,
-`::building_an_envelope_never_creates_a_denied_name_on_the_host`).
-
-**No mechanism holds an absent name under a writable prefix, and none was
-built.** Each way of refusing a child the creation of one name touches the
-host or refuses more than the name. A bwrap mask over an absent name makes its
-mountpoint on the host, and if the host later unlinks it the mask lazily
-unmounts; a tmpfs over the parent hides the rest of the directory; Landlock
-refuses creation per directory, never per name; fanotify permission events need
-privilege; seccomp cannot read a path argument; and a Windows ACE attaches to an
-object, of which the name has none. What remains is the stated residual: the
-in-process guard refuses ral's own creation, a child may make the name for that
-launch, and the next launch finds an object to mask or stamp
-(`docs/SPEC.md` §12.3); macOS's end of the pair is
-`capabilities::seatbelt_holds_an_absent_deny_inside_a_write_prefix`.
-
-**bwrap mounts what ral opened, never a name it resolves.** `Binds::open` plans
-every bind a launch shows — the read-only defaults, the read and write prefixes,
-the program's real image, each file and live directory the exec table allows,
-and over everything the cgroup tree — opens each object once without following
-a symlink, and lends a copy per bind at `Slot::Mount(i)`; `bwrap_argv` emits
-`--ro-bind-fd`/`--bind-fd` from the same vector. A path is its canonical object
-and the spellings that reach it (`render_objects`): `/bin` shows `/usr/bin`'s
-handle, except within another bind, where the host's own link already stands.
-A read-only bind within another bind adds nothing and a writable one is dropped
-only within a writable one. An absent object drops its binds at the open, and
-so does a system default this user may not reach; a name now reaching another
-object, or an open through a symlink, refuses the launch, saying which. Each
-deny is masked at every name a bind shows it, and a deny hiding `/proc`, which
-bwrap execs the trampoline through, is refused. A bwrap that builds no envelope
-refuses every confined launch in its own words, and one without
-`--ro-bind-fd` naming its version
-([[decisions/261006_the-envelope-mounts-by-handle|the-envelope-mounts-by-handle]]).
-Pinned by `sandbox::linux::tests::a_bind_is_opened_for_each_name_no_other_bind_shows`,
-`::a_prefix_whose_component_became_a_symlink_since_render_is_refused`,
-`::every_bind_is_a_handle_by_slot_in_layer_order`,
-`::a_write_through_a_link_is_frozen_and_masked_at_both_its_names` and, spawning,
-`::a_prefix_swapped_for_a_symlink_after_the_open_shows_what_was_opened`.
-
-**Where the host refuses bwrap a mount, the envelope rebuilds what the mount
-would have provided.** A rootless container's mount layer will not hand bwrap a
-fresh devpts, so `--dev` dies in setup and no `Restricted` envelope launches
-there at all; the same runtimes mask `/proc`, and the kernel then refuses the
-fresh procfs a pid namespace needs. `HostEnvelope` learns both with one probe
-spawn each (`sandbox/linux/host.rs`): `render_dev` lays out `--dev`'s own shape
-by hand where it must — a tmpfs, the device nodes bound in, the `pts/ptmx`
-symlink, a fresh `/dev/shm` — and `--unshare-pid` is emitted only where the
-table can be hidden. What cannot be rebuilt is stated, not refused: neither
-is a restriction a grant names, so the launch runs and the child sees what it
-would have seen unconfined — the container's own table, the host's `/dev/pts`
-([[design/two-enforcers|two-enforcers]]); running the container `--privileged`
-lifts both. The render is a pure function of the probed `HostEnvelope`, so
-the argv tests assert both shapes from literals rather than from whichever
-host runs them.
-Such hosts still refuse the read-only rebind of their own locked `/etc/hosts`
-and `/etc/resolv.conf`, by descriptor as by name, which remains open.
-
-**A kernel pseudo-filesystem inside the envelope describes the envelope; one
-that cannot is a host bind like any other, present only where something needs
-it.** `--proc /proc` is fresh with the pid namespace. bwrap has no sysfs op,
-and a bound `/sys` is the *mounter's*: its `class/net` lists the host's
-interfaces whatever `--unshare-net` did, its `class/dmi` and `bus` name the
-machine. So the Linux `floor` narrows `/sys` as it narrows `/etc`, to what
-sizes a program — `devices/system/cpu`, `kernel/mm/transparent_hugepage` — and a
-grant that wants the rest reads `/sys` by name. `/sys/fs/cgroup` is the case
-that is *wrong* rather than revealing: under the cgroup namespace a child's
-`/proc/self/cgroup` reads `0::/`, and a runtime joining that onto the host's
-tree reads the root's limits, which are none. `cgroup_tree` re-roots the tree
-on ral's own cgroup — the namespace's root, what a fresh cgroup2 mount inside it
-would show — on both projections, over the projection's binds; where the host
-builds no cgroup namespace (`HostEnvelope::private_cgroup`) the host's tree is
-the true one and is bound as it is
-([[decisions/260906_the-envelope-is-a-process-namespace|the-envelope-is-a-process-namespace]]).
-Pinned by `sandbox::linux::tests::sys_is_narrowed_to_what_sizes_a_program_and_the_cgroup_tree_is_the_payloads`
-and `::a_confined_program_reads_its_own_cgroup_and_none_of_the_hosts_interfaces`.
-
-**The envelope's identity is fixed at boot, and nothing a session does can
-change it.** The launcher a confined command runs under is exactly as trusted
-as the file it is, so that file is never chosen by name at spawn time — where
-the only environment in scope is the one built for the payload, `PATH`
-override included, and `Command::new("bwrap")` would have let a `within [env:
-[PATH: …]]` or a planted binary earlier on `PATH` supply code that runs before
-any confinement. Instead `sandbox::boot` pins bwrap (`linux::pin_envelope`)
-on the absolute entries of the `PATH` ral was started with, before any shell
-exists, as a `reexec::Pinned` — the same fd-pin ral uses for its own re-exec —
-and every launch execs `/proc/self/fd/N`, so neither a `PATH` override nor a
-replace-by-rename at the pinned path reaches it. In-place rewriting of the
-pinned inode — the one change a pin by descriptor cannot see — is closed on
-both sides of the dispatch boundary: for a confined child by the envelope
-itself, `Binds::open` lending both pins, bwrap's and ral's, as `Over` binds,
-each read-only by its own descriptor at the name its inode holds now
-(`Pinned::names`), after the projection's binds, `/` wholesale under
-`Unrestricted` included, and before the masks: a write is `EROFS`, a hard link
-`EXDEV`, a rename or unlink of the mountpoint `EBUSY`. It is the Linux twin of
-the write-deny macOS lays on ral's own file in every profile (`build_profile`;
-[[internals/seatbelt-profile|seatbelt-profile]]); for ral's own writes, the
-`Guarded` verdict above. An unlinked pin, a replace-by-rename having taken
-its name, has no name to lock and gets no bind. What stays open is another same-uid
-process, and any session after this one — a session cannot vet the enforcer it
-boots on — so where the pinned bwrap is writable by ral's uid a root-owned bwrap
-(the distro package) is the remedy. A host with no bwrap to pin
-is reported by `linux::envelope` at the first launch that needs it, through
-`Refusal::Unavailable`; `Launch::envelope` names the binary for a spawn
-failure's wording only. Pinned by `sandbox::linux::tests::the_launcher_is_the_pinned_envelope_and_never_a_name`,
-`::the_envelope_binary_is_read_only_inside_every_envelope`,
-`::a_pinned_binary_inside_a_writable_prefix_is_locked` and
-`guard::enforce::tests::a_write_onto_a_pinned_binary_is_guarded_before_any_grant_is_consulted`.
-
-**The sandbox is applied per external command, not by re-execing the grant
-body.** A `grant` is a *local* dynamic effect scope: its body evaluates in
-process, and `transport::dispatch` just runs that body locally — nested grants
-compose by intersecting authority on the evaluator's `GrantStack`, which is not a
-process boundary ([[design/grant|grant]]). Confinement happens one level down, at
-external dispatch. When `build_launch` (`runtime/command/process.rs`) spawns an
-admitted external or bundled child under a restrictive projection, it routes
-through `sandboxed_command` (`sandbox/launch.rs`), which confines that *one*
-child:
-
-- *Linux* wraps each child in `bwrap` via `bwrap_command`, threading
-  the logical cwd in as `--chdir`; a cwd the grant does not cover gets an empty
-  `0555` tmpfs stand-in laid before the binds (which hide it where they do
-  cover it), so a grant narrower than the cwd still runs commands, as under
-  Seatbelt, and a relative write there is refused. The envelope is the child's whole world, not
-  only its filesystem view: its own ipc, uts and cgroup namespaces on every
-  projection, and a pid namespace with a fresh `/proc` wherever the host can
-  build one, so a confined child sees and can signal nothing of the host,
-  `/proc/self` is its own, and `ps` under any grant shows the envelope alone.
-  bwrap never execs the payload in place — a monitor clones a namespace init,
-  which forks the payload — so a `Kept` launch reads the payload's pid back
-  over `--info-fd` (`InfoFd`, a socketpair, which no same-uid process can
-  reopen through `/proc` to forge a `child-pid`); that pid, a session leader by
-  `--new-session`, is the group every ladder signals, and the monitor is
-  addressed by nobody.
-  `Launch::spawn` places an enveloped launch `NewLeader` whatever was asked and
-  returns the payload's group, `ForegroundDecision` never hands an envelope the
-  terminal, and a pipeline collector addresses each confined stage's envelope
-  beside its own group ([[internals/pipeline-execution|pipeline execution]]);
-- *macOS* re-execs a tiny launcher, `ral --warrant`: the Seatbelt profile,
-  compiled in the parent, and the program to become — a host file, by the real
-  path the guard judged and under its spelling as `argv[0]`, or a bundled tool —
-  arrive in its warrant, and `serve_warrant` enters Seatbelt from the profile
-  alone and then `execve`s exactly that file;
-- *Windows* attaches the projection's AppContainer LowBox
-  `SECURITY_CAPABILITIES` to the child's own `CreateProcessW`
-  (`windows::session::confine`), so the parent's spawn is the confinement
-  point — no re-exec child.
-
-**The confined child is handed what to enter, and what to become, on a
-descriptor.** Both Unix backends re-exec ral as `ral --warrant`, whose whole
-argv names nothing: the confinement and the program arrive in a `Warrant` the
-parent compiled, on fd 99. The warrant crosses on a channel no other process
-can write — on Linux a sealed memfd, since a same-uid process may reopen any
-descriptor through `/proc` and a sealed copy is as read-only as ours, read back
-and checked once sealed; on macOS, which has no `/proc`, the read end of a
-socketpair whose writer closes before the child exists. The child refuses an
-unsealed memfd, a non-socket, and a warrant not in canonical form: decoding
-re-encodes and compares. On Linux the real argv is `bwrap --args 98 --
-/proc/self/fd/102 --warrant`: `bwrap_argv` is pure in descriptors and returns bwrap's options alone, which bwrap
-takes from `--args`, and the trampoline is ral's pin, lent at fd 102. The descriptors a confined launch hands down — bwrap's
-`--args`, the warrant, `--info-fd`, the Landlock ruleset, ral's pin, the seccomp programs, the mount handles —
-sit at slots defined once (`Slot`, the mounts an open-ended run last), and one `Handoff` places them all; the
-child sweeps everything from the first slot up once it is confined, so the program inherits none.
-`serve_warrant` runs before `sandbox::boot`, so the trampoline pins and opens
-nothing ahead of its confinement. Nothing runs unconfined: a failure before
-the program starts exits 126, a missing program 127; an `execve` refusal takes
-its code from the same `SpawnFailure` the in-process spawn uses.
-
-*Failing closed is the handoff's whole stance.* The warrant's `Confinement`
-(`Seatbelt(profile)` on macOS; on Linux `unconfined`, `landlock` or
-`landlock+refer`, a `Landlocked` promise or none) is the one thing the child
-enters, and `Warrant::confine` is the only road to the program — after the
-confinement is entered and the handoff closed — so no code path runs a program
-unconfined. On Linux the parent probes Landlock once and `landlock::build`
-decides everything: it refuses every launch whose probe failed and a
-restricting exec grant where Landlock is absent, creates the ruleset with the
-exact handled set the kernel accepts, and admits each rule by a handle opened
-without following symlinks, a file admit that has become a directory being
-dropped rather than widened to a hierarchy and one now reached through a symlink
-refusing the launch. The child probes nothing: it takes the ruleset
-at its slot, adds `Refer` on its own root when promised (the root exists only
-inside), and enters it; a promised ruleset that never arrived, or a descriptor
-that is not one, refuses the launch. A sandboxed launch needs ral's own pin
-(`reexec::own`); unpinned, it refuses. On Linux bwrap execs that pin by
-descriptor, so the trampoline is the boot inode whatever now holds its name,
-and nothing re-stats the name: a build swapped in mid-session runs under the
-parent that pinned the old one, consistently, and a filesystem that cannot
-exec an unlinked file (virtiofs) fails the launch instead. macOS execs it by
-name, so re-verifies it first (`Pinned::verify`). On Linux its self admit is
-that pin's descriptor, the boot inode, never a name.
-
-On Windows filesystem authority is *path*-keyed, and the token selects. Each
-`(canonical path, kind)` grant derives a deterministic capability SID from a
-hash of the canonical path; its ACE is stamped once, ever, and never reverted,
-and `session::confine` mints into the child's token exactly the capability SIDs
-its projection names. The kernel-level check therefore enforces the same
-projection the in-process guard judges — a narrowed grant or a subagent's
-narrowed permissions hold at the OS layer, because the narrower token does not
-carry the wider paths' capabilities. Persistence is safe because a capability
-SID is evaluated only in the AppContainer pass of the access check, whose result
-intersects the normal user pass: an ACE no live token names is inert and can
-never widen a process's reach past the owning user's own. A detached worker
-therefore keeps the authority it was born with by construction. The residual is
-that an ACE lives on the NTFS object while a grant rule names a path, and
-Windows does not re-inherit on a same-volume rename: a file moved into a granted
-tree stays dark, and one moved out of an rw tree keeps that tree's capability, so
-path-based rules and object-sticky stamps agree only while the tree is still
-([[decisions/260730_path-derived-capability-sids|path-derived-capability-sids]]).
-
-The launcher pins the *current binary* (`reexec::OWN`, fixed at `sandbox::boot`) so
-an on-disk swap cannot subvert it. Because confinement is per-command, it
-engages only when a child is actually spawned: a `grant [net: false] { … }` with no
-external child does not fail closed, and an offline request on a backend without
-kernel network enforcement fails closed at the spawn (`projection_enforceable`).
-
-Confinement can also be unavailable for a reason no pre-flight can see. On Linux
-the envelope is `bwrap`, a host package rather than part of ral, and a host
-without it fails closed at the spawn with `ENOENT`. The subtlety is *whose*
-`ENOENT` it is: `vet` has already resolved the target on `PATH`, and an envelope
-execs its target itself, reporting a missing one as an exit status. So under an
-active projection a spawn-time `NotFound` can only be the envelope's, and
-`spawn_error` says so — reading it as the target's would accuse the one program
-known to exist, and make a host lacking bubblewrap look like a grant that denies
-everything. A launch therefore carries the envelope it execs
-(`Launch::confinement`), set by the one backend whose envelope is a separate
-binary, so blame is read off what the launcher did rather than re-derived from
-the shell's state. Both routes end in the same refusal,
-`sandbox::Refusal::Unavailable`: nothing ran, and the sandbox is why.
-
-A ral-written pipeline stage is unrelated to this sandbox re-exec: it runs on
-its own thread of the parent process, sharing the parent's memory directly,
-never a re-exec'd child of any kind
-([[internals/pipeline-execution|pipeline execution]];
-[[decisions/260902_stages-are-threads|stages-are-threads]]).
-
-**The hard rule for any synchronous child wait a host still performs: it must
-own an out-of-band cancellation path.** A parent blocked reading a framed
-response cannot observe its own foreground `CancelScope` by cooperative
-polling — the poll never runs while the read is parked. Deadline and Esc
-therefore cannot break a wedged wait unless the parent has a side channel that
-signals the confined child subtree from outside it. Extra signal authority
-*inside* the child is not a substitute: it lets a child signal its own
-descendants, but it does nothing to free a parent stuck on the IPC edge.
-
-A bundled coreutil's filesystem access has no in-process guard, so under a
-restrictive grant it is never inlined: it is spawned as a re-exec child of ral — `--ral-bundled-tool
-<tool>`, or a warrant naming the tool — that receives the same per-command sandbox as any external, which
-is what floors it
-([[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec-images]];
-[[decisions/260617_sandbox-external-children|sandbox-external-children]]).
-
-This is the boundary [[design/exarch-architecture|exarch]] reuses unchanged — an
-agent run is a host-pushed grant frame over this same stack.
-
-See also [[design/grant|grant]],
-[[design/capability-carriers|capability-carriers]] (why the rule, the live
-judgment, and the `SandboxProjection` are distinct, not one); map
-[[map/core/capabilities|capabilities]]. `docs/SPEC.md` §12.
+See also [[design/capability-carriers|capability-carriers]] (why the rule, the
+live judgment and the `SandboxProjection` are three things, not one); map
+[[map/core/capabilities|capabilities]]; `docs/SPEC.md` §12.

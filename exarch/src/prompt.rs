@@ -19,8 +19,7 @@ pub const CHAT_SYSTEM: &str = ".";
 /// editing builtins are registered regardless.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum EditScheme {
-    /// Teach the agent to inspect text and replace an exact string. This is the
-    /// default.
+    /// Teach the agent to inspect text and replace an exact string.
     Replace,
     /// Teach the agent to inspect line hashes and make changes tied to the
     /// lines it inspected.

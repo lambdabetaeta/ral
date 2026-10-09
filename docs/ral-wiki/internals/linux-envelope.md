@@ -1,0 +1,159 @@
+---
+verified_at_commit: 0dc4a920
+verified_at_date: 2026-10-09
+anchors: [Binds, render_objects, bwrap_argv, bwrap_command, Slot, HostEnvelope, render_dev, cgroup_tree, floor, Pinned, pin_envelope, InfoFd]
+---
+
+# The Linux envelope
+
+**On Linux every confined command runs inside a bwrap *envelope*: a private
+view of the filesystem and a private set of namespaces, built for that one
+command.** This page says what the envelope mounts, what it shows the child, and
+how it copes with hosts that refuse parts of it. How a command enters it is
+[[internals/confined-launch|confined-launch]]; how its denies hold is
+[[internals/holding-a-deny|holding-a-deny]].
+
+## The envelope is the child's whole world
+
+**`bwrap_command` wraps each child in bwrap, and the envelope covers more than
+the filesystem**
+([[decisions/260906_the-envelope-is-a-process-namespace|the-envelope-is-a-process-namespace]]).
+
+- **Namespaces.** Every projection gets its own ipc, uts and cgroup namespaces.
+  Wherever the host can build one, it also gets a pid namespace with a fresh
+  `/proc`. A confined child then sees and can signal nothing of the host,
+  `/proc/self` is its own, and `ps` under any grant shows only the envelope.
+- **Working directory.** The logical cwd goes in as `--chdir`. A cwd the grant
+  does not cover gets an empty `0555` tmpfs stand-in, laid before the binds,
+  which hide it wherever they do cover it. So a grant narrower than the cwd
+  still runs commands, as under Seatbelt, and a relative write there is
+  refused.
+- **The payload's pid.** bwrap never execs the payload in place: a monitor
+  clones a namespace init, which forks the payload. So a `Kept` launch reads the
+  payload's pid back over `--info-fd` (`InfoFd`, a socketpair). No same-uid
+  process can reopen a socketpair through `/proc` to forge a `child-pid`. That
+  pid is a session leader, by `--new-session`, and its group is the one every
+  signal ladder targets. Nothing addresses the monitor.
+- **Process groups.** `Launch::spawn` makes an enveloped launch `NewLeader`
+  whatever was asked, and returns the payload's group. `ForegroundDecision`
+  never hands an envelope the terminal. A pipeline collector addresses each
+  confined stage's envelope beside its own group
+  ([[internals/pipeline-execution|pipeline execution]]).
+
+## bwrap mounts what ral opened, never a name
+
+**`Binds::open` plans every bind a launch shows, opens each object once without
+following a symlink, and lends a copy at `Slot::Mount(i)`**
+([[decisions/261006_the-envelope-mounts-by-handle|the-envelope-mounts-by-handle]]).
+`bwrap_argv` emits `--ro-bind-fd` or `--bind-fd` from the same vector. The binds
+are: the read-only defaults, the read and write prefixes, the program's real
+image, each file and live directory the exec table allows, and, over
+everything, the cgroup tree.
+
+- **A path is its canonical object plus the spellings that reach it**
+  (`render_objects`). `/bin` shows `/usr/bin`'s handle, except inside another
+  bind, where the host's own link already stands.
+- **Redundant binds are dropped.** A read-only bind inside another bind adds
+  nothing. A writable bind is dropped only inside a writable one.
+- **Missing objects are dropped, changed ones refused.** An absent object drops
+  its binds at the open, and so does a system default this user may not reach.
+  A name that now reaches another object, or an open through a symlink, refuses
+  the launch and says which.
+- **Every deny is masked at every name a bind shows it.** A deny that would hide
+  `/proc`, which bwrap execs the trampoline through, is refused.
+- **An unusable bwrap refuses in its own words.** A bwrap that builds no
+  envelope refuses every confined launch, and one without `--ro-bind-fd` is
+  named with its version.
+
+Pinned by `sandbox::linux::tests::a_bind_is_opened_for_each_name_no_other_bind_shows`,
+`::a_prefix_whose_component_became_a_symlink_since_render_is_refused`,
+`::every_bind_is_a_handle_by_slot_in_layer_order`,
+`::a_write_through_a_link_is_frozen_and_masked_at_both_its_names` and, spawning,
+`::a_prefix_swapped_for_a_symlink_after_the_open_shows_what_was_opened`.
+
+## Where the host refuses a mount, the envelope rebuilds it
+
+**Some hosts refuse bwrap a mount it needs. The envelope then builds the same
+result by hand, or states what it cannot build.**
+
+- **A fresh devpts.** A rootless container's mount layer will not give bwrap
+  one, so `--dev` fails in setup and no `Restricted` envelope could launch.
+  `render_dev` lays out `--dev`'s shape by hand instead: a tmpfs, the device
+  nodes bound in, the `pts/ptmx` symlink, and a fresh `/dev/shm`.
+- **A fresh procfs.** The same runtimes mask `/proc`, and the kernel then
+  refuses the procfs a pid namespace needs. `--unshare-pid` is emitted only
+  where the table can be hidden.
+- **`HostEnvelope` learns both** with one probe spawn each
+  (`sandbox/linux/host.rs`).
+- **What cannot be rebuilt is stated, not refused.** Neither is a restriction a
+  grant names, so the launch runs, and the child sees what it would see
+  unconfined: the container's own process table, the host's `/dev/pts`
+  ([[design/two-enforcers|two-enforcers]]). Running the container
+  `--privileged` lifts both.
+- **The render is a pure function of the probed `HostEnvelope`.** So the argv
+  tests assert both shapes from literals, not from whichever host runs them.
+- **Open:** such hosts still refuse the read-only rebind of their own locked
+  `/etc/hosts` and `/etc/resolv.conf`, by descriptor as by name.
+
+## Kernel pseudo-filesystems describe the envelope
+
+**A pseudo-filesystem inside the envelope must describe the envelope. One that
+cannot is a host bind like any other, present only where something needs it.**
+
+- **`/proc`** is mounted fresh (`--proc /proc`) with the pid namespace.
+- **`/sys`** has no bwrap operation, and a bound `/sys` describes the host: its
+  `class/net` lists the host's interfaces whatever `--unshare-net` did, and its
+  `class/dmi` and `bus` name the machine. So the Linux `floor` narrows `/sys`, as
+  it narrows `/etc`, to what sizes a program: `devices/system/cpu` and
+  `kernel/mm/transparent_hugepage`. A grant that wants the rest reads `/sys` by
+  name.
+- **`/sys/fs/cgroup`** would be *wrong*, not just revealing. Under the cgroup
+  namespace a child's `/proc/self/cgroup` reads `0::/`, and a runtime that joins
+  that to the host's tree reads the root's limits, which are none. `cgroup_tree`
+  re-roots the tree on ral's own cgroup, the namespace's root, which is what a
+  fresh cgroup2 mount inside would show. It does so on both projections, over
+  the projection's binds. Where the host builds no cgroup namespace
+  (`HostEnvelope::private_cgroup`), the host's tree is the true one and is bound
+  as it is.
+
+Pinned by `sandbox::linux::tests::sys_is_narrowed_to_what_sizes_a_program_and_the_cgroup_tree_is_the_payloads`
+and `::a_confined_program_reads_its_own_cgroup_and_none_of_the_hosts_interfaces`.
+
+## The envelope binary is fixed at boot
+
+**The launcher is exactly as trustworthy as the file it is, so ral never picks
+that file by name at spawn time.** At spawn, the only environment in scope is the
+payload's, including any `PATH` override. `Command::new("bwrap")` would let a
+`within [env: [PATH: …]]`, or a planted binary earlier on `PATH`, run code before
+any confinement.
+
+- **`sandbox::boot` pins bwrap before any shell exists** (`linux::pin_envelope`).
+  It searches the absolute entries of the `PATH` ral started with, and keeps the
+  result as a `reexec::Pinned`, the same fd pin ral uses to re-exec itself.
+- **Every launch execs `/proc/self/fd/N`.** Neither a `PATH` override nor a
+  replace-by-rename at the pinned path reaches it.
+- **In-place rewriting of the pinned inode**, the one change a pin by
+  descriptor cannot see, is closed on both sides:
+  - **for a confined child**, by the envelope. `Binds::open` lends both pins,
+    bwrap's and ral's, as `Over` binds, each read-only by its own descriptor at
+    the name its inode holds now (`Pinned::names`). They go after the
+    projection's binds, `/` wholesale under `Unrestricted` included, and before
+    the masks. A write gets `EROFS`, a hard link `EXDEV`, and a rename or unlink
+    of the mountpoint `EBUSY`. This is the Linux twin of the write-deny macOS
+    lays on ral's own file in every profile
+    ([[internals/seatbelt-profile|seatbelt-profile]]);
+  - **for ral's own writes**, by the `Guarded` verdict
+    ([[internals/path-judgment|path-judgment]]).
+- **An unlinked pin gets no bind.** A replace-by-rename took its name, so there
+  is no name to lock.
+- **Still open:** another same-uid process, and any later session, since a
+  session cannot vet the enforcer it boots on. Where the pinned bwrap is
+  writable by ral's uid, the remedy is a root-owned bwrap (the distro package).
+- **A host with no bwrap** is reported by `linux::envelope` at the first launch
+  that needs one, through `Refusal::Unavailable`. `Launch::envelope` names the
+  binary only for the wording of a spawn failure.
+
+Pinned by `sandbox::linux::tests::the_launcher_is_the_pinned_envelope_and_never_a_name`,
+`::the_envelope_binary_is_read_only_inside_every_envelope`,
+`::a_pinned_binary_inside_a_writable_prefix_is_locked` and
+`guard::enforce::tests::a_write_onto_a_pinned_binary_is_guarded_before_any_grant_is_consulted`.

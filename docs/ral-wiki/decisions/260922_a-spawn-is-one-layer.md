@@ -115,7 +115,7 @@ surfaces dissolves rather than needing a mirror on the spawn side.
 
 The credential deny is untouched: it lives in `for_invocation`, beneath every
 child, and a pushed layer can only narrow past it
-([[decisions/260905_a-grant-does-not-hand-out-its-own-key|a-grant-does-not-hand-out-its-own-key]]).
+([[invariants/a-grant-never-reaches-its-own-key|a-grant-never-reaches-its-own-key]]).
 
 ## What does not change
 

@@ -165,7 +165,7 @@ card, no rail barrier, and no line in an agent's trail claiming it wrote a
 file. One predicate says so, `LexicalPath::is_discard`
 (`core/src/path/forms.rs`), asked at both doors that have an opinion: the
 in-process guard, which excuses such a target from an *access*
-([[internals/capability-enforcement|capability-enforcement]]), and
+([[internals/path-judgment|path-judgment]]), and
 `Shell::observe_stamped` itself, the one fan-out door, which excuses it from a
 *mutation*. Every redirect seam already passes through that door, so the rule
 is stated once and no seam can forget it.

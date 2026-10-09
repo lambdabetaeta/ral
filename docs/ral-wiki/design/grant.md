@@ -24,7 +24,7 @@ blocked": no confined child can cause a denied path's contents to become
 reachable under a name the deny does not cover. Enforcing it is not free —
 some name on the path to a denied file stops being renameable or removable,
 and what that costs differs by backend — see
-[[internals/capability-enforcement|capability-enforcement]] for the rendering
+[[internals/holding-a-deny|holding-a-deny]] for the rendering
 and the per-backend price.
 
 **The axes are independent:** each is a separate field whose absence is the meet

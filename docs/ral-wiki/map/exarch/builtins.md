@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 6c9047b6
-generated_at_date: 2026-10-08
+generated_at_commit: 0dc4a920
+generated_at_date: 2026-10-09
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/skill.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/src/enquiry.rs, exarch/src/library.rs, exarch/data/agent.ral]
 ---
 
@@ -65,7 +65,7 @@ logical operation with one surface ([[map/exarch/io-surface|io-surface]]).
   of the original against the final text ([[map/exarch/cards|cards]]), and
   nothing at all if the two agree. A stderr note names the replaced lines and
   warns on suspicious `\n`-style escapes (the replacement text is verbatim).
-- `edit-replace <path> <from> <to>` → `Unit`. The default taught edit: replace
+- `edit-replace <path> <from> <to>` → `Unit`. Replace
   the one literal occurrence of `from`, erroring (file untouched) on zero or
   several matches; same silent read, same atomic write, same diff card. Counting
   is overlap-aware (core's `occurrence_starts`), so a needle that overlaps itself

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 73bc87ff
-generated_at_date: 2026-10-08
+generated_at_commit: 0dc4a920
+generated_at_date: 2026-10-09
 covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/data/system.md, exarch/data/agents.md, exarch/data/reply.md, exarch/data/ral.md, exarch/data/script-style.md, exarch/data/context.md]
 ---
 
@@ -108,6 +108,10 @@ can inherit a live key.**
   removing from the environment *every key variable that was present*, whether or
   not it yielded a usable key. A malformed value (a pasted newline) is still a
   live secret, so it is swept too.
+- Removal is **blank, then unset**: `unsetenv` drops only libc's pointer, while
+  `/proc/<pid>/environ` reads the bytes the kernel laid down at `execve`, so each
+  value is overwritten in place first, and the process is made non-dumpable
+  before any of it ([[invariants/a-grant-never-reaches-its-own-key|a-grant-never-reaches-its-own-key]]).
 - The scrub makes resolution **eager**: once a variable is gone it cannot be
   re-read, so a key absent at startup stays absent for the run. Read and removal
   happen while the process is still single-threaded — before any session worker —
@@ -187,8 +191,8 @@ agent, so a root, identity fork, and wire child each receive their own surface.
   per-command `handlers:` entries are unary `{ |args| … }`, the catch-all
   `handler:` binary `{ |name args| … }`.
 - **`Editing`** documents the file-editing scheme the `--edit` flag selects:
-  string-replace over `view-text` (`data/edit-replace.md`, the default) or
-  line-hash over `view-hash` (`data/edit-hash.md`, `--edit hash`); only the
+  line-hash over `view-hash` (`data/edit-hash.md`, `--edit hash`) or
+  string-replace over `view-text` (`data/edit-replace.md`, `--edit replace`); only the
   prompt text switches, every reader and editor stays registered
   ([[design/hash-addressed-editing|hash-addressed-editing]]).
 - **`Builtins`** (`builtin_index`) lists every builtin and prelude function by

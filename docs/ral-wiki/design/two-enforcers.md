@@ -151,7 +151,7 @@ would lose a setuid bwrap its bit and Ubuntu's AppArmor userns profile, which
 attaches to the exec'd file's path; a content digest detects the change, not
 the poison, and the restart it demands pins the poisoned bytes. What stays open
 — another same-uid process, a later session — a root-owned bwrap lifts
-([[internals/capability-enforcement|capability-enforcement]]).
+([[internals/linux-envelope|linux-envelope]]).
 
 The discipline this draws: **the in-process guard is authority over dispatch, not
 confinement of children.** Treating it as the latter is the mistake; pairing it

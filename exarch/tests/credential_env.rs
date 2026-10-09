@@ -390,3 +390,22 @@ fn a_key_bearing_account_names_itself_after_its_service() {
         },
     );
 }
+
+/// The store seals its process: not even the process itself can read back
+/// the launch environment through `/proc`.
+#[cfg(target_os = "linux")]
+#[test]
+fn resolution_seals_proc_environ() {
+    // Root's `CAP_SYS_PTRACE` reads a sealed process anyway.
+    // SAFETY: `geteuid` has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        ral_core::errln!("skipped: root can read a sealed process");
+        return;
+    }
+    with_env(&[], || {
+        let _store = CredentialStore::resolve_and_scrub(Vec::new());
+        let err = std::fs::read("/proc/self/environ")
+            .expect_err("a sealed process must not read its own launch environment");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{err}");
+    });
+}
