@@ -39,6 +39,7 @@ jobs:
   build:
     name: ${{ matrix.out }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
     # Empty for every entry but one, which is the same as not being here.
     container: ${{ matrix.container }}
     strategy:
@@ -191,6 +192,7 @@ jobs:
     name: ral-windows.msi
     needs: build
     runs-on: windows-latest
+    timeout-minutes: 120
     # wix is a framework-dependent app, and one of those does not cross a
     # major .NET version on its own: the day the runner image stops carrying
     # the runtime this build of wix was compiled against, it installs happily
@@ -252,6 +254,7 @@ jobs:
   guest-image:
     name: synod-guest-${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -299,6 +302,7 @@ jobs:
     name: ${{ matrix.out }}
     needs: guest-image
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -359,6 +363,7 @@ jobs:
   release:
     needs: [build, msi, synod-bundle]
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     permissions:
       contents: write
     steps:
