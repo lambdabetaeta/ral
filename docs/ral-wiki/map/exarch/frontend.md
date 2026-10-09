@@ -474,9 +474,11 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
   closes the screen, runs the `/login` flow, and reopens it; sign-out is
   local at once (`Bureau::sign_out`), and the issuer's revocation runs on its
   own thread, its outcome landing in the status line.
-- `/model`, `/login` and `/rewind` share `picker::overlay_frame`: one
-  double-line bezel, shadow, palette, padding, title, and hint frame around
-  distinct bodies — centred for the first two, in the frame's bottom-right
+- `/model`, `/login`, `/providers` and `/rewind` are framed by
+  `overlay::draw`: each states only its body's size, and gets one plane,
+  margin, double-line bezel, title, hint, padding and translucent shadow
+  around it, so the height a body reserves and the rows it lays out come from
+  one list. The anchor is centred for the first three, in the frame's bottom-right
   corner over the inert prompt box for `/rewind`, so the transcript it
   previews stays uncovered. The login body drives browser or device OAuth on a background thread,
   receives typed `LoginPhase`s over a channel, and carries the device expiry
@@ -565,7 +567,8 @@ user, home, git state, exarch's log directory) once at startup for the [[map/exa
         - `tui/highlight.rs` — ral source coloured by ral's own lexer: `highlight_ral`, `highlight_ral_spans`
         - `tui/fidelity.rs` — coherent degradation: `Fidelity`, turn-level `context_floor` and per-block `echo_delta`
         - `tui/select.rs` — drag-selection geometry in text-area columns: `highlight_range` for painting, `plain_slice` for copying
-        - `tui/picker.rs` — the `/model` tuning overlay: `Picker`, `Pick`, `overlay_frame`, `centered`, `render_shadow`
+        - `tui/overlay.rs` — the chrome every modal overlay floats in: `draw`, `body_width`, `Anchor`
+        - `tui/picker.rs` — the `/model` tuning overlay: `Picker`, `Pick`
         - `tui/palette.rs` — the TUI colour constants (`CODE_BG`, `SLATE`, `PROMPT_INK`, the agent hues) and the width vocabulary: `RAIL_W`, `READ_W`, `content_w`, and `Col`, the one column primitive every gutter that holds a cell is built from ([[map/exarch/cards|cards]])
         - `tui/model_picker.rs` — model choice: `drive` over a `Stage` (the live `Tui` for `pick_model` and `apply_model_switch`, or the picker `Alone` for a launch's `choose`); list fetching rides [[map/exarch/provider|provider]]'s `Listing`/`Fetches` pumps
         - `tui/login.rs` — the `/login` overlay: `LoginOverlay`, `drive_login`, `apply_login`

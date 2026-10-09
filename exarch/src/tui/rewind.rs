@@ -1,14 +1,14 @@
 //! The `/rewind` overlay: the prompts on screen, one of which is where the
 //! conversation goes back to.  While it is up the transcript behind it
 //! previews the cut — every row from the highlighted prompt on is ghosted
-//! (`render::paint_cut`) and scrolled into view — so what ⏎ undoes is seen
+//! (`render::paint_cut`) and scrolled into view — so what Enter undoes is seen
 //! before it is done.  Display and input only; [`rewind`] drives it and posts
 //! the [`Rewrite`].
 
 use super::app::Overlay;
 use super::line::truncate_spans;
+use super::overlay::{self, Anchor};
 use super::palette::{CYAN, Col, OVERLAY_BG, SLATE};
-use super::picker::{CHROME_H, overlay_frame};
 use super::tui_loop::{OverlayTick, Tui, overlay_tick};
 use crate::bus::{Mailbox, Post, Rewrite};
 use ratatui::Frame;
@@ -18,15 +18,10 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-const OVERLAY_W: u16 = 68;
+const BODY_W: u16 = 54;
 const VISIBLE_ROWS: usize = 8;
-/// Under the list: a blank, then the reminder of what a rewind spares.
-const NOTE_ROWS: u16 = 2;
 /// Kept rows shown above the cut, so the seam is read in context.
 const LEAD_ROWS: usize = 2;
-/// The frame's edge the overlay keeps clear for its shadow.
-const SHADOW_W: u16 = 2;
-const SHADOW_H: u16 = 1;
 
 pub(super) struct RewindOverlay {
     /// Turn-opening prompts on screen, oldest first; never empty.
@@ -41,12 +36,12 @@ impl RewindOverlay {
         Some(Self { prompts, selected })
     }
 
-    /// The turn the highlighted prompt opened — the anchor ⏎ would post.
+    /// The turn the highlighted prompt opened — the anchor Enter would post.
     pub(super) fn anchor(&self) -> u64 {
         self.prompts[self.selected].0
     }
 
-    /// Move the highlight, or resolve on ⏎.
+    /// Move the highlight, or resolve on Enter.
     fn key(&mut self, code: KeyCode) -> Option<u64> {
         match code {
             KeyCode::Up => self.selected = self.selected.saturating_sub(1),
@@ -63,15 +58,17 @@ impl RewindOverlay {
         let plane = Style::default().bg(OVERLAY_BG);
         let rows = self.prompts.len().min(VISIBLE_ROWS);
         let list_h = u16::try_from(rows).unwrap_or(u16::MAX);
-        let h = list_h + NOTE_ROWS + CHROME_H;
-        let area = corner(OVERLAY_W, h, frame);
-        let inner = overlay_frame(f, area, " REWIND ", " ↑↓ choose · ⏎ rewind · esc keep ");
-        let [list, _, note] = Layout::vertical([
-            Constraint::Length(list_h),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
-        .areas(inner);
+        // The list, a blank, then the reminder of what a rewind spares.
+        let heights = [list_h, 1, 1];
+        let body = overlay::draw(
+            f,
+            frame,
+            Anchor::Corner,
+            (BODY_W, heights.iter().sum()),
+            " REWIND ",
+            " ↑↓ choose · enter rewind · esc keep ",
+        );
+        let [list, _, note] = Layout::vertical(heights.map(Constraint::Length)).areas(body);
         f.render_widget(
             Paragraph::new(self.list_lines(rows, list.width)).style(plane),
             list,
@@ -121,20 +118,6 @@ impl RewindOverlay {
                 Line::from(truncate_spans(&spans, usize::from(width)))
             })
             .collect()
-    }
-}
-
-/// A `w × h` rect in `area`'s bottom-right corner, its shadow's margin kept,
-/// clamped to fit.  Over the prompt box, inert under a modal, so the
-/// transcript — the thing being previewed — stays uncovered above it.
-fn corner(w: u16, h: u16, area: Rect) -> Rect {
-    let w = w.min(area.width.saturating_sub(SHADOW_W));
-    let h = h.min(area.height.saturating_sub(SHADOW_H));
-    Rect {
-        x: area.right().saturating_sub(w + SHADOW_W),
-        y: area.bottom().saturating_sub(h + SHADOW_H),
-        width: w,
-        height: h,
     }
 }
 

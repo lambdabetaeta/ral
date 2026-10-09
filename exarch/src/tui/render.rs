@@ -390,7 +390,7 @@ fn paint_hover(app: &App, rows: &mut [Row], offset: usize) {
 }
 
 /// Ghost every row from the cut a `/rewind` overlay highlights: the preview
-/// of what ⏎ would undo, drawn on the trunk, whose transcript it is.
+/// of what Enter would undo, drawn on the trunk, whose transcript it is.
 fn paint_cut(app: &App, rows: &mut [Row], offset: usize) {
     let Some(Overlay::Rewind(overlay)) = &app.overlay else {
         return;

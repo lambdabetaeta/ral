@@ -657,6 +657,42 @@ pub(super) fn truncate_spans(spans: &[Span<'static>], max_w: usize) -> Vec<Span<
     out
 }
 
+/// The run of `spans` grown evenly around `spans[at]` until it fills `width`,
+/// each cut side marked by a `…` in `mark`, so the span at `at` stays in view.
+pub(super) fn window_around(
+    spans: &[Span<'static>],
+    at: usize,
+    width: usize,
+    mark: Style,
+) -> Vec<Span<'static>> {
+    if span_run_width(spans) <= width {
+        return spans.to_vec();
+    }
+    let budget = width.saturating_sub(4); // `… ` and ` …`
+    let (mut lo, mut hi, mut used) = (at, at + 1, spans[at].width());
+    loop {
+        let left = lo > 0 && used + spans[lo - 1].width() <= budget;
+        if left {
+            lo -= 1;
+            used += spans[lo].width();
+        }
+        let right = hi < spans.len() && used + spans[hi].width() <= budget;
+        if right {
+            used += spans[hi].width();
+            hi += 1;
+        }
+        if !left && !right {
+            break;
+        }
+    }
+    (lo > 0)
+        .then(|| Span::styled("… ", mark))
+        .into_iter()
+        .chain(spans[lo..hi].iter().cloned())
+        .chain((hi < spans.len()).then(|| Span::styled(" …", mark)))
+        .collect()
+}
+
 /// A `text` mark's roled spans as `Line`s, broken on embedded newlines.
 /// Width-folding happens later, in [`wrap_line`].
 pub(super) fn render_text(spans: &[CardSpan]) -> Vec<Line<'static>> {

@@ -8,8 +8,8 @@
 use super::app::Overlay;
 use super::line;
 use super::login;
+use super::overlay::{self, Anchor};
 use super::palette::{CYAN, Col, LIME, ORANGE, OVERLAY_BG, PURPLE, RED, SLATE};
-use super::picker::{CHROME_H, CHROME_W, centered, overlay_frame};
 use super::tui_loop::{CommandCtx, OverlayTick, Tui, overlay_tick};
 use crate::provider::Holdings;
 use crate::provider::accounts::{Entry, Source, entries};
@@ -26,8 +26,7 @@ use ratatui::widgets::Paragraph;
 use std::sync::mpsc;
 use std::thread;
 
-const OVERLAY_W: u16 = 108;
-const BODY_W: usize = (OVERLAY_W - CHROME_W) as usize;
+const BODY_W: u16 = 94;
 const HEADS: [&str; 3] = ["SERVICE", "ENDPOINT / KIND", "KEY"];
 const FORM: [&str; 4] = ["name", "address", "protocol", "key"];
 const PROTOCOL: usize = 2;
@@ -374,23 +373,21 @@ impl ProvidersOverlay {
 impl ProvidersOverlay {
     pub(super) fn render(&self, f: &mut Frame, frame: Rect) {
         let lines = self.body_lines();
-        let rows = u16::try_from(lines.len()).unwrap_or(u16::MAX);
-        let h = (CHROME_H + rows).min(frame.height.max(3));
-        let area = centered(OVERLAY_W.min(frame.width), h, frame);
+        let size = (BODY_W, u16::try_from(lines.len()).unwrap_or(u16::MAX));
         let hint = match &self.mode {
             Mode::List => {
                 " ↑↓ move · k key · x clear · a add endpoint · d remove · l sign in · esc close "
             }
-            Mode::Key { .. } => " ⏎ save · esc back ",
+            Mode::Key { .. } => " enter save · esc back ",
             Mode::Form(_) => {
-                " tab next · ←→ protocol / no key · ⏎ next / save · ^S save · esc back "
+                " tab next · ←→ protocol / no key · enter next / save · ^S save · esc back "
             }
             Mode::Confirm { .. } => " y yes · any other key no ",
         };
-        let inner = overlay_frame(f, area, " PROVIDERS ", hint);
+        let body = overlay::draw(f, frame, Anchor::Centre, size, " PROVIDERS ", hint);
         f.render_widget(
             Paragraph::new(lines).style(Style::default().bg(OVERLAY_BG)),
-            inner,
+            body,
         );
     }
 
@@ -417,7 +414,7 @@ impl ProvidersOverlay {
                     lines.extend(line::hang(
                         &[Span::raw("  ")],
                         vec![Span::styled(note, DIM)],
-                        BODY_W,
+                        usize::from(BODY_W),
                     ));
                 }
             }
@@ -455,7 +452,7 @@ impl ProvidersOverlay {
             lines.extend(line::hang(
                 &[Span::raw("  ")],
                 vec![Span::styled(text.clone(), Style::new().fg(ink))],
-                BODY_W,
+                usize::from(BODY_W),
             ));
         }
         lines.push(Line::default());

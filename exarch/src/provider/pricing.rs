@@ -74,12 +74,32 @@ pub struct ModelCaps {
     pub supported_parameters: Vec<String>,
 }
 
+/// A request knob a model may or may not accept.
+#[derive(Clone, Copy, Debug)]
+pub enum Param {
+    Reasoning,
+    Temperature,
+    TopP,
+}
+
+impl Param {
+    /// The catalog's spelling.
+    const fn key(self) -> &'static str {
+        match self {
+            Self::Reasoning => "reasoning",
+            Self::Temperature => "temperature",
+            Self::TopP => "top_p",
+        }
+    }
+}
+
 impl ModelCaps {
     /// Does the model advertise `param`?  An empty list is a catalog miss, not
     /// a denial, so it answers `true` — the picker's knobs and synod's effort
     /// mask stay open on a model the catalog simply never listed.
-    pub fn supports(&self, param: &str) -> bool {
-        self.supported_parameters.is_empty() || self.supported_parameters.iter().any(|p| p == param)
+    pub fn supports(&self, param: Param) -> bool {
+        self.supported_parameters.is_empty()
+            || self.supported_parameters.iter().any(|p| p == param.key())
     }
 }
 

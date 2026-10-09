@@ -185,7 +185,7 @@ fn offers(listed: Vec<String>, caps: impl Fn(&str) -> pricing::ModelCaps) -> Vec
     listed
         .into_iter()
         .map(|name| {
-            let reasoning = caps(&name).supports("reasoning");
+            let reasoning = caps(&name).supports(pricing::Param::Reasoning);
             ModelChoice { name, reasoning }
         })
         .collect()

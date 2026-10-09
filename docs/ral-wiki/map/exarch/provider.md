@@ -384,8 +384,8 @@ disk-caches both paths:
   forgotten and an endpoint withdrawn reach the listing as a login does.
   Re-login updates the cell in place; a login that has since learnt its email
   is renamed where it stands, its identity being the account id throughout.
-- OpenRouter serving endpoints remain a separate, intent-driven request after
-  a model is selected.
+- OpenRouter serving endpoints remain a separate request per model; the
+  `/model` overlay makes it for whichever OpenRouter model is highlighted.
 - `listing.rs` states the picker-side orchestration once for every front-end
   (the `/model` overlay and synod's window alike): the `FetchState` vocabulary,
   a keyed background-fetch pump (`Fetches`), and the per-provider `Listing`

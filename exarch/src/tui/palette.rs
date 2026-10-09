@@ -21,7 +21,18 @@ pub(super) const RED_HOT: Color = Color::Rgb(242, 142, 158);
 /// A faint raised plane saying "queued, not yet delivered"; the prompt itself
 /// still renders through the normal rail/fence/body path.
 pub(super) const QUEUED_PROMPT_BG: Color = Color::Rgb(72, 78, 94);
-/// The `/model` overlay's plane ([`super::picker`]) — the one areal mark that
+/// Seven hues far apart on the circle, cycled over a row of tags so
+/// neighbours never blur.
+pub(super) const TAG_HUES: [Color; 7] = [
+    Color::Rgb(130, 190, 230),
+    Color::Rgb(230, 150, 120),
+    Color::Rgb(130, 210, 150),
+    Color::Rgb(210, 170, 110),
+    Color::Rgb(180, 140, 210),
+    Color::Rgb(110, 200, 200),
+    Color::Rgb(220, 140, 180),
+];
+/// Every modal overlay's plane ([`super::overlay`]) — the one areal mark that
 /// means the modal holds the focus.
 pub(super) const OVERLAY_BG: Color = Color::Rgb(28, 34, 66);
 /// The silhouette of text a pending `/rewind` would cut: one ink for every

@@ -1,66 +1,38 @@
-//! The `/model` tuning overlay — a floating, bezel-framed modal, which a
-//! launch with no model to restore also opens, alone, before its session.
+//! The `/model` overlay: a fuzzy-filtered `model · provider` list over every
+//! account, with the effort, temperature and top-p to send. A launch with no
+//! model to restore opens it alone, before its session.
 //!
-//! The rest of the TUI is a flat stack of strips; this one floats over a
-//! [`Clear`]ed centre of the frame and is modal in behaviour too — `App::key`
-//! returns early while an overlay is open, and `model_picker.rs` drives the
-//! keys instead. It edits a model selection together with today's tuning: a
-//! fuzzy-filtered `model · provider` list of what each account lists, the
-//! [`EFFORT_LADDER`] rung
-//! `auto · zero · low · med · high · xhigh · max`, temperature, and top-p.
+//! An `OpenRouter` model adds a provider row that pins `provider.order`; it is
+//! a routing choice, not a filter, so it never moves the highlight. A tuning
+//! row the highlighted model's catalog entry positively lacks is grayed and
+//! masked out of the [`Tuning`], but kept for the next model that admits it.
 //!
-//! For an `OpenRouter` `vendor/model` a fifth control appears, listing the
-//! upstream providers serving *that* model; choosing one pins the request's
-//! `provider.order`. It is a routing choice, not a filter, so it never moves
-//! the highlighted model, and the row is inert (and skipped by `Tab`) for
-//! every other provider — only `OpenRouter` routes.
-//!
-//! The tuning rows gate on the *highlighted* model's catalog
-//! `supported_parameters`: a parameter the catalog positively reports absent
-//! grays its row, ignores its arrows, and is masked out of the emitted
-//! [`Tuning`] so it is never sent — while the picker keeps the user's setting
-//! for the next model that does admit it. An unknown model reads as supported.
-//!
-//! The picker is pure display+input. `model_picker.rs` owns the credential
-//! store, the catalog, and the network seam, and feeds results in through
-//! [`Picker::set_models`] and [`Picker::set_endpoints`], so a list reads
-//! "loading…" until its background fetch lands. The driver reads
-//! [`Picker::model_needing_endpoints`] and fetches the serving providers of
-//! whichever `OpenRouter` model is highlighted, so the row is filled before
-//! the control is focused.
+//! Display and input only: `model_picker.rs` fetches, and feeds results in
+//! through [`Picker::set_models`] and [`Picker::set_endpoints`].
 
 use super::line;
-use super::palette::{BANNER_GOLD, CYAN, Col, OVERLAY_BG, RED, SLATE};
-
-/// The label gutter every row of the picker aligns to: two wider than
-/// `provider`, the longest label.
-const FIELD_LABEL: Col = Col::wide(10);
+use super::overlay::{self, Anchor};
+use super::palette::{CYAN, Col, OVERLAY_BG, RED, SLATE, TAG_HUES};
 use crate::provider::identity::{self, Account, AccountId};
 use crate::provider::models::ProviderEndpoint;
+use crate::provider::pricing::{ModelCaps, Param};
 use crate::provider::{EFFORT_LADDER, Tuning};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Margin, Rect};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use std::collections::BTreeMap;
 
 pub use crate::provider::listing::{EndpointsState, ModelsState};
 
-/// A serving-provider choice bound to the model it was made for: inert unless
-/// that model is still highlighted, so a route can never ride a model whose
-/// providers it was not chosen from.
+/// A serving provider, bound to the model it was chosen for and inert off it.
 struct Route {
     model: String,
     slug: String,
 }
 
-/// A listed model chosen with Enter.
-///
-/// Its account, the live tuning, and the serving-provider slug (`None` for
-/// auto, and for every provider that does not route). Cancellation (Esc,
-/// Ctrl-C, Ctrl-D) is resolved by the driver before a key reaches
-/// [`Picker::key`], so it never appears here.
+/// A listed model chosen with Enter; `route` is `None` for auto.
 pub struct Pick {
     pub account: Account,
     pub model: String,
@@ -71,7 +43,6 @@ pub struct Pick {
 /// A rendered list row: a listed model and the account that lists it.
 type Row = (Account, String);
 
-/// Which control holds the keyboard; it renders bright and the others dim.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Focus {
     Search,
@@ -81,8 +52,7 @@ enum Focus {
     TopP,
 }
 
-/// The one cycle order, forward; [`Picker::cycle`] filters `Provider` out of it
-/// rather than a second order being spelled out without that rung.
+/// [`Picker::cycle`] drops `Provider` for a model that does not route.
 const FOCUS_ORDER: &[Focus] = &[
     Focus::Search,
     Focus::Provider,
@@ -91,9 +61,7 @@ const FOCUS_ORDER: &[Focus] = &[
     Focus::TopP,
 ];
 
-/// One ramp glyph per [`EFFORT_LADDER`] rung, in the same order. `auto` wears a
-/// dot rather than a block so it reads as "no setting" rather than "the
-/// smallest setting".
+/// One per [`EFFORT_LADDER`] rung; `auto` is a dot, not the smallest block.
 const GLYPHS: &[&str] = &["·", "▁", "▂", "▄", "▆", "▇", "█"];
 
 const _: () = assert!(
@@ -101,59 +69,30 @@ const _: () = assert!(
     "one glyph per effort-ladder rung"
 );
 
-/// genai accepts `0.0..=2.0`; the overlay steps by tenths.
 const TEMP_MAX: f64 = 2.0;
 const TEMP_STEP: f64 = 0.1;
 const TEMP_PLACES: usize = 1;
-/// genai accepts `0.0..=1.0`; the step is a twentieth so the common `0.9` and
-/// `0.95` land exactly.
+/// A twentieth, so the common `0.9` and `0.95` land exactly.
 const TOP_P_MAX: f64 = 1.0;
 const TOP_P_STEP: f64 = 0.05;
 const TOP_P_PLACES: usize = 2;
-/// Cells in a tuning track: the hue gradient and the fill both span this width.
 const TRACK_W: usize = 24;
 
 const VISIBLE_ROWS: u16 = 8;
-/// The overlay's fixed content width; clamped to the frame when narrower.
-const OVERLAY_W: u16 = 78;
+const BODY_W: u16 = 64;
+/// The label gutter every row aligns to: two wider than `provider`.
+const FIELD_LABEL: Col = Col::wide(10);
+const HINT: &str = " tab field · ↑↓ pick · ←→ adjust · enter apply · esc cancel ";
 
-/// The plane left showing outside the bezel, so the frame floats on the modal
-/// rather than being its edge. Cells are about 2:1, hence two columns a row.
-const MARGIN_X: u16 = 2;
-const MARGIN_Y: u16 = 1;
-/// The airy margin inside the bezel, so the controls never crowd the frame.
-const PAD_X: u16 = 4;
-const PAD_Y: u16 = 1;
-/// What [`overlay_frame`] takes of the overlay's width and height — margin,
-/// bezel and padding on both sides. `login.rs` sizes through the same chrome.
-pub(super) const CHROME_W: u16 = 2 * (MARGIN_X + 1 + PAD_X);
-pub(super) const CHROME_H: u16 = 2 * (MARGIN_Y + 1 + PAD_Y);
-/// Columns of shade cast to the right, against one row below, for the same
-/// 2:1 cells.
-const SHADOW_DEPTH: u16 = 2;
-/// The shadow is translucent: a cell beneath it keeps its glyph and both its
-/// colours are drawn this far toward [`UMBRA`], so the session shows through.
-const SHADOW_ALPHA: f32 = 0.7;
-const UMBRA: Color = Color::Rgb(2, 3, 8);
-/// Stand-ins for the terminal's own colours, which a `Reset` cell does not
-/// reveal and so cannot be darkened.
-const GROUND_BG: Color = Color::Rgb(24, 26, 34);
-const GROUND_FG: Color = SLATE;
-
-/// Endpoints of the temperature gradient (cold blue → warm red) and of the
-/// effort ramp (dim → bright cyan), interpolated by `rail::mix`.
 const COLD: Color = Color::Rgb(96, 160, 235);
 const WARM: Color = Color::Rgb(228, 116, 96);
 const EFFORT_DIM: Color = Color::Rgb(74, 86, 110);
 const EFFORT_BRIGHT: Color = Color::Rgb(150, 205, 220);
 
-/// The top-p track's one hue — top-p is nucleus *mass*, not a temperature, so
-/// it earns no gradient and the fill alone encodes it. A muted green, kept
-/// clear of the effort ramp's cyan and the temperature track's blue→red.
+/// Top-p is a mass, not a temperature, so its track has one hue.
 const NUCLEUS: Color = Color::Rgb(140, 196, 150);
 
-/// Snap `t` to `places` decimals, so repeated `±step` additions never drift
-/// into float noise like `0.30000000000000004`.
+/// Snap `t` to `places` decimals, so repeated steps never drift.
 fn snap(t: f64, places: usize) -> f64 {
     #[allow(
         clippy::cast_possible_truncation,
@@ -164,9 +103,7 @@ fn snap(t: f64, places: usize) -> f64 {
     (t * scale).round() / scale
 }
 
-/// Step a `0.0..=max` knob by `step` in the `up` direction. `auto` (`None`) sits
-/// below the floor: the first up-step lands on `0.0`, and stepping below zero
-/// returns to `auto`.
+/// Step a `0.0..=max` knob; `auto` (`None`) sits just below `0.0`.
 fn step_knob(value: Option<f64>, up: bool, step: f64, max: f64, places: usize) -> Option<f64> {
     if up {
         Some(snap(value.map_or(0.0, |t| (t + step).min(max)), places))
@@ -179,9 +116,8 @@ fn step_knob(value: Option<f64>, up: bool, step: f64, max: f64, places: usize) -
     }
 }
 
-/// A tag's text: the provider name, then the context window and quantization
-/// that tell apart providers of the same model. The wrapping spaces give the
-/// active tag its reversed-block look.
+/// A provider's name, context window and quantization, space-padded so the
+/// active tag reverses as a block.
 fn provider_tag(endpoint: &ProviderEndpoint) -> String {
     let mut text = endpoint.provider_name.clone();
     if let Some(context_length) = endpoint.context_length {
@@ -195,122 +131,30 @@ fn provider_tag(endpoint: &ProviderEndpoint) -> String {
     format!(" {text} ")
 }
 
-/// Centre a `w × h` rect within `area`, clamped to fit. Shared with `login.rs`.
-pub(super) fn centered(w: u16, h: u16, area: Rect) -> Rect {
-    let w = w.min(area.width);
-    let h = h.min(area.height);
-    Rect {
-        x: area.x + (area.width - w) / 2,
-        y: area.y + (area.height - h) / 2,
-        width: w,
-        height: h,
-    }
-}
-
-/// Cast a translucent drop shadow down-and-right of `area`, so the modal reads
-/// as lifted off the session rather than punched into it. `cell_mut`
-/// bounds-checks, so cells falling off the frame are simply skipped.
-fn render_shadow(f: &mut Frame, area: Rect) {
-    let shade = |c: Color, ground: Color| {
-        let c = if matches!(c, Color::Rgb(..)) {
-            c
-        } else {
-            ground
-        };
-        super::rail::mix(c, UMBRA, SHADOW_ALPHA)
-    };
-    let buf = f.buffer_mut();
-    let mut cast = |x: u16, y: u16| {
-        if let Some(cell) = buf.cell_mut((x, y)) {
-            cell.fg = shade(cell.fg, GROUND_FG);
-            cell.bg = shade(cell.bg, GROUND_BG);
-        }
-    };
-    // The bottom edge, shifted right by the depth so the corner squares off.
-    for x in (area.x + SHADOW_DEPTH)..area.right().saturating_add(SHADOW_DEPTH) {
-        cast(x, area.bottom());
-    }
-    // The right edge, starting one row down so the top-right corner stays
-    // unshaded — the light falls from the upper left.
-    for y in (area.y + 1)..=area.bottom() {
-        for dx in 0..SHADOW_DEPTH {
-            cast(area.right() + dx, y);
-        }
-    }
-}
-
-/// Cast the shadow, clear the box to the plane, and draw the double-line bezel
-/// inset by the margin, returning the inner content rect. The one shell both
-/// `/model` and `/login` render into.
-pub(super) fn overlay_frame(f: &mut Frame, area: Rect, title: &str, hint: &str) -> Rect {
-    let plane = Style::default().bg(OVERLAY_BG);
-    render_shadow(f, area);
-    f.render_widget(Clear, area);
-    f.render_widget(Block::default().style(plane), area);
-    let area = area.inner(Margin::new(MARGIN_X, MARGIN_Y));
-    let bezel = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Double)
-        .border_style(Style::default().fg(CYAN).add_modifier(Modifier::BOLD))
-        .style(plane)
-        .title(
-            Line::from(Span::styled(
-                title.to_string(),
-                plane.fg(BANNER_GOLD).add_modifier(Modifier::BOLD),
-            ))
-            .centered(),
-        )
-        .title_bottom(
-            Line::from(Span::styled(
-                hint.to_string(),
-                plane.fg(SLATE).add_modifier(Modifier::DIM),
-            ))
-            .centered(),
-        )
-        .padding(Padding::new(PAD_X, PAD_X, PAD_Y, PAD_Y));
-    let inner = bezel.inner(area);
-    f.render_widget(bezel, area);
-    inner
-}
-
 pub struct Picker {
     query: String,
-    /// In declaration order; their lists fill in as fetches land. Also the set
-    /// [`identity::label`] disambiguates a row's account within.
+    /// In declaration order; also what [`identity::label`] disambiguates in.
     providers: Vec<Account>,
     models: BTreeMap<AccountId, ModelsState>,
-    /// Keyed by `OpenRouter` model id; absent until that model is first
-    /// highlighted.
+    /// Keyed by `OpenRouter` model id.
     endpoints: BTreeMap<String, EndpointsState>,
-    /// Index into the current filtered [`Self::rows`].
+    /// Into [`Self::rows`].
     selected: usize,
     focus: Focus,
-    /// `None` is auto — `OpenRouter` decides.
+    /// `None` throughout is auto.
     route: Option<Route>,
-    /// Index into [`EFFORT_LADDER`].
     effort_idx: usize,
-    /// `None` is auto (unset).
     temperature: Option<f64>,
-    /// `None` is auto (unset).
     top_p: Option<f64>,
-    /// Capability lookup for the *highlighted* model, injected so the picker
-    /// stays a pure component tests can stub; `model_picker.rs` passes
-    /// [`crate::provider::pricing::caps_or_default`].
-    caps: fn(&str) -> crate::provider::pricing::ModelCaps,
-    /// Why the picker opened, when that is news: a saved selection that no
-    /// longer stands.
+    /// Injected so tests can stub the catalog.
+    caps: fn(&str) -> ModelCaps,
+    /// Why the picker opened, when that is news.
     note: Option<String>,
 }
 
 impl Picker {
-    /// Open over `providers`, every list loading until `model_picker.rs` feeds
-    /// in a cached or fetched one. `initial` seeds the tuning controls from the
-    /// focused provider's live values, so reopening shows what is in force.
-    pub fn new(
-        providers: Vec<Account>,
-        initial: &Tuning,
-        caps: fn(&str) -> crate::provider::pricing::ModelCaps,
-    ) -> Self {
+    /// Open over `providers`, every list loading, on the tuning in force.
+    pub fn new(providers: Vec<Account>, initial: &Tuning, caps: fn(&str) -> ModelCaps) -> Self {
         let models = providers
             .iter()
             .map(|account| (account.id.clone(), ModelsState::Loading))
@@ -345,58 +189,47 @@ impl Picker {
         Self { note, ..self }
     }
 
-    /// The row's name, drawn relative to every account open in this picker —
-    /// the one place a label is computed, and it is not computed here.
     fn label(&self, account: &Account) -> String {
         identity::label(account, &self.providers)
     }
 
-    /// Record a provider's resolved (or failed) list, clamping the selection in
-    /// case the visible list shrank.
+    /// Record a provider's list, clamping the selection if it shrank.
     pub fn set_models(&mut self, id: &AccountId, state: ModelsState) {
         self.models.insert(id.clone(), state);
         self.clamp_selection();
     }
 
-    /// Record a model's serving-provider fetch result, or its in-flight state.
     pub fn set_endpoints(&mut self, model: &str, state: EndpointsState) {
         self.endpoints.insert(model.to_string(), state);
     }
 
-    /// `model_picker.rs`'s cue to spawn a serving-provider fetch: the
-    /// highlighted `OpenRouter` model, while no [`EndpointsState`] is recorded
-    /// for it — so seeding `Loading` before spawning is what dedups the fetch.
+    /// The highlighted `OpenRouter` model, until its endpoints are recorded:
+    /// the driver's cue to fetch, deduped by seeding `Loading`.
     pub fn model_needing_endpoints(&self) -> Option<String> {
-        let model = self.highlighted_or_model(&self.rows())?;
+        let model = self.highlighted_routed_model(&self.rows())?;
         (!self.endpoints.contains_key(&model)).then_some(model)
     }
 
-    /// Whether any provider's model list is still in flight.
     pub fn is_loading(&self) -> bool {
         self.providers
             .iter()
             .any(|account| matches!(self.models.get(&account.id), Some(ModelsState::Loading)))
     }
 
-    /// The model on the highlighted row; an empty list has none to gate
-    /// against. Reads the row slice the caller already computed for this frame
-    /// or key.
     fn highlighted_model(&self, rows: &[Row]) -> Option<String> {
         rows.get(self.selected).map(|(_, model)| model.clone())
     }
 
-    /// The highlighted model iff its service routes — `OpenRouter` alone, so
-    /// the only one the provider control applies to.
-    fn highlighted_or_model(&self, rows: &[Row]) -> Option<String> {
+    /// The highlighted model iff its service routes, as `OpenRouter` alone does.
+    fn highlighted_routed_model(&self, rows: &[Row]) -> Option<String> {
         rows.get(self.selected)
             .filter(|(account, _)| account.service.routes)
             .map(|(_, model)| model.clone())
     }
 
-    /// What the provider control cycles after `auto`, in listed order. Empty
-    /// while loading, failed, or unfetched, and for a row that does not route.
+    /// What the provider control cycles after `auto`.
     fn endpoint_slugs(&self, rows: &[Row]) -> Vec<String> {
-        let Some(model) = self.highlighted_or_model(rows) else {
+        let Some(model) = self.highlighted_routed_model(rows) else {
             return Vec::new();
         };
         match self.endpoints.get(&model) {
@@ -407,52 +240,47 @@ impl Picker {
         }
     }
 
-    /// The route slug in force — `Some` only while the model it was chosen for
-    /// is the highlighted one, so a choice can never leak onto another model.
+    /// The route slug, while the model it was chosen for is highlighted.
     fn active_route(&self, rows: &[Row]) -> Option<&str> {
         let route = self.route.as_ref()?;
-        (self.highlighted_or_model(rows).as_deref() == Some(route.model.as_str()))
+        (self.highlighted_routed_model(rows).as_deref() == Some(route.model.as_str()))
             .then_some(route.slug.as_str())
     }
 
-    /// The index convention the provider control's cycling and its tag
-    /// rendering must agree on: `0` is auto, `i + 1` is `items[i]`.
+    /// `0` is auto, `i + 1` is `items[i]`.
     fn active_index<T>(&self, rows: &[Row], items: &[T], slug_of: impl Fn(&T) -> &str) -> usize {
         self.active_route(rows)
             .and_then(|s| items.iter().position(|it| slug_of(it) == s))
             .map_or(0, |i| i + 1)
     }
 
-    /// Whether the highlighted model admits `param`. An unknown model — catalog
-    /// miss, list still loading — reads as supported, so a row grays only when
-    /// the catalog *positively* reports the parameter absent.
-    fn supports(&self, rows: &[Row], param: &str) -> bool {
+    /// Whether the highlighted model admits `param`; an unknown one does.
+    fn supports(&self, rows: &[Row], param: Param) -> bool {
         match self.highlighted_model(rows) {
             Some(model) => (self.caps)(&model).supports(param),
             None => true,
         }
     }
 
-    /// The live tuning *for the highlighted model*: a knob it does not admit is
-    /// masked to `None` so it is neither sent nor persisted, while the picker
-    /// keeps the setting for the next model that does.
+    /// The tuning for the highlighted model, masked to what it admits.
     fn tuning(&self, rows: &[Row]) -> Tuning {
         Tuning {
             effort: self
-                .supports(rows, "reasoning")
+                .supports(rows, Param::Reasoning)
                 .then(|| EFFORT_LADDER[self.effort_idx].1.clone())
                 .flatten(),
             temperature: self
-                .supports(rows, "temperature")
+                .supports(rows, Param::Temperature)
                 .then_some(self.temperature)
                 .flatten(),
-            top_p: self.supports(rows, "top_p").then_some(self.top_p).flatten(),
+            top_p: self
+                .supports(rows, Param::TopP)
+                .then_some(self.top_p)
+                .flatten(),
         }
     }
 
-    /// Handle one key press; Enter on a listed row picks it. The driver
-    /// intercepts Esc, Ctrl-C and Ctrl-D as the shared cancel chord before a
-    /// key reaches here, so this never sees one.
+    /// One key; Enter on a listed row picks it. The driver handles cancel.
     pub fn key(&mut self, code: ratatui::crossterm::event::KeyCode) -> Option<Pick> {
         use ratatui::crossterm::event::KeyCode;
         match code {
@@ -468,9 +296,7 @@ impl Picker {
                 let rows = self.rows();
                 self.focus = self.cycle(&rows, false);
             }
-            // Typing always means "filter models", whatever field had focus.
-            // The route self-gates on the highlighted model, so a query that
-            // moves the highlight off it merely deactivates the route.
+            // Typing always filters, whatever has focus.
             KeyCode::Char(c) => {
                 self.focus = Focus::Search;
                 self.query.push(c);
@@ -494,8 +320,6 @@ impl Picker {
         None
     }
 
-    /// Resolve the highlighted row into a pick carrying the live tuning and the
-    /// route in force for that model.
     fn apply(&self, rows: &[Row]) -> Option<Pick> {
         let (account, model) = rows.get(self.selected)?;
         Some(Pick {
@@ -506,10 +330,8 @@ impl Picker {
         })
     }
 
-    /// The next focus. The provider control joins the cycle only when an
-    /// `OpenRouter` model is highlighted; otherwise it is skipped.
     fn cycle(&self, rows: &[Row], forward: bool) -> Focus {
-        let has_provider = self.highlighted_or_model(rows).is_some();
+        let has_provider = self.highlighted_routed_model(rows).is_some();
         let order: Vec<Focus> = FOCUS_ORDER
             .iter()
             .copied()
@@ -524,8 +346,7 @@ impl Picker {
         order[next]
     }
 
-    /// Move the focused control. `up` is the increasing direction: down the
-    /// list, up the ladder, warmer.
+    /// `up` increases: down the list, up the ladder, warmer.
     fn move_in_focus(&mut self, rows: &[Row], up: bool) {
         match self.focus {
             Focus::Search => {
@@ -539,15 +360,12 @@ impl Picker {
                 }
             }
             Focus::Provider => {
-                // `auto → slug₀ → slug₁ → …`, clamping at the ends. A route is
-                // a choice *about* the highlighted model, so the selection
-                // deliberately stays put.
-                let Some(model) = self.highlighted_or_model(rows) else {
+                let Some(model) = self.highlighted_routed_model(rows) else {
                     return;
                 };
                 let slugs = self.endpoint_slugs(rows);
                 if slugs.is_empty() {
-                    return; // loading / failed / none — nothing to cycle yet
+                    return;
                 }
                 let pos = self.active_index(rows, &slugs, String::as_str);
                 let next = if up {
@@ -561,7 +379,7 @@ impl Picker {
                 });
             }
             Focus::Effort => {
-                if !self.supports(rows, "reasoning") {
+                if !self.supports(rows, Param::Reasoning) {
                     return;
                 }
                 self.effort_idx = if up {
@@ -571,14 +389,14 @@ impl Picker {
                 };
             }
             Focus::Temperature => {
-                if !self.supports(rows, "temperature") {
+                if !self.supports(rows, Param::Temperature) {
                     return;
                 }
                 self.temperature =
                     step_knob(self.temperature, up, TEMP_STEP, TEMP_MAX, TEMP_PLACES);
             }
             Focus::TopP => {
-                if !self.supports(rows, "top_p") {
+                if !self.supports(rows, Param::TopP) {
                     return;
                 }
                 self.top_p = step_knob(self.top_p, up, TOP_P_STEP, TOP_P_MAX, TOP_P_PLACES);
@@ -586,12 +404,9 @@ impl Picker {
         }
     }
 
-    /// The `(provider, model)` rows matching the fuzzy query, best score first,
-    /// ties broken alphabetically on the `label / model` line they matched by.
-    /// The route is not a filter and does not narrow this.
+    /// The rows matching the query, best first, each ranked on its own
+    /// `label / model`: two accounts may list the same model.
     fn rows(&self) -> Vec<Row> {
-        // Each row carries its own haystack, so no index can pair a row with
-        // another's label — two providers may list the very same model name.
         let mut rows: Vec<(String, Row)> = Vec::new();
         for account in &self.providers {
             if let Some(ModelsState::Loaded(models)) = self.models.get(&account.id) {
@@ -620,9 +435,7 @@ impl Picker {
         self.selected = if n == 0 { 0 } else { self.selected.min(n - 1) };
     }
 
-    /// The notes under the controls, each a headline and perhaps its reason:
-    /// why the picker opened, then each provider whose listing failed, so its
-    /// absent models are explained.
+    /// Headline and reason: why the picker opened, then each failed listing.
     fn notes(&self) -> impl Iterator<Item = (String, Option<String>)> {
         let failures =
             self.providers
@@ -642,82 +455,54 @@ impl Picker {
 
     // --- rendering -----------------------------------------------------------
 
-    /// The overlay's outer size: the fixed width, clamped to the frame, over a
-    /// height that fits every row [`Self::render`] emits.
-    fn desired_size(&self, frame: Rect) -> (u16, u16) {
-        let w = OVERLAY_W.min(frame.width);
-        // Counting the pre-wrapped note lines reserves exactly the rows the
-        // render emits.
-        let note_width = w.saturating_sub(CHROME_W);
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "wrapped note-row count; bounded by the tiny catalog"
-        )]
-        let notes = self.note_lines(note_width).len() as u16;
-        // chrome + search + status + list + provider + effort + temp + top-p +
-        // notes. The provider row is reserved even for a model that does not
-        // route, so the overlay's height never jumps.
-        let h = CHROME_H + 1 + 1 + (VISIBLE_ROWS + 2) + 1 + 1 + 1 + 1 + notes;
-        (w, h.min(frame.height.max(3)))
-    }
-
-    /// Draw the overlay over the centre of `frame`. The filtered row slice is
-    /// computed once here and threaded through every row-reading helper, so one
-    /// frame reads one list.
+    /// Draw the overlay over the centre of `frame`, from one filtered row slice.
     pub fn render(&self, f: &mut Frame, frame: Rect) {
-        let (w, h) = self.desired_size(frame);
-        let area = centered(w, h, frame);
-        let plane = Style::default().bg(OVERLAY_BG);
         let rows = self.rows();
-
-        let inner = overlay_frame(
+        let width = overlay::body_width(BODY_W, frame);
+        let notes = self.note_lines(width);
+        let plane = Style::default().bg(OVERLAY_BG);
+        // The provider row stands even for a model that does not route, so the
+        // height never jumps; the list's border takes two more.
+        let heights = [
+            1,
+            1,
+            VISIBLE_ROWS + 2,
+            1,
+            1,
+            1,
+            1,
+            u16::try_from(notes.len()).unwrap_or(u16::MAX),
+        ];
+        let body = overlay::draw(
             f,
-            area,
+            frame,
+            Anchor::Centre,
+            (width, heights.iter().sum()),
             " MODEL ",
-            " tab field · ↑↓ pick · ←→ adjust · ⏎ apply · esc cancel ",
+            HINT,
         );
-
-        // The eight rows `desired_size` sums the height of; the list carries
-        // its own border, hence the two extra cells.
-        let [search, status, list, provider, effort, temp, top_p, notes] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(VISIBLE_ROWS + 2),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(0),
-        ])
-        .areas(inner);
-
-        f.render_widget(Paragraph::new(self.search_line()).style(plane), search);
-        f.render_widget(Paragraph::new(self.status_line(&rows)).style(plane), status);
+        let [search, status, list, provider, effort, temp, top_p, note] =
+            Layout::vertical(heights.map(Constraint::Length)).areas(body);
         self.render_list(f, &rows, list, plane);
-        f.render_widget(
-            Paragraph::new(self.provider_line(&rows, provider.width)).style(plane),
-            provider,
-        );
-        f.render_widget(
-            Paragraph::new(self.effort_line(self.supports(&rows, "reasoning"))).style(plane),
-            effort,
-        );
-        f.render_widget(
-            Paragraph::new(self.temp_line(self.supports(&rows, "temperature"))).style(plane),
-            temp,
-        );
-        f.render_widget(
-            Paragraph::new(self.top_p_line(self.supports(&rows, "top_p"))).style(plane),
-            top_p,
-        );
-        let note_lines = self.note_lines(notes.width);
-        if !note_lines.is_empty() {
-            f.render_widget(Paragraph::new(note_lines).style(plane), notes);
+        for (line, at) in [
+            (self.search_line(), search),
+            (self.status_line(&rows), status),
+            (self.provider_line(&rows, provider.width), provider),
+            (
+                self.effort_line(self.supports(&rows, Param::Reasoning)),
+                effort,
+            ),
+            (
+                self.temp_line(self.supports(&rows, Param::Temperature)),
+                temp,
+            ),
+            (self.top_p_line(self.supports(&rows, Param::TopP)), top_p),
+        ] {
+            f.render_widget(Paragraph::new(line).style(plane), at);
         }
+        f.render_widget(Paragraph::new(notes).style(plane), note);
     }
 
-    /// A field label in the gutter every row aligns to, bright when focused, so
-    /// the eye finds the live control by lightness alone.
     fn field_label(&self, text: &str, field: Focus) -> Span<'static> {
         let style = if self.focus == field {
             Style::default().fg(CYAN).add_modifier(Modifier::BOLD)
@@ -755,8 +540,6 @@ impl Picker {
         ))
     }
 
-    /// The model list in its own rounded panel: the selected row reversed, the
-    /// border brightening when the search field has focus.
     fn render_list(&self, f: &mut Frame, rows: &[Row], area: Rect, plane: Style) {
         let focused = self.focus == Focus::Search;
         let border = if focused {
@@ -773,7 +556,6 @@ impl Picker {
         f.render_widget(block, area);
 
         let window = list_area.height as usize;
-        // Scroll so the selected row stays visible.
         let start = self.selected.saturating_sub(window.saturating_sub(1));
         let lines: Vec<Line<'static>> = rows
             .iter()
@@ -800,8 +582,6 @@ impl Picker {
         f.render_widget(Paragraph::new(lines).style(plane), list_area);
     }
 
-    /// A grayed tuning row: the label plus a note, so a knob the model does not
-    /// admit reads as disabled rather than missing.
     fn unsupported_row(label: &str) -> Line<'static> {
         let dim = Style::default().fg(SLATE).add_modifier(Modifier::DIM);
         Line::from(vec![
@@ -813,10 +593,6 @@ impl Picker {
         ])
     }
 
-    /// The serving-provider row for the highlighted model: an inert note when
-    /// it does not route, `loading…`, `auto` beside the failure reason, or an
-    /// `auto` tag and one hue-coded tag per provider with the active one
-    /// reversed.
     fn provider_line(&self, rows: &[Row], width: u16) -> Line<'static> {
         let focused = self.focus == Focus::Provider;
         let label = self.field_label("provider", Focus::Provider);
@@ -835,7 +611,7 @@ impl Picker {
             }
         };
 
-        let Some(model) = self.highlighted_or_model(rows) else {
+        let Some(model) = self.highlighted_routed_model(rows) else {
             return Line::from(vec![
                 label,
                 Span::styled(
@@ -857,71 +633,35 @@ impl Picker {
                     Span::styled(format!("  {reason}"), dim.add_modifier(Modifier::ITALIC)),
                 ]);
             }
-            // Not yet fetched: `auto` alone, and focusing the control here is
-            // what triggers the fetch.
             None => &[],
         };
 
-        // Seven hues far apart on the circle, so neighbouring tags never blur.
-        let colors: &[Color] = &[
-            Color::Rgb(130, 190, 230), // blue
-            Color::Rgb(230, 150, 120), // warm red
-            Color::Rgb(130, 210, 150), // green
-            Color::Rgb(210, 170, 110), // gold
-            Color::Rgb(180, 140, 210), // violet
-            Color::Rgb(110, 200, 200), // teal
-            Color::Rgb(220, 140, 180), // rose
-        ];
         let active = self.active_index(rows, endpoints, |e| e.slug.as_str());
-
-        let mut spans = vec![label, Span::styled(" auto ", auto_style(active == 0))];
-        for (i, endpoint) in endpoints.iter().enumerate() {
-            let hue = colors[i % colors.len()];
-            let style = if (i + 1) == active {
-                Style::default()
-                    .fg(hue)
-                    .add_modifier(Modifier::REVERSED | Modifier::BOLD)
-            } else {
-                Style::default().fg(hue).add_modifier(Modifier::DIM)
-            };
-            spans.push(Span::styled(provider_tag(endpoint), style));
-        }
-        let total: usize = spans.iter().map(Span::width).sum();
-        if total <= width as usize {
-            return Line::from(spans);
-        }
-
-        // Overflow: keep the label and a window of tags around the active one,
-        // so the highlight never falls off the edge.
-        let active_span = active + 1; // in spans: 1 = auto, 2 = first tag, …
-        let budget = (width as usize).saturating_sub(spans[0].width());
-
-        let mut lo = active_span;
-        let mut hi = active_span + 1; // exclusive
-        let mut used = spans[active_span].width();
-
-        while lo > 1 && used + spans[lo - 1].width() <= budget {
-            lo -= 1;
-            used += spans[lo].width();
-        }
-        while hi < spans.len() && used + spans[hi].width() <= budget {
-            used += spans[hi].width();
-            hi += 1;
-        }
-
-        let mut result = vec![spans[0].clone()];
-        if lo > 1 {
-            result.push(Span::styled(" … ", dim));
-        }
-        result.extend(spans[lo..hi].iter().cloned());
-        if hi < spans.len() {
-            result.push(Span::styled(" …", dim));
-        }
-        Line::from(result)
+        let tags: Vec<Span<'static>> =
+            std::iter::once(Span::styled(" auto ", auto_style(active == 0)))
+                .chain(
+                    endpoints
+                        .iter()
+                        .zip(TAG_HUES.iter().cycle())
+                        .enumerate()
+                        .map(|(i, (endpoint, &hue))| {
+                            let style = if i + 1 == active {
+                                Style::default()
+                                    .fg(hue)
+                                    .add_modifier(Modifier::REVERSED | Modifier::BOLD)
+                            } else {
+                                Style::default().fg(hue).add_modifier(Modifier::DIM)
+                            };
+                            Span::styled(provider_tag(endpoint), style)
+                        }),
+                )
+                .collect();
+        let room = usize::from(width).saturating_sub(label.width());
+        let mut spans = vec![label];
+        spans.extend(line::window_around(&tags, active, room, dim));
+        Line::from(spans)
     }
-    /// The effort ladder: an ascending block ramp that brightens as it grows,
-    /// the chosen rung reversed and named. Grayed when the highlighted model
-    /// has no reasoning effort to set.
+
     fn effort_line(&self, supported: bool) -> Line<'static> {
         if !supported {
             return Self::unsupported_row("effort");
@@ -945,7 +685,7 @@ impl Picker {
             }
             spans.push(Span::styled(*glyph, style));
         }
-        // Pad the ramp to a track's width, so every readout starts level.
+        // Every readout starts level with the tracks'.
         spans.push(Span::raw(" ".repeat(TRACK_W - GLYPHS.len())));
         let chosen = EFFORT_LADDER[self.effort_idx].0;
         let label_style = if focused {
@@ -957,9 +697,7 @@ impl Picker {
         Line::from(spans)
     }
 
-    /// The chassis the temperature and top-p tracks share, differing only in
-    /// `hue`: [`TRACK_W`] cells filled to `value`'s fraction of `max`, with
-    /// `auto` (`None`) drawing the whole track faint.
+    /// [`TRACK_W`] cells filled to `value / max`; `auto` draws it all faint.
     fn track_line(
         &self,
         label: &str,
@@ -1002,8 +740,6 @@ impl Picker {
         Line::from(spans)
     }
 
-    /// The temperature track: a cold→warm gradient filled to length. Grayed
-    /// when the highlighted model does not admit a temperature.
     fn temp_line(&self, supported: bool) -> Line<'static> {
         if !supported {
             return Self::unsupported_row("temp");
@@ -1025,8 +761,6 @@ impl Picker {
         )
     }
 
-    /// The top-p track: one [`NUCLEUS`] hue, the fill alone encoding the value.
-    /// Grayed when the highlighted model does not admit a top-p.
     fn top_p_line(&self, supported: bool) -> Line<'static> {
         if !supported {
             return Self::unsupported_row("top-p");
@@ -1041,11 +775,8 @@ impl Picker {
         )
     }
 
-    /// Each note set off by a blank row and wrapped to `width`: a bold
-    /// headline under a `⚠ `, its reason hanging plain beneath. The reason is
-    /// wrapped rather than truncated — it is the point of the note. Wrapping
-    /// through [`line::hang`] lets these lines double as the exact height
-    /// [`Self::desired_size`] reserves.
+    /// Each note after a blank row: a bold `⚠` headline, then its reason
+    /// wrapped, never truncated, beneath.
     fn note_lines(&self, width: u16) -> Vec<Line<'static>> {
         let width = width as usize;
         let bold = Style::default().fg(RED).add_modifier(Modifier::BOLD);

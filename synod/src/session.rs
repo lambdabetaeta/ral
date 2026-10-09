@@ -683,7 +683,7 @@ fn resolve_tuning(effort: Option<String>, model: &str) -> Result<provider::Tunin
     pricing::ensure_loaded_blocking();
     Ok(mask_unsupported_effort(
         tuning,
-        pricing::caps_or_default(model).supports("reasoning"),
+        pricing::caps_or_default(model).supports(pricing::Param::Reasoning),
     ))
 }
 

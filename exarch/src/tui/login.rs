@@ -8,8 +8,8 @@
 
 use super::app::Overlay;
 use super::line;
+use super::overlay::{self, Anchor};
 use super::palette::{CYAN, Col, OVERLAY_BG, RED, SLATE};
-use super::picker::{CHROME_H, CHROME_W, centered, overlay_frame};
 use super::terminal::osc52_copy;
 use super::tui_loop::{CommandCtx, OverlayTick, Tui, overlay_tick};
 use crate::provider::identity;
@@ -25,16 +25,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
 /// Wide enough for an id-qualified account label beside its blurb.
-const OVERLAY_W: u16 = 76;
-/// Wrap width for the body rows: [`OVERLAY_W`] less the overlay's chrome.
-const BODY_W: usize = (OVERLAY_W - CHROME_W) as usize;
+const BODY_W: u16 = 62;
 /// The indent every body row shares.
 const INDENT: &str = "  ";
 /// The column every row's value starts after, so that no value is placed by
 /// a hand-counted literal.  Two wider than the longest label.
 const LABEL: Col = Col::wide(8);
 /// What a labelled row leaves for its value.
-const VALUE_W: usize = BODY_W - INDENT.len() - LABEL.cells();
+const VALUE_W: usize = BODY_W as usize - INDENT.len() - LABEL.cells();
 
 /// Success closes the overlay, so there is no resting "done" mode.
 enum Mode {
@@ -181,30 +179,23 @@ impl Station {
 }
 
 impl LoginOverlay {
-    /// Draw the overlay centred on `frame`, in the picker's own chrome — one
-    /// shell, two overlays.
+    /// Draw the overlay centred on `frame`.
     pub(super) fn render(&self, f: &mut Frame, frame: Rect) {
-        let (w, h) = self.desired_size(frame);
-        let area = centered(w, h, frame);
-        let plane = Style::default().bg(OVERLAY_BG);
+        let lines = self.body_lines();
+        let size = (BODY_W, u16::try_from(lines.len()).unwrap_or(u16::MAX));
 
         let hint = match &self.mode {
-            Mode::Choosing => " ↑↓ account · ⏎ start · esc cancel ",
-            Mode::Failed(_) => " ⏎ retry · esc close ",
+            Mode::Choosing => " ↑↓ account · enter start · esc cancel ",
+            Mode::Failed(_) => " enter retry · esc close ",
             Mode::Running(_) if self.yanked => " copied · esc cancel ",
             Mode::Running(Some(LoginPhase::AwaitingBrowser { .. })) => " y copy · esc cancel ",
             Mode::Running(_) => " esc cancel ",
         };
-        let inner = overlay_frame(f, area, " SIGN IN ", hint);
-        f.render_widget(Paragraph::new(self.body_lines()).style(plane), inner);
-    }
-
-    fn desired_size(&self, frame: Rect) -> (u16, u16) {
-        let w = OVERLAY_W.min(frame.width);
-        #[allow(clippy::cast_possible_truncation, reason = "a handful of body rows")]
-        let body_rows = self.body_lines().len() as u16;
-        let h = CHROME_H + body_rows;
-        (w, h.min(frame.height.max(3)))
+        let body = overlay::draw(f, frame, Anchor::Centre, size, " SIGN IN ", hint);
+        f.render_widget(
+            Paragraph::new(lines).style(Style::default().bg(OVERLAY_BG)),
+            body,
+        );
     }
 
     fn body_lines(&self) -> Vec<Line<'static>> {

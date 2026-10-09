@@ -23,6 +23,7 @@ mod login;
 mod matrix;
 mod md;
 mod model_picker;
+mod overlay;
 mod palette;
 mod picker;
 mod prompt;
