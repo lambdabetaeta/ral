@@ -9,7 +9,9 @@
 
 use exarch::app::App;
 use exarch::provider::identity::{AccountId, ServiceName};
-use exarch::provider::models::{Listed, ModelCatalog, ModelSource, ProviderEndpoint, listing_of};
+use exarch::provider::models::{
+    ListFailure, Listed, ModelCatalog, ModelSource, ProviderEndpoint, listing_of,
+};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -26,7 +28,7 @@ struct FakeSource {
 }
 
 impl ModelSource for FakeSource {
-    fn list(&self, _account: &AccountId) -> Result<Vec<Listed>, String> {
+    fn list(&self, _account: &AccountId) -> Result<Vec<Listed>, ListFailure> {
         self.fetches.fetch_add(1, Ordering::Relaxed);
         Ok(listed())
     }

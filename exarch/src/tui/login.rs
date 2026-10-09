@@ -9,7 +9,7 @@
 use super::app::Overlay;
 use super::line;
 use super::overlay::{self, Anchor};
-use super::palette::{CYAN, Col, OVERLAY_BG, RED, SLATE};
+use super::palette::{CYAN, Col, RED, SLATE};
 use super::terminal::osc52_copy;
 use super::tui_loop::{CommandCtx, OverlayTick, Tui, overlay_tick};
 use crate::provider::identity;
@@ -31,8 +31,6 @@ const INDENT: &str = "  ";
 /// The column every row's value starts after, so that no value is placed by
 /// a hand-counted literal.  Two wider than the longest label.
 const LABEL: Col = Col::wide(8);
-/// What a labelled row leaves for its value.
-const VALUE_W: usize = BODY_W as usize - INDENT.len() - LABEL.cells();
 
 /// Success closes the overlay, so there is no resting "done" mode.
 enum Mode {
@@ -181,8 +179,8 @@ impl Station {
 impl LoginOverlay {
     /// Draw the overlay centred on `frame`.
     pub(super) fn render(&self, f: &mut Frame, frame: Rect) {
-        let lines = self.body_lines();
-        let size = (BODY_W, u16::try_from(lines.len()).unwrap_or(u16::MAX));
+        let width = overlay::body_width(BODY_W, frame);
+        let lines = self.body_lines(usize::from(width));
 
         let hint = match &self.mode {
             Mode::Choosing => " ↑↓ account · enter start · esc cancel ",
@@ -191,14 +189,12 @@ impl LoginOverlay {
             Mode::Running(Some(LoginPhase::AwaitingBrowser { .. })) => " y copy · esc cancel ",
             Mode::Running(_) => " esc cancel ",
         };
+        let size = (width, lines.len());
         let body = overlay::draw(f, frame, Anchor::Centre, size, " SIGN IN ", hint);
-        f.render_widget(
-            Paragraph::new(lines).style(Style::default().bg(OVERLAY_BG)),
-            body,
-        );
+        f.render_widget(Paragraph::new(lines), body);
     }
 
-    fn body_lines(&self) -> Vec<Line<'static>> {
+    fn body_lines(&self, width: usize) -> Vec<Line<'static>> {
         let mut lines: Vec<_> = self
             .choices
             .iter()
@@ -207,7 +203,7 @@ impl LoginOverlay {
             .collect();
         lines.push(Line::default());
         lines.push(self.phase_line());
-        lines.extend(self.detail_lines());
+        lines.extend(self.detail_lines(width));
         lines
     }
 
@@ -262,11 +258,13 @@ impl LoginOverlay {
     /// The phase-specific rows below the track. The alt screen swallows stderr,
     /// so what [`LoginPhase::stderr_line`] gives the CLI must appear here or
     /// nowhere — the sign-in URL above all.
-    fn detail_lines(&self) -> Vec<Line<'static>> {
+    fn detail_lines(&self, width: usize) -> Vec<Line<'static>> {
         match &self.mode {
             Mode::Choosing | Mode::Running(None | Some(LoginPhase::ExchangingCode)) => Vec::new(),
-            Mode::Running(Some(LoginPhase::AwaitingBrowser { url })) => field("open", url, dim()),
-            Mode::Failed(reason) => field("error", reason, Style::default().fg(RED)),
+            Mode::Running(Some(LoginPhase::AwaitingBrowser { url })) => {
+                field("open", url, dim(), width)
+            }
+            Mode::Failed(reason) => field("error", reason, Style::default().fg(RED), width),
         }
     }
 }
@@ -280,16 +278,12 @@ fn dim() -> Style {
 /// A labelled row whose value wraps on under the value column, through the
 /// shared display-width-aware [`line::hang`].  Wrapping is what stops
 /// a long value clipping at the bezel and reading as a shorter one.
-fn field(label: &str, text: &str, style: Style) -> Vec<Line<'static>> {
+fn field(label: &str, text: &str, style: Style, width: usize) -> Vec<Line<'static>> {
     let head = [Span::styled(
         format!("{INDENT}{}", LABEL.left(label)),
         dim(),
     )];
-    line::hang(
-        &head,
-        vec![Span::styled(text.to_string(), style)],
-        head[0].width() + VALUE_W,
-    )
+    line::hang(&head, vec![Span::styled(text.to_string(), style)], width)
 }
 
 // ---------------------------------------------------------------------------

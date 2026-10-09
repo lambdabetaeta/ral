@@ -6,7 +6,7 @@
 //! names the outcomes, [`Fetches`] pumps the threads, [`Listing`] joins them.
 
 use super::identity::AccountId;
-use super::models::{Listed, ModelCatalog, ModelSource, ProviderEndpoint, names};
+use super::models::{ListFailure, Listed, ModelCatalog, ModelSource, ProviderEndpoint, names};
 use std::collections::BTreeMap;
 
 /// One background fetch's state, over an account's model list
@@ -27,29 +27,30 @@ pub type EndpointsState = FetchState<Vec<ProviderEndpoint>>;
 
 /// A keyed background-fetch pump: one thread per key, all reporting through one
 /// channel, so [`Self::landed`] never blocks and results fold in arrival order.
-pub struct Fetches<K, T> {
-    tx: std::sync::mpsc::Sender<(K, Result<T, String>)>,
-    rx: std::sync::mpsc::Receiver<(K, Result<T, String>)>,
+pub struct Fetches<K, T, E = String> {
+    tx: std::sync::mpsc::Sender<(K, Result<T, E>)>,
+    rx: std::sync::mpsc::Receiver<(K, Result<T, E>)>,
 }
 
-impl<K, T> Default for Fetches<K, T> {
+impl<K, T, E> Default for Fetches<K, T, E> {
     fn default() -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
         Self { tx, rx }
     }
 }
 
-impl<K, T> Fetches<K, T> {
+impl<K, T, E> Fetches<K, T, E> {
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Run `fetch` on its own thread and send `(key, fetch())` back. The send
     /// fails only when the pump is already dropped — nothing left to hand it to.
-    pub fn spawn(&self, key: K, fetch: impl FnOnce() -> Result<T, String> + Send + 'static)
+    pub fn spawn(&self, key: K, fetch: impl FnOnce() -> Result<T, E> + Send + 'static)
     where
         K: Send + 'static,
         T: Send + 'static,
+        E: Send + 'static,
     {
         let tx = self.tx.clone();
         std::thread::spawn(move || {
@@ -59,7 +60,7 @@ impl<K, T> Fetches<K, T> {
     }
 
     /// Every fetch that has landed since the last call, without blocking.
-    pub fn landed(&mut self) -> Vec<(K, Result<T, String>)> {
+    pub fn landed(&mut self) -> Vec<(K, Result<T, E>)> {
         std::iter::from_fn(|| self.rx.try_recv().ok()).collect()
     }
 
@@ -69,7 +70,7 @@ impl<K, T> Fetches<K, T> {
     /// panicking thread's, which unwound past its send. Hence no fetch count
     /// and no timeout — the transport's per-read idle timeout makes a wedged
     /// fetch error and send of its own accord.
-    pub fn settle(self) -> Vec<(K, Result<T, String>)> {
+    pub fn settle(self) -> Vec<(K, Result<T, E>)> {
         drop(self.tx);
         std::iter::from_fn(|| self.rx.recv().ok()).collect()
     }
@@ -79,7 +80,7 @@ impl<K, T> Fetches<K, T> {
 /// seeded from the catalog's caches, completed by a [`Fetches`] pump.
 pub struct Listing {
     states: BTreeMap<AccountId, ModelsState>,
-    fetches: Fetches<AccountId, Vec<Listed>>,
+    fetches: Fetches<AccountId, Vec<Listed>, ListFailure>,
 }
 
 impl Listing {
@@ -116,7 +117,7 @@ impl Listing {
                     catalog.record(&account, listed);
                     ModelsState::Loaded(models)
                 }
-                Err(reason) => ModelsState::Failed(reason),
+                Err(reason) => ModelsState::Failed(reason.to_string()),
             };
             self.states.insert(account.clone(), state);
             changed.push(account);
@@ -128,7 +129,7 @@ impl Listing {
     /// Catalog-free by design: a caller holding the catalog behind a lock
     /// (synod's `refresh_menu`) folds the successes in afterward through
     /// [`ModelCatalog::record`], never holding it across the network.
-    pub fn settle(self) -> Vec<(AccountId, Result<Vec<Listed>, String>)> {
+    pub fn settle(self) -> Vec<(AccountId, Result<Vec<Listed>, ListFailure>)> {
         self.fetches.settle()
     }
 
@@ -156,7 +157,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
-    type Lists = BTreeMap<AccountId, Result<Vec<Listed>, String>>;
+    type Lists = BTreeMap<AccountId, Result<Vec<Listed>, ListFailure>>;
 
     /// A fake [`ModelSource`] whose state is shared, not forked, across a clone
     /// — so a background thread's fetch is counted where the test can see it.
@@ -180,13 +181,13 @@ mod tests {
     }
 
     impl ModelSource for FakeSource {
-        fn list(&self, account: &AccountId) -> Result<Vec<Listed>, String> {
+        fn list(&self, account: &AccountId) -> Result<Vec<Listed>, ListFailure> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.lists
                 .lock_ignore_poison()
                 .get(account)
                 .cloned()
-                .unwrap_or_else(|| Err("no fake list".into()))
+                .unwrap_or_else(|| Err(ListFailure::Request("no fake list".into())))
         }
 
         fn endpoints(&self, _model: &str) -> Result<Vec<ProviderEndpoint>, String> {
@@ -269,7 +270,10 @@ mod tests {
     fn a_failed_fetch_lands_failed_and_is_not_recorded() {
         let openai = Account::built_in("openai");
         let mut lists = BTreeMap::new();
-        lists.insert(openai.id.clone(), Err("network down".to_string()));
+        lists.insert(
+            openai.id.clone(),
+            Err(ListFailure::Request("network down".into())),
+        );
         let mut catalog = ModelCatalog::memo_only(FakeSource::new(lists));
 
         let mut listing = Listing::open(vec![openai.id.clone()], &mut catalog);
@@ -289,7 +293,7 @@ mod tests {
         let anthropic = Account::built_in("anthropic");
         let openai = Account::built_in("openai");
         let mut lists = one(&anthropic.id, &["model-a"]);
-        lists.insert(openai.id.clone(), Err("no key".to_string()));
+        lists.insert(openai.id.clone(), Err(ListFailure::NoCredential));
         let mut catalog = ModelCatalog::memo_only(FakeSource::new(lists));
 
         let listing = Listing::open(vec![anthropic.id.clone(), openai.id.clone()], &mut catalog);
@@ -301,7 +305,7 @@ mod tests {
             results[0],
             (anthropic.id, Ok(vec![Listed::bare("model-a")]))
         );
-        assert_eq!(results[1], (openai.id, Err("no key".to_string())));
+        assert_eq!(results[1], (openai.id, Err(ListFailure::NoCredential)));
     }
 
     #[test]

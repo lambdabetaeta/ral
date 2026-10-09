@@ -144,7 +144,7 @@ where
         match result {
             Ok(models) => catalog.record(&id, models),
             Err(reason) => {
-                failed.insert(id, reason);
+                failed.insert(id, reason.to_string());
             }
         }
     }
@@ -223,7 +223,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use exarch::provider::models::{Listed, ProviderEndpoint};
+    use exarch::provider::models::{ListFailure, Listed, ProviderEndpoint};
     use std::sync::Arc;
 
     /// A built-in service's sole account — the common case in these tests.
@@ -235,7 +235,7 @@ mod tests {
         Account::of_service(service)
     }
 
-    type Lists = BTreeMap<AccountId, Result<Vec<Listed>, String>>;
+    type Lists = BTreeMap<AccountId, Result<Vec<Listed>, ListFailure>>;
 
     /// A fake [`ModelSource`] whose list is shared (not forked) across a
     /// clone, so a background-fetch thread run by [`Listing::open`] serves
@@ -254,12 +254,12 @@ mod tests {
     }
 
     impl ModelSource for FakeSource {
-        fn list(&self, id: &AccountId) -> Result<Vec<Listed>, String> {
+        fn list(&self, id: &AccountId) -> Result<Vec<Listed>, ListFailure> {
             self.lists
                 .lock_ignore_poison()
                 .get(id)
                 .cloned()
-                .unwrap_or_else(|| Err("no fake list".into()))
+                .unwrap_or_else(|| Err(ListFailure::Request("no fake list".into())))
         }
 
         fn endpoints(&self, _model: &str) -> Result<Vec<ProviderEndpoint>, String> {
@@ -365,7 +365,10 @@ mod tests {
     fn refresh_menu_leaves_a_failed_fetch_uncached_and_says_why() {
         let deepseek = fam("deepseek");
         let mut lists = Lists::new();
-        lists.insert(deepseek.id.clone(), Err("network down".to_string()));
+        lists.insert(
+            deepseek.id.clone(),
+            Err(ListFailure::Request("network down".into())),
+        );
         let catalog = Mutex::new(ModelCatalog::memo_only(FakeSource::new(lists)));
 
         let menu = refresh_menu_for(std::slice::from_ref(&deepseek), &catalog);

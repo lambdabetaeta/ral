@@ -63,14 +63,43 @@ pub struct ProviderEndpoint {
     pub quantization: Option<String>,
 }
 
+/// Why an account's model list could not be had. Says nothing of which
+/// account: the caller names it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ListFailure {
+    UnknownAccount,
+    NoCredential,
+    Runtime(String),
+    Request(String),
+    Refresh(String),
+    Http {
+        status: reqwest::StatusCode,
+        detail: String,
+    },
+    Parse(String),
+}
+
+impl std::fmt::Display for ListFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownAccount => f.write_str("not a known account"),
+            Self::NoCredential => f.write_str("no resolved credential"),
+            Self::Runtime(e) | Self::Request(e) => f.write_str(e),
+            Self::Refresh(e) => write!(f, "could not refresh the login: {e}"),
+            Self::Http { status, detail } => write!(f, "OpenAI returned HTTP {status}: {detail}"),
+            Self::Parse(e) => write!(f, "could not parse the model list: {e}"),
+        }
+    }
+}
+
 /// The seam every fetch of an account's model list goes through: live against
 /// genai and `OpenRouter`'s REST API, an in-memory fake in tests.
 pub trait ModelSource {
     /// `account`'s full model list.
     ///
     /// # Errors
-    /// Returns `Err` saying why the fetch failed; the caller names the account.
-    fn list(&self, account: &AccountId) -> Result<Vec<Listed>, String>;
+    /// Returns `Err` saying why the fetch failed, never which account.
+    fn list(&self, account: &AccountId) -> Result<Vec<Listed>, ListFailure>;
 
     /// The upstream serving providers `OpenRouter` lists for `model`. Only a
     /// routing service reaches this, so the picker calls it for nothing else.
@@ -117,12 +146,12 @@ pub(super) fn blocking_runtime(what: &str) -> Result<tokio::runtime::Runtime, St
 }
 
 impl ModelSource for LiveSource {
-    fn list(&self, id: &AccountId) -> Result<Vec<Listed>, String> {
-        let account = self
+    fn list(&self, id: &AccountId) -> Result<Vec<Listed>, ListFailure> {
+        let account = self.roster.account(id).ok_or(ListFailure::UnknownAccount)?;
+        let credential = self
             .roster
-            .account(id)
-            .ok_or_else(|| format!("{id} is not a known account"))?;
-        let credential = self.roster.credential(id).ok_or("no resolved credential")?;
+            .credential(id)
+            .ok_or(ListFailure::NoCredential)?;
         match credential {
             Credential::ApiKey(key) => self.list_api_key(account, key),
             Credential::OAuth(cell) => Self::list_chatgpt(cell),
@@ -169,10 +198,12 @@ impl ModelSource for LiveSource {
 }
 
 impl LiveSource {
-    fn list_api_key(&self, account: &Account, key: &str) -> Result<Vec<Listed>, String> {
-        let runtime = blocking_runtime("listing")?;
+    fn list_api_key(&self, account: &Account, key: &str) -> Result<Vec<Listed>, ListFailure> {
+        let runtime = blocking_runtime("listing").map_err(ListFailure::Runtime)?;
         match Native::of(account.service.adapter) {
-            Some(native) => runtime.block_on(native.list(account, key)),
+            Some(native) => runtime
+                .block_on(native.list(account, key))
+                .map_err(ListFailure::Request),
             None => runtime.block_on(self.list_genai(account, key)),
         }
     }
@@ -180,7 +211,7 @@ impl LiveSource {
     /// Endpoint and key passed explicitly, so a catalog request never leans on
     /// the client's auth resolver. Both come from the account's service, so a
     /// declared endpoint lists exactly as a built-in one does.
-    async fn list_genai(&self, account: &Account, key: &str) -> Result<Vec<Listed>, String> {
+    async fn list_genai(&self, account: &Account, key: &str) -> Result<Vec<Listed>, ListFailure> {
         let provider_config = ProviderConfig {
             endpoint: account.service.endpoint.clone().map(Endpoint::from_owned),
             auth: Some(AuthData::from_single(key.to_owned())),
@@ -189,7 +220,7 @@ impl LiveSource {
             .all_model_names(account.service.adapter, provider_config)
             .await
             .map(|names| names.into_iter().map(Listed::bare).collect())
-            .map_err(|e| e.to_string())
+            .map_err(|e| ListFailure::Request(e.to_string()))
     }
 
     /// The plan's own catalog, as `OpenAI` lists it for this account;
@@ -197,31 +228,31 @@ impl LiveSource {
     /// new source.
     fn list_chatgpt(
         cell: &std::sync::Arc<std::sync::Mutex<oauth::OAuthToken>>,
-    ) -> Result<Vec<Listed>, String> {
-        let runtime = blocking_runtime("subscription model-list")?;
+    ) -> Result<Vec<Listed>, ListFailure> {
+        let runtime = blocking_runtime("subscription model-list").map_err(ListFailure::Runtime)?;
         runtime.block_on(async {
             oauth::refresh_cell_if_stale(cell)
                 .await
-                .map_err(|e| format!("could not refresh the login: {e}"))?;
+                .map_err(ListFailure::Refresh)?;
             let token = cell.lock_ignore_poison().clone();
             let response = crate::provider::tls::client()
                 .get(PLAN_MODELS_URL)
                 .bearer_auth(token.access_token)
                 .send()
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| ListFailure::Request(e.to_string()))?;
             let status = response.status();
             if !status.is_success() {
                 let body = response.text().await.unwrap_or_default();
-                return Err(format!(
-                    "OpenAI returned HTTP {status}: {}",
-                    body_detail(&body)
-                ));
+                return Err(ListFailure::Http {
+                    status,
+                    detail: body_detail(&body),
+                });
             }
             let body: PlanModels = response
                 .json()
                 .await
-                .map_err(|e| format!("could not parse the model list: {e}"))?;
+                .map_err(|e| ListFailure::Parse(e.to_string()))?;
             Ok(body.listed())
         })
     }
@@ -450,7 +481,7 @@ pub fn names(listed: &[Listed]) -> Vec<String> {
 pub fn listing_of<S: ModelSource + Clone>(
     catalog: &Mutex<ModelCatalog<S>>,
     account: &AccountId,
-) -> Result<Vec<Listed>, String> {
+) -> Result<Vec<Listed>, ListFailure> {
     let source = {
         let mut catalog = catalog.lock_ignore_poison();
         if let Some(listed) = catalog.cached_listing(account) {
@@ -505,7 +536,7 @@ pub fn resolve_account(id: &str, available: &[Account]) -> Option<Account> {
 pub fn resolve_model_provider(
     name: &str,
     available: &[Account],
-    mut listing: impl FnMut(&Account) -> Result<Vec<Listed>, String>,
+    mut listing: impl FnMut(&Account) -> Result<Vec<Listed>, ListFailure>,
 ) -> Result<Account, String> {
     if available.is_empty() {
         return Err(no_provider_error());
@@ -643,12 +674,12 @@ mod tests {
     }
 
     impl ModelSource for FakeSource {
-        fn list(&self, account: &AccountId) -> Result<Vec<Listed>, String> {
+        fn list(&self, account: &AccountId) -> Result<Vec<Listed>, ListFailure> {
             self.calls.set(self.calls.get() + 1);
             self.lists
                 .get(account)
                 .cloned()
-                .unwrap_or_else(|| Err("no fake list".into()))
+                .unwrap_or_else(|| Err(ListFailure::Request("no fake list".into())))
         }
 
         fn endpoints(&self, model: &str) -> Result<Vec<ProviderEndpoint>, String> {
@@ -659,19 +690,19 @@ mod tests {
         }
     }
 
-    type Lists = BTreeMap<AccountId, Result<Vec<Listed>, String>>;
+    type Lists = BTreeMap<AccountId, Result<Vec<Listed>, ListFailure>>;
 
     fn bare(models: &[&str]) -> Vec<Listed> {
         models.iter().map(|m| Listed::bare(*m)).collect()
     }
 
     /// A listing lookup over `lists`, as `resolve_model_provider` takes one.
-    fn lookup(lists: &Lists) -> impl FnMut(&Account) -> Result<Vec<Listed>, String> + '_ {
+    fn lookup(lists: &Lists) -> impl FnMut(&Account) -> Result<Vec<Listed>, ListFailure> + '_ {
         |account| {
             lists
                 .get(&account.id)
                 .cloned()
-                .unwrap_or_else(|| Err("unreachable".into()))
+                .unwrap_or_else(|| Err(ListFailure::Request("unreachable".into())))
         }
     }
 
@@ -693,11 +724,14 @@ mod tests {
     #[test]
     fn a_failed_fetch_keeps_its_reason_and_caches_nothing() {
         let deepseek = Account::built_in("deepseek");
-        let lists = Lists::from([(deepseek.id.clone(), Err("network down".to_string()))]);
+        let lists = Lists::from([(
+            deepseek.id.clone(),
+            Err(ListFailure::Request("network down".into())),
+        )]);
         let catalog = Mutex::new(ModelCatalog::memo_only(FakeSource::new(lists)));
         assert_eq!(
             listing_of(&catalog, &deepseek.id),
-            Err("network down".to_string())
+            Err(ListFailure::Request("network down".into()))
         );
         assert_eq!(
             catalog.lock_ignore_poison().cached_listing(&deepseek.id),
@@ -791,7 +825,10 @@ mod tests {
         let deepseek = Account::built_in("deepseek");
         let lists = Lists::from([
             (anthropic.id.clone(), Ok(bare(&["model-a"]))),
-            (deepseek.id.clone(), Err("network down".to_string())),
+            (
+                deepseek.id.clone(),
+                Err(ListFailure::Request("network down".into())),
+            ),
         ]);
         let available = [anthropic, deepseek];
         let err = resolve_model_provider("model-b", &available, lookup(&lists)).unwrap_err();

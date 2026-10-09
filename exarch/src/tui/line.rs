@@ -659,6 +659,7 @@ pub(super) fn truncate_spans(spans: &[Span<'static>], max_w: usize) -> Vec<Span<
 
 /// The run of `spans` grown evenly around `spans[at]` until it fills `width`,
 /// each cut side marked by a `…` in `mark`, so the span at `at` stays in view.
+/// `at` must index `spans`; it panics otherwise.
 pub(super) fn window_around(
     spans: &[Span<'static>],
     at: usize,
@@ -1142,3 +1143,6 @@ fn words(spans: &[Span<'static>]) -> Vec<(Vec<(String, Style)>, usize)> {
     flush(&mut run, &mut run_w, &mut ws);
     out
 }
+
+#[cfg(test)]
+mod tests;

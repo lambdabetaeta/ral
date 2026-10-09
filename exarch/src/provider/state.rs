@@ -9,7 +9,7 @@
 use crate::provider::Provider;
 use crate::provider::identity::{self, Account};
 use crate::provider::models::{
-    Listed, resolve_account, resolve_model_provider, resolve_pinned_provider,
+    ListFailure, Listed, resolve_account, resolve_model_provider, resolve_pinned_provider,
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -90,7 +90,7 @@ pub(crate) fn opening(
     model_flag: Option<&str>,
     saved: Option<&State>,
     available: &[Account],
-    listing: impl FnMut(&Account) -> Result<Vec<Listed>, String>,
+    listing: impl FnMut(&Account) -> Result<Vec<Listed>, ListFailure>,
 ) -> Result<Opening, String> {
     let pair = |account: Account, model: String| Pair { account, model };
     let pinned = provider_flag
@@ -259,7 +259,7 @@ mod tests {
         State::new(account, std::slice::from_ref(account), model)
     }
 
-    fn lists(models: &[&str]) -> impl FnMut(&Account) -> Result<Vec<Listed>, String> {
+    fn lists(models: &[&str]) -> impl FnMut(&Account) -> Result<Vec<Listed>, ListFailure> {
         let listed: Vec<Listed> = models.iter().map(|m| Listed::bare(*m)).collect();
         move |_| Ok(listed.clone())
     }

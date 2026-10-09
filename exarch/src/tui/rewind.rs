@@ -8,7 +8,7 @@
 use super::app::Overlay;
 use super::line::truncate_spans;
 use super::overlay::{self, Anchor};
-use super::palette::{CYAN, Col, OVERLAY_BG, SLATE};
+use super::palette::{CYAN, Col, SLATE};
 use super::tui_loop::{OverlayTick, Tui, overlay_tick};
 use crate::bus::{Mailbox, Post, Rewrite};
 use ratatui::Frame;
@@ -55,7 +55,6 @@ impl RewindOverlay {
     }
 
     pub(super) fn render(&self, f: &mut Frame, frame: Rect) {
-        let plane = Style::default().bg(OVERLAY_BG);
         let rows = self.prompts.len().min(VISIBLE_ROWS);
         let list_h = u16::try_from(rows).unwrap_or(u16::MAX);
         // The list, a blank, then the reminder of what a rewind spares.
@@ -64,15 +63,12 @@ impl RewindOverlay {
             f,
             frame,
             Anchor::Corner,
-            (BODY_W, heights.iter().sum()),
+            (BODY_W, usize::from(heights.iter().sum::<u16>())),
             " REWIND ",
             " ↑↓ choose · enter rewind · esc keep ",
         );
         let [list, _, note] = Layout::vertical(heights.map(Constraint::Length)).areas(body);
-        f.render_widget(
-            Paragraph::new(self.list_lines(rows, list.width)).style(plane),
-            list,
-        );
+        f.render_widget(Paragraph::new(self.list_lines(rows, list.width)), list);
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 format!(
@@ -80,8 +76,7 @@ impl RewindOverlay {
                     self.anchor()
                 ),
                 Style::default().fg(SLATE).add_modifier(Modifier::DIM),
-            )))
-            .style(plane),
+            ))),
             note,
         );
     }

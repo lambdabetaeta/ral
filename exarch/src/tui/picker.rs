@@ -12,7 +12,7 @@
 
 use super::line;
 use super::overlay::{self, Anchor};
-use super::palette::{CYAN, Col, OVERLAY_BG, RED, SLATE, TAG_HUES};
+use super::palette::{CYAN, Col, RED, SLATE};
 use crate::provider::identity::{self, Account, AccountId};
 use crate::provider::models::ProviderEndpoint;
 use crate::provider::pricing::{ModelCaps, Param};
@@ -52,6 +52,18 @@ enum Focus {
     TopP,
 }
 
+impl Focus {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Search => "search",
+            Self::Provider => "provider",
+            Self::Effort => "effort",
+            Self::Temperature => "temp",
+            Self::TopP => "top-p",
+        }
+    }
+}
+
 /// [`Picker::cycle`] drops `Provider` for a model that does not route.
 const FOCUS_ORDER: &[Focus] = &[
     Focus::Search,
@@ -80,10 +92,29 @@ const TRACK_W: usize = 24;
 
 const VISIBLE_ROWS: u16 = 8;
 const BODY_W: u16 = 64;
-/// The label gutter every row aligns to: two wider than `provider`.
-const FIELD_LABEL: Col = Col::wide(10);
+/// The label gutter every row aligns to: two wider than the longest label.
+const FIELD_LABEL: Col = Col::wide({
+    let (mut i, mut w) = (0, 0);
+    while i < FOCUS_ORDER.len() {
+        let n = FOCUS_ORDER[i].label().len();
+        w = if n > w { n } else { w };
+        i += 1;
+    }
+    w + 2
+});
 const HINT: &str = " tab field · ↑↓ pick · ←→ adjust · enter apply · esc cancel ";
 
+/// Seven hues far apart on the circle, cycled over a row of tags so
+/// neighbours never blur.
+pub(super) const TAG_HUES: [Color; 7] = [
+    Color::Rgb(130, 190, 230),
+    Color::Rgb(230, 150, 120),
+    Color::Rgb(130, 210, 150),
+    Color::Rgb(210, 170, 110),
+    Color::Rgb(180, 140, 210),
+    Color::Rgb(110, 200, 200),
+    Color::Rgb(220, 140, 180),
+];
 const COLD: Color = Color::Rgb(96, 160, 235);
 const WARM: Color = Color::Rgb(228, 116, 96);
 const EFFORT_DIM: Color = Color::Rgb(74, 86, 110);
@@ -138,6 +169,8 @@ pub struct Picker {
     models: BTreeMap<AccountId, ModelsState>,
     /// Keyed by `OpenRouter` model id.
     endpoints: BTreeMap<String, EndpointsState>,
+    /// The rows matching the query, best first; see [`Self::refilter`].
+    rows: Vec<Row>,
     /// Into [`Self::rows`].
     selected: usize,
     focus: Focus,
@@ -167,11 +200,12 @@ impl Picker {
                 _ => false,
             })
             .unwrap_or(0);
-        Self {
+        let mut picker = Self {
             query: String::new(),
             providers,
             models,
             endpoints: BTreeMap::new(),
+            rows: Vec::new(),
             selected: 0,
             focus: Focus::Search,
             route: None,
@@ -180,7 +214,9 @@ impl Picker {
             top_p: initial.top_p,
             caps,
             note: None,
-        }
+        };
+        picker.refilter();
+        picker
     }
 
     /// Open with `note` above the failures, saying why the picker is up.
@@ -196,7 +232,7 @@ impl Picker {
     /// Record a provider's list, clamping the selection if it shrank.
     pub fn set_models(&mut self, id: &AccountId, state: ModelsState) {
         self.models.insert(id.clone(), state);
-        self.clamp_selection();
+        self.refilter();
     }
 
     pub fn set_endpoints(&mut self, model: &str, state: EndpointsState) {
@@ -206,7 +242,7 @@ impl Picker {
     /// The highlighted `OpenRouter` model, until its endpoints are recorded:
     /// the driver's cue to fetch, deduped by seeding `Loading`.
     pub fn model_needing_endpoints(&self) -> Option<String> {
-        let model = self.highlighted_routed_model(&self.rows())?;
+        let model = self.highlighted_routed_model()?;
         (!self.endpoints.contains_key(&model)).then_some(model)
     }
 
@@ -216,67 +252,57 @@ impl Picker {
             .any(|account| matches!(self.models.get(&account.id), Some(ModelsState::Loading)))
     }
 
-    fn highlighted_model(&self, rows: &[Row]) -> Option<String> {
-        rows.get(self.selected).map(|(_, model)| model.clone())
+    fn highlighted_model(&self) -> Option<String> {
+        self.rows.get(self.selected).map(|(_, model)| model.clone())
     }
 
     /// The highlighted model iff its service routes, as `OpenRouter` alone does.
-    fn highlighted_routed_model(&self, rows: &[Row]) -> Option<String> {
-        rows.get(self.selected)
+    fn highlighted_routed_model(&self) -> Option<String> {
+        self.rows
+            .get(self.selected)
             .filter(|(account, _)| account.service.routes)
             .map(|(_, model)| model.clone())
     }
 
-    /// What the provider control cycles after `auto`.
-    fn endpoint_slugs(&self, rows: &[Row]) -> Vec<String> {
-        let Some(model) = self.highlighted_routed_model(rows) else {
-            return Vec::new();
-        };
-        match self.endpoints.get(&model) {
-            Some(EndpointsState::Loaded(endpoints)) => {
-                endpoints.iter().map(|e| e.slug.clone()).collect()
-            }
-            _ => Vec::new(),
-        }
-    }
-
     /// The route slug, while the model it was chosen for is highlighted.
-    fn active_route(&self, rows: &[Row]) -> Option<&str> {
+    fn active_route(&self) -> Option<&str> {
         let route = self.route.as_ref()?;
-        (self.highlighted_routed_model(rows).as_deref() == Some(route.model.as_str()))
+        (self.highlighted_routed_model().as_deref() == Some(route.model.as_str()))
             .then_some(route.slug.as_str())
     }
 
-    /// `0` is auto, `i + 1` is `items[i]`.
-    fn active_index<T>(&self, rows: &[Row], items: &[T], slug_of: impl Fn(&T) -> &str) -> usize {
-        self.active_route(rows)
-            .and_then(|s| items.iter().position(|it| slug_of(it) == s))
-            .map_or(0, |i| i + 1)
+    /// The active route's place among the highlighted model's endpoints;
+    /// `None` is auto.
+    fn active_index(&self) -> Option<usize> {
+        let slug = self.active_route()?;
+        let Some(EndpointsState::Loaded(endpoints)) =
+            self.endpoints.get(&self.highlighted_routed_model()?)
+        else {
+            return None;
+        };
+        endpoints.iter().position(|e| e.slug == slug)
     }
 
     /// Whether the highlighted model admits `param`; an unknown one does.
-    fn supports(&self, rows: &[Row], param: Param) -> bool {
-        match self.highlighted_model(rows) {
+    fn supports(&self, param: Param) -> bool {
+        match self.highlighted_model() {
             Some(model) => (self.caps)(&model).supports(param),
             None => true,
         }
     }
 
     /// The tuning for the highlighted model, masked to what it admits.
-    fn tuning(&self, rows: &[Row]) -> Tuning {
+    fn tuning(&self) -> Tuning {
         Tuning {
             effort: self
-                .supports(rows, Param::Reasoning)
+                .supports(Param::Reasoning)
                 .then(|| EFFORT_LADDER[self.effort_idx].1.clone())
                 .flatten(),
             temperature: self
-                .supports(rows, Param::Temperature)
+                .supports(Param::Temperature)
                 .then_some(self.temperature)
                 .flatten(),
-            top_p: self
-                .supports(rows, Param::TopP)
-                .then_some(self.top_p)
-                .flatten(),
+            top_p: self.supports(Param::TopP).then_some(self.top_p).flatten(),
         }
     }
 
@@ -284,102 +310,88 @@ impl Picker {
     pub fn key(&mut self, code: ratatui::crossterm::event::KeyCode) -> Option<Pick> {
         use ratatui::crossterm::event::KeyCode;
         match code {
-            KeyCode::Enter => {
-                let rows = self.rows();
-                return self.apply(&rows);
-            }
-            KeyCode::Tab => {
-                let rows = self.rows();
-                self.focus = self.cycle(&rows, true);
-            }
-            KeyCode::BackTab => {
-                let rows = self.rows();
-                self.focus = self.cycle(&rows, false);
-            }
+            KeyCode::Enter => return self.apply(),
+            KeyCode::Tab => self.focus = self.cycle(true),
+            KeyCode::BackTab => self.focus = self.cycle(false),
             // Typing always filters, whatever has focus.
             KeyCode::Char(c) => {
                 self.focus = Focus::Search;
                 self.query.push(c);
                 self.selected = 0;
+                self.refilter();
             }
             KeyCode::Backspace => {
                 self.focus = Focus::Search;
                 self.query.pop();
                 self.selected = 0;
+                self.refilter();
             }
-            KeyCode::Up | KeyCode::Left => {
-                let rows = self.rows();
-                self.move_in_focus(&rows, false);
-            }
-            KeyCode::Down | KeyCode::Right => {
-                let rows = self.rows();
-                self.move_in_focus(&rows, true);
-            }
+            KeyCode::Up | KeyCode::Left => self.move_in_focus(false),
+            KeyCode::Down | KeyCode::Right => self.move_in_focus(true),
             _ => {}
         }
         None
     }
 
-    fn apply(&self, rows: &[Row]) -> Option<Pick> {
-        let (account, model) = rows.get(self.selected)?;
+    fn apply(&self) -> Option<Pick> {
+        let (account, model) = self.rows.get(self.selected)?;
         Some(Pick {
             account: account.clone(),
             model: model.clone(),
-            tuning: self.tuning(rows),
-            route: self.active_route(rows).map(str::to_string),
+            tuning: self.tuning(),
+            route: self.active_route().map(str::to_string),
         })
     }
 
-    fn cycle(&self, rows: &[Row], forward: bool) -> Focus {
-        let has_provider = self.highlighted_routed_model(rows).is_some();
-        let order: Vec<Focus> = FOCUS_ORDER
+    fn cycle(&self, forward: bool) -> Focus {
+        let routed = self.highlighted_routed_model().is_some();
+        let order = FOCUS_ORDER
             .iter()
             .copied()
-            .filter(|f| has_provider || *f != Focus::Provider)
-            .collect();
-        let pos = order.iter().position(|f| *f == self.focus).unwrap_or(0);
-        let next = if forward {
-            (pos + 1) % order.len()
+            .filter(|f| routed || *f != Focus::Provider);
+        let before = |f: &Focus| *f != self.focus;
+        let both = order.clone().chain(order);
+        if forward {
+            both.skip_while(before).nth(1)
         } else {
-            (pos + order.len() - 1) % order.len()
-        };
-        order[next]
+            both.rev().skip_while(before).nth(1)
+        }
+        .unwrap_or(Focus::Search)
     }
 
     /// `up` increases: down the list, up the ladder, warmer.
-    fn move_in_focus(&mut self, rows: &[Row], up: bool) {
+    fn move_in_focus(&mut self, up: bool) {
         match self.focus {
             Focus::Search => {
                 if up {
-                    let n = rows.len();
-                    if n > 0 {
-                        self.selected = (self.selected + 1).min(n - 1);
-                    }
+                    self.selected = (self.selected + 1).min(self.rows.len().saturating_sub(1));
                 } else {
                     self.selected = self.selected.saturating_sub(1);
                 }
             }
             Focus::Provider => {
-                let Some(model) = self.highlighted_routed_model(rows) else {
+                let Some(model) = self.highlighted_routed_model() else {
                     return;
                 };
-                let slugs = self.endpoint_slugs(rows);
-                if slugs.is_empty() {
+                let Some(EndpointsState::Loaded(endpoints)) = self.endpoints.get(&model) else {
                     return;
-                }
-                let pos = self.active_index(rows, &slugs, String::as_str);
+                };
+                let Some(last) = endpoints.len().checked_sub(1) else {
+                    return;
+                };
+                let at = self.active_index();
                 let next = if up {
-                    (pos + 1).min(slugs.len())
+                    Some(at.map_or(0, |i| (i + 1).min(last)))
                 } else {
-                    pos.saturating_sub(1)
+                    at.and_then(|i| i.checked_sub(1))
                 };
-                self.route = (next > 0).then(|| Route {
+                self.route = next.map(|i| Route {
                     model,
-                    slug: slugs[next - 1].clone(),
+                    slug: endpoints[i].slug.clone(),
                 });
             }
             Focus::Effort => {
-                if !self.supports(rows, Param::Reasoning) {
+                if !self.supports(Param::Reasoning) {
                     return;
                 }
                 self.effort_idx = if up {
@@ -389,14 +401,14 @@ impl Picker {
                 };
             }
             Focus::Temperature => {
-                if !self.supports(rows, Param::Temperature) {
+                if !self.supports(Param::Temperature) {
                     return;
                 }
                 self.temperature =
                     step_knob(self.temperature, up, TEMP_STEP, TEMP_MAX, TEMP_PLACES);
             }
             Focus::TopP => {
-                if !self.supports(rows, Param::TopP) {
+                if !self.supports(Param::TopP) {
                     return;
                 }
                 self.top_p = step_knob(self.top_p, up, TOP_P_STEP, TOP_P_MAX, TOP_P_PLACES);
@@ -404,9 +416,10 @@ impl Picker {
         }
     }
 
-    /// The rows matching the query, best first, each ranked on its own
-    /// `label / model`: two accounts may list the same model.
-    fn rows(&self) -> Vec<Row> {
+    /// Recompute [`Self::rows`], best first, each ranked on its own
+    /// `label / model` (two accounts may list the same model), and clamp the
+    /// selection into them.
+    fn refilter(&mut self) {
         let mut rows: Vec<(String, Row)> = Vec::new();
         for account in &self.providers {
             if let Some(ModelsState::Loaded(models)) = self.models.get(&account.id) {
@@ -419,7 +432,7 @@ impl Picker {
                 }
             }
         }
-        ral_core::text::rank_by(
+        self.rows = ral_core::text::rank_by(
             self.query.trim(),
             rows,
             |r: &(String, _)| r.0.as_str(),
@@ -427,12 +440,8 @@ impl Picker {
         )
         .into_iter()
         .map(|(_, row)| row)
-        .collect()
-    }
-
-    fn clamp_selection(&mut self) {
-        let n = self.rows().len();
-        self.selected = if n == 0 { 0 } else { self.selected.min(n - 1) };
+        .collect();
+        self.selected = self.selected.min(self.rows.len().saturating_sub(1));
     }
 
     /// Headline and reason: why the picker opened, then each failed listing.
@@ -455,12 +464,10 @@ impl Picker {
 
     // --- rendering -----------------------------------------------------------
 
-    /// Draw the overlay over the centre of `frame`, from one filtered row slice.
+    /// Draw the overlay over the centre of `frame`.
     pub fn render(&self, f: &mut Frame, frame: Rect) {
-        let rows = self.rows();
         let width = overlay::body_width(BODY_W, frame);
         let notes = self.note_lines(width);
-        let plane = Style::default().bg(OVERLAY_BG);
         // The provider row stands even for a model that does not route, so the
         // height never jumps; the list's border takes two more.
         let heights = [
@@ -477,39 +484,33 @@ impl Picker {
             f,
             frame,
             Anchor::Centre,
-            (width, heights.iter().sum()),
+            (width, usize::from(heights.iter().sum::<u16>())),
             " MODEL ",
             HINT,
         );
         let [search, status, list, provider, effort, temp, top_p, note] =
             Layout::vertical(heights.map(Constraint::Length)).areas(body);
-        self.render_list(f, &rows, list, plane);
+        self.render_list(f, list);
         for (line, at) in [
             (self.search_line(), search),
-            (self.status_line(&rows), status),
-            (self.provider_line(&rows, provider.width), provider),
-            (
-                self.effort_line(self.supports(&rows, Param::Reasoning)),
-                effort,
-            ),
-            (
-                self.temp_line(self.supports(&rows, Param::Temperature)),
-                temp,
-            ),
-            (self.top_p_line(self.supports(&rows, Param::TopP)), top_p),
+            (self.status_line(), status),
+            (self.provider_line(provider.width), provider),
+            (self.effort_line(self.supports(Param::Reasoning)), effort),
+            (self.temp_line(self.supports(Param::Temperature)), temp),
+            (self.top_p_line(self.supports(Param::TopP)), top_p),
         ] {
-            f.render_widget(Paragraph::new(line).style(plane), at);
+            f.render_widget(Paragraph::new(line), at);
         }
-        f.render_widget(Paragraph::new(notes).style(plane), note);
+        f.render_widget(Paragraph::new(notes), note);
     }
 
-    fn field_label(&self, text: &str, field: Focus) -> Span<'static> {
+    fn field_label(&self, field: Focus) -> Span<'static> {
         let style = if self.focus == field {
             Style::default().fg(CYAN).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(SLATE).add_modifier(Modifier::DIM)
         };
-        Span::styled(FIELD_LABEL.left(text), style)
+        Span::styled(FIELD_LABEL.left(field.label()), style)
     }
 
     fn search_line(&self) -> Line<'static> {
@@ -521,14 +522,14 @@ impl Picker {
         };
         let caret = if focused { "▏" } else { " " };
         Line::from(vec![
-            self.field_label("search", Focus::Search),
+            self.field_label(Focus::Search),
             Span::styled(self.query.clone(), query_style),
             Span::styled(caret, Style::default().fg(CYAN)),
         ])
     }
 
-    fn status_line(&self, rows: &[Row]) -> Line<'static> {
-        let n = rows.len();
+    fn status_line(&self) -> Line<'static> {
+        let n = self.rows.len();
         let text = if self.is_loading() {
             "loading…".to_string()
         } else {
@@ -540,7 +541,7 @@ impl Picker {
         ))
     }
 
-    fn render_list(&self, f: &mut Frame, rows: &[Row], area: Rect, plane: Style) {
+    fn render_list(&self, f: &mut Frame, area: Rect) {
         let focused = self.focus == Focus::Search;
         let border = if focused {
             Style::default().fg(CYAN)
@@ -550,14 +551,14 @@ impl Picker {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(border)
-            .style(plane);
+            .border_style(border);
         let list_area = block.inner(area);
         f.render_widget(block, area);
 
         let window = list_area.height as usize;
         let start = self.selected.saturating_sub(window.saturating_sub(1));
-        let lines: Vec<Line<'static>> = rows
+        let lines: Vec<Line<'static>> = self
+            .rows
             .iter()
             .enumerate()
             .skip(start)
@@ -579,13 +580,13 @@ impl Picker {
                 ])
             })
             .collect();
-        f.render_widget(Paragraph::new(lines).style(plane), list_area);
+        f.render_widget(Paragraph::new(lines), list_area);
     }
 
-    fn unsupported_row(label: &str) -> Line<'static> {
+    fn unsupported_row(field: Focus) -> Line<'static> {
         let dim = Style::default().fg(SLATE).add_modifier(Modifier::DIM);
         Line::from(vec![
-            Span::styled(FIELD_LABEL.left(label), dim),
+            Span::styled(FIELD_LABEL.left(field.label()), dim),
             Span::styled(
                 "not supported by this model",
                 dim.add_modifier(Modifier::ITALIC),
@@ -593,9 +594,9 @@ impl Picker {
         ])
     }
 
-    fn provider_line(&self, rows: &[Row], width: u16) -> Line<'static> {
+    fn provider_line(&self, width: u16) -> Line<'static> {
         let focused = self.focus == Focus::Provider;
-        let label = self.field_label("provider", Focus::Provider);
+        let label = self.field_label(Focus::Provider);
         let dim = Style::default().fg(SLATE).add_modifier(Modifier::DIM);
         let auto_style = |active: bool| {
             if active && focused {
@@ -611,7 +612,7 @@ impl Picker {
             }
         };
 
-        let Some(model) = self.highlighted_routed_model(rows) else {
+        let Some(model) = self.highlighted_routed_model() else {
             return Line::from(vec![
                 label,
                 Span::styled(
@@ -636,16 +637,16 @@ impl Picker {
             None => &[],
         };
 
-        let active = self.active_index(rows, endpoints, |e| e.slug.as_str());
+        let active = self.active_index();
         let tags: Vec<Span<'static>> =
-            std::iter::once(Span::styled(" auto ", auto_style(active == 0)))
+            std::iter::once(Span::styled(" auto ", auto_style(active.is_none())))
                 .chain(
                     endpoints
                         .iter()
                         .zip(TAG_HUES.iter().cycle())
                         .enumerate()
                         .map(|(i, (endpoint, &hue))| {
-                            let style = if i + 1 == active {
+                            let style = if active == Some(i) {
                                 Style::default()
                                     .fg(hue)
                                     .add_modifier(Modifier::REVERSED | Modifier::BOLD)
@@ -658,18 +659,20 @@ impl Picker {
                 .collect();
         let room = usize::from(width).saturating_sub(label.width());
         let mut spans = vec![label];
-        spans.extend(line::window_around(&tags, active, room, dim));
+        // Auto leads the tags.
+        let at = active.map_or(0, |i| i + 1);
+        spans.extend(line::window_around(&tags, at, room, dim));
         Line::from(spans)
     }
 
     fn effort_line(&self, supported: bool) -> Line<'static> {
         if !supported {
-            return Self::unsupported_row("effort");
+            return Self::unsupported_row(Focus::Effort);
         }
         let focused = self.focus == Focus::Effort;
         #[allow(clippy::cast_precision_loss, reason = "const slice length")]
         let last = GLYPHS.len().saturating_sub(1).max(1) as f32;
-        let mut spans = vec![self.field_label("effort", Focus::Effort)];
+        let mut spans = vec![self.field_label(Focus::Effort)];
         for (i, glyph) in GLYPHS.iter().enumerate() {
             #[allow(
                 clippy::cast_precision_loss,
@@ -700,7 +703,6 @@ impl Picker {
     /// [`TRACK_W`] cells filled to `value / max`; `auto` draws it all faint.
     fn track_line(
         &self,
-        label: &str,
         field: Focus,
         value: Option<f64>,
         max: f64,
@@ -708,7 +710,7 @@ impl Picker {
         hue: impl Fn(usize) -> Color,
     ) -> Line<'static> {
         let focused = self.focus == field;
-        let mut spans = vec![self.field_label(label, field)];
+        let mut spans = vec![self.field_label(field)];
 
         #[allow(
             clippy::cast_possible_truncation,
@@ -742,7 +744,7 @@ impl Picker {
 
     fn temp_line(&self, supported: bool) -> Line<'static> {
         if !supported {
-            return Self::unsupported_row("temp");
+            return Self::unsupported_row(Focus::Temperature);
         }
         #[allow(clippy::cast_precision_loss, reason = "const track width")]
         let last = (TRACK_W - 1).max(1) as f32;
@@ -752,7 +754,6 @@ impl Picker {
         )]
         let hue = |i: usize| super::rail::mix(COLD, WARM, i as f32 / last);
         self.track_line(
-            "temp",
             Focus::Temperature,
             self.temperature,
             TEMP_MAX,
@@ -763,16 +764,11 @@ impl Picker {
 
     fn top_p_line(&self, supported: bool) -> Line<'static> {
         if !supported {
-            return Self::unsupported_row("top-p");
+            return Self::unsupported_row(Focus::TopP);
         }
-        self.track_line(
-            "top-p",
-            Focus::TopP,
-            self.top_p,
-            TOP_P_MAX,
-            TOP_P_PLACES,
-            |_| NUCLEUS,
-        )
+        self.track_line(Focus::TopP, self.top_p, TOP_P_MAX, TOP_P_PLACES, |_| {
+            NUCLEUS
+        })
     }
 
     /// Each note after a blank row: a bold `⚠` headline, then its reason

@@ -181,7 +181,7 @@ impl Bureau {
             .credential(&account.id)
             .ok_or_else(|| format!("{label} has no resolved credential"))?;
         let listed = listing_of(&holdings.catalog, &account.id)
-            .map_err(|why| format!("could not list the models '{label}' serves: {why}"))?;
+            .map_err(|why| format!("{label} could not list its models: {why}"))?;
         // A pinned endpoint's own window binds, not the model's.
         let context_window = route
             .as_deref()

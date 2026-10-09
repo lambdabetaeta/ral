@@ -40,7 +40,7 @@ pub(super) fn draw(
     f: &mut Frame,
     frame: Rect,
     anchor: Anchor,
-    (w, h): (u16, u16),
+    (w, rows): (u16, usize),
     title: &str,
     hint: &str,
 ) -> Rect {
@@ -49,9 +49,10 @@ pub(super) fn draw(
         height: frame.height.saturating_sub(SHADOW.vertical),
         ..frame
     };
+    let h = u16::try_from(rows).unwrap_or(u16::MAX);
     let (w, h) = (
         (w + CHROME_W).min(room.width),
-        (h + CHROME_H).min(room.height),
+        h.saturating_add(CHROME_H).min(room.height),
     );
     let area = match anchor {
         Anchor::Centre => Rect {
@@ -101,28 +102,33 @@ pub(super) fn draw(
 /// the light falls from the upper left.
 fn shadow(f: &mut Frame, area: Rect) {
     let buf = f.buffer_mut();
-    let cast = Rect {
+    let bottom = Rect {
         x: area.x + SHADOW.horizontal,
-        y: area.y + SHADOW.vertical,
-        ..area
+        y: area.bottom(),
+        width: area.width,
+        height: SHADOW.vertical,
     };
-    let lit = |x: u16, y: u16| area.contains((x, y).into());
-    for y in cast.top()..cast.bottom() {
-        for x in cast.left()..cast.right() {
-            if lit(x, y) {
-                continue;
-            }
-            let Some(cell) = buf.cell_mut((x, y)) else {
-                continue;
-            };
-            match cell.fg {
-                Color::Rgb(..) => cell.fg = super::rail::mix(cell.fg, UMBRA, SHADOW_ALPHA),
-                _ => cell.modifier.insert(Modifier::DIM),
-            }
-            cell.bg = match cell.bg {
-                Color::Rgb(..) => super::rail::mix(cell.bg, UMBRA, SHADOW_ALPHA),
-                _ => UMBRA,
-            };
+    let right = Rect {
+        x: area.right(),
+        y: area.y + SHADOW.vertical,
+        width: SHADOW.horizontal,
+        height: area.height.saturating_sub(SHADOW.vertical),
+    };
+    for (x, y) in [bottom, right]
+        .into_iter()
+        .flat_map(Rect::positions)
+        .map(|p| (p.x, p.y))
+    {
+        let Some(cell) = buf.cell_mut((x, y)) else {
+            continue;
+        };
+        match cell.fg {
+            Color::Rgb(..) => cell.fg = super::rail::mix(cell.fg, UMBRA, SHADOW_ALPHA),
+            _ => cell.modifier.insert(Modifier::DIM),
         }
+        cell.bg = match cell.bg {
+            Color::Rgb(..) => super::rail::mix(cell.bg, UMBRA, SHADOW_ALPHA),
+            _ => UMBRA,
+        };
     }
 }

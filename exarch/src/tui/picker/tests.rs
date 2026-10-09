@@ -52,9 +52,9 @@ fn openrouter_picker() -> Picker {
 
 /// The `model · provider` labels of every listed row, in order.
 fn row_labels(p: &Picker) -> Vec<String> {
-    p.rows()
-        .into_iter()
-        .map(|(account, m)| format!("{m} · {}", p.label(&account)))
+    p.rows
+        .iter()
+        .map(|(account, m)| format!("{m} · {}", p.label(account)))
         .collect()
 }
 
@@ -165,7 +165,7 @@ fn enter_on_an_unlisted_query_picks_nothing() {
     for c in "model-z".chars() {
         p.key(KeyCode::Char(c));
     }
-    assert_eq!(p.rows(), []);
+    assert_eq!(p.rows, []);
     assert!(p.key(KeyCode::Enter).is_none());
 }
 
@@ -346,7 +346,7 @@ fn unsupported_effort_is_masked_and_remembered() {
     p.key(KeyCode::Tab); // Temperature
     p.key(KeyCode::Right); // auto → 0.0
     p.key(KeyCode::Right); // 0.0 → 0.1
-    let live = p.tuning(&p.rows());
+    let live = p.tuning();
     assert_eq!(
         live.effort.as_ref().map(ReasoningEffort::variant_name),
         Some("high")
@@ -357,7 +357,7 @@ fn unsupported_effort_is_masked_and_remembered() {
     p.key(KeyCode::Tab); // TopP
     p.key(KeyCode::Tab); // Search
     p.key(KeyCode::Up); // → chat-only
-    let masked = p.tuning(&p.rows());
+    let masked = p.tuning();
     assert!(masked.effort.is_none(), "reasoning masked for chat-only");
     assert_eq!(masked.temperature, Some(0.1));
 
@@ -372,7 +372,7 @@ fn unsupported_effort_is_masked_and_remembered() {
     p.key(KeyCode::Tab); // Search
     p.key(KeyCode::Down); // → reasoner
     assert_eq!(
-        p.tuning(&p.rows())
+        p.tuning()
             .effort
             .as_ref()
             .map(ReasoningEffort::variant_name),
@@ -387,7 +387,7 @@ fn provider_cycles_serving_endpoints_without_moving_the_model() {
     let mut p = openrouter_picker();
     p.key(KeyCode::Down); // highlight vendor-b/model-b
     let model = "vendor-b/model-b";
-    assert_eq!(p.highlighted_model(&p.rows()).as_deref(), Some(model));
+    assert_eq!(p.highlighted_model().as_deref(), Some(model));
     p.set_endpoints(
         model,
         EndpointsState::Loaded(vec![
@@ -400,20 +400,20 @@ fn provider_cycles_serving_endpoints_without_moving_the_model() {
     assert_eq!(p.focus, Focus::Provider);
 
     p.key(KeyCode::Right);
-    assert_eq!(p.active_route(&p.rows()), Some("deepinfra"));
+    assert_eq!(p.active_route(), Some("deepinfra"));
     assert_eq!(
-        p.highlighted_model(&p.rows()).as_deref(),
+        p.highlighted_model().as_deref(),
         Some(model),
         "the highlighted model never moves when picking a provider"
     );
     p.key(KeyCode::Right);
-    assert_eq!(p.active_route(&p.rows()), Some("novita"));
+    assert_eq!(p.active_route(), Some("novita"));
     p.key(KeyCode::Right);
-    assert_eq!(p.active_route(&p.rows()), Some("novita"));
+    assert_eq!(p.active_route(), Some("novita"));
     p.key(KeyCode::Left);
-    assert_eq!(p.active_route(&p.rows()), Some("deepinfra"));
+    assert_eq!(p.active_route(), Some("deepinfra"));
     p.key(KeyCode::Left);
-    assert_eq!(p.active_route(&p.rows()), None);
+    assert_eq!(p.active_route(), None);
 
     p.key(KeyCode::Right); // auto → deepinfra
     let pick = p.key(KeyCode::Enter).expect("a listed row is picked");
@@ -434,23 +434,23 @@ fn route_is_inactive_off_its_model_and_returns_on_it() {
     );
     p.key(KeyCode::Tab); // Provider
     p.key(KeyCode::Right); // choose deepinfra
-    assert_eq!(p.active_route(&p.rows()), Some("deepinfra"));
+    assert_eq!(p.active_route(), Some("deepinfra"));
 
     for _ in 0..4 {
         p.key(KeyCode::Tab); // Provider → Effort → Temperature → TopP → Search
     }
     assert_eq!(p.focus, Focus::Search);
     p.key(KeyCode::Down); // vendor-b/model-c
-    assert_ne!(p.highlighted_model(&p.rows()).as_deref(), Some(model));
+    assert_ne!(p.highlighted_model().as_deref(), Some(model));
     assert_eq!(
-        p.active_route(&p.rows()),
+        p.active_route(),
         None,
         "the route does not ride another model"
     );
 
     p.key(KeyCode::Up);
-    assert_eq!(p.highlighted_model(&p.rows()).as_deref(), Some(model));
-    assert_eq!(p.active_route(&p.rows()), Some("deepinfra"));
+    assert_eq!(p.highlighted_model().as_deref(), Some(model));
+    assert_eq!(p.active_route(), Some("deepinfra"));
 }
 
 /// A model that does not route skips the provider control, and nothing
@@ -458,7 +458,7 @@ fn route_is_inactive_off_its_model_and_returns_on_it() {
 #[test]
 fn provider_control_skipped_for_non_openrouter_model() {
     let mut p = loaded_picker();
-    assert!(p.highlighted_model(&p.rows()).is_some());
+    assert!(p.highlighted_model().is_some());
     p.key(KeyCode::Tab);
     assert_eq!(p.focus, Focus::Effort);
     assert!(p.model_needing_endpoints().is_none());

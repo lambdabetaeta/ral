@@ -9,7 +9,7 @@ use super::app::Overlay;
 use super::line;
 use super::login;
 use super::overlay::{self, Anchor};
-use super::palette::{CYAN, Col, LIME, ORANGE, OVERLAY_BG, PURPLE, RED, SLATE};
+use super::palette::{CYAN, Col, LIME, ORANGE, PURPLE, RED, SLATE};
 use super::tui_loop::{CommandCtx, OverlayTick, Tui, overlay_tick};
 use crate::provider::Holdings;
 use crate::provider::accounts::{Entry, Source, entries};
@@ -372,8 +372,8 @@ impl ProvidersOverlay {
 
 impl ProvidersOverlay {
     pub(super) fn render(&self, f: &mut Frame, frame: Rect) {
-        let lines = self.body_lines();
-        let size = (BODY_W, u16::try_from(lines.len()).unwrap_or(u16::MAX));
+        let width = overlay::body_width(BODY_W, frame);
+        let lines = self.body_lines(usize::from(width));
         let hint = match &self.mode {
             Mode::List => {
                 " ↑↓ move · k key · x clear · a add endpoint · d remove · l sign in · esc close "
@@ -384,14 +384,18 @@ impl ProvidersOverlay {
             }
             Mode::Confirm { .. } => " y yes · any other key no ",
         };
-        let body = overlay::draw(f, frame, Anchor::Centre, size, " PROVIDERS ", hint);
-        f.render_widget(
-            Paragraph::new(lines).style(Style::default().bg(OVERLAY_BG)),
-            body,
+        let body = overlay::draw(
+            f,
+            frame,
+            Anchor::Centre,
+            (width, lines.len()),
+            " PROVIDERS ",
+            hint,
         );
+        f.render_widget(Paragraph::new(lines), body);
     }
 
-    fn body_lines(&self) -> Vec<Line<'static>> {
+    fn body_lines(&self, width: usize) -> Vec<Line<'static>> {
         let mut lines = self.table();
         lines.push(Line::default());
         match &self.mode {
@@ -414,7 +418,7 @@ impl ProvidersOverlay {
                     lines.extend(line::hang(
                         &[Span::raw("  ")],
                         vec![Span::styled(note, DIM)],
-                        usize::from(BODY_W),
+                        width,
                     ));
                 }
             }
@@ -452,7 +456,7 @@ impl ProvidersOverlay {
             lines.extend(line::hang(
                 &[Span::raw("  ")],
                 vec![Span::styled(text.clone(), Style::new().fg(ink))],
-                usize::from(BODY_W),
+                width,
             ));
         }
         lines.push(Line::default());
