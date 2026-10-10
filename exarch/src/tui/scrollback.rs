@@ -952,6 +952,22 @@ impl Scrollback {
         }
     }
 
+    /// Preview the cut a third down the viewport, clamped at either end, and
+    /// return its row.  Re-pins the offset every frame, so the wheel is inert.
+    pub(super) fn render_cut_window(
+        &mut self,
+        width: u16,
+        height: usize,
+        anchor: u64,
+    ) -> (RenderWindow, Option<usize>) {
+        self.render_blocks(width.min(READ_W));
+        let cut = self.cut_row(anchor);
+        if let Some(row) = cut {
+            self.scroll_to(row.saturating_sub(height / 3));
+        }
+        (self.render_window(width, height), cut)
+    }
+
     /// The visible slice at `width` × `height`.  While `sticky`, `offset` is
     /// pinned to the tail; otherwise it is clamped to `max_off` and `sticky`
     /// re-arms once it reaches the bottom.

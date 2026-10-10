@@ -157,16 +157,29 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
         }
         _ => Vec::new(),
     };
-    let (mut rows, offset, scroll_pct) = match app.tabs.scrollback_mut(focused) {
+    let cut = match &app.overlay {
+        Some(Overlay::Rewind(overlay)) if focused == root => Some(overlay.anchor()),
+        _ => None,
+    };
+    let (mut rows, offset, scroll_pct, cut_row) = match app.tabs.scrollback_mut(focused) {
         Some(sb) => {
-            let w = sb.render_window(s.text.width, s.text.height as usize);
-            (w.lines, w.offset, w.scroll_pct)
+            let height = usize::from(s.text.height);
+            let (w, cut_row) = match cut {
+                Some(anchor) => sb.render_cut_window(s.text.width, height, anchor),
+                None => (sb.render_window(s.text.width, height), None),
+            };
+            (w.lines, w.offset, w.scroll_pct, cut_row)
         }
-        None => (Vec::new(), 0, None),
+        None => (Vec::new(), 0, None, None),
     };
     paint_selection(app, &mut rows, offset);
     paint_hover(app, &mut rows, offset);
-    paint_cut(app, &mut rows, offset);
+    // Ghost every row from the cut: the preview of what Enter would undo.
+    if let Some(cut) = cut_row {
+        for row in rows.iter_mut().skip(cut.saturating_sub(offset)) {
+            row.ghost();
+        }
+    }
     // The screen flatten — one of the two seams where a margin rejoins its
     // content, the other being `user.log`.
     let lines: Vec<Line<'static>> = rows.into_iter().map(Row::into_line).collect();
@@ -386,24 +399,6 @@ fn paint_hover(app: &App, rows: &mut [Row], offset: usize) {
         .and_then(|i| rows.get_mut(i))
     {
         row.hover();
-    }
-}
-
-/// Ghost every row from the cut a `/rewind` overlay highlights: the preview
-/// of what Enter would undo, drawn on the trunk, whose transcript it is.
-fn paint_cut(app: &App, rows: &mut [Row], offset: usize) {
-    let Some(Overlay::Rewind(overlay)) = &app.overlay else {
-        return;
-    };
-    let Some(cut) = app
-        .tabs
-        .scrollback(app.tabs.root())
-        .and_then(|sb| sb.cut_row(overlay.anchor()))
-    else {
-        return;
-    };
-    for row in rows.iter_mut().skip(cut.saturating_sub(offset)) {
-        row.ghost();
     }
 }
 

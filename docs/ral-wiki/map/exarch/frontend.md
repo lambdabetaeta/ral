@@ -428,12 +428,12 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  the `tui/rewind.rs` overlay over the trunk's turn-opening prompts (the
  fold's `Blocks::prompts`, since `Display::Prompt` carries the `turn` it
  opens — `None` for a steering line, which opens none), the latest
- highlighted; while it is up the transcript previews the cut, every row from
- `Scrollback::cut_row` on repainted as a `palette::GHOST` silhouette
- (`Row::ghost`, `render::paint_cut`) and scrolled to sit two rows below the
- top, the viewport put back when the overlay closes. ⏎ posts
- `Rewrite::Rewind(turn)`; the cut the preview draws and the cut the landed
- `Display::Rewound` makes are the one function, `Blocks::rewind_point`.
+ highlighted. The eight-row list keeps the selection near its centre, shows
+ its position in the history, and supports Page Up/Down and Home/End. While
+ it is open, `Scrollback::render_cut_window` positions the cut a third down
+ the transcript, clamped at either end, and returns its row, from which
+ rows are ghosted (`Row::ghost`) in `render::draw`. The viewport is restored
+ on close; ⏎ posts `Rewrite::Rewind(turn)`. Both cuts use `Blocks::rewind_point`.
  `/branch [name]`
  forks a *conversing* tab from the focused context — a peer conversation
  under [[decisions/260705_branch-minimal|branch-minimal]], named by the human
@@ -579,4 +579,4 @@ user, home, git state, exarch's log directory) once at startup for the [[map/exa
         - `tui/model_picker.rs` — model choice: `drive` over a `Stage` (the live `Tui` for `pick_model` and `apply_model_switch`, or the picker `Alone` for a launch's `choose`); list fetching rides [[map/exarch/provider|provider]]'s `Listing`/`Fetches` pumps
         - `tui/login.rs` — the `/login` overlay: `LoginOverlay`, `drive_login`, `apply_login`
         - `tui/providers.rs` — the `/providers` overlay: `ProvidersOverlay`, `Action`, `providers`, `drive`
-        - `tui/rewind.rs` — the `/rewind` overlay: `RewindOverlay`, `rewind`, the cut preview's `reveal_cut`
+        - `tui/rewind.rs` — the `/rewind` overlay: `RewindOverlay`, `rewind`; `Scrollback::render_cut_window` positions the preview and returns the cut row that `render::draw` ghosts from

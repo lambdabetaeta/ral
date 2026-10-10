@@ -1,9 +1,9 @@
 //! The `/rewind` overlay: the prompts on screen, one of which is where the
 //! conversation goes back to.  While it is up the transcript behind it
 //! previews the cut — every row from the highlighted prompt on is ghosted
-//! (`render::paint_cut`) and scrolled into view — so what Enter undoes is seen
-//! before it is done.  Display and input only; [`rewind`] drives it and posts
-//! the [`Rewrite`].
+//! (`render::draw`, from the row `Scrollback::render_cut_window` returns) and
+//! scrolled into view — so what Enter undoes is seen before it is done.
+//! Display and input only; [`rewind`] drives it and posts the [`Rewrite`].
 
 use super::app::Overlay;
 use super::line::truncate_spans;
@@ -18,10 +18,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-const BODY_W: u16 = 54;
+const BODY_W: u16 = 96;
 const VISIBLE_ROWS: usize = 8;
-/// Kept rows shown above the cut, so the seam is read in context.
-const LEAD_ROWS: usize = 2;
 
 pub(super) struct RewindOverlay {
     /// Turn-opening prompts on screen, oldest first; never empty.
@@ -46,6 +44,10 @@ impl RewindOverlay {
         match code {
             KeyCode::Up => self.selected = self.selected.saturating_sub(1),
             KeyCode::Down => self.selected = (self.selected + 1).min(self.prompts.len() - 1),
+            KeyCode::PageUp => self.selected = self.selected.saturating_sub(VISIBLE_ROWS),
+            KeyCode::PageDown => {
+                self.selected = (self.selected + VISIBLE_ROWS).min(self.prompts.len() - 1);
+            }
             KeyCode::Home => self.selected = 0,
             KeyCode::End => self.selected = self.prompts.len() - 1,
             KeyCode::Enter => return Some(self.anchor()),
@@ -57,26 +59,26 @@ impl RewindOverlay {
     pub(super) fn render(&self, f: &mut Frame, frame: Rect) {
         let rows = self.prompts.len().min(VISIBLE_ROWS);
         let list_h = u16::try_from(rows).unwrap_or(u16::MAX);
-        // The list, a blank, then the reminder of what a rewind spares.
-        let heights = [list_h, 1, 1];
+        let heights = [list_h, 1, 2];
         let body = overlay::draw(
             f,
             frame,
             Anchor::Corner,
             (BODY_W, usize::from(heights.iter().sum::<u16>())),
-            " REWIND ",
-            " ↑↓ choose · enter rewind · esc keep ",
+            &format!(" REWIND {}/{} ", self.selected + 1, self.prompts.len()),
+            " ↑↓ choose · pgup/pgdn page · home/end · enter rewind · esc keep ",
         );
         let [list, _, note] = Layout::vertical(heights.map(Constraint::Length)).areas(body);
-        f.render_widget(Paragraph::new(self.list_lines(rows, list.width)), list);
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                format!(
-                    "turn {} and all after it cease to be; the shell is not rewound",
-                    self.anchor()
-                ),
-                Style::default().fg(SLATE).add_modifier(Modifier::DIM),
-            ))),
+            Paragraph::new(self.list_lines(usize::from(list.height), list.width)),
+            list,
+        );
+        f.render_widget(
+            Paragraph::new(format!(
+                "⚠ This will remove the conversation from turn {} onwards from the context.\nThe state of the shell or the code will not be changed.",
+                self.anchor()
+            ))
+            .style(Style::default().fg(SLATE).add_modifier(Modifier::DIM)),
             note,
         );
     }
@@ -90,7 +92,10 @@ impl RewindOverlay {
             .map(|(turn, _)| turn.to_string())
             .collect();
         let figures = Col::of(turns.iter().map(String::as_str));
-        let start = self.selected.saturating_sub(window - 1);
+        let start = self
+            .selected
+            .saturating_sub(window / 2)
+            .min(self.prompts.len().saturating_sub(window));
         (start..)
             .zip(&turns[start..])
             .take(window)
@@ -141,11 +146,9 @@ pub(super) fn rewind(tui: &mut Tui, mailbox: &Mailbox) {
     }
 }
 
-/// Poll keys until the overlay resolves; `None` on cancel.  Each frame first
-/// scrolls the trunk so the highlighted cut sits [`LEAD_ROWS`] below the top.
+/// Poll keys until the overlay resolves; `None` on cancel.
 fn drive(tui: &mut Tui) -> Option<u64> {
     loop {
-        reveal_cut(tui);
         match overlay_tick(tui) {
             OverlayTick::Idle | OverlayTick::Save | OverlayTick::Paste(_) => {}
             OverlayTick::Key(code) => {
@@ -155,17 +158,5 @@ fn drive(tui: &mut Tui) -> Option<u64> {
             }
             OverlayTick::Cancel | OverlayTick::TerminalLost => return None,
         }
-    }
-}
-
-fn reveal_cut(tui: &mut Tui) {
-    let root = tui.app.tabs.root();
-    let Some(anchor) = tui.app.rewind_mut().map(|r| r.anchor()) else {
-        return;
-    };
-    if let Some(sb) = tui.app.tabs.scrollback_mut(root)
-        && let Some(row) = sb.cut_row(anchor)
-    {
-        sb.scroll_to(row.saturating_sub(LEAD_ROWS));
     }
 }
