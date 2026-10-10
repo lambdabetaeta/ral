@@ -7,6 +7,7 @@
 //!   first-order manifest, which the host may refuse;
 //! - `` `repl-clipboard `` — `_ed-clipboard`'s copy, which the host performs.
 
+use ral_core::capability::Flag;
 use ral_core::first_order::FOValue;
 use ral_core::first_order::datum::{Datum, tag, untag};
 use ral_core::record;
@@ -34,6 +35,23 @@ pub(crate) enum EditorOp {
     History,
     StateGet,
     StateSet(Data),
+}
+
+impl EditorOp {
+    /// The grant an op needs.
+    pub(crate) fn flag(&self) -> Flag {
+        match self {
+            Self::Get | Self::History | Self::StateGet => Flag::EditorRead,
+            Self::Set { .. }
+            | Self::SetLbuffer(_)
+            | Self::Insert(_)
+            | Self::Push
+            | Self::Accept
+            | Self::Ghost(_)
+            | Self::Highlight(_)
+            | Self::StateSet(_) => Flag::EditorWrite,
+        }
+    }
 }
 
 /// A span as a plugin asked for it: `start`/`end` floored at zero, clamped by

@@ -67,4 +67,4 @@ pub use group::{ReapStatus, break_pipeline_group, disown_pipeline_group, try_rea
 #[cfg(windows)]
 pub(crate) use group::{release_win_group, wait_leader_blocking};
 #[cfg(windows)]
-pub use signal::{install_handlers, reset_child_signals};
+pub use signal::{install_handlers, install_interrupt_handler, reset_child_signals};

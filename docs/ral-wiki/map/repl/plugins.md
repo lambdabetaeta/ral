@@ -88,7 +88,7 @@ them from `help`. They split into reads (`_ed-get`, answering the whole `EditorS
 and terminal escapes (`_ed-clipboard` copies natively when local, else by OSC 52; `_ed-hyperlink` is OSC 8).
 
 Each is a **thin engine-side door**: it keeps its own checks — the grant, via the one `ask`
-(`Shell::check(flag, name)` then the enquiry), and its arguments' shape — and
+(`Shell::check(op.flag(), name)` then the enquiry, the flag being `EditorOp::flag`), and its arguments' shape — and
 puts the rest to the host as one `` `repl-editor `` enquiry (`EditorOp`),
 decoding the answer strictly. The host answers only
 while a `PluginContext` is installed for the dispatch — inside a plugin

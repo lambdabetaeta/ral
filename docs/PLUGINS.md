@@ -58,9 +58,11 @@ the call site, not a manifest declaration.
 
 | Field | Enables |
 |---|---|
-| `read`  | `_ed-get`, `_ed-parse`, `_ed-history` |
+| `read`  | `_ed-get`, `_ed-parse`, `_ed-history`, `_ed-state`, `_ed-tui` |
 | `write` | `_ed-set`, `_ed-set-lbuffer`, `_ed-insert`, `_ed-push`, `_ed-accept`, `_ed-ghost`, `_ed-highlight`, `_ed-state` |
 | `tui`   | `_ed-tui` |
+
+A builtin listed under two fields needs both.
 
 `grant`'s `shell` field gates shell builtins that modify persistent
 process state (SPEC §12.8):

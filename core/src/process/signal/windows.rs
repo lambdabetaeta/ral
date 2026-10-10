@@ -34,6 +34,13 @@ pub fn install_handlers() {
     });
 }
 
+/// The interactive shell's console handler, non-escalating as Unix's
+/// `interrupt_handler`: an idle Ctrl-C is the line editor's, a run in flight
+/// hears it through its host's `Control`.
+pub fn install_interrupt_handler() {
+    let _ = ctrlc::set_handler(request_interrupt);
+}
+
 // ── Inherited dispositions / child-signal reset ────────────────────────────
 
 /// No-op: Windows children inherit the parent's console-control handlers, and

@@ -37,7 +37,7 @@ use windows::gesture_signal;
 #[cfg(windows)]
 pub(crate) use windows::{KILL, grace_signal};
 #[cfg(windows)]
-pub use windows::{install_handlers, reset_child_signals};
+pub use windows::{install_handlers, install_interrupt_handler, reset_child_signals};
 
 /// Every signal a death by which is `cause`'s: its grace signal, its key, and
 /// the kill that ends every teardown.

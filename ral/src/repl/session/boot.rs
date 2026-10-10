@@ -36,7 +36,7 @@ use super::super::host::ReplHost;
 /// must never be named here: a raw install would silently and permanently
 /// disconnect that registry's dispatch for the signal.
 ///
-/// Windows: installs `SetConsoleCtrlHandler` via `signal::install_handlers`.
+/// Windows: `signal::install_interrupt_handler`, likewise non-escalating.
 pub(super) fn setup_signals() -> TerminalClaim {
     #[cfg(unix)]
     {
@@ -74,7 +74,7 @@ pub(super) fn setup_signals() -> TerminalClaim {
     }
     #[cfg(windows)]
     {
-        ral_core::process::install_handlers();
+        ral_core::process::install_interrupt_handler();
         TerminalClaim::default()
     }
 }

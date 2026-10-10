@@ -298,7 +298,8 @@ impl Shell {
     /// and never as a command.
     ///
     /// # Errors
-    /// Whatever [`Self::vet_hook`] or [`Self::insert_hook`] raises.
+    /// Whatever [`Self::vet_hook`] raises, [`RegisterError::NoSession`] on a
+    /// child shell, [`RegisterError::AlreadyRegistered`] if `name` is taken.
     pub fn register_hook(
         &mut self,
         name: HookName,
@@ -307,15 +308,6 @@ impl Shell {
         policy: DefaultPolicy,
     ) -> Result<(), RegisterError> {
         let hook = self.vet_hook(&name, value, sig, policy)?;
-        self.insert_hook(name, hook)
-    }
-
-    /// The committing half of registration: insert an already-vetted hook.
-    ///
-    /// # Errors
-    /// [`RegisterError::NoSession`] on a child shell,
-    /// [`RegisterError::AlreadyRegistered`] if `name` is taken.
-    pub fn insert_hook(&mut self, name: HookName, hook: Hook) -> Result<(), RegisterError> {
         let table = self
             .session
             .hooks
@@ -325,6 +317,24 @@ impl Shell {
             return Err(RegisterError::AlreadyRegistered { name });
         };
         slot.insert(hook);
+        Ok(())
+    }
+
+    /// Install already-vetted hooks, replacing any of the same name.  Fails
+    /// only on a child shell, before changing anything.
+    ///
+    /// # Errors
+    /// [`RegisterError::NoSession`] on a child shell.
+    pub fn set_hooks(
+        &mut self,
+        hooks: impl IntoIterator<Item = (HookName, Hook)>,
+    ) -> Result<(), RegisterError> {
+        let table = self
+            .session
+            .hooks
+            .as_mut()
+            .ok_or(RegisterError::NoSession)?;
+        table.hooks.extend(hooks);
         Ok(())
     }
 

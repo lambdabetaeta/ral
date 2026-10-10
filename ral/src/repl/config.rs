@@ -274,10 +274,13 @@ impl RcPlan {
         Ok(plan)
     }
 
-    /// Commit the plan, loading its plugins under `mooring`.  Nothing here
-    /// refuses the rc: a plugin that fails to load is reported and skipped,
-    /// and only an `exit` escape propagates.
+    /// Commit the plan, loading its plugins under `mooring`.  The one refusal
+    /// (a non-session shell) comes before anything is committed; a plugin that
+    /// fails to load is reported and skipped, and only an `exit` escape propagates.
     pub(crate) fn apply(self, mooring: &Mooring, shell: &mut Shell) -> Settled<RcSettings> {
+        shell
+            .set_hooks(self.hooks)
+            .map_err(|e| Break::Error(Error::new(e.to_string())))?;
         // PWD lives on context.cwd and a copy in env_overrides would shadow it;
         // ral keeps no OLDPWD.  An rc spreading a parent's environment carries both.
         for (k, v) in self
@@ -298,11 +301,6 @@ impl RcPlan {
         }
         if let Some(n) = self.stack_limit {
             shell.set_stack_limit(n);
-        }
-        for (name, hook) in self.hooks {
-            shell
-                .insert_hook(name, hook)
-                .map_err(|e| Break::Error(Error::new(e.to_string())))?;
         }
         for (name, options) in &self.plugins {
             let loaded = match options.into_owned() {

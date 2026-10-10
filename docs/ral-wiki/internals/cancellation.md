@@ -48,7 +48,7 @@ that owns it, so nothing fans out around the tree.
 **The force-exit floor is reachable only in non-interactive paths.** The `ral`
 batch launcher binds SIGINT to `handler` (`batch.rs`, `install_handlers`); the
 interactive REPL rebinds SIGINT to the non-escalating `interrupt_handler`
-(below), which never touches the ladder. So repeated Ctrl-C at an interactive prompt is cooperative, never a
+(below; on Windows, `install_interrupt_handler`), which never touches the ladder. So repeated Ctrl-C at an interactive prompt is cooperative, never a
 hard kill — the escalation belongs to batch scripts and to external
 SIGTERM/SIGHUP.
 

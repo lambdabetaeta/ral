@@ -3046,6 +3046,8 @@ Its fields are:
 - `write` — change editor text or state and accept input;
 - `tui` — open the editor TUI facility.
 
+An `_ed-*` builtin needs the field of every operation it performs: `_ed-tui` also needs `read`, `_ed-state` both `read` and `write`.
+
 `shell` currently controls working-directory changes:
 
 ```ral

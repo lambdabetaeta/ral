@@ -25,28 +25,16 @@ use super::super::enquiry::{ClipboardReq, Data, EditorOp, EditorSnapshot, Enquir
 use super::super::highlight_style::style_ansi;
 use ral_core::text::{byte_to_char, char_to_byte};
 
-/// Put `op` to the host, which `name` may do under `flag` only.
-fn ask(
-    shell: &Shell,
-    mooring: &Mooring,
-    flag: Flag,
-    name: &str,
-    op: impl Into<Enquiry>,
-) -> Settled<Value> {
-    shell.check(flag, name)?;
-    Ok(shell.enquire(mooring, op.into().encode())?.into())
+/// Put `op` to the host, which `name` may do under `op`'s grant only.
+fn ask(shell: &Shell, mooring: &Mooring, name: &str, op: EditorOp) -> Settled<Value> {
+    shell.check(op.flag(), name)?;
+    Ok(shell.enquire(mooring, Enquiry::from(op).encode())?.into())
 }
 
 /// `op`'s answer, decoded as a `T`.
-fn answer<T: Datum>(
-    shell: &Shell,
-    mooring: &Mooring,
-    flag: Flag,
-    name: &str,
-    op: impl Into<Enquiry>,
-) -> Settled<T> {
-    shell.check(flag, name)?;
-    T::decode(&shell.enquire(mooring, op.into().encode())?)
+fn answer<T: Datum>(shell: &Shell, mooring: &Mooring, name: &str, op: EditorOp) -> Settled<T> {
+    shell.check(op.flag(), name)?;
+    T::decode(&shell.enquire(mooring, Enquiry::from(op).encode())?)
         .map_err(|why| sig(format!("the host answered outside its shape: {why}")))
 }
 
@@ -64,7 +52,7 @@ fn offset(n: i64) -> usize {
 
 /// `_ed-get` → `[text: Str, cursor: Int, keymap: Str, in-readline: Bool]`
 pub fn builtin_ed_get(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    ask(shell, mooring, Flag::EditorRead, "_ed-get", EditorOp::Get)
+    ask(shell, mooring, "_ed-get", EditorOp::Get)
 }
 
 // ─── State write ─────────────────────────────────────────────────────────────
@@ -96,13 +84,7 @@ fn set_op(arg: &Value) -> Settled<EditorOp> {
 
 /// `_ed-set [text: `keep|`set Str, cursor: `keep|`set Int]` — partial write.
 pub fn builtin_ed_set(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    ask(
-        shell,
-        mooring,
-        Flag::EditorWrite,
-        "_ed-set",
-        set_op(&args[0])?,
-    )
+    ask(shell, mooring, "_ed-set", set_op(&args[0])?)
 }
 
 /// `_ed-set-lbuffer <l>` — replace text left of cursor; right side preserved.
@@ -114,7 +96,6 @@ pub fn builtin_ed_set_lbuffer(
     ask(
         shell,
         mooring,
-        Flag::EditorWrite,
         "_ed-set-lbuffer",
         EditorOp::SetLbuffer(args[0].as_str("_ed-set-lbuffer")?.to_owned()),
     )
@@ -125,7 +106,6 @@ pub fn builtin_ed_insert(args: &[Value], mooring: &Mooring, shell: &mut Shell) -
     ask(
         shell,
         mooring,
-        Flag::EditorWrite,
         "_ed-insert",
         EditorOp::Insert(args[0].as_str("_ed-insert")?.to_owned()),
     )
@@ -133,24 +113,12 @@ pub fn builtin_ed_insert(args: &[Value], mooring: &Mooring, shell: &mut Shell) -
 
 /// `_ed-push` — save buffer to stack, clear.
 pub fn builtin_ed_push(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    ask(
-        shell,
-        mooring,
-        Flag::EditorWrite,
-        "_ed-push",
-        EditorOp::Push,
-    )
+    ask(shell, mooring, "_ed-push", EditorOp::Push)
 }
 
 /// `_ed-accept` — mark buffer for immediate execution.
 pub fn builtin_ed_accept(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    ask(
-        shell,
-        mooring,
-        Flag::EditorWrite,
-        "_ed-accept",
-        EditorOp::Accept,
-    )
+    ask(shell, mooring, "_ed-accept", EditorOp::Accept)
 }
 
 // ─── TUI ─────────────────────────────────────────────────────────────────────
@@ -195,9 +163,8 @@ pub fn builtin_ed_tui(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
     if mooring.in_terminal_loan() {
         return Ok(tui_result(Value::string("_ed-tui: already in TUI mode"), 1));
     }
-    if answer::<EditorSnapshot>(shell, mooring, Flag::EditorTui, "_ed-tui", EditorOp::Get)?
-        .in_readline
-    {
+    shell.check(Flag::EditorTui, "_ed-tui")?;
+    if answer::<EditorSnapshot>(shell, mooring, "_ed-tui", EditorOp::Get)?.in_readline {
         return Ok(tui_result(
             Value::string("_ed-tui: not available inside buffer-change hooks"),
             1,
@@ -228,13 +195,7 @@ pub fn builtin_ed_history(args: &[Value], mooring: &Mooring, shell: &mut Shell) 
         Value::Int(n) => offset(*n),
         _ => return Err(sig("_ed-history: limit must be Int")),
     };
-    let history: Vec<String> = answer(
-        shell,
-        mooring,
-        Flag::EditorRead,
-        "_ed-history",
-        EditorOp::History,
-    )?;
+    let history: Vec<String> = answer(shell, mooring, "_ed-history", EditorOp::History)?;
     let mut results: Vec<Value> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for entry in history {
@@ -290,8 +251,7 @@ fn word_text(text: &str, tok: &Token, span: ByteSpan) -> String {
 /// `_ed-parse` → `[words: [Str], current: Int, offset: Int]` — the simple
 /// command at the cursor.  `words` is empty exactly when the buffer does not lex.
 pub fn builtin_ed_parse(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    let EditorSnapshot { text, cursor, .. } =
-        answer(shell, mooring, Flag::EditorRead, "_ed-parse", EditorOp::Get)?;
+    let EditorSnapshot { text, cursor, .. } = answer(shell, mooring, "_ed-parse", EditorOp::Get)?;
     let (words, current, offset) = parse_at(&text, cursor).unwrap_or_default();
     #[allow(
         clippy::cast_possible_wrap,
@@ -348,7 +308,6 @@ pub fn builtin_ed_ghost(args: &[Value], mooring: &Mooring, shell: &mut Shell) ->
     ask(
         shell,
         mooring,
-        Flag::EditorWrite,
         "_ed-ghost",
         EditorOp::Ghost(args[0].as_str("_ed-ghost")?.to_owned()),
     )
@@ -395,7 +354,10 @@ pub fn builtin_ed_clipboard(
         text: args[0].as_str("_ed-clipboard")?.to_owned(),
         osc52: shell.terminal().ui_clipboard_write_ok(),
     });
-    answer(shell, mooring, Flag::EditorWrite, "_ed-clipboard", req).map(Value::Bool)
+    shell.check(Flag::EditorWrite, "_ed-clipboard")?;
+    bool::decode(&shell.enquire(mooring, req.encode())?)
+        .map(Value::Bool)
+        .map_err(|why| sig(format!("the host answered outside its shape: {why}")))
 }
 
 /// `_ed-highlight <spans>` — set highlight spans (empty list clears).
@@ -409,13 +371,7 @@ pub fn builtin_ed_highlight(
         .iter()
         .map(|v| highlight_req(&v))
         .collect::<Settled<_>>()?;
-    ask(
-        shell,
-        mooring,
-        Flag::EditorWrite,
-        "_ed-highlight",
-        EditorOp::Highlight(spans),
-    )
+    ask(shell, mooring, "_ed-highlight", EditorOp::Highlight(spans))
 }
 
 /// One `_ed-highlight` span: row-polymorphic, its style checked here.
@@ -464,13 +420,7 @@ pub fn builtin_ed_state(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    let current = match answer::<Option<Data>>(
-        shell,
-        mooring,
-        Flag::EditorWrite,
-        "_ed-state",
-        EditorOp::StateGet,
-    )? {
+    let current = match answer::<Option<Data>>(shell, mooring, "_ed-state", EditorOp::StateGet)? {
         Some(Data(stored)) => {
             let stored = Value::from(stored);
             // The cell outlives every session, so what it holds was decided by
@@ -489,13 +439,7 @@ pub fn builtin_ed_state(
             e.leaf
         ))
     })?;
-    ask(
-        shell,
-        mooring,
-        Flag::EditorWrite,
-        "_ed-state",
-        EditorOp::StateSet(Data(data)),
-    )?;
+    ask(shell, mooring, "_ed-state", EditorOp::StateSet(Data(data)))?;
     Ok(new_val)
 }
 
