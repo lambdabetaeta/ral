@@ -1040,7 +1040,8 @@ fn pipeline_mid_stage_launch_failure_with_long_producer_kills_it() {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod pty_helper {
     use std::ffi::CStr;
-    use std::os::fd::{FromRawFd, OwnedFd, RawFd};
+    use std::io::Error;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
     pub struct Pty {
         pub master: OwnedFd,
@@ -1051,23 +1052,33 @@ mod pty_helper {
     /// `unlockpt` / `ptsname`.  The slave is only opened by the child
     /// (ral): the parent keeps the master to drive the test.  Caller
     /// is responsible for closing both.
-    pub fn open() -> std::io::Result<Pty> {
-        let master = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
-        if master < 0 {
-            return Err(std::io::Error::last_os_error());
+    pub fn open() -> Result<Pty, String> {
+        let fail =
+            |step, e: Error| format!("Could not create a terminal for this test ({step}): {e}");
+        let fd = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
+        if fd < 0 {
+            let error = Error::last_os_error();
+            let hint = if error.kind() == std::io::ErrorKind::PermissionDenied {
+                "; a sandbox may be blocking terminal creation (these tests need PTY device access)"
+            } else {
+                ""
+            };
+            return Err(fail("posix_openpt", error) + hint);
         }
-        if unsafe { libc::grantpt(master) } != 0 || unsafe { libc::unlockpt(master) } != 0 {
-            unsafe { libc::close(master) };
-            return Err(std::io::Error::last_os_error());
+        let master = unsafe { OwnedFd::from_raw_fd(fd) };
+        let raw = master.as_raw_fd();
+        if unsafe { libc::grantpt(raw) } != 0 {
+            return Err(fail("grantpt", Error::last_os_error()));
         }
-        let name_ptr = unsafe { libc::ptsname(master) };
+        if unsafe { libc::unlockpt(raw) } != 0 {
+            return Err(fail("unlockpt", Error::last_os_error()));
+        }
+        let name_ptr = unsafe { libc::ptsname(raw) };
         if name_ptr.is_null() {
-            unsafe { libc::close(master) };
-            return Err(std::io::Error::last_os_error());
+            return Err(fail("ptsname", Error::last_os_error()));
         }
         let cstr = unsafe { CStr::from_ptr(name_ptr) };
         let slave_path = std::path::PathBuf::from(cstr.to_str().expect("ptsname utf-8").to_owned());
-        let master = unsafe { OwnedFd::from_raw_fd(master as RawFd) };
         Ok(Pty { master, slave_path })
     }
 
@@ -1114,11 +1125,11 @@ struct PtySession {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 impl PtySession {
-    fn spawn() -> Option<Self> {
+    fn spawn() -> Result<Self, String> {
         use std::os::fd::{AsRawFd, FromRawFd};
         use std::os::unix::process::CommandExt;
 
-        let pty = pty_helper::open().ok()?;
+        let pty = pty_helper::open()?;
         let slave_path = pty.slave_path.clone();
 
         let mut cmd = ral_command();
@@ -1143,11 +1154,16 @@ impl PtySession {
                 Ok(())
             });
         }
-        let child = cmd.spawn().ok()?;
+        let child = cmd
+            .spawn()
+            .map_err(|e| format!("could not start ral under a PTY: {e}"))?;
 
         let input_fd = unsafe { libc::dup(pty.master.as_raw_fd()) };
         if input_fd < 0 {
-            return None;
+            return Err(format!(
+                "dup PTY input: {}",
+                std::io::Error::last_os_error()
+            ));
         }
         let input = unsafe { std::fs::File::from_raw_fd(input_fd) };
 
@@ -1158,7 +1174,10 @@ impl PtySession {
         }
         let reader_fd = unsafe { libc::dup(raw) };
         if reader_fd < 0 {
-            return None;
+            return Err(format!(
+                "dup PTY reader: {}",
+                std::io::Error::last_os_error()
+            ));
         }
         let reader = unsafe { std::fs::File::from_raw_fd(reader_fd) };
 
@@ -1166,7 +1185,7 @@ impl PtySession {
         // this pty must outlive them for the session's whole life.
         std::mem::forget(pty.master);
 
-        Some(Self {
+        Ok(Self {
             child,
             input,
             reader,
@@ -1303,13 +1322,15 @@ fn run_pty_repl_until(
     line: &str,
     timeout: Duration,
     done: impl Fn(&str) -> bool,
-) -> Option<Output> {
+) -> Result<Output, String> {
     let mut session = PtySession::spawn()?;
-    session.send_line(line).ok()?;
+    session
+        .send_line(line)
+        .map_err(|e| format!("writing to PTY: {e}"))?;
     let reached = session.wait_until(timeout, done);
     let mut out = session.finish();
     out.status = if reached { 0 } else { 124 };
-    Some(out)
+    Ok(out)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1339,7 +1360,7 @@ fn pty_external_stage_runs_to_completion() {
             && parse_tagged_tcpgrp(text, "post").is_some()
             && text.matches("❯").count() >= 2
     })
-    .expect("pty setup failed");
+    .unwrap_or_else(|e| panic!("{e}"));
     assert_ne!(
         o.status, 124,
         "pty pipeline timed out; stderr: {}",
@@ -1359,7 +1380,7 @@ fn ctrl_c_ends_an_all_ral_foreground_pipeline() {
     // The terminal belongs to the pipeline's group, whose only process is
     // the anchor: the tty's SIGINT reaches nothing that can die, so the
     // anchor must witness it and the collector cancel the stages.
-    let mut session = PtySession::spawn().expect("pty setup failed");
+    let mut session = PtySession::spawn().unwrap_or_else(|e| panic!("{e}"));
     session
         .send_line("!{ let go = { |n| echo tick; go $[$n + 1] }; go 0 } | !{ from-lines }")
         .expect("send failed");
@@ -1387,7 +1408,7 @@ const CTRL_BACKSLASH: u8 = 0x1c;
 /// ran on past the key.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn press_on_the_lent_terminal(line: &str, key: u8) -> (bool, PtySession) {
-    let mut session = PtySession::spawn().expect("pty setup failed");
+    let mut session = PtySession::spawn().unwrap_or_else(|e| panic!("{e}"));
     session.send_line(line).expect("send failed");
     session
         .wait_for_lent_terminal(Duration::from_secs(8))
@@ -1492,7 +1513,7 @@ fn a_key_the_lent_command_handles_does_not_stop_the_line() {
 fn ctrl_c_during_a_foreground_capture_spares_a_worker() {
     let dir = tempfile::tempdir().unwrap();
     let marker = dir.path().join("worker-done");
-    let mut session = PtySession::spawn().expect("pty setup failed");
+    let mut session = PtySession::spawn().unwrap_or_else(|e| panic!("{e}"));
     session
         .send_line(&format!(
             "let h = spawn {{ sleep 2; touch #'{}'# }}; let x = !{{ sh -c #'echo held$((6*7)) >&2; sleep 5'# }}",
@@ -1524,7 +1545,7 @@ fn a_workers_external_cannot_open_the_terminal() {
     let dir = tempfile::tempdir().unwrap();
     let reach = dir.path().join("reach");
     let apart = dir.path().join("apart");
-    let mut session = PtySession::spawn().expect("pty setup failed");
+    let mut session = PtySession::spawn().unwrap_or_else(|e| panic!("{e}"));
     session
         .send_line(&format!(
             "spawn {{ sh -c #'true 3</dev/tty && touch \"{}\" || touch \"{}\"'# }}",
