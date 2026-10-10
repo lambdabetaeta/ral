@@ -54,39 +54,26 @@ pub(super) fn dispatch_keybinding(
         return unchanged();
     };
 
-    // rustyline supplied `pk.cursor_byte` in bytes; the plugin surface
-    // speaks chars throughout.
-    let cursor = byte_to_char(current, pk.cursor_byte);
-    let arg = FOValue::Map {
-        entries: vec![
-            ("line".into(), current.to_string().encode()),
-            (
-                "cursor".into(),
-                FOValue::Int {
-                    value: cursor.try_into().unwrap_or(i64::MAX),
-                },
-            ),
-            ("history".into(), history.clone().encode()),
-            ("keymap".into(), keymap_name(keymap).to_string().encode()),
-            ("state".into(), state_cell.clone().unwrap_or(FOValue::Unit)),
-        ],
-    };
     // The plugin's persistent cell rides the context and is saved back, so a
     // handler's `_ed-state` survives between keypresses.
     let ctx = PluginContext {
-        editor_state: EditorState {
-            text: current.to_string(),
-            cursor,
-            keymap: keymap_name(keymap).into(),
-        },
+        // rustyline supplied `pk.cursor_byte` in bytes; the plugin surface
+        // speaks chars throughout.
+        editor_state: EditorState::new(
+            current.to_string(),
+            byte_to_char(current, pk.cursor_byte),
+            keymap_name(keymap),
+        ),
         history,
         state_cell,
         ..PluginContext::default()
     };
     let hr = host.run_hook(
         t,
-        HookName::plugin(pk.plugin.clone(), format!("key:{key}")),
-        vec![arg],
+        HookName::plugin(pk.plugin.clone(), format!("key#{}", pk.binding_idx)),
+        vec![FOValue::Map {
+            entries: vec![("key".into(), key.encode())],
+        }],
         None,
         Some(ctx),
     );
@@ -106,10 +93,11 @@ pub(super) fn dispatch_keybinding(
         rt.keybindings.buffers.push(EditBuffer { text, cursor });
     }
     drop(rt);
+    let EditBuffer { text, cursor } = ctx.editor_state.into();
     if ctx.outputs.accept_line {
-        KeybindingOutcome::Accept(ctx.editor_state.text)
+        KeybindingOutcome::Accept(text)
     } else {
-        KeybindingOutcome::Edit(ctx.editor_state.text, ctx.editor_state.cursor)
+        KeybindingOutcome::Edit(text, cursor)
     }
 }
 

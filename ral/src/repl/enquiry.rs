@@ -108,6 +108,12 @@ pub(crate) enum Enquiry {
     Clipboard(ClipboardReq),
 }
 
+impl From<EditorOp> for Enquiry {
+    fn from(op: EditorOp) -> Self {
+        Self::Editor(op)
+    }
+}
+
 impl Datum for EditorOp {
     fn encode(self) -> FOValue {
         match self {

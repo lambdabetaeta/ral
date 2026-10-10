@@ -151,7 +151,7 @@ pub fn apply(
     match val {
         // Zero arguments is a force, not an application (the machine's
         // `apply` boundary demands at least one): the hook door's arity-0
-        // entries (`HookSig::Prompt` and the like) take this path.
+        // entries (`HookSig::Block` and the like) take this path.
         Value::Thunk(_) | Value::Native { .. } if args.is_empty() => {
             machine::force(val.clone(), mooring, shell)
         }

@@ -3,9 +3,7 @@
 //! claim, panic hook — and the frontend the rc settles on after it.
 
 use ral_core::carrier::Transport;
-#[cfg(unix)]
-use ral_core::terminal;
-use ral_core::terminal::{InteractiveMode, TerminalState};
+use ral_core::terminal::{self, InteractiveMode, TerminalState};
 use rustyline::config::BellStyle;
 use std::sync::Arc;
 
@@ -42,11 +40,12 @@ use super::super::host::ReplHost;
 pub(super) fn setup_signals() -> TerminalClaim {
     #[cfg(unix)]
     {
-        use ral_core::process::{ignore, install};
+        use ral_core::process::{default, ignore, install};
         // Ignore SIGTTOU before the claim, whose `tcsetpgrp` runs from a
-        // group not yet in the foreground; leave SIGTTIN at its default
-        // until after, since the claim parks the shell on it.
+        // group not yet in the foreground; SIGTTIN must stop the shell
+        // until after, since the claim parks it there.
         ignore(libc::SIGTTOU);
+        default(libc::SIGTTIN);
         let claim = claim_terminal().unwrap_or_else(|msg| {
             // A REPL that can't claim its tty is awkward (job control
             // won't work, ^C delivery may misroute) but not fatal — many
@@ -131,14 +130,19 @@ fn claim_terminal() -> Result<TerminalClaim, String> {
     let stdin = rustix::stdio::stdin();
     // Park ourselves out of the parent's way until foregrounded.  Each
     // SIGTTIN stops the whole group; when resumed we re-check, since the
-    // foreground may have changed again.
-    while rustix::termios::tcgetpgrp(stdin).ok() != Some(rustix::process::getpgrp()) {
-        if let Err(e) = rustix::process::kill_current_process_group(rustix::process::Signal::TTIN) {
-            return Err(format!("kill(SIGTTIN): {e}"));
-        }
+    // foreground may have changed again.  A bounded number of parks: a
+    // terminal whose foreground group is gone would stop us for ever.
+    let group = rustix::process::getpgrp();
+    let mut parks = 0..64;
+    while rustix::termios::tcgetpgrp(stdin).map_err(|e| format!("tcgetpgrp: {e}"))? != group {
+        parks.next().ok_or(
+            "the terminal's foreground belongs to another process group; \
+             was ral started in the background of a shell that has since exited?",
+        )?;
+        rustix::process::kill_current_process_group(rustix::process::Signal::TTIN)
+            .map_err(|e| format!("kill(SIGTTIN): {e}"))?;
     }
     let pid = rustix::process::getpid();
-    let group = rustix::process::getpgrp();
     let left = if group == pid {
         None
     } else {
@@ -237,24 +241,30 @@ pub(super) fn create_frontend(
     engine: Arc<dyn Transport>,
     host: Arc<ReplHost>,
     terminal: TerminalState,
+    history: Option<String>,
 ) -> Box<dyn Frontend> {
-    if matches!(interactive_mode, InteractiveMode::Minimal) {
-        return Box::new(MinimalFrontend::new());
+    if !matches!(interactive_mode, InteractiveMode::Minimal)
+        && matches!(settings.surface, Surface::Readline)
+    {
+        let bell = if settings.bell {
+            BellStyle::Audible
+        } else {
+            BellStyle::None
+        };
+        let editor = RustylineFrontend::new(
+            engine,
+            host,
+            terminal,
+            settings.edit_mode,
+            bell,
+            history.clone(),
+        );
+        match editor {
+            Ok(editor) => return Box::new(editor),
+            Err(e) => terminal::shell_warning(&format!(
+                "ral: could not start the line editor ({e}); using the minimal one"
+            )),
+        }
     }
-    match settings.surface {
-        Surface::Minimal => return Box::new(MinimalFrontend::new()),
-        Surface::Readline => {}
-    }
-    let bell = if settings.bell {
-        BellStyle::Audible
-    } else {
-        BellStyle::None
-    };
-    Box::new(RustylineFrontend::new(
-        engine,
-        host,
-        terminal,
-        settings.edit_mode,
-        bell,
-    ))
+    Box::new(MinimalFrontend::new(history))
 }

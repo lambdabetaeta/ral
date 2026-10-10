@@ -27,7 +27,8 @@ return { |options|
     }
 
     let _zi = { |ctx|
-        let query = _ed-lbuffer
+        let st = _ed-get
+        let query = slice $st[text] 0 $st[cursor]
         let r = _ed-tui {
             zoxide query --interactive -- $query
         }

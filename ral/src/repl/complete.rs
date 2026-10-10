@@ -18,10 +18,11 @@
 
 use ral_core::ansi;
 use ral_core::carrier::Transport;
+use ral_core::syntax::parser::needs_continuation;
 use rustyline::completion::{Completer, Pair};
 use rustyline::highlight::{CmdKind, Highlighter};
 use rustyline::hint::Hinter;
-use rustyline::validate::Validator;
+use rustyline::validate::{ValidationContext, ValidationResult, Validator};
 use rustyline::{Context, Helper};
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -144,5 +145,14 @@ impl Highlighter for RalHelper {
     }
 }
 
-impl Validator for RalHelper {}
+/// An incomplete buffer gets a newline in place of a submit.
+impl Validator for RalHelper {
+    fn validate(&self, ctx: &mut ValidationContext) -> rustyline::Result<ValidationResult> {
+        Ok(if needs_continuation(ctx.input()) {
+            ValidationResult::Incomplete
+        } else {
+            ValidationResult::Valid(None)
+        })
+    }
+}
 impl Helper for RalHelper {}

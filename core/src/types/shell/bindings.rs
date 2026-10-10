@@ -611,7 +611,7 @@ mod chokepoint_tests {
             .register_hook(
                 crate::types::HookName::session("test_prompt"),
                 thunk,
-                crate::types::HookSig::Prompt,
+                crate::types::HookSig::Block,
                 crate::types::DefaultPolicy::denied(),
             )
             .expect("register the hook");
@@ -657,12 +657,7 @@ mod chokepoint_tests {
 
         let reg = |shell: &mut Shell, name: HookName| {
             shell
-                .register_hook(
-                    name,
-                    thunk.clone(),
-                    HookSig::Prompt,
-                    DefaultPolicy::denied(),
-                )
+                .register_hook(name, thunk.clone(), HookSig::Block, DefaultPolicy::denied())
                 .expect("register");
         };
         reg(&mut shell, HookName::plugin("p", "prompt"));

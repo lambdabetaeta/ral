@@ -23,7 +23,6 @@ mod inherit;
 mod init;
 pub(crate) mod modules;
 pub(crate) mod notice;
-pub(crate) mod repl;
 mod scope;
 mod scrub;
 pub(crate) mod workers;
@@ -32,7 +31,6 @@ use self::bindings::BindingLedger;
 use self::cwd::Cwd;
 use self::detached::DetachPolicy;
 use self::modules::Modules;
-use self::repl::ReplScratch;
 use self::workers::Roster;
 use super::audit::Audit;
 use super::builtin::BuiltinTable;
@@ -134,7 +132,9 @@ pub struct SessionState {
     /// stack, since hooks are run roots, never commands or variables.  Session
     /// state, not context: a worker or a stage never dispatches one, and a run
     /// that registers one and then panics does not roll it back.
-    pub(crate) hooks: std::collections::HashMap<hooks::HookName, hooks::Hook>,
+    /// `None` for every child (aside, worker, stage, fork): only the booted
+    /// session owns hooks and the plugin ledger that undoes them.
+    pub(crate) hooks: Option<hooks::HookTable>,
 }
 
 /// Host-local scratch whose members each carry their own flow rule — not a
@@ -146,9 +146,6 @@ pub struct LocalState {
     /// observations; the dispatcher posts one observation per real command
     /// through `types::audit::door`.
     pub(crate) audit: Audit,
-    /// Flows across neither threads nor IPC; moved across the pipeline-stage
-    /// boundary.
-    pub(crate) repl: ReplScratch,
     /// Every worker (`spawn`, `watch`, `service`) detached from this shell.
     /// [`Shell::spawn_thread`] shares the registry into the worker's own shell,
     /// so a nested `spawn` registers alongside its parent; a sub-agent fork

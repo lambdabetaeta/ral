@@ -161,6 +161,7 @@ impl EngineSeed {
             .map_err(failed("captured environment"))?;
         shell.env = env;
         shell.session.stack_limit = self.stack_limit;
+        shell.session.hooks = None;
         shell.context = context;
         self.grant.narrow_onto(shell, narrow)
     }
@@ -217,7 +218,7 @@ mod tests {
             .register_hook(
                 HookName::session("prompt"),
                 blk,
-                HookSig::Prompt,
+                HookSig::Block,
                 DefaultPolicy::denied(),
             )
             .expect("register a hook");
@@ -285,7 +286,7 @@ mod tests {
                 "{arm} must scrub a native's applied handle"
             );
             assert!(
-                child.session.hooks.is_empty(),
+                child.session.hooks.is_none(),
                 "{arm} must leave the parent's hooks behind"
             );
         }

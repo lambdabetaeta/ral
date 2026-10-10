@@ -15,13 +15,14 @@ use std::sync::Arc;
 
 use super::host::ReplHost;
 use super::plugin::fire;
+use super::theme::OutputTheme;
 
 pub(super) enum Step {
     Continue,
     Exit(u8),
 }
 
-fn print_result(val: &Value) {
+fn print_result(val: &Value, theme: &OutputTheme) {
     match val {
         Value::Unit => {}
         Value::Bytes(b) => {
@@ -35,7 +36,6 @@ fn print_result(val: &Value) {
                 }
                 _ => val.to_string(),
             };
-            let theme = super::theme::output_theme();
             if ral_core::terminal::ui_color()
                 && let Some(color) = &theme.value_color
             {
@@ -68,7 +68,12 @@ pub(super) fn line_run(src: &str) -> Run {
 /// The session is the working directory's outermost handler, so `chpwd`
 /// compares its directory across the line: a `cd` that a `within [dir: …]`
 /// undid, or a `cd .`, fires nothing.
-pub(super) fn step(trimmed: &str, t: &dyn Transport, host: &Arc<ReplHost>) -> Step {
+pub(super) fn step(
+    trimmed: &str,
+    t: &dyn Transport,
+    host: &Arc<ReplHost>,
+    theme: &OutputTheme,
+) -> Step {
     let src = trimmed.to_string().encode();
     fire(t, host, "pre-exec", &record(vec![("src", src.clone())]));
     let before = t.cwd().ok();
@@ -87,7 +92,7 @@ pub(super) fn step(trimmed: &str, t: &dyn Transport, host: &Arc<ReplHost>) -> St
             let status = ending.status();
             let step = match ending {
                 Ending::Settled { value, .. } => {
-                    print_result(&Value::from(value));
+                    print_result(&Value::from(value), theme);
                     Step::Continue
                 }
                 Ending::Raised { rendered, .. }
@@ -183,7 +188,7 @@ mod tests {
                 .register_hook(
                     HookName::plugin("p", &event),
                     h,
-                    HookSig::Lifecycle { kind: event },
+                    HookSig::Hook { kind: event },
                     DefaultPolicy::denied(),
                 )
                 .expect("register");
@@ -200,7 +205,7 @@ mod tests {
     }
 
     fn run(line: &str, t: &IdentityTransport, host: &Arc<ReplHost>) {
-        step(line, t, host);
+        step(line, t, host, &OutputTheme::default());
     }
 
     /// `post-exec` hands the handler one event record carrying the source

@@ -256,8 +256,6 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ("ral/src/repl/config.rs", "silent:history-mkdir"),
     ("ral/src/repl/config.rs", "silent:rc-write"),
     ("ral/src/repl/config/source.rs", "silent:config-read"),
-    ("ral/src/repl/frontend.rs", "silent:history-append"),
-    ("ral/src/repl/frontend.rs", "silent:history-read"),
     ("ral/src/repl/plugin/load.rs", "silent:plugin-read"),
     ("ral/src/repl/session/boot.rs", "silent:crashlog-write"),
 ];

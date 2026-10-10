@@ -7,12 +7,11 @@
 //! ends the session with its status. Any other failure is reported and the
 //! boot goes on — a broken startup file must not strand the user at no shell.
 
-use ral_core::errln;
-use ral_core::types::{Break, DefaultPolicy, Escape, HookName, HookSig, Map, Mooring, Settled};
+use ral_core::types::{Break, Escape, Map, Mooring, Settled};
 use ral_core::{Shell, Value, terminal};
 
 use super::super::errfmt::report_failed_load;
-use super::{RcSettings, apply_rc_config, create_default_rc, find_ralrc};
+use super::{RcPlan, RcSettings, create_default_rc, find_ralrc};
 
 /// Why a startup file stopped.
 #[derive(Debug, PartialEq)]
@@ -57,12 +56,7 @@ pub(crate) fn source_startup_files(
             }
         }
     }
-    let rc = find_ralrc().or_else(|| {
-        let path = create_default_rc()?;
-        errln!("note: created {path}");
-        Some(path)
-    });
-    match rc {
+    match find_ralrc().or_else(create_default_rc) {
         Some(path) => tolerate(source_rc(&path, mooring, shell), RcSettings::default()),
         None => Ok(RcSettings::default()),
     }
@@ -80,25 +74,15 @@ fn source_profile(path: &str, mooring: &Mooring, shell: &mut Shell) -> Result<()
     }
 }
 
-/// Apply the rc's map and register its `startup` block. A broken file or a
-/// refused map leaves the defaults; a startup block that will not register
-/// keeps the settings the map applied.
+/// Decode the rc's map, then commit it. A broken file or a refused map
+/// leaves the defaults and changes nothing.
 fn source_rc(path: &str, mooring: &Mooring, shell: &mut Shell) -> Result<RcSettings, Stop> {
-    let pairs = rc_config(path, mooring, shell)?;
-    let (mut settings, startup) = apply_rc_config(&pairs, mooring, shell)
+    let plan = RcPlan::decode(&rc_config(path, mooring, shell)?, shell)
         .map_err(|msg| Stop::Failed(format!("{path}: {msg}")))?;
-    if let Some(block) = startup {
-        match shell.register_hook(
-            HookName::session("startup"),
-            block,
-            HookSig::Prompt,
-            DefaultPolicy::denied(),
-        ) {
-            Ok(()) => settings.startup = true,
-            Err(e) => terminal::cmd_error("ral", &format!("{path}: startup: {e}")),
-        }
-    }
-    Ok(settings)
+    plan.apply(mooring, shell).map_err(|b| match b {
+        Break::Escape(Escape::Exit(code)) => Stop::Exit(code),
+        Break::Error(e) => Stop::Failed(format!("{path}: {}", e.message)),
+    })
 }
 
 fn rc_config(path: &str, mooring: &Mooring, shell: &mut Shell) -> Result<Map, Stop> {

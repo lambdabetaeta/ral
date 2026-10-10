@@ -4,7 +4,7 @@
 //! inline save-modify-restore around the body rather than an RAII type.
 
 use super::Shell;
-use crate::types::{Binding, HandlerEntry, HandlerRole, Settled, Value};
+use crate::types::{Binding, FrameHandle, HandlerEntry, HandlerRole, Settled, Value};
 
 impl Shell {
     /// Install `thunk` as the alias for `name`, replacing any existing one.
@@ -17,11 +17,29 @@ impl Shell {
     /// # Errors
     /// `thunk` not a unary lambda, or its body changing the head's pipeline
     /// mode.
-    pub fn install_alias(&mut self, name: String, thunk: Value) -> Settled<()> {
-        let entry = HandlerEntry::vet(name, thunk, self.session_schemes(), HandlerRole::Alias)?;
+    pub fn install_alias(&mut self, name: String, thunk: Value) -> Settled<FrameHandle> {
+        self.vet_alias(name, thunk)
+            .map(|entry| self.commit_alias(entry))
+    }
+
+    /// The read-only half of [`Self::install_alias`]: the gate, nothing installed.
+    ///
+    /// # Errors
+    /// As [`Self::install_alias`].
+    pub fn vet_alias(&self, name: String, thunk: Value) -> Settled<HandlerEntry> {
+        HandlerEntry::vet(name, thunk, self.session_schemes(), HandlerRole::Alias)
+    }
+
+    /// The committing half: install a vetted entry, replacing any alias of its name.
+    pub fn commit_alias(&mut self, entry: HandlerEntry) -> FrameHandle {
         self.context.handlers.remove_alias(&entry.name);
-        self.context.handlers.push_alias(vec![entry]);
-        Ok(())
+        self.context.handlers.push_alias(vec![entry])
+    }
+
+    /// Remove the alias frame [`Self::install_alias`] minted, reporting whether
+    /// it was still there: a frame the user replaced has a new handle.
+    pub fn remove_alias_frame(&mut self, handle: FrameHandle) -> bool {
+        self.context.handlers.remove_by_handle(handle).is_some()
     }
 
     /// Install `value` as a lexical scope binding for `name` — the rc

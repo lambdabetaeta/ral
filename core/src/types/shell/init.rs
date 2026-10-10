@@ -41,7 +41,7 @@ impl Shell {
                 ),
                 guest_jail: None,
                 stack_limit: super::DEFAULT_STACK_LIMIT,
-                hooks: std::collections::HashMap::new(),
+                hooks: Some(super::hooks::HookTable::default()),
             },
             local: LocalState::default(),
         }

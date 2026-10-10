@@ -62,7 +62,8 @@ let _by_cmd = [
             guard: !{intercalate '' ['\S\s+\S*', !{re-replace-all '[.^$*+?()\[\]{}|\\]' '\$0' $trigger}, '$']},
             handler: { |_|
                 let [words: ws, current: i, offset: o] = _ed-parse
-                let lb = _ed-lbuffer
+                let st = _ed-get
+                let lb = slice $st[text] 0 $st[cursor]
                 let n = $[!{length $lb} - $o - !{length $trigger}]
                 if $[not !{is-empty $ws} && $n >= 0] {
                     let [cmd, ..._] = $ws

@@ -196,7 +196,7 @@ fn rc_bad_value_in_a_decoded_rc_fails_the_whole_file() {
 
     let out = repl(&["-i"], &env, "echo alive\n");
     assert!(
-        out.stderr.contains("'edit-mode'") && out.stderr.contains("must be a string"),
+        out.stderr.contains("'edit-mode'") && out.stderr.contains("must be 'emacs' or 'vi'"),
         "the bad value must name the field and what was wrong with it: {}",
         out.stderr
     );
@@ -291,7 +291,7 @@ fn an_alias_ending_in_cd_installs_with_no_trailing_write() {
     let marker = env[1].1.join("it-worked");
     let out = repl(&["-i"], &env, "gohome\ntouch it-worked\n");
     assert!(
-        !out.stderr.contains("ralrc alias"),
+        !out.stderr.contains("alias 'gohome'"),
         "an alias ending in `cd` must install; stderr was:\n{}",
         out.stderr
     );
@@ -314,7 +314,7 @@ fn an_alias_whose_if_join_is_all_value_still_installs() {
     let marker = env[1].1.join("it-worked");
     let out = repl(&["-i"], &env, "gohome\ntouch it-worked\n");
     assert!(
-        !out.stderr.contains("ralrc alias"),
+        !out.stderr.contains("alias 'gohome'"),
         "an if/else of two `cd`s must install; stderr was:\n{}",
         out.stderr
     );
@@ -333,9 +333,7 @@ fn an_alias_returning_a_string_is_still_rejected() {
     let (_dir, env) = rc_home("return [aliases: [greet: { |args| \"hi\" }]]");
     let out = repl(&["-i"], &env, "echo ok\n");
     assert!(
-        out.stderr.contains("ralrc alias")
-            && out.stderr.contains("greet")
-            && out.stderr.contains("String"),
+        out.stderr.contains("alias 'greet'") && out.stderr.contains("String"),
         "a value-returning arm over a fresh name must still fail; stderr was:\n{}",
         out.stderr
     );

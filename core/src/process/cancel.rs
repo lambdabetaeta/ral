@@ -96,6 +96,11 @@ static REQUESTED_ROOT: AtomicU8 = AtomicU8::new(0);
 /// it orders each interrupt against a listener's registration.
 static INTERRUPTS: AtomicU64 = AtomicU64::new(0);
 
+/// Interrupts raised so far: a reader tells whether one landed since it looked.
+pub fn interrupt_epoch() -> u64 {
+    INTERRUPTS.load(Ordering::Acquire)
+}
+
 /// Raise an interrupt, reaching every [`forward_ambient`] listener registered
 /// before this instant.
 ///

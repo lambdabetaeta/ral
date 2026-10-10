@@ -368,9 +368,7 @@ Methods on `Shell` live by concern, one submodule each:
   lambda or a builtin, resolved by the run door's hook-program arm under the hook's
   registered `DefaultPolicy`: terminal authority, capture, and `aside`; a
   fault in a hook run is labelled by `HookName::fault_label`, and a hook run
-  is no ready boundary), `repl.rs` (`ReplScratch`, the
-  [[map/repl|REPL]]'s engine-side scratch: the typed registry of the plugins
-  its load door committed).
+  is no ready boundary); the table is an `Option<HookTable>`, `Some` only on the booted session (every child holds `None`), and carries the [[map/repl|REPL]]'s plugin ledger beside the hooks.
 
 ## The flow matrix
 

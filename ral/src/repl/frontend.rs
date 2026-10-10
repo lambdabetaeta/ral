@@ -23,7 +23,6 @@ pub(super) use rustyline::RustylineFrontend;
 
 use ral_core::carrier::Transport;
 
-use super::config::dirs_history;
 use super::host::Printer;
 use super::prompt::PromptText;
 
@@ -68,114 +67,16 @@ pub(super) struct EditBuffer {
 /// has already handled any plugin keybinding that accepted.  `Edit` is
 /// a buffer the session should re-feed to the next `read` call (a plugin
 /// keybinding handler asked to re-edit, or `_ed-push` queued a buffer).
-/// `Interrupt` is Ctrl-C at an empty prompt; `Eof` is Ctrl-D on empty.
+/// `Interrupt` is Ctrl-C at an empty prompt; `End` ends the session with
+/// that exit status (0 on Ctrl-D at an empty prompt, 1 on a read error).
 pub(super) enum Read {
     Line(String),
     Edit(EditBuffer),
     Interrupt,
-    Eof,
+    End(u8),
 }
 
 // ── Trait ─────────────────────────────────────────────────────────────────
-
-/// One backend-supplied continuation read, classified for
-/// [`join_continuation`].
-pub(super) enum Continuation {
-    /// Another line to fold into the buffer.
-    Line(String),
-    /// Ctrl-C / Ctrl-D / EOF: abandon the partial buffer, yielding an
-    /// empty input for the session to skip.
-    Discard,
-}
-
-/// Fold continuation lines into `first` until the buffer is a complete
-/// input, joining with newlines.  The backend owns the actual read (and
-/// its own prompt / abort detection) via `next`; this drives the shared
-/// `needs_continuation` loop, the one place both frontends agree on Ctrl-D.
-/// A [`Continuation::Discard`] returns the empty string.
-pub(super) fn join_continuation(first: String, mut next: impl FnMut() -> Continuation) -> String {
-    let mut buf = first;
-    while ral_core::syntax::parser::needs_continuation(&buf) {
-        match next() {
-            Continuation::Line(line) => {
-                buf.push('\n');
-                buf.push_str(&line);
-            }
-            Continuation::Discard => return String::new(),
-        }
-    }
-    buf
-}
-
-// ── Persisted history ───────────────────────────────────────────────────────
-
-/// Persisted REPL history shared by the non-rustyline frontends.
-///
-/// Entries loaded from disk at construction are counted in `persisted`;
-/// everything past it is this session's contribution, appended (not
-/// rewritten) on save so concurrent sessions do not clobber each other's
-/// history.  ([`RustylineFrontend`] uses rustyline's own `DefaultHistory`
-/// instead, so it does not use this.)
-pub(super) struct History {
-    entries: Vec<String>,
-    persisted: usize,
-    path: Option<String>,
-}
-
-impl History {
-    /// Load persisted history from the configured history file.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:history-read] loads persisted repl history at construction; not turn-time model I/O"
-    )]
-    pub(super) fn load() -> Self {
-        let path = dirs_history();
-        let entries: Vec<String> = path
-            .as_deref()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .map(|s| s.lines().map(String::from).collect())
-            .unwrap_or_default();
-        let persisted = entries.len();
-        Self {
-            entries,
-            persisted,
-            path,
-        }
-    }
-
-    /// Append `entry` unless it repeats the most recent one.
-    pub(super) fn add(&mut self, entry: &str) {
-        if self.entries.last().is_none_or(|s| s != entry) {
-            self.entries.push(entry.to_string());
-        }
-    }
-
-    /// Append this session's new entries to the history file.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:history-append] appends this session's repl history to its log file; not turn-time model I/O"
-    )]
-    pub(super) fn save(&mut self) {
-        let Some(path) = &self.path else {
-            return;
-        };
-        let fresh = &self.entries[self.persisted..];
-        if fresh.is_empty() {
-            return;
-        }
-        use std::io::Write;
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
-            for entry in fresh {
-                let _ = writeln!(file, "{entry}");
-            }
-        }
-        self.persisted = self.entries.len();
-    }
-}
 
 pub(super) trait Frontend {
     /// Read one logical input from the user.
@@ -184,8 +85,8 @@ pub(super) trait Frontend {
     /// [`Read::Edit`] (and now wants to re-feed) — when `None`, the
     /// frontend may still draw initial state from its own internal queue
     /// (e.g. `_ed-push`).  The frontend is responsible for plugin sync,
-    /// keybinding dispatch, continuation reads, line-erase escapes, and
-    /// flushing deferred plugin diagnostics before returning.
+    /// keybinding dispatch and line-erase escapes before returning; the session
+    /// flushes deferred plugin diagnostics afterwards.
     fn read(
         &mut self,
         engine: &dyn Transport,
@@ -194,59 +95,11 @@ pub(super) trait Frontend {
     ) -> Read;
 
     fn add_history(&mut self, entry: &str);
-    fn save_history(&mut self);
+    fn save_history(&mut self) -> Result<(), String>;
 
     /// Where a line printed while the user edits should go, if this frontend
     /// can put it above the prompt.
     fn printer(&mut self) -> Option<Printer> {
         None
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{Continuation, join_continuation};
-
-    /// A complete first line is returned without reading any continuation.
-    #[test]
-    fn complete_input_reads_no_continuation() {
-        let mut calls = 0;
-        let out = join_continuation("echo hi".into(), || {
-            calls += 1;
-            Continuation::Discard
-        });
-        assert_eq!(out, "echo hi");
-        assert_eq!(calls, 0, "a complete line must not prompt for more");
-    }
-
-    /// Continuation lines are folded in with newlines until the buffer
-    /// parses as complete.
-    #[test]
-    fn folds_lines_until_complete() {
-        let mut rest = vec!["world"].into_iter();
-        // A trailing pipe is an incomplete input; the next line completes it.
-        let out = join_continuation("echo hi |".into(), || {
-            Continuation::Line(rest.next().unwrap().to_string())
-        });
-        assert_eq!(out, "echo hi |\nworld");
-    }
-
-    /// A trailing `?` is a continuation exactly as a trailing `|` is, and
-    /// the joined buffer must then parse.
-    #[test]
-    fn folds_a_line_after_a_trailing_chain_question() {
-        let mut rest = vec!["echo b"].into_iter();
-        let out = join_continuation("echo a ?".into(), || {
-            Continuation::Line(rest.next().unwrap().to_string())
-        });
-        assert_eq!(out, "echo a ?\necho b");
-        assert!(ral_core::syntax::parser::parse(&out).is_ok(), "{out:?}");
-    }
-
-    /// Discard (Ctrl-C / Ctrl-D / read error) abandons the partial buffer.
-    #[test]
-    fn discard_yields_empty() {
-        let out = join_continuation("echo hi |".into(), || Continuation::Discard);
-        assert_eq!(out, "");
     }
 }

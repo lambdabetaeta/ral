@@ -394,6 +394,43 @@ pub fn lex(source: &str) -> Result<Vec<Lexeme>, LexError> {
     lex_with(source, FileId::DUMMY)
 }
 
+/// `text`'s tokens, closing each string, `{` or `[` still open at the end — an
+/// editor's buffer is routinely mid-block.  `None` for any other lex failure.
+pub fn lex_open(text: &str) -> Option<Vec<Lexeme>> {
+    let mut source = text.to_owned();
+    loop {
+        match lex(&source) {
+            Ok(tokens) => return Some(tokens),
+            Err(LexError {
+                kind: LexErrorKind::UnterminatedBalanced { close, .. },
+                ..
+            }) => source.push(close),
+            // A nested open form (`inner`) is not closed by the string's delimiter.
+            Err(LexError {
+                kind:
+                    LexErrorKind::UnterminatedString {
+                        form, inner: None, ..
+                    },
+                ..
+            }) => source.push_str(&form.closing()),
+            Err(_) => return None,
+        }
+    }
+}
+
+/// Tokens that end one simple command and begin the next.
+pub fn separates(tok: &Token) -> bool {
+    matches!(
+        tok,
+        Token::Pipe
+            | Token::Question
+            | Token::Semi
+            | Token::Newline
+            | Token::LBrace
+            | Token::RBrace
+    )
+}
+
 /// Tokenise `source`, attributing every token's byte range to `file`.
 ///
 /// # Errors

@@ -2,11 +2,12 @@
 //!
 //! The prompt body is a registered hook at `Session/"prompt"`, dispatched
 //! like any other hook.  The prompt body reads `cwd` and `user` directly.
-//! Plugins may transform the result via the `prompt` lifecycle hook.
+//! Plugins may transform the result via the `prompt` hook.
 
 use ral_core::carrier::Transport;
 use ral_core::errln;
 use ral_core::first_order::FOValue;
+use ral_core::first_order::datum::Datum as _;
 use ral_core::types::{Closure, DefaultPolicy, HookName, HookSig};
 use ral_core::{Captured, Shell, Value};
 use std::sync::Arc;
@@ -30,12 +31,7 @@ pub(crate) fn install_default_prompt(shell: &mut Shell) {
     let block = Value::Thunk(Closure::closed(ral_core::source::Spanned::synthetic(
         ral_core::ir::CompKind::Return(ral_core::ir::Val::String(DEFAULT_PROMPT.into())),
     )));
-    let _ = shell.register_hook(
-        name,
-        block,
-        HookSig::Prompt,
-        DefaultPolicy::denied_capture(),
-    );
+    let _ = shell.register_hook(name, block, HookSig::Block, DefaultPolicy::denied_capture());
 }
 
 /// Prompt text in both raw and styled forms.
@@ -97,14 +93,13 @@ pub(super) fn write_terminal_title(terminal: &ral_core::terminal::TerminalState,
 }
 
 /// Run the registered `Session/"prompt"` hook, fold plugin `prompt` hooks
-/// over it, and produce the renderable [`PromptText`].  A failing prompt —
-/// one whose value cannot cross included — falls back to [`DEFAULT_PROMPT`],
-/// printing its diagnostic when it differs from the last one printed.
+/// over it (each read like the session prompt), and produce the renderable
+/// [`PromptText`].  A failing hook falls back to [`DEFAULT_PROMPT`] (a plugin,
+/// to the prompt so far); the render's faults print together, when they
+/// differ from the last render's.
 pub(super) fn render(t: &dyn Transport, host: &Arc<ReplHost>) -> PromptText {
     let base = host.run_hook(t, HookName::session("prompt"), vec![], None, None);
-    if let Some(fault) = host.prompt_fault(base.fault) {
-        errln!("{fault}");
-    }
+    let mut faults: Vec<String> = base.fault.into_iter().collect();
     let mut prompt = base.value.map_or_else(
         || DEFAULT_PROMPT.to_string(),
         |value| prompt_text(value, base.captured),
@@ -114,17 +109,17 @@ pub(super) fn render(t: &dyn Transport, host: &Arc<ReplHost>) -> PromptText {
         let hr = host.run_hook(
             t,
             HookName::plugin(name, "prompt"),
-            vec![FOValue::String {
-                value: prompt.clone(),
-            }],
+            vec![prompt.clone().encode()],
             None,
             None,
         );
-        match (hr.value, hr.fault) {
-            (Some(FOValue::String { value }), _) => prompt = value,
-            (_, Some(fault)) => errln!("{fault}"),
-            _ => {}
+        faults.extend(hr.fault);
+        if let Some(value) = hr.value {
+            prompt = prompt_text(value, hr.captured);
         }
+    }
+    if let Some(fault) = host.prompt_fault((!faults.is_empty()).then(|| faults.join("\n"))) {
+        errln!("{fault}");
     }
     PromptText::from_styled(prompt)
 }
@@ -151,7 +146,7 @@ mod tests {
                 .register_hook(
                     HookName::session("prompt"),
                     prompt,
-                    HookSig::Prompt,
+                    HookSig::Block,
                     DefaultPolicy::denied_capture(),
                 )
                 .expect("a block registers as the prompt");

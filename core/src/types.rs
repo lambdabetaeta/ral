@@ -9,8 +9,6 @@ pub use env::{Binding, Env, EnvVars};
 pub(crate) mod signature;
 pub(crate) use signature::{PreludeMap, Signature, lookup};
 
-pub use shell::repl::{PluginEntry, ReplScratch};
-
 mod value;
 pub(crate) use value::Leaf;
 pub use value::Value;
@@ -24,9 +22,10 @@ pub use closure::Closure;
 // the checker before the spawn, `runtime::command::vet` at it.
 
 mod handler;
+pub use handler::{FrameHandle, HandlerEntry};
 pub(crate) use handler::{
-    FrameHandle, FrameKind, HandlerArity, HandlerEntry, HandlerFrame, HandlerLookup, HandlerRole,
-    refused_arm, validate_handler_arity,
+    FrameKind, HandlerArity, HandlerFrame, HandlerLookup, HandlerRole, refused_arm,
+    validate_handler_arity,
 };
 
 // The shared state behind `Value::Handle`.
@@ -101,7 +100,9 @@ pub(crate) use mooring::{NurseryGuard, TerminalAccess};
 
 mod shell;
 pub(crate) use shell::Context;
-pub use shell::hooks::{DefaultPolicy, Hook, HookName, HookSig, Namespace, RegisterError};
+pub use shell::hooks::{
+    DefaultPolicy, Hook, HookName, HookSig, Namespace, PluginEntry, RegisterError,
+};
 pub use shell::{DEFAULT_STACK_LIMIT, LocalState, SessionState, Shell};
 
 pub(crate) use shell::workers::{CapReached, LeaseChain};

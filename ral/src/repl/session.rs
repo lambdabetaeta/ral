@@ -20,7 +20,9 @@ use std::sync::Arc;
 use super::exec::{Step, step};
 use super::frontend::{EditBuffer, Frontend, Read};
 use super::host::{ReplHost, hook_run, teardown_notice};
+use super::plugin::flush_pending_messages;
 use super::prompt::{render as render_prompt, write_terminal_title};
+use super::theme::OutputTheme;
 use crate::boot_door::{self, Boot};
 use crate::startup::engine::{INSTALLERS, REPL};
 
@@ -41,6 +43,7 @@ pub(super) struct Session {
     /// The process's signals, heard as the engine's `Control`.
     _signals: ral_core::process::AmbientForward,
     host: Arc<ReplHost>,
+    theme: OutputTheme,
     frontend: Box<dyn Frontend>,
     terminal: TerminalState,
     /// Buffer the previous `read` asked us to re-feed (a plugin keybinding
@@ -92,7 +95,6 @@ impl Session {
         if let Some(surface) = opts.surface {
             settings.surface = surface;
         }
-        super::theme::set_output_theme(settings.theme.clone());
         if settings.startup {
             let startup = ral_core::HookName::session("startup");
             if let Some(fault) = host
@@ -109,6 +111,7 @@ impl Session {
             transport.clone(),
             host.clone(),
             terminal,
+            super::config::dirs_history(),
         );
         host.set_printer(frontend.printer());
 
@@ -116,6 +119,7 @@ impl Session {
             transport,
             _signals: signals,
             host,
+            theme: settings.theme,
             frontend,
             terminal,
             pending: None,
@@ -124,7 +128,7 @@ impl Session {
         })
     }
 
-    /// Drive the loop until a frontend reports EOF or `exit` escapes the
+    /// Drive the loop until a frontend ends the session or `exit` escapes the
     /// evaluator.  History flush and the worker sweep happen in [`Drop`], so
     /// they cover a panic-unwind exit as well as this orderly one.
     pub(super) fn run(mut self) -> ExitCode {
@@ -134,7 +138,7 @@ impl Session {
     }
 
     /// Run one iteration: draw prompt, read, eval.  Returns `Break` when the
-    /// frontend hits EOF, the evaluator returns an exit code, or the
+    /// frontend ends the session, the evaluator returns an exit code, or the
     /// session has ended.
     fn iterate(&mut self) -> Flow {
         let t: &dyn Transport = &*self.transport;
@@ -155,8 +159,11 @@ impl Session {
         write_terminal_title(&self.terminal, &cwd.to_string_lossy());
         let prompt = render_prompt(t, &self.host);
 
-        let read_result = self.frontend.read(t, &prompt, self.pending.take());
-        match read_result {
+        let read = self.frontend.read(t, &prompt, self.pending.take());
+        // The one boundary at which deferred plugin diagnostics land: the
+        // editor has already erased whatever it drew.
+        flush_pending_messages(&self.host.runtime);
+        match read {
             Read::Line(input) => {
                 let trimmed = input.trim();
                 if trimmed.is_empty() {
@@ -174,14 +181,17 @@ impl Session {
                 self.transport.control().interrupt();
                 Flow::Continue
             }
-            Read::Eof => Flow::Break,
+            Read::End(code) => {
+                self.exit_code = code;
+                Flow::Break
+            }
         }
     }
 
     /// Evaluate one non-empty trimmed input line, recording any exit
     /// code so [`run`](Self::run) can break cleanly.
     fn eval(&mut self, trimmed: &str) -> Flow {
-        match step(trimmed, &*self.transport, &self.host) {
+        match step(trimmed, &*self.transport, &self.host, &self.theme) {
             Step::Continue => Flow::Continue,
             Step::Exit(c) => {
                 self.exit_code = c;
@@ -203,7 +213,10 @@ impl Drop for Session {
     fn drop(&mut self) {
         let workers = self.transport.workers().unwrap_or_default();
         self.transport.detach();
-        self.frontend.save_history();
+        flush_pending_messages(&self.host.runtime);
+        if let Err(e) = self.frontend.save_history() {
+            errln!("ral: {e}");
+        }
         if let Some(notice) = teardown_notice(&workers) {
             errln!("{notice}");
         }

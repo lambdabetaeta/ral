@@ -3,15 +3,15 @@
 //! An rc file is ral source whose return value is a configuration record, or
 //! `()` for a file with nothing to set.  Its eleven keys are declared once, in
 //! `Form::Rc`'s table, and the checker ascribes that table to the file's
-//! inferred return type — unknown key or wrong field type alike — to a static
-//! error, whatever syntax produced it, and the whole file is skipped.  A file
-//! whose return the checker cannot type (decoded JSON) reaches
-//! `apply_rc_config`, which meets the same keyset and the same field types
-//! itself, before applying anything: either mistake refuses the whole rc
-//! there too, agreeing with what the static check already does.
+//! inferred return type, so an unknown key or a wrong field type is a static
+//! error and the whole file is skipped.  A file whose return the checker
+//! cannot type (decoded JSON) meets the same keyset and field types in
+//! [`RcPlan::decode`].
 //!
-//! All of it runs engine-side, inside the boot door; the host is told only
-//! the [`RcSettings`] its frontend needs.
+//! The rc is a plan, decoded then committed: `decode` makes every fallible
+//! judgement reading the shell only, so a refused rc has changed nothing;
+//! `apply` then commits.  All of it runs engine-side, inside the boot door;
+//! the host is told only the [`RcSettings`] its frontend needs.
 
 pub(crate) mod source;
 
@@ -21,8 +21,11 @@ use ral_core::first_order::datum::Datum;
 use ral_core::record;
 use ral_core::ty::{Ty, Typed};
 use ral_core::typecheck::Form;
-use ral_core::types::{Break, DefaultPolicy, Error, HookName, HookSig, Map, Mooring};
+use ral_core::types::{
+    Break, DefaultPolicy, Error, HandlerEntry, Hook, HookName, HookSig, Map, Mooring, Settled,
+};
 use ral_core::{Shell, Value};
+use std::io::Write as _;
 
 use super::errfmt::report_failed_load;
 use super::frontend::Surface;
@@ -119,7 +122,8 @@ const DEFAULT_RC: &str = "\
 return ()
 ";
 
-/// Write the default RC skeleton to the first resolvable config location.
+/// Write the default RC skeleton to the first resolvable config location,
+/// unless a concurrent boot got there first, in which case that file stands.
 #[allow(
     clippy::disallowed_methods,
     reason = "[silent:rc-write] persists the default repl config dir + rc file; not turn-time model I/O"
@@ -146,354 +150,179 @@ pub(super) fn create_default_rc() -> Option<String> {
         );
         return None;
     }
-    if let Err(e) = std::fs::write(&path, DEFAULT_RC) {
-        errln!("ral: warning: could not write {}: {e}", path.display());
-        return None;
+    let shown = path.to_string_lossy().into_owned();
+    match std::fs::File::create_new(&path).and_then(|mut f| f.write_all(DEFAULT_RC.as_bytes())) {
+        Ok(()) => errln!("note: created {shown}"),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => {
+            errln!("ral: warning: could not write {}: {e}", path.display());
+            return None;
+        }
     }
-    Some(path.to_string_lossy().into_owned())
+    Some(shown)
 }
 
-// ── RC config application ────────────────────────────────────────────────
+// ── RC config: decoded, then committed ───────────────────────────────────
 
-/// The trailer every runtime refusal of a *decoded* rc carries: a bad key or
-/// a bad value both mean the whole rc is refused, not applied piecemeal, so
-/// the reader is told plainly that defaults are what actually took effect.
+/// The trailer every refusal of a decoded rc carries: a bad key or a bad
+/// value refuses the whole rc, and nothing of it was applied.
 fn refuse(reason: impl std::fmt::Display) -> String {
     format!("rc: {reason}. The rc was not applied; the shell started with defaults.")
 }
 
-/// Apply the RC config map to the shell, loading its plugins under
-/// `mooring`.  Returns the resolved settings and the `startup` block, if
-/// any, for the caller to register.  The rc's map contract
-/// (and the diagnostic for breaking it) lives with the sourcing in
-/// [`source`]; this function only ever sees a map.
-///
-/// A decoded map has no type for the checker to hold to the rc's keyset or its
-/// fields' types, so both are met here instead, agreeing with what a
-/// record return is held to statically: an unknown key, or a known key
-/// whose value is the wrong shape, refuses the whole rc rather than the
-/// keys around it landing first.
-///
-/// Refusing *before* mutating anything is only fully honest for the seven
-/// keys [`rc_value_shape_error`] can judge from the value alone; `prompt`,
-/// `aliases`, and `theme` each judge more than that (a block's arity, a
-/// thunk's route, a nested key `apply_rc_key`'s own decoder warns about),
-/// so those three run first — if any refuses, nothing else has been
-/// touched yet — and everything left, already shape-checked or (`startup`)
-/// unconditional, cannot fail behind them.
-pub(crate) fn apply_rc_config(
-    pairs: &Map,
-    mooring: &Mooring,
-    shell: &mut Shell,
-) -> Result<(RcSettings, Option<Value>), String> {
-    let table = ral_core::typecheck::contract::declared(Form::Rc);
-    if let Some(key) = pairs.keys().find(|k| table.holds(k).is_none()) {
-        return Err(refuse(table.unknown_key(key)));
-    }
-    if let Some(err) = pairs.iter().find_map(|(k, v)| rc_value_shape_error(k, &v)) {
-        return Err(refuse(err.message));
-    }
-
-    let mut settings = RcSettings::default();
-    let mut startup: Option<Value> = None;
-    for key in ["prompt", "aliases", "theme"] {
-        if let Some(val) = pairs.get(key) {
-            apply_rc_key(
-                key,
-                val.into_owned(),
-                mooring,
-                shell,
-                &mut settings,
-                &mut startup,
-            )
-            .map_err(|err| refuse(err.message))?;
-        }
-    }
-    for (key, val) in pairs {
-        if matches!(key, "prompt" | "aliases" | "theme") {
-            continue;
-        }
-        // Every other key was shape-checked above, so this cannot fail.
-        apply_rc_key(
-            key,
-            val.into_owned(),
-            mooring,
-            shell,
-            &mut settings,
-            &mut startup,
-        )
-        .map_err(|err| refuse(err.message))?;
-    }
-    Ok((settings, startup))
+/// A fully judged rc: every field already has its final shape and every hook
+/// and alias has passed the shell's gate, so [`Self::apply`] cannot refuse.
+#[derive(Default)]
+pub(crate) struct RcPlan {
+    settings: RcSettings,
+    stack_limit: Option<usize>,
+    env: Map,
+    bindings: Map,
+    plugins: Map,
+    aliases: Vec<HandlerEntry>,
+    hooks: Vec<(HookName, Hook)>,
 }
 
-/// What [`apply_rc_key`] would reject about `val` before it applies
-/// anything: the same shape checks, read-only.  `prompt` and `aliases`
-/// judge more than a value's shape (a block's arity, a thunk's route), and
-/// `theme`'s own decoder warns on an unknown nested key as a side effect of
-/// judging it — a second, pure call here would print that warning twice —
-/// so all three are left to `apply_rc_key` itself, run first in
-/// `apply_rc_config` so nothing else has landed if they refuse. Every other
-/// key's failure is exactly a shape mismatch, so checking it here first is
-/// what lets `apply_rc_config` refuse a bad value without touching the shell.
-fn rc_value_shape_error(key: &str, val: &Value) -> Option<Error> {
-    let err = |msg: String| Some(Error::new(msg));
-    match key {
-        "env" | "bindings" if !matches!(val, Value::Map(_)) => {
-            err(format!("rc '{key}' must be a map; got {}", val.type_name()))
-        }
-        "edit-mode" => match val {
-            Value::String(s) if matches!(s.to_ascii_lowercase().as_str(), "vi" | "emacs") => None,
-            Value::String(s) => err(format!("rc 'edit-mode' must be 'emacs' or 'vi'; got '{s}'")),
-            other => err(format!(
-                "rc 'edit-mode' must be a string; got {}",
-                other.type_name()
-            )),
-        },
-        "bell" if !matches!(val, Value::Bool(_)) => {
-            err(format!("rc 'bell' must be a bool; got {}", val.type_name()))
-        }
-        "surface" => match val {
-            Value::String(s) if <Surface as clap::ValueEnum>::from_str(s, true).is_ok() => None,
-            Value::String(s) => err(format!(
-                "rc 'surface' must be minimal or readline; got '{s}'"
-            )),
-            other => err(format!(
-                "rc 'surface' must be a string; got {}",
-                other.type_name()
-            )),
-        },
-        "recursion-limit" => match val.as_int() {
-            Some(n) if n > 0 => None,
-            Some(n) => err(format!("rc 'recursion-limit' must be positive; got {n}")),
-            None => err(format!(
-                "rc 'recursion-limit' must be a positive int; got {}",
-                val.type_name()
-            )),
-        },
-        "plugins" if !matches!(val, Value::Map(_)) => err(format!(
-            "rc 'plugins' must be a map from plugin name to its options, \
-             e.g. [zoxide: [key: 'alt-z'], autosuggestion: [:]]; got {}",
-            val.type_name()
-        )),
-        _ => None,
-    }
-}
-
-/// Apply a single rc top-level `key: val` pair.  Called only for a key
-/// `apply_rc_config` has already found in the keyset; an `Err` here now
-/// refuses the whole rc at the caller, same as an unknown key, so this
-/// function's only job is to judge and apply — not to soften a refusal into
-/// "reported, the rest still applies".
-///
-/// The keyset is [`Form::Rc`]'s declared table, which is also what the
-/// checker holds an rc file's returned row to; the shapes it leaves to the
-/// decoder — a map of hooks, a map of aliases, a theme — are the per-key
-/// checks below, mirrored read-only in [`rc_value_shape_error`] so the
-/// caller can refuse most of them before this function ever mutates
-/// anything. The catch-all arm is unreachable in practice: it exists only
-/// because `key: &str` is not the enum the caller's keyset pre-check reads.
-fn apply_rc_key(
-    key: &str,
-    val: Value,
-    mooring: &Mooring,
-    shell: &mut Shell,
-    settings: &mut RcSettings,
-    startup: &mut Option<Value>,
-) -> Result<(), Error> {
-    match key {
-        "env" => {
-            let Value::Map(m) = val else {
-                return Err(Error::new(format!(
-                    "rc 'env' must be a map; got {}",
-                    val.type_name()
-                )));
-            };
-            for (k, v) in &m {
-                // PWD lives on context.cwd, and a copy in env_overrides
-                // would shadow it and drift on the next `cd`; ral keeps no
-                // OLDPWD at all.  An rc
-                // that spreads a parent shell's environment carries them,
-                // so drop them here rather than feed them to set_env_var.
-                if matches!(k, "PWD" | "OLDPWD") {
-                    continue;
+impl RcPlan {
+    /// Judge the rc's map against `shell`, which it only reads: the keyset,
+    /// every field's shape, the theme, the prompt and startup blocks, and each
+    /// alias.  The map contract (and the diagnostic for breaking it) lives
+    /// with the sourcing in [`source`].
+    pub(crate) fn decode(pairs: &Map, shell: &Shell) -> Result<Self, String> {
+        let table = ral_core::typecheck::contract::declared(Form::Rc);
+        let mut plan = Self::default();
+        for (key, val) in pairs {
+            match (key, val.into_owned()) {
+                ("env", Value::Map(m)) => plan.env = m,
+                ("bindings", Value::Map(m)) => plan.bindings = m,
+                ("plugins", Value::Map(m)) => plan.plugins = m,
+                ("theme", Value::Map(m)) => {
+                    plan.settings.theme = OutputTheme::from_map(&m).map_err(refuse)?;
                 }
-                let v = v.into_owned();
-                shell.set_env_var(k.to_string(), v.to_string());
-                shell.set_var(k.to_string(), v);
-            }
-            Ok(())
-        }
-        "prompt" => shell
-            .register_hook(
-                HookName::session("prompt"),
-                val,
-                HookSig::Prompt,
-                DefaultPolicy::denied_capture(),
-            )
-            .map_err(|e| Error::new(e.to_string())),
-        "aliases" => {
-            let Value::Map(m) = val else {
-                return Err(Error::new(format!(
-                    "rc 'aliases' must be a map; got {}",
-                    val.type_name()
-                )));
-            };
-            // A function installs as an argv-handler alias; any other
-            // value falls through to a plain scope binding so the key
-            // still lands somewhere usable.
-            m.iter().try_for_each(|(name, value)| {
-                let name = name.to_string();
-                let value = value.into_owned();
-                if matches!(value, Value::Thunk(_)) {
-                    let alias = name.clone();
-                    shell.install_alias(name, value).map_err(|err| match err {
-                        Break::Error(e) => e.context(format!("ralrc alias '{alias}'")),
-                        Break::Escape(_) => {
-                            Error::new(format!("ralrc alias '{alias}' installation escaped"))
+                ("aliases", Value::Map(m)) => {
+                    plan.aliases = m
+                        .iter()
+                        .map(|(name, f)| match f.into_owned() {
+                            f @ Value::Thunk(_) => shell.vet_alias(name.to_string(), f).map_err(|b| {
+                                refuse(match b {
+                                    Break::Error(e) => e.context(format!("alias '{name}'")).message,
+                                    Break::Escape(_) => format!("alias '{name}' escaped"),
+                                })
+                            }),
+                            other => Err(refuse(format!(
+                                "alias '{name}' is {}, not a function; did you mean to put it under `bindings:`?",
+                                other.type_name()
+                            ))),
+                        })
+                        .collect::<Result<_, _>>()?;
+                }
+                ("edit-mode", Value::String(s)) => {
+                    plan.settings.edit_mode = match s.to_ascii_lowercase().as_str() {
+                        "vi" => Keymap::Vi,
+                        "emacs" => Keymap::Emacs,
+                        _ => {
+                            return Err(refuse(format!(
+                                "'edit-mode' must be 'emacs' or 'vi'; got '{s}'"
+                            )));
                         }
-                    })
-                } else {
-                    shell.set_var(name, value);
-                    Ok(())
+                    }
                 }
-            })
-        }
-        "bindings" => {
-            let Value::Map(m) = val else {
-                return Err(Error::new(format!(
-                    "rc 'bindings' must be a map; got {}",
-                    val.type_name()
-                )));
-            };
-            // Every value installs as a lexical scope binding,
-            // functions included; a function is typed by the checker
-            // so it is applyable by function application at the prompt.
-            for (name, value) in &m {
-                shell.bind_value(name.to_string(), value.into_owned());
-            }
-            Ok(())
-        }
-        "edit-mode" => {
-            let Value::String(s) = val else {
-                return Err(Error::new(format!(
-                    "rc 'edit-mode' must be a string; got {}",
-                    val.type_name()
-                )));
-            };
-            match s.to_ascii_lowercase().as_str() {
-                "vi" => settings.edit_mode = Keymap::Vi,
-                "emacs" => settings.edit_mode = Keymap::Emacs,
-                _ => {
-                    return Err(Error::new(format!(
-                        "rc 'edit-mode' must be 'emacs' or 'vi'; got '{s}'"
+                ("bell", Value::Bool(b)) => plan.settings.bell = b,
+                ("surface", Value::String(s)) => {
+                    plan.settings.surface = <Surface as clap::ValueEnum>::from_str(&s, true)
+                        .map_err(|_| {
+                            refuse(format!("'surface' must be minimal or readline; got '{s}'"))
+                        })?;
+                }
+                ("recursion-limit", Value::Int(n)) => {
+                    plan.stack_limit =
+                        Some(usize::try_from(n).ok().filter(|&n| n > 0).ok_or_else(|| {
+                            refuse(format!("'recursion-limit' must be positive; got {n}"))
+                        })?);
+                }
+                (k @ ("prompt" | "startup"), f) => {
+                    let name = HookName::session(k);
+                    let policy = match k {
+                        "prompt" => DefaultPolicy::denied_capture(),
+                        _ => DefaultPolicy::denied(),
+                    };
+                    let hook = shell
+                        .vet_hook(&name, f, HookSig::Block, policy)
+                        .map_err(|e| refuse(format!("'{k}': {e}")))?;
+                    plan.settings.startup |= k == "startup";
+                    plan.hooks.push((name, hook));
+                }
+                (k, other) if table.holds(k).is_some() => {
+                    let want = match k {
+                        "env" | "bindings" | "aliases" | "theme" => "a map",
+                        "plugins" => {
+                            "a map from plugin name to its options, e.g. [zoxide: [key: 'alt-z'], autosuggestion: [:]]"
+                        }
+                        "edit-mode" => "'emacs' or 'vi'",
+                        "bell" => "a bool",
+                        "surface" => "minimal or readline",
+                        _ => "a positive int",
+                    };
+                    return Err(refuse(format!(
+                        "'{k}' must be {want}; got {}",
+                        other.type_name()
                     )));
                 }
-            }
-            Ok(())
-        }
-        "bell" => {
-            let Value::Bool(b) = val else {
-                return Err(Error::new(format!(
-                    "rc 'bell' must be a bool; got {}",
-                    val.type_name()
-                )));
-            };
-            settings.bell = b;
-            Ok(())
-        }
-        "surface" => {
-            let Value::String(s) = val else {
-                return Err(Error::new(format!(
-                    "rc 'surface' must be a string; got {}",
-                    val.type_name()
-                )));
-            };
-            match <Surface as clap::ValueEnum>::from_str(&s, true) {
-                Ok(surface) => {
-                    settings.surface = surface;
-                    Ok(())
-                }
-                Err(_) => Err(Error::new(format!(
-                    "rc 'surface' must be minimal or readline; got '{s}'"
-                ))),
+                (k, _) => return Err(refuse(table.unknown_key(k))),
             }
         }
-        "recursion-limit" => {
-            let Some(n) = val.as_int() else {
-                return Err(Error::new(format!(
-                    "rc 'recursion-limit' must be a positive int; got {}",
-                    val.type_name()
-                )));
-            };
-            if n <= 0 {
-                return Err(Error::new(format!(
-                    "rc 'recursion-limit' must be positive; got {n}"
-                )));
-            }
-            #[allow(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                reason = "filtered > 0; a recursion limit far below usize::MAX on 64-bit"
-            )]
-            let limit = n as usize;
-            shell.set_stack_limit(limit);
-            Ok(())
-        }
-        "plugins" => {
-            let Value::Map(entries) = val else {
-                return Err(Error::new(format!(
-                    "rc 'plugins' must be a map from plugin name to its options, \
-                         e.g. [zoxide: [key: 'alt-z'], autosuggestion: [:]]; got {}",
-                    val.type_name()
-                )));
-            };
-            for (name, options) in &entries {
-                if let Err(err) = load_rc_plugin(name, options.into_owned(), mooring, shell) {
-                    report_failed_load(shell, &format!("plugin '{name}'"), &err, None);
-                }
-            }
-            Ok(())
-        }
-        "startup" => {
-            *startup = Some(val);
-            Ok(())
-        }
-        "theme" => match val {
-            Value::Map(pairs) => {
-                settings.theme = OutputTheme::from_map(&pairs).map_err(Error::new)?;
-                Ok(())
-            }
-            other => Err(Error::new(format!(
-                "rc 'theme' must be a map; got {}",
-                other.type_name()
-            ))),
-        },
-        other => Err(Error::new(
-            ral_core::typecheck::contract::declared(Form::Rc).unknown_key(other),
-        )),
+        Ok(plan)
     }
-}
 
-/// Load one rc `plugins:` entry: the key names the plugin (or its path),
-/// the value is the options map, forwarded verbatim to the plugin's
-/// top-level block.
-fn load_rc_plugin(
-    name: &str,
-    options: Value,
-    mooring: &Mooring,
-    shell: &mut Shell,
-) -> Result<(), Error> {
-    let Value::Map(options) = options else {
-        return Err(Error::new(format!(
-            "rc plugin '{name}': the value under a plugin name is its options map; got {}. \
-                 Write `{name}: [:]` if it takes no options.",
-            options.type_name()
-        )));
-    };
-    match super::plugin::load::load_plugin(name, &options, mooring, shell) {
-        Err(Break::Error(e)) => Err(e.context(format!("plugin '{name}'"))),
-        _ => Ok(()),
+    /// Commit the plan, loading its plugins under `mooring`.  Nothing here
+    /// refuses the rc: a plugin that fails to load is reported and skipped,
+    /// and only an `exit` escape propagates.
+    pub(crate) fn apply(self, mooring: &Mooring, shell: &mut Shell) -> Settled<RcSettings> {
+        // PWD lives on context.cwd and a copy in env_overrides would shadow it;
+        // ral keeps no OLDPWD.  An rc spreading a parent's environment carries both.
+        for (k, v) in self
+            .env
+            .iter()
+            .filter(|(k, _)| !matches!(*k, "PWD" | "OLDPWD"))
+        {
+            let v = v.into_owned();
+            shell.set_env_var(k.to_string(), v.to_string());
+            shell.set_var(k.to_string(), v);
+        }
+        // Bindings, functions included, are lexical: applyable at the prompt.
+        for (k, v) in &self.bindings {
+            shell.bind_value(k.to_string(), v.into_owned());
+        }
+        for entry in self.aliases {
+            shell.commit_alias(entry);
+        }
+        if let Some(n) = self.stack_limit {
+            shell.set_stack_limit(n);
+        }
+        for (name, hook) in self.hooks {
+            shell
+                .insert_hook(name, hook)
+                .map_err(|e| Break::Error(Error::new(e.to_string())))?;
+        }
+        for (name, options) in &self.plugins {
+            let loaded = match options.into_owned() {
+                Value::Map(o) => super::plugin::load::load_plugin(name, &o, mooring, shell),
+                other => Err(Break::Error(Error::new(format!(
+                    "the value under a plugin name is its options map; got {}. \
+                     Write `{name}: [:]` if it takes no options.",
+                    other.type_name()
+                )))),
+            };
+            match loaded {
+                Err(Break::Error(e)) => {
+                    let what = format!("plugin '{name}'");
+                    report_failed_load(shell, &what, &e.context(&what), None);
+                }
+                Err(escape) => return Err(escape),
+                Ok(()) => {}
+            }
+        }
+        Ok(self.settings)
     }
 }
 
@@ -556,13 +385,19 @@ mod tests {
         }
     }
 
-    /// Evaluate `rc_src`, apply it through `apply_rc_config`, and return the
+    /// Decode then commit, as the boot door does.
+    fn commit(pairs: &Map, mooring: &Mooring, shell: &mut Shell) -> Result<RcSettings, String> {
+        let plan = RcPlan::decode(pairs, shell)?;
+        Ok(plan.apply(mooring, shell).expect("apply never refuses"))
+    }
+
+    /// Evaluate `rc_src`, apply it through `RcPlan`, and return the
     /// resulting shell and settings.  Registers the baked prelude so the rc
     /// sees the environment it sees at real startup.
     fn apply_rc_inner(rc_src: &str) -> (Shell, RcSettings) {
         let mut shell = prelude_shell();
         let pairs = rc_map(&mut shell, rc_src);
-        let (settings, _) = apply_rc_config(&pairs, &Mooring::adrift(), &mut shell)
+        let settings = commit(&pairs, &Mooring::adrift(), &mut shell)
             .expect("test rc must satisfy the keyset");
         (shell, settings)
     }
@@ -589,8 +424,7 @@ mod tests {
                 "_apply-rc  — test door applying one rc map.",
                 BuiltinBody::Captured(Arc::new(move |_, mooring, shell| {
                     let pairs = pairs.lock().unwrap().take().expect("applied once");
-                    apply_rc_config(&pairs, mooring, shell)
-                        .expect("test rc must satisfy the keyset");
+                    commit(&pairs, mooring, shell).expect("test rc must satisfy the keyset");
                     Ok(Value::Unit)
                 })),
             );
@@ -726,26 +560,26 @@ mod tests {
         assert!(err.contains("bell"));
     }
 
-    // ── apply_rc_config: bindings / aliases routing ───────────────────────
+    // ── RcPlan: bindings / aliases routing ───────────────────────
 
-    /// Apply `config` to a fresh shell via `apply_rc_config` and return the shell.
+    /// Apply `config` to a fresh shell via `RcPlan` and return the shell.
     fn apply_to_fresh_env(config: Value) -> Shell {
         apply_to_fresh_env_full(config).0
     }
 
-    /// Apply `config` to a fresh shell via `apply_rc_config` and return the
+    /// Apply `config` to a fresh shell via `RcPlan` and return the
     /// full post-application state: shell and resolved settings.
     fn apply_to_fresh_env_full(config: Value) -> (Shell, RcSettings) {
         let mut shell = ral_core::test_helper::core_shell();
         let Value::Map(pairs) = config else {
             panic!("test rc config must be a map; got {}", config.type_name());
         };
-        let (settings, _) = apply_rc_config(&pairs, &Mooring::adrift(), &mut shell)
+        let settings = commit(&pairs, &Mooring::adrift(), &mut shell)
             .expect("test rc must satisfy the keyset");
         (shell, settings)
     }
 
-    /// Apply `config` to a fresh shell, expecting `apply_rc_config` to
+    /// Apply `config` to a fresh shell, expecting `RcPlan::decode` to
     /// refuse it — the decoded spelling's contract door, exercised the way
     /// `apply_to_fresh_env_full` exercises success.  Returns the shell
     /// (untouched by the refused keys) and the refusal text.
@@ -754,7 +588,7 @@ mod tests {
         let Value::Map(pairs) = config else {
             panic!("test rc config must be a map; got {}", config.type_name());
         };
-        let Err(err) = apply_rc_config(&pairs, &Mooring::adrift(), &mut shell) else {
+        let Err(err) = commit(&pairs, &Mooring::adrift(), &mut shell) else {
             panic!("test rc must fail its contract");
         };
         (shell, err)
@@ -818,17 +652,58 @@ mod tests {
         assert_eq!(shell.scope_lookup("n"), Some(&Value::Int(42)));
     }
 
-    /// Under `aliases:` a function installs as an alias handler frame; a
-    /// non-function value falls through to a plain scope binding.
+    /// A non-function under `aliases:` refuses the rc, pointing at `bindings:`.
     #[test]
-    fn rc_aliases_route_by_value_shape() {
-        let plain = Value::Bool(true);
-        let shell = apply_to_fresh_env(Value::map(vec![(
+    fn rc_non_thunk_alias_points_at_bindings() {
+        let (shell, err) = apply_to_fresh_env_rejected(Value::map(vec![(
             "aliases".into(),
-            Value::map(vec![("ll".into(), plain.clone())]),
+            Value::map(vec![("ll".into(), Value::Bool(true))]),
         )]));
-        assert_eq!(shell.scope_lookup("ll"), Some(&plain));
-        assert!(!shell.has_alias("ll"));
+        assert!(
+            err.contains("`bindings:`") && err.contains("not applied"),
+            "{err}"
+        );
+        assert!(shell.scope_lookup("ll").is_none() && !shell.has_alias("ll"));
+    }
+
+    /// A refused rc leaves no prompt hook behind: valid prompt, bad theme colour.
+    #[test]
+    fn refused_rc_registers_no_prompt() {
+        let mut shell = prelude_shell();
+        let pairs = rc_map(
+            &mut shell,
+            "return [prompt: { return 'x' }, theme: [value-color: 'purple']]\n",
+        );
+        let Err(err) = commit(&pairs, &Mooring::adrift(), &mut shell) else {
+            panic!("theme refuses");
+        };
+        assert!(
+            err.contains("value-color") && err.contains("not applied"),
+            "{err}"
+        );
+        assert!(!shell.has_hook(&HookName::session("prompt")));
+    }
+
+    /// A refused rc installs none of its aliases: one good, one non-thunk.
+    #[test]
+    fn refused_rc_installs_no_aliases() {
+        let mut shell = prelude_shell();
+        let pairs = rc_map(
+            &mut shell,
+            "return [aliases: [ll: { |args| ls ...$args }, bad: 3]]\n",
+        );
+        assert!(commit(&pairs, &Mooring::adrift(), &mut shell).is_err());
+        assert!(!shell.has_alias("ll") && !shell.has_alias("bad"));
+    }
+
+    /// An unknown `theme:` key refuses the rc rather than warning.
+    #[test]
+    fn rc_unknown_theme_key_rejected() {
+        let (_, err) = apply_to_fresh_env_rejected(Value::map(vec![(
+            "theme".into(),
+            Value::map(vec![("wat".into(), Value::Int(1))]),
+        )]));
+        assert!(err.contains("wat") && err.contains("not applied"), "{err}");
     }
 
     /// A wrong-typed `plugins:` value refuses the whole map before any
@@ -918,43 +793,22 @@ mod tests {
     }
 
     /// Every key `Form::Rc`'s table declares reaches its own arm in
-    /// `apply_rc_key`: fed a value of the wrong shape (`Unit`), a handled
-    /// key refuses — or, like `startup`, accepts anything — with its own
-    /// message, never the table's `unknown_key` wording.  A `Holds::Refused`
-    /// key is not reachable in `Form::Rc` today, but the loop honours it the
-    /// same way the other two doors' drift tests do, so adding one here
-    /// needs no new test.
+    /// `RcPlan::decode`: fed a value of the wrong shape (`Unit`), it refuses
+    /// with its own message, never the table's `unknown_key` wording.
     #[test]
-    fn every_declared_rc_key_is_handled_by_apply_rc_key() {
+    fn every_declared_rc_key_is_handled_by_decode() {
         let table = ral_core::typecheck::contract::declared(Form::Rc);
-        let mut shell = ral_core::test_helper::core_shell();
+        let shell = ral_core::test_helper::core_shell();
         for key in table.keys {
-            let mut settings = RcSettings::default();
-            let mut startup = None;
-            let result = apply_rc_key(
-                key.label,
-                Value::Unit,
-                &Mooring::adrift(),
-                &mut shell,
-                &mut settings,
-                &mut startup,
+            let pairs = Map::from_iter([(key.label.to_string(), Value::Unit)]);
+            let err = RcPlan::decode(&pairs, &shell)
+                .err()
+                .expect("Unit satisfies no key");
+            assert!(
+                !err.contains(&table.unknown_key(key.label)),
+                "key '{}' fell through",
+                key.label
             );
-            let unknown = table.unknown_key(key.label);
-            match &key.holds {
-                ral_core::typecheck::contract::Holds::Refused(advice) => {
-                    let err = result.expect_err("refused key must error");
-                    assert_eq!(&err.message, *advice);
-                }
-                _ => {
-                    if let Err(err) = &result {
-                        assert_ne!(
-                            err.message, unknown,
-                            "key '{}' fell through to apply_rc_key's unknown arm",
-                            key.label
-                        );
-                    }
-                }
-            }
         }
     }
 }

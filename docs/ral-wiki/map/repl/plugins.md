@@ -23,10 +23,10 @@ the runtime, that page owns the rendering.
 A *hook* is a handler a plugin's manifest names for one of five events,
 registered into the shell's hook table under `HookName::plugin(name, event)`
 by the load door, with the policy its event needs
-(`load.rs::register_plugin_hooks`): `pre-exec`, `post-exec` and `chpwd` as
-`HookSig::Lifecycle`, `prompt` and `buffer-change` as `HookSig::Hook`, all
-`Denied` terminal authority, `buffer-change` taken `aside`; a keybinding's
-handler as `key:<chord>` with `DefaultPolicy::leased()`, so an `_ed-tui` body
+(`load.rs::register_plugin_hooks`): all as `HookSig::Hook { kind }`, all
+`Denied` terminal authority, `buffer-change` taken `aside`, `prompt` taken
+with capture like the session prompt; a keybinding's
+handler as `key#<index>` (its position in the manifest, so two guarded bindings on one key stay distinct) with `DefaultPolicy::leased()`, so an `_ed-tui` body
 can foreground a captured pipeline.
 
 **Running a hook is a dispatch.** `ReplHost::run_hook` sends one
@@ -45,11 +45,12 @@ carries (`GrantStack::root()`).
   `{src, status}` or `{old, new}` ([[map/repl/loop|`exec.rs`]] fires them
   around each line). A fault prints at once.
 - **Prompt** — [[map/repl/loop|`prompt.rs`]] folds every plugin `prompt` hook
-  over the session prompt's text.
+  over the session prompt's text, reading each result as the session prompt
+  is read.
 - **Buffer-change** — `run_buffer_change_hooks`, called from rustyline's
   `Hinter`, dispatches each plugin's hook
-  whenever the line or cursor moves, with `{old-buf, line, pos, history,
-  keymap, state}` and a context with `in_readline` set, then gathers the
+  whenever the line or cursor moves, with `{old}` (the record carries only what the event alone knows; the
+  editor is read through `_ed-*`) and a context with `in_readline` set, then gathers the
   ghost text and highlight spans the handlers left in it.
 - **Keybinding** — `keybinding.rs::dispatch_keybinding` (below).
 
@@ -81,16 +82,15 @@ preempted.
 `plugin/ed_builtins.rs` defines `ED_BUILTINS`, the line-editor builtin family,
 one `BuiltinEntry` per op so the typechecker sees each return type and arity is
 fixed per op ([[invariants/fixed-arity|fixed-arity]]). The `_` prefix hides
-them from `help`. They split into reads (`_ed-get`, `_ed-text`, `_ed-cursor`,
-`_ed-keymap`, `_ed-lbuffer`), buffer writes (`_ed-set`, `_ed-set-lbuffer`,
+them from `help`. They split into reads (`_ed-get`, answering the whole `EditorSnapshot`), buffer writes (`_ed-set`, `_ed-set-lbuffer`,
 `_ed-insert`, `_ed-push`, `_ed-accept`), display effects (`_ed-ghost`,
 `_ed-highlight`), services (`_ed-tui`, `_ed-history`, `_ed-parse`, `_ed-state`),
 and terminal escapes (`_ed-clipboard` copies natively when local, else by OSC 52; `_ed-hyperlink` is OSC 8).
 
-Each is a **thin engine-side door**: it keeps its own checks — interactive
-mode, `Shell::check(Flag::EditorRead | Flag::EditorWrite, …)` against the grant, its
-arguments' shape — and puts the rest to the host as one `` `repl-editor ``
-enquiry (`EditorOp`), decoding the answer strictly. The host answers only
+Each is a **thin engine-side door**: it keeps its own checks — the grant, via the one `ask`
+(`Shell::check(flag, name)` then the enquiry), and its arguments' shape — and
+puts the rest to the host as one `` `repl-editor `` enquiry (`EditorOp`),
+decoding the answer strictly. The host answers only
 while a `PluginContext` is installed for the dispatch — inside a plugin
 handler — and refuses otherwise with "no plugin context". The doors ride the
 REPL surface the `repl` recipe boots, so the typechecker reads them off the
@@ -100,7 +100,8 @@ session's own builtin table from the first rc check.
 
 `plugin/editor.rs` holds the host-side types. `PluginContext` is installed by
 `ReplHost` around one hook's dispatch and taken back after it: the live
-`editor_state`, the `history`, `in_readline`, the `outputs` (ghost text,
+`editor_state` (private fields: `apply` clamps the cursor into the text after
+every op), the `history` (an `Arc<[String]>`), `in_readline`, the `outputs` (ghost text,
 highlight spans, pushed buffer, accept flag), and the plugin's `state_cell`,
 saved back onto its `LoadedPlugin` afterwards. `PluginContext::apply` answers
 one `EditorOp`. All cursor offsets here are **character** offsets; core's
@@ -174,24 +175,23 @@ safe inside editor callbacks where no dispatch may run.
   which takes a name alone, passes the empty map. The door then commits the
   hooks and aliases and enquires `` `repl-plugin `loaded ``; any failure
   past the commit — the host's refusal included — rolls the plugin's whole
-  namespace back. A failed `load-plugin` is printed, not raised, through
-  `errfmt::report_failed_load`, as a failed rc `plugins:` entry is: a plugin
-  that does not compile shows the caret report it would as a script
-  ([[map/core/diagnostics|diagnostics]]), then `ral: plugin 'NAME': skipped,
-  since it does not compile`, since the report names only the file. The
-  `plugins-check` recipe greps stderr for `plugin 'NAME':`, which that line
-  and a runtime failure's message both carry. The engine keeps its own registry of what it committed,
-  `ReplScratch.plugins` (`{name, aliases}`), for `check_not_loaded` and
-  unload. Unloading is the exact inverse: the host is told first and may
-  refuse, then the hooks and aliases go. A load inside a `spawn`ed worker,
-  which has no desk, fails with the no-desk error. Loading also runs the
+  namespace back. The doors return their outcome: a failed `load-plugin` or `unload-plugin`
+  raises, its error contexted `plugin 'NAME'`, and an `exit` escape
+  propagates. A relative path resolves through `shell.resolve` (live cwd,
+  `~`). The plugin ledger `PluginEntry { name, aliases }` lives in the session's
+  `HookTable` beside the hooks it undoes, aliases by `FrameHandle` so an
+  alias the user replaced survives unload. Unloading is the exact inverse:
+  the host is told first and may refuse, then the hooks and aliases go. Only
+  the booted session has a `HookTable`; a load from an aside, a worker or a
+  stage fails at once with `RegisterError::NoSession`. Loading also runs the
   shadow lint host-side: a binding the router's `dead_entries` flags (an
   earlier unguarded entry owns its chord) is warned about, not rejected.
 - `keybinding.rs` — when a plugin-registered key fires, rustyline stashes a
   `PendingKeybinding` and accepts the line; `dispatch_keybinding` then
   dispatches the handler's hook outside the readline borrow with a fresh
   context, resolving the owning plugin by **name**
-  (`PluginRuntime::resolve_keybinding`) and saving its `state_cell` back
+  (`PluginRuntime::resolve_keybinding`, which also yields the key notation the
+  handler's `[key]` record carries) and saving its `state_cell` back
   exactly as the buffer-change path does. A `PendingKeybinding` carries the
   plugin's name plus a binding index *within* it, never a position in the
   runtime `Vec` — an unload compacts that vector, so a runtime index would
@@ -200,7 +200,7 @@ safe inside editor callbacks where no dispatch may run.
   reconciles rustyline's binding table by full unbind-then-rebind,
   registering one `RouterKeyHandler` per distinct bound chord
   (`bound_chords`, in `plugin/router.rs`) that consults the live router on
-  each press; a frontend matching keys itself snapshots the `KeyRouter`
-  instead. `CtrlDHandler` and the rustyline `chord_to_key_event` conversion
+  each press. The bound-sequence set lives on `RustylineFrontend`, passed to
+  `sync_plugins` by `&mut`. `CtrlDHandler` and the rustyline `chord_to_key_event` conversion
   live here too, over the `RalHelper` editor rustyline adapts against
   ([[map/repl/frontend|frontend]]).

@@ -133,7 +133,6 @@ fn guard_allows(guard: Option<&regex::Regex>, line: &str, pos: usize) -> bool {
 /// messages; `(plugin, binding_idx)` is the same identity
 /// [`PluginRuntime::resolve_keybinding`](super::PluginRuntime::resolve_keybinding)
 /// re-resolves by name at dispatch time, stale-safe across unloads.
-#[derive(Clone)]
 pub(in crate::repl) struct RouterEntry {
     pub(in crate::repl) plugin: String,
     pub(in crate::repl) binding_idx: usize,
@@ -153,9 +152,8 @@ pub(in crate::repl) enum Resolution {
 }
 
 /// The ordered dispatch table, rebuilt whenever the plugin list changes
-/// ([`PluginRuntime::keybindings_changed`](super::PluginRuntime::keybindings_changed))
-/// and snapshot (`Clone`) by a frontend that matches keys itself.
-#[derive(Clone, Default)]
+/// ([`PluginRuntime::keybindings_changed`](super::PluginRuntime::keybindings_changed)).
+#[derive(Default)]
 pub(in crate::repl) struct KeyRouter {
     entries: Vec<RouterEntry>,
 }

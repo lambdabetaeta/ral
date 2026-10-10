@@ -35,6 +35,14 @@ pub fn ignore(sig: libc::c_int) {
     }
 }
 
+/// Restore `sig` to its default disposition, snapshotting the inherited ones first.
+pub fn default(sig: libc::c_int) {
+    snapshot_once();
+    unsafe {
+        libc::signal(sig, libc::SIG_DFL);
+    }
+}
+
 /// Point `sig` at `handler`, snapshotting the inherited dispositions first.
 pub fn install(sig: libc::c_int, handler: extern "C" fn(libc::c_int)) {
     snapshot_once();

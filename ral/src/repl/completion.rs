@@ -22,7 +22,10 @@
 
 use ral_core::carrier::Transport;
 use ral_core::protocol::probe::PathEntry;
+use ral_core::syntax::lexer::{Token, lex_open, separates};
+use ral_core::syntax::quote_word;
 use ral_core::text::rank;
+use std::borrow::Cow;
 use std::cell::OnceCell;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -39,20 +42,14 @@ pub(super) struct Candidate {
     pub(super) replacement: String,
 }
 
-/// What one completion request draws on: the two halves of the command-name
-/// pool, the `$`-variable names (bindings only), and the engine whose
-/// filesystem path completion lists — relative directories anchored against
-/// its logical cwd, since `cd` moves only that.
+/// What one completion request draws on: the [`SourceCache`] and the engine
+/// whose filesystem path completion lists — relative directories anchored
+/// against its logical cwd, since `cd` moves only that.
 ///
-/// Borrowed from the [`SourceCache`] rather than owned, because the `PATH`
-/// half runs to thousands of names and an owned merge would clone every one of
-/// them per Tab.
+/// Borrowed rather than owned, because the `PATH` half runs to thousands of
+/// names and an owned merge would clone every one of them per Tab.
 pub(super) struct Sources<'a> {
-    /// The executables reachable through the effective `PATH`.
-    path_commands: &'a [String],
-    /// Bindings, builtins and handlers — what costs no disk access to learn.
-    shell_commands: &'a [String],
-    variables: &'a [String],
+    cache: &'a SourceCache,
     engine: &'a dyn Transport,
 }
 
@@ -62,11 +59,36 @@ impl Sources<'_> {
     /// name, and the `PATH` scan repeats a name once per directory holding it.
     /// Only the references are sorted, and that order is not load-bearing —
     /// [`rank`] re-sorts by score.
+    ///
+    /// The one place `PATH` is enumerated, if this is the first request since
+    /// the scan was dropped.  The enumeration mirrors `locate`'s rules —
+    /// relative entries anchored against the engine's cwd, the executable bit
+    /// required, and an empty `PATH` element dropped rather than read as the
+    /// cwd, so a trailing `;` does not offer every file of the current
+    /// directory as a command.  Dispatch still goes through the fresh
+    /// `locate`, so a scan gone stale can only misinform a menu, never
+    /// misdirect a spawn.
     fn command_names(&self) -> Vec<&String> {
-        let mut names: Vec<&String> = self
-            .path_commands
+        let scan = self.cache.scan.get_or_init(|| PathScan {
+            names: self
+                .cache
+                .key
+                .path
+                .as_deref()
+                .map(|path| {
+                    std::env::split_paths(path)
+                        .filter(|dir| !dir.as_os_str().is_empty())
+                        .flat_map(|dir| entries(self.engine, &dir))
+                        .filter_map(|e| e.exec.then_some(e.name))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            taken: Instant::now(),
+        });
+        let mut names: Vec<&String> = scan
+            .names
             .iter()
-            .chain(self.shell_commands.iter())
+            .chain(&self.cache.shell_commands)
             .collect();
         names.sort_unstable();
         names.dedup();
@@ -187,36 +209,11 @@ impl SourceCache {
             self.scan = OnceCell::new();
         }
     }
-
-    /// The view one completion request ranks against, enumerating `PATH` if
-    /// this is the first request since the scan was dropped.
-    ///
-    /// The enumeration mirrors `locate`'s rules — relative entries anchored
-    /// against the engine's cwd, the executable bit required, and an empty
-    /// `PATH` element dropped rather than read as the cwd, so a trailing `;`
-    /// does not offer every file of the current directory as a command.
-    /// Dispatch still goes through the fresh `locate`, so a scan gone stale can
-    /// only misinform a menu, never misdirect a spawn.
+    /// The view one completion request ranks against.  Reads nothing: the
+    /// `PATH` walk waits for [`Sources::command_names`].
     pub(super) fn sources<'a>(&'a self, engine: &'a dyn Transport) -> Sources<'a> {
-        let scan = self.scan.get_or_init(|| PathScan {
-            names: self
-                .key
-                .path
-                .as_deref()
-                .map(|path| {
-                    std::env::split_paths(path)
-                        .filter(|dir| !dir.as_os_str().is_empty())
-                        .flat_map(|dir| entries(engine, &dir))
-                        .filter_map(|e| e.exec.then_some(e.name))
-                        .collect()
-                })
-                .unwrap_or_default(),
-            taken: Instant::now(),
-        });
         Sources {
-            path_commands: &scan.names,
-            shell_commands: &self.shell_commands,
-            variables: &self.variables,
+            cache: self,
             engine,
         }
     }
@@ -238,19 +235,72 @@ fn entries(engine: &dyn Transport, dir: &Path) -> Vec<PathEntry> {
 
 // ── The entry point ──────────────────────────────────────────────────────────
 
-/// Complete the token ending at byte offset `pos` in `line`.  Returns the
-/// byte offset the replacement starts at (where a frontend splices the chosen
-/// `replacement`) and the ranked candidates, best first.
+/// Complete the atom under the cursor at byte offset `pos` in `line`.  Returns
+/// the byte offset the replacement starts at (where a frontend splices the
+/// chosen `replacement`) and the ranked candidates, best first.
+///
+/// Classification reads the lexer's own tokens of `line[..pos]`: the atom is
+/// the last lexeme touching `pos`, and it is at command position when what
+/// precedes it is nothing or a separator.  A path candidate replaces the whole
+/// atom, so it is one atom again — words that touch do not parse.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "adapter: the directory part of a user-typed token, read for candidates"
+)]
 pub(super) fn complete(line: &str, pos: usize, sources: &Sources<'_>) -> (usize, Vec<Candidate>) {
-    let (start, kind) = CompletionKind::classify(&line[..pos]);
-    match kind {
-        CompletionKind::Variable { prefix } => (
-            start,
-            rank_names(sources.variables.iter().collect(), prefix),
+    let Some(lexemes) = lex_open(&line[..pos]) else {
+        return (pos, vec![]);
+    };
+    // Lexemes starting at `pos` are the closers `lex_open` appended, or `Eof`.
+    let seen = &lexemes[..lexemes.partition_point(|l| (l.span.start as usize) < pos)];
+    let atom = seen
+        .last()
+        .filter(|l| l.span.end as usize >= pos && !separates(&l.token));
+    let at_command = seen
+        .len()
+        .checked_sub(1 + usize::from(atom.is_some()))
+        .is_none_or(|i| separates(&seen[i].token));
+    // A quoted atom does not expand `~`.
+    let (start, text, tilde) = match atom.map(|l| (&l.token, l.span)) {
+        None => (pos, String::new(), false),
+        Some((Token::Word(_), span)) => (
+            span.start as usize,
+            match &line[span.start as usize..span.end as usize] {
+                "~" => "~/".into(), // a lone `~` is home as a directory
+                word => word.to_owned(),
+            },
+            true,
         ),
-        CompletionKind::Command { prefix } => (start, rank_names(sources.command_names(), prefix)),
-        CompletionKind::Path { token } => complete_path(token, start, sources.engine),
+        Some((Token::SingleQuoted(body), span)) => (span.start as usize, body.clone(), false),
+        Some((Token::Variable { name, delimited }, span)) => {
+            return (
+                span.start as usize + 1 + usize::from(*delimited),
+                rank_names(sources.cache.variables.iter().collect(), name),
+            );
+        }
+        Some(_) => return (pos, vec![]),
+    };
+    if at_command && !text.contains('/') {
+        return (start, rank_names(sources.command_names(), &text));
     }
+    let (dir, needle) = text.split_at(text.rfind('/').map_or(0, |slash| slash + 1));
+    let read = if dir.is_empty() { "./" } else { dir };
+    let Some(read) = (!tilde)
+        .then(|| read.to_owned())
+        .or_else(|| expand_tilde(read))
+    else {
+        return (start, vec![]);
+    };
+    // The engine anchors a relative directory against its logical cwd.
+    (
+        start,
+        ranked_entries(
+            entries(sources.engine, Path::new(&read)),
+            needle,
+            dir,
+            tilde,
+        ),
+    )
 }
 
 /// Filter and rank `names` against `needle`, mapping each survivor to a
@@ -265,50 +315,6 @@ fn rank_names<T: AsRef<str>>(names: Vec<T>, needle: &str) -> Vec<Candidate> {
             replacement: name.as_ref().to_owned(),
         })
         .collect()
-}
-
-// ── Classification ───────────────────────────────────────────────────────────
-
-/// Classification of the token under the cursor.
-enum CompletionKind<'a> {
-    /// `$prefix` — complete an identifier name.
-    Variable { prefix: &'a str },
-    /// At command position (start of line, after `|`, `{`, `(`, `;`, `&&`, `||`).
-    Command { prefix: &'a str },
-    /// Anything else — complete a filesystem path.
-    Path { token: &'a str },
-}
-
-impl<'a> CompletionKind<'a> {
-    fn classify(before: &'a str) -> (usize, Self) {
-        let token_start = before
-            .rfind(|c: char| c.is_whitespace() || matches!(c, '|' | '{' | '(' | ';'))
-            .map_or(0, |i| i + 1);
-        let token = &before[token_start..];
-
-        if let Some(prefix) = token.strip_prefix('$') {
-            return (token_start + 1, CompletionKind::Variable { prefix });
-        }
-
-        if is_cmd_pos(before[..token_start].trim_end()) && !token.contains('/') {
-            return (token_start, CompletionKind::Command { prefix: token });
-        }
-
-        (token_start, CompletionKind::Path { token })
-    }
-}
-
-/// True when the cursor is at a position where a command name is expected.
-fn is_cmd_pos(before_token: &str) -> bool {
-    if before_token.is_empty() {
-        return true;
-    }
-    // Single-char boundaries.
-    if before_token.ends_with(['|', '{', '?', ';', '(']) {
-        return true;
-    }
-    // Two-char operators `&&` and `||`.
-    before_token.ends_with("&&") || before_token.ends_with("||")
 }
 
 // ── Path completion ───────────────────────────────────────────────────────────
@@ -342,68 +348,18 @@ fn dotfile_visible(name: &str, needle: &str) -> bool {
     needle.starts_with('.') || !name.starts_with('.')
 }
 
-// Adapter site: turns user-typed completion tokens (a home dir, a
-// tilde-expanded directory) into `&Path`s to read for candidates. These are
-// the "user-input literal paths" adapter case clippy.toml sanctions for a
-// local `Path::new` with a reason.
-#[allow(clippy::disallowed_methods)]
-pub(super) fn complete_path(
-    token: &str,
-    token_start: usize,
-    engine: &dyn Transport,
-) -> (usize, Vec<Candidate>) {
-    // Bare `~`: list home directory with `~/` prefix on replacements.  The
-    // replacement must include `~/` because a frontend replaces from
-    // `token_start`; quoting it would suppress tilde expansion, so names with
-    // special chars are left bare on this path.
-    if token == "~" {
-        let Some(home) = ral_core::host::home() else {
-            return (token_start, vec![]);
-        };
-        return (
-            token_start,
-            ranked_entries(entries(engine, Path::new(&home)), "", "~/", false),
-        );
-    }
-
-    // Split at last `/` to obtain the directory to read and the name needle.
-    let (dir, name_needle, prefix_offset) = match token.rfind('/') {
-        Some(slash) => (&token[..=slash], &token[slash + 1..], slash + 1),
-        None => ("./", token, 0),
-    };
-
-    let Some(expanded) = expand_tilde(dir) else {
-        return (token_start + prefix_offset, vec![]);
-    };
-
-    // The engine anchors a relative directory against its logical cwd;
-    // tilde expansion has already made a `~`-prefixed one absolute.
-    (
-        token_start + prefix_offset,
-        ranked_entries(entries(engine, Path::new(&expanded)), name_needle, "", true),
-    )
-}
-
-/// Build ranked completion candidates for the `entries` matching
-/// `name_needle` and passing the dotfile gate.  Each replacement is `replacement_prefix` + name (+ `/` if a
-/// directory), quoted using ral source syntax (via
-/// [`ral_core::syntax::quote_word`]) when `quote` is set and the
-/// candidate name is not a bare word.
-///
-/// Tilde-prefix completion passes `quote = false` so the trailing `~/` keeps
-/// its expansion meaning; quoting it would suppress the expansion.
-fn ranked_entries(
-    entries: Vec<PathEntry>,
-    name_needle: &str,
-    replacement_prefix: &str,
-    quote: bool,
-) -> Vec<Candidate> {
+/// Build ranked completion candidates for the `entries` matching `needle` and
+/// passing the dotfile gate.  Each replacement is the whole path `dir` + name
+/// (+ `/` if a directory) as one source atom, quoted by
+/// [`ral_core::syntax::quote_word`] unless a bare word.  A `tilde` path that
+/// needs quoting is expanded first, since a quoted `~` would not expand.
+fn ranked_entries(entries: Vec<PathEntry>, needle: &str, dir: &str, tilde: bool) -> Vec<Candidate> {
     let visible: Vec<Named> = entries
         .into_iter()
-        .filter(|e| dotfile_visible(&e.name, name_needle))
+        .filter(|e| dotfile_visible(&e.name, needle))
         .map(Named)
         .collect();
-    rank(name_needle, visible, true)
+    rank(needle, visible, true)
         .into_iter()
         .map(|Named(e)| {
             let display = if e.dir {
@@ -411,15 +367,15 @@ fn ranked_entries(
             } else {
                 e.name
             };
-            let body = format!("{replacement_prefix}{display}");
-            let replacement = if quote {
-                ral_core::syntax::quote_word(&body).into_owned()
+            let full = format!("{dir}{display}");
+            let full = if tilde && matches!(quote_word(&full), Cow::Owned(_)) {
+                expand_tilde(&full).unwrap_or(full)
             } else {
-                body
+                full
             };
             Candidate {
+                replacement: quote_word(&full).into_owned(),
                 display,
-                replacement,
             }
         })
         .collect()
@@ -434,33 +390,28 @@ mod tests {
 
     use ral_core::carrier::IdentityTransport;
 
-    /// Backing storage for a hand-built [`Sources`], which borrows its lists.
+    /// Backing storage for a hand-built [`Sources`], which borrows its cache.
     struct Fixture {
-        path_commands: Vec<String>,
-        shell_commands: Vec<String>,
-        variables: Vec<String>,
+        cache: SourceCache,
         engine: IdentityTransport,
     }
 
     impl Fixture {
         fn view(&self) -> Sources<'_> {
-            Sources {
-                path_commands: &self.path_commands,
-                shell_commands: &self.shell_commands,
-                variables: &self.variables,
-                engine: &self.engine,
-            }
+            self.cache.sources(&self.engine)
         }
     }
 
-    /// Backing store for the classification and ranking tests, which care
-    /// about neither the command split nor the engine: every name goes in
-    /// the shell half, and path completion is never asked.
+    /// Backing store for the classification and ranking tests: every name goes
+    /// in the shell half, the `PATH` scan is empty, and the engine sits at `/`.
     fn sources(commands: &[&str], variables: &[&str]) -> Fixture {
         Fixture {
-            path_commands: Vec::new(),
-            shell_commands: commands.iter().map(ToString::to_string).collect(),
-            variables: variables.iter().map(ToString::to_string).collect(),
+            cache: SourceCache {
+                shell_commands: commands.iter().map(ToString::to_string).collect(),
+                variables: variables.iter().map(ToString::to_string).collect(),
+                key: PathKey::default(),
+                scan: OnceCell::new(),
+            },
             engine: engine_at("", Path::new("/")),
         }
     }
@@ -630,7 +581,7 @@ mod tests {
 
         let mut cache = SourceCache::new();
         cache.refresh(&engine);
-        let _ = cache.sources(&engine);
+        let _ = cache.sources(&engine).command_names();
         assert!(cache.has_scanned());
 
         // Only the *prompt's* clock is injected, so the TTL is exercised
@@ -650,34 +601,55 @@ mod tests {
     /// The two halves dedup against each other, not merely within.
     #[test]
     fn a_name_in_both_halves_is_offered_once() {
-        let src = Fixture {
-            path_commands: vec!["dup".into(), "dup".into()],
-            ..sources(&["dup"], &[])
-        };
+        let mut src = sources(&["dup"], &[]);
+        src.cache.scan = OnceCell::from(PathScan {
+            names: vec!["dup".into(), "dup".into()],
+            taken: Instant::now(),
+        });
         let offered = command_completions(&src.view(), "dup");
         assert_eq!(offered, vec!["dup".to_string()]);
     }
 
-    // ── is_cmd_pos ──────────────────────────────────────────────────────
-
+    /// `$var` and path completion read no directory of `PATH`.
     #[test]
-    fn cmd_pos_recognises_command_boundaries() {
-        for s in [
-            "",
-            "foo |",
-            "if true {",
-            "x?",
-            "foo;",
-            "(",
-            "foo &&",
-            "foo ||",
-        ] {
-            assert!(is_cmd_pos(s), "expected cmd pos at {s:?}");
+    fn variable_and_path_completion_do_not_walk_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("alpha"), "").unwrap();
+        let engine = engine_at(&as_path_value(tmp.path()), tmp.path());
+        let mut cache = SourceCache::new();
+        cache.refresh(&engine);
+        for line in ["echo $da", "ls al", "ls ./al", "ls 'al"] {
+            complete(line, line.len(), &cache.sources(&engine));
+            assert!(!cache.has_scanned(), "{line:?} walked PATH");
         }
-        assert!(!is_cmd_pos("foo"));
+        complete("al", 2, &cache.sources(&engine));
+        assert!(cache.has_scanned());
     }
 
     // ── complete: classification + matching ─────────────────────────────
+
+    /// Command position is nothing before the atom, or a separator.
+    #[test]
+    fn complete_offers_commands_after_separators() {
+        let src = sources(&["git"], &[]);
+        for (line, start) in [("foo | gi", 6), ("if true { gi", 10), ("foo; gi", 5)] {
+            let (at, cands) = complete(line, line.len(), &src.view());
+            assert_eq!(at, start, "{line:?}");
+            assert!(cands.iter().any(|c| c.display == "git"), "{line:?}");
+        }
+        let (_, cands) = complete("foo gi", 6, &src.view());
+        assert!(cands.is_empty(), "an argument is a path");
+    }
+
+    /// The lexer reads U+2003 as a word character, so the atom starts at 0;
+    /// no byte arithmetic may split the multibyte character.
+    #[test]
+    fn complete_after_an_em_space_does_not_panic() {
+        let src = sources(&["git"], &[]);
+        let line = "\u{2003}gi";
+        let (start, _) = complete(line, line.len(), &src.view());
+        assert_eq!(start, 0);
+    }
 
     #[test]
     fn complete_offers_commands_at_command_position() {
@@ -728,26 +700,34 @@ mod tests {
         assert_eq!(order.first(), Some(&"grep"), "got {order:?}");
     }
 
-    // ── complete_path / dotfile_visible ─────────────────────────────────
+    // ── path completion / dotfile_visible ───────────────────────────────
 
-    #[test]
-    fn complete_path_expands_home_tilde_prefix() {
-        if ral_core::host::home().is_none() {
-            return;
+    /// A fixture whose engine sits in `cwd`.
+    fn at(cwd: &Path) -> Fixture {
+        Fixture {
+            engine: engine_at("", cwd),
+            ..sources(&[], &[])
         }
-        let (start, _) = complete_path("~/", 0, &engine_at("", Path::new("/")));
-        assert_eq!(start, 2);
     }
 
     #[test]
-    fn complete_path_supports_bare_tilde_token() {
+    fn path_completion_expands_home_tilde_prefix() {
         if ral_core::host::home().is_none() {
             return;
         }
-        let (start, _) = complete_path("~", 3, &engine_at("", Path::new("/")));
+        let (start, _) = complete("ls ~/", 5, &at(Path::new("/")).view());
         assert_eq!(start, 3);
     }
 
+    /// A lone `~` lists home, as the directory `~/`.
+    #[test]
+    fn path_completion_of_a_lone_tilde_lists_home() {
+        if ral_core::host::home().is_none() {
+            return;
+        }
+        let (start, _) = complete("ls ~", 4, &at(Path::new("/")).view());
+        assert_eq!(start, 3);
+    }
     #[test]
     fn dotfile_gate_hides_dotfiles_unless_needle_has_dot() {
         assert!(!dotfile_visible(".git", ""));
@@ -759,39 +739,43 @@ mod tests {
     // ── Engine cwd anchoring ────────────────────────────────────────────
 
     #[test]
-    fn complete_path_lists_shell_cwd_for_empty_token() {
+    fn path_completion_lists_shell_cwd_for_empty_token() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("alpha"), "").unwrap();
         std::fs::write(tmp.path().join("beta"), "").unwrap();
 
-        let (_, cands) = complete_path("", 0, &engine_at("", tmp.path()));
+        let (start, cands) = complete("ls ", 3, &at(tmp.path()).view());
         let mut names: Vec<&str> = cands.iter().map(|c| c.display.as_str()).collect();
         names.sort_unstable();
-        assert_eq!(names, vec!["alpha", "beta"]);
+        assert_eq!((start, names), (3, vec!["alpha", "beta"]));
     }
 
     #[test]
-    fn complete_path_lists_shell_cwd_subdir_for_relative_token() {
+    fn path_completion_lists_shell_cwd_subdir_for_relative_token() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir(tmp.path().join("sub")).unwrap();
         std::fs::write(tmp.path().join("sub").join("gamma"), "").unwrap();
 
-        let (_, cands) = complete_path("sub/", 0, &engine_at("", tmp.path()));
-        let names: Vec<&str> = cands.iter().map(|c| c.display.as_str()).collect();
-        assert_eq!(names, vec!["gamma"]);
+        let (start, cands) = complete("ls sub/", 7, &at(tmp.path()).view());
+        assert_eq!(start, 3);
+        assert_eq!(cands.len(), 1);
+        assert_eq!(
+            (cands[0].display.as_str(), cands[0].replacement.as_str()),
+            ("gamma", "sub/gamma")
+        );
     }
 
-    /// A path candidate's `replacement` is source-quoted exactly when the name
+    /// A path candidate's `replacement` is source-quoted exactly when the path
     /// is not a bare ral word; its `display` never is, and a directory keeps
     /// its trailing slash on both.
     #[test]
-    fn complete_path_quotes_replacement_but_not_display() {
+    fn path_completion_quotes_replacement_but_not_display() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("a b.txt"), "").unwrap();
         std::fs::write(tmp.path().join("plain.txt"), "").unwrap();
         std::fs::create_dir(tmp.path().join("sub")).unwrap();
 
-        let (_, cands) = complete_path("", 0, &engine_at("", tmp.path()));
+        let (_, cands) = complete("ls ", 3, &at(tmp.path()).view());
         let replacement = |display: &str| {
             cands
                 .iter()
@@ -805,15 +789,39 @@ mod tests {
         assert_eq!(replacement("sub/"), "sub/");
     }
 
+    /// Inside a subdirectory the replacement is one quoted atom from the
+    /// atom's start: `dir/'a b'` would not parse.
     #[test]
-    fn complete_path_leaves_absolute_dir_unanchored() {
+    fn path_completion_in_a_subdirectory_quotes_the_whole_atom() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("dir")).unwrap();
+        std::fs::write(tmp.path().join("dir").join("a b"), "").unwrap();
+
+        let (start, cands) = complete("ls dir/a", 8, &at(tmp.path()).view());
+        assert_eq!(start, 3);
+        assert_eq!(cands[0].replacement, "'dir/a b'");
+    }
+
+    /// An open quote is one atom, spaces included; the replacement closes it.
+    #[test]
+    fn path_completion_continues_an_open_single_quote() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("my dir")).unwrap();
+
+        let (start, cands) = complete("ls 'my di", 9, &at(tmp.path()).view());
+        assert_eq!(start, 3);
+        assert_eq!(cands[0].replacement, "'my dir/'");
+    }
+
+    #[test]
+    fn path_completion_leaves_absolute_dir_unanchored() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("delta"), "").unwrap();
 
         // A wholly unrelated cwd; the absolute prefix should win.
         let wrong_cwd = tempfile::tempdir().unwrap();
-        let token = format!("{}/", tmp.path().display());
-        let (_, cands) = complete_path(&token, 0, &engine_at("", wrong_cwd.path()));
+        let line = format!("ls {}/", tmp.path().display());
+        let (_, cands) = complete(&line, line.len(), &at(wrong_cwd.path()).view());
         let names: Vec<&str> = cands.iter().map(|c| c.display.as_str()).collect();
         assert_eq!(names, vec!["delta"]);
     }

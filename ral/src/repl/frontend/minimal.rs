@@ -1,28 +1,63 @@
 //! Minimal stdin frontend for dumb terminals and `RAL_INTERACTIVE_MODE=minimal`.
 //!
-//! Bypasses rustyline entirely; reads from canonical stdin with no
+//! Bypasses rustyline's editor entirely; reads from canonical stdin with no
 //! raw-mode termios, no DECSET sequences, and no line editing — just
 //! `read_line` with a `> ` continuation prompt.  Independent of the
 //! plugin runtime; ghost text, highlights, and plugin keybindings are
 //! unavailable here.
 
 use ral_core::carrier::Transport;
+use ral_core::process::interrupt_epoch;
+use ral_core::syntax::parser::needs_continuation;
 use ral_core::terminal;
-use std::io::{BufRead, Write};
+use rustyline::history::{FileHistory, History};
+use std::io::Write;
 
 use super::super::prompt::PromptText;
-use super::{EditBuffer, Frontend, History, Read};
+use super::{EditBuffer, Frontend, Read};
 
 pub(in crate::repl) struct MinimalFrontend {
-    history: History,
+    history: FileHistory,
+    path: Option<String>,
 }
 
 impl MinimalFrontend {
-    pub(in crate::repl) fn new() -> Self {
-        Self {
-            history: History::load(),
+    pub(in crate::repl) fn new(path: Option<String>) -> Self {
+        let mut history = FileHistory::new();
+        if let Some(p) = &path {
+            let _ = history.load(p.as_ref());
+        }
+        Self { history, path }
+    }
+}
+
+/// One backend-supplied continuation read, classified for [`join_continuation`].
+enum Continuation {
+    /// Another line to fold into the buffer.
+    Line(String),
+    /// A line read after Ctrl-C: the partial buffer is abandoned and this
+    /// line starts afresh.
+    Restart(String),
+    /// EOF / read error: abandon the partial buffer, yielding an empty input
+    /// for the session to skip.
+    Discard,
+}
+
+/// Fold continuation lines into `first` until the buffer is a complete
+/// input, joining with newlines.  The backend owns the actual read via `next`.
+fn join_continuation(first: String, mut next: impl FnMut() -> Continuation) -> String {
+    let mut buf = first;
+    while needs_continuation(&buf) {
+        match next() {
+            Continuation::Line(line) => {
+                buf.push('\n');
+                buf.push_str(&line);
+            }
+            Continuation::Restart(line) => buf = line,
+            Continuation::Discard => return String::new(),
         }
     }
+    buf
 }
 
 impl Frontend for MinimalFrontend {
@@ -33,59 +68,113 @@ impl Frontend for MinimalFrontend {
         _pending: Option<EditBuffer>,
     ) -> Read {
         let stdin = std::io::stdin();
-        let write_prompt = |s: &[u8]| {
+        let write_prompt = |s: &str| {
             let mut out = std::io::stdout().lock();
-            let _ = out.write_all(s);
+            let _ = out.write_all(s.as_bytes());
             let _ = out.flush();
         };
+        let mut epoch = interrupt_epoch();
+        let trim = |s: &str| s.trim_end_matches(['\n', '\r']).to_string();
 
-        // Read first line.  A fresh prompt has no partial buffer to abandon,
-        // so this read carries no abort-byte detection: a bare Ctrl-D on an
-        // empty line arrives as `Ok(0)` (EOF), and a control byte at the start
-        // of a piped line is fed through as ordinary input for the session to
-        // reject — only the continuation read below abandons a partial buffer.
-        write_prompt(prompt.styled().as_bytes());
+        write_prompt(prompt.styled());
         let mut line = String::new();
-        let first_read = stdin.lock().read_line(&mut line);
-        let input = match first_read {
-            Ok(0) => return Read::Eof,
-            Ok(_) => line.trim_end_matches(['\n', '\r']).to_string(),
+        match stdin.read_line(&mut line) {
+            Ok(0) => return Read::End(0),
+            Ok(_) => {}
             Err(e) => {
                 terminal::cmd_error("ral", &e.to_string());
-                return Read::Eof;
+                return Read::End(1);
             }
-        };
+        }
 
-        // Continuation: while `parser::needs_continuation` (driven by
-        // `join_continuation`) reports the buffer incomplete — an unclosed
-        // lexeme, or an operator awaiting what it demands — prompt for
-        // and fold in the next line.  An EOF / read error, or a leading
-        // end-of-transmission (NUL) or Ctrl-C byte, abandons the partial
-        // buffer; both abort bytes are read off the raw first byte.
-        let input = super::join_continuation(input, || {
-            write_prompt(b"> ");
+        // Canonical mode delivers Ctrl-C as a signal, not a byte: a line read
+        // after the interrupt epoch moved restarts the buffer.
+        Read::Line(join_continuation(trim(&line), || {
+            write_prompt("> ");
             let mut cont = String::new();
-            let cont_read = stdin.lock().read_line(&mut cont);
-            let first_byte = cont.as_bytes().first().copied();
-            match cont_read {
-                Ok(0) | Err(_) => super::Continuation::Discard,
-                Ok(_) if first_byte == Some(0x00) => super::Continuation::Discard,
-                Ok(_) if first_byte == Some(0x03) => {
-                    ral_core::process::clear();
-                    super::Continuation::Discard
+            match stdin.read_line(&mut cont) {
+                Ok(0) => Continuation::Discard,
+                Err(e) => {
+                    terminal::cmd_error("ral", &e.to_string());
+                    Continuation::Discard
                 }
-                Ok(_) => super::Continuation::Line(cont.trim_end_matches(['\n', '\r']).to_string()),
+                Ok(_) => {
+                    let now = interrupt_epoch();
+                    if std::mem::replace(&mut epoch, now) == now {
+                        Continuation::Line(trim(&cont))
+                    } else {
+                        Continuation::Restart(trim(&cont))
+                    }
+                }
             }
-        });
-
-        Read::Line(input)
+        }))
     }
 
     fn add_history(&mut self, entry: &str) {
-        self.history.add(entry);
+        let _ = self.history.add(entry);
     }
 
-    fn save_history(&mut self) {
-        self.history.save();
+    fn save_history(&mut self) -> Result<(), String> {
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
+        self.history
+            .append(path.as_ref())
+            .map_err(|e| format!("could not save history to {path}: {e}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Continuation, join_continuation};
+
+    /// A complete first line is returned without reading any continuation.
+    #[test]
+    fn complete_input_reads_no_continuation() {
+        let mut calls = 0;
+        let out = join_continuation("echo hi".into(), || {
+            calls += 1;
+            Continuation::Discard
+        });
+        assert_eq!(out, "echo hi");
+        assert_eq!(calls, 0, "a complete line must not prompt for more");
+    }
+
+    /// Continuation lines are folded in with newlines until the buffer
+    /// parses as complete.
+    #[test]
+    fn folds_lines_until_complete() {
+        let mut rest = vec!["world"].into_iter();
+        // A trailing pipe is an incomplete input; the next line completes it.
+        let out = join_continuation("echo hi |".into(), || {
+            Continuation::Line(rest.next().unwrap().to_string())
+        });
+        assert_eq!(out, "echo hi |\nworld");
+    }
+
+    /// A trailing `?` is a continuation exactly as a trailing `|` is, and
+    /// the joined buffer must then parse.
+    #[test]
+    fn folds_a_line_after_a_trailing_chain_question() {
+        let mut rest = vec!["echo b"].into_iter();
+        let out = join_continuation("echo a ?".into(), || {
+            Continuation::Line(rest.next().unwrap().to_string())
+        });
+        assert_eq!(out, "echo a ?\necho b");
+        assert!(ral_core::syntax::parser::parse(&out).is_ok(), "{out:?}");
+    }
+
+    /// Discard (EOF / read error) abandons the partial buffer.
+    #[test]
+    fn discard_yields_empty() {
+        let out = join_continuation("echo hi |".into(), || Continuation::Discard);
+        assert_eq!(out, "");
+    }
+
+    /// A restart replaces the partial buffer with the new line.
+    #[test]
+    fn restart_replaces_the_buffer() {
+        let out = join_continuation("echo hi |".into(), || Continuation::Restart("ls".into()));
+        assert_eq!(out, "ls");
     }
 }

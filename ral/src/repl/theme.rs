@@ -7,22 +7,9 @@
 //!
 //! Color is suppressed automatically when [`ral_core::terminal::ui_color`]
 //! returns false, so the theme can store an unconditional `Some(color)`.
-//!
-//! The theme is process-global state — there is exactly one REPL per
-//! process and it consults the theme from the value-printing path
-//! (`repl::exec::print_result`).  Stored behind a `RwLock` so the RC
-//! file can replace it once during startup without imposing locking on
-//! the read path beyond a snapshot clone.
-//!
-//! The swap is whole, so poison goes through the workspace's door
-//! ([`ral_core::sync::RwLockExt`]): silently dropping the write and reading
-//! back the *default* would revert the user's configured prompt with no
-//! diagnostic anywhere, which is the one outcome a theme must not have.
 
 use ral_core::ansi::{YELLOW, named_color};
-use ral_core::sync::RwLockExt as _;
 use ral_core::{Map, Value};
-use std::sync::{LazyLock, RwLock};
 
 /// Styling applied to ral-computed values printed at the REPL prompt.
 #[derive(Clone, Debug)]
@@ -51,9 +38,8 @@ impl OutputTheme {
     /// Build a theme from an RC `theme:` map, starting from the default and
     /// overriding the `value-prefix` / `value-color` keys it carries.  A
     /// `value-color` names an ANSI colour (see [`named_color`]) or `none` to
-    /// suppress color entirely.  An unknown key warns and is ignored; a
-    /// recognised key with a malformed value is rejected with an error
-    /// naming the key.
+    /// suppress color entirely.  An unknown key or a malformed value is
+    /// rejected with an error naming it.
     pub(crate) fn from_map(pairs: &Map) -> Result<Self, String> {
         let mut theme = Self::default();
         for (k, v) in pairs {
@@ -62,7 +48,7 @@ impl OutputTheme {
                     Value::String(s) => theme.value_prefix = s.to_string(),
                     other => {
                         return Err(format!(
-                            "rc theme 'value-prefix' must be a string; got {}",
+                            "theme 'value-prefix' must be a string; got {}",
                             other.type_name()
                         ));
                     }
@@ -75,38 +61,27 @@ impl OutputTheme {
                         Some(color) => theme.value_color = Some(color),
                         None => {
                             return Err(format!(
-                                "rc theme 'value-color' must be one of black, red, green, \
+                                "theme 'value-color' must be one of black, red, green, \
                                  yellow, blue, magenta, cyan, white, or none; got '{s}'"
                             ));
                         }
                     },
                     other => {
                         return Err(format!(
-                            "rc theme 'value-color' must be a string; got {}",
+                            "theme 'value-color' must be a string; got {}",
                             other.type_name()
                         ));
                     }
                 },
-                other => ral_core::terminal::shell_warning(&format!(
-                    "ral: theme: unknown key '{other}', ignoring"
-                )),
+                other => {
+                    return Err(format!(
+                        "theme: unknown key '{other}'; known keys are value-prefix and value-color"
+                    ));
+                }
             }
         }
         Ok(theme)
     }
-}
-
-static OUTPUT_THEME: LazyLock<RwLock<OutputTheme>> =
-    LazyLock::new(|| RwLock::new(OutputTheme::default()));
-
-/// Replace the active output theme.  Called once after the RC file is loaded.
-pub(crate) fn set_output_theme(theme: OutputTheme) {
-    *OUTPUT_THEME.write_ignore_poison() = theme;
-}
-
-/// Return a snapshot of the current output theme.
-pub(crate) fn output_theme() -> OutputTheme {
-    OUTPUT_THEME.read_ignore_poison().clone()
 }
 
 #[cfg(test)]
@@ -147,13 +122,11 @@ mod tests {
     }
 
     #[test]
-    fn theme_unknown_key_ignored_known_keys_apply() {
+    fn theme_unknown_key_rejected() {
         let pairs = map_of(vec![
             ("wat".into(), Value::string("x")),
             ("value-prefix".into(), Value::string("> ")),
         ]);
-        let theme = OutputTheme::from_map(&pairs).unwrap();
-        assert_eq!(theme.value_prefix, "> ");
-        assert_eq!(theme.value_color, Some(YELLOW.into()));
+        assert!(OutputTheme::from_map(&pairs).unwrap_err().contains("wat"));
     }
 }

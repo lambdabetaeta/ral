@@ -35,9 +35,9 @@ no job table: ral does not suspend
   (`ral/src/boot_door.rs`). `boot_door::settle` reads its `Ending`: `Settled`
   carries the rc's `RcSettings`, a `--capabilities` failure is `Raised`
   status 2, a profile's `exit N` is `Exited(N)`, and either ends the session
-  there. The host then applies `--surface` over the rc's choice, sets the
+  there. The host then applies `--surface` over the rc's choice, keeps the
   output theme, and dispatches `Session "startup"` if the rc registered one.
-- `run` loops `iterate` until it returns `Flow::Break` — a frontend `Eof`, an
+- `run` loops `iterate` until it returns `Flow::Break` — a frontend `End`, an
   `exit`, or a severed transport.
 - `iterate` is one cycle: break if the `session-ended` reading names a cause
   (SIGTERM/SIGHUP or Ctrl-\ cancelled the durable root — cancellation is
@@ -46,7 +46,8 @@ no job table: ral does not suspend
   from the `cwd` reading, render the prompt, `read`, and act on the `Read`.
   `Read::Line` adds to history and evaluates; `Read::Edit` becomes next
   iteration's `pending`; `Read::Interrupt` clears the signal and sends
-  `Control::Interrupt`; `Read::Eof` breaks. `read` is handed the transport,
+  `Control::Interrupt`; `Read::End(code)` records the exit status and breaks. After `read` returns
+  the session flushes deferred plugin diagnostics, the one boundary. `read` is handed the transport,
   the prompt, and the pending buffer.
 - `eval` runs one trimmed line through `exec::step`, recording an `exit` code
   so `run` breaks cleanly.
@@ -68,7 +69,7 @@ inherited `SIG_IGN`s before the first change so `reset_child_signals` can hand
 them on: the nohup rule), `claim_terminal` (run after
 SIGTTOU is ignored, since its `tcsetpgrp` runs from a group not yet in the
 foreground, and before SIGTTIN is: it parks the shell on SIGTTIN until it is
-foregrounded, so `ral &` does not seize the terminal from a parent shell's
+foregrounded (at most 64 parks, then an error asking whether ral was started in the background of a shell that has since exited; SIGTTIN is set to `SIG_DFL` through core's `process::default` first), so `ral &` does not seize the terminal from a parent shell's
 current job; it answers a `TerminalClaim` naming the group it left, if it
 left one, which hands the terminal back on drop — else a parent doing no job
 control, `vim`'s `:sh` or `su`, stops on its next terminal read),
@@ -110,7 +111,7 @@ closed keyset the rc's own returned *row* is held to — the same rule
 `within`/`grant` options get, extended to a program's own return value. It is
 the inferred row and not the syntax that produced it, so a key misspelled
 inside a spread is caught with one written out; a return carrying no row (a
-`Map`) meets the same keyset at `apply_rc_config` instead. A file that does
+`Map`) meets the same keyset in `RcPlan::decode` instead. A file that does
 not compile — a parse or type error, a broken contract among the latter — is
 *reported and skipped*: `errfmt::report_failed_load` prints the caret report
 its `Error::uncompiled` carries ([[map/core/diagnostics|diagnostics]]), then
@@ -119,9 +120,12 @@ stopped at the error above` for one that failed partway; the boot always survive
 ([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]]), the
 whole rc unapplied rather than only the offending key. A *computed* rc return
 (a bound variable, a call) is invisible to the contract and stays on
-`apply_rc_config`'s own per-key runtime check, which meets the same keyset
-and field types before applying anything and refuses the whole rc on an
-unknown key or a malformed value alike. An rc `startup` block registers as
+`RcPlan::decode`, which meets the same keyset and field types, reading the
+shell only, and refuses the whole rc on an unknown key, a malformed value, an
+unknown theme key, a prompt or startup block `vet_hook` rejects, or an alias
+`HandlerEntry::vet` rejects (a non-function under `aliases:` is pointed at
+`bindings:`); only then does `RcPlan::apply` commit, with no refusal left
+(a plugin that fails to load is reported and skipped, an `exit` propagates). An rc `startup` block registers as
 the `Session/"startup"` hook, and the host dispatches it as a hook run under
 `Denied` terminal authority — a fresh frame whose `let`s do not leak.
 
@@ -180,7 +184,7 @@ captured, fault, walled, ctx}`).
   frontend's printer above the prompt, a `` `notice `` dim, an
   `` `observed `` observation skipped by choice (the ral front-ends render no
   audit), and anything else dropped with a note naming its class.
-- `prompt_fault` prints a broken prompt's diagnostic once while it repeats.
+- `prompt_fault` prints a render's faults, joined, once while they repeat.
 
 ## The selectable frontend
 
@@ -203,22 +207,25 @@ and completion live in
   registered with capture: its return value is the prompt, a returned unit
   falls back to its captured stdout. The prompt body reads `user` and `cwd`,
   the ambient builtins, directly. Plugin `prompt` hooks
-  fold over the result, each a dispatch; the terminal title is written
-  separately. A failing prompt — one whose value cannot cross included —
-  falls back to the default `❯ `, printing its diagnostic when it differs
-  from the last one printed, and the session survives so the user can rebind
-  it.
+  fold over the result, each a dispatch registered with capture and read
+  through the same `prompt_text`; the terminal title is written separately.
+  A failing prompt — one whose value cannot cross included — falls back to
+  the default `❯ ` (a plugin's, to the prompt so far); the faults of one
+  render print together through `prompt_fault`, when they differ from the last
+  render's, and the session survives so the user can rebind it.
 - `config.rs` — the rc's eleven keys (`env`, `prompt` — registered as the
   `Session/"prompt"` hook — `bindings`, `aliases`, `edit-mode`, `bell`,
   `surface`, `recursion-limit`, `plugins`, `startup`, `theme`) are declared
-  once, in `Form::Rc`'s table, and `apply_rc_key` applies each engine-side,
-  inside the boot door, to the shell or to the `RcSettings` it answers. A
+  once, in `Form::Rc`'s table, and `RcPlan::decode` judges them all engine-side,
+  inside the boot door, before `RcPlan::apply` commits to the shell and the
+  `RcSettings` it answers; a refused rc has changed nothing. The first-run
+  skeleton is written with `create_new`, so a concurrent rc is never truncated. A
   wrong type at one of the scalar keys is the table's static failure, above;
-  the per-key runtime check catches those keys' further shape rules (e.g.
+  `decode` catches those keys' further shape rules (e.g.
   `edit-mode` must be `'emacs'`/`'vi'`, not just a `String`).
 - `theme.rs` — `OutputTheme` (the `value-prefix`, default `"=> "`, and an
   optional `value-color`, default yellow) governs value rendering;
-  process-global behind an `RwLock`, set once from the boot's answer.
+  held by `Session` and passed to `step`; an unknown theme key refuses the rc.
 - `errfmt.rs` — the REPL-styled plugin notices (the breaker's disable notice,
   a plugin warning), beside core's full ariadne renderer, and
   `report_failed_load`, the one printer for a failed rc, profile, or plugin

@@ -113,38 +113,39 @@ fn chord_to_key_event(chord: KeyChord) -> KeyEvent {
 ///
 /// rustyline owns its binding table but the router owns precedence, so
 /// registration is one [`RouterKeyHandler`] per distinct bound chord:
-/// every sequence bound on the last sync is dropped, then the router's
+/// every sequence in `bound` (the last sync's) is dropped, then the router's
 /// chords are re-bound.  A plugin removed by `unload` therefore loses
 /// its sequences here rather than leaving a handler behind.
 pub(in crate::repl) fn sync_plugins(
     runtime: &Arc<Mutex<PluginRuntime>>,
     rl: &mut Editor<RalHelper, DefaultHistory>,
+    bound: &mut Vec<KeyEvent>,
 ) {
-    let chords: Vec<KeyChord> = {
+    let chords = {
         let mut rt = lock(runtime);
         if !rt.keybindings_dirty {
             return;
         }
         rt.keybindings_dirty = false;
-        for key in std::mem::take(&mut rt.keybindings.bound) {
-            rl.unbind_sequence(key);
-        }
         rt.router.bound_chords()
     };
-
-    let mut bound = Vec::new();
-    for chord in chords {
-        let key_event = chord_to_key_event(chord);
-        rl.bind_sequence(
-            key_event,
-            rustyline::EventHandler::Conditional(Box::new(RouterKeyHandler {
-                runtime: runtime.clone(),
-                chord,
-            })),
-        );
-        bound.push(key_event);
+    for key in bound.drain(..) {
+        rl.unbind_sequence(key);
     }
-    lock(runtime).keybindings.bound = bound;
+    *bound = chords
+        .into_iter()
+        .map(|chord| {
+            let key_event = chord_to_key_event(chord);
+            rl.bind_sequence(
+                key_event,
+                rustyline::EventHandler::Conditional(Box::new(RouterKeyHandler {
+                    runtime: runtime.clone(),
+                    chord,
+                })),
+            );
+            key_event
+        })
+        .collect();
 }
 
 /// Snapshot rustyline history (most-recent-first) into the runtime so plugin
@@ -153,7 +154,7 @@ pub(in crate::repl) fn snapshot_history(
     rl: &Editor<RalHelper, DefaultHistory>,
     runtime: &Arc<Mutex<PluginRuntime>>,
 ) {
-    let entries: Vec<String> = (0..rl.history().len())
+    let entries: Arc<[String]> = (0..rl.history().len())
         .rev()
         .filter_map(|i| {
             rl.history()

@@ -58,7 +58,7 @@ the call site, not a manifest declaration.
 
 | Field | Enables |
 |---|---|
-| `read`  | `_ed-get`, `_ed-text`, `_ed-cursor`, `_ed-keymap`, `_ed-lbuffer`, `_ed-parse`, `_ed-history` |
+| `read`  | `_ed-get`, `_ed-parse`, `_ed-history` |
 | `write` | `_ed-set`, `_ed-set-lbuffer`, `_ed-insert`, `_ed-push`, `_ed-accept`, `_ed-ghost`, `_ed-highlight`, `_ed-state` |
 | `tui`   | `_ed-tui` |
 
@@ -78,18 +78,14 @@ keybinding handler documents that the enclosing session needs
 
 ## 3 The `_ed-*` family
 
-Interactive only. Outside an interactive session every builtin raises
-`<name>: not available outside interactive mode`. The full reference
-is SPEC §15.5; the summary below is oriented around what plugin code
-needs to know.
+Plugin handlers only. Called anywhere else (an ordinary prompt, a batch
+host) a builtin raises the host's refusal, which says why. The full
+reference is SPEC §15.5; the summary below is oriented around what
+plugin code needs to know.
 
 | Builtin | Shape | Purpose |
 |---|---|---|
-| `_ed-get` | `Returns [text: Str, cursor: Int, keymap: Str]` | read state |
-| `_ed-text` | `Returns Str` | current buffer text |
-| `_ed-cursor` | `F Int` | current cursor offset |
-| `_ed-keymap` | `Returns Str` | current keymap name |
-| `_ed-lbuffer` | `Returns Str` | text left of cursor |
+| `_ed-get` | `Returns [text: Str, cursor: Int, keymap: Str, in-readline: Bool]` | the whole editor state; the text left of the cursor is `slice $st[text] 0 $st[cursor]` |
 | `_ed-set` | `[text: `keep\|`set Str, cursor: `keep\|`set Int] → Returns Unit` | partial buffer update |
 | `_ed-set-lbuffer` | `Str → Returns Unit` | replace left-of-cursor, preserve right |
 | `_ed-insert` | `Str → Returns Unit` | insert at cursor, advance |
@@ -225,8 +221,9 @@ individual failures. A failing handler's error is logged as
 `plugin 'name': hook 'event' failed: <message>`.
 
 **`buffer-change`** receives
-`[old-buf: Str, line: Str, pos: Int, history: [Str], keymap: Str,
-state]`. Typical uses are highlighting and autosuggestion.
+`[old: Str]`, the buffer before the change; the buffer, cursor,
+history and keymap are read through `_ed-get` and `_ed-history`.
+Typical uses are highlighting and autosuggestion.
 
 **`pre-exec`** receives `[src: Str]`, the full command line as
 typed; **`post-exec`** receives `[src: Str, status: Int]`, adding
@@ -238,8 +235,11 @@ restores the directory on exit, fires nothing.
 
 **`prompt`** is a transformer, not an event record. Each handler
 receives the current prompt string (starting from the shell's base)
-and returns a new one. Handlers compose: the output of handler `n`
-is the input to handler `n+1`.
+and returns a new one, or prints it: like the session prompt, a
+handler returning `()` has its captured stdout taken as the prompt.
+Handlers compose: the output of handler `n` is the input to handler
+`n+1`. A failing handler leaves the prompt as it was; the faults of
+one render print together, once while they repeat.
 
 ```
 # Append a git branch segment.
@@ -277,7 +277,9 @@ guarded bindings on one chord compose as an ordered pattern match:
 `key: 'tab'` with a guard cooperates with built-in completion, and
 unmatched presses complete as usual.
 
-A handler is `{|ctx| → Returns Unit}`; its return value carries nothing.
+A handler is `{|ev| → Returns Unit}`, where `ev` is `[key: Str]`, the
+binding's key notation; its return value carries nothing. The buffer
+and cursor are read with `_ed-get`.
 All effects flow through the `_ed-*` builtins (`_ed-set`,
 `_ed-insert`, `_ed-set-lbuffer`, `_ed-push`, `_ed-accept`, `_ed-tui`,
 …). Whether a binding claims a press is decided entirely by its
@@ -525,7 +527,8 @@ let [pick: pick, var: var] = use 'lib/fzf.ral'
 { |options| [
     name: fzf-history,
     keybindings: [[key: !{get $options key ctrl-r}, handler: { |_|
-        pick '' "--scheme=history --bind=ctrl-r:toggle-sort,alt-r:toggle-raw --wrap-sign '\\t↳ ' --highlight-line --multi !{var FZF_CTRL_R_OPTS ''}" `items !{_ed-history '' 0} [--query, !{_ed-lbuffer}] { |ps|
+        let st = _ed-get
+        pick '' "--scheme=history --bind=ctrl-r:toggle-sort,alt-r:toggle-raw --wrap-sign '\\t↳ ' --highlight-line --multi !{var FZF_CTRL_R_OPTS ''}" `items !{_ed-history '' 0} [--query, !{slice $st[text] 0 $st[cursor]}] { |ps|
             let t = intercalate "\n" !{map { |p| re-replace-all '\n+$' '' $p } $ps}
             _ed-set [text: `set $t, cursor: `set !{length $t}]
         }
@@ -557,7 +560,8 @@ path completion as the default:
             guard: !{intercalate '' ['\S\s+\S*', !{re-replace-all '[.^$*+?()\[\]{}|\\]' '\$0' $trigger}, '$']},
             handler: { |_|
                 let [words: ws, current: i, offset: o] = _ed-parse
-                let lb = _ed-lbuffer
+                let st = _ed-get
+                let lb = slice $st[text] 0 $st[cursor]
                 let n = $[!{length $lb} - $o - !{length $trigger}]
                 if $[not !{is-empty $ws} && $n >= 0] {
                     let [cmd, ..._] = $ws

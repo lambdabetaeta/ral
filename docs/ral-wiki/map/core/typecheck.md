@@ -149,7 +149,7 @@ Internals:
   `ascribe` holds a contract file's finished return to its table, after
   inference and in a scratch copy of the unifier (unknown key T0076, not a
   record T0077, and the row errors). It is the single registration point, so the runtime doors that read the same
-  keysets — `apply_rc_key`, `LoadedPlugin::parse`, `decode_capability_map` —
+  keysets — `RcPlan::decode`, `LoadedPlugin::parse`, `decode_capability_map` —
   dispatch off it rather than each keeping a copy. No table reaches the
   unifier ([[decisions/260930_a-table-never-enters-the-unifier|a-table-never-enters-the-unifier]]).
 

@@ -12,44 +12,33 @@
 use ral_core::first_order::datum::Datum as _;
 use ral_core::typecheck::builtins::scheme;
 use ral_core::types::{
-    Break, BuiltinBody, BuiltinEntry, DefaultPolicy, Error, HookName, HookSig, Map, Mooring,
-    PluginEntry, Settled,
+    Break, BuiltinBody, BuiltinEntry, DefaultPolicy, Error, FrameHandle, HookName, HookSig, Map,
+    Mooring, PluginEntry, Settled,
 };
-use ral_core::{Shell, Value, terminal};
+use ral_core::{Shell, Value};
 use std::borrow::Cow;
 
 use super::super::enquiry::{Enquiry, PluginNote};
-use super::super::errfmt::report_failed_load;
 use super::load_err;
 use super::manifest::{self, ManifestHandlers};
 
-fn position(shell: &Shell, name: &str) -> Option<usize> {
-    shell.repl().plugins.iter().position(|p| p.name == name)
-}
-
-#[allow(
-    clippy::unnecessary_wraps,
-    reason = "a static builtin body's signature"
-)]
 fn load_door(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     // No options: `load-plugin` takes a name alone, so a plugin loaded
     // through it stands on its own defaults.
     let name = args[0].as_str("load-plugin")?;
-    if let Err(Break::Error(e)) = load_plugin(name, &Map::new(), mooring, shell) {
-        report_failed_load(shell, &format!("plugin '{name}'"), &e, None);
-    }
-    Ok(Value::Unit)
+    load_plugin(name, &Map::new(), mooring, shell)
+        .map(|()| Value::Unit)
+        .map_err(|b| match b {
+            Break::Error(e) => e.context(format!("plugin '{name}'")).into(),
+            escape @ Break::Escape(_) => escape,
+        })
 }
 
-#[allow(
-    clippy::unnecessary_wraps,
-    reason = "a static builtin body's signature"
-)]
 fn unload_door(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    if let Err(e) = unload_plugin(args[0].as_str("unload-plugin")?, mooring, shell) {
-        terminal::cmd_error("unload-plugin", &e.message);
-    }
-    Ok(Value::Unit)
+    let name = args[0].as_str("unload-plugin")?;
+    unload_plugin(name, mooring, shell)
+        .map(|()| Value::Unit)
+        .map_err(|e| e.context(format!("plugin '{name}'")).into())
 }
 
 static DOORS_ARR: [BuiltinEntry; 2] = [
@@ -76,9 +65,7 @@ pub(crate) fn load_plugin(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<()> {
-    check_not_loaded(name_or_path, shell)?;
-
-    let path = resolve_plugin_path(name_or_path, shell.env_overrides())?;
+    let path = resolve_plugin_path(name_or_path, shell)?;
     let rp = shell.resolve(&path);
     shell.check_fs_read(&rp)?;
     #[allow(
@@ -102,34 +89,37 @@ pub(crate) fn load_plugin(
             )),
         )
     })?;
-    let module = instantiate(value, options, name_or_path, mooring, shell)?;
-    check_is_manifest(&module, name_or_path)?;
+    let module = instantiate(value, options, mooring, shell)?;
+    check_is_manifest(&module)?;
 
     let (manifest, handlers) = manifest::parse(&module)?;
-    let name = manifest.name.clone();
-    check_not_loaded(&name, shell)?;
-    check_no_binding_conflicts(&handlers.aliases, &name, shell)?;
+    let mut entry = PluginEntry {
+        name: manifest.name.clone(),
+        aliases: Vec::new(),
+    };
+    if shell.plugin_loaded(&entry.name).map_err(load_err)? {
+        return Err(load_err("already loaded").into());
+    }
+    check_no_binding_conflicts(&handlers.aliases, shell)?;
 
     // Past this point any failure — the host's refusal included — rolls the
     // plugin's whole namespace back, so nothing dispatchable survives it.
-    let committed = register_plugin_hooks(&name, &handlers, shell)
-        .and_then(|()| install_bindings(&handlers.aliases, &name, shell))
+    let committed = register_plugin_hooks(&entry.name, &handlers, shell)
+        .and_then(|()| install_bindings(&handlers.aliases, &mut entry.aliases, shell))
         .and_then(|()| {
             shell.enquire(
                 mooring,
                 Enquiry::Plugin(PluginNote::Loaded(manifest)).encode(),
             )
         });
-    let aliases: Vec<String> = handlers.aliases.into_iter().map(|(n, _)| n).collect();
     if let Err(e) = committed {
-        shell.remove_plugin_hooks(&name);
-        for alias in &aliases {
-            shell.remove_alias(alias);
+        shell.remove_plugin_hooks(&entry.name);
+        for handle in entry.aliases {
+            shell.remove_alias_frame(handle);
         }
-        return Err(Break::Error(e));
+        return Err(e.into());
     }
-    shell.repl_mut().plugins.push(PluginEntry { name, aliases });
-    Ok(())
+    Ok(shell.commit_plugin(entry).map_err(load_err)?)
 }
 
 /// Register a plugin's hook-event and keybinding handlers in the session
@@ -143,46 +133,31 @@ fn register_plugin_hooks(
     shell: &mut Shell,
 ) -> Result<(), Error> {
     for (hook_event, handler) in &handlers.hooks {
-        let (sig, policy) = match hook_event.as_str() {
-            "buffer-change" => (
-                HookSig::Hook {
-                    kind: hook_event.clone(),
-                },
-                DefaultPolicy::denied().aside(),
-            ),
-            "prompt" => (
-                HookSig::Hook {
-                    kind: "prompt hook".into(),
-                },
-                DefaultPolicy::denied(),
-            ),
-            _ => (
-                HookSig::Lifecycle {
-                    kind: hook_event.clone(),
-                },
-                DefaultPolicy::denied(),
-            ),
+        let (kind, policy) = match hook_event.as_str() {
+            "buffer-change" => (hook_event.clone(), DefaultPolicy::denied().aside()),
+            "prompt" => ("prompt hook".into(), DefaultPolicy::denied_capture()),
+            _ => (hook_event.clone(), DefaultPolicy::denied()),
         };
         shell
             .register_hook(
                 HookName::plugin(plugin_name.to_string(), hook_event.clone()),
                 handler.clone(),
-                sig,
+                HookSig::Hook { kind },
                 policy,
             )
-            .map_err(|e| load_err(format!("plugin '{plugin_name}': hook '{hook_event}': {e}")))?;
+            .map_err(|e| load_err(format!("hook '{hook_event}': {e}")))?;
     }
-    for (key, handler) in &handlers.keybindings {
+    for (idx, (key, handler)) in handlers.keybindings.iter().enumerate() {
         shell
             .register_hook(
-                HookName::plugin(plugin_name.to_string(), format!("key:{key}")),
+                HookName::plugin(plugin_name.to_string(), format!("key#{idx}")),
                 handler.clone(),
                 HookSig::Hook {
                     kind: "keybinding".into(),
                 },
                 DefaultPolicy::leased(),
             )
-            .map_err(|e| load_err(format!("plugin '{plugin_name}': keybinding '{key}': {e}")))?;
+            .map_err(|e| load_err(format!("keybinding '{key}': {e}")))?;
     }
     Ok(())
 }
@@ -191,24 +166,17 @@ fn register_plugin_hooks(
 /// it go: drops every hook and keybinding handler it registered and removes
 /// its aliases.
 pub(crate) fn unload_plugin(name: &str, mooring: &Mooring, shell: &mut Shell) -> Result<(), Error> {
-    let idx =
-        position(shell, name).ok_or_else(|| load_err(format!("plugin '{name}' is not loaded")))?;
+    if !shell.plugin_loaded(name).map_err(load_err)? {
+        return Err(load_err("not loaded"));
+    }
     shell.enquire(
         mooring,
         Enquiry::Plugin(PluginNote::Unloaded(name.to_string())).encode(),
     )?;
-    let PluginEntry { name, aliases } = shell.repl_mut().plugins.remove(idx);
-    shell.remove_plugin_hooks(&name);
-    for alias in &aliases {
-        shell.remove_alias(alias);
+    for handle in shell.take_plugin(name).into_iter().flat_map(|p| p.aliases) {
+        shell.remove_alias_frame(handle);
     }
-    Ok(())
-}
-
-fn check_not_loaded(name: &str, shell: &Shell) -> Result<(), Error> {
-    if position(shell, name).is_some() {
-        return Err(load_err(format!("plugin '{name}' is already loaded")));
-    }
+    shell.remove_plugin_hooks(name);
     Ok(())
 }
 
@@ -216,35 +184,29 @@ fn check_not_loaded(name: &str, shell: &Shell) -> Result<(), Error> {
 /// plugin / rc-config / interactive `alias`.  Atomic: checked before
 /// any insertion happens.  A lexical or native binding under the same
 /// name is not a conflict — the alias installs, live only under `^name`.
-fn check_no_binding_conflicts(
-    bindings: &[(String, Value)],
-    plugin_name: &str,
-    shell: &Shell,
-) -> Result<(), Error> {
-    for (name, _) in bindings {
-        if shell.has_alias(name) {
-            return Err(load_err(format!(
-                "alias '{name}' from plugin '{plugin_name}' conflicts with an existing alias"
-            )));
-        }
+fn check_no_binding_conflicts(bindings: &[(String, Value)], shell: &Shell) -> Result<(), Error> {
+    match bindings.iter().find(|(name, _)| shell.has_alias(name)) {
+        Some((name, _)) => Err(load_err(format!(
+            "alias '{name}' conflicts with an existing alias"
+        ))),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 fn install_bindings(
     bindings: &[(String, Value)],
-    plugin_name: &str,
+    handles: &mut Vec<FrameHandle>,
     shell: &mut Shell,
 ) -> Result<(), Error> {
     for (name, value) in bindings {
-        shell
-            .install_alias(name.clone(), value.clone())
-            .map_err(|e| match e {
-                Break::Error(err) => err.context(format!("plugin '{plugin_name}' alias '{name}'")),
-                Break::Escape(_) => load_err(format!(
-                    "plugin '{plugin_name}' alias '{name}' installation escaped"
-                )),
-            })?;
+        handles.push(
+            shell
+                .install_alias(name.clone(), value.clone())
+                .map_err(|e| match e {
+                    Break::Error(err) => err.context(format!("alias '{name}'")),
+                    Break::Escape(_) => load_err(format!("alias '{name}' installation escaped")),
+                })?,
+        );
     }
     Ok(())
 }
@@ -253,21 +215,15 @@ fn install_bindings(
 /// load's own mooring, to yield its manifest.  If the plugin is already a
 /// manifest map, a non-empty options map is a load-time error; an empty one
 /// is fine.
-fn instantiate(
-    val: Value,
-    options: &Map,
-    name: &str,
-    mooring: &Mooring,
-    shell: &mut Shell,
-) -> Settled<Value> {
+fn instantiate(val: Value, options: &Map, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     match val {
         Value::Thunk(ref c) if c.comp().arrow().is_some() => {
             ral_core::evaluator::apply(&val, vec![Value::Map(options.clone())], mooring, shell)
         }
-        _ if !options.is_empty() => Err(Break::Error(load_err(format!(
-            "plugin '{name}' takes no configuration; \
-             its entry in the rc's plugins map wants the empty options map `[:]`"
-        )))),
+        _ if !options.is_empty() => Err(Break::Error(load_err(
+            "it takes no configuration; \
+             its entry in the rc's plugins map wants the empty options map `[:]`",
+        ))),
         val => Ok(val),
     }
 }
@@ -275,16 +231,16 @@ fn instantiate(
 /// Error if `val` is still a thunk after instantiation.  A `Lambda` means the
 /// plugin's one options parameter was not supplied; a `Block` means the plugin
 /// returned a block instead of a map.
-fn check_is_manifest(val: &Value, name: &str) -> Result<(), Error> {
+fn check_is_manifest(val: &Value) -> Result<(), Error> {
     match val {
-        Value::Thunk(c) if c.comp().arrow().is_some() => Err(load_err(format!(
-            "plugin '{name}' expects its options map but none was applied; \
-             this is an internal error in load-plugin"
-        ))),
-        Value::Thunk(_) => Err(load_err(format!(
-            "plugin '{name}' returned a Block as its manifest; \
-             expected a Map (e.g. [name: '...', hooks: [...], keybindings: [...]])"
-        ))),
+        Value::Thunk(c) if c.comp().arrow().is_some() => Err(load_err(
+            "it expects its options map but none was applied; \
+             this is an internal error in load-plugin",
+        )),
+        Value::Thunk(_) => Err(load_err(
+            "it returned a Block as its manifest; \
+             expected a Map (e.g. [name: '...', hooks: [...], keybindings: [...]])",
+        )),
         _ => Ok(()),
     }
 }
@@ -293,44 +249,24 @@ fn check_is_manifest(val: &Value, name: &str) -> Result<(), Error> {
 /// 1. `<config>/ral/plugins/<name>.ral`
 /// 2. Each directory in `RAL_PATH`: `$dir/<name>.ral`
 /// 3. The literal path, then `<name>.ral`
-fn resolve_plugin_path(
-    name_or_path: &str,
-    env_overrides: &ral_core::types::EnvVars,
-) -> Result<String, Error> {
+fn resolve_plugin_path(name_or_path: &str, shell: &Shell) -> Result<String, Error> {
     let plugin_file = format!("{name_or_path}.ral");
     let config_candidate = ral_core::host::xdg(ral_core::host::XdgKind::Config)
         .map(|d| d.join("ral/plugins"))
         .map(|dir| dir.join(&plugin_file));
-    let ral_path_candidates = ral_core::path::ral_path::entries(env_overrides)
+    let ral_path_candidates = ral_core::path::ral_path::entries(shell.env_overrides())
         .into_iter()
         .map(|dir| dir.join(&plugin_file));
-    // Final fallbacks: the user-supplied identifier verbatim, then
-    // the same with `.ral` appended.  These are intentional
-    // literal-path candidates (no cwd-anchoring, no sigil expansion),
-    // so the `PathBuf::from` is the correct constructor here.
-    #[allow(clippy::disallowed_methods)]
-    let literal_candidates = [
-        std::path::PathBuf::from(name_or_path),
-        std::path::PathBuf::from(&plugin_file),
-    ];
+    // Final fallbacks: the identifier verbatim, then with `.ral`; the live
+    // cwd and `~` apply, as to any other path.
     config_candidate
         .into_iter()
         .chain(ral_path_candidates)
-        .chain(literal_candidates)
-        .find_map(|cand| canonicalise_candidate(&cand))
         .map(|p| p.to_string_lossy().into_owned())
-        .ok_or_else(|| load_err(format!("plugin '{name_or_path}' not found")))
-}
-
-/// Strictly canonicalise one plugin candidate through a shell-less
-/// resolver — the public door to canonicalisation.  `cand` is already
-/// absolute (or literal cwd-relative), so the empty cwd anchors nothing
-/// it should not; `None` when the candidate does not name a file.
-fn canonicalise_candidate(cand: &std::path::Path) -> Option<std::path::PathBuf> {
-    ral_core::path::Resolver::shell_less()
-        .resolve(&cand.to_string_lossy())
-        .canonicalise_strict()
-        .ok()
+        .chain([name_or_path.to_string(), plugin_file.clone()])
+        .find_map(|cand| shell.resolve(&cand).canonicalise_strict().ok())
+        .map(|p| p.to_string_lossy().into_owned())
+        .ok_or_else(|| load_err("not found; is it in <config>/ral/plugins or RAL_PATH?"))
 }
 
 #[cfg(test)]
@@ -352,6 +288,22 @@ mod tests {
         let h = crate::repl::eval(&mut shell, "{ |_ev| return () }");
         register_plugin_hooks("p", &hooks_only(vec![("post-exec".into(), h)]), &mut shell)
             .expect("a unary lifecycle handler registers");
+    }
+
+    /// Two guarded bindings on one key in one plugin both register.
+    #[test]
+    fn two_bindings_on_one_key_both_register() {
+        let mut shell = ral_core::test_helper::core_shell();
+        let h = crate::repl::eval(&mut shell, "{ |_ev| return () }");
+        register_plugin_hooks(
+            "p",
+            &ManifestHandlers {
+                keybindings: vec![("tab".into(), h.clone()), ("tab".into(), h)],
+                ..hooks_only(Vec::new())
+            },
+            &mut shell,
+        )
+        .expect("two bindings on one key must not collide");
     }
 
     /// A two-parameter lifecycle handler is rejected at load, with an error

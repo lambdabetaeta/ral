@@ -9,13 +9,11 @@
 //! whatever [`Mooring`] it later runs under.
 
 use super::bindings::BindingLedger;
-use super::repl::ReplScratch;
 use super::workers::Roster;
 use super::{LocalState, Mooring, SessionState, Shell};
 use crate::io::{Io, Source};
 use crate::process::{DurableRoot, ForegroundScope};
 use crate::types::{Audit, ExitHints};
-use std::collections::HashMap;
 use std::sync::Arc;
 
 impl Shell {
@@ -49,11 +47,10 @@ impl Shell {
                 terminal_lease: None,
                 guest_jail: self.session.guest_jail.clone(),
                 stack_limit: self.session.stack_limit,
-                hooks: HashMap::new(),
+                hooks: None,
             },
             local: LocalState {
                 audit: Audit::dispatched_from(self.local.audit.call_site),
-                repl: ReplScratch::default(),
                 workers,
                 bindings: BindingLedger::default(),
                 detach: self.local.detach.clone(),
@@ -156,7 +153,7 @@ mod tests {
             .register_hook(
                 HookName::session("prompt"),
                 body,
-                HookSig::Prompt,
+                HookSig::Block,
                 DefaultPolicy::denied(),
             )
             .expect("register a hook");

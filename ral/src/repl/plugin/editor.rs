@@ -13,16 +13,35 @@
 
 use ral_core::first_order::FOValue;
 use ral_core::first_order::datum::Datum as _;
+use std::sync::Arc;
 
 use super::super::enquiry::{Data, EditorOp, EditorSnapshot};
+use super::super::frontend::EditBuffer;
 
 /// Line editor state visible to plugins.  `cursor` is a character offset
-/// into `text` (see the module-level note on cursor units).
+/// into `text` (see the module-level note on cursor units), never past its
+/// end: [`Self::new`] and [`PluginContext::apply`] are its only writers.
 #[derive(Debug, Clone, Default)]
 pub struct EditorState {
-    pub text: std::string::String,
-    pub cursor: usize,
-    pub keymap: std::string::String,
+    text: std::string::String,
+    cursor: usize,
+    keymap: std::string::String,
+}
+
+impl EditorState {
+    pub fn new(text: std::string::String, cursor: usize, keymap: &str) -> Self {
+        Self {
+            cursor: cursor.min(text.chars().count()),
+            text,
+            keymap: keymap.into(),
+        }
+    }
+}
+
+impl From<EditorState> for EditBuffer {
+    fn from(EditorState { text, cursor, .. }: EditorState) -> Self {
+        Self { text, cursor }
+    }
 }
 
 /// A half-open character range `[start, start+len)` into buffer text.
@@ -98,7 +117,7 @@ pub struct PluginOutputs {
 #[derive(Debug, Clone, Default)]
 pub struct PluginContext {
     pub editor_state: EditorState,
-    pub history: Vec<std::string::String>,
+    pub history: Arc<[std::string::String]>,
     /// True inside the readline loop (`buffer-change`), where `_ed-tui` is
     /// forbidden.
     pub in_readline: bool,
@@ -128,16 +147,13 @@ impl PluginContext {
                 }
                 .encode();
             }
-            EditorOp::History => return self.history.clone().encode(),
+            EditorOp::History => return self.history.to_vec().encode(),
             EditorOp::StateGet => return self.state_cell.clone().map(Data).encode(),
-            // The cursor clamps against the *new* text.
             EditorOp::Set { text, cursor } => {
                 if let Some(text) = text {
                     st.text = text;
                 }
-                if let Some(n) = cursor {
-                    st.cursor = n.min(st.text.chars().count());
-                }
+                st.cursor = cursor.unwrap_or(st.cursor);
             }
             EditorOp::SetLbuffer(left) => {
                 let (_, right) = split_at_cursor(&st.text, st.cursor);
@@ -167,6 +183,7 @@ impl PluginContext {
             }
             EditorOp::StateSet(Data(v)) => self.state_cell = Some(v),
         }
+        st.cursor = st.cursor.min(st.text.chars().count());
         FOValue::Unit
     }
 }
@@ -203,5 +220,19 @@ mod tests {
             cursor: Some(99),
         });
         assert_eq!(pc.editor_state.cursor, 3);
+    }
+
+    /// A shorter text with `keep` cursor leaves no cursor past the end.
+    #[test]
+    fn set_shorter_text_clamps_kept_cursor() {
+        let mut pc = PluginContext {
+            editor_state: EditorState::new("hello world".into(), 11, "emacs"),
+            ..PluginContext::default()
+        };
+        pc.apply(EditorOp::Set {
+            text: Some("hi".into()),
+            cursor: None,
+        });
+        assert_eq!(pc.editor_state.cursor, 2);
     }
 }

@@ -290,7 +290,7 @@ impl Shell {
                 })
             }
             Program::Hook { ref name, ref args } => {
-                let Some(hook) = self.session.hooks.get(name).cloned() else {
+                let Some(hook) = self.hook(name).cloned() else {
                     return RunReport::Static {
                         diagnostics: StaticDiagnostics::Host(crate::types::Error::new(format!(
                             "hook '{name}' is not registered"
@@ -717,7 +717,7 @@ pub(crate) mod tests {
             .register_hook(
                 name.clone(),
                 thunk,
-                crate::types::HookSig::Prompt,
+                crate::types::HookSig::Block,
                 crate::types::DefaultPolicy::denied(),
             )
             .expect("register the hook");
@@ -751,7 +751,7 @@ pub(crate) mod tests {
             .cloned()
             .expect("hook_body is bound");
         shell
-            .register_hook(name.clone(), body, crate::types::HookSig::Prompt, policy)
+            .register_hook(name.clone(), body, crate::types::HookSig::Block, policy)
             .expect("register the hook");
         let RunReport::Ran { ending, .. } = shell.run(Run {
             program: Program::Hook { name, args: vec![] },

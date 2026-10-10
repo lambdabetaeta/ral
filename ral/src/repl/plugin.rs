@@ -12,8 +12,7 @@
 //!   hook outputs (ghost text, highlights), the keymap, and the history
 //!   snapshot.  Touched by Hinter/Highlighter callbacks.
 //! - [`Keybindings`] — pending keybinding flagged by rustyline's event
-//!   handler, the buffer stack populated by `_ed-push`, and the key
-//!   sequences currently bound with rustyline.
+//!   handler and the buffer stack populated by `_ed-push`.
 //! - [`DeferredDiagnostics`] — plugin error/warning messages buffered
 //!   during readline for later flushing past line-erase escapes.
 //!
@@ -52,7 +51,6 @@ use super::host::ReplHost;
 use ral_core::text::byte_to_char;
 // Anchored to the crate root: a bare `rustyline::` path here would resolve
 // to the sibling `rustyline` module instead of the crate of the same name.
-use ::rustyline::KeyEvent;
 use ::rustyline::config::EditMode;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -113,7 +111,7 @@ impl Datum for Keymap {
 }
 
 /// Name the keymap for plugin hooks: `"viins"` for vi insert, `"emacs"`
-/// otherwise.  Surfaced to plugin hooks via the `_ed-keymap` query.
+/// otherwise.  Surfaced to plugin hooks via the `_ed-get` record.
 pub(super) fn keymap_name(keymap: Keymap) -> &'static str {
     match keymap {
         Keymap::Vi => "viins",
@@ -135,21 +133,16 @@ pub(super) struct EditorHooks {
     pub(super) highlights: Vec<HighlightSpan>,
     keymap: Keymap,
     /// History snapshot for `_ed-history`, most recent first.
-    pub(super) history: Vec<String>,
+    pub(super) history: Arc<[String]>,
 }
 
 /// Keybinding-side state.  `pending` is the keybinding rustyline flagged
 /// inside its event handler; the REPL drains it after readline returns.
-/// `buffers` is the stack populated by `_ed-push`.  `bound` records the
-/// key sequences currently registered with rustyline so
-/// [`rustyline::sync_plugins`]
-/// can unbind the ones an unloaded plugin owned — rustyline keys nothing
-/// on plugin identity, so we hold the reconciliation set here.
+/// `buffers` is the stack populated by `_ed-push`.
 #[derive(Default)]
 pub(super) struct Keybindings {
     pub(super) pending: Option<PendingKeybinding>,
     pub(super) buffers: Vec<EditBuffer>,
-    pub(super) bound: Vec<KeyEvent>,
 }
 
 /// Plugin diagnostics buffered during a readline session so the REPL can
@@ -285,7 +278,7 @@ const BUFFER_CHANGE_FAULT_LIMIT: u32 = 3;
 ///
 /// `pos` is the byte offset rustyline supplies; it is converted once to a
 /// character offset so everything downstream (the change-detection snapshot,
-/// the editor state exposed to plugins, the hook's argument) speaks the same
+/// the editor state exposed to plugins) speaks the same
 /// units as the rest of the `_ed-*` surface.
 pub(super) fn run_buffer_change_hooks(
     t: &dyn Transport,
@@ -295,12 +288,12 @@ pub(super) fn run_buffer_change_hooks(
 ) {
     let runtime = &host.runtime;
     let pos = byte_to_char(line, pos);
-    let (old_buf, handlers, history, keymap) = {
+    let (old, handlers, history, keymap) = {
         let mut rt = lock(runtime);
         if line == rt.hooks.previous.text && pos == rt.hooks.previous.cursor {
             return;
         }
-        let old_buf = std::mem::replace(&mut rt.hooks.previous.text, line.to_string());
+        let old = std::mem::replace(&mut rt.hooks.previous.text, line.to_string());
         rt.hooks.previous.cursor = pos;
 
         let handlers = rt.with_hook("buffer-change", |p| !p.buffer_change_health.is_disabled());
@@ -310,39 +303,22 @@ pub(super) fn run_buffer_change_hooks(
             return;
         }
         (
-            old_buf,
+            old,
             handlers,
             rt.hooks.history.clone(),
             keymap_name(rt.hooks.keymap),
         )
     };
 
-    let history_list = history.clone().encode();
+    let arg = FOValue::Map {
+        entries: vec![("old".into(), old.encode())],
+    };
     let mut ghost: Option<String> = None;
     let mut spans: Vec<HighlightSpan> = Vec::new();
     for name in handlers {
         let state_cell = lock(runtime).state_cell(&name);
-        let arg = FOValue::Map {
-            entries: vec![
-                ("old-buf".into(), old_buf.clone().encode()),
-                ("line".into(), line.to_string().encode()),
-                (
-                    "pos".into(),
-                    FOValue::Int {
-                        value: pos.try_into().unwrap_or(i64::MAX),
-                    },
-                ),
-                ("history".into(), history_list.clone()),
-                ("keymap".into(), keymap.to_string().encode()),
-                ("state".into(), state_cell.clone().unwrap_or(FOValue::Unit)),
-            ],
-        };
         let ctx = PluginContext {
-            editor_state: EditorState {
-                text: line.to_string(),
-                cursor: pos,
-                keymap: keymap.into(),
-            },
+            editor_state: EditorState::new(line.to_string(), pos, keymap),
             history: history.clone(),
             in_readline: true,
             state_cell,
@@ -353,7 +329,7 @@ pub(super) fn run_buffer_change_hooks(
         let hr = host.run_hook(
             t,
             HookName::plugin(name.clone(), "buffer-change"),
-            vec![arg],
+            vec![arg.clone()],
             Some(BUFFER_CHANGE_BUDGET),
             Some(ctx),
         );
@@ -529,7 +505,7 @@ mod tests {
     use super::*;
 
     /// `Keymap` names rustyline's `EditMode`, the rc's `edit_mode:` value, and
-    /// the keymap for the `_ed-keymap` query.
+    /// the keymap for the `_ed-get` record.
     #[test]
     fn keymap_names_edit_mode_rc_value_and_plugin_keymap() {
         assert_eq!(EditMode::from(Keymap::Vi), EditMode::Vi);

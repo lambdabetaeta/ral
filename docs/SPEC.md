@@ -4233,7 +4233,7 @@ The recognized hooks are:
 
 | Hook | Argument and result | Time |
 |---|---|---|
-| `buffer-change` | `[old-buf: String, line: String, pos: Int, history: List<String>, keymap: String, state: Any]`; returns `Unit` | After the text or cursor changes. |
+| `buffer-change` | `[old: String]`; returns `Unit` | After the text or cursor changes. |
 | `pre-exec` | `[src: String]`; returns `Unit` | Before one complete prompt input is evaluated. |
 | `post-exec` | `[src: String, status: Int]`; returns `Unit` | After evaluation settles. |
 | `chpwd` | `[old: String, new: String]`; returns `Unit` | After an input line that leaves the session working directory changed. |
@@ -4241,13 +4241,15 @@ The recognized hooks are:
 
 The four `Unit` result contracts above are enforced. A non-`Unit` result is a
 hook failure, not an ignored value. The `prompt` hook is deliberately
-different: it is a string transformer, so each successful `String` becomes the
-next plugin's input.
+different: it is a string transformer, read like the session prompt (a returned
+value, else the captured standard output), so each successful result becomes
+the next plugin's input.
 
 Hooks run in plugin load order. A failed lifecycle hook is reported but does
 not prevent later plugins' hooks from running or replace the command's status.
 Prompt transformers compose: each successful result becomes the next hook's
-input, while a failed or non-string result leaves the current prompt unchanged.
+input, while a failed hook leaves the current prompt unchanged. The faults of
+one render print together, once while they repeat.
 
 `buffer-change` runs on the editing path, so ral protects the session from a
 persistently bad handler. A single invocation that exceeds 100 milliseconds,
@@ -4255,11 +4257,8 @@ or three consecutive failures, disables that plugin's `buffer-change` hook for
 the rest of the session and prints a notice. `_ed-tui` is unavailable inside
 `buffer-change`.
 
-A keybinding handler receives:
-
-```text
-[line: String, cursor: Int, history: List<String>, keymap: String, state: Any]
-```
+A keybinding handler receives `[key: String]`, the binding's key notation. A
+hook reads the editor only through the `_ed-*` builtins.
 
 Key names are `tab`, `enter`, `escape`, arrows, `home`, `end`, `delete`,
 `backspace`, `f1` through `f12`, a single character, `ctrl-character`, or
@@ -4290,8 +4289,7 @@ Cursor and span offsets count Unicode characters, not UTF-8 bytes.
 
 | Builtin | Contract |
 |---|---|
-| `_ed-get` | Return `[text, cursor, keymap]`. |
-| `_ed-text`, `_ed-cursor`, `_ed-keymap`, `_ed-lbuffer` | Read the whole buffer, cursor, active keymap, or text left of the cursor. |
+| `_ed-get` | Return `[text, cursor, keymap, in-readline]`. The text left of the cursor is `slice $st[text] 0 $st[cursor]`. |
 | `_ed-set [text: `keep\|`set Str, cursor: `keep\|`set Int]` | Replace `text` and/or `cursor`; `` `keep `` leaves a field unchanged and an out-of-range cursor is clamped. |
 | `_ed-set-lbuffer text` | Replace text left of the cursor, preserving the right side. |
 | `_ed-insert text` | Insert at the cursor and advance past the insertion. |

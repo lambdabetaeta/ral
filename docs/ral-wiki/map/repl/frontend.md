@@ -8,23 +8,28 @@ covers_paths: [ral/src/repl/frontend.rs, ral/src/repl/frontend/, ral/src/repl/co
 
 `ral/src/repl/frontend.rs` declares the `Frontend` trait — the seam between the
 [[map/repl/loop|session loop]] and the line editor. One method, `read`, returns
-a typed `Read` event (`Line` / `Edit` / `Interrupt` / `Eof`); the session never
+a typed `Read` event (`Line` / `Edit` / `Interrupt` / `End(status)`); the session never
 sees keybindings, escape sequences, or the buffer stack. The frontend owns
-plugin sync, keybinding dispatch, continuation reads, and flushing deferred
-diagnostics before returning. **A frontend reads the engine only through the
+plugin sync, keybinding dispatch, and the erase of an abandoned edit; the
+session flushes deferred diagnostics once after `read` returns, and once in
+`Drop`. **A frontend reads the engine only through the
 transport `read` is handed** — probes, and hook dispatches through the
 `ReplHost` — never a `Shell`. `EditBuffer` carries a re-feed buffer whose
 `cursor` is a **character** offset (matching the plugin surface — see
 [[map/repl/plugins|plugins]]); the rustyline boundary converts to bytes.
 
-Both backends drive the multi-line read through `frontend::join_continuation`,
-which folds backend-supplied lines into the buffer until it parses complete
-(or is abandoned by a `Continuation::Discard`). The loop, the newline joining,
-and the abandon semantics live there once, so Ctrl-C / Ctrl-D / a read error
-behave identically — abandoning the partial buffer keeps the session alive
-rather than ending it, on every path alike. History saves *append* the
-session's own entries rather than rewriting the file, so concurrent sessions do
-not clobber each other.
+**The editor owns the whole buffer.** `RalHelper` implements rustyline's
+`Validator` (`needs_continuation`), so Enter on an incomplete buffer inserts a
+newline in place; a plugin key's `AcceptLine` submits unconditionally, so a
+pending key always sees the full buffer and a full-buffer byte cursor. After an
+`Edit` outcome `cursor::erase_drawn` erases exactly the rows drawn (per-line
+`ceil(width / cols)`, prompt included, by `unicode-width`). `End(0)` is EOF, a
+read error prints then `End(1)`. The minimal frontend alone folds continuation
+lines (`join_continuation`); Ctrl-C there arrives as a signal, so a line read
+after the `interrupt_epoch` moved restarts the buffer. Both frontends hold a
+rustyline `FileHistory` (one `#V2` format); saves *append* the session's own
+entries so concurrent sessions do not clobber each other, and a failed save is
+reported once, from `Drop for Session`.
 
 Three implementations live in `frontend/`, selected by `Surface`
 (`--surface` flag or rc `surface:`; the capability gate forces `minimal` on
@@ -42,10 +47,16 @@ dumb terminals whatever was asked):
 ## Completion
 
 The completion *engine* is frontend-neutral: `completion.rs` classifies the
-token under the cursor (`$`-variable / command-position name / path), gathers
+atom under the cursor by the lexer's own tokens (`lex_open` over the line up to
+the cursor, which also closes an open string or block): the last lexeme
+touching the cursor, at command position iff the lexeme before it is absent or
+`separates`. A path candidate replaces the *whole* atom from its start, as one
+`quote_word`-rendered atom (`dir/'a b'` would not parse; `'dir/a b'`
+does), tilde-expanded first when it needs quoting. It then gathers
 candidates from a `Sources` view the engine's readings answer — the cheap
 half (`completion-names`, `builtin-names`) once per prompt, the `PATH`
-enumeration lazily through `path-entries` in the engine's own filesystem,
+enumeration lazily (only when a command name is wanted, never for `$var` or
+paths) through `path-entries` in the engine's own filesystem,
 keyed by the `env-var PATH` and `cwd` readings and aged by `SCAN_TTL`;
 cwd-anchored path entries likewise — and ranks them.
 `completion::complete(line, pos, &Sources) -> (replace_from, Vec<Candidate>)`

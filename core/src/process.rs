@@ -34,7 +34,7 @@ pub(crate) use tree::sample_descendants;
 pub(crate) use cancel::TEARDOWN_GRACE;
 pub use cancel::{
     Ambient, AmbientForward, CancelCause, CancelScope, CancelWatch, DurableRoot, ForegroundScope,
-    forward_ambient, request_interrupt, request_root_cancel, watch_cancel,
+    forward_ambient, interrupt_epoch, request_interrupt, request_root_cancel, watch_cancel,
 };
 
 pub use child::ChildHandle;
@@ -53,8 +53,8 @@ pub use foreground::{TerminalLoan, interrupt_foreground_child, termios_snapshot}
 pub use group::{spawn_with_pgid, spawn_with_pgid_after};
 #[cfg(unix)]
 pub use signal::{
-    ignore, install, install_handlers, interrupt_handler, quit_handler, reset_child_signals,
-    term_handler,
+    default, ignore, install, install_handlers, interrupt_handler, quit_handler,
+    reset_child_signals, term_handler,
 };
 
 #[cfg(unix)]

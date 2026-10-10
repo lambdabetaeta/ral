@@ -16,7 +16,7 @@ use super::flow::Settled;
 /// Removal finds the frame by handle rather than index, so an alias dropped
 /// between a push and its paired pop cannot shift the wrong frame out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct FrameHandle(pub(crate) u64);
+pub struct FrameHandle(pub(crate) u64);
 
 /// Calling convention of a handler — fixed by its surface form at install,
 /// never inferred from the thunk at the call site.
@@ -31,7 +31,7 @@ pub(crate) enum HandlerArity {
 /// One user handler — the unit of installation in a [`HandlerFrame`].
 /// Builtins are `BuiltinEntry` instead.
 #[derive(Clone)]
-pub(crate) struct HandlerEntry {
+pub struct HandlerEntry {
     pub name: Cow<'static, str>,
     pub(crate) arity: HandlerArity,
     pub(crate) thunk: Value,

@@ -8,7 +8,6 @@ use super::Shell;
 use super::TerminalAccess;
 use super::bindings::BindingLease;
 use super::detached::DetachPolicy;
-use super::repl::ReplScratch;
 use crate::io::Sink;
 use crate::process::{DurableRoot, ForegroundScope, TerminalLease};
 use crate::source::SourceDb;
@@ -123,14 +122,6 @@ impl Shell {
     /// documents a sourced closure library no builtin table ever sees.
     pub fn install_library_docs(&mut self, entries: Vec<(String, String)>) {
         self.session.library_docs.extend(entries);
-    }
-
-    pub fn repl(&self) -> &ReplScratch {
-        &self.local.repl
-    }
-
-    pub fn repl_mut(&mut self) -> &mut ReplScratch {
-        &mut self.local.repl
     }
 
     /// Every worker (`spawn`, `watch`, `service`) here, settled or running.
