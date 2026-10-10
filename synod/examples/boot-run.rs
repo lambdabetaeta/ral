@@ -57,7 +57,7 @@ use exarch::provider::scripted::{Reply, Script};
 use exarch::provider::{Bureau, Provider, ToolCall};
 use exarch::record::AgentId;
 use exarch::record::RecordedAccount;
-use exarch::record::{Display, Record, Recorded, Transient};
+use exarch::record::{Display, Record, Recorded, Settlement, Transient};
 use ral_core::capability::GrantStack;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -235,10 +235,11 @@ struct PrintSink;
 
 impl Sink for PrintSink {
     fn fact(&mut self, _id: AgentId, rec: &Recorded<Record>) {
-        if let Record::Display(Display::SubagentDone { name, error, .. }) = rec.value() {
-            match error {
-                Some(e) => println!("\n[{name} failed: {e}]"),
-                None => println!("\n[{name} finished]"),
+        if let Record::Display(Display::SubagentDone { name, outcome, .. }) = rec.value() {
+            match outcome {
+                Settlement::Finished => println!("\n[{name} finished]"),
+                Settlement::Cancelled => println!("\n[{name} cancelled]"),
+                Settlement::Failed { reason } => println!("\n[{name} failed: {reason}]"),
             }
         }
     }

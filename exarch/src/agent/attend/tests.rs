@@ -43,12 +43,17 @@ fn announce_records_display_facts() {
             }
             Record::Display(Display::SubagentDone {
                 name,
-                error,
+                outcome,
                 elapsed_ms,
                 ..
             }) => {
                 assert_eq!(name, "helper");
-                assert_eq!(error.as_deref(), Some("boom"));
+                assert_eq!(
+                    outcome,
+                    crate::record::Settlement::Failed {
+                        reason: "boom".into()
+                    }
+                );
                 assert_eq!(elapsed_ms, 1500);
                 facts.push("subagent");
             }

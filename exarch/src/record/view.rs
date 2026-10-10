@@ -9,8 +9,8 @@
 //! record into.
 
 use super::{
-    BlockId, Cut, Display, EditAuthority, Fold, Forensic, Recorded, Refusal, Role, Seq, Spent,
-    TurnRow,
+    BlockId, Cut, Display, EditAuthority, Fold, Forensic, Recorded, Refusal, Role, Seq, Settlement,
+    Spent, TurnRow,
 };
 use crate::card::{Card, Change, DoneOutcome, Field, FieldVal, Mark, Role as Ink, Span};
 use crate::provider::{ProviderError, Usage};
@@ -47,7 +47,7 @@ pub enum BlockKind {
     },
     SubagentDone {
         name: String,
-        error: Option<String>,
+        outcome: Settlement,
         elapsed_ms: u64,
     },
     Observation {
@@ -315,13 +315,13 @@ impl Blocks {
             Display::Result { text, failed, call } => self.attach_result(call, &text, failed),
             Display::SubagentDone {
                 name,
-                error,
+                outcome,
                 elapsed_ms,
             } => self.push(
                 seq,
                 BlockKind::SubagentDone {
                     name,
-                    error,
+                    outcome,
                     elapsed_ms,
                 },
             ),

@@ -7,7 +7,7 @@ use ral_core::first_order::FOValue;
 use std::fmt;
 use std::time::Duration;
 
-use crate::record::AgentId;
+use crate::record::{AgentId, Settlement};
 
 /// A schedule's id: monotonic, and never reused, not even across `/clear`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -102,16 +102,15 @@ pub enum AgentOutcome {
 }
 
 impl AgentOutcome {
-    /// Why a `↘` subagent breadcrumb reads as a failure, or `None` where the
-    /// child simply finished.  Every consumer of
-    /// `record::Display::SubagentDone` — transcript, headless stderr, the TUI
-    /// — reduces through here, so the three render alike.
-    pub(crate) fn fault(&self) -> Option<String> {
+    /// The `↘` breadcrumb's reduction, so that every consumer of
+    /// `record::Display::SubagentDone` renders alike.
+    pub(crate) fn settlement(&self) -> Settlement {
         match self {
-            Self::Replied => None,
-            Self::Stopped(r) => Some(r.clone()),
-            Self::Cancelled => Some("cancelled".into()),
-            Self::Failed(e) => Some(e.clone()),
+            Self::Replied => Settlement::Finished,
+            Self::Cancelled => Settlement::Cancelled,
+            Self::Stopped(reason) | Self::Failed(reason) => Settlement::Failed {
+                reason: reason.clone(),
+            },
         }
     }
 

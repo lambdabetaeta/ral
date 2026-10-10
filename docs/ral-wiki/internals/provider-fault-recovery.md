@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 6a8d848f
-verified_at_date: 2026-10-08
+verified_at_commit: f7ceae58
+verified_at_date: 2026-10-10
 anchors: [from_genai, refused, error_object, Fault, of_webc, of_boxed, of_reqwest, ProviderError, Refused, Refusal, Limit, Recovery, recovery, Transient, Api, Truncated, retry_with_backoff, Attempt, backoff_sleep, parse_retry_after, unwaitable, BODY_KEYS, epoch_or_delta, Wait::patient, RATE_LIMIT_MAX_DELAY_MS, json_status_code, CutShort, stall_cause, root_cause, body_detail, Readout, stalled_step_out, STREAM_IDLE_TIMEOUT, MAX_ATTEMPTS, RATE_LIMIT_MAX_ATTEMPTS, manufacture, Sealed]
 ---
 
@@ -33,7 +33,7 @@ where each keeps it:
 | `HttpError { status, body }` | a raw HTTP-level failure | a typed `StatusCode` |
 | `WebModelCall` / `WebAdapterCall { webc_error }` | non-streamed calls: adapter model-list fetches | a `webc::Error` (below) |
 | `WebStream { error: BoxError }` | the streaming `exec_chat_stream` path | a *boxed* leaf — see below |
-| `ChatResponse { body }` | a mid-stream SSE error frame | a status code *inside the JSON*, at `body["error"]["code"]` or `body["code"]` |
+| `ChatResponse { body }` | a mid-stream SSE error frame | an error body, optionally naming a numeric status at `body["error"]["code"]` or `body["code"]` |
 | everything else | bad request, auth gap, mapping failure, stream-parse error | nothing to recover |
 
 The `webc::Error` inside a `WebModelCall` narrows again:
@@ -59,15 +59,15 @@ distillation is `Fault`:
 
 ```
 enum Fault<'a> {
-    Status { status: StatusCode, headers: Option<&'a HeaderMap>, body: Option<Value> },
+    Response { status: Option<StatusCode>, headers: Option<&'a HeaderMap>, body: Option<Value> },
     Transport(Option<String>),
     Terminal,
 }
 ```
 
-- **`Status`** — a completed HTTP response reached us with a non-2xx code. The
-  code, the headers (for `Retry-After`), and the provider's JSON error body
-  ride along; the *caller* decides what a given status means.
+- **`Response`** — a provider error reached us over HTTP or inside a stream.
+  Its optional status, headers (for `Retry-After`), and JSON body ride along;
+  the *caller* decides recovery. A string error code does not imply an HTTP status.
 - **`Transport`** — a `reqwest` fault with no status: connect, timeout, a
   malformed request, or a body that dropped or failed to decode mid-flight.
   Retryable by nature — nothing reached the model. It carries the leaf's own
@@ -78,16 +78,16 @@ enum Fault<'a> {
 `Fault::of` is the walk. It descends the typed tree to the leaf and never
 touches the `Display` text:
 
-- `HttpError` → `Status` directly.
+- `HttpError` → `Response` directly.
 - `WebModelCall` / `WebAdapterCall` → `of_webc`: `ResponseFailedStatus` →
-  `Status` (with headers), `Reqwest` → `of_reqwest`, anything else →
+  `Response` (with headers), `Reqwest` → `of_reqwest`, anything else →
   `Terminal`.
 - `WebStream` → `of_boxed`, which downcasts the boxed leaf: a `genai::Error`
   **recurses back into `Fault::of`** (so a boxed `HttpError` reuses the same
-  `Status` arm), a `reqwest::Error` goes to `of_reqwest`, and a corrupt-UTF-8
+  `Response` arm), a `reqwest::Error` goes to `of_reqwest`, and a corrupt-UTF-8
   box falls through to `Terminal`.
-- `ChatResponse` → read `json_status_code` from the body; a valid code becomes
-  `Status`, a missing one is `Terminal`.
+- `ChatResponse` → `Response`, retaining the body whether or not
+  `json_status_code` finds a numeric status. String codes remain error fields.
 - every other variant → the `_ => Terminal` floor.
 
 `of_reqwest` is the one predicate left: a `reqwest::Error` is `Transport` only
@@ -107,15 +107,15 @@ that both over-matched — the word "body" appears in a non-JSON error's own
 ## From leaf to verdict: `ProviderError`
 
 `from_genai` turns the leaf into the public failure the rest of exarch sees,
-`ProviderError`. Only the `Status` leaf needs a decision — the HTTP code splits
-three ways:
+`ProviderError`. Only the `Response` leaf needs a decision — the HTTP code splits
+by status when present:
 
 | leaf | `ProviderError` | retried? |
 |---|---|---|
-| `Status` 429, quota spent | `Api` | **no** — no wait clears it |
-| `Status` 429, otherwise | `Refused(Refusal { limit, resets_at, received, cause, body })` | as `Refusal::recovery` reads it: in place (patient tier), or surfaced at once |
-| `Status` 5xx | `Transient { cause, attempts, body }` | yes — transient tier |
-| `Status` other (4xx, redirect) | `Api { status, model, message, body }` | **no** — the user must change the request |
+| `Response` 429, quota spent | `Api` | **no** — no wait clears it |
+| `Response` 429, otherwise | `Refused(Refusal { limit, resets_at, received, cause, body })` | as `Refusal::recovery` reads it: in place (patient tier), or surfaced at once |
+| `Response` 5xx | `Transient { cause, attempts, body }` | yes — transient tier |
+| `Response` other (4xx, redirect, absent status) | `Api { status, model, message, body }` | **no** — the user must change the request |
 | `Transport(detail)` | `Transient` (no body) | yes |
 | `Terminal` | `Other(String)` | no — rendered raw |
 

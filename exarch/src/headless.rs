@@ -16,7 +16,7 @@ use crate::card::{self, Card, Landed, Mark, Row, observation_card};
 use crate::provider::{Provider, Usage};
 use crate::record::AgentId;
 use crate::record::fault::Remedy;
-use crate::record::{self, Blocks, Delta, Record, Recorded, Transient};
+use crate::record::{self, Blocks, Delta, Record, Recorded, Settlement, Transient};
 use crate::shell_eval::user_json;
 use ral_core::first_order::FOValue;
 use ral_core::first_order::datum::Datum as _;
@@ -305,20 +305,22 @@ impl Headless<'_> {
             // only live sign of a child; its own log dir holds the rest.
             K::SubagentDone {
                 name,
-                error,
+                outcome,
                 elapsed_ms,
-                ..
             } => {
                 let took =
                     crate::bus::elapsed_phrase(std::time::Duration::from_millis(*elapsed_ms));
-                match error {
-                    Some(reason) => {
-                        let _ = writeln!(self.err, "[agent {name} failed after {took}: {reason}]");
+                let _ = match outcome {
+                    Settlement::Finished => {
+                        writeln!(self.err, "[agent {name} finished after {took}]")
                     }
-                    None => {
-                        let _ = writeln!(self.err, "[agent {name} finished after {took}]");
+                    Settlement::Cancelled => {
+                        writeln!(self.err, "[agent {name} cancelled after {took}]")
                     }
-                }
+                    Settlement::Failed { reason } => {
+                        writeln!(self.err, "[agent {name} failed after {took}: {reason}]")
+                    }
+                };
             }
             K::Error { text } => {
                 if text.starts_with(crate::bus::WORKER_PANIC_PREFIX) {

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 73bc87ff
-generated_at_date: 2026-10-08
+generated_at_commit: f7ceae58
+generated_at_date: 2026-10-10
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/record/session.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/cancel.rs, exarch/src/boot.rs, exarch/src/agent/seat.rs, exarch/src/signals.rs, exarch/src/prompt/host.rs]
 ---
 
@@ -232,6 +232,12 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
    `PROMPT_INK` rule fence (`line::prompt_fence`) and neutral prompt ink, found
    at a glance by boundary and tone rather than by reverse video, which stays
    reserved for an active selection.
+ - **notifications share one text layout.** `Chrome::render` wraps notification
+   text at the block's content width; cards and structured readouts own their
+   layout. Agent completions are `Chrome::Subagent`, sharing text flow and gap
+   placement with worker completions. Only the first content row wears the rail.
+   A completion records its `record::Settlement` (finished, cancelled, or failed
+   with a reason), so no consumer reads cancellation out of a reason string.
  - **figure and ground, on the luminance axis.** Within the agent's
    foreground, *communication* and *work* split by value: the model's prose
    answer, a subagent's returned result, and the human's prompt stay at full

@@ -245,6 +245,15 @@ pub enum Protocol {
     },
 }
 
+/// How a child's run ended, as its `↘` breadcrumb reports it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Settlement {
+    Finished,
+    Cancelled,
+    Failed { reason: String },
+}
+
 /// The commits the view fold needs — cut, coalesced, and reduced *before*
 /// they reach the seam, so a resumed scrollback matches what the user
 /// actually saw.
@@ -306,7 +315,7 @@ pub enum Display {
     /// scrollback.
     SubagentDone {
         name: String,
-        error: Option<String>,
+        outcome: Settlement,
         elapsed_ms: u64,
     },
     /// A fact core observed at a door, carried as its total wire form — the

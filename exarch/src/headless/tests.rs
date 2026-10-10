@@ -468,8 +468,8 @@ fn converse_settled_holds_for_a_live_child_then_quiesces() {
     assert!(
         sink.inner.facts.iter().any(|f| matches!(
             f,
-            Record::Display(Display::SubagentDone { name, error, .. })
-                if name == "helper" && error.as_deref() == Some("done")
+            Record::Display(Display::SubagentDone { name, outcome, .. })
+                if name == "helper" && matches!(outcome, Settlement::Failed { reason } if reason == "done")
         )),
         "the settled child's end must reach the exchange's own sink"
     );
@@ -520,8 +520,8 @@ fn converse_settled_ends_even_when_a_child_never_replies() {
     assert!(
         sink.facts.iter().any(|f| matches!(
             f,
-            Record::Display(Display::SubagentDone { name, error, .. })
-                if name == "flaky" && error.is_some()
+            Record::Display(Display::SubagentDone { name, outcome, .. })
+                if name == "flaky" && matches!(outcome, Settlement::Failed { .. })
         )),
         "the child's un-replied finish must surface as a failed SubagentDone"
     );

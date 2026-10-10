@@ -14,6 +14,7 @@ use crate::card::{
     Span as CardSpan,
 };
 use crate::provider;
+use crate::record::Settlement;
 use crate::record::fault::{Datum, Field as FaultField, Readout, Remedy};
 use ratatui::{
     style::{Color, Modifier, Style},
@@ -325,32 +326,30 @@ fn agent_name(name: &str, hue: Color) -> Span<'static> {
 }
 
 /// An async subagent's landed line: `agent [NAME] finished · 1 min 12 secs`, the
-/// bold `name` turning [`ORANGE`] with the verb when `error` is set.  No body
+/// bold `name` turning [`ORANGE`] with the verb unless it finished.  No body
 /// and no magnitude — a reply is a value on the child's own agent, read with
 /// `` exarch-agents `read ``, so there is nothing here to size or to disclose.  The
 /// `↘` is the rail's, not this line's.
 pub(super) fn subagent_header(
     name: &str,
-    error: Option<&str>,
+    outcome: &Settlement,
     elapsed: Duration,
 ) -> Vec<Line<'static>> {
-    let cancelled = error.is_some_and(|r| r.eq_ignore_ascii_case("cancelled"));
-    let verb = match error {
-        None => "finished",
-        Some(_) if cancelled => "cancelled",
-        Some(_) => "failed",
+    let (verb, ink) = match outcome {
+        Settlement::Finished => ("finished", LIME),
+        Settlement::Cancelled => ("cancelled", ORANGE),
+        Settlement::Failed { .. } => ("failed", ORANGE),
     };
     let dim = Style::default().fg(SLATE).add_modifier(Modifier::DIM);
     let mut spans = vec![
         Span::styled("agent ", dim),
-        agent_name(name, if error.is_some() { ORANGE } else { LIME }),
+        agent_name(name, ink),
         Span::styled(
             format!(" {verb}  · {}", crate::bus::elapsed_phrase(elapsed)),
             dim,
         ),
     ];
-    // `cancelled` is the verb itself; repeating it as a reason says nothing.
-    if let Some(reason) = error.filter(|_| !cancelled) {
+    if let Settlement::Failed { reason } = outcome {
         spans.push(Span::styled(
             format!("  — {reason}"),
             Style::default().fg(ORANGE).add_modifier(Modifier::DIM),

@@ -1,5 +1,54 @@
 use super::*;
 
+#[test]
+fn notification_text_shares_one_wrap_boundary() {
+    let message = "A long notification whose final words must remain visible.";
+    for chrome in [
+        Chrome::Note(message.into()),
+        Chrome::Error(message.into()),
+        Chrome::Settled(vec![CardSpan::new(crate::card::Role::Muted, message)]),
+        Chrome::Spawned(vec![CardSpan::new(crate::card::Role::Muted, message)]),
+    ] {
+        let lines = chrome.render(24);
+        assert!(lines.iter().all(|line| line.width() <= 24));
+        let text = lines.iter().map(line::text).collect::<Vec<_>>().join(" ");
+        let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(words(&text).ends_with(message), "{text}");
+    }
+}
+
+#[test]
+fn subagent_failure_wraps_at_each_width_without_losing_its_reason() {
+    let reason = "The ChatGPT user has reached their Subscription Sharing usage limit. \
+                  Try again after the limit resets or use an API key instead.";
+    let block = Block::chrome(
+        Chrome::Subagent {
+            name: "credential-diagnostics".into(),
+            outcome: Settlement::Failed {
+                reason: reason.into(),
+            },
+            elapsed: std::time::Duration::from_secs(161),
+        },
+        None,
+    );
+    for width in [24, 48, 100, 160] {
+        let rows = block.live(width, AgentSlot(0), "");
+        assert!(
+            rows.iter()
+                .all(|row| row.clone().into_line().width() <= usize::from(width))
+        );
+        assert_eq!(
+            rows.iter()
+                .filter(|row| !row.gutter().trim().is_empty())
+                .count(),
+            1
+        );
+        let text: String = rows.iter().map(Row::plain).collect();
+        let compact = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        assert!(compact(&text).ends_with(&compact(reason)), "{text}");
+    }
+}
+
 fn act(verb: &str, subject: Option<&str>, payload: &str, failed: bool) -> Block {
     Block::new(
         BlockKind::act(

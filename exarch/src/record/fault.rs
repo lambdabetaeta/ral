@@ -208,7 +208,7 @@ fn value_display(v: &Value) -> Option<String> {
     }
 }
 
-/// Flatten a parsed error `body` into ordered fields: `type`/`code` leads as
+/// Flatten a parsed error `body` into ordered fields: `type` and `code` lead as
 /// the machine-readable class, then the rest in the `Map`'s sorted order,
 /// skipping nulls and anything already `consumed` by a dedicated field, with
 /// `message` last because it is the one that wraps.
@@ -217,12 +217,10 @@ fn body_fields(body: &Value, consumed: &[&str]) -> Vec<Field> {
         return vec![];
     };
     let mut fs = Vec::new();
-    if let Some(v) = obj
-        .get("type")
-        .or_else(|| obj.get("code"))
-        .and_then(value_display)
-    {
-        fs.push(text_field("type", v));
+    for key in ["type", "code"] {
+        if let Some(v) = obj.get(key).and_then(value_display) {
+            fs.push(text_field(key, v));
+        }
     }
     for (k, v) in obj {
         if matches!(k.as_str(), "type" | "code" | "message") || consumed.contains(&k.as_str()) {

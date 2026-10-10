@@ -21,7 +21,7 @@ use super::row::Row;
 use crate::card::{Card, Change, Effect, Span as CardSpan};
 use crate::provider::ProviderError;
 use crate::record::fault::Readout;
-use crate::record::{Seq, Verdict};
+use crate::record::{Seq, Settlement, Verdict};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::time::Duration;
@@ -51,6 +51,13 @@ pub(super) enum Chrome {
     /// broke off either way — but stays a separate shape so the matrix's
     /// failure cell keeps reporting failures only.
     Cancelled,
+    /// An agent's completion; wears the `↘` even on failure, which reads in
+    /// the header.
+    Subagent {
+        name: String,
+        outcome: Settlement,
+        elapsed: Duration,
+    },
     /// A detached block that settled — the `` `done `` a deferred worker flushes
     /// at completion. It wears the `↘` of [`RailKind::Subagent`]: background
     /// work landing in root's scrollback turns after the run that spawned it is
@@ -73,34 +80,37 @@ impl Chrome {
     /// text wraps here; the field-row and card builders take the width
     /// themselves.
     fn render(&self, width: u16) -> Vec<Line<'static>> {
-        let text = |lines: Vec<Line<'static>>| -> Vec<Line<'static>> {
-            lines
-                .iter()
-                .flat_map(|l| line::wrap_line(l, width.into()))
-                .collect()
-        };
-        match self {
-            Self::Turn => line::turn(),
-            Self::Prompt(s) => text(line::user_prompt(s)),
-            Self::Note(s) => text(line::note(s)),
-            Self::StopReason(raw) => text(line::stop_reason(raw)),
-            Self::Error(msg) => text(line::error(msg)),
-            Self::ProviderError(e) => line::render_readout(Readout::fatal(e), width),
-            Self::Stalled(e) => line::render_readout(Readout::stall(e), width),
-            Self::Cancelled => line::note("cancelled"),
-            Self::Settled(spans) | Self::Spawned(spans) => text(line::render_text(spans)),
-            Self::Opening(card) => banner::opening(card, width),
-            Self::Legend => text(banner::legend_panel(width)),
+        let lines = match self {
+            Self::ProviderError(e) => return line::render_readout(Readout::fatal(e), width),
+            Self::Stalled(e) => return line::render_readout(Readout::stall(e), width),
+            Self::Opening(card) => return banner::opening(card, width),
             Self::Framed(card) => {
-                line::render_card_framed(card, line::CARD_INDENT, width, Detail::Full)
+                return line::render_card_framed(card, line::CARD_INDENT, width, Detail::Full);
             }
-        }
+            Self::Turn => line::turn(),
+            Self::Prompt(s) => line::user_prompt(s),
+            Self::Note(s) => line::note(s),
+            Self::StopReason(raw) => line::stop_reason(raw),
+            Self::Error(msg) => line::error(msg),
+            Self::Cancelled => line::note("cancelled"),
+            Self::Subagent {
+                name,
+                outcome,
+                elapsed,
+            } => line::subagent_header(name, outcome, *elapsed),
+            Self::Settled(spans) | Self::Spawned(spans) => line::render_text(spans),
+            Self::Legend => banner::legend_panel(width),
+        };
+        lines
+            .iter()
+            .flat_map(|line| line::wrap_line(line, width.into()))
+            .collect()
     }
 
     fn rail(&self) -> Option<RailKind> {
         match self {
             Self::Turn => Some(RailKind::Turn),
-            Self::Settled(_) => Some(RailKind::Subagent),
+            Self::Settled(_) | Self::Subagent { .. } => Some(RailKind::Subagent),
             Self::Spawned(_) => Some(RailKind::FleetAct),
             Self::Error(_) | Self::ProviderError(_) | Self::Stalled(_) | Self::Cancelled => {
                 Some(RailKind::Error)
@@ -331,14 +341,6 @@ pub(super) enum BlockKind {
         payload: String,
         failed: bool,
         dial: Dial,
-    },
-    /// An async subagent's result, landed in root's scrollback.  Its own kind
-    /// because prose cannot carry `name`/`elapsed`/`error` and a card would
-    /// lose the `↘` identity.
-    Subagent {
-        name: String,
-        error: Option<String>,
-        elapsed: Duration,
     },
     /// A run of file changes, read as one patch: whatever the work between
     /// two calls wrote or edited.
@@ -912,11 +914,6 @@ impl Block {
                 width,
                 at >= Detail::Full,
             ),
-            BlockKind::Subagent {
-                name,
-                error,
-                elapsed,
-            } => line::subagent_header(name, error.as_deref(), *elapsed),
             // Opens on the one blank an unframed card opens on.
             BlockKind::Changes { changes, .. } => std::iter::once(Line::default())
                 .chain(super::diff::changes_body(changes, width.into(), at))
@@ -971,8 +968,6 @@ impl Block {
                 "schedule" | "unschedule" => RailKind::TimeAct,
                 _ => RailKind::FleetAct,
             }),
-            // The `↘` holds even on error; the failure reads in the header.
-            BlockKind::Subagent { .. } => Some(RailKind::Subagent),
             // A file mutation wears `▎`, whether a run of changes or a kit's
             // diff. A framed card's frame is its own mark, and an unowned
             // effect folds into nothing, so neither wears a glyph.

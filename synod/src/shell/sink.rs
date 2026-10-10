@@ -22,7 +22,9 @@ use exarch::clock;
 use exarch::provider::ProviderError;
 use exarch::record::AgentId;
 use exarch::record::fault::{Datum, Readout, Remedy};
-use exarch::record::{Display, Forensic, Protocol, Record, Recorded, Transient, context_rows_card};
+use exarch::record::{
+    Display, Forensic, Protocol, Record, Recorded, Settlement, Transient, context_rows_card,
+};
 use serde::Serialize;
 use ts_rs::TS;
 
@@ -536,9 +538,8 @@ impl Router {
         match fact {
             Record::Display(Display::SubagentDone {
                 name,
-                error,
+                outcome,
                 elapsed_ms,
-                ..
             }) => {
                 #[allow(
                     clippy::cast_precision_loss,
@@ -547,7 +548,7 @@ impl Router {
                 let elapsed_secs = *elapsed_ms as f64 / 1000.0;
                 return Some(SynodEvent::HelperDone {
                     name: name.clone(),
-                    ok: error.is_none(),
+                    ok: *outcome == Settlement::Finished,
                     elapsed_secs,
                 });
             }
@@ -860,10 +861,10 @@ mod tests {
         let mut router = Router::default();
         router.route_transient(AgentId::new(0), &Transient::State(AgentState::Ready));
 
-        let done = |error: Option<String>| {
+        let done = |outcome| {
             Record::Display(Display::SubagentDone {
                 name: "letters".to_string(),
-                error,
+                outcome,
                 elapsed_ms: 2_000,
             })
         };
@@ -871,7 +872,7 @@ mod tests {
             name,
             ok,
             elapsed_secs,
-        }) = router.route_fact(AgentId::new(0), &done(None))
+        }) = router.route_fact(AgentId::new(0), &done(Settlement::Finished))
         else {
             panic!("expected a HelperDone event");
         };
@@ -879,9 +880,12 @@ mod tests {
         assert!(ok);
         assert!((elapsed_secs - 2.0).abs() < f64::EPSILON);
 
-        let Some(SynodEvent::HelperDone { ok, .. }) =
-            router.route_fact(AgentId::new(0), &done(Some("boom".to_string())))
-        else {
+        let Some(SynodEvent::HelperDone { ok, .. }) = router.route_fact(
+            AgentId::new(0),
+            &done(Settlement::Failed {
+                reason: "boom".to_string(),
+            }),
+        ) else {
             panic!("expected a HelperDone event");
         };
         assert!(!ok);

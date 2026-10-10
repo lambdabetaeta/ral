@@ -445,13 +445,11 @@ pub(super) fn announce(item: &Item, opens: Option<u64>, recorder: &crate::record
             );
         }
         Item::Agent(r) => {
-            // The record carries the reduced fault the scrollback block is
-            // built from, not the raw outcome enum.
             record_commit(
                 recorder,
                 crate::record::Display::SubagentDone {
                     name: r.name.clone(),
-                    error: r.outcome.fault(),
+                    outcome: r.outcome.settlement(),
                     elapsed_ms: u64::try_from(r.elapsed.as_millis()).unwrap_or(u64::MAX),
                 },
             );

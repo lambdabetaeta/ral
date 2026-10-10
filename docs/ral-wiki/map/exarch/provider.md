@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 0dc4a920
-generated_at_date: 2026-10-09
+generated_at_commit: f7ceae58
+generated_at_date: 2026-10-10
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs]
 ---
 
@@ -468,12 +468,15 @@ only model-behaviour outcomes, not transport.
 
 `ProviderError::from_genai` (`provider/error.rs`) **reads retryability from
 genai's typed variants, not from its `Display` string.** A single structural walk, `Fault::of`, descends
-each error to one of three leaves — `Status` (a non-2xx HTTP response), `Transport`
+each error to one of three leaves — `Response` (a provider error with an optional HTTP status), `Transport`
 (a `reqwest` fault with no status), or `Terminal` (no recoverable leaf) — recovering
 the `StatusCode`, the response `HeaderMap`, and the parsed JSON body across the four
 paths a non-2xx reaches us by: `HttpError`, `WebModelCall(ResponseFailedStatus)`,
 the `HttpError` boxed inside a streaming `WebStream` (recursion), and a mid-stream
-`ChatResponse` frame whose code lives in `body["error"]["code"]` / `body["code"]`.
+`ChatResponse` frame whose numeric status, when present, lives in
+`body["error"]["code"]` / `body["code"]`. A string code or absent status
+still retains the complete body and becomes a terminal `Api` error, subject
+to the same overflow classification as HTTP errors.
 The status drives the split: `refused` reads a 429 as a spent quota (`Api`) or
 else a `Refused` stated whole — its `Limit`, reset and receipt — taking the
 first two from `provider/reset.rs`, which reads every header and body
@@ -497,7 +500,10 @@ is minted at its own listed window, not the model's.
 
 Each retryable and 4xx variant carries the parsed body (boxed at the error
 boundary) as an optional JSON value, so the renderer can print a
-labelled, structured error from the JSON rather than scraping the cause text;
+labelled, structured error from the JSON rather than scraping the cause text.
+`record::fault::body_fields` keeps `type` and `code` as distinct fields, with
+`message` last; `summary` carries the message across agent boundaries. The
+complete body remains in the recorded error, including its stream envelope;
 the chrome lives in [[map/exarch/cards|cards]] / [[map/exarch/frontend|frontend]].
 `reset.rs`'s last-resort text scrape, `parse_retry_after`, slices the
 *lowercased* copy it searches, never indexing the original with an offset taken

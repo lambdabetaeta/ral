@@ -1060,13 +1060,13 @@ impl Scrollback {
             ))],
             K::SubagentDone {
                 name,
-                error,
+                outcome,
                 elapsed_ms,
-            } => vec![Item::Barrier(BlockKind::Subagent {
+            } => chrome(Chrome::Subagent {
                 name: name.clone(),
-                error: error.clone(),
+                outcome: outcome.clone(),
                 elapsed: Duration::from_millis(*elapsed_ms),
-            })],
+            }),
             K::Observation { value } => observation_items(value),
             K::Change { change } => vec![Item::Change(change.clone())],
             K::Card { card } => vec![surfaced(card.clone())],

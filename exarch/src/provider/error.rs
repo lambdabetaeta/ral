@@ -68,8 +68,8 @@ pub enum ProviderError {
     /// HTTP 429, whole. [`Refusal::recovery`] alone decides whether the retry
     /// loop waits it out in place.
     Refused(Refusal),
-    /// A non-success status that is neither 429 nor 5xx: auth, bad request,
-    /// model not found.  Never retried — the user has to change something.
+    /// A terminal provider response: auth, bad request, model not found.
+    /// Stream errors may carry no HTTP status. Never retried.
     ///
     /// The failing endpoint is [`extract_url`] of `message`, not a field — a
     /// stored copy could disagree with the message beside it.
@@ -223,20 +223,24 @@ impl ProviderError {
     pub fn from_genai(err: &genai::Error, model: &str) -> Self {
         let msg = err.to_string();
         match Fault::of(err) {
-            Fault::Status {
-                status,
+            Fault::Response {
+                status: Some(status),
                 headers,
                 body,
             } if status == StatusCode::TOO_MANY_REQUESTS => {
                 Self::refused(headers, body, msg, model)
             }
-            Fault::Status { status, body, .. } if status.is_server_error() => Self::Transient {
+            Fault::Response {
+                status: Some(status),
+                body,
+                ..
+            } if status.is_server_error() => Self::Transient {
                 cause: msg,
                 attempts: 1,
                 body,
                 status: Some(status.as_u16()),
             },
-            Fault::Status { status, body, .. } => match overflow(body.as_deref(), &msg) {
+            Fault::Response { status, body, .. } => match overflow(body.as_deref(), &msg) {
                 Some((sent, limit)) => Self::Overflow {
                     model: model.to_string(),
                     provider: body
@@ -251,7 +255,7 @@ impl ProviderError {
                     body,
                 },
                 None => Self::Api {
-                    status: Some(status.as_u16()),
+                    status: status.map(|s| s.as_u16()),
                     model: model.to_string(),
                     message: msg,
                     body,
@@ -304,7 +308,7 @@ static OVERFLOW_PHRASINGS: LazyLock<[Regex; 4]> = LazyLock::new(|| {
     .map(|p| Regex::new(&format!("(?is){p}")).expect("a phrasing is a regex"))
 });
 
-/// `(sent, limit)` when a 4xx body is a context overflow: a known phrasing
+/// `(sent, limit)` when an error body is a context overflow: a known phrasing
 /// matched, or the body's own `type`/`code` says so.
 fn overflow(body: Option<&serde_json::Value>, msg: &str) -> Option<(Option<u64>, Option<u64>)> {
     let text = body
@@ -330,14 +334,9 @@ fn overflow(body: Option<&serde_json::Value>, msg: &str) -> Option<(Option<u64>,
 /// is total — the `_ => Terminal` floor means a genai variant added upstream
 /// surfaces raw instead of being silently misclassified.
 enum Fault<'a> {
-    /// A completed response with a non-2xx status, reached through any of the
-    /// four shapes genai reports one by: `HttpError`; `ResponseFailedStatus`;
-    /// an `HttpError` boxed in `WebStream`, the streaming path's version of
-    /// the same shape; or a mid-stream `ChatResponse` frame whose status lives
-    /// in its JSON body and so carries no headers to read a `retry-after`
-    /// from.
-    Status {
-        status: StatusCode,
+    /// A provider error response; an SSE frame need not name an HTTP status.
+    Response {
+        status: Option<StatusCode>,
         headers: Option<&'a HeaderMap>,
         body: Option<Body>,
     },
@@ -364,17 +363,15 @@ impl<'a> Fault<'a> {
                 body,
                 headers,
                 ..
-            } => Self::status(*status, Some(headers), body),
+            } => Self::http(*status, Some(headers), body),
             genai::Error::WebModelCall { webc_error, .. }
             | genai::Error::WebAdapterCall { webc_error, .. } => Self::of_webc(webc_error),
             genai::Error::WebStream { error, .. } => Self::of_boxed(error.as_ref()),
-            genai::Error::ChatResponse { body, .. } => json_status_code(body)
-                .and_then(|code| StatusCode::from_u16(code).ok())
-                .map_or(Fault::Terminal(None), |status| Fault::Status {
-                    status,
-                    headers: None,
-                    body: Some(Box::new(unwrap_relay(body.clone()))),
-                }),
+            genai::Error::ChatResponse { body, .. } => Fault::Response {
+                status: json_status_code(body).and_then(|code| StatusCode::from_u16(code).ok()),
+                headers: None,
+                body: Some(Box::new(unwrap_relay(body.clone()))),
+            },
             _ => Fault::Terminal(None),
         }
     }
@@ -385,7 +382,7 @@ impl<'a> Fault<'a> {
                 status,
                 headers,
                 body,
-            } => Self::status(*status, Some(headers), body),
+            } => Self::http(*status, Some(headers), body),
             genai::webc::Error::Reqwest(e) => Self::of_reqwest(e),
             _ => Fault::Terminal(None),
         }
@@ -418,9 +415,9 @@ impl<'a> Fault<'a> {
         }
     }
 
-    fn status(status: StatusCode, headers: Option<&'a HeaderMap>, body: &str) -> Self {
-        Fault::Status {
-            status,
+    fn http(status: StatusCode, headers: Option<&'a HeaderMap>, body: &str) -> Self {
+        Fault::Response {
+            status: Some(status),
             headers,
             body: serde_json::from_str(body)
                 .ok()
@@ -1006,9 +1003,65 @@ mod tests {
         }
     }
 
-    /// A status read out of the body routes exactly as a header one does:
-    /// nested and flat bodies are both read, 429 reaches `Refused` rather
-    /// than the generic `Api` path, and a body with no code stays terminal.
+    #[test]
+    fn stream_error_keeps_its_body_without_an_http_status() {
+        use crate::record::fault::{Datum, Readout};
+
+        let message = "The ChatGPT user has reached their Subscription Sharing usage limit. \
+                       Ask the user to try again after their usage limit resets or use an API key instead.";
+        let body = serde_json::json!({
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "code": "subscription_sharing_usage_limit_exceeded",
+                "message": message,
+                "param": null,
+            },
+            "sequence_number": 2,
+        });
+        for boxed in [false, true] {
+            let mut err = genai::Error::ChatResponse {
+                model_iden: iden("gpt-6.1-sol"),
+                body: body.clone(),
+            };
+            if boxed {
+                err = genai::Error::WebStream {
+                    model_iden: iden("gpt-6.1-sol"),
+                    cause: "stream failed".into(),
+                    error: Box::new(err),
+                };
+            }
+            let error = ProviderError::from_genai(&err, "gpt-6.1-sol");
+            assert!(matches!(&error, ProviderError::Api { status: None, .. }));
+            assert_eq!(error.summary(), format!("api error: {message}"));
+            let saved = serde_json::to_value(&error).expect("recordable error");
+            assert_eq!(saved["api"]["body"], body);
+            let readout = Readout::fatal(&error);
+            let fields: Vec<_> = readout
+                .fields
+                .into_iter()
+                .map(|field| {
+                    let Datum::Text(value) = field.datum else {
+                        panic!("unexpected wait")
+                    };
+                    (field.label, value)
+                })
+                .collect();
+            assert_eq!(
+                fields,
+                [
+                    ("model".into(), "gpt-6.1-sol".into()),
+                    ("type".into(), "invalid_request_error".into()),
+                    (
+                        "code".into(),
+                        "subscription_sharing_usage_limit_exceeded".into()
+                    ),
+                    ("message".into(), message.into()),
+                ]
+            );
+        }
+    }
+
     #[test]
     fn from_genai_classifies_json_body_status_in_both_shapes() {
         let route = |body| {
@@ -1032,7 +1085,14 @@ mod tests {
         );
         let codeless = route(serde_json::json!({"message": "no code"}));
         assert!(
-            matches!(codeless, ProviderError::Other(_)),
+            matches!(
+                codeless,
+                ProviderError::Api {
+                    status: None,
+                    body: Some(_),
+                    ..
+                }
+            ),
             "a JSON body with no code is terminal, got {codeless:?}"
         );
     }
