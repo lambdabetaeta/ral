@@ -180,9 +180,10 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
   folder: nothing is copied, so there is no copy or free space to warn about.
 - `session/engine_log.rs` — `capture` writes `engine.log` into the run
   directory when a conversation's engine is lost: the sentence the user was
-  shown, then the guest console's capped copy (`vm_manager::GuestConsole`),
-  the one place an engine's dying words reach the host. On macOS no copy is
-  kept, and the file says so rather than reading as a silent guest.
+  shown, under an `Assistant engine lost` heading, then the guest console's
+  capped copy (`vm_manager::GuestConsole`), the one place an engine's dying
+  words reach the host. On macOS no copy is kept, and the file says so rather
+  than reading as a silent guest.
 - `accounts.rs` — **synod's own credential story**, and the one place it
   stops borrowing exarch's. A key reaches exarch through the environment
   because exarch is started from a shell; synod is double-clicked, inherits

@@ -81,7 +81,7 @@ pub(super) fn capture(
 /// directory to write into.
 fn render(why: &str, console: &vm_manager::GuestConsole) -> String {
     let mut out = String::new();
-    out.push_str("---- the engine behind this conversation went ----\n");
+    out.push_str("---- Assistant engine lost ----\n");
     out.push_str(why);
     out.push_str("\n\n");
     match console.log.as_ref() {
