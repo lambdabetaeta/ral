@@ -33,6 +33,7 @@ rustls     = { version = "0.23", default-features = false, features = ["std", "t
 webpki-roots = "1"
 tokio      = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }
 futures-util = { version = "0.3", default-features = false }
+clipboard  = { workspace = true }
 libc       = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }

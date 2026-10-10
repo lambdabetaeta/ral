@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 446e3123
-generated_at_date: 2026-10-06
+generated_at_commit: a152e8b0
+generated_at_date: 2026-10-10
 covers_paths: [core/src/source.rs, core/src/diagnostic.rs, core/src/compile.rs, core/src/syntax/report.rs, core/src/terminal.rs, core/src/terminal/stderr.rs, core/src/text.rs, core/src/ansi.rs, core/src/types/exit_hints.rs]
 ---
 
@@ -127,7 +127,7 @@ in `typecheck/explain.rs` ([[map/core/typecheck|typecheck]]).
 ## Styling and the colour gate — `core/src/ansi.rs`, `core/src/terminal.rs`
 
 `ansi` is vocabulary only: escape constants, the OSC helpers (`osc_set_title`,
-`osc8_link`, `osc52_copy`), `escape_seq_len`, `strip`, `visible`, `when`.
+`osc8_link`), `escape_seq_len`, `strip`, `visible`, `when`.
 **One colour decision, made once**: a front end probes a `TerminalState` and
 `seat`s it (`TerminalState::seat`, first wins); `terminal::stderr_color` and
 `terminal::ui_color` read that seat. A wire engine seats its `Attach.terminal`,

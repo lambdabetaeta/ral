@@ -443,34 +443,6 @@ pub(super) fn restore_stderr(backup: WindowsStderrBackup) {
     }
 }
 
-/// Raw-byte ceiling for an OSC 52 yank: base64 expands 3→4, keeping this under
-/// the tightest common per-sequence cap, kitty's 8 KiB.
-pub(super) const YANK_CAP: usize = 6000;
-
-/// Emit `text` to the host terminal's clipboard via OSC 52.  Oversized sequences
-/// are dropped in silence, so callers bound the slice (see [`YANK_CAP`]); tmux
-/// needs `set-clipboard on`, and on 3.3+ `allow-passthrough on`, or it eats the
-/// sequence on the way out.
-pub(super) fn osc52_copy(text: &str) -> io::Result<()> {
-    use base64::{Engine, engine::general_purpose::STANDARD};
-    use std::io::Write;
-    let payload = STANDARD.encode(text);
-    let sequence = ral_core::ansi::osc52_copy(&payload);
-    let mut out = io::stdout().lock();
-    out.write_all(sequence.as_bytes())?;
-    out.flush()
-}
-
-/// The last `cap` bytes of `text`, snapped forward to a char boundary; all of
-/// `text` when it already fits.
-pub(super) fn tail_bytes(text: &str, cap: usize) -> &str {
-    if text.len() <= cap {
-        return text;
-    }
-    let start = text.ceil_char_boundary(text.len() - cap);
-    &text[start..]
-}
-
 #[cfg(test)]
 mod tests {
     use super::pick_editor_spec;

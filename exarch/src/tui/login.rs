@@ -10,7 +10,6 @@ use super::app::Overlay;
 use super::line;
 use super::overlay::{self, Anchor};
 use super::palette::{CYAN, Col, RED, SLATE};
-use super::terminal::osc52_copy;
 use super::tui_loop::{CommandCtx, OverlayTick, Tui, overlay_tick};
 use crate::provider::identity;
 use crate::provider::oauth::{self, LoginPhase, OAuthToken, SignIn};
@@ -373,10 +372,10 @@ fn drive_login(tui: &mut Tui) -> Option<(OAuthToken, bool)> {
                     });
                     flow = Some(FlowHandle { rx, cancel });
                 }
-                // Only the write is ours to judge: OSC 52 draws no reply, so
+                // Only the write is ours to judge: over OSC 52 no reply comes, so
                 // whether the terminal at the far end honoured it is unknowable.
                 LoginAction::Yank(text) => {
-                    if osc52_copy(&text).is_ok()
+                    if tui.app.clipboard.copy(&text, true).is_ok()
                         && let Some(l) = tui.app.login_mut()
                     {
                         l.yanked = true;

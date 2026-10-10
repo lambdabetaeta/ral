@@ -21,32 +21,29 @@ use ral_core::{Shell, Value};
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use super::super::enquiry::{Data, EditorOp, EditorSnapshot, Enquiry, HighlightReq};
+use super::super::enquiry::{ClipboardReq, Data, EditorOp, EditorSnapshot, Enquiry, HighlightReq};
 use super::super::highlight_style::style_ansi;
 use super::editor::split_at_cursor;
 use ral_core::text::{byte_to_char, char_to_byte};
 
-/// Put `op` to the host's editor context.
-fn ask(shell: &Shell, mooring: &Mooring, op: EditorOp) -> Settled<FOValue> {
-    Ok(shell.enquire(mooring, Enquiry::Editor(op).encode())?)
+/// Put `req` to the host.
+fn ask(shell: &Shell, mooring: &Mooring, req: Enquiry) -> Settled<FOValue> {
+    Ok(shell.enquire(mooring, req.encode())?)
 }
 
-/// `op`'s answer, decoded as a `T`.
-fn answer<T: Datum>(shell: &Shell, mooring: &Mooring, op: EditorOp) -> Settled<T> {
-    T::decode(&ask(shell, mooring, op)?).map_err(|why| {
-        sig(format!(
-            "editor op: the host answered outside its shape: {why}"
-        ))
-    })
+/// `req`'s answer, decoded as a `T`.
+fn answer<T: Datum>(shell: &Shell, mooring: &Mooring, req: Enquiry) -> Settled<T> {
+    T::decode(&ask(shell, mooring, req)?)
+        .map_err(|why| sig(format!("the host answered outside its shape: {why}")))
 }
 
 fn snapshot(shell: &Shell, mooring: &Mooring) -> Settled<EditorSnapshot> {
-    answer(shell, mooring, EditorOp::Get)
+    answer(shell, mooring, Enquiry::Editor(EditorOp::Get))
 }
 
 /// Write `op`, answering `()`.
 fn write(shell: &Shell, mooring: &Mooring, op: EditorOp) -> Settled<Value> {
-    ask(shell, mooring, op).map(|_| Value::Unit)
+    ask(shell, mooring, Enquiry::Editor(op)).map(|_| Value::Unit)
 }
 
 fn require_interactive(name: &str, shell: &Shell) -> Settled<()> {
@@ -270,7 +267,7 @@ pub fn builtin_ed_history(args: &[Value], mooring: &Mooring, shell: &mut Shell) 
         Value::Int(n) => offset(*n),
         _ => return Err(sig("_ed-history: limit must be Int")),
     };
-    let history: Vec<String> = answer(shell, mooring, EditorOp::History)?;
+    let history: Vec<String> = answer(shell, mooring, Enquiry::Editor(EditorOp::History))?;
     let mut results: Vec<Value> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for entry in history {
@@ -449,39 +446,24 @@ pub fn builtin_ed_hyperlink(
     Ok(Value::string(rendered))
 }
 
-/// `_ed-clipboard <text>` — ask the host terminal to write `text` to the
-/// system clipboard via OSC 52.
+/// `_ed-clipboard <text>` — copy `text` to the system clipboard.
 ///
-/// Returns `Bool`: `true` when the sequence was emitted, `false` when the
-/// terminal isn't known to accept OSC 52 (so a plugin can fall back to
-/// `pbcopy` / `xclip` / `wl-copy`).  Gated on `editor.write` and the
-/// `ui_clipboard_write_ok` capability surfaced by `$TERMINAL`.
-///
-/// We emit directly to stdout because OSC 52 is zero-width: it neither
-/// moves the cursor nor writes visible bytes, so it does not corrupt the
-/// active rustyline display.  This matches the `write_terminal_title`
-/// precedent.  IO errors are swallowed — a failed copy is recoverable
-/// and shouldn't tear down the plugin handler.
+/// Returns `Bool`: whether the whole text reached the clipboard, natively when
+/// ral runs on this machine and else by OSC 52 (which also needs the
+/// `ui_clipboard_write_ok` capability surfaced by `$TERMINAL`).  Gated on
+/// `editor.write`.
 pub fn builtin_ed_clipboard(
     args: &[Value],
-    _mooring: &Mooring,
+    mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
     require_interactive("_ed-clipboard", shell)?;
     shell.check(Flag::EditorWrite, "_ed-clipboard")?;
-
-    if !shell.terminal().ui_clipboard_write_ok() {
-        return Ok(Value::Bool(false));
-    }
-
-    use base64::Engine;
-    use std::io::Write;
-    let payload = base64::engine::general_purpose::STANDARD
-        .encode(args[0].as_str("_ed-clipboard")?.as_bytes());
-    let sequence = ral_core::ansi::osc52_copy(&payload);
-    let _ = std::io::stdout().write_all(sequence.as_bytes());
-    let _ = std::io::stdout().flush();
-    Ok(Value::Bool(true))
+    let req = Enquiry::Clipboard(ClipboardReq {
+        text: args[0].as_str("_ed-clipboard")?.to_owned(),
+        osc52: shell.terminal().ui_clipboard_write_ok(),
+    });
+    answer(shell, mooring, req).map(Value::Bool)
 }
 
 /// `_ed-highlight <spans>` — set highlight spans (empty list clears).
@@ -548,7 +530,8 @@ pub fn builtin_ed_state(
 ) -> Settled<Value> {
     require_interactive("_ed-state", shell)?;
     shell.check(Flag::EditorWrite, "_ed-state")?;
-    let current = match answer::<Option<Data>>(shell, mooring, EditorOp::StateGet)? {
+    let current = match answer::<Option<Data>>(shell, mooring, Enquiry::Editor(EditorOp::StateGet))?
+    {
         Some(Data(stored)) => {
             let stored = Value::from(stored);
             // The cell outlives every session, so what it holds was decided by
@@ -782,7 +765,7 @@ static ED_BUILTINS_ARR: [BuiltinEntry; 18] = [
     BuiltinEntry::new(
         Cow::Borrowed("_ed-clipboard"),
         scheme_string_to_bool,
-        "_ed-clipboard <text>  — OSC 52 system-clipboard write; returns Bool (true on emit, false when host terminal can't).",
+        "_ed-clipboard <text>  — copy to the system clipboard, natively when local, else by OSC 52; returns Bool (true when all of it landed).",
         BuiltinBody::Static(builtin_ed_clipboard),
     ),
     BuiltinEntry::new(

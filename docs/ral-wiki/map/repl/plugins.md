@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 446e3123
+generated_at_commit: a152e8b0
 generated_at_date: 2026-10-05
 covers_paths: [ral/src/repl/plugin.rs, ral/src/repl/plugin/, ral/src/repl/keybinding.rs, ral/src/repl/enquiry.rs]
 ---
@@ -85,7 +85,7 @@ them from `help`. They split into reads (`_ed-get`, `_ed-text`, `_ed-cursor`,
 `_ed-keymap`, `_ed-lbuffer`), buffer writes (`_ed-set`, `_ed-set-lbuffer`,
 `_ed-insert`, `_ed-push`, `_ed-accept`), display effects (`_ed-ghost`,
 `_ed-highlight`), services (`_ed-tui`, `_ed-history`, `_ed-parse`, `_ed-state`),
-and terminal escapes (`_ed-clipboard` for OSC 52, `_ed-hyperlink` for OSC 8).
+and terminal escapes (`_ed-clipboard` copies natively when local, else by OSC 52; `_ed-hyperlink` is OSC 8).
 
 Each is a **thin engine-side door**: it keeps its own checks — interactive
 mode, `Shell::check(Flag::EditorRead | Flag::EditorWrite, …)` against the grant, its

@@ -12,7 +12,7 @@ use crate::bus::{Emitter, Inbox, channel};
 use crate::card::Row;
 use ral_core::capability::Capabilities;
 use ral_core::carrier::IdentityTransport;
-use ral_core::fact::{Command, Read};
+use ral_core::fact::Read;
 use ral_core::first_order::datum::Datum as _;
 use ral_core::types::WriteOutcome;
 use ral_core::types::{
@@ -1470,7 +1470,10 @@ fn a_write_over_a_file_too_large_to_read_shows_no_diff() {
 #[cfg(unix)]
 #[test]
 fn bare_external_surfaces_one_exec_card() {
-    use ral_core::types::{AuditIo, CommandOrigin};
+    use ral_core::{
+        fact::Command,
+        types::{AuditIo, CommandOrigin},
+    };
     let engine = fresh();
 
     let (r, records) = run_capturing(&engine, "/usr/bin/true");
@@ -1540,7 +1543,10 @@ fn view_is_a_helper_not_an_exec_image() {
 #[cfg(unix)]
 #[test]
 fn cat_redirect_surfaces_read_then_exec_in_order() {
-    use ral_core::types::{AuditIo, CommandOrigin};
+    use ral_core::{
+        fact::Command,
+        types::{AuditIo, CommandOrigin},
+    };
     let engine = fresh();
     let (_dir, path) = scratch_file("cov-cat", "a", "one\ntwo\n");
 

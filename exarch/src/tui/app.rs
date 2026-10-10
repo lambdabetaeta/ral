@@ -4,7 +4,7 @@
 
 use super::banner;
 use super::block::{AgentSlot, Chrome};
-use super::gesture::{Effect, GestureState};
+use super::gesture::{Effect, GestureState, Toast};
 use super::login::LoginOverlay;
 use super::matrix::{self, Matrix, MatrixSort, Nav};
 use super::palette::AGENT_HUES;
@@ -16,7 +16,7 @@ use super::resources::{BusFigures, ScrollbackFigures, frontend_rows};
 use super::rewind::RewindOverlay;
 use super::scrollback::Scrollback;
 use super::tabs::{TabRow, Tabs};
-use super::terminal::{Term, osc52_copy};
+use super::terminal::Term;
 use crate::agent::Agent;
 use crate::agent::fleet::Fleet;
 use crate::bus::{BusReceiver, Inbox};
@@ -24,6 +24,7 @@ use crate::provider::identity::Account;
 use crate::provider::{Provider, Usage};
 use crate::record::{AgentId, AgentState};
 use crate::record::{Display, Forensic, Record, Recorded, Transient};
+use clipboard::Clipboard;
 
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -62,6 +63,7 @@ pub(crate) struct App {
     /// rendering: drawn last, over the dimmed session.
     pub(super) overlay: Option<Overlay>,
     pub(super) gesture: GestureState,
+    pub(super) clipboard: Clipboard,
     /// A render-time projection over `tabs`, never a reshuffle of the model.
     pub(super) matrix_sort: MatrixSort,
     /// The matrix's cursor, deliberately separate from [`Tabs::focus`]: moving
@@ -99,6 +101,7 @@ impl App {
             status_model: String::new(),
             overlay: None,
             gesture: GestureState::new(),
+            clipboard: Clipboard::default(),
             matrix_sort: MatrixSort::default(),
             matrix: Matrix::Watching,
             root_clear_drain: false,
@@ -532,8 +535,9 @@ impl App {
                 }
             }
             Effect::Copy(text) => {
-                let outcome = osc52_copy(&text).map(|()| text.chars().count());
-                self.gesture.note_copy(outcome);
+                let sent = self.clipboard.copy(&text, true).ok();
+                self.gesture
+                    .note_copy(sent, Toast::Copied(text.chars().count()));
             }
         }
     }

@@ -1,10 +1,11 @@
-//! The REPL's two enquiry classes, typed once for both ends: the engine's
+//! The REPL's three enquiry classes, typed once for both ends: the engine's
 //! doors encode a request, the host decodes it, and back.
 //!
 //! - `` `repl-editor `` — the `_ed-*` doors' reads and writes of the editor
 //!   context the host installs around a plugin hook's dispatch;
 //! - `` `repl-plugin `` — the load doors telling the host a plugin's
-//!   first-order manifest, which the host may refuse.
+//!   first-order manifest, which the host may refuse;
+//! - `` `repl-clipboard `` — `_ed-clipboard`'s copy, which the host performs.
 
 use ral_core::first_order::FOValue;
 use ral_core::first_order::datum::{Datum, tag, untag};
@@ -14,6 +15,7 @@ use super::plugin::manifest::Manifest;
 
 const EDITOR: &str = "repl-editor";
 const PLUGIN: &str = "repl-plugin";
+const CLIPBOARD: &str = "repl-clipboard";
 
 /// One request to the host's editor context.
 #[derive(Debug, Clone, PartialEq)]
@@ -80,6 +82,18 @@ impl Datum for Data {
     }
 }
 
+/// A copy for the host to make; `osc52` is whether the terminal may be asked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClipboardReq {
+    pub(crate) text: String,
+    pub(crate) osc52: bool,
+}
+
+record!(ClipboardReq {
+    text: "text",
+    osc52: "osc52",
+});
+
 /// What a load door tells the host.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum PluginNote {
@@ -91,6 +105,7 @@ pub(crate) enum PluginNote {
 pub(crate) enum Enquiry {
     Editor(EditorOp),
     Plugin(PluginNote),
+    Clipboard(ClipboardReq),
 }
 
 impl Datum for EditorOp {
@@ -153,6 +168,7 @@ impl Datum for Enquiry {
             Self::Plugin(PluginNote::Unloaded(name)) => {
                 tag(PLUGIN, Some(tag("unloaded", Some(name.encode()))))
             }
+            Self::Clipboard(req) => tag(CLIPBOARD, Some(req.encode())),
         }
     }
 
@@ -171,8 +187,9 @@ impl Datum for Enquiry {
                     note.shape()
                 )),
             },
+            Some((CLIPBOARD, Some(req))) => ClipboardReq::decode(req).map(Self::Clipboard),
             Some((class, _)) => Err(format!(
-                "the REPL answers no `{class} enquiries: only `{EDITOR} and `{PLUGIN}"
+                "the REPL answers no `{class} enquiries: only `{EDITOR}, `{PLUGIN} and `{CLIPBOARD}"
             )),
             None => Err(format!("an enquiry must be a variant, got {}", v.shape())),
         }
@@ -204,6 +221,11 @@ mod tests {
         }
         let note = Enquiry::Plugin(PluginNote::Unloaded("p".into()));
         assert_eq!(Enquiry::decode(&note.clone().encode()), Ok(note));
+        let copy = Enquiry::Clipboard(ClipboardReq {
+            text: "hi".into(),
+            osc52: true,
+        });
+        assert_eq!(Enquiry::decode(&copy.clone().encode()), Ok(copy));
     }
 
     /// An unknown class names itself, never passes silently.

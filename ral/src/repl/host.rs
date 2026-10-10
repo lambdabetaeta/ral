@@ -1,7 +1,8 @@
-//! The REPL's [`Host`]: it answers the engine's `` `repl-editor `` and
-//! `` `repl-plugin `` enquiries, renders what the engine surfaces, and is
+//! The REPL's [`Host`]: it answers the engine's `` `repl-editor ``,
+//! `` `repl-plugin `` and `` `repl-clipboard `` enquiries, renders what the engine surfaces, and is
 //! the one door every plugin hook's dispatch goes through.
 
+use clipboard::{Clipboard, Copied};
 use ral_core::carrier::{Host, Severed, Transport, dispatch_to_report};
 use ral_core::first_order::FOValue;
 use ral_core::first_order::datum::{Datum as _, untag};
@@ -15,7 +16,7 @@ use ral_core::{errln, outln};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use super::enquiry::Enquiry;
+use super::enquiry::{ClipboardReq, Enquiry};
 use super::plugin::PluginRuntime;
 use super::plugin::editor::PluginContext;
 
@@ -29,6 +30,7 @@ pub(super) struct ReplHost {
     printer: Mutex<Option<Printer>>,
     /// The session prompt's latest fault, so a broken prompt says so once.
     prompt_fault: Mutex<Option<String>>,
+    clipboard: Mutex<Clipboard>,
 }
 
 /// What one hook dispatch came to.  An `exit` from a hook is ignored, so it
@@ -60,6 +62,7 @@ impl ReplHost {
             editor: Mutex::default(),
             printer: Mutex::default(),
             prompt_fault: Mutex::default(),
+            clipboard: Mutex::default(),
         })
     }
 
@@ -180,6 +183,13 @@ impl Host for ReplHost {
                 .note(note)
                 .map(|()| FOValue::Unit)
                 .map_err(refuse),
+            Enquiry::Clipboard(ClipboardReq { text, osc52 }) => {
+                let whole = matches!(
+                    self.clipboard.lock_ignore_poison().copy(&text, osc52),
+                    Ok(Copied::Whole)
+                );
+                Ok(whole.encode())
+            }
         }
     }
 }

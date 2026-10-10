@@ -608,6 +608,10 @@ the size cap, and the hit/press helpers have one home. This is the one piece of
 non-trivial structural work the pointer layer adds; the rest is wiring it into
 `compose`.
 
+The clipboard half has landed as the `clipboard` crate (2026-10-10): native
+when local, OSC 52 under ssh or without a display, shared by exarch and the
+REPL host.
+
 ## The substrate, not the wrapper
 
 Every projection is a **projection of runtime state that already exists** —

@@ -64,19 +64,6 @@ pub fn osc8_link(uri: &str, text: &str) -> String {
     format!("\x1b]8;;{uri}\x1b\\{text}\x1b]8;;\x1b\\")
 }
 
-/// OSC 52 — ask the terminal to put `base64_payload` on the system clipboard.
-///
-/// The caller encodes, which is what keeps `core` free of a base64 dependency.
-/// Terminated with BEL, not ST: tmux relays a copy through its `Ms` capability,
-/// which emits BEL, and some terminals implementing OSC 52 never learned ST.
-/// Every yank path, REPL and exarch alike, goes through here.
-///
-/// Write only.  Clipboard reads are not offered because the permission prompts
-/// vary too much between terminals, and `TerminalState` gates only the write.
-pub fn osc52_copy(base64_payload: &str) -> String {
-    format!("\x1b]52;c;{base64_payload}\x07")
-}
-
 // ── Escape-sequence scanning ───────────────────────────────────────────────
 
 const ESC: u8 = 0x1b;
@@ -218,12 +205,6 @@ mod tests {
         // The empty URI is the close-link sentinel; wrapping text in it is a
         // caller error, but must still parse rather than truncate the stream.
         assert_eq!(osc8_link("", "text"), "\x1b]8;;\x1b\\text\x1b]8;;\x1b\\");
-    }
-
-    #[test]
-    fn osc52_copy_uses_system_clipboard_target_and_bel() {
-        // The payload is opaque to the builder; `aGVsbG8=` is "hello", spliced.
-        assert_eq!(osc52_copy("aGVsbG8="), "\x1b]52;c;aGVsbG8=\x07");
     }
 
     #[test]

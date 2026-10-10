@@ -1,5 +1,5 @@
 ---
-generated_at_commit: f7ceae58
+generated_at_commit: a152e8b0
 generated_at_date: 2026-10-10
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/record/session.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/cancel.rs, exarch/src/boot.rs, exarch/src/agent/seat.rs, exarch/src/signals.rs, exarch/src/prompt/host.rs]
 ---
@@ -421,7 +421,8 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  `/export`, `/model`, `/login`, `/providers`, `/limits`, `/thinking`, `/close`, `/focus`) run
  on the UI thread; `/help` answers with a framed card of `(command, gloss)`
  rows, and `/copy` answers where every copy does — the transient corner
- toast of `gesture::Toast`, never a block in the transcript;
+ toast of `gesture::Toast`, never a block in the transcript; copies go
+ through the `clipboard` crate, native locally and OSC 52 over ssh;
  session commands are parsed at submit into a `Read` (`/branch`,
  `/context`, `/resources`) or a `Rewrite` (`/clear`, `/evict`, `/rewind`,
  `/quit`) and enter the trunk's inbox. `/rewind` takes no argument: it opens
@@ -491,8 +492,8 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
   label from the flow rather than reconstructing it in the view. Every body row
   is a `(label, value)` pair over one shared column, and a value too long for it
   wraps instead of clipping; `y` sends the phase's one transcribable value — the URL, or the device code —
-  to the host clipboard over OSC 52, which is how it reaches a browser at the
-  other end of an ssh connection. Closing the overlay sets its relaxed
+  to the clipboard through the `clipboard` crate: native locally, and over
+  OSC 52 under ssh, which is how it reaches a browser at the other end. Closing the overlay sets its relaxed
   cancellation flag; browser accept polls it directly, while device polling
   checks it before each bounded request.
 - `headless.rs` — one-shot pipe: `--output-format text` suppresses incidental

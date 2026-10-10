@@ -4303,7 +4303,7 @@ Cursor and span offsets count Unicode characters, not UTF-8 bytes.
 | `_ed-highlight spans` | Replace highlight spans of shape `[start, end, style]`; an empty list clears them. |
 | `_ed-state default updater` | Read, transform, store, and return one persistent cell belonging to the plugin. |
 | `_ed-tui block` | Suspend the editor, run the block, and return `[output: String, status: Int]`. |
-| `_ed-clipboard text` | Attempt an OSC 52 clipboard write; return whether the terminal accepted emission. |
+| `_ed-clipboard text` | Copy `text` to the system clipboard, natively when local, else by OSC 52; return whether all of it landed. |
 | `_ed-hyperlink uri text` | Return an OSC 8 hyperlink where supported, otherwise return plain `text`. |
 
 `_ed-push` and `_ed-accept` may be combined to preserve the current input while

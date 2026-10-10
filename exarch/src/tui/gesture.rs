@@ -3,9 +3,9 @@
 //! `App` to apply.  Nothing here touches a scrollback mutably or the terminal.
 
 use std::cmp::Ordering;
-use std::io;
 use std::time::{Duration, Instant};
 
+use clipboard::Copied;
 use ratatui::crossterm::event::MouseEvent;
 use ratatui::layout::{Position, Rect};
 
@@ -106,8 +106,8 @@ pub(super) enum Toast {
     Copied(usize),
     /// `/copy`, counted in lines of the reply.
     Reply(usize),
-    /// `/copy` of a reply past the clipboard limit: only its last bytes went.
-    ReplyTail(usize),
+    /// A copy past what OSC 52 carries: only its last bytes went.
+    Tail(usize),
     CopyFailed,
 }
 
@@ -229,13 +229,16 @@ impl GestureState {
         }
     }
 
-    /// Record the outcome of an [`Effect::Copy`]: the count copied, or failure.
-    pub(super) fn note_copy(&mut self, outcome: io::Result<usize>) {
-        self.note(outcome.map_or(Toast::CopyFailed, Toast::Copied));
+    /// Record a copy's outcome, `whole` when all of it landed.
+    pub(super) fn note_copy(&mut self, sent: Option<Copied>, whole: Toast) {
+        self.note(match sent {
+            None => Toast::CopyFailed,
+            Some(Copied::Tail(n)) => Toast::Tail(n),
+            Some(Copied::Whole) => whole,
+        });
     }
 
-    /// Post a copy outcome reached elsewhere, `/copy`'s among them.
-    pub(super) fn note(&mut self, toast: Toast) {
+    fn note(&mut self, toast: Toast) {
         self.toast = Some((toast, Instant::now()));
     }
 

@@ -12,7 +12,6 @@ use super::model_picker::pick_model;
 use super::providers;
 use super::rewind;
 use super::scrollback;
-use super::terminal::{YANK_CAP, osc52_copy, tail_bytes};
 use super::tui_loop::Tui;
 use crate::SessionInfo;
 use crate::bus::{Mailbox, Post, Read, Rewrite};
@@ -366,11 +365,10 @@ pub(super) fn cmd_thinking(app: &mut App) {
     app.tabs.toggle_thinking();
 }
 
-/// Copy the latest reply, as raw markdown, to the clipboard via OSC 52.  A reply
-/// past the terminal's per-sequence limit is copied tail-first and announced,
-/// since the terminal would otherwise drop the sequence and copy nothing.  The
-/// outcome is a corner toast, as a drag-selection's copy is: a copy is a
-/// gesture on the transcript, not an event in it.
+/// Copy the latest reply, as raw markdown, to the clipboard; only over OSC 52
+/// does a long one arrive tail-first, announced.  The outcome is a corner
+/// toast, as a drag-selection's copy is: a copy is a gesture on the transcript,
+/// not an event in it.
 pub(super) fn cmd_copy(app: &mut App) {
     let id = app.tabs.root();
     let reply = app.latest_reply();
@@ -378,15 +376,9 @@ pub(super) fn cmd_copy(app: &mut App) {
         app.push_error(id, "no reply to copy yet");
         return;
     }
-    let payload = tail_bytes(&reply, YANK_CAP);
-    let toast = if osc52_copy(payload).is_err() {
-        Toast::CopyFailed
-    } else if payload.len() < reply.len() {
-        Toast::ReplyTail(payload.len())
-    } else {
-        Toast::Reply(reply.lines().count())
-    };
-    app.gesture.note(toast);
+    let sent = app.clipboard.copy(&reply, true).ok();
+    app.gesture
+        .note_copy(sent, Toast::Reply(reply.lines().count()));
 }
 
 /// Write the focused tab's rendered `user.log` to `arg`, never over an existing
