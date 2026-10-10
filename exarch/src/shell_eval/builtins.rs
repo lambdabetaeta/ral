@@ -18,7 +18,6 @@ use ral_core::types::{Break, BuiltinBody, BuiltinEntry, Mooring, Observed, Settl
 use ral_core::{HostSurface, Shell, Value};
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::fmt::Write as _;
 use std::io::{Read as _, Write};
 use std::sync::Arc;
 
@@ -844,7 +843,8 @@ fn builtin_skill(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settle
                 Ok(body) => body,
                 Err(why) => {
                     return Settled::Ok(Value::string(format!(
-                        "could not read skill {name}: {why}"
+                        "could not load skill {name:?} from {}: {why}",
+                        sk_md.display()
                     )));
                 }
             };
@@ -879,29 +879,30 @@ fn builtin_skill_list(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> 
     let cwd = shell.cwd();
     let config_dir = crate::app::EXARCH.xdg_dir(ral_core::host::XdgKind::Config);
     let all = skill::discover_all(&cwd, &config_dir);
-    let mut out = String::new();
+    let (mut entries, mut errors) = (Vec::new(), Vec::new());
     for (name, dir) in &all {
         let sk_md = dir.join("SKILL.md");
         let rp = shell.resolve(&sk_md.to_string_lossy());
-        if shell.check_fs_read(&rp).is_ok()
-            && let Some(s) = skill::parse_skill(dir, name)
-        {
-            if !out.is_empty() {
-                out.push('\n');
+        if shell.check_fs_read(&rp).is_ok() {
+            match skill::parse_skill(dir, name) {
+                Ok(s) => entries.push(format!("{}: {}", s.name, s.description)),
+                Err(why) => errors.push(format!("⚠ skipped {}: {why}", sk_md.display())),
             }
-            let _ = write!(out, "{}: {}", s.name, s.description);
         }
     }
-    #[allow(
-        clippy::cast_possible_wrap,
-        reason = "skill-list line count bounded; no i64 wrap"
-    )]
-    let count = out.lines().count() as i64;
     mooring.surface(&Value::map(vec![
         ("io".into(), Value::string("skill-list")),
-        ("count".into(), Value::Int(count)),
+        (
+            "count".into(),
+            Value::Int(i64::try_from(entries.len()).unwrap_or(i64::MAX)),
+        ),
     ]));
-    Settled::Ok(Value::string(out))
+    let sections: Vec<_> = [entries, errors]
+        .iter()
+        .filter(|v| !v.is_empty())
+        .map(|v| v.join("\n"))
+        .collect();
+    Settled::Ok(Value::string(sections.join("\n\n")))
 }
 
 /// `service-handle :: ∀α. Int → F (Handle α)` — the per-call-site α instantiation

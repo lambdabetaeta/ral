@@ -44,7 +44,14 @@ fn name_must_match_dir() {
         "---\nname: wrong-name\ndescription: x\n---\n",
     )
     .unwrap();
-    assert!(parse_skill(&skill_dir, "my-skill").is_none());
+    assert!(parse_skill(&skill_dir, "my-skill").is_err());
+}
+
+#[test]
+fn frontmatter_errors_name_the_problem() {
+    let err = |raw| skill_from_frontmatter(raw, "my-skill").unwrap_err();
+    assert!(err("---\nname: other\ndescription: x\n---\n").contains("must match directory name"));
+    assert!(err("---\nname: my-skill\n---\n").contains("description"));
 }
 
 #[test]

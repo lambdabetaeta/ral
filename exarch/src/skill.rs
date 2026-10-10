@@ -77,7 +77,7 @@ pub fn discover_metadata(
         let Ok(raw) = std::fs::read_to_string(rp.as_path()) else {
             continue;
         };
-        if let Some(skill) = skill_from_frontmatter(&raw, &name) {
+        if let Ok(skill) = skill_from_frontmatter(&raw, &name) {
             skills.push(skill);
         }
     }
@@ -88,13 +88,32 @@ pub fn discover_metadata(
 /// is valid and matches its directory.  I/O-free by design: callers do their own
 /// read, keeping the silent startup door and the surface turn-time door distinct
 /// while sharing this parse.
-fn skill_from_frontmatter(raw: &str, dir_name: &str) -> Option<Skill> {
+fn skill_from_frontmatter(raw: &str, dir_name: &str) -> Result<Skill, String> {
     let matter = Matter::<YAML>::new();
-    let parsed: gray_matter::ParsedEntity<gray_matter::Pod> = matter.parse(raw).ok()?;
-    let data = parsed.data?;
-    let name = data["name"].as_string().ok()?;
-    let description = data["description"].as_string().ok()?;
-    (name == dir_name && valid_skill_name(&name)).then_some(Skill { name, description })
+    let parsed: gray_matter::ParsedEntity<gray_matter::Pod> = matter
+        .parse(raw)
+        .map_err(|e| format!("invalid YAML frontmatter: {e}"))?;
+    let Some(gray_matter::Pod::Hash(data)) = parsed.data else {
+        return Err("missing YAML frontmatter".into());
+    };
+    // `Pod`'s `Index` panics on a missing key.
+    let field = |key| {
+        data.get(key)
+            .and_then(|v| v.as_string().ok())
+            .ok_or_else(|| format!("frontmatter must contain a string `{key}`"))
+    };
+    let (name, description) = (field("name")?, field("description")?);
+    if !valid_skill_name(&name) {
+        return Err(format!(
+            "invalid skill name {name:?}; use lowercase letters, digits, and hyphens"
+        ));
+    }
+    if name != dir_name {
+        return Err(format!(
+            "frontmatter name {name:?} must match directory name {dir_name:?}"
+        ));
+    }
+    Ok(Skill { name, description })
 }
 
 /// `dir`'s frontmatter, for the `skill-list` builtin; the call site has already
@@ -103,8 +122,8 @@ fn skill_from_frontmatter(raw: &str, dir_name: &str) -> Option<Skill> {
     clippy::disallowed_methods,
     reason = "[surface:skill-list] reads a SKILL.md's frontmatter for the `skill-list` builtin; the surface card justifies the read"
 )]
-pub(crate) fn parse_skill(dir: &Path, dir_name: &str) -> Option<Skill> {
-    let raw = std::fs::read_to_string(dir.join("SKILL.md")).ok()?;
+pub(crate) fn parse_skill(dir: &Path, dir_name: &str) -> Result<Skill, String> {
+    let raw = std::fs::read_to_string(dir.join("SKILL.md")).map_err(|e| e.to_string())?;
     skill_from_frontmatter(&raw, dir_name)
 }
 
@@ -115,12 +134,11 @@ pub(crate) fn parse_skill(dir: &Path, dir_name: &str) -> Option<Skill> {
     reason = "[surface:skill-body] reads the SKILL.md body for `skill`; the surface card justifies the read"
 )]
 pub(crate) fn read_skill_body(dir: &Path) -> Result<String, String> {
-    let path = dir.join("SKILL.md");
-    let raw = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let raw = std::fs::read_to_string(dir.join("SKILL.md")).map_err(|e| e.to_string())?;
     let matter = Matter::<YAML>::new();
     let parsed: gray_matter::ParsedEntity<gray_matter::Pod> = matter
         .parse(&raw)
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+        .map_err(|e| format!("invalid YAML frontmatter: {e}"))?;
     Ok(parsed.content)
 }
 

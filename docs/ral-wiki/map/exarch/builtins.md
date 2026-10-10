@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 0dc4a920
+generated_at_commit: c52e910a
 generated_at_date: 2026-10-09
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/skill.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/src/enquiry.rs, exarch/src/library.rs, exarch/data/agent.ral]
 ---
@@ -78,7 +78,10 @@ logical operation with one surface ([[map/exarch/io-surface|io-surface]]).
 - `skill-list` / `skill <name>` — Agent Skills with progressive disclosure: list
   the available skills (fresh scan each call, filtered by the grant), then load
   one skill's full `SKILL.md` body on demand; the scan and frontmatter parse
-  live in `skill.rs`.
+  live in `skill.rs`. Startup discovery skips invalid files quietly; `skill-list`
+  lists valid skills, then names each skipped `SKILL.md` by path with its cause;
+  its count covers only valid skills. `skill` reports a read or frontmatter
+  failure with the skill's name and path.
 - `fff <query>` → `[String]`. Frecency-ranked fuzzy filename search over the
   working tree (`fff_index`, the `fff-search` crate); the per-directory index is
   cached process-globally, so forked children sharing the cwd reuse it.
