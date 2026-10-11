@@ -71,6 +71,17 @@ variant!(typed Observed {
 });
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Retention {
+    pub bytes: u64,
+    pub truncated: bool,
+}
+
+record!(typed Retention {
+    bytes: "bytes",
+    truncated: "truncated",
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Command {
     /// Shown name first, then its arguments.
     pub argv: Vec<String>,
@@ -80,6 +91,9 @@ pub struct Command {
     /// `Bytes`.
     pub stdout: Bytes,
     pub stderr: Bytes,
+    /// `None` without byte capture.
+    pub stdout_capture: Option<Retention>,
+    pub stderr_capture: Option<Retention>,
     /// The runtime's own account of why the command failed: `Some` iff the
     /// outcome was a runtime error.  The streams hold only what the child
     /// wrote; this is the one place ral speaks in its own voice.
@@ -103,6 +117,8 @@ impl Command {
             origin,
             stdout: io.stdout.into(),
             stderr: io.stderr.into(),
+            stdout_capture: io.stdout_capture,
+            stderr_capture: io.stderr_capture,
             error,
         }
     }
@@ -114,6 +130,8 @@ record!(typed Command {
     origin: "origin",
     stdout: "stdout",
     stderr: "stderr",
+    stdout_capture: "stdout-capture",
+    stderr_capture: "stderr-capture",
     error: "error",
 });
 

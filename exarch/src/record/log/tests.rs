@@ -1,5 +1,5 @@
 use super::*;
-use crate::record::Forensic;
+use crate::record::{Display, Forensic};
 
 fn temp_path(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
@@ -88,6 +88,50 @@ fn a_record_round_trips_through_the_entry_envelope() {
         line.contains("\"at_unix_ms\""),
         "the line on disk must carry the Entry envelope: {line}"
     );
+}
+
+#[test]
+fn a_large_observation_replays_exactly_from_compact_bytes() {
+    use ral_core::fact::{Command, CommandOrigin, Observation, Observed, Retention};
+    use ral_core::first_order::datum::Datum as _;
+    use ral_core::types::AuditIo;
+
+    let path = temp_path("compact-observation");
+    let log = Log::create(&path).unwrap();
+    let bytes: Vec<u8> = (0..=255).cycle().take(1024 * 1024).collect();
+    let observation = Observation::instant(
+        None,
+        None,
+        Observed::Command(Command::new(
+            "producer",
+            [],
+            0,
+            CommandOrigin::External,
+            AuditIo {
+                stdout: bytes.clone(),
+                stdout_capture: Some(Retention {
+                    bytes: 2 * bytes.len() as u64,
+                    truncated: true,
+                }),
+                ..AuditIo::default()
+            },
+            None,
+        )),
+    );
+    let _locus = log
+        .append(Record::Display(Display::Observation {
+            value: observation.clone().encode(),
+        }))
+        .unwrap();
+    assert!(std::fs::metadata(&path).unwrap().len() < 1_400_000);
+    let records: Vec<_> = Log::read(&path).unwrap().collect::<Result<_, _>>().unwrap();
+    assert_eq!(records.len(), 1);
+    let Record::Display(Display::Observation { value }) =
+        records.into_iter().next().unwrap().into_value()
+    else {
+        panic!("the observation replays as an observation")
+    };
+    assert_eq!(Observation::decode(&value).unwrap(), observation);
 }
 
 #[test]

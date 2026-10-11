@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 446e3123
-generated_at_date: 2026-09-26
+generated_at_commit: 53509c43
+generated_at_date: 2026-10-11
 covers_paths: [core/src/first_order.rs, core/src/first_order/, core/src/types/value/first_order.rs, core/src/seed.rs, core/src/seed/, core/src/frame.rs, core/src/guard/grant.rs]
 ---
 
@@ -66,6 +66,8 @@ typed accessors (`field`, `as_str`, `as_int`, …) for a host reading one.
   declarations (`ErrorRecord::ty()`); `await`'s and `poll`'s polymorphic shapes
   are `Io::ty().extend(..)` over them. The doors that mint them sit above
   (`types::error`, `types::audit`).
+- `first_order/byte_encoding.rs` — byte strings serialize to base64 in JSON
+  and native bytes in binary codecs. Each decoder requires its encoding.
 
 **One walk each way joins `Value` and `FOValue`
 (`types/value/first_order.rs`).** `FOValue::walk` folds a `Value`, handing each

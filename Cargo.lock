@@ -5828,6 +5828,7 @@ version = "0.8.0"
 dependencies = [
  "anstyle-query",
  "ariadne",
+ "base64 0.22.1",
  "cap-fs-ext",
  "cap-primitives",
  "csv",

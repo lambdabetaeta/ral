@@ -93,6 +93,13 @@ Read a report with two prelude functions: `succeeded $r` is a `Bool`, and `comma
     let out = bytes-to-string !{commands $r}[0][stdout]
     if !{succeeded $r} { $out } else { #'no matches'# }
 
+Each command retains at most 1 MiB per stream. Its `stdout-capture` and
+`stderr-capture` are `` `some [bytes: Int, truncated: Bool] `` when captured:
+check `truncated` before treating the bytes as complete. Capture retains an
+exact prefix, including intermediate pipeline output; all bytes still flow
+to their destination. Redirect large output to a file and read a bounded
+window when you need more.
+
 Prefer `!{commands $r}` to a `case` on the trail whenever only commands matter. When you want the failure itself, `case` on the outcome — the `` `err `` record is exactly what `try` hands its handler:
 
     case $r[outcome] [

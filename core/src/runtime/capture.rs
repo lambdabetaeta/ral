@@ -3,9 +3,12 @@
 //! buffer, so the bytes become a value; [`with_audit_capture`] *tees*, so bytes
 //! are recorded and still go where they were going.  A write's destination is
 //! settled where the writer stands, so no byte is ever moved after the fact.
-use crate::io::{Sink, new_buffer, tee_with_buffer};
-use crate::types::Shell;
+use crate::fact::Retention;
+use crate::io::{ByteBuffer, Sink, new_buffer, tee_with_buffer};
+use crate::types::{AuditIo, Shell};
 use std::mem::{replace, swap};
+
+const AUDIT_BUFFER_CAP: usize = 1024 * 1024;
 
 /// Restores the sinks it replaced on `Drop`, panic included.
 struct SinkScope<'a> {
@@ -61,17 +64,101 @@ where
 /// standalone external; direct-spawn pipeline stages never reach here, since
 /// their stdout is a kernel pipe to the next stage and `pipeline::collect`
 /// synthesises their node with no bytes.
-pub(crate) fn with_audit_capture<R, F>(shell: &mut Shell, f: F) -> (R, Vec<u8>, Vec<u8>)
+pub(crate) fn with_audit_capture<R, F>(shell: &mut Shell, f: F) -> (R, AuditIo)
 where
     F: FnOnce(&mut Shell) -> R,
 {
     if !shell.local.audit.captures_bytes() {
-        return (f(shell), Vec::new(), Vec::new());
+        return (f(shell), AuditIo::default());
     }
-    let (out_sink, out_buf) = tee_with_buffer(shell.io.stdout.clone());
-    let (err_sink, err_buf) = tee_with_buffer(shell.io.stderr.clone());
+    let (out_sink, out_buf) = tee_with_buffer(shell.io.stdout.clone(), AUDIT_BUFFER_CAP);
+    let (err_sink, err_buf) = tee_with_buffer(shell.io.stderr.clone(), AUDIT_BUFFER_CAP);
     let scope = SinkScope::enter(shell, out_sink, Some(err_sink));
     let result = f(scope.shell);
     drop(scope);
-    (result, out_buf.take(), err_buf.take())
+    let capture = |buf: &ByteBuffer| {
+        Some(Retention {
+            bytes: buf.total(),
+            truncated: buf.overflowed(),
+        })
+    };
+    let io = AuditIo {
+        stdout: out_buf.take(),
+        stderr: err_buf.take(),
+        stdout_capture: capture(&out_buf),
+        stderr_capture: capture(&err_buf),
+    };
+    (result, io)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::CapturePolicy;
+    use std::io::Write as _;
+
+    #[test]
+    fn audit_caps_both_streams_without_limiting_ordinary_capture() {
+        let mut shell = crate::test_helper::core_shell();
+        let scope = shell.local.audit.open(CapturePolicy::Bytes);
+        let stdout: Vec<u8> = (0..=255).cycle().take(AUDIT_BUFFER_CAP + 4096).collect();
+        let stderr = vec![255; AUDIT_BUFFER_CAP + 1];
+        let (err_sink, err_buf) = new_buffer();
+        shell.io.stderr = err_sink;
+        let ((result, io), captured, overflowed) = with_capture(&mut shell, |shell| {
+            with_audit_capture(shell, |shell| {
+                shell.io.stdout.write_all(&stdout)?;
+                shell.io.stderr.write_all(&stderr)
+            })
+        });
+        result.unwrap();
+        let _trail = shell.local.audit.close(scope);
+        assert!(!overflowed);
+        assert_eq!(captured, stdout);
+        assert_eq!(err_buf.take(), stderr);
+        assert_eq!(io.stdout, stdout[..AUDIT_BUFFER_CAP]);
+        assert_eq!(io.stderr, stderr[..AUDIT_BUFFER_CAP]);
+        assert_eq!(
+            io.stdout_capture,
+            Some(Retention {
+                bytes: stdout.len() as u64,
+                truncated: true
+            })
+        );
+        assert_eq!(
+            io.stderr_capture,
+            Some(Retention {
+                bytes: stderr.len() as u64,
+                truncated: true
+            })
+        );
+    }
+
+    #[test]
+    fn the_exact_audit_limit_is_complete() {
+        let mut shell = crate::test_helper::core_shell();
+        let scope = shell.local.audit.open(CapturePolicy::Bytes);
+        let (sink, _buf) = new_buffer();
+        shell.io.stdout = sink;
+        let (result, io) = with_audit_capture(&mut shell, |shell| {
+            shell.io.stdout.write_all(&vec![0; AUDIT_BUFFER_CAP])
+        });
+        result.unwrap();
+        let _trail = shell.local.audit.close(scope);
+        assert_eq!(io.stdout.len(), AUDIT_BUFFER_CAP);
+        assert_eq!(
+            io.stdout_capture,
+            Some(Retention {
+                bytes: AUDIT_BUFFER_CAP as u64,
+                truncated: false
+            })
+        );
+        assert_eq!(
+            io.stderr_capture,
+            Some(Retention {
+                bytes: 0,
+                truncated: false
+            })
+        );
+    }
 }

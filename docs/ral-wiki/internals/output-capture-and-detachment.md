@@ -112,7 +112,7 @@ The escape is detachment — the *handle* is its evidence
 
 ## A chatty server is bounded, not unbounded
 
-- Every `Sink::Buffer` is capped at 16 MiB (`SINK_BUFFER_CAP`). Past the cap
+- Ordinary capture and worker buffers are capped at 16 MiB (`SINK_BUFFER_CAP`). Past the cap
   `CapturedBytes::append` appends a one-line truncation marker and drops the rest — yet the
   write still returns `Ok` (`core/src/io/sink.rs`).
 - So the pump keeps reading and discarding after the cap. A server that spews to
@@ -127,7 +127,10 @@ The escape is detachment — the *handle* is its evidence
   the value — `capture` — the buffer is drained by the very step that would
   bind them, so `Frame::Capture`'s return rule reads `CapturedBytes::overflowed` once
   the writers have joined and fails, flushing the prefix visibly rather than binding it
-  ([[design/capture|capture]]). One flag on the buffer, two readings of it.
+  ([[design/capture|capture]]). One overflow predicate, two readings of it.
+- Audit tees have their own 1 MiB retention cap. They keep exact prefixes
+  without a marker, count every observed byte, and report truncation through
+  the command's capture metadata ([[design/audit|audit]]).
 
 ## Detachment decays by neglect, not by age
 

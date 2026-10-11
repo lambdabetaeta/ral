@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 446e3123
-generated_at_date: 2026-10-06
+generated_at_commit: 53509c43
+generated_at_date: 2026-10-11
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs]
 ---
 
@@ -57,10 +57,12 @@ duplicate ([[internals/pipeline-execution|pipeline execution]]).
   centralise the (stdio, pump) decision so no caller computes inherit-vs-pipe by
   hand; `same_destination` says whether two sinks deliver to one destination,
   which decides whether a child's stderr may share stdout's descriptor. A `ByteBuffer` is `Arc<CapturedBytes>`: the bytes under a mutex, and
-  beside them the `overflowed` flag `CapturedBytes::append` raises at
-  `SINK_BUFFER_CAP` (`take`, `peek`, `overflowed` are its readers). The flag
-  exists because the write path cannot report the cap — a pump returns `()`
-  from its own thread — so `overflowed` is read once the writers have joined, by whoever means to make the bytes a
+  beside them a total byte count and retention cap. `overflowed` compares
+  that count against the cap (`take`, `peek`, `total`, `overflowed` are its
+  readers). `new_buffer` keeps 16 MiB plus a marker; the audit tee retains
+  its caller's smaller prefix without a marker. The write path cannot report
+  the cap — a pump returns `()` from its own thread — so `overflowed` is read
+  once the writers have joined, by whoever means to make the bytes a
   value ([[design/capture|capture]]).
 - `wake.rs` — `Wake`, what ends a stage thread's blocked stdin read or
   stdout write from another thread: a self-pipe `poll_beside`'d (rustix

@@ -516,7 +516,7 @@ impl CollectState {
     /// The audit and verdict fold, in launch order — the one place `&Shell`
     /// reaches an external's settlement, and why `last` is the final stage's
     /// value whenever that stage is `Ok` and unread otherwise.  The audit is
-    /// broadcast before the verdict is ranked, so a failing stage still
+    /// merged before the verdict is ranked, so a failing stage still
     /// contributes what it observed.  The loan drops with `self`, returning
     /// the terminal and striking the frame whatever the verdict.
     pub(super) fn fold(mut self, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
@@ -533,9 +533,11 @@ impl CollectState {
                     "ral pipeline stage vanished without reporting".to_string(),
                 )))
             });
+            // Thread stages already published their facts.
+            let surface = matches!(&end, StageEnd::External { .. }).then_some(mooring);
             let StageObservation { settled, audit } = end.settle(shell, self.started, pressed);
             for observation in audit.into_observations() {
-                shell.observe_stamped(Some(mooring), observation);
+                shell.observe_stamped(surface, observation);
             }
             match settled {
                 Err(br) => {

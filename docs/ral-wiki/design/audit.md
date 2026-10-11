@@ -55,11 +55,14 @@ The rule is what keeps the trail proportional to effects rather than to
 teed, argv-rendered record per application, and a `filter` over a few
 thousand grep hits became millions of them.
 
-Retention is one rule for both byte streams: `stdout` and `stderr` are each
-capped at the same 16 MiB as a worker's buffers, with a truncation marker at
-the cap. Neither is privileged, and neither cap is an I/O limit — every byte
-still reaches its ordinary destination, since auditing is observational and a
-tee is not a gate.
+Retention is one rule for both byte streams: `stdout` and `stderr` each retain
+an exact prefix of at most 1 MiB. `stdout-capture` and `stderr-capture` are
+`` `some [bytes: Int, truncated: Bool] `` when captured, counting every byte
+observed at the tee, or `` `none `` without byte capture.
+Truncation is metadata; no marker is mixed into the command's bytes. Neither
+cap is an I/O limit — every byte still reaches its ordinary destination,
+since auditing is observational and a tee is not a gate. Ordinary value
+capture and worker buffers retain their independent 16 MiB limit.
 
 **Collection is lexical, not temporal, and the trail itself is flat.**
 
@@ -79,6 +82,9 @@ tee is not a gate.
   ([[decisions/260902_stages-are-threads|stages-are-threads]]) — only
   *transports* its fragment back to the owning evaluator, which merges it into the surrounding
   trail; the boundary never decides structure.
+- A pipeline thread publishes each observation live. Its collector merges
+  that observation into the enclosing trail without publishing it again;
+  a direct external stage's observation is first published by the collector.
 - A delimiter's lifecycle is scope-shaped, not one-shot: opening either
   installs a trail or finds one already open, and whichever happened decides
   what closing does. The delimiter that installed the trail drains and closes

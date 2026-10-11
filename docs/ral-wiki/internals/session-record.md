@@ -65,6 +65,10 @@ The outer `Record` vocabulary is closed:
   provider/stall/error rows, nudges, and other breadcrumbs. The view fold
   admits the rows that belong on scrollback; the model fold ignores them.
 
+Byte strings use lossless base64 in JSON. Audit observations preserve the
+captured prefix and its retention metadata exactly; replay adds no further
+truncation.
+
 `Transient` is deliberately outside `Record`: token and thinking deltas, state
 changes, boundaries, child lifecycle, stop reasons, clear acknowledgements,
 live pins/resources, and seam faults. These are drawn or routed while the

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 446e3123
-generated_at_date: 2026-10-05
+generated_at_commit: 53509c43
+generated_at_date: 2026-10-11
 covers_paths: [core/src/runtime.rs, core/src/runtime/]
 ---
 
@@ -43,7 +43,8 @@ evaluator item; the evaluator reaches it at
   `RedirectState` lifecycle (open, route fd 1/2 through the shell's sinks,
   restore, settle each write) and `with_redirects`.
 - `capture.rs` — `with_capture` and the audit tee, both over one `SinkScope`
-  that restores the replaced sinks on `Drop`.
+  that restores the replaced sinks on `Drop`. Audit retains 1 MiB per stream
+  with byte counts and truncation metadata, independently of ordinary capture.
 - `command_call.rs` also holds `call_external`, an external's door: stamp the
   start, tee its streams, name a failure, settle the one `Observed::Command`.
 - `command.rs` — the External arm: vet the resolved head, launch its
@@ -191,7 +192,9 @@ evaluator item; the evaluator reaches it at
     `StageEnd` carries a `Thread`'s already-built `StageObservation` or an
     `External`'s raw outcome, unsettled pumps, jail, and the `sent` its handle
     recorded; `StageEnd::settle` is what turns either into one
-    `StageObservation`, in the fold and nowhere else. On an external's own
+    `StageObservation`, in the fold and nowhere else. The collector publishes
+    a direct external's observation; a thread's already-published
+    observations only merge into the trail. On an external's own
     `Event::Ended`, `StageHandle::file_external_end` reaps the watch — after
     the stage has left `stages`, so no later `KillStage` can ever name a
     reaped pid — and releases the held-open edge, leaving the jail and the

@@ -1,4 +1,4 @@
-<!-- verified_at_commit: 6104758c -->
+<!-- verified_at_commit: 53509c43 -->
 # ral(1) — language specification
 
 ## 1. About this specification
@@ -3389,7 +3389,10 @@ dispatches with `case` and the checker decides exhaustiveness (§8.3):
 
 ```text
 what: `command [argv: [String], status: Int, origin: <`external | `detached>,
-                stdout: Bytes, stderr: Bytes, error: <`some String | `none>]
+                stdout: Bytes, stderr: Bytes,
+                stdout-capture: <`some [bytes: Int, truncated: Bool] | `none>,
+                stderr-capture: <`some [bytes: Int, truncated: Bool] | `none>,
+                error: <`some String | `none>]
     | `write   [path: String, mode: <`write | `append | `stream>,
                 outcome: <`committed | `aborted | `failed>,
                 new-bytes: <`some Bytes | `none>,
@@ -3416,6 +3419,8 @@ A `` `command `` observation records an external or bundled command, or a
 | `origin` | `` `external \| `detached `` | the door the command came through |
 | `stdout` | `Bytes` | raw bytes observed on fd 1 |
 | `stderr` | `Bytes` | raw bytes observed on fd 2 |
+| `stdout-capture` | optional `[bytes: Int, truncated: Bool]` | total bytes observed on fd 1 and whether retention cut the stream |
+| `stderr-capture` | optional `[bytes: Int, truncated: Bool]` | total bytes observed on fd 2 and whether retention cut the stream |
 | `error` | optional `String` | ral's runtime error message, `` `none `` when the outcome was not a runtime error |
 
 A command's returned value is not among them. `argv`, the status, and the bytes
@@ -3472,11 +3477,14 @@ copied from `stderr`, and a nonzero status need not imply a `` `some `` `error`.
 Conversely, `stderr` contains only bytes observed on fd 2. It never contains
 synthetic runtime prose merely because a command failed.
 
-`stdout` and `stderr` are retained under one rule: each is capped at 16 MiB —
-the same capture cap a worker's buffers use (§11.3) — and at the cap ral
-appends one truncation marker and discards the rest. Neither stream is
-privileged over the other. These are retention rules, not I/O limits: every
-byte still streams to its ordinary destination.
+`stdout` and `stderr` are retained under one rule: each keeps an exact prefix
+of at most 1 MiB. Each capture field is `` `some `` of the total byte count
+observed at its tee and a `truncated` flag; no synthetic marker is inserted
+into the retained bytes. Without byte capture, the capture field is `` `none ``.
+Neither stream is privileged over the other. These are retention rules,
+not I/O limits: every byte still streams to its ordinary destination.
+Ordinary value capture (§7) and worker buffers (§11.3) retain their separate
+16 MiB limit.
 
 Command observations cover external commands, bundled commands, pipeline
 stages, and `detach` births. Arguments are recorded after evaluation and

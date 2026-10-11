@@ -107,6 +107,7 @@ fn a_pipeline_stage_reports_the_same_command_fact_as_a_standalone_run() {
     let (staged_result, staged_events) = run("/bin/echo hi | /bin/cat", true);
     staged_result.expect("the pipeline should succeed");
     let staged = command_facts(&staged_events);
+    assert_eq!(staged.len(), 2, "each stage surfaces exactly once");
     let head = staged
         .first()
         .expect("a stage that ran must report its own fact, as a standalone run does");
@@ -130,6 +131,10 @@ fn a_pipeline_stage_and_a_standalone_run_agree_on_when_to_report() {
 
         let alone_trail = command_facts(&trail_of(&alone_report));
         let staged_trail = command_facts(&trail_of(&staged_report));
+        assert_eq!(staged_trail.len(), 2, "each stage enters the trail once");
+        if sink {
+            assert_eq!(command_facts(&staged_events).len(), 2);
+        }
         assert_eq!(
             shape(staged_trail.first().expect("the head stage's own fact")),
             shape(alone_trail.first().expect("the standalone dispatch's fact")),
@@ -142,4 +147,48 @@ fn a_pipeline_stage_and_a_standalone_run_agree_on_when_to_report() {
             "with sink={sink} the two doors must agree on whether anything surfaces"
         );
     }
+}
+
+#[test]
+fn nested_pipelines_publish_each_fact_once_and_keep_the_whole_trail() {
+    let (report, events) = run("audit { /bin/echo hi | !{ /bin/cat | /bin/cat } }", true);
+    let report = report.expect("nested pipelines succeed");
+    let trail = trail_of(&report);
+    assert_eq!(command_facts(&trail).len(), 3);
+    assert_eq!(command_facts(&events).len(), 3);
+    assert!(trail.iter().all(|fact| events.contains(fact)));
+}
+
+#[test]
+fn audit_retention_preserves_pipeline_traffic_and_reports_the_cut() {
+    use ral_core::fact::Observed;
+    use ral_core::first_order::FOValue;
+    use ral_core::first_order::datum::Datum as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("large.bin");
+    let bytes: Vec<u8> = (0..=255).cycle().take(1024 * 1024 + 4096).collect();
+    std::fs::write(&path, &bytes).unwrap();
+    let source = format!("audit {{ /bin/cat '{}' | /usr/bin/wc -c }}", path.display());
+    let (report, events) = run(&source, true);
+    let trail = trail_of(&report.expect("the pipeline succeeds past the retention limit"));
+    let commands: Vec<_> = trail
+        .iter()
+        .map(|v| Observation::decode(&FOValue::try_from(v).unwrap()).unwrap())
+        .filter_map(|obs| match obs.what {
+            Observed::Command(command) => Some(command),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(commands.len(), 2);
+    assert_eq!(command_facts(&events).len(), 2);
+    assert!(trail.iter().all(|fact| events.contains(fact)));
+    let producer = &commands[0];
+    assert_eq!(producer.stdout.as_slice(), &bytes[..1024 * 1024]);
+    let capture = producer.stdout_capture.as_ref().unwrap();
+    assert_eq!(capture.bytes, bytes.len() as u64);
+    assert!(capture.truncated);
+    let count = std::str::from_utf8(&commands[1].stdout).unwrap().trim();
+    assert_eq!(count.parse::<usize>().unwrap(), bytes.len());
+    assert!(!commands[1].stdout_capture.as_ref().unwrap().truncated);
 }

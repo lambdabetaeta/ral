@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 446e3123
-generated_at_date: 2026-10-06
+generated_at_commit: 53509c43
+generated_at_date: 2026-10-11
 covers_paths: [core/src/protocol.rs, core/src/protocol/, core/src/carrier.rs, core/src/carrier/, core/src/engine.rs, core/src/engine/, core/src/run/report.rs, core/src/seed.rs, core/src/seed/hatch.rs, core/src/guard/grant.rs]
 ---
 
@@ -47,7 +47,7 @@ half; `core/src/run/report.rs` projects a run onto the algebra;
 
 The frame algebra. Everything on it is a wire type; nothing here carries.
 
-- `PROTOCOL_VERSION` (currently 14) — checked at `Attach`; a mismatch refuses.
+- `PROTOCOL_VERSION` (currently 15) — checked at `Attach`; a mismatch refuses.
 - `check_media` — the same number compared at *build* time, against the
   `proto_version=` line `vm-image/build-boot.sh` records for the engine in the
   guest media; `synod/examples/check-media.rs`, tauri's `beforeBuildCommand`,

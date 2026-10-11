@@ -4,6 +4,7 @@
 //! uninhabited by default ([`NoExt`]); [`datum`] types the protocol's
 //! payloads through it.
 
+mod byte_encoding;
 mod bytes;
 pub mod datum;
 mod finite;
@@ -34,6 +35,7 @@ pub enum FOValue<X = NoExt> {
         value: std::string::String,
     },
     Bytes {
+        #[serde(with = "byte_encoding")]
         value: Vec<u8>,
     },
     List {

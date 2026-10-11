@@ -9,7 +9,7 @@ use super::edge::{DeadEdge, Edge};
 use crate::sync::LockExt as _;
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Cap on `Sink::Buffer` growth: past it bytes are dropped after a truncation
@@ -21,29 +21,49 @@ pub(crate) const SINK_BUFFER_CAP: usize = 16 * 1024 * 1024;
 const SINK_BUFFER_TRUNC_MARKER: &[u8] =
     b"\n[ral: buffer exceeded 16 MiB; remaining output dropped]\n";
 
-/// Captured bytes, and the one thing about them the write path cannot say:
-/// that [`SINK_BUFFER_CAP`] cut the stream short.
+/// A bounded prefix and the byte count before retention.
 ///
 /// Every writer's `Ok(())` is honest about its write, so truncation is
 /// recorded here and read out of band, once the buffer is complete.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct CapturedBytes {
     bytes: Mutex<Vec<u8>>,
-    overflowed: AtomicBool,
+    total: AtomicU64,
+    cap: usize,
+    marker: &'static [u8],
+}
+
+impl Default for CapturedBytes {
+    fn default() -> Self {
+        Self::limited(SINK_BUFFER_CAP, SINK_BUFFER_TRUNC_MARKER)
+    }
 }
 
 impl CapturedBytes {
+    fn limited(cap: usize, marker: &'static [u8]) -> Self {
+        Self {
+            bytes: Mutex::default(),
+            total: AtomicU64::default(),
+            cap,
+            marker,
+        }
+    }
+
     /// Drain the buffer.
     pub(crate) fn take(&self) -> Vec<u8> {
         std::mem::take(&mut *self.bytes.lock_ignore_poison())
     }
 
-    /// Whether [`SINK_BUFFER_CAP`] truncated what [`Self::take`] hands back,
+    /// Whether retention truncated what [`Self::take`] hands back,
     /// so a caller for whom the bytes *are* a value can refuse them instead of
     /// binding a prefix.  Only meaningful once every writer has joined; `join`
     /// is what orders their stores against this load.
     pub(crate) fn overflowed(&self) -> bool {
-        self.overflowed.load(Ordering::Relaxed)
+        self.total() > self.cap as u64
+    }
+
+    pub(crate) fn total(&self) -> u64 {
+        self.total.load(Ordering::Relaxed)
     }
 
     /// Copy the buffer without draining it, so `poll` can sample a worker
@@ -54,20 +74,16 @@ impl CapturedBytes {
         self.bytes.lock_ignore_poison().clone()
     }
 
-    /// Append under `SINK_BUFFER_CAP`, emitting the truncation marker once at
-    /// the boundary and raising `overflowed` with it.  Sole enforcement point,
-    /// so shell writes and pump-thread appends cannot disagree about the cap.
+    /// Count every byte; retain the prefix and at most one marker.
     fn append(&self, bytes: &[u8]) {
         let mut g = self.bytes.lock_ignore_poison();
+        self.total.fetch_add(bytes.len() as u64, Ordering::Relaxed);
         let cur = g.len();
-        if cur < SINK_BUFFER_CAP + SINK_BUFFER_TRUNC_MARKER.len() {
-            if cur + bytes.len() <= SINK_BUFFER_CAP {
-                g.extend_from_slice(bytes);
-            } else {
-                g.extend_from_slice(&bytes[..SINK_BUFFER_CAP.saturating_sub(cur)]);
-                g.extend_from_slice(SINK_BUFFER_TRUNC_MARKER);
-                drop(g);
-                self.overflowed.store(true, Ordering::Relaxed);
+        if cur <= self.cap {
+            let keep = bytes.len().min(self.cap - cur);
+            g.extend_from_slice(&bytes[..keep]);
+            if keep < bytes.len() {
+                g.extend_from_slice(self.marker);
             }
         }
     }
@@ -341,8 +357,8 @@ impl Clone for Sink {
 /// Wrap `base` in a `Sink::Tee` whose other branch is a fresh buffer, so bytes
 /// are recorded and still seen.  `with_audit_capture` in `runtime::capture` is
 /// the caller; it drains the buffer once every writer has closed.
-pub(crate) fn tee_with_buffer(base: Sink) -> (Sink, ByteBuffer) {
-    let buf = ByteBuffer::default();
+pub(crate) fn tee_with_buffer(base: Sink, cap: usize) -> (Sink, ByteBuffer) {
+    let buf = Arc::new(CapturedBytes::limited(cap, &[]));
     let sink = Sink::Tee(Box::new(Sink::Buffer(buf.clone())), Box::new(base));
     (sink, buf)
 }
@@ -425,8 +441,21 @@ impl Write for Sink {
     reason = "[test] test fs/process scaffolding"
 )]
 mod tests {
-    use super::{Edge, Sink, terminator_len};
+    use super::{CapturedBytes, Edge, Sink, terminator_len};
     use crate::io::Wake;
+
+    #[test]
+    fn an_overflow_marker_is_appended_once_and_the_count_keeps_growing() {
+        let buf = CapturedBytes::limited(4, b"[cut]");
+        buf.append(b"abcd");
+        assert!(!buf.overflowed());
+        buf.append(b"ef");
+        buf.append(b"gh");
+        assert_eq!(buf.total(), 8);
+        assert!(buf.overflowed());
+        assert_eq!(buf.take(), b"abcd[cut]");
+        assert!(buf.overflowed());
+    }
     use std::io::Write as _;
     use std::sync::{Arc, Mutex};
 

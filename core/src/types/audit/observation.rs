@@ -77,6 +77,7 @@ mod tests {
                 AuditIo {
                     stdout: b"out".to_vec(),
                     stderr: b"err".to_vec(),
+                    ..AuditIo::default()
                 },
                 Some("spawn failed"),
             ),
@@ -141,6 +142,39 @@ mod tests {
     #[test]
     fn every_variant_round_trips_through_its_encoding() {
         every_kind().into_iter().for_each(round_trips);
+    }
+
+    #[test]
+    fn command_capture_fields_are_required_and_typed() {
+        let Observed::Command(command) = command(
+            CommandOrigin::External,
+            AuditIo {
+                stdout: vec![0, 128, 255],
+                ..AuditIo::default()
+            },
+            None,
+        ) else {
+            unreachable!()
+        };
+        let FOValue::Map { mut entries } = command.encode() else {
+            unreachable!()
+        };
+        for key in ["stdout-capture", "stderr-capture"] {
+            let missing = FOValue::Map {
+                entries: entries.iter().filter(|(k, _)| k != key).cloned().collect(),
+            };
+            assert!(Command::decode(&missing).unwrap_err().contains(key));
+        }
+        entries
+            .iter_mut()
+            .find(|(k, _)| k == "stdout-capture")
+            .unwrap()
+            .1 = FOValue::Unit;
+        assert!(
+            Command::decode(&FOValue::Map { entries })
+                .unwrap_err()
+                .contains("stdout-capture")
+        );
     }
 
     #[test]

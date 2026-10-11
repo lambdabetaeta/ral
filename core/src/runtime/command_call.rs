@@ -143,9 +143,8 @@ fn call_external(
     body: impl FnOnce(&mut Shell) -> Settled<Value>,
 ) -> Settled<Value> {
     let start = shell.audit_start(mooring);
-    let (mut result, stdout, stderr) = with_audit_capture(shell, body);
+    let (mut result, io) = with_audit_capture(shell, body);
     name_failure(shown, &mut result);
-    let io = AuditIo { stdout, stderr };
     finish_command(shell, mooring, start, shown, args, &result, io);
     result
 }
