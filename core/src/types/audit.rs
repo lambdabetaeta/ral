@@ -13,18 +13,18 @@ mod observation;
 pub(crate) use door::AuditStart;
 
 use super::{Value, outcome_value};
-use crate::fact::{ErrorRecord, Observation, Retention};
+use crate::fact::{ErrorRecord, Observation};
 use crate::source::Span;
 use serde::{Deserialize, Serialize};
 
-/// Bytes captured for one command under `CapturePolicy::Bytes`, empty
-/// otherwise.
+/// Bytes captured for one command under `CapturePolicy::Bytes`, and the totals
+/// written; empty and zero otherwise.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AuditIo {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
-    pub stdout_capture: Option<Retention>,
-    pub stderr_capture: Option<Retention>,
+    pub stdout_total: u64,
+    pub stderr_total: u64,
 }
 
 /// Whether per-command bytes are teed into audit observations.  `Off` lets fd

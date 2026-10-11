@@ -92,7 +92,7 @@ fn a_record_round_trips_through_the_entry_envelope() {
 
 #[test]
 fn a_large_observation_replays_exactly_from_compact_bytes() {
-    use ral_core::fact::{Command, CommandOrigin, Observation, Observed, Retention};
+    use ral_core::fact::{Command, CommandOrigin, Observation, Observed};
     use ral_core::first_order::datum::Datum as _;
     use ral_core::types::AuditIo;
 
@@ -109,10 +109,7 @@ fn a_large_observation_replays_exactly_from_compact_bytes() {
             CommandOrigin::External,
             AuditIo {
                 stdout: bytes.clone(),
-                stdout_capture: Some(Retention {
-                    bytes: 2 * bytes.len() as u64,
-                    truncated: true,
-                }),
+                stdout_total: 2 * bytes.len() as u64,
                 ..AuditIo::default()
             },
             None,

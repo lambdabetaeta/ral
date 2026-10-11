@@ -3,8 +3,7 @@
 //! buffer, so the bytes become a value; [`with_audit_capture`] *tees*, so bytes
 //! are recorded and still go where they were going.  A write's destination is
 //! settled where the writer stands, so no byte is ever moved after the fact.
-use crate::fact::Retention;
-use crate::io::{ByteBuffer, Sink, new_buffer, tee_with_buffer};
+use crate::io::{Sink, new_buffer, tee_with_buffer};
 use crate::types::{AuditIo, Shell};
 use std::mem::{replace, swap};
 
@@ -76,17 +75,13 @@ where
     let scope = SinkScope::enter(shell, out_sink, Some(err_sink));
     let result = f(scope.shell);
     drop(scope);
-    let capture = |buf: &ByteBuffer| {
-        Some(Retention {
-            bytes: buf.total(),
-            truncated: buf.overflowed(),
-        })
-    };
+    let (stdout, stdout_total) = out_buf.take_counted();
+    let (stderr, stderr_total) = err_buf.take_counted();
     let io = AuditIo {
-        stdout: out_buf.take(),
-        stderr: err_buf.take(),
-        stdout_capture: capture(&out_buf),
-        stderr_capture: capture(&err_buf),
+        stdout,
+        stderr,
+        stdout_total,
+        stderr_total,
     };
     (result, io)
 }
@@ -118,20 +113,8 @@ mod tests {
         assert_eq!(err_buf.take(), stderr);
         assert_eq!(io.stdout, stdout[..AUDIT_BUFFER_CAP]);
         assert_eq!(io.stderr, stderr[..AUDIT_BUFFER_CAP]);
-        assert_eq!(
-            io.stdout_capture,
-            Some(Retention {
-                bytes: stdout.len() as u64,
-                truncated: true
-            })
-        );
-        assert_eq!(
-            io.stderr_capture,
-            Some(Retention {
-                bytes: stderr.len() as u64,
-                truncated: true
-            })
-        );
+        assert_eq!(io.stdout_total, stdout.len() as u64);
+        assert_eq!(io.stderr_total, stderr.len() as u64);
     }
 
     #[test]
@@ -146,19 +129,8 @@ mod tests {
         result.unwrap();
         let _trail = shell.local.audit.close(scope);
         assert_eq!(io.stdout.len(), AUDIT_BUFFER_CAP);
-        assert_eq!(
-            io.stdout_capture,
-            Some(Retention {
-                bytes: AUDIT_BUFFER_CAP as u64,
-                truncated: false
-            })
-        );
-        assert_eq!(
-            io.stderr_capture,
-            Some(Retention {
-                bytes: 0,
-                truncated: false
-            })
-        );
+        assert_eq!(io.stdout_total, AUDIT_BUFFER_CAP as u64);
+        assert_eq!(io.stderr, b"");
+        assert_eq!(io.stderr_total, 0);
     }
 }

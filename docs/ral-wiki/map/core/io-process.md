@@ -56,10 +56,11 @@ duplicate ([[internals/pipeline-execution|pipeline execution]]).
   sink), a stage thread's pipe edge. `child_stdout` / `child_stderr`
   centralise the (stdio, pump) decision so no caller computes inherit-vs-pipe by
   hand; `same_destination` says whether two sinks deliver to one destination,
-  which decides whether a child's stderr may share stdout's descriptor. A `ByteBuffer` is `Arc<CapturedBytes>`: the bytes under a mutex, and
-  beside them a total byte count and retention cap. `overflowed` compares
-  that count against the cap (`take`, `peek`, `total`, `overflowed` are its
-  readers). `new_buffer` keeps 16 MiB plus a marker; the audit tee retains
+  which decides whether a child's stderr may share stdout's descriptor.
+  A `ByteBuffer` is `Arc<CapturedBytes>`: the prefix and its total byte count
+  under one mutex, with a retention cap. `overflowed` compares that count
+  against the cap (`take`, `take_counted`, `peek`, `total`, `overflowed` are
+  its readers). `new_buffer` keeps 16 MiB plus a marker; the audit tee retains
   its caller's smaller prefix without a marker. The write path cannot report
   the cap — a pump returns `()` from its own thread — so `overflowed` is read
   once the writers have joined, by whoever means to make the bytes a

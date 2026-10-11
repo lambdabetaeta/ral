@@ -77,7 +77,8 @@ mod tests {
                 AuditIo {
                     stdout: b"out".to_vec(),
                     stderr: b"err".to_vec(),
-                    ..AuditIo::default()
+                    stdout_total: 3,
+                    stderr_total: 3,
                 },
                 Some("spawn failed"),
             ),
@@ -150,6 +151,7 @@ mod tests {
             CommandOrigin::External,
             AuditIo {
                 stdout: vec![0, 128, 255],
+                stdout_total: 3,
                 ..AuditIo::default()
             },
             None,
@@ -159,7 +161,7 @@ mod tests {
         let FOValue::Map { mut entries } = command.encode() else {
             unreachable!()
         };
-        for key in ["stdout-capture", "stderr-capture"] {
+        for key in ["stdout-total", "stderr-total"] {
             let missing = FOValue::Map {
                 entries: entries.iter().filter(|(k, _)| k != key).cloned().collect(),
             };
@@ -167,13 +169,13 @@ mod tests {
         }
         entries
             .iter_mut()
-            .find(|(k, _)| k == "stdout-capture")
+            .find(|(k, _)| k == "stdout-total")
             .unwrap()
             .1 = FOValue::Unit;
         assert!(
             Command::decode(&FOValue::Map { entries })
                 .unwrap_err()
-                .contains("stdout-capture")
+                .contains("stdout-total")
         );
     }
 

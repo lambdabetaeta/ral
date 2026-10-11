@@ -9,7 +9,6 @@ use super::edge::{DeadEdge, Edge};
 use crate::sync::LockExt as _;
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Cap on `Sink::Buffer` growth: past it bytes are dropped after a truncation
@@ -27,8 +26,7 @@ const SINK_BUFFER_TRUNC_MARKER: &[u8] =
 /// recorded here and read out of band, once the buffer is complete.
 #[derive(Debug)]
 pub struct CapturedBytes {
-    bytes: Mutex<Vec<u8>>,
-    total: AtomicU64,
+    bytes: Mutex<(Vec<u8>, u64)>,
     cap: usize,
     marker: &'static [u8],
 }
@@ -43,7 +41,6 @@ impl CapturedBytes {
     fn limited(cap: usize, marker: &'static [u8]) -> Self {
         Self {
             bytes: Mutex::default(),
-            total: AtomicU64::default(),
             cap,
             marker,
         }
@@ -51,19 +48,23 @@ impl CapturedBytes {
 
     /// Drain the buffer.
     pub(crate) fn take(&self) -> Vec<u8> {
-        std::mem::take(&mut *self.bytes.lock_ignore_poison())
+        self.take_counted().0
+    }
+
+    pub(crate) fn take_counted(&self) -> (Vec<u8>, u64) {
+        let mut g = self.bytes.lock_ignore_poison();
+        (std::mem::take(&mut g.0), g.1)
     }
 
     /// Whether retention truncated what [`Self::take`] hands back,
     /// so a caller for whom the bytes *are* a value can refuse them instead of
-    /// binding a prefix.  Only meaningful once every writer has joined; `join`
-    /// is what orders their stores against this load.
+    /// binding a prefix. Read after every writer has joined for the final verdict.
     pub(crate) fn overflowed(&self) -> bool {
         self.total() > self.cap as u64
     }
 
     pub(crate) fn total(&self) -> u64 {
-        self.total.load(Ordering::Relaxed)
+        self.bytes.lock_ignore_poison().1
     }
 
     /// Copy the buffer without draining it, so `poll` can sample a worker
@@ -71,19 +72,19 @@ impl CapturedBytes {
     /// output.  The price is that successive peeks overlap: each is a snapshot
     /// of everything so far, not a delta.
     pub(crate) fn peek(&self) -> Vec<u8> {
-        self.bytes.lock_ignore_poison().clone()
+        self.bytes.lock_ignore_poison().0.clone()
     }
 
     /// Count every byte; retain the prefix and at most one marker.
     fn append(&self, bytes: &[u8]) {
         let mut g = self.bytes.lock_ignore_poison();
-        self.total.fetch_add(bytes.len() as u64, Ordering::Relaxed);
-        let cur = g.len();
+        g.1 += bytes.len() as u64;
+        let cur = g.0.len();
         if cur <= self.cap {
             let keep = bytes.len().min(self.cap - cur);
-            g.extend_from_slice(&bytes[..keep]);
+            g.0.extend_from_slice(&bytes[..keep]);
             if keep < bytes.len() {
-                g.extend_from_slice(self.marker);
+                g.0.extend_from_slice(self.marker);
             }
         }
     }
@@ -443,6 +444,8 @@ impl Write for Sink {
 mod tests {
     use super::{CapturedBytes, Edge, Sink, terminator_len};
     use crate::io::Wake;
+    use std::io::Write as _;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn an_overflow_marker_is_appended_once_and_the_count_keeps_growing() {
@@ -456,8 +459,6 @@ mod tests {
         assert_eq!(buf.take(), b"abcd[cut]");
         assert!(buf.overflowed());
     }
-    use std::io::Write as _;
-    use std::sync::{Arc, Mutex};
 
     #[test]
     fn terminator_len_is_the_one_line_rule() {

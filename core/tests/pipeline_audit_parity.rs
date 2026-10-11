@@ -185,10 +185,8 @@ fn audit_retention_preserves_pipeline_traffic_and_reports_the_cut() {
     assert!(trail.iter().all(|fact| events.contains(fact)));
     let producer = &commands[0];
     assert_eq!(producer.stdout.as_slice(), &bytes[..1024 * 1024]);
-    let capture = producer.stdout_capture.as_ref().unwrap();
-    assert_eq!(capture.bytes, bytes.len() as u64);
-    assert!(capture.truncated);
+    assert_eq!(producer.stdout_total, bytes.len() as u64);
     let count = std::str::from_utf8(&commands[1].stdout).unwrap().trim();
     assert_eq!(count.parse::<usize>().unwrap(), bytes.len());
-    assert!(!commands[1].stdout_capture.as_ref().unwrap().truncated);
+    assert_eq!(commands[1].stdout_total, commands[1].stdout.len() as u64);
 }

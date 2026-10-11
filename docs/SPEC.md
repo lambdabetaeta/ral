@@ -3389,9 +3389,8 @@ dispatches with `case` and the checker decides exhaustiveness (§8.3):
 
 ```text
 what: `command [argv: [String], status: Int, origin: <`external | `detached>,
-                stdout: Bytes, stderr: Bytes,
-                stdout-capture: <`some [bytes: Int, truncated: Bool] | `none>,
-                stderr-capture: <`some [bytes: Int, truncated: Bool] | `none>,
+                stdout: Bytes, stdout-total: Int,
+                stderr: Bytes, stderr-total: Int,
                 error: <`some String | `none>]
     | `write   [path: String, mode: <`write | `append | `stream>,
                 outcome: <`committed | `aborted | `failed>,
@@ -3417,10 +3416,10 @@ A `` `command `` observation records an external or bundled command, or a
 | `argv` | `[String]` | the shown name first, then its evaluated arguments |
 | `status` | `Int` | the outcome's status: 0 for a command that returned, otherwise its error's exit code |
 | `origin` | `` `external \| `detached `` | the door the command came through |
-| `stdout` | `Bytes` | raw bytes observed on fd 1 |
-| `stderr` | `Bytes` | raw bytes observed on fd 2 |
-| `stdout-capture` | optional `[bytes: Int, truncated: Bool]` | total bytes observed on fd 1 and whether retention cut the stream |
-| `stderr-capture` | optional `[bytes: Int, truncated: Bool]` | total bytes observed on fd 2 and whether retention cut the stream |
+| `stdout` | `Bytes` | retained prefix of fd 1, at most 1 MiB |
+| `stdout-total` | `Int` | bytes written to fd 1, 0 without byte capture |
+| `stderr` | `Bytes` | retained prefix of fd 2, at most 1 MiB |
+| `stderr-total` | `Int` | bytes written to fd 2, 0 without byte capture |
 | `error` | optional `String` | ral's runtime error message, `` `none `` when the outcome was not a runtime error |
 
 A command's returned value is not among them. `argv`, the status, and the bytes
@@ -3477,14 +3476,15 @@ copied from `stderr`, and a nonzero status need not imply a `` `some `` `error`.
 Conversely, `stderr` contains only bytes observed on fd 2. It never contains
 synthetic runtime prose merely because a command failed.
 
-`stdout` and `stderr` are retained under one rule: each keeps an exact prefix
-of at most 1 MiB. Each capture field is `` `some `` of the total byte count
-observed at its tee and a `truncated` flag; no synthetic marker is inserted
-into the retained bytes. Without byte capture, the capture field is `` `none ``.
-Neither stream is privileged over the other. These are retention rules,
-not I/O limits: every byte still streams to its ordinary destination.
-Ordinary value capture (§7) and worker buffers (§11.3) retain their separate
-16 MiB limit.
+`stdout` and `stderr` each retain an exact prefix of at most 1 MiB; no
+synthetic marker is inserted. `stdout-total` and `stderr-total` count every
+byte observed at the tee, so a stream is complete exactly when its total
+equals the length of its bytes and truncated when the total is larger.
+A `detach` birth, a direct-spawn pipeline stage, or a command running without
+byte capture (`CapturePolicy::Off`) has empty bytes and total 0.
+Neither stream is privileged. These are retention rules, not I/O limits:
+every byte still streams to its ordinary destination. Ordinary value capture
+(§7) and worker buffers (§11.3) retain their separate 16 MiB limit.
 
 Command observations cover external commands, bundled commands, pipeline
 stages, and `detach` births. Arguments are recorded after evaluation and

@@ -129,8 +129,8 @@ The escape is detachment — the *handle* is its evidence
   the writers have joined and fails, flushing the prefix visibly rather than binding it
   ([[design/capture|capture]]). One overflow predicate, two readings of it.
 - Audit tees have their own 1 MiB retention cap. They keep exact prefixes
-  without a marker, count every observed byte, and report truncation through
-  the command's capture metadata ([[design/audit|audit]]).
+  without a marker and count every observed byte. Each stream
+  pairs its prefix with its total; a larger total means truncation ([[design/audit|audit]]).
 
 ## Detachment decays by neglect, not by age
 

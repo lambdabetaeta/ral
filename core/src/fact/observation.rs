@@ -71,29 +71,16 @@ variant!(typed Observed {
 });
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Retention {
-    pub bytes: u64,
-    pub truncated: bool,
-}
-
-record!(typed Retention {
-    bytes: "bytes",
-    truncated: "truncated",
-});
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Command {
     /// Shown name first, then its arguments.
     pub argv: Vec<String>,
     pub status: i32,
     pub origin: CommandOrigin,
-    /// Bytes teed off fd 1 and fd 2, empty unless the capture policy is
-    /// `Bytes`.
+    /// Retained prefix and total bytes written; empty and 0 without byte capture.
     pub stdout: Bytes,
+    pub stdout_total: u64,
     pub stderr: Bytes,
-    /// `None` without byte capture.
-    pub stdout_capture: Option<Retention>,
-    pub stderr_capture: Option<Retention>,
+    pub stderr_total: u64,
     /// The runtime's own account of why the command failed: `Some` iff the
     /// outcome was a runtime error.  The streams hold only what the child
     /// wrote; this is the one place ral speaks in its own voice.
@@ -116,9 +103,9 @@ impl Command {
             status,
             origin,
             stdout: io.stdout.into(),
+            stdout_total: io.stdout_total,
             stderr: io.stderr.into(),
-            stdout_capture: io.stdout_capture,
-            stderr_capture: io.stderr_capture,
+            stderr_total: io.stderr_total,
             error,
         }
     }
@@ -129,9 +116,9 @@ record!(typed Command {
     status: "status",
     origin: "origin",
     stdout: "stdout",
+    stdout_total: "stdout-total",
     stderr: "stderr",
-    stdout_capture: "stdout-capture",
-    stderr_capture: "stderr-capture",
+    stderr_total: "stderr-total",
     error: "error",
 });
 

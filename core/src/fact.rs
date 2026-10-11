@@ -12,7 +12,7 @@ mod observation;
 pub use error::{ErrorRecord, Reason};
 pub use observation::{
     Act, Check, Command, CommandOrigin, Decision, Grep, Observation, Observed, Read, Resource,
-    Retention, Worker, Write, WriteOutcome,
+    Worker, Write, WriteOutcome,
 };
 
 use crate::first_order::Bytes;

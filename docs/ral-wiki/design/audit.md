@@ -55,14 +55,15 @@ The rule is what keeps the trail proportional to effects rather than to
 teed, argv-rendered record per application, and a `filter` over a few
 thousand grep hits became millions of them.
 
-Retention is one rule for both byte streams: `stdout` and `stderr` each retain
-an exact prefix of at most 1 MiB. `stdout-capture` and `stderr-capture` are
-`` `some [bytes: Int, truncated: Bool] `` when captured, counting every byte
-observed at the tee, or `` `none `` without byte capture.
-Truncation is metadata; no marker is mixed into the command's bytes. Neither
-cap is an I/O limit — every byte still reaches its ordinary destination,
-since auditing is observational and a tee is not a gate. Ordinary value
-capture and worker buffers retain their independent 16 MiB limit.
+Retention is one rule for both byte streams: `stdout` and `stderr` each
+retain an exact prefix of at most 1 MiB, and `stdout-total` and `stderr-total`
+count every byte observed at the tee; truncation is exactly
+`total > length bytes`. A `detach` birth, a direct-spawn stage, or byte
+capture off yields empty bytes and total 0. No marker is mixed into the
+command's bytes. Neither cap is an I/O limit — every byte still reaches its
+ordinary destination, since auditing is observational and a tee is not a
+gate. Ordinary value capture and worker buffers retain their independent
+16 MiB limit.
 
 **Collection is lexical, not temporal, and the trail itself is flat.**
 

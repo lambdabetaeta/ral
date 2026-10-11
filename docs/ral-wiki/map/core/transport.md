@@ -67,7 +67,8 @@ typed accessors (`field`, `as_str`, `as_int`, …) for a host reading one.
   are `Io::ty().extend(..)` over them. The doors that mint them sit above
   (`types::error`, `types::audit`).
 - `first_order/byte_encoding.rs` — byte strings serialize to base64 in JSON
-  and native bytes in binary codecs. Each decoder requires its encoding.
+  and native bytes in binary codecs. Binary decoding copies or takes the
+  whole byte buffer. Each decoder requires its encoding.
 
 **One walk each way joins `Value` and `FOValue`
 (`types/value/first_order.rs`).** `FOValue::walk` folds a `Value`, handing each

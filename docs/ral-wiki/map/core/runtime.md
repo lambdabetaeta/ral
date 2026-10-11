@@ -44,7 +44,7 @@ evaluator item; the evaluator reaches it at
   restore, settle each write) and `with_redirects`.
 - `capture.rs` — `with_capture` and the audit tee, both over one `SinkScope`
   that restores the replaced sinks on `Drop`. Audit retains 1 MiB per stream
-  with byte counts and truncation metadata, independently of ordinary capture.
+  as a prefix and a byte total, independently of ordinary capture.
 - `command_call.rs` also holds `call_external`, an external's door: stamp the
   start, tee its streams, name a failure, settle the one `Observed::Command`.
 - `command.rs` — the External arm: vet the resolved head, launch its
