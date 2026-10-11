@@ -56,8 +56,7 @@ impl Listed {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderEndpoint {
     pub provider_name: String,
-    /// What `provider.order` wants in the request body: the endpoint `tag`'s
-    /// prefix, which equals the `/api/v1/providers` slug.
+    /// The full endpoint tag accepted by `provider.order`, including variants.
     pub slug: String,
     pub context_length: Option<u64>,
     pub quantization: Option<String>,
@@ -308,7 +307,7 @@ struct EndpointsData {
 struct EndpointWire {
     #[serde(default)]
     provider_name: String,
-    /// `provider-slug/variant`, e.g. `"deepinfra/fp4"`; the slug is its prefix.
+    /// `provider-slug/variant`, e.g. `"deepinfra/fp4"`.
     #[serde(default)]
     tag: String,
     context_length: Option<u64>,
@@ -316,16 +315,10 @@ struct EndpointWire {
 }
 
 impl ProviderEndpoint {
-    /// A tag carrying no `/` is its own slug — a provider with one variant.
     fn from_wire(wire: EndpointWire) -> Self {
-        let slug = wire
-            .tag
-            .split_once('/')
-            .map(|(prefix, _)| prefix.to_string())
-            .unwrap_or(wire.tag);
         Self {
             provider_name: wire.provider_name,
-            slug,
+            slug: wire.tag,
             context_length: wire.context_length,
             quantization: wire.quantization,
         }
@@ -740,14 +733,14 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_slug_is_tag_prefix() {
+    fn endpoint_slug_preserves_the_full_tag() {
         let with_variant = ProviderEndpoint::from_wire(EndpointWire {
             provider_name: "DeepInfra".into(),
             tag: "deepinfra/fp4".into(),
             context_length: Some(163_840),
             quantization: Some("fp4".into()),
         });
-        assert_eq!(with_variant.slug, "deepinfra");
+        assert_eq!(with_variant.slug, "deepinfra/fp4");
         let bare = ProviderEndpoint::from_wire(EndpointWire {
             provider_name: "StreamLake".into(),
             tag: "streamlake".into(),

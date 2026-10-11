@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f7ceae58
-generated_at_date: 2026-10-10
+generated_at_commit: dcd202fb9da349cd9bc1f3d1332277da0f41da68
+generated_at_date: 2026-10-11
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs]
 ---
 
@@ -388,6 +388,9 @@ disk-caches both paths:
   is renamed where it stands, its identity being the account id throughout.
 - OpenRouter serving endpoints remain a separate request per model; the
   `/model` overlay makes it for whichever OpenRouter model is highlighted.
+  Routing preserves the full endpoint tag, including variant or region suffixes.
+  The picker shows those suffixes and keeps one row per distinct tag, in server
+  order: selection resolves by tag, so repeated tags would trap navigation.
 - `listing.rs` states the picker-side orchestration once for every front-end
   (the `/model` overlay and synod's window alike): the `FetchState` vocabulary,
   a keyed background-fetch pump (`Fetches`), and the per-provider `Listing`

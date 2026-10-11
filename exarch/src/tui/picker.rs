@@ -22,7 +22,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub use crate::provider::listing::{EndpointsState, ModelsState};
 
@@ -150,6 +150,10 @@ fn step_knob(value: Option<f64>, up: bool, step: f64, max: f64, places: usize) -
 /// active tag reverses as a block.
 fn provider_tag(endpoint: &ProviderEndpoint) -> String {
     let mut text = endpoint.provider_name.clone();
+    if let Some((_, variant)) = endpoint.slug.split_once('/') {
+        text.push('/');
+        text.push_str(variant);
+    }
     if let Some(context_length) = endpoint.context_length {
         text.push(' ');
         text.push_str(&crate::provider::humanize_tokens(context_length));
@@ -234,7 +238,12 @@ impl Picker {
         self.refilter();
     }
 
-    pub fn set_endpoints(&mut self, model: &str, state: EndpointsState) {
+    pub fn set_endpoints(&mut self, model: &str, mut state: EndpointsState) {
+        if let EndpointsState::Loaded(endpoints) = &mut state {
+            // Selection by slug requires one row per routing target.
+            let mut seen = BTreeSet::new();
+            endpoints.retain(|endpoint| seen.insert(endpoint.slug.clone()));
+        }
         self.endpoints.insert(model.to_string(), state);
     }
 

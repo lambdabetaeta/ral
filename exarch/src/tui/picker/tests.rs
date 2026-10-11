@@ -421,6 +421,58 @@ fn provider_cycles_serving_endpoints_without_moving_the_model() {
     assert_eq!(pick.route.as_deref(), Some("deepinfra"));
 }
 
+#[test]
+fn every_endpoint_is_reachable_past_variants_and_repeated_tags() {
+    let mut p = openrouter_picker();
+    let model = "vendor-b/model-b";
+    p.key(KeyCode::Down);
+    p.set_endpoints(
+        model,
+        EndpointsState::Loaded(vec![
+            endpoint("Wafer", "wafer/us"),
+            endpoint("Wafer", "wafer"),
+            endpoint("Mistral", "mistral/zdr"),
+            endpoint("Mistral", "mistral/nvfp4"),
+            endpoint("Mistral", "mistral/nvfp4"),
+            endpoint("Together", "together"),
+        ]),
+    );
+    p.key(KeyCode::Tab);
+    let slugs = [
+        "wafer/us",
+        "wafer",
+        "mistral/zdr",
+        "mistral/nvfp4",
+        "together",
+    ];
+    for slug in slugs {
+        p.key(KeyCode::Right);
+        assert_eq!(p.active_route(), Some(slug));
+        let row = p.provider_line(80).to_string();
+        let name = match slug {
+            "wafer/us" => "Wafer/us",
+            "wafer" => "Wafer",
+            "mistral/zdr" => "Mistral/zdr",
+            "mistral/nvfp4" => "Mistral/nvfp4",
+            _ => "Together",
+        };
+        assert!(row.contains(name), "{row}");
+    }
+    for slug in slugs.into_iter().rev().skip(1) {
+        p.key(KeyCode::Left);
+        assert_eq!(p.active_route(), Some(slug));
+    }
+    let pick = p.key(KeyCode::Enter).expect("a listed row is picked");
+    assert_eq!(pick.route.as_deref(), Some("wafer/us"));
+    p.key(KeyCode::Left);
+    assert_eq!(p.active_route(), None);
+    for _ in slugs {
+        p.key(KeyCode::Right);
+    }
+    let pick = p.key(KeyCode::Enter).expect("a listed row is picked");
+    assert_eq!(pick.route.as_deref(), Some("together"));
+}
+
 /// Moving the highlight off a route's model deactivates it, and coming back
 /// restores it — the choice never rides a model it was not made for.
 #[test]
