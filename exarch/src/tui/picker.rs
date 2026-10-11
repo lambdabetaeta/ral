@@ -12,7 +12,7 @@
 
 use super::line;
 use super::overlay::{self, Anchor};
-use super::palette::{CYAN, Col, RED, SLATE};
+use super::palette::{CYAN, Col, OVERLAY_BG, RED, SLATE};
 use crate::provider::identity::{self, Account, AccountId};
 use crate::provider::models::ProviderEndpoint;
 use crate::provider::pricing::{ModelCaps, Param};
@@ -91,7 +91,7 @@ const TOP_P_PLACES: usize = 2;
 const TRACK_W: usize = 24;
 
 const VISIBLE_ROWS: u16 = 8;
-const BODY_W: u16 = 64;
+const BODY_W: u16 = 80;
 /// The label gutter every row aligns to: two wider than the longest label.
 const FIELD_LABEL: Col = Col::wide({
     let (mut i, mut w) = (0, 0);
@@ -102,7 +102,6 @@ const FIELD_LABEL: Col = Col::wide({
     }
     w + 2
 });
-const HINT: &str = " tab field · ↑↓ pick · ←→ adjust · enter apply · esc cancel ";
 
 /// Seven hues far apart on the circle, cycled over a row of tags so
 /// neighbours never blur.
@@ -486,7 +485,11 @@ impl Picker {
             Anchor::Centre,
             (width, usize::from(heights.iter().sum::<u16>())),
             " MODEL ",
-            HINT,
+            if self.focus == Focus::Search {
+                " Tab next field · ↑↓ select model · Enter apply · Esc cancel "
+            } else {
+                " Tab next field · ←→ change value · Enter apply · Esc cancel "
+            },
         );
         let [search, status, list, provider, effort, temp, top_p, note] =
             Layout::vertical(heights.map(Constraint::Length)).areas(body);
@@ -554,8 +557,19 @@ impl Picker {
             .border_style(border);
         let list_area = block.inner(area);
         f.render_widget(block, area);
+        if list_area.width < 4 {
+            return;
+        }
 
         let window = list_area.height as usize;
+        let width = usize::from(list_area.width);
+        let label_width = self
+            .rows
+            .iter()
+            .map(|(account, _)| Span::raw(self.label(account)).width())
+            .max()
+            .unwrap_or(0)
+            .min(width / 2);
         let start = self.selected.saturating_sub(window.saturating_sub(1));
         let lines: Vec<Line<'static>> = self
             .rows
@@ -564,20 +578,32 @@ impl Picker {
             .skip(start)
             .take(window)
             .map(|(i, (account, model))| {
-                let reversed = |style: Style| {
+                let selected = Style::default().fg(OVERLAY_BG).bg(CYAN);
+                let style = |color| {
                     if i == self.selected {
-                        style.add_modifier(Modifier::REVERSED)
+                        selected
                     } else {
-                        style
+                        Style::default().fg(color)
                     }
                 };
-                Line::from(vec![
-                    Span::styled(model.clone(), reversed(Style::default().fg(CYAN))),
-                    Span::styled(
-                        format!(" · {}", self.label(account)),
-                        reversed(Style::default().fg(SLATE)),
-                    ),
-                ])
+                let model = line::truncate_spans(
+                    &[Span::styled(model.clone(), style(CYAN))],
+                    width.saturating_sub(label_width + 2),
+                );
+                let label = line::truncate_spans(
+                    &[Span::styled(self.label(account), style(SLATE))],
+                    label_width,
+                );
+                let padding = width
+                    .saturating_sub(model.iter().chain(&label).map(Span::width).sum::<usize>());
+                let mut spans = model;
+                spans.push(Span::raw(" ".repeat(padding)));
+                spans.extend(label);
+                Line::from(spans).style(if i == self.selected {
+                    selected
+                } else {
+                    Style::default()
+                })
             })
             .collect();
         f.render_widget(Paragraph::new(lines), list_area);
@@ -657,11 +683,26 @@ impl Picker {
                         }),
                 )
                 .collect();
-        let room = usize::from(width).saturating_sub(label.width());
-        let mut spans = vec![label];
+        let room = usize::from(width).saturating_sub(label.width() + 4);
+        if room == 0 {
+            return Line::from(label);
+        }
+        let arrow = |enabled| {
+            if enabled && focused {
+                Style::default().fg(CYAN)
+            } else {
+                dim
+            }
+        };
+        let mut spans = vec![label, Span::styled("← ", arrow(active.is_some()))];
         // Auto leads the tags.
         let at = active.map_or(0, |i| i + 1);
-        spans.extend(line::window_around(&tags, at, room, dim));
+        let visible = line::window_around(&tags, at, room, dim);
+        let visible = line::truncate_spans(&visible, room);
+        let used: usize = visible.iter().map(Span::width).sum();
+        spans.extend(visible);
+        spans.push(Span::raw(" ".repeat(room.saturating_sub(used))));
+        spans.push(Span::styled(" →", arrow(at < endpoints.len())));
         Line::from(spans)
     }
 

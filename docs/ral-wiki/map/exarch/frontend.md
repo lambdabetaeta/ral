@@ -1,6 +1,6 @@
 ---
-generated_at_commit: a152e8b0
-generated_at_date: 2026-10-10
+generated_at_commit: dcd202fb
+generated_at_date: 2026-10-11
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/record/session.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/cancel.rs, exarch/src/boot.rs, exarch/src/agent/seat.rs, exarch/src/signals.rs, exarch/src/prompt/host.rs]
 ---
 
@@ -469,6 +469,9 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
   row matches by rather than the row itself, so a row and its haystack travel
   together and two providers listing one model name stay two rows. Rows read
   best-match first and, an empty query included, alphabetically within a score.
+  The selected row has one full-width highlight, with account labels aligned
+  at the right. The wider bezel shows hints for the focused field; routing
+  choices sit between fixed arrows, dimmed at either end of the range.
 - `/providers` (`tui/providers.rs`) is a terminal-form table of every known
   account in the same bezel: save or clear a key, declare or remove an
   endpoint (a four-field form whose key row ←→ toggles to "checks no key"),
