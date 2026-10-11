@@ -68,3 +68,18 @@ fn capability_card_denies_role_bad_and_shows_its_fields() {
         .expect("a decision span");
     assert_eq!(denied.role, Some(Role::Bad));
 }
+
+#[test]
+fn errand_birth_names_the_identity_and_existing_description() {
+    let text = |cmd: &str| {
+        worker_spans(WorkerId(7), cmd, LeaseClass::Worker)
+            .iter()
+            .map(|span| span.text.as_str())
+            .collect::<String>()
+    };
+    assert_eq!(
+        text("block at turn 1, line 3"),
+        "errand #7 started · turn 1, line 3"
+    );
+    assert_eq!(text("build release"), "errand #7 started · build release");
+}

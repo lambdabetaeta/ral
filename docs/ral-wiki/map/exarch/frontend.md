@@ -1,10 +1,18 @@
 ---
-generated_at_commit: dcd202fb
+generated_at_commit: 28d06d78
 generated_at_date: 2026-10-11
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/record/session.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/cancel.rs, exarch/src/boot.rs, exarch/src/agent/seat.rs, exarch/src/signals.rs, exarch/src/prompt/host.rs]
 ---
 
 # Map: exarch / frontend
+
+The transcript calls shell workers **errands**: `errand #N started · description`
+and `errand #N finished (exit S) · description`, with failure reasons preserved.
+Birth and completion share the registry ID; descriptions come from existing
+call-site labels or explicit `watch`/`service` descriptions. Saved completion
+records without an ID remain readable and omit it. `spawn` and `defer` retain
+their existing signatures.
+
 
 The agent core and the user interface meet at **one outbound event stream and
 one inbound inbox**, mapped by `bus.rs`'s module doc across its submodules:

@@ -1040,7 +1040,7 @@ fn wait_for_batch(batches: &Arc<Mutex<Vec<Vec<FOValue>>>>) -> Vec<Vec<FOValue>> 
 }
 
 /// The `outcome` label inside a batch's trailing `` `done ``.  Pins the shape
-/// the exarch decoder matches: a `{cmd, outcome}` map over a closed variant.
+/// the exarch decoder matches: a `{id, cmd, outcome}` map over a closed variant.
 fn done_outcome_label(done: &FOValue) -> String {
     let done = fo_expect_variant(done, "done");
     match done.field("outcome").expect("outcome field") {
@@ -1066,7 +1066,10 @@ fn detached_worker_flushes_done_to_deferred_sink() {
         let _handle = spawn_child(&m, &mut shell, Birth::Spawn, "<block>", work).unwrap();
         let mut got = wait_for_batch(&batches);
         assert_eq!(got.len(), 1, "one batch per completed worker");
-        got.pop().unwrap()
+        let batch = got.pop().unwrap();
+        let done = crate::types::DoneEvent::from_surface(batch.last().unwrap()).unwrap();
+        assert_eq!(done.id, shell.local.workers.snapshot()[0].id);
+        batch
     }
 
     let ok = run(|_, _child| Ok(Value::Unit));

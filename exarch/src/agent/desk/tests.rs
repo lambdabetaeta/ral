@@ -952,6 +952,7 @@ fn live_surfaces_record_their_seam_twins() {
     });
     applier.live(
         &ral_core::types::DoneEvent {
+            id: ral_core::types::WorkerId(7),
             cmd: "<block>".into(),
             outcome: ral_core::types::Done::Ok,
         }

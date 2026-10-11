@@ -336,8 +336,8 @@ impl Headless<'_> {
             K::Observation { value } => self.print_observation(value),
             K::Change { change } => self.print_card(&card::change_card(change)),
             K::Card { card } => self.print_card(card),
-            K::Done { cmd, outcome } => {
-                let _ = writeln!(self.err, "{}", card::settled_text(cmd, outcome));
+            K::Done { id, cmd, outcome } => {
+                let _ = writeln!(self.err, "{}", card::settled_text(*id, cmd, outcome));
             }
             K::Context { turns } => {
                 self.print_card(&record::context_rows_card(turns));

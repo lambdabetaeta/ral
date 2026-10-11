@@ -1,10 +1,18 @@
 ---
-generated_at_commit: a3c336a3
-generated_at_date: 2026-10-09
+generated_at_commit: 28d06d78
+generated_at_date: 2026-10-11
 covers_paths: [core/src/types/audit/observation.rs, exarch/src/tui/group.rs, core/src/types/audit/door.rs, core/src/evaluator/call.rs, core/src/runtime/command_call.rs, core/src/path/walk.rs, core/src/guard/shell.rs, core/src/runtime/redirect.rs, core/src/path/stage.rs, core/src/runtime/command/detach.rs, core/src/runtime/pipeline/collect.rs, core/src/runtime/redirect/scope.rs, core/src/runtime/command.rs, core/src/runtime/command/stdio.rs, core/src/types/shell/mod.rs, core/src/types/mooring.rs, exarch/src/card.rs, exarch/src/card/diff.rs, exarch/src/card/value.rs, exarch/src/card/decode.rs, exarch/src/card/encode.rs, exarch/src/card/observation.rs, exarch/src/card/done.rs, exarch/src/card/testkit.rs, exarch/src/agent/desk.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/commit.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, clippy.toml, core/tests/syscall_sites.rs]
 ---
 
 # Map: exarch / io surface
+
+The transcript calls shell workers **errands**: `errand #N started · description`
+and `errand #N finished (exit S) · description`, with failure reasons preserved.
+Birth and completion share the registry ID; descriptions come from existing
+call-site labels or explicit `watch`/`service` descriptions. Saved completion
+records without an ID remain readable and omit it. `spawn` and `defer` retain
+their existing signatures.
+
 
 Every redirect read (`<`), every redirect write (`>` family), every external
 or bundled exec image the model launches, and every denied head admission

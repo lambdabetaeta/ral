@@ -4,7 +4,7 @@
 use super::{Latch, SurfaceBuffer};
 use crate::first_order::FOValue;
 use crate::sync::LockExt as _;
-use crate::types::{DeferredSink, Done, DoneEvent, EventSink};
+use crate::types::{DeferredSink, Done, DoneEvent, EventSink, WorkerId};
 use std::sync::Arc;
 
 /// Cap on a detached worker's deferred surface: past it one `surface-overflow`
@@ -29,7 +29,7 @@ impl DeferredSurface {
     /// — the claim lives here, at the sink's sole call site, so no
     /// implementation can forget the discipline.  The batch is a fresh clone,
     /// independent of `HandleInner::try_settle`'s later `mem::take` of the same buffer.
-    fn flush(&self, joined: &Latch, cmd: &str, outcome: Done) {
+    fn flush(&self, joined: &Latch, id: WorkerId, cmd: &str, outcome: Done) {
         let Some(deferred) = self.deferred.as_ref() else {
             return;
         };
@@ -38,7 +38,7 @@ impl DeferredSurface {
         }
         let mut batch = self.buf.lock_ignore_poison().clone();
         let cmd = cmd.into();
-        batch.push(DoneEvent { cmd, outcome }.to_surface());
+        batch.push(DoneEvent { id, cmd, outcome }.to_surface());
         deferred.deliver(batch);
     }
 }
@@ -61,6 +61,7 @@ impl EventSink for DeferredSurface {
 struct Pending {
     surface: Arc<DeferredSurface>,
     joined: Latch,
+    id: WorkerId,
     cmd: String,
 }
 
@@ -72,10 +73,16 @@ struct Pending {
 pub(crate) struct FlushGuard(Option<Pending>);
 
 impl FlushGuard {
-    pub(crate) fn new(surface: Arc<DeferredSurface>, joined: Latch, cmd: String) -> Self {
+    pub(crate) fn new(
+        surface: Arc<DeferredSurface>,
+        joined: Latch,
+        id: WorkerId,
+        cmd: String,
+    ) -> Self {
         Self(Some(Pending {
             surface,
             joined,
+            id,
             cmd,
         }))
     }
@@ -90,10 +97,11 @@ impl FlushGuard {
         if let Some(Pending {
             surface,
             joined,
+            id,
             cmd,
         }) = self.0.take()
         {
-            surface.flush(&joined, &cmd, outcome);
+            surface.flush(&joined, id, &cmd, outcome);
         }
     }
 }

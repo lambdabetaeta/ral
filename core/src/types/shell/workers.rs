@@ -159,11 +159,13 @@ variant!(Done {
 /// The event a detached worker appends at completion.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DoneEvent {
+    pub id: WorkerId,
     pub cmd: String,
     pub outcome: Done,
 }
 
 record!(DoneEvent {
+    id: "id",
     cmd: "cmd",
     outcome: "outcome",
 });

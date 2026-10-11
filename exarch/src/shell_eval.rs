@@ -115,6 +115,7 @@ pub enum Surface {
     Card(crate::card::Card),
     Notice(ral_core::types::Notice),
     Done {
+        id: Option<u64>,
         cmd: String,
         outcome: crate::card::DoneOutcome,
     },
@@ -169,8 +170,12 @@ pub fn decode_surface(ev: &FOValue) -> Decoded {
         Decoded::Surface(Surface::Notice(notice))
     } else if let Some(card) = value_to_card(ev) {
         Decoded::Surface(Surface::Card(card))
-    } else if let Some((cmd, outcome)) = value_to_done(ev) {
-        Decoded::Surface(Surface::Done { cmd, outcome })
+    } else if let Some((id, cmd, outcome)) = value_to_done(ev) {
+        Decoded::Surface(Surface::Done {
+            id: Some(id),
+            cmd,
+            outcome,
+        })
     } else {
         Decoded::Unknown
     }

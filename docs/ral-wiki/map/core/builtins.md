@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 446e3123
-generated_at_date: 2026-10-05
+generated_at_commit: 28d06d78
+generated_at_date: 2026-10-11
 covers_paths: [core/src/builtins/, core/src/builtins.rs, core/src/uutils.rs]
 ---
 
@@ -182,7 +182,8 @@ Bodies are grouped by concern, one submodule each:
   error, the trail, and the workers listing use — comes from the birth
   itself: a watch's label, a service's description, and for a plain `spawn`
   or a prelude `defer` over it, `shell.call_site()` — `block at <script>,
-  line N`.
+  line N`. Completion events carry the same worker ID as the birth and registry entry,
+  including on failure and panic.
   The spawn door also enforces the frame's admission cap
   (`Mooring::worker_cap`): a birth of any class *reserves* its seat at
   the door (`WorkerRegistry::reserve`) — refused while `cap` workers are

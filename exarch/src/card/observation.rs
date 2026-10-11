@@ -172,17 +172,22 @@ fn capability_spans(check: &Check) -> Vec<Span> {
     spans
 }
 
-/// A worker birth's heading, `worker #id cmd class` — a mark of its own,
+/// A worker birth's heading, `errand #id started · cmd` — a mark of its own,
 /// never `spawn`'s `$ cmd → status` row, so a birth reads as what it is
 /// rather than as another exec.
 fn worker_spans(id: WorkerId, cmd: &str, class: LeaseClass) -> Vec<Span> {
     vec![
-        Span::new(Role::Muted, "worker "),
+        Span::new(Role::Muted, "errand "),
         Span::new(Role::Path, format!("#{}", id.0)),
-        Span::plain(" "),
-        Span::new(Role::Code, cmd),
-        Span::plain(" "),
-        Span::new(Role::Muted, <&str>::from(class)),
+        Span::new(Role::Muted, " started · "),
+        Span::new(Role::Code, cmd.strip_prefix("block at ").unwrap_or(cmd)),
+        Span::new(
+            Role::Muted,
+            match class {
+                LeaseClass::Worker => "",
+                LeaseClass::Durable => " · durable",
+            },
+        ),
     ]
 }
 

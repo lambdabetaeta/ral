@@ -334,6 +334,8 @@ pub enum Display {
         card: Card,
     },
     Done {
+        #[serde(default)]
+        id: Option<u64>,
         cmd: String,
         outcome: DoneOutcome,
     },

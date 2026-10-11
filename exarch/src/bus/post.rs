@@ -318,8 +318,8 @@ fn surface_notice(values: &[FOValue]) -> String {
         .rev()
         .find_map(crate::card::value_to_done)
         .map_or_else(
-            || "background block settled".to_string(),
-            |(cmd, outcome)| crate::card::settled_text(&cmd, &outcome),
+            || "errand finished".to_string(),
+            |(id, cmd, outcome)| crate::card::settled_text(Some(id), &cmd, &outcome),
         );
     format!("{settled}. Await its handle for the value.")
 }

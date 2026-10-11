@@ -698,12 +698,14 @@ fn decode_surface_round_trips_each_class() {
         Decoded::Surface(Surface::Card(_))
     ));
     let done = DoneEvent {
+        id: ral_core::types::WorkerId(7),
         cmd: "block at turn 1, line 1".into(),
         outcome: Done::Ok,
     };
     assert!(matches!(
         decode_surface(&done.to_surface()),
         Decoded::Surface(Surface::Done {
+            id: Some(7),
             cmd,
             outcome: crate::card::DoneOutcome::Ok,
         }) if cmd == "block at turn 1, line 1"

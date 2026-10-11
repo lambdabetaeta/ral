@@ -405,8 +405,9 @@ pub(crate) fn absorb_surface(
             let _recorded = recorder.emit(crate::record::Display::Card { card: card.clone() })?;
             Ok(())
         }
-        Surface::Done { cmd, outcome } => {
+        Surface::Done { id, cmd, outcome } => {
             let _recorded = recorder.emit(crate::record::Display::Done {
+                id: *id,
                 cmd: cmd.clone(),
                 outcome: outcome.clone(),
             })?;

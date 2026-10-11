@@ -113,6 +113,7 @@ where
         }
     };
 
+    let id = WorkerId::mint();
     let cmd = cmd.to_string();
     let worker_cmd = cmd.clone();
 
@@ -138,7 +139,7 @@ where
             child.io.stdout = stdout;
             child.io.stderr = stderr;
 
-            let guard = FlushGuard::new(worker_surface, worker_joined, worker_cmd);
+            let guard = FlushGuard::new(worker_surface, worker_joined, id, worker_cmd);
 
             let result = work(mooring, child);
             child.io.stdout.flush_pending();
@@ -155,7 +156,6 @@ where
         })
         .map_err(|e| sig(format!("could not start a worker thread: {e}")))?;
 
-    let id = WorkerId::mint();
     shell.local.workers.register(
         reservation,
         WorkerEntry {
