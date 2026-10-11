@@ -8,7 +8,7 @@ use ral_core::terminal::TerminalState;
 use rustyline::config::{BellStyle, Builder, CompletionType};
 use rustyline::error::ReadlineError;
 use rustyline::history::DefaultHistory;
-use rustyline::{Editor, EventHandler, KeyCode, KeyEvent, Modifiers};
+use rustyline::{Editor, Event, EventHandler, KeyCode, KeyEvent, Modifiers};
 use std::sync::Arc;
 
 use super::super::complete::RalHelper;
@@ -27,8 +27,8 @@ pub(in crate::repl) struct RustylineFrontend {
     keymap: Keymap,
     terminal: TerminalState,
     history_path: Option<String>,
-    /// The key sequences bound with rustyline, so a sync can unbind them.
-    bound: Vec<KeyEvent>,
+    /// The events bound with rustyline, so a sync can unbind them.
+    bound: Vec<Event>,
 }
 
 impl RustylineFrontend {

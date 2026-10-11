@@ -5,24 +5,35 @@
 //! told, plus the [`ManifestHandlers`] it registers itself; the host
 //! re-validates the manifest into a [`LoadedPlugin`].
 
-use super::router::{KeyChord, builtin_action, parse_key_notation, reserved_action};
+use super::router::{CTRL_X, KeyChord, builtin_action, parse_key_notation, reserved_action};
 use super::{HookHealth, load_err};
 use ral_core::first_order::FOValue;
-use ral_core::record;
 use ral_core::types::{Error, settings_map};
-use ral_core::{Map, Value};
+use ral_core::{Map, Value, label, record};
+use std::collections::HashMap;
+use strum::{IntoStaticStr, VariantArray};
 
 /// Hook events recognised in manifests.  Typos are load errors so a
 /// plugin cannot silently register a handler that never fires.
-pub(super) const KNOWN_HOOKS: &[&str] =
-    &["buffer-change", "pre-exec", "post-exec", "chpwd", "prompt"];
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
+pub(crate) enum HookEvent {
+    BufferChange,
+    Complete,
+    PreExec,
+    PostExec,
+    Chpwd,
+    Prompt,
+}
+
+label!(HookEvent);
 
 /// A manifest's first-order part: what the host needs to route keys and
 /// fire hooks.  Handlers never cross; they stay registered engine-side.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Manifest {
     pub(crate) name: String,
-    pub(crate) hooks: Vec<String>,
+    pub(crate) hooks: Vec<HookEvent>,
     pub(crate) keybindings: Vec<KeySpec>,
 }
 
@@ -44,14 +55,15 @@ record!(KeySpec {
     guard: "guard",
 });
 
-/// One keybinding, validated.  `chord` is the parsed form of `key`; `guard`,
-/// when present, is a regex the binding claims its chord under only when it
-/// matches the text left of the cursor, otherwise dispatch falls to the next
-/// table entry or the editor's built-in action.
+/// One keybinding, validated.  `chords` is the parsed form of `key`: one
+/// chord, or a sequence beginning with ctrl-x; `guard`, when present, is a
+/// regex the binding claims its keys under only when it matches the text left
+/// of the cursor, otherwise dispatch falls to the next table entry or the
+/// editor's built-in action.
 #[derive(Debug, Clone)]
 pub(crate) struct KeyBinding {
     pub(crate) key: String,
-    pub(crate) chord: KeyChord,
+    pub(crate) chords: Vec<KeyChord>,
     pub(crate) guard: Option<regex::Regex>,
 }
 
@@ -60,11 +72,16 @@ impl KeySpec {
     /// because its router is what the binding must fit.
     pub(crate) fn bind(&self) -> Result<KeyBinding, String> {
         let key = &self.key;
-        let chord = parse_key_notation(key)
-            .ok_or_else(|| format!("keybinding '{key}': unrecognised key notation"))?;
-        if let Some(action) = reserved_action(chord) {
+        let chords = parse_key_notation(key).map_err(|why| format!("keybinding '{key}': {why}"))?;
+        if let Some(action) = chords.iter().copied().find_map(reserved_action) {
             return Err(format!(
                 "keybinding '{key}' is reserved for {action} and cannot be bound by a plugin"
+            ));
+        }
+        if chords.len() > 1 && chords[0] != CTRL_X {
+            return Err(format!(
+                "keybinding '{key}': a key sequence begins with ctrl-x, the prefix the line \
+                 editor leaves free for sequences"
             ));
         }
         let guard = self
@@ -74,7 +91,8 @@ impl KeySpec {
             .transpose()
             .map_err(|e| format!("keybinding '{key}': invalid guard regex: {e}"))?;
         if guard.is_none()
-            && let Some(action) = builtin_action(chord)
+            && let [chord] = chords.as_slice()
+            && let Some(action) = builtin_action(*chord)
         {
             return Err(format!(
                 "unguarded keybinding '{key}' would shadow the built-in {action} on every \
@@ -83,7 +101,7 @@ impl KeySpec {
         }
         Ok(KeyBinding {
             key: key.clone(),
-            chord,
+            chords,
             guard,
         })
     }
@@ -100,14 +118,13 @@ impl KeySpec {
 #[derive(Debug, Clone)]
 pub(crate) struct LoadedPlugin {
     pub(crate) name: String,
-    /// Hook event names this plugin registered.  The handler values
+    /// The hook events this plugin registered.  The handler values
     /// themselves live only in the engine's hook table.
-    pub(crate) hooks: Vec<String>,
+    pub(crate) hooks: Vec<HookEvent>,
     pub(crate) keybindings: Vec<KeyBinding>,
     pub(crate) state_cell: Option<FOValue>,
-    /// Circuit-breaker state for this plugin's buffer-change hook — the only
-    /// hook that fires on every keystroke and so needs a per-session brake.
-    pub(crate) buffer_change_health: HookHealth,
+    /// Circuit-breaker state of this plugin's braked hooks, by event.
+    pub(crate) health: HashMap<HookEvent, HookHealth>,
 }
 
 impl LoadedPlugin {
@@ -122,7 +139,7 @@ impl LoadedPlugin {
             name: manifest.name,
             hooks: manifest.hooks,
             state_cell: None,
-            buffer_change_health: HookHealth::default(),
+            health: HashMap::new(),
         })
     }
 }
@@ -131,7 +148,7 @@ impl LoadedPlugin {
 /// into its hook table and env; `aliases` are also what unload removes.
 #[derive(Debug)]
 pub(super) struct ManifestHandlers {
-    pub(super) hooks: Vec<(String, Value)>,
+    pub(super) hooks: Vec<(HookEvent, Value)>,
     pub(super) keybindings: Vec<(String, Value)>,
     pub(super) aliases: Vec<(String, Value)>,
 }
@@ -201,7 +218,7 @@ pub(super) fn parse(val: &Value) -> Result<(Manifest, ManifestHandlers), Error> 
     };
     let manifest = Manifest {
         name,
-        hooks: hooks.iter().map(|(event, _)| event.clone()).collect(),
+        hooks: hooks.iter().map(|&(event, _)| event).collect(),
         keybindings,
     };
     let handlers = ManifestHandlers {
@@ -212,22 +229,29 @@ pub(super) fn parse(val: &Value) -> Result<(Manifest, ManifestHandlers), Error> 
     Ok((manifest, handlers))
 }
 
-fn parse_hooks(entries: &Map) -> Result<Vec<(String, Value)>, Error> {
+fn parse_hooks(entries: &Map) -> Result<Vec<(HookEvent, Value)>, Error> {
     let mut out = Vec::new();
-    for (event, value) in entries {
-        if !KNOWN_HOOKS.contains(&event) {
+    for (name, value) in entries {
+        let Some(&event) = HookEvent::VARIANTS
+            .iter()
+            .find(|&&e| <&str>::from(e) == name)
+        else {
             return Err(load_err(format!(
-                "unknown hook event '{event}'. Valid events: {}",
-                KNOWN_HOOKS.join(", ")
+                "unknown hook event '{name}'. Valid events: {}",
+                HookEvent::VARIANTS
+                    .iter()
+                    .map(<&str>::from)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )));
-        }
+        };
         if !matches!(value.as_ref(), Value::Thunk(_)) {
             return Err(load_err(format!(
-                "hook '{event}': expected a block, got {}",
+                "hook '{name}': expected a block, got {}",
                 value.type_name()
             )));
         }
-        out.push((event.to_string(), value.into_owned()));
+        out.push((event, value.into_owned()));
     }
     Ok(out)
 }
@@ -568,10 +592,46 @@ mod tests {
         let err = parse_keybindings(std::iter::once(keybinding_entry("hyper-x", None)))
             .expect_err("bad notation must be rejected");
         assert!(
-            err.message.contains("hyper-x") && err.message.contains("notation"),
-            "error should name the notation, got: {}",
+            err.message.contains("keybinding 'hyper-x'") && err.message.contains("not a key"),
+            "error should name the notation and the fault, got: {}",
             err.message
         );
+    }
+
+    /// A key sequence begins with plain ctrl-x, the prefix the editor leaves
+    /// free; anything else is refused, guard or not.
+    #[test]
+    fn key_sequences_begin_with_ctrl_x() {
+        let (out, _) = parse_keybindings(std::iter::once(keybinding_entry("ctrl-x ctrl-e", None)))
+            .expect("a ctrl-x sequence binds unguarded");
+        assert_eq!(out.len(), 1);
+        for key in ["escape escape", "alt-x y", "ctrl-alt-x y"] {
+            let err = parse_keybindings(std::iter::once(keybinding_entry(key, Some("x"))))
+                .expect_err("a sequence off ctrl-x must be rejected");
+            assert!(
+                err.message.contains(key) && err.message.contains("begins with ctrl-x"),
+                "error should name the key and the rule, got: {}",
+                err.message
+            );
+        }
+    }
+
+    /// Shift applies to named keys; for a character the shifted character is
+    /// itself the key.
+    #[test]
+    fn shift_with_a_character_is_load_error() {
+        let err = parse_keybindings(std::iter::once(keybinding_entry("shift-a", Some("x"))))
+            .expect_err("shift-a must be rejected");
+        assert!(err.message.contains("'A'"), "got: {}", err.message);
+        parse_keybindings(std::iter::once(keybinding_entry("shift-f5", None)))
+            .expect("shift-f5 binds unguarded");
+    }
+
+    /// Reserved means exactly ctrl-c / ctrl-d: another modifier frees the chord.
+    #[test]
+    fn ctrl_alt_c_is_not_reserved() {
+        parse_keybindings(std::iter::once(keybinding_entry("ctrl-alt-c", None)))
+            .expect("ctrl-alt-c binds unguarded");
     }
 
     /// A modified chord with no ral-owned action parses unguarded —

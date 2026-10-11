@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 446e3123
-generated_at_date: 2026-09-11
+generated_at_commit: 28d06d78
+generated_at_date: 2026-10-11
 covers_paths: [ral/src/repl/frontend.rs, ral/src/repl/frontend/, ral/src/repl/completion.rs, ral/src/repl/complete.rs, ral/src/repl/highlight_style.rs, prompt-editor/src/completion.rs, core/src/text.rs]
 ---
 
@@ -42,7 +42,10 @@ dumb terminals whatever was asked):
   keybindings, ghost text, highlights, and rustyline history, on TTYs that
   support raw mode and ANSI. Its `printer` hands rustyline's
   `ExternalPrinter` to the `ReplHost`, so a surfaced `` `watch `` line lands
-  above the live prompt.
+  above the live prompt. It remembers the `Event`s it bound (`bound`), so
+  `sync_plugins` can unbind them before rebinding: each distinct plugin key
+  sequence is one `Event::KeySeq`, a lone chord a sequence of one
+  ([[map/repl/plugins|plugins]]).
 
 ## Completion
 
@@ -60,7 +63,8 @@ paths) through `path-entries` in the engine's own filesystem,
 keyed by the `env-var PATH` and `cwd` readings and aged by `SCAN_TTL`;
 cwd-anchored path entries likewise — and ranks them.
 `completion::complete(line, pos, &Sources) -> (replace_from, Vec<Candidate>)`
-is the single entry point the rustyline helper calls. Ranking is `nucleo` fuzzy
+is the engine's single entry point; the rustyline helper reaches it only when
+no plugin `complete` hook claims the word (below). Ranking is `nucleo` fuzzy
 matching for every surface — path-tuned for path entries, ties broken
 alphabetically — and lives in `ral_core::text::rank`, a generic `AsRef<str>`
 function with no UI in it, so exarch's pickers match the same way ral's menus
@@ -71,9 +75,18 @@ of the item; `rank` is that same function under `AsRef::as_ref`. Ranking a row
 together with its haystack is what keeps the two from drifting apart into
 parallel vectors. `Candidate` is the engine's own type and stays here.
 
+`completion::parse_at` reads the simple command around the cursor as a
+`CommandAt {words, current, offset}` — `words[current]` the word being typed,
+from char `offset` — which `_ed-parse` answers and a plugin `complete` hook
+receives. `Candidate` is also a `Datum`: a bare string is both its fields, else
+exactly a `{replacement, display}` record.
+
 - `complete.rs::RalHelper` is the **rustyline adapter**: it holds the `Sources`
-  snapshot (rebuilt each prompt via `refresh`), delegates `Completer::complete`
-  to the engine, and maps each `Candidate` to a rustyline `Pair`. It also
+  snapshot (rebuilt each prompt via `refresh`), asks
+  `plugin::run_complete_hooks` first — the first plugin `complete` hook to
+  return a non-empty list claims the word, replacing from its `offset`
+  ([[map/repl/plugins|plugins]]) — else asks the engine in
+  `Completer::complete`, and maps each `Candidate` to a rustyline `Pair`. It also
   implements `Hinter`/`Highlighter` — ghost text and syntax highlights are *not*
   computed here; they come from plugin `buffer-change` hooks recorded in the
   [[map/repl/plugins|`PluginRuntime`]], and `RalHelper` only paints what the

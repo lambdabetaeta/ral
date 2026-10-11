@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 446e3123
-generated_at_date: 2026-10-06
+generated_at_commit: 28d06d78
+generated_at_date: 2026-10-11
 covers_paths: [ral/src/repl.rs, ral/src/repl/session.rs, ral/src/repl/session/, ral/src/repl/exec.rs, ral/src/repl/host.rs, ral/src/repl/enquiry.rs, ral/src/repl/prompt.rs, ral/src/repl/config.rs, ral/src/repl/config/, ral/src/repl/theme.rs, ral/src/repl/errfmt.rs, ral/src/repl/cursor.rs, ral/src/boot_door.rs, ral/src/surface.rs]
 ---
 
@@ -136,16 +136,21 @@ the REPL host, and the engine's door compiles, typechecks, and runs it against
 the live session** ([[internals/a-turn-end-to-end|a run, end to end]]).
 
 `exec.rs::step` is the per-line entry. `line_run` builds the `Run` —
-`Program::Source(trimmed)`, `script_name: "<stdin>"`, `GrantStack::root()`,
+`Program::Source(line)`, `script_name: "<stdin>"`, `GrantStack::root()`,
 no wall, `RunIo::Inherit`, `RequestedTerminalAccess::Leased`,
 `RunStdin::Inherit` — and `ReplHost::dispatch` sends it. Around it the
-lifecycle hooks fire as dispatches of their own (`plugin::fire`): `pre-exec`
-with `{src}` before; after, `chpwd` with `{old, new}` if the `cwd` reading
+lifecycle hooks run as dispatches of their own. Before, `pre_exec` folds the
+plugins' `pre-exec` hooks over the typed line in load order, each dispatched
+with `{src}`: a `Str` result is the next hook's line and, last, the line
+`line_run` carries; `()`, an `exit`, a fault or a wrong-shaped value
+([[map/repl/plugins|plugins]]) leaves it. After, `fire` runs `chpwd`
+with `{old, new}` if the `cwd` reading
 differs from the one taken before the line — the session is the working
 directory's outermost handler, so a `cd` a `within [dir:]` undid fires
 nothing — then `post-exec` with
-`{src, status}` — for every `pre-exec`, a static failure's status included.
-An `Err(Severed)` prints the cause and ends the session.
+`{src, status}`, `src` being the line that ran — for every line, a static
+failure's status included. An `Err(Severed)` prints the cause and ends the
+session.
 
 It matches the one flat `Report`:
 
@@ -169,16 +174,18 @@ hook is ignored.
 ## The host
 
 `host.rs::ReplHost` is the REPL's `Host`, and the one door every hook
-dispatch goes through (`dispatch`, `run_hook` → `HookResult {value,
-captured, fault, walled, ctx}`).
+dispatch goes through (`dispatch`, `run_hook` → `HookResult {outcome,
+captured, ctx}`, the `Outcome` one of `Settled(value)`, `Exited`,
+`Faulted(text)`, `Walled(text)`, the text trimmed and labelled once there).
 
-- `enquire` answers the two classes `enquiry.rs` types once for both ends:
+- `enquire` answers the three classes `enquiry.rs` types once for both ends:
   `` `repl-editor `` (an `EditorOp` — `get`, `set`, `set-lbuffer`, `insert`,
   `push`, `accept`, `ghost`, `highlight`, `history`, `state-get`,
   `state-set` — applied to the editor context installed for the dispatch in
-  flight, refused in its own words when none is) and `` `repl-plugin ``
+  flight, refused in its own words when none is), `` `repl-plugin ``
   (`loaded` with a manifest, `unloaded` with a name — told to the
-  [[map/repl/plugins|plugin runtime]], which may refuse).
+  [[map/repl/plugins|plugin runtime]], which may refuse) and
+  `` `repl-clipboard `` (a `ClipboardReq`, copied by the host).
 - `surface` and the `DeferredSink` impl render what the engine surfaces: a
   `` `watch `` line (`ral/src/surface.rs`, shared with batch) through the
   frontend's printer above the prompt, a `` `notice `` dim, an

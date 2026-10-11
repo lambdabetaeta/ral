@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use super::exec::{Step, step};
 use super::frontend::{EditBuffer, Frontend, Read};
-use super::host::{ReplHost, hook_run, teardown_notice};
+use super::host::{Outcome, ReplHost, hook_run, teardown_notice};
 use super::plugin::flush_pending_messages;
 use super::prompt::{render as render_prompt, write_terminal_title};
 use super::theme::OutputTheme;
@@ -97,9 +97,9 @@ impl Session {
         }
         if settings.startup {
             let startup = ral_core::HookName::session("startup");
-            if let Some(fault) = host
+            if let Outcome::Faulted(fault) | Outcome::Walled(fault) = host
                 .run_hook(&*transport, startup, vec![], None, None)
-                .fault
+                .outcome
             {
                 errln!("{fault}");
             }

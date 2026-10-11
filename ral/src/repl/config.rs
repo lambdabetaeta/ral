@@ -171,7 +171,8 @@ fn refuse(reason: impl std::fmt::Display) -> String {
 }
 
 /// A fully judged rc: every field already has its final shape and every hook
-/// and alias has passed the shell's gate, so [`Self::apply`] cannot refuse.
+/// and alias has passed the shell's gate, so [`Self::apply`] refuses only a
+/// shell that is not the session, before committing anything.
 #[derive(Default)]
 pub(crate) struct RcPlan {
     settings: RcSettings,
@@ -386,7 +387,9 @@ mod tests {
     /// Decode then commit, as the boot door does.
     fn commit(pairs: &Map, mooring: &Mooring, shell: &mut Shell) -> Result<RcSettings, String> {
         let plan = RcPlan::decode(pairs, shell)?;
-        Ok(plan.apply(mooring, shell).expect("apply never refuses"))
+        Ok(plan
+            .apply(mooring, shell)
+            .expect("a test shell is a session"))
     }
 
     /// Evaluate `rc_src`, apply it through `RcPlan`, and return the

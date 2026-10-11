@@ -5,7 +5,9 @@
 //! then calls [`dispatch_keybinding`] to run the handler outside the
 //! readline borrow, with a fresh editor context reflecting the current
 //! editor state.  The handler may mutate the buffer, accept the line, or
-//! push a new buffer onto the stack.
+//! push a new buffer onto the stack.  The handler receives the record
+//! `[key: Str, mode: Str]`: the bound notation, and the editor's input mode
+//! at the press (`insert`, `command` or `replace`).
 
 use ral_core::HookName;
 use ral_core::carrier::Transport;
@@ -14,9 +16,9 @@ use ral_core::first_order::datum::Datum as _;
 use std::sync::Arc;
 
 use super::frontend::EditBuffer;
-use super::host::ReplHost;
+use super::host::{Outcome, ReplHost};
 use super::plugin::editor::{EditorState, PluginContext};
-use super::plugin::{Keymap, PendingKeybinding, defer_plugin_message, keymap_name, lock};
+use super::plugin::{Keymap, PendingKeybinding, defer_plugin_message, lock};
 use ral_core::text::byte_to_char;
 
 /// Outcome of running a plugin keybinding handler.
@@ -62,7 +64,7 @@ pub(super) fn dispatch_keybinding(
         editor_state: EditorState::new(
             current.to_string(),
             byte_to_char(current, pk.cursor_byte),
-            keymap_name(keymap),
+            keymap,
         ),
         history,
         state_cell,
@@ -72,13 +74,16 @@ pub(super) fn dispatch_keybinding(
         t,
         HookName::plugin(pk.plugin.clone(), format!("key#{}", pk.binding_idx)),
         vec![FOValue::Map {
-            entries: vec![("key".into(), key.encode())],
+            entries: vec![
+                ("key".into(), key.encode()),
+                ("mode".into(), pk.mode.to_owned().encode()),
+            ],
         }],
         None,
         Some(ctx),
     );
 
-    if let Some(fault) = hr.fault {
+    if let Outcome::Faulted(fault) | Outcome::Walled(fault) = hr.outcome {
         // Deferred: the REPL loop is about to emit `\x1b[A\r\x1b[K` to erase
         // rustyline's stray newline, which would clobber an immediate
         // `eprintln!` on that very line.  Flushed afterward.
@@ -104,23 +109,20 @@ pub(super) fn dispatch_keybinding(
 #[cfg(test)]
 mod tests {
     use super::super::plugin::PluginRuntime;
-    use super::super::plugin::manifest::{KeyBinding, LoadedPlugin};
-    use super::super::plugin::parse_key_notation;
+    use super::super::plugin::manifest::{KeySpec, LoadedPlugin, Manifest};
 
     /// A plugin record carrying one keybinding under `key`, so resolution
     /// can be checked by the key it yields.
     fn plugin(name: &str, key: &str) -> LoadedPlugin {
-        LoadedPlugin {
+        LoadedPlugin::admit(Manifest {
             name: name.to_string(),
             hooks: Vec::new(),
-            keybindings: vec![KeyBinding {
+            keybindings: vec![KeySpec {
                 key: key.to_string(),
-                chord: parse_key_notation(key).expect("test key parses"),
                 guard: None,
             }],
-            state_cell: None,
-            buffer_change_health: crate::repl::plugin::HookHealth::default(),
-        }
+        })
+        .expect("test key binds")
     }
 
     /// J3 regression: after `unload_plugin` compacts the runtime `Vec`, a

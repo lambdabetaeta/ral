@@ -3046,7 +3046,7 @@ Its fields are:
 - `write` — change editor text or state and accept input;
 - `tui` — open the editor TUI facility.
 
-An `_ed-*` builtin needs the field of every operation it performs: `_ed-tui` also needs `read`, `_ed-state` both `read` and `write`.
+An `_ed-*` builtin needs the field of every operation it performs, checked before its first effect; `_ed-state` needs both `read` and `write`.
 
 `shell` currently controls working-directory changes:
 
@@ -4236,46 +4236,85 @@ The recognized hooks are:
 | Hook | Argument and result | Time |
 |---|---|---|
 | `buffer-change` | `[old: String]`; returns `Unit` | After the text or cursor changes. |
-| `pre-exec` | `[src: String]`; returns `Unit` | Before one complete prompt input is evaluated. |
+| `complete` | `[words: [String], current: Int, offset: Int]`; returns `[String]` or `[[replacement: String, display: String]]` | When completions are requested, before the editor's own. |
+| `pre-exec` | `[src: String]`; returns the line to run (`String`), or `Unit` | Before one complete prompt input is evaluated. |
 | `post-exec` | `[src: String, status: Int]`; returns `Unit` | After evaluation settles. |
 | `chpwd` | `[old: String, new: String]`; returns `Unit` | After an input line that leaves the session working directory changed. |
 | `prompt` | The current prompt `String`; returns a `String` | Before each prompt render. |
 
-The four `Unit` result contracts above are enforced. A non-`Unit` result is a
-hook failure, not an ignored value. The `prompt` hook is deliberately
-different: it is a string transformer, read like the session prompt (a returned
-value, else the captured standard output), so each successful result becomes
-the next plugin's input.
+The value of a `buffer-change`, `post-exec`, or `chpwd` hook is ignored. The
+`prompt` hook is deliberately different: it is a string transformer, read like
+the session prompt (a returned value, else the captured standard output), so
+each successful result becomes the next plugin's input.
 
 Hooks run in plugin load order. A failed lifecycle hook is reported but does
 not prevent later plugins' hooks from running or replace the command's status.
-Prompt transformers compose: each successful result becomes the next hook's
-input, while a failed hook leaves the current prompt unchanged. The faults of
-one render print together, once while they repeat.
+A fault is attributed `plugin 'name' hook 'event'`. Prompt transformers
+compose: each successful result becomes the next hook's input, while a failed
+hook leaves the current prompt unchanged. The faults of one render print
+together, once while they repeat.
 
-`buffer-change` runs on the editing path, so ral protects the session from a
-persistently bad handler. A single invocation that exceeds 100 milliseconds,
-or three consecutive failures, disables that plugin's `buffer-change` hook for
-the rest of the session and prints a notice. `_ed-tui` is unavailable inside
-`buffer-change`.
+`pre-exec` hooks fold over the input line: each receives the line the previous
+one returned, and the last line is the one evaluated. A `String` result
+replaces the line and `Unit` leaves it. A failed hook is reported and a result
+of any other type is reported with a warning; both leave the line as it was, so
+no hook can stop every line. A line is refused by rewriting it to a failing
+one, such as `"fail [status: 1, message: 'refused']"`; its status reaches
+`post-exec` through the ordinary evaluation. `post-exec`'s `src` is the line
+that ran.
 
-A keybinding handler receives `[key: String]`, the binding's key notation. A
-hook reads the editor only through the `_ed-*` builtins.
+`complete` runs when completions are requested for a buffer that lexes, with
+the record `_ed-parse` returns. Each candidate is a `String`, standing for
+itself, or a `[replacement, display]` record. The first plugin in load order
+whose hook returns a non-empty list claims the word: its candidates replace the
+text from character `offset` to the cursor, unfiltered, and no later hook runs.
+An empty list or `()` passes to the next plugin and finally to the editor's own
+completion, and so does a result of any other shape, with a warning. The hook
+runs aside: its writes to the buffer, ghost text, and highlights are discarded.
 
-Key names are `tab`, `enter`, `escape`, arrows, `home`, `end`, `delete`,
-`backspace`, `f1` through `f12`, a single character, `ctrl-character`, or
-`alt-character`. Ctrl-C and Ctrl-D are reserved and cannot be bound.
+`buffer-change` and `complete` run on the editing path, so ral protects the
+session from a persistently bad handler, braked separately for each plugin and
+hook. A single invocation that exceeds its budget (100 milliseconds for
+`buffer-change`, 500 for `complete`), or three consecutive failures, disables
+that plugin's hook for the rest of the session and prints a notice.
+
+A keybinding handler receives `[key: String, mode: String]`: the binding's key
+notation, and the editor's input mode at the press, `insert`, `command`, or
+`replace` (`insert` throughout emacs). A hook reads the editor only through the
+`_ed-*` builtins.
+
+A key notation is one or more chords separated by spaces:
+
+```text
+notation := chord (' '+ chord)*
+chord    := (modifier '-')* key        each modifier at most once, any order
+modifier := ctrl | alt | shift
+key      := one character | f1…f12 | tab | enter | escape | up | down
+          | left | right | home | end | delete | backspace
+```
+
+A modifier is a modifier only while something follows its dash, so `ctrl--` is
+ctrl with `-`. `shift` applies to the keys that are not characters; for a
+character the shifted character is itself the key, so `A` and not `shift-a`.
+`ctrl` with an uppercase letter is refused, being the same key to a terminal
+as the lowercase one; so are `ctrl-h`, `ctrl-i`, `ctrl-m`, and `ctrl-[`, which a
+terminal sends as `backspace`, `tab`, `enter`, and `escape`, and a control
+character written as the key. Each refusal names the spelling to use. A
+sequence of several chords must begin with `ctrl-x`, the prefix the line editor
+leaves free for sequences. Ctrl-C and Ctrl-D, with
+no other modifier, are reserved and cannot be bound, alone or in a sequence.
 
 Keybindings form one ordered table: plugin load order, then manifest order,
 then the frontend's built-in action. A `guard` is a regular expression matched
-against the text left of the cursor. A binding claims its key only when the
+against the text left of the cursor. A binding claims its keys only when the
 guard matches. Every unmodified key except F1 through F12 already has an editor
 action and therefore requires a guard. Modified chords and function keys may
-be unguarded. A later binding hidden by an earlier unguarded binding loads with
-a warning naming the earlier owner.
+be unguarded. A binding that can never fire loads with a warning naming the
+binding that claims its keys first: an earlier unguarded binding on the same
+keys, or an unguarded binding on a proper prefix of its sequence.
 
-The minimal frontend does not dispatch buffer-change hooks or editor
-keybindings and cannot display ghost text or highlights. Plugin aliases and
+The minimal frontend does not dispatch buffer-change or complete hooks or
+editor keybindings and cannot display ghost text or highlights. Plugin aliases and
 the `pre-exec`, `post-exec`, `chpwd`, and `prompt` hooks remain session
 facilities and do not depend on raw-mode editing.
 
@@ -4291,7 +4330,7 @@ Cursor and span offsets count Unicode characters, not UTF-8 bytes.
 
 | Builtin | Contract |
 |---|---|
-| `_ed-get` | Return `[text, cursor, keymap, in-readline]`. The text left of the cursor is `slice $st[text] 0 $st[cursor]`. |
+| `_ed-get` | Return `[text, cursor, keymap]`; `keymap` is `emacs` or `vi`, the configured keymap. The text left of the cursor is `slice $st[text] 0 $st[cursor]`. |
 | `_ed-set [text: `keep\|`set Str, cursor: `keep\|`set Int]` | Replace `text` and/or `cursor`; `` `keep `` leaves a field unchanged and an out-of-range cursor is clamped. |
 | `_ed-set-lbuffer text` | Replace text left of the cursor, preserving the right side. |
 | `_ed-insert text` | Insert at the cursor and advance past the insertion. |
@@ -4314,8 +4353,9 @@ do not become part of the input buffer.
 standard output captured while allowing an interactive child to use the
 terminal. The body's value is ignored; the captured bytes are decoded as text,
 lossily, with one trailing newline removed, and supply `output`. A body failure
-is returned as data in `output` and `status` rather than raised. Nested
-`_ed-tui` calls and calls from `buffer-change` are reported as status 1.
+is returned as data in `output` and `status` rather than raised. `_ed-tui`
+opens only from a keybinding handler, the run that holds the terminal; from any
+other hook, and nested inside another `_ed-tui`, it is reported as status 1.
 
 Terminal presentation remains capability-dependent. Clipboard emission may
 return `false`; hyperlink formatting may return plain text; colour, ghost text,

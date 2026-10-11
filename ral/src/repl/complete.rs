@@ -3,8 +3,9 @@
 //!
 //! [`RalHelper`] implements rustyline's `Completer`, `Hinter`, and
 //! `Highlighter`.  Completion itself is the frontend-neutral
-//! [`super::completion`] engine; this type only holds the [`SourceCache`] the
-//! engine ranks against and adapts the engine's
+//! [`super::completion`] engine, unless a plugin's `complete` hook claims the
+//! word first; this type only holds the [`SourceCache`] the engine ranks
+//! against and adapts the winning
 //! [`Candidate`](super::completion::Candidate)s to rustyline `Pair`s.
 //! Highlighting and ghost text come from plugin buffer-change hooks, which it
 //! dispatches through the engine it holds and records in
@@ -30,7 +31,7 @@ use std::sync::Arc;
 use super::completion::{self, SourceCache};
 use super::highlight_style::apply_highlights;
 use super::host::ReplHost;
-use super::plugin::{lock, run_buffer_change_hooks};
+use super::plugin::{lock, run_buffer_change_hooks, run_complete_hooks};
 
 // ── RalHelper ────────────────────────────────────────────────────────────
 
@@ -79,8 +80,10 @@ impl Completer for RalHelper {
         pos: usize,
         _ctx: &Context<'_>,
     ) -> rustyline::Result<(usize, Vec<Pair>)> {
-        let (start, candidates) =
-            completion::complete(line, pos, &self.sources.sources(&*self.engine));
+        let (start, candidates) = run_complete_hooks(&*self.engine, &self.host, line, pos)
+            .unwrap_or_else(|| {
+                completion::complete(line, pos, &self.sources.sources(&*self.engine))
+            });
         let pairs = candidates
             .into_iter()
             .map(|c| Pair {

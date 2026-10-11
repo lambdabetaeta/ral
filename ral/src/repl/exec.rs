@@ -1,20 +1,23 @@
 //! One input line, dispatched through the engine protocol.
 //!
 //! [`step`] runs a source line through the transport with the REPL host,
-//! drains to its [`Report`], and fires the lifecycle hooks around it —
-//! `pre-exec` before; after, `chpwd` if the line moved the session's
-//! directory, then `post-exec` — each a dispatch of its own.
+//! drains to its [`Report`], and fires the lifecycle hooks around it — each a
+//! dispatch of its own.  `pre-exec` comes before and is folded over the line,
+//! each hook free to rewrite it; after, `chpwd` if the line moved the
+//! session's directory, then `post-exec`, which sees the line that ran.
 
 use ral_core::carrier::Transport;
 use ral_core::first_order::FOValue;
 use ral_core::first_order::datum::Datum as _;
 use ral_core::protocol::{Ending, Report, Run};
-use ral_core::{Value, builtins};
+use ral_core::{HookName, Value, builtins};
 use ral_core::{err, errln, outln};
 use std::sync::Arc;
 
-use super::host::ReplHost;
-use super::plugin::fire;
+use super::errfmt::format_plugin_warning;
+use super::host::{Outcome, ReplHost};
+use super::plugin::lock;
+use super::plugin::manifest::HookEvent;
 use super::theme::OutputTheme;
 
 pub(super) enum Step {
@@ -61,9 +64,67 @@ pub(super) fn line_run(src: &str) -> Run {
     Run::foreground(src, "<stdin>")
 }
 
-/// Dispatch one trimmed non-empty input line, firing the lifecycle hooks
-/// around it: `post-exec` for every `pre-exec`, with the line's status, a
-/// static failure's included.
+/// Fire lifecycle `event` on every plugin that registers it.  Every
+/// lifecycle hook receives exactly one argument, the event record:
+/// `{src, status}` for `post-exec`, `{old, new}` for `chpwd`.
+fn fire(t: &dyn Transport, host: &Arc<ReplHost>, event: HookEvent, record: &FOValue) {
+    let names = lock(&host.runtime).with_hook(event);
+    for name in names {
+        let hr = host.run_hook(
+            t,
+            HookName::plugin(name, <&str>::from(event)),
+            vec![record.clone()],
+            None,
+            None,
+        );
+        // Printed, not deferred: a lifecycle hook runs with the terminal
+        // already stable, and a deferred message would wait for a next prompt
+        // the last command before exit never reaches.
+        if let Outcome::Faulted(fault) | Outcome::Walled(fault) = hr.outcome {
+            errln!("{fault}");
+        }
+    }
+}
+
+/// Fold the plugins' `pre-exec` hooks over `src` in load order: a hook returns
+/// the line to run, or `()` to leave it.  A fault is reported and passed over,
+/// so no hook can stop every line, `unload-plugin` itself included.
+fn pre_exec(t: &dyn Transport, host: &Arc<ReplHost>, src: String) -> String {
+    let names = lock(&host.runtime).with_hook(HookEvent::PreExec);
+    names.into_iter().fold(src, |src, name| {
+        let hr = host.run_hook(
+            t,
+            HookName::plugin(&name, <&str>::from(HookEvent::PreExec)),
+            vec![record(vec![("src", src.clone().encode())])],
+            None,
+            None,
+        );
+        match hr.outcome {
+            Outcome::Faulted(fault) | Outcome::Walled(fault) => {
+                errln!("{fault}");
+                src
+            }
+            Outcome::Settled(FOValue::String { value }) => value,
+            Outcome::Settled(FOValue::Unit) | Outcome::Exited => src,
+            Outcome::Settled(other) => {
+                errln!(
+                    "{}",
+                    format_plugin_warning(
+                        &name,
+                        &format!(
+                            "its pre-exec hook returned {}; a pre-exec hook returns the line to run, or `()`",
+                            other.shape()
+                        ),
+                    )
+                );
+                src
+            }
+        }
+    })
+}
+
+/// Dispatch one trimmed non-empty input line between its lifecycle hooks;
+/// `post-exec` follows every line, a static failure's included.
 ///
 /// The session is the working directory's outermost handler, so `chpwd`
 /// compares its directory across the line: a `cd` that a `within [dir: …]`
@@ -74,11 +135,10 @@ pub(super) fn step(
     host: &Arc<ReplHost>,
     theme: &OutputTheme,
 ) -> Step {
-    let src = trimmed.to_string().encode();
-    fire(t, host, "pre-exec", &record(vec![("src", src.clone())]));
+    let src = pre_exec(t, host, trimmed.to_owned());
     let before = t.cwd().ok();
 
-    let (report, _) = host.dispatch(t, line_run(trimmed), None);
+    let (report, _) = host.dispatch(t, line_run(&src), None);
     let (status, step) = match report {
         Err(severed) => {
             errln!("ral: {severed}");
@@ -114,16 +174,16 @@ pub(super) fn step(
         fire(
             t,
             host,
-            "chpwd",
+            HookEvent::Chpwd,
             &record(vec![("old", path(old)), ("new", path(new))]),
         );
     }
     fire(
         t,
         host,
-        "post-exec",
+        HookEvent::PostExec,
         &record(vec![
-            ("src", src),
+            ("src", src.encode()),
             (
                 "status",
                 FOValue::Int {
@@ -139,70 +199,8 @@ pub(super) fn step(
 #[allow(clippy::disallowed_methods, reason = "[test] test scaffolding")]
 mod tests {
     use super::*;
-    use crate::repl::plugin::PluginRuntime;
-    use crate::repl::plugin::manifest::{LoadedPlugin, Manifest};
+    use crate::repl::plugin::load::harness::dressed;
     use ral_core::carrier::IdentityTransport;
-    use ral_core::ty::{Scheme, Ty};
-    use ral_core::typecheck::Unifier;
-    use ral_core::typecheck::builtins::{fun, mk_scheme, pure, thunk};
-    use ral_core::types::{BuiltinBody, BuiltinEntry, DefaultPolicy, HookName, HookSig};
-    use std::borrow::Cow;
-    use std::sync::Mutex;
-
-    /// The sink's type: an argv in, `Unit` out — the base-frame convention,
-    /// since the sink takes whatever a hook body hands it, however much of it.
-    fn sink_scheme(_u: &mut Unifier) -> Scheme {
-        mk_scheme(&[], &[], thunk(fun(Ty::argv(), pure(Ty::Unit))))
-    }
-
-    /// A test-only sink base frame: `record` appends its argument values into
-    /// the shared vector, so a hook handler's projections out of the event
-    /// record become observable.
-    fn sink_builtin(sink: Arc<Mutex<Vec<Value>>>) -> BuiltinEntry {
-        BuiltinEntry::base_frame(
-            Cow::Borrowed("record"),
-            sink_scheme,
-            "record: test sink appending its arguments.",
-            BuiltinBody::Captured(Arc::new(move |args, _mooring, _shell| {
-                sink.lock().unwrap().extend(args.iter().cloned());
-                Ok(Value::Unit)
-            })),
-        )
-    }
-
-    /// An engine carrying the sink builtin and one plugin `p` whose
-    /// `hook_event` handler is compiled from `handler_src`, the host told of
-    /// it, and the sink its builtin appends every call to.
-    fn dressed(
-        hook_event: &str,
-        handler_src: &str,
-    ) -> (IdentityTransport, Arc<ReplHost>, Arc<Mutex<Vec<Value>>>) {
-        let sink = Arc::new(Mutex::new(Vec::new()));
-        let (event, handler_src) = (hook_event.to_owned(), handler_src.to_owned());
-        let recorder = sink_builtin(sink.clone());
-        let t = crate::repl::engine(move |shell| {
-            crate::PRELUDE.seat(shell);
-            shell.install_captured_builtins(&vec![recorder].into());
-            let h = crate::repl::eval(shell, &handler_src);
-            shell
-                .register_hook(
-                    HookName::plugin("p", &event),
-                    h,
-                    HookSig::Hook { kind: event },
-                    DefaultPolicy::denied(),
-                )
-                .expect("register");
-        });
-        let plugin = LoadedPlugin::admit(Manifest {
-            name: "p".into(),
-            hooks: vec![hook_event.into()],
-            keybindings: Vec::new(),
-        })
-        .expect("admit");
-        let runtime = Arc::new(Mutex::new(PluginRuntime::default()));
-        crate::repl::plugin::lock(&runtime).plugins.push(plugin);
-        (t, ReplHost::new(runtime), sink)
-    }
 
     fn run(line: &str, t: &IdentityTransport, host: &Arc<ReplHost>) {
         step(line, t, host, &OutputTheme::default());
@@ -212,7 +210,11 @@ mod tests {
     /// line under `src` and the line's status under `status`.
     #[test]
     fn post_exec_passes_src_and_status_in_one_event_record() {
-        let (t, host, sink) = dressed("post-exec", "{ |ev| record $ev[src] $ev[status] }");
+        let (t, host, sink) = dressed(&[(
+            "p",
+            HookEvent::PostExec,
+            "{ |ev| record $ev[src] $ev[status] }",
+        )]);
         let line = "fail [status: 7, message: 'x']";
         run(line, &t, &host);
         assert_eq!(
@@ -224,7 +226,7 @@ mod tests {
     /// A static failure still closes its `pre-exec` with a `post-exec`.
     #[test]
     fn post_exec_fires_after_a_static_failure() {
-        let (t, host, sink) = dressed("post-exec", "{ |ev| record $ev[status] }");
+        let (t, host, sink) = dressed(&[("p", HookEvent::PostExec, "{ |ev| record $ev[status] }")]);
         run("if", &t, &host);
         assert_eq!(sink.lock().unwrap().len(), 1, "one post-exec per line");
     }
@@ -233,9 +235,79 @@ mod tests {
     /// line under `src`.
     #[test]
     fn pre_exec_passes_src_in_one_event_record() {
-        let (t, host, sink) = dressed("pre-exec", "{ |ev| record $ev[src] }");
+        let (t, host, sink) = dressed(&[("p", HookEvent::PreExec, "{ |ev| record $ev[src] }")]);
         run("return ()", &t, &host);
         assert_eq!(*sink.lock().unwrap(), vec![Value::string("return ()")]);
+    }
+
+    /// The line a `pre-exec` hook returns is the line that runs.
+    #[test]
+    fn pre_exec_rewrite_is_what_runs() {
+        let (t, host, sink) = dressed(&[(
+            "p",
+            HookEvent::PreExec,
+            "{ |_ev| return 'record rewritten' }",
+        )]);
+        run("return ()", &t, &host);
+        assert_eq!(*sink.lock().unwrap(), vec![Value::string("rewritten")]);
+    }
+
+    /// Each `pre-exec` hook sees the line the one before it returned.
+    #[test]
+    fn pre_exec_rewriters_compose_in_load_order() {
+        let (t, host, sink) = dressed(&[
+            ("p", HookEvent::PreExec, "{ |ev| return \"$ev[src] one\" }"),
+            ("q", HookEvent::PreExec, "{ |ev| return \"$ev[src] two\" }"),
+        ]);
+        run("record", &t, &host);
+        assert_eq!(
+            *sink.lock().unwrap(),
+            vec![Value::string("one"), Value::string("two")]
+        );
+    }
+
+    /// A failing `pre-exec` hook is reported, and the line runs as typed.
+    #[test]
+    fn failing_pre_exec_does_not_stop_the_line() {
+        let (t, host, sink) = dressed(&[(
+            "p",
+            HookEvent::PreExec,
+            "{ |_ev| fail [status: 1, message: 'boom'] }",
+        )]);
+        run("record ran", &t, &host);
+        assert_eq!(*sink.lock().unwrap(), vec![Value::string("ran")]);
+    }
+
+    /// A `pre-exec` hook returning neither a line nor `()` leaves the line.
+    #[test]
+    fn wrong_shaped_pre_exec_return_leaves_the_line() {
+        let (t, host, sink) = dressed(&[("p", HookEvent::PreExec, "{ |_ev| return 7 }")]);
+        run("record typed", &t, &host);
+        assert_eq!(*sink.lock().unwrap(), vec![Value::string("typed")]);
+    }
+
+    /// Refusing a line is rewriting it to a failing one, whose status reaches
+    /// `post-exec` through the ordinary run.
+    #[test]
+    fn pre_exec_refuses_by_rewriting_to_a_failing_line() {
+        let refusal = "fail [status: 4, message: 'refused']";
+        let (t, host, sink) = dressed(&[
+            (
+                "p",
+                HookEvent::PreExec,
+                &format!("{{ |_ev| return \"{refusal}\" }}"),
+            ),
+            (
+                "p",
+                HookEvent::PostExec,
+                "{ |ev| record $ev[src] $ev[status] }",
+            ),
+        ]);
+        run("record never", &t, &host);
+        assert_eq!(
+            *sink.lock().unwrap(),
+            vec![Value::string(refusal), Value::Int(4)]
+        );
     }
 
     /// `chpwd` observes the session's directory at the line boundary: a `cd`
@@ -246,7 +318,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let root = root.path();
         std::fs::create_dir_all(root.join("d").join("x")).unwrap();
-        let (t, host, sink) = dressed("chpwd", "{ |ev| record $ev[old] $ev[new] }");
+        let (t, host, sink) =
+            dressed(&[("p", HookEvent::Chpwd, "{ |ev| record $ev[old] $ev[new] }")]);
         run(&format!("cd '{}'", root.display()), &t, &host);
         sink.lock().unwrap().clear();
 

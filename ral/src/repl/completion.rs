@@ -21,10 +21,14 @@
 //! surface; [`ral_core::text::rank`] is its single home.
 
 use ral_core::carrier::Transport;
+use ral_core::first_order::FOValue;
+use ral_core::first_order::datum::{Datum, exact_keys, field};
 use ral_core::protocol::probe::PathEntry;
-use ral_core::syntax::lexer::{Token, lex_open, separates};
+use ral_core::record;
+use ral_core::source::Span as ByteSpan;
+use ral_core::syntax::lexer::{Lexeme, Token, lex_open, separates};
 use ral_core::syntax::quote_word;
-use ral_core::text::rank;
+use ral_core::text::{byte_to_char, char_to_byte, rank};
 use std::borrow::Cow;
 use std::cell::OnceCell;
 use std::path::{Path, PathBuf};
@@ -40,6 +44,32 @@ use std::time::{Duration, Instant};
 pub(super) struct Candidate {
     pub(super) display: String,
     pub(super) replacement: String,
+}
+
+/// A bare string is both fields; otherwise a `[replacement, display]` record.
+impl Datum for Candidate {
+    fn encode(self) -> FOValue {
+        FOValue::Map {
+            entries: vec![
+                ("display".into(), self.display.encode()),
+                ("replacement".into(), self.replacement.encode()),
+            ],
+        }
+    }
+
+    fn decode(v: &FOValue) -> Result<Self, String> {
+        if let Some(s) = v.as_str() {
+            return Ok(Self {
+                display: s.into(),
+                replacement: s.into(),
+            });
+        }
+        exact_keys(v, &["replacement", "display"])?;
+        Ok(Self {
+            display: field(v, "display")?,
+            replacement: field(v, "replacement")?,
+        })
+    }
 }
 
 /// What one completion request draws on: the [`SourceCache`] and the engine
@@ -379,6 +409,102 @@ fn ranked_entries(entries: Vec<PathEntry>, needle: &str, dir: &str, tilde: bool)
             }
         })
         .collect()
+}
+
+// ── The simple command at the cursor ─────────────────────────────────────────
+
+/// The simple command around the cursor: `words[current]` is the word
+/// being typed, starting at char `offset`.
+#[derive(Debug, Default)]
+pub(super) struct CommandAt {
+    pub(super) words: Vec<String>,
+    pub(super) current: usize,
+    pub(super) offset: usize,
+}
+
+record!(typed CommandAt {
+    words: "words",
+    current: "current",
+    offset: "offset",
+});
+
+/// True for token kinds that carry word-like content (command names,
+/// arguments, variable references) as opposed to pure syntax (pipes,
+/// braces, separators) that only delimit them.
+fn is_word_token(tok: &Token) -> bool {
+    matches!(
+        tok,
+        Token::Word(_)
+            | Token::SingleQuoted(_)
+            | Token::DoubleQuoted(_)
+            | Token::Tag(_)
+            | Token::Variable { .. }
+            | Token::Expr(_)
+    )
+}
+
+/// The text of a word-bearing token.  Single-quoted bodies come straight
+/// from the token (already unescaped, hash-bumping and all); every other
+/// kind is read back out of `text` via the token's own byte span, stripping
+/// the surrounding quotes for double-quoted strings.
+///
+/// Escapes are asymmetric between the two quote styles: a single-quoted body
+/// is the token's unescaped value, but a double-quoted body is returned raw
+/// from the source span — its `\n`, `\"`, `$…` escapes verbatim, not
+/// interpreted.  Plugins tokenizing the buffer see double-quoted text exactly
+/// as typed; unescaping it is theirs to do if they need the runtime value.
+fn word_text(text: &str, tok: &Token, span: ByteSpan) -> String {
+    if let Token::SingleQuoted(s) = tok {
+        return s.clone();
+    }
+    let start = span.start as usize;
+    // A `$[` that `lex_open` closed ends past `text`.
+    let end = (span.end as usize).min(text.len());
+    match tok {
+        Token::DoubleQuoted(_) => text[start + 1..end.saturating_sub(1).max(start + 1)].to_string(),
+        _ => text[start..end].to_string(),
+    }
+}
+
+/// The words of the simple command around char offset `cursor`, the index of
+/// the word the cursor touches, and that word's char offset.  A cursor in a gap
+/// gets a fresh `""` spliced in at its own offset, so `words[current]` is
+/// always the word being typed (bash's `COMP_CWORD`, zsh's `CURRENT`).
+pub(super) fn parse_at(text: &str, cursor: usize) -> Option<CommandAt> {
+    let at = char_to_byte(text, cursor);
+    let tokens = lex_open(text)?;
+    let start = tokens
+        .iter()
+        .rposition(|l| separates(&l.token) && l.span.end as usize <= at)
+        .map_or(0, |i| i + 1);
+    let end = tokens[start..]
+        .iter()
+        .position(|l| separates(&l.token))
+        .map_or(tokens.len(), |i| start + i);
+    let (spans, mut words): (Vec<(usize, usize)>, Vec<String>) = tokens[start..end]
+        .iter()
+        .filter(|l| is_word_token(&l.token))
+        .map(|Lexeme { token, span }| {
+            (
+                (span.start as usize, span.end as usize),
+                word_text(text, token, *span),
+            )
+        })
+        .unzip();
+    if let Some(i) = spans.iter().position(|&(s, e)| s <= at && at <= e) {
+        return Some(CommandAt {
+            words,
+            current: i,
+            offset: byte_to_char(text, spans[i].0),
+        });
+    }
+    let i = spans.iter().take_while(|&&(_, e)| e < at).count();
+    words.insert(i, String::new());
+    Some(CommandAt {
+        words,
+        current: i,
+        offset: cursor,
+    })
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
@@ -824,5 +950,50 @@ mod tests {
         let (_, cands) = complete(&line, line.len(), &at(wrong_cwd.path()).view());
         let names: Vec<&str> = cands.iter().map(|c| c.display.as_str()).collect();
         assert_eq!(names, vec!["delta"]);
+    }
+
+    /// `parse_at` over `marked`, whose `▮` is the cursor, as
+    /// `(words, current, offset)`.
+    fn parse(marked: &str) -> Option<(Vec<String>, usize, usize)> {
+        let at = marked.find('▮').expect("a cursor mark");
+        parse_at(&marked.replace('▮', ""), marked[..at].chars().count())
+            .map(|c| (c.words, c.current, c.offset))
+    }
+
+    fn w(words: &[&str]) -> Vec<String> {
+        words.iter().map(|&s| s.to_owned()).collect()
+    }
+
+    #[test]
+    fn parse_at_reads_the_simple_command_at_the_cursor() {
+        assert_eq!(parse("ssh me@h**▮"), Some((w(&["ssh", "me@h**"]), 1, 4)));
+        assert_eq!(
+            parse("ls -l | ssh h▮ ; cd x"),
+            Some((w(&["ssh", "h"]), 1, 12))
+        );
+        assert_eq!(parse("ls▮| wc"), Some((w(&["ls"]), 0, 0)));
+        assert_eq!(parse("cat a▮ b"), Some((w(&["cat", "a", "b"]), 1, 4)));
+        assert_eq!(parse("echo é▮"), Some((w(&["echo", "é"]), 1, 5)));
+    }
+
+    /// A cursor between words is on a fresh empty word, at its own offset.
+    #[test]
+    fn parse_at_splices_an_empty_word_into_a_gap() {
+        assert_eq!(parse("▮"), Some((w(&[""]), 0, 0)));
+        assert_eq!(parse("ls | ssh ▮"), Some((w(&["ssh", ""]), 1, 9)));
+        assert_eq!(parse("cp a ▮ b"), Some((w(&["cp", "a", "", "b"]), 2, 5)));
+    }
+
+    /// An open block or an open string is the editor's ordinary state, not a
+    /// lex failure.
+    #[test]
+    fn parse_at_reads_inside_an_open_block_and_an_open_string() {
+        assert_eq!(parse("try { cd ~/pr▮"), Some((w(&["cd", "~/pr"]), 1, 9)));
+        assert_eq!(
+            parse("within [dir: a] {\n  ssh ▮"),
+            Some((w(&["ssh", ""]), 1, 24))
+        );
+        assert_eq!(parse("echo $[1 +▮"), Some((w(&["echo", "$[1 +"]), 1, 5)));
+        assert_eq!(parse("echo 'open▮"), Some((w(&["echo", "open"]), 1, 5)));
     }
 }

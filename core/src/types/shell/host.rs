@@ -335,44 +335,19 @@ mod tests {
         );
     }
 
-    /// The `_ed-tui` elevation: the loan derives a raised mooring rather than
-    /// mutating the parent.
+    /// Only a held terminal is lent: `Leased` yields the raised loan and stays
+    /// itself; `Denied` has nothing to lend, `ExplicitLoan` has already lent.
     #[test]
-    fn lend_terminal_raises_leased_to_explicit_loan() {
-        let leased = Mooring {
-            terminal_access: TerminalAccess::Leased,
+    fn lend_terminal_lends_only_a_held_terminal() {
+        let with = |terminal_access| Mooring {
+            terminal_access,
             ..Mooring::adrift()
         };
-        assert!(!leased.in_terminal_loan());
-
-        let loaned = leased.lend_terminal();
-        assert!(
-            loaned.in_terminal_loan(),
-            "the derived mooring is raised to ExplicitLoan"
-        );
-        assert!(
-            !leased.in_terminal_loan(),
-            "the parent mooring is untouched by the derivation"
-        );
-    }
-
-    /// The loan raises an authorised mooring but never mints authority, so
-    /// lending from `Denied` leaves the borrow unreachable even with a lease.
-    #[test]
-    #[cfg(unix)]
-    fn denied_mooring_lend_does_not_elevate() {
-        let mut shell = crate::test_helper::core_shell();
-        shell.session.terminal_lease = TerminalLease::mint_at_startup(true);
-        let denied = Mooring::adrift();
-
-        let loaned = denied.lend_terminal();
-        assert!(
-            !loaned.in_terminal_loan(),
-            "a Denied mooring is not raised to ExplicitLoan"
-        );
-        assert!(
-            shell.terminal_lease(&loaned).is_none(),
-            "no foreground borrow: the loan cannot mint authority from Denied"
-        );
+        let leased = with(TerminalAccess::Leased);
+        let loan = leased.lend_terminal().expect("a Leased mooring lends");
+        assert_eq!(loan.terminal_access, TerminalAccess::ExplicitLoan);
+        assert_eq!(leased.terminal_access, TerminalAccess::Leased);
+        assert!(with(TerminalAccess::Denied).lend_terminal().is_none());
+        assert!(loan.lend_terminal().is_none());
     }
 }

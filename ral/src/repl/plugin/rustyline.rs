@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex};
 
 use rustyline::history::{DefaultHistory, History};
 use rustyline::{
-    Cmd, ConditionalEventHandler, Editor, Event, EventContext, KeyCode, KeyEvent, Modifiers,
-    Movement, RepeatCount,
+    Cmd, ConditionalEventHandler, Editor, Event, EventContext, InputMode, KeyCode, KeyEvent,
+    Modifiers, Movement, RepeatCount,
 };
 
 use super::super::complete::RalHelper;
@@ -42,14 +42,14 @@ impl ConditionalEventHandler for CtrlDHandler {
     }
 }
 
-/// The one rustyline handler per distinct bound chord.  It consults the
-/// live router, so several entries on one chord resolve in table order;
+/// The one rustyline handler per distinct bound sequence.  It consults the
+/// live router, so several entries on one sequence resolve in table order;
 /// `None` on [`Resolution::Default`] runs rustyline's own action for the
 /// key.  Resolution is pure — the evaluator never runs here; a claimed
 /// binding is stashed as pending and dispatched after readline returns.
 struct RouterKeyHandler {
     runtime: Arc<Mutex<PluginRuntime>>,
-    chord: KeyChord,
+    chords: Vec<KeyChord>,
 }
 
 impl ConditionalEventHandler for RouterKeyHandler {
@@ -61,7 +61,7 @@ impl ConditionalEventHandler for RouterKeyHandler {
         ctx: &EventContext,
     ) -> Option<Cmd> {
         let mut rt = lock(&self.runtime);
-        match rt.router.resolve(self.chord, ctx.line(), ctx.pos()) {
+        match rt.router.resolve(&self.chords, ctx.line(), ctx.pos()) {
             Resolution::Claimed {
                 plugin,
                 binding_idx,
@@ -70,6 +70,11 @@ impl ConditionalEventHandler for RouterKeyHandler {
                     plugin,
                     binding_idx,
                     cursor_byte: ctx.pos(),
+                    mode: match ctx.input_mode() {
+                        InputMode::Insert => "insert",
+                        InputMode::Command => "command",
+                        InputMode::Replace => "replace",
+                    },
                 });
                 drop(rt);
                 Some(Cmd::AcceptLine)
@@ -97,13 +102,14 @@ fn chord_to_key_event(chord: KeyChord) -> KeyEvent {
         KeyName::Backspace => KeyCode::Backspace,
         KeyName::F(n) => KeyCode::F(n),
     };
-    let mut mods = Modifiers::NONE;
-    if chord.ctrl {
-        mods |= Modifiers::CTRL;
-    }
-    if chord.alt {
-        mods |= Modifiers::ALT;
-    }
+    let mods = [
+        (chord.ctrl, Modifiers::CTRL),
+        (chord.alt, Modifiers::ALT),
+        (chord.shift, Modifiers::SHIFT),
+    ]
+    .into_iter()
+    .filter_map(|(on, m)| on.then_some(m))
+    .collect();
     KeyEvent(code, mods)
 }
 
@@ -112,38 +118,38 @@ fn chord_to_key_event(chord: KeyChord) -> KeyEvent {
 /// those routines and cleared here; if it isn't set we skip the work.
 ///
 /// rustyline owns its binding table but the router owns precedence, so
-/// registration is one [`RouterKeyHandler`] per distinct bound chord:
-/// every sequence in `bound` (the last sync's) is dropped, then the router's
-/// chords are re-bound.  A plugin removed by `unload` therefore loses
-/// its sequences here rather than leaving a handler behind.
+/// registration is one [`RouterKeyHandler`] per distinct bound sequence:
+/// every event in `bound` (the last sync's) is dropped, then the router's
+/// sequences are re-bound as `Event::KeySeq`.  A plugin removed by `unload`
+/// therefore loses its sequences here rather than leaving a handler behind.
 pub(in crate::repl) fn sync_plugins(
     runtime: &Arc<Mutex<PluginRuntime>>,
     rl: &mut Editor<RalHelper, DefaultHistory>,
-    bound: &mut Vec<KeyEvent>,
+    bound: &mut Vec<Event>,
 ) {
-    let chords = {
+    let keys = {
         let mut rt = lock(runtime);
         if !rt.keybindings_dirty {
             return;
         }
         rt.keybindings_dirty = false;
-        rt.router.bound_chords()
+        rt.router.bound_keys()
     };
-    for key in bound.drain(..) {
-        rl.unbind_sequence(key);
+    for event in bound.drain(..) {
+        rl.unbind_sequence(event);
     }
-    *bound = chords
+    *bound = keys
         .into_iter()
-        .map(|chord| {
-            let key_event = chord_to_key_event(chord);
+        .map(|chords| {
+            let event = Event::KeySeq(chords.iter().map(|&c| chord_to_key_event(c)).collect());
             rl.bind_sequence(
-                key_event,
+                event.clone(),
                 rustyline::EventHandler::Conditional(Box::new(RouterKeyHandler {
                     runtime: runtime.clone(),
-                    chord,
+                    chords,
                 })),
             );
-            key_event
+            event
         })
         .collect();
 }
@@ -171,21 +177,39 @@ mod tests {
     use super::super::router::parse_key_notation;
     use super::*;
 
-    /// The rustyline boundary: a parsed chord adapts to exactly the `KeyEvent`
-    /// rustyline binds against, so `sync_plugins` binds exactly the
-    /// notation the router resolves.
+    /// The rustyline boundary: a parsed notation adapts to exactly the
+    /// `KeyEvent`s rustyline binds against, so `sync_plugins` binds exactly
+    /// the notation the router resolves.
     #[test]
-    fn chord_adapts_to_rustyline_key_event() {
-        let ev = |s| parse_key_notation(s).map(chord_to_key_event);
+    fn chords_adapt_to_rustyline_key_events() {
+        let ev = |s| {
+            parse_key_notation(s).map(|chords| {
+                chords
+                    .into_iter()
+                    .map(chord_to_key_event)
+                    .collect::<Vec<_>>()
+            })
+        };
         assert_eq!(
             ev("ctrl-r"),
-            Some(KeyEvent(KeyCode::Char('r'), Modifiers::CTRL))
+            Ok(vec![KeyEvent(KeyCode::Char('r'), Modifiers::CTRL)])
         );
         assert_eq!(
             ev("alt-c"),
-            Some(KeyEvent(KeyCode::Char('c'), Modifiers::ALT))
+            Ok(vec![KeyEvent(KeyCode::Char('c'), Modifiers::ALT)])
         );
-        assert_eq!(ev("tab"), Some(KeyEvent(KeyCode::Tab, Modifiers::NONE)));
-        assert_eq!(ev("f5"), Some(KeyEvent(KeyCode::F(5), Modifiers::NONE)));
+        assert_eq!(ev("tab"), Ok(vec![KeyEvent(KeyCode::Tab, Modifiers::NONE)]));
+        assert_eq!(ev("f5"), Ok(vec![KeyEvent(KeyCode::F(5), Modifiers::NONE)]));
+        assert_eq!(
+            ev("shift-f5"),
+            Ok(vec![KeyEvent(KeyCode::F(5), Modifiers::SHIFT)])
+        );
+        assert_eq!(
+            ev("ctrl-x ctrl-e"),
+            Ok(vec![
+                KeyEvent(KeyCode::Char('x'), Modifiers::CTRL),
+                KeyEvent(KeyCode::Char('e'), Modifiers::CTRL)
+            ])
+        );
     }
 }

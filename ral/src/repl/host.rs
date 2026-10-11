@@ -33,15 +33,19 @@ pub(super) struct ReplHost {
     clipboard: Mutex<Clipboard>,
 }
 
-/// What one hook dispatch came to.  An `exit` from a hook is ignored, so it
-/// leaves both `value` and `fault` empty.
-#[derive(Default)]
+/// How a hook run ended.  An `exit` from a hook is ignored.  A fault is
+/// rendered by the engine and labelled with the hook's name.
+pub(super) enum Outcome {
+    Settled(FOValue),
+    Exited,
+    Faulted(String),
+    Walled(String),
+}
+
+/// What one hook dispatch came to.
 pub(super) struct HookResult {
-    pub(super) value: Option<FOValue>,
+    pub(super) outcome: Outcome,
     pub(super) captured: Option<Captured>,
-    /// The fault, rendered by the engine and labelled with the hook's name.
-    pub(super) fault: Option<String>,
-    pub(super) walled: bool,
     pub(super) ctx: Option<PluginContext>,
 }
 
@@ -103,35 +107,31 @@ impl ReplHost {
         ctx: Option<PluginContext>,
     ) -> HookResult {
         let (report, ctx) = self.dispatch(t, hook_run(Program::Hook { name, args }, wall), ctx);
-        let mut out = HookResult {
-            ctx,
-            ..HookResult::default()
-        };
-        let fault = match report {
-            Err(severed) => format!("ral: {severed}"),
-            Ok(Report::Static { rendered, .. }) => rendered,
+        let (mut outcome, captured) = match report {
+            Err(severed) => (Outcome::Faulted(format!("ral: {severed}")), None),
+            Ok(Report::Static { rendered, .. }) => (Outcome::Faulted(rendered), None),
             Ok(Report::Ran {
                 ending, captured, ..
-            }) => {
-                out.captured = captured;
+            }) => (
                 match ending {
-                    Ending::Settled { value, .. } => {
-                        out.value = Some(value);
-                        return out;
-                    }
-                    Ending::Exited(_) => return out,
-                    Ending::Walled { rendered, .. } => {
-                        out.walled = true;
-                        rendered
-                    }
+                    Ending::Settled { value, .. } => Outcome::Settled(value),
+                    Ending::Exited(_) => Outcome::Exited,
+                    Ending::Walled { rendered, .. } => Outcome::Walled(rendered),
                     Ending::Raised { rendered, .. } | Ending::Unreturnable { rendered, .. } => {
-                        rendered
+                        Outcome::Faulted(rendered)
                     }
-                }
-            }
+                },
+                captured,
+            ),
         };
-        out.fault = Some(fault.trim_end().to_string());
-        out
+        if let Outcome::Faulted(f) | Outcome::Walled(f) = &mut outcome {
+            f.truncate(f.trim_end().len());
+        }
+        HookResult {
+            outcome,
+            captured,
+            ctx,
+        }
     }
 
     fn line(&self, line: &str) {

@@ -6,9 +6,9 @@
 //! a failed load left out.
 
 use ral_core::ansi::{self, BOLD_YELLOW, RESET};
+use ral_core::err;
 use ral_core::types::Error;
 use ral_core::{Shell, terminal};
-use ral_core::{err, errln};
 
 /// Print a failed load's report, then `ral: {what}: …` saying how far it got:
 /// skipped whole if it never compiled, which a compile report cannot say, or
@@ -36,9 +36,10 @@ pub(super) fn format_plugin_disabled(plugin_name: &str, kind: &str, reason: &str
     )
 }
 
-/// Print a plugin warning to stderr with consistent formatting.
-pub(super) fn plugin_warning(plugin_name: &str, msg: &str) {
+/// Format a plugin warning with consistent styling.  Returned as a string (no
+/// trailing newline), for the caller to print or defer.
+pub(super) fn format_plugin_warning(plugin_name: &str, msg: &str) -> String {
     let c = terminal::stderr_color();
     let (yellow, reset) = (ansi::when(c, BOLD_YELLOW), ansi::when(c, RESET));
-    errln!("{yellow}plugin{reset} '{plugin_name}': warning: {msg}");
+    format!("{yellow}plugin{reset} '{plugin_name}': warning: {msg}")
 }

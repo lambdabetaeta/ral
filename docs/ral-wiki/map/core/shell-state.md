@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 446e3123
-generated_at_date: 2026-10-06
+generated_at_commit: 28d06d78
+generated_at_date: 2026-10-11
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
 
@@ -286,8 +286,8 @@ loan). **Borrow when you can, loan when you must.**
 an event while holding the shell mutably. `Mooring` is not `Clone`:
 `lend_terminal` is the one lawful derivation, so the raise-never-mint rule on
 `TerminalAccess` lives in one door rather than in every bulk copy. Outside
-core only `cancel`, `Mooring::surface`, `Mooring::lend_terminal` /
-`in_terminal_loan`, `Mooring::fork`, and `Mooring::adrift` are reachable —
+core only `cancel`, `Mooring::surface`, `Mooring::lend_terminal`,
+`Mooring::fork`, and `Mooring::adrift` are reachable —
 `adrift()` being the mooring a host builds to call a builtin body outside any
 run (no surface, no rail, no desk, no fork door, and a scope under a root
 nothing else holds, so cancelling it is how such a caller drives the body's poll points).
@@ -338,9 +338,8 @@ lifetimes:
 Because the mooring is invariant, a raise is not a mutation but a derivation:
 `Mooring::lend_terminal` returns a *new* mooring with `Leased` raised to
 `ExplicitLoan` for `_ed-tui`, and the borrow ends when that value goes out of
-scope. It leaves a `Denied` run untouched, closing the
-`Denied → ExplicitLoan` door so a loan can only raise an authorised run,
-never mint authority.
+scope. It is `None` from `Denied` and from `ExplicitLoan`: a loan raises only
+a run that holds the terminal, never mints authority, and is never lent twice.
 
 ### Method modules
 

@@ -20,7 +20,7 @@ use std::borrow::Cow;
 
 use super::super::enquiry::{Enquiry, PluginNote};
 use super::load_err;
-use super::manifest::{self, ManifestHandlers};
+use super::manifest::{self, HookEvent, ManifestHandlers};
 
 fn load_door(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     // No options: `load-plugin` takes a name alone, so a plugin loaded
@@ -125,27 +125,32 @@ pub(crate) fn load_plugin(
 /// Register a plugin's hook-event and keybinding handlers in the session
 /// hook table, each keyed under the plugin's namespace so
 /// [`Shell::remove_plugin_hooks`] can drop them all at unload (or roll back
-/// a failed load).  A buffer-change hook runs aside: nothing it does flows
-/// back into the session.
+/// a failed load).  A buffer-change or complete hook runs aside: nothing it
+/// does flows back into the session.
 fn register_plugin_hooks(
     plugin_name: &str,
     handlers: &ManifestHandlers,
     shell: &mut Shell,
 ) -> Result<(), Error> {
-    for (hook_event, handler) in &handlers.hooks {
-        let (kind, policy) = match hook_event.as_str() {
-            "buffer-change" => (hook_event.clone(), DefaultPolicy::denied().aside()),
-            "prompt" => ("prompt hook".into(), DefaultPolicy::denied_capture()),
-            _ => (hook_event.clone(), DefaultPolicy::denied()),
+    for (event, handler) in &handlers.hooks {
+        let name = <&str>::from(*event);
+        let (kind, policy) = match event {
+            HookEvent::BufferChange | HookEvent::Complete => {
+                (name, DefaultPolicy::denied().aside())
+            }
+            HookEvent::Prompt => ("prompt hook", DefaultPolicy::denied_capture()),
+            HookEvent::PreExec | HookEvent::PostExec | HookEvent::Chpwd => {
+                (name, DefaultPolicy::denied())
+            }
         };
         shell
             .register_hook(
-                HookName::plugin(plugin_name.to_string(), hook_event.clone()),
+                HookName::plugin(plugin_name.to_string(), name),
                 handler.clone(),
-                HookSig::Hook { kind },
+                HookSig::Hook { kind: kind.into() },
                 policy,
             )
-            .map_err(|e| load_err(format!("hook '{hook_event}': {e}")))?;
+            .map_err(|e| load_err(format!("hook '{name}': {e}")))?;
     }
     for (idx, (key, handler)) in handlers.keybindings.iter().enumerate() {
         shell
@@ -273,7 +278,7 @@ fn resolve_plugin_path(name_or_path: &str, shell: &Shell) -> Result<String, Erro
 mod tests {
     use super::*;
 
-    fn hooks_only(hooks: Vec<(String, Value)>) -> ManifestHandlers {
+    fn hooks_only(hooks: Vec<(HookEvent, Value)>) -> ManifestHandlers {
         ManifestHandlers {
             hooks,
             keybindings: Vec::new(),
@@ -286,7 +291,7 @@ mod tests {
     fn unary_lifecycle_handler_registers() {
         let mut shell = ral_core::test_helper::core_shell();
         let h = crate::repl::eval(&mut shell, "{ |_ev| return () }");
-        register_plugin_hooks("p", &hooks_only(vec![("post-exec".into(), h)]), &mut shell)
+        register_plugin_hooks("p", &hooks_only(vec![(HookEvent::PostExec, h)]), &mut shell)
             .expect("a unary lifecycle handler registers");
     }
 
@@ -313,7 +318,7 @@ mod tests {
         let mut shell = ral_core::test_helper::core_shell();
         let h = crate::repl::eval(&mut shell, "{ |_src _status| return () }");
         let err =
-            register_plugin_hooks("p", &hooks_only(vec![("post-exec".into(), h)]), &mut shell)
+            register_plugin_hooks("p", &hooks_only(vec![(HookEvent::PostExec, h)]), &mut shell)
                 .expect_err("a two-parameter lifecycle handler must be rejected");
         assert!(
             err.message.contains("post-exec")
@@ -322,5 +327,86 @@ mod tests {
             "error should name the hook and the arity mismatch, got: {}",
             err.message
         );
+    }
+}
+
+/// A plugin bench: an engine with a `record` sink and plugins whose hooks
+/// register as in production.
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "[test] test scaffolding")]
+pub(in crate::repl) mod harness {
+    use super::*;
+    use crate::repl::host::ReplHost;
+    use crate::repl::plugin::manifest::{LoadedPlugin, Manifest};
+    use crate::repl::plugin::{PluginRuntime, lock};
+    use ral_core::carrier::IdentityTransport;
+    use ral_core::ty::{Scheme, Ty};
+    use ral_core::typecheck::Unifier;
+    use ral_core::typecheck::builtins::{fun, mk_scheme, pure, thunk};
+    use std::sync::{Arc, Mutex};
+
+    /// The sink's type: an argv in, `Unit` out — the base-frame convention,
+    /// since the sink takes whatever a hook body hands it, however much of it.
+    fn sink_scheme(_u: &mut Unifier) -> Scheme {
+        mk_scheme(&[], &[], thunk(fun(Ty::argv(), pure(Ty::Unit))))
+    }
+
+    /// A test-only sink base frame: `record` appends its argument values into
+    /// the shared vector, so a hook handler's projections out of the event
+    /// record become observable.
+    fn sink_builtin(sink: Arc<Mutex<Vec<Value>>>) -> BuiltinEntry {
+        BuiltinEntry::base_frame(
+            Cow::Borrowed("record"),
+            sink_scheme,
+            "record: test sink appending its arguments.",
+            BuiltinBody::Captured(Arc::new(move |args, _mooring, _shell| {
+                sink.lock().unwrap().extend(args.iter().cloned());
+                Ok(Value::Unit)
+            })),
+        )
+    }
+
+    /// An engine carrying the sink builtin and the plugins `hooks` name, each
+    /// handler compiled from its source and registered as a load would, the
+    /// host told of the plugins in first-appearance order, and the sink the
+    /// builtin appends every call to.
+    pub(in crate::repl) fn dressed(
+        hooks: &[(&str, HookEvent, &str)], // (plugin, event, handler source)
+    ) -> (IdentityTransport, Arc<ReplHost>, Arc<Mutex<Vec<Value>>>) {
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        let recorder = sink_builtin(sink.clone());
+        let owned: Vec<_> = hooks
+            .iter()
+            .map(|&(p, e, s)| (p.to_owned(), e, s.to_owned()))
+            .collect();
+        let t = crate::repl::engine(move |shell| {
+            crate::PRELUDE.seat(shell);
+            shell.install_captured_builtins(&vec![recorder].into());
+            for (plugin, event, src) in &owned {
+                let handlers = ManifestHandlers {
+                    hooks: vec![(*event, crate::repl::eval(shell, src))],
+                    keybindings: Vec::new(),
+                    aliases: Vec::new(),
+                };
+                register_plugin_hooks(plugin, &handlers, shell).expect("register");
+            }
+        });
+        let mut manifests: Vec<Manifest> = Vec::new();
+        for &(plugin, event, _) in hooks {
+            match manifests.iter_mut().find(|m| m.name == plugin) {
+                Some(m) => m.hooks.push(event),
+                None => manifests.push(Manifest {
+                    name: plugin.into(),
+                    hooks: vec![event],
+                    keybindings: Vec::new(),
+                }),
+            }
+        }
+        let runtime = Arc::new(Mutex::new(PluginRuntime::default()));
+        lock(&runtime).plugins = manifests
+            .into_iter()
+            .map(|m| LoadedPlugin::admit(m).expect("admit"))
+            .collect();
+        (t, ReplHost::new(runtime), sink)
     }
 }

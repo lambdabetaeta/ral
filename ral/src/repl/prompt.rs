@@ -12,8 +12,8 @@ use ral_core::types::{Closure, DefaultPolicy, HookName, HookSig};
 use ral_core::{Captured, Shell, Value};
 use std::sync::Arc;
 
-use super::host::ReplHost;
-use super::plugin::lock;
+use super::host::{Outcome, ReplHost};
+use super::plugin::{lock, manifest::HookEvent};
 
 /// The default prompt.  The boot door registers it as the `Session/"prompt"`
 /// hook; a failing prompt falls back to it directly.  The session survives a
@@ -99,23 +99,28 @@ pub(super) fn write_terminal_title(terminal: &ral_core::terminal::TerminalState,
 /// differ from the last render's.
 pub(super) fn render(t: &dyn Transport, host: &Arc<ReplHost>) -> PromptText {
     let base = host.run_hook(t, HookName::session("prompt"), vec![], None, None);
-    let mut faults: Vec<String> = base.fault.into_iter().collect();
-    let mut prompt = base.value.map_or_else(
-        || DEFAULT_PROMPT.to_string(),
-        |value| prompt_text(value, base.captured),
-    );
-    let plugins = lock(&host.runtime).with_hook("prompt", |_| true);
+    let mut faults = Vec::new();
+    let mut prompt = match base.outcome {
+        Outcome::Settled(value) => prompt_text(value, base.captured),
+        Outcome::Exited => DEFAULT_PROMPT.to_string(),
+        Outcome::Faulted(fault) | Outcome::Walled(fault) => {
+            faults.push(fault);
+            DEFAULT_PROMPT.to_string()
+        }
+    };
+    let plugins = lock(&host.runtime).with_hook(HookEvent::Prompt);
     for name in plugins {
         let hr = host.run_hook(
             t,
-            HookName::plugin(name, "prompt"),
+            HookName::plugin(name, <&str>::from(HookEvent::Prompt)),
             vec![prompt.clone().encode()],
             None,
             None,
         );
-        faults.extend(hr.fault);
-        if let Some(value) = hr.value {
-            prompt = prompt_text(value, hr.captured);
+        match hr.outcome {
+            Outcome::Settled(value) => prompt = prompt_text(value, hr.captured),
+            Outcome::Exited => {}
+            Outcome::Faulted(fault) | Outcome::Walled(fault) => faults.push(fault),
         }
     }
     if let Some(fault) = host.prompt_fault((!faults.is_empty()).then(|| faults.join("\n"))) {

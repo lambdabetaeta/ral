@@ -10,10 +10,10 @@
 use ral_core::capability::Flag;
 use ral_core::first_order::FOValue;
 use ral_core::first_order::datum::Datum;
-use ral_core::source::Span as ByteSpan;
-use ral_core::syntax::lexer::{Lexeme, Token, lex_open, separates};
 use ral_core::ty::Site;
-use ral_core::ty::{CompTy, Grade, Kind, Scheme, Ty, closed_record, closed_variant, open_record};
+use ral_core::ty::{
+    CompTy, Grade, Kind, Scheme, Ty, Typed, closed_record, closed_variant, open_record,
+};
 use ral_core::typecheck::Unifier;
 use ral_core::typecheck::builtins::{fun, graded, mk_scheme as scheme, pure, thunk};
 use ral_core::types::{Break, BuiltinBody, BuiltinEntry, Mooring, Settled, sig};
@@ -21,20 +21,19 @@ use ral_core::{Shell, Value};
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use super::super::enquiry::{ClipboardReq, Data, EditorOp, EditorSnapshot, Enquiry, HighlightReq};
+use super::super::completion::{CommandAt, parse_at};
+use super::super::enquiry::{ClipboardReq, Data, EditorOp, EditorSnapshot, Gated, HighlightReq};
 use super::super::highlight_style::style_ansi;
-use ral_core::text::{byte_to_char, char_to_byte};
 
 /// Put `op` to the host, which `name` may do under `op`'s grant only.
-fn ask(shell: &Shell, mooring: &Mooring, name: &str, op: EditorOp) -> Settled<Value> {
-    shell.check(op.flag(), name)?;
-    Ok(shell.enquire(mooring, Enquiry::from(op).encode())?.into())
+fn ask(shell: &Shell, mooring: &Mooring, name: &str, op: impl Gated) -> Settled<Value> {
+    answer::<Data>(shell, mooring, name, op).map(|Data(v)| v.into())
 }
 
 /// `op`'s answer, decoded as a `T`.
-fn answer<T: Datum>(shell: &Shell, mooring: &Mooring, name: &str, op: EditorOp) -> Settled<T> {
+fn answer<T: Datum>(shell: &Shell, mooring: &Mooring, name: &str, op: impl Gated) -> Settled<T> {
     shell.check(op.flag(), name)?;
-    T::decode(&shell.enquire(mooring, Enquiry::from(op).encode())?)
+    T::decode(&shell.enquire(mooring, op.into().encode())?)
         .map_err(|why| sig(format!("the host answered outside its shape: {why}")))
 }
 
@@ -50,7 +49,7 @@ fn offset(n: i64) -> usize {
 
 // ─── State read ──────────────────────────────────────────────────────────────
 
-/// `_ed-get` → `[text: Str, cursor: Int, keymap: Str, in-readline: Bool]`
+/// `_ed-get` → `[text: Str, cursor: Int, keymap: Str]`
 pub fn builtin_ed_get(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     ask(shell, mooring, "_ed-get", EditorOp::Get)
 }
@@ -157,20 +156,19 @@ fn decode_captured(bytes: &[u8]) -> String {
 /// [`Mooring::lend_terminal`] raises `terminal_access` to `ExplicitLoan`,
 /// which the pipeline foreground rule honors, keeping `_ed-tui`'s body in
 /// the foreground process group despite the captured stdout pipe.  The
-/// loaned mooring dies with the call — nothing to restore.
-/// [`Mooring::in_terminal_loan`] is the re-entrancy guard.
+/// loaned mooring dies with the call — nothing to restore.  The loan exists
+/// only in a run holding the terminal, once, so `_ed-tui` reports status 1
+/// anywhere else or nested.
 pub fn builtin_ed_tui(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    if mooring.in_terminal_loan() {
-        return Ok(tui_result(Value::string("_ed-tui: already in TUI mode"), 1));
-    }
     shell.check(Flag::EditorTui, "_ed-tui")?;
-    if answer::<EditorSnapshot>(shell, mooring, "_ed-tui", EditorOp::Get)?.in_readline {
+    let Some(loaned) = mooring.lend_terminal() else {
         return Ok(tui_result(
-            Value::string("_ed-tui: not available inside buffer-change hooks"),
+            Value::string(
+                "_ed-tui: this run holds no terminal to lend (a TUI opens from a keybinding handler, and not inside another)",
+            ),
             1,
         ));
-    }
-    let loaned = mooring.lend_terminal();
+    };
     // A TUI plugin's own screen output, not a value the program binds: the
     // truncation marker is the whole report a 16 MiB draw deserves.
     let (result, bytes, _overflowed) = ral_core::evaluator::with_capture(shell, |shell| {
@@ -210,95 +208,11 @@ pub fn builtin_ed_history(args: &[Value], mooring: &Mooring, shell: &mut Shell) 
     Ok(Value::list(results))
 }
 
-/// True for token kinds that carry word-like content (command names,
-/// arguments, variable references) as opposed to pure syntax (pipes,
-/// braces, separators) that only delimit them.
-fn is_word_token(tok: &Token) -> bool {
-    matches!(
-        tok,
-        Token::Word(_)
-            | Token::SingleQuoted(_)
-            | Token::DoubleQuoted(_)
-            | Token::Tag(_)
-            | Token::Variable { .. }
-            | Token::Expr(_)
-    )
-}
-
-/// The text of a word-bearing token.  Single-quoted bodies come straight
-/// from the token (already unescaped, hash-bumping and all); every other
-/// kind is read back out of `text` via the token's own byte span, stripping
-/// the surrounding quotes for double-quoted strings.
-///
-/// Escapes are asymmetric between the two quote styles: a single-quoted body
-/// is the token's unescaped value, but a double-quoted body is returned raw
-/// from the source span — its `\n`, `\"`, `$…` escapes verbatim, not
-/// interpreted.  Plugins tokenizing the buffer see double-quoted text exactly
-/// as typed; unescaping it is theirs to do if they need the runtime value.
-fn word_text(text: &str, tok: &Token, span: ByteSpan) -> String {
-    if let Token::SingleQuoted(s) = tok {
-        return s.clone();
-    }
-    let start = span.start as usize;
-    // A `$[` that `lex_open` closed ends past `text`.
-    let end = (span.end as usize).min(text.len());
-    match tok {
-        Token::DoubleQuoted(_) => text[start + 1..end.saturating_sub(1).max(start + 1)].to_string(),
-        _ => text[start..end].to_string(),
-    }
-}
-
 /// `_ed-parse` → `[words: [Str], current: Int, offset: Int]` — the simple
 /// command at the cursor.  `words` is empty exactly when the buffer does not lex.
 pub fn builtin_ed_parse(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let EditorSnapshot { text, cursor, .. } = answer(shell, mooring, "_ed-parse", EditorOp::Get)?;
-    let (words, current, offset) = parse_at(&text, cursor).unwrap_or_default();
-    #[allow(
-        clippy::cast_possible_wrap,
-        reason = "buffer offsets, far below i64::MAX"
-    )]
-    let (current, offset) = (current as i64, offset as i64);
-    Ok(Value::map(vec![
-        (
-            "words".into(),
-            Value::list(words.into_iter().map(Value::string).collect()),
-        ),
-        ("current".into(), Value::Int(current)),
-        ("offset".into(), Value::Int(offset)),
-    ]))
-}
-
-/// The words of the simple command around char offset `cursor`, the index of
-/// the word the cursor touches, and that word's char offset.  A cursor in a gap
-/// gets a fresh `""` spliced in at its own offset, so `words[current]` is
-/// always the word being typed (bash's `COMP_CWORD`, zsh's `CURRENT`).
-fn parse_at(text: &str, cursor: usize) -> Option<(Vec<String>, usize, usize)> {
-    let at = char_to_byte(text, cursor);
-    let tokens = lex_open(text)?;
-    let start = tokens
-        .iter()
-        .rposition(|l| separates(&l.token) && l.span.end as usize <= at)
-        .map_or(0, |i| i + 1);
-    let end = tokens[start..]
-        .iter()
-        .position(|l| separates(&l.token))
-        .map_or(tokens.len(), |i| start + i);
-    let (spans, mut words): (Vec<(usize, usize)>, Vec<String>) = tokens[start..end]
-        .iter()
-        .filter(|l| is_word_token(&l.token))
-        .map(|Lexeme { token, span }| {
-            (
-                (span.start as usize, span.end as usize),
-                word_text(text, token, *span),
-            )
-        })
-        .unzip();
-    if let Some(i) = spans.iter().position(|&(s, e)| s <= at && at <= e) {
-        return Some((words, i, byte_to_char(text, spans[i].0)));
-    }
-    let i = spans.iter().take_while(|&&(_, e)| e < at).count();
-    words.insert(i, String::new());
-    Some((words, i, cursor))
+    Ok(parse_at(&text, cursor).unwrap_or_default().encode().into())
 }
 
 // ─── Output channels ─────────────────────────────────────────────────────────
@@ -350,14 +264,11 @@ pub fn builtin_ed_clipboard(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    let req = Enquiry::Clipboard(ClipboardReq {
+    let req = ClipboardReq {
         text: args[0].as_str("_ed-clipboard")?.to_owned(),
         osc52: shell.terminal().ui_clipboard_write_ok(),
-    });
-    shell.check(Flag::EditorWrite, "_ed-clipboard")?;
-    bool::decode(&shell.enquire(mooring, req.encode())?)
-        .map(Value::Bool)
-        .map_err(|why| sig(format!("the host answered outside its shape: {why}")))
+    };
+    answer(shell, mooring, "_ed-clipboard", req).map(Value::Bool)
 }
 
 /// `_ed-highlight <spans>` — set highlight spans (empty list clears).
@@ -420,6 +331,8 @@ pub fn builtin_ed_state(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
+    // Write is checked before the updater runs, not after it.
+    shell.check(Flag::EditorWrite, "_ed-state")?;
     let current = match answer::<Option<Data>>(shell, mooring, "_ed-state", EditorOp::StateGet)? {
         Some(Data(stored)) => {
             let stored = Value::from(stored);
@@ -450,16 +363,7 @@ pub fn builtin_ed_state(
 // remain dynamic source/alias/hook loaders above this surface.
 
 fn scheme_ed_get(_u: &mut Unifier) -> Scheme {
-    scheme(
-        &[],
-        &[],
-        thunk(pure(closed_record(&[
-            ("text", Ty::String),
-            ("cursor", Ty::Int),
-            ("keymap", Ty::String),
-            ("in-readline", Ty::Bool),
-        ]))),
-    )
+    scheme(&[], &[], thunk(pure(EditorSnapshot::ty())))
 }
 
 fn scheme_unit_thunk(_u: &mut Unifier) -> Scheme {
@@ -506,15 +410,7 @@ fn scheme_history(_u: &mut Unifier) -> Scheme {
 }
 
 fn scheme_parse(_u: &mut Unifier) -> Scheme {
-    scheme(
-        &[],
-        &[],
-        thunk(pure(closed_record(&[
-            ("words", Ty::list(Ty::String)),
-            ("current", Ty::Int),
-            ("offset", Ty::Int),
-        ]))),
-    )
+    scheme(&[], &[], thunk(pure(CommandAt::ty())))
 }
 
 /// `_ed-tui :: ∀ε α. U(F^ε α) → F [output: Str, status: Int]` — absorbs its
@@ -557,7 +453,7 @@ static ED_BUILTINS_ARR: [BuiltinEntry; 14] = [
     BuiltinEntry::new(
         Cow::Borrowed("_ed-get"),
         scheme_ed_get,
-        "_ed-get  — return editor state record [text, cursor, keymap, in-readline].",
+        "_ed-get  — return editor state record [text, cursor, keymap].",
         BuiltinBody::Static(builtin_ed_get),
     ),
     BuiltinEntry::new(
@@ -647,6 +543,8 @@ pub static ED_BUILTINS: &[BuiltinEntry] = &ED_BUILTINS_ARR;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repl::exec::line_run;
+    use ral_core::{RequestedTerminalAccess, protocol::Run};
 
     /// Every `_ed-*` entry must carry all static facets directly.
     #[test]
@@ -688,10 +586,10 @@ mod tests {
     }
 
     /// A desk keeping the plugin's cell: it answers `StateGet` with what an
-    /// earlier session stored and counts the writes it is asked for.
+    /// earlier session stored and counts every request it is asked.
     struct Cell {
         stored: FOValue,
-        writes: std::sync::atomic::AtomicUsize,
+        asked: std::sync::atomic::AtomicUsize,
     }
 
     impl ral_core::types::EnquiryDesk for Cell {
@@ -701,40 +599,39 @@ mod tests {
             _cancel: &ral_core::process::CancelScope,
         ) -> Result<FOValue, ral_core::types::Error> {
             use super::super::super::enquiry::Enquiry;
+            self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             match Enquiry::decode(&req) {
                 Ok(Enquiry::Editor(EditorOp::StateGet)) => {
                     Ok(Some(Data(self.stored.clone())).encode())
                 }
-                Ok(Enquiry::Editor(EditorOp::StateSet(_))) => {
-                    self.writes
-                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    Ok(FOValue::Unit)
-                }
+                Ok(Enquiry::Editor(EditorOp::StateSet(_))) => Ok(FOValue::Unit),
                 other => panic!("the cell answers state reads and writes only, got {other:?}"),
             }
         }
     }
 
-    fn run_with_cell(stored: FOValue) -> (Result<Value, Break>, usize) {
+    const BUMP: &str = "_ed-state 0 { |n| return $[$n + 1] }";
+
+    /// Run `run` against a cell holding `stored`; its result and how many
+    /// requests the cell was asked.
+    fn run_with_cell(stored: FOValue, run: Run) -> (Result<Value, Break>, usize) {
         let cell = std::sync::Arc::new(Cell {
             stored,
-            writes: std::sync::atomic::AtomicUsize::new(0),
+            asked: std::sync::atomic::AtomicUsize::new(0),
         });
         let mut shell = ral_core::test_helper::core_shell();
         shell.install_builtins(ED_BUILTINS);
         shell.set_interactive(true);
         let report = shell.run(ral_core::run::RunRequest {
             desk: Some(cell.clone()),
-            ..ral_core::run::RunRequest::from(crate::repl::exec::line_run(
-                "_ed-state 0 { |n| return $[$n + 1] }",
-            ))
+            ..ral_core::run::RunRequest::from(run)
         });
         let ral_core::run::RunReport::Ran { ending, .. } = report else {
             panic!("the line must check and run");
         };
         (
             ending.into_result(),
-            cell.writes.load(std::sync::atomic::Ordering::SeqCst),
+            cell.asked.load(std::sync::atomic::Ordering::SeqCst),
         )
     }
 
@@ -743,9 +640,10 @@ mod tests {
     /// earlier program left at another type is refused, and nothing is written.
     #[test]
     fn a_stale_state_cell_is_refused_before_the_updater_runs() {
-        let (result, writes) = run_with_cell(FOValue::String {
+        let stale = FOValue::String {
             value: "stale".into(),
-        });
+        };
+        let (result, asked) = run_with_cell(stale, line_run(BUMP));
         let Err(Break::Error(e)) = result else {
             panic!("a stale cell must be refused, got {result:?}");
         };
@@ -756,57 +654,51 @@ mod tests {
             "{}",
             e.message
         );
-        assert_eq!(writes, 0, "the updater must not have run");
+        assert_eq!(asked, 1, "the read only: the updater must not have run");
     }
 
     #[test]
     fn a_state_cell_of_the_right_type_reaches_the_updater() {
-        let (result, writes) = run_with_cell(FOValue::Int { value: 4 });
+        let (result, asked) = run_with_cell(FOValue::Int { value: 4 }, line_run(BUMP));
         assert!(matches!(result, Ok(Value::Int(5))), "{result:?}");
-        assert_eq!(writes, 1);
+        assert_eq!(asked, 2, "the read, then the write");
     }
 
-    /// `parse_at` over `marked`, whose `▮` is the cursor.
-    fn parse(marked: &str) -> Option<(Vec<String>, usize, usize)> {
-        let at = marked.find('▮').expect("a cursor mark");
-        parse_at(&marked.replace('▮', ""), marked[..at].chars().count())
-    }
-
-    fn w(words: &[&str]) -> Vec<String> {
-        words.iter().map(|&s| s.to_owned()).collect()
-    }
-
+    /// `_ed-state` writes, so the write grant is checked before the host is
+    /// asked anything and before the updater runs.
     #[test]
-    fn ed_parse_reads_the_simple_command_at_the_cursor() {
-        assert_eq!(parse("ssh me@h**▮"), Some((w(&["ssh", "me@h**"]), 1, 4)));
-        assert_eq!(
-            parse("ls -l | ssh h▮ ; cd x"),
-            Some((w(&["ssh", "h"]), 1, 12))
+    fn a_state_cell_is_refused_without_the_write_grant() {
+        let src = format!("grant [editor: [read: true, write: false]] {{ {BUMP} }}");
+        let (result, asked) = run_with_cell(FOValue::Int { value: 4 }, line_run(&src));
+        let Err(Break::Error(e)) = result else {
+            panic!("a read-only grant must refuse, got {result:?}");
+        };
+        assert!(
+            e.message.contains("_ed-state requires editor.write"),
+            "{}",
+            e.message
         );
-        assert_eq!(parse("ls▮| wc"), Some((w(&["ls"]), 0, 0)));
-        assert_eq!(parse("cat a▮ b"), Some((w(&["cat", "a", "b"]), 1, 4)));
-        assert_eq!(parse("echo é▮"), Some((w(&["echo", "é"]), 1, 5)));
+        assert_eq!(asked, 0, "the host must not have been asked");
     }
 
-    /// A cursor between words is on a fresh empty word, at its own offset.
+    /// A run holding no terminal has none to lend: `_ed-tui` reports status 1
+    /// and asks the host nothing.
     #[test]
-    fn ed_parse_splices_an_empty_word_into_a_gap() {
-        assert_eq!(parse("▮"), Some((w(&[""]), 0, 0)));
-        assert_eq!(parse("ls | ssh ▮"), Some((w(&["ssh", ""]), 1, 9)));
-        assert_eq!(parse("cp a ▮ b"), Some((w(&["cp", "a", "", "b"]), 2, 5)));
-    }
-
-    /// An open block or an open string is the editor's ordinary state, not a
-    /// lex failure.
-    #[test]
-    fn ed_parse_reads_inside_an_open_block_and_an_open_string() {
-        assert_eq!(parse("try { cd ~/pr▮"), Some((w(&["cd", "~/pr"]), 1, 9)));
-        assert_eq!(
-            parse("within [dir: a] {\n  ssh ▮"),
-            Some((w(&["ssh", ""]), 1, 24))
+    fn tui_without_a_held_terminal_reports_status_one() {
+        let run = Run {
+            terminal: RequestedTerminalAccess::Denied,
+            ..line_run("_ed-tui { echo hi }")
+        };
+        let (result, asked) = run_with_cell(FOValue::Unit, run);
+        let Ok(Value::Map(m)) = result else {
+            panic!("_ed-tui reports rather than raises, got {result:?}");
+        };
+        assert!(matches!(m.get("status").as_deref(), Some(Value::Int(1))));
+        assert!(
+            m.get("output")
+                .is_some_and(|o| o.to_string().contains("holds no terminal to lend"))
         );
-        assert_eq!(parse("echo $[1 +▮"), Some((w(&["echo", "$[1 +"]), 1, 5)));
-        assert_eq!(parse("echo 'open▮"), Some((w(&["echo", "open"]), 1, 5)));
+        assert_eq!(asked, 0);
     }
 
     /// A non-Int cursor is refused at the door, before any request is put.

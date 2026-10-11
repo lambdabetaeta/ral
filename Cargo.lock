@@ -5816,6 +5816,7 @@ dependencies = [
  "rustix",
  "rustyline",
  "serde_json",
+ "strum",
  "tempfile",
  "unicode-width 0.2.2",
  "windows-sys 0.61.2",

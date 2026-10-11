@@ -58,11 +58,12 @@ the call site, not a manifest declaration.
 
 | Field | Enables |
 |---|---|
-| `read`  | `_ed-get`, `_ed-parse`, `_ed-history`, `_ed-state`, `_ed-tui` |
+| `read`  | `_ed-get`, `_ed-parse`, `_ed-history`, `_ed-state` |
 | `write` | `_ed-set`, `_ed-set-lbuffer`, `_ed-insert`, `_ed-push`, `_ed-accept`, `_ed-ghost`, `_ed-highlight`, `_ed-state` |
 | `tui`   | `_ed-tui` |
 
-A builtin listed under two fields needs both.
+A builtin listed under two fields needs both, and checks them before it
+does anything.
 
 `grant`'s `shell` field gates shell builtins that modify persistent
 process state (SPEC §12.8):
@@ -87,7 +88,7 @@ plugin code needs to know.
 
 | Builtin | Shape | Purpose |
 |---|---|---|
-| `_ed-get` | `Returns [text: Str, cursor: Int, keymap: Str, in-readline: Bool]` | the whole editor state; the text left of the cursor is `slice $st[text] 0 $st[cursor]` |
+| `_ed-get` | `Returns [text: Str, cursor: Int, keymap: Str]` | the whole editor state; `keymap` is `emacs` or `vi`; the text left of the cursor is `slice $st[text] 0 $st[cursor]` |
 | `_ed-set` | `[text: `keep\|`set Str, cursor: `keep\|`set Int] → Returns Unit` | partial buffer update |
 | `_ed-set-lbuffer` | `Str → Returns Unit` | replace left-of-cursor, preserve right |
 | `_ed-insert` | `Str → Returns Unit` | insert at cursor, advance |
@@ -109,14 +110,17 @@ if the user had pressed Enter. The pair implements zsh-style
 `push-line; accept-line`.
 
 **`_ed-tui`.** The body runs with the line editor suspended and
-stdout captured. On success the return record's `status` is 0 and
+stdout captured. It opens only from a keybinding handler, the one run
+that holds the terminal. On success the return record's `status` is 0 and
 `output` is the captured stdout, decoded lossily, one trailing newline
 stripped.  The body is a command, its value is its output, and the call
 displays a terminal selection rather than computing with it. When the body fails, `status` carries the exit code and
 `output` carries the error message; the call never raises, so plugins
 can discriminate cancellation (fzf 1 = no match, 130 = Esc) from real
-errors without wrapping in `try`. Nested `_ed-tui` is reported as
-status 1 rather than raised.
+errors without wrapping in `try`. In any other hook, or nested inside
+another `_ed-tui`, the call is reported as status 1 rather than raised,
+its `output` being `_ed-tui: this run holds no terminal to lend (a TUI
+opens from a keybinding handler, and not inside another)`.
 
 **`_ed-history`.** Entries are returned most recent first,
 deduplicated. `_ed-history '' 0` returns the full history.
@@ -183,11 +187,11 @@ wrappers around anything else.
 The module is evaluated with no options (`[:]`). If its return value
 is a block, `[:]` is applied as its single argument; the result must
 then be a manifest map. If the module's return value is already a
-map, that map is the manifest directly. Unknown hook names are warned
-on stderr and skipped; they do not fail the load. Invalid key
-notation in a keybinding is a load-time error (§6); a keybinding
-shadowed by an earlier same-chord binding loads with a warning naming
-the shadower. Loading a plugin whose name is already registered is
+map, that map is the manifest directly. An unknown hook name is a
+load-time error naming the valid events. Invalid key notation in a
+keybinding is a load-time error (§6); a keybinding that can never fire
+loads with a warning naming the binding that claims its keys first.
+Loading a plugin whose name is already registered is
 an error; `unload-plugin` of an unknown plugin is also an error.
 
 ```
@@ -213,23 +217,62 @@ any other shape is a load error.
 | Event | Handler | Fires |
 |---|---|---|
 | `buffer-change` | `{Map → Returns Unit}` | after buffer or cursor changes |
-| `pre-exec` | `{Map → Returns Unit}` | after Enter, before execution |
+| `complete` | `{Map → Returns [Str]}` | on Tab, before ral's own completion |
+| `pre-exec` | `{Map → Returns Str}` | after Enter, before execution |
 | `post-exec` | `{Map → Returns Unit}` | after execution completes |
 | `chpwd` | `{Map → Returns Unit}` | after a line that moved the session's directory |
 | `prompt` | `{Str → Returns Str}` | before each prompt render |
 
 All handlers for an event run in plugin load order regardless of
-individual failures. A failing handler's error is logged as
-`plugin 'name': hook 'event' failed: <message>`.
+individual failures. A failing handler's error is reported prefixed
+`plugin 'name' hook 'event': `.
 
 **`buffer-change`** receives
 `[old: Str]`, the buffer before the change; the buffer, cursor,
 history and keymap are read through `_ed-get` and `_ed-history`.
 Typical uses are highlighting and autosuggestion.
 
-**`pre-exec`** receives `[src: Str]`, the full command line as
-typed; **`post-exec`** receives `[src: Str, status: Int]`, adding
-the exit status. **`chpwd`** receives `[old: Str, new: Str]`, the
+**`complete`** receives `[words: [Str], current: Int, offset: Int]`,
+the record `_ed-parse` returns for the word Tab was pressed on, and
+returns candidates: each a `Str`, or `[replacement: Str, display: Str]`
+(a `Str` is both). The first hook in load order to return a non-empty
+list claims the word, and the candidates replace the text from
+character `offset` to the cursor; later hooks do not run. An empty
+list or `()` passes to the next hook, and finally to ral's own completion.
+Candidates are not filtered further: a hook returns those that
+complete `words[current]`. A return of any other shape passes with a
+warning. When the buffer does not lex, no hook runs.
+
+`complete` runs aside, like `buffer-change`: its writes to the buffer
+and to ghost text and highlights take no effect, and `_ed-tui` reports
+status 1. Both are braked per plugin and event: a run overrunning its
+budget (100ms for `buffer-change`, 500ms for `complete`), or failing
+three times in a row, disables that hook for the rest of the session,
+with one notice, `plugin 'name': hook 'event' disabled for this
+session (overran its 500ms budget)` or `(failed 3 times in a row)`.
+
+**`pre-exec`** receives `[src: Str]`, the full command line as typed,
+and returns the line to run, or `()` to leave it. The hooks fold over
+the line in load order: each receives what the one before returned,
+and the last line is what runs. A failing hook is reported and the
+line goes on as it was, so no hook can stop every line; a return of
+any other shape is reported with a warning and passed over alike.
+Refusing a line is rewriting it to a failing one; its status reaches
+`post-exec` through the ordinary run:
+
+```
+hooks: [
+    pre-exec: { |ev|
+        if !{re-match '^rm -rf /' $ev[src]} {
+            return "fail [status: 1, message: 'refused']"
+        } else { return $ev[src] }
+    }
+]
+```
+
+**`post-exec`** receives `[src: Str, status: Int]`: `src` is the line
+that ran, after any rewrite, and `status` its exit status.
+**`chpwd`** receives `[old: Str, new: Str]`, the
 session's working directory before and after the line. It compares
 the two ends, not the `cd`s between them: `cd a; cd b` on one line
 fires once, while `cd .`, or a `cd` inside `within [dir: …]`, which
@@ -259,52 +302,79 @@ Declared as `keybindings: [[key: $str, handler: $thunk, guard?: $regex], …]`.
 
 **Key notation:**
 
-| Notation | Meaning |
-|---|---|
-| `'a' … 'z'`, `'0' … '9'` | literal |
-| `'ctrl-<c>'`, `'alt-<c>'` | modified letter |
-| `'tab'`, `'enter'`, `'escape'`, `'backspace'`, `'delete'` | named keys |
-| `'up'`, `'down'`, `'left'`, `'right'`, `'home'`, `'end'` | navigation |
-| `'f1' … 'f12'` | function keys |
+```
+notation := chord (' '+ chord)*
+chord    := (modifier '-')* key        each modifier at most once, any order
+modifier := ctrl | alt | shift
+key      := one character | f1…f12 | tab | enter | escape | up | down
+          | left | right | home | end | delete | backspace
+```
 
-Invalid notation is a load-time error.
+So `'a'`, `'ctrl-r'`, `'alt-enter'`, `'ctrl-left'`, `'f5'`,
+`'ctrl-alt-x'` (the same key as `'alt-ctrl-x'`), and `'ctrl--'` (ctrl
+with `-`). Two rules keep one key from having two spellings, and a
+refusal names the spelling to use:
+
+- `shift` goes with a key that is not a character (`'shift-f5'`,
+  `'shift-left'`); for a character, the shifted character is itself the
+  key: `'A'`, not `'shift-a'`.
+- `ctrl` with an uppercase letter is refused: a terminal sends
+  `'ctrl-C'` as `'ctrl-c'`. So are `'ctrl-h'`, `'ctrl-i'`, `'ctrl-m'`
+  and `'ctrl-['`, which a terminal sends as `'backspace'`, `'tab'`,
+  `'enter'` and `'escape'`, and a control character written as the key.
+
+A sequence is chords separated by spaces, pressed in turn:
+`'ctrl-x ctrl-e'`. It must begin with plain `ctrl-x`, the prefix the
+line editor leaves free for sequences.
+
+Invalid notation is a load-time error naming the offending text.
 
 **Dispatch.** Plugin keybindings form one ordered dispatch table
 shared by every REPL frontend: entries in plugin load order (manifest
 order within a plugin), with the editor's built-in action as the
-tail. A key press runs the first entry whose chord matches and whose
+tail. A key press runs the first entry whose keys match and whose
 `guard` — a regex tested against the text left of the cursor —
 allows; when no entry claims it, the built-in action runs. Several
-guarded bindings on one chord compose as an ordered pattern match:
-`key: 'tab'` with a guard cooperates with built-in completion, and
-unmatched presses complete as usual.
+guarded bindings on one key or sequence compose as an ordered pattern
+match: `key: 'tab'` with a guard cooperates with built-in completion,
+and unmatched presses complete as usual.
 
-A handler is `{|ev| → Returns Unit}`, where `ev` is `[key: Str]`, the
-binding's key notation; its return value carries nothing. The buffer
-and cursor are read with `_ed-get`.
+A handler is `{|ev| → Returns Unit}`, where `ev` is
+`[key: Str, mode: Str]`: the binding's key notation, and the editor's
+input mode at the press, `insert`, `command` or `replace` (`insert`
+throughout emacs). `_ed-get`'s `keymap` is the configured one, `emacs`
+or `vi`; `mode` is how a handler tells vi's modes apart. A handler's
+return value carries nothing. The buffer and cursor are read with
+`_ed-get`.
 All effects flow through the `_ed-*` builtins (`_ed-set`,
 `_ed-insert`, `_ed-set-lbuffer`, `_ed-push`, `_ed-accept`, `_ed-tui`,
 …). Whether a binding claims a press is decided entirely by its
 guard, before the handler runs — there is no return-value fallthrough.
 
-**Load-time rules.** Three rules keep the table honest:
+**Load-time rules.** Four rules keep the table honest:
 
-- `ctrl-c` and `ctrl-d` are reserved (interrupt, end-of-file) and
-  cannot be bound, guard or not.
+- `ctrl-c` and `ctrl-d`, with no other modifier, are reserved
+  (interrupt, end-of-file) and cannot be bound, guard or not, alone or
+  within a sequence.
 - Every unmodified key except `f1`–`f12` carries a ral-owned built-in
   editing action (typing, cursor movement, deletion, completion,
   history, accept-line, keymap escape); binding one requires a
   `guard:`, since an unguarded binding would shadow the action on
-  every press. Modified chords (`ctrl-…`, `alt-…`) and function keys
-  may be bound unguarded — replacing the underlying editor default
-  (`ctrl-t`, `alt-c`, `ctrl-r`) is the point.
-- A binding that can never fire — an earlier-loaded unguarded binding
-  owns its chord — loads with a warning naming the shadower.
+  every press. Modified chords (`ctrl-…`, `alt-…`, `shift-…`) and
+  function keys may be bound unguarded — replacing the underlying
+  editor default (`ctrl-t`, `alt-c`, `ctrl-r`) is the point.
+- A sequence begins with `ctrl-x`.
+- A binding that can never fire loads with a warning naming the
+  binding that claims its keys first: an unguarded binding on the same
+  keys loaded before it, or an unguarded binding on a proper prefix of
+  its sequence, wherever loaded — an unguarded `ctrl-x` kills every
+  `ctrl-x …` sequence. The warning is given when the dead binding or
+  its blocker belongs to the plugin being loaded.
 
 **What a handler may do.** Use `_ed-set` / `_ed-push` / `_ed-accept`
 / `_ed-ghost` / `_ed-highlight` to mutate editor state. Use `_ed-tui`
 (gated by `grant`'s `editor.tui`, §2) to run a fuzzy finder or other
-full-screen program.
+full-screen program; a keybinding handler is the one place it opens.
 
 After a handler that returns without `accept`, the shell re-enters
 readline with the handler's final buffer and cursor.
@@ -587,11 +657,34 @@ kill completes PIDs from `ps`. ral has no `export`, `unset` or
 upstream's `_fzf_compgen_*` and `_fzf_comprun` overrides have no
 counterpart.
 
-### 10.6 Syntax highlight (sketch)
+### 10.6 `complete` — git branches
+
+A `complete` hook claims a word only where it has something to say, and
+returns `[]` elsewhere so that ral's own completion answers. This one
+claims the argument after `git checkout` or `git switch`, offering the
+branches that start with what is typed; outside a repository `git`
+fails, and the hook passes:
 
 ```
-let _handler = { |ev|
-    let new = $ev[line]
+return [
+    name: git-branch,
+    hooks: [complete: { |[words: ws, current: i]|
+        let head = intercalate ' ' !{take 2 $ws}
+        if $[$i == 2 && !{elem $head ['git checkout', 'git switch']}] {
+            let w = last !{take 3 $ws}
+            let branches = try { return !{lines !{git branch '--format=%(refname:short)'}} } { |_| return [] }
+            return !{filter { |b| $[!{slice $b 0 !{length $w}} == $w] } $branches}
+        } else { return [] }
+    }],
+]
+```
+
+### 10.7 Syntax highlight (sketch)
+
+```
+let _handler = { |_ev|
+    let st = _ed-get
+    let new = $st[text]
     _if !{is-empty $new} { _ed-highlight []; return () } {}
     let toks  = split '[ \t]+' $new
     let head  = $toks[0]
@@ -610,16 +703,6 @@ return [
 The following appear in earlier design notes but are not yet
 implemented. They are collected here as candidates for future
 releases.
-
-- **Multi-key bindings.** A key notation `'escape escape'` and a
-  configurable timeout (`key_timeout` in ralrc, e.g. 500ms) to
-  support chords.
-
-- **`buffer-change` deadline.** A soft deadline (e.g. 16ms,
-  configurable as `editor_hook_deadline_us`) after which remaining
-  buffer-change handlers are deferred to the next idle. Today
-  handlers run unconditionally; a slow handler slows every
-  keystroke.
 
 - **Left/right prompt hooks.** A `prompt` signature taking the side
   (`"left"`/`"right"`) and returning that side's segment,

@@ -27,11 +27,6 @@ pub(super) mod router;
 pub(super) mod rustyline;
 
 pub(super) use self::router::{KeyChord, KeyName, KeyRouter, Resolution};
-// Production code reaches `parse_key_notation` straight from `router`
-// (manifest.rs); this re-export exists only so keybinding.rs's test
-// module can name it via `crate::repl::plugin`.
-#[cfg(test)]
-pub(super) use self::router::parse_key_notation;
 
 use ral_core::HookName;
 use ral_core::carrier::Transport;
@@ -43,12 +38,13 @@ use ral_core::ty::{Ty, Typed};
 use std::time::Duration;
 
 use self::editor::{EditorState, HighlightSpan, PluginContext};
-use self::manifest::{LoadedPlugin, Manifest};
+use self::manifest::{HookEvent, LoadedPlugin, Manifest};
+use super::completion::{Candidate, parse_at};
 use super::enquiry::PluginNote;
-use super::errfmt::{format_plugin_disabled, plugin_warning};
+use super::errfmt::{format_plugin_disabled, format_plugin_warning};
 use super::frontend::EditBuffer;
-use super::host::ReplHost;
-use ral_core::text::byte_to_char;
+use super::host::{HookResult, Outcome, ReplHost};
+use ral_core::text::{byte_to_char, char_to_byte};
 // Anchored to the crate root: a bare `rustyline::` path here would resolve
 // to the sibling `rustyline` module instead of the crate of the same name.
 use ::rustyline::config::EditMode;
@@ -68,7 +64,8 @@ pub(super) fn load_err(msg: impl std::fmt::Display) -> ral_core::types::Error {
 }
 
 /// Which keymap the editor is in — the frontend-neutral reduction of
-/// rustyline's `EditMode`, and the rc `edit-mode:` key's value.
+/// rustyline's `EditMode`, the rc `edit-mode:` key's value, and `_ed-get`'s
+/// `keymap`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum Keymap {
     #[default]
@@ -107,15 +104,6 @@ impl Datum for Keymap {
             Some("vi") => Ok(Self::Vi),
             _ => Err(format!("expected \"emacs\" or \"vi\", got {}", v.shape())),
         }
-    }
-}
-
-/// Name the keymap for plugin hooks: `"viins"` for vi insert, `"emacs"`
-/// otherwise.  Surfaced to plugin hooks via the `_ed-get` record.
-pub(super) fn keymap_name(keymap: Keymap) -> &'static str {
-    match keymap {
-        Keymap::Vi => "viins",
-        Keymap::Emacs => "emacs",
     }
 }
 
@@ -211,17 +199,20 @@ pub(super) struct PendingKeybinding {
     pub(super) binding_idx: usize,
     /// Cursor position as a byte offset into the line at the moment the key fired.
     pub(super) cursor_byte: usize,
+    /// The editor's input mode at the press: `insert`, `command` or `replace`.
+    pub(super) mode: &'static str,
 }
 
 // ── Circuit breaker ─────────────────────────────────────────────────────
 
 /// Per-session health of one plugin hook, the circuit-breaker's state.
 ///
-/// A buffer-change hook fires on every keystroke, so a slow or always-faulting
-/// one must not run unbraked. Consecutive faults accumulate; a fault run that
-/// reaches [`BUFFER_CHANGE_FAULT_LIMIT`], or any run that overruns
-/// [`BUFFER_CHANGE_BUDGET`], trips the breaker — the hook is skipped for the
-/// rest of the session. A success resets the fault count.
+/// A braked hook fires on every keystroke (`buffer-change`) or every Tab
+/// (`complete`), so a slow or always-faulting one must not run unbraked.
+/// Consecutive faults accumulate; a fault run that reaches [`FAULT_LIMIT`], or
+/// any run that overruns its budget ([`BUFFER_CHANGE`], [`COMPLETE`]), trips
+/// the breaker — the hook is skipped for the rest of the session. A run that
+/// ends otherwise resets the fault count.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct HookHealth {
     consecutive_faults: u32,
@@ -235,29 +226,27 @@ impl HookHealth {
 
     /// Fold one hook outcome into the health state, returning `true` exactly on
     /// the call that trips the breaker (so the caller emits the single disable
-    /// diagnostic once). A timeout trips immediately; otherwise faults
-    /// accumulate to `fault_limit` and a success clears the count.
-    pub(super) fn record_outcome(&mut self, ok: bool, timed_out: bool, fault_limit: u32) -> bool {
+    /// diagnostic once). A wall trips immediately; otherwise faults accumulate
+    /// to [`FAULT_LIMIT`] and any other ending clears the count.
+    pub(super) fn record_outcome(&mut self, outcome: &Outcome) -> bool {
         if self.disabled {
             return false;
         }
-        if timed_out {
-            self.disabled = true;
-            return true;
-        }
-        if ok {
-            self.consecutive_faults = 0;
-            false
-        } else {
-            self.consecutive_faults += 1;
-            if self.consecutive_faults >= fault_limit {
-                self.disabled = true;
-                true
-            } else {
-                false
-            }
-        }
+        self.consecutive_faults = match outcome {
+            Outcome::Faulted(_) => self.consecutive_faults + 1,
+            _ => 0,
+        };
+        self.disabled =
+            matches!(outcome, Outcome::Walled(_)) || self.consecutive_faults >= FAULT_LIMIT;
+        self.disabled
     }
+}
+
+/// A braked hook: its event, and the wall each run must beat.
+#[derive(Clone, Copy)]
+struct Brake {
+    event: HookEvent,
+    budget: Duration,
 }
 
 /// Foreground wall for a single buffer-change hook run: a hook that runs this
@@ -265,12 +254,80 @@ impl HookHealth {
 /// breaker. The wall is cooperative — the machine polls cancellation at
 /// every step, so any handler doing ordinary work (iteration, command
 /// spawns, recursion) is preempted at the next step.
-const BUFFER_CHANGE_BUDGET: Duration = Duration::from_millis(100);
+const BUFFER_CHANGE: Brake = Brake {
+    event: HookEvent::BufferChange,
+    budget: Duration::from_millis(100),
+};
 
-/// Consecutive buffer-change faults that trip the breaker.
-const BUFFER_CHANGE_FAULT_LIMIT: u32 = 3;
+/// The same wall, longer, for a `complete` hook, which runs on a Tab press and
+/// may consult the disk or a command.
+const COMPLETE: Brake = Brake {
+    event: HookEvent::Complete,
+    budget: Duration::from_millis(500),
+};
 
-// ── Buffer-change hooks ─────────────────────────────────────────────────
+/// Consecutive faults that trip the breaker.
+const FAULT_LIMIT: u32 = 3;
+
+/// Run `name`'s `brake` hook on `arg` against the buffer `line`, the cursor at
+/// char `pos`: the plugin's state cell goes in and back out, a fault is
+/// deferred, and the outcome is folded into the breaker, which defers its one
+/// disable notice.
+fn run_braked(
+    t: &dyn Transport,
+    host: &Arc<ReplHost>,
+    name: &str,
+    Brake { event, budget }: Brake,
+    arg: FOValue,
+    line: &str,
+    pos: usize,
+) -> HookResult {
+    let (state_cell, history, keymap) = {
+        let rt = lock(&host.runtime);
+        (
+            rt.state_cell(name),
+            rt.hooks.history.clone(),
+            rt.hooks.keymap,
+        )
+    };
+    let ctx = PluginContext {
+        editor_state: EditorState::new(line.to_owned(), pos, keymap),
+        history,
+        state_cell,
+        ..PluginContext::default()
+    };
+    let mut hr = host.run_hook(
+        t,
+        HookName::plugin(name, <&str>::from(event)),
+        vec![arg],
+        Some(budget),
+        Some(ctx),
+    );
+    let mut rt = lock(&host.runtime);
+    if let Some(ctx) = &mut hr.ctx {
+        rt.write_back_state_cell(name, ctx.state_cell.take());
+    }
+    if let Outcome::Faulted(fault) | Outcome::Walled(fault) = &hr.outcome {
+        rt.diagnostics.messages.push(fault.clone());
+    }
+    if let Some(p) = rt.plugins.iter_mut().find(|p| p.name == name)
+        && p.health
+            .entry(event)
+            .or_default()
+            .record_outcome(&hr.outcome)
+    {
+        let why = if matches!(hr.outcome, Outcome::Walled(_)) {
+            format!("overran its {}ms budget", budget.as_millis())
+        } else {
+            format!("failed {FAULT_LIMIT} times in a row")
+        };
+        let msg = format_plugin_disabled(name, event.into(), &why);
+        rt.diagnostics.messages.push(msg);
+    }
+    hr
+}
+
+// ── Braked hooks ────────────────────────────────────────────────────────
 
 /// Drive buffer-change hooks whenever the line or cursor moves.
 /// Called from `Hinter::hint()`, which holds no lock; the runtime lock is
@@ -286,91 +343,72 @@ pub(super) fn run_buffer_change_hooks(
     line: &str,
     pos: usize,
 ) {
-    let runtime = &host.runtime;
     let pos = byte_to_char(line, pos);
-    let (old, handlers, history, keymap) = {
-        let mut rt = lock(runtime);
+    let (old, handlers) = {
+        let mut rt = lock(&host.runtime);
         if line == rt.hooks.previous.text && pos == rt.hooks.previous.cursor {
             return;
         }
         let old = std::mem::replace(&mut rt.hooks.previous.text, line.to_string());
         rt.hooks.previous.cursor = pos;
-
-        let handlers = rt.with_hook("buffer-change", |p| !p.buffer_change_health.is_disabled());
-        if handlers.is_empty() {
-            rt.hooks.ghost = None;
-            rt.hooks.highlights.clear();
-            return;
-        }
-        (
-            old,
-            handlers,
-            rt.hooks.history.clone(),
-            keymap_name(rt.hooks.keymap),
-        )
+        (old, rt.with_hook(HookEvent::BufferChange))
     };
-
     let arg = FOValue::Map {
         entries: vec![("old".into(), old.encode())],
     };
     let mut ghost: Option<String> = None;
     let mut spans: Vec<HighlightSpan> = Vec::new();
     for name in handlers {
-        let state_cell = lock(runtime).state_cell(&name);
-        let ctx = PluginContext {
-            editor_state: EditorState::new(line.to_string(), pos, keymap),
-            history: history.clone(),
-            in_readline: true,
-            state_cell,
-            ..PluginContext::default()
-        };
-        // The keystroke budget arms the wall, and the breaker disables a
-        // persistently bad hook for the session.
-        let hr = host.run_hook(
-            t,
-            HookName::plugin(name.clone(), "buffer-change"),
-            vec![arg.clone()],
-            Some(BUFFER_CHANGE_BUDGET),
-            Some(ctx),
-        );
-
-        let state_cell = hr.ctx.map(|ctx| {
-            if let Some(g) = ctx.outputs.ghost_text {
-                ghost = Some(g);
-            }
+        let hr = run_braked(t, host, &name, BUFFER_CHANGE, arg.clone(), line, pos);
+        if let Some(ctx) = hr.ctx {
+            ghost = ctx.outputs.ghost_text.or(ghost);
             spans.extend(ctx.outputs.highlight_spans);
-            ctx.state_cell
-        });
-        let mut rt = lock(runtime);
-        if let Some(state_cell) = state_cell {
-            rt.write_back_state_cell(&name, state_cell);
-        }
-        if let Some(fault) = &hr.fault {
-            rt.diagnostics.messages.push(fault.clone());
-        }
-        if let Some(p) = rt.plugins.iter_mut().find(|p| p.name == name)
-            && p.buffer_change_health.record_outcome(
-                hr.fault.is_none(),
-                hr.walled,
-                BUFFER_CHANGE_FAULT_LIMIT,
-            )
-        {
-            let why = if hr.walled {
-                format!(
-                    "overran its {}ms keystroke budget",
-                    BUFFER_CHANGE_BUDGET.as_millis()
-                )
-            } else {
-                format!("failed {BUFFER_CHANGE_FAULT_LIMIT} times in a row")
-            };
-            let msg = format_plugin_disabled(&name, "buffer-change", &why);
-            rt.diagnostics.messages.push(msg);
         }
     }
 
-    let mut rt = lock(runtime);
+    // With no handler left this clears the last line's ghost and highlights.
+    let mut rt = lock(&host.runtime);
     rt.hooks.ghost = ghost;
     rt.hooks.highlights = spans;
+}
+
+/// The plugins' `complete` hooks, in load order, over the word at byte `pos`:
+/// the first non-empty list claims it, replacing from the word's start.
+pub(super) fn run_complete_hooks(
+    t: &dyn Transport,
+    host: &Arc<ReplHost>,
+    line: &str,
+    pos: usize,
+) -> Option<(usize, Vec<Candidate>)> {
+    let handlers = lock(&host.runtime).with_hook(HookEvent::Complete);
+    if handlers.is_empty() {
+        return None;
+    }
+    let pos = byte_to_char(line, pos);
+    let at = parse_at(line, pos)?;
+    let start = char_to_byte(line, at.offset);
+    let arg = at.encode();
+    handlers.into_iter().find_map(|name| {
+        match run_braked(t, host, &name, COMPLETE, arg.clone(), line, pos).outcome {
+            Outcome::Settled(FOValue::Unit) => None,
+            Outcome::Settled(value) => match Vec::<Candidate>::decode(&value) {
+                Ok(found) => (!found.is_empty()).then_some((start, found)),
+                Err(why) => {
+                    let warning = format_plugin_warning(
+                        &name,
+                        &format!(
+                            "its complete hook returned the wrong shape ({why}); a complete hook \
+                             returns a list of strings or [replacement, display] records, or `()` \
+                             to pass"
+                        ),
+                    );
+                    defer_plugin_message(&host.runtime, warning);
+                    None
+                }
+            },
+            _ => None,
+        }
+    })
 }
 
 // ── Plugin lifecycle helpers ─────────────────────────────────────────────
@@ -385,15 +423,15 @@ pub(super) fn reset_editor_hooks(runtime: &Arc<Mutex<PluginRuntime>>, keymap: Ke
 }
 
 impl PluginRuntime {
-    /// The plugins registering `event` that pass `keep`, by name.
-    pub(super) fn with_hook(
-        &self,
-        event: &str,
-        keep: impl Fn(&LoadedPlugin) -> bool,
-    ) -> Vec<String> {
+    /// The plugins registering `event` whose breaker for it has not tripped,
+    /// by name.
+    pub(super) fn with_hook(&self, event: HookEvent) -> Vec<String> {
         self.plugins
             .iter()
-            .filter(|p| p.hooks.iter().any(|h| h == event) && keep(p))
+            .filter(|p| {
+                p.hooks.contains(&event)
+                    && !p.health.get(&event).is_some_and(HookHealth::is_disabled)
+            })
             .map(|p| p.name.clone())
             .collect()
     }
@@ -459,18 +497,21 @@ impl PluginRuntime {
         let name = plugin.name.clone();
         self.plugins.push(plugin);
         self.keybindings_changed();
-        // Shadow lint: a dead binding (an earlier unguarded entry owns its
-        // chord) can only be introduced by this load, and only among this
-        // plugin's own entries — earlier plugins keep their precedence.
+        // Shadow lint: this load may kill its own bindings or, with an unguarded
+        // prefix, an earlier plugin's sequence, so report a dead entry when
+        // either it or its blocker is this plugin's.
         for (dead, blocker) in self.router.dead_entries() {
-            if dead.plugin == name {
-                plugin_warning(
-                    &name,
-                    &format!(
-                        "keybinding '{}' will never fire: an unguarded '{}' binding of plugin \
-                         '{}' precedes it",
-                        dead.key, blocker.key, blocker.plugin
-                    ),
+            if dead.plugin == name || blocker.plugin == name {
+                errln!(
+                    "{}",
+                    format_plugin_warning(
+                        &name,
+                        &format!(
+                            "keybinding '{}' of plugin '{}' will never fire: an unguarded '{}' \
+                             binding of plugin '{}' claims it first",
+                            dead.key, dead.plugin, blocker.key, blocker.plugin
+                        ),
+                    )
                 );
             }
         }
@@ -478,39 +519,131 @@ impl PluginRuntime {
     }
 }
 
-/// Fire lifecycle `event` on every plugin that registers it.  Every
-/// lifecycle hook receives exactly one argument, the event record: `{src}`
-/// for `pre-exec`, `{src, status}` for `post-exec`, `{old, new}` for `chpwd`.
-pub(crate) fn fire(t: &dyn Transport, host: &Arc<ReplHost>, event: &str, record: &FOValue) {
-    let names = lock(&host.runtime).with_hook(event, |_| true);
-    for name in names {
-        let hr = host.run_hook(
-            t,
-            HookName::plugin(name, event),
-            vec![record.clone()],
-            None,
-            None,
-        );
-        // Printed, not deferred: a lifecycle hook runs with the terminal
-        // already stable, and a deferred message would wait for a next prompt
-        // the last command before exit never reaches.
-        if let Some(fault) = hr.fault {
-            errln!("{fault}");
-        }
-    }
-}
-
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "[test] test scaffolding")]
 mod tests {
+    use super::load::harness::dressed;
     use super::*;
+    use ral_core::Value;
 
     /// `Keymap` names rustyline's `EditMode`, the rc's `edit_mode:` value, and
     /// the keymap for the `_ed-get` record.
     #[test]
-    fn keymap_names_edit_mode_rc_value_and_plugin_keymap() {
+    fn keymap_names_edit_mode_and_round_trips_as_a_datum() {
         assert_eq!(EditMode::from(Keymap::Vi), EditMode::Vi);
         assert_eq!(Keymap::decode(&Keymap::Vi.encode()), Ok(Keymap::Vi));
-        assert_eq!(keymap_name(Keymap::Vi), "viins");
-        assert_eq!(keymap_name(Keymap::Emacs), "emacs");
+    }
+
+    /// A `complete` hook claims the word: it sees the command at the cursor,
+    /// and its list replaces from the word's start.
+    #[test]
+    fn a_complete_hook_claims_the_word() {
+        let (t, host, sink) = dressed(&[(
+            "p",
+            HookEvent::Complete,
+            "{ |at| record $at[current] $at[offset] ...$at[words]; return ['main', 'feature'] }",
+        )]);
+        let claim = run_complete_hooks(&t, &host, "git checkout ma", 15);
+        assert_eq!(
+            claim,
+            Some((
+                13,
+                ["main", "feature"]
+                    .map(|s| Candidate {
+                        display: s.into(),
+                        replacement: s.into()
+                    })
+                    .into()
+            ))
+        );
+        assert_eq!(
+            *sink.lock().unwrap(),
+            vec![
+                Value::Int(2),
+                Value::Int(13),
+                Value::string("git"),
+                Value::string("checkout"),
+                Value::string("ma"),
+            ]
+        );
+    }
+
+    /// An empty list claims nothing: the engine answers.
+    #[test]
+    fn an_empty_complete_list_passes_to_the_engine() {
+        let (t, host, _) = dressed(&[("p", HookEvent::Complete, "{ |_at| return [] }")]);
+        assert_eq!(run_complete_hooks(&t, &host, "git ", 4), None);
+        assert_eq!(
+            lock(&host.runtime).diagnostics.messages,
+            Vec::<String>::new()
+        );
+    }
+
+    /// `()` passes, silently.
+    #[test]
+    fn a_unit_complete_return_passes_silently() {
+        let (t, host, _) = dressed(&[("p", HookEvent::Complete, "{ |_at| return () }")]);
+        assert_eq!(run_complete_hooks(&t, &host, "git ", 4), None);
+        assert_eq!(
+            lock(&host.runtime).diagnostics.messages,
+            Vec::<String>::new()
+        );
+    }
+
+    /// A value of the wrong shape passes, with one warning deferred.
+    #[test]
+    fn a_wrong_shaped_complete_return_passes_with_a_warning() {
+        let (t, host, _) = dressed(&[("p", HookEvent::Complete, "{ |_at| return 7 }")]);
+        assert_eq!(run_complete_hooks(&t, &host, "git ", 4), None);
+        let rt = lock(&host.runtime);
+        assert_eq!(rt.diagnostics.messages.len(), 1);
+        assert!(
+            rt.diagnostics.messages[0].contains("its complete hook returned the wrong shape"),
+            "{}",
+            rt.diagnostics.messages[0]
+        );
+    }
+
+    /// A record candidate keeps its display apart from its replacement.
+    #[test]
+    fn a_record_candidate_keeps_its_display() {
+        let (t, host, _) = dressed(&[(
+            "p",
+            HookEvent::Complete,
+            "{ |_at| return [[replacement: 'main', display: 'main (current)']] }",
+        )]);
+        assert_eq!(
+            run_complete_hooks(&t, &host, "git ", 4),
+            Some((
+                4,
+                vec![Candidate {
+                    display: "main (current)".into(),
+                    replacement: "main".into()
+                }]
+            ))
+        );
+    }
+
+    /// A `complete` hook that always fails is disabled on its third Tab, with
+    /// one notice, and is not run on the fourth.
+    #[test]
+    fn a_failing_complete_hook_trips_the_breaker_on_the_third_tab() {
+        let (t, host, _) = dressed(&[(
+            "p",
+            HookEvent::Complete,
+            "{ |_at| fail [status: 1, message: 'boom'] }",
+        )]);
+        for _ in 0..3 {
+            assert_eq!(run_complete_hooks(&t, &host, "git ", 4), None);
+        }
+        let seen = lock(&host.runtime).diagnostics.messages.clone();
+        assert_eq!(seen.len(), 4, "three faults, then the notice: {seen:?}");
+        assert!(
+            seen[3].contains("hook 'complete' disabled for this session"),
+            "{}",
+            seen[3]
+        );
+        assert_eq!(run_complete_hooks(&t, &host, "git ", 4), None);
+        assert_eq!(lock(&host.runtime).diagnostics.messages, seen);
     }
 }

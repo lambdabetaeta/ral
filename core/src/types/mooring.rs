@@ -301,14 +301,13 @@ impl Mooring {
         }
     }
 
-    /// Derive a mooring identical to this one with its terminal authority
-    /// raised: `Leased => ExplicitLoan`, everything else unchanged.
-    /// Raise-never-mint — a `Denied` mooring lends a `Denied` one.  The parent
-    /// is untouched and the derivation dies with the call that borrowed it
-    /// (`_ed-tui`'s `fzf`, which must own the foreground pgid to draw on
-    /// `/dev/tty` even though stdout is captured).
-    pub fn lend_terminal(&self) -> Self {
-        Self {
+    /// The same mooring with `terminal_access` raised to `ExplicitLoan`, for
+    /// the call that borrows it (`_ed-tui`'s `fzf`, which must own the
+    /// foreground pgid to draw on `/dev/tty` even though stdout is captured).
+    /// `Some` only from `Leased`: a `Denied` run has no terminal to lend and an
+    /// `ExplicitLoan` one has already lent it.  The parent is untouched.
+    pub fn lend_terminal(&self) -> Option<Self> {
+        matches!(self.terminal_access, TerminalAccess::Leased).then(|| Self {
             surface: self.surface.clone(),
             deferred: self.deferred.clone(),
             desk: self.desk.clone(),
@@ -316,17 +315,8 @@ impl Mooring {
             cancel: self.cancel.clone(),
             deferred_lease: self.deferred_lease,
             worker_cap: self.worker_cap,
-            terminal_access: match self.terminal_access {
-                TerminalAccess::Leased => TerminalAccess::ExplicitLoan,
-                other => other,
-            },
-        }
-    }
-
-    /// The re-entrancy guard `_ed-tui` refuses on, a nested loan being a logic
-    /// error.
-    pub fn in_terminal_loan(&self) -> bool {
-        matches!(self.terminal_access, TerminalAccess::ExplicitLoan)
+            terminal_access: TerminalAccess::ExplicitLoan,
+        })
     }
 }
 

@@ -12,6 +12,7 @@ use ral_core::first_order::FOValue;
 use ral_core::first_order::datum::{Datum, tag, untag};
 use ral_core::record;
 
+use super::plugin::Keymap;
 use super::plugin::manifest::Manifest;
 
 const EDITOR: &str = "repl-editor";
@@ -37,9 +38,13 @@ pub(crate) enum EditorOp {
     StateSet(Data),
 }
 
-impl EditorOp {
-    /// The grant an op needs.
-    pub(crate) fn flag(&self) -> Flag {
+/// A request an `_ed-*` door puts to the host, and the grant it needs.
+pub(crate) trait Gated: Into<Enquiry> {
+    fn flag(&self) -> Flag;
+}
+
+impl Gated for EditorOp {
+    fn flag(&self) -> Flag {
         match self {
             Self::Get | Self::History | Self::StateGet => Flag::EditorRead,
             Self::Set { .. }
@@ -51,6 +56,12 @@ impl EditorOp {
             | Self::Highlight(_)
             | Self::StateSet(_) => Flag::EditorWrite,
         }
+    }
+}
+
+impl Gated for ClipboardReq {
+    fn flag(&self) -> Flag {
+        Flag::EditorWrite
     }
 }
 
@@ -75,15 +86,13 @@ pub(crate) struct EditorSnapshot {
     pub(crate) text: String,
     /// A character offset.
     pub(crate) cursor: usize,
-    pub(crate) keymap: String,
-    pub(crate) in_readline: bool,
+    pub(crate) keymap: Keymap,
 }
 
-record!(EditorSnapshot {
+record!(typed EditorSnapshot {
     text: "text",
     cursor: "cursor",
     keymap: "keymap",
-    in_readline: "in-readline",
 });
 
 /// Any first-order value, as itself.
@@ -129,6 +138,12 @@ pub(crate) enum Enquiry {
 impl From<EditorOp> for Enquiry {
     fn from(op: EditorOp) -> Self {
         Self::Editor(op)
+    }
+}
+
+impl From<ClipboardReq> for Enquiry {
+    fn from(req: ClipboardReq) -> Self {
+        Self::Clipboard(req)
     }
 }
 

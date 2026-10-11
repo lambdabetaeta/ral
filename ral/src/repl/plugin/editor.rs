@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use super::super::enquiry::{Data, EditorOp, EditorSnapshot};
 use super::super::frontend::EditBuffer;
+use super::Keymap;
 
 /// Line editor state visible to plugins.  `cursor` is a character offset
 /// into `text` (see the module-level note on cursor units), never past its
@@ -25,15 +26,15 @@ use super::super::frontend::EditBuffer;
 pub struct EditorState {
     text: std::string::String,
     cursor: usize,
-    keymap: std::string::String,
+    keymap: Keymap,
 }
 
 impl EditorState {
-    pub fn new(text: std::string::String, cursor: usize, keymap: &str) -> Self {
+    pub fn new(text: std::string::String, cursor: usize, keymap: Keymap) -> Self {
         Self {
             cursor: cursor.min(text.chars().count()),
             text,
-            keymap: keymap.into(),
+            keymap,
         }
     }
 }
@@ -118,9 +119,6 @@ pub struct PluginOutputs {
 pub struct PluginContext {
     pub editor_state: EditorState,
     pub history: Arc<[std::string::String]>,
-    /// True inside the readline loop (`buffer-change`), where `_ed-tui` is
-    /// forbidden.
-    pub in_readline: bool,
     pub outputs: PluginOutputs,
     pub state_cell: Option<FOValue>,
 }
@@ -142,8 +140,7 @@ impl PluginContext {
                 return EditorSnapshot {
                     text: st.text.clone(),
                     cursor: st.cursor,
-                    keymap: st.keymap.clone(),
-                    in_readline: self.in_readline,
+                    keymap: st.keymap,
                 }
                 .encode();
             }
@@ -226,7 +223,7 @@ mod tests {
     #[test]
     fn set_shorter_text_clamps_kept_cursor() {
         let mut pc = PluginContext {
-            editor_state: EditorState::new("hello world".into(), 11, "emacs"),
+            editor_state: EditorState::new("hello world".into(), 11, Keymap::Emacs),
             ..PluginContext::default()
         };
         pc.apply(EditorOp::Set {
