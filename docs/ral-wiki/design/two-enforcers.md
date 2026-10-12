@@ -136,7 +136,11 @@ counts processes per real UID but compares each `fork`/`posix_spawn` with the
 *forking* process's own limit, so only the confined subtree's forks are refused
 and every other process of the user keeps its own. The threshold is absolute:
 if the user's session grows past it, the confined command's forks fail first,
-never the desktop's. It refuses forks; it does not kill.
+never the desktop's. It refuses forks; it does not kill. The system ceiling
+and the inherited hard limit both cap the budget; an installation failure
+refuses the launch. A status-128 failure with no attributed kernel denial
+gets a conditional explanation of this limit, never a claim that the exit
+status proves a refused fork.
 
 **Neither enforcer is the body's to rewrite.** Every launcher pinned at boot —
 on Linux both bwrap and ral's own trampoline, and ral itself wherever else it

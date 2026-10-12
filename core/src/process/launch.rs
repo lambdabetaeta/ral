@@ -198,6 +198,7 @@ impl Launch {
 
 #[cfg(not(windows))]
 impl Launch {
+    #[cfg(any(not(target_os = "linux"), test))]
     pub fn new(program: impl AsRef<OsStr>) -> Self {
         #[allow(
             clippy::disallowed_methods,

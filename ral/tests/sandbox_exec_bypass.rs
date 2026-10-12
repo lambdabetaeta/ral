@@ -167,3 +167,33 @@ fn assert_leaked_nothing(out: &common::Output) {
         out.stderr
     );
 }
+
+#[test]
+fn a_covered_exec_file_cannot_be_rewritten_by_an_interpreter() {
+    let td = tempfile::tempdir().unwrap();
+    let file = td.path().join("tool");
+    for trusted in [false, true] {
+        write_script(&file, "ORIGINAL");
+        let extra = if trusted {
+            format!(", '{}'", file.display())
+        } else {
+            String::new()
+        };
+        let out = run_script(&format!(
+            "grant [fs: [read: ['{d}'], write: ['{d}'{extra}]], \
+             exec: ['/bin/': 'allow', '{f}': 'allow']] {{ \
+             /bin/sh -c 'echo sibling > {d}/other; echo changed > {f}' }}",
+            d = td.path().display(),
+            f = file.display()
+        ));
+        assert_eq!(
+            std::fs::read_to_string(td.path().join("other")).unwrap(),
+            "sibling\n",
+            "{}",
+            out.stderr
+        );
+        assert_eq!(out.status == 0, trusted, "{}", out.stderr);
+        let bytes = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(bytes.contains("ORIGINAL"), !trusted);
+    }
+}

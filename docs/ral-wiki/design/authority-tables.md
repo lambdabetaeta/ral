@@ -211,7 +211,7 @@ deny by another spelling holds in the kernel as in the guard
 On a case-sensitive volume, where `Tools` and `tools` are distinct
 directories. On a case-insensitive one each pair is one object with one
 stored spelling, `realpath` returns it, and the answers are those of the
-stored side; on Windows the ASCII pairs are one key already. *Respelled*
+stored side. *Respelled*
 marks a refusal that names the denied spelling.
 
 | Grant | Subject | Verdict | Why |
@@ -321,9 +321,10 @@ marks a refusal that names the denied spelling.
 
 ### Windows path identity
 
-- **`/` and `\` alike, ASCII case folded, the `\\?\` verbatim prefix stripped
+- **`/` and `\` alike, the `\\?\` verbatim prefix stripped
   in either slash spelling, a verbatim UNC head folded to `\server\share`,
-  drive letters compared as components** (`windows_identity_components`). A
+  drive letters folded, directory entries compared as stored**
+  (`windows_stored_components`). A
   `//?/`-spelled access must meet a `\\?\`- or plain-spelled deny: real Windows
   honours only the backslash form, but this matcher holds the separators
   interchangeable, and folding the two differently would leave a deny a
@@ -335,14 +336,16 @@ marks a refusal that names the denied spelling.
   neither is dark on the other.
 - **8.3 short names are an alias, not a fold**, so no key closes them. With a
   deny on `C:\w\secretfile.txt`, a leaf left spelled `SECRET~1.TXT` misses the
-  long name and admits the read. The walk instead opens a `~`-bearing leaf,
+  long name and admits the read. The walk instead opens every leaf,
   file or directory, with attribute access alone and asks the kernel its long
   name (`walk::dealias`); a name it cannot learn refuses the access. A short
   spelling makes an allow miss, a refusal, but a deny miss, an admission; the
   kernel's ACE, being on the object, holds for a child regardless.
-- **The Windows allow side keeps its ASCII fold**, so the guard over-grants
-  across ASCII case in a case-sensitive folder while the ACL is exact. A stated
-  residual: making the Windows walk spell stored names is its own change.
+- **The Windows allow side keeps stored case.** `GetFinalPathNameByHandleW`
+  supplies the existing object's name, or the parent's name for an absent
+  leaf. Both allow containment and `RealPath` ordering preserve that case,
+  so an allow on `Work` cannot reach a distinct `work`. Denies retain the
+  collision fold. Display abbreviation still folds ASCII case.
 
 ### Firmlinks and the root
 
@@ -381,6 +384,9 @@ marks a refusal that names the denied spelling.
 - **A symlink to an admitted file is admitted**, since it runs that file; a
   symlink under an admitted directory to a file outside it is not. The
   launcher runs the real path it judged, the user's spelling as `argv[0]`.
+  Linux opens the image before judgment and execs that descriptor; shebang
+  interpreters receive the descriptor path as their script argument
+  ([[internals/confined-launch|confined-launch]]).
 
 ### Namespaces
 

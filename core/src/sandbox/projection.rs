@@ -61,11 +61,12 @@ impl<N> Default for FsRules<N> {
     }
 }
 
-/// How the write region stands to one admitted exec directory.
+/// How the write region stands to one admitted executable or directory.
 #[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WriteReach {
-    /// A write prefix that reaches it lies within an admit that holds it: the
+    /// Named writable itself, or a write prefix that reaches it lies within
+    /// an admitted directory that holds it: the
     /// writes were named at or below an admit at or above this one, so
     /// authoring binaries here is the grant's intent.
     Trusted,
@@ -77,8 +78,8 @@ pub(crate) enum WriteReach {
 
 #[cfg(unix)]
 impl FsRules<Rendered> {
-    /// The reach of the write prefixes over `admit`, itself among `admitted`.
-    /// Trusted when some write prefix `w` that covers `admit` or lies inside it
+    /// The reach over `admit`, with the admitted directories in `admitted`.
+    /// Trusted when named writable, or some write prefix `w` that covers it or lies inside it
     /// lies within (or is) an admitted dir that holds `admit`; covered when
     /// some `w` covers it and none qualifies; apart otherwise.  Everything is
     /// rendered names, so the comparison is the plain prefix test on spellings.
@@ -89,11 +90,12 @@ impl FsRules<Rendered> {
     ) -> WriteReach {
         let writes = &self.write_prefixes;
         let named = writes.iter().any(|w| {
-            (w.holds(admit.as_str()) || admit.holds(w.as_str()))
-                && admitted.iter().any(|t| {
-                    let t = t.borrow();
-                    t.holds(admit.as_str()) && t.holds(w.as_str())
-                })
+            w == admit
+                || (w.holds(admit.as_str()) || admit.holds(w.as_str()))
+                    && admitted.iter().any(|t| {
+                        let t = t.borrow();
+                        t.holds(admit.as_str()) && t.holds(w.as_str())
+                    })
         });
         if named {
             WriteReach::Trusted

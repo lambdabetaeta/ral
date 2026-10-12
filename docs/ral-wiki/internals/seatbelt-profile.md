@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 8928f5de
-verified_at_date: 2026-10-08
+verified_at_commit: 2afefdf4
+verified_at_date: 2026-10-12
 anchors: [apply_profile, build_profile, Profile, emit_fs_restricted, emit_exec_rules, Clause, Filter, emit_ancestor_metadata, withheld_doors, rendered_ancestors, pinned_dirs, open_search_dir]
 ---
 
@@ -100,11 +100,13 @@ Freezing contradicts no layer, none having asked to write there, and restores
 the premise `capability::deputy` reasons from: that an unrestricted `fs` is
 not "everything writable" — true of the folded grant, false of this backend
 until here. A grant that *restricts* fs freezes, veto or none, only the admitted
-directories its write prefixes cover without naming (`write: ~` over
+files and directories its write prefixes cover without naming (`write: ~` over
 `~/.cargo/bin`), and not those they name, nor those nested under an admit they
 name: the overlap there is a stance someone took (`reasonable` admits `cwd:/`
 for exactly the scripts it lets the agent write), and a bare-name veto under it
 is no more than a narrowing of the allow set ([[decisions/261006_a-veto-freezes-what-a-write-covers|a-veto-freezes-what-a-write-covers]]).
+A file named explicitly as writable stays writable; a covered file gets a
+literal write deny, leaving its siblings writable.
 
 **net.** Enforced by absence. The base admits `network-outbound` for nothing;
 only `net: true` appends `macos-net.sbpl` — the wholesale `(allow network*)`,

@@ -50,6 +50,8 @@ pub(super) enum Slot {
     /// bwrap's `--add-seccomp-fd`s, one per program.
     #[cfg(target_os = "linux")]
     Seccomp(u8),
+    #[cfg(target_os = "linux")]
+    Image,
     /// One per bind, by `--ro-bind-fd` or `--bind-fd`; open-ended, so last.
     #[cfg(target_os = "linux")]
     Mount(u16),
@@ -62,7 +64,7 @@ impl Slot {
     #[cfg(target_os = "linux")]
     const SECCOMP_SLOTS: u8 = 4;
 
-    /// 98, 99, 100, 101, 102, 103 + i, 107 + i.
+    /// 98, 99, 100, 101, 102, 103 + i, 107, 108 + i.
     pub(super) const fn fd(self) -> c_int {
         Self::FIRST
             + match self {
@@ -78,7 +80,9 @@ impl Slot {
                 #[cfg(target_os = "linux")]
                 Self::Seccomp(i) => 5 + i as c_int,
                 #[cfg(target_os = "linux")]
-                Self::Mount(i) => 9 + i as c_int,
+                Self::Image => 9,
+                #[cfg(target_os = "linux")]
+                Self::Mount(i) => 10 + i as c_int,
             }
     }
 
@@ -201,7 +205,7 @@ impl From<&Admitted> for Run {
     fn from(admitted: &Admitted) -> Self {
         let args = admitted.args().iter().map(OsString::from).collect();
         match admitted.program() {
-            Program::File { path, real } => Self::File {
+            Program::File { path, real, .. } => Self::File {
                 real: real.as_path().to_path_buf(),
                 arg0: path.clone(),
                 args,
@@ -213,15 +217,27 @@ impl From<&Admitted> for Run {
 
 /// The program, once its confinement is entered: the only thing a received
 /// warrant yields, so nothing else can run it.
-pub(super) struct Confined(Run);
+pub(super) struct Confined {
+    run: Run,
+    #[cfg(target_os = "linux")]
+    image: Option<OwnedFd>,
+}
 
 impl Confined {
     /// Become the program: a host file is `execve`d, which returns only when
     /// the kernel refuses, as the exit code that says so; a bundled tool
     /// runs here.
     pub(super) fn run(self) -> u8 {
-        match self.0 {
-            Run::File { real, arg0, args } => exec(&real, &arg0, args),
+        match self.run {
+            Run::File { real, arg0, args } => exec(
+                &real,
+                &arg0,
+                args,
+                #[cfg(target_os = "linux")]
+                self.image
+                    .as_ref()
+                    .expect("a file warrant received its image"),
+            ),
             Run::Tool(tool, args) => crate::uutils::run(&tool, args).unwrap_or_else(|e| {
                 crate::terminal::cmd_error("ral", &e.to_string());
                 127
@@ -232,12 +248,21 @@ impl Confined {
 
 /// Become the host program at `real`, which sees `arg0` as its own name;
 /// returns only when `execve` refuses.
-fn exec(real: &std::path::Path, arg0: &std::path::Path, args: Vec<OsString>) -> u8 {
+fn exec(
+    real: &std::path::Path,
+    arg0: &std::path::Path,
+    args: Vec<OsString>,
+    #[cfg(target_os = "linux")] image: &OwnedFd,
+) -> u8 {
+    #[cfg(target_os = "linux")]
+    let at = crate::path::proc_fd_path(image.as_raw_fd());
+    #[cfg(not(target_os = "linux"))]
+    let at = real;
     #[allow(
         clippy::disallowed_methods,
         reason = "[silent:respawn-spawn] sandbox respawn handoff: builds the Command for the confined re-exec; the surface card fired before this handoff, so the exec itself raises no card."
     )]
-    let mut cmd = Command::new(real);
+    let mut cmd = Command::new(at);
     cmd.arg0(arg0).args(args);
     #[allow(
         clippy::disallowed_methods,
@@ -277,8 +302,29 @@ impl Warrant {
     pub(super) fn confine() -> Result<Confined, String> {
         let Self { confinement, run } = Self::receive()?;
         confinement.enter()?;
+        #[cfg(target_os = "linux")]
+        let image = if let Run::File { real, .. } = &run {
+            let fd = Slot::Image
+                .take()
+                .ok_or("the warrant has no opened image")?;
+            let visible = super::linux::visible_image(real, &fd)?;
+            // Scripts reopen this descriptor after exec; it must survive the sweep.
+            let kept = rustix::io::fcntl_dupfd_cloexec(&visible, 3).map_err(|e| e.to_string())?;
+            if kept.as_raw_fd() >= Slot::FIRST {
+                return Err("no descriptor below the handoff is free for the image".into());
+            }
+            rustix::io::fcntl_setfd(&kept, rustix::io::FdFlags::empty())
+                .map_err(|e| e.to_string())?;
+            Some(kept)
+        } else {
+            None
+        };
         close_handoff()?;
-        Ok(Confined(run))
+        Ok(Confined {
+            run,
+            #[cfg(target_os = "linux")]
+            image,
+        })
     }
 
     /// This warrant, parcelled for [`Slot::Warrant`].
@@ -770,10 +816,13 @@ mod tests {
         let fds: Vec<_> = fixed
             .into_iter()
             .chain(seccomp)
-            .chain([Slot::Mount(0), Slot::Mount(1)])
+            .chain([Slot::Image, Slot::Mount(0), Slot::Mount(1)])
             .map(Slot::fd)
             .collect();
-        assert_eq!(fds, [98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108]);
+        assert_eq!(
+            fds,
+            [98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109]
+        );
         assert_eq!(fds[0], Slot::FIRST);
         assert!(Slot::seccomp(4).is_err(), "a fifth program has no slot");
     }

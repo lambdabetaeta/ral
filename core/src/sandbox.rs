@@ -42,6 +42,8 @@ pub use projection::{FsProjection, FsRules, SandboxProjection};
 // confinement before it becomes the program.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use carriers::carriers;
+#[cfg(target_os = "linux")]
+pub(crate) use launch::image_command;
 pub use launch::serve_warrant;
 pub(crate) use launch::{Ownership, sandboxed_command};
 #[cfg(target_os = "macos")]

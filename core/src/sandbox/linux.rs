@@ -524,10 +524,10 @@ fn shown(
 }
 
 /// What the envelope keeps read-only over the writes that reach it, as
-/// macOS's profile does: each allowed directory a write covers without
+/// macOS's profile does: each allowed file or directory a write covers without
 /// naming it ([`landlock::write_reach`], the classification a veto walks
-/// by), and under an unrestricted `fs` holding a veto the allowed files too.
-/// A covered file under a restricted `fs` stays writable.  Each is frozen
+/// by), and under an unrestricted `fs` the admitted set when a veto asks.
+/// Each is frozen
 /// wherever a writable bind of `shown` puts it, a prefix written through a
 /// symlink being two mounts of one object.
 fn frozen(
@@ -537,9 +537,8 @@ fn frozen(
 ) -> Result<Vec<Bind>, String> {
     let reach = landlock::write_reach(exec, &policy.fs)?;
     let whole = policy.fs.rules().is_none();
-    let files = whole.then(|| exec.allowed_files());
     let mut frozen = Vec::new();
-    for real in exec.allowed_dirs().chain(files.into_iter().flatten()) {
+    for real in exec.allowed_dirs().chain(exec.allowed_files()) {
         for name in render_real(real)? {
             if reach(&name) != WriteReach::Covered {
                 continue;
@@ -614,6 +613,26 @@ fn open_real(name: &Path, flags: OFlags) -> Result<Option<OwnedFd>, OpenError> {
             source: errno.into(),
         }),
     }
+}
+
+/// Keep the envelope's mount restrictions on the image, never its host mount.
+pub(super) fn visible_image(name: &Path, original: &OwnedFd) -> Result<OwnedFd, String> {
+    let changed = || {
+        format!(
+            "sandbox: the image at {} changed or is hidden by the grant; refusing to execute it",
+            name.display()
+        )
+    };
+    let visible = open_real(name, OFlags::empty())?.ok_or_else(changed)?;
+    let identity = |fd: &OwnedFd| {
+        rustix::fs::fstat(fd)
+            .map(|s| (s.st_dev, s.st_ino))
+            .map_err(|e| e.to_string())
+    };
+    if identity(&visible)? != identity(original)? {
+        return Err(changed());
+    }
+    Ok(visible)
 }
 
 /// Why [`open_real`] refused.
@@ -1345,6 +1364,27 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_covered_exec_file_is_frozen_but_an_explicit_write_is_trusted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = std::fs::canonicalize(tmp.path()).unwrap();
+        let file = dir.join("tool");
+        std::fs::write(&file, "x").unwrap();
+        for (write, tree, expected) in [
+            (&dir, false, vec![file.to_string_lossy().into_owned()]),
+            (&file, false, vec![]),
+            (&dir, true, vec![]),
+        ] {
+            let mut rules = vec![file_rule(RealPath::of(&file).unwrap(), true)];
+            rules.extend(tree.then(|| dir_rule(RealPath::of(&dir).unwrap(), true)));
+            let policy = SandboxProjection {
+                exec: ExecProjection::Restricted(rules.into_iter().collect()),
+                ..restricted(&[], &[write], &[])
+            };
+            assert_eq!(frozen(&binds(None, &policy, WHOLE)), expected);
+        }
     }
 
     /// A write prefix through a symlink is one handle bound at two names, and
@@ -2920,6 +2960,97 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn a_covered_file_is_frozen_inside_the_write_that_covers_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = std::fs::canonicalize(tmp.path()).unwrap();
+        let tool = dir.join("tool");
+        for trusted in [false, true] {
+            std::fs::copy("/bin/true", &tool).unwrap();
+            let mut writes = vec![dir.as_path()];
+            writes.extend(trusted.then_some(tool.as_path()));
+            let policy = SandboxProjection {
+                exec: admitting(&[], &[&tool.to_string_lossy()]),
+                ..restricted(&[], &writes, &[])
+            };
+            let Some(env) = envelope_launches(&policy) else {
+                return;
+            };
+            let script = format!(
+                "echo READY; echo x > '{t}' && echo REWRITTEN; echo y > '{d}/other' && echo SIBLING",
+                t = tool.display(),
+                d = dir.display()
+            );
+            let out = run_confined(&env, &policy, &script).unwrap();
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                stdout.contains("READY") && stdout.contains("SIBLING"),
+                "{out:?}"
+            );
+            assert_eq!(stdout.contains("REWRITTEN"), trusted, "{out:?}");
+        }
+    }
+
+    #[test]
+    fn an_ancestor_renamed_before_the_envelope_cannot_replace_the_image() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = std::fs::canonicalize(tmp.path()).unwrap();
+        let bin = dir.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let file = bin.join("tool");
+        std::fs::copy("/bin/echo", &file).unwrap();
+        let program = admitted(Program::file(file.clone()).unwrap(), &["ORIGINAL".into()]);
+        let policy = SandboxProjection {
+            exec: admitting(&[], &[&file.to_string_lossy()]),
+            ..restricted(&[&dir], &[], &[])
+        };
+        let Some(env) = envelope_launches(&policy) else {
+            return;
+        };
+        let control = run_admitted(&env, &policy, &program).unwrap();
+        assert_eq!(control.stdout, b"ORIGINAL\n", "{control:?}");
+        std::fs::rename(&bin, dir.join("moved")).unwrap();
+        std::fs::create_dir(&bin).unwrap();
+        std::fs::copy("/bin/false", &file).unwrap();
+        let out = run_admitted(&env, &policy, &program).unwrap();
+        assert!(!out.status.success(), "{out:?}");
+        assert!(out.stdout.is_empty(), "{out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("changed or is hidden"),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn a_scripts_image_descriptor_obeys_the_envelopes_freeze_and_denies() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = std::fs::canonicalize(tmp.path()).unwrap();
+        let script = dir.join("script");
+        let content = "#!/bin/sh\necho READY\necho overwritten > \"$0\" && echo WROTE\nexit 0\n";
+        std::fs::write(&script, content).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let program = admitted(Program::file(script.clone()).unwrap(), &[]);
+        let policy = SandboxProjection {
+            exec: admitting(&[], &[&script.to_string_lossy()]),
+            ..restricted(&[], &[&dir], &[])
+        };
+        let Some(env) = envelope_launches(&policy) else {
+            return;
+        };
+        let out = run_admitted(&env, &policy, &program).unwrap();
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(out.stdout, b"READY\n", "{out:?}");
+        assert_eq!(std::fs::read_to_string(&script).unwrap(), content);
+
+        let denied = SandboxProjection {
+            exec: policy.exec,
+            ..restricted(&[], &[&dir], &[&script])
+        };
+        let out = run_admitted(&env, &denied, &program).unwrap();
+        assert!(!out.status.success() && out.stdout.is_empty(), "{out:?}");
+    }
+
     /// Under an unrestricted fs the admitted set is frozen exactly when a
     /// veto is in force, and nothing else is.
     #[test]
@@ -3318,7 +3449,10 @@ mod tests {
         let mut handoff = Handoff::default();
         handoff.lend(Slot::Warrant, warrant.as_fd());
         let image = match admitted.program() {
-            Program::File { real, .. } => Some(real),
+            Program::File { real, image, .. } => {
+                handoff.lend(Slot::Image, image.as_ref().unwrap().as_fd());
+                Some(real)
+            }
             Program::Tool(_) => None,
         };
         let rendered = policy.rendered().expect("renders");

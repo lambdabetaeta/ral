@@ -313,6 +313,11 @@ fn emit_exec_rules(
                     profile.exec_freeze.push(deny_writes(Filter::Subpath(dir)));
                 }
             }
+            for file in &granted_files {
+                if writes.write_reach(file, &admitted_dirs) == WriteReach::Covered {
+                    profile.exec_freeze.push(deny_writes(Filter::Literal(file)));
+                }
+            }
         }
     }
     Ok(())
@@ -669,6 +674,22 @@ mod tests {
             write < freeze,
             "the freeze must follow the write it overrides:\n{profile}"
         );
+    }
+
+    #[test]
+    fn mac_profile_freezes_a_covered_file_but_keeps_intended_writes() {
+        let image = "/ral-test/w/tool";
+        let freeze = format!("(deny file-write* (literal \"{image}\"))");
+        for (write, dirs, frozen) in [
+            ("/ral-test/w", vec![], true),
+            (image, vec![], false),
+            ("/ral-test/w", vec![dir("/ral-test/w", true)], false),
+            ("/ral-test/other", vec![], false),
+        ] {
+            let rules = dirs.into_iter().chain([file(image, true)]).collect();
+            let profile = build_profile(&restricted(writing(&[write]), rules)).unwrap();
+            assert_eq!(profile.contains(&freeze), frozen, "{profile}");
+        }
     }
 
     /// The grant that names the tree, whole or in part, keeps it writable: the

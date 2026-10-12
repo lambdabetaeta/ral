@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 0dc4a920
-verified_at_date: 2026-10-09
+verified_at_commit: 2afefdf4
+verified_at_date: 2026-10-12
 anchors: [Binds, render_objects, bwrap_argv, bwrap_command, Slot, HostEnvelope, render_dev, cgroup_tree, floor, Pinned, pin_envelope, InfoFd]
 ---
 
@@ -49,6 +49,13 @@ following a symlink, and lends a copy at `Slot::Mount(i)`**
 are: the read-only defaults, the read and write prefixes, the program's real
 image, each file and live directory the exec table allows, and, over
 everything, the cgroup tree.
+
+The launched image has its own earlier pin: opened at head resolution,
+judged by that object's name and lent at fd 107. The mounts start at fd 108.
+The trampoline opens the mounted image, checks its inode against the pin and
+execs that descriptor. A replacement or mask refuses the launch; the descriptor
+keeps the envelope's mount restrictions
+([[internals/confined-launch|confined-launch]]).
 
 - **A path is its canonical object plus the spellings that reach it**
   (`render_objects`). `/bin` shows `/usr/bin`'s handle, except inside another

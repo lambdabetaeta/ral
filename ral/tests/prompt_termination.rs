@@ -293,7 +293,8 @@ fn termination_restores_modes_and_hands_the_terminal_back() {
             .args([
                 "-c",
                 r#"
-            "$@" <&0 &
+            exec 3<&0
+            "$@" <&3 &
             ral_pid=$!
             printf 'ral-pid:%s\n' "$ral_pid"
             wait "$ral_pid"
@@ -321,7 +322,13 @@ fn termination_restores_modes_and_hands_the_terminal_back() {
             .trim()
             .parse()
             .unwrap();
-        assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
+        assert_eq!(
+            unsafe { libc::kill(pid, libc::SIGTERM) },
+            0,
+            "{}: {}",
+            std::io::Error::last_os_error(),
+            session.text()
+        );
         assert!(
             session.wait_until(WAIT, |text| text.contains("ral-ended")),
             "{}",

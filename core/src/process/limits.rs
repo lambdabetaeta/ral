@@ -15,6 +15,19 @@ use std::io;
 #[cfg(any(windows, target_os = "macos"))]
 const ACTIVE_PROCESS_CAP: u32 = 512;
 
+#[cfg(target_os = "macos")]
+pub(crate) fn failure_hint(code: i32) -> Option<String> {
+    (code == 128).then(|| {
+        format!(
+            "this command ran with a process limit: your process count at launch plus \
+         {ACTIVE_PROCESS_CAP}, capped by the system maximum. Exit status 128 can accompany \
+         a refused fork, but does not prove one. If the command reported that it could not \
+         fork, reduce concurrent processes and retry; widening fs or exec grants does not \
+         raise this limit."
+        )
+    })
+}
+
 #[cfg(unix)]
 impl Launch {
     /// Limit the child's resources in one `pre_exec`: no core dumps and, on
@@ -31,30 +44,39 @@ impl Launch {
         reason = "only macOS can fail: it measures the fork-brake budget"
     )]
     pub(crate) fn limit_resources(&mut self) -> io::Result<()> {
-        use std::os::unix::process::CommandExt;
         #[cfg(target_os = "macos")]
         let nproc = fork_brake::limit()
             .map_err(|e| io::Error::other(format!("cannot count your processes: {e}")))?;
+        #[cfg(target_os = "macos")]
+        self.limit_forks(nproc);
+        use std::os::unix::process::CommandExt;
         unsafe {
-            self.cmd.pre_exec(move || {
-                let zero = libc::rlimit {
-                    rlim_cur: 0,
-                    rlim_max: 0,
-                };
-                libc::setrlimit(libc::RLIMIT_CORE, &raw const zero);
-                #[cfg(target_os = "macos")]
-                {
-                    let cap = libc::rlimit {
-                        rlim_cur: nproc,
-                        rlim_max: nproc,
-                    };
-                    libc::setrlimit(libc::RLIMIT_NPROC, &raw const cap);
-                }
-                Ok(())
-            });
+            self.cmd
+                .pre_exec(|| set_limit(rustix::process::Resource::Core, 0));
         }
         Ok(())
     }
+
+    #[cfg(target_os = "macos")]
+    fn limit_forks(&mut self, limit: libc::rlim_t) {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            self.cmd
+                .pre_exec(move || set_limit(rustix::process::Resource::Nproc, limit));
+        }
+    }
+}
+
+#[cfg(unix)]
+fn set_limit(resource: rustix::process::Resource, limit: u64) -> io::Result<()> {
+    rustix::process::setrlimit(
+        resource,
+        rustix::process::Rlimit {
+            current: Some(limit),
+            maximum: Some(limit),
+        },
+    )
+    .map_err(Into::into)
 }
 
 impl ChildHandle {

@@ -31,8 +31,7 @@ fn path_aliases(p: &Path) -> Vec<PathBuf> {
 /// rule's [`Polarity`] picks, never a caller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Identity {
-    /// The name as stored: bytes off Windows, ASCII case on Windows, where
-    /// the walk does not spell stored names.
+    /// The name as stored, with Windows heads and separators normalised.
     Stored,
     /// Every name some filesystem takes for the same: [`collision_key`] per
     /// component.
@@ -112,7 +111,9 @@ pub(super) fn path_within(path: &Path, prefix: &Path, identity: Identity) -> boo
             // closed by fixing only the matcher, and failing closed here
             // would make a *deny* prefix fail open.
             Identity::Stored if rules == PathRules::Windows => {
-                starts_with_identity(&p.to_string_lossy(), &q.to_string_lossy(), rules)
+                let p = windows_stored_components(&p.to_string_lossy());
+                let q = windows_stored_components(&q.to_string_lossy());
+                p.starts_with(&q)
             }
             // Compare the `&Path`s, not their `to_string_lossy` forms: two
             // distinct non-UTF-8 paths can decode to the same
@@ -189,6 +190,17 @@ pub(crate) fn starts_with_identity(path: &str, prefix: &str, rules: PathRules) -
 /// non-ASCII folds sooner than claiming equivalences the driver would refuse.
 pub(crate) fn windows_identity_components(p: &str) -> Vec<String> {
     windows_components(p, str::to_ascii_lowercase)
+}
+
+/// Canonical names keep their case; a drive letter is not a directory entry.
+pub(crate) fn windows_stored_components(p: &str) -> Vec<String> {
+    let mut parts = windows_components(p, str::to_owned);
+    if let Some(drive) = parts.first_mut()
+        && drive.ends_with(':')
+    {
+        drive.make_ascii_lowercase();
+    }
+    parts
 }
 
 /// A path string's components under Windows path identity, each through
@@ -470,6 +482,18 @@ mod tests {
     fn windows_identity_ignores_case() {
         assert!(starts_with_identity(r"C:\WORK\sub", r"c:\work", W));
         assert!(starts_with_identity(r"c:\Work\Sub", r"C:\WORK", W));
+    }
+
+    #[test]
+    fn windows_stored_names_distinguish_case_except_in_the_drive() {
+        assert_eq!(
+            windows_stored_components(r"\\?\C:\Work\file"),
+            windows_stored_components("c:/Work/file")
+        );
+        assert_ne!(
+            windows_stored_components(r"C:\Work"),
+            windows_stored_components(r"C:\work")
+        );
     }
 
     #[test]

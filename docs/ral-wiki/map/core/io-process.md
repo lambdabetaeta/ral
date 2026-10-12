@@ -1,5 +1,5 @@
 ---
-generated_at_commit: eecd78ad
+generated_at_commit: 2afefdf4
 generated_at_date: 2026-10-12
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs]
 ---
@@ -226,7 +226,10 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   foreground external group.
 - `limits.rs` — what a child spawned under an active grant may consume: no
   core dump, and a process budget (macOS's fork brake,
-  `limits/fork_brake.rs`, a Windows Job Object cap).
+  `limits/fork_brake.rs`, a Windows Job Object cap). Resource-limit installation
+  is checked; the macOS cap respects the inherited hard limit, and
+  `limits::failure_hint` offers a conditional process-limit explanation for
+  status 128 when no kernel denial was attributed.
   `Launch::limit_resources` arms the pre-exec half and
   `ChildHandle::limit_processes` the post-spawn one; a brake that cannot be
   armed is an `Err`, never a warning. `runtime::command::brake` caps the job

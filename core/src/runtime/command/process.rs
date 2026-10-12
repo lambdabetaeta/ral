@@ -47,8 +47,15 @@ pub(crate) fn build_launch(
         crate::sandbox::sandboxed_command(&projection, admitted, ownership, &shell.cwd(), cancel)?
     } else {
         match admitted.program() {
-            Program::File { path, real } => {
+            Program::File { path, real, .. } => {
+                #[cfg(not(target_os = "linux"))]
                 let mut cmd = crate::process::Launch::new(real.as_path());
+                #[cfg(target_os = "linux")]
+                let mut cmd = crate::process::Launch::from_command(crate::sandbox::image_command(
+                    admitted.program(),
+                )?);
+                #[cfg(target_os = "linux")]
+                let _ = real;
                 cmd.arg0(path);
                 cmd.args(admitted.args());
                 cmd
@@ -110,10 +117,14 @@ pub(crate) fn with_denials(
     if shell.sandbox_projection().is_none() || err.cancelled_by().is_some() {
         return err;
     }
-    match crate::sandbox::denial_hint(&pids(), since, err.code()) {
-        Some(hint) => err.append_hint(hint),
-        None => err,
+    if let Some(hint) = crate::sandbox::denial_hint(&pids(), since, err.code()) {
+        return err.append_hint(hint);
     }
+    #[cfg(target_os = "macos")]
+    if let Some(hint) = crate::process::limits::failure_hint(err.code()) {
+        return err.append_hint(hint);
+    }
+    err
 }
 
 /// Cap `child`'s process tree in the group `pgid` placed it in.  When the cap
@@ -347,6 +358,22 @@ mod judged_program {
             "the link moved"
         );
         assert_eq!(stdout_of(&plan, &shell), "a\n");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_renamed_ancestor_cannot_redirect_the_judged_image() {
+        let (tmp, mut shell) = workdir();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let image = plant(&bin, "original");
+        point_build_at(tmp.path(), &image);
+        let plan = judge(&mut shell, &[]);
+        std::fs::rename(&bin, tmp.path().join("moved")).unwrap();
+        std::fs::create_dir(&bin).unwrap();
+        std::fs::write(&image, "#!/bin/sh\necho IMPOSTOR\n").unwrap();
+        std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(stdout_of(&plan, &shell), "original\n");
     }
 
     #[test]

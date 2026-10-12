@@ -151,6 +151,35 @@ fn issue(confinement: Native, admitted: &Admitted) -> Result<OwnedFd, Refusal> {
     Ok(Warrant::new(confinement, admitted).parcel()?)
 }
 
+#[cfg(target_os = "linux")]
+fn image(program: &crate::capability::Program) -> Result<Option<&OwnedFd>, Refusal> {
+    match program {
+        crate::capability::Program::Tool(_) => Ok(None),
+        crate::capability::Program::File { image, real, .. } => {
+            image.as_deref().map(Some).ok_or_else(|| {
+                Refusal::Launch(format!(
+                    "sandbox: no opened image for {real}; refusing to reopen its name"
+                ))
+            })
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[silent:exec-image] Runs the image opened before admission; the command surface owns the event."
+)]
+pub(crate) fn image_command(program: &crate::capability::Program) -> Result<Command, Refusal> {
+    let image = image(program)?
+        .ok_or_else(|| Refusal::Launch("a bundled tool has no host image".into()))?;
+    let mut cmd = Command::new(crate::path::proc_fd_path(Slot::Image.fd()));
+    let mut handoff = Handoff::default();
+    handoff.lend(Slot::Image, image.as_fd());
+    handoff.install(&mut cmd)?;
+    Ok(cmd)
+}
+
 /// Linux: the payload is always the trampoline, launched under this host's
 /// pinned bwrap.
 #[cfg(target_os = "linux")]
@@ -198,6 +227,14 @@ pub(super) fn enveloped(
     handoff.lend(Slot::Warrant, warrant.as_fd());
     if let Some(ruleset) = &ruleset {
         handoff.lend(Slot::Ruleset, ruleset.as_fd());
+    }
+    if let Some(image) = image(admitted.program())? {
+        if let Some(ruleset) = &ruleset
+            && !matches!(rendered.exec, super::ExecProjection::Unrestricted)
+        {
+            ruleset.admit_image(image)?;
+        }
+        handoff.lend(Slot::Image, image.as_fd());
     }
     let image = match admitted.program() {
         crate::capability::Program::File { real, .. } => Some(real),

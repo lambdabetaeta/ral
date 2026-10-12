@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 0dc4a920
-verified_at_date: 2026-10-09
+verified_at_commit: 2afefdf4
+verified_at_date: 2026-10-12
 anchors: [sandboxed_command, build_launch, serve_warrant, Warrant, Slot, Handoff, Landlocked, Envelope, Refusal, spawn_error, projection_enforceable, SessionSandbox, ensure_fs_grant, fs_capability_name]
 ---
 
@@ -16,6 +16,15 @@ under a restrictive projection, it calls `sandboxed_command`
 ## One confinement point per platform
 
 - **Linux** wraps the child in bwrap ([[internals/linux-envelope|linux-envelope]]).
+  `Head::resolve` opens the image with `O_PATH` before admission and judges
+  the name of that open object. The descriptor reaches the trampoline at
+  `Slot::Image` and is explicitly admitted when Landlock restricts exec.
+  Rulesets that only restrict other operations need no image rule. Inside the envelope,
+  `visible_image` opens the real path without following symlinks and checks
+  its inode against that pin. A changed or masked image refuses the launch;
+  a matching image is exec'd by this new descriptor. It belongs to the
+  envelope's mount, so reopening it cannot evade a read-only bind or deny.
+  Unconfined launches use the original pin through `image_command`.
 - **macOS** re-execs a small launcher, `ral --warrant`. The warrant carries the
   Seatbelt profile, compiled in the parent, and the program to become: a host
   file, by the real path the guard judged and with the user's spelling as
@@ -45,9 +54,15 @@ compiled, on fd 99.
   bwrap reads from `--args`. The trampoline is ral's own pin, lent at fd 102.
 - **Every descriptor a launch hands down has a slot defined once** (`Slot`):
   bwrap's `--args`, the warrant, `--info-fd`, the Landlock ruleset, ral's pin,
-  the seccomp programs, and the mount handles, which come last because their
+  the seccomp programs, the image at fd 107, and the mount handles from fd 108,
+  which come last because their
   number is open-ended. One `Handoff` places them all. Once confined, the child
-  closes everything from the first slot up, so the program inherits none.
+  moves the image below the handoff range and closes everything from the
+  first slot up. The image alone survives exec: a shebang interpreter must
+  reopen it. The interpreter receives `/proc/self/fd/N` as the script's name,
+  so a script's `$0` is that descriptor path; native binaries keep the user's
+  spelling as `argv[0]`. An in-place rewrite of the inode is outside this pin's
+  guarantee, as are the platform's interpreter lookups.
 - **`serve_warrant` runs before `sandbox::boot`.** The trampoline pins and
   opens nothing before it is confined.
 - **Exit codes are honest.** A failure before the program starts exits 126, a

@@ -386,33 +386,10 @@ fn stored_name(dir: &File, name: &OsStr) -> Option<OsString> {
     Some(OsString::from_vec(stored.to_vec()))
 }
 
-/// Windows keeps a second, 8.3 name for an entry whose own is too long for
-/// it: `SHORTN~1` and `shortname-probe-directory` are one directory under
-/// two spellings.  The walk assembles the spelling it was *handed*, so a
-/// grant frozen through `realpath` — which answers in long names — and an
-/// access arriving short never meet, and the grant denies its own directory.
-/// `TEMP` is the common way in: a Windows account whose name overflows 8.3
-/// has a short `%TEMP%`, as GitHub's runners (`RUNNER~1`) do.
-///
-/// The answer has to come from a handle, not from a second pass over the
-/// name: resolving once is this module's whole point, and a re-walk is the
-/// gap [`walk`] exists to close.  `GetFinalPathNameByHandleW` asks the
-/// kernel what the object behind a handle the walk *already opened* is
-/// called — the same question `fs::canonicalize` asks, so the two agree by
-/// construction.
-///
-/// `~` is the one character an 8.3 alias always carries, so the guard costs
-/// an ordinary walk nothing and a name that merely contains a `~` one
-/// handle query that returns it unchanged.  The leaf, file or directory, is
-/// opened for its attributes alone — no data, so nothing a grant has yet to
-/// authorise.  A short spelling left standing would slip a long-named deny,
-/// so a name that cannot be learned refuses the access.  An absent leaf
-/// aliases nothing and keeps its spelling under its directory's long name.
+/// Ask the handle for stored case and long names, as grant freezing does.
+/// An absent leaf keeps its spelling under its parent's stored name.
 #[cfg(windows)]
 fn dealias(dir: &File, leaf: &OsStr, real: PathBuf) -> io::Result<PathBuf> {
-    if !real.as_os_str().to_string_lossy().contains('~') {
-        return Ok(real);
-    }
     let named = match open_attributes(dir, leaf) {
         Ok(object) => final_path(&object),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -422,7 +399,7 @@ fn dealias(dir: &File, leaf: &OsStr, real: PathBuf) -> io::Result<PathBuf> {
     };
     named.ok_or_else(|| {
         io::Error::other(format!(
-            "cannot learn the long name of {}, which may be an 8.3 short alias; \
+            "cannot learn the stored name of {}; \
              ral refuses a name it cannot judge under every spelling",
             real.display()
         ))
@@ -924,6 +901,26 @@ mod tests {
 mod windows_tests {
     use super::*;
     use crate::path::Resolver;
+
+    #[test]
+    fn existing_and_absent_leaves_use_the_parents_stored_case() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("StoredCase");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("File"), "x").unwrap();
+        let resolver = Resolver::shell_less();
+        for (spelled, stored) in [("file", "File"), ("new", "new")] {
+            let path = tmp.path().join("storedcase").join(spelled);
+            let located = walk(&resolver.resolve(&path.to_string_lossy()), Leaf::Resolve).unwrap();
+            assert!(
+                located
+                    .real()
+                    .ends_with(Path::new("StoredCase").join(stored)),
+                "{}",
+                located.real().display()
+            );
+        }
+    }
 
     /// The 8.3 alias Windows keeps for `path`, if this volume keeps one.
     fn short_name(path: &Path) -> Option<PathBuf> {

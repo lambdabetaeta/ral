@@ -65,6 +65,8 @@ fn file(real: &str) -> Program {
     Program::File {
         path: real.into(),
         real: RealPath::assumed(real),
+        #[cfg(target_os = "linux")]
+        image: None,
     }
 }
 

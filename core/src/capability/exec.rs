@@ -107,9 +107,14 @@ impl GrantStack {
 pub(crate) enum Program {
     /// A bundled tool, run as ral itself.
     Tool(String),
-    /// A host file: `real` is `realpath(path)`, judged and run; `path` is the
-    /// spelling, which the program sees as `argv[0]`.
-    File { path: PathBuf, real: RealPath },
+    /// A host file, judged at `real`, with `path` as argv[0]. Linux holds the
+    /// opened image; only synthetic policy tests omit its descriptor.
+    File {
+        path: PathBuf,
+        real: RealPath,
+        #[cfg(target_os = "linux")]
+        image: Option<std::sync::Arc<std::os::fd::OwnedFd>>,
+    },
 }
 
 impl Program {

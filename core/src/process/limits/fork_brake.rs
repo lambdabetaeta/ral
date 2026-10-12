@@ -15,10 +15,13 @@ const PROC_RUID_ONLY: u32 = 5;
 /// The child's `RLIMIT_NPROC`: the user's live processes now, plus the budget.
 pub(super) fn limit() -> io::Result<libc::rlim_t> {
     let ceiling = per_user_ceiling()?;
+    let inherited = rustix::process::getrlimit(rustix::process::Resource::Nproc)
+        .maximum
+        .unwrap_or(ceiling);
     Ok(budgeted(
         live_processes(ceiling)?,
         libc::rlim_t::from(ACTIVE_PROCESS_CAP),
-        ceiling,
+        ceiling.min(inherited),
     ))
 }
 
@@ -114,5 +117,26 @@ mod tests {
             matches!(*limits, [soft, hard] if soft == hard && soft <= ceiling),
             "soft and hard must agree within the ceiling {ceiling}: {limits:?}"
         );
+    }
+
+    #[test]
+    fn an_exhausted_child_cannot_fork_but_the_parent_still_can() {
+        use crate::process::Launch;
+        let run = |limit| {
+            let mut cmd = Launch::new("/bin/sh");
+            cmd.args(["-c", "/usr/bin/true; exit $?"]);
+            cmd.limit_forks(limit);
+            cmd.cmd.output().unwrap()
+        };
+        let allowed = run(limit().unwrap());
+        assert!(allowed.status.success(), "{allowed:?}");
+        let denied = run(0);
+        assert!(!denied.status.success(), "{denied:?}");
+        assert!(
+            String::from_utf8_lossy(&denied.stderr).contains("fork"),
+            "{denied:?}"
+        );
+        let after = run(limit().unwrap());
+        assert!(after.status.success(), "the parent was capped: {after:?}");
     }
 }

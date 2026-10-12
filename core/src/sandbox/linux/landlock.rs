@@ -208,6 +208,11 @@ impl Ruleset {
         }
     }
 
+    pub(crate) fn admit_image(&self, image: &OwnedFd) -> Result<(), String> {
+        self.admit(image.as_fd(), Access::EXECUTE)
+            .map_err(|e| format!("landlock: cannot admit the opened image: {e}"))
+    }
+
     /// Confine this process and everything it execs; the descriptor closes.
     fn restrict_self(self) -> Result<(), Error> {
         let off = 0 as libc::c_ulong;

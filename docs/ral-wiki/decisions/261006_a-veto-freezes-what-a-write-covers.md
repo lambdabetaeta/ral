@@ -1,11 +1,16 @@
 ---
 status: active
-generated_at_commit: b49b3823
-verified_at_commit: b6bb51b5
+generated_at_commit: 2afefdf4
+verified_at_commit: 2afefdf4
 anchors: [WriteReach, write_reach, emit_exec_rules, carries_veto, Binds, vetoes_walk]
 ---
 
 # A veto freezes what a write covers
+
+Implementation update, 12 Oct: the file residual below is closed. Restricted
+fs projections classify individually admitted files too; an explicit write
+to the file trusts it, as does a reaching write inside an admitted directory
+that holds it. Covered files are frozen on macOS and Linux.
 
 **An admitted directory is frozen against writes unless the write region names
 that tree, or one that holds it: writes named at or below an admit at or above

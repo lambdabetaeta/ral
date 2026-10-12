@@ -1,11 +1,18 @@
 ---
 status: active
-generated_at_commit: 9bdbb945
-verified_at_commit: 78d13526
+generated_at_commit: 2afefdf4
+verified_at_commit: 2afefdf4
 anchors: [Binds, Bind, render_objects, bwrap_argv, bwrap_command, HostEnvelope, Slot, open_real, Pinned]
 ---
 
 # The envelope mounts by handle
+
+Implementation update, 12 Oct: the judge-to-open image residual below is
+closed on Linux. The head pins the image before judgment; the trampoline
+compares the mounted image against that pin and execs a descriptor on the
+envelope's mount. See [[internals/confined-launch|confined-launch]] for the
+descriptor lifetime and the script-name consequence. Mount slots now start
+at fd 108, after the image at fd 107.
 
 **Every object the bwrap envelope shows is opened by ral, in the host, never
 through a symlink, and mounted by that descriptor (`--ro-bind-fd`,

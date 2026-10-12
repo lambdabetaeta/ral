@@ -32,7 +32,12 @@ impl Input {
         if self.ended() {
             return Ok(None);
         }
-        *reader = Some(unsafe { libc::pthread_self() } as usize);
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "pthread_t is pointer-sized on the supported Unix targets"
+        )]
+        let thread = unsafe { libc::pthread_self() } as usize;
+        *reader = Some(thread);
         drop(reader);
         Ok(Some(Reading {
             input: self,

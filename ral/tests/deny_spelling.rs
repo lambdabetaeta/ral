@@ -41,17 +41,13 @@ fn an_absent_deny_refuses_a_case_variant_create() {
     let out = write_under_deny(&d.0, "Secrets", &d.join("secrets"));
     assert_refused(&out, "a create of `secrets` under a deny on `Secrets`");
     assert!(!d.join("secrets").exists(), "the refused create landed");
-    // Windows' stored identity already folds ASCII case, so there the deny
-    // holds the name as stored and the plain denial is the right one.
-    if cfg!(not(windows)) {
-        assert!(
-            out.stderr
-                .contains(&format!("the denied {}", d.join("Secrets").display()))
-                && out.stderr.contains("a deny holds under every spelling"),
-            "the denial must name the deny and say why; stderr:\n{}",
-            out.stderr
-        );
-    }
+    assert!(
+        out.stderr
+            .contains(&format!("the denied {}", d.join("Secrets").display()))
+            && out.stderr.contains("a deny holds under every spelling"),
+        "the denial must name the deny and say why; stderr:\n{}",
+        out.stderr
+    );
 
     std::fs::create_dir(d.join("secrets")).unwrap();
     let out = write_under_deny(&d.0, "Secrets", &d.join("secrets").join("t"));
@@ -115,11 +111,6 @@ fn allow_side_pairs(d: &Path) {
         "a write into `work` under a deny on the distinct `Work`",
     );
 
-    // Windows' allow side keeps its ASCII fold, a stated residual: there an
-    // allow on `Work` reaches `work`, and a deny holds it as stored.
-    if cfg!(windows) {
-        return;
-    }
     assert!(
         denied.stderr.contains("a deny holds under every spelling"),
         "the over-deny must say why; stderr:\n{}",
@@ -182,11 +173,10 @@ fn the_allow_side_keeps_case_on_a_case_sensitive_volume() {
     }
 }
 
-/// T6 on Windows, in a directory made case-sensitive with `fsutil`: the
-/// deny side, the allow side keeping its ASCII fold.
+/// T6 on Windows, in a directory made case-sensitive with `fsutil`.
 #[cfg(windows)]
 #[test]
-fn a_deny_over_denies_in_a_case_sensitive_folder() {
+fn the_allow_side_keeps_case_in_a_case_sensitive_folder() {
     let d = Scratch::new("deny_spelling_cs");
     let enabled = std::process::Command::new("fsutil")
         .args(["file", "setCaseSensitiveInfo"])
