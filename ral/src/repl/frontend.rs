@@ -15,8 +15,13 @@
 //! Every frontend reads the engine only through the transport — probes, and
 //! hook dispatches — never a `Shell`.
 
+#[cfg(unix)]
+mod input;
 mod minimal;
 mod rustyline;
+
+#[cfg(unix)]
+pub(super) use input::Input;
 
 pub(super) use minimal::MinimalFrontend;
 pub(super) use rustyline::RustylineFrontend;
@@ -92,6 +97,7 @@ pub(super) trait Frontend {
         engine: &dyn Transport,
         prompt: &PromptText,
         pending: Option<EditBuffer>,
+        #[cfg(unix)] input: &mut Input,
     ) -> Read;
 
     fn add_history(&mut self, entry: &str);

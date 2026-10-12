@@ -124,13 +124,21 @@ signal context. The two are different kinds of proposition.
 - **No scope folds either.** `process::forward_ambient` hands a host thread
   each cause as it lands (`Ambient::Interrupt`, `Ambient::Root(cause)`), the
   handlers staying async-signal-safe and the reaper's wake running the scan.
-  `ControlSender::forward_signals` maps an interrupt to `Control::Interrupt`,
+  `ControlSender::hear`, also used by `forward_signals`, maps an interrupt to `Control::Interrupt`,
   which strikes only the dispatch in flight, a root `RootAbort` to `Abort` and
   any other root cause to `Terminate`, which cancel the durable root. The REPL
   and batch hold one for the session, a wire engine one over its own scopes,
   and exarch forwards to its trunk's `Agent` (`signals::face`). So a process
   hosting many engines — exarch, a test binary — never has one signal reach
   them all.
+- **An idle Unix REPL is woken after its root is cancelled.** Its ambient
+  forwarder calls `hear` before `Shutdown::end`: the minimal reader
+  polls a persistent wake beside nonblocking stdin; the rustyline reader is
+  interrupted with thread-directed SIGINT until its exclusive registration
+  ends. A new read refuses a standing shutdown. The loop checks the root
+  again after input returns, preserving its cause's status and the ordinary
+  history, worker, and terminal cleanup
+  ([[map/repl/frontend|frontend]]).
 - **Sharing, not shadowing.** A nested run nests under the frame the
   interrupt strikes, so a Ctrl-C mid-nest unwinds the whole nest, as a POSIX
   shell's does.

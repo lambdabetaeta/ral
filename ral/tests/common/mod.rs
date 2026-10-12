@@ -16,6 +16,9 @@
 
 #![allow(dead_code)] // not every test file uses every helper
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod pty;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

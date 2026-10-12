@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 53509c43
-generated_at_date: 2026-10-11
+generated_at_commit: 355cf24d
+generated_at_date: 2026-10-12
 covers_paths: [core/src/protocol.rs, core/src/protocol/, core/src/carrier.rs, core/src/carrier/, core/src/engine.rs, core/src/engine/, core/src/run/report.rs, core/src/seed.rs, core/src/seed/hatch.rs, core/src/guard/grant.rs]
 ---
 
@@ -184,7 +184,8 @@ The two interpretations of the algebra, and what they share.
 - `ControlSender` — `interrupt()`, `cancel(id)`, `terminate()` over one of two
   doors: `Door::Identity` applies the verb straight onto the engine's
   `Scopes`, `Door::Wire` writes a `Control` frame through the severance cell.
-  `Control::hearing` is the verb an ambient cause asks.
+  `hear(ambient)` sends the verb `Control::hearing` names;
+  `forward_signals()` holds a process listener forwarding through that door.
 - `EventReceiver` — the front-end's single-drainer event queue; its `stash`
   hands back an event a probe's or a desk's pre-drain read past, in arrival
   order, rather than dropping it.

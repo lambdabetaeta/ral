@@ -42,6 +42,8 @@ pub(super) struct Session {
     transport: Arc<IdentityTransport>,
     /// The process's signals, heard as the engine's `Control`.
     _signals: ral_core::process::AmbientForward,
+    #[cfg(unix)]
+    input: super::frontend::Input,
     host: Arc<ReplHost>,
     theme: OutputTheme,
     frontend: Box<dyn Frontend>,
@@ -75,6 +77,23 @@ impl Session {
                 ExitCode::from(2)
             },
         )?);
+        #[cfg(unix)]
+        let input = super::frontend::Input::new().map_err(|e| {
+            errln!("ral: could not prepare interruptible input: {e}");
+            ExitCode::from(1)
+        })?;
+        #[cfg(unix)]
+        let signals = {
+            let control = transport.control().clone();
+            let input = input.shutdown();
+            ral_core::process::forward_ambient(move |ambient| {
+                control.hear(ambient);
+                if matches!(ambient, ral_core::process::Ambient::Root(_)) {
+                    input.end();
+                }
+            })
+        };
+        #[cfg(windows)]
         let signals = transport.control().forward_signals();
         let host = ReplHost::new(Arc::default());
         transport.set_deferred_sink(host.clone());
@@ -118,6 +137,8 @@ impl Session {
         Ok(Self {
             transport,
             _signals: signals,
+            #[cfg(unix)]
+            input,
             host,
             theme: settings.theme,
             frontend,
@@ -159,10 +180,20 @@ impl Session {
         write_terminal_title(&self.terminal, &cwd.to_string_lossy());
         let prompt = render_prompt(t, &self.host);
 
-        let read = self.frontend.read(t, &prompt, self.pending.take());
+        let read = self.frontend.read(
+            t,
+            &prompt,
+            self.pending.take(),
+            #[cfg(unix)]
+            &mut self.input,
+        );
         // The one boundary at which deferred plugin diagnostics land: the
         // editor has already erased whatever it drew.
         flush_pending_messages(&self.host.runtime);
+        if let Ok(Some(code)) = t.session_ended() {
+            self.exit_code = crate::platform::exit_byte(code);
+            return Flow::Break;
+        }
         match read {
             Read::Line(input) => {
                 let trimmed = input.trim();

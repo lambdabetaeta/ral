@@ -27,6 +27,7 @@ pub(in crate::repl) struct RustylineFrontend {
     keymap: Keymap,
     terminal: TerminalState,
     history_path: Option<String>,
+    printer: Option<Printer>,
     /// The events bound with rustyline, so a sync can unbind them.
     bound: Vec<Event>,
 }
@@ -49,6 +50,14 @@ impl RustylineFrontend {
             .build();
 
         let mut rl: Editor<RalHelper, DefaultHistory> = Editor::with_config(config)?;
+        // Unix's printer requires the TTY path whose reader handles SIGINT.
+        #[cfg(unix)]
+        let printer = Some(Box::new(rl.create_external_printer()?) as Printer);
+        #[cfg(windows)]
+        let printer = rl
+            .create_external_printer()
+            .ok()
+            .map(|p| Box::new(p) as Printer);
         rl.bind_sequence(
             KeyEvent(KeyCode::Char('d'), Modifiers::CTRL),
             EventHandler::Conditional(Box::new(super::super::plugin::rustyline::CtrlDHandler)),
@@ -64,6 +73,7 @@ impl RustylineFrontend {
             keymap,
             terminal,
             history_path,
+            printer,
             bound: Vec::new(),
         })
     }
@@ -75,6 +85,7 @@ impl Frontend for RustylineFrontend {
         engine: &dyn Transport,
         prompt: &PromptText,
         pending: Option<EditBuffer>,
+        #[cfg(unix)] input: &mut super::Input,
     ) -> Read {
         // Pre-readline housekeeping: partial-line marker, plugin sync,
         // helper refresh (cheap engine state only — the `PATH` enumeration
@@ -95,6 +106,18 @@ impl Frontend for RustylineFrontend {
         // pushed onto the stack by `_ed-push`.  The editor owns the whole
         // buffer, continuation lines included.
         let rl_prompt = (prompt.raw(), prompt.styled());
+        #[cfg(unix)]
+        let reading = match input.readline() {
+            Ok(Some(reading)) => reading,
+            Ok(None) => return Read::End(0),
+            Err(e) => {
+                terminal::cmd_error(
+                    "ral",
+                    &format!("could not prepare interruptible input: {e}"),
+                );
+                return Read::End(1);
+            }
+        };
         let read = match pending.or_else(|| pop_buffer_stack(runtime)) {
             // `EditBuffer.cursor` counts characters; rustyline splits by byte.
             Some(buf) => {
@@ -104,6 +127,13 @@ impl Frontend for RustylineFrontend {
             }
             None => self.rl.readline(&rl_prompt),
         };
+        #[cfg(unix)]
+        {
+            drop(reading);
+            if input.ended() {
+                return Read::End(0);
+            }
+        }
         let raw = match read {
             Ok(s) => s,
             Err(ReadlineError::Interrupted) => return Read::Interrupt,
@@ -147,9 +177,6 @@ impl Frontend for RustylineFrontend {
     }
 
     fn printer(&mut self) -> Option<Printer> {
-        self.rl
-            .create_external_printer()
-            .ok()
-            .map(|p| Box::new(p) as Printer)
+        self.printer.take()
     }
 }

@@ -508,11 +508,16 @@ impl ControlSender {
         self.send(Control::Terminate);
     }
 
+    /// Deliver one ambient cause to this session.
+    pub fn hear(&self, ambient: crate::process::Ambient) {
+        self.send(Control::hearing(ambient));
+    }
+
     /// Hear this process's signals as this session's `Control` until the
     /// guard drops: no engine folds them itself.
     pub fn forward_signals(&self) -> crate::process::AmbientForward {
         let door = self.clone();
-        crate::process::forward_ambient(move |ambient| door.send(Control::hearing(ambient)))
+        crate::process::forward_ambient(move |ambient| door.hear(ambient))
     }
 
     fn send(&self, control: Control) {

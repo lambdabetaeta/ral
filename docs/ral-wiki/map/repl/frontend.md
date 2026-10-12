@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 28d06d78
-generated_at_date: 2026-10-11
+generated_at_commit: 355cf24d
+generated_at_date: 2026-10-12
 covers_paths: [ral/src/repl/frontend.rs, ral/src/repl/frontend/, ral/src/repl/completion.rs, ral/src/repl/complete.rs, ral/src/repl/highlight_style.rs, prompt-editor/src/completion.rs, core/src/text.rs]
 ---
 
@@ -31,7 +31,7 @@ rustyline `FileHistory` (one `#V2` format); saves *append* the session's own
 entries so concurrent sessions do not clobber each other, and a failed save is
 reported once, from `Drop for Session`.
 
-Three implementations live in `frontend/`, selected by `Surface`
+Two implementations live in `frontend/`, selected by `Surface`
 (`--surface` flag or rc `surface:`; the capability gate forces `minimal` on
 dumb terminals whatever was asked):
 
@@ -46,6 +46,25 @@ dumb terminals whatever was asked):
   `sync_plugins` can unbind them before rebinding: each distinct plugin key
   sequence is one `Event::KeySeq`, a lone chord a sequence of one
   ([[map/repl/plugins|plugins]]).
+
+**On Unix, ending the session wakes its input without taking ownership of
+cleanup.** `input.rs::Input` is the unique reader; its shared `Shutdown`
+handle is held by the ambient forwarder.
+
+- Minimal input polls stdin beside core's persistent `Wake`, reads with
+  `O_NONBLOCK`, and restores the original flags on return or unwind. A
+  terminal flush can invalidate readiness; `EAGAIN` returns to the poll.
+  One-byte buffering leaves the next command's stdin untouched.
+- Rustyline construction requires its external printer on Unix: that
+  establishes a supported input/output TTY and its SIGINT-aware reader.
+  Construction failures retain their diagnostic and fall back to minimal.
+- A `Reading` guard exclusively registers the reading pthread and temporarily
+  unblocks SIGINT. Shutdown sends it SIGINT every 20 ms until the guard drops:
+  the retry covers entry before rustyline installs its handler. The guard
+  cannot cross threads; unregistration precedes restoring the signal mask.
+- Rustyline restores raw mode and bracketed paste before returning. The
+  session observes the durable root before interpreting the returned input,
+  then follows its ordinary history, worker, and terminal cleanup.
 
 ## Completion
 

@@ -1,4 +1,4 @@
-//! Ending a stage's blocked stdin read from another thread.
+//! Ending a blocked IO wait from another thread.
 //!
 //! Unix: a self-pipe the reader polls beside its own fd — a fired wake reads
 //! as `POLLIN` on the wake fd, never as a byte the reader must drain.
@@ -59,7 +59,7 @@ impl Wake {
     // The early return guards the Unix arm's write below, which is compiled
     // out on Windows — leaving a `return` that is last only on this platform.
     #[cfg_attr(windows, allow(clippy::needless_return))]
-    pub(crate) fn fire(&self) {
+    pub fn fire(&self) {
         if self.fired.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -72,9 +72,21 @@ impl Wake {
         }
     }
 
-    #[cfg(windows)]
-    pub(crate) fn is_fired(&self) -> bool {
+    pub fn is_fired(&self) -> bool {
         self.fired.load(Ordering::SeqCst)
+    }
+
+    /// Wait for readable input, returning false if this wake fires.
+    /// The caller must use nonblocking reads: readiness can become stale.
+    ///
+    /// # Errors
+    /// The readiness wait failed.
+    #[cfg(unix)]
+    pub fn wait_readable(&self, fd: impl std::os::fd::AsFd) -> std::io::Result<bool> {
+        Ok(matches!(
+            self.poll_beside(fd, PollFlags::IN)?,
+            Readiness::Ready(_)
+        ))
     }
 
     /// Block until `fd` reports `events` or the wake fires; a fired wake

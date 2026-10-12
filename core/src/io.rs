@@ -18,7 +18,7 @@ pub(crate) use sink::{SINK_BUFFER_CAP, new_buffer, tee_with_buffer, terminator_l
 pub use source::{Source, SourceReader};
 #[cfg(unix)]
 pub(crate) use wake::Readiness;
-pub(crate) use wake::Wake;
+pub use wake::Wake;
 
 /// All pipeline-stage IO state for a single Shell.
 pub(crate) struct Io {

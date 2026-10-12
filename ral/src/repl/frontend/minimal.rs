@@ -66,8 +66,21 @@ impl Frontend for MinimalFrontend {
         _engine: &dyn Transport,
         prompt: &PromptText,
         _pending: Option<EditBuffer>,
+        #[cfg(unix)] input: &mut super::Input,
     ) -> Read {
+        #[cfg(windows)]
         let stdin = std::io::stdin();
+        #[cfg_attr(windows, allow(unused_mut))]
+        let mut read_line = |line: &mut String| {
+            #[cfg(unix)]
+            {
+                input.read_line(line)
+            }
+            #[cfg(windows)]
+            {
+                stdin.read_line(line)
+            }
+        };
         let write_prompt = |s: &str| {
             let mut out = std::io::stdout().lock();
             let _ = out.write_all(s.as_bytes());
@@ -78,7 +91,7 @@ impl Frontend for MinimalFrontend {
 
         write_prompt(prompt.styled());
         let mut line = String::new();
-        match stdin.read_line(&mut line) {
+        match read_line(&mut line) {
             Ok(0) => return Read::End(0),
             Ok(_) => {}
             Err(e) => {
@@ -92,7 +105,7 @@ impl Frontend for MinimalFrontend {
         Read::Line(join_continuation(trim(&line), || {
             write_prompt("> ");
             let mut cont = String::new();
-            match stdin.read_line(&mut cont) {
+            match read_line(&mut cont) {
                 Ok(0) => Continuation::Discard,
                 Err(e) => {
                     terminal::cmd_error("ral", &e.to_string());

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 53509c43
-generated_at_date: 2026-10-11
+generated_at_commit: 355cf24d
+generated_at_date: 2026-10-12
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs]
 ---
 
@@ -69,8 +69,10 @@ duplicate ([[internals/pipeline-execution|pipeline execution]]).
   stdout write from another thread: a self-pipe `poll_beside`'d (rustix
   `poll`, answering `Readiness::{Fired, Ready(PollFlags)}`) with the stage's own
   fd on Unix, a flag plus `CancelSynchronousIo` on the stage's thread handle
-  on Windows. `fire` is the reader-visible surface, `is_fired` its
-  `cfg(windows)` half; a fired wake
+  on Windows. `fire` and `is_fired` expose the persistent wake;
+  Unix `wait_readable` lets the REPL poll beside a nonblocking input fd,
+  returning false on cancellation. Readiness alone never promises a blocking
+  read will finish. A fired wake
   is read as EOF by a `SourceReader` carrying it and written as success by a
   `Sink::Pipe` carrying it, never as an interrupted I/O error.
 - `terminal.rs` — `TerminalState`: cached startup isatty / ANSI / NO_COLOR /

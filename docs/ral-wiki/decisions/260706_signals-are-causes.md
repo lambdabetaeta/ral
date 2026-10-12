@@ -22,6 +22,10 @@ forget to consult.
 > spent, so an idle delivery latches and the REPL reads it at its next prompt
 > boundary.
 
+> The blocked-read part of the Residual is closed by the Unix
+> [[map/repl/frontend|frontend input wake]]: the host first cancels the root,
+> then wakes the reader, which returns through the session's normal cleanup.
+
 This closes issue #3 of the 2026-07-05 core audit: *signals can't preempt a
 blocked standalone external; SIGTERM never cancels*. The audit deferred the
 issue believing the fix needed a new signal→wait-loop bridge (a self-pipe /
