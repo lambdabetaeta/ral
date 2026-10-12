@@ -35,7 +35,7 @@
 //! writing an existing one.
 //!
 //! Two witnesses must agree before a stamp is skipped: the stamp store (a
-//! grow-only set beside the ledgers) says the propagation ran to completion,
+//! completion set beside the ledgers) says the propagation ran to completion,
 //! and a probe of the root's own DACL says the tree it completed on is still
 //! this one. A crash mid-propagation leaves no store entry, so the next grant
 //! re-stamps; a granted root deleted and recreated fails the probe, same
@@ -68,6 +68,10 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+
+mod deny;
+#[cfg(test)]
+pub(super) mod deny_tests;
 
 use crate::process::cancel::{CancelCause, CancelScope};
 
@@ -479,10 +483,9 @@ pub(crate) fn fs_capability_name(canonical: &Path, kind: GrantKind) -> String {
 /// would stay unwritable for good with no witness able to say why. The ACE's
 /// own skip stands when both of its witnesses hold: the stamp store records a
 /// completed propagation, and the root's own DACL still carries it. `cancel` is
-/// polled at entry, which is as fine-grained as this gets: each stamp is a
-/// single `SetNamedSecurityInfoW`, not interruptible from here — but under
-/// this scheme every stamp runs once per `(path, kind)` ever, not once per
-/// projection.
+/// polled between descendants of a deny walk; Win32's own propagation is
+/// not interruptible. A deny's witness includes that walk, since inheritance
+/// cannot cross protected DACLs or outrank explicit entries.
 #[allow(
     clippy::disallowed_methods,
     reason = "[silent:dacl-apply] Stats the grant target to choose OI|CI inheritance before stamping the capability ACE. Sandbox grant-application infrastructure, not model data I/O: raises no surface card."
@@ -509,12 +512,18 @@ pub(crate) fn ensure_fs_grant(
         ensure_low_integrity_label(canonical)?;
     }
     let key = stamp_key(canonical, kind);
+    // Serialize the witness with the mutation, including an interrupted retry.
+    let _guard = PathMutexGuard::acquire(canonical)?;
     if stamp_recorded(&key) && capability_ace_present(canonical, sid_str, kind, inheritable) {
         return Ok(());
     }
-    // Held across apply and record, so another ral session stamping the same
-    // path cannot interleave its read-merge-write of the DACL with ours.
-    let _guard = PathMutexGuard::acquire(canonical)?;
+    // A recreated root must not resurrect its old completion witness mid-apply.
+    update_stamp(&key, false)?;
+    let _deny_root = if kind == GrantKind::Deny && inheritable {
+        Some(deny::descendants(canonical, sid_str, cancel)?)
+    } else {
+        None
+    };
     apply_explicit_ace(
         canonical,
         sid_str,
@@ -561,7 +570,7 @@ fn capability_ace_present(
     }
 }
 
-/// The stamp store: the grow-only completion witness for [`ensure_fs_grant`],
+/// The stamp store: the completion witness for [`ensure_fs_grant`],
 /// one [`stamp_key`] entry per propagation that ran to the end. No upstream
 /// counterpart — mxc restores its stamps, so completion never needs
 /// witnessing across sessions.
@@ -574,7 +583,13 @@ struct StampStore {
 /// Keyed on the canonical spelling exactly as [`fs_capability_name`] is, and
 /// unfolded for the same case-sensitive-directory reason.
 fn stamp_key(canonical: &Path, kind: GrantKind) -> String {
-    format!("{}|{}", kind.tag(), canonical.to_string_lossy())
+    // Earlier deny stamps witnessed only the root's propagation.
+    let tag = if kind == GrantKind::Deny {
+        "deny-tree"
+    } else {
+        kind.tag()
+    };
+    format!("{tag}|{}", canonical.to_string_lossy())
 }
 
 /// [`stamp_key`]'s counterpart for the mandatory-label stamp — a distinct tag
@@ -616,6 +631,10 @@ fn stamp_recorded(key: &str) -> bool {
 /// as empty and is rewritten — entries lost that way cost redundant restamps,
 /// never authority.
 fn record_stamp(key: &str) -> Result<(), DaclError> {
+    update_stamp(key, true)
+}
+
+fn update_stamp(key: &str, complete: bool) -> Result<(), DaclError> {
     let path = ensure_ledger_dir()?.join(STAMP_STORE_FILE_NAME);
     let _guard = PathMutexGuard::acquire(&path)?;
     let mut store: StampStore = match read_stamp_store_bytes(&path) {
@@ -623,7 +642,12 @@ fn record_stamp(key: &str) -> Result<(), DaclError> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => StampStore::default(),
         Err(e) => return Err(DaclError::LedgerIo(e)),
     };
-    if !store.stamps.insert(key.to_string()) {
+    let changed = if complete {
+        store.stamps.insert(key.to_string())
+    } else {
+        store.stamps.remove(key)
+    };
+    if !changed {
         return Ok(());
     }
     let json = serde_json::to_vec_pretty(&store)
@@ -654,7 +678,7 @@ pub(crate) fn recover_orphaned_state() -> Result<RecoveryReport, DaclError> {
         }
         // The stamp store lives beside the ledgers but is not one: it has no
         // `run_id`, so parsing it as a `Ledger` always fails. Recognizing it
-        // by file name keeps the sweep from quarantining a session's grow-only
+        // by file name keeps the sweep from quarantining a session's
         // completion witnesses on every boot.
         if path.file_name().and_then(|s| s.to_str()) == Some(STAMP_STORE_FILE_NAME) {
             continue;
@@ -1143,6 +1167,13 @@ fn win32_err_str(path: &Path, msg: &str) -> DaclError {
     }
 }
 
+fn null_deny_dacl(path: &Path) -> DaclError {
+    win32_err_str(
+        path,
+        "cannot add a deny to a null DACL without removing ordinary access; give this path explicit permissions first",
+    )
+}
+
 /// Merge one explicit allow-or-deny ACE into `path`'s DACL, under the path
 /// mutex the caller holds across scan, ledger, and this. `SetEntriesInAclW`
 /// inserts in canonical order — explicit deny, explicit allow, inherited — so
@@ -1151,11 +1182,9 @@ fn win32_err_str(path: &Path, msg: &str) -> DaclError {
 /// all: `SandboxProjection::of` calls
 /// [`Table::live`](crate::capability::table::Table::live) so an allow
 /// beneath a deny is dropped from the projection before any ACE is stamped,
-/// rather than relying on ACL order to bury it. A directory gets `OI|CI`,
-/// whose propagation Win32 handles in both directions, which is why nothing
-/// here walks descendants. **Residual, not fixed here:** a descendant whose
-/// own DACL has inheritance protection turned on does not receive the
-/// directory's deny at all; characterising that needs a Windows host.
+/// rather than relying on ACL order to bury it. A directory gets `OI|CI`;
+/// [`deny::descendants`] reasserts denies at descendants where inheritance
+/// cannot suffice, without changing their protection or ordinary permissions.
 fn apply_explicit_ace(
     path: &Path,
     sid_str: &str,
@@ -1199,6 +1228,10 @@ fn apply_explicit_ace(
     };
     if rc != ERROR_SUCCESS {
         return Err(win32_err(path, "GetNamedSecurityInfoW", rc));
+    }
+    if existing_dacl.is_null() && ace_type == AceType::Deny {
+        unsafe { windows_sys::Win32::Foundation::LocalFree(sd) };
+        return Err(null_deny_dacl(path));
     }
 
     let mut new_dacl: *mut ACL = std::ptr::null_mut();
@@ -2591,7 +2624,7 @@ mod tests {
     /// Every allow/deny ACE for `sid_str` as `(AceType byte, inherited?)` in
     /// ACL order — inherited ones included, unlike
     /// [`scan_explicit_aces_for_sid`] — so a test can assert the ordering.
-    fn sid_ace_sequence(path: &Path, sid_str: &str) -> Vec<(u8, bool)> {
+    pub(super) fn sid_ace_sequence(path: &Path, sid_str: &str) -> Vec<(u8, bool)> {
         let sid = OwnedSid::parse(sid_str).unwrap();
         let path_w = wide(path);
         let mut existing_dacl: *mut ACL = std::ptr::null_mut();

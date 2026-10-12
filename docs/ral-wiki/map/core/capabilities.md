@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 446e3123
-generated_at_date: 2026-10-06
+generated_at_commit: 5e4fdd40
+generated_at_date: 2026-10-12
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/guard/, core/src/guard.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
 
@@ -459,9 +459,10 @@ check runs before the `AppContainer` pass, and an unlabeled object defaults to
 `ensure_low_integrity_label` also stamps a `Low` `SYSTEM_MANDATORY_LABEL_ACE`,
 asked *before* the ACE's witness is consulted and witnessed under its own stamp
 key and its own SACL probe. For each mutation two witnesses gate skipping it —
-the grow-only stamp store (`stamps.json`, atomic tmp+rename, per-path
+the completion store (`stamps.json`, atomic tmp+rename, per-path
 named-mutex merge) recording completed propagations, and a probe of the root's
-own DACL confirming the tree was not deleted and recreated. Recording follows
+own DACL confirming its ACE remains. Before an ACE is reapplied, its old
+completion witness is removed under the path mutex; recording follows
 the apply, so a crash mid-propagation leaves no witness and the next grant
 re-stamps idempotently while a child in the interim fails closed. A spawn's
 kernel-checked reach is then exactly the capability SIDs `session::confine`
@@ -476,8 +477,13 @@ projection* (`SessionSandbox` maps `bind_spec` identity to profile) for the
 deny-by-default token and named-object namespace separation, carrying no fs
 authority, and `DaclManager` is the profile ledger — teardown deletes profiles
 but restores no ACEs; a `deny_paths` entry is its own per-path deny capability
-the token opts into, which canonical ACL ordering places ahead of any allow, so
-projection-specific denies coexist on a shared path; the child's program image
+the token opts into, so projection-specific denies coexist on a shared path.
+`dacl/deny.rs` walks a directory deny and stamps it explicitly wherever a
+protected DACL or explicit ACE defeats inheritance. The walk holds ancestors
+against replacement and reparse conversion, skips reparse points, polls cancel
+per entry, and refuses an uninspectable or unmodifiable descendant by name.
+Its `deny-tree` stamp key witnesses the walk and root propagation together;
+the root probe cannot detect later changes deeper in the tree. The child's program image
 is granted read-only so a user-installed binary or the bundled-tool self image
 can load at all; and `net: false` is enforced by withholding the network
 capability SIDs — a LowBox token without them cannot open a socket, so

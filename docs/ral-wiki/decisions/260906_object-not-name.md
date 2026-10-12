@@ -91,5 +91,19 @@ in the language.
   dead under deny-wins, and a Windows ACL orders explicit allows before
   inherited denies, so handing one over inverted the rule.
 
-**Residual.** A Windows descendant with an inheritance-protected DACL does not
-receive its directory's deny; characterising that needs a Windows host.
+**Descendant coverage (2026-10-12).** Inheritance alone misses protected DACLs
+and loses to a descendant's explicit allow. `dacl::deny::descendants` walks a
+denied tree and reasserts its capability deny explicitly on protected objects
+and objects with any explicit ACE, preserving their protection and ordinary
+permissions. Reparse points are skipped; failure to inspect or stamp a
+descendant refuses confinement and names the path. The completion witness is
+versioned independently of the capability SID, so existing root-only stamps
+cannot skip the walk. It is invalidated before a retry and recorded only after
+the walk and root propagation finish.
+
+The regression matrix is
+`session::tests::confined_child_denies_protected_and_explicit_descendants`;
+Windows execution remains pending. A completed walk does not detect later
+descendant replacement or ACL edits: the persistent-stamp freshness limit in
+[[decisions/260730_path-derived-capability-sids|path-derived-capability-sids]]
+still applies.

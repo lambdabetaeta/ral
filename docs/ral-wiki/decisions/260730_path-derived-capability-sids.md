@@ -53,13 +53,26 @@ Split the two: derive the SID from the path, and let the token select.
   **intersects** the normal user pass: an ACE that no live token names is inert,
   and can never widen any process's reach beyond the owning user's own ambient
   access. This is the pattern Chromium uses for its LPAC install-directory ACLs.
-- **Two witnesses gate a skip.** A grow-only stamp store (`stamps.json` beside
+- **Two witnesses gate a skip.** A completion store (`stamps.json` beside
   the ledgers, atomic tmp+rename writes, per-path named-mutex merge) records
   completed propagations; a probe of the root's own DACL confirms the tree was
   not deleted and recreated under the same name. Ordering is
-  **apply-then-record**: a crash mid-propagation leaves no witness, so the next
+  **invalidate-apply-record**: before reapplying an ACE, remove any completion
+  witness for the replaced root under its path mutex. A crash mid-propagation
+  leaves no witness, so the next
   grant re-stamps (idempotent) and a child that runs in the interim fails
   closed.
+- **A directory deny also walks descendants.** Protected DACLs do not inherit
+  it; explicit allows on unprotected descendants can precede it. The walk
+  stamps the same deny explicitly at every protected or explicit ACL boundary,
+  independently of which allow SIDs a particular token holds. Protection stays
+  set, ordinary permissions stay unchanged, and reparse points are not followed.
+  A busy, unreadable or unmodifiable descendant refuses the launch by name.
+  A null DACL is refused too: replacing its unrestricted access with a
+  deny-only DACL would also remove the host user's ordinary access.
+  The `deny-tree` completion key witnesses both the walk and root propagation;
+  earlier `deny` keys cannot stand in for it. Each entry is a cancellation
+  point, though Win32's propagation itself is not interruptible.
 - **The token is the projection.** A spawn's kernel-enforced reach is exactly
   the capability SIDs `session::confine` mints into its
   `SECURITY_CAPABILITIES`, alongside the network capabilities as before.
@@ -158,6 +171,11 @@ load-bearing caveat of the design, accepted explicitly:
   rw-tree A into ro-tree B is still writable through `cap(A)`, though B grants
   only reads. A hard link across differently-granted prefixes is the same fact
   spelled differently — one object, several names, one descriptor.
+- **A deny walk witnesses the tree it inspected.** Its cached completion and
+  root ACE probe do not detect a protected descendant introduced afterwards,
+  a replaced descendant, or a later explicit allow. These can restore access
+  without changing the root's DACL. The walk closes the pre-existing ACL holes;
+  it does not provide continuous enforcement against this drift.
 - **The per-session memo may not speak for a deny.** `session::confine` keeps a
   per-projection memo of `(path-as-spelled, kind)` pairs it has already ensured,
   to spare repeat launches even the witness check. Because it keys on the name
@@ -188,58 +206,32 @@ page.
 
 ## Open work — validation before this is called settled
 
-The enforcement claims above rest on Windows access-check behaviour that is
-asserted, not yet exercised end to end. Until this matrix passes, treat the
-design as shipped-but-unvalidated:
+The basic confined-child write is witnessed: the Windows workflow's
+[2026-10-09 run](https://github.com/lambdabetaeta/ral/actions/runs/37924220629)
+passed `session::tests::confined_child_writes_inside_the_grant_and_not_outside`.
+That proves the granted write and outside denial exercised there, not the
+whole matrix below.
 
-- an end-to-end LowBox spawn with privately derived capability SIDs, in all
-  three arms — no capability, ro capability, rw capability — run continuously
-  by `session::tests::confined_child_writes_inside_the_grant_and_not_outside`
-  on real Windows CI. **The rw arm has failed on every run since this decision
-  landed, and still does.** The mandatory-label stamp above was necessary — a
-  `Medium`-labeled tempdir refuses every `Low`-IL write at the
-  mandatory-integrity gate before the DACL is ever consulted — but it was not
-  sufficient, and an earlier revision of this page wrongly recorded it as
-  closing this item. What the trace shows is a grant that lands and does not
-  bite: the ACE is stamped, the label is stamped, `CreateProcessW` accepts the
-  capability, and the child leaves the directory empty. Two of the three
-  premises are now confirmed against Microsoft's own account of the check — a
-  capability SID in a DACL does admit an `AppContainer` that holds it, and the
-  permitted access is the *intersection* of the user pass and the
-  `AppContainer` pass — so the mechanism is not what is wrong. **The test was.**
-  Its `cmd /c` string quoted the redirect target, and `CreateProcessW` takes one
-  flat command line: `process::launch`'s quoter escapes an embedded `"` as `\"`,
-  which `cmd.exe` — having no backslash escape — reads as a literal backslash
-  before a quote. The child was therefore redirecting into
-  `\C:\…\ok.txt\`, failing its own syntax check and exiting nonzero without
-  asking the filesystem anything, on every run since the test was written. This
-  is the same hazard `process::launch::reject_batch` refuses `.bat`/`.cmd`
-  images over, met from the other side. The target is now a bare relative name
-  under the granted cwd, which admits no second reading, so the exit status the
-  assertion prints finally means what it says. Until a green run, this stays
-  open — and if it stays red at exit 1, the next suspect is a host precondition
-  ral never establishes: MXC, whose DACL engine this is a port of, ships a
-  separate elevated `wxc-host-prep prepare-system-drive`, which stamps a
-  non-inheriting `0x0012_0088` metadata ACE for `ALL APPLICATION PACKAGES` and
-  `ALL RESTRICTED APPLICATION PACKAGES` on the system-drive root because
-  `cmd.exe`, `pwsh.exe` and `node.exe` stat `C:\` during startup and fail
-  `ERROR_ACCESS_DENIED` inside an `AppContainer` without it — and a
-  `prepare-null-device` for the same reason on `\Device\Null`, whose security
-  descriptor the kernel resets at every boot. Neither is ported, and adopting
-  either means an elevated, permanent mutation of the system drive's DACL on
-  every developer machine and CI runner — its own decision, not a fix to reach
-  for before the cheap reading has been ruled out;
-- a deny capability overriding an enclosing allow, observed from inside the
-  child;
+Remaining validation:
+
+- no-capability, read-only and read-write LowBox arms across reads and writes;
+- `session::tests::confined_child_denies_protected_and_explicit_descendants`:
+  positive reads before denial, ordinary inheritance, protected directories
+  and files with copied allows, nested protection, a protected subtree with
+  inherited access removed, an explicit `ALL APPLICATION PACKAGES` allow on
+  the actual file read, and an unrestricted-by-this-deny token still reading
+  after the stamp. The test is implemented; Windows execution is pending;
 - attenuation: a wide token and a narrowed token over the same tree;
 - a LowBox child spawning a descendant with a capability it does not itself
   hold. Nested AppContainer capabilities are *expected* to be subset-only —
   verify it rather than assume it, since the whole shrinks-only argument leans
   on it;
 - reparse points (junctions, symlinks) across granted prefixes;
-- `SE_DACL_PROTECTED` descendants: MARTA propagation skips them, so such a
-  subtree is a hole — fail-closed, exactly as under the old design, but worth a
-  test that says so;
+- `dacl::deny_tests`: preservation of DACL protection and deny ordering,
+  migration of root-only stamps, failure and retry after a root is recreated,
+  refusal of null DACLs without changing ordinary access, and a junction whose
+  target must receive no deny. Windows execution is
+  pending;
 - DACL growth on hot roots (expected ≤3 capability ACEs per distinct prefix);
 - token capability-array size limits, on a projection with many prefixes.
 

@@ -647,6 +647,99 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[test] LowBox deny enforcement through real file reads"
+    )]
+    fn confined_child_denies_protected_and_explicit_descendants() {
+        use super::super::dacl::deny_tests::{DenyTree, READABLE, with_state};
+        use crate::process::cancel::CancelScope;
+        use crate::process::{Launch, PgidPolicy, StdioSpec};
+        use crate::sandbox::{ExecProjection, FsProjection, FsRules, SandboxProjection};
+        use std::io::Read;
+        use std::path::Path;
+
+        with_state(|| {
+            let tree = DenyTree::new();
+            let projection = |deny: bool| SandboxProjection {
+                fs: FsProjection::Restricted(FsRules {
+                    read_prefixes: vec![tree.allow.to_string_lossy().into_owned()],
+                    floor: Vec::new(),
+                    write_prefixes: Vec::new(),
+                    deny_paths: if deny {
+                        vec![tree.deny.to_string_lossy().into_owned()]
+                    } else {
+                        Vec::new()
+                    },
+                    pinned_dirs: Vec::new(),
+                }),
+                net: false,
+                exec: ExecProjection::default(),
+            };
+            let read = |relative: &str, deny: bool, readable: bool| {
+                let cmd = Path::new(r"C:\Windows\System32\cmd.exe");
+                let mut launch = Launch::new(cmd);
+                launch.args(["/d", "/s", "/c", &format!("type {relative}")]);
+                launch.current_dir(tree.cwd());
+                launch.stdin(StdioSpec::null());
+                launch.stdout(StdioSpec::Piped);
+                launch.stderr(StdioSpec::Piped);
+                super::confine(
+                    &mut launch,
+                    &projection(deny),
+                    Some(cmd),
+                    &CancelScope::default(),
+                )
+                .unwrap();
+                let (mut child, _pgid, _) = launch.spawn(PgidPolicy::Inherit).unwrap();
+                let mut stdout = Vec::new();
+                child
+                    .take_stdout()
+                    .unwrap()
+                    .read_to_end(&mut stdout)
+                    .unwrap();
+                let mut stderr = Vec::new();
+                child
+                    .take_stderr()
+                    .unwrap()
+                    .read_to_end(&mut stderr)
+                    .unwrap();
+                let ended = child.reap().unwrap();
+                assert_eq!(
+                    ended.code(),
+                    Some(i32::from(!readable)),
+                    "{relative}, deny={deny}: {ended:?}, stderr={}",
+                    String::from_utf8_lossy(&stderr)
+                );
+                assert_eq!(
+                    stdout,
+                    if readable {
+                        b"secret\r\n".as_slice()
+                    } else {
+                        b""
+                    },
+                    "{relative}, deny={deny}"
+                );
+            };
+
+            read("ok.txt", false, true);
+            tree.shape();
+            for relative in READABLE {
+                read(relative, false, true);
+            }
+            read(r"D\dark\key.txt", false, false);
+            read("ok.txt", true, true);
+            for relative in READABLE.iter().skip(1) {
+                read(relative, true, false);
+            }
+            read(r"D\dark\key.txt", true, false);
+            // Persistent denies are projection-specific.
+            read(r"D\protected\key.txt", false, true);
+            super::teardown();
+        });
+    }
+
+    #[test]
     fn profile_name_is_pid_and_counter_keyed_within_the_length_cap() {
         let n0 = profile_name(0);
         let n1 = profile_name(1);

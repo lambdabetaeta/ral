@@ -130,6 +130,14 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ("core/src/sandbox/warrant.rs", "silent:respawn-spawn"),
     ("core/src/sandbox/windows/dacl.rs", "silent:dacl-apply"),
     (
+        "core/src/sandbox/windows/dacl/deny.rs",
+        "silent:dacl-deny-pin",
+    ),
+    (
+        "core/src/sandbox/windows/dacl/deny.rs",
+        "silent:dacl-deny-walk",
+    ),
+    (
         "core/src/sandbox/windows/dacl.rs",
         "silent:dacl-ledger-read",
     ),

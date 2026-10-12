@@ -468,6 +468,12 @@ marks a refusal that names the denied spelling.
   deny-wins such an allow is dead, and a Windows ACL orders explicit allows
   before inherited denies, so handing one over would invert the rule
   (`the_live_allows_are_those_no_deny_holds`).
+- **Existing Windows ACLs are another source of explicit allows.** A directory
+  deny walks its descendants, reasserting an explicit deny at protected DACLs
+  and explicit ACL boundaries. The walk skips reparse points and refuses a
+  descendant it cannot inspect or stamp. Its persistent completion witness
+  describes the tree at that walk, not later ACL edits or replacements
+  ([[decisions/260730_path-derived-capability-sids|path-derived-capability-sids]]).
 - **`pinned_dirs` derive from *rendered* names**: the ancestor closure of each
   rendered deny within a rendered write name, so an alias's chain is pinned
   beside its target's ([[internals/seatbelt-profile|seatbelt-profile]]).
