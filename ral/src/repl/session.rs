@@ -66,7 +66,10 @@ impl Session {
     /// `--capabilities` failure, or an `exit` in a startup file.
     pub(super) fn boot(opts: &crate::cli::InteractiveOpts) -> Result<Self, ExitCode> {
         let exit = |status| ExitCode::from(crate::platform::exit_byte(status));
-        let claim = boot::setup_signals();
+        let claim = boot::setup_signals().map_err(|e| {
+            errln!("ral: could not prepare interruptible input: {e}");
+            ExitCode::from(1)
+        })?;
         let (interactive_mode, terminal) = crate::platform::probe_terminal(true);
         boot::setup_panic_hook();
 
@@ -78,10 +81,7 @@ impl Session {
             },
         )?);
         #[cfg(unix)]
-        let input = super::frontend::Input::new().map_err(|e| {
-            errln!("ral: could not prepare interruptible input: {e}");
-            ExitCode::from(1)
-        })?;
+        let input = super::frontend::Input::default();
         #[cfg(unix)]
         let signals = {
             let control = transport.control().clone();

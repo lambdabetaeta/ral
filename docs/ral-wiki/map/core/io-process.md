@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 355cf24d
+generated_at_commit: eecd78ad
 generated_at_date: 2026-10-12
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs]
 ---
@@ -69,10 +69,7 @@ duplicate ([[internals/pipeline-execution|pipeline execution]]).
   stdout write from another thread: a self-pipe `poll_beside`'d (rustix
   `poll`, answering `Readiness::{Fired, Ready(PollFlags)}`) with the stage's own
   fd on Unix, a flag plus `CancelSynchronousIo` on the stage's thread handle
-  on Windows. `fire` and `is_fired` expose the persistent wake;
-  Unix `wait_readable` lets the REPL poll beside a nonblocking input fd,
-  returning false on cancellation. Readiness alone never promises a blocking
-  read will finish. A fired wake
+  on Windows. The wake is private to core. A fired wake
   is read as EOF by a `SourceReader` carrying it and written as success by a
   `Sink::Pipe` carrying it, never as an interrupted I/O error.
 - `terminal.rs` — `TerminalState`: cached startup isatty / ANSI / NO_COLOR /
@@ -192,7 +189,10 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   `gesture_signal` and `KILL`; `interrupt_handler` is the interactive SIGINT
   disposition — a bare `request_interrupt()`, with no delivery of its own,
   since a pipeline's processes hear a cancellation through the collector — and
-  `quit_handler` is the Ctrl-`\` root abort. `grace_signal(cause)` is the one
+  `quit_handler` is the Ctrl-`\` root abort. Unix `install_interrupt_handler`
+  installs SIGINT without `SA_RESTART` so the REPL's blocked input can return
+  on interruption; it snapshots inherited ignored dispositions before changing
+  them. `grace_signal(cause)` is the one
   cause→signal table both teardowns read (`RunningChild::terminate` and the
   pipeline collector's `cancel_all`): `Interrupt` → SIGINT,
   `Explicit`/`Deadline`/`Terminate` → SIGTERM (on Windows all four →

@@ -201,7 +201,8 @@ impl PtySession {
     pub fn read_available(&mut self) {
         use std::io::Read;
         let mut chunk = [0u8; 4096];
-        loop {
+        // A continuously writing child must not starve the caller's deadline.
+        for _ in 0..64 {
             match self.reader.read(&mut chunk) {
                 Ok(0) => break,
                 Ok(n) => self.bytes.extend_from_slice(&chunk[..n]),
@@ -270,13 +271,38 @@ impl PtySession {
         lent
     }
 
-    /// Kill the child, drain the pty for a short post-exit window (ral
-    /// writes its trace lines just before exiting, and the slave-side fds
-    /// may outlive the exit by a few millis on Linux), and reduce to an
-    /// `Output`.
+    pub fn wait_for_exit(
+        &mut self,
+        timeout: Duration,
+    ) -> std::io::Result<std::process::ExitStatus> {
+        let start = std::time::Instant::now();
+        loop {
+            self.read_available();
+            if let Some(status) = self.child.try_wait()? {
+                self.read_available();
+                return Ok(status);
+            }
+            if start.elapsed() >= timeout {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!(
+                        "terminal child did not exit within {timeout:?}: {}",
+                        self.text()
+                    ),
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Drain during exit; on macOS, undrained output can hold even a killed child.
     pub fn finish(mut self) -> Output {
         let _ = self.child.kill();
-        let status = self.child.wait().ok().and_then(|s| s.code()).unwrap_or(1);
+        let status = self
+            .wait_for_exit(Duration::from_secs(5))
+            .expect("reap terminal child")
+            .code()
+            .unwrap_or(1);
         let drain_start = std::time::Instant::now();
         while drain_start.elapsed() < Duration::from_millis(200) {
             self.read_available();
@@ -293,9 +319,6 @@ impl PtySession {
 impl Drop for PtySession {
     fn drop(&mut self) {
         let _ = self.child.kill();
-        while matches!(self.child.try_wait(), Ok(None)) {
-            self.read_available();
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        let _ = self.wait_for_exit(Duration::from_secs(5));
     }
 }

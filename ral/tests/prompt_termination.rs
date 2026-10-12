@@ -70,19 +70,28 @@ fn signal(child: &Child, signal: i32) {
 }
 
 fn exit_pty(session: &mut PtySession) -> ExitStatus {
-    let start = Instant::now();
-    loop {
-        session.read_available();
-        if let Some(status) = session.child.try_wait().unwrap() {
-            return status;
-        }
-        assert!(
-            start.elapsed() < WAIT,
-            "ral did not exit: {}",
-            session.text()
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    session.wait_for_exit(WAIT).unwrap()
+}
+
+#[test]
+fn terminal_exit_wait_is_bounded_and_drains_output() {
+    let mut cmd = Command::new("/bin/sh");
+    cmd.args([
+        "-c",
+        "printf ready; read acknowledgement; /usr/bin/head -c 131072 /dev/zero; exit 7",
+    ]);
+    let mut session = PtySession::spawn_command(cmd).unwrap();
+    assert!(session.wait_until(WAIT, |text| text.contains("ready")));
+    assert_eq!(
+        session
+            .wait_for_exit(Duration::from_millis(50))
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::TimedOut
+    );
+    session.send_line("continue").unwrap();
+    assert_eq!(exit_pty(&mut session).code(), Some(7));
+    assert!(session.text().len() >= 131_072);
 }
 
 #[test]
@@ -120,33 +129,36 @@ fn idle_termination_saves_history() {
 }
 
 #[test]
-fn readline_termination_survives_an_inherited_sigint_mask() {
-    let dir = TempDir::new().unwrap();
-    let mut cmd = command(&dir, "readline");
-    unsafe {
-        cmd.pre_exec(|| {
-            let mut set = std::mem::zeroed();
-            libc::sigemptyset(&raw mut set);
-            libc::sigaddset(&raw mut set, libc::SIGINT);
-            let error =
-                libc::pthread_sigmask(libc::SIG_BLOCK, &raw const set, std::ptr::null_mut());
-            if error == 0 {
-                Ok(())
-            } else {
-                Err(std::io::Error::from_raw_os_error(error))
-            }
-        });
+fn termination_survives_an_inherited_sigint_mask() {
+    for surface in ["minimal", "readline"] {
+        let dir = TempDir::new().unwrap();
+        let mut cmd = command(&dir, surface);
+        unsafe {
+            cmd.pre_exec(|| {
+                let mut set = std::mem::zeroed();
+                libc::sigemptyset(&raw mut set);
+                libc::sigaddset(&raw mut set, libc::SIGINT);
+                let error =
+                    libc::pthread_sigmask(libc::SIG_BLOCK, &raw const set, std::ptr::null_mut());
+                if error == 0 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::from_raw_os_error(error))
+                }
+            });
+        }
+        let mut session = PtySession::spawn_command(cmd).unwrap();
+        prompt(&mut session, 1);
+        assert_eq!(
+            tcgetattr(&session.terminal)
+                .unwrap()
+                .local_modes
+                .contains(LocalModes::ICANON),
+            surface == "minimal"
+        );
+        signal(&session.child, libc::SIGTERM);
+        assert_eq!(exit_pty(&mut session).code(), Some(143));
     }
-    let mut session = PtySession::spawn_command(cmd).unwrap();
-    prompt(&mut session, 1);
-    assert!(
-        !tcgetattr(&session.terminal)
-            .unwrap()
-            .local_modes
-            .contains(LocalModes::ICANON)
-    );
-    signal(&session.child, libc::SIGTERM);
-    assert_eq!(exit_pty(&mut session).code(), Some(143));
 }
 
 #[test]
@@ -187,14 +199,63 @@ fn minimal_continuation_can_be_terminated() {
 }
 
 #[test]
-fn ctrl_c_still_leaves_the_readline_session_usable() {
-    let dir = TempDir::new().unwrap();
-    let mut session = PtySession::spawn_command(command(&dir, "readline")).unwrap();
-    prompt(&mut session, 1);
-    session.send_ctrl_c().unwrap();
-    prompt(&mut session, 2);
-    paste_line(&mut session, "exit 7");
-    assert_eq!(exit_pty(&mut session).code(), Some(7));
+fn ctrl_c_still_leaves_the_session_usable() {
+    for surface in ["minimal", "readline"] {
+        let dir = TempDir::new().unwrap();
+        let mut session = PtySession::spawn_command(command(&dir, surface)).unwrap();
+        prompt(&mut session, 1);
+        session.send_ctrl_c().unwrap();
+        if surface == "readline" {
+            prompt(&mut session, 2);
+            paste_line(&mut session, "exit 7");
+        } else {
+            session.send_line("exit 7").unwrap();
+        }
+        assert_eq!(exit_pty(&mut session).code(), Some(7));
+    }
+}
+
+#[test]
+fn minimal_input_preserves_the_parents_descriptor_flags() {
+    use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+
+    for nonblocking in [false, true] {
+        let dir = TempDir::new().unwrap();
+        let (read, mut write) = ral_core::process::cloexec_pipe().unwrap();
+        if nonblocking {
+            fcntl_setfl(&read, fcntl_getfl(&read).unwrap() | OFlags::NONBLOCK).unwrap();
+        }
+        let flags = fcntl_getfl(&read).unwrap();
+        let mut child = command(&dir, "minimal")
+            .stdin(read.try_clone().unwrap())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let marker = dir.path().join("ready");
+        writeln!(write, "echo ready > '{}'", marker.display()).unwrap();
+        let start = Instant::now();
+        while !marker.exists() {
+            if start.elapsed() > WAIT {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("minimal REPL never evaluated its first line");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let mut observed = Vec::new();
+        for _ in 0..20 {
+            observed.push(fcntl_getfl(&read).unwrap());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        signal(&child, libc::SIGTERM);
+        assert_eq!(exit(&mut child).code(), Some(143));
+        assert!(
+            observed.iter().all(|&actual| actual == flags),
+            "{observed:?}"
+        );
+        assert_eq!(fcntl_getfl(&read).unwrap(), flags);
+    }
 }
 
 #[test]
@@ -279,7 +340,7 @@ fn termination_restores_modes_and_hands_the_terminal_back() {
 }
 
 #[test]
-fn minimal_input_restores_blocking_reads_for_foreground_commands() {
+fn minimal_input_leaves_blocking_reads_for_foreground_commands() {
     let dir = TempDir::new().unwrap();
     let mut session = PtySession::spawn_command(command(&dir, "minimal")).unwrap();
     prompt(&mut session, 1);

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 355cf24d
+generated_at_commit: eecd78ad
 generated_at_date: 2026-10-12
 covers_paths: [ral/src/repl.rs, ral/src/repl/session.rs, ral/src/repl/session/, ral/src/repl/exec.rs, ral/src/repl/host.rs, ral/src/repl/enquiry.rs, ral/src/repl/prompt.rs, ral/src/repl/config.rs, ral/src/repl/config/, ral/src/repl/theme.rs, ral/src/repl/errfmt.rs, ral/src/repl/cursor.rs, ral/src/boot_door.rs, ral/src/surface.rs]
 ---
@@ -53,8 +53,9 @@ no job table: ral does not suspend
   `Input` reader.
 - The Unix ambient forwarder first calls `ControlSender::hear`, cancelling
   the engine's scopes synchronously, then ends `Input` on a root cause.
-  Its persistent wake closes the interval between the root check and the
-  blocking read; the [[map/repl/frontend|frontend]] returns through normal
+  Its persistent shutdown flag and repeated thread-directed interrupt cover
+  the interval between the root check and the blocking read; the
+  [[map/repl/frontend|frontend]] returns through normal
   cleanup. The signal thread never exits the process or restores its terminal.
 - `eval` runs one trimmed line through `exec::step`, recording an `exit` code
   so `run` breaks cleanly.

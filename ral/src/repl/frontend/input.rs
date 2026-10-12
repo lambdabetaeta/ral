@@ -1,35 +1,29 @@
 //! A root cancellation wakes input; the session still owns its exit.
 
-use ral_core::io::Wake;
 use ral_core::process::arm_callback;
 use ral_core::sync::LockExt as _;
 use std::io::{self, BufRead, BufReader};
 use std::marker::PhantomData;
-use std::os::fd::BorrowedFd;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, TryLockError};
 use std::time::Duration;
 
+#[derive(Default)]
 pub(in crate::repl) struct Input(Arc<Shutdown>);
 
+#[derive(Default)]
 pub(in crate::repl) struct Shutdown {
-    wake: Arc<Wake>,
+    ended: AtomicBool,
     reader: Mutex<Option<usize>>,
 }
 
 impl Input {
-    pub(in crate::repl) fn new() -> io::Result<Self> {
-        Ok(Self(Arc::new(Shutdown {
-            wake: Wake::new()?,
-            reader: Mutex::default(),
-        })))
-    }
-
     pub(in crate::repl) fn shutdown(&self) -> Arc<Shutdown> {
         self.0.clone()
     }
 
     pub(super) fn ended(&self) -> bool {
-        self.0.wake.is_fired()
+        self.0.ended.load(Ordering::SeqCst)
     }
 
     pub(super) fn readline(&mut self) -> io::Result<Option<Reading<'_>>> {
@@ -46,23 +40,14 @@ impl Input {
         }))
     }
 
-    #[expect(
-        clippy::needless_pass_by_ref_mut,
-        reason = "one reader owns stdin's mode until this call returns"
-    )]
     pub(super) fn read_line(&mut self, line: &mut String) -> io::Result<usize> {
-        let stdin = rustix::stdio::stdin();
-        let _mode = Nonblocking::new(stdin)?;
+        let Some(mut reading) = self.readline()? else {
+            line.clear();
+            return Ok(0);
+        };
         // Never take type-ahead away from the next foreground command.
-        let read = BufReader::with_capacity(
-            1,
-            Stdin {
-                fd: stdin,
-                wake: &self.0.wake,
-            },
-        )
-        .read_line(line);
-        if self.ended() {
+        let read = BufReader::with_capacity(1, &mut reading).read_line(line);
+        if reading.input.ended() {
             line.clear();
             Ok(0)
         } else {
@@ -74,10 +59,9 @@ impl Input {
 impl Shutdown {
     pub(in crate::repl) fn end(self: &Arc<Self>) {
         let reader = self.reader.lock_ignore_poison();
-        if self.wake.is_fired() {
+        if self.ended.swap(true, Ordering::SeqCst) {
             return;
         }
-        self.wake.fire();
         drop(reader);
         self.poke();
     }
@@ -95,7 +79,7 @@ impl Shutdown {
                 unsafe { libc::pthread_kill(thread as libc::pthread_t, libc::SIGINT) };
             }
         }
-        // Rustyline installs its handler inside readline; an early poke is lost.
+        // An interrupt before handler installation or the blocking read is lost.
         let shutdown = self.clone();
         arm_callback(Duration::from_millis(20), move || shutdown.poke()).keep();
     }
@@ -110,6 +94,32 @@ pub(super) struct Reading<'a> {
 impl Drop for Reading<'_> {
     fn drop(&mut self) {
         *self.input.0.reader.lock_ignore_poison() = None;
+    }
+}
+
+impl io::Read for Reading<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        use rustix::event::{PollFd, PollFlags, poll};
+        use rustix::io::Errno;
+
+        let stdin = rustix::stdio::stdin();
+        loop {
+            if buf.is_empty() || self.input.ended() {
+                return Ok(0);
+            }
+            match rustix::io::read(stdin, &mut *buf) {
+                Err(Errno::INTR) => {}
+                Err(Errno::AGAIN) => {
+                    // Stdin may already be nonblocking; its flags belong to the caller.
+                    let mut fds = [PollFd::new(&stdin, PollFlags::IN)];
+                    match poll(&mut fds, None) {
+                        Ok(_) | Err(Errno::INTR) => {}
+                        Err(e) => return Err(e.into()),
+                    }
+                }
+                read => return Ok(read?),
+            }
+        }
     }
 }
 
@@ -139,83 +149,65 @@ impl Drop for SignalMask {
     }
 }
 
-struct Nonblocking<'a>(BorrowedFd<'a>, rustix::fs::OFlags);
-
-impl<'a> Nonblocking<'a> {
-    fn new(fd: BorrowedFd<'a>) -> io::Result<Self> {
-        let flags = rustix::fs::fcntl_getfl(fd)?;
-        rustix::fs::fcntl_setfl(fd, flags | rustix::fs::OFlags::NONBLOCK)?;
-        Ok(Self(fd, flags))
-    }
-}
-
-impl Drop for Nonblocking<'_> {
-    fn drop(&mut self) {
-        let _ = rustix::fs::fcntl_setfl(self.0, self.1);
-    }
-}
-
-struct Stdin<'a> {
-    fd: BorrowedFd<'a>,
-    wake: &'a Wake,
-}
-
-impl io::Read for Stdin<'_> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if buf.is_empty() {
-            return Ok(0);
-        }
-        loop {
-            if !self.wake.wait_readable(self.fd)? {
-                return Ok(0);
-            }
-            match rustix::io::read(self.fd, &mut *buf) {
-                Err(rustix::io::Errno::AGAIN | rustix::io::Errno::INTR) => {}
-                read => return Ok(read?),
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::fd::AsFd as _;
 
     #[test]
     fn cancellation_before_registration_refuses_the_read() {
-        let mut input = Input::new().unwrap();
+        let mut input = Input::default();
         input.shutdown().end();
         assert!(input.readline().unwrap().is_none());
     }
 
     #[test]
-    fn stale_readiness_cannot_block_a_read() {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[test] signal dispositions need an isolated process"
+    )]
+    fn shutdown_retries_after_an_early_interrupt() {
         use std::io::{Read as _, Write as _};
-        let (read, mut write) = ral_core::process::cloexec_pipe().unwrap();
-        let wake = Wake::new().unwrap();
-        let flags = rustix::fs::fcntl_getfl(&read).unwrap();
-        {
-            let _mode = Nonblocking::new(read.as_fd()).unwrap();
-            write.write_all(b"x").unwrap();
-            assert!(wake.wait_readable(&read).unwrap());
-            let mut byte = [0];
-            rustix::io::read(&read, &mut byte).unwrap();
-            assert_eq!(
-                rustix::io::read(&read, &mut byte),
-                Err(rustix::io::Errno::AGAIN)
-            );
-            wake.fire();
-            assert_eq!(
-                Stdin {
-                    fd: read.as_fd(),
-                    wake: &wake
-                }
-                .read(&mut byte)
-                .unwrap(),
-                0
-            );
+        use std::os::fd::AsRawFd as _;
+
+        if std::env::var_os("RAL_INPUT_WAKE_TEST").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "repl::frontend::input::tests::shutdown_retries_after_an_early_interrupt",
+                    "--nocapture",
+                ])
+                .env("RAL_INPUT_WAKE_TEST", "1")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            return;
         }
-        assert_eq!(rustix::fs::fcntl_getfl(&read).unwrap(), flags);
+
+        ral_core::process::install_interrupt_handler().unwrap();
+        let (read, mut write) = ral_core::process::cloexec_pipe().unwrap();
+        assert_eq!(
+            unsafe { libc::dup2(read.as_raw_fd(), libc::STDIN_FILENO) },
+            0
+        );
+        let mut input = Input::default();
+        let shutdown = input.shutdown();
+        let mut reading = input.readline().unwrap().unwrap();
+        let epoch = ral_core::process::interrupt_epoch();
+        shutdown.end();
+        assert_ne!(ral_core::process::interrupt_epoch(), epoch);
+
+        let (done, wait) = std::sync::mpsc::channel();
+        let fallback = std::thread::spawn(move || {
+            if wait.recv_timeout(Duration::from_secs(2)).is_err() {
+                write.write_all(b"x").unwrap();
+            }
+        });
+        // Enter after the first interrupt, as if cancellation raced the check.
+        let mut byte = [0];
+        let result = rustix::io::read(rustix::stdio::stdin(), &mut byte);
+        let _ = done.send(());
+        fallback.join().unwrap();
+        assert_eq!(result, Err(rustix::io::Errno::INTR));
+        assert_eq!(reading.read(&mut byte).unwrap(), 0);
     }
 }

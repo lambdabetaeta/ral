@@ -93,6 +93,23 @@ pub fn interrupt_handler() -> extern "C" fn(libc::c_int) {
     sigint_handler
 }
 
+/// Install the interactive SIGINT handler without restarting blocked reads.
+///
+/// # Errors
+/// The signal disposition could not be installed.
+pub fn install_interrupt_handler() -> std::io::Result<()> {
+    snapshot_once();
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = sigint_handler as *const () as libc::sighandler_t;
+        libc::sigemptyset(&raw mut action.sa_mask);
+        if libc::sigaction(libc::SIGINT, &raw const action, std::ptr::null_mut()) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
 extern "C" fn sigquit_handler(_: libc::c_int) {
     // Ctrl-\ reaps the session: the root cause reaches the foreground run and
     // every detached worker, and latches on an idle session, being one-way.

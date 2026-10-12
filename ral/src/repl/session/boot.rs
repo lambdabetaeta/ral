@@ -28,7 +28,7 @@ use super::super::host::ReplHost;
 /// - SIGTTIN → `SIG_IGN`  (shell reads stdin without being stopped if not fg)
 /// - SIGPIPE → `SIG_IGN`  (writing to a closed pipe yields an error, not death)
 ///
-/// Every disposition goes through core's `ignore` / `install`, which snapshot
+/// Every disposition goes through core's signal installers, which snapshot
 /// the inherited ignores first so children get them back (the nohup rule).
 ///
 /// SIGWINCH (owned in-process by crossterm's `signal-hook-registry` master
@@ -37,7 +37,8 @@ use super::super::host::ReplHost;
 /// disconnect that registry's dispatch for the signal.
 ///
 /// Windows: `signal::install_interrupt_handler`, likewise non-escalating.
-pub(super) fn setup_signals() -> TerminalClaim {
+#[cfg_attr(windows, allow(clippy::unnecessary_wraps))]
+pub(super) fn setup_signals() -> std::io::Result<TerminalClaim> {
     #[cfg(unix)]
     {
         use ral_core::process::{default, ignore, install};
@@ -60,7 +61,7 @@ pub(super) fn setup_signals() -> TerminalClaim {
         // The non-escalating interrupt handler rather than SIG_IGN: a
         // no-op between commands, and a cancel of the foreground scope —
         // whence the pipeline's own teardown — during a run.
-        install(libc::SIGINT, ral_core::process::interrupt_handler());
+        ral_core::process::install_interrupt_handler()?;
         // Ctrl-\ cancels the durable root — the reap-everything gesture.
         install(libc::SIGQUIT, ral_core::process::quit_handler());
         install(libc::SIGTERM, ral_core::process::term_handler());
@@ -70,12 +71,12 @@ pub(super) fn setup_signals() -> TerminalClaim {
         ignore(libc::SIGTSTP);
         ignore(libc::SIGTTIN);
         ignore(libc::SIGPIPE);
-        claim
+        Ok(claim)
     }
     #[cfg(windows)]
     {
         ral_core::process::install_interrupt_handler();
-        TerminalClaim::default()
+        Ok(TerminalClaim::default())
     }
 }
 

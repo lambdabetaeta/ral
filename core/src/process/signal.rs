@@ -26,8 +26,8 @@ use unix::gesture_signal;
 pub(crate) use unix::{KILL, gesture, grace_signal};
 #[cfg(unix)]
 pub use unix::{
-    default, ignore, install, install_handlers, interrupt_handler, quit_handler,
-    reset_child_signals, term_handler,
+    default, ignore, install, install_handlers, install_interrupt_handler, interrupt_handler,
+    quit_handler, reset_child_signals, term_handler,
 };
 
 #[cfg(windows)]

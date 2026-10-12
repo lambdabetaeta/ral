@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 6c9047b6
-verified_at_date: 2026-10-08
+verified_at_commit: eecd78ad
+verified_at_date: 2026-10-12
 anchors: [ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, CancelScope, CancelCause, Terminate, DurableRoot, ForegroundScope, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, Status::code, ChildEnd, WaitOutcome::classify, KILL_EXIT_CODE, Mooring::check, CancelCause::code, Signal::status, RunningChild::wait, watch_cancel, Membership::owes, break_pipeline_group, escalation_pending]
 ---
 
@@ -132,10 +132,12 @@ signal context. The two are different kinds of proposition.
   hosting many engines — exarch, a test binary — never has one signal reach
   them all.
 - **An idle Unix REPL is woken after its root is cancelled.** Its ambient
-  forwarder calls `hear` before `Shutdown::end`: the minimal reader
-  polls a persistent wake beside nonblocking stdin; the rustyline reader is
-  interrupted with thread-directed SIGINT until its exclusive registration
-  ends. A new read refuses a standing shutdown. The loop checks the root
+  forwarder calls `hear` before `Shutdown::end`: both readers are interrupted
+  with thread-directed SIGINT until their exclusive registration ends. The
+  minimal reader leaves stdin's shared flags untouched and checks shutdown
+  after `EINTR`; the interactive handler omits `SA_RESTART`. Repeated delivery
+  covers cancellation just before a blocking syscall or before rustyline
+  installs its handler. A new read refuses a standing shutdown. The loop checks the root
   again after input returns, preserving its cause's status and the ordinary
   history, worker, and terminal cleanup
   ([[map/repl/frontend|frontend]]).

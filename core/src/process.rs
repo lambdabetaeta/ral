@@ -53,8 +53,8 @@ pub use foreground::{TerminalLoan, interrupt_foreground_child, termios_snapshot}
 pub use group::{spawn_with_pgid, spawn_with_pgid_after};
 #[cfg(unix)]
 pub use signal::{
-    default, ignore, install, install_handlers, interrupt_handler, quit_handler,
-    reset_child_signals, term_handler,
+    default, ignore, install, install_handlers, install_interrupt_handler, interrupt_handler,
+    quit_handler, reset_child_signals, term_handler,
 };
 
 #[cfg(unix)]

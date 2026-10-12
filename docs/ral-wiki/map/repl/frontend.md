@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 355cf24d
+generated_at_commit: eecd78ad
 generated_at_date: 2026-10-12
 covers_paths: [ral/src/repl/frontend.rs, ral/src/repl/frontend/, ral/src/repl/completion.rs, ral/src/repl/complete.rs, ral/src/repl/highlight_style.rs, prompt-editor/src/completion.rs, core/src/text.rs]
 ---
@@ -51,16 +51,20 @@ dumb terminals whatever was asked):
 cleanup.** `input.rs::Input` is the unique reader; its shared `Shutdown`
 handle is held by the ambient forwarder.
 
-- Minimal input polls stdin beside core's persistent `Wake`, reads with
-  `O_NONBLOCK`, and restores the original flags on return or unwind. A
-  terminal flush can invalidate readiness; `EAGAIN` returns to the poll.
-  One-byte buffering leaves the next command's stdin untouched.
+- Minimal input reads through `Reading` itself, checking shutdown before
+  each read and after interruption. The interactive SIGINT handler omits
+  `SA_RESTART`, so a blocked read returns `EINTR`. Inherited descriptor flags
+  are untouched: `O_NONBLOCK` belongs to the shared open file description,
+  including the parent's aliases. Already-nonblocking input waits in `poll`
+  after `EAGAIN`. One-byte buffering leaves the next command's stdin untouched.
 - Rustyline construction requires its external printer on Unix: that
   establishes a supported input/output TTY and its SIGINT-aware reader.
   Construction failures retain their diagnostic and fall back to minimal.
-- A `Reading` guard exclusively registers the reading pthread and temporarily
-  unblocks SIGINT. Shutdown sends it SIGINT every 20 ms until the guard drops:
-  the retry covers entry before rustyline installs its handler. The guard
+- Both frontends hold a `Reading` guard, exclusively registering the reading
+  pthread and temporarily unblocking SIGINT. Shutdown sends it SIGINT every
+  20 ms until the guard drops:
+  the retry covers entry before rustyline installs its handler or between
+  the minimal reader's shutdown check and its blocking syscall. The guard
   cannot cross threads; unregistration precedes restoring the signal mask.
 - Rustyline restores raw mode and bracketed paste before returning. The
   session observes the durable root before interpreting the returned input,
