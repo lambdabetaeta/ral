@@ -12,9 +12,9 @@ use crate::cancel::InterruptTarget;
 use crate::enquiry::ForkClaim;
 use crate::record::AgentId;
 use crate::record::AgentLog;
+use crate::test_helper::spawn_engine_on;
 use ral_core::types::NurseryId;
 use std::io::{Read, Write};
-use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::Mutex as StdMutex;
@@ -30,34 +30,6 @@ fn fresh_log() -> AgentLog {
         &crate::record::RecordedAccount::for_test("test"),
     )
     .expect("session log")
-}
-
-/// Re-exec this binary as a bare `--engine` child holding `guest` on fd 3,
-/// exactly [`crate::agent::seat::tests::spawn_engine`]'s vehicle. The
-/// caller drops its own copy afterwards, as `hatch_over` does, so the
-/// child's death reads as EOF on the host's end.
-fn spawn_engine_on(guest: &UnixStream) -> std::process::Child {
-    let guest_fd = guest.as_raw_fd();
-    let mut cmd = std::process::Command::new(std::env::current_exe().expect("current exe"));
-    cmd.arg(ral_core::Role::Engine.flag());
-    cmd.stdin(std::process::Stdio::null());
-    cmd.stdout(std::process::Stdio::null());
-    cmd.stderr(std::process::Stdio::null());
-    // SAFETY: runs between fork and exec, calling only async-signal-safe
-    // `dup2`/`close`, with no allocation and no locking.
-    unsafe {
-        use std::os::unix::process::CommandExt;
-        cmd.pre_exec(move || {
-            if libc::dup2(guest_fd, 3) < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if guest_fd != 3 {
-                libc::close(guest_fd);
-            }
-            Ok(())
-        });
-    }
-    cmd.spawn().expect("spawn engine child")
 }
 
 /// What the guest at the far end of a [`FakeDial`] does with the dial.

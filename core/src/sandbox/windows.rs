@@ -8,4 +8,5 @@
 
 pub(crate) mod appcontainer;
 pub(crate) mod dacl;
+mod local;
 pub(crate) mod session;

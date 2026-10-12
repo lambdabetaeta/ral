@@ -129,7 +129,7 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ("core/src/sandbox/reexec.rs", "silent:verify-stat"),
     ("core/src/sandbox/warrant.rs", "silent:respawn-exec"),
     ("core/src/sandbox/warrant.rs", "silent:respawn-spawn"),
-    ("core/src/sandbox/windows/dacl.rs", "silent:dacl-apply"),
+    ("core/src/sandbox/windows/dacl/mod.rs", "silent:dacl-apply"),
     (
         "core/src/sandbox/windows/dacl/deny.rs",
         "silent:dacl-deny-pin",
@@ -139,25 +139,31 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
         "silent:dacl-deny-walk",
     ),
     (
-        "core/src/sandbox/windows/dacl.rs",
+        "core/src/sandbox/windows/dacl/ledger.rs",
         "silent:dacl-ledger-read",
     ),
     (
-        "core/src/sandbox/windows/dacl.rs",
+        "core/src/sandbox/windows/dacl/ledger.rs",
         "silent:dacl-ledger-remove",
     ),
     (
-        "core/src/sandbox/windows/dacl.rs",
+        "core/src/sandbox/windows/dacl/ledger.rs",
         "silent:dacl-ledger-sweep",
     ),
     (
-        "core/src/sandbox/windows/dacl.rs",
+        "core/src/sandbox/windows/dacl/ledger.rs",
         "silent:dacl-ledger-write",
     ),
-    ("core/src/sandbox/windows/dacl.rs", "silent:dacl-stamp-read"),
-    ("core/src/sandbox/windows/dacl.rs", "silent:dacl-state-dir"),
     (
-        "core/src/sandbox/windows/dacl.rs",
+        "core/src/sandbox/windows/dacl/stamp.rs",
+        "silent:dacl-stamp-read",
+    ),
+    (
+        "core/src/sandbox/windows/dacl/ledger.rs",
+        "silent:dacl-state-dir",
+    ),
+    (
+        "core/src/sandbox/windows/dacl/ledger.rs",
         "silent:dacl-state-dir-recheck",
     ),
     ("core/src/frame.rs", "silent:frame-dump"),

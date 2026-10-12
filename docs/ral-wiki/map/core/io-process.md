@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 2afefdf4
+generated_at_commit: 94344cac
 generated_at_date: 2026-10-12
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs]
 ---
@@ -12,6 +12,10 @@ process groups that govern a foreground child, and the daemon that fires every
 scheduled action. **Authority over the controlling terminal is carried as a
 value, not re-derived from process state** — the foreground handoff is gated on
 a held [[map/core/shell-state|TerminalLease]].
+
+Windows process creation immediately owns both returned handles as
+`OwnedHandle`; failed Job Object assignment or thread resumption releases both.
+The child keeps the process handle, and the spawning thread releases the thread handle.
 
 ## IO — `core/src/io/`
 

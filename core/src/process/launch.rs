@@ -577,68 +577,7 @@ mod windows_args {
     // Non-BMP text through the argv UTF-16 conversion, so a wide-char
     // regression is caught apart from a quoting one.  Windows CI only.
     #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        /// Decode a `make_command_line` buffer, dropping its trailing NUL.
-        fn decode(wide: &[u16]) -> String {
-            let (last, body) = wide.split_last().expect("non-empty command line");
-            assert_eq!(*last, 0, "make_command_line must NUL-terminate");
-            String::from_utf16(body).expect("well-formed UTF-16")
-        }
-
-        /// A plain argument takes `append_arg`'s no-quoting branch, isolating
-        /// the encode/decode round-trip from the quoting rules.
-        #[test]
-        fn plain_arg_round_trips_non_ascii_and_non_bmp() {
-            let program = std::ffi::OsString::from(r"C:\Users\café\bin\日本語.exe");
-            let arg = std::ffi::OsString::from("🎉𝔘𝔫𝔦𝔠𝔬𝔡𝔢-café-日本語");
-            let cmd = make_command_line(program.as_os_str(), std::slice::from_ref(&arg)).unwrap();
-            let decoded = decode(&cmd);
-            assert_eq!(
-                decoded,
-                format!(
-                    "\"{}\" {}",
-                    program.to_str().unwrap(),
-                    arg.to_str().unwrap()
-                )
-            );
-        }
-
-        /// The same text through `append_arg`'s quoting branch.
-        #[test]
-        fn quoted_arg_round_trips_non_ascii_and_non_bmp() {
-            let program = std::ffi::OsString::from(r"C:\Program Files\ral.exe");
-            let arg = std::ffi::OsString::from("🎉 café 日本語 with spaces");
-            let cmd = make_command_line(program.as_os_str(), std::slice::from_ref(&arg)).unwrap();
-            let decoded = decode(&cmd);
-            assert_eq!(
-                decoded,
-                format!(
-                    "\"{}\" \"{}\"",
-                    program.to_str().unwrap(),
-                    arg.to_str().unwrap()
-                )
-            );
-        }
-
-        /// A surrogate pair against the arg boundary and against an escaped
-        /// embedded quote — the two places careless `u16`-unit walking in the
-        /// backslash-doubling would split one.
-        #[test]
-        fn non_bmp_survives_adjacent_to_escaped_quote() {
-            let q = '"';
-            let program = std::ffi::OsString::from(r"C:\ral.exe");
-            let arg = std::ffi::OsString::from(format!("🎉{q}🎊 quoted 🎊{q}🎉"));
-            let cmd = make_command_line(program.as_os_str(), std::slice::from_ref(&arg)).unwrap();
-            let decoded = decode(&cmd);
-            let expected_payload = format!("🎉\\{q}🎊 quoted 🎊\\{q}🎉");
-            assert_eq!(
-                decoded,
-                format!("\"{}\" \"{expected_payload}\"", program.to_str().unwrap())
-            );
-        }
-    }
+    mod tests;
 }
 
 #[cfg(windows)]
@@ -653,8 +592,7 @@ mod windows {
     use std::ptr::{null, null_mut};
     use std::sync::Mutex;
     use windows_sys::Win32::Foundation::{
-        CloseHandle, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
-        WAIT_OBJECT_0,
+        HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation, WAIT_OBJECT_0,
     };
     use windows_sys::Win32::Security::SECURITY_CAPABILITIES;
     use windows_sys::Win32::Storage::FileSystem::{
@@ -800,27 +738,33 @@ mod windows {
             return Err(io::Error::last_os_error());
         }
 
-        let process = OwnedHandleGuard(pi.hProcess);
-        let thread = OwnedHandleGuard(pi.hThread);
+        // SAFETY: CreateProcessW returned two fresh owning handles.
+        let process = unsafe { OwnedHandle::from_raw_handle(pi.hProcess) };
+        let thread = unsafe { OwnedHandle::from_raw_handle(pi.hThread) };
         if let Some(job) = crate::process::group::prepared_job(prepared) {
-            let assigned = unsafe { AssignProcessToJobObject(job, process.0) };
+            let assigned = unsafe { AssignProcessToJobObject(job, process.as_raw_handle()) };
             if assigned == 0 {
                 unsafe {
-                    windows_sys::Win32::System::Threading::TerminateProcess(process.0, 1);
+                    windows_sys::Win32::System::Threading::TerminateProcess(
+                        process.as_raw_handle(),
+                        1,
+                    );
                 }
                 return Err(io::Error::other(
                     "could not place pipeline child in its Job Object before start; is ral already running in a restrictive Windows Job Object?",
                 ));
             }
-            if unsafe { ResumeThread(thread.0) } == u32::MAX {
+            if unsafe { ResumeThread(thread.as_raw_handle()) } == u32::MAX {
                 unsafe {
-                    windows_sys::Win32::System::Threading::TerminateProcess(process.0, 1);
+                    windows_sys::Win32::System::Threading::TerminateProcess(
+                        process.as_raw_handle(),
+                        1,
+                    );
                 }
                 return Err(io::Error::last_os_error());
             }
         }
 
-        let process = process.into_owned();
         drop(thread);
         Ok(ChildHandle::from_windows_raw(RawChild::new(
             process,
@@ -1117,27 +1061,6 @@ mod windows {
         }
     }
 
-    struct OwnedHandleGuard(HANDLE);
-
-    impl OwnedHandleGuard {
-        fn into_owned(self) -> OwnedHandle {
-            let handle = self.0;
-            std::mem::forget(self);
-            // SAFETY: `CreateProcessW` returned a fresh owning process handle.
-            unsafe { OwnedHandle::from_raw_handle(handle as RawHandle) }
-        }
-    }
-
-    impl Drop for OwnedHandleGuard {
-        fn drop(&mut self) {
-            unsafe {
-                if !self.0.is_null() {
-                    CloseHandle(self.0);
-                }
-            }
-        }
-    }
-
     fn wide_null(s: &OsStr) -> io::Result<Vec<u16>> {
         windows_args::ensure_no_nuls(s)?;
         Ok(s.encode_wide().chain([0]).collect())
@@ -1266,39 +1189,5 @@ mod windows {
     // The other two UTF-16 conversions: `wide_null` for the program path and
     // cwd, `environment_block` for the env block.
     #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        fn decode_wide_null(v: &[u16]) -> String {
-            let (last, body) = v.split_last().expect("non-empty");
-            assert_eq!(*last, 0, "wide_null must NUL-terminate");
-            String::from_utf16(body).expect("well-formed UTF-16")
-        }
-
-        #[test]
-        fn wide_null_round_trips_non_ascii_and_non_bmp() {
-            let s = "🎉𝔘𝔫𝔦𝔠𝔬𝔡𝔢-café-日本語";
-            let encoded = wide_null(OsStr::new(s)).unwrap();
-            assert_eq!(decode_wide_null(&encoded), s);
-        }
-
-        /// `environment_block` layers `edits` over the live environment, so
-        /// the assertion hunts the block for the one injected entry.
-        #[test]
-        fn environment_block_round_trips_a_non_ascii_non_bmp_value() {
-            let key = super::super::env_key(OsStr::new("RAL_UNICODE_TEST_VAR"));
-            let value = OsString::from("🎉𝔘𝔫𝔦𝔠𝔬𝔡𝔢-café-日本語");
-            let edits = std::collections::BTreeMap::from([(key, EnvEdit::Set(value.clone()))]);
-            let block = environment_block(&edits).unwrap();
-            // Entries are NUL-terminated, plus one extra NUL closing the whole
-            // block: strip that, then split on the per-entry NULs.
-            let (_, body) = block.split_last().expect("non-empty");
-            let text = String::from_utf16(body).expect("well-formed UTF-16");
-            let expected = format!("RAL_UNICODE_TEST_VAR={}", value.to_str().unwrap());
-            assert!(
-                text.split('\u{0}').any(|entry| entry == expected),
-                "expected entry {expected:?} not found in environment block"
-            );
-        }
-    }
+    mod tests;
 }

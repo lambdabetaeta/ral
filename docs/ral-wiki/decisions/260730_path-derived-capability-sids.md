@@ -13,7 +13,13 @@ projection per session.** Supersedes
 [[decisions/260714_ace-free-fs-confinement|ace-free-fs-confinement]] (which left
 the tier choice open) and the fs-authority half of
 [[decisions/260713_projection-keyed-appcontainer|projection-keyed-appcontainer]];
-realised in `core/src/sandbox/windows/{dacl,session,appcontainer}.rs`.
+realised in `core/src/sandbox/windows/{session,appcontainer}.rs` and `dacl/`.
+
+**2026-10-12 amendment:** The legacy pre-capability ACE restore path is retired.
+Recovery reclaims profile registrations only; its ledger requires the owner's
+creation time and profile list. Persistent capability stamps remain in place.
+The implementation is split into `dacl/{mod,stamp,ledger,acl,mutex}.rs`, with
+owned descriptors and borrowed ACEs for security scans.
 
 ## Context
 
@@ -82,10 +88,9 @@ Split the two: derive the SID from the path, and let the token select.
   path instead of one projection's deny bleeding onto another's.
 - **Profiles stay, stripped of fs authority.** The per-projection AppContainer
   profile remains for what only it provides — the deny-by-default LowBox token
-  and named-object namespace separation. `DaclManager` shrinks to the profile
-  ledger; teardown no longer restores ACEs, so exit no longer hangs. The boot
-  sweep still restores *legacy* pre-capability ledgers' per-session ACEs, since
-  a recycled pid could resurrect a profile name those ACEs still reference.
+  and named-object namespace separation. `DaclManager` records profile
+  registrations; teardown and the boot sweep reclaim only these profiles.
+  Recovery checks the owner's creation time as well as its PID and image.
 - **A read-write grant on a directory also lowers its mandatory label to `Low`.**
   The capability ACE is necessary but not sufficient: Windows runs the
   mandatory-integrity check *before* the AppContainer pass, and a directory
@@ -201,7 +206,7 @@ load-bearing caveat of the design, accepted explicitly:
   tracking is **rejected**: journal wrap and crash-resume make it a durable
   state machine of its own, more complexity than the drift it closes.
 
-`dacl.rs`'s module header documents this on the code side and points at this
+`dacl/mod.rs`'s module header documents this on the code side and points at this
 page.
 
 ## Open work — validation before this is called settled

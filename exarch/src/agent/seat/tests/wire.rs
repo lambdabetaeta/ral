@@ -3,10 +3,10 @@ use crate::agent::desk::{ExarchDesk, HostServices, RunHost, SurfaceApplier};
 use crate::agent::fleet::Fleet;
 use crate::bus::{Emitter, Inbox};
 use crate::record::{AgentId, AgentLog};
+use crate::test_helper::engine_over_socketpair;
 use ral_core::carrier::{Host, WireTransport};
 use ral_core::protocol::channel::Liveness;
 use ral_core::protocol::{EnquiryError, Report};
-use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -24,40 +24,6 @@ fn test_log() -> AgentLog {
     .expect("session log")
 }
 
-/// The fd-3 handoff ral-daemon's `spawn` performs, so the host end can be
-/// taken with `adopt` — the constructor `Seat::wire`, and so synod, calls.
-fn spawn_engine(liveness: Liveness) -> (WireTransport, std::process::Child) {
-    let (host, guest) = UnixStream::pair().expect("socketpair");
-    let guest_fd = guest.as_raw_fd();
-    let mut cmd = std::process::Command::new(std::env::current_exe().expect("current exe"));
-    cmd.arg(ral_core::Role::Engine.flag());
-    cmd.stdin(std::process::Stdio::null());
-    cmd.stdout(std::process::Stdio::null());
-    cmd.stderr(std::process::Stdio::null());
-    // SAFETY: runs between fork and exec, calling only async-signal-safe
-    // `dup2`/`close`, with no allocation and no locking.
-    unsafe {
-        use std::os::unix::process::CommandExt;
-        cmd.pre_exec(move || {
-            if libc::dup2(guest_fd, 3) < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if guest_fd != 3 {
-                libc::close(guest_fd);
-            }
-            Ok(())
-        });
-    }
-    let child = cmd.spawn().expect("spawn engine child");
-    // The child holds it as fd 3 now; a copy kept here would hide the
-    // child's death from this end's own EOF.
-    drop(guest);
-    (
-        WireTransport::adopt(host, liveness).expect("adopt host stream"),
-        child,
-    )
-}
-
 /// The trunk a wire desk's handlers scope against — inert: this file's
 /// tests never spawn from it.
 fn test_trunk(fleet: &Arc<Fleet>) -> Arc<crate::agent::Agent> {
@@ -67,7 +33,7 @@ fn test_trunk(fleet: &Arc<Fleet>) -> Arc<crate::agent::Agent> {
 }
 
 fn wire_seat(liveness: Liveness) -> (Seat, std::process::Child) {
-    let (transport, child) = spawn_engine(liveness);
+    let (transport, child) = engine_over_socketpair(liveness);
     let dir = std::env::temp_dir();
     (
         Seat::wire(transport, dir.clone(), dir).expect("a freshly spawned engine attaches"),

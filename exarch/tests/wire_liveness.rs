@@ -19,10 +19,11 @@
 //! ([`exarch::pre_main_ctor!`]), so `std::env::current_exe()` is a genuine
 //! engine.
 
-use std::os::unix::io::AsRawFd;
-use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+#[path = "../src/test_helper.rs"]
+mod test_helper;
 
 use ral_core::carrier::{Host, Transport, WireTransport, dispatch_to_report};
 use ral_core::protocol::channel::Liveness;
@@ -45,43 +46,8 @@ impl Drop for EngineChild {
     }
 }
 
-/// Spawn a real engine child over one end of a `socketpair` and adopt the
-/// host end into a `WireTransport` driving the §3 frame protocol under
-/// `liveness`.
-///
-/// The `pre_exec` is ral-daemon's `spawn`'s: `dup2` the guest end onto fd 3, close the original
-/// if it landed elsewhere. The guest end lives only in the child afterwards;
-/// the host end is the parent's sole handle to the protocol.
 fn engine_over_socketpair(liveness: Liveness) -> (WireTransport, EngineChild) {
-    let (host, guest) = UnixStream::pair().expect("socketpair");
-    let guest_fd = guest.as_raw_fd();
-
-    let mut cmd = std::process::Command::new(std::env::current_exe().expect("current exe"));
-    cmd.arg(ral_core::Role::Engine.flag());
-    cmd.stdin(std::process::Stdio::null());
-    cmd.stdout(std::process::Stdio::null());
-    cmd.stderr(std::process::Stdio::null());
-    // SAFETY: the closure runs between fork and exec and calls only
-    // async-signal-safe syscalls (`dup2`, `close`) with no allocation and no
-    // locking.
-    unsafe {
-        use std::os::unix::process::CommandExt;
-        cmd.pre_exec(move || {
-            if libc::dup2(guest_fd, 3) < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if guest_fd != 3 {
-                libc::close(guest_fd);
-            }
-            Ok(())
-        });
-    }
-    let child = cmd.spawn().expect("spawn engine child");
-    // The guest end has crossed into the child (as fd 3); the parent must not
-    // hold it, or the engine would never see EOF when the host end shuts down.
-    drop(guest);
-
-    let transport = WireTransport::adopt(host, liveness).expect("adopt host stream");
+    let (transport, child) = test_helper::engine_over_socketpair(liveness);
     (transport, EngineChild(child))
 }
 

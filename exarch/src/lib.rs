@@ -39,6 +39,8 @@ pub mod schedule;
 pub mod shell_eval;
 pub(crate) mod signals;
 pub mod skill;
+#[cfg(all(unix, test))]
+pub(crate) mod test_helper;
 pub mod tui;
 pub mod wallet;
 

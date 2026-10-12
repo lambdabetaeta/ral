@@ -38,9 +38,7 @@ use windows_sys::Win32::Security::{
 };
 use windows_sys::Win32::System::SystemServices::SE_GROUP_ENABLED;
 
-// `windows-sys` aliases `PSID` and `HLOCAL` to the same `*mut c_void`, so a
-// `PSID` goes straight into `LocalFree` uncast.
-use windows_sys::Win32::Foundation::LocalFree;
+use super::local::Local;
 
 /// `HRESULT_FROM_WIN32` from `winerror.h`, which `windows-sys` cannot
 /// generate because it is a header-only macro. Every input here is a genuine
@@ -82,13 +80,9 @@ fn sid_to_string(sid: PSID) -> io::Result<String> {
     if ok == 0 {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: `out` was just allocated by `ConvertSidToStringSidW`.
-    let s = unsafe { wide_ptr_to_string(out) };
-    // SAFETY: freed exactly once, as that call's contract requires.
-    unsafe {
-        LocalFree(out.cast());
-    }
-    Ok(s)
+    // SAFETY: ConvertSidToStringSidW transferred the terminated string.
+    let out = unsafe { Local::from_raw(out) };
+    Ok(unsafe { wide_ptr_to_string(out.as_ptr()) })
 }
 
 /// Owned `PSID` from `CreateAppContainerProfile` or
@@ -216,7 +210,7 @@ pub(crate) fn delete_profile_by_name(name: &str) -> io::Result<()> {
 // after mxc appcontainer_runner.rs::OwnedCapabilitySid
 /// Owned capability `PSID`: `DeriveCapabilitySidsFromName` `LocalAlloc`s its
 /// SIDs, so this one takes `LocalFree`, not the `FreeSid` above.
-pub(crate) struct OwnedCapabilitySid(PSID);
+pub(crate) struct OwnedCapabilitySid(Local<std::ffi::c_void>);
 
 impl OwnedCapabilitySid {
     /// Derive the capability SID for `name` — a well-known Windows capability
@@ -249,25 +243,22 @@ impl OwnedCapabilitySid {
                 return Err(io::Error::last_os_error());
             }
 
+            let group_sids = Local::from_raw(group_sids);
             for i in 0..group_sid_count {
-                let sid = *group_sids.add(i as usize);
-                LocalFree(sid);
+                drop(Local::from_raw(*group_sids.as_ptr().add(i as usize)));
             }
-            LocalFree(group_sids.cast());
+            let capability_sids = Local::from_raw(capability_sids);
 
             if capability_sid_count == 0 {
-                LocalFree(capability_sids.cast());
                 return Err(io::Error::other(format!(
                     "no capability SID returned for '{name}'"
                 )));
             }
 
-            let result_sid = *capability_sids;
+            let result_sid = Local::from_raw(*capability_sids.as_ptr());
             for i in 1..capability_sid_count {
-                let sid = *capability_sids.add(i as usize);
-                LocalFree(sid);
+                drop(Local::from_raw(*capability_sids.as_ptr().add(i as usize)));
             }
-            LocalFree(capability_sids.cast());
 
             Ok(Self(result_sid))
         }
@@ -276,25 +267,13 @@ impl OwnedCapabilitySid {
     /// The capability's `PSID`, valid only while `self` lives — a
     /// `SID_AND_ATTRIBUTES` built from it must not outlive the owner.
     pub(crate) fn sid(&self) -> PSID {
-        self.0
+        self.0.as_ptr()
     }
 
     /// The SID in `S-1-15-3-…` string form: the spelling `dacl` writes into an
     /// ACE.
     pub(crate) fn sid_string(&self) -> io::Result<String> {
-        sid_to_string(self.0)
-    }
-}
-
-impl Drop for OwnedCapabilitySid {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            // SAFETY: a `LocalAlloc`'d SID from
-            // `DeriveCapabilitySidsFromName`.
-            unsafe {
-                LocalFree(self.0.cast());
-            }
-        }
+        sid_to_string(self.0.as_ptr())
     }
 }
 
@@ -327,7 +306,7 @@ impl CapabilitySids {
             for name in NETWORK_CAPABILITIES {
                 let sid = OwnedCapabilitySid::from_capability_name(name)?;
                 entries.push(SID_AND_ATTRIBUTES {
-                    Sid: sid.0,
+                    Sid: sid.sid(),
                     Attributes: SE_GROUP_ENABLED as u32,
                 });
                 owned.push(sid);
@@ -346,68 +325,4 @@ impl CapabilitySids {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn hresult_from_win32_matches_already_exists_constant() {
-        // 0x800700B7 is the published wrapping, checkable against `winerror.h`.
-        assert_eq!(
-            hresult_from_win32(ERROR_ALREADY_EXISTS).cast_unsigned(),
-            0x8007_00B7
-        );
-    }
-
-    #[test]
-    fn capability_sids_empty_when_network_denied() {
-        let caps = CapabilitySids::build(false).expect("build never touches the OS when empty");
-        assert!(caps.entries().is_empty());
-    }
-
-    #[test]
-    fn capability_sids_derives_both_network_capabilities_when_allowed() {
-        let caps = CapabilitySids::build(true).expect(
-            "internetClient/privateNetworkClientServer are well-known capabilities on any \
-             supported Windows version",
-        );
-        assert_eq!(caps.entries().len(), NETWORK_CAPABILITIES.len());
-        for entry in caps.entries() {
-            assert!(!entry.Sid.is_null());
-            assert_eq!(entry.Attributes, SE_GROUP_ENABLED as u32);
-        }
-    }
-
-    #[test]
-    fn profile_create_reuse_sid_string_and_delete_round_trip() {
-        // Keyed on pid so a concurrent test process cannot collide.
-        let name = format!("ral.test.appcontainer.{}", std::process::id());
-
-        let profile = AppContainerProfile::create_or_reuse(&name).expect("first create succeeds");
-        assert_eq!(profile.name, name);
-        assert!(!profile.sid().is_null());
-        let sid_string = profile.sid_string().expect("SID converts to string form");
-        assert!(
-            sid_string.starts_with("S-1-15-"),
-            "unexpected AppContainer SID: {sid_string}"
-        );
-
-        // Dropping frees the in-memory SID but leaves the OS profile
-        // registered, so the next create takes the already-exists path.
-        drop(profile);
-        let reused = AppContainerProfile::create_or_reuse(&name).expect("reuse succeeds");
-        assert_eq!(
-            reused.sid_string().expect("SID converts to string form"),
-            sid_string
-        );
-        reused.delete().expect("delete succeeds");
-
-        // The SID is a deterministic function of the name, so it survives a
-        // delete and re-create.
-        let recreated = AppContainerProfile::create_or_reuse(&name).expect("re-create succeeds");
-        assert_eq!(
-            recreated.sid_string().expect("SID converts to string form"),
-            sid_string
-        );
-        recreated.delete().expect("final delete succeeds");
-    }
-}
+mod tests;

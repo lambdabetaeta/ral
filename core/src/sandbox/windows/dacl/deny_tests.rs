@@ -3,9 +3,15 @@
     reason = "[test] Windows deny fixtures and real ACL regressions"
 )]
 
+use super::acl::wide;
 use super::*;
 use std::os::windows::fs::OpenOptionsExt;
+use windows_sys::Win32::Foundation::ERROR_SUCCESS;
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+use windows_sys::Win32::Security::Authorization::{
+    GetNamedSecurityInfoW, SE_FILE_OBJECT, SetNamedSecurityInfoW,
+};
+use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
 use windows_sys::Win32::Security::{
     GetSecurityDescriptorControl, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
     SE_DACL_PROTECTED,

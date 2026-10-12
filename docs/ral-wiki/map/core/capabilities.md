@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 2afefdf4
+generated_at_commit: 94344cac
 generated_at_date: 2026-10-12
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/guard/, core/src/guard.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
@@ -271,8 +271,8 @@ device for `net` to govern; the in-process guards apply unchanged
   envelope (`linux::pin_envelope`, walked on the process's own `PATH`
   before any shell exists); `boot` is `pin` and, on Windows, the boot-time orphan sweep
   (`windows::session::boot_recover`) that deletes a crashed prior session's
-  AppContainer profiles and restores the per-session ACEs of any legacy
-  pre-capability ledger. A test binary is
+  AppContainer profiles, matching their ledger owner by PID, image and creation
+  time. A test binary is
   the same [[invariants/single-binary|multicall executable]] a confined child
   re-execs, so it must serve these flags from its own pre-`main` `#[ctor]` (it
   reaches `main` only through libtest). `invocation::serve(&role, installers)`
@@ -449,13 +449,14 @@ device for `net` to govern; the in-process guards apply unchanged
   payload's pid read back for a `Kept` launch; `linux/host.rs`, `HostEnvelope`,
   the probed host facts the render is pure in), and
   `windows.rs` (Job Objects capping the child tree at 512 processes, plus the
-  AppContainer backend in three submodules — `appcontainer.rs`, the profile
-  lifecycle and LowBox `SECURITY_CAPABILITIES` construction; `dacl.rs`, the
-  path-derived capability-SID engine (`fs_capability_name`, `ensure_fs_grant`)
-  over a durably persisted stamp store, per-path named mutexes, and boot-time
-  orphan recovery; `session.rs`, the session state the two compose into). The
-  module docs of those three files carry the full protocol; the shape is
-  imitated from MXC's Tier-3 processcontainer backend, breadcrumbed per unit.
+  AppContainer backend in `windows/`: `appcontainer.rs` owns profiles and
+  LowBox `SECURITY_CAPABILITIES`; `dacl/mod.rs` exposes the path-derived
+  capability-SID engine; `session.rs` composes them). Within `dacl/`,
+  `stamp.rs` owns completion witnesses, `mutex.rs` per-path locks, `ledger.rs`
+  profile recovery, and `acl.rs` queried descriptors and borrowed ACEs.
+  `windows/local.rs` owns Win32 local allocations. Kernel handles use
+  `OwnedHandle`; the path mutex guard stays on its acquiring thread.
+  Ported units retain their MXC provenance.
 
 The Windows backend is **path-keyed**: each `(canonical path, kind)` grant —
 kind ∈ {rw, ro, deny} — derives a deterministic capability name
@@ -481,7 +482,7 @@ kernel-checked reach is then exactly the capability SIDs `session::confine`
 mints into its token, so attenuation shrinks-only: a narrowed grant or subagent
 gets a token lacking the wider paths' capabilities. An ACE lives on the NTFS
 object and Windows does not re-inherit on a same-volume rename, so stamped
-authority is object-sticky where a grant rule is path-based — `dacl.rs`'s module
+authority is object-sticky where a grant rule is path-based — `dacl/mod.rs`'s module
 header records the resulting drift in both directions
 ([[decisions/260730_path-derived-capability-sids|path-derived-capability-sids]]).
 Within that shape: an AppContainer profile is still minted per *distinct fs

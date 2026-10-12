@@ -3,23 +3,15 @@
 use std::fs::{self, File};
 use std::io;
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
-use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 
-use windows_sys::Win32::Foundation::{ERROR_SUCCESS, LocalFree};
-use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
-use windows_sys::Win32::Security::{
-    ACE_HEADER, DACL_SECURITY_INFORMATION, GetAce, GetSecurityDescriptorControl, SE_DACL_PROTECTED,
-};
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
     FILE_READ_ATTRIBUTES, FILE_SHARE_READ, READ_CONTROL,
 };
 
-use super::{
-    AceType, DENY_MASK, DaclError, INHERITED_ACE_FLAG, PathMutexGuard, apply_explicit_ace,
-    cancelled, win32_err, win32_err_str,
-};
+use super::acl::{INHERITED_ACE_FLAG, Security, null_deny_dacl, win32_err_str};
+use super::{AceType, DENY_MASK, DaclError, PathMutexGuard, apply_explicit_ace, cancelled};
 use crate::process::cancel::CancelScope;
 
 #[allow(
@@ -79,51 +71,18 @@ fn walk_error(path: &Path, error: &io::Error) -> DaclError {
 }
 
 fn needs_explicit_deny(file: &File, path: &Path) -> Result<bool, DaclError> {
-    let mut dacl = std::ptr::null_mut();
-    let mut sd = std::ptr::null_mut();
-    // SAFETY: the live handle has READ_CONTROL; the outputs live through the scan.
-    let rc = unsafe {
-        GetSecurityInfo(
-            file.as_raw_handle(),
-            SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            &raw mut dacl,
-            std::ptr::null_mut(),
-            &raw mut sd,
-        )
-    };
-    if rc != ERROR_SUCCESS {
-        return Err(win32_err(path, "GetSecurityInfo", rc));
+    let security = Security::of_file(file, path)?;
+    if security.acl.is_null() {
+        return Err(null_deny_dacl(path));
     }
-    let result = (|| {
-        let mut control = 0;
-        let mut revision = 0;
-        // SAFETY: GetSecurityInfo returned this descriptor.
-        if unsafe { GetSecurityDescriptorControl(sd, &raw mut control, &raw mut revision) } == 0 {
-            return Err(walk_error(path, &io::Error::last_os_error()));
-        }
-        if dacl.is_null() {
-            return Err(super::null_deny_dacl(path));
-        }
-        if control & SE_DACL_PROTECTED != 0 {
+    if security.protected().map_err(|e| walk_error(path, &e))? {
+        return Ok(true);
+    }
+    // Every explicit boundary matters, independent of this token's SIDs.
+    for ace in security.aces() {
+        if ace.map_err(|e| walk_error(path, &e))?.0.AceFlags & INHERITED_ACE_FLAG == 0 {
             return Ok(true);
         }
-        // Conservatively cover every explicit boundary, independent of this token's SIDs.
-        // SAFETY: the DACL and its ACEs belong to sd until LocalFree below.
-        for index in 0..unsafe { (*dacl).AceCount } {
-            let mut ace = std::ptr::null_mut();
-            if unsafe { GetAce(dacl, u32::from(index), &raw mut ace) } == 0 {
-                return Err(walk_error(path, &io::Error::last_os_error()));
-            }
-            if unsafe { (*ace.cast::<ACE_HEADER>()).AceFlags } & INHERITED_ACE_FLAG == 0 {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    })();
-    // SAFETY: GetSecurityInfo allocated sd; no borrowed ACL pointer escapes.
-    unsafe { LocalFree(sd) };
-    result
+    }
+    Ok(false)
 }
