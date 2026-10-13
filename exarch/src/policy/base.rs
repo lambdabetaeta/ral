@@ -104,7 +104,9 @@ mod tests {
             _ => None,
         })
     }
-    use ral_core::capability::{Capabilities, Net};
+    use ral_core::capability::Capabilities;
+    #[cfg(unix)]
+    use ral_core::capability::Net;
     #[cfg(unix)]
     use std::path::Path;
 

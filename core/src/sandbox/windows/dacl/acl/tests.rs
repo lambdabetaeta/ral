@@ -38,7 +38,7 @@ fn sid_parse_rejects_empty_and_oversized() {
 fn effective_access_is_zero_on_fresh_dir() {
     with_scoped_state_dir(|| {
         let td = tempfile::tempdir().unwrap();
-        let access = compute_appcontainer_effective_access(td.path()).unwrap();
+        let access = compute_appcontainer_effective_access(Target::Named(td.path())).unwrap();
         assert_eq!(access, 0);
     });
 }
