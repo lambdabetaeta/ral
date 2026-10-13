@@ -520,6 +520,9 @@ mod tests {
     struct Fixture {
         cache: SourceCache,
         engine: IdentityTransport,
+        /// The engine's logical cwd: a fresh directory holding only what a test
+        /// plants in it, so path completion never lists the host's filesystem.
+        cwd: tempfile::TempDir,
     }
 
     impl Fixture {
@@ -528,9 +531,11 @@ mod tests {
         }
     }
 
-    /// Backing store for the classification and ranking tests: every name goes
-    /// in the shell half, the `PATH` scan is empty, and the engine sits at `/`.
+    /// Backing store for the classification, ranking and path tests: every
+    /// name goes in the shell half, the `PATH` scan is empty, and the engine
+    /// sits in an empty directory of its own.
     fn sources(commands: &[&str], variables: &[&str]) -> Fixture {
+        let cwd = tempfile::tempdir().unwrap();
         Fixture {
             cache: SourceCache {
                 shell_commands: commands.iter().map(ToString::to_string).collect(),
@@ -538,7 +543,8 @@ mod tests {
                 key: PathKey::default(),
                 scan: OnceCell::new(),
             },
-            engine: engine_at("", Path::new("/")),
+            engine: engine_at("", cwd.path()),
+            cwd,
         }
     }
 
@@ -754,17 +760,24 @@ mod tests {
 
     // ── complete: classification + matching ─────────────────────────────
 
-    /// Command position is nothing before the atom, or a separator.
+    /// Command position is nothing before the atom, or a separator; anywhere
+    /// else the atom is a path, completed from the cwd and not from commands.
     #[test]
     fn complete_offers_commands_after_separators() {
         let src = sources(&["git"], &[]);
-        for (line, start) in [("foo | gi", 6), ("if true { gi", 10), ("foo; gi", 5)] {
+        std::fs::write(src.cwd.path().join("gizmo"), "").unwrap();
+        let offered = |line: &str| {
             let (at, cands) = complete(line, line.len(), &src.view());
-            assert_eq!(at, start, "{line:?}");
-            assert!(cands.iter().any(|c| c.display == "git"), "{line:?}");
+            (at, cands.into_iter().map(|c| c.display).collect::<Vec<_>>())
+        };
+        for (line, start) in [("foo | gi", 6), ("if true { gi", 10), ("foo; gi", 5)] {
+            assert_eq!(offered(line), (start, vec!["git".into()]), "{line:?}");
         }
-        let (_, cands) = complete("foo gi", 6, &src.view());
-        assert!(cands.is_empty(), "an argument is a path");
+        assert_eq!(
+            offered("foo gi"),
+            (4, vec!["gizmo".into()]),
+            "an argument is a path"
+        );
     }
 
     /// The lexer reads U+2003 as a word character, so the atom starts at 0;
@@ -828,20 +841,12 @@ mod tests {
 
     // ── path completion / dotfile_visible ───────────────────────────────
 
-    /// A fixture whose engine sits in `cwd`.
-    fn at(cwd: &Path) -> Fixture {
-        Fixture {
-            engine: engine_at("", cwd),
-            ..sources(&[], &[])
-        }
-    }
-
     #[test]
     fn path_completion_expands_home_tilde_prefix() {
         if ral_core::host::home().is_none() {
             return;
         }
-        let (start, _) = complete("ls ~/", 5, &at(Path::new("/")).view());
+        let (start, _) = complete("ls ~/", 5, &sources(&[], &[]).view());
         assert_eq!(start, 3);
     }
 
@@ -851,7 +856,7 @@ mod tests {
         if ral_core::host::home().is_none() {
             return;
         }
-        let (start, _) = complete("ls ~", 4, &at(Path::new("/")).view());
+        let (start, _) = complete("ls ~", 4, &sources(&[], &[]).view());
         assert_eq!(start, 3);
     }
     #[test]
@@ -866,11 +871,11 @@ mod tests {
 
     #[test]
     fn path_completion_lists_shell_cwd_for_empty_token() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("alpha"), "").unwrap();
-        std::fs::write(tmp.path().join("beta"), "").unwrap();
+        let src = sources(&[], &[]);
+        std::fs::write(src.cwd.path().join("alpha"), "").unwrap();
+        std::fs::write(src.cwd.path().join("beta"), "").unwrap();
 
-        let (start, cands) = complete("ls ", 3, &at(tmp.path()).view());
+        let (start, cands) = complete("ls ", 3, &src.view());
         let mut names: Vec<&str> = cands.iter().map(|c| c.display.as_str()).collect();
         names.sort_unstable();
         assert_eq!((start, names), (3, vec!["alpha", "beta"]));
@@ -878,11 +883,11 @@ mod tests {
 
     #[test]
     fn path_completion_lists_shell_cwd_subdir_for_relative_token() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir(tmp.path().join("sub")).unwrap();
-        std::fs::write(tmp.path().join("sub").join("gamma"), "").unwrap();
+        let src = sources(&[], &[]);
+        std::fs::create_dir(src.cwd.path().join("sub")).unwrap();
+        std::fs::write(src.cwd.path().join("sub").join("gamma"), "").unwrap();
 
-        let (start, cands) = complete("ls sub/", 7, &at(tmp.path()).view());
+        let (start, cands) = complete("ls sub/", 7, &src.view());
         assert_eq!(start, 3);
         assert_eq!(cands.len(), 1);
         assert_eq!(
@@ -896,12 +901,12 @@ mod tests {
     /// its trailing slash on both.
     #[test]
     fn path_completion_quotes_replacement_but_not_display() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("a b.txt"), "").unwrap();
-        std::fs::write(tmp.path().join("plain.txt"), "").unwrap();
-        std::fs::create_dir(tmp.path().join("sub")).unwrap();
+        let src = sources(&[], &[]);
+        std::fs::write(src.cwd.path().join("a b.txt"), "").unwrap();
+        std::fs::write(src.cwd.path().join("plain.txt"), "").unwrap();
+        std::fs::create_dir(src.cwd.path().join("sub")).unwrap();
 
-        let (_, cands) = complete("ls ", 3, &at(tmp.path()).view());
+        let (_, cands) = complete("ls ", 3, &src.view());
         let replacement = |display: &str| {
             cands
                 .iter()
@@ -919,11 +924,11 @@ mod tests {
     /// atom's start: `dir/'a b'` would not parse.
     #[test]
     fn path_completion_in_a_subdirectory_quotes_the_whole_atom() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir(tmp.path().join("dir")).unwrap();
-        std::fs::write(tmp.path().join("dir").join("a b"), "").unwrap();
+        let src = sources(&[], &[]);
+        std::fs::create_dir(src.cwd.path().join("dir")).unwrap();
+        std::fs::write(src.cwd.path().join("dir").join("a b"), "").unwrap();
 
-        let (start, cands) = complete("ls dir/a", 8, &at(tmp.path()).view());
+        let (start, cands) = complete("ls dir/a", 8, &src.view());
         assert_eq!(start, 3);
         assert_eq!(cands[0].replacement, "'dir/a b'");
     }
@@ -931,10 +936,10 @@ mod tests {
     /// An open quote is one atom, spaces included; the replacement closes it.
     #[test]
     fn path_completion_continues_an_open_single_quote() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir(tmp.path().join("my dir")).unwrap();
+        let src = sources(&[], &[]);
+        std::fs::create_dir(src.cwd.path().join("my dir")).unwrap();
 
-        let (start, cands) = complete("ls 'my di", 9, &at(tmp.path()).view());
+        let (start, cands) = complete("ls 'my di", 9, &src.view());
         assert_eq!(start, 3);
         assert_eq!(cands[0].replacement, "'my dir/'");
     }
@@ -944,10 +949,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("delta"), "").unwrap();
 
-        // A wholly unrelated cwd; the absolute prefix should win.
-        let wrong_cwd = tempfile::tempdir().unwrap();
+        // The fixture's cwd is wholly unrelated; the absolute prefix should win.
+        let src = sources(&[], &[]);
         let line = format!("ls {}/", tmp.path().display());
-        let (_, cands) = complete(&line, line.len(), &at(wrong_cwd.path()).view());
+        let (_, cands) = complete(&line, line.len(), &src.view());
         let names: Vec<&str> = cands.iter().map(|c| c.display.as_str()).collect();
         assert_eq!(names, vec!["delta"]);
     }
