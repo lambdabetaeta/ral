@@ -2,7 +2,7 @@
 //! probes, all through one in-process engine.
 use super::*;
 use crate::carrier::{Dispatching, dispatch_to_report};
-use crate::protocol::{Ending, EnquiryError, Report};
+use crate::protocol::{Control, Ending, EnquiryError, Report};
 use crate::types::Shell;
 
 mod identity_cancel_tests {
@@ -65,7 +65,7 @@ mod identity_cancel_tests {
 
     #[test]
     fn an_interrupt_racing_a_fresh_dispatch_is_not_dropped() {
-        race(ControlSender::interrupt);
+        race(|control| control.send(Control::Interrupt(DispatchId(1))));
     }
 
     /// Dispatch a child under a forwarder, `raise` once the child is running,
@@ -100,6 +100,32 @@ mod identity_cancel_tests {
         };
         let ended = transport.session_ended().expect("the probe answers");
         (ending.status(), ended)
+    }
+
+    /// Forwarding lags the key: an interrupt raised before a dispatch was
+    /// sent, heard only once it is in flight, must not unwind it.
+    #[cfg(unix)]
+    #[test]
+    fn an_interrupt_raised_before_a_dispatch_never_reaches_it() {
+        let _serial = crate::process::cancel::REQUEST_SERIAL.lock();
+        let transport = Arc::new(crate::carrier::testkit::boot(
+            &crate::carrier::testkit::BARE,
+        ));
+        crate::process::request_interrupt();
+        let worker = {
+            let transport = transport.clone();
+            std::thread::spawn(move || crate::carrier::testkit::eval(&transport, "sleep 1"))
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while transport.control().in_flight().is_none() {
+            assert!(Instant::now() < deadline, "the dispatch never went out");
+            std::thread::yield_now();
+        }
+        transport.control().hear(crate::process::Ambient::Interrupt);
+        let Report::Ran { ending, .. } = worker.join().expect("dispatch must not panic") else {
+            panic!("the run must reach evaluation");
+        };
+        assert_eq!(ending.status(), 0, "the interrupt was aimed at no dispatch");
     }
 
     /// A SIGINT reaches an identity engine only as its host's

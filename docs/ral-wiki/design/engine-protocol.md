@@ -57,19 +57,22 @@ into a fake mirror pair:
 
 - *Mood.* `Control` is imperative while `Surface` is indicative: this
   happened, this is now true. `Control` has four verbs, each meaning one
-  thing under either carrier (`Scopes::apply`): `Interrupt` unwinds whatever
-  dispatch is in flight, as a Ctrl-C would, and is a no-op between runs;
-  `Cancel(id)` unwinds that dispatch, even one not yet arrived, and a stale id
-  strikes nothing; `Terminate` cancels the durable root — every run and every
-  detached worker, for good; `Abort` is `Terminate` as Ctrl-`\` asks it, cause
-  `RootAbort`. No engine folds its process's signals: its host forwards them as
-  these verbs (`ControlSender::forward_signals`; a wire engine, over its own
-  scopes), so a process hosting many engines — exarch, a test binary — never
-  has one signal reach them all.
+  thing under either carrier (`Scopes::apply`): `Interrupt(id)` unwinds that
+  dispatch as a Ctrl-C would and `Cancel(id)` as a targeted teardown, either
+  one even before the dispatch has arrived, and a stale id strikes nothing;
+  `Terminate` cancels the durable root — every run and every detached worker,
+  for good; `Abort` is `Terminate` as Ctrl-`\` asks it, cause `RootAbort`. No
+  engine folds its process's signals: its front-end forwards them as these
+  verbs (`ControlSender::forward_signals`), aiming an interrupt only at a
+  dispatch it sent before the interrupt was raised, so a Ctrl-C struck between
+  runs reaches none. A wire engine hears only its own process's shutdown. So a
+  process hosting many engines — exarch, a test binary — never has one signal
+  reach them all.
 - *Ordering.* `Surface` is sequenced within its dispatch, strictly before
   that dispatch's `Report` — what makes the transcript truthful. `Control`
   is deliberately unsequenced: it must race past an in-flight dispatch, or
-  cancel could not work.
+  cancel could not work. Naming its dispatch is what makes the race harmless:
+  a verb that arrives late finds a stale id.
 - *Clock.* `Dispatch` opens the turn's clock and holds the session's single
   worker rendezvous; `Enquiry` happens inside a dispatch and inherits all of
   it — no wall of its own, and a `Control::Cancel` must wake an engine

@@ -1,7 +1,7 @@
 ---
 verified_at_commit: eecd78ad
 verified_at_date: 2026-10-12
-anchors: [ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, CancelScope, CancelCause, Terminate, DurableRoot, ForegroundScope, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, Status::code, ChildEnd, WaitOutcome::classify, KILL_EXIT_CODE, Mooring::check, CancelCause::code, Signal::status, RunningChild::wait, watch_cancel, Membership::owes, break_pipeline_group, escalation_pending]
+anchors: [ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, CancelScope, CancelCause, Terminate, DurableRoot, ForegroundScope, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, Status::code, ChildEnd, WaitOutcome::classify, KILL_EXIT_CODE, Mooring::check, CancelCause::code, Signal::status, RunningChild::wait, watch_cancel, Membership::owes, break_pipeline_group, escalation_pending]
 ---
 
 # Cancellation
@@ -124,13 +124,28 @@ signal context. The two are different kinds of proposition.
 - **No scope folds either.** `process::forward_ambient` hands a host thread
   each cause as it lands (`Ambient::Interrupt`, `Ambient::Root(cause)`), the
   handlers staying async-signal-safe and the reaper's wake running the scan.
-  `ControlSender::hear`, also used by `forward_signals`, maps an interrupt to `Control::Interrupt`,
-  which strikes only the dispatch in flight, a root `RootAbort` to `Abort` and
-  any other root cause to `Terminate`, which cancel the durable root. The REPL
-  and batch hold one for the session, a wire engine one over its own scopes,
-  and exarch forwards to its trunk's `Agent` (`signals::face`). So a process
-  hosting many engines — exarch, a test binary — never has one signal reach
-  them all.
+  `ControlSender::hear`, also used by `forward_signals`, maps a root
+  `RootAbort` to `Abort` and any other root cause to `Terminate`, which cancel
+  the durable root, and an interrupt to `Control::Interrupt(id)`, naming the
+  dispatch its front-end has in flight. The REPL and batch hold one for the
+  session, and exarch forwards to its trunk's `Agent` (`signals::face`); a wire
+  engine hears only its own process's shutdown, since an interrupt is aimed by
+  the front-end that sent the dispatch. So a process hosting many engines —
+  exarch, a test binary — never has one signal reach them all.
+- **A dispatch is born at an instant.** Forwarding lags the key by two thread
+  hops, so the dispatch in flight when an interrupt *arrives* need not be the
+  one in flight when it was *struck*: a Ctrl-C at an idle minimal prompt, where
+  the canonical tty raises a real SIGINT, would land on the next line.
+  `dispatch_to_report` aims its front-end's `ControlSender` at each dispatch it
+  sends (`aim`), sampling `interrupt_epoch` under the lock `hear` reads it by,
+  and `hear` sends `Interrupt(id)` only if the epoch has moved since. This is
+  the birth instant of
+  [[decisions/260726_cancel-is-a-watermark|cancel-is-a-watermark]], which the
+  move to `Control` had dropped, kept now per dispatch at the front-end rather
+  than per frame. A key-driven `interrupt()` names whatever is in flight now.
+  The engine strikes only the id named and foretells one not yet arrived, as
+  it does a `Cancel`, so a late `Interrupt` finds a stale id and strikes
+  nothing.
 - **An idle Unix REPL is woken after its root is cancelled.** Its ambient
   forwarder calls `hear` before `Shutdown::end`: both readers are interrupted
   with thread-directed SIGINT until their exclusive registration ends. The
@@ -348,7 +363,8 @@ The same two mechanisms are driven by different keys on different surfaces.
 | gesture | surface | what fires | effect |
 |---|---|---|---|
 | **Ctrl-C** | ral REPL, mid-eval | SIGINT → `interrupt_handler` | `request_interrupt()`, forwarded as `Control::Interrupt` — a pipeline's externals hear it through the collector; **counter untouched** |
-| **Ctrl-C** | ral REPL, idle prompt | line editor reads it as a byte | abandons the partial buffer, `process::clear()`, and sends `Control::Interrupt`, a no-op with nothing in flight; no signal |
+| **Ctrl-C** | ral REPL, idle prompt | line editor reads it as a byte | abandons the partial buffer; nothing is in flight, so nothing is sent; no signal |
+| **Ctrl-C** | ral REPL, idle minimal prompt | canonical tty → SIGINT → `interrupt_handler` | the tty drops the partial line; `request_interrupt()` is forwarded, but every later dispatch is born after it, so it strikes none |
 | **Ctrl-`\`** | ral REPL, terminal not lent | SIGQUIT → `sigquit_handler` | `request_root_cancel(RootAbort)`, forwarded as `Control::Abort` — reaps foreground *and* every detached worker, latching if idle; the REPL loop observes the sticky root and exits |
 | **Ctrl-C / Ctrl-`\` / hangup** | any ral host, terminal lent to a command or pipeline | tty → the tenant's group (a hangup also reaches ral, as session leader) | the `TerminalLoan` hears it from the tenant — its death, or the anchor's `Heard` — and strikes `Interrupt` / `RootAbort` / `Terminate` on the run's frame as the terminal returns: the job ends, `try` cannot recover it, the session lives |
 | **Ctrl-C** | ral batch / `-c` | SIGINT → `handler` | `request_interrupt()`, forwarded as `Control::Interrupt`, + ladder `+1`; third press `_exit`s |
@@ -483,7 +499,8 @@ by construction; the root-reap gesture is REPL Ctrl-`\`, not a TUI key.
   since given way to forwarding as `Control`.
 - [[decisions/260726_cancel-is-a-watermark|cancel-is-a-watermark]] — why the
   interrupt is time-indexed and what the run door's nesting fixed; the
-  per-frame birth instants went with the folding.
+  per-frame birth instants went with the folding, and a per-dispatch one
+  returned at the front-end (`ControlSender::aim`).
 - [[internals/output-capture-and-detachment|output-capture-and-detachment]] and
   [[internals/pipeline-execution|pipeline-execution]] — the foreground-deadline and
   group-teardown paths that read the scope.

@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use crate::first_order::FOValue;
 use crate::io::{Captured, RunIo, RunStdin};
-use crate::process::{Ambient, CancelCause, RequestedTerminalAccess};
+use crate::process::{CancelCause, RequestedTerminalAccess};
 use crate::types::{CapturePolicy, Error};
 use probe::Probe;
 
@@ -20,7 +20,7 @@ pub mod probe;
 /// The frame algebra's generation, checked at `Attach` and refused on
 /// mismatch.  Public because a build has to compare it against the engine
 /// sitting in the guest media beside it: see [`check_media`].
-pub const PROTOCOL_VERSION: u32 = 17;
+pub const PROTOCOL_VERSION: u32 = 18;
 
 /// The key `vm-image/build-boot.sh` records [`PROTOCOL_VERSION`] under in the
 /// boot media's manifest, `vm-image/out/boot/boot-manifest.txt`.
@@ -353,9 +353,9 @@ impl From<EnquiryError> for Error {
 /// carrier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Control {
-    /// Unwind whatever dispatch is in flight, as a Ctrl-C would; none in
-    /// flight, nothing happens.
-    Interrupt,
+    /// Unwind this dispatch as a Ctrl-C would, even one not yet arrived; a
+    /// stale id strikes nothing.
+    Interrupt(DispatchId),
     /// Unwind this dispatch, even one not yet arrived; a stale id strikes
     /// nothing.
     Cancel(DispatchId),
@@ -367,12 +367,12 @@ pub enum Control {
 }
 
 impl Control {
-    /// The verb an ambient cause asks of the session it reaches.
-    pub(crate) fn hearing(ambient: Ambient) -> Self {
-        match ambient {
-            Ambient::Interrupt => Self::Interrupt,
-            Ambient::Root(CancelCause::Aborted) => Self::Abort,
-            Ambient::Root(_) => Self::Terminate,
+    /// The verb a shutdown request asks of the session it reaches.
+    pub(crate) fn ending(cause: CancelCause) -> Self {
+        if cause == CancelCause::Aborted {
+            Self::Abort
+        } else {
+            Self::Terminate
         }
     }
 }

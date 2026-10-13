@@ -16,6 +16,7 @@ use std::time::Duration;
 use crate::engine::Scopes;
 use crate::first_order::FOValue;
 use crate::first_order::datum::Datum;
+use crate::process::{Ambient, interrupt_epoch};
 use crate::protocol::channel::{WireChannel, write_or_sever};
 use crate::protocol::probe::{BindingRow, CompletionNames, PathEntry, Probe, WorkerRow};
 use crate::protocol::{Control, DispatchId, EnquiryError, EnquiryId, Event, Frame, Report, Run};
@@ -436,6 +437,7 @@ pub fn dispatch_to_report(
         return Err(cause);
     }
     let id = mint_dispatch_id();
+    let _aimed = transport.control().aim(id);
 
     transport.dispatch(id, run, &host);
 
@@ -481,7 +483,12 @@ type WireControl = (Arc<Mutex<WireChannel>>, Arc<OnceLock<Severed>>);
 /// The out-of-band control door: [`Control`]'s verbs, meaning the same under
 /// either carrier.
 #[derive(Clone)]
-pub struct ControlSender(Door);
+pub struct ControlSender {
+    door: Door,
+    /// The dispatch this front-end has in flight, and the
+    /// [`interrupt_epoch`](crate::process::interrupt_epoch) it was sent at.
+    in_flight: Arc<Mutex<Option<(DispatchId, u64)>>>,
+}
 
 #[derive(Clone)]
 enum Door {
@@ -493,9 +500,19 @@ enum Door {
 }
 
 impl ControlSender {
-    /// Unwind whatever dispatch is in flight; none in flight, nothing happens.
+    fn new(door: Door) -> Self {
+        Self {
+            door,
+            in_flight: Arc::default(),
+        }
+    }
+
+    /// Unwind the dispatch this front-end has in flight; none in flight,
+    /// nothing happens.
     pub fn interrupt(&self) {
-        self.send(Control::Interrupt);
+        if let Some((id, _)) = self.in_flight() {
+            self.send(Control::Interrupt(id));
+        }
     }
 
     /// Unwind dispatch `id`, even one the engine has not yet seen.
@@ -508,9 +525,20 @@ impl ControlSender {
         self.send(Control::Terminate);
     }
 
-    /// Deliver one ambient cause to this session.
-    pub fn hear(&self, ambient: crate::process::Ambient) {
-        self.send(Control::hearing(ambient));
+    /// Deliver one ambient cause to this session. Forwarding lags the key, so
+    /// an interrupt reaches the dispatch in flight only if raised after it was
+    /// sent: a Ctrl-C at an idle prompt must not unwind the next line.
+    pub fn hear(&self, ambient: Ambient) {
+        match ambient {
+            Ambient::Interrupt => {
+                if let Some((id, sent)) = self.in_flight()
+                    && interrupt_epoch() > sent
+                {
+                    self.send(Control::Interrupt(id));
+                }
+            }
+            Ambient::Root(cause) => self.send(Control::ending(cause)),
+        }
     }
 
     /// Hear this process's signals as this session's `Control` until the
@@ -520,8 +548,21 @@ impl ControlSender {
         crate::process::forward_ambient(move |ambient| door.hear(ambient))
     }
 
+    /// Aim this front-end's interrupts at `id` until the guard drops.
+    fn aim(&self, id: DispatchId) -> Aimed<'_> {
+        // Sampled under the lock: a later raise is seen by `hear` after it.
+        let mut in_flight = self.in_flight.lock_ignore_poison();
+        *in_flight = Some((id, interrupt_epoch()));
+        drop(in_flight);
+        Aimed(self)
+    }
+
+    fn in_flight(&self) -> Option<(DispatchId, u64)> {
+        *self.in_flight.lock_ignore_poison()
+    }
+
     fn send(&self, control: Control) {
-        match &self.0 {
+        match &self.door {
             Door::Identity(scopes) => scopes.apply(control),
             // A control frame that cannot be written is as fatal as a dispatch
             // that cannot: the peer is gone, and waiting on the reader's
@@ -530,6 +571,15 @@ impl ControlSender {
                 let _ = write_through(ch, severance, &Frame::Control(control));
             }
         }
+    }
+}
+
+/// [`ControlSender::aim`]'s claim, lifted when the dispatch settles.
+struct Aimed<'a>(&'a ControlSender);
+
+impl Drop for Aimed<'_> {
+    fn drop(&mut self) {
+        *self.0.in_flight.lock_ignore_poison() = None;
     }
 }
 

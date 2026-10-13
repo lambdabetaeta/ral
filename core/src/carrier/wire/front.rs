@@ -230,7 +230,7 @@ impl WireTransport {
         let (event_tx, event_rx) = mpsc::channel();
         let attached = Arc::new((Mutex::new(false), Condvar::new()));
         let write_tx = Arc::new(Mutex::new(writer));
-        let control = ControlSender(Door::Wire((write_tx.clone(), severance.clone())));
+        let control = ControlSender::new(Door::Wire((write_tx.clone(), severance.clone())));
         let ends = Ends::new(control, EventReceiver::new(event_rx), severance);
         let reader = spawn_wire_reader(
             reader_ch,

@@ -189,21 +189,21 @@ pub(crate) struct Scopes {
 struct Slot {
     /// The dispatch `Interrupt` and `Cancel` strike. Replaced, never cleared:
     /// a settled run's scope is dead, so striking it is a no-op, and a stale
-    /// `Cancel` names an id the next run does not bear.
+    /// id names a dispatch the next run does not bear.
     current: Option<(DispatchId, ForegroundScope)>,
-    /// A `Cancel` that overtook the dispatch it names.
-    foretold: Option<DispatchId>,
+    /// A strike that overtook the dispatch it names, with its cause.
+    foretold: Option<(DispatchId, CancelCause)>,
 }
 
 impl Scopes {
     /// Mint `id`'s scope ahead of its run's frame, so a cancel raised
-    /// meanwhile has somewhere to land; struck already if a `Cancel` foretold
+    /// meanwhile has somewhere to land; struck already if a strike foretold
     /// it.
     pub(crate) fn open(&self, id: DispatchId) -> ForegroundScope {
         let scope = self.dispatches.child();
         let mut slot = self.slot.lock_ignore_poison();
-        if slot.foretold.take_if(|pending| *pending == id).is_some() {
-            scope.cancel(CancelCause::Cancelled);
+        if let Some((_, cause)) = slot.foretold.take_if(|(pending, _)| *pending == id) {
+            scope.cancel(cause);
         }
         slot.current = Some((id, scope.clone()));
         scope
@@ -212,18 +212,25 @@ impl Scopes {
     /// One `Control` verb, meaning the same under either carrier.
     pub(crate) fn apply(&self, control: Control) {
         match control {
-            Control::Interrupt => self.strike(CancelCause::Interrupted),
-            Control::Cancel(id) => {
-                let mut slot = self.slot.lock_ignore_poison();
-                match &slot.current {
-                    Some((current, scope)) if *current == id => {
-                        scope.cancel(CancelCause::Cancelled);
-                    }
-                    _ => slot.foretold = Some(id),
-                }
-            }
+            Control::Interrupt(id) => self.aim(id, CancelCause::Interrupted),
+            Control::Cancel(id) => self.aim(id, CancelCause::Cancelled),
             Control::Terminate => self.end(CancelCause::Terminated),
             Control::Abort => self.end(CancelCause::Aborted),
+        }
+    }
+
+    /// Strike dispatch `id` with `cause`, or foretell it until `id` arrives.
+    fn aim(&self, id: DispatchId, cause: CancelCause) {
+        let mut slot = self.slot.lock_ignore_poison();
+        match &slot.current {
+            Some((current, scope)) if *current == id => scope.cancel(cause),
+            _ => {
+                let cause = match slot.foretold {
+                    Some((pending, prior)) if pending == id => prior.max(cause),
+                    _ => cause,
+                };
+                slot.foretold = Some((id, cause));
+            }
         }
     }
 

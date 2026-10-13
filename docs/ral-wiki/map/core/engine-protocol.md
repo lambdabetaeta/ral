@@ -37,17 +37,18 @@ half; `core/src/run/report.rs` projects a run onto the algebra;
   The carriers differ in these and nowhere else.
 - `Scopes` — what stops an engine's runs, shared with whichever thread
   carries `Control`: the dispatch scope root, the durable root, and a slot
-  holding the current dispatch and a foretold `Cancel`. `open` mints a
-  dispatch's scope ahead of its frame (struck already if a `Cancel` foretold
-  it); `apply` is `Control`'s one meaning — `Interrupt` strikes the current
-  dispatch, `Cancel(id)` strikes it if it bears `id` and foretells it
-  otherwise, `Terminate` cancels the durable root.
+  holding the current dispatch and a foretold strike with its cause. `open`
+  mints a dispatch's scope ahead of its frame (struck already if a strike
+  foretold it); `apply` is `Control`'s one meaning — `Interrupt(id)` and
+  `Cancel(id)` strike the current dispatch if it bears `id` and foretell it
+  otherwise, as `Interrupted` and `Cancelled`, and `Terminate` cancels the
+  durable root.
 
 ## `core/src/protocol.rs`
 
 The frame algebra. Everything on it is a wire type; nothing here carries.
 
-- `PROTOCOL_VERSION` (currently 17) — checked at `Attach`; a mismatch refuses.
+- `PROTOCOL_VERSION` (currently 18) — checked at `Attach`; a mismatch refuses.
 - `check_media` — the same number compared at *build* time, against the
   `proto_version=` line `vm-image/build-boot.sh` records for the engine in the
   guest media; `synod/examples/check-media.rs`, tauri's `beforeBuildCommand`,
@@ -80,7 +81,7 @@ The frame algebra. Everything on it is a wire type; nothing here carries.
   `no_desk()` is the fixed wording for a host with nothing to answer, and
   `From<EnquiryError> for Error` the one way a refusal becomes the error
   both carriers' desks raise.
-- `Control` — `Interrupt`, `Cancel(DispatchId)`, `Terminate`, `Abort` (a
+- `Control` — `Interrupt(DispatchId)`, `Cancel(DispatchId)`, `Terminate`, `Abort` (a
   `Terminate` whose cause is `RootAbort`); applied by `Scopes::apply` under
   both carriers.
 - `Report` / `Ending` / `FailureStatus` — the terminal frame:
@@ -178,14 +179,17 @@ The two interpretations of the algebra, and what they share.
   thread-local registry of the transports this thread is dispatching on,
   entered by `dispatch_to_report` and checked by every typed reading and the
   identity carrier's `probe`, panicking with a didactic sentence.
-- `dispatch_to_report` — mint a `DispatchId`, call `transport.dispatch`,
-  drain `events()` to that dispatch's own `Report`, forwarding
-  `Surface`/`Enquiry` to `host`; `Result<Report, Severed>`.
+- `dispatch_to_report` — mint a `DispatchId`, aim the control door at it,
+  call `transport.dispatch`, drain `events()` to that dispatch's own `Report`,
+  forwarding `Surface`/`Enquiry` to `host`; `Result<Report, Severed>`.
 - `ControlSender` — `interrupt()`, `cancel(id)`, `terminate()` over one of two
   doors: `Door::Identity` applies the verb straight onto the engine's
   `Scopes`, `Door::Wire` writes a `Control` frame through the severance cell.
-  `hear(ambient)` sends the verb `Control::hearing` names;
-  `forward_signals()` holds a process listener forwarding through that door.
+  `aim(id)` records the dispatch in flight with the `interrupt_epoch` it was
+  sent at, until its `Aimed` guard drops; `interrupt()` names that dispatch,
+  and `hear(ambient)` names it only if the epoch has moved since, sending
+  `Control::ending` for a root cause; `forward_signals()` holds a process
+  listener forwarding through that door.
 - `EventReceiver` — the front-end's single-drainer event queue; its `stash`
   hands back an event a probe's or a desk's pre-drain read past, in arrival
   order, rather than dropping it.

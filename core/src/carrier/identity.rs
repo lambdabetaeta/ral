@@ -57,7 +57,7 @@ impl IdentityTransport {
     fn over(engine: Engine) -> Self {
         let (event_tx, event_rx) = mpsc::channel();
         let scopes = engine.scopes().clone();
-        let control = ControlSender(Door::Identity(scopes.clone()));
+        let control = ControlSender::new(Door::Identity(scopes.clone()));
         Self {
             installer: engine.installer(),
             scopes,

@@ -364,12 +364,14 @@ fn engine_session(
         }
     };
 
-    // This process is the engine's own, so it hears the process's signals as
-    // its own `Control`, the way an identity host forwards them.
+    // This process is the engine's own, so it hears that process's shutdown;
+    // an interrupt is aimed only by the front-end that sent the dispatch.
     let _signals = {
         let scopes = engine.scopes().clone();
         crate::process::forward_ambient(move |ambient| {
-            scopes.apply(Control::hearing(ambient));
+            if let crate::process::Ambient::Root(cause) = ambient {
+                scopes.apply(Control::ending(cause));
+            }
         })
     };
 
@@ -912,30 +914,19 @@ mod engine_session_tests {
         assert_eq!(host.detach_and_join(), 0);
     }
 
-    /// The engine's process is its own, so it hears that process's signals as
-    /// its own `Control`: an interrupt ends the run in flight, not the session.
-    /// Raised until the report lands, since the host cannot see the run open.
+    /// An interrupt names its dispatch: it ends that run, not the session.
     #[test]
-    fn a_process_interrupt_unwinds_the_wire_engines_run() {
+    fn an_interrupt_unwinds_the_run_it_names() {
         let _g = REQUEST_SERIAL.lock();
         let mut host = start();
-        assert_eq!(ran_int(&host.run(1, "$[1 + 1]")), 2);
-        host.dispatch(2, "/bin/sleep 30");
-        let report = loop {
-            crate::process::request_interrupt();
-            if host
-                .ch
-                .poll_readable(Some(Duration::from_millis(50)))
-                .expect("poll engine")
-            {
-                break host.report(2);
-            }
-        };
+        host.dispatch(1, "/bin/sleep 30");
+        host.send(&Frame::Control(Control::Interrupt(DispatchId(1))));
+        let report = host.report(1);
         assert!(
             matches!(&report, Report::Ran { ending, .. } if ending.status() == 130),
             "an interrupted run reports 130, got {report:?}"
         );
-        assert_eq!(ran_int(&host.run(3, "$[1 + 1]")), 2, "the session lives on");
+        assert_eq!(ran_int(&host.run(2, "$[1 + 1]")), 2, "the session lives on");
         assert_eq!(host.detach_and_join(), 0);
     }
 

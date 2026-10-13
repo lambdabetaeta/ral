@@ -45,8 +45,8 @@ no job table: ral does not suspend
   prompt), `process::clear` any residual interrupt, write the terminal title
   from the `cwd` reading, render the prompt, `read`, and act on the `Read`.
   `Read::Line` adds to history and evaluates; `Read::Edit` becomes next
-  iteration's `pending`; `Read::Interrupt` clears the signal and sends
-  `Control::Interrupt`; `Read::End(code)` records the exit status and breaks. After `read` returns
+  iteration's `pending`; `Read::Interrupt` just continues, nothing being in
+  flight at the prompt; `Read::End(code)` records the exit status and breaks. After `read` returns
   the session flushes deferred plugin diagnostics, the one boundary, and
   checks `session-ended` again before interpreting input. `read` is handed
   the transport, the prompt, the pending buffer, and on Unix the exclusive

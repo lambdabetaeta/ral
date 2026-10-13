@@ -1,13 +1,12 @@
 //! The transport's control door, driven the way a front-end drives it: an
 //! interrupt arriving mid-dispatch must actually stop the run.
 //!
-//! The identity arm of `ControlSender` strikes the `ForegroundScope` that
-//! `dispatch` opened for the dispatch in flight, and `run_under` seats the
-//! run's frame beneath it — the interrupt the REPL's Ctrl-C sends, which names
-//! no dispatch and so needs none minted by hand. The wall clock is the
-//! discriminating half: the child would sleep far longer than the ceiling
-//! asserted here.  A SIGINT reaches the engine the same way, forwarded by its
-//! host as this very `Control::Interrupt`.
+//! `ControlSender::interrupt` aims at the dispatch this front-end has in
+//! flight, and the identity arm strikes the `ForegroundScope` that `dispatch`
+//! opened for it, beneath which `run_under` seats the run's frame. The wall
+//! clock is the discriminating half: the child would sleep far longer than
+//! the ceiling asserted here.  A SIGINT reaches the engine the same way,
+//! forwarded by its host as this very `Control::Interrupt`.
 
 #![cfg(unix)]
 

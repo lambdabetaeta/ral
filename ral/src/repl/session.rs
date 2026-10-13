@@ -207,11 +207,7 @@ impl Session {
                 self.pending = Some(buf);
                 Flow::Continue
             }
-            Read::Interrupt => {
-                ral_core::process::clear();
-                self.transport.control().interrupt();
-                Flow::Continue
-            }
+            Read::Interrupt => Flow::Continue,
             Read::End(code) => {
                 self.exit_code = code;
                 Flow::Break
