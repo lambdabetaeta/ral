@@ -37,8 +37,9 @@ try {
 } { |_| echo 'deny beats allow' }
 
 # A directory target admits what lives under it and nothing else: a link under
-# it is judged at the file it names
-grant [exec: [allow: [`dir `absolute /bin]]] { /bin/echo 'under the dir' }
+# it is judged at the file it names. A coreutil may be a link out of /bin to a
+# multi-call image, so the dir test runs /bin/sh
+grant [exec: [allow: [`dir `absolute /bin]]] { /bin/sh -c 'echo under the dir' }
 let d = temp-dir
 ln -s /bin/echo "$d/echo"
 try { within [dir: $d] { grant [exec: [allow: [`dir `absolute $d]]] { ./echo hi } } } { |_| echo 'outside the dir denied' }

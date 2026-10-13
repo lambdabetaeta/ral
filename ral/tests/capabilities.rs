@@ -568,7 +568,7 @@ fn under_exec_deny(bin: &std::path::Path, deny: &str, body: &str) -> common::Out
         "-c",
         &format!(
             "grant [fs: [read: [`absolute '{root}'], write: [`absolute '{b}']], \
-             exec: [allow: [`dir `absolute '{b}', `dir `absolute /bin], deny: [{deny}]]] {{ {body} }}"
+             exec: [allow: [`dir `absolute '{b}', `dir `absolute /bin, `name mkdir, `name cp], deny: [{deny}]]] {{ {body} }}"
         ),
     ])
 }

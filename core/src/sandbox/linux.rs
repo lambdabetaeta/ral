@@ -2438,14 +2438,21 @@ mod tests {
     }
 
     /// The command directories, plus whatever a test adds, by their real
-    /// paths as a grant freezes them, and the linkers a launch's support
+    /// paths as a grant freezes them, and the directory coreutils really live
+    /// in (`cat`'s), which a distribution may link `/usr/bin` into from a
+    /// multi-call image elsewhere, and the linkers a launch's support
     /// supplies: nothing else is admitted, ral's own binary included.
     fn admitting(dirs: &[&str], paths: &[&str]) -> ExecProjection {
         let real = |p: &str| RealPath::of(std::path::Path::new(p)).expect("an admit exists");
+        let coreutils = RealPath::of(std::path::Path::new("/usr/bin/cat"))
+            .ok()
+            .and_then(|cat| cat.as_path().parent().map(RealPath::assumed));
         let dirs = ["/bin", "/usr/bin"]
             .iter()
             .chain(dirs)
-            .map(|d| dir_rule(real(d), true));
+            .map(|d| real(d))
+            .chain(coreutils)
+            .map(|d| dir_rule(d, true));
         let files = paths.iter().map(|p| file_rule(real(p), true));
         let linkers = crate::sandbox::carriers::linkers()
             .into_iter()

@@ -164,11 +164,12 @@ What the kernel now reports:
   `execve` (an editor save) may need a different interpreter, which Landlock
   then refuses with the "not admitted" hint. Pre-placement gives the same
   support, so no authority is involved; the pin made the error impossible.
-- **`` `dir `absolute /usr/bin `` admitted nothing on IT107528.** The guard
-  refused `/usr/bin/ls` under it, and with a trailing slash the kernel refused
-  the script's children. Unexplained and independent of this change (the
-  lowering is untouched); to be investigated separately. The end-to-end tests
-  avoid `` `dir `` allowances.
+- **`` `dir `absolute /usr/bin `` admits none of the coreutils on Ubuntu
+  26.04.** There uutils coreutils makes `/usr/bin/<tool>` a link to
+  `/usr/lib/cargo/bin/coreutils/<tool>`, hard links of one multi-call image.
+  ral judges the real path and Landlock the inode, so a `dir` allowance over
+  `/usr/bin` covers none of them, by design. The end-to-end tests avoid
+  `` `dir `` allowances and admit tools by `` `name `` or real path.
 
 **The commitment.** Reopening judge→`execve` atomicity would reverse this page.
 
