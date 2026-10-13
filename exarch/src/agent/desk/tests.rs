@@ -2094,41 +2094,78 @@ fn engaged_child_answers_a_second_steer_with_no_focus_involved() {
     handle.join().expect("worker thread must not panic");
 }
 
-/// The reaped child delivers exactly one
-/// [`crate::bus::AgentOutcome::Cancelled`] to the parent inbox.
+/// A never-renewed lease that lands before the child has taken up its seed
+/// still settles it [`crate::bus::AgentOutcome::Cancelled`]: the attend loop,
+/// having settled no item, ends on the cancel that stopped it drawing.  The
+/// test orders the reap before the loop starts, so the seed is never taken
+/// up — the empty script would panic if it were.
 #[test]
-fn ms_lease_child_never_renewed_is_cancelled() {
-    // The ttl must expire well inside the scripted round-trips, so the
-    // lease and not the script's end finishes the exchange.
-    let ttl = Duration::from_millis(25);
+fn ms_lease_reaping_a_child_before_its_seed_is_cancelled() {
     let parent = Avatar::for_test_with(crate::agent::TestTrunk {
-        lease: ttl,
+        lease: Duration::from_millis(1),
         ..crate::agent::TestTrunk::new("system")
     })
     .unwrap();
     let child = parent.fork_named("child-a").expect("fork child a");
-    let mut long_script = Script::new();
-    for i in 0..2_000u32 {
-        long_script = long_script.then(Reply::tool_calls(vec![ral_call(&i.to_string(), "1")]));
+    child.seed("go".into());
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !child.agent.token.terminated() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the never-renewed lease must reap the child"
+        );
+        std::thread::sleep(Duration::from_millis(1));
     }
-    child
-        .agent
-        .provider
-        .swap(Arc::new(Provider::scripted("test-model", long_script)));
+    let handle = attend_and_deliver(child);
+    assert_reaped_cancelled(&parent, handle);
+}
+
+/// A never-renewed lease reaps a child mid-exchange: the child's one tool
+/// call blocks until cancelled, so the exchange cannot end on its own and the
+/// reap is what ends it.  Where the bound lands against the take-up is the
+/// scheduler's, but not the outcome: a bound that beats it is
+/// [`ms_lease_reaping_a_child_before_its_seed_is_cancelled`].
+#[test]
+fn ms_lease_reaping_a_child_mid_exchange_is_cancelled() {
+    let parent = Avatar::for_test_with(crate::agent::TestTrunk {
+        lease: Duration::from_millis(25),
+        installers: crate::agent::testkit::dressed(|shell| {
+            shell.install_builtins(crate::agent::testkit::WORKER_REGISTRY_TEST_BUILTINS);
+        }),
+        ..crate::agent::TestTrunk::new("system")
+    })
+    .unwrap();
+    let child = parent.fork_named("child-a").expect("fork child a");
+    child.agent.provider.swap(Arc::new(Provider::scripted(
+        "test-model",
+        Script::new().then(Reply::tool_calls(vec![ral_call(
+            "block",
+            "test-clear-block-forever",
+        )])),
+    )));
     child.seed("go".into());
     let handle = attend_and_deliver(child);
+    assert_reaped_cancelled(&parent, handle);
+}
 
+/// The reaped child delivers exactly one
+/// [`crate::bus::AgentOutcome::Cancelled`] to the parent inbox, and settles.
+fn assert_reaped_cancelled(parent: &Avatar, handle: std::thread::JoinHandle<()>) {
     match wait_for_settle(&parent.inbox()) {
         crate::bus::Next::Item(crate::bus::Item::Agent(result)) => {
             assert!(
                 matches!(result.outcome, crate::bus::AgentOutcome::Cancelled),
-                "a never-renewed lease reaps mid-exchange with Cancelled, got {:?}",
+                "a never-renewed lease reaps with Cancelled, got {:?}",
                 result.outcome
             );
         }
         other => panic!("expected an Agent result item, got {other:?}"),
     }
     handle.join().expect("worker thread must not panic");
+    assert!(
+        parent.inbox().next_item().is_none(),
+        "the reap is reported exactly once"
+    );
     assert_eq!(
         crate::agent::roster::summary(&parent.agent).live,
         0,

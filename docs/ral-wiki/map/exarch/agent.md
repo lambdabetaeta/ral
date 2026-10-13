@@ -220,7 +220,10 @@ Three nested loops, the same for trunk and child alike:
   agent itself (`Agent::deposit_reply`, which also posts the one-line notice
   to a parent); a child then parks `Engaged`, and only a parentless returning
   agent — the headless root — ends its loop on it, its driver reading the
-  deposit off `Agent::reply`. At the single exit the loop winds a stranded
+  deposit off `Agent::reply`. The loop's outcome is its last settlement; one
+  that settled nothing ends on why it stopped drawing — `Cancelled` under a
+  terminate cause (a lease reap, a `cancel`), a finish without `reply`
+  otherwise. At the single exit the loop winds a stranded
   prompt back through `quiesce` so the next `append_user` is always admissible
   ([[invariants/turn-ends-ready|exchange-ends-ready]]); the trunk's `Avatar`
   then drops (a child's drops when its detached thread returns), pruned from

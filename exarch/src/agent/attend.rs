@@ -87,7 +87,7 @@ impl Avatar {
 
     fn attend_until(&mut self, emit: &Emitter, idle: Idle) -> AgentOutcome {
         self.couple(emit);
-        let mut settled = AgentOutcome::Failed(NO_REPLY_REASON.into());
+        let mut settled = None;
         let lost = loop {
             if let Some(s) = self.seat.severed() {
                 break Some(s);
@@ -99,7 +99,7 @@ impl Avatar {
             match self.take_up(&next, emit) {
                 Ok(step) => {
                     if let Some(outcome) = step.settled {
-                        settled = outcome;
+                        settled = Some(outcome);
                     }
                     if step.flow.is_break() {
                         break None;
@@ -110,12 +110,25 @@ impl Avatar {
         };
         // A severance the loop broke on, or one a park quiesced behind, is
         // recorded exactly once: the engine's own account as a durable note,
-        // the plain sentence as the failed outcome.
-        if let Some(s) = lost.or_else(|| self.seat.severed()) {
-            let lost = EngineLost::running(&s, self.agent.run_dir());
-            self.note(lost.logged());
-            settled = AgentOutcome::Failed(lost.to_string());
-        }
+        // the plain sentence as the failed outcome.  Otherwise the last
+        // settlement stands; a loop that settled nothing ends on why it
+        // stopped drawing — a terminate cause in force before anything
+        // settled (a lease reap, a `cancel`) is that cancellation, and
+        // anything else a finish without `reply`.
+        let settled = match lost.or_else(|| self.seat.severed()) {
+            Some(s) => {
+                let lost = EngineLost::running(&s, self.agent.run_dir());
+                self.note(lost.logged());
+                AgentOutcome::Failed(lost.to_string())
+            }
+            None => settled.unwrap_or_else(|| {
+                if self.agent.token.terminated() {
+                    AgentOutcome::Cancelled
+                } else {
+                    AgentOutcome::Failed(NO_REPLY_REASON.into())
+                }
+            }),
+        };
         // `take_up` quiesces per item; this catches whichever path broke the
         // loop, so the agent is ReadyForUser however it ends.
         self.abort_unready();
