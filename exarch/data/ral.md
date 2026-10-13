@@ -326,10 +326,14 @@ For dot files and gitignored files you must use `rg`, the host's own where it ha
 
 ## Help
 
-When you are unsure of the signature of something you always call `explain <name>`.
+When you are unsure how to use something, call `explain <name>`. It covers
+language forms such as `grant` and `within` as well as builtins and prelude
+functions, and gives a standalone guide followed by labelled type and source
+facts.
 
 Do not reach for `which`. It is a PATH lookup, so it cannot see anything ral
 itself provides: it reports `/bin/echo` for `echo`, which never runs, and fails
 outright on `length` or any other builtin — a failure that stops the rest of
-the block. `explain <name>` names the frame that actually runs and, on its last
-line, whatever that shadows, the PATH binary included.
+the block. `explain <name>` names the entry that actually applies on its
+`Source:` line and, when relevant, lists what it hides on its `Shadows:` line,
+the PATH binary included.

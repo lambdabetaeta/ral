@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 870865ed
-generated_at_date: 2026-10-08
+generated_at_commit: b620692f
+generated_at_date: 2026-10-13
 covers_paths: [core/src/syntax/]
 ---
 
@@ -35,8 +35,10 @@ sees raw bytes and bare words.
   binding of stdin, stdout or stderr at the second redirect
   ([[decisions/260930_redirects-are-bindings|redirects-are-bindings]]).
 - `syntax.rs` — the module root: `CONTROL_OPERATORS` (`try`, `guard`,
-  `within`, `grant`, `audit`), read by the parser's `parse_control_op` and, through
-  `is_control_operator` / `is_keyword`, by the checker and the highlighters;
+  `within`, `grant`, `audit`) and `FLOW_KEYWORDS` (`if`, `elsif`, `else`,
+  `let`, `return`, `case`), read by the parser and, through
+  `is_control_operator` / `is_keyword`, by the checker, highlighters, and the
+  [[map/core/builtins|help registry's]] documentation-completeness test;
   `NESTING_DEPTH_LIMIT`.
 - `parser.rs` — `parse(source) -> Result<Vec<Stmt>, ParseError>`; `parse_with`
   carries a `FileId`. A `||` after a pipe is refused naming `?`. The words rule is checked once

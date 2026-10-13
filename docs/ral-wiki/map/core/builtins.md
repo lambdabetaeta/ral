@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 28d06d78
-generated_at_date: 2026-10-11
+generated_at_commit: b620692f
+generated_at_date: 2026-10-13
 covers_paths: [core/src/builtins/, core/src/builtins.rs, core/src/uutils.rs]
 ---
 
@@ -238,14 +238,20 @@ Bodies are grouped by concern, one submodule each:
   wraps: it forwards a tagged variant to the host's
   [[map/core/shell-state|`SurfaceSink`]] and is the identity under a bare REPL;
 - `math.rs` — the Float rounding builtins (`round`, `floor`, `ceil`, `trunc`);
-- `help.rs` — `help` (arity-0 command index) and `explain <name>` lookup, both
-  reflecting on the session — its scope and the shell's registries, never the
-  caller's block. One `Where` answers both halves of an entry: the line naming
-  the frame that would run, and the doc ladder that asks *that* registry — a
-  session binding owning its name outright rather than inheriting the doc of
-  what it shadows. `locate_all` returns the whole resolution chain, so
-  `explain` also names what a name shadows, a PATH binary included, which is
-  the question `which` answers wrongly for every name ral provides;
+- `help.rs` — `help` (arity-0 language and command index) and `explain <name>`
+  lookup, both reflecting on the session — its scope and the shell's
+  registries, never the caller's block. `LANGUAGE_DOCS` gives every parser
+  keyword and Boolean literal a standalone guide; a completeness test pairs
+  that table with `CONTROL_OPERATORS`, `FLOW_KEYWORDS`, and
+  `LANGUAGE_CONSTANTS`, so new syntax cannot land undocumented. One `Where`
+  answers both halves of a resolved command entry: the line naming the frame
+  that would run, and the doc ladder that asks *that* registry — a session
+  binding owning its name outright rather than inheriting the doc of what it
+  shadows. The shared renderer separates a doc's conventional `usage  — prose`
+  opening and labels `Usage:`, `Type:`, `Source:`, and `Shadows:`; absent facts
+  are omitted. `locate_all` returns the whole resolution chain, so `explain`
+  also names what a name shadows, a PATH binary included, which is the
+  question `which` answers wrongly for every name ral provides;
 - `print.rs` — the value pretty-printer shared by the REPL and exarch's
   tool-result rendering (`PrintParams`; a rendering utility, not a registered
   builtin). One printer, one policy, per-reader numbers: truncation preserves

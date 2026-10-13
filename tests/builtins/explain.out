@@ -1,22 +1,27 @@
   idf
-  ∀α. α → Returns α
-  idf: session
+  Type: ∀α. α → Returns α
+  Source: session
 
   words
-  Integer
-  words: session
-  shadows: prelude
+  Type: Integer
+  Source: session
+  Shadows: prelude
 
   greet
-  —
-  greet: alias
+  Source: alias
 
-  length: length <val>  — number of elements in a string, bytes, list, or map.
-  ∀α:sized. α → Returns Integer
-  length: builtin
+  length
+  Usage: length <val>
+  number of elements in a string, bytes, list, or map.
 
-  length: length <val>  — number of elements in a string, bytes, list, or map.
-  ∀α:sized. α → Returns Integer
-  length: builtin
-  shadows: handler
+  Type: ∀α:sized. α → Returns Integer
+  Source: builtin
+
+  length
+  Usage: length <val>
+  number of elements in a string, bytes, list, or map.
+
+  Type: ∀α:sized. α → Returns Integer
+  Source: builtin
+  Shadows: handler
 

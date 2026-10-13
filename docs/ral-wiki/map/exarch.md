@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 0dc4a920
-generated_at_date: 2026-10-09
+generated_at_commit: b620692f
+generated_at_date: 2026-10-13
 covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/data/system.md, exarch/data/agents.md, exarch/data/reply.md, exarch/data/ral.md, exarch/data/script-style.md, exarch/data/context.md]
 ---
 
@@ -189,7 +189,9 @@ agent, so a root, identity fork, and wire child each receive their own surface.
   follow the lambda-only install rule
   ([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]):
   per-command `handlers:` entries are unary `{ |args| … }`, the catch-all
-  `handler:` binary `{ |name args| … }`.
+  `handler:` binary `{ |name args| … }`. It directs the model to `explain` for
+  standalone language-form and command guides and names the labelled `Type:`,
+  `Source:`, and `Shadows:` facts that make those results machine-readable.
 - **`Editing`** documents the file-editing scheme the `--edit` flag selects:
   line-hash over `view-hash` (`data/edit-hash.md`, `--edit hash`) or
   string-replace over `view-text` (`data/edit-replace.md`, `--edit replace`); only the

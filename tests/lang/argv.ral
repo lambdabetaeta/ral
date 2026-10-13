@@ -39,6 +39,6 @@ echo
 let doc = explain echo
 re-find-match 'write one line' $doc
 re-find-match '\[String\] →' $doc
-re-find-match 'echo: builtin' $doc
+re-find-match 'Source: builtin' $doc
 
 echo 'argv tests done'

@@ -240,8 +240,11 @@ fn explain_answers_every_agent_helper_with_its_doc() {
         let run = run_once(&engine, &format!("explain {name}"));
         // `explain` indents every line it prints; a family's doc spans lines.
         let out = String::from_utf8_lossy(&run.stdout).replace("\n  ", "\n");
+        let rendered = doc
+            .split_once("  — ")
+            .map_or_else(|| doc.clone(), |(usage, prose)| format!("Usage: {usage}\n{prose}"));
         assert!(
-            out.contains(&doc),
+            out.contains(&rendered),
             "`explain {name}` must print its indexed doc, got:\n{out}"
         );
     }

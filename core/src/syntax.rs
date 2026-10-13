@@ -16,6 +16,9 @@ pub use quote::{is_bare_word, quote_word};
 /// The control operators: the stage heads `parse_control_op` reads.
 pub(crate) const CONTROL_OPERATORS: [&str; 5] = ["try", "guard", "within", "grant", "audit"];
 
+/// The reserved flow and binding words, beside [`CONTROL_OPERATORS`].
+pub(crate) const FLOW_KEYWORDS: [&str; 6] = ["if", "elsif", "else", "let", "return", "case"];
+
 /// True when `word` is a control operator.
 pub fn is_control_operator(word: &str) -> bool {
     CONTROL_OPERATORS.contains(&word)
@@ -28,7 +31,7 @@ pub fn is_control_operator(word: &str) -> bool {
 /// literals (`true`, `false`) are not keywords; they classify through
 /// [`ast::WordLiteral`].
 pub fn is_keyword(word: &str) -> bool {
-    is_control_operator(word) || matches!(word, "if" | "elsif" | "else" | "let" | "return" | "case")
+    is_control_operator(word) || FLOW_KEYWORDS.contains(&word)
 }
 
 /// Recursion cap for the front end, enforced independently by the lexer over

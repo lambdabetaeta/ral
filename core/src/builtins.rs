@@ -374,10 +374,10 @@ builtin_registry! {
     // See `crate::uutils::is_uutils_tool`.
 
     Help { names: ["help"], ty: scheme::help,
-        doc: "help  — print an overview of builtins, prelude, and library; see also `explain`.",
+        doc: "help  — print an overview of language syntax, builtins, prelude, and library; see also `explain`.",
         call: |args, _mooring, shell| help::builtin_help(args, shell), },
     Explain { names: ["explain"], ty: scheme::explain,
-        doc: "explain <name>  — print documentation for one name: doc, type signature, where the shell would find it, and what that shadows. Unlike `which`, which only searches PATH and so cannot see anything ral provides, this names the frame that would actually run.",
+        doc: "explain <name>  — print the full guide for one language form or command, followed by its type when applicable, its source, and what it shadows. Unlike `which`, which only searches PATH and so cannot see anything ral provides, this describes the entry that actually applies.",
         call: |args, _mooring, shell| help::builtin_explain(args, shell), },
     // The `_ed-*` family rides the REPL's boot surface instead; see
     // `ral::repl::plugin::ed_builtins::ED_BUILTINS`.

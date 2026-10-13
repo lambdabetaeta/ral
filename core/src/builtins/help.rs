@@ -1,6 +1,8 @@
-//! `help` prints the command index; `explain <name>` resolves one user
-//! definition, builtin, prelude function, or host-installed library entry to
-//! its doc, its type, and where the shell would find it.
+//! `help` prints the language and command index.
+//!
+//! `explain <name>` resolves one language form, user definition, builtin,
+//! prelude function, or host-installed library entry to its documentation and
+//! place in the shell.
 
 use crate::ansi::{BOLD, CYAN, DIM, RESET};
 use crate::ir::CommandName;
@@ -11,6 +13,91 @@ use crate::typecheck::builtin_type_hint;
 use crate::types::{Binding, HandlerLookup, Settled, Shell, Value};
 use std::fmt::{self, Write};
 use std::path::PathBuf;
+
+/// Syntax that the parser, rather than a callable binding, provides.
+///
+/// Keep this vocabulary paired with `syntax::is_keyword` and
+/// `LANGUAGE_CONSTANTS`; the test below makes drift loud.
+static LANGUAGE_DOCS: &[(&str, &str)] = &[
+    (
+        "audit",
+        "audit { body }  — run a block and return its outcome and a structured trail instead of failing.\n\n\
+         The result is `[outcome: `ok value | `err error, trail: observations]`. The trail records commands, reads, writes, workers, host acts, and denied capability checks performed by the body. Each command observation keeps `argv`, `status`, `stdout`, `stderr`, and total byte counts; each stream retains at most 1 MiB.\n\n\
+         Use `succeeded $report` for a Boolean and `commands $report` for just the command observations. Inspect a failure with `case $report[outcome] [...]`. Output still flows to the surrounding pipe or redirect while it is recorded.\n\n\
+         Example:\n  let report = audit { grep -c ERROR app.log }\n  if !{succeeded $report} { bytes-to-string !{commands $report}[0][stdout] } else { 'no matches' }",
+    ),
+    (
+        "case",
+        "case <variant> [`tag: { |payload| body }, ...]  — run the arm matching a variant's tag.\n\n\
+         Write every arm at the `case`; the checker uses that fixed set to prove the match exhaustive. Each arm is a one-argument block, or a name holding one. A tag without a payload passes `()`. All arms must return compatible results.\n\n\
+         Example:\n  case $result [\n    `ok:  { |value| return $value },\n    `err: { |error| fail $error },\n  ]",
+    ),
+    (
+        "else",
+        "else { body }  — supply the fallback branch of an `if`.\n\n\
+         It follows the final `if` or `elsif` branch. The body is a block, or a name holding one, and runs only when every preceding condition is false. With `else`, every branch must return a compatible result. See `explain if` for the complete form.",
+    ),
+    (
+        "elsif",
+        "elsif <condition> { body }  — add another condition and branch to an `if`.\n\n\
+         Conditions are tested in order and must be `Bool`; only the first true branch runs. The body is a block, or a name holding one. See `explain if` for the complete form.",
+    ),
+    (
+        "false",
+        "false  — the Boolean false value.\n\n\
+         It is a successful value, not a failure: `?` does not react to it and `try` does not catch it. It selects another `if` branch, and a top-level result of `false` gives the process status 1.",
+    ),
+    (
+        "grant",
+        "grant [capabilities] { body }  — run a block with reduced authority.\n\n\
+         A grant may contain `exec`, `fs`, `net`, `editor`, and `shell`. Omitted fields inherit their surrounding authority. A written field restricts it, nested grants intersect, and no grant can restore authority withheld outside it. `grant [] { body }` changes nothing. Work spawned inside inherits the active grant.\n\n\
+         `exec` is `[allow: targets, deny: targets]`; once present, only allowed targets may run and any deny wins. A target is a bare command (`name git), one executable at a place (`cwd tools/lint), or every executable under a place or selector (`dir `cwd tools, `dir `system, `dir `path, `dir `homebrew).\n\n\
+         `fs` is `[read: places, write: places, deny: places]`; `write` also permits reading, and `deny` wins. A present `fs` table grants no unlisted reads or writes. Places are tagged anchors: `absolute /path, `cwd relative, `home relative, `tempdir relative, `gitdir relative, and `xdg-config relative, `xdg-data relative, `xdg-cache relative, `xdg-state relative, or `xdg-bin relative. Relative anchors and symlinks are resolved when the grant begins.\n\n\
+         Write `net: `offline` to deny child networking. `editor` is a list drawn from `read, `write, and `tui. `shell` is a list drawn from `chdir and `detach. An empty written list withholds every verb in that dimension.\n\n\
+         Example:\n  grant [\n    exec: [allow: [`name git, `name rg]],\n    fs: [read: [`cwd .], write: [`cwd build], deny: [`cwd .env]],\n    net: `offline,\n    shell: [`chdir],\n  ] {\n    rg TODO src\n  }",
+    ),
+    (
+        "guard",
+        "guard { body } { cleanup }  — run cleanup after body, whether body succeeds or fails.\n\n\
+         When cleanup succeeds, `guard` returns the body's value or continues its failure. A cleanup that fails or exits takes precedence over the body's result. Use `attempt { ... }` inside cleanup when cleanup failure should be ignored.\n\n\
+         Example:\n  guard { use-resource } { attempt { release-resource } }",
+    ),
+    (
+        "if",
+        "if <Bool> { body } [elsif <Bool> { body } ...] [else { body }]  — choose the first true branch.\n\n\
+         Conditions are evaluated in order. Branch bodies are blocks, or names holding blocks, and unchosen bodies do not run. With `else`, all branches must return compatible results. Without `else`, the form is for effects and returns `()`. Bind a computed block first, then name it as the body.\n\n\
+         Example:\n  if $[$n == 0] { 'zero' }\n  elsif $[$n > 0] { 'positive' }\n  else { 'negative' }",
+    ),
+    (
+        "let",
+        "let <pattern> = <command>  — evaluate a command and bind its result for the rest of the surrounding scope.\n\n\
+         Use the binding as `$name`; a bare name in command position applies it. External-command output is captured as a `String` unless a final decoder such as `from-lines` or `from-json` returns another value. Patterns may destructure lists and records: `let [head, ...tail] = $items`. Bindings are immutable, but a later binding may shadow an earlier one.\n\n\
+         Example:\n  let files = glob #'**/*.rs'#\n  let counts = map { |file| line-count $file } $files",
+    ),
+    (
+        "return",
+        "return [value]  — finish successfully with a value; without one, return `()`.\n\n\
+         `return` constructs a successful computation; it does not exit the process and does not escape an enclosing function early. A block's result is the final computation it runs, so `return` is most useful when lifting data explicitly or returning unit from an otherwise empty path.\n\n\
+         Example:\n  let twice = { |n| return $[$n * 2] }",
+    ),
+    (
+        "true",
+        "true  — the Boolean true value.\n\n\
+         It is a successful value and selects an `if` branch. A top-level result of `true` gives the process status 0.",
+    ),
+    (
+        "try",
+        "try { body } { |error| handler }  — recover from a failure raised while running body.\n\n\
+         On success, return the body's value without running the handler. On failure, call the handler with `[cmd, status, reason, message, site]`; branch on `reason`, and use `fail $error` to re-raise. Body and handler must return compatible results. Output is not captured: use `audit` when stdout, stderr, or the full trail is needed. Exits and internal control escapes bypass the handler.\n\n\
+         Example:\n  try { from-string < config.txt } { |error|\n    warn \"config: $error[message]\"\n    return #'{}'#\n  }",
+    ),
+    (
+        "within",
+        "within [options] { body }  — run a block with temporary shell context.\n\n\
+         Options are `dir: path`, `env: map`, `handlers: [name: handler, ...]`, and `handler: catch-all`. `dir` changes the logical working directory; `env` overlays variables, with `unset removing one. Named handlers receive the command's argument list. The catch-all receives the unresolved command name and then its argument list. Options compose, and the previous context returns when the body finishes.\n\n\
+         Example:\n  within [\n    dir: project,\n    env: [MODE: 'test', TOKEN: `unset],\n    handlers: [notify: { |args| echo ...$args }],\n  ] {\n    notify building\n    make check\n  }",
+    ),
+];
 
 /// A checked `let` installs its generalised scheme beside the value, so a
 /// definition's most general type reads straight off its binding — the baked
@@ -27,6 +114,13 @@ fn prelude_doc(name: &str) -> Option<&'static str> {
         .map(|&(_, doc)| doc)
 }
 
+fn language_doc(name: &str) -> Option<&'static str> {
+    LANGUAGE_DOCS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|&(_, doc)| doc)
+}
+
 /// The documented prelude function names.  An embedding host folds these into
 /// its own command index beside [`Shell::builtin_names`].
 pub fn prelude_names() -> Vec<&'static str> {
@@ -38,15 +132,16 @@ fn by_name<'a>(mut rows: Vec<(&'a str, &'a str)>) -> Vec<(&'a str, &'a str)> {
     rows
 }
 
-/// Every documented registry, in `help`'s print order: the builtin manifest,
-/// the prelude, then whatever a host installed with
+/// Every documented registry, in `help`'s print order: language syntax, the
+/// builtin manifest, the prelude, then whatever a host installed with
 /// [`Shell::install_library_docs`] — which is empty until one does.
-/// `explain`'s fallback search sweeps the same three.
+/// `explain`'s fallback search sweeps the same four.
 ///
 /// A leading `_` marks a name internal: it is kept out of the index and out
 /// of the search, though `explain` named it exactly still answers.
-fn registries(shell: &Shell) -> [(&'static str, Vec<(&str, &str)>); 3] {
+fn registries(shell: &Shell) -> [(&'static str, Vec<(&str, &str)>); 4] {
     [
+        ("Language", LANGUAGE_DOCS.to_vec()),
         (
             "Builtins",
             by_name(
@@ -119,33 +214,42 @@ fn lead_paragraph(doc: &str) -> &str {
     doc.split_once("\n\n").map_or(doc, |(head, _)| head)
 }
 
-/// One `explain` entry: the doc, the type, then a dim line apiece for where
-/// the name lives and what that shadows.
+/// One `explain` entry: a readable guide, then labelled facts about the name.
 fn fmt_entry(
     name: &str,
     doc: Option<&str>,
     ty: Option<&str>,
     tail: &[String],
     Colors {
-        cyan, dim, reset, ..
+        bold,
+        cyan,
+        dim,
+        reset,
     }: Colors,
 ) -> String {
-    let head = match doc {
-        // Continuation lines must land inside the two-space block, not the margin.
-        Some(doc) => format!(
-            "  {cyan}{name}{reset}{dim}:{reset} {}\n",
-            doc.replace('\n', "\n  ")
-        ),
-        None => format!("  {cyan}{name}{reset}\n"),
-    };
-    // Every manifest row has a type to print — a value row's polytype, a base
-    // frame's argv type — so an em dash means no registry had one.
-    let ty = format!("  {dim}{}{reset}\n", ty.unwrap_or("—"));
-    let tail = tail.iter().fold(String::new(), |mut lines, line| {
-        let _ = writeln!(lines, "  {dim}{line}{reset}");
-        lines
-    });
-    format!("{head}{ty}{tail}\n")
+    let mut out = format!("  {bold}{cyan}{name}{reset}\n");
+    if let Some(doc) = doc {
+        let (usage, description) = doc
+            .split_once("  — ")
+            .map_or((None, doc), |(usage, description)| {
+                (Some(usage), description)
+            });
+        if let Some(usage) = usage {
+            let _ = writeln!(out, "  {dim}Usage:{reset} {usage}");
+        }
+        let _ = writeln!(out, "  {}", description.replace('\n', "\n  "));
+    }
+    if doc.is_some() && (ty.is_some() || !tail.is_empty()) {
+        out.push('\n');
+    }
+    if let Some(ty) = ty {
+        let _ = writeln!(out, "  {dim}Type:{reset} {ty}");
+    }
+    for line in tail {
+        let _ = writeln!(out, "  {dim}{line}{reset}");
+    }
+    out.push('\n');
+    out
 }
 
 /// One row of the `help` index.
@@ -156,10 +260,13 @@ fn fmt_line(
         cyan, dim, reset, ..
     }: Colors,
 ) -> String {
-    format!(
-        "  {cyan}{name}{reset} {dim}—{reset} {}\n",
-        lead_paragraph(doc)
-    )
+    let summary = lead_paragraph(doc);
+    match summary.strip_prefix(name) {
+        Some(rest) if rest.is_empty() || rest.starts_with(char::is_whitespace) => {
+            format!("  {cyan}{name}{reset}{rest}\n")
+        }
+        _ => format!("  {cyan}{name}{reset} {dim}—{reset} {summary}\n"),
+    }
 }
 
 pub(super) fn builtin_help(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
@@ -178,7 +285,7 @@ pub(super) fn builtin_help(_args: &[Value], shell: &mut Shell) -> Settled<Value>
         });
     let out = format!(
         "{index}{dim}──{reset}\n\
-         {dim}Use `explain <name>` for the full type signature and source location of any entry.{reset}\n"
+         {dim}Use `explain <name>` for the full guide, type when applicable, source, and shadowing details.{reset}\n"
     );
 
     shell.write_stdout(out.as_bytes())?;
@@ -196,9 +303,18 @@ pub(super) fn builtin_explain(args: &[Value], shell: &mut Shell) -> Settled<Valu
 
 /// What documents `name` over the frame that would run.  A name nothing binds
 /// and no registry documents falls to a search of the whole index; everything
-/// else prints the one entry block, an em dash standing in for whichever of
-/// the doc and the type no registry holds.
+/// else prints the one entry block. Optional facts are omitted when no registry
+/// holds them, rather than rendered as unexplained placeholders.
 fn explanation(name: &str, shell: &Shell, colors: Colors) -> String {
+    if let Some(doc) = language_doc(name) {
+        return fmt_entry(
+            name,
+            Some(doc),
+            None,
+            &["Source: language syntax".to_string()],
+            colors,
+        );
+    }
     let sites = locate_all(name, shell);
     let (doc, ty) = documented(name, sites.first(), shell);
     if sites.is_empty() && doc.is_none() && ty.is_none() {
@@ -206,14 +322,14 @@ fn explanation(name: &str, shell: &Shell, colors: Colors) -> String {
     }
     let mut tail: Vec<String> = sites
         .first()
-        .map(|site| format!("{name}: {site}"))
+        .map(|site| format!("Source: {site}"))
         .into_iter()
         .collect();
     if let [_, shadowed @ ..] = sites.as_slice()
         && !shadowed.is_empty()
     {
         let names: Vec<String> = shadowed.iter().map(Where::to_string).collect();
-        tail.push(format!("shadows: {}", names.join(", ")));
+        tail.push(format!("Shadows: {}", names.join(", ")));
     }
     fmt_entry(name, doc.as_deref(), ty.as_deref(), &tail, colors)
 }
@@ -318,7 +434,7 @@ impl fmt::Display for Where {
 /// half of the manifest (a native — the env hit), then the handler stack, then
 /// `PATH`.  A native's own arm is unreachable from any bare head or `^` (A-1′),
 /// so it reports as `builtin`, and an arm stacked over it reports separately,
-/// under `shadows:`.
+/// under `Shadows:`.
 fn locate_all(name: &str, shell: &Shell) -> Vec<Where> {
     let mut sites = Vec::new();
     if shell.env.binding(name).is_some() {
@@ -384,6 +500,21 @@ fn grant_admits(name: &str, shell: &Shell) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn language_docs_cover_every_keyword_and_constant() {
+        let mut expected: Vec<&str> = crate::syntax::CONTROL_OPERATORS.into_iter().collect();
+        expected.extend(crate::syntax::FLOW_KEYWORDS);
+        expected.extend(
+            crate::typecheck::builtins::LANGUAGE_CONSTANTS
+                .iter()
+                .map(|&(name, _)| name),
+        );
+        expected.sort_unstable();
+
+        let documented: Vec<&str> = LANGUAGE_DOCS.iter().map(|&(name, _)| name).collect();
+        assert_eq!(documented, expected);
+    }
 
     /// `build.rs` scrapes these summaries out of `prelude.ral`; the two rules
     /// worth pinning are how a wrapped doc joins and where one stops.
@@ -485,7 +616,7 @@ mod tests {
         let mut shell = crate::test_helper::core_shell();
         shell.set_var("sess_name".into(), Value::Int(1));
         for (source, expected) in [
-            ("!{ explain sess_name }", "sess_name: session"),
+            ("!{ explain sess_name }", "Source: session"),
             (
                 "let f = { |zqx_local| explain zqx_local }\nf 1",
                 "explain: zqx_local: not found",

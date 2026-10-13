@@ -3740,17 +3740,22 @@ explain map
 explain from-json
 ```
 
-`help` prints sorted `Builtins:` and `Prelude:` sections. It uses the builtin
-registry and the prelude's `##` documentation, the same sources used to build
-the shell. When a host has installed documentation for a sourced library, help
-also prints a `Library:` section.
+`help` prints sorted `Language:`, `Builtins:`, and `Prelude:` sections. The
+language section covers every reserved form and Boolean literal. The other
+sections use the builtin registry and the prelude's `##` documentation, the
+same sources used to build the shell. When a host has installed documentation
+for a sourced library, help also prints a `Library:` section.
 
-`explain name` prints the name's summary, full inferred type or command
-signature, and where the name resolves. It understands core and host builtins,
-prelude entries, documented host libraries, session bindings, aliases,
-handlers, and external commands. If no exact documented name exists, it
-searches documented names case-insensitively. Regex search is used when regex
-support is compiled in; otherwise the search is a substring match.
+`explain name` prints the name's full documentation, inferred type or command
+signature where one exists, and where the name comes from. It understands
+language forms and literals, core and host builtins, prelude entries,
+documented host libraries, session bindings, aliases, handlers, and external
+commands. Language entries are short standalone usage guides. The renderer
+separates a conventional usage line from its prose and labels the facts it has
+as `Usage:`, `Type:`, `Source:`, and `Shadows:`; a missing fact is omitted. If
+no exact documented name exists, it searches documented names
+case-insensitively. Regex search is used when regex support is compiled in;
+otherwise the search is a substring match.
 
 `help` is the canonical catalogue of documented standard and host-library
 entries, not a list of every command that might be reachable. Arbitrary aliases,
@@ -4164,15 +4169,17 @@ the resulting shell.
 
 ### 15.4. Discovering the installed surface
 
-`help` lists the installed public builtins, documented prelude bindings, and
-any library documentation supplied by the host. Names beginning with `_` are
-hidden. The lists are sorted.
+`help` lists language forms and literals, installed public builtins, documented
+prelude bindings, and any library documentation supplied by the host. Names
+beginning with `_` are hidden. The lists are sorted.
 
-`explain name` shows the entry's documentation, inferred or declared type, and
-where name resolution would find it. When no exact entry resolves, `explain`
-performs a case-insensitive search and prints matching public entries. These
-commands are informational: a missing query prints a message and leaves status
-zero.
+`explain name` shows the entry's full documentation, inferred or declared type
+where one exists, and where it comes from. For a language entry the full
+documentation is a standalone usage guide. Available facts are labelled
+`Usage:`, `Type:`, `Source:`, and `Shadows:`. When no exact entry resolves,
+`explain` performs a case-insensitive search and prints matching public
+entries. These commands are informational: a missing query prints a message
+and leaves status zero.
 
 Because help is assembled from the live shell, it describes host additions
 such as `watch` and `load-plugin` only where they are actually installed.
