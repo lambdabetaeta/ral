@@ -1,6 +1,7 @@
 //! Typing environment and inference context.
 
-use super::error::{Reason, TypeError, TypeErrorKind, UnitCall};
+use super::contract::NestedCheck;
+use super::error::{Clash, Reason, TypeError, TypeErrorKind, UnitCall};
 use super::index::{Idx, Lbl};
 use super::unify::{Unifier, WeakSource};
 use crate::ir::{Comp, GroupNode, Name, Val, synthetic};
@@ -222,6 +223,9 @@ pub struct InferCtx {
     pub(super) pending_labels: Vec<Lbl>,
     /// Computed reads whose target's head is not yet known.
     pub(super) pending_indexes: Vec<Idx>,
+    /// Nested grant tables awaiting ascription, drained once by `typecheck`;
+    /// the one-shot sessions re-infer accepted bodies and never read it.
+    pub(super) nested: Vec<NestedCheck>,
     /// The binding whose value is being inferred, narrowed like [`Self::pos`].
     pub(super) holder: Option<Span>,
     /// A `Rec` group's member types, inferred once per `Arc` within a run
@@ -278,6 +282,7 @@ impl InferCtx {
             unit_reads: Vec::new(),
             pending_labels: Vec::new(),
             pending_indexes: Vec::new(),
+            nested: Vec::new(),
             holder: None,
             rec_groups: HashMap::new(),
             rec_group_rebuilds: HashMap::new(),
@@ -398,8 +403,22 @@ impl InferCtx {
 
     /// Unify two value types, reporting a mismatch under `why`.
     pub(crate) fn unify_ty(&mut self, a: &Ty, b: &Ty, why: Reason) {
+        self.unify_ty_with(a, b, |u, a, b| {
+            u.unify_ty(a, b).map_err(|kind| Box::new((kind, why)))
+        });
+    }
+
+    /// [`Self::unify_ty`] by `unify`, which words its own failure: a reason
+    /// that depends on where in the types the clash fell.
+    pub(super) fn unify_ty_with(
+        &mut self,
+        a: &Ty,
+        b: &Ty,
+        unify: impl FnOnce(&mut Unifier, &Ty, &Ty) -> Result<(), Clash>,
+    ) {
         self.unifier.at = self.pos;
-        if let Err(kind) = self.unifier.unify_ty(a, b) {
+        if let Err(clash) = unify(&mut self.unifier, a, b) {
+            let (kind, why) = *clash;
             let weak = self
                 .unifier
                 .weak_source_in_ty(a)

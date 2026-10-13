@@ -19,10 +19,10 @@ fn under(read: &Path, write: &Path, deny: &[&Path], body: &str) -> common::Outpu
     common::run(
         "deny_spelling",
         &format!(
-            "grant [fs: [read: ['{}'], write: ['{}'], deny: [{}]]] {{ {body} }}",
+            "grant [fs: [read: [`absolute '{}'], write: [`absolute '{}'], deny: [{}]]] {{ {body} }}",
             read.display(),
             write.display(),
-            common::quoted(deny),
+            common::places(deny),
         ),
     )
 }

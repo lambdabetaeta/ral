@@ -1,0 +1,2 @@
+# contains: unknown key 'git'
+grant [exec: [git: 'allow']] { return 1 }

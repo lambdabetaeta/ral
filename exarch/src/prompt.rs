@@ -4,7 +4,8 @@
 pub mod host;
 
 use crate::skill;
-use ral_core::capability::{Capabilities, ExecKey, GrantStack};
+use ral_core::capability::{Capabilities, ExecKey, GrantStack, Net};
+use std::collections::BTreeSet;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
@@ -366,8 +367,7 @@ pub fn grant_summary(caps: &Capabilities, scratch_line: &str) -> String {
     // Nothing attenuated (the `dangerous` profile): the denial legend would
     // describe a runtime event that cannot occur, so collapse to one line
     // plus the scratch path the agent still needs.
-    let ambient = caps.exec.is_none() && caps.fs.is_none() && caps.net != Some(false);
-    if ambient {
+    if !caps.is_restrictive() {
         return format!(
             "Ambient authority: every command, path, and network call is permitted; \
 the sandbox is the trust boundary.\n\n- scratch: {scratch_line}\n"
@@ -396,27 +396,30 @@ the sandbox is the trust boundary.\n\n- scratch: {scratch_line}\n"
         "- net: {}",
         match caps.net {
             None => "inherit",
-            Some(true) => "allow",
-            Some(false) => "deny",
+            Some(Net::Offline) => "deny",
         }
     );
+    if let Some(verbs) = &caps.editor {
+        let _ = writeln!(s, "- editor: {}", verbs_line(verbs));
+    }
+    if let Some(verbs) = &caps.shell {
+        let _ = writeln!(s, "- shell: {}", verbs_line(verbs));
+    }
     let _ = writeln!(s, "- scratch: {scratch_line}");
     s
 }
 
-/// Per-command exec policy as `name` or `name[sub1,sub2,...]`, comma-joined:
-/// bare names, then path keys as their author spelled them.  Directory
+/// Admitted commands, comma-joined: bare names, then path keys as their
+/// author spelled them.  Directory
 /// admittances are surfaced by [`exec_dirs_line`], denies by
 /// [`exec_denies`], so only admitted keys land here.
 fn exec_line(caps: &Capabilities) -> String {
     let Some(grant) = &caps.exec else {
         return "unrestricted".into();
     };
-    let admitted: Vec<String> = (grant.0.iter())
-        .filter_map(|(key, v)| match key {
-            ExecKey::Dir(_) => None,
-            _ => v.admit_label(&key.to_string()),
-        })
+    let admitted: Vec<String> = (grant.iter())
+        .filter(|(key, v)| !matches!(key, ExecKey::Dir(_)) && !v.is_denied())
+        .map(|(key, _)| key.to_string())
         .collect();
     if admitted.is_empty() {
         "(none)".into()
@@ -425,11 +428,11 @@ fn exec_line(caps: &Capabilities) -> String {
     }
 }
 
-/// Allowed directory prefixes, each with a trailing `/` so it reads as a
-/// directory.  Empty when nothing admits by directory.
+/// Allowed directories, each rendered as its `dir` target.  Empty when
+/// nothing admits by directory.
 fn exec_dirs_line(caps: &Capabilities) -> String {
     caps.exec.as_ref().map_or_else(String::new, |grant| {
-        (grant.0.iter())
+        (grant.iter())
             .filter(|(key, v)| matches!(key, ExecKey::Dir(_)) && !v.is_denied())
             .map(|(key, _)| key.to_string())
             .collect::<Vec<_>>()
@@ -442,11 +445,23 @@ fn exec_dirs_line(caps: &Capabilities) -> String {
 /// the path.
 fn exec_denies(caps: &Capabilities) -> Vec<String> {
     caps.exec.as_ref().map_or_else(Vec::new, |grant| {
-        (grant.0.iter())
+        (grant.iter())
             .filter(|(_, v)| v.is_denied())
             .map(|(key, _)| key.to_string())
             .collect()
     })
+}
+
+fn verbs_line<V: Copy>(verbs: &BTreeSet<V>) -> String
+where
+    &'static str: From<V>,
+{
+    let names: Vec<&str> = verbs.iter().map(|&v| v.into()).collect();
+    if names.is_empty() {
+        "(none)".into()
+    } else {
+        names.join(", ")
+    }
 }
 
 fn or_none<S: AsRef<str>>(v: &[S]) -> String {
@@ -632,5 +647,19 @@ mod tests {
             resolved.contains("chunk-3") && !resolved.contains(NAME_PLACEHOLDER),
             "the placeholder must never reach a model: {resolved}"
         );
+    }
+
+    /// A layer withholding only `detach` is no ambient authority: its verbs
+    /// are listed.
+    #[test]
+    fn a_layer_withholding_only_detach_lists_its_verbs() {
+        use ral_core::capability::ShellVerb;
+        let layer = Capabilities {
+            shell: Some([ShellVerb::Chdir].into()),
+            ..Capabilities::root()
+        };
+        let text = stack_summary(&GrantStack::of(layer), "scratch");
+        assert!(!text.contains("Ambient authority"), "{text}");
+        assert!(text.contains("- shell: chdir\n"), "{text}");
     }
 }

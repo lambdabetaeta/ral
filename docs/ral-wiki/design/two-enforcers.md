@@ -17,12 +17,10 @@ narrates *how* each runs; this page argues *why* both exist.
   primitives execute in process — they are not subprocesses, and an OS sandbox
   confines only a child. For everything ral does itself, the in-process guard is
   the one place a check can live ([[internals/builtins-registry|builtins]]).
-- *It is coarser than the grant model.* Exec is three-valued (Allow /
-  Only / Deny), and the guard matches the runtime argv: `exec: [git:
-  [status]]` admits `git status` and denies `git push`. The sandbox renders only
-  a path rule list — it filters *which binary*, never *which subcommand*, nor
-  which bundled tool a re-exec of ral runs.
-  Delegating exec to the OS silently coarsens the grant.
+- *It is coarser than the grant model.* The guard judges a launch by its
+  target, a bundled tool by name, and a bare-name veto under a trusted write;
+  the sandbox renders only a path rule list, and never sees which bundled tool a
+  re-exec of ral runs. Delegating exec to the OS silently coarsens the grant.
 - *It is uneven across platforms.* bwrap has no path-aware exec filter, Windows'
   container is coarse, and `net` is unscopable anywhere. Were the sandbox the
   sole enforcer, `grant` would mean different things on different kernels; the
@@ -92,9 +90,9 @@ serves ([[decisions/260906_the-envelope-is-a-process-namespace|the-envelope-is-a
 | | held by | when the host lacks it |
 |---|---|---|
 | `fs` read/write prefixes, `deny` masks; what the exec table admits is readable | bwrap mounts, each source a handle ral opened without following a symlink, each mask at every name a bind shows the denied path ([[decisions/261006_the-envelope-mounts-by-handle]]) | refuse: `confinement_unavailable`, a bwrap that builds no envelope or lacks `--ro-bind-fd` (before 0.8.0) included |
-| `net: false` | `--unshare-net` | refuse: `projection_enforceable` |
+| ``net: `offline`` | `--unshare-net` | refuse: `projection_enforceable` |
 | `exec` — which path may be `execve`d (not which code runs), a deny inside an allowed directory included, over the tree at launch: a program added afterwards to a directory holding a block is denied until the next launch | Landlock `Execute` ruleset, the parent subtracting each block from the directory that holds it; a read-only bind over each admitted directory a write prefix covers without naming, at every name a writable bind shows it (a prefix written through a symlink is two binds of one handle), so a veto carried into it cannot be authored around ([[decisions/261006_a-veto-freezes-what-a-write-covers]]) | refuse: `confinement_unavailable`, an exec opinion alone asking for the envelope |
-| `exec` — which subcommand, and a bare-name veto under a trusted write | in-process guard | the guard stands alone |
+| `exec` — a bare-name veto under a trusted write | in-process guard | the guard stands alone |
 | die with parent, new session, no core, the seccomp deny-set (kills kernel attack surface; refuses mounting, user namespaces and `TIOCSTI` with an errno) | bwrap + `pre_exec` | applied where possible |
 | private ipc / uts | `--unshare-*` | never refused |
 | `/sys/fs/cgroup` is the payload's own tree | cgroup namespace + re-rooted bind | the tree is the host's |
@@ -141,6 +139,14 @@ and the inherited hard limit both cap the budget; an installation failure
 refuses the launch. A status-128 failure with no attributed kernel denial
 gets a conditional explanation of this limit, never a claim that the exit
 status proves a refused fork.
+
+**Protections engage by restriction, not by presence.** Resource limits,
+process braking and loader-variable scrubbing are active when some layer
+restricts: `exec` or `fs` supplied, `net` `offline`, or a verb list that omits
+a verb (`is_restrictive`, one predicate per axis). A neutral layer (`()`, a
+full verb list) leaves ral ambient and, inside a restrictive stack, turns
+nothing off; exarch's summary calls a layer ambient by the same predicate
+([[decisions/261012_grant-surface-is-typed|grant-surface-is-typed]]).
 
 **Neither enforcer is the body's to rewrite.** Every launcher pinned at boot —
 on Linux both bwrap and ral's own trampoline, and ral itself wherever else it

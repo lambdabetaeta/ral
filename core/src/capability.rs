@@ -27,6 +27,6 @@ pub use fs::FsOp;
 pub(crate) use fs::{floor, region};
 pub(crate) use lattice::meet_insert;
 pub use lattice::{
-    Capabilities, EditorPolicy, ExecGrant, ExecKey, Flag, FsPolicy, GrantStack, Meet, ShellPolicy,
+    Capabilities, EditorVerb, ExecGrant, ExecKey, Flag, FsPolicy, GrantStack, Meet, Net, ShellVerb,
     Verdict, Widen,
 };

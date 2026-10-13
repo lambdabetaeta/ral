@@ -11,7 +11,7 @@
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::capability::Program;
-use crate::capability::{Admitted, ExecRules, FsOp, GrantStack, floor, region, rules};
+use crate::capability::{Admitted, ExecRules, FsOp, GrantStack, Net, floor, region, rules};
 use crate::path::{FrozenPath, Rendered, Resolver, render_paths, rendered_pins};
 #[cfg(unix)]
 use std::borrow::Borrow;
@@ -271,7 +271,7 @@ impl SandboxProjection<String> {
         // some layer held an `fs` opinion, so there is no mixed case to weigh.
         let regions =
             region(grants, resolver, &FsOp::Read).zip(region(grants, resolver, &FsOp::Write));
-        let net = grants.net().reduce(|all, net| all && net);
+        let online = !grants.net().any(|n| n == Net::Offline);
 
         let compiled = admitted.is_none().then(|| rules(grants)).flatten();
         let exec = admitted
@@ -287,7 +287,7 @@ impl SandboxProjection<String> {
         let exec_triggers_sandbox =
             crate::sandbox::EXEC_ENFORCED && !matches!(exec, ExecProjection::Unrestricted);
 
-        if regions.is_none() && net.is_none_or(|allowed| allowed) && !exec_triggers_sandbox {
+        if regions.is_none() && online && !exec_triggers_sandbox {
             crate::dbg_trace!(
                 "sandbox-proj",
                 "fold unrestricted in {:?} (no OS sandbox needed)",
@@ -310,7 +310,7 @@ impl SandboxProjection<String> {
         };
         let projection = Self {
             fs,
-            net: net.unwrap_or(true),
+            net: online,
             exec,
         };
         crate::dbg_trace!("sandbox-proj", "fold restricted in {:?}", t_fold.elapsed());
@@ -592,7 +592,7 @@ mod rendered_tests {
 #[cfg(all(test, unix))]
 mod tests {
     use super::{ExecProjection, WriteReach};
-    use crate::capability::{Capabilities, ExecGrant, ExecKey, ExecScope, FsPolicy, Verdict};
+    use crate::capability::{Capabilities, ExecKey, ExecScope, FsPolicy, Verdict};
     use crate::path::{FrozenPath, render_real};
 
     /// A layer with an opinion on writes, on exec, or both.
@@ -604,7 +604,8 @@ mod tests {
                 write_prefixes: vec![prefix(w)],
                 deny_paths: Vec::new(),
             }),
-            exec: admit.map(|dir| ExecGrant([(ExecKey::Dir(prefix(dir)), Verdict::Allow)].into())),
+            exec: admit
+                .map(|dir| std::iter::once((ExecKey::Dir(prefix(dir)), Verdict::Allow)).collect()),
             ..Capabilities::root()
         }
     }

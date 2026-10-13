@@ -87,9 +87,9 @@ LANDING_EXAMPLES = {
 }
 
 SANDBOX_EXAMPLE = """grant [
-    exec: [git: ['status']],
-    fs: [read: ['cwd:'], write: []],
-    net: false,
+    exec: [allow: [`name git]],
+    fs: [read: [`cwd .]],
+    net: `offline,
 ] {
     git status
 }"""

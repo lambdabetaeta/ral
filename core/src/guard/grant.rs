@@ -1,6 +1,6 @@
 //! How a spawn's grant reaches a child that has not yet resolved it.
 //!
-//! A restriction record crosses unfrozen: a `cwd:` sigil in a grant names the
+//! A restriction record crosses unfrozen: a `cwd` place in a grant names the
 //! cwd of the shell that grant governs — the child's, never the spawn site's —
 //! so the freeze belongs where the child's cwd is.  Hence a record here and
 //! not a [`Capabilities`], whose paths are resolved by construction.
@@ -75,7 +75,7 @@ impl SpawnGrant {
     }
 }
 
-// Unix-only: a frozen `cwd:` reads with `\` separators on Windows.
+// Unix-only: a frozen `cwd` reads with `\` separators on Windows.
 #[cfg(all(test, unix))]
 #[allow(
     clippy::disallowed_methods,
@@ -120,7 +120,7 @@ mod tests {
             "fs".to_string(),
             Value::map(vec![(
                 "read".to_string(),
-                Value::list(vec![Value::string("cwd:")]),
+                Value::list(vec![Value::variant("cwd", Some(Value::string(".")))]),
             )]),
         )]);
         let layer = restrict(&record)
@@ -130,7 +130,7 @@ mod tests {
         assert_eq!(
             read.iter().map(FrozenPath::as_str).collect::<Vec<_>>(),
             vec!["/work/proj"],
-            "`cwd:` must name the cwd the layer is frozen against, not the process's"
+            "`cwd .` must name the cwd the layer is frozen against, not the process's"
         );
     }
 
@@ -139,7 +139,40 @@ mod tests {
         let record = Value::map(vec![("net".to_string(), Value::string("yes"))]);
         let refusal = restrict(&record)
             .layer(unreachable_narrower, &cwd("/work/proj"))
-            .expect_err("a net axis that is not a Bool");
-        assert_eq!(refusal, "grant net: expected a Bool, got String");
+            .expect_err("a net axis that is not `offline`");
+        assert_eq!(
+            refusal,
+            "grant net: expected a net mode, got the string yes\nhint: a grant only narrows: omit `net` to inherit, or write net: `offline"
+        );
+    }
+
+    #[test]
+    fn obsolete_argument_policies_are_refused_off_the_wire() {
+        let name_git = Value::list(vec![Value::variant("name", Some(Value::string("git")))]);
+        let status = Value::list(vec![Value::string("status")]);
+        let records = [
+            ("git", Value::map(vec![("git".to_string(), status.clone())])),
+            (
+                "only",
+                Value::map(vec![
+                    ("allow".to_string(), name_git),
+                    ("only".to_string(), status),
+                ]),
+            ),
+        ];
+        for (key, exec) in records {
+            let record = Value::map(vec![("exec".to_string(), exec)]);
+            let refusal = restrict(&record)
+                .layer(unreachable_narrower, &cwd("/work/proj"))
+                .expect_err("an argument policy must not decode");
+            assert!(
+                refusal.contains(&format!("unknown key '{key}'")),
+                "{refusal}"
+            );
+            assert!(
+                refusal.contains("argument restrictions are no longer supported"),
+                "{refusal}"
+            );
+        }
     }
 }

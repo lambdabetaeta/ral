@@ -2,7 +2,7 @@
 //! as data; every sentence a user reads is a pure function of that data,
 //! written here and nowhere else.
 
-use super::contract::unknown_key_message;
+use super::contract::{Vocab, unknown_key_message};
 use super::error::{
     CycleVia, KindFound, Reason, SpreadHead, Standing, TypeError, TypeErrorKind, UnitCall,
 };
@@ -12,7 +12,8 @@ use crate::ir::{ArithOp, BinaryOp};
 use crate::source::Span;
 use crate::text::plural;
 use crate::ty::{
-    CompTy, FmtCtx, Grade, Kind, Label, RefusedArg, Row, Ty, fmt_comp_ty_ctx, fmt_ty_ctx,
+    CompTy, FmtCtx, Grade, Kind, Label, RefusedArg, Row, TAG_PREFIX, Ty, fmt_comp_ty_ctx,
+    fmt_ty_ctx,
 };
 
 impl TypeErrorKind {
@@ -54,9 +55,10 @@ impl TypeErrorKind {
                 ),
             },
             Self::CompTyMismatch { expected, actual } => fmt_comp_mismatch(expected, actual),
-            Self::RowExtraField { label, .. } => {
-                format!("this record has no field named '{label}'")
-            }
+            Self::RowExtraField { label, .. } => match label {
+                Label::Field(field) => format!("this record has no field named '{field}'"),
+                tag @ Label::Case(_) => format!("this value cannot be the tag {tag}"),
+            },
             Self::RowMissingField { label } => {
                 format!("this record is missing a field named '{label}'")
             }
@@ -69,6 +71,10 @@ impl TypeErrorKind {
             Self::UnknownKey { form, key, offered } => unknown_key_message(form, key, offered),
             Self::ReturnNotRecord { form, found, .. } => format!(
                 "`{form}` takes a record of settings, and this file returns {}",
+                describe(found)
+            ),
+            Self::NotATable { key, found, .. } => format!(
+                "`{key}` takes a record of settings, and this is {}",
                 describe(found)
             ),
             Self::CommandNotFunction { ty } => {
@@ -221,12 +227,16 @@ impl TypeErrorKind {
                 let ctx = FmtCtx::for_value_types(&[ty]);
                 format!("{} cannot be invoked as a command", fmt_ty_ctx(ty, &ctx))
             }
-            Self::RowExtraField { label, .. } => format!("no field '{label}' in this record"),
+            Self::RowExtraField { label, .. } => match label {
+                Label::Field(field) => format!("no field '{field}' in this record"),
+                tag @ Label::Case(_) => format!("no tag {tag} here"),
+            },
             Self::RowMissingField { label } => format!("this record needs field '{label}'"),
             Self::DuplicateField { label } => format!("'{label}' was already given above"),
             Self::RefusedKey { key, .. } => format!("'{key}' is refused here"),
             Self::UnknownKey { key, .. } => format!("no such key: '{key}'"),
             Self::ReturnNotRecord { found, .. } => format!("returns {}", describe(found)),
+            Self::NotATable { found, .. } => format!("is {}", describe(found)),
             Self::CaseNotExhaustive { missing, extra } => {
                 match (missing.as_slice(), extra.as_slice()) {
                     ([only], []) => format!("no arm for {only}"),
@@ -630,7 +640,7 @@ impl TypeError {
         };
         Report {
             code: Some(self.kind.code()),
-            message: self.kind.render_message(),
+            message: self.message(),
             at: self.pos.map(|sp| at(sp, self.kind.render_label())),
             also: self
                 .pos
@@ -695,6 +705,21 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
     } = kind
     {
         return kind_hint(found, *required, reason);
+    }
+    if let Some(Reason::Vocabulary(vocab)) = reason {
+        match kind {
+            // The message lists the tags, so the row hint would say it twice.
+            TypeErrorKind::RowExtraField {
+                label: Label::Case(tag),
+                ..
+            } => return vocab.miss(tag).map(str::to_string),
+            TypeErrorKind::TyMismatch { expected, actual } => {
+                if let Some(hint) = vocab_mismatch(vocab, expected, actual) {
+                    return Some(hint);
+                }
+            }
+            _ => {}
+        }
     }
     let from_kind = match kind {
         TypeErrorKind::CommandNotFunction { .. } => Some(
@@ -771,13 +796,22 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
         )),
         // Phrased as the runtime phrases its own missing-key hint, so a reader
         // meeting the two errors meets one language.
-        TypeErrorKind::RowExtraField { known, .. }
+        TypeErrorKind::RowExtraField { label, known }
             if !known.is_empty() && !matches!(reason, Some(Reason::RecordUpdate { .. })) => {
-            Some(format!(
-                "available: {}; did you mean one of those?",
-                known.join(", ")
-            ))
+            Some(match label {
+                Label::Field(_) => format!(
+                    "available: {}; did you mean one of those?",
+                    known.join(", ")
+                ),
+                Label::Case(tag) => match near_tags(tag, known)[..] {
+                    [near] => format!("available tags: {}; did you mean {near}?", known.join(", ")),
+                    _ => format!("available tags: {}", known.join(", ")),
+                },
+            })
         }
+        TypeErrorKind::NotATable { key, first, .. } => Some(format!(
+            "a grant table is a record; for `{key}` to admit nothing write `{key}: [{first}: []]`"
+        )),
         TypeErrorKind::DuplicateField { label } => Some(format!(
             "a record has one value per field, so keep whichever '{label}' you meant; \
              to update a field a spread supplies, write it once after the spread, \
@@ -1002,6 +1036,7 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
         | Reason::MapKeyRead
         | Reason::DynamicIndexTarget
         | Reason::AutoderefHead
+        | Reason::Vocabulary(_)
         | Reason::Capture => None,
     }
 }
@@ -1016,6 +1051,7 @@ fn record_update_hint(base: Option<&str>, kind: &TypeErrorKind) -> String {
                 not labels, so a map has no fields to update"
             .to_string();
     };
+    let label = label.name();
     let subject = base.map_or_else(|| "this record".to_string(), |b| format!("`${b}`"));
     let lead = format!(
         "{subject} has no field `{label}` to update: a spread replaces fields its record already has"
@@ -1177,6 +1213,70 @@ fn return_not_record_hint(form: &str, found: &Ty, offered: &[&str]) -> String {
         ),
         Ty::Thunk(_) => format!("`{form}` returns its settings, not a block"),
         _ => format!("return a record such as `[{key}: …]`, or `()` for nothing to set"),
+    }
+}
+
+/// The tags of `known` within edit distance of `tag`, as written, nearest first.
+fn near_tags<'a>(tag: &str, known: &'a [String]) -> Vec<&'a str> {
+    let bare = |k: &'a String| k.trim_start_matches(TAG_PREFIX);
+    let near = crate::text::near_names(tag, known.iter().map(bare), 1);
+    known
+        .iter()
+        .filter(|k| near.contains(&bare(k)))
+        .map(String::as_str)
+        .collect()
+}
+
+/// The tags a type offers, peeling the lists around it.
+fn offered_tags(ty: &Ty) -> Option<Vec<String>> {
+    match ty {
+        Ty::List(elem) => offered_tags(elem),
+        Ty::Variant(row) => Some(row.fields().map(|(label, _)| label.to_string()).collect()),
+        _ => None,
+    }
+}
+
+/// What a vocabulary says of a value that is no tag of its row, or whose
+/// payload is the wrong type.
+fn vocab_mismatch(vocab: &Vocab, expected: &Ty, actual: &Ty) -> Option<String> {
+    let advice = match (offered_tags(expected), offered_tags(actual)) {
+        (Some(_), None) | (None, Some(_)) => vocab.untagged,
+        (None, None) => vocab.payload,
+        _ => return None,
+    };
+    Some(advice.to_string())
+}
+
+/// The headline for a tag a vocabulary's closed row lacks, in its words: the
+/// one sentence the checker and the grant decoder both say.  `known` are the
+/// row's tags as written, `` `cwd ``.
+pub(crate) fn unknown_tag_message(noun: &str, tag: &str, known: &[String]) -> String {
+    let noun = crate::text::indefinite(noun);
+    let near = match near_tags(tag, known)[..] {
+        [near] => format!(" (did you mean {near}?)"),
+        _ => String::new(),
+    };
+    format!(
+        "{TAG_PREFIX}{tag} is not {noun}; {noun} is one of {}{near}",
+        known.join(", ")
+    )
+}
+
+impl TypeError {
+    /// The headline: the kind's own, or its vocabulary's when the failed
+    /// constraint was against one.
+    pub fn message(&self) -> String {
+        match (&self.kind, &self.reason) {
+            (
+                TypeErrorKind::RowExtraField {
+                    label: Label::Case(tag),
+                    ..
+                },
+                Some(Reason::Vocabulary(vocab)),
+            ) => Some(vocab.refuse(tag).0),
+            _ => None,
+        }
+        .unwrap_or_else(|| self.kind.render_message())
     }
 }
 

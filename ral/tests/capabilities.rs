@@ -40,7 +40,7 @@ fn write_profile(suffix: &str, body: &str) -> std::path::PathBuf {
 
 #[test]
 fn single_file_deny_blocks_command() {
-    let prof = write_profile("single_deny", "return [exec: [ls: 'deny']]\n");
+    let prof = write_profile("single_deny", "return [exec: [deny: [`name ls]]]\n");
     let out = ral(&["--capabilities", prof.to_str().unwrap(), "-c", "ls ."]);
     std::fs::remove_file(&prof).ok();
     assert_ne!(
@@ -76,13 +76,13 @@ fn missing_profile_file_errors_clean() {
 /// without one file having to know about the other's vetoes.
 ///
 /// Both denied commands here resolve as external (`arm=External` in
-/// ral's dispatch trace) — `echo` is a ral builtin so an `'echo': 'deny'`
+/// ral's dispatch trace) — `echo` is a ral builtin so a ``deny: [`name echo]``
 /// would do nothing; we use `ls` and `cat` which both fall through to
 /// the system PATH.
 #[test]
 fn comma_separated_profiles_meet_both_denies() {
-    let a = write_profile("meet_a", "return [exec: [ls: 'deny']]\n");
-    let b = write_profile("meet_b", "return [exec: [cat: 'deny']]\n");
+    let a = write_profile("meet_a", "return [exec: [deny: [`name ls]]]\n");
+    let b = write_profile("meet_b", "return [exec: [deny: [`name cat]]]\n");
     let arg = format!("{},{}", a.display(), b.display());
 
     let out_ls = ral(&["--capabilities", &arg, "-c", "ls ."]);
@@ -102,8 +102,8 @@ fn comma_separated_profiles_meet_both_denies() {
 /// in both orders, since a fold that narrows must also commute.
 #[test]
 fn a_one_sided_allow_does_not_survive_the_meet() {
-    let a = write_profile("allow_a", "return [exec: [ls: 'allow', cat: 'allow']]\n");
-    let b = write_profile("allow_b", "return [exec: [ls: 'allow']]\n");
+    let a = write_profile("allow_a", "return [exec: [allow: [`name ls, `name cat]]]\n");
+    let b = write_profile("allow_b", "return [exec: [allow: [`name ls]]]\n");
 
     for arg in [
         format!("{},{}", a.display(), b.display()),
@@ -131,35 +131,34 @@ fn a_one_sided_allow_does_not_survive_the_meet() {
     std::fs::remove_file(&b).ok();
 }
 
-/// A misspelt `xdg:` name is a load-time error naming the typo and every
-/// kind it could have meant — not a silently frozen literal prefix, and not
-/// a bare non-absolute complaint that hides the real cause.  The companion
-/// run proves the rejection is the *name*, not `xdg:` as such.
+/// A misspelt `xdg-*` tag is a load-time error naming the typo and every
+/// kind it could have meant.  The companion run proves the rejection is the
+/// tag, not `xdg-` as such.
 #[test]
 fn unknown_xdg_token_in_profile_names_the_typo_and_the_alternatives() {
-    let bad = write_profile("xdg_typo", "return [fs: [read: ['xdg:cofnig']]]\n");
+    let bad = write_profile("xdg_typo", "return [fs: [read: [`xdg-cofnig .]]]\n");
     let out = ral(&["--capabilities", bad.to_str().unwrap(), "-c", "echo never"]);
     std::fs::remove_file(&bad).ok();
     assert_ne!(out.status, 0, "a typo'd xdg token must not load");
     assert!(
-        out.stderr.contains("unknown xdg token 'xdg:cofnig'"),
-        "expected the unknown-token diagnostic; got:\n{}",
+        out.stderr.contains("`xdg-cofnig"),
+        "expected the unknown-tag diagnostic; got:\n{}",
         out.stderr
     );
     for kind in ["config", "data", "cache", "state", "bin"] {
         assert!(
-            out.stderr.contains(kind),
-            "the alternatives must list '{kind}'; got:\n{}",
+            out.stderr.contains(&format!("xdg-{kind}")),
+            "the alternatives must list 'xdg-{kind}'; got:\n{}",
             out.stderr
         );
     }
 
-    let good = write_profile("xdg_known", "return [fs: [read: ['xdg:config']]]\n");
+    let good = write_profile("xdg_known", "return [fs: [read: [`xdg-config .]]]\n");
     let out = ral(&["--capabilities", good.to_str().unwrap(), "-c", "echo never"]);
     std::fs::remove_file(&good).ok();
     assert_eq!(
         out.status, 0,
-        "a known xdg token must load; stderr:\n{}",
+        "a known xdg tag must load; stderr:\n{}",
         out.stderr
     );
 }
@@ -181,7 +180,7 @@ fn confined_ral_walks_to_a_granted_file() {
     let out = ral(&[
         "-c",
         &format!(
-            "grant [fs: [read: ['{d_s}', '{bin_dir_s}']]] {{ {bin_s} -c 'cat < {d_s}/f.txt' }}"
+            "grant [fs: [read: [`absolute '{d_s}', `absolute '{bin_dir_s}']]] {{ {bin_s} -c 'cat < {d_s}/f.txt' }}"
         ),
     ]);
     std::fs::remove_dir_all(&d).ok();
@@ -237,7 +236,7 @@ fn deny_pin_survives_ancestor_rename() {
     let out = ral(&[
         "-c",
         &format!(
-            "grant [fs: [read: ['{d_s}'], write: ['{d_s}'], deny: ['{d_s}/.ssh/id_rsa']]] \
+            "grant [fs: [read: [`absolute '{d_s}'], write: [`absolute '{d_s}'], deny: [`absolute '{d_s}/.ssh/id_rsa']]] \
              {{ sh -c 'mv {d_s}/.ssh {d_s}/x && cat {d_s}/x/id_rsa' }}"
         ),
     ]);
@@ -269,7 +268,7 @@ fn deny_pin_leaves_directory_entries_mutable() {
     let created_s = created.to_string_lossy().into_owned();
     let under_grant = |body: String| {
         format!(
-            "grant [fs: [read: ['{d_s}'], write: ['{d_s}'], deny: ['{d_s}/.ssh/id_rsa']]] {{ {body} }}"
+            "grant [fs: [read: [`absolute '{d_s}'], write: [`absolute '{d_s}'], deny: [`absolute '{d_s}/.ssh/id_rsa']]] {{ {body} }}"
         )
     };
 
@@ -318,8 +317,8 @@ fn deny_pin_survives_write_prefix_root_rename() {
     let out = ral(&[
         "-c",
         &format!(
-            "grant [fs: [read: ['{d_s}', '{s_s}'], write: ['{d_s}', '{s_s}'], \
-             deny: ['{d_s}/.ssh/id_rsa']]] \
+            "grant [fs: [read: [`absolute '{d_s}', `absolute '{s_s}'], \
+             write: [`absolute '{d_s}', `absolute '{s_s}'], deny: [`absolute '{d_s}/.ssh/id_rsa']]] \
              {{ sh -c 'mv {d_s} {s_s}/r && cat {s_s}/r/.ssh/id_rsa' }}"
         ),
     ]);
@@ -349,7 +348,7 @@ fn seatbelt_holds_an_absent_deny_inside_a_write_prefix() {
     let out = ral(&[
         "-c",
         &format!(
-            "grant [fs: [read: ['{d_s}'], write: ['{d_s}'], deny: ['{d_s}/.env']]] \
+            "grant [fs: [read: [`absolute '{d_s}'], write: [`absolute '{d_s}'], deny: [`absolute '{d_s}/.env']]] \
              {{ /bin/sh -c 'echo x > {d_s}/.env && echo made-env; \
              echo y > {d_s}/other && echo made-other' }}"
         ),
@@ -375,25 +374,23 @@ fn seatbelt_holds_an_absent_deny_inside_a_write_prefix() {
     assert!(!env_exists, "the denied name exists on the host");
 }
 
-/// The grant schema leaves `exec`/`fs` policy values to the runtime
-/// decoder — they are key-shaped and heterogeneous, inexpressible as one
-/// homogeneous element type.  So `--check` waves an ill-shaped policy
-/// through, and the decoder must refuse it *before* the grant frame is
+/// A table reaching `exec:` through a parameter is left to the runtime
+/// decoder, which must refuse an ill-shaped one *before* the grant frame is
 /// pushed and the body entered.
 #[test]
-fn undecodable_exec_policy_passes_the_checker_and_is_refused_at_run() {
-    let src = "grant [exec: [git: 5]] { echo BODYRAN }";
+fn undecodable_exec_table_passes_the_checker_and_is_refused_at_run() {
+    let src = "let g = { |t| grant [exec: $t] { echo BODYRAN } }; g [git: 5]";
     assert_eq!(
         ral(&["--check", "-c", src]).status,
         0,
-        "the checker deliberately does not police policy values"
+        "the checker does not constrain a parameter"
     );
     let out = ral(&["-c", src]);
-    assert_ne!(out.status, 0, "an Int policy must not decode");
+    assert_ne!(out.status, 0, "an argument policy must not decode");
     assert!(
         out.stderr
-            .contains("must be 'allow', 'deny', or a list of subcommands"),
-        "expected the exec-policy diagnostic; got:\n{}",
+            .contains("argument restrictions are no longer supported"),
+        "expected the exec-table diagnostic; got:\n{}",
         out.stderr
     );
     // stdout only: stderr echoes the source line inside the ariadne snippet.
@@ -416,7 +413,7 @@ fn confined_forks_run_under_a_process_budget() {
         "brake",
         &[],
         &format!(
-            "grant [fs: [read: ['{d_s}']]] {{ sh -c 'echo $(ulimit -Su) $(ulimit -Hu); \
+            "grant [fs: [read: [`absolute '{d_s}']]] {{ sh -c 'echo $(ulimit -Su) $(ulimit -Hu); \
              i=0; while [ $i -lt 50 ]; do /usr/bin/true & i=$((i+1)); done; wait; echo forked' }}"
         ),
         std::time::Duration::from_secs(30),
@@ -456,6 +453,83 @@ fn confined_forks_run_under_a_process_budget() {
     );
 }
 
+/// The `(soft, hard)` process limits a `sh` child reports, run as `wrap`
+/// writes the probe into a script; `None` where the runner is itself confined.
+#[cfg(target_os = "macos")]
+fn child_limits(tag: &str, wrap: impl Fn(&str) -> String) -> Option<Vec<u64>> {
+    const PROBE: &str = "sh -c 'echo $(ulimit -Su) $(ulimit -Hu)'";
+    let out = common::run_with_timeout(tag, &[], &wrap(PROBE), std::time::Duration::from_secs(30))
+        .expect("the limit probe hung");
+    if refused_by_a_confined_runner(&out) {
+        return None;
+    }
+    assert_eq!(out.status, 0, "stderr:\n{}", out.stderr);
+    Some(
+        out.stdout
+            .split_whitespace()
+            .map(|n| n.parse().expect("a numeric process limit"))
+            .collect(),
+    )
+}
+
+/// The `(soft, hard)` process limits an unconfined `sh` has.
+#[cfg(target_os = "macos")]
+fn free_limits() -> [u64; 2] {
+    let ulimit = |flag: &str| -> u64 {
+        let out = Command::new("sh")
+            .args(["-c", &format!("ulimit {flag}")])
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    };
+    [ulimit("-Su"), ulimit("-Hu")]
+}
+
+#[cfg(target_os = "macos")]
+const FULL_VERBS: &str = "editor: [`read, `write, `tui], shell: [`chdir, `detach]";
+
+/// A neutral policy launches ambient: the child keeps the user's own limits.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_neutral_policy_leaves_the_process_limits_alone() {
+    let Some(limits) = child_limits("brake_neutral", |probe| {
+        format!("grant [{FULL_VERBS}] {{ {probe} }}")
+    }) else {
+        return;
+    };
+    assert_eq!(limits, free_limits(), "a neutral grant applies no budget");
+}
+
+/// A neutral layer around a restriction cannot lift the budget, and a
+/// withheld verb alone activates it.
+#[cfg(target_os = "macos")]
+#[test]
+fn neutral_layers_around_a_restriction_keep_the_process_budget() {
+    let d = scratch_dir("brake_wrapped");
+    let d_s = d.to_string_lossy().into_owned();
+    let wrapped = child_limits("brake_wrapped", |probe| {
+        format!(
+            "grant [{FULL_VERBS}] {{ grant [fs: [read: [`absolute '{d_s}']]] {{ \
+             grant [{FULL_VERBS}] {{ {probe} }} }} }}"
+        )
+    });
+    let verb = child_limits("brake_verb", |probe| {
+        format!("grant [shell: [`chdir]] {{ {probe} }}")
+    });
+    std::fs::remove_dir_all(&d).ok();
+    let free = free_limits()[0];
+    for limits in [wrapped, verb].into_iter().flatten() {
+        assert!(
+            matches!(*limits, [soft, hard] if soft == hard && soft <= free),
+            "the budget must survive: {limits:?} against the user's {free}"
+        );
+    }
+}
+
 /// A canonical scratch directory holding `bin/good/x` and an executable
 /// stash script `x` outside `bin`, which a grant body copies in after the
 /// grant froze.
@@ -480,18 +554,23 @@ impl ExecScratch {
     }
 }
 
-/// `body` under `grant [exec: [<bin>/: allow, /bin/: allow, <deny>: deny]]`,
+/// `body` under an exec grant allowing `<bin>` and `/bin` and denying
+/// `<bin>/<deny>` (a directory if `deny` ends in `/`),
 /// reading the scratch directory and writing `<bin>`.  The write is named at
 /// the admit, so the body may author there: under an unrestricted `fs` the
 /// deny would freeze the admitted set (`261006_a-veto-freezes-what-a-write-covers`).
 #[cfg(unix)]
 fn under_exec_deny(bin: &std::path::Path, deny: &str, body: &str) -> common::Output {
     let (root, b) = (bin.parent().unwrap().display(), bin.display());
+    let deny = match deny.strip_suffix('/') {
+        Some(dir) => format!("`dir `absolute '{b}/{dir}'"),
+        None => format!("`absolute '{b}/{deny}'"),
+    };
     ral(&[
         "-c",
         &format!(
-            "grant [fs: [read: ['{root}'], write: ['{b}']], \
-             exec: ['{b}/': 'allow', '/bin/': 'allow', '{b}/{deny}': 'deny']] {{ {body} }}"
+            "grant [fs: [read: [`absolute '{root}'], write: [`absolute '{b}']], \
+             exec: [allow: [`dir `absolute '{b}', `dir `absolute /bin], deny: [{deny}]]] {{ {body} }}"
         ),
     ])
 }
@@ -533,7 +612,9 @@ fn an_absent_exec_deny_holds_a_case_variant() {
         out.stderr
     );
     assert!(
-        out.stderr.contains(&format!("the denied {b}/Evil")) && out.stderr.contains(RESPELLED),
+        out.stderr
+            .contains(&format!("the denied `dir `absolute {b}/Evil"))
+            && out.stderr.contains(RESPELLED),
         "the refusal must name the deny and say why; stderr:\n{}",
         out.stderr
     );
@@ -587,7 +668,9 @@ fn an_absent_exec_path_deny_holds_a_case_variant() {
         out.stderr
     );
     assert!(
-        out.stderr.contains(&format!("the denied {b}/Tool")) && out.stderr.contains(RESPELLED),
+        out.stderr
+            .contains(&format!("the denied `absolute {b}/Tool"))
+            && out.stderr.contains(RESPELLED),
         "the refusal must name the deny and say why; stderr:\n{}",
         out.stderr
     );
@@ -635,8 +718,8 @@ fn a_stacked_one_sided_allow_denies_no_other_spelling() {
     let out = ral(&[
         "-c",
         &format!(
-            "grant [exec: ['{b}/B/': 'allow', '/bin/': 'allow']] {{ \
-             grant [exec: ['{b}/B/': 'allow', '{b}/b/': 'allow', '/bin/': 'allow']] {{ {b}/B/x }} }}"
+            "grant [exec: [allow: [`dir `absolute '{b}/B', `dir `absolute /bin]]] {{ \
+             grant [exec: [allow: [`dir `absolute '{b}/B', `dir `absolute '{b}/b', `dir `absolute /bin]]] {{ {b}/B/x }} }}"
         ),
     ]);
     if refused_by_a_confined_runner(&out) {
@@ -662,12 +745,12 @@ fn an_allow_beneath_a_deny_never_reaches_the_backend() {
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(file, text).unwrap();
     }
-    let allows = common::quoted(&[&d.0, &d.join("Secrets/sub")]);
+    let allows = common::places(&[&d.0, &d.join("Secrets/sub")]);
     let cat = |file: &std::path::Path| {
         common::run(
             "caps_beneath",
             &format!(
-                "grant [fs: [read: [{allows}], write: [{allows}], deny: ['{}']]] \
+                "grant [fs: [read: [{allows}], write: [{allows}], deny: [`absolute '{}']]] \
                  {{ sh -c 'cat {}' }}",
                 d.join("Secrets").display(),
                 file.display()

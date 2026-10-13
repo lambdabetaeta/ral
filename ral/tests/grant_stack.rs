@@ -10,27 +10,41 @@
 
 mod common;
 
-use common::{Output, Scratch, assert_admitted, assert_refused, quoted};
+use common::{Output, Scratch, assert_admitted, assert_refused, places};
 use std::path::Path;
 
 /// An fs layer reading `read`, writing `write` and denying `deny`.
 fn fs(read: &[&Path], write: &[&Path], deny: &[&Path]) -> String {
     format!(
         "fs: [read: [{}], write: [{}], deny: [{}]]",
-        quoted(read),
-        quoted(write),
-        quoted(deny)
+        places(read),
+        places(write),
+        places(deny)
     )
 }
 
-/// An exec layer of `rules`, a directory key ending in `/`.  Each admits
-/// `/bin/` too, so a script's interpreter runs wherever the kernel checks it.
+/// An exec layer of `(key, verdict)` rules: a key ending in `/` is a `dir`,
+/// a bare name a `name`, anything else a file.  Each layer admits `/bin` too,
+/// so a script's interpreter runs wherever the kernel checks it.
 #[cfg(unix)]
 fn exec(rules: &[(&str, &str)]) -> String {
-    let rules: Vec<String> = (std::iter::once(&("/bin/", "allow")).chain(rules))
-        .map(|(key, verdict)| format!("'{key}': '{verdict}'"))
-        .collect();
-    format!("exec: [{}]", rules.join(", "))
+    let target = |key: &str| match key.strip_suffix('/') {
+        Some(dir) => format!("`dir `absolute '{dir}'"),
+        None if key.contains('/') => format!("`absolute '{key}'"),
+        None => format!("`name {key}"),
+    };
+    let list = |want: &str| {
+        let keys = (std::iter::once(&("/bin/", "allow")).chain(rules))
+            .filter(|(_, verdict)| *verdict == want)
+            .map(|(key, _)| target(key))
+            .collect::<Vec<_>>();
+        keys.join(", ")
+    };
+    format!(
+        "exec: [allow: [{}], deny: [{}]]",
+        list("allow"),
+        list("deny")
+    )
 }
 
 fn under(layer: &str, body: &str) -> Output {

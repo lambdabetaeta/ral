@@ -58,25 +58,6 @@ fn exec_only(exec: ExecGrant) -> Capabilities {
     }
 }
 
-/// A file rule beats a dir: an `Only` restriction on `cargo`'s file is not
-/// relaxed by a sibling dir key admitting the directory cargo lives in.
-#[test]
-fn a_file_rule_restriction_beats_a_covering_allow_dir() {
-    let mut shell = ral_core::test_helper::core_shell();
-    let grant = exec_only(
-        paths(&[("/bin/cargo", Verdict::Only(["build".to_string()].into()))])
-            .chain(dirs(&[("/bin", true)]))
-            .collect(),
-    );
-    let result = shell.with_capabilities(grant, |shell| {
-        check_file(shell, &host("/bin/cargo"), &["install".into()])
-    });
-    assert!(
-        result.is_err(),
-        "a file rule's subcommand restriction must beat a covering allow dir"
-    );
-}
-
 /// A deny dir carves a hole inside a broader allow dir: the deepest dir
 /// wins, so a binary in the inner directory is denied even though the outer
 /// admits.

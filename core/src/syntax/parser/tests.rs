@@ -2444,7 +2444,7 @@ fn a_repeated_handler_name_is_refused() {
 
 #[test]
 fn parse_grant_caps_and_body() {
-    let op = unwrap_single_scope(parse("grant [exec: [:]] { body }").unwrap());
+    let op = unwrap_single_scope(parse("grant [exec: [allow: []]] { body }").unwrap());
     assert!(matches!(op, ScopeAst::Grant { .. }));
 }
 

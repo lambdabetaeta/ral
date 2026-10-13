@@ -9,6 +9,8 @@ use crate::guard::decode_capability_map;
 use crate::guard::freeze::{FreezeCtx, PolicyError};
 use crate::path::RealPath;
 use crate::types::Value;
+use std::collections::BTreeSet;
+use strum::VariantArray;
 
 /// The `Value::Map` shape `decode_capability_map` receives in production.
 fn map(entries: Vec<(&str, Value)>) -> Value {
@@ -20,8 +22,25 @@ fn map(entries: Vec<(&str, Value)>) -> Value {
     )
 }
 
-fn strs(items: &[&str]) -> Value {
-    Value::list(items.iter().map(|s| Value::string(*s)).collect())
+fn tagged(label: &str, payload: &str) -> Value {
+    Value::variant(label, Some(Value::string(payload)))
+}
+
+/// `xdg-KIND` place with a subpath.
+#[cfg(unix)]
+fn xdg(kind: &str, sub: &str) -> Value {
+    tagged(&format!("xdg-{kind}"), sub)
+}
+
+/// A list of `(tag, payload)` targets, the payload itself a tagged value.
+#[cfg(unix)]
+fn places(entries: &[(&str, Value)]) -> Value {
+    Value::list(
+        entries
+            .iter()
+            .map(|(tag, inner)| Value::variant(*tag, Some(inner.clone())))
+            .collect(),
+    )
 }
 
 /// A path literal in the host's normal form (`/usr/bin` → `\usr\bin` on
@@ -38,10 +57,6 @@ fn nprefix(s: &str) -> crate::path::FrozenPath {
 
 fn break_msg(e: PolicyError) -> String {
     e.message
-}
-
-fn only(subs: &[&str]) -> Verdict {
-    Verdict::Only(subs.iter().map(ToString::to_string).collect())
 }
 
 fn grant<const N: usize>(entries: [(ExecKey, Verdict); N]) -> ExecGrant {
@@ -78,7 +93,7 @@ fn admits(grants: &GrantStack, real: &str) -> bool {
 #[cfg(unix)]
 use crate::test_env::{with_var, with_vars_cleared};
 
-/// Clears the `XDG_*_HOME` overrides so `xdg:` sigils resolve to the
+/// Clears the `XDG_*_HOME` overrides so `xdg-*` places resolve to the
 /// home-joined defaults, under the synthetic home the escape guard admits.
 #[cfg(unix)]
 fn with_xdg_defaults<R>(f: impl FnOnce() -> R) -> R {
@@ -98,7 +113,7 @@ fn witness_a() -> Capabilities {
     Capabilities {
         exec: Some(grant([
             (name("cargo"), Verdict::Allow),
-            (name("git"), only(&["log", "status"])),
+            (name("git"), Verdict::Allow),
             (path_key("/opt/tool"), Verdict::Allow),
             (dir_key("/usr/bin"), Verdict::Allow),
         ])),
@@ -107,21 +122,16 @@ fn witness_a() -> Capabilities {
             write_prefixes: vec![nprefix("/tmp")],
             deny_paths: vec![nprefix("/tmp/secret")],
         }),
-        net: Some(true),
-        detach: Some(true),
-        editor: Some(EditorPolicy {
-            read: true,
-            write: true,
-            tui: false,
-        }),
-        shell: Some(ShellPolicy { chdir: true }),
+        net: None,
+        editor: Some([EditorVerb::Read, EditorVerb::Write].into()),
+        shell: Some([ShellVerb::Chdir, ShellVerb::Detach].into()),
     }
 }
 
 fn witness_b() -> Capabilities {
     Capabilities {
         exec: Some(grant([
-            (name("cargo"), only(&["build"])),
+            (name("cargo"), Verdict::Allow),
             (name("ls"), Verdict::Allow),
             (path_key("/opt/tool"), Verdict::Deny),
             (dir_key("/usr/bin"), Verdict::Allow),
@@ -132,14 +142,9 @@ fn witness_b() -> Capabilities {
             write_prefixes: vec![nprefix("/tmp/work")],
             deny_paths: vec![nprefix("/tmp/work/.exarch.toml")],
         }),
-        net: Some(false),
-        detach: Some(false),
-        editor: Some(EditorPolicy {
-            read: true,
-            write: false,
-            tui: true,
-        }),
-        shell: Some(ShellPolicy { chdir: false }),
+        net: Some(Net::Offline),
+        editor: Some([EditorVerb::Read, EditorVerb::Tui].into()),
+        shell: Some(std::collections::BTreeSet::new()),
     }
 }
 
@@ -152,44 +157,41 @@ fn witness_c() -> Capabilities {
             deny_paths: Vec::new(),
         }),
         net: None,
-        detach: None,
         editor: None,
         shell: None,
     }
 }
 
 /// Absence is not denial: the axis composes by meet like every other, so only
-/// an explicit `detach: false` withholds, and no inner frame gives it back.
+/// a verb set that omits `detach` withholds, and no inner frame gives it back.
 #[test]
 fn detach_is_permitted_until_some_layer_withholds_it() {
-    let deny = |d: Option<bool>| Capabilities {
-        detach: d,
+    let detach = Flag::Shell(ShellVerb::Detach);
+    let verbs = |v: &[ShellVerb]| Capabilities {
+        shell: Some(v.iter().copied().collect()),
         ..Default::default()
     };
     let mut stack = GrantStack::root();
-    assert!(stack.permits(Flag::Detach), "ambient authority permits");
+    assert!(stack.permits(detach), "ambient authority permits");
     stack.push(Capabilities {
         fs: Some(FsPolicy::default()),
         ..Default::default()
     });
     assert!(
-        stack.permits(Flag::Detach),
+        stack.permits(detach),
         "a frame that attenuates only fs leaves the verb alone"
     );
-    stack.push(deny(Some(false)));
+    stack.push(verbs(&[ShellVerb::Chdir]));
+    assert!(!stack.permits(detach), "an omitted verb is withheld");
+    stack.push(verbs(&[ShellVerb::Chdir, ShellVerb::Detach]));
     assert!(
-        !stack.permits(Flag::Detach),
-        "an explicit withholding denies"
-    );
-    stack.push(deny(Some(true)));
-    assert!(
-        !stack.permits(Flag::Detach),
+        !stack.permits(detach),
         "and no inner frame can grant back what an outer one withheld"
     );
 }
 
-/// A veto is a floor: an overlay naming `bash: 'allow'` over a base
-/// `bash: 'deny'` leaves bash denied.  To permit it, change the base.
+/// A veto is a floor: an overlay allowing `name bash` over a base
+/// denying it leaves bash denied.  To permit it, change the base.
 #[test]
 fn widen_exec_regrant_does_not_lift_deny() {
     let caps = |v: Verdict| Capabilities {
@@ -198,7 +200,7 @@ fn widen_exec_regrant_does_not_lift_deny() {
     };
     let widened = caps(Verdict::Deny).widen(caps(Verdict::Allow));
     assert_eq!(
-        widened.exec.unwrap().0.get(&name("bash")),
+        widened.exec.unwrap().get(&name("bash")),
         Some(&Verdict::Deny)
     );
 }
@@ -208,22 +210,22 @@ fn widen_exec_regrant_does_not_lift_deny() {
 #[test]
 fn widen_exec_keeps_one_sided_deny() {
     let exec = grant([(name("bash"), Verdict::Deny)]).widen(grant([(name("rg"), Verdict::Allow)]));
-    assert_eq!(exec.0.get(&name("bash")), Some(&Verdict::Deny));
-    assert_eq!(exec.0.get(&name("rg")), Some(&Verdict::Allow));
+    assert_eq!(exec.get(&name("bash")), Some(&Verdict::Deny));
+    assert_eq!(exec.get(&name("rg")), Some(&Verdict::Allow));
 }
 
 /// Deny-overrides on dirs: re-granting the exact denied tree does not lift it.
 #[test]
 fn widen_exec_dirs_regrant_does_not_lift_deny() {
     let exec = exec_deny_of(&nprefix("/x")).widen(exec_of(&nprefix("/x")));
-    assert_eq!(exec.0.get(&dir_key("/x")), Some(&Verdict::Deny));
+    assert_eq!(exec.get(&dir_key("/x")), Some(&Verdict::Deny));
 }
 
 #[test]
 fn widen_exec_dirs_keep_one_sided_deny() {
     let exec = exec_deny_of(&nprefix("/opt/danger")).widen(exec_of(&nprefix("/usr/bin")));
-    assert_eq!(exec.0.get(&dir_key("/opt/danger")), Some(&Verdict::Deny));
-    assert_eq!(exec.0.get(&dir_key("/usr/bin")), Some(&Verdict::Allow));
+    assert_eq!(exec.get(&dir_key("/opt/danger")), Some(&Verdict::Deny));
+    assert_eq!(exec.get(&dir_key("/usr/bin")), Some(&Verdict::Allow));
 }
 
 /// A stack is sigil-free by construction, so the wire form carries concrete
@@ -328,7 +330,7 @@ fn stack_of(exec: ExecGrant) -> GrantStack {
 }
 
 fn allow_dirs(exec: &ExecGrant) -> Vec<&crate::path::FrozenPath> {
-    (exec.0.iter())
+    (exec.iter())
         .filter_map(|(key, v)| match key {
             ExecKey::Dir(dir) if !v.is_denied() => Some(dir),
             _ => None,
@@ -384,8 +386,7 @@ fn exec_widen_drops_allow_resolving_to_the_same_dir_as_a_deny() {
     let composed = exec_of(&allow).widen(exec_deny_of(&deny));
     assert!(
         allow_dirs(&composed).is_empty(),
-        "the deny must evict the allow it shares a target with, got {:?}",
-        composed.0
+        "the deny must evict the allow it shares a target with, got {composed:?}",
     );
     assert!(
         !admits(&stack_of(composed), candidate),
@@ -408,8 +409,7 @@ fn exec_widen_drops_allow_naming_a_deny_dirs_target() {
     let composed = exec_of(&allow).widen(exec_deny_of(&deny));
     assert!(
         allow_dirs(&composed).is_empty(),
-        "the deny must evict the allow on its target, got {:?}",
-        composed.0
+        "the deny must evict the allow on its target, got {composed:?}",
     );
     assert!(
         !admits(&stack_of(composed), candidate),
@@ -429,8 +429,7 @@ fn exec_widen_drops_allow_clashing_with_deny_on_firmlink_alias() {
     let composed = allow.widen(deny);
     assert!(
         allow_dirs(&composed).is_empty(),
-        "the deny must evict the alias-clashing allow, got {:?}",
-        composed.0
+        "the deny must evict the alias-clashing allow, got {composed:?}",
     );
     assert!(
         !admits(&stack_of(composed), "/tmp/x/bin"),
@@ -446,8 +445,7 @@ fn exec_widen_drops_allow_on_another_spelling_of_a_deny() {
     let composed = exec_of(&p("/a/b")).widen(exec_deny_of(&p("/a/B")));
     assert!(
         allow_dirs(&composed).is_empty(),
-        "a deny on `/a/B` must evict the allow on `/a/b`, got {:?}",
-        composed.0
+        "a deny on `/a/B` must evict the allow on `/a/b`, got {composed:?}",
     );
     let composed = exec_of(&p("/a/b")).widen(exec_deny_of(&p("/a/B/c")));
     assert_eq!(
@@ -523,78 +521,228 @@ fn widen_idempotent() {
     assert_eq!(a.clone().widen(a.clone()), a);
 }
 
+/// An omitted extension axis is the identity.
 #[test]
-fn widen_none_is_identity() {
+fn widen_omitted_extension_axis_is_the_identity() {
     let a = witness_a();
     assert_eq!(a.clone().widen(Capabilities::default()), a);
-    assert_eq!(Capabilities::default().widen(a.clone()), a);
 }
 
-/// Boolean vetoes are floors under base extension: an extension may add an
-/// opinion where the base is silent, but may not turn a base `false` into `true`.
+/// An omitted base verb axis absorbs: it is every verb, which nothing widens.
 #[test]
-fn widen_boolean_vetoes_are_sticky() {
-    let widened = witness_a().widen(witness_b());
-    let editor = widened.editor.unwrap();
-    let shell = widened.shell.unwrap();
+fn widen_omitted_base_verb_axis_absorbs() {
+    let a = witness_a();
+    let widened = Capabilities::default().widen(a.clone());
+    assert_eq!(
+        widened,
+        Capabilities {
+            editor: None,
+            shell: None,
+            ..a
+        }
+    );
+}
 
-    assert_eq!(widened.net, Some(false));
-    assert_eq!(widened.detach, Some(false));
-    assert!(editor.read);
-    assert!(!editor.write);
-    assert!(!editor.tui);
-    assert!(!shell.chdir);
+fn shell_of(verbs: &[ShellVerb]) -> Capabilities {
+    Capabilities {
+        shell: Some(verbs.iter().copied().collect()),
+        ..Default::default()
+    }
+}
+
+/// A base withholding `detach` regains it from an extension; no base can veto
+/// a verb against one.
+#[test]
+fn widen_joins_verb_sets() {
+    let widened = shell_of(&[ShellVerb::Chdir]).widen(shell_of(&[ShellVerb::Detach]));
+    assert_eq!(
+        widened.shell,
+        Some(ShellVerb::VARIANTS.iter().copied().collect())
+    );
+}
+
+/// A base that omits `shell` keeps every verb whatever the extension lists.
+#[test]
+fn widen_over_a_silent_base_keeps_every_verb() {
+    for extension in [&[][..], &[ShellVerb::Detach], ShellVerb::VARIANTS] {
+        let widened = Capabilities::default().widen(shell_of(extension));
+        assert_eq!(widened.shell, None);
+        let stack = GrantStack::of(widened);
+        assert!(every_flag().into_iter().all(|f| stack.permits(f)));
+    }
+}
+
+fn every_flag() -> Vec<Flag> {
+    (EditorVerb::VARIANTS.iter().copied().map(Flag::Editor))
+        .chain(ShellVerb::VARIANTS.iter().copied().map(Flag::Shell))
+        .collect()
+}
+
+#[test]
+fn deny_all_withholds_every_verb() {
+    let stack = GrantStack::of(Capabilities::deny_all());
+    for flag in every_flag() {
+        assert!(!stack.permits(flag), "{} must be withheld", flag.key());
+    }
+}
+
+/// What a stack decides: each verb, an exec admission, and the net opinions.
+fn judgments(stack: &GrantStack) -> (Vec<bool>, bool, Vec<Net>) {
+    (
+        every_flag().into_iter().map(|f| stack.permits(f)).collect(),
+        admits(stack, "/bin/ls"),
+        stack.net().collect(),
+    )
+}
+
+/// Layers that supply an axis only to list every verb, or none at all.
+fn neutral_layers() -> [Capabilities; 4] {
+    let editor: BTreeSet<_> = EditorVerb::VARIANTS.iter().copied().collect();
+    let shell: BTreeSet<_> = ShellVerb::VARIANTS.iter().copied().collect();
+    [
+        Capabilities::root(),
+        Capabilities {
+            editor: Some(editor.clone()),
+            ..Default::default()
+        },
+        Capabilities {
+            shell: Some(shell.clone()),
+            ..Default::default()
+        },
+        Capabilities {
+            editor: Some(editor),
+            shell: Some(shell),
+            ..Default::default()
+        },
+    ]
+}
+
+/// `()`, a full editor list, a full shell list and both judge as ambient
+/// authority does, and leave a stack inactive.
+#[test]
+fn neutral_layers_judge_as_ambient_and_leave_it_inactive() {
+    let ambient = GrantStack::root();
+    for layer in neutral_layers() {
+        assert!(!layer.is_restrictive(), "{layer:?} must be neutral");
+        let mut stack = GrantStack::root();
+        stack.push(layer);
+        assert!(!stack.is_restrictive());
+        assert_eq!(judgments(&stack), judgments(&ambient));
+    }
+}
+
+/// A neutral layer, or all of them nested, changes neither the judgments nor
+/// the activation of a stack withholding a shell verb and the net.
+#[test]
+fn neutral_layers_leave_a_restrictive_stack_as_it_was() {
+    let mut base = GrantStack::root();
+    base.push(Capabilities {
+        net: Some(Net::Offline),
+        ..shell_of(&[ShellVerb::Chdir])
+    });
+    let judged = judgments(&base);
+    assert!(base.is_restrictive() && !base.permits(Flag::Shell(ShellVerb::Detach)));
+
+    let mut nested = base.clone();
+    for layer in neutral_layers() {
+        let mut stack = base.clone();
+        stack.push(layer.clone());
+        nested.push(layer);
+        for stack in [&stack, &nested] {
+            assert!(stack.is_restrictive());
+            assert_eq!(judgments(stack), judged);
+        }
+    }
+}
+
+/// Places freezing to one surface are one exec key, in either order; two
+/// spellings through a symlink stay two.
+#[cfg(unix)]
+#[test]
+fn exec_keys_follow_the_frozen_surface() {
+    let decode = |targets: Vec<Value>| {
+        let exec = map(vec![("allow", Value::list(targets))]);
+        decode_capability_map(&map(vec![("exec", exec)]), "test", &test_ctx("/h"))
+            .expect("places decode")
+            .exec
+            .expect("exec supplied")
+    };
+    let (rel, abs) = (tagged("cwd", "tools/x"), tagged("absolute", "/tools/x"));
+    let forward = decode(vec![rel.clone(), abs.clone()]);
+    assert_eq!(forward.iter().count(), 1);
+    assert_eq!(forward, decode(vec![abs, rel]));
+
+    let key = |surface, real| ExecKey::Path(crate::path::FrozenPath::for_test(surface, real));
+    let linked: ExecGrant = [
+        (key("/a/x", "/real/x"), Verdict::Allow),
+        (key("/b/x", "/real/x"), Verdict::Allow),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(linked.iter().count(), 2);
+}
+
+/// A key displays as the target that wrote it: a directory keeps its `dir`
+/// constructor, distinct from a file at the same path.
+#[cfg(unix)]
+#[test]
+fn exec_keys_display_as_their_targets() {
+    assert_eq!(name("git").to_string(), "`name git");
+    assert_eq!(path_key("/tools").to_string(), "`absolute /tools");
+    assert_eq!(dir_key("/tools").to_string(), "`dir `absolute /tools");
+}
+
+/// An unfrozen field is refused: a peer's stale `detach` must not vanish into
+/// a wider grant.
+#[test]
+fn capabilities_refuse_an_unknown_wire_field() {
+    let err = serde_json::from_str::<Capabilities>(r#"{"detach":false}"#)
+        .expect_err("`detach` is no field of a layer");
+    assert!(err.to_string().contains("detach"), "{err}");
+}
+
+/// A stack with `Offline` and partial verb sets crosses the engine protocol
+/// as sequences of tag names and survives it.
+#[test]
+fn a_run_carries_its_grant_stack_across_the_wire() {
+    let mut caps = GrantStack::root();
+    caps.push(witness_a());
+    caps.push(witness_b());
+    let run = crate::protocol::Run {
+        caps,
+        ..crate::protocol::Run::captured("echo hi", "<test>")
+    };
+    let json = serde_json::to_string(&run).unwrap();
+    assert!(
+        json.contains(r#""offline""#) && json.contains(r#""chdir""#),
+        "{json}"
+    );
+    assert_eq!(
+        serde_json::from_str::<crate::protocol::Run>(&json).unwrap(),
+        run
+    );
+}
+
+/// The offline veto is a floor under base extension, and an extension's verbs
+/// join a base's verb set.
+#[test]
+fn widen_keeps_the_net_veto_and_unions_verbs() {
+    let widened = witness_a().widen(witness_b());
+    assert_eq!(widened.net, Some(Net::Offline));
+    assert_eq!(
+        widened.editor,
+        Some(EditorVerb::VARIANTS.iter().copied().collect())
+    );
+    assert_eq!(widened.shell, witness_a().shell);
 }
 
 #[test]
 fn widen_exec_widens_verdicts_and_unions_keys() {
     let exec = witness_a().widen(witness_b()).exec.unwrap();
-    assert_eq!(exec.0.get(&name("cargo")), Some(&Verdict::Allow));
-    assert_eq!(exec.0.get(&name("ls")), Some(&Verdict::Allow));
-    assert_eq!(exec.0.get(&name("git")), Some(&only(&["log", "status"])));
-    assert_eq!(exec.0.get(&path_key("/opt/tool")), Some(&Verdict::Deny));
-}
-
-/// The stack keeps a one-sided `Only` restriction: layer A restricts `git`
-/// to `status` over an allowed binary directory, layer B repeats only the
-/// directory allow.  The stack meets the layers' tables pointwise, so the
-/// restriction survives whichever layer sits on top.
-#[test]
-fn stack_keeps_a_one_sided_subcommand_restriction() {
-    // What counts as absolute is the host's own answer: a leading `/` roots
-    // a path on Unix and is merely drive-relative on Windows.  So the pair is
-    // spelled for the host running the test, as the guard's own dir-match
-    // tests are.
-    let (bin_dir, git_path) = if cfg!(windows) {
-        (r"C:\ral-test\bin", r"C:\ral-test\bin\git")
-    } else {
-        ("/ral-test/bin", "/ral-test/bin/git")
-    };
-    let restricting = Capabilities {
-        exec: Some(grant([
-            (path_key(git_path), only(&["status"])),
-            (dir_key(bin_dir), Verdict::Allow),
-        ])),
-        ..Default::default()
-    };
-    let silent = Capabilities {
-        exec: Some(exec_of(&nprefix(bin_dir))),
-        ..Default::default()
-    };
-    for (first, second) in [(restricting.clone(), silent.clone()), (silent, restricting)] {
-        let mut shell = crate::test_helper::core_shell();
-        shell.with_capabilities(first, |sh| {
-            sh.with_capabilities(second, |sh| {
-                let check = |sh: &mut crate::types::Shell, arg: &str| {
-                    sh.check_exec("git", file(git_path), vec![arg.to_string()])
-                        .map(drop)
-                };
-                check(sh, "push")
-                    .expect_err("A's restriction must survive whichever layer sits on top");
-                check(sh, "status").expect("the admitted subcommand must still be allowed");
-            });
-        });
-    }
+    assert_eq!(exec.get(&name("cargo")), Some(&Verdict::Allow));
+    assert_eq!(exec.get(&name("ls")), Some(&Verdict::Allow));
+    assert_eq!(exec.get(&name("git")), Some(&Verdict::Allow));
+    assert_eq!(exec.get(&path_key("/opt/tool")), Some(&Verdict::Deny));
 }
 
 /// A `deny_path` is a sticky veto under widening as under meet, so an
@@ -621,94 +769,125 @@ fn widen_fs_unions_prefixes_and_denies() {
     );
 }
 
-/// With the `XDG_*_HOME` overrides cleared every token resolves under the
+/// With the `XDG_*_HOME` overrides cleared every place resolves under the
 /// synthetic home, so the escape guard passes and the freeze succeeds.
-// Unix-only: a driveless `/usr/bin` fails the post-freeze absoluteness
-// check on Windows.
+// Unix-only: a driveless `/usr/bin` is dead on Windows.
 #[cfg(unix)]
 #[test]
-fn decode_accepts_known_tokens() {
+fn decode_accepts_known_places() {
     let v = map(vec![
         (
             "exec",
-            map(vec![
-                ("xdg:bin/", Value::string("allow")),
-                ("/usr/bin/", Value::string("allow")),
-            ]),
+            map(vec![(
+                "allow",
+                places(&[
+                    ("dir", xdg("bin", ".")),
+                    ("dir", tagged("absolute", "/usr/bin")),
+                ]),
+            )]),
         ),
         (
             "fs",
             map(vec![
                 (
                     "read",
-                    strs(&["xdg:config", "xdg:data/agda", "~/.cache", "/etc"]),
+                    Value::list(vec![
+                        tagged("xdg-config", "."),
+                        tagged("xdg-data", "agda"),
+                        tagged("home", ".cache"),
+                        tagged("absolute", "/etc"),
+                    ]),
                 ),
-                ("write", strs(&["xdg:cache"])),
-                ("deny", strs(&["xdg:config/secret"])),
+                ("write", Value::list(vec![tagged("xdg-cache", ".")])),
+                ("deny", Value::list(vec![tagged("xdg-config", "secret")])),
             ]),
         ),
     ]);
     with_xdg_defaults(|| decode_capability_map(&v, "test", &test_ctx("/h")))
-        .expect("known tokens should decode and freeze");
+        .expect("known places should decode and freeze");
 }
 
-/// A typo in the `xdg:` namespace fails at decode, before any resolution
-/// against the environment, rather than silently matching nothing at runtime.
+/// A typo in an `xdg-` tag fails at decode, naming the real ones, rather than
+/// silently matching nothing at runtime.
 #[test]
 fn decode_rejects_xdg_typo() {
-    let v = map(vec![("fs", map(vec![("read", strs(&["xdg:cofnig"]))]))]);
+    let v = map(vec![(
+        "fs",
+        map(vec![("read", Value::list(vec![tagged("xdg-cofnig", ".")]))]),
+    )]);
     let err = break_msg(decode_capability_map(&v, "test", &test_ctx("/h")).unwrap_err());
-    assert!(err.contains("xdg:cofnig"), "got {err}");
-    assert!(err.contains("config"), "should list known kinds: {err}");
+    assert!(err.contains("xdg-cofnig"), "got {err}");
+    assert!(
+        err.contains("`xdg-config,"),
+        "should list known kinds: {err}"
+    );
 }
 
-/// Decode rewrites every sigil to a concrete absolute path, so matching is
+/// Decode rewrites every place to a concrete absolute path, so matching is
 /// decoupled from any later env mutation.
-// Unix-only: sigil expansion joins via `PathBuf`, which on Windows yields
+// Unix-only: place expansion joins via `PathBuf`, which on Windows yields
 // backslashes against the synthetic `/h` home, so `/h/.local/bin` never lands.
 #[cfg(unix)]
 #[test]
-fn decode_rewrites_sigils_to_concrete_paths() {
+fn decode_rewrites_places_to_concrete_paths() {
     let v = map(vec![
         (
             "exec",
-            map(vec![
-                ("xdg:bin/", Value::string("allow")),
-                ("/usr/bin/", Value::string("allow")),
-            ]),
+            map(vec![(
+                "allow",
+                places(&[
+                    ("dir", xdg("bin", ".")),
+                    ("dir", tagged("absolute", "/usr/bin")),
+                ]),
+            )]),
         ),
-        ("fs", map(vec![("read", strs(&["~/notes", "/etc"]))])),
+        (
+            "fs",
+            map(vec![(
+                "read",
+                Value::list(vec![tagged("home", "notes"), tagged("absolute", "/etc")]),
+            )]),
+        ),
     ]);
     let caps = with_xdg_defaults(|| decode_capability_map(&v, "test", &test_ctx("/h")))
-        .expect("known sigils freeze");
-    // Dir keys are stored slash-free.
+        .expect("known places freeze");
     let exec = caps.exec.unwrap();
     let allowed = allow_dirs(&exec);
     assert!(allowed.iter().any(|p| p.as_str() == "/h/.local/bin"));
     assert!(allowed.iter().any(|p| p.as_str() == "/usr/bin"));
+    // A list is a set, so it freezes in the frozen paths' own order.
     let reads = caps.fs.unwrap().read_prefixes;
-    assert_eq!(reads[0], "/h/notes");
-    assert_eq!(reads[1], "/etc");
+    assert_eq!(reads[0], "/etc");
+    assert_eq!(reads[1], "/h/notes");
 }
 
-/// The trailing slash is all that separates a directory grant from a literal
-/// one, so omitting it would decode to a grant on a binary that cannot exist
-/// and fail closed at use time as a bare "denied by active grant".
+/// An unwrapped place names one executable, so a directory there would
+/// fail closed at use time as a bare "denied by active grant"; decode says
+/// `dir` instead.
 #[cfg(unix)]
 #[test]
-fn decode_rejects_directory_as_literal_command() {
-    let v = map(vec![("exec", map(vec![("/etc", Value::string("allow"))]))]);
-    let err = break_msg(decode_capability_map(&v, "test", &test_ctx("/h")).unwrap_err());
-    assert!(err.contains("/etc/"), "should hint the slash: {err}");
+fn decode_rejects_directory_as_exec_file() {
+    let v = map(vec![(
+        "exec",
+        map(vec![(
+            "allow",
+            Value::list(vec![tagged("absolute", "/etc")]),
+        )]),
+    )]);
+    let err = decode_capability_map(&v, "test", &test_ctx("/h")).unwrap_err();
+    assert!(err.hint.unwrap().contains("`dir `absolute /etc`"));
 }
 
 /// Defence in depth: `XDG_DATA_HOME=/etc` must not widen a policy naming
-/// `xdg:data`; decode rejects it and names the offending env var.
+/// `xdg-data`; decode rejects it and names the offending env var.
 // Unix-only: the boundary check compares Unix path prefixes.
 #[cfg(unix)]
 #[test]
 fn decode_rejects_xdg_var_outside_home() {
-    let v = map(vec![("fs", map(vec![("read", strs(&["xdg:data"]))]))]);
+    let v = map(vec![(
+        "fs",
+        map(vec![("read", Value::list(vec![tagged("xdg-data", ".")]))]),
+    )]);
     let err = with_var("XDG_DATA_HOME", Some("/etc"), || {
         decode_capability_map(&v, "test", &test_ctx("/h")).unwrap_err()
     });
@@ -721,102 +900,119 @@ fn decode_rejects_xdg_var_outside_home() {
     assert!(err.contains("HOME"), "should mention HOME: {err}");
 }
 
-/// No home is a configuration error, not a silent allow — whether it arrives
+/// No home is a configuration error, not a silent allow, whether it arrives
 /// as the absence the readers report or as the empty binding `HOME=` gives.
 #[test]
 fn decode_errors_when_there_is_no_home() {
-    let v = map(vec![("fs", map(vec![("read", strs(&["~/x"]))]))]);
+    let v = map(vec![(
+        "fs",
+        map(vec![("read", Value::list(vec![tagged("home", "x")]))]),
+    )]);
     for ctx in [test_ctx(""), no_home_ctx()] {
         let err = break_msg(decode_capability_map(&v, "test", &ctx).unwrap_err());
         assert!(err.contains("HOME"), "got {err}");
     }
 }
 
-/// A bare relative prefix survives freeze unchanged and would anchor to the
-/// live cwd at check time, so the same grant would shift meaning after a `cd`.
+/// A bare relative path would anchor to the live cwd at check time, so the
+/// same grant would shift meaning after a `cd`.
 #[test]
-fn decode_rejects_bare_relative_fs_path() {
-    let v = map(vec![("fs", map(vec![("read", strs(&["proj"]))]))]);
+fn decode_rejects_relative_absolute_place() {
+    let v = map(vec![(
+        "fs",
+        map(vec![(
+            "read",
+            Value::list(vec![tagged("absolute", "proj")]),
+        )]),
+    )]);
     let err = break_msg(decode_capability_map(&v, "test", &test_ctx("/h")).unwrap_err());
     assert!(err.contains("proj"), "should name the entry: {err}");
-    assert!(err.contains("cwd:"), "should hint the cwd: sigil: {err}");
+    assert!(
+        err.contains("`cwd proj`"),
+        "should hint the cwd place: {err}"
+    );
 }
 
 #[test]
-fn decode_rejects_dot_relative_fs_paths() {
-    let v = map(vec![("fs", map(vec![("read", strs(&["./a", "../b"]))]))]);
-    assert!(decode_capability_map(&v, "test", &test_ctx("/h")).is_err());
+fn decode_rejects_dot_relative_absolute_places() {
+    for p in ["./a", "../b"] {
+        let v = map(vec![(
+            "fs",
+            map(vec![("read", Value::list(vec![tagged("absolute", p)]))]),
+        )]);
+        assert!(decode_capability_map(&v, "test", &test_ctx("/h")).is_err());
+    }
 }
 
 /// It carries a `/`, so it is a path, not a bare command name.
 #[test]
-fn decode_rejects_relative_exec_literal() {
-    let v = map(vec![("exec", map(vec![("./foo", Value::string("allow"))]))]);
+fn decode_rejects_path_shaped_name() {
+    let v = map(vec![(
+        "exec",
+        map(vec![("allow", Value::list(vec![tagged("name", "./foo")]))]),
+    )]);
     assert!(decode_capability_map(&v, "test", &test_ctx("/h")).is_err());
 }
 
-/// A bare name is a name, not a path, so the absoluteness rule spares it.
+/// A bare name is a name, not a path, so no place rule applies to it.
 #[test]
 fn decode_accepts_bare_exec_name() {
-    let v = map(vec![("exec", map(vec![("git", Value::string("allow"))]))]);
-    let caps =
-        decode_capability_map(&v, "test", &test_ctx("/h")).expect("bare command name is exempt");
-    assert!(caps.exec.unwrap().0.contains_key(&name("git")));
+    let v = map(vec![(
+        "exec",
+        map(vec![("allow", Value::list(vec![tagged("name", "git")]))]),
+    )]);
+    let caps = decode_capability_map(&v, "test", &test_ctx("/h")).expect("a bare command name");
+    assert!(caps.exec.unwrap().get(&name("git")).is_some());
 }
 
-/// `cwd:proj` freezes to an absolute path — the sanctioned "relative to here"
-/// the bare-relative rejection points at.
+/// `cwd proj` freezes to an absolute path: the sanctioned "relative to here"
+/// the relative-path rejection points at.
 // Unix-only: the joined `/h` cwd is driveless, so Windows calls it relative.
 #[cfg(unix)]
 #[test]
-fn decode_accepts_cwd_relative_fs_path() {
-    let v = map(vec![("fs", map(vec![("read", strs(&["cwd:proj"]))]))]);
+fn decode_accepts_cwd_relative_fs_place() {
+    let v = map(vec![(
+        "fs",
+        map(vec![("read", Value::list(vec![tagged("cwd", "proj")]))]),
+    )]);
     decode_capability_map(&v, "test", &test_ctx("/h"))
-        .expect("cwd: sigil freezes to an absolute path");
+        .expect("a cwd place freezes to an absolute path");
 }
 
-/// A non-Bool is a hard decode error naming the expected type, not a silent
-/// fold to `false` that would quietly deny the capability.
+/// A verb that is no tag is a hard decode error, not a silent fold that would
+/// quietly deny the capability.
 #[test]
-fn decode_rejects_non_bool_editor_field() {
-    let v = map(vec![("editor", map(vec![("write", Value::string("yes"))]))]);
-    let err = break_msg(decode_capability_map(&v, "test", &test_ctx("/h")).unwrap_err());
-    assert!(err.contains("Bool"), "should name the expected type: {err}");
-}
-
-#[test]
-fn decode_rejects_non_bool_shell_field() {
-    let v = map(vec![("shell", map(vec![("chdir", Value::Int(5))]))]);
-    let err = break_msg(decode_capability_map(&v, "test", &test_ctx("/h")).unwrap_err());
-    assert!(err.contains("Bool"), "should name the expected type: {err}");
+fn decode_rejects_non_tag_verb() {
+    for key in ["editor", "shell"] {
+        let v = map(vec![(key, Value::list(vec![Value::Int(5)]))]);
+        let err = break_msg(decode_capability_map(&v, "test", &test_ctx("/h")).unwrap_err());
+        assert!(
+            err.contains("expected a verb"),
+            "should say what a verb is: {err}"
+        );
+    }
 }
 
 #[test]
-fn decode_accepts_bool_dimension_fields() {
+fn decode_accepts_verb_lists_and_offline() {
     let v = map(vec![
         (
             "editor",
-            map(vec![
-                ("read", Value::Bool(true)),
-                ("write", Value::Bool(false)),
-                ("tui", Value::Bool(true)),
+            Value::list(vec![
+                Value::variant("read", None),
+                Value::variant("tui", None),
             ]),
         ),
-        ("shell", map(vec![("chdir", Value::Bool(true))])),
-        ("net", Value::Bool(false)),
+        ("shell", Value::list(vec![Value::variant("chdir", None)])),
+        ("net", Value::variant("offline", None)),
     ]);
-    let caps = decode_capability_map(&v, "test", &test_ctx("/h"))
-        .expect("genuine Bools decode to policy fields");
+    let caps = decode_capability_map(&v, "test", &test_ctx("/h")).expect("verbs and `offline`");
     assert_eq!(
         caps.editor,
-        Some(EditorPolicy {
-            read: true,
-            write: false,
-            tui: true,
-        })
+        Some([EditorVerb::Read, EditorVerb::Tui].into())
     );
-    assert_eq!(caps.shell, Some(ShellPolicy { chdir: true }));
-    assert_eq!(caps.net, Some(false));
+    assert_eq!(caps.shell, Some([ShellVerb::Chdir].into()));
+    assert_eq!(caps.net, Some(Net::Offline));
 }
 
 fn test_ctx(home: &str) -> FreezeCtx {

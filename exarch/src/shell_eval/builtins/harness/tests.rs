@@ -77,7 +77,7 @@ fn inherit_and_restrict_pass_the_grant_door() {
     let session = crate::agent::Avatar::for_test("system").unwrap();
     let (tx, _rx) = crate::bus::channel();
     let emit = crate::bus::Emitter::new(tx, session.agent.id);
-    for grant in ["`inherit", "`restrict [net: false]"] {
+    for grant in ["`inherit", "`restrict [net: `offline]"] {
         let result = session.ral(&format!(
                 r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: {grant}, search: true, provider: `guess, model: `inherit]"
             ),

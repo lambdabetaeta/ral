@@ -41,8 +41,8 @@ where it is asked for rather than announced: `ral`'s audit trail records
 one `deputy` check per flagged prefix when a grant frame is entered
 ([[map/core/capabilities|capabilities]]).
 
-Every profile is *frozen* as it loads — resolving each `~` / `xdg:` / `cwd:` /
-`tempdir:` / `gitdir:` / `system:` sigil against the session's home, working
+Every profile is *frozen* as it loads — resolving each place (`` `home ``, `` `xdg-* ``, `` `cwd ``,
+`` `tempdir ``, `` `gitdir ``) and the `` `system `` selector against the session's home, working
 directory, and the platform's live tool roots inside
 `ral_core::guard`'s decode pass (`guard/decode.rs`, `guard/freeze.rs`) — so composition runs entirely on
 already-resolved `Capabilities` ([[design/capability-freeze|freeze boundary]]).
@@ -144,7 +144,7 @@ of `grant [...] { body }`, loaded through
 host reads the resulting authority only through core's accessors, never its
 representation ([[decisions/260615_no-core-repr-leak-into-exarch|no-core-repr-leak-into-exarch]]).
 
-**The bake-ins name exec authority portably through the `system:` sigil** —
+**The bake-ins name exec authority portably through the `` `dir `system `` selector** —
 [[map/core/capabilities|core]]'s spelling of the platform's live tool roots
 (`ral_core::guard::freeze::system_tool_roots`): the standard binary dirs plus a
 Homebrew tree when the host has one on Unix; `%SystemRoot%\System32`, the
@@ -177,7 +177,7 @@ can't silently widen a jail:
 - `read-only` reads but does not write `cwd:`;
 - `confined` is net-off, admits host execs by subpath and only bundled tools by
   bare name, and has no home-reaching prefixes;
-- `cwd:`/`tempdir:` sigils freeze into the per-invocation working and temp dirs
+- `` `cwd ``/`` `tempdir `` places freeze into the per-invocation working and temp dirs
   without exarch injecting them dynamically.
 
 `exarch/examples/git.exarch.ral` is the canonical `--extend-base` that lifts

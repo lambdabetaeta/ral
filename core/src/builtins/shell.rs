@@ -1,6 +1,6 @@
 //! The shell-state builtins: `alias`, `unalias`, and `cd`.
 
-use crate::capability::Flag;
+use crate::capability::{Flag, ShellVerb};
 use crate::types::{Settled, Shell, Value, sig};
 
 /// `alias NAME BODY` — the interactive door to [`Shell::install_alias`],
@@ -75,7 +75,7 @@ pub(super) fn builtin_chdir(args: &[Value], shell: &mut Shell) -> Settled<Value>
         }
     };
 
-    shell.check(Flag::ShellChdir, "cd")?;
+    shell.check(Flag::Shell(ShellVerb::Chdir), "cd")?;
     shell.apply_chdir(path)?;
     Ok(Value::Unit)
 }

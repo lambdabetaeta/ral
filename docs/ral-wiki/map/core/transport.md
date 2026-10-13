@@ -151,7 +151,7 @@ each alias arm with its scheme
   pushes the grant. The take must not wait on the host; the application needs
   the booted installer's shell.
 - `SpawnGrant` — `Inherit` (⊤), `Base(name)`, or `Restrict(record)` — crosses
-  **unfrozen**: a `cwd:` sigil in a grant names the cwd of the shell it
+  **unfrozen**: a `` `cwd `` place in a grant names the cwd of the shell it
   governs, so the freeze happens on the child's side. `SpawnGrant::narrow_onto`
   resolves it against that shell's cwd and home and pushes one session layer —
   the step an adopted identity fork (`IdentityTransport::adopt_parked`) and a

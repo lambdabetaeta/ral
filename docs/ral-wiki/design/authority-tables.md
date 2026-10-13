@@ -14,8 +14,8 @@ the two dimensions became one structure is
 
 ## The structure
 
-- **Verdicts.** `Deny < Only(s) < Allow`, `Only` meeting by intersection
-  (`Verdict`, `core/src/capability/lattice.rs`). Deny is the bottom.
+- **Verdicts.** `Deny < Allow` (`Verdict`, `core/src/capability/lattice.rs`).
+  Deny is the bottom.
 - **Subjects** `s ∈ S`: what a table judges. A path for fs; for exec a
   `Subject` — a file by its real path, a bundled tool by name, or `Under(d)`,
   the inside of a directory.
@@ -23,7 +23,7 @@ the two dimensions became one structure is
   `K → Verdict`; a scope written twice meets (`meet_insert`), so a table never
   holds two opinions at one key.
 - **Polarity picks identity.** A rule *speaks* to `s` when its scope holds `s`
-  as the rule's polarity reads names: an allow (or `Only`) under `⊑S`, the
+  as the rule's polarity reads names: an allow under `⊑S`, the
   name as stored; a deny under `⊑C`, every spelling some filesystem takes for
   it (`collision_key` per component). `⊑S ⊆ ⊑C`, both transitive, both
   firmlink-aware. The table names `Allow` or `Deny`, never an `Identity`;
@@ -171,18 +171,17 @@ would break both, for reasons unrelated to any spelling.
   `BTreeMap<ExecKey, Verdict>`, entered through `meet_insert` (its
   `FromIterator` too). It rides the
   wire, `--extend-base` widens it (`ExecGrant::widen`, its `evicts` sweep), and
-  exarch's prompt prints it through `Display`, a dir with its trailing `/`.
+  exarch's prompt prints it through `Display`, a dir as `` `dir ``.
 - `ExecScope` — the grant *compiled against this host* (`ExecRules::compile`):
   a bare name becomes the bundled tool of that name, the file the host `PATH`
   finds, and for a deny a `Name` veto; a path key a `File`, a dir key a `Dir`
-  at `Verdict::from(!v.is_denied())`, so no dir carries `Only` into a table,
-  each its frozen real form.
+  at its own verdict, each its frozen real form.
 
 There was a third: a list of `ExecRule { Dir, File, Veto }` rendered for the
 kernel, which the Linux parent read back into a table. It is gone
 ([[decisions/261006_capability-is-data|capability-is-data]]): the model sits
 below the sandbox, so `ExecProjection::Restricted` carries the `ExecRules`
-itself, and the kernel's poorer vocabulary (no `Only`, no tools, no carriers as
+itself, and the kernel's poorer vocabulary (no tools, no carriers as
 such) is what `for_kernel` leaves in the table, not a type of its own. A bare
 key is no scope until the host `PATH` is consulted, so an authored grant is
 not closed under meet and must be compiled per question
@@ -448,8 +447,7 @@ marks a refusal that names the denied spelling.
 
 ### What the kernel cannot see
 
-- **argv**: `Only` renders as an allow, and a subcommand restriction is the
-  guard's alone.
+- **argv**: the kernel sees no arguments, and no verdict depends on them.
 - **Which bundled tool a re-exec of ral runs**: a tool is ral's own binary to
   the kernel.
 - **Landlock is allow-list only**: a block inside an allowed directory is

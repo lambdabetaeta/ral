@@ -617,7 +617,7 @@ fn macos_sandbox_functional() -> bool {
         .args([
             "--norc",
             "-c",
-            "grant [exec: ['/bin/echo': 'allow'], fs: [read: ['/tmp']]] { /bin/echo probe }",
+            "grant [exec: [allow: [`absolute /bin/echo]], fs: [read: [`absolute /tmp]]] { /bin/echo probe }",
         ])
         .stderr(Stdio::null())
         .output()
@@ -633,7 +633,7 @@ fn grant_fs_pipeline_stdout_flows() {
         return;
     }
     let o = run(
-        "grant [exec: ['/bin/echo': 'allow'], fs: [read: ['/tmp']]] { /bin/echo sandboxed } | cat",
+        "grant [exec: [allow: [`absolute /bin/echo]], fs: [read: [`absolute /tmp]]] { /bin/echo sandboxed } | cat",
     );
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "sandboxed");
@@ -648,7 +648,7 @@ fn grant_fs_capture_returns_output() {
         return;
     }
     let o = run(
-        "let xv = grant [exec: ['/bin/echo': 'allow'], fs: [read: ['/tmp']]] { /bin/echo captured | from-lines }; echo $xv[0]",
+        "let xv = grant [exec: [allow: [`absolute /bin/echo]], fs: [read: [`absolute /tmp]]] { /bin/echo captured | from-lines }; echo $xv[0]",
     );
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "captured");
@@ -661,7 +661,7 @@ fn grant_pipeline_abort_after_missing_later_stage_does_not_hang() {
     }
     for n in [5, 50_000] {
         let script = format!(
-            "grant [net: false, fs: [read: ['cwd:', '/tmp', 'tempdir:'], write: ['cwd:', '/tmp', 'tempdir:']]] {{ to-lines !{{range 0 {n}}} | limit 80 }}"
+            "grant [net: `offline, fs: [read: [`cwd ., `absolute /tmp, `tempdir .], write: [`cwd ., `absolute /tmp, `tempdir .]]] {{ to-lines !{{range 0 {n}}} | limit 80 }}"
         );
         let o = run_with_timeout(&[], &script, Duration::from_secs(5))
             .expect("sandboxed byte-to-missing-external pipeline hung");
@@ -690,8 +690,9 @@ fn grant_fs_pipeline_stdin_forwarded() {
     if !sandbox_functional() {
         return;
     }
-    let o =
-        run("let xv = /bin/echo piped | grant [fs: [read: ['/tmp']]] { from-lines }; echo $xv[0]");
+    let o = run(
+        "let xv = /bin/echo piped | grant [fs: [read: [`absolute /tmp]]] { from-lines }; echo $xv[0]",
+    );
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "piped");
 }
@@ -730,7 +731,7 @@ fn a_cancelled_confined_pipeline_stage_gets_its_grace_signal() {
     // cover the temp dir itself: on macOS that is `$TMPDIR`, not `/tmp`.
     let tmp = std::env::temp_dir();
     let script = format!(
-        "let job = watch \"tests\" {{ grant [fs: [read: ['{0}'], write: ['{0}']]] {{ {1} | cat }} ; return `done }}\ncat {2}\ncancel $job\n",
+        "let job = watch \"tests\" {{ grant [fs: [read: [`absolute '{0}'], write: [`absolute '{0}']]] {{ {1} | cat }} ; return `done }}\ncat {2}\ncancel $job\n",
         tmp.display(),
         fixture.display(),
         gate.display(),
@@ -769,7 +770,7 @@ fn a_struck_frame_signals_an_enveloped_stage_member_once() {
     std::fs::write(
         &script_path,
         format!(
-            "grant [fs: [read: ['{0}'], write: ['{0}']]] {{ !{{ sh -c 'trap \"echo x >> {1}\" INT TERM; : > {2}; while :; do sleep 0.05; done' }} | cat }}\n",
+            "grant [fs: [read: [`absolute '{0}'], write: [`absolute '{0}']]] {{ !{{ sh -c 'trap \"echo x >> {1}\" INT TERM; : > {2}; while :; do sleep 0.05; done' }} | cat }}\n",
             tmp.display(),
             hits.display(),
             ready.display(),
@@ -844,7 +845,7 @@ fn grant_exec_bare_name_denied_when_scoped_path_rebinds_command() {
     // semantically orthogonal to the exec/PATH-spoofing check this test
     // exercises.
     let script = format!(
-        "within [env: [PATH: '{0}']] {{ grant [exec: [git: 'allow'], fs: [read: ['{0}']]] {{ git }} }}",
+        "within [env: [PATH: '{0}']] {{ grant [exec: [allow: [`name git]], fs: [read: [`absolute '{0}']]] {{ git }} }}",
         dir.path().to_string_lossy()
     );
     let o = run(&script);
@@ -868,7 +869,7 @@ fn grant_exec_explicit_path_allows_scoped_path_command() {
     // sandbox can actually exec the spoofed git from /tmp/...  The script is
     // one the user can author, so it carries no interpreter: the grant names it.
     let script = format!(
-        "within [env: [PATH: '{0}']] {{ grant [exec: ['{1}': 'allow', '/bin/sh': 'allow'], fs: [read: ['{0}']]] {{ git }} }}",
+        "within [env: [PATH: '{0}']] {{ grant [exec: [allow: [`absolute '{1}', `absolute /bin/sh]], fs: [read: [`absolute '{0}']]] {{ git }} }}",
         dir.path().to_string_lossy(),
         fake_git.to_string_lossy()
     );
@@ -906,10 +907,9 @@ fn grant_fs_write_through_symlinked_prefix_to_nonexistent_target() {
         "precondition: target must not exist"
     );
 
-    let grant_prefix = format!("{}/", link.display());
     let script = format!(
-        "grant [fs: [write: ['{prefix}']]] {{ to-string 'hi' > '{path}' }}; printf done\\n",
-        prefix = grant_prefix,
+        "grant [fs: [write: [`absolute '{prefix}']]] {{ to-string 'hi' > '{path}' }}; printf done\\n",
+        prefix = link.display(),
         path = target_via_link.display(),
     );
     let o = run(&script);

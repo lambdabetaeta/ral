@@ -118,7 +118,7 @@ not `mach-lookup` (measured on Darwin 25.5.0: denying `mach-lookup` outright
 still resolves names; admitting that socket alone resolves them with
 `mach-lookup` denied). Admitting the socket for any local reason would make a
 hostname an egress channel — an attacker-chosen query label leaves through a
-daemon outside the sandbox — while `net: false` still read as closed.
+daemon outside the sandbox — while ``net: `offline`` still read as closed.
 `mac_profile_denies_network_when_disabled` asserts this over every rendered
 rule, with a `net: true` positive control so it cannot pass vacuously.
 
@@ -144,7 +144,7 @@ admits being variable-length.
   instead of worked around: `launchservicesd` (and `lsd.*`) would spawn
   whatever `/usr/bin/open` names as an unconfined child of launchd — `open -a
   Terminal ./payload.command` is a full escape, `open https://…` egress under
-  `net: false`; the pasteboard is a clipboard no grant mentions;
+  ``net: `offline``; the pasteboard is a clipboard no grant mentions;
   `SecurityServer` hands out keychain items (`security
   find-generic-password`). Withholding securityd has one measured cost: cargo's
   bundled libgit2 speaks TLS through SecureTransport, whose handshake reaches

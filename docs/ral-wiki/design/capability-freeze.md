@@ -1,7 +1,7 @@
 # The freeze boundary
 
 **A capability bundle is resolved the moment it is decoded: there is one type,
-`Capabilities`, and every value of it is *frozen* — concrete paths, no sigils —
+`Capabilities`, and every value of it is *frozen* — concrete paths, no places —
 by construction.** The boundary between *syntactic profile* and *resolved
 authority* is not a type split but a single pass inside the one constructor, so
 "an unresolved bundle reaches the dynamic stack or the IPC wire" is
@@ -9,8 +9,8 @@ unrepresentable: there is nowhere for one to exist.
 
 The type (`core/src/capability/lattice.rs`):
 
-- *`Capabilities`* — per-effect policies (`exec`, `fs`, `net`, `detach`,
-  `editor`, `shell`), and nothing else: every member is authority, so a bundle
+- *`Capabilities`* — per-effect policies (`exec`, `fs`, `net`, and the
+  `editor` and `shell` verb sets), and nothing else: every member is authority, so a bundle
   carries no switch over what is recorded about it. Path lists hold concrete
   absolute paths. Bundles compose by stacking on a `GrantStack`, every
   verdict meeting the layers' tables at the access
@@ -21,78 +21,101 @@ The type (`core/src/capability/lattice.rs`):
 
 The sole non-trivial constructor is `decode_capability_map`
 (`core/src/guard/decode.rs`), the single `Value::Map → Capabilities`
-function. It walks a `.ral` profile's terminal map — or the inline
-`grant [...] { body }` map — into a bundle, then runs a *freeze pass* before
+function. It walks a `.ral` profile's terminal record — or the inline
+`grant [...] { body }` record — into a bundle, then runs a *freeze pass* before
 returning. In that pass it:
 
-- **resolves** every `~` / `xdg:` / `cwd:` / `tempdir:` / `gitdir:` sigil against a
-  `FreezeCtx` (owned `home` and `cwd`, `FreezeCtx::of(&Shell)`; and `tempdir:` against the process temp dir). The freeze is `guard/freeze.rs`: `FreezeCtx::path` is the one place a grant string becomes a `FrozenPath`, and `FrozenPath::from_surface` the one minting door ([[decisions/261006_capability-is-data|capability-is-data]]);
-- **rejects** an `xdg:` value that escapes `home` — defence in depth against an
+- **resolves** every place (`` `cwd ``, `` `home ``, `` `tempdir ``, `` `gitdir ``,
+  `` `xdg-* ``, `` `absolute ``) and every selector (`` `path ``, `` `system ``)
+  against a `FreezeCtx` (owned `home` and `cwd`, `FreezeCtx::of(&Shell)`;
+  `` `tempdir `` against the process temp dir). The freeze is `guard/freeze.rs`:
+  `FreezeCtx::place` is the one place a grant's place becomes a `FrozenPath`,
+  `FreezeCtx::selector` the one place a selector becomes many, and
+  `FrozenPath::from_surface` the one minting door
+  ([[decisions/261006_capability-is-data|capability-is-data]]);
+- **classifies** an `absolute` payload on the raw string, before any folding,
+  host first, so one profile loads on both platforms: a path absolute under the
+  host's rules is live, one absolute only under the other platform's is a *dead
+  grant* (`place` answers `None`), and one absolute under neither is refused.
+  A well-formed forward-slash UNC `//server/share/x` is live on both; `\x`,
+  `C:x` and malformed UNC roots (`\\` or `//` with no server and share) name
+  no path anywhere. Host folding would
+  otherwise read `C:/../x` on POSIX as the relative `x`;
+- **validates** a subpath lexically, before joining, so a profile fails alike
+  everywhere: the empty string, a leading separator and a drive prefix are
+  refused, `.` is the anchor and `..` folds and may leave it;
+- **rejects** a `~` or `xdg:NAME` payload under every tag: those prefixes are
+  expanded at run time, never in a grant, and the error names the place meant;
+- **rejects** an `xdg-*` place that escapes `home` — defence in depth against an
   attacker-set `XDG_*_HOME=/etc` silently widening a grant;
-- **rejects** a `~` or `xdg:` entry where nothing binds `HOME`: no base to
-  resolve against, and the escape guard just above is itself stated in `home`'s
-  terms, so an absolute `XDG_*_HOME` cannot stand in for one. Old rule, long
-  unreachable — boot seeding used to substitute `.` for an unset `HOME`, so the
-  guard saw a home that was merely wrong, and such a grant fell through to the
-  relative-entry rejection below carrying advice about the wrong problem
-  (`use cwd:~/.gitconfig`). The readers now answer `Option`, and the reason the
-  entry cannot be frozen is the reason the author is given;
-- **rejects** a `gitdir:` whose `.git` pointer file names a directory that does
-  not name the working tree back;
-- **rejects** a non-sigil *relative* entry — it would otherwise anchor to the
-  live cwd at the access rather than the grant, so the same rule would mean a
-  different region after a `cd`. Authors write `cwd:sub` to pin "relative to
-  here" once; a bare command name in `exec` is a name, not a path, and is exempt.
+- **rejects** an anchored place that freezes relative (a relative `HOME` or
+  `TMPDIR`) and a `` `home `` or `xdg-*` place where nothing binds `HOME`: no
+  base to resolve against, and the escape guard just above is itself stated in
+  `home`'s terms, so an absolute `XDG_*_HOME` cannot stand in for one. The
+  readers answer `Option`, and the reason the place cannot be frozen is the
+  reason the author is given;
+- **rejects** a `` `gitdir `` whose `.git` pointer file names a directory that
+  does not name the working tree back.
+
+A bare string or a relative path is no place at all: the checker refuses it
+before the program runs, and the decoder refuses it again for a value that
+arrived untyped. Authors write `` `cwd sub `` to pin "relative to here" once.
 
 Both callers — `eval_grant` (`core/src/evaluator/scope.rs`) and the profile
 loader (`core/src/load/profile.rs`) — are in-crate, and the path-free
 `root` / `deny_all` / `default` are the only other ways to obtain a
 `Capabilities`. So *resolved by construction* is a visibility fact, not a
-discipline: no surface admits a sigil-bearing bundle.
+discipline: no surface admits an unresolved bundle.
 
-## What freeze does *not* resolve: the access and its symlinks
+## What freeze pins, and what the access resolves
 
-**Freeze resolves the grant's own paths; it never canonicalises symlinks, and it
-never touches the path of a future access — those belong to the moment of
-enforcement, not the moment of decode.** Sigil expansion is intrinsic to the
-profile and safe to pin once. Symlink resolution is not: the symlink that defeats
-a grant is *created at runtime, inside an already-granted region*, on the very
-path a running body asks to open.
+**Freeze pins the author's places and follows their symlinks once; it never
+touches the path of a future access, which is resolved at the moment of
+enforcement.** `FrozenPath::from_surface` is the one disk consultation: it
+folds the spelling and canonicalises leniently, so a prefix carries its
+`surface` (the author's spelling) and its `real` form (symlinks followed as the
+disk stood at decode). That makes the algebra a pure function of the policy.
+Enforcement then re-asks the world.
 
-- A grant of `read: [~/sandbox]` is not escaped by a `~/sandbox/leak → /etc/passwd`
-  link the body plants once the grant has taken force. A lexical match would admit
-  it — `~/sandbox/leak` sits squarely under the granted prefix — so what saves us
-  is canonicalising the **access** *before* matching: resolved to `/etc/passwd`,
-  outside the region, it is denied. This is a time-of-check-to-time-of-use race
-  whose *use* is the `open()`; at decode the link does not yet exist, and there is
-  nothing for freeze to resolve.
-- Canonicalisation is therefore a property of the *access*, not the *rule*.
-  Pinning the grant's prefixes to canonical form at freeze would defend nothing
-  here — the threat rides the opened path, not the prefix — and would shackle the
-  grant to the symlink topology as it stood at decode, drifting from the live
-  filesystem thereafter.
+- **fs prefixes re-resolve on every check** (`FrozenPath::refreeze`), so a
+  symlink swapped under a granted prefix after decode is followed live; allow
+  and deny prefixes alike are judged on the world as it is.
+- **Exec `Path` and `Dir` keys keep their frozen identity.**
+- **The access is canonicalised before matching.** A grant of
+  `` read: [`home sandbox] `` is not escaped by a `~/sandbox/leak → /etc/passwd`
+  link the body plants once the grant has taken force: a lexical match would
+  admit it, the resolved `/etc/passwd` is outside the region and denied. This is
+  a time-of-check-to-time-of-use race whose *use* is the `open()`; at decode the
+  link does not yet exist, and there is nothing for freeze to resolve.
 
 So the runtime fold resolves paths against the live environment rather than
 reading a fully-canonical bundle: the [[internals/path-judgment|four-stage
 rule]] (expand → lex → canonicalise → `path_within`) runs *per access*, and
-"canonicalise before match" is exactly what closes symlink and `..` escape. This
-is the access-time complement to the load-time freeze — the same reason the
-runtime fold stays [[design/capability-carriers|a live judgment]] and not a
+"canonicalise before match" is what closes symlink and `..` escape. This is the
+access-time complement to the load-time freeze — the same reason the runtime
+fold stays [[design/capability-carriers|a live judgment]] and not a
 precomputed value.
 
-The two are dual defences against a confined body cheating its fence. Freezing the
-rule's sigils pins its *authorship*: `cwd:` resolves to where the grant was
-established, so a later `cd` cannot retroactively widen authority — the body cannot
-widen by moving. Deferring symlink resolution to the access binds the rule to the
-*live world* — so the body cannot escape by re-pointing. Pin the intent; resolve
-the world.
+Freezing the rule's anchors pins its *authorship*: `` `cwd `` resolves to where
+the grant was established, so a later `cd` cannot retroactively widen authority.
+The prefixes themselves are a different matter.
+
+**Known limitation: allowances are re-resolved too.** The per-access fold
+re-freezes every prefix, allowances included, so an allowance follows whatever
+its path names *now*. A grant reading `work/ro` and writing `work` is escaped by
+renaming `ro` and planting a symlink named `ro` that points outside: the
+re-resolved allowance follows the replacement, in the guard and in the kernel
+projection alike. Re-resolution is right for exclusions, which must hold their
+object under any new spelling, and wrong for allowances. The fix, freezing
+allowances for good and re-resolving only exclusions, is specified in the
+belnap-authority plan (§4.1) and has not landed.
 
 ## The XDG-escape guard is a per-profile invariant
 
 Because freeze runs once per profile *as it loads*, the escape check fires on
-**any** input profile that names an `xdg:` path resolving outside `HOME` —
+**any** input profile that names an `xdg-*` place resolving outside `HOME` —
 whether or not later composition would keep that path. A `restrict` profile that
-mentions an escaping `xdg:data` is rejected even if a `meet` would have
+mentions an escaping `` `xdg-data `` is rejected even if a `meet` would have
 intersected it away.
 
 The guard asks its containment question on the form the *in-process guard*
@@ -118,25 +141,25 @@ what survives the lattice. Error attribution is per-profile — exarch's loader
 prepends `--restrict <path>` (or `--extend-base`), so the message names the file
 that carried the bad token.
 
-## A `gitdir:` pointer is answered, not obeyed
+## A `` `gitdir `` pointer is answered, not obeyed
 
-**Two sigils read a source the session does not author — an `XDG_*_HOME` and a
+**Two places read a source the session does not author — an `XDG_*_HOME` and a
 `.git` pointer file — and each is guarded in the terms of whoever could write
-it.** The `xdg:` guard is containment, because an environment variable's harm is
-where it lands. The `gitdir:` guard cannot be: a linked worktree's git directory
+it.** The `xdg-*` guard is containment, because an environment variable's harm is
+where it lands. The `gitdir` guard cannot be: a linked worktree's git directory
 legitimately lies outside the tree, so no region bounds it. What bounds it is
 *mutual reference*.
 
 - A `.git` file lives in the working tree, which under exarch's `reasonable`
   base is granted for write. So the pointer is a sentence the confined body may
-  compose, and `gitdir:` is granted read **and** write.
+  compose, and `` `gitdir `` is granted read **and** write.
 - Freeze therefore follows the pointer only as far as a git directory that names
   this tree back — a linked worktree's `gitdir` file, or `core.worktree` in the
   config of a repository split off with `--separate-git-dir`, the two records git
   itself keeps. Both ends must agree, and only one end is writable from inside
   the tree.
-- A pointer nothing claims is a `PolicyError` at the door (`guard::freeze`, which holds the three `gitdir:` refusals), like an escaping
-  `xdg:`. Silently narrowing to the cwd would be safe and unreadable — the same
+- A pointer nothing claims is a `PolicyError` at the door (`guard::freeze`, which holds the three `gitdir` refusals), like an escaping
+  `xdg-*` place. Silently narrowing to the cwd would be safe and unreadable — the same
   fail-closed-and-say-so reading the XDG guard takes.
 
 ## Composition is over resolved paths
@@ -148,7 +171,7 @@ and the lattice operations run on the resolved bundles.
 
 - the meet and the widen compare **concrete paths**, so prefix containment is exact
   (`/work/proj/src ⊂ /work/proj` is seen as such). Strictly more precise than
-  comparing sigil strings; no soundness change.
+  comparing place spellings; no soundness change.
 - the `FreezeCtx` is built **once** per composition site, home and cwd in hand
   — `eval_grant` and `apply_session_profiles` against the live shell's
   effective home; exarch's `for_invocation` against `host::home()` and the
@@ -170,7 +193,7 @@ answers at the access ([[decisions/260906_object-not-name|object-not-name]]).
 [[design/capability-carriers|SandboxProjection]] crosses to a re-exec'd child —
 a trusted boundary between cooperating ral processes, where the parent has
 already resolved every path. Since a `Capabilities` is always resolved, only
-concrete paths cross; there is no second, sigil-bearing form that could.
+concrete paths cross; there is no second, unresolved form that could.
 
 A resolved path is resolved *in some namespace*, and one carrier crosses to a
 different one: synod's bundle is frozen on the host and enforced by the in-process guard inside

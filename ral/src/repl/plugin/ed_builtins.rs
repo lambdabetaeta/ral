@@ -7,7 +7,7 @@
 //! as a `` `repl-editor `` enquiry, which the host answers only while an
 //! editor context is installed for the dispatch — inside a plugin handler.
 
-use ral_core::capability::Flag;
+use ral_core::capability::{EditorVerb, Flag};
 use ral_core::first_order::FOValue;
 use ral_core::first_order::datum::Datum;
 use ral_core::ty::Site;
@@ -160,7 +160,7 @@ fn decode_captured(bytes: &[u8]) -> String {
 /// only in a run holding the terminal, once, so `_ed-tui` reports status 1
 /// anywhere else or nested.
 pub fn builtin_ed_tui(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    shell.check(Flag::EditorTui, "_ed-tui")?;
+    shell.check(Flag::Editor(EditorVerb::Tui), "_ed-tui")?;
     let Some(loaned) = mooring.lend_terminal() else {
         return Ok(tui_result(
             Value::string(
@@ -332,7 +332,7 @@ pub fn builtin_ed_state(
     shell: &mut Shell,
 ) -> Settled<Value> {
     // Write is checked before the updater runs, not after it.
-    shell.check(Flag::EditorWrite, "_ed-state")?;
+    shell.check(Flag::Editor(EditorVerb::Write), "_ed-state")?;
     let current = match answer::<Option<Data>>(shell, mooring, "_ed-state", EditorOp::StateGet)? {
         Some(Data(stored)) => {
             let stored = Value::from(stored);
@@ -668,13 +668,13 @@ mod tests {
     /// asked anything and before the updater runs.
     #[test]
     fn a_state_cell_is_refused_without_the_write_grant() {
-        let src = format!("grant [editor: [read: true, write: false]] {{ {BUMP} }}");
+        let src = format!("grant [editor: [`read]] {{ {BUMP} }}");
         let (result, asked) = run_with_cell(FOValue::Int { value: 4 }, line_run(&src));
         let Err(Break::Error(e)) = result else {
             panic!("a read-only grant must refuse, got {result:?}");
         };
         assert!(
-            e.message.contains("_ed-state requires editor.write"),
+            e.message.contains("_ed-state requires editor: [`write]"),
             "{}",
             e.message
         );

@@ -37,7 +37,7 @@ When all the agents are done:
 
     let dirs = glob #'corpus/*'#
     for !{range 0 !{length $dirs}} { |i|
-      let only-mine = [net: false, fs: [read: ["cwd:$dirs[$i]"]]]
+      let only-mine = [net: `offline, fs: [read: [`cwd "$dirs[$i]"]]]
       exarch-agents `start [prompt: "Summarise the notes under $dirs[$i]. Reply [topic: Str, claims: [Str]].", name: "corpus-$i", type: `amnemon, grant: `restrict $only-mine, search: false, provider: `inherit, model: `inherit]
     }
 

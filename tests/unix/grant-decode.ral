@@ -1,5 +1,22 @@
-# Test: a grant whose paths cannot be decoded is refused before its body runs
+# Test: a grant whose targets cannot be decoded is refused before its body runs
 
-try { grant [fs: [read: ['proj']]] { echo BODYRAN }; return () } { |e| echo "$e[message]" }
+# A place that is not absolute, a path-shaped name, a directory left unwrapped
+try { grant [fs: [read: [`absolute proj]]] { echo BODYRAN }; return () } { |e| echo "$e[message]" }
+try { grant [exec: [allow: [`name ./tool]]] { echo BODYRAN }; return () } { |e| echo "$e[message]" }
+try { grant [exec: [allow: [`absolute /usr/bin]]] { echo BODYRAN }; return () } { |e| echo "$e[message]" }
+
+# Values the checker leaves to the decoder: a table reaching it through a
+# parameter is still validated, key by key
+let exec-of = { |table| grant [exec: $table] { echo BODYRAN } }
+try { exec-of [alow: []]; return () } { |e| echo "$e[message]" }
+
+# Argument policies are gone: a per-command entry or an `only` list is refused,
+# never read as an allowance
+try { exec-of [git: [status, log]]; return () } { |e| echo "$e[message]" }
+try { exec-of [only: [status]]; return () } { |e| echo "$e[message]" }
+
+# A nullary tag carries no payload, not even an explicit unit
+let net-of = { |mode| grant [net: $mode] { echo BODYRAN } }
+try { net-of `offline (); return () } { |e| echo "$e[message]" }
 
 echo 'grant decode tests done'

@@ -23,11 +23,11 @@ let checks = { |trail|
 }
 
 let d = temp-dir
-let bindir = "$d/bin/"
+let bindir = "$d/bin"
 
 let deputy = audit {
-    grant [exec: [$bindir: 'allow']] {
-        grant [fs: [write: [$d]]] { echo x }
+    grant [exec: [allow: [`dir `absolute $bindir]]] {
+        grant [fs: [write: [`absolute $d]]] { echo x }
     }
 }
 let flagged = !{checks $deputy[trail]}
@@ -39,8 +39,8 @@ echo !{has $flagged[0][fields] 'prefix'}
 # Control: with the fs dimension absent the same exec dir is innocent —
 # an unrestricted fs is not read as "everything writable".
 let innocent = audit {
-    grant [exec: [$bindir: 'allow']] {
-        grant [net: false] { echo x }
+    grant [exec: [allow: [`dir `absolute $bindir]]] {
+        grant [net: `offline] { echo x }
     }
 }
 echo !{length !{checks $innocent[trail]}}

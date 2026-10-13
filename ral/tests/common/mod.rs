@@ -328,7 +328,7 @@ pub fn bwrap_functional() -> bool {
         let out = run(
             "bwrap_probe",
             &format!(
-                "grant [fs: [read: ['{t}'], write: ['{t}']]] {{ /bin/echo ok }}",
+                "grant [fs: [read: [`absolute '{t}'], write: [`absolute '{t}']]] {{ /bin/echo ok }}",
                 t = tmp.display()
             ),
         );
@@ -336,10 +336,10 @@ pub fn bwrap_functional() -> bool {
     })
 }
 
-/// `paths` as a ral list body: each quoted, comma-separated.
-pub fn quoted(paths: &[&Path]) -> String {
+/// `paths` as a ral list body: each an `absolute` place, comma-separated.
+pub fn places(paths: &[&Path]) -> String {
     (paths.iter())
-        .map(|p| format!("'{}'", p.display()))
+        .map(|p| format!("`absolute '{}'", p.display()))
         .collect::<Vec<_>>()
         .join(", ")
 }

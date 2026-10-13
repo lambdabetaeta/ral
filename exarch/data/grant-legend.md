@@ -3,7 +3,6 @@ A denied call raises `… denied by active grant` for a command, `… denied by 
 Notation:
 
 - `name` admits the command unrestricted.
-- `name[sub,sub]` admits only those subcommands.
 - `exec dirs:` lists path prefixes under which any executable in that directory is admitted.
 - `(none)` means the dimension is empty.
 - `inherit` means no narrowing at this layer.

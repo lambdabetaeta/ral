@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 94344cac
+generated_at_commit: 6bfbb097
 generated_at_date: 2026-10-12
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/guard/, core/src/guard.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
@@ -29,17 +29,21 @@ Submodules:
 
 - `lattice.rs` — the types and their algebra: the single always-frozen
   `Capabilities`, resolved by `guard::freeze` at decode
-  ([[design/capability-freeze|freeze boundary]]); `FsPolicy`, `EditorPolicy`,
-  `ShellPolicy`, `GrantStack`, `Meet`, `Widen`; and the authored exec grant
-  `ExecGrant(BTreeMap<ExecKey, Verdict>)` — `ExecKey::{Name, Path, Dir}`, bare
-  keys, frozen path keys and frozen dir keys, under `Verdict`
-  (`Deny < Only(s) < Allow`), a dir taking only `Allow` or `Deny` since it
-  cannot restrict argv; every entry added by `meet_insert`, and `Display`
-  spelling a key as a grant does. It rides the wire (as a pair sequence) and is
-  never matched directly; `ExecRules` is what judges. `Flag` and
-  `GrantStack::permits(Flag)` are the one boolean vocabulary (`Detach`,
-  `EditorRead`, `EditorWrite`, `EditorTui`, `ShellChdir`): a meet over the
-  layers, silence permitting;
+  ([[design/capability-freeze|freeze boundary]]); `FsPolicy`, `Net`
+  (`Offline`, the one opinion a layer holds on the network), the verb sets
+  `BTreeSet<EditorVerb>` and `BTreeSet<ShellVerb>` (each `Option`: absent
+  inherits), `GrantStack`, `Meet`, `Widen`; and the authored exec grant
+  `ExecGrant`, a private `BTreeMap<ExecKey, Verdict>` built only by `Default`
+  and `FromIterator`, read through `iter` and `get` — `ExecKey::{Name, Path,
+  Dir}`, bare keys, frozen path keys and frozen dir keys, under `Verdict`
+  (`Deny < Allow`); every entry added by `meet_insert`, and `Display`
+  spelling a key as a grant does (a dir as `` `dir ``). It rides the wire (as a
+  pair sequence) and is never matched directly; `ExecRules` is what judges.
+  `Flag` (`Editor(EditorVerb)`, `Shell(ShellVerb)`) and
+  `GrantStack::permits(Flag)` are the one verb vocabulary: membership, a meet
+  over the layers, silence permitting. `is_restrictive` is the per-axis
+  activation predicate: exec and fs when supplied, `Net` when `Offline`, a verb
+  set unless it lists every verb;
 - `table.rs` — `Table<K: Scope>`, authority as a table of scoped rules
   ([[design/authority-tables|authority-tables]]): `Scope` (`rank`,
   `holds::<P>`, `own`), `verdict` (most specific decides, ties meet, silence
@@ -60,8 +64,8 @@ Submodules:
   compiled per question. `GrantStack::admit(program, args)` is the one exec
   judgment and the only mint of `Admitted` (the program, its argv and the table
   that judged them, private fields, all a launch reads); a refusal is data,
-  `Refused { program, args, why: ExecDenial }` with `Denied { respelled }` or
-  `Subcommand { allowed }`; `admits(&Program)` is head-only admission and
+  `Refused { program, args, why: ExecDenial }` with `Denied { respelled }`;
+  `admits(&Program)` is head-only admission and
   `respelled` the deny that holds a program under another spelling.
   `ExecRules::for_kernel` is the table with its carriers admitted and each file
   at its final verdict, what the kernel is handed; `precedence` the same rules
@@ -115,18 +119,21 @@ grant string becomes a frozen path.
   the same name refusal, `path::walk` to the object, then `check_fs_exact` on
   `Located::real`. `Shell::refused` mints a `Denial`'s `Break` and records its check
   through `Shell::record_check` with no `Mooring`, so on the trail alone;
-- `freeze.rs` — the one place a grant string becomes a `FrozenPath`, against
-  one anchor: `FreezeCtx` (`FreezeCtx::of(&Shell)`, owned `home` and `cwd`) and
-  its `path`, `paths` and `absolute`; the five path-prefix sigils (`~`, `xdg:`,
-  `cwd:`, `tempdir:`, `gitdir:`), `PolicyError`, the `gitdir:` refusals
-  (`From<BadPointer>`), and the exec-only expansions `path_dirs` and
-  `system_dirs` (`system_tool_roots`);
+- `freeze.rs` — the one place a grant's `Place` or `Selector` becomes a
+  `FrozenPath`, against one anchor: `FreezeCtx` (`FreezeCtx::of(&Shell)`, owned
+  `home` and `cwd`) and its `place` (`None` is a dead grant, an `absolute`
+  payload classified on the raw string) and `selector`; the tags `absolute`,
+  `cwd`, `home`, `tempdir`, `gitdir` and `xdg-*`, `PolicyError`, the `gitdir`
+  refusals (`From<BadPointer>`), and the exec-only selectors `path` and
+  `system` (`path_dirs`, `system_dirs`, `system_tool_roots`);
 - `decode.rs` — `decode_capability_map`, which walks a `grant [...]` /
   `--capabilities` `Value` map into a frozen `Capabilities`, one dimension
-  decoder per `exec` / `fs` / `net` / `detach` / `editor` / `shell` key —
+  decoder per `exec` / `fs` / `net` / `editor` / `shell` key, nested tables
+  and verb lists read as sets —
   every one of them authority, none of them a recording switch
-  ([[design/audit|audit]]); its exec-map freeze expands `path:` and `system:`
-  into `ExecKey::Dir` entries, every entry through `meet_insert`;
+  ([[design/audit|audit]]); its exec targets freeze to `ExecKey::{Name, Path, Dir}` (a
+  `dir` selector expanding to one `Dir` per directory), collected through
+  `ExecGrant::from_iter`;
 - `grant.rs` — `SpawnGrant` (`Inherit`, `Base`, `Restrict`), a spawn's grant
   as it crosses to a child that has not yet resolved it, frozen against the
   child's own `FreezeCtx`.
@@ -134,9 +141,9 @@ grant string becomes a frozen path.
 Path resolution for grant matching is `core/src/path/`: a fixed staged rule,
 plus `which.rs` for PATH search.
 
-- expand — `sigil.rs` (run-time `~` and `xdg:` expansion; the other sigils
-  `cwd:`, `tempdir:`, `gitdir:` are policy-only, expanded at freeze by
-  `guard::freeze`; `git.rs` backs `gitdir:` discovery, following a `.git` pointer file only to a
+- expand — `sigil.rs` (run-time `~` and `xdg:` expansion of ordinary paths,
+  never in a grant; the places `cwd`, `tempdir`, `gitdir` are policy-only,
+  expanded at freeze by `guard::freeze`; `git.rs` backs `gitdir` discovery, following a `.git` pointer file only to a
   git directory whose `gitdir` back-pointer or `core.worktree` names the working
   tree back; a bad pointer is a path-level `BadPointer`, phrased as a grant error by the caller), `tilde.rs` (`~` and `~/sub` only; an unset `HOME` is `None`,
   and each caller picks its own honest answer);
@@ -214,7 +221,7 @@ and `evicts` for composition — and no other door: `identity::path_within` and 
 so the form-blind kernel does not leave `core/src/path/`, `surface_path` is
 private to `forms.rs`, and outside the module the surface leaves the type
 only as a *string* (`as_str`, `into_string`) for rendering. That is enforced
-rather than documented because the `xdg:` freeze guard once chose the form for
+rather than documented because the `xdg-*` freeze guard once chose the form for
 itself — asking on the surface while the check it guarded matched the real
 form — and read a symlink out of `HOME` as contained.
 
@@ -228,7 +235,7 @@ XDG base directories resolve through one resolver, `host/basedir.rs`
 home-joined Linux default on every platform, and `None` where there is neither
 — a host fact answers with an `Option`, so each caller picks its own fallback
 rather than inheriting a fabricated home (the Windows sandbox ledger takes the
-temp dir, keeping itself out of the cwd). Both the `xdg:` grant sigil
+temp dir, keeping itself out of the cwd). Both the `xdg-*` grant places
 (`sigil.rs`, `guard::freeze`) and the host's own config/data loaders (`host::xdg`) defer to
 it, so a grant and the rc/history/plugin paths can never name different
 directories — [[decisions/260601_xdg-resolver-consolidation|xdg-resolver-consolidation]].
@@ -320,7 +327,7 @@ device for `net` to govern; the in-process guards apply unchanged
   program (`sandbox::carriers`), so the profile renders the table that judged
   the launch rather than a second compile. It takes no `Shell`;
   `Shell::sandbox_projection` (`guard/shell.rs`) is the door.
-- `projection_enforceable` (`sandbox.rs`) — rejects an offline (`net: false`)
+- `projection_enforceable` (`sandbox.rs`) — rejects an offline (`` net: `offline ``)
   projection on a backend with no kernel network enforcement, so an unenforceable
   request fails closed rather than running ignored.
 - `Refusal` (`sandbox.rs`) — why no confined child exists: nothing ran.
@@ -498,7 +505,7 @@ per entry, and refuses an uninspectable or unmodifiable descendant by name.
 Its `deny-tree` stamp key witnesses the walk and root propagation together;
 the root probe cannot detect later changes deeper in the tree. The child's program image
 is granted read-only so a user-installed binary or the bundled-tool self image
-can load at all; and `net: false` is enforced by withholding the network
+can load at all; and `` net: `offline `` is enforced by withholding the network
 capability SIDs — a LowBox token without them cannot open a socket, so
 `net_enforced()` holds on Windows.
 
@@ -523,7 +530,7 @@ class decides the remedy, and the hint answers once per class present**: a
 `file-read*` path is offered to the grant's `read` set and a `file-write*` one
 to `write` (advice that fails twice, otherwise), a `process-exec` path to the
 `exec` set — the layer a re-exec through `sh -c` or `find -exec` reaches, and
-the only one that sees it — a `network-*` denial to the `net:` bit alone, and a
+the only one that sees it — a `network-*` denial to the `net` axis alone, and a
 `mach-*`/`ipc-*` operand to nothing at all, because a door is the base
 profile's to decide and no grant widens one. `Denied` is that taxonomy as a
 type, so a service name cannot arrive where a path is expected; withheld doors

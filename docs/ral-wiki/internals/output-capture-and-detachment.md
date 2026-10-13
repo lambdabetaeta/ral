@@ -256,7 +256,7 @@ of the child's pgid.
   and does so only off Windows, where the double fork exists. That is now the
   whole of the absence question: whether a given *call* may spend the verb is
   asked of the live grant stack (`GrantStack::permits(Flag::Detach)`) and answered as
-  a refusal, `detach: false`
+  a refusal, a `shell` list without `` `detach ``
   ([[decisions/260727_detach-under-a-grant|detach-under-a-grant]]).
 - A survivor born under a projection **keeps it for life**. `build_launch`
   renders the frame's confinement into the launch exactly as for a child the

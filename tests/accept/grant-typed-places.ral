@@ -1,0 +1,30 @@
+# Typed grant values: places, selectors and verbs written inline, computed
+# and bound all check
+
+let tool = 'rg'
+let sub = 'build'
+let shared = [`absolute /usr/share]
+grant [
+    exec: [
+        allow: [`name git, `name $tool, `absolute /bin/sh, `cwd tools/build, `dir `system, `dir `path],
+        deny: [`name bash, `dir `absolute /opt/homebrew],
+    ],
+    fs: [
+        read:  [`cwd ., `xdg-data ., `home .gitconfig, `gitdir ., ...$shared],
+        write: [`cwd $sub, `tempdir .],
+        deny:  [`cwd .git],
+    ],
+    net:    `offline,
+    editor: [`read],
+    shell:  [`chdir],
+] { return 1 }
+
+# Bound tables and lists are checked where they are written
+let nothing = [allow: []]
+let nowhere = [read: []]
+grant [exec: $nothing, fs: $nowhere, editor: [], shell: []] { return 1 }
+grant [editor: [`read, `write, `tui], shell: [`chdir, `detach]] { return 1 }
+
+# A table passed through a generic function's parameter is left to the decoder
+let exec-of = { |table| grant [exec: $table] { return 1 } }
+let _ = exec-of [allow: [`name git]]

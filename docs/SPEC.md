@@ -2208,7 +2208,7 @@ within [dir: /usr/share] {
 echo !{cwd}          # prints "/usr"
 ```
 
-Setting the directory on entry is not a `cd`, so `shell: [chdir: false]` does not refuse it; a `cd` in the body still needs `chdir`. A `within` without `dir` leaves the working directory alone, and a `cd` inside it persists.
+Setting the directory on entry is not a `cd`, so a `shell` list without `` `chdir `` does not refuse it; a `cd` in the body still needs `` `chdir ``. A `within` without `dir` leaves the working directory alone, and a `cd` inside it persists.
 
 An empty path, a missing path, a non-directory, or a path denied by the active filesystem grant is an error before the body runs.
 
@@ -2766,7 +2766,7 @@ supposed to provide.
 On Unix the implementation double-forks, reparents the grandchild, and creates
 a new session. It preserves the logical working directory, environment, and
 the sandbox projection active at birth. Later grants cannot widen it. An
-active grant may refuse the operation with `detach: false` before any process
+active grant may refuse the operation by omitting `` `detach `` from `shell` before any process
 is born.
 
 `detach` is Unix-only and is installed only by hosts that also provide a
@@ -2809,22 +2809,22 @@ a boundary.
 ```ral
 grant [
     exec: [
-        git: ['status', 'diff'],
-        sh: 'deny',
+        allow: [`name git, `name rg, `dir `system],
+        deny:  [`name sh],
     ],
     fs: [
-        read:  ['cwd:', '/usr/share'],
-        write: ['cwd:build'],
-        deny:  ['cwd:.git'],
+        read:  [`cwd ., `absolute /usr/share],
+        write: [`cwd build],
+        deny:  [`cwd .git],
     ],
-    net: false,
-    detach: false,
+    net:   `offline,
+    shell: [`chdir],
 ] {
     git status
 }
 ```
 
-Each dimension is independent. Omitting `net`, for example, says nothing about network access; it inherits the surrounding authority. An empty grant changes nothing:
+The values are ordinary records, lists and variants; the checker types them like any other value (§12.1). Each dimension is independent. Omitting `net`, for example, says nothing about network access; it inherits the surrounding authority. A written dimension restricts. An empty grant changes nothing:
 
 ```ral
 grant [] {
@@ -2835,15 +2835,17 @@ grant [] {
 A grant can never restore authority withheld by an outer grant or a session profile. Nested grants intersect:
 
 ```ral
-grant [exec: [git: ['status', 'diff']]] {
-    grant [exec: [git: ['status']]] {
+grant [exec: [allow: [`name git, `name rg]]] {
+    grant [exec: [allow: [`name git]]] {
         git status   # allowed
-        git diff     # denied
+        rg foo       # denied
     }
 }
 ```
 
 A denial at any layer remains a denial.
+
+Every list in a grant denotes a set. An entry written twice, in one list or through spreads of two computed lists, adds nothing; no rule refuses a repeat. A target that is both allowed and denied is denied, and a place may be both read and written.
 
 ### 12.1. Capability fields
 
@@ -2852,24 +2854,21 @@ A capability record accepts exactly these names:
 - `exec`
 - `fs`
 - `net`
-- `detach`
 - `editor`
 - `shell`
 
-Unknown names are errors, reported before the program runs. `net` and `detach`
-are Boolean; the other four are structured, and their interiors are the
-decoder's to judge.
+Unknown names are errors, reported before the program runs. `exec` and `fs` are nested tables with the fields below; `net` takes `` `offline ``; `editor` and `shell` take lists of verbs.
 
-`grant`'s bracket is the form's own, as `within`'s is: `[]` is the empty
-grant, each field is written out with a value that may be computed, and a bundle
-or a map in its place is a parse error.
+`grant`'s bracket is the form's own, as `within`'s is: `[]` is the empty grant, each field is written out with a value that may be computed, and a bundle or a map in its place is a parse error. A nested table is a record in the same way: a map (`exec: [:]` included) and `()` are refused statically, with the record spelling to use. The empty table is written with an empty list: `exec: [allow: []]`, `fs: [read: []]`.
 
-Omitting a whole field inherits that dimension. Once a structured field such as `fs`, `editor`, or `shell` is present, omitted members inside it take their restrictive default.
+The tags are types, not strings. A bare string where a place or an exec target belongs, a misspelled tag, a tag with the wrong payload, and `net: true` are refused statically, before the program runs, with the tags on offer and the nearest one named. A value the checker cannot type (a profile decoded from JSON, a parameter of a generic function) reaches the runtime decoder, which judges the same vocabulary.
+
+Omitting a whole field inherits that dimension. Within `fs`, an omitted `read` or `write` admits nothing for that operation; a present `exec` table admits only what its `allow` list names (§12.3).
 
 Thus:
 
 ```ral
-grant [fs: [read: ['cwd:']]] { … }
+grant [fs: [read: [`cwd .]]] { … }
 ```
 
 allows reads beneath the frozen working directory, denies all writes, and leaves every non-filesystem dimension unchanged.
@@ -2877,64 +2876,101 @@ allows reads beneath the frozen working directory, denies all writes, and leaves
 Similarly:
 
 ```ral
-grant [editor: [read: true]] { … }
+grant [editor: [`read]] { … }
 ```
 
 allows editor reads, denies editor writes and TUI access, and leaves non-editor dimensions unchanged.
 
-### 12.2. `exec`
+### 12.2. Places and selectors
 
-`exec` names commands or paths, each with a policy:
+A *place* names one path. It is resolved when the grant is frozen, against the anchor its tag names:
+
+| Place | Denotes |
+|---|---|
+| `` `absolute P `` | the absolute path `P` |
+| `` `cwd S `` | `S` against the working directory at decode time |
+| `` `home S `` | `S` against the effective home |
+| `` `tempdir S `` | `S` against the platform temporary directory at decode time |
+| `` `gitdir S `` | `S` against the current repository's real Git directory, or the working directory outside a repository |
+| `` `xdg-config S ``, `` `xdg-data S ``, `` `xdg-cache S ``, `` `xdg-state S ``, `` `xdg-bin S `` | `S` against that XDG base |
+
+A *selector* names a set of directories that the environment chooses, not a path the author wrote. It is valid only as the payload of `dir` in an `exec` list (§12.3):
+
+| Selector | Denotes |
+|---|---|
+| `` `path `` | every absolute directory in the host process's `$PATH` at decode time; an error if there are none |
+| `` `system `` | ral's platform-defined system tool directories |
+
+Selectors never appear in `fs` lists: their expansion is not bounded by any containment guard, and a `$PATH` entry can be `$HOME` or `/`, so a write grant on one would let a child plant programs where the user's own shell looks.
+
+The payload `P` is absolute under the host's rules. The payload `S` is a relative subpath of components separated by `/` (and `\` on Windows): `.` is the anchor itself, and `..` folds at decode and may leave the anchor, as in `` `cwd ../sibling `` (the XDG escape guard still judges the result). The empty string, a leading `/` or `\`, and a drive prefix `X:` are refused in `S` on every platform, so a profile fails alike everywhere.
+
+A payload headed by `~` or `xdg:NAME` is refused under every tag: those prefixes are expanded when a path is used, not when a grant is read, so `` `absolute ~/x `` would name a relative path. The error names the place meant, `` `home x `` or `` `xdg-config x ``.
+
+`` `absolute `` classifies its payload on the raw string, before any folding, host first: it is live if absolute under the host's rules, dead if absolute only under the other platform's, and refused if under neither.
+
+| Raw `P` | POSIX | Windows |
+|---|---|---|
+| `/x`, `/` | absolute | dead |
+| `//server/share/x` (well-formed UNC) | absolute | absolute |
+| `C:\x`, `C:/x`, `\\server\share\x` | dead | absolute |
+| `\x` (root-relative) | refused | refused: it names no drive |
+| `C:x` (drive-relative), anything relative | refused | refused |
+| `\\` or `//` with no server and share (malformed UNC) | refused | refused |
+
+A *dead grant* names no path on this host, so one profile can contain host-specific entries and load on both platforms; it matches nothing and, in a deny list, denies nothing.
+
+Places, anchors, `..`, environment-derived bases and symlink identities are frozen when the inline grant or profile is decoded. Later `cd`, `HOME`, `TMPDIR`, XDG, or repository changes do not retarget the grant. An anchored place that freezes relative (a relative `HOME` or `TMPDIR`) is refused. Ordinary relative paths and bare strings are rejected: write `` `cwd relative/path `` when that is intended.
+
+An XDG place must resolve beneath the effective home directory. ral rejects an unset home needed by `` `home `` or an `xdg-*` tag, an XDG environment override that would escape the home directory, and a `.git` pointer file that no Git directory claims. Where `.git` is a file naming the Git directory, `` `gitdir `` follows it only if that directory names the working tree back, as a linked worktree's `gitdir` file does and as a `--separate-git-dir` repository's `core.worktree` setting does, since the file itself lies inside the tree the grant confines.
+
+### 12.3. `exec`
+
+`exec` has two lists of targets, `allow` and `deny`:
 
 ```ral
 exec: [
-    git: ['status', 'diff'],
-    rg: 'allow',
-    bash: 'deny',
-    '/opt/tools/': 'allow',
+    allow: [`name git, `name rg, `absolute /opt/tools/lint, `cwd tools/build, `dir `system],
+    deny:  [`name bash, `dir `absolute /opt/homebrew],
 ]
 ```
 
-A literal command accepts:
+A target is one of:
 
-- `'allow'` — any arguments;
-- `'deny'` — no invocation;
-- a non-empty list of strings — only invocations whose first argument is in that list.
+- `` `name N `` — the bare command `N`: the file the host `PATH` finds for it, and the bundled tool of that name. A scoped `PATH` cannot change what it names. `N` must be a bare command name; a path-shaped payload is refused with a hint to use a place;
+- a place (§12.2) — the one executable at that path, frozen to its real path when the grant is decoded. A place that is a directory is refused, with a hint to use `dir`;
+- `` `dir D `` — every executable beneath each directory `D` names, recursively, frozen to its real path, where `D` is a place or a selector. Directory scope is spelled, never inferred from a stat: `` `cwd tools/build `` names one executable, `` `dir `cwd tools `` names everything beneath `tools`.
 
-The subcommand check examines only the first argument. A command with no first argument is denied by a subcommand policy.
+Bare strings are not targets. Authority over a command does not depend on its arguments: an allowed target is admitted with any arguments, or none, and a denied target is refused. ral has no first-argument or subcommand policy.
 
-Every rule judges the file that will run: its real path, with symbolic links followed. A path key names one file, frozen to its real path when the grant is decoded. A bare key names the file the host `PATH` finds for it, and the bundled tool of that name; a scoped `PATH` cannot change what it names. So `git: 'allow'` also admits `/usr/bin/git` spelled as a path, because it is the same file.
+Every rule judges the file that will run: its real path, with symbolic links followed. So `` `name git `` also admits `/usr/bin/git` spelled `` `absolute /usr/bin/git ``, because it is the same file. A deny of a name also vetoes the command by file name wherever it lives, so `` deny: [`name bash] `` cannot be avoided through a link or another directory. A denial holds every spelling some filesystem takes for its name, in any case or Unicode form, so it also refuses `BASH` or a file under a differently cased denied directory; an allowance holds its name only as stored.
 
-A key ending in `/` names every executable beneath that directory, frozen to its real path. Directory keys accept only `'allow'` or `'deny'`. A literal denial also vetoes the command by file name wherever it lives, so `bash: 'deny'` cannot be avoided through a link or another directory. A denial holds every spelling some filesystem takes for its name, in any case or Unicode form, so it also refuses `BASH` or a file under a differently cased denied directory; an allowance holds its name only as stored.
+The most specific rule decides: a name veto, then a path, then the deepest covering directory; rules of equal specificity meet, so a target in both lists is denied. A command that does not exist is never judged: it fails with status 127, or 126 when the file is not executable.
 
-The most specific rule decides: a veto, then a literal key, then the deepest covering directory; rules of equal specificity meet, so an equal allow and deny resolves to deny. A command that does not exist is never judged: it fails with status 127, or 126 when the file is not executable.
+Once an `exec` table is present, commands not admitted by it are denied: `exec: [allow: []]` admits no executable, and omitting `exec` inherits. Nested `exec` tables intersect, and every denial remains effective.
 
-Once an `exec` map is present, commands not admitted by that map are denied. Nested `exec` maps intersect, subcommand lists intersect, and every denial remains effective.
+Two selectors may be the payload of `dir`:
 
-Two exec-only shorthands expand when the grant is decoded:
+- `` `path `` — every absolute directory in the current `$PATH`;
+- `` `system `` — ral's platform-defined system tool directories.
 
-- `'path:'` — every absolute directory in the current `$PATH`;
-- `'system:'` — ral’s platform-defined system tool directories.
+### 12.4. `fs`
 
-Both take only `'allow'` or `'deny'`. `path:` is an error if `$PATH` contains no absolute directories.
-
-### 12.3. `fs`
-
-`fs` has three path lists:
+`fs` has three lists of places:
 
 ```ral
 fs: [
-    read:  ['cwd:', 'xdg:data'],
-    write: ['cwd:build', 'tempdir:'],
-    deny:  ['cwd:.secrets'],
+    read:  [`cwd ., `xdg-data .],
+    write: [`cwd build, `tempdir .],
+    deny:  [`cwd .secrets],
 ]
 ```
 
-- `read` permits reads under the listed prefixes.
-- `write` permits writes under the listed prefixes.
-- `deny` forbids both reads and writes under the listed prefixes.
+- `read` permits reads under the listed places.
+- `write` permits writes under the listed places.
+- `deny` forbids both reads and writes under the listed places.
 
-Read and write authority are separate: write permission does not imply read permission. A present `fs` map with no `read` or no `write` entry grants nothing for that operation, for `read` nothing beyond the floor. Deny regions are carve-outs and accumulate across nested grants.
+`name`, `dir` and selectors are refused in these lists. Read and write authority are separate: write permission does not imply read permission. A present `fs` table with no `read` or no `write` entry grants nothing for that operation, for `read` nothing beyond the floor; `fs: [read: []]` keeps only the floor. Deny regions are carve-outs and accumulate across nested grants.
 
 The floor is the platform's fixed set of read-only system paths that any program needs to start (§12.11). Every restricted `read` admits it, whether or not the grant names it, and the in-process check and the host sandbox agree on it. No nested grant narrows it; only a `deny` removes a floor path. It admits reads alone: never writes, never execution.
 
@@ -2946,45 +2982,29 @@ A `deny` may name a path that does not exist yet, inside a `write` prefix. On ma
 
 One write no grant admits: onto a binary the sandbox pinned at startup — bubblewrap on Linux, ral’s own executable where it re-execs itself — judged by inode, so a hard link or a rename since startup names it too. The refusal names the binary and is not a grant denial. Replacing the file by rename is permitted; the session keeps running the copy it pinned.
 
-### 12.4. Path sigils and freezing
-
-Capability paths must be absolute after expansion. These sigils make portable absolute prefixes:
-
-- `~` or `~/subpath` — the effective home directory;
-- `xdg:config`, `xdg:data`, `xdg:cache`, `xdg:state`, `xdg:runtime`, and their subpaths;
-- `cwd:` — the working directory at decode time;
-- `tempdir:` — the platform temporary directory at decode time;
-- `gitdir:` — the current repository’s real Git directory, or `cwd:` outside a repository. Where `.git` is a file naming that directory, the directory must name the working tree back — as a linked worktree’s `gitdir` file does, and as a `--separate-git-dir` repository’s `core.worktree` setting does — since the file itself lies inside the tree the grant confines.
-
-Sigils, `.` and `..`, environment-derived bases, and symlink identities are frozen when the inline grant or profile is decoded. Later `cd`, `HOME`, `TMPDIR`, XDG, or repository changes do not retarget the grant.
-
-Ordinary relative paths are rejected. Use `cwd:relative/path` when that is intended.
-
-An XDG sigil must resolve beneath the effective home directory. ral rejects an unknown XDG name, an unset home needed by `~` or `xdg:`, an XDG environment override that would escape the home directory, or a `.git` pointer file no Git directory claims. A path rooted for another operating-system family is ignored as a dead, non-matching grant so one profile can contain host-specific entries.
-
 ### 12.5. `net`
 
-`net` is a Boolean:
+`net` takes the one value `` `offline ``:
 
 ```ral
-grant [net: false] { … }
+grant [net: `offline] { … }
 ```
 
-`false` disables network access for spawned children through the OS sandbox. `true` leaves network authority available unless an outer layer already disabled it. ral has no in-process network primitive, so there is no separate ral-level network check.
+`` `offline `` disables network access for spawned children through the OS sandbox. A grant only narrows, so there is no value that grants network access: omit `net` to inherit, and an outer `` `offline `` cannot be lifted. `net: true` and `net: false` are refused statically. ral has no in-process network primitive, so there is no separate ral-level network check.
 
-If the host cannot enforce `net: false`, ral refuses the confined launch rather than silently running it online.
+If the host cannot enforce `` `offline ``, ral refuses the confined launch rather than silently running it online.
 
 ### 12.6. `detach`
 
-`detach` is a Boolean controlling whether the body may create a process that the session stops owning.
+`detach` is a verb of `shell` (§12.8): it controls whether the body may create a process that the session stops owning.
 
 ```ral
-grant [detach: false] {
+grant [shell: [`chdir]] {
     # detach is refused; spawn and service remain session-owned alternatives
 }
 ```
 
-A single `false` anywhere in the active stack denies the birth. `true` cannot override an outer `false`.
+A layer that supplies `shell` and omits `detach` denies the birth, anywhere in the active stack; a layer cannot override an outer one's omission. Writing `` shell: [`chdir] `` therefore withholds `detach`, the safe direction, since detach is the authority that outlives the session.
 
 When detachment is allowed, the child is created under the effective
 filesystem and network projection and, on hosts that support it, the effective
@@ -3025,36 +3045,32 @@ could replace or create a program there — one observation per flagged prefix,
 naming it in `fields[prefix]`. This finding reports the confused-deputy shape;
 it does not deny it.
 
-The `net`, `detach`, `editor`, and `shell` Boolean checks record no individual
-checks.
+The checks on `net` and on the `editor` and `shell` verbs record no individual
+observations.
 
 ### 12.8. `editor` and `shell`
 
+`editor` and `shell` are lists of verbs, each a tag:
+
+```ral
+editor: [`read, `write, `tui]
+shell:  [`chdir, `detach]
+```
+
 `editor` controls the private line-editor interface:
 
-```ral
-editor: [
-    read: true,
-    write: false,
-    tui: false,
-]
-```
+- `` `read `` — inspect editor text, cursor, history, keymaps, parse state, and related state;
+- `` `write `` — change editor text or state and accept input;
+- `` `tui `` — open the editor TUI facility.
 
-Its fields are:
+An `_ed-*` builtin needs the verb of every operation it performs, checked before its first effect; `_ed-state` needs both `` `read `` and `` `write ``.
 
-- `read` — inspect editor text, cursor, history, keymaps, parse state, and related state;
-- `write` — change editor text or state and accept input;
-- `tui` — open the editor TUI facility.
+`shell` controls what the body may do to the session itself:
 
-An `_ed-*` builtin needs the field of every operation it performs, checked before its first effect; `_ed-state` needs both `read` and `write`.
+- `` `chdir `` — change the working directory with `cd`; `within [dir: …]` scopes a directory and is judged by `fs` alone;
+- `` `detach `` — create a process that the session stops owning (§12.6).
 
-`shell` currently controls working-directory changes:
-
-```ral
-shell: [chdir: false]
-```
-
-When `chdir` is false, `cd` is denied. These booleans are intersected independently across nested grants.
+A verb is permitted only where every layer that supplies its list names it, so nested grants intersect. A list naming every verb is neutral, like omitting the field; an empty list withholds every verb, and an unknown verb is an error listing the verbs on offer. Under an extension, as exarch's `--extend-base`, the base's verbs are joined with the extension's: a verb list has no spelling for a veto, so an extension can add a verb its base lacks, and a base that omits the field keeps every verb.
 
 ### 12.9. Concurrency and inheritance
 
@@ -3068,24 +3084,24 @@ External and bundled commands receive an OS-sandbox projection folded from the e
 
 ral uses two complementary enforcement layers:
 
-1. The in-process guard checks command admission, subcommands, ral-owned filesystem operations, editor operations, `cd`, and detached-process birth.
+1. The in-process guard checks command admission, ral-owned filesystem operations, editor operations, `cd`, and detached-process birth.
 2. The OS sandbox confines filesystem and network actions performed directly by a spawned program. On macOS and Linux it also confines executable paths.
 
-The in-process command guard applies on every host, including when no OS sandbox is needed. It cannot see a command that an admitted child launches internally. Conversely, an OS sandbox cannot express first-argument subcommand rules and cannot protect operations ral performs in its own process.
+The in-process command guard applies on every host, including when no OS sandbox is needed. It cannot see a command that an admitted child launches internally. Conversely, an OS sandbox cannot protect operations ral performs in its own process.
 
-A directory that `exec` admits is also a place a child could author a program the grant never named. Under a restricted `fs`, the OS sandbox therefore makes an admitted directory read-only when a broader `write` prefix covers it, unless some `write` prefix reaching it was itself named at or inside an admitted directory that contains it: that states the intent. `write: ['/opt/work']` with `'/opt/work/'` admitted leaves it writable, whereas `write: ['/opt']` over a lone admitted `'/opt/tools/'` does not. Both macOS and Linux enforce this in the kernel, Linux at every name the `write` prefix reaches it by, a symbolic link in the prefix included.
+A directory that `exec` admits is also a place a child could author a program the grant never named. Under a restricted `fs`, the OS sandbox therefore makes an admitted directory read-only when a broader `write` prefix covers it, unless some `write` prefix reaching it was itself named at or inside an admitted directory that contains it: that states the intent. ``write: [`absolute /opt/work]`` with `` `dir `absolute /opt/work `` admitted leaves it writable, whereas ``write: [`absolute /opt]`` over a lone admitted `` `dir `absolute /opt/tools `` does not. Both macOS and Linux enforce this in the kernel, Linux at every name the `write` prefix reaches it by, a symbolic link in the prefix included.
 
-Dynamic loader injection variables such as `LD_PRELOAD`, `LD_AUDIT`, `LD_LIBRARY_PATH`, and `DYLD_*` are removed from child environments while capabilities are active. Confined Unix children also receive resource limits; Windows confines process trees with a Job Object.
+Dynamic loader injection variables such as `LD_PRELOAD`, `LD_AUDIT`, `LD_LIBRARY_PATH`, and `DYLD_*` are removed from child environments while a restriction is active. A stack is restricting when some layer supplies `exec` or `fs`, ``net: `offline``, or a verb list that omits a verb; a layer that restricts nothing (`[]`, or full `editor` and `shell` lists) leaves ral ambient, and added to a restricting stack it changes neither the judgments nor the protections. Confined Unix children also receive resource limits; Windows confines process trees with a Job Object.
 
 ### 12.11. Host differences and limits
 
-**macOS.** ral launches confined children under Seatbelt. Filesystem, offline-network, and executable-path restrictions are kernel-enforced. The executable allow-list also constrains programs launched internally by an admitted child. Subcommand restrictions remain an in-process check on the original invocation. Since Seatbelt logs filesystem, executable, network, and Mach/IPC denials through one stream, a denial's diagnostic hint (§13.2) is classed by what was actually refused, never assumed to be a filesystem read merely because a hint has to say something. The read floor is `/bin`, `/usr`, `/lib`, `/System`, `/dev`, the Command Line Tools and Xcode developer directories, `/opt/homebrew`, the dyld cache directory, `/etc` wholesale, and the `xcode-select` and runtime-socket directories under `/var`; Rosetta's runtime is likewise runnable by every confined child.
+**macOS.** ral launches confined children under Seatbelt. Filesystem, offline-network, and executable-path restrictions are kernel-enforced. The executable allow-list also constrains programs launched internally by an admitted child. Since Seatbelt logs filesystem, executable, network, and Mach/IPC denials through one stream, a denial's diagnostic hint (§13.2) is classed by what was actually refused, never assumed to be a filesystem read merely because a hint has to say something. The read floor is `/bin`, `/usr`, `/lib`, `/System`, `/dev`, the Command Line Tools and Xcode developer directories, `/opt/homebrew`, the dyld cache directory, `/etc` wholesale, and the `xcode-select` and runtime-socket directories under `/var`; Rosetta's runtime is likewise runnable by every confined child.
 
-**Linux.** ral uses bubblewrap for filesystem restrictions and `net: false`; on x86-64 and aarch64 every confined child also runs under a seccomp deny-set: kernel attack surface (ptrace, bpf, module loading, kexec/reboot/swap, keyrings, `userfaultfd`, `open_by_handle_at`, the mount family) is killed with SIGSYS, and user-namespace creation, `setns`, `clone3` and `ioctl(TIOCSTI)` are refused with an errno — no mounting and no containers inside a grant. ral opens each path the envelope shows itself, never through a symbolic link, and has bubblewrap mount that open file rather than a name, so a path replaced by a link after the grant was read shows nothing the grant did not name, and one whose components became a link refuses the launch; this needs bubblewrap 0.8.0 or later, and under an older one no confined command runs. A grant that limits which programs may run is refused on a kernel without Landlock, and every confined command is refused on a kernel older than 5.9, which cannot close the descriptors ral hands the child before its program starts. A directory the `exec` grant admits is readable inside, as on macOS. The read floor is `/bin`, `/usr`, `/lib`, `/lib64`, the files under `/etc` that dynamic linking, name resolution, user lookup and toolchain resolution need, the Linuxbrew prefix, and of `/sys` only what sizes a program (`/sys/devices/system/cpu`, `/sys/kernel/mm/transparent_hugepage`); the envelope binds it read-only. The rest of `/sys` describes the host — its `class/net` lists the host's interfaces whatever `net` says — and a grant that wants it lists `/sys` under `read`. Every confined child runs in its own ipc and uts namespaces and, wherever the host can mount a fresh procfs, its own pid namespace with its own `/proc`: on every projection it sees and can signal no host process. Wherever the kernel builds a cgroup namespace the child has one, and on every projection `/sys/fs/cgroup` is the tree its own `/proc/self/cgroup` names — ral's cgroup, so a runtime reads its real limits; where the kernel cannot, the child sees the host's tree. A container runtime that masks `/proc` prevents the pid namespace; the launch still runs, and the table is the container's own. Each other invariant the host cannot build is likewise absent while the launch still runs. A confined command has no controlling terminal. Bubblewrap has no path-based executable filter, so the confined child enters a Landlock domain of its own inside the envelope: executable-path restrictions are kernel-enforced on kernels with Landlock (Linux 5.13 and later), constraining programs launched internally by an admitted child as on macOS, and on Landlock 6 kernels (Linux 6.12 and later) the child can signal no process outside the envelope even where no pid namespace could be built. What the kernel gates is the path passed to `execve`. Landlock is allow-list only, so a denied path *inside* an admitted directory is held by admitting that directory's other entries, as they stand when the command launches: a program added there afterwards is refused until the next launch, and a bare-name deny under an admitted directory whose writes the grant names at or below an admit is held by ral's own check alone, since a child could author a renamed copy there; one a broader `write` covers is kept read-only inside, so the kernel holds it. An admitted dynamic loader or interpreter invoked explicitly on an unadmitted file is refused by ral's own check but not by the kernel. An attenuated `exec` alone is enough to build the envelope, so a grant that narrows only which programs run is still kernel-enforced.
+**Linux.** ral uses bubblewrap for filesystem restrictions and ``net: `offline``; on x86-64 and aarch64 every confined child also runs under a seccomp deny-set: kernel attack surface (ptrace, bpf, module loading, kexec/reboot/swap, keyrings, `userfaultfd`, `open_by_handle_at`, the mount family) is killed with SIGSYS, and user-namespace creation, `setns`, `clone3` and `ioctl(TIOCSTI)` are refused with an errno — no mounting and no containers inside a grant. ral opens each path the envelope shows itself, never through a symbolic link, and has bubblewrap mount that open file rather than a name, so a path replaced by a link after the grant was read shows nothing the grant did not name, and one whose components became a link refuses the launch; this needs bubblewrap 0.8.0 or later, and under an older one no confined command runs. A grant that limits which programs may run is refused on a kernel without Landlock, and every confined command is refused on a kernel older than 5.9, which cannot close the descriptors ral hands the child before its program starts. A directory the `exec` grant admits is readable inside, as on macOS. The read floor is `/bin`, `/usr`, `/lib`, `/lib64`, the files under `/etc` that dynamic linking, name resolution, user lookup and toolchain resolution need, the Linuxbrew prefix, and of `/sys` only what sizes a program (`/sys/devices/system/cpu`, `/sys/kernel/mm/transparent_hugepage`); the envelope binds it read-only. The rest of `/sys` describes the host — its `class/net` lists the host's interfaces whatever `net` says — and a grant that wants it lists `/sys` under `read`. Every confined child runs in its own ipc and uts namespaces and, wherever the host can mount a fresh procfs, its own pid namespace with its own `/proc`: on every projection it sees and can signal no host process. Wherever the kernel builds a cgroup namespace the child has one, and on every projection `/sys/fs/cgroup` is the tree its own `/proc/self/cgroup` names — ral's cgroup, so a runtime reads its real limits; where the kernel cannot, the child sees the host's tree. A container runtime that masks `/proc` prevents the pid namespace; the launch still runs, and the table is the container's own. Each other invariant the host cannot build is likewise absent while the launch still runs. A confined command has no controlling terminal. Bubblewrap has no path-based executable filter, so the confined child enters a Landlock domain of its own inside the envelope: executable-path restrictions are kernel-enforced on kernels with Landlock (Linux 5.13 and later), constraining programs launched internally by an admitted child as on macOS, and on Landlock 6 kernels (Linux 6.12 and later) the child can signal no process outside the envelope even where no pid namespace could be built. What the kernel gates is the path passed to `execve`. Landlock is allow-list only, so a denied path *inside* an admitted directory is held by admitting that directory's other entries, as they stand when the command launches: a program added there afterwards is refused until the next launch, and a bare-name deny under an admitted directory whose writes the grant names at or below an admit is held by ral's own check alone, since a child could author a renamed copy there; one a broader `write` covers is kept read-only inside, so the kernel holds it. An admitted dynamic loader or interpreter invoked explicitly on an unadmitted file is refused by ral's own check but not by the kernel. An attenuated `exec` alone is enough to build the envelope, so a grant that narrows only which programs run is still kernel-enforced.
 
-**Windows.** ral uses a projection-specific AppContainer token, filesystem capability SIDs, and a Job Object. AppContainer is deny-by-default: a child confined only to obtain `net: false` does not automatically retain ordinary access to the user’s working tree. Windows has no path-based executable filter, so an admitted program may execute another visible program internally. Network and UNC grant paths are unsupported. The read floor is `%SystemRoot%`, `%ProgramFiles%` and `%ProgramFiles(x86)%`, which AppContainer already reads. A host's ambient `ALL APPLICATION PACKAGES` grants may reach beyond the floor: the kernel is then wider than ral's own check, never narrower, and only a less-privileged AppContainer could close it. Filesystem capability entries are attached to NTFS objects; same-volume renames and hard links can therefore preserve or omit authority differently from a purely path-based rule.
+**Windows.** ral uses a projection-specific AppContainer token, filesystem capability SIDs, and a Job Object. AppContainer is deny-by-default: a child confined only to obtain ``net: `offline`` does not automatically retain ordinary access to the user’s working tree. Windows has no path-based executable filter, so an admitted program may execute another visible program internally. Network and UNC grant paths are unsupported. The read floor is `%SystemRoot%`, `%ProgramFiles%` and `%ProgramFiles(x86)%`, which AppContainer already reads. A host's ambient `ALL APPLICATION PACKAGES` grants may reach beyond the floor: the kernel is then wider than ral's own check, never narrower, and only a less-privileged AppContainer could close it. Filesystem capability entries are attached to NTFS objects; same-volume renames and hard links can therefore preserve or omit authority differently from a purely path-based rule.
 
-On another host, a filesystem restriction fails when no per-command sandbox backend can be built, and `net: false` is explicitly rejected if kernel network enforcement is unavailable.
+On another host, a filesystem restriction fails when no per-command sandbox backend can be built, and ``net: `offline`` is explicitly rejected if kernel network enforcement is unavailable.
 
 ### 12.12. Capability profiles
 
@@ -3096,14 +3112,13 @@ a capability record with exactly the same contract as the one `grant` accepts:
 # read-only.ral
 return [
     exec: [
-        git: ['status', 'diff'],
-        rg: 'allow',
+        allow: [`name git, `name rg],
     ],
     fs: [
-        read: ['cwd:'],
+        read: [`cwd .],
     ],
-    net: false,
-    detach: false,
+    net:   `offline,
+    shell: [`chdir],
 ]
 ```
 
@@ -3123,9 +3138,11 @@ A profile that ends in a scalar, a list, a block, or any other value is
 rejected.
 
 A profile is ascribed `grant`'s table after inference, as at the rc file
-(§15.3) and the plugin manifest (§15.5). `return [exec: …, net: false]` is a
+(§15.3) and the plugin manifest (§15.5). ``return [exec: …, net: `offline]`` is a
 record, so `exec`'s misspelling as `exect` is caught statically, before the
-profile script runs at all. `return ["exec": …, "net": false]` is a map, whose
+profile script runs at all; so is a misspelled place tag, a bare string in a
+list of places, or `net: true`, since the nested tables are ascribed too.
+`return ["exec": …]` is a map, whose
 keys are data rather than the table's labels, and is refused statically with
 the spelling to use. A profile whose return the checker cannot type — one
 decoded from JSON — runs to completion first, and its keys are then checked
@@ -3143,13 +3160,18 @@ inline grants may narrow that ceiling but cannot widen it.
 
 A profile computed in the language is a profile file, then, not an inline
 bundle: `grant`'s bracket writes its fields, so `grant $p[policy] { … }` does not
-parse. `grant [fs: $paths, net: false] { … }`, with computed *values*, does.
+parse. ``grant [fs: [read: $paths], net: `offline] { … }``, with computed *values*, does.
 
-Compilation or runtime failure in a profile, a non-map terminal value,
-malformed maps, wrong Boolean types, non-string path or subcommand entries,
-empty subcommand lists, unknown fields, unresolved required sigils, and invalid
-relative paths are reported as configuration errors. Inline-map decode errors
-occur before the `grant` body runs; session-profile errors prevent the requested
+Compilation or runtime failure in a profile, a terminal value that is not a
+record, a map or `()` where a nested table belongs, unknown fields at any
+depth, a bare string where a place or exec target belongs, an unknown tag,
+verb, or `net` value, a tag with the wrong payload, an obsolete argument
+restriction (`only`, or a list of subcommands), a selector in an `fs` list, an
+unwrapped selector or a directory place in an `exec` list, a path-shaped
+`name`, a place whose payload is not absolute (`` `absolute ``) or not a
+relative subpath (every other tag), a `~` or `xdg:` payload, and an anchor
+that cannot be frozen are reported as configuration errors. Inline-record
+decode errors occur before the `grant` body runs; session-profile errors prevent the requested
 session or batch program from starting.
 
 ## 13. Audit, diagnostics, and testing
@@ -3268,7 +3290,7 @@ names the fully-resolved path — so a symlink inside a granted directory does
 not make the link's own directory sufficient — and the grant's matching `read`
 or `write` set; a denied executable names the path and the grant's `exec`
 allow-list, the only layer a re-exec such as `sh -c` or `find -exec` reaches; a
-denied socket names the `net: false` bit as the whole of the remedy; and a
+denied socket names the ``net: `offline`` grant as the whole of the remedy; and a
 denied Mach or IPC lookup names the door itself, quoting the base profile's own
 recorded reason for withholding it where one exists — an unexplained door is
 still named, since it is usually a harmless probe rather than the failure's

@@ -12,6 +12,7 @@
 use super::table::{Scope, Table};
 use super::{ExecGrant, ExecKey, GrantStack, Meet, Verdict};
 use crate::path::{Polarity, RealPath, SearchCwd, command_name_key};
+use crate::syntax::quote::quote_word;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
@@ -47,8 +48,6 @@ pub(crate) enum ExecDenial {
     /// The program is denied; `respelled` names the deny that holds it only
     /// under another spelling of its name, when no deny holds it as stored.
     Denied { respelled: Option<ExecScope> },
-    /// Only these first arguments pass, and the call's first argument is none of them.
-    Subcommand { allowed: BTreeSet<String> },
 }
 
 /// A call the stack refused.
@@ -72,8 +71,6 @@ impl GrantStack {
             Verdict::Deny => Some(ExecDenial::Denied {
                 respelled: rules.as_ref().and_then(|r| r.respelled(subject)).cloned(),
             }),
-            Verdict::Only(allowed) => (!args.first().is_some_and(|first| allowed.contains(first)))
-                .then_some(ExecDenial::Subcommand { allowed }),
         };
         match why {
             None => Ok(Admitted {
@@ -85,8 +82,7 @@ impl GrantStack {
         }
     }
 
-    /// Head-only admission, before any argv is known: a subcommand
-    /// restriction is not yet a refusal.
+    /// Head-only admission, before any argv is known.
     pub(crate) fn admits(&self, program: &Program) -> bool {
         rules(self).is_none_or(|r| !r.verdict(program.subject()).is_denied())
     }
@@ -167,12 +163,16 @@ pub(crate) enum Rank {
     Name,
 }
 
-/// The path or the name.
+/// As a grant spells it: a directory under its `dir` constructor, a file as
+/// its `absolute` place, a tool or name under `name`.
 impl std::fmt::Display for ExecScope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Dir(path) | Self::Carrier(path) | Self::File(path) => path.fmt(f),
-            Self::Tool(name) | Self::Name(name) => name.fmt(f),
+            Self::Dir(path) => write!(f, "`dir `absolute {}", quote_word(&path.to_string())),
+            Self::Carrier(path) | Self::File(path) => {
+                write!(f, "`absolute {}", quote_word(&path.to_string()))
+            }
+            Self::Tool(name) | Self::Name(name) => write!(f, "`name {}", quote_word(name)),
         }
     }
 }
@@ -225,9 +225,9 @@ impl ExecRules {
     /// their frozen forms, never re-read from disk.
     pub(crate) fn compile(grant: &ExecGrant) -> Self {
         let host_path = std::env::var("PATH").ok();
-        (grant.0.iter())
+        (grant.iter())
             .flat_map(|(key, v)| {
-                let (scopes, v): (Vec<ExecScope>, Verdict) = match key {
+                let scopes: Vec<ExecScope> = match key {
                     ExecKey::Name(name) => {
                         let tool = crate::uutils::is_uutils_tool(name)
                             .then(|| ExecScope::Tool(name.clone()));
@@ -238,19 +238,10 @@ impl ExecRules {
                         let veto = v
                             .is_denied()
                             .then(|| ExecScope::Name(command_name_key(name)));
-                        (
-                            [tool, file, veto].into_iter().flatten().collect(),
-                            v.clone(),
-                        )
+                        [tool, file, veto].into_iter().flatten().collect()
                     }
-                    ExecKey::Path(path) => {
-                        (vec![ExecScope::File(RealPath::frozen(path))], v.clone())
-                    }
-                    // A dir admits or denies; `Only` needs a named command.
-                    ExecKey::Dir(dir) => (
-                        vec![ExecScope::Dir(RealPath::frozen(dir))],
-                        Verdict::from(!v.is_denied()),
-                    ),
+                    ExecKey::Path(path) => vec![ExecScope::File(RealPath::frozen(path))],
+                    ExecKey::Dir(dir) => vec![ExecScope::Dir(RealPath::frozen(dir))],
                 };
                 scopes.into_iter().map(move |scope| (scope, v.clone()))
             })
@@ -260,8 +251,7 @@ impl ExecRules {
     /// What the kernel is handed: this table with `carriers` admitted beneath
     /// an exact rule, and each file at its final verdict, so an allow-only
     /// renderer (Landlock) may keep the allows as they stand.  The kernel
-    /// cannot see argv, so `Only` is an allow; tools are not rendered, the
-    /// kernel seeing ral's own binary for them.
+    /// Tools are not rendered, the kernel seeing ral's own binary for them.
     pub(crate) fn for_kernel(&self, carriers: &BTreeSet<RealPath>) -> Self {
         let mut with = self.clone();
         with.extend(
@@ -331,8 +321,6 @@ pub(super) mod tests {
     use super::*;
     use crate::capability::table::speaks;
     use crate::path::{Allow, Deny, FrozenPath};
-    #[cfg(unix)]
-    use std::collections::BTreeMap;
 
     /// `p` as an absolute path on the host, which for Windows needs a drive.
     fn host(p: &str) -> String {
@@ -446,6 +434,16 @@ pub(super) mod tests {
         if cfg!(not(windows)) {
             assert_eq!(of_file(&met, "/x/t"), Verdict::Deny);
         }
+    }
+
+    /// A directory deny keeps its `dir` marker in a refusal, distinct from a
+    /// file deny at the same place.
+    #[test]
+    fn a_directory_deny_reads_apart_from_a_file_deny() {
+        let at = |scope: fn(RealPath) -> ExecScope| scope(RealPath::assumed("/tools")).to_string();
+        assert_eq!(at(ExecScope::Dir), "`dir `absolute /tools");
+        assert_eq!(at(ExecScope::File), "`absolute /tools");
+        assert_eq!(ExecScope::Name("bash".into()).to_string(), "`name bash");
     }
 
     /// U2: a deny holds every spelling of its name, an allow its own.
@@ -598,14 +596,8 @@ pub(super) mod tests {
     const TOOLS: [&str; 2] = ["ls", "rm"];
     const NAMES: [&str; 4] = ["x", "sh", "rm", "X"];
 
-    fn verdicts() -> [Verdict; 4] {
-        let only = |subs: &[&str]| Verdict::Only(subs.iter().map(ToString::to_string).collect());
-        [
-            Verdict::Allow,
-            Verdict::Deny,
-            only(&["a"]),
-            only(&["a", "b"]),
-        ]
+    fn verdicts() -> [Verdict; 2] {
+        [Verdict::Allow, Verdict::Deny]
     }
 
     /// Every path the universe names.
@@ -748,7 +740,7 @@ pub(super) mod tests {
         std::fs::write(&target, "").unwrap();
         let link = tmp.path().join("a");
         std::os::unix::fs::symlink(&target, &link).unwrap();
-        let grant = ExecGrant(BTreeMap::from([
+        let grant: ExecGrant = [
             (
                 ExecKey::Path(FrozenPath::from_surface(&link)),
                 Verdict::Deny,
@@ -757,7 +749,9 @@ pub(super) mod tests {
                 ExecKey::Path(FrozenPath::from_surface(&target)),
                 Verdict::Allow,
             ),
-        ]));
+        ]
+        .into_iter()
+        .collect();
         let table = ExecRules::compile(&grant);
         assert_eq!(
             table.rules().map(|(_, v)| v).collect::<Vec<_>>(),
@@ -770,9 +764,7 @@ pub(super) mod tests {
         let linked = FrozenPath::for_test(&host("/l"), &host("/x"));
         let extra = extra_allow.map(|e| (FrozenPath::from_surface(host(e)), Verdict::Allow));
         let dirs = std::iter::once((linked, Verdict::from(allow))).chain(extra);
-        ExecRules::compile(&ExecGrant(
-            dirs.map(|(dir, v)| (ExecKey::Dir(dir), v)).collect(),
-        ))
+        ExecRules::compile(&dirs.map(|(dir, v)| (ExecKey::Dir(dir), v)).collect())
     }
 
     /// A dir that is a symlink covers where it points, allow or deny alike.

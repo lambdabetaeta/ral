@@ -1,10 +1,9 @@
 //! Run-time expansion of the path-prefix sigils `~[/sub]` and `xdg:NAME[/sub]`
 //! at the head of a path.  Anything else passes through unchanged.
 //!
-//! `~` and `xdg:` expand both here, at run time (stage 1 of
-//! [`crate::path::Resolver`]), and at policy freeze; the other sigils
-//! (`cwd:`, `tempdir:`, `gitdir:`, and the exec-only `path:` and `system:`)
-//! are freeze-only, and `guard::freeze` owns them with the rest of the freeze.
+//! They expand only here, at run time (stage 1 of
+//! [`crate::path::Resolver`]): a grant names its places with tags, which
+//! `guard::freeze` owns, and refuses these prefixes.
 //! XDG uses the Linux defaults on every platform, macOS included
 //! ([`crate::host`]).
 
@@ -35,8 +34,8 @@ pub(crate) fn relative_suffix(s: &str) -> &str {
 /// Infallible, because [`Resolver::resolve`](super::Resolver::resolve) is:
 /// whatever cannot be answered passes through literally — an unknown `home`
 /// leaves `~/x` as `~/x`.  That fails closed, a prefix matching nothing
-/// beating a fabricated path that might; a caller wanting the same gap to be
-/// a configuration error freezes with `guard::freeze::FreezeCtx::path`.
+/// beating a fabricated path that might.  A grant refuses the gap instead, in
+/// `guard::freeze::FreezeCtx::place`.
 pub fn expand_path_prefix(input: &str, home: Option<&str>) -> String {
     if let Some((kind, sub)) = parse_xdg_token(input) {
         return match resolve_xdg(kind, home) {

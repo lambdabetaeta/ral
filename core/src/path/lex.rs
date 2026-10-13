@@ -6,34 +6,22 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use super::PathRules;
 use crate::host;
 
 /// True iff `path` is absolute under Windows rules: a drive-letter prefix or
-/// a UNC/verbatim root.  String logic rather than `std::path::Path`, whose
-/// absoluteness rule is fixed at compile time to the build target, so
-/// [`is_foreign_rooted`] can ask the question from any host.
-fn is_windows_absolute(path: &str) -> bool {
-    if path.starts_with(r"\\") || path.starts_with("//") {
-        return true;
+/// a UNC/verbatim root, `\\server\share` with either separator and both
+/// components non-empty.  A bare `\\` or `//` names no volume, so it is no
+/// root: folded, it would be the universal prefix.  String logic rather than
+/// `std::path::Path`, whose absoluteness rule is fixed at compile time to the
+/// build target, so a grant can be classified from any host.
+pub(crate) fn is_windows_absolute(path: &str) -> bool {
+    if let Some(unc) = path.strip_prefix(r"\\").or_else(|| path.strip_prefix("//")) {
+        let mut parts = unc.split(['/', '\\']);
+        return parts.next().is_some_and(|server| !server.is_empty())
+            && parts.next().is_some_and(|share| !share.is_empty());
     }
     let b = path.as_bytes();
     b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'/' | b'\\')
-}
-
-/// True iff `path` is rooted but not Windows-absolute: a Unix-absolute grant
-/// (`/tmp`, `/usr/local/bin`) frozen on a Windows build, where it resolves
-/// nowhere.  Either leading separator counts: the freeze pass runs
-/// [`fold_dots`] first, which re-renders the POSIX root as a native `\`.
-/// Always `false` under POSIX rules, where rooted and absolute coincide.
-///
-/// The gate is `guard::freeze::FreezeCtx::absolute`, which drops this
-/// class as a dead grant instead of erroring on it as it does on a genuinely
-/// relative entry.
-pub(crate) fn is_foreign_rooted(path: &str, rules: PathRules) -> bool {
-    rules == PathRules::Windows
-        && matches!(path.as_bytes().first(), Some(b'/' | b'\\'))
-        && !is_windows_absolute(path)
 }
 
 /// Resolve `path` against `cwd`, or against the process cwd when `cwd` is
@@ -69,7 +57,7 @@ pub fn resolve_path(cwd: Option<&Path>, path: &str) -> PathBuf {
 /// on exactly this path and nowhere else, so the doors that must not anchor
 /// it ask here rather than matching a root apiece.
 ///
-/// String logic, as [`is_windows_absolute`] and [`is_foreign_rooted`] are,
+/// String logic, as [`is_windows_absolute`] is,
 /// and exact rather than "all separators": `\\` opens a UNC name and `X:\`
 /// carries a prefix component, and neither is universal.  A drive root must
 /// keep anchoring as it always did, or a grant over one volume would widen
@@ -295,7 +283,36 @@ pub(crate) fn proper_ancestors<'a>(paths: impl IntoIterator<Item = &'a str>) -> 
 mod tests {
     use super::*;
 
-    const W: PathRules = PathRules::Windows;
+    #[test]
+    fn a_unc_root_needs_a_server_and_a_share() {
+        for ok in [
+            r"\\srv\sh",
+            r"\\srv\sh\x",
+            "//srv/sh/x",
+            r"\\?\C:\x",
+            r"\\?\UNC\srv\sh",
+            r"C:\x",
+            "c:/x",
+        ] {
+            assert!(is_windows_absolute(ok), "{ok}");
+        }
+        for bad in [
+            r"\\",
+            "//",
+            r"\\srv",
+            r"\\srv\",
+            "//srv/",
+            r"\\\srv\sh",
+            "///srv/sh",
+            r"\\?\",
+            r"\x",
+            "/x",
+            "C:x",
+            "",
+        ] {
+            assert!(!is_windows_absolute(bad), "{bad}");
+        }
+    }
 
     fn pb(s: &str) -> PathBuf {
         PathBuf::from(s)
@@ -361,24 +378,5 @@ mod tests {
                 "the two kernels disagree on {input:?}"
             );
         }
-    }
-
-    // The whole table pinned on every host, no Windows CI leg needed.
-    #[test]
-    fn foreign_rooted_classification() {
-        // Either separator: the freeze pass folds `/tmp` to `\tmp` on
-        // Windows before this check runs.
-        assert!(is_foreign_rooted("/tmp", W));
-        assert!(is_foreign_rooted(r"\tmp", W));
-        assert!(is_foreign_rooted("/usr/local/bin", W));
-        assert!(!is_foreign_rooted(r"C:\work", W));
-        assert!(!is_foreign_rooted("c:/work", W));
-        assert!(!is_foreign_rooted(r"\\server\share", W));
-        assert!(!is_foreign_rooted("//server/share", W));
-        // Genuinely relative paths stay in the strict-error class.
-        assert!(!is_foreign_rooted("proj", W));
-        assert!(!is_foreign_rooted("./a", W));
-        assert!(!is_foreign_rooted("/tmp", PathRules::Posix));
-        assert!(!is_foreign_rooted(r"\tmp", PathRules::Posix));
     }
 }

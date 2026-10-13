@@ -1,0 +1,3 @@
+# contains: `name
+# contains: `cwd
+grant [exec: [allow: ['git']]] { return 1 }

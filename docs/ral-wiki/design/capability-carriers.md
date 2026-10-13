@@ -58,7 +58,7 @@ understand different languages ([[design/two-enforcers|two-enforcers]]):
   follow-ups or understand "`git` but only `status`."
 
 `SandboxProjection` is the permission boiled down into that flat list — the
-subtle parts (which subcommand, this argument vs that) flattened away because the
+subtle parts (a bare-name veto, a bundled tool's name) flattened away because the
 sentry could never act on them. Same authority, two renderings, because there are
 two enforcers of unequal sophistication. Neither rendering serves both: hand the
 flat list to the sharp judge and you have thrown away its precision; ask the

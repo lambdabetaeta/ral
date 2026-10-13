@@ -368,11 +368,11 @@ impl Datum for Grant {
                 Ok(Self(SpawnGrant::Restrict(record.clone())))
             }
             Some(("restrict", Some(other))) => Err(format!(
-                "`restrict must carry a capability record [exec, fs, net, detach, editor, shell], got {}",
+                "`restrict must carry a capability record [exec, fs, net, editor, shell], got {}",
                 other.shape()
             )),
             _ => Err(format!(
-                "expected `inherit, {}, or `restrict [exec: …, fs: …, net: …, detach: …, editor: …, \
+                "expected `inherit, {}, or `restrict [exec: …, fs: …, net: …, editor: …, \
                  shell: …]: `inherit is how you decline to narrow at all, and `restrict must carry \
                  a capability record of the same shape `grant [...]` takes, every key optional: got {}",
                 crate::policy::SPAWN_BASES
@@ -1254,7 +1254,7 @@ mod tests {
 
     fn restriction() -> FOValue {
         FOValue::Map {
-            entries: vec![("net".into(), false.encode())],
+            entries: vec![("net".into(), tag("offline", None))],
         }
     }
 

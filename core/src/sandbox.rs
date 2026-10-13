@@ -116,7 +116,7 @@ impl From<String> for Refusal {
 pub(crate) fn projection_enforceable(projection: &SandboxProjection) -> Result<(), Refusal> {
     if !projection.net && !NET_ENFORCED {
         return Err(Refusal::Unavailable(
-            "offline mode (net: false) is unsupported on this platform: \
+            "offline mode (`net: `offline`) is unsupported on this platform: \
              no kernel network enforcement exists"
                 .into(),
         ));

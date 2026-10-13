@@ -767,7 +767,7 @@ fn a_result_that_is_not_data_says_what_it_holds() {
     }
 }
 
-/// A shell whose `_narrow` pushes a `net: false` session ceiling and whose
+/// A shell whose `_narrow` pushes an offline session ceiling and whose
 /// `_narrowed` reports whether any ceiling holds.
 fn narrowing_shell() -> Shell {
     use crate::capability::Capabilities;
@@ -780,7 +780,7 @@ fn narrowing_shell() -> Shell {
             "",
             BuiltinBody::Captured(Arc::new(|_, _, s: &mut Shell| {
                 s.push_session_capabilities(Capabilities {
-                    net: Some(false),
+                    net: Some(crate::capability::Net::Offline),
                     ..Capabilities::root()
                 });
                 Ok(Value::Bool(true))
@@ -810,7 +810,10 @@ fn assert_ceiling_survives(mut shell: Shell, narrow: Run) {
         before + 1,
         "the run's own frames must leave with it, and only they"
     );
-    assert_eq!(shell.context.grants.net().collect::<Vec<_>>(), [false]);
+    assert_eq!(
+        shell.context.grants.net().collect::<Vec<_>>(),
+        [crate::capability::Net::Offline]
+    );
     let RunReport::Ran {
         ending: Ending::Settled { value, .. },
         ..
@@ -830,7 +833,7 @@ fn assert_ceiling_survives(mut shell: Shell, narrow: Run) {
 fn a_session_ceiling_pushed_in_a_run_outlives_it() {
     let mut caps = GrantStack::root();
     caps.push(crate::capability::Capabilities {
-        detach: Some(false),
+        shell: Some([crate::capability::ShellVerb::Chdir].into()),
         ..crate::capability::Capabilities::root()
     });
     let mut narrow = Run::captured("_narrow", "<test>");
@@ -844,7 +847,7 @@ fn a_session_ceiling_pushed_in_a_run_outlives_it() {
 fn a_session_ceiling_pushed_in_a_grant_block_outlives_it() {
     assert_ceiling_survives(
         narrowing_shell(),
-        Run::captured("grant [net: true] { _narrow }", "<test>"),
+        Run::captured("grant [net: `offline] { _narrow }", "<test>"),
     );
 }
 

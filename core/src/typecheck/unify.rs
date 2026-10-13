@@ -1460,7 +1460,7 @@ impl Unifier {
         }
         let names = |ls: Vec<Label>| ls.iter().map(Label::to_string).collect::<Vec<_>>();
         let a_names = names(self.row_spine(a).0);
-        let known = if a_names.contains(&label) {
+        let known = if a_names.contains(&label.to_string()) {
             names(self.row_spine(b).0)
         } else {
             a_names
@@ -1522,7 +1522,7 @@ impl Unifier {
                 (Row::Empty, Row::Empty) => return Ok(()),
                 (Row::Empty, Row::Extend(l, ..)) => {
                     return Err(TypeErrorKind::RowExtraField {
-                        label: l.to_string(),
+                        label: l,
                         known: Vec::new(),
                     });
                 }
@@ -1998,7 +1998,7 @@ mod tests {
                 .unify_row(&closed(&written), &wanted)
                 .expect_err("a record without `r` must not unify");
             assert!(
-                matches!(&err, TypeErrorKind::RowExtraField { label, .. } if label == "r"),
+                matches!(&err, TypeErrorKind::RowExtraField { label, .. } if label.name() == "r"),
                 "{written:?}: expected RowExtraField(r), got {err:?}"
             );
         }

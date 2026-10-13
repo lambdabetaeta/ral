@@ -1,9 +1,10 @@
 //! The type errors the checker raises: a structural cause, the provenance of
 //! the failed constraint, and a span.  Their user-facing prose is in `explain.rs`.
 
+use super::contract::Vocab;
 use crate::ir::BinaryOp;
 use crate::source::Span;
-use crate::ty::{CompTy, Kind, Ty};
+use crate::ty::{CompTy, Kind, Label, Ty};
 
 /// What an arm stands in for, which decides what it must produce.
 #[derive(Debug, Clone)]
@@ -15,6 +16,9 @@ pub enum Standing {
     /// The catch-all `handler:`, for every command in its extent.
     EveryCommand,
 }
+
+/// A failed constraint with the reason it was raised under; boxed, being large.
+pub(super) type Clash = Box<(TypeErrorKind, Reason)>;
 
 /// Why the inferencer demanded that two types agree.
 ///
@@ -79,6 +83,9 @@ pub enum Reason {
         form: &'static str,
         key: String,
     },
+    /// A written option's value against the closed set of tags a vocabulary names;
+    /// the innermost one the clash met.
+    Vocabulary(&'static Vocab),
     /// A `handlers:` arm that arrived as a value, against the block an arm is.
     HandlerArm,
     /// The `!` operator's operand against the block shape it forces.
@@ -183,8 +190,10 @@ pub enum TypeErrorKind {
         expected: CompTy,
         actual: CompTy,
     },
+    /// A label a closed row lacks; the label's alphabet says whether the row
+    /// is a record's or a variant's.
     RowExtraField {
-        label: String,
+        label: Label,
         /// The labels the rejecting record does have, so the message can offer
         /// the alternatives and not only the miss.  Empty when neither side had
         /// concrete labels to name.
@@ -219,6 +228,13 @@ pub enum TypeErrorKind {
         form: &'static str,
         found: Ty,
         offered: Vec<&'static str>,
+    },
+    /// A grant's nested table (`exec:`, `fs:`) given something that is no record.
+    NotATable {
+        key: &'static str,
+        /// The table's first key, which its empty spelling is written with.
+        first: &'static str,
+        found: Ty,
     },
     /// A non-function value in head position; shares T0011 with `CompTyMismatch`.
     CommandNotFunction {
@@ -344,6 +360,7 @@ impl TypeErrorKind {
             Self::RefusedKey { .. } => "T0026",
             Self::UnknownKey { .. } => "T0076",
             Self::ReturnNotRecord { .. } => "T0077",
+            Self::NotATable { .. } => "T0079",
             Self::CaseNotExhaustive { .. } => "T0030",
             Self::CaseOnNonVariant { .. } => "T0032",
             Self::ControlOperatorAsValue { .. } => "T0040",
@@ -403,7 +420,7 @@ impl TypeError {
 
 impl std::fmt::Display for TypeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let msg = self.kind.render_message();
+        let msg = self.message();
         match self.pos {
             Some(sp) => write!(f, "@{}..{}: {}", sp.start, sp.end, msg),
             None => write!(f, "{msg}"),

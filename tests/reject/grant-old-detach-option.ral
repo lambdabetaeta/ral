@@ -1,0 +1,2 @@
+# contains: unknown key 'detach'
+grant [detach: false] { return 1 }

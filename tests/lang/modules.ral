@@ -56,7 +56,7 @@ echo "$sess[visible] $sess[reads_earlier] $hidden"
 mkdir -p "$tmpdir/lib" "$tmpdir/other"
 echo "let answer = 42" > "$tmpdir/lib/g.ral"
 try {
-    grant [fs: [read: ["$tmpdir/other"]]] {
+    grant [fs: [read: [`absolute "$tmpdir/other"]]] {
         within [dir: "$tmpdir/other", env: [RAL_PATH: "$tmpdir/lib"]] { let _ = use 'g.ral' }
     }
 } { |e| echo !{re-match 'denied by grant' $e[message]} }

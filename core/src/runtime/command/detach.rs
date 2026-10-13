@@ -11,7 +11,7 @@
 //! Its standard descriptors are `/dev/null`: our end of an inherited pipe
 //! closes when we exit, and the survivor's next write would take a `SIGPIPE`.
 
-use crate::capability::Flag;
+use crate::capability::{Flag, ShellVerb};
 use crate::fact::{Command, Receipt};
 use crate::ir::CommandName;
 use crate::process::StdioSpec;
@@ -65,7 +65,7 @@ pub(crate) fn detach(
             None => {}
         }
     }
-    shell.check(Flag::Detach, "detach")?;
+    shell.check(Flag::Shell(ShellVerb::Detach), "detach")?;
     // Existence (127/126), argv shape, the grant's verdict on the whole call:
     // the same judgments an ordinary external passes, so a bundled uutils tool
     // falls out as its own image with no special case here.

@@ -1,0 +1,2 @@
+# contains: `chdir
+grant [shell: [chdir: false]] { return 1 }

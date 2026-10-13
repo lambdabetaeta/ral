@@ -9,6 +9,10 @@ status: active
 > [[design/authority-tables|authority-tables]]). The guard and the projection
 > still read one fold apiece per question, at two freshnesses.
 
+> **Surface, 2026-10-12.** The grant surface now mirrors the partition: an
+> exec target is `name`, a place, or `dir`
+> ([[decisions/261012_grant-surface-is-typed|grant-surface-is-typed]]).
+
 # Exec authority gets its partitioned type; the two folds stay two
 
 A simplification pass over the capability layer following the

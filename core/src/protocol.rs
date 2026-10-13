@@ -20,7 +20,7 @@ pub mod probe;
 /// The frame algebra's generation, checked at `Attach` and refused on
 /// mismatch.  Public because a build has to compare it against the engine
 /// sitting in the guest media beside it: see [`check_media`].
-pub const PROTOCOL_VERSION: u32 = 15;
+pub const PROTOCOL_VERSION: u32 = 16;
 
 /// The key `vm-image/build-boot.sh` records [`PROTOCOL_VERSION`] under in the
 /// boot media's manifest, `vm-image/out/boot/boot-manifest.txt`.

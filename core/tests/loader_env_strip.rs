@@ -28,11 +28,13 @@
 mod common;
 
 use ral_core::RunIo;
-use ral_core::capability::{Capabilities, FsPolicy, GrantStack};
+use ral_core::capability::{Capabilities, EditorVerb, FsPolicy, GrantStack, ShellVerb};
 use ral_core::path::FrozenPath;
 use ral_core::protocol::Run;
 use ral_core::run::RunReport;
 use ral_core::types::{Shell, Value};
+use std::collections::BTreeSet;
+use strum::VariantArray;
 
 fn boot() -> Shell {
     ral_core::boot::boot_shell(
@@ -42,55 +44,78 @@ fn boot() -> Shell {
     )
 }
 
-/// A capability frame whose fs policy confines reads and writes to `dir`.  Any
-/// `fs` key makes `sandbox_projection()` return `Some(_)`, so the per-command
+/// A capability frame whose fs policy confines reads and writes to a scratch
+/// directory.  Any `fs` key makes `sandbox_projection()` return `Some(_)`, so the per-command
 /// launcher confines the `printenv` child.
-fn restrict_to(dir: &str) -> Capabilities {
+fn restrict() -> Capabilities {
+    let dir = std::env::temp_dir().join(format!("ral_loader_env_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create work dir");
+    let dir = dir.to_string_lossy();
     Capabilities {
         fs: Some(FsPolicy {
-            read_prefixes: vec![FrozenPath::from_surface(dir)],
-            write_prefixes: vec![FrozenPath::from_surface(dir)],
+            read_prefixes: vec![FrozenPath::from_surface(&dir)],
+            write_prefixes: vec![FrozenPath::from_surface(&dir)],
             deny_paths: Vec::new(),
         }),
         ..Capabilities::root()
     }
 }
 
-/// The environment a confined bundled child sees, as `printenv` reports it.
-fn confined_child_env(src: &str) -> String {
-    let dir = std::env::temp_dir().join(format!("ral_loader_env_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("create work dir");
-    let mut shell = boot();
-    let report = shell.run(Run {
+/// Layers that supply an axis only to list every verb, or none at all.
+fn neutral_layers() -> [Capabilities; 4] {
+    let editor: BTreeSet<_> = EditorVerb::VARIANTS.iter().copied().collect();
+    let shell: BTreeSet<_> = ShellVerb::VARIANTS.iter().copied().collect();
+    [
+        Capabilities::root(),
+        Capabilities {
+            editor: Some(editor.clone()),
+            ..Capabilities::root()
+        },
+        Capabilities {
+            shell: Some(shell.clone()),
+            ..Capabilities::root()
+        },
+        Capabilities {
+            editor: Some(editor),
+            shell: Some(shell),
+            ..Capabilities::root()
+        },
+    ]
+}
+
+/// The environment a bundled child sees under `layers`, as `printenv` reports
+/// it, with `vars` set in a `within`.
+fn child_env(layers: impl IntoIterator<Item = Capabilities>, vars: &str) -> String {
+    let mut caps = GrantStack::root();
+    layers.into_iter().for_each(|layer| caps.push(layer));
+    let src = format!("within [env: [{vars}]] {{ printenv | from-string }}");
+    let report = boot().run(Run {
         io: RunIo::Inherit,
-        caps: GrantStack::of(restrict_to(&dir.to_string_lossy())),
-        ..Run::captured(src, "<test>")
+        caps,
+        ..Run::captured(&src, "<test>")
     });
     let RunReport::Ran { ending, .. } = report else {
         panic!("well-formed source must run: {src:?}");
     };
     match ending
         .into_result()
-        .expect("a confined bundled printenv must succeed")
+        .expect("a bundled printenv must succeed")
     {
         Value::String(s) => s.into_string(),
         other => panic!("expected printenv's bytes as a string, got {other:?}"),
     }
 }
 
-#[test]
-fn dyld_overrides_never_reach_a_confined_child() {
-    let env = confined_child_env(
-        // An already-loaded system dylib: inserting it changes nothing, so an
-        // unstripped child still reaches `printenv` and the assertion below —
-        // rather than aborting in dyld — is what reports the hole.
-        "within [env: [DYLD_INSERT_LIBRARIES: '/usr/lib/libSystem.B.dylib', \
-         DYLD_LIBRARY_PATH: '/nonexistent', RAL_LOADER_PROBE: 'present']] { \
-         printenv | from-string }",
-    );
+// An already-loaded system dylib: inserting it changes nothing, so an
+// unstripped child still reaches `printenv` and the assertion below, rather
+// than aborting in dyld, is what reports the hole.
+const LOADER_VARS: &str = "DYLD_INSERT_LIBRARIES: '/usr/lib/libSystem.B.dylib', \
+                           DYLD_LIBRARY_PATH: '/nonexistent', RAL_LOADER_PROBE: 'present'";
+
+fn assert_stripped(env: &str) {
     assert!(
         env.contains("RAL_LOADER_PROBE=present"),
-        "control variable missing — the child never received the `within` env, \
+        "control variable missing: the child never received the `within` env, \
          so this test proves nothing about the strip: {env:?}"
     );
     assert!(
@@ -98,4 +123,40 @@ fn dyld_overrides_never_reach_a_confined_child() {
         "a dynamic-loader override reached a confined child; on macOS it would \
          load before the trampoline enters Seatbelt: {env:?}"
     );
+}
+
+#[test]
+fn dyld_overrides_never_reach_a_confined_child() {
+    assert_stripped(&child_env([restrict()], LOADER_VARS));
+}
+
+/// A withheld verb alone activates the strip.
+#[test]
+fn a_withheld_verb_strips_loader_overrides() {
+    let layer = Capabilities {
+        shell: Some(BTreeSet::from([ShellVerb::Chdir])),
+        ..Capabilities::root()
+    };
+    assert_stripped(&child_env([layer], LOADER_VARS));
+}
+
+/// Neutral layers around a restriction cannot turn the strip off.
+#[test]
+fn neutral_layers_around_a_restriction_keep_stripping() {
+    for neutral in neutral_layers() {
+        let layers = [neutral.clone(), restrict(), neutral];
+        assert_stripped(&child_env(layers, LOADER_VARS));
+    }
+}
+
+/// A neutral policy launches ambient: the override arrives.
+#[test]
+fn a_neutral_policy_leaves_loader_overrides_alone() {
+    for neutral in neutral_layers() {
+        let env = child_env([neutral], LOADER_VARS);
+        assert!(
+            env.contains("DYLD_LIBRARY_PATH=/nonexistent"),
+            "a neutral policy must not scrub the environment: {env:?}"
+        );
+    }
 }

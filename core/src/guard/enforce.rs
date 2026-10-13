@@ -10,7 +10,7 @@
 //! so the two cannot drift.
 
 use crate::capability::{
-    Admitted, ExecDenial, Flag, FsOp, GrantStack, Program, Refused, Verdict, region,
+    Admitted, ExecDenial, Flag, FsOp, GrantStack, Program, Refused, ShellVerb, Verdict, region,
 };
 use crate::path::{FrozenPath, LexicalPath, Resolver};
 use crate::types::{Check, Context, Error, Resource, Settled, sig};
@@ -53,35 +53,13 @@ pub(crate) fn check_exec(
 }
 
 fn exec_denial(shown: &str, Refused { program, args, why }: Refused) -> Denial {
-    let respelled = match &why {
-        ExecDenial::Denied { respelled } => respelled.as_ref(),
-        ExecDenial::Subcommand { .. } => None,
-    };
-    let error = match &why {
-        ExecDenial::Denied {
-            respelled: Some(deny),
-        } => Error::new(respelled_refusal("exec", &program, deny)),
-        ExecDenial::Denied { respelled: None } => {
-            Error::new(format!("command '{shown}' denied by active grant")).with_hint(
-                "add the command to the grant exec map \
-                 (or its directory, keyed with a trailing '/') to allow it",
-            )
-        }
-        ExecDenial::Subcommand { allowed } => {
-            let hint = format!(
-                "allowed subcommands (matched against the command's first argument): {}",
-                allowed.iter().cloned().collect::<Vec<_>>().join(", ")
-            );
-            match args.first() {
-                Some(first) => Error::new(format!(
-                    "command '{shown}' subcommand '{first}' denied by active grant"
-                )),
-                None => Error::new(format!(
-                    "command '{shown}' requires an allowed subcommand under the active grant"
-                )),
-            }
-            .with_hint(hint)
-        }
+    let ExecDenial::Denied { respelled } = &why;
+    let error = match respelled {
+        Some(deny) => Error::new(respelled_refusal("exec", &program, deny)),
+        None => Error::new(format!("command '{shown}' denied by active grant")).with_hint(
+            "add the command to the grant's exec `allow` list: `name git` for a command name, \
+             `absolute /path/to/it` for a file, or `dir `absolute /path` for its directory",
+        ),
     };
     let fields = [
         ("name", shown.to_string()),
@@ -89,7 +67,7 @@ fn exec_denial(shown: &str, Refused { program, args, why }: Refused) -> Denial {
         ("args", args.join(" ")),
     ]
     .into_iter()
-    .chain(respelled.map(|deny| ("deny", deny.to_string())));
+    .chain(respelled.as_ref().map(|deny| ("deny", deny.to_string())));
     Denial::new(Resource::Exec, fields, error)
 }
 
@@ -101,7 +79,7 @@ pub(crate) fn deny_head(grants: &GrantStack, shown: &str, program: &Program) -> 
         None => Error::new(format!(
             "command '{shown}' denied by active grant ({program})"
         ))
-        .with_hint("add the command to the grant exec map to allow it"),
+        .with_hint("add the command to the grant's exec `allow` list, as `name git` or `absolute /path/to/it`"),
     };
     Denial::new(Resource::Exec, [("name", shown.to_string())], error)
 }
@@ -148,7 +126,7 @@ pub(super) fn fs_verdict(
         Verdict::Deny => region
             .respelled(resolved)
             .map_or(FsVerdict::Denied, |deny| FsVerdict::Respelled(deny.clone())),
-        _ => FsVerdict::Granted,
+        Verdict::Allow => FsVerdict::Granted,
     }
 }
 
@@ -250,7 +228,7 @@ pub(crate) fn check_flag(ctx: &Context, flag: Flag, who: &str) -> Settled<()> {
         return Ok(());
     }
     Err(sig(match flag {
-        Flag::Detach => format!(
+        Flag::Shell(ShellVerb::Detach) => format!(
             "{who}: an active grant withholds it, so nothing here may outlive this session. \
              Would `spawn` or `service` do, since both end when the session does?"
         ),

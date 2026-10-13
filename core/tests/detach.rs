@@ -260,7 +260,7 @@ fn a_frame_that_withholds_detach_refuses_the_call_and_spends_no_birth() {
     shell.arm_detach(1);
     let message = refusal(
         &mut shell,
-        "grant [detach: false] { detach #'a long sleep'# /bin/sleep 300 }",
+        "grant [shell: [`chdir]] { detach #'a long sleep'# /bin/sleep 300 }",
     );
     assert!(
         message.contains("withholds"),

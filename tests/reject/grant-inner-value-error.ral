@@ -1,2 +1,2 @@
 # contains: this is a Bool, but a number (Int or Float) is needed
-grant [exec: [git: $[true + 1]]] { echo hi }
+grant [exec: [allow: [`name $[true + 1]]]] { echo hi }

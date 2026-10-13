@@ -17,10 +17,13 @@ of [[internals/capability-enforcement|capability-enforcement]].
 bundled `Tool`, or a host `File` with its spelling and its real path.
 `ExecRules::verdict` judges it, and it is the only function that does.
 
+- **Arguments play no part.** An allowed target runs with any arguments, a
+  denied one with none; `admit(program, args)` is one entry point because the
+  arguments belong to the admitted launch, not because they are judged.
 - **A path key** matches the real path by equality, and a directory key by
   containment. The deepest key decides.
 - **A bare key** means the file the host `PATH` finds. So a planted
-  `/tmp/evil/rg` does not inherit `rg: allow`.
+  `/tmp/evil/rg` does not inherit ``allow: [`name rg]``.
 - **A bare deny** also vetoes the name wherever it resolves. It stops an
   absolute `/bin/bash` and a symlink to it alike.
 - **A head that names no file has no program.** It fails with 127 or 126, never

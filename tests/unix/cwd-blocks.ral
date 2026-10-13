@@ -34,15 +34,18 @@ echo !{equal $back !{resolve-path "$root/inner/sub"}}
 cwd-is "$root/outer"
 
 # Entering `within [dir:]` needs no chdir authority; a `cd` inside it does
-echo !{equal !{grant [shell: [chdir: false]] { within [dir: "$root/inner"] { cwd } }} !{resolve-path "$root/inner"}}
-try { grant [shell: [chdir: false]] { within [dir: "$root/inner"] { cd sub } } } { |e|
+echo !{equal !{grant [shell: []] { within [dir: "$root/inner"] { cwd } }} !{resolve-path "$root/inner"}}
+try { grant [shell: []] { within [dir: "$root/inner"] { cd sub } } } { |e|
     echo $e[message]
 }
+
+# ...and the scoped directory may be one an fs grant confines to
+echo !{equal !{grant [shell: [], fs: [read: [`absolute "$root/inner"]]] { within [dir: "$root/inner"] { cwd } }} !{resolve-path "$root/inner"}}
 
 # Every other block shares the ambient cell: a `cd` inside persists
 within [env: [PROBE: x]] { cd "$root/inner" }
 cwd-is "$root/inner"
-grant [exec: [:]] { cd "$root/outer" }
+grant [exec: [allow: []]] { cd "$root/outer" }
 cwd-is "$root/outer"
 !{ cd "$root/inner" }
 cwd-is "$root/inner"

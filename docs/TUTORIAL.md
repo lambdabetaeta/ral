@@ -635,23 +635,27 @@ the whole block.
 `grant` removes authority for one block:
 
     grant [
-        exec: [git: [status, diff]],
+        exec: [allow: [`name git, `name rg]],
         fs: [
-            read: ['cwd:'],
-            write: ['tempdir:'],
+            read: [`cwd .],
+            write: [`tempdir .],
         ],
-        net: false,
+        net: `offline,
     ] {
         git status --short       # allowed
-        git push                 # denied: push was not granted
+        curl $url                # denied: curl was not granted
     }
 
 Each mentioned dimension becomes deny-by-default:
 
-- `exec:` names commands, paths, directory prefixes, or subcommands;
-- `fs:` names readable, writable, and denied regions;
-- `net:` permits or refuses network access;
-- `detach:` permits or refuses work that outlives the session.
+- `exec:` lists `allow` and `deny` targets: `` `name git ``, a place such as
+  `` `absolute /opt/tools/lint ``, or `` `dir `system `` for a directory. An
+  allowed target runs with any arguments; ral does not filter arguments;
+- `fs:` lists the places that are readable, writable, and denied;
+- `net:` is `` `offline `` or omitted; a grant cannot ask for the network;
+- `editor:` and `shell:` list verbs, for example `` shell: [`chdir] ``.
+  `` `detach `` is a `shell` verb: it permits work that outlives the session,
+  so a `shell` list without it refuses that work.
 
 An omitted dimension keeps the caller's authority. A nested `grant` can only
 reduce authority, never restore it.
@@ -661,9 +665,12 @@ down. Whenever an audit trail is open, a *denial* is recorded as a `` `check ``
 entry and an allowed check never is, so no inner `grant` can hide a refusal
 from the trail you opened around it.
 
-Filesystem policies use stable prefixes such as `cwd:`, `tempdir:`, `gitdir:`,
-`xdg:config`, and `~/project`. They are fixed when the policy is loaded, so a
-later directory or environment change cannot retarget them.
+Places are a tag and a relative subpath: `` `cwd src ``, `` `tempdir . ``,
+`` `gitdir . ``, `` `xdg-config tools ``, `` `home project ``, or
+`` `absolute /usr/share ``. They are fixed when the policy is loaded, so a
+later directory or environment change cannot retarget them. Every list is a
+set, so naming something twice changes nothing. Tags are checked before the
+program runs: ``net: true`` and a bare string where a place belongs are errors.
 
 Filesystem rules cover redirects, structured queries, and bundled tools;
 execution and network rules cover external processes. If the operating system

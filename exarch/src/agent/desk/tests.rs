@@ -1304,7 +1304,7 @@ fn start_refuses_a_restriction_that_is_not_a_record() {
     assert_eq!(
         err.message,
         "`exarch-agents `start`: `spec: `grant: `restrict must carry a capability record \
-         [exec, fs, net, detach, editor, shell], got a Str"
+         [exec, fs, net, editor, shell], got a Str"
     );
 }
 

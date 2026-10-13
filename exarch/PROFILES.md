@@ -32,7 +32,7 @@ on, while `confined` turns the network off but allows project writes.
 | `reasonable` | on      | read + write  | broad config, state, and toolchain caches | `PATH`, system roots, user toolchains, named tools  |
 | `edit-only`  | on      | read + write  | broad config and toolchain caches         | system and editing tools; Git denied                |
 | `read-only`  | on      | read only     | broad config and toolchain caches         | system and review tools, including Git              |
-| `minimal`    | on      | read + write  | none; `xdg:cache` is writable             | system roots, project, and scratch                  |
+| `minimal`    | on      | read + write  | none; `` `xdg-cache `` is writable             | system roots, project, and scratch                  |
 | `confined`   | off     | read + write  | none                                      | system roots, `/usr/local/bin`, project, and scratch |
 
 ### `reasonable` — everyday coding
@@ -43,7 +43,7 @@ and use installed development toolchains.
 - **Reads:** the project and Git directory, scratch, XDG config/data/cache/state
   directories, common toolchain caches, user toolchains, and macOS
   `~/Library/Caches`.
-- **Writes:** the project and Git directory, scratch, and `xdg:cache`. Persistent
+- **Writes:** the project and Git directory, scratch, and `` `xdg-cache ``. Persistent
   config, data, state, user binaries, SSH keys, and system directories are not
   writable.
 - **Programs:** commands resolved through `PATH`, platform tool roots, common
@@ -108,7 +108,7 @@ network isolation.
 `minimal` is the smallest useful starting point for a custom profile.
 
 - **Reads:** project and scratch only.
-- **Writes:** project, scratch, and `xdg:cache`.
+- **Writes:** project, scratch, and `` `xdg-cache ``.
 - **Programs:** platform system roots, project executables, and scratch
   executables.
 - **Network:** on.
@@ -162,20 +162,20 @@ exarch --base dangerous --restrict mine.ral
 
 ## Compose a profile
 
-An optional `--extend-base` file widens the selected base. Any number of
+An optional `--extend-base` file widens the selected base. Verb lists join: an extension can add a `shell` or `editor` verb the base lacks, and a base that omits a verb list keeps every verb. Any number of
 `--restrict` files then narrow it:
 
 ```text
 effective = (base ⊔ extension) ⊓ restriction₁ ⊓ restriction₂ ⊓ …
 ```
 
-Each file is frozen as it loads: `~`, `xdg:`, `cwd:`, `tempdir:`, `gitdir:`,
-and `system:` resolve to fixed paths for that session before the capabilities
-are composed. Changing the environment later cannot move those grants.
+Each file is frozen as it loads: the places `` `home ``, `` `xdg-* ``, `` `cwd ``,
+`` `tempdir ``, `` `gitdir ``, and the `` `system `` and `` `path `` selectors resolve to
+fixed paths for that session before the capabilities are composed. Changing the environment later cannot move those grants.
 
 Two of them are read from a source the session does not author, and each is
-checked rather than trusted. An `xdg:` path must land under the home directory.
-A `gitdir:` in a worktree or submodule — where `.git` is a file naming the real
+checked rather than trusted. An `` `xdg-* `` place must land under the home directory.
+A `` `gitdir `` in a worktree or submodule — where `.git` is a file naming the real
 Git directory — is followed only as far as a Git directory that names the
 working tree back, since that file sits in the tree the agent may write. A
 pointer nothing claims refuses the session and names both paths.
@@ -195,7 +195,7 @@ exarch --base minimal --extend-base build-tools.ral --restrict project.ral
 
 ## Platform tool roots
 
-The `system:` name expands to the platform's live tool roots:
+The `` `dir `system `` target expands to the platform's live tool roots:
 
 - `/usr/bin` and `/bin`, plus detected Homebrew or Linuxbrew roots, on Unix;
 - `%SystemRoot%\System32`, Windows PowerShell, and Git for Windows' `usr\bin`
@@ -208,7 +208,7 @@ platform can back.
 
 ## Build-tool caches
 
-`reasonable` and `minimal` permit writes to `xdg:cache`, so modern tools that
+`reasonable` and `minimal` permit writes to `` `xdg-cache ``, so modern tools that
 honour `$XDG_CACHE_HOME` use an allowed cache automatically.
 
 For common tools that use older home-directory conventions, exarch redirects

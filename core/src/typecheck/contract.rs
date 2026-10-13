@@ -5,7 +5,9 @@
 //! `grant` check theirs key by written key at the form, the bracket being
 //! syntax (`Inferencer::check_options`); an rc file, a capability profile
 //! and a plugin manifest are ascribed the table once inference has finished,
-//! as ML ascribes a signature (`ascribe`).  The runtime doors —
+//! as ML ascribes a signature (`ascribe`).  A table may hold another
+//! ([`Holds::Table`]), ascribed the same way from a queue `typecheck` drains
+//! once the labels settle (`drain_nested`).  The runtime doors —
 //! `apply_rc_key`, `LoadedPlugin::parse`, `decode_capability_map` — each keep
 //! their own `match` over the values; a table gives them only the *keyset*
 //! and the unknown-key wording, so that much is written once.  A door's own
@@ -18,12 +20,16 @@
 //! `every_declared_manifest_key_is_handled_by_parse`, and
 //! `every_declared_grant_key_is_handled_by_decode_capability_map`.
 
+mod grant;
+
+pub(crate) use grant::{DIR_TARGET, EDITOR, EXEC_TARGET, NET, PLACE, SHELL};
+
 use super::env::InferCtx;
-use super::error::{Reason, Standing, TypeErrorKind};
+use super::error::{Clash, Reason, Standing, TypeErrorKind};
 use super::unify::Unifier;
 use crate::ir::{CompKind, Phrase, Val};
 use crate::source::{Span, Spanned};
-use crate::ty::{CompTy, Label, Row, Ty};
+use crate::ty::{CompTy, Label, Row, TAG_PREFIX, Ty};
 
 /// Which declared table.  An enum rather than a name, so a lookup cannot miss.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,10 +48,108 @@ pub enum Holds {
     Required(Ty),
     /// The decoders': a fresh variable per occurrence, nothing imposed.
     Decoded,
+    /// `within`'s catch-all handler, the one value inferred in context.
+    CatchAll,
     /// A shape minted fresh per occurrence, variables and all.
     Shaped(fn(&mut Unifier) -> Ty),
+    /// A nested table, whose optional keys no row can express: ascribed once
+    /// inference has finished, and never constraining.
+    Table(&'static Table),
     /// Known, and refused, with advice of its own rather than "unknown key".
     Refused(&'static str),
+}
+
+/// What a written or inferred value is done with, by what its key holds it to.
+pub(super) enum Held<'a> {
+    /// Unified with this type, minted fresh.
+    Unify(Ty),
+    /// Ascribed once inference has finished.
+    Nested(&'static Table),
+    /// Refused with this advice.
+    Refuse(&'a str),
+    /// Left to the runtime decoder.
+    Nothing,
+}
+
+impl Holds {
+    /// What a value held here is done with.  Exhaustive, so a new way of
+    /// holding a value cannot be ignored by the doors that apply it.
+    pub(super) fn held(&self, u: &mut Unifier) -> Held<'_> {
+        match self {
+            Self::At(ty) | Self::Required(ty) => Held::Unify(ty.clone()),
+            Self::CatchAll => Held::Unify(catch_all_ty(u)),
+            Self::Shaped(mint) => Held::Unify(mint(u)),
+            Self::Table(table) => Held::Nested(table),
+            Self::Refused(advice) => Held::Refuse(advice),
+            Self::Decoded => Held::Nothing,
+        }
+    }
+}
+
+/// The tags one closed variant row offers, as the words a clash with it uses.
+///
+/// The row itself is minted from `row`, so what a clash names and what the
+/// checker admits are one list; the decoder words its refusals from the same
+/// vocabulary.
+#[derive(Debug)]
+pub struct Vocab {
+    /// What a member is called: "place".
+    pub noun: &'static str,
+    /// The row's tags with their payloads, in the order a refusal lists them.
+    pub row: fn() -> Vec<(String, Ty)>,
+    /// Advice for a tag refused on purpose, by tag.
+    pub misses: &'static [(&'static str, &'static str)],
+    /// Advice for a value that is no tag at all.
+    pub untagged: &'static str,
+    /// Advice for a tag whose payload is the wrong type.
+    pub payload: &'static str,
+    /// Tags whose payload is a vocabulary of its own, held to it first so that
+    /// a clash inside the payload is worded by the row it met.
+    pub within: &'static [(&'static str, &'static Self)],
+}
+
+impl Vocab {
+    /// The closed variant this vocabulary is.
+    pub(crate) fn ty(&self) -> Ty {
+        Ty::Variant(
+            (self.row)()
+                .into_iter()
+                .rev()
+                .fold(Row::Empty, |rest, (tag, ty)| {
+                    Row::Extend(Label::Case(tag), Box::new(ty), Box::new(rest))
+                }),
+        )
+    }
+
+    /// The tags as a refusal writes them, `` `cwd ``.
+    pub fn tags(&self) -> Vec<String> {
+        (self.row)()
+            .into_iter()
+            .map(|(tag, _)| format!("{TAG_PREFIX}{tag}"))
+            .collect()
+    }
+
+    /// The advice kept for `tag`, a tag refused on purpose.
+    pub fn miss(&self, tag: &str) -> Option<&'static str> {
+        self.misses.iter().find(|(t, _)| *t == tag).map(|&(_, a)| a)
+    }
+
+    /// The headline for `tag`, which the row lacks, and the advice kept for
+    /// it: one refusal for the checker and the decoder alike.
+    pub fn refuse(&self, tag: &str) -> (String, Option<&'static str>) {
+        (
+            super::explain::unknown_tag_message(self.noun, tag, &self.tags()),
+            self.miss(tag),
+        )
+    }
+}
+
+/// A nested table's value, waiting for the labels to settle.
+pub(super) struct NestedCheck {
+    pub key: &'static str,
+    pub table: &'static Table,
+    pub ty: Ty,
+    pub pos: Option<Span>,
 }
 
 /// One label a table names.
@@ -112,51 +216,8 @@ static WITHIN: Table = Table {
         },
         Key {
             label: "handler",
-            holds: Holds::Shaped(catch_all_ty),
+            holds: Holds::CatchAll,
             reason: Some(Reason::StandsIn(Standing::EveryCommand)),
-        },
-    ],
-    factory: false,
-};
-
-/// `grant`'s options, which are also the capability profile's keyset.
-///
-/// Everything but the two flags is `decode_capability_map`'s: a policy value
-/// may be a string or a list, and the two mix within one record.  Typing them
-/// to full depth would put one label at two ground types — `editor.read`
-/// beside `fs.read`.
-static GRANT: Table = Table {
-    form: "grant",
-    keys: &[
-        Key {
-            label: "exec",
-            holds: Holds::Decoded,
-            reason: None,
-        },
-        Key {
-            label: "fs",
-            holds: Holds::Decoded,
-            reason: None,
-        },
-        Key {
-            label: "net",
-            holds: Holds::At(Ty::Bool),
-            reason: None,
-        },
-        Key {
-            label: "detach",
-            holds: Holds::At(Ty::Bool),
-            reason: None,
-        },
-        Key {
-            label: "editor",
-            holds: Holds::Decoded,
-            reason: None,
-        },
-        Key {
-            label: "shell",
-            holds: Holds::Decoded,
-            reason: None,
         },
     ],
     factory: false,
@@ -284,7 +345,7 @@ fn catch_all_ty(_u: &mut Unifier) -> Ty {
 pub fn declared(form: Form) -> &'static Table {
     match form {
         Form::Within => &WITHIN,
-        Form::Grant => &GRANT,
+        Form::Grant => &grant::GRANT,
         Form::Rc => &RC,
         Form::Manifest => &MANIFEST,
     }
@@ -304,6 +365,54 @@ pub(super) fn field_reason(table: &Table, key: &Key) -> Reason {
         form: table.form,
         key: key.label.to_string(),
     })
+}
+
+/// A value against what `key` of `table` holds it to, the failure worded by
+/// the vocabulary it met: those nested in the value first, so a clash inside
+/// a `dir` payload is the payload's and not the list's.
+pub(super) fn unify_held(
+    table: &'static Table,
+    key: &'static Key,
+) -> impl FnOnce(&mut Unifier, &Ty, &Ty) -> Result<(), Clash> {
+    move |u, declared, found| match &key.reason {
+        Some(Reason::Vocabulary(vocab)) => unify_vocab(u, vocab, declared, found),
+        _ => u
+            .unify_ty(declared, found)
+            .map_err(|kind| Box::new((kind, field_reason(table, key)))),
+    }
+}
+
+fn unify_vocab(
+    u: &mut Unifier,
+    vocab: &'static Vocab,
+    declared: &Ty,
+    found: &Ty,
+) -> Result<(), Clash> {
+    for &(tag, inner) in vocab.within {
+        if let Some(payload) = payload_at(u, found, tag) {
+            unify_vocab(u, inner, &inner.ty(), &payload)?;
+        }
+    }
+    u.unify_ty(declared, found)
+        .map_err(|kind| Box::new((kind, Reason::Vocabulary(vocab))))
+}
+
+/// The payload `tag` carries in the variant `ty` offers, under any lists.
+fn payload_at(u: &Unifier, ty: &Ty, tag: &str) -> Option<Ty> {
+    match u.resolve_ty(ty) {
+        Ty::List(elem) => payload_at(u, &elem, tag),
+        Ty::Variant(row) => {
+            let mut rest = u.resolve_row(&row);
+            while let Row::Extend(label, payload, tail) = rest {
+                if label == Label::Case(tag.to_string()) {
+                    return Some(*payload);
+                }
+                rest = u.resolve_row(&tail);
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 /// Where `label`'s value sits, when the options were written out.
@@ -384,21 +493,19 @@ fn ascribe_row(ctx: &mut InferCtx, row: &Row, table: &'static Table, written: Op
             });
             continue;
         };
-        let declared = match &key.holds {
-            Holds::At(ty) | Holds::Required(ty) => ty.clone(),
-            Holds::Shaped(mint) => mint(&mut scratch),
-            Holds::Decoded => continue,
-            Holds::Refused(advice) => {
-                ctx.diagnose(TypeErrorKind::RefusedKey {
-                    form: table.form,
-                    key: key.label,
-                    advice,
-                });
-                continue;
+        match key.holds.held(&mut scratch) {
+            Held::Unify(declared) => {
+                if let Err(clash) = unify_held(table, key)(&mut scratch, &declared, &payload) {
+                    ctx.report(clash.0, clash.1);
+                }
             }
-        };
-        if let Err(kind) = scratch.unify_ty(&declared, &payload) {
-            ctx.report(kind, field_reason(table, key));
+            Held::Nested(sub) => ascribe_nested(ctx, key.label, &payload, sub),
+            Held::Refuse(advice) => ctx.diagnose(TypeErrorKind::RefusedKey {
+                form: table.form,
+                key: key.label,
+                advice,
+            }),
+            Held::Nothing => {}
         }
     }
     ctx.pos = phrase_pos;
@@ -409,4 +516,35 @@ fn ascribe_row(ctx: &mut InferCtx, row: &Row, table: &'static Table, written: Op
             });
         }
     }
+}
+
+/// A nested table's value against `table`, as a record: a map and `()` are
+/// refused, and a type still unresolved is the runtime decoder's.
+fn ascribe_nested(ctx: &mut InferCtx, key: &'static str, ty: &Ty, table: &'static Table) {
+    match ctx.unifier.resolve_ty(ty) {
+        Ty::Record(row) => ascribe_row(ctx, &row, table, None),
+        Ty::Var(_) => {}
+        found => ctx.diagnose(TypeErrorKind::NotATable {
+            key,
+            first: table.keys.first().map_or("", |k| k.label),
+            found,
+        }),
+    }
+}
+
+/// Ascribe every queued nested table, each at its value's span.  Call once,
+/// after the pending labels settle.
+pub(super) fn drain_nested(ctx: &mut InferCtx) {
+    let saved = ctx.pos;
+    for NestedCheck {
+        key,
+        table,
+        ty,
+        pos,
+    } in std::mem::take(&mut ctx.nested)
+    {
+        ctx.pos = pos;
+        ascribe_nested(ctx, key, &ty, table);
+    }
+    ctx.pos = saved;
 }

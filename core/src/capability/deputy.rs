@@ -28,7 +28,7 @@ pub fn deputy_prefixes(stack: &GrantStack) -> Vec<FrozenPath> {
     let admits = |prefix: &FrozenPath| (prefix.clone(), Verdict::Allow);
     let dirs = (stack.exec())
         .map(|exec| {
-            (exec.0.iter())
+            (exec.iter())
                 .filter_map(|(key, v)| match key {
                     ExecKey::Dir(dir) if !v.is_denied() => Some(admits(dir)),
                     _ => None,
@@ -58,10 +58,9 @@ mod tests {
     use super::deputy_prefixes;
     use crate::capability::{Capabilities, ExecGrant, ExecKey, FsPolicy, GrantStack, Verdict};
     use crate::path::FrozenPath;
-    use std::collections::BTreeMap;
 
     fn exec_dir(dir: FrozenPath) -> ExecGrant {
-        ExecGrant(BTreeMap::from([(ExecKey::Dir(dir), Verdict::Allow)]))
+        std::iter::once((ExecKey::Dir(dir), Verdict::Allow)).collect()
     }
 
     fn fs_write(prefix: &str) -> FsPolicy {

@@ -3,16 +3,16 @@
 // fallback anchors at `/`.
 #![cfg(unix)]
 
-//! The `gitdir:` sigil, over the shapes a `.git` entry can take.
+//! The `gitdir` place, over the shapes a `.git` entry can take.
 //!
 //! It is a grant-shaping input — exarch's shipped `reasonable.exarch.ral`
-//! grants `'gitdir:'` read *and* write — and a `.git` file is written inside
+//! grants `gitdir` read *and* write — and a `.git` file is written inside
 //! the working tree, which under that grant the agent may write.  So the
 //! pointer alone never decides the grant: the git directory it names must claim
 //! this working tree back, and a pointer nothing claims is a policy error
 //! rather than a wider grant.
 
-use ral_core::guard::freeze::{FreezeCtx, PolicyError};
+use ral_core::guard::freeze::{FreezeCtx, Place, PolicyError};
 use std::path::{Path, PathBuf};
 
 fn root(tag: &str) -> PathBuf {
@@ -22,21 +22,25 @@ fn root(tag: &str) -> PathBuf {
     std::fs::canonicalize(&dir).unwrap()
 }
 
-fn freeze(entry: &str, cwd: &Path) -> Result<String, PolicyError> {
+fn freeze(cwd: &Path) -> Result<String, PolicyError> {
     FreezeCtx {
         home: Some("/h".into()),
         cwd: cwd.into(),
     }
-    .path(entry)
-    .map(|p| p.as_str().to_string())
+    .place(&Place::Gitdir(".".into()))
+    .map(|p| {
+        p.expect("a gitdir place is never dead")
+            .as_str()
+            .to_string()
+    })
 }
 
-fn frozen(entry: &str, cwd: &Path) -> String {
-    freeze(entry, cwd).expect("the pointer is claimed, so the grant freezes")
+fn frozen(cwd: &Path) -> String {
+    freeze(cwd).expect("the pointer is claimed, so the grant freezes")
 }
 
-fn refused(entry: &str, cwd: &Path) -> PolicyError {
-    freeze(entry, cwd).expect_err("an unclaimed pointer must refuse")
+fn refused(cwd: &Path) -> PolicyError {
+    freeze(cwd).expect_err("an unclaimed pointer must refuse")
 }
 
 /// A `.git` file that names no git directory at all is a separate refusal, and
@@ -47,7 +51,7 @@ fn gitdir_refuses_a_git_file_with_no_pointer_line() {
     std::fs::create_dir_all(root.join("tree")).unwrap();
     std::fs::write(root.join("tree/.git"), "this is not a pointer\n").unwrap();
 
-    let err = refused("gitdir:", &root.join("tree"));
+    let err = refused(&root.join("tree"));
     assert!(err.message.contains("no `gitdir:` line"), "{err:?}");
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -60,16 +64,16 @@ fn gitdir_takes_a_plain_clone_directory_as_it_stands() {
     std::fs::create_dir_all(root.join(".git/objects")).unwrap();
     std::fs::create_dir_all(root.join("src")).unwrap();
 
-    let out = frozen("gitdir:", &root.join("src"));
+    let out = frozen(&root.join("src"));
     assert_eq!(out, root.join(".git").display().to_string());
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// Outside a repository there is nothing to discover, and `FreezeCtx::path`'s
+/// Outside a repository there is nothing to discover, and `FreezeCtx::place`'s
 /// documented fallback is the cwd itself.
 #[test]
 fn gitdir_outside_a_repository_falls_back_to_the_cwd() {
     // The walk climbs every ancestor, so the fallback is only reachable from
     // a cwd with no `.git` anywhere above it — `/` is the one such directory.
-    assert_eq!(frozen("gitdir:", Path::new("/")), "/");
+    assert_eq!(frozen(Path::new("/")), "/");
 }

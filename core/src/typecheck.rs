@@ -199,6 +199,7 @@ pub fn typecheck(
     let (mut phrase_schemes, tail) = infer::infer_toplevel(&mut ctx, &mut env, phrases);
     ctx.settle_pending_indexes();
     ctx.settle_pending_labels(None);
+    contract::drain_nested(&mut ctx);
     if ctx.errors.is_empty()
         && let Some(table) = contract
     {

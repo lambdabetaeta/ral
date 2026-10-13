@@ -152,8 +152,7 @@ pub fn admits_file(shell: &Shell, real: &str) -> bool {
 /// `Shell::check_exec` on the file whose real path is `real`, with `args`.
 ///
 /// # Errors
-/// `Err` if the active grant denies the file, or admits only a subcommand
-/// set that `args`'s first element misses.
+/// `Err` if the active grant denies the file.
 pub fn check_file(shell: &mut Shell, real: &str, args: &[String]) -> Settled<()> {
     shell.check_exec(real, file(real), args.to_vec()).map(drop)
 }

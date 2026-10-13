@@ -54,30 +54,30 @@ manifest is a load-time error, so a plugin cannot mistake a listed
 capability set for enforcement. Confinement is `grant`, applied at
 the call site, not a manifest declaration.
 
-`grant`'s `editor` field gates the `_ed-*` builtins (SPEC §12.8):
+`grant`'s `editor` field, a list of verbs such as ``editor: [`read, `write]``, gates the `_ed-*` builtins (SPEC §12.8):
 
-| Field | Enables |
+| Verb | Enables |
 |---|---|
-| `read`  | `_ed-get`, `_ed-parse`, `_ed-history`, `_ed-state` |
-| `write` | `_ed-set`, `_ed-set-lbuffer`, `_ed-insert`, `_ed-push`, `_ed-accept`, `_ed-ghost`, `_ed-highlight`, `_ed-state` |
-| `tui`   | `_ed-tui` |
+| `` `read `` | `_ed-get`, `_ed-parse`, `_ed-history`, `_ed-state` |
+| `` `write `` | `_ed-set`, `_ed-set-lbuffer`, `_ed-insert`, `_ed-push`, `_ed-accept`, `_ed-ghost`, `_ed-highlight`, `_ed-state` |
+| `` `tui `` | `_ed-tui` |
 
-A builtin listed under two fields needs both, and checks them before it
+A builtin listed under two verbs needs both, and checks them before it
 does anything.
 
-`grant`'s `shell` field gates shell builtins that modify persistent
-process state (SPEC §12.8):
+`grant`'s `shell` field, a list of verbs such as ``shell: [`chdir]``, gates
+shell builtins that modify persistent process state (SPEC §12.8):
 
-| Field | Enables |
+| Verb | Enables |
 |---|---|
-| `chdir` | `cd` |
+| `` `chdir `` | `cd` |
 
 Plugin aliases run with ambient authority — no grant is pushed around
 the call — matching the behaviour of `rc` aliases (§7). Hooks and
 keybinding handlers likewise run under whatever `grant` is already in
 force when they fire; a plugin author who needs `cd` from a hook or
 keybinding handler documents that the enclosing session needs
-`shell: [chdir: true]`, since the plugin itself cannot grant it.
+``shell: [`chdir]``, since the plugin itself cannot grant it.
 
 ## 3 The `_ed-*` family
 
@@ -373,7 +373,7 @@ guard, before the handler runs — there is no return-value fallthrough.
 
 **What a handler may do.** Use `_ed-set` / `_ed-push` / `_ed-accept`
 / `_ed-ghost` / `_ed-highlight` to mutate editor state. Use `_ed-tui`
-(gated by `grant`'s `editor.tui`, §2) to run a fuzzy finder or other
+(gated by `grant`'s `` editor: [`tui] ``, §2) to run a fuzzy finder or other
 full-screen program; a keybinding handler is the one place it opens.
 
 After a handler that returns without `accept`, the shell re-enters
@@ -398,7 +398,7 @@ pushed around the call. This matches the behaviour of `rc` aliases.
 A plugin alias that calls `cd` therefore always succeeds, regardless
 of the caller's `grant` stack. A *hook* or *keybinding handler* that
 calls `cd`, by contrast, needs the enclosing session to hold
-`shell: [chdir: true]` (§2).
+``shell: [`chdir]`` (§2).
 
 ```
 aliases: [

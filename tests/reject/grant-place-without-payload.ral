@@ -1,0 +1,2 @@
+# contains: `cwd
+grant [fs: [read: [`cwd]]] { return 1 }

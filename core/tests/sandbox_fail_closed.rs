@@ -156,7 +156,7 @@ fn external_write_outside_grant_denied_in_block_body() {
         &mut shell,
         Capabilities::root(),
         &format!(
-            "grant [fs: [read: ['{work_s}'], write: ['{work_s}']]] \
+            "grant [fs: [read: [`absolute '{work_s}'], write: [`absolute '{work_s}']]] \
              {{ sh -c 'echo x > {denied_s}' }}"
         ),
     );

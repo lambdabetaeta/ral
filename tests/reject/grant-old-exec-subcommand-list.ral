@@ -1,0 +1,2 @@
+# contains: unknown key '/bin/sh'
+grant [exec: ['/bin/sh': [-c]]] { return 1 }

@@ -28,8 +28,9 @@
 //! path names nothing.  One substitution, in one function, which is why
 //! the construction lives here and is not scattered across the session.
 
-use ral_core::capability::{Capabilities, EditorPolicy, ExecKey, FsPolicy, ShellPolicy, Verdict};
+use ral_core::capability::{Capabilities, ExecKey, FsPolicy, Verdict};
 use ral_core::path::FrozenPath;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// The image's office toolbox, as an allowlist of *bare command names*:
@@ -424,18 +425,15 @@ impl Grant {
                 write_prefixes: prefixes(),
                 deny_paths: Vec::new(),
             }),
-            net: Some(true),
             exec: Some(
                 (TOOLBOX.iter())
                     .map(|name| (ExecKey::Name((*name).to_string()), Verdict::Allow))
                     .collect(),
             ),
-            editor: Some(EditorPolicy::default()),
-            shell: Some(ShellPolicy { chdir: true }),
-            // Unattenuated: the guest VM already bounds every survivor a
-            // detach could birth, so withholding the verb here would deny
-            // an escape the machine boundary has already closed.
-            detach: None,
+            editor: Some(BTreeSet::new()),
+            // `shell` is unattenuated: the guest VM already bounds every
+            // survivor a detach could birth.
+            ..Capabilities::default()
         }
     }
 }
@@ -932,7 +930,7 @@ mod tests {
         let exec = caps.exec.as_ref().expect("the office grant restricts exec");
         for tool in ["pandoc", "soffice", "python3", "qpdf", "csvcut"] {
             assert_eq!(
-                exec.0.get(&ExecKey::Name(tool.into())),
+                exec.get(&ExecKey::Name(tool.into())),
                 Some(&Verdict::Allow),
                 "the office toolbox must admit {tool}"
             );
@@ -957,9 +955,9 @@ mod tests {
         let (_dir, grant) = granted("grant-net");
         assert_eq!(
             grant.capabilities().net,
-            Some(true),
+            None,
             "the guest has a wire; `core/src/sandbox/linux.rs` turns \
-             Some(false) into `bwrap --unshare-net`, which would strip it back off"
+             `Offline` into `bwrap --unshare-net`, which would strip it back off"
         );
     }
 

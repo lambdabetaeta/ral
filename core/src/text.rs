@@ -52,6 +52,16 @@ pub fn plural<N: std::fmt::Display + PartialEq + From<u8> + Copy>(n: N, noun: &s
     }
 }
 
+/// `noun` with its indefinite article, judged by spelling.
+pub fn indefinite(noun: &str) -> String {
+    let a = if noun.starts_with(['a', 'e', 'i', 'o', 'u']) {
+        "an"
+    } else {
+        "a"
+    };
+    format!("{a} {noun}")
+}
+
 /// Fuzzy-rank `items` against `needle`, best first, dropping non-matches.
 ///
 /// The matcher is `nucleo`, the Helix team's, and this is its single home: every

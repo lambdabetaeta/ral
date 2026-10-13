@@ -22,7 +22,7 @@ const SENTINEL: &str = "ral-exec-pwned";
 /// name `cat` wherever it resolves.
 fn under_exec_grant(dir: &Path, body: &str) -> common::Output {
     run_script(&format!(
-        "grant [exec: ['/bin/': 'allow', '{}/': 'allow', cat: 'deny']] {{ {body} }}",
+        "grant [exec: [allow: [`dir `absolute /bin, `dir `absolute '{}'], deny: [`name cat]]] {{ {body} }}",
         dir.display()
     ))
 }
@@ -31,8 +31,8 @@ fn under_exec_grant(dir: &Path, body: &str) -> common::Output {
 /// `admit`, with no veto anywhere.
 fn writing_beside_admit(write: &Path, admit: &Path, body: &str) -> common::Output {
     run_script(&format!(
-        "grant [fs: [read: ['{w}'], write: ['{w}']], \
-         exec: ['/bin/': 'allow', '{}/': 'allow']] {{ {body} }}",
+        "grant [fs: [read: [`absolute '{w}'], write: [`absolute '{w}']], \
+         exec: [allow: [`dir `absolute /bin, `dir `absolute '{}']]] {{ {body} }}",
         admit.display(),
         w = write.display()
     ))
@@ -175,13 +175,13 @@ fn a_covered_exec_file_cannot_be_rewritten_by_an_interpreter() {
     for trusted in [false, true] {
         write_script(&file, "ORIGINAL");
         let extra = if trusted {
-            format!(", '{}'", file.display())
+            format!(", `absolute '{}'", file.display())
         } else {
             String::new()
         };
         let out = run_script(&format!(
-            "grant [fs: [read: ['{d}'], write: ['{d}'{extra}]], \
-             exec: ['/bin/': 'allow', '{f}': 'allow']] {{ \
+            "grant [fs: [read: [`absolute '{d}'], write: [`absolute '{d}'{extra}]], \
+             exec: [allow: [`dir `absolute /bin, `absolute '{f}']]] {{ \
              /bin/sh -c 'echo sibling > {d}/other; echo changed > {f}' }}",
             d = td.path().display(),
             f = file.display()

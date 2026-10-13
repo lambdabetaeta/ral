@@ -259,7 +259,7 @@ spawn is one exchange:
   holds of the parent's session — mints eight token bytes, and names port and
   token in the enquiry. The seed carries the spawn's `grant` as a
   `SpawnGrant`, and a `` `restrict `` record crosses it **undecoded**: the
-  sigils in it must freeze against the child's own working directory, and the
+  places in it must freeze against the child's own working directory, and the
   guest is the side standing in it
   ([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]]);
 - the desk, *while answering*, dials that port, writes the token, and waits;

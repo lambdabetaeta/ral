@@ -1,11 +1,21 @@
-listed subcommand runs
-unlisted subcommand denied
+allowed target runs with any arguments
+sibling refused
 intersection denies outer-only
 unfolded head runs
-grant exec: block form for 'cmd' is not a valid exec policy; use within [handlers: [cmd: ...]] instead
+written empty allowance refuses
+bound empty allowance refuses
+omission inherits
 refused
-under the key
-outside the key denied
+overlap admitted
+overlap admits no more
+deny beats allow
+under the dir
+outside the dir denied
 inner layer denies what it omits
-policy shapes run
+anchored sibling refused
+anchored target admitted, anchor fixed
+anchored file deny keeps its verdict
+name admits host and bundled tools
+name deny vetoes the path
+target shapes run
 grant exec tests done

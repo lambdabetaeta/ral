@@ -15,7 +15,7 @@ fn a_same_map_deny_holds_inside_a_write_prefix_at_the_shell_boundary() {
     let mut shell = common::fresh_shell();
     for (path, succeeds) in [(&allowed, true), (&secret, false)] {
         let source = format!(
-            "grant [fs: [read: ['{root}'], write: ['{root}'], deny: ['{}']]] {{ echo changed > '{}' }}",
+            "grant [fs: [read: [`absolute '{root}'], write: [`absolute '{root}'], deny: [`absolute '{}']]] {{ echo changed > '{}' }}",
             secret.display(),
             path.display()
         );

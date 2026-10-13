@@ -1,0 +1,31 @@
+# Test: `shell` takes a list of verbs; a verb is permitted only where every
+# layer that supplies the axis lists it
+
+let can-cd = { |body|
+    try { !$body; return 'cd permitted' } { |e| return $e[message] }
+}
+let dest = temp-dir
+
+# `chdir` admits cd; a list without it, or an empty one, refuses it
+echo !{can-cd { grant [shell: [`chdir]] { cd $dest } }}
+echo !{can-cd { grant [shell: [`detach]] { cd $dest } }}
+echo !{can-cd { grant [shell: []] { cd $dest } }}
+
+# A list naming every verb is neutral, like omitting the axis
+echo !{can-cd { grant [shell: [`chdir, `detach]] { cd $dest } }}
+echo !{can-cd { grant [] { cd $dest } }}
+
+# Nested layers meet: any layer that withholds a verb withholds it
+echo !{can-cd { grant [shell: [`chdir, `detach]] { grant [shell: [`detach]] { cd $dest } } }}
+echo !{can-cd { grant [shell: [`chdir]] { grant [shell: [`chdir, `detach]] { cd $dest } } }}
+echo !{can-cd { grant [shell: [`detach]] { grant [shell: [`chdir]] { cd $dest } } }}
+
+# A layer that does not write the axis cannot lift a withholding outside it
+echo !{can-cd { grant [shell: []] { grant [net: `offline] { cd $dest } } }}
+
+# Lists are sets: a repeated verb adds nothing
+echo !{can-cd { grant [shell: [`chdir, `chdir]] { cd $dest } }}
+
+cd /
+rm -rf $dest
+echo 'grant verbs tests done'

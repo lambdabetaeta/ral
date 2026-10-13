@@ -1,0 +1,19 @@
+# Test: a `home` anchor freezes where the grant is decoded and stays fixed
+# after HOME changes inside the body.  The scripts name their interpreter.
+let t = temp-dir
+mkdir -p "$t/home/tools" "$t/other/tools"
+to-string "#!/bin/sh\nexit 0\n" > "$t/home/tools/a"
+to-string "#!/bin/sh\nexit 0\n" > "$t/other/tools/a"
+chmod +x "$t/home/tools/a" "$t/other/tools/a"
+within [dir: $t, env: [HOME: "$t/home"]] {
+    grant [exec: [allow: [`home tools/a, `absolute /bin/sh]]] {
+        within [env: [HOME: "$t/other"]] {
+            ./home/tools/a
+            echo 'frozen home admitted'
+            try { ./other/tools/a } { |_| echo 'moved home admits nothing new' }
+        }
+    }
+}
+rm -rf $t
+
+echo 'grant home anchor tests done'

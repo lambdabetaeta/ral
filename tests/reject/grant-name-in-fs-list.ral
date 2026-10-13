@@ -1,0 +1,2 @@
+# contains: `name is not a place
+grant [fs: [read: [`name git]]] { return 1 }

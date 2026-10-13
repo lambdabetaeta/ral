@@ -1,6 +1,12 @@
 ---
-status: active
+status: superseded
+superseded_by: decisions/261012_grant-surface-is-typed
 ---
+
+> **Superseded 2026-10-12.** The surface it describes, string keys with a
+> trailing slash and subcommand lists, is replaced by tagged places and `dir`
+> targets, and subcommand lists are gone
+> ([[decisions/261012_grant-surface-is-typed|grant-surface-is-typed]]).
 
 # Two exec spellings that failed quietly now fail at load
 

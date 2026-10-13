@@ -33,12 +33,11 @@ impl Shell {
         verdict.map_err(|denial| self.refused(*denial))
     }
 
-    /// Check `exec` for `program`, shown as `shown`, then hold `args` to any
-    /// subcommand restriction.  The [`Admitted`] is what the launcher demands.
+    /// Check `exec` for `program`, shown as `shown`.  The [`Admitted`] is what
+    /// the launcher demands.
     ///
     /// # Errors
-    /// `Err` if the active grant denies the program, or admits only a
-    /// subcommand set that `args`'s first element misses.
+    /// `Err` if the active grant denies the program.
     pub(crate) fn check_exec(
         &mut self,
         shown: &str,

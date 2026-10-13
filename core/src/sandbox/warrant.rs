@@ -278,8 +278,8 @@ fn exec(
             let interp = interp.display();
             format!(
                 "\nhint: its interpreter {interp} is not admitted by the grant: a script you \
-                 can edit carries no interpreter of its own: add '{interp}': 'allow' to the \
-                 exec grant"
+                 can edit carries no interpreter of its own: add `absolute {interp} to the \
+                 exec grant's allow list"
             )
         });
     crate::terminal::cmd_error(

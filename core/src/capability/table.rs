@@ -98,7 +98,7 @@ impl<K: Scope> Table<K> {
 pub(super) fn speaks<K: Scope>(scope: &K, verdict: &Verdict, subject: K::Subject<'_>) -> bool {
     match verdict {
         Verdict::Deny => scope.holds::<Deny>(subject),
-        _ => scope.holds::<Allow>(subject),
+        Verdict::Allow => scope.holds::<Allow>(subject),
     }
 }
 

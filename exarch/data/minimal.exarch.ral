@@ -1,11 +1,11 @@
 # `minimal` bake-in.  The smallest base that's actually useful as a
 # starting point for additive `--extend-base` composition: the
-# platform's tool roots (`system:` — see `core/src/path/sigil.rs`)
+# platform's tool roots (`dir `system`)
 # + cwd + scratch, network on, chdir allowed.  Nothing from the
-# user's home except scratch: `xdg:bin` is not admitted (so a fresh
+# user's home except scratch: `xdg-bin` is not admitted (so a fresh
 # tool dropped in `~/.local/bin` is a deliberate choice via
 # extend-base, not an implicit one); a Homebrew tree is not admitted
-# even though `system:` folds one in when present — an explicit
+# even though `system` folds one in when present — an explicit
 # `deny` override below carves it back out, so user-installed brew
 # tools must be opted in; toolchain caches and `~/Library` are not
 # readable.
@@ -17,7 +17,7 @@
 # `dangerous + --restrict`: minimal is a curated starting point;
 # dangerous-with-restrict is a bespoke profile written from scratch.
 #
-# `cwd:` and `tempdir:` sigils are resolved by the freeze pass at
+# `cwd` and `tempdir` places are resolved by the freeze pass at
 # session start, so the per-invocation working directory bakes in
 # without exarch having to inject anything dynamically.
 #
@@ -26,28 +26,24 @@
 # `include_str!`.
 
 return [
-  net:   true,
-
-  shell: [chdir: true],
-
   # Reads and writes mirror the threat model of `reasonable` —
   # writes go only to ephemeral / recoverable surfaces (cwd, scratch,
-  # `xdg:cache`) so a hallucinating agent can't corrupt persistent
+  # `xdg-cache`) so a hallucinating agent can't corrupt persistent
   # state.  Modern tools that respect `$XDG_CACHE_HOME` land there
   # automatically.  Legacy build tools (cargo, npm, gradle, …) get
   # their home env vars redirected to `$EXARCH_SCRATCH/<tool>` by
   # exarch's runtime.
   fs: [
     read: [
-      'cwd:',
-      '/tmp',
-      'tempdir:',
+      `cwd .,
+      `absolute /tmp,
+      `tempdir .,
     ],
     write: [
-      'cwd:',
-      '/tmp',
-      'tempdir:',
-      'xdg:cache',
+      `cwd .,
+      `absolute /tmp,
+      `tempdir .,
+      `xdg-cache .,
     ],
   ],
 
@@ -58,31 +54,34 @@ return [
   # `curl`, `tar`, `awk`, `sed`, `pkg-config`, `clang`, … — which
   # matches what users actually want from "tight but functional."
   #
-  # `system:` folds in a Homebrew tree when one exists on the host
-  # (see `core/src/path/sigil.rs::system_tool_roots`); the explicit
+  # `system` folds in a Homebrew tree when one exists on the host
+  # (see `core/src/guard/freeze.rs::system_tool_roots`); the explicit
   # `deny` below carves it back out so `minimal` stays "system tools
   # only" regardless of host.  Apple's toolchain (CommandLineTools,
-  # Xcode) is folded in by `system:` too, so building from source works
+  # Xcode) is folded in by `system` too, so building from source works
   # without listing each tool here.
   #
-  # `bash` and `zsh` live under a tool root (admitted by `system:`
-  # above), but a literal-match `'deny'` overrides the subpath rule.
+  # `bash` and `zsh` live under a tool root (admitted by `system`
+  # above), but a literal `name` deny overrides the subpath rule.
   # Autoconf-style `configure` scripts and `make` recipes shell out
   # via `/bin/sh -c` and need `sh` itself; bash/zsh are agent
   # quality-of-life only.  `cmd`/`powershell`/`pwsh` are the Windows
-  # analogues of the same call — `system:` admits them unconditionally
+  # analogues of the same call — `system` admits them unconditionally
   # via `%SystemRoot%\System32`, so they get the same deny bash/zsh do.
   exec: [
-    'system:':   'allow',
-    '/opt/homebrew/': 'deny',  # system: folds Homebrew in when present; minimal opts it back out
-    'cwd:/':     'allow',
-    '/tmp/':     'allow',
-    'tempdir:/': 'allow',
-
-    bash: 'deny',
-    zsh:  'deny',
-    cmd:        'deny',
-    powershell: 'deny',
-    pwsh:       'deny',
+    allow: [
+      `dir `system,
+      `dir `cwd .,
+      `dir `absolute /tmp,
+      `dir `tempdir .,
+    ],
+    deny: [
+      `dir `absolute /opt/homebrew,  # `system` folds Homebrew in when present; minimal opts it back out
+      `name bash,
+      `name zsh,
+      `name cmd,
+      `name powershell,
+      `name pwsh,
+    ],
   ],
 ]

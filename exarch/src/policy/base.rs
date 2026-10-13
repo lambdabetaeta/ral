@@ -5,7 +5,7 @@
 //!
 //! Loosest to tightest: `dangerous` (the lattice top), `reasonable`,
 //! `edit-only`, `read-only`, `minimal`, `confined`.  Every profile but
-//! `dangerous` names `cwd:` and `tempdir:` sigils, which the loader freezes at
+//! `dangerous` names `cwd` and `tempdir` places, which the loader freezes at
 //! session start — so the per-invocation working directory is baked into the
 //! policy and exarch never injects it dynamically.
 
@@ -72,7 +72,7 @@ fn drop_dead_exec_grants(caps: &mut Capabilities, unix_available: bool) {
         return;
     }
     if let Some(exec) = caps.exec.as_mut() {
-        exec.0.retain(|key, _| {
+        exec.retain(|key, _| {
             !matches!(key, ExecKey::Name(name)
                 if ral_core::uutils::COREUTILS_UNIX_ONLY_TOOLS.contains(&name.as_str()))
         });
@@ -99,6 +99,10 @@ mod tests {
     #[cfg(unix)]
     use ral_core::capability::Verdict;
     use ral_core::guard::freeze::FreezeCtx;
+    #[cfg(unix)]
+    use ral_core::guard::freeze::Place;
+    #[cfg(unix)]
+    use ral_core::host::XdgKind;
 
     fn bare(s: &str) -> ExecKey {
         ExecKey::Name(s.into())
@@ -106,17 +110,17 @@ mod tests {
 
     /// Each dir key's surface, and whether it admits.
     fn dirs(exec: &ExecGrant) -> impl Iterator<Item = (&str, bool)> {
-        exec.0.iter().filter_map(|(key, v)| match key {
+        exec.iter().filter_map(|(key, v)| match key {
             ExecKey::Dir(dir) => Some((dir.as_str(), !v.is_denied())),
             _ => None,
         })
     }
-    use ral_core::capability::Capabilities;
+    use ral_core::capability::{Capabilities, Net};
     #[cfg(unix)]
     use std::path::Path;
 
-    /// Parse *and* freeze a bake-in: the loader resolves sigils, so a failure
-    /// here is malformed source, an unknown `xdg:` token, or an xdg escape.
+    /// Parse *and* freeze a bake-in: the loader resolves places, so a failure
+    /// here is malformed source, a refused payload, or an xdg escape.
     fn load(name: &str, text: &str, ctx: &FreezeCtx) -> Capabilities {
         let mut shell = ral_core::test_helper::core_shell();
         ral_core::load::profile::load_capabilities_from_str(
@@ -134,9 +138,16 @@ mod tests {
     /// so an equality against it agrees with a frozen grant only by
     /// coincidence — and disagrees exactly where the freeze would have failed.
     #[cfg(unix)]
-    fn frozen(entry: &str, ctx: &FreezeCtx) -> ral_core::path::FrozenPath {
-        ctx.path(entry)
-            .unwrap_or_else(|e| panic!("'{entry}' should freeze: {}", e.message))
+    fn frozen(place: &Place, ctx: &FreezeCtx) -> ral_core::path::FrozenPath {
+        ctx.place(place)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| panic!("{place:?} should freeze"))
+    }
+
+    #[cfg(unix)]
+    fn xdg(kind: XdgKind, sub: &str) -> Place {
+        Place::Xdg(kind, sub.into())
     }
 
     /// The real path of a file at `path`, as the in-process exec guard judges it.
@@ -165,11 +176,11 @@ mod tests {
         shell.with_capabilities(caps, |sh| ral_core::test_access::admits_file(sh, real))
     }
 
-    /// Every bake-in names `~`/`xdg:` paths, so a host with no `HOME` cannot
+    /// Every bake-in names `home`/`xdg-*` places, so a host with no `HOME` cannot
     /// load one at all — said here rather than by each test failing obscurely.
     fn host_home() -> String {
         ral_core::host::home()
-            .expect("these profiles name `~`/`xdg:` paths, so the test host needs HOME")
+            .expect("these profiles name `home`/`xdg-*` places, so the test host needs HOME")
     }
 
     /// Every bake-in must load against the real `HOME`, so a broken profile
@@ -243,8 +254,8 @@ mod tests {
     }
 
     /// The three load-bearing differences from `reasonable`, pinned so an edit
-    /// cannot quietly widen the build jail.  `confined` names no `~`/`xdg:`
-    /// path, so a synthetic home suffices — and nothing may resolve under it.
+    /// cannot quietly widen the build jail.  `confined` names no `home`/`xdg-*`
+    /// place, so a synthetic home suffices — and nothing may resolve under it.
     #[cfg(unix)]
     #[test]
     fn confined_is_offline_subpath_only_no_home_reads() {
@@ -253,11 +264,11 @@ mod tests {
             cwd: "/work/proj".into(),
         };
         let caps = load("confined", CONFINED_RAL, &ctx);
-        assert_eq!(caps.net, Some(false), "confined must have net off");
+        assert_eq!(caps.net, Some(Net::Offline), "confined must have net off");
         let exec = caps.exec.as_ref().expect("confined declares exec");
         let bundled = ral_core::uutils::bundled_tools();
-        let host_named: Vec<&str> = (exec.0.keys())
-            .filter_map(|key| match key {
+        let host_named: Vec<&str> = (exec.iter())
+            .filter_map(|(key, _)| match key {
                 ExecKey::Name(name) if !bundled.contains(&name.as_str()) => Some(name.as_str()),
                 ExecKey::Path(path) => Some(path.as_str()),
                 _ => None,
@@ -279,7 +290,7 @@ mod tests {
     }
 
     /// The one difference from `reasonable`: the working tree is readable but
-    /// not writable.  Guards against `cwd:` creeping back into `write`.
+    /// not writable.  Guards against `cwd` creeping back into `write`.
     #[cfg(unix)]
     #[test]
     fn read_only_does_not_write_cwd() {
@@ -312,7 +323,7 @@ mod tests {
         );
     }
 
-    /// `xdg:bin` freezes to `${XDG_BIN_HOME:-~/.local/bin}` and must land in
+    /// `xdg-bin` freezes to `${XDG_BIN_HOME:-~/.local/bin}` and must land in
     /// the grant's `dirs`, where directory keys live.
     #[cfg(unix)]
     #[test]
@@ -324,11 +335,11 @@ mod tests {
         };
         let caps = load("reasonable", REASONABLE_RAL, &ctx);
         let exec = caps.exec.as_ref().expect("reasonable should declare exec");
-        let xdg_bin = frozen("xdg:bin", &ctx);
+        let xdg_bin = frozen(&xdg(XdgKind::Bin, "."), &ctx);
         assert_eq!(
-            exec.0.get(&ExecKey::Dir(xdg_bin.clone())),
+            exec.get(&ExecKey::Dir(xdg_bin.clone())),
             Some(&Verdict::Allow),
-            "reasonable should list the resolved xdg:bin ({}) in exec dirs",
+            "reasonable should list the resolved xdg-bin ({}) in exec dirs",
             xdg_bin.as_str()
         );
     }
@@ -378,7 +389,7 @@ mod tests {
         }
     }
 
-    /// End-to-end: once freeze rewrites `cwd:` into the working directory, a
+    /// End-to-end: once freeze rewrites `cwd` into the working directory, a
     /// path-style exec beneath it is admitted.
     #[cfg(unix)]
     #[test]
@@ -393,11 +404,11 @@ mod tests {
 
         assert!(
             admits(caps, "/work/proj/configure"),
-            "./configure under cwd: must be admitted"
+            "./configure under `cwd` must be admitted"
         );
     }
 
-    /// `system:`'s Homebrew root admits cmake, though cmake is no per-name
+    /// `system`'s Homebrew root admits cmake, though cmake is no per-name
     /// entry.  That root exists only where Homebrew does, so on a brew-less
     /// host this passes vacuously rather than failing falsely; CI's macOS
     /// runners ship Homebrew, so it still bites.
@@ -502,12 +513,12 @@ mod tests {
             home: Some(home),
             cwd: "/".into(),
         };
-        let gitconfig = frozen("~/.gitconfig", &ctx);
+        let gitconfig = frozen(&Place::Home(".gitconfig".into()), &ctx);
         for (name, text) in [("reasonable", REASONABLE_RAL), ("read-only", READ_ONLY_RAL)] {
             let caps = load(name, text, &ctx);
             let exec = caps.exec.as_ref().expect("base declares exec");
             assert_eq!(
-                exec.0.get(&bare("git")),
+                exec.get(&bare("git")),
                 Some(&Verdict::Allow),
                 "{name} should admit git"
             );
@@ -520,11 +531,11 @@ mod tests {
         }
     }
 
-    /// `minimal`'s explicit `/opt/homebrew/` deny is what keeps `system:`,
+    /// `minimal`'s explicit `dir `absolute /opt/homebrew` deny is what keeps `system`,
     /// which folds a Homebrew tree in when the host has one, from widening it:
     /// brew tools stay opt-in, and the git extension is the opt-in — its bare
     /// `git` is whichever git the host `PATH` finds.  The cwd must not be `/`,
-    /// or the `cwd:/` allow would admit everything.
+    /// or the `dir `cwd .` allow would admit everything.
     #[cfg(unix)]
     #[test]
     fn minimal_admits_system_git_not_homebrew() {
@@ -547,13 +558,13 @@ mod tests {
             widened
                 .exec
                 .as_ref()
-                .and_then(|exec| exec.0.get(&bare("git"))),
+                .and_then(|exec| exec.get(&bare("git"))),
             Some(&Verdict::Allow)
         );
         if let Some(git) = host_real("git") {
             assert!(
                 admits(widened, &git),
-                "the git extension's git: 'allow' carries the host's git, wherever it lives"
+                "the git extension's `name git` carries the host's git, wherever it lives"
             );
         }
     }
@@ -562,7 +573,7 @@ mod tests {
     /// while `reasonable`'s credential denies survive: widening an `FsPolicy`
     /// unions deny sets, so a veto sticks without the overlay re-stating it, which is
     /// what lets an overlay stay purely additive.  Both sides freeze against
-    /// the same home, so their `xdg:config/*` paths coincide.
+    /// the same home, so their `xdg-config` places coincide.
     #[cfg(unix)]
     #[test]
     fn git_extension_widens_into_git_capable_profile() {
@@ -571,8 +582,8 @@ mod tests {
             home: Some(home),
             cwd: "/".into(),
         };
-        let gitconfig = frozen("~/.gitconfig", &ctx);
-        let xdg_config_git = frozen("xdg:config/git", &ctx);
+        let gitconfig = frozen(&Place::Home(".gitconfig".into()), &ctx);
+        let xdg_config_git = frozen(&xdg(XdgKind::Config, "git"), &ctx);
 
         let widened_minimal = load("minimal", MINIMAL_RAL, &ctx).widen(load(
             "git-extension",
@@ -583,7 +594,7 @@ mod tests {
             .exec
             .as_ref()
             .expect("extension should keep exec map");
-        assert_eq!(exec.0.get(&bare("git")), Some(&Verdict::Allow));
+        assert_eq!(exec.get(&bare("git")), Some(&Verdict::Allow));
         let fs = widened_minimal
             .fs
             .as_ref()
@@ -594,7 +605,7 @@ mod tests {
         );
         assert!(
             fs.read_prefixes.iter().any(|p| p == &xdg_config_git),
-            "widening minimal should add xdg:config/git"
+            "widening minimal should add xdg-config git"
         );
 
         let widened_reasonable = load("reasonable", REASONABLE_RAL, &ctx).widen(load(
@@ -606,17 +617,17 @@ mod tests {
             .fs
             .as_ref()
             .expect("extension should keep fs map");
-        for denied in ["xdg:config/gh", "xdg:config/op", "xdg:config/gcloud"] {
-            let resolved = frozen(denied, &ctx);
+        for denied in ["gh", "op", "gcloud"] {
+            let resolved = frozen(&xdg(XdgKind::Config, denied), &ctx);
             assert!(
                 fs.deny_paths.iter().any(|p| p == &resolved),
-                "widening reasonable should preserve {denied} deny ({})",
+                "widening reasonable should preserve xdg-config {denied} deny ({})",
                 resolved.as_str()
             );
         }
     }
 
-    /// `system:` must expand to an `Allow` verdict for every live tool root —
+    /// `system` must expand to an `Allow` verdict for every live tool root —
     /// merely finding the key would pass on a `Deny` too, which is the whole
     /// point.  `minimal` is the one exception: its Homebrew override must
     /// survive as a `Deny`.  Ungated, since `system_tool_roots` walks the
@@ -684,7 +695,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} should declare exec"));
             let unsettled: Vec<&str> = ral_core::uutils::bundled_tools()
                 .into_iter()
-                .filter(|tool| !exec.0.contains_key(&bare(tool)))
+                .filter(|tool| exec.get(&bare(tool)).is_none())
                 .collect();
             assert!(
                 unsettled.is_empty(),
@@ -709,11 +720,11 @@ mod tests {
         {
             let exec = caps.exec.as_ref().expect("reasonable declares exec");
             assert!(
-                exec.0.contains_key(&bare("tac")),
+                exec.get(&bare("tac")).is_some(),
                 "host build should still bundle tac"
             );
             assert!(
-                exec.0.contains_key(&bare("test")),
+                exec.get(&bare("test")).is_some(),
                 "host build should still bundle test"
             );
         }
@@ -723,16 +734,16 @@ mod tests {
         let exec = caps.exec.as_ref().expect("reasonable declares exec");
         for dead in ral_core::uutils::COREUTILS_UNIX_ONLY_TOOLS {
             assert!(
-                !exec.0.contains_key(&bare(dead)),
+                exec.get(&bare(dead)).is_none(),
                 "'{dead}' should be dropped when the platform can't bundle it"
             );
         }
         assert!(
-            exec.0.contains_key(&bare("git")),
+            exec.get(&bare("git")).is_some(),
             "an ordinary named binary must survive the drop"
         );
         assert!(
-            exec.0.contains_key(&bare("cat")),
+            exec.get(&bare("cat")).is_some(),
             "a cross-platform bundled tool must survive the drop"
         );
     }

@@ -119,11 +119,11 @@ like the argument of `grant [...]`:
 
 ```
 [
-  exec: [git: 'allow', cargo: 'allow'],
-  fs:   [read:  ['cwd:', 'tempdir:'],
-         write: ['cwd:', 'tempdir:']],
-  net:  false,
-  shell: [chdir: true],
+  exec: [allow: [`name git, `name cargo]],
+  fs:   [read:  [`cwd ., `tempdir .],
+         write: [`cwd ., `tempdir .]],
+  net:  `offline,
+  shell: [`chdir],
 ]
 ```
 
@@ -137,7 +137,7 @@ which enforces the same file, network and, on macOS and Linux,
 executable restrictions on whatever that program does after spawn.
 On Windows each granted path carries an ACE for a capability SID
 derived from that path, which the child's token holds only when the
-grant admits it, and `net: false` withholds the network capability
+grant admits it, and ``net: `offline`` withholds the network capability
 SIDs so a denied command cannot open a socket at all.
 
 Treat Exarch as a development tool, not a hardened jail.

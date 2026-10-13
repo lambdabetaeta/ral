@@ -8,20 +8,40 @@ to-string no > "$dir/forbidden/leaf.txt"
 
 # A denied file inside a readable region cannot be read
 try {
-    grant [fs: [read: [$dir], deny: ["$dir/secret.txt"]]] { let _ = from-string < "$dir/secret.txt" }
+    grant [fs: [read: [`absolute $dir], deny: [`absolute "$dir/secret.txt"]]] { let _ = from-string < "$dir/secret.txt" }
 } { |_| echo 'read denied' }
 
 # A denied directory covers everything beneath it
 try {
-    grant [fs: [read: [$dir], deny: ["$dir/forbidden"]]] { let _ = from-string < "$dir/forbidden/leaf.txt" }
+    grant [fs: [read: [`absolute $dir], deny: [`absolute "$dir/forbidden"]]] { let _ = from-string < "$dir/forbidden/leaf.txt" }
 } { |_| echo 'subpath denied' }
 
 # glob and list-dir drop denied entries and keep their siblings
-let hits = grant [fs: [read: [$dir], deny: ["$dir/secret.txt"]]] { glob "$dir/*.txt" }
+let hits = grant [fs: [read: [`absolute $dir], deny: [`absolute "$dir/secret.txt"]]] { glob "$dir/*.txt" }
 echo !{length $hits}
 echo !{equal $hits[0] "$dir/visible.txt"}
-let entries = grant [fs: [read: [$dir], deny: ["$dir/secret.txt"]]] { list-dir $dir }
+let entries = grant [fs: [read: [`absolute $dir], deny: [`absolute "$dir/secret.txt"]]] { list-dir $dir }
 echo !{map { |e| return $e[name] } $entries}
+
+# A place may be both read and denied: the deny wins
+try {
+    grant [fs: [read: [`absolute "$dir/secret.txt"], deny: [`absolute "$dir/secret.txt"]]] { let _ = from-string < "$dir/secret.txt" }
+} { |_| echo 'deny beats read' }
+
+# Lists are sets: two overlapping computed lists judge as either alone
+let a = [`absolute $dir, `absolute "$dir/forbidden"]
+let b = [`absolute "$dir/forbidden"]
+echo !{grant [fs: [read: [...$a, ...$b], deny: [...$b, ...$b]]] { from-string < "$dir/visible.txt" }}
+try {
+    grant [fs: [read: [...$a, ...$b], deny: [...$b, ...$b]]] { let _ = from-string < "$dir/forbidden/leaf.txt" }
+} { |_| echo 'overlap denies as one' }
+
+# An empty read list restricts; omitting `fs` inherits
+try { grant [fs: [read: []]] { let _ = from-string < "$dir/visible.txt" } } { |_| echo 'empty read list restricts' }
+let unrestricted = grant [] { from-string < "$dir/visible.txt" }
+echo $unrestricted
+let none = [read: []]
+try { grant [fs: $none] { let _ = from-string < "$dir/visible.txt" } } { |_| echo 'bound empty read list restricts' }
 
 rm -rf $dir
 echo 'grant fs deny tests done'

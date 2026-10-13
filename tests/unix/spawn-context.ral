@@ -12,7 +12,7 @@ within [env: [MY_DYN_VAR: hello-from-dyn]] {
 
 # A grant in force at spawn time binds inside the worker, and only within
 # the grant's extent
-grant [exec: [ls: 'deny']] {
+grant [exec: [deny: [`name ls]]] {
     let h2 = spawn { ls . }
     try {
         let result = await $h2
@@ -42,7 +42,7 @@ let h5 = watch "job" { sh -c "echo err 1>&2" }
 await $h5
 
 # A handle made and awaited inside a grant with an fs policy just works
-grant [fs: [read: ['/'], write: ['/']]] {
+grant [fs: [read: [`absolute /], write: [`absolute /]]] {
     let hg = !{spawn { return 1 }}
     let rg = await $hg
     echo $rg[value]

@@ -90,9 +90,9 @@ fn an_extend_base_grant_cannot_survive_a_restrict_that_omits_it() {
     let extend = profile(
         &dir,
         "ext.ral",
-        "return [exec: [rustc: 'allow', ls: 'allow']]\n",
+        "return [exec: [allow: [`name rustc, `name ls]]]\n",
     );
-    let restrict = profile(&dir, "restrict.ral", "return [exec: [ls: 'allow']]\n");
+    let restrict = profile(&dir, "restrict.ral", "return [exec: [allow: [`name ls]]]\n");
     let cwd = dir.path().to_string_lossy().into_owned();
 
     let (stack, _) =
@@ -118,12 +118,12 @@ fn two_restricts_compose_to_the_same_grant_in_either_order() {
     let a = profile(
         &dir,
         "a.ral",
-        "return [fs: [read: ['/'], write: ['/']], exec: [git: 'allow', ls: 'allow']]\n",
+        "return [fs: [read: [`absolute /], write: [`absolute /]], exec: [allow: [`name git, `name ls]]]\n",
     );
     let b = profile(
         &dir,
         "b.ral",
-        "return [exec: [ls: 'allow', cat: 'allow'], net: false]\n",
+        "return [exec: [allow: [`name ls, `name cat]], net: `offline]\n",
     );
     let cwd = dir.path().to_string_lossy().into_owned();
 
@@ -145,8 +145,8 @@ fn two_restricts_compose_to_the_same_grant_in_either_order() {
             );
         }
         assert!(
-            !stack.net().all(|n| n),
-            "net: false in either file must survive the fold, flag order must not reach it"
+            stack.net().next().is_some(),
+            "net: `offline in either file must survive the fold, flag order must not reach it"
         );
         for name in ["a.ral", "b.ral"] {
             let path = dir.path().join(name);
@@ -174,7 +174,7 @@ fn two_restricts_compose_to_the_same_grant_in_either_order() {
 /// entry is lexical, and the guard expands it — so the file is refused by both
 /// its own spelling and its canonical one, while its sibling stays writable.
 ///
-/// The ceiling is `cwd:`, the directory holding both files: a literal `/`
+/// The ceiling is `` `cwd . ``, the directory holding both files: a literal `/`
 /// would be a foreign-rooted dead grant on Windows, leaving nothing writable
 /// and the sibling refused for the wrong reason.
 #[test]
@@ -183,7 +183,7 @@ fn a_restrict_file_is_refused_by_the_fs_guard_under_either_spelling() {
     let restrict = profile(
         &dir,
         "restrict.ral",
-        "return [fs: [read: ['cwd:'], write: ['cwd:']]]\n",
+        "return [fs: [read: [`cwd .], write: [`cwd .]]]\n",
     );
     let sibling = profile(&dir, "scratch.txt", "ordinary work\n");
     let canonical = std::fs::canonicalize(&restrict).expect("the restrict file exists");
@@ -275,7 +275,7 @@ fn dangerous_stays_ambient_until_something_attenuates_it() {
         "dangerous must attenuate nothing"
     );
 
-    let restrict = profile(&dir, "restrict.ral", "return [net: false]\n");
+    let restrict = profile(&dir, "restrict.ral", "return [net: `offline]\n");
     let (stack, _) = for_invocation(&cwd, "dangerous", None, std::slice::from_ref(&restrict))
         .expect("dangerous composes with a restrict file");
     let denies: Vec<String> = stack
@@ -306,15 +306,15 @@ fn the_grant_summary_agrees_with_an_attenuated_grant() {
         "an attenuated session must not be told it holds everything:\n{text}"
     );
     assert_eq!(
-        stack.net().collect::<Vec<_>>(),
-        vec![true],
-        "minimal declares net: true, and is the only layer with an opinion"
+        stack.net().count(),
+        0,
+        "minimal never restricts the net, and no layer has an opinion"
     );
-    assert_eq!(bullet(&text, "- net:"), "- net: allow");
+    assert_eq!(bullet(&text, "- net:"), "- net: inherit");
     let veto = if cfg!(windows) {
         "cmd"
     } else {
-        "/opt/homebrew/"
+        "/opt/homebrew"
     };
     assert!(
         bullet(&text, "- exec deny:").contains(veto),

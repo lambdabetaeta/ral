@@ -23,7 +23,7 @@ impl Fixture {
         let list = |items: &[String]| {
             items
                 .iter()
-                .map(|p| format!("'{p}'"))
+                .map(|p| format!("`absolute '{p}'"))
                 .collect::<Vec<_>>()
                 .join(", ")
         };

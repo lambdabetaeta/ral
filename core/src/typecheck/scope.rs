@@ -6,7 +6,9 @@
 //! module owns its names.  Each written option is looked up in the table the
 //! form declares in [`super::contract`] and held to what the table says of
 //! it, key by written key; no record type is built for the bracket, so what
-//! is not written is an absent premise.
+//! is not written is an absent premise.  A value held to a nested table is
+//! inferred as any other and queued, to be ascribed once inference has
+//! finished (`contract::drain_nested`).
 //!
 //! The runtime's own unknown-key refusals — `decode_capability_map`'s — are
 //! not dead code: `use` *asserts* a module's row rather than checking it, so
@@ -18,7 +20,9 @@
 //! `within [dir: d] { hostname }` is, is a command.
 
 use super::builtins::audit_record;
-use super::contract::{Form, Holds, Table, catch_all_shape, declared, field_reason};
+use super::contract::{
+    Form, Held, Holds, Key, NestedCheck, Table, catch_all_shape, declared, unify_held,
+};
 use super::env::HandlerOrigin;
 use super::error::{Reason, TypeErrorKind};
 use super::grade::JoinArm;
@@ -54,30 +58,12 @@ impl Inferencer<'_> {
 
     fn check_option(&mut self, label: &str, value: &Val, table: &'static Table) {
         let key = table.keys.iter().find(|k| k.label == label);
-        let catch_all = key.is_some_and(|k| matches!(k.holds, Holds::Shaped(_)));
-        let found = if catch_all {
-            let cty = match value {
-                Val::Thunk(comp) => self.infer_catch_all(comp.shape()),
-                // A value in hand is pinned to the catch-all's parameters first, so
-                // its producer is what stands in.
-                value => {
-                    let ty = self.infer_val(value);
-                    let shape = catch_all_shape(self.ctx.unifier.fresh_comp_ty());
-                    self.ctx
-                        .unify_ty(&ty, &Ty::Thunk(Box::new(shape.clone())), Reason::HandlerArm);
-                    shape
-                }
-            };
-            let cty = match self.catch_all_stands_in(&cty) {
-                Ok(cty) => cty,
-                Err((cty, error)) => {
-                    self.ctx.raise(*error);
-                    cty
-                }
-            };
-            Ty::Thunk(Box::new(cty))
-        } else {
-            self.infer_val(value)
+        let found = match key {
+            Some(Key {
+                holds: Holds::CatchAll,
+                ..
+            }) => self.infer_catch_all_option(value),
+            _ => self.infer_val(value),
         };
         let Some(key) = key else {
             return self.ctx.diagnose(TypeErrorKind::UnknownKey {
@@ -86,20 +72,49 @@ impl Inferencer<'_> {
                 offered: table.offered(),
             });
         };
-        let declared = match &key.holds {
-            Holds::At(ty) | Holds::Required(ty) => ty.clone(),
-            Holds::Shaped(shape) => shape(&mut self.ctx.unifier),
-            Holds::Decoded => return,
-            Holds::Refused(advice) => {
-                return self.ctx.diagnose(TypeErrorKind::RefusedKey {
-                    form: table.form,
-                    key: key.label,
-                    advice,
-                });
+        match key.holds.held(&mut self.ctx.unifier) {
+            Held::Unify(declared) => {
+                self.ctx
+                    .unify_ty_with(&declared, &found, unify_held(table, key));
+            }
+            Held::Nested(sub) => self.ctx.nested.push(NestedCheck {
+                key: key.label,
+                table: sub,
+                ty: found,
+                pos: self.ctx.pos,
+            }),
+            Held::Refuse(advice) => self.ctx.diagnose(TypeErrorKind::RefusedKey {
+                form: table.form,
+                key: key.label,
+                advice,
+            }),
+            Held::Nothing => {}
+        }
+    }
+
+    /// The catch-all `handler:`: a block written out is checked in context, its
+    /// name and argv bound before its body, as a named arm is; a value in hand
+    /// is pinned to the catch-all's parameters first, so its producer is what
+    /// stands in.
+    fn infer_catch_all_option(&mut self, value: &Val) -> Ty {
+        let cty = match value {
+            Val::Thunk(comp) => self.infer_catch_all(comp.shape()),
+            value => {
+                let ty = self.infer_val(value);
+                let shape = catch_all_shape(self.ctx.unifier.fresh_comp_ty());
+                self.ctx
+                    .unify_ty(&ty, &Ty::Thunk(Box::new(shape.clone())), Reason::HandlerArm);
+                shape
             }
         };
-        self.ctx
-            .unify_ty(&declared, &found, field_reason(table, key));
+        let cty = match self.catch_all_stands_in(&cty) {
+            Ok(cty) => cty,
+            Err((cty, error)) => {
+                self.ctx.raise(*error);
+                cty
+            }
+        };
+        Ty::Thunk(Box::new(cty))
     }
 
     /// Collect the schemes `handlers:` binds in the body.  A catch-all

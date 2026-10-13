@@ -1,1 +1,1 @@
-grant [fs: [read: ['/home/project'], write: ['/tmp/build']], net: false] { echo hi }
+grant [fs: [read: [`absolute /home/project], write: [`absolute /tmp/build]], net: `offline] { echo hi }

@@ -1,0 +1,11 @@
+cd permitted
+denied: cd requires shell: [`chdir]
+denied: cd requires shell: [`chdir]
+cd permitted
+cd permitted
+denied: cd requires shell: [`chdir]
+cd permitted
+denied: cd requires shell: [`chdir]
+denied: cd requires shell: [`chdir]
+cd permitted
+grant verbs tests done

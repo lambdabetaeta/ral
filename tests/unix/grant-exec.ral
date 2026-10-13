@@ -1,40 +1,78 @@
-# Test: grant [exec:] subcommand policies
+# Test: grant [exec:] allow and deny targets
 
-# A listed subcommand runs; an unlisted one is denied
-grant [exec: ['/bin/sh': [-c]]] { /bin/sh -c 'exit 0' }
-echo 'listed subcommand runs'
-try { grant [exec: ['/bin/sh': [-c]]] { /bin/sh -s } } { |_| echo 'unlisted subcommand denied' }
+# An allowed target runs whatever its arguments, and with none
+grant [exec: [allow: [`absolute /bin/sh]]] { /bin/sh -c 'exit 0'; /bin/sh /dev/null; /bin/sh < /dev/null }
+echo 'allowed target runs with any arguments'
+try { grant [exec: [allow: [`absolute /bin/sh]]] { /bin/echo hi } } { |_| echo 'sibling refused' }
 
-# Nested grants intersect: -s is in the outer list only
+# Nested grants intersect: /bin/echo is in the outer list only
 try {
-    grant [exec: ['/bin/sh': [-c, -s]]] { grant [exec: ['/bin/sh': [-c]]] { /bin/sh -s } }
+    grant [exec: [allow: [`absolute /bin/sh, `absolute /bin/echo]]] {
+        grant [exec: [allow: [`absolute /bin/sh]]] { /bin/echo hi }
+    }
 } { |_| echo 'intersection denies outer-only' }
 
 # A head's spelling is not its identity: `//` and `.` fold before the key is met
-grant [exec: ['/bin/sh': [-c]]] { /bin//./sh -c 'exit 0' }
+grant [exec: [allow: [`absolute /bin/sh]]] { /bin//./sh -c 'exit 0' }
 echo 'unfolded head runs'
 
-# A thunk is not an exec policy
-try { grant [exec: [cmd: { return ok }]] { cmd } } { |e| echo $e[message] }
+# An empty allowance admits nothing, written or bound; omission inherits
+try { grant [exec: [allow: []]] { /bin/echo hi } } { |_| echo 'written empty allowance refuses' }
+let nothing = [allow: []]
+try { grant [exec: $nothing] { /bin/echo hi } } { |_| echo 'bound empty allowance refuses' }
+grant [] { /bin/echo 'omission inherits' }
 
 # Refusal needs no audit trail around it
-try { grant [exec: ['/bin/echo': 'allow']] { /bin/sh -c 'exit 0' } } { |_| echo 'refused' }
+try { grant [exec: [allow: [`absolute /bin/echo]]] { /bin/sh -c 'exit 0' } } { |_| echo 'refused' }
 
-# A directory key admits what lives under it and nothing else: a link under
-# the key is judged at the file it names
-grant [exec: ['/bin/': 'allow']] { /bin/echo 'under the key' }
+# Lists are sets: two overlapping computed lists judge as either alone
+let a = [`absolute /bin/sh, `absolute /bin/echo]
+let b = [`absolute /bin/echo]
+grant [exec: [allow: [...$a, ...$b]]] { /bin/echo 'overlap admitted'; /bin/sh -c 'exit 0' }
+try { grant [exec: [allow: [...$a, ...$b]]] { /bin/cat /dev/null } } { |_| echo 'overlap admits no more' }
+
+# A target in both lists is denied
+try {
+    grant [exec: [allow: [`absolute /bin/echo], deny: [`absolute /bin/echo]]] { /bin/echo hi }
+} { |_| echo 'deny beats allow' }
+
+# A directory target admits what lives under it and nothing else: a link under
+# it is judged at the file it names
+grant [exec: [allow: [`dir `absolute /bin]]] { /bin/echo 'under the dir' }
 let d = temp-dir
 ln -s /bin/echo "$d/echo"
-let key = "$d/"
-try { within [dir: $d] { grant [exec: [$key: 'allow']] { ./echo hi } } } { |_| echo 'outside the key denied' }
+try { within [dir: $d] { grant [exec: [allow: [`dir `absolute $d]]] { ./echo hi } } } { |_| echo 'outside the dir denied' }
 rm -rf $d
 
-# An inner layer's exec map is a complete opinion: /bin/echo is not in it
+# An inner layer's exec table is a complete opinion: /bin/echo is not in it
 try {
-    grant [exec: ['/bin/': 'allow']] { grant [exec: ['/usr/bin/env': 'allow']] { /bin/echo hi } }
+    grant [exec: [allow: [`dir `absolute /bin]]] { grant [exec: [allow: [`absolute /usr/bin/env]]] { /bin/echo hi } }
 } { |_| echo 'inner layer denies what it omits' }
 
-# Each policy shape is accepted: a subcommand list, an inline string, a subpath
-grant [exec: [git: ['status', 'log'], make: 'allow', '/usr/bin/': 'allow']] { echo 'policy shapes run' }
+# Anchored targets name one executable: its sibling is refused, and the anchor
+# is frozen where the grant is decoded.  The scripts name their interpreter.
+let t = temp-dir
+mkdir -p "$t/tools" "$t/elsewhere"
+to-string "#!/bin/sh\nexit 0\n" > "$t/tools/a"
+to-string "#!/bin/sh\nexit 0\n" > "$t/tools/b"
+chmod +x "$t/tools/a" "$t/tools/b"
+within [dir: $t] {
+    grant [exec: [allow: [`cwd tools/a, `absolute /bin/sh]]] { ./tools/a }
+    try { grant [exec: [allow: [`cwd tools/a, `absolute /bin/sh]]] { ./tools/b } } { |_| echo 'anchored sibling refused' }
+    grant [exec: [allow: [`cwd tools/a, `absolute /bin/sh]]] { within [dir: "$t/elsewhere"] { ../tools/a } }
+    echo 'anchored target admitted, anchor fixed'
+    try { grant [exec: [allow: [`dir `cwd tools, `absolute /bin/sh], deny: [`cwd tools/b]]] { ./tools/b } } { |_| echo 'anchored file deny keeps its verdict' }
+    grant [exec: [allow: [`dir `cwd tools, `absolute /bin/sh], deny: [`cwd tools/b]]] { ./tools/a }
+}
+rm -rf $t
+
+# `name` admits the host command found through PATH, or the bundled tool of
+# that name, and a name deny vetoes it everywhere, by path too
+grant [exec: [allow: [`name sh, `name printf]]] { sh -c 'exit 0'; printf '' }
+echo 'name admits host and bundled tools'
+try { grant [exec: [allow: [`dir `absolute /bin], deny: [`name sh]]] { /bin/sh -c 'exit 0' } } { |_| echo 'name deny vetoes the path' }
+
+# Every target shape is accepted
+grant [exec: [allow: [`name git, `name make, `absolute /usr/bin/env, `dir `absolute /usr/bin, `cwd tools/build, `dir `system, `dir `path]]] { echo 'target shapes run' }
 
 echo 'grant exec tests done'

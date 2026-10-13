@@ -7,7 +7,7 @@
 //!   first-order manifest, which the host may refuse;
 //! - `` `repl-clipboard `` — `_ed-clipboard`'s copy, which the host performs.
 
-use ral_core::capability::Flag;
+use ral_core::capability::{EditorVerb, Flag};
 use ral_core::first_order::FOValue;
 use ral_core::first_order::datum::{Datum, tag, untag};
 use ral_core::record;
@@ -46,7 +46,7 @@ pub(crate) trait Gated: Into<Enquiry> {
 impl Gated for EditorOp {
     fn flag(&self) -> Flag {
         match self {
-            Self::Get | Self::History | Self::StateGet => Flag::EditorRead,
+            Self::Get | Self::History | Self::StateGet => Flag::Editor(EditorVerb::Read),
             Self::Set { .. }
             | Self::SetLbuffer(_)
             | Self::Insert(_)
@@ -54,14 +54,14 @@ impl Gated for EditorOp {
             | Self::Accept
             | Self::Ghost(_)
             | Self::Highlight(_)
-            | Self::StateSet(_) => Flag::EditorWrite,
+            | Self::StateSet(_) => Flag::Editor(EditorVerb::Write),
         }
     }
 }
 
 impl Gated for ClipboardReq {
     fn flag(&self) -> Flag {
-        Flag::EditorWrite
+        Flag::Editor(EditorVerb::Write)
     }
 }
 

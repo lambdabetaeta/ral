@@ -17,9 +17,10 @@ mod load;
 use base::{resolve_base, root_fs_policy};
 use load::{absolute_in, load_capabilities_ral};
 use ral_core::capability::{Capabilities, GrantStack};
-use ral_core::guard::freeze::FreezeCtx;
+use ral_core::guard::freeze::{FreezeCtx, Place};
 use ral_core::host;
 use ral_core::terminal::TerminalState;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// Compose a session's effective [`GrantStack`], with the restrict files'
@@ -142,15 +143,16 @@ pub fn base_layer(base_name: &str, cwd: &Path) -> Result<Capabilities, String> {
 /// `core/src/guard/enforce.rs` and the OS sandbox profiles each expand a
 /// deny entry to its canonical and macOS-firmlink variants themselves.
 fn deny_layer(paths: &[PathBuf], ctx: &FreezeCtx) -> Result<Capabilities, String> {
-    let entries: Vec<String> = paths
+    let frozen: BTreeSet<_> = paths
         .iter()
-        .map(|p| p.to_string_lossy().into_owned())
-        .collect();
-    let mut frozen = ctx.paths(&entries).map_err(|e| e.message)?;
-    frozen.sort();
-    frozen.dedup();
+        .filter_map(|p| {
+            let place = Place::Absolute(p.to_string_lossy().into_owned());
+            ctx.place(&place).transpose()
+        })
+        .collect::<Result<_, _>>()
+        .map_err(|e| e.message)?;
     let mut fs = root_fs_policy();
-    fs.deny_paths = frozen;
+    fs.deny_paths = frozen.into_iter().collect();
     Ok(Capabilities {
         fs: Some(fs),
         ..Capabilities::default()
@@ -164,6 +166,7 @@ fn deny_layer(paths: &[PathBuf], ctx: &FreezeCtx) -> Result<Capabilities, String
 )]
 mod tests {
     use super::*;
+    use ral_core::capability::Net;
 
     #[test]
     fn restrict_files_are_denied_even_under_dangerous_base() {
@@ -172,7 +175,7 @@ mod tests {
             std::process::id(),
             "dangerous",
         ));
-        std::fs::write(&path, "return [exec: [ls: 'allow']]\n").unwrap();
+        std::fs::write(&path, "return [exec: [allow: [`name ls]]]\n").unwrap();
 
         // The `/` ceiling freezes to the native root spelling: `\` on Windows,
         // still a universal prefix there since it folds to zero components.
@@ -196,14 +199,18 @@ mod tests {
     #[test]
     fn narrow_cannot_escalate_a_restricted_parent() {
         let confined = base_layer("confined", Path::new("/work/proj")).unwrap();
-        assert_eq!(confined.net, Some(false), "confined layer has net off");
+        assert_eq!(
+            confined.net,
+            Some(Net::Offline),
+            "confined layer has net off"
+        );
         let minimal = base_layer("minimal", Path::new("/work/proj")).unwrap();
 
         let mut stack = GrantStack::root();
         stack.push(confined);
         stack.push(minimal);
         assert!(
-            !stack.net().all(|n| n),
+            stack.net().next().is_some(),
             "naming a looser base must not turn the network back on"
         );
     }

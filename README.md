@@ -23,7 +23,7 @@ curl $primary ? curl $fallback   # ? reacts to failure; | moves data
 glob '*.rs' | map { |f| wc -l $f }         # typed pipelines,
 let cfg = curl -s $url | from-json         # checked before anything runs
 
-grant [exec: [git: 'allow'], fs: [read: ['/src']], net: false] {
+grant [exec: [allow: [`name git]], fs: [read: [`absolute /src]], net: `offline] {
     git log              # permitted
     curl $url            # denied
 }

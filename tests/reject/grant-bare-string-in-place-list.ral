@@ -1,0 +1,2 @@
+# contains: `absolute
+grant [fs: [read: ['/tmp']]] { return 1 }

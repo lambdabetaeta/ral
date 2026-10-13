@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 446e3123
+generated_at_commit: 6bfbb097
 generated_at_date: 2026-10-06
 covers_paths: [core/src/typecheck/, core/src/typecheck.rs]
 ---
@@ -142,13 +142,25 @@ Internals:
 - `scope.rs` — the five structural scope nodes, and `check_options`: the rule
   that holds each written option of `within` and `grant` to a declared table,
   key by key — unknown key T0076, refused key T0026, a clash at the key's own
-  sentence, a written catch-all arm checked in context;
+  sentence. `Holds::CatchAll` (`within`'s `handler`) alone takes contextual
+  handler inference at the written form; `Holds::Shaped` infers an ordinary
+  value and unifies it with the minted type, and `Holds::Table` queues the
+  value's nested check with its span (the value is inferred normally and never
+  constrained). One helper builds the expected type for inline checking and
+  scratch ascription;
 - `contract.rs` — the declared tables themselves (`within`, `grant`, the rc
   file, the plugin manifest), each a closed keyset whose labels are held at a
   ground type, left to their decoder, or refused with a sentence of their own.
+  A table's key holds a ground type, a shaped type minted from the Rust enums
+  (`EditorVerb`, `ShellVerb`, `XdgKind`), a nested `Table` or a catch-all.
   `ascribe` holds a contract file's finished return to its table, after
   inference and in a scratch copy of the unifier (unknown key T0076, not a
-  record T0077, and the row errors). It is the single registration point, so the runtime doors that read the same
+  record T0077, and the row errors); a nested table is ascribed by the same
+  recursive function, from the queue `typecheck` drains once, after the
+  pending labels settle and before the contract ascription (a map or `()` where
+  a nested table belongs is refused as a non-record). The one-shot sessions
+  drop their queue unread. A clash at a closed row names the row's tags and the
+  nearest one. It is the single registration point, so the runtime doors that read the same
   keysets — `RcPlan::decode`, `LoadedPlugin::parse`, `decode_capability_map` —
   dispatch off it rather than each keeping a copy. No table reaches the
   unifier ([[decisions/260930_a-table-never-enters-the-unifier|a-table-never-enters-the-unifier]]).

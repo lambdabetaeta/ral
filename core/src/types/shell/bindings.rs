@@ -482,7 +482,11 @@ mod chokepoint_tests {
     #[test]
     fn block_local_let_is_not_leased() {
         let mut shell = armed_shell(64);
-        top_level(&mut shell, "grant [exec: [:]] { let block_local = 1 }").expect("grant body");
+        top_level(
+            &mut shell,
+            "grant [exec: [allow: []]] { let block_local = 1 }",
+        )
+        .expect("grant body");
         assert!(shell.scope_lookup("block_local").is_none());
         assert!(!is_leased(&shell, "block_local"));
         assert!(!is_baseline(&shell, "block_local"));

@@ -1,7 +1,7 @@
 # Capabilities and `grant`
 
 **`grant` is a dynamic-context operator that attenuates authority for its body by
-*intersection*.** `grant [exec: [...], fs: [...], net: ...] { body }` narrows the
+*intersection*.** `grant [exec: [...], fs: [...], net: `offline] { body }` narrows the
 commands, filesystem paths, and network access available to `body` and
 everything it calls. Authority is never amplified:
 
@@ -33,9 +33,9 @@ identity (`None` = inherit = ⊤, [[map/core/shell-state|`Option<T>: Meet`]]).
 - **Restricting one axis does not restrict another.** `grant [fs: [...]] { … }`
   narrows the filesystem but leaves `net`, `exec`, `editor`, and `shell` at the
   caller's authority; a grant that means to confine network access must say
-  `net: false` itself.
-- **`net` has no in-process guard.** ral has no network primitives, so a
-  `net: false` is enforced only by the OS sandbox — it fails closed where no
+  ``net: `offline`` itself.
+- **`net` has no in-process guard.** ral has no network primitives, so
+  ``net: `offline`` is enforced only by the OS sandbox — it fails closed where no
   backend exists.
 - **The process view is the envelope's, on every projection.** No axis names
   it: a child confined for any reason sees and can signal only the envelope's
@@ -50,13 +50,14 @@ for an implicit cross-axis deny: an omitted axis is ⊤, the identity of `meet`.
 
 **Capability checks gate four dimensions:**
 
-- **exec** over a three-valued lattice (Allow / Only / Deny) — more
+- **exec** as allow or deny of a target, regardless of its arguments — more
   expressive than orthodox object-capability, since a base profile can veto a
   name a restrict file never mentions;
 - **fs** by read/write path prefix with denies;
-- **net** as allow/deny;
-- **detach** as allow/deny — the one dimension that gates a *verb* rather than
-  an action on a resource, and the one that reaches no OS profile: it decides
+- **net** as `` `offline `` or nothing;
+- **editor** and **shell** as verb lists, where `detach` is the one verb that
+  gates a *verb* rather than an action on a resource, and the one that reaches
+  no OS profile: it decides
   whether a process the session stops owning may be born at all, never what
   that process may then do
   ([[decisions/260727_detach-under-a-grant|detach-under-a-grant]]).
@@ -86,26 +87,34 @@ process's death is dropped, which is what makes it a survivor rather than a
 receipt for something already killed.
 
 **The dimensions are syntax, and the bracket is the form's.** `grant` takes
-its six dimensions written out in its own bracket, the way `case` writes its
-arms, and the checker holds each written one to its table: `net` and `detach`
-at `Bool`, the four structured ones left to the decoder. No record type is
+its five dimensions written out in its own bracket, the way `case` writes its
+arms, and the checker holds each written one to its table. No record type is
 built for the bracket, so a dimension that is not written is an absent premise,
 not a flag. A misspelled dimension is refused before the program runs, naming
-`grant` and its own six; a bundle bound elsewhere (`grant $o { … }`), a spread
+`grant` and its own five; a bundle bound elsewhere (`grant $o { … }`), a spread
 and a repeated dimension are parse errors, since each hides which dimensions
 are written; a map is no bundle either, a map's keys being data
 ([[design/records-and-maps|records-and-maps]]); and `[]` is the empty grant
 rather than the empty list, the bracket being read by the form. The values are
-ordinary terms — `grant [fs: $paths, net: false]` — and to grant a dimension
-only sometimes, lift the condition to the form.
+ordinary terms — ``grant [fs: [read: $paths], net: `offline]`` — and to grant a
+dimension only sometimes, lift the condition to the form.
 
-The four structured dimensions stay the decoder's to judge: a policy value may
-be a string or a list, and `editor.read: Bool` sits beside `fs.read: [String]`.
+**The values are typed data.** Places and exec targets are tagged variants
+(`` `cwd src ``, `` `name git ``, `` `dir `system ``); `exec` and `fs` are
+nested records of lists, `net` is `` `offline ``, `editor` and `shell` are
+verb lists. The checker ascribes the nested tables too, so a bare string where
+a place belongs, a misspelled tag or `net: true` fails before the program
+runs, naming the tags on offer. Every list is a set, with repeats idempotent;
+extension joins verb lists; a selector (`path`, `system`) is valid only under
+`dir`; and there is no argument filter
+([[decisions/261012_grant-surface-is-typed|grant-surface-is-typed]]). Values
+the checker cannot type still reach the runtime decoder, which judges the same
+vocabulary.
 
 A `.ral` profile and the inline
 `grant` surface are symmetric: both decode through the same walker into one
 frozen `Capabilities`, so configuration is the grant value written as source,
-not a second schema. That walker resolves every sigil as it decodes —
+not a second schema. That walker resolves every place as it decodes —
 [[design/capability-freeze|the freeze boundary]] — so no unresolved form ever
 reaches the stack or the IPC wire.
 
@@ -113,9 +122,9 @@ This is the boundary [[map/exarch|exarch]] reuses as its sandbox: each agent
 run evaluates under a profile's capabilities pushed onto this same stack.
 
 **Concessions.** Three caveats are inherent to the design, not defects:
-- **Bare command names are ambient.** A bare exec key like `git` resolves through
+- **Bare command names are ambient.** A bare exec name like `` `name git `` resolves through
   `PATH`, so it is not a strict object-capability; the mitigation is the base
-  profile's deny on shells together with the `fs` deny on writing `xdg:bin` — the
+  profile's deny on shells together with the `fs` deny on writing `` `xdg-bin `` — the
   names that matter are pinned, the rest rest on `PATH` integrity.
 - **TOCTOU on path resolution.** The resolver-form and bind-form checks share one
   source, so the OS profile and the in-process check cannot disagree, but symlink
@@ -129,9 +138,9 @@ run evaluates under a profile's capabilities pushed onto this same stack.
   the name veto for the same reason and to the same small effect. The overlap
   is therefore not merely tolerable but *required* — `cargo build &&
   ./target/debug/app` is exactly this shape, and every bake-in profile makes
-  `cwd:`, `/tmp`, and `tempdir:` both writable and exec-admitted on purpose.
+  `` `cwd ``, `/tmp`, and `` `tempdir `` both writable and exec-admitted on purpose.
   What is required is the overlap a grant *names*: an admit that a write prefix
-  only covers from above (`write: ~` over `~/.cargo/bin`) is frozen against
+  only covers from above (``write: [`home .]`` over `~/.cargo/bin`) is frozen against
   writes, and a bare-name veto is advisory only under an admit the write region
   names or nests beneath one it names ([[decisions/261006_a-veto-freezes-what-a-write-covers|a-veto-freezes-what-a-write-covers]]).
   `capability::deputy_prefixes` accordingly reports and never denies, and *no
@@ -140,7 +149,7 @@ run evaluates under a profile's capabilities pushed onto this same stack.
   What does bite is **authority that outlives or exceeds the projection**: a
   write escalates when whoever later treats those bytes as code is not confined
   by the projection that admitted the write — running after the session ends
-  (*outlives*) or beside it with more authority (*exceeds*). `xdg:bin` is the
+  (*outlives*) or beside it with more authority (*exceeds*). `` `xdg-bin `` is the
   case the base profiles decide correctly for the wrong stated reason. It must
   stay unwritable not because `exec` also names it, but because a program left
   on the human's `$PATH` is run tomorrow by the human, unconfined.
@@ -148,13 +157,13 @@ run evaluates under a profile's capabilities pushed onto this same stack.
 **An open class: the unconfined reader.** Every dimension `grant` gates names
 what the *confined* process may do. One family of escalations has no such
 shape: a write into a region that some process the host runs later —
-unconfined — treats as code. A hook under `gitdir:`, a `core.pager` or an alias
+unconfined — treats as code. A hook under `` `gitdir ``, a `core.pager` or an alias
 in `.git/config`, an `.envrc`, a `package.json` script, a `Makefile`. None is a
 binary, none is exec-admitted, and each runs with the user's full authority the
 moment the user reaches for the ordinary tool that reads it. The `exec`
 dimension cannot see this: a file that is never executed, only interpreted, is
-invisible to any check on execution. The default profiles make `cwd:` and
-`gitdir:` writable, so the class is live rather than hypothetical.
+invisible to any check on execution. The default profiles make `` `cwd `` and
+`` `gitdir `` writable, so the class is live rather than hypothetical.
 
 Nothing in this vocabulary expresses it, because the question is not what the
 confined process may do but what an unconfined one does afterwards with what

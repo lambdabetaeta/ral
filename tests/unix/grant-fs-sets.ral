@@ -14,44 +14,44 @@ let denied = { |body|
 }
 
 # Redirects: write, append, stdin, stderr
-denied { grant [fs: [write: [$inside]]] { to-string leak > "$outside/new.txt" } }
+denied { grant [fs: [write: [`absolute $inside]]] { to-string leak > "$outside/new.txt" } }
 echo !{exists "$outside/new.txt"}
-denied { grant [fs: [write: [$inside]]] { to-string more >> "$outside/log.txt" } }
+denied { grant [fs: [write: [`absolute $inside]]] { to-string more >> "$outside/log.txt" } }
 echo !{from-string < "$outside/log.txt"}
-denied { grant [fs: [read: [$inside]]] { head < "$outside/secret.txt" } }
-denied { grant [fs: [write: [$inside]]] { head /dev/null 2> "$outside/err.log" } }
+denied { grant [fs: [read: [`absolute $inside]]] { head < "$outside/secret.txt" } }
+denied { grant [fs: [write: [`absolute $inside]]] { head /dev/null 2> "$outside/err.log" } }
 echo !{exists "$outside/err.log"}
-grant [fs: [write: [$inside]]] { to-string kept > "$inside/ok.txt" }
+grant [fs: [write: [`absolute $inside]]] { to-string kept > "$inside/ok.txt" }
 echo !{from-string < "$inside/ok.txt"}
-echo !{grant [fs: [read: [$inside]]] { from-string < "$inside/ok.txt" }}
+echo !{grant [fs: [read: [`absolute $inside]]] { from-string < "$inside/ok.txt" }}
 
 # A pipeline stage that runs in a helper carries the same grant
-denied { grant [fs: [write: [$inside]]] {
+denied { grant [fs: [write: [`absolute $inside]]] {
     let sink = { from-line; /bin/echo seed > "$outside/leak.txt" }
     echo seed | !$sink
 } }
 echo !{exists "$outside/leak.txt"}
-grant [fs: [write: [$inside]]] {
+grant [fs: [write: [`absolute $inside]]] {
     let sink = { from-line; /bin/echo seed > "$inside/kept.txt" }
     echo seed | !$sink
 }
 echo !{from-string < "$inside/kept.txt"}
 
 # Module loading is a read
-denied { grant [fs: [read: [$inside]]] { use "$outside/lib.ral" } }
-grant [fs: [read: [$inside], write: [$inside]]] { use "$inside/mod.ral" }
+denied { grant [fs: [read: [`absolute $inside]]] { use "$outside/lib.ral" } }
+grant [fs: [read: [`absolute $inside], write: [`absolute $inside]]] { use "$inside/mod.ral" }
 echo !{from-string < "$inside/witness.txt"}
 
 # Read-gated queries and write-gated temp builtins
-denied { grant [fs: [read: [$inside]]] { file-info "$outside/secret.txt" } }
-echo !{grant [fs: [read: [$inside]]] { file-info "$inside/ok.txt" }}[name]
-denied { grant [fs: [read: [$inside]]] { resolve-path $outside } }
-echo !{re-match '^/' !{grant [fs: [read: [$inside]]] { resolve-path $inside }}}
-denied { grant [fs: [write: [$inside]]] { temp-dir } }
-denied { grant [fs: [write: [$inside]]] { temp-file } }
-let td = grant [fs: [write: [$root]]] { temp-dir }
+denied { grant [fs: [read: [`absolute $inside]]] { file-info "$outside/secret.txt" } }
+echo !{grant [fs: [read: [`absolute $inside]]] { file-info "$inside/ok.txt" }}[name]
+denied { grant [fs: [read: [`absolute $inside]]] { resolve-path $outside } }
+echo !{re-match '^/' !{grant [fs: [read: [`absolute $inside]]] { resolve-path $inside }}}
+denied { grant [fs: [write: [`absolute $inside]]] { temp-dir } }
+denied { grant [fs: [write: [`absolute $inside]]] { temp-file } }
+let td = grant [fs: [write: [`absolute $root]]] { temp-dir }
 echo !{exists $td}
-let tf = grant [fs: [write: [$root]]] { temp-file }
+let tf = grant [fs: [write: [`absolute $root]]] { temp-file }
 echo !{exists $tf}
 
 rm -rf $dir $td $tf

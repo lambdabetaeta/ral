@@ -135,16 +135,13 @@ mod tests {
         let caps = load_capabilities_from_str(
             &Mooring::adrift(),
             &mut shell,
-            "return [exec: [ls: 'allow']]",
+            "return [exec: [allow: [`name ls]]]",
             "<test:minimal>",
             &ctx(),
         )
         .unwrap();
         let exec = caps.exec.expect("exec dimension present");
-        assert_eq!(
-            exec.0.get(&ExecKey::Name("ls".into())),
-            Some(&Verdict::Allow)
-        );
+        assert_eq!(exec.get(&ExecKey::Name("ls".into())), Some(&Verdict::Allow));
         // `None` is no opinion, so an unmentioned dimension inherits the caller.
         assert!(
             caps.fs.is_none()
@@ -155,18 +152,18 @@ mod tests {
     }
 
     #[test]
-    fn deny_string_produces_sticky_deny_policy() {
+    fn deny_target_produces_sticky_deny_policy() {
         let mut shell = shell();
         let caps = load_capabilities_from_str(
             &Mooring::adrift(),
             &mut shell,
-            "return [exec: [bash: 'deny']]",
+            "return [exec: [deny: [`name bash]]]",
             "<test:deny>",
             &ctx(),
         )
         .unwrap();
         assert_eq!(
-            caps.exec.unwrap().0.get(&ExecKey::Name("bash".into())),
+            caps.exec.unwrap().get(&ExecKey::Name("bash".into())),
             Some(&Verdict::Deny)
         );
     }
@@ -203,7 +200,7 @@ mod tests {
     /// the form itself is, so the typo never reaches the walker.
     #[test]
     fn unknown_top_level_key_is_refused_before_the_file_runs() {
-        let msg = load_err_message("return [fss: [read: ['/tmp']]]", "<test:typo>");
+        let msg = load_err_message("return [fss: [read: [`absolute /tmp]]]", "<test:typo>");
         assert!(msg.contains("'fss'"), "{msg}");
     }
 
@@ -211,7 +208,10 @@ mod tests {
     /// table's labels, so it is written as a record.
     #[test]
     fn a_mapped_profile_is_refused_before_the_file_runs() {
-        let msg = load_err_message("return [\"fss\": [read: ['/tmp']]]", "<test:typo-map>");
+        let msg = load_err_message(
+            "return [\"fss\": [read: [`absolute /tmp]]]",
+            "<test:typo-map>",
+        );
         assert!(msg.contains("`grant` takes a record of settings"), "{msg}");
     }
 
@@ -247,14 +247,14 @@ mod tests {
         }
     }
 
-    /// An env-scoped `HOME` reaches `~` freezing here exactly as it reaches
+    /// An env-scoped `HOME` reaches `home` freezing here exactly as it reaches
     /// `grant`'s: one home for both freeze doors.
     #[test]
-    fn session_profiles_freeze_tilde_against_the_shell_home() {
+    fn session_profiles_freeze_home_against_the_shell_home() {
         let home = tempfile::tempdir().unwrap();
         let profile_dir = tempfile::tempdir().unwrap();
         let profile_path = profile_dir.path().join("profile.ral");
-        std::fs::write(&profile_path, "return [fs: [read: ['~/data']]]").unwrap();
+        std::fs::write(&profile_path, "return [fs: [read: [`home data]]]").unwrap();
 
         let mut shell = shell();
         shell

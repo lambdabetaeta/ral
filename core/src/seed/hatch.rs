@@ -443,7 +443,7 @@ mod tests {
     )]
     fn deny_net(_base: &str, _cwd: &std::path::Path) -> Result<Capabilities, String> {
         Ok(Capabilities {
-            net: Some(false),
+            net: Some(crate::capability::Net::Offline),
             ..Capabilities::default()
         })
     }
@@ -639,7 +639,7 @@ mod tests {
 
         assert_eq!(shell.env.get("kept"), Some(&Value::Int(7)));
         assert!(
-            !shell.context.grants.net().all(|n| n),
+            shell.context.grants.net().next().is_some(),
             "the installer's narrower must land its floor on the hydrated shell"
         );
     }

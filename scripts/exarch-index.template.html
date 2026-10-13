@@ -79,7 +79,7 @@
                 <div class="ring grandchild">
                   <div class="ring-head">
                     <span class="who">notes-a</span>
-                    <code class="cap">grant: `restrict [net: false, fs: [read: ['cwd:notes/a']]]</code>
+                    <code class="cap">grant: `restrict [net: `offline, fs: [read: [`cwd notes/a]]]</code>
                   </div>
                   <p class="ring-note">its own sub-agent; the checks fold every ring above it</p>
                 </div>
@@ -157,23 +157,25 @@ echo $[!{length $hits} + #' matches'#]</code></pre>
         <div class="exchange">
           <div class="listing">
             <div class="listing-bar">grants intersect</div>
-<pre><code>grant [exec: [git: ['status', 'diff']]] {
-    grant [exec: [git: ['status']]] {
+<pre><code>grant [exec: [allow: [`name git, `name ls]]] {
+    grant [exec: [deny: [`name ls]]] {
         git status   # allowed
-        git diff     # denied
+        ls           # denied
     }
 }</code></pre>
           </div>
           <div class="output">
             <div class="listing-bar">what the agent is told</div>
-            <pre>[R0001] Error: command 'git' subcommand 'diff' denied by active grant
+            <pre>[R0001] Error: command 'ls' denied by active grant
    ╭─[ turn.ral:4:9 ]
    │
- 4 │         git diff     # denied
-   │         ────┬───
-   │             ╰───── here
+ 4 │         ls           # denied
+   │         ─┬
+   │          ╰── here
    │
-   │ Help: allowed subcommands (matched against the command's first argument): status
+   │ Help: add the command to the grant's exec `allow` list: `name git` for a
+   │ command name, `absolute /path/to/it` for a file, or `dir `absolute /path`
+   │ for its directory
 ───╯</pre>
           </div>
         </div>
@@ -187,7 +189,7 @@ echo $[!{length $hits} + #' matches'#]</code></pre>
             <tr><th scope="col">what</th><th scope="col">checked by</th></tr>
           </thead>
           <tbody>
-            <tr><td>which commands run, down to subcommands</td>
+            <tr><td>which commands run</td>
                 <td>ral, before anything is spawned</td></tr>
             <tr><td>files the shell reads and writes itself</td>
                 <td>ral, on the object a path resolves to</td></tr>
@@ -260,7 +262,7 @@ echo $[!{length $hits} + #' matches'#]</code></pre>
           <div class="listing-bar">a grant computed per child</div>
 <pre><code>let dirs = glob #'notes/*'#
 for !{range 0 !{length $dirs}} { |i|
-  let only-mine = [net: false, fs: [read: ["cwd:$dirs[$i]"]]]
+  let only-mine = [net: `offline, fs: [read: [`cwd $dirs[$i]]]]
   exarch-agents `start [
     prompt:   "Summarise the notes under $dirs[$i]. Reply [topic: Str, claims: [Str]].",
     name:     "notes-$i",

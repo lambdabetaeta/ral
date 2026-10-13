@@ -1,0 +1,3 @@
+# contains: `wirte is not a verb
+# contains: did you mean `write
+grant [editor: [`wirte]] { return 1 }

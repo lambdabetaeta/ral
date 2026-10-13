@@ -48,7 +48,7 @@ the trail. The doors are:
   load.
 - `Shell::locate`, the door every open goes through. It judges the object it
   lands on with `check_fs_exact`.
-- the boolean flags: one `Flag`, checked by one `Shell::check(Flag, who)`.
+- the verbs of `editor` and `shell`: one `Flag`, checked by one `Shell::check(Flag, who)`.
 - on the sandbox's side, `SandboxProjection::of`, the part of the policy the OS
   can render, folded from the same tables.
 
@@ -85,7 +85,7 @@ Three rules govern how layers compose:
 - A deny is anti-monotonic. A later layer can add denies, but never reopens a
   denied region ([[design/scoping|dynamic frames]]).
 
-Exec has three verdicts (`Verdict`: Allow / Only / Deny). The bundled coreutils
+Exec has two verdicts (`Verdict`: Allow / Deny), over a target and never its arguments. The bundled coreutils
 and the structured primitives go through the same chokepoint
 ([[internals/builtins-registry|builtins]]). That closes the bypass, and lets ral
 stay a [[invariants/single-binary|single binary]].
@@ -141,7 +141,7 @@ Two consequences follow:
 - Each command is its own *launch*. Two commands in one grant body run in two
   envelopes, each rendered afresh from the filesystem as it then stands.
 - Confinement engages only when a child is actually spawned. A
-  `grant [net: false] { … }` that runs no external command does not fail
+  ``grant [net: `offline] { … }`` that runs no external command does not fail
   closed. An offline request on a backend that cannot enforce it fails closed at
   the spawn (`projection_enforceable`).
 

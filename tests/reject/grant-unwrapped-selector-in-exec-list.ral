@@ -1,0 +1,3 @@
+# contains: `path names directories to run programs from
+# contains: write `dir `path
+grant [exec: [allow: [`path]]] { return 1 }

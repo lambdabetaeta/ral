@@ -57,7 +57,7 @@ echo !{commands $outer}[1][argv][0]
 
 # grant is transparent — its body's command lands directly in the trail,
 # with no grant observation framing it
-let grant_report = audit { grant [exec: ['/bin/echo': 'allow']] { /bin/echo 'inside' } }
+let grant_report = audit { grant [exec: [allow: [`absolute /bin/echo]]] { /bin/echo 'inside' } }
 echo !{length !{commands $grant_report}}
 echo !{commands $grant_report}[0][argv][0]
 
@@ -89,19 +89,19 @@ let checks = { |report key|
 }
 let argv0s = { |report| map { |c| return "$c[argv][0]" } !{commands $report} }
 
-let admitted = audit { grant [exec: ['/bin/echo': 'allow']] { /bin/echo hi } }
+let admitted = audit { grant [exec: [allow: [`absolute /bin/echo]]] { /bin/echo hi } }
 echo !{checks $admitted name}
 echo !{argv0s $admitted}
 
 # A refusal is recorded whatever the grant says about auditing; it fails the
 # body, and it names the refused command
-let refused = audit { grant [exec: ['/bin/echo': 'allow']] { /bin/sh -c 'exit 0' } }
+let refused = audit { grant [exec: [allow: [`absolute /bin/echo]]] { /bin/sh -c 'exit 0' } }
 echo !{succeeded $refused}
 echo !{checks $refused name}
 
 # So is a refused write, naming the operation
 let scratch = temp-dir
-let blocked = audit { grant [fs: [write: [$scratch]]] { to-string x > '/ralaudit_test.txt' } }
+let blocked = audit { grant [fs: [write: [`absolute $scratch]]] { to-string x > '/ralaudit_test.txt' } }
 echo !{checks $blocked op}
 rm -rf $scratch
 

@@ -8,7 +8,7 @@
 let [registry, lockfile] = args
 let no-network = [6, 7]
 
-let resolved = grant [net: false] {
+let resolved = grant [net: `offline] {
     return !{try {
         let remote = !{curl -fsS "$registry/latest" | from-csv}
         echo 'resolved from the registry'

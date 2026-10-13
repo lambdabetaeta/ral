@@ -1,0 +1,3 @@
+# contains: a grant table is a record
+# contains: exec: [allow: []]
+grant [exec: ["allow": []]] { return 1 }

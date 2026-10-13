@@ -3,4 +3,10 @@ subpath denied
 1
 true
 [forbidden, visible.txt]
+deny beats read
+ok
+overlap denies as one
+empty read list restricts
+ok
+bound empty read list restricts
 grant fs deny tests done

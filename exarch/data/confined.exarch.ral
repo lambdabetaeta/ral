@@ -9,9 +9,7 @@
 # `--base confined --extend-base extra.ral` to widen for one tool.
 
 return [
-  net:   false,                       # no network — confined.sb has the same default
-
-  shell: [chdir: true],               # cd inside the tree is fine
+  net:   `offline,   # no network — confined.sb has the same default
 
   # The working tree, plus scratch directories.  Nothing else readable;
   # nothing else writable.  System paths needed by the platform runtime
@@ -19,99 +17,101 @@ return [
   # floor — see `core/src/capability/fs.rs::floor`.
   fs: [
     read: [
-      'cwd:',                         # working tree
-      'tempdir:',                     # $TMPDIR (per-session scratch)
-      '/tmp',                         # legacy scratch
+      `cwd .,          # working tree
+      `tempdir .,      # $TMPDIR (per-session scratch)
+      `absolute /tmp,  # legacy scratch
     ],
     write: [
-      'cwd:',                         # build artefacts land here
-      'tempdir:',
-      '/tmp',
+      `cwd .,  # build artefacts land here
+      `tempdir .,
+      `absolute /tmp,
     ],
   ],
 
   # Host binaries are admitted by subpath, never enumerated: the build
   # sandbox trusts whatever lives in the platform's tool roots
-  # (`system:` — see `core/src/path/sigil.rs`), including a Homebrew
+  # (`dir `system` — see `core/src/guard/freeze.rs`), including a Homebrew
   # tree when the host has one — a build jail plausibly needs a
   # Homebrew-installed compiler.  Apple's toolchain (CommandLineTools,
   # Xcode) is among those roots too, so `gcc → cc1 → as → ld` resolves
   # without listing each tool here.
   exec: [
-    'system:':         'allow',      # sh, bash, uname, dirname, env, sed, awk, …
-    '/usr/local/bin/': 'allow',      # user-installed CLI tools
-    'cwd:/':           'allow',      # ./configure, ./build.sh, etc.
-    'tempdir:/':       'allow',      # build-tree-shadowed scratch
-    '/tmp/':           'allow',
+    allow: [
+      `dir `system,                   # sh, bash, uname, dirname, env, sed, awk, …
+      `dir `absolute /usr/local/bin,  # user-installed CLI tools
+      `dir `cwd .,                    # ./configure, ./build.sh, etc.
+      `dir `tempdir .,                # build-tree-shadowed scratch
+      `dir `absolute /tmp,
 
-    # The coreutils linked into the ral binary (`core/src/uutils.rs`).
-    # These are the one exception to "host binaries by subpath": a
-    # bundled tool is spawned by bare name and never resolved on disk, so
-    # no prefix above can reach it and it must be named.  Silence here is
-    # not tightness — it is an agent that cannot `ls`.  `cmp`, `diff` and
-    # `rg` bundle only under non-default features, so they are host
-    # binaries here; a build that turns those on fails
-    # `every_grantable_base_settles_the_bundled_tools`, which names them.
-    #
-    # `rm`, `mv` and `truncate` are admitted like any other: what a
-    # confined child may destroy is settled by the `fs.write` prefixes
-    # above, which stop at the working tree and scratch.  Withholding the
-    # verbs as well would break `make clean` without protecting one byte
-    # the fs guard does not already hold.
-    #
-    # The `unix:` half of the set (`id`, `kill`, `stat`, `tac`, `test`,
-    # `timeout`) cannot link on Windows; `policy::base::drop_dead_exec_grants`
-    # strips those there, so listing them here stays honest on every host.
-    base64:    'allow',
-    basename:  'allow',
-    cat:       'allow',
-    comm:      'allow',
-    cp:        'allow',
-    cut:       'allow',
-    date:      'allow',
-    df:        'allow',
-    dirname:   'allow',
-    du:        'allow',
-    env:       'allow',
-    head:      'allow',
-    hostname:  'allow',
-    id:        'allow',
-    join:      'allow',
-    kill:      'allow',
-    ln:        'allow',
-    ls:        'allow',
-    mkdir:     'allow',
-    mktemp:    'allow',
-    mv:        'allow',
-    nproc:     'allow',
-    paste:     'allow',
-    printenv:  'allow',
-    printf:    'allow',
-    pwd:       'allow',
-    readlink:  'allow',
-    realpath:  'allow',
-    rm:        'allow',
-    rmdir:     'allow',
-    seq:       'allow',
-    sha256sum: 'allow',
-    sha512sum: 'allow',
-    shuf:      'allow',
-    sleep:     'allow',
-    sort:      'allow',
-    split:     'allow',
-    stat:      'allow',
-    tac:       'allow',
-    tail:      'allow',
-    tee:       'allow',
-    test:      'allow',
-    timeout:   'allow',
-    touch:     'allow',
-    tr:        'allow',
-    truncate:  'allow',
-    uname:     'allow',
-    uniq:      'allow',
-    wc:        'allow',
-    whoami:    'allow',
-    yes:       'allow',
+      # The coreutils linked into the ral binary (`core/src/uutils.rs`).
+      # These are the one exception to "host binaries by subpath": a
+      # bundled tool is spawned by bare name and never resolved on disk, so
+      # no prefix above can reach it and it must be named.  Silence here is
+      # not tightness — it is an agent that cannot `ls`.  `cmp`, `diff` and
+      # `rg` bundle only under non-default features, so they are host
+      # binaries here; a build that turns those on fails
+      # `every_grantable_base_settles_the_bundled_tools`, which names them.
+      #
+      # `rm`, `mv` and `truncate` are admitted like any other: what a
+      # confined child may destroy is settled by the `fs.write` prefixes
+      # above, which stop at the working tree and scratch.  Withholding the
+      # verbs as well would break `make clean` without protecting one byte
+      # the fs guard does not already hold.
+      #
+      # The `unix:` half of the set (`id`, `kill`, `stat`, `tac`, `test`,
+      # `timeout`) cannot link on Windows; `policy::base::drop_dead_exec_grants`
+      # strips those there, so listing them here stays honest on every host.
+      `name base64,
+      `name basename,
+      `name cat,
+      `name comm,
+      `name cp,
+      `name cut,
+      `name date,
+      `name df,
+      `name dirname,
+      `name du,
+      `name env,
+      `name head,
+      `name hostname,
+      `name id,
+      `name join,
+      `name kill,
+      `name ln,
+      `name ls,
+      `name mkdir,
+      `name mktemp,
+      `name mv,
+      `name nproc,
+      `name paste,
+      `name printenv,
+      `name printf,
+      `name pwd,
+      `name readlink,
+      `name realpath,
+      `name rm,
+      `name rmdir,
+      `name seq,
+      `name sha256sum,
+      `name sha512sum,
+      `name shuf,
+      `name sleep,
+      `name sort,
+      `name split,
+      `name stat,
+      `name tac,
+      `name tail,
+      `name tee,
+      `name test,
+      `name timeout,
+      `name touch,
+      `name tr,
+      `name truncate,
+      `name uname,
+      `name uniq,
+      `name wc,
+      `name whoami,
+      `name yes,
+    ],
   ],
 ]

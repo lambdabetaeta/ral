@@ -12,44 +12,40 @@
 # `reasonable` and lock down via deny.
 
 return [
-  net:   true,
-
-  shell: [chdir: true],
-
   # Reads as broad as `reasonable`: the agent should be able to read
   # the full project tree, system caches, tool configs.  All the
   # usual toolchain caches stay readable so e.g. `cargo metadata`
   # can resolve without rebuilding.
   fs: [
     read: [
-      'cwd:',                  # the project tree the agent is reviewing
-      '/tmp',
-      'tempdir:',              # `$TMPDIR` on macOS — distinct from /tmp
-      'xdg:config',            # ${XDG_CONFIG_HOME:-~/.config}
-      'xdg:data',              # ${XDG_DATA_HOME:-~/.local/share}
-      'xdg:cache',             # ${XDG_CACHE_HOME:-~/.cache}
-      'xdg:state',             # ${XDG_STATE_HOME:-~/.local/state}
-      'xdg:bin',               # ${XDG_BIN_HOME:-~/.local/bin}
-      '~/Library/Caches',      # macOS-native CLI caches outside the XDG world
-      '~/.cargo/registry',
-      '~/.cargo/git',
-      '~/.rustup',
-      '~/go',
-      '~/.npm',
-      '~/.gem',
-      '~/.bundle',
-      '~/.gradle/caches',
-      '~/.m2/repository',
-      '~/.pyenv',
-      '~/.rbenv',
-      '~/.nvm',
+      `cwd .,                # the project tree the agent is reviewing
+      `absolute /tmp,
+      `tempdir .,            # `$TMPDIR` on macOS — distinct from /tmp
+      `xdg-config .,         # ${XDG_CONFIG_HOME:-~/.config}
+      `xdg-data .,           # ${XDG_DATA_HOME:-~/.local/share}
+      `xdg-cache .,          # ${XDG_CACHE_HOME:-~/.cache}
+      `xdg-state .,          # ${XDG_STATE_HOME:-~/.local/state}
+      `xdg-bin .,            # ${XDG_BIN_HOME:-~/.local/bin}
+      `home Library/Caches,  # macOS-native CLI caches outside the XDG world
+      `home .cargo/registry,
+      `home .cargo/git,
+      `home .rustup,
+      `home go,
+      `home .npm,
+      `home .gem,
+      `home .bundle,
+      `home .gradle/caches,
+      `home .m2/repository,
+      `home .pyenv,
+      `home .rbenv,
+      `home .nvm,
 
       # Git config — `git log`, `git show`, `git diff` are core to
       # the review use case.  See `reasonable` for the credential
       # surface analysis: SSH keys and gpg keys stay unadmitted, so
       # authenticated network-git fails without explicit opt-in.
-      '~/.gitconfig',
-      'xdg:config/git',
+      `home .gitconfig,
+      `xdg-config git,
     ],
 
     # Writes only to scratch — the project tree is off-limits.  This is
@@ -58,19 +54,19 @@ return [
     # that need a workspace can use `$EXARCH_SCRATCH` (under
     # `tempdir:`) as their scratch root.
     write: [
-      '/tmp',
-      'tempdir:',
+      `absolute /tmp,
+      `tempdir .,
     ],
 
     # Same credential carve-outs as `reasonable`: these are present in
-    # `xdg:config` (read above) but the contents are OAuth tokens and
+    # `xdg-config` (read above) but the contents are OAuth tokens and
     # session secrets the agent should never see, even read-only.
     # exarch's and synod's own credential files are denied in
     # composition (`policy::for_invocation`), not here.
     deny: [
-      'xdg:config/gh',         # gh CLI — hosts.yml has the GitHub OAuth token
-      'xdg:config/op',         # 1Password CLI session
-      'xdg:config/gcloud',     # Google Cloud SDK OAuth
+      `xdg-config gh,      # gh CLI — hosts.yml has the GitHub OAuth token
+      `xdg-config op,      # 1Password CLI session
+      `xdg-config gcloud,  # Google Cloud SDK OAuth
     ],
   ],
 
@@ -81,131 +77,137 @@ return [
   # intentional: the agent can attempt the action and observe the
   # denial, rather than having "tool not found" surprise.
   exec: [
-    'xdg:bin/':            'allow',
-    'system:':             'allow',   # the platform's tool roots — see core/src/path/sigil.rs
-    '/usr/local/bin/':     'allow',
-    '/usr/local/sbin/':    'allow',
-    '/usr/sbin/':          'allow',
-    '/sbin/':              'allow',
-    'cwd:/':               'allow',   # read-only, so nothing can be dropped here to run
-    # No `/tmp/` or `tempdir:/`: those are this profile's only writable
-    # dirs, and a dir that is both writable and exec-admitted makes the
-    # denies below advisory — write a copy of `bash` into scratch under
-    # another name and the veto, a name veto, never sees it.
+    allow: [
+      `dir `xdg-bin .,
+      `dir `system,  # the platform's tool roots — see `system_tool_roots` in core/src/guard/freeze.rs
+      `dir `absolute /usr/local/bin,
+      `dir `absolute /usr/local/sbin,
+      `dir `absolute /usr/sbin,
+      `dir `absolute /sbin,
+      `dir `cwd .,   # read-only, so nothing can be dropped here to run
+      # No `/tmp/` or `tempdir:/`: those are this profile's only writable
+      # dirs, and a dir that is both writable and exec-admitted makes the
+      # denies below advisory — write a copy of `bash` into scratch under
+      # another name and the veto, a name veto, never sees it.
 
-    # Coreutils
-    base64:    'allow',
-    basename:  'allow',
-    cat:       'allow',
-    comm:      'allow',
-    cp:        'allow',
-    cut:       'allow',
-    date:      'allow',
-    df:        'allow',
-    dirname:   'allow',
-    du:        'allow',
-    echo:      'allow',
-    env:       'allow',
-    head:      'allow',
-    hostname:  'allow',
-    id:        'allow',
-    join:      'allow',
-    kill:      'deny',   # signalling is not reading; a review job has nothing to signal
-    ln:        'allow',
-    ls:        'allow',
-    mkdir:     'allow',
-    mktemp:    'allow',
-    mv:        'allow',
-    nproc:     'allow',
-    paste:     'allow',
-    printenv:  'allow',
-    printf:    'allow',
-    pwd:       'allow',
-    readlink:  'allow',
-    realpath:  'allow',
-    rm:        'allow',
-    rmdir:     'allow',
-    seq:       'allow',
-    sha256sum: 'allow',
-    sha512sum: 'allow',
-    shuf:      'allow',
-    sleep:     'allow',
-    sort:      'allow',
-    split:     'allow',
-    stat:      'allow',
-    tac:       'allow',
-    tail:      'allow',
-    tee:       'allow',
-    test:      'allow',
-    timeout:   'allow',
-    touch:     'allow',
-    tr:        'allow',
-    truncate:  'allow',
-    uname:     'allow',
-    uniq:      'allow',
-    wc:        'allow',
-    whoami:    'allow',
-    yes:       'allow',
+      # Coreutils
+      `name base64,
+      `name basename,
+      `name cat,
+      `name comm,
+      `name cp,
+      `name cut,
+      `name date,
+      `name df,
+      `name dirname,
+      `name du,
+      `name echo,
+      `name env,
+      `name head,
+      `name hostname,
+      `name id,
+      `name join,
+      `name ln,
+      `name ls,
+      `name mkdir,
+      `name mktemp,
+      `name mv,
+      `name nproc,
+      `name paste,
+      `name printenv,
+      `name printf,
+      `name pwd,
+      `name readlink,
+      `name realpath,
+      `name rm,
+      `name rmdir,
+      `name seq,
+      `name sha256sum,
+      `name sha512sum,
+      `name shuf,
+      `name sleep,
+      `name sort,
+      `name split,
+      `name stat,
+      `name tac,
+      `name tail,
+      `name tee,
+      `name test,
+      `name timeout,
+      `name touch,
+      `name tr,
+      `name truncate,
+      `name uname,
+      `name uniq,
+      `name wc,
+      `name whoami,
+      `name yes,
 
-    # Shells.  `cmd`/`powershell`/`pwsh` are the Windows analogues of
-    # bash/zsh — `system:` admits them unconditionally via
-    # `%SystemRoot%\System32` and the PowerShell home, so they get the
-    # same deny.
-    sh:   'allow',
-    bash: 'deny',
-    zsh:  'deny',
-    cmd:        'deny',
-    powershell: 'deny',
-    pwsh:       'deny',
+      # Shells.  `sh` only; the denied ones are below.
+      `name sh,
 
-    # Version control.  `git` is admitted; review work needs
-    # `git log`, `git diff`, `git show`.  Writes go to scratch only,
-    # so `git commit` (which writes objects into cwd:/.git) fails by
-    # fs guard — the agent can read history but not rewrite it.  See
-    # `reasonable` for the credential-helper analysis.
-    git: 'allow',
-    gh:  'allow',
+      # Version control.  `git` is admitted; review work needs
+      # `git log`, `git diff`, `git show`.  Writes go to scratch only,
+      # so `git commit` (which writes objects into cwd:/.git) fails by
+      # fs guard — the agent can read history but not rewrite it.  See
+      # `reasonable` for the credential-helper analysis.
+      `name git,
+      `name gh,
 
-    # Net fetch
-    curl: 'allow',
-    wget: 'allow',
+      # Net fetch
+      `name curl,
+      `name wget,
 
-    # Search / inspect
-    rg:    'allow',
-    fd:    'allow',
-    jq:    'allow',
-    yq:    'allow',
-    awk:   'allow',
-    gawk:  'allow',
-    find:  'allow',
-    xargs: 'allow',
-    file:  'allow',
-    which: 'allow',
+      # Search / inspect
+      `name rg,
+      `name fd,
+      `name jq,
+      `name yq,
+      `name awk,
+      `name gawk,
+      `name find,
+      `name xargs,
+      `name file,
+      `name which,
 
-    # Scripting runtimes (one-off scripts, common as tooling)
-    python:  'allow',
-    python3: 'allow',
+      # Scripting runtimes (one-off scripts, common as tooling)
+      `name python,
+      `name python3,
 
-    # Archives
-    tar:     'allow',
-    gzip:    'allow',
-    gunzip:  'allow',
-    bzip2:   'allow',
-    bunzip2: 'allow',
-    xz:      'allow',
-    zip:     'allow',
-    unzip:   'allow',
+      # Archives
+      `name tar,
+      `name gzip,
+      `name gunzip,
+      `name bzip2,
+      `name bunzip2,
+      `name xz,
+      `name zip,
+      `name unzip,
 
-    # Diff / patch / docs
-    cmp:   'allow',
-    diff:  'allow',
-    patch: 'allow',
-    less:  'allow',
-    man:   'allow',
+      # Diff / patch / docs
+      `name cmp,
+      `name diff,
+      `name patch,
+      `name less,
+      `name man,
 
-    # Process inspection (read-only)
-    ps:    'allow',
-    lsof:  'allow',
-    pgrep: 'allow',
+      # Process inspection (read-only)
+      `name ps,
+      `name lsof,
+      `name pgrep,
+    ],
+    deny: [
+      `name kill,  # signalling is not reading; a review job has nothing to signal
+
+      # Shells.  `cmd`/`powershell`/`pwsh` are the Windows analogues of
+      # bash/zsh — `system` admits them unconditionally via
+      # `%SystemRoot%\System32` and the PowerShell home, so they get the
+      # same deny.
+      `name bash,
+      `name zsh,
+      `name cmd,
+      `name powershell,
+      `name pwsh,
+    ],
   ],
 ]

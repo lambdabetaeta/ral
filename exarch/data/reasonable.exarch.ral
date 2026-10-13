@@ -1,8 +1,8 @@
 # `reasonable` bake-in.  Coreutils + a curated everyday-tooling set
 # (shells, version control, net fetch, search/inspect, scripting,
-# archives), plus directory-based allowance (trailing-`/` keys in
+# archives), plus directory-based allowance (`dir` targets in
 # `exec`) for the standard system / package-manager binary dirs, plus
-# everything already on `$PATH` via the `path:` sigil, so
+# everything already on `$PATH` via the `path` selector, so
 # build drivers (cargo, make, cc, npm, …) work out of the box and
 # user-installed tooling is automatically visible.
 # In spirit similar to Claude Code's default tool set.  The OS
@@ -14,31 +14,27 @@
 # Default base when `--base` is omitted.
 
 return [
-  net:   true,
-
-  shell: [chdir: true],
-
   # Build-toolchain caches, user-installed toolchains, and the
   # project tree itself.  The OS sandbox layer's readable system
   # paths (CommandLineTools, /opt/homebrew, /etc/alternatives, …)
   # are added separately, and the tool roots that may run come from
-  # `system:` below; this section covers what the OS layer can't
+  # `dir `system` below; this section covers what the OS layer can't
   # bake in.
   #
-  # Path-prefix sigils are expanded before grant matching:
-  #   * `~` / `~/sub` — the home directory.
-  #   * `xdg:NAME[/sub]` — an XDG basedir, honouring `XDG_*_HOME` env
-  #     vars with the Linux defaults universally.
-  #   * `cwd:[/sub]` — the working directory at session start.
-  #   * `tempdir:[/sub]` — `std::env::temp_dir()`.
-  #   * `gitdir:[/sub]` — the git directory of the repository the cwd is in.
+  # Places are frozen when the grant is decoded:
+  #   * `home SUB` — SUB under the home directory.
+  #   * `xdg-NAME SUB` — SUB under an XDG basedir, honouring `XDG_*_HOME`
+  #     env vars with the Linux defaults universally.
+  #   * `cwd SUB` — SUB under the working directory at session start.
+  #   * `tempdir SUB` — SUB under `std::env::temp_dir()`.
+  #   * `gitdir SUB` — SUB under the git directory of the repository the cwd is in.
   #     Where `.git` is a *file* naming that directory, the directory must
   #     name this working tree back (a linked worktree's `gitdir` file, or
   #     `core.worktree` in a `--separate-git-dir` config) — the file itself
   #     sits in the tree this grant makes writable, so on its own it would
   #     choose the grant.  A pointer nothing claims refuses the session.
   #
-  # See `core/src/path/sigil.rs` for the recognised tokens.
+  # `absolute P` names an absolute path; `.` as SUB is the anchor itself.
   #
   # Tool-specific caches and registries (~/.cargo/registry,
   # ~/.gradle/caches, ~/.m2/repository, …) are scoped to the cache
@@ -48,49 +44,49 @@ return [
   # ~/.m2/settings.xml hold repository credentials.
   #
   # The XDG basedirs are all readable so tools find their configs,
-  # data files, and binaries — but only `xdg:cache` is writable.
+  # data files, and binaries — but only `xdg-cache` is writable.
   # Two reasons for the asymmetry:
   #
-  #   * `xdg:bin` is on the human's `$PATH`. A program dropped there
+  #   * `xdg-bin` is on the human's `$PATH`. A program dropped there
   #     outlives the session and is run tomorrow by the user, with the
   #     user's authority — not this projection's.
   #
-  #   * `xdg:config` holds credentials for many tools (gh, op,
+  #   * `xdg-config` holds credentials for many tools (gh, op,
   #     gcloud OAuth tokens, …).  Read is accepted as a
   #     data-exfiltration risk; write would let an agent rewrite
   #     those configs.
   fs: [
     read: [
-      'cwd:',                   # the project tree the agent is working in
-      'gitdir:',                # the actual git directory (handles worktrees)
-      '/tmp',
-      'tempdir:',               # `$TMPDIR` on macOS — distinct from /tmp
-      'xdg:config',             # ${XDG_CONFIG_HOME:-~/.config}
-      'xdg:data',               # ${XDG_DATA_HOME:-~/.local/share}
-      'xdg:cache',              # ${XDG_CACHE_HOME:-~/.cache}
-      'xdg:state',              # ${XDG_STATE_HOME:-~/.local/state}
-      'xdg:bin',                # ${XDG_BIN_HOME:-~/.local/bin}
-      '~/Library/Caches',       # macOS-native CLI caches outside the XDG world
-      '~/.cargo/bin',       # rustup shims (cargo, rustc, clippy, rustfmt, …)
-      '~/.cargo/registry',
-      '~/.cargo/git',
-      '~/.rustup',
-      '~/go',
-      '~/.npm',
-      '~/.gem',
-      '~/.bundle',
-      '~/.gradle/caches',
-      '~/.m2/repository',
-      '~/.pyenv',
-      '~/.rbenv',
-      '~/.nvm',
-      '~/.volta',              # Volta (Node.js version manager)
-      '~/.ghcup',              # GHCup Haskell toolchain
-      '~/.cabal',              # Cabal — bin/, store/, packages/
-      '~/.stack',              # Haskell Stack — programs/, snapshots/
-      '~/.opam',               # OCaml opam switch installs
-      '~/.asdf',               # asdf version manager
-      '~/.sdkman',             # SDKMAN (Java, Kotlin, Scala, Maven, …)
+      `cwd .,                # the project tree the agent is working in
+      `gitdir .,             # the actual git directory (handles worktrees)
+      `absolute /tmp,
+      `tempdir .,            # `$TMPDIR` on macOS — distinct from /tmp
+      `xdg-config .,         # ${XDG_CONFIG_HOME:-~/.config}
+      `xdg-data .,           # ${XDG_DATA_HOME:-~/.local/share}
+      `xdg-cache .,          # ${XDG_CACHE_HOME:-~/.cache}
+      `xdg-state .,          # ${XDG_STATE_HOME:-~/.local/state}
+      `xdg-bin .,            # ${XDG_BIN_HOME:-~/.local/bin}
+      `home Library/Caches,  # macOS-native CLI caches outside the XDG world
+      `home .cargo/bin,      # rustup shims (cargo, rustc, clippy, rustfmt, …)
+      `home .cargo/registry,
+      `home .cargo/git,
+      `home .rustup,
+      `home go,
+      `home .npm,
+      `home .gem,
+      `home .bundle,
+      `home .gradle/caches,
+      `home .m2/repository,
+      `home .pyenv,
+      `home .rbenv,
+      `home .nvm,
+      `home .volta,          # Volta (Node.js version manager)
+      `home .ghcup,          # GHCup Haskell toolchain
+      `home .cabal,          # Cabal — bin/, store/, packages/
+      `home .stack,          # Haskell Stack — programs/, snapshots/
+      `home .opam,           # OCaml opam switch installs
+      `home .asdf,           # asdf version manager
+      `home .sdkman,         # SDKMAN (Java, Kotlin, Scala, Maven, …)
 
       # Git config.  Every git invocation (including `git status`)
       # reads ~/.gitconfig for user.name / user.email / aliases.  The
@@ -100,12 +96,12 @@ return [
       # admit.  HTTPS push fails too, by a door rather than a path:
       # osxkeychain asks securityd, which the base profile withholds
       # because the same door hands out keychain items.
-      '~/.gitconfig',
-      '~/.gitignore_global',     # path `core.excludesfile` points at by default
-      'xdg:config/git',
+      `home .gitconfig,
+      `home .gitignore_global,  # path `core.excludesfile` points at by default
+      `xdg-config git,
     ],
     # Writes go to ephemeral / recoverable surfaces only — the working
-    # tree, scratch directories, and `xdg:cache`.  The XDG spec defines
+    # tree, scratch directories, and `xdg-cache`.  The XDG spec defines
     # cache contents as re-derivable, so a hallucinating agent that
     # corrupts `~/.cache/foo` causes at most a re-fetch.  Modern tooling
     # (uv, pnpm, bun, mise, ruff, hatch, …) respects `$XDG_CACHE_HOME`
@@ -119,26 +115,26 @@ return [
     # at session entry by exarch's runtime, so `cargo build` and friends
     # work without the agent having to know any redirection protocol.
     #
-    # `xdg:config`, `xdg:data`, `xdg:state`, `xdg:bin` stay non-writable
+    # `xdg-config`, `xdg-data`, `xdg-state`, `xdg-bin` stay non-writable
     # for one reason in three dresses: each is read later by something
-    # this projection does not confine.  A program under `xdg:bin` is run
+    # this projection does not confine.  A program under `xdg-bin` is run
     # tomorrow by the user off their own `$PATH`; a rewritten gitconfig or
     # npmrc is obeyed by the user's own git and npm (`core.pager` is a
     # command); persistent state is trusted by whatever wrote it.
     #
-    # The writable set below is not free of that hazard — `cwd:` and
-    # `gitdir:` hold hooks, `.envrc`, `package.json` scripts, Makefiles,
+    # The writable set below is not free of that hazard — `cwd` and
+    # `gitdir` hold hooks, `.envrc`, `package.json` scripts, Makefiles,
     # all of which the user's unconfined tooling executes on sight.  No
     # capability names that class today; see the wiki's `design/grant`.
     write: [
-      'cwd:',
-      '/tmp',
-      'tempdir:',
-      'xdg:cache',
-      'gitdir:',
+      `cwd .,
+      `absolute /tmp,
+      `tempdir .,
+      `xdg-cache .,
+      `gitdir .,
     ],
 
-    # Per-tool credential subdirs of `xdg:config`.  The broad `xdg:config`
+    # Per-tool credential subdirs of `xdg-config`.  The broad `xdg-config`
     # read above is intentional (tools mysteriously break without their
     # config), but a few well-known dirs hold OAuth tokens or session
     # secrets the agent should never see, even read-only.  These are
@@ -146,186 +142,188 @@ return [
     # exarch's and synod's own credential files are denied in
     # composition (`policy::for_invocation`), not here.
     deny: [
-      'xdg:config/gh',      # gh CLI — hosts.yml has the GitHub OAuth token
-      'xdg:config/op',      # 1Password CLI session
-      'xdg:config/gcloud',  # Google Cloud SDK OAuth
+      `xdg-config gh,      # gh CLI — hosts.yml has the GitHub OAuth token
+      `xdg-config op,      # 1Password CLI session
+      `xdg-config gcloud,  # Google Cloud SDK OAuth
     ],
   ],
 
-  # Directory-based exec admittance.  A key ending in `/` is a subpath
+  # Directory-based exec admittance.  A `dir` target is a subpath
   # prefix: any binary whose resolved absolute path lies inside the
-  # directory is admitted with `'allow'`.  Per-name entries below win on
+  # directory is admitted.  Per-name entries below win on
   # more-specific match: a literal key always beats a directory prefix.
   exec: [
-    # Admit every binary on PATH.  Expands at freeze time: each `:`
-    # separator in `$PATH` becomes a `dirs` entry with this verdict.
-    # Per-name entries still beat the directory entries
-    # because literal keys win on more-specific match.
-    'path:': 'allow',
+    allow: [
+      # Admit every binary on PATH.  Expands at freeze time: each `:`
+      # separator in `$PATH` becomes a `dir` entry.
+      # Per-name entries still beat the directory entries
+      # because literal keys win on more-specific match.
+      `dir `path,
 
-    'xdg:bin/':            'allow',   # ${XDG_BIN_HOME:-~/.local/bin}
-    'system:':             'allow',   # the platform's tool roots — see core/src/path/sigil.rs
-    '/usr/local/bin/':     'allow',
-    '/usr/local/sbin/':    'allow',
-    '/usr/sbin/':          'allow',
-    '/sbin/':              'allow',
-    # These three are writable as well as admitted — a general agent
-    # builds and runs what it built.  The fs and net grants are what
-    # confine this profile; use `edit-only` or `read-only`, where no
-    # admitted directory is writable, when the boundary has to hold
-    # against the agent rather than steer it (wiki: design/grant
-    # §Concessions).
-    'cwd:/':               'allow',   # scripts the agent drops into the project tree
-    '/tmp/':               'allow',   # scratch builds (autotools `./configure`, ad-hoc scripts)
-    'tempdir:/':           'allow',   # `$TMPDIR` on macOS — distinct from /tmp
-    '~/.cargo/bin/':        'allow',   # rustup shims — cargo, rustc, clippy, rustfmt, …
-    '~/.rustup/toolchains/': 'allow', # toolchain binaries the shims dispatch to
+      `dir `xdg-bin .,  # ${XDG_BIN_HOME:-~/.local/bin}
+      `dir `system,     # the platform's tool roots — see `system_tool_roots` in core/src/guard/freeze.rs
+      `dir `absolute /usr/local/bin,
+      `dir `absolute /usr/local/sbin,
+      `dir `absolute /usr/sbin,
+      `dir `absolute /sbin,
+      # These three are writable as well as admitted — a general agent
+      # builds and runs what it built.  The fs and net grants are what
+      # confine this profile; use `edit-only` or `read-only`, where no
+      # admitted directory is writable, when the boundary has to hold
+      # against the agent rather than steer it (wiki: design/grant
+      # §Concessions).
+      `dir `cwd .,                    # scripts the agent drops into the project tree
+      `dir `absolute /tmp,            # scratch builds (autotools `./configure`, ad-hoc scripts)
+      `dir `tempdir .,                # `$TMPDIR` on macOS — distinct from /tmp
+      `dir `home .cargo/bin,          # rustup shims — cargo, rustc, clippy, rustfmt, …
+      `dir `home .rustup/toolchains,  # toolchain binaries the shims dispatch to
 
-    # Go — official installer lands in /usr/local/go/bin/;
-    # `go install` writes user tools to ~/go/bin/ (GOPATH/bin default).
-    '/usr/local/go/bin/':    'allow',
-    '~/go/bin/':             'allow',
+      # Go — official installer lands in /usr/local/go/bin/;
+      # `go install` writes user tools to ~/go/bin/ (GOPATH/bin default).
+      `dir `absolute /usr/local/go/bin,
+      `dir `home go/bin,
 
-    # Node.js / JavaScript
-    '~/.nvm/versions/':      'allow',  # nvm — resolves through all versions/<v>/bin/
-    '~/.volta/bin/':         'allow',  # Volta shims (node, npm, yarn, pnpm, …)
+      # Node.js / JavaScript
+      `dir `home .nvm/versions,  # nvm — resolves through all versions/<v>/bin/
+      `dir `home .volta/bin,     # Volta shims (node, npm, yarn, pnpm, …)
 
-    # Ruby — rbenv dispatches through shims before exec'ing the versioned binary.
-    '~/.rbenv/shims/':       'allow',
-    '~/.rbenv/versions/':    'allow',
+      # Ruby — rbenv dispatches through shims before exec'ing the versioned binary.
+      `dir `home .rbenv/shims,
+      `dir `home .rbenv/versions,
 
-    # Python — pyenv, same two-layer dispatch as rbenv.
-    '~/.pyenv/shims/':       'allow',
-    '~/.pyenv/versions/':    'allow',
+      # Python — pyenv, same two-layer dispatch as rbenv.
+      `dir `home .pyenv/shims,
+      `dir `home .pyenv/versions,
 
-    # Haskell — GHCup is the recommended installer (GHC, Cabal, HLS);
-    # Cabal and Stack each maintain their own installed-executables dirs.
-    '~/.ghcup/bin/':         'allow',
-    '~/.cabal/bin/':         'allow',
-    '~/.stack/programs/':    'allow',  # Stack-managed GHC toolchains
+      # Haskell — GHCup is the recommended installer (GHC, Cabal, HLS);
+      # Cabal and Stack each maintain their own installed-executables dirs.
+      `dir `home .ghcup/bin,
+      `dir `home .cabal/bin,
+      `dir `home .stack/programs,  # Stack-managed GHC toolchains
 
-    # OCaml — opam switch bins live at ~/.opam/<switch>/bin/ so the whole
-    # tree needs a subpath prefix.
-    '~/.opam/':              'allow',
+      # OCaml — opam switch bins live at ~/.opam/<switch>/bin/ so the whole
+      # tree needs a subpath prefix.
+      `dir `home .opam,
 
-    # Universal version managers (cover multiple languages each).
-    '~/.asdf/shims/':        'allow',
-    '~/.asdf/installs/':     'allow',
-    '~/.sdkman/candidates/': 'allow',  # Java, Kotlin, Scala, Groovy, Maven, …
+      # Universal version managers (cover multiple languages each).
+      `dir `home .asdf/shims,
+      `dir `home .asdf/installs,
+      `dir `home .sdkman/candidates,  # Java, Kotlin, Scala, Groovy, Maven, …
 
-    # The per-name entries below are not a second opinion on what the
-    # directories above already admit.  The coreutils linked into the ral
-    # binary (`core/src/uutils.rs`) are spawned by bare name and never
-    # resolved on disk, so no prefix above can reach one: a bundled tool
-    # left unnamed here is unrunnable.  `cmp`, `diff` and `rg` bundle only
-    # under non-default features, and are named too so this profile holds
-    # whichever way the binary was built.  The rest are host binaries,
-    # named so the everyday set does not depend on what `$PATH` happened
-    # to hold when the profile froze.
-    #
-    # Coreutils
-    base64:    'allow',
-    basename:  'allow',
-    cat:       'allow',
-    comm:      'allow',
-    cp:        'allow',
-    cut:       'allow',
-    date:      'allow',
-    df:        'allow',
-    dirname:   'allow',
-    du:        'allow',
-    echo:      'allow',
-    env:       'allow',
-    head:      'allow',
-    hostname:  'allow',
-    id:        'allow',
-    join:      'allow',
-    kill:      'allow',
-    ln:        'allow',
-    ls:        'allow',
-    mkdir:     'allow',
-    mktemp:    'allow',
-    mv:        'allow',
-    nproc:     'allow',
-    paste:     'allow',
-    printenv:  'allow',
-    printf:    'allow',
-    pwd:       'allow',
-    readlink:  'allow',
-    realpath:  'allow',
-    rm:        'allow',
-    rmdir:     'allow',
-    seq:       'allow',
-    sha256sum: 'allow',
-    sha512sum: 'allow',
-    shuf:      'allow',
-    sleep:     'allow',
-    sort:      'allow',
-    split:     'allow',
-    stat:      'allow',
-    tac:       'allow',
-    tail:      'allow',
-    tee:       'allow',
-    test:      'allow',
-    timeout:   'allow',
-    touch:     'allow',
-    tr:        'allow',
-    truncate:  'allow',
-    uname:     'allow',
-    uniq:      'allow',
-    wc:        'allow',
-    whoami:    'allow',
-    yes:       'allow',
+      # The per-name entries below are not a second opinion on what the
+      # directories above already admit.  The coreutils linked into the ral
+      # binary (`core/src/uutils.rs`) are spawned by bare name and never
+      # resolved on disk, so no prefix above can reach one: a bundled tool
+      # left unnamed here is unrunnable.  `cmp`, `diff` and `rg` bundle only
+      # under non-default features, and are named too so this profile holds
+      # whichever way the binary was built.  The rest are host binaries,
+      # named so the everyday set does not depend on what `$PATH` happened
+      # to hold when the profile froze.
+      #
+      # Coreutils
+      `name base64,
+      `name basename,
+      `name cat,
+      `name comm,
+      `name cp,
+      `name cut,
+      `name date,
+      `name df,
+      `name dirname,
+      `name du,
+      `name echo,
+      `name env,
+      `name head,
+      `name hostname,
+      `name id,
+      `name join,
+      `name kill,
+      `name ln,
+      `name ls,
+      `name mkdir,
+      `name mktemp,
+      `name mv,
+      `name nproc,
+      `name paste,
+      `name printenv,
+      `name printf,
+      `name pwd,
+      `name readlink,
+      `name realpath,
+      `name rm,
+      `name rmdir,
+      `name seq,
+      `name sha256sum,
+      `name sha512sum,
+      `name shuf,
+      `name sleep,
+      `name sort,
+      `name split,
+      `name stat,
+      `name tac,
+      `name tail,
+      `name tee,
+      `name test,
+      `name timeout,
+      `name touch,
+      `name tr,
+      `name truncate,
+      `name uname,
+      `name uniq,
+      `name wc,
+      `name whoami,
+      `name yes,
 
-    # Shells
-    sh:   'allow',
+      # Shells
+      `name sh,
 
-    # Version control.  What git can and cannot do here follows from the
-    # fs reads above (~/.gitconfig yes, ~/.ssh and ~/.gnupg no); cargo
-    # fetches git dependencies through this binary — see PROFILES.md.
-    git: 'allow',
-    gh:  'allow',
+      # Version control.  What git can and cannot do here follows from the
+      # fs reads above (~/.gitconfig yes, ~/.ssh and ~/.gnupg no); cargo
+      # fetches git dependencies through this binary — see PROFILES.md.
+      `name git,
+      `name gh,
 
-    # Net fetch
-    curl: 'allow',
-    wget: 'allow',
+      # Net fetch
+      `name curl,
+      `name wget,
 
-    # Search / inspect
-    rg:    'allow',
-    fd:    'allow',
-    jq:    'allow',
-    yq:    'allow',
-    awk:   'allow',
-    gawk:  'allow',
-    find:  'allow',
-    xargs: 'allow',
-    file:  'allow',
-    which: 'allow',
+      # Search / inspect
+      `name rg,
+      `name fd,
+      `name jq,
+      `name yq,
+      `name awk,
+      `name gawk,
+      `name find,
+      `name xargs,
+      `name file,
+      `name which,
 
-    # Scripting runtimes (one-off scripts, common as tooling)
-    python:  'allow',
-    python3: 'allow',
+      # Scripting runtimes (one-off scripts, common as tooling)
+      `name python,
+      `name python3,
 
-    # Archives
-    tar:     'allow',
-    gzip:    'allow',
-    gunzip:  'allow',
-    bzip2:   'allow',
-    bunzip2: 'allow',
-    xz:      'allow',
-    zip:     'allow',
-    unzip:   'allow',
+      # Archives
+      `name tar,
+      `name gzip,
+      `name gunzip,
+      `name bzip2,
+      `name bunzip2,
+      `name xz,
+      `name zip,
+      `name unzip,
 
-    # Diff / patch / docs
-    cmp:   'allow',
-    diff:  'allow',
-    patch: 'allow',
-    less:  'allow',
-    man:   'allow',
+      # Diff / patch / docs
+      `name cmp,
+      `name diff,
+      `name patch,
+      `name less,
+      `name man,
 
-    # Process inspection (read-only)
-    ps:    'allow',
-    lsof:  'allow',
-    pgrep: 'allow',
+      # Process inspection (read-only)
+      `name ps,
+      `name lsof,
+      `name pgrep,
+    ],
   ],
 ]
