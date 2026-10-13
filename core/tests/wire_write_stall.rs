@@ -50,6 +50,20 @@ fn big_run() -> Run {
     Run::captured("x".repeat(16 * 1024 * 1024), "<test>")
 }
 
+/// Whether `peer` has bytes waiting, without consuming any: the one
+/// observable proof that the other end has begun a write. A write holds the
+/// transport's write lock for its whole frame, so against a peer that never
+/// drains, bytes on the wire mean the writer is parked holding that lock.
+fn has_inbound_bytes(peer: &UnixStream) -> bool {
+    use rustix::event::{PollFd, PollFlags, Timespec, poll};
+    let now = Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    let mut fds = [PollFd::new(peer, PollFlags::IN)];
+    poll(&mut fds, Some(&now)).expect("poll") > 0
+}
+
 /// A generous bound against dev-fleet jitter, still an order of magnitude
 /// under the production 25s default: every assertion here must resolve well
 /// inside the brisk write deadline above, not merely inside this ceiling.
@@ -98,14 +112,19 @@ fn a_stuck_write_still_declares_death() {
 fn a_write_stalled_cancel_returns_and_declares_death() {
     let (host_end, peer_end) = UnixStream::pair().expect("socketpair");
     let transport = Arc::new(WireTransport::adopt(host_end, brisk_liveness()).expect("adopt"));
-    let _peer = peer_end;
+    // Held open and never read: the peer that goes quiet mid-connection.
+    let peer = peer_end;
 
     let dispatcher = transport.clone();
     std::thread::spawn(move || {
         dispatcher.dispatch(DispatchId(1), big_run(), &no_seam());
     });
-    // Give the dispatch a moment to park mid-write, holding the write lock.
-    std::thread::sleep(Duration::from_millis(50));
+    // Park the cancel behind the dispatch, not ahead of it: a cancel that won
+    // the lock first would write its frame into an empty buffer and return.
+    assert!(
+        eventually(BOUND, || has_inbound_bytes(&peer).then_some(())).is_some(),
+        "setup: the dispatch must be mid-write, holding the write lock"
+    );
 
     let started = Instant::now();
     transport.control().cancel(DispatchId(1));
