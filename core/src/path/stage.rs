@@ -111,8 +111,8 @@ fn read_capped(mut file: File) -> Option<Vec<u8>> {
 impl Located {
     /// Stage an atomic `>` beside this target.  `existing` is its stat when it
     /// exists: its mode is carried onto the staged file, since a redirect must
-    /// not silently narrow a 0644 file; a new file gets what `open(2)` would
-    /// have created under the umask.
+    /// not silently narrow a 0644 file; a new file keeps what its create gave
+    /// it, 0o666 under the umask.
     ///
     /// # Errors
     /// The staging create's, or the mode's.
@@ -120,22 +120,12 @@ impl Located {
         let (file, tmp) = self.create_sibling_tmp()?;
         // Latched before the first fallible step, so an early `?` unlinks it.
         let pending = PendingWrite(Some(Staged { target: self, tmp }));
+        // The umask is never read: reading it means setting it, which races
+        // other threads' creates.
         #[cfg(unix)]
-        {
+        if let Some(existing) = existing {
             use std::os::unix::fs::PermissionsExt;
-            let mode = existing.map_or_else(
-                || {
-                    // `rustix::process::umask` has no read-only form: set a
-                    // throwaway value to read the mask, then put it back.
-                    let prev = rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o022));
-                    rustix::process::umask(prev);
-                    #[allow(clippy::useless_conversion)] // libc::mode_t is u16 on macOS/BSD
-                    let mask = u32::from(prev.as_raw_mode());
-                    0o666 & !mask
-                },
-                |s| s.mode,
-            );
-            file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+            file.set_permissions(std::fs::Permissions::from_mode(existing.mode))?;
         }
         #[cfg(not(unix))]
         let _ = existing;
