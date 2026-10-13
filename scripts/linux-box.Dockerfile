@@ -19,6 +19,10 @@ FROM rust:bookworm
 # *-sys; libssl-dev the handful preferring system OpenSSL to rustls.
 # musl-tools gives them `musl-gcc`, the C half of the musl target.
 #
+# clang is the C compiler `just check-linux` names for both arches: gcc here
+# targets only this image's own, and clang assembles psm's stack switching for
+# the other without a cross toolchain.
+#
 # bubblewrap is the Linux sandbox backend itself.  Absent, every test that
 # spawns an envelope *skips* — which reads exactly like a pass, and is how
 # a `deny` rendering that could not even launch went unnoticed.
@@ -32,6 +36,7 @@ RUN apt-get update \
         libssl-dev \
         cmake \
         musl-tools \
+        clang \
         git \
         curl \
         ca-certificates \

@@ -120,8 +120,9 @@ fi
 
 # The bwrap envelope on both arches.  `lint` compiles it for this host's alone,
 # and on macOS not at all, so this is the only step that reads the x32 guard and
-# the aarch64 filter in the same run.  Its targets are rust-toolchain.toml's, so
-# unlike check-windows it needs nothing the box does not already install.
+# the aarch64 filter in the same run.  Its targets are rust-toolchain.toml's and
+# its C compiler is the clang the box installs, so unlike check-windows it needs
+# nothing the box does not already carry.
 step check-linux
 
 # The Seatbelt half, for the same reason read the other way: a Linux `lint`

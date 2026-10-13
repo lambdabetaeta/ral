@@ -67,7 +67,13 @@ check-windows $RUSTFLAGS=deny:
 # so no host needs a target it was not already going to install. Scoped to
 # ral-core: ral-ripgrep-core's tikv-jemallocator compiles jemalloc's C, which
 # needs a musl cross toolchain ("C compiler cannot create executables").
-check-linux $RUSTFLAGS=deny:
+#
+# Even ral-core has C to assemble: psm, under serde_stacker, builds its
+# stack-switching routines in a build script that `cargo check` runs too, and
+# cc-rs would ask for a `<arch>-linux-musl-gcc` that no host has for its cross
+# arch. clang assembles for any target with no sysroot, so it is the one
+# compiler for both arches, on whichever host runs this.
+check-linux $RUSTFLAGS=deny $CC_aarch64_unknown_linux_musl='clang' $CC_x86_64_unknown_linux_musl='clang':
     cargo check -p ral-core --all-targets --target aarch64-unknown-linux-musl
     cargo check -p ral-core --all-targets --target x86_64-unknown-linux-musl
 
@@ -77,10 +83,14 @@ check-linux $RUSTFLAGS=deny:
 # on a Mac, and a build break there alone.
 #
 # One arch, Seatbelt being no more arch-conditional than the rest of it. Never
-# links, so a Linux host can run it, and the bogus CC sends blake3's build
-# script down its pure-Rust path as check-windows does. Unlike check-linux's,
-# this target is one rust-toolchain.toml installs for this recipe's sake alone.
-check-macos $RUSTFLAGS=deny $CC_aarch64_apple_darwin='cc-absent-use-blake3-pure-fallback':
+# links, so a Linux host can run it. Unlike check-linux's, this target is one
+# rust-toolchain.toml installs for this recipe's sake alone.
+#
+# A C toolchain is needed at all because psm, under serde_stacker, assembles
+# its stack-switching routines in a build script that `cargo check` runs too.
+# clang assembles for any target with no SDK or sysroot, so a Linux host runs
+# this as readily as a Mac, where clang is the system compiler.
+check-macos $RUSTFLAGS=deny $CC_aarch64_apple_darwin='clang':
     cargo check -p ral-core --all-targets --target aarch64-apple-darwin
 
 # plugins/*.ral are left out: the `_ed-*` builtins they call live only on the
