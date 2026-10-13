@@ -222,13 +222,20 @@ broker-uninstall:
     -sc.exe stop SynodMachineBroker
     sc.exe delete SynodMachineBroker
 
+# The guest media and the check that they match this host are the bundle's
+# business alone, so both live in tauri.bundle.conf.json, which only a bundle
+# names: tauri-build copies a config's resources while *compiling* synod, and a
+# checkout with no built guest image could then not even `cargo check` it.
+# `--config` merges that file over tauri.conf.json and the platform's own, and
+# the merged result is what the cargo build underneath reads.
+
 # Bundle synod into a macOS .app (+ .dmg); needs the Tauri CLI and a built arm64 guest image.
 [working-directory('synod')]
 synod-app:
-    cargo tauri build
+    cargo tauri build --config tauri.bundle.conf.json
 
 # Bundle synod into a Windows .msi installer; needs the Tauri CLI and an x86_64 guest image (built from a Unix host).
 [working-directory('synod')]
 synod-msi:
     cargo build --release -p vm-manager --bin synod-machine-broker
-    cargo tauri build
+    cargo tauri build --config tauri.bundle.conf.json

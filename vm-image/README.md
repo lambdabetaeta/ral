@@ -65,8 +65,8 @@ Two consequences worth stating before they surprise anyone:
   no qemu is involved on either host.
 
 Because a developer builds one guest at a time, `out/` deliberately does **not**
-encode the architecture in any path — `synod/src/boot.rs` and the bundles'
-resource maps look in the one fixed place. `out/boot/boot-manifest.txt`'s
+encode the architecture in any path — `synod/src/boot.rs` and the bundle's
+resource map look in the one fixed place. `out/boot/boot-manifest.txt`'s
 leading `arch=` line is how you know which guest is currently sitting there.
 
 That same manifest carries a `boot_contract=` line — the generation of `ral.`

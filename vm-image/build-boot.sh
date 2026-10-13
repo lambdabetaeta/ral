@@ -56,9 +56,8 @@
 # The output paths deliberately do not encode the architecture: a developer
 # builds the media for their own host, one arch at a time, and synod's
 # boot-media discovery (synod/src/boot.rs) looks in this one place — as does
-# the bundle's resource map (synod/tauri.conf.json and its Windows
-# counterpart). boot-manifest.txt's `arch=` line is how you know which guest
-# is currently sitting in out/boot/.
+# the bundle's resource map (synod/tauri.bundle.conf.json). boot-manifest.txt's
+# `arch=` line is how you know which guest is currently sitting in out/boot/.
 
 set -euo pipefail
 

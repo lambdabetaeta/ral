@@ -3,10 +3,14 @@
 //!
 //! Packaging's business, so it runs from `beforeBuildCommand` rather than
 //! `build.rs`, where a stale image would be a compile error for the whole
-//! workspace.  Absent media is not a failure: when none of the boot media
-//! exists, the bundler names the missing resource itself.  Media *without* its
-//! manifest is one — a kernel or initramfs from an older pipeline, which
-//! nothing here could check — so it is refused rather than packaged unchecked.
+//! workspace.  That command sits in `tauri.bundle.conf.json`, beside the
+//! resource map it is about, and only `cargo tauri build --config` names the
+//! file: in `tauri.conf.json` the map would have tauri-build look for the
+//! media on every compile.  Absent media is not a failure: when none of the
+//! boot media exists, the bundler names the missing resource itself.  Media
+//! *without* its manifest is one — a kernel or initramfs from an older
+//! pipeline, which nothing here could check — so it is refused rather than
+//! packaged unchecked.
 
 #![allow(
     clippy::disallowed_macros,

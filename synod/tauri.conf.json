@@ -3,8 +3,7 @@
   "productName": "Synod",
   "identifier": "app.synod.desktop",
   "build": {
-    "frontendDist": "./ui",
-    "beforeBuildCommand": "cargo run --quiet -p synod --example check-media"
+    "frontendDist": "./ui"
   },
   "app": {
     "withGlobalTauri": true,
@@ -36,12 +35,6 @@
       "icons/icon.ico",
       "icons/icon.png"
     ],
-    "resources": {
-      "../vm-image/out/boot/kernel": "boot/kernel",
-      "../vm-image/out/boot/initramfs.img": "boot/initramfs.img",
-      "../vm-image/out/rootfs.img.zst": "boot/rootfs.img.zst",
-      "../vm-image/out/rootfs.img.sha256": "boot/rootfs.img.sha256"
-    },
     "macOS": {
       "entitlements": "./Entitlements.plist",
       "signingIdentity": "-"

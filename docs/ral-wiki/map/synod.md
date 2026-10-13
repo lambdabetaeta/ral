@@ -45,7 +45,7 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
   its own.
 - `build.rs` — the Tauri build and nothing else (`tauri_build::build()`).
 - `examples/check-media.rs` — the one thing the bundle cannot check for
-  itself, run as `tauri.conf.json`'s `beforeBuildCommand`: it reads
+  itself, run as `tauri.bundle.conf.json`'s `beforeBuildCommand`: it reads
   `vm-image/out/boot/boot-manifest.txt` and puts it to both
   `ral_daemon::boot::check_media` and `ral_core::protocol::check_media`, so
   media whose boot contract or engine protocol is not this host's fails

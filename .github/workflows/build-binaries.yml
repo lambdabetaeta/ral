@@ -248,7 +248,7 @@ jobs:
   # scripts drive, and which the Ubuntu runner images carry — pulls the base
   # image for the host it is on.
   #
-  # Only the four files `synod/tauri.conf.json` lists as resources are kept.
+  # Only the four files `synod/tauri.bundle.conf.json` lists as resources are kept.
   # The uncompressed rootfs.img is gigabytes and no bundle reads it: what ships
   # is the zstd-compressed image and the checksum of what it decompresses to.
   guest-image:
@@ -336,7 +336,7 @@ jobs:
       - name: Bundle
         shell: bash
         working-directory: synod
-        run: cargo tauri build
+        run: cargo tauri build --config tauri.bundle.conf.json
       - name: Name the artifact
         shell: bash
         run: |
