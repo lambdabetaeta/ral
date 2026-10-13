@@ -135,9 +135,7 @@ impl Shell {
     /// audit, no refusal: the question a door asks about a *side* read it
     /// may simply forgo, such as a write's before-image.
     pub fn admits_fs_exact(&self, op: &FsOp, real: &std::path::Path) -> bool {
-        self.context
-            .grants
-            .admits_fs_exact(op, real)
+        self.context.grants.admits_fs_exact(op, real)
     }
 
     /// The OS-renderable projection of the live capability stack; `None` when

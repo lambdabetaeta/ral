@@ -36,10 +36,9 @@ pub(crate) fn build_launch(
     let jail = shell.guest_jail();
     let admitted = &plan.admitted;
     let mut cmd = if jail.is_none()
-        && let Some(projection) = crate::sandbox::SandboxProjection::of(
-            &shell.context.grants,
-            Some(admitted),
-        ) {
+        && let Some(projection) =
+            crate::sandbox::SandboxProjection::of(&shell.context.grants, Some(admitted))
+    {
         // A `grant` body evaluates in this process unconfined; spawned children
         // are the only thing an OS sandbox reaches, and this is where it does.
         crate::sandbox::projection_enforceable(&projection)?;

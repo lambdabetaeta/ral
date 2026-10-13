@@ -226,7 +226,11 @@ mod words {
             (ExecKey::Name("sh".into()), Evidence::DENY),
         ]);
         let e = refusal(&ctx([deny]), &real.to_string());
-        assert!(e.message.contains("excluded by `` `name sh ``"), "{}", e.message);
+        assert!(
+            e.message.contains("excluded by `` `name sh ``"),
+            "{}",
+            e.message
+        );
     }
 
     /// A program that may run but that fs does not let be read is refused for

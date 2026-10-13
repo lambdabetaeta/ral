@@ -225,7 +225,9 @@ pub(crate) fn windows_head(p: &str) -> String {
         return p.to_string();
     };
     match s.split_at_checked(4) {
-        Some((unc, rest)) if unc.as_bytes()[..3].eq_ignore_ascii_case(b"UNC") && is_sep(unc.as_bytes()[3]) => {
+        Some((unc, rest))
+            if unc.as_bytes()[..3].eq_ignore_ascii_case(b"UNC") && is_sep(unc.as_bytes()[3]) =>
+        {
             format!(r"\{rest}")
         }
         _ => s.to_string(),

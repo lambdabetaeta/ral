@@ -170,13 +170,18 @@ pub(crate) fn shebang(path: &Path) -> Option<PathBuf> {
         .custom_flags(libc::O_NONBLOCK)
         .open(path)
         .ok()?;
-    file.metadata().ok()?.is_file().then(|| head_shebang(file))?
+    file.metadata()
+        .ok()?
+        .is_file()
+        .then(|| head_shebang(file))?
 }
 
 /// [`shebang`] of the file behind the pinned image descriptor `fd`, never its name.
 #[cfg(target_os = "linux")]
 pub(crate) fn shebang_of_image(fd: std::os::fd::BorrowedFd<'_>) -> Option<PathBuf> {
-    shebang(&crate::path::proc_fd_path(std::os::fd::AsRawFd::as_raw_fd(&fd)))
+    shebang(&crate::path::proc_fd_path(std::os::fd::AsRawFd::as_raw_fd(
+        &fd,
+    )))
 }
 
 fn head_shebang(file: std::fs::File) -> Option<PathBuf> {
