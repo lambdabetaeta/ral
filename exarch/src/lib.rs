@@ -59,27 +59,14 @@ pub static INSTALLERS: [ral_core::engine::EngineInstaller; 1] =
         narrow: policy::base_layer,
     }];
 
-/// The full pre-`main` dispatch, shared by the binary's `main` and every test
-/// `#[ctor]`: core's [`serve_process`](ral_core::invocation::serve_process) over
-/// exarch's [`INSTALLERS`].
-///
-/// The pipeline anchor re-execs the running binary, which under `cargo test`
-/// is the libtest harness, so the flag must be served before libtest sees argv
-/// and rejects it.
+/// The exit a served re-exec role calls for, or a return when there is none.
 ///
 /// `Some(code)` means this process is a re-exec child that should exit now.
-pub fn dispatch_pre_main() -> Option<u8> {
-    ral_core::invocation::serve_process(&INSTALLERS)
-}
-
-/// [`dispatch_pre_main`], and the exit its answer calls for — one expression,
-/// so the two `main`s over this crate and every [`pre_main_ctor!`] cannot drift
-/// on what makes exiting here safe.
-///
-/// Returns only when this process is no such child, so a `main` calls it as its
-/// first real statement and a `#[ctor]` calls it as its whole body.
-pub fn exit_if_re_exec_child() {
-    if let Some(code) = dispatch_pre_main() {
+/// The one place either entry point below exits, so the two `main`s over this
+/// crate and every [`pre_main_ctor!`] cannot drift on what makes exiting here
+/// safe.
+fn exit_on(served: Option<u8>) {
+    if let Some(code) = served {
         #[allow(
             clippy::disallowed_methods,
             reason = "a re-exec child, served before any CLI: the anchor drains a pipe, the pgid probe writes a line, the sandbox stage has already exec'd or refused. None boots a shell, so none holds a lease, a watched child or a staged write; and in the `#[ctor]` form nothing at all is booted yet"
@@ -88,7 +75,33 @@ pub fn exit_if_re_exec_child() {
     }
 }
 
-/// Emit the `#[ctor]` running [`exit_if_re_exec_child`].
+/// The full pre-`main` dispatch for a `main`: core's
+/// [`serve_process`](ral_core::invocation::serve_process) over exarch's
+/// [`INSTALLERS`], and the exit its answer calls for.
+///
+/// Returns only when this process is no re-exec child, so a `main` calls it as
+/// its first real statement.  A `#[ctor]` calls
+/// [`exit_if_re_exec_child_before_main`] instead, which differs only in where
+/// it reads argv.
+pub fn exit_if_re_exec_child() {
+    exit_on(ral_core::invocation::serve_process(&INSTALLERS));
+}
+
+/// [`exit_if_re_exec_child`] for a `#[ctor]`: core's
+/// [`serve_process_before_main`](ral_core::invocation::serve_process_before_main)
+/// over the same [`INSTALLERS`], and the same exit.
+///
+/// The pipeline anchor re-execs the running binary, which under `cargo test` is
+/// the libtest harness, so its flag must be served before libtest sees argv and
+/// rejects it.  A constructor runs before `main`, where std has argv on some
+/// platforms and not others, hence the separate form; it is the body of every
+/// [`pre_main_ctor!`] and not otherwise called.
+#[doc(hidden)]
+pub fn exit_if_re_exec_child_before_main() {
+    exit_on(ral_core::invocation::serve_process_before_main(&INSTALLERS));
+}
+
+/// Emit the `#[ctor]` running [`exit_if_re_exec_child_before_main`].
 ///
 /// A re-exec child is then gone before libtest sees flags it would reject.
 /// Once per binary; gate with `#[cfg(test)]` where only the test build wants it.
@@ -97,7 +110,7 @@ macro_rules! pre_main_ctor {
     () => {
         #[ctor::ctor(unsafe)]
         fn init_pre_main() {
-            $crate::exit_if_re_exec_child();
+            $crate::exit_if_re_exec_child_before_main();
         }
     };
 }

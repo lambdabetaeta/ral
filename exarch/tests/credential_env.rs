@@ -21,7 +21,7 @@ use ral_core::sync::LockExt as _;
 
 // Mirror the binary's pre-`main` re-exec dispatch — helper re-exec dispatch,
 // then the OS-sandbox stage — before libtest sees the flags either would
-// reject; see [`exarch::dispatch_pre_main`].
+// reject; see [`exarch::pre_main_ctor!`].
 exarch::pre_main_ctor!();
 
 /// A built-in, key-bearing account's id — the common case in these tests.

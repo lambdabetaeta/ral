@@ -28,8 +28,8 @@ crate) is the session path; `main.rs` is the thin shell over it. On the way out,
 AppContainer profiles on Windows, a no-op elsewhere — before surrendering the
 exit code.
 
-- **Pre-`main` trampoline.** Before any setup, `dispatch_pre_main` short-circuits
-  a re-exec child, returning `Option<u8>`: it hands the role
+- **Pre-`main` trampoline.** Before any setup, `exit_if_re_exec_child` serves
+  and exits a re-exec child: it hands the role
   `ral_core::classify(argv)` names to core's one pre-`main` dispatch,
   `ral_core::invocation::serve_process` ([[map/repl/startup|startup]]), over
   exarch's `INSTALLERS` (whose `narrow` is `policy::base_layer`, since core
@@ -37,8 +37,10 @@ exit code.
   layer while booting). A confined child is served before any pin, the anchor
   and the pgid probe unpinned; every other role — the `--engine` seat child
   included — is pinned by [[map/core/capabilities|`sandbox::boot`]] before it runs.
-  `main` and **every test `#[ctor]` run this identical function** — they differ
-  only in how they act on `Some` (exit vs return the `u8`). A test binary reaches
+  `main` and **every test `#[ctor]` (`pre_main_ctor!`) share this dispatch and
+  its exit** — they differ only in where argv comes from: a constructor calls
+  `serve_process_before_main`, because on musl std has no argv before `main`
+  and only `/proc/self/cmdline` does. A test binary reaches
   `main` only through libtest yet is the same
   [[invariants/single-binary|multicall executable]] a child re-execs; skip the
   dispatch and the confined transport stays unpinned, so that binary's

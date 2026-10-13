@@ -3,7 +3,7 @@
 //! prelude is parsed and elaborated exactly once per test binary.
 //!
 //! Also installs a pre-main constructor that serves the re-exec roles
-//! (see [`ral_core::invocation::serve_process`]):
+//! (see [`ral_core::invocation::serve_process_before_main`]):
 //! the pipeline anchor and capture-active standalone invocations of bundled
 //! coreutils tools re-exec `current_exe()` — the test binary itself — so
 //! without the constructor the re-exec would land in the test framework
@@ -23,7 +23,7 @@ use std::sync::Arc;
     reason = "a re-exec stage that has served its request, in a ctor before main: no shell, reaper or staged write exists in the process yet"
 )]
 fn init_test_binary() {
-    if let Some(code) = ral_core::invocation::serve_process(&[]) {
+    if let Some(code) = ral_core::invocation::serve_process_before_main(&[]) {
         std::process::exit(i32::from(code));
     }
 }

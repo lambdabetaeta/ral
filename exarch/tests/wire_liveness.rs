@@ -32,7 +32,7 @@ use ral_core::protocol::{Attach, DispatchId, Event, Report, Run};
 // Mirror the binary's pre-`main` re-exec dispatch: the `--engine` re-exec is
 // served here, before libtest sees a flag it would reject, so a re-exec'd
 // child becomes the engine rather than a second copy of the test harness.
-// See [`exarch::dispatch_pre_main`].
+// See [`exarch::pre_main_ctor!`].
 exarch::pre_main_ctor!();
 
 /// Kills and reaps the engine child on drop, so no engine — and no `sleep`

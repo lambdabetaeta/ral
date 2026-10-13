@@ -52,14 +52,67 @@ pub fn serve(
     }
 }
 
-/// [`serve`] the role this process's own argv names.
+/// [`serve`] the role this process's own argv names: the `main`s' form.
 ///
-/// The one expression every `main` and test constructor shares: a test
-/// binary's re-exec of `current_exe()` is thus served before libtest sees
-/// flags it would reject.
+/// A `main` reads argv from std, as any program does, and never from `/proc`:
+/// the guest and a sandboxed payload may have none.  A `#[ctor]` runs before
+/// `main` and calls [`serve_process_before_main`] instead, so that a test
+/// binary's re-exec of `current_exe()` is served before libtest sees flags it
+/// would reject.
 pub fn serve_process(installers: &'static [crate::engine::EngineInstaller]) -> Option<u8> {
     let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
     serve(&classify(&argv), installers)
+}
+
+/// [`serve_process`], for a `#[ctor]`: the same role, read from the argv
+/// [`argv_before_main`] can find before `main` has run.
+///
+/// It exists because a constructor cannot read argv the way a `main` does: on
+/// Linux without glibc std has not captured it yet, and a constructor that saw
+/// no argv would see no role, leaving libtest to reject the role's flag.
+pub fn serve_process_before_main(
+    installers: &'static [crate::engine::EngineInstaller],
+) -> Option<u8> {
+    serve(&classify(&argv_before_main()), installers)
+}
+
+/// This process's argv without `argv[0]`, as a `#[ctor]` can read it.
+///
+/// std captures argv before `main` only where the platform hands it over:
+/// glibc passes `argc` and `argv` to `.init_array` functions, and std
+/// registers one on `all(target_os = "linux", target_env = "gnu")`; macOS has
+/// `_NSGetArgv` and Windows `GetCommandLineW`.  musl calls its `.init_array`
+/// functions with no arguments, so there `std::env::args_os` is empty until
+/// `main`.  The kernel's copy of the exec'd argv, `/proc/self/cmdline`, is the
+/// one source left, so that is read, and a failure to read it is a panic: a
+/// constructor that silently saw no role would fail much later, and far from
+/// its cause.
+#[cfg(all(target_os = "linux", not(target_env = "gnu")))]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[silent:argv-before-main] Bootstrap read of the kernel's copy of this process's own argv, where std has none before `main`. Process bootstrap, not model data I/O."
+)]
+fn argv_before_main() -> Vec<OsString> {
+    use std::os::unix::ffi::OsStringExt;
+    let cmdline = std::fs::read("/proc/self/cmdline").unwrap_or_else(|e| {
+        panic!(
+            "a pre-main constructor on a non-glibc Linux has no argv but /proc/self/cmdline, \
+             and it could not be read: {e}"
+        )
+    });
+    // Each argument ends in a NUL, so the last piece of a plain split is empty.
+    let args = cmdline.strip_suffix(&[0]).unwrap_or(&cmdline);
+    args.split(|&b| b == 0)
+        .skip(1)
+        .map(|arg| OsString::from_vec(arg.to_vec()))
+        .collect()
+}
+
+/// This process's argv without `argv[0]`: std has captured it before `main`
+/// here (see the Linux-without-glibc form for where it has not).
+#[cfg(not(all(target_os = "linux", not(target_env = "gnu"))))]
+fn argv_before_main() -> Vec<OsString> {
+    std::env::args_os().skip(1).collect()
 }
 
 /// `ral --ral-bundled-tool <tool> <args...>`: unconfined, under whatever

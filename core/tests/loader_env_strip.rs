@@ -18,7 +18,7 @@
 //! or the test would pass on env plumbing that never worked.
 //!
 //! Like the sibling fs tests this target imports `core/tests/common` for its
-//! `#[ctor::ctor]`, which runs `invocation::serve_process` so the re-exec child
+//! `#[ctor::ctor]`, which runs `invocation::serve_process_before_main` so the re-exec child
 //! enters Seatbelt instead of landing in the libtest framework, and is gated
 //! to macOS, the backend that can confine an in-tree re-exec child without an
 //! external helper binary.

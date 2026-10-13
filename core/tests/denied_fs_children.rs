@@ -38,7 +38,7 @@
 //! seam directly; this file proves the same enforcement *through eval*.
 //!
 //! Like `sandbox_fail_closed.rs`, this target imports `core/tests/common`
-//! so its `#[ctor::ctor]` runs `invocation::serve_process` — that is what
+//! so its `#[ctor::ctor]` runs `invocation::serve_process_before_main` — that is what
 //! lets a per-command re-exec child actually enter Seatbelt and run the
 //! confined target. Without it the re-exec child would land in the
 //! libtest framework and crash on the unknown `--warrant`

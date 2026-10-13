@@ -32,9 +32,11 @@ by `Role::flag`, and disjointness lives there and nowhere else — a flag a
 script was given, or a tool's own `--engine`, names no role; the two test roles
 exist only under `test-util`. `ral_core::invocation::serve(&role, installers)`
 is the one place a role is served, each role's body staying with the code it
-serves. `ral`'s `identify` hands it the role it classified; exarch and every
-test `#[ctor]` share `ral_core::invocation::serve_process(installers)`, which
-reads argv itself. They differ only in what they do with its `Option<u8>`; what
+serves. `ral`'s `identify` hands it the role it classified; exarch's `main`
+calls `ral_core::invocation::serve_process(installers)`, which reads argv
+itself, and every test `#[ctor]` its twin `serve_process_before_main`, which
+reads it where a constructor can (on musl std has no argv before `main`, so
+`/proc/self/cmdline`). They differ only in what they do with its `Option<u8>`; what
 it decides is when each role is pinned. Before argv
 is parsed, `main` refuses to run setuid — the shell inherits the caller's
 environment and must not run elevated, and neither must any re-exec child, so

@@ -32,7 +32,7 @@ fn scripted(model: &str, script: Script) -> Arc<Provider> {
 
 // Mirror the binary's pre-`main` re-exec dispatch — helper re-exec dispatch,
 // then the OS-sandbox stage — before libtest sees the flags either would
-// reject; see [`exarch::dispatch_pre_main`].
+// reject; see [`exarch::pre_main_ctor!`].
 exarch::pre_main_ctor!();
 
 /// The drained result of one `deliberate` run: the outcome, every durable
