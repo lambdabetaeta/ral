@@ -204,7 +204,13 @@ mod tests {
 
     #[test]
     fn a_decoded_rc_that_is_no_map_is_rejected() {
-        let err = failure(rc("return !{echo '\"vi\"' | from-json}\n"));
+        let dir = tempfile::tempdir().unwrap();
+        let json = dir.path().join("rc.json");
+        std::fs::write(&json, "\"vi\"").unwrap();
+        let err = failure(rc(&format!(
+            "return !{{from-json < '{}'}}\n",
+            json.display()
+        )));
         assert!(
             err.contains("rc file must return a record, a map, or `()`")
                 && err.contains("got String"),

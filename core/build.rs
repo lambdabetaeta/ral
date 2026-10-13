@@ -105,6 +105,13 @@ fn render(entries: &BTreeMap<&str, Option<String>>) -> String {
 )]
 fn main() {
     println!("cargo:rerun-if-changed=src/prelude.ral");
+    // std has no argv before `main` here; see `invocation::argv_before_main`.
+    println!("cargo:rustc-check-cfg=cfg(ctor_without_argv)");
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux")
+        && env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("gnu")
+    {
+        println!("cargo:rustc-cfg=ctor_without_argv");
+    }
 
     let src = fs::read_to_string("src/prelude.ral").expect("failed to read src/prelude.ral");
     let manifest = render(&exports(&src).collect());

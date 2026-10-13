@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 446e3123
+generated_at_commit: 958d7af7
 generated_at_date: 2026-10-06
 covers_paths: [ral/src/main.rs, ral/src/startup.rs, ral/src/cli.rs, ral/src/batch.rs, ral/src/boot_door.rs, ral/src/platform.rs, ral/build.rs]
 ---
@@ -36,7 +36,8 @@ serves. `ral`'s `identify` hands it the role it classified; exarch's `main`
 calls `ral_core::invocation::serve_process(installers)`, which reads argv
 itself, and every test `#[ctor]` its twin `serve_process_before_main`, which
 reads it where a constructor can (on musl std has no argv before `main`, so
-`/proc/self/cmdline`). They differ only in what they do with its `Option<u8>`; what
+`/proc/self/cmdline`, though the role it serves still runs without one: see
+[[map/exarch|exarch]]). They differ only in what they do with its `Option<u8>`; what
 it decides is when each role is pinned. Before argv
 is parsed, `main` refuses to run setuid — the shell inherits the caller's
 environment and must not run elevated, and neither must any re-exec child, so

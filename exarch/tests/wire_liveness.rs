@@ -127,7 +127,7 @@ fn a_cancel_that_overtakes_its_dispatch_still_stops_the_run() {
     let started = Instant::now();
     transport.dispatch(
         id,
-        Run::captured("sleep 30", "<test>"),
+        Run::captured("/bin/sleep 30", "<test>"),
         &(Arc::new(()) as Arc<dyn Host>),
     );
 
@@ -172,7 +172,7 @@ fn a_dead_peer_fails_the_in_flight_run_as_cancelled() {
     // A literal id suffices — nothing here correlates a reply.
     transport.dispatch(
         DispatchId(1),
-        Run::captured("sleep 30", "<test>"),
+        Run::captured("/bin/sleep 30", "<test>"),
         &(Arc::new(()) as Arc<dyn Host>),
     );
 
@@ -197,7 +197,7 @@ fn a_dead_peer_fails_the_in_flight_run_as_cancelled() {
 
     assert!(
         exited,
-        "a dead peer must fail the in-flight run as cancelled and exit, not run `sleep 30` to \
+        "a dead peer must fail the in-flight run as cancelled and exit, not run `/bin/sleep 30` to \
          term or hang"
     );
 }

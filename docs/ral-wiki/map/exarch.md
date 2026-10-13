@@ -1,5 +1,5 @@
 ---
-generated_at_commit: b620692f
+generated_at_commit: 958d7af7
 generated_at_date: 2026-10-13
 covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/data/system.md, exarch/data/agents.md, exarch/data/reply.md, exarch/data/ral.md, exarch/data/script-style.md, exarch/data/context.md]
 ---
@@ -40,7 +40,12 @@ exit code.
   `main` and **every test `#[ctor]` (`pre_main_ctor!`) share this dispatch and
   its exit** — they differ only in where argv comes from: a constructor calls
   `serve_process_before_main`, because on musl std has no argv before `main`
-  and only `/proc/self/cmdline` does. A test binary reaches
+  and only `/proc/self/cmdline` does. That names the role but not the process
+  it runs in: std's argv stays empty, and uucore reads it, so no constructor on
+  musl serves a bundled tool. Tests that need one are ignored under
+  `cfg(ctor_without_argv)`, which core's and exarch's build scripts set on Linux
+  without glibc; a unix-only test that needs only some process names a host
+  program by path (`/bin/sleep`). A test binary reaches
   `main` only through libtest yet is the same
   [[invariants/single-binary|multicall executable]] a child re-execs; skip the
   dispatch and the confined transport stays unpinned, so that binary's

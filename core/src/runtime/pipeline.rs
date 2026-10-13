@@ -179,7 +179,7 @@ mod tests {
     fn a_struck_frame_signals_a_stage_member_once() {
         let trapper = Trapper::new();
         run_struck(
-            &format!("!{{ {} }} | cat", trapper.command()),
+            &format!("!{{ {} }} | /bin/cat", trapper.command()),
             &trapper,
             |scope, _| {
                 scope.cancel(CancelCause::Interrupted);
@@ -195,7 +195,7 @@ mod tests {
     fn a_group_signal_reaches_a_stage_member_once() {
         let trapper = Trapper::new();
         run_struck(
-            &format!("!{{ {} }} | cat", trapper.command()),
+            &format!("!{{ {} }} | /bin/cat", trapper.command()),
             &trapper,
             |scope, pid| {
                 let pid = rustix::process::Pid::from_raw(pid).expect("a live pid");
@@ -221,7 +221,7 @@ mod tests {
     fn a_nested_pipelines_member_hears_the_outer_owner_once() {
         let trapper = Trapper::new();
         run_struck(
-            &format!("!{{ {} | cat }} | cat", trapper.command()),
+            &format!("!{{ {} | /bin/cat }} | /bin/cat", trapper.command()),
             &trapper,
             |scope, _| scope.cancel(CancelCause::TimedOut),
         );

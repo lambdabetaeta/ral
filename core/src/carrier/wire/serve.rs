@@ -892,7 +892,7 @@ mod engine_session_tests {
     fn busy_refuses_a_second_dispatch_and_a_probe() {
         let _g = REQUEST_SERIAL.lock();
         let mut host = start();
-        host.dispatch(1, "sleep 15");
+        host.dispatch(1, "/bin/sleep 15");
         assert!(is_engine_busy(&host.run(2, "$[1 + 1]")));
         host.send(&Frame::Probe(DispatchId(3), Probe::Cwd));
         assert_eq!(host.reading(3), Err(BUSY.to_string()));
@@ -906,7 +906,7 @@ mod engine_session_tests {
     fn cancel_settles_an_in_flight_run_promptly() {
         let _g = REQUEST_SERIAL.lock();
         let mut host = start();
-        host.dispatch(1, "sleep 30");
+        host.dispatch(1, "/bin/sleep 30");
         host.cancel(1);
         host.report(1);
         assert_eq!(host.detach_and_join(), 0);
@@ -920,7 +920,7 @@ mod engine_session_tests {
         let _g = REQUEST_SERIAL.lock();
         let mut host = start();
         assert_eq!(ran_int(&host.run(1, "$[1 + 1]")), 2);
-        host.dispatch(2, "sleep 30");
+        host.dispatch(2, "/bin/sleep 30");
         let report = loop {
             crate::process::request_interrupt();
             if host
@@ -947,7 +947,7 @@ mod engine_session_tests {
         let mut host = start();
         assert_eq!(ran_int(&host.run(1, "$[1 + 1]")), 2);
         crate::process::request_root_cancel(CancelCause::Terminated);
-        let report = host.run(2, "sleep 30");
+        let report = host.run(2, "/bin/sleep 30");
         crate::process::cancel::clear_root_request();
         assert!(
             matches!(&report, Report::Ran { ending, .. } if ending.status() == 143),
@@ -960,7 +960,7 @@ mod engine_session_tests {
     fn deferred_batch_crosses_as_a_session_frame() {
         let _g = REQUEST_SERIAL.lock();
         let mut host = start();
-        host.run(1, "let h = spawn { sleep 1 }");
+        host.run(1, "let h = spawn { /bin/sleep 1 }");
         let frame =
             host.await_frame(|f| matches!(f, Frame::Session(SessionEvent::DeferredSurface(_))));
         let Frame::Session(SessionEvent::DeferredSurface(batch)) = frame else {

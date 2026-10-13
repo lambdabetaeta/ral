@@ -3538,17 +3538,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The exec policies a descendant meets ral under, each with whether ral
+    /// starts: admitted by path, not admitted, its folder excluded.
+    fn ral_exec_policies(work: &std::path::Path) -> [(&'static str, SandboxProjection, bool); 3] {
+        let own = crate::sandbox::reexec::own().expect("ral pins itself");
+        let home = own.arg0().parent().expect("ral has a folder");
+        let own_path = own.arg0().to_string_lossy().into_owned();
+        let under = |exec, deny: &[&std::path::Path]| SandboxProjection {
+            exec,
+            ..deny_within(work, deny)
+        };
+        [
+            ("admitted", under(admitting(&[], &[&own_path]), &[]), true),
+            ("unadmitted", under(admitting(&[], &[]), &[]), false),
+            (
+                "excluded folder",
+                under(admitting(&[&home.to_string_lossy()], &[]), &[home]),
+                false,
+            ),
+        ]
+    }
+
     /// A descendant starts ral neither under an exec allow-list that does not
     /// admit it, nor by name where its folder is fs-excluded, nor as
-    /// `/proc/self/exe`; a bundled tool, run by the launcher, still runs.
-    #[cfg(feature = "coreutils")]
+    /// `/proc/self/exe`.
     #[test]
-    fn a_descendant_cannot_start_ral_but_a_bundled_tool_runs() {
+    fn a_descendant_cannot_start_ral() {
         if !landlock_at_least(super::landlock::Abi::EXEC) {
             return;
         }
         let own = crate::sandbox::reexec::own().expect("ral pins itself");
-        let home = own.arg0().parent().expect("ral has a folder").to_path_buf();
+        let home = own.arg0().parent().expect("ral has a folder");
         let name = own.arg0().file_name().expect("ral has a name");
         let work = workdir("exec-ral");
         let script = format!(
@@ -3558,20 +3578,7 @@ mod tests {
             home = home.display(),
             name = name.to_string_lossy(),
         );
-        let own_path = own.arg0().to_string_lossy().into_owned();
-        let under = |exec, deny: &[&std::path::Path]| SandboxProjection {
-            exec,
-            ..deny_within(&work, deny)
-        };
-        for (label, policy, self_ran) in [
-            ("admitted", under(admitting(&[], &[&own_path]), &[]), true),
-            ("unadmitted", under(admitting(&[], &[]), &[]), false),
-            (
-                "excluded folder",
-                under(admitting(&[&home.to_string_lossy()], &[]), &[&home]),
-                false,
-            ),
-        ] {
+        for (label, policy, self_ran) in ral_exec_policies(&work) {
             let Some(env) = envelope_launches(&policy) else {
                 return;
             };
@@ -3580,10 +3587,30 @@ mod tests {
             assert!(emitted(&stdout, "READY"), "{label}: {stdout}");
             assert_eq!(emitted(&stdout, "SELF-RAN"), self_ran, "{label}: {stdout}");
             assert!(!emitted(&stdout, "PROC-RAN"), "{label}: {stdout}");
-            let tool = admitted(
-                Program::Tool("basename".into()),
-                &["/x/TOOL-RAN".to_string()],
-            );
+        }
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    /// Under the same policies a bundled tool, run by the launcher, still runs.
+    #[cfg(feature = "coreutils")]
+    #[cfg_attr(
+        ctor_without_argv,
+        ignore = "a test binary serves bundled tools before main, where musl gives std no argv"
+    )]
+    #[test]
+    fn a_bundled_tool_runs_where_a_descendant_cannot_start_ral() {
+        if !landlock_at_least(super::landlock::Abi::EXEC) {
+            return;
+        }
+        let work = workdir("exec-ral-tool");
+        let tool = admitted(
+            Program::Tool("basename".into()),
+            &["/x/TOOL-RAN".to_string()],
+        );
+        for (label, policy, _) in ral_exec_policies(&work) {
+            let Some(env) = envelope_launches(&policy) else {
+                return;
+            };
             let out = run_admitted(&env, &policy, &tool).expect("spawn");
             assert!(
                 emitted(&String::from_utf8_lossy(&out.stdout), "TOOL-RAN"),
@@ -3833,6 +3860,10 @@ mod tests {
     /// after the swap has no name but the one it lost: a bundled tool runs in
     /// the trampoline itself.
     #[cfg(feature = "coreutils")]
+    #[cfg_attr(
+        ctor_without_argv,
+        ignore = "a test binary serves bundled tools before main, where musl gives std no argv"
+    )]
     #[test]
     fn the_trampoline_inside_is_the_pinned_inode() {
         let policy = unrestricted();

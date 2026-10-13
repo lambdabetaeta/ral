@@ -191,6 +191,10 @@ fn interrupt_unwinds_exactly_one_agent() {
 
 /// The interrupt reaches the run in flight through the target, and only
 /// it: never `eval_root`, so the agent's *next* run is born uncancelled.
+#[cfg_attr(
+    ctor_without_argv,
+    ignore = "a test binary serves bundled tools before main, where musl gives std no argv"
+)]
 #[test]
 fn interrupt_never_poisons_the_next_run() {
     use ral_core::carrier::dispatch_to_report;

@@ -276,6 +276,10 @@ fn nursery_is_emptied_at_run_teardown() {
 /// A worker the lease chain reaps *between* runs has no live sink until the
 /// next run installs one, so its reap surfaces as a `` `notice `` there,
 /// ordered before that run's own settling.
+#[cfg_attr(
+    ctor_without_argv,
+    ignore = "a test binary serves bundled tools before main, where musl gives std no argv"
+)]
 #[test]
 fn ready_boundary_notice_surfaces_a_pending_worker_reap() {
     let mut shell = crate::test_helper::core_shell();
@@ -559,6 +563,10 @@ fn deadline_cancel_reports_walled() {
 /// A real wall, so the cancel lands *during* the script: in
 /// `deadline_cancel_reports_walled` it fires ahead of every binding, so
 /// none has landed there for the wall to be measured against.
+#[cfg_attr(
+    ctor_without_argv,
+    ignore = "a test binary serves bundled tools before main, where musl gives std no argv"
+)]
 #[test]
 fn mid_script_wall_keeps_the_bindings_that_landed() {
     let mut shell = crate::test_helper::core_shell();

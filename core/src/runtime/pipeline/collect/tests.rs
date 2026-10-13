@@ -456,7 +456,7 @@ fn a_torn_down_externals_death_names_the_cause_it_was_sent() {
 #[test]
 fn a_try_in_a_stage_its_reader_cut_sees_reader_gone() {
     let src = "let spew = { |n| to-line y\n spew $n }\n\
-               !{ try { spew 0 } { |err| fail [status: $err[status], message: !{str $err[reason]}] } } | head -n 1";
+               !{ try { spew 0 } { |err| fail [status: $err[status], message: !{str $err[reason]}] } } | /usr/bin/head -n 1";
     let mut shell = crate::test_helper::core_shell();
     let report = shell.run(crate::protocol::Run::captured(src, "<test>"));
     match report {

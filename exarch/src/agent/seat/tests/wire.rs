@@ -175,7 +175,7 @@ fn wire_seat_install_deferred_installs_the_sink_for_a_settled_spawn_worker() {
 
     let report = ral_core::carrier::dispatch_to_report(
         seat.transport(),
-        ral_core::protocol::Run::captured("let h = spawn { sleep 1 }", "<test>"),
+        ral_core::protocol::Run::captured("let h = spawn { /bin/sleep 1 }", "<test>"),
         host,
     )
     .expect("the engine must answer the dispatch with a Report");
@@ -237,7 +237,7 @@ fn wire_reach_interrupt_settles_an_in_flight_run_promptly() {
         let dispatch = s.spawn(|| {
             ral_core::carrier::dispatch_to_report(
                 seat.transport(),
-                ral_core::protocol::Run::captured("sleep 30", "<test>"),
+                ral_core::protocol::Run::captured("/bin/sleep 30", "<test>"),
                 Arc::new(()) as Arc<dyn Host>,
             )
         });
@@ -253,7 +253,7 @@ fn wire_reach_interrupt_settles_an_in_flight_run_promptly() {
     assert!(report.is_ok(), "the engine must still answer with a Report");
     assert!(
         elapsed < WAIT,
-        "cancel must settle the run well inside {WAIT:?} rather than run `sleep 30` to \
+        "cancel must settle the run well inside {WAIT:?} rather than run `/bin/sleep 30` to \
          term, took {elapsed:?}"
     );
 

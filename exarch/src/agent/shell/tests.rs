@@ -210,7 +210,11 @@ fn the_wall_names_the_workers_that_survived_it() {
     let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
 
     let result = session
-        .ral("let deferred = defer { sleep 20 }\nsleep 20", 2, &emit)
+        .ral(
+            "let deferred = defer { /bin/sleep 20 }\n/bin/sleep 20",
+            2,
+            &emit,
+        )
         .text;
 
     assert!(
@@ -251,7 +255,7 @@ fn a_non_zero_exit_with_a_live_birth_names_the_orphan() {
 
     let result = session
         .ral(
-            "let deferred = defer { sleep 20 }\n/bin/sh -c 'exit 3'",
+            "let deferred = defer { /bin/sleep 20 }\n/bin/sh -c 'exit 3'",
             10,
             &emit,
         )

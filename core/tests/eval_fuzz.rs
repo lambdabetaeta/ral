@@ -151,6 +151,10 @@ fn session_scope_let_shadows_a_path_command() {
 }
 
 #[cfg(feature = "coreutils")]
+#[cfg_attr(
+    ctor_without_argv,
+    ignore = "a test binary serves bundled tools before main, where musl gives std no argv"
+)]
 #[test]
 fn bundled_uutils_capture_honours_scoped_cwd() {
     let dir = tempfile::tempdir().unwrap();
@@ -168,6 +172,10 @@ fn bundled_uutils_capture_honours_scoped_cwd() {
 }
 
 #[cfg(feature = "coreutils")]
+#[cfg_attr(
+    ctor_without_argv,
+    ignore = "a test binary serves bundled tools before main, where musl gives std no argv"
+)]
 #[test]
 fn bundled_uutils_capture_completes_with_buffer_sink() {
     let out = must_succeed("let out = ls -lah\nreturn $out");
@@ -269,6 +277,10 @@ fn interpolation_rejects_list() {
 /// bytes (`"4\n"` for four lines) and proves the pipeline succeeded — a
 /// non-zero `wc` would fail the `from-string` capture instead.
 #[cfg(all(unix, feature = "coreutils"))]
+#[cfg_attr(
+    ctor_without_argv,
+    ignore = "a test binary serves bundled tools before main, where musl gives std no argv"
+)]
 #[test]
 fn bundled_byte_stage_runs_as_direct_child_and_produces_bytes() {
     assert_eq!(
@@ -283,6 +295,10 @@ fn bundled_byte_stage_runs_as_direct_child_and_produces_bytes() {
 /// failure rather than swallowing the non-zero status: `wc` on a missing
 /// path exits non-zero, and the pipeline must fail-fast.
 #[cfg(all(unix, feature = "coreutils"))]
+#[cfg_attr(
+    ctor_without_argv,
+    ignore = "a test binary serves bundled tools before main, where musl gives std no argv"
+)]
 #[test]
 fn failing_bundled_byte_stage_surfaces_failure() {
     must_fail("printf 'a\\nb\\n' | wc /nonexistent/path");

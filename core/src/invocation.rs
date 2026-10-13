@@ -70,6 +70,10 @@ pub fn serve_process(installers: &'static [crate::engine::EngineInstaller]) -> O
 /// It exists because a constructor cannot read argv the way a `main` does: on
 /// Linux without glibc std has not captured it yet, and a constructor that saw
 /// no argv would see no role, leaving libtest to reject the role's flag.
+///
+/// The role then runs with std's argv still empty there, so a bundled tool,
+/// whose uucore reads it, cannot be served this way: tests that need one are
+/// ignored under `cfg(ctor_without_argv)`.
 pub fn serve_process_before_main(
     installers: &'static [crate::engine::EngineInstaller],
 ) -> Option<u8> {
@@ -87,7 +91,7 @@ pub fn serve_process_before_main(
 /// one source left, so that is read, and a failure to read it is a panic: a
 /// constructor that silently saw no role would fail much later, and far from
 /// its cause.
-#[cfg(all(target_os = "linux", not(target_env = "gnu")))]
+#[cfg(ctor_without_argv)]
 #[allow(
     clippy::disallowed_methods,
     reason = "[silent:argv-before-main] Bootstrap read of the kernel's copy of this process's own argv, where std has none before `main`. Process bootstrap, not model data I/O."
@@ -110,7 +114,7 @@ fn argv_before_main() -> Vec<OsString> {
 
 /// This process's argv without `argv[0]`: std has captured it before `main`
 /// here (see the Linux-without-glibc form for where it has not).
-#[cfg(not(all(target_os = "linux", not(target_env = "gnu"))))]
+#[cfg(not(ctor_without_argv))]
 fn argv_before_main() -> Vec<OsString> {
     std::env::args_os().skip(1).collect()
 }
