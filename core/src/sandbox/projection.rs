@@ -17,14 +17,13 @@
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::capability::Subject;
 use crate::capability::{
-    Admitted, Evidence, ExecRules, FsOp, FsScope, GrantStack, Join, Net, region, rules,
+    Admitted, Evidence, ExecRules, FsOp, FsScope, GrantStack, Join, Net, Region, region, rules,
     running_region,
 };
-use crate::path::{FrozenPath, RealPath, Resolver};
+use crate::path::{FrozenPath, RealPath};
 #[cfg(unix)]
 use crate::path::{Object, Rendered, render_objects, render_paths, rendered_pins};
 use std::collections::BTreeSet;
-use std::path::Path;
 
 /// The fs half of a projection.
 ///
@@ -209,11 +208,7 @@ impl SandboxProjection {
     /// computed once for every launch with a restricted fs or exec, filtered to
     /// the live files no exec or fs exclusion covers, and joined into the read
     /// region as places and into the exec table as file allows.
-    pub(crate) fn of(
-        grants: &GrantStack,
-        resolver: &Resolver,
-        admitted: Option<&Admitted>,
-    ) -> Option<Self> {
+    pub(crate) fn of(grants: &GrantStack, admitted: Option<&Admitted>) -> Option<Self> {
         // Traced because this fold is not the pure reduction it reads as:
         // re-freezing exclusions canonicalises against the filesystem, and
         // compiling the exec table walks the host `PATH` for every bare key, so
@@ -223,8 +218,8 @@ impl SandboxProjection {
         let t_fold = std::time::Instant::now();
         // Zipped because the two regions are `Some` on the same condition,
         // some layer held an `fs` opinion, so there is no mixed case to weigh.
-        let regions = running_region(grants, resolver)
-            .zip(region(grants, resolver, &FsOp::Write))
+        let regions = running_region(grants)
+            .zip(region(grants, &FsOp::Write))
             .filter(|_| !grants.fs_is_top());
         let online = !grants.net().any(|n| n == Net::Offline);
 
@@ -248,12 +243,7 @@ impl SandboxProjection {
             return None;
         }
 
-        let read_excludes = |path: &Path| {
-            regions
-                .as_ref()
-                .is_some_and(|(read, _)| read.excludes(path))
-        };
-        let live = live_support(table, &read_excludes, admitted);
+        let live = live_support(table, regions.as_ref().map(|(read, _)| read), admitted);
         let exec = table.map_or(ExecProjection::Unrestricted, |table| {
             ExecProjection::Restricted(table.for_kernel(&live))
         });
@@ -310,7 +300,7 @@ fn objects(scopes: &[FsScope]) -> Result<Vec<Object>, String> {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn live_support(
     table: Option<&ExecRules>,
-    read_excludes: &dyn Fn(&Path) -> bool,
+    read: Option<&Region>,
     admitted: Option<&Admitted>,
 ) -> BTreeSet<RealPath> {
     use crate::capability::Program;
@@ -324,7 +314,8 @@ fn live_support(
         support.extend(super::carriers::linkers());
     }
     support.retain(|s| {
-        !table.is_some_and(|t| t.excludes(Subject::File(s))) && !read_excludes(s.as_path())
+        !table.is_some_and(|t| t.excludes(Subject::File(s)))
+            && !read.is_some_and(|r| r.excludes(s.as_path()))
     });
     support
 }
@@ -334,7 +325,7 @@ fn live_support(
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn live_support(
     _: Option<&ExecRules>,
-    _: &dyn Fn(&Path) -> bool,
+    _: Option<&Region>,
     _: Option<&Admitted>,
 ) -> BTreeSet<RealPath> {
     BTreeSet::new()

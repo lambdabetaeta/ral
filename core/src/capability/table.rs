@@ -157,6 +157,7 @@ impl<K: Scope> Join for Table<K> {
 )]
 mod tests {
     use super::{Scope, Table};
+    use crate::capability::exec::ExecScope;
     use crate::capability::exec::tests::{Rng, paths, random};
     use crate::capability::fs::{FsScope, Region};
     use crate::capability::{Evidence, Join, Meet};
@@ -165,9 +166,11 @@ mod tests {
 
     /// `ev(a ∧ b, s) = ev(a, s) ∧ ev(b, s)` and likewise for `⊕`, Both and
     /// Neither included, at every subject; and on what the meet makes, a
-    /// semilattice, structurally: `a ∧ a = a`, commutative, associative.
-    fn laws<'s, K: Scope + std::fmt::Debug + 's>(
+    /// semilattice, structurally: `a ∧ a = a`, commutative, associative; and
+    /// likewise `⊕`, with `top` the meet's unit and the empty table the join's.
+    fn laws<'s, K: Scope + 's>(
         mut rng: Rng,
+        top: &Table<K>,
         random: impl Fn(&mut Rng) -> Table<K>,
         subjects: &[K::Subject<'s>],
     ) {
@@ -195,6 +198,16 @@ mod tests {
                 "a = {a:?}\nb = {b:?}\nc = {c:?}"
             );
             assert_eq!(joined, b.clone().join(a.clone()), "a = {a:?}\nb = {b:?}");
+            assert_eq!(a.clone().join(a.clone()), a, "a = {a:?}");
+            assert_eq!(
+                joined.join(c.clone()),
+                a.clone().join(b.clone().join(c.clone())),
+                "a = {a:?}\nb = {b:?}\nc = {c:?}"
+            );
+            assert_eq!(top.clone().meet(a.clone()), a, "a = {a:?}");
+            assert_eq!(a.clone().meet(top.clone()), a, "a = {a:?}");
+            assert_eq!(a.clone().join(Table::default()), a, "a = {a:?}");
+            assert_eq!(Table::default().join(a.clone()), a, "a = {a:?}");
         }
     }
 
@@ -202,7 +215,8 @@ mod tests {
     fn the_exec_meet_and_join_are_pointwise_on_evidence() {
         let paths = paths();
         let subjects: Vec<_> = crate::capability::exec::tests::subjects(&paths).collect();
-        laws(Rng(0x9e37_79b9_7f4a_7c15), random, &subjects);
+        let top = std::iter::once((ExecScope::Any, Evidence::ALLOW)).collect();
+        laws(Rng(0x9e37_79b9_7f4a_7c15), &top, random, &subjects);
     }
 
     /// A case pair, a symlink-divergent pair, the root and nested dirs.
@@ -255,6 +269,7 @@ mod tests {
             "/z/y",
         ]
         .map(Path::new);
-        laws(Rng(0x5851_f42d_4c95_7f2d), random_region, &probes);
+        let top = std::iter::once((FsScope::Prefix(FrozenPath::root()), Evidence::ALLOW)).collect();
+        laws(Rng(0x5851_f42d_4c95_7f2d), &top, random_region, &probes);
     }
 }

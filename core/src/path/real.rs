@@ -47,7 +47,7 @@ impl RealPath {
     /// The prefix's surface followed against the live disk: where an exclusion
     /// looks, since it names whatever its spelling reaches now.
     pub(crate) fn live(prefix: &FrozenPath) -> Self {
-        Self(prefix.live_real())
+        Self(prefix.live().real_path().to_path_buf())
     }
 
     /// A rendered object: already the frozen real path, so no lookup.

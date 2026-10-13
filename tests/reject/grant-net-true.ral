@@ -1,2 +1,2 @@
-# contains: a grant only narrows: omit `net` to inherit, or write net: `offline
+# contains: a grant only narrows: omit `net` to inherit, or write `` net: `offline ``
 grant [net: true] { return 1 }

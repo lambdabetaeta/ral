@@ -194,8 +194,7 @@ pub fn run() -> Result<(), String> {
         |account| provider::models::listing_of(&holdings.catalog, &account.id),
     )?;
 
-    let (caps, restrict_files) =
-        policy::for_invocation(&cwd, &c.base, c.extend.as_deref(), &c.restrict)?;
+    let invocation = policy::for_invocation(&cwd, &c.base, c.extend.as_deref(), &c.restrict)?;
     let scratch =
         Arc::new(app::Scratch::new(app::EXARCH).map_err(|e| format!("scratch dir: {e}"))?);
     let (_mode, terminal, _warn) = ral_core::terminal::TerminalState::probe_from_env();
@@ -210,7 +209,7 @@ pub fn run() -> Result<(), String> {
     } else {
         prompt::assemble(
             &c.system_files,
-            &caps,
+            &invocation,
             app::EXARCH,
             &cwd_path,
             &config_dir,
@@ -237,7 +236,7 @@ pub fn run() -> Result<(), String> {
     );
     let config = agent::RootConfig {
         system,
-        caps,
+        caps: invocation.stack,
         run_dir: run_dir.clone(),
         account: record::RecordedAccount::of(provider.account(), &available),
         // An attended trunk parks for the human; a headless one terminates
@@ -277,7 +276,7 @@ pub fn run() -> Result<(), String> {
         system_files: &c.system_files,
         base: &c.base,
         extend: c.extend.as_deref(),
-        restrict_files: &restrict_files,
+        restrict_files: &invocation.restricts,
         cwd: &cwd,
         resumed,
     };

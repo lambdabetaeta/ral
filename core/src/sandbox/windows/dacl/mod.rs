@@ -14,10 +14,11 @@
 //! ([`fs_capability_name`]); [`ensure_fs_grant`] stamps that SID's ACE onto
 //! the prefix, and a child reaches the path only if `session` put the
 //! capability in its `LowBox` token. The stamp is the expensive part — one
-//! `SetNamedSecurityInfoW`, whose inheritable ACE Windows propagates into
-//! every existing descendant before returning, seconds on a build tree — so
-//! it is paid once per `(path, kind)` *ever*, across sessions and
-//! projections, and never reverted. Leaving it is safe: a capability SID is
+//! security write (`SetNamedSecurityInfoW`, or `SetSecurityInfo` through a
+//! held handle), whose inheritable ACE Windows propagates into every existing
+//! descendant before returning, seconds on a build tree — so it is paid once
+//! per `(path, kind)` *ever*, across sessions and projections, and never
+//! reverted. Leaving it is safe: a capability SID is
 //! matched only in the `AppContainer` pass of the access check, whose result
 //! intersects the normal pass, so an ACE no live token names is inert and can
 //! never widen any process's reach beyond the owning user's own.
@@ -183,6 +184,16 @@ pub(crate) enum DaclError {
     Cancelled(CancelCause),
 }
 
+/// Whether a reparse target is a volume GUID path, as a mount point's is.
+fn volume_mount(target: &Path) -> bool {
+    let t = target.to_string_lossy();
+    ["\\??\\", "\\\\?\\"].iter().any(|p| {
+        t.strip_prefix(p)
+            .and_then(|r| r.get(..7))
+            .is_some_and(|v| v.eq_ignore_ascii_case("Volume{"))
+    })
+}
+
 impl std::fmt::Display for DaclError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -192,6 +203,19 @@ impl std::fmt::Display for DaclError {
                 p.display()
             ),
             Self::PathNotFound(p) => write!(f, "path does not exist: {}", p.display()),
+            Self::Redirected {
+                granted,
+                at,
+                target: Some(t),
+            } if volume_mount(t) => write!(
+                f,
+                "'{}' was granted by its real path, but '{}' is where a volume is mounted; \
+                 a volume mounted in a folder cannot be granted on Windows (it cannot be \
+                 told from a junction). Would giving the volume a drive letter and \
+                 granting that do?",
+                granted.display(),
+                at.display()
+            ),
             Self::Redirected {
                 granted,
                 at,
@@ -240,7 +264,7 @@ impl From<io::Error> for DaclError {
 }
 
 /// The stamp loops' poll point: a chain of atomic loads, so it costs nothing
-/// against the `SetNamedSecurityInfoW` it guards.
+/// against the security write it guards.
 fn cancelled(cancel: &CancelScope) -> Result<(), DaclError> {
     match cancel.cause() {
         Some(cause) => Err(DaclError::Cancelled(cause)),
@@ -299,9 +323,10 @@ pub(crate) fn ensure_fs_grant(
     ensure_grant(Target::Named(canonical), sid_str, kind, cancel)
 }
 
-/// [`ensure_fs_grant`] for a frozen allowance, applied through the handles
+/// [`ensure_fs_grant`] for a frozen allowance, applied through the handle
 /// [`FrozenPin`] holds: the object checked is the object stamped. Allows only; a
-/// deny walks the tree by name and is re-resolved at every launch.
+/// deny is re-resolved at every launch. A stamp already recorded needs no
+/// `WRITE_DAC`: only the write that would be new fails, as `WriteDacDenied`.
 pub(crate) fn ensure_frozen_grant(
     pin: &FrozenPin,
     sid_str: &str,
@@ -309,7 +334,6 @@ pub(crate) fn ensure_frozen_grant(
     cancel: &CancelScope,
 ) -> Result<(), DaclError> {
     debug_assert!(kind != GrantKind::Deny, "a deny is stamped by name");
-    pin.can_stamp(kind)?;
     ensure_grant(pin.target(), sid_str, kind, cancel)
 }
 

@@ -130,7 +130,7 @@ pub fn exec_projection_rules(projection: &SandboxProjection) -> Option<Vec<Kerne
             path: path.to_string(),
             allow,
         }),
-        ExecScope::File(path) => Some(KernelExecRule::File {
+        ExecScope::File { path, .. } => Some(KernelExecRule::File {
             path: path.to_string(),
             allow,
         }),
@@ -175,10 +175,7 @@ fn file(real: &str) -> Program {
 
 /// Whether the live stack admits running the file whose real path is `real`.
 pub fn admits_file(shell: &Shell, real: &str) -> bool {
-    shell
-        .context
-        .grants
-        .admits(&file(real), &shell.context.resolver())
+    shell.context.grants.admits(&file(real))
 }
 
 /// `Shell::check_exec` on the file whose real path is `real`, with `args`.

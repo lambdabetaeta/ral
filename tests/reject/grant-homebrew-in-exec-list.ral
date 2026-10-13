@@ -1,0 +1,2 @@
+# contains: write `` `dir `homebrew ``
+grant [exec: [allow: [`homebrew]]] { return 1 }

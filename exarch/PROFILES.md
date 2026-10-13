@@ -33,7 +33,7 @@ on, while `confined` turns the network off but allows project writes.
 | `edit-only`  | on      | read + write  | broad config and toolchain caches         | system and editing tools; Git denied                |
 | `read-only`  | on      | read only     | broad config and toolchain caches         | system and review tools, including Git              |
 | `minimal`    | on      | read + write  | none; `` `xdg-cache `` is writable             | system roots, project, and scratch                  |
-| `confined`   | off     | read + write  | none                                      | system roots, `/usr/local/bin`, project, and scratch |
+| `confined`   | off     | read + write  | none                                      | system roots, Homebrew, `/usr/local/bin`, project, and scratch |
 
 ### `reasonable` — everyday coding
 
@@ -151,8 +151,8 @@ It is shaped after
 [BrianSwift/macOSSandboxBuild's `confined.sb`][confined-sb].
 
 - **Reads and writes:** project and scratch only.
-- **Programs:** platform system roots, `/usr/local/bin`, project executables,
-  scratch executables, and the coreutils built into the binary.
+- **Programs:** platform system roots, `` `dir `homebrew `` where Homebrew is
+  present, `/usr/local/bin`, project executables, scratch executables, and the coreutils built into the binary.
 - **Network:** off.
 
 `rm`, `mv` and `truncate` are admitted like any other tool. What a confined
@@ -216,23 +216,26 @@ restricts. The file's allowances and exclusions join the base's before any
   the base lacks, a base cannot withhold a verb (`detach` included) against
   an extension, and a base that omits a verb list keeps every verb.
 
-Any number of `--restrict` files then narrow the result:
+Any number of `--restrict` files then narrow the result. Each is a layer
+pushed on a stack, in argument order, and a layer reads the run places of the
+layers beneath it, so order matters:
 
 ```text
-effective = (base ◁ extension) ∧ restriction₁ ∧ restriction₂ ∧ …
+stack = [ base ◁ extension, restriction₁, restriction₂, …, exarch's own layers ]
 ```
 
 A refusal that cites an exclusion says that an allowance cannot override it
 and points at the policy that imposes it; `--extend` cannot lift it.
 
 A launch on Windows is refused when the filesystem region holds every path:
-`dangerous` with an exclusion from `--extend` or a restriction file that only
-excludes. Windows' sandbox reaches only folders stamped for it, and ral will
+`dangerous` with an exclusion from `--extend`, or with a restriction file that
+only excludes and has no allowances (an fs-restricting restriction file also
+brings exarch's exclusions of itself and of its credential files). Windows' sandbox reaches only folders stamped for it, and ral will
 not stamp every drive; grant the folders the program needs instead. The
 in-process guard still judges, and in-process work is unaffected.
 
 Each file is frozen as it loads: the places `` `home ``, `` `xdg-* ``, `` `cwd ``,
-`` `tempdir ``, `` `gitdir ``, and the `` `system `` and `` `path `` selectors resolve to
+`` `tempdir ``, `` `gitdir ``, and the `` `system ``, `` `homebrew `` and `` `path `` selectors resolve to
 fixed paths for that session before the capabilities are composed. Changing the environment later cannot move those grants.
 
 Two of them are read from a source the session does not author, and each is
@@ -260,15 +263,15 @@ exarch --base minimal --extend build-tools.ral --restrict project.ral
 The `` `dir `system `` target expands to the platform's live tool roots:
 
 - `/usr/bin` and `/bin`, plus the toolchain roots present, on Unix; Homebrew is
-  the separate `` `dir `homebrew `` selector (`HOMEBREW_PREFIX`, else whichever
-  of `/opt/homebrew`, `/home/linuxbrew/.linuxbrew` and `~/.linuxbrew` exist);
+  the separate `` `dir `homebrew `` selector (`HOMEBREW_PREFIX`, else
+  `/opt/homebrew` if it exists);
 - `%SystemRoot%\System32`, Windows PowerShell, and Git for Windows' `usr\bin`
   when present, on Windows.
 
 macOS also supplies Command Line Tools and Xcode paths at the sandbox layer.
 Unix-only path entries are discarded on Windows rather than making the whole
-profile fail to load. `policy show` therefore reports only grants the current
-platform can back.
+profile fail to load. The audit trail (`ral --audit --capabilities FILE -c true`) therefore
+reports only grants the current platform can back.
 
 ## Build-tool caches
 
@@ -341,9 +344,11 @@ git dependencies at all.
   program built in `/tmp`.
 - **Activation reads what a policy means.** A layer that restricts nothing,
   such as a filesystem that writes the root and excludes nothing, activates no
-  launch hardening. exarch pushes its credential layer only where some
-  filesystem restricts: `--base dangerous --extend` with a positive-only `fs`
-  gets none, and with an `fs` exclusion it does.
+  launch hardening. exarch pushes its credential layer, and the exclusion of
+  each `--restrict` file, only where some filesystem restricts: `--base
+  dangerous --extend` with a positive-only `fs` gets none, and with an `fs`
+  exclusion it does. A restriction file that leaves `fs` silent is therefore
+  editable by the agent, as an `--extend` file is.
 
 ## What exclusions cannot do
 

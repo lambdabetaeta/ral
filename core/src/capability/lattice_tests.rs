@@ -13,7 +13,7 @@ use super::exec::{ExecRules, Subject};
 use super::*;
 use crate::guard::decode_capability_map;
 use crate::guard::freeze::{FreezeCtx, PolicyError};
-use crate::path::{RealPath, Resolver};
+use crate::path::RealPath;
 use crate::types::Value;
 use std::collections::BTreeSet;
 use strum::VariantArray;
@@ -87,7 +87,7 @@ fn file(real: &str) -> Program {
 
 /// Whether `grants` admits running the file whose real path is `real`.
 fn admits(grants: &GrantStack, real: &str) -> bool {
-    grants.admits(&file(real), &Resolver::shell_less())
+    grants.admits(&file(real))
 }
 
 #[cfg(unix)]
@@ -450,7 +450,7 @@ fn decode_rejects_xdg_typo() {
     let err = break_msg(decode_capability_map(&v, "test", &test_ctx("/h")).unwrap_err());
     assert!(err.contains("xdg-cofnig"), "got {err}");
     assert!(
-        err.contains("`xdg-config,"),
+        err.contains("`` `xdg-config ``,"),
         "should list known kinds: {err}"
     );
 }
@@ -507,7 +507,7 @@ fn decode_rejects_directory_as_exec_file() {
         )]),
     )]);
     let err = decode_capability_map(&v, "test", &test_ctx("/h")).unwrap_err();
-    assert!(err.hint.unwrap().contains("`dir `absolute /etc`"));
+    assert!(err.hint.unwrap().contains("`` `dir `absolute /etc ``"));
 }
 
 /// Defence in depth: `XDG_DATA_HOME=/etc` must not widen a policy naming
@@ -560,7 +560,7 @@ fn decode_rejects_relative_absolute_place() {
     let err = break_msg(decode_capability_map(&v, "test", &test_ctx("/h")).unwrap_err());
     assert!(err.contains("proj"), "should name the entry: {err}");
     assert!(
-        err.contains("`cwd proj`"),
+        err.contains("`` `cwd proj ``"),
         "should hint the cwd place: {err}"
     );
 }
@@ -794,11 +794,9 @@ fn extension_reads_omission_by_role() {
     });
     let extended = Capabilities::default().extend(positive);
     assert!(!extended.is_restrictive(), "{extended:?}");
-    assert!(GrantStack::of(extended).admits_fs_exact(
-        &FsOp::Read,
-        &Resolver::shell_less(),
-        std::path::Path::new("/anywhere"),
-    ));
+    assert!(
+        GrantStack::of(extended).admits_fs_exact(&FsOp::Read, std::path::Path::new("/anywhere"),)
+    );
 }
 
 /// An exclusion in the fragment over an omitted base axis is "every request,
@@ -819,10 +817,9 @@ fn extension_with_an_exclusion_over_an_omitted_axis_is_every_less_it() {
     let stack = GrantStack::of(extended);
     assert!(admits(&stack, "/anywhere/else"));
     assert!(!admits(&stack, "/bad/prog"));
-    let resolver = Resolver::shell_less();
     for op in [FsOp::Read, FsOp::Write] {
-        assert!(stack.admits_fs_exact(&op, &resolver, std::path::Path::new("/anywhere")));
-        assert!(!stack.admits_fs_exact(&op, &resolver, std::path::Path::new("/secret/f")));
+        assert!(stack.admits_fs_exact(&op, std::path::Path::new("/anywhere")));
+        assert!(!stack.admits_fs_exact(&op, std::path::Path::new("/secret/f")));
     }
 }
 
@@ -874,17 +871,8 @@ fn an_extension_run_allowance_over_an_omitted_exec_reads_what_it_names() {
         ..Capabilities::default()
     }));
     let stack = GrantStack::of(extended);
-    let resolver = Resolver::shell_less();
-    assert!(
-        stack
-            .read(std::path::Path::new("/opt/prog"), &resolver)
-            .is_ok()
-    );
-    assert!(
-        stack
-            .read(std::path::Path::new("/opt/other"), &resolver)
-            .is_err()
-    );
+    assert!(stack.read(std::path::Path::new("/opt/prog")).is_ok());
+    assert!(stack.read(std::path::Path::new("/opt/other")).is_err());
 }
 
 // ── Random policies ───────────────────────────────────────────────────────
@@ -892,6 +880,7 @@ fn an_extension_run_allowance_over_an_omitted_exec_reads_what_it_names() {
 use super::exec::tests::Rng;
 
 const LAW_DIRS: [&str; 4] = ["/lawtest/a", "/lawtest/a/b", "/lawtest/z", "/lawtest/Z"];
+const LAW_NAMES: [&str; 3] = ["x", "ls", "cat"];
 const LAW_FILES: [&str; 6] = [
     "/lawtest/a/x",
     "/lawtest/a/b/x",
@@ -932,6 +921,11 @@ fn rand_exec(rng: &mut Rng, every_ok: bool) -> Option<ExecGrant> {
     for f in LAW_FILES {
         if some(rng, 4) {
             entries.push((ExecKey::Path(lit(f)), evidence(rng)));
+        }
+    }
+    for n in LAW_NAMES {
+        if some(rng, 3) {
+            entries.push((ExecKey::Name(n.into()), evidence(rng)));
         }
     }
     let grant: ExecGrant = entries.into_iter().collect();
@@ -982,10 +976,6 @@ fn rand_verbs<V: VariantArray + Ord + Copy>(rng: &mut Rng) -> Option<BTreeSet<V>
             .filter(|_| some(rng, 2))
             .collect()
     })
-}
-
-fn resolver() -> Resolver<'static> {
-    Resolver::shell_less()
 }
 
 fn exec_permits(stack: &GrantStack, real: &str) -> bool {
@@ -1043,12 +1033,11 @@ fn law_4_extension_invariant_on_fs() {
         let extended = layer(&base).extend(Fragment::of(layer(&frag)));
         let permits = |caps: Capabilities, op: &FsOp, f: &str| {
             let stack = GrantStack::of(caps);
-            region(&stack, &resolver(), op)
-                .is_none_or(|r| r.evidence(std::path::Path::new(f)).permits())
+            region(&stack, op).is_none_or(|r| r.evidence(std::path::Path::new(f)).permits())
         };
         for op in [FsOp::Read, FsOp::Write] {
             for f in LAW_FILES {
-                let fe = region(&GrantStack::of(layer(&frag)), &resolver(), &op)
+                let fe = region(&GrantStack::of(layer(&frag)), &op)
                     .map_or(Evidence::NEITHER, |r| r.evidence(std::path::Path::new(f)));
                 let b = permits(layer(&base), &op, f);
                 let e = permits(extended.clone(), &op, f);
@@ -1081,7 +1070,7 @@ fn law_4_extension_invariant_on_reads_with_run_places() {
         let extended = base.clone().extend(Fragment::of(frag));
         let own = layer(&frag_exec, &Some(frag_fs.clone().unwrap_or_default()));
         let read = |caps: Capabilities, f: &str| {
-            running_region(&GrantStack::of(caps), &resolver())
+            running_region(&GrantStack::of(caps))
                 .map_or(Evidence::ALLOW, |r| r.evidence(std::path::Path::new(f)))
         };
         for f in LAW_FILES {
@@ -1200,13 +1189,12 @@ fn activation_is_denotational() {
 #[test]
 fn the_read_and_run_judgments_agree_with_their_regions() {
     let mut rng = Rng(0x9876_5432_10fe_dcba);
-    let resolver = resolver();
     for _ in 0..800 {
         let stack = rand_stack(&mut rng);
-        let full = running_region(&stack, &resolver);
+        let full = running_region(&stack);
         for f in LAW_FILES {
             let path = std::path::Path::new(f);
-            let read = stack.read(path, &resolver);
+            let read = stack.read(path);
             let want = full.as_ref().is_none_or(|r| r.evidence(path).permits());
             assert_eq!(read.is_ok(), want, "{f}\nstack = {stack:?}");
             if let Err(Withheld::Excluded { scope, .. }) = &read {
@@ -1214,16 +1202,14 @@ fn the_read_and_run_judgments_agree_with_their_regions() {
                 use crate::path::Deny;
                 assert!(scope.holds::<Deny>(path), "{scope:?} does not hold {f}");
             }
-            let runs = stack.admit(file(f), vec![], &resolver).is_ok();
+            let runs = stack.admit(file(f), vec![]).is_ok();
             assert_eq!(
                 runs,
                 exec_permits(&stack, f) && want,
                 "{f}\nstack = {stack:?}"
             );
         }
-        let tool = stack
-            .admit(Program::Tool("ls".into()), vec![], &resolver)
-            .is_ok();
+        let tool = stack.admit(Program::Tool("ls".into()), vec![]).is_ok();
         let tool_exec = rules(&stack).is_none_or(|r| r.evidence(Subject::Tool("ls")).permits());
         assert_eq!(tool, tool_exec, "stack = {stack:?}");
     }
@@ -1233,13 +1219,12 @@ fn the_read_and_run_judgments_agree_with_their_regions() {
 #[test]
 fn law_8_writing_reads() {
     let mut rng = Rng(0x0bad_cafe_f00d_1234);
-    let resolver = resolver();
     for _ in 0..1000 {
         let stack = rand_stack(&mut rng);
         for f in LAW_FILES {
             let path = std::path::Path::new(f);
             assert!(
-                stack.write(path, &resolver).is_err() || stack.read(path, &resolver).is_ok(),
+                stack.write(path).is_err() || stack.read(path).is_ok(),
                 "{f}\nstack = {stack:?}"
             );
         }
@@ -1251,7 +1236,6 @@ fn law_8_writing_reads() {
 #[test]
 fn law_10_restriction_attenuates() {
     let mut rng = Rng(0x5555_aaaa_3333_cccc);
-    let resolver = resolver();
     for _ in 0..1000 {
         let stack = rand_stack(&mut rng);
         let mut pushed = stack.clone();
@@ -1260,16 +1244,15 @@ fn law_10_restriction_attenuates() {
             let path = std::path::Path::new(f);
             let msg = format!("{f}\nstack = {stack:?}\npushed = {pushed:?}");
             assert!(
-                pushed.admit(file(f), vec![], &resolver).is_err()
-                    || stack.admit(file(f), vec![], &resolver).is_ok(),
+                pushed.admit(file(f), vec![]).is_err() || stack.admit(file(f), vec![]).is_ok(),
                 "run {msg}"
             );
             assert!(
-                pushed.read(path, &resolver).is_err() || stack.read(path, &resolver).is_ok(),
+                pushed.read(path).is_err() || stack.read(path).is_ok(),
                 "read {msg}"
             );
             assert!(
-                pushed.write(path, &resolver).is_err() || stack.write(path, &resolver).is_ok(),
+                pushed.write(path).is_err() || stack.write(path).is_ok(),
                 "write {msg}"
             );
         }
@@ -1288,13 +1271,8 @@ fn a_nested_run_allowance_cannot_make_what_the_ceiling_withholds_readable() {
         exec: Some(grant([(path_key("/opt/prog"), Evidence::ALLOW)])),
         ..Capabilities::default()
     });
-    let resolver = resolver();
-    assert!(
-        stack
-            .read(std::path::Path::new("/opt/prog"), &resolver)
-            .is_err()
-    );
-    assert!(stack.admit(file("/opt/prog"), vec![], &resolver).is_err());
+    assert!(stack.read(std::path::Path::new("/opt/prog")).is_err());
+    assert!(stack.admit(file("/opt/prog"), vec![]).is_err());
 }
 
 /// A bundled tool runs wherever exec permits it and no fs exclusion covers
@@ -1308,19 +1286,29 @@ fn a_bundled_tool_reads_ral_s_binary() {
             ..Capabilities::default()
         })
     };
-    let tool = |s: &GrantStack| {
-        s.admit(Program::Tool("ls".into()), vec![], &resolver())
-            .is_ok()
-    };
+    let tool = |s: &GrantStack| s.admit(Program::Tool("ls".into()), vec![]).is_ok();
+    let own_file = crate::path::FrozenPath::from_surface(own.as_path());
     let own_dir = crate::path::FrozenPath::from_surface(own.as_path().parent().unwrap());
     let excluding = stack(FsPolicy {
         read_prefixes: vec![crate::path::FrozenPath::root()],
-        deny_paths: vec![own_dir],
+        deny_paths: vec![own_dir.clone()],
         ..FsPolicy::default()
     });
     assert!(!tool(&excluding));
     assert!(
         tool(&stack(FsPolicy::default())),
         "an fs that merely does not read ral's binary refuses nothing"
+    );
+    if !crate::uutils::is_uutils_tool("ls") {
+        return;
+    }
+    let exec = grant([
+        (name("ls"), Evidence::ALLOW),
+        (ExecKey::Path(own_file), Evidence::DENY),
+        (ExecKey::Dir(own_dir), Evidence::DENY),
+    ]);
+    assert!(
+        tool(&stack_of(exec)),
+        "an exec exclusion of ral's binary leaves a bundled tool alone"
     );
 }

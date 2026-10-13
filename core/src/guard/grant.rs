@@ -142,7 +142,7 @@ mod tests {
             .expect_err("a net axis that is not `offline`");
         assert_eq!(
             refusal,
-            "grant net: expected a net mode, got the string yes\nhint: a grant only narrows: omit `net` to inherit, or write net: `offline"
+            "grant net: expected a net mode, got the string yes\nhint: a grant only narrows: omit `net` to inherit, or write `` net: `offline ``"
         );
     }
 

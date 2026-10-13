@@ -23,7 +23,7 @@ pub(crate) fn parse_xdg_token(input: &str) -> Option<(XdgKind, Option<&str>)> {
 /// A sigil's sub-path as something that joins *onto* its base: leading
 /// separators come off, because `Path::join` on a rooted suffix discards the
 /// base outright — `xdg:data//etc` would otherwise name `/etc`.
-pub(crate) fn relative_suffix(s: &str) -> &str {
+fn relative_suffix(s: &str) -> &str {
     s.trim_start_matches(['/', '\\'])
 }
 

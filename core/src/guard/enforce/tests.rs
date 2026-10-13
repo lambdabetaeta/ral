@@ -21,7 +21,7 @@ fn stack(fs: FsPolicy) -> GrantStack {
 fn admits_read(grants: &GrantStack, path: &std::path::Path) -> bool {
     let resolver = Resolver::shell_less();
     let rp = resolver.resolve(&path.to_string_lossy());
-    grants.admits_fs(&FsOp::Read, &resolver, &rp)
+    grants.admits_fs(&FsOp::Read, &rp)
 }
 
 #[test]
@@ -56,9 +56,8 @@ fn a_write_onto_a_pinned_binary_is_guarded_before_any_grant_is_consulted() {
     use super::{FsRefusal, fs_judge};
     crate::sandbox::pin();
     let open = GrantStack::of(Capabilities::default());
-    let resolver = Resolver::shell_less();
     let own = std::env::current_exe().expect("own path");
-    let verdict = |path: &std::path::Path, op: &FsOp| fs_judge(&open, &resolver, path, op);
+    let verdict = |path: &std::path::Path, op: &FsOp| fs_judge(&open, path, op);
 
     assert!(
         matches!(verdict(&own, &FsOp::Write), Err(FsRefusal::Guarded("ral"))),
@@ -128,7 +127,7 @@ fn a_deny_holding_the_stored_name_refuses_plainly() {
     };
     let respelled = |grants: &GrantStack| {
         let access = root.join("d/secrets/f");
-        match fs_judge(grants, &Resolver::shell_less(), &access, &FsOp::Read) {
+        match fs_judge(grants, &access, &FsOp::Read) {
             Err(FsRefusal::Withheld(Withheld::Excluded { respelled, .. })) => respelled,
             _ => panic!("an exclusion holds the access"),
         }
@@ -141,7 +140,7 @@ mod words {
     use super::*;
     use crate::capability::{Evidence, ExecGrant, ExecKey, Program};
     use crate::guard::enforce::{check_exec, check_fs_exact};
-    use crate::path::RealPath;
+    use crate::path::{RealPath, SearchCwd};
     use crate::types::Context;
 
     fn ctx(layers: impl IntoIterator<Item = Capabilities>) -> Context {
@@ -186,7 +185,14 @@ mod words {
         let one = refusal(&ctx([only.clone()]), "/x/t");
         assert!(one.message.contains("lets it run"), "{}", one.message);
         assert!(!one.hint.unwrap().contains("enclosing grant"));
-        let two = refusal(&ctx([only.clone(), only]), "/x/t");
+        let outer = exec(&[(dir("/x"), Evidence::ALLOW)]);
+        let two = refusal(&ctx([outer, only]), "/x/t");
+        assert!(
+            two.message
+                .contains("some layer's exec `allow` list does not let it run"),
+            "{}",
+            two.message
+        );
         assert!(two.hint.unwrap().contains("enclosing grant"));
     }
 
@@ -205,9 +211,27 @@ mod words {
         assert!(!e.hint.unwrap().contains("--extend"));
     }
 
+    /// A name deny is cited as the author wrote it, not as the file it found.
+    #[test]
+    fn a_name_deny_is_named_as_written() {
+        let path = crate::path::locate(
+            "sh",
+            std::env::var("PATH").ok().as_deref(),
+            SearchCwd::nowhere(),
+        )
+        .expect("sh on PATH");
+        let real = RealPath::of(&path).unwrap();
+        let deny = exec(&[
+            (ExecKey::Name("sh".into()), Evidence::ALLOW),
+            (ExecKey::Name("sh".into()), Evidence::DENY),
+        ]);
+        let e = refusal(&ctx([deny]), &real.to_string());
+        assert!(e.message.contains("excluded by `` `name sh ``"), "{}", e.message);
+    }
+
     /// A program that may run but that fs does not let be read is refused for
-    /// reading it.  A layer reads only what it and the layers beneath it run
-    /// (§4.6), so the fs layer sits beneath the exec layer.
+    /// reading it.  A layer reads only what it and the layers beneath it run,
+    /// so the fs layer sits beneath the exec layer.
     #[test]
     fn an_unreadable_program_is_refused_for_what_it_reads() {
         let runs = exec(&[(dir("/x"), Evidence::ALLOW)]);

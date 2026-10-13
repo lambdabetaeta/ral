@@ -2,7 +2,7 @@
 //! as data; every sentence a user reads is a pure function of that data,
 //! written here and nowhere else.
 
-use super::contract::{Vocab, unknown_key_message};
+use super::contract::{Vocab, code, unknown_key_message};
 use super::error::{
     CycleVia, KindFound, Reason, SpreadHead, Standing, TypeError, TypeErrorKind, UnitCall,
 };
@@ -10,7 +10,7 @@ use super::unify::WeakSource;
 use crate::diagnostic::{self, Report};
 use crate::ir::{ArithOp, BinaryOp};
 use crate::source::Span;
-use crate::text::plural;
+use crate::text::{indefinite, plural};
 use crate::ty::{
     CompTy, FmtCtx, Grade, Kind, Label, RefusedArg, Row, TAG_PREFIX, Ty, fmt_comp_ty_ctx,
     fmt_ty_ctx,
@@ -57,7 +57,9 @@ impl TypeErrorKind {
             Self::CompTyMismatch { expected, actual } => fmt_comp_mismatch(expected, actual),
             Self::RowExtraField { label, .. } => match label {
                 Label::Field(field) => format!("this record has no field named '{field}'"),
-                tag @ Label::Case(_) => format!("this value cannot be the tag {tag}"),
+                tag @ Label::Case(_) => {
+                    format!("this value cannot be the tag {}", code(&tag.to_string()))
+                }
             },
             Self::RowMissingField { label } => {
                 format!("this record is missing a field named '{label}'")
@@ -239,11 +241,11 @@ impl TypeErrorKind {
             Self::NotATable { found, .. } => format!("is {}", describe(found)),
             Self::CaseNotExhaustive { missing, extra } => {
                 match (missing.as_slice(), extra.as_slice()) {
-                    ([only], []) => format!("no arm for {only}"),
-                    (some, []) => format!("no arm for {}", some.join(", ")),
-                    ([], [only]) => format!("arm for {only} that the value never produces"),
+                    ([only], []) => format!("no arm for {}", code(only)),
+                    (some, []) => format!("no arm for {}", coded(some)),
+                    ([], [only]) => format!("arm for {} that the value never produces", code(only)),
                     ([], some) => {
-                        format!("arms for {} that the value never produces", some.join(", "))
+                        format!("arms for {} that the value never produces", coded(some))
                     }
                     _ => "case alternatives don't match the value".into(),
                 }
@@ -594,15 +596,18 @@ fn fmt_case_exhaustiveness(missing: &[String], extra: &[String]) -> String {
     let mut parts: Vec<String> = Vec::new();
     match missing {
         [] => {}
-        [one] => parts.push(format!("no arm for {one}")),
-        many => parts.push(format!("no arms for {}", many.join(", "))),
+        [one] => parts.push(format!("no arm for {}", code(one))),
+        many => parts.push(format!("no arms for {}", coded(many))),
     }
     match extra {
         [] => {}
-        [one] => parts.push(format!("arm for {one} but the value never produces it")),
+        [one] => parts.push(format!(
+            "arm for {} but the value never produces it",
+            code(one)
+        )),
         many => parts.push(format!(
             "arms for {} but the value never produces them",
-            many.join(", ")
+            coded(many)
         )),
     }
     format!("case is not exhaustive: {}", parts.join("; "))
@@ -712,7 +717,7 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
             TypeErrorKind::RowExtraField {
                 label: Label::Case(tag),
                 ..
-            } => return vocab.miss(tag).map(str::to_string),
+            } => return vocab.miss(tag),
             TypeErrorKind::TyMismatch { expected, actual } => {
                 if let Some(hint) = vocab_mismatch(vocab, expected, actual) {
                     return Some(hint);
@@ -803,10 +808,13 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
                     "available: {}; did you mean one of those?",
                     known.join(", ")
                 ),
-                Label::Case(tag) => match near_tags(tag, known)[..] {
-                    [near] => format!("available tags: {}; did you mean {near}?", known.join(", ")),
-                    _ => format!("available tags: {}", known.join(", ")),
-                },
+                Label::Case(tag) => {
+                    let all = coded(known);
+                    match near_tags(tag, known)[..] {
+                        [near] => format!("available tags: {all}; did you mean {}?", code(near)),
+                        _ => format!("available tags: {all}"),
+                    }
+                }
             })
         }
         TypeErrorKind::NotATable { key, first, .. } => Some(format!(
@@ -848,7 +856,10 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
                 .to_string(),
         ),
         TypeErrorKind::CaseOnNonVariant { .. } => {
-            Some("construct the value with a tag (`name payload) before scrutinising it".to_string())
+            Some(format!(
+                "construct the value with a tag ({}) before scrutinising it",
+                code("`name payload")
+            ))
         }
         // Both remedies keep every command the program already names: one drops
         // the wire, the other keeps the producer and gives it somewhere to run.
@@ -1247,18 +1258,34 @@ fn vocab_mismatch(vocab: &Vocab, expected: &Ty, actual: &Ty) -> Option<String> {
     Some(advice.to_string())
 }
 
+/// Whether one side is a vocabulary's tag and the other is not a tag at all.
+fn untagged_mismatch(expected: &Ty, actual: &Ty) -> bool {
+    offered_tags(expected).is_some() != offered_tags(actual).is_some()
+}
+
+/// Each tag of `known` as a code span, joined as a list.
+fn coded(known: &[String]) -> String {
+    known.iter().map(|k| code(k)).collect::<Vec<_>>().join(", ")
+}
+
 /// The headline for a tag a vocabulary's closed row lacks, in its words: the
 /// one sentence the checker and the grant decoder both say.  `known` are the
-/// row's tags as written, `` `cwd ``.
-pub(crate) fn unknown_tag_message(noun: &str, tag: &str, known: &[String]) -> String {
-    let noun = crate::text::indefinite(noun);
+/// row's tags as written, `` `cwd ``; `suggest` offers the nearest of them.
+pub(crate) fn unknown_tag_message(
+    noun: &str,
+    tag: &str,
+    known: &[String],
+    suggest: bool,
+) -> String {
+    let noun = indefinite(noun);
     let near = match near_tags(tag, known)[..] {
-        [near] => format!(" (did you mean {near}?)"),
+        [near] if suggest => format!(" (did you mean {}?)", code(near)),
         _ => String::new(),
     };
     format!(
-        "{TAG_PREFIX}{tag} is not {noun}; {noun} is one of {}{near}",
-        known.join(", ")
+        "{} is not {noun}; {noun} is one of {}{near}",
+        code(&format!("{TAG_PREFIX}{tag}")),
+        coded(known)
     )
 }
 
@@ -1274,6 +1301,15 @@ impl TypeError {
                 },
                 Some(Reason::Vocabulary(vocab)),
             ) => Some(vocab.refuse(tag).0),
+            (TypeErrorKind::TyMismatch { expected, actual }, Some(Reason::Vocabulary(vocab)))
+                if untagged_mismatch(expected, actual) =>
+            {
+                let wanted = match **expected {
+                    Ty::List(_) => format!("a list of {}s", vocab.noun),
+                    _ => indefinite(vocab.noun),
+                };
+                Some(format!("expected {wanted}, got {}", describe(actual)))
+            }
             _ => None,
         }
         .unwrap_or_else(|| self.kind.render_message())

@@ -113,8 +113,8 @@ pub(crate) fn denial_hint(_pids: &HashSet<u32>, _since: Instant, exit_code: i32)
          filesystem access surfaces only as an access-denied error on the command, with no kernel \
          log naming the path, so the exact path cannot be shown here. If the command needs a file \
          or directory the active grant's fs allow-list does not admit, widen the grant's read (or \
-         write) set: the `grant [ fs: [read: [`absolute …]] ] { … }` block in ral, or `--extend` for \
-         exarch (unless an exclusion covers it: an allowance cannot override one). A ``net: `offline`` grant likewise withholds the network capability, so a command that \
+         write) set: the `` grant [ fs: [read: [`absolute …]] ] { … } `` block in ral, or `--extend` for \
+         exarch (unless an exclusion covers it: an allowance cannot override one). A `` net: `offline` `` grant likewise withholds the network capability, so a command that \
          needs a socket will fail the same way."
             .to_string(),
     )
@@ -233,7 +233,7 @@ fn path_remedy(paths: &[&str], set: &str) -> String {
     let _ = write!(
         out,
         "\nAdd {} (or a parent directory) to the grant's {set} set: the \
-         `grant [ fs: [{set}: [`absolute {}]] ] {{ … }}` block in ral, or `--extend` for \
+         `` grant [ fs: [{set}: [`absolute {}]] ] {{ … }} `` block in ral, or `--extend` for \
          exarch (unless an exclusion covers it: an allowance cannot override one). The sandbox matches fully-resolved paths, so a path reached through a \
          symlink inside a granted directory (e.g. ~/.config) needs the resolved path \
          above, not the link's own.",
@@ -251,8 +251,8 @@ fn exec_remedy(paths: &[&str]) -> String {
     out.push_str(&listing(paths));
     let _ = write!(
         out,
-        "\nAdmit it as a file or a directory: the `grant [ exec: [allow: [`absolute {0}]] ] {{ … }}` \
-         block (or `dir `absolute {0}` for a directory) in ral, or `--extend` for exarch, unless an exclusion covers it: an allowance cannot override one. A re-exec (`sh -c`, `find -exec`) \
+        "\nAdmit it as a file or a directory: the `` grant [ exec: [allow: [`absolute {0}]] ] {{ … }} `` \
+         block (or `` `dir `absolute {0} `` for a directory) in ral, or `--extend` for exarch, unless an exclusion covers it: an allowance cannot override one. A re-exec (`sh -c`, `find -exec`) \
          reaches only this layer, so an in-process admit alone does not carry it.",
         quote_word(paths[0])
     );
@@ -295,7 +295,7 @@ fn door_remedy(doors: &[&str]) -> String {
 }
 
 #[cfg(not(windows))]
-const NET_REMEDY: &str = "a socket was denied, so the active grant is ``net: `offline``; and that bit is the whole of \
+const NET_REMEDY: &str = "a socket was denied, so the active grant is `` net: `offline` ``; and that bit is the whole of \
      it. No fs or exec widening opens a socket, and a hostname cannot carry bytes out as a \
      query label either: the resolver is closed at the same layer.";
 
@@ -314,7 +314,7 @@ fn opaque_remedy(op: Option<&str>) -> String {
     format!(
         "{what}, and the kernel record names no operand: so this hint cannot say what to \
          widen. If the command needs a path the grant does not admit, add it to the grant's \
-         read or write set: the `grant [ fs: [read: [`absolute …]] ] {{ … }}` block in ral, or \
+         read or write set: the `` grant [ fs: [read: [`absolute …]] ] {{ … }} `` block in ral, or \
          `--extend` for exarch, unless an exclusion covers it: an allowance cannot override one."
     )
 }
@@ -413,7 +413,7 @@ mod tests {
         );
     }
 
-    /// ``net: `offline`` is the whole remedy for a socket, and no fs wording
+    /// `` net: `offline` `` is the whole remedy for a socket, and no fs wording
     /// belongs anywhere near it.
     #[cfg(target_os = "macos")]
     #[test]
@@ -422,7 +422,7 @@ mod tests {
                     network-outbound";
         let hint = build_hint(&[line]);
         assert!(
-            hint.contains("`net: `offline`"),
+            hint.contains("`` net: `offline` ``"),
             "a denied socket must name the net bit; got {hint:?}"
         );
         assert!(

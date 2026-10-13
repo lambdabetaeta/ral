@@ -1,2 +1,3 @@
-# contains: unknown key 'detach'
+# contains: does not take 'detach'
+# contains: `detach` is a shell verb
 grant [detach: false] { return 1 }

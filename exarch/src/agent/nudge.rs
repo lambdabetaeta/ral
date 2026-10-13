@@ -87,8 +87,8 @@ impl Reminder {
                 format!(
                     "Context pressure: {detail}. At the next turn boundary, turns {runs} will \
                      leave your context; they stay readable with `exarch-transcript`. To leave \
-                     your future self a line, run `exarch-context `evict [turns: !{{range {first} \
-                     {last_plus_one}}}, note: `some '…']` now: a prompt whose exchange is still \
+                     your future self a line, run `` exarch-context `evict [turns: !{{range {first} \
+                     {last_plus_one}}}, note: `some '…'] `` now: a prompt whose exchange is still \
                      in hand stays on its own; otherwise nothing is required of you."
                 )
             }

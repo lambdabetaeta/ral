@@ -29,6 +29,7 @@ use super::error::{Clash, Reason, Standing, TypeErrorKind};
 use super::unify::Unifier;
 use crate::ir::{CompKind, Phrase, Val};
 use crate::source::{Span, Spanned};
+pub(crate) use crate::text::code;
 use crate::ty::{CompTy, Label, Row, TAG_PREFIX, Ty};
 
 /// Which declared table.  An enum rather than a name, so a lookup cannot miss.
@@ -97,8 +98,8 @@ pub struct Vocab {
     pub noun: &'static str,
     /// The row's tags with their payloads, in the order a refusal lists them.
     pub row: fn() -> Vec<(String, Ty)>,
-    /// Advice for a tag refused on purpose, by tag.
-    pub misses: &'static [(&'static str, &'static str)],
+    /// Advice for a tag refused on purpose.
+    pub misses: fn(&str) -> Option<String>,
     /// Advice for a value that is no tag at all.
     pub untagged: &'static str,
     /// Advice for a tag whose payload is the wrong type.
@@ -130,17 +131,18 @@ impl Vocab {
     }
 
     /// The advice kept for `tag`, a tag refused on purpose.
-    pub fn miss(&self, tag: &str) -> Option<&'static str> {
-        self.misses.iter().find(|(t, _)| *t == tag).map(|&(_, a)| a)
+    pub fn miss(&self, tag: &str) -> Option<String> {
+        (self.misses)(tag)
     }
 
     /// The headline for `tag`, which the row lacks, and the advice kept for
-    /// it: one refusal for the checker and the decoder alike.
-    pub fn refuse(&self, tag: &str) -> (String, Option<&'static str>) {
-        (
-            super::explain::unknown_tag_message(self.noun, tag, &self.tags()),
-            self.miss(tag),
-        )
+    /// it: one refusal for the checker and the decoder alike.  Advice replaces
+    /// the nearest-tag guess, which would contradict it.
+    pub fn refuse(&self, tag: &str) -> (String, Option<String>) {
+        let advice = self.miss(tag);
+        let headline =
+            super::explain::unknown_tag_message(self.noun, tag, &self.tags(), advice.is_none());
+        (headline, advice)
     }
 }
 
@@ -353,8 +355,12 @@ pub fn declared(form: Form) -> &'static Table {
 
 /// What a runtime door says about a key a table does not name.
 pub(super) fn unknown_key_message(form: &str, key: &str, offered: &[&str]) -> String {
+    let near = match crate::text::near_names(key, offered.iter().copied(), 1)[..] {
+        [near] => format!(" (did you mean '{near}'?)"),
+        _ => String::new(),
+    };
     format!(
-        "unknown key '{key}': `{form}` takes {list}",
+        "unknown key '{key}': `{form}` takes {list}{near}",
         list = offered.join(", "),
     )
 }
@@ -415,8 +421,8 @@ fn payload_at(u: &Unifier, ty: &Ty, tag: &str) -> Option<Ty> {
     }
 }
 
-/// Where `label`'s value sits, when the options were written out.
-pub(super) fn written_at(opts: &Val, label: &str) -> Option<Span> {
+/// `label`'s value, when the options were written out.
+fn written_field<'a>(opts: &'a Val, label: &str) -> Option<&'a Spanned<Val>> {
     let Val::Record(entries) = opts else {
         return None;
     };
@@ -424,7 +430,12 @@ pub(super) fn written_at(opts: &Val, label: &str) -> Option<Span> {
         .shape()
         .iter()
         .find(|(key, _)| key.as_ref() == label)
-        .and_then(|(_, value)| value.span)
+        .map(|(_, value)| value)
+}
+
+/// Where `label`'s value sits, when the options were written out.
+pub(super) fn written_at(opts: &Val, label: &str) -> Option<Span> {
+    written_field(opts, label).and_then(|value| value.span)
 }
 
 /// Hold a program's own return value to `table`, once inference has finished.
@@ -499,7 +510,10 @@ fn ascribe_row(ctx: &mut InferCtx, row: &Row, table: &'static Table, written: Op
                     ctx.report(clash.0, clash.1);
                 }
             }
-            Held::Nested(sub) => ascribe_nested(ctx, key.label, &payload, sub),
+            Held::Nested(sub) => {
+                let inner = written.and_then(|w| written_field(w, &label));
+                ascribe_nested(ctx, key.label, &payload, sub, inner.map(|v| &v.item));
+            }
             Held::Refuse(advice) => ctx.diagnose(TypeErrorKind::RefusedKey {
                 form: table.form,
                 key: key.label,
@@ -520,9 +534,15 @@ fn ascribe_row(ctx: &mut InferCtx, row: &Row, table: &'static Table, written: Op
 
 /// A nested table's value against `table`, as a record: a map and `()` are
 /// refused, and a type still unresolved is the runtime decoder's.
-fn ascribe_nested(ctx: &mut InferCtx, key: &'static str, ty: &Ty, table: &'static Table) {
+fn ascribe_nested(
+    ctx: &mut InferCtx,
+    key: &'static str,
+    ty: &Ty,
+    table: &'static Table,
+    written: Option<&Val>,
+) {
     match ctx.unifier.resolve_ty(ty) {
-        Ty::Record(row) => ascribe_row(ctx, &row, table, None),
+        Ty::Record(row) => ascribe_row(ctx, &row, table, written),
         Ty::Var(_) => {}
         found => ctx.diagnose(TypeErrorKind::NotATable {
             key,
@@ -544,7 +564,7 @@ pub(super) fn drain_nested(ctx: &mut InferCtx) {
     } in std::mem::take(&mut ctx.nested)
     {
         ctx.pos = pos;
-        ascribe_nested(ctx, key, &ty, table);
+        ascribe_nested(ctx, key, &ty, table, None);
     }
     ctx.pos = saved;
 }

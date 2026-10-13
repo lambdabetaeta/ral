@@ -326,7 +326,7 @@ pub fn serve_warrant(_extra: &[OsString]) -> u8 {
 ))]
 pub(super) fn admitted(program: crate::capability::Program, args: &[String]) -> Admitted {
     crate::capability::GrantStack::root()
-        .admit(program, args.to_vec(), &crate::path::Resolver::shell_less())
+        .admit(program, args.to_vec())
         .expect("an unrestricted stack admits everything")
 }
 
@@ -611,7 +611,7 @@ mod tests {
             fs: FsProjection::Restricted(FsRules {
                 read: scopes(read),
                 write: scopes(write),
-                deny: deny.iter().map(|d| FrozenPath::from_surface(d)).collect(),
+                deny: deny.iter().map(FrozenPath::from_surface).collect(),
                 pinned_dirs: Vec::new(),
             }),
             net: true,
@@ -709,7 +709,7 @@ mod tests {
                     crate::capability::Evidence::ALLOW,
                 ),
                 (
-                    crate::capability::ExecScope::File(shell),
+                    crate::capability::ExecScope::file(shell),
                     crate::capability::Evidence::DENY,
                 ),
             ];
@@ -778,13 +778,13 @@ mod tests {
             }),
             ..Capabilities::root()
         };
-        let (stack, resolver) = (GrantStack::of(layer), crate::path::Resolver::shell_less());
+        let stack = GrantStack::of(layer);
         let program = Program::file(script.to_path_buf()).expect("a program");
         let admitted = stack
-            .admit(program, Vec::new(), &resolver)
+            .admit(program, Vec::new())
             .expect("the grant admits the script");
-        let projection = SandboxProjection::of(&stack, &resolver, Some(&admitted))
-            .expect("a restricted fs sandboxes");
+        let projection =
+            SandboxProjection::of(&stack, Some(&admitted)).expect("a restricted fs sandboxes");
         let cmd = macos_sandboxed_command(&projection, &admitted).expect("build host command");
         let (_, stderr) = confined_stderr(cmd);
         let _ = std::fs::remove_dir_all(&work);
@@ -846,16 +846,15 @@ mod tests {
             exec: Some(exec),
             ..Capabilities::root()
         };
-        let (stack, resolver) = (GrantStack::of(layer), crate::path::Resolver::shell_less());
+        let stack = GrantStack::of(layer);
         let admitted = stack
             .admit(
                 Program::file(stub.into()).expect("git stub"),
                 vec!["--version".into()],
-                &resolver,
             )
             .expect("the grant admits the stub");
         let projection =
-            SandboxProjection::of(&stack, &resolver, Some(&admitted)).expect("exec is restricted");
+            SandboxProjection::of(&stack, Some(&admitted)).expect("exec is restricted");
         let cmd = macos_sandboxed_command(&projection, &admitted).expect("build host command");
         let (code, stderr) = confined_stderr(cmd);
         assert_eq!(code, Some(0), "{stderr}");

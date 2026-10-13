@@ -47,8 +47,8 @@ per-session scratch dir alone, so no profile can make `$XDG_CONFIG_HOME`
 writable — the protection is *structural*, not a deny-list entry an oversight
 could omit ([[map/exarch/policy|policy]]).
 
-- **Structural covers write, and only write.** Most bases *read* `xdg:config`
-  and `xdg:state` whole, so tools find their own configuration — which is why
+- **Structural covers write, and only write.** Most bases *read* `` `xdg-config ``
+  and `` `xdg-state `` whole, so tools find their own configuration — which is why
   the files holding our credentials are denied by name, in composition, on the
   same footing as a restrict file
   ([[invariants/a-grant-never-reaches-its-own-key|a-grant-never-reaches-its-own-key]]).

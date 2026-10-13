@@ -13,8 +13,7 @@
 
 use super::fs::{FsScope, Region};
 use super::{Evidence, ExecGrant, ExecKey, FsOp, GrantStack, Meet, region};
-use crate::path::{FrozenPath, Resolver};
-use std::collections::BTreeSet;
+use crate::path::FrozenPath;
 
 /// The prefixes that are both exec-admitted and fs-writable under `stack`,
 /// the live part of the meet of the two regions, each folded as the guard
@@ -25,22 +24,17 @@ use std::collections::BTreeSet;
 /// "everything runnable".  A directory wholly excluded on either side holds
 /// Both and is dropped; each writable island under a runnable directory is
 /// reported.
-pub fn deputy_prefixes(stack: &GrantStack, resolver: &Resolver) -> Vec<FrozenPath> {
+pub fn deputy_prefixes(stack: &GrantStack) -> Vec<FrozenPath> {
     if stack.exec_is_top() {
         return Vec::new();
     }
-    let runs = stack
-        .exec()
-        .map(|exec| runnable(exec, resolver))
-        .reduce(Meet::meet);
-    let writes = region(stack, resolver, &FsOp::Write);
+    let runs = stack.exec().map(runnable).reduce(Meet::meet);
+    let writes = region(stack, &FsOp::Write);
     let (Some(runs), Some(writes)) = (runs, writes) else {
         return Vec::new();
     };
     let both = runs.meet(writes);
-    let found: BTreeSet<&FsScope> = both.live().collect();
-    found
-        .into_iter()
+    both.live()
         .filter_map(|scope| match scope {
             FsScope::Prefix(prefix) => Some(prefix.clone()),
             FsScope::Place(_) => None,
@@ -51,7 +45,7 @@ pub fn deputy_prefixes(stack: &GrantStack, resolver: &Resolver) -> Vec<FrozenPat
 /// One layer's runnable directories as a region; `every` is the root.  The
 /// positive half of an entry stays as frozen and the negative half is
 /// re-resolved, as `fs::region` treats its own.
-fn runnable(exec: &ExecGrant, resolver: &Resolver) -> Region {
+fn runnable(exec: &ExecGrant) -> Region {
     let root = exec
         .every()
         .then(|| (FsScope::Prefix(FrozenPath::root()), Evidence::ALLOW));
@@ -62,7 +56,7 @@ fn runnable(exec: &ExecGrant, resolver: &Resolver) -> Region {
     let halves = dirs.flat_map(|(dir, e)| {
         [
             (e.positive).then(|| (FsScope::Prefix(dir.clone()), Evidence::ALLOW)),
-            (e.negative).then(|| (FsScope::Prefix(dir.refreeze(resolver)), Evidence::DENY)),
+            (e.negative).then(|| (FsScope::Prefix(dir.live()), Evidence::DENY)),
         ]
     });
     root.into_iter().chain(halves.flatten()).collect()
@@ -74,7 +68,7 @@ mod tests {
     use crate::capability::{
         Axis, Capabilities, Evidence, ExecGrant, ExecKey, FsPolicy, GrantStack,
     };
-    use crate::path::{FrozenPath, Resolver};
+    use crate::path::FrozenPath;
 
     fn lit(p: &str) -> FrozenPath {
         FrozenPath::for_test(p, p)
@@ -115,7 +109,7 @@ mod tests {
     }
 
     fn report(stack: &GrantStack) -> Vec<String> {
-        (deputy_prefixes(stack, &Resolver::shell_less()).iter())
+        (deputy_prefixes(stack).iter())
             .map(|p| p.as_str().to_string())
             .collect()
     }

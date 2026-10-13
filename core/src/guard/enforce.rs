@@ -13,7 +13,8 @@ use crate::capability::{
     Admitted, ExecDenial, Flag, FsOp, FsScope, GrantStack, Program, Refused, ShellVerb, Withheld,
     ral_binary,
 };
-use crate::path::{LexicalPath, Resolver};
+use crate::path::LexicalPath;
+use crate::text::code;
 use crate::types::{Check, Context, Error, Resource, Settled, sig};
 use std::fmt::Display;
 
@@ -69,13 +70,11 @@ pub(crate) fn check_exec(
     program: Program,
     args: Vec<String>,
 ) -> Result<Admitted, Box<Denial>> {
-    ctx.grants
-        .admit(program, args, &ctx.resolver())
-        .map_err(|refused| {
-            let Refused { program, args, why } = *refused;
-            let error = exec_error(&ctx.grants, shown, &program, &why);
-            Box::new(exec_denial(shown, &program, &why, Some(&args), error))
-        })
+    ctx.grants.admit(program, args).map_err(|refused| {
+        let Refused { program, args, why } = *refused;
+        let error = exec_error(&ctx.grants, shown, &program, &why);
+        Box::new(exec_denial(shown, &program, &why, Some(&args), error))
+    })
 }
 
 /// The words of an exec refusal.
@@ -83,19 +82,27 @@ fn exec_error(grants: &GrantStack, shown: &str, program: &Program, why: &ExecDen
     let layers = grants.exec().count();
     let head = format!("command '{shown}' denied by active grant");
     match why {
-        ExecDenial::Run(Withheld::MissingAllowance) if layers > 1 => {
-            Error::new(format!("{head}: no layer lets it run")).with_hint(NESTED)
-        }
+        ExecDenial::Run(Withheld::MissingAllowance) if layers > 1 => Error::new(format!(
+            "{head}: some layer's exec `allow` list does not let it run"
+        ))
+        .with_hint(NESTED),
         ExecDenial::Run(Withheld::MissingAllowance) => Error::new(format!(
             "{head}: nothing in the grant's exec `allow` list lets it run"
         ))
-        .with_hint(
-            "add it to the grant's exec `allow` list: `name git` for a command name, \
-             `absolute /path/to/it` for a file, or `dir `absolute /path` for its directory",
-        ),
+        .with_hint(format!(
+            "add it to the grant's exec `allow` list: {} for a command name, {} for a file, \
+                 or {} for its directory",
+            code("`name git"),
+            code("`absolute /path/to/it"),
+            code("`dir `absolute /path"),
+        )),
         ExecDenial::Run(Withheld::Excluded { scope, respelled }) => Error::new(format!(
             "{head}: {}",
-            excluded(format_args!("'{program}'"), scope, *respelled)
+            excluded(
+                format_args!("'{program}'"),
+                code(&scope.to_string()),
+                *respelled
+            )
         ))
         .with_hint(EXCLUSION_HINT),
         ExecDenial::Read(why) => Error::new(format!("{head}: {}", read_cause(shown, program, why)))
@@ -117,11 +124,8 @@ fn read_cause(shown: &str, program: &Program, why: &Withheld<FsScope>) -> String
         ),
     };
     match (why, program) {
-        (Withheld::MissingAllowance, Program::File { .. }) => {
-            format!("{subject} may run, but it is not readable under the active grant")
-        }
-        (Withheld::MissingAllowance, Program::Tool(_)) => {
-            format!("{lead}{subject} is not readable under the active grant")
+        (Withheld::MissingAllowance, _) => {
+            format!("{lead}{subject} may run, but it is not readable under the active grant")
         }
         (Withheld::Excluded { scope, respelled }, _) => format!(
             "{lead}{}",
@@ -186,13 +190,12 @@ pub(super) enum FsRefusal {
 /// allowance, and a path no allowance supports is withheld.  `Ok` exactly when
 /// no layer held an `fs` opinion or some allowance supports the path alone.
 ///
-/// The fold runs against a live [`Resolver`] on every check, so the exclusions
+/// The fold re-resolves exclusions against the live disk on every check, so the exclusions
 /// this decides against are the ones the disk describes now, where the
 /// sandbox's projection folds once, at spawn, because that is when the OS
 /// profile is written.
 pub(super) fn fs_judge(
     grants: &GrantStack,
-    resolver: &Resolver,
     resolved: &std::path::Path,
     op: &FsOp,
 ) -> Result<(), FsRefusal> {
@@ -203,8 +206,8 @@ pub(super) fn fs_judge(
         return Err(FsRefusal::Guarded(pinned));
     }
     match op {
-        FsOp::Read => grants.read(resolved, resolver),
-        FsOp::Write => grants.write(resolved, resolver),
+        FsOp::Read => grants.read(resolved),
+        FsOp::Write => grants.write(resolved),
     }
     .map_err(FsRefusal::Withheld)
 }
@@ -220,15 +223,15 @@ impl GrantStack {
     /// membership, not access.
     ///
     /// [`Shell::check_fs_read`]: crate::types::Shell::check_fs_read
-    pub fn admits_fs(&self, op: &FsOp, resolver: &Resolver, path: &LexicalPath) -> bool {
-        self.admits_fs_exact(op, resolver, &path.canonicalise_lenient())
+    pub fn admits_fs(&self, op: &FsOp, path: &LexicalPath) -> bool {
+        self.admits_fs_exact(op, &path.canonicalise_lenient())
     }
 
     /// [`admits_fs`](Self::admits_fs) for a path already symlink-free, what
     /// [`crate::path::Located::real`] hands over, so no second walk gets to
     /// disagree with the one that located the object.
-    pub fn admits_fs_exact(&self, op: &FsOp, resolver: &Resolver, real: &std::path::Path) -> bool {
-        fs_judge(self, resolver, real, op).is_ok()
+    pub fn admits_fs_exact(&self, op: &FsOp, real: &std::path::Path) -> bool {
+        fs_judge(self, real, op).is_ok()
     }
 }
 
@@ -249,7 +252,7 @@ pub(crate) fn check_fs_exact(
     let name = <&str>::from(op);
     let path = resolved.display();
     let layers = ctx.grants.fs().count();
-    let refusal = match fs_judge(&ctx.grants, &ctx.resolver(), resolved, op) {
+    let refusal = match fs_judge(&ctx.grants, resolved, op) {
         Ok(()) => return Ok(()),
         Err(refusal) => refusal,
     };

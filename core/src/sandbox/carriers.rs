@@ -163,13 +163,26 @@ pub(crate) fn trusted_real(path: &Path) -> Option<RealPath> {
     reason = "[silent:carrier-shebang] reads the head of an admitted program to learn its interpreter, as the kernel will; sandbox rendering, not the model's data I/O"
 )]
 pub(crate) fn shebang(path: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::OpenOptionsExt;
+    // `O_NONBLOCK` and the regular-file check: a FIFO swapped in must not stall the reader.
+    let file = std::fs::File::options()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .ok()?;
+    file.metadata().ok()?.is_file().then(|| head_shebang(file))?
+}
+
+/// [`shebang`] of the file behind the pinned image descriptor `fd`, never its name.
+#[cfg(target_os = "linux")]
+pub(crate) fn shebang_of_image(fd: std::os::fd::BorrowedFd<'_>) -> Option<PathBuf> {
+    shebang(&crate::path::proc_fd_path(std::os::fd::AsRawFd::as_raw_fd(&fd)))
+}
+
+fn head_shebang(file: std::fs::File) -> Option<PathBuf> {
     const LIMIT: u64 = if cfg!(target_os = "macos") { 512 } else { 256 };
     let mut head = Vec::new();
-    std::fs::File::open(path)
-        .ok()?
-        .take(LIMIT)
-        .read_to_end(&mut head)
-        .ok()?;
+    file.take(LIMIT).read_to_end(&mut head).ok()?;
     let line = head.strip_prefix(b"#!")?;
     let end = line
         .iter()

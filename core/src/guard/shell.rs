@@ -137,13 +137,13 @@ impl Shell {
     pub fn admits_fs_exact(&self, op: &FsOp, real: &std::path::Path) -> bool {
         self.context
             .grants
-            .admits_fs_exact(op, &self.context.resolver(), real)
+            .admits_fs_exact(op, real)
     }
 
     /// The OS-renderable projection of the live capability stack; `None` when
     /// no layer restricts enough to need an OS sandbox at all.
     pub fn sandbox_projection(&self) -> Option<SandboxProjection> {
-        SandboxProjection::of(&self.context.grants, &self.context.resolver(), None)
+        SandboxProjection::of(&self.context.grants, None)
     }
 
     /// Run `f` with `capabilities` pushed for its dynamic extent.  The single
@@ -195,9 +195,7 @@ impl Shell {
         if !self.local.audit.active() {
             return;
         }
-        for prefix in
-            crate::capability::deputy_prefixes(&self.context.grants, &self.context.resolver())
-        {
+        for prefix in crate::capability::deputy_prefixes(&self.context.grants) {
             let fields = BTreeMap::from([("prefix".to_string(), prefix.as_str().to_string())]);
             self.record_check(None, Check::new(Resource::Deputy, fields));
         }

@@ -3,8 +3,9 @@
 
 pub mod host;
 
+use crate::policy::Invocation;
 use crate::skill;
-use ral_core::capability::{Capabilities, ExecKey, GrantStack, Net};
+use ral_core::capability::{Capabilities, ExecKey};
 use std::collections::BTreeSet;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
@@ -38,7 +39,7 @@ pub enum EditScheme {
 /// If reading a `--system` file or a discovered `AGENTS.md` fails.
 pub fn assemble(
     files: &[PathBuf],
-    caps: &GrantStack,
+    invocation: &Invocation,
     app: crate::app::App,
     cwd: &Path,
     config_dir: &Path,
@@ -80,12 +81,12 @@ pub fn assemble(
         Some("Context management"),
         include_str!("../data/context.md").into(),
     ));
-    sections.push((Some("Host"), host_section(caps, app)));
+    sections.push((Some("Host"), host_section(invocation, app)));
     let agents = discover_agents(cwd, config_dir);
     if !agents.is_empty() {
         sections.push((Some("Workspace"), read_files(&agents)?));
     }
-    let skills = skill::discover_metadata(cwd, config_dir, caps);
+    let skills = skill::discover_metadata(cwd, config_dir, &invocation.stack);
     if !skills.is_empty() {
         sections.push((Some("Skills"), skills_section(&skills)));
     }
@@ -321,46 +322,48 @@ pub fn render(sections: &[(Option<&str>, String)]) -> String {
 /// alone — synod's engine lives in a guest VM where none of them hold, so it
 /// builds its own around the shared [`grant_summary`].
 ///
-/// `caps` is `policy::for_invocation`'s stack, whose last layer is the self
-/// layer.
-pub fn host_section(caps: &GrantStack, app: crate::app::App) -> String {
+/// `invocation` is `policy::for_invocation`'s result; its self layer is the
+/// one that reads as "exarch itself".
+pub fn host_section(invocation: &Invocation, app: crate::app::App) -> String {
     let state = app.xdg_dir(ral_core::host::XdgKind::State);
     let scratch_line = format!("`${}` = {SCRATCH_PLACEHOLDER}", app.scratch_var());
     format!(
         "You are an agent named '{NAME_PLACEHOLDER}'.\n\n{}\n{}",
         host::snapshot(&state),
-        stack_summary(caps, caps.iter().last(), &scratch_line)
+        stack_summary(invocation.layers(), &scratch_line)
     )
 }
 
-/// [`grant_summary`] over every layer of `stack` that [`says_something`], oldest first —
-/// the stack is the meet, so describing each layer in turn describes the
-/// whole composed ceiling without re-deriving the single flattened
-/// `Capabilities` that finding 2 retired.  The common case (no `--restrict`
-/// files) has exactly one restrictive layer, so its output is
-/// `grant_summary`'s unchanged.  `own` is the stack's self layer, if it has one.
-fn stack_summary(stack: &GrantStack, own: Option<&Capabilities>, scratch_line: &str) -> String {
-    let layers: Vec<&Capabilities> = stack.iter().filter(|c| says_something(c)).collect();
-    let Some((first, rest)) = layers.split_first() else {
+/// The legend once, then each layer of `stack` that [`says_something`] in
+/// turn, oldest first, then the net and scratch lines once: the stack is the
+/// meet, so describing each layer describes the whole composed ceiling
+/// without re-deriving a flattened `Capabilities`.  Each layer carries whether
+/// it is the stack's self layer.
+fn stack_summary<'a>(
+    stack: impl Iterator<Item = (&'a Capabilities, bool)>,
+    scratch_line: &str,
+) -> String {
+    let layers: Vec<_> = stack.filter(|&(c, _)| says_something(c)).collect();
+    if layers.is_empty() {
         return grant_summary(&Capabilities::root(), scratch_line);
-    };
-    let render = |caps: &Capabilities| {
-        summary(
-            caps,
-            scratch_line,
-            own.is_some_and(|o| std::ptr::eq(o, caps)),
-        )
-    };
-    let mut s = render(first);
-    for (i, caps) in rest.iter().enumerate() {
+    }
+    let mut s = legend();
+    if layers.len() > 1 {
         let _ = writeln!(
             s,
-            "\nLayer {} of {} further restricting layers:",
-            i + 2,
+            "The grant is the meet of {} layers, oldest first.",
             layers.len()
         );
-        s.push_str(&render(caps));
     }
+    for (i, &(caps, own)) in layers.iter().enumerate() {
+        if layers.len() > 1 {
+            let _ = writeln!(s, "\nLayer {}:", i + 1);
+        }
+        s.push_str(&layer_lines(caps, own));
+    }
+    let denied = layers.iter().any(|(c, _)| c.net.is_some());
+    s.push('\n');
+    s.push_str(&tail_lines(denied, scratch_line));
     s
 }
 
@@ -369,7 +372,7 @@ fn stack_summary(stack: &GrantStack, own: Option<&Capabilities>, scratch_line: &
 ///
 /// Under a nested fs restriction such a place stays readable, which the reader
 /// needs to know even of a layer that denotes `t`.
-pub fn says_something(caps: &Capabilities) -> bool {
+fn says_something(caps: &Capabilities) -> bool {
     caps.is_restrictive()
         || caps
             .exec
@@ -387,12 +390,6 @@ pub fn says_something(caps: &Capabilities) -> bool {
 /// the caller because exarch names a seeded env var and host path where synod
 /// names the guest's tmpfs.  Public for exactly that second caller.
 pub fn grant_summary(caps: &Capabilities, scratch_line: &str) -> String {
-    summary(caps, scratch_line, false)
-}
-
-/// [`grant_summary`], where `own` marks exarch's self layer, whose one
-/// exclusion reads as "exarch itself" rather than as a path.
-fn summary(caps: &Capabilities, scratch_line: &str, own: bool) -> String {
     // Nothing to say: the denial legend would describe a runtime event that
     // cannot occur, so collapse to one line plus the scratch path the agent
     // still needs.
@@ -402,8 +399,28 @@ fn summary(caps: &Capabilities, scratch_line: &str, own: bool) -> String {
 the sandbox is the trust boundary.\n\n- scratch: {scratch_line}\n"
         );
     }
-    let mut s = String::from(include_str!("../data/grant-legend.md").trim_end());
-    s.push_str("\n\n");
+    let mut s = legend();
+    s.push_str(&layer_lines(caps, false));
+    s.push_str(&tail_lines(caps.net.is_some(), scratch_line));
+    s
+}
+
+fn legend() -> String {
+    format!("{}\n\n", include_str!("../data/grant-legend.md").trim_end())
+}
+
+/// What the whole grant leaves: the net and scratch bullets.
+fn tail_lines(net_denied: bool, scratch_line: &str) -> String {
+    format!(
+        "- net: {}\n- scratch: {scratch_line}\n",
+        if net_denied { "deny" } else { "inherit" }
+    )
+}
+
+/// One layer's bullets bar net and scratch.  `own` marks exarch's self layer,
+/// whose one exclusion reads as "exarch itself" rather than as a path.
+fn layer_lines(caps: &Capabilities, own: bool) -> String {
+    let mut s = String::new();
     if own {
         s.push_str("- exec: every program, less exarch itself\n");
     } else {
@@ -424,21 +441,12 @@ the sandbox is the trust boundary.\n\n- scratch: {scratch_line}\n"
             let _ = writeln!(s, "- fs deny: {}", join_str(&fs.deny_paths));
         }
     }
-    let _ = writeln!(
-        s,
-        "- net: {}",
-        match caps.net {
-            None => "inherit",
-            Some(Net::Offline) => "deny",
-        }
-    );
     if let Some(verbs) = &caps.editor {
         let _ = writeln!(s, "- editor: {}", verbs_line(verbs));
     }
     if let Some(verbs) = &caps.shell {
         let _ = writeln!(s, "- shell: {}", verbs_line(verbs));
     }
-    let _ = writeln!(s, "- scratch: {scratch_line}");
     s
 }
 
@@ -696,7 +704,12 @@ mod tests {
             shell: Some([ShellVerb::Chdir].into()),
             ..Capabilities::root()
         };
-        let text = stack_summary(&GrantStack::of(layer), None, "scratch");
+        let text = stack_summary(
+            ral_core::capability::GrantStack::of(layer)
+                .iter()
+                .map(|c| (c, false)),
+            "scratch",
+        );
         assert!(!text.contains("Ambient authority"), "{text}");
         assert!(text.contains("- shell: chdir\n"), "{text}");
     }

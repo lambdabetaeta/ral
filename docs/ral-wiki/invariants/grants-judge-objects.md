@@ -60,7 +60,7 @@ choice. Nothing outside `core/src/path/` is:
   leaves the type only as a `String`, for rendering.
 
 A guard must ask on the form its check matches. The one time it did not, the
-`xdg:` freeze guard asked containment of the surface while the check it guarded
+`xdg-*` freeze guard asked containment of the surface while the check it guarded
 matched the real form, and read `XDG_DATA_HOME=~/link`, `link → /etc`, as
 contained inside `HOME` (fixed in `a5b0a525`).
 

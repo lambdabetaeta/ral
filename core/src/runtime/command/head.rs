@@ -153,8 +153,7 @@ mod tests {
 
     /// Head admission as dispatch asks it: a head with no program passes.
     fn admits_head(ctx: &Context, head: &Head) -> bool {
-        (head.program.as_ref().ok())
-            .is_none_or(|program| ctx.grants.admits(program, &ctx.resolver()))
+        (head.program.as_ref().ok()).is_none_or(|program| ctx.grants.admits(program))
     }
 
     #[test]

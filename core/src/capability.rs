@@ -24,9 +24,11 @@ pub(crate) use exec::ExecScope;
 pub(crate) use exec::Subject;
 pub(crate) use exec::{Admitted, ExecDenial, ExecRules, Program, Refused, ral_binary, rules};
 pub use fs::FsOp;
+#[cfg(target_os = "macos")]
+pub(crate) use fs::ROSETTA;
 #[cfg(target_os = "linux")]
 pub(crate) use fs::floor;
-pub(crate) use fs::{FsScope, region, running_region};
+pub(crate) use fs::{FsScope, Region, region, running_region};
 pub use lattice::{
     Axis, Capabilities, EditorVerb, Evidence, ExecGrant, ExecKey, Flag, Fragment, FsPolicy,
     GrantStack, Join, Meet, Net, ShellVerb,

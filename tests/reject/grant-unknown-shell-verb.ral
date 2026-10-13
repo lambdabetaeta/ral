@@ -1,3 +1,3 @@
-# contains: `chdr is not a verb
-# contains: did you mean `chdir
+# contains: `` `chdr `` is not a verb
+# contains: did you mean `` `chdir ``
 grant [shell: [`chdr]] { return 1 }

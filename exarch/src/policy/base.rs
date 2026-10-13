@@ -61,9 +61,10 @@ pub(super) fn resolve_base(name: &str, ctx: &FreezeCtx) -> Result<Capabilities, 
     Ok(caps)
 }
 
-/// Drop bare exec keys naming a coreutil this platform cannot bundle — the
-/// `coreutils-unix-only` set, whose `uu_*` crates compile on Unix alone — so a
-/// rendered profile never advertises a grant it cannot honour.
+/// Withdraw the allowances of bare exec keys naming a coreutil this platform
+/// cannot bundle (the `coreutils-unix-only` set, whose `uu_*` crates compile on
+/// Unix alone), so a rendered profile never advertises a grant it cannot
+/// honour.  Exclusions stay: a veto does not depend on the tool existing.
 ///
 /// `unix_available` is a parameter rather than a `cfg!(unix)` read here so the
 /// non-Unix shape is testable from a Unix host.
@@ -72,8 +73,8 @@ fn drop_dead_exec_grants(caps: &mut Capabilities, unix_available: bool) {
         return;
     }
     if let Some(exec) = caps.exec.as_mut() {
-        exec.retain(|key, _| {
-            !matches!(key, ExecKey::Name(name)
+        exec.withdraw(|key| {
+            matches!(key, ExecKey::Name(name)
                 if ral_core::uutils::COREUTILS_UNIX_ONLY_TOOLS.contains(&name.as_str()))
         });
     }
@@ -564,14 +565,8 @@ mod tests {
         );
         if let Some(git) = host_real("git") {
             assert!(
-                admits(extended.clone(), &git),
+                admits(extended, &git),
                 "the git extension's `name git` carries the host's git, wherever it lives"
-            );
-        }
-        if ral_core::path::exists("/opt/homebrew") {
-            assert!(
-                admits(extended, "/opt/homebrew/bin/git"),
-                "a Homebrew git is admitted once the extension names it"
             );
         }
     }
@@ -849,5 +844,32 @@ mod tests {
             exec.get(&bare("cat")).is_some(),
             "a cross-platform bundled tool must survive the drop"
         );
+    }
+
+    #[test]
+    fn dropping_dead_grants_keeps_exclusions() {
+        use ral_core::capability::Evidence;
+        let [allowed, denied, both, ..] = *ral_core::uutils::COREUTILS_UNIX_ONLY_TOOLS else {
+            unreachable!("at least three unix-only tools")
+        };
+        let mut caps = Capabilities::deny_all();
+        caps.exec = Some(
+            [
+                (bare(allowed), Evidence::ALLOW),
+                (bare(denied), Evidence::DENY),
+                (bare(both), Evidence::BOTH),
+                (bare("git"), Evidence::ALLOW),
+            ]
+            .into_iter()
+            .collect(),
+        );
+
+        drop_dead_exec_grants(&mut caps, false);
+
+        let exec = caps.exec.as_ref().unwrap();
+        assert_eq!(exec.get(&bare(allowed)), None);
+        assert_eq!(exec.get(&bare(denied)), Some(&Evidence::DENY));
+        assert_eq!(exec.get(&bare(both)), Some(&Evidence::DENY));
+        assert_eq!(exec.get(&bare("git")), Some(&Evidence::ALLOW));
     }
 }

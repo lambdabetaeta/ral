@@ -847,7 +847,7 @@ mod tests {
         Admitted, Capabilities, FsPolicy, FsScope, GrantStack, Program, floor,
     };
     use crate::capability::{Evidence, ExecScope};
-    use crate::path::{FrozenPath, RealPath, Resolver};
+    use crate::path::{FrozenPath, RealPath};
     use crate::sandbox::launch::{Ownership, admitted, enveloped};
     use crate::sandbox::warrant::{Handoff, Slot};
     use crate::sandbox::{ExecProjection, FsProjection, FsRules, SandboxProjection};
@@ -868,7 +868,7 @@ mod tests {
     }
 
     fn file_rule(path: RealPath, allow: bool) -> Rule {
-        (ExecScope::File(path), evidence(allow))
+        (ExecScope::file(path), evidence(allow))
     }
 
     fn veto_rule(name: &str) -> Rule {
@@ -1177,8 +1177,7 @@ mod tests {
             fs: Some(fs),
             ..Capabilities::root()
         };
-        SandboxProjection::of(&GrantStack::of(caps), &Resolver::shell_less(), None)
-            .expect("an fs grant projects")
+        SandboxProjection::of(&GrantStack::of(caps), None).expect("an fs grant projects")
     }
 
     /// The `Shown` binds beneath `dir`, the floor left out.
@@ -1265,11 +1264,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A write that covers a run place freezes nothing: the one writable bind
-    /// is the whole of the view there.
+    /// Writing does not withdraw run authority: a write that covers a run
+    /// place leaves the one writable bind as the whole of the view there.
     #[test]
-    fn a_write_covering_a_run_place_freezes_nothing() {
-        let dir = workdir("binds-unfrozen");
+    fn a_write_covering_a_run_place_leaves_one_writable_bind() {
+        let dir = workdir("binds-write-over-place");
         let dir = std::fs::canonicalize(&dir).expect("the work dir is real");
         let (w, bin) = (dir.join("w"), dir.join("w/bin"));
         std::fs::create_dir_all(&bin).unwrap();
@@ -2932,14 +2931,15 @@ mod tests {
         assert!(!out.status.success() && out.stdout.is_empty(), "{out:?}");
     }
 
-    /// Under an unrestricted fs nothing is frozen, a veto in force or not, and
-    /// the veto is not walked: every write reaches it.
+    /// Under an unrestricted fs, a veto in force or not, the tool the exec
+    /// grant admits still runs, and the child still writes beside it: every
+    /// write reaches the veto, so it is not walked.
     #[test]
-    fn an_unrestricted_fs_freezes_nothing_under_a_veto() {
+    fn an_unrestricted_fs_with_a_veto_still_runs_what_the_exec_grant_admits() {
         if !landlock_at_least(super::landlock::Abi::EXEC) {
             return;
         }
-        let dir = workdir("exec-frozen-whole");
+        let dir = workdir("exec-unrestricted-veto");
         let bin = dir.join("bin");
         std::fs::create_dir(&bin).unwrap();
         std::fs::copy("/bin/true", bin.join("tool")).expect("copy /bin/true");
@@ -3319,14 +3319,13 @@ mod tests {
             fs,
             ..Capabilities::root()
         });
-        let resolver = Resolver::shell_less();
         let program = Program::file(program.to_path_buf()).expect("the program exists");
         let args: Vec<String> = args.iter().map(|a| (*a).to_string()).collect();
         let admitted = stack
-            .admit(program, args, &resolver)
+            .admit(program, args)
             .unwrap_or_else(|why| panic!("the stack refuses the program: {why:?}"));
-        let projection = SandboxProjection::of(&stack, &resolver, Some(&admitted))
-            .expect("a restricted stack projects");
+        let projection =
+            SandboxProjection::of(&stack, Some(&admitted)).expect("a restricted stack projects");
         (projection, admitted)
     }
 
@@ -3355,6 +3354,62 @@ mod tests {
         assert!(
             !exec_files(&shut).contains(&linker),
             "an excluded linker candidate was admitted: {linker}"
+        );
+    }
+
+    /// An fs exclusion on a linker candidate beats the support that would
+    /// admit it, as an exec exclusion does.
+    #[test]
+    fn an_fs_excluded_linker_candidate_is_not_admitted() {
+        let Some(linker) = crate::sandbox::carriers::linkers().into_iter().next() else {
+            eprintln!("skipping: this host has no dynamic linker candidate");
+            return;
+        };
+        let sh = std::path::Path::new("/bin/sh");
+        let fs = |deny: Vec<FrozenPath>| FsPolicy {
+            read_prefixes: vec![FrozenPath::from_surface(std::path::Path::new("/"))],
+            write_prefixes: Vec::new(),
+            deny_paths: deny,
+        };
+        let (open, _) = folded(Some((&[], &[])), Some(fs(Vec::new())), sh, &[]);
+        assert!(
+            exec_files(&open).contains(&linker),
+            "support admits the linker unless excluded: {linker}"
+        );
+        let denied = fs(vec![FrozenPath::from_surface(linker.as_path())]);
+        let (shut, _) = folded(Some((&[], &[])), Some(denied), sh, &[]);
+        assert!(
+            !exec_files(&shut).contains(&linker),
+            "an fs-excluded linker candidate was admitted: {linker}"
+        );
+    }
+
+    /// An exec exclusion on a script's interpreter keeps it out of the read
+    /// region's places, where support would otherwise carry it.
+    #[test]
+    fn an_exec_excluded_carrier_is_not_read() {
+        let Some(script) = trusted_script() else {
+            eprintln!("skipping: this host has no trusted script");
+            return;
+        };
+        let carrier = crate::sandbox::carriers::trusted_real(&script)
+            .and_then(|real| crate::sandbox::carriers::shebang(real.as_path()))
+            .and_then(|interp| crate::sandbox::carriers::trusted_real(&interp))
+            .expect("a trusted script has a trusted interpreter");
+        let reads = || FsPolicy {
+            read_prefixes: vec![FrozenPath::from_surface(std::env::temp_dir())],
+            write_prefixes: Vec::new(),
+            deny_paths: Vec::new(),
+        };
+        let carried = |deny: &[&std::path::Path]| {
+            let (policy, _) = folded(Some((&[], deny)), Some(reads()), &script, &[]);
+            let rules = policy.fs.rules().expect("a restricted fs").read.clone();
+            rules.contains(&FsScope::Place(carrier.clone()))
+        };
+        assert!(carried(&[]), "support carries the interpreter: {carrier}");
+        assert!(
+            !carried(&[carrier.as_path()]),
+            "an exec-excluded carrier was read: {carrier}"
         );
     }
 

@@ -44,7 +44,7 @@ pushed layer**:
 Composition emits no confused-deputy warning naming every prefix both
 exec-admitted and writable. That predicate is not the one that matters —
 in-projection overlap escalates nothing and every bake-in requires it, so such
-a line would fire on every session naming `cwd:`, `/tmp`, and `tempdir:`, all
+a line would fire on every session naming `` `cwd ``, `` `absolute /tmp ``, and `` `tempdir ``, all
 three deliberate ([[design/grant|grant]] §Concessions). The report lives
 where it is asked for rather than announced: `ral`'s audit trail records
 one `deputy` check per flagged prefix when a grant frame is entered
@@ -55,7 +55,7 @@ Every profile is *frozen* as it loads — resolving each place (`` `home ``, `` 
 directory, and the platform's live tool roots inside
 `ral_core::guard`'s decode pass (`guard/decode.rs`, `guard/freeze.rs`) — so composition runs entirely on
 already-resolved `Capabilities` ([[design/capability-freeze|freeze boundary]]).
-An `xdg:` path escaping `HOME` is rejected at the profile that names it, before
+An `` `xdg-* `` place escaping `HOME` is rejected at the profile that names it, before
 composition could discard it. Loading reuses
 `ral_core::load::profile::load_capabilities_from_*` — the same surface as ral's
 `--capabilities <path>.ral` (`policy/load.rs` wraps it with exarch's error
@@ -135,7 +135,7 @@ those a `Program::Tool` and skips the `PATH` walk entirely, so they reach the
 in-process guard as a tool with no place on disk: a directory prefix cannot
 match one, and silence denies it. That is why `read-only`, `edit-only`,
 `reasonable` and `confined` each carry a per-name coreutils block that looks
-redundant beside their `system:` subpath rule and is not.
+redundant beside their `` `dir `system `` rule and is not.
 `every_grantable_base_settles_the_bundled_tools` pins it, per build
 configuration — turn on the `ripgrep` feature without naming `rg` in a profile
 and it fails, naming the tool.
@@ -163,7 +163,7 @@ ride it:
 
 - interactive shells are denied by literal override in every attenuated
   profile — `bash`/`zsh` and their Windows analogues `cmd`/`powershell`/`pwsh`
-  (which `system:` would otherwise admit via `System32`); `sh` stays allowed
+  (which `` `dir `system `` would otherwise admit via `System32`); `sh` stays allowed
   for `configure`/`make` shell-outs;
 - `minimal` leaves Homebrew unlisted, so brew tools are opt-in through
   `--extend`; `reasonable`, `confined`, `edit-only` and `read-only` add
@@ -183,7 +183,7 @@ can't silently widen a jail:
   `--extend`); `minimal` admits only the *system* git under `/usr/bin/`
   (a brew git is opt-in via the git extension);
 - every exec-declaring base carries an `Allow` for each live system tool root;
-- `read-only` reads but does not write `cwd:`;
+- `read-only` reads but does not write `` `cwd ``;
 - `confined` is net-off, admits host execs by subpath and only bundled tools by
   bare name, and has no home-reaching prefixes;
 - `` `cwd ``/`` `tempdir `` places freeze into the per-invocation working and temp dirs

@@ -1,2 +1,2 @@
-# contains: fs lists take places such as `absolute or `cwd
+# contains: fs lists take places such as `` `absolute `` or `` `cwd ``
 grant [fs: [read: [`path]]] { return 1 }

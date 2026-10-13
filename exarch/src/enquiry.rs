@@ -12,6 +12,7 @@ use crate::schedule::{CronSchedule, ScheduleInfo, Trigger, fmt_duration, parse_d
 use ral_core::SpawnGrant;
 use ral_core::first_order::FOValue;
 use ral_core::first_order::datum::{Datum, exact_keys, field, tag, untag};
+use ral_core::text::code;
 use ral_core::ty::{Ty, Typed};
 use ral_core::types::NurseryId;
 use ral_core::{record, variant};
@@ -55,7 +56,8 @@ fn read_tag<F: Family, T>(
     let offered = || offer(F::TAGS);
     let (label, payload) = untag(word).ok_or_else(|| {
         format!(
-            "`exarch-{class}` takes a tag naming what to do ({}); got {}",
+            "{} takes a tag naming what to do ({}); got {}",
+            code(&format!("exarch-{class}")),
             offered(),
             word.shape()
         )
@@ -63,15 +65,17 @@ fn read_tag<F: Family, T>(
     decode(label, payload)
         .ok_or_else(|| {
             format!(
-                "unrecognised tag in `exarch-{class} `{label}`: `exarch-{class}` takes {}",
+                "unrecognised tag in {}: {} takes {}",
+                code(&format!("exarch-{class} `{label}")),
+                code(&format!("exarch-{class}")),
                 offered()
             )
         })?
-        .map_err(|why| format!("`exarch-{class} `{label}`: {why}"))
+        .map_err(|why| format!("{}: {why}", code(&format!("exarch-{class} `{label}"))))
 }
 
 fn offer(tags: &[&str]) -> String {
-    let tags: Vec<String> = tags.iter().map(|t| format!("`{t}")).collect();
+    let tags: Vec<String> = tags.iter().map(|t| code(&format!("`{t}"))).collect();
     match tags.split_last() {
         Some((last, rest)) if !rest.is_empty() => format!("{} or {last}", rest.join(", ")),
         _ => tags.concat(),
@@ -116,7 +120,10 @@ impl Datum for Request {
         })?;
         let word = || {
             word.ok_or_else(|| {
-                format!("`exarch-{label}` takes a tag naming what to do, got no payload at all")
+                format!(
+                    "{} takes a tag naming what to do, got no payload at all",
+                    code(&format!("exarch-{label}"))
+                )
             })
         };
         match label {
@@ -778,8 +785,8 @@ impl Datum for Card {
             .filter(|card| !card.marks().is_empty())
             .ok_or_else(|| {
                 format!(
-                    "expected a card with at least one mark, got {}: did you mean `exarch-pins \
-                     `clear` to empty the slot?",
+                    "expected a card with at least one mark, got {}: did you mean `` exarch-pins \
+                     `clear `` to empty the slot?",
                     v.shape()
                 )
             })
@@ -1480,7 +1487,7 @@ mod tests {
         };
         assert_eq!(
             why,
-            "`exarch-context `evict`: no `turns field in a record of 1 field"
+            "`` exarch-context `evict ``: no `turns field in a record of 1 field"
         );
     }
 
@@ -1490,6 +1497,6 @@ mod tests {
         let Err(why) = family::<Pins>(&tag("list", Some(FOValue::Unit))) else {
             panic!("`list takes nothing");
         };
-        assert_eq!(why, "`exarch-pins `list`: takes no payload, got ()");
+        assert_eq!(why, "`` exarch-pins `list ``: takes no payload, got ()");
     }
 }

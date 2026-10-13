@@ -38,7 +38,6 @@ pub(crate) fn build_launch(
     let mut cmd = if jail.is_none()
         && let Some(projection) = crate::sandbox::SandboxProjection::of(
             &shell.context.grants,
-            &shell.context.resolver(),
             Some(admitted),
         ) {
         // A `grant` body evaluates in this process unconfined; spawned children

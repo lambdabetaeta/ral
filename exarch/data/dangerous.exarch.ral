@@ -1,9 +1,12 @@
-# `dangerous` bake-in.  No attenuation: every field defaults to the
-# lattice top (None / unset).  The agent has ambient authority.  Use
-# only when something else is the trust boundary (e.g. a Docker
-# container).
+# `dangerous` bake-in.  The profile itself attenuates nothing: every
+# field defaults to the lattice top (None / unset).  Use only when
+# something else is the trust boundary (e.g. a Docker container).
+#
+# Exarch still layers its own exclusions on top: its binary is never
+# runnable, its credential files are denied once some layer restricts
+# the filesystem, and every `--restrict` file is denied.
 #
 # Combine with `--restrict <FILE>` to "start permissive and
-# attenuate from there": `dangerous ⊓ file = file`.
+# attenuate from there": the file, less those exclusions.
 
 return ()

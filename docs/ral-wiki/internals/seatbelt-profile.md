@@ -111,7 +111,7 @@ descendants, and `capability::deputy` names such folders
 ([[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]]).
 
 **net.** Enforced by absence. The base admits `network-outbound` for nothing;
-only `net: true` appends `macos-net.sbpl` — the wholesale `(allow network*)`,
+only a grant that does not say ``net: `offline`` appends `macos-net.sbpl` — the wholesale `(allow network*)`,
 Seatbelt having no per-address rules, and the Mach doors that *are* the
 network: configd (proxies, DNS servers), the dnssd port, trustd. That silence
 is what closes DNS: `getaddrinfo` reaches mDNSResponder over the UNIX socket
@@ -122,7 +122,7 @@ still resolves names; admitting that socket alone resolves them with
 hostname an egress channel — an attacker-chosen query label leaves through a
 daemon outside the sandbox — while ``net: `offline`` still read as closed.
 `mac_profile_denies_network_when_disabled` asserts this over every rendered
-rule, with a `net: true` positive control so it cannot pass vacuously.
+rule, with an open-network positive control so it cannot pass vacuously.
 
 ## The base, `macos-base.sbpl`
 

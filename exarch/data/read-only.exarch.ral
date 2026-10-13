@@ -49,10 +49,10 @@ return [
     ],
 
     # Writes only to scratch — the project tree is off-limits.  This is
-    # the load-bearing difference vs `reasonable`: `cwd:` is read-only,
+    # the load-bearing difference vs `reasonable`: `cwd .` is read-only,
     # and any tool that wants to modify the tree fails closed.  Tools
     # that need a workspace can use `$EXARCH_SCRATCH` (under
-    # `tempdir:`) as their scratch root.
+    # `tempdir .`) as their scratch root.
     write: [
       `absolute /tmp,
       `tempdir .,
@@ -73,7 +73,7 @@ return [
   # Exec mirrors `reasonable` — the agent has the same toolset.  No
   # write capability means `rm`, `mv`, `cp`, `mkdir`, `touch`,
   # `truncate` and friends are still admitted as commands but fail at
-  # the fs guard when their target lies under `cwd:`.  This is
+  # the fs guard when their target lies under `cwd .`.  This is
   # intentional: the agent can attempt the action and observe the
   # denial, rather than having "tool not found" surprise.
   exec: [
@@ -86,7 +86,7 @@ return [
       `dir `absolute /usr/sbin,
       `dir `absolute /sbin,
       `dir `cwd .,   # read-only, so nothing can be dropped here to run
-      # No `/tmp/` or `tempdir:/`: those are this profile's only writable
+      # No `dir `absolute /tmp` or `dir `tempdir .`: those are this profile's only writable
       # dirs, and a dir that is both writable and exec-admitted makes the
       # denies below advisory — write a copy of `bash` into scratch under
       # another name and the veto, a name veto, never sees it.
@@ -149,7 +149,7 @@ return [
 
       # Version control.  `git` is admitted; review work needs
       # `git log`, `git diff`, `git show`.  Writes go to scratch only,
-      # so `git commit` (which writes objects into cwd:/.git) fails by
+      # so `git commit` (which writes objects into `cwd .`'s `.git`) fails by
       # fs guard — the agent can read history but not rewrite it.  See
       # `reasonable` for the credential-helper analysis.
       `name git,

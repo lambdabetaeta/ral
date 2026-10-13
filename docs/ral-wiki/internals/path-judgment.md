@@ -68,7 +68,7 @@ holds as frozen**
 - **For a name that does not exist**, stored spellings cannot help. Here the
   deny relation does the work: a `Region`'s deny rule holds any path whose
   components agree with it under `identity::collision_key`. So creating `.ENV`
-  meets an absent `deny: [cwd:/.env]`, and the refusal says another spelling
+  meets an absent `` deny: [`cwd .env] ``, and the refusal says another spelling
   caught it.
 
 ## Exceptions decided before any region

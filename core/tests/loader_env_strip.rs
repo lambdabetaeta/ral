@@ -50,7 +50,6 @@ fn boot() -> Shell {
 fn restrict() -> Capabilities {
     let dir = std::env::temp_dir().join(format!("ral_loader_env_{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("create work dir");
-    let dir = dir.to_string_lossy();
     Capabilities {
         fs: Some(FsPolicy {
             read_prefixes: vec![FrozenPath::from_surface(&dir)],
@@ -92,7 +91,7 @@ fn child_env(layers: impl IntoIterator<Item = Capabilities>, vars: &str) -> Stri
     let report = boot().run(Run {
         io: RunIo::Inherit,
         caps,
-        ..Run::captured(&src, "<test>")
+        ..Run::captured(src.as_str(), "<test>")
     });
     let RunReport::Ran { ending, .. } = report else {
         panic!("well-formed source must run: {src:?}");

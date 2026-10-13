@@ -3,7 +3,7 @@
 //!
 //! Evaluation is [`super::evaluate_source`], decoding is
 //! [`decode_capability_map`]; this file only joins them.
-//! Sigils freeze here, so a composed ceiling is the `meet` of already-resolved
+//! Places freeze here, so a composed ceiling is the `meet` of already-resolved
 //! bundles.  Entered by the ral CLI's `--capabilities` flag and by exarch's
 //! base/extend/restrict orchestrator.
 
@@ -15,7 +15,7 @@ use crate::guard::freeze::FreezeCtx;
 use crate::types::{Break, Mooring, Settled, Shell, sig};
 
 /// Evaluate `source` and decode its terminal value into a frozen
-/// [`Capabilities`], resolving sigils against `ctx`.
+/// [`Capabilities`], resolving places against `ctx`.
 ///
 /// `virtual_path` names the file in errors and keys the cycle stack —
 /// synthetic (`<built-in:NAME>`) for embedded profiles.
@@ -104,8 +104,8 @@ pub fn load_fragment_from_path(
 /// Root first, and the stack folds them at every check, so no file's opinion
 /// is ever flattened away by a sibling that is silent on the same key.
 ///
-/// One `FreezeCtx` serves every load, so every profile resolves its sigils
-/// against the same home and cwd, and an `xdg:` path escaping `HOME` is
+/// One `FreezeCtx` serves every load, so every profile resolves its places
+/// against the same home and cwd, and an `xdg-*` place escaping `HOME` is
 /// rejected at the profile that names it.  Failures carry a bare mechanism
 /// message; the caller prepends provenance (`--capabilities`, a config key).
 /// The home is the shell's effective `HOME` — the override chain — the same

@@ -60,7 +60,7 @@ return [
   # listing each tool here.
   #
   # `bash` and `zsh` live under a tool root (admitted by `system`
-  # above), but a literal `name` deny overrides the subpath rule.
+  # above), but a `name` exclusion beats the subpath allowance.
   # Autoconf-style `configure` scripts and `make` recipes shell out
   # via `/bin/sh -c` and need `sh` itself; bash/zsh are agent
   # quality-of-life only.  `cmd`/`powershell`/`pwsh` are the Windows

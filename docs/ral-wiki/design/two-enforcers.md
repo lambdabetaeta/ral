@@ -149,6 +149,17 @@ start:
 
 *Declared limits*, each a place where guard and kernel can differ:
 
+- **On Linux a pin is runnable wherever it is readable.** The pinned bwrap and
+  trampoline are bind-mounted read-only at their own names whatever the `fs`
+  grant reads, and where `exec` is unrestricted Landlock carries no exec
+  ruleset, so a readable pin is also runnable. Under ``grant [fs: [read: [`cwd .]]]``
+  with ral installed outside the readable set, `ral -c …` is refused by the
+  guard (running reads, and ral's binary is not readable), but
+  `sh -c '/path/to/ral -c …'` runs and the nested ral boots with no grants. `fs`
+  and `net` stay kernel-confined; only guard-only rules are lost (verbs, and an
+  exec allow-list that an unrestricted `exec` never had). Under any restricted
+  `exec`, or `every` with exclusions, the pins are not admitted. See
+  [[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]].
 - **Support depends on the launch, not on the policy alone.** A support file the
   policy excludes refuses the programs that start through it, though the policy
   says nothing about them; an allowance can admit a support file the policy
@@ -198,6 +209,10 @@ start:
     for it, and the root would narrow to one drive.
   - A grant lives on the NTFS object, so a file renamed out of a granted tree
     keeps its grant for the tokens that held the tree.
+  - A volume mounted in a folder, with no drive letter, cannot be granted: its
+    mount point is a name-surrogate reparse point, indistinguishable from a
+    junction, and the frozen pin refuses every allowance through one. It fails
+    closed. Giving the volume a drive letter and granting that works.
   - Windows has no kernel exec layer; exec is the guard's alone.
 - **The kernel sees no argv.**
 

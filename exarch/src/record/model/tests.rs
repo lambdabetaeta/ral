@@ -363,7 +363,7 @@ fn a_cut_inside_the_work_in_hand_leaves_one_hole() {
         "{marker}"
     );
     assert!(
-        marker.contains("`exarch-transcript `read [turns: !{range 34 37}]` reads turns 34 through 36 back as material"),
+        marker.contains("`` exarch-transcript `read [turns: !{range 34 37}] `` reads turns 34 through 36 back as material"),
         "{marker}"
     );
     assert!(
@@ -423,7 +423,7 @@ fn a_marker_draws_a_row_per_departed_turn() {
         "{first}"
     );
     assert!(
-        first.contains("`exarch-transcript `index` lists them."),
+        first.contains("`` exarch-transcript `index `` lists them."),
         "{first}"
     );
     let rows: Vec<&str> = first.lines().filter(|line| line.contains(" KB")).collect();

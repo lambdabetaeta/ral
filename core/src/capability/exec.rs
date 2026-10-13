@@ -12,7 +12,7 @@
 use super::fs::FsScope;
 use super::table::{Scope, Table, Withheld};
 use super::{Evidence, ExecGrant, ExecKey, GrantStack, Join, Meet};
-use crate::path::{FrozenPath, Polarity, RealPath, Resolver, SearchCwd, command_name_key};
+use crate::path::{FrozenPath, Polarity, RealPath, SearchCwd, command_name_key};
 use crate::syntax::quote::quote_word;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -74,10 +74,9 @@ impl GrantStack {
         &self,
         program: Program,
         args: Vec<String>,
-        resolver: &Resolver,
     ) -> Result<Admitted, Box<Refused>> {
         let rules = rules(self);
-        match self.judge(rules.as_ref(), &program, resolver) {
+        match self.judge(rules.as_ref(), &program) {
             None => Ok(Admitted {
                 program,
                 args,
@@ -88,32 +87,27 @@ impl GrantStack {
     }
 
     /// Head-only admission, before any argv is known.
-    pub(crate) fn admits(&self, program: &Program, resolver: &Resolver) -> bool {
-        self.refusal(program, resolver).is_none()
+    pub(crate) fn admits(&self, program: &Program) -> bool {
+        self.refusal(program).is_none()
     }
 
     /// Why a head is refused, for a refusal raised before [`GrantStack::admit`].
-    pub(crate) fn refusal(&self, program: &Program, resolver: &Resolver) -> Option<ExecDenial> {
-        self.judge(rules(self).as_ref(), program, resolver)
+    pub(crate) fn refusal(&self, program: &Program) -> Option<ExecDenial> {
+        self.judge(rules(self).as_ref(), program)
     }
 
     /// `↓run = ↓exec ∧ ↓read` (law 7): a supplied exec table must support the
     /// program, then what running it reads must be readable.  A bundled tool
     /// runs ral's image, which only an fs exclusion withholds.
-    fn judge(
-        &self,
-        rules: Option<&ExecRules>,
-        program: &Program,
-        resolver: &Resolver,
-    ) -> Option<ExecDenial> {
+    fn judge(&self, rules: Option<&ExecRules>, program: &Program) -> Option<ExecDenial> {
         if let Some(why) = rules.and_then(|r| r.withheld(program.subject())) {
             return Some(ExecDenial::Run(why));
         }
         let read = match program {
-            Program::File { real, .. } => self.read(real.as_path(), resolver),
-            Program::Tool(_) => ral_binary().map_or(Ok(()), |own| {
-                self.read_not_excluded(own.as_path(), resolver)
-            }),
+            Program::File { real, .. } => self.read(real.as_path()),
+            Program::Tool(_) => {
+                ral_binary().map_or(Ok(()), |own| self.read_not_excluded(own.as_path()))
+            }
         };
         read.err().map(ExecDenial::Read)
     }
@@ -169,11 +163,24 @@ pub(crate) enum ExecScope {
     /// Every program: compiled from [`ExecGrant::every`], never negative.
     Any,
     Dir(RealPath),
-    File(RealPath),
+    /// `named` is the bare name the file was found under: provenance, never
+    /// consulted by judgement.  Entries differing only in `named` hold the
+    /// same subjects, each holding the other's `own()`, so the meet's nesting
+    /// obligation holds.
+    File {
+        path: RealPath,
+        named: Option<String>,
+    },
     Tool(String),
     /// The [`command_name_key`] of a bare exclusion: a veto on the name
     /// everywhere, never positive.
     Name(String),
+}
+
+impl ExecScope {
+    pub(crate) fn file(path: RealPath) -> Self {
+        Self::File { path, named: None }
+    }
 }
 
 /// As a grant spells it: a directory under its `dir` constructor, a file as
@@ -183,7 +190,8 @@ impl std::fmt::Display for ExecScope {
         match self {
             Self::Any => f.write_str("every program"),
             Self::Dir(path) => write!(f, "`dir `absolute {}", quote_word(&path.to_string())),
-            Self::File(path) => write!(f, "`absolute {}", quote_word(&path.to_string())),
+            Self::File { named: Some(n), .. } => write!(f, "`name {}", quote_word(n)),
+            Self::File { path, .. } => write!(f, "`absolute {}", quote_word(&path.to_string())),
             Self::Tool(name) | Self::Name(name) => write!(f, "`name {}", quote_word(name)),
         }
     }
@@ -199,7 +207,7 @@ impl Scope for ExecScope {
         match (self, subject) {
             (Self::Any, _) => true,
             (Self::Dir(dir), Subject::File(path) | Subject::Under(path)) => path.within::<P>(dir),
-            (Self::File(file), Subject::File(path)) => {
+            (Self::File { path: file, .. }, Subject::File(path)) => {
                 path.within::<P>(file) && file.within::<P>(path)
             }
             (Self::Tool(tool), Subject::Tool(name)) => tool == name,
@@ -213,7 +221,7 @@ impl Scope for ExecScope {
         match self {
             Self::Any => Subject::Any,
             Self::Dir(dir) => Subject::Under(dir),
-            Self::File(file) => Subject::File(file),
+            Self::File { path, .. } => Subject::File(path),
             Self::Tool(name) | Self::Name(name) => Subject::Tool(name),
         }
     }
@@ -248,7 +256,10 @@ impl ExecRules {
                     crate::uutils::is_uutils_tool(name).then(|| ExecScope::Tool(name.clone()));
                 let file = crate::path::locate(name, host_path.as_deref(), SearchCwd::nowhere())
                     .and_then(|hit| RealPath::of(&hit).ok())
-                    .map(ExecScope::File);
+                    .map(|path| ExecScope::File {
+                        path,
+                        named: Some(name.clone()),
+                    });
                 [tool, file]
                     .into_iter()
                     .flatten()
@@ -260,7 +271,7 @@ impl ExecRules {
                     )
                     .collect()
             }
-            ExecKey::Path(path) => frozen_and_live(path, evidence, ExecScope::File),
+            ExecKey::Path(path) => frozen_and_live(path, evidence, ExecScope::file),
             ExecKey::Dir(dir) => frozen_and_live(dir, evidence, ExecScope::Dir),
         });
         every.into_iter().chain(keyed).collect()
@@ -278,15 +289,15 @@ impl ExecRules {
             .collect();
         let support = support
             .iter()
-            .map(|c| (ExecScope::File(c.clone()), Evidence::ALLOW));
+            .map(|c| (ExecScope::file(c.clone()), Evidence::ALLOW));
         rules.join(support.collect())
     }
 
-    /// The run places (§4.6 of the plan): the real paths of the positive
+    /// The run places: the real paths of the positive
     /// files and directories, which running reads.
     pub(crate) fn places(&self) -> impl Iterator<Item = &RealPath> {
         self.positives().filter_map(|scope| match scope {
-            ExecScope::Dir(path) | ExecScope::File(path) => Some(path),
+            ExecScope::Dir(path) | ExecScope::File { path, .. } => Some(path),
             _ => None,
         })
     }
@@ -295,7 +306,7 @@ impl ExecRules {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn allowed_files(&self) -> impl Iterator<Item = &RealPath> {
         self.live().filter_map(|scope| match scope {
-            ExecScope::File(file) => Some(file),
+            ExecScope::File { path, .. } => Some(path),
             _ => None,
         })
     }
@@ -358,7 +369,7 @@ pub(super) mod tests {
     const BOTH: Evidence = Evidence::BOTH;
 
     fn file(p: &str, e: Evidence) -> (ExecScope, Evidence) {
-        (ExecScope::File(real(p)), e)
+        (ExecScope::file(real(p)), e)
     }
 
     fn dir(p: &str, e: Evidence) -> (ExecScope, Evidence) {
@@ -447,7 +458,7 @@ pub(super) mod tests {
         assert!(!of_file(&a.meet(b), "/a/b/c/x").permits());
     }
 
-    /// U1: a key one layer never mentioned is not written down as an
+    /// a key one layer never mentioned is not written down as an
     /// exclusion, which would hold every spelling of it.
     #[test]
     fn the_meet_writes_no_default_as_an_exclusion() {
@@ -477,11 +488,23 @@ pub(super) mod tests {
     fn a_directory_exclusion_reads_apart_from_a_file_exclusion() {
         let at = |scope: fn(RealPath) -> ExecScope| scope(RealPath::assumed("/tools")).to_string();
         assert_eq!(at(ExecScope::Dir), "`dir `absolute /tools");
-        assert_eq!(at(ExecScope::File), "`absolute /tools");
+        assert_eq!(at(ExecScope::file), "`absolute /tools");
         assert_eq!(ExecScope::Name("bash".into()).to_string(), "`name bash");
     }
 
-    /// U2: an exclusion holds every spelling of its name, an allow its own.
+    /// A file found under a bare name is cited as the author wrote it.
+    #[test]
+    fn a_file_found_by_name_is_cited_by_name() {
+        let path = RealPath::assumed("/usr/bin/dash");
+        let named = ExecScope::File {
+            path: path.clone(),
+            named: Some("sh".into()),
+        };
+        assert_eq!(named.to_string(), "`name sh");
+        assert_eq!(ExecScope::file(path).to_string(), "`absolute /usr/bin/dash");
+    }
+
+    /// an exclusion holds every spelling of its name, an allow its own.
     #[test]
     fn an_exclusion_holds_every_spelling_and_an_allow_its_own() {
         let (nfc, nfd) = ("/x/caf\u{e9}", "/x/cafe\u{301}");
@@ -489,9 +512,9 @@ pub(super) mod tests {
         let allow = |scope: &ExecScope, p: &str| scope.holds::<Allow>(Subject::File(&real(p)));
         let (evil, tool) = (
             ExecScope::Dir(real("/x/Evil")),
-            ExecScope::File(real("/x/Tool")),
+            ExecScope::file(real("/x/Tool")),
         );
-        let (cafe_dir, cafe) = (ExecScope::Dir(real(nfc)), ExecScope::File(real(nfc)));
+        let (cafe_dir, cafe) = (ExecScope::Dir(real(nfc)), ExecScope::file(real(nfc)));
         assert!(deny(&evil, "/x/evil/t"));
         assert!(!deny(&evil, "/x/evilx/t"));
         assert!(allow(&evil, "/x/Evil/t"));
@@ -507,7 +530,7 @@ pub(super) mod tests {
         }
     }
 
-    /// U3: a folded match is an exclusion as a stored one is: ties are Both,
+    /// a folded match is an exclusion as a stored one is: ties are Both,
     /// and neither a deeper rule nor an exact one reopens it.
     #[test]
     fn a_folded_match_excludes_as_a_stored_one() {
@@ -586,7 +609,7 @@ pub(super) mod tests {
         assert!(scope.holds::<Deny>(Subject::File(&real("/x/tool"))));
     }
 
-    /// U7: a veto holds every spelling of the name.
+    /// a veto holds every spelling of the name.
     #[test]
     fn a_veto_holds_every_spelling_of_the_name() {
         let rules: ExecRules = [dir("/x", ALLOW), veto("sh")].into_iter().collect();
@@ -696,7 +719,7 @@ pub(super) mod tests {
             let kernel = rules.for_kernel(&support);
             assert!(!kernel.rules().any(|(s, _)| matches!(s, ExecScope::Tool(_))));
             let mut with = rules.clone();
-            with.extend((support.iter()).map(|c| (ExecScope::File(c.clone()), Evidence::ALLOW)));
+            with.extend((support.iter()).map(|c| (ExecScope::file(c.clone()), Evidence::ALLOW)));
             for p in &paths {
                 for s in [Subject::File(p), Subject::Under(p)] {
                     assert_eq!(

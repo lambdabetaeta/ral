@@ -10,8 +10,8 @@ Each place has its own guard. Neither guard depends on a profile remembering it.
 
 ## On disk: denied by composition
 
-Most profiles (`reasonable`, `read-only`, `edit-only`) read `xdg:config` and
-`xdg:state` whole, on purpose. Tools break without their configuration, and the
+Most profiles (`reasonable`, `read-only`, `edit-only`) read `` `xdg-config . `` and
+`` `xdg-state . `` whole, on purpose. Tools break without their configuration, and the
 profiles accept that risk by name, denying `gh`, `op` and `gcloud` by hand. Our
 own credentials sit inside that region:
 
@@ -20,7 +20,7 @@ own credentials sit inside that region:
 - `$XDG_STATE_HOME/exarch/oauth.json`, a ChatGPT login's tokens
   (`provider/oauth/`).
 
-Unguarded, a grant with `net: true` could exfiltrate them with `cat`. So
+Unguarded, a grant that leaves the network open could exfiltrate them with `cat`. So
 `provider::credential_files` names every such file for every product on the
 engine (`bootstrap::APPS`). `policy::for_invocation` then denies them **after**
 composition, as its own layer, on the same footing as a `--restrict` file's own
@@ -80,7 +80,7 @@ depend on a policy.
   `/proc` files belong to its namespace's root, which is exarch itself if it
   runs as that root. The bytes are still blanked, but the heap is open.
 - **Session logs are readable on purpose.** Asking an agent to read logs is
-  common, so `xdg:state` stays open. A key reaches a log only if the agent could
+  common, so `` `xdg-state . `` stays open. A key reaches a log only if the agent could
   read it first, and the two guards above close that; anything a user pastes
   into a session can be read by later sessions.
 - **Windows has no seal.** Any process of the same user can open exarch for

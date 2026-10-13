@@ -5,8 +5,8 @@
 //! a tag and a subpath, `absolute /usr`, `cwd src`, `home .ssh`,
 //! `tempdir .`, `gitdir .` or `xdg-NAME sub`, and the anchor is read here,
 //! once, so a later `chdir` or `TMPDIR` change cannot retroactively widen a
-//! grant.  A selector, `path` or `system`, names directories the environment
-//! chooses, and is exec-only: its expansion has no containment guard.  XDG
+//! grant.  A selector names directories the environment chooses, and is
+//! exec-only: its expansion has no containment guard.  XDG
 //! uses the Linux defaults on every platform, macOS included
 //! ([`crate::host`]).
 //!
@@ -16,7 +16,9 @@
 //! only under the other platform's, refused if under neither.  `/x` is
 //! POSIX-absolute and names no drive, `C:\x` and `\\srv\sh\x` are
 //! Windows-absolute, and a well-formed `//srv/sh/x` is both, so live on both.
-//! A UNC root needs a server and a share; a bare `\\` or `//` is none.  A
+//! A UNC root, plain or verbatim (`\\?\UNC\srv\sh`), needs a server and a
+//! share; a bare `\\` or `//` is none, and no `\\?\` or `\\.\` path is
+//! read as anything but a drive path or such a root.  A
 //! subpath is judged lexically, so that a profile fails alike everywhere.
 //! `~` and `xdg:NAME` are expanded by the resolver at run time, never in a
 //! grant, and are refused under every tag.
@@ -36,14 +38,16 @@
 
 use crate::host::{XdgKind, resolve_xdg};
 use crate::path::git::{BadPointer, Pointer, discover_git_dir};
-use crate::path::lex::is_windows_absolute;
+use crate::path::identity::windows_identity_components;
+use crate::path::lex::{Root, root};
+use crate::path::sigil::parse_xdg_token;
 use crate::path::tilde::TildePath;
 use crate::path::{Allow, FrozenPath, PathRules};
 use crate::syntax::quote::quote_word;
+use crate::text::code;
 use crate::types::{Break, Error, Shell};
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 use strum::{EnumString, IntoStaticStr, VariantArray};
 
 /// One path a grant names: a tag and a subpath.
@@ -213,44 +217,49 @@ impl From<BadPointer> for PolicyError {
 fn unclaimed_message(dot_git: &Path, target: &Path) -> PolicyError {
     PolicyError::new(format!(
         "the .git file at '{dot_git}' points at '{target}', but that directory \
-         does not name this working tree back, so `gitdir` will not grant it; \
+         does not name this working tree back, so {gitdir} will not grant it; \
          a pointer written inside the tree would otherwise choose the grant.",
         dot_git = dot_git.display(),
+        gitdir = code("`gitdir"),
         target = target.display(),
     ))
-    .with_hint(
+    .with_hint(format!(
         "A linked worktree's git directory holds a `gitdir` file naming this \
-         very .git file, and a repository split off with `--separate-git-dir` \
-         holds `core.worktree` in its config; neither names this tree.  Was the \
-         worktree moved?  `git worktree repair` rewrites both ends.  If the \
-         pointer is hand-written, name the git directory explicitly in the \
-         policy instead of `gitdir`.",
-    )
+             very .git file, and a repository split off with `--separate-git-dir` \
+             holds `core.worktree` in its config; neither names this tree.  Was the \
+             worktree moved?  `git worktree repair` rewrites both ends.  If the \
+             pointer is hand-written, name the git directory explicitly in the \
+             policy instead of {}.",
+        code("`gitdir")
+    ))
 }
 
 fn no_pointer_message(dot_git: &Path) -> PolicyError {
     PolicyError::new(format!(
         "the .git entry at '{}' is a file with no `gitdir:` line, so there is \
-         no git directory for `gitdir` to name.",
+         no git directory for {} to name.",
         dot_git.display(),
+        code("`gitdir"),
     ))
-    .with_hint(
+    .with_hint(format!(
         "A worktree's or submodule's `.git` file holds one line, \
-         `gitdir: <path>`.  Is this file something else?  If the tree is not a \
-         repository, drop `gitdir` from the policy or replace it with an \
-         explicit path.",
-    )
+             `gitdir: <path>`.  Is this file something else?  If the tree is not a \
+             repository, drop {} from the policy or replace it with an \
+             explicit path.",
+        code("`gitdir")
+    ))
 }
 
 fn unreadable_message(dot_git: &Path, error: &std::io::Error) -> PolicyError {
     PolicyError::new(format!(
-        "the .git file at '{}' cannot be read ({error}), so `gitdir` cannot \
+        "the .git file at '{}' cannot be read ({error}), so {} cannot \
          say which git directory the grant covers.",
         dot_git.display(),
+        code("`gitdir"),
     ))
     .with_hint(
         "The freeze reads the pointer as the user launching the session.  Check \
-         the file's permissions, or replace `gitdir` in the policy with an \
+         the file's permissions, or replace `gitdir in the policy with an \
          explicit path.",
     )
 }
@@ -333,7 +342,7 @@ impl FreezeCtx {
         match selector {
             Selector::Path => path_dirs(),
             Selector::System => system_dirs(),
-            Selector::Homebrew => homebrew_dirs(self.home()),
+            Selector::Homebrew => homebrew_dirs(),
         }
     }
 
@@ -370,7 +379,9 @@ impl FreezeCtx {
         } else {
             format!(
                 "{var}={val}: set it to a subpath of HOME ({home}), unset it to use the \
-                 default, or replace `xdg-{name}` in the policy with an `absolute` path."
+                 default, or replace {} in the policy with an {} path.",
+                code(&format!("`xdg-{name}")),
+                code("`absolute"),
             )
         };
         let via = if resolved.real() == resolved.as_str() {
@@ -382,7 +393,8 @@ impl FreezeCtx {
             )
         };
         Err(PolicyError::new(format!(
-            "`xdg-{name}` resolves to '{}'{via}, outside HOME; refusing to widen the grant.  {clause}",
+            "{} resolves to '{}'{via}, outside HOME; refusing to widen the grant.  {clause}",
+            code(&format!("`xdg-{name}")),
             resolved.real(),
         )))
     }
@@ -396,8 +408,9 @@ fn anchored(tag: &str, frozen: FrozenPath) -> Result<FrozenPath, PolicyError> {
         return Ok(frozen);
     }
     Err(PolicyError::new(format!(
-        "`{tag}` freezes to the relative path '{}'; an anchor must be absolute. \
+        "{} freezes to the relative path '{}'; an anchor must be absolute. \
          Is HOME or TMPDIR relative?",
+        code(&format!("`{tag}")),
         frozen.as_str()
     )))
 }
@@ -409,50 +422,63 @@ fn anchored(tag: &str, frozen: FrozenPath) -> Result<FrozenPath, PolicyError> {
 /// when under neither.
 ///
 /// # Errors
-/// A run-time prefix, a root-relative `\x`, a UNC root with no server or
-/// share, or a relative or drive-relative path.
+/// A run-time prefix, a root-relative `\x`, a malformed UNC, verbatim or
+/// device root, or a relative or drive-relative path.
 pub(crate) fn live_absolute(raw: &str, rules: PathRules) -> Result<bool, PolicyError> {
     if let Some(err) = runtime_prefix(raw) {
         return Err(err);
     }
+    let root = root(raw);
     let absolute = |rules| match rules {
-        PathRules::Posix => raw.starts_with('/'),
-        PathRules::Windows => is_windows_absolute(raw),
+        PathRules::Posix => raw.starts_with('/') && matches!(root, Root::Posix | Root::Unc),
+        PathRules::Windows => matches!(root, Root::Unc | Root::Verbatim | Root::Drive),
     };
     let other = match rules {
         PathRules::Posix => PathRules::Windows,
         PathRules::Windows => PathRules::Posix,
     };
-    if absolute(rules) {
+    if root == Root::Malformed {
+        Err(not_absolute(raw, root))
+    } else if absolute(rules) {
+        debug_assert!(
+            rules != PathRules::Windows || !windows_identity_components(raw).is_empty(),
+            "a live Windows root must name a component, or it prefixes every path"
+        );
         Ok(true)
     } else if absolute(other) {
         Ok(false)
     } else {
-        Err(not_absolute(raw))
+        Err(not_absolute(raw, root))
     }
 }
 
-fn not_absolute(raw: &str) -> PolicyError {
+fn not_absolute(raw: &str, root: Root) -> PolicyError {
     let word = quote_word(raw);
-    if raw.starts_with(r"\\") {
-        PolicyError::new(format!(
-            "`absolute {word}` is a UNC root with no server and share; write \
-             `absolute '\\\\server\\share\\x'`"
-        ))
-    } else if raw.starts_with('\\') {
-        PolicyError::new(format!(
-            "`absolute {word}` names no drive; write `absolute 'C:\\x'`"
-        ))
-    } else if has_drive(raw) {
-        PolicyError::new(format!(
-            "`absolute {word}` is drive-relative; write `absolute 'C:\\…'`"
-        ))
-    } else {
-        PolicyError::new(format!(
-            "`absolute` needs an absolute path; for a path under the working \
-             directory write `cwd {word}`"
-        ))
-    }
+    let abs = |rest: &str| code(&format!("`absolute {rest}"));
+    PolicyError::new(match root {
+        Root::Malformed => format!(
+            "{} is no well-formed UNC or verbatim path; a UNC path needs a \
+             server and a share, as in {}; a verbatim path is \
+             {} or {}.  A '?' or \
+             '.' is no server name, and device paths are not accepted",
+            abs(&word),
+            abs("'\\\\server\\share\\x'"),
+            abs("'\\\\?\\C:\\x'"),
+            abs("'\\\\?\\UNC\\server\\share\\x'"),
+        ),
+        _ if raw.starts_with('\\') => {
+            format!("{} names no drive; write {}", abs(&word), abs("'C:\\x'"))
+        }
+        _ if has_drive(raw) => {
+            format!("{} is drive-relative; write {}", abs(&word), abs("'C:\\…'"))
+        }
+        _ => format!(
+            "{} needs an absolute path; for a path under the working \
+             directory write {}",
+            code("`absolute"),
+            code(&format!("`cwd {word}")),
+        ),
+    })
 }
 
 /// A relative subpath, judged lexically so that a profile fails alike on
@@ -463,20 +489,23 @@ fn subpath<'a>(tag: &str, s: &'a str) -> Result<&'a str, PolicyError> {
         return Err(err);
     }
     let word = quote_word(s);
+    let this = code(&format!("`{tag}"));
+    let drive = code("`absolute 'C:\\…'");
     match s.as_bytes() {
         [] => Err(PolicyError::new(format!(
-            "`{tag}` needs a path; write `{tag} .` for the anchor itself"
+            "{this} needs a path; write {} for the anchor itself",
+            code(&format!("`{tag} ."))
         ))),
         [b'/', ..] => Err(PolicyError::new(format!(
-            "`{tag}` takes a relative path, not {word}; for {word} write `absolute {word}`"
+            "{this} takes a relative path, not {word}; for {word} write {}",
+            code(&format!("`absolute {word}"))
         ))),
         [b'\\', ..] => Err(PolicyError::new(format!(
-            "`{tag}` takes a relative path, not {word}, which names no drive; a drive \
-             belongs in `absolute 'C:\\…'`"
+            "{this} takes a relative path, not {word}, which names no drive; a drive \
+             belongs in {drive}"
         ))),
         _ if has_drive(s) => Err(PolicyError::new(format!(
-            "`{tag}` takes a relative path, not {word}; a drive belongs in \
-             `absolute 'C:\\…'`"
+            "{this} takes a relative path, not {word}; a drive belongs in {drive}"
         ))),
         _ => Ok(s),
     }
@@ -496,33 +525,37 @@ fn runtime_prefix(s: &str) -> Option<PolicyError> {
     };
     if let Some(tilde) = TildePath::parse(s) {
         return Some(PolicyError::new(format!(
-            "`~` is not expanded in a grant; for a path under the home directory \
-             write `home {}`",
-            rest(tilde.suffix.as_deref().unwrap_or_default()),
+            "'~' is not expanded in a grant; for a path under the home directory \
+             write {}",
+            code(&format!(
+                "`home {}",
+                rest(tilde.suffix.as_deref().unwrap_or_default())
+            )),
         )));
     }
-    let body = s.strip_prefix("xdg:")?;
-    let (name, sub) = body.split_once('/').unwrap_or((body, ""));
-    Some(match XdgKind::from_str(name) {
-        Ok(kind) => {
-            let name = <&str>::from(kind);
-            PolicyError::new(format!(
-                "`xdg:{name}` is not expanded in a grant; write `xdg-{name} {}`",
-                rest(sub),
-            ))
-        }
-        Err(_) => PolicyError::new(unknown_xdg_message(s)),
-    })
+    if let Some((kind, sub)) = parse_xdg_token(s) {
+        let name = <&str>::from(kind);
+        return Some(PolicyError::new(format!(
+            "{} is not expanded in a grant; write {}",
+            code(&format!("`xdg:{name}")),
+            code(&format!("`xdg-{name} {}", rest(sub.unwrap_or_default()))),
+        )));
+    }
+    s.starts_with("xdg:")
+        .then(|| PolicyError::new(unknown_xdg_message(s)))
 }
 
 /// The one answer for a home-relative place where nothing binds `HOME`: `home`
 /// and `xdg-*` fail for the same reason and take the same two fixes.
 fn home_unknown() -> PolicyError {
-    PolicyError::new(
-        "HOME is unset, so `home` and `xdg-*` places in the policy \
+    PolicyError::new(format!(
+        "HOME is unset, so {} and {} places in the policy \
          can't be resolved.  Set HOME in the environment, or replace the \
-         home-relative places in the policy with `absolute` paths.",
-    )
+         home-relative places in the policy with {} paths.",
+        code("`home"),
+        code("`xdg-*"),
+        code("`absolute"),
+    ))
 }
 
 fn unknown_xdg_message(entry: &str) -> String {
@@ -531,7 +564,7 @@ fn unknown_xdg_message(entry: &str) -> String {
          Did you mean one of those?",
         XdgKind::VARIANTS
             .iter()
-            .map(|&k| format!("`xdg-{}`", <&str>::from(k)))
+            .map(|&k| code(&format!("`xdg-{}", <&str>::from(k))))
             .collect::<Vec<_>>()
             .join(", "),
     )
@@ -551,29 +584,31 @@ fn freeze(path: impl AsRef<Path>) -> Result<FrozenPath, PolicyError> {
 /// relative `$PATH` entry is the environment's business, not the grant
 /// author's, so unlike a relative grant path it is dropped in silence.
 fn path_dirs() -> Result<Vec<FrozenPath>, PolicyError> {
-    let path = std::env::var("PATH").unwrap_or_default();
+    #[allow(clippy::disallowed_methods, reason = "PATH, not an XDG basedir")]
+    let path = std::env::var_os("PATH").unwrap_or_default();
     let dirs: Vec<_> = std::env::split_paths(&path)
         .filter(|entry| entry.is_absolute())
         .map(freeze)
         .collect::<Result<_, _>>()?;
     if dirs.is_empty() {
-        return Err(PolicyError::new(
-            "`path` expands to zero absolute directories; \
+        return Err(PolicyError::new(format!(
+            "{} expands to zero absolute directories; \
              PATH is empty, unset, or contains only relative entries",
-        ));
+            code("`path")
+        )));
     }
     Ok(dirs)
 }
 
 /// `homebrew` expansion.  An absent Homebrew expands to nothing, not an error.
-fn homebrew_dirs(home: Option<&str>) -> Result<Vec<FrozenPath>, PolicyError> {
-    live_homebrew_roots(home).iter().map(freeze).collect()
+fn homebrew_dirs() -> Result<Vec<FrozenPath>, PolicyError> {
+    live_homebrew_roots().iter().map(freeze).collect()
 }
 
 /// [`homebrew_roots`] over the live environment and filesystem: what the
 /// `homebrew` selector and the fs floor both expand to.
-pub(crate) fn live_homebrew_roots(home: Option<&str>) -> Vec<String> {
-    homebrew_roots(|k| std::env::var(k).ok(), home, crate::path::exists)
+pub(crate) fn live_homebrew_roots() -> Vec<String> {
+    homebrew_roots(|k| std::env::var(k).ok(), crate::path::exists)
 }
 
 /// `system` expansion.  Unlike `path` it can never come back empty, the
@@ -634,28 +669,17 @@ pub(crate) fn unix_tool_roots(exists: impl Fn(&str) -> bool) -> Vec<String> {
 }
 
 /// The Homebrew prefixes that `exists` reports: an absolute `HOMEBREW_PREFIX`
-/// alone when `env` sets one, else whichever of `/opt/homebrew`,
-/// `/home/linuxbrew/.linuxbrew` and `~/.linuxbrew` is present.  Intel macOS's
+/// alone when `env` sets one, else `/opt/homebrew` if present.  Intel macOS's
 /// `/usr/local` is shared with everything else, so only `HOMEBREW_PREFIX`
 /// reaches it.
 pub(crate) fn homebrew_roots(
     env: impl Fn(&str) -> Option<String>,
-    home: Option<&str>,
     exists: impl Fn(&str) -> bool,
 ) -> Vec<String> {
-    let defaults = || {
-        ["/opt/homebrew", "/home/linuxbrew/.linuxbrew"]
-            .map(str::to_string)
-            .into_iter()
-            .chain(home.map(|h| format!("{}/.linuxbrew", h.trim_end_matches('/'))))
-    };
-    match env("HOMEBREW_PREFIX").filter(|p| p.starts_with('/')) {
-        Some(prefix) => vec![prefix],
-        None => defaults().collect(),
-    }
-    .into_iter()
-    .filter(|root| exists(root))
-    .collect()
+    let root = env("HOMEBREW_PREFIX")
+        .filter(|p| p.starts_with('/'))
+        .unwrap_or_else(|| "/opt/homebrew".to_string());
+    exists(&root).then_some(root).into_iter().collect()
 }
 
 /// `%SystemRoot%\System32` and the bundled Windows PowerShell home, falling
@@ -889,8 +913,8 @@ mod tests {
     #[test]
     fn a_bad_subpath_says_what_to_write() {
         let ctx = ctx("/h", "/cwd");
-        assert!(refusal(&cwd(""), &ctx).contains("`cwd .`"));
-        assert!(refusal(&cwd("/x"), &ctx).contains("`absolute /x`"));
+        assert!(refusal(&cwd(""), &ctx).contains("`cwd . "));
+        assert!(refusal(&cwd("/x"), &ctx).contains("write `` `absolute /x ``"));
         assert!(refusal(&cwd("C:x"), &ctx).contains("`absolute 'C:"));
         assert!(refusal(&cwd(r"\x"), &ctx).contains("names no drive"));
     }
@@ -901,11 +925,19 @@ mod tests {
     fn absolute_payloads_classify_on_the_raw_string() {
         use PathRules::{Posix, Windows};
         let live = |raw, rules| live_absolute(raw, rules).ok();
-        for raw in ["/x", "/", "//", "///x"] {
+        for raw in ["/x", "/", "/\\x"] {
             assert_eq!(live(raw, Posix), Some(true), "{raw}");
             assert_eq!(live(raw, Windows), Some(false), "{raw}");
         }
-        for raw in [r"C:\x", "C:/x", r"\\server\share\x", r"\\?\C:\x", "C:/../x"] {
+        for raw in [
+            r"C:\x",
+            "C:/x",
+            r"\\server\share\x",
+            r"\\?\C:\x",
+            r"\\?\UNC\srv\sh\x",
+            "//?/UNC/srv/sh/x",
+            "C:/../x",
+        ] {
             assert_eq!(live(raw, Posix), Some(false), "{raw}");
             assert_eq!(live(raw, Windows), Some(true), "{raw}");
         }
@@ -916,10 +948,18 @@ mod tests {
         }
         for raw in [
             r"\x",
+            "//",
+            "///x",
+            "//srv",
+            "//srv/",
             r"\\",
             r"\\srv",
             r"\\srv\",
             r"\\\srv\sh",
+            r"\\?\UNC\",
+            r"\\?\UNC\srv",
+            "//?/UNC/",
+            r"\\.\C:\x",
             "C:x",
             "src",
             "./src",
@@ -932,19 +972,27 @@ mod tests {
         }
     }
 
-    /// A malformed UNC root is never Windows-live, so it cannot fold to the
-    /// universal prefix there; a backslash one says what a UNC root needs.
+    /// A malformed UNC or verbatim root is live on no host, so it cannot fold
+    /// to the universal prefix; the refusal says what a well-formed one is.
     #[test]
-    fn a_malformed_unc_root_is_not_live_on_windows() {
-        for raw in [r"\\", "//", r"\\srv", "//srv/", r"\\\srv\sh"] {
-            assert_ne!(
-                live_absolute(raw, PathRules::Windows).ok(),
-                Some(true),
-                "{raw}"
-            );
+    fn a_malformed_unc_or_verbatim_root_is_refused_everywhere() {
+        for raw in [
+            r"\\",
+            "//",
+            r"\\srv",
+            r"\\?\UNC\srv",
+            "//?/UNC/",
+            r"\\.\C:\x",
+        ] {
+            for rules in [PathRules::Posix, PathRules::Windows] {
+                let err = live_absolute(raw, rules).unwrap_err();
+                assert!(
+                    err.message.contains("server and a share"),
+                    "{raw}: {}",
+                    err.message
+                );
+            }
         }
-        let err = live_absolute(r"\\", PathRules::Windows).unwrap_err();
-        assert!(err.message.contains("server and share"), "{}", err.message);
     }
 
     /// The anchors are the one declaration of the place tags.
@@ -969,14 +1017,11 @@ mod tests {
         let ctx = ctx("/h", "/cwd");
         for place in [abs("~/x"), cwd("~/x"), Place::Home("~".into())] {
             let err = refusal(&place, &ctx);
-            assert!(
-                err.contains("`home x`") || err.contains("`home .`"),
-                "{err}"
-            );
+            assert!(err.contains("`home x") || err.contains("`home ."), "{err}");
         }
         for place in [abs("xdg:config/x"), cwd("xdg:config/x")] {
             let err = refusal(&place, &ctx);
-            assert!(err.contains("`xdg-config x`"), "{err}");
+            assert!(err.contains("`xdg-config x"), "{err}");
         }
     }
 
@@ -1029,47 +1074,26 @@ mod tests {
         let prefix =
             |v: &'static str| move |k: &str| (k == "HOMEBREW_PREFIX").then(|| v.to_string());
         let unset = |_: &str| None;
-        let cases: [(&str, Vec<String>, Vec<String>); 8] = [
+        let cases: [(&str, Vec<String>, Vec<String>); 6] = [
             (
-                "defaults",
-                homebrew_roots(unset, Some("/home/u"), all),
-                vec![
-                    "/opt/homebrew",
-                    "/home/linuxbrew/.linuxbrew",
-                    "/home/u/.linuxbrew",
-                ]
-                .into_iter()
-                .map(String::from)
-                .collect(),
+                "default",
+                homebrew_roots(unset, all),
+                vec!["/opt/homebrew".into()],
             ),
+            ("absent", homebrew_roots(unset, none), vec![]),
             (
-                "only present defaults",
-                homebrew_roots(unset, Some("/home/u"), |p| p == "/home/u/.linuxbrew"),
-                vec!["/home/u/.linuxbrew".into()],
-            ),
-            (
-                "absent",
-                homebrew_roots(unset, Some("/home/u"), none),
-                vec![],
-            ),
-            (
-                "no home",
-                homebrew_roots(unset, None, all),
-                vec!["/opt/homebrew".into(), "/home/linuxbrew/.linuxbrew".into()],
-            ),
-            (
-                "prefix replaces defaults",
-                homebrew_roots(prefix("/usr/local"), Some("/home/u"), all),
+                "prefix replaces default",
+                homebrew_roots(prefix("/usr/local"), all),
                 vec!["/usr/local".into()],
             ),
             (
                 "absent prefix is nothing",
-                homebrew_roots(prefix("/usr/local"), Some("/home/u"), |p| p != "/usr/local"),
+                homebrew_roots(prefix("/usr/local"), |p| p != "/usr/local"),
                 vec![],
             ),
             (
                 "relative prefix ignored",
-                homebrew_roots(prefix("brew"), None, |p| p == "/opt/homebrew"),
+                homebrew_roots(prefix("brew"), |p| p == "/opt/homebrew"),
                 vec!["/opt/homebrew".into()],
             ),
             (

@@ -8,20 +8,64 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::host;
 
-/// True iff `path` is absolute under Windows rules: a drive-letter prefix or
-/// a UNC/verbatim root, `\\server\share` with either separator and both
-/// components non-empty.  A bare `\\` or `//` names no volume, so it is no
-/// root: folded, it would be the universal prefix.  String logic rather than
-/// `std::path::Path`, whose absoluteness rule is fixed at compile time to the
-/// build target, so a grant can be classified from any host.
-pub(crate) fn is_windows_absolute(path: &str) -> bool {
-    if let Some(unc) = path.strip_prefix(r"\\").or_else(|| path.strip_prefix("//")) {
-        let mut parts = unc.split(['/', '\\']);
-        return parts.next().is_some_and(|server| !server.is_empty())
-            && parts.next().is_some_and(|share| !share.is_empty());
+/// How a raw path string is rooted, judged on the string alone.  A UNC or
+/// verbatim-UNC root is recognised only with a server and a share both named:
+/// bare, its component list folds empty, a prefix of every path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Root {
+    /// `/x`: rooted by one separator, no drive.
+    Posix,
+    /// `\\server\share` with either separator, both names non-empty.
+    Unc,
+    /// `\\?\C:\x` or `\\?\UNC\server\share`, with either separator.
+    Verbatim,
+    /// `C:\x` or `C:/x`.
+    Drive,
+    /// Opens with two separators but is no well-formed UNC or verbatim root:
+    /// a missing server or share, a `?` or `.` server, a device path.
+    Malformed,
+    /// Relative, drive-relative or root-relative (`\x`).
+    Other,
+}
+
+/// The [`Root`] of `path`.  String logic rather than `std::path::Path`, whose
+/// absoluteness rule is fixed at compile time to the build target, so a grant
+/// can be classified from any host.
+pub(crate) fn root(path: &str) -> Root {
+    if let Some(rest) = path.strip_prefix(r"\\").or_else(|| path.strip_prefix("//")) {
+        return unc_root(rest);
     }
-    let b = path.as_bytes();
-    b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'/' | b'\\')
+    match path.as_bytes() {
+        [b'/', ..] => Root::Posix,
+        [d, b':', b'/' | b'\\', ..] if d.is_ascii_alphabetic() => Root::Drive,
+        _ => Root::Other,
+    }
+}
+
+/// [`root`] of what follows a leading `\\` or `//`.
+fn unc_root(rest: &str) -> Root {
+    let mut parts = rest.split(['/', '\\']);
+    match parts.next() {
+        Some("?") => match parts.next() {
+            Some(d) if is_drive(d) && parts.next().is_some() => Root::Verbatim,
+            Some(u) if u.eq_ignore_ascii_case("UNC") && server_share(parts) => Root::Verbatim,
+            _ => Root::Malformed,
+        },
+        _ if server_share(rest.split(['/', '\\'])) => Root::Unc,
+        _ => Root::Malformed,
+    }
+}
+
+fn is_drive(s: &str) -> bool {
+    matches!(s.as_bytes(), [d, b':'] if d.is_ascii_alphabetic())
+}
+
+/// A non-empty server that is not `?` or `.`, then a non-empty share.
+fn server_share<'a>(mut parts: impl Iterator<Item = &'a str>) -> bool {
+    parts
+        .next()
+        .is_some_and(|server| !matches!(server, "" | "?" | "."))
+        && parts.next().is_some_and(|share| !share.is_empty())
 }
 
 /// Resolve `path` against `cwd`, or against the process cwd when `cwd` is
@@ -57,7 +101,7 @@ pub fn resolve_path(cwd: Option<&Path>, path: &str) -> PathBuf {
 /// on exactly this path and nowhere else, so the doors that must not anchor
 /// it ask here rather than matching a root apiece.
 ///
-/// String logic, as [`is_windows_absolute`] is,
+/// String logic, as [`root`] is,
 /// and exact rather than "all separators": `\\` opens a UNC name and `X:\`
 /// carries a prefix component, and neither is universal.  A drive root must
 /// keep anchoring as it always did, or a grant over one volume would widen
@@ -234,7 +278,7 @@ pub fn shape(path: &str) -> PathShape {
 }
 
 /// `Path::new(path).is_absolute()` — the *host's* rule, not the Windows one
-/// `is_windows_absolute` applies.
+/// [`root`] applies.
 #[allow(
     clippy::disallowed_methods,
     reason = "path-form: this is the `is_absolute` helper the ban names"
@@ -283,34 +327,53 @@ pub(crate) fn proper_ancestors<'a>(paths: impl IntoIterator<Item = &'a str>) -> 
 mod tests {
     use super::*;
 
+    /// Platform-independent: classification is on the raw string.
     #[test]
-    fn a_unc_root_needs_a_server_and_a_share() {
-        for ok in [
-            r"\\srv\sh",
-            r"\\srv\sh\x",
-            "//srv/sh/x",
-            r"\\?\C:\x",
-            r"\\?\UNC\srv\sh",
-            r"C:\x",
-            "c:/x",
+    fn roots_classify_on_the_raw_string() {
+        use Root::*;
+        for (raw, want) in [
+            ("/x", Posix),
+            ("/", Posix),
+            (r"\\srv\sh", Unc),
+            (r"\\srv\sh\x", Unc),
+            ("//srv/sh/x", Unc),
+            (r"\\?\C:\x", Verbatim),
+            (r"\\?\C:\", Verbatim),
+            ("//?/C:/x", Verbatim),
+            (r"\\?\UNC\srv\sh", Verbatim),
+            (r"\\?\UNC\srv\sh\x", Verbatim),
+            (r"\\?\unc\srv\sh", Verbatim),
+            ("//?/UNC/srv/sh", Verbatim),
+            (r"C:\x", Drive),
+            ("c:/x", Drive),
+            (r"\\", Malformed),
+            ("//", Malformed),
+            ("///x", Malformed),
+            (r"\\srv", Malformed),
+            (r"\\srv\", Malformed),
+            ("//srv/", Malformed),
+            (r"\\\srv\sh", Malformed),
+            ("///srv/sh", Malformed),
+            (r"\\?\", Malformed),
+            (r"\\?", Malformed),
+            (r"\\?\UNC\", Malformed),
+            (r"\\?\UNC\srv", Malformed),
+            (r"\\?\UNC\srv\", Malformed),
+            (r"\\?\UNC\?\sh", Malformed),
+            (r"\\?\UNC\.\sh", Malformed),
+            ("//?/UNC/", Malformed),
+            ("//?/UNC/srv", Malformed),
+            (r"\\?\C:", Malformed),
+            (r"\\?\x", Malformed),
+            (r"\\.\C:\x", Malformed),
+            (r"\\.\pipe\x", Malformed),
+            (r"\\?\?\x", Malformed),
+            (r"\x", Other),
+            ("C:x", Other),
+            ("x", Other),
+            ("", Other),
         ] {
-            assert!(is_windows_absolute(ok), "{ok}");
-        }
-        for bad in [
-            r"\\",
-            "//",
-            r"\\srv",
-            r"\\srv\",
-            "//srv/",
-            r"\\\srv\sh",
-            "///srv/sh",
-            r"\\?\",
-            r"\x",
-            "/x",
-            "C:x",
-            "",
-        ] {
-            assert!(!is_windows_absolute(bad), "{bad}");
+            assert_eq!(root(raw), want, "{raw}");
         }
     }
 

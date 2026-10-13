@@ -363,7 +363,7 @@ summaries. An `every` table with exclusions activates.
 | extra scopes | places of exec's run allowances; the platform floor and live support, joined as positives | support files, joined by `for_kernel` |
 
 **An exclusion beats every allowance, in both.** An fs exclusion is a carve-out
-protecting *content*: credentials under a readable `xdg:config`, the agent's
+protecting *content*: credentials under a readable `` `xdg-config ``, the agent's
 profile under a writable cwd. An exec exclusion names a *program*. Neither a
 narrower directory nor an exact file reopens it, and nor do a carrier, the
 dynamic linker or ral's binary. This is the one rule every backend can hold: a
@@ -465,7 +465,7 @@ stored side. *Respelled* marks a refusal that names the excluded spelling.
   `F_GETPATH` return the stored spelling of an existing name, for case and
   normalisation, on both volume kinds; the macOS walk spells components as
   stored (`getattrlistat`). An absent leaf has no stored spelling, and that is
-  exactly the write a deny exists to stop: under `deny: [cwd:/.env]` with
+  exactly the write a deny exists to stop: under `` deny: [`cwd .env] `` with
   `.env` absent, `echo key > .ENV` once left `key` in the object `.env`
   names. Every later access was refused; the hole was the access that creates
   the object ([[decisions/261006_denies-hold-under-every-spelling|denies-hold-under-every-spelling]]).
@@ -511,7 +511,7 @@ stored side. *Respelled* marks a refusal that names the excluded spelling.
   key in `real` instead would rename a distinct object on a case-sensitive
   volume, `real` being rendered into bwrap destinations, Seatbelt rules and
   the Windows SID hash. Refusing a deny on an absent path breaks the documented
-  `cwd:/.env`. Masking every colliding sibling on Linux and Windows enumerates
+  `` `cwd .env ``. Masking every colliding sibling on Linux and Windows enumerates
   directories, races, and builds machinery to enforce an over-approximation.
 - **Each polarity takes the identity whose error is a refusal.** A deny that
   under-merges is the hole; one that over-merges refuses a sibling nobody
@@ -639,13 +639,13 @@ stored side. *Respelled* marks a refusal that names the excluded spelling.
   naming one file join to Both: `RealPath`'s `Ord` is the host's file identity, by
   components off Windows and by Windows identity components on it
   (`two_path_keys_naming_one_file_meet`).
-- **A veto's key folds.** `deny: [bash]` compiles to a folding exact deny and a
+- **A veto's key folds.** `` deny: [`name bash] `` compiles to a folding exact deny and a
   veto, and Seatbelt's veto regex folds, so a stored key would admit in the
   guard a macOS child's `/x/BASH` that the kernel refuses
   (`a_veto_holds_every_spelling_of_the_name`).
 - **On Windows the key strips the executable extension** and lower-cases ASCII
   (`name_key_on`, over `WINDOWS_EXEC_EXTENSIONS`), so `bash.exe` meets
-  `deny: [bash]`.
+  `` deny: [`name bash] ``.
 - **A copy under a new name escapes a veto**, a declared limit: it is a
   different file with no trace of the denied name. What holds is the
   projection the copy inherits ([[design/grant|grant]] §Concessions), and
@@ -725,7 +725,7 @@ argues from.
   through a held handle, with no redirecting reparse point on its path (a symlink,
   junction or other name surrogate is refused; a cloud-files placeholder is not).
 - **The floor is an allowance like any other.** It is frozen once per process, on
-  the premise that its roots are the system's; `~/.linuxbrew` and a
+  the premise that its roots are the system's; a
   `HOMEBREW_PREFIX` can be the user's, and a child that writes the parent of such
   a root could replace it with a symlink, so the floor renders frozen too and a
   redirected root shows nothing. What loading needs is not authored, so a floor

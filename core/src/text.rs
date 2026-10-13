@@ -182,6 +182,15 @@ impl From<Cow<'_, str>> for Str {
     }
 }
 
+/// `src` as a code span that pastes back as ral: doubled around a tag's backtick.
+pub fn code(src: &str) -> String {
+    if src.contains(crate::ty::TAG_PREFIX) {
+        format!("`` {src} ``")
+    } else {
+        format!("`{src}`")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

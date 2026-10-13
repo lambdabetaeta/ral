@@ -55,6 +55,13 @@ pub(super) static GRANT: Table = Table {
             holds: Holds::Shaped(shell),
             reason: Some(Reason::Vocabulary(&SHELL)),
         },
+        Key {
+            label: "detach",
+            holds: Holds::Refused(
+                "`detach` is a shell verb now: list it in `shell`, as in `` shell: [`chdir, `detach] ``",
+            ),
+            reason: None,
+        },
     ],
     factory: false,
 };
@@ -101,68 +108,84 @@ static FS: Table = Table {
 pub(crate) static PLACE: Vocab = Vocab {
     noun: "place",
     row: place_row,
-    misses: &[
-        ("name", EXEC_ONLY),
-        ("dir", EXEC_ONLY),
-        ("path", SELECTOR_IN_FS),
-        ("system", SELECTOR_IN_FS),
-    ],
-    untagged: "a place is a tagged path: write `absolute /tmp, or `cwd src for a path under the working directory",
-    payload: "a place's payload is a path: `absolute /tmp, `cwd src",
+    misses: place_misses,
+    untagged: "a place is a tagged path: write `` `absolute /tmp `` or `` `cwd src `` for a path under the working directory",
+    payload: "a place's payload is a path: `` `absolute /tmp ``, `` `cwd src ``",
     within: &[],
 };
 
-const EXEC_ONLY: &str =
-    "`name and `dir belong in an exec list; fs lists take places such as `absolute or `cwd";
-const SELECTOR_IN_FS: &str = "selectors name directories to run programs from, so they belong in an exec list as `dir `path or `dir `system; fs lists take places such as `absolute or `cwd";
+const FS_TAKES: &str = "fs lists take places such as `` `absolute `` or `` `cwd ``";
+
+fn selector_tag(tag: &str) -> bool {
+    tag.parse::<Selector>().is_ok()
+}
+
+fn place_misses(tag: &str) -> Option<String> {
+    match tag {
+        "name" | "dir" => Some(format!(
+            "`` `name `` and `` `dir `` belong in an exec list; {FS_TAKES}"
+        )),
+        _ if selector_tag(tag) => Some(format!(
+            "`` `{tag} `` names directories to run programs from, so it belongs in an exec list \
+             as `` `dir `{tag} ``; {FS_TAKES}"
+        )),
+        _ => None,
+    }
+}
 
 pub(crate) static EXEC_TARGET: Vocab = Vocab {
     noun: "exec target",
     row: exec_target_row,
-    misses: &[
-        (
-            "path",
-            "`path names directories to run programs from; write `dir `path",
-        ),
-        (
-            "system",
-            "`system names the platform's tool directories; write `dir `system",
-        ),
-    ],
-    untagged: "an exec target is tagged: write `name git for a command found on the PATH, or a place such as `absolute /bin/sh or `cwd tools/build",
-    payload: "`name takes a command name and a place takes a path: `name git, `cwd tools/build; `dir takes a place or a selector with no payload of its own",
+    misses: exec_target_misses,
+    untagged: "an exec target is tagged: write `` `name git `` for a command found on the PATH, or a place such as `` `absolute /bin/sh `` or `` `cwd tools/build ``",
+    payload: "`` `name `` takes a command name and a place takes a path: `` `name git ``, `` `cwd tools/build ``; `` `dir `` takes a place or a selector with no payload of its own",
     within: &[("dir", &DIR_TARGET)],
 };
+
+fn exec_target_misses(tag: &str) -> Option<String> {
+    selector_tag(tag).then(|| {
+        format!("`` `{tag} `` names directories to run programs from; write `` `dir `{tag} ``")
+    })
+}
 
 pub(crate) static DIR_TARGET: Vocab = Vocab {
     noun: "place or a selector",
     row: dir_target_row,
-    misses: &[
-        (
-            "name",
-            "`dir takes a place or a selector; write `name git in the list itself for a command",
-        ),
-        ("dir", "`dir does not nest; write `dir `cwd tools"),
-    ],
-    untagged: "`dir takes a place or a selector: `dir `cwd tools, or `dir `system",
-    payload: "a place takes a path and a selector takes none: `dir `cwd tools, `dir `system",
+    misses: dir_target_misses,
+    untagged: "`` `dir `` takes a place or a selector: `` `dir `cwd tools ``, or `` `dir `system ``",
+    payload: "a place takes a path and a selector takes none: `` `dir `cwd tools ``, `` `dir `system ``",
     within: &[],
 };
+
+fn dir_target_misses(tag: &str) -> Option<String> {
+    match tag {
+        "name" => Some(
+            "`` `dir `` takes a place or a selector; write `` `name git `` in the list itself for a command"
+                .into(),
+        ),
+        "dir" => Some("`` `dir `` does not nest; write `` `dir `cwd tools ``".into()),
+        _ => None,
+    }
+}
+
+fn no_misses(_: &str) -> Option<String> {
+    None
+}
 
 pub(crate) static NET: Vocab = Vocab {
     noun: "net mode",
     row: nullary::<Net>,
-    misses: &[],
-    untagged: "a grant only narrows: omit `net` to inherit, or write net: `offline",
-    payload: "`offline takes no payload",
+    misses: no_misses,
+    untagged: "a grant only narrows: omit `net` to inherit, or write `` net: `offline ``",
+    payload: "`` `offline `` takes no payload",
     within: &[],
 };
 
 pub(crate) static EDITOR: Vocab = Vocab {
     noun: "verb",
     row: nullary::<EditorVerb>,
-    misses: &[],
-    untagged: "`editor takes the list of verbs it permits, such as editor: [`read]; omit it to inherit",
+    misses: no_misses,
+    untagged: "`editor` takes the list of verbs it permits, such as `` editor: [`read] ``; omit it to inherit",
     payload: "a verb takes no payload",
     within: &[],
 };
@@ -170,8 +193,8 @@ pub(crate) static EDITOR: Vocab = Vocab {
 pub(crate) static SHELL: Vocab = Vocab {
     noun: "verb",
     row: nullary::<ShellVerb>,
-    misses: &[],
-    untagged: "`shell takes the list of verbs it permits, such as shell: [`chdir]; omit it to inherit",
+    misses: no_misses,
+    untagged: "`shell` takes the list of verbs it permits, such as `` shell: [`chdir] ``; omit it to inherit",
     payload: "a verb takes no payload",
     within: &[],
 };

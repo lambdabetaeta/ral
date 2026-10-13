@@ -12,7 +12,7 @@ use super::DaclError;
 use std::ffi::c_void;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
-use std::os::windows::io::AsRawHandle;
+use std::os::windows::io::{AsRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
 use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_SUCCESS};
 use windows_sys::Win32::Security::Authorization::{
@@ -24,6 +24,10 @@ use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_REVISION, AddMandatoryAce, CONTAINER_INHERIT_ACE,
     DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetLengthSid, INHERITED_ACE, InitializeAcl,
     IsValidSid, LABEL_SECURITY_INFORMATION, OBJECT_INHERIT_ACE, PSID,
+};
+use windows_sys::Win32::Storage::FileSystem::{
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_TAG_INFO, FileAttributeTagInfo,
+    GetFileInformationByHandleEx,
 };
 
 /// An empty `ACL` header's byte count — the floor every ACL built here is
@@ -157,7 +161,7 @@ impl OwnedSid {
 #[derive(Clone, Copy)]
 pub(super) enum Target<'a> {
     Named(&'a Path),
-    Handle(&'a std::fs::File, &'a Path),
+    Handle(&'a OwnedHandle, &'a Path),
 }
 
 impl<'a> Target<'a> {
@@ -167,16 +171,25 @@ impl<'a> Target<'a> {
         }
     }
 
+    /// The call that writes security to this target, for messages.
+    fn set_op(self) -> &'static str {
+        match self {
+            Self::Named(_) => "SetNamedSecurityInfoW",
+            Self::Handle(..) => "SetSecurityInfo",
+        }
+    }
+
     #[allow(
         clippy::disallowed_methods,
         reason = "[silent:dacl-apply] Stats the grant target to choose OI|CI inheritance before stamping. Sandbox grant-application infrastructure, not model data I/O."
     )]
     pub(super) fn is_dir(self) -> io::Result<bool> {
         match self {
-            Self::Named(p) => std::fs::metadata(p),
-            Self::Handle(f, _) => f.metadata(),
+            Self::Named(p) => std::fs::metadata(p).map(|m| m.is_dir()),
+            Self::Handle(h, _) => {
+                attribute_tag(h).map(|i| i.FileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0)
+            }
         }
-        .map(|m| m.is_dir())
     }
 }
 
@@ -206,87 +219,76 @@ pub(super) struct Security {
 
 impl Security {
     pub(super) fn named(path: &Path, kind: AclKind) -> Result<Self, DaclError> {
-        let label = matches!(kind, AclKind::Label);
         let path_w = wide(path);
-        let mut acl = std::ptr::null_mut();
-        let mut sd = std::ptr::null_mut();
         // SAFETY: the path is terminated; outputs are owned only on success.
-        let rc = unsafe {
-            GetNamedSecurityInfoW(
-                path_w.as_ptr(),
-                SE_FILE_OBJECT,
-                if label {
-                    LABEL_SECURITY_INFORMATION
-                } else {
-                    DACL_SECURITY_INFORMATION
-                },
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                if label {
-                    std::ptr::null_mut()
-                } else {
-                    &raw mut acl
-                },
-                if label {
-                    &raw mut acl
-                } else {
-                    std::ptr::null_mut()
-                },
-                &raw mut sd,
-            )
-        };
-        if rc != ERROR_SUCCESS {
-            return Err(win32_err(path, "GetNamedSecurityInfoW", rc));
-        }
-        // SAFETY: the successful query transferred the descriptor allocation.
-        Ok(Self {
-            sd: unsafe { Local::from_raw(sd) },
-            acl,
-        })
+        Self::query(
+            path,
+            kind,
+            "GetNamedSecurityInfoW",
+            |info, dacl, sacl, sd| unsafe {
+                GetNamedSecurityInfoW(
+                    path_w.as_ptr(),
+                    SE_FILE_OBJECT,
+                    info,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    dacl,
+                    sacl,
+                    sd,
+                )
+            },
+        )
     }
 
     pub(super) fn of(target: Target<'_>, kind: AclKind) -> Result<Self, DaclError> {
         match target {
             Target::Named(path) => Self::named(path, kind),
-            Target::Handle(file, path) => Self::held(file, path, kind),
+            Target::Handle(handle, path) => Self::held(handle, path, kind),
         }
     }
 
     pub(super) fn held(
-        file: &std::fs::File,
+        handle: &OwnedHandle,
         path: &Path,
         kind: AclKind,
     ) -> Result<Self, DaclError> {
-        let label = matches!(kind, AclKind::Label);
+        // SAFETY: the handle is live with READ_CONTROL; outputs are owned on success.
+        Self::query(
+            path,
+            kind,
+            "GetSecurityInfo",
+            |info, dacl, sacl, sd| unsafe {
+                GetSecurityInfo(
+                    handle.as_raw_handle(),
+                    SE_FILE_OBJECT,
+                    info,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    dacl,
+                    sacl,
+                    sd,
+                )
+            },
+        )
+    }
+
+    /// Run `call` with the information class and the one output slot `kind`
+    /// reads, the other null.
+    fn query(
+        path: &Path,
+        kind: AclKind,
+        op: &str,
+        call: impl FnOnce(u32, *mut *mut ACL, *mut *mut ACL, *mut *mut c_void) -> u32,
+    ) -> Result<Self, DaclError> {
         let mut acl = std::ptr::null_mut();
         let mut sd = std::ptr::null_mut();
-        // SAFETY: file is live with READ_CONTROL; outputs are owned on success.
-        let rc = unsafe {
-            GetSecurityInfo(
-                file.as_raw_handle(),
-                SE_FILE_OBJECT,
-                if label {
-                    LABEL_SECURITY_INFORMATION
-                } else {
-                    DACL_SECURITY_INFORMATION
-                },
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                if label {
-                    std::ptr::null_mut()
-                } else {
-                    &raw mut acl
-                },
-                if label {
-                    &raw mut acl
-                } else {
-                    std::ptr::null_mut()
-                },
-                &raw mut sd,
-            )
+        let null = std::ptr::null_mut();
+        let rc = match kind {
+            AclKind::Dacl => call(DACL_SECURITY_INFORMATION, &raw mut acl, null, &raw mut sd),
+            AclKind::Label => call(LABEL_SECURITY_INFORMATION, null, &raw mut acl, &raw mut sd),
         };
         if rc != ERROR_SUCCESS {
-            return Err(win32_err(path, "GetSecurityInfo", rc));
+            return Err(win32_err(path, op, rc));
         }
         // SAFETY: the successful query transferred the descriptor allocation.
         Ok(Self {
@@ -362,6 +364,28 @@ impl Ace<'_> {
     }
 }
 
+/// A held object's attributes and reparse tag, in one query.
+#[allow(clippy::cast_possible_truncation, reason = "an eight-byte struct")]
+pub(super) fn attribute_tag(handle: &OwnedHandle) -> io::Result<FILE_ATTRIBUTE_TAG_INFO> {
+    let mut info = FILE_ATTRIBUTE_TAG_INFO {
+        FileAttributes: 0,
+        ReparseTag: 0,
+    };
+    // SAFETY: the handle is live and `info` is exactly the struct the class names.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            handle.as_raw_handle(),
+            FileAttributeTagInfo,
+            (&raw mut info).cast(),
+            const { size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32 },
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(info)
+}
+
 pub(super) fn wide(p: &Path) -> Vec<u16> {
     p.as_os_str()
         .encode_wide()
@@ -381,20 +405,18 @@ fn trustee_for(sid: &OwnedSid) -> TRUSTEE_W {
     }
 }
 
-/// The verdict on a `SetNamedSecurityInfoW` that wrote a DACL.  Refusal to
+/// The verdict on a [`set_security`] that wrote a DACL.  Refusal to
 /// take ownership of the ACL is its own error: the path is someone else's to
 /// stamp, which the user can act on, unlike a bare Win32 code.
-fn dacl_written(path: &Path, rc: u32) -> Result<(), DaclError> {
+fn dacl_written(target: Target<'_>, rc: u32) -> Result<(), DaclError> {
+    let (path, op) = (target.path(), target.set_op());
     match rc {
         ERROR_SUCCESS => Ok(()),
         ERROR_ACCESS_DENIED => Err(DaclError::WriteDacDenied {
             path: path.to_path_buf(),
-            reason: format!(
-                "SetNamedSecurityInfoW: {}",
-                io::Error::from_raw_os_error(rc.cast_signed())
-            ),
+            reason: format!("{op}: {}", io::Error::from_raw_os_error(rc.cast_signed())),
         }),
-        _ => Err(win32_err(path, "SetNamedSecurityInfoW", rc)),
+        _ => Err(win32_err(path, op, rc)),
     }
 }
 
@@ -472,7 +494,7 @@ pub(super) fn apply_explicit_ace<'a>(
     // SAFETY: SetEntriesInAclW transferred this allocation.
     let new_dacl = unsafe { Local::from_raw(new_dacl) };
     dacl_written(
-        path,
+        target,
         set_security(
             target,
             DACL_SECURITY_INFORMATION,
@@ -523,7 +545,10 @@ fn set_security(target: Target<'_>, info: u32, dacl: *mut ACL, sacl: *mut ACL) -
 /// `EXPLICIT_ACCESS_W`/`SetEntriesInAclW` path [`apply_explicit_ace`] takes,
 /// since that API only merges DACL entries — mandatory labels are a SACL of
 /// their own, and `AddMandatoryAce` is the dedicated primitive for building one.
-pub(super) fn apply_mandatory_label_ace(target: Target<'_>) -> Result<(), DaclError> {
+pub(super) fn apply_mandatory_label_ace<'a>(
+    target: impl Into<Target<'a>>,
+) -> Result<(), DaclError> {
+    let target = target.into();
     let path = target.path();
     let sid = OwnedSid::parse(LOW_INTEGRITY_SID)?;
 
@@ -571,7 +596,7 @@ pub(super) fn apply_mandatory_label_ace(target: Target<'_>) -> Result<(), DaclEr
         acl_ptr,
     );
     if rc != ERROR_SUCCESS {
-        return Err(win32_err(path, "SetNamedSecurityInfoW(label)", rc));
+        return Err(win32_err(path, &format!("{}(label)", target.set_op()), rc));
     }
     Ok(())
 }
@@ -657,10 +682,7 @@ fn well_known_ac_sids() -> &'static [OwnedSid] {
 /// Windows' own access check — a matching deny marks bits off, and a later
 /// allow can only add bits not already denied. A NULL or empty DACL yields 0,
 /// "grants nothing", so the caller tries the real grant instead of assuming.
-fn compute_appcontainer_effective_access<'a>(
-    target: impl Into<Target<'a>>,
-) -> Result<u32, DaclError> {
-    let target = target.into();
+fn compute_appcontainer_effective_access(target: Target<'_>) -> Result<u32, DaclError> {
     let path = target.path();
     let security = Security::of(target, AclKind::Dacl)?;
     let mut allowed = 0;
@@ -687,8 +709,11 @@ fn compute_appcontainer_effective_access<'a>(
 /// and fail than to assume a coverage nothing verified.
 ///
 /// after mxc `fallback_detector.rs::appcontainer_already_grants`
-pub(super) fn appcontainer_already_grants(target: Target<'_>, needed_mask: u32) -> bool {
-    match compute_appcontainer_effective_access(target) {
+pub(super) fn appcontainer_already_grants<'a>(
+    target: impl Into<Target<'a>>,
+    needed_mask: u32,
+) -> bool {
+    match compute_appcontainer_effective_access(target.into()) {
         Ok(effective) => (effective & needed_mask) == needed_mask,
         Err(_) => false,
     }

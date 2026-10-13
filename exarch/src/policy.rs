@@ -31,13 +31,14 @@ use std::path::{Path, PathBuf};
 ///
 /// `base_name` selects a bake-in profile from `base`.  Every profile freezes
 /// against the session's `HOME` and working directory as it loads, so the
-/// extension and every layer push run on already-resolved bundles.  Each restrict
-/// file's own path joins a deny layer, putting the bytes that shape the
-/// agent's permissions beyond its reach; the extend file does not,
-/// since extending authority is a trust-source concern rather than a
-/// containment one.  On the same footing, and for the same reason, the
-/// stack denies [`provider::credential_files`](crate::provider::credential_files)
-/// in its own layer wherever some layer's `fs` restricts.  Last in every
+/// extension and every layer push run on already-resolved bundles.  Wherever
+/// some layer's `fs` restricts, each restrict file's own path joins a deny
+/// layer, putting the bytes that shape the agent's permissions beyond its
+/// reach; the extend file does not, since extending authority is a
+/// trust-source concern rather than a containment one.  On the same
+/// footing the stack denies
+/// [`provider::credential_files`](crate::provider::credential_files) in
+/// its own layer.  Last in every
 /// session, `dangerous` included, a layer excludes exarch's own binary from
 /// exec, so the agent cannot start exarch.
 ///
@@ -53,7 +54,7 @@ pub fn for_invocation(
     base_name: &str,
     extension: Option<&Path>,
     restrict_files: &[PathBuf],
-) -> Result<(GrantStack, Vec<PathBuf>), String> {
+) -> Result<Invocation, String> {
     // The loader evaluates ral source, so it needs a Shell.  This one is
     // scaffolding: the caller builds the session's real shell separately, from
     // the frozen GrantStack returned here.
@@ -90,24 +91,52 @@ pub fn for_invocation(
         )?);
     }
 
-    if !restricts.is_empty() {
-        stack.push(deny_layer(&restricts, &ctx)?);
-    }
-
-    // Our own credentials are the authority a grant is *made of*, never
-    // something it hands out — so they are carved out in their own layer,
-    // where no profile can forget them and no `--extend` can widen them
-    // back.  Only where some layer's fs restricts: an unrestricted session
-    // asked not to be confined, and installing a layer there to hold these
-    // denies would confine it, against an agent that can read the same bytes
-    // a hundred other ways.
+    // Our own credentials and the restrict files are the authority a grant is
+    // *made of*, never something it hands out, so they are carved out in their
+    // own layer, where no profile can forget them and no `--extend` can widen
+    // them back.  Only where some layer's fs restricts: an unrestricted
+    // session asked not to be confined, and a layer holding these exclusions
+    // would confine its fs (on Windows, to "every path less some", which
+    // refuses every launch).  An fs-silent restrict file is thus editable by
+    // the agent, as an `--extend` file is.
     if !stack.fs_is_top() {
+        if !restricts.is_empty() {
+            stack.push(deny_layer(&restricts, &ctx)?);
+        }
         stack.push(deny_layer(&crate::provider::credential_files(), &ctx)?);
     }
 
-    stack.push(self_layer()?);
+    let own = self_layer()?;
+    stack.push(own.clone());
 
-    Ok((stack, restricts))
+    Ok(Invocation {
+        stack,
+        restricts,
+        own,
+    })
+}
+
+/// A session's composed authority, with the pieces its callers need by name.
+#[derive(Debug)]
+pub struct Invocation {
+    /// The whole meet, self layer last.
+    pub stack: GrantStack,
+    /// Absolute paths of the `--restrict` files.
+    pub restricts: Vec<PathBuf>,
+    /// The self layer, which the stack also carries.
+    pub own: Capabilities,
+}
+
+impl Invocation {
+    /// The stack's layers, each with whether it is the self layer: the last,
+    /// which `for_invocation` always pushes, so a ceiling equal to it is not.
+    pub fn layers(&self) -> impl Iterator<Item = (&Capabilities, bool)> {
+        let last = self.stack.iter().count().saturating_sub(1);
+        self.stack
+            .iter()
+            .enumerate()
+            .map(move |(i, c)| (c, i == last))
+    }
 }
 
 /// The bake-in bases a spawn's `grant` may name — a subset of what
@@ -175,7 +204,7 @@ fn deny_layer(paths: &[PathBuf], ctx: &FreezeCtx) -> Result<Capabilities, String
 /// exclusion, follows that name afresh at each judgment.  Exec only: an fs
 /// exclusion would refuse every bundled tool.  Unpinned, it names nothing
 /// rather than guess.
-pub(crate) fn self_layer() -> Result<Capabilities, String> {
+fn self_layer() -> Result<Capabilities, String> {
     let exe = ral_core::sandbox::pinned_arg0().ok_or(
         "exarch could not pin its own binary at startup (is it missing or unreadable?), \
          so cannot exclude it from exec",
@@ -197,28 +226,29 @@ mod tests {
     use ral_core::capability::Net;
 
     #[test]
-    fn restrict_files_are_denied_even_under_dangerous_base() {
+    fn an_fs_restricting_restrict_file_is_denied_under_dangerous_base() {
         let path = std::env::temp_dir().join(format!(
             "exarch-restrict-test-{}-{}.ral",
             std::process::id(),
             "dangerous",
         ));
-        std::fs::write(&path, "return [exec: [allow: [`name ls]]]\n").unwrap();
+        std::fs::write(&path, "return [fs: [write: [`cwd .]]]\n").unwrap();
 
-        // The `/` ceiling freezes to the native root spelling: `\` on Windows,
-        // still a universal prefix there since it folds to zero components.
-        let cwd = if cfg!(windows) { r"C:\" } else { "/" };
-        let (stack, _) =
-            for_invocation(cwd, "dangerous", None, std::slice::from_ref(&path)).unwrap();
+        let cwd = std::env::temp_dir().join(format!("exarch-restrict-cwd-{}", std::process::id()));
+        std::fs::create_dir_all(&cwd).unwrap();
+        let cwd = cwd.to_string_lossy().into_owned();
+        let Invocation { stack, .. } =
+            for_invocation(&cwd, "dangerous", None, std::slice::from_ref(&path)).unwrap();
 
         let resolver = ral_core::path::Resolver::shell_less();
         let rp = resolver.resolve(&path.to_string_lossy());
         assert!(
-            !stack.admits_fs(&ral_core::capability::FsOp::Write, &resolver, &rp),
+            !stack.admits_fs(&ral_core::capability::FsOp::Write, &rp),
             "restrict file path should be write-denied"
         );
 
         let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir(cwd);
     }
 
     /// The stack ANDs the verdicts, so a `confined` layer (network off) under

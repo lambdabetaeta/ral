@@ -662,10 +662,12 @@ fn grant_names_a_misspelt_place_in_the_places_words() {
         let (msgs, hints) = (grant_messages(src), grant_hints(src));
         assert_eq!(msgs.len(), 1, "{src}: {msgs:?}");
         assert!(
-            msgs[0].starts_with("`cwdd is not a place; a place is one of `absolute, `cwd, "),
+            msgs[0].starts_with(
+                "`` `cwdd `` is not a place; a place is one of `` `absolute ``, `` `cwd ``, "
+            ),
             "{msgs:?}"
         );
-        assert!(msgs[0].ends_with("(did you mean `cwd?)"), "{msgs:?}");
+        assert!(msgs[0].ends_with("(did you mean `` `cwd ``?)"), "{msgs:?}");
         assert!(
             hints.is_empty(),
             "the vocabulary replaces the row hint: {hints:?}"
@@ -673,7 +675,7 @@ fn grant_names_a_misspelt_place_in_the_places_words() {
     }
     let errs = contract_errors(declared(Form::Grant), "return [fs: [read: [`cwdd .]]]");
     assert_eq!(codes_of(&errs), ["T0020"], "{errs:?}");
-    assert!(errs[0].message().starts_with("`cwdd is not a place"));
+    assert!(errs[0].message().starts_with("`` `cwdd `` is not a place"));
 }
 
 /// A clash at a closed row is worded as a tag wherever ral meets one, not
@@ -684,9 +686,13 @@ fn a_variant_clash_is_worded_as_a_tag() {
     assert_eq!(codes_of(&errs), ["T0020"], "{errs:?}");
     assert_eq!(
         errs[0].kind.render_message(),
-        "this value cannot be the tag `online"
+        "this value cannot be the tag `` `online ``"
     );
-    assert!(errs[0].message().starts_with("`online is not a net mode"));
+    assert!(
+        errs[0]
+            .message()
+            .starts_with("`` `online `` is not a net mode")
+    );
 }
 
 #[test]
@@ -704,24 +710,80 @@ fn grant_steers_a_wrongly_spelt_list_entry_to_its_tags() {
     assert!(
         hints
             .iter()
-            .any(|h| h.contains("omit `net` to inherit, or write net: `offline")),
+            .any(|h| h.contains("omit `net` to inherit, or write `` net: `offline ``")),
         "{hints:?}"
     );
 }
 
 #[test]
 fn grant_offers_dir_for_a_selector_in_an_exec_list_and_places_in_an_fs_list() {
-    let hints = grant_hints("grant [exec: [allow: [`path]]] { return 1 }");
+    for selector in ["path", "system", "homebrew"] {
+        let hints = grant_hints(&format!(
+            "grant [exec: [allow: [`{selector}]]] {{ return 1 }}"
+        ));
+        let dir = format!("write `` `dir `{selector} ``");
+        assert!(hints.iter().any(|h| h.contains(&dir)), "{hints:?}");
+        let hints = grant_hints(&format!("grant [fs: [read: [`{selector}]]] {{ return 1 }}"));
+        assert!(
+            hints
+                .iter()
+                .any(|h| h.contains("fs lists take places such as `` `absolute `` or `` `cwd ``")),
+            "{hints:?}"
+        );
+        assert!(
+            hints
+                .iter()
+                .any(|h| h.contains(&format!("as `` `dir `{selector} ``"))),
+            "{hints:?}"
+        );
+    }
+}
+
+/// Specific advice replaces the nearest-tag guess, which would contradict it.
+#[test]
+fn grant_advice_replaces_the_nearest_tag_guess() {
+    let msgs = grant_messages("grant [exec: [allow: [`dir `name git]]] { return 1 }");
+    assert!(!msgs[0].contains("did you mean"), "{msgs:?}");
+}
+
+/// A mismatch against a vocabulary is worded as the decoder words it.
+#[test]
+fn grant_words_a_type_mismatch_in_the_vocabularys_words() {
+    let msgs = grant_messages("grant [net: true] { return 1 }");
+    assert_eq!(msgs, ["expected a net mode, got a Bool"]);
+    let msgs = grant_messages("grant [editor: true] { return 1 }");
+    assert_eq!(msgs, ["expected a list of verbs, got a Bool"]);
+    let msgs = grant_messages("grant [exec: [allow: ['git']]] { return 1 }");
+    assert_eq!(msgs, ["expected an exec target, got text (String)"]);
+}
+
+/// `detach` is a shell verb: the checker gives the advice the decoder does,
+/// inline and as a profile.
+#[test]
+fn grant_steers_a_detach_option_to_the_shell_verb() {
+    let errs = raw_errors("grant [detach: true] { return 1 }");
+    assert_eq!(codes_of(&errs), ["T0026"], "{errs:?}");
+    assert_eq!(errs[0].message(), "`grant` does not take 'detach'");
+    let hint = errs[0].hint().unwrap();
+    assert!(hint.contains("`detach` is a shell verb"), "{hint}");
+    assert!(hint.contains("`` shell: [`chdir, `detach] ``"), "{hint}");
+    let errs = contract_errors(declared(Form::Grant), "return [detach: true]");
+    assert_eq!(codes_of(&errs), ["T0026"], "{errs:?}");
+}
+
+/// Argument restrictions are gone: `only` is an unknown key of `exec`, with
+/// no per-command advice and a suggestion only for a near miss.
+#[test]
+fn grant_refuses_an_exec_only_list_as_an_unknown_key() {
+    let src = "grant [exec: [only: [`name git]]] { return 1 }";
+    let errs = raw_errors(src);
+    assert_eq!(codes_of(&errs), ["T0076"], "{errs:?}");
+    assert!(errs[0].message().contains("unknown key 'only'"), "{errs:?}");
+    assert!(errs[0].hint().is_none(), "{:?}", errs[0].hint());
+    let errs = raw_errors("grant [exec: [alow: []]] { return 1 }");
     assert!(
-        hints.iter().any(|h| h.contains("write `dir `path")),
-        "{hints:?}"
-    );
-    let hints = grant_hints("grant [fs: [read: [`path]]] { return 1 }");
-    assert!(
-        hints
-            .iter()
-            .any(|h| h.contains("fs lists take places such as `absolute or `cwd")),
-        "{hints:?}"
+        errs[0].message().ends_with("(did you mean 'allow'?)"),
+        "{errs:?}"
     );
 }
 
@@ -738,10 +800,19 @@ fn grant_words_a_dir_payload_clash_in_the_dir_payloads_vocabulary() {
 #[test]
 fn grant_refuses_an_unknown_verb_with_the_nearest_one() {
     let msgs = grant_messages("grant [editor: [`wirte]] { return 1 }");
-    assert!(msgs[0].starts_with("`wirte is not a verb"), "{msgs:?}");
-    assert!(msgs[0].ends_with("(did you mean `write?)"), "{msgs:?}");
+    assert!(
+        msgs[0].starts_with("`` `wirte `` is not a verb"),
+        "{msgs:?}"
+    );
+    assert!(
+        msgs[0].ends_with("(did you mean `` `write ``?)"),
+        "{msgs:?}"
+    );
     let msgs = grant_messages("grant [shell: [`chdr]] { return 1 }");
-    assert!(msgs[0].ends_with("(did you mean `chdir?)"), "{msgs:?}");
+    assert!(
+        msgs[0].ends_with("(did you mean `` `chdir ``?)"),
+        "{msgs:?}"
+    );
 }
 
 /// A tag's payload is typed wherever the table sits: bound, or returned from

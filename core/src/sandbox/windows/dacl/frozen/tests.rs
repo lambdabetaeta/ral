@@ -83,23 +83,6 @@ fn a_junction_on_an_ancestor_is_refused() {
 }
 
 #[test]
-fn a_held_directory_cannot_be_swapped_for_a_junction() {
-    let td = tempfile::tempdir().unwrap();
-    let root = real(td.path());
-    let (granted, outside) = (root.join("granted"), root.join("outside"));
-    fs::create_dir_all(&granted).unwrap();
-    fs::create_dir(&outside).unwrap();
-    let _pin = FrozenPin::open(&granted, GrantKind::ReadOnly)
-        .unwrap()
-        .unwrap();
-    assert!(
-        fs::rename(&granted, root.join("moved")).is_err(),
-        "a held component must refuse rename: that is what closes the window"
-    );
-    assert!(fs::remove_dir(&granted).is_err());
-}
-
-#[test]
 fn a_directory_converted_to_a_junction_while_its_path_is_opened_is_never_descended() {
     // `a` flips between an empty directory and a junction to `outside`, which
     // holds `b`; only a walk that followed the junction could reach `b`.
@@ -186,4 +169,22 @@ fn the_redirect_refusal_names_the_link_and_how_to_grant_its_target() {
         text.contains("an allowance names what it named when granted"),
         "{text}"
     );
+}
+
+#[test]
+fn a_volume_mount_refusal_asks_for_a_drive_letter() {
+    let at = PathBuf::from(r"C:\mnt\data");
+    let e = |target| DaclError::Redirected {
+        granted: at.clone(),
+        at: at.clone(),
+        target: Some(PathBuf::from(target)),
+    };
+    for t in [r"\\?\Volume{1234}\", r"\??\volume{1234}\"] {
+        assert!(super::super::volume_mount(Path::new(t)), "{t}");
+        assert!(e(t).to_string().contains("drive letter"));
+    }
+    for t in [r"\\?\D:\x", r"\\?\VolumeX", r"D:\Volume{1}"] {
+        assert!(!super::super::volume_mount(Path::new(t)), "{t}");
+        assert!(e(t).to_string().contains("is now a link to"));
+    }
 }

@@ -150,14 +150,12 @@ return [
 
   # Directory-based exec admittance.  A `dir` target is a subpath
   # prefix: any binary whose resolved absolute path lies inside the
-  # directory is admitted.  Per-name entries below win on
-  # more-specific match: a literal key always beats a directory prefix.
+  # directory is admitted.  Allowances only add; specificity decides
+  # nothing.  An exclusion beats every allowance, however specific.
   exec: [
     allow: [
       # Admit every binary on PATH.  Expands at freeze time: each `:`
       # separator in `$PATH` becomes a `dir` entry.
-      # Per-name entries still beat the directory entries
-      # because literal keys win on more-specific match.
       `dir `path,
 
       `dir `xdg-bin .,  # ${XDG_BIN_HOME:-~/.local/bin}

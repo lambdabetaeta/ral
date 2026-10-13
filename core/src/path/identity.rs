@@ -106,10 +106,10 @@ pub(super) fn path_within(path: &Path, prefix: &Path, identity: Identity) -> boo
         qs.iter().any(|q| match identity {
             // The identity fold is defined on strings, so this arm
             // necessarily accepts the lossy form: two distinct non-UTF-8
-            // paths that decode alike compare equal here.  `FrozenPath`
-            // already freezes to `to_string_lossy` strings, so nothing is
-            // closed by fixing only the matcher, and failing closed here
-            // would make a *deny* prefix fail open.
+            // paths that decode alike compare equal here.  A grant refuses a
+            // non-Unicode real path when it is frozen, but a path checked at
+            // run time can still be one, and failing closed here would make
+            // a *deny* prefix fail open.
             Identity::Stored if rules == PathRules::Windows => {
                 let p = windows_stored_components(&p.to_string_lossy());
                 let q = windows_stored_components(&q.to_string_lossy());
@@ -221,21 +221,22 @@ fn windows_components<T>(p: &str, key: impl Fn(&str) -> T) -> Vec<T> {
 /// fold without the case fold.  One copy, because a head the two folded
 /// differently would silently unfold a `~`.
 pub(crate) fn windows_head(p: &str) -> String {
-    let s = strip_verbatim_prefix(p);
-    s.strip_prefix("UNC\\")
-        .or_else(|| s.strip_prefix("UNC/"))
-        .map_or_else(|| s.to_string(), |rest| format!(r"\{rest}"))
+    let Some(s) = strip_verbatim_prefix(p) else {
+        return p.to_string();
+    };
+    match s.split_at_checked(4) {
+        Some((unc, rest)) if unc.as_bytes()[..3].eq_ignore_ascii_case(b"UNC") && is_sep(unc.as_bytes()[3]) => {
+            format!(r"\{rest}")
+        }
+        _ => s.to_string(),
+    }
 }
 
 /// Strip a leading verbatim prefix (two separators, `?`, a separator) under
 /// either slash spelling and the mixed forms between.
-fn strip_verbatim_prefix(p: &str) -> &str {
+fn strip_verbatim_prefix(p: &str) -> Option<&str> {
     let b = p.as_bytes();
-    if b.len() >= 4 && is_sep(b[0]) && is_sep(b[1]) && b[2] == b'?' && is_sep(b[3]) {
-        &p[4..]
-    } else {
-        p
-    }
+    (b.len() >= 4 && is_sep(b[0]) && is_sep(b[1]) && b[2] == b'?' && is_sep(b[3])).then(|| &p[4..])
 }
 
 /// A path separator under Windows path identity: `/` and `\` alike.
@@ -515,6 +516,12 @@ mod tests {
             r"\\server\share",
             W
         ));
+    }
+
+    #[test]
+    fn windows_head_folds_unc_only_after_a_verbatim_prefix() {
+        assert_eq!(windows_head(r"\\?\unc\srv\sh"), r"\srv\sh");
+        assert_eq!(windows_head(r"UNC\srv"), r"UNC\srv");
     }
 
     #[test]

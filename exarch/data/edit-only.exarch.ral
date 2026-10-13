@@ -47,7 +47,7 @@ return [
       `xdg-config git,
     ],
     # Writes go to the working tree (the folder being edited) plus
-    # ephemeral scratch directories.  Unlike `read-only`, `cwd:` is
+    # ephemeral scratch directories.  Unlike `read-only`, `cwd .` is
     # writable so the agent can apply edits.
     write: [
       `cwd .,
@@ -67,12 +67,12 @@ return [
   ],
 
   # Exec mirrors `reasonable` — the agent has the same toolset.
-  # Unlike `read-only`, the write set includes `cwd:` so file
+  # Unlike `read-only`, the write set includes `cwd .` so file
   # mutations succeed.
   #
   # And unlike either, no directory this profile can *write* is
-  # admitted here: `reasonable`'s `cwd:/`, `/tmp/` and `tempdir:/`
-  # admits are absent.  A directory that is both writable and
+  # admitted here: `reasonable`'s `dir `cwd .`, `dir `absolute /tmp`
+  # and `dir `tempdir .` admits are absent.  A directory that is both writable and
   # exec-admitted makes every deny below advisory — `cp $(which git)
   # ./g` and run `./g`, a copy no name veto and no `#"/git$"` regex
   # ever sees.  An editing agent runs tools, not the tree it edits, so
@@ -214,9 +214,9 @@ return [
       `name pwsh,
 
       # Version control.  `git` is denied so that committing stays a
-      # human decision: no admitted directory is writable (see above),
-      # so there is nowhere to put a copy of it that this profile would
-      # then run.  The veto is still a veto over *names*, not over what
+      # human decision: bar the launch-from-`~` case above, no admitted
+      # directory is writable, so there is nowhere to put a copy of it
+      # that this profile would then run.  The veto is still a veto over *names*, not over what
       # a binary does — an admitted tool that shells out to a library
       # rather than to `git` is not what it stops.  Use ral builtins
       # (`grep-files`, `view-text`, `edit-replace`) for code exploration and

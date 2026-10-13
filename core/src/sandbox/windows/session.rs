@@ -33,7 +33,7 @@ use windows_sys::Win32::Security::{PSID, SID_AND_ATTRIBUTES};
 use windows_sys::Win32::System::SystemServices::SE_GROUP_ENABLED;
 
 use crate::capability::FsScope;
-use crate::path::RealPath;
+use crate::path::{FrozenPath, RealPath};
 use crate::process::Launch;
 use crate::process::cancel::CancelScope;
 use crate::sandbox::Refusal;
@@ -416,10 +416,17 @@ fn ensure_denies(
 /// Refuse "every path, less exclusions". The universal prefix means every
 /// path on every volume, and an `AppContainer` reaches only what is stamped for
 /// it; stamped as a path it would narrow to one drive and stamp that whole.
-/// Run before anything is stamped, so the guard alone judges.
+/// The root is refused however it arrives (a prefix, a run place, an
+/// exclusion), since the drive it opens is stamped, or walked, whole. Run before anything is stamped, so the guard
+/// alone judges.
 fn refuse_universal_prefix(rules: &FsRules) -> Result<(), Refusal> {
-    let universal = |s: &FsScope| matches!(s, FsScope::Prefix(p) if p.is_root());
-    if !rules.read.iter().chain(&rules.write).any(universal) {
+    let bare = |p: &Path| crate::path::lex::is_bare_root(&p.to_string_lossy());
+    let universal = |s: &FsScope| match s {
+        FsScope::Prefix(p) => p.is_root() || bare(RealPath::frozen(p).as_path()),
+        FsScope::Place(r) => bare(r.as_path()),
+    };
+    let excluded = |p: &FrozenPath| p.is_root() || bare(RealPath::frozen(p).as_path());
+    if !rules.read.iter().chain(&rules.write).any(universal) && !rules.deny.iter().any(excluded) {
         return Ok(());
     }
     let allows = if rules.deny.is_empty() {

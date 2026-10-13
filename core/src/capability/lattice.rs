@@ -185,9 +185,14 @@ impl ExecGrant {
         self.rules.get(key)
     }
 
-    /// Prunes entries; rewrites none.
-    pub fn retain(&mut self, mut keep: impl FnMut(&ExecKey, &Evidence) -> bool) {
-        self.rules.retain(|key, e| keep(key, e));
+    /// Withdraws the allowances `drop` selects; an exclusion stays.
+    pub fn withdraw(&mut self, mut drop: impl FnMut(&ExecKey) -> bool) {
+        for (key, e) in &mut self.rules {
+            if drop(key) {
+                e.positive = false;
+            }
+        }
+        self.rules.retain(|_, e| *e != Evidence::NEITHER);
     }
 
     fn denies(&self) -> bool {
@@ -508,7 +513,7 @@ impl IntoIterator for GrantStack {
 
 impl Capabilities {
     /// Lattice bottom for positive authority: every effect pinned to its
-    /// most-restrictive value, so a `meet` against it zeroes every dimension.
+    /// most-restrictive value, so pushing it as a layer zeroes every axis.
     pub fn deny_all() -> Self {
         Self {
             exec: Some(ExecGrant::default()),
@@ -535,9 +540,7 @@ impl Capabilities {
     pub fn root() -> Self {
         Self::default()
     }
-}
 
-impl Capabilities {
     /// `self ◁ fragment`: the ceiling a base and an extension make, before any
     /// restriction.  An exclusion of the fragment always wins; an allowance
     /// never removes authority; an axis the base omits stays unrestricted,

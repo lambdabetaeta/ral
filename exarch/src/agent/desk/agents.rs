@@ -70,7 +70,7 @@ impl ExarchDesk {
         // `/clear` in another tab does not refuse a spawn here.
         if s.stamp.is_stale() {
             return Err(Error::new(
-                "`exarch-agents `start` refused: the agent tree was cleared while this call was still in \
+                "`` exarch-agents `start `` refused: the agent tree was cleared while this call was still in \
                  flight, so the fuel and permissions snapshot it captured are now stale: \
                  issue agent again on your next turn",
             ));
@@ -80,10 +80,10 @@ impl ExarchDesk {
         // siblings are free and only a deep enough chain bottoms out.
         if s.agent.fuel == 0 {
             return Err(Error::new(
-                "`exarch-agents `start` refused: no spawn fuel remains at this depth, so you cannot \
+                "`` exarch-agents `start `` refused: no spawn fuel remains at this depth, so you cannot \
                  delegate any further here. Fuel bounds how deep a chain of spawns may \
                  recurse, never how many children you may start at any one depth: starting \
-                 several agents here costs nothing extra. `exarch-agents `cancel` on any node stops \
+                 several agents here costs nothing extra. `` exarch-agents `cancel `` on any node stops \
                  its whole live subtree regardless of depth.",
             ));
         }
@@ -92,7 +92,7 @@ impl ExarchDesk {
         // lock, and that is what closes a same-name race.
         if s.fleet.name_live(&name) {
             return Err(Error::new(format!(
-                "`exarch-agents `start` refused: a live agent already bears the name '{name}'; pick \
+                "`` exarch-agents `start `` refused: a live agent already bears the name '{name}'; pick \
                      another, or wait for it to settle. Names identify live agents; agents \
                      lists yours."
             )));
@@ -127,7 +127,8 @@ impl ExarchDesk {
     ) -> Result<Arc<Provider>, Error> {
         let s = &self.services;
         let current = s.agent.current_provider();
-        let refused = |why: String| Error::new(format!("`exarch-agents `start` refused: {why}"));
+        let refused =
+            |why: String| Error::new(format!("`` exarch-agents `start `` refused: {why}"));
         let bureau = &s.fleet.launch.bureau;
         let account = match provider {
             Selection::Inherit => current.account().clone(),
@@ -151,7 +152,8 @@ impl ExarchDesk {
     /// listener it opened across the wire, whose engine narrows itself by the
     /// seed it carries.
     fn fork_seat(&self, verb: &str, fork: ForkClaim, grant: &SpawnGrant) -> Result<Seat, Error> {
-        let refused = |why: String| Error::new(format!("`exarch-agents `{verb}` refused: {why}"));
+        let refused =
+            |why: String| Error::new(format!("`` exarch-agents `{verb} `` refused: {why}"));
         match (&self.services.kind, fork) {
             (SeatKind::Identity(parent), ForkClaim::Parked(id)) => parent
                 .adopt_parked(id, grant)
@@ -274,7 +276,7 @@ impl ExarchDesk {
             search,
             fleet: s.fleet.clone(),
         })
-        .map_err(|why| Error::new(format!("`exarch-agents `{verb}` refused: {why}")))
+        .map_err(|why| Error::new(format!("`` exarch-agents `{verb} `` refused: {why}")))
     }
 
     /// Hand `child` to `spawn_async` and answer the roster it now appears in —
@@ -311,7 +313,7 @@ impl ExarchDesk {
         let s = &self.services;
         let Some(order) = &s.branch else {
             return Err(Error::new(
-                "`exarch-agents `branch` is the host's own `/branch` door, and no /branch is \
+                "`` exarch-agents `branch `` is the host's own `/branch` door, and no /branch is \
                  under way on this call",
             ));
         };
@@ -366,7 +368,8 @@ impl ExarchDesk {
             Err(()) => (
                 "refused: not a descendant".to_string(),
                 format!(
-                    "agent '{name}' is not an agent you started; `exarch-agents `cancel` may only reach a descendant of yours"
+                    "agent '{name}' is not an agent you started; {} may only reach a descendant of yours",
+                    ral_core::text::code("exarch-agents `cancel")
                 ),
                 true,
             ),
@@ -403,7 +406,7 @@ impl ExarchDesk {
             Some(to) if to.id == s.agent.id => (
                 "refused: that is you".to_string(),
                 format!(
-                    "agent '{name}' is you; `exarch-agents `message` reaches another agent: to wake yourself, arm a `exarch-schedules` fire"
+                    "agent '{name}' is you; `` exarch-agents `message `` reaches another agent: to wake yourself, arm a `exarch-schedules` fire"
                 ),
                 false,
             ),
@@ -467,8 +470,9 @@ impl ExarchDesk {
             )),
             Some(found) => match s.agent.descendant(&found) {
                 None => Err(format!(
-                    "agent '{name}' is not an agent you started; `exarch-agents `read` may only reach \
-                     a descendant of yours"
+                    "agent '{name}' is not an agent you started; {} may only reach \
+                     a descendant of yours",
+                    ral_core::text::code("exarch-agents `read")
                 )),
                 // The deposit is left in place, so the fetch is idempotent
                 // until the descendant replies again.

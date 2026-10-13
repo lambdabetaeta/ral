@@ -158,7 +158,7 @@ echo $[!{length $hits} + #' matches'#]</code></pre>
           <div class="listing">
             <div class="listing-bar">grants intersect</div>
 <pre><code>grant [exec: [allow: [`name git, `name ls]]] {
-    grant [exec: [deny: [`name ls]]] {
+    grant [exec: [allow: [`name git], deny: [`name ls]]] {
         git status   # allowed
         ls           # denied
     }
@@ -166,16 +166,14 @@ echo $[!{length $hits} + #' matches'#]</code></pre>
           </div>
           <div class="output">
             <div class="listing-bar">what the agent is told</div>
-            <pre>[R0001] Error: command 'ls' denied by active grant
+            <pre>[R0001] Error: command 'ls' denied by active grant: '/usr/bin/ls' is excluded by `` `name ls ``; an allowance cannot override an exclusion
    ╭─[ turn.ral:4:9 ]
    │
  4 │         ls           # denied
    │         ─┬
    │          ╰── here
    │
-   │ Help: add the command to the grant's exec `allow` list: `name git` for a
-   │ command name, `absolute /path/to/it` for a file, or `dir `absolute /path`
-   │ for its directory
+   │ Help: the exclusion belongs to the policy that imposes it; change that policy
 ───╯</pre>
           </div>
         </div>
@@ -207,8 +205,8 @@ echo $[!{length $hits} + #' matches'#]</code></pre>
 
         <h3>Profiles</h3>
         <p>A profile is a ral program that returns a grant. Pick one with
-        <code>--base</code>, then widen it with <code>--extend</code>
-        or narrow it with any number of <code>--restrict</code> files.</p>
+        <code>--base</code>, add to it once with <code>--extend</code>
+        (an allowance widens it; an exclusion still wins), or narrow it with any number of <code>--restrict</code> files.</p>
         <div class="lattice">
           <div class="writ default">
             <span class="name">reasonable</span>
@@ -232,7 +230,7 @@ echo $[!{length $hits} + #' matches'#]</code></pre>
           </div>
           <div class="writ">
             <span class="name">dangerous</span>
-            <span class="desc">No restriction at all. For a VM or container, or as the base for <code>--restrict</code>.</span>
+            <span class="desc">The profile itself restricts nothing; exarch still excludes its own binary, and, once you restrict, its credential files and your restriction files. For a VM or container, or as the base for <code>--restrict</code>.</span>
           </div>
         </div>
         <p class="aside">This is defence in depth for a development tool, not

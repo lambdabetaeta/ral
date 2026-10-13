@@ -1,8 +1,8 @@
-grant fs: `absolute` needs an absolute path; for a path under the working directory write `cwd proj`
-grant exec: `name takes a bare command name, not ./tool
-grant exec: `absolute /usr/bin` is a directory, so as an exec target it names a binary that cannot exist
-grant exec: unknown key 'alow': `grant exec` takes allow, deny
+grant fs: `` `absolute `` needs an absolute path; for a path under the working directory write `` `cwd proj ``
+grant exec: `` `name `` takes a bare command name, not ./tool
+grant exec: `` `absolute /usr/bin `` is a directory, so as an exec target it names a binary that cannot exist
+grant exec: unknown key 'alow': `grant exec` takes allow, deny (did you mean 'allow'?)
 grant exec: unknown key 'git': `grant exec` takes allow, deny
 grant exec: unknown key 'only': `grant exec` takes allow, deny
-grant net: `offline takes no payload; write it bare, `offline
+grant net: `` `offline `` takes no payload; write it bare, `` `offline ``
 grant decode tests done

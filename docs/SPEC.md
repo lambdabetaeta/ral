@@ -2867,7 +2867,7 @@ Unknown names are errors, reported before the program runs. `exec` and `fs` are 
 
 The tags are types, not strings. A bare string where a place or an exec target belongs, a misspelled tag, a tag with the wrong payload, and `net: true` are refused statically, before the program runs, with the tags on offer and the nearest one named. A value the checker cannot type (a profile decoded from JSON, a parameter of a generic function) reaches the runtime decoder, which judges the same vocabulary.
 
-Omitting a whole field inherits that dimension. Within `fs`, an omitted `read` or `write` admits nothing for that operation; a present `exec` table admits only what its `allow` list names (§12.3).
+Omitting a whole field inherits that dimension. Within `fs`, an omitted `read` or `write` adds no allowances of its own (reads still follow from `write` and from what the grant runs, §12.4); a present `exec` table admits only what its `allow` list names (§12.3).
 
 Thus:
 
@@ -2904,7 +2904,7 @@ A *selector* names a set of directories that the environment chooses, not a path
 |---|---|
 | `` `path `` | every absolute directory in the host process's `$PATH` at decode time; an error if there are none |
 | `` `system `` | ral's platform-defined system tool directories, without Homebrew |
-| `` `homebrew `` | the Homebrew prefixes that exist (`HOMEBREW_PREFIX`, else `/opt/homebrew`, `/home/linuxbrew/.linuxbrew`, `~/.linuxbrew`); nothing if there are none |
+| `` `homebrew `` | the Homebrew prefixes that exist (`HOMEBREW_PREFIX`, else `/opt/homebrew`); nothing if there are none |
 
 Selectors never appear in `fs` lists: their expansion is not bounded by any containment guard, and a `$PATH` entry can be `$HOME` or `/`, so a write grant on one would let a child plant programs where the user's own shell looks.
 
@@ -2938,7 +2938,7 @@ An XDG place must resolve beneath the effective home directory. ral rejects an u
 ```ral
 exec: [
     allow: [`name git, `name rg, `absolute /opt/tools/lint, `cwd tools/build, `dir `system],
-    deny:  [`name bash, `dir `absolute /opt/homebrew],
+    deny:  [`name bash, `absolute /usr/bin/curl],
 ]
 ```
 
@@ -2966,7 +2966,7 @@ Three selectors may be the payload of `dir`:
 
 - `` `path `` — every absolute directory in the current `$PATH`;
 - `` `system `` — ral's platform-defined system tool directories, without Homebrew;
-- `` `homebrew `` — the Homebrew prefixes that exist: `HOMEBREW_PREFIX`, read from the host environment, when it is an absolute path, otherwise whichever of `/opt/homebrew`, `/home/linuxbrew/.linuxbrew` and `~/.linuxbrew` exist, and nothing where there is none. It is the whole prefix, so a formula's `bin` link and the `Cellar` file it resolves to are both admitted.
+- `` `homebrew `` — the Homebrew prefixes that exist: `HOMEBREW_PREFIX`, read from the host environment, when it is an absolute path, otherwise `/opt/homebrew` if it exists, and nothing where there is none. It is the whole prefix, so a formula's `bin` link and the `Cellar` file it resolves to are both admitted.
 
 ### 12.4. `fs`
 

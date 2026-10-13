@@ -119,7 +119,7 @@ impl From<String> for Refusal {
 pub(crate) fn projection_enforceable(projection: &SandboxProjection) -> Result<(), Refusal> {
     if !projection.net && !NET_ENFORCED {
         return Err(Refusal::Unavailable(
-            "offline mode (`net: `offline`) is unsupported on this platform: \
+            "offline mode (`` net: `offline` ``) is unsupported on this platform: \
              no kernel network enforcement exists"
                 .into(),
         ));
@@ -130,7 +130,7 @@ pub(crate) fn projection_enforceable(projection: &SandboxProjection) -> Result<(
 /// The boot-pinned binary `path` names — `"bwrap"` for the Linux envelope,
 /// `"ral"` for our own executable: or `None`.  Judged by inode, so a hard
 /// link or a rename since boot still answers; a name with nothing on disk
-/// under it names no pin.  `guard::enforce::fs_verdict` asks this of every write
+/// under it names no pin.  `guard::enforce::fs_judge` asks this of every write
 /// ral itself dispatches: the enforcer's inode is not the body's to rewrite,
 /// whatever the grant admits ([`launch`] binds it read-only for the confined
 /// child, and this is the same fact for the in-process half).

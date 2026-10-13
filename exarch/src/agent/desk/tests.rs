@@ -343,7 +343,7 @@ fn unknown_tag_answers_the_extension_error_too() {
             .expect_err("an unrecognised tag must not answer Ok");
         assert!(
             err.message.starts_with(&format!(
-                "unrecognised tag in `exarch-{class} `no-such-tag`: "
+                "unrecognised tag in `` exarch-{class} `no-such-tag ``: "
             )),
             "got: {}",
             err.message
@@ -558,7 +558,7 @@ fn transcript_grep_refuses_a_field_it_does_not_read() {
         .expect_err("`turn` is not a field `grep` reads");
     assert_eq!(
         err.message,
-        "`exarch-transcript `grep`: unknown field `turn`: did you mean `turns`?"
+        "`` exarch-transcript `grep ``: unknown field `turn`: did you mean `turns`?"
     );
     desk.ask(transcript_grep_request("answer", Some(&[1, 2])))
         .expect("the spelt field still narrows the search");
@@ -679,7 +679,7 @@ fn context_evict_refuses_an_empty_note() {
         .expect_err("an empty note is not a note");
     assert_eq!(
         err.message,
-        "`exarch-context `evict`: `note: text must not be empty: `none leaves no note"
+        "`` exarch-context `evict ``: `note: text must not be empty: `none leaves no note"
     );
 }
 
@@ -699,7 +699,7 @@ fn context_evict_refuses_a_note_over_the_cap() {
         .expect_err("241 bytes is over the 240-byte cap");
     assert_eq!(
         err.message,
-        "`exarch-context `evict`: `note: text is 241 bytes; the marker keeps one short line: 240 at most. What is the one thing your future self needs to know?"
+        "`` exarch-context `evict ``: `note: text is 241 bytes; the marker keeps one short line: 240 at most. What is the one thing your future self needs to know?"
     );
 }
 
@@ -720,7 +720,7 @@ fn context_evict_refuses_a_multiline_note() {
             .expect_err("a note that breaks a line is not one row");
         assert_eq!(
             err.message,
-            "`exarch-context `evict`: `note: text must be a single line: the marker draws one row per turn the cut takes, and a line break in a note reads as one of them."
+            "`` exarch-context `evict ``: `note: text must be a single line: the marker draws one row per turn the cut takes, and a line break in a note reads as one of them."
         );
     }
 }
@@ -754,7 +754,7 @@ fn context_evict_refuses_a_field_it_does_not_read() {
         .expect_err("`through` is not a field `evict` reads");
     assert_eq!(
         err.message,
-        "`exarch-context `evict`: unknown field `through`: expected `turns`, `note`"
+        "`` exarch-context `evict ``: unknown field `through`: expected `turns`, `note`"
     );
     desk.ask(context_evict_request(&[1, 2], Some("the parser is fixed")))
         .expect("the fields the tag does read still evict");
@@ -1201,7 +1201,7 @@ fn a_refused_selection_never_registers_a_child() {
         ))
         .expect_err("a scripted bureau must refuse to mint");
     assert!(
-        err.message.contains("`exarch-agents `start` refused"),
+        err.message.contains("`` exarch-agents `start `` refused"),
         "the refusal must name the tag it refused, got: {}",
         err.message
     );
@@ -1238,7 +1238,7 @@ fn start_refuses_a_spec_missing_a_field_by_name() {
         .expect_err("a spec missing `name` must be refused");
     assert_eq!(
         err.message,
-        "`exarch-agents `start`: `spec: no `name field in a record of 6 fields"
+        "`` exarch-agents `start ``: `spec: no `name field in a record of 6 fields"
     );
 }
 
@@ -1250,7 +1250,7 @@ fn start_refuses_a_misspelt_spec_field() {
         .expect_err("`nmae` is not a field the spec carries");
     assert_eq!(
         err.message,
-        "`exarch-agents `start`: `spec: unknown field `nmae`: did you mean `name`?"
+        "`` exarch-agents `start ``: `spec: unknown field `nmae`: did you mean `name`?"
     );
 }
 
@@ -1303,7 +1303,7 @@ fn start_refuses_a_restriction_that_is_not_a_record() {
         .expect_err("a `restrict that carries no record at all");
     assert_eq!(
         err.message,
-        "`exarch-agents `start`: `spec: `grant: `restrict must carry a capability record \
+        "`` exarch-agents `start ``: `spec: `grant: `restrict must carry a capability record \
          [exec, fs, net, editor, shell], got a Str"
     );
 }
@@ -1619,7 +1619,7 @@ fn cancel_scopes_to_descendants_and_message_does_not() {
         .expect_err("a message to oneself must be refused");
     assert_eq!(
         err.message,
-        "agent 'mid' is you; `exarch-agents `message` reaches another agent: to wake yourself, arm a `exarch-schedules` fire"
+        "agent 'mid' is you; `` exarch-agents `message `` reaches another agent: to wake yourself, arm a `exarch-schedules` fire"
     );
 
     let cancel_err = desk1
@@ -1627,7 +1627,7 @@ fn cancel_scopes_to_descendants_and_message_does_not() {
         .expect_err("cancelling an ancestor must be refused");
     assert_eq!(
         cancel_err.message,
-        "agent 'parent' is not an agent you started; `exarch-agents `cancel` may only reach a descendant of yours"
+        "agent 'parent' is not an agent you started; `` exarch-agents `cancel `` may only reach a descendant of yours"
     );
 
     assert!(

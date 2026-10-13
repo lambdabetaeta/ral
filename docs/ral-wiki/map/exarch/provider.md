@@ -245,7 +245,7 @@ Each launch reads the vault once per key-bearing account:
   credentials: each app in `app::APPS` contributing its keychain
   fallback path plus `oauth::token_path`. `policy::for_invocation` denies all
   of them to every grant that attenuates the filesystem at all, since the
-  base profiles read `xdg:config`/`xdg:state` wholesale and would otherwise
+  base profiles read the `` `xdg-config ``/`` `xdg-state `` places wholesale and would otherwise
   hand the agent the key that pays for its own turn — see
   [[invariants/a-grant-never-reaches-its-own-key|a-grant-never-reaches-its-own-key]].
 - `provider/secret_file.rs` — `write_private`, the owner-only writer the

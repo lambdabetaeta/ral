@@ -2,7 +2,7 @@ use super::{
     FsRules, FsScope, GrantKind, ProjectionKey, existing_paths, filter_out_granted, profile_name,
     refuse_universal_prefix,
 };
-use crate::path::FrozenPath;
+use crate::path::{FrozenPath, RealPath};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
@@ -92,6 +92,18 @@ fn the_universal_prefix_is_refused_in_either_region() {
         .unwrap_err()
         .to_string();
     assert!(why.contains("every path except some exclusions"), "{why}");
+}
+
+#[test]
+fn the_root_is_refused_as_a_place_and_as_an_exclusion() {
+    let place = FsRules {
+        read: vec![FsScope::Place(RealPath::assumed("/"))],
+        ..rules(&[], &[], &[])
+    };
+    for rules in [place, rules(&[r"C:\work"], &[], &["/"])] {
+        let why = refuse_universal_prefix(&rules).unwrap_err().to_string();
+        assert!(why.contains("ral will not stamp every drive"), "{why}");
+    }
 }
 
 #[test]

@@ -10,7 +10,8 @@
 //! is rendered by subtraction ([`expand`]): the entries the table still
 //! admits, as the tree stands at launch.  A program added there afterwards is
 //! denied until the next launch, and a name veto is carried only into
-//! hierarchies no write reaches, never beneath `Any` ([`vetoes_walk`]).
+//! hierarchies no write reaches, never beneath `Any` ([`vetoes_walk`]); a
+//! directory the envelope masks is never covered from above.
 //!
 //! A rule attaches to a host object, and a walk from a file inside the
 //! envelope meets only the inodes above it there, so every directory
@@ -18,9 +19,9 @@
 
 use super::super::Refusal;
 use super::super::warrant::Slot;
-use super::{OpenError, open_real};
+use super::{DenyMask, OpenError, open_real};
 use crate::capability::{ExecRules, ExecScope, Subject};
-use crate::path::{Allow, Deny, Object, RealPath};
+use crate::path::{Allow, Deny, Object, RealPath, Rendered};
 use crate::sandbox::{ExecProjection, RenderedFs};
 use libc::{c_int, c_uint};
 use rustix::fs::{FileType, Mode, OFlags};
@@ -30,7 +31,6 @@ use std::fmt;
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
-
 use std::sync::LazyLock;
 
 /// `LANDLOCK_CREATE_RULESET_VERSION` in the UAPI; not exported by `libc`.
@@ -381,7 +381,11 @@ fn admit_exec(
             .map_err(|source| Error::admit(name.display(), source))?;
     }
     let walks = vetoes_walk(table, fs);
-    expand(table, roots, &walks, &mut |admit| {
+    let masks: Vec<_> = (fs.rules().into_iter().flat_map(|rules| &rules.deny))
+        .filter(|path| matches!(DenyMask::over(path), DenyMask::EmptyDir))
+        .cloned()
+        .collect();
+    expand(table, roots, &walks, &masks, &mut |admit| {
         ruleset.admit(admit.fd, Access::EXECUTE)
     })?;
     Ok(())
@@ -441,16 +445,20 @@ struct Admit<'a> {
 /// [`lowered`] the table permits, whole where nothing is excluded beneath it,
 /// else entry by entry, each judged by the table, each subdirectory in turn.
 /// An excluded directory is never entered: what the table allows beneath it
-/// is a live scope of its own, admitted from the top.
+/// is a live scope of its own, admitted from the top.  A directory in `masks`
+/// is excluded likewise: the envelope shows a scratch tmpfs there that the
+/// payload may `chmod` open and write, so no rule may reach it from above.
 fn expand(
     table: &ExecRules,
     roots: &[RealPath],
-    vetoes_walk: &dyn Fn(&RealPath) -> bool,
+    walks: &dyn Fn(&RealPath) -> bool,
+    masks: &[Rendered],
     sink: &mut dyn FnMut(Admit<'_>) -> io::Result<()>,
 ) -> Result<(), Error> {
     let mut walk = Walk {
         table,
-        walks: vetoes_walk,
+        walks,
+        masks,
         sink,
         spine: Vec::new(),
     };
@@ -464,14 +472,26 @@ fn expand(
 
 /// Whether a rule could speak strictly beneath `d` other than through `d`'s
 /// own evidence: an exclusion of a directory or file strictly within `d`
-/// under `Deny`'s identity (over-listing is cost, never a hole), or any name
-/// veto where vetoes walk `d`.
-fn listed(table: &ExecRules, d: &RealPath, vetoes_walk: bool) -> bool {
-    table.denies().any(|scope| match scope {
-        ExecScope::Dir(p) | ExecScope::File(p) => p.within::<Deny>(d) && !d.within::<Deny>(p),
-        ExecScope::Name(_) => vetoes_walk,
-        ExecScope::Any | ExecScope::Tool(_) => false,
-    })
+/// under `Deny`'s identity (over-listing is cost, never a hole), a masked
+/// directory likewise, or any name veto where vetoes `walks` `d`.
+fn listed(table: &ExecRules, masks: &[Rendered], d: &RealPath, walks: bool) -> bool {
+    let masked = masks
+        .iter()
+        .any(|m| d.contains::<Deny>(m.as_str().as_ref()) && !held(m, d));
+    masked
+        || table.denies().any(|scope| match scope {
+            ExecScope::Dir(p) | ExecScope::File { path: p, .. } => {
+                p.within::<Deny>(d) && !d.within::<Deny>(p)
+            }
+            ExecScope::Name(_) => walks,
+            ExecScope::Any | ExecScope::Tool(_) => false,
+        })
+}
+
+/// Whether `mask` holds `path`; a name that is not Unicode lies in no
+/// rendered one.
+fn held(mask: &Rendered, path: &RealPath) -> bool {
+    path.as_path().to_str().is_some_and(|name| mask.holds(name))
 }
 
 /// One expansion in progress.  Every handle is opened relative to its
@@ -479,6 +499,7 @@ fn listed(table: &ExecRules, d: &RealPath, vetoes_walk: bool) -> bool {
 struct Walk<'w> {
     table: &'w ExecRules,
     walks: &'w dyn Fn(&RealPath) -> bool,
+    masks: &'w [Rendered],
     sink: &'w mut dyn FnMut(Admit<'_>) -> io::Result<()>,
     /// The `(dev, ino)` of each directory being listed, so a bind mount
     /// looping back onto one ends the descent there.
@@ -487,7 +508,7 @@ struct Walk<'w> {
 
 impl Walk<'_> {
     fn dir(&mut self, d: &RealPath, fd: BorrowedFd<'_>) -> Result<(), Error> {
-        if !listed(self.table, d, (self.walks)(d)) {
+        if !listed(self.table, self.masks, d, (self.walks)(d)) {
             return self.admit(Admit { path: d, fd });
         }
         let stat = rustix::fs::fstat(fd).map_err(|errno| Error::admit(d, errno))?;
@@ -542,7 +563,8 @@ impl Walk<'_> {
             FileType::RegularFile => Subject::File(e),
             _ => return Ok(()),
         };
-        if !self.table.evidence(subject).permits() {
+        let masked = kind == FileType::Directory && self.masks.iter().any(|m| held(m, e));
+        if masked || !self.table.evidence(subject).permits() {
             return Ok(());
         }
         match kind {
@@ -626,7 +648,7 @@ impl From<Error> for String {
 mod tests {
     use super::*;
     use crate::capability::Evidence;
-    use crate::path::render_objects;
+    use crate::path::{render_objects, render_paths};
     use crate::sandbox::{FsProjection, FsRules};
     use std::path::{Path, PathBuf};
 
@@ -747,7 +769,7 @@ mod tests {
         let scope = if dir {
             ExecScope::Dir(path)
         } else {
-            ExecScope::File(path)
+            ExecScope::file(path)
         };
         (
             scope,
@@ -853,9 +875,18 @@ mod tests {
         roots: &[RealPath],
         walks: bool,
     ) -> Result<BTreeSet<(PathBuf, bool)>, Error> {
+        expanded_masking(rules, roots, walks, &[])
+    }
+
+    fn expanded_masking(
+        rules: &[Rule],
+        roots: &[RealPath],
+        walks: bool,
+        masks: &[Rendered],
+    ) -> Result<BTreeSet<(PathBuf, bool)>, Error> {
         use std::os::unix::fs::MetadataExt;
         let mut seen = BTreeSet::new();
-        expand(&table_of(rules), roots, &|_| walks, &mut |admit| {
+        expand(&table_of(rules), roots, &|_| walks, masks, &mut |admit| {
             let path = admit.path.as_path();
             let opened = rustix::fs::fstat(admit.fd)?;
             assert_eq!(
@@ -1094,5 +1125,29 @@ mod tests {
         let rules = [allow(&d, true), deny(&d.join("s"), true)];
         let seen = expanded_on(&rules, &[sub], true).expect("expands");
         assert!(seen.is_empty(), "an excluded root admits nothing: {seen:?}");
+    }
+
+    /// An fs-denied directory is a scratch tmpfs the payload may `chmod` open
+    /// and write, so no exec rule covers it from above: the admitted directory
+    /// is lowered to rules around it, and a mask at the root admits nothing.
+    #[test]
+    fn a_masked_directory_under_an_admitted_one_is_covered_by_no_rule() {
+        let (_tmp, d) = tree();
+        let mask = |rel: &str| {
+            render_paths(&[d.join(rel).to_string_lossy().into_owned()]).expect("renders")
+        };
+        let rules = [allow(&d, true)];
+        let seen = expanded_masking(&rules, &whole(), false, &mask("s")).expect("expands");
+        assert_eq!(
+            seen,
+            admits(
+                &d,
+                &[("a", false), ("x", false), ("n", false), ("sub", true)]
+            ),
+            "everything but `s`, which the walk never enters"
+        );
+        let seen = expanded_masking(&rules, &[RealPath::assumed(d.join("s"))], false, &mask("s"))
+            .expect("expands");
+        assert!(seen.is_empty(), "a masked root admits nothing: {seen:?}");
     }
 }

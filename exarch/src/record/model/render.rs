@@ -160,10 +160,14 @@ fn whereabouts(hole: &[Turn]) -> String {
     } else {
         format!("reads turns {from} through {} back as material", past - 1)
     };
+    let code = ral_core::text::code;
     format!(
-        "They are still readable: `exarch-transcript `read [turns: !{{range {from} {past}}}]` {reads}, \
-         `exarch-transcript `grep [pattern: 're', turns: `all]` searches every turn ever recorded, and \
-         `exarch-transcript `index` lists them."
+        "They are still readable: {} {reads}, {} searches every turn ever recorded, and {} lists them.",
+        code(&format!(
+            "exarch-transcript `read [turns: !{{range {from} {past}}}]"
+        )),
+        code("exarch-transcript `grep [pattern: 're', turns: `all]"),
+        code("exarch-transcript `index"),
     )
 }
 

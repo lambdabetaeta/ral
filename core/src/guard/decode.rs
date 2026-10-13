@@ -21,7 +21,7 @@ use crate::syntax::quote::quote_word;
 use crate::text::{indefinite, near_names};
 use crate::typecheck::contract::{
     DIR_TARGET, EDITOR, EXEC_TARGET, Form as ContractForm, Holds, NET, PLACE, SHELL, Table, Vocab,
-    declared,
+    code, declared,
 };
 use crate::types::{List, Map, Value, settings_map};
 use std::collections::BTreeSet;
@@ -57,16 +57,17 @@ impl<'a> Tag<'a> {
 
     /// The string payload, `what` naming what it should hold; `vocab` advises.
     fn text(&self, vocab: &Vocab, what: &str) -> Result<&'a str, PolicyError> {
-        let label = self.label;
+        let tag = code(&format!("`{}", self.label));
         match self.payload {
             Some(Value::String(s)) => Ok(s.as_str()),
             Some(other) => Err(PolicyError::new(format!(
-                "`{label} takes {what}, got {}",
+                "{tag} takes {what}, got {}",
                 other.type_name()
             ))
             .with_hint(vocab.payload)),
             None => Err(PolicyError::new(format!(
-                "`{label} needs a payload: {what}, as in `{label} …`"
+                "{tag} needs a payload: {what}, as in {}",
+                code(&format!("`{} …", self.label))
             ))
             .with_hint(vocab.payload)),
         }
@@ -77,8 +78,8 @@ impl<'a> Tag<'a> {
         match self.payload {
             None => Ok(()),
             Some(_) => Err(PolicyError::new(format!(
-                "`{0} takes no payload; write it bare, `{0}",
-                self.label
+                "{0} takes no payload; write it bare, {0}",
+                code(&format!("`{}", self.label))
             ))
             .with_hint(vocab.payload)),
         }
@@ -186,19 +187,17 @@ fn decode_fs(value: &Value, err_prefix: &str, ctx: &FreezeCtx) -> Result<FsPolic
     let at = within(err_prefix);
     let mut fp = FsPolicy::default();
     for (sub, paths) in table_of(value, "fs: [read: []]").map_err(&at)? {
+        let slot = match sub {
+            "read" => &mut fp.read_prefixes,
+            "write" => &mut fp.write_prefixes,
+            "deny" => &mut fp.deny_paths,
+            _ => return Err(at(PolicyError::new(nested("fs").unknown_key(sub)))),
+        };
         let list = list_of(&paths, "places").map_err(&at)?;
-        let frozen = freeze_places(&list, ctx)
+        *slot = freeze_places(&list, ctx)
             .map_err(&at)?
             .into_iter()
             .collect();
-        match sub {
-            "read" => fp.read_prefixes = frozen,
-            "write" => fp.write_prefixes = frozen,
-            "deny" => fp.deny_paths = frozen,
-            _ => {
-                return Err(at(PolicyError::new(nested("fs").unknown_key(sub))));
-            }
-        }
     }
     Ok(fp)
 }
@@ -252,12 +251,13 @@ fn bare_name(name: &str) -> Result<(), PolicyError> {
         return Ok(());
     }
     Err(PolicyError::new(format!(
-        "`name takes a bare command name, not {}",
+        "{} takes a bare command name, not {}",
+        code("`name"),
         quote_word(name)
     ))
     .with_hint(
-        "for a path write `absolute /path` or `cwd relative/path`; \
-                 for a directory of programs, `dir `absolute /path`",
+        "for a path write `` `absolute /path `` or `` `cwd relative/path ``; \
+         for a directory of programs, `` `dir `absolute /path ``",
     ))
 }
 
@@ -268,12 +268,16 @@ fn file_key(place: &Place, ctx: &FreezeCtx) -> Result<Vec<ExecKey>, PolicyError>
         return Ok(vec![]);
     };
     if crate::path::is_dir(frozen.as_str()) {
-        let spelled = format!("{} {}", place.tag(), quote_word(place.payload()));
+        let spelled = format!("`{} {}", place.tag(), quote_word(place.payload()));
         return Err(PolicyError::new(format!(
-            "`{spelled}` is a directory, so as an exec target it names a binary that \
-             cannot exist"
+            "{} is a directory, so as an exec target it names a binary that \
+             cannot exist",
+            code(&spelled)
         ))
-        .with_hint(format!("did you mean `dir `{spelled}`?")));
+        .with_hint(format!(
+            "did you mean {}?",
+            code(&format!("`dir {spelled}"))
+        )));
     }
     Ok(vec![ExecKey::Path(frozen)])
 }
@@ -281,7 +285,8 @@ fn file_key(place: &Place, ctx: &FreezeCtx) -> Result<Vec<ExecKey>, PolicyError>
 /// `dir D`: every directory `D`, a place or a selector, resolves to.
 fn dir_keys(tag: &Tag, ctx: &FreezeCtx) -> Result<Vec<ExecKey>, PolicyError> {
     let payload = tag.payload.ok_or_else(|| {
-        PolicyError::new("`dir needs a place or a selector").with_hint(DIR_TARGET.untagged)
+        PolicyError::new(format!("{} needs a place or a selector", code("`dir")))
+            .with_hint(DIR_TARGET.untagged)
     })?;
     let inner = Tag::of(payload).ok_or_else(|| untagged(&DIR_TARGET, payload))?;
     let dirs = if let Some(selector) = selector_of(&inner)? {
@@ -320,7 +325,7 @@ fn decode_exec(value: &Value, err_prefix: &str, ctx: &FreezeCtx) -> Result<ExecG
         let evidence = match key {
             "allow" => Evidence::ALLOW,
             "deny" => Evidence::DENY,
-            other => return Err(at(unknown_exec_key(other))),
+            other => return Err(at(unknown_exec_key(other, &targets))),
         };
         let list = list_of(&targets, "targets").map_err(&at)?;
         for item in &list {
@@ -331,16 +336,27 @@ fn decode_exec(value: &Value, err_prefix: &str, ctx: &FreezeCtx) -> Result<ExecG
     Ok(ExecGrant::from_iter(pairs))
 }
 
-fn unknown_exec_key(key: &str) -> PolicyError {
-    let msg = nested("exec").unknown_key(key);
-    if near_names(key, ["allow", "deny"], 1).is_empty() {
-        PolicyError::new(msg).with_hint(format!(
-            "per-command policies and argument restrictions are no longer supported; \
-             write `allow: [`name {key}]` or `deny: [`name {key}]`"
-        ))
-    } else {
-        PolicyError::new(msg)
+/// Whether `value` has the shape of the old surface's per-command policy:
+/// `'allow'`, `'deny'`, or a list of subcommands.
+fn is_old_policy(value: &Value) -> bool {
+    match value {
+        Value::String(_) => true,
+        Value::List(items) => items.iter().all(|i| matches!(*i, Value::String(_))),
+        _ => false,
     }
+}
+
+fn unknown_exec_key(key: &str, value: &Value) -> PolicyError {
+    let err = PolicyError::new(nested("exec").unknown_key(key));
+    if !is_old_policy(value) || !near_names(key, ["allow", "deny"], 1).is_empty() {
+        return err;
+    }
+    err.with_hint(format!(
+        "per-command policies and argument restrictions are no longer supported; \
+         write {} or {}",
+        code(&format!("allow: [`name {key}]")),
+        code(&format!("deny: [`name {key}]")),
+    ))
 }
 
 // ── Capability walker ─────────────────────────────────────────────────────
@@ -350,7 +366,7 @@ fn unknown_exec_key(key: &str) -> PolicyError {
 ///
 /// The single `Value → Capabilities` constructor, shared by the
 /// `grant [...] { body }` builtin in `evaluator::scope`, the
-/// capability-file loader in `capability::load`, and [`crate::SpawnGrant`]'s
+/// profile loader in `load::profile`, and [`crate::SpawnGrant`]'s
 /// resolver; every path is frozen against `ctx` right here, so "a
 /// `Capabilities` has every path already resolved" holds by construction
 /// whoever comes through.  Unknown keys error here and in each dimension's
@@ -382,11 +398,10 @@ pub fn decode_capability_map(
             "shell" => caps.shell = Some(decode_verbs::<ShellVerb>(&v, &SHELL, &at)?),
             other => {
                 let table = declared(ContractForm::Grant);
-                let err = PolicyError::new(format!("{err_prefix}: {}", table.unknown_key(other)));
-                return Err(match other {
-                    "detach" => err.with_hint("`detach` is a shell verb now: list it in `shell`, as in `shell: [`chdir, `detach]`"),
-                    _ => err,
-                });
+                return Err(PolicyError::new(match table.holds(other) {
+                    Some(Holds::Refused(advice)) => format!("{err_prefix}: {advice}"),
+                    _ => format!("{err_prefix}: {}", table.unknown_key(other)),
+                }));
             }
         }
     }
@@ -564,7 +579,7 @@ mod tests {
                 "{name}: {}",
                 e.message
             );
-            assert!(e.hint.unwrap().contains("`absolute /path`"));
+            assert!(e.hint.unwrap().contains("`` `absolute /path ``"));
         }
     }
 
@@ -580,12 +595,12 @@ mod tests {
     fn an_unknown_target_tag_lists_the_targets_and_offers_the_nearest() {
         let e = exec_refusal(exec(vec![tagged("nmae", "git")], vec![]));
         assert!(
-            e.message.contains("`nmae is not an exec target;"),
+            e.message.contains("`` `nmae `` is not an exec target;"),
             "{}",
             e.message
         );
         assert!(
-            e.message.ends_with("(did you mean `name?)"),
+            e.message.ends_with("(did you mean `` `name ``?)"),
             "{}",
             e.message
         );
@@ -598,10 +613,10 @@ mod tests {
 
     #[test]
     fn an_unwrapped_selector_is_refused_with_the_dir_hint() {
-        for sel in ["path", "system"] {
+        for sel in ["path", "system", "homebrew"] {
             let e = exec_refusal(exec(vec![bare(sel)], vec![]));
             let hint = e.hint.unwrap();
-            assert!(hint.contains(&format!("write `dir `{sel}")), "{hint}");
+            assert!(hint.contains(&format!("write `` `dir `{sel} ``")), "{hint}");
         }
     }
 
@@ -626,7 +641,7 @@ mod tests {
         }
         let e = exec_refusal(exec(vec![bare("dir")], vec![]));
         assert!(
-            e.message.contains("`dir needs a place or a selector"),
+            e.message.contains("`` `dir `` needs a place or a selector"),
             "{}",
             e.message
         );
@@ -650,7 +665,6 @@ mod tests {
             list(vec![Value::string("git")]),
             rec(&[("git", Value::string("allow"))]),
             rec(&[("cargo", list(vec![Value::string("build")]))]),
-            rec(&[("git", Value::Bool(true))]),
         ] {
             let e = exec_refusal(value.clone());
             let text = format!("{} {}", e.message, e.hint.clone().unwrap_or_default());
@@ -665,7 +679,45 @@ mod tests {
     fn a_misspelt_exec_key_offers_the_real_ones() {
         let e = exec_refusal(rec(&[("alow", list(vec![]))]));
         assert!(e.message.contains("takes allow, deny"), "{}", e.message);
+        assert!(
+            e.message.ends_with("(did you mean 'allow'?)"),
+            "{}",
+            e.message
+        );
         assert!(e.hint.is_none());
+    }
+
+    /// The per-command migration hint is for the old string surface's shapes;
+    /// any other value under an unknown key is a plain unknown key.
+    #[test]
+    fn the_per_command_hint_is_only_for_the_old_policy_shapes() {
+        for value in [Value::string("allow"), list(vec![Value::string("build")])] {
+            let hint = exec_refusal(rec(&[("git", value)])).hint.unwrap();
+            assert!(hint.contains("`` allow: [`name git] ``"), "{hint}");
+        }
+        for value in [list(vec![bare("git")]), Value::Bool(true), rec(&[])] {
+            let e = exec_refusal(rec(&[("only", value)]));
+            assert!(e.message.contains("unknown key 'only'"), "{}", e.message);
+            assert!(e.hint.is_none(), "{:?}", e.hint);
+        }
+    }
+
+    /// An unknown key is refused before its value is read.
+    #[test]
+    fn an_unknown_fs_key_is_refused_before_its_places() {
+        let e = refusal(&rec(&[(
+            "fs",
+            rec(&[("raed", list(vec![tagged("cwdd", ".")]))]),
+        )]));
+        assert!(e.message.contains("unknown key 'raed'"), "{}", e.message);
+    }
+
+    /// Specific advice replaces the nearest-tag guess, which would contradict it.
+    #[test]
+    fn a_dir_of_a_name_gives_its_advice_and_no_guess() {
+        let e = exec_refusal(exec(vec![dir(tagged("name", "git"))], vec![]));
+        assert!(!e.message.contains("did you mean"), "{}", e.message);
+        assert!(e.hint.unwrap().contains("`` `name git ``"));
     }
 
     #[test]
@@ -710,6 +762,7 @@ mod tests {
             dir(tagged("cwd", ".")),
             bare("path"),
             bare("system"),
+            bare("homebrew"),
         ] {
             let e = fs_refusal(vec![item]);
             assert!(e.message.contains("is not a place"), "{}", e.message);
@@ -720,12 +773,17 @@ mod tests {
         assert!(e.hint.unwrap().contains("`absolute /tmp"));
         let m = fs_refusal(vec![tagged("cwdd", "x")]).message;
         assert!(
-            m.contains("`cwdd is not a place; a place is one of `absolute, `cwd, "),
+            m.contains(
+                "`` `cwdd `` is not a place; a place is one of `` `absolute ``, `` `cwd ``, "
+            ),
             "{m}"
         );
-        assert!(m.ends_with("`xdg-bin (did you mean `cwd?)"), "{m}");
+        assert!(
+            m.ends_with("`` `xdg-bin `` (did you mean `` `cwd ``?)"),
+            "{m}"
+        );
         let m = fs_refusal(vec![bare("cwd")]).message;
-        assert!(m.contains("`cwd needs a payload"), "{m}");
+        assert!(m.contains("`` `cwd `` needs a payload"), "{m}");
     }
 
     #[test]
@@ -757,12 +815,12 @@ mod tests {
             assert!(
                 e.hint
                     .unwrap()
-                    .contains("omit `net` to inherit, or write net: `offline"),
+                    .contains("omit `net` to inherit, or write `` net: `offline ``"),
                 "hint"
             );
         }
         let m = refusal(&rec(&[("net", bare("online"))])).message;
-        assert!(m.contains("`online is not a net mode"), "{m}");
+        assert!(m.contains("`` `online `` is not a net mode"), "{m}");
         let m = refusal(&rec(&[(
             "net",
             Value::variant("offline", Some(Value::Unit)),
@@ -791,13 +849,13 @@ mod tests {
     #[test]
     fn an_unknown_verb_lists_the_offered_ones() {
         let m = refusal(&rec(&[("shell", list(vec![bare("chdri")]))])).message;
-        assert!(m.contains("`chdri is not a verb"), "{m}");
+        assert!(m.contains("`` `chdri `` is not a verb"), "{m}");
         assert!(
-            m.contains("`chdir, `detach") && m.contains("did you mean `chdir?"),
+            m.contains("`` `chdir ``, `` `detach ``") && m.contains("did you mean `` `chdir ``?"),
             "{m}"
         );
         let m = refusal(&rec(&[("editor", list(vec![bare("exec")]))])).message;
-        assert!(m.contains("`read, `write, `tui"), "{m}");
+        assert!(m.contains("`` `read ``, `` `write ``, `` `tui ``"), "{m}");
     }
 
     #[test]
@@ -808,7 +866,7 @@ mod tests {
         }
         let e = refusal(&rec(&[("shell", list(vec![Value::string("chdir")]))]));
         assert!(e.message.contains("expected a verb"), "{}", e.message);
-        assert!(e.hint.unwrap().contains("`shell takes the list of verbs"));
+        assert!(e.hint.unwrap().contains("`shell` takes the list of verbs"));
         let m = refusal(&rec(&[(
             "editor",
             list(vec![Value::variant("read", Some(Value::Unit))]),
@@ -820,8 +878,16 @@ mod tests {
     #[test]
     fn detach_is_a_shell_verb_not_a_key() {
         let e = refusal(&rec(&[("detach", Value::Bool(true))]));
-        assert!(e.message.contains("unknown key 'detach'"), "{}", e.message);
-        assert!(e.hint.unwrap().contains("`shell: [`chdir, `detach]`"));
+        assert!(
+            e.message.contains("`detach` is a shell verb"),
+            "{}",
+            e.message
+        );
+        assert!(
+            e.message.contains("`` shell: [`chdir, `detach] ``"),
+            "{}",
+            e.message
+        );
     }
 
     // ── drift ──

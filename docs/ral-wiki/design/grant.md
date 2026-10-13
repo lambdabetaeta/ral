@@ -61,9 +61,8 @@ launch hardening.
 - **`system` and `homebrew`.** `system` is the platform's own tool roots and no
   longer holds Homebrew; `` `dir `homebrew `` is the Homebrew prefixes that exist
   at freeze time. `HOMEBREW_PREFIX`, read from the host environment as `path`
-  reads `$PATH`, replaces the defaults when it is an absolute path; otherwise the
-  defaults are whichever of `/opt/homebrew`, `/home/linuxbrew/.linuxbrew` and
-  `~/.linuxbrew` exist, and an absent Homebrew expands to nothing, never an
+  reads `$PATH`, replaces the default when it is an absolute path; otherwise the
+  default is `/opt/homebrew` if it exists, and an absent Homebrew expands to nothing, never an
   error. Intel macOS's `/usr/local` is reached only through `HOMEBREW_PREFIX`,
   since that prefix is shared with everything else. The root is the whole prefix,
   so a formula's `bin` link and the `Cellar` file it resolves to are both

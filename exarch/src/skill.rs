@@ -71,7 +71,7 @@ pub fn discover_metadata(
     for (name, dir) in discover_all(cwd, config_dir) {
         let sk_md = dir.join("SKILL.md");
         let rp = resolver.resolve(&sk_md.to_string_lossy());
-        if !grants.admits_fs(&ral_core::capability::FsOp::Read, &resolver, &rp) {
+        if !grants.admits_fs(&ral_core::capability::FsOp::Read, &rp) {
             continue;
         }
         let Ok(raw) = std::fs::read_to_string(rp.as_path()) else {

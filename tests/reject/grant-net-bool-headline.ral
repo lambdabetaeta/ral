@@ -1,0 +1,2 @@
+# contains: expected a net mode, got a Bool
+grant [net: true] { return 1 }

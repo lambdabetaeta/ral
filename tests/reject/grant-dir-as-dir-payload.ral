@@ -1,2 +1,2 @@
-# contains: `dir is not a place or a selector
+# contains: `` `dir `` is not a place or a selector
 grant [exec: [allow: [`dir `dir `cwd tools]]] { return 1 }

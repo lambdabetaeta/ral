@@ -80,10 +80,7 @@ pub(crate) fn classify_command(
     let r = resolve_command_word(head, env, shell);
     if let Resolution::External(head) = &r
         && let Ok(program) = &head.program
-        && let Some(why) = shell
-            .context
-            .grants
-            .refusal(program, &shell.context.resolver())
+        && let Some(why) = shell.context.grants.refusal(program)
     {
         return Err(refuse_head(&head.shown, program, &why, mooring, shell));
     }

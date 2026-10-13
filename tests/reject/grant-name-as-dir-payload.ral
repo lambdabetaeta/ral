@@ -1,2 +1,2 @@
-# contains: `name is not a place or a selector
+# contains: `` `name `` is not a place or a selector
 grant [exec: [allow: [`dir `name git]]] { return 1 }

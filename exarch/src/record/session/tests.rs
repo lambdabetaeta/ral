@@ -430,7 +430,7 @@ fn a_cut_between_a_prompt_and_its_answer_keeps_the_prompt() {
     );
     assert!(
         marker.contains(
-            "`exarch-transcript `read [turns: !{range 2 3}]` reads turn 2 back as material"
+            "`` exarch-transcript `read [turns: !{range 2 3}] `` reads turn 2 back as material"
         ),
         "{marker}"
     );

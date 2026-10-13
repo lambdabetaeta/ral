@@ -1,2 +1,2 @@
-# contains: `dir is not a place
+# contains: `` `dir `` is not a place
 grant [fs: [write: [`dir `cwd tools]]] { return 1 }

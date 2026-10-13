@@ -389,7 +389,7 @@ fn undecodable_exec_table_passes_the_checker_and_is_refused_at_run() {
     assert_ne!(out.status, 0, "an argument policy must not decode");
     assert!(
         out.stderr
-            .contains("argument restrictions are no longer supported"),
+            .contains("grant exec: unknown key 'git'"),
         "expected the exec-table diagnostic; got:\n{}",
         out.stderr
     );
@@ -612,7 +612,7 @@ fn an_absent_exec_deny_holds_a_case_variant() {
     );
     assert!(
         out.stderr
-            .contains(&format!("the denied `dir `absolute {b}/Evil"))
+            .contains(&format!("the denied `` `dir `absolute {b}/Evil ``"))
             && out.stderr.contains(RESPELLED),
         "the refusal must name the deny and say why; stderr:\n{}",
         out.stderr
@@ -668,7 +668,7 @@ fn an_absent_exec_path_deny_holds_a_case_variant() {
     );
     assert!(
         out.stderr
-            .contains(&format!("the denied `absolute {b}/Tool"))
+            .contains(&format!("the denied `` `absolute {b}/Tool ``"))
             && out.stderr.contains(RESPELLED),
         "the refusal must name the deny and say why; stderr:\n{}",
         out.stderr

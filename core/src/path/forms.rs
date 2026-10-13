@@ -25,7 +25,6 @@
 
 use super::PathRules;
 use super::identity::{Polarity, path_within};
-use super::resolver::Resolver;
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 
@@ -284,18 +283,21 @@ impl FrozenPath {
     }
 
     /// `self` unless it is the root, which is never re-resolved:
-    /// `Resolver::resolve` anchors a driveless path to a cwd, which on Windows
+    /// canonicalising anchors a driveless path to a cwd, which on Windows
     /// would narrow the universal root to one drive.
     fn off_root(&self) -> Option<&Self> {
         (!self.is_root()).then_some(self)
     }
 
-    /// This prefix frozen afresh from its surface spelling against
-    /// `resolver`: unchanged but for a re-resolution of its symlinks.
-    pub(crate) fn refreeze(&self, resolver: &Resolver) -> Self {
-        self.off_root().map_or_else(Self::root, |p| {
-            Self::from_surface(resolver.resolve(&p.surface).as_path())
-        })
+    /// This prefix with its real form re-resolved against the live disk, for
+    /// an exclusion, which names whatever its spelling reaches now.  The
+    /// surface is kept: it is absolute and folded, as the freeze guarantees.
+    pub(crate) fn live(&self) -> Self {
+        debug_assert!(self.is_root() || self.is_absolute(), "{:?}", self.surface);
+        Self {
+            surface: self.surface.clone(),
+            real: self.live_real().to_string_lossy().into_owned(),
+        }
     }
 
     /// Whether this is the universal prefix, [`root`](Self::root).
@@ -309,9 +311,8 @@ impl FrozenPath {
         self.contains::<super::Allow>(Self::root().real_path())
     }
 
-    /// The real form of this prefix's surface against the live disk, for an
-    /// exclusion, which names whatever its spelling reaches now.
-    pub(super) fn live_real(&self) -> PathBuf {
+    /// The real form of this prefix's surface against the live disk.
+    fn live_real(&self) -> PathBuf {
         self.off_root().map_or_else(
             || self.real_path().to_path_buf(),
             |p| super::canon::canonicalise_lenient(p.surface_path()),

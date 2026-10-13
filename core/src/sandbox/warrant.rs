@@ -25,6 +25,7 @@ use crate::Role;
 use crate::capability::{Admitted, Program, Subject, Withheld};
 use crate::path::{Deny, RealPath};
 use crate::process::SpawnFailure;
+use crate::syntax::quote::quote_word;
 use libc::c_int;
 use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
@@ -217,7 +218,7 @@ impl Run {
             Program::File { path, real, .. } => Self::File {
                 real: real.as_path().to_path_buf(),
                 arg0: path.clone(),
-                excluded: interpreter_exclusion(real, projection),
+                excluded: interpreter_exclusion(admitted.program(), projection),
                 args,
             },
             Program::Tool(tool) => Self::Tool(tool.clone(), args),
@@ -226,10 +227,18 @@ impl Run {
 }
 
 /// The exclusion, on either axis, that covers the interpreter of the `#!`
-/// script at `real`.  Read for the hint alone: support is the projection's,
-/// and nothing here is evidence.
-fn interpreter_exclusion(real: &RealPath, projection: &SandboxProjection) -> Option<String> {
-    let interpreter = RealPath::of(&super::carriers::shebang(real.as_path())?).ok()?;
+/// script `program`, read through its pinned image where Linux holds one.  For
+/// the hint alone: support is the projection's, and nothing here is evidence.
+fn interpreter_exclusion(program: &Program, projection: &SandboxProjection) -> Option<String> {
+    let shebang = match program {
+        Program::Tool(_) => None,
+        #[cfg(target_os = "linux")]
+        Program::File {
+            image: Some(image), ..
+        } => super::carriers::shebang_of_image(image.as_fd()),
+        Program::File { real, .. } => super::carriers::shebang(real.as_path()),
+    };
+    let interpreter = RealPath::of(&shebang?).ok()?;
     let exec = match &projection.exec {
         ExecProjection::Restricted(rules) => rules.withheld(Subject::File(&interpreter)),
         ExecProjection::Unrestricted => None,
@@ -244,7 +253,7 @@ fn interpreter_exclusion(real: &RealPath, projection: &SandboxProjection) -> Opt
             .deny
             .iter()
             .find(|p| p.contains::<Deny>(interpreter.as_path()));
-        denied.map(|p| p.as_str().to_owned())
+        denied.map(|p| format!("`absolute {}", quote_word(p.as_str())))
     })
 }
 
@@ -300,12 +309,12 @@ fn exec(
     #[cfg(target_os = "linux")]
     let at = crate::path::proc_fd_path(image.as_raw_fd());
     #[cfg(not(target_os = "linux"))]
-    let at = real;
+    let at = real.to_path_buf();
     #[allow(
         clippy::disallowed_methods,
         reason = "[silent:respawn-spawn] sandbox respawn handoff: builds the Command for the confined re-exec; the surface card fired before this handoff, so the exec itself raises no card."
     )]
-    let mut cmd = Command::new(at);
+    let mut cmd = Command::new(&at);
     cmd.arg0(arg0).args(args);
     #[allow(
         clippy::disallowed_methods,
@@ -315,19 +324,20 @@ fn exec(
     // A kernel refusal of a script is most often its interpreter's, which a
     // script the user can edit cannot carry in with it.
     let hint = (err.kind() == io::ErrorKind::PermissionDenied)
-        .then(|| super::carriers::shebang(real))
+        .then(|| super::carriers::shebang(&at))
         .flatten()
         .map(|interp| {
-            let interp = interp.display();
+            let interp = quote_word(&interp.to_string_lossy()).into_owned();
             match excluded {
                 Some(scope) => format!(
-                    "\nhint: its interpreter '{interp}' is excluded by {scope}; an allowance \
-                     cannot override an exclusion"
+                    "\nhint: its interpreter {interp} is excluded by {}; an allowance \
+                     cannot override an exclusion",
+                    crate::text::code(scope)
                 ),
                 None => format!(
                     "\nhint: its interpreter {interp} is not admitted by the grant: a script \
-                     you can edit carries no interpreter of its own: add `absolute {interp} to \
-                     the exec grant's allow list"
+                     you can edit carries no interpreter of its own: add `` `absolute {interp} `` \
+                     to the exec grant's allow list"
                 ),
             }
         });

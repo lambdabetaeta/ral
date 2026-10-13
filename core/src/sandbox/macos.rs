@@ -11,7 +11,7 @@
 //! one allow/deny bit rather than an endpoint list.
 
 use super::{ExecProjection, FsProjection, RenderedRules, SandboxProjection};
-use crate::capability::ExecScope;
+use crate::capability::{ExecScope, ROSETTA};
 use crate::path::{Object, Rendered, render_paths, render_real, rendered_ancestors};
 use std::collections::BTreeSet;
 use std::ffi::{CStr, CString};
@@ -131,7 +131,7 @@ pub(super) fn build_profile(policy: &SandboxProjection) -> Result<String, String
         }
     }
 
-    emit_exec_rules(&mut profile, &rendered.exec)?;
+    emit_exec_rules(&mut profile, &rendered.exec, crate::path::exists(ROSETTA))?;
 
     // Ral's own file, rendered like the rest: execve presents `/tmp/x` as
     // `/private/tmp/x`.  Protected whatever the grant, never admitted by it.
@@ -203,8 +203,8 @@ fn emit_fs_restricted(lines: &mut Vec<String>, rules: &RenderedRules) {
 pub(crate) const RENDERS_EXEC: bool = true;
 
 /// Render the `process-exec` rules.  `Unrestricted` is a wildcard.
-/// `Restricted` admits Rosetta's loader first, in a clause of its own, then
-/// every positive scope (`Any` as the wildcard), then every negative one, so
+/// `Restricted` admits Rosetta's loader (when `loader`) first, then every
+/// positive scope (`Any` as the wildcard), then every negative one, so
 /// that an exclusion reaches everything above it: Seatbelt is last-match-wins.
 /// Order within a group is for stable output; depth grants no exception.  A
 /// scope holding both polarities emits both.  Support arrives among the
@@ -214,25 +214,23 @@ pub(crate) const RENDERS_EXEC: bool = true;
 ///
 /// `Err` when a name's expansion is not valid UTF-8, which [`render_paths`]
 /// refuses.
-fn emit_exec_rules(profile: &mut Profile, exec: &ExecProjection) -> Result<(), String> {
+fn emit_exec_rules(
+    profile: &mut Profile,
+    exec: &ExecProjection,
+    loader: bool,
+) -> Result<(), String> {
     let ExecProjection::Restricted(rules) = exec else {
         profile.exec_rules.push(ANY_EXEC.to_string());
         return Ok(());
     };
     // Toolchains (`gcc → cc1 → as → ld`) arrive through the grant, `system:`
     // among them; only the loader, Rosetta's runtime, is ambient.
-    let rosetta = std::iter::once("/Library/Apple/usr").filter(|p| crate::path::exists(p));
-    let loader = render_paths(&rosetta.collect::<Vec<_>>())?;
-    // An operand-less `(allow file-read* process-exec)` is an unconditional
-    // allow under SBPL, so an empty loader must emit nothing.
-    if !loader.is_empty() {
-        let filters: String = loader
-            .iter()
-            .map(|dir| format!("\n  {}", Filter::Subpath(dir)))
-            .collect();
-        profile
-            .exec_rules
-            .push(format!("(allow file-read* process-exec{filters})"));
+    if loader {
+        let dirs = render_paths(&[ROSETTA])?;
+        profile.exec_rules.extend(
+            dirs.iter()
+                .map(|dir| Clause::allow("process-exec", Filter::Subpath(dir)).to_string()),
+        );
     }
     let spell = |scope: &ExecScope, allow: bool| -> Result<Vec<String>, String> {
         let clause = |filter| {
@@ -243,18 +241,21 @@ fn emit_exec_rules(profile: &mut Profile, exec: &ExecProjection) -> Result<(), S
             }
             .to_string()
         };
-        Ok(match scope {
-            ExecScope::Any => vec![ANY_EXEC.to_string()],
-            ExecScope::Dir(path) => render_real(path)?
+        Ok(match (scope, allow) {
+            (ExecScope::Any, true) => vec![ANY_EXEC.to_string()],
+            (ExecScope::Dir(path), _) => render_real(path)?
                 .iter()
                 .map(|name| clause(Filter::Subpath(name)))
                 .collect(),
-            ExecScope::File(path) => render_real(path)?
+            (ExecScope::File { path, .. }, _) => render_real(path)?
                 .iter()
                 .map(|name| clause(Filter::Literal(name)))
                 .collect(),
-            ExecScope::Name(name) => vec![clause(Filter::Regex(name))],
-            ExecScope::Tool(_) => Vec::new(),
+            (ExecScope::Name(name), false) => vec![clause(Filter::Regex(name))],
+            (ExecScope::Tool(_), _) => Vec::new(),
+            (ExecScope::Any, false) | (ExecScope::Name(_), true) => {
+                unreachable!("Table::extend's `stores`: Any is only positive, Name only negative")
+            }
         })
     };
     let positives = rules
@@ -271,7 +272,7 @@ fn emit_exec_rules(profile: &mut Profile, exec: &ExecProjection) -> Result<(), S
     let granted = rules
         .live()
         .filter_map(|scope| match scope {
-            ExecScope::Dir(path) | ExecScope::File(path) => Some(render_real(path)),
+            ExecScope::Dir(path) | ExecScope::File { path, .. } => Some(render_real(path)),
             _ => None,
         })
         .collect::<Result<Vec<_>, _>>()?
@@ -453,7 +454,7 @@ mod tests {
     }
 
     fn file(path: &str, allow: bool) -> Rule {
-        (ExecScope::File(RealPath::assumed(path)), evidence(allow))
+        (ExecScope::file(RealPath::assumed(path)), evidence(allow))
     }
 
     fn veto(name: &str) -> Rule {
@@ -610,7 +611,7 @@ mod tests {
     #[test]
     fn mac_profile_emits_both_clauses_for_a_both_scope() {
         let both = (
-            ExecScope::File(RealPath::assumed("/x/tool")),
+            ExecScope::file(RealPath::assumed("/x/tool")),
             Evidence::BOTH,
         );
         let profile = build_profile(&restricted(FsProjection::default(), vec![both])).unwrap();
@@ -631,6 +632,22 @@ mod tests {
         let any = at(&profile, "(allow process-exec)\n");
         let deny = at(&profile, r#"(deny process-exec (regex #"/git$"))"#);
         assert!(any < deny);
+    }
+
+    /// Rosetta's loader precedes every exclusion, so none is shadowed by it.
+    #[test]
+    fn mac_profile_admits_the_loader_before_every_exec_deny() {
+        let mut profile = Profile::default();
+        let exec =
+            ExecProjection::Restricted(vec![veto("git"), dir("/x/y", false)].into_iter().collect());
+        super::emit_exec_rules(&mut profile, &exec, true).unwrap();
+        let lines = profile.exec_rules;
+        let loader = lines
+            .iter()
+            .position(|l| l == "(allow process-exec (subpath \"/Library/Apple/usr\"))")
+            .expect("loader clause");
+        let first_deny = lines.iter().position(|l| l.starts_with("(deny")).unwrap();
+        assert!(loader < first_deny, "out of order:\n{lines:#?}");
     }
 
     /// Nothing is frozen: a write prefix covering an admitted dir, or a file

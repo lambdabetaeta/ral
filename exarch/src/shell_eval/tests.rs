@@ -1798,7 +1798,7 @@ mod self_layer {
     fn exarch_is_refused_in_a_dangerous_and_a_reasonable_session() {
         let Some(f) = fixture() else { return };
         for base in ["dangerous", "reasonable"] {
-            let (stack, _) =
+            let crate::policy::Invocation { stack, .. } =
                 crate::policy::for_invocation(&f.cwd, base, Some(&f.extend), &[]).expect(base);
             refuses_exarch(&f, &stack);
             bundled_tool_runs(&f, &stack);
@@ -1810,7 +1810,7 @@ mod self_layer {
     #[test]
     fn a_spawned_child_inherits_the_self_layer() {
         let Some(f) = fixture() else { return };
-        let (parent, _) = crate::policy::for_invocation(&f.cwd, "dangerous", Some(&f.extend), &[])
+        let crate::policy::Invocation { stack: parent, .. } = crate::policy::for_invocation(&f.cwd, "dangerous", Some(&f.extend), &[])
             .expect("dangerous composes");
         let ctx = ral_core::guard::freeze::FreezeCtx {
             home: None,

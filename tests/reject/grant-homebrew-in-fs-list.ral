@@ -1,0 +1,3 @@
+# contains: as `` `dir `homebrew ``
+# contains: fs lists take places
+grant [fs: [read: [`homebrew]]] { return 1 }

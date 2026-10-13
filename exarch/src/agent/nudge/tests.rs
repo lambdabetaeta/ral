@@ -323,7 +323,7 @@ fn pressure_names_the_cut_and_offers_the_note() {
     assert!(body.contains("400 of 500 tokens"), "{body}");
     assert!(
         body.contains("turns 1–7 will leave your context")
-            && body.contains("`exarch-context `evict [turns: !{range 1 8}"),
+            && body.contains("`` exarch-context `evict [turns: !{range 1 8}"),
         "must name the cut and offer the note: {body}"
     );
 }
