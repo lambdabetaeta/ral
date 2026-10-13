@@ -13,6 +13,7 @@
 //! thing.
 
 use crate::guard::{GrantNarrower, SpawnGrant};
+use crate::ty::Fixings;
 use crate::types::{Context, Error, FrameKind, HandlerEntry, HandlerFrame, Settled, Shell};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -92,6 +93,8 @@ pub(crate) struct EngineSeed {
     /// The spawn's grant, still unresolved: frozen against the receiving
     /// engine's own cwd, and meet-narrowed against its ceiling, once hydrated.
     grant: SpawnGrant,
+    /// The parent's fixings, so the child starts from the snapshot a fork has.
+    fixings: Fixings,
 }
 
 /// Reify a forked shell into a wire-ready [`EngineSeed`], `hatch`'s only
@@ -117,6 +120,7 @@ pub(crate) fn pack_seed(shell: &Shell, grant: SpawnGrant) -> Settled<EngineSeed>
         stack_limit: shell.session.stack_limit,
         context,
         grant,
+        fixings: shell.session.fixings.snapshot(),
     })
 }
 
@@ -160,8 +164,13 @@ impl EngineSeed {
             .into_runtime(&dec)
             .map_err(failed("captured environment"))?;
         shell.env = env;
+        // Sealed as a fork is: everything inherited is baseline.
+        if let Some(lease) = shell.local.bindings.lease() {
+            shell.arm_binding_lease(lease);
+        }
         shell.session.stack_limit = self.stack_limit;
         shell.session.hooks = None;
+        shell.session.fixings = Arc::new(self.fixings);
         shell.context = context;
         self.grant.narrow_onto(shell, narrow)
     }
@@ -176,11 +185,18 @@ mod tests {
         idle_handle,
     };
 
-    /// A shell over core's own surface with the prelude seated: what a
-    /// hatched child hydrates into.
-    fn child() -> Shell {
+    /// The recipe both a parent and a hatched child are built by: core's own
+    /// surface, the prelude seated, and a session's policy.
+    fn booted() -> Shell {
         let mut shell = crate::test_helper::core_shell();
         BakedPrelude::runtime().seat(&mut shell);
+        shell.set_exit_hints(crate::types::ExitHints::from_text("false 1 hinted\n"));
+        shell.arm_binding_lease(crate::types::BindingLease {
+            idle_calls: 3,
+            large_binding_bytes: 1 << 20,
+        });
+        shell.arm_worker_retention(5);
+        shell.arm_detach(4);
         shell
     }
 
@@ -191,11 +207,17 @@ mod tests {
 
     /// The one snapshot law: an identity fork and a wire-seeded child, both
     /// read out of the same nursery slot, resolve every name to the same
-    /// value — and the same absence — because `fork_into_nursery` scrubs
-    /// every handle, wherever it stands, before either arm sees the shell.
+    /// value, and the same absence, because `fork_into_nursery` scrubs every
+    /// handle wherever it stands before either arm sees the shell. Both hold
+    /// their parent's policy: one forks it, the other boots the same recipe.
     #[test]
-    fn identity_fork_and_wire_seed_agree_on_the_scrubbed_scope() {
-        let mut parent = child();
+    fn identity_fork_and_wire_seed_agree() {
+        let mut parent = booted();
+        let unit = crate::ty::UnitId::fresh();
+        parent
+            .fixings()
+            .fix(unit, 0, crate::ty::Side::Number, "/n")
+            .expect("a fresh variable is fixed");
         parent.set_var("kept".to_string(), Value::Int(7));
         parent.set_var("live".to_string(), idle_handle());
         let blk = block_over(&parent.env);
@@ -243,7 +265,7 @@ mod tests {
             .expect("a nursery is installed");
         let nursery_shell = nursery.adopt(id_b).expect("adopt the parked fork");
         let seed = pack_seed(&nursery_shell, SpawnGrant::Inherit).expect("pack seed");
-        let mut wire_child = child();
+        let mut wire_child = booted();
         seed.apply(&mut wire_child, no_base).expect("apply seed");
 
         assert_eq!(
@@ -261,6 +283,13 @@ mod tests {
             ("an identity fork", &identity_child),
             ("a wire seed", &wire_child),
         ] {
+            assert!(
+                child
+                    .fixings()
+                    .fix(unit, 0, crate::ty::Side::Text, "/t")
+                    .is_err(),
+                "{arm} must keep the parent's fixings"
+            );
             assert!(
                 opaque(child.env.get("live")),
                 "{arm} must scrub a handle-carrying binding"
@@ -289,6 +318,26 @@ mod tests {
                 child.session.hooks.is_none(),
                 "{arm} must leave the parent's hooks behind"
             );
+            assert!(
+                child.session.exit_hints.lookup("false", 1).is_some(),
+                "{arm} must keep the exit hints"
+            );
+            assert!(
+                child.local.bindings.armed()
+                    && child.local.bindings.leased_count() == 0
+                    && child.local.bindings.exempts("kept"),
+                "{arm} must seal everything inherited as baseline"
+            );
+            assert_eq!(
+                child.local.workers.retention(),
+                Some(5),
+                "{arm} must keep the worker retention"
+            );
+            assert_eq!(
+                child.detach_policy().map(|p| p.budget),
+                Some(4),
+                "{arm} must keep the detach budget"
+            );
         }
     }
 
@@ -297,7 +346,7 @@ mod tests {
     #[test]
     fn a_seed_carries_a_binding_once_per_closure_that_mentions_it() {
         const MARKER: &str = "zqx-marker";
-        let mut shell = child();
+        let mut shell = booted();
         crate::evaluator::run_source(
             &format!("let big = '{MARKER}'\nlet f = {{ 1 }}\nlet g = {{ 2 }}\nlet h = {{ $big }}"),
             &mut shell,

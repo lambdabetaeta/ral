@@ -310,7 +310,7 @@ does in the in-process lattice.
 
 **The one snapshot law: an identity fork and a wire hatch give the child the
 same scope, handler stack and hooks, every name resolving to the same value or
-the same absence.** A handle is what stands in the way — live authority over a
+the same absence, and the same session policy.** A handle is what stands in the way — live authority over a
 parent-side worker, with no wire form — and it is exactly the class of
 authority every other line of the fork law already denies a child: the parent's
 cancel domain, its terminal, its inbox, its provider handle. So the scrub lives
@@ -321,10 +321,15 @@ scope a closure captured, in a native's applied arguments, in a handler frame's
 arms. The fork empties the hooks, which the wire does not carry: they are the
 installing host's lifecycle entry points, and a child engine is not that host.
 A shell that reaches no handle forks as itself, its scope shared rather than
-copied. A round-trip test pins the law: fork a shell in memory, seed the same
-shell through `EngineSeed`, and compare bindings, captured scopes, applied
-arguments and handler frames, with no hook in either child
-([[map/core/transport|transport]]).
+copied. The policy is the session's own and owes nothing to the seat. That
+means its exit hints, its lease terms with everything inherited sealed as
+baseline, its worker retention, the size of its detach budget, and a snapshot
+of its `comparable` fixings. An identity fork takes all of it from its parent
+(`Shell::fork_session`). A hatched child boots the same recipe and applies a
+seed that carries the fixings and re-seals the lease. A round-trip test pins
+the law: fork a shell in memory, seed the same shell through `EngineSeed`, and
+compare bindings, captured scopes, applied arguments, handler frames and that
+policy, with no hook in either child ([[map/core/transport|transport]]).
 
 Past that one field the seat asymmetry ends and the fleet's uniformity resumes:
 `` exarch-agents `message ``, `` exarch-agents `cancel ``, and the idle-lease reaper all

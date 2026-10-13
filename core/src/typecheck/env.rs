@@ -7,7 +7,7 @@ use super::unify::{Unifier, WeakSource};
 use crate::ir::{Comp, GroupNode, Name, Val, synthetic};
 use crate::source::Span;
 use crate::ty::{CompTy, Kind, Scheme, Ty};
-use crate::ty::{Fixings, Site};
+use crate::ty::{Site, UnitId};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -327,10 +327,10 @@ impl InferCtx {
     }
 
     /// Freeze every recorded boundary, and every residual use, as the unit's
-    /// solution has left it.  One [`Fixings`] is shared by all of them.
+    /// solution has left it.  All of them name one fresh unit.
     pub(super) fn snapshot_sites(&mut self) {
-        let fixings = Fixings::new();
-        let freeze = |ty: &Ty| Arc::new(Site::snapshot(&self.unifier, ty, Arc::clone(&fixings)));
+        let unit = UnitId::fresh();
+        let freeze = |ty: &Ty| Arc::new(Site::snapshot(&self.unifier, ty, unit));
         self.sites = self
             .boundary_results
             .iter()

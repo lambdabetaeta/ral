@@ -1,6 +1,6 @@
 //! Moving state from a parent shell into a child computation.
 //!
-//! Spawned thread, cross-process pipeline stage, REPL aside and sub-agent
+//! Spawned thread, pipeline stage, REPL aside and sub-agent
 //! session are genuine forks over a different store, and all four are built by
 //! the one literal in [`Shell::child`]: a field added to [`Shell`] cannot reach
 //! a child by defaulting.  No child mints a
@@ -9,25 +9,43 @@
 //! whatever [`Mooring`] it later runs under.
 
 use super::bindings::BindingLedger;
+use super::detached::DetachPolicy;
 use super::workers::Roster;
 use super::{LocalState, Mooring, SessionState, Shell};
 use crate::io::{Io, Source};
 use crate::process::{DurableRoot, ForegroundScope};
-use crate::types::{Audit, ExitHints};
+use crate::ty::Fixings;
+use crate::types::Audit;
 use std::sync::Arc;
 
+/// What a child holds for itself rather than from its parent.
+struct Holding {
+    root: DurableRoot,
+    anchor: ForegroundScope,
+    workers: Roster,
+    bindings: BindingLedger,
+    detach: Option<Arc<DetachPolicy>>,
+    fixings: Arc<Fixings>,
+}
+
 impl Shell {
-    /// This shell's child, built on the parent's thread: the lexical scope,
-    /// context, Σ, builtin table, source registry, call site and detach budget
-    /// ride along, so the child resolves, renders and describes as the parent
-    /// does.  Everything else is fresh: control counters, since a child
+    /// This shell's child, built on the parent's thread: it inherits the
+    /// lexical scope, context, Σ, builtin table, source registry, call site
+    /// and the session's policy (exit hints), so it resolves, renders and
+    /// describes as the parent does, and differs from its siblings only in its
+    /// [`Holding`].  Everything else is fresh: control counters, since a child
     /// continues no call stack; no hooks, since a worker or a stage dispatches
     /// none; stdin `Empty`, since a child must not `tcgetpgrp` whoever owns
     /// the real terminal.
-    ///
-    /// The cancel `root` and `anchor` and the `workers` roster are the three
-    /// things the four kinds of child differ in.
-    fn child(&self, root: DurableRoot, anchor: ForegroundScope, workers: Roster) -> Self {
+    fn child(&self, holding: Holding) -> Self {
+        let Holding {
+            root,
+            anchor,
+            workers,
+            bindings,
+            detach,
+            fixings,
+        } = holding;
         Self {
             env: self.env.clone(),
             sig: Arc::clone(&self.sig),
@@ -41,7 +59,8 @@ impl Shell {
                 anchor,
                 sources: self.session.sources.clone(),
                 root_file: self.session.root_file,
-                exit_hints: ExitHints::default(),
+                exit_hints: Arc::clone(&self.session.exit_hints),
+                fixings,
                 builtins: self.session.builtins.clone(),
                 library_docs: self.session.library_docs.clone(),
                 terminal_lease: None,
@@ -52,8 +71,8 @@ impl Shell {
             local: LocalState {
                 audit: Audit::dispatched_from(self.local.audit.call_site),
                 workers,
-                bindings: BindingLedger::default(),
-                detach: self.local.detach.clone(),
+                bindings,
+                detach,
                 machine_depth: 0,
             },
         }
@@ -62,15 +81,29 @@ impl Shell {
     /// Fork this shell into an independent child *session* — the primitive a
     /// host uses to spawn a sub-agent that executes its own runs.
     ///
-    /// Scope, context, and builtin table are snapshotted, everything else
-    /// fresh: a durable root deaf to the ambient causes even when forked from
-    /// a facing session, its host cancelling it through [`Shell::cancel_handle`]
-    /// instead, and a registry of its own.  Nothing flows back: the child's
-    /// `cd`, env, and new bindings die with it.
+    /// A new session keeps its parent's policy (exit hints, the lease's terms
+    /// with everything inherited sealed as baseline, worker retention, the
+    /// detach budget's size) and a
+    /// snapshot of its parent's fixings, and answers
+    /// for none of its parent's state: a fresh root deaf to the ambient causes
+    /// (its host cancels it through [`Shell::cancel_handle`]), a roster of its
+    /// own, an unspent detach budget.  Nothing
+    /// flows back: the child's `cd`, env, and new bindings die with it.
     pub fn fork_session(&self) -> Self {
         let root = DurableRoot::new();
         let anchor = root.worker();
-        self.child(root, anchor, Roster::default())
+        self.child(Holding {
+            root,
+            anchor,
+            workers: self.local.workers.fresh(),
+            bindings: self.local.bindings.forked(self.visible_names()),
+            detach: self
+                .local
+                .detach
+                .as_deref()
+                .map(|policy| Arc::new(policy.fresh())),
+            fixings: Arc::new(self.session.fixings.snapshot()),
+        })
     }
 
     /// Join this session as an *aside*: a second [`Shell`] the host runs
@@ -86,7 +119,14 @@ impl Shell {
     pub fn join_session(&self) -> Self {
         let root = self.session.root.clone();
         let anchor = root.worker();
-        self.child(root, anchor, Roster::default())
+        self.child(Holding {
+            root,
+            anchor,
+            workers: self.local.workers.fresh(),
+            bindings: BindingLedger::default(),
+            detach: self.local.detach.clone(),
+            fixings: Arc::clone(&self.session.fixings),
+        })
     }
 
     /// The one and only thread-spawn primitive: `f` runs on a fresh OS thread
@@ -110,11 +150,14 @@ impl Shell {
         F: FnOnce(&Mooring, &mut Self) -> R + Send + 'static,
         R: Send + 'static,
     {
-        let mut child = self.child(
-            self.session.root.clone(),
-            mooring.cancel.clone(),
-            self.local.workers.share(),
-        );
+        let mut child = self.child(Holding {
+            root: self.session.root.clone(),
+            anchor: mooring.cancel.clone(),
+            workers: self.local.workers.share(),
+            bindings: BindingLedger::default(),
+            detach: self.local.detach.clone(),
+            fixings: Arc::clone(&self.session.fixings),
+        });
         let worker_cancel = mooring.cancel.as_scope().clone();
         let live = self.local.workers.live_ticket();
         let handle = std::thread::Builder::new()
@@ -258,5 +301,85 @@ mod tests {
             child_root_file, root_file,
             "the worker must inherit the parent's root file"
         );
+    }
+
+    /// A forked session keeps its parent's policy and answers for none of its
+    /// state.
+    #[test]
+    fn a_forked_session_keeps_the_policy_and_answers_for_nothing() {
+        let mut parent = crate::test_helper::core_shell();
+        parent.set_exit_hints(crate::types::ExitHints::from_text("false 1 hinted\n"));
+        parent.arm_binding_lease(crate::types::BindingLease {
+            idle_calls: 3,
+            large_binding_bytes: 1 << 20,
+        });
+        parent.arm_worker_retention(5);
+        parent.arm_detach(4);
+        parent
+            .local
+            .detach
+            .as_ref()
+            .expect("armed")
+            .admit()
+            .expect("a birth is left")
+            .commit();
+        parent.set_var("late".to_string(), crate::types::Value::Int(1));
+
+        let child = parent.fork_session();
+        assert!(Arc::ptr_eq(
+            &parent.session.exit_hints,
+            &child.session.exit_hints
+        ));
+        assert!(child.local.bindings.armed());
+        assert_eq!(child.local.bindings.leased_count(), 0);
+        assert!(child.local.bindings.exempts("late"));
+        assert_eq!(child.local.workers.retention(), Some(5));
+        let (theirs, ours) = (
+            child.local.detach.as_ref().expect("armed"),
+            parent.local.detach.as_ref().expect("armed"),
+        );
+        assert_eq!(theirs.budget, 4);
+        assert_eq!(theirs.births.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert!(!Arc::ptr_eq(theirs, ours));
+    }
+
+    /// An aside is the same session: it shares the detach policy and leases
+    /// nothing of its own.
+    #[test]
+    fn an_aside_shares_the_detach_policy_and_leases_nothing() {
+        let mut parent = crate::test_helper::core_shell();
+        parent.arm_detach(4);
+        parent.arm_binding_lease(crate::types::BindingLease {
+            idle_calls: 3,
+            large_binding_bytes: 1 << 20,
+        });
+        let aside = parent.join_session();
+        assert!(Arc::ptr_eq(
+            aside.local.detach.as_ref().expect("armed"),
+            parent.local.detach.as_ref().expect("armed"),
+        ));
+        assert!(!aside.local.bindings.armed());
+    }
+
+    /// A forked session starts from its parent's fixings and writes only its
+    /// own.
+    #[test]
+    fn a_forked_session_snapshots_its_fixings() {
+        use crate::ty::{Side, UnitId};
+        let unit = UnitId::fresh();
+        let parent = crate::test_helper::core_shell();
+        assert!(parent.fixings().fix(unit, 0, Side::Number, "/a").is_ok());
+        let child = parent.fork_session();
+        assert!(child.fixings().fix(unit, 0, Side::Text, "/b").is_err());
+        assert!(child.fixings().fix(unit, 1, Side::Text, "/b").is_ok());
+        assert!(parent.fixings().fix(unit, 1, Side::Number, "/b").is_ok());
+    }
+
+    /// An aside is the same session: it shares the fixings.
+    #[test]
+    fn an_aside_shares_the_session_fixings() {
+        let parent = crate::test_helper::core_shell();
+        let aside = parent.join_session();
+        assert!(Arc::ptr_eq(&parent.session.fixings, &aside.session.fixings));
     }
 }

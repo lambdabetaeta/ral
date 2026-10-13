@@ -29,6 +29,18 @@ pub struct DetachPolicy {
 }
 
 impl DetachPolicy {
+    pub(crate) fn new(budget: u64) -> Self {
+        Self {
+            budget,
+            births: AtomicU64::new(0),
+        }
+    }
+
+    /// The same budget, unspent.
+    pub(crate) fn fresh(&self) -> Self {
+        Self::new(self.budget)
+    }
+
     /// Reserve one birth.
     ///
     /// The counter this consults includes reservations still in flight as

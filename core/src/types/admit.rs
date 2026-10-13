@@ -7,7 +7,7 @@
 
 use crate::source::Span;
 use crate::sync::LockExt as _;
-use crate::ty::{Fields, Fixed, Fixings, Id, Kind, Scheme, Shape, Side, Site, Tail};
+use crate::ty::{Fields, Fixed, Fixings, Id, Kind, Scheme, Shape, Side, Site, Tail, UnitId};
 use crate::types::{Break, Error, Map, Shell, Value};
 use std::fmt::{self, Write as _};
 use std::sync::Arc;
@@ -30,14 +30,20 @@ impl Fixings {
         clippy::significant_drop_tightening,
         reason = "the read and the insert are one step under the lock"
     )]
-    fn fix(&self, var: u32, side: Side, pointer: &str) -> Result<(), Fixed> {
-        let mut table = self.table.lock_ignore_poison();
-        match table.get(&var) {
+    pub(crate) fn fix(
+        &self,
+        unit: UnitId,
+        var: u32,
+        side: Side,
+        pointer: &str,
+    ) -> Result<(), Fixed> {
+        let mut table = self.0.lock_ignore_poison();
+        match table.get(&(unit, var)) {
             Some(first) if first.side != side => Err(first.clone()),
             Some(_) => Ok(()),
             None => {
                 table.insert(
-                    var,
+                    (unit, var),
                     Fixed {
                         side,
                         pointer: pointer.to_owned(),
@@ -237,17 +243,17 @@ impl Site {
     ///
     /// # Errors
     /// The first place the value and the type disagree.
-    pub fn admit(&self, value: &Value) -> Result<(), Mismatch> {
-        self.walk(self.root, value)
+    pub fn admit(&self, value: &Value, fixings: &Fixings) -> Result<(), Mismatch> {
+        self.walk(self.root, value, fixings)
     }
 
     /// [`Self::admit`] for the value a `Handle α` site's worker settles with.
     ///
     /// # Errors
     /// As [`Self::admit`].
-    pub fn admit_handled(&self, value: &Value) -> Result<(), Mismatch> {
+    pub fn admit_handled(&self, value: &Value, fixings: &Fixings) -> Result<(), Mismatch> {
         match self.nodes[self.root].shape {
-            Shape::Handle(inner) => self.walk(inner, value),
+            Shape::Handle(inner) => self.walk(inner, value, fixings),
             _ => Ok(()),
         }
     }
@@ -264,8 +270,9 @@ impl Site {
         &self,
         record: &Value,
         schemes: &[(String, Arc<Scheme>)],
+        fixings: &Fixings,
     ) -> Result<(), Mismatch> {
-        self.admit(record)?;
+        self.admit(record, fixings)?;
         let Value::Map(fields) = record else {
             return Ok(());
         };
@@ -289,9 +296,10 @@ impl Site {
         Ok(())
     }
 
-    fn walk(&self, id: Id, value: &Value) -> Result<(), Mismatch> {
+    fn walk(&self, id: Id, value: &Value, fixings: &Fixings) -> Result<(), Mismatch> {
         Walk {
             site: self,
+            fixings,
             path: Vec::new(),
         }
         .run(id, value, None)
@@ -307,6 +315,7 @@ enum Step {
 
 struct Walk<'a> {
     site: &'a Site,
+    fixings: &'a Fixings,
     path: Vec<Step>,
 }
 
@@ -459,9 +468,8 @@ impl Walk<'_> {
             && let Some(side) = side(value)
         {
             let pointer = pointer_of(&self.path);
-            self.site
-                .fixings
-                .fix(var, side, &pointer)
+            self.fixings
+                .fix(self.site.unit, var, side, &pointer)
                 .map_err(|first| {
                     self.mismatch(
                         at,

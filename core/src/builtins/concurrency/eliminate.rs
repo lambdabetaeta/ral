@@ -64,7 +64,7 @@ fn replay_deferred_surface(handle: &HandleInner, completed: &CompletedHandle, mo
 fn admit_handled(handle: &HandleInner, value: &Value, shell: &Shell) -> Settled<()> {
     match &handle.site {
         Some(site) => site
-            .admit_handled(value)
+            .admit_handled(value, &shell.session.fixings)
             .map_err(|mismatch| mismatch.refusal("service-handle", shell)),
         None => Ok(()),
     }

@@ -307,7 +307,7 @@ pub fn site_of(ty: &Ty) -> std::sync::Arc<crate::ty::Site> {
     std::sync::Arc::new(crate::ty::Site::snapshot(
         &Unifier::new(),
         ty,
-        crate::ty::Fixings::new(),
+        crate::ty::UnitId::fresh(),
     ))
 }
 

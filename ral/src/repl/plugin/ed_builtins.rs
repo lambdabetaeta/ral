@@ -338,7 +338,7 @@ pub fn builtin_ed_state(
             let stored = Value::from(stored);
             // The cell outlives every session, so what it holds was decided by
             // whichever program last wrote it.
-            site.admit(&stored).map_err(|mismatch| {
+            site.admit(&stored, shell.fixings()).map_err(|mismatch| {
                 mismatch.refusal("_ed-state (the plugin's persistent cell)", shell)
             })?;
             stored

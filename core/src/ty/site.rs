@@ -4,12 +4,13 @@
 //! `types::site`; this is the vocabulary, with no `Value` or unifier in it.
 
 use crate::source::Span;
+use crate::sync::LockExt as _;
 use crate::ty::Kind;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 pub(crate) type Id = usize;
 
@@ -84,78 +85,64 @@ pub(crate) struct Fixed {
     pub(crate) pointer: String,
 }
 
-/// What the unit's `comparable` variables were fixed to.
-///
-/// One per unit, shared by every [`Site`] the unit builds, so two decodes the
-/// program treats as one `comparable` type agree for as long as the compiled
-/// program lives.  A `SerialThunk` ships a copy to an engine child; what the
-/// child fixes stays there.
-#[derive(Debug)]
-pub struct Fixings {
-    pub(crate) id: u64,
-    pub(crate) table: Mutex<HashMap<u32, Fixed>>,
+/// A compiled unit's name: unique in every process that meets it.  A baked
+/// unit's id is minted in the build script and travels with its IR, a seed's
+/// with its closures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub(crate) struct UnitId {
+    process: u64,
+    seq: u64,
 }
+
+impl UnitId {
+    pub(crate) fn fresh() -> Self {
+        static PROCESS: OnceLock<u64> = OnceLock::new();
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let process = *PROCESS.get_or_init(|| {
+            let mut nonce = [0; 8];
+            getrandom::fill(&mut nonce).expect("OS randomness");
+            u64::from_le_bytes(nonce)
+        });
+        Self {
+            process,
+            seq: NEXT.fetch_add(1, Ordering::Relaxed),
+        }
+    }
+}
+
+/// What a session's `comparable` variables were fixed to, per unit: shared
+/// by the session's threads, snapshotted into a new session.
+#[derive(Debug, Default)]
+pub struct Fixings(pub(crate) Mutex<HashMap<(UnitId, u32), Fixed>>);
 
 impl Fixings {
-    pub(crate) fn new() -> Arc<Self> {
-        static NEXT: AtomicU32 = AtomicU32::new(0);
-        let id =
-            u64::from(std::process::id()) << 32 | u64::from(NEXT.fetch_add(1, Ordering::Relaxed));
-        Arc::new(Self {
-            id,
-            table: Mutex::default(),
-        })
+    pub(crate) fn snapshot(&self) -> Self {
+        Self(Mutex::new(self.0.lock_ignore_poison().clone()))
     }
 }
 
-impl PartialEq for Fixings {
-    fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
+impl Clone for Fixings {
+    fn clone(&self) -> Self {
+        self.snapshot()
     }
 }
 
-/// Wire form of a unit's fixings: the table, under its id, so every site of
-/// one unit that reaches a process meets the one `Arc` there.
-mod shared {
-    use super::{Fixed, Fixings, HashMap, Mutex, OnceLock, Weak};
-    use crate::sync::LockExt as _;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use std::sync::Arc;
-
-    type Live = Mutex<HashMap<u64, Weak<Fixings>>>;
-
-    fn live() -> &'static Live {
-        static LIVE: OnceLock<Live> = OnceLock::new();
-        LIVE.get_or_init(Live::default)
+impl Serialize for Fixings {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let table = self.0.lock_ignore_poison();
+        serializer.collect_seq(table.iter().map(|(&(unit, var), fixed)| (unit, var, fixed)))
     }
+}
 
-    pub(super) fn serialize<S: Serializer>(
-        fixings: &Arc<Fixings>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        let table = fixings.table.lock_ignore_poison();
-        (fixings.id, &*table).serialize(serializer)
-    }
-
-    #[allow(
-        clippy::significant_drop_tightening,
-        reason = "lookup and registration are one step under the lock"
-    )]
-    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<Arc<Fixings>, D::Error> {
-        let (id, table) = <(u64, HashMap<u32, Fixed>)>::deserialize(deserializer)?;
-        let mut live = live().lock_ignore_poison();
-        live.retain(|_, weak| weak.strong_count() > 0);
-        if let Some(known) = live.get(&id).and_then(Weak::upgrade) {
-            return Ok(known);
-        }
-        let fixings = Arc::new(Fixings {
-            id,
-            table: Mutex::new(table),
-        });
-        live.insert(id, Arc::downgrade(&fixings));
-        Ok(fixings)
+impl<'de> Deserialize<'de> for Fixings {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let triples = Vec::<(UnitId, u32, Fixed)>::deserialize(deserializer)?;
+        Ok(Self(Mutex::new(
+            triples
+                .into_iter()
+                .map(|(unit, var, fixed)| ((unit, var), fixed))
+                .collect(),
+        )))
     }
 }
 
@@ -165,6 +152,5 @@ mod shared {
 pub struct Site {
     pub(crate) nodes: Vec<Node>,
     pub(crate) root: Id,
-    #[serde(with = "shared")]
-    pub(crate) fixings: Arc<Fixings>,
+    pub(crate) unit: UnitId,
 }

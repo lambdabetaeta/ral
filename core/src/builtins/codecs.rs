@@ -118,7 +118,7 @@ fn json_to_value(j: serde_json::Value) -> Result<Value, OutOfRange> {
 /// Let a decoded `value` into the program if it is what the program makes of
 /// it: the one door every decoder of undecided shape ends at.
 fn admitted(door: &str, site: &Site, value: Value, shell: &Shell) -> Settled<Value> {
-    site.admit(&value)
+    site.admit(&value, &shell.session.fixings)
         .map_err(|mismatch| mismatch.refusal(door, shell))?;
     Ok(value)
 }

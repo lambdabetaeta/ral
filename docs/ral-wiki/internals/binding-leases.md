@@ -23,11 +23,14 @@ Only names the model itself binds at the session's top level — residency is
 by ρ, and a name only Σ answers (a native, a prelude function) is never a ρ
 entry at all, so it is not a candidate to prune rather than merely exempt
 from it. Everything else visible when exarch arms the ledger — agent
-library, rc and host seeds, and on a fork the entire inherited parent scope —
-is sealed as baseline, permanently exempt (`Shell::arm_binding_lease`, armed
-by `shell_eval::arm_session_ledgers` in the engine's own boot recipe and on
-each fork before it is parked, so `/clear`'s rebooted engine re-seals for
-free). Its baseline read, `Env::all_bindings`, still folds in Σ's prelude
+library, rc and host seeds — is sealed as baseline, permanently exempt
+(`Shell::arm_binding_lease`, armed once by `shell_eval::arm_session_ledgers`
+in the engine's own boot recipe, so `/clear`'s rebooted engine re-seals for
+free). A fork seals its entire inherited scope on the parent's terms, in core
+rather than by the host: `fork_session` builds its ledger with
+`BindingLedger::forked`, and a hatched child, whose recipe armed before its
+seed's scope arrived, re-seals in `EngineSeed::apply`. So on either seat a
+fork's lease governs only the names the child itself writes. Its baseline read, `Env::all_bindings`, still folds in Σ's prelude
 beside ρ, so a prelude name that has not been shadowed is sealed as a
 harmless redundancy over a name the ledger could never reach.
 Bindings made inside blocks, lambdas, `use` bodies, or letrec fixpoint frames

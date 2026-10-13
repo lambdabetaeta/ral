@@ -88,8 +88,8 @@ host the harness runs under, whose `enquire` answers the honest
 lease constant this module owns but does not put on the request: it is not
 per-run policy, it is per-*shell* policy, armed once by
 `shell_eval::arm_session_ledgers` — the one ledger-policy site, applied by
-the one recipe both carriers boot through (`boot::engine_boot_shell`)
-and to each fork before it is parked
+the one recipe both carriers boot through (`boot::engine_boot_shell`); a fork
+keeps its terms through core's `fork_session`
 ([[map/exarch/agent|agent]]; [[decisions/260629_agent-binding-reaping|agent-binding-reaping]]).
 Reusing the settled-worker-retention figure is deliberate: one ral-call
 clock, read by both ledgers for their own idle policy. `LARGE_BINDING_BYTES`

@@ -473,10 +473,10 @@ mod tests {
     }
 
     /// The child admits as the parent would: a thunk ships the sites of its
-    /// IR, and the sites of one unit meet the one `Fixings` there, so two
-    /// decodes the program compares still agree in the engine child.
+    /// IR, and the sites of one unit keep their unit there, so two decodes the
+    /// program compares still share a fixing in the engine child.
     #[test]
-    fn a_thunk_ships_its_boundary_sites_and_their_shared_fixings() {
+    fn a_thunk_ships_its_boundary_sites_under_one_unit() {
         let src = "let f = { |p|\n  let a = from-json < $p\n  let b = from-json < $p\n  return $[$a[x] < $b[x]]\n}";
         let ast = crate::syntax::parser::parse(src).expect("parse");
         let top = crate::elaborator::elaborate(&ast, [], "").expect("elaborate");
@@ -504,9 +504,10 @@ mod tests {
         assert_eq!(*back.comp, *node, "sites survive the wire");
         let received = boundary_sites(&back.comp);
         assert!(
-            received[0].shares_fixings_with(&received[1]),
-            "the unit's sites meet one Fixings in the child"
+            received[0].same_unit(&received[1]),
+            "the unit's sites keep their unit in the child"
         );
+        assert_eq!(received, sent, "the received sites equal the sent ones");
     }
 
     /// A reference past the end of the table is out of range, not a cycle:

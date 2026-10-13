@@ -106,7 +106,9 @@ pub struct SessionState {
     /// in a worker or a stage falls back to it.  `None` between runs: the
     /// fallback is then `""`, i.e. cwd-relative.
     pub(crate) root_file: Option<FileId>,
-    pub(crate) exit_hints: crate::types::ExitHints,
+    pub(crate) exit_hints: Arc<crate::types::ExitHints>,
+    /// What the session's `comparable` variables were fixed to, per unit.
+    pub(crate) fixings: Arc<crate::ty::Fixings>,
     /// Builtin bodies are Rust fn pointers or captured host closures, hence
     /// process-local: the receiver of a wire shell installs its own table
     /// rather than having one shipped to it.

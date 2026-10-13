@@ -169,7 +169,7 @@ pub fn apply(
 pub(crate) fn readmit(top: &crate::ir::Toplevel, shell: &Shell) -> Settled<()> {
     for (name, site) in &top.admits {
         if let Some(value) = shell.env.get(name) {
-            site.admit(value)
+            site.admit(value, &shell.session.fixings)
                 .map_err(|mismatch| mismatch.refusal(&format!("${name}"), shell))?;
         }
     }

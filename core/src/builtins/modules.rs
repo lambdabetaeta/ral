@@ -87,7 +87,7 @@ pub(crate) fn builtin_use(
         .filter_map(|name| ran.env.get(name).map(|v| (name.clone(), v.clone())))
         .collect();
     let record = Value::map(bindings);
-    site.admit_module(&record, &top.exported_schemes())
+    site.admit_module(&record, &top.exported_schemes(), &shell.session.fixings)
         .map_err(|mismatch| mismatch.refusal("use", shell))?;
     Ok(record)
 }

@@ -12,6 +12,7 @@ use crate::io::Sink;
 use crate::process::{DurableRoot, ForegroundScope, TerminalLease};
 use crate::source::SourceDb;
 use crate::terminal::TerminalState;
+use crate::ty::Fixings;
 use crate::types::ExitHints;
 use crate::types::{BuiltinEntry, Convention, ReapNotice, Set, WorkerEntry, WorkerId};
 use std::sync::Arc;
@@ -49,8 +50,13 @@ impl Shell {
         self.session.anchor.child()
     }
 
+    /// What this session's `comparable` variables were fixed to.
+    pub fn fixings(&self) -> &Fixings {
+        &self.session.fixings
+    }
+
     pub fn set_exit_hints(&mut self, hints: ExitHints) {
-        self.session.exit_hints = hints;
+        self.session.exit_hints = Arc::new(hints);
     }
 
     /// Install the guest process jail — called only by an engine's boot when
@@ -148,10 +154,7 @@ impl Shell {
     /// whole life, armed in the same act that installs the `detach` builtin.
     /// Re-arming replaces the budget and forgets the births spent on the old.
     pub fn arm_detach(&mut self, budget: u64) {
-        self.local.detach = Some(Arc::new(DetachPolicy {
-            budget,
-            births: std::sync::atomic::AtomicU64::new(0),
-        }));
+        self.local.detach = Some(Arc::new(DetachPolicy::new(budget)));
     }
 
     pub fn detach_policy(&self) -> Option<&DetachPolicy> {
@@ -195,12 +198,17 @@ impl Shell {
     /// seed vars — becomes permanently exempt from expiry.  A re-arm discards
     /// the prior ledger and reseals; a host that never arms sees no expiry.
     pub fn arm_binding_lease(&mut self, lease: BindingLease) {
-        let baseline = self
-            .env
+        let baseline = self.visible_names();
+        self.local.bindings.arm(lease, baseline);
+    }
+
+    /// Every name visible in the scope chain right now.
+    pub(super) fn visible_names(&self) -> Vec<String> {
+        self.env
             .all_bindings(&self.sig)
             .into_iter()
-            .map(|(name, _)| name);
-        self.local.bindings.arm(lease, baseline);
+            .map(|(name, _)| name)
+            .collect()
     }
 
     /// The terminal-foreground handoff borrow: `Some` iff `mooring`'s

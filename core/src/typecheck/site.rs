@@ -4,13 +4,13 @@
 //! The graph keeps two things a `Ty` loses once the unifier has resolved it:
 //! the span that imposed each structure, and the identity of each free
 //! variable, which is what lets two decodes the program treats as one
-//! `comparable` type agree ([`Fixings`]).  The runtime walks it in
+//! `comparable` type agree (a session's [`crate::ty::Fixings`], under the site's unit).  The runtime walks it in
 //! `types::admit`.
 
 use super::unify::Unifier;
 use crate::ty::{
-    CompTy, CompTyVar, Fields, Fixings, Grade, GradeShape, Id, Label, Node, Row, Scheme, Shape,
-    Site, Tail, Ty, TyVar,
+    CompTy, CompTyVar, Fields, Grade, GradeShape, Id, Label, Node, Row, Scheme, Shape, Site, Tail,
+    Ty, TyVar, UnitId,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -35,7 +35,7 @@ impl GradeShape {
 
 impl Site {
     /// Freeze `ty` as `u` has solved it.
-    pub(crate) fn snapshot(u: &Unifier, ty: &Ty, fixings: Arc<Fixings>) -> Self {
+    pub(crate) fn snapshot(u: &Unifier, ty: &Ty, unit: UnitId) -> Self {
         let mut build = Build {
             u,
             nodes: Vec::new(),
@@ -46,14 +46,14 @@ impl Site {
         Self {
             nodes: build.nodes,
             root,
-            fixings,
+            unit,
         }
     }
 
-    /// Whether both sites answer to one unit's [`Fixings`].
+    /// Whether both sites belong to one unit.
     #[cfg(test)]
-    pub(crate) fn shares_fixings_with(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.fixings, &other.fixings)
+    pub(crate) fn same_unit(&self, other: &Self) -> bool {
+        self.unit == other.unit
     }
 
     /// The root as a type over `u`'s fresh variables: one variable per node,

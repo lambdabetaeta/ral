@@ -123,14 +123,17 @@ them for any other, through the receiver's `Signature`.
 ## The seed — `core/src/seed.rs`, `core/src/guard/grant.rs`
 
 **`EngineSeed` is a forked shell reified for a hatch: `scope_table`, `env`,
-`stack_limit`, `context` and the spawn's `grant`.** No frame crosses: a
+`stack_limit`, `context`, the session's `fixings` and the spawn's `grant`.** No frame crosses: a
 hatched engine's [[internals/evaluator-machine|machine]] starts over the empty
 stack, so what rides is store, never continuation. The environment rides once,
 as the row of one [[design/scoping|`Env`]], ρ alone; the context is
 `Context<Vec<WireHandlerFrame>>`, the live `Context` with its handler stack
 swapped for interned frames (`Context::try_map_handlers`), so nothing mirrors
 a field and every other field crosses as itself — `env_overrides`, `cwd`,
-`grants`, `args`, `modules`. Hooks are session state and never ride.
+`grants`, `args`, `modules`. The fixings ride as the session's table of
+`(UnitId, var, Fixed)` triples, never inside a `Site`, which names only its
+unit; unit ids do not depend on the process, so a prelude unit's entries mean
+the same in the child. Hooks are session state and never ride.
 `WireHandlerFrame` is a [[internals/handler-dispatch|handler stack]] frame,
 each alias arm with its scheme
 ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
@@ -147,8 +150,9 @@ each alias arm with its scheme
   through one `WireDecoder` before touching the shell, splices the wire's
   handler frames atop the receiver's own through `HandlerStack::push_frame`
   (so the builtin table the child's installer booted survives, never having
-  ridden the wire, and a hydrated alias stays removable by `unalias`), then
-  pushes the grant. The take must not wait on the host; the application needs
+  ridden the wire, and a hydrated alias stays removable by `unalias`),
+  installs the fixings, re-seals the lease so everything inherited is
+  baseline (as `fork_session` seals an identity fork), then pushes the grant. The take must not wait on the host; the application needs
   the booted installer's shell.
 - `SpawnGrant` — `Inherit` (⊤), `Base(name)`, or `Restrict(record)` — crosses
   **unfrozen**: a `` `cwd `` place in a grant names the cwd of the shell it

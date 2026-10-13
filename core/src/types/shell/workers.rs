@@ -280,6 +280,15 @@ impl Roster {
     pub(crate) fn share(&self) -> Self {
         Self::Shared(WorkerRegistry::clone(self))
     }
+
+    /// A registry of its own, carrying this one's retention.
+    pub(crate) fn fresh(&self) -> Self {
+        let registry = WorkerRegistry::default();
+        if let Some(retention) = self.retention() {
+            registry.arm_retention(retention);
+        }
+        Self::Owned(registry)
+    }
 }
 
 impl Default for Roster {
@@ -390,6 +399,10 @@ impl WorkerRegistry {
             class: entry.class,
             cause,
         });
+    }
+
+    pub(crate) fn retention(&self) -> Option<u64> {
+        self.0.lock_ignore_poison().retention
     }
 
     /// Arm the settled-entry retention bound, in ral calls. Idempotent by

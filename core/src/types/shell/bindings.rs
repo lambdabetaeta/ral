@@ -106,6 +106,22 @@ impl BindingLedger {
         });
     }
 
+    /// A new session keeps the parent's terms and seals everything it inherited.
+    pub(crate) fn forked(&self, baseline: impl IntoIterator<Item = String>) -> Self {
+        let mut ledger = Self::default();
+        if let Some(lease) = self.lease() {
+            ledger.arm(lease, baseline);
+        }
+        ledger
+    }
+
+    #[cfg(test)]
+    pub(crate) fn exempts(&self, name: &str) -> bool {
+        self.0
+            .as_ref()
+            .is_some_and(|armed| armed.baseline.contains(name))
+    }
+
     pub(crate) fn armed(&self) -> bool {
         self.0.is_some()
     }

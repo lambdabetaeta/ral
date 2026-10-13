@@ -33,7 +33,8 @@ impl Shell {
                 root,
                 sources: crate::source::SourceDb::default(),
                 root_file: None,
-                exit_hints: crate::types::ExitHints::default(),
+                exit_hints: Arc::default(),
+                fixings: Arc::default(),
                 builtins: crate::types::BuiltinTable::default(),
                 library_docs: std::collections::HashMap::new(),
                 terminal_lease: crate::process::TerminalLease::mint_at_startup(

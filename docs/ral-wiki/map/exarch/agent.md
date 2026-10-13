@@ -320,8 +320,8 @@ plumbing of their own: they ride the same drain above.
 **The binding-lease ledger** is armed by `shell_eval::arm_session_ledgers` —
 the one policy site, run by the one recipe (`boot::engine_boot_shell`) right after
 the `Attach`'s env is seeded as bindings (seeding then arming stay one visible
-sequence), and over each parked fork by `_exarch-branch`'s and `start`'s shared
-`fork_then_enquire`, as a hatched child's recipe arms its own — with
+sequence); a fork keeps those terms through core's `fork_session`, sealing
+everything it inherited ([[map/core/shell-state|shell-state]]) — with
 [[map/exarch/shell-eval|shell-eval]]'s `BINDING_IDLE_CALLS` (256) and
 `LARGE_BINDING_BYTES` (1 MiB), beside `arm_worker_retention`. The
 large-binding residency nudge rides the pushed `` `notice `` channel above,
@@ -815,10 +815,10 @@ controlling terminal the TUI owns).
   name staying bound, and empties the hooks
   ([[map/core/shell-state|the flow matrix]]). Closures stay live, and a parent
   that reaches no handle forks with its scope shared, not copied.
-- **The lease.** On the in-process (`Fork::Park`) arm the fork is dressed with
-  `shell_eval::arm_session_ledgers`, which seals every name visible at that
-  instant as baseline: inherited scratch is never pruned in the child
-  (`fork_child_inherited_scratch_is_baseline`).
+- **The lease.** Core's `fork_session` keeps the parent's lease terms and
+  seals every inherited name as baseline, and a hatched child re-seals after
+  applying its seed: inherited scratch is never pruned in the child, on either
+  seat (`fork_child_inherited_scratch_is_baseline`).
 There is no flow-back: the child's `cd`, env, and new bindings die with it. An
 agent with fuel left may spawn, and each fork hands the child one less unit of
 `fuel` than the parent holds (`SPAWN_FUEL = 3` at the trunk; the parent's own

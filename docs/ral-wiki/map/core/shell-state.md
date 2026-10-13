@@ -139,8 +139,10 @@ checkpoint, since a run never writes it.
   LIFO extent it claims to be — the `sources`
   registry rendered against after a run returns (append-only for the session,
   so a nested run's spans can never alias an outer run's `FileId`) and the
-  `root_file` naming the current run's root source, the `exit_hints` table,
-  the host-installed
+  `root_file` naming the current run's root source, the `exit_hints` table
+  (one `Arc`, shared by every child), the `fixings` store (what each unit's
+  `comparable` variables were fixed to: the session's threads share it, a new
+  session snapshots it, [[map/core/ty|ty]]), the host-installed
   `builtins` with the session's `library_docs`, the session's
   `terminal_lease`, the `guest_jail` (`Some` only inside a VM guest —
   the spawn jail's shared uid counter, [[map/core/io-process|io-process]]), and
@@ -151,9 +153,9 @@ checkpoint, since a run never writes it.
   residue once run and session state are named. The worker registry
   (`shell/workers.rs`) is a per-`Shell` directory of every `spawn`/`watch`ed
   `HandleInner`, one per agent; `Shell::spawn_thread` shares it by `Arc` into
-  a spawned worker's own shell (so a nested `spawn` registers alongside its
-  parent), but a sub-agent fork or pipeline stage starts with a fresh, empty
-  one. Beside the entries it keeps the `ReapNotice` ledger the reap policies
+  a spawned worker's or a pipeline stage's own shell (so a nested `spawn`
+  registers alongside its parent), but a sub-agent fork or an aside starts
+  with a fresh, empty one carrying the parent's retention. Beside the entries it keeps the `ReapNotice` ledger the reap policies
   write — one compact record per entry removed by policy, atomic with the
   removal under the registry's one lock — pushed by the engine as
   `` `notice `` surface events at each settled source run's ready boundary
@@ -397,7 +399,9 @@ authority**: no lease on the session, and the mooring the fork is handed
 carries `TerminalAccess::Denied` — the safe default for a store that is not
 the session's. Each also starts with stdin `Empty`, no hooks and no control
 counters; what rides along is the scope, context, Σ, builtin table, source
-registry, root file, call site and detach budget:
+registry, root file, call site and exit hints. The kinds differ only in their
+`Holding` — cancel root and anchor, roster, lease ledger, detach budget,
+fixings:
 
 - `spawn_thread` — a spawned worker (`spawn`, `par`, the detached-worker
   helper) *and* a ral-written pipeline stage
@@ -411,15 +415,26 @@ registry, root file, call site and detach budget:
   it; a stage thread instead gets `Mooring::for_stage_thread`, a child of the
   *node's own* cancel scope, so a pipeline-wide cancel reaches every stage
   transitively and the pipeline's own surface/deferred rail carries over
-  rather than a worker's fresh one.
+  rather than a worker's fresh one. It shares the session's root, roster,
+  detach budget and fixings; its lease ledger is unarmed.
 - `join_session` — an aside: an independent sibling that clones the parent's
   `context`, source cursor, builtin table, and Σ (`sig`, by `Arc` clone)
   without touching its IO / audit / REPL scratch; no flow-back. It shares the
   parent's cancel root, so code there is interruptible while it runs and older
   interrupts stay out of its reach; the run door runs a hook there when its
   registered `DefaultPolicy` says `aside` (the REPL's buffer-change hooks).
-- `fork_session` — the host session fork (the sub-agent case), an aside with a
-  durable root of its own. `fork_scrubbed` (`scrub.rs`) is the door
+  It shares the detach budget and fixings too, but holds a roster of its own
+  and an unarmed ledger.
+- `fork_session` — the host session fork (the sub-agent case): a new session,
+  holding its parent's policy and none of its state. Its durable root is its
+  own, and its roster carries the parent's retention. Its lease ledger runs on
+  the parent's terms and seals everything inherited as baseline
+  ([[internals/binding-leases|binding-leases]]). It gets an unspent detach
+  budget of the same size, and a snapshot of the fixings. A hatched child
+  reaches the same state by booting the same recipe and applying its seed,
+  which carries the fixings and re-seals the lease
+  ([[map/core/transport|transport]]); `identity_fork_and_wire_seed_agree`
+  holds the two seats to it. `fork_scrubbed` (`scrub.rs`) is the door
   every sub-agent fork actually passes through: `fork_session`, then one
   `Scrub` over every root the fork holds — the session scope and each
   handler frame's arms (`HandlerStack::values_mut`). A fork's hook table is

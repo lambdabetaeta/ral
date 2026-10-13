@@ -55,6 +55,7 @@ shlex         = { workspace = true }
 ignore        = "0.4"
 tempfile      = "3.27"
 fastrand      = { workspace = true }
+getrandom     = "0.4"
 cap-primitives = { workspace = true }
 cap-fs-ext    = { workspace = true }
 serde         = { workspace = true }

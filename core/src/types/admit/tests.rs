@@ -1,11 +1,11 @@
 use super::*;
 use crate::source::FileId;
-use crate::ty::Ty;
+use crate::ty::{Ty, UnitId};
 use crate::ty::{closed_record, closed_variant, open_record};
 use crate::typecheck::Unifier;
 
 fn site(u: &Unifier, ty: &Ty) -> Site {
-    Site::snapshot(u, ty, Fixings::new())
+    Site::snapshot(u, ty, UnitId::fresh())
 }
 
 fn ground(ty: &Ty) -> Site {
@@ -22,7 +22,7 @@ fn map(entries: &[(&str, Value)]) -> Value {
 }
 
 fn refusal(site: &Site, value: &Value) -> String {
-    site.admit(value)
+    site.admit(value, &Fixings::default())
         .expect_err("the value must be refused")
         .to_string()
 }
@@ -34,7 +34,7 @@ fn a_value_of_the_solved_type_is_admitted() {
         ("a", Value::Int(1)),
         ("b", Value::list(vec![Value::string("x")])),
     ]);
-    assert!(ground(&ty).admit(&value).is_ok());
+    assert!(ground(&ty).admit(&value, &Fixings::default()).is_ok());
 }
 
 #[test]
@@ -63,7 +63,7 @@ fn an_open_row_admits_extra_fields_and_a_closed_one_names_them() {
     let tail = u.fresh_row_var();
     let value = map(&[("a", Value::Int(1)), ("extra", Value::Bool(true))]);
     let open = open_record(&[("a", Ty::Int)], tail);
-    assert!(site(&u, &open).admit(&value).is_ok());
+    assert!(site(&u, &open).admit(&value, &Fixings::default()).is_ok());
     let closed = closed_record(&[("a", Ty::Int)]);
     assert!(refusal(&ground(&closed), &value).contains("has a field `extra`"));
 }
@@ -84,10 +84,13 @@ fn a_kinded_variable_admits_only_its_heads() {
     let v = u.fresh_kinded(Kind::NUMBER);
     let s = site(&u, &Ty::list(v));
     assert!(
-        s.admit(&Value::list(vec![
-            Value::Int(1),
-            Value::Float(crate::first_order::Finite::new(2.5).expect("finite"))
-        ]))
+        s.admit(
+            &Value::list(vec![
+                Value::Int(1),
+                Value::Float(crate::first_order::Finite::new(2.5).expect("finite"))
+            ]),
+            &Fixings::default()
+        )
         .is_ok()
     );
     assert_eq!(
@@ -102,8 +105,11 @@ fn a_free_variable_admits_anything_a_parametric_use_could_hold() {
     let v = u.fresh_ty();
     let s = site(&u, &Ty::list(v));
     assert!(
-        s.admit(&Value::list(vec![Value::Int(1), Value::string("a")]))
-            .is_ok()
+        s.admit(
+            &Value::list(vec![Value::Int(1), Value::string("a")]),
+            &Fixings::default()
+        )
+        .is_ok()
     );
 }
 
@@ -114,13 +120,16 @@ fn a_comparable_variable_is_fixed_to_numbers_or_to_text() {
     let ty = closed_record(&[("a", v.clone()), ("c", v)]);
     let s = site(&u, &ty);
     assert!(
-        s.admit(&map(&[
-            ("a", Value::Int(1)),
-            (
-                "c",
-                Value::Float(crate::first_order::Finite::new(2.5).expect("finite"))
-            )
-        ]))
+        s.admit(
+            &map(&[
+                ("a", Value::Int(1)),
+                (
+                    "c",
+                    Value::Float(crate::first_order::Finite::new(2.5).expect("finite"))
+                )
+            ]),
+            &Fixings::default()
+        )
         .is_ok()
     );
     let mixed = map(&[("a", Value::Int(1)), ("c", Value::string("x"))]);
@@ -134,11 +143,24 @@ fn a_comparable_variable_is_fixed_to_numbers_or_to_text() {
 fn fixings_are_shared_by_every_site_of_a_unit() {
     let mut u = Unifier::new();
     let v = u.fresh_kinded(Kind::COMPARABLE);
-    let fixings = Fixings::new();
-    let first = Site::snapshot(&u, &v, Arc::clone(&fixings));
-    let second = Site::snapshot(&u, &v, fixings);
-    assert!(first.admit(&Value::Int(1)).is_ok());
-    assert!(refusal(&second, &Value::string("x")).contains("compares them"));
+    let (unit, fixings) = (UnitId::fresh(), Fixings::default());
+    let first = Site::snapshot(&u, &v, unit);
+    let second = Site::snapshot(&u, &v, unit);
+    assert!(first.admit(&Value::Int(1), &fixings).is_ok());
+    let refused = second
+        .admit(&Value::string("x"), &fixings)
+        .expect_err("the unit's variable is fixed to numbers");
+    assert!(refused.to_string().contains("compares them"));
+}
+
+#[test]
+fn a_unit_fixes_independently_in_two_stores() {
+    let mut u = Unifier::new();
+    let v = u.fresh_kinded(Kind::COMPARABLE);
+    let s = site(&u, &v);
+    let (one, other) = (Fixings::default(), Fixings::default());
+    assert!(s.admit(&Value::Int(1), &one).is_ok());
+    assert!(s.admit(&Value::string("x"), &other).is_ok());
 }
 
 #[test]
@@ -149,7 +171,7 @@ fn a_recursive_type_admits_a_nested_document_and_refuses_a_scalar_leaf() {
         .expect("a cycle through a map is data");
     let s = site(&u, &Ty::Var(v));
     let nested = map(&[("a", map(&[("b", map(&[]))]))]);
-    assert!(s.admit(&nested).is_ok());
+    assert!(s.admit(&nested, &Fixings::default()).is_ok());
     let leaf = map(&[("a", map(&[("b", Value::Int(1))]))]);
     assert_eq!(
         refusal(&s, &leaf),
@@ -162,9 +184,10 @@ fn a_json_number_keeps_its_kind_at_a_ground_site() {
     let float = refusal(&ground(&Ty::Float), &Value::Int(3));
     assert!(float.contains("a whole number (`3`)") && float.contains("as a Float"));
     let int = ground(&Ty::Int)
-        .admit(&Value::Float(
-            crate::first_order::Finite::new(2.5).expect("finite"),
-        ))
+        .admit(
+            &Value::Float(crate::first_order::Finite::new(2.5).expect("finite")),
+            &Fixings::default(),
+        )
         .expect_err("a fraction is not an Int");
     assert!(
         int.hint()
@@ -180,12 +203,12 @@ fn a_variant_site_needs_a_tag_of_its_row() {
         label: "some".into(),
         payload: Some(Box::new(Value::Int(1))),
     };
-    assert!(s.admit(&some).is_ok());
+    assert!(s.admit(&some, &Fixings::default()).is_ok());
     let none = Value::Variant {
         label: "none".into(),
         payload: None,
     };
-    assert!(s.admit(&none).is_ok());
+    assert!(s.admit(&none, &Fixings::default()).is_ok());
     let other = Value::Variant {
         label: "other".into(),
         payload: None,
@@ -197,8 +220,11 @@ fn a_variant_site_needs_a_tag_of_its_row() {
 #[test]
 fn a_handle_site_admits_the_value_the_worker_settled_with() {
     let s = ground(&Ty::Handle(Box::new(Ty::Int)));
-    assert!(s.admit_handled(&Value::Int(1)).is_ok());
-    assert!(refusal_of(s.admit_handled(&Value::string("x"))).contains("uses it as an Int"));
+    assert!(s.admit_handled(&Value::Int(1), &Fixings::default()).is_ok());
+    assert!(
+        refusal_of(s.admit_handled(&Value::string("x"), &Fixings::default()))
+            .contains("uses it as an Int")
+    );
 }
 
 fn refusal_of(result: Result<(), Mismatch>) -> String {
@@ -214,29 +240,27 @@ fn the_witness_is_the_use_that_fixed_the_structure() {
     u.unify_ty(&Ty::Var(v), &Ty::Int)
         .expect("a free variable meets Int");
     let mismatch = site(&u, &Ty::Var(v))
-        .admit(&Value::string("x"))
+        .admit(&Value::string("x"), &Fixings::default())
         .expect_err("text is not an Int");
     assert_eq!(mismatch.witness(), Some(at));
 }
 
 #[test]
-fn a_site_round_trips_the_wire_and_its_units_sites_meet_one_fixings() {
+fn a_site_round_trips_with_its_unit() {
     let mut u = Unifier::new();
     let v = u.fresh_kinded(Kind::COMPARABLE);
-    let fixings = Fixings::new();
-    let (a, b) = (
-        Site::snapshot(&u, &v, Arc::clone(&fixings)),
-        Site::snapshot(&u, &v, fixings),
-    );
+    let unit = UnitId::fresh();
+    let (a, b) = (Site::snapshot(&u, &v, unit), Site::snapshot(&u, &v, unit));
     let wire = |site: &Site| postcard::to_allocvec(site).expect("a site serialises");
     let (a2, b2): (Site, Site) = (
         postcard::from_bytes(&wire(&a)).expect("and reads back"),
         postcard::from_bytes(&wire(&b)).expect("and reads back"),
     );
     assert_eq!(a2.nodes, a.nodes);
-    assert!(Arc::ptr_eq(&a2.fixings, &b2.fixings));
-    assert!(a2.admit(&Value::Int(1)).is_ok());
-    assert!(b2.admit(&Value::string("x")).is_err());
+    assert_eq!((a2.unit, b2.unit), (unit, unit));
+    let fixings = Fixings::default();
+    assert!(a2.admit(&Value::Int(1), &fixings).is_ok());
+    assert!(b2.admit(&Value::string("x"), &fixings).is_err());
 }
 
 #[test]
@@ -254,11 +278,15 @@ fn a_module_closure_is_held_to_its_scheme() {
         )]
     };
     assert!(
-        site.admit_module(&record, &scheme_of(Ty::Int, Ty::Int))
+        site.admit_module(&record, &scheme_of(Ty::Int, Ty::Int), &Fixings::default())
             .is_ok()
     );
     let err = site
-        .admit_module(&record, &scheme_of(Ty::String, Ty::Int))
+        .admit_module(
+            &record,
+            &scheme_of(Ty::String, Ty::Int),
+            &Fixings::default(),
+        )
         .expect_err("a block over text is no block over Int");
     assert!(
         err.to_string()

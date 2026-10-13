@@ -5837,6 +5837,7 @@ dependencies = [
  "diffutils",
  "either",
  "fastrand",
+ "getrandom 0.4.3",
  "glob",
  "icu_casemap",
  "icu_locale_core",

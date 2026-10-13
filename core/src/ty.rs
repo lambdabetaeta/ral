@@ -18,7 +18,7 @@ pub(crate) use kind::Head;
 pub use kind::Kind;
 pub use scheme::Scheme;
 pub(crate) use scheme::{CachedFreeVars, WeakVars};
-pub(crate) use site::{Fields, Fixed, GradeShape, Id, Node, Shape, Side, Tail};
+pub(crate) use site::{Fields, Fixed, GradeShape, Id, Node, Shape, Side, Tail, UnitId};
 pub use site::{Fixings, Site};
 pub use typed::{
     Typed, closed_record, closed_variant, field_ty, open_record, open_variant, optional_ty,
