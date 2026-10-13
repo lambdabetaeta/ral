@@ -224,7 +224,9 @@ checkpoint, since a run never writes it.
   a survivor's death is unobservable from here, so a release would be a
   number nobody can compute — and the policy is `Arc`-shared into a spawned
   worker's shell like the registry, so a `detach` inside a `spawn { }` spends
-  the owning session's budget. It is equally deliberately absent from
+  the owning session's budget. The bound is per session: a sub-agent fork
+  gets the same budget unspent, as a hatched child's recipe arms one. It is
+  equally deliberately absent from
   `LocalState`'s `Drop`: the surviving processes are the one thing a teardown
   must leave alone.
 

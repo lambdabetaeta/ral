@@ -80,9 +80,9 @@ impl WireHandlerFrame {
 }
 
 /// A forked shell, wire-ready for `hatch`: its environment once, its context
-/// with the handler frames interned, the cap on its stack, and the spawn's
-/// grant.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// with the handler frames interned, the cap on its stack, its fixings, and
+/// the spawn's grant.
+#[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct EngineSeed {
     scope_table: ScopeTable,
     env: SerialEnvSnapshot,
@@ -170,7 +170,9 @@ impl EngineSeed {
         }
         shell.session.stack_limit = self.stack_limit;
         shell.session.hooks = None;
-        shell.session.fixings = Arc::new(self.fixings);
+        // Its boot's units keep their fixings; the parent's win where both
+        // fix one, as in an identity fork.
+        shell.session.fixings.absorb(self.fixings);
         shell.context = context;
         self.grant.narrow_onto(shell, narrow)
     }
@@ -209,7 +211,8 @@ mod tests {
     /// read out of the same nursery slot, resolve every name to the same
     /// value, and the same absence, because `fork_into_nursery` scrubs every
     /// handle wherever it stands before either arm sees the shell. Both hold
-    /// their parent's policy: one forks it, the other boots the same recipe.
+    /// their parent's policy: one forks it, the other boots the same recipe,
+    /// which `apply` leaves standing.
     #[test]
     fn identity_fork_and_wire_seed_agree() {
         let mut parent = booted();
@@ -339,6 +342,28 @@ mod tests {
                 "{arm} must keep the detach budget"
             );
         }
+    }
+
+    /// A hatched child keeps what its own boot fixed beside its parent's
+    /// fixings: its boot's units are its process's, never the parent's.
+    #[test]
+    fn a_seed_keeps_the_childs_own_fixings() {
+        use crate::ty::{Side, UnitId};
+        let (theirs, ours) = (UnitId::fresh(), UnitId::fresh());
+        let parent = booted();
+        parent
+            .fixings()
+            .fix(theirs, 0, Side::Number, "/n")
+            .expect("a fresh variable is fixed");
+        let seed = pack_seed(&parent.fork_scrubbed(), SpawnGrant::Inherit).expect("pack seed");
+        let mut child = booted();
+        child
+            .fixings()
+            .fix(ours, 0, Side::Text, "/t")
+            .expect("a fresh variable is fixed");
+        seed.apply(&mut child, no_base).expect("apply seed");
+        assert!(child.fixings().fix(theirs, 0, Side::Text, "/t").is_err());
+        assert!(child.fixings().fix(ours, 0, Side::Number, "/n").is_err());
     }
 
     /// Rows are per closure: `big` rides the session's row and `h`'s, and

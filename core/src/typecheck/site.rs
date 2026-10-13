@@ -4,8 +4,8 @@
 //! The graph keeps two things a `Ty` loses once the unifier has resolved it:
 //! the span that imposed each structure, and the identity of each free
 //! variable, which is what lets two decodes the program treats as one
-//! `comparable` type agree (a session's [`crate::ty::Fixings`], under the site's unit).  The runtime walks it in
-//! `types::admit`.
+//! `comparable` type agree (a session's [`crate::ty::Fixings`], under the
+//! site's unit).  The runtime walks it in `types::admit`.
 
 use super::unify::Unifier;
 use crate::ty::{

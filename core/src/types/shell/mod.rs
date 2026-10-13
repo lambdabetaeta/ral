@@ -156,12 +156,14 @@ pub struct LocalState {
     /// Inert until a host arms it, then ages every non-baseline top-level name
     /// so long-unused scratch can be pruned.  Unlike [`Self::workers`] it needs
     /// no lock: its one writer is the thread owning `&mut Shell` for every run,
-    /// install, and prune.  Forks and workers start fresh and inert.
+    /// install, and prune.  Workers and asides start inert; a fork is armed on
+    /// its parent's terms.
     pub(crate) bindings: BindingLedger,
     /// Authority to birth processes outliving this session.  Armed in the same
     /// act that installs the `detach` builtin, so an unarmed shell lacks the
     /// verb rather than owning one it cannot budget.  `Arc`-shared into a
-    /// worker's shell, so a `detach` inside `spawn { }` spends this budget.
+    /// worker's shell, so a `detach` inside `spawn { }` spends this budget; a
+    /// fork gets its own, unspent.
     pub(crate) detach: Option<Arc<DetachPolicy>>,
     /// Nested `machine::evaluate`/`machine::apply` re-entries live on this
     /// host stack frame: a native such as `map` applying a user function.

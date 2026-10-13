@@ -2,6 +2,14 @@
 status: 'superseded in part by [[decisions/260911_an-external-is-a-byte-operation]] — the ledger, the single-writer argument, the install chokepoint, and the pruning/pinning mechanism all stand. What resolves otherwise: `source`, one of the three renewal seams, is deleted, and with it `classify_command`''s `Resolution::Env` dispatch-time renewal and `BindingLedger::renew_one` — two seams remain, not three.'
 ---
 
+> **Amended 2026-10-13.** The rule stands: a fork's baseline is everything it
+> inherited. Who arms has moved. The engine's boot recipe
+> (`shell_eval::arm_session_ledgers`) arms the trunk, and `/clear`'s rebooted
+> engine with it; core seals a fork itself, `fork_session` through
+> `BindingLedger::forked` and a hatched child by re-sealing in
+> `EngineSeed::apply`. Neither `Agent::assemble` nor a `replace_shell` arms
+> anything ([[internals/binding-leases|binding-leases]]).
+
 # Exarch leases agent scratch bindings; ral bindings do not expire
 
 > leases-and-budgets answered this

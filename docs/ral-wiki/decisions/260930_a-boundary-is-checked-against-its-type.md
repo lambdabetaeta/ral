@@ -3,6 +3,11 @@ status: accepted
 generated_at_commit: 8d868e18
 ---
 
+> **Amended 2026-10-13.** `Fixings` is session state, not one per unit: one
+> table per session keyed by `(UnitId, var)`, shared by the session's threads
+> and snapshotted into a fork, so a unit's sites still share their fixings
+> ([[map/core/ty|ty]]).
+
 # A boundary is checked against its solved type
 
 **A door through which a value of a shape the program did not decide enters

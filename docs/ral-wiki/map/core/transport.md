@@ -132,8 +132,9 @@ swapped for interned frames (`Context::try_map_handlers`), so nothing mirrors
 a field and every other field crosses as itself — `env_overrides`, `cwd`,
 `grants`, `args`, `modules`. The fixings ride as the session's table of
 `(UnitId, var, Fixed)` triples, never inside a `Site`, which names only its
-unit; unit ids do not depend on the process, so a prelude unit's entries mean
-the same in the child. Hooks are session state and never ride.
+unit: a shipped closure's sites name the parent's units, so their entries
+govern them in the child as in the parent. Hooks are session state and never
+ride.
 `WireHandlerFrame` is a [[internals/handler-dispatch|handler stack]] frame,
 each alias arm with its scheme
 ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
@@ -151,9 +152,11 @@ each alias arm with its scheme
   handler frames atop the receiver's own through `HandlerStack::push_frame`
   (so the builtin table the child's installer booted survives, never having
   ridden the wire, and a hydrated alias stays removable by `unalias`),
-  installs the fixings, re-seals the lease so everything inherited is
-  baseline (as `fork_session` seals an identity fork), then pushes the grant. The take must not wait on the host; the application needs
-  the booted installer's shell.
+  adds the fixings to those its own boot made (`Fixings::absorb`, the
+  parent's winning where both fix a variable, as in an identity fork),
+  re-seals the lease so everything inherited is baseline (as `fork_session`
+  seals an identity fork), then pushes the grant. The take must not wait on
+  the host; the application needs the booted installer's shell.
 - `SpawnGrant` — `Inherit` (⊤), `Base(name)`, or `Restrict(record)` — crosses
   **unfrozen**: a `` `cwd `` place in a grant names the cwd of the shell it
   governs, so the freeze happens on the child's side. `SpawnGrant::narrow_onto`

@@ -18,7 +18,7 @@ use crate::ty::Fixings;
 use crate::types::Audit;
 use std::sync::Arc;
 
-/// What a child holds for itself rather than from its parent.
+/// What the four kinds of child differ in.
 struct Holding {
     root: DurableRoot,
     anchor: ForegroundScope,
@@ -31,8 +31,8 @@ struct Holding {
 impl Shell {
     /// This shell's child, built on the parent's thread: it inherits the
     /// lexical scope, context, Σ, builtin table, source registry, call site
-    /// and the session's policy (exit hints), so it resolves, renders and
-    /// describes as the parent does, and differs from its siblings only in its
+    /// and the session's exit hints, so it resolves, renders and describes as
+    /// the parent does, and differs from its siblings only in its
     /// [`Holding`].  Everything else is fresh: control counters, since a child
     /// continues no call stack; no hooks, since a worker or a stage dispatches
     /// none; stdin `Empty`, since a child must not `tcgetpgrp` whoever owns
@@ -83,12 +83,11 @@ impl Shell {
     ///
     /// A new session keeps its parent's policy (exit hints, the lease's terms
     /// with everything inherited sealed as baseline, worker retention, the
-    /// detach budget's size) and a
-    /// snapshot of its parent's fixings, and answers
-    /// for none of its parent's state: a fresh root deaf to the ambient causes
-    /// (its host cancels it through [`Shell::cancel_handle`]), a roster of its
-    /// own, an unspent detach budget.  Nothing
-    /// flows back: the child's `cd`, env, and new bindings die with it.
+    /// detach budget's size) and a snapshot of its parent's fixings, and
+    /// answers for none of its parent's state: a fresh root deaf to the
+    /// ambient causes (its host cancels it through [`Shell::cancel_handle`]),
+    /// a roster of its own, an unspent detach budget.  Nothing flows back:
+    /// the child's `cd`, env, and new bindings die with it.
     pub fn fork_session(&self) -> Self {
         let root = DurableRoot::new();
         let anchor = root.worker();
@@ -96,7 +95,7 @@ impl Shell {
             root,
             anchor,
             workers: self.local.workers.fresh(),
-            bindings: self.local.bindings.forked(self.visible_names()),
+            bindings: self.local.bindings.forked(|| self.visible_names()),
             detach: self
                 .local
                 .detach
@@ -301,6 +300,21 @@ mod tests {
             child_root_file, root_file,
             "the worker must inherit the parent's root file"
         );
+    }
+
+    /// A worker or a stage hints at a failed command as its session does.
+    #[test]
+    fn spawned_worker_shares_the_exit_hints() {
+        let mut parent = crate::test_helper::core_shell();
+        parent.set_exit_hints(crate::types::ExitHints::from_text("false 1 hinted\n"));
+        let (join, _cancel) = parent
+            .spawn_thread(Mooring::adrift(), "test-worker", |_, child| {
+                Arc::clone(&child.session.exit_hints)
+            })
+            .expect("spawn_thread");
+
+        let hints = join.join().expect("worker thread");
+        assert!(Arc::ptr_eq(&hints, &parent.session.exit_hints));
     }
 
     /// A forked session keeps its parent's policy and answers for none of its

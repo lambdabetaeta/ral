@@ -106,11 +106,15 @@ impl BindingLedger {
         });
     }
 
-    /// A new session keeps the parent's terms and seals everything it inherited.
-    pub(crate) fn forked(&self, baseline: impl IntoIterator<Item = String>) -> Self {
+    /// A new session keeps the parent's terms and seals everything it
+    /// inherited, read only when there are terms to keep.
+    pub(crate) fn forked<I>(&self, baseline: impl FnOnce() -> I) -> Self
+    where
+        I: IntoIterator<Item = String>,
+    {
         let mut ledger = Self::default();
         if let Some(lease) = self.lease() {
-            ledger.arm(lease, baseline);
+            ledger.arm(lease, baseline());
         }
         ledger
     }

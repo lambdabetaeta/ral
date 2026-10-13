@@ -16,7 +16,9 @@
 //! `Arc`-shares the policy into a worker's shell, so a `detach` under
 //! `spawn { }` spends the owning session's budget, while
 //! [`LocalState`](super::LocalState)'s [`Drop`] cancels that session's
-//! workers but never this.
+//! workers but never this. The bound is per session:
+//! [`Shell::fork_session`](super::Shell::fork_session) gives a sub-agent the
+//! same budget unspent, as a hatched child's recipe arms one.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 

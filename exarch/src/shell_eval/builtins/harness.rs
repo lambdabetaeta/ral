@@ -128,7 +128,7 @@ fn fork_then_enquire(
 ) -> Settled<Value> {
     let session = match mooring.fork() {
         Some(Fork::Listen) => return hatch_over_the_wire(grant, mooring, shell, request),
-        _ => shell.fork_into_nursery(mooring)?,
+        Some(Fork::Park(_)) | None => shell.fork_into_nursery(mooring)?,
     };
     ask(AGENTS, request(ForkClaim::Parked(session)), mooring, shell)
 }

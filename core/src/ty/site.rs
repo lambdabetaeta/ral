@@ -119,11 +119,12 @@ impl Fixings {
     pub(crate) fn snapshot(&self) -> Self {
         Self(Mutex::new(self.0.lock_ignore_poison().clone()))
     }
-}
 
-impl Clone for Fixings {
-    fn clone(&self) -> Self {
-        self.snapshot()
+    /// Add `other`'s entries, `other` winning where both fix a variable.
+    pub(crate) fn absorb(&self, other: Self) {
+        self.0
+            .lock_ignore_poison()
+            .extend(other.0.into_inner_ignore_poison());
     }
 }
 
