@@ -662,7 +662,10 @@ fn pinned(pins: [&Pinned; 2]) -> Result<Vec<(Rendered, OwnedFd)>, String> {
 /// host refuses a fresh devpts.
 ///
 /// By hand, `/dev/pts` is the host's, so a pty opened inside is not the
-/// envelope's own.  An absent node is dropped: binding one costs the launch.
+/// envelope's own, and `/dev/ptmx` reaches it only where that devpts's
+/// `ptmxmode` admits: the kernel finds a ptmx node's devpts at the `pts` beside
+/// it in the same mount, which a bind of the host's node lacks.  An absent node
+/// is dropped: binding one costs the launch.
 fn render_dev(c: &mut Options, host: HostEnvelope) {
     if host.virtual_dev {
         c.args(["--dev", "/dev"]);
@@ -1855,12 +1858,25 @@ mod tests {
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
 
-        for ok in ["NULL-OK", "URANDOM-OK", "SHM-OK", "PTMX-OK"] {
+        for ok in ["NULL-OK", "URANDOM-OK", "SHM-OK"] {
             assert!(
                 stdout.contains(ok),
                 "the by-hand /dev is missing {ok}: {stdout} {stderr}"
             );
         }
+        // The pty is the host devpts's, opened at its own `ptmx`, which that
+        // devpts's `ptmxmode` may close: the envelope serves one exactly where
+        // the host's devpts does.
+        let host_serves = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/pts/ptmx")
+            .is_ok();
+        assert_eq!(
+            stdout.contains("PTMX-OK"),
+            host_serves,
+            "the by-hand /dev/ptmx must be the host devpts's own: {stdout} {stderr}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

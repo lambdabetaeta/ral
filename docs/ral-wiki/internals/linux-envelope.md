@@ -136,10 +136,18 @@ result by hand, or states what it cannot build.**
   unconfined: the container's own process table, the host's `/dev/pts`
   ([[design/two-enforcers|two-enforcers]]). Running the container
   `--privileged` lifts both.
+- **A pty by hand is the host devpts's.** `/dev/ptmx` opens where that
+  devpts's `ptmxmode` admits: a container runtime's own devpts (`0666`), not
+  the kernel's default nor a systemd host's (`000`). The host's `/dev/ptmx`
+  node cannot stand in: the kernel finds a node's devpts at the `pts` beside
+  it in the same mount, and a bind of one file has none.
 - **The render is a pure function of the probed `HostEnvelope`.** So the argv
   tests assert both shapes from literals, not from whichever host runs them.
 - **Open:** such hosts still refuse the read-only rebind of their own locked
   `/etc/hosts` and `/etc/resolv.conf`, by descriptor as by name.
+
+Pinned by `sandbox::linux::tests::a_host_that_refuses_dev_gets_the_same_shape_by_hand`
+and `::the_by_hand_dev_serves_a_confined_body`.
 
 ## Kernel pseudo-filesystems describe the envelope
 
