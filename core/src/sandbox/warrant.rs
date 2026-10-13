@@ -57,8 +57,6 @@ pub(super) enum Slot {
     /// bwrap's `--add-seccomp-fd`s, one per program.
     #[cfg(target_os = "linux")]
     Seccomp(u8),
-    #[cfg(target_os = "linux")]
-    Image,
     /// One per bind, by `--ro-bind-fd` or `--bind-fd`; open-ended, so last.
     #[cfg(target_os = "linux")]
     Mount(u16),
@@ -71,7 +69,7 @@ impl Slot {
     #[cfg(target_os = "linux")]
     const SECCOMP_SLOTS: u8 = 4;
 
-    /// 98, 99, 100, 101, 102, 103 + i, 107, 108 + i.
+    /// 98, 99, 100, 101, 102, 103 + i, 107 + i.
     pub(super) const fn fd(self) -> c_int {
         Self::FIRST
             + match self {
@@ -87,9 +85,7 @@ impl Slot {
                 #[cfg(target_os = "linux")]
                 Self::Seccomp(i) => 5 + i as c_int,
                 #[cfg(target_os = "linux")]
-                Self::Image => 9,
-                #[cfg(target_os = "linux")]
-                Self::Mount(i) => 10 + i as c_int,
+                Self::Mount(i) => 9 + i as c_int,
             }
     }
 
@@ -215,10 +211,10 @@ impl Run {
     fn of(admitted: &Admitted, projection: &SandboxProjection) -> Self {
         let args = admitted.args().iter().map(OsString::from).collect();
         match admitted.program() {
-            Program::File { path, real, .. } => Self::File {
+            Program::File { path, real } => Self::File {
                 real: real.as_path().to_path_buf(),
                 arg0: path.clone(),
-                excluded: interpreter_exclusion(admitted.program(), projection),
+                excluded: interpreter_exclusion(real, projection),
                 args,
             },
             Program::Tool(tool) => Self::Tool(tool.clone(), args),
@@ -227,18 +223,10 @@ impl Run {
 }
 
 /// The exclusion, on either axis, that covers the interpreter of the `#!`
-/// script `program`, read through its pinned image where Linux holds one.  For
-/// the hint alone: support is the projection's, and nothing here is evidence.
-fn interpreter_exclusion(program: &Program, projection: &SandboxProjection) -> Option<String> {
-    let shebang = match program {
-        Program::Tool(_) => None,
-        #[cfg(target_os = "linux")]
-        Program::File {
-            image: Some(image), ..
-        } => super::carriers::shebang_of_image(image.as_fd()),
-        Program::File { real, .. } => super::carriers::shebang(real.as_path()),
-    };
-    let interpreter = RealPath::of(&shebang?).ok()?;
+/// script at `real`.  For the hint alone: support is the projection's, and
+/// nothing here is evidence.
+fn interpreter_exclusion(real: &RealPath, projection: &SandboxProjection) -> Option<String> {
+    let interpreter = RealPath::of(&super::carriers::shebang(real.as_path())?).ok()?;
     let exec = match &projection.exec {
         ExecProjection::Restricted(rules) => rules.withheld(Subject::File(&interpreter)),
         ExecProjection::Unrestricted => None,
@@ -259,11 +247,7 @@ fn interpreter_exclusion(program: &Program, projection: &SandboxProjection) -> O
 
 /// The program, once its confinement is entered: the only thing a received
 /// warrant yields, so nothing else can run it.
-pub(super) struct Confined {
-    run: Run,
-    #[cfg(target_os = "linux")]
-    image: Option<OwnedFd>,
-}
+pub(super) struct Confined(Run);
 
 /// The `arg0` and exclusion fields only a file carries.
 type FileFields<'a> = [&'a [u8]; 2];
@@ -273,22 +257,13 @@ impl Confined {
     /// the kernel refuses, as the exit code that says so; a bundled tool
     /// runs here.
     pub(super) fn run(self) -> u8 {
-        match self.run {
+        match self.0 {
             Run::File {
                 real,
                 arg0,
                 excluded,
                 args,
-            } => exec(
-                &real,
-                &arg0,
-                excluded.as_deref(),
-                args,
-                #[cfg(target_os = "linux")]
-                self.image
-                    .as_ref()
-                    .expect("a file warrant received its image"),
-            ),
+            } => exec(&real, &arg0, excluded.as_deref(), args),
             Run::Tool(tool, args) => crate::uutils::run(&tool, args).unwrap_or_else(|e| {
                 crate::terminal::cmd_error("ral", &e.to_string());
                 127
@@ -304,17 +279,12 @@ fn exec(
     arg0: &std::path::Path,
     excluded: Option<&str>,
     args: Vec<OsString>,
-    #[cfg(target_os = "linux")] image: &OwnedFd,
 ) -> u8 {
-    #[cfg(target_os = "linux")]
-    let at = crate::path::proc_fd_path(image.as_raw_fd());
-    #[cfg(not(target_os = "linux"))]
-    let at = real.to_path_buf();
     #[allow(
         clippy::disallowed_methods,
         reason = "[silent:respawn-spawn] sandbox respawn handoff: builds the Command for the confined re-exec; the surface card fired before this handoff, so the exec itself raises no card."
     )]
-    let mut cmd = Command::new(&at);
+    let mut cmd = Command::new(real);
     cmd.arg0(arg0).args(args);
     #[allow(
         clippy::disallowed_methods,
@@ -324,7 +294,7 @@ fn exec(
     // A kernel refusal of a script is most often its interpreter's, which a
     // script the user can edit cannot carry in with it.
     let hint = (err.kind() == io::ErrorKind::PermissionDenied)
-        .then(|| super::carriers::shebang(&at))
+        .then(|| super::carriers::shebang(real))
         .flatten()
         .map(|interp| {
             let interp = quote_word(&interp.to_string_lossy()).into_owned();
@@ -365,29 +335,8 @@ impl Warrant {
     pub(super) fn confine() -> Result<Confined, String> {
         let Self { confinement, run } = Self::receive()?;
         confinement.enter()?;
-        #[cfg(target_os = "linux")]
-        let image = if let Run::File { real, .. } = &run {
-            let fd = Slot::Image
-                .take()
-                .ok_or("the warrant has no opened image")?;
-            let visible = super::linux::visible_image(real, &fd)?;
-            // Scripts reopen this descriptor after exec; it must survive the sweep.
-            let kept = rustix::io::fcntl_dupfd_cloexec(&visible, 3).map_err(|e| e.to_string())?;
-            if kept.as_raw_fd() >= Slot::FIRST {
-                return Err("no descriptor below the handoff is free for the image".into());
-            }
-            rustix::io::fcntl_setfd(&kept, rustix::io::FdFlags::empty())
-                .map_err(|e| e.to_string())?;
-            Some(kept)
-        } else {
-            None
-        };
         close_handoff()?;
-        Ok(Confined {
-            run,
-            #[cfg(target_os = "linux")]
-            image,
-        })
+        Ok(Confined(run))
     }
 
     /// This warrant, parcelled for [`Slot::Warrant`].
@@ -904,13 +853,10 @@ mod tests {
         let fds: Vec<_> = fixed
             .into_iter()
             .chain(seccomp)
-            .chain([Slot::Image, Slot::Mount(0), Slot::Mount(1)])
+            .chain([Slot::Mount(0), Slot::Mount(1)])
             .map(Slot::fd)
             .collect();
-        assert_eq!(
-            fds,
-            [98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109]
-        );
+        assert_eq!(fds, [98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108]);
         assert_eq!(fds[0], Slot::FIRST);
         assert!(Slot::seccomp(4).is_err(), "a fifth program has no slot");
     }

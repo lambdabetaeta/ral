@@ -1,5 +1,5 @@
 ---
-verified_at_commit: 002c654a
+verified_at_commit: 646bff0a
 verified_at_date: 2026-10-13
 anchors: [Binds, render_objects, bwrap_argv, bwrap_command, Slot, HostEnvelope, render_dev, cgroup_tree, floor, Pinned, pin_envelope, InfoFd]
 ---
@@ -50,18 +50,11 @@ are: the read-only defaults, the read region (`shown`: every read scope of the
 fs projection, run places and live support among them, written prefixes
 included), the pins of bwrap and the trampoline, bound read-only at their own
 names before the masks, and, over everything, the cgroup tree. The launched
-image is not a bind of its own: the running-reads law puts it in the read region, and its
-inode, judged by the guard, is what the ruleset admits (`admit_image`).
+image is not a bind of its own: the running-reads law puts it in the read
+region, and the table admits it as it admits any file.
 Every allowance is bound as the frozen real path the guard judged, never
 re-resolved; the surface spelling is only the destination at which the frozen
 object is bound.
-
-The launched image has its own earlier pin: opened at head resolution,
-judged by that object's name and lent at fd 107. The mounts start at fd 108.
-The trampoline opens the mounted image, checks its inode against the pin and
-execs that descriptor. A replacement or mask refuses the launch; the descriptor
-keeps the envelope's mount restrictions
-([[internals/confined-launch|confined-launch]]).
 
 - **A path is its canonical object plus the spellings that reach it**
   (`render_objects`). `/bin` shows `/usr/bin`'s handle, except inside another

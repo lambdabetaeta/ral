@@ -57,25 +57,17 @@ impl Head {
 }
 
 impl Program {
-    /// Resolve the image; Linux opens it before its name is judged.
+    /// The file `path` names, which the launcher will run by its real path,
+    /// seen as `path` by the program.
     pub(crate) fn file(path: PathBuf) -> Result<Self, Missing> {
-        let missing = |e: std::io::Error| match e.kind() {
+        let real = RealPath::of(&path).map_err(|e| match e.kind() {
             ErrorKind::NotFound | ErrorKind::NotADirectory => Missing::NotFound,
             _ => Missing::NotExecutable(path.clone()),
-        };
-        #[cfg(target_os = "linux")]
-        let (real, image) = RealPath::open_image(&path).map_err(missing)?;
-        #[cfg(not(target_os = "linux"))]
-        let real = RealPath::of(&path).map_err(missing)?;
+        })?;
         if !is_executable_file(&path) {
             return Err(Missing::NotExecutable(path));
         }
-        Ok(Self::File {
-            path,
-            real,
-            #[cfg(target_os = "linux")]
-            image: Some(std::sync::Arc::new(image)),
-        })
+        Ok(Self::File { path, real })
     }
 }
 
@@ -189,7 +181,7 @@ mod tests {
 
     fn file_of(head: &Head) -> (&Path, &RealPath) {
         match &head.program {
-            Ok(Program::File { path, real, .. }) => (path, real),
+            Ok(Program::File { path, real }) => (path, real),
             other => panic!("expected a host file, got {other:?}"),
         }
     }

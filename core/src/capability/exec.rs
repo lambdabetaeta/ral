@@ -118,14 +118,11 @@ impl GrantStack {
 pub(crate) enum Program {
     /// A bundled tool, run as ral itself.
     Tool(String),
-    /// A host file, judged at `real`, with `path` as argv[0]. Linux holds the
-    /// opened image; only synthetic policy tests omit its descriptor.
-    File {
-        path: PathBuf,
-        real: RealPath,
-        #[cfg(target_os = "linux")]
-        image: Option<std::sync::Arc<std::os::fd::OwnedFd>>,
-    },
+    /// A host file: `real` is `realpath(path)`, judged and run; `path` is the
+    /// spelling, which the program sees as `argv[0]`. A `#!` script sees
+    /// `real` as its script name: the kernel hands the interpreter the exec
+    /// path.
+    File { path: PathBuf, real: RealPath },
 }
 
 impl Program {

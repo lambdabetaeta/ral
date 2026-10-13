@@ -213,11 +213,6 @@ impl Ruleset {
         }
     }
 
-    fn admit_image(&self, image: &OwnedFd) -> Result<(), String> {
-        self.admit(image.as_fd(), Access::EXECUTE)
-            .map_err(|e| format!("landlock: cannot admit the opened image: {e}"))
-    }
-
     /// Confine this process and everything it execs; the descriptor closes.
     fn restrict_self(self) -> Result<(), Error> {
         let off = 0 as libc::c_ulong;
@@ -331,8 +326,7 @@ fn plan(exec: &ExecProjection, landlock: Landlock) -> Result<Option<Plan>, Refus
 /// The ruleset for `exec` on a kernel at `landlock`, and what the payload is
 /// promised; `None` where there is nothing to enter.  `roots` are the
 /// objects the envelope shows, which a directory admission is lowered onto;
-/// `fs` decides where a name veto is carried into one; `image` is the
-/// launched file, admitted by the inode the guard judged.
+/// `fs` decides where a name veto is carried into one.
 ///
 /// # Errors
 /// As [`plan`]; a ruleset or rule the kernel refuses; an admit that cannot be
@@ -341,7 +335,6 @@ pub(crate) fn build(
     exec: &ExecProjection,
     fs: &RenderedFs,
     roots: &[RealPath],
-    image: Option<&OwnedFd>,
     landlock: Landlock,
 ) -> Result<Option<(Ruleset, Landlocked)>, Refusal> {
     let Some(Plan { handled, scoped }) = plan(exec, landlock)? else {
@@ -351,9 +344,6 @@ pub(crate) fn build(
         .map_err(|e| Refusal::Launch(Error::Create(e).to_string()))?;
     if let Some(table) = kernel_table(exec) {
         admit_exec(&ruleset, table, fs, roots)?;
-        if let Some(image) = image {
-            ruleset.admit_image(image)?;
-        }
     }
     let refer_root = handled.contains(Access::REFER);
     Ok(Some((ruleset, Landlocked { refer_root })))
@@ -817,7 +807,6 @@ mod tests {
             &ExecProjection::Restricted(table_of(&rules)),
             &FsProjection::Unrestricted,
             &whole(),
-            None,
             landlock,
         )
         .expect("builds");
@@ -839,7 +828,6 @@ mod tests {
             &ExecProjection::Restricted(table_of(&[allow(&allowed, true)])),
             &FsProjection::Unrestricted,
             &whole(),
-            None,
             landlock,
         ) else {
             panic!("a symlink would admit its target");

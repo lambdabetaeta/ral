@@ -579,26 +579,6 @@ fn open_real(name: &Path, flags: OFlags) -> Result<Option<OwnedFd>, OpenError> {
     }
 }
 
-/// Keep the envelope's mount restrictions on the image, never its host mount.
-pub(super) fn visible_image(name: &Path, original: &OwnedFd) -> Result<OwnedFd, String> {
-    let changed = || {
-        format!(
-            "sandbox: the image at {} changed or is hidden by the grant; refusing to execute it",
-            name.display()
-        )
-    };
-    let visible = open_real(name, OFlags::empty())?.ok_or_else(changed)?;
-    let identity = |fd: &OwnedFd| {
-        rustix::fs::fstat(fd)
-            .map(|s| (s.st_dev, s.st_ino))
-            .map_err(|e| e.to_string())
-    };
-    if identity(&visible)? != identity(original)? {
-        return Err(changed());
-    }
-    Ok(visible)
-}
-
 /// Why [`open_real`] refused.
 #[derive(Debug)]
 enum OpenError {
@@ -1693,8 +1673,8 @@ mod tests {
     /// Only a spawn shows the trampoline's `execve` reaching the file the user
     /// named: `~/.local/bin/uv`, a link into `~/.local/share/uv`.  The image is
     /// shown by the reads alone, at its real path: a grant that reads it runs
-    /// it by either name, and one that does not has the launch refuse, the
-    /// image being hidden.
+    /// it by either name, and one that does not has the `execve` fail, the
+    /// image being absent inside.
     #[test]
     fn a_linked_image_runs_through_the_read_that_shows_its_real_path() {
         let (dir, real) = linked_tool("image-link-spawn");
@@ -1716,7 +1696,7 @@ mod tests {
         let out = run_admitted(&env, &apart, &admitted(tool(), &[])).expect("spawn bwrap");
         assert!(
             !String::from_utf8_lossy(&out.stdout).contains("READY")
-                && String::from_utf8_lossy(&out.stderr).contains("hidden by the grant"),
+                && String::from_utf8_lossy(&out.stderr).contains(&real),
             "an image no read shows ran: {out:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -2872,63 +2852,64 @@ mod tests {
         }
     }
 
-    #[test]
-    fn an_ancestor_renamed_before_the_envelope_cannot_replace_the_image() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = std::fs::canonicalize(tmp.path()).unwrap();
-        let bin = dir.join("bin");
-        std::fs::create_dir(&bin).unwrap();
-        let file = bin.join("tool");
-        std::fs::copy("/bin/echo", &file).unwrap();
-        let program = admitted(Program::file(file.clone()).unwrap(), &["ORIGINAL".into()]);
-        let policy = SandboxProjection {
-            exec: admitting(&[], &[&file.to_string_lossy()]),
-            ..restricted(&[&dir], &[], &[])
-        };
-        let Some(env) = envelope_launches(&policy) else {
-            return;
-        };
-        let control = run_admitted(&env, &policy, &program).unwrap();
-        assert_eq!(control.stdout, b"ORIGINAL\n", "{control:?}");
-        std::fs::rename(&bin, dir.join("moved")).unwrap();
-        std::fs::create_dir(&bin).unwrap();
-        std::fs::copy("/bin/false", &file).unwrap();
-        let out = run_admitted(&env, &policy, &program).unwrap();
-        assert!(!out.status.success(), "{out:?}");
-        assert!(out.stdout.is_empty(), "{out:?}");
-        assert!(
-            String::from_utf8_lossy(&out.stderr).contains("changed or is hidden"),
-            "{out:?}"
-        );
-    }
-
-    #[test]
-    fn a_scripts_image_descriptor_obeys_the_envelopes_denies() {
+    /// Writes `dir/sibling` and `dir/script`, and returns the script's path.
+    /// The script prints its `$0`, then the sibling it finds by `${0%/*}`, the
+    /// lexical `dirname "$0"`, using builtins alone so that nothing else need
+    /// be admitted.
+    fn script_beside_sibling(dir: &std::path::Path) -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt;
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = std::fs::canonicalize(tmp.path()).unwrap();
         let script = dir.join("script");
-        let content = "#!/bin/sh\necho READY\necho overwritten > \"$0\" && echo WROTE\nexit 0\n";
+        let content = "#!/bin/sh\nprintf '%s\\n' \"$0\"; read -r l < \"${0%/*}/sibling\"; printf '%s\\n' \"$l\"\n";
         std::fs::write(&script, content).unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(dir.join("sibling"), "SIBLING\n").unwrap();
+        script
+    }
+
+    /// The trampoline `execve`s the real path, so the kernel hands a `#!`
+    /// script that path as `$0`, and the lexical idiom finds its siblings.
+    #[test]
+    fn a_confined_script_sees_its_real_path_and_its_siblings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = std::fs::canonicalize(tmp.path()).unwrap();
+        let script = script_beside_sibling(&dir);
         let program = admitted(Program::file(script.clone()).unwrap(), &[]);
         let policy = SandboxProjection {
             exec: admitting(&[], &[&script.to_string_lossy()]),
-            ..restricted(&[], &[&dir], &[])
+            ..restricted(&[&dir], &[], &[])
         };
         let Some(env) = envelope_launches(&policy) else {
             return;
         };
         let out = run_admitted(&env, &policy, &program).unwrap();
         assert!(out.status.success(), "{out:?}");
-        assert!(out.stdout.starts_with(b"READY\n"), "{out:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            format!("{}\nSIBLING\n", script.display())
+        );
+    }
 
-        let denied = SandboxProjection {
-            exec: policy.exec,
-            ..restricted(&[], &[&dir], &[&script])
+    /// A deny masks the file with an unopenable node, which the kernel's
+    /// `execve` refuses; `exec` names the real path.
+    #[test]
+    fn a_masked_script_does_not_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = std::fs::canonicalize(tmp.path()).unwrap();
+        let script = script_beside_sibling(&dir);
+        let program = admitted(Program::file(script.clone()).unwrap(), &[]);
+        let policy = SandboxProjection {
+            exec: admitting(&[], &[&script.to_string_lossy()]),
+            ..restricted(&[&dir], &[], &[&script])
         };
-        let out = run_admitted(&env, &denied, &program).unwrap();
+        let Some(env) = envelope_launches(&policy) else {
+            return;
+        };
+        let out = run_admitted(&env, &policy, &program).unwrap();
         assert!(!out.status.success() && out.stdout.is_empty(), "{out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains(&*script.to_string_lossy()),
+            "{out:?}"
+        );
     }
 
     /// Under an unrestricted fs, a veto in force or not, the tool the exec
@@ -3781,9 +3762,6 @@ mod tests {
             .expect("parcels");
         let mut handoff = Handoff::default();
         handoff.lend(Slot::Warrant, warrant.as_fd());
-        if let Program::File { image, .. } = admitted.program() {
-            handoff.lend(Slot::Image, image.as_ref().unwrap().as_fd());
-        }
         let rendered = policy.rendered().expect("renders");
         let env = Envelope {
             trampoline: own,

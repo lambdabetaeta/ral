@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 002c654a
+generated_at_commit: 646bff0a
 generated_at_date: 2026-10-13
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/guard/, core/src/guard.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
@@ -67,7 +67,7 @@ Submodules:
   allowance;
 - `exec.rs` — the exec instance
   ([[decisions/261004_exec-rules|exec-rules]]) and its judgment: `Program`
-  (`Tool` or `File { path, real, … }`, holding Linux's opened image) and the `Subject` it is judged as (`Tool`,
+  (`Tool` or `File { path, real }`) and the `Subject` it is judged as (`Tool`,
   `File`, `Under`, `Any`); `ExecScope` (`Any`, `Dir`, `File`, `Tool`, `Name`),
   `Name` negative only and `Any` positive only by construction; `ExecRules =
   Table<ExecScope>`; `ExecRules::compile`, one layer's `ExecGrant` against this
@@ -354,13 +354,13 @@ device for `net` to govern; the in-process guards apply unchanged
   `Unavailable` is a confinement this host cannot establish, whether `projection_enforceable` saw it coming,
   there was no bwrap on `PATH` to pin at boot (`linux::envelope`, asked at the
   first launch that needs it), or the pinned envelope failed to spawn.
-- `Launch::new` (`process/launch.rs`) builds an unsandboxed external by name
-  on macOS and Windows; Linux's `image_command` launches its opened image.
+- `Launch::new` (`process/launch.rs`) builds the unsandboxed external exec
+  image; `build_launch` reaches it directly when no projection is active.
 - `launch.rs` (`sandboxed_command`) — the per-command launcher. `build_launch`
   (`runtime/command/process.rs`) routes an external or bundled child through here
   whenever a projection is active and the process is not already confined,
   confining that *one* child, the `Admitted`'s program: a `Program::File`
-  by the real path the guard judged (by a descriptor on Linux), its spelling as `argv[0]`, or a
+  by the real path the guard judged, its spelling as `argv[0]`, or a
   `Program::Tool`. macOS
   and Linux share one trampoline: the pinned ral itself, whose whole argv is
   `ral --warrant` (`Role::Warrant`). The confinement to enter and the program to
@@ -389,15 +389,9 @@ device for `net` to govern; the in-process guards apply unchanged
   100 `--info-fd` (a socketpair, which unlike a pipe cannot be reopened through
   `/proc`), 101 the Landlock ruleset, 102 ral's pin, the trampoline bwrap
   execs, 103.. the seccomp programs (sealed
-  memfds), 107 the image, 108.. one mount handle per bind, open-ended and last. One `Handoff` lifts every source above every target and a
+  memfds), 107.. one mount handle per bind, open-ended and last. One `Handoff` lifts every source above every target and a
   single `pre_exec` `dup2`s each home; the child sweeps everything from 98 up
-  with `close_range` once confined, preserving only the image below that range
-  so a shebang interpreter can reopen it. `linux::visible_image` first opens
-  the image on the envelope's mount and compares its inode with the host pin;
-  a replacement or fs mask refuses execution, and the descriptor cannot
-  reopen the host mount writable through a read-only bind.
-  A script sees `/proc/self/fd/N` as
-  its name; native argv[0] retains its spelling. `Landlocked::enter` consumes the ruleset. `bwrap_command` refuses to launch if
+  with `close_range` once confined, and `Landlocked::enter` consumes the ruleset. `bwrap_command` refuses to launch if
   bwrap's pin fd sits on one of these slots: the `dup2` would close it before
   the exec of `/proc/self/fd/<N>`, which would then run whatever landed there.
   macOS spawns the trampoline directly; Linux spawns it under `bwrap`
@@ -411,8 +405,7 @@ device for `net` to govern; the in-process guards apply unchanged
   never through a symlink, so each rule reaches the file a grant froze.
   `landlock::build` plans the
   handled set from the parent's one probe (`plan`), creates the `Ruleset` by raw
-  syscall, and admits the launched image by the inode the guard judged
-  (`admit_image`), each allowed file as
+  syscall, and admits each allowed file as
   itself and each live allowed directory as its hierarchy less what the table
   blocks beneath it (`expand`, which stops where a bind mount loops back onto
   a directory it is listing), each opened in the host by `open_real`
@@ -425,7 +418,7 @@ device for `net` to govern; the in-process guards apply unchanged
   `bwrap_command` takes the `Envelope` (bwrap's pin, the trampoline's, and
   the `HostEnvelope` probed once by running that trampoline as a pipeline
   anchor), the image (`Program::File`'s real path, the file the trampoline
-  makes readable; execution uses the pin), the handoff so far and the rendered projection, and refuses
+  execs), the handoff so far and the rendered projection, and refuses
   outright under a bwrap that builds no envelope, in bwrap's own words, or one
   without `--ro-bind-fd` (`HostEnvelope::builds`). `Binds::open` is the one
   place a launch opens what it mounts: the read-only defaults, the read and

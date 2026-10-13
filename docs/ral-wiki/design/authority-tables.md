@@ -608,9 +608,6 @@ stored side. *Respelled* marks a refusal that names the excluded spelling.
 - **A symlink to an admitted file is admitted**, since it runs that file; a
   symlink under an admitted directory to a file outside it is not. The
   launcher runs the real path it judged, the user's spelling as `argv[0]`.
-  Linux opens the image before judgment and execs that descriptor; shebang
-  interpreters receive the descriptor path as their script argument
-  ([[internals/confined-launch|confined-launch]]).
 
 ### Namespaces
 

@@ -20,25 +20,6 @@ impl RealPath {
         super::canon::canonicalise_strict(path).map(Self)
     }
 
-    /// The name behind the opened image is what the grant judges.
-    #[cfg(target_os = "linux")]
-    pub(crate) fn open_image(path: &Path) -> std::io::Result<(Self, std::os::fd::OwnedFd)> {
-        use rustix::fs::{Mode, OFlags, fstat, open, readlink};
-        use std::os::fd::AsRawFd;
-        use std::os::unix::ffi::OsStringExt;
-        let image = open(path, OFlags::PATH | OFlags::CLOEXEC, Mode::empty())?;
-        let stat = fstat(&image)?;
-        if stat.st_nlink == 0 {
-            return Err(std::io::ErrorKind::NotFound.into());
-        }
-        let name = readlink(super::proc_fd_path(image.as_raw_fd()), Vec::new())?;
-        if name.as_bytes().ends_with(b" (deleted)") {
-            return Err(std::io::ErrorKind::NotFound.into());
-        }
-        let real = PathBuf::from(std::ffi::OsString::from_vec(name.into_bytes()));
-        Ok((Self(real), image))
-    }
-
     /// The prefix's `resolved` form, as it froze: no disk access.
     pub(crate) fn frozen(prefix: &FrozenPath) -> Self {
         Self(prefix.real_path().to_path_buf())

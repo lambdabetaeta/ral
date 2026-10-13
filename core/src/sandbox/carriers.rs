@@ -176,14 +176,6 @@ pub(crate) fn shebang(path: &Path) -> Option<PathBuf> {
         .then(|| head_shebang(file))?
 }
 
-/// [`shebang`] of the file behind the pinned image descriptor `fd`, never its name.
-#[cfg(target_os = "linux")]
-pub(crate) fn shebang_of_image(fd: std::os::fd::BorrowedFd<'_>) -> Option<PathBuf> {
-    shebang(&crate::path::proc_fd_path(std::os::fd::AsRawFd::as_raw_fd(
-        &fd,
-    )))
-}
-
 fn head_shebang(file: std::fs::File) -> Option<PathBuf> {
     const LIMIT: u64 = if cfg!(target_os = "macos") { 512 } else { 256 };
     let mut head = Vec::new();

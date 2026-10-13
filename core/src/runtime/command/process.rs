@@ -45,15 +45,8 @@ pub(crate) fn build_launch(
         crate::sandbox::sandboxed_command(&projection, admitted, ownership, &shell.cwd(), cancel)?
     } else {
         match admitted.program() {
-            Program::File { path, real, .. } => {
-                #[cfg(not(target_os = "linux"))]
+            Program::File { path, real } => {
                 let mut cmd = crate::process::Launch::new(real.as_path());
-                #[cfg(target_os = "linux")]
-                let mut cmd = crate::process::Launch::from_command(crate::sandbox::image_command(
-                    admitted.program(),
-                )?);
-                #[cfg(target_os = "linux")]
-                let _ = real;
                 cmd.arg0(path);
                 cmd.args(admitted.args());
                 cmd
@@ -358,20 +351,30 @@ mod judged_program {
         assert_eq!(stdout_of(&plan, &shell), "a\n");
     }
 
-    #[cfg(target_os = "linux")]
+    /// A `#!` script reached through a link is handed its real path by the
+    /// kernel, so the lexical idiom `${0%/*}` (what `dirname "$0"` computes)
+    /// finds its siblings.
     #[test]
-    fn a_renamed_ancestor_cannot_redirect_the_judged_image() {
+    fn a_script_reached_through_a_link_sees_its_real_path() {
         let (tmp, mut shell) = workdir();
         let bin = tmp.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
-        let image = plant(&bin, "original");
-        point_build_at(tmp.path(), &image);
+        let tool = bin.join("tool");
+        std::fs::write(
+            &tool,
+            "#!/bin/sh\nprintf '%s\\n' \"$0\"; read -r l < \"${0%/*}/sibling\"; printf '%s\\n' \"$l\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(bin.join("sibling"), "SIBLING\n").unwrap();
+        point_build_at(tmp.path(), &tool);
+
         let plan = judge(&mut shell, &[]);
-        std::fs::rename(&bin, tmp.path().join("moved")).unwrap();
-        std::fs::create_dir(&bin).unwrap();
-        std::fs::write(&image, "#!/bin/sh\necho IMPOSTOR\n").unwrap();
-        std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert_eq!(stdout_of(&plan, &shell), "original\n");
+        let real = std::fs::canonicalize(&tool).unwrap();
+        assert_eq!(
+            stdout_of(&plan, &shell),
+            format!("{}\nSIBLING\n", real.display())
+        );
     }
 
     #[test]

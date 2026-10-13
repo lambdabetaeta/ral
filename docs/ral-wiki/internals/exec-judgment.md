@@ -1,5 +1,5 @@
 ---
-verified_at_commit: 002c654a
+verified_at_commit: 646bff0a
 verified_at_date: 2026-10-13
 anchors: [Head, ExecRules, ExecScope, Withheld, ExecDenial, Evidence, GrantStack, admit, check_exec, Admitted, for_kernel, places, deputy_prefixes]
 ---
@@ -63,10 +63,12 @@ table, then what running reads (below).
 retargeted between judgment and `execve` (by an earlier pipeline stage, say)
 cannot run another program.
 
-- **A renamed *ancestor* still can.** On macOS the window runs up to the
-  `execve`; on Linux, up to the moment the envelope opens the image to mount it
-  ([[decisions/261006_the-envelope-mounts-by-handle|the-envelope-mounts-by-handle]]).
-  Closing it needs `Program` to carry a handle from `Head::resolve`.
+- **A renamed ancestor, or a rewrite at the real path, between judgment and
+  `execve` runs the new file** wherever the policy admits that path, and
+  nowhere else: inside the envelope the kernel judges the inode `execve`
+  meets. This is a declared limit, since a writer of the path could have
+  placed the file before judgment
+  ([[decisions/261013_the-image-is-not-pinned|the-image-is-not-pinned]]).
 - **A `#!` script reached through a link sees its real path as `$0`.** The
   kernel hands the interpreter the exec path, not `argv[0]`.
 
