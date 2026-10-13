@@ -94,9 +94,9 @@ what a `Run`'s ceiling already states. `Attach` carries only what an engine
 reads — the terminal state, cwd, home, protocol version, installer tag, the
 host's per-session env, and `config`, the installer's own settings as an
 `FOValue` its recipe decodes and core never reads. `SerialValue` — the
-closure-capable sibling
-that ships lambdas between the pipeline-helper processes of one kernel — is
-a different type for a different domain; it never reaches the protocol.
+closure-capable sibling that carries a forked session into a hatched engine
+(*The hatch*, below) — is a different type for a different domain; it never
+reaches the protocol.
 
 The **envelope** — `Frame`, `Event`, `SessionEvent`, correlation ids,
 `Attach`'s handshake — stays a closed set of Rust types behind
@@ -264,10 +264,31 @@ conflated into one string a caller might pattern-match.
 connection *is* the session**, so no frame carries a session address.
 `Attach` opens it; `Detach`, an EOF, or the liveness deadline closes it;
 `Dispatch`, `Probe`, `Event`, `Control`, `Answer` all ride it unaddressed.
-What a multi-session envelope would reimplement in software, the kernel
-already supplies per process: isolation (a wedged or panicking session
-cannot touch a sibling), scoped cancel (signal the process), worker
-containment (a session's workers die with it), teardown (kill it).
+
+**The process is what makes a session's end final.** Most of what a session
+needs from its boundary is already software: `Control` cancels a dispatch,
+the session's `DurableRoot` and `Roster` contain its workers, and the worker's
+`catch_unwind` contains a panic. None of that ends a session that will not
+cooperate. Cancellation is polling, not revocation
+([[internals/cancellation|cancellation]]): an effect already past its last
+check runs to completion. An atomic write's commit, for one, fsyncs and then
+renames; a thread blocked in that fsync renames over its target after its
+session has been abandoned. Only the death of a process ends every thread at
+once, and with it every effect the session still had in flight. The process
+is therefore the unit of *forced* termination, and so of a session's
+effects. The isolation, scoped cancel and teardown a process also gives
+come along with it.
+
+- **No session is adopted into another's process.** In-process adoption of a
+  wire helper would delete the seed (*The hatch*) but would lose that bound.
+  Recovering it means one of two things. The first is ending the guest
+  whenever a helper fails to settle, which turns one wedged helper into the
+  loss of the whole conversation. The second is a contract that no effect
+  outlives its session, and cooperative cancellation cannot give one. Either
+  way the adoption needs more machinery than the seed costs: a session
+  supervisor, a process cancel root, an audit of every process-global
+  mutation, and a new handshake. The host's identity seats share exarch's
+  process, and accept the weaker bound there.
 
 - **`/clear` is host lifecycle, not a frame**: drop the engine and boot a
   fresh one from the same `Attach`, onto the same interrupt target. A seat
