@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 2afefdf4
-verified_at_date: 2026-10-12
+verified_at_commit: 002c654a
+verified_at_date: 2026-10-13
 anchors: [sandboxed_command, build_launch, serve_warrant, Warrant, Slot, Handoff, Landlocked, Envelope, Refusal, spawn_error, projection_enforceable, SessionSandbox, ensure_fs_grant, fs_capability_name]
 ---
 
@@ -95,8 +95,10 @@ the one thing the child enters: `Seatbelt(profile)` on macOS; on Linux
     inode whatever holds its name now, and nothing re-stats the name. A build
     swapped in mid-session runs under the parent that pinned the old one,
     consistently. A filesystem that cannot exec an unlinked file (virtiofs)
-    fails the launch instead. The trampoline's own exec admit is that pin's
-    descriptor, never a name.
+    fails the launch instead. The trampoline runs before the payload enters its
+    policy: trusted construction, not an authored exec. No policy admits ral's
+    image on its own account; ral's binary is an ordinary file the table admits
+    or not ([[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]]).
   - macOS execs the pin by name, so it re-verifies it first (`Pinned::verify`).
 
 ## Windows keys authority by path, and the token selects
@@ -115,6 +117,37 @@ the session's `SessionSandbox`.
   pass. An ACE no live token names is inert, and can never widen a process's
   reach past its owning user's. So a detached worker keeps the authority it was
   born with, by construction.
+- **A frozen allowance is stamped through a held handle, never by name.** Its
+  real path was frozen at decode, and `canonicalise` then `SetNamedSecurityInfoW`
+  would follow a junction planted on the path or on any ancestor and leave a
+  window between check and stamp. So the invariant is: resolution meets no
+  redirecting reparse point anywhere on the path, and the grant lands on the very
+  object checked. Components are held root first, each opened relative to its
+  parent's handle with `FILE_OPEN_REPARSE_POINT`, without delete sharing (as the
+  deny walk pins what it inspects); the tag of a reparse point is read on the
+  held handle, and only a name surrogate (symlink, junction, mount point) refuses
+  the launch, naming both; a cloud-files placeholder passes, which
+  `OBJ_DONT_REPARSE` would have refused
+  (`dacl/frozen.rs`).
+- **The check comes before every filter, on every launch.** Three filters drop
+  paths before anything is stamped: the projection's memo of what it granted,
+  existence, and the ambient-access probe. A path granted at an earlier launch and
+  since replaced by a junction would pass all three and skip a check placed in
+  the stamp alone, so every frozen allowance is checked first, warm cache or not.
+  A read-write grant also sets a mandatory integrity label by name; it goes
+  through the held handle too, so both operations reach the object checked.
+- **The projection key covers the whole `read` list**, run places and live
+  support included, not only its prefixes: capabilities accumulate per key and
+  reach every later token minted under it, so two launches with the same
+  prefixes and different places never share one. Every run place is stamped as a
+  read prefix is, frozen. The guest-jail launch branch still bypasses per-command
+  projection and installs no kernel exec policy.
+- **A bundled tool's child is `ral.exe` itself**, loaded by the AppContainer,
+  whose image keeps its read and execute grant: the spawn's, by the parent, not an
+  exec judged in a child. An fs exclusion over `ral.exe`'s folder would make the
+  deny walk put an explicit deny on the image, which outranks its grant; the guard
+  therefore refuses every bundled tool in that case, so the walk never meets a
+  launch that needs it, and Windows needs no exception.
 - **Residual:** an ACE lives on the NTFS object, but a grant names a path, and
   Windows does not re-inherit on a same-volume rename. A file moved into a
   granted tree stays dark; one moved out of a writable tree keeps that tree's

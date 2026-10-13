@@ -7,17 +7,23 @@
 //! fields, with no length anywhere:
 //!
 //! ```text
-//! ral-warrant/1  <confinement>  file  <real>  <argv0>  <argc>  <arg>…
-//! ral-warrant/1  <confinement>  tool  <name>           <argc>  <arg>…
+//! ral-warrant/2  <confinement>  file  <real>  <argv0>  <excluded>  <argc>  <arg>…
+//! ral-warrant/2  <confinement>  tool  <name>                       <argc>  <arg>…
 //! ```
+//!
+//! `<excluded>` names the exclusion covering the launched script's
+//! interpreter, empty if none: the parent read the `#!` line once, for the
+//! child's diagnosis alone, never as evidence.
 //!
 //! The decoder accepts only what the encoder emits, byte for byte, so the
 //! encoding is canonical and injective.
 
 #[cfg(target_os = "linux")]
 use super::linux::landlock::Landlocked;
+use super::{ExecProjection, SandboxProjection};
 use crate::Role;
-use crate::capability::{Admitted, Program};
+use crate::capability::{Admitted, Program, Subject, Withheld};
+use crate::path::{Deny, RealPath};
 use crate::process::SpawnFailure;
 use libc::c_int;
 use std::borrow::Cow;
@@ -113,7 +119,7 @@ impl Slot {
     }
 }
 
-const MAGIC: &[u8] = b"ral-warrant/1";
+const MAGIC: &[u8] = b"ral-warrant/2";
 /// Under macOS's default socket-buffer ceiling, far above either OS's `ARG_MAX`.
 const CAP: usize = 8 << 20;
 
@@ -190,29 +196,56 @@ pub(super) struct Warrant {
 
 /// The program the re-exec becomes inside its confinement: a host file it
 /// `execve`s, by the real path the in-process guard judged and under the
-/// spelling the user wrote, or a bundled tool it runs in-process.
+/// spelling the user wrote, or a bundled tool it runs in-process.  A file
+/// carries the exclusion that covers its script's interpreter, if any, for the
+/// hint after a refused `execve`.
 #[derive(Debug, PartialEq, Eq)]
 enum Run {
     File {
         real: PathBuf,
         arg0: PathBuf,
+        excluded: Option<String>,
         args: Vec<OsString>,
     },
     Tool(String, Vec<OsString>),
 }
 
-impl From<&Admitted> for Run {
-    fn from(admitted: &Admitted) -> Self {
+impl Run {
+    fn of(admitted: &Admitted, projection: &SandboxProjection) -> Self {
         let args = admitted.args().iter().map(OsString::from).collect();
         match admitted.program() {
             Program::File { path, real, .. } => Self::File {
                 real: real.as_path().to_path_buf(),
                 arg0: path.clone(),
+                excluded: interpreter_exclusion(real, projection),
                 args,
             },
             Program::Tool(tool) => Self::Tool(tool.clone(), args),
         }
     }
+}
+
+/// The exclusion, on either axis, that covers the interpreter of the `#!`
+/// script at `real`.  Read for the hint alone: support is the projection's,
+/// and nothing here is evidence.
+fn interpreter_exclusion(real: &RealPath, projection: &SandboxProjection) -> Option<String> {
+    let interpreter = RealPath::of(&super::carriers::shebang(real.as_path())?).ok()?;
+    let exec = match &projection.exec {
+        ExecProjection::Restricted(rules) => rules.withheld(Subject::File(&interpreter)),
+        ExecProjection::Unrestricted => None,
+    }
+    .and_then(|w| match w {
+        Withheld::Excluded { scope, .. } => Some(scope.to_string()),
+        Withheld::MissingAllowance => None,
+    });
+    exec.or_else(|| {
+        let fs = projection.fs.rules()?;
+        let denied = fs
+            .deny
+            .iter()
+            .find(|p| p.contains::<Deny>(interpreter.as_path()));
+        denied.map(|p| p.as_str().to_owned())
+    })
 }
 
 /// The program, once its confinement is entered: the only thing a received
@@ -223,15 +256,24 @@ pub(super) struct Confined {
     image: Option<OwnedFd>,
 }
 
+/// The `arg0` and exclusion fields only a file carries.
+type FileFields<'a> = [&'a [u8]; 2];
+
 impl Confined {
     /// Become the program: a host file is `execve`d, which returns only when
     /// the kernel refuses, as the exit code that says so; a bundled tool
     /// runs here.
     pub(super) fn run(self) -> u8 {
         match self.run {
-            Run::File { real, arg0, args } => exec(
+            Run::File {
+                real,
+                arg0,
+                excluded,
+                args,
+            } => exec(
                 &real,
                 &arg0,
+                excluded.as_deref(),
                 args,
                 #[cfg(target_os = "linux")]
                 self.image
@@ -251,6 +293,7 @@ impl Confined {
 fn exec(
     real: &std::path::Path,
     arg0: &std::path::Path,
+    excluded: Option<&str>,
     args: Vec<OsString>,
     #[cfg(target_os = "linux")] image: &OwnedFd,
 ) -> u8 {
@@ -276,11 +319,17 @@ fn exec(
         .flatten()
         .map(|interp| {
             let interp = interp.display();
-            format!(
-                "\nhint: its interpreter {interp} is not admitted by the grant: a script you \
-                 can edit carries no interpreter of its own: add `absolute {interp} to the \
-                 exec grant's allow list"
-            )
+            match excluded {
+                Some(scope) => format!(
+                    "\nhint: its interpreter '{interp}' is excluded by {scope}; an allowance \
+                     cannot override an exclusion"
+                ),
+                None => format!(
+                    "\nhint: its interpreter {interp} is not admitted by the grant: a script \
+                     you can edit carries no interpreter of its own: add `absolute {interp} to \
+                     the exec grant's allow list"
+                ),
+            }
         });
     crate::terminal::cmd_error(
         "ral",
@@ -290,10 +339,14 @@ fn exec(
 }
 
 impl Warrant {
-    pub(super) fn new(confinement: Native, admitted: &Admitted) -> Self {
+    pub(super) fn new(
+        confinement: Native,
+        admitted: &Admitted,
+        projection: &SandboxProjection,
+    ) -> Self {
         Self {
             confinement,
-            run: admitted.into(),
+            run: Run::of(admitted, projection),
         }
     }
 
@@ -359,11 +412,19 @@ impl Warrant {
     }
 
     fn encode(&self) -> Result<Vec<u8>, String> {
-        let (kind, program, arg0, args): (&[u8], &[u8], Option<&[u8]>, _) = match &self.run {
-            Run::File { real, arg0, args } => (
+        let (kind, program, file, args): (&[u8], &[u8], Option<FileFields>, _) = match &self.run {
+            Run::File {
+                real,
+                arg0,
+                excluded,
+                args,
+            } => (
                 b"file",
                 real.as_os_str().as_bytes(),
-                Some(arg0.as_os_str().as_bytes()),
+                Some([
+                    arg0.as_os_str().as_bytes(),
+                    excluded.as_deref().unwrap_or_default().as_bytes(),
+                ]),
                 args,
             ),
             Run::Tool(tool, args) => (b"tool", tool.as_bytes(), None, args),
@@ -372,7 +433,7 @@ impl Warrant {
         let argc = args.len().to_string();
         let head = [MAGIC, confinement.as_bytes(), kind, program]
             .into_iter()
-            .chain(arg0)
+            .chain(file.into_iter().flatten())
             .chain([argc.as_bytes()]);
         let bytes = nul_terminated(head.chain(args.iter().map(|a| a.as_bytes())))?;
         if bytes.len() > CAP {
@@ -400,7 +461,9 @@ impl Warrant {
         let confinement = Native::parse(text(next("confinement")?)?)?;
         let kind = next("kind")?;
         let program = next("program")?;
-        let arg0 = (kind == b"file").then(|| next("argv[0]")).transpose()?;
+        let file = (kind == b"file")
+            .then(|| Ok::<_, String>((next("argv[0]")?, next("interpreter exclusion")?)))
+            .transpose()?;
         let argc: usize = text(next("argument count")?)?
             .parse()
             .map_err(|e| format!("the warrant's argument count: {e}"))?;
@@ -411,10 +474,13 @@ impl Warrant {
                 args.len()
             ));
         }
-        let run = match (kind, arg0) {
-            (b"file", Some(arg0)) => Run::File {
+        let run = match (kind, file) {
+            (b"file", Some((arg0, excluded))) => Run::File {
                 real: OsStr::from_bytes(program).into(),
                 arg0: OsStr::from_bytes(arg0).into(),
+                excluded: Some(text(excluded)?)
+                    .filter(|scope| !scope.is_empty())
+                    .map(str::to_owned),
                 args,
             },
             (b"tool", None) => Run::Tool(text(program)?.to_owned(), args),
@@ -700,12 +766,17 @@ mod tests {
     }
 
     fn file(real: &[u8], arg0: &[u8], args: &[&[u8]]) -> Warrant {
+        excluding(real, arg0, None, args)
+    }
+
+    fn excluding(real: &[u8], arg0: &[u8], excluded: Option<&str>, args: &[&[u8]]) -> Warrant {
         let args = args.iter().map(|a| OsStr::from_bytes(a).into()).collect();
         Warrant {
             confinement: confinement(),
             run: Run::File {
                 real: OsStr::from_bytes(real).into(),
                 arg0: OsStr::from_bytes(arg0).into(),
+                excluded: excluded.map(str::to_owned),
                 args,
             },
         }
@@ -723,6 +794,7 @@ mod tests {
                 b"tools/\xfeb",
                 &[b"-c", b"echo a  b\nc", b"", b"\xfe\xff"],
             ),
+            excluding(b"/bin/sh", b"sh", Some("`absolute /bin/dash"), &[b"x"]),
             Warrant {
                 confinement: Native::parse(NO_CONFINEMENT).expect("a valid confinement"),
                 run: Run::Tool("ls".to_string(), Vec::new()),
@@ -739,13 +811,13 @@ mod tests {
         let conf = confinement().spell().into_owned();
         let conf = conf.as_bytes();
         let big = vec![b'a'; CAP];
-        let control = framed(&[MAGIC, conf, b"file", b"/bin/sh", b"sh", b"1", b"x"]);
+        let control = framed(&[MAGIC, conf, b"file", b"/bin/sh", b"sh", b"", b"1", b"x"]);
         assert!(Warrant::decode(&control).is_ok(), "the control must decode");
         for (case, bytes) in [
             ("empty", Vec::new()),
             (
                 "another version",
-                framed(&[b"ral-warrant/2", conf, b"file", b"/bin/sh", b"sh", b"0"]),
+                framed(&[b"ral-warrant/1", conf, b"file", b"/bin/sh", b"sh", b"0"]),
             ),
             ("cut short", control[..control.len() - 1].to_vec()),
             (
@@ -754,27 +826,33 @@ mod tests {
             ),
             (
                 "an argument too many",
-                framed(&[MAGIC, conf, b"file", b"/bin/sh", b"sh", b"1", b"x", b"y"]),
+                framed(&[
+                    MAGIC, conf, b"file", b"/bin/sh", b"sh", b"", b"1", b"x", b"y",
+                ]),
             ),
             (
                 "an argument too few",
-                framed(&[MAGIC, conf, b"file", b"/bin/sh", b"sh", b"2", b"x"]),
+                framed(&[MAGIC, conf, b"file", b"/bin/sh", b"sh", b"", b"2", b"x"]),
             ),
             (
                 "a signed count",
-                framed(&[MAGIC, conf, b"file", b"/bin/sh", b"sh", b"+1", b"x"]),
+                framed(&[MAGIC, conf, b"file", b"/bin/sh", b"sh", b"", b"+1", b"x"]),
             ),
             (
                 "a padded count",
-                framed(&[MAGIC, conf, b"file", b"/bin/sh", b"sh", b"01", b"x"]),
+                framed(&[MAGIC, conf, b"file", b"/bin/sh", b"sh", b"", b"01", b"x"]),
             ),
             (
                 "over the cap",
-                framed(&[MAGIC, conf, b"file", b"/bin/sh", b"sh", b"1", &big]),
+                framed(&[MAGIC, conf, b"file", b"/bin/sh", b"sh", b"", b"1", &big]),
             ),
             (
                 "a file without its argv[0]",
                 framed(&[MAGIC, conf, b"file", b"/bin/sh", b"1", b"x"]),
+            ),
+            (
+                "a file without its exclusion field",
+                framed(&[MAGIC, conf, b"file", b"/bin/sh", b"sh", b"1", b"x"]),
             ),
             (
                 "a tool with an argv[0]",

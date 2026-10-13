@@ -110,7 +110,7 @@ pub struct SessionInfo<'a> {
     pub system_size: usize,
     pub system_files: &'a [std::path::PathBuf],
     pub base: &'a str,
-    pub extend_base: Option<&'a std::path::Path>,
+    pub extend: Option<&'a std::path::Path>,
     pub restrict_files: &'a [std::path::PathBuf],
     pub cwd: &'a str,
     /// What a `--resume` picked up, `None` for a fresh session.
@@ -195,7 +195,7 @@ pub fn run() -> Result<(), String> {
     )?;
 
     let (caps, restrict_files) =
-        policy::for_invocation(&cwd, &c.base, c.extend_base.as_deref(), &c.restrict)?;
+        policy::for_invocation(&cwd, &c.base, c.extend.as_deref(), &c.restrict)?;
     let scratch =
         Arc::new(app::Scratch::new(app::EXARCH).map_err(|e| format!("scratch dir: {e}"))?);
     let (_mode, terminal, _warn) = ral_core::terminal::TerminalState::probe_from_env();
@@ -276,7 +276,7 @@ pub fn run() -> Result<(), String> {
         system_size,
         system_files: &c.system_files,
         base: &c.base,
-        extend_base: c.extend_base.as_deref(),
+        extend: c.extend.as_deref(),
         restrict_files: &restrict_files,
         cwd: &cwd,
         resumed,

@@ -20,13 +20,15 @@ mod lattice_tests;
 pub use deputy::deputy_prefixes;
 #[cfg(unix)]
 pub(crate) use exec::ExecScope;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 pub(crate) use exec::Subject;
-pub(crate) use exec::{Admitted, ExecDenial, ExecRules, Program, Refused, rules};
+pub(crate) use exec::{Admitted, ExecDenial, ExecRules, Program, Refused, ral_binary, rules};
 pub use fs::FsOp;
-pub(crate) use fs::{floor, region};
-pub(crate) use lattice::meet_insert;
+#[cfg(target_os = "linux")]
+pub(crate) use fs::floor;
+pub(crate) use fs::{FsScope, region, running_region};
 pub use lattice::{
-    Capabilities, EditorVerb, ExecGrant, ExecKey, Flag, FsPolicy, GrantStack, Meet, Net, ShellVerb,
-    Verdict, Widen,
+    Axis, Capabilities, EditorVerb, Evidence, ExecGrant, ExecKey, Flag, Fragment, FsPolicy,
+    GrantStack, Join, Meet, Net, ShellVerb,
 };
+pub(crate) use table::Withheld;

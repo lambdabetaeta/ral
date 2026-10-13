@@ -48,10 +48,8 @@ pub(crate) use real::RealPath;
 pub(crate) use render::render_real;
 #[cfg(target_os = "macos")]
 pub(crate) use render::rendered_ancestors;
-pub(crate) use render::rendered_pins;
-#[cfg(target_os = "linux")]
-pub(crate) use render::{Object, render_objects};
-pub(crate) use render::{Rendered, render_paths};
+#[cfg(unix)]
+pub(crate) use render::{Object, Rendered, render_objects, render_paths, rendered_pins};
 pub use resolver::Resolver;
 pub use walk::Located;
 pub(crate) use which::is_executable_file;

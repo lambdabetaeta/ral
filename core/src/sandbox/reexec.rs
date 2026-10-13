@@ -46,7 +46,6 @@ impl Pinned {
 
     /// The on-disk path the pin was taken from: `argv[0]` of every exec
     /// [`Self::command`] builds.
-    #[cfg_attr(windows, allow(dead_code))]
     pub(super) fn arg0(&self) -> &Path {
         &self.arg0
     }
@@ -180,6 +179,12 @@ enum Pin {
 }
 
 pub(super) static OWN: OnceLock<Pinned> = OnceLock::new();
+
+/// The path ral's own binary was pinned from at boot, for a guard that names
+/// it; `None` while unpinned.
+pub fn pinned_arg0() -> Option<&'static Path> {
+    OWN.get().map(Pinned::arg0)
+}
 
 /// ral's own pin, which a sandboxed launch cannot go without: unpinned, ral
 /// cannot vouch that the copy it re-execs is itself.

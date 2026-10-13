@@ -4,9 +4,9 @@
 )]
 #![allow(clippy::disallowed_methods)]
 
-//! A stack's authority is the meet of its layers: denies join, allows meet
-//! by their stored names, and in each table the most specific rule decides.
-//! Each refusal is paired with an admitted control.
+//! A stack's authority is the meet of its layers: exclusions join, allowances
+//! meet by their stored names, and an exclusion beats every allowance however
+//! specific.  Each refusal is paired with an admitted control.
 
 mod common;
 
@@ -240,8 +240,8 @@ fn disjoint_layers_meet_to_nothing() {
     assert!(out.stdout.contains("content"), "stdout:\n{}", out.stdout);
 }
 
-/// Denies join, and the most specific rule decides: a deeper allow in an
-/// inner layer does not lift an outer deny dir.
+/// Exclusions join, and no allowance beats one: a deeper allow in an inner
+/// layer does not lift an outer deny dir.
 #[cfg(unix)]
 #[test]
 fn a_deeper_inner_allow_does_not_lift_an_outer_exec_deny() {
@@ -266,11 +266,11 @@ fn a_deeper_inner_allow_does_not_lift_an_outer_exec_deny() {
     assert_not_run(&out, "`evil/deep/t`");
 }
 
-/// The most specific rule decides: an exact file allow beats a covering
-/// deny dir, which no fs allow can do.
+/// An exclusion beats every allowance: an exact file allow does not reopen a
+/// covering deny dir, whatever fs allows.
 #[cfg(unix)]
 #[test]
-fn an_exact_exec_allow_beats_a_covering_deny_dir() {
+fn an_exact_exec_allow_does_not_reopen_a_covering_deny_dir() {
     let d = Scratch::new("stack_exec_exact");
     let bin = d.join("bin");
     let (tool, other) = (bin.join("tool"), bin.join("other"));
@@ -282,13 +282,16 @@ fn an_exact_exec_allow_beats_a_covering_deny_dir() {
         (&tool.display().to_string(), "allow"),
     ]);
 
-    let out = under(&layer, &tool.display().to_string());
-    if common::refused_by_a_confined_runner(&out) {
-        return;
+    for program in [&tool, &other] {
+        let out = under(&layer, &program.display().to_string());
+        assert_not_run(&out, &program.display().to_string());
+        assert!(
+            out.stderr
+                .contains("an allowance cannot override an exclusion"),
+            "the refusal must say no allowance overrides it; stderr:\n{}",
+            out.stderr
+        );
     }
-    assert_ran(&out, "`tool`");
-    let out = under(&layer, &other.display().to_string());
-    assert_not_run(&out, "`other`");
 }
 
 /// A veto holds every spelling of the name, and refuses plainly: its key is

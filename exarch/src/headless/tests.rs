@@ -300,7 +300,7 @@ fn a_blank_seed_is_no_seed_and_the_refusal_names_every_flag() {
             system_size: 0,
             system_files: &[],
             base: "dangerous",
-            extend_base: None,
+            extend: None,
             restrict_files: &[],
             cwd: "/tmp",
             resumed: None,

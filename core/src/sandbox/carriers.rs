@@ -1,7 +1,7 @@
 //! Carriers: the files `execve` forwards to before a program's own code runs —
 //! a `#!` script's interpreter and, on macOS, the system's root-owned shims.
-//! The kernel exec rules admit them beside the grant, or an admitted script
-//! could not start.
+//! They are support (see `projection`): live where no exclusion covers them,
+//! admitted and readable beside the grant, or an admitted script could not start.
 //!
 //! The system vouches for its own scripts and shims; a script the user can
 //! author must have its interpreter named in the grant, and so must the
@@ -37,6 +37,42 @@ pub(crate) fn carriers<'a>(programs: impl IntoIterator<Item = &'a RealPath>) -> 
             .collect();
     }
     found
+}
+
+/// No kernel linker candidates to admit off Linux: macOS's loader is Rosetta's
+/// directory, which the profile names itself.
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn linkers() -> Vec<RealPath> {
+    Vec::new()
+}
+
+/// The dynamic linkers, as regular files: `execve` of a dynamic binary needs
+/// the binary's `PT_INTERP` file.  Support for a launch under restricted exec,
+/// admitted unless excluded.  Never a directory, which under `/usr/bin` would
+/// admit a command directory.
+#[cfg(target_os = "linux")]
+pub(crate) fn linkers() -> Vec<RealPath> {
+    const PATTERNS: &[&str] = &[
+        "/lib/ld*.so*",
+        "/lib64/ld*.so*",
+        "/lib32/ld*.so*",
+        "/usr/lib/ld*.so*",
+        "/usr/lib64/ld*.so*",
+        "/usr/lib32/ld*.so*",
+        // Debian multiarch, e.g. /usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1.
+        "/lib/*/ld*.so*",
+        "/usr/lib/*/ld*.so*",
+    ];
+    let found: BTreeSet<RealPath> = PATTERNS
+        .iter()
+        .filter_map(|p| glob::glob(p).ok())
+        .flatten()
+        .flatten()
+        // Merged-/usr makes /lib/x and /usr/lib/x one inode: one real path.
+        .filter_map(|p| RealPath::of(&p).ok())
+        .filter(|p| p.as_path().is_file())
+        .collect();
+    found.into_iter().collect()
 }
 
 /// Where `execve` of `program` goes next: the system's shims, then its
@@ -151,7 +187,7 @@ pub(crate) fn shebang(path: &Path) -> Option<PathBuf> {
 /// tool in the developer directory.  Never `DEVELOPER_DIR`: the confined code
 /// controls its environment.
 #[cfg(target_os = "macos")]
-fn shims(program: &Path) -> Vec<PathBuf> {
+pub(super) fn shims(program: &Path) -> Vec<PathBuf> {
     if program.as_os_str() == "/bin/sh" {
         return vec![PathBuf::from("/private/var/select/sh")];
     }

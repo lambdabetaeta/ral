@@ -15,7 +15,7 @@
 
 use super::freeze::{Anchor, FreezeCtx, Place, PolicyError, Selector, has_drive};
 use crate::capability::{
-    Capabilities, EditorVerb, ExecGrant, ExecKey, FsPolicy, Net, ShellVerb, Verdict,
+    Capabilities, EditorVerb, Evidence, ExecGrant, ExecKey, FsPolicy, Net, ShellVerb,
 };
 use crate::syntax::quote::quote_word;
 use crate::text::{indefinite, near_names};
@@ -317,15 +317,15 @@ fn decode_exec(value: &Value, err_prefix: &str, ctx: &FreezeCtx) -> Result<ExecG
     let at = within(err_prefix);
     let mut pairs = Vec::new();
     for (key, targets) in table_of(value, "exec: [allow: []]").map_err(&at)? {
-        let verdict = match key {
-            "allow" => Verdict::Allow,
-            "deny" => Verdict::Deny,
+        let evidence = match key {
+            "allow" => Evidence::ALLOW,
+            "deny" => Evidence::DENY,
             other => return Err(at(unknown_exec_key(other))),
         };
         let list = list_of(&targets, "targets").map_err(&at)?;
         for item in &list {
             let keys = decode_target(&item, ctx).map_err(&at)?;
-            pairs.extend(keys.into_iter().map(|k| (k, verdict.clone())));
+            pairs.extend(keys.into_iter().map(|k| (k, evidence)));
         }
     }
     Ok(ExecGrant::from_iter(pairs))
@@ -400,6 +400,7 @@ pub fn decode_capability_map(
 )]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use crate::path::FrozenPath;
 
     fn bare(label: &str) -> Value {
@@ -468,14 +469,14 @@ mod tests {
     // ── exec ──
 
     #[test]
-    fn exec_names_decode_to_name_keys_with_their_list_verdict() {
+    fn exec_names_decode_to_name_keys_with_their_list_evidence() {
         let g = grant_of(exec(
             vec![tagged("name", "git")],
             vec![tagged("name", "bash")],
         ))
         .unwrap();
-        assert_eq!(g.get(&ExecKey::Name("git".into())), Some(&Verdict::Allow));
-        assert_eq!(g.get(&ExecKey::Name("bash".into())), Some(&Verdict::Deny));
+        assert_eq!(g.get(&ExecKey::Name("git".into())), Some(&Evidence::ALLOW));
+        assert_eq!(g.get(&ExecKey::Name("bash".into())), Some(&Evidence::DENY));
     }
 
     #[cfg(unix)]
@@ -491,14 +492,17 @@ mod tests {
         ))
         .unwrap();
         let key = |k: fn(FrozenPath) -> ExecKey, p: &str| k(FrozenPath::from_surface(p));
-        assert_eq!(g.get(&key(ExecKey::Path, "/bin/sh")), Some(&Verdict::Allow));
+        assert_eq!(
+            g.get(&key(ExecKey::Path, "/bin/sh")),
+            Some(&Evidence::ALLOW)
+        );
         assert_eq!(
             g.get(&key(ExecKey::Path, "/work/tools/build")),
-            Some(&Verdict::Allow)
+            Some(&Evidence::ALLOW)
         );
         assert_eq!(
             g.get(&key(ExecKey::Dir, "/opt/tools")),
-            Some(&Verdict::Allow)
+            Some(&Evidence::ALLOW)
         );
     }
 
@@ -508,7 +512,7 @@ mod tests {
         assert!(g.iter().count() >= 1);
         assert!(
             g.iter()
-                .all(|(k, v)| matches!(k, ExecKey::Dir(_)) && *v == Verdict::Allow)
+                .all(|(k, v)| matches!(k, ExecKey::Dir(_)) && *v == Evidence::ALLOW)
         );
     }
 
@@ -524,14 +528,15 @@ mod tests {
         assert_eq!(once, twice);
     }
 
+    /// A target in both lists is Both, which `↓` refuses.
     #[test]
-    fn a_target_in_both_lists_is_denied() {
+    fn a_target_in_both_lists_is_both() {
         let g = grant_of(exec(
             vec![tagged("name", "git")],
             vec![tagged("name", "git")],
         ))
         .unwrap();
-        assert_eq!(g.get(&ExecKey::Name("git".into())), Some(&Verdict::Deny));
+        assert_eq!(g.get(&ExecKey::Name("git".into())), Some(&Evidence::BOTH));
     }
 
     #[test]

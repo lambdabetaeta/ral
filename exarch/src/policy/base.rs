@@ -9,7 +9,7 @@
 //! session start — so the per-invocation working directory is baked into the
 //! policy and exarch never injects it dynamically.
 
-use ral_core::capability::{Capabilities, ExecKey, FsPolicy};
+use ral_core::capability::{Capabilities, ExecKey};
 use ral_core::guard::freeze::FreezeCtx;
 use ral_core::terminal::TerminalState;
 
@@ -19,7 +19,7 @@ const READ_ONLY_RAL: &str = include_str!("../../data/read-only.exarch.ral");
 const EDIT_ONLY_RAL: &str = include_str!("../../data/edit-only.exarch.ral");
 const CONFINED_RAL: &str = include_str!("../../data/confined.exarch.ral");
 const DANGEROUS_RAL: &str = include_str!("../../data/dangerous.exarch.ral");
-// Gated with its only consumers, the Unix-shaped extension-widening tests below.
+// Gated with its only consumers, the Unix-shaped extension tests below.
 #[cfg(all(test, unix))]
 const GIT_EXTENSION_RAL: &str = include_str!("../../examples/git.exarch.ral");
 
@@ -79,25 +79,13 @@ fn drop_dead_exec_grants(caps: &mut Capabilities, unix_available: bool) {
     }
 }
 
-/// The implicit ceiling made concrete: `super::deny_layer` installs this so a
-/// restriction file's carve-outs land on a policy rather than on nothing.  `/`
-/// is minted in the normal form every other grant-side prefix carries.
-pub(super) fn root_fs_policy() -> FsPolicy {
-    let root = ral_core::path::FrozenPath::root;
-    FsPolicy {
-        read_prefixes: vec![root()],
-        write_prefixes: vec![root()],
-        deny_paths: Vec::new(),
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
     use ral_core::capability::ExecGrant;
     #[cfg(unix)]
-    use ral_core::capability::Verdict;
+    use ral_core::capability::{Evidence, Fragment};
     use ral_core::guard::freeze::FreezeCtx;
     #[cfg(unix)]
     use ral_core::guard::freeze::Place;
@@ -111,7 +99,7 @@ mod tests {
     /// Each dir key's surface, and whether it admits.
     fn dirs(exec: &ExecGrant) -> impl Iterator<Item = (&str, bool)> {
         exec.iter().filter_map(|(key, v)| match key {
-            ExecKey::Dir(dir) => Some((dir.as_str(), !v.is_denied())),
+            ExecKey::Dir(dir) => Some((dir.as_str(), v.permits())),
             _ => None,
         })
     }
@@ -131,6 +119,20 @@ mod tests {
             ctx,
         )
         .unwrap_or_else(|e| panic!("base '{name}' failed to load: {e:?}"))
+    }
+
+    /// [`load`] for an extension file.
+    #[cfg(unix)]
+    fn fragment(name: &str, text: &str, ctx: &FreezeCtx) -> Fragment {
+        let mut shell = ral_core::test_helper::core_shell();
+        ral_core::load::profile::load_fragment_from_str(
+            &ral_core::types::Mooring::adrift(),
+            &mut shell,
+            text,
+            &format!("<test-fragment:{name}>"),
+            ctx,
+        )
+        .unwrap_or_else(|e| panic!("extension '{name}' failed to load: {e:?}"))
     }
 
     /// Expect a grant through the door that authored it.  `expand_path_prefix`
@@ -338,7 +340,7 @@ mod tests {
         let xdg_bin = frozen(&xdg(XdgKind::Bin, "."), &ctx);
         assert_eq!(
             exec.get(&ExecKey::Dir(xdg_bin.clone())),
-            Some(&Verdict::Allow),
+            Some(&Evidence::ALLOW),
             "reasonable should list the resolved xdg-bin ({}) in exec dirs",
             xdg_bin.as_str()
         );
@@ -502,7 +504,7 @@ mod tests {
     }
 
     /// Both admit `git` and read `~/.gitconfig`, so a commit works without
-    /// `--extend-base`.  Push and signed commits still don't: their credential
+    /// `--extend`.  Push and signed commits still don't: their credential
     /// and signing helpers need `~/.ssh` and `~/.gnupg`, which the fs grant
     /// leaves unreadable.
     #[cfg(unix)]
@@ -519,7 +521,7 @@ mod tests {
             let exec = caps.exec.as_ref().expect("base declares exec");
             assert_eq!(
                 exec.get(&bare("git")),
-                Some(&Verdict::Allow),
+                Some(&Evidence::ALLOW),
                 "{name} should admit git"
             );
             let fs = caps.fs.as_ref().expect("base declares fs");
@@ -531,11 +533,10 @@ mod tests {
         }
     }
 
-    /// `minimal`'s explicit `dir `absolute /opt/homebrew` deny is what keeps `system`,
-    /// which folds a Homebrew tree in when the host has one, from widening it:
-    /// brew tools stay opt-in, and the git extension is the opt-in — its bare
+    /// `minimal` lists no Homebrew tree and `system` carries none, so brew
+    /// tools stay opt-in, and the git extension is the opt-in — its bare
     /// `git` is whichever git the host `PATH` finds.  The cwd must not be `/`,
-    /// or the `dir `cwd .` allow would admit everything.
+    /// or the ``dir `cwd .`` allow would admit everything.
     #[cfg(unix)]
     #[test]
     fn minimal_admits_system_git_not_homebrew() {
@@ -552,31 +553,37 @@ mod tests {
             !admits(load("minimal", MINIMAL_RAL, &ctx), "/opt/homebrew/bin/git"),
             "minimal does not admit a Homebrew git: brew trees are opt-in"
         );
-        let widened =
-            load("minimal", MINIMAL_RAL, &ctx).widen(load("git-ext", GIT_EXTENSION_RAL, &ctx));
+        let extended =
+            load("minimal", MINIMAL_RAL, &ctx).extend(fragment("git-ext", GIT_EXTENSION_RAL, &ctx));
         assert_eq!(
-            widened
+            extended
                 .exec
                 .as_ref()
                 .and_then(|exec| exec.get(&bare("git"))),
-            Some(&Verdict::Allow)
+            Some(&Evidence::ALLOW)
         );
         if let Some(git) = host_real("git") {
             assert!(
-                admits(widened, &git),
+                admits(extended.clone(), &git),
                 "the git extension's `name git` carries the host's git, wherever it lives"
+            );
+        }
+        if ral_core::path::exists("/opt/homebrew") {
+            assert!(
+                admits(extended, "/opt/homebrew/bin/git"),
+                "a Homebrew git is admitted once the extension names it"
             );
         }
     }
 
-    /// The extension widens `minimal` — gitconfig readable, `git` admitted —
-    /// while `reasonable`'s credential denies survive: widening an `FsPolicy`
+    /// The extension extends `minimal` — gitconfig readable, `git` admitted —
+    /// while `reasonable`'s credential denies survive: extending an `FsPolicy`
     /// unions deny sets, so a veto sticks without the overlay re-stating it, which is
     /// what lets an overlay stay purely additive.  Both sides freeze against
     /// the same home, so their `xdg-config` places coincide.
     #[cfg(unix)]
     #[test]
-    fn git_extension_widens_into_git_capable_profile() {
+    fn git_extension_extends_into_git_capable_profile() {
         let home = host_home();
         let ctx = FreezeCtx {
             home: Some(home),
@@ -585,35 +592,35 @@ mod tests {
         let gitconfig = frozen(&Place::Home(".gitconfig".into()), &ctx);
         let xdg_config_git = frozen(&xdg(XdgKind::Config, "git"), &ctx);
 
-        let widened_minimal = load("minimal", MINIMAL_RAL, &ctx).widen(load(
+        let extended_minimal = load("minimal", MINIMAL_RAL, &ctx).extend(fragment(
             "git-extension",
             GIT_EXTENSION_RAL,
             &ctx,
         ));
-        let exec = widened_minimal
+        let exec = extended_minimal
             .exec
             .as_ref()
             .expect("extension should keep exec map");
-        assert_eq!(exec.get(&bare("git")), Some(&Verdict::Allow));
-        let fs = widened_minimal
+        assert_eq!(exec.get(&bare("git")), Some(&Evidence::ALLOW));
+        let fs = extended_minimal
             .fs
             .as_ref()
             .expect("extension should keep fs map");
         assert!(
             fs.read_prefixes.iter().any(|p| p == &gitconfig),
-            "widening minimal should add ~/.gitconfig"
+            "extending minimal should add ~/.gitconfig"
         );
         assert!(
             fs.read_prefixes.iter().any(|p| p == &xdg_config_git),
-            "widening minimal should add xdg-config git"
+            "extending minimal should add xdg-config git"
         );
 
-        let widened_reasonable = load("reasonable", REASONABLE_RAL, &ctx).widen(load(
+        let extended_reasonable = load("reasonable", REASONABLE_RAL, &ctx).extend(fragment(
             "git-extension",
             GIT_EXTENSION_RAL,
             &ctx,
         ));
-        let fs = widened_reasonable
+        let fs = extended_reasonable
             .fs
             .as_ref()
             .expect("extension should keep fs map");
@@ -621,16 +628,113 @@ mod tests {
             let resolved = frozen(&xdg(XdgKind::Config, denied), &ctx);
             assert!(
                 fs.deny_paths.iter().any(|p| p == &resolved),
-                "widening reasonable should preserve xdg-config {denied} deny ({})",
+                "extending reasonable should preserve xdg-config {denied} deny ({})",
                 resolved.as_str()
             );
         }
     }
 
-    /// `system` must expand to an `Allow` verdict for every live tool root —
-    /// merely finding the key would pass on a `Deny` too, which is the whole
-    /// point.  `minimal` is the one exception: its Homebrew override must
-    /// survive as a `Deny`.  Ungated, since `system_tool_roots` walks the
+    /// A positive extension reaches a target the base never listed, and an
+    /// area it does not name stays as the base left it.
+    #[cfg(unix)]
+    #[test]
+    fn a_positive_extension_of_an_unlisted_target_is_admitted() {
+        let home = host_home();
+        let ctx = FreezeCtx {
+            home: Some(home.clone()),
+            cwd: "/work".into(),
+        };
+        let tool = object(&format!("{home}/unlisted-tool"));
+        let minimal = load("minimal", MINIMAL_RAL, &ctx);
+        assert!(!admits(minimal.clone(), &tool), "{tool} is not minimal's");
+        let extended = minimal.extend(fragment(
+            "home-dir",
+            "return [exec: [allow: [`dir `home .]]]",
+            &ctx,
+        ));
+        assert!(
+            admits(extended, &tool),
+            "the extension names {tool}'s folder"
+        );
+    }
+
+    /// An exclusion wins over every allowance: an exact file or a deeper
+    /// directory in an extension does not reopen `minimal`'s `bash`.
+    #[cfg(unix)]
+    #[test]
+    fn neither_an_exact_file_nor_a_deeper_directory_reopens_an_exclusion() {
+        let ctx = FreezeCtx {
+            home: Some(host_home()),
+            cwd: "/work".into(),
+        };
+        for source in [
+            "return [exec: [allow: [`absolute /usr/bin/bash]]]",
+            "return [exec: [allow: [`dir `absolute /usr/bin]]]",
+        ] {
+            let extended =
+                load("minimal", MINIMAL_RAL, &ctx).extend(fragment("reopen", source, &ctx));
+            assert!(
+                !admits(extended, "/usr/bin/bash"),
+                "`{source}` must not reopen the `name bash` exclusion"
+            );
+        }
+    }
+
+    /// Verb lists join by union: a base cannot withhold a verb against an
+    /// extension.
+    #[cfg(unix)]
+    #[test]
+    fn verbs_join_by_union() {
+        use ral_core::capability::ShellVerb;
+        let ctx = FreezeCtx {
+            home: Some(host_home()),
+            cwd: "/work".into(),
+        };
+        let base = Capabilities {
+            shell: Some([ShellVerb::Chdir].into()),
+            ..Capabilities::default()
+        };
+        let extended = base.extend(fragment("verbs", "return [shell: [`detach]]", &ctx));
+        assert_eq!(
+            extended.shell,
+            Some([ShellVerb::Chdir, ShellVerb::Detach].into())
+        );
+    }
+
+    /// A base that omits exec but restricts fs, extended with a run allowance
+    /// beside `every`: the ceiling keeps the allowance and reads what it
+    /// names.  The program sits in a scratch dir, outside the read floor.
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::disallowed_methods, reason = "[test] scratch executable")]
+    fn a_run_allowance_beside_every_is_readable_under_an_fs_only_base() {
+        let ctx = FreezeCtx {
+            home: Some(host_home()),
+            cwd: "/work".into(),
+        };
+        let base = Capabilities {
+            fs: Some(ral_core::capability::FsPolicy {
+                read_prefixes: vec![frozen(&Place::Absolute("/work".into()), &ctx)],
+                ..Default::default()
+            }),
+            ..Capabilities::default()
+        };
+        let dir = tempfile::tempdir().expect("scratch dir");
+        let tool = dir.path().join("tool");
+        std::fs::write(&tool, "#!/bin/sh\n").expect("write the tool");
+        let tool = object(&tool.to_string_lossy());
+        assert!(!admits(base.clone(), &tool), "{tool} is outside the reads");
+        let extended = base.extend(fragment(
+            "tool",
+            &format!("return [exec: [allow: [`absolute {tool}]]]"),
+            &ctx,
+        ));
+        assert!(admits(extended, &tool), "the allowance reads what it names");
+    }
+
+    /// `system` must expand to an allowance for every live tool root —
+    /// merely finding the key would pass on a deny too, which is the whole
+    /// point.  Ungated, since `system_tool_roots` walks the
     /// platform's own branch and the assertion holds either way.
     #[test]
     fn every_exec_base_admits_live_system_tool_roots() {
@@ -657,10 +761,9 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} should declare exec"));
             for root in &roots {
                 let normalized = ral_core::path::FrozenPath::from_surface(root).into_string();
-                let expected = !(name == "minimal" && root == "/opt/homebrew");
                 assert!(
-                    dirs(exec).any(|(p, v)| p == normalized && v == expected),
-                    "{name} should carry allow={expected} for the live system tool root {normalized}"
+                    dirs(exec).any(|(p, v)| p == normalized && v),
+                    "{name} should allow the live system tool root {normalized}"
                 );
             }
         }

@@ -10,7 +10,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_READ_ATTRIBUTES, FILE_SHARE_READ, READ_CONTROL,
 };
 
-use super::acl::{INHERITED_ACE_FLAG, Security, null_deny_dacl, win32_err_str};
+use super::acl::{AclKind, INHERITED_ACE_FLAG, Security, null_deny_dacl, win32_err_str};
 use super::{AceType, DENY_MASK, DaclError, PathMutexGuard, apply_explicit_ace, cancelled};
 use crate::process::cancel::CancelScope;
 
@@ -71,7 +71,7 @@ fn walk_error(path: &Path, error: &io::Error) -> DaclError {
 }
 
 fn needs_explicit_deny(file: &File, path: &Path) -> Result<bool, DaclError> {
-    let security = Security::of_file(file, path)?;
+    let security = Security::held(file, path, AclKind::Dacl)?;
     if security.acl.is_null() {
         return Err(null_deny_dacl(path));
     }

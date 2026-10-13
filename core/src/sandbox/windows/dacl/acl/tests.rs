@@ -12,7 +12,9 @@
     reason = "[test] test fs/process scaffolding"
 )]
 use super::super::tests::with_scoped_state_dir;
-use super::super::{GrantKind, RW_MASK, canonicalize_grant_target, ensure_fs_grant};
+use super::super::{
+    GrantKind, RW_MASK, canonicalize_grant_target, ensure_fs_grant, needing_grant, pin_all,
+};
 use super::*;
 #[test]
 fn sid_parse_valid_and_invalid() {
@@ -42,7 +44,7 @@ fn effective_access_is_zero_on_fresh_dir() {
 }
 
 #[test]
-fn filter_paths_needing_grant_drops_well_known_grant() {
+fn needing_grant_drops_well_known_grant() {
     with_scoped_state_dir(|| {
         let td_grant = tempfile::tempdir().unwrap();
         let td_no_grant = tempfile::tempdir().unwrap();
@@ -58,17 +60,22 @@ fn filter_paths_needing_grant_drops_well_known_grant() {
         )
         .unwrap();
 
-        let input = vec![
-            td_grant.path().to_path_buf(),
-            td_no_grant.path().to_path_buf(),
-        ];
-        let kept = filter_paths_needing_grant(input, RW_MASK);
+        let not_granted = canonicalize_grant_target(td_no_grant.path()).unwrap();
+        let pins = pin_all(
+            &[granted.clone(), not_granted.clone()],
+            GrantKind::ReadWrite,
+        )
+        .unwrap();
+        let kept: Vec<_> = needing_grant(pins, RW_MASK)
+            .iter()
+            .map(|p| p.path().to_path_buf())
+            .collect();
         assert!(
-            !kept.iter().any(|p| p == td_grant.path()),
+            !kept.contains(&granted),
             "already-granted path should be filtered out: kept={kept:?}"
         );
         assert!(
-            kept.iter().any(|p| p == td_no_grant.path()),
+            kept.contains(&not_granted),
             "non-granted path should survive the filter: kept={kept:?}"
         );
     });

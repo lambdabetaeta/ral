@@ -1,4 +1,4 @@
-//! Pins for [`GrantStack::admits_fs`]: containment is judged on resolved
+//! Pins for [`GrantStack::admits_fs`] and the refusals' words: containment is judged on resolved
 //! forms on both sides, so a symlink-spelled grant covers its target, in
 //! both directions.
 
@@ -48,37 +48,37 @@ fn a_symlink_spelled_read_prefix_admits_its_target() {
 }
 
 /// The threat is a stack with no `fs` opinion at all — the one shape
-/// the fold answers `Unrestricted` before consulting anything — so the
+/// the fold answers `Ok` before consulting anything — so the
 /// guard is tested on exactly that stack, and by inode: a hard link is
 /// the same file under another name.
 #[test]
 fn a_write_onto_a_pinned_binary_is_guarded_before_any_grant_is_consulted() {
-    use super::{FsVerdict, fs_verdict};
+    use super::{FsRefusal, fs_judge};
     crate::sandbox::pin();
     let open = GrantStack::of(Capabilities::default());
     let resolver = Resolver::shell_less();
     let own = std::env::current_exe().expect("own path");
-    let verdict = |path: &std::path::Path, op: &FsOp| fs_verdict(&open, &resolver, path, op);
+    let verdict = |path: &std::path::Path, op: &FsOp| fs_judge(&open, &resolver, path, op);
 
     assert!(
-        matches!(verdict(&own, &FsOp::Write), FsVerdict::Guarded("ral")),
+        matches!(verdict(&own, &FsOp::Write), Err(FsRefusal::Guarded("ral"))),
         "a write onto the pinned executable must be guarded under an open stack"
     );
     assert!(
-        matches!(verdict(&own, &FsOp::Read), FsVerdict::Unrestricted),
+        verdict(&own, &FsOp::Read).is_ok(),
         "the guard is over rewriting, not reading"
     );
     let tmp = tempfile::tempdir().unwrap();
     let other = tmp.path().join("other");
     std::fs::write(&other, "x").unwrap();
     assert!(
-        matches!(verdict(&other, &FsOp::Write), FsVerdict::Unrestricted),
+        verdict(&other, &FsOp::Write).is_ok(),
         "an unpinned file is the stack's to decide"
     );
     let link = tmp.path().join("link-to-own");
     if std::fs::hard_link(&own, &link).is_ok() {
         assert!(
-            matches!(verdict(&link, &FsOp::Write), FsVerdict::Guarded("ral")),
+            matches!(verdict(&link, &FsOp::Write), Err(FsRefusal::Guarded("ral"))),
             "a hard link names the pinned inode too"
         );
     }
@@ -113,7 +113,8 @@ fn a_symlink_spelled_deny_covers_its_target() {
 /// stored, though the deepest deny holds it only by a fold.
 #[test]
 fn a_deny_holding_the_stored_name_refuses_plainly() {
-    use super::{FsVerdict, fs_verdict};
+    use super::{FsRefusal, fs_judge};
+    use crate::capability::Withheld;
     let tmp = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(tmp.path()).unwrap();
     let under = |denies: &[&str]| {
@@ -125,18 +126,146 @@ fn a_deny_holding_the_stored_name_refuses_plainly() {
             ..FsPolicy::default()
         })
     };
-    let verdict = |grants: &GrantStack| {
+    let respelled = |grants: &GrantStack| {
         let access = root.join("d/secrets/f");
-        fs_verdict(grants, &Resolver::shell_less(), &access, &FsOp::Read)
+        match fs_judge(grants, &Resolver::shell_less(), &access, &FsOp::Read) {
+            Err(FsRefusal::Withheld(Withheld::Excluded { respelled, .. })) => respelled,
+            _ => panic!("an exclusion holds the access"),
+        }
     };
-    assert!(matches!(
-        verdict(&under(&["d/Secrets"])),
-        FsVerdict::Respelled(_)
-    ));
-    assert!(matches!(
-        verdict(&under(&["d", "d/Secrets"])),
-        FsVerdict::Denied
-    ));
+    assert!(respelled(&under(&["d/Secrets"])));
+    assert!(!respelled(&under(&["d", "d/Secrets"])));
+}
+
+mod words {
+    use super::*;
+    use crate::capability::{Evidence, ExecGrant, ExecKey, Program};
+    use crate::guard::enforce::{check_exec, check_fs_exact};
+    use crate::path::RealPath;
+    use crate::types::Context;
+
+    fn ctx(layers: impl IntoIterator<Item = Capabilities>) -> Context {
+        let mut ctx = Context::default();
+        ctx.grants = GrantStack::root();
+        layers.into_iter().for_each(|l| ctx.grants.push(l));
+        ctx
+    }
+
+    fn exec(entries: &[(ExecKey, Evidence)]) -> Capabilities {
+        Capabilities {
+            exec: Some(entries.iter().cloned().collect::<ExecGrant>()),
+            ..Capabilities::default()
+        }
+    }
+
+    fn file(real: &str) -> Program {
+        Program::File {
+            path: real.into(),
+            real: RealPath::assumed(real),
+            #[cfg(target_os = "linux")]
+            image: None,
+        }
+    }
+
+    fn dir(path: &str) -> ExecKey {
+        ExecKey::Dir(FrozenPath::for_test(path, path))
+    }
+
+    fn refusal(ctx: &Context, real: &str) -> crate::types::Error {
+        match check_exec(ctx, "t", file(real), vec![]) {
+            Ok(_) => panic!("{real} should be refused"),
+            Err(denial) => denial.error,
+        }
+    }
+
+    /// A missing allowance says so and mentions an enclosing grant only where
+    /// more than one layer supplies the axis.
+    #[test]
+    fn a_missing_allowance_mentions_an_enclosing_grant_only_when_nested() {
+        let only = exec(&[(dir("/other"), Evidence::ALLOW)]);
+        let one = refusal(&ctx([only.clone()]), "/x/t");
+        assert!(one.message.contains("lets it run"), "{}", one.message);
+        assert!(!one.hint.unwrap().contains("enclosing grant"));
+        let two = refusal(&ctx([only.clone(), only]), "/x/t");
+        assert!(two.hint.unwrap().contains("enclosing grant"));
+    }
+
+    /// An exclusion is named with its `dir` constructor, and no allowance is
+    /// offered against it.
+    #[test]
+    fn an_exclusion_is_named_and_no_allowance_is_suggested() {
+        let both = exec(&[(dir("/x"), Evidence::ALLOW), (dir("/x"), Evidence::DENY)]);
+        let e = refusal(&ctx([both]), "/x/t");
+        assert!(e.message.contains("`dir `absolute /x"), "{}", e.message);
+        assert!(
+            e.message.contains("cannot override an exclusion"),
+            "{}",
+            e.message
+        );
+        assert!(!e.hint.unwrap().contains("--extend"));
+    }
+
+    /// A program that may run but that fs does not let be read is refused for
+    /// reading it.  A layer reads only what it and the layers beneath it run
+    /// (§4.6), so the fs layer sits beneath the exec layer.
+    #[test]
+    fn an_unreadable_program_is_refused_for_what_it_reads() {
+        let runs = exec(&[(dir("/x"), Evidence::ALLOW)]);
+        let reads = Capabilities {
+            fs: Some(FsPolicy::default()),
+            ..Capabilities::default()
+        };
+        let e = refusal(&ctx([reads, runs.clone()]), "/x/t");
+        assert!(
+            e.message.contains("may run, but it is not readable"),
+            "{}",
+            e.message
+        );
+        let unrestricted = check_exec(&ctx([runs]), "t", file("/x/t"), vec![]);
+        assert!(unrestricted.is_ok());
+    }
+
+    /// A bundled tool is refused when an fs exclusion covers ral's binary,
+    /// which the refusal names.
+    #[test]
+    fn a_bundled_tool_names_ral_when_its_binary_is_excluded() {
+        let own = std::env::current_exe().unwrap();
+        let excluding = Capabilities {
+            fs: Some(FsPolicy {
+                read_prefixes: vec![FrozenPath::from_surface("/")],
+                deny_paths: vec![FrozenPath::from_surface(own.parent().unwrap())],
+                ..FsPolicy::default()
+            }),
+            ..Capabilities::default()
+        };
+        let ctx = ctx([excluding]);
+        let Err(denial) = check_exec(&ctx, "ls", Program::Tool("ls".into()), vec![]) else {
+            panic!("an fs exclusion over ral's binary refuses a bundled tool");
+        };
+        assert!(
+            denial.error.message.contains("built into ral"),
+            "{}",
+            denial.error.message
+        );
+        assert!(
+            denial.error.message.contains("ral's binary"),
+            "{}",
+            denial.error.message
+        );
+    }
+
+    /// An fs refusal names the missing permission.
+    #[test]
+    fn an_fs_refusal_names_reading_or_writing() {
+        let ctx = ctx([Capabilities {
+            fs: Some(FsPolicy::default()),
+            ..Capabilities::default()
+        }]);
+        let read = check_fs_exact(&ctx, std::path::Path::new("/nowhere/x"), &FsOp::Read);
+        assert!(read.err().unwrap().error.message.contains("reading"));
+        let write = check_fs_exact(&ctx, std::path::Path::new("/nowhere/x"), &FsOp::Write);
+        assert!(write.err().unwrap().error.message.contains("writing"));
+    }
 }
 
 /// Default APFS answers `SECRET` with `secret`: the walk must spell it as

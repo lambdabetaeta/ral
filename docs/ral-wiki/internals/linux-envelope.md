@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 2afefdf4
-verified_at_date: 2026-10-12
+verified_at_commit: 002c654a
+verified_at_date: 2026-10-13
 anchors: [Binds, render_objects, bwrap_argv, bwrap_command, Slot, HostEnvelope, render_dev, cgroup_tree, floor, Pinned, pin_envelope, InfoFd]
 ---
 
@@ -46,9 +46,15 @@ the filesystem**
 following a symlink, and lends a copy at `Slot::Mount(i)`**
 ([[decisions/261006_the-envelope-mounts-by-handle|the-envelope-mounts-by-handle]]).
 `bwrap_argv` emits `--ro-bind-fd` or `--bind-fd` from the same vector. The binds
-are: the read-only defaults, the read and write prefixes, the program's real
-image, each file and live directory the exec table allows, and, over
-everything, the cgroup tree.
+are: the read-only defaults, the read region (`shown`: every read scope of the
+fs projection, run places and live support among them, written prefixes
+included), the pins of bwrap and the trampoline, bound read-only at their own
+names before the masks, and, over everything, the cgroup tree. The launched
+image is not a bind of its own: the running-reads law puts it in the read region, and its
+inode, judged by the guard, is what the ruleset admits (`admit_image`).
+Every allowance is bound as the frozen real path the guard judged, never
+re-resolved; the surface spelling is only the destination at which the frozen
+object is bound.
 
 The launched image has its own earlier pin: opened at head resolution,
 judged by that object's name and lent at fd 107. The mounts start at fd 108.
@@ -62,6 +68,12 @@ keeps the envelope's mount restrictions
   bind, where the host's own link already stands.
 - **Redundant binds are dropped.** A read-only bind inside another bind adds
   nothing. A writable bind is dropped only inside a writable one.
+- **A redirected allowance refuses the launch.** Every bind object opens with
+  `openat2(RESOLVE_NO_SYMLINKS)`, so a symlink put anywhere on a frozen
+  allowance's path refuses the launch, naming it, rather than following it.
+- **There is no write freeze.** No bind is laid read-only over an admitted
+  directory a write covers; the protection it gave is a declared limit
+  ([[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]]).
 - **Missing objects are dropped, changed ones refused.** An absent object drops
   its binds at the open, and so does a system default this user may not reach.
   A name that now reaches another object, or an open through a symlink, refuses
@@ -75,8 +87,42 @@ keeps the envelope's mount restrictions
 Pinned by `sandbox::linux::tests::a_bind_is_opened_for_each_name_no_other_bind_shows`,
 `::a_prefix_whose_component_became_a_symlink_since_render_is_refused`,
 `::every_bind_is_a_handle_by_slot_in_layer_order`,
-`::a_write_through_a_link_is_frozen_and_masked_at_both_its_names` and, spawning,
+`::a_write_through_a_link_is_masked_at_both_its_names` and, spawning,
 `::a_prefix_swapped_for_a_symlink_after_the_open_shows_what_was_opened`.
+
+## The exec layer is lowered against the binds
+
+**Landlock rules attach to host objects opened before bwrap starts, and a walk
+from a file inside the envelope meets only the inodes above it in the
+envelope.** So the bind plan, with its objects, is computed before the ruleset
+and passed to `landlock::build`.
+
+Inside a restricted envelope a bind's root has the envelope's own directories
+above it, so a rule on a host directory above a bind root is off every walk
+inside that bind (the payload's `REFER` admission already worked around this for
+the envelope's root). `enveloped` once built the ruleset before `bwrap_command`
+opened the binds; the deduped shown roots, with their objects, are now computed
+first, and opening stays where it was.
+
+- **A directory admission `D`** puts a rule on `D` itself where some bind root's
+  object lies at or above `D`, and a rule on every bind root whose object lies
+  inside `D`: an alias (`/alias` bound to `/tools/sub` under `Dir(/tools)`) and
+  a canonical sub-bind (a ceiling that reads only `/tools/sub`). Exclusions are
+  subtracted along their spines from each root. Either way the walk from
+  `/tools/sub/prog` meets `/tools/sub` and the envelope's own directories, never
+  `/tools`; a nested grant that runs `Dir(/tools)` under a ceiling that reads only
+  `/tools/sub` cannot widen reading, so `/tools` is not shown.
+- **`Any` is the directory `/`.** Under an unrestricted fs it is a rule on `/`;
+  under a restricted fs, a rule on every bind root remaining after the
+  redundant-bind dedup. When every exclusion is a name veto, nothing is
+  subtracted, so no exec ruleset is built; signal scoping stays.
+- **Linker candidates are support**, admitted unless excluded, not before the
+  table; ral's pinned inode is no longer admitted at all.
+- **Limits, declared:** a program created during a launch on the spine of an
+  excluded path runs from the next launch; under `Any` with exclusions and a
+  restricted fs the envelope's private `/tmp` holds no host object, so a program
+  built there does not run; an excluded path that is a hard link to an admitted
+  file runs, since Landlock admits an inode.
 
 ## Where the host refuses a mount, the envelope rebuilds it
 

@@ -1,151 +1,270 @@
 ---
-verified_at_commit: 90479dea
-verified_at_date: 2026-10-06
-anchors: [GrantStack, Capabilities::widen, FsPolicy::widen, Verdict::meet, Verdict::widen, ExecGrant::widen, Table::meet, Table::verdict, region, rules, check_fs_op, for_invocation]
+verified_at_commit: 002c654a
+verified_at_date: 2026-10-13
+anchors: [GrantStack, Capabilities::extend, Fragment, Axis, join_top, Evidence, Table::meet, Table::withheld, region, rules, for_invocation]
 against: [design/grant, design/authority-tables, internals/capability-enforcement, design/two-enforcers, decisions/260906_object-not-name]
 ---
 
 # Composing capability policies
 
-[[design/grant|grant]] builds the policy a session runs under by composing
-pieces: a base profile, an optional `--extend-base` overlay, and any
-`--restrict` files. This page explains the composition rules in plain terms,
-shows what they do with examples, and points at the literature they come from.
-It is the formal-foundations companion to [[design/grant|grant]] and
-[[internals/capability-enforcement|capability-enforcement]].
+**Authority is a policy in the sense of Bruns and Huth's PBel: a function from
+requests to Belnap's four values, composed pointwise and closed to a decision
+only where it is enforced.** ral uses a small fragment of PBel and nothing
+else. [[design/grant|grant]] builds the policy a session runs under by composing
+pieces: a base profile, an optional `--extend` fragment, and any `--restrict`
+files. This page explains the composition rules, shows what they do, and reads
+them against the literature. It is the formal-foundations companion to
+[[design/grant|grant]] and
+[[internals/capability-enforcement|capability-enforcement]]; the table
+representation and the proofs are
+[[design/authority-tables|authority-tables]], the decision and its rationale
+[[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]].
 
 ## Two operations, two jobs
 
 Every rule does one of three things to a given command or path: **allow** it,
-**deny** it, or **say nothing**. Pieces combine two ways:
+**exclude** it, or **say nothing**. Pieces combine two ways:
 
-- **restrict** (`--restrict`, nested `grant`) — *narrow*. The result permits
-  something only if every layer permits it. This is *stacking*: each piece is
-  a layer of the `GrantStack`, and every verdict folds the layers' answers to
-  the access at hand. Nothing flattens two layers into one — see below for
-  why it cannot.
-- **extend-base** (`--extend-base`) — *widen*. The result adds the overlay's
-  grants on top of the base (`Capabilities::widen`, through the `Widen`
-  trait), producing one layer.
+- **restrict** (`--restrict`, nested `grant`): *narrow*. The result permits
+  something only if every layer permits it. This is *stacking*: each piece is a
+  layer of the `GrantStack`, and every question folds the layers' answers to the
+  access at hand. Nothing flattens two layers into one (see below).
+- **extend** (`--extend`): *join*. The ceiling is the base extended once by the
+  file's fragment (`Capabilities::extend`), producing one layer. Every later
+  layer restricts, so **authority is a ceiling, extended once, then only
+  restricted**; within ral there is no extension at all.
 
-## The one rule: a deny is a floor
+## The one rule: an exclusion beats every allowance
 
-In both operations, **a deny wins.** Once any layer denies something, nothing
-else can take that deny away:
+An exclusion wins over every allowance, on both axes, in the guard and the
+kernel, whatever their specificity. Neither a narrower directory nor an exact
+file reopens an excluded region, and nor do a carrier, the dynamic linker or
+ral's own binary; no backend makes an exception. In the extension, **an
+allowance never removes authority; only an exclusion does.** So:
 
-- a base deny survives an overlay that doesn't mention it;
-- a base deny survives an overlay that *re-grants* it — `--extend-base` cannot
+- a base exclusion survives a fragment that does not mention it;
+- a base exclusion survives a fragment that *re-allows* it: `--extend` cannot
   reopen a veto;
-- an overlay may *add* a deny, and it bites.
+- a fragment may *add* an exclusion, and it bites;
+- a fragment that supplies an axis the base leaves unrestricted leaves it
+  unrestricted, less the fragment's exclusions.
 
-To allow something a base forbids, you choose or write a base that allows it; you
-never reopen the floor from an overlay. Commands and paths follow this same rule.
+To allow something a base forbids, choose or write a base that allows it.
+
+### Guardrails, not walls
+
+An exclusion names programs by path and name. Where writing meets running, a
+copy, a newly written program or a script fed to an interpreter is a different
+request, and nothing here pretends otherwise. The exclusions that guard
+binaries are guardrails; what they stop is the honest request.
 
 ### Examples
 
-Base `reasonable` allows `git` and `curl`, reads `xdg:config`, and **denies
-`xdg:config/gh`** (where the GitHub OAuth token lives).
+Base `reasonable` allows `git` and `curl`, reads `xdg-config`, and **excludes
+`` `xdg-config gh ``** (where the GitHub OAuth token lives).
 
-- **Add a folder.** Overlay: `read ~/notes`. → `~/notes` becomes readable; `gh`
-  stays denied because the overlay never mentions it. The deny holding here is
-  what stops an unrelated grant from re-exposing the credential the base carved
-  out.
-- **Reopen a blocked command.** Base `minimal` denies `bash`. Overlay:
-  `exec [bash: allow]`. → bash stays denied. To get bash, use a base that allows
-  it.
-- **Add a block.** Overlay: `fs [deny: ~/secrets]`. → `~/secrets` is blocked on
-  top of whatever the base allowed.
-- **"minimal plus git".** This is *not* reopening a block: `minimal` does not
-  *deny* git, it just doesn't list it, so `exec [git: allow]` adds it cleanly. The
-  lesson — a base should `deny` only what is truly off-limits and leave "not
-  included, but fine to add" simply unlisted.
+- **Add a folder.** Fragment: `` read [`home notes] ``. `~/notes` becomes readable; `gh`
+  stays excluded because the fragment never mentions it.
+- **Reopen a blocked command.** A base that excludes `bash`. Fragment:
+  `` exec [allow: [`name bash]] ``. bash stays excluded. To get bash, use a base
+  that allows it.
+- **Add an exclusion.** Fragment: `` fs [deny: [`home secrets]] ``. `~/secrets` is
+  blocked on top of whatever the base allowed.
+- **"minimal plus git".** `minimal` does not *exclude* git, nor Homebrew; it
+  just does not list them, so `` exec [allow: [`name git]] `` adds `git` cleanly,
+  and a Homebrew `git` is admitted by name with nothing in the way. A base
+  should exclude only what is truly off-limits and leave "not included, but
+  fine to add" unlisted.
+- **`dangerous` plus an exclusion.** `dangerous` omits every axis. Extended
+  positively it stays unrestricted; extended with an exclusion it becomes
+  "every request, less that exclusion". An omitted *base* axis is `t`, not an
+  empty allowance.
 
-## Why this is the right default — the sources
+## Roles are types
 
-These composition rules have standard names; ral picks the conservative one.
+A PBel policy is total, so an omitted axis must denote something: the identity
+of the role it plays. In a **policy** (a base, a restriction layer, the ceiling,
+the stack) an omitted axis is `t`: it restricts nothing. In an **extension
+fragment** an omitted axis is `⊥`: it states nothing. The two roles are two
+types: `Capabilities` is a policy and the loader returns a `Fragment`, which only
+`Capabilities::extend` consumes and which can never be pushed onto a stack.
+Reading an omission in the wrong role is a type error, not a convention.
 
-- **Both choices are standard.** "Deny wins" is **deny-overrides**; "allow wins"
-  is **permit-overrides** — two of the rule-combining algorithms in the OASIS
-  **XACML** standard. The literature offers the menu; you choose by threat model.
+Extension of base `B` by fragment `F` is `B ◁ F`, per axis:
+
+| `B` | `F` | `B ◁ F` |
+|---|---|---|
+| any | omitted | `B` |
+| omitted (`t`) | supplied `Q` | `t ⊕ Q`: every request, less `Q`'s exclusions |
+| supplied `P` | supplied `Q` | `P ⊕ Q` |
+
+`◁` is not commutative, by design: its operands play different roles, whereas `⊕`
+between supplied policies is commutative. **The extension invariant** is stated
+of policy denotations: if `F` has no negative evidence at a request, whatever
+`B` permits `B ◁ F` permits; if `F` has negative evidence there, `B ◁ F`
+refuses; and `B ◁ F` permits only what `B` permits or `F` supports. It holds of
+the guard and of the policy part of every kernel table, not of a kernel table
+as a whole, since support (carriers, the linker) depends on the launch.
+
+## Running and writing read
+
+An allowance to write something allows reading it, in the layer that states it.
+A grant reads what it, and the grants enclosing it, let run by path, directory
+or name; a nested grant never makes something readable by naming it. So a
+restrict file that reads only the working directory does not hide the `cargo`
+that the ceiling runs from `~/.cargo/bin`: to hide it, exclude it. A bundled
+tool runs ral's own image, so it reads ral's binary, and an fs exclusion of that
+binary refuses every bundled tool; ral's binary is otherwise an ordinary host
+file, admitted exactly where a grant admits it. A nested ral is bound by the
+kernel alone, a guardrail like any other.
+
+## Why this is the right default: the sources
+
+- **Both choices are standard.** "Exclusion wins" is **deny-overrides**; "allow
+  wins" is **permit-overrides**: two of the rule-combining algorithms in the
+  OASIS **XACML** standard. The literature offers the menu; you choose by threat
+  model.
 - **For a sandbox, deny is the right default.** Saltzer & Schroeder's *fail-safe
-  defaults* (1975): base access on what is explicitly permitted, and deny when in
-  doubt. Deny-overrides is that principle applied to composition.
-- **One rule everywhere keeps policies predictable.** This body of work exists to
-  make policies you can *reason about*: Bruns & Huth's stated goal is "analyzable
-  composition," and Tschantz & Krishnamurthi formalize *safety*, *monotonicity*,
-  and *independent composition* — whether you can predict a policy from its
-  parts. Different rules for commands vs paths would break independent
-  composition, letting an unrelated overlay line change a verdict elsewhere; one
-  uniform rule keeps it.
+  defaults* (1975): base access on what is explicitly permitted, and deny when
+  in doubt. Deny-overrides is that principle applied to composition.
+- **One rule everywhere keeps policies predictable.** Bruns & Huth's stated goal
+  is "analyzable composition", and Tschantz & Krishnamurthi formalize *safety*,
+  *monotonicity* and *independent composition*. Different rules for commands vs
+  paths, or a specificity that lets an exact file reopen a directory, would let
+  an unrelated line change a verdict elsewhere; one uniform rule keeps it.
 - **The path/prefix world has a known footgun taxonomy.** Al-Shaer & Hamed
-  catalog firewall-rule anomalies over prefix containment — *shadowing*,
-  *generalization*, *correlation*, *redundancy*. A broad allow over a narrow deny
-  is *generalization*; "most-specific match wins" is the discipline that tames
-  it, and in exec it is literal: the derived `Ord` on `Rank`
-  (`Dir(depth) < Carrier < Exact < Name`), the greatest matching rank
-  deciding, over paths `path_within` has already resolved. In fs the rank is
-  `(is a deny, depth)`, so the same rule reads as deny-overrides: a deny
-  outranks every allow at any depth ([[design/authority-tables|authority-tables]]).
+  catalog firewall-rule anomalies over prefix containment: *shadowing*,
+  *generalization*, *correlation*, *redundancy*. ral takes the conservative
+  discipline: no specificity at all, so a broad allowance over a narrow
+  exclusion is always *Both*, and refuses.
 - **The operators form an algebra.** Bonatti, di Vimercati & Samarati give policy
-  *union*, *intersection*, and *difference*; ral's restrict/extend-base are the
-  intersection and a deny-respecting union.
+  *union*, *intersection* and *difference*; restrict is the intersection and
+  extend a union that an exclusion survives.
 
-## The deeper structure (optional)
+## PBel, and the fragment ral uses
 
-For the formal shape: the value space is **Belnap's four-valued logic** — allow,
-deny, neither, conflict — which carries *two* orderings at once, a **bilattice**
-(Ginsberg; Fitting), applied to access control by Bruns & Huth's PBel language.
-`restrict` is a meet on one ordering (permission); `extend-base` is a widen on the
-other (assertedness), with deny-overrides as the fixed rule for conflicts. The
-practical upshot is the only thing needed day to day: **deny wins, both ways.**
-That this is *not* a single lattice — it genuinely has two orderings — is why one
-operation never "absorbs" the other; that is expected, not a defect.
+The value space is **Belnap's FOUR**, presented as the product bilattice over
+the Booleans: evidence is a pair `(p, n)` of positive and negative support
+(`Evidence`), with `(0,0)` Neither, `(1,0)` Allow, `(0,1)` Deny, `(1,1)` Both.
+The orders are `x ≤k y` iff `p ≤ q ∧ n ≤ m`, and `x ≤t y` iff `p ≤ q ∧ m ≤ n`.
+After Bruns and Huth (§3, §4.1) ral's policies use these terms and no others:
+
+- basic policies `(t if X)` and `(f if X)`: an authored allowance or exclusion of
+  target `X`, and the constant `t`;
+- information join `⊕`: `(p, n) ⊕ (q, m) = (p ∨ q, n ∨ m)`, identity ⊥, which
+  collects the evidence of two supplied fragments;
+- truth meet `∧`: `(p, n) ∧ (q, m) = (p ∧ q, n ∨ m)`, identity `t`, which
+  composes restricting layers;
+- the wrapper `↓`, `p↓ = p[⊤ ↦ f][⊥ ↦ f]`: permit exactly when `p ∧ ¬n`, applied
+  once, at the boundary that enforces (Bruns and Huth §6, "top-level wrappers").
+
+Both `⊕` and `∧` are associative, commutative and idempotent, and a negative
+bit, once present, survives both. Within this fragment no composition followed
+by `↓` tells Both from Deny; FOUR is kept regardless, as PBel's carrier, so that
+adding negation, knowledge meet or priority later does not change the
+representation. Neither is not an authored deny: **a missing allowance is never
+stored as an exclusion.** Net is the one axis kept as a decision rather than as
+evidence. Every enforced policy has the shape `↓(E₀ ∧ E₁ ∧ … ∧ Eₙ)`, with every
+`⊕` before every `∧`, which is why an extension cannot follow a restriction and
+undo it: `(B ∧ R) ⊕ E` would permit what `R` withholds, but a pushed layer is
+immutable and `◁` takes a `Fragment`, which only the loader constructs, once,
+before the first push. One extension file is an interface choice; several would
+fold by `⊕` before extending the base. The order of the stack still matters
+within `∧`, because a layer reads the run places of the layers beneath it, so the
+same layer elaborates differently above and beneath another
+([[design/authority-tables|authority-tables]]).
+
+Not in the fragment: priority, negation, provenance of evidence, argument
+policies, any public policy-expression language. Ours, not the reference's: the
+request domains (running as reading, looking down the stack), polarity-dependent
+path identity, omission indexed by role, frozen allowances with re-resolved
+exclusions, support, denotational activation, and the absence of specificity.
+
+## What the reference gives, and what is ours
+
+From Bruns and Huth (Imperial College DTR11-6, 2011; ACM TISSEC 14(1)):
+
+- §2: FOUR as the simplest non-trivial bilattice, after Ginsberg (1988); the
+  pair presentation is the product construction of bilattices (Ginsberg; Fitting,
+  *Bilattices and the semantics of logic programming*, 1991).
+- §3: core PBel, with basic policies `(b if rp)`.
+- §4.1: the derived operators (`⊕`, `⊗`, `p > q`) and the wrappers `↓`, `↑`.
+- §6: the idioms. Resolve conflicts at the top level; absolute prohibitions;
+  SPL's AND as `(p ⊕ q)[⊤ ↦ f]`, which is deny-overrides.
+- §11: related work. Three-valued composition is subsumed by PBel; D-algebras are
+  compared.
+
+Ours, and our obligations rather than the reference's:
+
+- the request domains: running as reading at the stack, ral's binary as an
+  ordinary file, a bundled tool's read of it, writing as reading;
+- polarity-dependent identity (allowances as stored, exclusions under every
+  spelling) and, on top of it, frozen allowances with re-resolved exclusions;
+- omission indexed by role, the two role types and `◁`;
+- verbs as sets of positive evidence, and net as a decision;
+- the floor, carriers and linker as `⊕` support, and the guard/kernel contract
+  that support does not obey ([[design/two-enforcers|two-enforcers]]);
+- the universal positive `every`, compiled to `Any`, and its lowering against the
+  Linux envelope;
+- denotational activation;
+- the `homebrew` selector;
+- the absence of specificity, and the backend support and limits.
+
+Not borrowed: OpenAI's Codex CLI restricts no program at the OS level (its
+command rules are lexical checks on argv before spawn, and it does nothing about
+copies), which agrees with treating exclusions as guardrails.
 
 ## Why restrict is stacking and not a flattened meet
 
-An authored exec layer maps keys — bare names, paths, directories — to
-verdicts, and a key that is a bare name — `git: [status]` — is
-admission-or-restriction for *whatever `git` resolves to at check time*. Take
-A = `/usr/bin/` allowed and `git: [status]`, B = `/usr/bin/` allowed and silent
-on `git`. `A ∧ B` should refuse `git push` (A does). No authored map says
-that: keep A's key and the result also refuses `git` where B's directories
-never admitted it; drop it and the result admits `git push`. The meaning of
-the one-sided key is "A's restriction ∧ B's directory verdict on the resolved
-path", which exists only once the name is a file. So the authored form is not
-closed under intersection, and the meet is the stack: every question compiles
-each layer against the host and intersects the answers, where the same
-question *is* closed. (This was a real hole: a flattened `meet_literal_exec`
-dropped the one-sided restriction —
-[[decisions/260906_object-not-name|object-not-name]].)
+An authored exec layer maps keys (bare names, paths, directories) to evidence,
+and a key that is a bare name, `git: [status]`, is admission-or-restriction for
+*whatever `git` resolves to at check time*. Take A = `/usr/bin/` allowed and
+`git: [status]`, B = `/usr/bin/` allowed and silent on `git`. `A ∧ B` should
+refuse `git push` (A does). No authored map says that: keep A's key and the
+result also refuses `git` where B's directories never admitted it; drop it and
+the result admits `git push`. The meaning of the one-sided key is "A's
+restriction ∧ B's directory evidence on the resolved path", which exists only
+once the name is a file. So the authored form is not closed under intersection,
+and the meet is the stack: every question compiles each layer against the host
+and intersects the answers, where the same question *is* closed
+([[decisions/260906_object-not-name|object-not-name]]).
 
 **Restrict is a meet of tables.** Compiled, a layer is a table of scoped rules
-over objects — real paths, bundled tools, directories, vetoed names for exec;
-resolved prefixes for fs — denoting a function from subjects to verdicts, and
-`Table::meet` is defined by the pointwise law
-`⟦a ∧ b⟧(s) = ⟦a⟧(s) ∧ ⟦b⟧(s)`. Deny-overrides survives representation: the
-meet joins denies and keeps an allow only at its own subject's met verdict,
-since a default written down as a deny would, under the spelling-folding deny
-relation, refuse names neither layer denied. The one-sided key above is then
-exactly "A's restriction ∧ B's directory verdict on the resolved path",
-computed once the name is a file. The proof sketch and the lattice laws, both
-property-tested, are [[design/authority-tables|authority-tables]].
+over objects, denoting a function from subjects to evidence, and `Table::meet`
+is defined by `ev(a ∧ b, s) = ev(a, s) ∧ ev(b, s)`: exclusions join, and an
+allowance survives only at its own subject where both sides support it. A
+default written down as an exclusion would, under the spelling-folding relation
+exclusions use, refuse names neither layer excluded. The proof sketch and the
+property tests are [[design/authority-tables|authority-tables]].
 
 ## Cross-check: the code matches
 
-The composition site is `exarch::policy::for_invocation`, which produces a
-`GrantStack` whose layers are `base ∨ extend`, then each `restrict`, then the
-deny layers for the restrict files and the credential files.
+The composition site is `exarch::policy::for_invocation`, which builds one
+ceiling, `base.extend(fragment)`, and pushes it; then each `--restrict` file,
+the deny layer for the restrict files and the credential files, and last the
+self layer, an exec exclusion of exarch's own binary, as separate restriction
+layers. Credential, profile-file and self exclusions never move into the
+extension, where they could be forgotten. The `deny_layer` is `t ⊕ (f if X)`,
+built by `join_top` over a fragment of exclusions.
 
-- **restrict** — each file is a layer; `capability::fs::region` and
-  `capability::exec::rules` meet the layers' tables with `Table::meet`,
-  allows meeting and denies joining. Deny-overrides. ✔
-- **extend-base** — `FsPolicy::widen` unions denies *and* prefixes;
-  `Verdict::widen` makes `Deny` win key by key; `ExecGrant::widen` lets a
-  deny-dir evict a clashing allow-dir. Deny-overrides, uniform with fs. ✔
-- **at the point of use** — `check_fs_op` and `Shell::locate` test denies
-  before grants and fold every stack layer; `Table::verdict` ranks an fs
-  deny above every allow and an exec veto above every other rule. Any layer's
-  deny denies. ✔
+- **restrict**: each file is a layer; `capability::fs::region` and
+  `capability::exec::rules` meet the layers' tables with `Table::meet`, so a
+  conjunct per layer and `↓(S ∧ R)` permits nothing `↓S` did not (restriction attenuates).
+  Pairing of run places looks *down* the stack, so a pushed layer changes no
+  layer beneath it.
+- **extend**: `Capabilities::extend` applies `◁` per axis through
+  `Axis::{join, join_top}`, over a `Fragment` the loader alone constructs. On
+  exec, `join_top` sets `every` and keeps allowances beside it, so they name run
+  places without restricting; verbs join by union, fs by union of lists, net by
+  `Offline`.
+- **at the point of use**: `GrantStack::admit` and the fs guard
+  (`check_fs_op`, `Shell::locate`) fold every layer and decide once, with `↓`,
+  by `Table::withheld`, which cites an exclusion that applies or names the missing
+  permission. Any layer's exclusion excludes; any layer's missing allowance
+  refuses.
+- **activation**: `Capabilities::is_restrictive` asks each axis whether it
+  denotes `t` (`Axis::is_top`), so a layer that restricts nothing activates
+  nothing.
 
 ## See also
 

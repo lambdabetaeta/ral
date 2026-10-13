@@ -10,12 +10,12 @@
 //! Seatbelt has no per-address network rules, so `SandboxProjection::net` is
 //! one allow/deny bit rather than an endpoint list.
 
-use super::{ExecProjection, FsProjection, FsRules, SandboxProjection, WriteReach};
+use super::{ExecProjection, FsProjection, RenderedRules, SandboxProjection};
 use crate::capability::ExecScope;
-use crate::path::{Rendered, render_paths, render_real, rendered_ancestors};
+use crate::path::{Object, Rendered, render_paths, render_real, rendered_ancestors};
 use std::collections::BTreeSet;
 use std::ffi::{CStr, CString};
-use std::fmt::{self, Write};
+use std::fmt;
 use std::os::raw::{c_char, c_int};
 
 /// Seatbelt profiles do not stack: a process already inside one gets EPERM
@@ -79,14 +79,10 @@ const NET_PROFILE: &str = include_str!("macos-net.sbpl");
 struct Profile {
     /// What the fs grant reads and writes, with the directory lookups it needs.
     fs_allows: Vec<String>,
-    /// `process-exec` allows and denies, in the order the grant carries them.
+    /// The Rosetta loader, then every `process-exec` allow, then every deny.
     exec_rules: Vec<String>,
     /// The lookups the exec admits need through their ancestors.
     exec_ancestors: Vec<String>,
-    /// Writes denied under the admitted set: each dir a restricted fs's write
-    /// prefixes cover without naming, or, under an unrestricted fs, the whole
-    /// set when a veto asks.
-    exec_freeze: Vec<String>,
     /// What the fs grant carves out of its allows.
     fs_denies: Vec<String>,
     /// Directory names frozen in their parents, and ral's own file locked.
@@ -100,22 +96,14 @@ impl fmt::Display for Profile {
             fs_allows,
             exec_rules,
             exec_ancestors,
-            exec_freeze,
             fs_denies,
             pins,
             net,
         } = self;
         f.write_str(BASE_PROFILE)?;
-        for line in [
-            fs_allows,
-            exec_rules,
-            exec_ancestors,
-            exec_freeze,
-            fs_denies,
-            pins,
-        ]
-        .into_iter()
-        .flatten()
+        for line in [fs_allows, exec_rules, exec_ancestors, fs_denies, pins]
+            .into_iter()
+            .flatten()
         {
             write!(f, "\n{line}")?;
         }
@@ -143,11 +131,11 @@ pub(super) fn build_profile(policy: &SandboxProjection) -> Result<String, String
         }
     }
 
-    // Ral's own file, rendered like the rest: execve presents `/tmp/x` as
-    // `/private/tmp/x`.
-    let own = render_paths(&[super::reexec::own()?.exec_path().to_string_lossy()])?;
-    emit_exec_rules(&mut profile, &rendered.exec, &own, &rendered.fs)?;
+    emit_exec_rules(&mut profile, &rendered.exec)?;
 
+    // Ral's own file, rendered like the rest: execve presents `/tmp/x` as
+    // `/private/tmp/x`.  Protected whatever the grant, never admitted by it.
+    let own = render_paths(&[super::reexec::own()?.exec_path().to_string_lossy()])?;
     // `subpath` so a denied directory covers everything under it; `file-link`
     // (Seatbelt has no `file-link*`) blocks `link(2)` against the source,
     // closing the hole where a second name elsewhere would let writes bypass
@@ -155,7 +143,7 @@ pub(super) fn build_profile(policy: &SandboxProjection) -> Result<String, String
     for path in rendered
         .fs
         .rules()
-        .map(|r| r.deny_paths.as_slice())
+        .map(|r| r.deny.as_slice())
         .unwrap_or_default()
     {
         profile.fs_denies.extend(
@@ -194,134 +182,106 @@ fn emit_pins<'a>(pins: &mut Vec<String>, dirs: impl IntoIterator<Item = &'a Rend
 }
 
 /// Emit the allow rules and ancestor-metadata carve-outs for a restricted fs
-/// projection.
-fn emit_fs_restricted(lines: &mut Vec<String>, rules: &FsRules<Rendered>) {
-    let readable = || {
-        (rules.read_prefixes.iter())
-            .chain(&rules.floor)
-            .chain(&rules.write_prefixes)
-    };
+/// projection.  Every allowance renders as its frozen real path and its
+/// firmlink twin, never a surface spelling.  The read region carries what exec
+/// runs and what a launch needs beyond it, so exec's own clauses read nothing.
+fn emit_fs_restricted(lines: &mut Vec<String>, rules: &RenderedRules) {
+    fn names(objects: &[Object]) -> Vec<&Rendered> {
+        objects.iter().flat_map(Object::names).collect()
+    }
+    let (write, read) = (names(&rules.write), names(&rules.read));
+    let readable = || read.iter().chain(&write).copied();
     emit_ancestor_metadata(lines, readable());
     emit_read_subpaths(lines, readable());
-    for prefix in &rules.write_prefixes {
+    for prefix in write {
         lines.push(Clause::allow("file-write*", Filter::Subpath(prefix)).to_string());
     }
 }
 
 /// Seatbelt carries the exec allow-list into the kernel via the
-/// `process-exec` clause [`emit_exec_rules`] renders below.
+/// `process-exec` clauses [`emit_exec_rules`] renders below.
 pub(crate) const RENDERS_EXEC: bool = true;
 
-/// Render the `process-exec` rules.  `Unrestricted` is a wildcard, so an
-/// fs-only grant does not attenuate exec here.  `Restricted` admits the
-/// loader base and `own`, ral's binary, first, then renders each rule in
-/// precedence order, one [`Clause`] each: Seatbelt is last-match-wins.  Exec
-/// denies deny no reads: those are fs's.
-/// Writes under an admitted dir are denied wherever the fs grant would
-/// otherwise let a child author what the dir runs, and a veto is hollow
-/// without it: for each dir a restricted `fs`'s write prefixes cover without
-/// naming ([`WriteReach::Covered`]), and under an unrestricted `fs`, where
-/// `(allow file-write*)` covers everything, for the whole admitted set when
-/// a veto asks.  `own` is frozen by [`build_profile`] whatever the grant.
-/// Rule by rule: `docs/ral-wiki/internals/seatbelt-profile.md`.
+/// Render the `process-exec` rules.  `Unrestricted` is a wildcard.
+/// `Restricted` admits Rosetta's loader first, in a clause of its own, then
+/// every positive scope (`Any` as the wildcard), then every negative one, so
+/// that an exclusion reaches everything above it: Seatbelt is last-match-wins.
+/// Order within a group is for stable output; depth grants no exception.  A
+/// scope holding both polarities emits both.  Support arrives among the
+/// positives as file allows.  Exec clauses are `process-exec` alone: reads are
+/// the fs section's.  Rule by rule:
+/// `docs/ral-wiki/internals/seatbelt-profile.md`.
 ///
-/// `Err` when the loader base's own name-class expansion is not valid
-/// UTF-8, which [`render_paths`] refuses.
-fn emit_exec_rules(
-    profile: &mut Profile,
-    exec: &ExecProjection,
-    own: &[Rendered],
-    fs: &FsProjection<Rendered>,
-) -> Result<(), String> {
+/// `Err` when a name's expansion is not valid UTF-8, which [`render_paths`]
+/// refuses.
+fn emit_exec_rules(profile: &mut Profile, exec: &ExecProjection) -> Result<(), String> {
     let ExecProjection::Restricted(rules) = exec else {
-        profile.exec_rules.push("(allow process-exec)".to_string());
+        profile.exec_rules.push(ANY_EXEC.to_string());
         return Ok(());
     };
     // Toolchains (`gcc → cc1 → as → ld`) arrive through the grant, `system:`
-    // among them; only the loader base, Rosetta's runtime, is ambient.
+    // among them; only the loader, Rosetta's runtime, is ambient.
     let rosetta = std::iter::once("/Library/Apple/usr").filter(|p| crate::path::exists(p));
     let loader = render_paths(&rosetta.collect::<Vec<_>>())?;
-    // A ral run in here starts its bundled tools and pipeline anchors by
-    // re-executing this binary, so it is admitted without the grant naming it.
-    let mut clauses = String::new();
-    for path in own {
-        let _ = write!(clauses, "\n  {}", Filter::Literal(path));
-    }
-    for dir in &loader {
-        let _ = write!(clauses, "\n  {}", Filter::Subpath(dir));
-    }
     // An operand-less `(allow file-read* process-exec)` is an unconditional
-    // allow under SBPL, so an empty base must emit nothing.
-    if !clauses.is_empty() {
+    // allow under SBPL, so an empty loader must emit nothing.
+    if !loader.is_empty() {
+        let filters: String = loader
+            .iter()
+            .map(|dir| format!("\n  {}", Filter::Subpath(dir)))
+            .collect();
         profile
             .exec_rules
-            .push(format!("(allow file-read* process-exec{clauses})"));
+            .push(format!("(allow file-read* process-exec{filters})"));
     }
-    let (mut granted_files, mut granted_dirs): (Vec<Rendered>, Vec<Rendered>) =
-        (Vec::new(), Vec::new());
-    let mut push = |allow: bool, filter: Filter<'_>| {
-        profile
-            .exec_rules
-            .push(exec_clause(allow, filter).to_string());
+    let spell = |scope: &ExecScope, allow: bool| -> Result<Vec<String>, String> {
+        let clause = |filter| {
+            Clause {
+                allow,
+                ops: "process-exec",
+                filter,
+            }
+            .to_string()
+        };
+        Ok(match scope {
+            ExecScope::Any => vec![ANY_EXEC.to_string()],
+            ExecScope::Dir(path) => render_real(path)?
+                .iter()
+                .map(|name| clause(Filter::Subpath(name)))
+                .collect(),
+            ExecScope::File(path) => render_real(path)?
+                .iter()
+                .map(|name| clause(Filter::Literal(name)))
+                .collect(),
+            ExecScope::Name(name) => vec![clause(Filter::Regex(name))],
+            ExecScope::Tool(_) => Vec::new(),
+        })
     };
-    for (scope, verdict) in rules.precedence() {
-        let allow = !verdict.is_denied();
-        match scope {
-            ExecScope::Dir(path) => {
-                for name in render_real(path)? {
-                    push(allow, Filter::Subpath(&name));
-                    if allow {
-                        granted_dirs.push(name);
-                    }
-                }
-            }
-            ExecScope::File(path) => {
-                for name in render_real(path)? {
-                    push(allow, Filter::Literal(&name));
-                    if allow && !own.contains(&name) {
-                        granted_files.push(name);
-                    }
-                }
-            }
-            ExecScope::Name(name) => push(false, Filter::Regex(name)),
-            ExecScope::Carrier(_) | ExecScope::Tool(_) => {}
-        }
+    let positives = rules
+        .rules()
+        .filter(|(_, e)| e.positive)
+        .map(|(s, _)| (s, true));
+    let negatives = rules
+        .rules()
+        .filter(|(_, e)| e.negative)
+        .map(|(s, _)| (s, false));
+    for (scope, allow) in positives.chain(negatives) {
+        profile.exec_rules.extend(spell(scope, allow)?);
     }
-    emit_ancestor_metadata(
-        &mut profile.exec_ancestors,
-        own.iter().chain(&granted_files).chain(&granted_dirs),
-    );
-    let deny_writes = |filter| Clause::deny("file-write*", filter).to_string();
-    let admitted_dirs: Vec<&Rendered> = loader.iter().chain(&granted_dirs).collect();
-    match fs {
-        FsProjection::Unrestricted if rules.denies().next().is_some() => {
-            profile.exec_freeze.extend(
-                admitted_dirs
-                    .into_iter()
-                    .map(|dir| deny_writes(Filter::Subpath(dir))),
-            );
-            profile.exec_freeze.extend(
-                granted_files
-                    .iter()
-                    .map(|file| deny_writes(Filter::Literal(file))),
-            );
-        }
-        FsProjection::Unrestricted => {}
-        FsProjection::Restricted(writes) => {
-            for &dir in &admitted_dirs {
-                if writes.write_reach(dir, &admitted_dirs) == WriteReach::Covered {
-                    profile.exec_freeze.push(deny_writes(Filter::Subpath(dir)));
-                }
-            }
-            for file in &granted_files {
-                if writes.write_reach(file, &admitted_dirs) == WriteReach::Covered {
-                    profile.exec_freeze.push(deny_writes(Filter::Literal(file)));
-                }
-            }
-        }
-    }
+    let granted = rules
+        .live()
+        .filter_map(|scope| match scope {
+            ExecScope::Dir(path) | ExecScope::File(path) => Some(render_real(path)),
+            _ => None,
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .concat();
+    emit_ancestor_metadata(&mut profile.exec_ancestors, &granted);
     Ok(())
 }
+
+/// Every program may start: the wildcard, and what `Any` renders as.
+const ANY_EXEC: &str = "(allow process-exec)";
 
 /// What an SBPL clause matches.  `Display` escapes, so no name is spliced into
 /// a rule without it.
@@ -371,16 +331,6 @@ impl fmt::Display for Clause<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let verb = if self.allow { "allow" } else { "deny" };
         write!(f, "({verb} {} {})", self.ops, self.filter)
-    }
-}
-
-/// One kernel exec rule as one clause.  An allow admits `file-read*` beside
-/// `process-exec`, which Seatbelt needs to spawn; a deny is exec only.
-fn exec_clause(allow: bool, filter: Filter<'_>) -> Clause<'_> {
-    if allow {
-        Clause::allow("file-read* process-exec", filter)
-    } else {
-        Clause::deny("process-exec", filter)
     }
 }
 
@@ -471,9 +421,9 @@ unsafe extern "C" {
 #[cfg(test)]
 mod tests {
     use super::{BASE_PROFILE, NET_PROFILE, Profile, build_profile, withheld_doors};
-    use crate::capability::{ExecScope, Verdict};
+    use crate::capability::{Evidence, ExecScope, FsScope};
     use crate::path::proper_ancestors;
-    use crate::path::{RealPath, command_name_key};
+    use crate::path::{FrozenPath, RealPath, command_name_key};
     use crate::sandbox::{ExecProjection, FsProjection, FsRules, SandboxProjection};
 
     /// The profile with its commentary dropped — what the kernel reads.  The
@@ -488,24 +438,26 @@ mod tests {
             .join("\n")
     }
 
-    type Rule = (ExecScope, Verdict);
+    type Rule = (ExecScope, Evidence);
+
+    fn evidence(allow: bool) -> Evidence {
+        if allow {
+            Evidence::ALLOW
+        } else {
+            Evidence::DENY
+        }
+    }
 
     fn dir(path: &str, allow: bool) -> Rule {
-        (
-            ExecScope::Dir(RealPath::assumed(path)),
-            Verdict::from(allow),
-        )
+        (ExecScope::Dir(RealPath::assumed(path)), evidence(allow))
     }
 
     fn file(path: &str, allow: bool) -> Rule {
-        (
-            ExecScope::File(RealPath::assumed(path)),
-            Verdict::from(allow),
-        )
+        (ExecScope::File(RealPath::assumed(path)), evidence(allow))
     }
 
     fn veto(name: &str) -> Rule {
-        (ExecScope::Name(command_name_key(name)), Verdict::Deny)
+        (ExecScope::Name(command_name_key(name)), Evidence::DENY)
     }
 
     fn restricted(fs: FsProjection, rules: Vec<Rule>) -> SandboxProjection {
@@ -516,10 +468,26 @@ mod tests {
         }
     }
 
+    fn prefix(path: &str) -> FsScope {
+        FsScope::Prefix(FrozenPath::for_test(path, path))
+    }
+
+    fn frozen(paths: &[&str]) -> Vec<FrozenPath> {
+        paths.iter().map(|p| FrozenPath::for_test(p, p)).collect()
+    }
+
     /// A restricted fs writing under `prefixes` and nothing else.
     fn writing(prefixes: &[&str]) -> FsProjection {
         FsProjection::Restricted(FsRules {
-            write_prefixes: prefixes.iter().copied().map(String::from).collect(),
+            write: prefixes.iter().copied().map(prefix).collect(),
+            ..FsRules::default()
+        })
+    }
+
+    /// A restricted fs reading `reads` and nothing else.
+    fn reading(reads: Vec<FsScope>) -> FsProjection {
+        FsProjection::Restricted(FsRules {
+            read: reads,
             ..FsRules::default()
         })
     }
@@ -538,8 +506,10 @@ mod tests {
         assert!(!profile.contains("(allow file-read* process-exec"));
     }
 
+    /// Positive clauses are `process-exec` alone: the reads are the fs
+    /// section's, so an exec admit reads nothing of its own.
     #[test]
-    fn mac_profile_renders_each_rule_as_one_form() {
+    fn mac_profile_renders_each_rule_as_one_exec_only_form() {
         let policy = restricted(
             FsProjection::default(),
             vec![
@@ -550,9 +520,9 @@ mod tests {
         );
         let profile = build_profile(&policy).unwrap();
         for form in [
-            "(allow file-read* process-exec (subpath \"/usr/bin\"))",
-            "(allow file-read* process-exec (subpath \"/opt/homebrew/bin\"))",
-            "(allow file-read* process-exec (literal \"/usr/bin/git\"))",
+            "(allow process-exec (subpath \"/usr/bin\"))",
+            "(allow process-exec (subpath \"/opt/homebrew/bin\"))",
+            "(allow process-exec (literal \"/usr/bin/git\"))",
             "(allow file-read-metadata (literal \"/usr\"))",
             "(allow file-read-metadata (literal \"/usr/bin\"))",
         ] {
@@ -561,6 +531,10 @@ mod tests {
         assert!(
             !profile.contains("(allow process-exec)\n"),
             "wildcard process-exec leaked into restricted profile"
+        );
+        assert!(
+            !profile.contains("(allow file-read* (subpath \"/usr/bin\"))"),
+            "an exec admit read what the fs grant did not:\n{profile}"
         );
     }
 
@@ -590,7 +564,6 @@ mod tests {
             fs_allows: section("fs-allows"),
             exec_rules: section("exec-rules"),
             exec_ancestors: section("exec-ancestors"),
-            exec_freeze: section("exec-freeze"),
             fs_denies: section("fs-denies"),
             pins: section("pins"),
             net: true,
@@ -602,13 +575,14 @@ mod tests {
             .expect("the base leads and the net rules trail");
         assert_eq!(
             sections,
-            "\n(fs-allows)\n(exec-rules)\n(exec-ancestors)\n(exec-freeze)\n(fs-denies)\n(pins)"
+            "\n(fs-allows)\n(exec-rules)\n(exec-ancestors)\n(fs-denies)\n(pins)"
         );
     }
 
-    /// The projection's order is the precedence of its exec rules.
+    /// Every positive clause precedes every negative one, whatever the depth
+    /// of the scopes: depth grants no exception.
     #[test]
-    fn mac_profile_keeps_the_rules_in_order() {
+    fn mac_profile_emits_positives_then_negatives() {
         let policy = restricted(
             FsProjection::default(),
             vec![
@@ -619,182 +593,118 @@ mod tests {
             ],
         );
         let profile = build_profile(&policy).unwrap();
-        let forms = [
-            "(allow file-read* process-exec (subpath \"/x\"))",
+        let positives = [
+            "(allow process-exec (subpath \"/x\"))",
+            "(allow process-exec (literal \"/x/y/z\"))",
+        ];
+        let negatives = [
             "(deny process-exec (subpath \"/x/y\"))",
-            "(allow file-read* process-exec (literal \"/x/y/z\"))",
             r#"(deny process-exec (regex #"/z$"))"#,
         ];
-        let indices: Vec<usize> = forms.iter().map(|form| at(&profile, form)).collect();
-        assert!(indices.is_sorted(), "out of order:\n{profile}");
+        let last_positive = positives.iter().map(|f| at(&profile, f)).max().unwrap();
+        let first_negative = negatives.iter().map(|f| at(&profile, f)).min().unwrap();
+        assert!(last_positive < first_negative, "out of order:\n{profile}");
     }
 
-    /// An exec veto under an unrestricted fs is otherwise hollow: the child
-    /// drops a binary into an admitted directory and runs it from there under
-    /// a name the veto never mentions.
+    /// A scope holding both polarities emits both clauses.
     #[test]
-    fn mac_profile_freezes_the_admitted_set_when_a_veto_meets_unrestricted_fs() {
-        let vetoed = restricted(
+    fn mac_profile_emits_both_clauses_for_a_both_scope() {
+        let both = (
+            ExecScope::File(RealPath::assumed("/x/tool")),
+            Evidence::BOTH,
+        );
+        let profile = build_profile(&restricted(FsProjection::default(), vec![both])).unwrap();
+        let allow = at(&profile, "(allow process-exec (literal \"/x/tool\"))");
+        let deny = at(&profile, "(deny process-exec (literal \"/x/tool\"))");
+        assert!(allow < deny);
+    }
+
+    /// `Any` is the wildcard among the positives, and the exclusions still
+    /// follow it.
+    #[test]
+    fn mac_profile_renders_any_as_unrestricted_exec_before_its_exclusions() {
+        let policy = restricted(
+            FsProjection::default(),
+            vec![(ExecScope::Any, Evidence::ALLOW), veto("git")],
+        );
+        let profile = build_profile(&policy).unwrap();
+        let any = at(&profile, "(allow process-exec)\n");
+        let deny = at(&profile, r#"(deny process-exec (regex #"/git$"))"#);
+        assert!(any < deny);
+    }
+
+    /// Nothing is frozen: a write prefix covering an admitted dir, or a file
+    /// it names, leaves it writable, exclusion or not.
+    #[test]
+    fn mac_profile_freezes_nothing_a_write_prefix_covers() {
+        let policy = restricted(
+            writing(&["/ral-test/w"]),
+            vec![
+                dir("/ral-test/w/bin", true),
+                file("/ral-test/w/tool", true),
+                veto("git"),
+            ],
+        );
+        let profile = build_profile(&policy).unwrap();
+        assert!(
+            !profile.contains("(deny file-write* (subpath")
+                && !profile.contains("(deny file-write* (literal \"/ral-test"),
+            "an admitted path was frozen:\n{profile}"
+        );
+        let open = restricted(
             FsProjection::Unrestricted,
             vec![dir("/usr/bin", true), veto("git")],
         );
-        let profile = build_profile(&vetoed).unwrap();
-        assert!(
-            profile.contains("(deny file-write* (subpath \"/usr/bin\"))"),
-            "/usr/bin stayed writable under a veto:\n{profile}"
-        );
-        assert!(
-            !profile.contains("(deny file-write* (subpath \"/usr\"))"),
-            "/usr is no part of the admitted set:\n{profile}"
-        );
-        // Freezing is the veto's price, so a grant that vetoes nothing pays it
-        // not at all.
-        let open = restricted(FsProjection::Unrestricted, vec![dir("/usr/bin", true)]);
         assert!(
             !build_profile(&open)
                 .unwrap()
-                .contains("(deny file-write* (subpath"),
-            "a veto-free grant had its admitted set frozen"
+                .contains("(deny file-write* (subpath \"/usr/bin\"))"),
+            "a veto froze the admitted set"
         );
     }
 
-    /// Under a restricted fs the write prefixes author what an admitted dir runs,
-    /// so a dir they cover without naming is frozen — veto or none, and after
-    /// the write allow it overrides.
+    /// The read region renders as its frozen real path, run places included,
+    /// whether or not exec is restricted.
     #[test]
-    fn mac_profile_freezes_an_admitted_dir_a_shallower_write_prefix_covers() {
-        let policy = restricted(
-            writing(&["/ral-test/w"]),
-            vec![dir("/ral-test/w/bin", true)],
-        );
-        let profile = build_profile(&policy).unwrap();
-        let write = at(&profile, "(allow file-write* (subpath \"/ral-test/w\"))");
-        let freeze = at(&profile, "(deny file-write* (subpath \"/ral-test/w/bin\"))");
-        assert!(
-            write < freeze,
-            "the freeze must follow the write it overrides:\n{profile}"
-        );
-    }
-
-    #[test]
-    fn mac_profile_freezes_a_covered_file_but_keeps_intended_writes() {
-        let image = "/ral-test/w/tool";
-        let freeze = format!("(deny file-write* (literal \"{image}\"))");
-        for (write, dirs, frozen) in [
-            ("/ral-test/w", vec![], true),
-            (image, vec![], false),
-            ("/ral-test/w", vec![dir("/ral-test/w", true)], false),
-            ("/ral-test/other", vec![], false),
-        ] {
-            let rules = dirs.into_iter().chain([file(image, true)]).collect();
-            let profile = build_profile(&restricted(writing(&[write]), rules)).unwrap();
-            assert_eq!(profile.contains(&freeze), frozen, "{profile}");
-        }
-    }
-
-    /// The grant that names the tree, whole or in part, keeps it writable: the
-    /// control for the freeze above, which differs only in what the prefix is.
-    #[test]
-    fn mac_profile_leaves_a_dir_the_write_prefixes_name_writable() {
-        for prefix in ["/ral-test/w/bin", "/ral-test/w/bin/out"] {
-            let policy = restricted(writing(&[prefix]), vec![dir("/ral-test/w/bin", true)]);
-            let profile = build_profile(&policy).unwrap();
+    fn mac_profile_reads_a_place_as_its_frozen_real_path_and_twin() {
+        let place = FsScope::Place(RealPath::assumed("/tmp/ral-test/tool"));
+        let profile = build_profile(&SandboxProjection {
+            fs: reading(vec![place]),
+            ..SandboxProjection::default()
+        })
+        .unwrap();
+        for form in ["/tmp/ral-test/tool", "/private/tmp/ral-test/tool"] {
             at(
                 &profile,
-                &format!("(allow file-write* (subpath \"{prefix}\"))"),
-            );
-            assert!(
-                !profile.contains("(deny file-write* (subpath \"/ral-test/w/bin\"))"),
-                "{prefix} names the admit and it was frozen:\n{profile}"
+                &format!("(allow file-read* (subpath \"{form}\"))"),
             );
         }
     }
 
+    /// An allowance granted through a symlink reads as its frozen real path
+    /// alone: the surface it was written by is no predicate.
     #[test]
-    fn mac_profile_leaves_a_dir_no_write_prefix_reaches_alone() {
-        let policy = restricted(
-            writing(&["/ral-test/other"]),
-            vec![dir("/ral-test/w/bin", true)],
-        );
-        let profile = build_profile(&policy).unwrap();
-        assert!(
-            !profile.contains("(deny file-write* (subpath"),
-            "a dir no write prefix reaches was frozen:\n{profile}"
-        );
+    fn mac_profile_never_renders_the_surface_of_a_frozen_allowance() {
+        let linked = FsScope::Prefix(FrozenPath::for_test("/ral-test/link", "/ral-test/real"));
+        let profile = build_profile(&SandboxProjection {
+            fs: reading(vec![linked]),
+            ..SandboxProjection::default()
+        })
+        .unwrap();
+        at(&profile, "(allow file-read* (subpath \"/ral-test/real\"))");
+        assert!(!profile.contains("/ral-test/link"), "{profile}");
     }
 
-    /// The writes a grant names at or below an admit stand for every admit
-    /// beneath it, and for none beside it: a `$PATH` entry inside the project
-    /// stays writable, the sibling of a carve-out does not.
+    /// The kernel exec set is the rules: `/usr`, the toolchains and Homebrew
+    /// are readable but run only where the grant (`system:`) names them, and
+    /// ral's own binary only where it names that.
     #[test]
-    fn mac_profile_trusts_a_nested_admit_and_freezes_a_sibling_the_carve_out_misses() {
-        let nested = restricted(
-            writing(&["/ral-test/proj"]),
-            vec![
-                dir("/ral-test/proj", true),
-                dir("/ral-test/proj/node_modules/.bin", true),
-            ],
-        );
-        let profile = build_profile(&nested).unwrap();
-        assert!(
-            !profile.contains("(deny file-write* (subpath"),
-            "an admit nested in a named one was frozen:\n{profile}"
-        );
-
-        let sibling = restricted(
-            writing(&["/ral-test/home", "/ral-test/home/.cargo/registry"]),
-            vec![
-                dir("/ral-test/home/.cargo", true),
-                dir("/ral-test/home/.cargo/bin", true),
-            ],
-        );
-        let profile = build_profile(&sibling).unwrap();
-        at(
-            &profile,
-            "(deny file-write* (subpath \"/ral-test/home/.cargo/bin\"))",
-        );
-        assert!(
-            !profile.contains("(deny file-write* (subpath \"/ral-test/home/.cargo\"))"),
-            "the admit holding the carve-out was frozen:\n{profile}"
-        );
-    }
-
-    /// `/tmp` and `/private/tmp` are one directory: the freeze names both
-    /// spellings, as every other rule on a firmlinked path does.
-    #[test]
-    fn mac_profile_freezes_a_covered_dir_under_every_firmlink_spelling() {
-        let policy = restricted(
-            writing(&["/tmp/ral-test"]),
-            vec![dir("/tmp/ral-test/bin", true)],
-        );
-        let profile = build_profile(&policy).unwrap();
-        for form in ["/tmp/ral-test/bin", "/private/tmp/ral-test/bin"] {
-            at(
-                &profile,
-                &format!("(deny file-write* (subpath \"{form}\"))"),
-            );
-        }
-    }
-
-    /// The kernel exec set is the rules and the loader base: `/usr`, the
-    /// toolchains and Homebrew are readable but run only where the grant
-    /// (`system:`) names them.
-    #[test]
-    fn mac_profile_admits_no_ambient_exec_beyond_the_loader_base() {
-        let policy = restricted(
-            FsProjection::Restricted(FsRules {
-                floor: crate::capability::floor()
-                    .iter()
-                    .map(|p| p.as_str().into())
-                    .collect(),
-                ..FsRules::default()
-            }),
-            vec![dir("/usr/bin", true)],
-        );
+    fn mac_profile_admits_no_ambient_exec() {
+        let policy = restricted(reading(vec![prefix("/usr")]), vec![dir("/usr/bin", true)]);
         let profile = build_profile(&policy).unwrap();
         let exec_allows: Vec<&str> = profile
             .split("\n(")
-            .filter(|form| form.starts_with("allow file-read* process-exec"))
+            .filter(|form| form.starts_with("allow process-exec"))
             .collect();
         assert!(
             exec_allows
@@ -816,16 +726,22 @@ mod tests {
             );
         }
         assert!(profile.contains("(allow file-read* (subpath \"/usr\"))"));
+        let own = own_names();
+        assert!(
+            !own.iter().any(|o| profile.contains(&format!(
+                "(allow process-exec (literal \"{}\"))",
+                o.as_str()
+            ))),
+            "ral's own binary was admitted without the grant naming it:\n{profile}"
+        );
     }
 
+    /// An empty exec table admits no program, ral included.
     #[test]
-    fn mac_profile_emits_only_system_base_when_restricted_to_empty() {
+    fn mac_profile_admits_nothing_when_restricted_to_empty() {
         super::super::reexec::pin_self();
         let profile = build_profile(&restricted(FsProjection::default(), Vec::new())).unwrap();
-        // An empty rule list still admits the platform base — ral itself —
-        // just as an empty fs grant still admits libc and dyld.
-        assert!(profile.contains("(allow file-read* process-exec"));
-        assert!(!profile.contains("(allow process-exec)\n"));
+        assert!(!profile.contains("(allow process-exec"));
     }
 
     /// Exec denies follow the allow they carve, and deny no reads: reads are
@@ -841,10 +757,7 @@ mod tests {
             ],
         );
         let profile = build_profile(&policy).unwrap();
-        let allow = at(
-            &profile,
-            "(allow file-read* process-exec (subpath \"/usr/bin\"))",
-        );
+        let allow = at(&profile, "(allow process-exec (subpath \"/usr/bin\"))");
         let deny_dir = at(
             &profile,
             "(deny process-exec (subpath \"/usr/bin/sensitive\"))",
@@ -867,10 +780,7 @@ mod tests {
             vec![dir("/usr/bin", true), veto("git"), veto("c++")],
         );
         let profile = build_profile(&policy).unwrap();
-        let allow = at(
-            &profile,
-            "(allow file-read* process-exec (subpath \"/usr/bin\"))",
-        );
+        let allow = at(&profile, "(allow process-exec (subpath \"/usr/bin\"))");
         let veto = at(&profile, r#"(deny process-exec (regex #"/git$"))"#);
         at(&profile, r#"(deny process-exec (regex #"/c\+\+$"))"#);
         assert!(allow < veto, "a veto must follow the allow it overrides");
@@ -893,7 +803,7 @@ mod tests {
         for form in ["/tmp/tool", "/private/tmp/tool"] {
             at(
                 &profile,
-                &format!("(allow file-read* process-exec (literal \"{form}\"))"),
+                &format!("(allow process-exec (literal \"{form}\"))"),
             );
         }
         for form in ["/tmp/evil", "/private/tmp/evil"] {
@@ -904,25 +814,20 @@ mod tests {
         }
     }
 
-    /// The self-exec admit is the one exec path the projection never carries,
-    /// so it must come through the same door as everything else and appear
-    /// in every form, or a ral binary running from `/tmp/…` is admitted under
-    /// a spelling execve never presents and the ral run inside it cannot
-    /// re-exec itself.
-    ///
-    /// `pin_self` pins this test binary, which is the only handle on what the
-    /// profile will name; where that path touches no firmlink and
-    /// no symlink its class is a singleton and the loop degenerates to "the
-    /// literal is present".  The compile-time guarantee: `escape_path` takes
-    /// only [`Rendered`] — is what holds on such a host.
+    /// Ral's binary is an ordinary file: admitted where the policy names it,
+    /// under every spelling execve presents, and nowhere else.
     #[test]
-    fn mac_profile_expands_firmlinks_in_self_exec_literal() {
+    fn mac_profile_admits_ral_only_where_the_policy_names_it() {
         let own = own_names();
-        let profile = build_profile(&restricted(FsProjection::default(), Vec::new())).unwrap();
-        for form in own {
+        let named = restricted(FsProjection::default(), vec![file(own[0].as_str(), true)]);
+        let profile = build_profile(&named).unwrap();
+        for form in &own {
             assert!(
-                profile.contains(&format!("(literal \"{}\")", form.as_str())),
-                "self-exec admit for {} missing:\n{profile}",
+                profile.contains(&format!(
+                    "(allow process-exec (literal \"{}\"))",
+                    form.as_str()
+                )),
+                "ral's spelling {} missing:\n{profile}",
                 form.as_str()
             );
         }
@@ -951,9 +856,9 @@ mod tests {
             .as_str()
             .to_string();
         let restricted_fs = FsProjection::Restricted(FsRules {
-            read_prefixes: vec![dir.clone()],
-            write_prefixes: vec![dir.clone()],
-            deny_paths: vec![format!("{dir}/x/secret")],
+            read: vec![prefix(&dir)],
+            write: vec![prefix(&dir)],
+            deny: frozen(&[&format!("{dir}/x/secret")]),
             ..FsRules::default()
         });
         for fs in [FsProjection::Unrestricted, restricted_fs] {
@@ -981,8 +886,7 @@ mod tests {
         }
     }
 
-    /// A grant that names ral's own file under a freezing veto would have the
-    /// admitted-set freeze and the lock both deny its writes.
+    /// A grant that names ral's own file leaves the lock its one write deny.
     #[test]
     fn mac_profile_denies_ral_writes_once_when_the_grant_names_it() {
         let own = own_names();
@@ -1125,13 +1029,7 @@ mod tests {
         }
         // The floor arrives as read prefixes, ancestor metadata with them.
         let policy = SandboxProjection {
-            fs: FsProjection::Restricted(FsRules {
-                floor: crate::capability::floor()
-                    .iter()
-                    .map(|p| p.as_str().into())
-                    .collect(),
-                ..FsRules::default()
-            }),
+            fs: reading(vec![prefix("/Library/Developer/CommandLineTools")]),
             ..SandboxProjection::default()
         };
         let profile = build_profile(&policy).unwrap();
@@ -1155,8 +1053,8 @@ mod tests {
         // /tmp firmlinks to /private/tmp, so both spellings must appear.
         let policy = SandboxProjection {
             fs: FsProjection::Restricted(FsRules {
-                write_prefixes: vec!["/tmp/work".into()],
-                deny_paths: vec!["/tmp/work/.exarch.toml".into()],
+                write: vec![prefix("/tmp/work")],
+                deny: frozen(&["/tmp/work/.exarch.toml"]),
                 ..FsRules::default()
             }),
             net: true,
@@ -1184,8 +1082,8 @@ mod tests {
     fn mac_profile_emits_pin_rules_for_deny_ancestors() {
         let policy = SandboxProjection {
             fs: FsProjection::Restricted(FsRules {
-                write_prefixes: vec!["/tmp/work".into()],
-                deny_paths: vec!["/tmp/work/.ssh/id_rsa".into()],
+                write: vec![prefix("/tmp/work")],
+                deny: frozen(&["/tmp/work/.ssh/id_rsa"]),
                 ..FsRules::default()
             }),
             net: true,
@@ -1229,8 +1127,8 @@ mod tests {
         let deny = format!("{write}/alias/secret");
         let policy = SandboxProjection {
             fs: FsProjection::Restricted(FsRules {
-                write_prefixes: vec![write],
-                deny_paths: vec![deny],
+                write: vec![prefix(&write)],
+                deny: vec![FrozenPath::from_surface(&deny)],
                 ..FsRules::default()
             }),
             net: true,

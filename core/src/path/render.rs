@@ -29,7 +29,7 @@ impl Rendered {
     }
 
     /// Whether `spelled`, taken as written, is this name or lies under it.
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     pub(crate) fn holds(&self, spelled: &str) -> bool {
         super::identity::path_within_str(spelled, &self.0, super::identity::Identity::Stored)
     }
@@ -57,15 +57,6 @@ impl AsRef<str> for Rendered {
     }
 }
 
-/// One object a grant names: its canonical spelling, and the other names
-/// that reach it.
-#[cfg(target_os = "linux")]
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct Object {
-    pub(crate) real: Rendered,
-    pub(crate) spellings: Vec<Rendered>,
-}
-
 /// Every name by which a kernel sandbox hook might present the objects that
 /// `paths` name, deduped, each blessed as [`Rendered`].
 ///
@@ -89,31 +80,45 @@ pub(crate) fn render_paths<S: AsRef<str>>(paths: &[S]) -> Result<Vec<Rendered>, 
     )
 }
 
-/// Each of `paths` as its object and its other spellings, the grouping
-/// [`render_paths`] flattens away, one entry per object.  Linux has no
-/// firmlinks, so a path's names are itself and its canonical form.
+/// One object a frozen allowance names: its real path, and the other names
+/// the kernel presents it by or it is shown at: its firmlink twin on macOS,
+/// the surface spelling it was granted by on Linux, a destination there.
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Object {
+    pub(crate) real: Rendered,
+    pub(crate) spellings: Vec<Rendered>,
+}
+
+#[cfg(unix)]
+impl Object {
+    /// Every name of the object, the real path first.
+    pub(crate) fn names(&self) -> impl Iterator<Item = &Rendered> {
+        std::iter::once(&self.real).chain(&self.spellings)
+    }
+}
+
+/// Each frozen allowance as its object, one entry per object.  The object is
+/// the frozen real path through [`render_real`], never re-resolved; the
+/// surface a prefix was granted by is only where Linux shows it.
 ///
 /// # Errors
 ///
 /// As [`render_paths`].
-#[cfg(target_os = "linux")]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "lifts each grant string to a path to canonicalise it"
-)]
-pub(crate) fn render_objects<S: AsRef<str>>(paths: &[S]) -> Result<Vec<Object>, String> {
+#[cfg(unix)]
+pub(crate) fn render_objects<'a>(
+    grants: impl IntoIterator<Item = (super::RealPath, Option<&'a super::FrozenPath>)>,
+) -> Result<Vec<Object>, String> {
     use std::collections::{BTreeMap, BTreeSet};
     let mut objects = BTreeMap::<Rendered, BTreeSet<Rendered>>::new();
-    for path in paths {
-        let path = std::path::Path::new(path.as_ref());
-        let real = super::canon::canonicalise_lenient(path);
-        let names = super::canon::spelled([real.as_path(), path].into_iter(), |p| {
-            vec![p.to_path_buf()]
-        })?;
-        let mut names = names.into_iter().map(Rendered);
-        if let Some(real) = names.next() {
-            objects.entry(real).or_default().extend(names);
-        }
+    for (real, surface) in grants {
+        let mut names = render_real(&real)?.into_iter();
+        let Some(real) = names.next() else { continue };
+        let shown = surface
+            .filter(|_| cfg!(target_os = "linux"))
+            .map(|surface| Rendered(surface.as_str().to_owned()))
+            .filter(|surface| *surface != real);
+        objects.entry(real).or_default().extend(names.chain(shown));
     }
     Ok(objects
         .into_iter()
@@ -253,26 +258,22 @@ mod tests {
         }
     }
 
-    /// A name through a symlink is a spelling of the directory it reaches,
-    /// which is the object, however many inputs name it.
+    /// A prefix granted through a symlink is the object its frozen real path
+    /// names, shown at the spelling it was granted by, however many grants
+    /// name the object.
     #[cfg(target_os = "linux")]
-    #[allow(clippy::disallowed_methods, reason = "[test] fs scaffolding")]
     #[test]
-    fn a_linked_name_is_a_spelling_of_the_object_it_reaches() {
-        let tmp = tempfile::tempdir().expect("temp dir");
-        let root = tmp.path().canonicalize().expect("temp dir is real");
-        let real = root.join("usr/bin");
-        std::fs::create_dir_all(&real).expect("usr/bin");
-        let link = root.join("bin");
-        std::os::unix::fs::symlink("usr/bin", &link).expect("symlink");
-        let (real, link) = (real.to_str().unwrap(), link.to_str().unwrap());
-
-        let objects = render_objects(&[link, real, link]).expect("ASCII paths render");
+    fn a_frozen_prefix_is_its_real_object_shown_at_its_surface() {
+        let link = super::super::FrozenPath::for_test("/bin", "/usr/bin");
+        let real = || super::super::RealPath::assumed("/usr/bin");
+        let objects =
+            render_objects([(real(), Some(&link)), (real(), None), (real(), Some(&link))])
+                .expect("ASCII paths render");
         assert_eq!(
             objects,
             [Object {
-                real: Rendered(real.to_string()),
-                spellings: vec![Rendered(link.to_string())],
+                real: Rendered("/usr/bin".to_string()),
+                spellings: vec![Rendered("/bin".to_string())],
             }]
         );
     }

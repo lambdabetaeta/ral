@@ -17,6 +17,7 @@
 
 #[cfg(unix)]
 use crate::capability::ExecScope;
+use crate::capability::FsScope;
 use crate::capability::Program;
 use crate::carrier::{IdentityTransport, ProbeError, Transport};
 use crate::first_order::FOValue;
@@ -25,9 +26,9 @@ use crate::path::RealPath;
 use crate::protocol::Frame;
 use crate::protocol::channel::{WireChannel, WireStream};
 use crate::protocol::probe::Probe;
+use crate::sandbox::FsProjection;
 #[cfg(unix)]
 use crate::sandbox::{ExecProjection, SandboxProjection};
-use crate::sandbox::{FsProjection, FsRules};
 use crate::ty::{Scheme, Ty};
 use crate::typecheck::Unifier;
 use crate::types::{BuiltinEntry, Settled, Shell};
@@ -70,15 +71,39 @@ pub fn scheme_ty(scheme: &Scheme) -> &Ty {
     &scheme.ty
 }
 
-/// `FsProjection::rules`: the rules when restricted, `None` at the top.
-pub fn fs_rules<N>(projection: &FsProjection<N>) -> Option<&FsRules<N>> {
-    projection.rules()
+/// The real paths the fs projection reads, floor, run places and support
+/// among them; `None` at the unrestricted top.
+pub fn fs_read_paths<A, X>(projection: &FsProjection<A, X>) -> Option<Vec<String>>
+where
+    A: ReadName,
+{
+    projection
+        .rules()
+        .map(|rules| rules.read.iter().map(ReadName::real_name).collect())
+}
+
+/// How an allowance names the real path it grants.
+pub trait ReadName {
+    fn real_name(&self) -> String;
+}
+
+impl ReadName for FsScope {
+    fn real_name(&self) -> String {
+        match self {
+            Self::Prefix(prefix) => prefix.real().to_owned(),
+            Self::Place(place) => place.to_string(),
+        }
+    }
 }
 
 /// One exec rule as the kernel is handed it, real paths spelled out.
 #[cfg(unix)]
 #[derive(Debug)]
 pub enum KernelExecRule {
+    /// Every program.
+    Any {
+        allow: bool,
+    },
     /// The directory and everything beneath it.
     Dir {
         path: String,
@@ -92,29 +117,33 @@ pub enum KernelExecRule {
     Name(String),
 }
 
-/// The exec rules the kernel is handed, in the order a last-match-wins
-/// renderer emits them; `None` when exec is unrestricted.
+/// The exec rules the kernel is handed, support among them: every positive
+/// clause, then every negative one; `None` when exec is unrestricted.
 #[cfg(unix)]
 pub fn exec_projection_rules(projection: &SandboxProjection) -> Option<Vec<KernelExecRule>> {
     let ExecProjection::Restricted(rules) = &projection.exec else {
         return None;
     };
-    let kernel = (rules.precedence().into_iter()).filter_map(|(scope, verdict)| {
-        let allow = !verdict.is_denied();
-        match scope {
-            ExecScope::Dir(path) => Some(KernelExecRule::Dir {
-                path: path.to_string(),
-                allow,
-            }),
-            ExecScope::File(path) => Some(KernelExecRule::File {
-                path: path.to_string(),
-                allow,
-            }),
-            ExecScope::Name(name) => Some(KernelExecRule::Name(name.clone())),
-            ExecScope::Carrier(_) | ExecScope::Tool(_) => None,
-        }
-    });
-    Some(kernel.collect())
+    let clause = |scope: &ExecScope, allow: bool| match scope {
+        ExecScope::Any => Some(KernelExecRule::Any { allow }),
+        ExecScope::Dir(path) => Some(KernelExecRule::Dir {
+            path: path.to_string(),
+            allow,
+        }),
+        ExecScope::File(path) => Some(KernelExecRule::File {
+            path: path.to_string(),
+            allow,
+        }),
+        ExecScope::Name(name) => Some(KernelExecRule::Name(name.clone())),
+        ExecScope::Tool(_) => None,
+    };
+    let positives = (rules.rules())
+        .filter(|(_, e)| e.positive)
+        .filter_map(|(scope, _)| clause(scope, true));
+    let negatives = (rules.rules())
+        .filter(|(_, e)| e.negative)
+        .filter_map(|(scope, _)| clause(scope, false));
+    Some(positives.chain(negatives).collect())
 }
 
 /// Whether the projection restricts exec at all.
@@ -146,7 +175,10 @@ fn file(real: &str) -> Program {
 
 /// Whether the live stack admits running the file whose real path is `real`.
 pub fn admits_file(shell: &Shell, real: &str) -> bool {
-    shell.context.grants.admits(&file(real))
+    shell
+        .context
+        .grants
+        .admits(&file(real), &shell.context.resolver())
 }
 
 /// `Shell::check_exec` on the file whose real path is `real`, with `args`.

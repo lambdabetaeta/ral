@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 0dc4a920
-verified_at_date: 2026-10-09
-anchors: [locate, walk, Located, check_fs_exact, collision_key, is_discard, check_device_name, admits_fs, fs_verdict, pinned_binary]
+verified_at_commit: 002c654a
+verified_at_date: 2026-10-13
+anchors: [locate, walk, Located, check_fs_exact, collision_key, is_discard, check_device_name, admits_fs, FsRefusal, pinned_binary]
 ---
 
 # Path judgment: what ral checks when it touches a file
@@ -44,10 +44,20 @@ exist: every write is a `locate`.
   dangling link is judged at its target, and a component swapped after the
   judgment is never followed.
 
+## An allowance is frozen; an exclusion re-resolves
+
+**An allowance keeps the real path it was frozen to at decode and is never
+re-frozen; an exclusion is re-frozen against the live disk on every question.**
+So a symlink put in an allowance's place after the grant redirects nothing,
+while a new spelling of an excluded object is excluded the moment it exists
+([[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]]).
+Freezing refuses a real path that is not Unicode. A read also reads what a
+grant, and the grants enclosing it, let run, and every write prefix.
+
 ## A deny holds under every spelling
 
 **One file can have several names. A deny holds under all of them; an allow
-holds as stored**
+holds as frozen**
 ([[decisions/261006_denies-hold-under-every-spelling|denies-hold-under-every-spelling]]).
 
 - **On macOS** the walk spells each component as the directory stores it. A
@@ -77,7 +87,7 @@ decided before the stack is consulted.
 - **`GrantStack::admits_fs` does not share the exemption.** It decides
   *membership* of a region, and a device excused from an access is not thereby
   a member of anything.
-- **A write onto a pinned binary is refused.** `fs_verdict` answers `Guarded`
+- **A write onto a pinned binary is refused.** the fs judgment answers `FsRefusal::Guarded`
   for a write onto a binary the sandbox pinned at boot: bwrap on Linux, and
   ral's own executable. It answers *before* the stack is folded, because a stack
   with no `fs` opinion is `Unrestricted`, which is exactly the case to catch.

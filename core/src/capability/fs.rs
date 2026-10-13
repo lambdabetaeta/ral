@@ -11,17 +11,21 @@
 //!
 //! A restricted read region is the layers' meet joined with the [`floor`]:
 //! the platform's fixed read-only system paths any program needs to start.
-//! No layer's `read` narrows it; only a `deny` removes a floor path.
+//! No layer's `read` narrows it; only a `deny` removes a floor path.  Writing
+//! reads, and running reads: each layer reads its own write prefixes and the
+//! run places of the exec meet over it and the layers beneath it.
 //!
-//! Prefixes are re-frozen against the caller's [`Resolver`] here rather
-//! than read off the frozen policy, so the caller decides how fresh the
-//! answer is: composition is a statement about the policy, these about the
-//! world.  The guard folds afresh on every check; the projection folds once,
-//! at spawn, because that is when the OS profile is written.
+//! Allowances are frozen, as decoded: only exclusions are re-frozen against
+//! the caller's [`Resolver`] here, so a symlink put in an allowance's place
+//! redirects nothing while an exclusion follows its name.  The guard folds
+//! afresh on every check; the projection folds once, at spawn, because that is
+//! when the OS profile is written.
 
-use super::table::{Scope, Table};
-use super::{FsPolicy, GrantStack, Meet, Verdict};
-use crate::path::{FrozenPath, Polarity, Resolver};
+use super::exec::ExecRules;
+use super::table::{Scope, Table, Withheld};
+use super::{Evidence, FsPolicy, GrantStack, Join, Meet};
+use crate::guard::freeze::live_homebrew_roots;
+use crate::path::{FrozenPath, Polarity, RealPath, Resolver};
 use std::path::Path;
 use std::sync::LazyLock;
 use strum::IntoStaticStr;
@@ -35,39 +39,74 @@ pub enum FsOp {
 }
 
 impl FsOp {
-    fn prefixes<'a>(&self, fs: &'a FsPolicy) -> &'a [FrozenPath] {
-        match self {
+    /// What a layer allows for this op: writing reads, so a read includes the
+    /// write prefixes.
+    fn prefixes<'a>(&self, fs: &'a FsPolicy) -> impl Iterator<Item = &'a FrozenPath> {
+        let reads: &[FrozenPath] = match self {
             Self::Read => &fs.read_prefixes,
-            Self::Write => &fs.write_prefixes,
+            Self::Write => &[],
+        };
+        reads.iter().chain(&fs.write_prefixes)
+    }
+}
+
+/// A key of an fs region: an authored prefix, or a place exec runs.  Both are
+/// prefixes of a real path, so a place reads as a prefix whether exec runs it
+/// as a file or a directory, and containment is transitive across every pair.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FsScope {
+    Prefix(FrozenPath),
+    Place(RealPath),
+}
+
+impl std::fmt::Display for FsScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Prefix(prefix) => f.write_str(prefix.as_str()),
+            Self::Place(place) => place.fmt(f),
         }
     }
 }
 
-/// Fs authority over one op: prefixes judged by their resolved form, a deny
-/// outranking every allow.
-pub(crate) type Region = Table<FrozenPath>;
+/// Fs evidence over one op: prefixes judged by their resolved form, an
+/// exclusion beating every allowance.  Only the read region holds a place, and
+/// no place is negative.
+pub(crate) type Region = Table<FsScope>;
 
-impl Scope for FrozenPath {
+impl Scope for FsScope {
     type Subject<'a> = &'a Path;
-    type Rank = (bool, usize);
 
-    /// A deny outranks every allow; the deeper prefix ranks above among each.
-    fn rank(&self, verdict: &Verdict) -> (bool, usize) {
-        (verdict.is_denied(), self.depth())
+    fn stores(&self, evidence: Evidence) -> bool {
+        matches!(self, Self::Prefix(_)) || !evidence.negative
     }
 
     fn holds<P: Polarity>(&self, path: &Path) -> bool {
-        self.contains::<P>(path)
+        match self {
+            Self::Prefix(prefix) => prefix.contains::<P>(path),
+            Self::Place(place) => place.contains::<P>(path),
+        }
     }
 
     fn own(&self) -> &Path {
-        self.real_path()
+        match self {
+            Self::Prefix(prefix) => prefix.real_path(),
+            Self::Place(place) => place.as_path(),
+        }
     }
 }
 
+/// What loading needs is not authored, so an entry that cannot be held as a
+/// grant, resolving through a non-Unicode name, is dropped.
+fn freeze_floor(paths: impl IntoIterator<Item = impl AsRef<Path>>) -> Vec<FrozenPath> {
+    paths
+        .into_iter()
+        .filter_map(|p| FrozenPath::freeze(p).ok())
+        .collect()
+}
+
 /// The read-only system paths admitted under every restricted `read`, frozen
-/// once per process: they are root-owned, and the guard refolds on every check.
-/// Those absent on this host are dropped.
+/// once per process, with the Homebrew prefixes `homebrew` expands to.  Those
+/// absent on this host are dropped.
 pub(crate) fn floor() -> &'static [FrozenPath] {
     static FLOOR: LazyLock<Vec<FrozenPath>> = LazyLock::new(|| {
         #[cfg(windows)]
@@ -103,8 +142,6 @@ pub(crate) fn floor() -> &'static [FrozenPath] {
             "/etc/group",
             // Debian/Ubuntu toolchain symlinks (cc → gcc-13, etc.).
             "/etc/alternatives",
-            // Linuxbrew: a system prefix that happens to live under /home.
-            "/home/linuxbrew/.linuxbrew",
         ];
         #[cfg(target_os = "macos")]
         let listed = [
@@ -114,7 +151,6 @@ pub(crate) fn floor() -> &'static [FrozenPath] {
             "/Library/Apple/usr",
             "/Library/Developer/CommandLineTools",
             "/Applications/Xcode.app/Contents/Developer",
-            "/opt/homebrew",
             "/lib",
             "/System",
             "/dev",
@@ -129,34 +165,107 @@ pub(crate) fn floor() -> &'static [FrozenPath] {
         ];
         #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
         let listed: [&str; 0] = [];
-        (listed.iter())
-            .filter(|p| crate::path::exists(p))
-            .map(FrozenPath::from_surface)
-            .collect()
+        let home = std::env::var("HOME").ok();
+        let brew = live_homebrew_roots(home.as_deref());
+        let present = (listed.iter().map(ToString::to_string)).filter(|p| crate::path::exists(p));
+        freeze_floor(present.chain(brew))
     });
     &FLOOR
 }
 
-/// The stack's region for `op`: each opining layer's prefixes for `op` and
-/// its denies, re-frozen, met; for `Read`, joined with the [`floor`], which
-/// only a deny removes.  `None` exactly when no layer held an `fs` opinion,
-/// so the guard is unrestricted and the projection needs no fs rules; a layer
-/// that opined and admitted nothing denies (beyond the floor).
+/// `acc` met with `next`, the first `next` standing alone.
+fn meet_onto<T: Meet>(acc: &mut Option<T>, next: T) {
+    *acc = Some(match acc.take() {
+        Some(held) => held.meet(next),
+        None => next,
+    });
+}
+
+/// The stack's region for `op`: each opining layer's allowances for `op` and
+/// its exclusions, the exclusions re-frozen, met; for `Read`, joined with the
+/// [`floor`], which only an exclusion removes.  `None` exactly when no layer
+/// held an `fs` opinion, so the guard is unrestricted and the projection needs
+/// no fs rules; a layer that opined and admitted nothing denies (beyond the
+/// floor).
 pub(crate) fn region(grants: &GrantStack, resolver: &Resolver, op: &FsOp) -> Option<Region> {
-    let mut met = grants
-        .fs()
-        .map(|fs| {
-            let allows = op.prefixes(fs).iter().map(|p| (p, Verdict::Allow));
-            let denies = fs.deny_paths.iter().map(|p| (p, Verdict::Deny));
-            (allows.chain(denies))
-                .map(|(p, v)| (p.refreeze(resolver), v))
-                .collect::<Region>()
-        })
-        .reduce(Meet::meet)?;
-    if matches!(op, FsOp::Read) {
-        met.extend(floor().iter().map(|p| (p.clone(), Verdict::Allow)));
+    fold(grants, resolver, op, false)
+}
+
+/// The read region where each layer also reads the run places of the exec meet
+/// over it and the layers beneath it: no layer makes anything readable for
+/// those beneath it.
+pub(crate) fn running_region(grants: &GrantStack, resolver: &Resolver) -> Option<Region> {
+    fold(grants, resolver, &FsOp::Read, true)
+}
+
+fn fold(grants: &GrantStack, resolver: &Resolver, op: &FsOp, places: bool) -> Option<Region> {
+    let mut run: Option<ExecRules> = None;
+    let mut met: Option<Region> = None;
+    for layer in grants {
+        if places && let Some(exec) = &layer.exec {
+            meet_onto(&mut run, ExecRules::compile(exec));
+        }
+        let Some(fs) = &layer.fs else { continue };
+        let allows = op
+            .prefixes(fs)
+            .map(|p| (FsScope::Prefix(p.clone()), Evidence::ALLOW));
+        let denies =
+            (fs.deny_paths.iter()).map(|p| (FsScope::Prefix(p.refreeze(resolver)), Evidence::DENY));
+        let placed = (run.iter().flat_map(ExecRules::places))
+            .map(|p| (FsScope::Place(p.clone()), Evidence::ALLOW));
+        meet_onto(&mut met, allows.chain(denies).chain(placed).collect());
     }
-    Some(met)
+    let met = met?;
+    Some(match op {
+        FsOp::Read => met.join(
+            floor()
+                .iter()
+                .map(|p| (FsScope::Prefix(p.clone()), Evidence::ALLOW))
+                .collect(),
+        ),
+        FsOp::Write => met,
+    })
+}
+
+impl GrantStack {
+    /// The read judgment: may `path` be read?  Two calls of [`region`]: a
+    /// permit or an exclusion of the first, which compiles no exec table, is
+    /// final with the same witness; only a missing allowance asks again with
+    /// the run places, which add positive evidence alone.
+    pub(crate) fn read(&self, path: &Path, resolver: &Resolver) -> Result<(), Withheld<FsScope>> {
+        let Some(region) = region(self, resolver, &FsOp::Read) else {
+            return Ok(());
+        };
+        match region.withheld(path) {
+            None => Ok(()),
+            Some(Withheld::MissingAllowance) => {
+                let placed =
+                    running_region(self, resolver).expect("a region held an fs opinion before");
+                placed.withheld(path).map_or(Ok(()), Err)
+            }
+            Some(excluded) => Err(excluded),
+        }
+    }
+
+    /// The write judgment: may `path` be written?
+    pub(crate) fn write(&self, path: &Path, resolver: &Resolver) -> Result<(), Withheld<FsScope>> {
+        let region = region(self, resolver, &FsOp::Write);
+        region.and_then(|r| r.withheld(path)).map_or(Ok(()), Err)
+    }
+
+    /// Whether only an exclusion withholds the read of `path`, which is all a
+    /// bundled tool needs of ral's binary.
+    pub(crate) fn read_not_excluded(
+        &self,
+        path: &Path,
+        resolver: &Resolver,
+    ) -> Result<(), Withheld<FsScope>> {
+        let withheld = region(self, resolver, &FsOp::Read).and_then(|r| r.withheld(path));
+        match withheld {
+            Some(excluded @ Withheld::Excluded { .. }) => Err(excluded),
+            _ => Ok(()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -166,6 +275,8 @@ pub(crate) fn region(grants: &GrantStack, resolver: &Resolver, op: &FsOp) -> Opt
 )]
 mod tests {
     use super::*;
+    use crate::capability::{Capabilities, ExecGrant, ExecKey};
+    use crate::path::{Allow, Deny};
 
     /// A divergent `surface`/`resolved` pair — what a symlink freezes to,
     /// without touching disk.
@@ -179,14 +290,24 @@ mod tests {
     }
 
     fn table(allows: &[FrozenPath], denies: &[FrozenPath]) -> Region {
-        let allows = allows.iter().map(|p| (p.clone(), Verdict::Allow));
+        let allows = allows
+            .iter()
+            .map(|p| (FsScope::Prefix(p.clone()), Evidence::ALLOW));
         allows
-            .chain(denies.iter().map(|p| (p.clone(), Verdict::Deny)))
+            .chain(
+                denies
+                    .iter()
+                    .map(|p| (FsScope::Prefix(p.clone()), Evidence::DENY)),
+            )
             .collect()
     }
 
-    fn live(region: &Region) -> Vec<&str> {
-        region.live().map(FrozenPath::as_str).collect()
+    fn live(region: &Region) -> Vec<String> {
+        region.live().map(ToString::to_string).collect()
+    }
+
+    fn permits(region: &Region, path: &str) -> bool {
+        region.evidence(Path::new(path)).permits()
     }
 
     #[test]
@@ -213,27 +334,30 @@ mod tests {
         assert_eq!(live(&met), ["/a/sub"]);
     }
 
-    /// T3: the deny relation folds a spelling the allow relation keeps
-    /// apart, and a refusal by the fold names the deny.
+    /// T3: the exclusion relation folds a spelling the allowance relation
+    /// keeps apart, and a refusal by the fold names the exclusion.
     #[test]
-    fn a_deny_holds_every_spelling_and_an_allow_only_its_own() {
+    fn an_exclusion_holds_every_spelling_and_an_allowance_only_its_own() {
         let access = Path::new("/d/secrets/f");
         let region = table(&[lit("/")], &[lit("/d/Secrets")]);
-        assert_eq!(region.verdict(access), Verdict::Deny);
-        assert_eq!(region.verdict(Path::new("/d/other")), Verdict::Allow);
+        assert!(!permits(&region, "/d/secrets/f"));
+        assert!(permits(&region, "/d/other"));
         if cfg!(not(windows)) {
-            assert_eq!(region.respelled(access), Some(&lit("/d/Secrets")));
             assert_eq!(
-                table(&[lit("/d/Secrets")], &[]).verdict(access),
-                Verdict::Deny
+                region.withheld(access),
+                Some(Withheld::Excluded {
+                    scope: FsScope::Prefix(lit("/d/Secrets")),
+                    respelled: true
+                })
             );
+            assert!(!permits(&table(&[lit("/d/Secrets")], &[]), "/d/secrets/f"));
         }
     }
 
-    /// T3: the projection drops an allow a deny holds in another spelling,
-    /// and keeps one a narrower deny leaves standing.
+    /// T3: the projection drops an allowance an exclusion holds in another
+    /// spelling, and keeps one a narrower exclusion leaves standing.
     #[test]
-    fn the_live_allows_are_those_no_deny_holds() {
+    fn the_live_allows_are_those_no_exclusion_holds() {
         let region = table(
             &[lit("/d/secrets/f"), lit("/d/other"), lit("/e")],
             &[lit("/d/Secrets"), lit("/e/f")],
@@ -244,33 +368,35 @@ mod tests {
     /// A prefix is judged by where it resolves, whatever it spells.
     #[test]
     fn a_prefix_holds_by_its_resolved_form_not_its_surface() {
-        let file = Path::new("/a/file");
-        assert_eq!(
-            table(&[p("/a", "/elsewhere")], &[]).verdict(file),
-            Verdict::Deny
-        );
-        assert_eq!(
-            table(&[p("/link", "/a")], &[]).verdict(file),
-            Verdict::Allow
-        );
+        assert!(!permits(&table(&[p("/a", "/elsewhere")], &[]), "/a/file"));
+        assert!(permits(&table(&[p("/link", "/a")], &[]), "/a/file"));
     }
 
-    /// The refusal cites the deepest deny that holds the path only by a fold.
+    /// The refusal cites an exclusion that holds the path, never one that does
+    /// not, and the same one every time.
     #[test]
-    fn the_deepest_folded_deny_is_named() {
-        let region = table(&[lit("/")], &[lit("/D"), lit("/D/Secrets")]);
+    fn the_witness_is_an_exclusion_that_holds_the_path() {
+        let region = table(&[lit("/")], &[lit("/D"), lit("/D/Secrets"), lit("/E")]);
+        let path = Path::new("/d/secrets/f");
+        let Some(Withheld::Excluded { scope, .. }) = region.withheld(path) else {
+            panic!("an exclusion holds the path");
+        };
         if cfg!(not(windows)) {
-            assert_eq!(
-                region.respelled(Path::new("/d/secrets/f")),
-                Some(&lit("/D/Secrets"))
-            );
+            assert!(scope.holds::<Deny>(path) && !scope.holds::<Allow>(path));
         }
+        assert_eq!(region.withheld(path), region.withheld(path));
     }
 
-    /// The empty table is the fail-closed meet, so it must cover nothing.
+    /// The empty table is the fail-closed meet: it supports nothing, and is
+    /// not an exclusion.
     #[test]
-    fn the_empty_table_covers_nothing() {
-        assert_eq!(Region::default().verdict(Path::new("/a")), Verdict::Deny);
+    fn the_empty_table_supports_nothing() {
+        let region = Region::default();
+        assert_eq!(region.evidence(Path::new("/a")), Evidence::NEITHER);
+        assert_eq!(
+            region.withheld(Path::new("/a")),
+            Some(Withheld::MissingAllowance)
+        );
     }
 
     /// Regression: the ceiling survives a re-freeze without shrinking to a
@@ -289,20 +415,56 @@ mod tests {
             paths.extend([r"C:\Users\someone\Temp\x", r"D:\a\repo\y"]);
         }
         for path in paths {
-            assert_eq!(region.verdict(Path::new(path)), Verdict::Allow, "{path}");
+            assert!(permits(&region, path), "{path}");
         }
+    }
+
+    /// A floor entry that resolves through a non-Unicode name is dropped, not
+    /// held as a sibling its lossy form names.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_unicode_floor_entry_is_dropped() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tempfile::tempdir().unwrap();
+        let odd = dir.path().join(std::ffi::OsStr::from_bytes(b"f\xff"));
+        std::fs::create_dir(&odd).unwrap();
+        let fine = dir.path().join("fine");
+        std::fs::create_dir(&fine).unwrap();
+        let kept = freeze_floor([odd, fine.clone()]);
+        assert_eq!(kept, [FrozenPath::from_surface(fine)]);
+    }
+
+    fn layer(fs: FsPolicy) -> Capabilities {
+        Capabilities {
+            fs: Some(fs),
+            ..Capabilities::default()
+        }
+    }
+
+    fn running(places: &[&str]) -> Capabilities {
+        Capabilities {
+            exec: Some(
+                (places.iter())
+                    .map(|p| (ExecKey::Path(lit(p)), Evidence::ALLOW))
+                    .collect::<ExecGrant>(),
+            ),
+            ..Capabilities::default()
+        }
+    }
+
+    fn stack_of(layers: impl IntoIterator<Item = Capabilities>) -> GrantStack {
+        let mut stack = GrantStack::default();
+        layers.into_iter().for_each(|l| stack.push(l));
+        stack
     }
 
     /// The region for `op` of one layer allowing `allow` for both ops.
     fn region_of(op: &FsOp, allow: &[FrozenPath], deny: &[FrozenPath]) -> Region {
-        let stack = GrantStack::of(crate::capability::Capabilities {
-            fs: Some(FsPolicy {
-                read_prefixes: allow.to_vec(),
-                write_prefixes: allow.to_vec(),
-                deny_paths: deny.to_vec(),
-            }),
-            ..Default::default()
-        });
+        let stack = stack_of([layer(FsPolicy {
+            read_prefixes: allow.to_vec(),
+            write_prefixes: allow.to_vec(),
+            deny_paths: deny.to_vec(),
+        })]);
         region(&stack, &Resolver::shell_less(), op).expect("fs opined")
     }
 
@@ -310,22 +472,26 @@ mod tests {
     fn the_read_region_admits_the_floor_a_layer_never_named() {
         let read = region_of(&FsOp::Read, &[lit("/work")], &[]);
         for f in floor() {
-            assert_eq!(read.verdict(f.real_path()), Verdict::Allow, "{f:?}");
+            assert!(read.evidence(f.real_path()).permits(), "{f:?}");
         }
     }
 
     #[test]
-    fn a_deny_refuses_a_floor_path() {
+    fn an_exclusion_refuses_a_floor_path() {
         let f = floor().first().expect("a host has a floor");
         let read = region_of(&FsOp::Read, &[lit("/work")], std::slice::from_ref(f));
-        assert_eq!(read.verdict(f.real_path()), Verdict::Deny);
+        assert_eq!(read.evidence(f.real_path()), Evidence::BOTH);
+        assert!(matches!(
+            read.withheld(f.real_path()),
+            Some(Withheld::Excluded { .. })
+        ));
     }
 
     #[test]
     fn the_write_region_admits_no_floor_path() {
         let write = region_of(&FsOp::Write, &[lit("/work")], &[]);
         for f in floor() {
-            assert_eq!(write.verdict(f.real_path()), Verdict::Deny, "{f:?}");
+            assert!(!write.evidence(f.real_path()).permits(), "{f:?}");
         }
     }
 
@@ -335,9 +501,103 @@ mod tests {
         assert!(
             floor()
                 .iter()
-                .all(|f| read.verdict(f.real_path()) == Verdict::Allow)
+                .all(|f| read.evidence(f.real_path()).permits())
         );
-        assert_eq!(read.verdict(Path::new("/no/such/place")), Verdict::Deny);
+        assert_eq!(
+            read.evidence(Path::new("/no/such/place")),
+            Evidence::NEITHER
+        );
+    }
+
+    /// Writing reads: a layer that writes a folder and does not list it for
+    /// reading reads it.
+    #[test]
+    fn writing_a_folder_reads_it() {
+        let stack = stack_of([layer(FsPolicy {
+            write_prefixes: vec![lit("/work")],
+            ..FsPolicy::default()
+        })]);
+        let resolver = Resolver::shell_less();
+        assert!(stack.read(Path::new("/work/f"), &resolver).is_ok());
+        assert!(stack.write(Path::new("/work/f"), &resolver).is_ok());
+        assert!(stack.read(Path::new("/other/f"), &resolver).is_err());
+    }
+
+    /// Allowances are frozen as decoded; only exclusions are re-frozen.
+    #[test]
+    fn an_allowance_keeps_its_frozen_real_path() {
+        let stack = stack_of([layer(FsPolicy {
+            read_prefixes: vec![p("/no/such/surface", "/frozen/real")],
+            ..FsPolicy::default()
+        })]);
+        let read = region(&stack, &Resolver::shell_less(), &FsOp::Read).unwrap();
+        assert!(permits(&read, "/frozen/real/f"));
+        assert!(!permits(&read, "/no/such/surface/f"));
+    }
+
+    /// An enclosing grant's run places are readable by a nested fs-only
+    /// restriction; the nested grant's own are not made readable for those
+    /// beneath it.
+    #[test]
+    fn pairing_looks_down_the_stack() {
+        let resolver = Resolver::shell_less();
+        let reads_work = layer(FsPolicy {
+            read_prefixes: vec![lit("/work")],
+            ..FsPolicy::default()
+        });
+        let nested = stack_of([running(&["/opt/prog"]), reads_work]);
+        assert!(nested.read(Path::new("/opt/prog"), &resolver).is_ok());
+
+        // Order: a layer that reads nothing and omits exec, beneath a layer
+        // that runs `s` and omits fs, refuses `s`; the other way round permits.
+        let reads_nothing = layer(FsPolicy::default());
+        let beneath = stack_of([reads_nothing.clone(), running(&["/opt/prog"])]);
+        assert!(beneath.read(Path::new("/opt/prog"), &resolver).is_err());
+        let above = stack_of([running(&["/opt/prog"]), reads_nothing]);
+        assert!(above.read(Path::new("/opt/prog"), &resolver).is_ok());
+    }
+
+    /// An fs exclusion of a run place refuses it, naming the exclusion.
+    #[test]
+    fn an_exclusion_of_a_run_place_refuses_running_it() {
+        let stack = stack_of([
+            running(&["/opt/prog"]),
+            layer(FsPolicy {
+                read_prefixes: vec![lit("/")],
+                deny_paths: vec![lit("/opt/prog")],
+                ..FsPolicy::default()
+            }),
+        ]);
+        let why = stack.read(Path::new("/opt/prog"), &Resolver::shell_less());
+        assert!(matches!(why, Err(Withheld::Excluded { .. })), "{why:?}");
+    }
+
+    /// The read judgment's two calls agree with the region of run places.
+    #[test]
+    fn the_read_judgment_agrees_with_the_region_of_places() {
+        let resolver = Resolver::shell_less();
+        let stack = stack_of([
+            running(&["/opt/prog", "/opt/tools"]),
+            layer(FsPolicy {
+                read_prefixes: vec![lit("/work")],
+                deny_paths: vec![lit("/opt/tools/bad")],
+                ..FsPolicy::default()
+            }),
+        ]);
+        let full = running_region(&stack, &resolver).unwrap();
+        for path in [
+            "/opt/prog",
+            "/opt/tools/ok",
+            "/opt/tools/bad",
+            "/work/f",
+            "/etc/zz",
+        ] {
+            assert_eq!(
+                stack.read(Path::new(path), &resolver).is_ok(),
+                full.evidence(Path::new(path)).permits(),
+                "{path}"
+            );
+        }
     }
 
     /// Gated because the case- and separator-folding branch of

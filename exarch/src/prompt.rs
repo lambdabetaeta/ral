@@ -320,28 +320,38 @@ pub fn render(sections: &[(Option<&str>, String)]) -> String {
 /// Every line is a *host* truth, which is why the composition is exarch's
 /// alone — synod's engine lives in a guest VM where none of them hold, so it
 /// builds its own around the shared [`grant_summary`].
+///
+/// `caps` is `policy::for_invocation`'s stack, whose last layer is the self
+/// layer.
 pub fn host_section(caps: &GrantStack, app: crate::app::App) -> String {
     let state = app.xdg_dir(ral_core::host::XdgKind::State);
     let scratch_line = format!("`${}` = {SCRATCH_PLACEHOLDER}", app.scratch_var());
     format!(
         "You are an agent named '{NAME_PLACEHOLDER}'.\n\n{}\n{}",
         host::snapshot(&state),
-        stack_summary(caps, &scratch_line)
+        stack_summary(caps, caps.iter().last(), &scratch_line)
     )
 }
 
-/// [`grant_summary`] over every restrictive layer of `stack`, oldest first —
+/// [`grant_summary`] over every layer of `stack` that [`says_something`], oldest first —
 /// the stack is the meet, so describing each layer in turn describes the
 /// whole composed ceiling without re-deriving the single flattened
 /// `Capabilities` that finding 2 retired.  The common case (no `--restrict`
 /// files) has exactly one restrictive layer, so its output is
-/// `grant_summary`'s unchanged.
-fn stack_summary(stack: &GrantStack, scratch_line: &str) -> String {
-    let layers: Vec<&Capabilities> = stack.iter().filter(|c| c.is_restrictive()).collect();
+/// `grant_summary`'s unchanged.  `own` is the stack's self layer, if it has one.
+fn stack_summary(stack: &GrantStack, own: Option<&Capabilities>, scratch_line: &str) -> String {
+    let layers: Vec<&Capabilities> = stack.iter().filter(|c| says_something(c)).collect();
     let Some((first, rest)) = layers.split_first() else {
         return grant_summary(&Capabilities::root(), scratch_line);
     };
-    let mut s = grant_summary(first, scratch_line);
+    let render = |caps: &Capabilities| {
+        summary(
+            caps,
+            scratch_line,
+            own.is_some_and(|o| std::ptr::eq(o, caps)),
+        )
+    };
+    let mut s = render(first);
     for (i, caps) in rest.iter().enumerate() {
         let _ = writeln!(
             s,
@@ -349,9 +359,22 @@ fn stack_summary(stack: &GrantStack, scratch_line: &str) -> String {
             i + 2,
             layers.len()
         );
-        s.push_str(&grant_summary(caps, scratch_line));
+        s.push_str(&render(caps));
     }
     s
+}
+
+/// Whether a layer is worth summarising: it restricts, or its exec names a run
+/// place.
+///
+/// Under a nested fs restriction such a place stays readable, which the reader
+/// needs to know even of a layer that denotes `t`.
+pub fn says_something(caps: &Capabilities) -> bool {
+    caps.is_restrictive()
+        || caps
+            .exec
+            .as_ref()
+            .is_some_and(|grant| grant.iter().any(|(_, e)| e.positive))
 }
 
 /// The live grant: a static legend teaching the notation and the runtime
@@ -364,10 +387,16 @@ fn stack_summary(stack: &GrantStack, scratch_line: &str) -> String {
 /// the caller because exarch names a seeded env var and host path where synod
 /// names the guest's tmpfs.  Public for exactly that second caller.
 pub fn grant_summary(caps: &Capabilities, scratch_line: &str) -> String {
-    // Nothing attenuated (the `dangerous` profile): the denial legend would
-    // describe a runtime event that cannot occur, so collapse to one line
-    // plus the scratch path the agent still needs.
-    if !caps.is_restrictive() {
+    summary(caps, scratch_line, false)
+}
+
+/// [`grant_summary`], where `own` marks exarch's self layer, whose one
+/// exclusion reads as "exarch itself" rather than as a path.
+fn summary(caps: &Capabilities, scratch_line: &str, own: bool) -> String {
+    // Nothing to say: the denial legend would describe a runtime event that
+    // cannot occur, so collapse to one line plus the scratch path the agent
+    // still needs.
+    if !says_something(caps) {
         return format!(
             "Ambient authority: every command, path, and network call is permitted; \
 the sandbox is the trust boundary.\n\n- scratch: {scratch_line}\n"
@@ -375,13 +404,17 @@ the sandbox is the trust boundary.\n\n- scratch: {scratch_line}\n"
     }
     let mut s = String::from(include_str!("../data/grant-legend.md").trim_end());
     s.push_str("\n\n");
-    let _ = writeln!(s, "- exec: {}", exec_line(caps));
+    if own {
+        s.push_str("- exec: every program, less exarch itself\n");
+    } else {
+        let _ = writeln!(s, "- exec: {}", exec_line(caps));
+    }
     let dirs = exec_dirs_line(caps);
     if !dirs.is_empty() {
         let _ = writeln!(s, "- exec dirs: {dirs}");
     }
     let denies = exec_denies(caps);
-    if !denies.is_empty() {
+    if !own && !denies.is_empty() {
         let _ = writeln!(s, "- exec deny: {}", denies.join(", "));
     }
     if let Some(fs) = &caps.fs {
@@ -410,43 +443,48 @@ the sandbox is the trust boundary.\n\n- scratch: {scratch_line}\n"
 }
 
 /// Admitted commands, comma-joined: bare names, then path keys as their
-/// author spelled them.  Directory
-/// admittances are surfaced by [`exec_dirs_line`], denies by
-/// [`exec_denies`], so only admitted keys land here.
+/// author spelled them.  Directory allowances are surfaced by
+/// [`exec_dirs_line`], exclusions by [`exec_denies`], so only the other
+/// allowed keys land here.  Beside `every` they add no running, and are
+/// listed as authored.
 fn exec_line(caps: &Capabilities) -> String {
     let Some(grant) = &caps.exec else {
         return "unrestricted".into();
     };
     let admitted: Vec<String> = (grant.iter())
-        .filter(|(key, v)| !matches!(key, ExecKey::Dir(_)) && !v.is_denied())
+        .filter(|(key, e)| !matches!(key, ExecKey::Dir(_)) && e.positive)
         .map(|(key, _)| key.to_string())
         .collect();
-    if admitted.is_empty() {
-        "(none)".into()
-    } else {
-        admitted.join(", ")
+    match (grant.every(), admitted.is_empty()) {
+        (true, true) => "every program, less the exclusions below".into(),
+        (true, false) => format!(
+            "every program, less the exclusions below; also named: {}",
+            admitted.join(", ")
+        ),
+        (false, true) => "(none)".into(),
+        (false, false) => admitted.join(", "),
     }
 }
 
 /// Allowed directories, each rendered as its `dir` target.  Empty when
-/// nothing admits by directory.
+/// nothing allows by directory.
 fn exec_dirs_line(caps: &Capabilities) -> String {
     caps.exec.as_ref().map_or_else(String::new, |grant| {
         (grant.iter())
-            .filter(|(key, v)| matches!(key, ExecKey::Dir(_)) && !v.is_denied())
+            .filter(|(key, e)| matches!(key, ExecKey::Dir(_)) && e.positive)
             .map(|(key, _)| key.to_string())
             .collect::<Vec<_>>()
             .join(", ")
     })
 }
 
-/// Names, path keys and directory prefixes carrying an explicit `Deny` —
-/// vetoed even where a covering directory admittance would otherwise admit
-/// the path.
+/// Names, path keys and directory prefixes carrying an exclusion, which wins
+/// over every allowance, a covering directory's included.  A key allowed and
+/// excluded appears here and in the allowed lists.
 fn exec_denies(caps: &Capabilities) -> Vec<String> {
     caps.exec.as_ref().map_or_else(Vec::new, |grant| {
         (grant.iter())
-            .filter(|(_, v)| v.is_denied())
+            .filter(|(_, e)| e.negative)
             .map(|(key, _)| key.to_string())
             .collect()
     })
@@ -658,7 +696,7 @@ mod tests {
             shell: Some([ShellVerb::Chdir].into()),
             ..Capabilities::root()
         };
-        let text = stack_summary(&GrantStack::of(layer), "scratch");
+        let text = stack_summary(&GrantStack::of(layer), None, "scratch");
         assert!(!text.contains("Ambient authority"), "{text}");
         assert!(text.contains("- shell: chdir\n"), "{text}");
     }

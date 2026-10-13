@@ -44,6 +44,18 @@ impl RealPath {
         Self(prefix.real_path().to_path_buf())
     }
 
+    /// The prefix's surface followed against the live disk: where an exclusion
+    /// looks, since it names whatever its spelling reaches now.
+    pub(crate) fn live(prefix: &FrozenPath) -> Self {
+        Self(prefix.live_real())
+    }
+
+    /// A rendered object: already the frozen real path, so no lookup.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn rendered(object: &super::Rendered) -> Self {
+        Self(object.as_str().into())
+    }
+
     #[cfg(any(test, feature = "test-util"))]
     pub(crate) fn assumed(path: impl Into<PathBuf>) -> Self {
         Self(path.into())
@@ -55,10 +67,10 @@ impl RealPath {
         super::identity::path_within(&self.0, &dir.0, P::IDENTITY)
     }
 
-    /// Depth in components of the alias-folded form, so a firmlink spelling
-    /// buys no rank.
-    pub(crate) fn depth(&self) -> usize {
-        super::identity::identity_depth(&self.0.to_string_lossy(), PathRules::HOST)
+    /// Whether `path` lies inside this one, as a rule of polarity `P` reads
+    /// names; an fs access against a run place.
+    pub(crate) fn contains<P: Polarity>(&self, path: &Path) -> bool {
+        super::identity::path_within(path, &self.0, P::IDENTITY)
     }
 
     /// The entry `name` of this directory: real by construction, since a

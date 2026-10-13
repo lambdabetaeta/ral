@@ -451,4 +451,26 @@ mod tests {
             "exec must be denied under the no-authority grant; got: {err}"
         );
     }
+
+    /// An empty exec grant runs nothing, ral's own binary included: by path,
+    /// and as the bundled-tool frame that would otherwise run in its image.
+    #[cfg(unix)]
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[test] the test binary's own path"
+    )]
+    fn no_authority_grant_denies_the_current_executable() {
+        let exe = std::env::current_exe().expect("the test binary has a path");
+        for call in [
+            format!("{}", exe.display()),
+            format!("{} --ral-bundled-tool echo", exe.display()),
+        ] {
+            let err = parse(&format!("{call}\nreturn []")).unwrap_err();
+            assert!(
+                err.contains("denied by active grant"),
+                "`{call}` must be denied under the no-authority grant; got: {err}"
+            );
+        }
+    }
 }

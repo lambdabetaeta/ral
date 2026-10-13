@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 0dc4a920
-verified_at_date: 2026-10-09
+verified_at_commit: 002c654a
+verified_at_date: 2026-10-13
 anchors: [pinned_dirs, build_profile, DenyMask, Binds]
 ---
 

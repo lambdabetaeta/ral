@@ -47,7 +47,7 @@ on, and the open, stat, staging and rename done relative to that directory
 handle. Authority is preserved through execution because the handle *is* the
 authority ([[decisions/260906_object-not-name|object-not-name]]). The exec
 door judges the object too: a head's program is the file that will execute,
-judged by its real path through the one function `ExecRules::verdict`, and
+judged by its real path through the one exec judgment (`GrantStack::admit`), and
 the launcher runs that real path, under the user's spelling as `argv[0]`
 ([[decisions/261004_exec-rules|exec-rules]]).
 
@@ -70,14 +70,22 @@ the launcher runs that real path, under the user's spelling as `argv[0]`
   kernel filters the path passed to `execve`, not the code a process runs, so
   an admitted loader or interpreter handed an unadmitted file as an argument
   runs it ([[decisions/260906_landlock-exec-layer|landlock-exec-layer]]). What the
-  kernel admits is one law on every platform — the guard's own rules, ordered
-  so last-match-wins is its most-specific-wins precedence
-  ([[related/access-control-algebra|access-control-algebra]]), plus their carriers, the platform's
-  loader and ral ([[decisions/261004_exec-carriers|exec-carriers]]). Those
-  rules carry only the denies a layer wrote: the meet of two tables joins
-  their denies and keeps an allow only where both admit its own subject, never
-  writing a default as a deny, which Seatbelt's caseless match would turn on
-  every spelling of the name ([[design/authority-tables|authority-tables]]).
+  kernel admits is one law on every platform: the guard's own evidence table,
+  positives before negatives, so an exclusion beats every allowance with no
+  specificity, plus *support*, the carriers and the dynamic linker a launch
+  needs, joined as allowances where the author wrote none and dropped where an
+  exclusion on either axis covers them
+  ([[related/access-control-algebra|access-control-algebra]],
+  [[decisions/261004_exec-carriers|exec-carriers]]). ral's own binary is an
+  ordinary file, admitted only where the table admits it. The rules carry only
+  the exclusions a layer wrote: the meet of two tables joins their exclusions
+  and keeps an allowance only where both support its own subject, never writing
+  a default as an exclusion, which Seatbelt's caseless match would turn on every
+  spelling of the name ([[design/authority-tables|authority-tables]]). The
+  kernel and the guard agree on what runs *and* what is read: both read every
+  write prefix and every run place, an allowance reaches the kernel as the frozen
+  real path the guard judges by, and a launch whose frozen allowance has since
+  been redirected is refused rather than followed.
 
 **What a grant's guarantee means on Linux, row by row.** Rows above the rule
 are *promises*: a grant names them, and a host that cannot hold one refuses
@@ -91,7 +99,7 @@ serves ([[decisions/260906_the-envelope-is-a-process-namespace|the-envelope-is-a
 |---|---|---|
 | `fs` read/write prefixes, `deny` masks; what the exec table admits is readable | bwrap mounts, each source a handle ral opened without following a symlink, each mask at every name a bind shows the denied path ([[decisions/261006_the-envelope-mounts-by-handle]]) | refuse: `confinement_unavailable`, a bwrap that builds no envelope or lacks `--ro-bind-fd` (before 0.8.0) included |
 | ``net: `offline`` | `--unshare-net` | refuse: `projection_enforceable` |
-| `exec` — which path may be `execve`d (not which code runs), a deny inside an allowed directory included, over the tree at launch: a program added afterwards to a directory holding a block is denied until the next launch | Landlock `Execute` ruleset, the parent subtracting each block from the directory that holds it; a read-only bind over each admitted directory a write prefix covers without naming, at every name a writable bind shows it (a prefix written through a symlink is two binds of one handle), so a veto carried into it cannot be authored around ([[decisions/261006_a-veto-freezes-what-a-write-covers]]) | refuse: `confinement_unavailable`, an exec opinion alone asking for the envelope |
+| `exec` — which path may be `execve`d (not which code runs), a deny inside an allowed directory included, over the tree at launch: a program added afterwards to a directory holding a block is denied until the next launch | Landlock `Execute` ruleset, the parent subtracting each block from the directory that holds it; every directory admission, `every` among them, lowered against the envelope's binds | refuse: `confinement_unavailable`, an exec opinion alone asking for the envelope |
 | `exec` — a bare-name veto under a trusted write | in-process guard | the guard stands alone |
 | die with parent, new session, no core, the seccomp deny-set (kills kernel attack surface; refuses mounting, user namespaces and `TIOCSTI` with an errno) | bwrap + `pre_exec` | applied where possible |
 | private ipc / uts | `--unshare-*` | never refused |
@@ -116,6 +124,82 @@ and Windows kernels — a distinct `secrets` beside a denied `Secrets` is
 refused in process and not to a child — an over-approximation, stated in the
 refusal ([[decisions/261006_denies-hold-under-every-spelling|denies-hold-under-every-spelling]];
 every platform's case in [[design/authority-tables|authority-tables]]).
+
+## The contract between guard and kernel
+
+**The kernel agrees with the guard on resolved requests at launch, up to
+declared support and declared limits.** The guard's law is exclusion-wins over
+evidence ([[design/authority-tables|authority-tables]]); the kernel is handed
+the same table, the same read region (run places included) and, for exec, the
+policy joined with *support*. No backend adds an exception to an authored
+exclusion: a policy that relied on a carrier, linker, exact file or deeper
+directory reopening an exclusion fails, and the refusal says an allowance
+cannot override an exclusion.
+
+*Declared support* is what the kernel shows beyond the policy so a launch can
+start:
+
+- the platform floor (part of the policy), the live support set (carriers, the
+  Linux linker candidates) and macOS's Rosetta loader, each with the reads its
+  loading needs;
+- on Linux, the pinned bwrap and trampoline, readable at their own names;
+- the base profile's ambient allowances (`macos-base.sbpl`: the root's own entry,
+  the timezone database, the discard and terminal devices) and the Linux
+  envelope's private `/tmp`, `/dev` and `/proc`, none of which is the host's.
+
+*Declared limits*, each a place where guard and kernel can differ:
+
+- **Support depends on the launch, not on the policy alone.** A support file the
+  policy excludes refuses the programs that start through it, though the policy
+  says nothing about them; an allowance can admit a support file the policy
+  never names. The extension invariant therefore holds of policy denotations and
+  not of a kernel table as a whole.
+- **A nested ral** inherits the kernel confinement but not the stack: bundled-tool
+  rules, verbs and whatever else only the guard enforces do not bind it, and
+  under an exec allow-list that admits ral it runs every bundled tool. exarch
+  excludes its own binary and no other.
+- **`/proc/self/exe`.** A running program reads, and may re-execute, its own
+  image. The read is why a bundled tool reads ral's binary; the re-exec runs only
+  where the table admits the image.
+- **Hard links.** On Linux an admission is of an inode, so an excluded path that
+  is a hard link to an admitted file runs, with no copy or write (Landlock cannot
+  admit one name of an inode, and refusing every multiply-linked admitted file
+  would refuse hard-linked tools such as `git-core` helpers); macOS rules are by
+  path and hold. Independently, a path grant does not own the bytes reachable
+  through it: a hard link already inside a granted region to a file outside it
+  reads or writes that file, in the guard and every kernel. Only the pinned
+  binaries' inodes are protected, and the deputy findings do not see it.
+- **Writing meets running.** A broad write that covers a run-admitted directory
+  lets a child author programs there, including ones the user later runs outside
+  any sandbox; an exclusion does not stop a copy, a newly written program or a
+  script fed to an admitted interpreter. An admitted interpreter runs any script
+  it can read, and the dynamic linker any ELF it can read (`ld.so ./prog`).
+- **Name vetoes are advisory** beneath writable directories and beneath `Any`:
+  the kernel walks a veto only beneath directories no write reaches, so that
+  building and then running in one command works.
+- **Landlock subtracts over the tree as it stands at launch.** Beneath `Any` a
+  spine starts at `/` or at a bind root, so a program created during the launch
+  in any directory from there down to an excluded path's parent does not run
+  until the next launch.
+- **Under `Any` with exclusions and a restricted fs**, the envelope's private
+  `/tmp` holds no host object, so no admission reaches it and a program built
+  there does not run. exarch meets this always, through its self layer:
+  `dangerous` with a restrict file that restricts fs is the shipped case.
+- **fs, as before:** on a case-sensitive volume the Linux and Windows kernels do
+  not hold an exclusion under another spelling, and an absent excluded path under
+  a writable prefix reaches neither kernel until the next launch.
+- **Windows.**
+  - An unrestricted fs projection asks for no capability and rests on the ambient
+    `ALL APPLICATION PACKAGES` grants, so a child can be refused a file the guard
+    permits, and ambient grants can expose files a supplied read region does not
+    name.
+  - A launch whose fs region holds the universal prefix is refused, though the
+    guard permits what it would do: an AppContainer reaches only what is stamped
+    for it, and the root would narrow to one drive.
+  - A grant lives on the NTFS object, so a file renamed out of a granted tree
+    keeps its grant for the tokens that held the tree.
+  - Windows has no kernel exec layer; exec is the guard's alone.
+- **The kernel sees no argv.**
 
 **macOS has no stacking.** Landlock layers inside the envelope; Seatbelt
 profiles do not stack. A process already inside one gets `EPERM` entering a
@@ -152,7 +236,7 @@ nothing off; exarch's summary calls a layer ambient by the same predicate
 on Linux both bwrap and ral's own trampoline, and ral itself wherever else it
 re-execs — is closed to a confined child by its own read-only bind, and to
 ral's own writes by the guard's `Guarded`
-verdict: judged by inode, so a hard link names it too, and *before* any grant
+refusal: judged by inode, so a hard link names it too, and *before* any grant
 is folded, since a stack with no `fs` opinion is `Unrestricted` and exactly the
 case to catch. It is the discard device's twin — a name no grant needs to
 mention, always yes; an inode no grant can name, always no. A deny entry could

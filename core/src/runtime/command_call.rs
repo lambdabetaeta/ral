@@ -6,7 +6,7 @@
 //! every arm; pipeline staging reaches
 //! `resolve_command_word`/`classify_command` directly.
 
-use crate::capability::Program;
+use crate::capability::{ExecDenial, Program};
 use crate::fact::Command;
 use crate::guard::{Denial, deny_head};
 use crate::ir::{CommandName, CommandWord};
@@ -80,16 +80,25 @@ pub(crate) fn classify_command(
     let r = resolve_command_word(head, env, shell);
     if let Resolution::External(head) = &r
         && let Ok(program) = &head.program
-        && !shell.context.grants.admits(program)
+        && let Some(why) = shell
+            .context
+            .grants
+            .refusal(program, &shell.context.resolver())
     {
-        return Err(refuse_head(&head.shown, program, mooring, shell));
+        return Err(refuse_head(&head.shown, program, &why, mooring, shell));
     }
     Ok(r)
 }
 
 /// Denial for a head whose program the grant refuses.
-fn refuse_head(shown: &str, program: &Program, mooring: &Mooring, shell: &mut Shell) -> Break {
-    let Denial { check, error } = deny_head(&shell.context.grants, shown, program);
+fn refuse_head(
+    shown: &str,
+    program: &Program,
+    why: &ExecDenial,
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Break {
+    let Denial { check, error } = deny_head(&shell.context.grants, shown, program, why);
     shell.record_check(Some(mooring), check);
     error.into()
 }

@@ -79,10 +79,29 @@ tools available than `reasonable`.
 - It writes only the project and scratch.
 - It keeps the network on for remote context.
 - It admits system tools, Python, search, patch, archive, and network
-  utilities — but no executable in the project or scratch, which is what makes
-  the denies below hold: a directory that is both writable and exec-admitted
-  can be handed a copy of a denied tool under another name.
+  utilities, but no executable in the project or scratch: a directory that is
+  both writable and exec-admitted can be handed a copy of a denied tool under
+  another name, and nothing in ral freezes it against that (see
+  [What exclusions cannot do](#what-exclusions-cannot-do)).
 - It denies Git and interactive shells.
+
+The denies hold only where the project's write region covers no directory the
+profile runs. Launched from the project directory that is so. Launched from
+`~`, `` `cwd . `` is the home directory, which covers `` `dir `xdg-bin . ``
+(`~/.local/bin`): that directory is runnable and now writable, so a child can
+author a program there, including one you later run from your own `PATH`
+outside any sandbox, and the Git and shell denies there become advisory to
+descendants. Launch `edit-only` from a project directory.
+
+To see which folders a profile leaves both writable and runnable, push it as
+a session layer under an open audit trail; the trail then holds one `deputy`
+check per finding:
+
+```text
+ral --audit --capabilities exarch/data/edit-only.exarch.ral -c true
+```
+
+Run from `~`, this records a `deputy` check for `~/.local/bin`.
 
 The name describes the intended job, not a proof that no build can execute: a
 build tool under a system root still runs. If “no builds” is a hard
@@ -119,11 +138,11 @@ Unix, a Git binary under a system root may run, but Git config is not readable;
 the supplied extension adds Git config and admits Git wherever it is installed:
 
 ```text
-exarch --base minimal --extend-base exarch/examples/git.exarch.ral
+exarch --base minimal --extend exarch/examples/git.exarch.ral
 ```
 
-`minimal` explicitly excludes `/opt/homebrew`; other system roots remain
-platform-dependent.
+`minimal` leaves Homebrew unlisted; add brew tools with `--extend` (a file
+allowing `` `dir `homebrew ``). Other system roots remain platform-dependent.
 
 ### `confined` — offline build jail
 
@@ -153,7 +172,25 @@ assembler and linker without granting the rest of the home directory.
 authority as commands typed at your own prompt.
 
 Use it when another boundary already exists, such as a disposable VM or
-container. It is also the starting point for a profile written entirely as a
+container.
+
+It is ambient authority less starting exarch. In every session, `dangerous`
+included, exarch pushes a last layer that excludes its own binary from
+execution, by the path it was started from; every spawned agent inherits it.
+The agent loses exarch as a process (by path, by a name that resolves to it,
+or through `sh -c`); it keeps evaluating ral in its own shell, and bundled
+tools still run. Because that layer restricts, a `dangerous` session is
+confined like any other: launch hardening applies, and on Linux and macOS
+every launch runs in the sandbox (a profile that allows everything and
+refuses that one binary). On Linux a program created during a launch directly
+in a directory on the path to exarch's binary (`/`, `~`, `~/.cargo`,
+`~/.cargo/bin` for a cargo install) runs from the next launch on. The
+exclusion is a guardrail: another install of exarch or ral in a folder the
+grant admits still runs, as does a copy in a folder that is both writable and
+runnable; on Windows, which has no kernel exec layer, it is the in-process
+guard's alone.
+
+`dangerous` is also the starting point for a profile written entirely as a
 restriction:
 
 ```text
@@ -162,12 +199,37 @@ exarch --base dangerous --restrict mine.ral
 
 ## Compose a profile
 
-An optional `--extend-base` file widens the selected base. Verb lists join: an extension can add a `shell` or `editor` verb the base lacks, and a base that omits a verb list keeps every verb. Any number of
-`--restrict` files then narrow it:
+An optional `--extend` file extends the selected base once; every later layer
+restricts. The file's allowances and exclusions join the base's before any
+`--restrict`:
+
+- an allowance never removes permission, on any axis;
+- an exclusion always wins, over every allowance and regardless of how
+  specific the allowance is: an exact file or a deeper directory inside an
+  excluded directory does not run, and neither does a carrier or the dynamic
+  linker;
+- an area the base leaves unrestricted stays so, less the file's exclusions:
+  `--base dangerous --extend git.exarch.ral` stays unrestricted, apart from
+  exarch's own binary, and an extension with an exclusion yields "every
+  request, less the exclusions";
+- verb lists join by union: an extension can add a `shell` or `editor` verb
+  the base lacks, a base cannot withhold a verb (`detach` included) against
+  an extension, and a base that omits a verb list keeps every verb.
+
+Any number of `--restrict` files then narrow the result:
 
 ```text
-effective = (base ⊔ extension) ⊓ restriction₁ ⊓ restriction₂ ⊓ …
+effective = (base ◁ extension) ∧ restriction₁ ∧ restriction₂ ∧ …
 ```
+
+A refusal that cites an exclusion says that an allowance cannot override it
+and points at the policy that imposes it; `--extend` cannot lift it.
+
+A launch on Windows is refused when the filesystem region holds every path:
+`dangerous` with an exclusion from `--extend` or a restriction file that only
+excludes. Windows' sandbox reaches only folders stamped for it, and ral will
+not stamp every drive; grant the folders the program needs instead. The
+in-process guard still judges, and in-process work is unaffected.
 
 Each file is frozen as it loads: the places `` `home ``, `` `xdg-* ``, `` `cwd ``,
 `` `tempdir ``, `` `gitdir ``, and the `` `system `` and `` `path `` selectors resolve to
@@ -190,14 +252,16 @@ A typical custom setup starts small, adds trusted build tools, then confines
 the result to the project:
 
 ```text
-exarch --base minimal --extend-base build-tools.ral --restrict project.ral
+exarch --base minimal --extend build-tools.ral --restrict project.ral
 ```
 
 ## Platform tool roots
 
 The `` `dir `system `` target expands to the platform's live tool roots:
 
-- `/usr/bin` and `/bin`, plus detected Homebrew or Linuxbrew roots, on Unix;
+- `/usr/bin` and `/bin`, plus the toolchain roots present, on Unix; Homebrew is
+  the separate `` `dir `homebrew `` selector (`HOMEBREW_PREFIX`, else whichever
+  of `/opt/homebrew`, `/home/linuxbrew/.linuxbrew` and `~/.linuxbrew` exist);
 - `%SystemRoot%\System32`, Windows PowerShell, and Git for Windows' `usr\bin`
   when present, on Windows.
 
@@ -240,6 +304,64 @@ revision. The `git` binary's TLS needs no such door, so cargo fetches through
 it. A profile that denies `git`, such as `edit-only`, therefore cannot resolve
 git dependencies at all.
 
+## Reading, writing and running
+
+- **Running and writing read.** Whatever a grant lets run by path, directory or
+  name, or lets be written, may be read. A grant reads what it, and the grants
+  enclosing it, let run; a nested grant never makes something readable by
+  naming it in `exec`. So a restriction that supplies filesystem alone does not
+  hide the tools an enclosing grant runs: a restrict file reading only
+  `` `cwd . `` leaves `cargo` in `~/.cargo/bin` runnable. To hide one, exclude
+  it in `fs`; an `fs` exclusion of a run place refuses running it.
+- **Programs that run through "every program"** (an omitted `exec`) must be
+  readable under `fs`: an unreadable program outside the reads is refused.
+- **Allowances keep what they named.** A path allowance, to read, write or run,
+  names the real path it resolved to when the profile loaded. A symlink put in
+  its place later redirects nothing, and a launch whose allowed folder, or an
+  ancestor, was replaced by a symlink is refused on Linux and Windows, naming
+  it (it reaches nothing on macOS). Creating a granted directory after the
+  grant, or `rm -rf dir && mkdir dir`, keeps working. Exclusions follow their
+  names, so they catch whatever the name reaches now; a bare program name
+  follows `PATH` afresh at each run. A grant whose real path is not valid
+  Unicode is refused when loaded.
+- **Interpreters under filesystem-only restrictions.** A trusted interpreter
+  outside the reads starts its scripts under a restriction that supplies
+  `fs` alone, as it already did under a restricted `exec`.
+- **ral itself is an ordinary file.** `ral -c`, `#!` ral scripts and
+  `sh -c 'ral …'` run exactly where a grant admits ral, in the guard and the
+  kernel; under an `exec` allow-list that omits it they are refused. Where a
+  grant admits ral's folder (`reasonable` admits `~/.cargo/bin/`), a nested ral
+  runs bound by the kernel alone: bundled-tool rules and verbs do not bind it.
+  An `fs` exclusion of ral's binary refuses every bundled tool, which runs
+  ral's image; an `exec` exclusion leaves bundled tools alone.
+- **Every program, less the exclusions.** On Linux, a program created during a
+  launch on the path to an excluded path does not run until the next launch,
+  and under a restricted filesystem the sandbox's private `/tmp` runs nothing:
+  `dangerous` with a restrict file that restricts the filesystem cannot run a
+  program built in `/tmp`.
+- **Activation reads what a policy means.** A layer that restricts nothing,
+  such as a filesystem that writes the root and excludes nothing, activates no
+  launch hardening. exarch pushes its credential layer only where some
+  filesystem restricts: `--base dangerous --extend` with a positive-only `fs`
+  gets none, and with an `fs` exclusion it does.
+
+## What exclusions cannot do
+
+An exclusion names programs by path and name. It is a guardrail, not a wall:
+a copy of a program, a newly written program or a script fed to an admitted
+interpreter is a different request. ral no longer freezes a run-admitted
+folder that a broad write covers, with or without an exclusion; the freeze
+made an allowance withdraw write authority in the kernel alone. Any broad
+write over a run-admitted folder now lets a child write programs there,
+including ones you later run from your own `PATH` outside any sandbox, and a
+name exclusion there is advisory to descendants. The deputy findings name every
+such folder, and now list each writable island under a runnable folder (not
+a folder wholly excluded on either side); they are recorded only into an audit
+trail, so read them with `audit` as `edit-only` above describes. Other limits:
+a hard link already inside a granted region to a file outside it reads or
+writes that file; on Linux an excluded path that is a hard link to an admitted
+file runs; the kernel sees no argv; Windows has no kernel exec layer.
+
 ## Enforcement
 
 ral checks executable authority before spawning on every platform. Filesystem
@@ -272,4 +394,4 @@ exarch/data/confined.exarch.ral
 ```
 
 Custom profiles do not need to live in a special directory. Pass a ral file to
-`--extend-base` or `--restrict`.
+`--extend` or `--restrict`.

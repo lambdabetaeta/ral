@@ -113,8 +113,8 @@ pub(crate) fn denial_hint(_pids: &HashSet<u32>, _since: Instant, exit_code: i32)
          filesystem access surfaces only as an access-denied error on the command, with no kernel \
          log naming the path, so the exact path cannot be shown here. If the command needs a file \
          or directory the active grant's fs allow-list does not admit, widen the grant's read (or \
-         write) set: the `grant [ fs: [read: [`absolute …]] ] { … }` block in ral, or `--extend-base` for \
-         exarch. A ``net: `offline`` grant likewise withholds the network capability, so a command that \
+         write) set: the `grant [ fs: [read: [`absolute …]] ] { … }` block in ral, or `--extend` for \
+         exarch (unless an exclusion covers it: an allowance cannot override one). A ``net: `offline`` grant likewise withholds the network capability, so a command that \
          needs a socket will fail the same way."
             .to_string(),
     )
@@ -233,8 +233,8 @@ fn path_remedy(paths: &[&str], set: &str) -> String {
     let _ = write!(
         out,
         "\nAdd {} (or a parent directory) to the grant's {set} set: the \
-         `grant [ fs: [{set}: [`absolute {}]] ] {{ … }}` block in ral, or `--extend-base` for \
-         exarch. The sandbox matches fully-resolved paths, so a path reached through a \
+         `grant [ fs: [{set}: [`absolute {}]] ] {{ … }}` block in ral, or `--extend` for \
+         exarch (unless an exclusion covers it: an allowance cannot override one). The sandbox matches fully-resolved paths, so a path reached through a \
          symlink inside a granted directory (e.g. ~/.config) needs the resolved path \
          above, not the link's own.",
         if one { "it" } else { "each" },
@@ -252,7 +252,7 @@ fn exec_remedy(paths: &[&str]) -> String {
     let _ = write!(
         out,
         "\nAdmit it as a file or a directory: the `grant [ exec: [allow: [`absolute {0}]] ] {{ … }}` \
-         block (or `dir `absolute {0}` for a directory) in ral, or `--extend-base` for exarch. A re-exec (`sh -c`, `find -exec`) \
+         block (or `dir `absolute {0}` for a directory) in ral, or `--extend` for exarch, unless an exclusion covers it: an allowance cannot override one. A re-exec (`sh -c`, `find -exec`) \
          reaches only this layer, so an in-process admit alone does not carry it.",
         quote_word(paths[0])
     );
@@ -315,7 +315,7 @@ fn opaque_remedy(op: Option<&str>) -> String {
         "{what}, and the kernel record names no operand: so this hint cannot say what to \
          widen. If the command needs a path the grant does not admit, add it to the grant's \
          read or write set: the `grant [ fs: [read: [`absolute …]] ] {{ … }}` block in ral, or \
-         `--extend-base` for exarch."
+         `--extend` for exarch, unless an exclusion covers it: an allowance cannot override one."
     )
 }
 
@@ -341,7 +341,7 @@ mod tests {
             "hint must carry the symlink caveat; got {hint:?}"
         );
         assert!(
-            hint.contains("fs.read") && hint.contains("--extend-base"),
+            hint.contains("fs.read") && hint.contains("--extend"),
             "hint must name both grant surfaces; got {hint:?}"
         );
         assert!(hint.contains("deny(1)"), "hint must show the kernel line");

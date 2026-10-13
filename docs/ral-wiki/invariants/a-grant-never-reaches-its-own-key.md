@@ -25,7 +25,7 @@ Unguarded, a grant with `net: true` could exfiltrate them with `cat`. So
 engine (`bootstrap::APPS`). `policy::for_invocation` then denies them **after**
 composition, as its own layer, on the same footing as a `--restrict` file's own
 path ([[map/exarch/policy|policy]]). No profile can forget the deny, no
-`--extend-base` can widen past it, and every spawned child's layer can only
+`--extend` can widen past it, and every spawned child's layer can only
 narrow beneath it ([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]]).
 
 Synod's files are named by the engine (`bootstrap::SYNOD`), not by synod. The
@@ -68,8 +68,10 @@ depend on a policy.
 
 - **`dangerous` has no `fs` policy to carry the file deny.** It attenuates
   nothing by contract, and installing a policy only to hold the deny would
-  confine a session that asked not to be. Name a `--restrict` file and the
-  session attenuates, and the deny comes with it.
+  confine a session that asked not to be. The credential layer is pushed
+  wherever some fs restricts: name a `--restrict` file, or extend `dangerous`
+  with an fs exclusion, and the deny comes with it; a positive-only fs
+  restricts nothing and gets none.
 - **The vault is reachable from an unconfined session.** The macOS profile
   admits no `securityd`, and the Linux envelope binds no session bus unless a
   grant reads `/run/user`. Outside those, the credential manager answers any

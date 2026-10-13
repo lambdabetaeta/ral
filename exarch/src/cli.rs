@@ -72,17 +72,19 @@ pub struct Cli {
     /// default is `reasonable`.
     #[arg(long = "base", value_name = "NAME", default_value = "reasonable")]
     pub base: String,
-    /// Add permissions from one ral file to the starting permission set.
+    /// Join one ral file's allowances and exclusions to the starting permission set.
     ///
-    /// Exarch applies this file before any `--restrict` files, so it can make
-    /// the selected base more permissive. Exarch never discovers this file
-    /// automatically; you must name it explicitly.
-    #[arg(long = "extend-base", value_name = "FILE")]
-    pub extend_base: Option<std::path::PathBuf>,
+    /// Exarch applies this file before any `--restrict` files. An allowance
+    /// never removes permission, and an exclusion always wins. An area the
+    /// base leaves unrestricted stays so, less the file's exclusions. Exarch
+    /// never discovers this file automatically; you must name it explicitly.
+    #[arg(long = "extend", value_name = "FILE")]
+    pub extend: Option<std::path::PathBuf>,
     /// Reduce the agent's permissions using a ral file.
     ///
-    /// Repeat this option to apply more restrictions. Their order does not
-    /// matter, and a restriction can never add permission. Exarch also denies
+    /// Repeat this option to apply more restrictions, in argument order: a
+    /// restriction can never add permission, but what a run allowance makes
+    /// readable reaches only the restrictions applied after it. Exarch also denies
     /// the agent access to each restriction file, so the agent cannot change
     /// its own permissions.
     #[arg(long = "restrict", value_name = "FILE")]

@@ -64,8 +64,8 @@ pub(super) fn session_card(s: &SessionInfo<'_>) -> Card {
     rows.push(meta_field("base", vec![CardSpan::new(base_role, s.base)]));
 
     rows.push(meta_field(
-        "extend-base",
-        match s.extend_base {
+        "extend",
+        match s.extend {
             Some(p) => vec![CardSpan::new(Role::Path, p.display().to_string())],
             None => vec![CardSpan::new(Role::Muted, "none")],
         },

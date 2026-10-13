@@ -2,7 +2,7 @@
 //! loader dressed in exarch's error format, and the cwd-relative path helper
 //! `super::for_invocation` calls around it.
 
-use ral_core::capability::Capabilities;
+use ral_core::capability::{Capabilities, Fragment};
 use ral_core::guard::freeze::FreezeCtx;
 use ral_core::types::{Break, Escape, Mooring, Shell};
 use std::path::{Path, PathBuf};
@@ -22,10 +22,30 @@ pub(super) fn load_capabilities_ral(
     flag: &str,
     ctx: &FreezeCtx,
 ) -> Result<Capabilities, String> {
+    load(path, flag, || {
+        ral_core::load::profile::load_capabilities_from_path(mooring, shell, path, ctx)
+    })
+}
+
+/// [`load_capabilities_ral`] for an extension file, which only
+/// [`Capabilities::extend`] may consume.
+pub(super) fn load_fragment_ral(
+    mooring: &Mooring,
+    shell: &mut Shell,
+    path: &Path,
+    flag: &str,
+    ctx: &FreezeCtx,
+) -> Result<Fragment, String> {
+    load(path, flag, || {
+        ral_core::load::profile::load_fragment_from_path(mooring, shell, path, ctx)
+    })
+}
+
+fn load<T>(path: &Path, flag: &str, read: impl FnOnce() -> Result<T, Break>) -> Result<T, String> {
     if !path.exists() {
         return Err(format!("{flag} path does not exist: {}", path.display()));
     }
-    ral_core::load::profile::load_capabilities_from_path(mooring, shell, path, ctx).map_err(|e| {
+    read().map_err(|e| {
         let detail = match e {
             Break::Error(err) => err.message,
             Break::Escape(Escape::Exit(code)) => format!("exit {code}"),

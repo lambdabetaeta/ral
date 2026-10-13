@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 6bfbb097
-generated_at_date: 2026-10-12
+generated_at_commit: 002c654a
+generated_at_date: 2026-10-13
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/guard/, core/src/guard.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
 
@@ -19,8 +19,8 @@ dynamic composition) and the folds over it, with no reader of its own. The
 in-process guard (`core/src/guard/`) and the OS sandbox
 (`core/src/sandbox/projection.rs`) are its two consumers, in the order
 `capability < sandbox < guard`
-([[decisions/261006_capability-is-data|capability-is-data]]). Every verdict
-combines the layers' *verdicts*; there is no `Capabilities::meet`
+([[decisions/261006_capability-is-data|capability-is-data]]). Every judgment
+combines the layers' *evidence* ([[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]]); there is no `Capabilities::meet`
 ([[decisions/260906_object-not-name|object-not-name]]). Why `Capabilities`,
 the live judgment, and `SandboxProjection` are distinct and not one is argued in
 [[design/capability-carriers|capability-carriers]].
@@ -32,55 +32,68 @@ Submodules:
   ([[design/capability-freeze|freeze boundary]]); `FsPolicy`, `Net`
   (`Offline`, the one opinion a layer holds on the network), the verb sets
   `BTreeSet<EditorVerb>` and `BTreeSet<ShellVerb>` (each `Option`: absent
-  inherits), `GrantStack`, `Meet`, `Widen`; and the authored exec grant
-  `ExecGrant`, a private `BTreeMap<ExecKey, Verdict>` built only by `Default`
-  and `FromIterator`, read through `iter` and `get` — `ExecKey::{Name, Path,
-  Dir}`, bare keys, frozen path keys and frozen dir keys, under `Verdict`
-  (`Deny < Allow`); every entry added by `meet_insert`, and `Display`
-  spelling a key as a grant does (a dir as `` `dir ``). It rides the wire (as a
-  pair sequence) and is never matched directly; `ExecRules` is what judges.
+  inherits), `GrantStack`, `Meet`, `Join`, `Axis` (`join_top`, `is_top`),
+  `Evidence { positive, negative }` and `Fragment`, the extension file's
+  result, consumed only by `Capabilities::extend` (roles are types: a policy's
+  omitted axis is `t`, a fragment's is `⊥`); and the authored exec grant
+  `ExecGrant { every, rules }`, both fields private, built only by `Default`,
+  `FromIterator<(ExecKey, Evidence)>`, `Join`, `join_top` and the wire
+  decoder, every entry through `join_insert`, read through `every`, `iter` and
+  `get` — `ExecKey::{Name, Path, Dir}`, bare keys, frozen path keys and frozen
+  dir keys; `every` is a flag only `join_top` sets and has no negative form;
+  `Display` spells a key as a grant does (a dir as `` `dir ``). It rides the
+  wire (as a pair sequence, `{"every", "rules"}`) and is never matched
+  directly; `ExecRules` is what judges.
   `Flag` (`Editor(EditorVerb)`, `Shell(ShellVerb)`) and
   `GrantStack::permits(Flag)` are the one verb vocabulary: membership, a meet
-  over the layers, silence permitting. `is_restrictive` is the per-axis
-  activation predicate: exec and fs when supplied, `Net` when `Offline`, a verb
-  set unless it lists every verb;
-- `table.rs` — `Table<K: Scope>`, authority as a table of scoped rules
-  ([[design/authority-tables|authority-tables]]): `Scope` (`rank`,
-  `holds::<P>`, `own`), `verdict` (most specific decides, ties meet, silence
-  denies), `live`, `denies`, `respelled`, and `Meet for Table`, denies joining
-  and allows meeting at their own subjects; the meet's law and lattice laws are
-  its property tests;
-- `fs.rs` — the fs instance: `FsOp`, `Region = Table<FrozenPath>`
-  (subject a `&Path`, rank `(is a deny, depth)`: a deny outranking every allow, the deeper above among each), and `region`, each
-  opining layer's prefixes for the op and its `deny_paths`, re-frozen against
-  the caller's `Resolver` (`FrozenPath::refreeze`) and met;
+  over the layers, silence permitting. `is_restrictive` is the denotational
+  activation predicate, each axis through `is_top`: exec unless `every` with no
+  exclusion, fs unless it writes the root and excludes nothing, `Net` when
+  `Offline`, a verb set unless it lists every verb;
+- `table.rs` — `Table<K: Scope>`, authority as a table of scoped evidence
+  ([[design/authority-tables|authority-tables]]): `Scope` (`holds::<P>`,
+  `own`; no rank), `supports`, `excludes`, `evidence`, `live`, `denies`,
+  `withheld` (a `Withheld`: `MissingAllowance`, or `Excluded` citing an
+  exclusion that applies, chosen deterministically), and `Meet`/`Join for
+  Table`, denies joining and allows meeting at their own subjects; the meet's
+  obligations and the generic law test are its property tests;
+- `fs.rs` — the fs instance: `FsOp`, `FsScope { Prefix(FrozenPath),
+  Place(RealPath) }` (a run place reads as a prefix), both regions
+  `Table<FsScope>`, and `region(stack, resolver, op, places)`, each supplying
+  layer's read and write prefixes (writing reads) and, for `places`, its run
+  places `P≤L`, with the floor joined; allowances stay as frozen and only deny
+  paths are re-frozen against the `Resolver`. `GrantStack::read` is the read
+  judgment: `region(…, false)`, then `region(…, true)` only on a missing
+  allowance;
 - `exec.rs` — the exec instance
   ([[decisions/261004_exec-rules|exec-rules]]) and its judgment: `Program`
   (`Tool` or `File { path, real, … }`, holding Linux's opened image) and the `Subject` it is judged as (`Tool`,
-  `File`, `Under`); `ExecScope` (`Dir`, `Carrier`, `File`, `Tool`, `Name`)
-  ranked by `Rank` (`Dir(depth) < Carrier < Exact < Name`); `ExecRules =
+  `File`, `Under`, `Any`); `ExecScope` (`Any`, `Dir`, `File`, `Tool`, `Name`),
+  `Name` negative only and `Any` positive only by construction; `ExecRules =
   Table<ExecScope>`; `ExecRules::compile`, one layer's `ExecGrant` against this
-  host, a bare key resolved on the host `PATH`; `rules`, the stack's table,
-  compiled per question. `GrantStack::admit(program, args)` is the one exec
-  judgment and the only mint of `Admitted` (the program, its argv and the table
+  host, a bare key resolved on the host `PATH` (live per run), a path key's allowance
+  at the real path frozen at decode and its exclusion at the real path its
+  surface reaches now (`RealPath::live`); `rules`, the stack's table, compiled
+  per question; `places`, the run places (positive `File` and `Dir` real
+  paths). `GrantStack::admit(program, args, resolver)` is the one exec
+  judgment, the table then the read judgment and the only mint of `Admitted` (the program, its argv and the table
   that judged them, private fields, all a launch reads); a refusal is data,
-  `Refused { program, args, why: ExecDenial }` with `Denied { respelled }`;
-  `admits(&Program)` is head-only admission and
-  `respelled` the deny that holds a program under another spelling.
-  `ExecRules::for_kernel` is the table with its carriers admitted and each file
-  at its final verdict, what the kernel is handed; `precedence` the same rules
-  in ascending `Rank` for a last-match-wins renderer; `allowed_files` the live
-  file scopes the carriers are computed over. Vetoes key on
+  `Refused { program, args, why: ExecDenial }`, `ExecDenial::{Run(Withheld<ExecScope>),
+  Read(Withheld<FsScope>)}`; `admits(&Program)` is head-only admission.
+  `ExecRules::for_kernel(support)` is the table less bundled-tool scopes, joined
+  with the live support as `File` allows, what the kernel is handed;
+  `allowed_files` the live file scopes the carriers are computed over. Vetoes key on
   `path::command_name_key`;
 - `deputy.rs` — `deputy_prefixes`, the confused-deputy report: the prefixes a
-  grant makes both `exec`-admitted and `fs`-writable, each dimension folded
-  across the `GrantStack` as a `Region` of allows and read through `live()`,
-  pairs judged by `holds::<Allow>` at the other's own subject (neither layer is
-  guilty alone). **What it locates is where a write becomes runnable, not an
+  grant makes both `exec`-admitted and `fs`-writable, the live part of
+  `R ∧ W`, the exec region (each exec layer's `Dir` keys with full evidence,
+  the root for `every`) met with `fs::region(FsOp::Write)`, so each writable
+  island under a runnable directory is named and a directory wholly excluded
+  on either side is not. **What it locates is where a write becomes runnable, not an
   escalation**: within one projection the dropped binary is spawned under the
   confinement that wrote it, and only a runner outside the projection turns
-  the shape into an escape — so it reports and never denies. Findings surface at grant push and at an exarch profile load
-  ([[design/grant|grant]]).
+  the shape into an escape — so it reports and never denies. Findings are recorded only into an open audit trail, as a layer is pushed
+  (`ral --audit --capabilities <profile> -c true`; [[design/grant|grant]]).
 
 The `load` module (rank 10), not this one, holds `load/profile.rs` —
 `load_capabilities_from_path` / `_from_str` for `.ral` capability profiles,
@@ -101,10 +114,11 @@ grant string becomes a frozen path.
   (`GrantStack::admit` and the wording of its refusal), `check_fs_exact` (the
   object `Shell::locate` walked to), `check_flag`, `check_device_name`, and
   `deny_head`, the refusal of a head before its argv is known. The exec and fs
-  checks return `Result<_, Denial>`, a `Denial { check, error }`: the fact the
+  checks return `Result<_, Denial>`, a `Denial { check, error }`, over
+  `FsRefusal::{Guarded, Withheld}`: the fact the
   trail keeps and the error the caller raises. The fs guard is split so the
-  judgment is reusable without the report: `fs_verdict` is the decision —
-  `Guarded` first, for a write onto a boot-pinned sandbox binary
+  judgment is reusable without the report: the fs judgment is the decision —
+  `FsRefusal::Guarded` first, for a write onto a boot-pinned sandbox binary
   (`sandbox::pinned_binary`, by inode), before any grant is folded — and
   `check_fs_exact` words it. `GrantStack::admits_fs_exact` is the quiet twin a
   write asks before reading its before- and after-images;
@@ -124,8 +138,10 @@ grant string becomes a frozen path.
   `home` and `cwd`) and its `place` (`None` is a dead grant, an `absolute`
   payload classified on the raw string) and `selector`; the tags `absolute`,
   `cwd`, `home`, `tempdir`, `gitdir` and `xdg-*`, `PolicyError`, the `gitdir`
-  refusals (`From<BadPointer>`), and the exec-only selectors `path` and
-  `system` (`path_dirs`, `system_dirs`, `system_tool_roots`);
+  refusals (`From<BadPointer>`), and the directory selectors `path`, `system` and `homebrew`
+  (`path_dirs`, `system_dirs`, `system_tool_roots`, the Homebrew expansion the
+  fs floor shares); `FrozenPath` freezing refuses a real path that is not
+  Unicode;
 - `decode.rs` — `decode_capability_map`, which walks a `grant [...]` /
   `--capabilities` `Value` map into a frozen `Capabilities`, one dimension
   decoder per `exec` / `fs` / `net` / `editor` / `shell` key, nested tables
@@ -213,11 +229,11 @@ A `FrozenPath` (`forms.rs`) carries its `surface` form (lexical — what
 the author wrote, kept for display) and its `real` form (symlinks
 followed), both fixed by one disk consultation at the freeze door; a guest
 prefix is minted by `from_guest` under the POSIX fold, and `refreeze`
-re-resolves a prefix against a live `Resolver`, the bare root minted rather
-than frozen.
+re-resolves an exclusion against a live `Resolver` (an allowance is never
+re-frozen), the bare root minted rather than frozen.
 [[invariants/grants-judge-objects|Every authority is judged on `real`]]:
 `contains::<P>` for fs, `RealPath::frozen` (`real.rs`) for the exec table,
-and `evicts` for composition — and no other door: `identity::path_within` and its string twin are `pub(super)`,
+— and no other door: `identity::path_within` and its string twin are `pub(super)`,
 so the form-blind kernel does not leave `core/src/path/`, `surface_path` is
 private to `forms.rs`, and outside the module the surface leaves the type
 only as a *string* (`as_str`, `into_string`) for rendering. That is enforced
@@ -227,8 +243,9 @@ form — and read a symlink out of `HOME` as contained.
 
 The set-level algebra over prefixes is not in `path/`: it is
 `capability::table`, which names polarities and never identities, so every
-spelling question stays here. `real.rs` holds `RealPath`, the exec subject,
-ordered as the host identifies files and ranked by `identity_depth`.
+spelling question stays here. `real.rs` holds `RealPath`, the exec subject and the identity of a run place,
+ordered as the host identifies files; `RealPath::frozen` for an allowance,
+`RealPath::live` for an exclusion.
 
 XDG base directories resolve through one resolver, `host/basedir.rs`
 (`XdgKind`, `resolve_xdg`; the host's own bases through `host::xdg`): an absolute `XDG_*_HOME` override else the
@@ -251,12 +268,14 @@ guarded in-process on every platform (`guard::check_exec`) before the
 spawn; both Unix
 backends additionally render the same rules into the kernel, catching the
 re-execs the in-process guard never sees (`sh -c`, `find -exec`) — macOS as
-Seatbelt `process-exec` forms in `ExecRules::precedence` order, Linux as a Landlock `Execute`
+Seatbelt `process-exec` forms, positives then negatives, Linux as a Landlock `Execute`
 ruleset the payload enters inside the bwrap envelope over admits the parent
 opened in the host (`linux/landlock.rs`;
 Landlock being allow-list only, a deny *inside* an allowed directory is
-subtracted from it, entry by entry over the tree at launch). `carriers.rs` computes what the kernel
-must admit beside them for a script to start: system-vouched `#!`
+subtracted from it, entry by entry over the tree at launch; `Any` lowered against
+the bind plan, which is computed before the ruleset). `carriers.rs` computes the
+live support the kernel must admit beside the table for a script to start,
+under any confined launch whose fs or exec is restricted: system-vouched `#!`
 interpreters and macOS shims, by `trusted_real` — regular files only, judged
 against the effective uid — never `env`'s target
 ([[decisions/261004_exec-carriers|exec-carriers]]). The AppContainer on
@@ -318,13 +337,14 @@ device for `net` to govern; the in-process guards apply unchanged
   `Slot::Trampoline`, so there is no name to verify.
 - `projection.rs` — the sandbox's own view of authority:
   `SandboxProjection::of(&GrantStack, &Resolver, Option<&Admitted>)`
-  meet-folds the stack once, at spawn, into `FsProjection` (the read and write
-  `Region`s re-frozen once and rendered as the surface strings of their `live()`
-  allows and their `denies()`, `FsRules`, whose `rendered()` derives
-  `pinned_dirs`; `WriteReach` classifies a write prefix against an admitted
-  dir) and `ExecProjection::Restricted(ExecRules)`, `ExecRules::for_kernel` of
-  the `Admitted`'s own table with the carriers of its allowed files and its
-  program (`sandbox::carriers`), so the profile renders the table that judged
+  meet-folds the stack once, at spawn, into `FsProjection` (`read:
+  Vec<FsScope>`, the live positives of the read region with run places and live
+  support among them, beside the write prefixes, the floor and the exclusions;
+  allowances stay frozen up to rendering, exclusions are re-resolved through
+  `render_paths`; `FsRules`, whose `rendered()` derives `pinned_dirs`; no write
+  reach classification) and `ExecProjection::Restricted(ExecRules)`,
+  `ExecRules::for_kernel` of the `Admitted`'s own table joined with the live
+  support (`sandbox::carriers`), so the profile renders the table that judged
   the launch rather than a second compile. It takes no `Shell`;
   `Shell::sandbox_projection` (`guard/shell.rs`) is the door.
 - `projection_enforceable` (`sandbox.rs`) — rejects an offline (`` net: `offline ``)
@@ -358,8 +378,8 @@ device for `net` to govern; the in-process guards apply unchanged
   failure before the program starts exits 126, and an `execve` refusal takes its
   code from `SpawnFailure` (`From<&io::Error>`) — 126, or 127 for a missing
   program.
-  The encoding is NUL-terminated fields behind a `ral-warrant/1` magic — a
-  `file` is its real path, then its `argv[0]` spelling, then its argv; a `tool`
+  The encoding is NUL-terminated fields behind a `ral-warrant/2` magic — a
+  `file` is its real path, then its `argv[0]` spelling, then the exclusion covering its script's interpreter (empty if none), then its argv; a `tool`
   its name, then its argv — canonical (decode re-encodes and compares) and at
   most 8 MiB. It rides fd 99,
   never argv: a sealed memfd on Linux, checked again after sealing, and on macOS
@@ -391,7 +411,8 @@ device for `net` to govern; the in-process guards apply unchanged
   never through a symlink, so each rule reaches the file a grant froze.
   `landlock::build` plans the
   handled set from the parent's one probe (`plan`), creates the `Ruleset` by raw
-  syscall, and admits ral's pin fd, the loader base, each allowed file as
+  syscall, and admits the launched image by the inode the guard judged
+  (`admit_image`), each allowed file as
   itself and each live allowed directory as its hierarchy less what the table
   blocks beneath it (`expand`, which stops where a bind mount loops back onto
   a directory it is listing), each opened in the host by `open_real`
@@ -415,16 +436,16 @@ device for `net` to govern; the in-process guards apply unchanged
   bind at `Slot::Mount(i)`. A read-only bind within another bind is dropped, a
   writable one only within a writable one; an absent object drops its binds,
   and so does a system default this user may not reach, while a name now
-  reaching outside what was rendered refuses the launch. `Frozen` binds lay
-  each covered admit read-only wherever a writable bind shows it, and each
+  reaching outside what was rendered refuses the launch. Every allowance is
+  bound as its frozen real path, a redirected one refusing the launch, and each
   deny mask goes on wherever a `Shown` bind shows the denied path
   (`Binds::names`): a mount laid inside one bind of an object does not show
   at another, so a prefix written through a symlink, two binds of one
-  handle, is frozen and masked at both. A deny hiding `/proc` is refused,
+  handle, is masked at both. A deny hiding `/proc` is refused,
   the envelope starting its trampoline through it. The two pins join the `Over` layer by copies of their own
   descriptors, read-only at the names their inodes hold now (`pinned`, over
   `Pinned::names`), an unlinked pin binding nothing. `bwrap_argv` emits
-  `--ro-bind-fd`/`--bind-fd` from the same vector, `Shown`, then `Frozen`,
+  `--ro-bind-fd`/`--bind-fd` from the same vector, `Shown`,
   before `/proc` and `/dev`, `Over` after. `--chdir` refuses
   non-UTF-8, and so does every rendered name, rather than go lossy into
   bwrap's argv. Windows builds the
@@ -442,7 +463,7 @@ device for `net` to govern; the in-process guards apply unchanged
   locally, external children being confined per-command
   ([[decisions/260617_sandbox-external-children|sandbox-external-children]]).
 - Backends: `macos.rs` (Seatbelt, `macos-base.sbpl`; `Profile`, a record whose
-  field order is the rule precedence, and in every profile ral's own file is
+  field order is the rule precedence (no freeze section), and in every profile ral's own file is
   write-denied and its ancestors unlink-denied), `process/limits/fork_brake.rs` (macOS's
   process budget: the confined child's `RLIMIT_NPROC`, the user's count at
   launch plus 512, bounded by the system ceiling and inherited hard limit;
@@ -492,6 +513,7 @@ object and Windows does not re-inherit on a same-volume rename, so stamped
 authority is object-sticky where a grant rule is path-based — `dacl/mod.rs`'s module
 header records the resulting drift in both directions
 ([[decisions/260730_path-derived-capability-sids|path-derived-capability-sids]]).
+Every frozen allowance is checked before any stamp filter and stamped through a held handle on the very object checked, no redirecting reparse point on its path (a redirected one refuses the launch; a name surrogate redirects, a cloud placeholder does not; [[internals/confined-launch|confined-launch]]); the projection key covers the whole `read` list, places and live support included; and a launch whose fs projection holds the universal prefix is refused before anything is stamped.
 Within that shape: an AppContainer profile is still minted per *distinct fs
 projection* (`SessionSandbox` maps `bind_spec` identity to profile) for the
 deny-by-default token and named-object namespace separation, carrying no fs

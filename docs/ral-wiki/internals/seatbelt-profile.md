@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 2afefdf4
-verified_at_date: 2026-10-12
+verified_at_commit: 002c654a
+verified_at_date: 2026-10-13
 anchors: [apply_profile, build_profile, Profile, emit_fs_restricted, emit_exec_rules, Clause, Filter, emit_ancestor_metadata, withheld_doors, rendered_ancestors, pinned_dirs, open_search_dir]
 ---
 
@@ -42,7 +42,7 @@ cost of saying the second in the first:
 - **Order.** Seatbelt is last-match-wins, so every deny is emitted after every
   allow in the profile, not merely after its own. `Profile` is a record whose
   field order *is* that precedence — fs allows, exec rules, exec ancestors,
-  freeze, fs denies, pins, net — and its `Display` writes the sections in it.
+  fs denies, pins, net — and its `Display` writes the sections in it.
 - **ral's own file.** A sandboxed command must not swap the ral that confines
   its children, so in every profile ral's file is write-denied and its
   ancestors unlink-denied, whatever the grant.
@@ -70,43 +70,45 @@ socket). User temp and workspace paths are absent by design: they arrive
 through the grant.
 
 **exec.** `Unrestricted` is `(allow process-exec)`, so an fs-only grant does
-not attenuate exec at the OS layer. `Restricted` first admits Rosetta's
-runtime (`/Library/Apple/usr`, the one path the backend adds itself; its read half is in the floor) and ral's own
-binary in one `(allow file-read* process-exec …)` — Seatbelt needs both
-operations to spawn; ral is admitted because a ral run inside the sandbox
-starts its own bundled tools and pipeline anchors by re-executing this binary.
-An operand-less form is an unconditional allow, so an empty base emits nothing. Then each of the projection's rules, already in
-`Rank` order, becomes one `Clause`: an allowing dir or file
-`(allow file-read* process-exec (subpath|literal …))`, a denying one
-`(deny process-exec …)`, a veto `(deny process-exec (regex #"/name$"))`,
-the name wherever it resolves. Seatbelt matches each form caselessly, as the
-guard reads a deny; the stack's meet writes no default as a deny, so no form
-refuses a child a spelling the guard admits. Last-match-wins over that order is the
-in-process guard's precedence, carriers included
-([[decisions/261004_exec-carriers|exec-carriers]]). **Exec denies deny no
-reads**: reading is fs's to decide, and a veto would otherwise hide every
-same-named file. Allowed files and directories get their ancestor chains. Bundled tools
-re-exec ral itself (a warrant naming the tool; the per-tool check is `vet`'s),
-and Apple's compiler chain is grant data, under `system:`. This layer still
-cannot see argv, so `Only` renders as an allow; its job is the
-interpreter-bypass class the guard never sees (`sh -c`, `env`, `xargs`,
-`find -exec`).
+not attenuate exec at the OS layer; `Any` (`every`) renders the same way, with
+the table's exclusions after it. `Restricted` first admits Rosetta's runtime
+(`/Library/Apple/usr`, the one path the backend adds itself; its read half is in
+the floor) in a `file-read* process-exec` clause of its own, emitted before the
+exclusions so that an exclusion reaches it. ral's own binary is *not* admitted:
+it is an ordinary file, allowed where a policy clause allows it and reached by
+the denies after the positives. Then every positive exec clause, then every
+negative one. Positive clauses are `process-exec` alone, `(allow process-exec
+(subpath|literal …))`; reads, run places and support among them are the fs
+section's, which renders them whether exec is restricted or not. Support
+(carriers, [[decisions/261004_exec-carriers|exec-carriers]]) arrives among the
+positives as `File` allows. A negative clause is `(deny process-exec …)`, and a
+veto is `(deny process-exec (regex #"/name$"))`, the name wherever it resolves;
+an entry with both bits emits both clauses. Seatbelt matches each form
+caselessly, as the guard reads an exclusion. **Ordering within each group is
+for stable output only; depth grants no exception**, so last-match-wins puts
+every exclusion over every allowance, which is the guard's rule
+([[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]]).
+**Exec exclusions deny no reads**: reading is fs's to decide, and a veto would
+otherwise hide every same-named file. Allowed files and directories get their
+ancestor chains, computed from `live()` so that a suppressed scope never becomes
+an admitted root. Bundled tools run in the confined child, so no profile
+clause admits ral for them; they read ral's binary through fs. This layer still
+cannot see argv; its job is the interpreter-bypass class the guard never sees
+(`sh -c`, `env`, `xargs`, `find -exec`). Seatbelt needs `file-read*` to spawn a
+binary, so a program that runs only through `every` and is not read by the fs
+rules does not start. The confined child applies its profile after it has started, so its own
+image is already mapped when the profile takes force.
 
-**Freezing the admitted set.** Under `fs: Unrestricted` with a veto in force,
-every admitted directory and file is also `(deny file-write*)`. Otherwise
-`(allow file-write*)` makes every veto hollow: copy the denied binary under a
-fresh name into an admitted directory and run it from there.
-Freezing contradicts no layer, none having asked to write there, and restores
-the premise `capability::deputy` reasons from: that an unrestricted `fs` is
-not "everything writable" — true of the folded grant, false of this backend
-until here. A grant that *restricts* fs freezes, veto or none, only the admitted
-files and directories its write prefixes cover without naming (`write: ~` over
-`~/.cargo/bin`), and not those they name, nor those nested under an admit they
-name: the overlap there is a stance someone took (`reasonable` admits `cwd:/`
-for exactly the scripts it lets the agent write), and a bare-name veto under it
-is no more than a narrowing of the allow set ([[decisions/261006_a-veto-freezes-what-a-write-covers|a-veto-freezes-what-a-write-covers]]).
-A file named explicitly as writable stays writable; a covered file gets a
-literal write deny, leaving its siblings writable.
+**Allowances render frozen.** Every read, write and run allowance is rendered as
+its frozen real path, with its firmlink twins, and as nothing else: a surface
+spelling is never a predicate of its own. Seatbelt checks the resolved path of
+each access against it, so a symlink put in an allowance's place reaches
+nothing. Exclusions are rendered from their re-resolved names.
+
+**There is no write freeze.** An admitted directory a broad write covers stays
+writable, with or without a veto, under any fs; a name veto there is advisory to
+descendants, and `capability::deputy` names such folders
+([[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]]).
 
 **net.** Enforced by absence. The base admits `network-outbound` for nothing;
 only `net: true` appends `macos-net.sbpl` — the wholesale `(allow network*)`,

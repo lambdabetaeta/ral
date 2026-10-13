@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 0dc4a920
-generated_at_date: 2026-10-09
+generated_at_commit: 002c654a
+generated_at_date: 2026-10-13
 covers_paths: [exarch/src/policy.rs, exarch/src/policy/]
 ---
 
@@ -15,22 +15,31 @@ one meet that ever runs ([[decisions/260906_object-not-name|object-not-name]],
 [[map/core/capabilities|capabilities]]).
 
 ```text
-  ceiling = base ∨ extend_base?
-  stack   = [ceiling, restrict₁, restrict₂, ..., deny(restricts)?, deny(credentials)?]
+  ceiling = base ◁ extension?
+  stack   = [ceiling, restrict₁, restrict₂, ..., deny(restricts)?, deny(credentials)?, self]
 ```
 
-`for_invocation` builds that stack in a fixed order — **a single optional join
-widens the ceiling into its own layer; every other attenuation is its own
+`for_invocation` builds that stack in a fixed order — **a single optional extension
+adds to the ceiling, once, in its own layer; every other attenuation is its own
 pushed layer**:
 
 - resolves the named base (`resolve_base`) as the ceiling;
-- joins an optional `--extend-base` into the ceiling (widens it, still one
-  layer);
+- loads an optional `--extend` file as a `Fragment` and computes
+  `base.extend(fragment)` as the ceiling (`◁`: an allowance never removes
+  authority, an exclusion always wins, an axis the base leaves unrestricted
+  stays so less the fragment's exclusions; still one layer;
+  [[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]]);
 - pushes each `--restrict` file as its own layer (attenuates);
 - pushes a deny layer carving out each restrict file's own path (below);
 - pushes a deny layer for
   [[invariants/a-grant-never-reaches-its-own-key|exarch's and synod's own credential files]]
-  the same way, for every base but `dangerous`.
+  the same way, wherever some layer's fs restricts (the layer is pushed on the
+  denotation, so `dangerous` extended with a positive-only fs gets none);
+- pushes last the *self layer*: an exec exclusion of exarch's own binary, by
+  the path it was pinned from, built as `deny_layer` is (`join_top` over a
+  fragment of one exclusion), in every session, `dangerous` included, so every
+  spawned agent inherits it. The agent cannot start exarch as a process; `dangerous`
+  is ambient authority less starting exarch, and its stack restricts.
 
 Composition emits no confused-deputy warning naming every prefix both
 exec-admitted and writable. That predicate is not the one that matters —
@@ -61,7 +70,7 @@ desk behind the [[map/exarch/builtins|`` exarch-agents `start `` tag]]
 carries the parent's own `GrantStack` — and pushes this layer onto it
 (`SpawnGrant::narrow_onto`), so the same stack that carries the root's
 authority also carries a spawned child's attenuation. The stack's per-check
-fold ANDs every layer's verdict, so an added layer can only remove authority:
+fold ANDs every layer's evidence, so an added layer can only remove authority:
 a spawn can reduce a child's reach but never escalate it past the parent's —
 naming a base looser than the parent changes nothing (a network-off parent
 stays offline even under `minimal`).
@@ -94,29 +103,29 @@ holds an `fs` opinion — `provider::credential_files()`, so the agent cannot
 read the credentials that authorise its own turn
 ([[invariants/a-grant-never-reaches-its-own-key|a-grant-never-reaches-its-own-key]]).
 Pushed as its own layer, a credential deny is one no profile can omit by
-neglect and no `--extend-base` can widen back open — the stack's fold can
+neglect and no `--extend` can widen back open — the stack's fold can
 only narrow past it. **Only the user-supplied lexical form is pushed** — both
 capability enforcers expand a deny entry to its canonical (and, on macOS,
 firmlink) variants themselves, so canonicalising here would duplicate, less
 completely, work that belongs to core. Each path is frozen through the same
 lexer the grant decoder uses, so deny entries land as `FrozenPath`es in
-the grant-side normal form. The `--extend-base` file is *not* denied: it
-widens the ceiling, so denying writes to it is a trust-source concern, not a
-self-protection one. The credential deny is skipped for `dangerous` alone: it
-attenuates nothing by contract, and pushing an `fs`-opinionated layer there
-just to hold these denies would confine a session that asked not to be,
-against an agent that can read the same bytes a hundred other ways.
+the grant-side normal form. The `--extend` file is *not* denied: it
+extends the ceiling, so denying writes to it is a trust-source concern, not a
+self-protection one. The credential deny is pushed only where some layer's fs restricts: for plain
+`dangerous` it would confine a session that asked not to be, against an agent
+that can read the same bytes a hundred other ways.
 
 `policy/base.rs` embeds the six bake-in profiles from `exarch/data/*.exarch.ral`
 via `include_str!`, ordered from most to least authority:
 
-- `dangerous` — `Capabilities::root`, lattice top, no attenuation;
+- `dangerous` — `Capabilities::root`, lattice top, no attenuation of its own
+  (the self layer still excludes exarch's binary);
 - `reasonable` — default; everyday tooling + standard binary dirs;
 - `edit-only` — reasonable's reads, writes to the working tree and scratch,
   network on; for patch/refactor jobs that never run a build;
 - `read-only` — reasonable's reads/exec, writes only to scratch;
 - `minimal` — system binaries + cwd + scratch + net + chdir; a deliberately
-  narrow base for additive `--extend-base`;
+  narrow base for additive `--extend`;
 - `confined` — offline build jail; host binaries by subpath, with explicit
   bare-name entries for core's bundled tools (which have no path to match).
 
@@ -146,8 +155,9 @@ representation ([[decisions/260615_no-core-repr-leak-into-exarch|no-core-repr-le
 
 **The bake-ins name exec authority portably through the `` `dir `system `` selector** —
 [[map/core/capabilities|core]]'s spelling of the platform's live tool roots
-(`ral_core::guard::freeze::system_tool_roots`): the standard binary dirs plus a
-Homebrew tree when the host has one on Unix; `%SystemRoot%\System32`, the
+(`ral_core::guard::freeze::system_tool_roots`): the standard binary dirs on Unix (Homebrew is its own selector,
+`` `dir `homebrew ``, expanding to the prefixes that exist, `HOMEBREW_PREFIX`
+first); `%SystemRoot%\System32`, the
 PowerShell home, and Git-for-Windows' `usr\bin` on Windows. Two consequences
 ride it:
 
@@ -155,9 +165,9 @@ ride it:
   profile — `bash`/`zsh` and their Windows analogues `cmd`/`powershell`/`pwsh`
   (which `system:` would otherwise admit via `System32`); `sh` stays allowed
   for `configure`/`make` shell-outs;
-- `minimal` carves the Homebrew tree back out with an explicit
-  `/opt/homebrew/` deny, so `system:` folding it in when present never widens
-  minimal's "system tools only" narrowing — brew tools stay opt-in.
+- `minimal` leaves Homebrew unlisted, so brew tools are opt-in through
+  `--extend`; `reasonable`, `confined`, `edit-only` and `read-only` add
+  `` `dir `homebrew ``.
 
 `resolve_base` also drops *dead grants* as a profile loads: exec literals
 naming the Unix-only bundled coreutils (`drop_dead_exec_grants`) are removed
@@ -170,19 +180,18 @@ can't silently widen a jail:
 
 - `dangerous` is `Capabilities::default` (lattice top);
 - `git` admitted in `reasonable`/`read-only` (commit flows work without
-  `--extend-base`); `minimal` admits only the *system* git under `/usr/bin/`
-  (its Homebrew deny keeps a brew git opt-in via the git extension);
-- every exec-declaring base carries an `Allow` for each live system tool root
-  (`minimal`'s Homebrew deny the one documented exception);
+  `--extend`); `minimal` admits only the *system* git under `/usr/bin/`
+  (a brew git is opt-in via the git extension);
+- every exec-declaring base carries an `Allow` for each live system tool root;
 - `read-only` reads but does not write `cwd:`;
 - `confined` is net-off, admits host execs by subpath and only bundled tools by
   bare name, and has no home-reaching prefixes;
 - `` `cwd ``/`` `tempdir `` places freeze into the per-invocation working and temp dirs
   without exarch injecting them dynamically.
 
-`exarch/examples/git.exarch.ral` is the canonical `--extend-base` that lifts
-`minimal`/`confined` into a git-capable shape; a test pins that joining it into
-`minimal` keeps `git` admitted and adds `~/.gitconfig`, and that `FsPolicy::join`
+`exarch/examples/git.exarch.ral` is the canonical `--extend` that lifts
+`minimal`/`confined` into a git-capable shape; a test pins that extending `minimal` with it keeps `git` admitted and adds
+`~/.gitconfig`, and that `FsPolicy::join`
 **unions** deny sets — a one-sided veto survives the join, so an overlay stays
 purely additive without re-stating the base's credential denies.
 

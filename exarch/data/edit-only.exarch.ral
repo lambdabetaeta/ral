@@ -78,10 +78,22 @@ return [
   # ever sees.  An editing agent runs tools, not the tree it edits, so
   # the admits cost nothing here and their absence is what lets the
   # denies mean something.
+  #
+  # That holds only where `` `cwd . `` covers no admitted directory.
+  # Launched from `~`, it covers `` `dir `xdg-bin . ``, which is then
+  # both writable and runnable, and the `git` veto below is advisory.
+  # To see which folders a launch leaves so, run from the directory in
+  # question:
+  #
+  #     ral --audit --capabilities edit-only.exarch.ral -c true
+  #
+  # and read the `deputy` checks of the trail it prints; each names a
+  # prefix that is both writable and runnable.
   exec: [
     allow: [
       `dir `xdg-bin .,
-      `dir `system,  # the platform's tool roots — see `system_tool_roots` in core/src/guard/freeze.rs
+      `dir `system,    # the platform's tool roots: `system_tool_roots` in core/src/guard/freeze.rs
+      `dir `homebrew,  # the Homebrew prefixes present: `homebrew_roots` in core/src/guard/freeze.rs
       `dir `absolute /usr/local/bin,
       `dir `absolute /usr/local/sbin,
       `dir `absolute /usr/sbin,

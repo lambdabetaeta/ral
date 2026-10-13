@@ -649,8 +649,9 @@ the whole block.
 Each mentioned dimension becomes deny-by-default:
 
 - `exec:` lists `allow` and `deny` targets: `` `name git ``, a place such as
-  `` `absolute /opt/tools/lint ``, or `` `dir `system `` for a directory. An
-  allowed target runs with any arguments; ral does not filter arguments;
+  `` `absolute /opt/tools/lint ``, or `` `dir `system `` (or `` `dir `path ``,
+  `` `dir `homebrew ``) for a directory. An allowed target runs with any
+  arguments; ral does not filter arguments;
 - `fs:` lists the places that are readable, writable, and denied;
 - `net:` is `` `offline `` or omitted; a grant cannot ask for the network;
 - `editor:` and `shell:` list verbs, for example `` shell: [`chdir] ``.
@@ -659,6 +660,20 @@ Each mentioned dimension becomes deny-by-default:
 
 An omitted dimension keeps the caller's authority. A nested `grant` can only
 reduce authority, never restore it.
+
+Three rules decide what a grant means:
+
+- An exclusion (`deny`) beats every allowance, however specific: an exact file
+  or a deeper directory inside an excluded directory does not run. A refusal
+  says which exclusion applies; no allowance overrides it. An exclusion is a
+  guardrail, not a wall: it names programs by path and name, so a copy of one,
+  or a script fed to an allowed interpreter, is a different request.
+- Whatever a grant lets run by path, directory or name, or lets be written, may
+  be read. A nested `fs` grant therefore does not hide a tool an enclosing
+  grant runs; exclude it to hide it.
+- An allowance by path names what it named when it was granted: a symlink put
+  in its place later redirects nothing. An exclusion follows its name, and a
+  bare program name follows `PATH` afresh at each run.
 
 Every dimension grants or refuses authority; none decides what is written
 down. Whenever an audit trail is open, a *denial* is recorded as a `` `check ``

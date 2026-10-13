@@ -13,9 +13,9 @@ The type (`core/src/capability/lattice.rs`):
   `editor` and `shell` verb sets), and nothing else: every member is authority, so a bundle
   carries no switch over what is recorded about it. Path lists hold concrete
   absolute paths. Bundles compose by stacking on a `GrantStack`, every
-  verdict meeting the layers' tables at the access
-  ([[design/authority-tables|authority-tables]]); `widen` unions a base with
-  an extension into one bundle.
+  judgment meeting the layers' evidence at the access
+  ([[design/authority-tables|authority-tables]]); `Capabilities::extend` joins a base with
+  a fragment into one ceiling bundle.
 
 ## `decode` is the one-way door
 
@@ -77,10 +77,20 @@ folds the spelling and canonicalises leniently, so a prefix carries its
 disk stood at decode). That makes the algebra a pure function of the policy.
 Enforcement then re-asks the world.
 
-- **fs prefixes re-resolve on every check** (`FrozenPath::refreeze`), so a
-  symlink swapped under a granted prefix after decode is followed live; allow
-  and deny prefixes alike are judged on the world as it is.
-- **Exec `Path` and `Dir` keys keep their frozen identity.**
+- **Allowances are frozen for good; only exclusions re-resolve.** An allowance,
+  fs prefix or exec `Path`/`Dir` key, keeps the real path it was frozen to and
+  is never re-frozen, so a symlink put in its place later redirects nothing. An
+  exclusion re-freezes against the live disk on every question
+  (`FrozenPath::refreeze`; `RealPath::live` for exec), so it holds its object
+  under any new spelling the moment one exists. A bare program name resolves
+  afresh at each run.
+- **Freezing refuses a real path that is not Unicode**, since the frozen real
+  form is now the allowance's identity and a lossy form would grant a sibling.
+- **A guest allowance is not yet frozen inside the machine.** synod mints it with
+  `FrozenPath::from_guest`, whose real form copies its surface, and sends it with
+  every run, so a redirect made in one guest run can take effect in the next.
+  Freezing it once per session, inside the guest, is deferred
+  ([[design/authority-tables|authority-tables]], "Freshness").
 - **The access is canonicalised before matching.** A grant of
   `` read: [`home sandbox] `` is not escaped by a `~/sandbox/leak → /etc/passwd`
   link the body plants once the grant has taken force: a lexical match would
@@ -100,15 +110,15 @@ Freezing the rule's anchors pins its *authorship*: `` `cwd `` resolves to where
 the grant was established, so a later `cd` cannot retroactively widen authority.
 The prefixes themselves are a different matter.
 
-**Known limitation: allowances are re-resolved too.** The per-access fold
-re-freezes every prefix, allowances included, so an allowance follows whatever
-its path names *now*. A grant reading `work/ro` and writing `work` is escaped by
-renaming `ro` and planting a symlink named `ro` that points outside: the
-re-resolved allowance follows the replacement, in the guard and in the kernel
-projection alike. Re-resolution is right for exclusions, which must hold their
-object under any new spelling, and wrong for allowances. The fix, freezing
-allowances for good and re-resolving only exclusions, is specified in the
-belnap-authority plan (§4.1) and has not landed.
+**Allowances name what they named.** A grant reading `work/ro` and writing
+`work` is not escaped by renaming `ro` and planting a symlink named `ro` that
+points outside: the allowance keeps its frozen real path, the guard judges by it,
+and each backend refuses a launch whose frozen allowance now meets a link or
+reparse point rather than following it (Landlock's `RESOLVE_NO_SYMLINKS` binds,
+Seatbelt's resolved-path check, Windows' held handles). Creating a granted
+directory after the grant, or `rm -rf dir && mkdir dir`, keeps working: these
+are path grants, not inode pins. Re-resolution is right for exclusions and wrong
+for allowances ([[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]]).
 
 ## The XDG-escape guard is a per-profile invariant
 
@@ -138,7 +148,7 @@ holds two paths and picks.
 This is *fail-closed*: the honest reading for a defence-in-depth control is that
 the offending input is refused at the door, not that its rejection depends on
 what survives the lattice. Error attribution is per-profile — exarch's loader
-prepends `--restrict <path>` (or `--extend-base`), so the message names the file
+prepends `--restrict <path>` (or `--extend`), so the message names the file
 that carried the bad token.
 
 ## A `` `gitdir `` pointer is answered, not obeyed
@@ -165,11 +175,11 @@ legitimately lies outside the tree, so no region bounds it. What bounds it is
 ## Composition is over resolved paths
 
 When several profiles merge into one ceiling — exarch's
-`base ∨ extend ⊓ restrict` ([[map/exarch/policy|policy]]) or the
+`base ◁ extend ⊓ restrict` ([[map/exarch/policy|policy]]) or the
 `--capabilities` fold in `apply_session_profiles` — each is frozen as it loads
 and the lattice operations run on the resolved bundles.
 
-- the meet and the widen compare **concrete paths**, so prefix containment is exact
+- the meet and the extension compare **concrete paths**, so prefix containment is exact
   (`/work/proj/src ⊂ /work/proj` is seen as such). Strictly more precise than
   comparing place spellings; no soundness change.
 - the `FreezeCtx` is built **once** per composition site, home and cwd in hand
@@ -184,8 +194,8 @@ the live disk at enforcement time — sharing one meet, `Table::meet`
 [[decisions/260602_exec-authority-partitioned|exec-authority-partitioned]]
 §"one combinator at two fidelities" and §"the two folds stay separate".
 Composition itself is stacking, not a fold over frozen values: the
-`GrantStack` holds each layer and every verdict intersects the layers'
-answers at the access ([[decisions/260906_object-not-name|object-not-name]]).
+`GrantStack` holds each layer and every judgment meets the layers'
+evidence at the access ([[decisions/260906_object-not-name|object-not-name]]).
 
 ## Off the wire by construction
 
@@ -207,9 +217,8 @@ namespace the child will match in*.
 
 See also [[design/grant|grant]] (the calculus this resolves into),
 [[design/two-enforcers|two-enforcers]],
-[[decisions/261006_a-veto-freezes-what-a-write-covers|a-veto-freezes-what-a-write-covers]]
-(the other freeze: what a write region may not author in an admitted
-directory),
+[[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]]
+(frozen allowances, re-resolved exclusions),
 [[decisions/260605_capability-stage-collapse|capability-stage-collapse]] (the
 decision to collapse to one always-frozen type),
 [[decisions/260601_reduced-authority-witness|reduced-authority-witness]],

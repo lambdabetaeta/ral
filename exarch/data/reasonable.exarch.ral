@@ -16,9 +16,9 @@
 return [
   # Build-toolchain caches, user-installed toolchains, and the
   # project tree itself.  The OS sandbox layer's readable system
-  # paths (CommandLineTools, /opt/homebrew, /etc/alternatives, …)
+  # paths (CommandLineTools, Homebrew, /etc/alternatives, …)
   # are added separately, and the tool roots that may run come from
-  # `dir `system` below; this section covers what the OS layer can't
+  # `dir `system` and `dir `homebrew` below; this section covers what the OS layer can't
   # bake in.
   #
   # Places are frozen when the grant is decoded:
@@ -161,7 +161,8 @@ return [
       `dir `path,
 
       `dir `xdg-bin .,  # ${XDG_BIN_HOME:-~/.local/bin}
-      `dir `system,     # the platform's tool roots — see `system_tool_roots` in core/src/guard/freeze.rs
+      `dir `system,     # the platform's tool roots: `system_tool_roots` in core/src/guard/freeze.rs
+      `dir `homebrew,   # the Homebrew prefixes present: `homebrew_roots` in core/src/guard/freeze.rs
       `dir `absolute /usr/local/bin,
       `dir `absolute /usr/local/sbin,
       `dir `absolute /usr/sbin,

@@ -146,26 +146,19 @@ fn a_link_to_a_denied_file_is_judged_at_the_file() {
     assert_eq!(read(&fx.path("work/secret")), "keep\n");
 }
 
-/// The before-image is a read.  Under a grant that writes `work` but reads
-/// nothing, the replacement lands and the trail carries no old bytes; under
-/// one that also reads, it carries them — so the withholding is the grant's
-/// doing, not the card's.
+/// The before-image is a read, and writing reads: a grant that writes `work`
+/// and lists no read of it carries the old bytes, as one that lists it does.
 #[test]
-fn the_before_image_is_withheld_under_a_write_only_grant() {
-    for (readable, expect_old) in [(false, false), (true, true)] {
-        let fx = Fixture::new(
-            if readable { "diff_rw" } else { "diff_wo" },
-            if readable { &["."] } else { &[] },
-            &[],
-        );
+fn a_write_only_grant_carries_the_before_image_because_writing_reads() {
+    for (name, listed) in [("diff_wo", &[][..]), ("diff_rw", &["."][..])] {
+        let fx = Fixture::new(name, listed, &[]);
         std::fs::write(fx.path("work/f"), "OLD-BEFORE-IMAGE\n").unwrap();
         let out = fx.run(&["--audit"], "echo replaced > 'ROOT/work/f'");
         assert_eq!(out.status, 0, "stderr:\n{}", out.stderr);
         assert_eq!(read(&fx.path("work/f")), "replaced\n");
-        assert_eq!(
+        assert!(
             out.stderr.contains("OLD-BEFORE-IMAGE"),
-            expect_old,
-            "readable={readable}; audit dump:\n{}",
+            "read list {listed:?}; audit dump:\n{}",
             out.stderr
         );
     }

@@ -5,9 +5,9 @@
 //! Each test drives `Shell::with_capabilities` and `sandbox_projection` over
 //! the public API, and the in-process exec guard through `test_access`'s doors, which
 //! judge a file by the real path a test names.  The policies and their
-//! meet/widen semantics are the contract.
+//! meet/extension semantics are the contract.
 
-use ral_core::capability::{Capabilities, ExecGrant, ExecKey, FsPolicy, Verdict};
+use ral_core::capability::{Capabilities, Evidence, ExecGrant, ExecKey, FsPolicy};
 use ral_core::path::FrozenPath;
 use ral_core::test_access::check_file;
 #[cfg(unix)]
@@ -27,26 +27,23 @@ fn host(p: &str) -> String {
     }
 }
 
-fn names(entries: &[(&str, Verdict)]) -> impl Iterator<Item = (ExecKey, Verdict)> {
+fn names(entries: &[(&str, Evidence)]) -> impl Iterator<Item = (ExecKey, Evidence)> {
     entries
         .iter()
-        .map(|(name, v)| (ExecKey::Name((*name).to_string()), v.clone()))
+        .map(|(name, v)| (ExecKey::Name((*name).to_string()), *v))
 }
 
-fn paths(entries: &[(&str, Verdict)]) -> impl Iterator<Item = (ExecKey, Verdict)> {
-    entries.iter().map(|(path, v)| {
-        (
-            ExecKey::Path(FrozenPath::from_surface(host(path))),
-            v.clone(),
-        )
-    })
+fn paths(entries: &[(&str, Evidence)]) -> impl Iterator<Item = (ExecKey, Evidence)> {
+    entries
+        .iter()
+        .map(|(path, v)| (ExecKey::Path(FrozenPath::from_surface(host(path))), *v))
 }
 
-fn dirs(entries: &[(&str, bool)]) -> impl Iterator<Item = (ExecKey, Verdict)> {
+fn dirs(entries: &[(&str, bool)]) -> impl Iterator<Item = (ExecKey, Evidence)> {
     entries.iter().map(|(dir, v)| {
         (
             ExecKey::Dir(FrozenPath::from_surface(host(dir))),
-            Verdict::from(*v),
+            if *v { Evidence::ALLOW } else { Evidence::DENY },
         )
     })
 }
@@ -58,11 +55,10 @@ fn exec_only(exec: ExecGrant) -> Capabilities {
     }
 }
 
-/// A deny dir carves a hole inside a broader allow dir: the deepest dir
-/// wins, so a binary in the inner directory is denied even though the outer
-/// admits.
+/// An excluded dir carves a hole inside a broader allowed dir: a binary in
+/// the inner directory is refused though the outer admits.
 #[test]
-fn a_deeper_deny_dir_carves_a_hole_in_an_allow_dir() {
+fn an_excluded_dir_carves_a_hole_in_an_allowed_dir() {
     let mut shell = ral_core::test_helper::core_shell();
     let grant = exec_only(dirs(&[("/bin", true), ("/bin/sensitive", false)]).collect());
     shell
@@ -71,10 +67,7 @@ fn a_deeper_deny_dir_carves_a_hole_in_an_allow_dir() {
     let result = shell.with_capabilities(grant, |sh| {
         check_file(sh, &host("/bin/sensitive/payload"), &[])
     });
-    assert!(
-        result.is_err(),
-        "the deeper deny dir should beat the allow dir"
-    );
+    assert!(result.is_err(), "the exclusion should beat the allowed dir");
 }
 
 /// A bare key is the file the host `PATH` finds, so it admits no other file
@@ -82,7 +75,7 @@ fn a_deeper_deny_dir_carves_a_hole_in_an_allow_dir() {
 #[test]
 fn a_bare_allow_admits_no_other_file_of_its_name() {
     let mut shell = ral_core::test_helper::core_shell();
-    let grant = exec_only(names(&[("git", Verdict::Allow)]).collect());
+    let grant = exec_only(names(&[("git", Evidence::ALLOW)]).collect());
     let result = shell.with_capabilities(grant, |shell| {
         check_file(shell, &host("/fake-bin/git"), &["status".into()])
     });
@@ -92,7 +85,7 @@ fn a_bare_allow_admits_no_other_file_of_its_name() {
 #[test]
 fn a_path_key_admits_its_file() {
     let mut shell = ral_core::test_helper::core_shell();
-    let grant = exec_only(paths(&[("/fake-bin/git", Verdict::Allow)]).collect());
+    let grant = exec_only(paths(&[("/fake-bin/git", Evidence::ALLOW)]).collect());
     shell
         .with_capabilities(grant, |shell| {
             check_file(shell, &host("/fake-bin/git"), &["status".into()])
@@ -122,8 +115,10 @@ fn sandbox_projection_intersects_path_components() {
     let projection = shell.with_capabilities(outer, |shell| {
         shell.with_capabilities(inner, |shell| shell.sandbox_projection().unwrap())
     });
+    let read = ral_core::test_access::fs_read_paths(&projection.fs).expect("fs restricted");
     assert!(
-        ral_core::test_access::fs_rules(&projection.fs).is_some_and(|r| r.read_prefixes.is_empty())
+        !read.iter().any(|p| p.starts_with("/tmp/ral-prefix")),
+        "{read:?}"
     );
 }
 
@@ -162,9 +157,7 @@ fn sandbox_projection_does_not_leak_outer_raw_prefix() {
     let projection = shell.with_capabilities(outer, |shell| {
         shell.with_capabilities(inner, |shell| shell.sandbox_projection().unwrap())
     });
-    let read = &ral_core::test_access::fs_rules(&projection.fs)
-        .expect("fs restricted")
-        .read_prefixes;
+    let read = ral_core::test_access::fs_read_paths(&projection.fs).expect("fs restricted");
     assert!(!read.contains(&link.to_string_lossy().into_owned()));
     assert!(read.contains(&inner_dir.to_string_lossy().into_owned()));
 }
@@ -176,7 +169,7 @@ fn sandbox_projection_does_not_leak_outer_raw_prefix() {
 fn a_bare_deny_vetoes_its_name_under_an_allow_dir() {
     let mut shell = ral_core::test_helper::core_shell();
     let grant = exec_only(
-        names(&[("bash", Verdict::Deny)])
+        names(&[("bash", Evidence::DENY)])
             .chain(dirs(&[("/bin", true)]))
             .collect(),
     );
@@ -192,7 +185,7 @@ fn a_bare_deny_vetoes_its_name_under_an_allow_dir() {
 #[test]
 fn a_bare_allow_does_not_admit_a_planted_file_of_its_name() {
     let mut shell = ral_core::test_helper::core_shell();
-    let grant = exec_only(names(&[("rg", Verdict::Allow)]).collect());
+    let grant = exec_only(names(&[("rg", Evidence::ALLOW)]).collect());
     let result = shell.with_capabilities(grant, |sh| check_file(sh, &host("/evil/rg"), &[]));
     assert!(
         result.is_err(),
@@ -205,7 +198,7 @@ fn a_bare_allow_does_not_admit_a_planted_file_of_its_name() {
 fn a_path_key_deny_beats_a_covering_allow_dir() {
     let mut shell = ral_core::test_helper::core_shell();
     let grant = exec_only(
-        paths(&[("/bin/git", Verdict::Deny)])
+        paths(&[("/bin/git", Evidence::DENY)])
             .chain(dirs(&[("/bin", true)]))
             .collect(),
     );
@@ -245,7 +238,7 @@ fn with_fs(exec: ExecGrant) -> Capabilities {
 #[test]
 fn sandbox_projection_admits_a_path_key_covered_by_a_sibling_dir() {
     let outer = with_fs(dirs(&[("/bin", true)]).collect());
-    let inner = with_fs(paths(&[("/bin/git", Verdict::Allow)]).collect());
+    let inner = with_fs(paths(&[("/bin/git", Evidence::ALLOW)]).collect());
     let git = host("/bin/git");
 
     let mut shell = ral_core::test_helper::core_shell();
@@ -266,29 +259,34 @@ fn sandbox_projection_admits_a_path_key_covered_by_a_sibling_dir() {
         .expect("the in-process guard must admit the file");
 }
 
-/// Model the kernel over the rules it is handed: the last rule that matches a
-/// real path decides, and none denies.
+/// Model the kernel over the rules it is handed: a real path runs where some
+/// allowing clause holds it and no excluding clause does.
 #[cfg(unix)]
 fn kernel_admits(rules: Option<&[KernelExecRule]>, real: &str) -> bool {
     let Some(rules) = rules else {
         return true;
     };
     let real = Path::new(real);
-    (rules.iter().rev())
-        .find_map(|rule| match rule {
-            KernelExecRule::Dir { path, allow } => real.starts_with(path).then_some(*allow),
-            KernelExecRule::File { path, allow } => (real == Path::new(path)).then_some(*allow),
-            KernelExecRule::Name(name) => {
-                (real.file_name() == Some(name.as_ref())).then_some(false)
-            }
-        })
-        .unwrap_or(false)
+    let holds = |rule: &KernelExecRule| match rule {
+        KernelExecRule::Any { .. } => true,
+        KernelExecRule::Dir { path, .. } => real.starts_with(path),
+        KernelExecRule::File { path, .. } => real == Path::new(path),
+        KernelExecRule::Name(name) => real.file_name() == Some(name.as_ref()),
+    };
+    let allows = |rule: &KernelExecRule| match rule {
+        KernelExecRule::Any { allow }
+        | KernelExecRule::Dir { allow, .. }
+        | KernelExecRule::File { allow, .. } => *allow,
+        KernelExecRule::Name(_) => false,
+    };
+    let held = || rules.iter().filter(|rule| holds(rule));
+    held().any(allows) && !held().any(|rule| !allows(rule))
 }
 
 /// Conservatism invariant (safety direction): the OS projection must never
 /// admit a command the in-process guard would deny.  Checked differentially
 /// over adversarial two-layer stacks, each probed with a spread of real paths.
-/// Only a carrier may widen the kernel's set, and no probe here is one.
+/// Only support may widen the kernel's set, and no probe here is any.
 #[cfg(unix)]
 #[test]
 fn exec_projection_never_out_permits_the_guard() {
@@ -297,13 +295,13 @@ fn exec_projection_never_out_permits_the_guard() {
         // A path key admitted by inner, covered only by outer's allow dir.
         (
             allow_dir("/bin"),
-            paths(&[("/bin/git", Verdict::Allow)]).collect(),
+            paths(&[("/bin/git", Evidence::ALLOW)]).collect(),
             vec!["/bin/git", "/bin/ls", "/evil"],
         ),
         // A path key's deny carves a hole in a shared allow dir.
         (
             allow_dir("/bin"),
-            paths(&[("/bin/sudo", Verdict::Deny)])
+            paths(&[("/bin/sudo", Evidence::DENY)])
                 .chain(dirs(&[("/bin", true)]))
                 .collect(),
             vec!["/bin/ls", "/bin/sudo"],
@@ -311,7 +309,7 @@ fn exec_projection_never_out_permits_the_guard() {
         // A bare deny vetoes its name wherever it lands under the allow dir.
         (
             allow_dir("/bin"),
-            names(&[("bash", Verdict::Deny)])
+            names(&[("bash", Evidence::DENY)])
                 .chain(dirs(&[("/bin", true)]))
                 .collect(),
             vec!["/bin/ls", "/bin/bash", "/bin/nested/bash"],
@@ -319,7 +317,7 @@ fn exec_projection_never_out_permits_the_guard() {
         // A path key's deny must veto a file both dirs would admit.
         (
             allow_dir("/bin"),
-            paths(&[("/bin/bash", Verdict::Deny)])
+            paths(&[("/bin/bash", Evidence::DENY)])
                 .chain(dirs(&[("/bin", true)]))
                 .collect(),
             vec!["/bin/ls", "/bin/bash"],

@@ -19,25 +19,29 @@ consultation and offers containment on the real form alone:
   table: path and dir keys enter `ExecRules` as their real forms, judged
   against a head's `realpath(3)` by `RealPath::within::<P>`, the rule's
   polarity choosing the identity.
-- **composition — `evicts`**, which drops an allow dir a deny dir decides,
-  judges the same real forms the in-process guard does, under
-  `Collision` both ways.
+- **composition — `Table::meet`**, which joins exclusions and keeps an
+  allowance where both layers support its own subject, judges the same real
+  forms the in-process guard does. No sweep evicts an allowance: an exclusion
+  beats it as evidence, never by deleting it.
 
 An object can answer to several names — case and Unicode normalisation on
 APFS, NTFS, ZFS and Linux casefold directories — and an absent one has no stored
 spelling yet. So a **deny is judged by collision class and an allow by stored
 name** ([[decisions/261006_denies-hold-under-every-spelling|denies-hold-under-every-spelling]]):
-a rule of a `Table` speaks through `Scope::holds::<P>`, its verdict choosing
+a rule of a `Table` speaks through `Scope::holds::<P>`, its evidence bit choosing
 the `Polarity`, and `path` maps `Deny` to `Identity::Collision`, keyed by
 `identity::collision_key`, and `Allow` to `Identity::Stored`. A deny then holds the
 create that would make its object under another spelling, where an allow never
 reaches a distinct name on a case-sensitive volume. Composition keeps the
-split: denies join, allows meet by stored name, and the meet writes a Deny only
-where a layer wrote one, since a default so written would hold every other
+split: exclusions join, allowances meet by stored name, and the meet writes a
+negative bit only where a layer wrote one, since a default so written would hold every other
 spelling of its name ([[design/authority-tables|authority-tables]]).
 
-A resolved prefix means what the disk said at freeze: a granted `~/bin` that
-is a link to `/opt/x/bin` grants `/opt/x/bin`. That is no re-aiming of the
+A resolved prefix means what the disk said at freeze, and an allowance keeps
+that meaning for good: a granted `~/bin` that is a link to `/opt/x/bin` grants
+`/opt/x/bin`, and a link planted at `~/bin` later redirects nothing. Only an
+exclusion re-resolves, so it holds under whatever its name reaches now
+([[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]]). That is no re-aiming of the
 author's intent — a head spelled under `~/bin` executes there, and so the
 kernel has always judged it.
 

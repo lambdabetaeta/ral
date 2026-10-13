@@ -138,6 +138,21 @@ legible diagnostic; the desk refuses again because a registry's own
 admission check (naming, uniqueness) must hold independent of which door
 reached it.
 
+**The guest's end ships in media built earlier.** The warrant between ral and
+its confined child is one pinned binary at both ends, so a changed encoding
+changes its version string and no old form is decoded. The engine is different:
+the guest end lives in the VM image, built before the host. So any change to a
+payload's shape (authority evidence, an `ExecGrant` with its `every` flag, verb
+sets as sequences) bumps `PROTOCOL_VERSION` and rebuilds the guest media, whose
+manifest the host compares before packaging. Without the bump stale media passes
+the packaging check and the attach handshake and fails decoding the first
+dispatch. Evidence crosses as the required-field object
+`{"positive": …, "negative": …}` inside the existing sequence of pairs; the
+decoder rejects old verdict strings, missing fields, a duplicate key and a
+Neither value (the encoder emits neither, so either means the other end is not
+this tree). A `Fragment` never crosses: it lives only between loading and
+`extend`.
+
 ## The laws of an enquiry
 
 - **Containment.** An enquiry lives inside its run: same wall, same

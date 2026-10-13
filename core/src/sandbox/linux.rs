@@ -31,10 +31,10 @@ use super::Refusal;
 use super::launch::Ownership;
 use super::reexec::Pinned;
 use super::warrant::{Handoff, Slot, nul_terminated, parcel};
-use super::{ExecProjection, FsProjection, SandboxProjection, WriteReach};
+use super::{FsProjection, RenderedProjection};
 use crate::Role;
-use crate::capability::ExecRules;
-use crate::path::{Object, PathShape, RealPath, Rendered, render_objects, render_real};
+use crate::capability::floor;
+use crate::path::{Object, PathShape, RealPath, Rendered, render_real};
 use rustix::fs::OFlags;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
@@ -134,17 +134,17 @@ impl<'a> Envelope<'a> {
 /// every bind's handle, the `--info-fd` peer and the caller's `handoff` (the
 /// warrant and Landlock ruleset), every descriptor through one [`Handoff`].
 /// bwrap takes options alone from `--args`, so the payload rides its argv,
-/// and runs the pinned inode whatever now holds its name.  `image` is the
-/// host file the trampoline execs in turn, shown read-only.
+/// and runs the pinned inode whatever now holds its name.  `shown` is the
+/// bind plan the Landlock ruleset was built against.
 ///
 /// The second element of the return is `Kept`'s `--info-fd` peer — see
 /// [`InfoFd`].  Refused under a bwrap that builds no envelope or cannot mount
 /// by descriptor, and where bwrap's pin sits on one of the slots.
 pub(crate) fn bwrap_command(
     env: &Envelope<'_>,
-    image: Option<&RealPath>,
+    shown: Shown,
     handoff: Handoff<'_>,
-    policy: &SandboxProjection<Rendered>,
+    policy: &RenderedProjection,
     chdir: Option<&str>,
     ownership: Ownership,
 ) -> Result<(Command, Option<InfoFd>), Refusal> {
@@ -164,7 +164,7 @@ pub(crate) fn bwrap_command(
             ));
         }
     }
-    let binds = Binds::open(env, image, policy)?;
+    let binds = Binds::open(env, shown)?;
     let programs = seccomp_programs()?;
     let options = bwrap_argv(policy, chdir, ownership, env.host, &binds, programs.len())?;
     let parcel = |name: &str, bytes: &[u8]| {
@@ -214,7 +214,7 @@ pub(crate) fn bwrap_command(
 }
 
 /// The bwrap options that confine a payload under `policy`: `binds` by
-/// slot, layer by layer, `deny_paths` masked last at every name a bind
+/// slot, layer by layer, `deny` masked last at every name a bind
 /// shows them; a deny hiding `/proc`, which bwrap execs the trampoline
 /// through, is refused.  Descriptors appear by slot number alone, one
 /// `--add-seccomp-fd` per program of `seccomp`; [`bwrap_command`] lends them.
@@ -222,10 +222,9 @@ pub(crate) fn bwrap_command(
 /// Every name is taken from `policy`, rendered, so a rule lands on each
 /// spelling the kernel might present rather than on the one the grant author
 /// happened to write — a deny naming a symlink masks the target the resolved
-/// twin names.  `policy.exec` reaches the options only as the binds that show
-/// what it admits: bwrap filters mounts and syscalls, not exec by path, so
-/// [`landlock`] builds its ruleset in the host, and the payload enters it
-/// *inside* this envelope.
+/// twin names.  `policy.exec` reaches the options not at all: bwrap filters
+/// mounts and syscalls, not exec by path, so [`landlock`] builds its ruleset
+/// in the host, and the payload enters it *inside* this envelope.
 ///
 /// `chdir` is the in-sandbox cwd — bwrap starts the child in its
 /// mount-namespace root — so a per-command launch passes the target's
@@ -241,7 +240,7 @@ pub(crate) fn bwrap_command(
 /// The render is pure in `host` and in descriptors, so a test can assert
 /// options for a host it is not running on.
 pub(crate) fn bwrap_argv(
-    policy: &SandboxProjection<Rendered>,
+    policy: &RenderedProjection,
     chdir: Option<&str>,
     ownership: Ownership,
     host: HostEnvelope,
@@ -278,8 +277,7 @@ pub(crate) fn bwrap_argv(
                 c.args(["--perms", "0555", "--tmpfs", dir]);
             }
             binds.render(&mut c, Layer::Shown);
-            binds.render(&mut c, Layer::Frozen);
-            // After them, or a prefix of `/` or `/proc` re-binds the host's over these.
+            // After it, or a prefix of `/` or `/proc` re-binds the host's over these.
             c.args(["--proc", "/proc"]);
             render_dev(&mut c, host);
         }
@@ -288,7 +286,6 @@ pub(crate) fn bwrap_argv(
             // a fresh table under `--unshare-pid`, the host's bound without,
             // so `/proc/self` is the payload's own either way.
             c.args(["--dev-bind", "/", "/"]);
-            binds.render(&mut c, Layer::Frozen);
             c.args(["--proc", "/proc"]);
         }
     }
@@ -297,7 +294,7 @@ pub(crate) fn bwrap_argv(
     // unused because a mask is anchored to the inode, so a renamed ancestor
     // carries it — the pin macOS renders explicitly, Linux gets for free.
     if let Some(rules) = policy.fs.rules() {
-        let mut denied: Vec<_> = rules.deny_paths.iter().collect();
+        let mut denied: Vec<_> = rules.deny.iter().collect();
         denied.sort();
         for path in denied {
             let mask = DenyMask::over(path);
@@ -327,13 +324,11 @@ enum Access {
 }
 
 /// Where a bind goes in bwrap's order.  `Shown`: the projection's view,
-/// before the envelope's own `/proc` and `/dev`.  `Frozen`: read-only over
-/// `Shown`, the admits a write would otherwise let a child author.  `Over`:
-/// over everything, the cgroup tree and the pinned binaries.
+/// before the envelope's own `/proc` and `/dev`.  `Over`: over everything,
+/// the cgroup tree and the pinned binaries.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum Layer {
     Shown,
-    Frozen,
     Over,
 }
 
@@ -393,19 +388,12 @@ impl Binds {
     /// pins aside, which are open already.  Each object is opened once, and
     /// each bind lends its own copy, bwrap closing a descriptor after the
     /// one mount it serves.
-    fn open(
-        env: &Envelope<'_>,
-        image: Option<&RealPath>,
-        policy: &SandboxProjection<Rendered>,
-    ) -> Result<Self, String> {
-        let none = ExecRules::default();
-        let exec = match &policy.exec {
-            ExecProjection::Restricted(rules) => rules,
-            ExecProjection::Unrestricted => &none,
-        };
-        let (shown, tolerated) = shown(image, policy, exec)?;
-        let frozen = frozen(policy, exec, &shown)?;
-        let mut planned: Vec<_> = shown.into_iter().chain(frozen).collect();
+    fn open(env: &Envelope<'_>, shown: Shown) -> Result<Self, String> {
+        let Shown {
+            binds: mut planned,
+            tolerated,
+            ..
+        } = shown;
         if let Some(tree) = cgroup_tree(env.host)
             && let (Some(object), Some(dest)) = (object(&tree)?, object(CGROUP)?)
         {
@@ -484,104 +472,80 @@ impl Binds {
     }
 }
 
-/// What a restricted projection shows: the floor, the read and write
-/// prefixes, the image and every file and directory the exec table admits,
-/// each name by the object it reaches, less what another bind already shows;
-/// read-only before writable, each sorted by name, so a parent precedes its
-/// children and a writable prefix inside a read-only one wins.  Beside them,
-/// the floor's objects, which a host may keep from this user.
-fn shown(
-    image: Option<&RealPath>,
-    policy: &SandboxProjection<Rendered>,
-    exec: &ExecRules,
-) -> Result<(Vec<Bind>, BTreeSet<Rendered>), String> {
-    let FsProjection::Restricted(rules) = &policy.fs else {
-        return Ok(Default::default());
-    };
-    let floor = objects(&rules.floor, Access::ReadOnly)?;
-    let tolerated = floor.iter().map(|bind| bind.object.clone()).collect();
-    let mut names = floor;
-    names.extend(objects(&rules.read_prefixes, Access::ReadOnly)?);
-    names.extend(objects(&rules.write_prefixes, Access::Writable)?);
-    for real in image
-        .into_iter()
-        .chain(exec.allowed_files())
-        .chain(exec.allowed_dirs())
-    {
-        names.extend(
-            render_real(real)?
-                .into_iter()
-                .map(|name| Bind::read_only(Layer::Shown, name.clone(), name)),
-        );
-    }
-    names.sort();
-    names.dedup();
-    let shown = (names.iter())
-        .filter(|inner| !names.iter().any(|outer| outer.covers(inner)))
-        .cloned()
-        .collect();
-    Ok((shown, tolerated))
+/// What the envelope shows, planned before anything is opened, so that the
+/// Landlock ruleset is built against it.
+pub(crate) struct Shown {
+    binds: Vec<Bind>,
+    /// The floor's objects, which a host may keep from this user.
+    tolerated: BTreeSet<Rendered>,
+    /// The deduped objects the view is rooted at: every shown object under a
+    /// restricted fs, `/` under an unrestricted one.
+    pub(crate) roots: Vec<RealPath>,
 }
 
-/// What the envelope keeps read-only over the writes that reach it, as
-/// macOS's profile does: each allowed file or directory a write covers without
-/// naming it ([`landlock::write_reach`], the classification a veto walks
-/// by), and under an unrestricted `fs` the admitted set when a veto asks.
-/// Each is frozen
-/// wherever a writable bind of `shown` puts it, a prefix written through a
-/// symlink being two mounts of one object.
-fn frozen(
-    policy: &SandboxProjection<Rendered>,
-    exec: &ExecRules,
-    shown: &[Bind],
-) -> Result<Vec<Bind>, String> {
-    let reach = landlock::write_reach(exec, &policy.fs)?;
-    let whole = policy.fs.rules().is_none();
-    let mut frozen = Vec::new();
-    for real in exec.allowed_dirs().chain(exec.allowed_files()) {
-        for name in render_real(real)? {
-            if reach(&name) != WriteReach::Covered {
-                continue;
-            }
-            // Over `--dev-bind / /`, a name is where its object shows.
-            let root = whole.then(|| name.clone());
-            let writable = shown.iter().filter(|bind| bind.access == Access::Writable);
-            let dests = (root.into_iter()).chain(writable.filter_map(|bind| bind.shows(&name)));
-            frozen.extend(dests.map(|dest| Bind::read_only(Layer::Frozen, dest, name.clone())));
-        }
+impl Shown {
+    /// What a restricted projection shows: every read scope of the fs
+    /// projection, places among them, and every write prefix, each frozen
+    /// object at its real name and at the name it was granted by, less what
+    /// another bind already shows; read-only before writable, each sorted by
+    /// name, so a parent precedes its children and a writable prefix inside
+    /// a read-only one wins.
+    pub(crate) fn of(policy: &RenderedProjection) -> Result<Self, String> {
+        let FsProjection::Restricted(rules) = &policy.fs else {
+            let root = RealPath::of("/".as_ref()).map_err(|e| format!("sandbox: no root: {e}"))?;
+            return Ok(Self {
+                binds: Vec::new(),
+                tolerated: BTreeSet::new(),
+                roots: vec![root],
+            });
+        };
+        let floor = floor();
+        let tolerated = (rules.read.iter())
+            .map(|object| &object.real)
+            .filter(|real| floor.iter().any(|f| f.real() == real.as_str()))
+            .cloned()
+            .collect();
+        let mut names: Vec<_> = binds(&rules.read, Access::ReadOnly)
+            .chain(binds(&rules.write, Access::Writable))
+            .collect();
+        names.sort();
+        names.dedup();
+        let binds: Vec<_> = (names.iter())
+            .filter(|inner| !names.iter().any(|outer| outer.covers(inner)))
+            .cloned()
+            .collect();
+        let roots = (binds.iter().map(|bind| &bind.object))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(RealPath::rendered)
+            .collect();
+        Ok(Self {
+            binds,
+            tolerated,
+            roots,
+        })
     }
-    frozen.sort();
-    frozen.dedup();
-    Ok(frozen)
 }
 
-/// `names`, as rendered, each by the object it reaches.  Rendering put every
-/// object among them, so one reached now outside them was moved since.
-fn objects(names: &[Rendered], access: Access) -> Result<Vec<Bind>, String> {
-    let mut shown = Vec::new();
-    for Object { real, spellings } in render_objects(names)? {
-        if !names.contains(&real) {
-            let name = spellings.iter().map(Rendered::as_str).collect::<Vec<_>>();
-            return Err(format!(
-                "sandbox: {} now reaches {}, not what the grant rendered",
-                name.join(", "),
-                real.as_str()
-            ));
-        }
-        let dests = std::iter::once(real.clone()).chain(spellings);
-        shown.extend(dests.map(|dest| Bind {
+/// `objects`, each by its real name and by every name it is shown at.
+fn binds(objects: &[Object], access: Access) -> impl Iterator<Item = Bind> {
+    objects.iter().flat_map(move |object| {
+        (object.names()).map(move |dest| Bind {
             layer: Layer::Shown,
             access,
-            dest,
-            object: real.clone(),
-        }));
-    }
-    Ok(shown)
+            dest: dest.clone(),
+            object: object.real.clone(),
+        })
+    })
 }
 
-/// `name` as the one object it reaches.
+/// `name` as the one object it reaches; `None` where it names nothing.
 fn object(name: &str) -> Result<Option<Rendered>, String> {
-    Ok(render_objects(&[name])?.into_iter().next().map(|o| o.real))
+    match RealPath::of(name.as_ref()) {
+        Ok(real) => Ok(render_real(&real)?.into_iter().next()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("sandbox: cannot resolve {name}: {e}")),
+    }
 }
 
 /// `object`, opened in the host to be mounted; `None` where it names
@@ -875,32 +839,42 @@ impl DenyMask {
 )]
 mod tests {
     use super::{
-        Access, Binds, Builds, CGROUP, Envelope, HostEnvelope, Layer, Pinned, bwrap_argv,
+        Access, Binds, Builds, CGROUP, Envelope, HostEnvelope, Layer, Pinned, Shown, bwrap_argv,
         bwrap_command, seccomp_programs,
     };
     use crate::Role;
-    use crate::capability::{Admitted, Capabilities, FsPolicy, GrantStack, Program};
-    use crate::capability::{ExecScope, Verdict};
+    use crate::capability::{
+        Admitted, Capabilities, FsPolicy, FsScope, GrantStack, Program, floor,
+    };
+    use crate::capability::{Evidence, ExecScope};
     use crate::path::{FrozenPath, RealPath, Resolver};
     use crate::sandbox::launch::{Ownership, admitted, enveloped};
     use crate::sandbox::warrant::{Handoff, Slot};
     use crate::sandbox::{ExecProjection, FsProjection, FsRules, SandboxProjection};
     use std::process::Stdio;
 
-    type Rule = (ExecScope, Verdict);
+    type Rule = (ExecScope, Evidence);
+
+    fn evidence(allow: bool) -> Evidence {
+        if allow {
+            Evidence::ALLOW
+        } else {
+            Evidence::DENY
+        }
+    }
 
     fn dir_rule(path: RealPath, allow: bool) -> Rule {
-        (ExecScope::Dir(path), Verdict::from(allow))
+        (ExecScope::Dir(path), evidence(allow))
     }
 
     fn file_rule(path: RealPath, allow: bool) -> Rule {
-        (ExecScope::File(path), Verdict::from(allow))
+        (ExecScope::File(path), evidence(allow))
     }
 
     fn veto_rule(name: &str) -> Rule {
         (
             ExecScope::Name(crate::path::command_name_key(name)),
-            Verdict::Deny,
+            Evidence::DENY,
         )
     }
 
@@ -955,14 +929,22 @@ mod tests {
         }
     }
 
-    /// `policy`'s binds, opened over this host's tree.
-    fn binds(image: Option<&RealPath>, policy: &SandboxProjection, host: HostEnvelope) -> Binds {
+    fn prefix(path: &str) -> FsScope {
+        FsScope::Prefix(FrozenPath::from_surface(path))
+    }
+
+    /// What the envelope would show of `policy`.
+    fn plan(policy: &SandboxProjection) -> Shown {
         let rendered = policy.rendered().expect("ASCII paths render");
-        Binds::open(&on(&stand_in(), host), image, &rendered).expect("the binds open")
+        Shown::of(&rendered).expect("the plan builds")
+    }
+
+    /// `policy`'s binds, opened over this host's tree.
+    fn binds(policy: &SandboxProjection, host: HostEnvelope) -> Binds {
+        Binds::open(&on(&stand_in(), host), plan(policy)).expect("the binds open")
     }
 
     fn options(
-        image: Option<&RealPath>,
         policy: &SandboxProjection,
         chdir: Option<&str>,
         ownership: Ownership,
@@ -970,7 +952,7 @@ mod tests {
     ) -> Vec<String> {
         let seccomp = seccomp_programs().expect("seccomp programs compile");
         let rendered = policy.rendered().expect("ASCII paths render");
-        let binds = binds(image, policy, host);
+        let binds = binds(policy, host);
         bwrap_argv(&rendered, chdir, ownership, host, &binds, seccomp.len())
             .expect("ASCII paths render")
             .iter()
@@ -983,7 +965,7 @@ mod tests {
         policy: &SandboxProjection,
         ownership: Ownership,
     ) -> Vec<String> {
-        options(None, policy, None, ownership, host)
+        options(policy, None, ownership, host)
     }
 
     fn options_for(policy: &SandboxProjection) -> Vec<String> {
@@ -1056,7 +1038,7 @@ mod tests {
             ("root", &granted, "/", false),
             ("unrestricted", &unrestricted(), "/ral-ungranted/cwd", false),
         ] {
-            let args = options(None, policy, Some(cwd), Ownership::Kept, WHOLE);
+            let args = options(policy, Some(cwd), Ownership::Kept, WHOLE);
             let mask = position_of(&args, &["--perms", "0555", "--tmpfs", cwd]);
             assert_eq!(mask.is_some(), stood_up, "{label}: {args:?}");
             if let Some(mask) = mask {
@@ -1127,33 +1109,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The envelope shows an interpreter only on the system's word: a script
-    /// the user can write binds nothing beside itself.
-    #[test]
-    fn a_script_the_user_can_write_has_no_interpreter_bound() {
-        let dir = workdir("carrier-bind");
-        let interp = dir.join("interp");
-        std::fs::write(&interp, "\x7fELF").unwrap();
-        let script = dir.join("run");
-        std::fs::write(&script, format!("#!{}\n", interp.display())).unwrap();
-        let script = RealPath::of(&script).expect("the script exists");
-        let policy = SandboxProjection {
-            fs: FsProjection::Restricted(FsRules::default()),
-            net: true,
-            exec: ExecProjection::default(),
-        };
-        let args = options(Some(&script), &policy, None, Ownership::Kept, WHOLE);
-        let real = std::fs::canonicalize(&interp)
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
-        assert!(
-            !args.contains(&real),
-            "an interpreter the user could have swapped in must not be bound: {args:?}"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     /// `real/tool`, runnable, under a fresh work dir with `linkdir -> real`
     /// beside it: the dir, and the tool's real path.
     fn linked_tool(tag: &str) -> (std::path::PathBuf, String) {
@@ -1168,25 +1123,22 @@ mod tests {
         (dir, tool.to_string_lossy().into_owned())
     }
 
-    /// The trampoline execs the target by the real path the guard judged, so
-    /// outside every bind the envelope shows that file by its handle and
-    /// nothing at the name it was spelled by; within a bind, the bind shows
-    /// it.  The payload starts in the logical cwd.
+    /// The launched file is no bind of its own: law 7 has put it in the read
+    /// region, which shows it, and a grant that does not read it shows
+    /// nothing at its name.  The payload starts in the logical cwd.
     #[test]
-    fn the_target_is_bound_by_its_real_name_and_entered_from_the_cwd() {
+    fn the_launched_file_is_shown_by_the_reads_alone_and_the_cwd_is_entered() {
         let (dir, real) = linked_tool("target-bind");
-        let image = RealPath::of(std::path::Path::new(&real)).expect("the tool exists");
         let elsewhere = workdir("target-bind-elsewhere");
         let args = options(
-            Some(&image),
             &deny_within(&elsewhere, &[]),
             Some("/"),
             Ownership::Kept,
             WHOLE,
         );
         assert!(
-            bound(&args, "--ro-bind-fd", &real).is_some(),
-            "the host image must be shown read-only by its handle: {args:?}"
+            bound(&args, "--ro-bind-fd", &real).is_none(),
+            "an unread image is not shown: {args:?}"
         );
         assert!(
             !args
@@ -1198,16 +1150,11 @@ mod tests {
             position_of(&args, &["--chdir", "/"]).is_some(),
             "the payload must start in the logical cwd: {args:?}"
         );
-        let args = options(
-            Some(&image),
-            &deny_within(&dir, &[]),
-            None,
-            Ownership::Kept,
-            WHOLE,
-        );
+        let args = options(&restricted(&[&dir], &[], &[]), None, Ownership::Kept, WHOLE);
         assert!(
-            bound(&args, "--ro-bind-fd", &real).is_none(),
-            "a read-only bind inside the grant's writable one would deny its writes: {args:?}"
+            bound(&args, "--ro-bind-fd", &dir.to_string_lossy()).is_some()
+                && bound(&args, "--ro-bind-fd", &real).is_none(),
+            "a read of the directory shows it, and the image within it only there: {args:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&elsewhere);
@@ -1244,9 +1191,9 @@ mod tests {
 
     /// One bind per name the projection shows and another bind does not:
     /// an absent prefix shows nothing; a read-only one within another bind,
-    /// or an exec directory within the grant's writable one, shows nothing; a
-    /// writable one within a read-only one wins; a file mounts as a file; an
-    /// exec directory outside every prefix is shown, as on macOS.
+    /// or a run place within the grant's writable one, shows nothing; a
+    /// writable one within a read-only one wins; a file mounts as a file; a
+    /// run place outside every prefix is shown, as on macOS.
     #[test]
     fn a_bind_is_opened_for_each_name_no_other_bind_shows() {
         use std::os::unix::fs::MetadataExt;
@@ -1265,13 +1212,13 @@ mod tests {
         std::fs::write(&file, "x").unwrap();
         let absent = dir.join("absent");
         let mut policy = restricted(&[&ro, &inner, &file, &absent], &[&w], &[]);
-        policy.exec = ExecProjection::Restricted(
-            [&tools, &w.join("bin")]
-                .into_iter()
-                .map(|d| dir_rule(RealPath::of(d).expect("an exec dir exists"), true))
-                .collect(),
-        );
-        let binds = binds(None, &policy, WHOLE);
+        if let FsProjection::Restricted(rules) = &mut policy.fs {
+            rules.read.extend(
+                [&tools, &w.join("bin")]
+                    .map(|d| FsScope::Place(RealPath::of(d).expect("a run place exists"))),
+            );
+        }
+        let binds = binds(&policy, WHOLE);
         let name = |p: &std::path::Path| p.to_string_lossy().into_owned();
         assert_eq!(
             shown_within(&binds, &dir),
@@ -1302,7 +1249,7 @@ mod tests {
         std::fs::create_dir(&real).unwrap();
         std::os::unix::fs::symlink("real", &link).unwrap();
         let name = |p: &std::path::Path| p.to_string_lossy().into_owned();
-        let both = binds(None, &restricted(&[&link], &[], &[]), WHOLE);
+        let both = binds(&restricted(&[&link], &[], &[]), WHOLE);
         assert_eq!(
             shown_within(&both, &dir),
             [
@@ -1310,7 +1257,7 @@ mod tests {
                 (name(&real), Access::ReadOnly)
             ]
         );
-        let covered = binds(None, &restricted(&[&dir, &link], &[], &[]), WHOLE);
+        let covered = binds(&restricted(&[&dir, &link], &[], &[]), WHOLE);
         assert_eq!(
             shown_within(&covered, &dir),
             [(name(&dir), Access::ReadOnly)]
@@ -1318,105 +1265,43 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The `Frozen` binds, by destination.
-    fn frozen(binds: &Binds) -> Vec<String> {
-        (binds.layer(Layer::Frozen))
-            .map(|(_, bind)| bind.dest.as_str().to_string())
-            .collect()
-    }
-
-    /// An exec directory a write covers without naming is frozen read-only
-    /// over it, and one the grant writes by name is not; under an
-    /// unrestricted fs the whole admitted set is frozen when a veto asks.
+    /// A write that covers a run place freezes nothing: the one writable bind
+    /// is the whole of the view there.
     #[test]
-    fn a_covered_exec_directory_is_frozen_and_a_trusted_one_is_not() {
-        let dir = workdir("binds-frozen");
+    fn a_write_covering_a_run_place_freezes_nothing() {
+        let dir = workdir("binds-unfrozen");
         let dir = std::fs::canonicalize(&dir).expect("the work dir is real");
-        let (w, bin, tool) = (dir.join("w"), dir.join("w/bin"), dir.join("tool"));
+        let (w, bin) = (dir.join("w"), dir.join("w/bin"));
         std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(&tool, "x").unwrap();
-        let name = |p: &std::path::Path| p.to_string_lossy().into_owned();
-        let real = |p: &std::path::Path| RealPath::of(p).expect("an admit exists");
-        let admit = |veto: bool| {
-            let mut rules = vec![dir_rule(real(&bin), true), file_rule(real(&tool), true)];
-            rules.extend(veto.then(|| veto_rule("n")));
-            ExecProjection::Restricted(rules.into_iter().collect())
-        };
-        let under = |write: &std::path::Path| SandboxProjection {
-            exec: admit(false),
-            ..restricted(&[], &[write], &[])
-        };
-        let covered = binds(None, &under(&w), WHOLE);
-        assert_eq!(frozen(&covered), [name(&bin)], "covered");
-        assert_eq!(shown_within(&covered, &w), [(name(&w), Access::Writable)]);
-        let trusted = binds(None, &under(&bin), WHOLE);
-        assert!(frozen(&trusted).is_empty(), "trusted");
-        assert_eq!(shown_within(&trusted, &w), [(name(&bin), Access::Writable)]);
-        for (veto, expected) in [(true, vec![name(&tool), name(&bin)]), (false, vec![])] {
-            let policy = SandboxProjection {
-                exec: admit(veto),
-                ..unrestricted()
-            };
-            assert_eq!(
-                frozen(&binds(None, &policy, WHOLE)),
-                expected,
-                "veto: {veto}"
-            );
+        let mut policy = restricted(&[], &[&w], &[]);
+        if let FsProjection::Restricted(rules) = &mut policy.fs {
+            rules
+                .read
+                .push(FsScope::Place(RealPath::of(&bin).expect("a place")));
         }
+        policy.exec = ExecProjection::Restricted(
+            std::iter::once(dir_rule(RealPath::of(&bin).expect("an admit"), true)).collect(),
+        );
+        let binds = binds(&policy, WHOLE);
+        let name = |p: &std::path::Path| p.to_string_lossy().into_owned();
+        assert_eq!(shown_within(&binds, &w), [(name(&w), Access::Writable)]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn a_covered_exec_file_is_frozen_but_an_explicit_write_is_trusted() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = std::fs::canonicalize(tmp.path()).unwrap();
-        let file = dir.join("tool");
-        std::fs::write(&file, "x").unwrap();
-        for (write, tree, expected) in [
-            (&dir, false, vec![file.to_string_lossy().into_owned()]),
-            (&file, false, vec![]),
-            (&dir, true, vec![]),
-        ] {
-            let mut rules = vec![file_rule(RealPath::of(&file).unwrap(), true)];
-            rules.extend(tree.then(|| dir_rule(RealPath::of(&dir).unwrap(), true)));
-            let policy = SandboxProjection {
-                exec: ExecProjection::Restricted(rules.into_iter().collect()),
-                ..restricted(&[], &[write], &[])
-            };
-            assert_eq!(frozen(&binds(None, &policy, WHOLE)), expected);
-        }
-    }
-
     /// A write prefix through a symlink is one handle bound at two names, and
-    /// a mount laid inside one bind does not show at the other: the freeze
-    /// and a mask each go on at both.
+    /// a mount laid inside one bind does not show at the other: a mask goes
+    /// on at both.
     #[test]
-    fn a_write_through_a_link_is_frozen_and_masked_at_both_its_names() {
+    fn a_write_through_a_link_is_masked_at_both_its_names() {
         let dir = workdir("binds-linked-write");
         let dir = std::fs::canonicalize(&dir).expect("the work dir is real");
         let (real, link) = (dir.join("real"), dir.join("link"));
-        let (bin, secret) = (real.join("bin"), real.join("secret"));
-        std::fs::create_dir_all(&bin).unwrap();
+        let secret = real.join("secret");
+        std::fs::create_dir_all(&real).unwrap();
         std::fs::write(&secret, "x").unwrap();
         std::os::unix::fs::symlink("real", &link).unwrap();
-        let mut policy = SandboxProjection {
-            exec: ExecProjection::Restricted(
-                std::iter::once(dir_rule(
-                    RealPath::of(&bin).expect("the admit exists"),
-                    true,
-                ))
-                .collect(),
-            ),
-            ..restricted(&[], &[&link], &[])
-        };
-        if let FsProjection::Restricted(rules) = &mut policy.fs {
-            rules.deny_paths = vec![secret.to_string_lossy().into_owned()];
-        }
+        let policy = restricted(&[], &[&link], &[&secret]);
         let name = |p: &std::path::Path| p.to_string_lossy().into_owned();
-        assert_eq!(
-            frozen(&binds(None, &policy, WHOLE)),
-            [name(&link.join("bin")), name(&bin)]
-        );
         let args = options_for(&policy);
         for masked in [&secret, &link.join("secret")] {
             assert!(
@@ -1436,13 +1321,13 @@ mod tests {
         for (denied, refused) in [("/proc", true), ("/", true), ("/proc/sys", false)] {
             let policy = SandboxProjection {
                 fs: FsProjection::Restricted(FsRules {
-                    deny_paths: vec![denied.to_string()],
+                    deny: vec![FrozenPath::from_surface(denied)],
                     ..FsRules::default()
                 }),
                 ..unrestricted()
             };
             let rendered = policy.rendered().expect("renders");
-            let binds = binds(None, &policy, WHOLE);
+            let binds = binds(&policy, WHOLE);
             let argv = bwrap_argv(&rendered, None, Ownership::Kept, WHOLE, &binds, 0);
             assert_eq!(argv.is_err(), refused, "{denied}: {argv:?}");
         }
@@ -1484,39 +1369,28 @@ mod tests {
             .expect("ASCII paths render");
         std::fs::rename(&parent, dir.join("moved")).unwrap();
         std::os::unix::fs::symlink(&elsewhere, &parent).unwrap();
-        let Err(why) = Binds::open(&on(&stand_in(), WHOLE), None, &rendered) else {
+        let shown = Shown::of(&rendered).expect("the plan builds");
+        let Err(why) = Binds::open(&on(&stand_in(), WHOLE), shown) else {
             panic!("a symlinked component would show its target");
         };
-        assert!(why.contains("now reaches"), "{why}");
+        assert!(why.contains("symbolic link"), "{why}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Every handle by its slot, in layer order: the projection's view, the
-    /// admits frozen over the writes that cover them, the envelope's own
-    /// `/proc` and `/dev`, what goes over everything (the cgroup tree, then
-    /// the pins at their current names), then the masks; under an
-    /// unrestricted fs the frozen admits go over the root.  No source is a
-    /// name bwrap resolves but `/dev/null`.
+    /// envelope's own `/proc` and `/dev`, what goes over everything (the
+    /// cgroup tree, then the pins at their current names), then the masks;
+    /// under an unrestricted fs the root, then `/proc`.  No source is a name
+    /// bwrap resolves but `/dev/null`.
     #[test]
     fn every_bind_is_a_handle_by_slot_in_layer_order() {
         let dir = workdir("argv-order");
         let dir = std::fs::canonicalize(&dir).expect("the work dir is real");
-        let (ro, w, bin) = (dir.join("ro"), dir.join("ro/w"), dir.join("ro/w/bin"));
+        let (ro, w) = (dir.join("ro"), dir.join("ro/w"));
         let secret = w.join("secret");
-        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&w).unwrap();
         std::fs::write(&secret, "x").unwrap();
-        let admit = |veto: &[Rule]| {
-            let path = RealPath::of(&bin).expect("the admit exists");
-            let admitted = std::iter::once(dir_rule(path, true)).chain(veto.iter().cloned());
-            ExecProjection::Restricted(admitted.collect())
-        };
-        let mut policy = SandboxProjection {
-            exec: admit(&[]),
-            ..restricted(&[&ro], &[&w], &[])
-        };
-        if let FsProjection::Restricted(rules) = &mut policy.fs {
-            rules.deny_paths = vec![secret.to_string_lossy().into_owned()];
-        }
+        let policy = restricted(&[&ro], &[&w], &[&secret]);
         let args = options_for(&policy);
         let at = |args: &[String], piece: &[&str]| {
             position_of(args, piece).unwrap_or_else(|| panic!("no {piece:?}: {args:?}"))
@@ -1528,7 +1402,6 @@ mod tests {
         let order = [
             by_handle(&args, "--ro-bind-fd", &ro),
             by_handle(&args, "--bind-fd", &w),
-            by_handle(&args, "--ro-bind-fd", &bin),
             at(&args, &["--proc", "/proc"]),
             at(&args, &["--dev", "/dev"]),
             by_handle(&args, "--ro-bind-fd", std::path::Path::new(CGROUP)),
@@ -1539,14 +1412,9 @@ mod tests {
             ),
         ];
         assert!(order.is_sorted(), "{order:?}: {args:?}");
-        let vetoed = SandboxProjection {
-            exec: admit(&[veto_rule("n")]),
-            ..unrestricted()
-        };
-        let over_root = options_for(&vetoed);
+        let over_root = options_for(&unrestricted());
         let order = [
             at(&over_root, &["--dev-bind", "/", "/"]),
-            by_handle(&over_root, "--ro-bind-fd", &bin),
             at(&over_root, &["--proc", "/proc"]),
         ];
         assert!(order.is_sorted(), "{order:?}: {over_root:?}");
@@ -1580,7 +1448,7 @@ mod tests {
             let host = HostEnvelope { builds, ..WHOLE };
             let launch = bwrap_command(
                 &on(&pin, host),
-                None,
+                plan(&unrestricted()),
                 Handoff::default(),
                 &rendered,
                 None,
@@ -1824,49 +1692,60 @@ mod tests {
     }
 
     /// Only a spawn shows the trampoline's `execve` reaching the file the user
-    /// named: `~/.local/bin/uv`, a link into `~/.local/share/uv` with neither
-    /// granted, reported 127.  The real file is shown alone, by its handle:
-    /// its siblings stay out of sight.
+    /// named: `~/.local/bin/uv`, a link into `~/.local/share/uv`.  The image is
+    /// shown by the reads alone, at its real path: a grant that reads it runs
+    /// it by either name, and one that does not has the launch refuse, the
+    /// image being hidden.
     #[test]
-    fn a_linked_image_outside_the_grant_runs_and_shows_none_of_its_siblings() {
+    fn a_linked_image_runs_through_the_read_that_shows_its_real_path() {
         let (dir, real) = linked_tool("image-link-spawn");
-        let secret = std::path::Path::new(&real).with_file_name("secret");
-        std::fs::write(&secret, "SECRET-BYTES").unwrap();
-        std::fs::write(
-            &real,
-            format!(
-                "#!/bin/sh\n\
-                 echo READY\n\
-                 cat '{secret}' 2>/dev/null || echo SECRET-REFUSED\n",
-                secret = secret.display(),
-            ),
-        )
-        .unwrap();
+        std::fs::write(&real, "#!/bin/sh\necho READY\n").unwrap();
         let elsewhere = workdir("image-link-spawn-elsewhere");
-        let policy = deny_within(&elsewhere, &[]);
-        let Some(env) = envelope_launches(&policy) else {
+        let tool = || Program::file(dir.join("linkdir/tool")).expect("the tool exists");
+        let reading = restricted(&[&dir.join("real")], &[], &[]);
+        let Some(env) = envelope_launches(&reading) else {
             return;
         };
-
-        let tool = Program::file(dir.join("linkdir/tool")).expect("the tool exists");
-        let out = run_admitted(&env, &policy, &admitted(tool, &[])).expect("spawn bwrap");
+        let out = run_admitted(&env, &reading, &admitted(tool(), &[])).expect("spawn bwrap");
         let stdout = String::from_utf8_lossy(&out.stdout);
-
         assert!(
             stdout.contains("READY"),
             "the spelled name did not run inside the envelope: {}",
             String::from_utf8_lossy(&out.stderr)
         );
+        let apart = deny_within(&elsewhere, &[]);
+        let out = run_admitted(&env, &apart, &admitted(tool(), &[])).expect("spawn bwrap");
         assert!(
-            !stdout.contains("SECRET-BYTES"),
-            "a sibling of the real file reached the child: {stdout}"
-        );
-        assert!(
-            stdout.contains("SECRET-REFUSED"),
-            "the real file's sibling must stay out of sight: {stdout}"
+            !String::from_utf8_lossy(&out.stdout).contains("READY")
+                && String::from_utf8_lossy(&out.stderr).contains("hidden by the grant"),
+            "an image no read shows ran: {out:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&elsewhere);
+    }
+
+    /// A grant keeps the real path it froze: a spelling retargeted since
+    /// shows the frozen object, never the new target.
+    #[test]
+    fn a_spelling_retargeted_after_freezing_shows_its_frozen_object() {
+        let dir = workdir("binds-retarget");
+        let dir = std::fs::canonicalize(&dir).expect("the work dir is real");
+        let (first, second, link) = (dir.join("first"), dir.join("second"), dir.join("link"));
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::os::unix::fs::symlink("first", &link).unwrap();
+        let policy = restricted(&[&link], &[], &[]);
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink("second", &link).unwrap();
+        let shown = plan(&policy);
+        let name = |p: &std::path::Path| p.to_string_lossy().into_owned();
+        let objects: Vec<_> = (shown.binds.iter())
+            .map(|bind| bind.object.as_str().to_string())
+            .filter(|object| std::path::Path::new(object).starts_with(&dir))
+            .collect();
+        assert!(objects.contains(&name(&first)), "{objects:?}");
+        assert!(!objects.contains(&name(&second)), "{objects:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The handles are opened when the launch is built, so a prefix swapped
@@ -2050,7 +1929,7 @@ mod tests {
         let own = format!("{CGROUP}{}", super::own_cgroup().expect("a cgroup2 host"));
         // The tree's handle, by the inode it opened.
         let tree = |host: HostEnvelope, policy: &SandboxProjection| {
-            let binds = binds(None, policy, host);
+            let binds = binds(policy, host);
             let ((_, bind), handle) = (binds.slots().zip(&binds.handles))
                 .find(|((_, bind), _)| bind.dest.as_str() == CGROUP)
                 .expect("a cgroup bind");
@@ -2169,8 +2048,8 @@ mod tests {
         let dir_s = dir.to_string_lossy().into_owned();
         let rooted = SandboxProjection {
             fs: FsProjection::Restricted(FsRules {
-                read_prefixes: vec!["/".to_string()],
-                write_prefixes: vec![dir_s.clone()],
+                read: vec![prefix("/")],
+                write: vec![prefix(&dir_s)],
                 ..FsRules::default()
             }),
             net: true,
@@ -2226,7 +2105,7 @@ mod tests {
         let pin = stand_in();
         let (cmd, _info_fd) = bwrap_command(
             &on(&pin, WHOLE),
-            None,
+            plan(&unrestricted()),
             Handoff::default(),
             &unrestricted().rendered().expect("renders"),
             None,
@@ -2266,7 +2145,7 @@ mod tests {
         handoff.lend(Slot::Warrant, lent.as_fd());
         let Err(e) = bwrap_command(
             &on(&pin, WHOLE),
-            None,
+            plan(&unrestricted()),
             handoff,
             &unrestricted().rendered().expect("renders"),
             None,
@@ -2318,7 +2197,7 @@ mod tests {
     fn only_the_two_ownership_ties_distinguish_a_surrendered_launch() {
         let policy = SandboxProjection {
             fs: FsProjection::Restricted(FsRules {
-                read_prefixes: vec!["/usr".to_string()],
+                read: vec![prefix("/usr")],
                 ..FsRules::default()
             }),
             net: false,
@@ -2580,8 +2459,8 @@ mod tests {
     }
 
     /// The command directories, plus whatever a test adds, by their real
-    /// paths as a grant freezes them.  The loader and ral's own binary need
-    /// no naming: `landlock::build` admits them.
+    /// paths as a grant freezes them, and the linkers a launch's support
+    /// supplies: nothing else is admitted, ral's own binary included.
     fn admitting(dirs: &[&str], paths: &[&str]) -> ExecProjection {
         let real = |p: &str| RealPath::of(std::path::Path::new(p)).expect("an admit exists");
         let dirs = ["/bin", "/usr/bin"]
@@ -2589,7 +2468,10 @@ mod tests {
             .chain(dirs)
             .map(|d| dir_rule(real(d), true));
         let files = paths.iter().map(|p| file_rule(real(p), true));
-        ExecProjection::Restricted(dirs.chain(files).collect())
+        let linkers = crate::sandbox::carriers::linkers()
+            .into_iter()
+            .map(|linker| file_rule(linker, true));
+        ExecProjection::Restricted(dirs.chain(files).chain(linkers).collect())
     }
 
     /// Landlock's own precondition, alongside `envelope_launches`: without a
@@ -2736,13 +2618,19 @@ mod tests {
             return;
         };
         let name = vetoed.file_name().expect("a name").to_string_lossy();
-        let policy = exec_policy(admitting_less(
-            &[],
-            [
-                file_rule(RealPath::of(&denied).expect("the command exists"), false),
-                veto_rule(&name),
-            ],
-        ));
+        // A restricted fs that no write reaches `/usr/bin` through: a name
+        // veto is walked only there.
+        let work = workdir("exec-block");
+        let policy = SandboxProjection {
+            exec: admitting_less(
+                &[],
+                [
+                    file_rule(RealPath::of(&denied).expect("the command exists"), false),
+                    veto_rule(&name),
+                ],
+            ),
+            ..deny_within(&work, &[])
+        };
         let Some(env) = envelope_launches(&policy) else {
             return;
         };
@@ -2798,8 +2686,6 @@ mod tests {
         for copy in [&present, &blocked] {
             std::fs::copy("/bin/true", copy).expect("copy /bin/true");
         }
-        // Written by name, so trusted: an unrestricted fs under a block would
-        // freeze both.
         let policy = SandboxProjection {
             exec: admitting_less(
                 &[&expanded.to_string_lossy(), &whole.to_string_lossy()],
@@ -2851,10 +2737,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// What the grant lets run it lets read, as on macOS: an exec directory
-    /// outside every fs prefix is shown, and without the exec grant it is not.
+    /// What the grant lets run it lets read, as on macOS: a run place outside
+    /// every fs prefix is shown, and without one it is not.
     #[test]
-    fn an_exec_allowed_directory_is_readable_outside_every_fs_prefix() {
+    fn a_run_place_is_readable_outside_every_fs_prefix() {
         if !landlock_at_least(super::landlock::Abi::EXEC) {
             return;
         }
@@ -2864,14 +2750,19 @@ mod tests {
         std::fs::write(tools.join("readme"), "PARITY-BYTES").unwrap();
         let elsewhere = workdir("exec-parity-elsewhere");
         let script = format!("echo READY\ncat '{}'\n", tools.join("readme").display());
-        for (admitted, exec) in [
+        for (placed, exec) in [
             (true, admitting(&[&tools.to_string_lossy()], &[])),
             (false, admitting(&[], &[])),
         ] {
-            let policy = SandboxProjection {
+            let mut policy = SandboxProjection {
                 exec,
                 ..deny_within(&elsewhere, &[])
             };
+            if let FsProjection::Restricted(rules) = &mut policy.fs {
+                rules
+                    .read
+                    .extend(placed.then(|| FsScope::Place(RealPath::of(&tools).expect("a place"))));
+            }
             let Some(env) = envelope_launches(&policy) else {
                 return;
             };
@@ -2884,8 +2775,8 @@ mod tests {
             );
             assert_eq!(
                 stdout.contains("PARITY-BYTES"),
-                admitted,
-                "an exec directory is shown exactly when the grant admits it: {stdout}"
+                placed,
+                "a run place is shown exactly when the read region lists it: {stdout}"
             );
         }
         let _ = std::fs::remove_dir_all(&dir);
@@ -2923,15 +2814,15 @@ mod tests {
         Some(stdout)
     }
 
-    /// A write prefix that covers an admit without naming it cannot author
-    /// what the admit runs, and still takes writes around it; a prefix that
-    /// names the admit keeps it writable.
+    /// Nothing is frozen: a write prefix that covers an admit without naming
+    /// it lets a child author what the admit runs, the declared limit of a
+    /// grant that writes where it runs, and takes the writes around it too.
     #[test]
-    fn a_covered_admit_is_frozen_inside_the_write_that_covers_it() {
+    fn a_write_that_covers_an_admit_is_the_grants_to_give() {
         if !landlock_at_least(super::landlock::Abi::EXEC) {
             return;
         }
-        let dir = workdir("exec-frozen");
+        let dir = workdir("exec-unfrozen");
         let bin = dir.join("bin");
         std::fs::create_dir(&bin).unwrap();
         std::fs::copy("/bin/true", bin.join("tool")).expect("copy /bin/true");
@@ -2939,36 +2830,27 @@ mod tests {
             exec: admitting(&[&bin.to_string_lossy()], &[]),
             ..deny_within(write, &[])
         };
-        let Some(covered) = authored(&under(&dir), &dir) else {
-            return;
-        };
-        assert!(
-            !emitted(&covered, "ADMIT-WROTE") && covered.contains("Read-only file system"),
-            "a covered admit took a write: {covered}"
-        );
-        assert!(
-            emitted(&covered, "PREFIX-WROTE"),
-            "the freeze took the prefix around it: {covered}"
-        );
-        let Some(trusted) = authored(&under(&bin), &dir) else {
-            return;
-        };
-        assert!(
-            emitted(&trusted, "ADMIT-WROTE"),
-            "an admit the grant writes by name was frozen: {trusted}"
-        );
+        for write in [&dir, &bin] {
+            let Some(wrote) = authored(&under(write), &dir) else {
+                return;
+            };
+            assert!(
+                emitted(&wrote, "ADMIT-WROTE"),
+                "a write that reaches an admit was frozen out of it: {wrote}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn a_covered_file_is_frozen_inside_the_write_that_covers_it() {
+    fn a_covered_file_is_as_writable_as_the_write_that_covers_it() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = std::fs::canonicalize(tmp.path()).unwrap();
         let tool = dir.join("tool");
-        for trusted in [false, true] {
+        for named in [false, true] {
             std::fs::copy("/bin/true", &tool).unwrap();
             let mut writes = vec![dir.as_path()];
-            writes.extend(trusted.then_some(tool.as_path()));
+            writes.extend(named.then_some(tool.as_path()));
             let policy = SandboxProjection {
                 exec: admitting(&[], &[&tool.to_string_lossy()]),
                 ..restricted(&[], &writes, &[])
@@ -2987,7 +2869,7 @@ mod tests {
                 stdout.contains("READY") && stdout.contains("SIBLING"),
                 "{out:?}"
             );
-            assert_eq!(stdout.contains("REWRITTEN"), trusted, "{out:?}");
+            assert!(stdout.contains("REWRITTEN"), "named: {named}: {out:?}");
         }
     }
 
@@ -3022,7 +2904,7 @@ mod tests {
     }
 
     #[test]
-    fn a_scripts_image_descriptor_obeys_the_envelopes_freeze_and_denies() {
+    fn a_scripts_image_descriptor_obeys_the_envelopes_denies() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let dir = std::fs::canonicalize(tmp.path()).unwrap();
@@ -3040,8 +2922,7 @@ mod tests {
         };
         let out = run_admitted(&env, &policy, &program).unwrap();
         assert!(out.status.success(), "{out:?}");
-        assert_eq!(out.stdout, b"READY\n", "{out:?}");
-        assert_eq!(std::fs::read_to_string(&script).unwrap(), content);
+        assert!(out.stdout.starts_with(b"READY\n"), "{out:?}");
 
         let denied = SandboxProjection {
             exec: policy.exec,
@@ -3051,10 +2932,10 @@ mod tests {
         assert!(!out.status.success() && out.stdout.is_empty(), "{out:?}");
     }
 
-    /// Under an unrestricted fs the admitted set is frozen exactly when a
-    /// veto is in force, and nothing else is.
+    /// Under an unrestricted fs nothing is frozen, a veto in force or not, and
+    /// the veto is not walked: every write reaches it.
     #[test]
-    fn an_unrestricted_fs_freezes_the_admits_only_under_a_veto() {
+    fn an_unrestricted_fs_freezes_nothing_under_a_veto() {
         if !landlock_at_least(super::landlock::Abi::EXEC) {
             return;
         }
@@ -3069,12 +2950,106 @@ mod tests {
             let Some(stdout) = authored(&policy, &dir) else {
                 return;
             };
-            assert_eq!(
-                emitted(&stdout, "ADMIT-WROTE"),
-                !veto,
-                "the admit is frozen exactly under a veto: {stdout}"
+            assert!(
+                emitted(&stdout, "ADMIT-WROTE") && emitted(&stdout, "PREFIX-WROTE"),
+                "veto: {veto}: {stdout}"
             );
-            assert!(emitted(&stdout, "PREFIX-WROTE"), "{stdout}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A runnable copy of `/bin/true` at `dir/name`, which it creates.
+    fn copy_true(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let copy = dir.join(name);
+        std::fs::copy("/bin/true", &copy).expect("copy /bin/true");
+        copy
+    }
+
+    /// `Any` under a restricted fs is a rule on every bind root, less the
+    /// exclusions inside each: a program in a bind runs, the excluded one
+    /// beside it does not, and an exclusion elsewhere changes neither.
+    #[test]
+    fn every_program_is_lowered_onto_each_bind_less_the_exclusions() {
+        if !landlock_at_least(super::landlock::Abi::EXEC) {
+            return;
+        }
+        let dir = workdir("exec-any");
+        let dir = std::fs::canonicalize(&dir).expect("the work dir is real");
+        let bind = dir.join("w/deep/bind");
+        let (prog, excluded) = (copy_true(&bind, "prog"), copy_true(&bind, "excluded"));
+        let unrelated = copy_true(&dir.join("elsewhere"), "unrelated");
+        let real = |p: &std::path::Path| RealPath::of(p).expect("the file exists");
+        let policy = SandboxProjection {
+            exec: ExecProjection::Restricted(
+                [
+                    (ExecScope::Any, Evidence::ALLOW),
+                    file_rule(real(&excluded), false),
+                    file_rule(real(&unrelated), false),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+            ..restricted(&[&bind], &[], &[])
+        };
+        let Some(env) = envelope_launches(&policy) else {
+            return;
+        };
+        let script = format!(
+            "echo READY\n\
+             '{prog}' && echo PROG-RAN\n\
+             '{excluded}' && echo EXCLUDED-RAN\n",
+            prog = prog.display(),
+            excluded = excluded.display(),
+        );
+        let out = run_confined(&env, &policy, &script).expect("spawn");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            emitted(&stdout, "READY") && emitted(&stdout, "PROG-RAN"),
+            "Any admitted nothing in the bind: {stdout} {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !emitted(&stdout, "EXCLUDED-RAN"),
+            "an exclusion inside the bind did not hold: {stdout}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A directory admission reaches binds whose roots lie inside it, which a
+    /// rule on the directory itself would never meet: an alias, a symlink to
+    /// a subdirectory that the envelope binds at both names, and a canonical
+    /// sub-bind under a grant that reads only that subdirectory.
+    #[test]
+    fn a_directory_admission_reaches_the_binds_inside_it() {
+        if !landlock_at_least(super::landlock::Abi::EXEC) {
+            return;
+        }
+        let dir = workdir("exec-lowered");
+        let dir = std::fs::canonicalize(&dir).expect("the work dir is real");
+        let (tools, sub) = (dir.join("tools"), dir.join("tools/sub"));
+        copy_true(&sub, "prog");
+        std::os::unix::fs::symlink("tools/sub", dir.join("alias")).unwrap();
+        let exec = admitting(&[&tools.to_string_lossy()], &[]);
+        for (label, read, run) in [
+            ("alias", dir.join("alias"), dir.join("alias/prog")),
+            ("sub-bind", sub.clone(), sub.join("prog")),
+        ] {
+            let policy = SandboxProjection {
+                exec: exec.clone(),
+                ..restricted(&[&read], &[], &[])
+            };
+            let Some(env) = envelope_launches(&policy) else {
+                return;
+            };
+            let script = format!("echo READY\n'{}' && echo PROG-RAN\n", run.display());
+            let out = run_confined(&env, &policy, &script).expect("spawn");
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                emitted(&stdout, "READY") && emitted(&stdout, "PROG-RAN"),
+                "{label}: the admission missed the bind: {stdout} {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3215,7 +3190,12 @@ mod tests {
              kill -TERM {pid} 2>/dev/null && echo SLEEPER-SIGNALLED\n",
             pid = sleeper.id(),
         );
-        for exec in [ExecProjection::Unrestricted, admitting(&[], &[])] {
+        let bare = ExecProjection::Restricted(
+            [(ExecScope::Any, Evidence::ALLOW), veto_rule("rm")]
+                .into_iter()
+                .collect(),
+        );
+        for exec in [ExecProjection::Unrestricted, admitting(&[], &[]), bare] {
             let policy = exec_policy(exec);
             let Some(env) = envelope_launches(&policy) else {
                 break;
@@ -3267,10 +3247,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// ral re-execs itself inside, so the grant need not name it; the admit
-    /// is the pinned inode, so a byte-identical copy beside it stays denied.
+    /// ral's binary is an ordinary file: it runs where the table admits it,
+    /// by path or by directory, and nowhere else, a byte-identical copy
+    /// beside it included.
     #[test]
-    fn ral_runs_unnamed_by_the_grant_and_a_copy_of_it_does_not() {
+    fn ral_runs_only_where_the_table_admits_it() {
         if !landlock_at_least(super::landlock::Abi::EXEC) {
             return;
         }
@@ -3278,10 +3259,7 @@ mod tests {
         let dir = workdir("exec-self");
         let copy = dir.join("ral-copy");
         std::fs::copy(own.arg0(), &copy).expect("copy ral");
-        let policy = exec_policy(admitting(&[], &[]));
-        let Some(env) = envelope_launches(&policy) else {
-            return;
-        };
+        let own_path = own.arg0().to_string_lossy().into_owned();
         let script = format!(
             "echo READY\n\
              '{own}' --list >/dev/null && echo SELF-RAN\n\
@@ -3289,16 +3267,314 @@ mod tests {
             own = own.arg0().display(),
             copy = copy.display(),
         );
+        for (label, exec, self_ran) in [
+            ("unnamed", admitting(&[], &[]), false),
+            ("by path", admitting(&[], &[&own_path]), true),
+        ] {
+            let policy = exec_policy(exec);
+            let Some(env) = envelope_launches(&policy) else {
+                return;
+            };
+            let out = run_confined(&env, &policy, &script).expect("spawn");
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(emitted(&stdout, "READY"), "{label}: {stdout}");
+            assert_eq!(emitted(&stdout, "SELF-RAN"), self_ran, "{label}: {stdout}");
+            assert!(
+                !emitted(&stdout, "COPY-RAN"),
+                "{label}: a copy of ral ran, so the admit is not its file: {stdout}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The stack as a launch folds it: exec `allow`ed and `deny`ed by path,
+    /// each frozen, a directory when it is one, beside the system's command
+    /// directories; `fs` as given.  The program is admitted under it.
+    fn folded(
+        exec: Option<(&[&std::path::Path], &[&std::path::Path])>,
+        fs: Option<FsPolicy>,
+        program: &std::path::Path,
+        args: &[&str],
+    ) -> (SandboxProjection, Admitted) {
+        use crate::capability::ExecKey;
+        let key = |p: &std::path::Path| {
+            let frozen = FrozenPath::from_surface(p);
+            if p.is_dir() {
+                ExecKey::Dir(frozen)
+            } else {
+                ExecKey::Path(frozen)
+            }
+        };
+        let exec = exec.map(|(allow, deny)| {
+            ["/bin", "/usr/bin"]
+                .iter()
+                .map(|d| key(d.as_ref()))
+                .chain(allow.iter().map(|p| key(p)))
+                .map(|k| (k, Evidence::ALLOW))
+                .chain(deny.iter().map(|p| (key(p), Evidence::DENY)))
+                .collect()
+        });
+        let stack = GrantStack::of(Capabilities {
+            exec,
+            fs,
+            ..Capabilities::root()
+        });
+        let resolver = Resolver::shell_less();
+        let program = Program::file(program.to_path_buf()).expect("the program exists");
+        let args: Vec<String> = args.iter().map(|a| (*a).to_string()).collect();
+        let admitted = stack
+            .admit(program, args, &resolver)
+            .unwrap_or_else(|why| panic!("the stack refuses the program: {why:?}"));
+        let projection = SandboxProjection::of(&stack, &resolver, Some(&admitted))
+            .expect("a restricted stack projects");
+        (projection, admitted)
+    }
+
+    fn exec_files(projection: &SandboxProjection) -> Vec<RealPath> {
+        match &projection.exec {
+            ExecProjection::Restricted(rules) => rules.allowed_files().cloned().collect(),
+            ExecProjection::Unrestricted => Vec::new(),
+        }
+    }
+
+    /// An exec exclusion on a linker candidate beats the support that would
+    /// admit it; the same grant without it admits the linker.
+    #[test]
+    fn an_excluded_linker_candidate_is_not_admitted() {
+        let Some(linker) = crate::sandbox::carriers::linkers().into_iter().next() else {
+            eprintln!("skipping: this host has no dynamic linker candidate");
+            return;
+        };
+        let sh = std::path::Path::new("/bin/sh");
+        let (open, _) = folded(Some((&[], &[])), None, sh, &[]);
+        assert!(
+            exec_files(&open).contains(&linker),
+            "support admits the linker unless excluded: {linker}"
+        );
+        let (shut, _) = folded(Some((&[], &[linker.as_path()])), None, sh, &[]);
+        assert!(
+            !exec_files(&shut).contains(&linker),
+            "an excluded linker candidate was admitted: {linker}"
+        );
+    }
+
+    /// A `#!` script at `dir/script` whose interpreter, a copy of the shell,
+    /// is `dir/interp`.
+    fn scripted(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let interp = dir.join("interp");
+        std::fs::copy("/bin/sh", &interp).expect("copy /bin/sh");
+        let script = dir.join("script");
+        std::fs::write(
+            &script,
+            format!("#!{}\necho INTERP-RAN\n", interp.display()),
+        )
+        .expect("write the script");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("make the script runnable");
+        (script, interp)
+    }
+
+    /// A script whose interpreter is excluded, by exec or by fs, fails in the
+    /// kernel, and the hint names the exclusion rather than a missing admit.
+    #[test]
+    fn a_script_whose_interpreter_is_excluded_fails_in_the_kernel_naming_it() {
+        if !landlock_at_least(super::landlock::Abi::EXEC) {
+            return;
+        }
+        let dir = workdir("exec-interp-excluded");
+        let dir = std::fs::canonicalize(&dir).expect("the work dir is real");
+        let (script, interp) = scripted(&dir);
+        let fs = FsPolicy {
+            read_prefixes: vec![FrozenPath::from_surface(&dir)],
+            write_prefixes: Vec::new(),
+            deny_paths: vec![FrozenPath::from_surface(&interp)],
+        };
+        for (axis, exec, fs) in [
+            (
+                "exec",
+                Some((&[dir.as_path()][..], &[interp.as_path()][..])),
+                None,
+            ),
+            ("fs", Some((&[dir.as_path()][..], &[][..])), Some(fs)),
+        ] {
+            let (policy, admitted) = folded(exec, fs, &script, &[]);
+            let Some(env) = envelope_launches(&policy) else {
+                return;
+            };
+            let out = run_admitted(&env, &policy, &admitted).expect("spawn");
+            let (stdout, stderr) = (
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr),
+            );
+            assert!(
+                !stdout.contains("INTERP-RAN") && !out.status.success(),
+                "{axis}: an excluded interpreter ran: {stdout} {stderr}"
+            );
+            assert!(
+                stderr.contains("interpreter") && stderr.contains("is excluded by"),
+                "{axis}: the hint does not name the exclusion: {stderr}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A system-written script whose interpreter is system-written too,
+    /// preferring one whose interpreter lies beyond the floor.
+    fn trusted_script() -> Option<std::path::PathBuf> {
+        let beyond_floor =
+            |interp: &std::path::Path| !floor().iter().any(|f| interp.starts_with(f.real_path()));
+        let scripts: Vec<_> = std::fs::read_dir("/usr/bin")
+            .ok()?
+            .flatten()
+            .filter_map(|e| {
+                let real = crate::sandbox::carriers::trusted_real(&e.path())?;
+                let interp = crate::sandbox::carriers::shebang(real.as_path())?;
+                crate::sandbox::carriers::trusted_real(&interp)?;
+                Some((real.as_path().to_path_buf(), interp))
+            })
+            .collect();
+        scripts
+            .iter()
+            .find(|(_, interp)| beyond_floor(interp))
+            .or_else(|| scripts.first())
+            .map(|(script, _)| script.clone())
+    }
+
+    /// A trusted script starts under a restricted fs whose reads name neither
+    /// it nor its interpreter, with exec supplied and omitted: support's
+    /// reads carry it.  (On most hosts no system interpreter lies beyond the
+    /// floor, which then covers the one found.)
+    #[test]
+    fn a_trusted_script_starts_through_live_supports_reads() {
+        if !landlock_at_least(super::landlock::Abi::EXEC) {
+            return;
+        }
+        let Some(script) = trusted_script() else {
+            eprintln!("skipping: this host has no trusted script");
+            return;
+        };
+        let dir = workdir("trusted-script");
+        let reads = || FsPolicy {
+            read_prefixes: vec![FrozenPath::from_surface(&dir)],
+            write_prefixes: Vec::new(),
+            deny_paths: Vec::new(),
+        };
+        for (label, exec) in [
+            ("exec supplied", Some((&[script.as_path()][..], &[][..]))),
+            ("exec omitted", None),
+        ] {
+            let (policy, admitted) = folded(exec, Some(reads()), &script, &["--help"]);
+            let Some(env) = envelope_launches(&policy) else {
+                return;
+            };
+            let out = run_admitted(&env, &policy, &admitted).expect("spawn");
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(
+                !stderr.contains("Permission denied") && !stderr.contains("hint:"),
+                "{label}: the kernel refused {}: {stderr}",
+                script.display()
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A descendant starts ral neither under an exec allow-list that does not
+    /// admit it, nor by name where its folder is fs-excluded, nor as
+    /// `/proc/self/exe`; a bundled tool, run by the launcher, still runs.
+    #[cfg(feature = "coreutils")]
+    #[test]
+    fn a_descendant_cannot_start_ral_but_a_bundled_tool_runs() {
+        if !landlock_at_least(super::landlock::Abi::EXEC) {
+            return;
+        }
+        let own = crate::sandbox::reexec::own().expect("ral pins itself");
+        let home = own.arg0().parent().expect("ral has a folder").to_path_buf();
+        let name = own.arg0().file_name().expect("ral has a name");
+        let work = workdir("exec-ral");
+        let script = format!(
+            "echo READY\n\
+             PATH='{home}' '{name}' --list >/dev/null && echo SELF-RAN\n\
+             env /proc/self/exe -c true && echo PROC-RAN\n",
+            home = home.display(),
+            name = name.to_string_lossy(),
+        );
+        let own_path = own.arg0().to_string_lossy().into_owned();
+        let under = |exec, deny: &[&std::path::Path]| SandboxProjection {
+            exec,
+            ..deny_within(&work, deny)
+        };
+        for (label, policy, self_ran) in [
+            ("admitted", under(admitting(&[], &[&own_path]), &[]), true),
+            ("unadmitted", under(admitting(&[], &[]), &[]), false),
+            (
+                "excluded folder",
+                under(admitting(&[&home.to_string_lossy()], &[]), &[&home]),
+                false,
+            ),
+        ] {
+            let Some(env) = envelope_launches(&policy) else {
+                return;
+            };
+            let out = run_confined(&env, &policy, &script).expect("spawn");
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(emitted(&stdout, "READY"), "{label}: {stdout}");
+            assert_eq!(emitted(&stdout, "SELF-RAN"), self_ran, "{label}: {stdout}");
+            assert!(!emitted(&stdout, "PROC-RAN"), "{label}: {stdout}");
+            let tool = admitted(
+                Program::Tool("basename".into()),
+                &["/x/TOOL-RAN".to_string()],
+            );
+            let out = run_admitted(&env, &policy, &tool).expect("spawn");
+            assert!(
+                emitted(&String::from_utf8_lossy(&out.stdout), "TOOL-RAN"),
+                "{label}: a bundled tool did not run: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    /// A hard link made before launch at an excluded path to an admitted file
+    /// runs: Landlock admits inodes, and the exclusion names a path (§7.6).
+    #[test]
+    fn a_preexisting_hard_link_at_an_excluded_path_runs() {
+        if !landlock_at_least(super::landlock::Abi::EXEC) {
+            return;
+        }
+        let dir = workdir("exec-hard-link");
+        let dir = std::fs::canonicalize(&dir).expect("the work dir is real");
+        let admitted_file = copy_true(&dir, "admitted");
+        let linked = dir.join("linked");
+        std::fs::hard_link(&admitted_file, &linked).expect("hard link");
+        let planted = copy_true(&dir, "planted");
+        let policy = exec_policy(admitting_less(
+            &[],
+            [
+                file_rule(RealPath::of(&admitted_file).expect("exists"), true),
+                file_rule(RealPath::of(&linked).expect("exists"), false),
+            ],
+        ));
+        let Some(env) = envelope_launches(&policy) else {
+            return;
+        };
+        let script = format!(
+            "echo READY\n\
+             '{linked}' && echo LINK-RAN\n\
+             '{planted}' && echo PLANTED-RAN\n",
+            linked = linked.display(),
+            planted = planted.display(),
+        );
         let out = run_confined(&env, &policy, &script).expect("spawn");
         let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(emitted(&stdout, "READY"), "{stdout}");
         assert!(
-            emitted(&stdout, "SELF-RAN"),
-            "ral's own binary did not run inside: {stdout} {}",
-            String::from_utf8_lossy(&out.stderr)
+            emitted(&stdout, "LINK-RAN"),
+            "the declared limit moved: {stdout}"
         );
         assert!(
-            !emitted(&stdout, "COPY-RAN"),
-            "a copy of ral ran, so the admit is not its inode: {stdout}"
+            !emitted(&stdout, "PLANTED-RAN"),
+            "an unadmitted copy ran, so the link proves nothing: {stdout}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3337,6 +3613,7 @@ mod tests {
         let warrant = Warrant::new(
             promise,
             &admitted(sh, &["-c".to_string(), "echo RAN".to_string()]),
+            &unrestricted(),
         )
         .parcel()
         .expect("parcels");
@@ -3362,13 +3639,12 @@ mod tests {
 
     /// The bind table of a launch whose trampoline is `own`.
     fn over(own: &Pinned) -> Vec<String> {
-        let rendered = unrestricted().rendered().expect("renders");
         let bwrap = stand_in();
         let env = Envelope {
             trampoline: own,
             ..on(&bwrap, WHOLE)
         };
-        let binds = Binds::open(&env, None, &rendered).expect("the binds open");
+        let binds = Binds::open(&env, plan(&unrestricted())).expect("the binds open");
         (binds.layer(Layer::Over))
             .map(|(_, bind)| bind.dest.as_str().to_string())
             .collect()
@@ -3445,24 +3721,28 @@ mod tests {
     ) -> Option<std::process::Output> {
         use crate::sandbox::warrant::Warrant;
         use std::os::fd::AsFd;
-        let warrant = Warrant::new(None, admitted).parcel().expect("parcels");
+        let warrant = Warrant::new(None, admitted, policy)
+            .parcel()
+            .expect("parcels");
         let mut handoff = Handoff::default();
         handoff.lend(Slot::Warrant, warrant.as_fd());
-        let image = match admitted.program() {
-            Program::File { real, image, .. } => {
-                handoff.lend(Slot::Image, image.as_ref().unwrap().as_fd());
-                Some(real)
-            }
-            Program::Tool(_) => None,
-        };
+        if let Program::File { image, .. } = admitted.program() {
+            handoff.lend(Slot::Image, image.as_ref().unwrap().as_fd());
+        }
         let rendered = policy.rendered().expect("renders");
         let env = Envelope {
             trampoline: own,
             ..*env
         };
-        let (mut cmd, info_fd) =
-            bwrap_command(&env, image, handoff, &rendered, None, Ownership::Kept)
-                .expect("the launch builds");
+        let (mut cmd, info_fd) = bwrap_command(
+            &env,
+            plan(policy),
+            handoff,
+            &rendered,
+            None,
+            Ownership::Kept,
+        )
+        .expect("the launch builds");
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         let out = cmd.output().ok();
         drop(info_fd);

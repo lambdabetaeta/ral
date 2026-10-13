@@ -132,11 +132,13 @@ fn windows_sandboxed_command(
                 })?;
                 launch.arg(tool);
                 launch.args(args);
-                // The confined child is ral.exe itself; the token must load it.
-                let image = match super::reexec::OWN.get() {
-                    Some(own) => Some(own.exec_path().to_path_buf()),
-                    None => std::env::current_exe().ok(),
-                };
+                // The confined child is ral.exe itself; the token must load
+                // it, at its real path, since a link on the path refuses.
+                let image = (super::reexec::OWN.get())
+                    .map(|own| own.exec_path().to_path_buf())
+                    .or_else(|| std::env::current_exe().ok())
+                    .and_then(|exe| crate::path::RealPath::of(&exe).ok())
+                    .map(|real| real.as_path().to_path_buf());
                 (launch, image)
             }
         };
@@ -145,10 +147,14 @@ fn windows_sandboxed_command(
 }
 
 /// Issue the warrant for `admitted` under `confinement`, parcelled for
-/// [`Slot::Warrant`].
+/// [`Slot::Warrant`]; `projection` is read for its exclusions, to diagnose.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn issue(confinement: Native, admitted: &Admitted) -> Result<OwnedFd, Refusal> {
-    Ok(Warrant::new(confinement, admitted).parcel()?)
+fn issue(
+    confinement: Native,
+    admitted: &Admitted,
+    projection: &SandboxProjection,
+) -> Result<OwnedFd, Refusal> {
+    Ok(Warrant::new(confinement, admitted, projection).parcel()?)
 }
 
 #[cfg(target_os = "linux")]
@@ -209,8 +215,8 @@ fn faithful<'a>(path: &'a Path, what: &str) -> Result<&'a str, Refusal> {
 }
 
 /// `env`'s trampoline, handed its warrant and the Landlock ruleset built
-/// here, the program's image shown read-only beside it.  The trampoline is
-/// *us*: our boot pin, which bwrap execs by descriptor.
+/// here, against the binds the envelope will show.  The trampoline is *us*:
+/// our boot pin, which bwrap execs by descriptor.
 #[cfg(target_os = "linux")]
 pub(super) fn enveloped(
     env: &Envelope<'_>,
@@ -220,27 +226,26 @@ pub(super) fn enveloped(
     ownership: Ownership,
 ) -> Result<(Command, Option<super::linux::InfoFd>), Refusal> {
     let rendered = projection.rendered()?;
-    let (ruleset, confinement) =
-        super::linux::landlock::build(&rendered.exec, &rendered.fs, env.host.landlock)?.unzip();
-    let warrant = issue(confinement, admitted)?;
+    let shown = super::linux::Shown::of(&rendered)?;
+    let image = image(admitted.program())?;
+    let (ruleset, confinement) = super::linux::landlock::build(
+        &rendered.exec,
+        &rendered.fs,
+        &shown.roots,
+        image,
+        env.host.landlock,
+    )?
+    .unzip();
+    let warrant = issue(confinement, admitted, projection)?;
     let mut handoff = Handoff::default();
     handoff.lend(Slot::Warrant, warrant.as_fd());
     if let Some(ruleset) = &ruleset {
         handoff.lend(Slot::Ruleset, ruleset.as_fd());
     }
-    if let Some(image) = image(admitted.program())? {
-        if let Some(ruleset) = &ruleset
-            && !matches!(rendered.exec, super::ExecProjection::Unrestricted)
-        {
-            ruleset.admit_image(image)?;
-        }
+    if let Some(image) = image {
         handoff.lend(Slot::Image, image.as_fd());
     }
-    let image = match admitted.program() {
-        crate::capability::Program::File { real, .. } => Some(real),
-        crate::capability::Program::Tool(_) => None,
-    };
-    super::linux::bwrap_command(env, image, handoff, &rendered, chdir, ownership)
+    super::linux::bwrap_command(env, shown, handoff, &rendered, chdir, ownership)
 }
 
 /// macOS: re-exec the pinned ral, with the compiled profile in its warrant,
@@ -256,7 +261,7 @@ fn macos_sandboxed_command(
     let own = super::reexec::own()?;
     own.verify()?;
     let profile = super::macos::build_profile(projection)?;
-    let warrant = issue(Seatbelt(profile), admitted)?;
+    let warrant = issue(Seatbelt(profile), admitted, projection)?;
     let mut cmd = own.command();
     cmd.arg(Role::Warrant.flag());
     let mut handoff = Handoff::default();
@@ -321,7 +326,7 @@ pub fn serve_warrant(_extra: &[OsString]) -> u8 {
 ))]
 pub(super) fn admitted(program: crate::capability::Program, args: &[String]) -> Admitted {
     crate::capability::GrantStack::root()
-        .admit(program, args.to_vec())
+        .admit(program, args.to_vec(), &crate::path::Resolver::shell_less())
         .expect("an unrestricted stack admits everything")
 }
 
@@ -343,17 +348,22 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     use crate::{
         capability::Program,
+        path::FrozenPath,
         sandbox::{ExecProjection, FsProjection, FsRules},
     };
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn prefix(path: &str) -> crate::capability::FsScope {
+        crate::capability::FsScope::Prefix(FrozenPath::from_surface(path))
+    }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn restrictive() -> SandboxProjection {
         SandboxProjection {
             fs: FsProjection::Restricted(FsRules {
-                read_prefixes: vec!["/tmp".into()],
-                floor: Vec::new(),
-                write_prefixes: vec!["/tmp".into()],
-                deny_paths: vec!["/etc".into()],
+                read: vec![prefix("/tmp")],
+                write: vec![prefix("/tmp")],
+                deny: vec![FrozenPath::from_surface("/etc")],
                 pinned_dirs: Vec::new(),
             }),
             net: true,
@@ -394,10 +404,9 @@ mod tests {
     fn write_confined_to(write_dir: &str) -> SandboxProjection {
         SandboxProjection {
             fs: FsProjection::Restricted(FsRules {
-                read_prefixes: vec![write_dir.to_string()],
-                floor: Vec::new(),
-                write_prefixes: vec![write_dir.to_string()],
-                deny_paths: Vec::new(),
+                read: vec![prefix(write_dir)],
+                write: vec![prefix(write_dir)],
+                deny: Vec::new(),
                 pinned_dirs: Vec::new(),
             }),
             net: true,
@@ -579,6 +588,382 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&work);
         let _ = std::fs::remove_dir_all(&denied);
+    }
+
+    /// A fresh work directory under its canonical name, which is what the
+    /// kernel matches and what a frozen allowance holds.
+    #[cfg(target_os = "macos")]
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        std::fs::canonicalize(unique_workdir(tag)).expect("canonical work dir")
+    }
+
+    /// Reads `read` and writes `write` beside the floor-less base, with `deny`
+    /// carved out of both and `exec` as given.
+    #[cfg(target_os = "macos")]
+    fn confined_to(
+        read: &[&Path],
+        write: &[&Path],
+        deny: &[&str],
+        exec: ExecProjection,
+    ) -> SandboxProjection {
+        let scopes = |dirs: &[&Path]| dirs.iter().map(|d| prefix(&d.to_string_lossy())).collect();
+        SandboxProjection {
+            fs: FsProjection::Restricted(FsRules {
+                read: scopes(read),
+                write: scopes(write),
+                deny: deny.iter().map(|d| FrozenPath::from_surface(d)).collect(),
+                pinned_dirs: Vec::new(),
+            }),
+            net: true,
+            exec,
+        }
+    }
+
+    /// `every` program, and nothing else.
+    #[cfg(target_os = "macos")]
+    fn every() -> ExecProjection {
+        ExecProjection::Restricted(
+            std::iter::once((
+                crate::capability::ExecScope::Any,
+                crate::capability::Evidence::ALLOW,
+            ))
+            .collect(),
+        )
+    }
+
+    /// The exit code and stderr of `cmd` run confined, stdout silenced.
+    #[cfg(target_os = "macos")]
+    fn confined_stderr(mut cmd: Command) -> (Option<i32>, String) {
+        use std::process::Stdio;
+        let out = cmd
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn sandboxed child")
+            .wait_with_output()
+            .expect("wait for sandboxed child");
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    }
+
+    /// A Mach-O of this user's own, ad-hoc signed so that relocating it is
+    /// not what kills it.
+    #[cfg(target_os = "macos")]
+    fn mach_o(dir: &Path, name: &str) -> std::path::PathBuf {
+        let path = dir.join(name);
+        std::fs::copy("/usr/bin/true", &path).expect("copy a Mach-O");
+        let signed = Command::new("codesign")
+            .args(["--force", "-s", "-"])
+            .arg(&path)
+            .status()
+            .expect("run codesign");
+        assert!(signed.success(), "ad-hoc signing {}", path.display());
+        path
+    }
+
+    /// Law 7 (§7.4): Seatbelt starts no program the fs rules do not let it
+    /// read, so one that runs only through `every` is no run place for a
+    /// descendant unless the fs reads it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_descendant_starts_no_program_every_admits_and_the_fs_does_not_read() {
+        let (bin, mark) = (scratch("law7_bin"), scratch("law7_mark"));
+        let (prog, ran) = (mach_o(&bin, "prog"), mark.join("ran"));
+        let starts = |read: &[&Path]| {
+            let _ = std::fs::remove_file(&ran);
+            let line = format!("{} && echo > {}", prog.display(), ran.display());
+            let cmd = macos_sandboxed_command(
+                &confined_to(read, &[&mark], &[], every()),
+                &admitted(sh(), &["-c".into(), line]),
+            )
+            .expect("build host command");
+            run_confined(cmd);
+            ran.exists()
+        };
+        assert!(starts(&[&mark, &bin]), "control: the fs reads the program");
+        assert!(
+            !starts(&[&mark]),
+            "a Mach-O the fs does not read started under `every`"
+        );
+        let _ = std::fs::remove_dir_all(&bin);
+        let _ = std::fs::remove_dir_all(&mark);
+    }
+
+    /// A `#!/bin/sh` script, launched with `/bin/sh` excluded by the exec
+    /// table (`fs_deny` empty) or by the fs (`exec` unrestricted by it).
+    #[cfg(target_os = "macos")]
+    fn launch_with_excluded_shell(by_exec: bool) -> (Option<i32>, String) {
+        let work = scratch(if by_exec { "excl_exec" } else { "excl_fs" });
+        let script = work.join("run");
+        std::fs::write(&script, "#!/bin/sh\nexit 0\n").expect("write script");
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("chmod");
+        let projection = if by_exec {
+            let shell = crate::path::RealPath::of(Path::new("/bin/sh")).expect("/bin/sh exists");
+            let exec = [
+                (
+                    crate::capability::ExecScope::Any,
+                    crate::capability::Evidence::ALLOW,
+                ),
+                (
+                    crate::capability::ExecScope::File(shell),
+                    crate::capability::Evidence::DENY,
+                ),
+            ];
+            confined_to(
+                &[&work],
+                &[&work],
+                &[],
+                ExecProjection::Restricted(exec.into_iter().collect()),
+            )
+        } else {
+            confined_to(&[&work, Path::new("/bin")], &[&work], &["/bin/sh"], every())
+        };
+        let cmd = macos_sandboxed_command(
+            &projection,
+            &admitted(Program::file(script).expect("a script"), &[]),
+        )
+        .expect("build host command");
+        let out = confined_stderr(cmd);
+        let _ = std::fs::remove_dir_all(&work);
+        out
+    }
+
+    /// No allowance reopens an excluded interpreter, and the hint says which
+    /// exclusion it is (§7.1).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_script_whose_interpreter_is_excluded_fails_and_the_hint_names_it() {
+        for by_exec in [true, false] {
+            let (code, stderr) = launch_with_excluded_shell(by_exec);
+            assert_eq!(code, Some(126), "by exec: {by_exec}; {stderr}");
+            assert!(
+                stderr.contains("is excluded by") && stderr.contains("/bin/sh"),
+                "by exec: {by_exec}; {stderr}"
+            );
+        }
+    }
+
+    /// A system script whose system interpreter lies elsewhere: no grant of
+    /// the script's directory admits the interpreter, only support does.
+    #[cfg(target_os = "macos")]
+    fn system_script_elsewhere() -> Option<std::path::PathBuf> {
+        let scripts = std::fs::read_dir("/usr/bin").ok()?;
+        scripts.flatten().map(|e| e.path()).find(|script| {
+            let carried = || {
+                super::super::carriers::trusted_real(script)?;
+                let interpreter = super::super::carriers::shebang(script)?;
+                super::super::carriers::trusted_real(&interpreter)?;
+                (interpreter.parent() != script.parent()).then_some(())
+            };
+            carried().is_some()
+        })
+    }
+
+    /// The exit code and stderr of the system script under a restricted fs,
+    /// beside `exec` as given: it starts, through the live support alone.
+    #[cfg(target_os = "macos")]
+    fn start_system_script(script: &Path, exec: Option<crate::capability::ExecGrant>) -> String {
+        use crate::capability::{Capabilities, FsPolicy, GrantStack};
+        let work = scratch("support");
+        let layer = Capabilities {
+            exec,
+            fs: Some(FsPolicy {
+                read_prefixes: vec![FrozenPath::from_surface(&work)],
+                write_prefixes: Vec::new(),
+                deny_paths: Vec::new(),
+            }),
+            ..Capabilities::root()
+        };
+        let (stack, resolver) = (GrantStack::of(layer), crate::path::Resolver::shell_less());
+        let program = Program::file(script.to_path_buf()).expect("a program");
+        let admitted = stack
+            .admit(program, Vec::new(), &resolver)
+            .expect("the grant admits the script");
+        let projection = SandboxProjection::of(&stack, &resolver, Some(&admitted))
+            .expect("a restricted fs sandboxes");
+        let cmd = macos_sandboxed_command(&projection, &admitted).expect("build host command");
+        let (_, stderr) = confined_stderr(cmd);
+        let _ = std::fs::remove_dir_all(&work);
+        stderr
+    }
+
+    /// A trusted script starts through its interpreter's support, whether the
+    /// grant supplies `exec` (admitting the script's directory alone) or
+    /// omits it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_trusted_script_starts_through_its_interpreters_support() {
+        use crate::capability::{Evidence, ExecGrant, ExecKey};
+        let Some(script) = system_script_elsewhere() else {
+            eprintln!("skipping: no system script under /usr/bin");
+            return;
+        };
+        let dir = FrozenPath::from_surface(script.parent().expect("a directory"));
+        let supplied: ExecGrant = std::iter::once((ExecKey::Dir(dir), Evidence::ALLOW)).collect();
+        for exec in [Some(supplied), None] {
+            let stderr = start_system_script(&script, exec.clone());
+            assert!(
+                !stderr.contains(&format!("{}:", script.display())),
+                "exec {exec:?}: the script did not start: {stderr}"
+            );
+        }
+    }
+
+    /// `/usr/bin/git`'s stub forwards to one of two candidates (§7.4); the
+    /// one `xcrun` does not name may be excluded without refusing the stub.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_excluded_shim_candidate_the_stub_does_not_use_refuses_nothing() {
+        use crate::capability::{Capabilities, Evidence, ExecGrant, ExecKey, GrantStack};
+        let stub = Path::new("/usr/bin/git");
+        let used = Command::new("xcrun")
+            .args(["--find", "git"])
+            .output()
+            .ok()
+            .and_then(|o| std::fs::canonicalize(String::from_utf8(o.stdout).ok()?.trim()).ok());
+        let unused = used.and_then(|used| {
+            super::super::carriers::shims(stub)
+                .into_iter()
+                .filter_map(|c| std::fs::canonicalize(c).ok())
+                .find(|c| *c != used)
+        });
+        let Some(unused) = unused else {
+            eprintln!("skipping: the stub has one candidate here");
+            return;
+        };
+        let freeze = |p: &Path| FrozenPath::freeze(p).expect("a Unicode path");
+        let exec: ExecGrant = [
+            (ExecKey::Dir(freeze(Path::new("/usr/bin"))), Evidence::ALLOW),
+            (ExecKey::Path(freeze(&unused)), Evidence::DENY),
+        ]
+        .into_iter()
+        .collect();
+        let layer = Capabilities {
+            exec: Some(exec),
+            ..Capabilities::root()
+        };
+        let (stack, resolver) = (GrantStack::of(layer), crate::path::Resolver::shell_less());
+        let admitted = stack
+            .admit(
+                Program::file(stub.into()).expect("git stub"),
+                vec!["--version".into()],
+                &resolver,
+            )
+            .expect("the grant admits the stub");
+        let projection =
+            SandboxProjection::of(&stack, &resolver, Some(&admitted)).expect("exec is restricted");
+        let cmd = macos_sandboxed_command(&projection, &admitted).expect("build host command");
+        let (code, stderr) = confined_stderr(cmd);
+        assert_eq!(code, Some(0), "{stderr}");
+    }
+
+    /// `cat file` confined to reading `read`, minus `deny`.
+    #[cfg(target_os = "macos")]
+    fn reads(read: Vec<crate::capability::FsScope>, deny: Vec<FrozenPath>, file: &Path) -> bool {
+        let projection = SandboxProjection {
+            fs: FsProjection::Restricted(FsRules {
+                read,
+                write: Vec::new(),
+                deny,
+                pinned_dirs: Vec::new(),
+            }),
+            net: true,
+            exec: ExecProjection::default(),
+        };
+        let cat = Program::file("/bin/cat".into()).expect("/bin/cat exists");
+        let args = [file.to_string_lossy().into_owned()];
+        run_confined(
+            macos_sandboxed_command(&projection, &admitted(cat, &args)).expect("build command"),
+        )
+    }
+
+    /// Two directories holding a file `f`, and a link `link` to the first.
+    #[cfg(target_os = "macos")]
+    fn linked_dirs(
+        tag: &str,
+    ) -> (
+        std::path::PathBuf,
+        [std::path::PathBuf; 2],
+        std::path::PathBuf,
+    ) {
+        let root = scratch(tag);
+        let dirs = ["a", "b"].map(|d| {
+            let dir = root.join(d);
+            std::fs::create_dir(&dir).expect("dir");
+            std::fs::write(dir.join("f"), d).expect("file");
+            dir
+        });
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&dirs[0], &link).expect("link");
+        (root, dirs, link)
+    }
+
+    /// An allowance renders as the real path it froze (§7.3): a spelling that
+    /// becomes a real directory, or a link retargeted, reaches nothing new.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_allowance_through_a_respelled_link_reaches_nothing_beneath_the_new_name() {
+        use crate::capability::FsScope::Prefix;
+        let (root, [a, b], link) = linked_dirs("respell");
+        let frozen = || {
+            vec![Prefix(FrozenPath::for_test(
+                &link.to_string_lossy(),
+                &a.to_string_lossy(),
+            ))]
+        };
+        assert!(reads(frozen(), Vec::new(), &link.join("f")), "control");
+
+        std::fs::remove_file(&link).expect("unlink");
+        std::os::unix::fs::symlink(&b, &link).expect("retarget");
+        assert!(
+            !reads(frozen(), Vec::new(), &link.join("f")),
+            "the redirect reached b"
+        );
+        assert!(
+            reads(frozen(), Vec::new(), &a.join("f")),
+            "the frozen target stays"
+        );
+
+        std::fs::remove_file(&link).expect("unlink");
+        std::fs::create_dir(&link).expect("a real directory");
+        std::fs::write(link.join("f"), "new").expect("file");
+        assert!(
+            !reads(frozen(), Vec::new(), &link.join("f")),
+            "the new directory was reached"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An exclusion is re-resolved at launch, so it follows its name to
+    /// wherever the name leads now.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_exclusion_follows_a_retargeted_spelling() {
+        use crate::capability::FsScope::Prefix;
+        let (root, [a, b], link) = linked_dirs("exclusion");
+        std::fs::remove_file(&link).expect("unlink");
+        std::os::unix::fs::symlink(&b, &link).expect("retarget");
+        let whole = || vec![Prefix(FrozenPath::from_surface(&root))];
+        let deny = || {
+            vec![FrozenPath::for_test(
+                &link.to_string_lossy(),
+                &b.to_string_lossy(),
+            )]
+        };
+        assert!(reads(whole(), Vec::new(), &b.join("f")), "control");
+        assert!(
+            !reads(whole(), deny(), &b.join("f")),
+            "the new spelling's target stayed readable"
+        );
+        assert!(
+            reads(whole(), deny(), &a.join("f")),
+            "the old target is no longer excluded"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// `ps` shows the envelope taking its options from a slot and running

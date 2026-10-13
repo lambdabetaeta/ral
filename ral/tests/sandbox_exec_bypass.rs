@@ -111,48 +111,20 @@ fn a_bare_name_deny_stops_a_grandchild_the_guard_never_sees() {
     assert_leaked_nothing(&elsewhere);
 }
 
-/// A write prefix that only covers an admitted dir would let the child author
-/// the binaries the dir runs, so the kernel freezes the dir; a grant that names
-/// the tree keeps it writable.  The veto-free grant shows the freeze needs no
-/// veto to fire.
+/// The declared limit that replaced the write freeze: a write prefix that
+/// covers an admitted dir lets the child author in it.
 #[test]
-fn a_write_prefix_that_only_covers_an_admitted_dir_cannot_author_in_it() {
+fn a_write_prefix_covering_an_admitted_dir_can_author_in_it() {
     let td = tempfile::tempdir().unwrap();
     let tools = td.path().join("tools");
-    let scratch = td.path().join("scratch");
     std::fs::create_dir(&tools).unwrap();
-    std::fs::create_dir(&scratch).unwrap();
-    let plant = |dir: &Path| format!("/bin/sh -c 'echo x > {}/planted'", dir.display());
-
-    // Control: the covering prefix is live, so a later denial is the freeze
-    // and not a dead sandbox.
-    let beside = writing_beside_admit(td.path(), &tools, &plant(&scratch));
-    assert_eq!(
-        beside.status, 0,
-        "a write beside the admitted dir must land; stderr:\n{}",
-        beside.stderr
+    let out = writing_beside_admit(
+        td.path(),
+        &tools,
+        &format!("/bin/sh -c 'echo x > {}/planted'", tools.display()),
     );
-    assert!(scratch.join("planted").exists());
-
-    // Control: naming the tree keeps it writable.
-    let named = writing_beside_admit(&tools, &tools, &plant(&tools));
-    assert_eq!(
-        named.status, 0,
-        "a grant naming the admitted dir must keep it writable; stderr:\n{}",
-        named.stderr
-    );
+    assert_eq!(out.status, 0, "{}", out.stderr);
     assert!(tools.join("planted").exists());
-    std::fs::remove_file(tools.join("planted")).unwrap();
-
-    let covered = writing_beside_admit(td.path(), &tools, &plant(&tools));
-    assert_ne!(
-        covered.status, 0,
-        "a write into a dir the prefix only covers must be refused"
-    );
-    assert!(
-        !tools.join("planted").exists(),
-        "the write landed in the admitted dir"
-    );
 }
 
 fn assert_leaked_nothing(out: &common::Output) {
@@ -166,34 +138,4 @@ fn assert_leaked_nothing(out: &common::Output) {
         "the denied command ran; stderr:\n{}",
         out.stderr
     );
-}
-
-#[test]
-fn a_covered_exec_file_cannot_be_rewritten_by_an_interpreter() {
-    let td = tempfile::tempdir().unwrap();
-    let file = td.path().join("tool");
-    for trusted in [false, true] {
-        write_script(&file, "ORIGINAL");
-        let extra = if trusted {
-            format!(", `absolute '{}'", file.display())
-        } else {
-            String::new()
-        };
-        let out = run_script(&format!(
-            "grant [fs: [read: [`absolute '{d}'], write: [`absolute '{d}'{extra}]], \
-             exec: [allow: [`dir `absolute /bin, `absolute '{f}']]] {{ \
-             /bin/sh -c 'echo sibling > {d}/other; echo changed > {f}' }}",
-            d = td.path().display(),
-            f = file.display()
-        ));
-        assert_eq!(
-            std::fs::read_to_string(td.path().join("other")).unwrap(),
-            "sibling\n",
-            "{}",
-            out.stderr
-        );
-        assert_eq!(out.status == 0, trusted, "{}", out.stderr);
-        let bytes = std::fs::read_to_string(&file).unwrap();
-        assert_eq!(bytes.contains("ORIGINAL"), !trusted);
-    }
 }

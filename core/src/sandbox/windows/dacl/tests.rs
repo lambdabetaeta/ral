@@ -13,6 +13,7 @@
 )]
 use super::acl::{AclKind, INHERITED_ACE_FLAG, OwnedSid, Security};
 use super::*;
+use std::fs;
 
 /// An uncancelled scope: every test here exercises the stamp itself, while
 /// the cancel path has its own test below.

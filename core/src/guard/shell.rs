@@ -195,7 +195,9 @@ impl Shell {
         if !self.local.audit.active() {
             return;
         }
-        for prefix in crate::capability::deputy_prefixes(&self.context.grants) {
+        for prefix in
+            crate::capability::deputy_prefixes(&self.context.grants, &self.context.resolver())
+        {
             let fields = BTreeMap::from([("prefix".to_string(), prefix.as_str().to_string())]);
             self.record_check(None, Check::new(Resource::Deputy, fields));
         }

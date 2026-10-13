@@ -153,6 +153,9 @@ ctrlc        = "3"
 # Path -> capability-name digest for the sandbox's persistent DACL stamps.
 sha2         = { workspace = true }
 windows-sys  = { workspace = true, features = [
+    # NtCreateFile: component-wise opens relative to a held parent directory.
+    "Wdk_Foundation",
+    "Wdk_Storage_FileSystem",
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Security_Authorization",

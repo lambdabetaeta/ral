@@ -24,7 +24,7 @@
 //! `surface` leaves the type only as a `String`, for rendering.
 
 use super::PathRules;
-use super::identity::{Deny, Polarity, path_within};
+use super::identity::{Polarity, path_within};
 use super::resolver::Resolver;
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
@@ -131,6 +131,13 @@ pub struct FrozenPath {
     real: String,
 }
 
+/// A path that holds no faithful `String` form, with the lossy one.
+struct Unicode {
+    lossy: FrozenPath,
+    surface: PathBuf,
+    real: PathBuf,
+}
+
 impl FrozenPath {
     /// Mint a prefix from a surface form: fold `path`, follow its symlinks,
     /// and wrap both forms.  The one disk consultation this type ever makes,
@@ -139,24 +146,57 @@ impl FrozenPath {
     /// freeze pass in `guard::freeze`.  Idempotent on a form already normal,
     /// such as the OS-sandbox renderer emits.
     pub fn from_surface(path: impl AsRef<Path>) -> Self {
-        let folded = super::lex::fold_dots(path.as_ref());
+        match Self::mint(path.as_ref()) {
+            Ok(frozen) | Err(Unicode { lossy: frozen, .. }) => frozen,
+        }
+    }
+
+    /// [`from_surface`](Self::from_surface) for a grant, an identity that is
+    /// kept for good: `Err` when the surface or the real path it follows is not
+    /// valid Unicode, since the lossy `String` form would then name another
+    /// object, a sibling holding U+FFFD, in its place.
+    ///
+    /// # Errors
+    /// The refusal to hold `path` as a grant, saying why.
+    pub fn freeze(path: impl AsRef<Path>) -> Result<Self, String> {
+        Self::mint(path.as_ref()).map_err(|Unicode { surface, real, .. }| {
+            format!(
+                "ral cannot hold '{}' as a grant: it resolves to '{}', which is not valid \
+                 Unicode; grant a path that is, or one that does not pass through it",
+                surface.display(),
+                real.display()
+            )
+        })
+    }
+
+    fn mint(path: &Path) -> Result<Self, Unicode> {
+        let folded = super::lex::fold_dots(path);
         // The root is the one path `realpath` must not be asked about.  It
         // answers with a *drive* on Windows — the process's own — so a
-        // ceiling frozen here covered one volume and denied every other,
-        // and the universal prefix stopped being universal the moment a
-        // session ran from a drive its data was not on.  Folded to zero
-        // components it matches everything, which is what naming the root
-        // in a grant has always meant.
+        // ceiling frozen here covered one volume and denied every other, and
+        // the universal prefix stopped being universal the moment a session
+        // ran from a drive its data was not on.  Folded to zero components it
+        // matches everything, which is what naming the root in a grant has
+        // always meant.
         if super::lex::is_bare_root(&folded.to_string_lossy()) {
-            return Self {
+            return Ok(Self {
                 surface: "/".into(),
                 real: "/".into(),
-            };
+            });
         }
         let real = super::canon::canonicalise_lenient(&folded);
-        Self {
+        let lossy = Self {
             surface: folded.to_string_lossy().into_owned(),
             real: real.to_string_lossy().into_owned(),
+        };
+        if folded.to_str().is_some() && real.to_str().is_some() {
+            Ok(lossy)
+        } else {
+            Err(Unicode {
+                lossy,
+                surface: folded,
+                real,
+            })
         }
     }
 
@@ -213,7 +253,7 @@ impl FrozenPath {
         clippy::disallowed_methods,
         reason = "lexical Path::new over a surface already in normal form: no I/O behind it"
     )]
-    fn surface_path(&self) -> &Path {
+    pub(super) fn surface_path(&self) -> &Path {
         Path::new(&self.surface)
     }
 
@@ -243,33 +283,39 @@ impl FrozenPath {
         path_within(path, self.real_path(), P::IDENTITY)
     }
 
-    /// Depth in components of the alias-folded real form, as
-    /// [`RealPath::depth`](super::RealPath::depth) counts it.
-    pub(crate) fn depth(&self) -> usize {
-        super::identity::identity_depth(&self.real, PathRules::HOST)
+    /// `self` unless it is the root, which is never re-resolved:
+    /// `Resolver::resolve` anchors a driveless path to a cwd, which on Windows
+    /// would narrow the universal root to one drive.
+    fn off_root(&self) -> Option<&Self> {
+        (!self.is_root()).then_some(self)
     }
 
     /// This prefix frozen afresh from its surface spelling against
     /// `resolver`: unchanged but for a re-resolution of its symlinks.
     pub(crate) fn refreeze(&self, resolver: &Resolver) -> Self {
-        // `Resolver::resolve` anchors a driveless path to a cwd, which on
-        // Windows would narrow the universal root to one drive.
-        if super::lex::is_bare_root(&self.surface) {
-            return Self::root();
-        }
-        Self::from_surface(resolver.resolve(&self.surface).as_path())
+        self.off_root().map_or_else(Self::root, |p| {
+            Self::from_surface(resolver.resolve(&p.surface).as_path())
+        })
     }
 
-    /// True iff the in-process exec guard would let this deny decide everything the allow
-    /// `other` covers, so composition may drop the allow: the two real
-    /// forms contain each other under the deny's identity.
-    /// Mutual containment is one rank, where the guard's tie denies.
-    ///
-    /// Not byte equality: containment folds macOS firmlink aliases (`/tmp` ↔
-    /// `/private/tmp`) and every spelling some filesystem takes for a name,
-    /// so the derived `Eq`/`Ord` cannot answer this.
-    pub(crate) fn evicts(&self, other: &Self) -> bool {
-        self.contains::<Deny>(other.real_path()) && other.contains::<Deny>(self.real_path())
+    /// Whether this is the universal prefix, [`root`](Self::root).
+    pub fn is_root(&self) -> bool {
+        super::lex::is_bare_root(&self.surface)
+    }
+
+    /// Whether this prefix holds every path: it is the root, or a spelling
+    /// whose frozen real form is.
+    pub fn is_universal(&self) -> bool {
+        self.contains::<super::Allow>(Self::root().real_path())
+    }
+
+    /// The real form of this prefix's surface against the live disk, for an
+    /// exclusion, which names whatever its spelling reaches now.
+    pub(super) fn live_real(&self) -> PathBuf {
+        self.off_root().map_or_else(
+            || self.real_path().to_path_buf(),
+            |p| super::canon::canonicalise_lenient(p.surface_path()),
+        )
     }
 
     /// Consume into the owned surface `String`, for the wire and render

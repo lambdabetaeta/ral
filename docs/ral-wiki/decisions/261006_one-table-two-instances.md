@@ -2,10 +2,16 @@
 status: active
 generated_at_commit: 90479dea
 verified_at_commit: 446e3123
-anchors: [Table, Scope, ExecScope, Subject, Region, ExecKey, ExecRules, live, respelled, for_kernel, precedence, region, rules, refreeze, contains, own, meet_insert]
+anchors: [Table, Scope, ExecScope, Subject, Region, ExecKey, ExecRules, live, for_kernel, region, rules, refreeze, contains, own]
 ---
 
 # One table, two instances
+
+Partly superseded by [[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]]:
+the precedence and binary-verdict parts (rank, `Verdict`, `meet_insert`,
+`Carrier` as a ranked scope, `respelled` as the deepest fold, widening by
+`evicts`) are replaced by evidence and exclusion-wins. The shared table, object
+identity and the dynamic stack stand.
 
 **The fs and exec dimensions of a grant are one structure, `Table<K: Scope>`,
 whose meet is defined by the pointwise law `⟦a ∧ b⟧ = ⟦a⟧ ∧ ⟦b⟧`; the fs

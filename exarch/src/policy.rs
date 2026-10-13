@@ -1,11 +1,11 @@
 //! Capability composition for exarch.
 //!
 //! ```text
-//!   ceiling = base ∨ extend_base?
-//!   stack   = [ceiling, restrict₁, restrict₂, ..., deny(restricts)?, deny(credentials)?]
+//!   ceiling = base ◁ extend?
+//!   stack   = [ceiling, restrict₁, restrict₂, ..., deny(restricts)?, deny(credentials)?, self]
 //! ```
 //!
-//! One optional widening lifts the ceiling, in its own layer; every other
+//! One optional extension shapes the ceiling, in its own layer; every other
 //! composition is the [`GrantStack`] itself — each `--restrict` file, and
 //! each deny carve-out, is pushed as its own layer rather than folded ahead
 //! of time, so the stack's own per-check fold is the one meet that ever
@@ -14,11 +14,14 @@
 mod base;
 mod load;
 
-use base::{resolve_base, root_fs_policy};
-use load::{absolute_in, load_capabilities_ral};
-use ral_core::capability::{Capabilities, GrantStack};
+use base::resolve_base;
+use load::{absolute_in, load_capabilities_ral, load_fragment_ral};
+use ral_core::capability::{
+    Axis, Capabilities, Evidence, ExecGrant, ExecKey, FsPolicy, GrantStack,
+};
 use ral_core::guard::freeze::{FreezeCtx, Place};
 use ral_core::host;
+use ral_core::path::FrozenPath;
 use ral_core::terminal::TerminalState;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -28,16 +31,19 @@ use std::path::{Path, PathBuf};
 ///
 /// `base_name` selects a bake-in profile from `base`.  Every profile freezes
 /// against the session's `HOME` and working directory as it loads, so the
-/// widening and every layer push run on already-resolved bundles.  Each restrict
+/// extension and every layer push run on already-resolved bundles.  Each restrict
 /// file's own path joins a deny layer, putting the bytes that shape the
-/// agent's permissions beyond its reach; the extend-base file does not,
-/// since widening authority is a trust-source concern rather than a
+/// agent's permissions beyond its reach; the extend file does not,
+/// since extending authority is a trust-source concern rather than a
 /// containment one.  On the same footing, and for the same reason, the
 /// stack denies [`provider::credential_files`](crate::provider::credential_files)
-/// in its own layer wherever some layer holds an `fs` opinion.
+/// in its own layer wherever some layer's `fs` restricts.  Last in every
+/// session, `dangerous` included, a layer excludes exarch's own binary from
+/// exec, so the agent cannot start exarch.
 ///
 /// # Errors
-/// Unknown `base_name`, or a profile that fails to load.
+/// Unknown `base_name`, a profile that fails to load, or an exarch binary
+/// that cannot be named.
 #[allow(
     clippy::disallowed_methods,
     reason = "host-env: capability profiles freeze against the launching user's real home; no shell overlay exists yet"
@@ -45,7 +51,7 @@ use std::path::{Path, PathBuf};
 pub fn for_invocation(
     cwd: &str,
     base_name: &str,
-    extend_base: Option<&Path>,
+    extension: Option<&Path>,
     restrict_files: &[PathBuf],
 ) -> Result<(GrantStack, Vec<PathBuf>), String> {
     // The loader evaluates ral source, so it needs a Shell.  This one is
@@ -59,13 +65,13 @@ pub fn for_invocation(
     };
 
     let mut ceiling: Capabilities = resolve_base(base_name, &ctx)?;
-    if let Some(path) = extend_base {
+    if let Some(path) = extension {
         let abs = absolute_in(cwd, path);
-        ceiling = ceiling.widen(load_capabilities_ral(
+        ceiling = ceiling.extend(load_fragment_ral(
             &ral_core::types::Mooring::adrift(),
             &mut load_shell,
             &abs,
-            "--extend-base",
+            "--extend",
             &ctx,
         )?);
     }
@@ -90,14 +96,16 @@ pub fn for_invocation(
 
     // Our own credentials are the authority a grant is *made of*, never
     // something it hands out — so they are carved out in their own layer,
-    // where no profile can forget them and no `--extend-base` can widen them
-    // back.  Only where some layer holds an fs opinion: `dangerous`
-    // attenuates nothing by contract, and installing one there to hold these
-    // denies would silently confine every session that asked not to be,
-    // against an agent that can read the same bytes a hundred other ways.
-    if stack.iter().any(|c| c.fs.is_some()) {
+    // where no profile can forget them and no `--extend` can widen them
+    // back.  Only where some layer's fs restricts: an unrestricted session
+    // asked not to be confined, and installing a layer there to hold these
+    // denies would confine it, against an agent that can read the same bytes
+    // a hundred other ways.
+    if !stack.fs_is_top() {
         stack.push(deny_layer(&crate::provider::credential_files(), &ctx)?);
     }
+
+    stack.push(self_layer()?);
 
     Ok((stack, restricts))
 }
@@ -134,27 +142,47 @@ pub fn base_layer(base_name: &str, cwd: &Path) -> Result<Capabilities, String> {
     resolve_base(base_name, &ctx)
 }
 
-/// A deny layer carving `paths` out of a fresh, otherwise-unrestricted fs
-/// policy — a constructor, not a mutator, since composition is now the
-/// stack: each caller pushes the layer this returns rather than folding it
-/// into one already on the stack.
+/// A deny layer carving `paths` out of an otherwise-unrestricted fs policy:
+/// `t ⊕ (f if X)`.  A constructor, not a mutator, since composition is the
+/// stack: each caller pushes the layer this returns.
 ///
 /// Only the lexical form is pushed: the in-process check in
 /// `core/src/guard/enforce.rs` and the OS sandbox profiles each expand a
 /// deny entry to its canonical and macOS-firmlink variants themselves.
 fn deny_layer(paths: &[PathBuf], ctx: &FreezeCtx) -> Result<Capabilities, String> {
-    let frozen: BTreeSet<_> = paths
+    let deny_paths = paths
         .iter()
         .filter_map(|p| {
             let place = Place::Absolute(p.to_string_lossy().into_owned());
             ctx.place(&place).transpose()
         })
-        .collect::<Result<_, _>>()
-        .map_err(|e| e.message)?;
-    let mut fs = root_fs_policy();
-    fs.deny_paths = frozen.into_iter().collect();
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map_err(|e| e.message)?
+        .into_iter()
+        .collect();
     Ok(Capabilities {
-        fs: Some(fs),
+        fs: FsPolicy {
+            deny_paths,
+            ..FsPolicy::default()
+        }
+        .join_top(),
+        ..Capabilities::default()
+    })
+}
+
+/// The layer that keeps the agent from starting exarch: an exec exclusion of
+/// the path exarch's own binary was pinned from at boot, which, like every
+/// exclusion, follows that name afresh at each judgment.  Exec only: an fs
+/// exclusion would refuse every bundled tool.  Unpinned, it names nothing
+/// rather than guess.
+pub(crate) fn self_layer() -> Result<Capabilities, String> {
+    let exe = ral_core::sandbox::pinned_arg0().ok_or(
+        "exarch could not pin its own binary at startup (is it missing or unreadable?), \
+         so cannot exclude it from exec",
+    )?;
+    let exarch = ExecKey::Path(FrozenPath::freeze(exe)?);
+    Ok(Capabilities {
+        exec: ExecGrant::from_iter([(exarch, Evidence::DENY)]).join_top(),
         ..Capabilities::default()
     })
 }

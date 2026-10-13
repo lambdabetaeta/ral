@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 0dc4a920
-verified_at_date: 2026-10-09
-anchors: [check_exec, Admitted, admit, Flag, Denial, refused, region, Region, Table, GrantStack, SandboxProjection, Widen, sandboxed_command, build_launch, projection_enforceable]
+verified_at_commit: 002c654a
+verified_at_date: 2026-10-13
+anchors: [check_exec, Admitted, admit, Flag, ExecDenial, FsRefusal, Withheld, refused, region, Table, Evidence, GrantStack, SandboxProjection, Fragment, sandboxed_command, build_launch, projection_enforceable]
 ---
 
 # Capability enforcement: one model, two enforcers
@@ -37,9 +37,9 @@ not a typestate ([[decisions/260605_witness-collapse|witness-collapse]]).
 
 **Every in-process yes or no is a `guard::check_*(&Context, …)`.** Each check
 in `guard/enforce.rs` is a free function over a borrowed `Context`. It folds
-the whole dynamic `GrantStack` (`ctx.grants`) before it answers, so a verdict
+the whole dynamic `GrantStack` (`ctx.grants`) before it answers, so an answer
 reflects every frame on the stack, not just the top one. The exec and fs checks
-return a typed `Denial`, and `Shell::refused` (`guard/shell.rs`) records it on
+return a typed refusal (`ExecDenial`, `FsRefusal`), and `Shell::refused` (`guard/shell.rs`) records it on
 the trail. The doors are:
 
 - `check_exec`, which returns the `Admitted` token every launch needs. Only
@@ -54,39 +54,54 @@ the trail. The doors are:
 
 ## The fold keeps the layers apart
 
-**A verdict combines what each layer says about *this* access. It never
-flattens the layers into one frame.** A `Capabilities` is one layer, and the
-`GrantStack` is their meet. Each verdict (`capability::exec::rules`,
-`capability::fs::region`, `GrantStack::permits`) walks the stack.
+**A judgment combines what each layer says about *this* access. It never
+flattens the layers into one frame.** A `Capabilities` is a layer, and the
+`GrantStack` is their meet. Every judgment is evidence, a pair of Booleans
+(positive, negative), and `↓` closes it to permit or refuse once, at the
+boundary that enforces ([[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]]).
+The stack is an ordered elaboration of layers, then the pointwise meet: a
+layer reads its own prefixes and the run places of the exec meet over itself
+and the layers beneath it, so pushing a layer appends a conjunct and changes
+none beneath it.
 
 There is no `Capabilities::meet`, because an authored `ExecGrant` is not closed
 under intersection: a bare key means whatever file the host `PATH` finds at
-check time ([[decisions/260906_object-not-name|object-not-name]]). So the fold
+run time ([[decisions/260906_object-not-name|object-not-name]]). So the fold
 compiles first, then meets:
 
 - `rules` compiles every layer into an `ExecRules` table for each question, and
-  meets the tables.
-- `region` re-freezes every layer's prefixes for one operation into a `Region`,
-  and meets those.
+  meets the tables. `every` compiles to `ExecScope::Any`.
+- `region` folds every layer's prefixes for one operation into a
+  `Table<FsScope>` and meets those. Allowances stay as frozen at decode; only
+  deny paths are re-frozen. A read takes each layer's read and write prefixes
+  (writing reads) and, through `GrantStack::read`, its run places, then joins
+  `floor()`.
 
 Both are a `Table`, whose meet is the pointwise law `⟦a ∧ b⟧ = ⟦a⟧ ∧ ⟦b⟧`
 ([[design/authority-tables|authority-tables]]).
-[[related/access-control-algebra|access-control-algebra]] reads restrict-as-meet
-and extend-base-as-widen, both deny-overriding, against the literature.
+[[related/access-control-algebra|access-control-algebra]] reads the design
+against Bruns and Huth's PBel.
 
-**One place means a union, and it has its own rule.** `Widen` serves exarch's
-`--extend-base`, which widens a single base layer. There, silence lifts no
-veto.
+**Extension happens once, before the first push.** `Capabilities::extend` takes
+a `Fragment`, the loader's result for exarch's `--extend` file, in which an
+omitted axis states nothing; in a policy an omitted axis is `t`. A `Fragment`
+can never be pushed, so extension cannot follow restriction.
 
 Three rules govern how layers compose:
 
-- A dimension a layer omits inherits the ambient authority.
+- A dimension a layer omits restricts nothing.
 - A dimension a layer states can only narrow.
-- A deny is anti-monotonic. A later layer can add denies, but never reopens a
-  denied region ([[design/scoping|dynamic frames]]).
+- An exclusion beats every allowance. A later layer can add exclusions, but
+  never reopens an excluded region ([[design/scoping|dynamic frames]]).
 
-Exec has two verdicts (`Verdict`: Allow / Deny), over a target and never its arguments. The bundled coreutils
-and the structured primitives go through the same chokepoint
+**Activation is denotational.** A layer restricts exactly where some axis does
+not denote `t` (`is_top`): `every` with no exclusion, or an fs that writes the
+root and excludes nothing, activates nothing. Launch hardening, the projection
+and exarch's credential layer all read `GrantStack::is_restrictive`.
+
+Exec is judged over a target and never its arguments, in two parts: the table
+(`ExecDenial::Run`) and what running reads (`ExecDenial::Read`). The bundled
+coreutils and the structured primitives go through the same chokepoint
 ([[internals/builtins-registry|builtins]]). That closes the bypass, and lets ral
 stay a [[invariants/single-binary|single binary]].
 
@@ -109,21 +124,27 @@ process does on its own.**
   network capability SIDs: a LowBox token without them cannot open a socket.
 
 **For the filesystem, guard and sandbox cannot disagree, by construction.**
-Both read one fold (`capability/fs.rs`). `region` meets each layer's `Region`
+Both read one fold (`capability/fs.rs`). `region` meets each layer's table
 for the operation: the allows meet and the `deny_paths` join. A read then joins
 `floor()`, the platform's system paths, after the meet, so no `read` narrows the
 floor and only a `deny` removes part of it. No backend carries a system set of
 its own. So the conservatism invariant needs no differential test. The only
 difference is *when* the fold runs:
 
-- the guard folds afresh on every check, and asks `verdict`, then `respelled`
-  on a refusal;
+- the guard folds afresh on every check, and asks `withheld`, which cites an
+  exclusion that applies or a missing allowance;
 - the sandbox folds once at spawn, when it writes the profile, and renders
-  `live()` and `denies()` as surface strings.
+  the read region (`read: Vec<FsScope>`, run places and live support among
+  them), the write prefixes and the exclusions. Every allowance renders as its
+  frozen real path and as nothing else; only exclusions are rendered from their
+  re-resolved names. A backend refuses a launch whose frozen allowance has
+  been redirected rather than follow it.
 
-**The projection never carries an allow beneath a deny (`live()`).** Under
-deny-wins such an allow is dead. It must never reach a backend whose primitive
-puts explicit allows before inherited denies, as a Windows ACL does.
+**The projection never carries an allow beneath an exclusion (`live()`).** Such
+an allow is dead. It must never reach a backend whose primitive puts explicit
+allows before inherited denies, as a Windows ACL does. A launch whose fs region
+holds the universal prefix (`every` path) is refused on Windows before anything
+is stamped.
 
 ## Confinement is per command
 

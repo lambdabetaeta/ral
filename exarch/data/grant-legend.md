@@ -6,4 +6,6 @@ Notation:
 - `exec dirs:` lists path prefixes under which any executable in that directory is admitted.
 - `(none)` means the dimension is empty.
 - `inherit` means no narrowing at this layer.
-- `exec deny:` and `fs deny:` are absolute vetoes — they override admissions elsewhere in the same map.
+- `every` means every program, less the exclusions below; allowances listed beside it add no running but still make what they name readable.
+- `exec deny:` and `fs deny:` are exclusions: they win over every allowance, however specific, in this map and in every enclosing grant. In exarch, an exclusion of exarch's own binary is always present: you cannot start exarch as a process.
+- Whatever the grant lets run by path, directory or name, or lets be written, may be read.

@@ -556,9 +556,8 @@ impl ExecScratch {
 
 /// `body` under an exec grant allowing `<bin>` and `/bin` and denying
 /// `<bin>/<deny>` (a directory if `deny` ends in `/`),
-/// reading the scratch directory and writing `<bin>`.  The write is named at
-/// the admit, so the body may author there: under an unrestricted `fs` the
-/// deny would freeze the admitted set (`261006_a-veto-freezes-what-a-write-covers`).
+/// reading the scratch directory and writing `<bin>`, so the body may author
+/// there.
 #[cfg(unix)]
 fn under_exec_deny(bin: &std::path::Path, deny: &str, body: &str) -> common::Output {
     let (root, b) = (bin.parent().unwrap().display(), bin.display());

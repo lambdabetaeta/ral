@@ -1,229 +1,455 @@
 # Authority is a table of scoped rules
 
 **Each dimension of a grant that ranges over places, fs and exec, denotes a
-function from subjects to verdicts, and is represented by one structure: a
-finite table of scoped rules, read as "the most specific speaker decides,
-ties meet, silence denies".** A layer is a table, a stack is the meet of its
-layers' tables, and the meet is *defined* by the pointwise law
-`⟦a ∧ b⟧ = ⟦a⟧ ∧ ⟦b⟧`. The fs region and the exec rules are two instances
-of it (`core/src/capability/table.rs`); everything that differs between them
-is a choice of scope, subject and rank. Why the meet is a stack fold and not a
-flattened grant is [[decisions/260906_object-not-name|object-not-name]]; why
-the two dimensions became one structure is
-[[decisions/261006_one-table-two-instances|one-table-two-instances]].
+function from subjects to Belnap evidence, and is represented by one
+structure: a finite table of scoped rules, read as "an exclusion beats every
+allowance; silence permits nothing".** A layer is a table, a stack is the meet
+of its layers' tables, and the meet is *defined* by the pointwise law
+`ev(a ∧ b, s) = ev(a, s) ∧ ev(b, s)`. The fs region and the exec rules are two
+instances of it (`core/src/capability/table.rs`); everything that differs
+between them is a choice of scope and subject. Authority is a policy in the
+sense of Bruns and Huth's PBel, in a small fragment of it
+([[related/access-control-algebra|access-control-algebra]]). Why the meet is a
+stack fold and not a flattened grant is
+[[decisions/260906_object-not-name|object-not-name]]; why the two dimensions
+became one structure is
+[[decisions/261006_one-table-two-instances|one-table-two-instances]]; why
+evidence, and what it cost, is
+[[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]].
 
 ## The structure
 
-- **Verdicts.** `Deny < Allow` (`Verdict`, `core/src/capability/lattice.rs`).
-  Deny is the bottom.
+- **Evidence.** For a fixed request, `Evidence { positive, negative }` is a pair
+  of Booleans, Belnap's FOUR as a product bilattice: `(0,0)` Neither, `(1,0)`
+  Allow, `(0,1)` Deny, `(1,1)` Both. Neither is not an authored deny, and Both
+  is not malformed: allowing a directory and excluding a subtree deliberately
+  produces Both inside the subtree.
+- **The decision.** Enforcement is PBel's wrapper `↓`: permit exactly when
+  `positive ∧ ¬negative`, applied once, at the boundary that enforces
+  (`Evidence::permits`). Nothing below it closes a gap or a conflict.
+- **Requests, not strings.** Policies are functions of resolved requests: an fs
+  request is a resolved path with an operation; running a host file is a resolved
+  file (and a read of it); running a bundled tool is its name plus a read of
+  ral's binary. A bare name is resolved before its meaning meets another layer's
+  directories. Belnap changes how evidence combines, not what a name denotes: no
+  case folding, canonicalisation or containment code lives outside `path/`.
 - **Subjects** `s ∈ S`: what a table judges. A path for fs; for exec a
-  `Subject` — a file by its real path, a bundled tool by name, or `Under(d)`,
-  the inside of a directory.
+  `Subject`: `Any`, a bundled tool by name, a file by its real path, or
+  `Under(d)`, the inside of a directory.
 - **Scopes** `k ∈ K`: where a rule applies. A table `T` is a finite map
-  `K → Verdict`; a scope written twice meets (`meet_insert`), so a table never
-  holds two opinions at one key.
+  `K → Evidence`, private, filled only by joining (`join_insert`): a scope
+  written twice joins, so a scope holding both an allowance and an exclusion is
+  Both, and no table holds Neither.
 - **Polarity picks identity.** A rule *speaks* to `s` when its scope holds `s`
-  as the rule's polarity reads names: an allow under `⊑S`, the
-  name as stored; a deny under `⊑C`, every spelling some filesystem takes for
+  as the rule's polarity reads names: positive evidence under `⊑S`, the name as
+  stored; negative evidence under `⊑C`, every spelling some filesystem takes for
   it (`collision_key` per component). `⊑S ⊆ ⊑C`, both transitive, both
   firmlink-aware. The table names `Allow` or `Deny`, never an `Identity`;
   `core/src/path/` alone maps one to the other
   ([[invariants/grants-judge-objects|grants-judge-objects]]).
-- **Rank.** `rank(k, v)` says how specific a rule is; the greater decides.
 - **Own subject.** `k̂ = k.own()` is the subject a rule at `k` is itself judged
-  at: a prefix's real path, a directory's inside, a file itself, a tool's
-  name.
+  at: a prefix's real path, a directory's inside, a file itself, a tool's name.
 
 **Denotation.**
 
 ```
-⟦T⟧(s) = ⋀ { v : (k, v) ∈ T speaks to s, rank(k, v) maximal among speakers }
-⟦T⟧(s) = Deny   when nothing speaks
+supports(s)  = ∃ (k, e) ∈ T. e.positive ∧ k holds⟨Allow⟩ s
+excludes(s)  = ∃ (k, e) ∈ T. e.negative ∧ k holds⟨Deny⟩ s
+ev(T, s)     = (supports(s), excludes(s))
 ```
 
-One function computes it, `Table::verdict` (`most_specific` over `speaking`).
-The guard asks it, the projection renders what it admits, and no other code
-makes a verdict.
+There is no specificity: a rule's depth, kind and spelling decide nothing, only
+whether it speaks. One method answers a refusal, `Table::withheld`, which
+returns `None` exactly when `s` has positive evidence alone, otherwise
+`Withheld::Excluded { scope, respelled }` or `Withheld::MissingAllowance`. The
+guard asks it, the projection renders what it admits, and no other code makes a
+decision.
 
-## The meet: denies join, allows meet
+**The witness.** `withheld` looks only at exclusions that hold the subject, so
+it never cites one that does not exclude; among them it prefers one that holds
+the subject as stored, in stable key order. The choice is deterministic, not by
+depth. Its one guarantee is that the cited exclusion applies.
+
+**A missing allowance is never an exclusion.** An absent positive candidate
+leaves Neither, which refuses under `↓` but is not stored as negative evidence;
+an empty written table is supplied and denotes ⊥ everywhere, and a later
+fragment can still supply its allowance.
+
+## The meet: exclusions join, allowances meet
 
 ```
-a ∧ b = { (k, Deny) : (k, Deny) ∈ a ∪ b }
-      ∪ { (k, m)    : (k, v) ∈ a ∪ b, v ≠ Deny, m = ⟦a⟧(k̂) ∧ ⟦b⟧(k̂), m ≠ Deny }
+a ∧ b = { (k, Deny)  : k ∈ denies(a) ∪ denies(b) }
+      ∪ { (k, Allow) : k ∈ positives(a) ∪ positives(b),
+                       a.supports(k̂) ∧ b.supports(k̂) }
 ```
 
-Every deny either side wrote is kept; an allow scope survives at its own
-subject's met verdict, where that is not Deny. **A key met to Deny that no
-layer wrote as a deny is left absent.**
-
-**Why a default may not be written down.** The obvious pointwise
-representation stores, at every key of either side, both sides' verdicts met.
-That writes Deny at a key one side never mentioned: a *default* recorded as an
-*authored* deny. Under `⊑S` the two are indistinguishable. Under `⊑C` they are
-not, because a written deny holds every spelling of its name. On a byte-exact
-host take
+Every exclusion either side wrote is kept; an allowance survives at its own
+subject where *both* sides support it. **No default is written as an
+exclusion.** The obvious pointwise representation stores, at every key of
+either side, both sides' evidence met, which writes Deny at a key one side
+never mentioned: a *default* recorded as an *authored* exclusion. Under `⊑S`
+the two are indistinguishable; under `⊑C` they are not, because a written
+exclusion holds every spelling of its name. On a byte-exact host take
 
 ```
 a = { allow /a/B }      b = { allow /a/B, allow /a/b }
 ```
 
 Both layers allow `/a/B/x`. The pointwise table holds `/a/B ↦ Allow` and
-`/a/b ↦ Deny`; at `/a/B/x` the allow speaks by `⊑S`, the manufactured deny by
-`⊑C`, at one rank, and the tie denies. The kernel would render the same key,
-and Seatbelt, matching caselessly, would refuse a child what the guard
-admits. The meet is where the default is manufactured, so the meet is where it
-is stopped (`the_meet_writes_no_default_as_a_deny`;
+`/a/b ↦ Deny`; at `/a/B/x` the manufactured deny holds by `⊑C` and the subject
+becomes Both. The kernel would render the same key, and Seatbelt, matching
+caselessly, would refuse a child what the guard admits. The meet is where the
+default is manufactured, so the meet is where it is stopped
+(`the_meet_writes_no_default_as_a_deny`;
 `ral/tests/capabilities.rs::a_stacked_one_sided_allow_denies_no_other_spelling`).
 
-**The law.** For every subject `s`, `⟦a ∧ b⟧(s) = ⟦a⟧(s) ∧ ⟦b⟧(s)`. It holds
-of any scope satisfying five conditions, which both instances meet:
+**The law.** For every subject `s`, `ev(a ∧ b, s) = ev(a, s) ∧ ev(b, s)`,
+Neither and Both included. Agreement only after `↓` is too weak. It holds of
+any scope set satisfying three obligations, which the implementation documents
+and both instances meet:
 
-- **(P) polarity** — `holds⟨Allow⟩ ⊆ holds⟨Deny⟩`;
-- **(S) self** — `k` holds `k̂` under Allow;
-- **(T) transitivity** — if `k` holds `k̂′` and `k′` holds `s`, `k` holds `s`,
-  under Allow when both did, else under Deny;
-- **(R) locality** — if allow `k` and deny `d` both speak to `s` and
-  `rank(k) > rank(d)`, then `d` holds `k̂`: a more specific scope at a subject
-  lies within every less specific one there;
-- **(C) chain** — the allow scopes speaking to one subject are nested, the
-  inner one of rank at least the outer's.
+- **(1) self**: every positive scope holds its own subject;
+- **(2) nesting**: two positive scopes with a common subject are nested;
+- **(3) containment**: if `a` holds `own(k)` and `k` holds `s`, then `a` holds
+  `s`.
+
+Prefixes, run places, tools and `Any` satisfy them; `Name` is negative only.
+Two scopes have one polarity by construction, not by masking: compilation
+builds a `Name` veto only from negative evidence and `Any` only from the
+`every` flag, which has no negative form; the meet re-inserts each from
+`denies()` or `positives()` alone, and `Extend` debug-asserts it. A future
+positive scope that does not nest needs an explicit intersection first.
 
 *Proof sketch.* Fix `s`.
 
-- *A side denies, say `a`.* Either (i) a deny `d` is among `a`'s top speakers
-  at `s`, or (ii) nothing in `a` speaks (top allows alone cannot meet to
-  Deny). (i) `d ∈ a ∧ b`, since denies join. An allow `k` of the meet that
-  outranks `d` at `s` has `⟦a⟧(k̂) ≠ Deny`; by (R) `d` speaks at `k̂`, so some
-  `a`-allow `k″` speaks at `k̂` above `d`, and by (T) `k″` speaks at `s` above
-  `d`, contradicting `d`'s place at the top. Nothing outranks `d`; a tie
-  meets to Deny. (ii) An allow `k` of the meet speaking at `s` needs some
-  `a`-allow at `k̂`, which by (T) speaks at `s`. So the meet denies.
-- *Both allow.* By (C) the top speakers of both sides form a chain; let `k`
-  be the innermost. Everything that speaks at `k̂` speaks at `s` (T), and the
-  top speakers at `s` of each side hold `k̂` (C), so `⟦a⟧(k̂) = ⟦a⟧(s)` and
-  `⟦b⟧(k̂) = ⟦b⟧(s)`: `k` survives at `⟦a⟧(s) ∧ ⟦b⟧(s)`. Every deny of the meet
-  speaking at `s` sat below its own side's top, hence below `k`; an allow of
-  the meet outranking `k` would have outranked its own side's top. ∎
+- *Negative bit.* The meet keeps every exclusion, so it excludes `s` exactly
+  when either side does: `n = n_a ∨ n_b`.
+- *Positive bit, ⇒.* A positive scope `k` of the meet holds `s` and both sides
+  support `k̂`: some positive `j` of `a` holds `k̂`, and by (3) holds `s`. So
+  `a` supports `s`, and `b` likewise.
+- *Positive bit, ⇐.* Let `j` of `a` and `j′` of `b` both hold `s`. By (2) they
+  are nested, say `j` inside `j′`. Then `j′` holds `j̃ = own(j)` (the nesting),
+  so `b` supports `j̃`; `a` supports `j̃` since `j` holds it (1). So `j`
+  survives in the meet and holds `s`. ∎
 
-For fs, (R) is vacuous — no allow outranks a deny — and (C) is the nesting of
-prefixes along one path. For exec, (R) says a deeper directory, a file, or a
-carrier lies within the shallower directory that denies around it, and (C)
-says a file rule sits inside the directories that contain it.
+Hence the meet is commutative, associative and idempotent *structurally*:
+`a ∧ a = a`. Pinned by property tests over a universe of directories, files,
+tools, vetoes and `Any` holding case pairs and an NFC/NFD pair, so a name one
+filesystem keeps apart and another merges (`laws` in `capability/table.rs`).
 
-**The lattice laws** hold on the denotation outright and on the
-representation up to normalisation: `a ∧ b = b ∧ a`, `(a ∧ b) ∧ c =
-a ∧ (b ∧ c)`, and `(a ∧ a) ∧ (a ∧ a) = a ∧ a` — a table as written may hold an
-allow its own rules outrank, which a meet leaves out, so `a ∧ a` is `a`
-normalised. Pinned by property tests over a universe of directories, files,
-tools and vetoes holding case pairs and an NFC/NFD pair, so a name one
-filesystem keeps apart and another merges:
-`the_meet_of_two_tables_judges_as_the_meet_of_their_verdicts` and
-`the_meet_is_idempotent_commutative_and_associative` (`capability/table.rs`),
-and for the kernel rendering
-`the_kernel_rules_judge_as_the_table_and_its_carriers` (`capability/exec.rs`).
-The pointwise representation, by contrast, broke the law on 3,869 of 20,000
-random pairs of a model.
+## Laws
+
+These hold of denotations; representations may hold redundant scopes. The
+scalar and table laws (1 to 6) are stated of evidence and tables, never of
+stacks.
+
+1. `⊕` and `∧` are associative, commutative and idempotent on evidence, with
+   identities ⊥ and `t`.
+2. `↓(P ∧ Q) = ↓P ∧ ↓Q`.
+3. A negative bit, once present, survives `⊕` and `∧`. This is why no
+   composition followed by `↓` tells Both from Deny.
+4. **Extension invariant.** For base `B`, fragment `F` and request `s` on any
+   axis: if `F` has no negative evidence at `s`, `↓B(s)` implies
+   `↓(B ◁ F)(s)`; if `F` has negative evidence at `s`, `↓(B ◁ F)(s)` refuses;
+   and `↓(B ◁ F)(s)` implies `↓B(s)` or positive evidence of `F` at `s`. `F`'s
+   evidence includes the reads of what its run allowances name. It is a law of
+   *policy denotations*: it holds of the guard and of the policy part of every
+   kernel table, not of a kernel table as a whole, since support depends on the
+   launch and on which files are live (an allowance for a script can admit its
+   interpreter, and excluding the script can withdraw it). Nor is it a law of
+   launches: excluding a linker or a carrier refuses programs the fragment says
+   nothing about.
+5. **A table's evidence is the pointwise operation of its operands'**, Neither
+   and Both included: `ev(P ∧ Q, s) = ev(P, s) ∧ ev(Q, s)`, likewise for `⊕`.
+   Agreement only after `↓` is too weak.
+6. **Evaluation never stores ⊥ as negative evidence.** Mapping an empty
+   fragment to an explicit denial would prevent a later fragment from supplying
+   its allowance.
+7. **Running reads**: `↓run(s) = ↓exec(s) ∧ ↓read(s)` for a host file, where
+   `read` includes the write prefixes and the run places each layer looks down
+   to; for a bundled tool `t`, `↓run(t) = ↓exec(t) ∧ ¬read.negative(ral)`. ral's
+   binary is a host file under the first equation, like any other.
+8. **Writing reads**: `↓write(s)` implies `↓read(s)`, with no check, since every
+   layer that supplies the write pairs it into its own reads.
+9. **Redundant scopes denote nothing extra.** A layer's denotation includes its
+   run places: `every` and `every ⊕ (t if run s)` run the same programs but read
+   differently.
+10. **Restriction attenuates**: for every stack `S`, layer `R` and request `s`,
+    on every axis and for running and reading alike, `↓(S ∧ R)(s)` implies
+    `↓S(s)`. Pairing looks down the stack so that this holds: a pushed layer
+    adds a conjunct and changes none beneath it.
+
+Laws 4, 7, 8 and 10 are why roles-as-types, writing reads, verb `Join` and
+looking-down pairing exist; several departures of the old implementation broke
+law 4
+([[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]]).
+
+## Why FOUR, net, and verbs
+
+- **Why FOUR is kept.** Within ral's fragment (`⊕`, `∧`, `↓`) no composition
+  followed by `↓` tells Both from Deny, since a negative bit survives both
+  operators. The carrier stays FOUR because PBel's other operators do tell them
+  apart (`¬⊤ = ⊤` but `¬f = t`; `⊤ ⊗ t = t` but `f ⊗ t = ⊥`), and offering one
+  later must not change the representation. So `[⊤ ↦ f]` is never applied below
+  the enforcement boundary, and every law is stated of evidence, Both included.
+- **Net is a decision, not evidence.** `` `offline `` stands for every value with
+  its negative bit set, so `t ⊕ Offline` (⊤) and `Offline` itself (f) share one
+  representation. This is the one place below enforcement where ⊤ and f are
+  identified, sound only because no operator offered on net tells them apart; if
+  one is ever offered, net becomes an evidence pair like the other axes. An
+  omitted `net` is `t`; restriction is unchanged.
+- **Verbs are sets of positive evidence.** `editor` and `shell` are each a set of
+  verbs: a listed verb is positive evidence, an unlisted one is Neither, never
+  Deny. `⊕` is union and `∧` is intersection, so after `↓` a verb is permitted
+  only where every supplied layer lists it. Under extension verbs join by union,
+  and since verbs carry no exclusions, an omitted base axis absorbs any fragment
+  (`join_top` is `t`). Withholding a verb is a restriction's job; there is no
+  verb exclusion, so a base cannot withhold a verb, `detach` included, against an
+  extension.
+- **Evidence is never closed early.** A table stores evidence and the question
+  asks it; nothing stores a decision. Evaluation never stores ⊥ as negative
+  evidence, so an empty fragment cannot block a later one's allowance.
+
+## Extension: roles as types
+
+An omitted axis denotes the identity of the role it plays: in a *policy* (a
+base, a restriction layer, the ceiling, the stack) it is `t`; in an *extension
+fragment* it is `⊥`. The two roles are two types: `Capabilities` is a policy,
+the loader returns a `Fragment`, and a `Fragment` is consumed only by
+`Capabilities::extend`. Reading an omission in the wrong role is a type error.
+
+`B ◁ F`, per axis: any `B` with omitted `F` is `B`; omitted `B` with supplied
+`Q` is `t ⊕ Q`, every request less `Q`'s exclusions (`Axis::join_top`); supplied
+`P` with supplied `Q` is `P ⊕ Q`. On exec, `join_top` sets `every` and keeps
+`Q`'s allowances, which change nothing about running but still name run places.
+The shape of every enforced policy is `↓(E₀ ∧ E₁ ∧ … ∧ Eₙ)`: `E₀` elaborates
+the ceiling `B ◁ F`, each `Eᵢ` a restriction, every `⊕` before every `∧`.
+
+**Why order matters.** Elaboration is ordered and contextual on one point only:
+on fs reading, a layer reads the run places of the exec meet over itself and the
+layers beneath it. Everything else in a layer's elaboration is its own evidence.
+The meet of elaborated layers is the ordinary pointwise meet, commutative and
+associative, but the order of the stack still matters, because the same layer
+elaborates differently above and beneath another: a layer that reads nothing and
+omits exec, beneath a layer that runs `File(s)` and omits fs, refuses `s`; the
+same two layers the other way round permit it. Law 10 follows: pushing a layer
+appends a conjunct and elaborates none beneath it anew.
+
+**An extension after a restriction could undo it**: `(B ∧ R) ⊕ E` permits what
+`R` withholds. The order holds structurally: pushing a layer is `∧` and a pushed
+layer is immutable, while `◁` takes a `Fragment`, which only the loader
+constructs, and runs once, in exarch's `for_invocation`, before the first push.
+One extension file is an interface choice; several would fold by `⊕` before
+extending the base. `◁` itself resolves no name: the ceiling keeps the
+fragment's names as names, and every judgment resolves them afresh. Its
+equations are relative to the host state at which the fragment's paths were
+frozen, as every layer's are.
+
+**Representation per axis.** `Axis: Join` has `join_top` (`t ⊕ self`, `None`
+where omission loses nothing) and `is_top` (denotes `t`):
+
+| Axis | `join` | `join_top` | `is_top` |
+|---|---|---|---|
+| `ExecGrant` | `every` by `∨`, `join_insert` each entry | `None` for an empty grant; otherwise the same entries with `every` set, whose allowances still name run places | `every` and no negative entry |
+| `FsPolicy` | union each list | `None` without denies; otherwise read and write `[root]`, the same denies | writes the root, no denies |
+| `Net` | `Offline` | `Some(Offline)` | never |
+| verb sets | union | `None` | every verb listed |
+
+`join_top` on exec keeps its result even where it denotes `t`, because its
+allowances still name run places; elsewhere a result that denotes `t` is `None`.
+`Capabilities::is_restrictive` is "some supplied axis is not `is_top`". `Meet`
+and `Join` are the two bare operations, implemented in one shape by `Evidence`
+and `Table` (both) and by the axis policies (`Join`); `Widen` is deleted and the
+symmetric `Option<T>` lift with it. `Evidence`'s `Default` is Neither, the
+identity for collecting evidence; restriction starts from `t` explicitly, never
+from `Default`; it derives no `Ord`, neither order being total. A written empty
+table (`exec: [allow: []]`, `fs: [read: []]`) is supplied: ⊥ for every request,
+which on fs leaves the floor alone; being empty never makes a table omitted.
+
+## Reading what runs and what is written
+
+- **Writing reads.** A layer's read evidence is its read prefixes joined with
+  its write prefixes.
+- **Running reads, looking down the stack.** The run places of an exec table are
+  its positive `File` and `Dir` scopes, as frozen real paths read as prefixes
+  (`FsScope::Place`; `ExecRules::places`); `every` and bundled tools have none.
+  For a layer `L` that supplies fs, `P≤L` is the set of run places of the exec
+  meet over `L` and every layer beneath it. So a grant reads what it, and the
+  grants enclosing it, let run by path, directory or name, and a nested grant
+  never makes something readable by naming it: pushing a layer appends a conjunct
+  and changes none beneath it. An fs-only restriction nested under a grant that
+  runs `cargo` leaves `cargo` readable and runnable unless it excludes it.
+- **Exclusions do not pair**: refusing to run something does not refuse reading
+  it, and a scope holding Both pairs its positive half. Running and reading
+  couple in no other way; no write follows from either. Pairing matters only
+  where fs is supplied: an omitted fs is `t`.
+- **The read region.** With `P≤L` the places above, `floor` the platform's read
+  floor and `D` the supplied denies,
+  `Aread = ⋀_L (read_L ∪ write_L ∪ P≤L) ∪ floor`, over the fs-supplying layers
+  `L`. Joining the floor into each layer before the meet equals joining it once
+  after; an exclusion of a floor path or a place still refuses it; with no
+  supplied fs there is no floor-only restriction. Universal positive support on
+  fs is the root prefix `FrozenPath::root`, so `t ⊕ Q` is read `[root]`, write
+  `[root]`, deny `Q`'s denies. Discard devices and the pinned-binary write guard
+  keep their own rules.
+- **Why two calls, and what they are exact for.** `fs::region` runs on every fs
+  check and `reasonable` has about a hundred names, so permitted reads compile
+  nothing. Places add only positive evidence and the meet is monotone in it, so a
+  permit or an exclusion from the first call is final, with the same witness; the
+  second call can only turn a missing allowance into a permit. That is exact for
+  enforcement, not for evidence: a place can turn Deny into Both, which `↓` never
+  distinguishes, and the first call's table is never composed further. One
+  method, `GrantStack::read`, serves the fs guard, the running-reads check at
+  exec and the bundled-tool check of ral's binary; the projection calls
+  `region(…, true)` once per spawn.
+- **Places are prefixes of a real path.** A place reads as a prefix whether exec
+  runs it as a file or a directory, so containment is transitive across every
+  pair of scopes and the meet stays exact without shaped probes. A file place
+  later replaced by a directory reads its tree, in the guard and every kernel
+  alike; making that replacement needs a write to its parent, whose reading law 8
+  already grants, or the host.
+- **A fragment pairs nothing on its own.** `join_top` keeps a fragment's exec
+  allowances beside `every`, so the ceiling's table holds them, and a name in an
+  extension is resolved afresh at every run like every other name.
+- **A toolchain can be written once, in exec.** `reasonable`'s duplicate read
+  entries stay until selectors replace its toolchain directories; its run
+  allowances are narrower than its reads today (it runs `~/.rustup/toolchains/`
+  and reads `~/.rustup`).
+- The guard keeps compilation off permitted reads: the read judgment
+  (`GrantStack::read`) asks `fs::region(…, places: false)` and only on
+  `MissingAllowance` `region(…, true)`; places add only positive evidence, so a
+  first-call permit or exclusion is final.
+- **ral's binary is an ordinary host file**, run where a grant admits it and
+  read through pairing like any program. A *bundled tool* runs ral's image, so
+  it reads it: an fs exclusion of ral's binary refuses every bundled tool, on
+  every platform, and an exec exclusion leaves them alone. Nothing admits ral
+  beyond the policy and nothing excludes it beyond the policy.
+- **Refusals** are `ExecDenial::{Run, Read}` and
+  `FsRefusal::{Guarded, Withheld}`, each carrying a `Withheld` reason.
+
+## Activation is denotational
+
+A layer is restrictive exactly where some axis does not denote `t`
+(`Axis::is_top`), a stack exactly where some layer is. Exec restricts unless it
+is `every` with no exclusion; fs unless it writes the root and excludes nothing;
+net when `Offline`; a verb set unless it lists every verb. Every reader goes
+through it: the projection, launch hardening, exarch's credential layer and the
+summaries. An `every` table with exclusions activates.
 
 ## What a table hands out
 
-- **`live()`** — the allows still in force at their own subjects:
-  `{ k : (k, v) ∈ T, v ≠ Deny, ⟦T⟧(k̂) ≠ Deny }`. For fs, the allow lists a
-  backend renders; for exec, the files whose carriers the kernel needs
-  (`allowed_files`).
-- **`denies()`** — the scopes written as denies.
-- **`respelled(s)`** — the most specific deny (greatest rank) that holds `s` only by a fold, provided *no* deny
-  holds `s` as stored; else nothing: for fs the deepest such deny, for exec a
-  file deny over a dir deny. A refusal names it, so the author learns
-  the deny bit through case or Unicode form:
+- **`live()`**: the positive scopes still permitted at their own subjects, for
+  which descendants may still be excluded. For fs, the lists a backend renders;
+  for exec, the files and directories the kernel admits.
+- **`denies()`**: the scopes written as exclusions.
+- **`respelled`** on `Withheld::Excluded`: the exclusion holds `s` only by a
+  fold. A refusal says so, so the author learns the deny holds through case or
+  Unicode form:
   `fs write denied by grant: /w/.ENV is the denied /w/.env under another spelling (case or Unicode form); a deny holds under every spelling`.
   A veto's key is folded already and holds identically under both polarities,
   so a vetoed name is refused plainly.
 
 ## Two instances
 
-| | fs — `Region` | exec — `ExecRules` |
+| | fs: `Table<FsScope>` | exec: `ExecRules = Table<ExecScope>` |
 |---|---|---|
-| scope `K` | `FrozenPath` | `ExecScope { Dir, Carrier, File, Tool, Name }` |
-| subject | a plain `&Path`, the access canonicalised or walked | `Subject { Tool, File, Under }`, from a `Program` |
-| `k̂` | the prefix's `real` path | `Under(d)`, `File(f)`, `Tool(t)` |
-| holds | `FrozenPath::contains::<P>`, `path_within(path, real, P::IDENTITY)` | `RealPath::within::<P>`; a file or carrier by mutual containment; a tool by name; a name by `command_name_key` |
-| rank | `(is a deny, depth)`: a deny outranks every allow at any depth, the deeper ranking above among each; verdicts read as deny-wins, since every fs allow is `Allow` | `Dir(depth) < Carrier < Exact < Name`, verdict-blind |
-| where the denies live | each layer's `deny_paths`, in both the read and the write region | in the table, beside the allows |
+| scope `K` | `FsScope { Prefix(FrozenPath), Place(RealPath) }` | `ExecScope { Any, Dir, File, Tool, Name }` |
+| subject | a plain `&Path`, the access canonicalised or walked | `Subject { Any, Tool, File, Under }`, from a `Program` |
+| `k̂` | the real path | `Any`, `Under(d)`, `File(f)`, `Tool(t)` |
+| holds | `path_within(path, real, P::IDENTITY)`; a place reads as a prefix whether exec runs it as file or directory | `RealPath::within::<P>`; a file by mutual containment; a tool by name; a name by `command_name_key`; `Any` holds everything |
+| where the exclusions live | each layer's `deny_paths`, in both the read and the write region | in the table, beside the allowances |
 | tables per stack | two, one per `FsOp`, `None` when no layer holds an fs opinion | one, `None` when no layer holds an exec opinion |
-| when frozen | re-frozen against the live `Resolver` at every guard check, once at spawn for the projection | compiled afresh per question; path and dir keys are frozen forms, never re-read |
-| extra scope | — | `Carrier`, added only by `for_kernel()` |
+| when frozen | allowances frozen at decode, never re-frozen; exclusions re-frozen against the live `Resolver` on every check | allowance paths frozen at decode; exclusions re-resolved at every compile; names resolved afresh per run |
+| extra scopes | places of exec's run allowances; the platform floor and live support, joined as positives | support files, joined by `for_kernel` |
 
-**Exact beats a covering deny dir in exec; a deny wins at any depth in fs.**
-Each is its own dimension's law. An fs deny is a carve-out protecting
-*content* — credentials under a readable `xdg:config`, the agent's profile
-under a writable cwd — and every backend that holds it hangs it on a subtree
-an allow cannot reopen: a bwrap mask hides the whole tree, an ACE inherits
-down it, and a Windows ACL orders explicit allows before inherited denies, so
-it must never be handed an allow beneath a deny at all. An exec rule names a
-*program*, and the kernel's rule list is ordered, so last-match-wins can state
-an exception: `deny dir /x/B` with `allow file /x/b/tool` admits `/x/b/tool`,
-and the deepest directory decides between nested ones. Deny-wins in exec
-would break both, for reasons unrelated to any spelling.
+**An exclusion beats every allowance, in both.** An fs exclusion is a carve-out
+protecting *content*: credentials under a readable `xdg:config`, the agent's
+profile under a writable cwd. An exec exclusion names a *program*. Neither a
+narrower directory nor an exact file reopens it, and nor do a carrier, the
+dynamic linker or ral's binary. This is the one rule every backend can hold: a
+bwrap mask hides the whole tree, an ACE inherits down it, a Windows ACL orders
+explicit allows before inherited denies, and Seatbelt emits the negative
+clauses after the positive ones.
 
 **Exec has two languages, one map each, and the kernel reads the second.**
 
-- `ExecKey { Name, Path, Dir }` — the grant *as written*: `ExecGrant` is
-  `BTreeMap<ExecKey, Verdict>`, entered through `meet_insert` (its
-  `FromIterator` too). It rides the
-  wire, `--extend-base` widens it (`ExecGrant::widen`, its `evicts` sweep), and
-  exarch's prompt prints it through `Display`, a dir as `` `dir ``.
-- `ExecScope` — the grant *compiled against this host* (`ExecRules::compile`):
-  a bare name becomes the bundled tool of that name, the file the host `PATH`
-  finds, and for a deny a `Name` veto; a path key a `File`, a dir key a `Dir`
-  at its own verdict, each its frozen real form.
+- `ExecKey { Name, Path, Dir }`: the grant *as written*. `ExecGrant` is a
+  private `BTreeMap<ExecKey, Evidence>` plus the flag `every`, built only by
+  joining (`FromIterator`, `Join`, `join_top`, the wire decoder). It rides the
+  wire, and exarch's prompt prints it through `Display`, a dir as `` `dir ``.
+  `every` is not a key: only `join_top` sets it, so no surface spelling widens,
+  and a flag has no negative form, so "every program" can never be excluded.
+- `ExecScope`: the grant *compiled against this host* (`ExecRules::compile`): a
+  bare name becomes the bundled tool of that name, the host file `PATH` finds,
+  and, for negative evidence alone, a `Name` veto; a path key a `File`, a dir key
+  a `Dir`; `every` the scope `Any`. A path key splits its polarities: the
+  positive bit at the real path frozen at decode, the negative at the one its
+  surface reaches now (`RealPath::live`); a key with Both yields both entries,
+possibly at different paths. The veto carries only the negative bit, since a
+positive one would assert support for every executable sharing the basename: an
+allowance by name leaves no veto entry at all, and Both leaves exactly Deny, the
+positive half living on in the tool and file entries. One executable reached by
+several spellings accumulates evidence. A bare name resolves through the host
+`PATH` and the bundled-tool registry; a scoped `PATH` cannot redirect an
+allowance.
 
-There was a third: a list of `ExecRule { Dir, File, Veto }` rendered for the
-kernel, which the Linux parent read back into a table. It is gone
-([[decisions/261006_capability-is-data|capability-is-data]]): the model sits
-below the sandbox, so `ExecProjection::Restricted` carries the `ExecRules`
-itself, and the kernel's poorer vocabulary (no tools, no carriers as
-such) is what `for_kernel` leaves in the table, not a type of its own. A bare
-key is no scope until the host `PATH` is consulted, so an authored grant is
-not closed under meet and must be compiled per question
-([[decisions/260906_object-not-name|object-not-name]], fault B). And the
-kernel sees no argv and no bundled tool, and an allow-only renderer must be
-able to take the allows as they stand.
+A bare key is no scope until the host `PATH` is consulted, so an authored grant
+is not closed under meet and must be compiled per question
+([[decisions/260906_object-not-name|object-not-name]], fault B). The model sits
+below the sandbox ([[decisions/261006_capability-is-data|capability-is-data]]),
+so `ExecProjection::Restricted` carries the `ExecRules` itself.
 
-**What the kernel is handed.** `for_kernel()` adds `(Carrier(c), Allow)` for
-each carrier, keeps each `Dir` at its own verdict and each `Name` as a deny,
-and keeps each distinct file among `File` and `Carrier` scopes *once* at the
-table's verdict for it (so carriers are already folded in, and a file an
-authored exact deny or a veto beats is a deny). The result is again an
-`ExecRules`. Seatbelt renders it by `precedence()`, sorted by rank with denies
-after allows within a rank, so the kernel's last-match-wins is the guard's
-highest-rank-wins by construction
-([[decisions/261004_exec-carriers|exec-carriers]]). Landlock can render allows
-only, and reads the very table: `Table::verdict` over it is the kernel's
-judgment, which the property test asserts at every `File` and `Under` subject,
-and it is the one judge of the expansion that renders a block inside an
-allowed directory: every entry along the spine to a block is judged by it, so a
-deny by another spelling holds in the kernel as in the guard
+**What the kernel is handed.** `for_kernel(support)` drops the `Tool` scopes and
+joins the live support as `File` allowances, giving again an `ExecRules`. The
+kernel sees no tools and no argv, so the table is its poorer view of the same
+evidence. Seatbelt renders the Rosetta loader, then every positive clause, then
+every negative one; its last-match-wins puts every exclusion on top by
+construction, and order within a group is for stable output only. Landlock
+renders allowances only, from `live()` and `permits()`, subtracting exclusions
+along their spines before it issues rules, and `Any` lowered against the
+envelope's binds. The one judge of the expansion that renders a block inside an
+allowed directory is the table, so an exclusion by another spelling holds in the
+kernel as in the guard
 ([[decisions/260906_landlock-exec-layer|landlock-exec-layer]]).
+
+## Support
+
+**Support is what a launch needs beyond the policy to start a program:
+carriers and the dynamic linker. It yields to every exclusion.** With `S` the
+support set, the live support is
+`S′ = { s ∈ S | ¬exec.negative(s) ∧ ¬read.negative(s) }`, and on each axis the
+kernel's evidence at `s` is `(policy.positive(s) ∨ s ∈ S′, policy.negative(s))`.
+
+- Support grants running and reading, never writing.
+- It is a function of the launch: the launched file's carriers, and where exec is
+  restricted every live file's carriers and the Linux linker candidates. It is
+  computed for every launch with a restricted fs or exec, joined into both
+  tables as allowances, so no backend knows support as such.
+- The guard consults none. Support is therefore not a law of denotations: an
+  allowance for a script can admit its interpreter, and excluding the script can
+  withdraw it; excluding a linker or a carrier refuses programs the policy says
+  nothing about.
+- ral's binary is not support.
 
 ### Worked cases
 
 On a case-sensitive volume, where `Tools` and `tools` are distinct
 directories. On a case-insensitive one each pair is one object with one
 stored spelling, `realpath` returns it, and the answers are those of the
-stored side. *Respelled*
-marks a refusal that names the denied spelling.
+stored side. *Respelled* marks a refusal that names the excluded spelling.
 
-| Grant | Subject | Verdict | Why |
+| Grant | Subject | Decision | Why |
 |---|---|---|---|
-| allow dir `/x/Tools`, deny dir `/x/tools/evil` | `/x/Tools/evil/t` | Deny, respelled | the deny is deeper and holds `/x/Tools/evil` by `⊑C`; `/x/Tools/good/t` is Allow |
-| allow dir `/x/b`, deny dir `/x/B` | `/x/b/t` | Deny, respelled | one rank, the tie meets; fs's `live()` drops the allow likewise |
-| deny dir `/x/B`, allow file `/x/b/tool` | `/x/b/tool` | Allow | `Exact` over `Dir`; fs has no such rank |
-| allow file `/x/tool`, deny file `/x/Tool` | `/x/tool` | Deny, respelled | one rank, the tie meets |
-| stack `a = {allow /a/B}`, `b = {allow /a/B, allow /a/b}` | `/a/B/x` | Allow | the counterexample: `/a/b` is not written as a deny |
-| stack `a = {allow /a, deny /a/B}`, `b = {allow /a/b, allow /a/c}` | `/a/b/x` | Deny, respelled | `/a/B` joins the met denies; `/a/b` and `/a` are dropped, each denied at its own subject by one side; `/a/c/x` is Allow |
-| two layers, one allowing `/a/B`, the other `/a/b` | `/a/B/x` | Deny | each allows only its spelling and the meet keeps neither |
-| stack `a = {allow /a, deny /a/b}`, `b = {allow /a/b/c}` | `/a/b/c/x` | Deny | a deeper allow in one layer cannot lift a deny another places above it |
-| allow dir `/x`, veto `sh` | `/x/SH`, `/x/ſh` | Deny | a veto's key folds; `/x/shx` is Allow |
+| allow dir `/x/Tools`, exclude dir `/x/tools/evil` | `/x/Tools/evil/t` | refused, respelled | the exclusion holds `/x/Tools/evil` by `⊑C`; `/x/Tools/good/t` is allowed |
+| allow dir `/x/b`, exclude dir `/x/B` | `/x/b/t` | refused, respelled | Both; fs's `live()` drops the allowance likewise |
+| exclude dir `/x/B`, allow file `/x/b/tool` | `/x/b/tool` | refused, respelled | an exact file does not reopen an exclusion |
+| allow file `/x/tool`, exclude file `/x/Tool` | `/x/tool` | refused, respelled | Both |
+| allow dir `/w`, exclude dir `/w/private` | `/w/private/k` | refused | Both inside the subtree; `/w/other` is allowed |
+| stack `a = {allow /a/B}`, `b = {allow /a/B, allow /a/b}` | `/a/B/x` | allowed | the counterexample: `/a/b` is not written as an exclusion |
+| stack `a = {allow /a, exclude /a/B}`, `b = {allow /a/b, allow /a/c}` | `/a/b/x` | refused, respelled | `/a/B` joins the met exclusions; `/a/b` and `/a` are dropped, each unsupported by the other side; `/a/c/x` is allowed |
+| two layers, one allowing `/a/B`, the other `/a/b` | `/a/B/x` | refused | each allows only its spelling and the meet keeps neither |
+| stack `a = {allow /a, exclude /a/b}`, `b = {allow /a/b/c}` | `/a/b/c/x` | refused | a deeper allowance in one layer cannot lift an exclusion another places above it |
+| allow dir `/x`, veto `sh` | `/x/SH`, `/x/ſh` | refused | a veto's key folds; `/x/shx` is allowed |
 
 ## Corner cases, and why the design is what it is
 
@@ -294,13 +520,11 @@ marks a refusal that names the denied spelling.
   refusing. Across layers the split carries on: denies join and allows meet
   by stored name, so two layers that spell one directory differently grant it
   to neither.
-- **A folded match ranks as a stored one.** `holds` decides whether a rule
-  speaks, never at what rank: a deny met by fold sits at its own depth, ties
-  still meet, and a deeper allow still beats a shallower deny
-  (`a_folded_match_ranks_as_a_stored_one`). `evicts`, the `--extend-base`
-  sweep that drops an allow dir a deny dir clashes with, asks containment
-  under `Collision` both ways: mutual containment is one rank, where the
-  guard's tie already denies, so the sweep agrees with the verdict.
+- **A folded match is as good as a stored one.** `holds` decides whether a rule
+  speaks; it decides nothing else. An exclusion met by fold is negative evidence
+  like any other. The
+  witness a refusal cites is any exclusion that applies, so a respelled one is
+  named only when none holds the subject as stored.
 - **The over-deny is accepted and said.** On a case-sensitive volume — Linux,
   case-sensitive APFS, a case-sensitive NTFS folder — a distinct `secrets`
   beside a denied `Secrets` is refused in process and not by the Linux or
@@ -314,9 +538,11 @@ marks a refusal that names the denied spelling.
   two distinct non-UTF-8 paths decode to one replacement-character string and
   would compare equal
   (`path_within_does_not_collide_distinct_non_utf8_paths`). The Windows branch
-  necessarily accepts the lossy form: its identity fold is defined on strings,
-  a `FrozenPath` already freezes to lossy strings, and failing closed
-  there would make a *deny* fail open.
+  necessarily accepts the lossy form for an exclusion: its identity fold is
+  defined on strings, and failing closed there would make a *deny* fail open.
+  An *allowance* is the other way round: its real form is its identity, so
+  freezing a grant whose real path is not Unicode is refused, lest a sibling
+  whose name holds U+FFFD be granted in its place.
 
 ### Windows path identity
 
@@ -330,7 +556,7 @@ marks a refusal that names the denied spelling.
   differently spelled access slips past.
 - **The platform rules are a `PathRules` parameter, never a `cfg!` read**, in
   `starts_with_identity`, `starts_with_collision`, `is_foreign_rooted`,
-  `is_discard_device`, `reserved_device_refusal`, `identity_depth` and
+  `is_discard_device`, `reserved_device_refusal` and
   the name key, with `PathRules::HOST` read once at each sole call site, so both tables are pinned by tests on every host and
   neither is dark on the other.
 - **8.3 short names are an alias, not a fold**, so no key closes them. With a
@@ -353,13 +579,9 @@ marks a refusal that names the denied spelling.
   (`canon::firmlink_toggle`), because under Seatbelt `realpath(3)` can fail on
   `/tmp` itself and a grant authored in one spelling must cover an access in
   the other.
-- **Depth counts components of the alias-folded form** (`identity_depth`).
-  `/private/tmp` spells longer yet is one deep; counting characters would let
-  a shallow alias outrank `/tmp/a/b` beneath it
-  (`depth_counts_components_not_characters`). Three Windows spellings of one
-  directory likewise report one depth.
-- **Two spellings of one directory at equal rank tie, and the deny meets the
-  allow** (`a_firmlink_alias_does_not_outrank_a_deny`).
+- **Two spellings of one directory are one object**, an allowance and an
+  exclusion over them meet as Both, and the exclusion wins
+  (`a_firmlink_alias_does_not_outrank_a_deny`, kept as an alias-exclusion test).
 - **The root `/` is minted, never frozen.** `realpath("/")` answers the
   *current drive* on Windows, so a frozen ceiling covered one volume, and a
   session launched from `D:` lost a `%TEMP%` on `C:` — the shape GitHub's
@@ -377,9 +599,12 @@ marks a refusal that names the denied spelling.
   Seatbelt matches lexically, so a child could read the link's target
   (`a_symlinked_grant_cannot_escape_a_shallower_ceiling`, with its positive
   control).
-- **A symlinked exec dir covers where it points, at its target's depth**, allow
-  or deny alike, so a deeper allow inside the target still beats it
-  (`a_symlinked_deny_dir_ranks_at_its_target_depth`).
+- **A symlinked exec dir covers where it points**, allowance or exclusion
+  alike. An allowance keeps the target it was frozen to: a symlink put in its
+  place later redirects nothing and the allowance grants nothing there. An
+  exclusion follows its name, so after `/work/blocked` becomes a symlink to an
+  admitted `/tools`, excluding `Dir(/work/blocked)` excludes `/tools/prog`,
+  directly and through the link.
 - **A symlink to an admitted file is admitted**, since it runs that file; a
   symlink under an admitted directory to a file outside it is not. The
   launcher runs the real path it judged, the user's spelling as `argv[0]`.
@@ -405,10 +630,13 @@ marks a refusal that names the denied spelling.
   that name**, walked with `SearchCwd::nowhere` on the process's own `PATH`,
   never a scoped override: a planted `/tmp/evil/rg` inherits nothing from
   `rg: allow`, and `git: allow` admits `/usr/bin/git` typed as a path.
-- **A bare deny is also a veto on its `command_name_key`**, outranking every
-  other rule, so it stops an absolute `/bin/bash` and a link to it alike.
-- **Path and dir keys are frozen real forms, never re-read**, and two keys
-  naming one file meet: `RealPath`'s `Ord` is the host's file identity, by
+- **A bare exclusion is also a veto on its `command_name_key`**, so it stops an absolute `/bin/bash` and a link to it alike.
+- **A path or dir key splits its polarities.** The allowance is the frozen real
+  form, never re-read; the exclusion is re-resolved from its surface at every
+  compile. A bare name is the one live allowance, resolved afresh at each run
+  (`which::locate` keeps an answer for the rest of one top-level run, shared by
+  command resolution, so the program launched is the program judged). Two keys
+  naming one file join to Both: `RealPath`'s `Ord` is the host's file identity, by
   components off Windows and by Windows identity components on it
   (`two_path_keys_naming_one_file_meet`).
 - **A veto's key folds.** `deny: [bash]` compiles to a folding exact deny and a
@@ -428,7 +656,7 @@ marks a refusal that names the denied spelling.
   126 when the file is not executable, never a denial
   ([[decisions/261004_exec-rules|exec-rules]]).
 
-### Carriers
+### Carriers and the linker
 
 - **A carrier is what `execve` forwards to before the program's own code
   runs**: a `#!` interpreter, up to four hops, and on macOS the root-owned
@@ -436,20 +664,40 @@ marks a refusal that names the denied spelling.
   carriers an admitted script would die in the kernel.
 - **Admitted only on bytes the uid cannot author** (`trusted_real`, a
   link-following walk from `/`); `env` is not followed, since following it
-  reads a `PATH` the confined code controls.
-- **The guard never consults them; the kernel needs them.** They enter only
-  in `for_kernel()`, as `Carrier` scopes, ranked under `Exact` so an authored deny
-  on a carrier file wins and under `Name` so a vetoed name is not allowed
-  (`a_carrier_with_an_exact_deny_is_denied_to_the_kernel`,
-  `a_carrier_whose_name_is_vetoed_is_not_allowed`). A carrier holds a file by
-  mutual containment as a `File` rule does, so firmlink spellings agree
+  reads a `PATH` the confined code controls. System-only is not the floor: a
+  root-owned interpreter under `/opt` is a carrier.
+- **The guard never consults them; the kernel needs them.** Carriers and the
+  Linux linker candidates are *support* (above), joined as allowances only where
+  the author wrote none and dropped when an exec or an fs exclusion covers them.
+  An excluded carrier therefore refuses the script that starts through it, and
+  the confined child's hint says which exclusion, since an allowance cannot
+  override it. macOS's Rosetta loader is a directory and keeps a clause of its
+  own, emitted before the exclusions so that one reaches it
   ([[decisions/261004_exec-carriers|exec-carriers]]).
 
 ### What the kernel cannot see
 
+The complete contract, with every declared support and limit, is in
+[[design/two-enforcers|two-enforcers]]; the cases below are the ones this page
+argues from.
+
+
 - **argv**: the kernel sees no arguments, and no verdict depends on them.
 - **Which bundled tool a re-exec of ral runs**: a tool is ral's own binary to
-  the kernel.
+  the kernel. A *nested* ral is bound by the kernel alone: it boots with a fresh
+  stack, so whatever only the guard enforces, bundled-tool rules and verbs among
+  it, does not bind it, and under an exec allow-list that admits ral it runs every
+  bundled tool.
+- **Exclusions are guardrails where writing meets running.** A copy, a program
+  written into a folder that is both writable and runnable, or a script fed to an
+  admitted interpreter is a different request. The write freeze that once covered
+  such folders is gone
+  ([[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]]);
+  the deputy findings name them.
+- **On Linux an admission is of an inode**: an excluded path that is a hard link
+  to an admitted file runs. A path grant does not own the bytes reachable through
+  it either, so a hard link inside a granted region to a file outside reads or
+  writes that file.
 - **Landlock is allow-list only**: a block inside an allowed directory is
   rendered by subtraction over the tree as it stands at launch, so a program
   added afterwards to an expanded directory is denied until the next launch,
@@ -465,11 +713,31 @@ marks a refusal that names the denied spelling.
 
 ### The projection
 
-- **The fs rendering is lexical surface strings.** Each live prefix flattens
-  to `surface` once, in `SandboxProjection::of`, and every backend widens it into
-  its own name class at render time; `real` has no reader below the fold.
-- **`live()` is why no allow beneath a deny ever reaches a backend.** Under
-  deny-wins such an allow is dead, and a Windows ACL orders explicit allows
+- **An allowance renders as its frozen real path, and as nothing else.** The
+  projection (`SandboxProjection::of`) carries the read region as one list of
+  live positives, run places and live support among them, beside the write
+  prefixes, the floor and the exclusions; a surface spelling is never a
+  predicate of its own, since a name that was a symlink at freezing can later
+  hold a real directory the grant never named. Exclusions are re-resolved at
+  render time. Each backend refuses a redirected allowance rather than following
+  it: Linux's `openat2(RESOLVE_NO_SYMLINKS)` refuses the launch, Seatbelt matches
+  the resolved path against the frozen one, and Windows stamps the checked object
+  through a held handle, with no redirecting reparse point on its path (a symlink,
+  junction or other name surrogate is refused; a cloud-files placeholder is not).
+- **The floor is an allowance like any other.** It is frozen once per process, on
+  the premise that its roots are the system's; `~/.linuxbrew` and a
+  `HOMEBREW_PREFIX` can be the user's, and a child that writes the parent of such
+  a root could replace it with a symlink, so the floor renders frozen too and a
+  redirected root shows nothing. What loading needs is not authored, so a floor
+  entry that resolves through a non-Unicode name is dropped, not refused
+  (`freeze_floor`); a place that `PATH` resolved to and that is not Unicode
+  cannot be frozen as an allowance in the first place.
+- **Windows refuses the universal prefix.** A launch whose fs projection holds
+  `FrozenPath::root` in either region is refused before anything is stamped: an
+  AppContainer reaches only what is stamped for it, and the root would narrow to
+  one drive. The guard still judges.
+- **`live()` is why no allow beneath a deny ever reaches a backend.** Such an
+  allowance is Both, dead, and a Windows ACL orders explicit allows
   before inherited denies, so handing one over would invert the rule
   (`the_live_allows_are_those_no_deny_holds`).
 - **Existing Windows ACLs are another source of explicit allows.** A directory
@@ -494,15 +762,27 @@ marks a refusal that names the denied spelling.
 
 ### Freshness
 
-- **The guard re-freezes every prefix against the live disk on every check**,
-  so a deny holds its object the moment it exists, under any spelling.
-- **The projection freezes once, at spawn**, because that is when the profile
-  is written. That freshness is the whole difference between the two readers
-  of one fold.
-- **Exec tables are compiled afresh on every question**, because a bare key
-  follows the host `PATH`; the projection carries the very table in the
-  `Admitted` that judged the launch (`ExecProjection::Restricted(ExecRules)`,
-  by `ExecRules::for_kernel`), so the kernel list is no third language.
+- **Allowances are frozen; exclusions re-resolve.** An allowance keeps the real
+  path it was frozen to at decode and is never re-frozen, in the guard or any
+  backend. Re-freezing it would let a child that can write the folder holding
+  an allowed folder replace it with a symlink and point it anywhere the user can
+  reach, and both enforcers would follow. An exclusion re-freezes against the live
+  disk on every check (`fs::region` re-freezes only `deny_paths`), so it holds its
+  object the moment it exists, under any spelling. Creating a granted directory
+  after the grant, or `rm -rf dir && mkdir dir`, keeps working: these are path
+  grants, not inode pins.
+- **A guest allowance is not yet frozen inside the machine.** synod mints it
+  with `FrozenPath::from_guest`, whose real form copies its surface, and sends it
+  with every run. Freezing it once per session, inside the guest, is deferred
+  (`dev/docs/plans/261013_authority-types.md`); until then a redirect made in one
+  guest run can take effect in the next.
+- **The projection renders what the guard judged**, once at spawn, because that
+  is when the profile is written.
+- **Exec tables are compiled afresh on every question**, because a bare name
+  follows the host `PATH`, live per run; the projection carries the very table in
+  the `Admitted` that judged the launch
+  (`ExecProjection::Restricted(ExecRules)`, by `ExecRules::for_kernel`), so the
+  kernel list is no third language.
 
 ### Absent denies
 
@@ -514,6 +794,7 @@ marks a refusal that names the denied spelling.
   names (`docs/SPEC.md` §12.3;
   [[internals/holding-a-deny|holding-a-deny]]).
 
-See also [[design/grant|grant]], [[design/two-enforcers|two-enforcers]],
-[[related/access-control-algebra|access-control-algebra]] (restrict as meet
-against the literature), [[map/core/capabilities|map: capabilities]].
+See also [[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]],
+[[design/grant|grant]], [[design/two-enforcers|two-enforcers]],
+[[related/access-control-algebra|access-control-algebra]] (PBel, and the
+extension against the literature), [[map/core/capabilities|map: capabilities]].

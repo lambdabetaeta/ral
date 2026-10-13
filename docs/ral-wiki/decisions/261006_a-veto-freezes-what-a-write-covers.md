@@ -1,11 +1,14 @@
 ---
-status: active
+status: superseded
 generated_at_commit: 2afefdf4
-verified_at_commit: 2afefdf4
-anchors: [WriteReach, write_reach, emit_exec_rules, carries_veto, Binds, vetoes_walk]
 ---
 
 # A veto freezes what a write covers
+
+Superseded by [[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]]:
+the freeze made an exec allowance withdraw write authority, in the kernel alone,
+and is deleted; what it protected is a declared limit, whose cost that page
+records.
 
 Implementation update, 12 Oct: the file residual below is closed. Restricted
 fs projections classify individually admitted files too; an explicit write

@@ -5,6 +5,7 @@
 
 use super::acl::wide;
 use super::*;
+use std::fs;
 use std::os::windows::fs::OpenOptionsExt;
 use windows_sys::Win32::Foundation::ERROR_SUCCESS;
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;

@@ -48,10 +48,27 @@ fn run_shell_direct(
     timeout_secs: u64,
     recorder: &crate::record::Emitter,
 ) -> ToolResult {
+    run_shell_under(
+        transport,
+        &ral_core::capability::GrantStack::of(caps.clone()),
+        cmd,
+        timeout_secs,
+        recorder,
+    )
+}
+
+/// [`run_shell_direct`] under a whole stack.
+fn run_shell_under(
+    transport: &IdentityTransport,
+    stack: &ral_core::capability::GrantStack,
+    cmd: &str,
+    timeout_secs: u64,
+    recorder: &crate::record::Emitter,
+) -> ToolResult {
     let applier = Arc::new(crate::agent::desk::SurfaceApplier::new(recorder.clone()));
     let outcome = run_shell(
         transport,
-        &ral_core::capability::GrantStack::of(caps.clone()),
+        stack,
         "turn 1",
         cmd,
         timeout_secs,
@@ -1694,4 +1711,138 @@ fn user_json_payload_less_variant_becomes_the_bare_label_string() {
         payload: None,
     };
     assert_eq!(super::user_json(&v), serde_json::json!("none"));
+}
+
+/// The self layer in the kernel, on Linux: exarch's own binary (the test
+/// binary, pinned at boot) is refused directly, by a name resolving to it and
+/// through `sh -c`, while a bundled tool still runs.  The binary's directory is
+/// admitted by an extension, so only the self layer can refuse it.
+#[cfg(target_os = "linux")]
+mod self_layer {
+    use super::*;
+    use ral_core::capability::GrantStack;
+    use ral_core::first_order::FOValue;
+
+    struct Fixture {
+        dir: tempfile::TempDir,
+        exe: String,
+        link: String,
+        cwd: String,
+        extend: std::path::PathBuf,
+    }
+
+    fn fixture() -> Option<Fixture> {
+        if !ral_core::sandbox::restricted_envelope_launches() {
+            eprintln!("skip: this host cannot build a Restricted envelope");
+            return None;
+        }
+        let dir = scratch_dir("self-layer");
+        let exe = std::fs::canonicalize(std::env::current_exe().expect("test binary"))
+            .expect("the test binary exists");
+        let link = dir.path().join("elsewhere");
+        std::os::unix::fs::symlink(&exe, &link).expect("symlink to exarch");
+        let root = dir.path().to_string_lossy().into_owned();
+        let extend = dir.path().join("extend.ral");
+        std::fs::write(
+            &extend,
+            format!(
+                "return [exec: [allow: [`dir `absolute {}]], fs: [read: [`absolute {root}], write: [`absolute {root}]]]\n",
+                exe.parent().expect("a directory").display()
+            ),
+        )
+        .expect("extension file");
+        Some(Fixture {
+            exe: exe.to_string_lossy().into_owned(),
+            link: link.to_string_lossy().into_owned(),
+            cwd: root,
+            extend,
+            dir,
+        })
+    }
+
+    fn run(stack: &GrantStack, cmd: &str) -> ToolResult {
+        run_shell_under(&fresh(), stack, cmd, 20, &crate::record::Emitter::none())
+    }
+
+    fn refused(stack: &GrantStack, cmd: &str) {
+        let r = run(stack, cmd);
+        let out = String::from_utf8_lossy(&r.stdout);
+        assert!(
+            r.exit != 0 && !out.contains("Usage"),
+            "`{cmd}` must be refused; exit {}, stdout {out}, stderr {}",
+            r.exit,
+            String::from_utf8_lossy(&r.stderr)
+        );
+    }
+
+    fn refuses_exarch(f: &Fixture, stack: &GrantStack) {
+        refused(stack, &format!("{} --help", f.exe));
+        refused(stack, &format!("{} --help", f.link));
+        refused(stack, &format!("/bin/sh -c '{} --help'", f.exe));
+    }
+
+    fn bundled_tool_runs(f: &Fixture, stack: &GrantStack) {
+        let (from, to) = (f.dir.path().join("from"), f.dir.path().join("to"));
+        std::fs::write(&from, "x").expect("source file");
+        let r = run(stack, &format!("mv {} {}", from.display(), to.display()));
+        assert_eq!(
+            r.exit,
+            0,
+            "a bundled tool runs: {}",
+            String::from_utf8_lossy(&r.stderr)
+        );
+        assert!(to.exists(), "mv moved the file");
+    }
+
+    #[test]
+    fn exarch_is_refused_in_a_dangerous_and_a_reasonable_session() {
+        let Some(f) = fixture() else { return };
+        for base in ["dangerous", "reasonable"] {
+            let (stack, _) =
+                crate::policy::for_invocation(&f.cwd, base, Some(&f.extend), &[]).expect(base);
+            refuses_exarch(&f, &stack);
+            bundled_tool_runs(&f, &stack);
+        }
+    }
+
+    /// A spawned child's `Base` or `Restrict` layer is pushed without passing
+    /// through `for_invocation`, and still sits above the self layer.
+    #[test]
+    fn a_spawned_child_inherits_the_self_layer() {
+        let Some(f) = fixture() else { return };
+        let (parent, _) = crate::policy::for_invocation(&f.cwd, "dangerous", Some(&f.extend), &[])
+            .expect("dangerous composes");
+        let ctx = ral_core::guard::freeze::FreezeCtx {
+            home: None,
+            cwd: f.cwd.clone().into(),
+        };
+        let place = |label: &str, path: &str| FOValue::Variant {
+            label: label.into(),
+            payload: Some(Box::new(FOValue::String { value: path.into() })),
+        };
+        let exe_dir = std::path::Path::new(&f.exe).parent().expect("a directory");
+        let dir = FOValue::Variant {
+            label: "dir".into(),
+            payload: Some(Box::new(place("absolute", &exe_dir.to_string_lossy()))),
+        };
+        let record = FOValue::Map {
+            entries: vec![(
+                "exec".into(),
+                FOValue::Map {
+                    entries: vec![("allow".into(), FOValue::List { items: vec![dir] })],
+                },
+            )],
+        };
+        for grant in [
+            ral_core::SpawnGrant::Base("reasonable".into()),
+            ral_core::SpawnGrant::Restrict(record),
+        ] {
+            let layer = grant
+                .layer(crate::policy::base_layer, &ctx)
+                .expect("the grant resolves");
+            let mut child = parent.clone();
+            child.push(layer);
+            refuses_exarch(&f, &child);
+        }
+    }
 }

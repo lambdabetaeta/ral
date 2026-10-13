@@ -4,10 +4,16 @@
 //! doors: `decode_capability_map`, `FrozenPath::for_test`,
 //! `RealPath::assumed`.
 
+#![allow(
+    clippy::disallowed_methods,
+    reason = "[test] probes are lexical paths already in normal form"
+)]
+
+use super::exec::{ExecRules, Subject};
 use super::*;
 use crate::guard::decode_capability_map;
 use crate::guard::freeze::{FreezeCtx, PolicyError};
-use crate::path::RealPath;
+use crate::path::{RealPath, Resolver};
 use crate::types::Value;
 use std::collections::BTreeSet;
 use strum::VariantArray;
@@ -43,12 +49,6 @@ fn places(entries: &[(&str, Value)]) -> Value {
     )
 }
 
-/// A path literal in the host's normal form (`/usr/bin` → `\usr\bin` on
-/// Windows), so the Unix-shaped fixtures below still mean something there.
-fn np(s: &str) -> String {
-    nprefix(s).into_string()
-}
-
 /// A prefix witness for the fixtures that build `FsPolicy`/`ExecGrant`
 /// directly rather than through `decode_capability_map`.
 fn nprefix(s: &str) -> crate::path::FrozenPath {
@@ -59,7 +59,7 @@ fn break_msg(e: PolicyError) -> String {
     e.message
 }
 
-fn grant<const N: usize>(entries: [(ExecKey, Verdict); N]) -> ExecGrant {
+fn grant<const N: usize>(entries: [(ExecKey, Evidence); N]) -> ExecGrant {
     entries.into_iter().collect()
 }
 
@@ -87,7 +87,7 @@ fn file(real: &str) -> Program {
 
 /// Whether `grants` admits running the file whose real path is `real`.
 fn admits(grants: &GrantStack, real: &str) -> bool {
-    grants.admits(&file(real))
+    grants.admits(&file(real), &Resolver::shell_less())
 }
 
 #[cfg(unix)]
@@ -112,10 +112,10 @@ fn with_xdg_defaults<R>(f: impl FnOnce() -> R) -> R {
 fn witness_a() -> Capabilities {
     Capabilities {
         exec: Some(grant([
-            (name("cargo"), Verdict::Allow),
-            (name("git"), Verdict::Allow),
-            (path_key("/opt/tool"), Verdict::Allow),
-            (dir_key("/usr/bin"), Verdict::Allow),
+            (name("cargo"), Evidence::ALLOW),
+            (name("git"), Evidence::ALLOW),
+            (path_key("/opt/tool"), Evidence::ALLOW),
+            (dir_key("/usr/bin"), Evidence::ALLOW),
         ])),
         fs: Some(FsPolicy {
             read_prefixes: vec![nprefix("/tmp")],
@@ -131,11 +131,11 @@ fn witness_a() -> Capabilities {
 fn witness_b() -> Capabilities {
     Capabilities {
         exec: Some(grant([
-            (name("cargo"), Verdict::Allow),
-            (name("ls"), Verdict::Allow),
-            (path_key("/opt/tool"), Verdict::Deny),
-            (dir_key("/usr/bin"), Verdict::Allow),
-            (dir_key("/usr/local/bin"), Verdict::Allow),
+            (name("cargo"), Evidence::ALLOW),
+            (name("ls"), Evidence::ALLOW),
+            (path_key("/opt/tool"), Evidence::DENY),
+            (dir_key("/usr/bin"), Evidence::ALLOW),
+            (dir_key("/usr/local/bin"), Evidence::ALLOW),
         ])),
         fs: Some(FsPolicy {
             read_prefixes: vec![nprefix("/tmp/work")],
@@ -145,20 +145,6 @@ fn witness_b() -> Capabilities {
         net: Some(Net::Offline),
         editor: Some([EditorVerb::Read, EditorVerb::Tui].into()),
         shell: Some(std::collections::BTreeSet::new()),
-    }
-}
-
-fn witness_c() -> Capabilities {
-    Capabilities {
-        exec: Some(grant([(name("cargo"), Verdict::Allow)])),
-        fs: Some(FsPolicy {
-            read_prefixes: vec![nprefix("/tmp")],
-            write_prefixes: Vec::new(),
-            deny_paths: Vec::new(),
-        }),
-        net: None,
-        editor: None,
-        shell: None,
     }
 }
 
@@ -190,44 +176,6 @@ fn detach_is_permitted_until_some_layer_withholds_it() {
     );
 }
 
-/// A veto is a floor: an overlay allowing `name bash` over a base
-/// denying it leaves bash denied.  To permit it, change the base.
-#[test]
-fn widen_exec_regrant_does_not_lift_deny() {
-    let caps = |v: Verdict| Capabilities {
-        exec: Some(grant([(name("bash"), v)])),
-        ..Default::default()
-    };
-    let widened = caps(Verdict::Deny).widen(caps(Verdict::Allow));
-    assert_eq!(
-        widened.exec.unwrap().get(&name("bash")),
-        Some(&Verdict::Deny)
-    );
-}
-
-/// A one-sided `Deny` is a floor under widening too: an extension opening one
-/// command must not re-admit every shell the base pinned out.
-#[test]
-fn widen_exec_keeps_one_sided_deny() {
-    let exec = grant([(name("bash"), Verdict::Deny)]).widen(grant([(name("rg"), Verdict::Allow)]));
-    assert_eq!(exec.get(&name("bash")), Some(&Verdict::Deny));
-    assert_eq!(exec.get(&name("rg")), Some(&Verdict::Allow));
-}
-
-/// Deny-overrides on dirs: re-granting the exact denied tree does not lift it.
-#[test]
-fn widen_exec_dirs_regrant_does_not_lift_deny() {
-    let exec = exec_deny_of(&nprefix("/x")).widen(exec_of(&nprefix("/x")));
-    assert_eq!(exec.get(&dir_key("/x")), Some(&Verdict::Deny));
-}
-
-#[test]
-fn widen_exec_dirs_keep_one_sided_deny() {
-    let exec = exec_deny_of(&nprefix("/opt/danger")).widen(exec_of(&nprefix("/usr/bin")));
-    assert_eq!(exec.get(&dir_key("/opt/danger")), Some(&Verdict::Deny));
-    assert_eq!(exec.get(&dir_key("/usr/bin")), Some(&Verdict::Allow));
-}
-
 /// A stack is sigil-free by construction, so the wire form carries concrete
 /// paths and the peer has nothing to re-resolve — path and dir keys
 /// included, though no JSON object can be keyed by one.
@@ -250,17 +198,7 @@ fn fs_of(p: &crate::path::FrozenPath) -> FsPolicy {
 }
 
 fn exec_of(p: &crate::path::FrozenPath) -> ExecGrant {
-    grant([(ExecKey::Dir(p.clone()), Verdict::Allow)])
-}
-
-/// Both dimensions at once, so the laws below also exercise the `Option` lift
-/// and the cross-field composition, not one policy type in isolation.
-fn caps_of(p: &crate::path::FrozenPath) -> Capabilities {
-    Capabilities {
-        exec: Some(exec_of(p)),
-        fs: Some(fs_of(p)),
-        ..Default::default()
-    }
+    grant([(ExecKey::Dir(p.clone()), Evidence::ALLOW)])
 }
 
 /// Covers nesting, aliasing (`/a/alias` resolves to `/a`) and symlink
@@ -274,52 +212,8 @@ fn prefix_universe() -> Vec<crate::path::FrozenPath> {
     ]
 }
 
-#[test]
-fn widen_commutative_over_prefix_universe() {
-    let u = prefix_universe();
-    for a in &u {
-        for b in &u {
-            assert_eq!(fs_of(a).widen(fs_of(b)), fs_of(b).widen(fs_of(a)));
-            assert_eq!(exec_of(a).widen(exec_of(b)), exec_of(b).widen(exec_of(a)));
-            assert_eq!(caps_of(a).widen(caps_of(b)), caps_of(b).widen(caps_of(a)));
-        }
-    }
-}
-
-#[test]
-fn widen_associative_over_prefix_universe() {
-    let u = prefix_universe();
-    for a in &u {
-        for b in &u {
-            for c in &u {
-                assert_eq!(
-                    fs_of(a).widen(fs_of(b).widen(fs_of(c))),
-                    fs_of(a).widen(fs_of(b)).widen(fs_of(c))
-                );
-                assert_eq!(
-                    exec_of(a).widen(exec_of(b).widen(exec_of(c))),
-                    exec_of(a).widen(exec_of(b)).widen(exec_of(c))
-                );
-                assert_eq!(
-                    caps_of(a).widen(caps_of(b).widen(caps_of(c))),
-                    caps_of(a).widen(caps_of(b)).widen(caps_of(c))
-                );
-            }
-        }
-    }
-}
-
-#[test]
-fn widen_idempotent_over_prefix_universe() {
-    for a in &prefix_universe() {
-        assert_eq!(fs_of(a).widen(fs_of(a)), fs_of(a));
-        assert_eq!(exec_of(a).widen(exec_of(a)), exec_of(a));
-        assert_eq!(caps_of(a).widen(caps_of(a)), caps_of(a));
-    }
-}
-
 fn exec_deny_of(p: &crate::path::FrozenPath) -> ExecGrant {
-    grant([(ExecKey::Dir(p.clone()), Verdict::Deny)])
+    grant([(ExecKey::Dir(p.clone()), Evidence::DENY)])
 }
 
 fn stack_of(exec: ExecGrant) -> GrantStack {
@@ -329,135 +223,19 @@ fn stack_of(exec: ExecGrant) -> GrantStack {
     })
 }
 
+#[cfg(unix)]
 fn allow_dirs(exec: &ExecGrant) -> Vec<&crate::path::FrozenPath> {
     (exec.iter())
         .filter_map(|(key, v)| match key {
-            ExecKey::Dir(dir) if !v.is_denied() => Some(dir),
+            ExecKey::Dir(dir) if v.permits() => Some(dir),
             _ => None,
         })
         .collect()
 }
 
-/// The in-process guard judges dirs on their resolved forms, so eviction keys on those
-/// alone: an allow and a deny sharing a surface but resolving apart are two
-/// directories, and neither clash strips the other.  Checked through the
-/// guard as well as the allow dirs.
-#[test]
-fn exec_widen_keeps_allow_and_deny_that_share_a_surface_but_resolve_apart() {
-    // Spelled for the host: a rooted path with no drive is not absolute to
-    // Windows.
-    let (surface, divergent, allowed, denied) = if cfg!(windows) {
-        (r"C:\x", r"C:\y", r"C:\x\bin", r"C:\y\bin")
-    } else {
-        ("/x", "/y", "/x/bin", "/y/bin")
-    };
-    let allow = crate::path::FrozenPath::for_test(surface, surface);
-    let deny = crate::path::FrozenPath::for_test(surface, divergent);
-
-    let composed = exec_of(&allow).widen(exec_deny_of(&deny));
-    assert_eq!(
-        allow_dirs(&composed).len(),
-        1,
-        "a different directory is not evicted"
-    );
-    let grants = stack_of(composed);
-    assert!(
-        admits(&grants, allowed),
-        "the allow still covers its own directory"
-    );
-    assert!(
-        !admits(&grants, denied),
-        "the deny covers where it resolves"
-    );
-}
-
-/// Two symlinks resolving to one directory clash: the deny evicts the allow
-/// though neither spelling is the other's.
-#[test]
-fn exec_widen_drops_allow_resolving_to_the_same_dir_as_a_deny() {
-    let (link_a, link_b, target, candidate) = if cfg!(windows) {
-        (r"C:\a", r"C:\b", r"C:\x", r"C:\x\bin")
-    } else {
-        ("/a", "/b", "/x", "/x/bin")
-    };
-    let allow = crate::path::FrozenPath::for_test(link_a, target);
-    let deny = crate::path::FrozenPath::for_test(link_b, target);
-
-    let composed = exec_of(&allow).widen(exec_deny_of(&deny));
-    assert!(
-        allow_dirs(&composed).is_empty(),
-        "the deny must evict the allow it shares a target with, got {composed:?}",
-    );
-    assert!(
-        !admits(&stack_of(composed), candidate),
-        "a binary under the shared target must be denied"
-    );
-}
-
-/// A deny dir that is a symlink vetoes where it points, so it evicts an
-/// allow written as that target.
-#[test]
-fn exec_widen_drops_allow_naming_a_deny_dirs_target() {
-    let (link, target, candidate) = if cfg!(windows) {
-        (r"C:\l", r"C:\x", r"C:\x\bin")
-    } else {
-        ("/l", "/x", "/x/bin")
-    };
-    let allow = crate::path::FrozenPath::for_test(target, target);
-    let deny = crate::path::FrozenPath::for_test(link, target);
-
-    let composed = exec_of(&allow).widen(exec_deny_of(&deny));
-    assert!(
-        allow_dirs(&composed).is_empty(),
-        "the deny must evict the allow on its target, got {composed:?}",
-    );
-    assert!(
-        !admits(&stack_of(composed), candidate),
-        "a binary under the deny's target must be denied"
-    );
-}
-
-/// The same clash without shared bytes: `/private/tmp/x` and `/tmp/x` name
-/// one macOS firmlink-aliased directory, so eviction keys on `evicts`
-/// and not byte equality.  `capability/exec.rs` pins the guard half.
-#[cfg(target_os = "macos")]
-#[test]
-fn exec_widen_drops_allow_clashing_with_deny_on_firmlink_alias() {
-    let allow = exec_of(&crate::path::FrozenPath::from_surface("/private/tmp/x"));
-    let deny = exec_deny_of(&crate::path::FrozenPath::from_surface("/tmp/x"));
-
-    let composed = allow.widen(deny);
-    assert!(
-        allow_dirs(&composed).is_empty(),
-        "the deny must evict the alias-clashing allow, got {composed:?}",
-    );
-    assert!(
-        !admits(&stack_of(composed), "/tmp/x/bin"),
-        "a binary under the aliased surface must be denied"
-    );
-}
-
-/// U6: a deny holds every spelling of its name, so it evicts an allow on
-/// another spelling of its directory, and not one on its parent.
-#[test]
-fn exec_widen_drops_allow_on_another_spelling_of_a_deny() {
-    let p = |s: &str| crate::path::FrozenPath::from_surface(s);
-    let composed = exec_of(&p("/a/b")).widen(exec_deny_of(&p("/a/B")));
-    assert!(
-        allow_dirs(&composed).is_empty(),
-        "a deny on `/a/B` must evict the allow on `/a/b`, got {composed:?}",
-    );
-    let composed = exec_of(&p("/a/b")).widen(exec_deny_of(&p("/a/B/c")));
-    assert_eq!(
-        allow_dirs(&composed).len(),
-        1,
-        "a deny on `/a/B/c` must not evict the allow on `/a/b`"
-    );
-}
-
 /// The prefix universe folded through an allow-only and a deny-only grant
-/// alike, so the laws below reach deny-overrides — the dimension `exec_of` on
-/// its own never enters.
+/// alike, so the laws below reach exclusions, which `exec_of` on its own never
+/// enters.
 fn exec_universe() -> Vec<ExecGrant> {
     prefix_universe()
         .iter()
@@ -465,110 +243,10 @@ fn exec_universe() -> Vec<ExecGrant> {
         .collect()
 }
 
-#[test]
-fn exec_widen_commutative_with_denies() {
-    let u = exec_universe();
-    for a in &u {
-        for b in &u {
-            assert_eq!(a.clone().widen(b.clone()), b.clone().widen(a.clone()));
-        }
-    }
-}
-
-#[test]
-fn exec_widen_associative_with_denies() {
-    let u = exec_universe();
-    for a in &u {
-        for b in &u {
-            for c in &u {
-                assert_eq!(
-                    a.clone().widen(b.clone().widen(c.clone())),
-                    a.clone().widen(b.clone()).widen(c.clone())
-                );
-            }
-        }
-    }
-}
-
-#[test]
-fn exec_widen_idempotent_with_denies() {
-    for a in &exec_universe() {
-        assert_eq!(a.clone().widen(a.clone()), a.clone());
-    }
-}
-
-#[test]
-fn widen_commutative() {
-    let a = witness_a();
-    let b = witness_b();
-    assert_eq!(a.clone().widen(b.clone()), b.widen(a));
-}
-
-#[test]
-fn widen_associative() {
-    let a = witness_a();
-    let b = witness_b();
-    let c = witness_c();
-    assert_eq!(
-        a.clone().widen(b.clone().widen(c.clone())),
-        a.widen(b).widen(c)
-    );
-}
-
-#[test]
-fn widen_idempotent() {
-    let a = witness_a();
-    assert_eq!(a.clone().widen(a.clone()), a);
-}
-
-/// An omitted extension axis is the identity.
-#[test]
-fn widen_omitted_extension_axis_is_the_identity() {
-    let a = witness_a();
-    assert_eq!(a.clone().widen(Capabilities::default()), a);
-}
-
-/// An omitted base verb axis absorbs: it is every verb, which nothing widens.
-#[test]
-fn widen_omitted_base_verb_axis_absorbs() {
-    let a = witness_a();
-    let widened = Capabilities::default().widen(a.clone());
-    assert_eq!(
-        widened,
-        Capabilities {
-            editor: None,
-            shell: None,
-            ..a
-        }
-    );
-}
-
 fn shell_of(verbs: &[ShellVerb]) -> Capabilities {
     Capabilities {
         shell: Some(verbs.iter().copied().collect()),
         ..Default::default()
-    }
-}
-
-/// A base withholding `detach` regains it from an extension; no base can veto
-/// a verb against one.
-#[test]
-fn widen_joins_verb_sets() {
-    let widened = shell_of(&[ShellVerb::Chdir]).widen(shell_of(&[ShellVerb::Detach]));
-    assert_eq!(
-        widened.shell,
-        Some(ShellVerb::VARIANTS.iter().copied().collect())
-    );
-}
-
-/// A base that omits `shell` keeps every verb whatever the extension lists.
-#[test]
-fn widen_over_a_silent_base_keeps_every_verb() {
-    for extension in [&[][..], &[ShellVerb::Detach], ShellVerb::VARIANTS] {
-        let widened = Capabilities::default().widen(shell_of(extension));
-        assert_eq!(widened.shell, None);
-        let stack = GrantStack::of(widened);
-        assert!(every_flag().into_iter().all(|f| stack.permits(f)));
     }
 }
 
@@ -674,8 +352,8 @@ fn exec_keys_follow_the_frozen_surface() {
 
     let key = |surface, real| ExecKey::Path(crate::path::FrozenPath::for_test(surface, real));
     let linked: ExecGrant = [
-        (key("/a/x", "/real/x"), Verdict::Allow),
-        (key("/b/x", "/real/x"), Verdict::Allow),
+        (key("/a/x", "/real/x"), Evidence::ALLOW),
+        (key("/b/x", "/real/x"), Evidence::ALLOW),
     ]
     .into_iter()
     .collect();
@@ -720,52 +398,6 @@ fn a_run_carries_its_grant_stack_across_the_wire() {
     assert_eq!(
         serde_json::from_str::<crate::protocol::Run>(&json).unwrap(),
         run
-    );
-}
-
-/// The offline veto is a floor under base extension, and an extension's verbs
-/// join a base's verb set.
-#[test]
-fn widen_keeps_the_net_veto_and_unions_verbs() {
-    let widened = witness_a().widen(witness_b());
-    assert_eq!(widened.net, Some(Net::Offline));
-    assert_eq!(
-        widened.editor,
-        Some(EditorVerb::VARIANTS.iter().copied().collect())
-    );
-    assert_eq!(widened.shell, witness_a().shell);
-}
-
-#[test]
-fn widen_exec_widens_verdicts_and_unions_keys() {
-    let exec = witness_a().widen(witness_b()).exec.unwrap();
-    assert_eq!(exec.get(&name("cargo")), Some(&Verdict::Allow));
-    assert_eq!(exec.get(&name("ls")), Some(&Verdict::Allow));
-    assert_eq!(exec.get(&name("git")), Some(&Verdict::Allow));
-    assert_eq!(exec.get(&path_key("/opt/tool")), Some(&Verdict::Deny));
-}
-
-/// A `deny_path` is a sticky veto under widening as under meet, so an
-/// extension silent on a base carve-out cannot erode it.
-#[test]
-fn widen_fs_unions_prefixes_and_denies() {
-    let m = witness_a().widen(witness_b());
-    let fs = m.fs.unwrap();
-    assert!(fs.read_prefixes.iter().any(|p| p == np("/tmp").as_str()));
-    assert!(
-        fs.read_prefixes
-            .iter()
-            .any(|p| p == np("/tmp/work").as_str())
-    );
-    assert!(
-        fs.deny_paths
-            .iter()
-            .any(|p| p == np("/tmp/secret").as_str())
-    );
-    assert!(
-        fs.deny_paths
-            .iter()
-            .any(|p| p == np("/tmp/work/.exarch.toml").as_str())
     );
 }
 
@@ -1027,4 +659,668 @@ fn no_home_ctx() -> FreezeCtx {
         home: None,
         cwd: crate::path::test_cwd().into(),
     }
+}
+
+// ── Evidence ──────────────────────────────────────────────────────────────
+
+const FOUR: [Evidence; 4] = [
+    Evidence::NEITHER,
+    Evidence::ALLOW,
+    Evidence::DENY,
+    Evidence::BOTH,
+];
+
+/// The scalar laws, exhaustively: identities, associativity, commutativity,
+/// idempotence, the persistence of the negative bit, and `↓` preserving `∧`.
+#[test]
+fn evidence_is_a_bilattice_in_the_fragment_ral_uses() {
+    for a in FOUR {
+        assert_eq!(a.join(Evidence::NEITHER), a);
+        assert_eq!(a.meet(Evidence::ALLOW), a);
+        assert_eq!(a.join(a), a);
+        assert_eq!(a.meet(a), a);
+        for b in FOUR {
+            assert_eq!(a.join(b), b.join(a));
+            assert_eq!(a.meet(b), b.meet(a));
+            assert_eq!(
+                a.meet(b).permits(),
+                a.permits() && b.permits(),
+                "↓ preserves ∧: {a:?} {b:?}"
+            );
+            for op in [Evidence::join, Evidence::meet] {
+                assert_eq!(op(a, b).negative, a.negative || b.negative);
+            }
+            for c in FOUR {
+                assert_eq!(a.join(b).join(c), a.join(b.join(c)));
+                assert_eq!(a.meet(b).meet(c), a.meet(b.meet(c)));
+            }
+        }
+    }
+    assert!(Evidence::ALLOW.permits());
+    assert!(
+        ![Evidence::NEITHER, Evidence::DENY, Evidence::BOTH]
+            .iter()
+            .any(|e| e.permits())
+    );
+}
+
+/// The wire form is a required-field object, and `ExecGrant` a required pair
+/// of fields: Both and `every` round-trip; a repeated key, a Neither value, an
+/// old verdict string and a missing `every` are refused.
+#[test]
+fn evidence_and_exec_grants_cross_the_wire_strictly() {
+    let every = grant([(name("git"), Evidence::BOTH)]).join_top().unwrap();
+    assert!(every.every());
+    let json = serde_json::to_string(&every).unwrap();
+    assert_eq!(serde_json::from_str::<ExecGrant>(&json).unwrap(), every);
+    let key = serde_json::to_string(&name("git")).unwrap();
+    let both = r#"{"positive":true,"negative":true}"#;
+    let neither = r#"{"positive":false,"negative":false}"#;
+    let wire = |every: &str, rules: &str| format!(r#"{{{every}"rules":[{rules}]}}"#);
+    let ok = wire(r#""every":false,"#, &format!("[{key},{both}]"));
+    assert!(serde_json::from_str::<ExecGrant>(&ok).is_ok());
+    let repeated = wire(
+        r#""every":false,"#,
+        &format!("[{key},{both}],[{key},{both}]"),
+    );
+    assert!(serde_json::from_str::<ExecGrant>(&repeated).is_err());
+    let empty = wire(r#""every":false,"#, &format!("[{key},{neither}]"));
+    assert!(serde_json::from_str::<ExecGrant>(&empty).is_err());
+    let old = wire(r#""every":false,"#, &format!(r#"[{key},"allow"]"#));
+    assert!(serde_json::from_str::<ExecGrant>(&old).is_err());
+    let missing = wire("", &format!("[{key},{both}]"));
+    assert!(serde_json::from_str::<ExecGrant>(&missing).is_err());
+}
+
+// ── Joining and extension ─────────────────────────────────────────────────
+
+/// `⊕` is commutative, associative and idempotent on exec grants and fs
+/// policies, exclusions included.
+#[test]
+fn join_is_a_semilattice_over_the_prefix_universe() {
+    let u = prefix_universe();
+    for a in &u {
+        for b in &u {
+            assert_eq!(fs_of(a).join(fs_of(b)), fs_of(b).join(fs_of(a)));
+            for c in &u {
+                assert_eq!(
+                    fs_of(a).join(fs_of(b).join(fs_of(c))),
+                    fs_of(a).join(fs_of(b)).join(fs_of(c))
+                );
+            }
+        }
+        assert_eq!(fs_of(a).join(fs_of(a)), fs_of(a));
+    }
+    let e = exec_universe();
+    for a in &e {
+        for b in &e {
+            assert_eq!(a.clone().join(b.clone()), b.clone().join(a.clone()));
+            for c in &e {
+                assert_eq!(
+                    a.clone().join(b.clone().join(c.clone())),
+                    a.clone().join(b.clone()).join(c.clone())
+                );
+            }
+        }
+        assert_eq!(a.clone().join(a.clone()), a.clone());
+    }
+}
+
+/// An allowance and an exclusion of one key are Both, which `↓` refuses,
+/// whichever is joined first.
+#[test]
+fn joining_an_allowance_and_an_exclusion_is_both() {
+    let (allow, deny) = (exec_of(&nprefix("/x")), exec_deny_of(&nprefix("/x")));
+    for joined in [allow.clone().join(deny.clone()), deny.join(allow)] {
+        assert_eq!(joined.get(&dir_key("/x")), Some(&Evidence::BOTH));
+        assert!(!admits(&stack_of(joined), "/x/bin"));
+    }
+}
+
+fn fragment(caps: Capabilities) -> Fragment {
+    Fragment::of(caps)
+}
+
+/// An omitted fragment axis is the identity, and an omitted base axis stays
+/// unrestricted under a positive-only fragment.
+#[test]
+fn extension_reads_omission_by_role() {
+    let a = witness_a();
+    assert_eq!(a.clone().extend(fragment(Capabilities::default())), a);
+    let positive = fragment(Capabilities {
+        exec: Some(grant([(name("git"), Evidence::ALLOW)])),
+        fs: Some(fs_of(&nprefix("/tmp"))),
+        ..Capabilities::default()
+    });
+    let extended = Capabilities::default().extend(positive);
+    assert!(!extended.is_restrictive(), "{extended:?}");
+    assert!(GrantStack::of(extended).admits_fs_exact(
+        &FsOp::Read,
+        &Resolver::shell_less(),
+        std::path::Path::new("/anywhere"),
+    ));
+}
+
+/// An exclusion in the fragment over an omitted base axis is "every request,
+/// less the exclusion".
+#[test]
+fn extension_with_an_exclusion_over_an_omitted_axis_is_every_less_it() {
+    let excluding = fragment(Capabilities {
+        exec: Some(grant([(dir_key("/bad"), Evidence::DENY)])),
+        fs: Some(FsPolicy {
+            deny_paths: vec![nprefix("/secret")],
+            ..FsPolicy::default()
+        }),
+        ..Capabilities::default()
+    });
+    let extended = Capabilities::default().extend(excluding);
+    assert!(extended.is_restrictive());
+    assert!(extended.exec.as_ref().is_some_and(ExecGrant::every));
+    let stack = GrantStack::of(extended);
+    assert!(admits(&stack, "/anywhere/else"));
+    assert!(!admits(&stack, "/bad/prog"));
+    let resolver = Resolver::shell_less();
+    for op in [FsOp::Read, FsOp::Write] {
+        assert!(stack.admits_fs_exact(&op, &resolver, std::path::Path::new("/anywhere")));
+        assert!(!stack.admits_fs_exact(&op, &resolver, std::path::Path::new("/secret/f")));
+    }
+}
+
+/// Extension joins verb sets by union, and the net veto is a floor.
+#[test]
+fn extension_unions_verbs_and_keeps_the_net_veto() {
+    let extended = shell_of(&[ShellVerb::Chdir]).extend(fragment(shell_of(&[ShellVerb::Detach])));
+    assert_eq!(
+        extended.shell,
+        Some(ShellVerb::VARIANTS.iter().copied().collect())
+    );
+    for extension in [&[][..], &[ShellVerb::Detach], ShellVerb::VARIANTS] {
+        let extended = Capabilities::default().extend(fragment(shell_of(extension)));
+        assert_eq!(extended.shell, None);
+        let stack = GrantStack::of(extended);
+        assert!(every_flag().into_iter().all(|f| stack.permits(f)));
+    }
+    let offline = Capabilities {
+        net: Some(Net::Offline),
+        ..Capabilities::default()
+    };
+    assert_eq!(
+        Capabilities::default()
+            .extend(fragment(offline.clone()))
+            .net,
+        Some(Net::Offline)
+    );
+    assert_eq!(
+        offline.extend(fragment(Capabilities::default())).net,
+        Some(Net::Offline)
+    );
+}
+
+/// A base that omits exec but restricts fs, extended with a run allowance by
+/// name: the allowance stays beside `every`, so what it names is read, and a
+/// file at another real path under the same name still runs.
+#[cfg(unix)]
+#[test]
+fn an_extension_run_allowance_over_an_omitted_exec_reads_what_it_names() {
+    let base = Capabilities {
+        fs: Some(FsPolicy {
+            read_prefixes: vec![nprefix("/work")],
+            ..FsPolicy::default()
+        }),
+        ..Capabilities::default()
+    };
+    let extended = base.extend(fragment(Capabilities {
+        exec: Some(grant([(path_key("/opt/prog"), Evidence::ALLOW)])),
+        ..Capabilities::default()
+    }));
+    let stack = GrantStack::of(extended);
+    let resolver = Resolver::shell_less();
+    assert!(
+        stack
+            .read(std::path::Path::new("/opt/prog"), &resolver)
+            .is_ok()
+    );
+    assert!(
+        stack
+            .read(std::path::Path::new("/opt/other"), &resolver)
+            .is_err()
+    );
+}
+
+// ── Random policies ───────────────────────────────────────────────────────
+
+use super::exec::tests::Rng;
+
+const LAW_DIRS: [&str; 4] = ["/lawtest/a", "/lawtest/a/b", "/lawtest/z", "/lawtest/Z"];
+const LAW_FILES: [&str; 6] = [
+    "/lawtest/a/x",
+    "/lawtest/a/b/x",
+    "/lawtest/a/b/c/x",
+    "/lawtest/z/x",
+    "/lawtest/q/x",
+    "/lawtest/Z/x",
+];
+
+fn lit(p: &str) -> crate::path::FrozenPath {
+    crate::path::FrozenPath::for_test(p, p)
+}
+
+fn some(rng: &mut Rng, n: usize) -> bool {
+    rng.below(n) == 0
+}
+
+/// A random exec grant over the universe, `every` set one time in four where
+/// the grant is a policy and not an authored fragment.
+fn rand_exec(rng: &mut Rng, every_ok: bool) -> Option<ExecGrant> {
+    if some(rng, 3) {
+        return None;
+    }
+    let evidence = |rng: &mut Rng| {
+        rng.pick(&[
+            Evidence::ALLOW,
+            Evidence::ALLOW,
+            Evidence::DENY,
+            Evidence::BOTH,
+        ])
+    };
+    let mut entries = Vec::new();
+    for d in LAW_DIRS {
+        if some(rng, 3) {
+            entries.push((ExecKey::Dir(lit(d)), evidence(rng)));
+        }
+    }
+    for f in LAW_FILES {
+        if some(rng, 4) {
+            entries.push((ExecKey::Path(lit(f)), evidence(rng)));
+        }
+    }
+    let grant: ExecGrant = entries.into_iter().collect();
+    Some(if every_ok && some(rng, 4) {
+        grant.clone().join_top().unwrap_or(grant)
+    } else {
+        grant
+    })
+}
+
+fn rand_fs(rng: &mut Rng) -> Option<FsPolicy> {
+    if some(rng, 3) {
+        return None;
+    }
+    let pick = |rng: &mut Rng, n| {
+        LAW_DIRS
+            .iter()
+            .filter(|_| some(rng, n))
+            .map(|p| lit(p))
+            .collect::<Vec<_>>()
+    };
+    Some(FsPolicy {
+        read_prefixes: pick(rng, 3),
+        write_prefixes: pick(rng, 3),
+        deny_paths: pick(rng, 5),
+    })
+}
+
+fn rand_layer(rng: &mut Rng) -> Capabilities {
+    Capabilities {
+        exec: rand_exec(rng, true),
+        fs: rand_fs(rng),
+        ..Capabilities::default()
+    }
+}
+
+fn rand_stack(rng: &mut Rng) -> GrantStack {
+    let mut stack = GrantStack::default();
+    (0..=rng.below(3)).for_each(|_| stack.push(rand_layer(rng)));
+    stack
+}
+
+fn rand_verbs<V: VariantArray + Ord + Copy>(rng: &mut Rng) -> Option<BTreeSet<V>> {
+    (!some(rng, 3)).then(|| {
+        V::VARIANTS
+            .iter()
+            .copied()
+            .filter(|_| some(rng, 2))
+            .collect()
+    })
+}
+
+fn resolver() -> Resolver<'static> {
+    Resolver::shell_less()
+}
+
+fn exec_permits(stack: &GrantStack, real: &str) -> bool {
+    rules(stack).is_none_or(|r| {
+        r.evidence(Subject::File(&RealPath::assumed(real)))
+            .permits()
+    })
+}
+
+/// Law 4 on exec: an allowance never removes authority, an exclusion always
+/// wins, and nothing is permitted that neither side supports.
+#[test]
+fn law_4_extension_invariant_on_exec() {
+    let mut rng = Rng(0x1357_9bdf_2468_ace0);
+    for _ in 0..1500 {
+        let (base, fragment_exec) = (rand_exec(&mut rng, true), rand_exec(&mut rng, false));
+        let base_caps = Capabilities {
+            exec: base.clone(),
+            ..Capabilities::default()
+        };
+        let frag = Capabilities {
+            exec: fragment_exec.clone(),
+            ..Capabilities::default()
+        };
+        let extended = base_caps.clone().extend(Fragment::of(frag));
+        let own = fragment_exec.as_ref().map(ExecRules::compile);
+        for f in LAW_FILES {
+            let s = Subject::File(&RealPath::assumed(f));
+            let fe = own.as_ref().map_or(Evidence::NEITHER, |t| t.evidence(s));
+            let (b, e) = (
+                exec_permits(&GrantStack::of(base_caps.clone()), f),
+                exec_permits(&GrantStack::of(extended.clone()), f),
+            );
+            let msg = format!("{f}\nbase = {base:?}\nfragment = {fragment_exec:?}");
+            if fe.negative {
+                assert!(!e, "an exclusion lost: {msg}");
+            } else {
+                assert!(!b || e, "an allowance removed authority: {msg}");
+            }
+            assert!(!e || b || fe.positive, "authority from nowhere: {msg}");
+        }
+    }
+}
+
+/// Law 4 on fs, for each op, with no exec in play.
+#[test]
+fn law_4_extension_invariant_on_fs() {
+    let mut rng = Rng(0x0fed_cba9_8765_4321);
+    for _ in 0..1500 {
+        let (base, frag) = (rand_fs(&mut rng), rand_fs(&mut rng));
+        let layer = |fs: &Option<FsPolicy>| Capabilities {
+            fs: fs.clone(),
+            ..Capabilities::default()
+        };
+        let extended = layer(&base).extend(Fragment::of(layer(&frag)));
+        let permits = |caps: Capabilities, op: &FsOp, f: &str| {
+            let stack = GrantStack::of(caps);
+            region(&stack, &resolver(), op)
+                .is_none_or(|r| r.evidence(std::path::Path::new(f)).permits())
+        };
+        for op in [FsOp::Read, FsOp::Write] {
+            for f in LAW_FILES {
+                let fe = region(&GrantStack::of(layer(&frag)), &resolver(), &op)
+                    .map_or(Evidence::NEITHER, |r| r.evidence(std::path::Path::new(f)));
+                let b = permits(layer(&base), &op, f);
+                let e = permits(extended.clone(), &op, f);
+                let msg = format!("{f}\nbase = {base:?}\nfragment = {frag:?}");
+                if fe.negative {
+                    assert!(!e, "an exclusion lost: {msg}");
+                } else {
+                    assert!(!b || e, "an allowance removed authority: {msg}");
+                }
+                assert!(!e || b || fe.positive, "authority from nowhere: {msg}");
+            }
+        }
+    }
+}
+
+/// Law 4 on the read region with exec present: the run places an extension's
+/// exec supplies are reads, and its fs exclusions still win.
+#[test]
+fn law_4_extension_invariant_on_reads_with_run_places() {
+    let mut rng = Rng(0x0bad_cafe_f00d_5eed);
+    for _ in 0..1500 {
+        let layer = |exec: &Option<ExecGrant>, fs: &Option<FsPolicy>| Capabilities {
+            exec: exec.clone(),
+            fs: fs.clone(),
+            ..Capabilities::default()
+        };
+        let base = layer(&rand_exec(&mut rng, true), &rand_fs(&mut rng));
+        let (frag_exec, frag_fs) = (rand_exec(&mut rng, false), rand_fs(&mut rng));
+        let frag = layer(&frag_exec, &frag_fs);
+        let extended = base.clone().extend(Fragment::of(frag));
+        let own = layer(&frag_exec, &Some(frag_fs.clone().unwrap_or_default()));
+        let read = |caps: Capabilities, f: &str| {
+            running_region(&GrantStack::of(caps), &resolver())
+                .map_or(Evidence::ALLOW, |r| r.evidence(std::path::Path::new(f)))
+        };
+        for f in LAW_FILES {
+            let (fe, b, e) = (
+                read(own.clone(), f),
+                read(base.clone(), f).permits(),
+                read(extended.clone(), f).permits(),
+            );
+            let msg = format!("{f}\nbase = {base:?}\nfragment = {frag_exec:?} {frag_fs:?}");
+            if fe.negative {
+                assert!(!e, "an exclusion lost: {msg}");
+            } else {
+                assert!(!b || e, "an allowance removed authority: {msg}");
+            }
+            assert!(!e || b || fe.positive, "authority from nowhere: {msg}");
+        }
+    }
+}
+
+/// Law 4 on verbs and net.
+#[test]
+fn law_4_extension_invariant_on_verbs_and_net() {
+    let mut rng = Rng(0x2468_ace0_1357_9bdf);
+    for _ in 0..500 {
+        let layer = |rng: &mut Rng| Capabilities {
+            shell: rand_verbs(rng),
+            editor: rand_verbs(rng),
+            net: some(rng, 2).then_some(Net::Offline),
+            ..Capabilities::default()
+        };
+        let (base, frag) = (layer(&mut rng), layer(&mut rng));
+        let extended = base.clone().extend(Fragment::of(frag.clone()));
+        let (b, f, e) = (
+            GrantStack::of(base.clone()),
+            GrantStack::of(frag.clone()),
+            GrantStack::of(extended.clone()),
+        );
+        for flag in every_flag() {
+            assert!(!b.permits(flag) || e.permits(flag), "{flag:?}");
+            let listed = match flag {
+                Flag::Editor(v) => frag.editor.as_ref().is_some_and(|s| s.contains(&v)),
+                Flag::Shell(v) => frag.shell.as_ref().is_some_and(|s| s.contains(&v)),
+            };
+            assert!(!e.permits(flag) || b.permits(flag) || listed, "{flag:?}");
+        }
+        assert!(f.net().next().is_none() || e.net().next().is_some());
+        assert!(e.net().next().is_none() || b.net().next().is_some() || f.net().next().is_some());
+    }
+}
+
+/// A write allowance through a symlink to `/` is universal: top is decided by
+/// the frozen real identity, as the projection decides it.
+#[test]
+fn a_root_reached_through_a_symlink_denotes_top() {
+    let through = |surface, real| FsPolicy {
+        write_prefixes: vec![crate::path::FrozenPath::for_test(surface, real)],
+        ..FsPolicy::default()
+    };
+    assert!(through("/root-alias", "/").is_top());
+    assert!(!through("/", "/elsewhere").is_top());
+    assert!(!through("/work", "/work").is_top());
+}
+
+/// Activation reads denotations: an axis that denotes `t` activates nothing.
+#[test]
+fn activation_is_denotational() {
+    let every = grant([(name("git"), Evidence::ALLOW)]).join_top().unwrap();
+    assert!(every.is_top());
+    let writes_root = FsPolicy {
+        write_prefixes: vec![crate::path::FrozenPath::root()],
+        ..FsPolicy::default()
+    };
+    assert!(writes_root.is_top());
+    let top = Capabilities {
+        exec: Some(every),
+        fs: Some(writes_root.clone()),
+        ..Capabilities::default()
+    };
+    assert!(!top.is_restrictive());
+    assert!(!GrantStack::of(top).is_restrictive());
+    let excluding = Capabilities {
+        exec: Some(
+            grant([(dir_key("/bad"), Evidence::DENY)])
+                .join_top()
+                .unwrap(),
+        ),
+        ..Capabilities::default()
+    };
+    assert!(
+        excluding.is_restrictive(),
+        "an `every` table with exclusions restricts"
+    );
+    let denying = FsPolicy {
+        deny_paths: vec![nprefix("/bad")],
+        ..writes_root
+    };
+    assert!(!denying.is_top());
+    assert!(
+        Capabilities {
+            exec: Some(ExecGrant::default()),
+            ..Capabilities::default()
+        }
+        .is_restrictive()
+    );
+    assert!(
+        Capabilities {
+            net: Some(Net::Offline),
+            ..Capabilities::default()
+        }
+        .is_restrictive()
+    );
+}
+
+/// The read judgment agrees with the region of run places after `↓`, and cites
+/// an exclusion that applies; law 7 for a host file and for a bundled tool.
+#[test]
+fn the_read_and_run_judgments_agree_with_their_regions() {
+    let mut rng = Rng(0x9876_5432_10fe_dcba);
+    let resolver = resolver();
+    for _ in 0..800 {
+        let stack = rand_stack(&mut rng);
+        let full = running_region(&stack, &resolver);
+        for f in LAW_FILES {
+            let path = std::path::Path::new(f);
+            let read = stack.read(path, &resolver);
+            let want = full.as_ref().is_none_or(|r| r.evidence(path).permits());
+            assert_eq!(read.is_ok(), want, "{f}\nstack = {stack:?}");
+            if let Err(Withheld::Excluded { scope, .. }) = &read {
+                use super::table::Scope;
+                use crate::path::Deny;
+                assert!(scope.holds::<Deny>(path), "{scope:?} does not hold {f}");
+            }
+            let runs = stack.admit(file(f), vec![], &resolver).is_ok();
+            assert_eq!(
+                runs,
+                exec_permits(&stack, f) && want,
+                "{f}\nstack = {stack:?}"
+            );
+        }
+        let tool = stack
+            .admit(Program::Tool("ls".into()), vec![], &resolver)
+            .is_ok();
+        let tool_exec = rules(&stack).is_none_or(|r| r.evidence(Subject::Tool("ls")).permits());
+        assert_eq!(tool, tool_exec, "stack = {stack:?}");
+    }
+}
+
+/// Law 8: whatever the stack lets be written, it lets be read.
+#[test]
+fn law_8_writing_reads() {
+    let mut rng = Rng(0x0bad_cafe_f00d_1234);
+    let resolver = resolver();
+    for _ in 0..1000 {
+        let stack = rand_stack(&mut rng);
+        for f in LAW_FILES {
+            let path = std::path::Path::new(f);
+            assert!(
+                stack.write(path, &resolver).is_err() || stack.read(path, &resolver).is_ok(),
+                "{f}\nstack = {stack:?}"
+            );
+        }
+    }
+}
+
+/// Law 10: pushing a layer permits nothing the stack did not, for running,
+/// reading and writing alike.
+#[test]
+fn law_10_restriction_attenuates() {
+    let mut rng = Rng(0x5555_aaaa_3333_cccc);
+    let resolver = resolver();
+    for _ in 0..1000 {
+        let stack = rand_stack(&mut rng);
+        let mut pushed = stack.clone();
+        pushed.push(rand_layer(&mut rng));
+        for f in LAW_FILES {
+            let path = std::path::Path::new(f);
+            let msg = format!("{f}\nstack = {stack:?}\npushed = {pushed:?}");
+            assert!(
+                pushed.admit(file(f), vec![], &resolver).is_err()
+                    || stack.admit(file(f), vec![], &resolver).is_ok(),
+                "run {msg}"
+            );
+            assert!(
+                pushed.read(path, &resolver).is_err() || stack.read(path, &resolver).is_ok(),
+                "read {msg}"
+            );
+            assert!(
+                pushed.write(path, &resolver).is_err() || stack.write(path, &resolver).is_ok(),
+                "write {msg}"
+            );
+        }
+    }
+}
+
+/// Under a ceiling that reads nothing and omits exec, a nested layer allowing
+/// `File(s)` makes `s` neither readable nor runnable.
+#[test]
+fn a_nested_run_allowance_cannot_make_what_the_ceiling_withholds_readable() {
+    let mut stack = GrantStack::of(Capabilities {
+        fs: Some(FsPolicy::default()),
+        ..Capabilities::default()
+    });
+    stack.push(Capabilities {
+        exec: Some(grant([(path_key("/opt/prog"), Evidence::ALLOW)])),
+        ..Capabilities::default()
+    });
+    let resolver = resolver();
+    assert!(
+        stack
+            .read(std::path::Path::new("/opt/prog"), &resolver)
+            .is_err()
+    );
+    assert!(stack.admit(file("/opt/prog"), vec![], &resolver).is_err());
+}
+
+/// A bundled tool runs wherever exec permits it and no fs exclusion covers
+/// ral's binary; an exec exclusion of ral leaves it alone.
+#[test]
+fn a_bundled_tool_reads_ral_s_binary() {
+    let Some(own) = ral_binary() else { return };
+    let stack = |fs: FsPolicy| {
+        GrantStack::of(Capabilities {
+            fs: Some(fs),
+            ..Capabilities::default()
+        })
+    };
+    let tool = |s: &GrantStack| {
+        s.admit(Program::Tool("ls".into()), vec![], &resolver())
+            .is_ok()
+    };
+    let own_dir = crate::path::FrozenPath::from_surface(own.as_path().parent().unwrap());
+    let excluding = stack(FsPolicy {
+        read_prefixes: vec![crate::path::FrozenPath::root()],
+        deny_paths: vec![own_dir],
+        ..FsPolicy::default()
+    });
+    assert!(!tool(&excluding));
+    assert!(
+        tool(&stack(FsPolicy::default())),
+        "an fs that merely does not read ral's binary refuses nothing"
+    );
 }

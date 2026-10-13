@@ -28,7 +28,7 @@
 //! path names nothing.  One substitution, in one function, which is why
 //! the construction lives here and is not scattered across the session.
 
-use ral_core::capability::{Capabilities, ExecKey, FsPolicy, Verdict};
+use ral_core::capability::{Capabilities, Evidence, ExecKey, FsPolicy};
 use ral_core::path::FrozenPath;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -427,7 +427,7 @@ impl Grant {
             }),
             exec: Some(
                 (TOOLBOX.iter())
-                    .map(|name| (ExecKey::Name((*name).to_string()), Verdict::Allow))
+                    .map(|name| (ExecKey::Name((*name).to_string()), Evidence::ALLOW))
                     .collect(),
             ),
             editor: Some(BTreeSet::new()),
@@ -931,7 +931,7 @@ mod tests {
         for tool in ["pandoc", "soffice", "python3", "qpdf", "csvcut"] {
             assert_eq!(
                 exec.get(&ExecKey::Name(tool.into())),
-                Some(&Verdict::Allow),
+                Some(&Evidence::ALLOW),
                 "the office toolbox must admit {tool}"
             );
         }

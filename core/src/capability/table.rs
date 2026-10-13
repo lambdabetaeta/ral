@@ -1,31 +1,57 @@
-//! Authority as a table of scoped rules.
+//! Authority as a table of scoped evidence.
 //!
-//! A [`Table`] maps scopes to verdicts and denotes a function from subjects
-//! to verdicts: the most specific rule that speaks to a subject decides,
-//! ties meet, and silence denies.  The fs [`Region`](super::fs::Region) and
-//! the [`ExecRules`](super::exec::ExecRules) are its two instances.
+//! A [`Table`] maps scopes to [`Evidence`] and denotes a function from
+//! subjects to it: a subject has positive evidence where some positive scope
+//! holds it as stored, and negative evidence where some negative scope holds
+//! it under any spelling of its name.  Nothing is ranked: an exclusion beats
+//! every allowance, and only [`Evidence::permits`] closes a gap.  The fs
+//! [`Region`](super::fs::Region) and the [`ExecRules`](super::exec::ExecRules)
+//! are its two instances.
 
-use super::{Meet, Verdict, meet_insert};
+use super::lattice::join_insert;
+use super::{Evidence, Join, Meet};
 use crate::path::{Allow, Deny, Polarity};
 use std::collections::BTreeMap;
 
 /// Where a rule applies.
-pub(crate) trait Scope: Ord + Clone {
+///
+/// The meet is exact under three obligations:
+///
+/// - every positive scope holds its own subject;
+/// - two positive scopes with a common subject are nested;
+/// - `own()` detects containment: if `a` holds `own(k)` and `k` holds `s`,
+///   then `a` holds `s`.
+///
+/// A future positive scope that does not nest needs an explicit intersection
+/// before it is added.
+pub(crate) trait Scope: Ord + Clone + std::fmt::Debug {
     type Subject<'a>: Copy
     where
         Self: 'a;
-    type Rank: Ord;
-    /// How specific a rule here is; the greater decides.
-    fn rank(&self, verdict: &Verdict) -> Self::Rank;
     /// Whether `subject` falls in this scope, names read as `P` reads them.
     fn holds<P: Polarity>(&self, subject: Self::Subject<'_>) -> bool;
     /// The subject a rule at this scope is itself judged at.
     fn own(&self) -> Self::Subject<'_>;
+    /// Whether `evidence` may be stored here: a scope has one polarity by
+    /// construction where its subjects are not nested.
+    fn stores(&self, _evidence: Evidence) -> bool {
+        true
+    }
 }
 
-/// Rules by scope; a scope written twice meets.
+/// Why a supplied table refuses a subject.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Table<K: Scope>(BTreeMap<K, Verdict>);
+pub(crate) enum Withheld<K> {
+    /// No scope supports it.
+    MissingAllowance,
+    /// An exclusion applies; `respelled` when it holds the subject only under
+    /// another spelling of its name.
+    Excluded { scope: K, respelled: bool },
+}
+
+/// Evidence by scope; a scope written twice joins.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Table<K: Scope>(BTreeMap<K, Evidence>);
 
 impl<K: Scope> Default for Table<K> {
     fn default() -> Self {
@@ -33,16 +59,17 @@ impl<K: Scope> Default for Table<K> {
     }
 }
 
-impl<K: Scope> Extend<(K, Verdict)> for Table<K> {
-    fn extend<I: IntoIterator<Item = (K, Verdict)>>(&mut self, rules: I) {
-        for (scope, verdict) in rules {
-            meet_insert(&mut self.0, scope, verdict);
+impl<K: Scope> Extend<(K, Evidence)> for Table<K> {
+    fn extend<I: IntoIterator<Item = (K, Evidence)>>(&mut self, rules: I) {
+        for (scope, evidence) in rules {
+            debug_assert!(scope.stores(evidence), "{scope:?}");
+            join_insert(&mut self.0, scope, evidence);
         }
     }
 }
 
-impl<K: Scope> FromIterator<(K, Verdict)> for Table<K> {
-    fn from_iter<I: IntoIterator<Item = (K, Verdict)>>(rules: I) -> Self {
+impl<K: Scope> FromIterator<(K, Evidence)> for Table<K> {
+    fn from_iter<I: IntoIterator<Item = (K, Evidence)>>(rules: I) -> Self {
         let mut table = Self::default();
         table.extend(rules);
         table
@@ -50,87 +77,76 @@ impl<K: Scope> FromIterator<(K, Verdict)> for Table<K> {
 }
 
 impl<K: Scope> Table<K> {
-    pub(crate) fn rules(&self) -> impl Iterator<Item = (&K, &Verdict)> {
+    pub(crate) fn rules(&self) -> impl Iterator<Item = (&K, &Evidence)> {
         self.0.iter()
     }
 
-    pub(crate) fn verdict(&self, subject: K::Subject<'_>) -> Verdict {
-        most_specific(self.speaking(subject))
+    pub(crate) fn supports(&self, s: K::Subject<'_>) -> bool {
+        self.0
+            .iter()
+            .any(|(k, e)| e.positive && k.holds::<Allow>(s))
     }
 
-    /// The most specific deny holding `subject` only under another spelling
-    /// of its name, for a refusal to cite; none when some deny holds it as
-    /// stored.
-    pub(crate) fn respelled(&self, subject: K::Subject<'_>) -> Option<&K> {
-        if self.denies().any(|k| k.holds::<Allow>(subject)) {
-            return None;
+    pub(crate) fn excludes(&self, s: K::Subject<'_>) -> bool {
+        self.0.iter().any(|(k, e)| e.negative && k.holds::<Deny>(s))
+    }
+
+    pub(crate) fn evidence(&self, s: K::Subject<'_>) -> Evidence {
+        Evidence {
+            positive: self.supports(s),
+            negative: self.excludes(s),
         }
-        self.denies()
-            .filter(|k| k.holds::<Deny>(subject))
-            .max_by_key(|k| k.rank(&Verdict::Deny))
     }
 
-    /// The allows still in force at their own subjects.
-    pub(crate) fn live(&self) -> impl Iterator<Item = &K> {
-        (self.0.iter())
-            .filter(|(k, v)| !v.is_denied() && !self.verdict(k.own()).is_denied())
-            .map(|(k, _)| k)
+    pub(crate) fn positives(&self) -> impl Iterator<Item = &K> {
+        (self.0.iter()).filter(|(_, e)| e.positive).map(|(k, _)| k)
     }
 
     pub(crate) fn denies(&self) -> impl Iterator<Item = &K> {
-        (self.0.iter())
-            .filter(|(_, v)| v.is_denied())
-            .map(|(k, _)| k)
+        (self.0.iter()).filter(|(_, e)| e.negative).map(|(k, _)| k)
     }
 
-    fn speaking<'s>(
-        &'s self,
-        subject: K::Subject<'_>,
-    ) -> impl Iterator<Item = (K::Rank, &'s Verdict)> {
-        (self.0.iter())
-            .filter(move |(k, v)| speaks(*k, v, subject))
-            .map(|(k, v)| (k.rank(v), v))
+    /// Permitted at its own subject; descendants may still be excluded.
+    pub(crate) fn live(&self) -> impl Iterator<Item = &K> {
+        self.positives()
+            .filter(move |k| self.evidence(k.own()).permits())
+    }
+
+    /// `None` exactly when `s` has positive evidence alone.  An exclusion
+    /// that holds `s` as stored is cited before one that holds it only by a
+    /// fold, in stable key order: deterministic, never by depth.
+    pub(crate) fn withheld(&self, s: K::Subject<'_>) -> Option<Withheld<K>> {
+        let witness = self
+            .denies()
+            .filter(|k| k.holds::<Deny>(s))
+            .min_by_key(|k| !k.holds::<Allow>(s));
+        match witness {
+            Some(k) => Some(Withheld::Excluded {
+                scope: k.clone(),
+                respelled: !k.holds::<Allow>(s),
+            }),
+            None => (!self.supports(s)).then_some(Withheld::MissingAllowance),
+        }
     }
 }
 
-/// Whether a rule speaks to `subject`.  A table names polarities, never
-/// identities: which spellings are one name is `path`'s alone to say.
-pub(super) fn speaks<K: Scope>(scope: &K, verdict: &Verdict, subject: K::Subject<'_>) -> bool {
-    match verdict {
-        Verdict::Deny => scope.holds::<Deny>(subject),
-        Verdict::Allow => scope.holds::<Allow>(subject),
-    }
-}
-
-/// The greatest rank decides; equal ranks meet; silence denies.
-fn most_specific<'v, R: Ord>(speakers: impl IntoIterator<Item = (R, &'v Verdict)>) -> Verdict {
-    speakers
-        .into_iter()
-        .fold(None::<(R, Verdict)>, |best, (rank, v)| match best {
-            Some((held, b)) if held > rank => Some((held, b)),
-            Some((held, b)) if held == rank => Some((held, b.meet(v.clone()))),
-            _ => Some((rank, v.clone())),
-        })
-        .map_or(Verdict::Deny, |(_, v)| v)
-}
-
-/// `⟦a ∧ b⟧ = ⟦a⟧ ∧ ⟦b⟧`: denies join; an allow survives at its own
-/// subject's met verdict, where that is not a deny.
+/// `∧`, pointwise on evidence: denies join; an allow survives where both
+/// tables support its own subject.
 impl<K: Scope> Meet for Table<K> {
     fn meet(self, other: Self) -> Self {
-        let both = |k: &K| self.verdict(k.own()).meet(other.verdict(k.own()));
-        // A default met to a deny stays absent: written down, a deny holds
-        // every spelling of its name.
-        (self.0.iter().chain(&other.0))
-            .filter_map(|(k, v)| {
-                let m = if v.is_denied() {
-                    Verdict::Deny
-                } else {
-                    both(k)
-                };
-                (v.is_denied() || !m.is_denied()).then(|| (k.clone(), m))
-            })
-            .collect()
+        let denies = (self.denies().chain(other.denies())).map(|k| (k.clone(), Evidence::DENY));
+        let allows = (self.positives().chain(other.positives()))
+            .filter(|k| self.supports(k.own()) && other.supports(k.own()))
+            .map(|k| (k.clone(), Evidence::ALLOW));
+        denies.chain(allows).collect()
+    }
+}
+
+/// `⊕`, pointwise on evidence: the floor and support join through it.
+impl<K: Scope> Join for Table<K> {
+    fn join(mut self, other: Self) -> Self {
+        self.extend(other.0);
+        self
     }
 }
 
@@ -142,14 +158,14 @@ impl<K: Scope> Meet for Table<K> {
 mod tests {
     use super::{Scope, Table};
     use crate::capability::exec::tests::{Rng, paths, random};
-    use crate::capability::fs::Region;
-    use crate::capability::{Meet, Verdict};
-    use crate::path::FrozenPath;
+    use crate::capability::fs::{FsScope, Region};
+    use crate::capability::{Evidence, Join, Meet};
+    use crate::path::{FrozenPath, RealPath};
     use std::path::Path;
 
-    /// `⟦a ∧ b⟧ = ⟦a⟧ ∧ ⟦b⟧` at every subject, and the meet is a semilattice
-    /// on what it makes: a table as written may hold an allow its own rules
-    /// outrank, which a meet leaves out.
+    /// `ev(a ∧ b, s) = ev(a, s) ∧ ev(b, s)` and likewise for `⊕`, Both and
+    /// Neither included, at every subject; and on what the meet makes, a
+    /// semilattice, structurally: `a ∧ a = a`, commutative, associative.
     fn laws<'s, K: Scope + std::fmt::Debug + 's>(
         mut rng: Rng,
         random: impl Fn(&mut Rng) -> Table<K>,
@@ -158,23 +174,32 @@ mod tests {
         for _ in 0..1000 {
             let (a, b, c) = (random(&mut rng), random(&mut rng), random(&mut rng));
             let met = a.clone().meet(b.clone());
+            let joined = a.clone().join(b.clone());
             for &s in subjects {
-                let pointwise = a.verdict(s).meet(b.verdict(s));
-                assert_eq!(met.verdict(s), pointwise, "a = {a:?}\nb = {b:?}");
+                assert_eq!(
+                    met.evidence(s),
+                    a.evidence(s).meet(b.evidence(s)),
+                    "∧\na = {a:?}\nb = {b:?}"
+                );
+                assert_eq!(
+                    joined.evidence(s),
+                    a.evidence(s).join(b.evidence(s)),
+                    "⊕\na = {a:?}\nb = {b:?}"
+                );
             }
-            let own = a.clone().meet(a.clone());
-            assert_eq!(own.clone().meet(own.clone()), own, "a = {a:?}");
+            assert_eq!(a.clone().meet(a.clone()), a, "a = {a:?}");
             assert_eq!(met, b.clone().meet(a.clone()), "a = {a:?}\nb = {b:?}");
             assert_eq!(
                 met.meet(c.clone()),
                 a.clone().meet(b.clone().meet(c.clone())),
                 "a = {a:?}\nb = {b:?}\nc = {c:?}"
             );
+            assert_eq!(joined, b.clone().join(a.clone()), "a = {a:?}\nb = {b:?}");
         }
     }
 
     #[test]
-    fn the_exec_meet_is_pointwise_and_a_semilattice() {
+    fn the_exec_meet_and_join_are_pointwise_on_evidence() {
         let paths = paths();
         let subjects: Vec<_> = crate::capability::exec::tests::subjects(&paths).collect();
         laws(Rng(0x9e37_79b9_7f4a_7c15), random, &subjects);
@@ -195,14 +220,29 @@ mod tests {
         ]
     }
 
+    /// Places at a prefix's path and at its descendants.
+    fn places() -> [RealPath; 4] {
+        ["/d", "/d/secrets/f", "/e/sub", "/z"].map(RealPath::assumed)
+    }
+
     fn random_region(rng: &mut Rng) -> Region {
-        (prefixes().into_iter())
-            .filter_map(|p| (rng.below(3) == 0).then(|| (p, Verdict::from(rng.below(2) == 0))))
-            .collect()
+        let mut region = Region::default();
+        for prefix in prefixes() {
+            if rng.below(3) == 0 {
+                let evidence = rng.pick(&[Evidence::ALLOW, Evidence::DENY, Evidence::BOTH]);
+                region.extend([(FsScope::Prefix(prefix), evidence)]);
+            }
+        }
+        for place in places() {
+            if rng.below(3) == 0 {
+                region.extend([(FsScope::Place(place), Evidence::ALLOW)]);
+            }
+        }
+        region
     }
 
     #[test]
-    fn the_fs_meet_is_pointwise_and_a_semilattice() {
+    fn the_fs_meet_and_join_are_pointwise_on_evidence() {
         let probes = [
             "/d/secrets/f/x",
             "/d/Secrets/x",
@@ -212,6 +252,7 @@ mod tests {
             "/e/x",
             "/e/sub/x",
             "/z",
+            "/z/y",
         ]
         .map(Path::new);
         laws(Rng(0x5851_f42d_4c95_7f2d), random_region, &probes);

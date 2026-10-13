@@ -7,12 +7,15 @@ everything it calls. Authority is never amplified:
 
 - a dimension omitted from a grant inherits the ambient authority;
 - a dimension present can only narrow it;
-- nested grants compose by meet, deny-overrides: each of `fs` and `exec` is a
-  table of scoped rules whose meet is the pointwise meet of verdicts
+- nested grants compose by meet, exclusion-wins: each of `fs` and `exec` is a
+  table of scoped rules denoting a function from requests to Belnap evidence,
+  and the meet is the pointwise meet of evidence
   ([[design/authority-tables|authority-tables]]), the algebra read against the
   literature in [[related/access-control-algebra|access-control-algebra]];
-- a deny is anti-monotonic — further layers can add denies but never reopen a
-  denied region.
+- an exclusion is anti-monotonic: further layers can add exclusions but never
+  reopen an excluded region, and no specificity does either: neither an exact
+  file nor a narrower directory, nor a carrier, the dynamic linker or ral's
+  own binary.
 
 **A deny's reach is the content, not the spelling.** "Never reopen a denied
 region" must hold for what a deny protects, not just the string naming it: a
@@ -27,8 +30,9 @@ and what that costs differs by backend — see
 [[internals/holding-a-deny|holding-a-deny]] for the rendering
 and the per-backend price.
 
-**The axes are independent:** each is a separate field whose absence is the meet
-identity (`None` = inherit = ⊤, [[map/core/shell-state|`Option<T>: Meet`]]).
+**The axes are independent:** each is a separate field whose absence in a
+*policy* is `t`, the meet identity (`None` = inherit,
+[[map/core/shell-state|`Option<T>: Meet`]]).
 
 - **Restricting one axis does not restrict another.** `grant [fs: [...]] { … }`
   narrows the filesystem but leaves `net`, `exec`, `editor`, and `shell` at the
@@ -46,14 +50,162 @@ identity (`None` = inherit = ⊤, [[map/core/shell-state|`Option<T>: Meet`]]).
   ([[decisions/260906_the-envelope-is-a-process-namespace|the-envelope-is-a-process-namespace]]).
 
 This is a deliberate mental-model fact, recorded so omission is never mistaken
-for an implicit cross-axis deny: an omitted axis is ⊤, the identity of `meet`.
+for an implicit cross-axis deny: an omitted axis is `t`, the identity of `meet`.
+Activation reads what a policy *denotes*, not what it spells: a layer restricts
+exactly where some axis does not denote `t`, so `every` with no exclusion, or an
+fs that writes the root and excludes nothing, restricts nothing and activates no
+launch hardening.
+
+## Selectors, refusals and summaries
+
+- **`system` and `homebrew`.** `system` is the platform's own tool roots and no
+  longer holds Homebrew; `` `dir `homebrew `` is the Homebrew prefixes that exist
+  at freeze time. `HOMEBREW_PREFIX`, read from the host environment as `path`
+  reads `$PATH`, replaces the defaults when it is an absolute path; otherwise the
+  defaults are whichever of `/opt/homebrew`, `/home/linuxbrew/.linuxbrew` and
+  `~/.linuxbrew` exist, and an absent Homebrew expands to nothing, never an
+  error. Intel macOS's `/usr/local` is reached only through `HOMEBREW_PREFIX`,
+  since that prefix is shared with everything else. The root is the whole prefix,
+  so a formula's `bin` link and the `Cellar` file it resolves to are both
+  admitted, and readable by running. The fs floor's Homebrew entries are the same
+  expansion: a brew program admitted by name or by `path` maps its libraries from
+  its prefix wherever its admission came from. The floor is an allowance like
+  any other, so it renders frozen and a redirected root shows nothing.
+  An exclusion means "not allowed", never "not included": a profile that merely
+  leaves something unlisted does not exclude it.
+- **A refusal says why, in one of a few shapes.** *Missing allowance* names the
+  permission (reading, writing or running) and, only where more than one layer
+  supplies the axis, says an enclosing grant may be the one withholding it and
+  that a nested grant cannot add authority its caller withholds; it never
+  suggests an allowance in the innermost grant would help. *Excluded* names the
+  witness and says that no allowance overrides it, and points at the policy that
+  imposes it, never at `--extend`. *Unreadable program* says the program may run
+  but what running reads is withheld, and for a bundled tool names ral's binary
+  and the exclusion covering it. *Redirected allowance* names the link and says an
+  allowance names what it named when granted, and how to grant the new target.
+  *Respelled* keeps the explanation for an exclusion reached through case, Unicode
+  or a filesystem alias.
+- **Summaries list what was authored.** exarch's prompt, the grant legend and
+  synod's reused summaries list allowances and exclusions as written and compute
+  no effective permission per key (for bare names that would need host
+  resolution). A key with both bits appears in both lists, and the legend says
+  exclusions win. `every` reads "every program, less the exclusions below";
+  allowances beside it add no running but still make what they name readable.
+  A layer is summarised where it restricts *or* where its exec names a run place:
+  a ceiling of `every` beside `File(s)` with fs omitted denotes `t`, yet under a
+  nested fs-only restriction it makes `s` readable, so the reader needs to be
+  told. "Activates confinement" and "says something the reader needs" are two
+  predicates. The self layer is summarised like any exclusion: "every program,
+  less exarch itself".
+
+## Policy, extension and the six rules
+
+**Authority is a ceiling, extended once, then only restricted.** The ceiling is
+a base extended by at most one fragment (`--extend`, `B ◁ F`); every later
+layer (restrict files, credential layers, spawned children, `--capabilities`,
+`grant` blocks) restricts. Within ral there is no extension at all
+([[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]]).
+
+- **Roles are types.** An omitted axis denotes the identity of the role it
+  plays: `t` in a *policy* (a base, a restriction, the stack), `⊥` in an
+  *extension fragment*. `Capabilities` is a policy; the loader returns a
+  `Fragment`, consumed only by `Capabilities::extend` and never pushable onto a
+  stack. Reading an omission in the wrong role is a type error.
+- **In the extension an allowance never removes authority; only an exclusion
+  does.** The extension invariant states it of policy denotations: where `F` has no negative
+  evidence at `s`, `B` permitting `s` implies `B ◁ F` permitting it; where `F`
+  excludes `s`, `B ◁ F` refuses it; and `B ◁ F` permits only what `B` or `F`
+  supports. An axis the base leaves unrestricted stays so, less the
+  fragment's exclusions: `--base dangerous --extend git.exarch.ral` is every
+  request less the file's exclusions, not "only `git`". Verbs join by union and
+  carry no exclusions, so a base cannot withhold a verb against a fragment.
+- **Minimal plus git.** `minimal` admits `system` and leaves Homebrew unlisted
+  (it is a selector, `` `dir `homebrew ``, not part of `system`); a fragment
+  that allows `` `name git ``, loaded with `--extend`, adds `git` and removes
+  nothing, and a Homebrew `git` is admitted by name with nothing in the way.
+
+**Running and writing read.** A grant reads what it lets be written, in the
+layer that states it (writing reads), and what it, *and the grants enclosing
+it*, let run by path, directory or name (running reads, at the stack). A
+layer's read region joins its own read and write prefixes to the run places of
+the exec meet over itself and the layers beneath it; no layer makes anything
+readable for the layers beneath it, so pushing a layer never widens
+(restriction attenuates).
+
+- A restrict file that reads only `` `cwd . `` leaves `cargo` in
+  `~/.cargo/bin` readable and runnable where the enclosing grant runs it; to
+  hide it, *exclude* it.
+- A nested grant never makes something readable by naming it in exec: under a
+  ceiling that reads nothing and omits exec, a nested `File(s)` makes `s`
+  neither readable nor runnable. Order matters: a layer that reads nothing,
+  beneath one that runs `File(s)` and omits fs, refuses `s`; the other way
+  round permits it.
+- A program that runs only through `every`, or with exec omitted, must be
+  readable under fs; an fs exclusion of a run place refuses running it, and the
+  refusal names the exclusion.
+- A bundled tool runs inside the confined child, which runs ral's own image, so
+  it reads ral's binary: an fs exclusion over ral's binary refuses every
+  bundled tool on every platform, and an exec exclusion of ral leaves them
+  alone.
+
+**ral's binary is an ordinary host file.** It runs exactly where a grant
+admits it, by path, directory or name, in the guard and the kernel alike; nothing
+admits it beyond the policy, and nothing excludes it beyond the policy. A grant
+that admits the folder holding ral (`reasonable` admits `~/.cargo/bin/`, where
+a cargo install puts it) admits ral. A *nested ral* boots with a fresh stack and
+is confined by the kernel alone: whatever only the guard enforces, bundled-tool
+rules and verbs among it, does not bind it, so under an exec allow-list that
+admits ral, `ral -c 'mv a b'` runs the bundled `mv` the list omits. A grant whose
+guard-only rules must hold against a nested ral does not admit it.
+
+**exarch's agent cannot start exarch as a process.** In every session,
+`dangerous` included, exarch pushes as its last layer an exec exclusion of its
+own binary, by the path it was pinned from; spawned agents inherit it. It names
+that binary and nothing else, so another install of exarch or ral, in a folder
+a grant admits, runs. `dangerous` is therefore ambient authority *less starting
+exarch*: its stack is restrictive, launch hardening applies, and on Linux and
+macOS every launch is sandboxed. The shell still evaluates ral in its own
+process.
+
+Why unconditional: a spawn forks the parent's stack and pushes one layer without
+passing through `for_invocation`, so a layer pushed only where exec restricts
+would miss a `dangerous` parent's restricted child; an always-present layer is
+inherited by every descendant. Nothing the agent legitimately does re-execs
+exarch (its shell evaluates in exarch's process, bundled tools run in-process in
+the confined child, pipeline anchors are spawned unconfined by exarch itself), so
+the exclusion is exec only: an fs exclusion of exarch's binary would refuse every
+bundled tool. Costs: on Linux, a program created during a launch directly on the
+spine of exarch's binary (`~`, `~/.cargo`, `~/.cargo/bin` for a cargo install)
+runs from the next launch; under `dangerous` with an fs-restricting restrict
+file, a program built in the envelope's private `/tmp` does not run. Windows pays
+nothing: exec is enforced only in process and an exec-only restriction projects
+nothing there. synod builds its own stack and its guest holds no exarch binary,
+so it has no self layer. Like every exclusion it is a guardrail: it does not hold
+on Windows, against another install, against a copy in a folder both writable and
+runnable (`--ral-bundled-tool mv` runs there without any stack), the dynamic
+linker run on one, or, on Linux, a hard link to it at an admitted path.
+
+**Allowances name what they named; exclusions follow their names.** An allowance
+keeps the real path it was frozen to and is never re-resolved, so a symlink put
+in its place later redirects nothing and both enforcers refuse a launch whose
+frozen allowance now meets a link. An exclusion re-resolves on every question,
+so it catches whatever its name reaches now. A bare program name is the one live
+allowance: it names whatever the host `PATH` finds at each run.
+
+**Exclusions are guardrails, not walls, where writing meets running.** An
+exclusion names programs by path and name. A copy, a newly written program or a
+script fed to an interpreter is a different request. Support, the dynamic linker
+and the carriers a launch needs, joins as an allowance only where the author
+wrote none, and yields to every exclusion on either axis
+([[design/capability-carriers|capability-carriers]]).
 
 **Capability checks gate four dimensions:**
 
-- **exec** as allow or deny of a target, regardless of its arguments — more
-  expressive than orthodox object-capability, since a base profile can veto a
-  name a restrict file never mentions;
-- **fs** by read/write path prefix with denies;
+- **exec** as allowance or exclusion of a target, regardless of its arguments
+  — more expressive than orthodox object-capability, since a base profile can
+  exclude a name a restrict file never mentions; `every` is the one universal
+  allowance, a flag no surface spelling sets, never a key;
+- **fs** by read/write path prefix with exclusions;
 - **net** as `` `offline `` or nothing;
 - **editor** and **shell** as verb lists, where `detach` is the one verb that
   gates a *verb* rather than an action on a resource, and the one that reaches
@@ -105,11 +257,23 @@ nested records of lists, `net` is `` `offline ``, `editor` and `shell` are
 verb lists. The checker ascribes the nested tables too, so a bare string where
 a place belongs, a misspelled tag or `net: true` fails before the program
 runs, naming the tags on offer. Every list is a set, with repeats idempotent;
-extension joins verb lists; a selector (`path`, `system`) is valid only under
+extension joins verb lists; a selector (`path`, `system`, `homebrew`) is valid only under
 `dir`; and there is no argument filter
 ([[decisions/261012_grant-surface-is-typed|grant-surface-is-typed]]). Values
 the checker cannot type still reach the runtime decoder, which judges the same
 vocabulary.
+
+Why it is shaped so: lists are homogeneous and a tag has one payload type, so
+every place is tagged and every anchor takes a subpath (`.` for the anchor), or
+a string could not sit beside a tag. A selector is a different type from a place
+because its expansion has no containment guard, so a write grant on one would
+plant programs where the user's own shell looks. An `absolute` payload is
+classified on the raw string, so a path rooted only on the other platform is a
+dead grant and one profile loads on both. Nested tables are records (`()` stays
+the empty *profile*, and `exec: [allow: []]` the empty table). `chdir` gates
+`cd` while `within [dir: …]` is judged by `fs` alone. A path in `fs` can name a
+socket and no tag stops a process connecting to it; fs authority and service
+authority are separate, and no spelling widens what an envelope forbids.
 
 A `.ral` profile and the inline
 `grant` surface are symmetric: both decode through the same walker into one
@@ -139,12 +303,15 @@ run evaluates under a profile's capabilities pushed onto this same stack.
   is therefore not merely tolerable but *required* — `cargo build &&
   ./target/debug/app` is exactly this shape, and every bake-in profile makes
   `` `cwd ``, `/tmp`, and `` `tempdir `` both writable and exec-admitted on purpose.
-  What is required is the overlap a grant *names*: an admit that a write prefix
-  only covers from above (``write: [`home .]`` over `~/.cargo/bin`) is frozen against
-  writes, and a bare-name veto is advisory only under an admit the write region
-  names or nests beneath one it names ([[decisions/261006_a-veto-freezes-what-a-write-covers|a-veto-freezes-what-a-write-covers]]).
-  `capability::deputy_prefixes` accordingly reports and never denies, and *no
-  prefix is both* is not an invariant this design wants.
+  There is no write freeze: an exec allowance never withdraws write
+  authority, on any axis. A broad write that covers a run-admitted directory
+  (``write: [`home .]`` over `~/.cargo/bin`, or `edit-only` from `~` over
+  `~/.local/bin`) lets a child author programs there, and a bare-name veto
+  beneath a writable directory or `every` is advisory to descendants. That is a
+  declared limit, not a defence ([[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]]
+  records what it costs). `capability::deputy_prefixes` reports the folders that
+  stay both writable and runnable, into an `audit` trail only (read them with
+  `ral --audit --capabilities <profile> -c true`), and never denies; *no prefix is both* is not an invariant this design wants.
 
   What does bite is **authority that outlives or exceeds the projection**: a
   write escalates when whoever later treats those bytes as code is not confined
@@ -179,7 +346,8 @@ See also [[design/syscalls-are-effects|syscalls-are-effects]] (a capability is p
 [[design/two-enforcers|two-enforcers]], [[related/system-c|system-c]] (the
 type-based pole of this calculus),
 [[related/access-control-algebra|access-control-algebra]] (the security-literature
-model this lattice instantiates — composition over a Belnap bilattice).
+model this lattice instantiates: a fragment of Bruns and Huth's PBel over
+Belnap's FOUR), [[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]].
 
 **Realised in** [[internals/capability-enforcement|capability-enforcement]].
 

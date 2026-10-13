@@ -2,13 +2,18 @@
 //!
 //! A [`Capabilities`] frame bundles the per-effect policies.  Composition
 //! downward is the [`GrantStack`]: a `grant { ... }` or a loaded profile
-//! pushes one more layer, and every verdict folds the layers afresh,
+//! pushes one more layer, and every judgment folds the layers afresh,
 //! `exec::rules`, `fs::region`, [`GrantStack::permits`], rather than
 //! flattening them into one `Capabilities` first.
-//! [`Capabilities::widen`] is the one place a frame still composes eagerly:
-//! `--extend-base` widens a base ceiling at load time, before any attenuation
-//! runs, and its "silence lifts no veto" semantics only make sense as a
-//! single-layer union.  Denies are sticky under both regimes.
+//! [`Capabilities::extend`] is the one place a frame still composes eagerly:
+//! `--extend` joins a [`Fragment`] onto a base ceiling at load time, before
+//! any attenuation runs.
+//!
+//! Every policy denotes a function from requests to Belnap's four values,
+//! [`Evidence`].  Restriction is truth meet ([`Meet`]), extension information
+//! join ([`Join`]); an omitted axis is `t` in a policy and `⊥` in a fragment,
+//! and the two roles are two types.  Only the enforcing boundary closes
+//! evidence to a decision ([`Evidence::permits`]).
 //!
 //! This is data, with no reader of its own: the in-process guard
 //! (`crate::guard`) and the OS sandbox (`crate::sandbox`) are its two
@@ -20,53 +25,111 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use strum::{EnumString, IntoStaticStr, VariantArray};
 
-// ── Lattice traits ────────────────────────────────────────────────────────
-//
-// The two semilattice operations, beside the types they run over.  The
-// `Option<T>` lift rides along because `None` as identity — a layer with no
-// opinion on a field — is a capability convention, not a universal one.
+// ── Evidence and its operators ────────────────────────────────────────────
 
-/// Greatest lower bound: the most-authority value below both sides.
-/// Commutative, associative and idempotent, per type in `lattice_tests`.
+/// Belnap's FOUR as the product bilattice over the Booleans: positive and
+/// negative support for one request.
+///
+/// Neither is not a deny; Both is not malformed: allowing a directory and
+/// excluding a subtree produces Both inside the subtree.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Evidence {
+    pub positive: bool,
+    pub negative: bool,
+}
+
+impl Evidence {
+    pub const NEITHER: Self = Self {
+        positive: false,
+        negative: false,
+    };
+    pub const ALLOW: Self = Self {
+        positive: true,
+        negative: false,
+    };
+    pub const DENY: Self = Self {
+        positive: false,
+        negative: true,
+    };
+    pub const BOTH: Self = Self {
+        positive: true,
+        negative: true,
+    };
+
+    /// Belnap's `↓`, applied once, where a decision is enforced.
+    pub fn permits(self) -> bool {
+        self.positive && !self.negative
+    }
+}
+
+/// `∧`: composes restricting layers; positive support must agree, negative
+/// survives.  Identity `t` (ALLOW everywhere).
 pub trait Meet {
     fn meet(self, other: Self) -> Self;
 }
 
-/// Widen a base ceiling with an extension, before any attenuation runs.
-///
-/// Not the order-dual of [`Meet`]: vetoes survive from either side, so a deny
-/// is lifted by choosing a different base, never by composing over it.
-pub trait Widen {
-    fn widen(self, other: Self) -> Self;
+/// `⊕`: collects the evidence of two supplied fragments.  Identity `⊥`.
+pub trait Join {
+    fn join(self, other: Self) -> Self;
 }
 
-impl<T: Meet> Meet for Option<T> {
+impl Meet for Evidence {
     fn meet(self, other: Self) -> Self {
-        match (self, other) {
-            (None, x) | (x, None) => x,
-            (Some(a), Some(b)) => Some(a.meet(b)),
+        Self {
+            positive: self.positive && other.positive,
+            negative: self.negative || other.negative,
         }
     }
 }
 
-impl<T: Widen> Widen for Option<T> {
-    fn widen(self, other: Self) -> Self {
-        match (self, other) {
-            (None, x) | (x, None) => x,
-            (Some(a), Some(b)) => Some(a.widen(b)),
+impl Join for Evidence {
+    fn join(self, other: Self) -> Self {
+        Self {
+            positive: self.positive || other.positive,
+            negative: self.negative || other.negative,
         }
     }
 }
 
-/// `Deny < Allow`.
-///
-/// A `Deny` is sticky under meet *and* widen, even against a layer whose grant
-/// omits the key, so a base can pin a command out once and no overlay
-/// re-grants it; only a different base lifts one.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Verdict {
-    Allow,
-    Deny,
+/// An authored axis policy, as a fragment over the unrestricted policy.
+pub trait Axis: Join + Sized {
+    /// `t ⊕ self`; `None`, which is `t`, where omission loses nothing.
+    fn join_top(self) -> Option<Self>;
+    /// Denotes `t`: restricts nothing.
+    fn is_top(&self) -> bool;
+}
+
+/// An extension fragment: an omitted axis states nothing (`⊥`), where an
+/// omitted axis of a [`Capabilities`] restricts nothing (`t`).  Only
+/// [`Capabilities::extend`] consumes one, and only the loader makes one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fragment(Capabilities);
+
+impl Fragment {
+    /// Only `load::profile` calls this.
+    pub(crate) fn of(capabilities: Capabilities) -> Self {
+        Self(capabilities)
+    }
+}
+
+/// `base ◁ fragment` on one axis.
+fn extend<T: Axis>(base: Option<T>, fragment: Option<T>) -> Option<T> {
+    match (base, fragment) {
+        (base, None) => base,
+        (None, Some(fragment)) => fragment.join_top(),
+        (Some(base), Some(fragment)) => Some(base.join(fragment)),
+    }
+}
+
+/// Add `evidence` at `key`, joining what is held.  The one way evidence enters
+/// a map; Neither is never stored.
+pub(crate) fn join_insert<K: Ord>(map: &mut BTreeMap<K, Evidence>, key: K, evidence: Evidence) {
+    if evidence != Evidence::NEITHER {
+        map.entry(key)
+            .and_modify(|held| *held = held.join(evidence))
+            .or_insert(evidence);
+    }
 }
 
 /// An exec key as the author wrote it: the written twin of
@@ -96,70 +159,114 @@ impl std::fmt::Display for ExecKey {
 /// Exec authority as authored, per layer.
 ///
 /// The author's spellings survive for display; `capability::exec` compiles
-/// the grant into rules over programs, and nothing matches it directly.
+/// the grant into rules over programs, and nothing matches it directly.  Both
+/// fields are private: entries come only through joining, so no grant holds
+/// Neither, and `every` only through [`Axis::join_top`], so "every program"
+/// has no negative form.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExecGrant(#[serde(with = "pairs")] BTreeMap<ExecKey, Verdict>);
+#[serde(deny_unknown_fields)]
+pub struct ExecGrant {
+    /// `join_top`'s universal support: every program, never authored.
+    every: bool,
+    #[serde(with = "pairs")]
+    rules: BTreeMap<ExecKey, Evidence>,
+}
 
 impl ExecGrant {
-    pub fn iter(&self) -> impl Iterator<Item = (&ExecKey, &Verdict)> {
-        self.0.iter()
+    pub fn every(&self) -> bool {
+        self.every
     }
 
-    pub fn get(&self, key: &ExecKey) -> Option<&Verdict> {
-        self.0.get(key)
+    pub fn iter(&self) -> impl Iterator<Item = (&ExecKey, &Evidence)> {
+        self.rules.iter()
+    }
+
+    pub fn get(&self, key: &ExecKey) -> Option<&Evidence> {
+        self.rules.get(key)
     }
 
     /// Prunes entries; rewrites none.
-    pub fn retain(&mut self, mut keep: impl FnMut(&ExecKey, &Verdict) -> bool) {
-        self.0.retain(|key, v| keep(key, v));
+    pub fn retain(&mut self, mut keep: impl FnMut(&ExecKey, &Evidence) -> bool) {
+        self.rules.retain(|key, e| keep(key, e));
+    }
+
+    fn denies(&self) -> bool {
+        self.rules.values().any(|e| e.negative)
     }
 }
 
-/// A key written twice meets.
-impl FromIterator<(ExecKey, Verdict)> for ExecGrant {
-    fn from_iter<I: IntoIterator<Item = (ExecKey, Verdict)>>(keys: I) -> Self {
-        let mut grant = Self::default();
-        for (key, v) in keys {
-            meet_insert(&mut grant.0, key, v);
+/// A key written twice joins.
+impl FromIterator<(ExecKey, Evidence)> for ExecGrant {
+    fn from_iter<I: IntoIterator<Item = (ExecKey, Evidence)>>(keys: I) -> Self {
+        let mut rules = BTreeMap::new();
+        for (key, e) in keys {
+            join_insert(&mut rules, key, e);
         }
-        grant
+        Self {
+            every: false,
+            rules,
+        }
     }
 }
 
-/// The one way an exec entry is added: a key already present meets.
-pub(crate) fn meet_insert<K: Ord, V: Meet>(map: &mut BTreeMap<K, V>, key: K, value: V) {
-    let value = match map.remove(&key) {
-        Some(held) => held.meet(value),
-        None => value,
-    };
-    map.insert(key, value);
-}
-
-/// A map keyed by a struct, as the sequence of its pairs — no JSON object can
-/// key one — read back through [`meet_insert`].
+/// A map keyed by a struct, as the sequence of its pairs (no JSON object can
+/// key one), read back through [`join_insert`]: a repeated key or a Neither
+/// value is not what the encoder emits, so the other end is not this tree.
 mod pairs {
-    use super::{Meet, meet_insert};
+    use super::{Evidence, join_insert};
+    use serde::de::Error;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::collections::BTreeMap;
 
-    pub(super) fn serialize<K: Serialize, V: Serialize, S: Serializer>(
-        map: &BTreeMap<K, V>,
+    pub(super) fn serialize<K: Serialize, S: Serializer>(
+        map: &BTreeMap<K, Evidence>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
         serializer.collect_seq(map)
     }
 
-    pub(super) fn deserialize<'de, K, V, D>(deserializer: D) -> Result<BTreeMap<K, V>, D::Error>
+    pub(super) fn deserialize<'de, K, D>(deserializer: D) -> Result<BTreeMap<K, Evidence>, D::Error>
     where
         K: Deserialize<'de> + Ord,
-        V: Deserialize<'de> + Meet,
         D: Deserializer<'de>,
     {
         let mut map = BTreeMap::new();
-        for (key, value) in Vec::<(K, V)>::deserialize(deserializer)? {
-            meet_insert(&mut map, key, value);
+        for (key, e) in Vec::<(K, Evidence)>::deserialize(deserializer)? {
+            if e == Evidence::NEITHER {
+                return Err(D::Error::custom("a rule holds no evidence"));
+            }
+            let held = map.len();
+            join_insert(&mut map, key, e);
+            if map.len() == held {
+                return Err(D::Error::custom("a rule key repeats"));
+            }
         }
         Ok(map)
+    }
+}
+
+impl Join for ExecGrant {
+    fn join(mut self, other: Self) -> Self {
+        self.every |= other.every;
+        for (key, e) in other.rules {
+            join_insert(&mut self.rules, key, e);
+        }
+        self
+    }
+}
+
+impl Axis for ExecGrant {
+    /// The entries stay beside `every`: they change nothing about running,
+    /// but the stack still reads what they name.
+    fn join_top(self) -> Option<Self> {
+        (self.every || !self.rules.is_empty()).then_some(Self {
+            every: true,
+            ..self
+        })
+    }
+
+    fn is_top(&self) -> bool {
+        self.every && !self.denies()
     }
 }
 
@@ -317,16 +424,26 @@ impl GrantStack {
     /// A stack of exactly `frame`: a view for asking the in-process guard's question of one
     /// frame — a boot-time `Capabilities` no shell holds yet — not a session
     /// stack, which is always built by [`GrantStack::root`] plus `push`.
-    /// Verdict-identical to `[root, frame]` because the ambient root holds no
+    /// Decision-identical to `[root, frame]` because the ambient root holds no
     /// opinion on any axis.
     pub fn of(frame: Capabilities) -> Self {
         Self(vec![frame])
     }
 
-    /// True iff a real grant sits above the ambient root — what
+    /// True iff some layer restricts (denotes other than `t`) — what
     /// `Shell::has_active_capabilities` reports.
     pub fn is_restrictive(&self) -> bool {
         self.0.iter().any(Capabilities::is_restrictive)
+    }
+
+    /// Whether no layer restricts exec: the one question of exec denoting `t`.
+    pub fn exec_is_top(&self) -> bool {
+        self.exec().all(Axis::is_top)
+    }
+
+    /// Whether no layer restricts fs: the one question of fs denoting `t`.
+    pub fn fs_is_top(&self) -> bool {
+        self.fs().all(Axis::is_top)
     }
 
     pub fn push(&mut self, layer: Capabilities) {
@@ -402,14 +519,16 @@ impl Capabilities {
         }
     }
 
-    /// True iff some supplied axis restricts: exec and fs whenever supplied,
-    /// net when offline, a verb set unless it lists every verb.
+    /// True iff some supplied axis does not denote `t`.
     pub fn is_restrictive(&self) -> bool {
-        self.exec.is_some()
-            || self.fs.is_some()
-            || self.net == Some(Net::Offline)
-            || withholds(self.editor.as_ref())
-            || withholds(self.shell.as_ref())
+        fn restricts<T: Axis>(axis: Option<&T>) -> bool {
+            axis.is_some_and(|a| !a.is_top())
+        }
+        restricts(self.exec.as_ref())
+            || restricts(self.fs.as_ref())
+            || restricts(self.net.as_ref())
+            || restricts(self.editor.as_ref())
+            || restricts(self.shell.as_ref())
     }
 
     /// Ambient authority, the lattice top: all fields `None`, no attenuation.
@@ -419,108 +538,81 @@ impl Capabilities {
 }
 
 impl Capabilities {
-    /// Widen `self` with `other` — the composition `--extend-base` runs to lift
-    /// a base ceiling before any attenuation.  Positive authority unions, but
-    /// every veto survives from either side, so an extension can grant where
-    /// the base was silent and never re-admit what it denied.  Hence no
-    /// order-dual of [`Meet`]: a deny is a floor under both.
-    pub fn widen(self, other: Self) -> Self {
+    /// `self ◁ fragment`: the ceiling a base and an extension make, before any
+    /// restriction.  An exclusion of the fragment always wins; an allowance
+    /// never removes authority; an axis the base omits stays unrestricted,
+    /// less the fragment's exclusions.
+    pub fn extend(self, fragment: Fragment) -> Self {
+        let Fragment(fragment) = fragment;
         Self {
-            exec: self.exec.widen(other.exec),
-            fs: self.fs.widen(other.fs),
-            net: self.net.widen(other.net),
-            // An omitted base axis is every verb, which nothing widens.
-            editor: self.editor.map(|b| &b | &other.editor.unwrap_or_default()),
-            shell: self.shell.map(|b| &b | &other.shell.unwrap_or_default()),
+            exec: extend(self.exec, fragment.exec),
+            fs: extend(self.fs, fragment.fs),
+            net: extend(self.net, fragment.net),
+            editor: extend(self.editor, fragment.editor),
+            shell: extend(self.shell, fragment.shell),
         }
     }
 }
 
-// ── Lattice impls ─────────────────────────────────────────────────────────
+// ── Axis impls ────────────────────────────────────────────────────────────
 
-impl Verdict {
-    pub fn is_denied(&self) -> bool {
-        matches!(self, Self::Deny)
-    }
-}
-
-impl From<bool> for Verdict {
-    fn from(allow: bool) -> Self {
-        if allow { Self::Allow } else { Self::Deny }
-    }
-}
-
-impl Meet for Verdict {
-    fn meet(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Deny, _) | (_, Self::Deny) => Self::Deny,
-            (Self::Allow, Self::Allow) => Self::Allow,
-        }
-    }
-}
-
-impl Widen for Verdict {
-    fn widen(self, other: Self) -> Self {
-        match (self, other) {
-            // Deny-overrides under widening too, so `--extend-base` can never
-            // re-admit a command the base denies.
-            (Self::Deny, _) | (_, Self::Deny) => Self::Deny,
-            (Self::Allow, Self::Allow) => Self::Allow,
-        }
-    }
-}
-
-impl Widen for Net {
-    fn widen(self, _: Self) -> Self {
+impl Join for Net {
+    fn join(self, _: Self) -> Self {
         Self::Offline
     }
 }
 
-impl Widen for FsPolicy {
-    fn widen(self, other: Self) -> Self {
+impl Axis for Net {
+    fn join_top(self) -> Option<Self> {
+        Some(Self::Offline)
+    }
+
+    fn is_top(&self) -> bool {
+        false
+    }
+}
+
+impl Join for FsPolicy {
+    fn join(self, other: Self) -> Self {
         Self {
             read_prefixes: union_prefixes(self.read_prefixes, other.read_prefixes),
             write_prefixes: union_prefixes(self.write_prefixes, other.write_prefixes),
-            // Denies union exactly as in `meet`: an overlay silent on a base
-            // carve-out must not lift it.
             deny_paths: union_prefixes(self.deny_paths, other.deny_paths),
         }
     }
 }
 
-/// Keys widen one by one, then an
-/// [`evicts`](FrozenPath::evicts) sweep drops any allow dir that clashes
-/// with a deny dir — whatever spelling either side used — so an overlay that
-/// re-grants a directory the base vetoed still loses it.
-impl Widen for ExecGrant {
-    fn widen(self, other: Self) -> Self {
-        let mut keys = widen_keys(self.0, other.0);
-        let denied: Vec<FrozenPath> = (keys.iter())
-            .filter_map(|(key, v)| match key {
-                ExecKey::Dir(dir) if v.is_denied() => Some(dir.clone()),
-                _ => None,
-            })
-            .collect();
-        keys.retain(|key, v| match key {
-            ExecKey::Dir(dir) => v.is_denied() || !denied.iter().any(|d| d.evicts(dir)),
-            _ => true,
-        });
-        Self(keys)
+impl Axis for FsPolicy {
+    fn join_top(self) -> Option<Self> {
+        (!self.deny_paths.is_empty()).then(|| Self {
+            read_prefixes: vec![FrozenPath::root()],
+            write_prefixes: vec![FrozenPath::root()],
+            deny_paths: self.deny_paths,
+        })
+    }
+
+    /// Writing reads, so writing the root reads it too; the root as its frozen
+    /// identity holds it, so a symlink to `/` does.
+    fn is_top(&self) -> bool {
+        self.deny_paths.is_empty() && self.write_prefixes.iter().any(FrozenPath::is_universal)
     }
 }
 
-/// Shared keys widen, and a one-sided key survives verbatim: an absent key is
-/// the widening identity, so silence on one side lifts neither the other's
-/// grant nor its veto.
-fn widen_keys<K: Ord, V: Widen>(mut a: BTreeMap<K, V>, b: BTreeMap<K, V>) -> BTreeMap<K, V> {
-    for (key, v) in b {
-        let v = match a.remove(&key) {
-            Some(held) => held.widen(v),
-            None => v,
-        };
-        a.insert(key, v);
+impl<V: Ord + VariantArray> Join for BTreeSet<V> {
+    fn join(mut self, other: Self) -> Self {
+        self.extend(other);
+        self
     }
-    a
+}
+
+impl<V: Ord + VariantArray> Axis for BTreeSet<V> {
+    fn join_top(self) -> Option<Self> {
+        None
+    }
+
+    fn is_top(&self) -> bool {
+        self.len() == V::VARIANTS.len()
+    }
 }
 
 fn union_prefixes(a: Vec<FrozenPath>, b: Vec<FrozenPath>) -> Vec<FrozenPath> {
@@ -529,9 +621,4 @@ fn union_prefixes(a: Vec<FrozenPath>, b: Vec<FrozenPath>) -> Vec<FrozenPath> {
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
-}
-
-/// A verb set that lists fewer than every verb.
-fn withholds<V: VariantArray>(verbs: Option<&BTreeSet<V>>) -> bool {
-    verbs.is_some_and(|s| s.len() < V::VARIANTS.len())
 }

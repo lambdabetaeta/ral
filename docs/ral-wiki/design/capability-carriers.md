@@ -59,7 +59,20 @@ understand different languages ([[design/two-enforcers|two-enforcers]]):
 
 `SandboxProjection` is the permission boiled down into that flat list — the
 subtle parts (a bare-name veto, a bundled tool's name) flattened away because the
-sentry could never act on them. Same authority, two renderings, because there are
+sentry could never act on them. It carries the same evidence table the guard
+judges by, with every allowance as its frozen real path, plus *support*.
+
+**Support is what a launch needs beyond the policy, and it yields to every
+exclusion.** Carriers (a trusted script's interpreter) and the dynamic linker
+join the projection as allowances where the author wrote none, never ranked
+above anything: a support file serves a launch only if it can be both run and
+read, so one that an exec or an fs exclusion covers is dropped from both axes.
+Support is a function of the launch, not of the policy alone, and is computed
+for every confined launch under a restricted fs or exec. It grants running and
+reading, never writing. The guard consults none: an exclusion of a linker or an
+interpreter refuses the programs that start through it, though the policy says
+nothing about them, and the kernel's refusal is worded by the launch
+diagnostics. Same authority, two renderings, because there are
 two enforcers of unequal sophistication. Neither rendering serves both: hand the
 flat list to the sharp judge and you have thrown away its precision; ask the
 blunt sentry to understand the subtle rule and it simply can't

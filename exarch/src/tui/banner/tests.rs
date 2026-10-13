@@ -9,7 +9,7 @@ fn sample(base: &'static str) -> SessionInfo<'static> {
         system_size: 4096,
         system_files: &[],
         base,
-        extend_base: None,
+        extend: None,
         restrict_files: &[],
         cwd: "/Users/me/projects/ral",
         resumed: None,
@@ -45,7 +45,7 @@ fn session_card_orders_and_roles_fields() {
             "version",
             "cwd",
             "base",
-            "extend-base",
+            "extend",
             "restrict",
             "system prompt",
         ]
@@ -74,19 +74,19 @@ fn dangerous_base_is_the_one_field_that_earns_a_hue() {
 fn security_paths_are_roled_present_and_muted_when_absent() {
     let rs = rows(&sample("read-only"));
     assert_eq!(
-        lead_role(&rs.iter().find(|(l, _)| l == "extend-base").unwrap().1),
+        lead_role(&rs.iter().find(|(l, _)| l == "extend").unwrap().1),
         Some(Role::Muted),
-        "absent extend-base is muted none"
+        "absent extend is muted none"
     );
 
     let ext = PathBuf::from("/policy/base.ral");
     let restr = vec![PathBuf::from("src/lib.rs")];
     let mut s = sample("read-only");
-    s.extend_base = Some(ext.as_path());
+    s.extend = Some(ext.as_path());
     s.restrict_files = &restr;
     let rs = rows(&s);
     assert_eq!(
-        lead_role(&rs.iter().find(|(l, _)| l == "extend-base").unwrap().1),
+        lead_role(&rs.iter().find(|(l, _)| l == "extend").unwrap().1),
         Some(Role::Path)
     );
     assert_eq!(

@@ -6,7 +6,7 @@
 #
 # Use when the agent's job is to compile or process *this one tree*
 # and nothing else: `--base confined` for ad-hoc invocations,
-# `--base confined --extend-base extra.ral` to widen for one tool.
+# `--base confined --extend extra.ral` to widen for one tool.
 
 return [
   net:   `offline,   # no network — confined.sb has the same default
@@ -30,14 +30,15 @@ return [
 
   # Host binaries are admitted by subpath, never enumerated: the build
   # sandbox trusts whatever lives in the platform's tool roots
-  # (`dir `system` — see `core/src/guard/freeze.rs`), including a Homebrew
-  # tree when the host has one — a build jail plausibly needs a
-  # Homebrew-installed compiler.  Apple's toolchain (CommandLineTools,
-  # Xcode) is among those roots too, so `gcc → cc1 → as → ld` resolves
+  # (`dir `system`, and `dir `homebrew` for a Homebrew tree when the host
+  # has one; both expand in `core/src/guard/freeze.rs`) — a build jail
+  # plausibly needs a Homebrew-installed compiler.  Apple's toolchain
+  # (CommandLineTools, Xcode) is among the `system` roots, so `gcc → cc1 → as → ld` resolves
   # without listing each tool here.
   exec: [
     allow: [
       `dir `system,                   # sh, bash, uname, dirname, env, sed, awk, …
+      `dir `homebrew,                 # Homebrew-installed tools
       `dir `absolute /usr/local/bin,  # user-installed CLI tools
       `dir `cwd .,                    # ./configure, ./build.sh, etc.
       `dir `tempdir .,                # build-tree-shadowed scratch

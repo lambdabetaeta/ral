@@ -21,7 +21,7 @@
 
 mod common;
 
-use ral_core::capability::{Capabilities, ExecKey, Verdict};
+use ral_core::capability::{Capabilities, Evidence, ExecKey};
 use ral_core::path::FrozenPath;
 use ral_core::test_access::exec_projection_restricts;
 
@@ -32,7 +32,7 @@ fn exec_only_grant_still_projects() {
         exec: Some(
             std::iter::once((
                 ExecKey::Path(FrozenPath::from_surface("/bin/sh")),
-                Verdict::Allow,
+                Evidence::ALLOW,
             ))
             .collect(),
         ),

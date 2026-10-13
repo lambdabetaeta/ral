@@ -32,19 +32,23 @@ use std::sync::{LazyLock, Mutex};
 use windows_sys::Win32::Security::{PSID, SID_AND_ATTRIBUTES};
 use windows_sys::Win32::System::SystemServices::SE_GROUP_ENABLED;
 
+use crate::capability::FsScope;
+use crate::path::RealPath;
 use crate::process::Launch;
 use crate::process::cancel::CancelScope;
 use crate::sandbox::Refusal;
-use crate::sandbox::SandboxProjection;
+use crate::sandbox::{FsRules, SandboxProjection};
 use crate::sync::LockExt as _;
 
 use super::appcontainer::{AppContainerProfile, CapabilitySids, OwnedCapabilitySid};
-use super::dacl::{self, DaclError, DaclManager, GrantKind};
+use super::dacl::{self, DaclError, DaclManager, FrozenPin, GrantKind};
 
 /// One fs projection's identity, as [`FsRules`](crate::sandbox::FsRules)
-/// carries it. `net` is absent
-/// on purpose: network authority rides per-spawn on
-/// capability SIDs, never stamped on disk, so it needs no SID of its own.
+/// carries it: the whole `read` list, prefixes and places alike, since
+/// capabilities accumulate per key and reach every later token minted under
+/// it, so two launches that differ only in a place never share one. `net` is
+/// absent on purpose: network authority rides per-spawn on capability SIDs,
+/// never stamped on disk, so it needs no SID of its own.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ProjectionKey {
     read: Vec<String>,
@@ -57,12 +61,13 @@ struct ProjectionKey {
 /// [`confine`] mints into every token it builds for this projection.
 struct ProjectionSandbox {
     profile: AppContainerProfile,
-    /// Allow grants only, and keyed on the path *as spelled*: an object
-    /// replaced under that name loses the ACE that went with the old NTFS
-    /// object, so a memo hit on a stale entry silently skips the restamp. For
-    /// rw and ro that fails closed — the child simply cannot reach the new
-    /// object. A deny memoized the same way would fail *open*, so denies are
-    /// never memoized; see [`ensure_grants`].
+    /// Allow grants only, keyed on the frozen real path: an object replaced
+    /// under that name loses the ACE that went with the old NTFS object, so a
+    /// memo hit on a stale entry silently skips the restamp. For rw and ro
+    /// that fails closed — the child simply cannot reach the new object. A
+    /// deny memoized the same way would fail *open*, so denies are never
+    /// memoized; see [`ensure_denies`]. The memo is consulted only after the
+    /// redirect check, never in place of it.
     granted: HashSet<(PathBuf, GrantKind)>,
     /// In first-grant order, without repeats. A path the filters dropped —
     /// already covered by the well-known `AppContainer` SIDs, or not on disk —
@@ -178,7 +183,9 @@ fn profile_name(index: u32) -> String {
 /// takes one back. What makes this token narrower than another is only which
 /// capabilities it names.
 ///
-/// `program_image` is granted read+execute so the `LowBox` token can load the
+/// `program_image`, which must already be a real path (the guard's resolved
+/// image, never re-resolved here: a link on it is refused by the pin), is
+/// granted read+execute so the `LowBox` token can load the
 /// child's binary, mirroring the Linux backend's RO bind of the program path;
 /// `None` (a bare name the caller could not resolve) leaves that to the read
 /// projection and the `ALL APPLICATION PACKAGES` system paths. An
@@ -221,10 +228,17 @@ pub(crate) fn confine(
     // an unattenuated projection asks for nothing and rests on the ambient
     // ALL APPLICATION PACKAGES grants.
     let rules = projection.fs.rules().cloned().unwrap_or_default();
+    refuse_universal_prefix(&rules)?;
+    let (read, write) = (real_paths(&rules.read), real_paths(&rules.write));
+    let deny: Vec<PathBuf> = rules
+        .deny
+        .iter()
+        .map(|p| RealPath::frozen(p).as_path().to_path_buf())
+        .collect();
     let key = ProjectionKey {
-        read: rules.read_prefixes.clone(),
-        write: rules.write_prefixes.clone(),
-        deny: rules.deny_paths.clone(),
+        read: strings(&read),
+        write: strings(&write),
+        deny: strings(&deny),
     };
     sandbox.ensure_projection(&key)?;
     crate::dbg_trace!(
@@ -243,33 +257,35 @@ pub(crate) fn confine(
     } = sandbox;
     let proj = projections.get_mut(&key).expect("projection ensured above");
 
-    let readwrite: Vec<PathBuf> = rules.write_prefixes.iter().map(PathBuf::from).collect();
-    let mut readonly: Vec<PathBuf> = rules
-        .read_prefixes
-        .iter()
-        .filter(|p| !rules.write_prefixes.contains(*p))
-        .map(PathBuf::from)
+    let readwrite = write;
+    let mut readonly: Vec<PathBuf> = read
+        .into_iter()
+        .filter(|p| !readwrite.contains(p))
         .collect();
-    if let Some(image) = program_image {
-        let image = image.to_path_buf();
-        if !readwrite.contains(&image) && !readonly.contains(&image) {
-            readonly.push(image);
-        }
+    if let Some(image) = program_image.map(Path::to_path_buf)
+        && !readwrite.contains(&image)
+        && !readonly.contains(&image)
+    {
+        readonly.push(image);
     }
 
-    // Cheapest filter first: the memo, then existence, then the well-known-SID
-    // effective-access check, which is a real `GetNamedSecurityInfoW` and DACL
-    // walk per path.
+    // The redirect check comes first, before every filter and whatever the
+    // memo remembers: a path granted at an earlier launch and since replaced
+    // by a junction must refuse this one. The pins it takes are what the
+    // filters and the stamps then work from, so existence needs no second look.
     #[cfg(debug_assertions)]
     let t_filter = std::time::Instant::now();
+    let readwrite = dacl::pin_all(&readwrite, GrantKind::ReadWrite)?;
+    let readonly = dacl::pin_all(&readonly, GrantKind::ReadOnly)?;
     #[cfg(debug_assertions)]
     let (offered_rw, offered_ro) = (readwrite.len(), readonly.len());
+    // Cheapest filter first: the memo, then the well-known-SID
+    // effective-access check, which is a real `GetSecurityInfo` and DACL walk
+    // per path.
     let readwrite = filter_out_granted(&proj.granted, readwrite, GrantKind::ReadWrite);
     let readonly = filter_out_granted(&proj.granted, readonly, GrantKind::ReadOnly);
-    let readwrite = existing_paths(readwrite);
-    let readonly = existing_paths(readonly);
-    let readwrite = dacl::filter_paths_needing_grant(readwrite, dacl::RW_MASK);
-    let readonly = dacl::filter_paths_needing_grant(readonly, dacl::RO_MASK);
+    let readwrite = dacl::needing_grant(readwrite, dacl::RW_MASK);
+    let readonly = dacl::needing_grant(readonly, dacl::RO_MASK);
     crate::dbg_trace!(
         "sandbox-win",
         "confine: access filter kept rw {}/{}, ro {}/{} in {:?}",
@@ -288,7 +304,6 @@ pub(crate) fn confine(
     // `dacl::ensure_fs_grant`, whose witness pair — stamp store plus a probe of
     // the live object's own DACL — is the sole authority for it, at one
     // `GetNamedSecurityInfoW` per deny path per launch.
-    let deny: Vec<PathBuf> = rules.deny_paths.iter().map(PathBuf::from).collect();
     let deny = existing_paths(deny);
 
     // Each of these is a witness check on a path already stamped, and a whole
@@ -297,9 +312,9 @@ pub(crate) fn confine(
     let t_stamp = std::time::Instant::now();
     #[cfg(debug_assertions)]
     let (kept_rw, kept_ro, kept_deny) = (readwrite.len(), readonly.len(), deny.len());
-    ensure_grants(proj, fs_cap_sids, readwrite, GrantKind::ReadWrite, cancel)?;
-    ensure_grants(proj, fs_cap_sids, readonly, GrantKind::ReadOnly, cancel)?;
-    ensure_grants(proj, fs_cap_sids, deny, GrantKind::Deny, cancel)?;
+    ensure_allows(proj, fs_cap_sids, readwrite, GrantKind::ReadWrite, cancel)?;
+    ensure_allows(proj, fs_cap_sids, readonly, GrantKind::ReadOnly, cancel)?;
+    ensure_denies(proj, fs_cap_sids, deny, cancel)?;
     crate::dbg_trace!(
         "sandbox-win",
         "confine: ensured {kept_rw} rw + {kept_ro} ro + {kept_deny} deny capability ACEs in {:?} \
@@ -329,47 +344,113 @@ pub(crate) fn confine(
     Ok(())
 }
 
-/// Ensure one kind's grants: canonicalize each path, derive the capability its
-/// `(path, kind)` names — once per name per session — stamp the ACE if no
-/// witness says it is already there, and remember both the memo entry and the
-/// capability the projection's tokens must now carry. Ordered and deduplicated,
-/// so a token's capability list reads as the projection's grant history.
-fn ensure_grants(
+/// The capability `name` derives to, once per name per session.
+fn derive<'a>(
+    fs_cap_sids: &'a mut HashMap<String, FsCap>,
+    name: &str,
+) -> Result<&'a FsCap, Refusal> {
+    Ok(match fs_cap_sids.entry(name.to_owned()) {
+        Entry::Occupied(e) => e.into_mut(),
+        Entry::Vacant(v) => {
+            let sid = OwnedCapabilitySid::from_capability_name(name)
+                .map_err(|e| io_refusal("sandbox: derive fs capability SID", &e))?;
+            let sid_string = sid
+                .sid_string()
+                .map_err(|e| io_refusal("sandbox: fs capability SID string", &e))?;
+            v.insert(FsCap { sid, sid_string })
+        }
+    })
+}
+
+/// Record `name` on the projection's tokens: ordered and deduplicated, so a
+/// token's capability list reads as the projection's grant history.
+fn remember(proj: &mut ProjectionSandbox, name: String) {
+    if !proj.fs_caps.contains(&name) {
+        proj.fs_caps.push(name);
+    }
+}
+
+/// Ensure one kind's allows, each stamped through the handles its check
+/// holds, under the capability its frozen real path names: a witness check on
+/// a path already stamped, a whole tree propagation on one that is not.
+fn ensure_allows(
+    proj: &mut ProjectionSandbox,
+    fs_cap_sids: &mut HashMap<String, FsCap>,
+    pins: Vec<FrozenPin>,
+    kind: GrantKind,
+    cancel: &CancelScope,
+) -> Result<(), Refusal> {
+    for pin in pins {
+        let name = dacl::fs_capability_name(pin.path(), kind);
+        let cap = derive(fs_cap_sids, &name)?;
+        dacl::ensure_frozen_grant(&pin, &cap.sid_string, kind, cancel)?;
+        // The memo is a hint, never the check: `confine` pins every allowance
+        // before it consults it, and an object replaced under this name loses
+        // the ACE that went with the old one, which fails closed.
+        proj.granted.insert((pin.path().to_path_buf(), kind));
+        remember(proj, name);
+    }
+    Ok(())
+}
+
+/// Ensure the denies. An exclusion was re-resolved when the region was built
+/// and is canonicalised here, the one place it meets the disk, and never
+/// memoized: the same staleness that costs an
+/// allow its access would restore access the projection refused.
+fn ensure_denies(
     proj: &mut ProjectionSandbox,
     fs_cap_sids: &mut HashMap<String, FsCap>,
     paths: Vec<PathBuf>,
-    kind: GrantKind,
     cancel: &CancelScope,
 ) -> Result<(), Refusal> {
     for p in paths {
         let canonical = dacl::canonicalize_grant_target(&p)?;
-        let name = dacl::fs_capability_name(&canonical, kind);
-        let cap = match fs_cap_sids.entry(name.clone()) {
-            Entry::Occupied(e) => e.into_mut(),
-            Entry::Vacant(v) => {
-                let sid = OwnedCapabilitySid::from_capability_name(&name)
-                    .map_err(|e| io_refusal("sandbox: derive fs capability SID", &e))?;
-                let sid_string = sid
-                    .sid_string()
-                    .map_err(|e| io_refusal("sandbox: fs capability SID string", &e))?;
-                v.insert(FsCap { sid, sid_string })
-            }
-        };
-        dacl::ensure_fs_grant(&canonical, &cap.sid_string, kind, cancel)?;
-        // Allow grants are memoized under the path as spelled, not as
-        // canonicalized: that is what the next `confine` will hand us. A stale
-        // entry — the object replaced under that name — then costs the child
-        // access it should have had, which is the safe direction. A deny is
-        // never memoized, because there the same staleness restores access the
-        // projection refused.
-        if kind != GrantKind::Deny {
-            proj.granted.insert((p, kind));
-        }
-        if !proj.fs_caps.contains(&name) {
-            proj.fs_caps.push(name);
-        }
+        let name = dacl::fs_capability_name(&canonical, GrantKind::Deny);
+        let cap = derive(fs_cap_sids, &name)?;
+        dacl::ensure_fs_grant(&canonical, &cap.sid_string, GrantKind::Deny, cancel)?;
+        remember(proj, name);
     }
     Ok(())
+}
+
+/// Refuse "every path, less exclusions". The universal prefix means every
+/// path on every volume, and an `AppContainer` reaches only what is stamped for
+/// it; stamped as a path it would narrow to one drive and stamp that whole.
+/// Run before anything is stamped, so the guard alone judges.
+fn refuse_universal_prefix(rules: &FsRules) -> Result<(), Refusal> {
+    let universal = |s: &FsScope| matches!(s, FsScope::Prefix(p) if p.is_root());
+    if !rules.read.iter().chain(&rules.write).any(universal) {
+        return Ok(());
+    }
+    let allows = if rules.deny.is_empty() {
+        "every path"
+    } else {
+        "every path except some exclusions"
+    };
+    Err(Refusal::Unavailable(format!(
+        "this grant allows {allows}, which Windows cannot enforce: a sandboxed program \
+         reaches only folders stamped for it, and ral will not stamp every drive; grant \
+         the folders the program needs instead"
+    )))
+}
+
+/// A region's frozen real paths, which the stamps and capability names key
+/// on, never re-resolved.
+fn real_paths(region: &[FsScope]) -> Vec<PathBuf> {
+    region
+        .iter()
+        .map(|scope| match scope {
+            FsScope::Prefix(p) => RealPath::frozen(p).as_path().to_path_buf(),
+            FsScope::Place(r) => r.as_path().to_path_buf(),
+        })
+        .collect()
+}
+
+fn strings(paths: &[PathBuf]) -> Vec<String> {
+    paths
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect()
 }
 
 /// Recovery failures are logged; they do not prevent session startup.
@@ -455,14 +536,14 @@ fn existing_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 
 /// The pure half of the grant memo, free-standing so the tests below can
 /// exercise it without a real `AppContainer` profile or DACL manager.
-fn filter_out_granted(
+fn filter_out_granted<P: AsRef<Path>>(
     granted: &HashSet<(PathBuf, GrantKind)>,
-    paths: Vec<PathBuf>,
+    paths: Vec<P>,
     kind: GrantKind,
-) -> Vec<PathBuf> {
+) -> Vec<P> {
     paths
         .into_iter()
-        .filter(|p| !granted.contains(&(p.clone(), kind)))
+        .filter(|p| !granted.contains(&(p.as_ref().to_path_buf(), kind)))
         .collect()
 }
 
@@ -471,11 +552,13 @@ fn io_refusal(context: &str, e: &std::io::Error) -> Refusal {
 }
 
 /// A cancel mid-stamp is not a sandbox failure, so it stays a cancellation
-/// and never reads as `sandbox: fs grant failed`.
+/// and never reads as `sandbox: fs grant failed`; nor does a redirected
+/// allowance, which says what it is.
 impl From<DaclError> for Refusal {
     fn from(e: DaclError) -> Self {
         match e {
             DaclError::Cancelled(cause) => Self::Cancelled(cause),
+            e @ DaclError::Redirected { .. } => Self::Launch(e.to_string()),
             e => Self::Launch(format!("sandbox: fs grant failed: {e}")),
         }
     }

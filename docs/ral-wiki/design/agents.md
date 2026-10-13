@@ -518,7 +518,7 @@ match no directory prefix: `read-only` and `edit-only` name each tool literally
 for exactly this reason. A base whose `exec` block is prefixes alone leaves the
 child unable to run `ls`, and — the ceiling being non-escalating — with no way
 to ask for it back. A human at the CLI can see that and reach for
-`--extend-base`; a child can only spend turns discovering it.
+`--extend`; a child can only spend turns discovering it.
 
 A spawn's `R` mints no self-denial. `--restrict` denies the restriction
 *files'* own paths, so the agent cannot rewrite the bytes that shape its

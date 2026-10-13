@@ -58,7 +58,6 @@
 
 use crate::process::cancel::{CancelCause, CancelScope};
 use std::fmt::Write as _;
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use windows_sys::Win32::Storage::FileSystem::{
@@ -69,17 +68,18 @@ mod acl;
 mod deny;
 #[cfg(test)]
 pub(super) mod deny_tests;
+mod frozen;
 mod ledger;
 mod mutex;
 mod stamp;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use acl::filter_paths_needing_grant;
 use acl::{
-    AceType, OICI_ACE_FLAGS, apply_explicit_ace, apply_mandatory_label_ace,
+    AceType, OICI_ACE_FLAGS, Target, apply_explicit_ace, apply_mandatory_label_ace,
     low_integrity_label_present, scan_explicit_aces_for_sid,
 };
+pub(crate) use frozen::{FrozenPin, needing_grant, pin_all};
 pub(crate) use ledger::{DaclManager, recover_orphaned_state};
 use mutex::PathMutexGuard;
 use stamp::{label_stamp_key, record_stamp, stamp_key, stamp_recorded, update_stamp};
@@ -155,6 +155,13 @@ const _: () = {
 pub(crate) enum DaclError {
     NetworkPathRejected(PathBuf),
     PathNotFound(PathBuf),
+    /// A frozen allowance whose path now meets a reparse point at `at`,
+    /// which is `granted` itself or an ancestor of it.
+    Redirected {
+        granted: PathBuf,
+        at: PathBuf,
+        target: Option<PathBuf>,
+    },
     WriteDacDenied {
         path: PathBuf,
         reason: String,
@@ -185,6 +192,26 @@ impl std::fmt::Display for DaclError {
                 p.display()
             ),
             Self::PathNotFound(p) => write!(f, "path does not exist: {}", p.display()),
+            Self::Redirected {
+                granted,
+                at,
+                target,
+            } => {
+                write!(
+                    f,
+                    "'{}' was granted by its real path, but ",
+                    granted.display()
+                )?;
+                match target {
+                    Some(t) => write!(f, "'{}' is now a link to '{}'", at.display(), t.display())?,
+                    None => write!(f, "'{}' is now a reparse point", at.display())?,
+                }
+                f.write_str(
+                    "; an allowance names what it named when granted. To allow the new \
+                     target, grant it where the ceiling is set (in exarch, restart with a \
+                     grant that names it)",
+                )
+            }
             Self::WriteDacDenied { path, reason } => {
                 write!(f, "WRITE_DAC denied on {}: {reason}", path.display())
             }
@@ -263,35 +290,53 @@ pub(crate) fn fs_capability_name(canonical: &Path, kind: GrantKind) -> String {
 /// polled between descendants of a deny walk; Win32's own propagation is
 /// not interruptible. A deny's witness includes that walk, since inheritance
 /// cannot cross protected DACLs or outrank explicit entries.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:dacl-apply] Stats the grant target to choose OI|CI inheritance before stamping the capability ACE. Sandbox grant-application infrastructure, not model data I/O: raises no surface card."
-)]
 pub(crate) fn ensure_fs_grant(
     canonical: &Path,
     sid_str: &str,
     kind: GrantKind,
     cancel: &CancelScope,
 ) -> Result<(), DaclError> {
+    ensure_grant(Target::Named(canonical), sid_str, kind, cancel)
+}
+
+/// [`ensure_fs_grant`] for a frozen allowance, applied through the handles
+/// [`FrozenPin`] holds: the object checked is the object stamped. Allows only; a
+/// deny walks the tree by name and is re-resolved at every launch.
+pub(crate) fn ensure_frozen_grant(
+    pin: &FrozenPin,
+    sid_str: &str,
+    kind: GrantKind,
+    cancel: &CancelScope,
+) -> Result<(), DaclError> {
+    debug_assert!(kind != GrantKind::Deny, "a deny is stamped by name");
+    pin.can_stamp(kind)?;
+    ensure_grant(pin.target(), sid_str, kind, cancel)
+}
+
+fn ensure_grant(
+    target: Target<'_>,
+    sid_str: &str,
+    kind: GrantKind,
+    cancel: &CancelScope,
+) -> Result<(), DaclError> {
     cancelled(cancel)?;
-    let inheritable = fs::metadata(canonical)
-        .map_err(|e| DaclError::Win32 {
-            path: canonical.to_path_buf(),
-            reason: format!("metadata: {e}"),
-        })?
-        .is_dir();
+    let canonical = target.path();
+    let inheritable = target.is_dir().map_err(|e| DaclError::Win32 {
+        path: canonical.to_path_buf(),
+        reason: format!("metadata: {e}"),
+    })?;
     // A capability ACE alone cannot admit a create: the mandatory-integrity
     // check runs first, and a `Low`-IL child clears it only if the directory's
     // own label is `Low` or below. Read-only and deny grants need no label —
     // `Low` already reads `Medium` under the default no-write-up-only policy —
     // and neither does a file, whose write the capability ACE alone admits.
     if kind == GrantKind::ReadWrite && inheritable {
-        ensure_low_integrity_label(canonical)?;
+        ensure_low_integrity_label(target)?;
     }
     let key = stamp_key(canonical, kind);
     // Serialize the witness with the mutation, including an interrupted retry.
     let _guard = PathMutexGuard::acquire(canonical)?;
-    if stamp_recorded(&key) && capability_ace_present(canonical, sid_str, kind, inheritable) {
+    if stamp_recorded(&key) && capability_ace_present(target, sid_str, kind, inheritable) {
         return Ok(());
     }
     // A recreated root must not resurrect its old completion witness mid-apply.
@@ -301,13 +346,7 @@ pub(crate) fn ensure_fs_grant(
     } else {
         None
     };
-    apply_explicit_ace(
-        canonical,
-        sid_str,
-        kind.mask(),
-        inheritable,
-        kind.ace_type(),
-    )?;
+    apply_explicit_ace(target, sid_str, kind.mask(), inheritable, kind.ace_type())?;
     // Apply, then record: dying between the two leaves no witness, and the
     // next grant re-runs a propagation that is idempotent by construction.
     record_stamp(&key)
@@ -317,12 +356,12 @@ pub(crate) fn ensure_fs_grant(
 /// same way [`ensure_fs_grant`] treats the capability ACE — its own stamp-key
 /// namespace, so the two mutations' idempotency never entangles, and its own
 /// probe, so a label removed or never stamped is seen whatever the DACL says.
-fn ensure_low_integrity_label(canonical: &Path) -> Result<(), DaclError> {
-    let key = label_stamp_key(canonical);
-    if stamp_recorded(&key) && low_integrity_label_present(canonical) {
+fn ensure_low_integrity_label(target: Target<'_>) -> Result<(), DaclError> {
+    let key = label_stamp_key(target.path());
+    if stamp_recorded(&key) && low_integrity_label_present(target) {
         return Ok(());
     }
-    apply_mandatory_label_ace(canonical)?;
+    apply_mandatory_label_ace(target)?;
     record_stamp(&key)
 }
 
@@ -331,13 +370,13 @@ fn ensure_low_integrity_label(canonical: &Path) -> Result<(), DaclError> {
 /// when the target is a directory. An unreadable DACL answers `false` —
 /// attempt the real grant and let it fail loudly, the same posture as
 /// [`appcontainer_already_grants`].
-fn capability_ace_present(
-    canonical: &Path,
+fn capability_ace_present<'a>(
+    target: impl Into<Target<'a>>,
     sid_str: &str,
     kind: GrantKind,
     inheritable: bool,
 ) -> bool {
-    match scan_explicit_aces_for_sid(canonical, sid_str) {
+    match scan_explicit_aces_for_sid(target.into(), sid_str) {
         Ok(aces) => aces.iter().any(|a| {
             a.ace_type == kind.ace_type()
                 && (a.access_mask & kind.mask()) == kind.mask()

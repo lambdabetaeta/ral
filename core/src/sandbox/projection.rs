@@ -4,135 +4,82 @@
 //! [`SandboxProjection::of`] folds a stack once, at spawn, because that is
 //! when the OS profile is written.  The in-process guard (`crate::guard`)
 //! folds the same per-dimension tables afresh on every check: the fs
-//! [`region`] per op, the read one carrying the [`floor`], and for exec the
-//! very table [`GrantStack::admit`] judged with.  So guard and profile cannot disagree about what the stack
-//! permits; all that separates them is when the fold runs.  `detach` gates a
-//! verb rather than an OS rule, so it reaches no projection.
+//! [`region`] per op, the read one carrying the [`floor`] and the run places,
+//! and for exec the very table [`GrantStack::admit`] judged with.  So guard
+//! and profile cannot disagree about what the stack permits; all that
+//! separates them is when the fold runs.  `detach` gates a verb rather than an
+//! OS rule, so it reaches no projection.
+//!
+//! Support, what a launch needs beyond the policy to start a program
+//! (carriers, the Linux linker), is joined into both tables here, as allows
+//! that yield to every exclusion, so that no backend knows support as such.
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-use crate::capability::Program;
-use crate::capability::{Admitted, ExecRules, FsOp, GrantStack, Net, floor, region, rules};
-use crate::path::{FrozenPath, Rendered, Resolver, render_paths, rendered_pins};
+use crate::capability::Subject;
+use crate::capability::{
+    Admitted, Evidence, ExecRules, FsOp, FsScope, GrantStack, Join, Net, region, rules,
+    running_region,
+};
+use crate::path::{FrozenPath, RealPath, Resolver};
 #[cfg(unix)]
-use std::borrow::Borrow;
+use crate::path::{Object, Rendered, render_objects, render_paths, rendered_pins};
 use std::collections::BTreeSet;
+use std::path::Path;
 
-/// The fs half of a projection, its paths named in `N`.
+/// The fs half of a projection.
 ///
-/// Not [`FsPolicy`]: that is the grant-layer lattice element, whose
-/// [`FrozenPath`]es carry the `resolved` form the meet keys on.  Nothing
-/// below the fold reads it, so the projection holds plain surface spellings
-/// and each backend widens them into its own name class at render time,
-/// which is exactly what `N` is.
+/// Allowances stay frozen, as the guard judges them, up to rendering;
+/// exclusions are the surface names re-resolved at the fold.  `A` names an
+/// allowance and `X` an exclusion: [`FsScope`] and [`FrozenPath`] as folded,
+/// [`Object`] and [`Rendered`] as rendered.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FsRules<N> {
-    /// The grant's own live reads, the floor apart.
-    pub read_prefixes: Vec<N>,
-    /// The live part of [`floor`]: read as `read_prefixes` are, held apart
-    /// because a host may keep some of it from this user.
-    pub(crate) floor: Vec<N>,
-    pub write_prefixes: Vec<N>,
-    pub deny_paths: Vec<N>,
-    /// The ancestor closure of every *rendered* `deny_paths` entry that lies
-    /// within some *rendered* write name.  The macOS backend pins each
-    /// against rename and unlink, or a confined child relocates the ancestor
-    /// directory itself (`mv /repo/.ssh /repo/x`, or `mv /repo /scratch/r`
-    /// when the write prefix root is the ancestor) and the denied bytes
-    /// resurface at a name no deny rule covers.  Rendering runs before the
-    /// ancestor walk (`SandboxProjection::rendered`), so both a deny's
-    /// surface chain and its resolved chain are pinned, and an alias
-    /// `W/alias → W/top/deep` with deny `W/alias/secret` pins `W/top` too —
-    /// an ancestor chain only the resolved spelling reveals.
-    pub(crate) pinned_dirs: Vec<N>,
+pub struct FsRules<A = FsScope, X = FrozenPath> {
+    /// The live read region: authored reads and writes, the run places, the
+    /// live support and the [`floor`].
+    pub(crate) read: Vec<A>,
+    /// The live write prefixes.  Only prefixes: a place is never written.
+    pub(crate) write: Vec<A>,
+    pub(crate) deny: Vec<X>,
+    /// The ancestor closure of every *rendered* `deny` entry that lies within
+    /// some *rendered* write name.  The macOS backend pins each against rename
+    /// and unlink, or a confined child relocates the ancestor directory itself
+    /// (`mv /repo/.ssh /repo/x`, or `mv /repo /scratch/r` when the write
+    /// prefix root is the ancestor) and the denied bytes resurface at a name
+    /// no deny rule covers.  Derived after rendering, so both a deny's surface
+    /// chain and its resolved chain are pinned.  Empty until then.
+    pub(crate) pinned_dirs: Vec<X>,
 }
 
 /// Empty under any naming: rules over no paths, the shape a backend falls back
 /// to at the unrestricted top.  Hand-written because the derive would demand
-/// `N: Default`, which a name minted only by expansion cannot meet.
-impl<N> Default for FsRules<N> {
+/// `A: Default`.
+impl<A, X> Default for FsRules<A, X> {
     fn default() -> Self {
         Self {
-            read_prefixes: Vec::new(),
-            floor: Vec::new(),
-            write_prefixes: Vec::new(),
-            deny_paths: Vec::new(),
+            read: Vec::new(),
+            write: Vec::new(),
+            deny: Vec::new(),
             pinned_dirs: Vec::new(),
-        }
-    }
-}
-
-/// How the write region stands to one admitted executable or directory.
-#[cfg(unix)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WriteReach {
-    /// Named writable itself, or a write prefix that reaches it lies within
-    /// an admitted directory that holds it: the
-    /// writes were named at or below an admit at or above this one, so
-    /// authoring binaries here is the grant's intent.
-    Trusted,
-    /// A write prefix covers it and none was named so, so the child could
-    /// author binaries the admit runs without the grant having said so.
-    Covered,
-    Apart,
-}
-
-#[cfg(unix)]
-impl FsRules<Rendered> {
-    /// The reach over `admit`, with the admitted directories in `admitted`.
-    /// Trusted when named writable, or some write prefix `w` that covers it or lies inside it
-    /// lies within (or is) an admitted dir that holds `admit`; covered when
-    /// some `w` covers it and none qualifies; apart otherwise.  Everything is
-    /// rendered names, so the comparison is the plain prefix test on spellings.
-    pub(crate) fn write_reach(
-        &self,
-        admit: &Rendered,
-        admitted: &[impl Borrow<Rendered>],
-    ) -> WriteReach {
-        let writes = &self.write_prefixes;
-        let named = writes.iter().any(|w| {
-            w == admit
-                || (w.holds(admit.as_str()) || admit.holds(w.as_str()))
-                    && admitted.iter().any(|t| {
-                        let t = t.borrow();
-                        t.holds(admit.as_str()) && t.holds(w.as_str())
-                    })
-        });
-        if named {
-            WriteReach::Trusted
-        } else if writes.iter().any(|w| w.holds(admit.as_str())) {
-            WriteReach::Covered
-        } else {
-            WriteReach::Apart
         }
     }
 }
 
 /// OS-renderable view of the meet-folded fs policy.
 ///
-/// `Unrestricted` is the lattice top — no layer attenuated fs, so the profile
-/// passes it through with broad `file-read*`/`file-write*` on macOS,
-/// `--dev-bind / /` on Linux. An empty `Restricted` is the other extreme: fs
-/// was attenuated to nothing.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FsProjection<N = String> {
+/// `Unrestricted` is the lattice top: the stack writes the root and excludes
+/// nothing, so the profile passes fs through with broad `file-read*`/
+/// `file-write*` on macOS, `--dev-bind / /` on Linux. An empty `Restricted` is
+/// the other extreme: fs was attenuated to nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum FsProjection<A = FsScope, X = FrozenPath> {
+    #[default]
     Unrestricted,
-    Restricted(FsRules<N>),
+    Restricted(FsRules<A, X>),
 }
 
-/// Hand-written so the top is reachable for any naming, `Rendered` included:
-/// the derive would demand `N: Default`, which a name minted only by
-/// expansion cannot satisfy.
-impl<N> Default for FsProjection<N> {
-    fn default() -> Self {
-        Self::Unrestricted
-    }
-}
-
-impl<N> FsProjection<N> {
-    /// The rules when restricted, `None` at the unrestricted top.  Renderers
-    /// wanting only the prefixes match on this; the macOS profile builder
-    /// branches on the variant, since the two emit different SBPL shapes.
-    pub(crate) fn rules(&self) -> Option<&FsRules<N>> {
+impl<A, X> FsProjection<A, X> {
+    /// The rules when restricted, `None` at the unrestricted top.
+    pub(crate) fn rules(&self) -> Option<&FsRules<A, X>> {
         match self {
             Self::Unrestricted => None,
             Self::Restricted(r) => Some(r),
@@ -141,13 +88,13 @@ impl<N> FsProjection<N> {
 }
 
 /// Exec rules for the kernel: the table the in-process guard judged with, its
-/// carriers admitted and each file at its final verdict
-/// ([`ExecRules::for_kernel`]).
+/// support joined as allows ([`ExecRules::for_kernel`]).
 ///
-/// Under `Unrestricted` the in-process guard is the only check; `Restricted`
-/// closes the OS layer around the same table, shutting the `sh -c
-/// "PATH=…; cmd"` route by which a sandboxed child re-execs binaries the
-/// guard never sees.  An empty `Restricted` admits nothing.  Its paths are
+/// `Unrestricted` where exec denotes `t`: the in-process guard alone checks,
+/// and its exclusions are the table's own.  `Restricted` closes the OS layer
+/// around the same table, shutting the `sh -c "PATH=…; cmd"` route by which a
+/// sandboxed child re-execs binaries the guard never sees.  An empty
+/// `Restricted` admits nothing.  Its paths are
 /// [`RealPath`](crate::path::RealPath)s, frozen at grant, and stay so until
 /// the backend that needs other spellings renders them with
 /// [`render_real`](crate::path::render_real), which never re-resolves one.
@@ -164,17 +111,22 @@ pub(crate) enum ExecProjection {
 /// The platform backends `sandbox::linux` and `sandbox::macos` render it, in
 /// the launching process. Unlike a [`Capabilities`](crate::capability::Capabilities)
 /// frame, no further composition can widen it.
-///
-/// `N` is how the projection *names* the objects its fs rules rule over;
-/// exec rules name real paths throughout.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SandboxProjection<N = String> {
-    pub fs: FsProjection<N>,
+pub struct SandboxProjection<A = FsScope, X = FrozenPath> {
+    pub fs: FsProjection<A, X>,
     pub net: bool,
     pub(crate) exec: ExecProjection,
 }
 
-impl<N> Default for SandboxProjection<N> {
+/// A projection with every fs name rendered: what a Unix backend emits.
+#[cfg(target_os = "linux")]
+pub(crate) type RenderedProjection = SandboxProjection<Object, Rendered>;
+#[cfg(target_os = "linux")]
+pub(crate) type RenderedFs = FsProjection<Object, Rendered>;
+#[cfg(target_os = "macos")]
+pub(crate) type RenderedRules = FsRules<Object, Rendered>;
+
+impl<A, X> Default for SandboxProjection<A, X> {
     fn default() -> Self {
         Self {
             fs: FsProjection::default(),
@@ -184,61 +136,56 @@ impl<N> Default for SandboxProjection<N> {
     }
 }
 
-impl SandboxProjection<String> {
-    /// Every fs path in the projection as the names the kernel may present it
-    /// by, ordering and deduping each fs set once on the way and deriving
+impl SandboxProjection {
+    /// Every fs name in the projection as the names the kernel may present it
+    /// by, ordering and deduping each set once on the way and deriving
     /// `pinned_dirs` from the result.  After this call no rule a backend
     /// emits can name a spelling the kernel will not present.
     ///
-    /// The completeness guarantee is structural, not promised: the input is
-    /// destructured exhaustively, the output constructed exhaustively, and the
-    /// only way to obtain a `Vec<Rendered>` is to render.  Exec rules pass
-    /// through as real paths, for their backend to render with
-    /// [`render_real`](crate::path::render_real).  A path set added later
-    /// therefore fails to compile until it too is threaded — which is the point, since every under-enforcement of
-    /// this class has been someone forgetting to expand one new list.
+    /// The completeness guarantee is structural: the input is destructured
+    /// exhaustively, the output constructed exhaustively, and the only way to
+    /// obtain a [`Rendered`] is to render.  An allowance renders as its frozen
+    /// real path, never re-resolved ([`render_objects`]); an exclusion
+    /// renders as every name its surface reaches now ([`render_paths`]).
+    /// Exec rules pass through as real paths, for their backend to render with
+    /// [`render_real`](crate::path::render_real).
     ///
-    /// Pins are derived here rather than carried because they are a *function*
-    /// of the deny paths and the write prefixes — but only once both are
-    /// rendered: containment before expansion and after do not commute, since
-    /// a name reached only through a symlinked chain has ancestors the
-    /// surface spelling never mentions.  So the deny and write sets render
-    /// first, and the ancestor walk runs on their rendered output.
+    /// Pins are derived here rather than carried because they are a function
+    /// of the deny and write names, once both are rendered: containment before
+    /// expansion and after do not commute, since a name reached only through a
+    /// symlinked chain has ancestors the surface spelling never mentions.
     ///
     /// # Errors
     ///
     /// A name whose expansion cannot be spelled faithfully, as
     /// [`render_paths`] refuses it.
-    #[cfg_attr(not(unix), allow(dead_code))]
-    pub(crate) fn rendered(&self) -> Result<SandboxProjection<Rendered>, String> {
+    #[cfg(unix)]
+    pub(crate) fn rendered(&self) -> Result<SandboxProjection<Object, Rendered>, String> {
         let Self { fs, net, exec } = self;
-        let ordered = |ps: &[String]| -> Vec<String> {
-            ps.iter()
-                .cloned()
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect()
-        };
         let fs = match fs {
             FsProjection::Unrestricted => FsProjection::Unrestricted,
             FsProjection::Restricted(FsRules {
-                read_prefixes,
-                floor,
-                write_prefixes,
-                deny_paths,
-                // Derived below, so nothing a caller or the wire supplied is
-                // authority — see [`FsRules::pinned_dirs`].
+                read,
+                write,
+                deny,
+                // Derived below, so nothing a caller supplied is authority.
                 pinned_dirs: _,
             }) => {
-                let write_prefixes = render_paths(&ordered(write_prefixes))?;
-                let deny_paths = render_paths(&ordered(deny_paths))?;
-                let pinned_dirs = rendered_pins(&deny_paths, &write_prefixes);
+                let write = objects(write)?;
+                let deny = render_paths(
+                    &deny
+                        .iter()
+                        .map(FrozenPath::as_str)
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect::<Vec<_>>(),
+                )?;
+                let names: Vec<Rendered> = write.iter().flat_map(Object::names).cloned().collect();
                 FsProjection::Restricted(FsRules {
-                    read_prefixes: render_paths(&ordered(read_prefixes))?,
-                    floor: render_paths(&ordered(floor))?,
-                    write_prefixes,
-                    deny_paths,
-                    pinned_dirs,
+                    read: objects(read)?,
+                    pinned_dirs: rendered_pins(&deny, &names),
+                    write,
+                    deny,
                 })
             }
         };
@@ -251,41 +198,46 @@ impl SandboxProjection<String> {
 
     /// Meet-fold the stack's fs, net, and exec dimensions into the
     /// OS-renderable projection.  Exec is projected from the table that
-    /// admitted `admitted`, with the carriers of its program; a caller
-    /// launching nothing passes `None`, and the stack is compiled afresh.
-    /// `None` when no layer restricts fs or net, nor exec where the host's
+    /// admitted `admitted`; a caller launching nothing passes `None`, and the
+    /// stack is compiled afresh.  An axis that denotes `t` projects as
+    /// unrestricted, though an `every` table's run places still reach the read
+    /// region.  `None` when no axis restricts, nor exec where the host's
     /// backend renders it ([`crate::sandbox::EXEC_ENFORCED`]), so the caller
     /// can skip OS sandbox setup entirely.
+    ///
+    /// Support (carriers, and the Linux linker where exec is restricted) is
+    /// computed once for every launch with a restricted fs or exec, filtered to
+    /// the live files no exec or fs exclusion covers, and joined into the read
+    /// region as places and into the exec table as file allows.
     pub(crate) fn of(
         grants: &GrantStack,
         resolver: &Resolver,
         admitted: Option<&Admitted>,
     ) -> Option<Self> {
         // Traced because this fold is not the pure reduction it reads as:
-        // every re-freeze canonicalises against the filesystem, and compiling
-        // the exec table walks the host `PATH` for every bare key, so its cost
-        // tracks the host's fs latency and is paid again on each rebuild.
+        // re-freezing exclusions canonicalises against the filesystem, and
+        // compiling the exec table walks the host `PATH` for every bare key, so
+        // its cost tracks the host's fs latency and is paid again on each
+        // rebuild.
         #[cfg(debug_assertions)]
         let t_fold = std::time::Instant::now();
         // Zipped because the two regions are `Some` on the same condition,
         // some layer held an `fs` opinion, so there is no mixed case to weigh.
-        let regions =
-            region(grants, resolver, &FsOp::Read).zip(region(grants, resolver, &FsOp::Write));
+        let regions = running_region(grants, resolver)
+            .zip(region(grants, resolver, &FsOp::Write))
+            .filter(|_| !grants.fs_is_top());
         let online = !grants.net().any(|n| n == Net::Offline);
 
         let compiled = admitted.is_none().then(|| rules(grants)).flatten();
-        let exec = admitted
+        let table = admitted
             .map_or(compiled.as_ref(), Admitted::rules)
-            .map_or(ExecProjection::Unrestricted, |rules| {
-                ExecProjection::Restricted(rules.for_kernel(&carriers(rules, admitted)))
-            });
+            .filter(|_| !grants.exec_is_top());
         // Attenuated exec is worth an OS sandbox exactly where a backend
         // carries the rules into the kernel, which is the backends' fact to
         // state and `sandbox::EXEC_ENFORCED`'s to answer.  The in-process guard
         // runs on every platform regardless; the kernel layer is what sees the
         // re-execs it cannot (`sh -c`).
-        let exec_triggers_sandbox =
-            crate::sandbox::EXEC_ENFORCED && !matches!(exec, ExecProjection::Unrestricted);
+        let exec_triggers_sandbox = crate::sandbox::EXEC_ENFORCED && table.is_some();
 
         if regions.is_none() && online && !exec_triggers_sandbox {
             crate::dbg_trace!(
@@ -296,16 +248,38 @@ impl SandboxProjection<String> {
             return None;
         }
 
+        let read_excludes = |path: &Path| {
+            regions
+                .as_ref()
+                .is_some_and(|(read, _)| read.excludes(path))
+        };
+        let live = live_support(table, &read_excludes, admitted);
+        let exec = table.map_or(ExecProjection::Unrestricted, |table| {
+            ExecProjection::Restricted(table.for_kernel(&live))
+        });
         let fs = match regions {
-            Some((read, write)) => FsProjection::Restricted(FsRules {
-                floor: surface(read.live().filter(|p| floor().contains(p))),
-                read_prefixes: surface(read.live().filter(|p| !floor().contains(p))),
-                write_prefixes: surface(write.live()),
-                // Both regions carry the same denies; a disk change between the two
-                // folds can only drop a write allow, which fails closed.
-                deny_paths: surface(read.denies()),
-                pinned_dirs: Vec::new(),
-            }),
+            Some((read, write)) => {
+                let read = read.join(
+                    live.iter()
+                        .map(|s| (FsScope::Place(s.clone()), Evidence::ALLOW))
+                        .collect(),
+                );
+                FsProjection::Restricted(FsRules {
+                    read: read.live().cloned().collect(),
+                    write: write.live().cloned().collect(),
+                    // Both regions carry the same denies; a disk change between
+                    // the two folds can only drop a write allow, which fails
+                    // closed.
+                    deny: read
+                        .denies()
+                        .filter_map(|scope| match scope {
+                            FsScope::Prefix(prefix) => Some(prefix.clone()),
+                            FsScope::Place(_) => None,
+                        })
+                        .collect(),
+                    pinned_dirs: Vec::new(),
+                })
+            }
             None => FsProjection::Unrestricted,
         };
         let projection = Self {
@@ -318,62 +292,83 @@ impl SandboxProjection<String> {
     }
 }
 
-/// What the kernel must admit beside `rules` for its admitted files, and the
-/// launched program, to start.
+/// `scopes` as their objects, each frozen allowance by its real path.
+#[cfg(unix)]
+fn objects(scopes: &[FsScope]) -> Result<Vec<Object>, String> {
+    let named = scopes.iter().map(|scope| match scope {
+        FsScope::Prefix(prefix) => (RealPath::frozen(prefix), Some(prefix)),
+        FsScope::Place(place) => (place.clone(), None),
+    });
+    render_objects(named)
+}
+
+/// The live support `S'`: the carriers of the launched file and, where exec is
+/// restricted, of every live file, with the Linux linkers, less every file an
+/// exec exclusion (`table`) or an fs exclusion (`read`) covers.  Support
+/// yields to every exclusion on either axis: a file that cannot be both run and
+/// read serves no launch.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn carriers(rules: &ExecRules, admitted: Option<&Admitted>) -> BTreeSet<crate::path::RealPath> {
+fn live_support(
+    table: Option<&ExecRules>,
+    read_excludes: &dyn Fn(&Path) -> bool,
+    admitted: Option<&Admitted>,
+) -> BTreeSet<RealPath> {
+    use crate::capability::Program;
     let launched = admitted.and_then(|a| match a.program() {
         Program::File { real, .. } => Some(real),
         Program::Tool(_) => None,
     });
-    super::carriers(rules.allowed_files().chain(launched))
+    let files = table.into_iter().flat_map(ExecRules::allowed_files);
+    let mut support = super::carriers(launched.into_iter().chain(files));
+    if table.is_some() {
+        support.extend(super::carriers::linkers());
+    }
+    support.retain(|s| {
+        !table.is_some_and(|t| t.excludes(Subject::File(s))) && !read_excludes(s.as_path())
+    });
+    support
 }
 
 /// No kernel exec layer here ([`crate::sandbox::EXEC_ENFORCED`]), so nothing
 /// to carry.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn carriers(_: &ExecRules, _: Option<&Admitted>) -> BTreeSet<crate::path::RealPath> {
+fn live_support(
+    _: Option<&ExecRules>,
+    _: &dyn Fn(&Path) -> bool,
+    _: Option<&Admitted>,
+) -> BTreeSet<RealPath> {
     BTreeSet::new()
 }
 
-/// The fs projection is lexical: `resolved` has no reader below this fold,
-/// so each prefix flattens to its surface spelling here, once, and every
-/// backend widens that into its own name class at render time.
-fn surface<'a>(prefixes: impl Iterator<Item = &'a FrozenPath>) -> Vec<String> {
-    let unique: BTreeSet<&str> = prefixes.map(FrozenPath::as_str).collect();
-    unique.into_iter().map(str::to_owned).collect()
-}
-
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod rendered_tests {
     use super::*;
-    #[cfg(unix)]
-    use crate::path::RealPath;
 
-    /// The pins the traversal derives, through the real renderer — pins are
-    /// now a function of *rendered* names, so this goes through
-    /// [`SandboxProjection::rendered`] rather than calling the derivation
-    /// bare.  Containment, not equality: the renderer is entitled to add
-    /// spellings (on Windows a nonexistent `/repo` expands to the
-    /// drive-qualified `\\?\C:\repo` alongside itself), so callers assert
-    /// `as_str` containment, not the exact set.
-    fn pinned(write: &[&str], deny: &[&str]) -> Vec<String> {
-        let strings = |ps: &[&str]| ps.iter().copied().map(str::to_string).collect::<Vec<_>>();
-        let projection = SandboxProjection {
+    fn prefix(path: &str) -> FsScope {
+        FsScope::Prefix(FrozenPath::for_test(path, path))
+    }
+
+    fn projection(write: &[&str], deny: &[&str], pinned: &[&str]) -> SandboxProjection {
+        SandboxProjection {
             fs: FsProjection::Restricted(FsRules {
-                read_prefixes: Vec::new(),
-                floor: Vec::new(),
-                write_prefixes: strings(write),
-                deny_paths: strings(deny),
-                pinned_dirs: Vec::new(),
+                read: Vec::new(),
+                write: write.iter().copied().map(prefix).collect(),
+                deny: deny.iter().map(|d| FrozenPath::for_test(d, d)).collect(),
+                pinned_dirs: pinned.iter().map(|d| FrozenPath::for_test(d, d)).collect(),
             }),
             net: true,
             exec: ExecProjection::default(),
-        };
-        let out = projection.rendered().expect("ASCII paths render");
-        out.fs
-            .rules()
-            .expect("restricted in, restricted out")
+        }
+    }
+
+    /// The pins the traversal derives, through the real renderer.
+    /// Containment, not equality: the renderer may add spellings.
+    fn pinned(write: &[&str], deny: &[&str], carried: &[&str]) -> Vec<String> {
+        let out = projection(write, deny, carried)
+            .rendered()
+            .expect("ASCII paths render");
+        let rules = out.fs.rules().expect("restricted in, restricted out");
+        rules
             .pinned_dirs
             .iter()
             .map(|r| r.as_str().to_string())
@@ -381,280 +376,119 @@ mod rendered_tests {
     }
 
     /// The write prefix root is itself a proper ancestor of a deep-enough
-    /// deny, so it is pinned alongside the two intermediate directories —
-    /// the case that closes `mv /repo /scratch/r`.
+    /// deny, so it is pinned alongside the two intermediate directories.
     #[test]
     fn pins_every_ancestor_within_the_write_prefix_including_its_root() {
-        let dirs = pinned(&["/repo"], &["/repo/a/b/secret"]);
+        let dirs = pinned(&["/repo"], &["/repo/a/b/secret"], &[]);
         for expect in ["/repo", "/repo/a", "/repo/a/b"] {
             assert!(dirs.iter().any(|d| d == expect), "got {dirs:?}");
         }
     }
 
-    /// A read prefix is not a write prefix: only the latter can widen a deny's
-    /// chain, so a read-only `/repo` pins nothing.
     #[test]
     fn pins_nothing_when_no_write_prefix_covers_the_denys_chain() {
-        assert_eq!(pinned(&[], &["/repo/.ssh/id_rsa"]), Vec::<String>::new());
+        assert_eq!(
+            pinned(&[], &["/repo/.ssh/id_rsa"], &[]),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
     fn pins_nothing_for_a_deny_outside_every_prefix() {
-        assert_eq!(pinned(&["/repo"], &["/etc/secret"]), Vec::<String>::new());
-    }
-
-    /// A supplied pin is not authority: the traversal recomputes the set from
-    /// the denies and write prefixes, so a forged wire value neither survives
-    /// nor suppresses the real one.
-    #[test]
-    fn a_carried_pin_is_replaced_by_the_derived_one() {
-        let forged = SandboxProjection {
-            fs: FsProjection::Restricted(FsRules {
-                read_prefixes: Vec::new(),
-                floor: Vec::new(),
-                write_prefixes: vec!["/repo".to_string()],
-                deny_paths: vec!["/repo/a/secret".to_string()],
-                pinned_dirs: vec!["/somewhere/else".to_string()],
-            }),
-            net: true,
-            exec: ExecProjection::default(),
-        };
-        let out = forged.rendered().expect("ASCII paths render");
-        let dirs: Vec<&str> = out
-            .fs
-            .rules()
-            .expect("restricted in, restricted out")
-            .pinned_dirs
-            .iter()
-            .map(Rendered::as_str)
-            .collect();
-        // Containment, not equality: this goes through the real renderer, which
-        // is entitled to add spellings — see [`pinned`].  What is asserted is
-        // that the derived pins are present and the forged one reached neither
-        // the output nor, under any spelling, the rule set.
-        assert!(dirs.contains(&"/repo"), "got {dirs:?}");
-        assert!(dirs.contains(&"/repo/a"), "got {dirs:?}");
-        assert!(
-            !dirs.iter().any(|d| d.contains("somewhere")),
-            "a carried pin survived rendering: {dirs:?}"
+        assert_eq!(
+            pinned(&["/repo"], &["/etc/secret"], &[]),
+            Vec::<String>::new()
         );
     }
 
-    /// The reach of `write` over the admit `dir`, itself one of `admits`,
-    /// through the real renderers: every spelling of the admit must agree, or
-    /// the freeze would split one directory.
-    #[cfg(unix)]
-    fn reach(write: &[&str], admits: &[&str], dir: &str) -> WriteReach {
+    /// A supplied pin is not authority: the traversal recomputes the set.
+    #[test]
+    fn a_carried_pin_is_replaced_by_the_derived_one() {
+        let dirs = pinned(&["/repo"], &["/repo/a/secret"], &["/somewhere/else"]);
+        assert!(dirs.iter().any(|d| d == "/repo/a"), "got {dirs:?}");
+        assert!(
+            !dirs.iter().any(|d| d.contains("somewhere")),
+            "got {dirs:?}"
+        );
+    }
+
+    /// An allowance renders as its frozen real path, and a prefix granted
+    /// through a symlink never as the surface it was written by on macOS.
+    #[test]
+    fn an_allowance_renders_as_its_frozen_real_path() {
+        let linked = FsScope::Prefix(FrozenPath::for_test("/ral-test/link", "/ral-test/real"));
         let projection = SandboxProjection {
             fs: FsProjection::Restricted(FsRules {
-                write_prefixes: write.iter().copied().map(str::to_string).collect(),
+                read: vec![linked],
                 ..FsRules::default()
             }),
             net: true,
             exec: ExecProjection::default(),
         };
-        let rendered = projection.rendered().expect("ASCII paths render");
-        let fs = rendered.fs.rules().expect("restricted in, restricted out");
-        let names = |path: &str| {
-            crate::path::render_real(&RealPath::assumed(path)).expect("ASCII path renders")
-        };
-        let admitted: Vec<Rendered> = admits.iter().flat_map(|admit| names(admit)).collect();
-        let spellings = names(dir);
-        let first = fs.write_reach(&spellings[0], &admitted);
-        assert!(
-            spellings
-                .iter()
-                .all(|spelling| fs.write_reach(spelling, &admitted) == first),
-            "{dir} split across its spellings: {spellings:?}"
-        );
-        first
-    }
-
-    /// [`reach`] over `dir` as the only admit.
-    #[cfg(unix)]
-    fn reach_alone(write: &[&str], dir: &str) -> WriteReach {
-        reach(write, &[dir], dir)
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_write_prefix_identical_to_the_admit_is_trusted() {
-        assert_eq!(
-            reach_alone(&["/ral-test/w"], "/ral-test/w"),
-            WriteReach::Trusted
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_write_prefix_inside_the_admit_is_trusted() {
-        assert_eq!(
-            reach_alone(&["/ral-test/w/out"], "/ral-test/w"),
-            WriteReach::Trusted
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_shallower_write_prefix_covers_the_admit() {
-        assert_eq!(
-            reach_alone(&["/ral-test"], "/ral-test/w/bin"),
-            WriteReach::Covered
-        );
-        assert_eq!(reach_alone(&["/"], "/ral-test/w/bin"), WriteReach::Covered);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_disjoint_write_prefix_leaves_the_admit_apart() {
-        assert_eq!(
-            reach_alone(&["/ral-test/other"], "/ral-test/w"),
-            WriteReach::Apart
-        );
-        assert_eq!(reach_alone(&[], "/ral-test/w"), WriteReach::Apart);
-    }
-
-    /// Containment is by component: `/ral-test/w2` is no part of `/ral-test/w`.
-    #[cfg(unix)]
-    #[test]
-    fn a_sibling_that_shares_a_name_prefix_is_apart() {
-        assert_eq!(
-            reach_alone(&["/ral-test/w2"], "/ral-test/w"),
-            WriteReach::Apart
-        );
-    }
-
-    /// Naming the tree outranks a shallower prefix that also reaches it.
-    #[cfg(unix)]
-    #[test]
-    fn a_named_tree_stays_trusted_beside_a_covering_prefix() {
-        assert_eq!(
-            reach_alone(&["/ral-test", "/ral-test/w/bin"], "/ral-test/w/bin"),
-            WriteReach::Trusted
-        );
-    }
-
-    /// `write: cwd` with `cwd/` admitted: an admit nested under it, such as a
-    /// `$PATH` entry inside the project, is written at or below an admit above
-    /// it.
-    #[cfg(unix)]
-    #[test]
-    fn an_admit_nested_in_a_trusted_admit_is_trusted() {
-        let admits = ["/ral-test/proj", "/ral-test/proj/node_modules/.bin"];
-        for dir in admits {
-            assert_eq!(
-                reach(&["/ral-test/proj"], &admits, dir),
-                WriteReach::Trusted,
-                "{dir}"
-            );
-        }
-    }
-
-    /// No admit holds both `~` and `~/.cargo/bin`, so a broad prefix over a
-    /// lone admit stays covered.
-    #[cfg(unix)]
-    #[test]
-    fn a_broad_prefix_over_a_lone_admit_stays_covered() {
-        assert_eq!(
-            reach_alone(&["/ral-test/home"], "/ral-test/home/.cargo/bin"),
-            WriteReach::Covered
-        );
-    }
-
-    /// Trust does not leak sideways: the carve-out `~/.cargo/registry` lies in
-    /// `~/.cargo/`, which holds it, but does not reach `~/.cargo/bin`, and `~`
-    /// lies within no admit.
-    #[cfg(unix)]
-    #[test]
-    fn trust_does_not_leak_to_a_sibling_admit() {
-        let write = ["/ral-test/home", "/ral-test/home/.cargo/registry"];
-        let admits = ["/ral-test/home/.cargo", "/ral-test/home/.cargo/bin"];
-        assert_eq!(reach(&write, &admits, admits[0]), WriteReach::Trusted);
-        assert_eq!(reach(&write, &admits, admits[1]), WriteReach::Covered);
-    }
-
-    /// `/tmp` and `/private/tmp` are one directory, so a prefix spelled one
-    /// way reaches an admit spelled the other.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn firmlink_spellings_classify_alike() {
-        assert_eq!(
-            reach_alone(&["/tmp/ral-test"], "/private/tmp/ral-test/bin"),
-            WriteReach::Covered
-        );
-        assert_eq!(
-            reach_alone(&["/private/tmp/ral-test/bin"], "/tmp/ral-test/bin"),
-            WriteReach::Trusted
-        );
+        let out = projection.rendered().expect("ASCII paths render");
+        let rules = out.fs.rules().expect("restricted");
+        let object = &rules.read[0];
+        assert_eq!(object.real.as_str(), "/ral-test/real");
+        #[cfg(target_os = "macos")]
+        assert!(object.names().all(|n| !n.as_str().contains("link")));
+        #[cfg(target_os = "linux")]
+        assert_eq!(object.spellings.len(), 1);
     }
 }
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{ExecProjection, WriteReach};
-    use crate::capability::{Capabilities, ExecKey, ExecScope, FsPolicy, Verdict};
-    use crate::path::{FrozenPath, render_real};
+    use super::ExecProjection;
+    use crate::capability::{Axis, Capabilities, Evidence, ExecGrant, ExecKey, FsPolicy};
+    use crate::path::FrozenPath;
+    use crate::test_access::fs_read_paths;
 
-    /// A layer with an opinion on writes, on exec, or both.
-    fn layer(write: Option<&str>, admit: Option<&str>) -> Capabilities {
+    fn layer(read: Option<&str>, run: Option<&str>) -> Capabilities {
         let prefix = FrozenPath::from_surface;
         Capabilities {
-            fs: write.map(|w| FsPolicy {
+            fs: read.map(|w| FsPolicy {
                 read_prefixes: vec![prefix(w)],
-                write_prefixes: vec![prefix(w)],
+                write_prefixes: Vec::new(),
                 deny_paths: Vec::new(),
             }),
-            exec: admit
-                .map(|dir| std::iter::once((ExecKey::Dir(prefix(dir)), Verdict::Allow)).collect()),
+            exec: run
+                .map(|dir| std::iter::once((ExecKey::Dir(prefix(dir)), Evidence::ALLOW)).collect()),
             ..Capabilities::root()
         }
     }
 
-    /// The reach of the write region the stack folds to over the one dir it
-    /// admits.
-    fn folded_reach(base: Capabilities, inner: Capabilities) -> WriteReach {
-        let projection = crate::test_helper::core_shell().with_capabilities(base, |sh| {
-            sh.with_capabilities(inner, |sh| sh.sandbox_projection().expect("restricted"))
+    fn project(base: Capabilities) -> super::SandboxProjection {
+        crate::test_helper::core_shell()
+            .with_capabilities(base, |sh| sh.sandbox_projection().expect("restricted"))
+    }
+
+    /// The run place joins the read region, and nothing becomes writable.
+    #[test]
+    fn a_run_place_is_read_and_never_written() {
+        let projection = project(layer(Some("/ral-test/w"), Some("/ral-test/bin")));
+        let read = fs_read_paths(&projection.fs).expect("fs restricted");
+        assert!(read.iter().any(|p| p == "/ral-test/bin"), "{read:?}");
+        let rules = projection.fs.rules().expect("fs restricted");
+        assert_eq!(rules.write, Vec::new());
+    }
+
+    /// Exec that denotes `t` projects as unrestricted, though its places
+    /// still reach the read region.
+    #[test]
+    fn exec_that_denotes_top_is_unrestricted_and_its_places_still_read() {
+        let every = std::iter::once((
+            ExecKey::Dir(FrozenPath::from_surface("/ral-test/bin")),
+            Evidence::ALLOW,
+        ))
+        .collect::<ExecGrant>()
+        .join_top()
+        .expect("every");
+        let projection = project(Capabilities {
+            exec: Some(every),
+            ..layer(Some("/ral-test/w"), None)
         });
-        let rendered = projection.rendered().expect("ASCII paths render");
-        let fs = rendered.fs.rules().expect("a layer restricted fs");
-        let ExecProjection::Restricted(rules) = &rendered.exec else {
-            panic!("a layer restricted exec");
-        };
-        let dirs: Vec<_> = (rules.rules())
-            .filter_map(|(scope, v)| match scope {
-                ExecScope::Dir(path) if !v.is_denied() => Some(render_real(path)),
-                _ => None,
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .expect("ASCII paths render")
-            .concat();
-        fs.write_reach(
-            dirs.first().expect("the admitted dir reaches the rules"),
-            &dirs,
-        )
-    }
-
-    /// The base layer's prefix survives the fold when no inner layer says
-    /// anything about writes, so the admit an inner layer adds is covered by a
-    /// grant it never wrote.
-    #[test]
-    fn a_shallower_base_layer_covers_what_an_inner_layer_admits() {
-        let reach = folded_reach(
-            layer(Some("/ral-test/w"), None),
-            layer(None, Some("/ral-test/w/bin")),
-        );
-        assert_eq!(reach, WriteReach::Covered);
-    }
-
-    /// The control: an inner layer naming the admit as a write prefix too
-    /// meets to the deeper prefix, which is the admit itself.
-    #[test]
-    fn an_inner_layer_that_names_the_admit_as_writable_trusts_it() {
-        let reach = folded_reach(
-            layer(Some("/ral-test/w"), None),
-            layer(Some("/ral-test/w/bin"), Some("/ral-test/w/bin")),
-        );
-        assert_eq!(reach, WriteReach::Trusted);
+        assert_eq!(projection.exec, ExecProjection::Unrestricted);
+        let read = fs_read_paths(&projection.fs).expect("fs restricted");
+        assert!(read.iter().any(|p| p == "/ral-test/bin"), "{read:?}");
     }
 }

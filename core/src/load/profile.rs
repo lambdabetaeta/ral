@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use crate::capability::Capabilities;
+use crate::capability::{Capabilities, Fragment};
 use crate::guard::decode_capability_map;
 use crate::guard::freeze::FreezeCtx;
 use crate::types::{Break, Mooring, Settled, Shell, sig};
@@ -71,6 +71,34 @@ pub fn load_capabilities_from_path(
     load_capabilities_from_str(mooring, shell, &source, &abs, ctx)
 }
 
+/// [`load_capabilities_from_str`] for an extension file: what the source states
+/// is a [`Fragment`], in which an omitted axis states nothing.
+///
+/// # Errors
+/// As [`load_capabilities_from_str`].
+pub fn load_fragment_from_str(
+    mooring: &Mooring,
+    shell: &mut Shell,
+    source: &str,
+    virtual_path: &str,
+    ctx: &FreezeCtx,
+) -> Settled<Fragment> {
+    load_capabilities_from_str(mooring, shell, source, virtual_path, ctx).map(Fragment::of)
+}
+
+/// [`load_capabilities_from_path`] for an extension file.
+///
+/// # Errors
+/// As [`load_capabilities_from_path`].
+pub fn load_fragment_from_path(
+    mooring: &Mooring,
+    shell: &mut Shell,
+    path: &Path,
+    ctx: &FreezeCtx,
+) -> Settled<Fragment> {
+    load_capabilities_from_path(mooring, shell, path, ctx).map(Fragment::of)
+}
+
 /// Load each profile in `paths` and push each as its own permanent, session-wide layer.
 ///
 /// Root first, and the stack folds them at every check, so no file's opinion
@@ -116,7 +144,7 @@ fn wrap(virtual_path: &str, e: Break) -> Break {
 )]
 mod tests {
     use super::*;
-    use crate::capability::{ExecKey, Verdict};
+    use crate::capability::{Evidence, ExecKey};
 
     fn shell() -> Shell {
         crate::test_helper::core_shell()
@@ -141,7 +169,10 @@ mod tests {
         )
         .unwrap();
         let exec = caps.exec.expect("exec dimension present");
-        assert_eq!(exec.get(&ExecKey::Name("ls".into())), Some(&Verdict::Allow));
+        assert_eq!(
+            exec.get(&ExecKey::Name("ls".into())),
+            Some(&Evidence::ALLOW)
+        );
         // `None` is no opinion, so an unmentioned dimension inherits the caller.
         assert!(
             caps.fs.is_none()
@@ -164,8 +195,30 @@ mod tests {
         .unwrap();
         assert_eq!(
             caps.exec.unwrap().get(&ExecKey::Name("bash".into())),
-            Some(&Verdict::Deny)
+            Some(&Evidence::DENY)
         );
+    }
+
+    /// A fragment extends a base that omits an axis to every request less its
+    /// exclusions, and a positive-only one leaves the axis unrestricted.
+    #[test]
+    fn a_fragment_extends_by_role_not_by_omission() {
+        let mut shell = shell();
+        let mut load = |source: &str| {
+            load_fragment_from_str(
+                &Mooring::adrift(),
+                &mut shell,
+                source,
+                "<test:fragment>",
+                &ctx(),
+            )
+            .unwrap()
+        };
+        let positive = Capabilities::default().extend(load("return [exec: [allow: [`name ls]]]"));
+        assert!(!positive.is_restrictive(), "{positive:?}");
+        let excluding = Capabilities::default().extend(load("return [exec: [deny: [`name rm]]]"));
+        assert!(excluding.is_restrictive(), "{excluding:?}");
+        assert!(excluding.exec.is_some_and(|e| e.every()));
     }
 
     #[test]

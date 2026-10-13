@@ -1,14 +1,13 @@
 # `minimal` bake-in.  The smallest base that's actually useful as a
-# starting point for additive `--extend-base` composition: the
+# starting point for additive `--extend` composition: the
 # platform's tool roots (`dir `system`)
 # + cwd + scratch, network on, chdir allowed.  Nothing from the
 # user's home except scratch: `xdg-bin` is not admitted (so a fresh
 # tool dropped in `~/.local/bin` is a deliberate choice via
-# extend-base, not an implicit one); a Homebrew tree is not admitted
-# even though `system` folds one in when present — an explicit
-# `deny` override below carves it back out, so user-installed brew
-# tools must be opted in; toolchain caches and `~/Library` are not
-# readable.
+# `--extend`, not an implicit one); a Homebrew tree is not admitted
+# and is left unlisted, so brew tools are added by `--extend` (for
+# example a file that allows `` `dir `homebrew ``); toolchain caches
+# and `~/Library` are not readable.
 #
 # The contrast with `reasonable`: this is "system tools only,
 # nothing pulled from my home or homebrew, network on so I can
@@ -54,12 +53,11 @@ return [
   # `curl`, `tar`, `awk`, `sed`, `pkg-config`, `clang`, … — which
   # matches what users actually want from "tight but functional."
   #
-  # `system` folds in a Homebrew tree when one exists on the host
-  # (see `core/src/guard/freeze.rs::system_tool_roots`); the explicit
-  # `deny` below carves it back out so `minimal` stays "system tools
-  # only" regardless of host.  Apple's toolchain (CommandLineTools,
-  # Xcode) is folded in by `system` too, so building from source works
-  # without listing each tool here.
+  # `system` is the platform's own tool roots (see
+  # `core/src/guard/freeze.rs::system_tool_roots`) and carries no
+  # Homebrew tree.  Apple's toolchain (CommandLineTools, Xcode) is
+  # folded in by `system`, so building from source works without
+  # listing each tool here.
   #
   # `bash` and `zsh` live under a tool root (admitted by `system`
   # above), but a literal `name` deny overrides the subpath rule.
@@ -76,7 +74,6 @@ return [
       `dir `tempdir .,
     ],
     deny: [
-      `dir `absolute /opt/homebrew,  # `system` folds Homebrew in when present; minimal opts it back out
       `name bash,
       `name zsh,
       `name cmd,

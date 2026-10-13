@@ -243,28 +243,6 @@ pub(super) fn is_sep(c: u8) -> bool {
     matches!(c, b'/' | b'\\')
 }
 
-/// Depth of `dir` in components, folded through the same identity
-/// [`path_within`] matches with: a firmlink alias collapsed to its canonical
-/// (longer) spelling, then split under Windows path identity under Windows
-/// rules, by [`Path::components`] otherwise.
-///
-/// `capability::exec` ranks competing directory rules by depth, and a
-/// character count is a depth proxy only within one spelling:
-/// `/tmp/a/b` nests deeper than `/private/tmp` yet is shorter, so counting
-/// characters ranks spelling and lets a shallow alias outrank the directory
-/// it sits above.
-pub(crate) fn identity_depth(dir: &str, rules: PathRules) -> usize {
-    let original = PathBuf::from(dir);
-    let canonical = match super::canon::firmlink_toggle(&original) {
-        Some(alt) if alt.as_os_str().len() > original.as_os_str().len() => alt,
-        _ => original,
-    };
-    match rules {
-        PathRules::Windows => windows_identity_components(&canonical.to_string_lossy()).len(),
-        PathRules::Posix => canonical.components().count(),
-    }
-}
-
 #[cfg(test)]
 #[allow(
     clippy::disallowed_methods,
@@ -556,14 +534,5 @@ mod tests {
             r"C:\work",
             PathRules::Posix
         ));
-    }
-
-    /// Three spellings of one directory must report one depth, or the
-    /// deepest-prefix ranking picks by spelling.
-    #[test]
-    fn identity_depth_windows_folds_case_separator_and_verbatim() {
-        assert_eq!(identity_depth(r"C:\work\sub", W), 3);
-        assert_eq!(identity_depth(r"c:/WORK/SUB", W), 3);
-        assert_eq!(identity_depth(r"\\?\C:\work\sub", W), 3);
     }
 }

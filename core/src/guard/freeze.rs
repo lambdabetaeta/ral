@@ -149,6 +149,8 @@ pub enum Selector {
     Path,
     /// The platform's tool roots ([`system_tool_roots`]).
     System,
+    /// The Homebrew prefixes present on this host ([`homebrew_roots`]).
+    Homebrew,
 }
 
 /// A capability-policy decode/freeze failure.
@@ -301,20 +303,20 @@ impl FreezeCtx {
         let sub = |s| subpath(&tag, s);
         let frozen = match place {
             Place::Absolute(raw) => {
-                return Ok(
-                    live_absolute(raw, PathRules::HOST)?.then(|| FrozenPath::from_surface(raw))
-                );
+                return live_absolute(raw, PathRules::HOST)?
+                    .then(|| freeze(raw))
+                    .transpose();
             }
-            Place::Cwd(s) => join_sub(&self.cwd, sub(s)?),
-            Place::Tempdir(s) => join_sub(std::env::temp_dir(), sub(s)?),
+            Place::Cwd(s) => join_sub(&self.cwd, sub(s)?)?,
+            Place::Tempdir(s) => join_sub(std::env::temp_dir(), sub(s)?)?,
             Place::Gitdir(s) => {
                 let sub = sub(s)?;
                 let base = discover_git_dir(&self.cwd)?.unwrap_or_else(|| self.cwd.clone());
-                join_sub(base, sub)
+                join_sub(base, sub)?
             }
             Place::Home(s) => {
                 let sub = sub(s)?;
-                join_sub(self.home().ok_or_else(home_unknown)?, sub)
+                join_sub(self.home().ok_or_else(home_unknown)?, sub)?
             }
             Place::Xdg(kind, s) => self.xdg(*kind, sub(s)?)?,
         };
@@ -330,7 +332,8 @@ impl FreezeCtx {
     pub fn selector(&self, selector: Selector) -> Result<Vec<FrozenPath>, PolicyError> {
         match selector {
             Selector::Path => path_dirs(),
-            Selector::System => Ok(system_dirs()),
+            Selector::System => system_dirs(),
+            Selector::Homebrew => homebrew_dirs(self.home()),
         }
     }
 
@@ -352,7 +355,7 @@ impl FreezeCtx {
         let (Some(home), Some(base)) = (self.home(), resolve_xdg(kind, self.home())) else {
             return Err(home_unknown());
         };
-        let resolved = join_sub(base, sub);
+        let resolved = join_sub(base, sub)?;
         if FrozenPath::from_surface(home).contains::<Allow>(resolved.real_path()) {
             return Ok(resolved);
         }
@@ -534,8 +537,14 @@ fn unknown_xdg_message(entry: &str) -> String {
     )
 }
 
-fn join_sub(base: impl AsRef<Path>, sub: &str) -> FrozenPath {
-    FrozenPath::from_surface(base.as_ref().join(sub))
+fn join_sub(base: impl AsRef<Path>, sub: &str) -> Result<FrozenPath, PolicyError> {
+    freeze(base.as_ref().join(sub))
+}
+
+/// The grant door of [`FrozenPath`]: an allowance keeps the real path it is
+/// frozen to for good, so one that is not Unicode is refused here.
+fn freeze(path: impl AsRef<Path>) -> Result<FrozenPath, PolicyError> {
+    FrozenPath::freeze(path).map_err(PolicyError::new)
 }
 
 /// `$PATH` split on the platform separator, keeping the absolute entries.  A
@@ -545,8 +554,8 @@ fn path_dirs() -> Result<Vec<FrozenPath>, PolicyError> {
     let path = std::env::var("PATH").unwrap_or_default();
     let dirs: Vec<_> = std::env::split_paths(&path)
         .filter(|entry| entry.is_absolute())
-        .map(FrozenPath::from_surface)
-        .collect();
+        .map(freeze)
+        .collect::<Result<_, _>>()?;
     if dirs.is_empty() {
         return Err(PolicyError::new(
             "`path` expands to zero absolute directories; \
@@ -556,14 +565,22 @@ fn path_dirs() -> Result<Vec<FrozenPath>, PolicyError> {
     Ok(dirs)
 }
 
+/// `homebrew` expansion.  An absent Homebrew expands to nothing, not an error.
+fn homebrew_dirs(home: Option<&str>) -> Result<Vec<FrozenPath>, PolicyError> {
+    live_homebrew_roots(home).iter().map(freeze).collect()
+}
+
+/// [`homebrew_roots`] over the live environment and filesystem: what the
+/// `homebrew` selector and the fs floor both expand to.
+pub(crate) fn live_homebrew_roots(home: Option<&str>) -> Vec<String> {
+    homebrew_roots(|k| std::env::var(k).ok(), home, crate::path::exists)
+}
+
 /// `system` expansion.  Unlike `path` it can never come back empty, the
-/// platform's own tool roots being unconditional, so there is no
-/// empty-expansion error to raise here.
-fn system_dirs() -> Vec<FrozenPath> {
-    system_tool_roots()
-        .iter()
-        .map(FrozenPath::from_surface)
-        .collect()
+/// platform's own tool roots being unconditional, so the only error is a
+/// root that cannot be frozen.
+fn system_dirs() -> Result<Vec<FrozenPath>, PolicyError> {
+    system_tool_roots().iter().map(freeze).collect()
 }
 
 /// The platform's tool-root directories, what the `system` selector expands
@@ -591,8 +608,8 @@ pub fn system_tool_roots() -> Vec<String> {
     }
 }
 
-/// `/usr/bin` and `/bin` unconditionally, plus whichever of the Homebrew
-/// prefixes and the toolchain roots `exists` reports.
+/// `/usr/bin` and `/bin` unconditionally, plus whichever of the toolchain
+/// roots `exists` reports.
 ///
 /// The one place platform tool roots live as grant data: the OS sandboxes
 /// admit nothing beyond what a grant names, so program behaviour that no
@@ -603,8 +620,6 @@ pub(crate) fn unix_tool_roots(exists: impl Fn(&str) -> bool) -> Vec<String> {
     let mut roots = vec!["/usr/bin".to_string(), "/bin".to_string()];
     roots.extend(
         [
-            "/opt/homebrew",
-            "/home/linuxbrew/.linuxbrew",
             "/usr/libexec",
             "/usr/lib/git-core",
             "/usr/lib/gcc",
@@ -616,6 +631,31 @@ pub(crate) fn unix_tool_roots(exists: impl Fn(&str) -> bool) -> Vec<String> {
         .map(str::to_string),
     );
     roots
+}
+
+/// The Homebrew prefixes that `exists` reports: an absolute `HOMEBREW_PREFIX`
+/// alone when `env` sets one, else whichever of `/opt/homebrew`,
+/// `/home/linuxbrew/.linuxbrew` and `~/.linuxbrew` is present.  Intel macOS's
+/// `/usr/local` is shared with everything else, so only `HOMEBREW_PREFIX`
+/// reaches it.
+pub(crate) fn homebrew_roots(
+    env: impl Fn(&str) -> Option<String>,
+    home: Option<&str>,
+    exists: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    let defaults = || {
+        ["/opt/homebrew", "/home/linuxbrew/.linuxbrew"]
+            .map(str::to_string)
+            .into_iter()
+            .chain(home.map(|h| format!("{}/.linuxbrew", h.trim_end_matches('/'))))
+    };
+    match env("HOMEBREW_PREFIX").filter(|p| p.starts_with('/')) {
+        Some(prefix) => vec![prefix],
+        None => defaults().collect(),
+    }
+    .into_iter()
+    .filter(|root| exists(root))
+    .collect()
 }
 
 /// `%SystemRoot%\System32` and the bundled Windows PowerShell home, falling
@@ -977,16 +1017,70 @@ mod tests {
     }
 
     #[test]
-    fn unix_tool_roots_adds_present_homebrew_prefix_only() {
-        let roots = unix_tool_roots(|p| p == "/opt/homebrew");
-        assert_eq!(
-            roots,
-            vec![
-                "/usr/bin".to_string(),
-                "/bin".to_string(),
-                "/opt/homebrew".to_string(),
-            ]
-        );
+    fn unix_tool_roots_carries_no_homebrew() {
+        let roots = unix_tool_roots(|p| p.contains("brew"));
+        assert_eq!(roots, ["/usr/bin", "/bin"]);
+    }
+
+    #[test]
+    fn homebrew_roots_table() {
+        let all = |_: &str| true;
+        let none = |_: &str| false;
+        let prefix =
+            |v: &'static str| move |k: &str| (k == "HOMEBREW_PREFIX").then(|| v.to_string());
+        let unset = |_: &str| None;
+        let cases: [(&str, Vec<String>, Vec<String>); 8] = [
+            (
+                "defaults",
+                homebrew_roots(unset, Some("/home/u"), all),
+                vec![
+                    "/opt/homebrew",
+                    "/home/linuxbrew/.linuxbrew",
+                    "/home/u/.linuxbrew",
+                ]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            ),
+            (
+                "only present defaults",
+                homebrew_roots(unset, Some("/home/u"), |p| p == "/home/u/.linuxbrew"),
+                vec!["/home/u/.linuxbrew".into()],
+            ),
+            (
+                "absent",
+                homebrew_roots(unset, Some("/home/u"), none),
+                vec![],
+            ),
+            (
+                "no home",
+                homebrew_roots(unset, None, all),
+                vec!["/opt/homebrew".into(), "/home/linuxbrew/.linuxbrew".into()],
+            ),
+            (
+                "prefix replaces defaults",
+                homebrew_roots(prefix("/usr/local"), Some("/home/u"), all),
+                vec!["/usr/local".into()],
+            ),
+            (
+                "absent prefix is nothing",
+                homebrew_roots(prefix("/usr/local"), Some("/home/u"), |p| p != "/usr/local"),
+                vec![],
+            ),
+            (
+                "relative prefix ignored",
+                homebrew_roots(prefix("brew"), None, |p| p == "/opt/homebrew"),
+                vec!["/opt/homebrew".into()],
+            ),
+            (
+                "system without homebrew",
+                unix_tool_roots(|p| p.contains("brew")),
+                vec!["/usr/bin".into(), "/bin".into()],
+            ),
+        ];
+        for (name, got, want) in cases {
+            assert_eq!(got, want, "{name}");
+        }
     }
 
     #[test]

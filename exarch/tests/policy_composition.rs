@@ -47,6 +47,14 @@ fn bullet<'a>(text: &'a str, label: &str) -> &'a str {
         .unwrap_or_else(|| panic!("no `{label}` line in:\n{text}"))
 }
 
+/// The real path of this test binary, standing for exarch's own.
+fn own_binary() -> String {
+    std::fs::canonicalize(std::env::current_exe().expect("the test binary has a path"))
+        .expect("the test binary exists")
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// The real path of the file `name` runs on this host — what a bare key
 /// denotes: the canonical path of what `PATH` finds.  `rustc` is wherever
 /// rustup put it, so the fixture asks `PATH` rather than naming a directory.
@@ -80,12 +88,12 @@ fn install(shell: &mut Shell, stack: &GrantStack) {
     }
 }
 
-/// The widening runs before the meet, so a widened grant the attenuation file
-/// never names is erased by it.  Inverting the phases turns `--extend-base`
+/// The extension runs before the meet, so an extended grant the attenuation file
+/// never names is erased by it.  Inverting the phases turns `--extend`
 /// into an escape hatch from `--restrict`; `ls`, named on both sides, is the
 /// control that says the meet attenuated rather than emptied.
 #[test]
-fn an_extend_base_grant_cannot_survive_a_restrict_that_omits_it() {
+fn an_extend_grant_cannot_survive_a_restrict_that_omits_it() {
     let dir = Scratch::for_test(EXARCH, "extend-then-restrict").expect("scratch dir");
     let extend = profile(
         &dir,
@@ -101,11 +109,12 @@ fn an_extend_base_grant_cannot_survive_a_restrict_that_omits_it() {
     let mut shell = ral_core::test_helper::core_shell();
     install(&mut shell, &stack);
     check_file(&mut shell, &on_path("rustc"), &[])
-        .expect_err("--extend-base must not outlive a --restrict that omits it");
+        .expect_err("--extend must not outlive a --restrict that omits it");
     check_file(&mut shell, &on_path("ls"), &[]).expect("what both sides name survives the fold");
 }
 
-/// `--restrict` is documented as order-free.  Each file becomes its own
+/// Two restrictions whose verdicts do not depend on their order (it can: see
+/// the order test below).  Each file becomes its own
 /// layer, and a layer's exec map is an allowlist over the whole namespace —
 /// `b` naming no directory answers "outside my reach" for `git`, exactly as
 /// the restrict file of the test above answers for `rustc`.  So the fold
@@ -258,11 +267,11 @@ fn no_attenuated_base_can_read_a_credential_file() {
     }
 }
 
-/// `dangerous` is ambient authority by contract, so it installs no fs policy
-/// at all — and two denies are not worth turning every unconfined session into
+/// `dangerous` is ambient authority, less starting exarch: it installs no fs
+/// policy, and two denies are not worth turning every unconfined session into
 /// a confined one against an agent that can reach the same bytes a hundred
 /// other ways.  Naming a restrict file *does* attenuate, and then the
-/// credential carve-out lands with it.
+/// credential carve-out lands with it.  The self layer is there throughout.
 #[test]
 fn dangerous_stays_ambient_until_something_attenuates_it() {
     let dir = Scratch::for_test(EXARCH, "credential-deny-dangerous").expect("scratch dir");
@@ -272,8 +281,12 @@ fn dangerous_stays_ambient_until_something_attenuates_it() {
     let (stack, _) = for_invocation(&cwd, "dangerous", None, &[]).expect("dangerous composes");
     assert!(
         stack.fs().next().is_none(),
-        "dangerous must attenuate nothing"
+        "dangerous must attenuate nothing on fs"
     );
+    let mut shell = ral_core::test_helper::core_shell();
+    install(&mut shell, &stack);
+    refusal(check_file(&mut shell, &own_binary(), &[]));
+    check_file(&mut shell, &on_path("ls"), &[]).expect("everything else still runs");
 
     let restrict = profile(&dir, "restrict.ral", "return [net: `offline]\n");
     let (stack, _) = for_invocation(&cwd, "dangerous", None, std::slice::from_ref(&restrict))
@@ -287,6 +300,116 @@ fn dangerous_stays_ambient_until_something_attenuates_it() {
         denies.iter().any(|p| *p == *oauth.to_string_lossy()),
         "an attenuated dangerous must still carve out the tokens: {denies:?}"
     );
+}
+
+/// An extension's allowance never removes permission, so `dangerous` stays
+/// unrestricted; its exclusion makes every request, less it.  Exarch's own
+/// binary stays out of reach either way.
+#[test]
+fn dangerous_extended_is_unrestricted_less_the_extensions_exclusions() {
+    let dir = Scratch::for_test(EXARCH, "extend-dangerous").expect("scratch dir");
+    let cwd = dir.path().to_string_lossy().into_owned();
+    let positive = profile(&dir, "positive.ral", "return [exec: [allow: [`name ls]]]\n");
+    let excluding = profile(
+        &dir,
+        "excluding.ral",
+        "return [exec: [deny: [`name rustc]]]\n",
+    );
+
+    let (stack, _) =
+        for_invocation(&cwd, "dangerous", Some(&positive), &[]).expect("profiles compose");
+    assert!(
+        stack.iter().next().is_some_and(|c| !c.is_restrictive()),
+        "an allowance beside `dangerous` restricts nothing"
+    );
+    let mut shell = ral_core::test_helper::core_shell();
+    install(&mut shell, &stack);
+    check_file(&mut shell, &on_path("rustc"), &[]).expect("`every` still runs what is unnamed");
+    refusal(check_file(&mut shell, &own_binary(), &[]));
+
+    let (stack, _) =
+        for_invocation(&cwd, "dangerous", Some(&excluding), &[]).expect("profiles compose");
+    let mut shell = ral_core::test_helper::core_shell();
+    install(&mut shell, &stack);
+    let message = refusal(check_file(&mut shell, &on_path("rustc"), &[]));
+    assert!(message.contains(&on_path("rustc")), "{message}");
+    check_file(&mut shell, &on_path("ls"), &[]).expect("every request less the exclusion");
+}
+
+/// `--restrict` files apply in argument order: a layer reads the run places
+/// of the layers beneath it.  A layer that reads nothing, beneath one that
+/// runs a file, refuses it; the other way round the file runs and is read.
+#[test]
+fn restrictions_apply_in_argument_order() {
+    let dir = Scratch::for_test(EXARCH, "restrict-order").expect("scratch dir");
+    let cwd = dir.path().to_string_lossy().into_owned();
+    let bin = tempfile::tempdir().expect("scratch dir for the program");
+    let prog = bin.path().join("prog");
+    std::fs::write(&prog, "#!/bin/sh\n").expect("the program");
+    let prog = std::fs::canonicalize(prog)
+        .expect("the program exists")
+        .to_string_lossy()
+        .into_owned();
+    let reads_nothing = profile(&dir, "reads-nothing.ral", "return [fs: [read: []]]\n");
+    let runs = profile(
+        &dir,
+        "runs.ral",
+        &format!("return [exec: [allow: [`absolute {prog}]]]\n"),
+    );
+    let verdict = |files: [PathBuf; 2]| {
+        let (stack, _) = for_invocation(&cwd, "dangerous", None, &files).expect("composes");
+        let mut shell = ral_core::test_helper::core_shell();
+        install(&mut shell, &stack);
+        check_file(&mut shell, &prog, &[])
+    };
+    verdict([reads_nothing.clone(), runs.clone()])
+        .expect_err("a layer that reads nothing, beneath the run, cannot read it");
+    verdict([runs, reads_nothing]).expect("the run beneath makes the program readable");
+}
+
+/// The self layer is pushed in every session: exarch's own binary is refused
+/// under `reasonable` and `dangerous` alike.
+#[test]
+fn the_self_layer_refuses_exarch_in_every_session() {
+    let dir = Scratch::for_test(EXARCH, "self-layer").expect("scratch dir");
+    let cwd = dir.path().to_string_lossy().into_owned();
+    for base in ["reasonable", "dangerous"] {
+        let (stack, _) = for_invocation(&cwd, base, None, &[]).expect("base composes");
+        let mut shell = ral_core::test_helper::core_shell();
+        install(&mut shell, &stack);
+        refusal(check_file(&mut shell, &own_binary(), &[]));
+    }
+}
+
+/// The credential layer follows fs restriction, not fs presence: an extension
+/// that excludes a path restricts, and one that only allows does not.
+#[test]
+fn the_credential_layer_follows_an_fs_restriction() {
+    let dir = Scratch::for_test(EXARCH, "credential-extend").expect("scratch dir");
+    let cwd = dir.path().to_string_lossy().into_owned();
+    let oauth = EXARCH.xdg_dir(XdgKind::State).join("oauth.json");
+    let carved = |stack: &GrantStack| {
+        stack
+            .fs()
+            .flat_map(|fs| fs.deny_paths.iter())
+            .any(|p| p.as_str() == oauth.to_string_lossy())
+    };
+    let excluding = profile(
+        &dir,
+        "excluding.ral",
+        "return [fs: [deny: [`cwd secret]]]\n",
+    );
+    let positive = profile(&dir, "positive.ral", "return [fs: [read: [`cwd .]]]\n");
+
+    let (stack, _) =
+        for_invocation(&cwd, "dangerous", Some(&excluding), &[]).expect("profiles compose");
+    assert!(
+        carved(&stack),
+        "an fs exclusion restricts, so the tokens are carved out"
+    );
+    let (stack, _) =
+        for_invocation(&cwd, "dangerous", Some(&positive), &[]).expect("profiles compose");
+    assert!(!carved(&stack), "a positive-only fs restricts nothing");
 }
 
 /// The summary is the model's only view of its own authority, so it has to
@@ -311,11 +434,7 @@ fn the_grant_summary_agrees_with_an_attenuated_grant() {
         "minimal never restricts the net, and no layer has an opinion"
     );
     assert_eq!(bullet(&text, "- net:"), "- net: inherit");
-    let veto = if cfg!(windows) {
-        "cmd"
-    } else {
-        "/opt/homebrew"
-    };
+    let veto = if cfg!(windows) { "cmd" } else { "bash" };
     assert!(
         bullet(&text, "- exec deny:").contains(veto),
         "minimal's {veto} veto must reach the model:\n{text}"
@@ -326,18 +445,45 @@ fn the_grant_summary_agrees_with_an_attenuated_grant() {
     assert!(bullet(&text, "- scratch:").contains(SCRATCH_PLACEHOLDER));
 }
 
-/// `dangerous` attenuates nothing, so the denial legend would describe an
-/// event that cannot happen: the summary collapses to one line, and still
-/// names the scratch the agent needs.
+/// `dangerous` is every program less exarch itself: the summary says so, names
+/// the one exclusion, and says nothing of fs or net, and still names the
+/// scratch the agent needs.
 #[test]
-fn the_grant_summary_collapses_for_an_unattenuated_grant() {
+fn the_grant_summary_of_dangerous_is_every_program_less_exarch() {
     let dir = Scratch::for_test(EXARCH, "grant-prompt-dangerous").expect("scratch dir");
     let cwd = dir.path().to_string_lossy().into_owned();
     let (stack, _) = for_invocation(&cwd, "dangerous", None, &[]).expect("dangerous composes");
     let text = host_section(&stack, EXARCH);
 
-    assert!(text.contains("Ambient authority"), "{text}");
+    assert!(!text.contains("Ambient authority"), "{text}");
+    assert_eq!(
+        bullet(&text, "- exec:"),
+        "- exec: every program, less exarch itself"
+    );
+    assert!(!text.contains("- fs "), "{text}");
     assert!(bullet(&text, "- scratch:").contains(SCRATCH_PLACEHOLDER));
+}
+
+/// A ceiling of `every` beside a run place, fs omitted, denotes `t` and yet
+/// makes the place readable under a nested fs restriction, so it is
+/// summarised; a name is a run place too.
+#[test]
+fn a_layer_naming_a_run_place_is_summarised_though_it_denotes_top() {
+    let dir = Scratch::for_test(EXARCH, "grant-prompt-place").expect("scratch dir");
+    let cwd = dir.path().to_string_lossy().into_owned();
+    let place = profile(
+        &dir,
+        "place.ral",
+        &format!("return [exec: [allow: [`absolute {}]]]\n", on_path("ls")),
+    );
+    let nothing = profile(&dir, "nothing.ral", "return [exec: [allow: [`name ls]]]\n");
+
+    let (stack, _) = for_invocation(&cwd, "dangerous", Some(&place), &[]).expect("composes");
+    let text = host_section(&stack, EXARCH);
+    assert!(bullet(&text, "- exec:").contains("also named"), "{text}");
+    let (stack, _) = for_invocation(&cwd, "dangerous", Some(&nothing), &[]).expect("composes");
+    let text = host_section(&stack, EXARCH);
+    assert!(bullet(&text, "- exec:").contains("also named"), "{text}");
 }
 
 /// A misspelt base names every live one back, and each name it offers really

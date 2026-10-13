@@ -1,4 +1,8 @@
-use super::{GrantKind, ProjectionKey, existing_paths, filter_out_granted, profile_name};
+use super::{
+    FsRules, FsScope, GrantKind, ProjectionKey, existing_paths, filter_out_granted, profile_name,
+    refuse_universal_prefix,
+};
+use crate::path::FrozenPath;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
@@ -58,6 +62,80 @@ fn projection_key_identity_is_the_fs_triple() {
     assert_ne!(a, denied);
 }
 
+fn prefixes(paths: &[&str]) -> Vec<FsScope> {
+    paths
+        .iter()
+        .map(|p| FsScope::Prefix(FrozenPath::from_surface(p)))
+        .collect()
+}
+
+fn rules(read: &[&str], write: &[&str], deny: &[&str]) -> FsRules {
+    FsRules {
+        read: prefixes(read),
+        write: prefixes(write),
+        deny: deny.iter().map(FrozenPath::from_surface).collect(),
+        pinned_dirs: Vec::new(),
+    }
+}
+
+#[test]
+fn the_universal_prefix_is_refused_in_either_region() {
+    for rules in [
+        rules(&["/"], &[], &[r"C:\secret"]),
+        rules(&[], &["/"], &[r"C:\secret"]),
+        rules(&[r"C:\work"], &["/"], &[]),
+    ] {
+        let why = refuse_universal_prefix(&rules).unwrap_err().to_string();
+        assert!(why.contains("ral will not stamp every drive"), "{why}");
+    }
+    let why = refuse_universal_prefix(&rules(&["/"], &[], &[r"C:\secret"]))
+        .unwrap_err()
+        .to_string();
+    assert!(why.contains("every path except some exclusions"), "{why}");
+}
+
+#[test]
+fn a_drive_root_is_not_the_universal_prefix() {
+    assert!(refuse_universal_prefix(&rules(&[r"C:"], &[r"C:\work"], &[])).is_ok());
+}
+
+#[test]
+#[allow(clippy::disallowed_methods, reason = "[test] junction fixture")]
+fn a_redirected_allowance_refuses_the_launch_before_the_memo_is_consulted() {
+    use crate::process::Launch;
+    use crate::process::cancel::CancelScope;
+    use crate::sandbox::{ExecProjection, FsProjection, SandboxProjection};
+    let _env = crate::test_env::env_guard();
+    let root = tempfile::tempdir().unwrap();
+    let (granted, outside) = (root.path().join("granted"), root.path().join("outside"));
+    std::fs::create_dir(&granted).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    let projection = SandboxProjection {
+        fs: FsProjection::Restricted(rules(&[granted.to_str().unwrap()], &[], &[])),
+        net: false,
+        exec: ExecProjection::default(),
+    };
+    let confine = || {
+        let mut launch = Launch::new(r"C:\Windows\System32\cmd.exe");
+        super::confine(&mut launch, &projection, None, &CancelScope::default())
+    };
+    confine().expect("a real directory is granted");
+    std::fs::remove_dir(&granted).unwrap();
+    let junction = std::process::Command::new("cmd")
+        .args(["/d", "/c", "mklink", "/J"])
+        .arg(&granted)
+        .arg(&outside)
+        .output()
+        .unwrap();
+    assert!(junction.status.success(), "{junction:?}");
+    let why = confine().unwrap_err().to_string();
+    assert!(
+        why.contains("an allowance names what it named when granted"),
+        "{why}"
+    );
+    super::teardown();
+}
+
 /// End-to-end proof that the kernel honors a *private, derived*
 /// capability SID: `CreateProcessW` must accept it inside
 /// `SECURITY_CAPABILITIES`, the stamped allow-ACE must admit a write
@@ -77,7 +155,7 @@ fn confined_child_writes_inside_the_grant_and_not_outside() {
     let _env = crate::test_env::env_guard();
     use crate::process::cancel::CancelScope;
     use crate::process::{Launch, PgidPolicy, StdioSpec, WaitOutcome};
-    use crate::sandbox::{ExecProjection, FsProjection, FsRules, SandboxProjection};
+    use crate::sandbox::{ExecProjection, FsProjection, SandboxProjection};
     use std::path::Path;
 
     // Siblings under one root, so the child can name the ungranted one
@@ -88,13 +166,11 @@ fn confined_child_writes_inside_the_grant_and_not_outside() {
     std::fs::create_dir(&granted).unwrap();
     std::fs::create_dir(&outside).unwrap();
     let projection = SandboxProjection {
-        fs: FsProjection::Restricted(FsRules {
-            read_prefixes: vec![granted.to_string_lossy().into_owned()],
-            floor: Vec::new(),
-            write_prefixes: vec![granted.to_string_lossy().into_owned()],
-            deny_paths: Vec::new(),
-            pinned_dirs: Vec::new(),
-        }),
+        fs: FsProjection::Restricted(rules(
+            &[granted.to_str().unwrap()],
+            &[granted.to_str().unwrap()],
+            &[],
+        )),
         net: false,
         exec: ExecProjection::default(),
     };
@@ -165,24 +241,19 @@ fn confined_child_denies_protected_and_explicit_descendants() {
     use super::super::dacl::deny_tests::{DenyTree, READABLE, with_state};
     use crate::process::cancel::CancelScope;
     use crate::process::{Launch, PgidPolicy, StdioSpec};
-    use crate::sandbox::{ExecProjection, FsProjection, FsRules, SandboxProjection};
+    use crate::sandbox::{ExecProjection, FsProjection, SandboxProjection};
     use std::io::Read;
     use std::path::Path;
 
     with_state(|| {
         let tree = DenyTree::new();
+        let denied = [tree.deny.to_str().unwrap()];
         let projection = |deny: bool| SandboxProjection {
-            fs: FsProjection::Restricted(FsRules {
-                read_prefixes: vec![tree.allow.to_string_lossy().into_owned()],
-                floor: Vec::new(),
-                write_prefixes: Vec::new(),
-                deny_paths: if deny {
-                    vec![tree.deny.to_string_lossy().into_owned()]
-                } else {
-                    Vec::new()
-                },
-                pinned_dirs: Vec::new(),
-            }),
+            fs: FsProjection::Restricted(rules(
+                &[tree.allow.to_str().unwrap()],
+                &[],
+                if deny { &denied[..] } else { &[] },
+            )),
             net: false,
             exec: ExecProjection::default(),
         };
