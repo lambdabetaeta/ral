@@ -619,17 +619,19 @@ fn control_seat(
     control: impl Into<ral_core::protocol::channel::WireStream>,
     cwd: std::path::PathBuf,
 ) -> Result<exarch::agent::RootSeat, String> {
-    let scratch = std::path::Path::new(crate::grant::GUEST_SCRATCH);
+    let scratch = std::path::PathBuf::from(crate::grant::GUEST_SCRATCH);
     // Home is the guest scratch, not the workspace: `HOME` is where
     // XDG-defaulting tools drop caches and dotfiles, and pointed at
     // `/work` that litter would land among the user's own documents —
     // and in every change report.
-    let mut attach = ral_core::protocol::Attach::new(
-        exarch::shell_eval::builtins::INSTALLER_TAG,
-        cwd,
-        scratch.to_path_buf(),
+    let attach = ral_core::protocol::Attach::root(
+        ral_core::protocol::EngineSpec::new(
+            exarch::shell_eval::builtins::INSTALLER_TAG,
+            scratch.clone(),
+        ),
+        ral_core::protocol::Root::new(cwd)
+            .with_env(exarch::app::scratch_env(exarch::app::EXARCH, &scratch)),
     );
-    attach.env = exarch::app::scratch_env(exarch::app::EXARCH, scratch);
     Ok(exarch::agent::RootSeat::Wire {
         transport: Box::new(
             ral_core::carrier::WireTransport::adopt(

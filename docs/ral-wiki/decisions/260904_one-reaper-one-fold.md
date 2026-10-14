@@ -3,6 +3,11 @@ status: active
 generated_at_commit: 4957c6c4
 ---
 
+> **Amended 2026-10-13.** The accepted exception below is gone: the hatch and
+> its table were deleted ([[decisions/261013_the-seed-rides-the-protocol-sealed|the-seed-rides-the-protocol-sealed]]),
+> as was `ChildHandle::try_reap`. The reaper now owns every child wait, with
+> no exception; the passages on `hatch.rs` are history.
+
 # One reaper, one fold
 
 **"Every blocking wait on its own thread" was how ral simulated `select` on

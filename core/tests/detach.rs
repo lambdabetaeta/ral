@@ -39,8 +39,8 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
 
-/// The marker the hidden birth flag's survivor writes to its trace file and
-/// to both its streams, which go to `/dev/null`.
+/// The marker [`detach_host`]'s survivor writes to its trace file and to
+/// both its streams, which go to `/dev/null`.
 const MARKER: &str = "survivor-8fb1";
 
 /// Every test here births OS processes, and one of them sweeps
@@ -55,9 +55,11 @@ fn armed() -> Shell {
     let mut shell = ral_core::boot::boot_shell(
         ral_core::terminal::TerminalState::default(),
         common::prelude(),
-        &ral_core::boot::HostSurface::default(),
+        &ral_core::boot::HostSurface {
+            statics: vec![builtins::DETACH_BUILTIN],
+            ..ral_core::boot::HostSurface::default()
+        },
     );
-    shell.install_builtins(builtins::DETACH_BUILTIN);
     shell.arm_detach(16);
     shell
 }
@@ -106,31 +108,43 @@ fn refusal(shell: &mut Shell, source: &str) -> String {
     }
 }
 
-/// Re-exec this test binary under the hidden birth flag, wait for it to exit
-/// *completely*, and return the pid it printed for the survivor it left
-/// behind.  `host_out` and `host_err` take the host's own two streams, so a
-/// caller can also ask where the survivor's bytes did *not* go.
-///
-/// The re-exec lands in `common`'s `#[ctor]`, which serves the flag before
-/// libtest ever sees the argv.
+/// Names the trace file [`detach_host`] births into; unset, it does nothing.
+const HOST_TRACE: &str = "RAL_DETACH_HOST_TRACE";
+
+/// Run [`detach_host`] alone in a fresh copy of this test binary, wait for it
+/// to exit *completely*, and return the survivor it left behind.  `host_out`
+/// and `host_err` take the host's own two streams, so a caller can also ask
+/// where the survivor's bytes did *not* go.
 fn host_that_births_and_exits(trace: &Path, host_out: &Path, host_err: &Path) -> Survivor {
     let status = std::process::Command::new(std::env::current_exe().unwrap())
-        .arg(ral_core::Role::DetachBirth.flag())
-        .arg(trace)
-        .arg(MARKER)
+        .args(["--exact", "detach_host"])
+        .env(HOST_TRACE, trace)
         .stdout(std::fs::File::create(host_out).unwrap())
         .stderr(std::fs::File::create(host_err).unwrap())
         .status()
         .expect("the test binary can re-exec itself");
     assert!(status.success(), "the birthing host exited {status}");
-    let printed = std::fs::read_to_string(host_out).unwrap();
-    Survivor(
-        printed
-            .split_whitespace()
-            .next()
-            .and_then(|pid| pid.parse().ok())
-            .expect("the host prints the pid of what it birthed, and nothing else"),
-    )
+    let receipt = std::fs::read(trace.with_extension("receipt")).unwrap();
+    Survivor::of(&serde_json::from_slice(&receipt).expect("the host wrote its receipt"))
+}
+
+/// The host [`host_that_births_and_exits`] runs: birth one `detach` that
+/// writes [`MARKER`] to its trace and to both its streams until killed, and
+/// leave its receipt beside the trace, since libtest owns stdout.
+#[test]
+fn detach_host() {
+    let Some(trace) = std::env::var_os(HOST_TRACE).map(std::path::PathBuf::from) else {
+        return;
+    };
+    let receipt = birth(
+        &mut armed(),
+        &format!(
+            "detach #'the survivor a test outlives'# /bin/sh -c 'while :; do \
+             echo {MARKER}; echo {MARKER} >&2; echo {MARKER} >> {}; sleep 0.05; done'",
+            trace.display()
+        ),
+    );
+    std::fs::write(trace.with_extension("receipt"), receipt.to_string()).unwrap();
 }
 
 /// Poll `holds` to a deliberately generous ceiling: the dev box is a VM

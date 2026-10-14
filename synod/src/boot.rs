@@ -125,7 +125,7 @@ pub(crate) fn boot_media() -> Option<BootPlan> {
             let out = parent.parent()?.join("vm-image").join("out");
             let kernel = out.join("boot").join("kernel");
             let initramfs = out.join("boot").join("initramfs.img");
-            let rootfs = out.join("rootfs.img");
+            let rootfs = out.join("rootfs").join("rootfs.img");
             return [&kernel, &initramfs, &rootfs]
                 .iter()
                 .all(|f| f.is_file())

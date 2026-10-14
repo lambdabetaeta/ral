@@ -279,8 +279,8 @@ jobs:
             vm-image/out/boot/kernel
             vm-image/out/boot/initramfs.img
             vm-image/out/boot/boot-manifest.txt
-            vm-image/out/rootfs.img.zst
-            vm-image/out/rootfs.img.sha256
+            vm-image/out/rootfs/rootfs.img.zst
+            vm-image/out/rootfs/rootfs.img.sha256
           if-no-files-found: error
 
   # The synod installers, one per platform, each wrapping the guest image built

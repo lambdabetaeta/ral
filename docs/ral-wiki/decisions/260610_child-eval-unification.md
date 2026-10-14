@@ -15,6 +15,10 @@ status: superseded
 > engine seat's own seed wire for `hatch`
 > ([[map/core/transport|transport]]).
 
+> **Amended 2026-10-13.** `EngineSeed`/`pack_seed` and the hatch they served are
+> gone too: the seed rides the protocol, sealed in `Attach.seed`
+> ([[decisions/261013_the-seed-rides-the-protocol-sealed|the-seed-rides-the-protocol-sealed]]).
+
 # One re-exec'd-child eval protocol
 
 **Evaluating a `Comp` in a re-exec'd child is one protocol with two

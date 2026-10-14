@@ -13,10 +13,10 @@ use crate::carrier::{
     write_through,
 };
 use crate::first_order::FOValue;
-use crate::protocol::channel::{Liveness, WireChannel, WireStream, ticks};
+use crate::protocol::channel::{Liveness, WireChannel, WireStream, WriteError, ticks};
 use crate::protocol::probe::Probe;
 use crate::protocol::{
-    Attach, DispatchId, EnquiryError, EnquiryId, Event, Frame, Run, SessionEvent,
+    Attach, DispatchId, EnquiryError, EnquiryId, Event, Frame, Report, Run, SessionEvent,
 };
 use crate::sync::{CondvarExt as _, LockExt};
 use crate::types::DeferredSink;
@@ -193,8 +193,10 @@ fn spawn_heartbeat(
                 break;
             }
             seq += 1;
-            if write_through(&write_tx, &severance, &Frame::Ping(seq)).is_err() {
-                break;
+            match write_through(&write_tx, &severance, &Frame::Ping(seq)) {
+                Err(WriteError::Severed) => break,
+                Err(WriteError::Unencodable(e)) => unreachable!("a ping is a few bytes: {e}"),
+                Ok(()) => {}
             }
             unanswered.fetch_add(1, Ordering::Relaxed);
         }
@@ -260,7 +262,13 @@ impl WireTransport {
     /// # Panics
     /// If the already-open socket cannot be duplicated for the heartbeat.
     pub fn attach(&self, attach: Attach) {
-        self.write(&Frame::Attach(attach));
+        // No session yet to refuse into: the refusal is the attach's verdict.
+        if let Err(WriteError::Unencodable(e)) = self.write(&Frame::Attach(attach)) {
+            self.sever(Severed::Refused(format!(
+                "the attach could not be sent: {e}"
+            )));
+            return;
+        }
         let pending = self.pending_heartbeat.lock_ignore_poison().take();
         if let Some(liveness) = pending {
             // Silence is counted from here, not from `adopt`: a front-end that
@@ -325,11 +333,13 @@ impl WireTransport {
         }
     }
 
-    /// Any write error is fatal, `ECONNRESET` no less than `BrokenPipe`: a
+    /// Any I/O error is fatal, `ECONNRESET` no less than `BrokenPipe`: a
     /// dropped frame means no `Report` will ever arrive, so the host's `recv`
-    /// must learn of the severance rather than block forever.
-    fn write(&self, frame: &Frame) {
-        let _ = write_through(&self.write_tx, &self.ends.severance, frame);
+    /// must learn of the severance rather than block forever. A frame the fuse
+    /// refuses never reached the wire: each caller answers that refusal where
+    /// it stands.
+    fn write(&self, frame: &Frame) -> Result<(), WriteError> {
+        write_through(&self.write_tx, &self.ends.severance, frame)
     }
 }
 
@@ -355,13 +365,24 @@ impl Transport for WireTransport {
         // The host is consulted by the drain loop, not here: an enquiry
         // crossing a wire is a frame on `events()`, answered by whoever drains
         // it — `dispatch_to_report`.
-        self.write(&Frame::Dispatch(id, Box::new(run)));
+        if let Err(WriteError::Unencodable(e)) = self.write(&Frame::Dispatch(id, Box::new(run))) {
+            let report = Report::host_fault(format!("dispatch: the run could not be sent: {e}"));
+            self.ends
+                .events
+                .stash
+                .lock_ignore_poison()
+                .push_back((id, Event::Report(report)));
+        }
     }
 
     fn probe(&self, probe: &Probe) -> Result<FOValue, ProbeError> {
         forbid_reentry(self);
         let id = mint_dispatch_id();
-        self.write(&Frame::Probe(id, probe.clone()));
+        if let Err(WriteError::Unencodable(e)) = self.write(&Frame::Probe(id, probe.clone())) {
+            return Err(ProbeError::Rejected(format!(
+                "probe: the probe could not be sent: {e}"
+            )));
+        }
         // Foreign events read past on the way to this probe's own reading are
         // held here rather than restashed mid-loop: `recv`'s stash-first law
         // would hand a mid-loop stash straight back on the next iteration,
@@ -395,11 +416,19 @@ impl Transport for WireTransport {
     }
 
     fn detach(&self) {
-        self.write(&Frame::Detach);
+        let _ = self.write(&Frame::Detach);
     }
 
+    /// An answer the fuse refuses is replaced by its refusal, so the parked
+    /// engine is not left waiting.
     fn answer(&self, eid: EnquiryId, answer: Result<FOValue, EnquiryError>) {
-        self.write(&Frame::Answer(eid, answer));
+        if let Err(WriteError::Unencodable(e)) = self.write(&Frame::Answer(eid, answer)) {
+            let refusal = EnquiryError {
+                message: format!("answer: the host could not reply: {e}"),
+                status: 1,
+            };
+            let _ = self.write(&Frame::Answer(eid, Err(refusal)));
+        }
     }
 }
 

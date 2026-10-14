@@ -9,9 +9,10 @@ use std::io::{self, Read, Write};
 /// Checked before the body is allocated, so no peer names a huge buffer.
 const MAX_FRAME_LEN: u32 = 256 * 1024 * 1024;
 
-/// The frame fuse, stated once and judged by both doors: a writer that would
-/// exceed it fails here, with a sentence, instead of putting a frame on the
-/// wire that the reader can only answer by severing mid-stream.
+/// The frame fuse, stated once and judged by both doors: the encoder refuses a
+/// frame past it, with a sentence, before a byte is written, so the wire stays
+/// whole; the reader still severs on an oversize frame, a peer protocol
+/// violation.
 fn fuse(len: usize) -> io::Result<u32> {
     match u32::try_from(len) {
         Ok(len) if len <= MAX_FRAME_LEN => Ok(len),
@@ -25,22 +26,35 @@ fn fuse(len: usize) -> io::Result<u32> {
     }
 }
 
-/// Encode and decode both grow their stack onto the heap rather than capping
-/// depth: a frame nests as deep as the data or IR it carries, and only the
-/// fuse bounds it.
-pub(crate) fn write_frame<W: Write + ?Sized, T: Serialize>(w: &mut W, value: &T) -> io::Result<()> {
-    let mut bytes = Vec::new();
+/// A body the fuse has passed, and its length prefix.
+pub(crate) struct Encoded {
+    len: u32,
+    body: Vec<u8>,
+}
+
+/// Serialise and fuse, with no I/O: an `Err` is the writer's fault and leaves
+/// the wire untouched. Encode and decode both grow their stack onto the heap
+/// rather than capping depth: a frame nests as deep as the data or IR it
+/// carries, and only the fuse bounds it.
+pub(crate) fn encode<T: Serialize>(value: &T) -> io::Result<Encoded> {
+    let mut body = Vec::new();
     value
         .serialize(serde_stacker::Serializer::new(
-            &mut serde_json::Serializer::new(&mut bytes),
+            &mut serde_json::Serializer::new(&mut body),
         ))
         .map_err(io::Error::other)?;
-    let len = fuse(bytes.len())?;
+    Ok(Encoded {
+        len: fuse(body.len())?,
+        body,
+    })
+}
+
+/// Length prefix, body, flush: only I/O can fail here.
+pub(crate) fn put<W: Write + ?Sized>(w: &mut W, frame: &Encoded) -> io::Result<()> {
     let _no_sigpipe = sigpipe::Suppress::install();
-    w.write_all(&len.to_le_bytes())?;
-    w.write_all(&bytes)?;
-    w.flush()?;
-    Ok(())
+    w.write_all(&frame.len.to_le_bytes())?;
+    w.write_all(&frame.body)?;
+    w.flush()
 }
 
 /// Block SIGPIPE around a protocol write.
@@ -220,7 +234,7 @@ mod tests {
     #[test]
     fn read_frame_retries_a_signal_interrupted_length_read() {
         let mut framed = Vec::new();
-        write_frame(&mut framed, &"hello").unwrap();
+        put(&mut framed, &encode(&"hello").unwrap()).unwrap();
         let mut reader = InterruptOnce {
             bytes: std::io::Cursor::new(framed),
             interrupted: false,
@@ -276,7 +290,7 @@ mod tests {
             .unwrap()
             .expect("a whole frame decodes");
         let mut again = Vec::new();
-        write_frame(&mut again, &deep).unwrap();
+        put(&mut again, &encode(&deep).unwrap()).unwrap();
         assert_eq!(again, framed);
     }
 
@@ -311,7 +325,7 @@ mod tests {
                 }),
             );
             let mut framed = Vec::new();
-            write_frame(&mut framed, &frame).unwrap();
+            put(&mut framed, &encode(&frame).unwrap()).unwrap();
             let decoded: Option<Frame> = read_frame(&mut std::io::Cursor::new(framed)).unwrap();
             assert!(decoded == Some(frame), "a deep result must cross intact");
         }
@@ -323,7 +337,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let mut framed = Vec::new();
-        write_frame(&mut framed, &"not a number").unwrap();
+        put(&mut framed, &encode(&"not a number").unwrap()).unwrap();
         let mut reader = std::io::Cursor::new(framed);
         let err = read_frame::<_, u32>(&mut reader).unwrap_err();
 

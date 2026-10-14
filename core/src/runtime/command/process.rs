@@ -22,8 +22,9 @@ impl From<Refusal> for Break {
 /// and `pre_exec` hooks are the caller's: they differ between the standalone
 /// and pipeline contexts.
 ///
-/// `ownership` reaches only the Linux bwrap backend, which ties the envelope
-/// to this process's death unless the child is being surrendered.
+/// `ownership` reaches the Linux bwrap backend, which ties the envelope to
+/// this process's death unless the child is being surrendered, and the guest
+/// jail, which seats a surrendered child outside this engine's cgroup tree.
 pub(crate) fn build_launch(
     plan: &SpawnPlan,
     ownership: crate::sandbox::Ownership,
@@ -67,7 +68,9 @@ pub(crate) fn build_launch(
     }
     #[cfg(target_os = "linux")]
     if let Some(jail) = jail {
-        let plan = jail.plan().map_err(|e| sig(format!("guest jail: {e}")))?;
+        let plan = jail
+            .plan(ownership)
+            .map_err(|e| sig(format!("guest jail: {e}")))?;
         cmd.apply_guest_jail(&plan)
             .map_err(|e| sig(format!("guest jail: {e}")))?;
     }

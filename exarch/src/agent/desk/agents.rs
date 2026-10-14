@@ -108,7 +108,7 @@ impl ExarchDesk {
     /// Take up the fork a builtin body left for this desk: adopt it out of
     /// the parent's own transport, or make an engine for the sealed bequest
     /// across the wire.  The engine narrows by the bequest's grant on either
-    /// seat, so the desk does not read `spec.grant`.
+    /// seat.
     fn fork_seat(&self, verb: &str, fork: ForkClaim) -> Result<Seat, Error> {
         let refused =
             |why: String| Error::new(format!("`` exarch-agents `{verb} `` refused: {why}"));
@@ -116,8 +116,8 @@ impl ExarchDesk {
             (SeatKind::Identity(parent), ForkClaim::Parked(id)) => {
                 parent.adopt_parked(id).map(Seat::adopted).map_err(refused)
             }
-            (SeatKind::Wire { attach }, ForkClaim::Sealed(seed)) => {
-                self.make_engine(attach, seed).map_err(refused)
+            (SeatKind::Wire { engine }, ForkClaim::Sealed(seed)) => {
+                self.make_engine(engine, seed).map_err(refused)
             }
             (SeatKind::Identity(_), ForkClaim::Sealed(_)) => Err(refused(
                 "this host runs its children in its own process, so the fork must be `parked \
@@ -138,8 +138,8 @@ impl ExarchDesk {
     /// so the child is attached before the roster names it.
     fn make_engine(
         &self,
-        attach: &ral_core::protocol::Attach,
-        seed: ral_core::seed::Sealed,
+        engine: &ral_core::protocol::EngineSpec,
+        seal: ral_core::seed::Sealed,
     ) -> Result<Seat, String> {
         let s = &self.services;
         let factory = s.fleet.launch.factory.as_ref().ok_or(
@@ -154,7 +154,11 @@ impl ExarchDesk {
             ral_core::protocol::channel::Liveness::default(),
         )
         .map_err(|e| format!("could not adopt the helper engine's wire: {e}"))?;
-        Seat::wire(transport, attach.clone(), Some(seed)).map_err(|lost| {
+        Seat::wire(
+            transport,
+            ral_core::protocol::Attach::child(engine.clone(), seal),
+        )
+        .map_err(|lost| {
             crate::agent::seat::EngineLost::starting(&lost, s.agent.run_dir()).to_string()
         })
     }

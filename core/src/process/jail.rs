@@ -16,6 +16,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
+use crate::sandbox::Ownership;
+
 #[cfg(target_os = "linux")]
 pub(crate) mod linux;
 
@@ -42,13 +44,18 @@ static GUEST: OnceLock<Option<Arc<GuestJail>>> = OnceLock::new();
 
 /// Install this process's jail, once: `Some` only under `RAL_GUEST`, which
 /// only ral-daemon's closed environment sets, so every engine is jailed alike.
+/// Its value is the cgroup root the jail places commands under.
 /// Called by `Engine::boot` alone, so no recipe learns that jails exist.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "RAL_GUEST is the daemon-set cgroup root, not an XDG path"
+)]
 pub(crate) fn install_guest() {
     GUEST.get_or_init(|| {
         #[cfg(target_os = "linux")]
-        if std::env::var("RAL_GUEST").is_ok() {
+        if let Some(root) = std::env::var_os("RAL_GUEST") {
             return Some(Arc::new(GuestJail::new(
-                PathBuf::from("/sys/fs/cgroup/ral-exec"),
+                PathBuf::from(root),
                 100_000,
                 JailLimits::default(),
             )));
@@ -106,13 +113,18 @@ pub(crate) struct JailPlan {
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const GUEST_SEQ_FILE: &str = "/run/ral/jail.seq";
 
+/// The tree a detached survivor lives in: beside every engine's, so no
+/// engine's teardown reaches it and only the machine's halt does.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const DETACHED: &str = "detached";
+
 /// The guest-wide jail: one per booted engine, shared by `Arc` across every
 /// fork and worker thread.
 ///
 /// `engine_pid` groups a booted engine's own cgroups under one directory —
 /// grouping only, since the sequence file already makes `seq` itself
 /// guest-global — so teardown can reach exactly one engine's tree without
-/// disturbing a sibling's.
+/// disturbing a sibling's, or a survivor in [`DETACHED`].
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) struct GuestJail {
     cgroup_root: PathBuf,
@@ -143,13 +155,19 @@ impl GuestJail {
         }
     }
 
-    /// Mint the next exec's uid/gid and cgroup.
+    /// Mint the next exec's uid/gid and cgroup: in this engine's tree for a
+    /// child it keeps, in [`DETACHED`] for one it surrenders.
     ///
     /// # Errors
     /// Returns the sequence file's io error, on a Linux guest, if it cannot
     /// be opened, locked, read, or written.
-    pub(crate) fn plan(&self) -> io::Result<JailPlan> {
+    pub(crate) fn plan(&self, ownership: Ownership) -> io::Result<JailPlan> {
         let seq = self.next_seq()?;
+        let tree = match ownership {
+            Ownership::Kept => format!("engine-{}", self.engine_pid),
+            #[cfg(unix)]
+            Ownership::Surrendered => DETACHED.to_owned(),
+        };
         #[allow(
             clippy::cast_possible_truncation,
             reason = "a session's exec count never approaches u32::MAX"
@@ -158,10 +176,7 @@ impl GuestJail {
         Ok(JailPlan {
             uid,
             gid: uid,
-            cgroup: self
-                .cgroup_root
-                .join(format!("engine-{}", self.engine_pid))
-                .join(format!("exec-{seq}")),
+            cgroup: self.cgroup_root.join(tree).join(format!("exec-{seq}")),
             limits: self.limits,
         })
     }
@@ -217,9 +232,11 @@ mod tests {
     #[test]
     fn plan_yields_pairwise_distinct_uids_and_cgroups() {
         let jail = jail();
-        let Some(plans) =
-            unwrap_or_skip((0..8).map(|_| jail.plan()).collect::<io::Result<Vec<_>>>())
-        else {
+        let Some(plans) = unwrap_or_skip(
+            (0..8)
+                .map(|_| jail.plan(Ownership::Kept))
+                .collect::<io::Result<Vec<_>>>(),
+        ) else {
             return;
         };
         let mut uids: Vec<_> = plans.iter().map(|p| p.uid).collect();
@@ -235,7 +252,10 @@ mod tests {
     #[test]
     fn plan_uids_strictly_increase_and_never_yield_root() {
         let jail = jail();
-        let Some((a, b)) = unwrap_or_skip(jail.plan().and_then(|a| Ok((a, jail.plan()?)))) else {
+        let Some((a, b)) = unwrap_or_skip(
+            jail.plan(Ownership::Kept)
+                .and_then(|a| Ok((a, jail.plan(Ownership::Kept)?))),
+        ) else {
             return;
         };
         assert!(b.uid > a.uid);
@@ -246,10 +266,28 @@ mod tests {
 
     #[test]
     fn plan_roots_the_cgroup_and_carries_the_jails_limits() {
-        let Some(plan) = unwrap_or_skip(jail().plan()) else {
+        let Some(plan) = unwrap_or_skip(jail().plan(Ownership::Kept)) else {
             return;
         };
         assert!(plan.cgroup.starts_with("/sys/fs/cgroup/ral-exec"));
         assert_eq!(plan.limits, JailLimits::default());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plan_puts_a_survivor_beyond_every_engines_tree() {
+        let jail = jail();
+        let Some((kept, gone)) = unwrap_or_skip(
+            jail.plan(Ownership::Kept)
+                .and_then(|k| Ok((k, jail.plan(Ownership::Surrendered)?))),
+        ) else {
+            return;
+        };
+        let root = PathBuf::from("/sys/fs/cgroup/ral-exec");
+        assert!(
+            kept.cgroup
+                .starts_with(root.join(format!("engine-{}", std::process::id())))
+        );
+        assert_eq!(gone.cgroup.parent(), Some(root.join(DETACHED).as_path()));
     }
 }

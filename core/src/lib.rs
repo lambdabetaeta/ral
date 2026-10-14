@@ -85,7 +85,7 @@ fn init_lib_test_binary() {
     if let Some(code) = invocation::serve_process_before_main(&[]) {
         #[allow(
             clippy::disallowed_methods,
-            reason = "a re-exec stage has finished and dropped whatever shell it booted; the detach-birth fixture's survivor is meant to outlive this exit, which is what it is testing"
+            reason = "a re-exec stage has finished and dropped whatever shell it booted"
         )]
         std::process::exit(i32::from(code));
     }

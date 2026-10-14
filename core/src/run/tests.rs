@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 /// with that run's mooring — how a test acts mid-run, as an engine-side
 /// door does.
 pub(crate) fn install_act(
-    shell: &mut Shell,
+    runtime: &mut crate::Runtime,
     name: &'static str,
     act: impl Fn(&Mooring, &mut Shell) + Send + Sync + 'static,
 ) {
@@ -19,7 +19,7 @@ pub(crate) fn install_act(
             Ok(crate::types::Value::Unit)
         })),
     );
-    shell.install_captured_builtins(&vec![entry].into());
+    runtime.install_captured_builtins(&vec![entry].into());
 }
 
 /// An act striking its own run with `cause`, as a `Control` does.
@@ -236,12 +236,12 @@ fn a_settled_run_leaves_the_anchor_untouched() {
 /// The host's own `Nursery` clone is empty afterward: teardown reaches
 /// through the clone, not just the run's copy.
 fn assert_nursery_emptied(panic: bool) {
-    let mut shell = crate::test_helper::core_shell();
+    let mut runtime = crate::test_helper::core_runtime();
 
     let nursery = crate::types::Nursery::default();
     let parked_id: Arc<Mutex<Option<crate::types::NurseryId>>> = Arc::new(Mutex::new(None));
     let parked = parked_id.clone();
-    install_act(&mut shell, "park-fork", move |mooring, shell| {
+    install_act(&mut runtime, "park-fork", move |mooring, shell| {
         let Some(crate::types::Fork::Park(nursery)) = mooring.fork() else {
             panic!("a nursery is installed on this run");
         };
@@ -252,6 +252,7 @@ fn assert_nursery_emptied(panic: bool) {
             "run-door test: deliberate panic after parking a fork"
         );
     });
+    let mut shell = Shell::root(runtime.into());
 
     let _ = shell.run(RunRequest {
         fork: Some(crate::types::Fork::Park(nursery.clone())),
@@ -359,12 +360,13 @@ fn surfaced_notices(shell: &mut Shell, src: &str) -> Vec<crate::types::Notice> {
 /// `Mooring::check` unwinds the eval at 130.
 #[test]
 fn an_interrupt_mid_run_unwinds_the_eval() {
-    let mut shell = crate::test_helper::core_shell();
+    let mut runtime = crate::test_helper::core_runtime();
     install_act(
-        &mut shell,
+        &mut runtime,
         "interrupt",
         strike(crate::process::CancelCause::Interrupted),
     );
+    let mut shell = Shell::root(runtime.into());
     match shell.run(Run::captured(
         "interrupt\nlet rpv = 42\nreturn $rpv",
         "<test>",
@@ -392,12 +394,13 @@ fn an_interrupt_mid_run_unwinds_the_eval() {
 /// interrupt entirely.
 #[test]
 fn a_try_handler_cannot_settle_a_cancelled_run() {
-    let mut shell = crate::test_helper::core_shell();
+    let mut runtime = crate::test_helper::core_runtime();
     install_act(
-        &mut shell,
+        &mut runtime,
         "interrupt",
         strike(crate::process::CancelCause::Interrupted),
     );
+    let mut shell = Shell::root(runtime.into());
     match shell.run(Run::captured(
         "try { interrupt\nlet x = ()\nreturn $x } { |_| return () }",
         "<test>",
@@ -426,23 +429,28 @@ fn a_try_handler_cannot_settle_a_cancelled_run() {
 /// its own anchor, off the struck run's chain.
 #[test]
 fn an_aside_cannot_absorb_its_callers_interrupt() {
-    let mut shell = crate::test_helper::core_shell();
-    let aside = Mutex::new(shell.join_session());
+    let mut runtime = crate::test_helper::core_runtime();
+    let aside: Arc<Mutex<Option<Shell>>> = Arc::default();
+    let slot = aside.clone();
     let hook_status = Arc::new(Mutex::new(None));
     let status = hook_status.clone();
-    install_act(&mut shell, "interrupt-then-aside", move |mooring, _| {
+    install_act(&mut runtime, "interrupt-then-aside", move |mooring, _| {
         mooring
             .cancel
             .cancel(crate::process::CancelCause::Interrupted);
-        let report = aside
+        let report = slot
             .lock()
             .unwrap()
+            .as_mut()
+            .expect("the aside is joined before the run")
             .run(Run::captured("let y = 1\nreturn $y", "<test>"));
         match report {
             RunReport::Ran { ending, .. } => *status.lock().unwrap() = Some(ending.status()),
             RunReport::Static { .. } => panic!("valid source must reach evaluation"),
         }
     });
+    let mut shell = Shell::root(runtime.into());
+    *aside.lock().unwrap() = Some(shell.join_session());
     match shell.run(Run::captured(
         "interrupt-then-aside\nlet rpv = 42\nreturn $rpv",
         "<test>",
@@ -465,13 +473,14 @@ fn an_aside_cannot_absorb_its_callers_interrupt() {
 /// it, so plugin code is interruptible for its whole life.
 #[test]
 fn an_aside_unwinds_on_an_interrupt_raised_while_it_runs() {
-    let shell = crate::test_helper::core_shell();
-    let mut aside = shell.join_session();
+    let mut runtime = crate::test_helper::core_runtime();
     install_act(
-        &mut aside,
+        &mut runtime,
         "interrupt",
         strike(crate::process::CancelCause::Interrupted),
     );
+    let shell = Shell::root(runtime.into());
+    let mut aside = shell.join_session();
     match aside.run(Run::captured("interrupt\nlet y = 1\nreturn $y", "<test>")) {
         RunReport::Ran { ending, .. } => assert_eq!(
             ending.status(),
@@ -517,11 +526,12 @@ fn cancelling_a_session_by_handle_reaches_its_aside() {
 #[test]
 fn a_session_is_deaf_to_the_ambient_causes() {
     let _serial = crate::process::cancel::REQUEST_SERIAL.lock();
-    let mut shell = crate::test_helper::core_shell();
-    install_act(&mut shell, "raise", |_, _| {
+    let mut runtime = crate::test_helper::core_runtime();
+    install_act(&mut runtime, "raise", |_, _| {
         crate::process::request_interrupt();
         crate::process::request_root_cancel(crate::process::CancelCause::Aborted);
     });
+    let mut shell = Shell::root(runtime.into());
     let report = shell.run(Run::captured("raise\nlet rpv = 42\nreturn $rpv", "<test>"));
     crate::process::cancel::clear_root_request();
     match report {
@@ -541,12 +551,13 @@ fn a_session_is_deaf_to_the_ambient_causes() {
 /// classification without sleeping on the reaper.
 #[test]
 fn deadline_cancel_reports_walled() {
-    let mut shell = crate::test_helper::core_shell();
+    let mut runtime = crate::test_helper::core_runtime();
     install_act(
-        &mut shell,
+        &mut runtime,
         "expire",
         strike(crate::process::CancelCause::TimedOut),
     );
+    let mut shell = Shell::root(runtime.into());
     match shell.run(Run {
         wall: Some(std::time::Duration::from_secs(30)),
         ..Run::captured("expire\nlet rpv = 42\nreturn $rpv", "<test>")
@@ -647,12 +658,19 @@ static PANIC_BUILTINS_ARR: [crate::types::BuiltinEntry; 1] = [crate::types::Buil
 )];
 static PANIC_BUILTINS: &[crate::types::BuiltinEntry] = &PANIC_BUILTINS_ARR;
 
+fn panicking_shell() -> Shell {
+    crate::HostSurface {
+        statics: vec![PANIC_BUILTINS],
+        ..crate::HostSurface::default()
+    }
+    .shell(crate::terminal::TerminalState::default())
+}
+
 /// Rollback is to the run's entry, not to session birth: the panicking run's
 /// partial binding goes, a pre-run one stays, and the shell runs on.
 #[test]
 fn panicking_run_reports_failed_and_rolls_back() {
-    let mut shell = crate::test_helper::core_shell();
-    shell.install_builtins(PANIC_BUILTINS);
+    let mut shell = panicking_shell();
 
     match shell.run(Run::captured("let pre_panic = 1", "<test>")) {
         RunReport::Ran { ending, .. } => assert!(matches!(ending, Ending::Settled { .. })),
@@ -712,10 +730,11 @@ impl crate::types::EnquiryDesk for PanickingDesk {
 
 #[test]
 fn desk_handler_panic_is_caught_at_the_door() {
-    let mut shell = crate::test_helper::core_shell();
-    install_act(&mut shell, "enquire", |mooring, shell| {
+    let mut runtime = crate::test_helper::core_runtime();
+    install_act(&mut runtime, "enquire", |mooring, shell| {
         let _ = shell.enquire(mooring, crate::first_order::FOValue::Unit);
     });
+    let mut shell = Shell::root(runtime.into());
 
     match shell.run(RunRequest {
         desk: Some(Arc::new(PanickingDesk)),
@@ -781,7 +800,6 @@ fn a_result_that_is_not_data_says_what_it_holds() {
 fn narrowing_shell() -> Shell {
     use crate::capability::Capabilities;
     use crate::types::{BuiltinBody, BuiltinEntry};
-    let mut shell = crate::test_helper::core_shell();
     let entries: Arc<[BuiltinEntry]> = vec![
         BuiltinEntry::new(
             "_narrow".into(),
@@ -805,8 +823,11 @@ fn narrowing_shell() -> Shell {
         ),
     ]
     .into();
-    shell.install_captured_builtins(&entries);
-    shell
+    crate::HostSurface {
+        captured: vec![entries],
+        ..crate::HostSurface::default()
+    }
+    .shell(crate::terminal::TerminalState::default())
 }
 
 /// Run `narrow`, then assert its session ceiling alone outlived it and
@@ -972,8 +993,7 @@ fn a_dispatch_asking_no_trail_reports_none() {
 /// fresh scope and sees nothing left over.
 #[test]
 fn a_panicked_dispatch_reports_static_and_leaves_the_next_trail_empty() {
-    let mut shell = crate::test_helper::core_shell();
-    shell.install_builtins(PANIC_BUILTINS);
+    let mut shell = panicking_shell();
 
     match shell.run(Run {
         trail: Some(crate::types::CapturePolicy::Off),

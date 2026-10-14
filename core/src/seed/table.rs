@@ -441,7 +441,7 @@ mod tests {
             env: SerialEnvSnapshot { bindings: 0 },
         }));
 
-        // The same `serde_json` codec `frame::write_frame` frames with.
+        // The same `serde_json` codec `frame::encode` frames with.
         let json = serde_json::to_vec(&lambda).expect("serialise lambda");
         let back: SerialValue = serde_json::from_slice(&json).expect("deserialise lambda");
 
@@ -526,7 +526,7 @@ mod tests {
                 scheme: None,
             },
         )]];
-        let err = WireDecoder::for_runtime(&crate::test_helper::core_shell().runtime(), &table)
+        let err = WireDecoder::for_runtime(&crate::test_helper::core_runtime(), &table)
             .expect_err("out-of-range ref must fail the build");
         assert_eq!(err.message, "seed: scope ref 5 out of range or unresolved");
     }
@@ -559,8 +559,8 @@ mod tests {
         let mut ctx = InternCtx::new();
         let ipc = SerialValue::from_runtime(&chain, &mut ctx).expect("encode");
         let table = ctx.finish().expect("finish");
-        let dec = WireDecoder::for_runtime(&crate::test_helper::core_shell().runtime(), &table)
-            .expect("decoder");
+        let dec =
+            WireDecoder::for_runtime(&crate::test_helper::core_runtime(), &table).expect("decoder");
         let back = ipc.into_runtime(&dec).expect("decode");
         let mut depth = 0;
         let mut cur = &back;
@@ -580,8 +580,8 @@ mod tests {
         let mut ctx = InternCtx::new();
         let ipc = SerialValue::from_runtime(&value, &mut ctx).expect("to serial");
         let table = ctx.finish().expect("finish");
-        let dec = WireDecoder::for_runtime(&crate::test_helper::core_shell().runtime(), &table)
-            .expect("decoder");
+        let dec =
+            WireDecoder::for_runtime(&crate::test_helper::core_runtime(), &table).expect("decoder");
         assert_eq!(ipc.into_runtime(&dec).expect("from serial"), value);
     }
 

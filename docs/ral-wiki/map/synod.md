@@ -634,10 +634,11 @@ policy. It is also the guest's **engine factory**: after spawning the root it
 starts one accept thread on `boot::FACTORY_PORT` (the listener is bound before
 the root, so a host dial waits in the backlog), admits only a peer whose CID is
 `VMADDR_CID_HOST` (`vsock::is_host`), and spawns one engine per connection
-exactly as it spawned the root, on fd 3. The thread ends when `accept` fails.
+exactly as it spawned the root, on fd 3. Transient `accept` errors are retried; any other is fatal to the machine (the factory `kill`s its own process with SIGTERM, so `attend` returns naming it), never a silently dropped listener.
+The daemon installs no signal handlers: SIGCHLD and the stop signals (SIGTERM, SIGINT, SIGPWR) are blocked in every thread before the first is spawned (`reap::mask`; std hands a child its parent's mask, so each spawn's `pre_exec` unblocks them), and `attend` takes them in `sigwaitinfo`. On SIGCHLD it drains `waitpid(-1, WNOHANG)` under the fleet lock, so it cannot steal the child std is itself waiting on after a failed spawn, and tears down the dead engines' cgroup trees only after releasing it, so a concurrent dial never waits on a settle; on a stop signal it returns.
 When the root engine exits — the wire's EOF is its cue — the daemon powers
-the machine off from inside, `halt` signalling every engine's process group,
-not the root's alone: the clean inside-out halt. A child engine ends when the
+the machine off from inside, `halt` signalling every engine's process group
+(TERM, a grace for every engine alive then, KILL), not the root's alone: the clean inside-out halt. Commands leave their engine's group, so the KILL sweep also writes `cgroup.kill` at the jail's cgroup root (`mounts::EXEC_CGROUP`), and `attend` does the same for `engine-<pid>` when it reaps a child engine, then removes that tree deepest first. A detached survivor lives in `detached/exec-<seq>` instead, beside every engine's tree, so it outlives its engine exactly as on the host identity seat and only the halt's sweep ends it. The daemon makes that root, delegating `+memory +pids +cpu` into it, beside its mounts (`mounts::exec_cgroup`). A child engine ends when the
 host drops its connection.
 
 `Boot::workspace` is where the guest learns which hypervisor's folder it has:

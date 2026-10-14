@@ -1,14 +1,19 @@
 use super::*;
 
-/// Dress a bare test shell with exarch's host surface.
-fn dress(shell: &mut Shell) {
+/// A root over core, exarch's host surface, and the `extra` sets.
+fn dressed_shell(extra: &[&'static [BuiltinEntry]]) -> Shell {
+    let mut runtime = ral_core::test_helper::core_runtime();
     let surface = host_surface();
     for set in surface.statics {
-        shell.install_builtins(set);
+        runtime.install_builtins(set);
     }
     for set in &surface.captured {
-        shell.install_captured_builtins(set);
+        runtime.install_captured_builtins(set);
     }
+    for set in extra {
+        runtime.install_builtins(set);
+    }
+    Shell::root(runtime.into())
 }
 
 fn status(b: Break) -> i32 {
@@ -176,8 +181,7 @@ fn run_top_level(shell: &mut Shell, src: &str) {
 /// `service_is_external_on_a_bare_core_table` in `core/tests/typecheck.rs`.
 #[test]
 fn service_typechecks_on_an_exarch_dressed_shell() {
-    let mut shell = ral_core::test_helper::core_shell();
-    dress(&mut shell);
+    let shell = dressed_shell(&[]);
     match ral_core::compile::compile_and_typecheck(
         r#"let h = service "birth" { return 1 }; cancel $h"#,
         shell.session_schemes(),
@@ -202,8 +206,7 @@ fn service_typechecks_on_an_exarch_dressed_shell() {
 /// refused where it is written, and data of any shape is not.
 #[test]
 fn a_family_door_refuses_a_block_in_its_argument_statically() {
-    let mut shell = ral_core::test_helper::core_shell();
-    dress(&mut shell);
+    let shell = dressed_shell(&[]);
     let codes = |src: &str| -> Vec<&'static str> {
         match ral_core::compile::compile_and_typecheck(
             src,
@@ -241,8 +244,7 @@ fn a_family_door_refuses_a_block_in_its_argument_statically() {
 /// fails the first, an under-generalised one the second.
 #[test]
 fn service_handle_typechecks_under_its_documented_eliminators() {
-    let mut shell = ral_core::test_helper::core_shell();
-    dress(&mut shell);
+    let shell = dressed_shell(&[]);
     match ral_core::compile::compile_and_typecheck(
         "let a = await !{service-handle 3}\n\
          let n = $[$a[value] + 1]\n\
@@ -269,9 +271,7 @@ fn service_handle_typechecks_under_its_documented_eliminators() {
 
 #[test]
 fn service_registers_as_durable_with_its_description() {
-    let mut shell = ral_core::test_helper::core_shell();
-    dress(&mut shell);
-    shell.install_builtins(WORKER_TEST_BUILTINS);
+    let mut shell = dressed_shell(&[WORKER_TEST_BUILTINS]);
     run_top_level(
         &mut shell,
         r#"service "watch the thing" { test-block-forever }"#,
@@ -293,8 +293,7 @@ fn service_registers_as_durable_with_its_description() {
 /// binding that named it.
 #[test]
 fn service_handle_reacquires_a_durable_service_and_await_round_trips() {
-    let mut shell = ral_core::test_helper::core_shell();
-    dress(&mut shell);
+    let mut shell = dressed_shell(&[]);
     run_top_level(&mut shell, r#"service "answer" { 42 }"#);
 
     let entry = shell.workers().pop().expect("the service registered");
@@ -327,8 +326,7 @@ fn service_handle_reacquires_a_durable_service_and_await_round_trips() {
 /// resolves it as it would a running one.
 #[test]
 fn service_handle_reacquires_a_settled_but_unclaimed_service() {
-    let mut shell = ral_core::test_helper::core_shell();
-    dress(&mut shell);
+    let mut shell = dressed_shell(&[]);
     run_top_level(&mut shell, r#"service "answer" { 42 }"#);
 
     let entry = shell.workers().pop().expect("the service registered");
@@ -373,8 +371,7 @@ fn service_handle_reacquires_a_settled_but_unclaimed_service() {
 
 #[test]
 fn service_handle_errors_on_an_unknown_id() {
-    let mut shell = ral_core::test_helper::core_shell();
-    dress(&mut shell);
+    let mut shell = dressed_shell(&[]);
     let err = match builtin_service_handle(
         &[Value::Int(999_999)],
         &handle_site(),
@@ -391,9 +388,7 @@ fn service_handle_errors_on_an_unknown_id() {
 /// rediscovering an ordinary worker is the binding-lease ledger's job.
 #[test]
 fn service_handle_refuses_an_ephemeral_worker_id() {
-    let mut shell = ral_core::test_helper::core_shell();
-    dress(&mut shell);
-    shell.install_builtins(WORKER_TEST_BUILTINS);
+    let mut shell = dressed_shell(&[WORKER_TEST_BUILTINS]);
     run_top_level(&mut shell, "spawn { test-block-forever }");
 
     let entry = shell.workers().pop().expect("the spawn registered");
@@ -444,8 +439,7 @@ fn service_handle_is_exarch_only_never_a_core_builtin() {
 /// decides about the answer is not what another decides.
 #[test]
 fn service_handle_twice_on_one_worker_admits_at_each_site() {
-    let mut shell = ral_core::test_helper::core_shell();
-    dress(&mut shell);
+    let mut shell = dressed_shell(&[]);
     run_top_level(&mut shell, r#"service "answer" { 42 }"#);
     let entry = shell.workers().pop().expect("the service registered");
     #[allow(
@@ -534,12 +528,12 @@ fn service_is_installed_by_exarch_and_absent_from_the_repl_sets() {
             .any(|e| e.decl.name.as_ref() == "service"),
         "the REPL's host surface (watch) must not smuggle service in"
     );
-    let mut shell = ral_core::test_helper::core_shell();
+    let shell = ral_core::test_helper::core_shell();
     assert!(
         shell.lookup_builtin("service").is_none(),
         "a bare shell (the REPL's baseline) must not dispatch service"
     );
-    dress(&mut shell);
+    let shell = dressed_shell(&[]);
     assert!(
         shell.lookup_builtin("service").is_some(),
         "exarch's host surface must install service"
@@ -552,8 +546,7 @@ fn service_is_installed_by_exarch_and_absent_from_the_repl_sets() {
 /// installs it per boot instead, in the same act that arms its policy.
 #[test]
 fn detach_is_absent_from_the_host_surface() {
-    let mut shell = ral_core::test_helper::core_shell();
-    dress(&mut shell);
+    let shell = dressed_shell(&[]);
     assert!(
         shell.lookup_builtin("detach").is_none(),
         "the host surface must not carry `detach`: it cannot see the capabilities that \

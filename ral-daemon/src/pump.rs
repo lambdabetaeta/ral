@@ -81,11 +81,12 @@ pub fn spawn(tun: &OwnedFd, net: &OwnedFd) -> Result<Pid, String> {
     cmd.arg("--pump");
     cmd.env_clear();
     // SAFETY: the closure runs between `fork` and `exec` and calls only
-    // async-signal-safe syscalls — `fcntl`, `dup2` — with no allocation and
+    // async-signal-safe syscalls — `pthread_sigmask`, `fcntl`, `dup2` — with no allocation and
     // no locking.
     unsafe {
         use std::os::unix::process::CommandExt;
         cmd.pre_exec(move || {
+            crate::reap::mask(libc::SIG_UNBLOCK)?;
             let dup_high = |fd: RawFd| -> io::Result<RawFd> {
                 match libc::fcntl(fd, libc::F_DUPFD, 10) {
                     n if n < 0 => Err(io::Error::last_os_error()),

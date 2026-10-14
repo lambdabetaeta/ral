@@ -73,7 +73,7 @@ fn let_bound_context_read_does_not_echo_the_transcript() {
 /// recovery under test is the engine's own run door catching the unwind.
 #[test]
 fn worker_panic_preserves_completed_bindings_and_clean_context() {
-    let mut session = dressed_trunk(|shell| shell.install_builtins(PANIC_BUILTINS));
+    let mut session = dressed_trunk(|runtime| runtime.install_builtins(PANIC_BUILTINS));
     let baseline_grant_depth = probe_count(&session, ral_core::test_access::grant_depth);
 
     // The panicking second call surfaces to the model as an ordinary
@@ -125,12 +125,15 @@ fn worker_panic_preserves_completed_bindings_and_clean_context() {
 /// armed out of reach, so only the size axis is in play.
 #[test]
 fn large_binding_install_warns_on_its_own_run_stderr() {
-    let session = dressed_trunk(|shell| {
-        shell.arm_binding_lease(ral_core::types::BindingLease {
-            idle_calls: 1_000_000,
-            large_binding_bytes: 8,
-        });
-    });
+    let session = dressed_trunk_over(
+        |_| {},
+        |shell| {
+            shell.arm_binding_lease(ral_core::types::BindingLease {
+                idle_calls: 1_000_000,
+                large_binding_bytes: 8,
+            });
+        },
+    );
 
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
@@ -276,13 +279,15 @@ fn a_non_zero_exit_with_a_live_birth_names_the_orphan() {
 /// the prune is already part of the state being checkpointed.
 #[test]
 fn panic_after_prune_does_not_resurrect_binding() {
-    let mut session = dressed_trunk(|shell| {
-        shell.install_builtins(PANIC_BUILTINS);
-        shell.arm_binding_lease(ral_core::types::BindingLease {
-            idle_calls: 2,
-            large_binding_bytes: u64::MAX,
-        });
-    });
+    let mut session = dressed_trunk_over(
+        |runtime| runtime.install_builtins(PANIC_BUILTINS),
+        |shell| {
+            shell.arm_binding_lease(ral_core::types::BindingLease {
+                idle_calls: 2,
+                large_binding_bytes: u64::MAX,
+            });
+        },
+    );
 
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.agent.id);

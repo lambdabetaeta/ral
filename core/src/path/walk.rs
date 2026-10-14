@@ -289,7 +289,7 @@ fn descend(path: &Path, leaf_mode: Leaf) -> io::Result<Step> {
     }
     real.push(spelled(&dir, &leaf));
     #[cfg(windows)]
-    let real = dealias(&dir, &leaf, real)?;
+    let real = dealias(&dir, &leaf, &real)?;
     Ok(Step::Object(Located { dir, leaf, real }))
 }
 
@@ -389,7 +389,7 @@ fn stored_name(dir: &File, name: &OsStr) -> Option<OsString> {
 /// Ask the handle for stored case and long names, as grant freezing does.
 /// An absent leaf keeps its spelling under its parent's stored name.
 #[cfg(windows)]
-fn dealias(dir: &File, leaf: &OsStr, real: PathBuf) -> io::Result<PathBuf> {
+fn dealias(dir: &File, leaf: &OsStr, real: &Path) -> io::Result<PathBuf> {
     let named = match open_attributes(dir, leaf) {
         Ok(object) => final_path(&object),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {

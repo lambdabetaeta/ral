@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 static BARE: [EngineInstaller; 1] = [EngineInstaller {
     tag: "bare",
-    runtime: |_| Ok(HostSurface::default().runtime(TerminalState::default())),
+    runtime: |_| HostSurface::default().runtime(TerminalState::default()),
     root: |_, _| Ok(()),
     narrow: |_, _| Err("this engine makes no children".into()),
 }];

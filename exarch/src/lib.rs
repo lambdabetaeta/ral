@@ -70,7 +70,7 @@ fn exit_on(served: Option<u8>) {
     if let Some(code) = served {
         #[allow(
             clippy::disallowed_methods,
-            reason = "a re-exec child, served before any CLI: the anchor drains a pipe, the pgid probe writes a line, the sandbox stage has already exec'd or refused. None boots a shell, so none holds a lease, a watched child or a staged write; and in the `#[ctor]` form nothing at all is booted yet"
+            reason = "a re-exec child, served before any CLI: the anchor drains a pipe, the sandbox stage has already exec'd or refused. None boots a shell, so none holds a lease, a watched child or a staged write; and in the `#[ctor]` form nothing at all is booted yet"
         )]
         std::process::exit(i32::from(code));
     }

@@ -5,13 +5,10 @@
 //!
 //! The order is the sandbox's.  A confined re-exec is served by
 //! [`sandbox::serve_warrant`] alone, pinning and opening nothing before it is
-//! confined; the anchor and the pgid probe spawn nothing, so pin nothing.  A
+//! confined; the anchor spawns nothing, so pins nothing.  A
 //! bundled tool pins, as a re-exec child that reaches no session ledger.  Every
 //! other role boots first, the engine included: its grant-confined launches
 //! need the pinned envelope as much as the shell's.
-
-#[cfg(all(unix, any(test, feature = "test-util")))]
-mod probe;
 
 use crate::{Invocation, Role, classify, sandbox, terminal, uutils};
 use std::ffi::OsString;
@@ -29,8 +26,6 @@ pub fn serve(
     match *role {
         Invocation::Warrant(extra) => Some(sandbox::serve_warrant(extra)),
         Invocation::PipelineAnchor => Some(crate::runtime::pipeline::anchor::serve()),
-        #[cfg(all(unix, any(test, feature = "test-util")))]
-        Invocation::PgidCheck { tag } => Some(probe::pgid_check(tag)),
         #[cfg(unix)]
         Invocation::Engine => {
             sandbox::boot();
@@ -39,11 +34,6 @@ pub fn serve(
         Invocation::BundledTool(args) => {
             sandbox::pin();
             Some(serve_bundled_tool(args))
-        }
-        #[cfg(all(unix, any(test, feature = "test-util")))]
-        Invocation::DetachBirth { trace, marker } => {
-            sandbox::boot();
-            Some(probe::detach_birth(trace, marker))
         }
         Invocation::Shell => {
             sandbox::boot();

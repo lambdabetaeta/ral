@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 use ral_core::capability::GrantStack;
 use ral_core::carrier::{Transport, WireTransport, dispatch_to_report};
 use ral_core::protocol::channel::Liveness;
-use ral_core::protocol::{Attach, Program, Report, Run};
+use ral_core::protocol::{Attach, EngineSpec, Program, Report, Root, Run};
 use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
 use vm_manager::{BootArtifact, Hypervisor, Machine, MachineSpec};
 
@@ -57,13 +57,16 @@ const PROBE_PORT: u32 = 1732;
 /// name.
 const INSTALLER_TAG: &str = "exarch-agent";
 
+/// `EXARCH.scratch_var()`, spelled out for the same reason.
+const SCRATCH_VAR: &str = "EXARCH_SCRATCH";
+
 /// What the guest runs while the host dials it: bind the probe port, then
 /// report every connection that arrives and where it came from.
 ///
 /// It answers two questions at once. The host's dial proves the direction
 /// carries bytes — the guest reads what the host wrote and writes back. The
-/// two self-dials ask whether a *guest* process can reach the same port, which
-/// is the only threat a token on this wire would defend against.
+/// two self-dials ask whether a *guest* process can reach the same port; the
+/// wire carries no token, so admission is the factory port's host-CID check.
 const GUEST_LISTENER: &str = r#"
 import socket, struct, threading, time
 
@@ -199,12 +202,17 @@ fn prove_the_host_can_dial_in(
             return;
         }
     };
-    transport.attach(Attach::new(
-        INSTALLER_TAG,
-        workspace,
-        // The guest's own tmpfs, as every seat on this wire uses for `HOME`.
-        std::path::PathBuf::from("/tmp"),
-    ));
+    // The guest's own tmpfs, as every seat on this wire uses for `HOME`.
+    let scratch = std::path::PathBuf::from("/tmp");
+    // The guest refuses an attach that does not name its scratch variable.
+    let attach = Attach::root(
+        EngineSpec::new(INSTALLER_TAG, scratch.clone()),
+        Root::new(workspace).with_env(vec![(
+            SCRATCH_VAR.to_string(),
+            scratch.to_string_lossy().into_owned(),
+        )]),
+    );
+    transport.attach(attach);
     if let Err(severed) = transport.await_attached() {
         eprintln!("the guest refused to attach: {severed}");
         return;

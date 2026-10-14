@@ -266,7 +266,7 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   mints each exec a fresh unprivileged uid/gid and a fresh transient cgroup
   under `JailLimits` (memory / pids / CPU), with no syscall in the plan.
   There is one `GuestJail` per guest process, installed once by the first
-  engine to boot (`jail::install_guest`, gated on `RAL_GUEST`) and read by
+  engine to boot (`jail::install_guest`, gated on `RAL_GUEST`, whose value is the cgroup root, ral-daemon's `mounts::EXEC_CGROUP`, which the daemon makes and delegates into at boot; the jail makes `engine-<pid>/exec-<seq>` below it, or `detached/exec-<seq>` for a `detach` survivor, and the daemon removes a dead engine's tree) and read by
   `jail::guest()`; a sealed wire-seat child engine ([[design/agents|agents]]) is
   its own process and installs its own, so the
   sequence number behind both the uid and the cgroup name is minted
@@ -278,8 +278,12 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   path carries the engine's own pid as a grouping label, not a uniqueness
   guarantee (the sequence file already gives that): `ral-exec/engine-<pid>/
   exec-<seq>`, so a child engine's teardown stays scoped to its own
-  engine's tree and pid recycling can at worst hand a later engine a dead
-  engine's stale directory name, which its own teardown tolerates. Off a
+  engine's tree (the daemon kills a dead engine's commands through `engine-<pid>/cgroup.kill`, since they leave its process group) and pid recycling can at worst hand a later engine a dead
+  engine's stale directory name, which its own teardown tolerates.
+  `plan` takes the launch's `sandbox::Ownership`: a `Surrendered` (detached)
+  exec goes to `ral-exec/detached/exec-<seq>` instead, out of every engine's
+  tree, so an engine's end spares its survivors as it does on the host, and
+  only the daemon's halt reaches them. Off a
   real Linux guest, where `GuestJail` is never actually installed, `plan`
   falls back to a plain in-process counter so the module's own tests stay
   portable — `linux.rs` remains the only place a decision reaches the

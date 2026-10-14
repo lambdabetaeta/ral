@@ -35,7 +35,7 @@ exit code.
   exarch's `INSTALLERS` (whose `narrow` is `policy::base_layer`, since core
   carries no base-tag lexicon of its own and a wire-seeded child resolves its own
   layer while booting). A confined child is served before any pin, the anchor
-  and the pgid probe unpinned; every other role — the `--engine` seat child
+  unpinned; every other role — the `--engine` seat child
   included — is pinned by [[map/core/capabilities|`sandbox::boot`]] before it runs.
   `main` and **every test `#[ctor]` (`pre_main_ctor!`) share this dispatch and
   its exit** — they differ only in where argv comes from: a constructor calls

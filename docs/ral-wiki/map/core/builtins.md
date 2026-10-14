@@ -54,7 +54,7 @@ extra sets ride a `HostSurface` into `HostSurface::shell` and `boot::boot_shell`
 (`core/src/boot.rs`), so the checker's rule table, the base
 scope, and the base frames all come from the manifest the shell was booted with
 — there is no process-global registry, and every path that builds or hydrates a
-shell must seed through `install_builtins` or re-link a native by name.
+shell must be built over a `Runtime` that carries them or re-link a native by name.
 `register` clones the baked prelude's bindings into each fresh environment.
 `BOUNDARY_BUILTINS` (`from-json`, `from-jsonl`, `from-json-at`, `use`) also sits
 outside it, for a different reason: each row is a `BuiltinEntry::boundary`, whose

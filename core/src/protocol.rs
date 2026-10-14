@@ -20,7 +20,7 @@ pub mod probe;
 /// The frame algebra's generation, checked at `Attach` and refused on
 /// mismatch.  Public because a build has to compare it against the engine
 /// sitting in the guest media beside it: see [`check_media`].
-pub const PROTOCOL_VERSION: u32 = 19;
+pub const PROTOCOL_VERSION: u32 = 21;
 
 /// The key `vm-image/build-boot.sh` records [`PROTOCOL_VERSION`] under in the
 /// boot media's manifest, `vm-image/out/boot/boot-manifest.txt`.
@@ -150,10 +150,13 @@ impl Frame {
 /// payload, and `IdentityTransport::boot`'s argument.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Attach {
-    pub terminal: crate::terminal::TerminalState,
-    /// The session's logical cwd.
-    pub cwd: PathBuf,
-    pub home: PathBuf,
+    pub engine: EngineSpec,
+    pub origin: Origin,
+}
+
+/// What names the engine itself, root or child: the binary half of its origin.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EngineSpec {
     /// Checked against `PROTOCOL_VERSION`; a mismatch refuses the attach.
     pub proto_version: u32,
     /// Tag naming the boot recipe the engine applies once attached —
@@ -162,34 +165,97 @@ pub struct Attach {
     /// `EngineInstaller` table, so only the tag crosses, never the functions
     /// it names.
     pub installer: String,
+    pub terminal: crate::terminal::TerminalState,
+    pub home: PathBuf,
+}
+
+/// How the engine's session comes to be: a root from a recipe, a child from
+/// its parent. A child's cwd and env ride its seal, so nothing else is named.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Origin {
+    Root(Root),
+    /// A child's parent, sealed.
+    Child(crate::seed::Sealed),
+}
+
+/// What only a root is told: the session it starts from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Root {
+    /// The session's logical cwd.
+    pub cwd: PathBuf,
     /// Per-session variables the host seeds into the engine's environment.
     pub env: Vec<(String, String)>,
     /// The installer's own settings: its recipe decodes them, and refuses
     /// ill-shaped ones in its own words. Core never reads them.
     pub config: FOValue,
-    /// A child's parent, sealed; `None` for a root.
-    pub seed: Option<crate::seed::Sealed>,
+}
+
+impl EngineSpec {
+    /// A spec at this build's protocol version, on the default terminal.
+    pub fn new(installer: impl Into<String>, home: PathBuf) -> Self {
+        Self {
+            proto_version: PROTOCOL_VERSION,
+            installer: installer.into(),
+            terminal: crate::terminal::TerminalState::default(),
+            home,
+        }
+    }
+}
+
+impl Root {
+    /// A root at `cwd`, seeding no variables and configuring nothing.
+    pub fn new(cwd: PathBuf) -> Self {
+        Self {
+            cwd,
+            env: Vec::new(),
+            config: FOValue::Unit,
+        }
+    }
+
+    /// Seed these variables into the session's environment.
+    #[must_use]
+    pub fn with_env(mut self, env: Vec<(String, String)>) -> Self {
+        self.env = env;
+        self
+    }
+
+    /// Hand the installer these settings.
+    #[must_use]
+    pub fn with_config(mut self, config: FOValue) -> Self {
+        self.config = config;
+        self
+    }
 }
 
 impl Attach {
-    /// An attach at this build's protocol version, seeding no variables and
-    /// configuring nothing.
+    /// A root's attach, seeding no variables and configuring nothing.
     pub fn new(installer: impl Into<String>, cwd: PathBuf, home: PathBuf) -> Self {
         Self {
-            terminal: crate::terminal::TerminalState::default(),
-            cwd,
-            home,
-            proto_version: PROTOCOL_VERSION,
-            installer: installer.into(),
-            env: Vec::new(),
-            config: FOValue::Unit,
-            seed: None,
+            engine: EngineSpec::new(installer, home),
+            origin: Origin::Root(Root::new(cwd)),
+        }
+    }
+
+    /// A root's attach: `engine`, then the session it starts from.
+    pub fn root(engine: EngineSpec, root: Root) -> Self {
+        Self {
+            engine,
+            origin: Origin::Root(root),
+        }
+    }
+
+    /// A child's attach: `engine`, then its parent's seal.
+    pub fn child(engine: EngineSpec, sealed: crate::seed::Sealed) -> Self {
+        Self {
+            engine,
+            origin: Origin::Child(sealed),
         }
     }
 
     #[must_use]
-    pub fn with_config(self, config: FOValue) -> Self {
-        Self { config, ..self }
+    pub fn with_terminal(mut self, terminal: crate::terminal::TerminalState) -> Self {
+        self.engine.terminal = terminal;
+        self
     }
 }
 

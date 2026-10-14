@@ -134,7 +134,7 @@ fn by_name<'a>(mut rows: Vec<(&'a str, &'a str)>) -> Vec<(&'a str, &'a str)> {
 
 /// Every documented registry, in `help`'s print order: language syntax, the
 /// builtin manifest, the prelude, then whatever a host installed with
-/// [`Shell::install_library_docs`] — which is empty until one does.
+/// [`Runtime::install_library_docs`] — which is empty until one does.
 /// `explain`'s fallback search sweeps the same four.
 ///
 /// A leading `_` marks a name internal: it is kept out of the index and out
@@ -170,6 +170,7 @@ fn registries(shell: &Shell) -> [(&'static str, Vec<(&str, &str)>); 4] {
             by_name(
                 shell
                     .session
+                    .runtime
                     .library_docs
                     .iter()
                     .map(|(name, doc)| (name.as_str(), doc.as_str()))
@@ -344,8 +345,8 @@ fn explanation(name: &str, shell: &Shell, colors: Colors) -> String {
 /// Every other site sweeps the documented registries, since a frame stacked
 /// over a native — a handler, an alias — inherits the native's doc.
 fn documented(name: &str, site: Option<&Where>, shell: &Shell) -> (Option<String>, Option<String>) {
-    let manifest = || builtin_type_hint(shell.session.builtins.manifest(), name);
-    let library_doc = || shell.session.library_docs.get(name).cloned();
+    let manifest = || builtin_type_hint(shell.session.runtime.builtins.manifest(), name);
+    let library_doc = || shell.session.runtime.library_docs.get(name).cloned();
 
     if matches!(site, Some(Where::Session)) {
         return (library_doc(), scheme_of(shell.env.binding(name)));
@@ -443,7 +444,14 @@ fn locate_all(name: &str, shell: &Shell) -> Vec<Where> {
     if shell.sig.prelude_binding(name).is_some() {
         sites.push(Where::Prelude);
     }
-    if shell.session.builtins.manifest().value(name).is_some() {
+    if shell
+        .session
+        .runtime
+        .builtins
+        .manifest()
+        .value(name)
+        .is_some()
+    {
         sites.push(Where::Builtin);
     }
     // An alias is a handler frame too, so it must be named before a bare base
@@ -465,6 +473,7 @@ fn locate_all(name: &str, shell: &Shell) -> Vec<Where> {
     if !seen_as_frame
         && shell
             .session
+            .runtime
             .builtins
             .manifest()
             .base_frames()
@@ -555,12 +564,13 @@ mod tests {
         );
     }
 
-    /// [`Shell::install_library_docs`] is the one door onto
-    /// `session.library_docs`.
+    /// [`Runtime::install_library_docs`] is the one door onto
+    /// `runtime.library_docs`.
     #[test]
     fn installed_library_docs_surface_in_help_and_explain() {
-        let mut shell = crate::test_helper::core_shell();
-        shell.install_library_docs(vec![("frob".to_string(), "frob the widget".to_string())]);
+        let mut runtime = crate::test_helper::core_runtime();
+        runtime.install_library_docs(vec![("frob".to_string(), "frob the widget".to_string())]);
+        let mut shell = crate::Shell::root(runtime.into());
 
         let (sink, buf) = crate::io::new_buffer();
         shell.set_stdout(sink);
@@ -584,11 +594,12 @@ mod tests {
     /// The index prints a doc's lead paragraph; `explain` prints the whole thing.
     #[test]
     fn index_shows_summary_explain_shows_full_doc() {
-        let mut shell = crate::test_helper::core_shell();
-        shell.install_library_docs(vec![(
+        let mut runtime = crate::test_helper::core_runtime();
+        runtime.install_library_docs(vec![(
             "frob".to_string(),
             "frob the widget.\n\nHandle with care: it is load-bearing.".to_string(),
         )]);
+        let mut shell = crate::Shell::root(runtime.into());
 
         let (sink, buf) = crate::io::new_buffer();
         shell.set_stdout(sink);

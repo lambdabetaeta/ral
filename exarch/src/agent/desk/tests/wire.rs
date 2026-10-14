@@ -4,7 +4,7 @@
 //! vsock factory only means anything inside a real guest.
 
 use super::super::*;
-use super::{confined, message_req, spec, start};
+use super::{message_req, spec, start};
 use crate::agent::roster::summary;
 use crate::bus::Inbox;
 use crate::cancel::InterruptTarget;
@@ -130,7 +130,7 @@ fn wire_spawnable_desk(fuel: u32, factory: Arc<FakeFactory>) -> (ExarchDesk, Arc
         services: HostServices {
             fleet: fleet.clone(),
             kind: SeatKind::Wire {
-                attach: crate::boot::test_attach(),
+                engine: crate::boot::test_attach().0,
             },
             stamp: agent.mailbox.stamp(),
             agent,
@@ -154,7 +154,7 @@ fn parent_seal() -> Sealed {
 
 /// `` `exarch-agents `start `` as a wire engine sends it: its bequest, sealed.
 fn wire_start_req(name: &str, seed: Sealed) -> Request {
-    start(ForkClaim::Sealed(seed), spec("go", name, confined(), false))
+    start(ForkClaim::Sealed(seed), spec("go", name, false))
 }
 
 /// An engine that died at birth leaves the host a connection and no child,
@@ -296,7 +296,7 @@ fn identity_and_wire_peers_exchange_messages_through_one_desk() {
             // Neither peer's transport matters to `message`, which
             // touches only the tree and a mailbox.
             kind: SeatKind::Wire {
-                attach: crate::boot::test_attach(),
+                engine: crate::boot::test_attach().0,
             },
             stamp: parent.mailbox.stamp(),
             agent: parent,

@@ -89,7 +89,7 @@ lease constant this module owns but does not put on the request: it is not
 per-run policy, it is per-*shell* policy, armed once by
 `shell_eval::arm_session_ledgers` — the one ledger-policy site, applied by
 the one root recipe both carriers boot through (`boot::engine_runtime` for the
-process half, `boot::engine_root` for the recipe, which refuses an `Attach` that names no
+process half, `boot::engine_root` for the recipe, which refuses a `Root` that names no
 scratch: the host owns it); a fork
 keeps its terms through core's `Shell::bequeath` and `Shell::child_of`
 ([[map/exarch/agent|agent]]; [[decisions/260629_agent-binding-reaping|agent-binding-reaping]]).

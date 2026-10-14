@@ -789,9 +789,11 @@ fn a_worker_uses_a_module_against_its_creators_session() {
 }
 
 fn service_test_shell() -> Shell {
-    let mut shell = crate::test_helper::core_shell();
-    shell.install_builtins(crate::builtins::SERVICE_BUILTIN);
-    shell
+    crate::HostSurface {
+        statics: vec![crate::builtins::SERVICE_BUILTIN],
+        ..crate::HostSurface::default()
+    }
+    .shell(crate::terminal::TerminalState::default())
 }
 
 /// An empty (or whitespace-only) description is refused: it is the whole
@@ -834,8 +836,11 @@ fn service_description_lands_in_the_registry_entry() {
 
 #[cfg(unix)]
 fn detach_test_shell(budget: u64) -> Shell {
-    let mut shell = crate::test_helper::core_shell();
-    shell.install_builtins(crate::builtins::DETACH_BUILTIN);
+    let mut shell = crate::HostSurface {
+        statics: vec![crate::builtins::DETACH_BUILTIN],
+        ..crate::HostSurface::default()
+    }
+    .shell(crate::terminal::TerminalState::default());
     shell.arm_detach(budget);
     shell
 }

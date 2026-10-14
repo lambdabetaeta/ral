@@ -2,6 +2,10 @@
 status: active
 ---
 
+> **Amended 2026-10-13.** `pack_seed` and `hatch` are gone; `EngineSeed` survives
+> only as the codec of the sealed seed carried in `Attach.seed`
+> ([[decisions/261013_the-seed-rides-the-protocol-sealed|the-seed-rides-the-protocol-sealed]]).
+
 # Stages are threads
 
 **A ral-written pipeline stage is an OS thread running its own CEK machine

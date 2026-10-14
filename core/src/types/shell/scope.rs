@@ -134,7 +134,7 @@ impl Shell {
         crate::typecheck::SessionSchemes {
             bindings: self.env.binding_schemes(&self.sig),
             aliases: self.context.handlers.alias_schemes(),
-            builtins: self.session.builtins.manifest().clone(),
+            builtins: self.session.runtime.builtins.manifest().clone(),
         }
     }
 

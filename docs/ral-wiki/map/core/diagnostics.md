@@ -130,7 +130,7 @@ in `typecheck/explain.rs` ([[map/core/typecheck|typecheck]]).
 `osc8_link`), `escape_seq_len`, `strip`, `visible`, `when`.
 **One colour decision, made once**: a front end probes a `TerminalState` and
 `seat`s it (`TerminalState::seat`, first wins); `terminal::stderr_color` and
-`terminal::ui_color` read that seat. A wire engine seats its `Attach.terminal`,
+`terminal::ui_color` read that seat. A wire engine seats its `EngineSpec.terminal`,
 the front end's, never a probe of its own null stdio. Before any seat,
 `stderr_color` answers from one memoised `Auto` probe, so early-startup errors
 still colour, and `ui_color` is false: only a front end has a UI. The

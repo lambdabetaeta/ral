@@ -115,6 +115,18 @@ impl<H> Context<H> {
         }
     }
 
+    /// A copy of this context over `handlers`.
+    pub(crate) fn with_handlers<G>(&self, handlers: G) -> Context<G> {
+        Context {
+            env_overrides: self.env_overrides.clone(),
+            cwd: self.cwd.clone(),
+            grants: self.grants.clone(),
+            handlers,
+            args: self.args.clone(),
+            modules: self.modules.clone(),
+        }
+    }
+
     /// The same context over other handlers, if `f` can make them.
     pub(crate) fn try_map_handlers<G, E>(
         self,

@@ -8,9 +8,7 @@
 use crate::first_order::datum::Datum;
 use crate::first_order::{FOValue, NotData, Opaque};
 use crate::protocol::{Ending, FailureStatus, Report};
-use crate::run::RunReport;
-#[cfg(any(unix, test))]
-use crate::run::StaticDiagnostics;
+use crate::run::{RunReport, StaticDiagnostics};
 use crate::types::{Error, Shell};
 
 /// A settled result that cannot cross, said with what the author likely
@@ -133,10 +131,9 @@ impl RunReport {
 }
 
 impl Report {
-    /// A refusal the engine raises on its own behalf — a panicked worker, a
-    /// busy engine — rendered through the same door as a run's own static
+    /// A refusal raised outside the run — a panicked worker, a busy engine, a
+    /// frame the fuse would not pass — rendered through the same door as a run's own static
     /// failure, so a host never has to know which of the two it is printing.
-    #[cfg(unix)]
     pub(crate) fn host_fault(message: impl Into<String>) -> Self {
         let (rendered, status) = StaticDiagnostics::Host(Error::new(message)).render();
         Self::Static { rendered, status }

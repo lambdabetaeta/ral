@@ -83,7 +83,7 @@ fn context_survey_records_a_display_commit() {
 /// fallback when nothing has forked.
 #[test]
 fn resource_rows_survey_the_agents_accumulators() {
-    let session = dressed_trunk(|shell| shell.install_builtins(WORKER_REGISTRY_TEST_BUILTINS));
+    let session = dressed_trunk(|runtime| runtime.install_builtins(WORKER_REGISTRY_TEST_BUILTINS));
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
 
@@ -201,7 +201,7 @@ fn resource_rows_survey_the_agents_accumulators() {
 /// `last_observed` cell without touching it.
 #[test]
 fn resource_rows_renew_no_lease() {
-    let session = dressed_trunk(|shell| shell.install_builtins(WORKER_REGISTRY_TEST_BUILTINS));
+    let session = dressed_trunk(|runtime| runtime.install_builtins(WORKER_REGISTRY_TEST_BUILTINS));
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
     session.ral("spawn { test-clear-block-forever }", 30, &emit);

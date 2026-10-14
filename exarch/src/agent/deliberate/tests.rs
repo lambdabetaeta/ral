@@ -508,7 +508,7 @@ static T2_CANCEL_BUILTINS: &[BuiltinEntry] = &T2_CANCEL_BUILTINS_ARR;
 /// token `deliberate` watches, landing between `run_batch` and the drain.
 #[test]
 fn cancel_between_run_batch_and_drain_does_not_leak_reply_into_next_deliberation() {
-    let mut session = dressed_trunk(|shell| shell.install_builtins(T2_CANCEL_BUILTINS));
+    let mut session = dressed_trunk(|runtime| runtime.install_builtins(T2_CANCEL_BUILTINS));
     T2_CANCEL_TOKEN.with(|cell| *cell.borrow_mut() = Some(session.agent.token.clone()));
 
     let provider = scripted(
@@ -553,7 +553,7 @@ fn cancel_between_run_batch_and_drain_does_not_leak_reply_into_next_deliberation
 /// exchange's request still carries the interrupted work in full.
 #[test]
 fn a_prompt_queued_across_an_interrupt_opens_the_next_exchange_over_the_whole_context() {
-    let mut session = dressed_trunk(|shell| shell.install_builtins(T2_CANCEL_BUILTINS));
+    let mut session = dressed_trunk(|runtime| runtime.install_builtins(T2_CANCEL_BUILTINS));
     T2_CANCEL_TOKEN.with(|cell| *cell.borrow_mut() = Some(session.agent.token.clone()));
     T2_QUEUE.with(|cell| *cell.borrow_mut() = Some(session.agent.mailbox.clone()));
     session.agent.provider.swap(scripted(
@@ -601,7 +601,7 @@ fn a_prompt_queued_across_an_interrupt_opens_the_next_exchange_over_the_whole_co
 /// same boundary.
 #[test]
 fn a_read_queued_mid_exchange_runs_at_the_tool_boundary_ahead_of_the_next_step() {
-    let mut session = dressed_trunk(|shell| shell.install_builtins(T2_CANCEL_BUILTINS));
+    let mut session = dressed_trunk(|runtime| runtime.install_builtins(T2_CANCEL_BUILTINS));
     T2_QUEUE.with(|cell| *cell.borrow_mut() = Some(session.agent.mailbox.clone()));
     session.agent.provider.swap(scripted(
         "test-model",
@@ -667,7 +667,7 @@ fn a_read_queued_mid_exchange_runs_at_the_tool_boundary_ahead_of_the_next_step()
 /// typed beside a prompt forks with it.
 #[test]
 fn a_read_queued_after_a_prompt_runs_after_it_lands() {
-    let mut session = dressed_trunk(|shell| shell.install_builtins(T2_CANCEL_BUILTINS));
+    let mut session = dressed_trunk(|runtime| runtime.install_builtins(T2_CANCEL_BUILTINS));
     T2_QUEUE.with(|cell| *cell.borrow_mut() = Some(session.agent.mailbox.clone()));
     session.agent.provider.swap(scripted(
         "test-model",
@@ -846,7 +846,7 @@ fn current_epoch_surface_batch_reaches_the_model() {
 /// Pinned because it must keep holding with no wiring of its own.
 #[test]
 fn cancel_cascade_reaches_a_cancelled_sub_agents_workers() {
-    let parent = dressed_trunk(|shell| shell.install_builtins(WORKER_REGISTRY_TEST_BUILTINS));
+    let parent = dressed_trunk(|runtime| runtime.install_builtins(WORKER_REGISTRY_TEST_BUILTINS));
     let child = parent.fork().expect("fork child");
 
     let (tx, _rx) = crate::bus::channel();

@@ -1,6 +1,6 @@
 ---
 status: accepted
-generated_at_commit: e028f5a3
+generated_at_commit: 8aa9355b
 generated_at_date: 2026-10-13
 ---
 
@@ -9,8 +9,8 @@ generated_at_date: 2026-10-13
 **A payload the host relays but never reads crosses as bytes; its content is a
 contract between the engines at its two ends, and the spawner is what makes
 those ends one binary.** A sub-agent's bequest therefore rides the protocol
-twice, as `FOValue::Bytes` in the parent's enquiry and as `Attach.seed:
-Option<Sealed>` in the child's `Attach`, and the guest daemon, not a parent
+twice, as `FOValue::Bytes` in the parent's enquiry and as `Origin::Child(Sealed)`
+in the child's `Attach`, and the guest daemon, not a parent
 engine, spawns every engine. Amends the sentence of
 [[design/engine-protocol|engine-protocol]] that said the seed "never touches
 the engine protocol"; realised in `core/src/seed.rs` (`seal`, `Sealed`),
@@ -42,9 +42,23 @@ the factory from one path (`ral.engine` on a read-only rootfs); their agreement
 is structural, not versioned. `Sealed::unseal` is `pub(crate)` to core, so the
 host cannot read it.
 
-**Every engine is born from an `Attach`.** `seed: None` runs the root recipe;
-`Some` unseals against the engine's own `Runtime` and constructs with
-`Shell::child_of`. `Engine::boot(installers, &attach)` is the one door.
+**Every engine is born from an `Attach`.** An `Attach` is an `EngineSpec`
+(version, installer tag, terminal, home: what names the engine) and an `Origin`:
+`Origin::Root(Root { cwd, env, config })` runs the root recipe over those three;
+`Origin::Child(Sealed)` unseals against the engine's own `Runtime` and
+constructs with `Shell::child_of`, and names no cwd, env or config, since the
+seal carries them. The split makes the old defect unrepresentable: a sealed
+attach no longer has cwd/env fields for a desk to fill with its parent's stale
+values, and a wire seat keeps only the `EngineSpec`. `Engine::boot(installers,
+&attach)` is the one door; `PROTOCOL_VERSION` is 21 for this shape.
+
+**Builtins live on the `Runtime` alone.** `Engine::boot` derives one
+`Arc<Runtime>` from `installer.runtime(&spec)`; the root shell, a sealed child
+and every identity-adopted child are built over it, so every seat decodes and
+resolves against the same Σ. `Shell` has no way to install builtins or to give
+its runtime back (`install_builtins`, `install_captured_builtins`,
+`install_set` and `Shell::runtime` are gone); tests dress the `Runtime` before
+boot.
 
 **The host makes engines; the daemon is the factory.** The wire arm of the fork
 builtin does no I/O: `bequeath`, `seal`, name the bytes in the enquiry as
@@ -61,10 +75,20 @@ the host already holds the spawn the connection is for.
 CID: the source CID is written by the guest kernel's transport. Losing the
 token loses nothing.
 
-**The scratch is the host's, on every seat.** Every `Attach` names
-`$EXARCH_SCRATCH`; `engine_root` refuses one that does not; no engine mints a
+**The scratch is the host's, on every seat.** Every root `Attach` names
+`$EXARCH_SCRATCH` in its `Root.env`; `engine_root` refuses one that does not (a
+child's rides its bequest's env overrides); no engine mints a
 scratch, so no lock crosses a process boundary and nothing must live as long as
 an engine.
+
+The scratch carries the tool homes (`CARGO_HOME`, `GOPATH`, `RUSTUP_HOME`, …),
+shared by every agent in one tree; on the guest the scratch is `/tmp` itself.
+A narrowed child (a `read-only` grant may still write the scratch) can therefore
+plant `$CARGO_HOME/config.toml` or `$CARGO_HOME/bin/*` for a wider sibling or
+parent to execute. Accepted: agents in one tree trust each other. Grant
+narrowing bounds what a child may touch in the user's world, not what it may
+plant for its own tree. This held on the host seat before and now holds on the
+guest too.
 
 **Who ends what.** A child ends when the host drops its connection (EOF on
 fd 3); `halt` signals every engine's process group.
@@ -83,5 +107,5 @@ the factory port.
 The hatch: `seed/hatch.rs` (`listen_for_hatch`, `hatch_over`, `seed_from_env`,
 `HATCHED` and its sweep), the token, `HATCH_ACK`, the seed fd
 (`RAL_ENGINE_SEED_FD`), the table of unreaped children, the guest port builtin,
-`Birth`, `Dial`/`MachineDial`, and the orphan question: no engine has children
+the old hatch-era `Birth`, `Dial`/`MachineDial`, and the orphan question: no engine has children
 it must outlive.

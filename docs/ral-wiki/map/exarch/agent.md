@@ -37,8 +37,8 @@ the destination judges it at its own pop.
 halves (`boot::engine_runtime` and `boot::engine_root`, in the table
 `exarch::INSTALLERS` both carriers share) — a root keeps the `Attach` it was born from and the session `Scratch`
 that `Attach` names, an adopted fork keeps neither — or `Seat::Wire`, a
-`WireTransport` driving a remote engine, one process per session, keeping the
-`Attach` it was attached with, less its seal
+`WireTransport` driving a remote engine, one process per session, keeping only
+the `EngineSpec` it was attached with
 ([[map/core/engine-protocol|engine-protocol]]) — the
 canonical run and probe vocabulary either way
 ([[map/core/engine-protocol|engine-protocol]]) — plus the `inbox`, the
@@ -319,7 +319,7 @@ plumbing of their own: they ride the same drain above.
 
 **The binding-lease ledger** is armed by `shell_eval::arm_session_ledgers` —
 the one policy site, run by the one root recipe (`boot::engine_root`) right after
-the `Attach`'s env is seeded as bindings (seeding then arming stay one visible
+the `Root`'s env is seeded as bindings (seeding then arming stay one visible
 sequence); a fork keeps those terms through core's `Shell::bequeath` and
 `Shell::child_of`, sealing everything it inherited ([[map/core/shell-state|shell-state]]) — with
 [[map/exarch/shell-eval|shell-eval]]'s `BINDING_IDLE_CALLS` (256) and
@@ -882,10 +882,10 @@ The desk's wire arm (`make_engine`, `desk/agents.rs`) asks the launch's
 **`Factory`** (`exarch/src/agent/factory.rs` — `vm_manager`-free by
 construction, a capability object `RootConfig` hands to the `Launch`, `None` on
 every identity trunk) for one connection to a fresh engine, adopts it as a
-`WireTransport`, and seats it with `Seat::wire(transport, attach, Some(seal))`:
-the parent's own `Attach` plus the seal, written together, then `await_attached`.
-The seat stores the attach less its seal, so no seat holds its parent's
-bequest for its own life. The desk answers the parent's enquiry only after that
+`WireTransport`, and seats it with `Seat::wire(transport, Attach::child(engine, seal))`:
+the parent's `EngineSpec` plus the seal, written together, then `await_attached`.
+The seat stores only the `EngineSpec`, so no seat holds its parent's
+bequest for its own life and a child attach has no cwd or env to get stale. The desk answers the parent's enquiry only after that
 returns, so the child is attached before the roster names it, and hands the
 seat to the same `spawn_async` an identity fork reaches, at `fuel = parent - 1`.
 A refused attach reaches the parent as the desk's refusal, in the engine's

@@ -27,7 +27,7 @@ pub struct DetachPolicy {
     /// A whole-life total, not a concurrency limit.
     pub budget: u64,
     #[cfg_attr(not(unix), allow(dead_code))]
-    pub(crate) births: AtomicU64,
+    births: AtomicU64,
 }
 
 impl DetachPolicy {
@@ -36,6 +36,12 @@ impl DetachPolicy {
             budget,
             births: AtomicU64::new(0),
         }
+    }
+
+    /// Births counted so far, in-flight reservations included.
+    #[cfg(test)]
+    pub(crate) fn born(&self) -> u64 {
+        self.births.load(Ordering::Relaxed)
     }
 
     /// Reserve one birth.

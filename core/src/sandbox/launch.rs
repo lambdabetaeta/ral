@@ -31,10 +31,11 @@ use std::path::Path;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::{os::fd::AsFd, os::fd::OwnedFd, process::Command};
 
-/// Whether the session keeps owning what it launches.  Read only by the Linux
+/// Whether the session keeps owning what it launches.  Read by the Linux
 /// backend, which decides two ties between the session and the envelope:
 /// death (bwrap's `--die-with-parent`) and address (`--info-fd`, naming the
-/// payload's own session — see `linux::InfoFd`).
+/// payload's own session — see `linux::InfoFd`); and by the guest jail, whose
+/// cgroup for a survivor is not its engine's, so the engine's end spares it.
 /// `Surrendered` — the `detach` verb, whose child is meant to survive us —
 /// drops both: the survivor must not be killed by our death, and there is no
 /// session left here to address once we stop watching it.  No hole: the

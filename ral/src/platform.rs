@@ -6,7 +6,8 @@
 //! other's module.  Both Unix and Windows env-var fallbacks are encoded
 //! explicitly.
 
-use ral_core::protocol::Attach;
+use ral_core::first_order::FOValue;
+use ral_core::protocol::{Attach, EngineSpec, Root};
 use ral_core::terminal;
 use ral_core::terminal::{InteractiveMode, TerminalState};
 use ral_core::types::ExitHints;
@@ -25,17 +26,18 @@ pub(crate) fn probe_terminal(warn: bool) -> (InteractiveMode, TerminalState) {
 }
 
 /// An in-process engine's attach: its cwd and home are this process's own.
-pub(crate) fn local_attach(installer: &str, terminal: TerminalState) -> Attach {
+pub(crate) fn local_attach(installer: &str, terminal: TerminalState, config: FOValue) -> Attach {
     #[allow(
         clippy::disallowed_methods,
         reason = "host-env: an identity engine's home is this process's own"
     )]
     let home = ral_core::host::home().unwrap_or_default();
     let cwd = ral_core::host::cwd().unwrap_or_else(|| ".".into());
-    Attach {
-        terminal,
-        ..Attach::new(installer, cwd, home.into())
-    }
+    Attach::root(
+        EngineSpec::new(installer, home.into()),
+        Root::new(cwd).with_config(config),
+    )
+    .with_terminal(terminal)
 }
 
 static DEFAULT_EXIT_HINTS: &str = include_str!("../../data/exit-hints.txt");

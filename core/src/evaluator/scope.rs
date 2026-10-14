@@ -132,7 +132,7 @@ fn handler_schemes(env: &Env, shell: &Shell) -> crate::typecheck::SessionSchemes
     crate::typecheck::SessionSchemes {
         bindings: env.binding_schemes(&shell.sig),
         aliases: shell.context.handlers.alias_schemes(),
-        builtins: shell.session.builtins.manifest().clone(),
+        builtins: shell.session.runtime.builtins.manifest().clone(),
     }
 }
 
@@ -267,8 +267,11 @@ mod tests {
     /// leaves the trail exactly as closed as one that returns normally.
     #[test]
     fn a_panicking_audit_body_still_closes_the_trail() {
-        let mut shell = crate::test_helper::core_shell();
-        shell.install_builtins(PANIC_BUILTINS);
+        let mut shell = crate::HostSurface {
+            statics: vec![PANIC_BUILTINS],
+            ..crate::HostSurface::default()
+        }
+        .shell(crate::terminal::TerminalState::default());
         match shell.run(Run::captured("audit { core-panic-now }", "<test>")) {
             RunReport::Static { .. } => {}
             RunReport::Ran { .. } => panic!("a panicking body must report Static"),
@@ -287,8 +290,11 @@ mod tests {
     /// ordinary error leaves whatever `let`s landed before it (`docs/SPEC.md` §5.6).
     #[test]
     fn panic_mid_run_restores_the_pre_run_checkpoint() {
-        let mut shell = crate::test_helper::core_shell();
-        shell.install_builtins(PANIC_BUILTINS);
+        let mut shell = crate::HostSurface {
+            statics: vec![PANIC_BUILTINS],
+            ..crate::HostSurface::default()
+        }
+        .shell(crate::terminal::TerminalState::default());
         let before_cwd = shell.cwd();
         let tmp = std::env::temp_dir().display().to_string();
 

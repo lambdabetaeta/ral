@@ -5,30 +5,86 @@
 //! them.  A guest whose init does not wait leaks a zombie per orphan until
 //! the PID table is full.  So the daemon's main loop *is* a wait loop, and
 //! everything else it does — supervising the engine, honouring a stop
-//! request — is expressed as an answer to "what did the last wait return?".
+//! request — is expressed as an answer to "what woke it?".
+//!
+//! ## No handlers
+//!
+//! What wakes it is a signal: `SIGCHLD`, or one of [`STOP_SIGNALS`].  None
+//! has a handler.  All are blocked in every thread ([`mask`], before the
+//! first thread exists) and taken synchronously by [`next_signal`], so a stop
+//! request can neither be lost to a restarted syscall nor land in the wrong
+//! thread; and, being blocked, they are not dropped as PID 1's unhandled
+//! signals otherwise are.  On `SIGCHLD` the loop drains [`poll_any`].
 //!
 //! ## The wait vocabulary
 //!
 //! ral already typed its Unix wait funnel (`core/src/process/signal/unix.rs`,
 //! decision `260720_total-wait-status`), and this module speaks the same
 //! language rather than a second dialect of `waitpid`: rustix's transparent
-//! [`WaitStatus`] read through its bit-test accessors, blocking and polling
-//! as two distinct doors so an impossible idle result cannot leak into a
-//! blocking caller, and no `WIF*` decoding anywhere.  It does not *import*
-//! `ral_core::process`, and deliberately: PID 1 is a static binary in a boot
-//! artifact, and linking the shell's process layer into it would pull the
-//! whole evaluator — serde, clap, the search engine — into a program whose
-//! job is `mount`, `fork`, and `wait`.  The vocabulary is shared; the
-//! dependency is not.
-//!
-//! One rule *is* inverted, for a reason the shell does not have: `EINTR` is
-//! not retried away.  In the shell a signal arriving during a wait is noise
-//! to be transparently absorbed.  In an init it is the message — the host's
-//! stop request reaches this loop as a signal and nothing else — so it
-//! surfaces as [`Waking::Interrupted`] rather than being swallowed.
+//! [`WaitStatus`] read through its bit-test accessors, and no `WIF*` decoding
+//! anywhere.  It does not *import* `ral_core::process`, and deliberately:
+//! PID 1 is a static binary in a boot artifact, and linking the shell's
+//! process layer into it would pull the whole evaluator — serde, clap, the
+//! search engine — into a program whose job is `mount`, `fork`, and `wait`.
+//! The vocabulary is shared; the dependency is not.
+
+use std::io;
 
 use rustix::io::Errno;
 use rustix::process::{Pid, WaitOptions, WaitStatus, wait};
+
+/// The signals by which the host asks this machine to stop: `SIGTERM` from a
+/// supervisor, `SIGPWR` from an ACPI power-button event, and `SIGINT`, which
+/// Ctrl-Alt-Del becomes for init once `CadOff` is set.
+pub const STOP_SIGNALS: [libc::c_int; 3] = [libc::SIGTERM, libc::SIGINT, libc::SIGPWR];
+
+/// [`STOP_SIGNALS`] and `SIGCHLD`: everything the wait loop answers.
+fn awaited() -> libc::sigset_t {
+    // SAFETY: `sigemptyset` initialises `set` before `sigaddset` touches it.
+    unsafe {
+        let mut set = std::mem::zeroed();
+        libc::sigemptyset(&raw mut set);
+        for signal in STOP_SIGNALS.into_iter().chain([libc::SIGCHLD]) {
+            libc::sigaddset(&raw mut set, signal);
+        }
+        set
+    }
+}
+
+/// Apply `how` (`SIG_BLOCK`, `SIG_UNBLOCK`) to the awaited signals in the
+/// calling thread.  Async-signal-safe, so a child's `pre_exec` may undo the
+/// block it inherits.
+///
+/// # Errors
+/// Returns the error `pthread_sigmask` reports.
+pub fn mask(how: libc::c_int) -> io::Result<()> {
+    let set = awaited();
+    // SAFETY: `set` is initialised; only the calling thread's mask changes.
+    match unsafe { libc::pthread_sigmask(how, &raw const set, std::ptr::null_mut()) } {
+        0 => Ok(()),
+        err => Err(io::Error::from_raw_os_error(err)),
+    }
+}
+
+/// Block until an awaited signal is pending, take it, and return its number.
+/// Sound only while every thread has them blocked, as [`mask`] arranges.
+///
+/// # Errors
+/// Returns the error `sigwaitinfo` reports.
+pub fn next_signal() -> io::Result<libc::c_int> {
+    let set = awaited();
+    loop {
+        // SAFETY: `set` is initialised, and a null `siginfo_t` is permitted.
+        let signal = unsafe { libc::sigwaitinfo(&raw const set, std::ptr::null_mut()) };
+        if signal >= 0 {
+            return Ok(signal);
+        }
+        let err = io::Error::last_os_error();
+        if err.kind() != io::ErrorKind::Interrupted {
+            return Err(err);
+        }
+    }
+}
 
 /// How a child left the world.
 ///
@@ -75,7 +131,7 @@ impl std::fmt::Display for Death {
     }
 }
 
-/// What one turn of the wait loop found.
+/// What one non-blocking wait found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Waking {
     /// A child was reaped.
@@ -86,34 +142,18 @@ pub enum Waking {
         /// How it died.
         death: Death,
     },
-    /// A signal arrived while waiting.  In an init this is not noise: it is
-    /// how the host asks for the machine to stop.
-    Interrupted,
-    /// Nothing is reapable right now.  Only [`poll_any`] can return this;
-    /// [`wait_any`] blocks instead, so the impossible "idle" answer cannot
-    /// reach a caller that asked to block.
+    /// Nothing is reapable right now.
     Idle,
     /// No children remain at all.  For PID 1 this means the guest's entire
     /// userland is gone.
     Childless,
 }
 
-/// Wait for any child to die, blocking until one does or a signal arrives.
-///
-/// # Errors
-/// Returns the kernel's error for anything other than the interruption and
-/// no-children cases, which are answers rather than failures.
-pub fn wait_any() -> Result<Waking, Errno> {
-    classify(wait(WaitOptions::empty()))
-}
-
 /// Ask whether any child is reapable, without blocking.
 ///
-/// The polling twin of [`wait_any`], used while a shutdown's grace period
-/// runs down.
-///
 /// # Errors
-/// As [`wait_any`].
+/// Returns the kernel's error for anything other than `ECHILD`, which is
+/// [`Waking::Childless`].
 pub fn poll_any() -> Result<Waking, Errno> {
     classify(wait(WaitOptions::NOHANG))
 }
@@ -129,7 +169,6 @@ fn classify(result: Result<Option<(Pid, WaitStatus)>, Errno>) -> Result<Waking, 
             death: Death::read(status),
         }),
         Ok(None) => Ok(Waking::Idle),
-        Err(Errno::INTR) => Ok(Waking::Interrupted),
         Err(Errno::CHILD) => Ok(Waking::Childless),
         Err(err) => Err(err),
     }
@@ -138,13 +177,6 @@ fn classify(result: Result<Option<(Pid, WaitStatus)>, Errno>) -> Result<Waking, 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A signal delivered during the wait is the loop's wakeup, not an
-    /// error and not something to retry away.
-    #[test]
-    fn an_interrupted_wait_is_a_waking() {
-        assert_eq!(classify(Err(Errno::INTR)), Ok(Waking::Interrupted));
-    }
 
     /// `ECHILD` is the answer "there is nobody left", which for PID 1 is a
     /// fact about the guest rather than a failure.

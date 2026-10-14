@@ -8,7 +8,6 @@
 //! and the durable root under it, then waits for the worker to report and park.
 
 use std::collections::HashMap;
-use std::io;
 use std::os::unix::io::FromRawFd;
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
@@ -16,10 +15,11 @@ use std::time::{Duration, Instant};
 use crate::engine::{Engine, EngineInstaller, Outlet, Rails};
 use crate::first_order::FOValue;
 use crate::process::{CancelCause, ForegroundScope};
-use crate::protocol::channel::{HOST_SILENCE_DEADLINE, WireChannel, write_or_sever};
+use crate::protocol::channel::{HOST_SILENCE_DEADLINE, WireChannel, WriteError, write_or_sever};
 use crate::protocol::probe::Probe;
 use crate::protocol::{
-    Attach, Control, DispatchId, EnquiryError, EnquiryId, Event, Frame, Report, Run, SessionEvent,
+    Attach, Control, DispatchId, EnquiryError, EnquiryId, Event, Frame, Origin, Report, Root, Run,
+    SessionEvent,
 };
 use crate::sync::LockExt;
 use crate::types::{DeferredSink, EnquiryDesk, Error, Fork};
@@ -35,9 +35,33 @@ use std::sync::{Arc, Mutex, mpsc};
 /// Every engine-side write crosses here: a surface emit, a deferred batch, an
 /// enquiry, a report, a `Pong`. None of them may park the reader loop, so a
 /// stalled write becomes exactly the same fatal, non-blocking event a severed
-/// pipe already is.
-fn engine_write(writer: &Mutex<WireChannel>, fault: &AtomicBool, frame: &Frame) -> io::Result<()> {
-    write_or_sever(writer, frame, |_| fault.store(true, Ordering::SeqCst))
+/// pipe already is. A run's end or reading the fuse refuses is replaced by its
+/// [`refusal`], so the front-end is not left waiting; any other refusal goes
+/// back to its writer.
+fn engine_write(
+    writer: &Mutex<WireChannel>,
+    fault: &AtomicBool,
+    frame: &Frame,
+) -> Result<(), WriteError> {
+    let record = |_: &std::io::Error| fault.store(true, Ordering::SeqCst);
+    match (write_or_sever(writer, frame, record), frame) {
+        (
+            Err(WriteError::Unencodable(e)),
+            Frame::Event(id, ev @ (Event::Report(_) | Event::Reading(_))),
+        ) => {
+            let small = refusal(matches!(ev, Event::Reading(_)), &e.to_string());
+            write_or_sever(writer, &Frame::Event(*id, small), record)
+        }
+        (outcome, _) => outcome,
+    }
+}
+
+/// [`engine_write`] for a frame with no writer to refuse into: one the fuse
+/// refuses is diagnosed and dropped, and the wire stays alive.
+fn engine_send(writer: &Mutex<WireChannel>, fault: &AtomicBool, frame: &Frame) {
+    if let Err(WriteError::Unencodable(e)) = engine_write(writer, fault, frame) {
+        crate::errln!("engine: dropped a {} frame: {e}", frame.kind());
+    }
 }
 
 /// A detached worker's batch outlives the run that spawned it, so it has no
@@ -49,7 +73,7 @@ struct ChannelDeferredSink {
 
 impl DeferredSink for ChannelDeferredSink {
     fn deliver(&self, batch: Vec<FOValue>) {
-        let _ = engine_write(
+        engine_send(
             &self.writer,
             &self.fault,
             &Frame::Session(SessionEvent::DeferredSurface(batch)),
@@ -138,9 +162,12 @@ impl EnquiryDesk for WireDesk {
         let (tx, rx) = mpsc::sync_channel(1);
         self.parks.parked.lock_ignore_poison().insert(eid, tx);
 
-        if !(self.outlet)(self.id, Event::Enquiry(eid, req)) {
+        if let Err(e) = (self.outlet)(self.id, Event::Enquiry(eid, req)) {
             self.parks.parked.lock_ignore_poison().remove(&eid);
-            return Err(Error::new("enquiry lost: the host connection is down"));
+            return Err(Error::new(match e {
+                WriteError::Severed => "enquiry lost: the host connection is down".into(),
+                WriteError::Unencodable(e) => format!("enquiry: the host could not be asked: {e}"),
+            }));
         }
 
         // The sender leaves `parked` only into `fill`'s send or this park's own
@@ -273,25 +300,27 @@ pub fn run_engine(installers: &'static [EngineInstaller]) -> ! {
 /// The process-level half of an attach, which only a carrier that owns its
 /// process may perform. Both restores skip when the value already holds: an
 /// in-process engine attaches with its host's own cwd and HOME, and must not
-/// disturb either.
+/// disturb either. A child restores no cwd: its own rides its seal.
 fn restore_process_dirs(attach: &Attach) {
     #[allow(
         clippy::disallowed_methods,
         reason = "engine cwd restore during Attach: sets engine process cwd, not Shell logical cwd"
     )]
-    if std::env::current_dir().is_ok_and(|d| d != attach.cwd)
-        && let Err(e) = std::env::set_current_dir(&attach.cwd)
+    if let Origin::Root(Root { cwd, .. }) = &attach.origin
+        && std::env::current_dir().is_ok_and(|d| d != *cwd)
+        && let Err(e) = std::env::set_current_dir(cwd)
     {
-        crate::errln!("engine: failed to set cwd to {}: {e}", attach.cwd.display());
+        crate::errln!("engine: failed to set cwd to {}: {e}", cwd.display());
     }
+    let home = &attach.engine.home;
     #[allow(
         clippy::disallowed_methods,
         reason = "engine HOME restore during Attach: process env, not Shell state"
     )]
-    if std::env::var_os("HOME").as_deref() != Some(attach.home.as_os_str()) {
+    if std::env::var_os("HOME").as_deref() != Some(home.as_os_str()) {
         // SAFETY: single-threaded engine startup, no other threads
         unsafe {
-            std::env::set_var("HOME", &attach.home);
+            std::env::set_var("HOME", home);
         }
     }
 }
@@ -328,12 +357,12 @@ fn engine_session(
             restore_process_dirs(&attach);
             // Colour follows the front end's terminal, not this process's
             // null stdio.
-            attach.terminal.seat();
+            attach.engine.terminal.seat();
             match Engine::boot(installers, &attach) {
                 Ok(engine) => engine,
                 Err(msg) => {
                     crate::errln!("engine: {msg}");
-                    let _ = engine_write(
+                    engine_send(
                         &writer,
                         &wire_fault,
                         &Frame::Session(SessionEvent::Refused(msg)),
@@ -366,7 +395,7 @@ fn engine_session(
 
     // The engine now takes dispatches, and the front-end's `await_attached`
     // unblocks.
-    let _ = engine_write(
+    engine_send(
         &writer,
         &wire_fault,
         &Frame::Session(SessionEvent::Attached),
@@ -383,11 +412,11 @@ fn engine_session(
     // takes an item until its Report is written.
     let writing = Arc::new(AtomicBool::new(false));
     let (run_tx, run_rx) = mpsc::channel::<(Dispatch, WorkItem)>();
+    let parks = Arc::new(Parks::default());
     let outlet: Outlet = {
         let (writer, fault) = (writer.clone(), wire_fault.clone());
-        Arc::new(move |id, event| engine_write(&writer, &fault, &Frame::Event(id, event)).is_ok())
+        Arc::new(move |id, event| engine_write(&writer, &fault, &Frame::Event(id, event)))
     };
-    let parks = Arc::new(Parks::default());
 
     // ── Worker thread: owns the engine ─────────────────────────────
     {
@@ -431,7 +460,7 @@ fn engine_session(
                 // order is unchanged, and a probe the front-end sends on
                 // receiving the Report is never refused "engine busy".
                 drop(claim);
-                outlet(id, event);
+                let _ = outlet(id, event);
             }
         });
     }
@@ -442,7 +471,7 @@ fn engine_session(
     let admit = |id: DispatchId, probing: bool| {
         let claim = Dispatch::claim(&busy, id);
         if claim.is_none() {
-            outlet(id, refusal(probing, BUSY));
+            let _ = outlet(id, refusal(probing, BUSY));
         }
         claim
     };
@@ -521,7 +550,7 @@ fn engine_session(
             Frame::Control(control) => scopes.apply(control),
             Frame::Ping(seq) => {
                 armed = true;
-                let _ = engine_write(&writer, &wire_fault, &Frame::Pong(seq));
+                engine_send(&writer, &wire_fault, &Frame::Pong(seq));
             }
             Frame::Detach => break SessionEnd::Requested,
             out_of_protocol @ (Frame::Attach(_)
@@ -577,7 +606,7 @@ mod wire_desk_tests {
         WireDesk {
             id: DispatchId(id),
             outlet: Arc::new(move |id, event| {
-                engine_write(&writer, &fault, &Frame::Event(id, event)).is_ok()
+                engine_write(&writer, &fault, &Frame::Event(id, event))
             }),
             parks: Arc::default(),
         }
@@ -732,11 +761,11 @@ mod engine_session_tests {
     static INSTALLERS: &[EngineInstaller] = &[crate::carrier::testkit::installer(
         "test",
         |_| {
-            Ok(crate::boot::boot_runtime(
+            crate::boot::boot_runtime(
                 crate::terminal::TerminalState::default(),
                 crate::boot::BakedPrelude::runtime(),
                 &crate::boot::HostSurface::default(),
-            ))
+            )
         },
         |_, _| Ok(()),
     )];

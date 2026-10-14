@@ -374,13 +374,10 @@ impl Avatar {
                 &AgentLog::dir_of(&sessions_root, id),
             )
             .map_err(lost)?,
-            RootSeat::Wire { transport, attach } => {
-                Seat::wire(*transport, attach, None).map_err(lost)?
-            }
+            RootSeat::Wire { transport, attach } => Seat::wire(*transport, attach).map_err(lost)?,
         };
         let index =
             crate::prompt::BuiltinIndex::resolve(seat.read(|t| t.builtin_names()).map_err(lost)?);
-        // The scratch is the engine's to name, under either carrier.
         let scratch_var = crate::app::EXARCH.scratch_var();
         let scratch = seat
             .read(|t| t.env_var(&scratch_var))

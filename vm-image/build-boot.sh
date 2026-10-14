@@ -91,7 +91,10 @@ esac
 MIRROR="${MIRROR:-$ARCH_MIRROR}"
 RUST_TARGET="${RUST_TARGET:-$ARCH_RUST_TARGET}"
 
-mkdir -p "$OUT_DIR"
+# Built in a private staging dir (concurrent builds never share one) and published only once its manifest names this
+# build: podman can exit 0 after the inner script died (full VM disk).
+mkdir -p "$(dirname "$OUT_DIR")"; STAGING="$(mktemp -d "$OUT_DIR.staging.XXXXXX")"; chmod 755 "$STAGING"
+trap 'rm -rf "$STAGING"; [ -z "${LOCKED:-}" ] || rmdir "$OUT_DIR.lock"' EXIT
 export SUITE ARCH MIRROR RUST_TARGET
 
 command -v podman >/dev/null || { echo "podman not found" >&2; exit 1; }
@@ -145,10 +148,10 @@ podman run --rm -i \
   --security-opt label=disable \
   -e SUITE -e ARCH -e MIRROR -e RUST_TARGET -e GIT_HASH -e CARGO_BUILD_JOBS \
   -v "$(host_path "$REPO_DIR"):/ral:ro" \
-  -v "$(host_path "$OUT_DIR"):/out" \
+  -v "$(host_path "$STAGING"):/out" \
   ${CACHE_MOUNT[@]+"${CACHE_MOUNT[@]}"} \
   "$BASE_IMAGE" \
-  bash -euo pipefail -s <<'INNER' 2>&1 | tee "$OUT_DIR/build.log"
+  bash -euo pipefail -s <<'INNER' 2>&1 | tee "$STAGING/build.log"
 export DEBIAN_FRONTEND=noninteractive
 
 echo ">> [container] installing build tooling"
@@ -695,6 +698,14 @@ cat /out/boot-manifest.txt
 
 echo ">> [container] done"
 INNER
+
+grep -qx "ral_git_hash=$GIT_HASH" "$STAGING/boot-manifest.txt" 2>/dev/null || {
+  echo "error: the build container exited without finishing; the previous media in $OUT_DIR is untouched. The build log is above." >&2
+  exit 1
+}
+until mkdir "$OUT_DIR.lock" 2>/dev/null; do sleep 1; done
+LOCKED=1
+rm -rf "$OUT_DIR"; mv "$STAGING" "$OUT_DIR"
 
 END=$(date +%s)
 echo

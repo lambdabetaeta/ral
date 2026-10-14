@@ -3,7 +3,7 @@
 use super::*;
 use crate::carrier::{Dispatching, dispatch_to_report};
 use crate::guard::SpawnGrant;
-use crate::protocol::{Control, Ending, EnquiryError, Report};
+use crate::protocol::{Control, Ending, EnquiryError, Report, Root};
 use crate::types::Shell;
 
 mod identity_cancel_tests {
@@ -206,12 +206,13 @@ mod enquiry_tests {
     /// The host's transform reaches `enquire`'s caller, not just `IdentityDesk`.
     #[test]
     fn enquire_round_trips_through_a_stub_desk() {
-        let mut shell = crate::test_helper::core_shell();
+        let mut runtime = crate::test_helper::core_runtime();
         let answer = std::sync::Arc::new(Mutex::new(None));
         let asked = answer.clone();
-        install_act(&mut shell, "ask-desk", move |mooring, shell| {
+        install_act(&mut runtime, "ask-desk", move |mooring, shell| {
             *asked.lock().unwrap() = Some(shell.enquire(mooring, FOValue::Int { value: 41 }));
         });
+        let mut shell = crate::Shell::root(runtime.into());
         let desk: Desk = Arc::new(IdentityDesk {
             host: Arc::new(IncrementSeam),
             events: no_events(),
@@ -324,7 +325,7 @@ mod durability_tests {
             let mut runtime =
                 crate::HostSurface::default().runtime(crate::terminal::TerminalState::default());
             runtime.install_builtins(&PANIC_BUILTINS_ARR);
-            Ok(runtime)
+            runtime
         },
         |_, _| Ok(()),
     )];
@@ -372,10 +373,7 @@ mod probe_tests {
     fn at(dir: &std::path::Path) -> IdentityTransport {
         boot_at(
             &BARE,
-            &Attach {
-                cwd: dir.to_path_buf(),
-                ..attach(&BARE)
-            },
+            &Attach::root(attach(&BARE).engine, Root::new(dir.to_path_buf())),
         )
     }
 
@@ -413,8 +411,10 @@ mod probe_tests {
 
     #[test]
     fn env_var_reads_the_overlay() {
-        let mut attach = attach(&BARE);
-        attach.env.push(("PROBE_TEST_VAR".into(), "42".into()));
+        let attach = Attach::root(
+            attach(&BARE).engine,
+            Root::new(std::env::temp_dir()).with_env(vec![("PROBE_TEST_VAR".into(), "42".into())]),
+        );
         let transport = boot_at(&BARE, &attach);
         assert_eq!(transport.env_var("PROBE_TEST_VAR_ABSENT"), Ok(None));
         assert_eq!(

@@ -8,8 +8,7 @@ behind a hidden sentinel flag, never a sibling helper — the flag is the first
 argument, `ral_core::Role` spells each flag once, `ral_core::classify` is the
 one place that reads it, and `ral_core::invocation::serve` the one place that
 serves it; a re-exec is launched from a `Role`, never a string
-(`sandbox::reexec::launch`). The test roles (`PgidCheck`, `DetachBirth`) exist
-only under `test-util`, so release binaries ship none:
+(`sandbox::reexec::launch`). Every role ships; none exists for tests:
 
 - a multi-stage pipeline pins its process group's pgid open for the
   pipeline's whole life with a lone anchor, `--ral-pipeline-anchor`

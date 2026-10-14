@@ -24,11 +24,12 @@
 # very bytes — is done in Rust by the Windows backend at first boot, not here.
 # See README ("What this pipeline does NOT do") before adding it a second time.
 #
-# Outputs (in vm-image/out/, on the host via a bind mount):
+# Outputs (in vm-image/out/rootfs/, on the host via a bind mount):
 #   rootfs.img               the ext4 image
 #   rootfs.img.sha256        its checksum
 #   packages-manifest.txt    dpkg -l capture — the exact version pin record
-#   verify.txt               spot-check results
+#   verify.txt               spot-check results; its last line names the build
+#   build.log                full build transcript
 #
 # The multi-GB tree and apt cache live only in the container's ephemeral layer
 # and are reclaimed when it exits (--rm). Nothing is left on the podman machine.
@@ -36,7 +37,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-OUT_DIR="$SCRIPT_DIR/out"
+OUT_DIR="$SCRIPT_DIR/out/rootfs"
 
 # --- Knobs (env-overridable) -------------------------------------------------
 SUITE="${SUITE:-resolute}"   # Ubuntu 26.04 LTS (the current LTS)
@@ -73,7 +74,10 @@ ZSTD_LEVEL="${ZSTD_LEVEL:-19}"           # download artifact compression
 FS_UUID="${FS_UUID:-5d9e0b7a-6f2c-4e13-9a44-73b6c0f1a201}"
 SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-1753056000}"  # 2026-07-21, pinned
 
-mkdir -p "$OUT_DIR"
+# Built in a private staging dir (concurrent builds never share one) and published only once verify.txt names this
+# build: podman can exit 0 after the inner script died (full VM disk).
+mkdir -p "$(dirname "$OUT_DIR")"; STAGING="$(mktemp -d "$OUT_DIR.staging.XXXXXX")"; chmod 755 "$STAGING"
+trap 'rm -rf "$STAGING"; [ -z "${LOCKED:-}" ] || rmdir "$OUT_DIR.lock"' EXIT
 # Export so `podman run -e NAME` pass-through actually finds them.
 export SUITE MIRROR ARCH ZSTD_LEVEL FS_UUID SOURCE_DATE_EPOCH
 
@@ -89,6 +93,9 @@ else
   host_path() { printf '%s' "$1"; }
 fi
 
+GIT_HASH="$(git -C "$(host_path "$(dirname "$SCRIPT_DIR")")" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+export GIT_HASH
+
 echo ">> building $SUITE/$ARCH office rootfs via $BASE_IMAGE"
 echo ">> mirror: $MIRROR"
 START=$(date +%s)
@@ -96,11 +103,11 @@ START=$(date +%s)
 podman run --rm -i \
   --privileged \
   --security-opt label=disable \
-  -e SUITE -e MIRROR -e ARCH -e ZSTD_LEVEL -e FS_UUID -e SOURCE_DATE_EPOCH \
-  -v "$(host_path "$OUT_DIR"):/out" \
+  -e SUITE -e MIRROR -e ARCH -e ZSTD_LEVEL -e FS_UUID -e SOURCE_DATE_EPOCH -e GIT_HASH \
+  -v "$(host_path "$STAGING"):/out" \
   -v "$(host_path "$SCRIPT_DIR/packages.txt"):/packages.txt:ro" \
   "$BASE_IMAGE" \
-  bash -euo pipefail -s <<'INNER'
+  bash -euo pipefail -s <<'INNER' 2>&1 | tee "$STAGING/build.log"
 export DEBIAN_FRONTEND=noninteractive
 
 echo ">> [container] installing build tooling"
@@ -270,8 +277,17 @@ set -e
 for d in proc sys dev; do umount "/build/rootfs/$d"; done
 rm -f /build/rootfs/tmp/smoke.txt /build/rootfs/tmp/smoke.pdf
 
+echo "ral_git_hash=$GIT_HASH" >> /out/verify.txt
 echo ">> [container] done"
 INNER
+
+grep -qx "ral_git_hash=$GIT_HASH" "$STAGING/verify.txt" 2>/dev/null || {
+  echo "error: the build container exited without finishing; the previous media in $OUT_DIR is untouched. The build log is above." >&2
+  exit 1
+}
+until mkdir "$OUT_DIR.lock" 2>/dev/null; do sleep 1; done
+LOCKED=1
+rm -rf "$OUT_DIR"; mv "$STAGING" "$OUT_DIR"
 
 END=$(date +%s)
 ELAPSED=$(( END - START ))

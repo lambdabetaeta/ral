@@ -2,7 +2,7 @@
 
 use super::IdentityTransport;
 use crate::engine::EngineInstaller;
-use crate::protocol::{Attach, Report, Run};
+use crate::protocol::{Attach, EngineSpec, Report, Root, Run};
 use crate::terminal::TerminalState;
 use crate::types::{Runtime, Shell};
 
@@ -10,8 +10,8 @@ use crate::types::{Runtime, Shell};
 /// with no grant lexicon can: no seeded child.
 pub(crate) const fn installer(
     tag: &'static str,
-    runtime: fn(&Attach) -> Result<Runtime, String>,
-    root: fn(&Attach, &mut Shell) -> Result<(), String>,
+    runtime: fn(&EngineSpec) -> Runtime,
+    root: fn(&Root, &mut Shell) -> Result<(), String>,
 ) -> EngineInstaller {
     EngineInstaller {
         tag,
@@ -28,7 +28,7 @@ pub(crate) const fn installer(
 /// A runtime with no prelude and no surface.
 pub(crate) static BARE: [EngineInstaller; 1] = [installer(
     "bare",
-    |_| Ok(crate::HostSurface::default().runtime(TerminalState::default())),
+    |_| crate::HostSurface::default().runtime(TerminalState::default()),
     |_, _| Ok(()),
 )];
 

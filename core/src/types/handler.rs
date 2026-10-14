@@ -234,11 +234,6 @@ impl HandlerStack {
         stack
     }
 
-    /// The permanent layer below every run frame.
-    pub(crate) fn base(&self) -> &[BuiltinEntry] {
-        &self.base
-    }
-
     /// Push a scoped `within` frame.  `Shell::with_handlers` owns the paired
     /// [`Self::remove_by_handle`].
     pub fn push(&mut self, entries: Vec<HandlerEntry>, catch_all: Option<Value>) -> FrameHandle {
@@ -313,11 +308,6 @@ impl HandlerStack {
             }
         }
         None
-    }
-
-    /// Install base handler frames — the manifest's argv half.
-    pub(crate) fn install_base(&mut self, entries: &[BuiltinEntry]) {
-        self.base.extend(entries.iter().cloned());
     }
 
     /// Every per-name entry on the stack, innermost first.  A shadowed name

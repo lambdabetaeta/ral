@@ -19,8 +19,8 @@
 //! so its tags answer what they were asked for rather than a state.
 
 use crate::enquiry::{
-    Agents, Context, Evict, Family, ForkClaim, Pins, Reading, Request, Schedules, Start, Survey,
-    Transcript, Turns, Word, family,
+    Agents, Context, Evict, Family, ForkClaim, Launch, Pins, Reading, Request, Schedules, Start,
+    Survey, Transcript, Turns, Word, family,
 };
 use crate::schedule::ScheduleInfo;
 use ral_core::first_order::FOValue;
@@ -100,12 +100,9 @@ fn builtin_agents(
 fn agents(args: &[Value], mooring: &Mooring, shell: &Shell) -> Settled<Value> {
     match Word::decode(&first_order(AGENTS, &args[0])?).map_err(sig)? {
         Word::Ask(request) => ask(AGENTS, Request::Agents(request), mooring, shell),
-        Word::Spawn(spec) => {
-            let grant = spec.grant.0.clone();
-            fork_then_enquire(grant, mooring, shell, |fork| {
-                Request::Agents(Agents::Start(Start { spec, fork }))
-            })
-        }
+        Word::Spawn(Launch { grant, spec }) => fork_then_enquire(grant.0, mooring, shell, |fork| {
+            Request::Agents(Agents::Start(Start { spec, fork }))
+        }),
     }
 }
 

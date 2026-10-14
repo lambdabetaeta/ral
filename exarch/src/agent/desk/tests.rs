@@ -8,8 +8,8 @@ use crate::bus::{Inbox, Signal, channel};
 use crate::card::Card;
 use crate::enquiry::AgentInfo;
 use crate::enquiry::{
-    Add, Evict, ForkClaim, Grant, Grep, Launch, Memory, Message, Name, Note, Pin, Reading,
-    Selection, Start, Turns,
+    Add, Evict, ForkClaim, Grep, Memory, Message, Name, Note, Pin, Reading, Selection, Spec, Start,
+    Turns,
 };
 use crate::provider::{
     Provider,
@@ -20,7 +20,6 @@ use crate::record::AgentLog;
 use crate::record::EditAuthority;
 use crate::record::{Display, Record, Transient};
 use crate::schedule::{Trigger, parse_duration};
-use ral_core::SpawnGrant;
 use ral_core::first_order::datum::tag;
 use ral_core::types::NurseryId;
 use regex::Regex;
@@ -147,32 +146,24 @@ fn family_req(family: &str, label: &str, payload: Option<FOValue>) -> FOValue {
 
 /// The model's plainest spawn record: `` `amnemon ``, inheriting
 /// provider and model.
-pub(super) fn spec(prompt: &str, name: &str, grant: SpawnGrant, search: bool) -> Launch {
-    Launch {
+pub(super) fn spec(prompt: &str, name: &str, search: bool) -> Spec {
+    Spec {
         prompt: prompt.to_string(),
         name: Name(name.to_string()),
         memory: Memory::Amnemon,
-        grant: Grant(grant),
         search,
         provider: Selection::Inherit,
         model: Selection::Inherit,
     }
 }
 
-pub(super) fn confined() -> SpawnGrant {
-    SpawnGrant::Base("confined".to_string())
-}
-
-pub(super) fn start(fork: ForkClaim, spec: Launch) -> Request {
+pub(super) fn start(fork: ForkClaim, spec: Spec) -> Request {
     Request::Agents(Agents::Start(Start { spec, fork }))
 }
 
 /// The in-process shape: the fork waits in this host's own nursery.
 pub(super) fn start_req(session: NurseryId, prompt: &str, name: &str, search: bool) -> Request {
-    start(
-        ForkClaim::Parked(session),
-        spec(prompt, name, confined(), search),
-    )
+    start(ForkClaim::Parked(session), spec(prompt, name, search))
 }
 
 pub(super) fn message_req(to: &str, text: &str) -> Request {
@@ -1210,9 +1201,9 @@ fn a_refused_selection_never_registers_a_child() {
     let err = desk
         .ask(start(
             ForkClaim::Parked(NurseryId(0)),
-            Launch {
+            Spec {
                 model: Selection::Named("other-model".into()),
-                ..spec("go", "helper", confined(), false)
+                ..spec("go", "helper", false)
             },
         ))
         .expect_err("a scripted bureau must refuse to mint");
@@ -1230,7 +1221,7 @@ fn a_refused_selection_never_registers_a_child() {
 
 /// A `` `start `` whose spec record `edit` has spoilt, as no door sends it.
 fn spoilt_start(edit: impl FnOnce(&mut Vec<(String, FOValue)>)) -> FOValue {
-    let mut spec = spec("go", "scout", confined(), false).encode();
+    let mut spec = spec("go", "scout", false).encode();
     let FOValue::Map { entries } = &mut spec else {
         unreachable!("a spec is a record")
     };
@@ -1254,7 +1245,7 @@ fn start_refuses_a_spec_missing_a_field_by_name() {
         .expect_err("a spec missing `name` must be refused");
     assert_eq!(
         err.message,
-        "`` exarch-agents `start ``: `spec: no `name field in a record of 6 fields"
+        "`` exarch-agents `start ``: `spec: no `name field in a record of 5 fields"
     );
 }
 
@@ -1299,29 +1290,6 @@ fn agent_start_admits_a_search_request_above_the_parents_ceiling() {
         "a spawn asking for more search reach than its parent holds is narrowed, not refused"
     );
     let _ = wait_for_settle(&parent_inbox);
-}
-
-/// A `` `restrict `` carrying anything but a record is refused by the
-/// desk's own decoder, before a base is named or a path is frozen.
-#[test]
-fn start_refuses_a_restriction_that_is_not_a_record() {
-    let (desk, _fleet, _parent_inbox) = spawnable_desk(3);
-    let err = desk
-        .ask(start(
-            ForkClaim::Parked(NurseryId(0)),
-            spec(
-                "go",
-                "helper",
-                SpawnGrant::Restrict(text("everything")),
-                false,
-            ),
-        ))
-        .expect_err("a `restrict that carries no record at all");
-    assert_eq!(
-        err.message,
-        "`` exarch-agents `start ``: `spec: `grant: `restrict must carry a capability record \
-         [exec, fs, net, editor, shell], got a Str"
-    );
 }
 
 /// Read `system_prompt_bytes` off a session's opening bookend — the first
@@ -2144,8 +2112,8 @@ fn ms_lease_reaping_a_child_before_its_seed_is_cancelled() {
 fn ms_lease_reaping_a_child_mid_exchange_is_cancelled() {
     let parent = Avatar::for_test_with(crate::agent::TestTrunk {
         lease: Duration::from_millis(25),
-        installers: crate::agent::testkit::dressed(|shell| {
-            shell.install_builtins(crate::agent::testkit::WORKER_REGISTRY_TEST_BUILTINS);
+        installers: crate::agent::testkit::dressed(|runtime| {
+            runtime.install_builtins(crate::agent::testkit::WORKER_REGISTRY_TEST_BUILTINS);
         }),
         ..crate::agent::TestTrunk::new("system")
     })

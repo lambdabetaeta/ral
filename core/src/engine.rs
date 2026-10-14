@@ -12,7 +12,10 @@ use std::sync::{Arc, Mutex};
 use crate::first_order::FOValue;
 use crate::guard::GrantNarrower;
 use crate::process::{CancelCause, DurableRoot, ForegroundScope};
-use crate::protocol::{Attach, Control, DispatchId, Event, PROTOCOL_VERSION, Report, Run};
+use crate::protocol::channel::WriteError;
+use crate::protocol::{
+    Attach, Control, DispatchId, EngineSpec, Event, Origin, PROTOCOL_VERSION, Report, Root, Run,
+};
 use crate::sync::LockExt as _;
 use crate::types::{DeferredSink, Desk, Fork, Runtime, Shell};
 
@@ -26,14 +29,12 @@ pub(crate) mod probe;
 pub struct EngineInstaller {
     pub tag: &'static str,
     /// The process half: Σ, builtins, docs. Derived from the binary and the
-    /// attach's terminal; a root and a child engine each derive their own,
-    /// an in-process child shares its parent's.
-    pub runtime: fn(&Attach) -> Result<Runtime, String>,
+    /// spec's terminal, once per engine: a root and a child engine each derive
+    /// their own, an in-process child shares its parent's.
+    pub runtime: fn(&EngineSpec) -> Runtime,
     /// The root-only recipe over a root session: libraries, hints, seeds,
-    /// ledgers. It installs no builtins: those are the runtime's, so a
-    /// child engine has them too. An `Err` refuses the attach, in the
-    /// recipe's own words.
-    pub root: fn(&Attach, &mut Shell) -> Result<(), String>,
+    /// ledgers. An `Err` refuses the attach, in the recipe's own words.
+    pub root: fn(&Root, &mut Shell) -> Result<(), String>,
     /// How a seeded or adopted child's grant becomes a ceiling. A field and
     /// not a registered hook: core has no base-tag lexicon to resolve a grant
     /// against, so a host that boots an engine must state the policy its
@@ -41,16 +42,18 @@ pub struct EngineInstaller {
     pub narrow: GrantNarrower,
 }
 
-/// One session's engine: its shell, the scopes that stop its runs, and the
-/// installer it was born from.
+/// One session's engine: its shell, the runtime every session it adopts
+/// shares, the scopes that stop its runs, and the installer it was born from.
 pub(crate) struct Engine {
     pub(crate) shell: Shell,
+    runtime: Arc<Runtime>,
     scopes: Arc<Scopes>,
     installer: &'static EngineInstaller,
 }
 
-/// Where a carrier sends one dispatch's events; `false` if it could not.
-pub(crate) type Outlet = Arc<dyn Fn(DispatchId, Event) -> bool + Send + Sync>;
+/// Where a carrier sends one dispatch's events. An event the fuse refuses
+/// comes back `Unencodable`, for its writer to answer.
+pub(crate) type Outlet = Arc<dyn Fn(DispatchId, Event) -> Result<(), WriteError> + Send + Sync>;
 
 /// One dispatch's host-facing rails, as its carrier lays them.
 pub(crate) struct Rails {
@@ -68,7 +71,10 @@ struct Surface {
 
 impl crate::types::EventSink for Surface {
     fn emit(&self, ev: &FOValue) {
-        (self.outlet)(self.id, Event::Surface(ev.clone()));
+        if let Err(WriteError::Unencodable(e)) = (self.outlet)(self.id, Event::Surface(ev.clone()))
+        {
+            crate::errln!("engine: dropped a surface value: {e}");
+        }
     }
 }
 
@@ -91,9 +97,8 @@ fn resolve_installer<'a>(
 
 impl Engine {
     /// Become what `attach` names: resolve its installer, derive the runtime,
-    /// then either run the root recipe (seating the attach's cwd and env) or
-    /// unseal the attach's seed and construct the child. No recipe runs in a
-    /// child.
+    /// then either run the root recipe (seating the root's cwd and env) or
+    /// unseal the child's seal and construct it. No recipe runs in a child.
     ///
     /// # Errors
     /// The attach refusal, in the words of whichever step refused; a seal
@@ -102,30 +107,32 @@ impl Engine {
         installers: &'static [EngineInstaller],
         attach: &Attach,
     ) -> Result<Self, String> {
-        let installer = resolve_installer(installers, attach.proto_version, &attach.installer)?;
+        let spec = &attach.engine;
+        let installer = resolve_installer(installers, spec.proto_version, &spec.installer)?;
         crate::process::jail::install_guest();
-        let runtime = (installer.runtime)(attach)?;
-        let shell = match &attach.seed {
-            None => {
-                let mut shell = Shell::root(runtime);
+        let runtime = Arc::new((installer.runtime)(spec));
+        let shell = match &attach.origin {
+            Origin::Root(root) => {
+                let mut shell = Shell::root(Arc::clone(&runtime));
                 crate::boot::seed_host_env(&mut shell);
-                (installer.root)(attach, &mut shell)?;
-                shell.seed_cwd(attach.cwd.clone());
-                for (name, value) in &attach.env {
+                (installer.root)(root, &mut shell)?;
+                shell.seed_cwd(root.cwd.clone());
+                for (name, value) in &root.env {
                     shell.set_env_var(name, value);
                 }
                 shell
             }
-            Some(sealed) => {
+            Origin::Child(sealed) => {
                 let bequest = sealed.unseal()?.decode(&runtime)?;
-                Shell::child_of(runtime, bequest, installer.narrow)?
+                Shell::child_of(Arc::clone(&runtime), bequest, installer.narrow)?
             }
         };
         Ok(Self::new(shell, installer))
     }
 
-    /// An engine over a shell already built.
+    /// An engine over `shell`, sharing the runtime it was built on.
     pub(crate) fn new(shell: Shell, installer: &'static EngineInstaller) -> Self {
+        let runtime = Arc::clone(&shell.session.runtime);
         let scopes = Arc::new(Scopes {
             dispatches: shell.run_cancel_handle(),
             root: shell.cancel_handle(),
@@ -133,9 +140,14 @@ impl Engine {
         });
         Self {
             shell,
+            runtime,
             scopes,
             installer,
         }
+    }
+
+    pub(crate) fn runtime(&self) -> &Arc<Runtime> {
+        &self.runtime
     }
 
     pub(crate) fn scopes(&self) -> &Arc<Scopes> {
@@ -288,7 +300,7 @@ mod tests {
     fn a_sealed_attach_runs_no_root_recipe() {
         static PANICKY: [EngineInstaller; 1] = [crate::carrier::testkit::installer(
             "panicky-root",
-            |_| Ok(crate::HostSurface::default().runtime(crate::terminal::TerminalState::default())),
+            |_| crate::HostSurface::default().runtime(crate::terminal::TerminalState::default()),
             |_, _| panic!("a sealed child runs no root recipe"),
         )];
         let sealed = crate::seed::seal(
@@ -296,7 +308,7 @@ mod tests {
         )
         .expect("a scrubbed bequest seals");
         let mut attach = crate::carrier::testkit::attach(&PANICKY);
-        attach.seed = Some(sealed);
+        attach.origin = Origin::Child(sealed);
         let engine = Engine::boot(&PANICKY, &attach)
             .unwrap_or_else(|e| panic!("a sealed attach boots: {e}"));
         assert!(engine.shell.session.hooks.is_none());
@@ -307,7 +319,8 @@ mod tests {
         use crate::first_order::{Bytes, datum::Datum as _};
         let garbage = Bytes::from(&b"not a frame"[..]).encode();
         let mut attach = crate::carrier::testkit::attach(&crate::carrier::testkit::BARE);
-        attach.seed = Some(crate::seed::Sealed::decode(&garbage).expect("bytes are a seal"));
+        attach.origin =
+            Origin::Child(crate::seed::Sealed::decode(&garbage).expect("bytes are a seal"));
         let Err(why) = Engine::boot(&crate::carrier::testkit::BARE, &attach) else {
             panic!("a seal that is not a frame must refuse the attach");
         };

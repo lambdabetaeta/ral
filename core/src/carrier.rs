@@ -7,7 +7,6 @@
 //! JSON over a socket, answered by the engine process in `wire/serve.rs`. Both
 //! hold their front-end side in one [`Ends`], so the severance law, the event
 //! stream and the session sink are stated once.
-use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -17,7 +16,7 @@ use crate::engine::Scopes;
 use crate::first_order::FOValue;
 use crate::first_order::datum::Datum;
 use crate::process::{Ambient, interrupt_epoch};
-use crate::protocol::channel::{WireChannel, write_or_sever};
+use crate::protocol::channel::{WireChannel, WriteError, write_or_sever};
 use crate::protocol::probe::{BindingRow, CompletionNames, PathEntry, Probe, WorkerRow};
 use crate::protocol::{Control, DispatchId, EnquiryError, EnquiryId, Event, Frame, Report, Run};
 use crate::sync::LockExt as _;
@@ -99,9 +98,9 @@ fn sever(severance: &OnceLock<Severed>, cause: Severed) -> &Severed {
 /// Why a probe has no reading.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProbeError {
-    /// The engine answered but would not read: the rendezvous held by an
-    /// in-flight run, or a panic in the reading. A program error on the
-    /// caller's side, since probes are legal only at a run boundary.
+    /// The probe was refused: by the engine, its rendezvous held by an
+    /// in-flight run or its reading panicked, or before it was sent, by the
+    /// frame fuse.
     Rejected(String),
     /// No answer will ever come.
     Severed(Severed),
@@ -568,7 +567,11 @@ impl ControlSender {
             // that cannot: the peer is gone, and waiting on the reader's
             // eventual EOF to say so leaves a cancel silently lost meanwhile.
             Door::Wire((ch, severance)) => {
-                let _ = write_through(ch, severance, &Frame::Control(control));
+                if let Err(WriteError::Unencodable(e)) =
+                    write_through(ch, severance, &Frame::Control(control))
+                {
+                    unreachable!("a control frame is a few bytes: {e}");
+                }
             }
         }
     }
@@ -636,16 +639,16 @@ impl EventReceiver {
     }
 }
 
-/// The front-end's half of the severance law: [`write_or_sever`]
-/// recording into `severance`. Shared by the wire transport's writes and the
-/// wire arm of `ControlSender`; `Err` is handed back so a caller that must
-/// react further — the heartbeat's `Ping` arm breaking its loop — can, without
-/// repeating the severing itself.
+/// The front-end's half of the severance law: [`write_or_sever`] recording
+/// into `severance`. Shared by the wire transport's writes and the wire arm of
+/// `ControlSender`; `Err` is handed back so a caller that must react further —
+/// the heartbeat's `Ping` arm breaking its loop — can, without repeating the
+/// severing itself.
 fn write_through(
     ch: &Mutex<WireChannel>,
     severance: &OnceLock<Severed>,
     frame: &Frame,
-) -> io::Result<()> {
+) -> Result<(), WriteError> {
     write_or_sever(ch, frame, |e| {
         sever(severance, Severed::Closed(e.to_string()));
     })

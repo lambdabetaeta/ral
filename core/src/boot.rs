@@ -250,7 +250,7 @@ impl HostSurface {
     /// # Panics
     /// Panics if a name here collides with a core builtin or repeats.
     pub fn shell(&self, terminal: TerminalState) -> Shell {
-        Shell::root(self.runtime(terminal))
+        Shell::root(self.runtime(terminal).into())
     }
 }
 
@@ -282,7 +282,7 @@ pub fn boot_runtime(
 /// # Panics
 /// As [`boot_runtime`].
 pub fn boot_shell(terminal: TerminalState, prelude: &BakedPrelude, surface: &HostSurface) -> Shell {
-    let mut shell = Shell::root(boot_runtime(terminal, prelude, surface));
+    let mut shell = Shell::root(boot_runtime(terminal, prelude, surface).into());
     seed_host_env(&mut shell);
     shell
 }

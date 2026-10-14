@@ -8,8 +8,7 @@
 
 use std::ffi::{OsStr, OsString};
 
-/// A hidden role, named by one flag.  The test roles exist only under
-/// `test-util`.
+/// A hidden role, named by one flag.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
     /// A wire engine, which takes the process over on fd 3.
@@ -21,12 +20,6 @@ pub enum Role {
     Warrant,
     /// The bundled-tool multicall.
     BundledTool,
-    /// The test probe reporting the pgid its stage joined.
-    #[cfg(all(unix, any(test, feature = "test-util")))]
-    PgidCheck,
-    /// The test fixture birthing a `detach`.
-    #[cfg(all(unix, any(test, feature = "test-util")))]
-    DetachBirth,
 }
 
 impl Role {
@@ -36,10 +29,6 @@ impl Role {
         Self::Anchor,
         Self::Warrant,
         Self::BundledTool,
-        #[cfg(all(unix, any(test, feature = "test-util")))]
-        Self::PgidCheck,
-        #[cfg(all(unix, any(test, feature = "test-util")))]
-        Self::DetachBirth,
     ];
 
     /// The argument that names this role.  `ral-daemon`, which cannot depend
@@ -52,10 +41,6 @@ impl Role {
             Self::Anchor => "--ral-pipeline-anchor",
             Self::Warrant => "--warrant",
             Self::BundledTool => "--ral-bundled-tool",
-            #[cfg(all(unix, any(test, feature = "test-util")))]
-            Self::PgidCheck => "--ral-test-pgid-check",
-            #[cfg(all(unix, any(test, feature = "test-util")))]
-            Self::DetachBirth => "--ral-test-detach-birth",
         }
     }
 }
@@ -66,17 +51,6 @@ pub enum Invocation<'a> {
     #[cfg(unix)]
     Engine,
     PipelineAnchor,
-    /// The pgid probe, reporting under `tag`.
-    #[cfg(all(unix, any(test, feature = "test-util")))]
-    PgidCheck {
-        tag: Option<&'a OsStr>,
-    },
-    /// The detach fixture, appending `marker` to `trace`.
-    #[cfg(all(unix, any(test, feature = "test-util")))]
-    DetachBirth {
-        trace: &'a OsStr,
-        marker: &'a OsStr,
-    },
     /// The arguments are those the warrant was wrongly given: it takes none.
     Warrant(&'a [OsString]),
     /// The tool's name, then its arguments.
@@ -100,15 +74,6 @@ pub fn classify(argv: &[OsString]) -> Invocation<'_> {
         Role::Anchor => Invocation::PipelineAnchor,
         Role::Warrant => Invocation::Warrant(rest),
         Role::BundledTool => Invocation::BundledTool(rest),
-        #[cfg(all(unix, any(test, feature = "test-util")))]
-        Role::PgidCheck => Invocation::PgidCheck {
-            tag: rest.first().map(OsString::as_os_str),
-        },
-        #[cfg(all(unix, any(test, feature = "test-util")))]
-        Role::DetachBirth => match rest {
-            [trace, marker, ..] => Invocation::DetachBirth { trace, marker },
-            _ => Invocation::Shell,
-        },
     }
 }
 
@@ -166,28 +131,6 @@ mod tests {
             classify(&argv(&[Role::BundledTool.flag(), "rg", engine, "pcre2"])),
             Invocation::BundledTool(&argv(&["rg", engine, "pcre2"])),
             "a tool's own `--engine` is the tool's"
-        );
-        let (pgid, birth) = (Role::PgidCheck.flag(), Role::DetachBirth.flag());
-        let tag = OsString::from("up");
-        assert_eq!(
-            classify(&argv(&[pgid, "up"])),
-            Invocation::PgidCheck { tag: Some(&tag) }
-        );
-        assert_eq!(
-            classify(&argv(&[pgid])),
-            Invocation::PgidCheck { tag: None }
-        );
-        assert_eq!(
-            classify(&argv(&[birth, "trace", "marker", "spare"])),
-            Invocation::DetachBirth {
-                trace: OsStr::new("trace"),
-                marker: OsStr::new("marker"),
-            }
-        );
-        assert_eq!(
-            classify(&argv(&[birth, "trace"])),
-            Invocation::Shell,
-            "a birth missing its marker is no birth"
         );
     }
 

@@ -73,7 +73,8 @@ impl Session {
         let (interactive_mode, terminal) = crate::platform::probe_terminal(true);
         boot::setup_panic_hook();
 
-        let attach = crate::platform::local_attach(REPL, terminal);
+        let attach =
+            crate::platform::local_attach(REPL, terminal, ral_core::first_order::FOValue::Unit);
         let transport = Arc::new(IdentityTransport::boot(&INSTALLERS, &attach).map_err(
             |severed| {
                 errln!("ral: {severed}");

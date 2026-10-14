@@ -35,7 +35,6 @@ use self::detached::DetachPolicy;
 use self::modules::Modules;
 use self::workers::Roster;
 use super::audit::Audit;
-use super::builtin::BuiltinTable;
 use super::env::Env;
 use super::env::EnvVars;
 use super::error::Error;
@@ -111,13 +110,10 @@ pub struct SessionState {
     pub(crate) exit_hints: Arc<crate::types::ExitHints>,
     /// What the session's `comparable` variables were fixed to, per unit.
     pub(crate) fixings: Arc<crate::ty::Fixings>,
-    /// Builtin bodies are Rust fn pointers or captured host closures, hence
-    /// process-local: the receiver of a wire shell installs its own table
-    /// rather than having one shipped to it.
-    pub(crate) builtins: BuiltinTable,
-    /// Host-installed `name -> doc` for a sourced closure library (exarch's
-    /// agent helpers) that `help` / `explain` cannot otherwise see.
-    pub(crate) library_docs: std::collections::HashMap<String, String>,
+    /// The binary's half, shared by every session of an engine. Builtin
+    /// bodies are Rust fn pointers or captured host closures, hence
+    /// process-local: the receiver of a wire shell installs its own.
+    pub(crate) runtime: Arc<Runtime>,
     /// Minted once from the startup `tcgetpgrp == getpgrp` predicate: `Some`
     /// when ral owns the controlling terminal's foreground, `None` when piped,
     /// backgrounded, tty-less, or off Unix.  Lent — never moved or cloned — to

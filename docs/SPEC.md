@@ -2765,7 +2765,9 @@ supposed to provide.
 
 On Unix the implementation double-forks, reparents the grandchild, and creates
 a new session. It preserves the logical working directory, environment, and
-the sandbox projection active at birth. Later grants cannot widen it. An
+the sandbox projection active at birth. Inside a synod guest the survivor
+keeps its jail's limits and outlives the engine that birthed it, as on the
+host; it ends only with the machine. Later grants cannot widen it. An
 active grant may refuse the operation by omitting `` `detach `` from `shell` before any process
 is born.
 

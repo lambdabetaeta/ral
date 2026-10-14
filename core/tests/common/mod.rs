@@ -36,11 +36,7 @@ pub fn prelude() -> &'static BakedPrelude {
 
 /// A root shell over core's surface and the prelude: no env vars.
 pub fn prelude_shell() -> Shell {
-    Shell::root(boot_runtime(
-        TerminalState::default(),
-        prelude(),
-        &HostSurface::default(),
-    ))
+    Shell::root(boot_runtime(TerminalState::default(), prelude(), &HostSurface::default()).into())
 }
 
 /// A shell booted as every front end boots one: core's builtin surface,

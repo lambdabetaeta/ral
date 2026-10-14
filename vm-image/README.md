@@ -86,9 +86,9 @@ whole command line and the host sees only a control plane nobody dialled.
 | `build-boot.sh` | The boot-media pipeline: Ubuntu's kernel plus this repo's initramfs, with `ral-daemon` and the engine inside it (see the last section). |
 | `out/` | Build products (git-ignored), for whichever architecture was built last. |
 
-Build products in `out/`:
+Build products in `out/rootfs/`:
 
-- `rootfs.img` — the ext4 image (what the hypervisor mounts)
+- `rootfs/rootfs.img` — the ext4 image (what the hypervisor mounts)
 - `rootfs.img.zst` — zstd-compressed image (what a user downloads)
 - `rootfs.img.sha256`, `rootfs.img.zst.sha256` — checksums of both
 - `packages-manifest.txt` — `dpkg -l` capture; the exact version-pin record
@@ -138,7 +138,8 @@ just guest-rootfs amd64
 Everything is env-overridable (`SUITE`, `MIRROR`, `ARCH`, `ZSTD_LEVEL`,
 `FS_UUID`, `BASE_IMAGE`). The multi-GB tree and apt cache live only in the
 container's ephemeral layer (`--rm`) and are reclaimed on exit; only the final
-artifacts are written to `out/` (a bind mount onto the host).
+artifacts are written to `out/rootfs/`, via a staging dir that is published only once
+the build has stamped itself done (podman's exit status is not trusted).
 
 ### What this pipeline does NOT do
 
@@ -235,7 +236,7 @@ on x86_64, and none is asserted for it:
 | `rootfs.img.zst` SHA-256 | `49d6ad93823a2755a7c3e1f190f208af6a36689fb4f8d132284a623b4224d4ed` |
 | Build wall time (assemble → mkfs → verify) | ~245 s |
 
-Spot-checks (`out/verify.txt`): Python stack imports (pandas 2.3.3, Pillow
+Spot-checks (`out/rootfs/verify.txt`): Python stack imports (pandas 2.3.3, Pillow
 12.1.1, plus openpyxl / python-docx / pypdf); pandoc 3.7.0.2; LibreOffice
 26.2.2.2 present; tesseract languages eng/fra/deu/spa/ita/por/nld (+osd);
 qpdf 12.3.2, ripgrep 15.1.0, ocrmypdf 16.13.0; and **no toolchain present**.
@@ -456,7 +457,7 @@ The amd64 column earns its differences one at a time:
   writes the kernel command line, so `boot.img` is neutral about whether it is
   handed `console=hvc0` or `console=ttyS0`.
 
-Run it; outputs land in `vm-image/out/boot/`:
+Run it; outputs land in `vm-image/out/boot/` (swapped in whole, only on success):
 
 ```sh
 ./build-boot.sh                 # arm64, for Virtualization.framework

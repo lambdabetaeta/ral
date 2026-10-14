@@ -19,7 +19,8 @@ fn nursery_round_trips_a_forked_session() {
     let adopted = nursery
         .adopt(id)
         .expect("the parked bequest must be adoptable");
-    let child = Shell::child_of(shell.runtime(), adopted, no_base).expect("a child");
+    let child = Shell::child_of(crate::test_helper::core_runtime().into(), adopted, no_base)
+        .expect("a child");
 
     assert_eq!(
         child.env.get("parent_binding"),

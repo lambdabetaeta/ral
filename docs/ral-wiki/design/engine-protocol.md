@@ -1,3 +1,7 @@
+---
+generated_at_commit: 8aa9355b
+---
+
 # The engine protocol
 
 **A front-end and a `ral` engine share exactly one duplex stream, sorted into
@@ -24,11 +28,12 @@ and a binding is only the carriage around it.
   enquiries, and how a session it forks is adopted.
 - **One construction.** Every engine is born from an `EngineInstaller` and an
   `Attach`, and `Engine::boot` does it once for both carriers: resolve the
-  installer (version first, then tag), derive its `Runtime`, then either
-  `Shell::root` and the root recipe, or `Shell::child_of` over a decoded
-  `Bequest`; seat the attach's cwd and env, face the process's signals, jail a
-  guest. The identity carrier constructs its child from the runtime it was
-  born with and the parked bequest, so a fork too is the trivial instantiation
+  installer (version first, then tag), derive its `Runtime` once from the attach's `EngineSpec` (builtins live on it
+  and nowhere else), then either `Shell::root` and the root recipe over the
+  `Origin::Root` (seating its cwd and env), or `Shell::child_of` over the
+  `Bequest` a `Origin::Child` seal decodes to; face the process's signals, jail a
+  guest. The identity carrier constructs its child from the engine's `Arc<Runtime>`
+  and the parked bequest, so a fork too is the trivial instantiation
   of what the wire encodes. Construction is attach: `IdentityTransport::boot`
   returns the verdict the
   wire's `await_attached` does — `Severed::Refused`, in the refusing step's
@@ -94,11 +99,13 @@ number, string, bytes, and lists/maps/variants thereof, data all the way
 down, its extension slot uninhabited by construction. The envelope's own
 fields (`Run`, `Ending`, `Control`, `Attach`) are closed Rust types, and
 nothing in either carries an fd, a handle, a closure, or a capability beyond
-what a `Run`'s ceiling already states. `Attach` carries only what an engine
-reads — the terminal state, cwd, home, protocol version, installer tag, the
-host's per-session env, `config`, the installer's own settings as an
-`FOValue` its recipe decodes and core never reads, and `seed`, a sealed
-bequest the engine alone reads. `SerialValue` — the closure-capable sibling
+what a `Run`'s ceiling already states. `Attach` is
+`{ engine: EngineSpec, origin: Root | Child(Sealed) }` and carries only what
+an engine reads. `EngineSpec` names the engine — protocol version, installer
+tag, terminal state, home. A `Root` is the session a root starts from — its
+cwd, the host's per-session env, and `config`, the installer's own settings
+as an `FOValue` its recipe decodes and core never reads. A `Child` is a sealed
+bequest the engine alone reads, carrying its own cwd and env. `SerialValue` — the closure-capable sibling
 that carries a forked session into a sealed child engine (*The factory*,
 below) — is a different type for a different domain; it never reaches the
 protocol, and the host never reads the bytes it travels as. That is the
@@ -132,7 +139,7 @@ arrived ill-shaped — and `record!` derives it for a record whose keys must be
 exactly its own, answering an unknown key with the one it most likely meant
 (`variant!` and `label!` are its siblings for payload enums and enums of bare tags).
 Probe classes, exarch's enquiries, the REPL's enquiries and an installer's
-`Attach.config` all cross through it, so a door and the desk behind it decode
+`Root.config` all cross through it, so a door and the desk behind it decode
 with one function and refuse in one wording.
 
 **The frame codec has no depth cap.** Frames are length-prefixed JSON, and
@@ -353,7 +360,14 @@ the engine receives arms its read deadline**; a front-end that never pings
 leaves the engine's patience infinite, correctly, since its death needs no
 deadline to be noticed. A write that stalls past the same patience reads as
 death too — a front-end that stopped reading is, within that bound,
-indistinguishable from one that no longer exists.
+indistinguishable from one that no longer exists. Only failed I/O severs: a
+frame the fuse refuses is refused before the wire is touched, is the writer's
+fault, and is answered where its writer stands (a `Report` or a reading by the
+engine's refusal, a `Dispatch` by a host-fault `Report`, a `Probe` by a
+rejection, an `Answer` by `Err`, an enquiry by the enquirer's own error, an
+`Attach` by a refused attach); a frame with nowhere to refuse into is
+diagnosed and dropped. The reader still severs on an oversize frame, a peer's
+protocol violation.
 
 Every terminal cause collapses into one type, **`Severed`**: the engine
 refused `Attach` in its own words (a version mismatch, an unknown installer,

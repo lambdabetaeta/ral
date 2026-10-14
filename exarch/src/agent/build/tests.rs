@@ -244,7 +244,8 @@ fn fork_and_branch_bookend_record_the_childs_own_resolved_length() {
 /// batch instead, leaving this straggler path unexercised.
 #[test]
 fn clear_cancels_registered_workers_and_drops_their_late_surface() {
-    let mut session = dressed_trunk(|shell| shell.install_builtins(WORKER_REGISTRY_TEST_BUILTINS));
+    let mut session =
+        dressed_trunk(|runtime| runtime.install_builtins(WORKER_REGISTRY_TEST_BUILTINS));
 
     // The deferred sink `Avatar::ral` wires captures `emit`'s mailbox, which
     // must be this session's own inbox for the late-surface assertion
@@ -362,7 +363,7 @@ fn a_clear_in_one_tab_leaves_another_tabs_late_result_alone() {
 /// `Drop` is the only thing that reaches its workers.
 #[test]
 fn agent_drop_cancels_its_own_unclosed_workers() {
-    let avatar = dressed_trunk(|shell| shell.install_builtins(WORKER_REGISTRY_TEST_BUILTINS));
+    let avatar = dressed_trunk(|runtime| runtime.install_builtins(WORKER_REGISTRY_TEST_BUILTINS));
 
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::with_mailbox(tx, avatar.agent.id, avatar.inbox.mailbox());

@@ -60,6 +60,18 @@ use crate::vsock;
 /// directory, and the only path in the guest whose contents outlive the VM.
 pub const WORK: &str = "/work";
 
+/// The cgroup under which every jailed command lives.
+///
+/// Its children are `engine-<pid>/exec-<seq>`, and `detached/exec-<seq>` for
+/// survivors no engine's end may reach.  The daemon makes it ([`exec_cgroup`])
+/// and kills through it, since commands leave their engine's process group;
+/// the engine reads it from `RAL_GUEST` and makes the levels below.
+pub const EXEC_CGROUP: &str = "/sys/fs/cgroup/ral-exec";
+
+/// What the cgroup2 root delegates into [`EXEC_CGROUP`]: the engine's jail
+/// (`CONTROLLERS` in `core/src/process/jail/linux.rs`) hands the same set down.
+const CONTROLLERS: &str = "+memory +pids +cpu";
+
 /// The filesystem type of a virtiofs export.  The mount *source* is not a
 /// device but a tag the host and guest agree on; see [`Export::Virtiofs`].
 const VIRTIOFS: &str = "virtiofs";
@@ -318,6 +330,25 @@ pub fn plan(boot: &Boot) -> Vec<Mount> {
         },
         workspace(&boot.workspace, scratch),
     ]
+}
+
+/// Make [`EXEC_CGROUP`], with [`CONTROLLERS`] delegated into it, once the
+/// cgroup2 hierarchy is mounted.
+///
+/// # Errors
+/// Returns a sentence naming the step the kernel refused: without it no
+/// command could be given its limits, and the engine refuses to run one
+/// uncapped.
+pub fn exec_cgroup() -> Result<(), String> {
+    std::fs::write("/sys/fs/cgroup/cgroup.subtree_control", CONTROLLERS).map_err(|err| {
+        format!("could not delegate {CONTROLLERS} from the cgroup2 root to {EXEC_CGROUP}: {err}")
+    })?;
+    match mkdir(EXEC_CGROUP, Mode::from_raw_mode(0o755)) {
+        Ok(()) | Err(Errno::EXIST) => Ok(()),
+        Err(err) => Err(format!(
+            "could not create the commands' cgroup {EXEC_CGROUP}: {err}"
+        )),
+    }
 }
 
 /// The granted folder's mount, in whichever of the two shapes the host chose.

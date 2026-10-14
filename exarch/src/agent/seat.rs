@@ -7,7 +7,7 @@ use crate::cancel::InterruptTarget;
 use crate::shell_eval::builtins;
 use ral_core::carrier::{IdentityTransport, ProbeError, Severed, Transport};
 use ral_core::engine::EngineInstaller;
-use ral_core::protocol::Attach;
+use ral_core::protocol::{Attach, EngineSpec, Root};
 use std::sync::Arc;
 
 /// How a fork of this seat's engine reaches the desk that adopts it: parked in
@@ -15,10 +15,9 @@ use std::sync::Arc;
 /// `` `start `` and `/branch` choose their arm on this fact alone.
 pub(crate) enum SeatKind {
     Identity(Arc<IdentityTransport>),
-    /// A child is attached with this attach and its own seal; the stored one
-    /// carries none.
+    /// A child is attached as this engine was, with its own seal.
     Wire {
-        attach: Attach,
+        engine: EngineSpec,
     },
 }
 
@@ -39,7 +38,7 @@ pub(crate) enum Seat {
     Wire {
         transport: Box<ral_core::carrier::WireTransport>,
         target: InterruptTarget,
-        attach: Attach,
+        engine: EngineSpec,
     },
 }
 
@@ -183,13 +182,16 @@ impl Seat {
         session_dir: &std::path::Path,
     ) -> Result<Self, Severed> {
         let home = ral_core::host::home().unwrap_or_default();
-        let mut attach = Attach::new(builtins::INSTALLER_TAG, cwd, home.into());
-        attach.terminal = terminal;
-        attach.env = scratch.env();
-        attach.env.push((
+        let mut env = scratch.env();
+        env.push((
             "EXARCH_SESSION_DIR".into(),
             session_dir.to_string_lossy().into_owned(),
         ));
+        let attach = Attach::root(
+            EngineSpec::new(builtins::INSTALLER_TAG, home.into()),
+            Root::new(cwd).with_env(env),
+        )
+        .with_terminal(terminal);
         let transport = Arc::new(IdentityTransport::boot(installers, &attach)?);
         Ok(Self::Identity {
             target: InterruptTarget::new(transport.control().clone()),
@@ -211,10 +213,9 @@ impl Seat {
         }
     }
 
-    /// Write `attach` with `seed` beside it and wait for the verdict. The
-    /// stored attach carries no seal by construction: a child's seal is
-    /// always added fresh, so no seat holds its parent's bequest for its
-    /// own life.
+    /// Write `attach` and wait for the verdict. Only its engine half is kept:
+    /// a child's seal is always added fresh, so no seat holds its parent's
+    /// bequest for its own life.
     ///
     /// # Errors
     /// The transport's severance, if the engine refuses the attach or falls
@@ -222,20 +223,14 @@ impl Seat {
     pub(crate) fn wire(
         transport: ral_core::carrier::WireTransport,
         attach: Attach,
-        seed: Option<ral_core::seed::Sealed>,
     ) -> Result<Self, Severed> {
-        transport.attach(Attach {
-            seed,
-            ..attach.clone()
-        });
+        let engine = attach.engine.clone();
+        transport.attach(attach);
         transport.await_attached()?;
         Ok(Self::Wire {
             target: InterruptTarget::new(transport.control().clone()),
             transport: Box::new(transport),
-            attach: Attach {
-                seed: None,
-                ..attach
-            },
+            engine,
         })
     }
 
@@ -249,8 +244,8 @@ impl Seat {
     pub(crate) fn kind(&self) -> SeatKind {
         match self {
             Self::Identity { transport, .. } => SeatKind::Identity(transport.clone()),
-            Self::Wire { attach, .. } => SeatKind::Wire {
-                attach: attach.clone(),
+            Self::Wire { engine, .. } => SeatKind::Wire {
+                engine: engine.clone(),
             },
         }
     }

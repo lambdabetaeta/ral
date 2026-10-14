@@ -254,7 +254,7 @@ impl Word {
 
 /// `` `start ``: the model's spec, and how its forked session is reached.
 pub(crate) struct Start {
-    pub(crate) spec: Launch,
+    pub(crate) spec: Spec,
     pub(crate) fork: ForkClaim,
 }
 
@@ -263,22 +263,50 @@ record!(Start {
     fork: "fork",
 });
 
-/// The model's own spawn record.
+/// The model's own spawn record: a flat record read as its grant and the rest.
 pub(crate) struct Launch {
+    pub(crate) grant: Grant,
+    pub(crate) spec: Spec,
+}
+
+impl Datum for Launch {
+    fn encode(self) -> FOValue {
+        let FOValue::Map { mut entries } = self.spec.encode() else {
+            unreachable!("a spec encodes to a record")
+        };
+        entries.push(("grant".into(), self.grant.encode()));
+        entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+        FOValue::Map { entries }
+    }
+
+    fn decode(v: &FOValue) -> Result<Self, String> {
+        let FOValue::Map { entries } = v else {
+            return Err(format!("expected a record, got {}", v.shape()));
+        };
+        let rest = entries.iter().filter(|(k, _)| k != "grant").cloned();
+        Ok(Self {
+            grant: field(v, "grant")?,
+            spec: Spec::decode(&FOValue::Map {
+                entries: rest.collect(),
+            })?,
+        })
+    }
+}
+
+/// A [`Launch`] as the desk sees it: the grant rides in the sealed bequest.
+pub(crate) struct Spec {
     pub(crate) prompt: String,
     pub(crate) name: Name,
     pub(crate) memory: Memory,
-    pub(crate) grant: Grant,
     pub(crate) search: bool,
     pub(crate) provider: Selection,
     pub(crate) model: Selection,
 }
 
-record!(Launch {
+record!(Spec {
     prompt: "prompt",
     name: "name",
     memory: "type",
-    grant: "grant",
     search: "search",
     provider: "provider",
     model: "model",
@@ -1222,16 +1250,22 @@ mod tests {
         }
     }
 
-    fn spec(grant: SpawnGrant, memory: Memory, model: Selection) -> Launch {
+    fn launch(memory: Memory, model: Selection) -> Launch {
         Launch {
-            prompt: "go".into(),
-            name: Name("scout".into()),
-            memory,
-            grant: Grant(grant),
-            search: true,
-            provider: Selection::Inherit,
-            model,
+            grant: Grant(SpawnGrant::Inherit),
+            spec: Spec {
+                prompt: "go".into(),
+                name: Name("scout".into()),
+                memory,
+                search: true,
+                provider: Selection::Inherit,
+                model,
+            },
         }
+    }
+
+    fn spec(memory: Memory, model: Selection) -> Spec {
+        launch(memory, model).spec
     }
 
     fn restriction() -> FOValue {
@@ -1246,15 +1280,11 @@ mod tests {
         round_trips([
             Request::Agents(Agents::List),
             start(
-                spec(SpawnGrant::Inherit, Memory::Amnemon, Selection::Inherit),
+                spec(Memory::Amnemon, Selection::Inherit),
                 ForkClaim::Parked(NurseryId(3)),
             ),
             start(
-                spec(
-                    SpawnGrant::Base("confined".into()),
-                    Memory::Mnemon,
-                    Selection::Named("other-model".into()),
-                ),
+                spec(Memory::Mnemon, Selection::Named("other-model".into())),
                 ForkClaim::Sealed(
                     ral_core::seed::seal(
                         &ral_core::HostSurface::default()
@@ -1263,14 +1293,6 @@ mod tests {
                     )
                     .expect("a bequest seals"),
                 ),
-            ),
-            start(
-                spec(
-                    SpawnGrant::Restrict(restriction()),
-                    Memory::Amnemon,
-                    Selection::Inherit,
-                ),
-                ForkClaim::Parked(NurseryId(0)),
             ),
             Request::Agents(Agents::Message(Message {
                 to: "parent".into(),
@@ -1364,9 +1386,9 @@ mod tests {
     /// A model's `start` names its spec alone: the fork is its door's.
     #[test]
     fn a_models_start_word_is_the_spec_awaiting_its_fork() {
-        let spec = spec(SpawnGrant::Inherit, Memory::Amnemon, Selection::Inherit).encode();
+        let launch = launch(Memory::Amnemon, Selection::Inherit).encode();
         assert!(matches!(
-            Word::decode(&tag("start", Some(spec))),
+            Word::decode(&tag("start", Some(launch))),
             Ok(Word::Spawn(_))
         ));
         assert!(matches!(
@@ -1405,6 +1427,22 @@ mod tests {
             panic!("`restrict must carry its record through as first-order data");
         };
         assert_eq!(record, restriction(), "the record must cross unchanged");
+    }
+
+    #[test]
+    fn a_grant_refuses_a_restriction_that_is_not_a_record() {
+        let Err(why) = Grant::decode(&tag(
+            "restrict",
+            Some(FOValue::String {
+                value: "everything".into(),
+            }),
+        )) else {
+            panic!("a `restrict carrying no record is no grant");
+        };
+        assert_eq!(
+            why,
+            "`restrict must carry a capability record [exec, fs, net, editor, shell], got a Str"
+        );
     }
 
     #[test]

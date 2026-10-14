@@ -39,8 +39,8 @@ use std::time::{Duration, Instant};
 use rustix::process::Pid;
 
 use crate::boot::Boot;
-use crate::mounts::WORK;
-use crate::reap::Death;
+use crate::mounts::{EXEC_CGROUP, WORK};
+use crate::reap::{self, Death};
 use crate::vsock;
 
 /// The descriptor the engine reads its protocol from.  Fixed by
@@ -70,8 +70,9 @@ const BASE: &[(&str, &str)] = &[
     ("TERM", "dumb"),
     // The sole channel by which `core::engine::run_engine` (the same
     // multicall binary run here) learns it is running inside a guest, so
-    // it can install the process jail onto the shell it boots.
-    ("RAL_GUEST", "1"),
+    // it can install the process jail onto the shell it boots; its value
+    // is the cgroup root the jail places commands under.
+    ("RAL_GUEST", EXEC_CGROUP),
 ];
 
 /// The gateway's port for the CONNECT-only proxy — `guest-net`'s one
@@ -186,14 +187,15 @@ pub fn spawn(boot: &Boot, connection: &OwnedFd) -> Result<Pid, String> {
     cmd.envs(environment(boot.net.as_ref().map(|net| net.gateway)));
     cmd.current_dir(WORK);
     // SAFETY: the closure runs between `fork` and `exec` and calls only
-    // async-signal-safe syscalls — `sigprocmask`, `setsid`, `dup2`, `close` — with no
+    // async-signal-safe syscalls — `pthread_sigmask`, `setsid`, `dup2`, `close` — with no
     // allocation and no locking.
     unsafe {
         use std::os::unix::process::CommandExt;
         cmd.pre_exec(move || {
-            // std leaves the spawning thread's mask to the child, and the
-            // factory thread blocks the stop signals.
-            mask_stop_signals(libc::SIG_UNBLOCK)?;
+            // std hands the child its parent's mask (`do_exec` in
+            // library/std/src/sys/process/unix/unix.rs), and every daemon
+            // thread blocks the awaited signals.
+            reap::mask(libc::SIG_UNBLOCK)?;
             if libc::setsid() < 0 {
                 return Err(io::Error::last_os_error());
             }
@@ -223,32 +225,6 @@ pub fn spawn(boot: &Boot, connection: &OwnedFd) -> Result<Pid, String> {
         )
     })?;
     Ok(Pid::from_child(&child))
-}
-
-/// The signals by which the host asks this machine to stop.
-pub const STOP_SIGNALS: [libc::c_int; 3] = [libc::SIGTERM, libc::SIGINT, libc::SIGPWR];
-
-/// Apply `how` (`SIG_BLOCK`, `SIG_UNBLOCK`, ...) to [`STOP_SIGNALS`] in the
-/// calling thread. Async-signal-safe.
-///
-/// # Errors
-/// Returns the error `pthread_sigmask` reports.
-pub fn mask_stop_signals(how: libc::c_int) -> io::Result<()> {
-    // SAFETY: `set` is initialised by `sigemptyset` before use, and the
-    // calls touch only this local and the calling thread's mask.
-    let err = unsafe {
-        let mut set = std::mem::zeroed();
-        libc::sigemptyset(&raw mut set);
-        for signal in STOP_SIGNALS {
-            libc::sigaddset(&raw mut set, signal);
-        }
-        libc::pthread_sigmask(how, &raw const set, std::ptr::null_mut())
-    };
-    if err == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::from_raw_os_error(err))
-    }
 }
 
 /// What the engine's death means, said plainly enough for a host-side log.
@@ -315,8 +291,8 @@ mod tests {
     }
 
     /// `RAL_GUEST` is the entire signal `core::engine::run_engine` reads to
-    /// know it is booting inside a guest, so it must always be set and
-    /// non-empty, whether or not this boot has a network.
+    /// know it is booting inside a guest, and carries the jail's cgroup root,
+    /// so it must always be set to it, whether or not this boot has a network.
     #[test]
     fn ral_guest_is_set_and_non_empty() {
         for gateway in [None, Some(GATEWAY)] {
@@ -324,7 +300,7 @@ mod tests {
                 .into_iter()
                 .find_map(|(name, value)| (name == "RAL_GUEST").then_some(value))
                 .expect("the engine is given RAL_GUEST");
-            assert_ne!(value, "");
+            assert_eq!(value, EXEC_CGROUP);
         }
     }
 

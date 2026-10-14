@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e028f5a3
-generated_at_date: 2026-10-13
+generated_at_commit: 8aa9355b
+generated_at_date: 2026-10-14
 covers_paths: [core/src/first_order.rs, core/src/first_order/, core/src/types/value/first_order.rs, core/src/seed.rs, core/src/seed/, core/src/frame.rs, core/src/guard/grant.rs]
 ---
 
@@ -159,7 +159,7 @@ each alias arm with its scheme
   opacity law, [[decisions/261013_the-seed-rides-the-protocol-sealed|the-seed-rides-the-protocol-sealed]]);
   `Sealed::unseal` is `pub(crate)`, so only an engine can read one. `Sealed`
   is a `Datum` over `Bytes`, which is how a seal rides the enquiry as
-  `FOValue::Bytes`, and is `Attach.seed`'s type. `Engine::boot` unseals it
+  `FOValue::Bytes`, and is `Origin::Child`'s payload. `Engine::boot` unseals it
   against the runtime it has just derived. `Bytes` serialises as base64 under a
   human-readable serializer (`first_order/byte_encoding.rs`), so a seal also
   crosses JSON.
@@ -176,14 +176,16 @@ each alias arm with its scheme
 
 ## Framing — `core/src/frame.rs`
 
-**`write_frame` / `read_frame` are length-prefixed JSON frames, carrying both
+**`encode` + `put` / `read_frame` are length-prefixed JSON frames, carrying both
 the seal's one `EngineSeed` frame and the engine protocol's `WireChannel`
 frames (`core/src/protocol/channel.rs`).**
 
 - `fuse` is the one frame-size check both doors apply — `MAX_FRAME_LEN`, 256 MiB
   — before the reader allocates a body and before the writer sends one, so an
   oversized frame fails locally with a sentence instead of killing the peer
-  mid-stream.
+  mid-stream. The writer's check is `encode`'s alone: it hands back an
+  `Encoded` (a fused length and its body), which `put` writes, failing only
+  on I/O.
 - Neither side caps depth: both encode and decode under `serde_stacker`, which
   grows the stack onto the heap, so a legal nest of any depth crosses and only
   the fuse bounds it.

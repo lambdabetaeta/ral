@@ -577,9 +577,10 @@ mod tests {
 
     /// An engine whose `PATH` is exactly `path` and whose logical cwd is `cwd`.
     fn engine_at(path: &str, cwd: &Path) -> IdentityTransport {
-        let mut attach =
-            ral_core::protocol::Attach::new(crate::repl::TEST_TAG, cwd.into(), cwd.into());
-        attach.env.push(("PATH".into(), path.into()));
+        let attach = ral_core::protocol::Attach::root(
+            ral_core::protocol::EngineSpec::new(crate::repl::TEST_TAG, cwd.into()),
+            ral_core::protocol::Root::new(cwd.into()).with_env(vec![("PATH".into(), path.into())]),
+        );
         let runtime =
             ral_core::HostSurface::default().runtime(ral_core::terminal::TerminalState::default());
         crate::repl::engine_at(&attach, runtime, |_| {})

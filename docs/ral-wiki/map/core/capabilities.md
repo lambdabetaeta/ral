@@ -286,7 +286,7 @@ verification of stored-case walks, verbatim image launch, and launch refusals
 is outstanding; cross-compilation alone does not establish them.
 
 Inside a *guest* — a VM whose engine runs under `ral-daemon`, signalled by
-`RAL_GUEST` — the per-command OS backend is not engaged at all: every spawn
+`RAL_GUEST`, which carries the jail's cgroup root — the per-command OS backend is not engaged at all: every spawn
 is already confined by the [[map/core/io-process|spawn jail]] (a fresh
 unprivileged uid and a per-exec cgroup), the daemon disables the
 unprivileged user namespaces bwrap needs, and the guest has no network
@@ -307,7 +307,7 @@ device for `net` to govern; the in-process guards apply unchanged
   test `#[ctor]` alike, surfacing a served role's exit code so the caller can
   terminate. It serves a `Warrant` role first (`serve_warrant`), before any
   pin, so the trampoline pins and opens nothing before it is confined; the
-  pipeline anchor and the pgid probe spawn nothing and run unpinned. Every
+  pipeline anchor spawns nothing and runs unpinned. Every
   other role — the engine, the shell — runs `boot` first, and the
   `BundledTool` multicall only `pin`s, so an `--engine` process has bwrap
   pinned exactly as the shell does. Skip it and `OWN` stays unpinned, so the

@@ -185,14 +185,8 @@ impl Image {
 impl Shell {
     /// The one session literal, written without `..`.  `root` is `Some` for a
     /// parentless session and `None` for a child.
-    fn construct(runtime: Runtime, image: Image, root: Option<RootOnly>) -> Self {
-        let Runtime {
-            sig,
-            builtins,
-            base,
-            library_docs,
-            terminal,
-        } = runtime;
+    fn construct(runtime: Arc<Runtime>, image: Image, root: Option<RootOnly>) -> Self {
+        let sig = runtime.sig.clone();
         let Image {
             env,
             context,
@@ -227,10 +221,11 @@ impl Shell {
         Self {
             env,
             sig,
-            context: context.map_handlers(|frames| HandlerStack::over(base, frames)),
+            context: context
+                .map_handlers(|frames| HandlerStack::over(runtime.base.clone(), frames)),
             io: Io {
                 stdin,
-                terminal,
+                terminal: runtime.terminal,
                 ..Io::default()
             },
             session: SessionState {
@@ -240,8 +235,7 @@ impl Shell {
                 root_file: None,
                 exit_hints: Arc::new(exit_hints),
                 fixings: Arc::new(fixings),
-                builtins,
-                library_docs,
+                runtime,
                 terminal_lease,
                 stack_limit,
                 hooks,
@@ -263,7 +257,7 @@ impl Shell {
     /// # Errors
     /// Whatever the grant's narrowing refuses.
     pub(crate) fn child_of(
-        runtime: Runtime,
+        runtime: Arc<Runtime>,
         bequest: Bequest,
         narrow: GrantNarrower,
     ) -> Result<Self, String> {
@@ -276,20 +270,9 @@ impl Shell {
     /// A parentless session over `runtime`: no env, no cwd, no recipe.
     ///
     /// The session faces no signals: its host forwards them as `Control`.
-    pub fn root(runtime: Runtime) -> Self {
+    pub fn root(runtime: Arc<Runtime>) -> Self {
         let root = RootOnly::minted(runtime.terminal);
         Self::construct(runtime, Image::empty(), Some(root))
-    }
-
-    /// The process half of this session, as it stands.
-    pub fn runtime(&self) -> Runtime {
-        Runtime {
-            sig: Arc::clone(&self.sig),
-            builtins: self.session.builtins.clone(),
-            base: self.context.handlers.base().to_vec(),
-            library_docs: self.session.library_docs.clone(),
-            terminal: self.io.terminal,
-        }
     }
 }
 
@@ -304,7 +287,7 @@ mod tests {
             startup_foreground: true,
             ..TerminalState::default()
         };
-        let shell = Shell::root(HostSurface::default().runtime(terminal));
+        let shell = Shell::root(HostSurface::default().runtime(terminal).into());
         assert!(shell.session.hooks.is_some());
         #[cfg(unix)]
         assert!(shell.session.terminal_lease.is_some());
@@ -313,15 +296,5 @@ mod tests {
         assert_eq!(shell.local.workers.retention(), None);
         assert!(shell.local.detach.is_none());
         assert_eq!(shell.session.stack_limit, DEFAULT_STACK_LIMIT);
-    }
-
-    #[test]
-    fn a_runtime_is_read_off_a_shell_as_it_stands() {
-        let rt = HostSurface::default().runtime(TerminalState::default());
-        let mut shell = Shell::root(rt.clone());
-        shell.install_builtins(crate::builtins::SERVICE_BUILTIN);
-        let has = |rt: &Runtime| rt.builtins.manifest().names().any(|n| n == "service");
-        assert!(has(&shell.runtime()));
-        assert!(!has(&rt));
     }
 }

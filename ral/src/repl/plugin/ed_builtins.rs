@@ -619,8 +619,9 @@ mod tests {
             stored,
             asked: std::sync::atomic::AtomicUsize::new(0),
         });
-        let mut shell = ral_core::test_helper::core_shell();
-        shell.install_builtins(ED_BUILTINS);
+        let mut runtime = ral_core::test_helper::core_runtime();
+        runtime.install_builtins(ED_BUILTINS);
+        let mut shell = ral_core::Shell::root(runtime.into());
         shell.set_interactive(true);
         let report = shell.run(ral_core::run::RunRequest {
             desk: Some(cell.clone()),

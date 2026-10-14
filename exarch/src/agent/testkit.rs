@@ -11,6 +11,7 @@ use crate::provider::scripted::Script;
 use crate::provider::{Provider, ToolCall};
 use crate::record::RecordedAccount;
 use ral_core::HostSurface;
+use ral_core::Runtime;
 use ral_core::Shell;
 use ral_core::Value;
 use ral_core::engine::EngineInstaller;
@@ -25,17 +26,27 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 type Dress = Box<dyn FnOnce(&mut Shell)>;
+type RuntimeDress = Box<dyn FnOnce(&mut Runtime)>;
 
 thread_local! {
     static DRESS: std::cell::Cell<Option<Dress>> = const { std::cell::Cell::new(None) };
+    static RUNTIME_DRESS: std::cell::Cell<Option<RuntimeDress>> = const { std::cell::Cell::new(None) };
+}
+
+fn dressed_runtime(spec: &ral_core::protocol::EngineSpec) -> Runtime {
+    let mut runtime = crate::boot::engine_runtime(spec);
+    if let Some(dress) = RUNTIME_DRESS.take() {
+        dress(&mut runtime);
+    }
+    runtime
 }
 
 #[allow(
     clippy::unnecessary_wraps,
     reason = "must match EngineInstaller::root's signature, which can genuinely refuse"
 )]
-fn dressed_root(attach: &ral_core::protocol::Attach, shell: &mut Shell) -> Result<(), String> {
-    crate::boot::engine_root(attach, shell)?;
+fn dressed_root(root: &ral_core::protocol::Root, shell: &mut Shell) -> Result<(), String> {
+    crate::boot::engine_root(root, shell)?;
     if let Some(dress) = DRESS.take() {
         dress(shell);
     }
@@ -44,23 +55,40 @@ fn dressed_root(attach: &ral_core::protocol::Attach, shell: &mut Shell) -> Resul
 
 static DRESSED: [EngineInstaller; 1] = [EngineInstaller {
     tag: crate::shell_eval::builtins::INSTALLER_TAG,
-    runtime: crate::boot::engine_runtime,
+    runtime: dressed_runtime,
     root: dressed_root,
     narrow: crate::policy::base_layer,
 }];
 
-/// Exarch's recipe, then `dress`, for the next boot on this thread: a recipe
-/// is a `fn`, and `boot` runs its root on the calling thread. Spent on that boot,
-/// so a `/clear` reboots undressed.
-pub(crate) fn dressed(dress: impl FnOnce(&mut Shell) + 'static) -> &'static [EngineInstaller] {
-    DRESS.set(Some(Box::new(dress)));
+/// Exarch's recipe over a runtime `runtime` fits out, for the next boot on
+/// this thread: a recipe is a `fn`, and `boot` runs it on the calling thread.
+/// Spent on that boot, so a `/clear` reboots undressed.
+pub(crate) fn dressed(runtime: impl FnOnce(&mut Runtime) + 'static) -> &'static [EngineInstaller] {
+    dressed_over(runtime, |_| {})
+}
+
+/// [`dressed`], with `shell` also fitting out the root after its recipe.
+pub(crate) fn dressed_over(
+    runtime: impl FnOnce(&mut Runtime) + 'static,
+    shell: impl FnOnce(&mut Shell) + 'static,
+) -> &'static [EngineInstaller] {
+    RUNTIME_DRESS.set(Some(Box::new(runtime)));
+    DRESS.set(Some(Box::new(shell)));
     &DRESSED
 }
 
-/// A [`Avatar::for_test`] trunk whose engine `dress` fits out at boot.
-pub(crate) fn dressed_trunk(dress: impl FnOnce(&mut Shell) + 'static) -> Avatar {
+/// A [`Avatar::for_test`] trunk whose runtime `runtime` fits out at boot.
+pub(crate) fn dressed_trunk(runtime: impl FnOnce(&mut Runtime) + 'static) -> Avatar {
+    dressed_trunk_over(runtime, |_| {})
+}
+
+/// [`dressed_trunk`], with `shell` also fitting out its root.
+pub(crate) fn dressed_trunk_over(
+    runtime: impl FnOnce(&mut Runtime) + 'static,
+    shell: impl FnOnce(&mut Shell) + 'static,
+) -> Avatar {
     Avatar::for_test_with(crate::agent::TestTrunk {
-        installers: dressed(dress),
+        installers: dressed_over(runtime, shell),
         ..crate::agent::TestTrunk::new("system")
     })
     .expect("dressed test trunk")
@@ -68,7 +96,7 @@ pub(crate) fn dressed_trunk(dress: impl FnOnce(&mut Shell) + 'static) -> Avatar 
 
 static BARE: [EngineInstaller; 1] = [EngineInstaller {
     tag: "bare",
-    runtime: |_| Ok(HostSurface::default().runtime(TerminalState::default())),
+    runtime: |_| HostSurface::default().runtime(TerminalState::default()),
     root: |_, _| Ok(()),
     narrow: |_, _| Err("a bare test engine makes no children".into()),
 }];

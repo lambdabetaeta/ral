@@ -369,7 +369,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     fn prelude_shell() -> Shell {
-        Shell::root(crate::repl::prelude_runtime())
+        Shell::root(crate::repl::prelude_runtime().into())
     }
 
     fn rc_map(shell: &mut Shell, rc_src: &str) -> Map {
@@ -414,19 +414,24 @@ mod tests {
     /// does, so a plugin load has a desk to tell; the host's plugins after.
     fn loaded_plugins(rc_src: &str) -> Vec<String> {
         let rc_src = rc_src.to_owned();
-        let t = crate::repl::engine(crate::repl::prelude_runtime(), move |shell| {
-            let pairs = Mutex::new(Some(rc_map(shell, &rc_src)));
-            let door = BuiltinEntry::new(
-                Cow::Borrowed("_apply-rc"),
-                unit_thunk,
-                "_apply-rc  — test door applying one rc map.",
-                BuiltinBody::Captured(Arc::new(move |_, mooring, shell| {
+        let pairs: Arc<Mutex<Option<Map>>> = Arc::default();
+        let door = BuiltinEntry::new(
+            Cow::Borrowed("_apply-rc"),
+            unit_thunk,
+            "_apply-rc  — test door applying one rc map.",
+            BuiltinBody::Captured(Arc::new({
+                let pairs = pairs.clone();
+                move |_, mooring, shell| {
                     let pairs = pairs.lock().unwrap().take().expect("applied once");
                     commit(&pairs, mooring, shell).expect("test rc must satisfy the keyset");
                     Ok(Value::Unit)
-                })),
-            );
-            shell.install_captured_builtins(&vec![door].into());
+                }
+            })),
+        );
+        let mut runtime = crate::repl::prelude_runtime();
+        runtime.install_captured_builtins(&vec![door].into());
+        let t = crate::repl::engine(runtime, move |shell| {
+            *pairs.lock().unwrap() = Some(rc_map(shell, &rc_src));
         });
         let host = ReplHost::new(Arc::default());
         let _ = host.dispatch(&t, crate::repl::exec::line_run("_apply-rc"), None);

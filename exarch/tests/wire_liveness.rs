@@ -27,7 +27,7 @@ mod test_helper;
 
 use ral_core::carrier::{Host, Transport, WireTransport, dispatch_to_report};
 use ral_core::protocol::channel::Liveness;
-use ral_core::protocol::{Attach, DispatchId, Event, Report, Run};
+use ral_core::protocol::{Attach, DispatchId, EngineSpec, Event, Report, Root, Run};
 
 // Mirror the binary's pre-`main` re-exec dispatch: the `--engine` re-exec is
 // served here, before libtest sees a flag it would reject, so a re-exec'd
@@ -57,15 +57,16 @@ fn engine_over_socketpair(liveness: Liveness) -> (WireTransport, EngineChild) {
 /// [`INSTALLER_TAG`]: exarch::shell_eval::builtins::INSTALLER_TAG
 fn attach(transport: &WireTransport) -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
-    let mut attach = Attach::new(
-        exarch::shell_eval::builtins::INSTALLER_TAG,
-        dir.path().to_path_buf(),
-        dir.path().to_path_buf(),
+    let attach = Attach::root(
+        EngineSpec::new(
+            exarch::shell_eval::builtins::INSTALLER_TAG,
+            dir.path().to_path_buf(),
+        ),
+        Root::new(dir.path().to_path_buf()).with_env(vec![(
+            exarch::app::EXARCH.scratch_var(),
+            dir.path().to_string_lossy().into_owned(),
+        )]),
     );
-    attach.env.push((
-        exarch::app::EXARCH.scratch_var(),
-        dir.path().to_string_lossy().into_owned(),
-    ));
     transport.attach(attach);
     transport
         .await_attached()

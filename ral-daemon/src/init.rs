@@ -11,9 +11,10 @@
     reason = "[silent:guest-main] the guest daemon cannot depend on core, so no `errln!`"
 )]
 use std::convert::Infallible;
+use std::io;
 use std::os::fd::OwnedFd;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::path::Path;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use rustix::process::{Pid, Signal, getpid, kill_process_group};
@@ -30,8 +31,16 @@ use crate::{engine, mounts, net, pump, sysctl, vsock};
 /// afternoon.
 const GRACE: Duration = Duration::from_secs(5);
 
-/// How often the grace period looks to see whether the engine has gone.
+/// How long the factory waits before retrying an accept that failed for want
+/// of a resource.
+const RESOURCE_BACKOFF: Duration = Duration::from_millis(100);
+
+/// How often the grace period looks to see whether the engines have gone.
 const PULSE: Duration = Duration::from_millis(50);
+
+/// How long a dead engine's killed cgroups are given to empty before their
+/// removal is abandoned.
+const SETTLE: Duration = Duration::from_millis(500);
 
 /// Every engine the factory has started and not yet reaped, and whether it
 /// may start more. Shared with the accept thread; `halt` closes admission
@@ -73,15 +82,9 @@ impl Fleet {
 
 type Engines = Arc<Mutex<Fleet>>;
 
-/// Set by [`requested_stop`] the moment the host asks for this machine to
-/// end.  The wait loop reads it whenever a signal interrupts it.
-static STOPPING: AtomicBool = AtomicBool::new(false);
-
-/// The handler for every signal that means "the host wants this machine
-/// off".  Async-signal-safe: one atomic store, nothing else.
-extern "C" fn requested_stop(_: libc::c_int) {
-    STOPPING.store(true, Ordering::Release);
-}
+/// Why the engine factory died, when it did; read by [`attend`] on the stop
+/// signal the factory sends, so that the machine's epitaph names it.
+static FACTORY_FAILURE: OnceLock<String> = OnceLock::new();
 
 /// Be the guest's init.
 ///
@@ -112,6 +115,9 @@ pub fn serve() -> Result<Infallible, String> {
             getpid().as_raw_nonzero()
         ));
     }
+    // Before any thread exists, so every thread inherits the block.
+    reap::mask(libc::SIG_BLOCK)
+        .map_err(|err| format!("could not block the signals the daemon waits on: {err}"))?;
 
     // `/proc` first: the configuration is read out of it, so it cannot be
     // part of a plan computed from that configuration.
@@ -140,6 +146,7 @@ pub fn serve() -> Result<Infallible, String> {
     for filesystem in mounts::plan(&boot) {
         filesystem.apply()?;
     }
+    mounts::exec_cgroup()?;
     // Which of the two the host chose is worth one line in its own log: it is
     // the difference between the two hypervisors, and the first thing to know
     // when the workspace misbehaves.
@@ -160,13 +167,9 @@ pub fn serve() -> Result<Infallible, String> {
         setting.apply()?;
     }
 
-    listen_for_the_end();
-    if STOPPING.load(Ordering::Acquire) {
-        return halt(
-            &Engines::default(),
-            None,
-            "the host asked to stop before the engine had started",
-        );
+    // Ctrl-Alt-Del then reaches init as SIGINT, a stop request.
+    if let Err(err) = reboot(RebootCommand::CadOff) {
+        eprintln!("ral-daemon: could not take Ctrl-Alt-Del's power to reboot the guest: {err}");
     }
 
     // The control plane is dialled first — this is what fixes the Windows
@@ -201,34 +204,44 @@ pub fn serve() -> Result<Infallible, String> {
 
     // The root is pushed before the accept thread exists, so it is first.
     let engines: Engines = Arc::new(Mutex::new(Fleet::new(root)));
-    // The thread inherits the blocked mask, so stop signals reach this thread
-    // alone and interrupt `attend`'s wait; there is no window in which it
-    // could take one.
-    engine::mask_stop_signals(libc::SIG_BLOCK)
-        .map_err(|err| format!("could not mask the stop signals: {err}"))?;
-    let factory = std::thread::Builder::new()
+    std::thread::Builder::new()
         .name("ral-engine-factory".into())
         .spawn({
             let engines = engines.clone();
-            move || make_engines(&listener, &boot, &engines)
-        });
-    engine::mask_stop_signals(libc::SIG_UNBLOCK)
-        .map_err(|err| format!("could not unmask the stop signals: {err}"))?;
-    factory.map_err(|err| format!("could not start the engine factory thread: {err}"))?;
+            move || {
+                make_engines(&listener, &boot, &engines);
+                // The port stays bound until power-off, lest a guest process take it.
+                loop {
+                    std::thread::park();
+                }
+            }
+        })
+        .map_err(|err| format!("could not start the engine factory thread: {err}"))?;
 
     halt(&engines, pump, &attend(root, pump, &engines)?)
 }
 
-/// The accept thread's whole life: one engine per host dial, until the
-/// listener fails. A non-host peer is dropped and logged; a failed spawn is
-/// logged and its connection dropped, so the host reads EOF and severs.
+/// How long to wait before retrying a failed `accept`; `None` if the failure
+/// is not one a standing listener survives.
+fn accept_backoff(err: &io::Error) -> Option<Duration> {
+    match err.raw_os_error()? {
+        libc::ECONNABORTED | libc::EPROTO | libc::EAGAIN => Some(Duration::ZERO),
+        libc::EMFILE | libc::ENFILE | libc::ENOMEM | libc::ENOBUFS => Some(RESOURCE_BACKOFF),
+        _ => None,
+    }
+}
+
+/// The accept thread's whole life: one engine per host dial. A non-host peer
+/// is dropped and logged; a failed spawn is logged and its connection
+/// dropped, so the host reads EOF and severs. Transient accept errors are
+/// retried; any other brings the machine down.
 fn make_engines(listener: &OwnedFd, boot: &Boot, engines: &Engines) {
     loop {
         match vsock::accept_from_host(listener) {
             Ok(None) => eprintln!("ral-daemon: refused a dial that was not the host's"),
             Ok(Some(conn)) => {
-                // Spawned under the lock, so `attend` cannot reap it unrecorded
-                // and `halt` cannot miss it.
+                // Under the lock, `attend` reaps it only once recorded (std
+                // reaps a failed spawn itself) and `halt` cannot miss it.
                 let spawned = live(engines).admit(|| engine::spawn(boot, &conn));
                 match spawned {
                     None => return eprintln!("ral-daemon: the machine is stopping; dial dropped"),
@@ -239,11 +252,25 @@ fn make_engines(listener: &OwnedFd, boot: &Boot, engines: &Engines) {
                     Some(Err(err)) => eprintln!("ral-daemon: {err}"),
                 }
             }
-            Err(err) => {
-                return eprintln!("ral-daemon: the engine factory stopped accepting: {err}");
-            }
+            Err(err) => match accept_backoff(&err) {
+                Some(pause) => {
+                    eprintln!("ral-daemon: the engine factory will retry an accept: {err}");
+                    std::thread::sleep(pause);
+                }
+                None => return fail_factory(&err),
+            },
         }
     }
+}
+
+/// Record why the factory died and send the process a stop signal.  `kill`,
+/// never `raise`: a thread-directed signal stays pending on this thread,
+/// which blocks it, where [`attend`]'s `sigwaitinfo` never looks.
+fn fail_factory(err: &io::Error) {
+    let _ = FACTORY_FAILURE.set(format!(
+        "the engine factory stopped accepting the host's dials: {err}"
+    ));
+    let _ = rustix::process::kill_process(getpid(), Signal::TERM);
 }
 
 /// Dial the host's net wire, clear the resolver config, bring the `tun` up,
@@ -301,39 +328,94 @@ fn bring_up_network(net_config: &Net) -> Result<Pid, String> {
 /// processes entirely.
 ///
 /// # Errors
-/// Returns a sentence when the wait itself fails for a reason that is
-/// neither an interruption nor an empty process table.
+/// Returns a sentence when taking a signal or reaping fails for a reason
+/// other than an empty process table.
 fn attend(root: Pid, pump: Option<Pid>, engines: &Engines) -> Result<String, String> {
     loop {
-        let waking = reap::wait_any()
-            .map_err(|err| format!("waiting for the guest's processes failed: {err}"))?;
-        match waking {
-            Waking::Reaped { pid, death } if pid == root => return Ok(engine::epitaph(death)),
-            Waking::Reaped { pid, death } if Some(pid) == pump => {
+        let signal = reap::next_signal()
+            .map_err(|err| format!("waiting for the guest's signals failed: {err}"))?;
+        if signal != libc::SIGCHLD {
+            return Ok(FACTORY_FAILURE
+                .get()
+                .cloned()
+                .unwrap_or_else(|| "the host asked for this machine to stop".to_string()));
+        }
+        // Drained under the lock: a spawn in flight holds it, and std reaps
+        // its own failed child before releasing it.  Torn down after it.
+        let mut dead = Vec::new();
+        let mut fleet = live(engines);
+        loop {
+            let waking = reap::poll_any()
+                .map_err(|err| format!("reaping the guest's processes failed: {err}"))?;
+            let (pid, death) = match waking {
+                Waking::Reaped { pid, death } => (pid, death),
+                Waking::Idle => break,
+                Waking::Childless => {
+                    return Ok(
+                        "nothing is left running in the guest, not even the engine".to_string()
+                    );
+                }
+            };
+            if pid == root {
+                return Ok(engine::epitaph(death));
+            }
+            if Some(pid) == pump {
                 return Ok(pump::epitaph(death));
             }
-            Waking::Reaped { pid, death } if live(engines).forget(pid) => {
+            if fleet.forget(pid) {
                 eprintln!("ral-daemon: engine pid {} {death}", pid.as_raw_nonzero());
-            }
-            // An orphan, reparented here when its own parent died. Burying
-            // it is the job; saying so keeps the host's log honest about
-            // what the guest was doing.
-            Waking::Reaped { pid, death } => {
+                dead.push(pid);
+            } else {
+                // An orphan, reparented here when its own parent died.
+                // Burying it is the job; saying so keeps the host's log
+                // honest about what the guest was doing.
                 eprintln!(
                     "ral-daemon: reaped orphan pid {}, which {death}",
                     pid.as_raw_nonzero()
                 );
             }
-            Waking::Interrupted if STOPPING.load(Ordering::Acquire) => {
-                return Ok("the host asked for this machine to stop".to_string());
+        }
+        drop(fleet);
+        for pid in dead {
+            let tree =
+                Path::new(mounts::EXEC_CGROUP).join(format!("engine-{}", pid.as_raw_nonzero()));
+            kill_cgroup(&tree);
+            remove_cgroup(&tree, Instant::now() + SETTLE);
+        }
+    }
+}
+
+/// Kill every process in the cgroup at `path`, descendants included.  An
+/// absent cgroup is an engine that never ran a command; any other failure is
+/// logged, never fatal.
+fn kill_cgroup(path: &Path) {
+    match std::fs::write(path.join("cgroup.kill"), "1") {
+        Err(err) if err.kind() != io::ErrorKind::NotFound => eprintln!(
+            "ral-daemon: could not kill the commands under {}: {err}",
+            path.display()
+        ),
+        _ => {}
+    }
+}
+
+/// Remove the cgroup at `path` and every cgroup below it, deepest first.
+/// `cgroup.kill` returns before its members die, so a busy cgroup is retried
+/// until `deadline`; one left behind is logged and inert.
+fn remove_cgroup(path: &Path, deadline: Instant) {
+    for child in std::fs::read_dir(path).into_iter().flatten().flatten() {
+        if child.file_type().is_ok_and(|kind| kind.is_dir()) {
+            remove_cgroup(&child.path(), deadline);
+        }
+    }
+    loop {
+        match std::fs::remove_dir(path) {
+            Err(err) if err.raw_os_error() == Some(libc::EBUSY) && Instant::now() < deadline => {
+                std::thread::sleep(PULSE);
             }
-            Waking::Interrupted => {}
-            Waking::Childless => {
-                return Ok("nothing is left running in the guest, not even the engine".to_string());
+            Err(err) if err.kind() != io::ErrorKind::NotFound => {
+                return eprintln!("ral-daemon: could not remove {}: {err}", path.display());
             }
-            Waking::Idle => {
-                unreachable!("a blocking wait is never idle; NOHANG belongs to reap::poll_any")
-            }
+            _ => return,
         }
     }
 }
@@ -345,15 +427,18 @@ fn live(engines: &Engines) -> MutexGuard<'_, Fleet> {
 
 /// Bring the machine down, saying why first.
 ///
-/// Every engine's whole session — each leads one, so `kill(-pid, …)` reaches
-/// every command it ever spawned — is asked to finish, given [`GRACE`] to do
-/// it, and then killed; only then is the pump killed outright, with no
-/// grace at all. That order is deliberate, not incidental: an engine that is
-/// finishing a job may still be draining a response over the network, so
-/// killing the pump first would turn a graceful five seconds into five
-/// seconds of hung sockets for no benefit — the pump has no work of its own
-/// to finish, only the engines'. Then the filesystems are flushed and the
-/// power goes off.
+/// Every engine's process group is asked to finish, given [`GRACE`] for every
+/// engine still alive to exit, and then killed; the commands an engine spawned
+/// leave its group, so they are reached through the engine's cgroup instead:
+/// the KILL sweep writes `cgroup.kill` at the root of all of them, which also
+/// covers detached commands, whose tree is no engine's, and an engine already
+/// dead. Only then is the pump
+/// killed outright, with no grace at all. That order is deliberate, not
+/// incidental: an engine that is finishing a job may still be draining a
+/// response over the network, so killing the pump first would turn a graceful
+/// five seconds into five seconds of hung sockets for no benefit — the pump
+/// has no work of its own to finish, only the engines'. Then the filesystems
+/// are flushed and the power goes off.
 ///
 /// The root, when there is one, is the first of `engines`: `serve` pushes it
 /// before the accept thread starts, and `attend` never forgets it.
@@ -367,33 +452,31 @@ fn halt(engines: &Engines, pump: Option<Pid>, why: &str) -> Result<Infallible, S
     for &engine in &all {
         let _ = kill_process_group(engine, Signal::TERM);
     }
-    // Only a root still running is worth waiting for.  The commonest way to
-    // arrive here is [`attend`] having just reaped it, and a pid already
-    // reaped is never reported a second time — so without this probe the
-    // loop below could only ever expire, spending the whole grace on a
-    // process that ended before it started.  Each group is swept either way:
-    // a process group outlives its leader for as long as the commands the
-    // engine spawned are still in it.
-    if let Some(&root) = all.first()
-        && rustix::process::test_kill_process(root).is_ok()
-    {
-        let deadline = Instant::now() + GRACE;
-        while Instant::now() < deadline {
-            match reap::poll_any() {
-                Ok(Waking::Reaped { pid, .. }) if pid == root => break,
-                Ok(Waking::Reaped { .. } | Waking::Idle | Waking::Interrupted) => {
-                    std::thread::sleep(PULSE);
-                }
-                // Nobody left to wait for, or a wait that failed: either
-                // way there is nothing more to learn here, and the
-                // SIGKILL below is unconditional anyway.
-                Ok(Waking::Childless) | Err(_) => break,
-            }
+    // Wait only for engines still alive at TERM time: one already reaped (the
+    // commonest way to arrive here is [`attend`] having just reaped the root)
+    // is never reported again, so waiting on it could only expire. Each group
+    // is swept either way: a process group outlives its leader for as long as
+    // anything the engine spawned without leaving it is still in it.
+    let mut pending: Vec<Pid> = all
+        .iter()
+        .copied()
+        .filter(|&engine| rustix::process::test_kill_process(engine).is_ok())
+        .collect();
+    let deadline = Instant::now() + GRACE;
+    while !pending.is_empty() && Instant::now() < deadline {
+        match reap::poll_any() {
+            Ok(Waking::Reaped { pid, .. }) => pending.retain(|&p| p != pid),
+            Ok(Waking::Idle) => std::thread::sleep(PULSE),
+            // Nobody left to wait for, or a wait that failed: either way
+            // there is nothing more to learn here, and the SIGKILL below is
+            // unconditional anyway.
+            Ok(Waking::Childless) | Err(_) => break,
         }
     }
     for &engine in &all {
         let _ = kill_process_group(engine, Signal::KILL);
     }
+    kill_cgroup(Path::new(mounts::EXEC_CGROUP));
     if let Some(pump) = pump {
         let _ = rustix::process::kill_process(pump, Signal::KILL);
     }
@@ -434,28 +517,6 @@ fn announce_root() {
             ),
             None => eprintln!("ral-daemon: /proc/mounts names no root filesystem"),
         },
-    }
-}
-
-/// Install the handlers for the end of the machine.
-///
-/// PID 1 is exempt from every default signal disposition — the kernel drops
-/// signals init has not asked for — so a guest whose init installs nothing
-/// simply cannot be stopped politely.  Three deliveries mean the same
-/// request and are treated identically: `SIGTERM` from a supervisor,
-/// `SIGPWR` from an ACPI power-button event, and `SIGINT`, which is what
-/// Ctrl-Alt-Del becomes for init once [`RebootCommand::CadOff`] takes the
-/// keystroke's power to reboot the machine out from under us.
-fn listen_for_the_end() {
-    // SAFETY: `requested_stop` is async-signal-safe (one atomic store) and
-    // these three signals are claimed by nothing else in this process.
-    unsafe {
-        for signal in engine::STOP_SIGNALS {
-            libc::signal(signal, requested_stop as *const () as libc::sighandler_t);
-        }
-    }
-    if let Err(err) = reboot(RebootCommand::CadOff) {
-        eprintln!("ral-daemon: could not take Ctrl-Alt-Del's power to reboot the guest: {err}");
     }
 }
 

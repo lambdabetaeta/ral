@@ -3,11 +3,11 @@
 
 mod common;
 
-use common::fresh_shell;
-
 use ral_core::Value;
+use ral_core::boot::{HostSurface, boot_shell};
 use ral_core::protocol::Run;
 use ral_core::run::RunReport;
+use ral_core::terminal::TerminalState;
 use ral_core::types::{Mooring, Settled, Shell};
 
 /// Run one top-level run of `source` through the public `run` door
@@ -61,8 +61,14 @@ static PANIC_BUILTIN: &[ral_core::types::BuiltinEntry] = &PANIC_BUILTIN_ARR;
 /// continues on the same `Shell`.
 #[test]
 fn handler_self_mask_survives_panic_mid_body() {
-    let mut shell = fresh_shell();
-    shell.install_builtins(PANIC_BUILTIN);
+    let mut shell = boot_shell(
+        TerminalState::default(),
+        common::prelude(),
+        &HostSurface {
+            statics: vec![PANIC_BUILTIN],
+            ..HostSurface::default()
+        },
+    );
     let _ = top_level(&mut shell, "alias boom { |args| __test-panic }")
         .expect("installing the alias must succeed");
     assert!(

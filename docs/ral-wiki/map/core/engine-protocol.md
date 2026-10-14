@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e028f5a3
-generated_at_date: 2026-10-13
+generated_at_commit: 8aa9355b
+generated_at_date: 2026-10-14
 covers_paths: [core/src/protocol.rs, core/src/protocol/, core/src/carrier.rs, core/src/carrier/, core/src/engine.rs, core/src/engine/, core/src/run/report.rs, core/src/seed.rs, core/src/guard/grant.rs]
 ---
 
@@ -20,24 +20,24 @@ parent's seal, so core holds no spawn machinery for it.** The why is
 ## `core/src/engine.rs`
 
 - `EngineInstaller { tag, runtime, root, narrow }` — one compiled-in
-  installer, in two halves. `runtime: fn(&Attach) -> Result<Runtime, String>`
+  installer, in two halves. `runtime: fn(&EngineSpec) -> Runtime`
   is the process half (Σ, builtins, docs; a root and a child engine each
   derive their own, an in-process child shares its parent's); `root:
-  fn(&Attach, &mut Shell) -> Result<(), String>` is the root-only recipe
-  (libraries, hints, seeds, ledgers), which installs no builtins and refuses
-  in its own words; `narrow: GrantNarrower` is the policy a seeded or adopted
+  fn(&Root, &mut Shell) -> Result<(), String>` is the root-only recipe
+  (libraries, hints, seeds, ledgers), which refuses in its own words; `narrow: GrantNarrower` is the policy a seeded or adopted
   child is held to. Only `tag` crosses `Attach`, never the function.
-- `Runtime`: what the binary supplies, held by
-  `Shell` and read back through `Shell::runtime()`. `Engine` holds none.
-- `Engine` — one session's engine: the `Shell`, its `Scopes`, the installer
-  it was born from. `Engine::boot(installers, &attach)` is the one
+- `Runtime`: what the binary supplies, and the only place builtins are
+  installed (`install_builtins`, `install_captured_builtins`); a `Shell` is
+  built over one and cannot hand it back.
+- `Engine` — one session's engine: the `Shell`, its `Arc<Runtime>`, its
+  `Scopes`, the installer it was born from. `Engine::boot(installers, &attach)` is the one
   boot both carriers call: `resolve_installer` (version check, then tag
-  lookup), the guest jail under `RAL_GUEST`, the installer's `runtime`, then
-  by `attach.seed`: `None` is `Shell::root`, the root recipe, `seed_cwd` and
-  the attach's env; `Some(sealed)` is `Shell::child_of(runtime,
+  lookup), the guest jail under `RAL_GUEST` (whose value is the jail's cgroup root), the installer's `runtime`, then
+  by `attach.origin`: `Origin::Root(root)` is `Shell::root`, the root recipe,
+  `seed_cwd` and the root's env; `Origin::Child(sealed)` is `Shell::child_of(runtime,
   sealed.unseal()?.decode(&runtime)?, narrow)`, and no recipe runs. There is no
-  `Birth` and no `Keep`: the attach is the birth, and the scratch is the
-  host's, named in it.
+  `Keep`: the attach is the birth, and the scratch is the host's, named in a
+  root's env.
   `Engine::run` runs one dispatch under the scope `Scopes::open` minted;
   `Engine::probe` (`engine/probe.rs`) answers one `Probe`.
 - `Rails` — one dispatch's host-facing rails as its carrier lays them: the
@@ -56,7 +56,7 @@ parent's seal, so core holds no spawn machinery for it.** The why is
 
 The frame algebra. Everything on it is a wire type; nothing here carries.
 
-- `PROTOCOL_VERSION` (currently 19) — checked at `Attach`; a mismatch refuses.
+- `PROTOCOL_VERSION` (currently 21) — checked at `Attach`; a mismatch refuses.
 - `check_media` — the same number compared at *build* time, against the
   `proto_version=` line `vm-image/build-boot.sh` records for the engine in the
   guest media; `synod/examples/check-media.rs`, tauri's `beforeBuildCommand`,
@@ -64,12 +64,15 @@ The frame algebra. Everything on it is a wire type; nothing here carries.
 - `Frame` — the whole wire enum: `Attach`, `Detach`, `Dispatch`, `Probe`,
   `Event`, `Session`, `Control`, `Answer`, `Ping`, `Pong`; `Frame::kind`
   names a variant for the diagnostic about a frame out of place.
-- `Attach` — what every engine is born from, under either carrier:
-  `terminal`, `cwd`, `home`, `proto_version`, `installer`, `env` (per-session
-  variables the host seeds), `config` (the installer's own settings, an
-  `FOValue` its recipe decodes), `seed: Option<Sealed>` (a child's parent,
-  sealed; `None` for a root). `Attach::new` stamps this build's version;
-  `with_config` sets the settings.
+- `Attach { engine: EngineSpec, origin: Origin }` — what every engine is born
+  from, under either carrier. `EngineSpec` names the engine: `proto_version`,
+  `installer`, `terminal`, `home`. `Origin` is `Root(Root { cwd, env, config })`
+  (`env`: per-session variables the host seeds; `config`: the installer's own
+  settings, an `FOValue` its recipe decodes) or `Child(Sealed)` (a child's
+  parent, sealed, carrying its own cwd and env). `Attach::new` is a plain root's, at
+  this build's version; `Attach::root` pairs an `EngineSpec` with a `Root`, whose
+  `with_env` and `with_config` edit it; `Attach::child` pairs an `EngineSpec`
+  with a seal; `with_terminal` edits either.
 - `Run` / `Program` — one dispatch's payload: the policy fields plus
   `Program::Source`/`Program::Hook`. `Run`'s field types are the run regime,
   held by session state, and live below the wire: `RunIo` and `RunStdin`
@@ -141,14 +144,17 @@ The probe vocabulary, typed once for both ends.
   `rustix::event::poll` against a `Timespec` deadline, without blocking inside
   `read_frame`; how `engine_session` notices a silent front-end with no
   dedicated thread. Windows has no engine half, so no twin.
-- `set_write_deadline` — bounds every `write_frame` on every clone of the
+- `set_write_deadline` — bounds every `put` on every clone of the
   channel (`SO_SNDTIMEO` lives on the shared file description), turning a
   stalled write into the same fatal error a severed pipe already gives.
-- `write_or_sever` — the severance law itself, enforced once for both doors
-  (`carrier::write_through`, `engine_write`, which differ only in what they
-  record): a failed write is recorded *and* the channel shut down before the
-  lock is released, so nothing appends a frame after a truncated one and no
-  window leaves the record calling an already-shut socket healthy.
+- `write_or_sever` / `WriteError` — the severance law itself, enforced once
+  for both doors (`carrier::write_through`, `engine_write`, which differ only
+  in what they record): the frame is encoded before the lock is taken, and a
+  frame the fuse refuses is `Unencodable`, the wire untouched, for its writer
+  to answer where it stands; a failed write is `Severed`, recorded *and* the
+  channel shut down before the lock is released, so nothing appends a frame
+  after a truncated one and no window leaves the record calling an
+  already-shut socket healthy. Only failed I/O severs.
 - `Liveness` / `ticks` — how briskly a front-end pings and how much silence it
   tolerates; the deadline is judged as a count of unanswered pings
   (`Liveness::probes`), never as elapsed clock. `HOST_SILENCE_DEADLINE`, the
@@ -163,7 +169,8 @@ The two interpretations of the algebra, and what they share.
   `Silent` / `Faulted`, `Display`ed as the sentence a front-end shows, and
   `code()` the stable name it is quoted by; the private `sever()` is
   first-cause-wins.
-- `ProbeError` — `Rejected` (a program error: a probe mid-run) or `Severed`.
+- `ProbeError` — `Rejected` (a probe mid-run, a panicked reading, or one the
+  fuse refused before it was sent) or `Severed`.
 - `Host` trait — one run's host-facing surface: `surface`, `enquire`;
   `impl Host for ()` is the mute host.
 - `Ends` — the front-end state both carriers hold in one value: the
@@ -210,9 +217,9 @@ The two interpretations of the algebra, and what they share.
   Its public surface is `boot(installers, &attach)` — the same verdict as
   the wire's attach — and `adopt_parked(id)`, which takes the `Bequest` a
   run parked in this transport's nursery, builds `Shell::child_of` the
-  runtime this transport was born with, under this transport's installer's
-  `narrow`, and answers a new transport over it. `over` reads
-  `engine.shell.runtime()` once, before the session lock, and keeps it. Nothing on it yields or accepts a `Shell`. Its
+  engine's `Arc<Runtime>`, under this transport's installer's
+  `narrow`, and answers a new transport over it. `over` takes the
+  engine's `Arc<Runtime>` before the session lock and keeps it. Nothing on it yields or accepts a `Shell`. Its
   `dispatch` lays `Rails` whose outlet is an in-process channel, whose desk
   is `IdentityDesk`, and whose fork arm is `Fork::Park` over its own nursery.
 - `IdentityDesk` — the identity binding's `EnquiryDesk`: drains queued
@@ -227,7 +234,10 @@ The two interpretations of the algebra, and what they share.
   `await_attached()` blocks on the reader's `Attached`/`Refused` verdict or
   its own patience, counted in waits observed. A probe writes `Frame::Probe`
   and drains the event queue to the `Event::Reading` under its id, stashing
-  what it reads past.
+  what it reads past. A frame the fuse refuses is answered where its writer
+  stands: a `Dispatch` by a `Report::host_fault` stashed on its own event
+  stream, a `Probe` by `ProbeError::Rejected`, an `Answer` by an `Err` answer;
+  an `Attach`, with no session yet to refuse into, severs `Refused`.
 - `spawn_wire_reader` / `spawn_heartbeat` — the reader severs *before*
   dropping `event_tx`, on every exit path, and severs `Faulted` on a frame
   only a front-end sends; the heartbeat pings on `Liveness::interval`,
@@ -242,21 +252,26 @@ The wire carrier's engine half: a connection-lived engine process.
   `engine_session`.
 - `engine_session` — reads `Attach` (the only legal first frame), `restore_process_dirs` (the
   process-level half of an attach, which only a carrier owning its process
-  performs), `Engine::boot`, writes `Attached`/`Refused`, moves the engine
+  performs: a root's cwd, every engine's `HOME`; a child restores no cwd), `Engine::boot`, writes `Attached`/`Refused`, moves the engine
   onto a worker thread, then runs the reader loop; returns the process exit
   code. The loop breaks on a `SessionEnd` — `Requested` (a `Detach` or the
   front-end's EOF) or `Corrupt` (a read error, a dead worker, silence past the
   deadline, or a frame only an engine sends) — so corruption cannot be
   reported as an end the front-end asked for; a wire fault demotes even a
   `Requested` end to `1`.
-- The worker's `Rails` — an outlet writing `Frame::Event`, a
+- `engine_write` / `engine_send` — every engine-side write. A `Report` or
+  `Reading` the fuse refuses is replaced by its `refusal`; any other refusal
+  goes back to its writer, `engine_send` diagnosing and dropping a frame with
+  no writer to refuse into (a session frame, a `Pong`).
+- The worker's `Rails` — an outlet writing `Frame::Event` through
+  `engine_write` (an `Outlet` answers `Result<(), WriteError>`), a
   `ChannelDeferredSink` writing `Frame::Session`, a `WireDesk`, and
   `Fork::Seal`.
 - `WorkItem` / `refusal` — what the worker is handed, a run or a probe, and
   the refusal in the shape each waits on: a busy or panicked run ends in a
   `Report::host_fault`, a probe in an `Event::Reading(Err(..))`.
 - `WireDesk` / `Parks` — the wire engine's `EnquiryDesk`: writes
-  `Event::Enquiry`, then parks on a oneshot registered under its `EnquiryId`
+  `Event::Enquiry` (a refused or severed write is its own `Err`), then parks on a oneshot registered under its `EnquiryId`
   until `Frame::Answer` fills it or the run's own cancel scope fires. A park
   that gave up has deregistered its sender, so a late answer is dropped.
 - `Dispatch` / `Writing` — the one-run-or-probe rendezvous and the guard

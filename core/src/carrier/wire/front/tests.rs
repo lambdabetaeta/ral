@@ -43,7 +43,7 @@ fn adopt_then_attach_conveys_the_protocol_version() {
         .unwrap()
         .expect("an Attach frame must arrive")
     {
-        Frame::Attach(attach) => assert_eq!(attach.proto_version, PROTOCOL_VERSION),
+        Frame::Attach(attach) => assert_eq!(attach.engine.proto_version, PROTOCOL_VERSION),
         other => panic!("expected an Attach frame, got {other:?}"),
     }
 }

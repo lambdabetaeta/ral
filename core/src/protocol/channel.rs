@@ -84,8 +84,17 @@ impl WireChannel {
     ///
     /// # Errors
     /// Returns the encode or write error.
+    #[cfg(any(test, feature = "test-util"))]
     pub(crate) fn write_frame(&mut self, frame: &Frame) -> io::Result<()> {
-        crate::frame::write_frame(&mut self.stream, frame)
+        self.put(&crate::frame::encode(frame)?)
+    }
+
+    /// Write one already-encoded frame.
+    ///
+    /// # Errors
+    /// Returns the write error: only failed I/O.
+    pub(crate) fn put(&mut self, frame: &crate::frame::Encoded) -> io::Result<()> {
+        crate::frame::put(&mut self.stream, frame)
     }
 
     /// Duplicate the socket so one channel reads while another writes the same
@@ -135,7 +144,7 @@ impl WireChannel {
         let _ = self.stream.shutdown(std::net::Shutdown::Both);
     }
 
-    /// Bound how long a single `write_frame` may block on this socket.
+    /// Bound how long a single `put` may block on this socket.
     ///
     /// `SO_SNDTIMEO` lives on the shared file description, not the file
     /// descriptor, so every clone of this channel inherits the same deadline —
@@ -143,7 +152,7 @@ impl WireChannel {
     /// alone: `read_frame` and `poll_readable` are untouched. A write
     /// that stalls past `d` becomes an `io::Error`, which the framing law at
     /// the call sites above converts into connection death, the same as a
-    /// severed pipe. The invariant this buys: no `write_frame` blocks past the
+    /// severed pipe. The invariant this buys: no `put` blocks past the
     /// peer's patience deadline.
     ///
     /// # Errors
@@ -151,6 +160,15 @@ impl WireChannel {
     pub(crate) fn set_write_deadline(&self, d: Duration) -> io::Result<()> {
         self.stream.set_write_timeout(Some(d))
     }
+}
+
+/// Why a frame did not cross.
+#[derive(Debug)]
+pub(crate) enum WriteError {
+    /// The frame cannot be encoded: the writer's fault, the wire untouched.
+    Unencodable(io::Error),
+    /// The write failed; the failure was recorded and the channel shut down.
+    Severed,
 }
 
 /// The one write door under the severance law: write `frame`, and if the
@@ -164,31 +182,36 @@ impl WireChannel {
 /// fresh frame after a truncated one, and no window exists in which the
 /// record still calls an already-shut socket healthy.
 ///
+/// Only failed I/O severs: a frame is encoded before the lock is taken, and
+/// one the fuse refuses is the writer's fault, so it returns
+/// [`WriteError::Unencodable`] with the wire still whole, for the writer to
+/// answer where it stands.
+///
 /// Deliberately outside [`LockExt`](crate::sync::LockExt)'s recover-poison
-/// policy: a panic between `write_frame` and `shutdown` can leave a partial
+/// policy: a panic between `put` and `shutdown` can leave a partial
 /// frame on the socket that neither `record` nor a shutdown has sealed off,
 /// and letting the next writer resume into that torn stream is worse than
 /// the panic propagating; a poisoned channel must stay poisoned.
 ///
 /// # Errors
-/// Returns the write failure, so a caller that must react further — the
-/// heartbeat's `Ping` arm breaking its loop — can, without severing again.
+/// Returns why the frame did not cross, so a caller that must react further —
+/// the heartbeat's `Ping` arm breaking its loop — can, without severing again.
 #[allow(
     clippy::disallowed_methods,
-    reason = "the wire writer: a panic between write_frame and shutdown leaves a partial frame on the socket that neither the severance record nor shutdown has sealed off, so a recovered guard would append the next frame onto a torn one"
+    reason = "the wire writer: a panic between put and shutdown leaves a partial frame on the socket that neither the severance record nor shutdown has sealed off, so a recovered guard would append the next frame onto a torn one"
 )]
 pub(crate) fn write_or_sever(
     ch: &Mutex<WireChannel>,
     frame: &Frame,
     record: impl FnOnce(&io::Error),
-) -> io::Result<()> {
+) -> Result<(), WriteError> {
+    let encoded = crate::frame::encode(frame).map_err(WriteError::Unencodable)?;
     let mut guard = ch.lock().unwrap();
-    let outcome = guard.write_frame(frame);
-    if let Err(e) = &outcome {
-        record(e);
+    guard.put(&encoded).map_err(|e| {
+        record(&e);
         guard.shutdown();
-    }
-    outcome
+        WriteError::Severed
+    })
 }
 
 // ── Liveness ──────────────────────────────────────────────────────────

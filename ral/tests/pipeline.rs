@@ -15,7 +15,7 @@
 
 mod common;
 
-use common::{Output, fresh_tmp_path, ral_bin, ral_command};
+use common::{Output, fresh_tmp_path, ral_command};
 use std::os::unix::fs::PermissionsExt;
 use std::process::Stdio;
 use std::time::Duration;
@@ -384,11 +384,11 @@ fn a_nested_pipeline_joins_its_stages_group() {
     // the outer's own direct final stage, all share one anchor pgid.  The
     // final stage drains its stdin first, so the inner stages have already
     // reported and exited before their edge could ever die under them.
-    let ral = ral_bin();
     let script = format!(
-        "!{{ {r} --ral-test-pgid-check inner1 | {r} --ral-test-pgid-check inner2 }} \
-         | sh -c 'cat >/dev/null; exec {r} --ral-test-pgid-check outer'",
-        r = ral.display(),
+        "!{{ {} | {} }} | sh -c 'cat >/dev/null; {}'",
+        probe("inner1"),
+        probe("inner2"),
+        report("outer"),
     );
     let o = run_with_timeout(&[], &script, Duration::from_secs(5)).expect("nested pipeline hung");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
@@ -936,12 +936,24 @@ fn grant_fs_write_through_symlinked_prefix_to_nonexistent_target() {
 //
 // The pipeline anchor (a tiny null-stdio ral helper) keeps the pgid alive
 // even when the first stage exits before later stages spawn.  These tests
-// exercise that invariant by running ral itself as a pipeline stage with
-// the hidden `--ral-test-pgid-check <tag>` flag, which writes its pgid to
-// stderr and exits 0.  In a pre-anchor build, a fast producer like
-// `printf ""` could let the pgid go away before the consumer joined it,
-// stranding the consumer; the assertions below would either time out or
-// observe inconsistent pgids.
+// exercise that invariant with a [`probe`] stage reporting its pgid.  In a
+// pre-anchor build, a fast producer like `printf ""` could let the pgid go
+// away before the consumer joined it, stranding the consumer; the assertions
+// below would either time out or observe inconsistent pgids.
+
+/// A `sh` body writing `pgid:<tag>=… tcpgrp:<tag>=…` to stderr in one line,
+/// the tty's foreground group being `0` or `-1` when there is none.  The tag
+/// goes through `$t` because a pty echoes the typed line, which must not
+/// itself match.  Needs a `ps` with `tpgid` (procps, BSD); busybox has none.
+fn report(tag: &str) -> String {
+    format!("t={tag}; set -- $(ps -o pgid=,tpgid= -p $$); echo \"pgid:$t=$1 tcpgrp:$t=$2\" >&2")
+}
+
+/// A stage that [`report`]s, then drains its stdin: a reader exiting before
+/// its writer is done makes ral end that writer (SPEC §7.6).
+fn probe(tag: &str) -> String {
+    format!("sh -c '{}; cat >/dev/null'", report(tag))
+}
 
 fn parse_tagged_pgid(stderr: &str, tag: &str) -> Option<i32> {
     let prefix = format!("pgid:{tag}=");
@@ -960,11 +972,7 @@ fn race_true_producer_does_not_strand_consumer() {
     // ral's `true` builtin: the builtin would make stage 1 a ral helper and
     // move the test off the direct-external launch path it is here to
     // exercise.  Both spellings typecheck — a stage promises no traffic.
-    let ral = ral_bin();
-    let script = format!(
-        "/usr/bin/true | {} --ral-test-pgid-check post",
-        ral.display()
-    );
+    let script = format!("/usr/bin/true | {}", probe("post"));
     let o = run_with_timeout(&[], &script, Duration::from_secs(5))
         .expect("pipeline hung after `true` producer");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
@@ -978,11 +986,7 @@ fn race_true_producer_does_not_strand_consumer() {
 #[test]
 fn pipeline_three_stages_share_anchor_pgid() {
     // Every stage must report the same pgid — the anchor's.
-    let ral = ral_bin();
-    let script = format!(
-        "{r} --ral-test-pgid-check a | {r} --ral-test-pgid-check b | {r} --ral-test-pgid-check c",
-        r = ral.display(),
-    );
+    let script = format!("{} | {} | {}", probe("a"), probe("b"), probe("c"));
     let o = run_with_timeout(&[], &script, Duration::from_secs(5)).expect("pipeline hung");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     let a = parse_tagged_pgid(&o.stderr, "a").expect("a pgid");
@@ -993,13 +997,10 @@ fn pipeline_three_stages_share_anchor_pgid() {
 
     // An external spawned *inside* a ral-written stage thread joins the
     // same anchor pgid as a direct stage in the same pipeline, not one of
-    // its own.  `!{ ral --ral-test-pgid-check inner }` forces the first
-    // stage to be a ral-written block that spawns the probe as a nested
-    // external, rather than launching it direct.
-    let nested_script = format!(
-        "!{{ {r} --ral-test-pgid-check inner }} | {r} --ral-test-pgid-check outer",
-        r = ral.display(),
-    );
+    // its own.  `!{ probe }` forces the first stage to be a ral-written
+    // block that spawns the probe as a nested external, rather than
+    // launching it direct.
+    let nested_script = format!("!{{ {} }} | {}", probe("inner"), probe("outer"));
     let o = run_with_timeout(&[], &nested_script, Duration::from_secs(5))
         .expect("nested-external pipeline hung");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
@@ -1032,10 +1033,9 @@ fn pipeline_mid_stage_launch_failure_with_long_producer_kills_it() {
 // has handed the pty to the pipeline pgid.  The tests below open a real
 // pty so `tcgetpgrp` is meaningful.
 //
-// `--ral-test-pgid-check <tag>` writes both `pgid:<tag>` and (when
-// stdin is a tty) `tcpgrp:<tag>` to stderr.  These tests ask: when the
-// stage starts running user code, is it in the pgid that owns the
-// controlling terminal?
+// A [`probe`] writes both `pgid:<tag>` and `tcpgrp:<tag>` to stderr.
+// These tests ask: when the stage starts running user code, is it in the
+// pgid that owns the controlling terminal?
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use common::pty::PtySession;
@@ -1076,8 +1076,7 @@ fn pty_external_stage_runs_to_completion() {
     // drives ral through `-i --norc` rather than the batch script
     // runner.  The helper reports both its pgid and the pty foreground
     // pgid; after launch releases its job frame they must match.
-    let ral = ral_bin();
-    let script = format!("printf \"\" | {} --ral-test-pgid-check post", ral.display());
+    let script = format!("printf \"\" | {}", probe("post"));
     let o = run_pty_repl_until(&script, Duration::from_secs(8), |text| {
         parse_tagged_pgid(text, "post").is_some()
             && parse_tagged_tcpgrp(text, "post").is_some()

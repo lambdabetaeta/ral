@@ -9,6 +9,7 @@ use super::{
 };
 use crate::engine::{Engine, EngineInstaller, Rails, Scopes};
 use crate::first_order::FOValue;
+use crate::protocol::channel::WriteError;
 use crate::protocol::probe::Probe;
 use crate::protocol::{Attach, DispatchId, Event, Run};
 use crate::sync::LockExt as _;
@@ -34,9 +35,9 @@ pub struct IdentityTransport {
     /// dispatch still waiting to take it.
     scopes: Arc<Scopes>,
     installer: &'static EngineInstaller,
-    /// The root's runtime as born, read before the engine went behind the
-    /// lock; every child adopted here shares it.
-    runtime: Runtime,
+    /// The engine's runtime, shared out before it went behind the lock;
+    /// every child adopted here shares it.
+    runtime: Arc<Runtime>,
     /// Where this transport's runs park their forks — outside the lock, so a
     /// handler can adopt one mid-dispatch.
     nursery: Nursery,
@@ -59,7 +60,7 @@ impl IdentityTransport {
     fn over(engine: Engine) -> Self {
         let (event_tx, event_rx) = mpsc::channel();
         let scopes = engine.scopes().clone();
-        let runtime = engine.shell.runtime();
+        let runtime = engine.runtime().clone();
         let control = ControlSender::new(Door::Identity(scopes.clone()));
         Self {
             installer: engine.installer(),
@@ -86,7 +87,7 @@ impl IdentityTransport {
                 id.0
             )
         })?;
-        let shell = Shell::child_of(self.runtime.clone(), bequest, self.installer.narrow)?;
+        let shell = Shell::child_of(Arc::clone(&self.runtime), bequest, self.installer.narrow)?;
         Ok(Self::over(Engine::new(shell, self.installer)))
     }
 
@@ -143,7 +144,9 @@ impl Transport for IdentityTransport {
         let scope = self.scopes.open(id);
         let events = self.event_tx.clone();
         let rails = Rails {
-            outlet: Arc::new(move |id, event| events.send((id, event)).is_ok()),
+            outlet: Arc::new(move |id, event| {
+                events.send((id, event)).map_err(|_| WriteError::Severed)
+            }),
             deferred: self.ends.deferred_sink.lock_ignore_poison().clone(),
             desk: Arc::new(IdentityDesk {
                 host: host.clone(),

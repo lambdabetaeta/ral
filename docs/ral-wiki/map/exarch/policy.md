@@ -124,6 +124,7 @@ via `include_str!`, ordered from most to least authority:
 - `edit-only` — reasonable's reads, writes to the working tree and scratch,
   network on; for patch/refactor jobs that never run a build;
 - `read-only` — reasonable's reads/exec, writes only to scratch;
+  the scratch and its tool homes are shared tree-wide, so a narrowed child can plant files a wider sibling runs (accepted; see [[decisions/261013_the-seed-rides-the-protocol-sealed|the-seed-rides-the-protocol-sealed]]);
 - `minimal` — system binaries + cwd + scratch + net + chdir; a deliberately
   narrow base for additive `--extend`;
 - `confined` — offline build jail; host binaries by subpath, with explicit

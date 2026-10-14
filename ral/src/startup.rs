@@ -90,7 +90,7 @@ pub(crate) mod engine {
     use ral_core::boot::boot_runtime;
     use ral_core::engine::EngineInstaller;
     use ral_core::first_order::datum::Datum as _;
-    use ral_core::protocol::Attach;
+    use ral_core::protocol::{EngineSpec, Root};
     use ral_core::record;
 
     pub(crate) static INSTALLERS: [EngineInstaller; 2] = [
@@ -136,20 +136,12 @@ pub(crate) mod engine {
     }
 
     /// The REPL's process half.
-    #[allow(
-        clippy::unnecessary_wraps,
-        reason = "must match EngineInstaller::runtime's signature, which can genuinely refuse"
-    )]
-    fn repl_runtime(attach: &Attach) -> Result<Runtime, String> {
-        Ok(boot_runtime(
-            attach.terminal,
-            &crate::PRELUDE,
-            &repl_surface(),
-        ))
+    fn repl_runtime(spec: &EngineSpec) -> Runtime {
+        boot_runtime(spec.terminal, &crate::PRELUDE, &repl_surface())
     }
 
     /// Everything an interactive session is before rc.
-    fn repl_root(_: &Attach, shell: &mut ral_core::Shell) -> Result<(), String> {
+    fn repl_root(_: &Root, shell: &mut ral_core::Shell) -> Result<(), String> {
         shell.set_exit_hints(crate::platform::load_exit_hints());
         shell.set_interactive(true);
         let terminal = ral_core::Value::from(&shell.terminal());
@@ -158,27 +150,19 @@ pub(crate) mod engine {
     }
 
     /// The batch session's process half.
-    #[allow(
-        clippy::unnecessary_wraps,
-        reason = "must match EngineInstaller::runtime's signature, which can genuinely refuse"
-    )]
-    fn batch_runtime(attach: &Attach) -> Result<Runtime, String> {
-        Ok(boot_runtime(
-            attach.terminal,
-            &crate::PRELUDE,
-            &batch_surface(),
-        ))
+    fn batch_runtime(spec: &EngineSpec) -> Runtime {
+        boot_runtime(spec.terminal, &crate::PRELUDE, &batch_surface())
     }
 
     /// Everything a script's session is before its boot dispatch.
-    fn batch_root(attach: &Attach, shell: &mut ral_core::Shell) -> Result<(), String> {
-        let config = BatchConfig::decode(&attach.config)?;
+    fn batch_root(root: &Root, shell: &mut ral_core::Shell) -> Result<(), String> {
+        let config = BatchConfig::decode(&root.config)?;
         shell.set_exit_hints(crate::platform::load_exit_hints());
         shell.set_args(config.args);
         boot_door::register(shell)
     }
 
-    /// The `batch` installer's `Attach.config`.
+    /// The `batch` installer's `Root.config`.
     pub(crate) struct BatchConfig {
         pub(crate) args: Vec<String>,
     }

@@ -34,8 +34,9 @@ fn test_trunk(fleet: &Arc<Fleet>) -> Arc<crate::agent::Agent> {
 
 fn wire_seat(liveness: Liveness) -> (Seat, std::process::Child) {
     let (transport, child) = engine_over_socketpair(liveness);
+    let (spec, root) = crate::boot::test_attach();
     (
-        Seat::wire(transport, crate::boot::test_attach(), None)
+        Seat::wire(transport, ral_core::protocol::Attach::root(spec, root))
             .expect("a freshly spawned engine attaches"),
         child,
     )
@@ -47,7 +48,7 @@ fn wire_host_services(emit: &Emitter, parent: &Arc<crate::agent::Agent>) -> Host
     HostServices {
         fleet: Fleet::for_test(),
         kind: SeatKind::Wire {
-            attach: crate::boot::test_attach(),
+            engine: crate::boot::test_attach().0,
         },
         stamp: parent.mailbox.stamp(),
         agent: parent.clone(),
@@ -269,7 +270,7 @@ fn wire_seat_clear_answers_a_sentence() {
     let mut seat = Seat::Wire {
         target: InterruptTarget::new(transport.control().clone()),
         transport: Box::new(transport),
-        attach: crate::boot::test_attach(),
+        engine: crate::boot::test_attach().0,
     };
     let why = seat.clear().expect_err("a wire seat cannot reboot");
     assert!(why.contains("new conversation"), "{why}");
@@ -284,29 +285,16 @@ fn a_sealed_attach_is_a_child_of_its_parent() {
     let seal = ral_core::seed::seal(&parent.bequeath(ral_core::SpawnGrant::Inherit))
         .expect("a bequest seals");
     let (transport, mut child) = engine_over_socketpair(Liveness::default());
-    let seat = Seat::wire(transport, crate::boot::test_attach(), Some(seal))
-        .expect("an engine attaches with its parent's seal");
+    let seat = Seat::wire(
+        transport,
+        ral_core::protocol::Attach::child(crate::boot::test_attach().0, seal),
+    )
+    .expect("an engine attaches with its parent's seal");
     assert_eq!(
         seat.read(|t| t.env_var("PARENT_MARK"))
             .expect("the child answers"),
         Some("1".to_string())
     );
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
-#[test]
-fn a_seat_stores_its_attach_without_the_seal() {
-    let seal =
-        ral_core::seed::seal(&crate::boot::test_shell().bequeath(ral_core::SpawnGrant::Inherit))
-            .expect("a bequest seals");
-    let (transport, mut child) = engine_over_socketpair(Liveness::default());
-    let seat = Seat::wire(transport, crate::boot::test_attach(), Some(seal))
-        .expect("an engine attaches with its parent's seal");
-    let SeatKind::Wire { attach } = seat.kind() else {
-        panic!("a wire seat has a wire kind")
-    };
-    assert!(attach.seed.is_none());
     let _ = child.kill();
     let _ = child.wait();
 }

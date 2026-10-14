@@ -26,11 +26,10 @@ so one that is not UTF-8 is refused with status 2, never mangled.
 **One pure classifier names the hidden role a process was started for, and
 one dispatch serves it.** `ral_core::classify(argv)`
 (`core/src/role.rs`) reads the first argument alone over `Role::ALL` and
-returns an `Invocation`: `Engine`, `PipelineAnchor`, `PgidCheck`,
-`DetachBirth`, `Warrant`, `BundledTool`, or `Shell`. Each flag is spelled once,
+returns an `Invocation`: `Engine`, `PipelineAnchor`, `Warrant`,
+`BundledTool`, or `Shell`. Each flag is spelled once,
 by `Role::flag`, and disjointness lives there and nowhere else — a flag a
-script was given, or a tool's own `--engine`, names no role; the two test roles
-exist only under `test-util`. `ral_core::invocation::serve(&role, installers)`
+script was given, or a tool's own `--engine`, names no role. `ral_core::invocation::serve(&role, installers)`
 is the one place a role is served, each role's body staying with the code it
 serves. `ral`'s `identify` hands it the role it classified; exarch's `main`
 calls `ral_core::invocation::serve_process(installers)`, which reads argv
@@ -53,10 +52,7 @@ dispositions. Then, per role:
 - **Pipeline anchor** — `pipeline::anchor::serve` (`--ral-pipeline-anchor`, the
   one multicall re-exec a pipeline uses: a stage itself runs on a thread of the
   parent process, but a multi-stage pipeline needs one process to hold its pgid
-  open for its whole life). **Pgid probe** (`PgidCheck`, Unix) —
-  `invocation::probe::pgid_check`, served by every `test-util` binary, since the
-  tests spawn a real `ral` as a pipeline stage. Neither spawns anything, so
-  neither is pinned.
+  open for its whole life). It spawns nothing, so it is not pinned.
 - **Every other role** runs `sandbox::boot` first, which pins the binary (and, on
   Linux, bwrap) and, on Windows, sweeps what a crashed prior session left
   registered; the bundled tool only `sandbox::pin`s, as a re-exec child that
@@ -79,9 +75,7 @@ dispositions. Then, per role:
     ([[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec-images]]),
     and each external child launches under the effective policy
     ([[decisions/260617_sandbox-external-children|sandbox-external-children]]).
-  - **Shell** — `None`, and `identify` answers `Shell(Mode)`. The test-only
-    `DetachBirth` is booted like the shell and then served in place
-    (`probe::detach_birth`).
+  - **Shell** — `None`, and `identify` answers `Shell(Mode)`.
 
 The roles that are not the shell exit here, never reaching clap.
 
@@ -139,10 +133,10 @@ one ending law and one typecheck
   and exited through `StaticDiagnostics::render`. None boots anything.
 - **Boot, stage one.** `IdentityTransport::boot` with the `batch` installer
   (the table is not `cfg(unix)`-gated, only `run_engine` is), whose recipe
-  decodes `Attach.config` — `{args}` — strictly, boots the batch surface, sets
+  decodes `Root.config` — `{args}` — strictly, boots the batch surface, sets
   exit hints and args, and registers the boot door. `platform::local_attach`
   builds the attach at this process's cwd and home, the probed terminal in
-  `Attach.terminal`, and batch adds its config. A refusal exits 2 with its
+  `EngineSpec.terminal`, and batch adds its config. A refusal exits 2 with its
   sentence on stderr.
 - **Boot, stage two.** The first dispatch is `Program::Hook` on
   `Session "boot"`, the `_ral-boot` builtin itself (`ral/src/boot_door.rs`),

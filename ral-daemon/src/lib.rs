@@ -10,7 +10,9 @@
 //!
 //! 1. **Refuse politely unless we are init.**  Nothing below is survivable on
 //!    a machine that is not a guest, so the check comes before the first
-//!    syscall that changes anything.
+//!    syscall that changes anything.  Then block the host's stop signals and
+//!    `SIGCHLD`, before any thread exists: they wait pending for step 13
+//!    rather than being dropped, as PID 1's unhandled signals are (`reap`).
 //! 2. **Mount `/proc`.**  The one mount that cannot wait for a decision: the
 //!    configuration is read from `/proc/cmdline`.
 //! 3. **Read the kernel command line** into a [`boot::Boot`] — the only
@@ -29,13 +31,13 @@
 //! 6. **Mount everything else**, in the order `mounts::plan` fixes — which,
 //!    where the host runs a hypervisor with no virtiofs, includes dialling
 //!    the host for the workspace's own 9p transport.  Whether it does is a
-//!    fact the command line carried, not one the guest guesses at.
+//!    fact the command line carried, not one the guest guesses at.  Then
+//!    make the jail's cgroup root (`mounts::exec_cgroup`).
 //! 7. **Apply the guest-wide sysctls** (`sysctl::plan`) the engine's spawn
 //!    jail depends on — user namespaces off — before any external code gets
 //!    a chance to run.
-//! 8. **Listen for the end.**  PID 1 has no default signal dispositions, so
-//!    the handlers for "the host wants this machine off" are installed by
-//!    hand, before there is a child that could outlive them.
+//! 8. **Take Ctrl-Alt-Del's power to reboot**, so that it reaches init as
+//!    `SIGINT`, one of the stop signals.
 //! 9. **Dial the host's control plane**, but do not hand it to the engine
 //!    yet — the engine is the *last* thing this daemon starts.
 //! 10. **Bring the network up, when this boot has one** (`boot::Boot::net`):
@@ -43,12 +45,12 @@
 //!     with no prologue ahead of it — create and address the `tun`
 //!     (`net::plan`, `net::Interface::apply`), and start the pump
 //!     (`pump::spawn`) that will shovel packets across it.
-//! 11. **Bind the engine factory** on `boot::FACTORY_PORT` and start the
-//!     thread that accepts the host's dials, one engine per connection.
+//! 11. **Bind the engine factory** on `boot::FACTORY_PORT`.
 //! 12. **Start the root engine**, now that its network — if this boot has
 //!     one — is already live, and hand it the control-plane connection from
-//!     step 9 as fd 3.
-//! 13. **Wait.**  Forever, until the root engine or the pump dies, or the
+//!     step 9 as fd 3; then start the thread that accepts the host's dials
+//!     on the factory port, one engine per connection.
+//! 13. **Wait**, in `sigwaitinfo`, reaping on each `SIGCHLD`.  Forever, until the root engine or the pump dies, or the
 //!     host says stop — either's death ends the session, a child engine's
 //!     does not; see `engine::epitaph` and `pump::epitaph`.
 //!

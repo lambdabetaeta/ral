@@ -7,7 +7,6 @@ use super::Mooring;
 use super::Shell;
 use super::TerminalAccess;
 use super::bindings::BindingLease;
-use super::construct::natives_and_base;
 use super::detached::DetachPolicy;
 use crate::io::Sink;
 use crate::process::{DurableRoot, ForegroundScope, TerminalLease};
@@ -15,7 +14,7 @@ use crate::source::SourceDb;
 use crate::terminal::TerminalState;
 use crate::ty::Fixings;
 use crate::types::ExitHints;
-use crate::types::{BuiltinEntry, ReapNotice, Set, WorkerEntry, WorkerId};
+use crate::types::{BuiltinEntry, ReapNotice, WorkerEntry, WorkerId};
 use std::sync::Arc;
 
 impl Shell {
@@ -87,39 +86,11 @@ impl Shell {
 
     /// Every installed builtin's name, for tab completion.
     pub fn builtin_names(&self) -> impl Iterator<Item = &str> {
-        self.session.builtins.manifest().names()
-    }
-
-    /// The test-dressing door, with [`Self::install_captured_builtins`]; a
-    /// production host's surface rides [`HostSurface::runtime`](crate::HostSurface::runtime).
-    pub fn install_builtins(&mut self, entries: &'static [BuiltinEntry]) {
-        self.install_set(&Set::Static(entries));
-    }
-
-    pub fn install_captured_builtins(&mut self, entries: &Arc<[BuiltinEntry]>) {
-        self.install_set(&Set::Captured(Arc::clone(entries)));
-    }
-
-    /// Install `set`, then seed the base env scope and base handler frames
-    /// from it, unless it was already here.  A child's runtime is the one its
-    /// engine was born with, read by `IdentityTransport::over`, so this is for
-    /// live shells only.
-    pub(crate) fn install_set(&mut self, set: &Set) {
-        if self.session.builtins.install(set.clone()) {
-            let (natives, base) = natives_and_base(set);
-            Arc::make_mut(&mut self.sig).install_natives(natives);
-            self.context.handlers.install_base(&base);
-        }
+        self.session.runtime.builtins.manifest().names()
     }
 
     pub fn lookup_builtin(&self, name: &str) -> Option<BuiltinEntry> {
-        self.session.builtins.get(name)
-    }
-
-    /// Install extra `name -> doc` entries for `help`/`explain` — how a host
-    /// documents a sourced closure library no builtin table ever sees.
-    pub fn install_library_docs(&mut self, entries: Vec<(String, String)>) {
-        self.session.library_docs.extend(entries);
+        self.session.runtime.builtins.get(name)
     }
 
     /// Every worker (`spawn`, `watch`, `service`) here, settled or running.

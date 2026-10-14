@@ -126,3 +126,11 @@ Cite: `ral-daemon/src/boot.rs` (`CONTRACT`, `MANIFEST_KEY`, `check_media`),
 ## Amendment, 2026-10-13
 
 The contract is at 3: the factory port, on which the daemon listens for the host's engine dials ([[decisions/261013_the-seed-rides-the-protocol-sealed|the-seed-rides-the-protocol-sealed]]).
+
+## Amendment, 2026-10-14
+
+The jail's cgroup root is a boot-time agreement outside this contract: the
+daemon makes `/sys/fs/cgroup/ral-exec` (`mounts::EXEC_CGROUP`), delegates
+`+memory +pids +cpu` into it, and names it to the engine in `RAL_GUEST`; the
+engine makes `engine-<pid>/exec-<seq>` and `detached/exec-<seq>` below it. Both ends ship in the same
+initramfs, so it cannot skew between host and guest, and `CONTRACT` stays at 3.

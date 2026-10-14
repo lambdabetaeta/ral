@@ -26,5 +26,10 @@ pub fn core_schemes() -> crate::typecheck::SessionSchemes {
 /// A shell over core's own surface alone: no env vars, no prelude.  The
 /// scaffold unit tests start from.
 pub fn core_shell() -> crate::Shell {
-    crate::HostSurface::default().shell(crate::terminal::TerminalState::default())
+    crate::Shell::root(core_runtime().into())
+}
+
+/// Core's own surface as a runtime: what [`core_shell`] is a root over.
+pub fn core_runtime() -> crate::Runtime {
+    crate::HostSurface::default().runtime(crate::terminal::TerminalState::default())
 }

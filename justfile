@@ -210,12 +210,12 @@ guest-rootfs $ARCH='arm64':
 
 # Boot the Windows machine layer and hold it open (needs an elevated shell / Hyper-V Administrators).
 [windows]
-smoke-boot KERNEL='vm-image/out/boot/kernel' INITRAMFS='vm-image/out/boot/initramfs.img' ROOTFS='vm-image/out/rootfs.img' FOLDER='.':
+smoke-boot KERNEL='vm-image/out/boot/kernel' INITRAMFS='vm-image/out/boot/initramfs.img' ROOTFS='vm-image/out/rootfs/rootfs.img' FOLDER='.':
     cargo run -p vm-manager --example boot-smoke -- {{KERNEL}} {{INITRAMFS}} {{ROOTFS}} {{FOLDER}}
 
 # The same boot, plus one real run into the guest and back (same prerequisite as smoke-boot).
 [windows]
-smoke-run KERNEL='vm-image/out/boot/kernel' INITRAMFS='vm-image/out/boot/initramfs.img' ROOTFS='vm-image/out/rootfs.img' FOLDER='.':
+smoke-run KERNEL='vm-image/out/boot/kernel' INITRAMFS='vm-image/out/boot/initramfs.img' ROOTFS='vm-image/out/rootfs/rootfs.img' FOLDER='.':
     cargo run -p synod --example boot-run -- {{KERNEL}} {{INITRAMFS}} {{ROOTFS}} {{FOLDER}}
 
 # Install the machine broker as a LocalSystem Windows service (needs an elevated shell).

@@ -1,9 +1,9 @@
 //! The guest's one way off the machine.
 //!
 //! Neither hypervisor gives this guest a network adapter: every channel it
-//! has is an `AF_VSOCK` stream to `VMADDR_CID_HOST` on a port the host named
-//! on the kernel command line.  Three of them exist, and they are alike in
-//! everything except what happens to the connection afterwards:
+//! has is an `AF_VSOCK` stream between it and `VMADDR_CID_HOST`.  Three the
+//! guest dials, on ports the host named on the kernel command line, and they
+//! are alike in everything except what happens to the connection afterwards:
 //!
 //! - the **control plane** ([`crate::engine::control_plane`]) hands its
 //!   connection to the engine as file descriptor 3, where the host's typed
@@ -15,13 +15,12 @@
 //!   pump, which carries the `tun`'s IP to and from the user-mode TCP/IP
 //!   stack that is the guest's entire network.
 //!
-//! In all three the *guest* dials and the host listens.  That asymmetry is
+//! On these three the *guest* dials and the host listens.  That asymmetry is
 //! what makes the daemon so small: a connection that exists is already proof
 //! the host is there, so there is no readiness handshake on any of them.  The
-//! daemon binds exactly one guest port, the engine factory
-//! ([`crate::boot::FACTORY_PORT`]), and that is the one channel the host
-//! opens; the peer-CID check in [`accept_from_host`] is what makes a standing
-//! listener safe.
+//! daemon binds exactly one guest port, the engine factory, a compiled-in
+//! constant ([`crate::boot::FACTORY_PORT`]) that the host dials; the peer-CID
+//! check in [`accept_from_host`] is what makes a standing listener safe.
 //!
 //! The `socket`/`connect` pair below is written out here rather than borrowed
 //! from the engine's own copy, for the reason [`crate::reap`] gives about

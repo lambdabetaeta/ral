@@ -25,8 +25,8 @@ impl Shell {
     /// a root's.
     ///
     /// No handle is reachable from the bequest, so an identity-adopted child
-    /// and a sealed child resolve every name to the same value or the same
-    /// absence.  A handle becomes its `` `opaque `` placeholder.  A scope
+    /// and a sealed child resolve every name alike: both decode against the
+    /// one `Runtime`.  A handle becomes its `` `opaque `` placeholder.  A scope
     /// reaching no handle is shared, not copied.
     pub fn bequeath(&self, grant: SpawnGrant) -> Bequest {
         let mut scrub = Scrub::default();
@@ -40,7 +40,7 @@ impl Shell {
         Bequest {
             image: Image {
                 env,
-                context: self.context.clone().map_handlers(|_| frames),
+                context: self.context.with_handlers(frames),
                 sources: self.session.sources.clone(),
                 terms: Terms::of(self),
                 fixings: self.session.fixings.snapshot(),

@@ -350,9 +350,9 @@ impl Launch {
     ///
     /// So point all three standard streams at something that outlives this
     /// process; an inherited one dies with us, taking the survivor's writes
-    /// with it.  And under a guest jail the survivor keeps its `exec-N`
-    /// cgroup and its limits for good, since nobody left can tell when that
-    /// cgroup is empty.
+    /// with it.  And under a guest jail the survivor keeps its
+    /// `detached/exec-N` cgroup and its limits for good, since nobody left
+    /// can tell when that cgroup is empty.
     ///
     /// # Errors
     /// A failed fork or `execve`, or a pid handshake that comes up short.

@@ -110,8 +110,9 @@ pub struct Sealed(Bytes);
 pub fn seal(bequest: &Bequest) -> Result<Sealed, String> {
     let sealed = |e: &dyn std::fmt::Display| format!("seed: could not seal the bequest: {e}");
     let seed = EngineSeed::encode(bequest).map_err(|e| sealed(&e))?;
+    let frame = crate::frame::encode(&seed).map_err(|e| sealed(&e))?;
     let mut bytes = Vec::new();
-    crate::frame::write_frame(&mut bytes, &seed).map_err(|e| sealed(&e))?;
+    crate::frame::put(&mut bytes, &frame).map_err(|e| sealed(&e))?;
     Ok(Sealed(bytes.into()))
 }
 
@@ -218,6 +219,15 @@ mod tests {
     };
     use std::collections::BTreeSet;
 
+    /// The runtime a parent and its children are built over.
+    fn runtime() -> crate::Runtime {
+        crate::boot::boot_runtime(
+            crate::terminal::TerminalState::default(),
+            BakedPrelude::runtime(),
+            &crate::boot::HostSurface::default(),
+        )
+    }
+
     /// The recipe a parent is built by: core's own surface, the prelude
     /// seated, and a session's policy.
     fn booted() -> Shell {
@@ -258,6 +268,7 @@ mod tests {
         parent.set_var("blk".to_string(), blk.clone());
         let has = parent
             .session
+            .runtime
             .builtins
             .value("has")
             .expect("`has` is a builtin");
@@ -343,7 +354,7 @@ mod tests {
     fn a_bequest_survives_the_wire() {
         let parent = parent();
         let b = parent.bequeath(SpawnGrant::Base("confined".into()));
-        let d = through_the_wire(&b, &parent.runtime());
+        let d = through_the_wire(&b, &runtime());
 
         assert_eq!(names(&b.image.env), names(&d.image.env));
         for name in names(&b.image.env) {
@@ -418,7 +429,7 @@ mod tests {
     fn a_child_is_the_same_from_either_bequest() {
         let parent = parent();
         let b = parent.bequeath(SpawnGrant::Inherit);
-        let decoded = through_the_wire(&b, &parent.runtime());
+        let decoded = through_the_wire(&b, &runtime());
         let layers = parent.context.grants.len();
         let (unit, var) = *parent
             .fixings()
@@ -428,7 +439,7 @@ mod tests {
             .next()
             .expect("the parent fixed a unit");
         for (arm, bequest) in [("the bequest", b), ("the decoded bequest", decoded)] {
-            let child = Shell::child_of(parent.runtime(), bequest, no_base).expect("a child");
+            let child = Shell::child_of(runtime().into(), bequest, no_base).expect("a child");
             assert!(child.session.hooks.is_none(), "{arm}: no hooks");
             assert!(child.session.terminal_lease.is_none(), "{arm}: no lease");
             assert!(matches!(child.io.stdin, crate::io::Source::Empty), "{arm}");
@@ -445,11 +456,7 @@ mod tests {
             assert_eq!(child.local.workers.retention(), Some(5), "{arm}");
             let detach = child.detach_policy().expect("armed");
             assert_eq!(detach.budget, 4, "{arm}");
-            assert_eq!(
-                detach.births.load(std::sync::atomic::Ordering::Relaxed),
-                0,
-                "{arm}: the budget is unspent"
-            );
+            assert_eq!(detach.born(), 0, "{arm}: the budget is unspent");
             assert_eq!(child.session.stack_limit, 12_345, "{arm}");
             let held = child.fixings().fix(unit, var, crate::ty::Side::Text, "/t");
             assert!(held.is_err(), "{arm}: the parent's fixed unit");
