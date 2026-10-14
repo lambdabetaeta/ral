@@ -27,7 +27,7 @@
 pub mod accounts;
 pub mod boot;
 pub mod grant;
-pub mod machine_dial;
+pub mod machine_factory;
 pub mod prompt;
 pub mod session;
 #[cfg(test)]

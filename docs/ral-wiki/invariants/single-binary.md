@@ -23,8 +23,8 @@ only under `test-util`, so release binaries ship none:
   rather than argv, or at spawn on Windows (an AppContainer, no child re-exec
   there), confined by the `sandbox_projection` of the live
   [[design/grant|grant]];
-- a wire-seat agent hatch re-execs an engine child under `--engine`, seeded
-  from an `EngineSeed` the parent packs ([[map/core/transport|transport]]).
+- the guest daemon spawns every engine under `--engine`, a child's seed
+  arriving sealed in its `Attach` ([[map/core/transport|transport]]).
 
 This in-process linking is also what routes the bundled tools through the same
 capability chokepoint as the structured primitives.

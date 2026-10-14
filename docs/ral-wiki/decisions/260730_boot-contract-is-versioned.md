@@ -122,3 +122,7 @@ Cite: `ral-daemon/src/boot.rs` (`CONTRACT`, `MANIFEST_KEY`, `check_media`),
 `ral-daemon/examples/boot-contract.rs`, `vm-image/build-boot.sh`,
 `vm-image/out/boot/boot-manifest.txt`, `synod/build.rs` (`boot_contract`),
 `vm-image/README.md`.
+
+## Amendment, 2026-10-13
+
+The contract is at 3: the factory port, on which the daemon listens for the host's engine dials ([[decisions/261013_the-seed-rides-the-protocol-sealed|the-seed-rides-the-protocol-sealed]]).

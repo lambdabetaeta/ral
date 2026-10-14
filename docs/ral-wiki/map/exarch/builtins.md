@@ -1,6 +1,6 @@
 ---
-generated_at_commit: c52e910a
-generated_at_date: 2026-10-09
+generated_at_commit: e028f5a3
+generated_at_date: 2026-10-13
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/skill.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/src/enquiry.rs, exarch/src/library.rs, exarch/data/agent.ral]
 ---
 
@@ -33,8 +33,8 @@ prefix keeps the witness un-lexable as an integer, so a hash never elaborates to
 harness verbs and core's host-selected `SERVICE_BUILTIN`. Core's `boot_shell`
 takes the surface and installs it at construction (a half-dressed production
 shell is unrepresentable), and the wire engine boots the same dressing
-through its `EngineInstaller` *boot recipe*
-(`boot::engine_boot_shell`), named on the wire by `INSTALLER_TAG` in
+through its `EngineInstaller`'s two halves
+(`boot::engine_runtime` and `boot::engine_root`), named on the wire by `INSTALLER_TAG` in
 `Frame::Attach`.
 The bulk-I/O atoms read in Rust, **below the redirect frame**, so each is one
 logical operation with one surface ([[map/exarch/io-surface|io-surface]]).
@@ -460,7 +460,7 @@ is a second, narration-only tool outside this harness/tool boundary
   `skill-list`/`skill`.
 - `exarch/src/agent/desk.rs` and `agent/desk/` — `HostServices`, `ExarchDesk`, and the handler
   for each enquiry class.
-- `exarch/data/agent.ral` — the helper library; installed by `library::install_agent_library`, which `boot::engine_boot_shell` calls
+- `exarch/data/agent.ral` — the helper library; installed by `library::install_agent_library`, which `boot::engine_root` calls
   ([[map/exarch|exarch]] hub).
 - The model-facing tool that carries every one of these calls is
   [[map/exarch/tools|`ral`]].

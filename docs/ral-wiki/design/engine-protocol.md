@@ -22,11 +22,15 @@ and a binding is only the carriage around it.
   one on a worker thread behind a frame loop. They differ only in the
   `Rails` each lays for a dispatch: where its events go, who answers its
   enquiries, and how a session it forks is adopted.
-- **One boot.** Every engine is born from an `EngineInstaller` and an
+- **One construction.** Every engine is born from an `EngineInstaller` and an
   `Attach`, and `Engine::boot` does it once for both carriers: resolve the
-  installer (version first, then tag), run its recipe, seat the attach's cwd
-  and env, face the process's signals, jail a guest, apply a hatch seed.
-  Construction is attach: `IdentityTransport::boot` returns the verdict the
+  installer (version first, then tag), derive its `Runtime`, then either
+  `Shell::root` and the root recipe, or `Shell::child_of` over a decoded
+  `Bequest`; seat the attach's cwd and env, face the process's signals, jail a
+  guest. The identity carrier constructs its child from the runtime it was
+  born with and the parked bequest, so a fork too is the trivial instantiation
+  of what the wire encodes. Construction is attach: `IdentityTransport::boot`
+  returns the verdict the
   wire's `await_attached` does — `Severed::Refused`, in the refusing step's
   own words — so a transport in hand is one its engine accepted.
 - **No front-end holds a `Shell`.** Nothing public on `IdentityTransport`
@@ -92,11 +96,16 @@ fields (`Run`, `Ending`, `Control`, `Attach`) are closed Rust types, and
 nothing in either carries an fd, a handle, a closure, or a capability beyond
 what a `Run`'s ceiling already states. `Attach` carries only what an engine
 reads — the terminal state, cwd, home, protocol version, installer tag, the
-host's per-session env, and `config`, the installer's own settings as an
-`FOValue` its recipe decodes and core never reads. `SerialValue` — the
-closure-capable sibling that carries a forked session into a hatched engine
-(*The hatch*, below) — is a different type for a different domain; it never
-reaches the protocol.
+host's per-session env, `config`, the installer's own settings as an
+`FOValue` its recipe decodes and core never reads, and `seed`, a sealed
+bequest the engine alone reads. `SerialValue` — the closure-capable sibling
+that carries a forked session into a sealed child engine (*The factory*,
+below) — is a different type for a different domain; it never reaches the
+protocol, and the host never reads the bytes it travels as. That is the
+**opacity law**: a payload the host relays but never reads crosses as bytes;
+its content is a contract between the engines at its two ends, and the
+spawner is what makes those ends one binary
+([[decisions/261013_the-seed-rides-the-protocol-sealed|the-seed-rides-the-protocol-sealed]]).
 
 The **envelope** — `Frame`, `Event`, `SessionEvent`, correlation ids,
 `Attach`'s handshake — stays a closed set of Rust types behind
@@ -222,12 +231,13 @@ say: it is carriage, and the carrier decides it.
 - **`Fork` is the carrier's arm.** The identity carrier lays `Fork::Park`
   over a nursery it owns: a spawning builtin parks the fork there, and the
   handler adopts it through the parent's own transport —
-  `IdentityTransport::adopt_parked(id, grant)`, a new transport over the
-  forked engine, so the host never holds a forked `Shell`. The wire carrier
-  lays `Fork::Listen` (see *The hatch*). Either way the child's one grant
-  layer is pushed by `SpawnGrant::narrow_onto`, under the parent installer's
-  `narrow` and against the child's own cwd — the one layering step an adopted
-  fork and a hatched seed share.
+  `IdentityTransport::adopt_parked(id)`, a new transport over the
+  child engine, so the host never holds a forked `Shell`. The wire carrier
+  lays `Fork::Seal` (see *The factory*): the builtin seals its bequest and
+  names the bytes in its enquiry, and the host makes the engine. Either way the child's one grant
+  layer is pushed by `Shell::child_of`, from the grant the `Bequest` carries,
+  under the parent installer's `narrow` and against the child's own cwd — the
+  one layering step an adopted fork and a sealed child share.
 
 ## Probes: boundary-time reads
 
@@ -280,12 +290,12 @@ effects. The isolation, scoped cancel and teardown a process also gives
 come along with it.
 
 - **No session is adopted into another's process.** In-process adoption of a
-  wire helper would delete the seed (*The hatch*) but would lose that bound.
+  wire helper would delete the seal (*The factory*) but would lose that bound.
   Recovering it means one of two things. The first is ending the guest
   whenever a helper fails to settle, which turns one wedged helper into the
   loss of the whole conversation. The second is a contract that no effect
   outlives its session, and cooperative cancellation cannot give one. Either
-  way the adoption needs more machinery than the seed costs: a session
+  way the adoption needs more machinery than the seal costs: a session
   supervisor, a process cancel root, an audit of every process-global
   mutation, and a new handshake. The host's identity seats share exarch's
   process, and accept the weaker bound there.
@@ -295,42 +305,37 @@ come along with it.
   that cannot be reborn here — a wire seat, whose engine was not booted by
   this process, or an adopted fork, whose authority a fresh boot would not
   carry — refuses `/clear` with a sentence.
-- **A sub-agent fork under the wire is a child engine spawned inside the
-  guest**, same binary, re-exec'd as `--engine`. The parent's scope crosses
-  as an `EngineSeed` over an inherited fd — same-binary, kernel-to-kernel,
-  the domain the closure-capable serial form already serves lawfully — and
-  never touches the engine protocol at all. The first-order law governs the
-  protocol between two parties who cannot assume each other's version; a
-  parent spawning its own child, same binary, is not that protocol.
+- **A sub-agent fork under the wire is a child engine spawned by the guest
+  daemon**, on a connection the host dialled, born from an `Attach` that
+  carries the parent's seal. The parent's `Bequest` crosses sealed: bytes the
+  host relays unread, interpreted only by two instances of one binary, both
+  spawned by the daemon from one path. The first-order law governs the
+  positions the host reads; this one it does not.
 
-## The hatch: the host dials in
+## The factory: the host dials the daemon
 
-A wire spawn is one exchange, not a standing listener answering an unbounded
-stream of dials: **the guest binds an ephemeral port for the duration of
-exactly one spawn**, and names it — port and an eight-byte token — in its
-own enquiry payload.
+A wire spawn is one exchange. **No engine spawns an engine**: the parent's
+fork builtin does no I/O, only `bequeath`, `seal`, and names the bytes in its
+enquiry as `` `sealed <bytes> ``.
 
-- The host, *while still answering that enquiry*, dials the named port and
-  writes the token.
-- The guest's listener thread checks the token, spawns `current_exe
-  --engine` with the dialled connection handed to it on the protocol fd and
-  the seed on an inherited one, and only *then* writes the single
-  acknowledgement byte, `HATCH_ACK` — the whole of the guest's readiness
-  signal, since the wire's only legal first frame is `Attach` and nothing
-  else remains to say it.
-- The host reads the ack, adopts the stream as the child's seat, and only
-  then enrols the child in the roster. **The child exists before the roster
-  names it**, literally: the ack is written after `spawn()` has already
-  returned.
+- The host, *while still answering that enquiry*, asks its `Factory` for a
+  connection: the desk dials `FACTORY_PORT`, the one guest port, on which the
+  guest daemon listens for the life of the VM.
+- The daemon admits only a peer whose CID is `VMADDR_CID_HOST` and drops
+  anything else; a guest process cannot present the host's CID, since the
+  guest kernel's transport writes the source. Each admitted connection is one
+  engine, spawned exactly as the root is, on fd 3.
+- The desk builds the child's `Attach` from the parent's own plus the seal,
+  writes it, waits for `Attached`, and only then answers the enquiry. **The
+  child exists and is attached before the roster names it.** A refused attach
+  reaches the parent as the desk's refusal, in the engine's words.
 
-Neither the token nor the ack is a frame; both live before the handshake,
-beside the algebra rather than inside it. The token secures *adoption*, not
-authority — a plain capability meet already stops a child exceeding its
-parent — by stopping an unrelated guest process from getting the host to
-build an agent around its socket. The seed itself is written only after the
-child is spawned and read before it waits for `Attach`, so neither side
-blocks the other on a buffer a large scope could outgrow; a partial seed
-kills the child on the spot rather than waiting on a death that never comes.
+The root keeps dialling out: its dial is the boot's readiness signal. Children
+are dialled in because the host already holds the spawn the connection is for,
+so no correlation is needed. The seal is a `Bequest` in wire form, carrying the
+parent's sources, terms and grant as well as its scope, and no recipe runs in a
+sealed child: it derives its runtime and constructs over the unsealed bequest.
+A child ends when the host drops its connection (EOF on fd 3).
 
 ## Liveness and severance
 
@@ -352,7 +357,7 @@ indistinguishable from one that no longer exists.
 
 Every terminal cause collapses into one type, **`Severed`**: the engine
 refused `Attach` in its own words (a version mismatch, an unknown installer,
-a seed it could not apply); the stream closed or a frame failed to cross;
+a seal it could not unseal); the stream closed or a frame failed to cross;
 nothing arrived before the liveness deadline; or the engine answered outside
 the protocol — a reading outside its class's shape, a frame only a front-end
 sends — a fault the front-end observed for itself and records through

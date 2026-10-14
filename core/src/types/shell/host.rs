@@ -7,6 +7,7 @@ use super::Mooring;
 use super::Shell;
 use super::TerminalAccess;
 use super::bindings::BindingLease;
+use super::construct::natives_and_base;
 use super::detached::DetachPolicy;
 use crate::io::Sink;
 use crate::process::{DurableRoot, ForegroundScope, TerminalLease};
@@ -14,7 +15,7 @@ use crate::source::SourceDb;
 use crate::terminal::TerminalState;
 use crate::ty::Fixings;
 use crate::types::ExitHints;
-use crate::types::{BuiltinEntry, Convention, ReapNotice, Set, WorkerEntry, WorkerId};
+use crate::types::{BuiltinEntry, ReapNotice, Set, WorkerEntry, WorkerId};
 use std::sync::Arc;
 
 impl Shell {
@@ -59,19 +60,6 @@ impl Shell {
         self.session.exit_hints = Arc::new(hints);
     }
 
-    /// Install the guest process jail — called only by an engine's boot when
-    /// it sees `RAL_GUEST`, so every recipe stays unaware that jails exist.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    pub(crate) fn install_guest_jail(&mut self, jail: Arc<crate::process::jail::GuestJail>) {
-        self.session.guest_jail = Some(jail);
-    }
-
-    /// The guest process jail installed on this session — `None` anywhere but
-    /// a real Linux guest.
-    pub(crate) fn guest_jail(&self) -> Option<Arc<crate::process::jail::GuestJail>> {
-        self.session.guest_jail.clone()
-    }
-
     /// Terminal state probed once at startup (isatty / ANSI / mode bits).
     pub fn terminal(&self) -> TerminalState {
         self.io.terminal
@@ -103,7 +91,7 @@ impl Shell {
     }
 
     /// The test-dressing door, with [`Self::install_captured_builtins`]; a
-    /// production host's surface rides [`HostSurface::shell`](crate::HostSurface::shell).
+    /// production host's surface rides [`HostSurface::runtime`](crate::HostSurface::runtime).
     pub fn install_builtins(&mut self, entries: &'static [BuiltinEntry]) {
         self.install_set(&Set::Static(entries));
     }
@@ -113,10 +101,14 @@ impl Shell {
     }
 
     /// Install `set`, then seed the base env scope and base handler frames
-    /// from it, unless it was already here.
+    /// from it, unless it was already here.  A child's runtime is the one its
+    /// engine was born with, read by `IdentityTransport::over`, so this is for
+    /// live shells only.
     pub(crate) fn install_set(&mut self, set: &Set) {
         if self.session.builtins.install(set.clone()) {
-            seed_natives_and_base(self, set);
+            let (natives, base) = natives_and_base(set);
+            Arc::make_mut(&mut self.sig).install_natives(natives);
+            self.context.handlers.install_base(&base);
         }
     }
 
@@ -276,30 +268,6 @@ impl Shell {
     pub(crate) fn grant_depth(&self) -> usize {
         self.context.grants.len()
     }
-}
-
-/// Seed freshly installed `entries` into the two places the manifest's two
-/// halves live: a value row becomes a native in the base env scope, an argv
-/// row a base handler frame.  Each row says which it is
-/// ([`Convention`](crate::types::Convention)); the one place either is
-/// populated, for core and host installs alike.
-fn seed_natives_and_base(shell: &mut Shell, entries: &[BuiltinEntry]) {
-    let natives = entries
-        .iter()
-        .filter(|entry| entry.decl.convention == Convention::Value)
-        .map(|entry| {
-            (
-                entry.decl.name.clone().into_owned(),
-                crate::types::builtin::native_value(entry),
-            )
-        });
-    let base: Vec<BuiltinEntry> = entries
-        .iter()
-        .filter(|entry| entry.decl.convention == Convention::Argv)
-        .cloned()
-        .collect();
-    Arc::make_mut(&mut shell.sig).install_natives(natives);
-    shell.context.handlers.install_base(&base);
 }
 
 #[cfg(test)]

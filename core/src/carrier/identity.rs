@@ -9,11 +9,10 @@ use super::{
 };
 use crate::engine::{Engine, EngineInstaller, Rails, Scopes};
 use crate::first_order::FOValue;
-use crate::guard::SpawnGrant;
 use crate::protocol::probe::Probe;
 use crate::protocol::{Attach, DispatchId, Event, Run};
 use crate::sync::LockExt as _;
-use crate::types::{Fork, Nursery, NurseryId};
+use crate::types::{Fork, Nursery, NurseryId, Runtime, Shell};
 
 /// A session lock that cannot poison-panic, named for the one state it
 /// guards: a run that unwinds drops its guard mid-mutation, and recovering
@@ -35,6 +34,9 @@ pub struct IdentityTransport {
     /// dispatch still waiting to take it.
     scopes: Arc<Scopes>,
     installer: &'static EngineInstaller,
+    /// The root's runtime as born, read before the engine went behind the
+    /// lock; every child adopted here shares it.
+    runtime: Runtime,
     /// Where this transport's runs park their forks — outside the lock, so a
     /// handler can adopt one mid-dispatch.
     nursery: Nursery,
@@ -49,7 +51,7 @@ impl IdentityTransport {
     /// [`Severed::Refused`], in the refusing step's own words — the verdict
     /// `WireTransport::await_attached` gives.
     pub fn boot(installers: &'static [EngineInstaller], attach: &Attach) -> Result<Self, Severed> {
-        Engine::boot(installers, attach, None)
+        Engine::boot(installers, attach)
             .map(Self::over)
             .map_err(Severed::Refused)
     }
@@ -57,9 +59,11 @@ impl IdentityTransport {
     fn over(engine: Engine) -> Self {
         let (event_tx, event_rx) = mpsc::channel();
         let scopes = engine.scopes().clone();
+        let runtime = engine.shell.runtime();
         let control = ControlSender::new(Door::Identity(scopes.clone()));
         Self {
             installer: engine.installer(),
+            runtime,
             scopes,
             engine: SessionLock(std::sync::Mutex::new(engine)),
             nursery: Nursery::default(),
@@ -68,22 +72,22 @@ impl IdentityTransport {
         }
     }
 
-    /// Adopt the fork a run parked under `id` as an engine of its own, its
-    /// grant layer narrowed against the fork's own cwd under this transport's
-    /// installer.
+    /// Adopt the bequest a run parked under `id` as an engine of its own: a
+    /// child of this transport's runtime, its grant layer narrowed against its
+    /// own cwd under this transport's installer.
     ///
     /// # Errors
-    /// No fork parked under `id`, or whatever narrowing `grant` refuses.
-    pub fn adopt_parked(&self, id: NurseryId, grant: &SpawnGrant) -> Result<Self, String> {
-        let mut shell = self.nursery.adopt(id).ok_or_else(|| {
+    /// No bequest parked under `id`, or whatever narrowing its grant refuses.
+    pub fn adopt_parked(&self, id: NurseryId) -> Result<Self, String> {
+        let bequest = self.nursery.adopt(id).ok_or_else(|| {
             format!(
                 "no forked session is parked under nursery id {}: was it adopted already, or \
                  has the run that forked it ended?",
                 id.0
             )
         })?;
-        grant.narrow_onto(&mut shell, self.installer.narrow)?;
-        Ok(Self::over(Engine::new(shell, self.installer, Box::new(()))))
+        let shell = Shell::child_of(self.runtime.clone(), bequest, self.installer.narrow)?;
+        Ok(Self::over(Engine::new(shell, self.installer)))
     }
 
     /// Read the engine's shell under the session lock.

@@ -15,13 +15,13 @@
 //!   pump, which carries the `tun`'s IP to and from the user-mode TCP/IP
 //!   stack that is the guest's entire network.
 //!
-//! In both cases the *guest* dials and the host listens, never the reverse.
-//! That asymmetry is worth stating because it is what makes the daemon so
-//! small: a connection that exists is already proof the host is there, so
-//! there is no accept loop and no readiness handshake on any of them.  The
-//! daemon itself binds nothing; the one guest listener in this VM belongs to
-//! the engine, which binds an ephemeral port for the duration of a single
-//! child-engine spawn and closes it again (exarch's `guest_port`).
+//! In all three the *guest* dials and the host listens.  That asymmetry is
+//! what makes the daemon so small: a connection that exists is already proof
+//! the host is there, so there is no readiness handshake on any of them.  The
+//! daemon binds exactly one guest port, the engine factory
+//! ([`crate::boot::FACTORY_PORT`]), and that is the one channel the host
+//! opens; the peer-CID check in [`accept_from_host`] is what makes a standing
+//! listener safe.
 //!
 //! The `socket`/`connect` pair below is written out here rather than borrowed
 //! from the engine's own copy, for the reason [`crate::reap`] gives about
@@ -44,20 +44,29 @@ fn vsock_socket() -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(raw) })
 }
 
-/// The host's end of this guest's port space.
+/// The `sockaddr_vm` for `cid` and `port`.
 ///
 /// # Panics
 /// Never in practice: `AF_VSOCK` is a small positive constant, always a valid
 /// `sa_family_t`.
-fn host_addr(port: u32) -> libc::sockaddr_vm {
+fn addr(cid: u32, port: u32) -> libc::sockaddr_vm {
     libc::sockaddr_vm {
         svm_family: libc::sa_family_t::try_from(libc::AF_VSOCK)
             .expect("AF_VSOCK is a small positive address family"),
         svm_reserved1: 0,
         svm_port: port,
-        svm_cid: libc::VMADDR_CID_HOST,
+        svm_cid: cid,
         svm_zero: [0; 4],
     }
+}
+
+/// The size of a `sockaddr_vm`.
+///
+/// # Panics
+/// Never: a socket address is far smaller than `socklen_t`'s range.
+fn addr_len() -> libc::socklen_t {
+    libc::socklen_t::try_from(size_of::<libc::sockaddr_vm>())
+        .expect("a socket address is far smaller than socklen_t's range")
 }
 
 /// Open a stream to the host on `port`.
@@ -71,14 +80,10 @@ fn host_addr(port: u32) -> libc::sockaddr_vm {
 /// Returns the errno `socket(2)` or `connect(2)` gave, unadorned: the sentence
 /// a user reads is the caller's to write, since only the caller knows which
 /// channel was being opened and what its absence means.
-///
-/// # Panics
-/// Never: a socket address is far smaller than `socklen_t`'s range.
 pub(crate) fn dial_host(port: u32) -> io::Result<OwnedFd> {
     let socket = vsock_socket()?;
-    let addr = host_addr(port);
-    let len = libc::socklen_t::try_from(size_of::<libc::sockaddr_vm>())
-        .expect("a socket address is far smaller than socklen_t's range");
+    let addr = addr(libc::VMADDR_CID_HOST, port);
+    let len = addr_len();
     // SAFETY: `addr` is a fully initialised `sockaddr_vm` and `len` is its own
     // size, which is what `connect(2)` reads.
     let rc = unsafe { libc::connect(socket.as_raw_fd(), std::ptr::from_ref(&addr).cast(), len) };
@@ -86,6 +91,69 @@ pub(crate) fn dial_host(port: u32) -> io::Result<OwnedFd> {
         return Err(io::Error::last_os_error());
     }
     Ok(socket)
+}
+
+/// Bind and listen on `port` of this guest, any peer, `SOCK_CLOEXEC`.
+///
+/// # Errors
+/// Returns the errno `socket(2)`, `bind(2)` or `listen(2)` gave.
+pub(crate) fn listen(port: u32) -> io::Result<OwnedFd> {
+    let socket = vsock_socket()?;
+    let addr = addr(libc::VMADDR_CID_ANY, port);
+    // SAFETY: `addr` is a fully initialised `sockaddr_vm` and the length is
+    // its own size, which is what `bind(2)` reads.
+    let rc = unsafe {
+        libc::bind(
+            socket.as_raw_fd(),
+            std::ptr::from_ref(&addr).cast(),
+            addr_len(),
+        )
+    };
+    if rc < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: a plain `listen(2)` on a descriptor this call owns.
+    if unsafe { libc::listen(socket.as_raw_fd(), libc::SOMAXCONN) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(socket)
+}
+
+/// The one admission rule, as data: only `VMADDR_CID_HOST` is the host.
+fn is_host(cid: u32) -> bool {
+    cid == libc::VMADDR_CID_HOST
+}
+
+/// Accept one connection; `None` if the peer was not the host, whose
+/// connection is then dropped. Retries `EINTR`.
+///
+/// # Errors
+/// Returns the errno `accept4(2)` gave.
+pub(crate) fn accept_from_host(listener: &OwnedFd) -> io::Result<Option<OwnedFd>> {
+    loop {
+        let mut peer: libc::sockaddr_vm = addr(0, 0);
+        let mut len = addr_len();
+        // SAFETY: `peer` and `len` are live out parameters of the size
+        // `accept4(2)` is told.
+        let raw = unsafe {
+            libc::accept4(
+                listener.as_raw_fd(),
+                std::ptr::from_mut(&mut peer).cast(),
+                &raw mut len,
+                libc::SOCK_CLOEXEC,
+            )
+        };
+        if raw < 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
+        // SAFETY: `raw` is a fresh descriptor this call owns.
+        let conn = unsafe { OwnedFd::from_raw_fd(raw) };
+        return Ok(is_host(peer.svm_cid).then_some(conn));
+    }
 }
 
 /// Ask the kernel for `bytes` of send and receive buffer on `socket`.
@@ -131,4 +199,17 @@ pub(crate) fn set_buffer_sizes(socket: BorrowedFd<'_>, bytes: u32) -> io::Result
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_host_is_the_host() {
+        assert!(is_host(libc::VMADDR_CID_HOST));
+        for cid in [libc::VMADDR_CID_LOCAL, libc::VMADDR_CID_ANY, 3] {
+            assert!(!is_host(cid), "cid {cid} is not the host");
+        }
+    }
 }

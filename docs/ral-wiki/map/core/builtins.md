@@ -1,5 +1,5 @@
 ---
-generated_at_commit: b620692f
+generated_at_commit: e028f5a3
 generated_at_date: 2026-10-13
 covers_paths: [core/src/builtins/, core/src/builtins.rs, core/src/uutils.rs]
 ---
@@ -29,7 +29,7 @@ can hand a value of another type to a name the checker believes is `Unit`.
 The manifest is *authored as two*, and
 that authoring — not the arity — is the classification: a table entry seeds a
 `Value::Native` in the base scope, a base-frame row seeds a base handler frame
-(`native_value`, `seed_natives_and_base` in `types/shell/host.rs`;
+(`native_value`, `Runtime::install_set` in `types/shell/construct.rs`;
 [[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]],
 [[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
 A body is a `BuiltinBody` — a `Static` `fn(&[Value], &Mooring, &mut Shell) ->
@@ -218,7 +218,7 @@ Bodies are grouped by concern, one submodule each:
   its cancelled losers, and a settled `poll` remove the entry from whichever
   shell observes it, an explicit `cancel` removes it too, and a pending
   `poll` or a bare listing never touches the registry. A `Handle` is
-  process-local: `Shell::fork_scrubbed` scrubs it from every fork, and a run
+  process-local: `Shell::bequeath` scrubs it from every fork, and a run
   whose result is or holds one ends `Unreturnable` (`core/src/run/report.rs`);
 - `modules.rs` — the cacheless `use` loader (a boundary: it builds the export
   record and admits it with `Site::admit_module`, holding each function to the

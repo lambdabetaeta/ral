@@ -1,39 +1,36 @@
 //! Engines for core's own tests, booted as every engine is.
 
 use super::IdentityTransport;
-use crate::engine::{Booted, EngineInstaller};
+use crate::engine::EngineInstaller;
 use crate::protocol::{Attach, Report, Run};
+use crate::terminal::TerminalState;
+use crate::types::{Runtime, Shell};
 
-/// An installer that never hatches, so it states the one policy a host
+/// An installer that never makes children, so it states the one policy a host
 /// with no grant lexicon can: no seeded child.
 pub(crate) const fn installer(
     tag: &'static str,
-    boot: fn(&Attach) -> Result<Booted, String>,
+    runtime: fn(&Attach) -> Result<Runtime, String>,
+    root: fn(&Attach, &mut Shell) -> Result<(), String>,
 ) -> EngineInstaller {
     EngineInstaller {
         tag,
-        boot,
+        runtime,
+        root,
         narrow: |base, _| {
             Err(format!(
-                "this engine hatches no children, so it has no policy to resolve `{base}` by"
+                "this engine makes no children, so it has no policy to resolve `{base}` by"
             ))
         },
     }
 }
 
-#[allow(
-    clippy::unnecessary_wraps,
-    reason = "must match EngineInstaller::boot's signature, which can genuinely refuse"
-)]
-fn bare(_attach: &Attach) -> Result<Booted, String> {
-    Ok(Booted {
-        shell: crate::test_helper::core_shell(),
-        keep: Box::new(()),
-    })
-}
-
-/// A shell with no prelude and no surface.
-pub(crate) static BARE: [EngineInstaller; 1] = [installer("bare", bare)];
+/// A runtime with no prelude and no surface.
+pub(crate) static BARE: [EngineInstaller; 1] = [installer(
+    "bare",
+    |_| Ok(crate::HostSurface::default().runtime(TerminalState::default())),
+    |_, _| Ok(()),
+)];
 
 /// An attach to `installers`' first recipe, seated in the temp dir.
 pub(crate) fn attach(installers: &[EngineInstaller]) -> Attach {

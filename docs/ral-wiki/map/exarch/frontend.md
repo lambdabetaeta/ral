@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 28d06d78
-generated_at_date: 2026-10-11
+generated_at_commit: e028f5a3
+generated_at_date: 2026-10-13
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/record/session.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/cancel.rs, exarch/src/boot.rs, exarch/src/agent/seat.rs, exarch/src/signals.rs, exarch/src/prompt/host.rs]
 ---
 
@@ -556,8 +556,8 @@ A genuine external signal still routes through ral's one cause-carrying
 delivery path ([[decisions/260706_signals-are-causes|signals-are-causes]]).
 `boot::face_process_signals` (`boot.rs`) runs once per entry point: it discards
 stale ral interrupts and installs the cancel chain over ral's handlers. Every
-session shell boots through `boot::engine_boot_shell`, the one
-`EngineInstaller::boot`; `/clear` reboots the seat (`Seat::clear`,
+session shell boots through the installer's two halves,
+`boot::engine_runtime` and `boot::engine_root`; `/clear` reboots the seat (`Seat::clear`,
 `agent/seat.rs`) and republishes the fresh engine's control sender to the
 agent's `InterruptTarget` (`cancel.rs`), so Esc and SIGINT after `/clear` still
 reach the new shell. `prompt/host.rs` snapshots the machine (OS, date, cwd,

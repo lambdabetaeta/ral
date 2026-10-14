@@ -1,8 +1,7 @@
-//! The desk's wire arm: `` `start `` dialling a guest that is listening for
-//! exactly one connection, over a fake dialler and a re-exec'd `--engine`
-//! child standing in for the hatched guest — the same vehicle the wire seat's
-//! own tests already use, since a genuine vsock dial only means anything
-//! inside a real guest.
+//! The desk's wire arm: `` `start `` making an engine through a fake factory
+//! and a re-exec'd `--engine` child standing in for the guest daemon's
+//! spawn, the same vehicle the wire seat's own tests use, since a genuine
+//! vsock factory only means anything inside a real guest.
 
 use super::super::*;
 use super::{confined, message_req, spec, start};
@@ -13,10 +12,9 @@ use crate::enquiry::ForkClaim;
 use crate::record::AgentId;
 use crate::record::AgentLog;
 use crate::test_helper::spawn_engine_on;
+use ral_core::seed::{Sealed, seal};
 use ral_core::types::NurseryId;
-use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
 use std::sync::Mutex as StdMutex;
 
 /// Each log takes the next session id, so two of them are never the same
@@ -32,76 +30,58 @@ fn fresh_log() -> AgentLog {
     .expect("session log")
 }
 
-/// What the guest at the far end of a [`FakeDial`] does with the dial.
+/// What the far end of a [`FakeFactory`] does when asked for an engine.
 enum Guest {
-    /// The whole spine: read the token, spawn the child, then ack — the
-    /// order the guest's hatch in `ral_core::hatch` keeps, since the ack is the
-    /// claim that the child exists.
-    Hatches,
-    /// A guest-side hatch that failed: read the token and close, saying
-    /// nothing. The host's ack read sees EOF.
-    ClosesWithoutAcking,
-    /// Nothing is listening on that port.
+    /// A real `--engine` child on the other end of a socketpair, as the
+    /// guest daemon spawns one onto a connection.
+    Spawns,
+    /// A guest whose engine died at birth: a connection, and nobody on it.
+    Closes,
+    /// No engine could be made.
     Refuses(String),
 }
 
-/// A fake [`crate::agent::Dial`] that plays the guest. `dial` hands back
-/// one end of a socketpair and leaves a thread on the other end doing
-/// whatever this fake's [`Guest`] says, so the desk under test drives a
-/// real handshake against a real peer.
-struct FakeDial {
+/// A fake [`crate::agent::Factory`] that plays the guest daemon, so the desk
+/// under test drives a real handshake against a real peer.
+struct FakeFactory {
     guest: Guest,
-    /// Every port `dial` was asked for, in order.
-    ports: StdMutex<Vec<u32>>,
-    /// Every token a guest thread actually read off the wire.
-    tokens: Arc<StdMutex<Vec<u64>>>,
-    /// Engine children the guest threads spawned, for the test to reap.
-    children: Arc<StdMutex<Vec<std::process::Child>>>,
+    calls: StdMutex<usize>,
+    /// Engine children the factory spawned, for the test to reap.
+    children: StdMutex<Vec<std::process::Child>>,
 }
 
-impl FakeDial {
+impl FakeFactory {
     fn new(guest: Guest) -> Arc<Self> {
         Arc::new(Self {
             guest,
-            ports: StdMutex::new(Vec::new()),
-            tokens: Arc::new(StdMutex::new(Vec::new())),
-            children: Arc::new(StdMutex::new(Vec::new())),
+            calls: StdMutex::new(0),
+            children: StdMutex::new(Vec::new()),
         })
     }
 
-    fn ports(&self) -> Vec<u32> {
-        self.ports.lock().unwrap().clone()
+    fn calls(&self) -> usize {
+        *self.calls.lock().unwrap()
+    }
+
+    fn reap(&self) {
+        for mut child in self.children.lock().unwrap().drain(..) {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
 
-impl crate::agent::Dial for FakeDial {
-    fn dial(&self, port: u32) -> Result<ral_core::protocol::channel::WireStream, String> {
-        self.ports.lock().unwrap().push(port);
-        let hatches = match &self.guest {
-            Guest::Refuses(reason) => return Err(reason.clone()),
-            Guest::Hatches => true,
-            Guest::ClosesWithoutAcking => false,
-        };
+impl crate::agent::Factory for FakeFactory {
+    fn engine(&self) -> Result<ral_core::protocol::channel::WireStream, String> {
+        *self.calls.lock().unwrap() += 1;
+        if let Guest::Refuses(reason) = &self.guest {
+            return Err(reason.clone());
+        }
         let (host, guest) =
-            UnixStream::pair().map_err(|e| format!("socketpair for the fake dial: {e}"))?;
-        let tokens = self.tokens.clone();
-        let children = self.children.clone();
-        std::thread::spawn(move || {
-            let mut guest = guest;
-            let mut claim = [0u8; 8];
-            if guest.read_exact(&mut claim).is_err() {
-                return;
-            }
-            tokens.lock().unwrap().push(u64::from_le_bytes(claim));
-            if !hatches {
-                return;
-            }
-            let child = spawn_engine_on(&guest);
-            guest
-                .write_all(&[ral_core::protocol::HATCH_ACK])
-                .expect("ack the hatch");
-            children.lock().unwrap().push(child);
-        });
+            UnixStream::pair().map_err(|e| format!("socketpair for the fake factory: {e}"))?;
+        if matches!(self.guest, Guest::Spawns) {
+            self.children.lock().unwrap().push(spawn_engine_on(&guest));
+        }
         Ok(host)
     }
 }
@@ -111,7 +91,7 @@ impl crate::agent::Dial for FakeDial {
 /// a real reach value's *shape* but never actually cancel or interrupt
 /// through it.
 fn fake_wire_reach() -> InterruptTarget {
-    let (host, guest) = UnixStream::pair().expect("socketpair standing in for the dial");
+    let (host, guest) = UnixStream::pair().expect("socketpair standing in for the factory");
     let mut child = spawn_engine_on(&guest);
     drop(guest);
     let transport = ral_core::carrier::WireTransport::adopt(
@@ -127,12 +107,12 @@ fn fake_wire_reach() -> InterruptTarget {
 
 /// A wire-seat desk fixture whose parent holds the very inbox this
 /// returns, exactly [`super::spawnable_desk`]'s identity shape with
-/// `kind: SeatKind::Wire` and a dialler installed.
-fn wire_spawnable_desk(fuel: u32, dial: Arc<FakeDial>) -> (ExarchDesk, Arc<Fleet>, Inbox) {
+/// `kind: SeatKind::Wire` and a factory installed.
+fn wire_spawnable_desk(fuel: u32, factory: Arc<FakeFactory>) -> (ExarchDesk, Arc<Fleet>, Inbox) {
     let parent_inbox = Inbox::new();
     let fleet = Fleet::new(
         crate::agent::fleet::Launch {
-            dial: Some(dial),
+            factory: Some(factory),
             ..crate::agent::fleet::Launch::for_test()
         },
         crate::agent::fleet::AGENT_LEASE_IDLE,
@@ -150,8 +130,7 @@ fn wire_spawnable_desk(fuel: u32, dial: Arc<FakeDial>) -> (ExarchDesk, Arc<Fleet
         services: HostServices {
             fleet: fleet.clone(),
             kind: SeatKind::Wire {
-                cwd: PathBuf::from("/work"),
-                home: PathBuf::from("/tmp"),
+                attach: crate::boot::test_attach(),
             },
             stamp: agent.mailbox.stamp(),
             agent,
@@ -166,76 +145,119 @@ fn wire_spawnable_desk(fuel: u32, dial: Arc<FakeDial>) -> (ExarchDesk, Arc<Fleet
     (desk, fleet, parent_inbox)
 }
 
-/// `` `exarch-agents `start `` as a listening engine sends it: the port its
-/// listener is bound to, and the token that listener will check the
-/// host's dial against.
-fn wire_start_req(name: &str, port: u32, token: u64) -> Request {
-    start(
-        ForkClaim::Listening { port, token },
-        spec("go", name, confined(), false),
-    )
+/// The parent's bequest as a wire engine seals it, carrying `PARENT_MARK=1`.
+fn parent_seal() -> Sealed {
+    let mut shell = crate::boot::test_shell();
+    shell.set_env_var("PARENT_MARK", "1");
+    seal(&shell.bequeath(ral_core::SpawnGrant::Inherit)).expect("a bequest seals")
 }
 
-/// A guest whose own hatch failed closes without acking. The host has a
-/// connection and no child, and must say so rather than register one.
+/// `` `exarch-agents `start `` as a wire engine sends it: its bequest, sealed.
+fn wire_start_req(name: &str, seed: Sealed) -> Request {
+    start(ForkClaim::Sealed(seed), spec("go", name, confined(), false))
+}
+
+/// An engine that died at birth leaves the host a connection and no child,
+/// and it must say so rather than register one.
 #[test]
-fn wire_spawn_refuses_when_the_guest_closes_without_acking() {
-    let dial = FakeDial::new(Guest::ClosesWithoutAcking);
-    let (desk, _fleet, _parent_inbox) = wire_spawnable_desk(3, dial);
+fn wire_spawn_refuses_when_the_engine_closes_before_attaching() {
+    let factory = FakeFactory::new(Guest::Closes);
+    let (desk, _fleet, _parent_inbox) = wire_spawnable_desk(3, factory);
 
     let err = desk
-        .ask(wire_start_req("unacked", 41_731, 7))
-        .expect_err("an unacknowledged hatch must be refused");
+        .ask(wire_start_req("unattached", parent_seal()))
+        .expect_err("an engine that never attached must be refused");
     assert!(
-        err.message
-            .contains("the guest closed the connection before acknowledging the hatch"),
+        err.message.contains("could not be started"),
         "got: {}",
         err.message
     );
     assert_eq!(
         summary(&desk.services.agent).live,
         0,
-        "a hatch that was never acknowledged names no child on the roster"
+        "an engine that never attached names no child on the roster"
     );
 }
 
-/// A dial the guest refuses — nothing bound on that port — is refused
-/// with a sentence naming the dial, so the builtin's own listener thread
-/// learns why it was never reached.
+/// A factory that cannot make an engine is refused with a sentence naming
+/// the factory's reason.
 #[test]
-fn wire_spawn_refuses_naming_the_dial_when_the_guest_refuses_it() {
-    let dial = FakeDial::new(Guest::Refuses("connection reset by peer".to_string()));
-    let (desk, _fleet, _parent_inbox) = wire_spawnable_desk(3, dial);
+fn wire_spawn_refuses_naming_the_factory_when_it_refuses() {
+    let factory = FakeFactory::new(Guest::Refuses("connection reset by peer".to_string()));
+    let (desk, _fleet, _parent_inbox) = wire_spawnable_desk(3, factory);
 
     let err = desk
-        .ask(wire_start_req("never-reached", 41_731, 7))
-        .expect_err("a refused dial must be refused");
+        .ask(wire_start_req("never-made", parent_seal()))
+        .expect_err("a refused factory must be refused");
     assert!(
-        err.message.contains("could not dial") && err.message.contains("41731"),
-        "must name the dial and the port, got: {}",
+        err.message.contains("could not make a helper engine")
+            && err.message.contains("connection reset by peer"),
+        "must name the factory's refusal and its reason, got: {}",
         err.message
     );
 }
 
 /// The identity tag on a wire desk is a guest claiming to be in process.
-/// Refused, and before anything is dialled.
+/// Refused, and before the factory is asked.
 #[test]
-fn wire_spawn_refuses_a_parked_fork_without_dialling() {
-    let dial = FakeDial::new(Guest::Hatches);
-    let (desk, _fleet, _parent_inbox) = wire_spawnable_desk(3, dial.clone());
+fn wire_spawn_refuses_a_parked_fork_without_asking_the_factory() {
+    let factory = FakeFactory::new(Guest::Spawns);
+    let (desk, _fleet, _parent_inbox) = wire_spawnable_desk(3, factory.clone());
 
     let err = desk
         .ask(super::start_req(NurseryId(0), "go", "in-process", false))
         .expect_err("a wire desk has no nursery to adopt a parked fork from");
     assert!(
-        err.message.contains("`listening [port, token]`"),
+        err.message.contains("`sealed <bytes>`"),
         "must name the tag this host does take, got: {}",
         err.message
     );
-    assert!(
-        dial.ports().is_empty(),
-        "a fork this desk cannot reach is refused before any dial"
+    assert_eq!(
+        factory.calls(),
+        0,
+        "a fork this desk cannot reach is refused before the factory is asked"
     );
+}
+
+/// The seal crosses the host untouched: the engine the factory made is a
+/// child of the sealing parent, attached before the desk answers. `branch`
+/// takes the same arm as `start` but leaves the child in the order, where
+/// its seat can be probed.
+#[test]
+fn a_sealed_bequest_reaches_the_child_engine() {
+    let factory = FakeFactory::new(Guest::Spawns);
+    let (mut desk, _fleet, _parent_inbox) = wire_spawnable_desk(3, factory.clone());
+    let order = Arc::new(BranchOrder {
+        name: "sealed-branch".into(),
+        returns: true,
+        child: Mutex::default(),
+    });
+    desk.services.branch = Some(order.clone());
+
+    desk.ask(Request::Agents(Agents::Branch(ForkClaim::Sealed(
+        parent_seal(),
+    ))))
+    .expect("a sealed branch makes a child engine");
+    let child = order
+        .child
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the branch's child");
+    assert_eq!(
+        child
+            .seat
+            .read(|t| t.env_var("PARENT_MARK"))
+            .expect("the child engine answers a probe"),
+        Some("1".to_string()),
+        "the parent's env var reached the child through the sealed bequest"
+    );
+    drop(child);
+
+    desk.ask(wire_start_req("sealed-child", parent_seal()))
+        .expect("a sealed start makes and rosters a child engine");
+    assert_eq!(factory.calls(), 2);
+    factory.reap();
 }
 
 /// The peer-messaging pin: one identity-reach and one wire-reach child of
@@ -274,8 +296,7 @@ fn identity_and_wire_peers_exchange_messages_through_one_desk() {
             // Neither peer's transport matters to `message`, which
             // touches only the tree and a mailbox.
             kind: SeatKind::Wire {
-                cwd: PathBuf::from("/"),
-                home: PathBuf::from("/tmp"),
+                attach: crate::boot::test_attach(),
             },
             stamp: parent.mailbox.stamp(),
             agent: parent,

@@ -161,7 +161,7 @@ signal context. The two are different kinds of proposition.
   shell's does.
 - **A detached worker hears only the root**: `Terminate` reaches it, an
   interrupt, striking a run's frame, cannot.
-- **A forked session** (`Shell::fork_session` — exarch's sub-agents) hears no
+- **A forked session** (`Shell::bequeath` and `Shell::child_of` — exarch's sub-agents) hears no
   signal at all, and its host cancels it through a clonable handle on its
   durable root (`Shell::cancel_handle`)
   ([[decisions/260704_per-agent-eval-cancel|per-agent-eval-cancel]]).

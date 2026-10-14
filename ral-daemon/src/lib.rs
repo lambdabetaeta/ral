@@ -43,12 +43,14 @@
 //!     with no prologue ahead of it — create and address the `tun`
 //!     (`net::plan`, `net::Interface::apply`), and start the pump
 //!     (`pump::spawn`) that will shovel packets across it.
-//! 11. **Start the engine**, now that its network — if this boot has one —
-//!     is already live, and hand it the control-plane connection from step 9
-//!     as fd 3.
-//! 12. **Wait.**  Forever, until the engine or the pump dies, or the host
-//!     says stop — either child's death ends the session; see
-//!     `engine::epitaph` and `pump::epitaph`.
+//! 11. **Bind the engine factory** on `boot::FACTORY_PORT` and start the
+//!     thread that accepts the host's dials, one engine per connection.
+//! 12. **Start the root engine**, now that its network — if this boot has
+//!     one — is already live, and hand it the control-plane connection from
+//!     step 9 as fd 3.
+//! 13. **Wait.**  Forever, until the root engine or the pump dies, or the
+//!     host says stop — either's death ends the session, a child engine's
+//!     does not; see `engine::epitaph` and `pump::epitaph`.
 //!
 //! ## Console → host log
 //!

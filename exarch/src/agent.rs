@@ -43,8 +43,8 @@ mod build;
 mod command;
 pub mod deliberate;
 pub(crate) mod desk;
-mod dial;
 pub mod digest;
+mod factory;
 pub mod fleet;
 pub(crate) mod gauge;
 pub mod nudge;
@@ -61,7 +61,7 @@ pub(crate) mod tools;
 pub(crate) use build::TestTrunk;
 pub(crate) use build::{Build, fresh_id};
 pub use build::{RootConfig, RootSeat, Trunk};
-pub use dial::Dial;
+pub use factory::Factory;
 pub use seat::{EngineLost, EnginePhase};
 pub(crate) use shell::{Evaluated, LogCell, ReplyCell};
 

@@ -7,12 +7,12 @@
 //! so a malformed call never reaches the host, and is refused in the words
 //! the desk would use. `exarch-agents`'s `` `start `` tag, and the host-only
 //! `_exarch-branch`, fork this shell and tell the host how to reach the fork,
-//! which is what the run's [`Fork`] door says: an
-//! in-process host adopts a fork parked in the run's nursery, since the
-//! reentrancy law bars a desk handler from holding `&mut Shell` to fork one
-//! itself; a host across a wire is handed a guest port to dial, and dials it
-//! while it answers. [`crate::agent::desk::ExarchDesk`] answers every enquiry
-//! on the other side.
+//! which is what the run's [`Fork`] door says: an in-process host adopts a
+//! bequest parked in the run's nursery, since the reentrancy law bars a desk
+//! handler from holding `&mut Shell` to fork one itself; a host across a wire
+//! is named a sealed bequest, and builds an engine around it while it
+//! answers. [`crate::agent::desk::ExarchDesk`] answers every enquiry on the
+//! other side.
 //!
 //! All but `exarch-transcript` name a state, and answer it afterwards.
 //! `exarch-transcript` names the record instead, which no tag of it writes,
@@ -118,7 +118,7 @@ fn builtin_branch(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Sett
 }
 
 /// Fork this shell and enquire `request` of the fork's receipt, through the
-/// door this run's [`Fork`] names: parked in process, or listening across a
+/// door this run's [`Fork`] names: parked in process, or sealed across a
 /// wire. `` `start `` and `/branch` differ only in the request.
 fn fork_then_enquire(
     grant: SpawnGrant,
@@ -126,76 +126,19 @@ fn fork_then_enquire(
     shell: &Shell,
     request: impl FnOnce(ForkClaim) -> Request,
 ) -> Settled<Value> {
-    let session = match mooring.fork() {
-        Some(Fork::Listen) => return hatch_over_the_wire(grant, mooring, shell, request),
-        Some(Fork::Park(_)) | None => shell.fork_into_nursery(mooring)?,
-    };
-    ask(AGENTS, request(ForkClaim::Parked(session)), mooring, shell)
-}
-
-/// Eight bytes the host must write before this engine hatches onto the
-/// connection it dialled. The guest kernel's refusal to route a guest-local
-/// dial is the standing defence; this is the second line, against a jailed
-/// command that guesses a CID rather than reading one.
-#[cfg(target_os = "linux")]
-fn mint_token() -> u64 {
-    let mut bytes = [0u8; 8];
-    getrandom::fill(&mut bytes).expect("OS randomness");
-    u64::from_le_bytes(bytes)
-}
-
-/// The wire arm: bind a guest port for the duration of this one fork, name
-/// it in the enquiry, and let the host dial while it answers.
-///
-/// The answer arrives only once the child exists, because the listener thread
-/// acknowledges the dial after `spawn()` succeeds. So there is one enquiry and
-/// one rule for its outcome: raise the thread's reason if it has one — it was
-/// nearer the failure — otherwise the host's.
-#[cfg(target_os = "linux")]
-fn hatch_over_the_wire(
-    grant: SpawnGrant,
-    mooring: &Mooring,
-    shell: &Shell,
-    request: impl FnOnce(ForkClaim) -> Request,
-) -> Settled<Value> {
-    let token = mint_token();
-    let (socket, port) =
-        super::guest_port::bind().map_err(|why| sig(format!("{AGENTS}: {why}")))?;
-    let listener = ral_core::seed::hatch::listen_for_hatch(socket, token, shell, grant)
-        .map_err(|reason| sig(format!("{AGENTS}: {reason}")))?;
-    let answer = ask(
-        AGENTS,
-        request(ForkClaim::Listening { port, token }),
-        mooring,
-        shell,
-    );
-    // A host that refused never dialled, so the thread is still in its poll:
-    // wake it, or the join below never returns.
-    if answer.is_err() {
-        listener.cancel();
-    }
-    match listener.join() {
-        Err(ral_core::seed::hatch::Unhatched::Failed(reason)) => {
-            Err(sig(format!("{AGENTS}: {reason}")))
+    let claim = match mooring.fork() {
+        Some(Fork::Park(nursery)) => ForkClaim::Parked(nursery.park(shell.bequeath(grant))),
+        Some(Fork::Seal) => ForkClaim::Sealed(
+            ral_core::seed::seal(&shell.bequeath(grant))
+                .map_err(|why| sig(format!("{AGENTS}: {why}")))?,
+        ),
+        None => {
+            return Err(sig(format!(
+                "{AGENTS}: this host adopts no forked sessions"
+            )));
         }
-        _ => answer,
-    }
-}
-
-/// The dial this arm waits for means nothing outside a Linux guest, so a wire
-/// trunk built on any other platform refuses here rather than at a silent
-/// no-op.
-#[cfg(not(target_os = "linux"))]
-fn hatch_over_the_wire(
-    _grant: SpawnGrant,
-    _mooring: &Mooring,
-    _shell: &Shell,
-    _request: impl FnOnce(ForkClaim) -> Request,
-) -> Settled<Value> {
-    Err(sig(format!(
-        "{AGENTS}: this engine has no hatch support outside a Linux guest; a wire trunk's \
-         helper spawn only ever reaches one"
-    )))
+    };
+    ask(AGENTS, request(claim), mooring, shell)
 }
 
 fn scheme_branch(_u: &mut Unifier) -> Scheme {

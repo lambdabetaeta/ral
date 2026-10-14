@@ -265,7 +265,7 @@ pub fn run_engine(installers: &'static [EngineInstaller]) -> ! {
     let reader_ch = WireChannel::from_stream(stream);
     #[allow(
         clippy::disallowed_methods,
-        reason = "`engine_session`'s teardown settle is the shutdown: it cancels the durable root, tears the hatched children down and waits the worker out before returning here. An engine's stdio is /dev/null, so its session mints no TerminalLease and no TerminalLoan can exist to strand."
+        reason = "`engine_session`'s teardown settle is the shutdown: it cancels the durable root and waits the worker out before returning here. An engine's stdio is /dev/null, so its session mints no TerminalLease and no TerminalLoan can exist to strand."
     )]
     std::process::exit(engine_session(reader_ch, installers, Patience::default()));
 }
@@ -313,17 +313,6 @@ fn engine_session(
     installers: &'static [EngineInstaller],
     patience: Patience,
 ) -> i32 {
-    // A hatched parent starts writing only once this process exists, so the
-    // seed is taken before the wait for Attach: a seed larger than the
-    // socketpair's buffer would otherwise wedge parent and child.
-    let seed = match crate::seed::hatch::seed_from_env() {
-        Ok(seed) => seed,
-        Err(msg) => {
-            crate::errln!("engine: {msg}");
-            return 1;
-        }
-    };
-
     let writer_ch = reader_ch.try_clone().expect("try_clone engine channel");
     writer_ch
         .set_write_deadline(patience.write_stall)
@@ -340,7 +329,7 @@ fn engine_session(
             // Colour follows the front end's terminal, not this process's
             // null stdio.
             attach.terminal.seat();
-            match Engine::boot(installers, &attach, seed) {
+            match Engine::boot(installers, &attach) {
                 Ok(engine) => engine,
                 Err(msg) => {
                     crate::errln!("engine: {msg}");
@@ -427,7 +416,7 @@ fn engine_session(
                                 outlet: outlet.clone(),
                                 parks: parks.clone(),
                             }),
-                            fork: Fork::Listen,
+                            fork: Fork::Seal,
                         };
                         Event::Report(engine.run(id, *run, rails, &scope))
                     }
@@ -553,7 +542,6 @@ fn engine_session(
     // The loop may have exited with a run in flight: cancel it and every
     // worker under the durable root, then wait.
     scopes.end(CancelCause::Cancelled);
-    crate::seed::hatch::teardown_hatched();
     // Claimed *or* still writing: a claim is released ahead of its own report
     // write, so neither flag alone spans the work a settle must wait out.
     let settling = || writing.load(Ordering::Acquire) || busy.load(Ordering::Acquire);
@@ -737,27 +725,21 @@ mod wire_desk_tests {
 #[cfg(test)]
 mod engine_session_tests {
     use super::*;
-    use crate::engine::Booted;
     use crate::process::cancel::REQUEST_SERIAL;
 
     const WAIT: Duration = Duration::from_secs(20);
 
-    #[allow(
-        clippy::unnecessary_wraps,
-        reason = "must match EngineInstaller::boot's signature, which can genuinely refuse"
-    )]
-    fn boot(_attach: &Attach) -> Result<Booted, String> {
-        Ok(Booted {
-            shell: crate::boot::boot_shell(
+    static INSTALLERS: &[EngineInstaller] = &[crate::carrier::testkit::installer(
+        "test",
+        |_| {
+            Ok(crate::boot::boot_runtime(
                 crate::terminal::TerminalState::default(),
                 crate::boot::BakedPrelude::runtime(),
                 &crate::boot::HostSurface::default(),
-            ),
-            keep: Box::new(()),
-        })
-    }
-
-    static INSTALLERS: &[EngineInstaller] = &[crate::carrier::testkit::installer("test", boot)];
+            ))
+        },
+        |_, _| Ok(()),
+    )];
 
     /// `seen` holds the frames read past while awaiting a particular one, so a
     /// later await can still find them.

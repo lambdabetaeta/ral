@@ -79,7 +79,6 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ("core/src/invocation.rs", "silent:argv-before-main"),
     ("core/src/load/profile.rs", "silent:cap-load"),
     ("core/src/boot.rs", "silent:prelude-bake"),
-    ("core/src/seed/hatch.rs", "silent:hatch-spawn"),
     // The fs sites: `path/walk.rs` is the one file that opens a model-named
     // object, so every site below is a step of the locate-then-open recipe.
     ("core/src/path/walk.rs", "silent:discard-device"),

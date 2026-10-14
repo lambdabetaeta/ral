@@ -15,7 +15,7 @@ use crate::ir::{CompKind, Phrase, Toplevel};
 use crate::terminal::TerminalState;
 use crate::typecheck::Manifest;
 use crate::types::{
-    Break, BuiltinEntry, BuiltinTable, Env, Escape, Mooring, PreludeMap, Set, Shell,
+    Break, BuiltinEntry, BuiltinTable, Env, Escape, Mooring, PreludeMap, Runtime, Set, Shell,
     language_constants,
 };
 use std::sync::{Arc, OnceLock};
@@ -52,7 +52,7 @@ impl BakedPrelude {
         })
     }
 
-    /// Seat the prelude's bindings as `shell`'s Σ prelude tier, whole.
+    /// Seat the prelude's bindings as `runtime`'s Σ prelude tier, whole.
     ///
     /// The prelude runs once per bake, on a core-only shell: every phrase is a
     /// `Define` of `Return(V)` ([`validate_prelude_shape`]), so the run is a
@@ -61,9 +61,9 @@ impl BakedPrelude {
     ///
     /// # Panics
     /// Panics if the prelude fails to run: a partial prelude is never seated.
-    pub fn seat(&self, shell: &mut Shell) {
+    pub fn seat(&self, runtime: &mut Runtime) {
         let map = self.map.get_or_init(|| self.evaluate());
-        Arc::make_mut(&mut shell.sig).install_prelude(Arc::clone(map));
+        Arc::make_mut(&mut runtime.sig).install_prelude(Arc::clone(map));
     }
 
     fn evaluate(&self) -> Arc<PreludeMap> {
@@ -123,7 +123,7 @@ fn bake() -> Toplevel {
 /// or a thunk — naming the bound name(s).
 ///
 /// The wire ships the prelude tier by name alone, never by value: a
-/// re-exec'd engine child (`hatch`) re-derives it by running the same
+/// child engine re-derives it by running the same
 /// prelude source under its own process.  A `Define` whose right-hand side
 /// is anything but `Return` — an `if`, a call, a store read — could close
 /// over *this* process's facts (its stdout, its args, its clock) and so
@@ -231,36 +231,59 @@ impl HostSurface {
         self.builtin_table().manifest().clone()
     }
 
+    /// Core plus this surface, no prelude: the process half of a session.
+    ///
+    /// # Panics
+    /// Panics if a name here collides with a core builtin or repeats.
+    pub fn runtime(&self, terminal: TerminalState) -> Runtime {
+        let mut runtime = Runtime::bare(terminal);
+        for set in self.sets() {
+            runtime.install_set(&set);
+        }
+        // Language-given names live in Σ, ahead of the prelude.
+        Arc::make_mut(&mut runtime.sig).install_natives(language_constants());
+        runtime
+    }
+
     /// Core plus this surface, no env, no prelude: a loader's scaffold.
     ///
     /// # Panics
     /// Panics if a name here collides with a core builtin or repeats.
     pub fn shell(&self, terminal: TerminalState) -> Shell {
-        let mut shell = Shell::root(terminal);
-        for set in self.sets() {
-            shell.install_set(&set);
-        }
-        // Language-given names live in Σ, ahead of the prelude.
-        Arc::make_mut(&mut shell.sig).install_natives(language_constants());
-        shell
+        Shell::root(self.runtime(terminal))
     }
 }
 
-/// A shell as every front end boots one: `surface` installed, the env seeded
-/// from the host, the prelude seated.
+/// The process half of a session as every front end boots one: `surface`
+/// installed, then the prelude seated.
 ///
 /// `surface` lands before any rc file or user code is checked, so the
-/// typechecker and the runtime agree by construction.  Terminal handling,
-/// output capture, watchdogs, capability frames and rc files stay the host's,
-/// interposed around this call.
+/// typechecker and the runtime agree by construction.
 ///
 /// # Panics
 /// Panics if a name in `surface` collides with a core builtin or repeats
 /// within the surface.
+pub fn boot_runtime(
+    terminal: TerminalState,
+    prelude: &BakedPrelude,
+    surface: &HostSurface,
+) -> Runtime {
+    let mut runtime = surface.runtime(terminal);
+    prelude.seat(&mut runtime);
+    runtime
+}
+
+/// A shell as every front end boots one: [`boot_runtime`] over a root, the
+/// env seeded from the host.
+///
+/// Terminal handling, output capture, watchdogs, capability frames and rc
+/// files stay the host's, interposed around this call.
+///
+/// # Panics
+/// As [`boot_runtime`].
 pub fn boot_shell(terminal: TerminalState, prelude: &BakedPrelude, surface: &HostSurface) -> Shell {
-    let mut shell = surface.shell(terminal);
-    seed_env(&mut shell);
-    prelude.seat(&mut shell);
+    let mut shell = Shell::root(boot_runtime(terminal, prelude, surface));
+    seed_host_env(&mut shell);
     shell
 }
 
@@ -277,7 +300,7 @@ pub fn boot_shell(terminal: TerminalState, prelude: &BakedPrelude, surface: &Hos
     clippy::disallowed_methods,
     reason = "host-env: seeding the baseline `env` at boot; the host process env is the source the overlay later shadows"
 )]
-fn seed_env(shell: &mut Shell) {
+pub fn seed_host_env(shell: &mut Shell) {
     let user = crate::host::user();
     let shlvl = std::env::var("SHLVL")
         .ok()
@@ -382,6 +405,8 @@ pub fn bake_prelude_to_out_dir() {
 #[cfg(test)]
 mod tests {
     use super::{BakedPrelude, HostSurface, validate_prelude_shape};
+    use crate::terminal::TerminalState;
+    use crate::types::Runtime;
     use std::sync::Arc;
 
     /// A bake of `src`, checked against core alone but not shape-vetted, so a
@@ -400,10 +425,8 @@ mod tests {
     #[test]
     fn two_bakes_seat_two_preludes() {
         let (first, second) = (baked("let only_first = 1"), baked("let only_second = 2"));
-        let (mut a, mut b) = (
-            crate::test_helper::core_shell(),
-            crate::test_helper::core_shell(),
-        );
+        let bare = || Runtime::bare(TerminalState::default());
+        let (mut a, mut b) = (bare(), bare());
         first.seat(&mut a);
         second.seat(&mut b);
         assert!(a.sig.prelude_binding("only_first").is_some());
@@ -417,7 +440,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "the prelude failed to run: exit 3")]
     fn a_prelude_that_fails_to_run_panics() {
-        baked("exit 3").seat(&mut crate::test_helper::core_shell());
+        baked("exit 3").seat(&mut Runtime::bare(TerminalState::default()));
     }
 
     /// A prelude phrase whose RHS is computed at boot — an `if`, here — fails

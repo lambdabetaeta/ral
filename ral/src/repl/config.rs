@@ -369,9 +369,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     fn prelude_shell() -> Shell {
-        let mut shell = ral_core::test_helper::core_shell();
-        crate::PRELUDE.seat(&mut shell);
-        shell
+        Shell::root(crate::repl::prelude_runtime())
     }
 
     fn rc_map(shell: &mut Shell, rc_src: &str) -> Map {
@@ -416,8 +414,7 @@ mod tests {
     /// does, so a plugin load has a desk to tell; the host's plugins after.
     fn loaded_plugins(rc_src: &str) -> Vec<String> {
         let rc_src = rc_src.to_owned();
-        let t = crate::repl::engine(move |shell| {
-            crate::PRELUDE.seat(shell);
+        let t = crate::repl::engine(crate::repl::prelude_runtime(), move |shell| {
             let pairs = Mutex::new(Some(rc_map(shell, &rc_src)));
             let door = BuiltinEntry::new(
                 Cow::Borrowed("_apply-rc"),

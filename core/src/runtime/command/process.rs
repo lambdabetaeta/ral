@@ -33,7 +33,7 @@ pub(crate) fn build_launch(
     // A guest jail is already the guest's sandbox: bwrap needs unprivileged
     // user namespaces and the guest boots with `user.max_user_namespaces = 0`.
     // The in-process guard in `vet` runs either way.
-    let jail = shell.guest_jail();
+    let jail = crate::process::jail::guest();
     let admitted = &plan.admitted;
     let mut cmd = if jail.is_none()
         && let Some(projection) =

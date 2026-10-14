@@ -1,4 +1,4 @@
-//! The one child: the ral/exarch engine, and everything the daemon decides
+//! The engines: the ral/exarch engine, and everything the daemon decides
 //! on its behalf.
 //!
 //! The engine is the guest's entire reason for existing.  It is the same
@@ -15,18 +15,20 @@
 //! guest worth being anchored to), and the descriptors.  All four are data,
 //! and tested as data; [`spawn`] is the thin edge that performs them.
 //!
-//! ## Supervision: the engine is never restarted
+//! ## Supervision: the root engine is never restarted
 //!
-//! One VM per session, one engine per VM, and the whole session lives in the
-//! engine's memory.  A restarted engine would come back having forgotten
-//! every session id the host is still holding, and the host's next frame
-//! would land on a stranger wearing its name.  The design record already
-//! settles what happens instead — "a guest crash loses guest session state;
-//! the host retains the last acknowledged checkpoint" — so the daemon does
-//! the honest thing: it reaps the engine, writes its [`epitaph`] to the
-//! console, and powers the machine off.  The host observes a VM that
-//! stopped, which is unambiguous, rather than a VM that is still running and
-//! quietly wrong.
+//! The root engine is the one the daemon dials the control plane for, and the
+//! whole session lives in its memory.  A restarted engine would come back
+//! having forgotten every session id the host is still holding, and the
+//! host's next frame would land on a stranger wearing its name.  The design
+//! record already settles what happens instead — "a guest crash loses guest
+//! session state; the host retains the last acknowledged checkpoint" — so
+//! the daemon does the honest thing: it reaps the engine, writes its
+//! [`epitaph`] to the console, and powers the machine off.  The host
+//! observes a VM that stopped, which is unambiguous, rather than a VM that
+//! is still running and quietly wrong.  Only the root is so treated: a child engine, started on
+//! the host's dial at the factory port, ends by the host's doing and costs
+//! the machine nothing.
 
 use std::io;
 use std::net::Ipv4Addr;
@@ -160,7 +162,9 @@ pub fn control_plane(port: u32) -> Result<OwnedFd, String> {
     }
 }
 
-/// Start the engine on `control`, and return its pid.
+/// Start an engine on `connection`, and return its pid. Root and child
+/// alike: the daemon tells them apart by nothing, the host does by the
+/// `Attach` it sends.
 ///
 /// The child leads its own session, so the terminal signals a guest can
 /// generate never reach PID 1, and one `kill(-pid, …)` at shutdown reaches
@@ -169,24 +173,27 @@ pub fn control_plane(port: u32) -> Result<OwnedFd, String> {
 /// the engine writes outside the protocol lands in the host's log beside the
 /// daemon's own lines.
 ///
-/// `control` stays borrowed: the parent's copy is closed by the caller once
+/// `connection` stays borrowed: the parent's copy is closed by the caller once
 /// the child holds its own.
 ///
 /// # Errors
 /// Returns a sentence naming the engine binary when it cannot be started.
-pub fn spawn(boot: &Boot, control: &OwnedFd) -> Result<Pid, String> {
-    let socket = control.as_raw_fd();
+pub fn spawn(boot: &Boot, connection: &OwnedFd) -> Result<Pid, String> {
+    let socket = connection.as_raw_fd();
     let mut cmd = Command::new(&boot.engine);
     cmd.arg(ENGINE_FLAG);
     cmd.env_clear();
     cmd.envs(environment(boot.net.as_ref().map(|net| net.gateway)));
     cmd.current_dir(WORK);
     // SAFETY: the closure runs between `fork` and `exec` and calls only
-    // async-signal-safe syscalls — `setsid`, `dup2`, `close` — with no
+    // async-signal-safe syscalls — `sigprocmask`, `setsid`, `dup2`, `close` — with no
     // allocation and no locking.
     unsafe {
         use std::os::unix::process::CommandExt;
         cmd.pre_exec(move || {
+            // std leaves the spawning thread's mask to the child, and the
+            // factory thread blocks the stop signals.
+            mask_stop_signals(libc::SIG_UNBLOCK)?;
             if libc::setsid() < 0 {
                 return Err(io::Error::last_os_error());
             }
@@ -216,6 +223,32 @@ pub fn spawn(boot: &Boot, control: &OwnedFd) -> Result<Pid, String> {
         )
     })?;
     Ok(Pid::from_child(&child))
+}
+
+/// The signals by which the host asks this machine to stop.
+pub const STOP_SIGNALS: [libc::c_int; 3] = [libc::SIGTERM, libc::SIGINT, libc::SIGPWR];
+
+/// Apply `how` (`SIG_BLOCK`, `SIG_UNBLOCK`, ...) to [`STOP_SIGNALS`] in the
+/// calling thread. Async-signal-safe.
+///
+/// # Errors
+/// Returns the error `pthread_sigmask` reports.
+pub fn mask_stop_signals(how: libc::c_int) -> io::Result<()> {
+    // SAFETY: `set` is initialised by `sigemptyset` before use, and the
+    // calls touch only this local and the calling thread's mask.
+    let err = unsafe {
+        let mut set = std::mem::zeroed();
+        libc::sigemptyset(&raw mut set);
+        for signal in STOP_SIGNALS {
+            libc::sigaddset(&raw mut set, signal);
+        }
+        libc::pthread_sigmask(how, &raw const set, std::ptr::null_mut())
+    };
+    if err == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::from_raw_os_error(err))
+    }
 }
 
 /// What the engine's death means, said plainly enough for a host-side log.

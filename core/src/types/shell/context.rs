@@ -95,6 +95,26 @@ impl Context {
 }
 
 impl<H> Context<H> {
+    /// The same context over other handlers.
+    pub(crate) fn map_handlers<G>(self, f: impl FnOnce(H) -> G) -> Context<G> {
+        let Self {
+            env_overrides,
+            cwd,
+            grants,
+            handlers,
+            args,
+            modules,
+        } = self;
+        Context {
+            env_overrides,
+            cwd,
+            grants,
+            handlers: f(handlers),
+            args,
+            modules,
+        }
+    }
+
     /// The same context over other handlers, if `f` can make them.
     pub(crate) fn try_map_handlers<G, E>(
         self,

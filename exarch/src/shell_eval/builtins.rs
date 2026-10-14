@@ -22,8 +22,6 @@ use std::io::{Read as _, Write};
 use std::sync::Arc;
 
 mod fff_index;
-#[cfg(target_os = "linux")]
-mod guest_port;
 pub(crate) mod harness;
 
 /// The boot-recipe tag a `Frame::Attach` names to select [`host_surface`] as the

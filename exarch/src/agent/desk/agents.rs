@@ -6,55 +6,13 @@ use crate::agent::{Avatar, Build, ProviderHandle};
 use crate::enquiry::{Deposit, ForkClaim, Memory, Message, Name, Selection, Start};
 use crate::provider::Provider;
 use crate::shell_eval::{self};
-use ral_core::SpawnGrant;
 use ral_core::first_order::FOValue;
 use ral_core::first_order::datum::Datum;
 use ral_core::sync::LockExt;
 use ral_core::types::Error;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::{DeskAct, ExarchDesk};
-
-/// The two words that bracket one hatch, in opposite directions: the host
-/// writes the eight token bytes the guest's listener is waiting for, and reads
-/// back the single byte that listener writes only once the child's `spawn` has
-/// returned. Both precede the first frame; neither is one.
-///
-/// The clock is the transport's own, so a dial carries no second deadline —
-/// and it is lifted again before the stream is adopted, since the reader
-/// thread must then park in `read_frame` for as long as the child lives.
-fn greet_hatch(
-    stream: &mut ral_core::protocol::channel::WireStream,
-    token: u64,
-) -> Result<(), String> {
-    use std::io::{Read, Write};
-    let patience = ral_core::protocol::channel::Liveness::default().deadline;
-    stream
-        .set_write_timeout(Some(patience))
-        .and_then(|()| stream.set_read_timeout(Some(patience)))
-        .map_err(|e| format!("could not put the hatch deadline on the dialled wire: {e}"))?;
-    stream
-        .write_all(&token.to_le_bytes())
-        .map_err(|e| format!("could not send the hatch token to the guest's listener: {e}"))?;
-    let mut ack = [0u8; 1];
-    stream.read_exact(&mut ack).map_err(|e| match e.kind() {
-        std::io::ErrorKind::UnexpectedEof => {
-            "the guest closed the connection before acknowledging the hatch".to_string()
-        }
-        _ => format!("could not read the guest's hatch acknowledgement: {e}"),
-    })?;
-    if ack[0] != ral_core::protocol::HATCH_ACK {
-        return Err(format!(
-            "the guest answered the hatch with byte {:#04x} rather than the acknowledgement: \
-             whatever is listening on that port is not a ral engine waiting to be hatched",
-            ack[0]
-        ));
-    }
-    stream
-        .set_read_timeout(None)
-        .map_err(|e| format!("could not lift the hatch deadline from the wire: {e}"))
-}
 
 impl ExarchDesk {
     /// The spawn spine behind `` `start ``: take up the fork, fork its log off
@@ -99,10 +57,10 @@ impl ExarchDesk {
         }
 
         // Before the seat split, so both arms share one resolution and a
-        // refusal unwinds nothing: no adopted shell, no forked log, no dial.
+        // refusal unwinds nothing: no adopted shell, no forked log, no helper engine.
         let provider = self.child_provider(&spec.provider, &spec.model)?;
 
-        let seat = self.fork_seat("start", fork, &spec.grant.0)?;
+        let seat = self.fork_seat("start", fork)?;
         let child = self.child(
             "start",
             name.clone(),
@@ -148,65 +106,55 @@ impl ExarchDesk {
     }
 
     /// Take up the fork a builtin body left for this desk: adopt it out of
-    /// the parent's own transport, narrowed there by `grant`, or dial the
-    /// listener it opened across the wire, whose engine narrows itself by the
-    /// seed it carries.
-    fn fork_seat(&self, verb: &str, fork: ForkClaim, grant: &SpawnGrant) -> Result<Seat, Error> {
+    /// the parent's own transport, or make an engine for the sealed bequest
+    /// across the wire.  The engine narrows by the bequest's grant on either
+    /// seat, so the desk does not read `spec.grant`.
+    fn fork_seat(&self, verb: &str, fork: ForkClaim) -> Result<Seat, Error> {
         let refused =
             |why: String| Error::new(format!("`` exarch-agents `{verb} `` refused: {why}"));
         match (&self.services.kind, fork) {
-            (SeatKind::Identity(parent), ForkClaim::Parked(id)) => parent
-                .adopt_parked(id, grant)
-                .map(Seat::adopted)
-                .map_err(refused),
-            (SeatKind::Wire { cwd, home }, ForkClaim::Listening { port, token }) => self
-                .dial_seat(port, token, cwd.clone(), home.clone())
-                .map_err(refused),
-            (SeatKind::Identity(_), ForkClaim::Listening { .. }) => Err(refused(
+            (SeatKind::Identity(parent), ForkClaim::Parked(id)) => {
+                parent.adopt_parked(id).map(Seat::adopted).map_err(refused)
+            }
+            (SeatKind::Wire { attach }, ForkClaim::Sealed(seed)) => {
+                self.make_engine(attach, seed).map_err(refused)
+            }
+            (SeatKind::Identity(_), ForkClaim::Sealed(_)) => Err(refused(
                 "this host runs its children in its own process, so the fork must be `parked \
-                 <nursery id>`: a session that says it is listening for a dial is describing a \
-                 wire this desk does not have"
+                 <nursery id>`: a sealed bequest names a wire this desk does not have"
                     .into(),
             )),
             (SeatKind::Wire { .. }, ForkClaim::Parked(_)) => Err(refused(
-                "this host reaches its children across a wire, so the fork must be `listening \
-                 [port, token]`: a session that says it is parked in process is naming a \
-                 nursery this desk does not have"
+                "this host makes its children over a wire, so the fork must be `sealed <bytes>`: \
+                 a session that says it is parked in process is naming a nursery this desk does \
+                 not have"
                     .into(),
             )),
         }
     }
 
-    /// The wire arm: dial the listener the guest opened for this one fork,
-    /// write the token it is waiting for, and seat the child once the guest
-    /// acknowledges — which it does only once the child process exists.
-    fn dial_seat(
+    /// The wire arm: one engine from the factory, attached as the parent was
+    /// plus its seal. The parent's enquiry is answered only once this returns,
+    /// so the child is attached before the roster names it.
+    fn make_engine(
         &self,
-        port: u32,
-        token: u64,
-        cwd: PathBuf,
-        home: PathBuf,
+        attach: &ral_core::protocol::Attach,
+        seed: ral_core::seed::Sealed,
     ) -> Result<Seat, String> {
         let s = &self.services;
-        let dial = s.fleet.launch.dial.as_ref().ok_or(
-            "this wire session has no dialler installed to reach a helper engine's listener: a \
-             construction bug, since a fuelled wire trunk is refused at Avatar::root without one",
+        let factory = s.fleet.launch.factory.as_ref().ok_or(
+            "this wire session has no engine factory: a construction bug, since a fuelled wire \
+             trunk is refused at Avatar::root without one",
         )?;
-        let mut stream = dial.dial(port).map_err(|reason| {
-            format!("could not dial the helper engine's listener on guest port {port}: {reason}")
-        })?;
-        greet_hatch(&mut stream, token)?;
-        // Past the ack the child is alive, so a refusal from here on simply
-        // drops the stream: the child reads EOF on fd 3 and the guest's own
-        // table reaps it.
+        let stream = factory
+            .engine()
+            .map_err(|why| format!("could not make a helper engine: {why}"))?;
         let transport = ral_core::carrier::WireTransport::adopt(
             stream,
             ral_core::protocol::channel::Liveness::default(),
         )
-        .map_err(|e| format!("could not adopt the hatched wire: {e}"))?;
-        // Attached as the parent was; the seed carries the live cwd.  A
-        // hatched helper's logs live under the run that hatched it.
-        Seat::wire(transport, cwd, home).map_err(|lost| {
+        .map_err(|e| format!("could not adopt the helper engine's wire: {e}"))?;
+        Seat::wire(transport, attach.clone(), Some(seed)).map_err(|lost| {
             crate::agent::seat::EngineLost::starting(&lost, s.agent.run_dir()).to_string()
         })
     }
@@ -317,7 +265,7 @@ impl ExarchDesk {
                  under way on this call",
             ));
         };
-        let seat = self.fork_seat("branch", fork, &SpawnGrant::Inherit)?;
+        let seat = self.fork_seat("branch", fork)?;
         let child = self.child(
             "branch",
             order.name.clone(),

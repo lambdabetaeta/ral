@@ -18,9 +18,7 @@ use ral_core::types::Settled;
 use ral_core::{Shell, TypeError, Value};
 
 fn shell() -> Shell {
-    let mut s = ral_core::test_helper::core_shell();
-    common::prelude().seat(&mut s);
-    s
+    common::prelude_shell()
 }
 
 /// One REPL run through the public `run` door, which checks `src`

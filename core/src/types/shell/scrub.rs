@@ -1,6 +1,6 @@
-//! The fork's scrub: the one snapshot law's whole mechanism.
+//! The bequest's scrub: the one snapshot law's whole mechanism.
 //!
-//! It walks environments, not values — each ρ a fork reaches, once, by root
+//! It walks environments, not values — each ρ a bequest reaches, once, by root
 //! identity, dependencies first, on an explicit stack: a stream is a chain of
 //! closures, so recursing through one would bound it by the host stack.
 //! Captured environments form a DAG, so there is no cycle to guard; but a
@@ -9,34 +9,44 @@
 //! and the natives seeded, before any handle exists.
 
 use super::Shell;
+use super::construct::{Bequest, Image, Terms};
 use crate::first_order::Opaque;
+use crate::guard::SpawnGrant;
+use crate::types::handler::HandlerFrame;
 use crate::types::{Binding, Closure, Env, List, Map, Value};
 use std::convert::Infallible;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
 impl Shell {
-    /// Fork this shell ([`Self::fork_session`]) for a child engine to inherit.
+    /// What a child takes: this session's scope and handler frames with every
+    /// handle scrubbed (the one snapshot law), its sources, terms, a snapshot
+    /// of its fixings, and `grant`.  No hook and no terminal lease: those are
+    /// a root's.
     ///
-    /// The one snapshot law lands here: no handle is reachable from the fork —
-    /// not from its scope at any depth, nor its handler stack, nor its hooks —
-    /// so an identity-adopted child and a wire-hatched one, both forked here,
-    /// resolve every name to the same value or the same absence.  A handle
-    /// becomes its `` `opaque `` placeholder; hooks, the installing host's
-    /// lifecycle entry points, stay with that host.  A shell reaching no handle
-    /// forks as itself: the fork shares its environment.
-    pub fn fork_scrubbed(&self) -> Self {
-        let mut fork = self.fork_session();
+    /// No handle is reachable from the bequest, so an identity-adopted child
+    /// and a sealed child resolve every name to the same value or the same
+    /// absence.  A handle becomes its `` `opaque `` placeholder.  A scope
+    /// reaching no handle is shared, not copied.
+    pub fn bequeath(&self, grant: SpawnGrant) -> Bequest {
         let mut scrub = Scrub::default();
-        if let Some(env) = scrub.scope(&fork.env) {
-            fork.env = env;
-        }
-        for v in fork.context.handlers.values_mut() {
+        let env = scrub.scope(&self.env).unwrap_or_else(|| self.env.clone());
+        let mut frames: Vec<HandlerFrame> = self.context.handlers.iter().cloned().collect();
+        for v in frames.iter_mut().flat_map(HandlerFrame::values_mut) {
             if let Some(scrubbed) = scrub.value(v) {
                 *v = scrubbed;
             }
         }
-        fork
+        Bequest {
+            image: Image {
+                env,
+                context: self.context.clone().map_handlers(|_| frames),
+                sources: self.session.sources.clone(),
+                terms: Terms::of(self),
+                fixings: self.session.fixings.snapshot(),
+            },
+            grant,
+        }
     }
 }
 
@@ -254,7 +264,7 @@ mod tests {
         let blk = block_over(&parent.env);
         parent.set_var("blk".into(), blk);
 
-        let fork = parent.fork_scrubbed();
+        let fork = parent.bequeath(SpawnGrant::Inherit).image;
         assert!(
             fork.env.ptr_eq(&parent.env),
             "a scope reaching no handle must fork as itself"
@@ -272,7 +282,7 @@ mod tests {
         }
         parent.set_var("big".into(), Value::string("x".repeat(1 << 20)));
 
-        let fork = parent.fork_scrubbed();
+        let fork = parent.bequeath(SpawnGrant::Inherit).image;
         assert!(
             is_placeholder(fork.env.get("live")),
             "a handle binding must become the placeholder"
@@ -310,7 +320,7 @@ mod tests {
             parent.set_var(format!("d{i}"), blk);
         }
 
-        let fork = parent.fork_scrubbed();
+        let fork = parent.bequeath(SpawnGrant::Inherit).image;
         assert!(
             fork.env.ptr_eq(&parent.env),
             "a handle-free chain of definitions must fork as itself"
@@ -327,7 +337,7 @@ mod tests {
             crate::types::deep_block_chain(LINKS, idle_handle()),
         );
 
-        let fork = parent.fork_scrubbed();
+        let fork = parent.bequeath(SpawnGrant::Inherit).image;
         let mut link = fork.env.get("chain");
         for _ in 0..LINKS {
             link = captured(link).get("tail");

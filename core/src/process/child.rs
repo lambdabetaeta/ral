@@ -13,8 +13,7 @@ use super::reaper::{Watch, watch};
 ///
 /// [`Self::into_watch`] is the door to the reaper, which owns the wait on
 /// both platforms; [`Self::reap`] is the blocking wait after a confirmed
-/// kill, and [`Self::try_reap`] the non-blocking peer `seed/hatch.rs`'s table
-/// polls directly.
+/// kill.
 pub struct ChildHandle(ChildRepr);
 
 enum ChildRepr {
@@ -85,26 +84,6 @@ impl ChildHandle {
             }
             ChildRepr::RawWindows(child) => child.raw_process_handle(),
         }
-    }
-
-    /// Non-blocking reap: `Ok(None)` when nothing has exited yet.  Plain
-    /// `try_wait`, no `WUNTRACED`, so a stopped child reads as still
-    /// running.  Accepted exception to the one SIGCONT rule: `seed/hatch.rs`'s
-    /// table is swept on demand rather than watched, so a `kill -STOP` on a
-    /// hatched child is never answered and the child stays stopped.
-    ///
-    /// # Errors
-    /// Returns `Err` if the poll fails.
-    #[cfg(unix)]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "reaper: this is `ChildHandle::try_reap`, the door the ban names, around the one raw `try_wait`"
-    )]
-    pub(crate) fn try_reap(&mut self) -> std::io::Result<Option<WaitOutcome>> {
-        let ChildRepr::Std(child) = &mut self.0;
-        child
-            .try_wait()
-            .map(|opt| opt.map(WaitOutcome::from_exit_status))
     }
 
     /// Blocking reap after a confirmed SIGKILL, which terminates even a stopped

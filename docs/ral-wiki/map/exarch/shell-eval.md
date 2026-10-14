@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 6c9047b6
-generated_at_date: 2026-10-08
+generated_at_commit: e028f5a3
+generated_at_date: 2026-10-13
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/builtins.rs, exarch/data/agent.ral]
 ---
 
@@ -88,8 +88,10 @@ host the harness runs under, whose `enquire` answers the honest
 lease constant this module owns but does not put on the request: it is not
 per-run policy, it is per-*shell* policy, armed once by
 `shell_eval::arm_session_ledgers` — the one ledger-policy site, applied by
-the one recipe both carriers boot through (`boot::engine_boot_shell`); a fork
-keeps its terms through core's `fork_session`
+the one root recipe both carriers boot through (`boot::engine_runtime` for the
+process half, `boot::engine_root` for the recipe, which refuses an `Attach` that names no
+scratch: the host owns it); a fork
+keeps its terms through core's `Shell::bequeath` and `Shell::child_of`
 ([[map/exarch/agent|agent]]; [[decisions/260629_agent-binding-reaping|agent-binding-reaping]]).
 Reusing the settled-worker-retention figure is deliberate: one ral-call
 clock, read by both ledgers for their own idle policy. `LARGE_BINDING_BYTES`

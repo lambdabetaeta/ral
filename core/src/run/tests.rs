@@ -242,9 +242,10 @@ fn assert_nursery_emptied(panic: bool) {
     let parked_id: Arc<Mutex<Option<crate::types::NurseryId>>> = Arc::new(Mutex::new(None));
     let parked = parked_id.clone();
     install_act(&mut shell, "park-fork", move |mooring, shell| {
-        let id = shell
-            .fork_into_nursery(mooring)
-            .expect("a nursery is installed on this run");
+        let Some(crate::types::Fork::Park(nursery)) = mooring.fork() else {
+            panic!("a nursery is installed on this run");
+        };
+        let id = nursery.park(shell.bequeath(crate::SpawnGrant::Inherit));
         *parked.lock().unwrap() = Some(id);
         assert!(
             !panic,

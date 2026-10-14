@@ -28,7 +28,7 @@ fn converse_trunk(tag: &str, script: Script) -> Avatar {
             disk_warn_bytes: None,
             fuel: 0,
             egress: crate::egress::Egress::for_test(),
-            dial: None,
+            factory: None,
             bureau: Arc::new(crate::provider::Bureau::Scripted),
         },
         RootSeat::Identity {
@@ -365,7 +365,7 @@ fn settled_trunk(tag: &str, script: Script, allow_schedule: bool, resume_on_rese
             disk_warn_bytes: None,
             fuel: SPAWN_FUEL,
             egress: crate::egress::Egress::for_test(),
-            dial: None,
+            factory: None,
             bureau: Arc::new(crate::provider::Bureau::Scripted),
         },
         RootSeat::Identity {
@@ -528,8 +528,8 @@ fn converse_settled_ends_even_when_a_child_never_replies() {
 }
 
 /// A trunk that arms its own wakeups is refused at construction, the same
-/// class of refusal as a missing dialler: an armed wakeup may fire with
-/// nothing left to wait it out once the fleet quiesces.
+/// class of refusal as a missing engine factory: an armed wakeup may fire
+/// with nothing left to wait it out once the fleet quiesces.
 #[test]
 fn converse_settled_refuses_a_trunk_that_arms_its_own_wakeups() {
     for (tag, allow_schedule, resume_on_reset) in [

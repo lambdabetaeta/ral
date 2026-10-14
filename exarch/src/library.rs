@@ -5,26 +5,24 @@ use ral_core::{Shell, Value};
 
 const AGENT_SOURCE: &str = include_str!("../data/agent.ral");
 
-/// Source the embedded agent helper library into `shell`, installing its one-line
-/// docs ([`agent_library_docs`]) in the same act, so `help` can never list a
-/// helper the shell lacks nor miss one it has.
+/// Source the embedded agent helper library into `shell`. Its docs
+/// ([`agent_library_docs`]) are the runtime's, installed by
+/// `boot::engine_runtime`.
 ///
 /// # Errors
 /// If sourcing raises a ral error (re-surfaced as a signal) or escapes.
 pub fn install_agent_library(mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    let result =
-        ral_core::load::evaluate_source(mooring, shell, AGENT_SOURCE, "<exarch:agent>", None)
-            .map_err(|e| match e {
-                Break::Error(err) => sig(format!("exarch agent library: {}", err.message)),
-                other @ Break::Escape(_) => other,
-            })?;
-    shell.install_library_docs(agent_library_docs());
-    Ok(result)
+    ral_core::load::evaluate_source(mooring, shell, AGENT_SOURCE, "<exarch:agent>", None).map_err(
+        |e| match e {
+            Break::Error(err) => sig(format!("exarch agent library: {}", err.message)),
+            other @ Break::Escape(_) => other,
+        },
+    )
 }
 
 /// One-line docs for `agent.ral`'s helpers.  They are ral closures, not
 /// registered builtins, so `help` cannot find them unaided;
-/// [`install_agent_library`] plants these in the sourcing shell's session.
+/// `boot::engine_runtime` plants these in the runtime.
 pub(crate) fn agent_library_docs() -> Vec<(String, String)> {
     [
         ("view-text-around", "view-text-around PATH LINE PEEK  — show the 2*PEEK+1 lines of PATH centred on LINE, in `view-text`'s records, clamped at the top of the file."),

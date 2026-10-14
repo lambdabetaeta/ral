@@ -1,5 +1,5 @@
 //! Length-prefixed JSON frames: the one framing codec on every ral IPC
-//! channel — `hatch`'s engine seed and the engine wire in
+//! channel — the sealed engine seed and the engine wire in
 //! [`crate::protocol::channel`].
 
 use serde::Serialize;

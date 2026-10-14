@@ -1,0 +1,327 @@
+//! The one session constructor.  A shell's state has three sources: the
+//! binary ([`Runtime`]), the parent or nothing ([`Image`]), and the process
+//! itself, made inside [`Shell::construct`].
+
+use super::bindings::{BindingLease, BindingLedger};
+use super::detached::DetachPolicy;
+use super::hooks::HookTable;
+use super::workers::Roster;
+use super::{Context, DEFAULT_STACK_LIMIT, LocalState, SessionState, Shell};
+use crate::capability::GrantStack;
+use crate::guard::{GrantNarrower, SpawnGrant};
+use crate::io::{Io, Source};
+use crate::process::{DurableRoot, TerminalLease};
+use crate::source::SourceDb;
+use crate::terminal::TerminalState;
+use crate::ty::Fixings;
+use crate::types::handler::{HandlerFrame, HandlerStack};
+use crate::types::{
+    Audit, BuiltinEntry, BuiltinTable, Convention, Env, ExitHints, Set, Signature, Value,
+};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Arc;
+
+/// The process half of a session: what the binary supplies through the
+/// installer.  Shared through its `Arc`s by every session an engine
+/// constructs in process; a child engine derives its own.
+#[derive(Clone)]
+pub struct Runtime {
+    pub(crate) sig: Arc<Signature>,
+    pub(crate) builtins: BuiltinTable,
+    /// The base handler layer the builtin table's argv half installs.
+    pub(crate) base: Vec<BuiltinEntry>,
+    pub(crate) library_docs: HashMap<String, String>,
+    pub(crate) terminal: TerminalState,
+}
+
+impl Runtime {
+    /// No builtins, no prelude, no docs.
+    pub fn bare(terminal: TerminalState) -> Self {
+        Self {
+            sig: Arc::default(),
+            builtins: BuiltinTable::default(),
+            base: Vec::new(),
+            library_docs: HashMap::new(),
+            terminal,
+        }
+    }
+
+    pub fn install_builtins(&mut self, entries: &'static [BuiltinEntry]) {
+        self.install_set(&Set::Static(entries));
+    }
+
+    pub fn install_captured_builtins(&mut self, entries: &Arc<[BuiltinEntry]>) {
+        self.install_set(&Set::Captured(Arc::clone(entries)));
+    }
+
+    /// Install `set`, then its natives into Σ and its argv half into `base`,
+    /// unless it was already here.
+    pub(crate) fn install_set(&mut self, set: &Set) {
+        if self.builtins.install(set.clone()) {
+            let (natives, base) = natives_and_base(set);
+            Arc::make_mut(&mut self.sig).install_natives(natives);
+            self.base.extend(base);
+        }
+    }
+
+    pub fn install_library_docs(&mut self, entries: Vec<(String, String)>) {
+        self.library_docs.extend(entries);
+    }
+}
+
+/// Freshly installed `entries` split by the manifest's two halves: a value
+/// row is a native for Σ, an argv row a base handler.  Each row says which it
+/// is ([`Convention`]); the one place either is populated.
+pub(super) fn natives_and_base(
+    entries: &[BuiltinEntry],
+) -> (Vec<(String, Value)>, Vec<BuiltinEntry>) {
+    let natives = entries
+        .iter()
+        .filter(|entry| entry.decl.convention == Convention::Value)
+        .map(|entry| {
+            (
+                entry.decl.name.clone().into_owned(),
+                crate::types::builtin::native_value(entry),
+            )
+        })
+        .collect();
+    let base = entries
+        .iter()
+        .filter(|entry| entry.decl.convention == Convention::Argv)
+        .cloned()
+        .collect();
+    (natives, base)
+}
+
+/// Session policy: one type in memory and on the wire, so a term added here
+/// reaches both seats or the build fails.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct Terms {
+    pub(crate) stack_limit: usize,
+    pub(crate) exit_hints: ExitHints,
+    pub(crate) lease: Option<BindingLease>,
+    pub(crate) retention: Option<u64>,
+    pub(crate) detach_budget: Option<u64>,
+}
+
+impl Terms {
+    /// A root's: the compile-time stack cap and nothing armed; the root
+    /// recipe arms what it wants.
+    fn root() -> Self {
+        Self {
+            stack_limit: DEFAULT_STACK_LIMIT,
+            exit_hints: ExitHints::default(),
+            lease: None,
+            retention: None,
+            detach_budget: None,
+        }
+    }
+
+    /// This session's, as it stands.
+    pub(super) fn of(shell: &Shell) -> Self {
+        Self {
+            stack_limit: shell.session.stack_limit,
+            exit_hints: ExitHints::clone(&shell.session.exit_hints),
+            lease: shell.local.bindings.lease(),
+            retention: shell.local.workers.retention(),
+            detach_budget: shell.local.detach.as_deref().map(|policy| policy.budget),
+        }
+    }
+}
+
+/// What only a root session owns, beside its image: a bequest cannot express
+/// either.
+pub(crate) struct RootOnly {
+    hooks: HookTable,
+    terminal_lease: Option<TerminalLease>,
+}
+
+impl RootOnly {
+    /// An empty hook table, and the lease the terminal's startup foreground
+    /// mints.
+    fn minted(terminal: TerminalState) -> Self {
+        Self {
+            hooks: HookTable::default(),
+            terminal_lease: TerminalLease::mint_at_startup(terminal.startup_foreground),
+        }
+    }
+}
+
+/// A session's own state: exactly what a child can inherit, and what a root
+/// starts from empty.
+pub(crate) struct Image {
+    pub(crate) env: Env,
+    /// Handler frames only; the base layer is the runtime's.
+    pub(crate) context: Context<Vec<HandlerFrame>>,
+    pub(crate) sources: SourceDb,
+    pub(crate) terms: Terms,
+    pub(crate) fixings: Fixings,
+}
+
+/// What a child takes from its parent: its image, scrubbed, and the spawn's
+/// grant.  The nursery parks one; the host relays one sealed as `EngineSeed`.
+pub struct Bequest {
+    pub(crate) image: Image,
+    pub(crate) grant: SpawnGrant,
+}
+
+impl Image {
+    /// Empty scope, root grants, no sources, `Terms::root()`, no fixings.
+    fn empty() -> Self {
+        Self {
+            env: Env::new(),
+            context: Context {
+                grants: GrantStack::root(),
+                ..Context::default()
+            },
+            sources: SourceDb::default(),
+            terms: Terms::root(),
+            fixings: Fixings::default(),
+        }
+    }
+}
+
+impl Shell {
+    /// The one session literal, written without `..`.  `root` is `Some` for a
+    /// parentless session and `None` for a child.
+    fn construct(runtime: Runtime, image: Image, root: Option<RootOnly>) -> Self {
+        let Runtime {
+            sig,
+            builtins,
+            base,
+            library_docs,
+            terminal,
+        } = runtime;
+        let Image {
+            env,
+            context,
+            sources,
+            terms,
+            fixings,
+        } = image;
+        let Terms {
+            stack_limit,
+            exit_hints,
+            lease,
+            retention,
+            detach_budget,
+        } = terms;
+        let (stdin, hooks, terminal_lease) = match root {
+            Some(RootOnly {
+                hooks,
+                terminal_lease,
+            }) => (Source::Terminal, Some(hooks), terminal_lease),
+            None => (Source::Empty, None, None),
+        };
+        let durable = DurableRoot::new();
+        let workers = Roster::default();
+        if let Some(retention) = retention {
+            workers.arm_retention(retention);
+        }
+        let mut bindings = BindingLedger::default();
+        if let Some(lease) = lease {
+            let baseline = env.all_bindings(&sig).into_iter().map(|(name, _)| name);
+            bindings.arm(lease, baseline);
+        }
+        Self {
+            env,
+            sig,
+            context: context.map_handlers(|frames| HandlerStack::over(base, frames)),
+            io: Io {
+                stdin,
+                terminal,
+                ..Io::default()
+            },
+            session: SessionState {
+                anchor: durable.worker(),
+                root: durable,
+                sources,
+                root_file: None,
+                exit_hints: Arc::new(exit_hints),
+                fixings: Arc::new(fixings),
+                builtins,
+                library_docs,
+                terminal_lease,
+                stack_limit,
+                hooks,
+            },
+            local: LocalState {
+                audit: Audit::default(),
+                workers,
+                bindings,
+                detach: detach_budget.map(|budget| Arc::new(DetachPolicy::new(budget))),
+                machine_depth: 0,
+            },
+        }
+    }
+
+    /// A child session over `runtime`, from `bequest`: the one constructor of
+    /// a child on either seat.  The grant's layer is pushed last, frozen
+    /// against the child's own cwd.
+    ///
+    /// # Errors
+    /// Whatever the grant's narrowing refuses.
+    pub(crate) fn child_of(
+        runtime: Runtime,
+        bequest: Bequest,
+        narrow: GrantNarrower,
+    ) -> Result<Self, String> {
+        let Bequest { image, grant } = bequest;
+        let mut child = Self::construct(runtime, image, None);
+        grant.narrow_onto(&mut child, narrow)?;
+        Ok(child)
+    }
+
+    /// A parentless session over `runtime`: no env, no cwd, no recipe.
+    ///
+    /// The session faces no signals: its host forwards them as `Control`.
+    pub fn root(runtime: Runtime) -> Self {
+        let root = RootOnly::minted(runtime.terminal);
+        Self::construct(runtime, Image::empty(), Some(root))
+    }
+
+    /// The process half of this session, as it stands.
+    pub fn runtime(&self) -> Runtime {
+        Runtime {
+            sig: Arc::clone(&self.sig),
+            builtins: self.session.builtins.clone(),
+            base: self.context.handlers.base().to_vec(),
+            library_docs: self.session.library_docs.clone(),
+            terminal: self.io.terminal,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::HostSurface;
+
+    #[test]
+    fn a_root_owns_its_hooks_and_terminal_lease() {
+        let terminal = TerminalState {
+            startup_foreground: true,
+            ..TerminalState::default()
+        };
+        let shell = Shell::root(HostSurface::default().runtime(terminal));
+        assert!(shell.session.hooks.is_some());
+        #[cfg(unix)]
+        assert!(shell.session.terminal_lease.is_some());
+        assert!(matches!(shell.io.stdin, Source::Terminal));
+        assert!(!shell.local.bindings.armed());
+        assert_eq!(shell.local.workers.retention(), None);
+        assert!(shell.local.detach.is_none());
+        assert_eq!(shell.session.stack_limit, DEFAULT_STACK_LIMIT);
+    }
+
+    #[test]
+    fn a_runtime_is_read_off_a_shell_as_it_stands() {
+        let rt = HostSurface::default().runtime(TerminalState::default());
+        let mut shell = Shell::root(rt.clone());
+        shell.install_builtins(crate::builtins::SERVICE_BUILTIN);
+        let has = |rt: &Runtime| rt.builtins.manifest().names().any(|n| n == "service");
+        assert!(has(&shell.runtime()));
+        assert!(!has(&rt));
+    }
+}

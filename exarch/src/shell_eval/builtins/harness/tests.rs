@@ -7,7 +7,7 @@ fn bare_grant_tags() -> impl Iterator<Item = &'static str> {
 }
 
 /// The door validates `name`, `type`, and `grant` before
-/// `fork_into_nursery`/`enquire` ever run, so no child is registered.
+/// `bequeath`/`enquire` ever run, so no child is registered.
 #[test]
 fn unknown_grant_label_errors_before_any_enquiry_crosses() {
     let session = crate::agent::Avatar::for_test("system").unwrap();
@@ -1403,4 +1403,29 @@ fn index_and_grep_answer_their_own_shapes() {
         result.contains("\n0\n"),
         "a pattern that matches nothing answers no hits, got: {result}"
     );
+}
+
+/// A run whose host lends no fork door refuses a spawn in its own words,
+/// before any enquiry crosses.
+#[test]
+fn a_run_with_no_fork_door_refuses_in_its_own_words() {
+    use ral_core::protocol::Run;
+    use ral_core::run::{RunReport, RunRequest};
+    use ral_core::types::Break;
+
+    let mut shell = crate::boot::test_shell();
+    let report = shell.run(RunRequest::from(Run::captured(
+        r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `inherit, search: true, provider: `inherit, model: `inherit]",
+        "<test>",
+    )));
+    let RunReport::Ran { ending, .. } = report else {
+        panic!("well-formed source must run")
+    };
+    match ending.into_result() {
+        Err(Break::Error(e)) => assert_eq!(
+            e.message,
+            "exarch-agents: this host adopts no forked sessions"
+        ),
+        other => panic!("expected the no-fork-door refusal, got {other:?}"),
+    }
 }

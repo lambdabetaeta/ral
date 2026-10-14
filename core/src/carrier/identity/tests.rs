@@ -2,6 +2,7 @@
 //! probes, all through one in-process engine.
 use super::*;
 use crate::carrier::{Dispatching, dispatch_to_report};
+use crate::guard::SpawnGrant;
 use crate::protocol::{Control, Ending, EnquiryError, Report};
 use crate::types::Shell;
 
@@ -317,20 +318,16 @@ mod durability_tests {
         crate::types::BuiltinBody::Static(builtin_panic_now),
     )];
 
-    #[allow(
-        clippy::unnecessary_wraps,
-        reason = "must match EngineInstaller::boot's signature, which can genuinely refuse"
-    )]
-    fn panicky(_attach: &Attach) -> Result<crate::engine::Booted, String> {
-        let mut shell = crate::test_helper::core_shell();
-        shell.install_builtins(&PANIC_BUILTINS_ARR);
-        Ok(crate::engine::Booted {
-            shell,
-            keep: Box::new(()),
-        })
-    }
-
-    static PANICKY: [EngineInstaller; 1] = [crate::carrier::testkit::installer("panicky", panicky)];
+    static PANICKY: [EngineInstaller; 1] = [crate::carrier::testkit::installer(
+        "panicky",
+        |_| {
+            let mut runtime =
+                crate::HostSurface::default().runtime(crate::terminal::TerminalState::default());
+            runtime.install_builtins(&PANIC_BUILTINS_ARR);
+            Ok(runtime)
+        },
+        |_, _| Ok(()),
+    )];
 
     /// A panicking run arrives as an ordinary `Report::Static{Host}` — the run
     /// door caught it and rolled the shell back — and the same transport
@@ -498,16 +495,20 @@ mod probe_tests {
     #[test]
     fn a_parked_fork_is_adopted_once_under_the_parent_installer() {
         let transport = fresh();
-        let park = || transport.nursery.park(crate::test_helper::core_shell());
-        let id = park();
-        assert!(transport.adopt_parked(id, &SpawnGrant::Inherit).is_ok());
+        let park = |grant| {
+            transport
+                .nursery
+                .park(crate::test_helper::core_shell().bequeath(grant))
+        };
+        let id = park(SpawnGrant::Inherit);
+        assert!(transport.adopt_parked(id).is_ok());
         let again = transport
-            .adopt_parked(id, &SpawnGrant::Inherit)
+            .adopt_parked(id)
             .err()
-            .expect("a fork adopts once");
+            .expect("a bequest adopts once");
         assert!(again.contains("no forked session is parked"), "{again}");
         let based = transport
-            .adopt_parked(park(), &SpawnGrant::Base("confined".into()))
+            .adopt_parked(park(SpawnGrant::Base("confined".into())))
             .err()
             .expect("a bare engine has no base lexicon");
         assert!(based.contains("`confined`"), "{based}");

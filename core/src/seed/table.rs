@@ -1,16 +1,16 @@
 //! The seed's scope table: serialisable mirrors of `Value` and `Env`.
 //!
 //! [`SerialValue`] fills [`FOValue`]'s extension slot with closures so the
-//! re-exec'd engine child IPC ([`super::EngineSeed`], `hatch`) can ship a
+//! sealed child ([`super::EngineSeed`]) can ship a
 //! captured environment as JSON.  This module interns *environments*, one row
 //! per distinct allocation, by [`Env::ptr_eq`] identity ([`InternCtx`]),
-//! rebuilt topologically ([`WireDecoder::for_shell`]).  Σ never crosses: a
+//! rebuilt topologically ([`WireDecoder::for_runtime`]).  Σ never crosses: a
 //! captured environment carries only ρ.  `into_runtime`, given a
 //! [`WireDecoder`], is the sole wire→runtime conversion.
 
 use crate::first_order::FOValue;
 use crate::ir::{Comp, Name};
-use crate::types::{Binding, BuiltinTable, Closure, Env, Error, Leaf, Shell, Value};
+use crate::types::{Binding, BuiltinTable, Closure, Env, Error, Leaf, Runtime, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -64,7 +64,7 @@ pub(crate) struct SerialBinding {
 }
 
 /// One row per interned environment, in discovery order;
-/// [`WireDecoder::for_shell`] rebuilds it into session-tier maps on the
+/// [`WireDecoder::for_runtime`] rebuilds it into session-tier maps on the
 /// receiving side.
 pub(crate) type ScopeTable = Vec<Vec<(String, SerialBinding)>>;
 
@@ -72,7 +72,7 @@ pub(crate) type ScopeTable = Vec<Vec<(String, SerialBinding)>>;
 //
 // Environment references are unordered: an environment may hold a closure
 // whose captured env points at a row interned before or after it.
-// `WireDecoder::for_shell` therefore sorts by dependency rather than trusting
+// `WireDecoder::for_runtime` therefore sorts by dependency rather than trusting
 // id order.
 
 pub(crate) struct InternCtx {
@@ -122,7 +122,7 @@ impl InternCtx {
     /// no other accessor.
     ///
     /// # Errors
-    /// A binding's value reaches a handle, which [`Shell::fork_scrubbed`]
+    /// A binding's value reaches a handle, which [`crate::Shell::bequeath`]
     /// should have scrubbed before any shell reached this wire.
     pub(crate) fn finish(mut self) -> Result<ScopeTable, Error> {
         while let Some((id, bindings)) = self.pending.pop() {
@@ -162,7 +162,7 @@ type EnvRows = Vec<Option<Env>>;
 /// and the [`BuiltinTable`] a captured [`Value::Native`] re-links its name
 /// against.  Σ never rides the wire, so no tier crosses here either.
 ///
-/// Constructible only from the [`Shell`] that will run the decoded values,
+/// Constructible only from the [`Runtime`] that will run the decoded values,
 /// so no call site can pick a manifest of its own.
 #[derive(Debug)]
 pub(crate) struct WireDecoder {
@@ -178,7 +178,7 @@ impl WireDecoder {
     /// # Errors
     /// A row reference out of range or unresolved, a binding that fails to
     /// decode, or a cycle — rows left waiting when no row is ready.
-    pub(crate) fn for_shell(shell: &Shell, scope_table: &ScopeTable) -> Result<Self, Error> {
+    pub(crate) fn for_runtime(runtime: &Runtime, scope_table: &ScopeTable) -> Result<Self, Error> {
         let n = scope_table.len();
         let deps: Vec<HashSet<u32>> = scope_table
             .iter()
@@ -203,7 +203,7 @@ impl WireDecoder {
         let mut ready: Vec<usize> = (0..n).filter(|&id| waiting[id] == 0).collect();
         let mut dec = Self {
             rows: vec![None; n],
-            manifest: shell.session.builtins.clone(),
+            manifest: runtime.builtins.clone(),
         };
         let mut built = 0;
         while let Some(id) = ready.pop() {
@@ -239,8 +239,7 @@ impl WireDecoder {
 
 /// The match is exhaustive on purpose: a new [`SerialClosure`] variant must
 /// declare whether it carries scope references, or its dependency edges go
-/// silently missing from [`WireDecoder::for_shell`].
-#[cfg_attr(not(any(unix, test)), allow(dead_code))]
+/// silently missing from [`WireDecoder::for_runtime`].
 fn collect_scope_deps(value: &SerialValue, out: &mut HashSet<u32>) {
     value.for_each_ext(&mut |closure| match closure {
         SerialClosure::Thunk(t) => {
@@ -272,7 +271,7 @@ impl FOValue<SerialClosure> {
                     .collect::<Result<_, _>>()?,
             }))),
             Leaf::Handle => Err(Error::new(
-                "a handle reached the seed wire, though `Shell::fork_scrubbed` should have \
+                "a handle reached the seed wire, though `Shell::bequeath` should have \
                  replaced it: this is a fault in ral rather than in your program: please \
                  report the source that produced it",
             )),
@@ -527,7 +526,7 @@ mod tests {
                 scheme: None,
             },
         )]];
-        let err = WireDecoder::for_shell(&crate::test_helper::core_shell(), &table)
+        let err = WireDecoder::for_runtime(&crate::test_helper::core_shell().runtime(), &table)
             .expect_err("out-of-range ref must fail the build");
         assert_eq!(err.message, "seed: scope ref 5 out of range or unresolved");
     }
@@ -552,7 +551,7 @@ mod tests {
             .expect("a deep chain must encode without exhausting the stack");
     }
 
-    /// The deferred table still decodes: `for_shell` resolves the row
+    /// The deferred table still decodes: `for_runtime` resolves the row
     /// dependencies and `into_runtime` rebuilds every link.
     #[test]
     fn deep_stream_chain_round_trips() {
@@ -560,8 +559,8 @@ mod tests {
         let mut ctx = InternCtx::new();
         let ipc = SerialValue::from_runtime(&chain, &mut ctx).expect("encode");
         let table = ctx.finish().expect("finish");
-        let dec =
-            WireDecoder::for_shell(&crate::test_helper::core_shell(), &table).expect("decoder");
+        let dec = WireDecoder::for_runtime(&crate::test_helper::core_shell().runtime(), &table)
+            .expect("decoder");
         let back = ipc.into_runtime(&dec).expect("decode");
         let mut depth = 0;
         let mut cur = &back;
@@ -581,8 +580,8 @@ mod tests {
         let mut ctx = InternCtx::new();
         let ipc = SerialValue::from_runtime(&value, &mut ctx).expect("to serial");
         let table = ctx.finish().expect("finish");
-        let dec =
-            WireDecoder::for_shell(&crate::test_helper::core_shell(), &table).expect("decoder");
+        let dec = WireDecoder::for_runtime(&crate::test_helper::core_shell().runtime(), &table)
+            .expect("decoder");
         assert_eq!(ipc.into_runtime(&dec).expect("from serial"), value);
     }
 

@@ -2,11 +2,13 @@
 //! Nothing here runs per exchange — per-session disk state is
 //! [`crate::record::AgentLog`].
 
-use crate::app::{EXARCH, Scratch, seed_var};
+use crate::app::{EXARCH, seed_var};
 use crate::shell_eval;
 use crate::shell_eval::builtins;
-use ral_core::Shell;
+use ral_core::boot::boot_runtime;
+use ral_core::protocol::Attach;
 use ral_core::terminal::TerminalState;
+use ral_core::{Runtime, Shell};
 
 /// The process-level signal ceremony, once at each entry point that hosts an
 /// identity engine: exarch's cancel chain layers over ral's handlers.
@@ -17,57 +19,55 @@ pub fn face_process_signals(terminal: &TerminalState) {
     terminal.seat();
 }
 
-/// Exarch's one `EngineInstaller::boot`, under either carrier.
-///
-/// The dressed shell, `detach` where the double fork exists, and the Attach's
-/// env seeded as bindings before the ledgers arm. A scratch the Attach names
-/// is the host's; with none named — a guest engine — it mints its own, kept
-/// as long as the engine.
+/// Exarch's process half, under either carrier: the dressed surface and
+/// prelude, `detach` where the double fork exists, the agent library's docs.
 ///
 /// # Errors
-/// A scratch that could not be created, which refuses the attach.
-///
-/// # Panics
-/// Panics if the embedded agent library fails to load.
-pub fn engine_boot_shell(
-    attach: &ral_core::protocol::Attach,
-) -> Result<ral_core::engine::Booted, String> {
-    let mut shell = ral_core::boot::boot_shell(
+/// None: the signature is the installer's.
+pub fn engine_runtime(attach: &Attach) -> Result<Runtime, String> {
+    let mut runtime = boot_runtime(
         attach.terminal,
         &shell_eval::PRELUDE,
         &builtins::host_surface(),
     );
-    crate::library::install_agent_library(&ral_core::types::Mooring::adrift(), &mut shell)
+    #[cfg(unix)]
+    runtime.install_builtins(ral_core::builtins::DETACH_BUILTIN);
+    runtime.install_library_docs(crate::library::agent_library_docs());
+    Ok(runtime)
+}
+
+/// Exarch's root-only recipe: the agent library, hints, the detach budget,
+/// and the Attach's env seeded as bindings before the ledgers arm. The
+/// scratch is the host's, named by the Attach.
+///
+/// # Errors
+/// An Attach that names no scratch.
+///
+/// # Panics
+/// Panics if the embedded agent library fails to load.
+pub fn engine_root(attach: &Attach, shell: &mut Shell) -> Result<(), String> {
+    let var = EXARCH.scratch_var();
+    if !attach.env.iter().any(|(name, _)| *name == var) {
+        return Err(format!(
+            "exarch engine: the attach names no ${var}: the host owns the scratch and names it in every attach"
+        ));
+    }
+    crate::library::install_agent_library(&ral_core::types::Mooring::adrift(), shell)
         .unwrap_or_else(|e| panic!("exarch: embedded agent library failed to load: {e:?}"));
-    seed_no_color(&mut shell);
+    seed_no_color(shell);
     shell.set_exit_hints(ral_core::types::ExitHints::from_text(include_str!(
         "../../data/exit-hints.txt"
     )));
     #[cfg(unix)]
-    {
-        shell.install_builtins(ral_core::builtins::DETACH_BUILTIN);
-        shell.arm_detach(shell_eval::DETACH_BIRTH_BUDGET);
-    }
-    let named = attach
-        .env
-        .iter()
-        .any(|(name, _)| *name == EXARCH.scratch_var());
-    let keep: Box<dyn Send> = if named {
-        Box::new(())
-    } else {
-        let scratch = Scratch::new(EXARCH)
-            .map_err(|e| format!("exarch engine: could not create its scratch directory: {e}"))?;
-        scratch.install_into(&mut shell);
-        Box::new(scratch)
-    };
+    shell.arm_detach(shell_eval::DETACH_BIRTH_BUDGET);
     for (name, value) in &attach.env {
-        seed_var(&mut shell, name, value);
+        seed_var(shell, name, value);
     }
-    shell_eval::arm_session_ledgers(&mut shell);
-    Ok(ral_core::engine::Booted { shell, keep })
+    shell_eval::arm_session_ledgers(shell);
+    Ok(())
 }
 
-/// An Attach for a test engine, naming a scratch so the recipe mints none.
+/// An Attach for a test engine, naming the scratch.
 #[cfg(test)]
 pub(crate) fn test_attach() -> ral_core::protocol::Attach {
     let temp = std::env::temp_dir();
@@ -82,9 +82,11 @@ pub(crate) fn test_attach() -> ral_core::protocol::Attach {
 /// A dressed shell for a test, over no scratch of its own.
 #[cfg(test)]
 pub(crate) fn test_shell() -> Shell {
-    engine_boot_shell(&test_attach())
-        .expect("a named scratch boots without minting one")
-        .shell
+    let attach = test_attach();
+    let mut shell = Shell::root(engine_runtime(&attach).expect("exarch's runtime derives"));
+    ral_core::boot::seed_host_env(&mut shell);
+    engine_root(&attach, &mut shell).expect("test_attach names the scratch");
+    shell
 }
 
 /// An identity engine for a test, booted through the one recipe.
@@ -104,8 +106,9 @@ pub(crate) fn seed_no_color(shell: &mut Shell) {
 
 #[cfg(test)]
 mod tests {
-    use super::test_shell;
+    use super::{engine_root, engine_runtime, test_shell};
     use crate::app::{EXARCH, Scratch};
+    use ral_core::Shell;
 
     /// Cargo's own TLS wants a door no profile admits, so a confined session
     /// must hand it the `git` binary instead — invisible in every log, hence
@@ -119,5 +122,32 @@ mod tests {
             shell.env_var("CARGO_NET_GIT_FETCH_WITH_CLI"),
             Some("true".to_string())
         );
+    }
+
+    /// Pins the rule that makes a child engine's runtime its parent's.
+    #[test]
+    fn a_root_installs_no_builtins_the_runtime_lacks() {
+        let names = |shell: &Shell| {
+            let mut names: Vec<String> = shell.builtin_names().map(str::to_owned).collect();
+            names.sort();
+            names
+        };
+        let runtime = engine_runtime(&super::test_attach()).expect("exarch's runtime derives");
+        assert_eq!(names(&test_shell()), names(&Shell::root(runtime)));
+    }
+
+    #[test]
+    fn an_attach_naming_no_scratch_is_refused() {
+        let temp = std::env::temp_dir();
+        let attach = ral_core::protocol::Attach::new(
+            crate::shell_eval::builtins::INSTALLER_TAG,
+            temp.clone(),
+            temp,
+        );
+        let mut shell = Shell::root(engine_runtime(&attach).expect("exarch's runtime derives"));
+        let Err(why) = engine_root(&attach, &mut shell) else {
+            panic!("an unnamed scratch must refuse the attach");
+        };
+        assert!(why.contains(&EXARCH.scratch_var()), "{why}");
     }
 }

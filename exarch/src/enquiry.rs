@@ -429,52 +429,27 @@ impl Datum for Selection {
 pub(crate) enum ForkClaim {
     /// Parked in this host's own nursery, under this id.
     Parked(NurseryId),
-    /// Its engine listens on `port`, handing its connection only to a dial
-    /// that writes `token` first.
-    Listening { port: u32, token: u64 },
+    /// Sealed by a wire engine: the bytes the host builds a child engine
+    /// around without reading them.
+    Sealed(ral_core::seed::Sealed),
 }
 
 impl Datum for ForkClaim {
     fn encode(self) -> FOValue {
         match self {
             Self::Parked(id) => tag("parked", Some(id.0.encode())),
-            Self::Listening { port, token } => tag(
-                "listening",
-                Some(FOValue::Map {
-                    entries: vec![
-                        ("port".into(), u64::from(port).encode()),
-                        // Bit-preserving: the eight bytes the host writes are
-                        // the eight the listener compares.
-                        (
-                            "token".into(),
-                            FOValue::Int {
-                                value: token.cast_signed(),
-                            },
-                        ),
-                    ],
-                }),
-            ),
+            Self::Sealed(seal) => tag("sealed", Some(seal.encode())),
         }
     }
 
     fn decode(v: &FOValue) -> Result<Self, String> {
         match untag(v) {
             Some(("parked", Some(id))) => u64::decode(id).map(|id| Self::Parked(NurseryId(id))),
-            Some(("listening", Some(dial))) => {
-                exact_keys(dial, &["port", "token"])?;
-                let port: u64 = field(dial, "port")?;
-                let port =
-                    u32::try_from(port).map_err(|_| format!("`port: {port} is no vsock port"))?;
-                let Some(FOValue::Int { value }) = dial.field("token") else {
-                    return Err(format!("`token: expected an Int, in {}", dial.shape()));
-                };
-                Ok(Self::Listening {
-                    port,
-                    token: value.cast_unsigned(),
-                })
+            Some(("sealed", Some(bytes))) => {
+                ral_core::seed::Sealed::decode(bytes).map(Self::Sealed)
             }
             _ => Err(format!(
-                "expected `parked <nursery id> or `listening [port, token], got {}",
+                "expected `parked <nursery id> or `sealed <bytes>, got {}",
                 v.shape()
             )),
         }
@@ -1280,11 +1255,14 @@ mod tests {
                     Memory::Mnemon,
                     Selection::Named("other-model".into()),
                 ),
-                // A token past `i64::MAX` crosses bit for bit.
-                ForkClaim::Listening {
-                    port: 41_731,
-                    token: u64::MAX,
-                },
+                ForkClaim::Sealed(
+                    ral_core::seed::seal(
+                        &ral_core::HostSurface::default()
+                            .shell(ral_core::terminal::TerminalState::default())
+                            .bequeath(SpawnGrant::Inherit),
+                    )
+                    .expect("a bequest seals"),
+                ),
             ),
             start(
                 spec(

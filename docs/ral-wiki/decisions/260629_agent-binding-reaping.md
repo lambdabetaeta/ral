@@ -9,6 +9,10 @@ status: 'superseded in part by [[decisions/260911_an-external-is-a-byte-operatio
 > `BindingLedger::forked` and a hatched child by re-sealing in
 > `EngineSeed::apply`. Neither `Agent::assemble` nor a `replace_shell` arms
 > anything ([[internals/binding-leases|binding-leases]]).
+>
+> **Amended again 2026-10-13.** Who arms is now `Shell::construct`, from the
+> bequest's terms, sealing the inherited scope as baseline on either seat;
+> `fork_session`, `BindingLedger::forked` and the `apply` re-seal are gone.
 
 # Exarch leases agent scratch bindings; ral bindings do not expire
 

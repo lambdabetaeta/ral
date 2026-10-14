@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 958d7af7
+generated_at_commit: e028f5a3
 generated_at_date: 2026-10-13
 covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/data/system.md, exarch/data/agents.md, exarch/data/reply.md, exarch/data/ral.md, exarch/data/script-style.md, exarch/data/context.md]
 ---
@@ -141,12 +141,13 @@ Two modules hold the once-per-process pieces; nothing here is per-run.
 and project dirs, `Scratch`, `RunLock`, the time and slug helpers); `boot.rs` is
 the shell every seat starts from.
 
-- **`engine_boot_shell`** (`boot.rs`) — the one boot recipe for both seats
-  (`EngineInstaller::boot`, run engine-side at Attach): core's
-  [[map/repl/startup|`ral_core::boot::boot_shell`]] with exarch's host surface
-  (`builtins::host_surface()`) so the host builtins ride construction, then
-  `library::install_agent_library` for the `agent.ral` helpers, ANSI colour
-  suppressed at the source (`seed_no_color`), an engine-local `Scratch`, and
+- **`engine_runtime` and `engine_root`** (`boot.rs`) — the installer's two
+  halves for both seats, run engine-side at Attach: `engine_runtime` is core's
+  [[map/repl/startup|`ral_core::boot::boot_runtime`]] with exarch's host surface
+  (`builtins::host_surface()`) so the host builtins ride construction, and a
+  child engine runs it too; `engine_root` is the root-only recipe over a root
+  session: `library::install_agent_library` for the `agent.ral` helpers, ANSI colour
+  suppressed at the source (`seed_no_color`), the scratch the `Attach` names (it refuses one that names none: the host owns it), and
   **`shell_eval::arm_session_ledgers`** — the one policy site arming the
   binding lease and settled-worker retention. It has no signal ceremony and no
   terminal probe (a cancel arrives as a `Control` frame).

@@ -103,7 +103,7 @@ checked at the runtime door that enumerates their legal labels
 ([[decisions/260719_agent-names-and-schedule-labels|names-and-schedule-labels]]).
 One call:
 
-- **`fork`s a child `Agent`** through `Shell::fork_scrubbed`
+- **`fork`s a child `Agent`** through `Shell::bequeath`
   ([[map/core/shell-state|the flow matrix]]). The child snapshots the
   **serialisable fragment** of its parent's lexical scope — every binding,
   each handle in it replaced by an `` `opaque `` placeholder — with the
@@ -246,88 +246,78 @@ that answers `` exarch-agents `start `` sits in the host process, and cannot rea
 **The whole of that asymmetry is one field of one enquiry.** Beside the model's
 record, `` `start `` carries a `fork` tag saying how the child's forked session
 is to be reached: `` `parked <id> ``, a nursery slot the handler adopts by id,
-or `` `listening [port, token] ``, a port the guest has bound. Both arms run
+or `` `sealed <bytes> ``, the parent's bequest sealed for an engine the host will make. Both arms run
 every authority check the desk runs before anything is spawned, and both answer
 the same roster, so the enquiring builtin cannot tell which one served it.
 
-**The connection is opened by the side that knows what it is for.** A wire
-spawn is one exchange:
+**The host makes the engine.** A wire spawn is one exchange, and no engine
+spawns an engine:
 
-- the builtin **binds an ephemeral guest port for the duration of this one
-  spawn**, packs the scrubbed fork into an `EngineSeed` before the listener
-  thread starts — a `Shell` never crosses to it, and the seed is all it ever
-  holds of the parent's session — mints eight token bytes, and names port and
-  token in the enquiry. The seed carries the spawn's `grant` as a
+- the builtin does no I/O. It bequeaths the scrubbed fork, seals it
+  (`seed::seal`) and names the bytes in the enquiry; a `Shell` never crosses,
+  and the seal is all the desk ever holds of the parent's session, bytes it
+  relays and never reads. The bequest carries the spawn's `grant` as a
   `SpawnGrant`, and a `` `restrict `` record crosses it **undecoded**: the
   places in it must freeze against the child's own working directory, and the
-  guest is the side standing in it
+  child engine is the side standing in it
   ([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]]);
-- the desk, *while answering*, dials that port, writes the token, and waits;
-- the listener thread checks the token, spawns `current_exe --engine` with the
-  dialled connection on its protocol fd and the seed on an inherited one — the
-  same re-exec shape a wire seat's own construction uses, one level in — and
-  only **then** writes the acknowledgement byte;
-- the desk reads the ack, adopts the stream as a `Seat::Wire` child exactly as
-  the trunk itself was seated, and hands it to the same `spawn_async` an
-  identity trunk's fork reaches.
+- the desk, *while answering*, asks its `Factory` for a connection to a fresh
+  engine: synod's is the guest daemon, which spawns one engine per connection
+  the host dials on `FACTORY_PORT` and admits only `VMADDR_CID_HOST`;
+- the desk builds the child's `Attach` from the parent's own plus the seal,
+  adopts the stream as a `Seat::Wire` exactly as the trunk itself was seated,
+  and waits for `Attached`;
+- only then does it answer the enquiry and hand the seat to the same
+  `spawn_async` an identity trunk's fork reaches.
 
-**A dialling side never has to ask which connection this is.** Correlation is
-the price of accepting: a listener anyone may dial must publish a preamble for
-callers to name themselves in, hold a table keyed by what that preamble
-carries, run a pump to accept into it, expire the entries nobody claims, and
-split the spawn into a phase that reserves a child and a phase that redeems it.
-Open the connection from the other side and none of that has anything left to
-do — the host dialled a port it was told about, in the enquiry it is still
-answering, so it already holds the spawn the connection is for. What is left is
-not a cheaper correlation mechanism but no correlation at all
-([[design/engine-protocol|engine-protocol]]). The token
-changes job with the direction: no longer a key naming a rendezvous, it is a
-guard — the guest's proof that the connection it is about to hand a seeded
-engine was opened by the host, and not by something inside the guest racing it
-for the port ([[map/core/io-process|the spawn jail]] permits
-`socket(AF_VSOCK)`; the guest kernel's refusal of a guest-local dial is the
-standing defence, and the token stands behind it).
+**No connection has to ask which it is.** The host dialled the daemon for this
+spawn, in the enquiry it is still answering, so it already holds the spawn the
+connection is for; there is no preamble, no table keyed by one, no pump and no
+expiry ([[design/engine-protocol|engine-protocol]]). Admission is the peer's
+CID, a kernel-enforced identity, in place of a token: a guest process cannot
+present the host's CID, so a standing port is safe
+([[map/core/io-process|the spawn jail]] permits `socket(AF_VSOCK)`).
 
-**The child exists before the roster names it.** The listener acks only after
-`spawn()` has returned, and the desk enrols the child in the fleet only after
-reading the ack. There is no window in which an enrolled agent has no engine
-behind it — which is why the roster's `state` column is derived from the
-agent tree at listing time, and why `` exarch-agents `list `` reads as a fact rather
-than as an intent.
+**The child exists before the roster names it.** The desk answers the enquiry
+only after `Seat::wire` returned from `await_attached`, and enrols the child in
+the fleet only after that. There is no window in which an enrolled agent has no
+engine behind it, which is why the roster's `state` column is derived from the
+agent tree at listing time, and why `` exarch-agents `list `` reads as a fact
+rather than as an intent.
 
 A spawn that fails leaves nothing to reconcile. A desk that refuses never
-dials, so the builtin wakes its own listener thread rather than leave it in its
-poll; a child that will not spawn is never acked, and the reason raised is
-whichever stood nearer the failure — the guest thread's if it has one,
-otherwise the desk's. Nothing was reserved, so nothing has to expire. Past the
-ack the child is alive, and a refusal from there on simply drops the stream:
-the child reads EOF on its protocol fd and the guest's own table reaps it.
+dials; a factory that cannot make an engine, or an engine that refuses its
+`Attach`, reaches the parent as the desk's refusal, in the engine's words.
+Nothing was reserved, so nothing has to expire. Once the child is attached, a
+refusal from there on simply drops the stream: the child reads EOF on its
+protocol fd, exits, and the daemon reaps it.
 
-Depth beyond one needs nothing extra: a wire child inherits the dialler its
-parent was built with, so a helper spawning a helper of its own binds its own
-port and is dialled exactly as it was, and `fuel` bounds the recursion as it
-does in the in-process lattice.
+Depth beyond one needs nothing extra: a wire child's own spawns reach the same
+factory through the host, so a helper spawning a helper is dialled exactly as it
+was, and `fuel` bounds the recursion as it does in the in-process lattice.
 
-**The one snapshot law: an identity fork and a wire hatch give the child the
+**The one snapshot law: an identity fork and a sealed child give the child the
 same scope, handler stack and hooks, every name resolving to the same value or
 the same absence, and the same session policy.** A handle is what stands in the way — live authority over a
 parent-side worker, with no wire form — and it is exactly the class of
 authority every other line of the fork law already denies a child: the parent's
 cancel domain, its terminal, its inbox, its provider handle. So the scrub lives
-at `Shell::fork_scrubbed`, the one fork both arms take — the identity arm parks
-it in the nursery, the wire arm packs it into an `EngineSeed` — and each handle
-becomes an `` `opaque `` placeholder wherever it stood: in a binding, in any
-scope a closure captured, in a native's applied arguments, in a handler frame's
-arms. The fork empties the hooks, which the wire does not carry: they are the
-installing host's lifecycle entry points, and a child engine is not that host.
-A shell that reaches no handle forks as itself, its scope shared rather than
-copied. The policy is the session's own and owes nothing to the seat. That
+in `Shell::bequeath`, the one package both seats take: a child is
+`Shell::child_of(runtime, bequest)` on either seat — the identity arm parks the
+`Bequest` in the nursery, the wire arm seals it — and each
+handle becomes an `` `opaque `` placeholder wherever it stood: in a binding, in
+any scope a closure captured, in a native's applied arguments, in a handler
+frame's arms. A `Bequest` cannot express a hook: hooks are the installing
+host's lifecycle entry points, and a child engine is not that host. A shell
+that reaches no handle bequeaths itself, its scope shared rather than copied.
+The bequest carries scope, handler frames, sources, terms, fixings and the
+spawn grant. The policy is the session's own and owes nothing to the seat. That
 means its exit hints, its lease terms with everything inherited sealed as
 baseline, its worker retention, the size of its detach budget, and a snapshot
-of its `comparable` fixings. An identity fork takes all of it from its parent
-(`Shell::fork_session`). A hatched child boots the same recipe and applies a
-seed that carries the fixings and re-seals the lease. A round-trip test pins
-the law: fork a shell in memory, seed the same shell through `EngineSeed`, and
+of its `comparable` fixings. `Shell::construct` arms all of it from the
+bequest, the same code on either seat. A round-trip test pins the law and is
+both a codec test and a constructor test: construct a child from a bequest in
+memory, construct one from the same bequest through `EngineSeed` bytes, and
 compare bindings, captured scopes, applied arguments, handler frames and that
 policy, with no hook in either child ([[map/core/transport|transport]]).
 
@@ -491,10 +481,11 @@ The child is born with its parent's whole stack, plus at most one layer:
 `policy::base_layer` (the installer's `GrantNarrower`) resolves a named base,
 `decode_capability_map` an `R`, both frozen against the **child's** working
 directory so the layer lands already resolved
-([[design/capability-freeze|capabilities]]). The fork carries the parent's
-stack, and `SpawnGrant::narrow_onto` pushes the layer onto it: at adoption for
-an identity child (`IdentityTransport::adopt_parked`), at `EngineSeed::apply`
-for a hatched one ([[map/core/transport|transport]],
+([[design/capability-freeze|capabilities]]). The bequest carries the parent's
+stack and the grant, and `Shell::child_of` pushes the layer onto it through
+`SpawnGrant::narrow_onto`: at adoption for
+an identity child (`IdentityTransport::adopt_parked`), at `Engine::boot` for a
+sealed one ([[map/core/transport|transport]],
 [[map/exarch/policy|policy]]). There is no meet and no `Capabilities`
 folded against another: the stack's own per-check fold ANDs every layer's
 verdict, so a pushed layer can **narrow** the child below the parent and can
@@ -554,12 +545,12 @@ one field with six spellings, and why the CLI's two flags are not),
 interrupt, not a subtree cascade),
 [[decisions/260705_branch-minimal|branch-minimal]] (the conversing child whose
 `returns` bit is fixed false at construction),
-[[design/engine-protocol|engine-protocol]] (why the guest
+[[design/engine-protocol|engine-protocol]] (why the daemon
 listens and the host dials, what that direction deletes, and the enquiry
 class per registry, every tag answering the registry's state),
 [[decisions/260827_agent-and-avatar|agent-and-avatar]] (`Agent` as the `Arc`,
 `Avatar` as its embodiment, the fleet as `{ names, roots, lease }`),
-[[map/synod|synod]] (the dialler's landed home, and the helper surface built
+[[map/synod|synod]] (the factory's landed home, and the helper surface built
 over wire-seat children),
 [[decisions/260806_exchange-ends-at-fleet-quiescence|synod's exchange ends at
 fleet quiescence]] (the product law a wire-seat fleet's caller must satisfy).

@@ -7,10 +7,11 @@
 //! One entry per line, `<command> <status> <hint text>`; `*` matches any command,
 //! and `#` lines and blanks are ignored.
 
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
 
 /// Hints by command basename, then exit status.
-#[derive(Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ExitHints(HashMap<String, HashMap<i32, String>>);
 
 impl ExitHints {
@@ -34,6 +35,27 @@ impl ExitHints {
             .into_iter()
             .find_map(|name| self.0.get(name)?.get(&status))
             .cloned()
+    }
+}
+
+impl Serialize for ExitHints {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.0.iter().flat_map(|(cmd, by_status)| {
+            by_status
+                .iter()
+                .map(move |(&status, hint)| (cmd, status, hint))
+        }))
+    }
+}
+
+impl<'de> Deserialize<'de> for ExitHints {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let triples = Vec::<(String, i32, String)>::deserialize(deserializer)?;
+        let mut table: HashMap<String, HashMap<i32, String>> = HashMap::new();
+        for (cmd, status, hint) in triples {
+            table.entry(cmd).or_default().insert(status, hint);
+        }
+        Ok(Self(table))
     }
 }
 

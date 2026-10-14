@@ -79,7 +79,7 @@ impl fmt::Display for Side {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Fixed {
     pub(crate) side: Side,
     pub(crate) pointer: String,
@@ -118,13 +118,6 @@ pub struct Fixings(pub(crate) Mutex<HashMap<(UnitId, u32), Fixed>>);
 impl Fixings {
     pub(crate) fn snapshot(&self) -> Self {
         Self(Mutex::new(self.0.lock_ignore_poison().clone()))
-    }
-
-    /// Add `other`'s entries, `other` winning where both fix a variable.
-    pub(crate) fn absorb(&self, other: Self) {
-        self.0
-            .lock_ignore_poison()
-            .extend(other.0.into_inner_ignore_poison());
     }
 }
 

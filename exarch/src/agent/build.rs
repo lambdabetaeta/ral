@@ -3,7 +3,7 @@
 //! `assemble` and its [`Build`] bundle. `clear` rebuilds a node's context in
 //! place rather than ending it; `Drop` is the one exit every life takes.
 
-use crate::agent::dial::Dial;
+use crate::agent::factory::Factory;
 use crate::agent::fleet::{AGENT_LEASE_IDLE, Fleet, Launch, Unborn};
 use crate::agent::seat::{self, Seat};
 use crate::agent::shell::LogCell;
@@ -162,11 +162,11 @@ pub struct RootConfig {
     /// The network policy, whose `search` verdict is the trunk's reach and
     /// the ceiling every fork narrows under.
     pub egress: crate::egress::Egress,
-    /// The dial-side capability a wire trunk reaches its helpers through;
-    /// `None` for every identity trunk. A wire trunk built with `fuel > 0`
-    /// and no dialler is refused here — never a runtime surprise reached
-    /// only once a model calls `agent`.
-    pub dial: Option<Arc<dyn Dial>>,
+    /// Where a wire trunk gets its helper engines; `None` for every identity
+    /// trunk. A wire trunk built with `fuel > 0` and no factory is refused
+    /// here — never a runtime surprise reached only once a model calls
+    /// `agent`.
+    pub factory: Option<Arc<dyn Factory>>,
     /// Where this trunk's providers come from, shared by every fork.  A host
     /// that mints no providers of its own passes
     /// [`Bureau::Scripted`](crate::provider::Bureau::Scripted).
@@ -187,12 +187,11 @@ pub enum RootSeat {
     },
     /// Out-of-process: an already-built `transport` onto an engine elsewhere,
     /// a spawned `--engine` child or synod's adopted control-plane stream into
-    /// a guest VM. `cwd`/`home` come from the caller because under a VM the
-    /// workspace is a guest path this process cannot resolve.
+    /// a guest VM. The `attach` is the caller's, since under a VM its paths
+    /// are the guest's, which this process cannot resolve.
     Wire {
         transport: Box<ral_core::carrier::WireTransport>,
-        cwd: std::path::PathBuf,
-        home: std::path::PathBuf,
+        attach: ral_core::protocol::Attach,
     },
 }
 
@@ -342,16 +341,16 @@ impl Avatar {
             disk_warn_bytes,
             fuel,
             egress,
-            dial,
+            factory,
             bureau,
         } = cfg;
         // Stated, not discovered by a model calling `agent`: a fuelled wire
-        // trunk with no dialler to reach helpers through cannot ever answer
+        // trunk with no engine factory to make helpers with cannot ever answer
         // `` exarch-agents `start ``'s wire arm, so refuse the construction itself.
-        if matches!(&root_seat, RootSeat::Wire { .. }) && fuel > 0 && dial.is_none() {
+        if matches!(&root_seat, RootSeat::Wire { .. }) && fuel > 0 && factory.is_none() {
             return Err(io::Error::other(
-                "a wire trunk with spawn fuel needs a dialler to reach helper engines through: \
-                 pass one via RootConfig::dial, or build this trunk with fuel: 0",
+                "a wire trunk with spawn fuel needs an engine factory to make helper engines with: \
+                 pass one via RootConfig::factory, or build this trunk with fuel: 0",
             ));
         }
         let sessions_root = run_dir.join("sessions");
@@ -375,11 +374,9 @@ impl Avatar {
                 &AgentLog::dir_of(&sessions_root, id),
             )
             .map_err(lost)?,
-            RootSeat::Wire {
-                transport,
-                cwd,
-                home,
-            } => Seat::wire(*transport, cwd, home).map_err(lost)?,
+            RootSeat::Wire { transport, attach } => {
+                Seat::wire(*transport, attach, None).map_err(lost)?
+            }
         };
         let index =
             crate::prompt::BuiltinIndex::resolve(seat.read(|t| t.builtin_names()).map_err(lost)?);
@@ -423,7 +420,7 @@ impl Avatar {
                 resume_on_reset,
                 tools,
                 disk_warn_bytes,
-                dial,
+                factory,
                 bureau,
                 system,
                 index,
@@ -644,7 +641,7 @@ impl Avatar {
                 resume_on_reset,
                 tools: Toolset::offered(false),
                 disk_warn_bytes,
-                dial: None,
+                factory: None,
                 bureau: Arc::new(crate::provider::Bureau::Scripted),
                 system: system.into(),
                 index,

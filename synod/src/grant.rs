@@ -155,9 +155,9 @@ const TOOLBOX: &[&str] = &[
 
 /// The guest's disposable working space: the tmpfs `ral-daemon` mounts at
 /// `/tmp` (its mount plan, beside the `/work` mount itself), born with the
-/// machine and gone when it stops.  The engine's own scratch lands under
-/// it, and the prompt names it as the place for intermediate files, so the
-/// grant admits it whole.
+/// machine and gone when it stops.  It is the scratch the engine is
+/// told, not the parent of one it mints; the prompt names it as the place for
+/// intermediate files, so the grant admits it whole.
 pub(crate) const GUEST_SCRATCH: &str = "/tmp";
 
 /// One folder, opened as a session's whole authority.

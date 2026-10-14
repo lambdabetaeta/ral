@@ -265,8 +265,9 @@ fn wait_for_settle(inbox: &Inbox) -> crate::bus::Next {
 
 type Parked<R> = Box<dyn FnOnce(&ExarchDesk, NurseryId) -> R + Send>;
 
-/// Answers the one `` `branch `` a real run enquires by running its `f`
-/// against the fork that run parked, while the fork is still in its pen.
+/// Answers the one fork a real run enquires of, `` `branch `` or `` `start ``,
+/// by running its `f` against the bequest that run parked, while it is still
+/// in its pen.
 struct Parking<R> {
     desk: Arc<ExarchDesk>,
     f: Mutex<Option<Parked<R>>>,
@@ -277,9 +278,15 @@ impl<R: Send> Host for Parking<R> {
     fn surface(&self, _val: &FOValue) {}
 
     fn enquire(&self, req: FOValue) -> Result<FOValue, EnquiryError> {
-        let Ok(Request::Agents(Agents::Branch(ForkClaim::Parked(id)))) = Request::decode(&req)
+        let Ok(Request::Agents(
+            Agents::Branch(ForkClaim::Parked(id))
+            | Agents::Start(Start {
+                fork: ForkClaim::Parked(id),
+                ..
+            }),
+        )) = Request::decode(&req)
         else {
-            panic!("an identity run's `branch parks its fork")
+            panic!("an identity run parks its bequest")
         };
         let f = self.f.lock().unwrap().take().expect("one enquiry per run");
         *self.out.lock().unwrap() = Some(f(&self.desk, id));
@@ -293,6 +300,15 @@ fn with_parked<R: Send + 'static>(
     desk: &Arc<ExarchDesk>,
     f: impl FnOnce(&ExarchDesk, NurseryId) -> R + Send + 'static,
 ) -> R {
+    parked_by(desk, "_exarch-branch", f)
+}
+
+/// [`with_parked`], the fork made by running `source`.
+fn parked_by<R: Send + 'static>(
+    desk: &Arc<ExarchDesk>,
+    source: &str,
+    f: impl FnOnce(&ExarchDesk, NurseryId) -> R + Send + 'static,
+) -> R {
     let SeatKind::Identity(parent) = &desk.services.kind else {
         panic!("an identity desk parks in process")
     };
@@ -303,7 +319,7 @@ fn with_parked<R: Send + 'static>(
     });
     let report = ral_core::carrier::dispatch_to_report(
         &**parent,
-        ral_core::protocol::Run::captured("_exarch-branch", "<test>"),
+        ral_core::protocol::Run::captured(source, "<test>"),
         host.clone(),
     )
     .expect("an identity engine never severs");
@@ -319,7 +335,7 @@ fn still_parked(desk: &ExarchDesk, id: NurseryId) -> bool {
     let SeatKind::Identity(parent) = &desk.services.kind else {
         panic!("an identity desk parks in process")
     };
-    parent.adopt_parked(id, &SpawnGrant::Inherit).is_ok()
+    parent.adopt_parked(id).is_ok()
 }
 
 #[test]
@@ -1557,23 +1573,22 @@ fn agent_start_refuses_after_clear() {
     );
 }
 
-/// A refusal at adoption — here, a restriction record the capability
-/// decoder will not read, which only the engine's own freeze discovers —
-/// drops the adopted fork rather than leaving it to be adopted twice.
+/// A refusal at adoption: here, a restriction record the capability
+/// decoder will not read, which only the engine's own freeze discovers:
+/// drops the bequest rather than leaving it to be adopted twice.  The grant
+/// rides the bequest the run parked; the desk reads none of its own.
 #[test]
 fn refused_enquiry_leaves_the_nursery_empty() {
     let (desk, _fleet, _parent_inbox) = spawnable_desk(3);
-    let (err, left_parked) = with_parked(&desk, |desk, session| {
-        let restriction = FOValue::Map {
-            entries: vec![("net".to_string(), text("yes"))],
-        };
-        let answer = desk.ask(start(
-            ForkClaim::Parked(session),
-            spec("go", "helper", SpawnGrant::Restrict(restriction), false),
-        ));
-        (answer, still_parked(desk, session))
-    });
-    let err = err.expect_err("a `net axis that is not a Bool must refuse");
+    let (answer, left_parked) = parked_by(
+        &desk,
+        r"exarch-agents `start [prompt: #'go'#, name: 'helper', type: `amnemon, grant: `restrict [net: 'yes'], search: false, provider: `inherit, model: `inherit]",
+        |desk, session| {
+            let answer = desk.ask(start_req(session, "go", "helper", false));
+            (answer, still_parked(desk, session))
+        },
+    );
+    let err = answer.expect_err("a `net axis that is not a Bool must refuse");
     assert!(
         err.message.contains("net"),
         "must name the axis it could not read, got: {}",
@@ -1581,7 +1596,7 @@ fn refused_enquiry_leaves_the_nursery_empty() {
     );
     assert!(
         !left_parked,
-        "a refusal downstream of adopt must not leave the fork \
+        "a refusal downstream of adopt must not leave the bequest \
          re-adoptable: it was already claimed and simply drops"
     );
 }

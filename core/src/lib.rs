@@ -72,8 +72,8 @@ pub use role::{Invocation, Role, classify};
 pub use ty::Scheme;
 pub use typecheck::{SessionSchemes, TypeError, bake_prelude, typecheck};
 pub use types::{
-    Break, DefaultPolicy, Error, Escape, EventSink, HookName, HookSig, Map, RegisterError, Settled,
-    Shell, SurfaceSink, Value,
+    Bequest, Break, DefaultPolicy, Error, Escape, EventSink, HookName, HookSig, Map, RegisterError,
+    Runtime, Settled, Shell, SurfaceSink, Value,
 };
 
 /// Pre-`main` dispatch for the lib's own unit-test binary, so a test that

@@ -1,7 +1,7 @@
 ---
 verified_at_commit: 1776d222
 verified_at_date: 2026-09-03
-anchors: [builtin_registry, CORE_BUILTINS, WATCH_BUILTIN, BuiltinEntry, fixed_arity, native_value, seed_natives_and_base, coreutils_invoke]
+anchors: [builtin_registry, CORE_BUILTINS, WATCH_BUILTIN, BuiltinEntry, fixed_arity, native_value, install_set, coreutils_invoke]
 ---
 
 # Builtins: structure and registration
@@ -48,7 +48,7 @@ value and `$echo` is not, and `warn` curries where `echo` spreads
 
 **The manifest is a boot manifest; it is not a resolution layer.** It is
 authored as two, so installing a set is two installs rather than one sorting
-(`seed_natives_and_base`, with `native_value` — total over the table — the one
+(`Runtime::install_set`, with `native_value` — total over the table — the one
 door onto an entry's value form, shared with wire hydration): a table entry
 becomes a `Value::Native` in the shell's *base scope*, reached as an ordinary
 binding; a base-frame row becomes a *base frame* under the handler stack's run

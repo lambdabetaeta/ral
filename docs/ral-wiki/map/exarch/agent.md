@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 6c9047b6
-generated_at_date: 2026-10-08
+generated_at_commit: e028f5a3
+generated_at_date: 2026-10-13
 covers_paths: [exarch/src/agent.rs, exarch/src/latch.rs, exarch/src/agent/, exarch/src/signals.rs, exarch/src/cancel.rs, exarch/src/schedule.rs, exarch/src/enquiry.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
 
@@ -33,12 +33,12 @@ the destination judges it at its own pop.
 **`Avatar` is the private half**: the canonical
 [[internals/session-record|model projection]] (`AgentLog`, `record/session.rs`), a **seat**
 (`agent/seat.rs`) carrying the transport this run drives through —
-`Seat::Identity`, an `IdentityTransport` booted through the one recipe
-(`boot::engine_boot_shell`, the table `exarch::INSTALLERS` both carriers
-share) — a root keeps the `Attach` it was born from and the session `Scratch`
+`Seat::Identity`, an `IdentityTransport` booted through the installer's two
+halves (`boot::engine_runtime` and `boot::engine_root`, in the table
+`exarch::INSTALLERS` both carriers share) — a root keeps the `Attach` it was born from and the session `Scratch`
 that `Attach` names, an adopted fork keeps neither — or `Seat::Wire`, a
 `WireTransport` driving a remote engine, one process per session, keeping the
-`cwd`/`home` it was attached with
+`Attach` it was attached with, less its seal
 ([[map/core/engine-protocol|engine-protocol]]) — the
 canonical run and probe vocabulary either way
 ([[map/core/engine-protocol|engine-protocol]]) — plus the `inbox`, the
@@ -121,11 +121,11 @@ summary the TUI's banner shows. `RootConfig` carries the prompt, caps, `fuel`
 (exarch's and synod's launch sites pass `SPAWN_FUEL`), how the trunk is driven
 (`Trunk::{Headless, Attended, Embedded}`), the `Toolset` requests advertise
 (empty for `--chat`), the `Egress` (`exarch/src/egress.rs`) whose `search`
-verdict is read once, and the optional `dial` a wire trunk reaches its
-children through ([[#Wire-seat spawn|below]]) — what every fork shares goes
+verdict is read once, and the optional `factory` a wire trunk makes its
+children's engines with ([[#Wire-seat spawn|below]]) — what every fork shares goes
 onto the fleet's `Launch` — while `RootSeat` picks the seat kind (`Identity`
 boots its own shell from `scratch`; `Wire` adopts a built transport whose
-engine lives elsewhere, and spawns its sub-agents by dialling back into it).
+engine lives elsewhere, and makes its sub-agents' engines through its `factory`).
 The run's advisory lock is the launcher's to hold, never the node's.
 
 `Egress` bundles the two things a fleet's outbound network shares across
@@ -318,10 +318,10 @@ the calls until a settled entry expires, on the engine's own clock — which
 plumbing of their own: they ride the same drain above.
 
 **The binding-lease ledger** is armed by `shell_eval::arm_session_ledgers` —
-the one policy site, run by the one recipe (`boot::engine_boot_shell`) right after
+the one policy site, run by the one root recipe (`boot::engine_root`) right after
 the `Attach`'s env is seeded as bindings (seeding then arming stay one visible
-sequence); a fork keeps those terms through core's `fork_session`, sealing
-everything it inherited ([[map/core/shell-state|shell-state]]) — with
+sequence); a fork keeps those terms through core's `Shell::bequeath` and
+`Shell::child_of`, sealing everything it inherited ([[map/core/shell-state|shell-state]]) — with
 [[map/exarch/shell-eval|shell-eval]]'s `BINDING_IDLE_CALLS` (256) and
 `LARGE_BINDING_BYTES` (1 MiB), beside `arm_worker_retention`. The
 large-binding residency nudge rides the pushed `` `notice `` channel above,
@@ -522,7 +522,7 @@ refused, `Provider::complete` refuses every later request the hold covers
 Mutex<Vec<Weak<Agent>>>, lease: Duration, launch: Launch }` — two `Weak`
 indices, the idle-lease bound, and the **`Launch`**: what every node of one
 run shares, fixed once — `attended`, `allow_schedule`, `resume_on_reset`,
-the `Toolset`, `disk_warn_bytes`, the `dial`, the `Bureau`, and the prompt
+the `Toolset`, `disk_warn_bytes`, the `factory`, the `Bureau`, and the prompt
 template with the `BuiltinIndex` each node resolves it against. Held here
 once rather than copied into every `Agent`, so a fork's `Build` names only
 what is its own. It is not the tree: the tree is
@@ -651,7 +651,7 @@ A builtin spawn may say otherwise. `` exarch-agents `start ``'s `provider` and
 `model` fields each name `` `inherit `` or `` `named <Str> ``, and
 `ExarchDesk::child_provider` reads them **before the `SeatKind` split**, so
 both arms share one resolution and a refusal unwinds nothing — no adopted
-fork, no forked log, no dialled listener. A selection that resolves to the
+fork, no forked log, no engine made. A selection that resolves to the
 parent's own pair shares the parent's `Arc<Provider>`, allocating nothing; any
 other goes through `provider::Bureau::reselect`, which inherits the parent's
 tuning and output cap but not its `OpenRouter` route, chosen for the parent's
@@ -785,15 +785,16 @@ excursion, not one per boundary.
 
 A fork builds the child `Avatar` (and, inside it, the child `Agent`) for
 [[design/agents|sub-agent spawning]] out of a fork the *engine* makes of itself
-(`Shell::fork_scrubbed`, [[map/core/shell-state|the flow matrix]]), never one
+(`Shell::bequeath`, [[map/core/shell-state|the flow matrix]]), never one
 the host holds. The desk's one `child` builder serves both `start` and
 `/branch`; no `Shell` crosses into exarch. The child runs under its parent's
 `GrantStack`, and the one layer the spawn's `grant` names
 ([[map/exarch/policy|`policy::base_layer`]] for a base tag, `decode_capability_map`
 for a `` `restrict `` record, nothing for `` `inherit `` —
-[[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]]) is pushed
-engine-side, by `IdentityTransport::adopt_parked` or a hatched engine's
-`EngineSeed::apply`, both through `SpawnGrant::narrow_onto`.
+[[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]]) rides the
+`Bequest` and is pushed engine-side by `Shell::child_of`, through
+`SpawnGrant::narrow_onto`, whether the child is adopted by
+`IdentityTransport::adopt_parked` or sealed and made by the host's `factory`.
 A returning child sets `parent: Some(..)` — the strong tree edge that
 routes its result and drives the subtree cascade — and enrols itself in the
 fleet (`Fleet::enrol`), joining the shared `Arc<Fleet>` every node holds.
@@ -806,19 +807,21 @@ no lease — a sub-agent is not the foreground agent and can never seize the
 controlling terminal the TUI owns).
 
 - **The fork.** The spawn builtin (`fork_then_enquire`,
-  `shell_eval/builtins/harness.rs`) forks through `Shell::fork_scrubbed`, the
-  one door both spawn arms take ([[design/agents|agents]]'s one snapshot law);
-  the wire arm reaches it inside `listen_for_hatch`, which scrubs the shell it
-  is handed. The scrub replaces each `Value::Handle` the fork reaches with an
+  `shell_eval/builtins/harness.rs`) takes `Shell::bequeath(grant)`, the
+  one door both spawn arms take ([[design/agents|agents]]'s one snapshot law):
+  the identity arm parks the `Bequest` and the handler redeems it with
+  `adopt_parked(id)`, the wire arm seals it (`seed::seal`) and names the bytes in its enquiry. The grant
+  rides the bequest; the desk does not read `spec.grant`. The scrub replaces
+  each `Value::Handle` the bequest reaches with an
   `` `opaque `` placeholder — in a session binding, in any scope a closure
   captured, in a native's `applied` arguments, in a handler frame's arms — the
-  name staying bound, and empties the hooks
+  name staying bound, and a bequest carries no hooks
   ([[map/core/shell-state|the flow matrix]]). Closures stay live, and a parent
-  that reaches no handle forks with its scope shared, not copied.
-- **The lease.** Core's `fork_session` keeps the parent's lease terms and
-  seals every inherited name as baseline, and a hatched child re-seals after
-  applying its seed: inherited scratch is never pruned in the child, on either
-  seat (`fork_child_inherited_scratch_is_baseline`).
+  that reaches no handle bequeaths its scope shared, not copied.
+- **The lease.** `Shell::construct` arms the child's ledger from the
+  bequest's terms, keeping the parent's lease terms and sealing every
+  inherited name as baseline on either seat: inherited scratch is never
+  pruned in the child (`fork_child_inherited_scratch_is_baseline`).
 There is no flow-back: the child's `cd`, env, and new bindings die with it. An
 agent with fuel left may spawn, and each fork hands the child one less unit of
 `fuel` than the parent holds (`SPAWN_FUEL = 3` at the trunk; the parent's own
@@ -869,55 +872,38 @@ bars a desk handler from holding the `&mut Shell` a fork needs:
   scrubbed fork armed with the session ledgers and names the slot as
   `` `parked <id> ``. The desk adopts it by id through the parent's own
   transport (`IdentityTransport::adopt_parked`), in the same process.
-- **Wire.** A guest engine's runs carry `Fork::Listen` (`core/src/engine.rs`),
-  so the builtin body mints a `u64` token from OS randomness and calls
-  `ral_core::seed::hatch::listen_for_hatch` (`core/src/seed/hatch.rs`) with a listening
-  descriptor `shell_eval/builtins/guest_port.rs` has already bound — the one
-  `AF_VSOCK` endpoint exarch opens itself, and Linux-only because a guest port
-  means nothing outside a VM, while core's half is plain Unix plumbing tested
-  over `UnixListener` pairs on the production path. `listen_for_hatch`
-  scrubs the shell it is handed and packs the fork into an `EngineSeed` on the
-  caller's own thread — a `Shell` never leaves it — and a thread is left on
-  the socket. The enquiry names
-  `` `listening [port, token] ``.
+- **Wire.** A guest engine's runs carry `Fork::Seal` (`core/src/engine.rs`):
+  the builtin body does no I/O. It takes `Shell::bequeath`, `seal`s the
+  bequest into bytes the host never reads, and the enquiry names them as
+  `` `sealed <bytes> ``. No token, no ack, no seed fd and no table of children
+  exist: no engine spawns an engine.
 
-The desk's wire arm dials that port through the launch's **`Dial`** capability
-(`exarch/src/agent/dial.rs` — `vm_manager`-free by construction, a capability
-object `RootConfig` hands to the `Launch`, `None` on every identity trunk), writes the eight
-token bytes little-endian, and blocks on **one acknowledgement byte**
-(`ral_core::protocol::HATCH_ACK`) under the transport's own deadline. The
-listener thread accepts and compares the eight bytes, polling the wake pipe
-before every partial read — a dial that does not know them is dropped and the
-accept loop resumes, while one that sends only a prefix cannot pin shutdown.
-Losing the token race costs a stranger nothing but its connection; stalling
-mid-token costs the winner its spawn, which the decision records rather than
-defends against. `hatch_over` spawns `current_exe --engine` with the connection
-on fd 3 and the seed's fd named by `RAL_ENGINE_SEED_FD`; the child reads the
-framed seed before waiting for `Attach`, and the parent writes it after
-`spawn()`, so even a seed larger than the channel buffer makes progress. It
-writes the ack **only once `spawn()` has returned and the seed has crossed**. An
-ack therefore means the child already exists and holds its seed. The desk then
-adopts the
-stream as `Seat::Wire`, attached as the parent seat was (`SeatKind::Wire {
-cwd, home }` — the seed carries the live cwd and overrides the attach's on
-hydration, so no probe is owed per call), and hands the child to the same
-`spawn_async` an identity fork reaches, at `fuel = parent - 1`.
+The desk's wire arm (`make_engine`, `desk/agents.rs`) asks the launch's
+**`Factory`** (`exarch/src/agent/factory.rs` — `vm_manager`-free by
+construction, a capability object `RootConfig` hands to the `Launch`, `None` on
+every identity trunk) for one connection to a fresh engine, adopts it as a
+`WireTransport`, and seats it with `Seat::wire(transport, attach, Some(seal))`:
+the parent's own `Attach` plus the seal, written together, then `await_attached`.
+The seat stores the attach less its seal, so no seat holds its parent's
+bequest for its own life. The desk answers the parent's enquiry only after that
+returns, so the child is attached before the roster names it, and hands the
+seat to the same `spawn_async` an identity fork reaches, at `fuel = parent - 1`.
+A refused attach reaches the parent as the desk's refusal, in the engine's
+words. Synod's factory is the guest daemon on `FACTORY_PORT`, which admits only
+`VMADDR_CID_HOST` and spawns one engine per connection ([[map/synod|synod]]);
+the child unseals against its own `Runtime` in `Engine::boot`.
 
-One exchange, one token, one thread: the whole of failure is local. A refused
-enquiry never dialled, so the builtin wakes its listener through a pipe and
-joins it, raising the thread's own reason over the host's when it has one,
-since it was nearer the failure. Past the ack a refusal simply drops the
-stream — the child reads EOF on fd 3, and core's `HATCHED` table, swept at the
-next hatch and again at engine teardown, reaps whatever has since exited. That
-sweep is `waitpid` and nothing lighter: a hatched child closes its seed channel
-as soon as it has hydrated, so silence there means *started*, never stopped. A wire
-trunk with fuel > 0 and no dialler is a construction error, refused at
+One exchange, one connection: the whole of failure is local. A factory that
+cannot make an engine refuses in a sentence; past the attach a refusal simply
+drops the stream, the child reads EOF on fd 3, exits, and the daemon reaps it.
+A wire trunk with fuel > 0 and no factory is a construction error, refused at
 `Avatar::root` with a sentence rather than discovered by a model calling
-`agent`; off Linux the wire arm refuses in one sentence too.
+`agent`; on a backend that cannot dial inward (the HCS machine) the factory's
+refusal says so in one sentence.
 The enquiring builtin cannot tell which arm served it — both answer the same
 roster `` exarch-agents `` gives every tag. See [[design/agents|agents]] for the
-seed's isolation law and [[map/synod|synod]] for `MachineDial`, the `Dial`
-over `Machine::connect_guest`. The `` `mnemon `` memory mode
+seed's isolation law and [[map/synod|synod]] for `MachineFactory`, the
+`Factory` over `Machine::connect_guest`. The `` `mnemon `` memory mode
 additionally forks
 the parent's `AgentLog` and imports its model-visible context before assembly,
 as `/branch` does
@@ -994,5 +980,5 @@ the unit of eviction, the loop-top weighing, and the pressure reminder's
 channel),
 [[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]
 (the one edit, its three authorities, and the marker at each hole),
-[[map/synod|synod]] (`MachineDial`, and synod's own helper surface built over
+[[map/synod|synod]] (`MachineFactory`, and synod's own helper surface built over
 the wire-seat spawn above).

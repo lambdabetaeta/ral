@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 73bc87ff
-generated_at_date: 2026-10-08
+generated_at_commit: e028f5a3
+generated_at_date: 2026-10-13
 covers_paths: [synod/, vm-manager/, ral-daemon/, ral-initramfs/, vm-image/, core/src/protocol/channel.rs, core/src/carrier.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs]
 ---
 
@@ -103,7 +103,7 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
   the guest's `/work`) through `seat_machine` — the shared machine-seating
   seam, with `unseat_machine` its inverse for `end`.
   `synod/examples/boot-run.rs` calls both instead of reproducing them:
-  `unseat_machine(agent, dial) -> Box<dyn Machine>` enforces the
+  `unseat_machine(agent, factory) -> Box<dyn Machine>` enforces the
   drop-agent → recover-machine → shutdown ordering by ownership, so the
   wrong order is unrepresentable rather than merely discouraged.
   `control_seat` carries no platform condition at all: `take_wires` hands
@@ -150,7 +150,7 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
   disk at all. The trunk's fuel is
   `SPAWN_FUEL` (3), the same depth budget exarch's own trunks carry —
   promoted `pub` for exactly this reuse — and `RootConfig` carries a
-  `Dial` implementation over `Machine::connect_guest` (below), handed to the
+  `Factory` implementation over `Machine::connect_guest` (below), handed to the
   fleet's `Launch`, so synod's
   office assistant may delegate to helpers that run concurrently in the
   same guest, against the same folder, and in the same report. Only `vz.rs`
@@ -472,17 +472,20 @@ backends.
   inside the guest and hands back its host end — a `Command::Connect` on the
   machine thread under this backend, defaulted to a refusal sentence on any
   backend that cannot dial inwards. There is no third listener, no accept
-  pump, no published preamble, and no host-side token table: a connection the
+  pump, no published preamble, and no host-side table: a connection the
   host opened needs nothing to correlate it, because the side that opened it
-  already knows what it opened it for.
+  already knows what it opened it for. The listener it dials is the guest
+  daemon's ([[#ral-daemon/ — the guest's PID 1|below]]).
 
-  `synod/src/machine_dial.rs` is that seam's synod end — `MachineDial`, an
-  `exarch::agent::Dial` ([[map/exarch/agent|agent]]) over a machine it holds
-  in trust from `Conversation::begin` to `Conversation::end`, which takes it
-  back with `into_machine` once the agent that shared it is gone. The `Mutex`
-  it wraps the machine in is for `Sync`, not for the dial: `Machine` is
-  declared `Send` and no more, and one `Arc<dyn Dial>` crosses the desk's
-  threads.
+  `synod/src/machine_factory.rs` is that seam's synod end — `MachineFactory`,
+  an `exarch::agent::Factory` ([[map/exarch/agent|agent]]) over a machine it
+  holds in trust from `Conversation::begin` to `Conversation::end`, which takes
+  it back with `into_machine` once the agent that shared it is gone. Each
+  `engine()` dials `ral_daemon::boot::FACTORY_PORT`, never spelled twice. The
+  `Mutex` it wraps the machine in is for `Sync`, not for the dial: `Machine` is
+  declared `Send` and no more, and one `Arc<dyn Factory>` crosses the desk's
+  threads. The conversation's scratch is `GUEST_SCRATCH` (`/tmp`), named as
+  `$EXARCH_SCRATCH` in the root's `Attach` and in every child's.
 
 ## vm-manager/src/hcs/ — the Windows machine
 
@@ -627,8 +630,15 @@ arrives as fd 3), the classification of a wait result (`reap.rs`) — is a pure
 function unit-tested on any machine; the syscalls are a thin edge only a
 guest can exercise. The overlay root is deliberately the initramfs's job; the
 daemon verifies and names what it was handed. No ral semantics, no authority
-policy. When the engine exits — the wire's EOF is its cue — the daemon powers
-the machine off from inside: the clean inside-out halt.
+policy. It is also the guest's **engine factory**: after spawning the root it
+starts one accept thread on `boot::FACTORY_PORT` (the listener is bound before
+the root, so a host dial waits in the backlog), admits only a peer whose CID is
+`VMADDR_CID_HOST` (`vsock::is_host`), and spawns one engine per connection
+exactly as it spawned the root, on fd 3. The thread ends when `accept` fails.
+When the root engine exits — the wire's EOF is its cue — the daemon powers
+the machine off from inside, `halt` signalling every engine's process group,
+not the root's alone: the clean inside-out halt. A child engine ends when the
+host drops its connection.
 
 `Boot::workspace` is where the guest learns which hypervisor's folder it has:
 an `Export`, either `Virtiofs { tag }` or `Plan9 { name, port }`, decided by
@@ -642,7 +652,7 @@ never by order.
 
 The `ral.` key set and its value grammar are one versioned agreement, and
 `boot.rs` is where the version lives, beside the command line's only writer and
-only reader: `boot::CONTRACT`, `MANIFEST_KEY`, and `check_media`, the judgment a
+only reader: `boot::CONTRACT` (3: the factory port), `MANIFEST_KEY`, and `check_media`, the judgment a
 *host* build runs over the media it is about to package
 ([[decisions/260730_boot-contract-is-versioned|boot-contract-is-versioned]]).
 `ral-daemon/examples/boot-contract.rs` prints that constant and nothing else, so
@@ -748,20 +758,20 @@ exarch's cross-by-copy position.
   rides, whose stream type is std's owner for a connected socket and not a claim
   about the address family.
 - [[map/exarch/agent|exarch / agent]] — the one-exchange wire spawn synod's
-  fleet rides: the guest binds a port for the duration of one spawn and names
-  it in its enquiry, the desk dials it while answering, and the `Dial` trait
-  synod implements above is the seam it dials through.
-- [[design/agents|agents]] — the one-snapshot law: `Shell::fork_scrubbed` is
+  fleet rides: the engine seals its bequest and names it in its enquiry, the
+  desk dials the guest daemon's factory while answering, and the `Factory`
+  trait synod implements above is the seam it dials through.
+- [[design/agents|agents]] — the one-snapshot law: `Shell::bequeath` is
   the one fork both the identity arm's nursery park and the wire arm's
-  `EngineSeed` take, so `` exarch-agents `start `` means one thing regardless of
+  seal take, so `` exarch-agents `start `` means one thing regardless of
   seat.
-- [[design/engine-protocol|engine-protocol]] — why the guest
+- [[design/engine-protocol|engine-protocol]] — why the daemon
   listens and the host dials, and why that direction is what deleted the
   correlation machinery rather than shrinking it.
 - [[decisions/260806_exchange-ends-at-fleet-quiescence|exchange-ends-at-fleet-quiescence]]
   — why synod's closing walk waits for the whole fleet, not just the
   trunk, so a helper still writing never races the report.
 - [[map/core/io-process|core / io-process]] — the guest spawn jail
-  (`jail.rs`) whose unfiltered `socket(AF_VSOCK)` a hatch's eight token bytes
-  are the second line against, the guest kernel's refusal of a guest-local
-  dial being the first, until a seccomp address-family filter lands.
+  (`jail.rs`) whose unfiltered `socket(AF_VSOCK)` the daemon's peer-CID admission and
+  the guest kernel's refusal of a guest-local dial both stand behind, until a
+  seccomp address-family filter lands.

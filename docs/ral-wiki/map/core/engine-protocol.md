@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 355cf24d
-generated_at_date: 2026-10-12
-covers_paths: [core/src/protocol.rs, core/src/protocol/, core/src/carrier.rs, core/src/carrier/, core/src/engine.rs, core/src/engine/, core/src/run/report.rs, core/src/seed.rs, core/src/seed/hatch.rs, core/src/guard/grant.rs]
+generated_at_commit: e028f5a3
+generated_at_date: 2026-10-13
+covers_paths: [core/src/protocol.rs, core/src/protocol/, core/src/carrier.rs, core/src/carrier/, core/src/engine.rs, core/src/engine/, core/src/run/report.rs, core/src/seed.rs, core/src/guard/grant.rs]
 ---
 
 # Map: core / engine protocol
@@ -12,24 +12,32 @@ vocabulary, `protocol/channel.rs` the duplex byte channel and the one
 liveness law; `core/src/carrier.rs` and `carrier/` are the two carriers that
 interpret the algebra — the identity transport in process, the wire
 transport's front-end half — with `carrier/wire/serve.rs` the wire's engine
-half; `core/src/run/report.rs` projects a run onto the algebra;
-`core/src/seed/hatch.rs` is a wire-seat child's spawn machinery.** The why is
+half; `core/src/run/report.rs` projects a run onto the algebra; a wire-seat
+child is made by the host's factory and born from an `Attach` carrying its
+parent's seal, so core holds no spawn machinery for it.** The why is
 [[design/engine-protocol|engine-protocol]]; this page only points at symbols.
 
 ## `core/src/engine.rs`
 
-- `EngineInstaller { tag, boot, narrow }` — one compiled-in boot recipe.
-  `boot: fn(&Attach) -> Result<Booted, String>` reads the attach (its
-  `config` above all) and refuses in its own words; `narrow: GrantNarrower`
-  is the policy a seeded or adopted child is held to. Only `tag` crosses
-  `Attach`, never the function.
-- `Booted { shell, keep }` — what a recipe boots: the shell, and whatever
-  must outlive it (a scratch directory, say), dropped after the shell.
+- `EngineInstaller { tag, runtime, root, narrow }` — one compiled-in
+  installer, in two halves. `runtime: fn(&Attach) -> Result<Runtime, String>`
+  is the process half (Σ, builtins, docs; a root and a child engine each
+  derive their own, an in-process child shares its parent's); `root:
+  fn(&Attach, &mut Shell) -> Result<(), String>` is the root-only recipe
+  (libraries, hints, seeds, ledgers), which installs no builtins and refuses
+  in its own words; `narrow: GrantNarrower` is the policy a seeded or adopted
+  child is held to. Only `tag` crosses `Attach`, never the function.
+- `Runtime`: what the binary supplies, held by
+  `Shell` and read back through `Shell::runtime()`. `Engine` holds none.
 - `Engine` — one session's engine: the `Shell`, its `Scopes`, the installer
-  it was born from. `Engine::boot(installers, &attach, seed)` is the one
+  it was born from. `Engine::boot(installers, &attach)` is the one
   boot both carriers call: `resolve_installer` (version check, then tag
-  lookup), the recipe, `seed_cwd`, the attach's env, the
-  guest jail under `RAL_GUEST`, and `EngineSeed::apply` for a hatch.
+  lookup), the guest jail under `RAL_GUEST`, the installer's `runtime`, then
+  by `attach.seed`: `None` is `Shell::root`, the root recipe, `seed_cwd` and
+  the attach's env; `Some(sealed)` is `Shell::child_of(runtime,
+  sealed.unseal()?.decode(&runtime)?, narrow)`, and no recipe runs. There is no
+  `Birth` and no `Keep`: the attach is the birth, and the scratch is the
+  host's, named in it.
   `Engine::run` runs one dispatch under the scope `Scopes::open` minted;
   `Engine::probe` (`engine/probe.rs`) answers one `Probe`.
 - `Rails` — one dispatch's host-facing rails as its carrier lays them: the
@@ -48,21 +56,19 @@ half; `core/src/run/report.rs` projects a run onto the algebra;
 
 The frame algebra. Everything on it is a wire type; nothing here carries.
 
-- `PROTOCOL_VERSION` (currently 18) — checked at `Attach`; a mismatch refuses.
+- `PROTOCOL_VERSION` (currently 19) — checked at `Attach`; a mismatch refuses.
 - `check_media` — the same number compared at *build* time, against the
   `proto_version=` line `vm-image/build-boot.sh` records for the engine in the
   guest media; `synod/examples/check-media.rs`, tauri's `beforeBuildCommand`,
   refuses to package media that disagrees.
-- `HATCH_ACK` — the guest's one-byte readiness signal, written from
-  `seed/hatch.rs`; lives here for platform neutrality, not because it is ever
-  a `Frame`.
 - `Frame` — the whole wire enum: `Attach`, `Detach`, `Dispatch`, `Probe`,
   `Event`, `Session`, `Control`, `Answer`, `Ping`, `Pong`; `Frame::kind`
   names a variant for the diagnostic about a frame out of place.
 - `Attach` — what every engine is born from, under either carrier:
   `terminal`, `cwd`, `home`, `proto_version`, `installer`, `env` (per-session
   variables the host seeds), `config` (the installer's own settings, an
-  `FOValue` its recipe decodes). `Attach::new` stamps this build's version;
+  `FOValue` its recipe decodes), `seed: Option<Sealed>` (a child's parent,
+  sealed; `None` for a root). `Attach::new` stamps this build's version;
   `with_config` sets the settings.
 - `Run` / `Program` — one dispatch's payload: the policy fields plus
   `Program::Source`/`Program::Hook`. `Run`'s field types are the run regime,
@@ -147,8 +153,7 @@ The probe vocabulary, typed once for both ends.
   tolerates; the deadline is judged as a count of unanswered pings
   (`Liveness::probes`), never as elapsed clock. `HOST_SILENCE_DEADLINE`, the
   engine's armed read silence, is six default ping intervals, written beside
-  `Liveness::default`, so `seed/hatch.rs` bounds its seed write by it without
-  importing the engine.
+  `Liveness::default`.
 
 ## `core/src/carrier.rs`
 
@@ -203,10 +208,11 @@ The two interpretations of the algebra, and what they share.
   behind a poison-recovering session lock, its `Scopes` and its `Nursery`
   held outside the lock so a `Control` and an adoption land mid-dispatch.
   Its public surface is `boot(installers, &attach)` — the same verdict as
-  the wire's attach — and `adopt_parked(id, &grant)`, which takes a fork a
-  run parked in this transport's nursery, narrows it through
-  `SpawnGrant::narrow_onto` under this transport's installer, and answers a
-  new transport over it. Nothing on it yields or accepts a `Shell`. Its
+  the wire's attach — and `adopt_parked(id)`, which takes the `Bequest` a
+  run parked in this transport's nursery, builds `Shell::child_of` the
+  runtime this transport was born with, under this transport's installer's
+  `narrow`, and answers a new transport over it. `over` reads
+  `engine.shell.runtime()` once, before the session lock, and keeps it. Nothing on it yields or accepts a `Shell`. Its
   `dispatch` lays `Rails` whose outlet is an in-process channel, whose desk
   is `IdentityDesk`, and whose fork arm is `Fork::Park` over its own nursery.
 - `IdentityDesk` — the identity binding's `EnquiryDesk`: drains queued
@@ -234,8 +240,7 @@ The wire carrier's engine half: a connection-lived engine process.
 
 - `run_engine(installers)` — adopts fd 3 as the wire channel and calls
   `engine_session`.
-- `engine_session` — takes a hatch seed first (`seed::hatch::seed_from_env`),
-  reads `Attach` (the only legal first frame), `restore_process_dirs` (the
+- `engine_session` — reads `Attach` (the only legal first frame), `restore_process_dirs` (the
   process-level half of an attach, which only a carrier owning its process
   performs), `Engine::boot`, writes `Attached`/`Refused`, moves the engine
   onto a worker thread, then runs the reader loop; returns the process exit
@@ -246,7 +251,7 @@ The wire carrier's engine half: a connection-lived engine process.
   `Requested` end to `1`.
 - The worker's `Rails` — an outlet writing `Frame::Event`, a
   `ChannelDeferredSink` writing `Frame::Session`, a `WireDesk`, and
-  `Fork::Listen`.
+  `Fork::Seal`.
 - `WorkItem` / `refusal` — what the worker is handed, a run or a probe, and
   the refusal in the shape each waits on: a busy or panicked run ends in a
   `Report::host_fault`, a probe in an `Event::Reading(Err(..))`.
@@ -260,8 +265,7 @@ The wire carrier's engine half: a connection-lived engine process.
 - `Patience` — the engine's own read-silence and write-stall deadlines, armed
   once the first `Ping` arrives (both `HOST_SILENCE_DEADLINE` in production,
   a test gets a brisker pair).
-- The teardown settle — on any loop exit: `Scopes::end`,
-  `hatch::teardown_hatched()`, then poll the busy and writing flags under
+- The teardown settle — on any loop exit: `Scopes::end`, then poll the busy and writing flags under
   `SETTLE_TIMEOUT`/`SETTLE_POLL` before exiting, so no run is abandoned
   mid-report.
 
@@ -276,45 +280,13 @@ The engine's answers: `Engine::probe` reads one `Probe` off the shell
 `probe/fs.rs` — `tree_bytes` and `entries`: read-only
 metadata walks of the engine's own filesystem, under its cwd.
 
-## `core/src/seed/hatch.rs`
-
-A wire-seat spawn is one exchange: the guest binds an ephemeral port for one
-spawn and the host dials in — see [[design/engine-protocol|engine-protocol]]'s
-hatch section for the why.
-
-- `listen_for_hatch` — waits on a caller-bound listening descriptor for the
-  one dial that hatches a child, checking the dialler's eight token bytes. It
-  scrubs the shell it is handed (`Shell::fork_scrubbed`) and packs the fork
-  into an `EngineSeed` on the caller's own thread, so every path onto the
-  seed wire is a scrubbed fork ([[map/core/transport|transport]]). The
-  listener thread parks in `Wake::poll_beside`, the one self-pipe wake the
-  pipeline stages use, so `HatchListener::cancel` is `Wake::fire`.
-- `accept` — `accept_with(CLOEXEC)` on Linux, `accept` then `fcntl_setfd`
-  elsewhere (rustix drops the flag on Apple); the peer's address is discarded.
-- `hatch_over` — re-execs this binary (`--engine` in production) with the
-  dialled connection on fd 3 and a seed socketpair named by
-  `RAL_ENGINE_SEED_FD`; writes the framed seed while the child drains it, and
-  answers `HATCH_ACK` only once `spawn()` has returned and the seed has
-  crossed.
-- `HATCH_ACK` (defined in `protocol.rs`, written from here) — the byte that
-  says the child exists and already holds its whole seed; neither it nor the
-  token is a `Frame`, so a hatch never touches `PROTOCOL_VERSION`.
-- `seed_from_env` — the child's own take: reads `RAL_ENGINE_SEED_FD`,
-  striking the var as it takes the fd, before the engine waits for `Attach`;
-  `Engine::boot` applies what it took (`EngineSeed::apply`).
-- `HATCHED` / `teardown_hatched` / `sweep_hatched` — the process-global table
-  of spawned-but-unreaped hatch children, swept by `waitpid` at the next
-  hatch and again at engine teardown (a hatched child closes its seed channel
-  on hydration, not on death, so only `waitpid` tells running from gone).
-
 ## `core/src/guard/grant.rs`
 
 - `SpawnGrant` — `Inherit`, `Base(name)`, or `Restrict(record)` carried
   unfrozen. `layer` resolves it against a `FreezeCtx`; `narrow_onto` pushes
   that layer onto a shell as a session frame, frozen against the shell's own
-  cwd — the one layering step an adopted identity fork
-  (`IdentityTransport::adopt_parked`) and a hatched seed (`EngineSeed::apply`)
-  share, so neither seat holds a narrowing decision of its own
+  cwd — the one layering step, which `Shell::child_of` takes for an adopted
+  identity fork (`IdentityTransport::adopt_parked`) and a sealed child alike, so neither seat holds a narrowing decision of its own
   ([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]]). A
   `` `restrict `` record crosses undecoded and is decoded there, which keeps
   `Capabilities`' resolved-by-construction invariant true of every value that
@@ -326,15 +298,15 @@ hatch section for the why.
   demanded of every host that boots an engine instead of left in a slot one
   could forget to fill.
 
-The seed a hatch carries is `EngineSeed` — [[map/core/transport|transport]]'s
-`core/src/seed.rs` section.
+The seal a child's `Attach` carries is an `EngineSeed` in bytes —
+[[map/core/transport|transport]]'s `core/src/seed.rs` section.
 
 ## See also
 
 [[design/engine-protocol|engine-protocol]] (the why — one engine and two
 carriers, the channel table, the laws of an enquiry, liveness and severance),
 [[map/core/transport|transport]] (`frame.rs`'s framing, `Datum`,
-`EngineSeed`), [[map/exarch/agent|exarch / agent]] (the seat, the wire-seat
-spawn that dials a hatch), [[map/repl/loop|repl / loop]] (the REPL as an
+`seal`/`Sealed`), [[map/exarch/agent|exarch / agent]] (the seat, the wire-seat
+spawn that dials the factory), [[map/repl/loop|repl / loop]] (the REPL as an
 identity front-end), [[map/synod|synod]] (`WireTransport::adopt` over a
 guest VM's virtual socket).

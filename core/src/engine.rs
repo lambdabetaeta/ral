@@ -13,9 +13,8 @@ use crate::first_order::FOValue;
 use crate::guard::GrantNarrower;
 use crate::process::{CancelCause, DurableRoot, ForegroundScope};
 use crate::protocol::{Attach, Control, DispatchId, Event, PROTOCOL_VERSION, Report, Run};
-use crate::seed::EngineSeed;
 use crate::sync::LockExt as _;
-use crate::types::{DeferredSink, Desk, Fork, Shell};
+use crate::types::{DeferredSink, Desk, Fork, Runtime, Shell};
 
 pub(crate) mod probe;
 
@@ -26,21 +25,20 @@ pub(crate) mod probe;
 /// the function.
 pub struct EngineInstaller {
     pub tag: &'static str,
-    /// Prelude, host surface, libraries, ledger arming — at Attach, once. An
-    /// `Err` refuses the attach, in the recipe's own words.
-    pub boot: fn(&Attach) -> Result<Booted, String>,
+    /// The process half: Σ, builtins, docs. Derived from the binary and the
+    /// attach's terminal; a root and a child engine each derive their own,
+    /// an in-process child shares its parent's.
+    pub runtime: fn(&Attach) -> Result<Runtime, String>,
+    /// The root-only recipe over a root session: libraries, hints, seeds,
+    /// ledgers. It installs no builtins: those are the runtime's, so a
+    /// child engine has them too. An `Err` refuses the attach, in the
+    /// recipe's own words.
+    pub root: fn(&Attach, &mut Shell) -> Result<(), String>,
     /// How a seeded or adopted child's grant becomes a ceiling. A field and
     /// not a registered hook: core has no base-tag lexicon to resolve a grant
     /// against, so a host that boots an engine must state the policy its
     /// children are held to.
     pub narrow: GrantNarrower,
-}
-
-/// What a recipe boots.
-pub struct Booted {
-    pub shell: Shell,
-    /// Whatever must live as long as the engine — a scratch directory, say.
-    pub keep: Box<dyn Send>,
 }
 
 /// One session's engine: its shell, the scopes that stop its runs, and the
@@ -49,8 +47,6 @@ pub(crate) struct Engine {
     pub(crate) shell: Shell,
     scopes: Arc<Scopes>,
     installer: &'static EngineInstaller,
-    /// Declared after `shell`, so it outlives the shell's teardown.
-    _keep: Box<dyn Send>,
 }
 
 /// Where a carrier sends one dispatch's events; `false` if it could not.
@@ -94,45 +90,42 @@ fn resolve_installer<'a>(
 }
 
 impl Engine {
-    /// Become what `attach` names: resolve its installer, boot the recipe,
-    /// seat the session's cwd and env, and apply a hatch `seed` if there is
-    /// one.
+    /// Become what `attach` names: resolve its installer, derive the runtime,
+    /// then either run the root recipe (seating the attach's cwd and env) or
+    /// unseal the attach's seed and construct the child. No recipe runs in a
+    /// child.
     ///
     /// # Errors
-    /// The attach refusal, in the words of whichever step refused.
+    /// The attach refusal, in the words of whichever step refused; a seal
+    /// that will not unseal refuses the attach.
     pub(crate) fn boot(
         installers: &'static [EngineInstaller],
         attach: &Attach,
-        seed: Option<EngineSeed>,
     ) -> Result<Self, String> {
         let installer = resolve_installer(installers, attach.proto_version, &attach.installer)?;
-        let Booted { mut shell, keep } = (installer.boot)(attach)?;
-        shell.seed_cwd(attach.cwd.clone());
-        for (name, value) in &attach.env {
-            shell.set_env_var(name, value);
-        }
-        // Gated on the env var, never the installer tag: only ral-daemon's
-        // closed environment sets it, so every recipe is jailed alike.
-        #[cfg(target_os = "linux")]
-        if std::env::var("RAL_GUEST").is_ok() {
-            shell.install_guest_jail(Arc::new(crate::process::jail::GuestJail::new(
-                std::path::PathBuf::from("/sys/fs/cgroup/ral-exec"),
-                100_000,
-                crate::process::jail::JailLimits::default(),
-            )));
-        }
-        if let Some(seed) = seed {
-            seed.apply(&mut shell, installer.narrow)?;
-        }
-        Ok(Self::new(shell, installer, keep))
+        crate::process::jail::install_guest();
+        let runtime = (installer.runtime)(attach)?;
+        let shell = match &attach.seed {
+            None => {
+                let mut shell = Shell::root(runtime);
+                crate::boot::seed_host_env(&mut shell);
+                (installer.root)(attach, &mut shell)?;
+                shell.seed_cwd(attach.cwd.clone());
+                for (name, value) in &attach.env {
+                    shell.set_env_var(name, value);
+                }
+                shell
+            }
+            Some(sealed) => {
+                let bequest = sealed.unseal()?.decode(&runtime)?;
+                Shell::child_of(runtime, bequest, installer.narrow)?
+            }
+        };
+        Ok(Self::new(shell, installer))
     }
 
-    /// An engine over a shell already booted.
-    pub(crate) fn new(
-        shell: Shell,
-        installer: &'static EngineInstaller,
-        keep: Box<dyn Send>,
-    ) -> Self {
+    /// An engine over a shell already built.
+    pub(crate) fn new(shell: Shell, installer: &'static EngineInstaller) -> Self {
         let scopes = Arc::new(Scopes {
             dispatches: shell.run_cancel_handle(),
             root: shell.cancel_handle(),
@@ -142,7 +135,6 @@ impl Engine {
             shell,
             scopes,
             installer,
-            _keep: keep,
         }
     }
 
@@ -290,5 +282,35 @@ mod tests {
             Ok(_) => panic!("a mismatched protocol version must be refused"),
             Err(msg) => assert!(msg.contains("protocol version mismatch")),
         }
+    }
+
+    #[test]
+    fn a_sealed_attach_runs_no_root_recipe() {
+        static PANICKY: [EngineInstaller; 1] = [crate::carrier::testkit::installer(
+            "panicky-root",
+            |_| Ok(crate::HostSurface::default().runtime(crate::terminal::TerminalState::default())),
+            |_, _| panic!("a sealed child runs no root recipe"),
+        )];
+        let sealed = crate::seed::seal(
+            &crate::test_helper::core_shell().bequeath(crate::SpawnGrant::Inherit),
+        )
+        .expect("a scrubbed bequest seals");
+        let mut attach = crate::carrier::testkit::attach(&PANICKY);
+        attach.seed = Some(sealed);
+        let engine = Engine::boot(&PANICKY, &attach)
+            .unwrap_or_else(|e| panic!("a sealed attach boots: {e}"));
+        assert!(engine.shell.session.hooks.is_none());
+    }
+
+    #[test]
+    fn a_seal_that_will_not_unseal_refuses_the_attach() {
+        use crate::first_order::{Bytes, datum::Datum as _};
+        let garbage = Bytes::from(&b"not a frame"[..]).encode();
+        let mut attach = crate::carrier::testkit::attach(&crate::carrier::testkit::BARE);
+        attach.seed = Some(crate::seed::Sealed::decode(&garbage).expect("bytes are a seal"));
+        let Err(why) = Engine::boot(&crate::carrier::testkit::BARE, &attach) else {
+            panic!("a seal that is not a frame must refuse the attach");
+        };
+        assert!(why.contains("sealed bequest"), "{why}");
     }
 }

@@ -1,14 +1,14 @@
 ---
-generated_at_commit: 53509c43
-generated_at_date: 2026-10-11
+generated_at_commit: e028f5a3
+generated_at_date: 2026-10-13
 covers_paths: [core/src/first_order.rs, core/src/first_order/, core/src/types/value/first_order.rs, core/src/seed.rs, core/src/seed/, core/src/frame.rs, core/src/guard/grant.rs]
 ---
 
 # Map: core / transport
 
 The wire layer that carries a shell across a process boundary. Its one consumer
-is the wire-seat agent hatch: a forked shell's mobile state — `env`, `context`,
-the spawn's grant — is serialised to JSON, framed, and reconstituted in a fresh
+is the sealed child engine a wire-seat agent spawns: a `Bequest` — the parent's `env`, `context`,
+sources, terms, fixings and the spawn's grant — is serialised to JSON, framed, and sealed into bytes, and reconstituted in a fresh
 engine process ([[map/core/shell-state|shell-state]]). A pipeline stage never
 rides it — stages are threads sharing the parent's memory
 ([[decisions/260902_stages-are-threads|stages-are-threads]]) — and neither does
@@ -21,7 +21,7 @@ value vocabulary and codec.
 
 **Every wire↔runtime hop is an exhaustive, field-complete map: no hop passes
 through a constructor that defaults a field the wire carries, and no kind
-round-trips through a string with a catch-all decode arm.** A hatched child is
+round-trips through a string with a catch-all decode arm.** A sealed child is
 indistinguishable from an in-process fork exactly when no hop drops a field or
 collapses a variant. The discipline is mechanical — an exhaustive match makes a
 new variant fail the build, a field-complete struct literal a new field:
@@ -49,7 +49,7 @@ typed accessors (`field`, `as_str`, `as_int`, …) for a host reading one.
   `SerialEnvSnapshot` naming its scope's row — and `SerialClosure::Native`,
   a builtin's name and applied arguments, re-linked against the receiver's own
   table.
-- `SerialBinding` mirrors a scope entry, value *and* scheme, so a hatched child
+- `SerialBinding` mirrors a scope entry, value *and* scheme, so a sealed child
   keeps each binding's type
   ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
 - `first_order/datum.rs` — `Datum`, the one strict first-order codec every typed
@@ -112,7 +112,7 @@ them for any other, through the receiver's `Signature`.
   encodes every binding: every path onto this wire is a scrubbed fork, so a
   handle reaching `SerialValue::from_runtime` is a fault in ral, and its
   error says so.
-- `WireDecoder::for_shell` rebuilds the rows in dependency order by Kahn's
+- `WireDecoder::for_runtime` rebuilds the rows in dependency order by Kahn's
   algorithm over `collect_scope_deps`' edges, so a stream chain decodes in
   linear time, refusing an out-of-range reference or a cycle. It
   carries the receiver's builtin manifest, for a decoded `Native` to re-link
@@ -122,9 +122,10 @@ them for any other, through the receiver's `Signature`.
 
 ## The seed — `core/src/seed.rs`, `core/src/guard/grant.rs`
 
-**`EngineSeed` is a forked shell reified for a hatch: `scope_table`, `env`,
-`stack_limit`, `context`, the session's `fixings` and the spawn's `grant`.** No frame crosses: a
-hatched engine's [[internals/evaluator-machine|machine]] starts over the empty
+**`EngineSeed` is a `Bequest` in wire form, and a codec and nothing else:
+`scope_table`, `env`, `context`, the parent's `sources`, `terms`, `fixings` and
+the spawn's `grant`.** No frame crosses: a
+sealed child's [[internals/evaluator-machine|machine]] starts over the empty
 stack, so what rides is store, never continuation. The environment rides once,
 as the row of one [[design/scoping|`Env`]], ρ alone; the context is
 `Context<Vec<WireHandlerFrame>>`, the live `Context` with its handler stack
@@ -133,36 +134,42 @@ a field and every other field crosses as itself — `env_overrides`, `cwd`,
 `grants`, `args`, `modules`. The fixings ride as the session's table of
 `(UnitId, var, Fixed)` triples, never inside a `Site`, which names only its
 unit: a shipped closure's sites name the parent's units, so their entries
-govern them in the child as in the parent. Hooks are session state and never
-ride.
+govern them in the child as in the parent. The `SourceDb` rides whole, so a
+parent closure's `FileId` resolves in the child to the file it named, and
+`terms` is the same `Terms` type the constructor destructures, so a term added
+to it rides or the build fails. A bequest cannot express a hook, and none
+rides.
 `WireHandlerFrame` is a [[internals/handler-dispatch|handler stack]] frame,
 each alias arm with its scheme
 ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
 
-- `pack_seed` builds one from a shell that `Shell::fork_scrubbed` produced — the
-  fork both seats take, so an identity fork and a hatch snapshot the same
-  fragment and `` exarch-agents `start `` means one thing regardless of seat
-  ([[design/agents|agents]]'s one-snapshot law). `listen_for_hatch`
-  (`seed/hatch.rs`) forks and scrubs the shell it is handed before packing it,
-  and `pack_seed` trusts that fork rather than re-checking it.
-- `seed_from_env` (in `seed/hatch.rs`) takes the seed before the engine waits
-  for `Attach`, striking the fd's env var as it takes the fd; after `Attach`,
-  `Engine::boot` hands it to `EngineSeed::apply`, which decodes everything
-  through one `WireDecoder` before touching the shell, splices the wire's
-  handler frames atop the receiver's own through `HandlerStack::push_frame`
-  (so the builtin table the child's installer booted survives, never having
-  ridden the wire, and a hydrated alias stays removable by `unalias`),
-  adds the fixings to those its own boot made (`Fixings::absorb`, the
-  parent's winning where both fix a variable, as in an identity fork),
-  re-seals the lease so everything inherited is baseline (as `fork_session`
-  seals an identity fork), then pushes the grant. The take must not wait on
-  the host; the application needs the booted installer's shell.
+- `EngineSeed::encode(&Bequest)` builds one from a bequest `Shell::bequeath`
+  produced — the package both seats take, so an identity fork and a sealed child
+  snapshot the same fragment and `` exarch-agents `start `` means one thing
+  regardless of seat ([[design/agents|agents]]'s one-snapshot law). `encode`
+  trusts that scrub rather than re-checking it. `decode(self, &Runtime)`
+  returns the `Bequest`, decoding everything through one `WireDecoder` built
+  `for_runtime`: constructible only from the `Runtime` whose builtin table
+  re-links the natives by name, so no call site picks a manifest of its own.
+  The decoded bequest goes to `Shell::child_of`, which pushes the grant
+  exactly as for a parked one; `bequeath` has already snapshotted the fixings
+  and construction takes ownership of them, and a sealed child runs no recipe.
+- `seal(&Bequest) -> Result<Sealed, String>` encodes and frames one
+  `EngineSeed` into `Sealed`, bytes the host relays and never reads (the
+  opacity law, [[decisions/261013_the-seed-rides-the-protocol-sealed|the-seed-rides-the-protocol-sealed]]);
+  `Sealed::unseal` is `pub(crate)`, so only an engine can read one. `Sealed`
+  is a `Datum` over `Bytes`, which is how a seal rides the enquiry as
+  `FOValue::Bytes`, and is `Attach.seed`'s type. `Engine::boot` unseals it
+  against the runtime it has just derived. `Bytes` serialises as base64 under a
+  human-readable serializer (`first_order/byte_encoding.rs`), so a seal also
+  crosses JSON.
 - `SpawnGrant` — `Inherit` (⊤), `Base(name)`, or `Restrict(record)` — crosses
   **unfrozen**: a `` `cwd `` place in a grant names the cwd of the shell it
   governs, so the freeze happens on the child's side. `SpawnGrant::narrow_onto`
   resolves it against that shell's cwd and home and pushes one session layer —
-  the step an adopted identity fork (`IdentityTransport::adopt_parked`) and a
-  hatched seed share. `Base` reaches the host's `GrantNarrower`, since core has
+  the step `Shell::child_of` takes for an adopted identity fork
+  (`IdentityTransport::adopt_parked`) and a sealed child alike.
+  `Base` reaches the host's `GrantNarrower`, since core has
   no base-tag lexicon; `Restrict` goes through
   `guard::decode_capability_map`
   ([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]]).
@@ -170,7 +177,7 @@ each alias arm with its scheme
 ## Framing — `core/src/frame.rs`
 
 **`write_frame` / `read_frame` are length-prefixed JSON frames, carrying both
-the hatch's one `EngineSeed` frame and the engine protocol's `WireChannel`
+the seal's one `EngineSeed` frame and the engine protocol's `WireChannel`
 frames (`core/src/protocol/channel.rs`).**
 
 - `fuse` is the one frame-size check both doors apply — `MAX_FRAME_LEN`, 256 MiB

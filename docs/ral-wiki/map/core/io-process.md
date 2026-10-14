@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 94344cac
-generated_at_date: 2026-10-12
+generated_at_commit: e028f5a3
+generated_at_date: 2026-10-13
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs]
 ---
 
@@ -265,8 +265,10 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
 - `jail.rs` — the *guest spawn jail*'s decision layer: `GuestJail::plan`
   mints each exec a fresh unprivileged uid/gid and a fresh transient cgroup
   under `JailLimits` (memory / pids / CPU), with no syscall in the plan.
-  Each `GuestJail` is one per booted engine — a hatched wire-seat child
-  ([[design/agents|agents]]) installs its own, beside the trunk's — so the
+  There is one `GuestJail` per guest process, installed once by the first
+  engine to boot (`jail::install_guest`, gated on `RAL_GUEST`) and read by
+  `jail::guest()`; a sealed wire-seat child engine ([[design/agents|agents]]) is
+  its own process and installs its own, so the
   sequence number behind both the uid and the cgroup name is minted
   **guest-globally**, not per-engine: `linux::next_guest_seq` locks a
   counter file (`/run/ral/jail.seq`, `O_CREAT`, read-increment-write under
@@ -275,7 +277,7 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   spawned commands cannot collide on a uid or a cgroup name. The cgroup
   path carries the engine's own pid as a grouping label, not a uniqueness
   guarantee (the sequence file already gives that): `ral-exec/engine-<pid>/
-  exec-<seq>`, so a hatched child's teardown stays scoped to its own
+  exec-<seq>`, so a child engine's teardown stays scoped to its own
   engine's tree and pid recycling can at worst hand a later engine a dead
   engine's stale directory name, which its own teardown tolerates. Off a
   real Linux guest, where `GuestJail` is never actually installed, `plan`
@@ -299,32 +301,28 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   guest); a detached birth is handed none at all, since a caller that
   cannot name the process cannot know when its cgroup is empty — the
   survivor keeps the transient cgroup's limits and leaves one inert
-  directory until the guest reboots. The jail itself is session state (`session.guest_jail`),
-  inherited exactly like the builtin table so workers, pipeline stages,
-  and forks share one counter; only a guest engine (`RAL_GUEST`) installs
-  it, and there it replaces the per-command OS projection
+  directory until the guest reboots. The jail itself is process-global (a `OnceLock` in `jail.rs`),
+  so workers, pipeline stages, and forks share one counter; only a guest
+  engine (`RAL_GUEST`) installs it, and there it replaces the per-command OS projection
   ([[map/core/runtime|runtime]], `docs/SPEC.md` §12.11).
 
   **The recorded gap.** The jail is uid + cgroup + `NO_NEW_PRIVS` — there is
   no seccomp filter, so nothing stops a jailed process from calling
-  `socket(AF_VSOCK)`. What that would buy it is a race with the host for the
-  ephemeral guest port a parent engine binds while spawning a child
-  ([[map/core/transport|transport]], [[map/synod|synod]]), and so a child
-  engine seeded with the parent's scope — impersonation, not escalation,
-  since grant narrowing is a plain meet and a run's capabilities are enforced
-  inside the guest engine regardless of who computes them. Two things stand in
-  the way, and only the first is confinement. A jailed process cannot dial a
-  *guest-local* vsock port at all — measured 2026-08-24: the guest kernel
-  refuses `VMADDR_CID_LOCAL` with `ECONNRESET`, and `/dev/vsock`, the only way
-  to read one's own CID, is `EACCES` under the jail. That refusal is the
-  standing defence. Behind it stand the eight token bytes the host must write
-  before the listener will hatch anything: minted from the OS entropy source,
-  held by the thread that owns the listener, dead when that one spawn ends.
-  The token is the second line, against a jailed process that *guesses* a CID
-  rather than reading one. A seccomp address-family filter
-  that closes this at the syscall is unbuilt debt, not a design gap: the jail
-  plan above has room for it (one more syscall-time check beside
-  `NO_NEW_PRIVS`).
+  `socket(AF_VSOCK)`. The one guest listener is the daemon's engine factory
+  ([[map/synod|synod]]), and a connection it accepts is an unjailed engine
+  that receives whatever its `Attach` confers, so admission is everything.
+  Two independent lines hold, both kernel-enforced. A jailed process cannot
+  dial a *guest-local* vsock port at all, measured 2026-08-24: the guest
+  kernel refuses `VMADDR_CID_LOCAL` with `ECONNRESET`, and `/dev/vsock`, the
+  only way to read one's own CID, is `EACCES` under the jail. And were a dial
+  to arrive, the daemon accepts only a peer whose CID is `VMADDR_CID_HOST`,
+  which the guest kernel's transport writes and no guest process can present.
+  The old token is gone, and loses nothing. A seccomp address-family filter
+  that closes the syscall is unbuilt debt, not a design gap, and its reason
+  is host-side only: the host's own listeners (the VZ device is synod's; the
+  Hyper-V socket's SDDL names the one user) are what a jailed
+  `socket(AF_VSOCK)` could still reach. The jail plan above has room for it
+  (one more syscall-time check beside `NO_NEW_PRIVS`).
 
 Spawning an external command is capability-checked; that in-process guard
 lives in

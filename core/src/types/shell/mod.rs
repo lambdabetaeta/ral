@@ -14,13 +14,13 @@
 //! too small to belong to one stay here.
 
 pub(crate) mod bindings;
+mod construct;
 mod context;
 pub(crate) mod cwd;
 pub(crate) mod detached;
 pub(crate) mod hooks;
 mod host;
 mod inherit;
-mod init;
 pub(crate) mod modules;
 pub(crate) mod notice;
 mod scope;
@@ -28,6 +28,8 @@ mod scrub;
 pub(crate) mod workers;
 
 use self::bindings::BindingLedger;
+pub use self::construct::{Bequest, Runtime};
+pub(crate) use self::construct::{Image, Terms};
 use self::cwd::Cwd;
 use self::detached::DetachPolicy;
 use self::modules::Modules;
@@ -39,7 +41,7 @@ use super::env::EnvVars;
 use super::error::Error;
 use super::flow::{Break, Settled};
 use super::handler::HandlerStack;
-use super::mooring::{Fork, Mooring, NurseryId, TerminalAccess};
+use super::mooring::{Mooring, TerminalAccess};
 use super::sig;
 use crate::capability::GrantStack;
 use crate::io::Io;
@@ -121,10 +123,6 @@ pub struct SessionState {
     /// backgrounded, tty-less, or off Unix.  Lent — never moved or cloned — to
     /// the handoff, and only when the run's [`TerminalAccess`] permits.
     pub(crate) terminal_lease: Option<crate::process::TerminalLease>,
-    /// Installed by an engine's boot only when `RAL_GUEST` is set.
-    /// Shared by `Arc` across every fork and spawned worker, so concurrent
-    /// spawns from sibling Shells mint distinct uids and cgroups off one counter.
-    pub(crate) guest_jail: Option<std::sync::Arc<crate::process::jail::GuestJail>>,
     /// The machine's stack cap: `Machine::reserve` refuses a push at
     /// `stack.len() >= stack_limit`.  Counts machine frames, not host stack
     /// frames; `--recursion-limit`/rc's `recursion-limit:` key set it.
@@ -176,6 +174,10 @@ pub struct LocalState {
 /// The runtime: a field changes within a run (`io`), survives a run
 /// ([`SessionState`]), crosses evaluation boundaries (`env`, `context`), or
 /// is host scratch ([`LocalState`]).
+///
+/// A session is built by exactly two struct literals: `Shell::construct`, the
+/// one constructor of a root or a child session, and `Shell::child`, for the
+/// children that share a session's memory.
 ///
 /// Every field is `pub(crate)`, because the partition encodes run safety,
 /// capability attenuation, and wire framing — core's invariant, not an API a
@@ -246,23 +248,6 @@ impl Shell {
                 Error::raised(crate::types::NO_DESK, crate::types::NO_DESK_STATUS)
                     .with_hint(crate::types::NO_DESK_HINT),
             ),
-        }
-    }
-
-    /// [`Self::fork_scrubbed`] plus the in-process hand-off: park the fork in
-    /// `mooring`'s nursery and return the [`NurseryId`] a desk handler — barred
-    /// by the reentrancy law from holding `&mut Shell` itself — later redeems
-    /// with `Nursery::adopt`.
-    ///
-    /// # Errors
-    /// Returns `Err` unless this run's [`Fork`] door is [`Fork::Park`].
-    pub fn fork_into_nursery(&self, mooring: &Mooring) -> crate::types::Settled<NurseryId> {
-        match mooring.fork.as_ref() {
-            Some(Fork::Park(nursery)) => Ok(nursery.park(self.fork_scrubbed())),
-            Some(Fork::Listen) => Err(sig(
-                "this host's forked sessions leave over a wire, so there is no pen to park one in",
-            )),
-            None => Err(sig("this host adopts no forked sessions")),
         }
     }
 

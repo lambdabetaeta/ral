@@ -10,29 +10,21 @@
 
 #![cfg(unix)]
 
+use ral_core::HostSurface;
 use ral_core::carrier::{IdentityTransport, Transport, dispatch_to_report};
-use ral_core::engine::{Booted, EngineInstaller};
+use ral_core::engine::EngineInstaller;
 use ral_core::first_order::datum::Datum as _;
 use ral_core::protocol::{Attach, Report, Run};
+use ral_core::terminal::TerminalState;
 use ral_core::types::{CapturePolicy, Observed};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-#[allow(
-    clippy::unnecessary_wraps,
-    reason = "must match EngineInstaller::boot's signature, which can genuinely refuse"
-)]
-fn bare(_attach: &Attach) -> Result<Booted, String> {
-    Ok(Booted {
-        shell: ral_core::test_helper::core_shell(),
-        keep: Box::new(()),
-    })
-}
-
 static BARE: [EngineInstaller; 1] = [EngineInstaller {
     tag: "bare",
-    boot: bare,
-    narrow: |_, _| Err("this engine hatches no children".into()),
+    runtime: |_| Ok(HostSurface::default().runtime(TerminalState::default())),
+    root: |_, _| Ok(()),
+    narrow: |_, _| Err("this engine makes no children".into()),
 }];
 
 #[test]

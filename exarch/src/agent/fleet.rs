@@ -25,7 +25,7 @@
 //! moved on.  Per inbox, not per fleet — a `/clear` in one tab must not drop
 //! work another tab is still waiting on.
 
-use crate::agent::{Agent, Dial};
+use crate::agent::{Agent, Factory};
 use crate::enquiry::check_name;
 use crate::prompt::BuiltinIndex;
 use crate::provider::Bureau;
@@ -62,8 +62,8 @@ pub(crate) struct Launch {
     pub tools: Toolset,
     /// The operator's disk ceiling; `None` never walks the dirs at all.
     pub disk_warn_bytes: Option<u64>,
-    /// How a wire trunk reaches its helpers; `None` on an identity trunk.
-    pub dial: Option<Arc<dyn Dial>>,
+    /// Where a wire trunk gets its helper engines; `None` on an identity trunk.
+    pub factory: Option<Arc<dyn Factory>>,
     /// The one owner of provider construction.
     pub bureau: Arc<Bureau>,
     /// The prompt template, still carrying the builtin-index placeholder, and
@@ -83,7 +83,7 @@ impl Launch {
             resume_on_reset: false,
             tools: Toolset::offered(false),
             disk_warn_bytes: None,
-            dial: None,
+            factory: None,
             bureau: Arc::new(Bureau::Scripted),
             system: Arc::from(""),
             index: BuiltinIndex::resolve(

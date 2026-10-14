@@ -638,13 +638,7 @@ fn help_lists_a_library_section_only_on_a_shell_that_sourced_it() {
         "a shell that never sourced the agent library must list no Library section, got:\n{bare_out}"
     );
 
-    let mut dressed = ral_core::boot::boot_shell(
-        ral_core::terminal::TerminalState::default(),
-        &crate::shell_eval::PRELUDE,
-        &host_surface(),
-    );
-    crate::library::install_agent_library(&Mooring::adrift(), &mut dressed)
-        .expect("embedded agent library");
+    let mut dressed = crate::boot::test_shell();
     let dressed_out = run_help(&mut dressed);
     assert!(
         dressed_out.contains("Library:"),

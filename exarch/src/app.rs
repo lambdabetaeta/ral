@@ -204,18 +204,27 @@ impl Scratch {
 
     /// What [`Self::install_into`] seeds, as the pairs an `Attach` names.
     pub fn env(&self) -> Vec<(String, String)> {
-        let scratch = self.dir.to_string_lossy().into_owned();
-        let homes = LEGACY_TOOL_HOMES
-            .iter()
-            .map(|(var, sub)| ((*var).to_string(), format!("{scratch}/{sub}")));
-        let settings = CONFINED_TOOL_SETTINGS
-            .iter()
-            .map(|(var, value)| ((*var).to_string(), (*value).to_string()));
-        std::iter::once((self.var(), scratch.clone()))
-            .chain(homes)
-            .chain(settings)
-            .collect()
+        scratch_env(self.app, &self.dir)
     }
+}
+
+/// What a scratch at `dir` names to the agent.
+///
+/// The scratch var, the legacy tool homes under it, and the confined tool
+/// settings: one spelling for a host's own `Scratch` and for a guest path the
+/// host cannot hold.
+pub fn scratch_env(app: App, dir: &Path) -> Vec<(String, String)> {
+    let scratch = dir.to_string_lossy().into_owned();
+    let homes = LEGACY_TOOL_HOMES
+        .iter()
+        .map(|(var, sub)| ((*var).to_string(), format!("{scratch}/{sub}")));
+    let settings = CONFINED_TOOL_SETTINGS
+        .iter()
+        .map(|(var, value)| ((*var).to_string(), (*value).to_string()));
+    std::iter::once((app.scratch_var(), scratch.clone()))
+        .chain(homes)
+        .chain(settings)
+        .collect()
 }
 
 /// Delete the scratches no live session answers for.
@@ -528,10 +537,26 @@ pub(crate) fn seed_var(shell: &mut Shell, name: &str, value: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        LOCK_SUFFIX, hold_exclusive, normalize_resume_target, project_slug, reap_unheld,
-        resume_candidates_in,
+        CONFINED_TOOL_SETTINGS, EXARCH, LEGACY_TOOL_HOMES, LOCK_SUFFIX, hold_exclusive,
+        normalize_resume_target, project_slug, reap_unheld, resume_candidates_in, scratch_env,
     };
     use std::fs;
+
+    #[test]
+    fn scratch_env_names_the_var_the_homes_and_the_settings() {
+        let env = scratch_env(EXARCH, std::path::Path::new("/tmp/x"));
+        assert_eq!(
+            env.len(),
+            1 + LEGACY_TOOL_HOMES.len() + CONFINED_TOOL_SETTINGS.len()
+        );
+        assert_eq!(env[0], (EXARCH.scratch_var(), "/tmp/x".to_string()));
+        for (var, sub) in LEGACY_TOOL_HOMES {
+            assert!(env.contains(&((*var).to_string(), format!("/tmp/x/{sub}"))));
+        }
+        for (var, value) in CONFINED_TOOL_SETTINGS {
+            assert!(env.contains(&((*var).to_string(), (*value).to_string())));
+        }
+    }
 
     /// Seed a scratch and its lock file, as [`super::Scratch::new`] would.
     fn seed_scratch(temp: &std::path::Path, name: &str) -> std::path::PathBuf {

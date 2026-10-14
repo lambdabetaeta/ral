@@ -5,7 +5,7 @@
 //! sequence number behind both is guest-global, read from the counter file
 //! `linux::next_guest_seq` locks and increments — every booted engine mints
 //! off the one file, since two engines sharing a uid or a cgroup name is
-//! exactly the collision a hatched child must not risk. Off Linux, where
+//! exactly the collision a child engine must not risk. Off Linux, where
 //! `GuestJail` is never actually installed, `plan` falls back to a plain
 //! in-process counter so this module's own tests stay portable; the `linux`
 //! submodule remains the only place a decision reaches the kernel.
@@ -14,6 +14,7 @@ use std::io;
 use std::path::PathBuf;
 #[cfg(not(target_os = "linux"))]
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 #[cfg(target_os = "linux")]
 pub(crate) mod linux;
@@ -35,6 +36,31 @@ impl Default for JailLimits {
             cpu_quota_pct: 200,
         }
     }
+}
+
+static GUEST: OnceLock<Option<Arc<GuestJail>>> = OnceLock::new();
+
+/// Install this process's jail, once: `Some` only under `RAL_GUEST`, which
+/// only ral-daemon's closed environment sets, so every engine is jailed alike.
+/// Called by `Engine::boot` alone, so no recipe learns that jails exist.
+pub(crate) fn install_guest() {
+    GUEST.get_or_init(|| {
+        #[cfg(target_os = "linux")]
+        if std::env::var("RAL_GUEST").is_ok() {
+            return Some(Arc::new(GuestJail::new(
+                PathBuf::from("/sys/fs/cgroup/ral-exec"),
+                100_000,
+                JailLimits::default(),
+            )));
+        }
+        None
+    });
+}
+
+/// The jail this process runs under, `None` anywhere but a real Linux guest
+/// or before an engine has booted.
+pub(crate) fn guest() -> Option<Arc<GuestJail>> {
+    GUEST.get().cloned().flatten()
 }
 
 /// The transient cgroup a jailed exec was placed in.  Deliberately free of

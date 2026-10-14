@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 446e3123
-generated_at_date: 2026-09-30
+generated_at_commit: e028f5a3
+generated_at_date: 2026-10-13
 covers_paths: [core/src/lib.rs]
 ---
 
@@ -56,8 +56,9 @@ reduction primitive behind it. A host states policy; core owns resources.
 
 The crate splits driving a `Shell` from probing the machine it runs on.
 
-- `boot` embeds a `Shell` in a host process. `Shell::root` installs nothing and
-  is crate-private, so every shell chooses its surface through a door:
+- `boot` embeds a `Shell` in a host process. `Shell::root(runtime)` constructs over a `Runtime`, the surface a
+  host chooses through `HostSurface::runtime` or `boot_runtime`, so every
+  shell chooses its surface through a door:
   `HostSurface::shell` (core's `CORE_SETS`, then the host's sets, no env, no
   prelude: a loader's scaffold) or `boot_shell`, which adds the host env and
   seats a `BakedPrelude` whole (`BakedPrelude::seat`). A half-dressed

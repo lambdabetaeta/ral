@@ -103,7 +103,8 @@ pub(crate) use shell::Context;
 pub use shell::hooks::{
     DefaultPolicy, Hook, HookName, HookSig, Namespace, PluginEntry, RegisterError,
 };
-pub use shell::{DEFAULT_STACK_LIMIT, LocalState, SessionState, Shell};
+pub use shell::{Bequest, DEFAULT_STACK_LIMIT, LocalState, Runtime, SessionState, Shell};
+pub(crate) use shell::{Image, Terms};
 
 pub(crate) use shell::workers::{CapReached, LeaseChain};
 pub use shell::workers::{Done, DoneEvent, ReapCause, ReapNotice, WorkerEntry, WorkerLease};

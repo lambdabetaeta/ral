@@ -27,7 +27,7 @@
 //!
 //! # A known race, accepted rather than hidden
 //!
-//! A hatched helper's provider is a *snapshot of the trunk's own live one*
+//! A helper's provider is a *snapshot of the trunk's own live one*
 //! (`` agents `start ``'s wire arm, `exarch::agent::desk`), taken the instant its
 //! wire is adopted — the same queue the trunk's own next turn also pulls
 //! from, and the helper's detached thread starts before the trunk's tool
@@ -159,15 +159,16 @@ fn main() {
         disk_warn_bytes: None,
         fuel: SPAWN_FUEL,
         egress: Egress::for_test(),
-        // `seat_machine` overwrites this: the dialler cannot exist before
+        // `seat_machine` overwrites this: the factory cannot exist before
         // the machine it wraps.
-        dial: None,
+        factory: None,
         // The provider above is scripted, so nothing here ever mints one.
         bureau: Arc::new(Bureau::Scripted),
     };
     // `_net` is held open only so its EOF ends the session; this example
     // wants no guest network of its own.
-    let (dial, mut agent, _net) = seat_machine(machine, config, provider).expect("start the trunk");
+    let (factory, mut agent, _net) =
+        seat_machine(machine, config, provider).expect("start the trunk");
 
     let mut sink = PrintSink;
     let exchange = converse_settled(
@@ -179,7 +180,7 @@ fn main() {
     // `unseat_machine` is `Conversation::end`'s own machine-recovery step —
     // see its doc for why the agent must drop before the machine comes
     // back.
-    let machine = unseat_machine(agent, dial);
+    let machine = unseat_machine(agent, factory);
 
     match &exchange {
         Ok(()) => println!("the exchange settled: the trunk parked and every helper finished"),

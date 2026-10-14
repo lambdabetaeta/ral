@@ -28,7 +28,7 @@ every residual variable and resolves the body against the final unifier
 Every other carrier only transports what those two closed: the build-time
 prelude bake carries the schemes on the annotated prelude's `Define` phrases
 (`typecheck::bake_prelude`), read back by `SessionSchemes::from_prelude`, and the seed's scope tables carry the installed
-`(value, scheme)` pairs to a hatched child engine
+`(value, scheme)` pairs to a sealed child engine
 (`seed::table::SerialBinding`).
 
 A weak residual is the one variable a scheme may carry unquantified, because it

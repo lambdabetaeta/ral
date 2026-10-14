@@ -4,7 +4,7 @@
 
 use super::error::Error;
 use super::flow::Break;
-use super::shell::Shell;
+use super::shell::Bequest;
 use super::shell::workers::WorkerLease;
 use super::value::Value;
 use crate::process::{DurableRoot, ForegroundScope};
@@ -78,12 +78,12 @@ pub type Desk = std::sync::Arc<dyn EnquiryDesk>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NurseryId(pub u64);
 
-/// The parked forks plus the counter [`Nursery::park`] mints ids from: a
+/// The parked bequests plus the counter [`Nursery::park`] mints ids from: a
 /// length-derived id would repeat once `adopt`/`clear` free a slot.
 #[derive(Default)]
 struct NurseryState {
     next: u64,
-    parked: HashMap<u64, Shell>,
+    parked: HashMap<u64, Bequest>,
 }
 
 /// Run-local holding pen for engine-side session forks, reached only through
@@ -91,32 +91,32 @@ struct NurseryState {
 ///
 /// That arm exists for one reason: the reentrancy law bars a same-process desk
 /// handler from holding `&mut Shell`, so it cannot fork a session itself. The
-/// builtin body forks through
-/// [`Shell::fork_into_nursery`](crate::types::Shell::fork_into_nursery) and the
-/// fork reaches the handler as a [`NurseryId`] its transport adopts.
-/// [`NurseryGuard`] empties it, so an unadopted fork dies with its run.
+/// builtin body bequeaths through
+/// [`Shell::bequeath`](crate::types::Shell::bequeath) and the bequest reaches
+/// the handler as a [`NurseryId`] its transport adopts.
+/// [`NurseryGuard`] empties it, so an unadopted bequest dies with its run.
 #[derive(Clone, Default)]
 pub struct Nursery(Arc<Mutex<NurseryState>>);
 
 impl Nursery {
-    /// Park `shell` under a freshly minted id.
-    pub fn park(&self, shell: Shell) -> NurseryId {
+    /// Park `bequest` under a freshly minted id.
+    pub fn park(&self, bequest: Bequest) -> NurseryId {
         let id = {
             let mut state = self.0.lock_ignore_poison();
             let id = state.next;
             state.next += 1;
-            state.parked.insert(id, shell);
+            state.parked.insert(id, bequest);
             id
         };
         NurseryId(id)
     }
 
-    /// Remove and return the shell parked under `id`, if one is still there.
-    pub(crate) fn adopt(&self, id: NurseryId) -> Option<Shell> {
+    /// Remove and return the bequest parked under `id`, if one is still there.
+    pub(crate) fn adopt(&self, id: NurseryId) -> Option<Bequest> {
         self.0.lock_ignore_poison().parked.remove(&id.0)
     }
 
-    /// Drop every still-parked shell.
+    /// Drop every still-parked bequest.
     pub fn clear(&self) {
         self.0.lock_ignore_poison().parked.clear();
     }
@@ -125,10 +125,12 @@ impl Nursery {
 /// How a forked session reaches the desk that will adopt it.
 #[derive(Clone)]
 pub enum Fork {
-    /// In-process: the builtin parks the fork, the handler adopts it by id.
+    /// In-process: the builtin parks a bequest, the handler adopts it by id.
     Park(Nursery),
-    /// Across a wire: the builtin listens, the desk dials it back.
-    Listen,
+    /// Across a wire: the builtin seals its bequest into its enquiry; the host
+    /// that answers makes the child engine and hands it the seal in its
+    /// `Attach`.
+    Seal,
 }
 
 /// Host-installed destination for a deferred worker's surface batch, delivered
@@ -171,7 +173,7 @@ pub(crate) enum TerminalAccess {
 /// needs saving and restoring: it is an owned local on the run's own stack
 /// frame ([`Shell::run`](crate::Shell::run)), lent onward as `&Mooring`, and an
 /// outer run's is restored by the unwinding rather than by a guard.
-/// Deliberately *not* a [`Shell`] field — `&shell.mooring` would borrow the
+/// Deliberately *not* a [`Shell`](crate::Shell) field — `&shell.mooring` would borrow the
 /// whole shell while every callee wants `&mut Shell`, whereas `&Mooring` and
 /// `&mut Shell` are disjoint.  Not [`Clone`]: [`Self::lend_terminal`] is the
 /// one lawful derivation, so raise-never-mint lives in a single door.

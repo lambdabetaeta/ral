@@ -10,9 +10,11 @@ use crate::provider::Toolset;
 use crate::provider::scripted::Script;
 use crate::provider::{Provider, ToolCall};
 use crate::record::RecordedAccount;
+use ral_core::HostSurface;
 use ral_core::Shell;
 use ral_core::Value;
 use ral_core::engine::EngineInstaller;
+use ral_core::terminal::TerminalState;
 use ral_core::ty::{Scheme, Ty};
 use ral_core::typecheck::Unifier;
 use ral_core::typecheck::builtins::{mk_scheme, pure, thunk};
@@ -30,24 +32,25 @@ thread_local! {
 
 #[allow(
     clippy::unnecessary_wraps,
-    reason = "must match EngineInstaller::boot's signature, which can genuinely refuse"
+    reason = "must match EngineInstaller::root's signature, which can genuinely refuse"
 )]
-fn dressed_boot(attach: &ral_core::protocol::Attach) -> Result<ral_core::engine::Booted, String> {
-    let mut booted = crate::boot::engine_boot_shell(attach)?;
+fn dressed_root(attach: &ral_core::protocol::Attach, shell: &mut Shell) -> Result<(), String> {
+    crate::boot::engine_root(attach, shell)?;
     if let Some(dress) = DRESS.take() {
-        dress(&mut booted.shell);
+        dress(shell);
     }
-    Ok(booted)
+    Ok(())
 }
 
 static DRESSED: [EngineInstaller; 1] = [EngineInstaller {
     tag: crate::shell_eval::builtins::INSTALLER_TAG,
-    boot: dressed_boot,
+    runtime: crate::boot::engine_runtime,
+    root: dressed_root,
     narrow: crate::policy::base_layer,
 }];
 
 /// Exarch's recipe, then `dress`, for the next boot on this thread: a recipe
-/// is a `fn`, and `boot` runs it on the calling thread. Spent on that boot,
+/// is a `fn`, and `boot` runs its root on the calling thread. Spent on that boot,
 /// so a `/clear` reboots undressed.
 pub(crate) fn dressed(dress: impl FnOnce(&mut Shell) + 'static) -> &'static [EngineInstaller] {
     DRESS.set(Some(Box::new(dress)));
@@ -63,21 +66,11 @@ pub(crate) fn dressed_trunk(dress: impl FnOnce(&mut Shell) + 'static) -> Avatar 
     .expect("dressed test trunk")
 }
 
-#[allow(
-    clippy::unnecessary_wraps,
-    reason = "must match EngineInstaller::boot's signature, which can genuinely refuse"
-)]
-fn bare_boot(_attach: &ral_core::protocol::Attach) -> Result<ral_core::engine::Booted, String> {
-    Ok(ral_core::engine::Booted {
-        shell: ral_core::test_helper::core_shell(),
-        keep: Box::new(()),
-    })
-}
-
 static BARE: [EngineInstaller; 1] = [EngineInstaller {
     tag: "bare",
-    boot: bare_boot,
-    narrow: |_, _| Err("a bare test engine hatches no children".into()),
+    runtime: |_| Ok(HostSurface::default().runtime(TerminalState::default())),
+    root: |_, _| Ok(()),
+    narrow: |_, _| Err("a bare test engine makes no children".into()),
 }];
 
 /// An engine over a bare shell: no prelude, no surface, nothing to reach
@@ -320,7 +313,7 @@ fn root(trunk: Trunk, tools: Toolset) -> Avatar {
             disk_warn_bytes: None,
             fuel: SPAWN_FUEL,
             egress: crate::egress::Egress::for_test(),
-            dial: None,
+            factory: None,
             bureau: Arc::new(crate::provider::Bureau::Scripted),
         },
         RootSeat::Identity {

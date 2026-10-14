@@ -111,11 +111,11 @@ pub type NetWire = std::net::TcpStream;
 /// first message to the last.
 pub struct Conversation {
     grant: Grant,
-    /// The machine, held in trust by the dialler: [`Conversation::end`]
-    /// recovers it via [`crate::machine_dial::MachineDial::into_machine`],
+    /// The machine, held in trust by the factory: [`Conversation::end`]
+    /// recovers it via [`crate::machine_factory::MachineFactory::into_machine`],
     /// the only other owner being the [`Avatar`] this conversation also
     /// holds, which drops first.
-    dial: Arc<crate::machine_dial::MachineDial>,
+    factory: Arc<crate::machine_factory::MachineFactory>,
     agent: Avatar,
     /// The run's advisory lock, held for the conversation's life.
     _run_lock: exarch::app::RunLock,
@@ -279,24 +279,24 @@ impl Conversation {
             trunk: exarch::agent::Trunk::Embedded,
             tools: exarch::provider::Toolset::offered(false),
             disk_warn_bytes,
-            // Every agent may delegate: the office assistant hatches
+            // Every agent may delegate: the office assistant spawns
             // helpers that run concurrently in the same guest, and
             // the exchange ends only once the whole tree does
             // (`converse_settled`'s Law B), not merely the trunk.
             fuel: exarch::agent::SPAWN_FUEL,
             egress: egress.clone(),
-            // `seat_machine` overwrites this: the dialler cannot exist
+            // `seat_machine` overwrites this: the factory cannot exist
             // before the machine it wraps.
-            dial: None,
+            factory: None,
             bureau,
         };
-        let (dial, agent, net_wire) = seat_machine(machine, config, provider)?;
+        let (factory, agent, net_wire) = seat_machine(machine, config, provider)?;
         let net = net_seat(net_wire, egress)?;
 
         Ok((
             Self {
                 grant,
-                dial,
+                factory,
                 agent,
                 _run_lock: run_lock,
                 baseline,
@@ -385,7 +385,7 @@ impl Conversation {
         let run_dir = self.agent.run_dir();
         let lost = exarch::agent::EngineLost::running(&cause, run_dir.as_deref());
         if let Some(run_dir) = &run_dir {
-            engine_log::capture(run_dir, &lost.logged(), &self.dial.console());
+            engine_log::capture(run_dir, &lost.logged(), &self.factory.console());
         }
         let sentence = lost.to_string();
         self.ended = Some(sentence.clone());
@@ -397,7 +397,7 @@ impl Conversation {
     /// accepting the folder as it stands, which it already did.
     ///
     /// Recovers the machine through [`unseat_machine`], which drops the
-    /// agent before reclaiming it from the dialler — see its own doc for
+    /// agent before reclaiming it from the factory — see its own doc for
     /// why that order is load-bearing. The net wire follows, never before
     /// the control wire — a session with its control plane gone but its
     /// network still live has nothing left to police what that network is
@@ -415,13 +415,13 @@ impl Conversation {
     /// Panics if [`unseat_machine`] does — see its own doc.
     pub fn end(self) -> Result<(), String> {
         let Self {
-            dial,
+            factory,
             agent,
             net,
             baseline,
             ..
         } = self;
-        let machine = unseat_machine(agent, dial);
+        let machine = unseat_machine(agent, factory);
         // Joined, not merely stopped: ending a conversation must leave no
         // guest-net thread behind, and `join` is what reports a worker panic.
         net.stop();
@@ -445,15 +445,15 @@ impl Conversation {
 /// account or folder is asking for it.
 ///
 /// Adopts `machine`'s control wire, hands the machine itself to a fresh
-/// [`crate::machine_dial::MachineDial`], and starts an [`Avatar`] over the
+/// [`crate::machine_factory::MachineFactory`], and starts an [`Avatar`] over the
 /// seated wire with `config` and `provider`.
 ///
 /// `boot-run` calls this too, with a scripted `provider` and its own
 /// `config` — the reason this exists at all is so that example has no
 /// bracket of its own left to assemble by hand.
 ///
-/// `config.dial` is overwritten with the fresh dialler regardless of what
-/// was passed in: the dialler cannot exist before the machine it wraps is
+/// `config.factory` is overwritten with the fresh factory regardless of what
+/// was passed in: the factory cannot exist before the machine it wraps is
 /// known, so no caller can hand in the real one ahead of this call.
 ///
 /// The net wire comes back unclaimed rather than seated here — taken once
@@ -469,17 +469,17 @@ pub fn seat_machine(
     mut machine: Box<dyn vm_manager::Machine>,
     mut config: exarch::agent::RootConfig,
     provider: Arc<Provider>,
-) -> Result<(Arc<crate::machine_dial::MachineDial>, Avatar, NetWire), String> {
+) -> Result<(Arc<crate::machine_factory::MachineFactory>, Avatar, NetWire), String> {
     let workspace = machine.workspace_path().to_path_buf();
     let wires = machine.take_wires();
     let root_seat = control_seat(wires.control, workspace)?;
-    let dial = Arc::new(crate::machine_dial::MachineDial::new(machine));
-    config.dial = Some(dial.clone());
+    let factory = Arc::new(crate::machine_factory::MachineFactory::new(machine));
+    config.factory = Some(factory.clone());
     let agent = match Avatar::root(config, root_seat, provider) {
         Ok(agent) => agent,
-        Err(e) => return Err(start_failed(&dial, &e)),
+        Err(e) => return Err(start_failed(&factory, &e)),
     };
-    Ok((dial, agent, wires.net.into()))
+    Ok((factory, agent, wires.net.into()))
 }
 
 /// Turn a refused [`Avatar::root`] into the sentence the window shows, saving
@@ -499,7 +499,7 @@ pub fn seat_machine(
 /// be made, the record could not be opened — which says nothing about where it
 /// happened, and so does get a clause naming what was being attempted.  There
 /// is no engine to have a console in that case and nothing to capture.
-fn start_failed(dial: &crate::machine_dial::MachineDial, why: &std::io::Error) -> String {
+fn start_failed(factory: &crate::machine_factory::MachineFactory, why: &std::io::Error) -> String {
     let Some(lost) = why
         .get_ref()
         .and_then(|source| source.downcast_ref::<exarch::agent::EngineLost>())
@@ -510,12 +510,12 @@ fn start_failed(dial: &crate::machine_dial::MachineDial, why: &std::io::Error) -
     if let Some(run_dir) = lost.log_dir() {
         // `logged`, not the sentence: the file is where the engine's own
         // account of itself belongs, having been kept out of the window's.
-        engine_log::capture(run_dir, &lost.logged(), &dial.console());
+        engine_log::capture(run_dir, &lost.logged(), &factory.console());
     }
     sentence
 }
 
-/// Recover `agent`'s machine from `dial`, ending the agent first.
+/// Recover `agent`'s machine from `factory`, ending the agent first.
 ///
 /// [`Conversation::end`]'s own machine-recovery step, and the same one
 /// `boot-run` now reaches through this function instead of reproducing.
@@ -524,23 +524,23 @@ fn start_failed(dial: &crate::machine_dial::MachineDial, why: &std::io::Error) -
 /// that end is what makes the guest's engine see EOF and power the machine
 /// off from the inside, so the grace window a caller's `machine.shutdown()`
 /// normally observes a stop already under way rather than forcing one. The
-/// machine comes back from the dialler next, which has held it since
+/// machine comes back from the factory next, which has held it since
 /// [`seat_machine`] — its only other owner was the agent just dropped,
 /// whose own helpers (if any) are gone too by the time an exchange has
-/// settled, so this is always the dialler's last reference.
+/// settled, so this is always the factory's last reference.
 ///
 /// # Panics
-/// Panics if `dial`'s `Arc` has another owner left once `agent` is gone —
+/// Panics if `factory`'s `Arc` has another owner left once `agent` is gone —
 /// a construction bug, since nothing else in this crate clones it.
 pub fn unseat_machine(
     agent: Avatar,
-    dial: Arc<crate::machine_dial::MachineDial>,
+    factory: Arc<crate::machine_factory::MachineFactory>,
 ) -> Box<dyn vm_manager::Machine> {
     drop(agent);
-    Arc::try_unwrap(dial)
+    Arc::try_unwrap(factory)
         .unwrap_or_else(|_| {
             panic!(
-                "the guest dialler outlived the agent that was its only other owner — a helper \
+                "the guest factory outlived the agent that was its only other owner: a helper \
                  must have leaked past the exchange that was supposed to settle it"
             )
         })
@@ -619,6 +619,17 @@ fn control_seat(
     control: impl Into<ral_core::protocol::channel::WireStream>,
     cwd: std::path::PathBuf,
 ) -> Result<exarch::agent::RootSeat, String> {
+    let scratch = std::path::Path::new(crate::grant::GUEST_SCRATCH);
+    // Home is the guest scratch, not the workspace: `HOME` is where
+    // XDG-defaulting tools drop caches and dotfiles, and pointed at
+    // `/work` that litter would land among the user's own documents —
+    // and in every change report.
+    let mut attach = ral_core::protocol::Attach::new(
+        exarch::shell_eval::builtins::INSTALLER_TAG,
+        cwd,
+        scratch.to_path_buf(),
+    );
+    attach.env = exarch::app::scratch_env(exarch::app::EXARCH, scratch);
     Ok(exarch::agent::RootSeat::Wire {
         transport: Box::new(
             ral_core::carrier::WireTransport::adopt(
@@ -627,12 +638,7 @@ fn control_seat(
             )
             .map_err(|e| format!("could not take control of the machine: {e}"))?,
         ),
-        cwd,
-        // Home is the guest scratch, not the workspace: `HOME` is where
-        // XDG-defaulting tools drop caches and dotfiles, and pointed at
-        // `/work` that litter would land among the user's own documents —
-        // and in every change report.
-        home: std::path::PathBuf::from(crate::grant::GUEST_SCRATCH),
+        attach,
     })
 }
 

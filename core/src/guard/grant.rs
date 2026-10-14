@@ -26,7 +26,7 @@ use crate::types::{Shell, Value};
 pub type GrantNarrower = fn(&str, &std::path::Path) -> Result<Capabilities, String>;
 
 /// A spawn's grant, as it crosses to a child that has not yet resolved it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SpawnGrant {
     /// The parent's authority verbatim: ⊤, a layer that says nothing.
     Inherit,
@@ -60,7 +60,7 @@ impl SpawnGrant {
     }
 
     /// Push this grant's layer onto `shell`, frozen against the shell's own
-    /// anchor: the one resolution a hatched seed and an adopted fork share.
+    /// anchor: the one resolution a sealed seed and an adopted fork share.
     ///
     /// # Errors
     /// Whatever [`Self::layer`] refuses.

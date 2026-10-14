@@ -144,8 +144,7 @@ mod tests {
     /// the session prompt, through the transport.
     fn render_src(src: &str) -> String {
         let src = src.to_owned();
-        let t = crate::repl::engine(move |shell| {
-            crate::PRELUDE.seat(shell);
+        let t = crate::repl::engine(crate::repl::prelude_runtime(), move |shell| {
             let prompt = crate::repl::eval(shell, &src);
             shell
                 .register_hook(

@@ -17,8 +17,8 @@
 //! `spawn { }` spends the owning session's budget, while
 //! [`LocalState`](super::LocalState)'s [`Drop`] cancels that session's
 //! workers but never this. The bound is per session:
-//! [`Shell::fork_session`](super::Shell::fork_session) gives a sub-agent the
-//! same budget unspent, as a hatched child's recipe arms one.
+//! [`Shell::construct`](super::Shell) gives a sub-agent the same budget
+//! unspent, from its bequest's terms.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -27,7 +27,7 @@ pub struct DetachPolicy {
     /// A whole-life total, not a concurrency limit.
     pub budget: u64,
     #[cfg_attr(not(unix), allow(dead_code))]
-    pub(super) births: AtomicU64,
+    pub(crate) births: AtomicU64,
 }
 
 impl DetachPolicy {
@@ -36,11 +36,6 @@ impl DetachPolicy {
             budget,
             births: AtomicU64::new(0),
         }
-    }
-
-    /// The same budget, unspent.
-    pub(crate) fn fresh(&self) -> Self {
-        Self::new(self.budget)
     }
 
     /// Reserve one birth.

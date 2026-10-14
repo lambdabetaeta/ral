@@ -18,7 +18,7 @@ fn root_config(run_dir: &Path, fuel: u32) -> RootConfig {
         disk_warn_bytes: None,
         fuel,
         egress: crate::egress::Egress::for_test(),
-        dial: None,
+        factory: None,
         bureau: Arc::new(crate::provider::Bureau::Scripted),
     }
 }

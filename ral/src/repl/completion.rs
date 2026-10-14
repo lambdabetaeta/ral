@@ -580,7 +580,9 @@ mod tests {
         let mut attach =
             ral_core::protocol::Attach::new(crate::repl::TEST_TAG, cwd.into(), cwd.into());
         attach.env.push(("PATH".into(), path.into()));
-        crate::repl::engine_at(&attach, |_| {})
+        let runtime =
+            ral_core::HostSurface::default().runtime(ral_core::terminal::TerminalState::default());
+        crate::repl::engine_at(&attach, runtime, |_| {})
     }
 
     fn as_path_value(dir: &Path) -> String {

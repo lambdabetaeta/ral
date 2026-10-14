@@ -86,7 +86,9 @@ fn text_args(argv: Vec<OsString>) -> Result<Vec<String>, String> {
 /// session, `batch` for a script.
 pub(crate) mod engine {
     use crate::boot_door;
-    use ral_core::engine::{Booted, EngineInstaller};
+    use ral_core::Runtime;
+    use ral_core::boot::boot_runtime;
+    use ral_core::engine::EngineInstaller;
     use ral_core::first_order::datum::Datum as _;
     use ral_core::protocol::Attach;
     use ral_core::record;
@@ -94,12 +96,14 @@ pub(crate) mod engine {
     pub(crate) static INSTALLERS: [EngineInstaller; 2] = [
         EngineInstaller {
             tag: REPL,
-            boot: boot_repl,
+            runtime: repl_runtime,
+            root: repl_root,
             narrow: no_seeded_children,
         },
         EngineInstaller {
             tag: BATCH,
-            boot: boot_batch,
+            runtime: batch_runtime,
+            root: batch_root,
             narrow: no_seeded_children,
         },
     ];
@@ -131,33 +135,47 @@ pub(crate) mod engine {
         }
     }
 
+    /// The REPL's process half.
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "must match EngineInstaller::runtime's signature, which can genuinely refuse"
+    )]
+    fn repl_runtime(attach: &Attach) -> Result<Runtime, String> {
+        Ok(boot_runtime(
+            attach.terminal,
+            &crate::PRELUDE,
+            &repl_surface(),
+        ))
+    }
+
     /// Everything an interactive session is before rc.
-    fn boot_repl(attach: &Attach) -> Result<Booted, String> {
-        let mut shell =
-            ral_core::boot::boot_shell(attach.terminal, &crate::PRELUDE, &repl_surface());
+    fn repl_root(_: &Attach, shell: &mut ral_core::Shell) -> Result<(), String> {
         shell.set_exit_hints(crate::platform::load_exit_hints());
         shell.set_interactive(true);
         let terminal = ral_core::Value::from(&shell.terminal());
         shell.set_var("TERMINAL".into(), terminal);
-        boot_door::register(&mut shell)?;
-        Ok(Booted {
-            shell,
-            keep: Box::new(()),
-        })
+        boot_door::register(shell)
+    }
+
+    /// The batch session's process half.
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "must match EngineInstaller::runtime's signature, which can genuinely refuse"
+    )]
+    fn batch_runtime(attach: &Attach) -> Result<Runtime, String> {
+        Ok(boot_runtime(
+            attach.terminal,
+            &crate::PRELUDE,
+            &batch_surface(),
+        ))
     }
 
     /// Everything a script's session is before its boot dispatch.
-    fn boot_batch(attach: &Attach) -> Result<Booted, String> {
+    fn batch_root(attach: &Attach, shell: &mut ral_core::Shell) -> Result<(), String> {
         let config = BatchConfig::decode(&attach.config)?;
-        let mut shell =
-            ral_core::boot::boot_shell(attach.terminal, &crate::PRELUDE, &batch_surface());
         shell.set_exit_hints(crate::platform::load_exit_hints());
         shell.set_args(config.args);
-        boot_door::register(&mut shell)?;
-        Ok(Booted {
-            shell,
-            keep: Box::new(()),
-        })
+        boot_door::register(shell)
     }
 
     /// The `batch` installer's `Attach.config`.
@@ -167,9 +185,9 @@ pub(crate) mod engine {
 
     record!(BatchConfig { args: "args" });
 
-    /// The REPL hatches nothing — only exarch spawns agents, and only exarch
-    /// has a base-tag lexicon to resolve a grant against — so this engine's
-    /// grant policy is a refusal. Saying so is the point of
+    /// The REPL makes no child engines — only exarch spawns agents, and only
+    /// exarch has a base-tag lexicon to resolve a grant against — so this
+    /// engine's grant policy is a refusal. Saying so is the point of
     /// `EngineInstaller`'s field: an engine with no policy is
     /// unrepresentable, and a seeded child that reaches one is told why
     /// rather than silently admitted.

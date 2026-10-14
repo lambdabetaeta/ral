@@ -26,7 +26,7 @@ use std::collections::{HashMap, HashSet};
 /// an install whose
 /// [`Value::shallow_size`](crate::types::Value::shallow_size) estimate meets
 /// it queues a [`LargeBindingNotice`], however fresh the name.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BindingLease {
     pub idle_calls: u64,
     pub large_binding_bytes: u64,
@@ -104,19 +104,6 @@ impl BindingLedger {
             last_used: HashMap::new(),
             large_bindings: Vec::new(),
         });
-    }
-
-    /// A new session keeps the parent's terms and seals everything it
-    /// inherited, read only when there are terms to keep.
-    pub(crate) fn forked<I>(&self, baseline: impl FnOnce() -> I) -> Self
-    where
-        I: IntoIterator<Item = String>,
-    {
-        let mut ledger = Self::default();
-        if let Some(lease) = self.lease() {
-            ledger.arm(lease, baseline());
-        }
-        ledger
     }
 
     #[cfg(test)]

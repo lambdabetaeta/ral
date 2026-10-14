@@ -1,6 +1,6 @@
 ---
-generated_at_commit: dcd202fb9da349cd9bc1f3d1332277da0f41da68
-generated_at_date: 2026-10-11
+generated_at_commit: e028f5a3
+generated_at_date: 2026-10-13
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs]
 ---
 
@@ -346,7 +346,7 @@ the one door that takes both at once, store first. The `/model` overlay's
 to pump it, to record endpoints, to clone the fetch seam — and never around
 the fetch itself; `Bureau` carries `Arc<Bureau>` on `RootConfig` and from
 there on the fleet's `Launch`, the one place a run's host settings live,
-beside `dial`.
+beside `factory`.
 
 ## Model catalogs
 

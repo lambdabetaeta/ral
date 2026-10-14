@@ -27,9 +27,9 @@ library, rc and host seeds — is sealed as baseline, permanently exempt
 (`Shell::arm_binding_lease`, armed once by `shell_eval::arm_session_ledgers`
 in the engine's own boot recipe, so `/clear`'s rebooted engine re-seals for
 free). A fork seals its entire inherited scope on the parent's terms, in core
-rather than by the host: `fork_session` builds its ledger with
-`BindingLedger::forked`, and a hatched child, whose recipe armed before its
-seed's scope arrived, re-seals in `EngineSeed::apply`. So on either seat a
+rather than by the host: `Shell::construct` arms the child's ledger from the
+bequest's terms, sealing every inherited name as baseline, the same code on
+either seat. So a
 fork's lease governs only the names the child itself writes. Its baseline read, `Env::all_bindings`, still folds in Σ's prelude
 beside ρ, so a prelude name that has not been shadowed is sealed as a
 harmless redundancy over a name the ledger could never reach.

@@ -196,8 +196,8 @@ subterm under the node's own environment — over the empty stack. The parent's
 which it `launch`es and `join`s (collect, then finish) in one
 step: no frame, because nothing runs beneath the node; the outcome climbs the
 parent's frames like any other rule's terminal. **No frame ever crosses**: not
-to a stage, whose stack is empty by construction, nor to a hatched engine,
-which receives the engine seed's `env`, `stack_limit` and `context`
+to a stage, whose stack is empty by construction, nor to a sealed child engine,
+which receives the engine seed's `env`, `context` and `terms`
 (`core/src/seed.rs`) — one environment, ρ alone, interned by its
 allocation's identity; Σ never crosses, so the receiver answers a decoded
 closure's Σ names from its own.

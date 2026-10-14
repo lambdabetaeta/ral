@@ -61,7 +61,7 @@ fn root_config(run_dir: &Path) -> RootConfig {
         disk_warn_bytes: None,
         fuel: 0,
         egress: exarch::egress::Egress::for_test(),
-        dial: None,
+        factory: None,
         bureau: Arc::new(exarch::provider::Bureau::Scripted),
     }
 }

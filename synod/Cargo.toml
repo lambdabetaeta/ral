@@ -41,11 +41,11 @@ ts-rs      = { workspace = true }
 # `TcpStream` on Windows, the same pretence `ral_core::wire::WireStream`
 # makes for the control plane.
 guest-net  = { path = "../guest-net" }
+# The guest daemon's factory port and boot contract; builds on every platform.
+ral-daemon = { path = "../ral-daemon" }
 
 [dev-dependencies]
 # `test_access`'s exec doors, for the office grant's tests.
 ral-core = { path = "../core", features = ["test-util"] }
 # `test_fixture::workshop`'s per-test directory, which deletes itself.
 tempfile = { workspace = true }
-# The boot contract, for `examples/check-media`; synod's own code never asks.
-ral-daemon = { path = "../ral-daemon" }

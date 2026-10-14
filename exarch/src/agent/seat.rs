@@ -11,16 +11,14 @@ use ral_core::protocol::Attach;
 use std::sync::Arc;
 
 /// How a fork of this seat's engine reaches the desk that adopts it: parked in
-/// the parent's own transport, or dialled across a wire. `` `start `` and
-/// `/branch` choose their arm on this fact alone.
+/// the parent's own transport, or made by the host's factory across a wire.
+/// `` `start `` and `/branch` choose their arm on this fact alone.
 pub(crate) enum SeatKind {
     Identity(Arc<IdentityTransport>),
-    /// The attach this seat was given: a hatched child is attached alike.
-    /// Its seed carries the live cwd and overrides this one on hydration, so
-    /// no probe is owed per call.
+    /// A child is attached with this attach and its own seal; the stored one
+    /// carries none.
     Wire {
-        cwd: std::path::PathBuf,
-        home: std::path::PathBuf,
+        attach: Attach,
     },
 }
 
@@ -36,13 +34,12 @@ pub(crate) enum Seat {
         /// not carry.
         rebirth: Option<Rebirth>,
     },
-    /// Out-of-process, one engine per session: a fork is hatched guest-side
-    /// and dialled by the desk's wire arm, attached as this seat was.
+    /// Out-of-process, one engine per session: a fork is made by the host's
+    /// factory and attached as this seat was, plus its seal.
     Wire {
         transport: Box<ral_core::carrier::WireTransport>,
         target: InterruptTarget,
-        cwd: std::path::PathBuf,
-        home: std::path::PathBuf,
+        attach: Attach,
     },
 }
 
@@ -214,28 +211,31 @@ impl Seat {
         }
     }
 
-    /// `cwd` and `home` are the caller's word, never read from this
-    /// process: under a VM they are guest paths this host cannot resolve.
+    /// Write `attach` with `seed` beside it and wait for the verdict. The
+    /// stored attach carries no seal by construction: a child's seal is
+    /// always added fresh, so no seat holds its parent's bequest for its
+    /// own life.
     ///
     /// # Errors
     /// The transport's severance, if the engine refuses the attach or falls
     /// silent before answering it.
     pub(crate) fn wire(
         transport: ral_core::carrier::WireTransport,
-        cwd: std::path::PathBuf,
-        home: std::path::PathBuf,
+        attach: Attach,
+        seed: Option<ral_core::seed::Sealed>,
     ) -> Result<Self, Severed> {
-        transport.attach(Attach::new(
-            builtins::INSTALLER_TAG,
-            cwd.clone(),
-            home.clone(),
-        ));
+        transport.attach(Attach {
+            seed,
+            ..attach.clone()
+        });
         transport.await_attached()?;
         Ok(Self::Wire {
             target: InterruptTarget::new(transport.control().clone()),
             transport: Box::new(transport),
-            cwd,
-            home,
+            attach: Attach {
+                seed: None,
+                ..attach
+            },
         })
     }
 
@@ -249,9 +249,8 @@ impl Seat {
     pub(crate) fn kind(&self) -> SeatKind {
         match self {
             Self::Identity { transport, .. } => SeatKind::Identity(transport.clone()),
-            Self::Wire { cwd, home, .. } => SeatKind::Wire {
-                cwd: cwd.clone(),
-                home: home.clone(),
+            Self::Wire { attach, .. } => SeatKind::Wire {
+                attach: attach.clone(),
             },
         }
     }

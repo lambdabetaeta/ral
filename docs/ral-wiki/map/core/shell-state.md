@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 28d06d78
-generated_at_date: 2026-10-11
+generated_at_commit: e028f5a3
+generated_at_date: 2026-10-13
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
 
@@ -144,8 +144,7 @@ checkpoint, since a run never writes it.
   `comparable` variables were fixed to: the session's threads share it, a new
   session snapshots it, [[map/core/ty|ty]]), the host-installed
   `builtins` with the session's `library_docs`, the session's
-  `terminal_lease`, the `guest_jail` (`Some` only inside a VM guest —
-  the spawn jail's shared uid counter, [[map/core/io-process|io-process]]), and
+  `terminal_lease`, and
   the `hooks` table (a worker or a stage dispatches none; a hook registered by a run that then panics is not rolled back with the `(env, context)` checkpoint).
 - **`LocalState`** — host-local scratch carrying its own flow rules (audit
   trail, REPL scratch, the `workers` registry, the `bindings` ledger, the
@@ -225,7 +224,7 @@ checkpoint, since a run never writes it.
   number nobody can compute — and the policy is `Arc`-shared into a spawned
   worker's shell like the registry, so a `detach` inside a `spawn { }` spends
   the owning session's budget. The bound is per session: a sub-agent fork
-  gets the same budget unspent, as a hatched child's recipe arms one. It is
+  gets the same budget unspent, armed by `construct` from its terms, with no recipe. It is
   equally deliberately absent from
   `LocalState`'s `Drop`: the surviving processes are the one thing a teardown
   must leave alone.
@@ -262,19 +261,18 @@ The `fork` door is a two-armed sum, `Fork` (`mooring.rs`), read through
 
 - **`Fork::Park(Nursery)`** — in-process. The reentrancy law bars a
   same-process desk handler from holding `&mut Shell`, so it cannot fork a
-  session itself: the builtin body forks through `Shell::fork_into_nursery`,
-  the fork waits in the `Nursery` the identity carrier owns and lays on each
+  session itself: the builtin body parks `Shell::bequeath`'s `Bequest`,
+  the bequest waits in the `Nursery` the identity carrier owns and lays on each
   dispatch, and the handler redeems its `NurseryId` through the parent's own
-  transport, `IdentityTransport::adopt_parked` — a new transport over the
-  fork, never a `Shell` in the host's hands (`Nursery::adopt` is
-  `pub(crate)`).
-- **`Fork::Listen`** — across a wire. The builtin binds a guest port and names
-  it in its enquiry; the desk dials back and the child engine is spawned onto
-  that connection ([[map/core/transport|transport]]). There is no pen, and
-  `fork_into_nursery` says so in its own sentence rather than reusing the
-  absence one.
+  transport, `IdentityTransport::adopt_parked` — a new transport over a
+  `Shell::child_of` the bequest, never a `Shell` in the host's hands
+  (`Nursery::adopt` is `pub(crate)`).
+- **`Fork::Seal`** — across a wire. The builtin seals the `Bequest` and names
+  the bytes in its enquiry; the host makes the child engine and hands it the
+  seal in its `Attach` ([[map/core/transport|transport]]). The builtin does no
+  I/O and there is no pen.
 
-Both arms fork the same shell, `Shell::fork_scrubbed`, which is the whole of
+Both arms take the same `Shell::bequeath`, which is the whole of
 [[design/agents|agents]]'s one-snapshot law: `` exarch-agents `start `` means one
 thing regardless of seat.
 
@@ -348,11 +346,20 @@ a run that holds the terminal, never mints authority, and is never lent twice.
 
 Methods on `Shell` live by concern, one submodule each:
 
-- `init.rs` — construction, the startup env-var seeding pass into
+- `construct.rs` — construction (`Shell::construct`, `Shell::root`, `Shell::child_of`). The startup seeding is not here but in `boot::seed_host_env`: the env-var pass into
   `context.env_overrides` ([[decisions/260531_env-is-dynamic-only|env-is-dynamic-only]];
   a default fills only an absent variable, and one the host binds in bytes
   that are not UTF-8 gets no entry, so children inherit it untouched),
-  and the machine facts (`OS_NAME` / `OS_ARCH` / `OS_FAMILY`) seeded into the environment (`env`);
+  and the machine facts (`OS_NAME` / `OS_ARCH` / `OS_FAMILY`) seeded into the environment (`env`). `construct.rs` also holds the construction's types: `Runtime` (the process
+  half: Σ, the builtin table with its base handler layer, library docs, the
+  terminal state; from the installer, shared through its `Arc`s), `Image`
+  (what a child can inherit: env, context, sources, `Terms`, fixings), `Terms`
+  (the session's policy: stack limit, exit hints, lease, retention, detach
+  budget — one type in memory and on the wire), and `Bequest` (`Image` and the
+  `SpawnGrant`). `Shell::construct(runtime, image, root)` is the one session
+  literal, with a root's hooks and terminal lease passed beside the image so a
+  bequest cannot express either; `Shell::root(runtime)` and
+  `Shell::child_of(runtime, bequest, narrow)` are its two instances;
 - `host.rs` — the host-embedding accessor surface;
 - `context.rs` — the `Context` dynamic-context verbs;
 - `scope.rs` — `within` / `grant` guards realising [[design/scoping|scoping]];
@@ -363,7 +370,7 @@ Methods on `Shell` live by concern, one submodule each:
   `enter_cwd`/`restore_cwd` save and restore it whole for `within [dir:]`, and
   `seed_cwd` lets an in-process front end whose working directory is not the
   process cwd state it directly), `inherit.rs` (the
-  flow matrix, below), `scrub.rs` (`Shell::fork_scrubbed` and its `Scrub`,
+  flow matrix, below), `scrub.rs` (`Shell::bequeath` and its `Scrub`,
   the one snapshot law's whole mechanism, below), `modules.rs`, `detached.rs`
   (the `detach` budget), `hooks.rs` (the session-lived hook table of named
   run-entry points — prompt render, startup, plugin hooks — each a block, a
@@ -427,19 +434,21 @@ fixings:
   registered `DefaultPolicy` says `aside` (the REPL's buffer-change hooks).
   It shares the detach budget and fixings too, but holds a roster of its own
   and an unarmed ledger.
-- `fork_session` — the host session fork (the sub-agent case): a new session,
-  holding its parent's policy and none of its state. Its durable root is its
-  own, and its roster carries the parent's retention. Its lease ledger runs on
-  the parent's terms and seals everything inherited as baseline
+- `bequeath` / `child_of` — the host session fork (the sub-agent case): a new
+  session, holding its parent's policy and none of its state.
+  `Shell::bequeath(grant)` (`scrub.rs`) packages the parent's `Image` as a
+  `Bequest`; `Shell::child_of(runtime, bequest, narrow)` constructs over it
+  through `Shell::construct`. The child's durable root is its own, and its
+  roster carries the parent's retention. Its lease ledger runs on the parent's
+  terms and seals everything inherited as baseline
   ([[internals/binding-leases|binding-leases]]). It gets an unspent detach
-  budget of the same size, and a snapshot of the fixings. A hatched child
-  reaches the same state by booting the same recipe and applying its seed,
-  which carries the fixings and re-seals the lease
-  ([[map/core/transport|transport]]); `identity_fork_and_wire_seed_agree`
-  holds the two seats to it. `fork_scrubbed` (`scrub.rs`) is the door
-  every sub-agent fork actually passes through: `fork_session`, then one
+  budget of the same size, the parent's `SourceDb`, and a snapshot of the
+  fixings. A sealed child takes the same path: its `EngineSeed` is the
+  bequest in wire form ([[map/core/transport|transport]]), and no recipe runs.
+  The round-trip test is a codec test and a constructor test.
+  `bequeath` is the door every sub-agent fork passes through: one
   `Scrub` over every root the fork holds — the session scope and each
-  handler frame's arms (`HandlerStack::values_mut`). A fork's hook table is
+  handler frame's arms (`HandlerFrame::values_mut`). A fork's hook table is
   empty by construction: hooks are session state, never inherited. The scrub replaces each `Value::Handle` it reaches with an
   `` `opaque `` placeholder, the binding's name and scheme surviving.
   - It walks *scopes*, not values: each scope the roots reach, once, by
@@ -456,7 +465,7 @@ fixings:
 
   See [[map/core/transport|transport]] and [[map/exarch/agent|agent]].
 
-Every genuine fork copies `session.builtins` (the dispatch table) and shares
-`session.guest_jail`, so dispatch reaches the child and a guest's workers,
-stages, and forks share one jail counter; the same-thread β-step shares both
-by identity.
+Every genuine fork copies `session.builtins` (the dispatch table), so
+dispatch reaches the child; the same-thread β-step shares it by identity. The
+guest jail is not session state: it is process-global
+([[map/core/io-process|io-process]]).

@@ -20,7 +20,7 @@ pub mod probe;
 /// The frame algebra's generation, checked at `Attach` and refused on
 /// mismatch.  Public because a build has to compare it against the engine
 /// sitting in the guest media beside it: see [`check_media`].
-pub const PROTOCOL_VERSION: u32 = 18;
+pub const PROTOCOL_VERSION: u32 = 19;
 
 /// The key `vm-image/build-boot.sh` records [`PROTOCOL_VERSION`] under in the
 /// boot media's manifest, `vm-image/out/boot/boot-manifest.txt`.
@@ -69,16 +69,6 @@ pub fn check_media(manifest: &str, path: &str) -> Result<(), String> {
     }
     Ok(())
 }
-
-/// The byte before the first frame, written by a guest that has just spawned
-/// a child engine onto this connection and read by the host that dialled it.
-///
-/// The algebra offers no substitute: the host speaks first and `Attach` is the
-/// only legal first frame, so this byte is the whole of the guest's readiness
-/// signal — and without it a roster can name a child whose `spawn` has not yet
-/// returned. ASCII ACK, and portable, because the two ends need not share an
-/// operating system.
-pub const HATCH_ACK: u8 = 0x06;
 
 // ── Dispatch identity ─────────────────────────────────────────────────
 
@@ -177,6 +167,8 @@ pub struct Attach {
     /// The installer's own settings: its recipe decodes them, and refuses
     /// ill-shaped ones in its own words. Core never reads them.
     pub config: FOValue,
+    /// A child's parent, sealed; `None` for a root.
+    pub seed: Option<crate::seed::Sealed>,
 }
 
 impl Attach {
@@ -191,6 +183,7 @@ impl Attach {
             installer: installer.into(),
             env: Vec::new(),
             config: FOValue::Unit,
+            seed: None,
         }
     }
 

@@ -74,25 +74,12 @@ pub(crate) enum ChildEnd {
 }
 
 impl WaitOutcome {
-    /// Classify a platform `ExitStatus` without collapsing signal death into a code.
+    /// Classify a Windows `ExitStatus`.
+    #[cfg(windows)]
     pub(crate) fn from_exit_status(status: std::process::ExitStatus) -> Self {
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::ExitStatusExt;
-            if let Some(code) = status.code() {
-                Self::Exited(code)
-            } else if let Some(sig) = status.signal() {
-                Self::Signaled(Signal::new(sig))
-            } else {
-                Self::NativeCode(1)
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            match status.code() {
-                Some(code) => Self::Exited(code),
-                None => Self::NativeCode(1),
-            }
+        match status.code() {
+            Some(code) => Self::Exited(code),
+            None => Self::NativeCode(1),
         }
     }
 

@@ -160,7 +160,7 @@ pub(crate) trait WithSpan {
 /// Source text with a line-start index built once at load, so `byte → (line,
 /// col)` costs O(log lines) at any file size.  Cloning bumps refcounts rather
 /// than copying the text.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Source {
     /// A script path, `<stdin>`, or a module's virtual path — what a rendered
     /// error names as the file its caret points into.
@@ -205,6 +205,11 @@ impl Source {
 
     /// The source text.
     pub fn as_str(&self) -> &str {
+        &self.text
+    }
+
+    /// The source text, shared.
+    pub fn text(&self) -> &Arc<str> {
         &self.text
     }
 
@@ -253,7 +258,7 @@ impl std::fmt::Display for CallSite {
 /// Append-only for the session's whole life: a module a run loads shares the
 /// registry with that run, so reclaiming a slot would re-mint a [`FileId`]
 /// the run's live spans still carry.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SourceDb {
     sources: Arc<Vec<Source>>,
 }
@@ -294,6 +299,26 @@ impl SourceDb {
             reason = "FileId is u32; a run registers a handful of sources, far below 2^32"
         )]
         FileId(self.sources.len() as u32)
+    }
+}
+
+impl Serialize for SourceDb {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.sources.iter().map(|s| (s.name(), s.text())))
+    }
+}
+
+impl<'de> Deserialize<'de> for SourceDb {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let pairs = Vec::<(Arc<str>, Arc<str>)>::deserialize(deserializer)?;
+        Ok(Self {
+            sources: Arc::new(
+                pairs
+                    .into_iter()
+                    .map(|(name, text)| Source::new(name, text))
+                    .collect(),
+            ),
+        })
     }
 }
 

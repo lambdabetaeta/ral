@@ -77,7 +77,15 @@ pub const PREFIX: &str = "ral.";
 /// number lives here, beside the only reader and the only writer of the
 /// command line, so that a new key and its version cannot be added in two
 /// different commits.
-pub const CONTRACT: u32 = 2;
+///
+/// It is at 3 because of the factory port, which a guest built before it
+/// would not be listening on.
+pub const CONTRACT: u32 = 3;
+
+/// The one *guest* port in this contract: where the daemon accepts the
+/// host's dials for engines, one engine per connection. Guest ports are a
+/// different space from the host's `ral.port` and `ral.net`.
+pub const FACTORY_PORT: u32 = 1731;
 
 /// The key `vm-image/build-boot.sh` records [`CONTRACT`] under in the boot
 /// media's own manifest, `vm-image/out/boot/boot-manifest.txt`.

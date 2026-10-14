@@ -68,40 +68,60 @@ pub(crate) fn eval(shell: &mut ral_core::Shell, src: &str) -> ral_core::Value {
     }
 }
 
-/// Boot an identity engine at `attach`, over a fresh shell `dress` fits out.
+/// Core's surface with the REPL's prelude seated: the runtime a test engine
+/// takes when its code reads prelude names.
+#[cfg(test)]
+pub(crate) fn prelude_runtime() -> ral_core::Runtime {
+    ral_core::boot::boot_runtime(
+        ral_core::terminal::TerminalState::default(),
+        &crate::PRELUDE,
+        &ral_core::HostSurface::default(),
+    )
+}
+
+/// Boot an identity engine at `attach`, over a root on `runtime` that `dress`
+/// fits out.
 ///
-/// A recipe is a `fn`, so `dress` reaches it through this thread: `boot` runs
-/// the recipe on the calling one.
+/// A recipe is a `fn`, so `runtime` and `dress` reach it through this thread:
+/// `boot` runs the recipe on the calling one.
 #[cfg(test)]
 pub(crate) fn engine_at(
     attach: &ral_core::protocol::Attach,
+    runtime: ral_core::Runtime,
     dress: impl FnOnce(&mut ral_core::Shell) + 'static,
 ) -> ral_core::carrier::IdentityTransport {
-    use ral_core::engine::{Booted, EngineInstaller};
+    use ral_core::engine::EngineInstaller;
+    use std::cell::Cell;
     type Dress = Box<dyn FnOnce(&mut ral_core::Shell)>;
     thread_local! {
-        static DRESS: std::cell::Cell<Option<Dress>> = const { std::cell::Cell::new(None) };
+        static RUNTIME: Cell<Option<ral_core::Runtime>> = const { Cell::new(None) };
+        static DRESS: Cell<Option<Dress>> = const { Cell::new(None) };
+    }
+    fn test_runtime(_: &ral_core::protocol::Attach) -> Result<ral_core::Runtime, String> {
+        RUNTIME
+            .take()
+            .ok_or_else(|| "no runtime: was this test engine booted through `engine_at`?".into())
     }
     #[allow(
         clippy::unnecessary_wraps,
-        reason = "must match EngineInstaller::boot's signature, which can genuinely refuse"
+        reason = "must match EngineInstaller::root's signature, which can genuinely refuse"
     )]
-    fn dressed(_: &ral_core::protocol::Attach) -> Result<Booted, String> {
-        let mut shell =
-            ral_core::HostSurface::default().shell(ral_core::terminal::TerminalState::default());
+    fn dressed_root(
+        _: &ral_core::protocol::Attach,
+        shell: &mut ral_core::Shell,
+    ) -> Result<(), String> {
         if let Some(dress) = DRESS.take() {
-            dress(&mut shell);
+            dress(shell);
         }
-        Ok(Booted {
-            shell,
-            keep: Box::new(()),
-        })
+        Ok(())
     }
     static INSTALLERS: [EngineInstaller; 1] = [EngineInstaller {
         tag: TEST_TAG,
-        boot: dressed,
-        narrow: |_, _| Err("a test engine hatches no children".into()),
+        runtime: test_runtime,
+        root: dressed_root,
+        narrow: |_, _| Err("a test engine makes no child sessions".into()),
     }];
+    RUNTIME.set(Some(runtime));
     DRESS.set(Some(Box::new(dress)));
     ral_core::carrier::IdentityTransport::boot(&INSTALLERS, attach).expect("a test engine boots")
 }
@@ -112,11 +132,13 @@ pub(crate) const TEST_TAG: &str = "test";
 /// [`engine_at`], seated in the temp dir.
 #[cfg(test)]
 pub(crate) fn engine(
+    runtime: ral_core::Runtime,
     dress: impl FnOnce(&mut ral_core::Shell) + 'static,
 ) -> ral_core::carrier::IdentityTransport {
     let temp = std::env::temp_dir();
     engine_at(
         &ral_core::protocol::Attach::new(TEST_TAG, temp.clone(), temp),
+        runtime,
         dress,
     )
 }

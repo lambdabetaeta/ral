@@ -1,8 +1,9 @@
 //! An immutable byte string: the inner of `Value::Bytes`, and the datum for
 //! `FOValue::Bytes`.
 
-use super::FOValue;
 use super::datum::Datum;
+use super::{FOValue, byte_encoding};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -53,6 +54,18 @@ impl From<Vec<u8>> for Bytes {
 impl From<&[u8]> for Bytes {
     fn from(b: &[u8]) -> Self {
         Self::from(b.to_vec())
+    }
+}
+
+impl Serialize for Bytes {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        byte_encoding::serialize(self, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Bytes {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        byte_encoding::deserialize(deserializer).map(Self::from)
     }
 }
 

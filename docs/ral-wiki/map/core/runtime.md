@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 53509c43
-generated_at_date: 2026-10-11
+generated_at_commit: e028f5a3
+generated_at_date: 2026-10-13
 covers_paths: [core/src/runtime.rs, core/src/runtime/]
 ---
 
@@ -310,7 +310,7 @@ evaluator item; the evaluator reaches it at
   actually spawned, not at grant-body entry
   ([[decisions/260617_sandbox-external-children|sandbox-external-children]]).
   Inside a *guest*, `build_launch` takes neither projection branch:
-  `shell.guest_jail()` marks every spawn as already confined by the spawn
+  `jail::guest()` marks every spawn as already confined by the spawn
   jail — a fresh unprivileged uid and a per-exec cgroup,
   `process/jail.rs` ([[map/core/io-process|io-process]]) — since bwrap
   needs the user namespaces the guest boot disables; the in-process guards
@@ -319,8 +319,8 @@ evaluator item; the evaluator reaches it at
   `setsid`'d grandchild cannot leave its cgroup) while the grace phase
   stays pgid-addressed (`docs/SPEC.md` §12.11).
 `core/src/seed.rs` (crate root, beside the wire layer it rides, *not*
-under `runtime/`) carries only `EngineSeed`/`pack_seed`, the engine seat's
-own seed wire for a wire-hatched child (`seed/hatch.rs`); a pipeline stage never
+under `runtime/`) carries only `EngineSeed` and `seal`/`unseal`, the engine seat's
+own seed wire for a sealed child engine; a pipeline stage never
 crosses a wire at all and this module carries no pipeline-stage type
 ([[decisions/260902_stages-are-threads|stages-are-threads]],
 [[decisions/260610_child-eval-unification|child-eval-unification]], superseded).

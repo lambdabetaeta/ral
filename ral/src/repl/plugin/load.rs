@@ -379,8 +379,7 @@ pub(in crate::repl) mod harness {
             .iter()
             .map(|&(p, e, s)| (p.to_owned(), e, s.to_owned()))
             .collect();
-        let t = crate::repl::engine(move |shell| {
-            crate::PRELUDE.seat(shell);
+        let t = crate::repl::engine(crate::repl::prelude_runtime(), move |shell| {
             shell.install_captured_builtins(&vec![recorder].into());
             for (plugin, event, src) in &owned {
                 let handlers = ManifestHandlers {

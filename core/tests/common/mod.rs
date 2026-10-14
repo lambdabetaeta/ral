@@ -11,7 +11,7 @@
 
 #![allow(dead_code)] // not every test file uses every helper
 
-use ral_core::boot::{BakedPrelude, HostSurface, boot_shell};
+use ral_core::boot::{BakedPrelude, HostSurface, boot_runtime, boot_shell};
 use ral_core::terminal::TerminalState;
 use ral_core::types::Shell;
 use ral_core::{Scheme, ir::Comp};
@@ -32,6 +32,15 @@ fn init_test_binary() {
 /// blob), memoised for the accessors below and for `boot_shell`.
 pub fn prelude() -> &'static BakedPrelude {
     BakedPrelude::runtime()
+}
+
+/// A root shell over core's surface and the prelude: no env vars.
+pub fn prelude_shell() -> Shell {
+    Shell::root(boot_runtime(
+        TerminalState::default(),
+        prelude(),
+        &HostSurface::default(),
+    ))
 }
 
 /// A shell booted as every front end boots one: core's builtin surface,

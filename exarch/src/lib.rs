@@ -55,7 +55,8 @@ use std::sync::Arc;
 pub static INSTALLERS: [ral_core::engine::EngineInstaller; 1] =
     [ral_core::engine::EngineInstaller {
         tag: shell_eval::builtins::INSTALLER_TAG,
-        boot: boot::engine_boot_shell,
+        runtime: boot::engine_runtime,
+        root: boot::engine_root,
         narrow: policy::base_layer,
     }];
 
@@ -269,7 +270,7 @@ pub fn run() -> Result<(), String> {
         disk_warn_bytes,
         fuel: agent::SPAWN_FUEL,
         egress,
-        dial: None,
+        factory: None,
         bureau: Arc::clone(&bureau),
     };
     let seat = agent::RootSeat::Identity {

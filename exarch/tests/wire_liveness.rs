@@ -57,11 +57,16 @@ fn engine_over_socketpair(liveness: Liveness) -> (WireTransport, EngineChild) {
 /// [`INSTALLER_TAG`]: exarch::shell_eval::builtins::INSTALLER_TAG
 fn attach(transport: &WireTransport) -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
-    transport.attach(Attach::new(
+    let mut attach = Attach::new(
         exarch::shell_eval::builtins::INSTALLER_TAG,
         dir.path().to_path_buf(),
         dir.path().to_path_buf(),
+    );
+    attach.env.push((
+        exarch::app::EXARCH.scratch_var(),
+        dir.path().to_string_lossy().into_owned(),
     ));
+    transport.attach(attach);
     transport
         .await_attached()
         .expect("the engine must accept the attach");

@@ -182,6 +182,14 @@ impl HandlerFrame {
     pub(crate) fn is_alias_for(&self, name: &str) -> bool {
         self.kind == FrameKind::Alias && self.entries.first().is_some_and(|e| e.name == name)
     }
+
+    /// Every value this frame holds: each entry's thunk, then the catch-all.
+    pub(crate) fn values_mut(&mut self) -> impl Iterator<Item = &mut Value> {
+        self.entries
+            .iter_mut()
+            .map(|entry| &mut entry.thunk)
+            .chain(self.catch_all.as_mut())
+    }
 }
 
 /// One [`HandlerStack::lookup`] hit: a user frame, masked by depth and run
@@ -213,6 +221,24 @@ pub(crate) struct HandlerStack {
 }
 
 impl HandlerStack {
+    /// A stack over `base`, each of `frames` pushed through
+    /// [`Self::push_frame`], so the handles are this stack's.
+    pub(crate) fn over(base: Vec<BuiltinEntry>, frames: Vec<HandlerFrame>) -> Self {
+        let mut stack = Self {
+            base,
+            ..Self::default()
+        };
+        for frame in frames {
+            stack.push_frame(frame);
+        }
+        stack
+    }
+
+    /// The permanent layer below every run frame.
+    pub(crate) fn base(&self) -> &[BuiltinEntry] {
+        &self.base
+    }
+
     /// Push a scoped `within` frame.  `Shell::with_handlers` owns the paired
     /// [`Self::remove_by_handle`].
     pub fn push(&mut self, entries: Vec<HandlerEntry>, catch_all: Option<Value>) -> FrameHandle {
@@ -318,18 +344,6 @@ impl HandlerStack {
     /// The frames, outermost first.
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = &HandlerFrame> {
         self.frames.iter().map(|(_, frame)| frame)
-    }
-
-    /// Every value a frame holds — each entry's `thunk`, then its
-    /// `catch_all` — outermost frame first.
-    pub(crate) fn values_mut(&mut self) -> impl Iterator<Item = &mut Value> {
-        self.frames.iter_mut().flat_map(|(_, frame)| {
-            frame
-                .entries
-                .iter_mut()
-                .map(|entry| &mut entry.thunk)
-                .chain(frame.catch_all.as_mut())
-        })
     }
 
     /// Lift the frame at `depth`, as returned by [`Self::lookup`], off the
