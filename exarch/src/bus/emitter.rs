@@ -64,7 +64,7 @@ impl Publish for FleetSink {
     }
 }
 
-/// Whether a detached async `agent` child cloning this emitter gets a live
+/// Whether an async `agent` child (a worker) cloning this emitter gets a live
 /// tab or streams nowhere.  Display only: a [`Children::Muted`] child still
 /// records through its own record seam and still meters.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -151,7 +151,7 @@ impl Emitter {
         self.id
     }
 
-    /// Whether a detached worker may clone this emitter for a live tab —
+    /// Whether a worker may clone this emitter for a live tab —
     /// [`Children::Live`] off [`FleetBus::session`] and
     /// [`FleetBus::per_exchange_live`], read by `agent` to choose between
     /// [`Self::child`] and [`Self::muted_child`].
@@ -162,8 +162,8 @@ impl Emitter {
 
 /// The event channel and its inbox, over one of two lifetimes crossed with
 /// whether spawned children are live or muted on it: [`Self::session`], held
-/// across the whole REPL session (the TUI) with live children, so a detached
-/// async child streams to a live tab; [`Self::per_exchange`], closing with the
+/// across the whole REPL session (the TUI) with live children, so an async
+/// `agent` child (a worker) streams to a live tab; [`Self::per_exchange`], closing with the
 /// exchange (headless, tests) with muted children, so such a child stays off
 /// the display though it still records; and [`Self::per_exchange_live`], the
 /// same closing lifetime but with live children — what

@@ -84,7 +84,7 @@ impl InterruptTarget {
         self.0.lock_ignore_poison().interrupt();
     }
 
-    /// End every run and detached worker of the agent's engine, for good.
+    /// End every run and worker of the agent's engine, for good.
     pub(crate) fn terminate(&self) {
         self.0.lock_ignore_poison().terminate();
     }

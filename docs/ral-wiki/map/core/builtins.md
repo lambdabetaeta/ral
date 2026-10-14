@@ -153,7 +153,7 @@ Bodies are grouped by concern, one submodule each:
   and `poll` gate first on `ensure_live`, the cancelled pre-check
   ([[decisions/260615_poll-total-failed-arm|the settle decision]],
   [[decisions/260702_partial-poll-pending-output|partial-poll-pending-output]]).
-  A detached worker hangs under the durable session root, not the run's
+  A worker hangs under the durable session root, not the run's
   foreground scope, so a foreground cancel never reaps it; `await` shares
   `race`'s cancel-aware wait loop (`wait_first_settled`), so a deadline unwinds
   the wait while the root-scoped worker survives
@@ -170,7 +170,7 @@ Bodies are grouped by concern, one submodule each:
   pushes at the next settled run's ready boundary as a `` `notice ``
   surface event (`emit_ready_boundary_notices`; exarch decodes it back via
   `card::value_to_notice`), and cancels the worker's scope with
-  `Deadline` — never detaching the handle, so a later `poll`/`await` still
+  `Deadline` — never discarding the handle, so a later `poll`/`await` still
   observes the partial output and failure. The class decides the chain at
   the spawn door: `spawn_child` takes a `Birth` — which of `spawn`, `watch`
   and `service` is being served, and so the verb a refusal names, the lease

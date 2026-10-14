@@ -24,14 +24,14 @@ impl Shell {
         &self.session.sources
     }
 
-    /// The session's durable cancel root, under which every run and detached
+    /// The session's durable cancel root, under which every run and
     /// worker hangs.
     pub(crate) fn durable_root(&self) -> &DurableRoot {
         &self.session.root
     }
 
     /// A clonable cancel handle: cancelling it unwinds the in-flight run at the
-    /// evaluator's poll points and stops the session's detached workers.  No
+    /// evaluator's poll points and stops the session's workers.  No
     /// session folds the process's signals, so this — or a `Control` over it —
     /// is how a host stops a running eval.
     pub fn cancel_handle(&self) -> DurableRoot {

@@ -61,7 +61,7 @@ for every tool.
   model may narrate between calls without ending its turn. A record failure is
   a seam fault, not a tool error: the model still gets its acknowledgement.
 - **`agent/spawn.rs`** — not a tool module but the
-  fork-detach-register spine every launch shares: `spawn_async`, `AsyncSpawn`,
+  fork-spawn-register spine every launch shares: `spawn_async`, `AsyncSpawn`,
   `SpawnedChild`. Both `/branch`'s `spawn_branch` and the desk's
   `` exarch-agents `start `` handler build on it — either arm of it, in-process or
   across a wire — so `/branch` and the harness spawn verb share one

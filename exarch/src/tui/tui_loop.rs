@@ -66,7 +66,7 @@ pub fn run(
         ),
     };
     tui.app.update_live_model(provider, &bureau.available());
-    // A *session*-lived bus, not per-exchange: a detached async child keeps
+    // A *session*-lived bus, not per-exchange: an async child keeps
     // streaming to its tab after the exchange that spawned it ends.
     let bus = FleetBus::session(&session.inbox());
     if let Some(s) = seed {
@@ -237,7 +237,7 @@ fn ui_loop(
         let prev_focus = tui.app.tabs.focused();
         // The explicit-done contract, shared with the headless `Sink::drive`:
         // stop only when the worker is *done*, never when the channel empties,
-        // so a detached background agent flooding the bus cannot end the loop
+        // so a background agent flooding the bus cannot end the loop
         // early.  The cap bounds how long that flood starves the input poll.
         let mut handled_any = false;
         let more = match drain_signals(rx, done, Some(BATCH), |sig| {

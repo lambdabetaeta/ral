@@ -123,7 +123,7 @@ pub(crate) struct Facts {
     /// pinned.
     pub pinned: Option<String>,
     /// Nothing else is already carrying this agent forward: no reply standing
-    /// for a parent to fetch, no detached shell work, no busy children.  The
+    /// for a parent to fetch, no running worker, no busy children.  The
     /// one gate every nudge kind shares — `false` and `react` returns `None`
     /// unspent, budget untouched.
     pub quiet: bool,

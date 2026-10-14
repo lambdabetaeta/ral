@@ -58,7 +58,7 @@ and a binding is only the carriage around it.
 |                   | answered (call)                                                    | one-way (notice)                                              |
 | ----------------- | ------------------------------------------------------------------- | --------------------------------------------------------------- |
 | **host → engine** | `Dispatch → Report` — one whole run: clocked, walled, cancel-scoped  | `Control` — interrupt, cancel, terminate, abort, out-of-band     |
-| **engine → host** | `Enquiry → Answer` — nested inside a run, no clock of its own       | `Surface` — live values ordered before the Report, or a detached worker's deferred batch |
+| **engine → host** | `Enquiry → Answer` — nested inside a run, no clock of its own       | `Surface` — live values ordered before the Report, or a worker's deferred batch |
 
 Each direction owns one answered channel and one one-way channel. The
 remaining asymmetries are semantic, not accidental, and are never smoothed
@@ -69,7 +69,7 @@ into a fake mirror pair:
   thing under either carrier (`Scopes::apply`): `Interrupt(id)` unwinds that
   dispatch as a Ctrl-C would and `Cancel(id)` as a targeted teardown, either
   one even before the dispatch has arrived, and a stale id strikes nothing;
-  `Terminate` cancels the durable root — every run and every detached worker,
+  `Terminate` cancels the durable root — every run and every worker,
   for good; `Abort` is `Terminate` as Ctrl-`\` asks it, cause `RootAbort`. No
   engine folds its process's signals: its front-end forwards them as these
   verbs (`ControlSender::forward_signals`), aiming an interrupt only at a
@@ -175,7 +175,7 @@ this tree). A `Fragment` never crosses: it lives only between loading and
 ## The laws of an enquiry
 
 - **Containment.** An enquiry lives inside its run: same wall, same
-  foreground cancel scope, no clock of its own. A detached worker is built
+  foreground cancel scope, no clock of its own. A worker is built
   with no desk at all — a worker outlives its spawning run's `Report`, so one
   that could enquire would answer into a `Report` window already closed.
 - **Cancel wakes a park.** `Control::Cancel` must reach an engine parked on

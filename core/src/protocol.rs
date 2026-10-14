@@ -105,7 +105,7 @@ pub enum Frame {
     /// arrive while that Dispatch is outstanding.
     Event(DispatchId, Event),
     /// Engine → front-end, outside any dispatch's window: emitted by a
-    /// detached worker that settles between runs, so it has no dispatch to
+    /// worker that settles between runs, so it has no dispatch to
     /// ride and reaches the front-end through the transport's session sink
     /// instead of the per-run event stream.
     Session(SessionEvent),
@@ -367,7 +367,7 @@ pub enum Event {
 }
 
 /// Engine → front-end traffic with no dispatch to ride: the attach verdict,
-/// and a detached worker's batch.
+/// and a worker's batch.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SessionEvent {
     /// The engine booted the installer `Attach` named and takes dispatches.
@@ -418,7 +418,7 @@ pub enum Control {
     /// Unwind this dispatch, even one not yet arrived; a stale id strikes
     /// nothing.
     Cancel(DispatchId),
-    /// Cancel the session's durable root: every run and every detached
+    /// Cancel the session's durable root: every run and every
     /// worker, for good.
     Terminate,
     /// [`Terminate`](Self::Terminate), as Ctrl-`\` asks it: cause `RootAbort`.

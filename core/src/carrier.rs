@@ -519,7 +519,7 @@ impl ControlSender {
         self.send(Control::Cancel(id));
     }
 
-    /// End every run and every detached worker of the session, for good.
+    /// End every run and every worker of the session, for good.
     pub fn terminate(&self) {
         self.send(Control::Terminate);
     }

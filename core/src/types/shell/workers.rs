@@ -1,5 +1,5 @@
 //! The worker registry: a per-[`Shell`](super::Shell) directory of every
-//! detached worker (`spawn`, `watch`, `service`) spawned from it. Pure
+//! worker (`spawn`, `watch`, `service`) spawned from it. Pure
 //! bookkeeping — the directory the lease policies read, never a policy itself.
 //!
 //! `spawn_child` in `builtins::concurrency` files an entry as it mints the
@@ -141,7 +141,7 @@ pub enum ReapCause {
 
 label!(ReapCause);
 
-/// How a detached worker ended, as its `` `done `` event says: no return
+/// How a worker ended, as its `` `done `` event says: no return
 /// value, which only `await` hands over.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Done {
@@ -156,7 +156,7 @@ variant!(Done {
     Panic(String): "panic",
 });
 
-/// The event a detached worker appends at completion.
+/// The event a worker appends at completion.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DoneEvent {
     pub id: WorkerId,

@@ -61,7 +61,7 @@ recognised card: an unknown mark label or role degrades to plain `text`,
 because a card is a deliberate user-facing act, not a sentinel that might be
 malformed. The `diff` mark reads a `path` and a `hunks` list — each hunk its
 first line before (`old`) and after (`new`) the edit, and a `rows` list of `{tag, text}` records; a missing `hunks`
-lifts to empty so a bare diff still renders. Detached workers buffer their
+lifts to empty so a bare diff still renders. Workers buffer their
 `exarch-surface` calls and replay them on `await`, so a card replays for free.
 
 ## Encode — `encode_card`
@@ -82,7 +82,7 @@ state through a payload the decoder discards, because the only card
 ## Host-composed one-liners — `done`, notices
 
 Some of what the marks describe is composed in Rust, never decoded from a
-kit-authored `` `card ``. `settled_spans` words a detached worker's completion outcome — the `` `done ``
+kit-authored `` `card ``. `settled_spans` words a worker's completion outcome — the `` `done ``
 event core appends to every deferred surface batch, decoded by `value_to_done`
 into a `DoneOutcome` and recorded as `Display::Done { outcome }` — as one
 sentence, `background block settled (exit n)`, with a failure's message

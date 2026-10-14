@@ -344,7 +344,7 @@ impl Launch {
     }
 
     /// Spawn *detached* by double fork: the survivor is this process's
-    /// grandchild, reparented onto init in a session of its own, and only its
+    /// grandchild, reparented onto init in a session of its own, and at most its
     /// pid comes back.  Nothing here can then name it — the whole difference
     /// from [`Self::spawn`].
     ///
@@ -355,9 +355,9 @@ impl Launch {
     /// can tell when that cgroup is empty.
     ///
     /// # Errors
-    /// A failed fork or `execve`, or a pid handshake that comes up short.
+    /// A failed fork or `execve`; a survivor whose pid is lost is `Survivor::Unnamed`.
     #[cfg(unix)]
-    pub(crate) fn spawn_detached(&mut self) -> std::io::Result<u32> {
+    pub(crate) fn spawn_detached(&mut self) -> std::io::Result<crate::process::group::Survivor> {
         crate::process::group::spawn_detached(&mut self.cmd)
     }
 }

@@ -40,7 +40,7 @@ pub enum CancelCause {
     Cancelled = 3,
     /// A wall-clock or lifetime ceiling expired.
     TimedOut = 4,
-    /// SIGTERM / SIGHUP.  Lands on the durable root, so it reaches detached
+    /// SIGTERM / SIGHUP.  Lands on the durable root, so it reaches
     /// workers and not just the foreground run.
     Terminated = 5,
     /// Ctrl-\, reaping the session root.
@@ -374,7 +374,7 @@ impl Drop for CancelWatch {
 
 /// The session's durable cancel root.
 ///
-/// Detached workers (`spawn`, `watch`, `par`) parent under it, so a foreground
+/// workers (`spawn`, `watch`, `par`) parent under it, so a foreground
 /// cancel never reaches one: only a cancel on the root itself, or on the
 /// worker's own scope, stops it.
 #[derive(Debug, Clone)]
@@ -387,7 +387,7 @@ impl DurableRoot {
     }
 
     /// Mint a scope under this root that is *not* a run's foreground — a
-    /// detached worker's, and the anchor a session boots with.  A run's frame
+    /// worker's, and the anchor a session boots with.  A run's frame
     /// nests under the anchor, so by that shape cancelling it never reaches a
     /// worker, while cancelling the root reaches both.
     pub fn worker(&self) -> ForegroundScope {
@@ -395,7 +395,7 @@ impl DurableRoot {
     }
 
     /// Record `cause` on the root, reaching the foreground run and every
-    /// detached worker at once.
+    /// worker at once.
     pub fn cancel(&self, cause: CancelCause) {
         self.0.cancel(cause);
     }
@@ -584,7 +584,7 @@ mod tests {
         assert_eq!(
             worker.cause(),
             None,
-            "a run's interrupt must not reach a detached worker"
+            "a run's interrupt must not reach a worker"
         );
         root.cancel(CancelCause::Terminated);
         assert_eq!(

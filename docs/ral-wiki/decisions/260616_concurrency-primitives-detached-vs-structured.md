@@ -16,6 +16,8 @@ status: active
 > deleted outright, so the "`&` is `spawn`" section below keeps its second
 > clause — the `JobTable` is no management layer over `spawn` — and loses its
 > first: there is no `&` left to identify with `spawn`.
+>
+> The vocabulary has since changed: what this page calls a "detached worker" is now simply a *worker*, and "detached" is reserved for the `detach` verb ([[decisions/260725_survives-exit-is-its-own-verb|survives-exit-is-its-own-verb]]).
 
 **Given a turn evaluator with a durable *root* cancel scope distinct from the
 swappable *foreground* scope, a worker's parent follows the primitive that

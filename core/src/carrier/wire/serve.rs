@@ -64,7 +64,7 @@ fn engine_send(writer: &Mutex<WireChannel>, fault: &AtomicBool, frame: &Frame) {
     }
 }
 
-/// A detached worker's batch outlives the run that spawned it, so it has no
+/// A worker's batch outlives the run that spawned it, so it has no
 /// dispatch to stamp and rides `Frame::Session` instead.
 struct ChannelDeferredSink {
     writer: Arc<Mutex<WireChannel>>,

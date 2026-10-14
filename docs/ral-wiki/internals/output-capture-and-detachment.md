@@ -1,7 +1,7 @@
 ---
 verified_at_commit: 1776d222
 verified_at_date: 2026-09-30
-anchors: [Sink::pump, SINK_BUFFER_CAP, WaitedChild, spawn_child, PgidPolicy::NewLeader, process::deadline, WorkerLease, WorkerRegistry, LeaseChain, spawn_detached, DetachPolicy, Capture, decode_utf8_strict, write_sink, CapturedBytes::overflowed]
+anchors: [Sink::pump, SINK_BUFFER_CAP, WaitedChild, spawn_child, PgidPolicy::NewLeader, process::deadline, WorkerLease, WorkerRegistry, LeaseChain, spawn_detached, Survivor, DetachPolicy, Capture, decode_utf8_strict, write_sink, CapturedBytes::overflowed]
 ---
 
 # Output capture and detachment
@@ -94,7 +94,7 @@ A captured stream is a `Sink::Buffer` fed by a *pump* — see [[map/core/io-proc
 
 ## `spawn` moves the work off the run
 
-The escape is detachment — the *handle* is its evidence
+A worker hangs off the durable root, not the run: the *handle* is its evidence
 ([[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]]).
 
 - `spawn { … }` reifies a `Value::Handle` and runs the body on a worker thread
@@ -117,7 +117,7 @@ The escape is detachment — the *handle* is its evidence
   write still returns `Ok` (`core/src/io/sink.rs`).
 - So the pump keeps reading and discarding after the cap. A server that spews to
   stdout never fills the kernel pipe — it never blocks on a full pipe — and the
-  worker's memory stays bounded at ~16 MiB. The detached path has no unbounded-growth
+  worker's memory stays bounded at ~16 MiB. The worker path has no unbounded-growth
   failure mode, and no undrained-pipe stall.
 - Truncation with a marker is *this* path's contract, and only this one. A
   worker's bytes arrive with nobody to refuse them: the pump is a thread whose
@@ -132,9 +132,9 @@ The escape is detachment — the *handle* is its evidence
   without a marker and count every observed byte. Each stream
   pairs its prefix with its total; a larger total means truncation ([[design/audit|audit]]).
 
-## Detachment decays by neglect, not by age
+## Workers decay by neglect, not by age
 
-- Every detached worker — `spawn`, `watch`, `service` — files a `WorkerEntry` in
+- Every worker — `spawn`, `watch`, `service` — files a `WorkerEntry` in
   its shell's `WorkerRegistry` the instant it starts (`core/src/types/shell/workers.rs`):
   a per-shell directory holding the handle itself, not a second by-id control
   plane. All three classes are meant to end with the host process, and `detach`
@@ -160,7 +160,7 @@ The escape is detachment — the *handle* is its evidence
   absolute backstop. It is reaped once unobserved — no `poll`/`await`/`race`
   has named its handle — for `idle`, or once older than `backstop` regardless
   of observation. exarch grants one hour idle / 24 hour backstop
-  (`DETACHED_WORKER_CEILING`, `DETACHED_WORKER_BACKSTOP`,
+  (`WORKER_IDLE_CEILING`, `WORKER_BACKSTOP`,
   `exarch/src/shell_eval.rs`); the REPL grants none, so its spawns never reap.
   Age alone no longer kills a worker: a build babysat every run via `poll`
   renews indefinitely, up to the backstop.
@@ -251,6 +251,10 @@ of the child's pgid.
   the session never waited and cannot. The survivor is *mute*: a program worth
   outliving a session keeps its own log, and the only way to learn whether it is
   still alive is to probe what it serves.
+- **A birth spends a budget slot iff a survivor runs.** Once the spawn returns,
+  the grandchild has certainly exec'd, so every later failure (the reap, the pid
+  handshake) is `Survivor::Unnamed`: the slot is spent and the user is told a
+  program runs that nothing can stop by pid. Only a failed spawn refunds.
 - The verb is **absent, not vetoed**, wherever it has no meaning. A host arms a
   `DetachPolicy` — a birth budget — in the same act that installs the builtin,
   and does so only off Windows, where the double fork exists. That is now the
@@ -278,9 +282,9 @@ See also
 [[decisions/260725_survives-exit-is-its-own-verb|survives-exit-is-its-own-verb]]
 (the verb, the race it replaces, and why the type change earns the name),
 [[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]]
-(why a handle marks detachment, and the doctrine
+(why a handle marks a worker, and the doctrine
 leases-and-budgets retired: not
-"detached workers are unmanaged by design" but unmanaged by default),
+"workers are unmanaged by design" but unmanaged by default),
 [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]] (the root/foreground
 split and the reaper), [[map/exarch/shell-eval|shell-eval]] (the frame that arms the
 wall and captures the bytes), [[internals/binding-leases|binding-leases]] (the

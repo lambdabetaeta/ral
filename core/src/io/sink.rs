@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 
 /// Cap on `Sink::Buffer` growth: past it bytes are dropped after a truncation
 /// marker, so a high-volume capture has to become an explicit redirect.  Two
-/// readings of the one event: a detached worker keeps the marked prefix, and a
+/// readings of the one event: a worker keeps the marked prefix, and a
 /// capture whose bytes are about to become a value refuses it
 /// (`runtime::capture::with_capture`, and `machine.rs`'s `Frame::Capture` arm).
 pub(crate) const SINK_BUFFER_CAP: usize = 16 * 1024 * 1024;

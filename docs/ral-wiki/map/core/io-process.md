@@ -135,14 +135,14 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   `Instant`. *Deadlines are data*, not a thread per worker: `arm_lifetime` /
   `arm_callback` push an entry and return a `#[must_use]` `Deadline` guard —
   dropped, the entry disarms; `keep`-consumed, it fires regardless (the
-  fire-and-forget mode a detached worker's lease needs, since the worker
+  fire-and-forget mode a worker's lease needs, since the worker
   outlives the `spawn` that armed it).
   The fired action is `Cancel(scope) | Run(closure)`: `Cancel` cancels a
   `CancelScope` with `CancelCause::Deadline` (the foreground wall); `Run`
   invokes an opaque host closure once, the shape a scheduled
   wakeup rides — exarch arms a `Run` that posts a prompt and wakes its idle
-  loop, a detached agent worker arms a `Run` that cancels its own token at
-  its ceiling, and a detached `spawn` worker's idle-observation lease chain
+  loop, a agent worker arms a `Run` that cancels its own token at
+  its ceiling, and a `spawn` worker's idle-observation lease chain
   ([[map/core/builtins|builtins]]) is a `keep`-ed `Run` that re-arms itself
   until it reaps or the worker settles. The scheduler stays ignorant of
   prompts, cron, and sessions;

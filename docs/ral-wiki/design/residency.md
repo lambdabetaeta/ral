@@ -1,6 +1,6 @@
 # residency: a session is a ledger of residents
 
-**Everything that stays alive between runs — a detached worker, a sub-agent,
+**Everything that stays alive between runs — a worker, a sub-agent,
 a schedule, a top-level binding — is a *resident*,
 and a resident has exactly four facets: an identity in the session's
 ownership tree, a typed capability that reaches it, a lease, and a probe.**
@@ -65,7 +65,7 @@ whoever waits on it rather than parked as a resident of its own
 | grade | state | population | entered by | left by |
 |---|---|---|---|---|
 | 0 | foreground | the run in progress | evaluation | completion, the wall, interrupt |
-| 1 | background | detached handles (`spawn`) | birth | completion, `cancel`, lease reap, exit |
+| 1 | background | worker handles (`spawn`) | birth | completion, `cancel`, lease reap, exit |
 | 2 | durable | `service` workers | birth | completion, `cancel`, `/clear`, process exit |
 | 3 | survives exit | `detach`ed processes | birth | outside the session's story |
 

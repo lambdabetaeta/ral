@@ -62,9 +62,9 @@ through `report::tool_result`, which also reports whether the run failed:
   round trip to interrupt — so cancellation reaches any spawned child through the
   ordinary process-group / cancel-scope path;
 - **`deferred_lease`** — the idle-observation lease for workers the run
-  detaches at the durable root: `DETACHED_WORKER_CEILING` (1 h) as the idle
+  hangs off the durable root: `WORKER_IDLE_CEILING` (1 h) as the idle
   bound — a worker is reaped once unobserved that long, renewed by any
-  `poll`/`await`/`race` naming its handle — under `DETACHED_WORKER_BACKSTOP`
+  `poll`/`await`/`race` naming its handle — under `WORKER_BACKSTOP`
   (24 h), the absolute age no polling extends. Not load-bearing for run
   exit;
 - **`worker_cap`** — `LIVE_WORKER_CAP` (64), the admission bound core
@@ -84,7 +84,7 @@ the per-call `ExarchDesk` with a `SurfaceApplier`
 host the harness runs under, whose `enquire` answers the honest
 `EnquiryError::no_desk()` rather than reaching a handler.
 
-`BINDING_IDLE_CALLS` (256, beside `DETACHED_WORKER_CEILING`) is the other
+`BINDING_IDLE_CALLS` (256, beside `WORKER_IDLE_CEILING`) is the other
 lease constant this module owns but does not put on the request: it is not
 per-run policy, it is per-*shell* policy, armed once by
 `shell_eval::arm_session_ledgers` — the one ledger-policy site, applied by
@@ -101,7 +101,7 @@ independently of idle age or baseline status.
 
 Completion is `dispatch_to_report` returning `Ok(Report)`; an `Err(Severed)`
 is folded by every attend-loop caller into
-`agent::seat::EngineLost` ([[map/exarch/agent|agent]]). A detached `spawn`ed
+`agent::seat::EngineLost` ([[map/exarch/agent|agent]]). A `spawn`ed
 worker — a
 server, a watch — holds bounded deferred surface storage in core, never a clone
 of the bus [[map/exarch/frontend|`Emitter`]], so it cannot keep the tool run
@@ -208,7 +208,7 @@ engine diagnostic's job.
 regimes share: the live path — `dispatch_to_report`'s drain loop calling
 `host.surface(val)` for every `Event::Surface`, which `SurfaceApplier::live`
 decodes — and the deferred sink (`deferred_sink`, installed on the transport
-before each dispatch) mints identical events when a detached worker's batch
+before each dispatch) mints identical events when a worker's batch
 flushes, both calling it directly, with no guard layered over it. The
 codomain is `Surface`, the shell's own closed vocabulary, wrapped in
 `Decoded` beside `Landed` and `Unknown`. The decoder tries observation, then
@@ -237,14 +237,14 @@ never by the decoder or by the seam that records it (`absorb_surface`):
 - any other value tries `value_to_card` and becomes a `Surface::Card`, the one
   shape whose payload *is* a card; the closed mark set and the `value_to_card`
   / `render_card` decode-and-bind path live in [[map/exarch/cards|cards]];
-- the `` `done `` completion event a detached worker flushes at the end of its
+- the `` `done `` completion event a worker flushes at the end of its
   batch decodes to `Surface::Done`;
 - a value that is none of these is `Decoded::Unknown`: its caller records a
   `Forensic::SystemNote` (`unknown_surface_note`) naming the shape it dropped,
   the extension law's loud unknown class.
 
 The producer is a direct `exarch-surface` call at each kit site, with no cross-language
-sentinel constant. Same-thread children inherit the sink; detached workers do
+sentinel constant. Same-thread children inherit the sink; workers do
 not inherit the live sink. Core buffers their `exarch-surface` calls and flushes a
 settled batch to exarch's deferred sink (the inbox path); without that host
 sink, the ordinary `await`/`race` path replays it into the awaiting run. Either

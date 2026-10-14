@@ -349,7 +349,7 @@ pub(crate) enum Item {
     /// The agent's continuation of the prompt in hand: no human chrome, and it
     /// opens no new exchange.
     Nudge { prompt: u64, text: String },
-    /// A detached `spawn` worker's deferred `surface` batch.  Staleness is
+    /// A `spawn` worker's deferred `surface` batch.  Staleness is
     /// already settled at the pop; `agent::attend::announce` decodes `values`
     /// into the *root* scrollback exactly as a live tool run would, and
     /// [`Self::text`] wakes the model.

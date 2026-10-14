@@ -150,7 +150,7 @@ fn wire_seat_enquiry_is_answered_through_the_drain_loop() {
     let _ = child.wait();
 }
 
-/// A detached `spawn` worker settles after its spawning dispatch has
+/// A `spawn` worker settles after its spawning dispatch has
 /// already reported, so its batch has no dispatch to ride: it crosses on
 /// `Frame::Session` and reaches the `InboxDeferred` this seat installs,
 /// landing in `inbox` as a `Post::Surface`. Polled with no dispatch in

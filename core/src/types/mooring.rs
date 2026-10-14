@@ -216,7 +216,7 @@ impl Mooring {
             .map_or(Ok(()), |cause| Err(Break::Error(Error::cancelled(cause))))
     }
 
-    /// The mooring a detached worker runs under: a rebuild, not a share.
+    /// The mooring a worker runs under: a rebuild, not a share.
     ///
     /// `parent`'s cancel scope would let a foreground cancel reach a worker
     /// that must outlive the run, and desk and fork are barred to one; rail,

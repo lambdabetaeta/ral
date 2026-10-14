@@ -183,10 +183,10 @@ fn root_cancel_reaches_the_worker() {
     assert_eq!(observed, 131);
 }
 
-/// A foreground cancel spares a detached worker: it parents under the
+/// A foreground cancel spares a worker: it parents under the
 /// durable root, so a run timeout cannot reap work meant to outlive the run.
 #[test]
-fn foreground_cancel_spares_detached_worker() {
+fn foreground_cancel_spares_worker() {
     let shell = crate::test_helper::core_shell();
     let m = Mooring::adrift();
     let worker_mooring = Mooring::for_worker(&m, &shell.session.root, Arc::new(()));
@@ -196,7 +196,7 @@ fn foreground_cancel_spares_detached_worker() {
     m.cancel.cancel(crate::process::CancelCause::Interrupted);
     assert!(
         !worker_scope.is_cancelled(),
-        "a foreground cancel must not reach a detached worker"
+        "a foreground cancel must not reach a worker"
     );
 }
 
@@ -341,7 +341,7 @@ impl crate::types::EnquiryDesk for EchoDesk {
     }
 }
 
-/// Containment: a detached worker's own `enquire` answers the absence
+/// Containment: a worker's own `enquire` answers the absence
 /// error rather than reach the run's desk.
 #[test]
 fn spawned_worker_never_receives_the_enquiry_desk() {
@@ -367,7 +367,7 @@ fn spawned_worker_never_receives_the_enquiry_desk() {
         .expect("worker must send its enquire outcome before settling");
     match outcome {
         Err(e) => assert_eq!(e.message, crate::types::NO_DESK),
-        Ok(_) => panic!("a detached worker must never reach the spawning run's desk"),
+        Ok(_) => panic!("a worker must never reach the spawning run's desk"),
     }
 }
 
@@ -390,7 +390,7 @@ fn spawned_worker_never_receives_the_nursery() {
         .expect("worker must report its fork door before settling");
     assert!(
         doorless,
-        "a detached worker must never reach the spawning run's nursery"
+        "a worker must never reach the spawning run's nursery"
     );
 }
 
@@ -960,7 +960,7 @@ fn detach_returns_a_receipt_of_a_pid_and_a_desc() {
     assert!(matches!(fields.get("pid").as_deref(), Some(Value::Int(p)) if *p > 0));
 }
 
-/// A detached worker's `surface` events replay through the *awaiting* run
+/// A worker's `surface` events replay through the *awaiting* run
 /// exactly once: `poll` never, the first `await` yes, a second no.
 #[test]
 fn deferred_surface_replays_once_on_await_not_poll() {
@@ -1050,7 +1050,7 @@ fn done_outcome_label(done: &FOValue) -> String {
 /// a trailing `` `done `` as one batch — a sink reached with no eliminator at
 /// all — and each of the three outcomes stamps its own label.
 #[test]
-fn detached_worker_flushes_done_to_deferred_sink() {
+fn worker_flushes_done_to_deferred_sink() {
     fn run(
         work: impl FnOnce(&Mooring, &mut Shell) -> Settled<Value> + Send + 'static,
     ) -> Vec<FOValue> {

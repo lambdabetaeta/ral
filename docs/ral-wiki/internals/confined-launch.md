@@ -102,7 +102,7 @@ the session's `SessionSandbox`.
 - **Stamps that stay are safe.** A capability SID is evaluated only in the
   AppContainer pass of the access check, whose result intersects the normal user
   pass. An ACE no live token names is inert, and can never widen a process's
-  reach past its owning user's. So a detached worker keeps the authority it was
+  reach past its owning user's. So a worker keeps the authority it was
   born with, by construction.
 - **A frozen allowance is stamped through a held handle, never by name.** Its
   real path was frozen at decode, and `canonicalise` then `SetNamedSecurityInfoW`

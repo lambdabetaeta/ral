@@ -58,12 +58,11 @@ pub(super) enum Chrome {
         outcome: Settlement,
         elapsed: Duration,
     },
-    /// A detached block that settled — the `` `done `` a deferred worker flushes
-    /// at completion. It wears the `↘` of [`RailKind::Subagent`]: background
+    /// A settled worker's block: the `` `done `` it flushes at completion. It wears the `↘` of [`RailKind::Subagent`]: background
     /// work landing in root's scrollback turns after the run that spawned it is
     /// the same event as an agent's answer arriving, whatever produced it.
     Settled(Vec<CardSpan>),
-    /// A detached worker's birth. It wears the `↗` of [`RailKind::FleetAct`],
+    /// A worker's birth. It wears the `↗` of [`RailKind::FleetAct`],
     /// the act that made it: work leaving the run, to which [`Self::Settled`]
     /// is the `↘` of its return.
     Spawned(Vec<CardSpan>),

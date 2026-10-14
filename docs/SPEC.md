@@ -2078,15 +2078,15 @@ before ral's own interrupt lands and report the signal rather than the
 interrupt; the run stops regardless.
 
 A foreground interrupt affects the work that was running when the interrupt
-arrived, including nested runs, but not a detached worker and not a later
-prompt. Nothing a detached worker starts sits where the terminal reaches it:
+arrived, including nested runs, but not a worker and not a later
+prompt. Nothing a worker starts sits where the terminal reaches it:
 on Unix its external commands lead sessions of their own and its pipelines a
 group the terminal never holds, and on Windows its processes lead console
 groups ral never sends a console event. A terminal gesture reaches a worker
 only as the session termination or root abort ral itself raises. Explicit
 cancellation targets its handle. Deadlines affect their run
 scope. Session termination and root abort reach the durable session root and
-therefore its detached workers as well as foreground work.
+therefore its workers as well as foreground work.
 
 On Unix, Ctrl-C is a foreground interrupt. At an idle interactive prompt it
 cancels the edited line instead. Ctrl-\\ requests a root abort; `SIGTERM` and
@@ -2506,7 +2506,7 @@ state. A nested `spawn` remains owned by the same session.
 
 A worker is not part of the foreground run. Interrupting or timing out the run
 that created it does not cancel the worker. The worker's standard input is
-empty rather than inherited from the terminal, so detached work cannot steal
+empty rather than inherited from the terminal, so a worker cannot steal
 interactive input.
 
 Pipelines inside a worker still use byte pipes between stages. Value-style

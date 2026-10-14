@@ -94,9 +94,9 @@ impl ForegroundDecision {
 }
 
 /// `NewLeader` when the child takes the foreground, `NewSession` for a
-/// detached non-interactive top-level child, `Inherit` otherwise.
+/// headless (non-interactive top-level) child, `Inherit` otherwise.
 ///
-/// The detached child needs a group of its own so a watchdog cancel can
+/// The headless child needs a group of its own so a watchdog cancel can
 /// `kill(-pgid, …)` the whole subtree: an `Inherit` child's only killable
 /// handle is its pid, so a grandchild it forks (`/bin/sh -c '… &'`)
 /// survives holding the stdout pipe open and the pump drain outlasts the

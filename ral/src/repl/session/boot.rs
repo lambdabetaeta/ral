@@ -19,7 +19,7 @@ use super::super::host::ReplHost;
 /// Unix disposition table:
 /// - SIGINT  → interrupt handler (no-op when idle; raises the foreground interrupt)
 /// - SIGQUIT → quit handler (Ctrl+\ cancels the durable root — reaping the
-///   foreground run and every detached worker — instead of core-dumping)
+///   foreground run and every worker — instead of core-dumping)
 /// - SIGTERM/SIGHUP → term handler (cancels the durable root with `Terminate`;
 ///   the third delivery force-exits via the escalation ladder)
 /// - SIGTSTP → `SIG_IGN`  (the shell never suspends; a stop is answered with

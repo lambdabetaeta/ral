@@ -182,7 +182,7 @@ impl Engine {
 
 /// What stops an engine's runs, shared with whichever thread carries its
 /// `Control`: each dispatch's scope hangs off `dispatches`, and everything —
-/// detached workers too — off `root`.
+/// workers too — off `root`.
 pub(crate) struct Scopes {
     dispatches: ForegroundScope,
     root: DurableRoot,
@@ -255,7 +255,7 @@ impl Scopes {
         }
     }
 
-    /// Cancel the durable root: every run, and every detached worker.
+    /// Cancel the durable root: every run, and every worker.
     pub(crate) fn end(&self, cause: CancelCause) {
         self.root.cancel(cause);
     }

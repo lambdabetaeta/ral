@@ -21,15 +21,15 @@ use ral_core::types::{DeferredSink, Observation};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// Idle bound of the lease armed on every detached `spawn` worker, renewed by
+/// Idle bound of the lease armed on every `spawn` worker, renewed by
 /// any `poll`/`await`/`race`: an abandoned worker is reaped, a babysat one
 /// lives.  `pub(crate)` so the `/resources` fold reads the same constant its
 /// lease rows describe.
-pub(crate) const DETACHED_WORKER_CEILING: Duration = Duration::from_hours(1);
+pub(crate) const WORKER_IDLE_CEILING: Duration = Duration::from_hours(1);
 
 /// Absolute backstop of the same lease, measured from spawn: observation
 /// renews idleness, never age.
-pub(crate) const DETACHED_WORKER_BACKSTOP: Duration = Duration::from_hours(24);
+pub(crate) const WORKER_BACKSTOP: Duration = Duration::from_hours(24);
 
 /// Admission cap on concurrently *running* workers per agent, enforced by core
 /// at the spawn door.  A durable service holds a seat; a settled entry
@@ -192,7 +192,7 @@ pub(crate) fn unknown_surface_note(shape: impl std::fmt::Display) -> crate::reco
 }
 
 /// The deferred half of `surface`: the session-lived [`DeferredSink`] a
-/// detached `spawn` worker flushes its buffered batch to at completion.  Not a
+/// `spawn` worker flushes its buffered batch to at completion.  Not a
 /// second channel — the live sink's own vocabulary, posted through the
 /// session's envelope as a [`Stamped::Surface`] to render at the next boundary.
 ///
@@ -253,8 +253,8 @@ pub(crate) fn run_shell(
         caps: caps.clone(),
         wall: Some(Duration::from_secs(timeout_secs)),
         deferred_lease: Some(ral_core::types::WorkerLease {
-            idle: DETACHED_WORKER_CEILING,
-            backstop: DETACHED_WORKER_BACKSTOP,
+            idle: WORKER_IDLE_CEILING,
+            backstop: WORKER_BACKSTOP,
         }),
         worker_cap: Some(LIVE_WORKER_CAP),
         ..Run::captured(cmd, source)

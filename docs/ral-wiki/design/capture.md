@@ -83,7 +83,7 @@ program's session resolves
 address, and `captured_vals` the values coerced in hand; `annotate` reads both.
 
 **Exactness is kept by refusal.** The buffer behind a capture is capped at
-16 MiB (`SINK_BUFFER_CAP`), and a bounded buffer is what keeps a detached
+16 MiB (`SINK_BUFFER_CAP`), and a bounded buffer is what keeps a
 worker from growing without end ([[internals/output-capture-and-detachment|output-capture-and-detachment]]).
 Past the cap it appends a truncation marker and drops the rest — bytes the
 program could not tell from the command's own. So a capture that reaches the

@@ -15,7 +15,7 @@
 //! equal spelling; profile names are unique by construction rather than
 //! content-hashed, since a collision would merge two projections' namespaces.
 //!
-//! Nothing here reverts anything. Grant frames do not, because a detached
+//! Nothing here reverts anything. Grant frames do not, because a
 //! worker may outlive its frame under the token it was born with; and
 //! [`teardown`] does not either, because a stamped ACE no live token names is
 //! inert — the `AppContainer` pass of the access check intersects the user's own,

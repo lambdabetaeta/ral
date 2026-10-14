@@ -121,7 +121,7 @@ The layering is a DAG ([[invariants/exarch-is-a-dag|exarch-is-a-dag]]): `record`
 publishes through its `Publish` trait and knows no `bus`, and `bus` knows no
 `agent`, so the seam above is the only way a worker's fact reaches a frontend.
 
-The TUI mints one **session-lived** bus, so a detached async agent clones its
+The TUI mints one **session-lived** bus, so an async agent clones its
 sender and streams a live tab through the same id-routed draw path a sync child
 uses ([[decisions/260621_session-lifetime-event-bus|session-lifetime-event-bus]]);
 the one-shot/headless conversational drivers use a **per-exchange** bus with

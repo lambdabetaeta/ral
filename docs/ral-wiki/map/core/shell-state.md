@@ -130,7 +130,7 @@ checkpoint, since a run never writes it.
   `local.audit.call_site`) with it, so an unwinding evaluation cannot leave a
   stale register behind.
 - **`SessionState`** — what survives every run's teardown: the durable cancel
-  `root` that detached workers parent under (`Shell::join_session` *shares*
+  `root` that workers parent under (`Shell::join_session` *shares*
   it, for a second
   `Shell` the engine runs beside that session — an aside hook,
   [[decisions/260726_cancel-is-a-join|cancel-is-a-join]]), the
@@ -242,7 +242,7 @@ values, and enumeration renews nothing.
 
 What a run *fixes* is not on the `Shell` at all. The eight run-invariant
 members are a **`Mooring`**: the `surface` sink, the `deferred` sink (a
-detached worker's completion delivery — `None` outside an agent host), the
+worker's completion delivery — `None` outside an agent host), the
 `desk` answering the run's enquiries
 ([[map/core/engine-protocol|engine-protocol]]), the `fork` door
 naming how a forked session reaches the desk that adopts it (`None` outside a
@@ -313,7 +313,7 @@ already holds the wire form: `Shell::observe_stamped` (`types/audit/door.rs`) re
 with `Observation::to_surface`, tagged `` `observed `` so a host dispatches on
 the tag alone without re-encoding a `Value` it never had. Run-scoped, not
 a persistent capability — a run door installs it, so a clone of it has no
-liveness role and can never decide a run is over. A *detached* worker does not receive the live sink: its events
+liveness role and can never decide a run is over. A worker does not receive the live sink: its events
 buffer into a `SurfaceBuffer` and are delivered exactly once — replayed through
 the awaiting run's surface on the first `await` / `race`, or handed to the
 session-lived `deferred` sink at the worker's own completion, whichever renders
@@ -412,7 +412,7 @@ registry, root file, call site and exit hints. The kinds differ only in their
 `Holding` — cancel root and anchor, roster, lease ledger, detach budget,
 fixings:
 
-- `spawn_thread` — a spawned worker (`spawn`, `par`, the detached-worker
+- `spawn_thread` — a spawned worker (`spawn`, `par`, the worker
   helper) *and* a ral-written pipeline stage
   ([[map/core/runtime|runtime]]'s `pipeline/thread.rs`) — a pipeline never
   rides a re-exec'd child — on a fresh OS thread that owns its own IO, seeded

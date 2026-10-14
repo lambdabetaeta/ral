@@ -30,7 +30,7 @@
 //! regardless, and for the termination events, which have no key-event twin.
 //! Neither path signals a process: a tool child, a console group of its own,
 //! hears Ctrl-Break only from the teardown of the run that owns it, so a
-//! detached worker's children are never reached.
+//! worker's children are never reached.
 //!
 //! On both, [`crate::boot::face_process_signals`] owns the install
 //! ceremony, once per process.
@@ -62,7 +62,7 @@ pub(crate) fn install() {
 /// gets a real SIGINT through its own process group
 /// ([`ral_core::process::interrupt_foreground_child`]); signalling *another*
 /// group carries no escalation.  ral itself hears the interrupt through the
-/// trunk's `Control`, which spares detached workers and ticks no counter
+/// trunk's `Control`, which spares workers and ticks no counter
 /// toward a third-signal `_exit`.
 #[cfg(unix)]
 pub(crate) fn raise_interrupt() {

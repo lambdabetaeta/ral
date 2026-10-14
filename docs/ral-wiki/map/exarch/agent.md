@@ -274,7 +274,7 @@ Three nested loops, the same for trunk and child alike:
   `SessionToolResult` synchronously — dispatched through the launch's
   `Toolset` (`ral`, and `thinking` under `--thinking-tool`,
   [[map/exarch/tools|tools]]); a spawn verb inside `ral` hands the script a start
-  receipt after launching the detached child. Once every requested tool id has
+  receipt after launching the child. Once every requested tool id has
   a result,
   `run_batch` drains this agent's [[map/exarch/frontend|inbox]]'s tool-boundary
   steering. A non-slash steering prompt is appended after the complete
@@ -390,8 +390,8 @@ changes, silent while it holds, budget-free.
 boundaries.** `react`, the post-deliberation entry point, composes the repairs
 and the pin reminder into at most one `EXARCH_REMINDER` message per
 completion, self-posted as `Post::Nudge` and committed by `append_user` inside
-the same exchange, gated on `quiet` — no standing reply, no detached shell
-work, no busy children, the one condition those kinds share.
+the same exchange, gated on `quiet` — no standing reply, no running
+worker, no busy children, the one condition those kinds share.
 `Nudges::remind` is the other entry point, reached from `Avatar::warnings` at
 a *tool* boundary, where a gauge's `Reminder` — figures, not words; every
 model-facing sentence is `nudge.rs`'s to word — lands as steering trailing
@@ -624,7 +624,7 @@ on the trunk), leaving its descendants running
 ([[decisions/260705_cancel-per-tab|cancel-per-tab]]); the focused agent's
 sticky token is cleared at each exchange boundary (`Token::reset`).
 
-Cancelling the durable root already reaches a cancelled node's own detached `ral`
+Cancelling the durable root already reaches a cancelled node's own `ral`
 workers with no edge of its own: a worker's cancel scope is a child of its
 shell's durable root, and every `CancelScope::is_cancelled` walks its
 ancestors. What the cascade does *not* reach is a node that ends without ever

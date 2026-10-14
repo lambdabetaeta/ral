@@ -186,7 +186,7 @@ fn a_failed_control_write_marks_the_transport_dead() {
     drop(back);
 }
 
-/// A batch settling with no dispatch in flight — the shape a detached
+/// A batch settling with no dispatch in flight — the shape a
 /// worker's completion takes between runs — reaches a sink installed
 /// through `set_deferred_sink`, and a dispatch that follows still
 /// round-trips to its own Report: `Frame::Session` routing on the reader

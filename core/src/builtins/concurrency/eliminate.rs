@@ -43,7 +43,7 @@ fn ensure_live(handle: &HandleInner) -> Settled<()> {
     Ok(())
 }
 
-/// Replay a finished detached worker's buffered surface events through the
+/// Replay a finished worker's buffered surface events through the
 /// awaiting run's *current* surface, once.  Only `await`/`race` call this, so a
 /// polled-but-never-awaited handle emits nothing and a repeat `await` does not
 /// duplicate.

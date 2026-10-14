@@ -1,4 +1,4 @@
-//! A detached worker's surface: the events it emits while no run listens,
+//! A worker's surface: the events it emits while no run listens,
 //! buffered until an eliminator replays them or the completion delivers them.
 
 use super::{Latch, SurfaceBuffer};
@@ -7,11 +7,11 @@ use crate::sync::LockExt as _;
 use crate::types::{DeferredSink, Done, DoneEvent, EventSink, WorkerId};
 use std::sync::Arc;
 
-/// Cap on a detached worker's deferred surface: past it one `surface-overflow`
+/// Cap on a worker's deferred surface: past it one `surface-overflow`
 /// marker is recorded and further events drop.
 const DEFERRED_SURFACE_CAP: usize = 4096;
 
-/// A detached worker's surface: it may outlive the run that spawned it, so it
+/// A worker's surface: it may outlive the run that spawned it, so it
 /// buffers into a bounded [`SurfaceBuffer`] rather than hold that run's live
 /// sink.  The buffer leaves by `await`/`race` replay or by [`Self::flush`] to
 /// the [`DeferredSink`], whichever wins the handle's `joined` latch.

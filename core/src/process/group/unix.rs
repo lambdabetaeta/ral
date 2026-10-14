@@ -105,8 +105,16 @@ where
     Ok((child, leader))
 }
 
+/// A detached survivor, which has certainly exec'd: named by its pid, or not.
+#[derive(Debug)]
+pub enum Survivor {
+    Named(u32),
+    /// Running, but its pid never came back.
+    Unnamed(std::io::Error),
+}
+
 /// Spawn `cmd` so that the surviving process is this process's
-/// *grandchild*, and return its pid.
+/// *grandchild*, and return it.
 ///
 /// The hook of [`spawn_with_pgid_after`] forks again; the intermediate writes
 /// the grandchild's pid down a pipe and `_exit`s, and is reaped below — already
@@ -126,13 +134,12 @@ where
 /// grandchild's shuts only on a successful `execve`.
 ///
 /// # Errors
-/// Returns `Err` if either fork, the `setsid`, or the `execve` fails, if
-/// the intermediate exits non-zero, or if the pid handshake comes up short.
-pub fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<u32> {
-    use std::io::Read;
+/// `Err` if either fork, the `setsid`, or the `execve` fails: nothing was
+/// born.  Every later failure is [`Survivor::Unnamed`]: the survivor runs.
+pub fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<Survivor> {
     use std::os::fd::AsRawFd;
 
-    let (mut receipt, handshake) = crate::process::cloexec_pipe()?;
+    let (receipt, handshake) = crate::process::cloexec_pipe()?;
     let fd = handshake.as_raw_fd();
     let (intermediate, _its_pgid) =
         spawn_with_pgid_after(cmd, PgidPolicy::NewSession, move || {
@@ -163,6 +170,17 @@ pub fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<u32> {
             Ok(())
         })?;
     drop(handshake);
+    Ok(match survivor_pid(intermediate, receipt) {
+        Ok(pid) => Survivor::Named(pid),
+        Err(why) => Survivor::Unnamed(why),
+    })
+}
+
+/// Reap the intermediate and read the grandchild's pid off the handshake.
+fn survivor_pid(
+    intermediate: std::process::Child,
+    mut receipt: impl std::io::Read,
+) -> std::io::Result<u32> {
     let pid = intermediate.id();
     let (tx, rx) = std::sync::mpsc::channel();
     let watch = crate::process::reaper::watch(pid, tx, std::convert::identity);
@@ -170,23 +188,20 @@ pub fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<u32> {
     // above is what now owns its wait.
     drop(intermediate);
     let born = rx.recv().map_err(|_| {
-        std::io::Error::other("could not detach: the reaper never reported the intermediate's exit")
+        std::io::Error::other("the reaper never reported the intermediate's exit")
     })?;
     watch.reap()?;
     if born != crate::process::WaitOutcome::Exited(0) {
         return Err(std::io::Error::other(format!(
-            "could not detach: the intermediate process ended as {born:?} instead of exiting 0, so nothing here knows the pid of what it started"
+            "the intermediate process ended as {born:?} instead of exiting 0"
         )));
     }
     let mut pid = [0u8; size_of::<libc::pid_t>()];
-    receipt.read_exact(&mut pid).map_err(|err| {
-        std::io::Error::other(format!(
-            "could not detach: the process was started but its pid never came back ({err}); it may be running, with nothing left to name it"
-        ))
-    })?;
-    u32::try_from(libc::pid_t::from_ne_bytes(pid)).map_err(|_| {
-        std::io::Error::other("could not detach: the pid handed back is not a process id")
-    })
+    receipt
+        .read_exact(&mut pid)
+        .map_err(|err| std::io::Error::other(format!("the pid never came back ({err})")))?;
+    u32::try_from(libc::pid_t::from_ne_bytes(pid))
+        .map_err(|_| std::io::Error::other("the pid handed back is not a process id"))
 }
 
 #[cfg(test)]
@@ -195,7 +210,7 @@ pub fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<u32> {
     reason = "[test] test fs/process scaffolding"
 )]
 mod tests {
-    use super::spawn_detached;
+    use super::{Survivor, spawn_detached};
 
     // ── Detached birth ─────────────────────────────────────────────────────
 
@@ -216,7 +231,9 @@ mod tests {
     fn detached_survivor_is_orphaned_and_leads_its_own_group() {
         let mut cmd = detachable("sleep");
         cmd.arg("30");
-        let pid = spawn_detached(&mut cmd).expect("detached birth");
+        let Survivor::Named(pid) = spawn_detached(&mut cmd).expect("detached birth") else {
+            panic!("pid lost")
+        };
         let raw = i32::try_from(pid).expect("a live pid fits an i32");
 
         assert_eq!(
@@ -262,7 +279,9 @@ mod tests {
     fn detached_birth_leaves_nothing_to_reap() {
         let mut cmd = detachable("sleep");
         cmd.arg("30");
-        let pid = spawn_detached(&mut cmd).expect("detached birth");
+        let Survivor::Named(pid) = spawn_detached(&mut cmd).expect("detached birth") else {
+            panic!("pid lost")
+        };
         let raw = i32::try_from(pid).expect("a live pid fits an i32");
 
         assert_eq!(

@@ -92,7 +92,7 @@ pub(crate) struct Context<H = HandlerStack> {
 
 /// State that outlives every run's teardown.
 pub struct SessionState {
-    /// Detached workers (`spawn`, `watch`, `par`) parent here, not under the
+    /// workers (`spawn`, `watch`, `par`) parent here, not under the
     /// run's swappable foreground scope, so a foreground cancel never reaches
     /// them.
     pub(crate) root: DurableRoot,
@@ -142,7 +142,7 @@ pub struct LocalState {
     /// observations; the dispatcher posts one observation per real command
     /// through `types::audit::door`.
     pub(crate) audit: Audit,
-    /// Every worker (`spawn`, `watch`, `service`) detached from this shell.
+    /// Every worker (`spawn`, `watch`, `service`) spawned from this shell.
     /// [`Shell::spawn_thread`] shares the registry into the worker's own shell,
     /// so a nested `spawn` registers alongside its parent; a sub-agent fork
     /// starts fresh, one registry per agent.

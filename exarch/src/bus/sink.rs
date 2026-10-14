@@ -2,7 +2,7 @@
 //! [`drain_signals`], the one rule for when an exchange's signal loop ends.
 //!
 //! That rule is the worker's explicit `done` flag — never the channel emptying
-//! or disconnecting, since a detached worker (a `spawn`ed server, a background
+//! or disconnecting, since a worker (a `spawn`ed server, a background
 //! `agent`) may hold a sender clone forever. Both the headless [`Sink::drive`]
 //! and the TUI's `ui_loop` in `tui/tui_loop.rs` drive it, so they cannot drift.
 
@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
 use std::time::Duration;
 
-/// How often a blocked drain wakes to re-check `done`. A detached worker's
+/// How often a blocked drain wakes to re-check `done`. A worker's
 /// sender keeps the channel from ever disconnecting, so this timeout — not a
 /// disconnect — is what lets a finished worker be noticed.
 const DRAIN_POLL: Duration = Duration::from_millis(10);

@@ -17,7 +17,7 @@ use super::signal::KILL;
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
-pub(crate) use unix::spawn_detached;
+pub(crate) use unix::{Survivor, spawn_detached};
 #[cfg(unix)]
 pub use unix::{spawn_with_pgid, spawn_with_pgid_after};
 
@@ -100,7 +100,7 @@ impl Pgid {
 /// Where a spawned child's process group comes from.
 ///
 /// Foreground job leaders and pipeline first stages take `NewLeader`, later
-/// stages `Join`, an interactive background child `Inherit`, a detached worker
+/// stages `Join`, an interactive background child `Inherit`, a headless child
 /// `NewSession`.  Unix applies the choice in `pre_exec` before `execve`;
 /// Windows maps it onto a Job Object at the launch boundary.
 #[derive(Clone, Copy, Debug)]
@@ -113,7 +113,8 @@ pub enum PgidPolicy {
     /// Lead a fresh *session* (`setsid`): with no controlling terminal, the
     /// child cannot signal — through the shared tty or `tcgetpgrp` — whatever
     /// owns one.  Its pgid still equals its pid, so `kill(-pgid, …)` still
-    /// reaches the subtree.
+    /// reaches the subtree.  Used by a headless child, which never takes a
+    /// terminal, and by `detach`'s intermediate.
     NewSession,
     /// Join an existing pgid as a non-leader (`setpgid(0, leader)`).
     Join(Pgid),

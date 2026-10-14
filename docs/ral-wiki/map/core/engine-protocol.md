@@ -85,7 +85,7 @@ The frame algebra. Everything on it is a wire type; nothing here carries.
   `DispatchId`: the probe's own event, not a run that ended.
 - `SessionEvent` — engine→front-end with no dispatch to ride: `Attached` /
   `Refused(String)` (the attach verdict) and `DeferredSurface(Vec<FOValue>)`
-  (a detached worker's batch, and a watched worker's lines).
+  (a worker's batch, and a watched worker's lines).
 - `EnquiryError` — message plus status, the wire shape of a refused enquiry;
   `no_desk()` is the fixed wording for a host with nothing to answer, and
   `From<EnquiryError> for Error` the one way a refusal becomes the error

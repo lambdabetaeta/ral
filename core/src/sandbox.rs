@@ -154,8 +154,6 @@ pub(crate) fn pinned_binary(path: &std::path::Path) -> Option<&'static str> {
 /// `/etc/hosts` and `/etc/resolv.conf`, and the launch dies in setup.
 /// Test-only: a spawning test on such a host proves nothing either way, so
 /// callers skip rather than assert.
-// `Surrendered` carries no `--info-fd` to read and no parent-death tie:
-// neither decides whether the envelope builds, and `/bin/true` outlives nobody.
 #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
 #[allow(
     clippy::disallowed_methods,
@@ -182,6 +180,8 @@ pub fn restricted_envelope_launches() -> bool {
             &projection,
             &launch::admitted(program, &[]),
             None,
+            // `Surrendered` carries no `--info-fd` to read and no parent-death tie:
+            // neither decides whether the envelope builds, and `/bin/true` outlives nobody.
             launch::Ownership::Surrendered,
         )
         .is_ok_and(|(mut cmd, _no_info_fd)| {

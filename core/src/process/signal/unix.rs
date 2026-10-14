@@ -58,7 +58,7 @@ extern "C" fn handler(sig: libc::c_int) {
         unsafe { libc::_exit(cause.code().into()) };
     }
     // Async-signal-safe: atomic read-modify-writes on `static`s.  SIGTERM/SIGHUP
-    // land on the durable root, so detached workers hear them too.
+    // land on the durable root, so workers hear them too.
     match cause {
         CancelCause::Interrupted => request_interrupt(),
         _ => request_root_cancel(cause),
@@ -81,7 +81,7 @@ pub fn term_handler() -> extern "C" fn(libc::c_int) {
 
 extern "C" fn sigint_handler(_: libc::c_int) {
     // Forwarded as `Control::Interrupt`, which strikes only the dispatch in
-    // flight: an idle Ctrl-C stays the line editor's, and detached workers are
+    // flight: an idle Ctrl-C stays the line editor's, and workers are
     // spared.
     request_interrupt();
 }
@@ -112,7 +112,7 @@ pub fn install_interrupt_handler() -> std::io::Result<()> {
 
 extern "C" fn sigquit_handler(_: libc::c_int) {
     // Ctrl-\ reaps the session: the root cause reaches the foreground run and
-    // every detached worker, and latches on an idle session, being one-way.
+    // every worker, and latches on an idle session, being one-way.
     request_root_cancel(CancelCause::Aborted);
 }
 
@@ -316,7 +316,7 @@ mod tests {
     const OWED: std::time::Duration = std::time::Duration::from_secs(5);
 
     /// SIGINT interrupts the run in flight and leaves the durable root — and
-    /// with it every detached worker — untouched.
+    /// with it every worker — untouched.
     #[test]
     fn handler_translates_sigint_into_an_interrupt() {
         use crate::process::Ambient;
@@ -345,7 +345,7 @@ mod tests {
     }
 
     /// SIGTERM and SIGHUP are one shutdown request, reaching the durable root
-    /// and with it every detached worker.
+    /// and with it every worker.
     #[test]
     fn handler_translates_sigterm_and_sighup_into_root_terminate() {
         use crate::process::Ambient;

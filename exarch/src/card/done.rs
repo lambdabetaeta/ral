@@ -1,4 +1,4 @@
-//! How a detached worker's completion reads.
+//! How a worker's completion reads.
 //!
 //! Core flushes a single `` `done `` value at the end of a background block's
 //! deferred buffer; [`value_to_done`] decodes it, [`settled_spans`] words it.
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{Role, Span};
 
-/// A detached worker's `` `done `` completion, minus the one-line card the
+/// A worker's `` `done `` completion, minus the one-line card the
 /// view fold rebuilds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]

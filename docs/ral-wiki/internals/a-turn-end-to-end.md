@@ -21,7 +21,7 @@ reimplements evaluation, and no front-end calls the door itself: each is a
 `Report` for the front-end to render its own way
 ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]],
 [[decisions/260618_run-turn-host-loop|run-turn-host-loop]]). **Completion is the
-door returning** — never a channel disconnecting — so a detached `spawn`ed
+door returning** — never a channel disconnecting — so a `spawn`ed
 worker (a server, a watch) holding a clone of the surface cannot keep a run
 from ending ([[decisions/260618_run-turn-host-loop|run-turn-host-loop]]). The
 reduction primitive behind the door is crate-private, so a host cannot start an
@@ -71,7 +71,7 @@ looks up the hook table; both then converge on `run_built` and the run
 module's framed scaffold:
 
 - Mint the run's foreground scope — a child of the scope the door was entered
-  under, so a foreground timeout never reaches a detached worker
+  under, so a foreground timeout never reaches a worker
   ([[internals/cancellation|cancellation]]) — and arm its wall, if any,
   **before compiling**, so `wall` bounds the whole run — compile and typecheck
   included, not only evaluation. `compile_run`'s `process::clear` touches only

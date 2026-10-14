@@ -20,7 +20,7 @@
 //! each session's own `crate::bus::inbox` counts its clears as a
 //! clear-epoch, and
 //! a `Post` that cannot judge its own staleness — an async agent's result, a
-//! detached worker's deferred batch (`InboxDeferred`) — is stamped with that
+//! worker's deferred batch (`InboxDeferred`) — is stamped with that
 //! epoch at composition and refused at the inbox's own pop if it has since
 //! moved on.  Per inbox, not per fleet — a `/clear` in one tab must not drop
 //! work another tab is still waiting on.

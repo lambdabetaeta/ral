@@ -67,7 +67,7 @@ pub struct CompletedHandle {
     pub(crate) outcome: super::flow::Settled<Value>,
 }
 
-/// Bounded buffer of the structured events a *detached* worker defers rather
+/// Bounded buffer of the structured events a worker defers rather
 /// than emitting live, its spawning run having possibly ended.
 ///
 /// The bound lives in [`surface::DeferredSurface`], so a runaway emitter
@@ -93,7 +93,7 @@ pub struct HandleInner {
     /// watched handle, whose lines surface live through `Sink::Watch`.
     pub stdout_buf: ByteBuffer,
     pub stderr_buf: ByteBuffer,
-    /// Where a *detached* worker's `surface` events land, the spawning run's
+    /// Where a worker's `surface` events land, the spawning run's
     /// live sink being possibly gone.  Drained once into
     /// [`CompletedHandle::surface`].
     pub surface_buf: SurfaceBuffer,
@@ -115,7 +115,7 @@ pub struct HandleInner {
     /// The worker's own scope — a `DurableRoot::worker()` child of the
     /// *session* root, not of the spawning run, so a foreground interrupt
     /// cannot collaterally kill it.  `cancel` and `race`'s losers fire it, and
-    /// the worker stops at its next poll rather than running on detached.
+    /// the worker stops at its next poll rather than running on.
     pub cancel: crate::process::CancelScope,
 }
 

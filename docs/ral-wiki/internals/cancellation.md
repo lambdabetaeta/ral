@@ -97,7 +97,7 @@ discipline ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]).
   minted *only* from a `DurableRoot` (or by nesting another foreground), so an
   unrelated root can never be installed as a foreground by accident.
 - `DurableRoot::worker` mints the scopes beside a run: shell init's anchor and
-  `spawn_thread`'s detached worker. A run's frame nests under the anchor, so
+  `spawn_thread`'s worker. A run's frame nests under the anchor, so
   cancelling it never reaches a worker, while cancelling the root reaches both.
 - **The tree is the runs' dynamic extent.** `Shell::dispatch` nests each entry
   under the frame the run door displaces, not beside it under the root, so a
@@ -159,7 +159,7 @@ signal context. The two are different kinds of proposition.
 - **Sharing, not shadowing.** A nested run nests under the frame the
   interrupt strikes, so a Ctrl-C mid-nest unwinds the whole nest, as a POSIX
   shell's does.
-- **A detached worker hears only the root**: `Terminate` reaches it, an
+- **A worker hears only the root**: `Terminate` reaches it, an
   interrupt, striking a run's frame, cannot.
 - **A forked session** (`Shell::bequeath` and `Shell::child_of` — exarch's sub-agents) hears no
   signal at all, and its host cancels it through a clonable handle on its
@@ -365,10 +365,10 @@ The same two mechanisms are driven by different keys on different surfaces.
 | **Ctrl-C** | ral REPL, mid-eval | SIGINT → `interrupt_handler` | `request_interrupt()`, forwarded as `Control::Interrupt` — a pipeline's externals hear it through the collector; **counter untouched** |
 | **Ctrl-C** | ral REPL, idle prompt | line editor reads it as a byte | abandons the partial buffer; nothing is in flight, so nothing is sent; no signal |
 | **Ctrl-C** | ral REPL, idle minimal prompt | canonical tty → SIGINT → `interrupt_handler` | the tty drops the partial line; `request_interrupt()` is forwarded, but every later dispatch is born after it, so it strikes none |
-| **Ctrl-`\`** | ral REPL, terminal not lent | SIGQUIT → `sigquit_handler` | `request_root_cancel(RootAbort)`, forwarded as `Control::Abort` — reaps foreground *and* every detached worker, latching if idle; the REPL loop observes the sticky root and exits |
+| **Ctrl-`\`** | ral REPL, terminal not lent | SIGQUIT → `sigquit_handler` | `request_root_cancel(RootAbort)`, forwarded as `Control::Abort` — reaps foreground *and* every worker, latching if idle; the REPL loop observes the sticky root and exits |
 | **Ctrl-C / Ctrl-`\` / hangup** | any ral host, terminal lent to a command or pipeline | tty → the tenant's group (a hangup also reaches ral, as session leader) | the `TerminalLoan` hears it from the tenant — its death, or the anchor's `Heard` — and strikes `Interrupt` / `RootAbort` / `Terminate` on the run's frame as the terminal returns: the job ends, `try` cannot recover it, the session lives |
 | **Ctrl-C** | ral batch / `-c` | SIGINT → `handler` | `request_interrupt()`, forwarded as `Control::Interrupt`, + ladder `+1`; third press `_exit`s |
-| **SIGTERM / SIGHUP** | any ral host | `handler` (term disposition) | `request_root_cancel(Terminate)`, forwarded as `Control::Terminate` — foreground and detached workers unwind, externals torn down SIGTERM-first, exit 143; ladder `+1`, third delivery `_exit`s |
+| **SIGTERM / SIGHUP** | any ral host | `handler` (term disposition) | `request_root_cancel(Terminate)`, forwarded as `Control::Terminate` — foreground and workers unwind, externals torn down SIGTERM-first, exit 143; ladder `+1`, third delivery `_exit`s |
 | **Ctrl-C / Ctrl-Break** | ral on a Windows console | console event → the `ctrlc` handler | `request_interrupt()`, forwarded as `Control::Interrupt`, + ladder `+1`; third event `ExitProcess`es with 130. No console event is sent to any group: the struck run's teardown breaks the groups it owns, and a worker's are never reached |
 | **Ctrl-C / Esc** | exarch TUI, active exchange | `Agent::interrupt` on the focused agent (reached through that tab's own `Weak`); the trunk also `cancel::raise_interrupt` | cancels the focused agent's `Token` and, as `Control::Interrupt`, its dispatch in flight; on the trunk, additionally `interrupt_foreground_child` (Unix) or `request_interrupt()` (Windows) |
 | **Ctrl-C / Ctrl-Break** | exarch on a Windows console | console event → `console_ctrl_handler`, ahead of ral's | `request_interrupt()`, reported handled so ral's ladder never sees it; `face` forwards it to the trunk's `Agent::interrupt` |
@@ -396,7 +396,7 @@ child gets them back in `reset_child_signals`:
   the tty to the pgid the terminal is lent to; the anchor reports it and the
   pipeline's loan hears it as the key, so teardown does not re-send it.
   Raised while idle, it strikes only the settled run's dead scope, so the
-  next run never sees it — and a detached worker, off every run's chain, is
+  next run never sees it — and a worker, off every run's chain, is
   spared outright.
 - **SIGQUIT → `sigquit_handler`**, the louder "reap everything" gesture
   ([[decisions/260629_agent-binding-reaping|agent-binding-reaping]] keeps it as

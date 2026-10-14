@@ -245,8 +245,8 @@ impl Avatar {
             must_reply: self.agent.returns,
             pinned: self.pinned_digest(),
             // Nudged only when nothing else is already carrying this agent
-            // forward: no reply standing for a consumer to fetch, no detached
-            // shell work, no busy children.
+            // forward: no reply standing for a consumer to fetch, no worker
+            // still running, no busy children.
             quiet: !self.agent.has_reply() && workers_idle && !self.agent.has_busy_children(),
         };
         let nudged =
@@ -467,7 +467,7 @@ pub(super) fn announce(item: &Item, opens: Option<u64>, recorder: &crate::record
                 },
             );
         }
-        // A detached `spawn`'s deferred batch, decoded as the live foreground
+        // A `spawn` worker's deferred batch, decoded as the live foreground
         // decode would.  It was stamped with and posted to this same session,
         // so the emitter's id already routes its cards to the right scrollback.
         Item::Surface { values, .. } => {

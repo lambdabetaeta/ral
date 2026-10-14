@@ -235,7 +235,7 @@ A capability check or worker birth joins no call — rare and high-signal enough
 to earn its own line. A denial stands as its own card; a **worker birth** is
 not a card at all but a rail notice wearing the `↗` of the fleet act that made
 it, mirroring the `↘` its settlement arrives on — the departure and the return
-of the same detached work read as a pair of announcements around the run. A
+of the same worker read as a pair of announcements around the run. A
 lone surface and the grouped rows both read a `Listing`, so they cannot drift;
 the one departure is that an exec row **drops the `→ status` tail** — a run
 reads as the *set* of commands run, and per-command status survives in the

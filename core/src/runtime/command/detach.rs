@@ -15,6 +15,7 @@ use crate::capability::{Flag, ShellVerb};
 use crate::fact::{Command, Receipt};
 use crate::ir::CommandName;
 use crate::process::StdioSpec;
+use crate::process::group::Survivor;
 use crate::types::{
     AuditIo, CommandOrigin, HandlerLookup, Mooring, Observed, Settled, Shell, Value, sig,
 };
@@ -92,8 +93,8 @@ pub(crate) fn detach(
     // The survivor outlives this run, but confining it happens here, under this
     // run's scope: a cancel during the stamp abandons the birth, which is the
     // one moment it still can — and the abandoned launch's reservation, still
-    // uncommitted, gives the slot straight back. Only a spawned survivor ever
-    // spends one.
+    // uncommitted, gives the slot straight back. A failed spawn refunds it too;
+    // only a born survivor, named or not, spends one.
     let mut launch = build_launch(
         &plan,
         crate::sandbox::Ownership::Surrendered,
@@ -103,11 +104,10 @@ pub(crate) fn detach(
     launch.stdin(StdioSpec::null());
     launch.stdout(StdioSpec::null());
     launch.stderr(StdioSpec::null());
-    let pid = launch
+    let survivor = launch
         .spawn_detached()
         .map_err(|e| sig(format!("detach: cannot launch '{}': {e}", plan.shown)))?;
     reservation.commit();
-
     shell.observe(
         mooring,
         Observed::Command(Command::new(
@@ -119,8 +119,14 @@ pub(crate) fn detach(
             None,
         )),
     );
-    Ok(Value::from_datum(Receipt {
-        pid,
-        desc: desc.into(),
-    }))
+    match survivor {
+        Survivor::Named(pid) => Ok(Value::from_datum(Receipt {
+            pid,
+            desc: desc.into(),
+        })),
+        Survivor::Unnamed(why) => Err(sig(format!(
+            "detach: '{}' was started and is running, but its pid was lost ({why}); it cannot be stopped by pid",
+            plan.shown
+        ))),
+    }
 }
