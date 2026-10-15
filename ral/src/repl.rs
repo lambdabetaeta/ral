@@ -6,7 +6,7 @@
 //!
 //! Submodules factor out orthogonal concerns:
 //! - [`completion`] -- Frontend-neutral completion engine (classification,
-//!   candidate sources, fuzzy/prefix ranking) shared by every surface.
+//!   candidate sources, prefix matching, fuzzy fallback) shared by every surface.
 //! - [`complete`] -- The rustyline adapter over [`completion`]: completer,
 //!   ghost-text hinter, and plugin syntax highlighting.
 //! - [`config`]   -- RC file discovery, sourcing, and application, run

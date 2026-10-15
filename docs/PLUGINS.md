@@ -240,8 +240,10 @@ list claims the word, and the candidates replace the text from
 character `offset` to the cursor; later hooks do not run. An empty
 list or `()` passes to the next hook, and finally to ral's own completion.
 Candidates are not filtered further: a hook returns those that
-complete `words[current]`. A return of any other shape passes with a
-warning. When the buffer does not lex, no hook runs.
+complete `words[current]`. Tab inserts the candidates' longest common prefix,
+or a lone candidate outright, so a hook offering text that does not extend the
+word (an alias's expansion, say) should return exactly one. A return of any
+other shape passes with a warning. When the buffer does not lex, no hook runs.
 
 `complete` runs aside, like `buffer-change`: its writes to the buffer
 and to ghost text and highlights take no effect, and `_ed-tui` reports

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: a152e8b0
+generated_at_commit: 4e2ee042
 generated_at_date: 2026-10-10
 covers_paths: [core/src/source.rs, core/src/diagnostic.rs, core/src/compile.rs, core/src/syntax/report.rs, core/src/terminal.rs, core/src/terminal/stderr.rs, core/src/text.rs, core/src/ansi.rs, core/src/types/exit_hints.rs]
 ---
@@ -118,8 +118,7 @@ them to paint an in-place type-error underline whose label and caret agree
 word-for-word and column-for-column with the post-Enter ariadne report — the
 inline rendering belongs to that page, not here. `text.rs` is also the single
 home of the `nucleo` fuzzy matcher (`rank`, and `rank_by` for an item that is
-not its own haystack), so every filtered list a user is offered — completion
-menus, pickers, the exarch command popup — ranks the same way. Type-error *prose* generally
+not its own haystack), which serves exarch's pickers and command popup. Type-error *prose* generally
 lives beside the checker: provenance is data on the error (`Reason`,
 `typecheck/error.rs`) and every user-facing sentence is a pure function of it
 in `typecheck/explain.rs` ([[map/core/typecheck|typecheck]]).

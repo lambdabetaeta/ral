@@ -1,5 +1,5 @@
 ---
-generated_at_commit: eecd78ad
+generated_at_commit: 4e2ee042
 generated_at_date: 2026-10-12
 covers_paths: [ral/src/repl/frontend.rs, ral/src/repl/frontend/, ral/src/repl/completion.rs, ral/src/repl/complete.rs, ral/src/repl/highlight_style.rs, prompt-editor/src/completion.rs, core/src/text.rs]
 ---
@@ -84,19 +84,17 @@ half (`completion-names`, `builtin-names`) once per prompt, the `PATH`
 enumeration lazily (only when a command name is wanted, never for `$var` or
 paths) through `path-entries` in the engine's own filesystem,
 keyed by the `env-var PATH` and `cwd` readings and aged by `SCAN_TTL`;
-cwd-anchored path entries likewise — and ranks them.
+cwd-anchored path entries likewise — and matches them.
 `completion::complete(line, pos, &Sources) -> (replace_from, Vec<Candidate>)`
 is the engine's single entry point; the rustyline helper reaches it only when
-no plugin `complete` hook claims the word (below). Ranking is `nucleo` fuzzy
-matching for every surface — path-tuned for path entries, ties broken
-alphabetically — and lives in `ral_core::text::rank`, a generic `AsRef<str>`
-function with no UI in it, so exarch's pickers match the same way ral's menus
-do. A surface whose rows are not their own haystack — exarch's `/model` picker,
-matching an `(account, model)` pair by the `label / model` line it draws —
-calls `ral_core::text::rank_by`, which takes the haystack as a projection out
-of the item; `rank` is that same function under `AsRef::as_ref`. Ranking a row
-together with its haystack is what keeps the two from drifting apart into
-parallel vectors. `Candidate` is the engine's own type and stays here.
+no plugin `complete` hook claims the word (below). Matching runs once, via
+`matching`, over a single borrowed pool (`Item`: a name, or a path entry with its
+directory): names extending the typed text (smart case, alphabetical), else
+`nucleo` fuzzy matches over the same pool. Rustyline's List mode splices the
+candidates' common prefix, so a mixed list would never extend what was typed. Command position also offers the cwd's directories as
+`dir/`. `ral_core::text::rank` and `rank_by` are that fuzzy tier and also serve
+exarch's pickers; `rank_by` takes the haystack as a projection out of the item.
+`Candidate` is the engine's own type and stays here.
 
 `completion::parse_at` reads the simple command around the cursor as a
 `CommandAt {words, current, offset}` — `words[current]` the word being typed,

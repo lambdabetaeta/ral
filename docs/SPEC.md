@@ -4049,9 +4049,13 @@ surface was requested.
 
 The full frontends complete variables, command-position names, and paths.
 Variable candidates come from live non-private bindings. Command candidates
-also include installed builtins, handlers, and executables on `PATH`. Relative
-paths are resolved from ral's logical working directory. Matching is fuzzy;
-ties are stable and alphabetical. A new binding is visible at the next prompt.
+also include installed builtins, handlers, and executables on `PATH`, and the
+working directory's subdirectories, offered with a trailing `/`. Relative
+paths are resolved from ral's logical working directory. Matching is by
+prefix, ignoring case unless the typed text has a capital; candidates
+extending the typed text are listed alphabetically; only when none does in the
+whole request does matching fall back to fuzzy, best first.
+A new binding is visible at the next prompt.
 
 History is persisted in the ral configuration directory, with a legacy
 `~/.ral_history` fallback. Consecutive duplicate entries are omitted. Saving

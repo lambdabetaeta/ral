@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 446e3123
+generated_at_commit: 4e2ee042
 generated_at_date: 2026-10-06
 covers_paths: [ral/src/]
 ---
@@ -51,7 +51,7 @@ REPL makes that state the thing the loop threads.
   `exec.rs`, `host.rs`, `enquiry.rs`, `prompt.rs`, `config*`, `theme.rs`,
   `errfmt.rs`).
 - [[map/repl/frontend|frontend]] — the `Frontend` trait and its two
-  implementations (minimal, rustyline), plus the frontend-neutral fuzzy
+  implementations (minimal, rustyline), plus the frontend-neutral prefix-then-fuzzy
   completion engine and shared highlight table
   (`ral/src/repl/frontend*`, `completion.rs`, `complete.rs`,
   `cursor.rs`, `highlight_style.rs`).

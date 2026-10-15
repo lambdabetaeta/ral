@@ -279,7 +279,7 @@ pub(super) fn command_candidates(line: &str) -> Vec<Candidate> {
         .map(|v| v.meta())
         .flat_map(|m| std::iter::once(m.name).chain(m.aliases.iter().copied()))
         .collect();
-    ral_core::text::rank(line, tokens, false)
+    ral_core::text::rank(line, tokens)
         .into_iter()
         .map(|token| {
             let meta = by_token(token).map(Verb::meta);

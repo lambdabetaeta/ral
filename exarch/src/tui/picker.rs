@@ -440,15 +440,11 @@ impl Picker {
                 }
             }
         }
-        self.rows = ral_core::text::rank_by(
-            self.query.trim(),
-            rows,
-            |r: &(String, _)| r.0.as_str(),
-            false,
-        )
-        .into_iter()
-        .map(|(_, row)| row)
-        .collect();
+        self.rows =
+            ral_core::text::rank_by(self.query.trim(), rows, |r: &(String, _)| r.0.as_str())
+                .into_iter()
+                .map(|(_, row)| row)
+                .collect();
         self.selected = self.selected.min(self.rows.len().saturating_sub(1));
     }
 

@@ -64,33 +64,20 @@ pub fn indefinite(noun: &str) -> String {
 
 /// Fuzzy-rank `items` against `needle`, best first, dropping non-matches.
 ///
-/// The matcher is `nucleo`, the Helix team's, and this is its single home: every
-/// surface that offers a user a filtered list — completion menus, pickers —
-/// matches the same way, through this or through [`rank_by`] where an item is
-/// not its own haystack.  An empty needle matches everything, so an empty prefix
-/// lists the whole pool.  `paths` tunes the matcher for path-like haystacks (a
-/// `/`-aware boundary bonus).  Ties break alphabetically so the order is
-/// deterministic.
-pub fn rank<T: AsRef<str>>(needle: &str, items: Vec<T>, paths: bool) -> Vec<T> {
-    rank_by(needle, items, |item: &T| item.as_ref(), paths)
+/// The matcher is `nucleo`, the Helix team's; exarch's pickers and command
+/// popup all match through this or through [`rank_by`] where an item is not its
+/// own haystack.  An empty needle matches everything.  Ties break
+/// alphabetically so the order is deterministic.
+pub fn rank<T: AsRef<str>>(needle: &str, items: Vec<T>) -> Vec<T> {
+    rank_by(needle, items, |item: &T| item.as_ref())
 }
 
 /// As [`rank`], for items that are not their own haystack.
 ///
 /// `haystack` names the text each item matches by, borrowed from the item, so a
 /// row and the string it is ranked by cannot come apart into parallel vectors.
-pub fn rank_by<T>(
-    needle: &str,
-    items: Vec<T>,
-    haystack: impl Fn(&T) -> &str,
-    paths: bool,
-) -> Vec<T> {
-    let config = if paths {
-        Config::DEFAULT.match_paths()
-    } else {
-        Config::DEFAULT
-    };
-    let mut matcher = Matcher::new(config);
+pub fn rank_by<T>(needle: &str, items: Vec<T>, haystack: impl Fn(&T) -> &str) -> Vec<T> {
+    let mut matcher = Matcher::new(Config::DEFAULT);
     // `Pattern::new`, not `Pattern::parse`: no operator syntax, so a needle like
     // `'notes` or `^tmp` stays literal rather than being reinterpreted — the one
     // variant fit for both a path name and a free-text query.  Whitespace still
@@ -222,12 +209,7 @@ mod tests {
     /// alphabetical tie-break cannot collapse them onto one another.
     #[test]
     fn identical_haystacks_both_survive_in_input_order() {
-        let ranked = rank_by(
-            "x",
-            vec![(1, "x"), (2, "x")],
-            |item: &(i32, &str)| item.1,
-            false,
-        );
+        let ranked = rank_by("x", vec![(1, "x"), (2, "x")], |item: &(i32, &str)| item.1);
         assert_eq!(ranked, vec![(1, "x"), (2, "x")]);
     }
 

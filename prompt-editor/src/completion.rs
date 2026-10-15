@@ -3,7 +3,7 @@
 //!
 //! [`Menu`] owns a selection and the buffer span the chosen [`Candidate`]
 //! replaces, and nothing else — it neither gathers candidates nor ranks them
-//! (that is `ral_core::text::rank`'s job, wherever the host calls it).  The
+//! (that is the host's job).  The
 //! host owns the keys, driving [`Menu::select_next`] / [`Menu::select_prev`]
 //! (cycle), [`Menu::accept`] (splice) and dismissal (drop the menu) from its own
 //! event loop, and calls [`Menu::render`] with the area the popup may occupy.

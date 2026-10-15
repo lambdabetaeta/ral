@@ -3,9 +3,9 @@
 //! The completion *engine*, owned by no frontend: it classifies the token
 //! under the cursor (a `$`-variable, a command-position name, or a path),
 //! gathers candidates from a [`Sources`] view the engine's probes answer,
-//! and ranks them.  The rustyline helper ([`super::complete::RalHelper`]) calls [`complete`] against a shared
+//! and matches them.  The rustyline helper ([`super::complete::RalHelper`]) calls [`complete`] against a shared
 //! [`SourceCache`]; neither owns the classification, the candidate sources,
-//! or the ranking.
+//! or the matching.
 //!
 //! The sources are split in two by cost.  The cheap half — bindings,
 //! builtins, handlers, the logical cwd — is recomputed once per prompt, so a
@@ -17,8 +17,8 @@
 //! thousands of files is the difference between a prompt that appears and one
 //! that arrives.
 //!
-//! Ranking is fuzzy — the `nucleo` matcher, the Helix team's — for every
-//! surface; [`ral_core::text::rank`] is its single home.
+//! A request gathers one pool of names and [`matching`] runs once over it:
+//! names extending the typed text, alphabetically, else fuzzy matches.
 
 use ral_core::carrier::Transport;
 use ral_core::first_order::FOValue;
@@ -88,7 +88,7 @@ impl Sources<'_> {
     /// halves as well as within them: a binding name is also a command-position
     /// name, and the `PATH` scan repeats a name once per directory holding it.
     /// Only the references are sorted, and that order is not load-bearing —
-    /// [`rank`] re-sorts by score.
+    /// [`matching`] re-sorts.
     ///
     /// The one place `PATH` is enumerated, if this is the first request since
     /// the scan was dropped.  The enumeration mirrors `locate`'s rules —
@@ -267,7 +267,7 @@ fn entries(engine: &dyn Transport, dir: &Path) -> Vec<PathEntry> {
 
 /// Complete the atom under the cursor at byte offset `pos` in `line`.  Returns
 /// the byte offset the replacement starts at (where a frontend splices the
-/// chosen `replacement`) and the ranked candidates, best first.
+/// chosen `replacement`) and the matching candidates.
 ///
 /// Classification reads the lexer's own tokens of `line[..pos]`: the atom is
 /// the last lexeme touching `pos`, and it is at command position when what
@@ -303,15 +303,28 @@ pub(super) fn complete(line: &str, pos: usize, sources: &Sources<'_>) -> (usize,
         ),
         Some((Token::SingleQuoted(body), span)) => (span.start as usize, body.clone(), false),
         Some((Token::Variable { name, delimited }, span)) => {
+            let pool = sources.cache.variables.iter().map(|v| Item::Name(v));
             return (
                 span.start as usize + 1 + usize::from(*delimited),
-                rank_names(sources.cache.variables.iter().collect(), name),
+                offer(name, pool),
             );
         }
         Some(_) => return (pos, vec![]),
     };
     if at_command && !text.contains('/') {
-        return (start, rank_names(sources.command_names(), &text));
+        let names = sources.command_names();
+        let cwd = entries(sources.engine, Path::new("./"));
+        // A directory may lead to an executable (`dir/cmd`).
+        let dirs = cwd
+            .iter()
+            .filter(|e| e.dir && dotfile_visible(&e.name, &text))
+            .map(|entry| Item::Path {
+                dir: "",
+                entry,
+                tilde: true,
+            });
+        let pool = names.iter().map(|n| Item::Name(n)).chain(dirs);
+        return (start, offer(&text, pool));
     }
     let (dir, needle) = text.split_at(text.rfind('/').map_or(0, |slash| slash + 1));
     let read = if dir.is_empty() { "./" } else { dir };
@@ -322,29 +335,95 @@ pub(super) fn complete(line: &str, pos: usize, sources: &Sources<'_>) -> (usize,
         return (start, vec![]);
     };
     // The engine anchors a relative directory against its logical cwd.
-    (
-        start,
-        ranked_entries(
-            entries(sources.engine, Path::new(&read)),
-            needle,
-            dir,
-            tilde,
-        ),
-    )
+    let found = entries(sources.engine, Path::new(&read));
+    let pool = found
+        .iter()
+        .filter(|e| dotfile_visible(&e.name, needle))
+        .map(|entry| Item::Path { dir, entry, tilde });
+    (start, offer(needle, pool))
 }
 
-/// Filter and rank `names` against `needle`, mapping each survivor to a
-/// name-replacement [`Candidate`].  Generic over the borrow so the command pool
-/// can be ranked as `&String`s gathered from two backing vectors, cloning
-/// nothing until a name survives the match.
-fn rank_names<T: AsRef<str>>(names: Vec<T>, needle: &str) -> Vec<Candidate> {
-    rank(needle, names, false)
+/// One offerable name, borrowed from the pool it was gathered from.
+enum Item<'a> {
+    Name(&'a str),
+    Path {
+        dir: &'a str,
+        entry: &'a PathEntry,
+        tilde: bool,
+    },
+}
+
+impl AsRef<str> for Item<'_> {
+    fn as_ref(&self) -> &str {
+        match self {
+            Item::Name(n) => n,
+            Item::Path { entry, .. } => &entry.name,
+        }
+    }
+}
+
+impl Item<'_> {
+    /// A path replaces the whole atom `dir` + name (+ `/` for a directory),
+    /// quoted unless a bare word; a `tilde` path that needs quoting is expanded
+    /// first, since a quoted `~` would not expand.
+    fn candidate(self) -> Candidate {
+        match self {
+            Item::Name(n) => Candidate {
+                display: n.to_owned(),
+                replacement: n.to_owned(),
+            },
+            Item::Path { dir, entry, tilde } => {
+                let display = if entry.dir {
+                    format!("{}/", entry.name)
+                } else {
+                    entry.name.clone()
+                };
+                let full = format!("{dir}{display}");
+                let full = if tilde && matches!(quote_word(&full), Cow::Owned(_)) {
+                    expand_tilde(&full).unwrap_or(full)
+                } else {
+                    full
+                };
+                Candidate {
+                    replacement: quote_word(&full).into_owned(),
+                    display,
+                }
+            }
+        }
+    }
+}
+
+fn offer<'a>(needle: &str, pool: impl IntoIterator<Item = Item<'a>>) -> Vec<Candidate> {
+    matching(needle, pool.into_iter().collect())
         .into_iter()
-        .map(|name| Candidate {
-            display: name.as_ref().to_owned(),
-            replacement: name.as_ref().to_owned(),
-        })
+        .map(Item::candidate)
         .collect()
+}
+
+/// The `pool` items whose name extends `needle`, alphabetically; failing any,
+/// the fuzzy matches, best first.  One decision over the whole pool: rustyline
+/// splices the candidates' common prefix, so a mixed list would never extend
+/// what was typed.
+fn matching<T: AsRef<str>>(needle: &str, pool: Vec<T>) -> Vec<T> {
+    let (mut hits, misses): (Vec<T>, Vec<T>) =
+        pool.into_iter().partition(|i| extends(i.as_ref(), needle));
+    if hits.is_empty() {
+        return rank(needle, misses);
+    }
+    hits.sort_by(|a, b| a.as_ref().cmp(b.as_ref()));
+    hits
+}
+
+/// Smart case, as `rank` matches: a needle with no capital ignores case.
+fn extends(name: &str, needle: &str) -> bool {
+    if needle.chars().any(char::is_uppercase) {
+        return name.starts_with(needle);
+    }
+    let mut name = name.chars().flat_map(char::to_lowercase);
+    needle
+        .chars()
+        .flat_map(char::to_lowercase)
+        .all(|c| name.next() == Some(c))
 }
 
 // ── Path completion ───────────────────────────────────────────────────────────
@@ -362,53 +441,11 @@ fn expand_tilde(dir: &str) -> Option<String> {
     )
 }
 
-/// A path entry as the haystack [`rank`] matches the needle against.
-struct Named(PathEntry);
-
-impl AsRef<str> for Named {
-    fn as_ref(&self) -> &str {
-        &self.0.name
-    }
-}
-
 /// Whether `name` is offerable given the needle: a dotfile is hidden unless
 /// the needle itself starts with `.`.  The match against the needle is
-/// [`rank`]'s job; this is only the visibility gate.
+/// [`matching`]'s job; this is only the visibility gate.
 fn dotfile_visible(name: &str, needle: &str) -> bool {
     needle.starts_with('.') || !name.starts_with('.')
-}
-
-/// Build ranked completion candidates for the `entries` matching `needle` and
-/// passing the dotfile gate.  Each replacement is the whole path `dir` + name
-/// (+ `/` if a directory) as one source atom, quoted by
-/// [`ral_core::syntax::quote_word`] unless a bare word.  A `tilde` path that
-/// needs quoting is expanded first, since a quoted `~` would not expand.
-fn ranked_entries(entries: Vec<PathEntry>, needle: &str, dir: &str, tilde: bool) -> Vec<Candidate> {
-    let visible: Vec<Named> = entries
-        .into_iter()
-        .filter(|e| dotfile_visible(&e.name, needle))
-        .map(Named)
-        .collect();
-    rank(needle, visible, true)
-        .into_iter()
-        .map(|Named(e)| {
-            let display = if e.dir {
-                format!("{}/", e.name)
-            } else {
-                e.name
-            };
-            let full = format!("{dir}{display}");
-            let full = if tilde && matches!(quote_word(&full), Cow::Owned(_)) {
-                expand_tilde(&full).unwrap_or(full)
-            } else {
-                full
-            };
-            Candidate {
-                replacement: quote_word(&full).into_owned(),
-                display,
-            }
-        })
-        .collect()
 }
 
 // ── The simple command at the cursor ─────────────────────────────────────────
@@ -813,33 +850,47 @@ mod tests {
         assert!(!names.contains(&"echo"));
     }
 
-    #[test]
-    fn complete_is_case_insensitive() {
-        let src = sources(&["Foobar", "baz"], &[]);
-        let cands = complete("foo", 3, &src.view()).1;
-        assert!(cands.iter().any(|c| c.display == "Foobar"));
+    fn displays(cands: &[Candidate]) -> Vec<&str> {
+        cands.iter().map(|c| c.display.as_str()).collect()
     }
 
-    /// Fuzzy ranking accepts a non-prefix subsequence — the defining behaviour
-    /// over plain prefix matching: `rgp` ⊂ `ripgrep`.
     #[test]
-    fn complete_matches_fuzzy_subsequence() {
-        let src = sources(&["ripgrep", "ls"], &[]);
-        let cands = complete("rgp", 3, &src.view()).1;
-        assert!(
-            cands.iter().any(|c| c.display == "ripgrep"),
-            "fuzzy match should reach a non-prefix subsequence"
-        );
+    fn complete_ignores_case_unless_the_needle_has_a_capital() {
+        let src = sources(&["Foobar", "foobaz"], &[]);
+        let lower = complete("foo", 3, &src.view()).1;
+        assert_eq!(displays(&lower), ["Foobar", "foobaz"]);
+        let capital = complete("Foo", 3, &src.view()).1;
+        assert_eq!(displays(&capital), ["Foobar"]);
     }
 
-    /// A prefix match outranks a scattered subsequence: `gr` ranks `grep`
-    /// (prefix) above `ripgrep` (gap match).
     #[test]
-    fn complete_ranks_prefix_above_gap_match() {
-        let src = sources(&["ripgrep", "grep"], &[]);
-        let cands = complete("gr", 2, &src.view()).1;
-        let order: Vec<&str> = cands.iter().map(|c| c.display.as_str()).collect();
-        assert_eq!(order.first(), Some(&"grep"), "got {order:?}");
+    fn complete_falls_back_to_fuzzy_only_without_a_prefix_match() {
+        let src = sources(&["ripgrep", "grep", "ls"], &[]);
+        assert_eq!(displays(&complete("gr", 2, &src.view()).1), ["grep"]);
+        assert_eq!(displays(&complete("rgp", 3, &src.view()).1), ["ripgrep"]);
+    }
+
+    #[test]
+    fn a_prefix_match_anywhere_in_the_pool_suppresses_fuzzy() {
+        let src = sources(&["sorcery"], &[]);
+        assert_eq!(displays(&complete("src", 3, &src.view()).1), ["sorcery"]);
+        std::fs::create_dir(src.cwd.path().join("src")).unwrap();
+        let (_, cands) = complete("src", 3, &src.view());
+        assert_eq!(displays(&cands), ["src/"]);
+    }
+
+    #[test]
+    fn complete_offers_cwd_directories_at_command_position() {
+        let src = sources(&["sort"], &[]);
+        std::fs::create_dir(src.cwd.path().join("src")).unwrap();
+        std::fs::write(src.cwd.path().join("srcfile"), "").unwrap();
+        let (_, cands) = complete("s", 1, &src.view());
+        assert_eq!(displays(&cands), ["sort", "src/"]);
+        let (start, cands) = complete("sr", 2, &src.view());
+        assert_eq!(start, 0);
+        assert_eq!(cands.len(), 1);
+        assert_eq!(cands[0].display, "src/");
+        assert_eq!(cands[0].replacement, "src/");
     }
 
     // ── path completion / dotfile_visible ───────────────────────────────
@@ -1003,5 +1054,22 @@ mod tests {
         );
         assert_eq!(parse("echo $[1 +▮"), Some((w(&["echo", "$[1 +"]), 1, 5)));
         assert_eq!(parse("echo 'open▮"), Some((w(&["echo", "open"]), 1, 5)));
+    }
+
+    #[test]
+    fn the_fuzzy_tier_ranks_the_whole_pool_as_one() {
+        let src = sources(&["carbonic"], &[]);
+        std::fs::create_dir(src.cwd.path().join("src")).unwrap();
+        let (_, cands) = complete("rc", 2, &src.view());
+        assert_eq!(displays(&cands), ["src/", "carbonic"]);
+    }
+
+    #[test]
+    fn extends_is_smart_case() {
+        assert!(extends("Foobar", "foo"));
+        assert!(!extends("foobar", "Foo"));
+        assert!(extends("Foobar", "Foo"));
+        assert!(extends("anything", ""));
+        assert!(!extends("fo", "foo"));
     }
 }
