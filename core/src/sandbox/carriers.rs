@@ -63,11 +63,11 @@ pub(crate) fn linkers() -> Vec<RealPath> {
         "/lib/*/ld*.so*",
         "/usr/lib/*/ld*.so*",
     ];
+    let mooring = crate::types::Mooring::adrift();
     let found: BTreeSet<RealPath> = PATTERNS
         .iter()
-        .filter_map(|p| glob::glob(p).ok())
-        .flatten()
-        .flatten()
+        .filter_map(|p| crate::glob::Glob::parse(&PathBuf::from(*p)).ok())
+        .flat_map(|g| g.walk(&mooring).filter_map(Result::ok).collect::<Vec<_>>())
         // Merged-/usr makes /lib/x and /usr/lib/x one inode: one real path.
         .filter_map(|p| RealPath::of(&p).ok())
         .filter(|p| p.as_path().is_file())

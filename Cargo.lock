@@ -5838,7 +5838,7 @@ dependencies = [
  "either",
  "fastrand",
  "getrandom 0.4.3",
- "glob",
+ "globset",
  "icu_casemap",
  "icu_locale_core",
  "icu_normalizer",

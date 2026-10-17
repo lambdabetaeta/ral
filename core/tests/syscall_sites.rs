@@ -75,6 +75,7 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     // ── core ──────────────────────────────────────────────────────────────
     ("core/src/builtins/misc.rs", "silent:ask-tty"),
     ("core/src/builtins/modules.rs", "silent:module-load"),
+    ("core/src/glob.rs", "silent:glob-walk"),
     ("core/build.rs", "silent:prelude-bake-build"),
     ("core/src/invocation.rs", "silent:argv-before-main"),
     ("core/src/load/profile.rs", "silent:cap-load"),

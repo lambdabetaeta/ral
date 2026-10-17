@@ -8,8 +8,9 @@
 //! lexical, with no filesystem to gate.
 
 use crate::capability::FsOp;
+use crate::glob::Glob;
 use crate::path::walk::{DirEntry, FileInfo, Kind, Leaf, Stat};
-use crate::types::{Break, Settled, Shell, Value, sig};
+use crate::types::{Break, Mooring, Settled, Shell, Value, sig};
 use std::path::Path;
 
 use super::util::{admits_read, checked_read_path};
@@ -66,50 +67,48 @@ pub(super) fn builtin_temp_file(_args: &[Value], shell: &mut Shell) -> Settled<V
 
 /// Glob, preserving the pattern's shape: a cwd-relative pattern yields
 /// cwd-relative matches, a sigil-rooted or absolute one absolute matches.
-pub(super) fn builtin_glob(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_glob(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let raw = args[0].as_str("glob")?;
     let home = shell.context.home();
     let expanded = crate::path::sigil::expand_path_prefix(raw, home.as_deref());
-    let input_is_cwd_relative = !crate::path::is_absolute(&expanded);
-    let pattern = checked_read_path(shell, raw)?
-        .as_path()
-        .to_string_lossy()
-        .into_owned();
-    let strip_prefix = input_is_cwd_relative.then(|| shell.cwd());
-
-    // Hide dotfiles as Unix shells do, but stricter than `dotglob=off`:
-    // the crate filters at walk time, so even `.h*` matches nothing.
-    // Fully literal dotfile names still work.
-    let options = glob::MatchOptions {
-        require_literal_leading_dot: true,
-        ..glob::MatchOptions::new()
-    };
-    let mut results = Vec::new();
-    match glob::glob_with(&pattern, options) {
-        Ok(paths) => {
-            for entry in paths {
-                let path = entry.map_err(|e| sig(format!("glob: {e}")))?;
-                // As in `list-dir`: the *pattern* was admitted, the
-                // concrete hits under it were not.
-                if !admits_read(shell, &path.to_string_lossy()) {
-                    continue;
+    let base = (!crate::path::is_absolute(&expanded)).then(|| shell.cwd());
+    let pattern = checked_read_path(shell, raw)?;
+    let glob = Glob::parse(pattern.as_path()).map_err(|e| sig(format!("glob: {e}")))?;
+    let mut hits = Vec::new();
+    for hit in glob.walk(mooring) {
+        let hit = hit?;
+        let shown = base
+            .as_ref()
+            .and_then(|cwd| hit.strip_prefix(cwd).ok())
+            .unwrap_or(&hit);
+        match shown.to_str() {
+            // As in `list-dir`: the *pattern* was admitted, the hits under it were not.
+            Some(s) if admits_read(shell, s) => hits.push(s.to_owned()),
+            Some(_) => {}
+            None => {
+                if let Some(refusal) = unnameable(shell, &hit) {
+                    return Err(refusal);
                 }
-                let rendered = match &strip_prefix {
-                    Some(cwd) => path
-                        .strip_prefix(cwd)
-                        .map(Path::to_path_buf)
-                        .unwrap_or(path),
-                    None => path,
-                };
-                results.push(rendered.to_string_lossy().into_owned());
             }
         }
-        Err(e) => return Err(sig(format!("glob: {e}"))),
     }
-    results.sort();
-    Ok(Value::list(
-        results.into_iter().map(Value::string).collect(),
-    ))
+    hits.sort();
+    Ok(Value::list(hits.into_iter().map(Value::string).collect()))
+}
+
+/// A hit no ral string can hold, refused where its directory is readable.
+#[allow(
+    clippy::unnecessary_debug_formatting,
+    reason = "Debug escapes the invalid bytes; Display would mangle them"
+)]
+fn unnameable(shell: &mut Shell, hit: &Path) -> Option<Break> {
+    let dir = hit.ancestors().find_map(Path::to_str)?;
+    admits_read(shell, dir).then(|| {
+        let name = hit.strip_prefix(dir).unwrap_or(hit);
+        sig(format!(
+            "glob: {dir}: {name:?} is not valid UTF-8, so no ral string can hold it; rename it?"
+        ))
+    })
 }
 
 /// Label an `io::Error` with the operation and the path that provoked it.

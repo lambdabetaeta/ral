@@ -312,7 +312,7 @@ Writing a multi-line file must use a raw string, ideally with many hashes:
 
 Use the following instead of `rg`/`find`/`ls` to search for files; all are `.gitignore` sensitive. 
 
-- `glob #'**/*.txt'#` — matching paths as a ral list; skips dot files. Spread into a command: `mv ...!{glob …} out/`.
+- `glob #'**/*.txt'#` — matching paths as a ral list; a wildcard never matches a dot file (name it literally; a wildcard starting with `.` is an error). Spread into a command: `mv ...!{glob …} out/`.
 - `explore-dir n` — entries of the current directory to depth `n` as a `ral` list; `.gitignore`-aware
 - `grep-files #'TODO'#` — recursive grep of the current directory (Rust regex syntax); returns `ral` list of records `[file, line, text]`.
 - `fff #'query'#` — fuzzy file-name search (frecency-ranked) over the working tree, returning `[String]`. Use to find files by name without a glob pattern.

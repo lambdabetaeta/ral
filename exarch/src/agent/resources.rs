@@ -242,8 +242,7 @@ impl Avatar {
                         let idle_left = shell_eval::WORKER_IDLE_CEILING
                             .saturating_sub(std::time::Duration::from_secs(entry.idle_secs));
                         let age = std::time::Duration::from_secs(entry.up_secs);
-                        let backstop_left =
-                            shell_eval::WORKER_BACKSTOP.saturating_sub(age);
+                        let backstop_left = shell_eval::WORKER_BACKSTOP.saturating_sub(age);
                         let left = idle_left.min(backstop_left);
                         nearest_reap = Some(nearest_reap.map_or(left, |m| m.min(left)));
                     }
