@@ -139,3 +139,45 @@ fn a_workers_external_child_dies_with_the_batch_host() {
 fn a_cancel_the_host_immediately_outruns_still_reaps_the_child() {
     nothing_survives("cancel $job");
 }
+
+/// `cancel` strikes the worker's own node, and `await` converts that stop
+/// into the awaiter's error: 143, the cancellation's own status.
+#[test]
+fn a_cancelled_workers_await_reports_143() {
+    let out = run_with_timeout(
+        "ral_worker_teardown",
+        &[],
+        "let h = spawn { /bin/sleep 30 }; cancel $h; await $h",
+        GATE_TIMEOUT,
+    )
+    .expect("await of a cancelled worker hung");
+    assert_eq!(out.status, 143, "stderr: {}", out.stderr);
+}
+
+/// A worker's `exit` is the host's: it reaches the run that observes the
+/// worker and ends it.
+#[test]
+fn an_exit_in_a_worker_ends_the_awaiting_run() {
+    let out = run_with_timeout(
+        "ral_worker_teardown",
+        &[],
+        "let h = spawn { exit 3 }; await $h; echo after",
+        GATE_TIMEOUT,
+    )
+    .expect("await of an exited worker hung");
+    assert_eq!(out.status, 3, "stderr: {}", out.stderr);
+    assert!(!out.stdout.contains("after"), "stdout: {}", out.stdout);
+}
+
+#[test]
+fn a_poll_of_an_exited_worker_ends_the_run() {
+    let out = run_with_timeout(
+        "ral_worker_teardown",
+        &[],
+        "let h = spawn { exit 3 }; /bin/sleep 0.5; poll $h; echo after",
+        GATE_TIMEOUT,
+    )
+    .expect("poll of an exited worker hung");
+    assert_eq!(out.status, 3, "stderr: {}", out.stderr);
+    assert!(!out.stdout.contains("after"), "stdout: {}", out.stdout);
+}

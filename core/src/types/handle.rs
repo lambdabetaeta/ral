@@ -1,7 +1,7 @@
 //! The shared cells behind [`Value::Handle`](super::Value): what a spawned
 //! worker writes and its observers read.
 
-use super::flow::Settled;
+use super::flow::ThreadEnd;
 use super::value::Value;
 use crate::io::ByteBuffer;
 use crate::sync::LockExt as _;
@@ -64,7 +64,7 @@ pub struct CompletedHandle {
     /// Drained once from [`HandleInner::surface_buf`], and replayed through
     /// the awaiting run's surface by `await`/`race` — never by `poll`.
     pub surface: Vec<crate::first_order::FOValue>,
-    pub(crate) outcome: super::flow::Settled<Value>,
+    pub(crate) end: ThreadEnd,
 }
 
 /// Bounded buffer of the structured events a worker defers rather
@@ -81,7 +81,7 @@ pub struct HandleInner {
     /// Result channel.  The worker's body is its own closed machine run
     /// (`machine::evaluate`), already settled before it reaches the
     /// channel — nothing to absorb crossing the thread boundary.
-    pub result: Arc<Mutex<Option<std::sync::mpsc::Receiver<super::flow::Settled<Value>>>>>,
+    pub result: Arc<Mutex<Option<Receiver<ThreadEnd>>>>,
     /// Filled once, when the block completes and the buffers drain into it;
     /// every later observation reads it instead of the channel.
     pub cached: Arc<Mutex<Option<CompletedHandle>>>,
@@ -142,7 +142,7 @@ impl HandleInner {
     pub fn new(
         cmd: impl Into<std::string::String>,
         cancel: crate::process::CancelScope,
-        result: Option<Receiver<Settled<Value>>>,
+        result: Option<Receiver<ThreadEnd>>,
     ) -> Self {
         Self {
             result: Arc::new(Mutex::new(result)),
@@ -226,14 +226,13 @@ impl HandleInner {
         }
         let mut rx_guard = self.result.lock_ignore_poison();
         let rx = rx_guard.as_ref()?;
-        let outcome = match rx.try_recv() {
-            Ok(result) => result,
+        let end = match rx.try_recv() {
+            Ok(end) => end,
             // The worker names itself: the eliminator that found the corpse is
             // not what panicked, and `await`, `poll` and `race` all arrive here.
-            Err(TryRecvError::Disconnected) => Err(super::coerce::sig(format!(
-                "{}: spawned thread panicked",
-                self.cmd
-            ))),
+            Err(TryRecvError::Disconnected) => {
+                ThreadEnd::Panicked(format!("{}: spawned thread panicked", self.cmd))
+            }
             Err(TryRecvError::Empty) => return None,
         };
         rx_guard.take();
@@ -245,7 +244,7 @@ impl HandleInner {
             stdout: self.stdout_buf.take(),
             stderr: self.stderr_buf.take(),
             surface: std::mem::take(&mut *self.surface_buf.lock_ignore_poison()),
-            outcome,
+            end,
         };
         *self.cached.lock_ignore_poison() = Some(completed.clone());
         Some(completed)
@@ -257,7 +256,7 @@ impl HandleInner {
 pub(crate) fn idle_handle() -> Value {
     Value::Handle(Box::new(HandleInner::new(
         "<test>",
-        crate::process::CancelScope::default(),
+        crate::process::CancelScope::root(),
         None,
     )))
 }

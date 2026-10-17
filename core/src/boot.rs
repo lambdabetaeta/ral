@@ -79,6 +79,7 @@ impl BakedPrelude {
             let why = match brk {
                 Break::Error(e) => e.to_string(),
                 Break::Escape(Escape::Exit(code)) => format!("exit {code}"),
+                Break::Escape(Escape::Stopped { cause, .. }) => cause.message().to_owned(),
             };
             panic!("the prelude failed to run: {why}");
         }

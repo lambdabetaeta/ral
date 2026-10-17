@@ -1611,3 +1611,134 @@ fn a_cancelled_stages_sigterm_proof_grandchild_dies_when_the_group_grace_expires
         "the SIGTERM-proof grandchild (pid {gc_pid}) outlived the group's grace"
     );
 }
+
+// ── A stage's stops and escapes: who consumes them, what the fold ranks ──────
+
+/// Run `script(marker)` and return how it ended and whether it touched the
+/// marker; the marker is removed.
+fn run_marked(tag: &str, script: impl FnOnce(&str) -> String, timeout: Duration) -> (Output, bool) {
+    let path = fresh_tmp_path(tag, "mark");
+    let _ = std::fs::remove_file(&path);
+    let o = run_with_timeout(&[], &script(&format!("'{}'", path.display())), timeout)
+        .unwrap_or_else(|| panic!("{tag}: pipeline hung"));
+    let touched = path.exists();
+    let _ = std::fs::remove_file(&path);
+    (o, touched)
+}
+
+#[test]
+fn a_producers_try_cannot_change_its_reader_gone_stop() {
+    // A ral writer, whose dead write is the stop; an external's death is
+    // forgiven before any `try` could see it.
+    let (o, handled) = run_marked(
+        "ral_pipe_try_stop",
+        |f| {
+            format!(
+                "!{{ try {{ each {{ |i| echo $i }} !{{range 1 1000000}} }} {{ |e| touch {f} }} }} | head -1"
+            )
+        },
+        Duration::from_secs(10),
+    );
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout, "1\n");
+    assert!(!handled, "a try handler saw the reader-gone stop");
+}
+
+#[test]
+fn a_reader_gone_stage_runs_its_cleanup_and_the_cleanups_halt_is_the_verdict() {
+    let (o, ran) = run_marked(
+        "ral_pipe_gone_cleanup_halt",
+        |f| {
+            format!(
+                "!{{ guard {{ yes }} {{ touch {f}; fail [status: 7, message: x] }} }} | head -1"
+            )
+        },
+        Duration::from_secs(10),
+    );
+    assert_eq!(o.status, 7, "stderr: {}", o.stderr);
+    assert!(ran, "the cleanup did not run");
+}
+
+#[test]
+fn a_reader_gone_stages_cleanup_that_ends_on_it_is_forgiven() {
+    let (o, ran) = run_marked(
+        "ral_pipe_gone_cleanup_forgiven",
+        |f| format!("!{{ guard {{ yes }} {{ touch {f}; echo tail }} }} | head -1"),
+        Duration::from_secs(10),
+    );
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert!(ran, "the cleanup did not run");
+}
+
+#[test]
+fn a_nested_reader_gone_stages_cleanup_halt_is_the_verdict() {
+    // The inner fold's teardown is no verdict, a stage having halted; the
+    // outer collector forgives nothing it was not handed.
+    let o = run_with_timeout(
+        &[],
+        "!{ !{ guard { yes } { fail [status: 7, message: x] } } | cat } | head -1",
+        Duration::from_secs(10),
+    )
+    .expect("nested pipeline hung");
+    assert_eq!(o.status, 7, "stderr: {}", o.stderr);
+}
+
+#[test]
+fn a_reader_gone_stages_cleanup_write_is_stopped_and_its_tail_discarded() {
+    let (o, ran) = run_marked(
+        "ral_pipe_gone_cleanup_write",
+        |f| format!("!{{ guard {{ yes }} {{ echo tail; touch {f} }} }} | head -1"),
+        Duration::from_secs(10),
+    );
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert!(
+        !ran,
+        "the cleanup continued past its write to the dead edge"
+    );
+}
+
+#[test]
+fn an_exit_in_a_stage_outranks_a_sibling_error() {
+    let o = run_with_timeout(
+        &[],
+        "!{ exit 3 } | !{ fail [status: 7, message: x] }",
+        Duration::from_secs(10),
+    )
+    .expect("exit-vs-error pipeline hung");
+    assert_eq!(o.status, 3, "stderr: {}", o.stderr);
+}
+
+#[test]
+fn an_exit_in_a_stage_ends_the_pipeline_at_once() {
+    let o = run_with_timeout(
+        &[],
+        "!{ exit 3 } | !{ /bin/sleep 30 }",
+        Duration::from_secs(3),
+    )
+    .expect("the sibling's sleep held the pipeline open past the exit");
+    assert_eq!(o.status, 3, "stderr: {}", o.stderr);
+}
+
+#[test]
+fn a_reader_gone_stages_cleanup_exit_is_the_verdict() {
+    let o = run_with_timeout(
+        &[],
+        "!{ guard { yes } { exit 3 } } | head -1",
+        Duration::from_secs(10),
+    )
+    .expect("cleanup-exit pipeline hung");
+    assert_eq!(o.status, 3, "stderr: {}", o.stderr);
+}
+
+#[test]
+fn a_nested_reader_gone_stages_sibling_error_is_the_verdict() {
+    // The inner final stage's reader-gone stop names the outer stage and
+    // ranks under the failure beside it.
+    let o = run_with_timeout(
+        &[],
+        "!{ !{ fail [status: 7, message: x] } | !{ yes } } | head -1",
+        Duration::from_secs(10),
+    )
+    .expect("nested pipeline hung");
+    assert_eq!(o.status, 7, "stderr: {}", o.stderr);
+}

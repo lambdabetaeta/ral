@@ -597,7 +597,7 @@ mod tests {
             &self,
             req: FOValue,
             _cancel: &ral_core::process::CancelScope,
-        ) -> Result<FOValue, ral_core::types::Error> {
+        ) -> ral_core::types::Settled<FOValue> {
             use super::super::super::enquiry::Enquiry;
             self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             match Enquiry::decode(&req) {

@@ -847,6 +847,31 @@ fn timeout_kills_external_subprocess_tree() {
     );
 }
 
+/// A cleanup under a wall is shielded for the grace (2 s in exarch), then
+/// stopped: the call returns within wall plus grace, status the wall's.
+#[cfg(unix)]
+#[test]
+fn a_timed_out_cleanup_returns_within_wall_plus_grace() {
+    let engine = fresh();
+    let t0 = std::time::Instant::now();
+    let r = run_shell_direct(
+        &engine,
+        &Capabilities::root(),
+        "guard { /bin/sh -c 'sleep 30' } { /bin/sleep 30 }",
+        1,
+        &crate::record::Emitter::none(),
+    );
+    let elapsed = t0.elapsed();
+    assert_eq!(
+        r.exit, 124,
+        "a timed-out call reports the timeout exit code"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(1 + 2 + 3),
+        "the cleanup outlived wall plus grace: {elapsed:?}"
+    );
+}
+
 /// `timeout_kills_external_subprocess_tree`'s fixture, asserted on the
 /// surfaced message rather than the process tree.  The elapsed budget and
 /// the `timeout_secs` name are load-bearing for steering the model, so

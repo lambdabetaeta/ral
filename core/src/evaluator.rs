@@ -73,14 +73,17 @@ pub(crate) fn run_phrases(
     };
     let last = phrases.len().saturating_sub(1);
     for (i, phrase) in phrases.iter().enumerate() {
-        let result = mooring.check().and_then(|()| match &phrase.item {
-            Phrase::Run(m) => machine::evaluate(Arc::clone(m), ran.env.clone(), mooring, shell),
-            Phrase::Define {
-                pattern,
-                comp,
-                schemes,
-            } => ran.define(pattern, comp, schemes, mode, mooring, shell),
-        });
+        let result = shell
+            .poll()
+            .map_err(|b| machine::stamp(b, phrase.span))
+            .and_then(|()| match &phrase.item {
+                Phrase::Run(m) => machine::evaluate(Arc::clone(m), ran.env.clone(), mooring, shell),
+                Phrase::Define {
+                    pattern,
+                    comp,
+                    schemes,
+                } => ran.define(pattern, comp, schemes, mode, mooring, shell),
+            });
         match result {
             Ok(v) => ran.outcome = Ok(v),
             // A non-final phrase's own hintless error gets the same

@@ -252,6 +252,7 @@ pub(crate) fn run_shell(
     let run = Run {
         caps: caps.clone(),
         wall: Some(Duration::from_secs(timeout_secs)),
+        cleanup_grace: Duration::from_secs(2),
         deferred_lease: Some(ral_core::types::WorkerLease {
             idle: WORKER_IDLE_CEILING,
             backstop: WORKER_BACKSTOP,

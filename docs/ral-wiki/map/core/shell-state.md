@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e028f5a3
-generated_at_date: 2026-10-13
+generated_at_commit: dad6a1b3
+generated_at_date: 2026-10-17
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
 
@@ -128,7 +128,14 @@ checkpoint, since a run never writes it.
   at install and restores the previous one on `Drop`, carrying the two `Copy`
   registers the run's frame also owns for its life (`session.root_file` and
   `local.audit.call_site`) with it, so an unwinding evaluation cannot leave a
-  stale register behind.
+  stale register behind. The loan carries the current cancel scope too.
+- **`scope`** — the cancel scope the computation in focus polls
+  (`Shell::poll`), which also genuinely changes within a run: a thread base
+  sets it to its mooring's node, and `Frame::Cleanup` swaps it for a shielded
+  child for a `guard` cleanup's extent and restores it, as a capture swaps
+  `io.stdout` (`Shell::shield`). It is read, never written: writes aim at
+  `Mooring::home`
+  ([[decisions/261016_delimiters-are-handlers-for-poll|delimiters-are-handlers-for-poll]]).
 - **`SessionState`** — what survives every run's teardown: the durable cancel
   `root` that workers parent under (`Shell::join_session` *shares*
   it, for a second
@@ -240,14 +247,17 @@ values, and enumeration renews nothing.
 
 ### The mooring
 
-What a run *fixes* is not on the `Shell` at all. The eight run-invariant
+What a run *fixes* is not on the `Shell` at all. The nine run-invariant
 members are a **`Mooring`**: the `surface` sink, the `deferred` sink (a
 worker's completion delivery — `None` outside an agent host), the
 `desk` answering the run's enquiries
 ([[map/core/engine-protocol|engine-protocol]]), the `fork` door
 naming how a forked session reaches the desk that adopts it (`None` outside a
 host that installs one; like `desk`, never given to a deferred worker), the
-foreground `cancel` scope, the deferred-worker `WorkerLease` (`deferred_lease` — the idle
+owner's node `home` (the base of the run's scope tree: what a heard key, a
+wall, a lease or a `cancel` strikes, never what is polled), the
+`cleanup_grace` a `guard` cleanup's shield gets from the strike (the host's
+policy, from `Run::cleanup_grace`), the deferred-worker `WorkerLease` (`deferred_lease` — the idle
 bound and absolute backstop travel as one value; `None` never reaps), the
 `worker_cap` admission bound (`Some(cap)` refuses a spawn of any class while
 `cap` workers still run; `None` admits freely), and the run's
@@ -287,7 +297,7 @@ loan). **Borrow when you can, loan when you must.**
 an event while holding the shell mutably. `Mooring` is not `Clone`:
 `lend_terminal` is the one lawful derivation, so the raise-never-mint rule on
 `TerminalAccess` lives in one door rather than in every bulk copy. Outside
-core only `cancel`, `Mooring::surface`, `Mooring::lend_terminal`,
+core only `home`, `Mooring::surface`, `Mooring::lend_terminal`,
 `Mooring::fork`, and `Mooring::adrift` are reachable —
 `adrift()` being the mooring a host builds to call a builtin body outside any
 run (no surface, no rail, no desk, no fork door, and a scope under a root

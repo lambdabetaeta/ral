@@ -7,9 +7,10 @@ use super::eliminate::await_handle;
 use super::*;
 use crate::first_order::FOValue;
 use crate::io::new_buffer;
+use crate::process::{CancelCause, WorkerStop};
 use crate::types::{
-    Break, CompletedHandle, DeferredSink, EventSink, HandleInner, HandleState, LeaseClass, Map,
-    ReapCause, SurfaceBuffer, WorkerLease,
+    Break, CompletedHandle, DeferredSink, Error, Escape, EventSink, HandleInner, HandleState,
+    LeaseClass, Map, ReapCause, Status, SurfaceBuffer, ThreadEnd, WorkerLease,
 };
 use std::io::Write as _;
 use std::sync::{Arc, Mutex, mpsc};
@@ -26,7 +27,7 @@ fn status(b: Break) -> i32 {
 /// — through their sinks, as a real worker fills them.
 fn handle_with_disconnected_worker(stdout: &[u8], stderr: &[u8]) -> HandleInner {
     use std::io::Write;
-    let (tx, rx) = mpsc::channel::<Settled<Value>>();
+    let (tx, rx) = mpsc::channel::<ThreadEnd>();
     drop(tx);
     let (mut out_sink, stdout_buf) = new_buffer();
     let (mut err_sink, stderr_buf) = new_buffer();
@@ -39,7 +40,7 @@ fn handle_with_disconnected_worker(stdout: &[u8], stderr: &[u8]) -> HandleInner 
     HandleInner {
         stdout_buf,
         stderr_buf,
-        ..HandleInner::new("<test>", crate::process::CancelScope::default(), Some(rx))
+        ..HandleInner::new("<test>", crate::process::CancelScope::root(), Some(rx))
     }
 }
 
@@ -71,51 +72,76 @@ fn fo_expect_variant<'a>(v: &'a FOValue, label: &str) -> &'a FOValue {
     }
 }
 
-/// A panicked worker's `Disconnected` receiver must settle as a failure,
+/// A panicked worker's `Disconnected` receiver must settle as a panic,
 /// not `None` — else `poll` reads `pending` forever and `race` spins.
 #[test]
-fn try_settle_reports_disconnected_worker_as_failed() {
+fn try_settle_reports_disconnected_worker_as_panicked() {
     let handle = handle_with_disconnected_worker(b"", b"");
     match handle.try_settle() {
         Some(CompletedHandle {
-            outcome: Err(Break::Error(e)),
+            end: ThreadEnd::Panicked(text),
             ..
-        }) => {
-            assert_eq!(e.code(), 1);
-        }
-        other => panic!("expected Some(failed outcome), got {other:?}"),
+        }) => assert!(text.contains("spawned thread panicked")),
+        other => panic!("expected Some(panicked end), got {other:?}"),
     }
 }
 
-/// `poll` over a panicked worker yields `` `settled `` with the bytes it
-/// buffered before panicking and an `` `err `` outcome, never re-raising.
+/// `poll` re-raises a panicked worker, as `await` does: a defect is not the
+/// observer's to survive.
 #[test]
-fn poll_reports_disconnected_worker_as_settled_err() {
+fn a_polled_panic_is_reraised() {
     let shell = crate::test_helper::core_shell();
     let handle = handle_with_disconnected_worker(b"out", b"err");
     let args = [Value::Handle(Box::new(handle))];
-    let poll1 = builtin_poll(&args, &shell).expect("poll must not re-raise a panic");
-
-    let settled = expect_variant(&poll1, "settled");
-    let fields = expect_map(settled);
-    assert_eq!(
-        fields.get("stdout").as_deref(),
-        Some(&Value::bytes(b"out".to_vec()))
-    );
-    assert_eq!(
-        fields.get("stderr").as_deref(),
-        Some(&Value::bytes(b"err".to_vec()))
-    );
-    let outcome = fields.get("outcome");
-    let err = expect_variant(outcome.as_deref().expect("outcome field"), "err");
-    let err_fields = expect_map(err);
-    assert_eq!(err_fields.get("status").as_deref(), Some(&Value::Int(1)));
-
-    let poll2 = builtin_poll(&args, &shell).expect("repeat poll must not re-raise");
-    assert_eq!(poll1, poll2);
+    let raised =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| builtin_poll(&args, &shell)));
+    assert!(raised.is_err(), "poll must re-raise a worker's panic");
 }
 
-/// A worker polling `Mooring::check` against its own scope, reporting the
+/// `await` re-raises a panicked worker.
+#[test]
+fn an_awaited_panic_is_reraised() {
+    let shell = crate::test_helper::core_shell();
+    let m = Mooring::adrift();
+    let handle = handle_with_disconnected_worker(b"", b"");
+    let raised = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        await_handle(&handle, &m, &shell)
+    }));
+    assert!(raised.is_err(), "await must re-raise a worker's panic");
+}
+
+/// `race` re-raises a panicked winner.
+#[test]
+fn a_raced_panic_is_reraised() {
+    let shell = crate::test_helper::core_shell();
+    let m = Mooring::adrift();
+    let handle = handle_with_disconnected_worker(b"", b"");
+    let args = [Value::list(vec![Value::Handle(Box::new(handle))])];
+    let raised = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        builtin_race(&args, &m, &shell)
+    }));
+    assert!(raised.is_err(), "race must re-raise a worker's panic");
+}
+
+/// `poll` over a handle `cancel` abandoned settles with the owner's record.
+#[test]
+fn a_cancelled_handle_polls_settled() {
+    let mut shell = crate::test_helper::core_shell();
+    let m = Mooring::adrift();
+    let handle = spawn_child(&m, &mut shell, Birth::Spawn, "<test>", check_loop).unwrap();
+    let args = [Value::Handle(Box::new(handle))];
+    builtin_cancel(&args, &shell).unwrap();
+    let polled = builtin_poll(&args, &shell).expect("poll is total");
+    let fields = expect_map(expect_variant(&polled, "settled"));
+    let outcome = fields.get("outcome");
+    let err = expect_variant(outcome.as_deref().expect("outcome field"), "err");
+    assert_eq!(
+        expect_map(err).get("status").as_deref(),
+        Some(&Value::Int(143))
+    );
+}
+
+/// A worker polling its own scope, reporting the
 /// status it saw once `cancel_via` fires.  `ready` confirms it is alive
 /// first, so a test pins propagation, not a worker that never ran.
 fn spawn_polling_worker(
@@ -124,13 +150,14 @@ fn spawn_polling_worker(
 ) -> (i32, crate::process::CancelScope) {
     let (ready_tx, ready_rx) = mpsc::channel();
     let (done_tx, done_rx) = mpsc::channel();
-    let worker_mooring = Mooring::for_worker(&Mooring::adrift(), &shell.session.root, Arc::new(()));
-    let (_join, worker_cancel) = shell
-        .spawn_thread(worker_mooring, "test-worker", move |mooring, _child| {
+    let node = shell.session.root.worker();
+    let worker_mooring = Mooring::for_worker(&Mooring::adrift(), node.clone(), Arc::new(()));
+    let _join = shell
+        .spawn_thread(worker_mooring, "test-worker", move |_, child| {
             ready_tx.send(()).unwrap();
             loop {
-                if let Err(b) = mooring.check() {
-                    done_tx.send(status(b)).unwrap();
+                if let Err(b) = child.poll() {
+                    done_tx.send(b.code()).unwrap();
                     return;
                 }
                 std::thread::yield_now();
@@ -138,8 +165,8 @@ fn spawn_polling_worker(
         })
         .expect("spawn_thread");
     ready_rx.recv().unwrap();
-    cancel_via(&worker_cancel);
-    (done_rx.recv().unwrap(), worker_cancel)
+    cancel_via(node.as_scope());
+    (done_rx.recv().unwrap(), node.as_scope().clone())
 }
 
 /// Cancelling a worker's own scope stops it and leaves a sibling from the
@@ -148,9 +175,9 @@ fn spawn_polling_worker(
 #[test]
 fn worker_scope_cancel_stops_the_worker() {
     let shell = crate::test_helper::core_shell();
-    let sibling_mooring =
-        Mooring::for_worker(&Mooring::adrift(), &shell.session.root, Arc::new(()));
-    let (_idle_join, sibling) = shell
+    let sibling = shell.session.root.worker();
+    let sibling_mooring = Mooring::for_worker(&Mooring::adrift(), sibling.clone(), Arc::new(()));
+    let _idle_join = shell
         .spawn_thread(sibling_mooring, "test-sibling", |_, _| ())
         .expect("spawn_thread");
     let (observed, worker_scope) = spawn_polling_worker(&shell, |c| {
@@ -189,11 +216,12 @@ fn root_cancel_reaches_the_worker() {
 fn foreground_cancel_spares_worker() {
     let shell = crate::test_helper::core_shell();
     let m = Mooring::adrift();
-    let worker_mooring = Mooring::for_worker(&m, &shell.session.root, Arc::new(()));
-    let (_join, worker_scope) = shell
+    let worker_scope = shell.session.root.worker();
+    let worker_mooring = Mooring::for_worker(&m, worker_scope.clone(), Arc::new(()));
+    let _join = shell
         .spawn_thread(worker_mooring, "test-worker", |_, _| ())
         .expect("spawn_thread");
-    m.cancel.cancel(crate::process::CancelCause::Interrupted);
+    m.home.cancel(crate::process::CancelCause::Interrupted);
     assert!(
         !worker_scope.is_cancelled(),
         "a foreground cancel must not reach a worker"
@@ -208,7 +236,7 @@ fn await_unwinds_on_foreground_cancel_sparing_the_worker() {
 
     // A still-running worker, root-parented as a real `spawn`'s is.  Its
     // `Sender` stays alive, so the receiver reports `Empty`, not `Disconnected`.
-    let (_tx, rx) = mpsc::channel::<Settled<Value>>();
+    let (_tx, rx) = mpsc::channel::<ThreadEnd>();
     let (_sink, stdout_buf) = new_buffer();
     let (_sink2, stderr_buf) = new_buffer();
     let worker_scope = shell.session.root.worker().as_scope().clone();
@@ -220,11 +248,11 @@ fn await_unwinds_on_foreground_cancel_sparing_the_worker() {
 
     // Cancel the foreground (run deadline / interrupt), not the root.
     let m = Mooring::adrift();
-    m.cancel.cancel(crate::process::CancelCause::Interrupted);
+    shell.scope.cancel(crate::process::CancelCause::Interrupted);
 
     let err = await_handle(&handle, &m, &shell)
         .expect_err("await must unwind on a foreground cancel, not block");
-    assert!(matches!(err, Break::Error(_)));
+    assert!(matches!(err, Break::Escape(Escape::Stopped { .. })));
     assert!(
         !worker_scope.is_cancelled(),
         "the foreground cancel must unblock await without reaping the root-parented worker"
@@ -238,11 +266,11 @@ fn lease_ms(idle: u64, backstop: u64) -> WorkerLease {
     }
 }
 
-/// A body that stays `Running` until cancelled, polling `Mooring::check` so
+/// A body that stays `Running` until cancelled, polling its shell so
 /// a reap genuinely unwinds the thread rather than flag a scope nobody reads.
-fn check_loop(mooring: &Mooring, _child: &mut Shell) -> Settled<Value> {
+fn check_loop(_mooring: &Mooring, child: &mut Shell) -> Settled<Value> {
     loop {
-        mooring.check()?;
+        child.poll()?;
         std::thread::yield_now();
     }
 }
@@ -336,7 +364,7 @@ impl crate::types::EnquiryDesk for EchoDesk {
         &self,
         req: crate::first_order::FOValue,
         _cancel: &crate::process::CancelScope,
-    ) -> Result<crate::first_order::FOValue, crate::types::Error> {
+    ) -> Settled<crate::first_order::FOValue> {
         Ok(req)
     }
 }
@@ -348,7 +376,7 @@ fn spawned_worker_never_receives_the_enquiry_desk() {
     let mut shell = crate::test_helper::core_shell();
     let mut m = Mooring::adrift();
     m.desk = Some(Arc::new(EchoDesk) as crate::types::Desk);
-    let (tx, rx) = mpsc::channel::<Result<crate::first_order::FOValue, crate::types::Error>>();
+    let (tx, rx) = mpsc::channel::<Settled<crate::first_order::FOValue>>();
     let handle = spawn_child(
         &m,
         &mut shell,
@@ -366,7 +394,8 @@ fn spawned_worker_never_receives_the_enquiry_desk() {
         .recv_timeout(std::time::Duration::from_secs(1))
         .expect("worker must send its enquire outcome before settling");
     match outcome {
-        Err(e) => assert_eq!(e.message, crate::types::NO_DESK),
+        Err(Break::Error(e)) => assert_eq!(e.message, crate::types::NO_DESK),
+        Err(other) => panic!("expected the absence error, got {other:?}"),
         Ok(_) => panic!("a worker must never reach the spawning run's desk"),
     }
 }
@@ -978,8 +1007,8 @@ fn deferred_surface_replays_once_on_await_not_poll() {
 
     // A settled handle carrying one buffered event; the sender stays alive,
     // so the receiver sees a value rather than a disconnect.
-    let (tx, rx) = mpsc::channel::<Settled<Value>>();
-    tx.send(Ok(Value::Unit)).unwrap();
+    let (tx, rx) = mpsc::channel::<ThreadEnd>();
+    tx.send(ThreadEnd::Settled(Ok(Value::Unit))).unwrap();
     let (_s, stdout_buf) = new_buffer();
     let (_s2, stderr_buf) = new_buffer();
     let surface_buf: SurfaceBuffer = Arc::new(Mutex::new(vec![FOValue::Variant {
@@ -990,7 +1019,7 @@ fn deferred_surface_replays_once_on_await_not_poll() {
         stdout_buf,
         stderr_buf,
         surface_buf,
-        ..HandleInner::new("<test>", crate::process::CancelScope::default(), Some(rx))
+        ..HandleInner::new("<test>", crate::process::CancelScope::root(), Some(rx))
     };
 
     builtin_poll(&[Value::Handle(Box::new(handle.clone()))], &shell).expect("poll ok");
@@ -1181,10 +1210,10 @@ fn deferred_batch_carries_body_surface_before_done() {
 
     match handle.try_settle() {
         Some(CompletedHandle {
-            outcome: Err(Break::Error(_)),
+            end: ThreadEnd::Panicked(_),
             ..
         }) => {}
-        other => panic!("expected a settled panic outcome, got {other:?}"),
+        other => panic!("expected a panicked end, got {other:?}"),
     }
 }
 
@@ -1729,4 +1758,207 @@ fn settled_entries_do_not_block_admission() {
         Ok(Value::Unit)
     })
     .expect("a lingering settled entry must not hold a seat");
+}
+
+fn stopped_error(b: Break) -> Error {
+    match b {
+        Break::Error(e) => e,
+        other @ Break::Escape(_) => panic!("expected an error, got {other:?}"),
+    }
+}
+
+fn expect_worker_stop(e: &Error, stop: WorkerStop) {
+    assert_eq!(e.status, Status::WorkerStopped(stop));
+    assert_eq!(e.code(), i32::from(stop.cause().code()));
+    assert_eq!(e.message, stop.message());
+    let reason = crate::fact::Reason::from(&e.status);
+    let want = match stop {
+        WorkerStop::Cancelled => crate::fact::Reason::Cancelled,
+        WorkerStop::TimedOut => crate::fact::Reason::TimedOut,
+    };
+    assert_eq!(reason, want);
+}
+
+/// `cancel` then `await`: the stop is this run's own, so it is the awaiter's error.
+#[test]
+fn awaiting_a_cancelled_worker_is_the_awaiters_error() {
+    let mut shell = crate::test_helper::core_shell();
+    let m = Mooring::adrift();
+    let handle = spawn_child(&m, &mut shell, Birth::Spawn, "<test>", check_loop).unwrap();
+    builtin_cancel(&[Value::Handle(Box::new(handle.clone()))], &shell).unwrap();
+    let err = await_handle(&handle, &m, &shell).expect_err("a cancelled worker has no value");
+    expect_worker_stop(&stopped_error(err), WorkerStop::Cancelled);
+}
+
+/// A lease that expires settles the worker as an error `await` sees.
+#[test]
+fn awaiting_a_leased_out_worker_is_the_awaiters_error() {
+    let mut shell = crate::test_helper::core_shell();
+    let mut m = Mooring::adrift();
+    m.deferred_lease = Some(lease_ms(10_000, 20));
+    let handle = spawn_child(&m, &mut shell, Birth::Spawn, "<test>", check_loop).unwrap();
+    let err = await_handle(&handle, &m, &shell).expect_err("the lease expired");
+    expect_worker_stop(&stopped_error(err), WorkerStop::TimedOut);
+}
+
+/// The closing poll: a lease that fires during the body's last step, with no
+/// poll after it, is still the handle's error and not a success.
+#[test]
+fn a_lease_that_fires_during_the_last_step_is_still_the_awaiters_error() {
+    let mut shell = crate::test_helper::core_shell();
+    let mut m = Mooring::adrift();
+    m.deferred_lease = Some(lease_ms(10_000, 20));
+    let handle = spawn_child(&m, &mut shell, Birth::Spawn, "<test>", |_, _| {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        Ok(Value::Unit)
+    })
+    .unwrap();
+    let err = await_handle(&handle, &m, &shell).expect_err("the closing poll reads the lease");
+    expect_worker_stop(&stopped_error(err), WorkerStop::TimedOut);
+}
+
+/// A `cancel` from another thread while `await` is blocked is the awaiter's error.
+#[test]
+fn a_cancel_during_await_is_the_awaiters_error() {
+    let mut shell = crate::test_helper::core_shell();
+    let m = Mooring::adrift();
+    let handle = spawn_child(&m, &mut shell, Birth::Spawn, "<test>", check_loop).unwrap();
+    let canceller = handle.clone();
+    let join = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        if canceller.detach() {
+            canceller.cancel.cancel(CancelCause::Cancelled);
+        }
+    });
+    let err = await_handle(&handle, &m, &shell).expect_err("cancelled while awaited");
+    join.join().unwrap();
+    expect_worker_stop(&stopped_error(err), WorkerStop::Cancelled);
+}
+
+fn exiting_worker(shell: &mut Shell) -> HandleInner {
+    let handle = spawn_child(&Mooring::adrift(), shell, Birth::Spawn, "<test>", |_, _| {
+        Err(Break::Escape(Escape::Exit(3)))
+    })
+    .unwrap();
+    wait_settled(&handle);
+    handle
+}
+
+#[test]
+fn awaiting_an_exited_worker_exits() {
+    let mut shell = crate::test_helper::core_shell();
+    let handle = exiting_worker(&mut shell);
+    let err = await_handle(&handle, &Mooring::adrift(), &shell).expect_err("exit passes");
+    assert!(matches!(err, Break::Escape(Escape::Exit(3))), "{err:?}");
+}
+
+#[test]
+fn polling_an_exited_worker_exits() {
+    let mut shell = crate::test_helper::core_shell();
+    let handle = exiting_worker(&mut shell);
+    let err = builtin_poll(&[Value::Handle(Box::new(handle))], &shell).expect_err("exit passes");
+    assert!(matches!(err, Break::Escape(Escape::Exit(3))), "{err:?}");
+}
+
+/// A stop naming a node that is not the worker's passes the boundary, so
+/// `await` and `poll` re-raise it.
+#[test]
+fn a_foreign_stop_is_reraised_by_await_and_poll() {
+    let mut shell = crate::test_helper::core_shell();
+    let m = Mooring::adrift();
+    let foreign = shell.session.root.as_scope().id();
+    let body = move |_: &Mooring, _: &mut Shell| {
+        Err(Break::stopped(
+            CancelCause::Terminated,
+            Some(foreign.clone()),
+        ))
+    };
+    let awaited = spawn_child(&m, &mut shell, Birth::Spawn, "<a>", body.clone()).unwrap();
+    let err = await_handle(&awaited, &m, &shell).expect_err("a foreign stop passes");
+    assert!(
+        matches!(
+            err,
+            Break::Escape(Escape::Stopped {
+                cause: CancelCause::Terminated,
+                ..
+            })
+        ),
+        "{err:?}"
+    );
+
+    let polled = spawn_child(&m, &mut shell, Birth::Spawn, "<p>", body).unwrap();
+    wait_settled(&polled);
+    let err = builtin_poll(&[Value::Handle(Box::new(polled))], &shell)
+        .expect_err("a foreign stop passes");
+    assert!(
+        matches!(
+            err,
+            Break::Escape(Escape::Stopped {
+                cause: CancelCause::Terminated,
+                ..
+            })
+        ),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn a_stop_naming_the_workers_node_is_its_own_and_no_other_is() {
+    use super::birth::convert_own_stop;
+    let root = crate::process::DurableRoot::default();
+    let node = root.worker();
+    let own = convert_own_stop(
+        Err(Break::stopped(CancelCause::Cancelled, Some(node.id()))),
+        &node,
+    );
+    match own {
+        Err(Break::Error(e)) => assert_eq!(e.status, Status::WorkerStopped(WorkerStop::Cancelled)),
+        other => panic!("expected the worker's error, got {other:?}"),
+    }
+    let foreign = convert_own_stop(
+        Err(Break::stopped(
+            CancelCause::Terminated,
+            Some(root.as_scope().id()),
+        )),
+        &node,
+    );
+    assert!(matches!(
+        foreign,
+        Err(Break::Escape(Escape::Stopped { .. }))
+    ));
+    let unnamed = convert_own_stop(Err(Break::stopped(CancelCause::Cancelled, None)), &node);
+    assert!(matches!(
+        unnamed,
+        Err(Break::Escape(Escape::Stopped { .. }))
+    ));
+}
+
+#[test]
+fn a_workers_poll_names_its_own_node() {
+    let mut shell = crate::test_helper::core_shell();
+    let node = shell.session.root.worker();
+    shell.scope = node.clone();
+    node.cancel(CancelCause::Cancelled);
+    match shell.poll() {
+        Err(Break::Escape(Escape::Stopped {
+            owner: Some(id), ..
+        })) => assert_eq!(id, node.id()),
+        other => panic!("expected a stop naming the node, got {other:?}"),
+    }
+}
+
+/// A stage's node under a worker's: the join names the outermost node
+/// attaining it, the worker's, so its switch converts a stop minted below.
+#[test]
+fn a_stage_inside_a_worker_names_the_worker() {
+    use super::birth::convert_own_stop;
+    let node = crate::process::DurableRoot::default().worker();
+    node.cancel(CancelCause::TimedOut);
+    let inner = node.child();
+    let (cause, owner) = inner.in_force().expect("the chain carries the cause");
+    assert_eq!(owner, node.id());
+    match convert_own_stop(Err(Break::stopped(cause, Some(owner))), &node) {
+        Err(Break::Error(e)) => assert_eq!(e.status, Status::WorkerStopped(WorkerStop::TimedOut)),
+        other => panic!("expected the worker's error, got {other:?}"),
+    }
 }

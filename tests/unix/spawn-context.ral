@@ -60,6 +60,6 @@ echo !{case $sampled [`settled: { |s| case $s[outcome] [`ok: { |v| return $v }, 
 echo !{is-done $hs}
 let hc = !{spawn { sleep 30 }}
 cancel $hc
-echo !{try { poll $hc; return false } { |_| return true }}
+echo !{case !{poll $hc} [`settled: { |_| return true }, `pending: { |_| return false }]}
 
 echo 'spawn context tests done'

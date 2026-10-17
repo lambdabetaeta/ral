@@ -55,6 +55,37 @@ which self-masking keeps from diverging; the live semantic question is therefore
 masking discipline — which handler is in scope at each point — not how a captured
 continuation is re-entered.
 
+## Owners and the shield are `poll` handlers
+
+The same shape reaches past commands. Cancellation is one operation, `poll : 1
+→ 1`, performed at every step boundary (`Shell::poll`) and once per slice
+inside a blocked wait; under a nonzero join on the current scope it raises
+`stop ν c`, an escape naming the node ν that attained the join. The machine's
+stack already holds the frames that interpret it. `try` interprets `fail` and
+nothing else, so a stop walks past it as `exit` does. A **base frame** — the
+top of a run, a worker, a pipeline stage — is one handler: `{ return x ↦ R x;
+fail e ↦ pass; stop ν c ↦ if ν = me then R′ c else pass; poll k ↦ if j ≠ 0
+then stop ν j else k () }`, every other operation forwarded. Its return clause
+opens with a *closing poll* (`final_poll`): the node is read once more after
+the body settled, so a stop that landed after the last poll is not lost. A
+worker consumes a stop naming its own node into the handle's error; a stage
+forwards everything, and its collector consumes every stop naming that
+stage's node; the top names no node of its own, so `exit` and the host's
+stops are **top-level effects** no frame of the program interprets, read off
+the empty stack as an `Ending`.
+
+The shield is the fourth instance, `poll k ↦ k ()` while it masks:
+`Frame::Cleanup` swaps `Shell::scope` for a shielded child for a `guard`
+cleanup's extent and restores it on pop and abandon, exactly as
+`Frame::Capture` swaps `io.stdout`. So `Shell::scope` is a dynamically scoped
+cell beside `io.stdout`, *read* by every poll; the owner's name is
+`Mooring::home`, run-invariant and the target of every *write*. Owner-frame
+masking here is the same shape as self-masking above: a frame lifts what an
+outer one would answer for the extent of its own body
+([[decisions/261016_delimiters-are-handlers-for-poll|delimiters-are-handlers-for-poll]],
+[[decisions/261016_a-cleanup-is-shielded-within-its-grace|a-cleanup-is-shielded-within-its-grace]],
+[[internals/cancellation|cancellation]]).
+
 Self-masking removes exactly the owning frame; nearer unmatched frames remain
 visible too. In particular, an outer named arm wins over a nearer catch-all,
 and that catch-all remains available while the named arm runs. The checked

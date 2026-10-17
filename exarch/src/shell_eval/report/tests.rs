@@ -1,5 +1,7 @@
 use super::*;
 use ral_core::first_order::FOValue;
+use ral_core::process::CancelCause;
+use ral_core::protocol::FailureStatus;
 use ral_core::types::LeaseClass;
 
 fn born(ids: &[u64]) -> HashSet<u64> {
@@ -36,16 +38,14 @@ fn a_returning_call_says_nothing() {
 
 /// The status a walled run carries: its deadline cancellation's own.
 fn deadline_status() -> ral_core::protocol::FailureStatus {
-    ral_core::types::Status::Cancelled(ral_core::process::CancelCause::TimedOut)
-        .code()
-        .into()
+    FailureStatus::from(i32::from(CancelCause::TimedOut.code()))
 }
 
 #[test]
 fn wall_composes_rendering_remedy_audit_and_orphan_in_order() {
-    let ending = Ending::Walled {
+    let ending = Ending::Stopped {
         rendered: "error: sleep 30\n".into(),
-        record: FOValue::Unit,
+        cause: CancelCause::TimedOut,
         status: deadline_status(),
     };
     let births = born(&[1]);
@@ -61,6 +61,23 @@ fn wall_composes_rendering_remedy_audit_and_orphan_in_order() {
         rendered_at < remedy_at && remedy_at < audit_at && audit_at < orphan_at,
         "composition order must be rendering, remedy, audit, orphan: {out:?}"
     );
+}
+
+/// Only a deadline's stop earns the timeout tip; a reader-gone stop says nothing.
+#[test]
+fn only_a_timed_out_stop_carries_the_tip() {
+    let stopped = |rendered: &str, cause, status: i32| Ending::Stopped {
+        rendered: rendered.into(),
+        cause,
+        status: status.into(),
+    };
+    let interrupted = stopped("error: interrupted\n", CancelCause::Interrupted, 130);
+    let (out, exit) = render(&interrupted, &HashSet::new(), None, &[], 5);
+    assert_eq!((out.as_str(), exit), ("error: interrupted\n", 130));
+
+    let gone = stopped("", CancelCause::ReaderGone, 141);
+    let (out, exit) = render(&gone, &HashSet::new(), None, &[], 5);
+    assert_eq!((out.as_str(), exit), ("", 141));
 }
 
 #[test]
@@ -157,9 +174,9 @@ fn ending_matrix_gates_audit_and_orphan_on_unshown_effects() {
         ),
         (
             "wall",
-            Ending::Walled {
+            Ending::Stopped {
                 rendered: "error: wall\n".into(),
-                record: FOValue::Unit,
+                cause: CancelCause::TimedOut,
                 status: deadline_status(),
             },
             124,

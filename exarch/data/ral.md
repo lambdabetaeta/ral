@@ -217,7 +217,7 @@ A failed call ends a `ral` script, much like `set -euo pipefail` in `bash`. Defi
         "sort failed: exited $err[status], $err[message]"
       }
 
-`$err[reason]` says why it failed — `` `exited n ``, `` `signaled n ``, `` `cancelled `timed-out `` (or another cause), `` `not-found ``, `` `not-runnable ``, `` `raised `` — so branch on it rather than decoding `status`.
+`$err[reason]` says why it failed — `` `exited n ``, `` `signaled n ``, `` `cancelled ``, `` `timed-out ``, `` `not-found ``, `` `not-runnable ``, `` `raised `` — so branch on it rather than decoding `status`.
 
 The handler block must start on the same line as the body's closing brace — `} { |err| … }`. `$err[message]` is synthetic status text, not the failing command's stderr; wrap a failing call in `audit` when you need to see stdout.
 
@@ -255,7 +255,7 @@ If you truly have nothing else to do, `await` the handle with a long timeout.
       `err: { |e| fail $e },
     ]
 
-Like `audit`, deferred blocks turn errors into data. They are idempotent, so you can await the same handle across turns.
+Like `audit`, deferred blocks turn errors into data. `try` cannot catch Ctrl-C or the tool timeout: they stop the run. A worker you `cancel` reports `` `cancelled `` on `await` and in `poll`'s settled outcome; a worker that `exit`s ends the run that awaits or polls it. They are idempotent, so you can await the same handle across turns.
 
 Use `cancel $h` to stop a thread that is no longer required.
 

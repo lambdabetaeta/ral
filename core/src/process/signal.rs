@@ -54,7 +54,7 @@ pub(crate) fn signals_of(cause: CancelCause) -> impl Iterator<Item = Signal> {
 /// `_exit` in the platform handler.
 ///
 /// Not a delivery mechanism — the handlers deliver through the cancel scopes,
-/// which is all [`Mooring::check`](crate::types::Mooring::check) reads.  A backstop for wedged cooperative delivery
+/// which is all [`Shell::poll`](crate::types::Shell::poll) reads.  A backstop for wedged cooperative delivery
 /// must not depend on what it backstops.
 pub(crate) static ESCALATION: AtomicU8 = AtomicU8::new(0);
 

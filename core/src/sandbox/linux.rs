@@ -2279,16 +2279,17 @@ mod tests {
             jail,
         );
 
+        let striker = scope.clone();
         let canceller = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(200));
-            scope.cancel(CancelCause::Cancelled);
+            striker.cancel(CancelCause::Cancelled);
         });
 
         let t0 = std::time::Instant::now();
         let waited = running.wait();
         let elapsed = t0.elapsed();
         let (outcome, cause) = (waited.outcome, waited.cause);
-        waited.settle();
+        waited.settle(&scope);
         canceller.join().expect("canceller thread");
 
         assert!(

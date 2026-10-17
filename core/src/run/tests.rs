@@ -1,4 +1,5 @@
 use super::*;
+use crate::capability::GrantStack;
 use std::sync::{Arc, Mutex};
 
 /// Install `name`, a builtin running `act` inside whichever run calls it,
@@ -9,14 +10,33 @@ pub(crate) fn install_act(
     name: &'static str,
     act: impl Fn(&Mooring, &mut Shell) + Send + Sync + 'static,
 ) {
+    install_body(runtime, name, move |mooring, shell| {
+        act(mooring, shell);
+        Ok(Value::Unit)
+    });
+}
+
+/// [`install_act`]'s sibling whose act halts the run with `halt`.
+fn install_halting_act(
+    runtime: &mut crate::Runtime,
+    name: &'static str,
+    halt: impl Fn(&Mooring) -> Break + Send + Sync + 'static,
+) {
+    install_body(runtime, name, move |mooring, _| Err(halt(mooring)));
+}
+
+fn install_body(
+    runtime: &mut crate::Runtime,
+    name: &'static str,
+    body: impl Fn(&Mooring, &mut Shell) -> Settled<Value> + Send + Sync + 'static,
+) {
     use crate::typecheck::builtins::{mk_scheme, pure, thunk};
     let entry = crate::types::BuiltinEntry::new(
         std::borrow::Cow::Borrowed(name),
         |_| mk_scheme(&[], &[], thunk(pure(crate::ty::Ty::Unit))),
         "test-only: act from inside the run.",
         crate::types::BuiltinBody::Captured(Arc::new(move |_, mooring, shell| {
-            act(mooring, shell);
-            Ok(crate::types::Value::Unit)
+            body(mooring, shell)
         })),
     );
     runtime.install_captured_builtins(&vec![entry].into());
@@ -24,7 +44,7 @@ pub(crate) fn install_act(
 
 /// An act striking its own run with `cause`, as a `Control` does.
 fn strike(cause: crate::process::CancelCause) -> impl Fn(&Mooring, &mut Shell) + Send + Sync {
-    move |mooring, _| mooring.cancel.cancel(cause)
+    move |mooring, _| mooring.home.cancel(cause)
 }
 
 #[test]
@@ -357,7 +377,7 @@ fn surfaced_notices(shell: &mut Shell, src: &str) -> Vec<crate::types::Notice> {
 }
 
 /// An interrupt struck mid-run is read at the next poll point, so
-/// `Mooring::check` unwinds the eval at 130.
+/// `Shell::poll` unwinds the eval at 130.
 #[test]
 fn an_interrupt_mid_run_unwinds_the_eval() {
     let mut runtime = crate::test_helper::core_runtime();
@@ -377,21 +397,23 @@ fn an_interrupt_mid_run_unwinds_the_eval() {
                 130,
                 "a foreground cancel observed mid-eval reports 130"
             );
-            let result = ending.into_result();
             assert!(
-                matches!(result, Err(Break::Error(_))),
-                "the cancel must unwind into a Break::Error, got {result:?}"
+                matches!(
+                    ending,
+                    Ending::Stopped {
+                        cause: crate::process::CancelCause::Interrupted,
+                        ..
+                    }
+                ),
+                "the cancel must unwind into a stop, got {ending:?}"
             );
         }
         RunReport::Static { .. } => panic!("valid source must reach evaluation"),
     }
 }
 
-/// `try` classifies a cancellation like any recoverable error, so a handler
-/// that settles cleanly makes the outcome `Ok`, whose status is 0 — the
-/// run boundary must re-poll the monotone scope before the status is
-/// read, or a final `try { … } { |_| return () }` suppresses the
-/// interrupt entirely.
+/// A stop is no error, so `try` passes it and its handler never runs; the
+/// run ends stopped, as the monotone scope's closing poll would have it.
 #[test]
 fn a_try_handler_cannot_settle_a_cancelled_run() {
     let mut runtime = crate::test_helper::core_runtime();
@@ -411,13 +433,16 @@ fn a_try_handler_cannot_settle_a_cancelled_run() {
                 130,
                 "a try handler must not settle a cancelled run at 0"
             );
-            match ending.into_result() {
-                Err(Break::Error(e)) => assert_eq!(
-                    e.message, "interrupted",
-                    "the boundary poll must report the cancel cause's own words"
+            assert!(
+                matches!(
+                    ending,
+                    Ending::Stopped {
+                        cause: crate::process::CancelCause::Interrupted,
+                        ..
+                    }
                 ),
-                other => panic!("the re-poll must unwind into a Break::Error, got {other:?}"),
-            }
+                "a try handler must not catch a stop, got {ending:?}"
+            );
         }
         RunReport::Static { .. } => panic!("valid source must reach evaluation"),
     }
@@ -436,7 +461,7 @@ fn an_aside_cannot_absorb_its_callers_interrupt() {
     let status = hook_status.clone();
     install_act(&mut runtime, "interrupt-then-aside", move |mooring, _| {
         mooring
-            .cancel
+            .home
             .cancel(crate::process::CancelCause::Interrupted);
         let report = slot
             .lock()
@@ -510,10 +535,15 @@ fn cancelling_a_session_by_handle_reaches_its_aside() {
                 143,
                 "the aside's run unwinds with the session"
             );
-            let result = ending.into_result();
             assert!(
-                matches!(result, Err(Break::Error(_))),
-                "the handle cancel must unwind the aside, got {result:?}"
+                matches!(
+                    ending,
+                    Ending::Stopped {
+                        cause: crate::process::CancelCause::Cancelled,
+                        ..
+                    }
+                ),
+                "the handle cancel must unwind the aside, got {ending:?}"
             );
         }
         RunReport::Static { .. } => panic!("valid source must reach evaluation"),
@@ -547,10 +577,10 @@ fn a_session_is_deaf_to_the_ambient_causes() {
     }
 }
 
-/// The act fires the `Deadline` cause directly, pinning the `Walled`
+/// The act fires the `TimedOut` cause directly, pinning the `Stopped`
 /// classification without sleeping on the reaper.
 #[test]
-fn deadline_cancel_reports_walled() {
+fn a_walled_run_ends_stopped_timed_out() {
     let mut runtime = crate::test_helper::core_runtime();
     install_act(
         &mut runtime,
@@ -564,8 +594,14 @@ fn deadline_cancel_reports_walled() {
     }) {
         RunReport::Ran { ending, .. } => {
             assert!(
-                matches!(ending, Ending::Walled { .. }),
-                "a Deadline foreground cancel must report Walled"
+                matches!(
+                    ending,
+                    Ending::Stopped {
+                        cause: crate::process::CancelCause::TimedOut,
+                        ..
+                    }
+                ),
+                "a TimedOut foreground cancel must end the run stopped"
             );
         }
         RunReport::Static { .. } => panic!("valid source must reach evaluation"),
@@ -573,7 +609,7 @@ fn deadline_cancel_reports_walled() {
 }
 
 /// A real wall, so the cancel lands *during* the script: in
-/// `deadline_cancel_reports_walled` it fires ahead of every binding, so
+/// `a_walled_run_ends_stopped_timed_out` it fires ahead of every binding, so
 /// none has landed there for the wall to be measured against.
 #[cfg_attr(
     ctor_without_argv,
@@ -587,8 +623,14 @@ fn mid_script_wall_keeps_the_bindings_that_landed() {
         ..Run::captured("let pre_wall = 1\nsleep 30\nlet post_wall = 2", "<test>")
     }) {
         RunReport::Ran { ending, .. } => assert!(
-            matches!(ending, Ending::Walled { .. }),
-            "a wall cut mid-script must report Walled, got {ending:?}"
+            matches!(
+                ending,
+                Ending::Stopped {
+                    cause: crate::process::CancelCause::TimedOut,
+                    ..
+                }
+            ),
+            "a wall cut mid-script must end the run stopped, got {ending:?}"
         ),
         RunReport::Static { .. } => panic!("valid source must reach evaluation"),
     }
@@ -723,7 +765,7 @@ impl crate::types::EnquiryDesk for PanickingDesk {
         &self,
         _req: crate::first_order::FOValue,
         _cancel: &crate::process::CancelScope,
-    ) -> Result<crate::first_order::FOValue, crate::types::Error> {
+    ) -> Settled<crate::first_order::FOValue> {
         panic!("run-door test: desk handler panic");
     }
 }
@@ -761,7 +803,7 @@ fn rendered_fault(shell: &mut Shell, src: &str) -> String {
     };
     match ending {
         crate::protocol::Ending::Raised { rendered, .. }
-        | crate::protocol::Ending::Walled { rendered, .. } => rendered,
+        | crate::protocol::Ending::Stopped { rendered, .. } => rendered,
         other => panic!("{src:?} must fault, got {other:?}"),
     }
 }
@@ -1014,5 +1056,310 @@ fn a_panicked_dispatch_reports_static_and_leaves_the_next_trail_empty() {
             "the panicked dispatch's scope must not leak into the next one"
         ),
         RunReport::Static { .. } => panic!("valid source must reach evaluation"),
+    }
+}
+
+// ── delimiters are handlers for `poll` ───────────────────────────────
+
+/// A run's report over a runtime, its ending and captured stdout.
+fn ran(runtime: crate::Runtime, run: Run) -> (Ending, String) {
+    match Shell::root(runtime.into()).run(run) {
+        RunReport::Ran {
+            ending, captured, ..
+        } => {
+            let stdout = captured.map(|c| c.stdout).unwrap_or_default();
+            (ending, String::from_utf8_lossy(&stdout).into_owned())
+        }
+        RunReport::Static { .. } => panic!("valid source must reach evaluation"),
+    }
+}
+
+fn captured_with_grace(src: &str, grace: std::time::Duration) -> Run {
+    Run {
+        cleanup_grace: grace,
+        ..Run::captured(src, "<test>")
+    }
+}
+
+fn is_stopped(ending: &Ending, expected: CancelCause) -> bool {
+    matches!(ending, Ending::Stopped { cause, .. } if *cause == expected)
+}
+
+/// A runtime with `strike`, `strike-aborted` and `mark`, and the flag `mark` sets.
+fn marking_runtime() -> (crate::Runtime, Arc<Mutex<bool>>) {
+    let mut runtime = crate::test_helper::core_runtime();
+    install_act(&mut runtime, "strike", strike(CancelCause::Interrupted));
+    install_act(&mut runtime, "strike-aborted", strike(CancelCause::Aborted));
+    let marked = Arc::new(Mutex::new(false));
+    let flag = marked.clone();
+    install_act(&mut runtime, "mark", move |_, _| {
+        *flag.lock().unwrap() = true;
+    });
+    (runtime, marked)
+}
+
+/// A stop no condition stands behind, so a frame that caught it would run
+/// on unobstructed: the witness for law 1's third equation.
+fn unstruck_runtime() -> crate::Runtime {
+    let mut runtime = crate::test_helper::core_runtime();
+    install_halting_act(&mut runtime, "stop-unstruck", |_| {
+        Break::stopped(CancelCause::Interrupted, None)
+    });
+    runtime
+}
+
+#[test]
+fn a_try_cannot_see_a_stop() {
+    let (ending, out) = ran(
+        unstruck_runtime(),
+        Run::captured(
+            "try { stop-unstruck\necho after } { |e| echo handled }",
+            "<test>",
+        ),
+    );
+    assert!(is_stopped(&ending, CancelCause::Interrupted), "{ending:?}");
+    assert!(
+        !out.contains("after") && !out.contains("handled"),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn an_audit_passes_a_stop() {
+    let (ending, out) = ran(
+        unstruck_runtime(),
+        Run::captured("audit { stop-unstruck\necho after }", "<test>"),
+    );
+    assert!(is_stopped(&ending, CancelCause::Interrupted), "{ending:?}");
+    assert!(!out.contains("after"), "{out:?}");
+}
+
+#[test]
+fn a_fallback_passes_a_stop() {
+    let (ending, out) = ran(
+        unstruck_runtime(),
+        Run::captured(
+            "!{ stop-unstruck\nfail [status: 1, message: x] } ? echo fallback",
+            "<test>",
+        ),
+    );
+    assert!(is_stopped(&ending, CancelCause::Interrupted), "{ending:?}");
+    assert!(!out.contains("fallback"), "{out:?}");
+}
+
+#[test]
+fn a_run_ending_in_an_error_under_a_stop_ends_stopped() {
+    let mut runtime = crate::test_helper::core_runtime();
+    install_halting_act(&mut runtime, "strike-then-fail", |mooring| {
+        mooring.home.cancel(CancelCause::Interrupted);
+        crate::types::sig("x")
+    });
+    let (ending, _) = ran(runtime, Run::captured("strike-then-fail", "<test>"));
+    assert!(is_stopped(&ending, CancelCause::Interrupted), "{ending:?}");
+}
+
+#[test]
+fn a_cleanup_runs_shielded_and_the_stop_follows() {
+    let (runtime, marked) = marking_runtime();
+    let (ending, _) = ran(
+        runtime,
+        Run::captured("guard { strike } { sleep 0.2\nmark }", "<test>"),
+    );
+    assert!(is_stopped(&ending, CancelCause::Interrupted), "{ending:?}");
+    assert!(
+        *marked.lock().unwrap(),
+        "the cleanup must have run to its end"
+    );
+}
+
+#[test]
+fn a_cleanup_under_a_value_is_shielded_too() {
+    let (runtime, marked) = marking_runtime();
+    let (ending, _) = ran(
+        runtime,
+        Run::captured("guard { return 1 } { strike\nsleep 0.2\nmark }", "<test>"),
+    );
+    assert!(is_stopped(&ending, CancelCause::Interrupted), "{ending:?}");
+    assert!(*marked.lock().unwrap());
+}
+
+/// 0.7 s from the strike is within the grace; 1.2 s from the cleanup's
+/// start would not be.
+#[test]
+fn a_cleanup_struck_late_gets_the_grace() {
+    let (runtime, marked) = marking_runtime();
+    let (ending, _) = ran(
+        runtime,
+        captured_with_grace(
+            "guard { return 1 } { sleep 0.5\nstrike\nsleep 0.7\nmark }",
+            std::time::Duration::from_secs(1),
+        ),
+    );
+    assert!(is_stopped(&ending, CancelCause::Interrupted), "{ending:?}");
+    assert!(*marked.lock().unwrap());
+}
+
+#[test]
+fn a_cleanup_that_outlives_its_grace_is_stopped() {
+    let (runtime, marked) = marking_runtime();
+    let started = std::time::Instant::now();
+    let (ending, _) = ran(
+        runtime,
+        captured_with_grace(
+            "guard { strike } { sleep 5\nmark }",
+            std::time::Duration::from_millis(50),
+        ),
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(3));
+    assert!(is_stopped(&ending, CancelCause::Interrupted), "{ending:?}");
+    assert!(!*marked.lock().unwrap());
+}
+
+#[test]
+fn an_abort_passes_a_cleanup() {
+    let (runtime, marked) = marking_runtime();
+    let started = std::time::Instant::now();
+    let (ending, _) = ran(
+        runtime,
+        Run::captured("guard { strike-aborted } { sleep 5\nmark }", "<test>"),
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(3));
+    assert!(is_stopped(&ending, CancelCause::Aborted), "{ending:?}");
+    assert!(!*marked.lock().unwrap());
+}
+
+/// The shield is cooperative (ADR 261016_a-cleanup-is-shielded-within-its-grace): a signalled child is a failure `try`
+/// catches, the current scope carrying no cause to attribute it to.
+#[cfg(unix)]
+#[cfg_attr(
+    ctor_without_argv,
+    ignore = "a test binary serves bundled tools before main, where musl gives std no argv"
+)]
+#[test]
+fn a_signalled_child_under_a_shield_is_a_failure() {
+    let (runtime, marked) = marking_runtime();
+    let (ending, _) = ran(
+        runtime,
+        Run::captured(
+            "guard { strike } { try { /bin/sh -c 'kill -INT $$' } { |e| mark } }",
+            "<test>",
+        ),
+    );
+    assert!(is_stopped(&ending, CancelCause::Interrupted), "{ending:?}");
+    assert!(
+        *marked.lock().unwrap(),
+        "the handler must have seen a failure"
+    );
+}
+
+#[test]
+fn the_scope_comes_back_after_a_cleanup() {
+    for src in [
+        "guard { return 1 } { echo in }\nstrike\necho after",
+        "try { guard { fail [status: 1, message: x] } { echo in } } { |e|\nstrike\necho after }",
+    ] {
+        let (runtime, _) = marking_runtime();
+        let (ending, out) = ran(runtime, Run::captured(src, "<test>"));
+        assert!(
+            is_stopped(&ending, CancelCause::Interrupted),
+            "{src}: {ending:?}"
+        );
+        assert!(
+            out.contains("in") && !out.contains("after"),
+            "{src}: {out:?}"
+        );
+    }
+}
+
+/// One grace from the strike ends both at 1 s; renewed at the inner
+/// cleanup's (or outer finaliser's) entry, it would run to 1.6 s.
+#[test]
+fn nested_cleanups_share_one_grace() {
+    let (runtime, marked) = marking_runtime();
+    let started = std::time::Instant::now();
+    let (ending, _) = ran(
+        runtime,
+        captured_with_grace(
+            "guard { strike } { guard { sleep 0.6 } { sleep 5\nmark } }",
+            std::time::Duration::from_secs(1),
+        ),
+    );
+    assert!(started.elapsed() < std::time::Duration::from_millis(1400));
+    assert!(is_stopped(&ending, CancelCause::Interrupted), "{ending:?}");
+    assert!(!*marked.lock().unwrap());
+}
+
+#[test]
+fn successive_cleanups_share_one_grace() {
+    let (runtime, marked) = marking_runtime();
+    let started = std::time::Instant::now();
+    let (ending, _) = ran(
+        runtime,
+        captured_with_grace(
+            "guard { guard { strike } { sleep 0.6 } } { sleep 5\nmark }",
+            std::time::Duration::from_secs(1),
+        ),
+    );
+    assert!(started.elapsed() < std::time::Duration::from_millis(1400));
+    assert!(is_stopped(&ending, CancelCause::Interrupted), "{ending:?}");
+    assert!(!*marked.lock().unwrap());
+}
+
+#[test]
+fn an_exit_outranks_the_closing_poll() {
+    let mut runtime = crate::test_helper::core_runtime();
+    install_halting_act(&mut runtime, "strike-then-exit", |mooring| {
+        mooring.home.cancel(CancelCause::Interrupted);
+        Break::Escape(Escape::Exit(3))
+    });
+    let (ending, _) = ran(runtime, Run::captured("strike-then-exit", "<test>"));
+    assert!(matches!(ending, Ending::Exited(3)), "{ending:?}");
+}
+
+#[test]
+fn a_stop_before_an_exit_wins() {
+    let (runtime, _) = marking_runtime();
+    let (ending, _) = ran(runtime, Run::captured("strike\nexit 3", "<test>"));
+    assert!(is_stopped(&ending, CancelCause::Interrupted), "{ending:?}");
+}
+
+#[test]
+fn a_stronger_cause_lands_at_the_closing_poll() {
+    let mut runtime = crate::test_helper::core_runtime();
+    install_halting_act(&mut runtime, "strike-twice", |mooring| {
+        mooring.home.cancel(CancelCause::Interrupted);
+        let stop = mooring.home.poll().expect_err("the node was just struck");
+        mooring.home.cancel(CancelCause::Aborted);
+        stop
+    });
+    let (ending, _) = ran(runtime, Run::captured("strike-twice", "<test>"));
+    assert!(is_stopped(&ending, CancelCause::Aborted), "{ending:?}");
+}
+
+#[test]
+fn the_closing_poll_keeps_a_located_stop() {
+    let (runtime, _) = marking_runtime();
+    let (ending, _) = ran(runtime, Run::captured("strike\necho x", "<test>"));
+    assert!(
+        matches!(ending, Ending::Stopped { at: Some(_), .. }),
+        "{ending:?}"
+    );
+}
+
+#[test]
+fn a_stage_panic_stops_its_siblings_and_is_reraised() {
+    let mut runtime = crate::test_helper::core_runtime();
+    install_act(&mut runtime, "boom", |_, _| panic!("stage panic"));
+    let started = std::time::Instant::now();
+    let report = Shell::root(runtime.into()).run(Run::captured(
+        "!{ each { |i| echo $i } !{range 1 1000000} } | !{ boom }",
+        "<test>",
+    ));
+    assert!(started.elapsed() < std::time::Duration::from_secs(3));
+    match report {
+        RunReport::Static {
+            diagnostics: StaticDiagnostics::Host(e),
+        } => assert!(e.message.contains("run panicked"), "{:?}", e.message),
+        _ => panic!("a stage panic must report Static{{Host}}"),
     }
 }

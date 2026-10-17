@@ -117,7 +117,7 @@ impl Session {
         }
         if settings.startup {
             let startup = ral_core::HookName::session("startup");
-            if let Outcome::Faulted(fault) | Outcome::Walled(fault) = host
+            if let Outcome::Faulted(fault) | Outcome::Walled(fault) | Outcome::Stopped(fault) = host
                 .run_hook(&*transport, startup, vec![], None, None)
                 .outcome
             {

@@ -2,7 +2,6 @@
 //! report envelope its failed outcome.  Bytes are absent by design: `audit` is
 //! the forensic path.  Minted from an `Error` in `types::error`.
 
-use crate::process::CancelCause;
 use crate::source::CallSite;
 use crate::{record, variant};
 
@@ -11,7 +10,8 @@ use crate::{record, variant};
 pub enum Reason {
     Exited(i32),
     Signaled(i32),
-    Cancelled(CancelCause),
+    Cancelled,
+    TimedOut,
     NotFound,
     NotRunnable,
     Raised,
@@ -20,7 +20,8 @@ pub enum Reason {
 variant!(typed Reason {
     Exited(i32): "exited",
     Signaled(i32): "signaled",
-    Cancelled(CancelCause): "cancelled",
+    Cancelled: "cancelled",
+    TimedOut: "timed-out",
     NotFound: "not-found",
     NotRunnable: "not-runnable",
     Raised: "raised",

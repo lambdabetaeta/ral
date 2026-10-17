@@ -13,13 +13,15 @@ use crate::guard::freeze::FreezeCtx;
 use crate::io::{self, Sink};
 use crate::ir::Redirects;
 use crate::ir::{Args, CaseArm, Comp, CompKind, GroupNode, Val, ValListElem};
+use crate::process::{CancelScope, ForegroundScope};
 use crate::runtime::command_call::{self, Resolution};
 use crate::runtime::pipeline;
 use crate::runtime::redirect::scope::{RedirectState, WriteFate};
 use crate::source::Span;
 use crate::types::{
-    Binding, Break, CapturePolicy, Closure, Env, Error, FrameHandle, HandlerArity, HandlerFrame,
-    Mooring, Settled, Shell, Signature, TrailScope, Value, report_value, sig, sig_hint,
+    Binding, Break, CapturePolicy, Closure, Env, Error, Escape, FrameHandle, HandlerArity,
+    HandlerFrame, Mooring, Settled, Shell, Signature, TrailScope, Value, report_value, sig,
+    sig_hint,
 };
 
 use super::assemble;
@@ -83,6 +85,9 @@ enum Frame {
     },
     Cleanup {
         outcome: Settled<Value>,
+        /// The current scope before the cleanup's shield, restored on pop
+        /// and on abandon.
+        prev: ForegroundScope,
     },
     Within(WithinUndo),
     /// Where its layer sits: a session frame pushed above survives the pop.
@@ -121,12 +126,24 @@ pub(crate) const NESTED_MACHINE_LIMIT: usize = 24;
 
 // ── Small pure helpers ────────────────────────────────────────────────
 
-/// Stamp an unspanned error's span with `span`, the innermost node or frame
-/// that raised it — applied at each raising point instead of once at the end
-/// of a bigger function.
-fn stamp(b: Break, span: Option<Span>) -> Break {
+/// Stamp an unspanned error or an unlocated stop with `span`, the innermost
+/// node or frame that raised it — applied at each raising point instead of
+/// once at the end of a bigger function.
+pub(super) fn stamp(b: Break, span: Option<Span>) -> Break {
     match (b, span) {
         (Break::Error(e), Some(span)) if e.span.is_none() => Break::Error(e.at_span(span)),
+        (
+            Break::Escape(Escape::Stopped {
+                cause,
+                owner,
+                at: None,
+            }),
+            Some(span),
+        ) => Break::Escape(Escape::Stopped {
+            cause,
+            owner,
+            at: Some(span),
+        }),
         (b, _) => b,
     }
 }
@@ -152,9 +169,15 @@ fn as_value(t: Terminal) -> Result<Value, Break> {
 /// A capture that cannot become the value it promised: what the body already
 /// wrote is an effect that happened, so it goes to the sink the capture
 /// replaced before the halt rather than dying in the abandoned buffer.
-fn abandon_capture(prev: &mut Sink, bytes: &[u8], error: Error, span: Option<Span>) -> Break {
+fn abandon_capture(
+    prev: &mut Sink,
+    scope: &CancelScope,
+    bytes: &[u8],
+    error: Error,
+    span: Option<Span>,
+) -> Break {
     if !bytes.is_empty()
-        && let Err(br) = Shell::write_sink(prev, bytes, "the surrounding stream")
+        && let Err(br) = Shell::write_sink(prev, scope, bytes, "the surrounding stream")
     {
         return br;
     }
@@ -300,7 +323,6 @@ impl Machine {
         env: Env,
         mut args: Vec<Value>,
         span: Option<Span>,
-        mooring: &Mooring,
         shell: &Shell,
     ) -> Settled<Focus> {
         let Some((param, body)) = comp.arrow() else {
@@ -308,7 +330,7 @@ impl Machine {
         };
         let arg = args.remove(0);
         let env = pattern::bind(param, &arg, env)?;
-        mooring.check()?;
+        shell.poll()?;
         if !args.is_empty() {
             self.reserve(shell)?.push(Frame::Apply { args, span });
         }
@@ -454,7 +476,7 @@ impl Machine {
             }),
 
             CompKind::Rec { group, index } => {
-                mooring.check()?;
+                shell.poll()?;
                 // ρ|occ(g), computed once: the identity after the first unfold.
                 let restricted = env.restrict(group.occ());
                 let mut env2 = restricted.clone();
@@ -517,7 +539,7 @@ impl Machine {
                 pattern: _,
                 rest: _,
             } => {
-                mooring.check()?;
+                shell.poll()?;
                 self.reserve(shell)?.push(Frame::To {
                     bind: Arc::clone(comp),
                     env: env.clone(),
@@ -546,7 +568,7 @@ impl Machine {
             }
 
             CompKind::App { head, args } => {
-                mooring.check()?;
+                shell.poll()?;
                 shell.stamp_call_site(comp.span);
                 let argv = close_args(args, &env, &shell.sig)?;
                 self.reserve(shell)?.push(Frame::Apply {
@@ -726,7 +748,7 @@ impl Machine {
         mooring: &Mooring,
         shell: &mut Shell,
     ) -> Settled<Focus> {
-        mooring.check()?;
+        shell.poll()?;
         let argv = close_args(&exec.args, env, &shell.sig)?;
         let redirs = close_redirects(&exec.redirects, env, &shell.sig)?;
         shell.stamp_call_site(span);
@@ -787,7 +809,7 @@ impl Machine {
             }
 
             Frame::Apply { args, span } => match t {
-                Terminal::Lambda { comp, env } => self.beta(&comp, env, args, span, mooring, shell),
+                Terminal::Lambda { comp, env } => self.beta(&comp, env, args, span, shell),
                 Terminal::Value(v) => self.apply_rule(v, args, span, mooring, shell),
             }
             .map_err(|b| stamp(b, span)),
@@ -801,6 +823,7 @@ impl Machine {
                 let focus = if buf.overflowed() {
                     Err(abandon_capture(
                         &mut prev,
+                        shell.scope.as_scope(),
                         &bytes,
                         capture_overflowed(),
                         span,
@@ -822,11 +845,19 @@ impl Machine {
 
             Frame::Guard { cleanup } => {
                 let v = as_value(t)?;
-                self.reserve(shell)?.push(Frame::Cleanup { outcome: Ok(v) });
+                let slot = self.reserve(shell)?;
+                let prev = shell.shield(mooring.cleanup_grace);
+                slot.push(Frame::Cleanup {
+                    outcome: Ok(v),
+                    prev,
+                });
                 Self::force(cleanup, mooring, shell)
             }
 
-            Frame::Cleanup { outcome } => outcome.map(|v| Focus::Return(Terminal::Value(v))),
+            Frame::Cleanup { outcome, prev } => {
+                shell.scope = prev;
+                outcome.map(|v| Focus::Return(Terminal::Value(v)))
+            }
 
             undo @ (Frame::Unmask { .. } | Frame::Within(_) | Frame::Grant(_)) => {
                 undo.abandon(shell);
@@ -857,12 +888,22 @@ impl Machine {
             }),
 
             Frame::Capture { mut prev, buf, .. } => {
-                let flushed = Shell::write_sink(&mut prev, &buf.take(), "the surrounding stream");
+                let flushed = Shell::write_sink(
+                    &mut prev,
+                    shell.scope.as_scope(),
+                    &buf.take(),
+                    "the surrounding stream",
+                );
                 shell.io.stdout = prev;
                 Err(flushed.err().unwrap_or(s))
             }
 
-            Frame::Apply { .. } | Frame::Cleanup { .. } => Err(s),
+            Frame::Apply { .. } => Err(s),
+
+            Frame::Cleanup { prev, .. } => {
+                shell.scope = prev;
+                Err(s)
+            }
 
             Frame::Redirect(state) => {
                 let mut state = *state;
@@ -884,8 +925,12 @@ impl Machine {
             },
 
             Frame::Guard { cleanup } => {
-                self.reserve(shell)?
-                    .push(Frame::Cleanup { outcome: Err(s) });
+                let slot = self.reserve(shell)?;
+                let prev = shell.shield(mooring.cleanup_grace);
+                slot.push(Frame::Cleanup {
+                    outcome: Err(s),
+                    prev,
+                });
                 Self::force(cleanup, mooring, shell)
             }
 
@@ -922,11 +967,8 @@ impl Frame {
             Self::Audit(scope) => drop(shell.local.audit.close(scope)),
             Self::Within(undo) => undo.apply(shell),
             Self::Grant(at) => shell.context.grants.remove(at, 1),
-            Self::To { .. }
-            | Self::Apply { .. }
-            | Self::Try { .. }
-            | Self::Guard { .. }
-            | Self::Cleanup { .. } => {}
+            Self::Cleanup { prev, .. } => shell.scope = prev,
+            Self::To { .. } | Self::Apply { .. } | Self::Try { .. } | Self::Guard { .. } => {}
         }
     }
 }
@@ -1465,8 +1507,8 @@ mod tests {
     fn a_cancelled_tight_loop_returns() {
         let mut shell = new_shell();
         let mooring = Mooring::adrift();
-        mooring
-            .cancel
+        shell
+            .scope
             .cancel(crate::process::cancel::CancelCause::Cancelled);
         let out = run_with("let f = { !$f }\n!$f", &mooring, &mut shell);
         assert!(
@@ -1483,15 +1525,13 @@ mod tests {
         for source in ["let f = { !$f }\n!$f", "if true { let x = 1; return $x }"] {
             let mut shell = new_shell();
             let mooring = Mooring::adrift();
-            mooring
-                .cancel
+            shell
+                .scope
                 .cancel(crate::process::cancel::CancelCause::Cancelled);
             match run_with(source, &mooring, &mut shell) {
-                Err(Break::Error(e)) => assert!(
-                    e.span.is_some(),
-                    "a cancellation in `{source}` must be located, got {:?}",
-                    e.message
-                ),
+                Err(Break::Escape(Escape::Stopped { at, .. })) => {
+                    assert!(at.is_some(), "a stop in `{source}` must be located");
+                }
                 other => panic!("`{source}` must halt when cancelled, got {other:?}"),
             }
         }

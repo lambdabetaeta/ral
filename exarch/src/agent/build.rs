@@ -100,7 +100,7 @@ fn refusal(report: Report) -> Option<String> {
         Report::Ran {
             ending:
                 Ending::Raised { rendered, .. }
-                | Ending::Walled { rendered, .. }
+                | Ending::Stopped { rendered, .. }
                 | Ending::Unreturnable { rendered, .. },
             ..
         }

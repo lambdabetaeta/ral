@@ -14,7 +14,7 @@ use crate::types::{Binding, HandlerLookup, Settled, Shell, Value};
 use std::fmt::{self, Write};
 use std::path::PathBuf;
 
-/// Syntax that the parser, rather than a callable binding, provides.
+/// Syntax that the parser, rather than a binding, provides.
 ///
 /// Keep this vocabulary paired with `syntax::is_keyword` and
 /// `LANGUAGE_CONSTANTS`; the test below makes drift loud.

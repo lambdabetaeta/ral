@@ -1,13 +1,48 @@
 use super::super::group::PipelineGroup;
 use super::*;
+use crate::process::CancelScope;
+#[cfg(unix)]
+use crate::process::Membership;
+use crate::source::{FileId, Span};
 use crate::types::Escape;
+use std::time::Duration;
 
 fn error_break(status: i32, msg: &str) -> Break {
     Error::raised(msg, status).into()
 }
 
-/// The four laws of the join: an escape outranks an error, and within a
-/// rank the earlier stage wins.
+fn stopped(cause: CancelCause) -> Break {
+    Break::stopped(cause, None)
+}
+
+fn stopped_at(cause: CancelCause, at: u32) -> Break {
+    Break::Escape(Escape::Stopped {
+        cause,
+        owner: None,
+        at: Some(Span::new(FileId::DUMMY, at, at)),
+    })
+}
+
+/// A stage's reader-gone stop, naming its own node.
+fn cut(stage: &ScopeId) -> Break {
+    Break::stopped(CancelCause::ReaderGone, Some(stage.clone()))
+}
+
+fn stop_of(br: &Break) -> Option<(CancelCause, Option<u32>)> {
+    match br {
+        Break::Escape(Escape::Stopped { cause, at, .. }) => {
+            Some((*cause, at.as_ref().map(|s| s.start)))
+        }
+        _ => None,
+    }
+}
+
+fn is_error(br: &Break, code: i32) -> bool {
+    matches!(br, Break::Error(e) if e.code() == code)
+}
+
+/// The laws of the join: `Error 1 < Exit 2 < Stopped c (3 + c)`, a stage's
+/// reader-gone stop under everything, and within a rank the earlier stage wins.
 #[test]
 fn breaks_join_by_rank_earlier_stage_breaking_ties() {
     match stronger(error_break(7, "first"), error_break(9, "second")) {
@@ -35,6 +70,43 @@ fn breaks_join_by_rank_earlier_stage_breaking_ties() {
         ),
         Break::Escape(Escape::Exit(3))
     ));
+    let (interrupted, timed_out) = (CancelCause::Interrupted, CancelCause::TimedOut);
+    let exit = || Break::Escape(Escape::Exit(1));
+    assert_eq!(
+        stop_of(&stronger(exit(), stopped(interrupted))),
+        Some((interrupted, None))
+    );
+    assert_eq!(
+        stop_of(&stronger(stopped(interrupted), exit())),
+        Some((interrupted, None))
+    );
+    assert_eq!(
+        stop_of(&stronger(stopped(interrupted), stopped(timed_out))),
+        Some((timed_out, None))
+    );
+    assert_eq!(
+        stop_of(&stronger(
+            stopped_at(interrupted, 1),
+            stopped_at(interrupted, 2)
+        )),
+        Some((interrupted, Some(1))),
+        "equal stops keep the earlier"
+    );
+    let root = CancelScope::root();
+    assert!(is_error(&stronger(cut(&root.id()), error_break(7, "x")), 7));
+    assert!(is_error(&stronger(error_break(7, "x"), cut(&root.id())), 7));
+    assert!(matches!(
+        stronger(cut(&root.id()), Break::Escape(Escape::Exit(1))),
+        Break::Escape(Escape::Exit(1))
+    ));
+    assert_eq!(
+        stop_of(&stronger(
+            stopped(CancelCause::ReaderGone),
+            error_break(7, "x")
+        )),
+        Some((CancelCause::ReaderGone, None)),
+        "the closed-stdout stop is a stop"
+    );
 }
 
 #[test]
@@ -56,7 +128,14 @@ fn owning_pipeline(
 ) -> (PipelineGroup, CollectState, Sender<Event>) {
     let (tx, rx) = std::sync::mpsc::channel();
     let group = PipelineGroup::prepare(shell, tx.clone()).expect("anchor spawns");
-    let collect = CollectState::new(rx, &tx, group.group(), None, mooring, Instant::now());
+    let collect = CollectState::new(
+        rx,
+        group.group(),
+        None,
+        shell.scope.as_scope().clone(),
+        mooring.cleanup_grace,
+        Instant::now(),
+    );
     (group, collect, tx)
 }
 
@@ -216,7 +295,14 @@ fn a_joining_collector_cancel_all_kills_its_externals_and_returns() {
             .expect("spawn /bin/sh under the owner's pgid");
 
     let (tx, rx) = std::sync::mpsc::channel();
-    let mut collect = CollectState::new(rx, &tx, joining.group(), None, &mooring, Instant::now());
+    let mut collect = CollectState::new(
+        rx,
+        joining.group(),
+        None,
+        CancelScope::root(),
+        Duration::ZERO,
+        Instant::now(),
+    );
     collect.push(StageHandle::for_test(
         Slot {
             ix: 0,
@@ -229,7 +315,7 @@ fn a_joining_collector_cancel_all_kills_its_externals_and_returns() {
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     std::thread::scope(|scope| {
         scope.spawn(|| {
-            collect.cancel_all(CancelCause::TimedOut, false);
+            collect.cancel_all(CancelCause::TimedOut);
             let _ = done_tx.send(());
         });
         done_rx
@@ -238,8 +324,14 @@ fn a_joining_collector_cancel_all_kills_its_externals_and_returns() {
     });
 
     assert!(
-        matches!(collect.fold(&mooring, &mut shell), Err(Break::Error(_))),
-        "a killed stage must fold in an error, not a quiet ok"
+        matches!(
+            collect.fold(&mooring, &mut shell),
+            Err(Break::Escape(Escape::Stopped {
+                cause: CancelCause::TimedOut,
+                ..
+            }))
+        ),
+        "a torn-down stage must fold in the teardown's stop, not a quiet ok"
     );
     drop(owner);
 }
@@ -260,15 +352,55 @@ fn state_with(n: usize) -> CollectState {
     state
 }
 
-fn threads_with(n: usize) -> CollectState {
+/// `n` fake thread stages, their scopes, and the sender their slots address.
+fn threads_with(n: usize) -> (CollectState, Vec<CancelScope>, Sender<Event>) {
     let (mut state, tx) = CollectState::for_step_test();
-    for ix in 0..n {
-        state.push(StageHandle::fake_thread_for_step_test(Slot {
-            ix,
-            tx: tx.clone(),
-        }));
+    let scopes = (0..n)
+        .map(|ix| {
+            let (handle, scope) =
+                StageHandle::fake_thread_for_step_test(Slot { ix, tx: tx.clone() });
+            state.push(handle);
+            scope
+        })
+        .collect();
+    (state, scopes, tx)
+}
+
+fn halted(br: Break) -> StageObservation {
+    StageObservation {
+        end: ThreadEnd::Settled(Err(br)),
+        audit: AuditFragment::empty(),
     }
-    state
+}
+
+fn panicked(text: &str) -> StageObservation {
+    StageObservation {
+        end: ThreadEnd::Panicked(text.to_string()),
+        audit: AuditFragment::empty(),
+    }
+}
+
+/// Send each event `after` its millisecond offset from now, from a helper thread.
+fn sending(tx: &Sender<Event>, events: Vec<(u64, Event)>) -> std::thread::JoinHandle<()> {
+    let tx = tx.clone();
+    std::thread::spawn(move || {
+        let t0 = Instant::now();
+        for (ms, ev) in events {
+            std::thread::sleep(
+                (t0 + Duration::from_millis(ms)).saturating_duration_since(Instant::now()),
+            );
+            let _ = tx.send(ev);
+        }
+    })
+}
+
+fn returned(ix: usize, obs: StageObservation) -> Event {
+    Event::Returned(ix, obs)
+}
+
+fn fold_of(state: CollectState) -> Settled<Value> {
+    let mut shell = crate::test_helper::core_shell();
+    state.fold(&Mooring::adrift(), &mut shell)
 }
 
 fn sent_to(state: &CollectState, ix: usize) -> Option<CancelCause> {
@@ -339,38 +471,32 @@ fn a_write_heard_after_its_writer_was_filed_is_ignored() {
     );
 }
 
-/// A cancel always tears down, whatever the cause or its source, and
-/// teardown must deliver it, nothing else having.
+/// A cause the scope read between slices always tears down.
 #[test]
 fn a_cancelled_event_cancels_all() {
     let mut state = state_with(1);
     assert_eq!(
         step(&mut state, Event::Cancelled(CancelCause::TimedOut)),
         Some(Effect::CancelAll {
-            cause: CancelCause::TimedOut,
-            delivered: false
+            cause: CancelCause::TimedOut
         })
     );
 }
 
-/// A key the anchor heard reached every member of the group by the
-/// kernel's own hand, so teardown must not send a second copy of it; a
+/// A key the anchor heard is struck on the node and read by the scope at
+/// the next slice, never turned into a teardown by the hearing itself; a
 /// signal no terminal sends is inert.
 #[cfg(unix)]
 #[test]
-fn a_heard_key_tears_down_without_resending_it() {
+fn a_heard_key_strikes_the_node_and_tears_nothing_down() {
     let frame = crate::process::DurableRoot::new().worker();
     let mut state = state_with(1);
     state.loan = Some(TerminalLoan::for_test(&frame));
     let heard = |n| Event::Heard(crate::process::Signal::new(n));
     assert_eq!(step(&mut state, heard(libc::SIGTERM)), None);
-    assert_eq!(
-        step(&mut state, heard(libc::SIGINT)),
-        Some(Effect::CancelAll {
-            cause: CancelCause::Interrupted,
-            delivered: true
-        })
-    );
+    assert_eq!(frame.cause(), None);
+    assert_eq!(step(&mut state, heard(libc::SIGINT)), None);
+    assert_eq!(frame.cause(), Some(CancelCause::Interrupted));
 }
 
 /// With no terminal lent, nothing the anchor hears is a key.
@@ -387,8 +513,8 @@ fn with_no_loan_a_heard_signal_is_inert() {
     );
 }
 
-/// A stage dead of SIGINT nobody sent is the key's cancellation only if
-/// the key was pressed on the lent terminal, and its own signal otherwise.
+/// A stage dead of SIGINT nobody sent is the key's stop only if the current
+/// scope carries the key, and its own signal otherwise.
 #[cfg(unix)]
 #[test]
 fn a_stage_dead_of_the_key_is_cancelled_only_if_it_was_pressed() {
@@ -401,12 +527,24 @@ fn a_stage_dead_of_the_key_is_cancelled_only_if_it_was_pressed() {
         pumps: command::Pumps::default(),
         sent: None,
     };
-    let settled = |pressed| end().settle(&shell, Instant::now(), pressed).settled;
-    match settled(Some(CancelCause::Interrupted)) {
-        Err(Break::Error(e)) => assert_eq!(e.cancelled_by(), Some(CancelCause::Interrupted)),
-        other => panic!("expected the key's cancellation, got {other:?}"),
+    let group = Group::Joins(Membership::new(
+        Pgid::from_raw(1).expect("1 is positive"),
+        CancelScope::root(),
+    ));
+    let settled =
+        |scope: &CancelScope| match end().settle(&shell, Instant::now(), scope, &group).end {
+            ThreadEnd::Settled(s) => s,
+            ThreadEnd::Panicked(t) => panic!("{t}"),
+        };
+    let pressed = CancelScope::root();
+    pressed.cancel(CancelCause::Interrupted);
+    match settled(&pressed) {
+        Err(Break::Escape(Escape::Stopped { cause, .. })) => {
+            assert_eq!(cause, CancelCause::Interrupted);
+        }
+        other => panic!("expected the key's stop, got {other:?}"),
     }
-    match settled(None) {
+    match settled(&CancelScope::root()) {
         Err(Break::Error(e)) => assert!(
             matches!(
                 e.status,
@@ -419,18 +557,15 @@ fn a_stage_dead_of_the_key_is_cancelled_only_if_it_was_pressed() {
     }
 }
 
-/// A stage this collector tore down reports the cause it sent, not the
-/// signal that carried it.
+/// A stage this collector tore down is consumed, and the pipeline ends
+/// stopped with the cause the teardown carried, not the signal that carried it.
 #[cfg(unix)]
 #[test]
 fn a_torn_down_externals_death_names_the_cause_it_was_sent() {
     let mut shell = crate::test_helper::core_shell();
     let mooring = Mooring::adrift();
     let mut state = state_with(1);
-    state.stages[0]
-        .as_mut()
-        .expect("a live stage")
-        .cancel(CancelCause::Cancelled);
+    state.escalate(CancelCause::Cancelled);
     let _ = step(
         &mut state,
         Event::Ended(
@@ -440,37 +575,33 @@ fn a_torn_down_externals_death_names_the_cause_it_was_sent() {
     );
 
     match state.fold(&mooring, &mut shell) {
-        Err(Break::Error(e)) => assert_eq!(
-            e.cancelled_by(),
-            Some(CancelCause::Cancelled),
-            "expected the cause, not the signal: {e:?}"
-        ),
-        other => panic!("expected the teardown death to fold in as an error, got {other:?}"),
+        Err(Break::Escape(Escape::Stopped { cause, .. })) => {
+            assert_eq!(cause, CancelCause::Cancelled, "the cause, not the signal");
+        }
+        other => panic!("expected the teardown's stop, got {other:?}"),
     }
 }
 
-/// A `try` inside a stage body its reader cut sees why: the record reads
-/// `` `cancelled `reader-gone `` at 141, which the handler re-raises as
-/// its own failure for the run to report.
+/// A `try` inside a stage body its reader cut cannot see the reader-gone
+/// stop: it passes `try`, the handler never runs, and the collector
+/// consumes it.
 #[cfg(unix)]
 #[test]
-fn a_try_in_a_stage_its_reader_cut_sees_reader_gone() {
+fn a_try_in_a_stage_cannot_see_its_reader_gone_stop() {
     let src = "let spew = { |n| to-line y\n spew $n }\n\
-               !{ try { spew 0 } { |err| fail [status: $err[status], message: !{str $err[reason]}] } } | /usr/bin/head -n 1";
+               !{ try { spew 0 } { |err| fail [status: 7, message: x] } } | /usr/bin/head -n 1";
     let mut shell = crate::test_helper::core_shell();
     let report = shell.run(crate::protocol::Run::captured(src, "<test>"));
     match report {
         crate::run::RunReport::Ran {
-            ending: crate::run::Ending::Raised { error, .. },
+            ending: crate::run::Ending::Settled { .. },
+            captured,
             ..
         } => {
-            assert_eq!(error.code(), 141, "{error:?}");
-            assert!(
-                error.message.contains("`cancelled `reader-gone"),
-                "{error:?}"
-            );
+            let out = captured.expect("a captured run returns buffers").stdout;
+            assert_eq!(String::from_utf8_lossy(&out).lines().count(), 1, "{out:?}");
         }
-        _ => panic!("the handler's re-raise must end the run"),
+        _ => panic!("the handler must never run, so the pipeline settles"),
     }
 }
 
@@ -501,6 +632,35 @@ fn a_stage_kill_is_forgiven_by_sent_and_kept_without_it() {
         matches!(kept.fold(&mooring, &mut shell), Err(Break::Error(_))),
         "the very same death, unsent, must be kept as a real failure"
     );
+
+    // An ancestor's reader-gone stop forgives nothing this collector did not send.
+    let mut ancestors = state_with(1);
+    ancestors.scope.cancel(CancelCause::ReaderGone);
+    let _ = step(&mut ancestors, Event::Ended(0, kill));
+    match ancestors.fold(&mooring, &mut shell) {
+        Err(Break::Error(e)) => assert!(
+            matches!(
+                e.status,
+                crate::types::Status::Process(crate::process::CommandFailure::Signal(s))
+                    if s == crate::process::Signal::new(libc::SIGKILL)
+            ),
+            "{e:?}"
+        ),
+        other => panic!("expected `signaled 9`, got {other:?}"),
+    }
+
+    // A death by what was sent is the external's stop naming its stage.
+    let mut sent = state_with(1);
+    sent.stages[0]
+        .as_mut()
+        .expect("a live stage")
+        .cancel(CancelCause::Cancelled);
+    let term = WaitOutcome::Signaled(crate::process::Signal::new(libc::SIGTERM));
+    let _ = step(&mut sent, Event::Ended(0, term));
+    assert!(
+        sent.fold(&mooring, &mut shell).is_ok(),
+        "a death by the sent cause is consumed"
+    );
 }
 
 /// The reader's `Returned` reaches the collector before the writer's own
@@ -510,7 +670,7 @@ fn a_stage_kill_is_forgiven_by_sent_and_kept_without_it() {
 fn a_thread_writers_honest_exit_survives_its_readers_earlier_end() {
     let mut shell = crate::test_helper::core_shell();
     let mooring = Mooring::adrift();
-    let mut state = threads_with(2);
+    let (mut state, _scopes, _tx) = threads_with(2);
 
     assert_eq!(
         step(&mut state, Event::Returned(1, StageObservation::ok())),
@@ -529,35 +689,451 @@ fn a_thread_writers_honest_exit_survives_its_readers_earlier_end() {
     }
 }
 
-/// A `ReaderGone` break — as a dead edge's sink or a `ReaderGone` scope
-/// cancel mints it — is forgiven on its own evidence, nothing having been
-/// sent to the stage.
+/// A reader-gone stop naming the stage is the collector's own: consumed,
+/// whatever it was raised by.
 #[test]
-fn a_thread_writer_the_cancel_ended_is_forgiven() {
-    let mut shell = crate::test_helper::core_shell();
-    let mooring = Mooring::adrift();
-    let mut state = threads_with(1);
+fn a_reader_gone_writer_is_forgiven_by_its_name() {
+    let (mut state, scopes, _tx) = threads_with(1);
     assert_eq!(sent_to(&state, 0), None, "nothing was sent to this stage");
+    let _ = step(&mut state, returned(0, halted(cut(&scopes[0].id()))));
+    let folded = fold_of(state);
+    assert!(folded.is_ok(), "{folded:?}");
+}
 
+/// The same stop naming another node is some collector's above, so it is
+/// forwarded.
+#[test]
+fn a_foreign_reader_gone_is_forwarded() {
+    let (mut state, _scopes, _tx) = threads_with(1);
     let _ = step(
         &mut state,
-        Event::Returned(
-            0,
-            StageObservation::failure(Error::cancelled(CancelCause::ReaderGone)),
-        ),
+        returned(0, halted(cut(&CancelScope::root().id()))),
     );
+    match fold_of(state) {
+        Err(Break::Escape(Escape::Stopped { cause, .. })) => {
+            assert_eq!(cause, CancelCause::ReaderGone);
+        }
+        other => panic!("expected the foreign stop, got {other:?}"),
+    }
+}
 
-    let folded = state.fold(&mooring, &mut shell);
-    assert!(
-        folded.is_ok(),
-        "a writer the reader-gone cancel actually ended must be forgiven: {folded:?}"
+/// A key the root heard names the root, not the stage, so it is kept.
+#[test]
+fn an_armed_stage_that_ends_interrupted_is_kept() {
+    let (mut state, _scopes, _tx) = threads_with(1);
+    let root = CancelScope::root().id();
+    let stop = Break::stopped(CancelCause::Interrupted, Some(root));
+    let _ = step(&mut state, returned(0, halted(stop)));
+    match fold_of(state) {
+        Err(Break::Escape(Escape::Stopped { cause, .. })) => {
+            assert_eq!(cause, CancelCause::Interrupted);
+        }
+        other => panic!("expected the stop, got {other:?}"),
+    }
+}
+
+/// A reader-gone stage whose cleanup failed forwards the failure.
+#[test]
+fn a_reader_gone_stages_cleanup_halt_is_forwarded() {
+    let (mut state, _scopes, _tx) = threads_with(1);
+    let _ = step(
+        &mut state,
+        returned(0, StageObservation::failure(Error::raised("x", 7))),
     );
+    assert!(matches!(fold_of(state), Err(Break::Error(e)) if e.code() == 7));
+}
+
+/// Stage 0's error and stage 1's nested reader-gone stop: the stop ranks
+/// under the error.
+#[test]
+fn a_nested_reader_gone_stop_ranks_under_a_siblings_error() {
+    let (mut state, _scopes, _tx) = threads_with(2);
+    let _ = step(
+        &mut state,
+        returned(0, StageObservation::failure(Error::raised("x", 7))),
+    );
+    let _ = step(
+        &mut state,
+        returned(1, halted(cut(&CancelScope::root().id()))),
+    );
+    assert!(matches!(fold_of(state), Err(Break::Error(e)) if e.code() == 7));
+}
+
+/// An `exit` out of a stage is a top-level effect in flight: the siblings
+/// are torn down, and the stops that raises name their own stages.
+#[test]
+fn an_exit_in_a_stage_tears_the_siblings_down() {
+    let (mut state, scopes, tx) = threads_with(2);
+    let exit = halted(Break::Escape(Escape::Exit(3)));
+    assert_eq!(
+        step(&mut state, returned(0, exit)),
+        Some(Effect::CancelAll {
+            cause: CancelCause::Cancelled
+        })
+    );
+    let sibling = halted(Break::stopped(CancelCause::Cancelled, Some(scopes[1].id())));
+    let helper = sending(&tx, vec![(50, returned(1, sibling))]);
+    state.cancel_all(CancelCause::Cancelled);
+    helper.join().expect("helper");
+    assert_eq!(scopes[1].cause(), Some(CancelCause::Cancelled));
+    assert!(matches!(
+        fold_of(state),
+        Err(Break::Escape(Escape::Exit(3)))
+    ));
+}
+
+/// The closed-stdout stop out of a stage tears the siblings down too, and
+/// is the verdict.
+#[test]
+fn a_closed_stdout_in_a_stage_tears_the_siblings_down() {
+    let (mut state, scopes, tx) = threads_with(2);
+    assert_eq!(
+        step(
+            &mut state,
+            returned(1, halted(stopped(CancelCause::ReaderGone)))
+        ),
+        Some(Effect::CancelAll {
+            cause: CancelCause::ReaderGone
+        })
+    );
+    let helper = sending(&tx, vec![(50, returned(0, halted(cut(&scopes[0].id()))))]);
+    state.cancel_all(CancelCause::ReaderGone);
+    helper.join().expect("helper");
+    match fold_of(state) {
+        Err(Break::Escape(Escape::Stopped {
+            cause, owner: None, ..
+        })) => {
+            assert_eq!(cause, CancelCause::ReaderGone);
+        }
+        other => panic!("expected the closed-stdout stop, got {other:?}"),
+    }
+}
+
+/// A stage's own reader-gone stop arms its edge and tears nothing down.
+#[test]
+fn a_reader_gone_stop_naming_its_own_stage_tears_nothing_down() {
+    let (mut state, scopes, _tx) = threads_with(2);
+    assert_eq!(
+        step(&mut state, returned(1, halted(cut(&scopes[1].id())))),
+        Some(Effect::ArmEdge(0))
+    );
+}
+
+/// A stop naming the stage is the collector's whatever its cause, and the
+/// teardown's own observation is the verdict.
+#[test]
+fn a_stop_naming_the_stage_is_consumed_whatever_its_cause() {
+    let (mut state, scopes, tx) = threads_with(2);
+    let stop = |i: usize| {
+        halted(Break::stopped(
+            CancelCause::Terminated,
+            Some(scopes[i].id()),
+        ))
+    };
+    let helper = sending(
+        &tx,
+        vec![(50, returned(0, stop(0))), (50, returned(1, stop(1)))],
+    );
+    state.cancel_all(CancelCause::Terminated);
+    helper.join().expect("helper");
+    match fold_of(state) {
+        Err(Break::Escape(Escape::Stopped {
+            cause, owner: None, ..
+        })) => {
+            assert_eq!(cause, CancelCause::Terminated);
+        }
+        other => panic!("expected the teardown's own observation, got {other:?}"),
+    }
+}
+
+/// A panic tears the group down at `Aborted` and is re-raised at the fold.
+#[test]
+fn a_stage_panic_tears_the_group_down_and_is_reraised_at_fold() {
+    let (mut state, scopes, tx) = threads_with(2);
+    assert_eq!(
+        step(&mut state, returned(0, panicked("boom"))),
+        Some(Effect::CancelAll {
+            cause: CancelCause::Aborted
+        })
+    );
+    let helper = sending(&tx, vec![(50, returned(1, StageObservation::ok()))]);
+    state.cancel_all(CancelCause::Aborted);
+    helper.join().expect("helper");
+    assert_eq!(scopes[1].cause(), Some(CancelCause::Aborted));
+    let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fold_of(state)))
+        .expect_err("a panic is re-raised at the fold");
+    assert_eq!(
+        payload.downcast_ref::<String>().map(String::as_str),
+        Some("boom")
+    );
+}
+
+/// The collector is the one writer of a stage's node, for every teardown.
+#[test]
+fn a_cancel_all_writes_its_cause_on_every_thread_stage() {
+    let (mut state, scopes, tx) = threads_with(2);
+    let helper = sending(
+        &tx,
+        vec![
+            (50, returned(0, StageObservation::ok())),
+            (50, returned(1, StageObservation::ok())),
+        ],
+    );
+    state.cancel_all(CancelCause::Interrupted);
+    helper.join().expect("helper");
+    for scope in &scopes {
+        assert_eq!(scope.cause(), Some(CancelCause::Interrupted));
+    }
+}
+
+/// A live thread stage is waited for, up to the grace, before the kill.
+#[test]
+fn a_cancel_all_waits_for_a_live_thread_stage_up_to_its_grace() {
+    let (mut state, _scopes, tx) = threads_with(1);
+    state.cleanup_grace = Duration::from_millis(200);
+    let helper = sending(&tx, vec![(100, returned(0, StageObservation::ok()))]);
+    let t0 = Instant::now();
+    state.cancel_all(CancelCause::Interrupted);
+    helper.join().expect("helper");
+    assert!(
+        t0.elapsed() < Duration::from_millis(400),
+        "{:?}",
+        t0.elapsed()
+    );
+}
+
+/// A real external that ignores INT and TERM beside a fake thread stage, and
+/// the instant it died, measured from the call to `cancel_all(cause)`.
+#[cfg(unix)]
+fn death_during_teardown(cause: CancelCause) -> Duration {
+    let (mut state, tx) = CollectState::for_step_test();
+    state.cleanup_grace = Duration::from_millis(200);
+    let (thread, _scope) = StageHandle::fake_thread_for_step_test(Slot {
+        ix: 0,
+        tx: tx.clone(),
+    });
+    state.push(thread);
+    let mut child = std::process::Command::new("/bin/sh")
+        .args(["-c", "trap '' INT TERM; echo; exec sleep 30"])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn the trapper");
+    // The grace signal must not land before the trap does.
+    let mut ready = [0u8];
+    std::io::Read::read_exact(&mut child.stdout.take().expect("piped"), &mut ready)
+        .expect("the trapper is ready");
+    let pid = i32::try_from(child.id()).expect("a pid");
+    state.push(StageHandle::for_test(
+        Slot {
+            ix: 1,
+            tx: tx.clone(),
+        },
+        crate::process::ChildHandle::from_std(child),
+    ));
+    let t0 = Instant::now();
+    let prober = std::thread::spawn(move || {
+        loop {
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                return t0.elapsed();
+            }
+            if t0.elapsed() > Duration::from_secs(5) {
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+                return t0.elapsed();
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    });
+    let helper = sending(&tx, vec![(1500, returned(0, StageObservation::ok()))]);
+    state.cancel_all(cause);
+    helper.join().expect("helper");
+    prober.join().expect("prober")
+}
+
+/// The dual measures the kill: the signal grace, then the thread wait to its
+/// grace, then the kill.
+#[cfg(unix)]
+#[test]
+fn a_cancel_all_kills_only_after_the_thread_grace() {
+    let died_at = death_during_teardown(CancelCause::Interrupted);
+    assert!(died_at >= Duration::from_millis(700), "{died_at:?}");
+    assert!(died_at < Duration::from_millis(1200), "{died_at:?}");
+}
+
+/// No signal phase, no thread wait: a defect waits for nothing.
+#[cfg(unix)]
+#[test]
+fn an_abort_grants_no_grace() {
+    let died_at = death_during_teardown(CancelCause::Aborted);
+    assert!(died_at < Duration::from_millis(100), "{died_at:?}");
+}
+
+/// A panic filed mid-teardown escalates to `Aborted`, cutting the waits.
+#[test]
+fn a_panic_mid_teardown_escalates_to_abort() {
+    let (mut state, scopes, tx) = threads_with(2);
+    state.cleanup_grace = Duration::from_secs(1);
+    let helper = sending(
+        &tx,
+        vec![
+            (100, returned(0, panicked("boom"))),
+            (200, returned(1, StageObservation::ok())),
+        ],
+    );
+    let t0 = Instant::now();
+    state.cancel_all(CancelCause::Interrupted);
+    helper.join().expect("helper");
+    assert!(
+        t0.elapsed() < Duration::from_millis(600),
+        "{:?}",
+        t0.elapsed()
+    );
+    assert_eq!(scopes[1].cause(), Some(CancelCause::Aborted));
+    assert_eq!(scopes[0].cause(), Some(CancelCause::Interrupted));
+}
+
+/// A stronger cause read on the scope mid-teardown is written over the
+/// survivors.
+#[test]
+fn a_stronger_cause_mid_teardown_is_written_on_the_stages() {
+    let (mut state, scopes, tx) = threads_with(2);
+    let held = CancelScope::root();
+    state.scope = held.clone();
+    let helper = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        held.cancel(CancelCause::Cancelled);
+        std::thread::sleep(Duration::from_millis(50));
+        let _ = tx.send(returned(0, StageObservation::ok()));
+        let _ = tx.send(returned(1, StageObservation::ok()));
+    });
+    state.cancel_all(CancelCause::Interrupted);
+    helper.join().expect("helper");
+    for scope in &scopes {
+        assert_eq!(scope.cause(), Some(CancelCause::Cancelled));
+    }
+}
+
+/// A clean EOF everywhere does not launder a teardown.
+#[test]
+fn a_teardown_is_the_verdict_when_every_stage_survived_it() {
+    let (mut state, _scopes, tx) = threads_with(2);
+    let helper = sending(
+        &tx,
+        vec![
+            (50, returned(0, StageObservation::ok())),
+            (50, returned(1, StageObservation::ok())),
+        ],
+    );
+    state.cancel_all(CancelCause::Terminated);
+    helper.join().expect("helper");
+    match fold_of(state) {
+        Err(Break::Escape(Escape::Stopped {
+            cause, owner: None, ..
+        })) => {
+            assert_eq!(cause, CancelCause::Terminated);
+        }
+        other => panic!("expected the teardown's stop, got {other:?}"),
+    }
+}
+
+/// A stage's own halt outranks the teardown's cause.
+#[test]
+fn a_stage_halt_outranks_the_teardown_at_the_fold() {
+    let (mut state, _scopes, tx) = threads_with(2);
+    let helper = sending(
+        &tx,
+        vec![
+            (
+                50,
+                returned(0, StageObservation::failure(Error::raised("x", 7))),
+            ),
+            (50, returned(1, StageObservation::ok())),
+        ],
+    );
+    state.cancel_all(CancelCause::Terminated);
+    helper.join().expect("helper");
+    assert!(matches!(fold_of(state), Err(Break::Error(e)) if e.code() == 7));
+}
+
+/// One strike for every cleanup, before the joins.
+#[test]
+fn a_dropped_collector_writes_terminated_on_its_stages() {
+    let (state, scopes, _tx) = threads_with(2);
+    drop(state);
+    for scope in &scopes {
+        assert_eq!(scope.cause(), Some(CancelCause::Terminated));
+    }
+}
+
+#[test]
+fn a_cancelled_scope_is_read_between_slices() {
+    let (mut state, _tx) = CollectState::for_step_test();
+    let held = CancelScope::root();
+    state.scope = held.clone();
+    let striker = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        held.cancel(CancelCause::Interrupted);
+    });
+    let t0 = Instant::now();
+    let ev = state.recv(None);
+    striker.join().expect("striker");
+    assert!(matches!(
+        ev,
+        Some(Event::Cancelled(CancelCause::Interrupted))
+    ));
+    assert!(
+        t0.elapsed() < Duration::from_millis(200),
+        "{:?}",
+        t0.elapsed()
+    );
+}
+
+#[test]
+fn a_spent_deadline_returns_nothing_even_with_an_event_queued() {
+    let (state, tx) = CollectState::for_step_test();
+    tx.send(Event::Wrote(0)).expect("queue");
+    assert!(state.recv(Some(Instant::now())).is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn an_anchors_death_on_its_own_ends_the_pipeline() {
+    let mut state = state_with(1);
+    assert_eq!(
+        step(&mut state, Event::AnchorDied),
+        Some(Effect::CancelAll {
+            cause: CancelCause::Terminated
+        })
+    );
+}
+
+/// Inside a teardown the collector's own kill took the anchor with the group,
+/// so an `Interrupted` teardown must not end `Terminated`.
+#[cfg(unix)]
+#[test]
+fn an_anchors_death_inside_a_teardown_does_not_escalate() {
+    let (mut state, _scopes, tx) = threads_with(2);
+    let helper = sending(
+        &tx,
+        vec![
+            (50, Event::AnchorDied),
+            (100, returned(0, StageObservation::ok())),
+            (100, returned(1, StageObservation::ok())),
+        ],
+    );
+    state.cancel_all(CancelCause::Interrupted);
+    helper.join().expect("helper");
+    match fold_of(state) {
+        Err(Break::Escape(Escape::Stopped { cause, .. })) => {
+            assert_eq!(cause, CancelCause::Interrupted);
+        }
+        other => panic!("expected the teardown's stop, got {other:?}"),
+    }
 }
 
 // ── SettleOnDrop: the dead-man's switch ─────────────────────────────────
 
-/// Dropped mid-unwind, the guard settles its index itself: the message
-/// names the panic, not a silent disconnect.
+/// Dropped mid-unwind, the guard settles its index itself, so no index goes
+/// silent.
 #[test]
 fn a_guard_dropped_while_panicking_settles_its_index() {
     let (tx, rx) = std::sync::mpsc::channel();
@@ -569,10 +1145,10 @@ fn a_guard_dropped_while_panicking_settles_its_index() {
         .recv_timeout(std::time::Duration::from_secs(1))
         .expect("the guard settles on unwind");
     match event {
-        Event::Returned(0, obs) => match obs.settled {
-            Err(Break::Error(err)) => assert!(
-                err.message.contains("panicked"),
-                "expected the panic in the message: {}",
+        Event::Returned(0, obs) => match obs.end {
+            ThreadEnd::Settled(Err(Break::Error(err))) => assert!(
+                err.message.contains("without reporting"),
+                "expected the one dead-man's message: {}",
                 err.message
             ),
             other => panic!("expected an Error break, got {other:?}"),
@@ -598,16 +1174,15 @@ fn a_guard_that_sent_does_not_settle_twice() {
     ));
 }
 
-/// A guard dropped with no panic in flight and no send made — a stage
-/// thread that returned without filing its own `Returned` — reports a
-/// silent end, distinct in message from a panic.
+/// A guard dropped with no send made — a stage thread that returned without
+/// filing its own `Returned` — reports a silent end.
 #[test]
 fn a_guard_dropped_without_a_panic_reports_a_silent_end() {
     let (tx, rx) = std::sync::mpsc::channel();
     drop(SettleOnDrop::new(Slot { ix: 0, tx }));
     match rx.recv().expect("the guard settles on drop") {
-        Event::Returned(0, obs) => match obs.settled {
-            Err(Break::Error(err)) => assert!(
+        Event::Returned(0, obs) => match obs.end {
+            ThreadEnd::Settled(Err(Break::Error(err))) => assert!(
                 err.message.contains("without reporting"),
                 "expected the silent-end message: {}",
                 err.message
@@ -627,7 +1202,7 @@ fn drive_settles_a_stage_whose_producer_unwound() {
     let (group, mut collect, tx) = owning_pipeline(&shell, &mooring);
 
     let slot = Slot { ix: 0, tx };
-    collect.push(StageHandle::fake_thread_for_step_test(slot.clone()));
+    collect.push(StageHandle::fake_thread_for_step_test(slot.clone()).0);
 
     let handle = std::thread::spawn(move || {
         let _guard = SettleOnDrop::new(slot);

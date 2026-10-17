@@ -9,8 +9,6 @@
 
 use super::super::command;
 use super::collect::Event;
-#[cfg(unix)]
-use crate::process::CancelCause;
 use crate::process::{CancelScope, Group, Membership, Pgid, PgidPolicy, TerminalLoan};
 use crate::types::{Error, Mooring, Settled, Shell, sig};
 use std::sync::mpsc::Sender;
@@ -72,7 +70,7 @@ impl PipelineGroup {
         TerminalLoan::try_acquire(
             leader.as_raw(),
             shell.terminal_lease(mooring)?,
-            &mooring.cancel,
+            &mooring.home,
         )
     }
 
@@ -111,11 +109,11 @@ struct AnchorProcess {
     reporter: std::thread::JoinHandle<()>,
 }
 
-/// The anchor's own death cancels the pipeline: nothing else in the group has
-/// heard of it.
+/// The anchor's own death, on its own, ends the pipeline: nothing else in the
+/// group has heard of it.
 #[cfg(unix)]
 fn anchor_death(_: crate::process::WaitOutcome) -> Event {
-    Event::Cancelled(CancelCause::Terminated)
+    Event::AnchorDied
 }
 
 impl AnchorProcess {
@@ -216,6 +214,8 @@ fn read_anchor_reports(mut report: os_pipe::PipeReader, tx: &Sender<Event>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use crate::process::CancelCause;
 
     /// An owning group whose channel nobody reads — enough for every test
     /// that only wants a real pgid.

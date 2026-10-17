@@ -66,10 +66,8 @@ fn an_interrupt_through_the_control_door_stops_an_in_flight_run() {
         "an interrupted child is torn down with SIGINT"
     );
 
-    // The cancel unwinds as a `Break::Error`, so the struck `/bin/sleep`
-    // itself still settles into an observation before the unwind reaches the
-    // run door — `Audit::close` reads that prefix regardless of how the run
-    // ended.
+    // The struck `/bin/sleep` settles into an observation as the stop
+    // unwinds, and `Audit::close` reads the trail however the run ended.
     let struck = trail.into_iter().find_map(|fo| {
         let obs = ral_core::types::Observation::decode(&fo).ok()?;
         match obs.what {

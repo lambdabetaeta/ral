@@ -3,7 +3,7 @@
 
 use super::{Error, Status};
 use crate::fact::{ErrorRecord, Reason};
-use crate::process::{CommandFailure, SpawnFailure};
+use crate::process::{CommandFailure, SpawnFailure, WorkerStop};
 use crate::source::CallSite;
 use crate::types::{Shell, Value};
 
@@ -15,7 +15,8 @@ impl From<&Status> for Reason {
             Status::Process(CommandFailure::Signal(sig)) => Self::Signaled(sig.number()),
             Status::Process(CommandFailure::Spawn(SpawnFailure::NotFound)) => Self::NotFound,
             Status::Process(CommandFailure::Spawn(_)) => Self::NotRunnable,
-            Status::Cancelled(cause) => Self::Cancelled(*cause),
+            Status::WorkerStopped(WorkerStop::Cancelled) => Self::Cancelled,
+            Status::WorkerStopped(WorkerStop::TimedOut) => Self::TimedOut,
         }
     }
 }
@@ -58,6 +59,7 @@ impl Error {
     /// one that has none.
     pub fn record_at(&self, site: Option<CallSite>) -> ErrorRecord {
         let cmd = self.command.as_deref().unwrap_or("<runtime>");
+        let site = self.site.as_deref().cloned().or(site);
         ErrorRecord::new(cmd, &self.status, &self.message, site)
     }
 }
@@ -67,7 +69,6 @@ mod tests {
     use super::*;
     use crate::first_order::FOValue;
     use crate::first_order::datum::{Datum, tag};
-    use crate::process::CancelCause;
 
     #[test]
     fn status_is_the_reasons_own_projection() {
@@ -78,8 +79,13 @@ mod tests {
             None,
         );
         assert_eq!((rec.status(), rec.reason()), (3, Reason::Exited(3)));
-        let cause = ErrorRecord::new("sh", &Status::Cancelled(CancelCause::TimedOut), "x", None);
-        assert_eq!(i32::from(CancelCause::TimedOut.code()), cause.status());
+        let cause = ErrorRecord::new(
+            "sh",
+            &Status::WorkerStopped(WorkerStop::TimedOut),
+            "x",
+            None,
+        );
+        assert_eq!((cause.status(), cause.reason()), (124, Reason::TimedOut));
     }
 
     #[test]

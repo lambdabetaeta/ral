@@ -26,7 +26,7 @@ impl TerminalLoan {
         match *self {}
     }
 
-    pub(crate) fn reclaim(self, _: Option<Signal>) -> Option<CancelCause> {
+    pub(crate) fn reclaim(self, _: Option<Signal>) {
         match self {}
     }
 }

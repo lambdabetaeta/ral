@@ -2,6 +2,11 @@
 status: active
 ---
 
+> Amended 2026-10-16 by
+> [[decisions/261016_a-cleanup-is-shielded-within-its-grace|a-cleanup-is-shielded-within-its-grace]]:
+> the precedence rule below stands, and the cleanup now runs shielded against
+> a stop, for the host's grace counted from the strike.
+
 # A failing cleanup pre-empts
 
 **`guard M { N }`: any halt of the cleanup pre-empts the body's outcome — an

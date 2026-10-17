@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e028f5a3
-generated_at_date: 2026-10-13
+generated_at_commit: dad6a1b3
+generated_at_date: 2026-10-17
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs]
 ---
 
@@ -40,11 +40,11 @@ duplicate ([[internals/pipeline-execution|pipeline execution]]).
 - `source.rs` — `Source`, a stage's byte input: `Terminal` (fall through to
   fd 0), `Empty` (no input — immediate EOF, child stdin to `/dev/null`, *no*
   fall-through to fd 0), and `Reader(SourceReader)` — a pipe (an upstream
-  stage, a here-string) or a file (a `<file` redirect), and for a stage
-  thread's own stdin the `Wake` a blocked read polls beside its fd; a fired
-  wake reads as EOF, never as an interrupted-read error a retry loop would
+  stage, a here-string) or a file (a `<file` redirect), carrying the scope a
+  blocked read samples between slices (`poll.rs`'s `poll_slice`); a cause in
+  force reads as EOF, never as an interrupted-read error a retry loop would
   spin on. `Source::reader` never *takes* a source: it hands every consumer —
-  a builtin, an external's stdin, a nested stage — a duplicate, the wake left
+  a builtin, an external's stdin, a nested stage — a duplicate, the scope left
   behind when a child inherits it, so a stage's
   stdin outlives every command that reads it. `Empty` is also what a
   tty-owning pipeline's stage 0 resolves to when it has no upstream reader —
@@ -57,7 +57,9 @@ duplicate ([[internals/pipeline-execution|pipeline execution]]).
   terminal, stderr, redirect file, in-memory `ByteBuffer` capture, tee, a
   watched worker's line surface (`Watch`, each whole line handed to a line
   function the builtin builds around `watch_event`, so `io` knows no deferred
-  sink), a stage thread's pipe edge. `child_stdout` / `child_stderr`
+  sink), a stage thread's pipe edge (`Sink::Pipe { writer, edge, stage }`,
+  `stage` naming the writing stage's node for its reader-gone stop; the scope
+  a write polls is handed in, `write_under`). `child_stdout` / `child_stderr`
   centralise the (stdio, pump) decision so no caller computes inherit-vs-pipe by
   hand; `same_destination` says whether two sinks deliver to one destination,
   which decides whether a child's stderr may share stdout's descriptor.
@@ -69,13 +71,17 @@ duplicate ([[internals/pipeline-execution|pipeline execution]]).
   the cap — a pump returns `()` from its own thread — so `overflowed` is read
   once the writers have joined, by whoever means to make the bytes a
   value ([[design/capture|capture]]).
-- `wake.rs` — `Wake`, what ends a stage thread's blocked stdin read or
-  stdout write from another thread: a self-pipe `poll_beside`'d (rustix
-  `poll`, answering `Readiness::{Fired, Ready(PollFlags)}`) with the stage's own
-  fd on Unix, a flag plus `CancelSynchronousIo` on the stage's thread handle
-  on Windows. The wake is private to core. A fired wake
-  is read as EOF by a `SourceReader` carrying it and written as success by a
-  `Sink::Pipe` carrying it, never as an interrupted I/O error.
+- `poll.rs` — `poll_slice`, the one sliced fd wait (Unix): wait for readiness
+  for at most `POLL_SLICE`, `EINTR` retried against the slice's own deadline.
+  A blocked pipe write (`Sink::write_under`) or read (`read_interruptible`)
+  is a loop of (read the scope; one slice), so another thread ends it by
+  striking a scope, never by waking it. Windows cannot poll an anonymous
+  pipe: the thread waiting on the blocked one aborts its call (`interrupt`,
+  `CancelSynchronousIo`), the collector a thread stage's and
+  `Pumps::join_under` a pump's, and the aborted read or write (`aborted`)
+  re-reads its scope and, under a shield, retries; writes go a 4 KiB chunk
+  at a time, so the sentinel's one read lands one
+  ([[internals/cancellation|cancellation]]).
 - `terminal.rs` — `TerminalState`: cached startup isatty / ANSI / NO_COLOR /
   mode bits. `startup_foreground` records whether ral's group owned the
   controlling terminal's foreground at entry; it is not a per-handoff
@@ -166,13 +172,16 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   than by care. Windows watches the same shape (`reaper/windows.rs`) via
   `RegisterWaitForSingleObject`, where a stop cannot arise. Every subscriber
   names its own event type — the pipeline collector's `Event::Ended`, the
-  standalone command's `ChildEvent::Ended`, `spawn_detached`'s own channel —
+  standalone command's bare `WaitOutcome` channel, `spawn_detached`'s own —
   over `WaitOutcome`, the reaper's one wire type.
 - `cancel.rs` — the cause-bearing `CancelScope` tree (`DurableRoot` /
   `ForegroundScope`, `CancelCause`) for structured-concurrency cancellation,
   polled cooperatively in hot loops
   ([[decisions/260504_hot-path-cancellation|hot-path-cancellation]]). A scope's
-  cancellation is a *join*: one private `fold` over its chain's flags. A
+  cancellation is a *join*: one private `resolve` over its chain's flags,
+  naming the outermost node that attains it (`ScopeId`) and masking at a
+  shielded node (`shielded`) within the grace from the chain's first strike;
+  `POLL_SLICE` is every sliced wait's period. A
   signal handler raises an ambient cause instead — `REQUESTED_ROOT`, an
   absolute `AtomicU8`, or an interrupt on the `INTERRUPTS` count — which no
   scope folds: `forward_ambient` hands each to a host thread, which forwards it
@@ -180,10 +189,10 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   ([[internals/cancellation|cancellation]]).
 - `signal.rs` — *signals are causes*: the platform handlers translate each
   delivered signal into a `CancelCause` on the ambient causes — SIGINT →
-  foreground `Interrupt`, SIGTERM/SIGHUP → root `Terminate` — so one
+  foreground `Interrupted`, SIGTERM/SIGHUP → root `Terminated` — so one
   cancel-aware wait loop serves user interrupts, timeouts, and termination
   alike ([[decisions/260706_signals-are-causes|signals-are-causes]]).
-  The poll point is `Mooring::check`, scope-only; `clear` is the boundary
+  The poll point is `Shell::poll`, scope-only; `clear` is the boundary
   acknowledgment; the `ESCALATION` counter backs only the third-delivery
   `_exit` ladder (`escalation_pending` is the probe), whose `_exit` reads
   `CancelCause::code`. A raw-mode frontend's Esc drives the same

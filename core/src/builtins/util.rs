@@ -81,6 +81,8 @@ pub(crate) fn stdin_reader(name: &str, shell: &Shell) -> Settled<Box<dyn std::io
         .reader()
         .map_err(|e| crate::types::Error::io("could not duplicate stdin", &e))?
     {
+        // Re-scoped to the scope in focus, so a cleanup's reads are masked with it.
+        let reader = reader.interruptible(shell.scope.as_scope().clone());
         return Ok(Box::new(std::io::BufReader::new(reader)));
     }
     if shell.io.terminal.startup_stdin_tty {

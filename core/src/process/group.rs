@@ -27,7 +27,7 @@ mod windows;
 pub(crate) use windows::{
     PreparedGroup, apply_group_active_process_limit, close_prepared_group, is_known_group,
     prepare_group, prepared_job, register_prepared_group, release_win_group,
-    set_active_process_limit, wait_leader_blocking,
+    set_active_process_limit,
 };
 #[cfg(windows)]
 pub use windows::{ReapStatus, break_pipeline_group, disown_pipeline_group, try_reap_leader};

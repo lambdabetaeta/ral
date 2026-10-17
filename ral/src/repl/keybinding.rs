@@ -83,7 +83,7 @@ pub(super) fn dispatch_keybinding(
         Some(ctx),
     );
 
-    if let Outcome::Faulted(fault) | Outcome::Walled(fault) = hr.outcome {
+    if let Outcome::Faulted(fault) | Outcome::Walled(fault) | Outcome::Stopped(fault) = hr.outcome {
         // Deferred: the REPL loop is about to emit `\x1b[A\r\x1b[K` to erase
         // rustyline's stray newline, which would clobber an immediate
         // `eprintln!` on that very line.  Flushed afterward.

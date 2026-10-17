@@ -1,7 +1,7 @@
 ---
-verified_at_commit: eecd78ad
-verified_at_date: 2026-10-12
-anchors: [ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, CancelScope, CancelCause, Terminate, DurableRoot, ForegroundScope, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, Status::code, ChildEnd, WaitOutcome::classify, KILL_EXIT_CODE, Mooring::check, CancelCause::code, Signal::status, RunningChild::wait, watch_cancel, Membership::owes, break_pipeline_group, escalation_pending]
+verified_at_commit: dad6a1b3
+verified_at_date: 2026-10-17
+anchors: [Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, CancelScope::shielded, ScopeId, POLL_SLICE, final_poll, Break::code, Break::of_child, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, CancelScope, CancelCause, Terminate, DurableRoot, ForegroundScope, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, ChildEnd, WaitOutcome::classify, KILL_EXIT_CODE, CancelCause::code, Signal::status, RunningChild::wait, Membership::owes, break_pipeline_group, escalation_pending]
 ---
 
 # Cancellation
@@ -24,7 +24,9 @@ The two pieces answer different questions:
 - **The scope tree** (`CancelScope`) answers *"which subtree should unwind, and
   why?"* — a structured-concurrency primitive that names a *cause* and reaches
   exactly the workers that inherited the cancelled scope. It is the only thing
-  `Mooring::check` polls.
+  `Shell::poll` reads, and what it raises is a *stop*: an escape naming its
+  owner, which no `try` catches
+  ([[decisions/261016_delimiters-are-handlers-for-poll|delimiters-are-handlers-for-poll]]).
 - **The ladder** (`ESCALATION: AtomicU8`) answers *"is the user escalating
   toward kill?"* — the third delivery forces `_exit(128 + sig)`. It is a blunt,
   host-agnostic floor for a process whose cooperative delivery is wedged, never
@@ -59,30 +61,52 @@ and *only* a real delivered signal walks the ladder.
 
 ## The scope tree and its cause lattice
 
-A `CancelScope` is a node in a tree of `Arc`-linked `AtomicU8` flags. **Its
-cancellation is a *join*:**
+A `CancelScope` is a node `{ flag, cancelled_at, parent, shield }` in a tree of
+`Arc`-linked nodes. **Its cancellation is a *join*:**
 
-    cancelled(s) = ⨆ over chain(s) of flag(n)
+    j(s) = ⨆ over chain(s) of flag(n)
 
-- **`cancel(cause)`** is a `fetch_max` — cancellation is one-way and *monotone*: a
-  later, weaker cause can never mask a stronger one already in force.
-- **One private `fold`** computes the join; `is_cancelled` and `cause` are its
-  only callers, and every part it reads is private to `cancel.rs`, so no
-  observer can see a cancellation except as the whole join. No mutex, no
-  allocation — a handful of atomic loads per ancestor.
+- **`cancel(cause)`** sets `cancelled_at` (once) and then `fetch_max`es the
+  flag — cancellation is one-way and *monotone*: a later, weaker cause can
+  never mask a stronger one already in force. The instant is written first, by
+  the same writer in the same act, so a reader that sees the flag sees it.
+- **One private `resolve`** folds the chain root-first; `in_force`, `cause`,
+  `is_cancelled` and `poll` are its readers, and every part it reads is
+  private to `cancel.rs`. It mutates nothing. No mutex, no allocation beyond
+  the chain walk.
+- **The name.** `in_force` returns the join *and* `ν`, the **outermost** node
+  whose own flag attains it — a declared tie-break, not a record of who struck
+  first. A `ScopeId` (pointer identity) is that name; a stop carries it for its
+  owner. A cause the collector writes on a stage that an ancestor already
+  carries therefore renames nothing.
+- **Six minting points**, each a frame or a base: the session root
+  (`DurableRoot::new`); a worker's node and the session anchor
+  (`DurableRoot::worker`); a host's dispatch scope (`run_cancel_handle`, the
+  anchor's child); a run's node (`dispatch`, the base of a run); a stage's node
+  (`launch_thread_stage`, a child of the *current* scope, so a pipeline inside
+  a cleanup is masked with it); a cleanup's shield (`Frame::Cleanup`,
+  `shielded(grace)`).
+- **One writer per node.** The root by SIGTERM/SIGHUP/Ctrl-`\`; the dispatch
+  scope by the host's interrupt; a run's node by its wall and by the key its
+  terminal tenant heard; a worker's by `cancel`, a `race` loss, its lease, the
+  session wipe; a stage's by its **collector alone**, with the cause of
+  whatever teardown it runs (`ReaderGone` for a reader that left, `Aborted`
+  for a panic, `Cancelled` for a sibling's `exit`, `Terminated` for the
+  anchor's death or the collector's own drop, the cause it is tearing down
+  for otherwise); a shield by nobody.
 - The cause is an escalation order, `CancelCause`:
 
   | cause | value | meaning | who raises it |
   |---|---|---|---|
   | `ReaderGone` | 1 | a pipeline stage's reader has ended | the pipeline collector |
-  | `Interrupt` | 2 | user asked the foreground to stop | Ctrl-C / Esc / batch SIGINT |
-  | `Explicit` | 3 | a targeted worker teardown | `cancel <handle>`, `race` loser |
-  | `Deadline` | 4 | a wall-clock / lifetime ceiling expired | `process::deadline` |
-  | `Terminate` | 5 | the process was asked to shut down | SIGTERM / SIGHUP |
-  | `RootAbort` | 6 | the session root is being reaped | Ctrl-`\` |
+  | `Interrupted` | 2 | user asked the foreground to stop | Ctrl-C / Esc / batch SIGINT |
+  | `Cancelled` | 3 | a targeted worker teardown | `cancel <handle>`, `race` loser |
+  | `TimedOut` | 4 | a wall-clock / lifetime ceiling expired | `process::deadline` |
+  | `Terminated` | 5 | the process was asked to shut down | SIGTERM / SIGHUP |
+  | `Aborted` | 6 | the session root is being reaped | Ctrl-`\` |
 
-`check` maps the strongest cause to `Error::cancelled(cause)`, whose message
-is `CancelCause::message` — the one vocabulary every poll point shares.
+`poll` mints `Break::stopped(cause, owner)`, an escape; its message is
+`CancelCause::message`, the one vocabulary every poll point shares.
 
 ### Two typed scopes name the one invariant
 
@@ -93,7 +117,7 @@ discipline ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]).
 - **`DurableRoot`** (`shell.session.root`) is minted once per `Shell`. Detached
   workers — `spawn`, `watch` — parent under it, so a *foreground* cancel
   never reaches them ([[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]]).
-- **`ForegroundScope`** (`Mooring::cancel`) is the run's work scope. It can be
+- **`ForegroundScope`** (`Mooring::home`) is the run's work scope. It can be
   minted *only* from a `DurableRoot` (or by nesting another foreground), so an
   unrelated root can never be installed as a foreground by accident.
 - `DurableRoot::worker` mints the scopes beside a run: shell init's anchor and
@@ -104,10 +128,11 @@ discipline ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]).
   nested run observes what encloses it — its outer run's interrupt, and its
   outer run's wall elapsing
   ([[decisions/260726_cancel-is-a-watermark|cancel-is-a-watermark]]).
-  **Pipelines mint no scope of their own** — they are bounded by
-  the foreground scope they run under and by `CollectState::drop`, which kills
-  whatever it still holds unobserved: the owned pgid, or each live external by
-  pid (see [[internals/pipeline-execution|pipeline-execution]]).
+  **A pipeline mints one node per thread stage**, under the current scope,
+  which its collector alone writes; `CollectState::drop` writes `Terminated` on
+  every live thread stage in one sweep, then kills whatever it still holds
+  unobserved: the owned pgid, or each live external by pid (see
+  [[internals/pipeline-execution|pipeline-execution]]).
 
 ## The ambient causes
 
@@ -125,7 +150,7 @@ signal context. The two are different kinds of proposition.
   each cause as it lands (`Ambient::Interrupt`, `Ambient::Root(cause)`), the
   handlers staying async-signal-safe and the reaper's wake running the scan.
   `ControlSender::hear`, also used by `forward_signals`, maps a root
-  `RootAbort` to `Abort` and any other root cause to `Terminate`, which cancel
+  `Aborted` to `Abort` and any other root cause to `Terminate`, which cancel
   the durable root, and an interrupt to `Control::Interrupt(id)`, naming the
   dispatch its front-end has in flight. The REPL and batch hold one for the
   session, and exarch forwards to its trunk's `Agent` (`signals::face`); a wire
@@ -159,7 +184,7 @@ signal context. The two are different kinds of proposition.
 - **Sharing, not shadowing.** A nested run nests under the frame the
   interrupt strikes, so a Ctrl-C mid-nest unwinds the whole nest, as a POSIX
   shell's does.
-- **A worker hears only the root**: `Terminate` reaches it, an
+- **A worker hears only the root**: `Terminated` reaches it, an
   interrupt, striking a run's frame, cannot.
 - **A forked session** (`Shell::bequeath` and `Shell::child_of` — exarch's sub-agents) hears no
   signal at all, and its host cancels it through a clonable handle on its
@@ -177,10 +202,14 @@ This is the seam the
 "cancel translation": the semantic collapse is onto the scope tree, never
 into the signal handler.
 
-## Where cancellation is observed: poll points
+## Where cancellation is observed
 
-A cancel is a *request*; nothing stops until the evaluator next polls. The poll is
-`Mooring::check`, called at:
+A cancel is a *request*: it flips a flag, and nothing stops until a reader
+samples its chain. There are two kinds of reading, and nothing is ever
+delivered, so nothing can be lost.
+
+**Step boundaries.** `Shell::poll` reads the current scope and raises the stop
+in force, at:
 
 - the **machine's step arms** (`evaluator/machine.rs`) — the β-step, `Bind`,
   `App`, `Rec`, `Source`, and the exec step each poll, so any loop of `ral`
@@ -189,32 +218,96 @@ A cancel is a *request*; nothing stops until the evaluator next polls. The poll 
   a `?` chain's advance from one arm to the next is nested `try` applying a
   handler thunk, so it polls at the same β-step;
 - the **iterating builtins** (`builtins/collections.rs`, `builtins/concurrency.rs`)
-  — `map`/`filter`/`each` and the worker-join loops poll between elements;
+  — `map`/`filter`/`each`/`range` and the worker-join sweep poll between
+  elements;
 - **pipeline launch** (`runtime/pipeline.rs`, `runtime/pipeline/launch.rs`) —
-  before and between stage spawns.
+  before and between stage spawns;
+- a base's **closing poll** (`final_poll`), the first half of its return
+  clause: the top of a run and a worker read their node once more after the
+  body settled, so a stop that landed after the last poll is not lost. The
+  run's wall is disarmed first, and a firing already claimed is waited for on
+  its own `fired` flag, so nothing fires after this poll.
 
-A computation that never reaches a poll point (a tight Rust loop inside one
-builtin) is not interruptible by the scope path — the contract is *cooperative*.
+**Sliced waits.** Every blocked operation of ral's own is a sequence of (read
+the scope; wait at most `POLL_SLICE`, 10 ms), the read first so an
+always-ready stream still polls once per chunk: a pipe write
+(`Sink::write_under`) and read (`read_interruptible`), a child's wait
+(`RunningChild::wait`) and its pumps' drain (`WaitedChild::settle`,
+`Pumps::join_under`), the collector's `recv`, the enquiry park, and the
+`await` sweep. The slice is the sampling period, not an end-to-end bound: the
+latency to a stop is the slice plus the step in progress plus the scheduler.
+There is no watch table and no wake. Windows pipes cannot be waited on with a
+timeout, so there a blocked thread stage or pump is interrupted
+(`CancelSynchronousIo`) instead, and the aborted call re-reads its scope; a
+write retried under a shield may repeat a prefix, the one open gap
+([[decisions/261016_delimiters-are-handlers-for-poll|delimiters-are-handlers-for-poll]]).
+
+A computation that never reaches either (a tight Rust loop inside one
+builtin, a host wait outside the sliced rule: a stopped tty, an inherited
+terminal stdin, `ask`, a file read) is not interruptible by the scope path —
+the contract is *cooperative*.
+
+### The two cells
+
+The **owner's node** is the base of a machine's tree — a run's, a worker's, a
+stage's — and is run-invariant, so it lives on `Mooring::home`. It is what
+*writes* aim at: the key a terminal tenant heard, a stage's group membership,
+a lease and a `cancel`. The **current scope** is a descendant swapped by
+frames; it lives on `Shell::scope` and is what *reads* consult: `poll`, every
+sliced wait, a child's attribution, the collector's loop. At a base the two
+coincide; inside a cleanup the scope is a shield under the node. A write never
+aims at the current scope, so nothing ever writes a shield.
+
+A stop at a base is consumed iff it names that owner's node: a worker turns a
+stop naming its own node into the handle's `WorkerStopped` error; a collector
+forgives every stop naming one of its stages' nodes; every other node is the
+host's, and a stop naming one reaches the top uninterpreted, read as
+`Ending::Stopped`.
+
+### The shield
+
+A `guard` cleanup runs under `Shell::shield(mooring.cleanup_grace)`: the
+current scope becomes `scope.shielded(grace)` for the cleanup's extent and is
+restored on pop and abandon, as `Frame::Capture` restores `io.stdout`.
+Everything launched inside — a pipeline's stages, an external child, a nested
+machine — reads the current scope and is masked with it. A shielded node's
+fold admits from its ancestors only `Aborted` and, once `since + grace` has
+passed, everything; `since` is the earliest `cancelled_at` on the chain above
+it, and the grace is capped by the nearest enclosing shield's. Its own flag is
+written by nobody, so a descendant's own cause stays visible. Every cleanup of
+one unwinding therefore ends by one instant, and a run ends within `wall +
+grace + TEARDOWN_GRACE`. The shield is cooperative: a signal the tty or the
+collector sends to the group still reaches a cleanup's children, and a child
+that dies of it is a process failure, since the current scope carries no cause
+to attribute it to
+([[decisions/261016_a-cleanup-is-shielded-within-its-grace|a-cleanup-is-shielded-within-its-grace]]).
+
+The collector honours it in its teardown: `cancel_all` writes its cause on
+every thread stage, waits for live thread stages, bounded by the grace, before
+the group kill; a panic or a stronger cause mid-teardown escalates over the
+survivors; an abort grants no grace and cuts the waits short; the teardown's
+cause is a candidate verdict at the fold, the collector's own closing
+observation.
 
 ### External children: teardown by cause
 
-A blocked wait does not consult the scope, so nothing here polls at all: the
-process-wide reaper ([[map/core/io-process|io-process]]) posts a child's exit
-straight onto `RunningChild::wait`'s own channel, and `watch_cancel` posts a
-cancel onto the same channel the instant the scope's cause is set — one
-blocking `recv`, no interval, no backoff. The teardown is *cause-directed*,
+The process-wide reaper ([[map/core/io-process|io-process]]) posts a child's
+exit onto `RunningChild::wait`'s own channel, and the wait receives a slice at
+a time, reading the current scope between slices: a cause in force starts the
+teardown, and the grace wait inside it is sliced too, ending at once under
+`Aborted`. The teardown is *cause-directed*,
 and `grace_signal(cause)` (`process/signal/unix.rs`, and its Windows twin)
 is the one table that directs it — read by `RunningChild::terminate` and by
 the pipeline collector's `cancel_all` alike:
 
-- **`Interrupt`** → SIGINT-first, a bounded `TEARDOWN_GRACE` (500 ms), then a
+- **`Interrupted`** → SIGINT-first, a bounded `TEARDOWN_GRACE` (500 ms), then a
   group (or, ungrouped, pid-`Watch`) SIGKILL — a child that traps SIGINT
   still dies, and its grandchildren with it.
-- **`Explicit` / `Deadline` / `Terminate`** → SIGTERM-first with the same
+- **`Cancelled` / `TimedOut` / `Terminated`** → SIGTERM-first with the same
   grace then the same kill — decisive, without pretending to be a user
-  keystroke; a `Terminate` hands the tree the very signal the supervisor sent
+  keystroke; a `Terminated` hands the tree the very signal the supervisor sent
   ral.
-- **`ReaderGone` / `RootAbort`** → `None`, an immediate kill with no grace. A
+- **`ReaderGone` / `Aborted`** → `None`, an immediate kill with no grace. A
   reader-gone cut must not hand the verdict back to the producer's own
   disposition, and an abort has no grace to offer.
 - **On Windows** every graceful cause opens with Ctrl-Break, named by the
@@ -242,49 +335,55 @@ never reaches this channel at all, since the reaper answers it with
 a cause for teardown. A foreground external still gets its Ctrl-C from the
 kernel directly — it holds the lent terminal — and the key is heard back by
 the loan when the terminal returns (§Attribution); a SIGTERM delivered to
-*ral* preempts even that wait through the root cause.
+*ral* preempts even that wait through the root cause, read at the next
+slice.
 
 ## One status per fact
 
-**A run's failure is a function of its cause, never of where the cancel
+**A run's ending is a function of its cause, never of where the cancel
 landed.** A cancel that lands before a spawn meets a poll point; one that
 lands after meets a torn-down child. Both doors mint the one constructor
-`Status::Cancelled(cause)`, so the two cannot disagree. `Status` is a
-two-level sum, each level with its own messages and hints:
+`Break::stopped(cause, owner)`, so the two cannot disagree. `Break::code` is
+the one table: an error's code is its `Status`'s, an `exit n` is `n`, a stop
+is its cause's. `Status` is a two-level sum, each level with its own messages
+and hints:
 
-    Status         = Raised(i32) | Cancelled(CancelCause) | Process(CommandFailure)
+    Status         = Raised(i32) | WorkerStopped(WorkerStop) | Process(CommandFailure)
     CommandFailure = ExitCode(i32) | Signal(Signal) | Spawn(SpawnFailure)
 
-Each failure owns its code (`CancelCause::code`, `SpawnFailure::code`,
-`CommandFailure::code`, `Signal::status`/`Signal::of_status` for `128 + n`), and
-`Status::code` delegates, so one table answers each fact; a signal handler's
-`_exit` reads `CancelCause::code` directly:
+`WorkerStopped` is the one stop that becomes an error: a worker's own boundary
+converts a stop naming its node, and `await`/`poll` report it as the awaiter's
+failure. Each fact owns its code (`CancelCause::code`, `SpawnFailure::code`,
+`CommandFailure::code`, `Signal::status`/`Signal::of_status` for `128 + n`);
+a signal handler's `_exit` reads `CancelCause::code` directly:
 
-| status | code |
+| break | code |
 |---|---:|
-| `Raised(n)`, `ExitCode(n)` | n |
+| `Raised(n)`, `ExitCode(n)`, `exit n` | n |
 | `Signal(s)` | 128 + s |
 | spawn: not found | 127 |
 | spawn: any other | 126 |
-| `Cancelled(Interrupt)` | 130 (`128 + SIGINT`) |
-| `Cancelled(Explicit)` | 143 (`128 + SIGTERM`, what `kill` sends) |
-| `Cancelled(Deadline)` | 124 (as `timeout(1)`) |
-| `Cancelled(Terminate)` | 143 (`128 + SIGTERM`) |
-| `Cancelled(RootAbort)` | 131 (`128 + SIGQUIT`) |
-| `Cancelled(ReaderGone)` | 141 (`128 + SIGPIPE`) |
+| `stop Interrupted` | 130 (`128 + SIGINT`) |
+| `stop Cancelled`, `WorkerStopped(Cancelled)` | 143 (`128 + SIGTERM`, what `kill` sends) |
+| `stop TimedOut`, `WorkerStopped(TimedOut)` | 124 (as `timeout(1)`) |
+| `stop Terminated` | 143 (`128 + SIGTERM`) |
+| `stop Aborted` | 131 (`128 + SIGQUIT`) |
+| `stop ReaderGone` | 141 (`128 + SIGPIPE`) |
 
-The same facts reach ral code as the error record's `reason`
-(`types/error/record.rs`, `Reason`), of which `status` is the projection.
-`reader-gone` is among them because a `try` inside a stage body can observe
-its own cut.
+Errors reach ral code as the error record's `reason`
+(`types/error/record.rs`, `Reason`), of which `status` is the projection;
+`` `cancelled `` and `` `timed-out `` are the two `WorkerStopped` facts. A stop
+has no record: no `try` sees it.
 
 ### Attribution
 
 A child's death passes through `WaitOutcome::classify(cause, enveloped)`,
 which yields a transient `ChildEnd`: `Failed(CommandFailure)` or
-`Cancelled(CancelCause)`, and `Error::of_child` maps the second to
-`Error::cancelled` exactly as a poll point does. `cause` is the strongest in
-force when the death is observed, not only what ral sent.
+`Cancelled(CancelCause)`, and `Break::of_child` maps the second to
+`Break::stopped` carrying the join of the current scope, exactly as a poll
+point does. `cause` is the strongest in force on the *current scope* when the
+death is observed, not only what ral sent: under a shield a key the tenant
+heard is no cause, and the death is a failure.
 
 **A death is a cancellation iff it is by a signal of a cause in force.**
 `WaitOutcome::death(enveloped)` is the one reader of a death — a signal
@@ -299,39 +398,39 @@ SIGSEGV under any cause stays `Signal`.
 | cause | `signals_of` (Unix) | `signals_of` (Windows) |
 |---|---|---|
 | `ReaderGone` | SIGKILL | `KILL_EXIT_CODE` |
-| `RootAbort` | SIGKILL, SIGQUIT | `KILL_EXIT_CODE` |
-| `Interrupt` | SIGINT, SIGKILL | `KILL_EXIT_CODE`, `STATUS_CONTROL_C_EXIT` |
-| `Explicit`, `Deadline` | SIGTERM, SIGKILL | `KILL_EXIT_CODE`, `STATUS_CONTROL_C_EXIT` |
-| `Terminate` | SIGTERM, SIGHUP, SIGKILL | `KILL_EXIT_CODE`, `STATUS_CONTROL_C_EXIT` |
+| `Aborted` | SIGKILL, SIGQUIT | `KILL_EXIT_CODE` |
+| `Interrupted` | SIGINT, SIGKILL | `KILL_EXIT_CODE`, `STATUS_CONTROL_C_EXIT` |
+| `Cancelled`, `TimedOut` | SIGTERM, SIGKILL | `KILL_EXIT_CODE`, `STATUS_CONTROL_C_EXIT` |
+| `Terminated` | SIGTERM, SIGHUP, SIGKILL | `KILL_EXIT_CODE`, `STATUS_CONTROL_C_EXIT` |
 
 **Only a terminal ral lent can report a key pressed on it.** A key is what a
 terminal sends: the `GESTURES` table in `process/signal/unix.rs` — SIGINT →
-`Interrupt`, SIGQUIT → `RootAbort`, SIGHUP → `Terminate`; no terminal sends
+`Interrupted`, SIGQUIT → `Aborted`, SIGHUP → `Terminated`; no terminal sends
 SIGTERM. Its reader `gesture` is read only by the `TerminalLoan` (`process/foreground/unix.rs`), the one
 lending of the session's `TerminalLease` to a group, for a run. While it is
 lent the key reaches the tenant's group and never ral, so the loan hears it
-back from the tenant — `TerminalLoan::hear` — and when the terminal returns
-it strikes what it heard on the frame it was lent for, before the next poll:
+back from the tenant — `TerminalLoan::hear` — and **strikes it on the node it
+was lent for (`Mooring::home`) as it hears**:
 
 - a **lone command** is heard at `reclaim`, the instant it is dead, from its
-  own `death`; `command.rs` folds that cause into the one `classify` reads,
-  so Ctrl-C reads `` `cancelled `interrupted `` and the run is cancelled;
+  own `death`; `command.rs` then reads the *current scope* once, so Ctrl-C
+  ends the command stopped with `Interrupted` and the run is stopped — unless
+  a shield masks it, when the death is the command's own `` `signaled 2 ``
+  and the stop follows at the cleanup's first poll after the grace;
 - a **pipeline**'s loan is held by its collector: the anchor reports each
-  signal it swallowed raw as `Event::Heard(signal)`, a key tears the group
-  down with `delivered: true`, and once the anchor has ended the fold hears
-  out every queued report and settles each external stage under
-  `sent.max(pressed)`. The loan drops with the collector, striking the frame
-  whatever the verdict — the stages may all have trapped the key.
+  signal it swallowed raw as `Event::Heard(signal)`, which strikes the node
+  and records `pressed`; the teardown follows from the scope read at the next
+  slice, which is what lets a shield hold it off. `pressed` is read only to
+  skip a duplicate grace signal, never to attribute a death. The loan's drop
+  restores the terminal and strikes nothing.
 
-The frame the loan strikes is always the run's own: inside a run the only
-nested `ForegroundScope` is a stage thread's, and neither a stage's child
-nor a stage's pipeline is lent, so no `try` stands between the strike and
-the run's closing poll. What the loan cannot settle is an external inside a
-*stage body*: a `Joins` member whose waiter reads its scope as the reaper
-posts its death, racing the anchor's report through the collector to that
-scope. Lose the race and the stage reads `` `signaled 2 `` where a direct
-stage, settled under `pressed`, reads `` `cancelled `interrupted `` — the
-same exit 130, and the run stops either way.
+The node the loan strikes is always the run's own, never the current scope:
+neither a stage's child nor a stage's pipeline is lent, so the strike reaches
+every stage through the chain and the run's closing poll alike. What the loan
+cannot settle is an external inside a *stage body*: a `Joins` member whose
+waiter reads its scope as the reaper posts its death, racing the strike.
+Lose the race and the stage reads `` `signaled 2 `` — a failure ranking under
+the stop the run's own poll then raises, so the run stops either way.
 
 A key ral's own frontend re-creates onto a lent group
 (`interrupt_foreground_child`) is heard like the kernel's: it is the user's.
@@ -351,7 +450,7 @@ so ral ends every process it tears down — `TerminateProcess` and
 `TerminateJobObject` alike — with one `KILL_EXIT_CODE`; `death` there reads
 that and the console's `STATUS_CONTROL_C_EXIT` and nothing else. The latter
 is what Ctrl-C and Ctrl-Break both leave, so it is every graceful cause's —
-a `Deadline` teardown reads `timed out`, never an exit status — and with no
+a `TimedOut` teardown reads `timed out`, never an exit status — and with no
 such cause in force it is displayed as "ended by Ctrl-C". A console is never
 lent: the Windows `TerminalLoan` is uninhabited. A cancelled child carries no
 hint.
@@ -365,8 +464,8 @@ The same two mechanisms are driven by different keys on different surfaces.
 | **Ctrl-C** | ral REPL, mid-eval | SIGINT → `interrupt_handler` | `request_interrupt()`, forwarded as `Control::Interrupt` — a pipeline's externals hear it through the collector; **counter untouched** |
 | **Ctrl-C** | ral REPL, idle prompt | line editor reads it as a byte | abandons the partial buffer; nothing is in flight, so nothing is sent; no signal |
 | **Ctrl-C** | ral REPL, idle minimal prompt | canonical tty → SIGINT → `interrupt_handler` | the tty drops the partial line; `request_interrupt()` is forwarded, but every later dispatch is born after it, so it strikes none |
-| **Ctrl-`\`** | ral REPL, terminal not lent | SIGQUIT → `sigquit_handler` | `request_root_cancel(RootAbort)`, forwarded as `Control::Abort` — reaps foreground *and* every worker, latching if idle; the REPL loop observes the sticky root and exits |
-| **Ctrl-C / Ctrl-`\` / hangup** | any ral host, terminal lent to a command or pipeline | tty → the tenant's group (a hangup also reaches ral, as session leader) | the `TerminalLoan` hears it from the tenant — its death, or the anchor's `Heard` — and strikes `Interrupt` / `RootAbort` / `Terminate` on the run's frame as the terminal returns: the job ends, `try` cannot recover it, the session lives |
+| **Ctrl-`\`** | ral REPL, terminal not lent | SIGQUIT → `sigquit_handler` | `request_root_cancel(Aborted)`, forwarded as `Control::Abort` — reaps foreground *and* every worker, latching if idle; the REPL loop observes the sticky root and exits |
+| **Ctrl-C / Ctrl-`\` / hangup** | any ral host, terminal lent to a command or pipeline | tty → the tenant's group (a hangup also reaches ral, as session leader) | the `TerminalLoan` hears it from the tenant — its death, or the anchor's `Heard` — and strikes `Interrupted` / `Aborted` / `Terminated` on the run's node as it hears: the job is stopped, `try` never sees it, the session lives |
 | **Ctrl-C** | ral batch / `-c` | SIGINT → `handler` | `request_interrupt()`, forwarded as `Control::Interrupt`, + ladder `+1`; third press `_exit`s |
 | **SIGTERM / SIGHUP** | any ral host | `handler` (term disposition) | `request_root_cancel(Terminate)`, forwarded as `Control::Terminate` — foreground and workers unwind, externals torn down SIGTERM-first, exit 143; ladder `+1`, third delivery `_exit`s |
 | **Ctrl-C / Ctrl-Break** | ral on a Windows console | console event → the `ctrlc` handler | `request_interrupt()`, forwarded as `Control::Interrupt`, + ladder `+1`; third event `ExitProcess`es with 130. No console event is sent to any group: the struck run's teardown breaks the groups it owns, and a worker's are never reached |
@@ -388,8 +487,8 @@ child gets them back in `reset_child_signals`:
 - **SIGINT → `interrupt_handler`** (the `sigint_handler` it names). It raises
   the interrupt and does nothing else — no delivery of its own. The session
   forwards it as `Control::Interrupt`, and ral's own delivery to a pipeline's
-  processes is the cancel tree alone: the struck scope reaches the collector's `watch_cancel`, which posts
-  `Event::Cancelled` and tears the group down with exactly one grace signal per
+  processes is the cancel tree alone: the collector's `recv` reads the struck scope between
+  slices, mints `Event::Cancelled`, and tears the group down with exactly one grace signal per
   process ([[internals/pipeline-execution|pipeline-execution]],
   [[decisions/260905_one-delivery-path|one-delivery-path]]). A foreground
   pipeline's externals usually hear the kernel's own copy first, delivered by
@@ -403,7 +502,7 @@ child gets them back in `reset_child_signals`:
   *cancellation*, never deletion). It is a cooperative `request_root_cancel`, not
   the default core-dump — so it satisfies "Ctrl-`\` must not core-dump the shell"
   *by reaping*, not by ignoring.
-- **SIGTERM/SIGHUP → `handler`** — translates to a root `Terminate` (the whole
+- **SIGTERM/SIGHUP → `handler`** — translates to a root `Terminated` (the whole
   session unwinds, the REPL loop exits 143) and walks the escalation ladder;
   **SIGTSTP/SIGTTOU/SIGTTIN/SIGPIPE → `SIG_IGN`** — the shell answers a stop
   reaching one of its own children through `waitpid`/`SIGCONT` rather than
@@ -483,6 +582,11 @@ by construction; the root-reap gesture is REPL Ctrl-`\`, not a TUI key.
 
 ## See also
 
+- [[decisions/261016_delimiters-are-handlers-for-poll|delimiters-are-handlers-for-poll]] —
+  a stop is an escape with an owner; the two cells, sliced waits, the
+  collector as the owner of its stages' nodes.
+- [[decisions/261016_a-cleanup-is-shielded-within-its-grace|a-cleanup-is-shielded-within-its-grace]] —
+  the shield and its budget from the strike.
 - [[decisions/260706_signals-are-causes|signals-are-causes]] — the collapse of
   signal delivery onto the scope tree: `Terminate`, the scope-only `check`, the
   one wait loop.

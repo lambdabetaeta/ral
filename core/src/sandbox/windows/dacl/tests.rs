@@ -18,7 +18,7 @@ use std::fs;
 /// An uncancelled scope: every test here exercises the stamp itself, while
 /// the cancel path has its own test below.
 fn live() -> CancelScope {
-    CancelScope::default()
+    CancelScope::root()
 }
 
 /// A syntactically valid capability SID no real token carries: stamps for
@@ -136,7 +136,7 @@ fn a_cancel_in_force_stops_the_stamp_before_it_applies() {
     with_scoped_state_dir(|| {
         let td = tempfile::tempdir().unwrap();
         let canonical = canonicalize_grant_target(td.path()).unwrap();
-        let cancel = CancelScope::default();
+        let cancel = CancelScope::root();
         cancel.cancel(CancelCause::TimedOut);
 
         let err = ensure_fs_grant(&canonical, CAP_SID, GrantKind::ReadWrite, &cancel);

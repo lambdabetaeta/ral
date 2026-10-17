@@ -66,7 +66,9 @@ pub(crate) enum WaitOutcome {
     Enveloped(i32),
 }
 
-/// How a child's end reads once ral's own teardown is accounted for.
+/// How a child's end reads once ral's own teardown is accounted for:
+/// `Failed` is the command's error, `Cancelled` a stop, which
+/// `Break::of_child` mints.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ChildEnd {
     Failed(CommandFailure),

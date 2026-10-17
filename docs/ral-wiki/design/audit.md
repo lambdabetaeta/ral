@@ -21,8 +21,8 @@ in one vocabulary, and a reader that can read one can read all three. `trail`
 is the list of observations. Nothing else: no status field duplicating the
 process exit status the host already owns and `audit` never changes, and no
 hint appended to the message, because a hint is advice for a person and a
-report is data. An ordinary failure settles into `` `err ``; an `exit` escape
-is not a failure and walks past the report entirely
+report is data. An ordinary failure settles into `` `err ``; an
+`exit` escape and a stop are not failures and walk past the report entirely
 ([[design/failure|failure]]).
 
 **The kind is the tag.** An observation is an envelope — an optional `site`,

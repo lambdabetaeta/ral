@@ -1,7 +1,8 @@
 //! Interpreter state, partitioned by lifetime: the field name *is* the
 //! invariant.  `env` and `context` persist and cross evaluation boundaries
-//! and thread spawns; `io` ([`Io`]) belongs to one run, swapped in and
-//! restored on teardown by [`crate::run::IoLoan`]; [`SessionState`] survives
+//! and thread spawns; `io` ([`Io`]) and `scope` belong to one run, swapped in
+//! and restored on teardown by [`crate::run::IoLoan`], and within a run by the
+//! frames that swap them; [`SessionState`] survives
 //! every run; [`LocalState`] is host scratch whose members each carry their
 //! own rule.
 //!
@@ -43,11 +44,11 @@ use super::handler::HandlerStack;
 use super::mooring::{Mooring, TerminalAccess};
 use super::sig;
 use crate::capability::GrantStack;
-use crate::io::Io;
-use crate::process::{CancelCause, DurableRoot, ForegroundScope};
+use crate::io::{Io, WriteStopped};
+use crate::process::{CancelCause, CancelScope, DurableRoot, ForegroundScope};
 use crate::source::{CallSite, FileId, Source, SourceDb, Span};
-use std::io::Write as _;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Default cap on the machine's stack: frames, not host stack frames, so it
 /// can sit far above what a host stack allows.
@@ -167,7 +168,7 @@ pub struct LocalState {
     pub(crate) machine_depth: usize,
 }
 
-/// The runtime: a field changes within a run (`io`), survives a run
+/// The runtime: a field changes within a run (`io`, `scope`), survives a run
 /// ([`SessionState`]), crosses evaluation boundaries (`env`, `context`), or
 /// is host scratch ([`LocalState`]).
 ///
@@ -190,11 +191,34 @@ pub struct Shell {
     pub(crate) sig: Arc<crate::types::Signature>,
     pub(crate) context: Context,
     pub(crate) io: Io,
+    /// The scope the computation in focus polls: a thread base sets it to
+    /// its mooring's node; `Frame::Cleanup` swaps it for a shielded child
+    /// for a cleanup's extent and restores it, as `Frame::Capture` does
+    /// `io.stdout`.  Read, never written: writes aim at `Mooring::home`.
+    pub(crate) scope: ForegroundScope,
     pub(crate) session: SessionState,
     pub(crate) local: LocalState,
 }
 
 impl Shell {
+    /// `poll`: the step boundary's operation.  Raises the stop in force on
+    /// the current scope, named for its owner.  `pub`: a host's own
+    /// builtins poll it between their steps.
+    ///
+    /// # Errors
+    /// The stop in force, as the escape it is.
+    pub fn poll(&self) -> Settled<()> {
+        self.scope.poll()
+    }
+
+    /// Enter a cleanup: the current scope becomes a shielded child for
+    /// `grace` from the strike; the previous one comes back for the frame
+    /// to restore.
+    pub(crate) fn shield(&mut self, grace: Duration) -> ForegroundScope {
+        let shielded = self.scope.shielded(grace);
+        std::mem::replace(&mut self.scope, shielded)
+    }
+
     /// A call's span becomes the dispatch site, unless it lies outside the
     /// session's sources — the baked prelude's — so that `defer`'s inner
     /// `spawn` is stamped where the user wrote `defer`.
@@ -237,13 +261,13 @@ impl Shell {
         &self,
         mooring: &Mooring,
         req: crate::first_order::FOValue,
-    ) -> Result<crate::first_order::FOValue, crate::types::Error> {
+    ) -> Settled<crate::first_order::FOValue> {
         match mooring.desk.as_ref() {
-            Some(desk) => desk.enquire(req, mooring.cancel.as_scope()),
-            None => Err(
+            Some(desk) => desk.enquire(req, self.scope.as_scope()),
+            None => Err(Break::Error(
                 Error::raised(crate::types::NO_DESK, crate::types::NO_DESK_STATUS)
                     .with_hint(crate::types::NO_DESK_HINT),
-            ),
+            )),
         }
     }
 
@@ -268,7 +292,7 @@ impl Shell {
     /// # Errors
     /// See [`Self::write_sink`].
     pub(crate) fn write_stdout(&mut self, bytes: &[u8]) -> Settled<()> {
-        Self::write_sink(&mut self.io.stdout, bytes, "stdout")
+        Self::write_sink(&mut self.io.stdout, self.scope.as_scope(), bytes, "stdout")
     }
 
     /// Write `bytes` to the current stderr sink — where `warn` and the shell's
@@ -277,20 +301,31 @@ impl Shell {
     /// # Errors
     /// See [`Self::write_sink`].
     pub(crate) fn write_stderr(&mut self, bytes: &[u8]) -> Settled<()> {
-        Self::write_sink(&mut self.io.stderr, bytes, "stderr")
+        Self::write_sink(&mut self.io.stderr, self.scope.as_scope(), bytes, "stderr")
     }
 
-    /// The one place a dead interior edge becomes the reader-gone break.
-    /// `BrokenPipe` is a clean shutdown, as for a Unix tool dying silently on
-    /// `SIGPIPE`: the reader closed its end (`fzf` took a selection).
-    pub(crate) fn write_sink(sink: &mut crate::io::Sink, bytes: &[u8], what: &str) -> Settled<()> {
-        match sink.write_all(bytes) {
+    /// The one place a reader leaving becomes the stop it is.  A broken pipe
+    /// is the host's reader gone, unnamed, the top's; on stderr alone it is
+    /// dropped, as every Unix program drops it.
+    pub(crate) fn write_sink(
+        sink: &mut crate::io::Sink,
+        scope: &CancelScope,
+        bytes: &[u8],
+        what: &str,
+    ) -> Settled<()> {
+        match sink.write_under(scope, bytes) {
             Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
-            Err(e) if matches!(e.get_ref(), Some(src) if src.is::<crate::io::DeadEdge>()) => {
-                Err(Break::Error(Error::cancelled(CancelCause::ReaderGone)))
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
+                if sink.is_stderr() {
+                    Ok(())
+                } else {
+                    Err(Break::stopped(CancelCause::ReaderGone, None))
+                }
             }
-            Err(e) => Err(sig(format!("could not write to {what}: {e}"))),
+            Err(e) => Err(match e.downcast::<WriteStopped>() {
+                Ok(stop) => Break::stopped(stop.cause, stop.owner),
+                Err(e) => sig(format!("could not write to {what}: {e}")),
+            }),
         }
     }
 

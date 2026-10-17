@@ -1,12 +1,13 @@
 //! A worker's birth: the one door `spawn`, `watch` and `service` share.
 
-use super::eliminate::break_record;
 use super::watch_event;
 use crate::fact::Worker;
 use crate::io::{Sink, new_buffer};
+use crate::process::{ForegroundScope, WorkerStop};
 use crate::types::{
-    CapReached, DeferredSurface, Done, FlushGuard, HandleInner, Latch, LeaseChain, LeaseClass,
-    Mooring, Observed, Settled, Shell, SurfaceBuffer, Value, WorkerEntry, WorkerId, sig,
+    Break, CapReached, DeferredSurface, Done, Error, Escape, FlushGuard, HandleInner, Latch,
+    LeaseChain, LeaseClass, Mooring, Observed, Settled, Shell, SurfaceBuffer, ThreadEnd, Value,
+    WorkerEntry, WorkerId, final_poll, sig,
 };
 use std::io::Write as _;
 use std::sync::{Arc, Mutex};
@@ -117,7 +118,8 @@ where
     let cmd = cmd.to_string();
     let worker_cmd = cmd.clone();
 
-    let worker_mooring = Mooring::for_worker(mooring, &shell.session.root, worker_surface.clone());
+    let node = shell.session.root.worker();
+    let worker_mooring = Mooring::for_worker(mooring, node.clone(), worker_surface.clone());
     // Minted before the thread so the worker can hold a clone: its exit mark is
     // what ends the lease chain silently on a finished worker.
     let handle = HandleInner {
@@ -125,11 +127,7 @@ where
         stderr_buf,
         surface_buf,
         joined,
-        ..HandleInner::new(
-            cmd.clone(),
-            worker_mooring.cancel.as_scope().clone(),
-            Some(rx),
-        )
+        ..HandleInner::new(cmd.clone(), node.as_scope().clone(), Some(rx))
     };
     let worker = handle.clone();
     shell
@@ -141,15 +139,18 @@ where
 
             let guard = FlushGuard::new(worker_surface, worker_joined, id, worker_cmd);
 
-            let result = work(mooring, child);
+            let end = match ThreadEnd::of(|| work(mooring, child)) {
+                // The base's return clause: the closing poll, then the switch.
+                ThreadEnd::Settled(result) => ThreadEnd::Settled(convert_own_stop(
+                    final_poll(result, &mooring.home),
+                    &mooring.home,
+                )),
+                panicked @ ThreadEnd::Panicked(_) => panicked,
+            };
             child.io.stdout.flush_pending();
             child.io.stderr.flush_pending();
-            let outcome = match &result {
-                Ok(_) => Done::Ok,
-                Err(e) => Done::Err(break_record(e, child)),
-            };
-            guard.settle(outcome);
-            let _ = tx.send(result);
+            guard.settle(Done::of(&end, child));
+            let _ = tx.send(end);
             // Strictly *after* the send, so `Completed` always implies an
             // outcome already in the channel.
             worker.complete();
@@ -186,4 +187,21 @@ where
         .fire();
     }
     Ok(handle)
+}
+
+/// The boundary's switch: a stop naming this worker's own node, and only
+/// that, becomes the handle's error, carrying the stop's cause.  Any other
+/// stop passes through as the escape it is.
+pub(super) fn convert_own_stop(result: Settled<Value>, own: &ForegroundScope) -> Settled<Value> {
+    match result {
+        Err(Break::Escape(Escape::Stopped {
+            cause,
+            owner: Some(owner),
+            ..
+        })) if owner == own.id() => Err(WorkerStop::of(cause).map_or_else(
+            || Break::stopped(cause, Some(owner)),
+            |o| Error::worker_stopped(o).into(),
+        )),
+        other => other,
+    }
 }

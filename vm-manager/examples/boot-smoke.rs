@@ -223,6 +223,7 @@ fn prove_the_host_can_dial_in(
         script_name: "<boot-smoke>".to_string(),
         caps: GrantStack::root(),
         wall: Some(Duration::from_secs(60)),
+        cleanup_grace: Duration::from_secs(5),
         deferred_lease: None,
         worker_cap: None,
         io: RunIo::Capture,

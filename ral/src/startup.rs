@@ -35,17 +35,11 @@ pub(crate) fn refuse_setuid() {
     }
 }
 
-/// The process-wide dispositions every `ral` adopts, shell and re-exec child
-/// alike.
+/// The process-wide dispositions every `ral` adopts: SIGPIPE stays ignored in
+/// the shell, and a re-exec'd tool resets it for itself.
 pub(crate) fn adopt_process_dispositions() {
     #[cfg(windows)]
     ral_core::terminal::enable_virtual_terminal_processing();
-
-    // Restore SIGPIPE to SIG_DFL once at startup so bundled uutils (this same
-    // binary re-exec'd as `--ral-bundled-tool`) and the pipeline anchor see
-    // the default disposition.
-    #[cfg(unix)]
-    ral_core::uutils::init_signal_dispositions();
 }
 
 /// Serve whichever re-exec child this process is, or read argv as a shell

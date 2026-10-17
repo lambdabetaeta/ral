@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e028f5a3
-generated_at_date: 2026-10-13
+generated_at_commit: dad6a1b3
+generated_at_date: 2026-10-17
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/builtins.rs, exarch/data/agent.ral]
 ---
 
@@ -56,9 +56,11 @@ through `report::tool_result`, which also reports whether the run failed:
   all — an explicit empty source, not a side effect of foreground denial;
 - **`wall`** — the per-tool deadline, the `ral` tool's `timeout_secs` (60s
   default). Core arms it on the run's foreground scope *before compiling*, so
-  it bounds the whole run; only `CancelCause::Deadline` reports `timed_out`,
-  which `run_shell` turns into the exit-124 stderr described under *the wall is
-  a place* below, while Esc stays an interrupt. A grant body evaluates locally — no sandbox-IPC
+  it bounds the whole run; the wall ends the run as `Ending::Stopped` with
+  cause `TimedOut`, the one stop `render` follows with the timeout tip, the
+  exit-124 stderr described under *the wall is a place* below, while Esc stays
+  an interrupt and a closed stdout renders nothing. No `try` in the call can
+  catch either. A grant body evaluates locally — no sandbox-IPC
   round trip to interrupt — so cancellation reaches any spawned child through the
   ordinary process-group / cancel-scope path;
 - **`deferred_lease`** — the idle-observation lease for workers the run
@@ -125,12 +127,12 @@ pinned mid-script for the wall by
 `mid_script_wall_keeps_the_bindings_that_landed`. The asymmetry is
 before/after the wall, never bound/unbound. Nothing rolls back, and a model
 told only "retry with a higher `timeout_secs`" would duplicate every one of
-those effects. So the `timed_out` branch writes four things to stderr, in
+those effects. So a `TimedOut` stop writes four things to stderr, in
 order, and exits 124:
 
 1. **the engine's rendering, verbatim** — unconditionally, exactly as the
-   ordinary-failure branch beside it. A cancel is stamped on the innermost node
-   it unwound through ([[internals/cancellation|cancellation]]), so the
+   ordinary-failure branch beside it. A stop is stamped on the innermost node
+   it unwound through, and the run's closing poll keeps that location ([[internals/cancellation|cancellation]]), so the
    diagnostic carries the span that *locates* the wall: the frontier between the
    steps that completed and the one that did not;
 2. **the asymmetry and the remedy** — it timed out after *n* seconds at the

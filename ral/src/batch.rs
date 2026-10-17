@@ -69,23 +69,25 @@ pub(crate) fn run_stdin(run: RunOpts) -> ExitCode {
 /// Serialise the run's report envelope to JSON and emit it on stderr — the
 /// same envelope `audit { … }` returns, with the whole run as its body.  An
 /// escape (`exit`) is not a failure: the process still exits with its code,
-/// but the report reads `` `ok () ``.
+/// but the report reads `` `ok () ``; a stop reads `` `stopped cause ``.
 fn emit_audit_report(ending: &Ending, trail: &[ral_core::first_order::FOValue], pretty: bool) {
     use ral_core::first_order::datum::Datum as _;
-    use ral_core::types::{ErrorRecord, Status, Value, report_value};
+    use ral_core::types::{ErrorRecord, Status, Value, outcome_value, report_envelope};
     let outcome = match ending {
-        Ending::Settled { value, .. } => Ok(Value::from(value.clone())),
-        Ending::Raised { record, .. }
-        | Ending::Walled { record, .. }
-        | Ending::Unreturnable { record, .. } => Err(ErrorRecord::decode(record)
-            .unwrap_or_else(|why| ErrorRecord::new("<runtime>", &Status::Raised(1), &why, None))),
-        Ending::Exited(_) => Ok(Value::Unit),
+        Ending::Settled { value, .. } => outcome_value(Ok(Value::from(value.clone()))),
+        Ending::Raised { record, .. } | Ending::Unreturnable { record, .. } => {
+            outcome_value(Err(ErrorRecord::decode(record).unwrap_or_else(|why| {
+                ErrorRecord::new("<runtime>", &Status::Raised(1), &why, None)
+            })))
+        }
+        Ending::Exited(_) => outcome_value(Ok(Value::Unit)),
+        Ending::Stopped { cause, .. } => Value::variant("stopped", Some(Value::from_datum(*cause))),
     };
     let trail: Vec<Observation> = trail
         .iter()
         .filter_map(|fo| Observation::decode(fo).ok())
         .collect();
-    let json_val = FOValue::try_from(&report_value(outcome, trail))
+    let json_val = FOValue::try_from(&report_envelope(outcome, trail))
         .expect("a report is built from first-order values")
         .to_json(|b| serde_json::Value::String(String::from_utf8_lossy(b).into_owned()));
     let json_str = if pretty {
@@ -207,7 +209,7 @@ fn dispatch(transport: &IdentityTransport, run: Run, audit: Option<bool>) -> i32
                 (_, Some(pretty)) => emit_audit_report(&ending, &trail, pretty),
                 (
                     Ending::Raised { rendered, .. }
-                    | Ending::Walled { rendered, .. }
+                    | Ending::Stopped { rendered, .. }
                     | Ending::Unreturnable { rendered, .. },
                     None,
                 ) => err!("{rendered}"),

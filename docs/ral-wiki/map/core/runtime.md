@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e028f5a3
-generated_at_date: 2026-10-13
+generated_at_commit: dad6a1b3
+generated_at_date: 2026-10-17
 covers_paths: [core/src/runtime.rs, core/src/runtime/]
 ---
 
@@ -222,13 +222,16 @@ evaluator item; the evaluator reaches it at
     `leader_pgid`, `lend`, `end_anchor` (which `PipeNode::join` calls between
     `drive` and `fold`, so every report is on the channel), `Drop`: signalling
     and killing belong to the collector, which is what holds the live stages.
-    `CollectState::cancel_all(cause, delivered)` spells cancel, one
-    grace signal per `Address` the collector enumerates — the pipeline's
-    group or pids, unless `delivered` or, for a joining collector, unless the
-    cause is one its membership does not owe, and every confined stage's
-    envelope group regardless — a bounded blocking `recv_timeout` grace, the
-    kill (`kill_live`, the same addresses), a further
-    blocking drain, while `CollectState::drop` kills whenever it is dropped
+    `CollectState::cancel_all(cause)` spells cancel: `escalate` writes the
+    cause on every live stage in one sweep, then one grace signal per
+    `Address` the collector enumerates — the pipeline's group or pids, unless
+    the tty already delivered it (`pressed`) or, for a joining collector,
+    unless the cause is one its membership does not owe, and every confined
+    stage's envelope group regardless — a sliced `TEARDOWN_GRACE` drain that
+    escalates as it files, a wait for live thread stages bounded by the
+    cleanup grace (skipped under `Aborted`), the kill (`kill_live`, the same
+    addresses), a further drain, while `CollectState::drop` writes
+    `Terminated` on every live thread stage and kills whenever it is dropped
     with a stage still unobserved); `thread.rs` (`launch_thread_stage` wires a `Thread`
     stage's `Io` from its `StageRoute`, and its closure — given its
     `Slot { ix, tx }`, wrapped in a `SettleOnDrop` — builds its own
@@ -239,33 +242,36 @@ evaluator item; the evaluator reaches it at
     buffer (`shell.io.stdout`) is ([[design/capture|capture]]). A captured final
     stage is a `Capture` node, so it runs as a thread stage: its stdin the
     pipe, its buffer taking what the command writes.
-    `ThreadStage` is the collector's handle onto the running thread: `cancel`
-    cancels its scope and fires its wake — on Windows also retrying
-    `CancelSynchronousIo` until the wake is acknowledged or the thread has
-    finished, the one interrupt path there is — while
-    `join_after_settled` reclaims a thread whose `Returned` has already
-    arrived and `Drop` cancels-then-joins one never observed; a stage thread's
-    own interior wait, for whatever child *it* spawned, answers a stop inline
-    exactly as `RunningChild::wait` always does, structurally invisible to the
-    collector); `collect.rs`
+    `ThreadStage` is the collector's handle onto the running thread and the
+    stage's node: `cancel` writes the cause on that node — on Windows also one
+    `CancelSynchronousIo`, re-issued each pass of the collector's loop while
+    the stage's chain carries a cause — while `join_after_settled` reclaims a
+    thread whose `Returned` has already arrived and `Drop` writes `Terminated`
+    and joins one never observed a slice at a time; a stage thread's own
+    interior wait, for whatever child *it* spawned, answers a process stop
+    inline exactly as `RunningChild::wait` always does, structurally invisible
+    to the collector); `collect.rs`
     (`CollectState` owns the
     stage handles from the first one launched, an `mpsc` channel every
     producer feeds — the reaper (through a stage's own `Watch`), a stage
-    thread's own report, the sentinel, the anchor's witness, a `watch_cancel`
-    on the mooring's scope — carrying
-    `Event::{Ended, Returned, Wrote, Cancelled, Heard}`, with no
+    thread's own report, the sentinel, the anchor's witness and its watch —
+    received a slice at a time by `recv`, which reads the current scope
+    between slices and mints `Event::Cancelled` itself — carrying
+    `Event::{Ended, Returned, Wrote, Cancelled, AnchorDied, Heard}`, with no
     `Stopped`/`Continued` variant at all, which the pure fold `step` folds
     over, returning at most one `Effect` (`Option<Effect>`) for a
     thin interpreter (`CollectState::run`) to perform:
-    `ArmEdge`, `KillStage`, `CancelAll { cause, delivered }`. Completion is not
+    `ArmEdge`, `KillStage`, `CancelAll { cause }`. Completion is not
     among them — the pipeline is finished exactly when no stage handle is left
-    (`live()`). A `Heard` key sets `delivered` — the kernel gave the whole
-    pgid that signal already, so teardown sends no second copy of it — but
-    only through the collector's `loan: Option<TerminalLoan>`, the one ear for
-    a key: with no loan, or for a signal no terminal sends, it is inert.
-    `fold` opens by hearing out every queued report, settles each external
-    under `sent.max(pressed)`, and the loan drops with the collector,
-    returning the terminal and striking the run's frame; `holds_terminal`
+    (`live()`). A `Heard` key strikes the run's node and records `pressed` —
+    the kernel gave the whole pgid that signal already, so teardown sends no
+    second copy of it — but only through the collector's
+    `loan: Option<TerminalLoan>`, the one ear for a key: with no loan, or for
+    a signal no terminal sends, it is inert; the teardown follows from the
+    current scope read at the next slice. `fold` opens by hearing out every
+    queued report, settles each external under `sent` joined with the cause
+    on the current scope, and the loan drops with the collector, returning
+    the terminal and striking nothing; `holds_terminal`
     reports the loan actually made, which `LaunchCx.holds_terminal` freezes.
     The `Slot` a stage hands its own producers is minted by `PipeNode::launch`,
     which holds the sending half as a local and drops it on return — the

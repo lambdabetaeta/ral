@@ -164,12 +164,11 @@ let retry = { |n body|
 ## list (stdout/stderr are captured in the per-handle buffers, as for
 ## any `spawn`).
 ##
-## Fail-fast: the first block failure cancels every still-running
-## sibling before re-raising, so no worker outlives the call — a
-## detached remainder grinding on after the caller saw the failure is
-## a shell-job semantics `par` refuses to have.  Completed-but-unread
-## siblings are discarded with the rest; exactly the first observed
-## error surfaces, intact.
+## Fail-fast on failure: the first block failure cancels every
+## still-running sibling before re-raising it, intact.  A stop (Ctrl-C, a
+## deadline), an `exit` or a panic passes `par`'s `try`, so the siblings
+## still running are not cancelled: they run on, detached, until they
+## finish or the session ends.
 let par = { |f items jobs|
     let limit = if $[$jobs <= 0] { return !{length $items} } else { return $jobs }
 
@@ -211,8 +210,8 @@ let par = { |f items jobs|
 ## True once a handle has settled, false while its block is still running.
 ## Total over a finished handle: a `settled` block (whether it returned or
 ## failed) reports `true`, only a still-running (`pending`) block reports
-## `false`.  Non-blocking: `poll` samples without waiting.  Like `await`,
-## it fails on a cancelled handle.
+## `false`.  Non-blocking: `poll` samples without waiting.  Total, as `poll`
+## is: a cancelled handle has settled.
 let is-done = { |h|
     let polled = poll $h
     case $polled [

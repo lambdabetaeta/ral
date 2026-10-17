@@ -167,11 +167,8 @@ fn finish_command(
     if !shell.listening(mooring) {
         return;
     }
-    let (status, error) = match result {
-        Ok(_) => (0, None),
-        Err(Break::Error(e)) => (e.code(), Some(e.message.clone())),
-        Err(_) => return,
-    };
+    // A stop is recorded too, as a pipeline's external stage records it.
+    let broke = result.as_ref().err();
     let obs = Observation::spanning(
         start.site,
         start.time,
@@ -180,10 +177,10 @@ fn finish_command(
         Observed::Command(Command::new(
             shown,
             Value::render_argv(args),
-            status,
+            broke.map_or(0, Break::code),
             CommandOrigin::External,
             io,
-            error,
+            broke.map(Break::to_string),
         )),
     );
     shell.observe_stamped(Some(mooring), obs);

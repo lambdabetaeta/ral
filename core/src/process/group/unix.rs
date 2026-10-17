@@ -187,9 +187,9 @@ fn survivor_pid(
     // Dropping a `std::process::Child` neither kills nor reaps: the watch
     // above is what now owns its wait.
     drop(intermediate);
-    let born = rx.recv().map_err(|_| {
-        std::io::Error::other("the reaper never reported the intermediate's exit")
-    })?;
+    let born = rx
+        .recv()
+        .map_err(|_| std::io::Error::other("the reaper never reported the intermediate's exit"))?;
     watch.reap()?;
     if born != crate::process::WaitOutcome::Exited(0) {
         return Err(std::io::Error::other(format!(

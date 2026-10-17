@@ -32,14 +32,14 @@ pub fn termios_snapshot() -> Option<Termios> {
 /// (`Shell::terminal_lease`).
 ///
 /// While lent, a key pressed on the terminal reaches the tenant, never ral;
-/// the loan hears it back from the tenant and, on return, strikes it on the
-/// run's frame.
+/// the loan hears it back from the tenant and strikes it, as it hears, on the
+/// run's node.
 ///
 /// [`TerminalLease`]: crate::process::TerminalLease
 pub struct TerminalLoan {
     saved_pgid: Pid,
     saved_termios: Option<Termios>,
-    /// The run the terminal was lent for; struck with `pressed` on return.
+    /// The run's node, struck with every key heard (never the current scope).
     frame: ForegroundScope,
     pressed: Option<CancelCause>,
 }
@@ -100,24 +100,26 @@ impl TerminalLoan {
         }
     }
 
-    /// Read `signal`, reported by the tenant, as the key it hands back.
-    pub(crate) fn hear(&mut self, signal: Signal) -> Option<CancelCause> {
-        let key = gesture(signal);
-        self.pressed = self.pressed.max(key);
-        key
+    /// Read `signal`, reported by the tenant, as the key it hands back, and
+    /// strike it on the node, so every reader of its chain sees it.
+    pub(crate) fn hear(&mut self, signal: Signal) {
+        if let Some(key) = gesture(signal) {
+            self.pressed = self.pressed.max(Some(key));
+            self.frame.cancel(key);
+        }
     }
 
-    /// The strongest key heard so far.
+    /// The strongest key heard so far, read only to skip a duplicate grace
+    /// signal; it attributes no death.
     pub(crate) fn pressed(&self) -> Option<CancelCause> {
         self.pressed
     }
 
     /// Take the terminal back from a tenant whose death was by `last`.
-    pub(crate) fn reclaim(mut self, last: Option<Signal>) -> Option<CancelCause> {
+    pub(crate) fn reclaim(mut self, last: Option<Signal>) {
         if let Some(signal) = last {
             self.hear(signal);
         }
-        self.pressed
     }
 }
 
@@ -152,13 +154,9 @@ impl Drop for SigttouBlock {
 }
 
 impl Drop for TerminalLoan {
-    /// Restore the terminal, then strike what was heard on the run it was
-    /// lent for.
+    /// Restore the terminal; what was heard is already struck.
     fn drop(&mut self) {
         self.restore();
-        if let Some(cause) = self.pressed {
-            self.frame.cancel(cause);
-        }
     }
 }
 
@@ -220,7 +218,7 @@ impl TerminalLoan {
 /// kernel SIGINT whichever group owns the tty.  When an external child holds it
 /// this recreates that delivery, so the child dies and the evaluator's blocking
 /// `wait` returns; when the shell itself holds it there is nothing external to
-/// signal and the frontend's cooperative [`Mooring::check`](crate::types::Mooring::check) unwinds the
+/// signal and the frontend's cooperative [`Shell::poll`](crate::types::Shell::poll) unwinds the
 /// in-process eval instead.  Signalling *another* group never ticks ral's
 /// escalation ladder, so no third-signal force-exit can follow from this.
 pub fn interrupt_foreground_child() {
@@ -252,18 +250,17 @@ mod tests {
         assert_eq!(sigttou_is_blocked(), was_blocked);
     }
 
-    /// What a loan struck on its frame when it returned, after `heard`.
+    /// What a loan struck on its frame as it heard `heard`.
     fn struck_after(heard: &[i32]) -> Option<CancelCause> {
         let frame = crate::process::DurableRoot::new().worker();
         let mut loan = TerminalLoan::for_test(&frame);
         for &n in heard {
             loan.hear(Signal::new(n));
         }
-        drop(loan);
         frame.cause()
     }
 
-    /// A key heard is struck when the terminal returns; a signal no terminal
+    /// A key heard is struck at once; a signal no terminal
     /// sends is not; a stronger key outranks a weaker one.
     #[test]
     fn a_returned_loan_strikes_the_key_it_heard() {

@@ -103,7 +103,7 @@ pub(super) fn render(t: &dyn Transport, host: &Arc<ReplHost>) -> PromptText {
     let mut prompt = match base.outcome {
         Outcome::Settled(value) => prompt_text(value, base.captured),
         Outcome::Exited => DEFAULT_PROMPT.to_string(),
-        Outcome::Faulted(fault) | Outcome::Walled(fault) => {
+        Outcome::Faulted(fault) | Outcome::Walled(fault) | Outcome::Stopped(fault) => {
             faults.push(fault);
             DEFAULT_PROMPT.to_string()
         }
@@ -120,7 +120,9 @@ pub(super) fn render(t: &dyn Transport, host: &Arc<ReplHost>) -> PromptText {
         match hr.outcome {
             Outcome::Settled(value) => prompt = prompt_text(value, hr.captured),
             Outcome::Exited => {}
-            Outcome::Faulted(fault) | Outcome::Walled(fault) => faults.push(fault),
+            Outcome::Faulted(fault) | Outcome::Walled(fault) | Outcome::Stopped(fault) => {
+                faults.push(fault);
+            }
         }
     }
     if let Some(fault) = host.prompt_fault((!faults.is_empty()).then(|| faults.join("\n"))) {

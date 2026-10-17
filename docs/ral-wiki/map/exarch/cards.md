@@ -1,6 +1,6 @@
 ---
-generated_at_commit: a3c336a3
-generated_at_date: 2026-10-09
+generated_at_commit: dad6a1b3
+generated_at_date: 2026-10-17
 covers_paths: [exarch/src/record/fault.rs, exarch/src/card.rs, exarch/src/card/diff.rs, exarch/src/card/change.rs, exarch/src/card/value.rs, exarch/src/card/decode.rs, exarch/src/card/encode.rs, exarch/src/card/observation.rs, exarch/src/card/done.rs, exarch/src/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/agent/desk.rs, exarch/src/bus/post.rs, exarch/src/headless.rs, exarch/src/tui/line.rs, exarch/src/tui/diff.rs, exarch/src/tui/palette.rs, exarch/src/tui/block.rs, exarch/src/tui/group.rs, exarch/src/tui/rail.rs, exarch/src/record.rs, exarch/src/record/commit.rs, exarch/src/record/view.rs, exarch/src/tui/scrollback.rs, exarch/data/agent.ral]
 ---
 
@@ -86,7 +86,8 @@ kit-authored `` `card ``. `settled_spans` words a worker's completion outcome �
 event core appends to every deferred surface batch, decoded by `value_to_done`
 into a `DoneOutcome` and recorded as `Display::Done { outcome }` — as one
 sentence, `background block settled (exit n)`, with a failure's message
-appended. The outcome alone carries a level, roled `ok`/`bad` exactly as the
+appended; a worker that ended on an `exit` or a stop (`` `exited ``,
+`` `stopped `` on the card) reads "exited n" or the stop's cause, roled `bad`. The outcome alone carries a level, roled `ok`/`bad` exactly as the
 `$ cmd → status` exec row roles an exit code, which is what a settled block's
 is: a non-settled `╳` rail marks a turn error (provider, stall, or forensic
 fault) or a cancelled turn, while a nonzero worker exit remains the settled

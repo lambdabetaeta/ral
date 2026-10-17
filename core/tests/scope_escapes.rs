@@ -8,7 +8,7 @@ use ral_core::boot::{HostSurface, boot_shell};
 use ral_core::protocol::Run;
 use ral_core::run::RunReport;
 use ral_core::terminal::TerminalState;
-use ral_core::types::{Mooring, Settled, Shell};
+use ral_core::types::{Break, Escape, Mooring, Settled, Shell};
 
 /// Run one top-level run of `source` through the public `run` door
 /// and return the body's `Settled<Value>`.  Every test below picks source
@@ -98,4 +98,35 @@ fn handler_self_mask_survives_panic_mid_body() {
          straight-line code skipped on the unwind, permanently deleting \
          the user alias; A4's RAII guard restores it from `Drop`."
     );
+}
+
+fn test_shell() -> Shell {
+    boot_shell(
+        TerminalState::default(),
+        common::prelude(),
+        &HostSurface::default(),
+    )
+}
+
+/// A cleanup runs under an `exit`, and the `exit` follows it.
+#[test]
+fn a_guard_cleanup_runs_under_an_exit_and_the_exit_follows() {
+    let mut shell = test_shell();
+    match top_level(&mut shell, "guard { exit 3 } { echo cleaned }") {
+        Err(Break::Escape(Escape::Exit(3))) => {}
+        other => panic!("expected exit 3, got {other:?}"),
+    }
+}
+
+/// A cleanup's own failure pre-empts the halt it ran under.
+#[test]
+fn a_cleanups_fail_pre_empts_an_exit() {
+    let mut shell = test_shell();
+    match top_level(
+        &mut shell,
+        "guard { exit 3 } { fail [status: 7, message: x] }",
+    ) {
+        Err(Break::Error(e)) => assert_eq!(e.code(), 7),
+        other => panic!("expected an error with code 7, got {other:?}"),
+    }
 }

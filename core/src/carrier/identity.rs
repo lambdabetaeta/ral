@@ -117,7 +117,7 @@ impl crate::types::EnquiryDesk for IdentityDesk {
         &self,
         req: FOValue,
         _cancel: &crate::process::CancelScope,
-    ) -> Result<FOValue, crate::types::Error> {
+    ) -> crate::types::Settled<FOValue> {
         let mut carried = std::collections::VecDeque::new();
         while let Some((did, event)) = self.events.try_recv() {
             match event {
@@ -128,7 +128,9 @@ impl crate::types::EnquiryDesk for IdentityDesk {
         for item in carried {
             self.events.stash.lock_ignore_poison().push_back(item);
         }
-        self.host.enquire(req).map_err(crate::types::Error::from)
+        self.host
+            .enquire(req)
+            .map_err(|e| crate::types::Break::from(crate::types::Error::from(e)))
     }
 }
 

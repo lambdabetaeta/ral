@@ -19,7 +19,8 @@ use std::sync::Arc;
 /// What the three kinds of child differ in.
 struct Holding {
     root: DurableRoot,
-    anchor: ForegroundScope,
+    /// The child's session anchor and its current scope: one node at birth.
+    scope: ForegroundScope,
     workers: Roster,
 }
 
@@ -35,7 +36,7 @@ impl Shell {
     fn child(&self, holding: Holding) -> Self {
         let Holding {
             root,
-            anchor,
+            scope,
             workers,
         } = holding;
         Self {
@@ -46,9 +47,10 @@ impl Shell {
                 stdin: Source::Empty,
                 ..Io::default()
             },
+            scope: scope.clone(),
             session: SessionState {
                 root,
-                anchor,
+                anchor: scope,
                 sources: self.session.sources.clone(),
                 root_file: self.session.root_file,
                 exit_hints: Arc::clone(&self.session.exit_hints),
@@ -79,10 +81,10 @@ impl Shell {
     /// it from the run it was aimed at.
     pub fn join_session(&self) -> Self {
         let root = self.session.root.clone();
-        let anchor = root.worker();
+        let scope = root.worker();
         self.child(Holding {
             root,
-            anchor,
+            scope,
             workers: self.local.workers.fresh(),
         })
     }
@@ -90,7 +92,7 @@ impl Shell {
     /// The one and only thread-spawn primitive: `f` runs on a fresh OS thread
     /// with a child shell built here, on the parent's thread. `mooring` is
     /// minted by the caller, since only it has the parent mooring to rebuild
-    /// from.
+    /// from; the caller minted its node too, and keeps it.
     ///
     /// The worker registry is `Arc`-shared, not copied, so a nested `spawn`
     /// registers alongside its parent, and the worker's shell dropping cancels
@@ -103,17 +105,16 @@ impl Shell {
         mooring: Mooring,
         name: &str,
         f: F,
-    ) -> std::io::Result<(std::thread::JoinHandle<R>, crate::process::CancelScope)>
+    ) -> std::io::Result<std::thread::JoinHandle<R>>
     where
         F: FnOnce(&Mooring, &mut Self) -> R + Send + 'static,
         R: Send + 'static,
     {
         let mut child = self.child(Holding {
             root: self.session.root.clone(),
-            anchor: mooring.cancel.clone(),
+            scope: mooring.home.clone(),
             workers: self.local.workers.share(),
         });
-        let worker_cancel = mooring.cancel.as_scope().clone();
         let live = self.local.workers.live_ticket();
         let handle = std::thread::Builder::new()
             .name(name.into())
@@ -126,7 +127,7 @@ impl Shell {
                 drop((child, live));
                 out
             })?;
-        Ok((handle, worker_cancel))
+        Ok(handle)
     }
 }
 
@@ -155,7 +156,7 @@ mod tests {
         let aside = parent.join_session();
         assert!(!aside.has_hook(&HookName::session("prompt")));
         assert!(matches!(aside.io.stdin, crate::io::Source::Empty));
-        let (join, _cancel) = parent
+        let join = parent
             .spawn_thread(Mooring::adrift(), "test-worker", |_, child| {
                 (
                     child.has_hook(&HookName::session("prompt")),
@@ -173,7 +174,7 @@ mod tests {
     fn spawned_worker_inherits_the_stack_limit() {
         let mut parent = crate::test_helper::core_shell();
         parent.set_stack_limit(DEFAULT_STACK_LIMIT + 7);
-        let (join, _cancel) = parent
+        let join = parent
             .spawn_thread(Mooring::adrift(), "test-worker", |_, child| {
                 child.session.stack_limit
             })
@@ -191,7 +192,7 @@ mod tests {
         let mut parent = crate::test_helper::core_shell();
         let file = parent.install_script_context("worker.ral", "one\ntwo\nbad\n");
         let span = crate::source::Span::new(file, 8, 11);
-        let (join, _cancel) = parent
+        let join = parent
             .spawn_thread(Mooring::adrift(), "test-worker", move |_, child| {
                 crate::types::Error::new("boom")
                     .at_span(span)
@@ -216,7 +217,7 @@ mod tests {
         let mut parent = crate::test_helper::core_shell();
         parent.install_root_context("main.ral", "");
         let root_file = parent.session.root_file;
-        let (join, _cancel) = parent
+        let join = parent
             .spawn_thread(Mooring::adrift(), "test-worker", |_, child| {
                 child.session.root_file
             })
@@ -234,7 +235,7 @@ mod tests {
     fn spawned_worker_shares_the_exit_hints() {
         let mut parent = crate::test_helper::core_shell();
         parent.set_exit_hints(crate::types::ExitHints::from_text("false 1 hinted\n"));
-        let (join, _cancel) = parent
+        let join = parent
             .spawn_thread(Mooring::adrift(), "test-worker", |_, child| {
                 Arc::clone(&child.session.exit_hints)
             })

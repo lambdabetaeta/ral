@@ -227,7 +227,7 @@ impl HookHealth {
     /// Fold one hook outcome into the health state, returning `true` exactly on
     /// the call that trips the breaker (so the caller emits the single disable
     /// diagnostic once). A wall trips immediately; otherwise faults accumulate
-    /// to [`FAULT_LIMIT`] and any other ending clears the count.
+    /// to [`FAULT_LIMIT`] and any other ending, a stop included, clears the count.
     pub(super) fn record_outcome(&mut self, outcome: &Outcome) -> bool {
         if self.disabled {
             return false;
@@ -307,7 +307,8 @@ fn run_braked(
     if let Some(ctx) = &mut hr.ctx {
         rt.write_back_state_cell(name, ctx.state_cell.take());
     }
-    if let Outcome::Faulted(fault) | Outcome::Walled(fault) = &hr.outcome {
+    if let Outcome::Faulted(fault) | Outcome::Walled(fault) | Outcome::Stopped(fault) = &hr.outcome
+    {
         rt.diagnostics.messages.push(fault.clone());
     }
     if let Some(p) = rt.plugins.iter_mut().find(|p| p.name == name)

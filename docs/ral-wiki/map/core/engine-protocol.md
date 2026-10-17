@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 8aa9355b
-generated_at_date: 2026-10-14
+generated_at_commit: dad6a1b3
+generated_at_date: 2026-10-17
 covers_paths: [core/src/protocol.rs, core/src/protocol/, core/src/carrier.rs, core/src/carrier/, core/src/engine.rs, core/src/engine/, core/src/run/report.rs, core/src/seed.rs, core/src/guard/grant.rs]
 ---
 
@@ -56,7 +56,7 @@ parent's seal, so core holds no spawn machinery for it.** The why is
 
 The frame algebra. Everything on it is a wire type; nothing here carries.
 
-- `PROTOCOL_VERSION` (currently 21) — checked at `Attach`; a mismatch refuses.
+- `PROTOCOL_VERSION` (currently 22) — checked at `Attach`; a mismatch refuses.
 - `check_media` — the same number compared at *build* time, against the
   `proto_version=` line `vm-image/build-boot.sh` records for the engine in the
   guest media; `synod/examples/check-media.rs`, tauri's `beforeBuildCommand`,
@@ -95,11 +95,14 @@ The frame algebra. Everything on it is a wire type; nothing here carries.
   both carriers.
 - `Report` / `Ending` / `FailureStatus` — the terminal frame:
   `Static { rendered, status }` or `Ran { ending, captured, trail }`; `Ending`
-  has no stop arm — ral does not suspend, so every ending is
-  `Settled`/`Raised`/`Walled`/`Unreturnable`/`Exited`. `Unreturnable` is a
+  has no process-stop arm — ral does not suspend — so every ending is
+  `Settled`/`Raised`/`Stopped`/`Unreturnable`/`Exited`. `Stopped` is a
+  cancellation stop that reached the top, a top-level effect like `Exited`,
+  carrying its cause and its rendered diagnostic (empty for the closed-stdout
+  stop, which prints nothing). `Unreturnable` is a
   run that settled on a value the wire cannot carry (a handle, a block, a
-  function), rendered with a hint and reported as status 1. `Raised`,
-  `Walled` and `Unreturnable` carry their error's `record` — what `try`
+  function), rendered with a hint and reported as status 1. `Raised` and
+  `Unreturnable` carry their error's `record` — what `try`
   hands its handler, and what `--audit` builds its `` `err `` outcome from —
   and the two failing arms a `FailureStatus`, never a bare `i32`: it clamps
   into `1..=255` on the way in and on the way back off the wire, so no ending

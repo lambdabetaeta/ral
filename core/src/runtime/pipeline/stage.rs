@@ -6,6 +6,8 @@ use super::collect::{Slot, StageEnd, StageObservation};
 use super::route::HeldEdge;
 use super::sentinel;
 use super::thread::ThreadStage;
+#[cfg(test)]
+use crate::process::CancelScope;
 use crate::process::{CancelCause, Pgid, WaitOutcome, Watch};
 use std::sync::Arc;
 
@@ -48,8 +50,8 @@ impl StageHandle {
         }
     }
 
-    /// Records the cause; a thread is told, an external hears it only as the
-    /// signal the collector sends next.
+    /// Records the cause; a thread is told, by the collector's write on its
+    /// node, an external hears it only as the signal the collector sends next.
     pub(super) fn cancel(&mut self, cause: CancelCause) {
         self.sent = self.sent.max(Some(cause));
         if let StageKind::Thread(t) = &self.kind {
@@ -62,6 +64,14 @@ impl StageHandle {
         self.cancel(CancelCause::ReaderGone);
         if let StageKind::External(e) = &self.kind {
             e.watch.kill();
+        }
+    }
+
+    /// `Some` for a thread stage alone.
+    pub(super) fn thread(&self) -> Option<&ThreadStage> {
+        match &self.kind {
+            StageKind::Thread(t) => Some(t),
+            StageKind::External(_) => None,
         }
     }
 
@@ -119,9 +129,10 @@ impl StageHandle {
         let StageKind::Thread(t) = kind else {
             panic!("Event::Returned named a stage that was not a thread stage");
         };
+        let stage = t.id();
         t.join_after_settled();
         drop(held);
-        StageEnd::Thread(obs)
+        StageEnd::Thread { obs, stage }
     }
 
     /// An already-running external, for `collect.rs`'s own tests.
@@ -172,13 +183,11 @@ impl StageHandle {
     }
 
     /// No real thread, so an `Event::Returned` for it files as a real thread
-    /// stage's own end would.
+    /// stage's own end would; the stage's scope comes back, so a test can name
+    /// its reader-gone stop and read what the collector wrote.
     #[cfg(test)]
-    pub(super) fn fake_thread_for_step_test(slot: Slot) -> Self {
-        Self::new(
-            StageKind::Thread(ThreadStage::fake_for_step_test()),
-            None,
-            slot,
-        )
+    pub(super) fn fake_thread_for_step_test(slot: Slot) -> (Self, CancelScope) {
+        let (stage, scope) = ThreadStage::fake();
+        (Self::new(StageKind::Thread(stage), None, slot), scope)
     }
 }

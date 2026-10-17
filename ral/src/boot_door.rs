@@ -154,7 +154,7 @@ pub(crate) fn settle(report: Result<Report, Severed>) -> Result<RcSettings, i32>
         }),
         Ending::Exited(_) => Err(status),
         Ending::Raised { rendered, .. }
-        | Ending::Walled { rendered, .. }
+        | Ending::Stopped { rendered, .. }
         | Ending::Unreturnable { rendered, .. } => {
             err!("{rendered}");
             Err(status)

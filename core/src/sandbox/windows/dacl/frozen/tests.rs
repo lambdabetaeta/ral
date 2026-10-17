@@ -125,8 +125,7 @@ fn a_grant_since_replaced_by_a_junction_is_refused_on_the_next_launch() {
             let pin = FrozenPin::open(&granted, GrantKind::ReadOnly)
                 .unwrap()
                 .unwrap();
-            ensure_frozen_grant(&pin, CAP_SID, GrantKind::ReadOnly, &CancelScope::default())
-                .unwrap();
+            ensure_frozen_grant(&pin, CAP_SID, GrantKind::ReadOnly, &CancelScope::root()).unwrap();
         }
         fs::remove_dir(&granted).unwrap();
         junction(&granted, &outside);
@@ -145,7 +144,7 @@ fn a_read_write_grant_stamps_dacl_and_label_through_the_held_handle() {
         let pin = FrozenPin::open(&root, GrantKind::ReadWrite)
             .unwrap()
             .unwrap();
-        ensure_frozen_grant(&pin, CAP_SID, GrantKind::ReadWrite, &CancelScope::default()).unwrap();
+        ensure_frozen_grant(&pin, CAP_SID, GrantKind::ReadWrite, &CancelScope::root()).unwrap();
         assert!(super::super::low_integrity_label_present(&sub));
         assert!(
             super::super::scan_explicit_aces_for_sid(&root, CAP_SID)

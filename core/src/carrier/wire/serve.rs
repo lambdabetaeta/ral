@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use crate::engine::{Engine, EngineInstaller, Outlet, Rails};
 use crate::first_order::FOValue;
-use crate::process::{CancelCause, ForegroundScope};
+use crate::process::{CancelCause, ForegroundScope, POLL_SLICE};
 use crate::protocol::channel::{HOST_SILENCE_DEADLINE, WireChannel, WriteError, write_or_sever};
 use crate::protocol::probe::Probe;
 use crate::protocol::{
@@ -22,7 +22,7 @@ use crate::protocol::{
     SessionEvent,
 };
 use crate::sync::LockExt;
-use crate::types::{DeferredSink, EnquiryDesk, Error, Fork};
+use crate::types::{Break, DeferredSink, EnquiryDesk, Error, Fork, Settled};
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -80,10 +80,6 @@ impl DeferredSink for ChannelDeferredSink {
         );
     }
 }
-
-/// A cancel trips the enquiring run's scope from the reader thread, never this
-/// rendezvous, so the park must poll; this bounds how stale a cancel can go.
-const ENQUIRY_CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(75);
 
 /// Wake cadence while armed: brisk enough to notice a death, slow enough that
 /// an idle engine does not spin.
@@ -143,7 +139,7 @@ impl Parks {
 
 /// One dispatch's enquiry desk. `enquire` mints an [`EnquiryId`], sends
 /// `Event::Enquiry`, and parks until the front-end's `Frame::Answer` fills it
-/// — or the run's own cancel scope fires, polled at the receive timeout.
+/// — or the run's own cancel scope fires, polled a slice at a time.
 struct WireDesk {
     id: DispatchId,
     outlet: Outlet,
@@ -151,11 +147,7 @@ struct WireDesk {
 }
 
 impl EnquiryDesk for WireDesk {
-    fn enquire(
-        &self,
-        req: FOValue,
-        cancel: &crate::process::CancelScope,
-    ) -> Result<FOValue, Error> {
+    fn enquire(&self, req: FOValue, cancel: &crate::process::CancelScope) -> Settled<FOValue> {
         let eid = EnquiryId(self.parks.next.fetch_add(1, Ordering::Relaxed));
         // Registered before the send: the answer may be back before this
         // thread reaches the park below.
@@ -167,7 +159,8 @@ impl EnquiryDesk for WireDesk {
             return Err(Error::new(match e {
                 WriteError::Severed => "enquiry lost: the host connection is down".into(),
                 WriteError::Unencodable(e) => format!("enquiry: the host could not be asked: {e}"),
-            }));
+            })
+            .into());
         }
 
         // The sender leaves `parked` only into `fill`'s send or this park's own
@@ -177,20 +170,20 @@ impl EnquiryDesk for WireDesk {
         // Answer, then cancel, then park — in that order, so an answer already
         // in hand outranks a cancel pending beside it, and an enquiry raised
         // under an already-cancelled scope returns without parking at all. The
-        // park mints its error through `Error::cancelled`, as every poll point
-        // does.
+        // park polls the scope, which mints the stop, as every poll point does.
+        let raised = |e| Break::from(Error::from(e));
         loop {
             match rx.try_recv() {
-                Ok(answer) => return answer.map_err(Error::from),
+                Ok(answer) => return answer.map_err(raised),
                 Err(mpsc::TryRecvError::Empty) => {}
                 Err(mpsc::TryRecvError::Disconnected) => unreachable!("{ORPHANED}"),
             }
-            if let Some(cause) = cancel.cause() {
+            if let Err(stop) = cancel.poll() {
                 self.parks.parked.lock_ignore_poison().remove(&eid);
-                return Err(Error::cancelled(cause));
+                return Err(stop);
             }
-            match rx.recv_timeout(ENQUIRY_CANCEL_POLL) {
-                Ok(answer) => return answer.map_err(Error::from),
+            match rx.recv_timeout(POLL_SLICE) {
+                Ok(answer) => return answer.map_err(raised),
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => unreachable!("{ORPHANED}"),
             }
@@ -630,7 +623,7 @@ mod wire_desk_tests {
             filler.parks.fill(eid, Ok(FOValue::Int { value: 42 }));
         });
 
-        let answer = desk.enquire(FOValue::Int { value: 41 }, &CancelScope::default());
+        let answer = desk.enquire(FOValue::Int { value: 41 }, &CancelScope::root());
         front_end.join().expect("front-end thread");
         assert_eq!(answer.expect("answered"), FOValue::Int { value: 42 });
         assert!(
@@ -655,15 +648,28 @@ mod wire_desk_tests {
             filler.parks.fill(eid, Err(EnquiryError::no_desk()));
         });
 
-        let err = desk
-            .enquire(FOValue::Unit, &CancelScope::default())
-            .expect_err("refused");
+        let Break::Error(err) = desk
+            .enquire(FOValue::Unit, &CancelScope::root())
+            .expect_err("refused")
+        else {
+            panic!("a refusal is an error, not a stop");
+        };
         front_end.join().expect("front-end thread");
         assert_eq!(err.message, crate::types::NO_DESK);
         assert_eq!(
             err.status,
             crate::types::Status::Raised(crate::types::NO_DESK_STATUS)
         );
+    }
+
+    fn is_cancelled_stop(br: &Break) -> bool {
+        matches!(
+            br,
+            Break::Escape(crate::types::Escape::Stopped {
+                cause: CancelCause::Cancelled,
+                ..
+            })
+        )
     }
 
     fn lone_desk() -> (WireDesk, WireChannel) {
@@ -677,11 +683,12 @@ mod wire_desk_tests {
     #[test]
     fn cancel_wakes_a_parked_enquiry() {
         let (desk, _peer) = lone_desk();
-        let scope = CancelScope::default();
+        let scope = CancelScope::root();
 
         // Long enough that `enquire` is provably parked before the cancel
         // lands, so this test cannot pass by the pre-park check alone.
-        let lead = ENQUIRY_CANCEL_POLL * 2;
+        let lead = POLL_SLICE * 2;
+        let started = std::time::Instant::now();
         let canceller = {
             let scope = scope.clone();
             std::thread::spawn(move || {
@@ -690,12 +697,11 @@ mod wire_desk_tests {
             })
         };
 
-        let started = std::time::Instant::now();
-        let err = desk.enquire(FOValue::Unit, &scope).expect_err("cancelled");
+        let stop = desk.enquire(FOValue::Unit, &scope).expect_err("cancelled");
         let waited = started.elapsed();
         canceller.join().expect("canceller thread");
 
-        assert_eq!(err.message, "cancelled");
+        assert!(is_cancelled_stop(&stop), "{stop:?}");
         assert!(
             waited >= lead,
             "the enquiry parked until the cancel: {waited:?}"
@@ -711,22 +717,16 @@ mod wire_desk_tests {
     }
 
     /// An enquiry raised under an already-cancelled scope answers at once: it
-    /// checks the cancel before it parks, so it never waits out a poll tick.
+    /// checks the cancel before it parks.
     #[test]
     fn cancel_before_the_enquiry_never_parks() {
         let (desk, _peer) = lone_desk();
-        let scope = CancelScope::default();
+        let scope = CancelScope::root();
         scope.cancel(CancelCause::Cancelled);
 
-        let started = std::time::Instant::now();
-        let err = desk.enquire(FOValue::Unit, &scope).expect_err("cancelled");
-        let waited = started.elapsed();
+        let stop = desk.enquire(FOValue::Unit, &scope).expect_err("cancelled");
 
-        assert_eq!(err.message, "cancelled");
-        assert!(
-            waited < ENQUIRY_CANCEL_POLL,
-            "returned without parking for a tick: {waited:?}"
-        );
+        assert!(is_cancelled_stop(&stop), "{stop:?}");
         assert!(
             desk.parks.parked.lock().unwrap().is_empty(),
             "a cancelled park deregisters itself"

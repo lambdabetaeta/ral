@@ -1,13 +1,15 @@
 //! The runtime error type.
 
 use crate::diagnostic::{Label, Rejection, Report, palette};
-use crate::process::{CancelCause, ChildEnd, CommandFailure, SpawnFailure};
-use crate::source::{FileId, SourceDb, Span};
+use crate::process::{CancelCause, CommandFailure, SpawnFailure, WorkerStop};
+use crate::source::{CallSite, FileId, SourceDb, Span};
 use std::fmt::{self, Write as _};
 
 mod record;
 pub use record::outcome_value;
 
+/// Rides in every `Settled`, so its optional parts are boxed: clippy's
+/// `result_large_err` refuses an `Err` of 128 bytes.
 #[derive(Debug, Clone)]
 pub struct Error {
     pub message: String,
@@ -15,10 +17,9 @@ pub struct Error {
     /// `None` until `evaluator::machine`'s `stamp` sets the innermost
     /// enclosing node's span.
     pub span: Option<Span>,
-    pub hint: Option<String>,
+    pub hint: Option<Box<str>>,
     /// A second place in the source the message points at: the use that imposed
-    /// what a value failed to meet.  Boxed, like `command`: `Error` rides in
-    /// every `Settled`, and a larger one trips `result_large_err`.
+    /// what a value failed to meet.
     pub witness: Option<Box<Span>>,
     /// The shown name of the command whose failure this is; `None` until
     /// `types::flow::name_failure` stamps the innermost dispatch.
@@ -26,14 +27,22 @@ pub struct Error {
     /// A loaded file that failed to compile: renderers draw its report, not
     /// `message`.
     pub rejection: Option<Box<Rejection>>,
+    /// The site a re-raised record carried, read by `record_at` ahead of the
+    /// span.  Set only by `fail`.
+    pub(crate) site: Option<Box<CallSite>>,
 }
+
+const _: () = assert!(
+    std::mem::size_of::<Error>() < 128,
+    "Error must stay under clippy's result_large_err threshold"
+);
 
 /// An error's exit status: one constructor per fact, whichever door reported it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
     Raised(i32),
-    /// ral's own cancellation, whether a poll point or a child's teardown saw it.
-    Cancelled(CancelCause),
+    /// A stop an owner converted into an error at its boundary.
+    WorkerStopped(WorkerStop),
     Process(CommandFailure),
 }
 
@@ -43,7 +52,7 @@ impl Status {
         match self {
             Self::Raised(code) => *code,
             Self::Process(failure) => failure.code(),
-            Self::Cancelled(cause) => cause.code().into(),
+            Self::WorkerStopped(owned) => i32::from(owned.cause().code()),
         }
     }
 
@@ -66,7 +75,7 @@ impl Error {
         Self::with_status(message, Status::Raised(status))
     }
 
-    fn with_status(message: impl Into<String>, status: Status) -> Self {
+    pub(crate) fn with_status(message: impl Into<String>, status: Status) -> Self {
         Self {
             message: message.into(),
             status,
@@ -75,6 +84,7 @@ impl Error {
             witness: None,
             command: None,
             rejection: None,
+            site: None,
         }
     }
 
@@ -88,27 +98,23 @@ impl Error {
         }
     }
 
-    /// A poll point is any site that reads `CancelScope::cause()` (or
-    /// `is_cancelled()`) and answers `Some` by ending the evaluation with an
-    /// error; every such site mints that error through `Error::cancelled(cause)`.
-    pub(crate) fn cancelled(cause: CancelCause) -> Self {
-        Self::with_status(cause.message(), Status::Cancelled(cause))
+    pub(crate) fn worker_stopped(owned: WorkerStop) -> Self {
+        Self::with_status(owned.message(), Status::WorkerStopped(owned))
     }
 
-    pub(crate) fn cancelled_by(&self) -> Option<CancelCause> {
-        match self.status {
-            Status::Cancelled(cause) => Some(cause),
-            _ => None,
+    /// The diagnostic for a stop that reached the top of a run, drawn by the error
+    /// renderer through a rendering-only `Error` that never leaves this fn.
+    pub(crate) fn render_stop(
+        cause: CancelCause,
+        at: Option<Span>,
+        db: &SourceDb,
+        compact_root: Option<FileId>,
+    ) -> String {
+        Self {
+            span: at,
+            ..Self::raised(cause.message(), i32::from(cause.code()))
         }
-    }
-
-    /// A child's end as the error `cmd` fails with; a cancelled one's is the
-    /// very error a poll point mints for the same cause.
-    pub(crate) fn of_child(cmd: &str, end: ChildEnd, shell: &crate::types::Shell) -> Self {
-        match end {
-            ChildEnd::Failed(failure) => Self::from_command_failure(cmd, failure, shell),
-            ChildEnd::Cancelled(cause) => Self::cancelled(cause),
-        }
+        .render(db, compact_root)
     }
 
     /// A command that never became a process, whether the pre-spawn probe or
@@ -129,7 +135,7 @@ impl Error {
             _ => None,
         });
         Self {
-            hint,
+            hint: hint.map(Into::into),
             ..Self::with_status(failure.message(cmd), Status::Process(failure))
         }
     }
@@ -140,7 +146,7 @@ impl Error {
     }
 
     pub(crate) fn with_hint(mut self, hint: impl Into<String>) -> Self {
-        self.hint = Some(hint.into());
+        self.hint = Some(hint.into().into());
         self
     }
 
@@ -148,8 +154,8 @@ impl Error {
     pub(crate) fn append_hint(mut self, more: impl Into<String>) -> Self {
         let more = more.into();
         self.hint = Some(match self.hint.take() {
-            Some(hint) => format!("{hint}\n\n{more}"),
-            None => more,
+            Some(hint) => format!("{hint}\n\n{more}").into(),
+            None => more.into(),
         });
         self
     }
@@ -203,7 +209,7 @@ impl Error {
             message: self.message.clone(),
             at,
             also,
-            hint: self.hint.clone(),
+            hint: self.hint.as_deref().map(Into::into),
         };
         match resolved {
             Some((sp, src)) => report(

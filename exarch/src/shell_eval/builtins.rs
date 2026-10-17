@@ -257,7 +257,7 @@ fn builtin_view_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
 
 /// The one sanctioned `WalkBuilder::build` site, backed by a clippy ban: an
 /// `ignore::Walk` runs to completion regardless of cancellation, so every caller
-/// must poll [`Mooring::check`] atop each iteration to surface a
+/// must poll [`Shell::poll`] atop each iteration to surface a
 /// timeout or Esc as a cancellation `Break` before the next entry.
 #[allow(
     clippy::disallowed_methods,
@@ -285,7 +285,7 @@ fn readable(shell: &mut Shell, rel: &str) -> bool {
 /// Recursively search the cwd for `pattern` (ignore-aware, Rust regex), reading
 /// each file's bytes once.  The cancellation poll, the per-file deny skip, and
 /// the binary-detection quit all live here, the one site `grep-files` composes over.
-fn search_tree(mooring: &Mooring, shell: &mut Shell, pattern: &str) -> Settled<Vec<SearchHit>> {
+fn search_tree(shell: &mut Shell, pattern: &str) -> Settled<Vec<SearchHit>> {
     let matcher = RegexMatcherBuilder::new()
         .build(pattern)
         .map_err(|e| sig(regex_err("grep-files", pattern, &e.to_string())))?;
@@ -297,7 +297,7 @@ fn search_tree(mooring: &Mooring, shell: &mut Shell, pattern: &str) -> Settled<V
 
     let mut results = Vec::new();
     for raw in cancellable(WalkBuilder::new(&root).git_global(false)) {
-        mooring.check()?;
+        shell.poll()?;
         let entry = match raw {
             Ok(e) if e.file_type().is_some_and(|ft| ft.is_file()) => e,
             _ => continue,
@@ -348,7 +348,7 @@ fn builtin_grep_files(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
     });
     mooring.surface_data(&shell.observation(grep).to_surface());
 
-    let results = search_tree(mooring, shell, pattern)?
+    let results = search_tree(shell, pattern)?
         .into_iter()
         .map(|hit| {
             #[allow(
@@ -658,7 +658,7 @@ fn unindented_match(body: &str, from: &str) -> Option<usize> {
 
 /// `explore-dir DEPTH` — list the cwd's tree (ignore-aware) to `DEPTH`, through
 /// the one sanctioned walk site ([`cancellable`]).
-fn builtin_explore_dir(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+fn builtin_explore_dir(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let depth: usize = match &args[0] {
         Value::Int(n) if *n >= 0 => {
             #[allow(
@@ -690,7 +690,7 @@ fn builtin_explore_dir(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> 
     let mut results = Vec::new();
 
     for result in walker {
-        mooring.check()?;
+        shell.poll()?;
         match result {
             Ok(entry) => {
                 if entry.depth() == 0 {

@@ -2,9 +2,10 @@
 //! is observed, settled and stopped.
 
 use crate::fact::Io;
+use crate::process::WorkerStop;
 use crate::types::{
-    Break, CompletedHandle, Error, ErrorRecord, Escape, HandleInner, HandleState, Mooring, Settled,
-    Shell, Value, outcome_value, sig, sig_hint,
+    Break, CompletedHandle, Error, ErrorRecord, HandleInner, HandleState, Mooring, Settled, Shell,
+    ThreadEnd, Value, outcome_value, sig,
 };
 
 /// Stop a handle: the policy `cancel` and `race`'s loser cleanup share.  An
@@ -14,9 +15,7 @@ use crate::types::{
 /// The `state` guard spans the test and the transition, so there is no window
 /// for a worker to finish in between and have its outcome torn out from under
 /// it: every transition holds this lock, and takes `result` and `cached` under
-/// it, never the other way round.  The scope fires after the guard is dropped —
-/// `CancelScope::cancel` runs every armed watcher on this thread, and nothing
-/// that runs arbitrary code belongs inside a handle's transition.
+/// it, never the other way round.
 fn stop_handle(handle: &HandleInner) {
     if handle.detach() {
         handle.cancel.cancel(crate::process::CancelCause::Cancelled);
@@ -29,18 +28,6 @@ pub(crate) fn builtin_cancel(args: &[Value], shell: &Shell) -> Settled<Value> {
     stop_handle(handle);
     shell.local.workers.remove(handle);
     Ok(Value::Unit)
-}
-
-/// The pre-check `await` and `poll` share: a cancelled handle has no result to
-/// wait for or sample, so observing one is an error.
-fn ensure_live(handle: &HandleInner) -> Settled<()> {
-    if handle.state() == HandleState::Cancelled {
-        return Err(sig_hint(
-            "handle is cancelled",
-            "use try around await to handle cancellation",
-        ));
-    }
-    Ok(())
 }
 
 /// Replay a finished worker's buffered surface events through the
@@ -77,7 +64,10 @@ fn project_completed(
     handle: &HandleInner,
     shell: &Shell,
 ) -> Settled<Value> {
-    let value = completed.outcome?;
+    let value = match completed.end {
+        ThreadEnd::Settled(settled) => settled?,
+        ThreadEnd::Panicked(text) => std::panic::resume_unwind(Box::new(text)),
+    };
     admit_handled(handle, &value, shell)?;
     Ok(awaited(value, Io::of(completed.stdout, completed.stderr)))
 }
@@ -98,12 +88,13 @@ fn beside(io: Io, key: &str, v: Value) -> Value {
 }
 
 /// One cancel-aware foreground wait, shared by `await` and `race`: sweep until
-/// a handle settles, erroring when none remain live.  Between sweeps it polls
-/// `Mooring::check`, so a foreground cancel unwinds the wait — but the workers
-/// hang at the durable root, so a cut-short wait leaves them observable later.
+/// a handle settles.  Between sweeps it polls the shell, so a foreground
+/// cancel unwinds the wait — but the workers hang at the durable root, so a
+/// cut-short wait leaves them observable later.  A set of cancelled handles
+/// is the awaiter's own error: the cancel this run made.
 fn wait_first_settled<'a>(
     handles: &[&'a HandleInner],
-    mooring: &Mooring,
+    shell: &Shell,
 ) -> Settled<(&'a HandleInner, CompletedHandle)> {
     loop {
         let mut saw_running = false;
@@ -121,9 +112,13 @@ fn wait_first_settled<'a>(
             }
         }
         if !saw_running {
-            return Err(sig("no live handles to wait for"));
+            return Err(if handles.is_empty() {
+                sig("no live handles to wait for")
+            } else {
+                Error::worker_stopped(WorkerStop::Cancelled).into()
+            });
         }
-        mooring.check()?;
+        shell.poll()?;
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
 }
@@ -135,8 +130,7 @@ pub(super) fn await_handle(
     mooring: &Mooring,
     shell: &Shell,
 ) -> Settled<Value> {
-    ensure_live(handle)?;
-    let (_, completed) = wait_first_settled(&[handle], mooring)?;
+    let (_, completed) = wait_first_settled(&[handle], shell)?;
     shell.local.workers.remove(handle);
     replay_deferred_surface(handle, &completed, mooring);
     project_completed(completed, handle, shell)
@@ -158,24 +152,33 @@ pub(crate) fn builtin_await(args: &[Value], mooring: &Mooring, shell: &Shell) ->
 /// are therefore non-idempotent.  A watched handle's
 /// buffers stay empty, so a pending poll on one reports nothing.
 ///
-/// Errors only on a cancelled handle ([`ensure_live`]).  A failed block is
-/// reported as data, not re-raised: `poll` never re-raises, whatever the
-/// block's own status — that lives in `outcome.err.status`.
+/// Total over every handle: a cancelled one settles with the owner's record;
+/// a failed one as data; an `exit`, a foreign stop and a panic are re-raised,
+/// as `await` re-raises them.
 pub(crate) fn builtin_poll(args: &[Value], shell: &Shell) -> Settled<Value> {
     let handle = args[0].expect_handle("poll")?;
-    ensure_live(handle)?;
-    // Both arms are observations, so the touch lands once at entry, before the
-    // settle attempt decides which arm it is.
     handle.renew();
-    let result = if let Some(completed) = handle.try_settle() {
+    let result = if handle.state() == HandleState::Cancelled {
+        // `cancel` abandoned the outcome; the owner's return clause is the record.
+        let io = Io::of(handle.stdout_buf.peek(), handle.stderr_buf.peek());
+        Value::variant(
+            "settled",
+            Some(settled(
+                io,
+                Err(Error::worker_stopped(WorkerStop::Cancelled).record(shell)),
+            )),
+        )
+    } else if let Some(completed) = handle.try_settle() {
         // A settled poll observes as `await` does, so it removes the entry too.
         shell.local.workers.remove(handle);
-        let outcome = match completed.outcome {
-            Ok(value) => {
+        let outcome = match completed.end {
+            ThreadEnd::Settled(Ok(value)) => {
                 admit_handled(handle, &value, shell)?;
                 Ok(value)
             }
-            Err(e) => Err(break_record(&e, shell)),
+            ThreadEnd::Settled(Err(Break::Error(e))) => Err(e.record(shell)),
+            ThreadEnd::Settled(Err(escape)) => return Err(escape),
+            ThreadEnd::Panicked(text) => std::panic::resume_unwind(Box::new(text)),
         };
         Value::variant(
             "settled",
@@ -201,7 +204,7 @@ pub(crate) fn builtin_race(args: &[Value], mooring: &Mooring, shell: &Shell) -> 
         .map(|v| v.expect_handle("race"))
         .collect::<Result<Vec<_>, _>>()?;
 
-    let (winner, completed) = wait_first_settled(&handles, mooring)?;
+    let (winner, completed) = wait_first_settled(&handles, shell)?;
     shell.local.workers.remove(winner);
     for &h in &handles {
         if h != winner {
@@ -217,14 +220,4 @@ pub(crate) fn builtin_race(args: &[Value], mooring: &Mooring, shell: &Shell) -> 
 /// checker's `settle_record` is its type.
 fn settled(io: Io, outcome: Result<Value, ErrorRecord>) -> Value {
     beside(io, "outcome", outcome_value(outcome))
-}
-
-/// `poll`'s `` `err `` payload and the `` `done `` event's: the same record
-/// `try` hands its handler thunk.  An `Escape` carries no located message and
-/// names no command, so it has no site.
-pub(super) fn break_record(e: &Break, shell: &Shell) -> ErrorRecord {
-    match e {
-        Break::Error(err) => err.record(shell),
-        Break::Escape(Escape::Exit(code)) => Error::raised("block exited", *code).record_at(None),
-    }
 }

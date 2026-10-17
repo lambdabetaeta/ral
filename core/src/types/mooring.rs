@@ -2,8 +2,7 @@
 //! structured-event sink, its enquiry desk, its session-[`Fork`] door, and
 //! its terminal-foreground authority.
 
-use super::error::Error;
-use super::flow::Break;
+use super::flow::Settled;
 use super::shell::Bequest;
 use super::shell::workers::WorkerLease;
 use super::value::Value;
@@ -11,6 +10,7 @@ use crate::process::{DurableRoot, ForegroundScope};
 use crate::sync::LockExt as _;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// A sink for structured host events: the value-typed dual of the byte
 /// [`Io`](crate::io::Io) sinks.
@@ -61,12 +61,13 @@ pub trait EnquiryDesk: Send + Sync {
     /// and unwinds on the same causes every other poll point observes.
     ///
     /// # Errors
-    /// Returns `Err` when the host cannot answer `req`.
+    /// Returns `Err` when the host cannot answer `req`, or the stop `cancel`
+    /// carries.
     fn enquire(
         &self,
         req: crate::first_order::FOValue,
         cancel: &crate::process::CancelScope,
-    ) -> Result<crate::first_order::FOValue, crate::types::Error>;
+    ) -> Settled<crate::first_order::FOValue>;
 }
 
 /// Shared handle to the run-local enquiry desk.  Run-scoped like
@@ -169,6 +170,9 @@ pub(crate) enum TerminalAccess {
 /// The run-invariant half of the frame a run installs: where its events go,
 /// who answers it, what stops it, and its terminal-foreground authority.
 ///
+/// The node is here, being run-invariant; the current scope is not (a
+/// cleanup's shield), so it is [`Shell::scope`](crate::types::Shell).
+///
 /// Nothing here changes between a run's first step and its last, so nothing
 /// needs saving and restoring: it is an owned local on the run's own stack
 /// frame ([`Shell::run`](crate::Shell::run)), lent onward as `&Mooring`, and an
@@ -186,12 +190,15 @@ pub struct Mooring {
     pub(crate) desk: Option<Desk>,
     /// `None`: this host adopts no forked sessions.
     pub(crate) fork: Option<Fork>,
-    /// The run's foreground work scope, consulted between effectful steps by
-    /// [`Self::check`] and always a descendant
-    /// of [`SessionState`](crate::types::SessionState)'s durable root.  The one
-    /// `pub` member: a host clones a deadline child of it, or cancels it to
-    /// interrupt the foreground work.
-    pub cancel: ForegroundScope,
+    /// The owner's node: the base of this machine's tree (a run's, a
+    /// worker's, a stage's).  What a key the terminal tenant heard is struck
+    /// on, what a stage's group membership is judged by, what a host
+    /// cancels a worker through.  Not what is polled: that is `Shell::scope`,
+    /// a descendant swapped by frames, which coincides with this at the base.
+    pub home: ForegroundScope,
+    /// What a `guard` cleanup gets, from the strike, before the stop ends
+    /// it: the host's policy, as `wall` is.
+    pub(crate) cleanup_grace: Duration,
     pub(crate) deferred_lease: Option<WorkerLease>,
     /// Admission cap enforced at the spawn door, counting only *running*
     /// entries — settled ones lingering under retention never block a birth.
@@ -200,36 +207,21 @@ pub struct Mooring {
 }
 
 impl Mooring {
-    /// Whether the current evaluation should unwind.
-    ///
-    /// Fires when the foreground scope, or any ancestor, is cancelled: a
-    /// translated signal, a deadline, an explicit `cancel <handle>`, or a
-    /// Ctrl-\ root abort.  The error is unspanned: the break path stamps the
-    /// innermost node it unwinds through.
-    ///
-    /// # Errors
-    /// Returns `Err` carrying the strongest cause's message and exit code when
-    /// the chain is cancelled.
-    pub fn check(&self) -> Result<(), Break> {
-        self.cancel
-            .cause()
-            .map_or(Ok(()), |cause| Err(Break::Error(Error::cancelled(cause))))
-    }
-
     /// The mooring a worker runs under: a rebuild, not a share.
     ///
-    /// `parent`'s cancel scope would let a foreground cancel reach a worker
-    /// that must outlive the run, and desk and fork are barred to one; rail,
-    /// lease, and cap carry over, so a nested `spawn` is governed alike.  Its
-    /// scope is a [`worker`](DurableRoot::worker) of the session root: a
-    /// SIGTERM reaches it, a Ctrl-C does not.
-    pub(crate) fn for_worker(parent: &Self, root: &DurableRoot, surface: SurfaceSink) -> Self {
+    /// `parent`'s node would let a foreground cancel reach a worker that must
+    /// outlive the run, and desk and fork are barred to one; rail, lease, and
+    /// cap carry over, so a nested `spawn` is governed alike.  `node` is the
+    /// caller's [`worker`](DurableRoot::worker) of the session root: a SIGTERM
+    /// reaches it, a Ctrl-C does not.
+    pub(crate) fn for_worker(parent: &Self, node: ForegroundScope, surface: SurfaceSink) -> Self {
         Self {
             surface: Some(surface),
             deferred: parent.deferred.clone(),
             desk: None,
             fork: None,
-            cancel: root.worker(),
+            home: node,
+            cleanup_grace: parent.cleanup_grace,
             deferred_lease: parent.deferred_lease,
             worker_cap: parent.worker_cap,
             terminal_access: TerminalAccess::Denied,
@@ -240,15 +232,16 @@ impl Mooring {
     /// deferred sink carry over — a stage's audit and `spawn` deliveries are
     /// the pipeline's, not a worker's own — but no desk, no fork, and no
     /// terminal authority, since only the node itself may claim the
-    /// foreground.  `cancel` is a child of the node's own scope, so a
-    /// pipeline-wide cancel reaches every stage transitively.
-    pub(crate) fn for_stage_thread(parent: &Self) -> Self {
+    /// foreground.  `node` is the stage's own, minted by its launcher under
+    /// the current scope, so a pipeline-wide cancel reaches every stage.
+    pub(crate) fn for_stage_thread(parent: &Self, node: ForegroundScope) -> Self {
         Self {
             surface: parent.surface.clone(),
             deferred: parent.deferred.clone(),
             desk: None,
             fork: None,
-            cancel: parent.cancel.child(),
+            home: node,
+            cleanup_grace: parent.cleanup_grace,
             deferred_lease: parent.deferred_lease,
             worker_cap: parent.worker_cap,
             terminal_access: TerminalAccess::Denied,
@@ -257,15 +250,16 @@ impl Mooring {
 
     /// A mooring tied to no run: nothing installed, and a scope under a root
     /// nothing else holds.  What a caller invoking a builtin body outside a run
-    /// reaches for — a host-embedding test, above all; cancelling its
-    /// [`cancel`](Self::cancel) is how it drives the body's poll points.
+    /// reaches for — a host-embedding test, above all; cancelling the
+    /// shell's `scope` is how it drives the body's poll points.
     pub fn adrift() -> Self {
         Self {
             surface: None,
             deferred: None,
             desk: None,
             fork: None,
-            cancel: DurableRoot::default().worker(),
+            home: DurableRoot::default().worker(),
+            cleanup_grace: Duration::from_secs(5),
             deferred_lease: None,
             worker_cap: None,
             terminal_access: TerminalAccess::Denied,
@@ -314,7 +308,8 @@ impl Mooring {
             deferred: self.deferred.clone(),
             desk: self.desk.clone(),
             fork: self.fork.clone(),
-            cancel: self.cancel.clone(),
+            home: self.home.clone(),
+            cleanup_grace: self.cleanup_grace,
             deferred_lease: self.deferred_lease,
             worker_cap: self.worker_cap,
             terminal_access: TerminalAccess::ExplicitLoan,

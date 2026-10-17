@@ -21,9 +21,9 @@
 use crate::fact::{LeaseClass, WorkerId};
 use crate::first_order::FOValue;
 use crate::first_order::datum::{Datum, tag, untag};
+use crate::process::CancelCause;
 use crate::sync::LockExt as _;
-use crate::types::ErrorRecord;
-use crate::types::HandleInner;
+use crate::types::{Break, ErrorRecord, Escape, HandleInner, Shell, ThreadEnd};
 use crate::{label, record, variant};
 use serde::{Deserialize, Serialize};
 use std::ops::{ControlFlow, Deref};
@@ -32,12 +32,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 use strum::{IntoStaticStr, VariantArray};
 
-/// How long a teardown waits for cancelled workers to die. A child's wait loop
-/// sees a cancel within 100ms and grants its group a 500ms SIGTERM grace before
-/// SIGKILL (`runtime::command::child`), so anything that will die dies well
-/// inside this; expiry means a wedged worker, and exiting anyway is the lesser
-/// harm.
-const WORKER_DRAIN_GRACE: Duration = Duration::from_millis(1500);
+/// How long a wipe waits for cancelled workers to end: the cleanup grace a
+/// host grants by default (`Run::foreground`'s five seconds) plus the
+/// teardown grace, so a shielded cleanup's child is not orphaned by the
+/// session's end.  A host granting more accepts that a wipe may cut it.
+const WORKER_DRAIN_GRACE: Duration = Duration::from_millis(5_500);
 
 impl WorkerId {
     pub(crate) fn mint() -> Self {
@@ -147,14 +146,32 @@ label!(ReapCause);
 pub enum Done {
     Ok,
     Err(ErrorRecord),
+    Exited(i32),
+    Stopped(CancelCause),
     Panic(String),
 }
 
 variant!(Done {
     Ok: "ok",
     Err(ErrorRecord): "err",
+    Exited(i32): "exited",
+    Stopped(CancelCause): "stopped",
     Panic(String): "panic",
 });
+
+impl Done {
+    pub(crate) fn of(end: &ThreadEnd, shell: &Shell) -> Self {
+        match end {
+            ThreadEnd::Settled(Ok(_)) => Self::Ok,
+            ThreadEnd::Settled(Err(Break::Error(e))) => Self::Err(e.record(shell)),
+            ThreadEnd::Settled(Err(Break::Escape(Escape::Exit(n)))) => Self::Exited(*n),
+            ThreadEnd::Settled(Err(Break::Escape(Escape::Stopped { cause, .. }))) => {
+                Self::Stopped(*cause)
+            }
+            ThreadEnd::Panicked(text) => Self::Panic(text.clone()),
+        }
+    }
+}
 
 /// The event a worker appends at completion.
 #[derive(Clone, Debug, PartialEq, Eq)]

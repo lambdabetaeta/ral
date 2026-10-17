@@ -556,7 +556,7 @@ fn a_clear_outranks_the_lease() {
     trunk.forget();
     assert_eq!(
         ended(&engine),
-        Some(ral_core::types::Status::Cancelled(CancelCause::Terminated).code()),
+        Some(i32::from(CancelCause::Terminated.code())),
         "forget terminates the abandoned child's engine"
     );
 
@@ -566,7 +566,7 @@ fn a_clear_outranks_the_lease() {
     std::thread::sleep(ttl * 4);
     assert_eq!(
         ended(&engine),
-        Some(ral_core::types::Status::Cancelled(CancelCause::Terminated).code()),
+        Some(i32::from(CancelCause::Terminated.code())),
         "the lease's late fire finds a settled agent and never overwrites the cause"
     );
 }

@@ -38,7 +38,10 @@ fn unload_door(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<
     let name = args[0].as_str("unload-plugin")?;
     unload_plugin(name, mooring, shell)
         .map(|()| Value::Unit)
-        .map_err(|e| e.context(format!("plugin '{name}'")).into())
+        .map_err(|b| match b {
+            Break::Error(e) => e.context(format!("plugin '{name}'")).into(),
+            escape @ Break::Escape(_) => escape,
+        })
 }
 
 static DOORS_ARR: [BuiltinEntry; 2] = [
@@ -105,7 +108,10 @@ pub(crate) fn load_plugin(
     // Past this point any failure — the host's refusal included — rolls the
     // plugin's whole namespace back, so nothing dispatchable survives it.
     let committed = register_plugin_hooks(&entry.name, &handlers, shell)
-        .and_then(|()| install_bindings(&handlers.aliases, &mut entry.aliases, shell))
+        .map_err(Break::from)
+        .and_then(|()| {
+            install_bindings(&handlers.aliases, &mut entry.aliases, shell).map_err(Break::from)
+        })
         .and_then(|()| {
             shell.enquire(
                 mooring,
@@ -117,7 +123,7 @@ pub(crate) fn load_plugin(
         for handle in entry.aliases {
             shell.remove_alias_frame(handle);
         }
-        return Err(e.into());
+        return Err(e);
     }
     Ok(shell.commit_plugin(entry).map_err(load_err)?)
 }
@@ -170,9 +176,9 @@ fn register_plugin_hooks(
 /// Unload a plugin by name, fully reversing its load once the host has let
 /// it go: drops every hook and keybinding handler it registered and removes
 /// its aliases.
-pub(crate) fn unload_plugin(name: &str, mooring: &Mooring, shell: &mut Shell) -> Result<(), Error> {
+pub(crate) fn unload_plugin(name: &str, mooring: &Mooring, shell: &mut Shell) -> Settled<()> {
     if !shell.plugin_loaded(name).map_err(load_err)? {
-        return Err(load_err("not loaded"));
+        return Err(load_err("not loaded").into());
     }
     shell.enquire(
         mooring,

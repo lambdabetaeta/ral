@@ -601,7 +601,7 @@ mod tests {
     #[test]
     fn the_meet_admits_a_windows_case_and_separator_variant() {
         let met = table(&[lit(r"C:\work")], &[]).meet(table(&[lit("c:/WORK/sub")], &[]));
-        assert!(!live(&met).is_empty());
+        assert_ne!(live(&met), Vec::<String>::new());
     }
 
     /// Same, through the `\\?\`-verbatim spelling `std::fs::canonicalize`
@@ -610,6 +610,6 @@ mod tests {
     #[test]
     fn the_meet_admits_a_windows_verbatim_prefix_variant() {
         let met = table(&[lit(r"C:\work")], &[]).meet(table(&[lit(r"\\?\C:\work\sub")], &[]));
-        assert!(!live(&met).is_empty());
+        assert_ne!(live(&met), Vec::<String>::new());
     }
 }

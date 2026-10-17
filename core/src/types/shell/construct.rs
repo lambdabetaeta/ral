@@ -218,6 +218,7 @@ impl Shell {
             let baseline = env.all_bindings(&sig).into_iter().map(|(name, _)| name);
             bindings.arm(lease, baseline);
         }
+        let anchor = durable.worker();
         Self {
             env,
             sig,
@@ -228,8 +229,9 @@ impl Shell {
                 terminal: runtime.terminal,
                 ..Io::default()
             },
+            scope: anchor.clone(),
             session: SessionState {
-                anchor: durable.worker(),
+                anchor,
                 root: durable,
                 sources,
                 root_file: None,

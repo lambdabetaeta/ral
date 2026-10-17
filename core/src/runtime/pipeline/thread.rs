@@ -6,39 +6,43 @@ use super::collect::{SettleOnDrop, Slot, StageObservation};
 use super::launch::LaunchCx;
 use super::resolve::StageSpec;
 use super::route::{ByteIn, ByteOut};
-use crate::io::Wake;
 use crate::io::{Io, Sink};
 use crate::ir::Comp;
-use crate::process::{CancelCause, CancelScope};
+use crate::process::{CancelCause, CancelScope, POLL_SLICE, ScopeId};
 use crate::source::Span;
-use crate::types::{Break, Error, Mooring, Settled};
+use crate::types::{Break, Error, Mooring, Settled, ThreadEnd};
 use std::sync::Arc;
 
 /// The parent's handle onto a running stage thread.
 pub(super) struct ThreadStage {
     join: Option<std::thread::JoinHandle<()>>,
     cancel: CancelScope,
-    wake: Arc<Wake>,
 }
 
 impl ThreadStage {
-    /// Cancel the scope and wake the thread.  Windows has no wake an fd poll
-    /// can see, so a blocked `ReadFile` is retried with `CancelSynchronousIo`
-    /// until the wake is acknowledged or the thread has finished on its own.
+    /// The collector's write on the stage's node; on Windows, one interrupt
+    /// of the I/O in flight.
     pub(super) fn cancel(&self, cause: CancelCause) {
         self.cancel.cancel(cause);
-        self.wake.fire();
         #[cfg(windows)]
-        {
-            use std::os::windows::io::AsRawHandle;
-            use windows_sys::Win32::System::IO::CancelSynchronousIo;
-            let Some(join) = &self.join else { return };
-            while !self.wake.acknowledged() && !join.is_finished() {
-                // SAFETY: `join`'s handle is valid for the thread's whole
-                // life, which this `ThreadStage` outlives by construction.
-                unsafe { CancelSynchronousIo(join.as_raw_handle().cast()) };
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
+        self.interrupt();
+    }
+
+    pub(super) fn id(&self) -> ScopeId {
+        self.cancel.id()
+    }
+
+    #[cfg(windows)]
+    pub(super) fn is_cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+
+    /// `CancelSynchronousIo` cancels only the I/O pending when it lands, so a
+    /// request issued after it, or retried under a shield, needs the next.
+    #[cfg(windows)]
+    pub(super) fn interrupt(&self) {
+        if let Some(join) = &self.join {
+            crate::io::interrupt(join);
         }
     }
 
@@ -50,24 +54,33 @@ impl ThreadStage {
     }
 
     /// A `ThreadStage` around no real thread, for `collect.rs`'s own
-    /// transition-table tests: all it owes them is a no-op join.
+    /// transition-table tests, and the scope it was built over.
     #[cfg(test)]
-    pub(super) fn fake_for_step_test() -> Self {
-        Self {
-            join: None,
-            cancel: CancelScope::root(),
-            wake: Wake::new().expect("create a wake"),
-        }
+    pub(super) fn fake() -> (Self, CancelScope) {
+        let cancel = CancelScope::root();
+        (
+            Self {
+                join: None,
+                cancel: cancel.clone(),
+            },
+            cancel,
+        )
     }
 }
 
 impl Drop for ThreadStage {
-    /// A stage never observed is cancelled and joined, not abandoned.
+    /// A stage never observed is cancelled and joined, not abandoned: a slice
+    /// at a time, sharing the strike `CollectState::drop` already made.
     fn drop(&mut self) {
         if self.join.is_none() {
             return;
         }
         self.cancel(CancelCause::Terminated);
+        while self.join.as_ref().is_some_and(|j| !j.is_finished()) {
+            #[cfg(windows)]
+            self.interrupt();
+            std::thread::sleep(POLL_SLICE);
+        }
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }
@@ -82,20 +95,6 @@ fn stage_error(message: String, span: Option<Span>) -> Break {
     })
 }
 
-/// Stamped with the stage's span — the panicking thread's stack has none of
-/// its own to attribute it to.
-fn panic_error(payload: &(dyn std::any::Any + Send), span: Option<Span>) -> Error {
-    let msg = payload
-        .downcast_ref::<&str>()
-        .map(|s| (*s).to_string())
-        .or_else(|| payload.downcast_ref::<String>().cloned())
-        .unwrap_or_else(|| "unknown panic".to_string());
-    Error {
-        span,
-        ..Error::new(format!("ral pipeline stage panicked: {msg}"))
-    }
-}
-
 /// Spawn one ral-written stage on its own thread.
 pub(super) fn launch_thread_stage(
     stage: &Arc<Comp>,
@@ -105,20 +104,15 @@ pub(super) fn launch_thread_stage(
     cx: &LaunchCx<'_>,
     slot: Slot,
 ) -> Settled<ThreadStage> {
-    let wake = Wake::new().map_err(|e| {
-        stage_error(
-            format!("could not create a pipeline stage's wake: {e}"),
-            spec.span,
-        )
-    })?;
-    let stdin = super::launch::stage_stdin(stdin, cx.shell, &wake)?;
-    let mooring = Mooring::for_stage_thread(cx.mooring);
+    let node = cx.shell.scope.child();
+    let stdin = super::launch::stage_stdin(stdin, cx.shell, node.as_scope())?;
+    let mooring = Mooring::for_stage_thread(cx.mooring, node.clone());
 
     let stdout = match stdout {
         ByteOut::Downstream(w, edge) => Sink::Pipe {
             writer: Arc::new(w),
-            wake: Arc::clone(&wake),
             edge,
+            stage: node.id(),
         },
         ByteOut::Parent => cx.shell.io.stdout.clone(),
     };
@@ -129,7 +123,7 @@ pub(super) fn launch_thread_stage(
         stderr: cx.shell.io.stderr.clone(),
         interactive: cx.shell.io.interactive,
         terminal: cx.shell.io.terminal,
-        stage: Some(cx.group.membership(mooring.cancel.as_scope())),
+        stage: Some(cx.group.membership(node.as_scope())),
     };
 
     let policy = cx.shell.local.audit.active_policy();
@@ -139,34 +133,27 @@ pub(super) fn launch_thread_stage(
     let span = spec.span;
 
     let settle = SettleOnDrop::new(slot);
-    let spawned = cx
+    let join = cx
         .shell
         .spawn_thread(mooring, "ral pipeline stage", move |mooring, child| {
             child.io = io;
             child.local.audit.install_active_policy(policy);
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                eval(comp, env, mooring, child)
-            }));
-            let settled = match result {
-                Ok(settled) => settled,
-                Err(payload) => Err(Break::Error(panic_error(&*payload, span))),
-            };
+            let end = ThreadEnd::of(|| eval(comp, env, mooring, child));
             settle.send(StageObservation {
-                settled,
+                end,
                 audit: child.local.audit.take_fragment(),
             });
-        });
-    let (join, cancel) = spawned.map_err(|e| {
-        stage_error(
-            format!("could not start a pipeline stage thread: {e}"),
-            span,
-        )
-    })?;
+        })
+        .map_err(|e| {
+            stage_error(
+                format!("could not start a pipeline stage thread: {e}"),
+                span,
+            )
+        })?;
 
     Ok(ThreadStage {
         join: Some(join),
-        cancel,
-        wake,
+        cancel: node.as_scope().clone(),
     })
 }
 
@@ -176,7 +163,8 @@ mod tests {
     use super::super::resolve::StageLaunch;
     use super::*;
     use crate::io::Edge;
-    use crate::types::TerminalAccess;
+    use crate::process::DurableRoot;
+    use crate::types::{Escape, TerminalAccess};
     use std::io::Read;
     use std::time::{Duration, Instant};
 
@@ -247,7 +235,10 @@ mod tests {
             panic!("a thread stage must settle as Event::Returned");
         };
         assert_eq!(ix, 0);
-        assert!(obs.settled.is_ok(), "echo hi must not fail");
+        assert!(
+            matches!(obs.end, ThreadEnd::Settled(Ok(_))),
+            "echo hi must not fail"
+        );
     }
 
     #[test]
@@ -291,27 +282,16 @@ mod tests {
         };
         assert!(start.elapsed() < Duration::from_millis(500));
         assert!(
-            matches!(&obs.settled, Err(Break::Error(e)) if e.cancelled_by() == Some(CancelCause::ReaderGone)),
-            "a real cancelled thread's break must carry the cancel's own mark: {:?}",
-            obs.settled
+            matches!(
+                &obs.end,
+                ThreadEnd::Settled(Err(Break::Escape(Escape::Stopped {
+                    cause: CancelCause::ReaderGone,
+                    ..
+                })))
+            ),
+            "a cancelled thread ends in the reader-gone stop: {:?}",
+            obs.end
         );
-    }
-
-    /// `panic_error` converts a caught payload to an error carrying the
-    /// stage's own span, its stack having none of its own.
-    #[test]
-    fn panic_error_carries_the_payload_and_span() {
-        let file = crate::test_helper::core_shell().install_script_context("<test>", "boom");
-        let span = Span::new(file, 0, 4);
-        let payload: Box<dyn std::any::Any + Send> = Box::new("boom");
-
-        let err = panic_error(&*payload, Some(span));
-        assert!(
-            err.message.contains("boom"),
-            "the panic payload must ride in the message: {}",
-            err.message
-        );
-        assert_eq!(err.span, Some(span), "the stage's own span must survive");
     }
 
     #[test]
@@ -320,6 +300,8 @@ mod tests {
         parent.session.terminal_lease = crate::process::TerminalLease::mint_at_startup(true);
         let outer = Mooring {
             terminal_access: TerminalAccess::Leased,
+            home: DurableRoot::default().worker(),
+            cleanup_grace: Duration::ZERO,
             ..Mooring::adrift()
         };
         assert!(
@@ -327,7 +309,7 @@ mod tests {
             "precondition: the outer mooring holds a lease"
         );
 
-        let stage_mooring = Mooring::for_stage_thread(&outer);
+        let stage_mooring = Mooring::for_stage_thread(&outer, DurableRoot::default().worker());
         assert!(
             parent.terminal_lease(&stage_mooring).is_none(),
             "a stage thread's mooring denies terminal access outright"

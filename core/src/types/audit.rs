@@ -206,8 +206,13 @@ pub fn epoch_us() -> i64 {
 /// Mirrored in the typechecker by `audit_record` in
 /// `core/src/typecheck/builtins.rs`.
 pub fn report_value(outcome: Result<Value, ErrorRecord>, trail: Vec<Observation>) -> Value {
+    report_envelope(outcome_value(outcome), trail)
+}
+
+/// [`report_value`] over an outcome already a `` `ok``/`` `err `` value.
+pub fn report_envelope(outcome: Value, trail: Vec<Observation>) -> Value {
     Value::map(vec![
-        ("outcome".into(), outcome_value(outcome)),
+        ("outcome".into(), outcome),
         (
             "trail".into(),
             Value::list(trail.into_iter().map(Value::from_datum).collect()),

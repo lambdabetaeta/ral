@@ -51,77 +51,9 @@ pub(crate) fn encode<T: Serialize>(value: &T) -> io::Result<Encoded> {
 
 /// Length prefix, body, flush: only I/O can fail here.
 pub(crate) fn put<W: Write + ?Sized>(w: &mut W, frame: &Encoded) -> io::Result<()> {
-    let _no_sigpipe = sigpipe::Suppress::install();
     w.write_all(&frame.len.to_le_bytes())?;
     w.write_all(&frame.body)?;
     w.flush()
-}
-
-/// Block SIGPIPE around a protocol write.
-///
-/// Batch mode leaves SIGPIPE at `SIG_DFL` so the bundled coreutils die on a
-/// closed downstream (`yes | head`) — but it would equally kill the parent
-/// mid-write to a peer that has already exited, instead of yielding the
-/// `EPIPE` the error path is written to observe.  SIGPIPE is thread-directed,
-/// so masking it on the writing thread suffices, and unlike `SO_NOSIGPIPE`
-/// (BSD-only) or `MSG_NOSIGNAL` (wants `send(2)`) it rides `Write` unchanged.
-#[cfg(unix)]
-mod sigpipe {
-    pub(super) struct Suppress {
-        was_blocked: bool,
-    }
-
-    impl Suppress {
-        /// Remembers a pre-existing block, so `Drop` unblocks only ours.
-        pub(super) fn install() -> Self {
-            use nix::sys::signal::{SigSet, SigmaskHow, Signal, pthread_sigmask};
-            let mut set = SigSet::empty();
-            set.add(Signal::SIGPIPE);
-            let mut old = SigSet::empty();
-            let _ = pthread_sigmask(SigmaskHow::SIG_BLOCK, Some(&set), Some(&mut old));
-            Self {
-                was_blocked: old.contains(Signal::SIGPIPE),
-            }
-        }
-    }
-
-    impl Drop for Suppress {
-        fn drop(&mut self) {
-            // Blocked before us: leave the mask alone, and do not consume a
-            // signal the surrounding code may be managing itself.
-            if self.was_blocked {
-                return;
-            }
-            use nix::sys::signal::{SigSet, SigmaskHow, Signal, pthread_sigmask};
-            let mut set = SigSet::empty();
-            set.add(Signal::SIGPIPE);
-            // `nix` wraps no `sigpending(2)`, so this one call drops to libc.
-            // Safety: `sigpending` fills `raw` before `assume_init` reads it.
-            let pending = unsafe {
-                let mut raw = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
-                (libc::sigpending(raw.as_mut_ptr()) == 0)
-                    .then(|| SigSet::from_sigset_t_unchecked(raw.assume_init()))
-            };
-            // A dead-peer write left SIGPIPE pending; consume it before
-            // unblocking, or restoring the mask delivers it under batch
-            // mode's `SIG_DFL`.  `wait` cannot block: it is reached only
-            // with SIGPIPE already pending.
-            if pending.is_some_and(|p| p.contains(Signal::SIGPIPE)) {
-                let _ = set.wait();
-            }
-            let _ = pthread_sigmask(SigmaskHow::SIG_UNBLOCK, Some(&set), None);
-        }
-    }
-}
-
-#[cfg(not(unix))]
-mod sigpipe {
-    pub(super) struct Suppress;
-    impl Suppress {
-        pub(super) fn install() -> Self {
-            Self
-        }
-    }
 }
 
 pub(crate) fn read_frame<R: Read + ?Sized, T: DeserializeOwned>(

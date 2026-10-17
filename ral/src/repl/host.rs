@@ -6,6 +6,7 @@ use clipboard::{Clipboard, Copied};
 use ral_core::carrier::{Host, Severed, Transport, dispatch_to_report};
 use ral_core::first_order::FOValue;
 use ral_core::first_order::datum::{Datum as _, untag};
+use ral_core::process::CancelCause;
 use ral_core::protocol::probe::WorkerRow;
 use ral_core::protocol::{Ending, EnquiryError, Program, Report, Run};
 use ral_core::sync::LockExt as _;
@@ -34,12 +35,14 @@ pub(super) struct ReplHost {
 }
 
 /// How a hook run ended.  An `exit` from a hook is ignored.  A fault is
-/// rendered by the engine and labelled with the hook's name.
+/// rendered by the engine and labelled with the hook's name; a stop is
+/// reported like a fault but is nobody's fault.
 pub(super) enum Outcome {
     Settled(FOValue),
     Exited,
     Faulted(String),
     Walled(String),
+    Stopped(String),
 }
 
 /// What one hook dispatch came to.
@@ -116,7 +119,12 @@ impl ReplHost {
                 match ending {
                     Ending::Settled { value, .. } => Outcome::Settled(value),
                     Ending::Exited(_) => Outcome::Exited,
-                    Ending::Walled { rendered, .. } => Outcome::Walled(rendered),
+                    Ending::Stopped {
+                        rendered,
+                        cause: CancelCause::TimedOut,
+                        ..
+                    } => Outcome::Walled(rendered),
+                    Ending::Stopped { rendered, .. } => Outcome::Stopped(rendered),
                     Ending::Raised { rendered, .. } | Ending::Unreturnable { rendered, .. } => {
                         Outcome::Faulted(rendered)
                     }
@@ -124,7 +132,7 @@ impl ReplHost {
                 captured,
             ),
         };
-        if let Outcome::Faulted(f) | Outcome::Walled(f) = &mut outcome {
+        if let Outcome::Faulted(f) | Outcome::Walled(f) | Outcome::Stopped(f) = &mut outcome {
             f.truncate(f.trim_end().len());
         }
         HookResult {

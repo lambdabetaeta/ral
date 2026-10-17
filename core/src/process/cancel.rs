@@ -2,8 +2,9 @@
 //!
 //! A scope's cancellation is the join of its own flag with every ancestor's —
 //! walked, not flattened, so a subscope carries its own flag while still
-//! observing its parents.  Workers read it wherever
-//! [`Mooring::check`](crate::types::Mooring::check) is called.
+//! observing its parents.  Computations read it with
+//! [`Shell::poll`](crate::types::Shell::poll) at every step boundary, and every
+//! blocked wait re-reads it each [`POLL_SLICE`].
 //!
 //! A signal handler holds no scope, so it raises one of two ambient causes
 //! instead, and no scope folds either: a host hears them through
@@ -12,23 +13,37 @@
 //! forever; an interrupt is aimed at whatever ran when the key was struck, so a
 //! listener registered after it never hears it.
 
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use strum::{IntoStaticStr, VariantArray};
 
 use crate::sync::LockExt as _;
+use crate::types::{Break, Settled};
 
 /// Why a [`CancelScope`] was cancelled.
 ///
 /// The causes escalate `ReaderGone < Interrupted < Cancelled < TimedOut <
 /// Terminated < Aborted`; a scope records the highest ever applied to it and
 /// never downgrades.  The numeric values are the on-flag encoding, `0`
-/// meaning uncancelled.  The variant names are the tags `$err[reason]` names
-/// a cause by, under `` `cancelled ``.
+/// meaning uncancelled.  The variant names are the tags a `` `stopped ``
+/// card and the wire's `Ending::Stopped` name a cause by.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, strum::FromRepr, IntoStaticStr, VariantArray,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    strum::FromRepr,
+    IntoStaticStr,
+    VariantArray,
+    serde::Serialize,
+    serde::Deserialize,
 )]
 #[strum(serialize_all = "kebab-case")]
+#[serde(rename_all = "kebab-case")]
 #[repr(u8)]
 pub enum CancelCause {
     /// A pipeline stage's reader stage has already been observed; the
@@ -73,7 +88,7 @@ impl CancelCause {
     ///
     /// For rendering a cancellation that already exists — the `Display`
     /// impl, the process exit byte — never for minting one; minting is
-    /// `Error::cancelled(cause)`'s alone.
+    /// `Break::stopped`'s alone.
     pub fn message(self) -> &'static str {
         match self {
             Self::ReaderGone => "its reader ended",
@@ -210,10 +225,121 @@ impl Drop for AmbientForward {
     }
 }
 
+/// A stop an owner converted into an error at its boundary: the two a
+/// worker's own switch can carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerStop {
+    Cancelled,
+    TimedOut,
+}
+
+impl WorkerStop {
+    pub fn of(cause: CancelCause) -> Option<Self> {
+        match cause {
+            CancelCause::Cancelled => Some(Self::Cancelled),
+            CancelCause::TimedOut => Some(Self::TimedOut),
+            _ => None,
+        }
+    }
+
+    pub fn cause(self) -> CancelCause {
+        match self {
+            Self::Cancelled => CancelCause::Cancelled,
+            Self::TimedOut => CancelCause::TimedOut,
+        }
+    }
+
+    /// `worker was cancelled` (143), `worker's lease expired` (124).
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::Cancelled => "worker was cancelled",
+            Self::TimedOut => "worker's lease expired",
+        }
+    }
+}
+
+/// A scope node's identity: the name a stop carries for its owner.
+#[derive(Clone)]
+pub struct ScopeId(Arc<ScopeNode>);
+
+impl PartialEq for ScopeId {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for ScopeId {}
+
+impl std::fmt::Debug for ScopeId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ScopeId({:p})", Arc::as_ptr(&self.0))
+    }
+}
+
+/// Every sliced wait's period: a blocked wait re-reads its scope this often.
+pub(crate) const POLL_SLICE: Duration = Duration::from_millis(10);
+
 #[derive(Debug)]
 struct ScopeNode {
     flag: AtomicU8,
-    parent: Option<std::sync::Arc<Self>>,
+    /// The instant the flag first rose, set in the act that raised it: a
+    /// shield's budget runs from the earliest of these on its chain.
+    cancelled_at: OnceLock<Instant>,
+    parent: Option<Arc<Self>>,
+    /// `Some(grace)` on a cleanup's node: masked for `grace` from the strike.
+    shield: Option<Duration>,
+}
+
+/// What a chain folds to: the join, the outermost node attaining it, and the
+/// earliest strike on the chain.
+struct InForce<'a> {
+    cause: u8,
+    node: &'a Arc<ScopeNode>,
+    since: Instant,
+}
+
+/// A shielded node admits from above only `Aborted`, and everything once
+/// `since + grace` has passed.  `Instant::now()` is read only at a shielded
+/// node with something above it.  Root-first over the chain, iteratively:
+/// the chain is as deep as the nested cleanups, which only the recursion
+/// limit bounds.
+fn resolve(scope: &Arc<ScopeNode>) -> Option<InForce<'_>> {
+    let chain: Vec<&Arc<ScopeNode>> =
+        std::iter::successors(Some(scope), |n| n.parent.as_ref()).collect();
+    chain.iter().rev().fold(None, |above, &node| {
+        let above = above.filter(|j: &InForce<'_>| {
+            node.shield.is_none_or(|grace| {
+                j.cause >= CancelCause::Aborted as u8 || Instant::now() >= j.since + grace
+            })
+        });
+        let own = node.flag.load(Ordering::Acquire);
+        // `cancelled_at` is set before the flag's release store, so a nonzero flag
+        // always has its instant.
+        let at = (own != 0).then(|| {
+            *node
+                .cancelled_at
+                .get()
+                .expect("a struck node has its instant")
+        });
+        match (above, at) {
+            (Some(above), Some(at)) if above.cause >= own => Some(InForce {
+                since: above.since.min(at),
+                ..above
+            }),
+            (Some(above), Some(at)) => Some(InForce {
+                cause: own,
+                node,
+                since: above.since.min(at),
+            }),
+            (Some(above), None) => Some(above),
+            (None, Some(at)) => Some(InForce {
+                cause: own,
+                node,
+                since: at,
+            }),
+            (None, None) => None,
+        }
+    })
 }
 
 /// A handle into the cancel-scope tree.
@@ -222,146 +348,83 @@ struct ScopeNode {
 /// Cancellation is one-way and monotone in the [`CancelCause`] order: a
 /// cancelled scope stays cancelled and its recorded cause only rises.
 #[derive(Debug, Clone)]
-pub struct CancelScope(std::sync::Arc<ScopeNode>);
+pub struct CancelScope(Arc<ScopeNode>);
 
 impl CancelScope {
     /// The one constructor every scope in the tree goes through.
-    fn mint(parent: Option<std::sync::Arc<ScopeNode>>) -> Self {
-        Self(std::sync::Arc::new(ScopeNode {
+    fn mint(parent: Option<Arc<ScopeNode>>, shield: Option<Duration>) -> Self {
+        Self(Arc::new(ScopeNode {
             flag: AtomicU8::new(0),
+            cancelled_at: OnceLock::new(),
             parent,
+            shield,
         }))
     }
 
     /// A fresh top-level scope.  Spawned workers take a
     /// [`child`](Self::child) instead, so cancellation reaches them.
     pub(crate) fn root() -> Self {
-        Self::mint(None)
+        Self::mint(None, None)
     }
 
     /// A scope nested under `self`, cancelled by `self` or any ancestor.
     pub fn child(&self) -> Self {
-        Self::mint(Some(self.0.clone()))
+        Self::mint(Some(Arc::clone(&self.0)), None)
     }
 
-    /// Raise this scope's flag to `cause`, never downgrading, then fire every
-    /// [`CancelWatch`] whose cause is now in force.
+    /// A cleanup's scope: masked against every ancestor cause below `Aborted`
+    /// for `grace` from the chain's strike, or for the nearest enclosing
+    /// shield's grace if that is shorter.  Nothing writes its own flag.
+    pub(crate) fn shielded(&self, grace: Duration) -> Self {
+        let enclosing =
+            std::iter::successors(Some(&self.0), |n| n.parent.as_ref()).find_map(|n| n.shield);
+        Self::mint(
+            Some(Arc::clone(&self.0)),
+            Some(enclosing.map_or(grace, |e| e.min(grace))),
+        )
+    }
+
+    /// The one write: the instant first, then the flag, so a reader that
+    /// sees the flag sees the instant.
     pub fn cancel(&self, cause: CancelCause) {
+        self.0.cancelled_at.get_or_init(Instant::now);
         self.0.flag.fetch_max(cause as u8, Ordering::Release);
-        scan_cancels();
-    }
-
-    /// The join of every flag on this scope's chain — `0` when nothing is in
-    /// force.  The single reader, so no observer sees a cancellation except as
-    /// the whole join.
-    fn fold(&self) -> u8 {
-        let mut node: &std::sync::Arc<ScopeNode> = &self.0;
-        let mut join = 0u8;
-        loop {
-            join = join.max(node.flag.load(Ordering::Acquire));
-            match &node.parent {
-                Some(p) => node = p,
-                None => return join,
-            }
-        }
     }
 
     /// True if anything in this scope's join is in force.
     pub fn is_cancelled(&self) -> bool {
-        self.fold() != 0
+        self.in_force().is_some()
     }
 
     /// The strongest [`CancelCause`] in this scope's join, or `None`.
     pub fn cause(&self) -> Option<CancelCause> {
-        CancelCause::from_repr(self.fold())
+        self.in_force().map(|(cause, _)| cause)
     }
-}
 
-impl Default for CancelScope {
-    fn default() -> Self {
-        Self::root()
+    /// `poll`: the stop in force on this scope, named for its owner, or
+    /// nothing.  `pub`: a desk outside core parks on it, and only this
+    /// mints the named stop (`in_force` and `id` stay crate-private).
+    ///
+    /// # Errors
+    /// The stop in force, as the escape it is.
+    pub fn poll(&self) -> Settled<()> {
+        self.in_force().map_or(Ok(()), |(cause, owner)| {
+            Err(Break::stopped(cause, Some(owner)))
+        })
     }
-}
 
-// ── Cancel watchers ─────────────────────────────────────────────────────────
-//
-// A registration table beside the scope tree, for a subscriber with no poll
-// point of its own: the pipeline collector, `RunningChild::wait`, the engine
-// enquiry park.  A cause lands only through `CancelScope::cancel`, which scans
-// the table synchronously.
-
-type OnCancel = Box<dyn FnOnce(CancelCause) + Send>;
-
-struct WatchEntry {
-    scope: CancelScope,
-    on_cancel: OnCancel,
-    armed: Arc<AtomicBool>,
-}
-
-static WATCHES: Mutex<Vec<WatchEntry>> = Mutex::new(Vec::new());
-
-/// Run `on_cancel` once, with the cause, as soon as `scope.cause()` is
-/// `Some`.  Dropping the returned [`CancelWatch`] disarms it.
-pub fn watch_cancel(
-    scope: CancelScope,
-    on_cancel: impl FnOnce(CancelCause) + Send + 'static,
-) -> CancelWatch {
-    let armed = Arc::new(AtomicBool::new(true));
-    let mut table = WATCHES.lock_ignore_poison();
-    table.push(WatchEntry {
-        scope,
-        on_cancel: Box::new(on_cancel),
-        armed: armed.clone(),
-    });
-    // Insert, then check this entry alone: a cause raised between a caller's
-    // own check and this registration is not missed, since both this check
-    // and `scan_cancels` take the same lock this insert just released.
-    let idx = table.len() - 1;
-    let fired = table[idx]
-        .scope
-        .cause()
-        .map(|cause| (table.swap_remove(idx).on_cancel, cause));
-    drop(table);
-    if let Some((on_cancel, cause)) = fired {
-        on_cancel(cause);
+    /// The strongest cause in force and the node that attained it.
+    pub(crate) fn in_force(&self) -> Option<(CancelCause, ScopeId)> {
+        resolve(&self.0).map(|j| {
+            (
+                CancelCause::from_repr(j.cause).expect("a nonzero flag is a cause"),
+                ScopeId(Arc::clone(j.node)),
+            )
+        })
     }
-    CancelWatch { armed }
-}
 
-/// Fire and remove every armed registration whose cause is now `Some` —
-/// under the table lock, entries are only taken out; their closures run
-/// after the lock is released, so a closure may itself cancel a scope
-/// without deadlocking on this same table.
-fn scan_cancels() {
-    let mut fired: Vec<(OnCancel, CancelCause)> = Vec::new();
-    {
-        let mut table = WATCHES.lock_ignore_poison();
-        let mut i = 0;
-        while i < table.len() {
-            if !table[i].armed.load(Ordering::Acquire) {
-                table.swap_remove(i);
-                continue;
-            }
-            match table[i].scope.cause() {
-                Some(cause) => fired.push((table.swap_remove(i).on_cancel, cause)),
-                None => i += 1,
-            }
-        }
-    }
-    for (on_cancel, cause) in fired {
-        on_cancel(cause);
-    }
-}
-
-/// A registered [`watch_cancel`]; dropping it disarms the registration.
-#[must_use]
-pub struct CancelWatch {
-    armed: Arc<AtomicBool>,
-}
-
-impl Drop for CancelWatch {
-    fn drop(&mut self) {
-        self.armed.store(false, Ordering::Release);
+    pub(crate) fn id(&self) -> ScopeId {
+        ScopeId(Arc::clone(&self.0))
     }
 }
 
@@ -432,6 +495,11 @@ impl ForegroundScope {
         self.0.cancel(cause);
     }
 
+    /// A cleanup's scope under this one; see [`CancelScope::shielded`].
+    pub(crate) fn shielded(&self, grace: Duration) -> Self {
+        Self(self.0.shielded(grace))
+    }
+
     /// True if this scope or any ancestor is cancelled.
     pub fn is_cancelled(&self) -> bool {
         self.0.is_cancelled()
@@ -441,6 +509,22 @@ impl ForegroundScope {
     /// `None`.
     pub fn cause(&self) -> Option<CancelCause> {
         self.0.cause()
+    }
+
+    /// See [`CancelScope::poll`].
+    ///
+    /// # Errors
+    /// The stop in force, as the escape it is.
+    pub fn poll(&self) -> Settled<()> {
+        self.0.poll()
+    }
+
+    pub(crate) fn in_force(&self) -> Option<(CancelCause, ScopeId)> {
+        self.0.in_force()
+    }
+
+    pub(crate) fn id(&self) -> ScopeId {
+        self.0.id()
     }
 
     /// Borrow the underlying [`CancelScope`] for a worker handle, a running
@@ -594,72 +678,121 @@ mod tests {
         );
     }
 
-    /// A cause raised before registration is not missed: `watch_cancel`
-    /// checks its own entry once, right after inserting.
-    #[test]
-    fn a_watch_registered_after_the_cause_fires_at_once() {
-        let scope = CancelScope::root();
-        scope.cancel(CancelCause::Cancelled);
-        let seen = Arc::new(Mutex::new(None));
-        let recorded = seen.clone();
-        let _watch = watch_cancel(scope, move |cause| {
-            *recorded.lock_ignore_poison() = Some(cause);
-        });
-        assert_eq!(*seen.lock_ignore_poison(), Some(CancelCause::Cancelled));
+    fn pair() -> (CancelScope, CancelScope) {
+        let parent = CancelScope::root();
+        let node = parent.child();
+        (parent, node)
     }
 
-    /// A watch registered before the cause fires when `cancel` scans.
     #[test]
-    fn a_watch_registered_before_fires_on_cancel() {
-        let scope = CancelScope::root();
-        let seen = Arc::new(Mutex::new(None));
-        let recorded = seen.clone();
-        let _watch = watch_cancel(scope.clone(), move |cause| {
-            *recorded.lock_ignore_poison() = Some(cause);
-        });
-        assert_eq!(*seen.lock_ignore_poison(), None);
-        scope.cancel(CancelCause::TimedOut);
-        assert_eq!(*seen.lock_ignore_poison(), Some(CancelCause::TimedOut));
+    fn a_join_names_the_outermost_node_attaining_it() {
+        let (parent, child) = pair();
+        parent.cancel(CancelCause::Interrupted);
+        child.cancel(CancelCause::Interrupted);
+        assert_eq!(
+            child.in_force(),
+            Some((CancelCause::Interrupted, parent.id()))
+        );
+
+        let (parent, child) = pair();
+        parent.cancel(CancelCause::Cancelled);
+        child.cancel(CancelCause::Interrupted);
+        assert_eq!(
+            child.in_force(),
+            Some((CancelCause::Cancelled, parent.id()))
+        );
+
+        let (parent, child) = pair();
+        parent.cancel(CancelCause::Interrupted);
+        child.cancel(CancelCause::Cancelled);
+        assert_eq!(child.in_force(), Some((CancelCause::Cancelled, child.id())));
     }
 
-    /// Dropping the guard disarms the registration: a later cancel never
-    /// fires it.
     #[test]
-    fn a_dropped_guard_never_fires() {
-        let scope = CancelScope::root();
-        let fired = Arc::new(AtomicBool::new(false));
-        let flag = fired.clone();
-        drop(watch_cancel(scope.clone(), move |_| {
-            flag.store(true, Ordering::Release);
-        }));
-        scope.cancel(CancelCause::Interrupted);
-        assert!(
-            !fired.load(Ordering::Acquire),
-            "a disarmed watch must not fire"
+    fn a_shield_masks_its_ancestors_within_the_grace() {
+        let (parent, node) = pair();
+        let s = node.shielded(Duration::from_secs(1));
+        node.cancel(CancelCause::Cancelled);
+        parent.cancel(CancelCause::Interrupted);
+        assert_eq!(s.cause(), None);
+        assert_eq!(node.cause(), Some(CancelCause::Cancelled));
+    }
+
+    #[test]
+    fn a_shield_never_masks_a_descendants_own_flag() {
+        let (parent, node) = pair();
+        let s = node.shielded(Duration::from_secs(1));
+        let inner = s.child();
+        parent.cancel(CancelCause::Interrupted);
+        inner.cancel(CancelCause::ReaderGone);
+        assert_eq!(
+            inner.in_force(),
+            Some((CancelCause::ReaderGone, inner.id()))
         );
     }
 
-    /// Two watches on one scope both fire: the table holds independent
-    /// entries, not one slot per scope.
     #[test]
-    fn two_watches_on_one_scope_both_fire() {
-        let scope = CancelScope::root();
-        let fired_a = Arc::new(AtomicBool::new(false));
-        let fired_b = Arc::new(AtomicBool::new(false));
-        let flag_a = fired_a.clone();
-        let flag_b = fired_b.clone();
-        let _watch_a = watch_cancel(scope.clone(), move |_| {
-            flag_a.store(true, Ordering::Release);
-        });
-        let _watch_b = watch_cancel(scope.clone(), move |_| {
-            flag_b.store(true, Ordering::Release);
-        });
-        scope.cancel(CancelCause::Interrupted);
-        assert!(fired_a.load(Ordering::Acquire), "the first watch must fire");
-        assert!(
-            fired_b.load(Ordering::Acquire),
-            "the second watch must fire"
-        );
+    fn an_abort_passes_a_shield() {
+        let (parent, node) = pair();
+        let s = node.shielded(Duration::from_secs(1));
+        parent.cancel(CancelCause::Aborted);
+        assert_eq!(s.cause(), Some(CancelCause::Aborted));
+    }
+
+    #[test]
+    fn a_spent_shield_masks_nothing() {
+        let (parent, node) = pair();
+        let s = node.shielded(Duration::from_millis(200));
+        parent.cancel(CancelCause::Interrupted);
+        assert_eq!(s.cause(), None);
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(s.cause(), Some(CancelCause::Interrupted));
+    }
+
+    #[test]
+    fn the_grace_runs_from_the_strike() {
+        let (parent, node) = pair();
+        parent.cancel(CancelCause::Interrupted);
+        std::thread::sleep(Duration::from_millis(100));
+        let s = node.shielded(Duration::from_millis(60));
+        assert_eq!(s.cause(), Some(CancelCause::Interrupted));
+        let t = node.shielded(Duration::from_millis(600));
+        assert_eq!(t.cause(), None);
+        std::thread::sleep(Duration::from_millis(600));
+        assert_eq!(t.cause(), Some(CancelCause::Interrupted));
+    }
+
+    #[test]
+    fn successive_shields_share_the_strike() {
+        let (parent, node) = pair();
+        parent.cancel(CancelCause::Interrupted);
+        let s1 = node.shielded(Duration::from_millis(400));
+        std::thread::sleep(Duration::from_millis(300));
+        drop(s1);
+        let s2 = node.shielded(Duration::from_millis(400));
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(s2.cause(), Some(CancelCause::Interrupted));
+    }
+
+    #[test]
+    fn a_nested_shield_ends_with_its_enclosing_one() {
+        let (parent, node) = pair();
+        let outer = node.shielded(Duration::from_millis(200));
+        let inner = outer.shielded(Duration::from_secs(10));
+        parent.cancel(CancelCause::Interrupted);
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(inner.cause(), Some(CancelCause::Interrupted));
+    }
+
+    #[test]
+    fn a_stronger_cause_keeps_the_first_strike() {
+        let (parent, node) = pair();
+        parent.cancel(CancelCause::Interrupted);
+        std::thread::sleep(Duration::from_millis(300));
+        parent.cancel(CancelCause::Cancelled);
+        let s = node.shielded(Duration::from_millis(400));
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(s.cause(), Some(CancelCause::Cancelled));
     }
 
     /// A forwarder hears the interrupts raised after it and none before, and a

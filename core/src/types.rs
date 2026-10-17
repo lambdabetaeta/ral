@@ -65,8 +65,8 @@ mod exit_hints;
 pub use exit_hints::ExitHints;
 
 mod flow;
-pub(crate) use flow::name_failure;
-pub use flow::{Break, Escape, Settled};
+pub use flow::{Break, Escape, Settled, ThreadEnd};
+pub(crate) use flow::{final_poll, name_failure, panic_text};
 
 // `sig` rides along with the coercions: both sit below the builtins and the
 // capability layer, which reach them without importing each other.
@@ -80,7 +80,10 @@ pub use shell::cwd::Cwd;
 
 pub mod audit;
 pub(crate) use audit::AuditStart;
-pub use audit::{Audit, AuditFragment, AuditIo, CapturePolicy, TrailScope, epoch_us, report_value};
+pub use audit::{
+    Audit, AuditFragment, AuditIo, CapturePolicy, TrailScope, epoch_us, report_envelope,
+    report_value,
+};
 
 // Here because the session speaks them: the records `fact` declares.
 pub use crate::fact::{

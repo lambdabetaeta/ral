@@ -16,13 +16,6 @@ fn dressed_shell(extra: &[&'static [BuiltinEntry]]) -> Shell {
     Shell::root(runtime.into())
 }
 
-fn status(b: Break) -> i32 {
-    match b {
-        Break::Error(e) => e.code(),
-        other @ Break::Escape(_) => panic!("expected Break::Error, got {other:?}"),
-    }
-}
-
 #[test]
 fn line_hash_ignores_trailing_whitespace() {
     assert_eq!(line_hash("x"), line_hash("x   "));
@@ -108,20 +101,24 @@ fn window_hashes_are_unique_across_a_long_identical_run() {
 fn search_files_honours_a_cancelled_scope() {
     let mut shell = ral_core::test_helper::core_shell();
     let m = Mooring::adrift();
-    m.cancel.cancel(ral_core::process::CancelCause::Interrupted);
+    shell
+        .cancel_handle()
+        .cancel(ral_core::process::CancelCause::Interrupted);
     let err = builtin_grep_files(&[Value::string("x")], &m, &mut shell)
         .expect_err("a cancelled scope must abort the search walk");
-    assert_eq!(status(err), 130);
+    assert_eq!(err.code(), 130);
 }
 
 #[test]
 fn explore_dir_honours_a_cancelled_scope() {
     let mut shell = ral_core::test_helper::core_shell();
     let m = Mooring::adrift();
-    m.cancel.cancel(ral_core::process::CancelCause::Interrupted);
+    shell
+        .cancel_handle()
+        .cancel(ral_core::process::CancelCause::Interrupted);
     let err = builtin_explore_dir(&[Value::Int(3)], &m, &mut shell)
         .expect_err("a cancelled scope must abort the directory walk");
-    assert_eq!(status(err), 130);
+    assert_eq!(err.code(), 130);
 }
 
 // ── `service-handle` builtin ─────────────────────────────────────────
@@ -131,17 +128,17 @@ fn handle_site() -> Arc<Site> {
     ral_core::test_access::site_of(&Ty::Handle(Box::new(Ty::Int)))
 }
 
-/// A worker body that blocks until cancelled, polling `Mooring::check` so the
+/// A worker body that blocks until cancelled, polling `Shell::poll` so the
 /// thread genuinely stays `Running` rather than settling instantly.  Named
 /// apart from `test-clear-block-forever` in `exarch/src/agent/testkit.rs` so
 /// registering both in one test binary cannot collide.
 fn builtin_test_block_forever(
     _args: &[Value],
-    mooring: &Mooring,
-    _shell: &mut Shell,
+    _mooring: &Mooring,
+    shell: &mut Shell,
 ) -> Settled<Value> {
     loop {
-        mooring.check()?;
+        shell.poll()?;
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
 }

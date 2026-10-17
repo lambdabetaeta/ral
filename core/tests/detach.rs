@@ -98,9 +98,7 @@ fn refusal(shell: &mut Shell, source: &str) -> String {
     });
     match report {
         RunReport::Ran {
-            ending:
-                ral_core::run::Ending::Raised { error, .. }
-                | ral_core::run::Ending::Walled { error, .. },
+            ending: ral_core::run::Ending::Raised { error, .. },
             ..
         } => error.to_string(),
         RunReport::Ran { ending, .. } => panic!("{source} must be refused, got {ending:?}"),

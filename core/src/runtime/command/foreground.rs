@@ -84,11 +84,11 @@ impl ForegroundDecision {
                 reason = "child_id is a live OS pid from Child::id(): positive and below i32::MAX, so the u32→pid_t reinterpretation never wraps"
             )]
             let pid = child_id as libc::pid_t;
-            TerminalLoan::try_acquire(pid, lease, &mooring.cancel)
+            TerminalLoan::try_acquire(pid, lease, &mooring.home)
         }
         #[cfg(windows)]
         {
-            TerminalLoan::try_acquire(child_id.cast_signed(), lease, &mooring.cancel)
+            TerminalLoan::try_acquire(child_id.cast_signed(), lease, &mooring.home)
         }
     }
 }

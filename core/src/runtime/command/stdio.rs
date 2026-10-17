@@ -214,12 +214,12 @@ mod tests {
     #[test]
     fn wire_stdin_borrows_a_stage_shaped_source() {
         use crate::io::SourceReader;
-        use crate::io::Wake;
 
         let mut shell = crate::test_helper::core_shell();
         let (r, _w) = crate::process::cloexec_pipe().expect("data pipe");
-        let wake = Wake::new().expect("wake");
-        shell.io.stdin = Source::Reader(SourceReader::pipe(r).interruptible(wake));
+        shell.io.stdin = Source::Reader(
+            SourceReader::pipe(r).interruptible(crate::process::CancelScope::root()),
+        );
 
         let route = wire_stdin(&shell.io.stdin, shell.io.terminal.startup_stdin_tty, None)
             .expect("wire_stdin");

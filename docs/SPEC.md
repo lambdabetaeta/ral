@@ -1726,7 +1726,7 @@ Large here strings are written concurrently with the reader, so filling an opera
 
 ### 7.6. Process completion and the terminal
 
-ral runs a ral-written stage on its own thread and an external stage as a process; every external in the pipeline shares one process group the shell is not a member of. ral launches all stages and waits for all of them. A failure in any stage fails the whole pipeline. If several stages fail, the first failing stage in launch order supplies the reported failure. A control escape such as `return` or `exit` takes precedence over an ordinary stage failure.
+ral runs a ral-written stage on its own thread and an external stage as a process; every external in the pipeline shares one process group the shell is not a member of. ral launches all stages and waits for all of them. A failure in any stage fails the whole pipeline. If several stages fail, the first failing stage in launch order supplies the reported failure. An escape outranks an ordinary stage failure, and a stop (§8.10) outranks an `exit`; two stops rank by cause; ties go to the earlier stage. A stage's own reader-gone stop, or an enclosing stage's, is no verdict at all: it ranks under everything. An `exit` in a stage, or a stop reaching a stage from outside the pipeline, ends the pipeline at once: the other stages are torn down, and what that teardown stops is the pipeline's own to forgive.
 
 A downstream command often stops reading before an upstream producer is done writing, as in:
 
@@ -1736,7 +1736,7 @@ large-producer | head
 
 An interior edge is dead once its reader stage has ended. A stage feels that death at exactly one place — its next write to that edge — and nowhere else. A ral-written stage's own write to a dead edge raises the break at that write; an external's write ral cannot see, so ral hears it instead: once the reader is gone, ral reads the edge itself, on the read-end duplicate it already holds, discards whatever bytes are pending at that moment (they were owed to a reader that left), and treats the first byte written after them as the kill's cue — SIGKILL on Unix, a distinctive-code `TerminateProcess` on Windows. A write already blocked on a full pipe when the edge dies is completed into that same read and then judged dead: a write not complete when the edge dies does not complete.
 
-That break — and only that break — is the pipeline's one forgiven death: a non-final stage ral cuts this way keeps no failure, because the rest of its output was owed to nobody. Everything a stage does before its first dead write is its own account and runs to completion: its stderr, its files, its children that never write the edge, its own exit status if it never writes again. Nothing after that write is promised. The same condition in the final stage remains its own failure: the final stage's output crosses the pipeline's outer boundary, not an interior edge, so a caller that stops reading the pipeline's own output is a failure that stage reports for itself.
+That break — and only that break — is the pipeline's one forgiven death: a non-final stage ral cuts this way keeps no failure, because the rest of its output was owed to nobody. Everything a stage does before its first dead write is its own account and runs to completion: its stderr, its files, its children that never write the edge, its own exit status if it never writes again. Nothing after that write is promised. In the final stage the same condition is the closed-stdout stop: the pipeline's own output crosses the outer boundary, and a caller that stops reading it stops the run, status 141, an escape no `try` catches (§8.10). A reader-gone stage's `guard` cleanup runs, shielded (§8.7): a cleanup that halts on anything but its reader-gone stop is the pipeline's verdict; one that ends on it is forgiven; a cleanup's write to the dead edge is stopped, not masked.
 
 A stage whose own redirect statically sends every byte of its stdout to a file, never to the interior edge, never performs the write the cut watches for: `cmd > file | next` therefore runs `cmd`'s redirect to completion regardless of when `next` settles, not because it is exempted but because it never reaches the operation the rule cuts.
 
@@ -1889,12 +1889,15 @@ fail [status: 64, message: 'bad command line']
 A record must contain a nonzero integer `status` field and a `String`
 `message`: the message is the text the failure carries. The checker enforces
 this shape. A record reaching `fail` from an unchecked boundary — a decoder's
-result, a module's asserted shape — is refused at run time instead. Other
-fields are ignored when `fail` raises the error.
+result, a module's asserted shape — is refused at run time instead. `reason`,
+`cmd` and `site` are kept when present.
 
 Status 0 is rejected: use `return` for success. A status must fit the runtime's
 signed exit-code range. Passing the error record received by `try` to `fail`
-re-raises its essential status and message. Integers and bare message strings
+re-raises it faithfully: `status`, `message`, `reason`, `cmd`, and a `site`
+the record has, all round-trip. A `status` that disagrees with its `reason`'s
+projection (§8.6) is refused, naming the status that reason has; a
+`` `signaled n `` outside 1 to 127 is refused. Integers and bare message strings
 are rejected so failure remains structured at its point of construction.
 
 An external command that exits unsuccessfully and a runtime operation that
@@ -1931,10 +1934,8 @@ receives this record:
 where
 
 ```text
-Reason = `exited Int | `signaled Int | `cancelled Cause
+Reason = `exited Int | `signaled Int | `cancelled | `timed-out
        | `not-found | `not-runnable | `raised
-Cause  = `interrupted | `cancelled | `timed-out | `terminated | `aborted
-       | `reader-gone
 ```
 
 `reason` says why the failure happened, and `status` is its projection:
@@ -1943,14 +1944,13 @@ Cause  = `interrupted | `cancelled | `timed-out | `terminated | `aborted
 |---|---|---:|
 | `` `exited n `` | an external command exited with nonzero `n` | `n` |
 | `` `signaled s `` | an external command died of signal `s`, not by a cancellation (§8.10) | 128 + `s` |
-| `` `cancelled c `` | cancellation by cause `c` (§8.10) | the cause's status |
+| `` `cancelled `` | a worker this run cancelled, observed by `await` or `poll` | 143 |
+| `` `timed-out `` | a worker whose lease expired, observed likewise | 124 |
 | `` `not-found `` | no command of that name exists | 127 |
 | `` `not-runnable `` | the command exists but could not be started | 126 |
 | `` `raised `` | `fail`, or a runtime operation that could not complete | the raised status |
 
-Recovery branches on `reason`, not on a status number. `fail` ignores
-`reason`: `fail $error` re-raises `status` and `message`, and the new error's
-`reason` is `` `raised ``.
+Recovery branches on `reason`, not on a status number.
 
 `cmd` names the command whose dispatch failed — a builtin call included — and
 is `<runtime>` when the failure came from no command. The dispatch stamps its
@@ -1967,12 +1967,11 @@ byte pipes. The error record's `message` is the structured failure message; it
 is not captured stderr. Use `audit` when command bytes and the full trail are
 required — its `` `err `` outcome carries this same record (§13.3).
 
-A handler that succeeds recovers the failure and leaves status 0. `exit` and
-internal tail-call control bypass the handler. Cancellation may be observed
-as a recoverable error inside the body, but cancellation is sticky:
-recovering it cannot make the enclosing run complete successfully. That
-includes a cancellation a command's end reports: a key pressed on a terminal
-ral lent is struck on the run (§8.10).
+A handler that succeeds recovers the failure and leaves status 0. `exit`,
+internal tail-call control, and a stop (§8.10) bypass the handler: a stop is
+not a failure, and `try` never sees one. The one stop a handler can meet is
+the error `await` or `poll` reports for a worker this run cancelled or whose
+lease expired, which is the awaiting run's own failure.
 
 ### 8.7. Cleanup with `guard`
 
@@ -1992,7 +1991,19 @@ value, or its failure remains the result after cleanup.
 
 A cleanup that does not complete pre-empts that outcome, an ordinary failure
 exactly as a control escape such as `exit`. If both the body
-and the cleanup halt, the cleanup's signal is the result. A cleanup whose own
+and the cleanup halt, the cleanup's signal is the result.
+
+A cleanup is shielded: a stop (§8.10) already in force when it starts, or
+landing while it runs, does not end it until the grace is spent. The grace is
+a host-set budget (five seconds by default) counted from the instant the stop
+landed, whatever the cleanup was doing then, so every cleanup of one
+unwinding ends by one instant. A root abort (Ctrl-\\) passes the shield. The
+shield is ral's own restraint: a signal the terminal or the pipeline sends to
+the process group still reaches the cleanup's children, as under any shell,
+and a child that dies of it fails as a signalled command does. Within the
+grace a cleanup's commands and pipelines run to completion; past it, the stop
+ends the cleanup at its next poll, and the cleanup's halt is the result.
+ A cleanup whose own
 failure is not to fail the computation says so: `guard { … } { attempt { … } }`
 suppresses it, and `guard { … } { try { … } { |err| … } }` reports it and
 carries on.
@@ -2013,7 +2024,8 @@ exit 7
 
 The default status is 0. An explicit status must be an integer in the signed
 exit-code range. `exit` is a control escape, not an ordinary failure: `?` and
-`try` do not catch it. A command-line host translates it to the platform's
+`try` do not catch it. `await` and `poll` re-raise a worker's `exit`: an
+`exit` in a worker ends the run that observes it, and no other. A command-line host translates it to the platform's
 process exit status; an embedding host receives the structured exit request.
 
 ### 8.9. Diagnostics
@@ -2038,26 +2050,42 @@ collection loops and tail-call steps, and while launching or waiting for
 pipelines and external commands. A cancelled external process is terminated
 and reaped before control returns.
 
+A stop is an escape, not a failure: it carries a cause, no `reason`, and no
+`try` catches it; the run it reaches ends stopped, with the cause's status.
+Two boundaries within a program own stops: a worker's boundary owns
+`cancelled` and `timed out` on its own handle, which `await` and `poll` report
+as the awaiter's failure (§8.6); a pipeline owns the stops naming its own
+stages, the reader-gone stop of one whose reader left and the teardown it runs
+for a sibling's escape, and forgives them (§7.6). Every other stop is the
+host's and reaches the top of the run uninterpreted, as `exit` does. A stop in
+force is observed at the next step and, inside a blocked write, read or wait
+of ral's own, at the next ten-millisecond slice.
+
 Cancellation causes form an escalation order and never downgrade:
 
-| Cause | `reason` | Message | Status |
-|---|---|---|---:|
-| foreground interrupt | `` `cancelled `interrupted `` | `interrupted` | 130 |
-| explicit cancellation | `` `cancelled `cancelled `` | `cancelled` | 143 |
-| deadline | `` `cancelled `timed-out `` | `timed out` | 124 |
-| session termination | `` `cancelled `terminated `` | `terminated` | 143 |
-| root abort | `` `cancelled `aborted `` | `aborted` | 131 |
+| Cause | Message | Status |
+|---|---|---:|
+| reader gone | `its reader ended` | 141 |
+| foreground interrupt | `interrupted` | 130 |
+| explicit cancellation | `cancelled` | 143 |
+| deadline | `timed out` | 124 |
+| session termination | `terminated` | 143 |
+| root abort | `aborted` | 131 |
 
 A cause a signal raises reports 128 plus that signal, as a POSIX shell does:
 an interrupt 128 + SIGINT, a root abort 128 + SIGQUIT, session termination
 128 + SIGTERM. An explicit cancellation reports 128 + SIGTERM, what `kill`
 delivers, and a deadline 124, as `timeout(1)` does. A pipeline stage
-cut short because its reader ended fails with `` `cancelled `reader-gone ``
-and status 141, the SIGPIPE status; a `try` inside that stage's body can
-observe it.
+cut short because its reader ended is stopped with the reader-gone cause,
+which its pipeline forgives; no `try` inside the stage sees it. The shell's
+own write to its standard output after the reader left is the same stop at
+the run's own boundary, and ends the run with status 141 and no diagnostic,
+as a SIGPIPE death would. That stop lives in the lost stream itself: a
+cleanup after it runs unhurried, and only its own write to that stream ends
+it.
 
-A cancellation reports the same `reason`, message and status whether it lands
-before a command starts or while the command runs. An external command that
+A stop reports the same cause, message and status whether it lands before a
+command starts or while the command runs. An external command that
 dies of the signal ral sends first to tear it down, or of the final kill, is
 reported as the cause in force, also when a sandbox's envelope relays that
 death as `128 + n`. An exit is never read as a signal: `exit 130` is the
@@ -2066,8 +2094,8 @@ command's choice.
 Only a terminal ral lent can make a command's failure a cancellation.
 While a command or pipeline holds the terminal, Ctrl-C, Ctrl-\\ or a hangup
 comes back to ral when it takes the terminal back. A command that dies of
-the key reports that key's cancellation, and the run it belongs to is
-cancelled, so `try` cannot recover it. A pipeline hears the key itself,
+the key is stopped with that key's cause, and the run it belongs to is
+stopped: `try` never sees it. A pipeline hears the key itself,
 whatever its stages do with it. A command that catches the key and carries
 on, or exits, has handled it. A signal from anywhere else is the command's
 own failure (`` `signaled ``), and so is any other death, such as SIGSEGV.
@@ -2597,10 +2625,12 @@ owning registry. Cancellation is cooperative for ral computation and is
 propagated to external child process groups by the process runtime. A worker
 may take a short bounded interval to tear its process tree down.
 
-Cancellation has no result. `await` and `poll` on a cancelled handle fail with
-`handle is cancelled`; the diagnostic suggests using `try` around `await`.
-Cancelling a handle that has already completed does not destroy its cached
-outcome.
+Cancellation has no result. `await` on a cancelled handle fails with
+`worker was cancelled`, reason `` `cancelled ``, status 143: the awaiting run's
+own failure, which `try` can recover (§8.6). `poll` settles it as that same
+error record. A worker whose lease expired reports `worker's lease expired`,
+reason `` `timed-out ``, status 124, likewise. Cancelling a handle that has
+already completed does not destroy its cached outcome.
 
 ### 11.3. Buffered output and `par`
 
@@ -2635,7 +2665,8 @@ item. Results preserve input order even when workers finish out of order.
 `par` unwraps each await record and returns only the list of `value` fields;
 use explicit `spawn` and `await` when stdout or stderr is needed. If an item
 fails, `par` cancels every remaining sibling before re-raising the original
-failure.
+failure. A stop, an `exit` or a panic passes `par`, and the remaining siblings
+run on, detached.
 
 ### 11.4. Registry, leases, and shutdown
 

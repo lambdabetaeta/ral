@@ -172,16 +172,19 @@ mod enquiry_tests {
     use super::*;
     use crate::run::tests::install_act;
     use crate::run::{RunReport, RunRequest};
-    use crate::types::{Desk, Mooring};
+    use crate::types::{Break, Desk, Mooring};
     use std::sync::Mutex;
 
     /// No desk installed answers the honest absence error, verbatim.
     #[test]
     fn absent_desk_answers_the_honest_error() {
         let shell = crate::test_helper::core_shell();
-        let err = shell
+        let Break::Error(err) = shell
             .enquire(&Mooring::adrift(), FOValue::Unit)
-            .expect_err("no desk is installed");
+            .expect_err("no desk is installed")
+        else {
+            panic!("an absent desk is an error, not a stop");
+        };
         assert_eq!(err.message, crate::types::NO_DESK);
     }
 

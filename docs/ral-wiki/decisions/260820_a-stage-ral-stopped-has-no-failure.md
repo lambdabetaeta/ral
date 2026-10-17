@@ -20,6 +20,11 @@ superseded_by: decisions/260903_ral-does-not-suspend
 > reader is gone but at its first write to the dead edge, and the redirect
 > exemption is gone as a clause because it follows from that.
 
+> Amended 2026-10-16 by
+> [[decisions/261016_delimiters-are-handlers-for-poll|delimiters-are-handlers-for-poll]]:
+> forgiveness is by name, not by the shape of a stage's break. The collector
+> consumes exactly the stops naming its own stages' nodes.
+
 # A stage ral stopped has no failure
 
 **Past a `|`, a stage lives exactly as long as its reader needs it: ral itself

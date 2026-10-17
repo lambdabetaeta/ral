@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 1776d222
-verified_at_date: 2026-09-30
+verified_at_commit: dad6a1b3
+verified_at_date: 2026-10-17
 anchors: [Machine, step_eval, eval_rules, step_return, step_halt, Frame, Focus, Terminal, Closure, Closure::new, Node::new, Env, restrict, Signature, lookup, form, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, EngineSeed, NESTED_MACHINE_LIMIT, force, force_val, launch_thread_stage, Assemble]
 ---
 
@@ -100,7 +100,10 @@ returns a value, `E[x ↦ v]` is built from the frame's own `E`, so `x`
 scopes over `N` and nothing else whatever M did. It is the only frame with
 syntax to close over, so the only one carrying an `Env`. `Cleanup` is
 the kernel's `to _` with a settled rest: it drops the cleanup's value and
-resumes the outcome it holds (`βguard-val`). Frames hold
+resumes the outcome it holds (`βguard-val`). It also holds the cancel scope
+`Guard` displaced when it shielded the cleanup (`Shell::shield`), restored on
+pop and on abandon, so the finaliser *and* the re-halt run under the shield
+([[decisions/261016_a-cleanup-is-shielded-within-its-grace|a-cleanup-is-shielded-within-its-grace]]). Frames hold
 `Arc`s into the IR, never cloned IR, and undo tokens, never a `Context`
 clone: `Redirect(Box<RedirectState>)` tears down and settles its writes,
 the one interpreter of a redirect list (stdin, stdout, stderr open in that order; a

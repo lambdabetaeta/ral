@@ -12,16 +12,15 @@
 //! on loan through [`IoLoan`], which restores on `Drop` even on unwind, since a
 //! host may catch a worker panic and carry the same `Shell` on.
 
-use crate::capability::GrantStack;
 use crate::compile::compile_and_typecheck;
 use crate::diagnostic::{Rejection, Report};
 use crate::io::{Captured, Io, RunIo, RunStdin, Sink, Source};
-use crate::process::{CancelCause, ForegroundScope, RequestedTerminalAccess};
+use crate::process::{CancelCause, Deadline, ForegroundScope, RequestedTerminalAccess};
 use crate::protocol::{Program, Run};
 use crate::source::{FileId, Span};
 use crate::types::{
     Break, DeferredSink, Desk, Error, Escape, Fork, Mooring, Notice, NurseryGuard, Observation,
-    Settled, Shell, SurfaceSink, TrailScope, Value,
+    Settled, Shell, SurfaceSink, TrailScope, Value, final_poll,
 };
 use std::io::Write as _;
 use std::sync::Arc;
@@ -50,7 +49,7 @@ impl StaticDiagnostics {
                     message: e.message.clone(),
                     at: None,
                     also: None,
-                    hint: e.hint.clone(),
+                    hint: e.hint.as_deref().map(Into::into),
                 };
                 (report.plain(), e.code())
             }
@@ -129,11 +128,10 @@ pub enum Ending {
         error: Error,
         compact: Option<FileId>,
     },
-    /// A raise the wall itself caused — same shape as [`Self::Raised`], the
-    /// tag alone is what a renderer needs to choose the timeout remedy over
-    /// the exit-code one.
-    Walled {
-        error: Error,
+    /// A stop that reached the top, a top-level effect: the run was ended, not failed.
+    Stopped {
+        cause: CancelCause,
+        at: Option<Span>,
         compact: Option<FileId>,
     },
     Exited(i32),
@@ -146,7 +144,8 @@ impl Ending {
     pub fn status(&self) -> i32 {
         match self {
             Self::Settled { status, .. } => *status,
-            Self::Raised { error, .. } | Self::Walled { error, .. } => error.code(),
+            Self::Raised { error, .. } => error.code(),
+            Self::Stopped { cause, .. } => i32::from(cause.code()),
             Self::Exited(code) => *code,
         }
     }
@@ -159,7 +158,12 @@ impl Ending {
     pub fn into_result(self) -> Settled<Value> {
         match self {
             Self::Settled { value, .. } => Ok(value),
-            Self::Raised { error, .. } | Self::Walled { error, .. } => Err(Break::Error(error)),
+            Self::Raised { error, .. } => Err(Break::Error(error)),
+            Self::Stopped { cause, at, .. } => Err(Break::Escape(Escape::Stopped {
+                cause,
+                owner: None,
+                at,
+            })),
             Self::Exited(code) => Err(Break::Escape(Escape::Exit(code))),
         }
     }
@@ -172,15 +176,6 @@ fn arm_wall(
     foreground: &crate::process::ForegroundScope,
 ) -> crate::process::Deadline {
     crate::process::arm_lifetime(foreground.as_scope().clone(), wall)
-}
-
-/// The message of a recovered panic payload, for either string shape.
-fn panic_text(payload: &dyn std::any::Any) -> String {
-    payload
-        .downcast_ref::<String>()
-        .cloned()
-        .or_else(|| payload.downcast_ref::<&'static str>().map(|s| (*s).into()))
-        .unwrap_or_else(|| "non-string payload".into())
 }
 
 impl Shell {
@@ -234,7 +229,10 @@ impl Shell {
                 (self.env, self.context) = checkpoint;
                 RunReport::Static {
                     diagnostics: StaticDiagnostics::Host(crate::types::Error::raised(
-                        format!("run panicked: {}", panic_text(payload.as_ref())),
+                        format!(
+                            "run panicked: {}",
+                            crate::types::panic_text(payload.as_ref())
+                        ),
                         101,
                     )),
                 }
@@ -339,7 +337,7 @@ impl Shell {
         &mut self,
         req: RunRequest,
         foreground: ForegroundScope,
-        wall: Option<crate::process::Deadline>,
+        wall: Option<Deadline>,
         compact: Option<FileId>,
         body: impl FnOnce(&Mooring, &mut Self) -> Settled<Value>,
     ) -> RunReport {
@@ -350,12 +348,6 @@ impl Shell {
             desk,
             fork,
         } = req;
-
-        // A hook run has no text: its program is an already-compiled value.
-        let src = match &run.program {
-            Program::Source(src) => Some(src.as_str()),
-            Program::Hook { .. } => None,
-        };
 
         let capture = (run.io == RunIo::Capture).then(Capture::default);
 
@@ -374,31 +366,17 @@ impl Shell {
             deferred,
             desk,
             fork,
-            cancel: foreground,
+            home: foreground,
+            cleanup_grace: run.cleanup_grace,
             deferred_lease: run.deferred_lease,
             worker_cap: run.worker_cap,
             terminal_access,
         };
         let next = build_run(self, capture.as_ref(), stdin);
-        let (result, status) = run_framed(
-            &mooring,
-            self,
-            next,
-            &run.script_name,
-            src,
-            run.caps.clone(),
-            body,
-        );
-
-        // Disarm before reading the cause: while armed, the reaper can still
-        // trip in the gap between eval returning and this read, and a run that
-        // finished inside its budget would be misread as timed out.
-        drop(wall);
-
-        let timed_out = mooring.cancel.cause() == Some(CancelCause::TimedOut);
+        let (result, status) = run_framed(&mooring, self, next, &run, wall, body);
 
         RunReport::Ran {
-            ending: classify_ending(result, status, compact, timed_out),
+            ending: classify_ending(result, status, compact),
             captured: capture.map(Capture::finish),
             // Filled in by `enter`, which holds this dispatch's scope.
             trail: Vec::new(),
@@ -409,33 +387,28 @@ impl Shell {
 /// Fold a settled body's raw parts into the one [`Ending`] they describe.
 /// `status` is used only for [`Ending::Settled`] — every other arm's status
 /// is a pure function of the escape, read lazily through [`Ending::status`].
-fn classify_ending(
-    result: Settled<Value>,
-    status: i32,
-    compact: Option<FileId>,
-    timed_out: bool,
-) -> Ending {
+fn classify_ending(result: Settled<Value>, status: i32, compact: Option<FileId>) -> Ending {
     match result {
         Ok(value) => Ending::Settled { value, status },
-        // The cancel is stamped on the innermost node it unwound through, so
-        // the wall is no exception to the engine's own error rendering —
-        // only the tag distinguishing it from an ordinary raise is new here.
-        Err(Break::Error(error)) if timed_out => Ending::Walled { error, compact },
         Err(Break::Error(error)) => Ending::Raised { error, compact },
         Err(Break::Escape(Escape::Exit(code))) => Ending::Exited(code),
+        Err(Break::Escape(Escape::Stopped { cause, at, .. })) => {
+            Ending::Stopped { cause, at, compact }
+        }
     }
 }
 
 // ── The spine behind the door: compile, build, install, classify ────────────
 
-/// Holds what a run takes on loan from the shell — the byte streams,
-/// `session.root_file`, `local.audit.call_site` — and restores it on `Drop`, so
+/// Holds what a run takes on loan from the shell — the byte streams, the
+/// current scope, `session.root_file`, `local.audit.call_site` — and restores it on `Drop`, so
 /// an unwinding run leaves nothing stale on the persistent `Shell`. Everything
 /// else a run installs lives on the [`Mooring`], which was never on the shell
 /// and so needs no restoring.
 struct IoLoan<'s> {
     shell: &'s mut Shell,
     saved: Io,
+    saved_scope: ForegroundScope,
     saved_root: Option<FileId>,
     saved_site: Option<Span>,
 }
@@ -443,13 +416,15 @@ struct IoLoan<'s> {
 impl<'s> IoLoan<'s> {
     /// The run starts with the registers cleared, not inherited: a fresh run
     /// has no call site and no root file until it registers one.
-    fn install(shell: &'s mut Shell, next: Io) -> Self {
+    fn install(shell: &'s mut Shell, next: Io, scope: ForegroundScope) -> Self {
         let saved = std::mem::replace(&mut shell.io, next);
+        let saved_scope = std::mem::replace(&mut shell.scope, scope);
         let saved_root = shell.session.root_file.take();
         let saved_site = shell.local.audit.call_site.take();
         Self {
             shell,
             saved,
+            saved_scope,
             saved_root,
             saved_site,
         }
@@ -461,6 +436,7 @@ impl Drop for IoLoan<'_> {
         // Swap rather than assign, so the run's own streams move into `saved`
         // and close with the guard.
         std::mem::swap(&mut self.shell.io, &mut self.saved);
+        std::mem::swap(&mut self.shell.scope, &mut self.saved_scope);
         self.shell.session.root_file = self.saved_root;
         self.shell.local.audit.call_site = self.saved_site;
     }
@@ -559,37 +535,44 @@ pub(crate) fn compile_run(
     Ok((top, compact))
 }
 
-/// Install the built run state, run `body` under `capabilities`, compute the transport status, and tear the frame down. Both
+/// Install the built run state, run `body` under `run`'s capabilities, compute the transport status, and tear the frame down. Both
 /// program arms settle to one [`Settled<Value>`], so this spine is shared
 /// verbatim; the caller keeps the mooring, the limits and the classification.
 pub(crate) fn run_framed(
     mooring: &Mooring,
     shell: &mut Shell,
     next: Io,
-    script_name: &str,
-    src: Option<&str>,
-    capabilities: GrantStack,
+    run: &Run,
+    wall: Option<Deadline>,
     body: impl FnOnce(&Mooring, &mut Shell) -> Settled<Value>,
 ) -> (Settled<Value>, i32) {
-    let guard = IoLoan::install(shell, next);
+    let guard = IoLoan::install(shell, next, mooring.home.clone());
     let shell = &mut *guard.shell;
     // Only a source run registers: a hook's spans point into the file the hook
     // was defined in, so an entry for its absent text would name nothing and
     // never be reclaimed — the registry is append-only for the session's life.
-    if let Some(src) = src {
-        shell.install_root_context(script_name, src);
+    let boundary = match &run.program {
+        Program::Source(src) => {
+            shell.install_root_context(&run.script_name, src);
+            true
+        }
+        Program::Hook { .. } => false,
+    };
+
+    let result = shell.with_layers(run.caps.clone(), |s| body(mooring, s));
+
+    // The run's last step boundary.  The wall is disarmed first; a firing
+    // the daemon has already claimed lands momentarily and is waited for
+    // on its own flag (the node may already carry a weaker cause), so
+    // nothing fires after this poll.
+    if let Some(wall) = wall
+        && !wall.disarm()
+    {
+        while !wall.fired() {
+            std::thread::yield_now();
+        }
     }
-    let boundary = src.is_some();
-
-    let result = shell.with_layers(capabilities, |s| body(mooring, s));
-
-    // Cancellation is sticky until the run settles, and the run settles here: a
-    // recovery construct (`try`) classifies the cancellation `Break::Error`
-    // like any other and may absorb it into a clean value, but the scope is
-    // monotone, so this final poll re-raises it before the status is read —
-    // the transport sees the true verdict. Demotes only a
-    // successful settle; an error or escape already carries its own.
-    let result = result.and_then(|value| mooring.check().map(|()| value));
+    let result = final_poll(result, &mooring.home);
 
     let status = result.as_ref().err().map_or(0, Break::code);
 

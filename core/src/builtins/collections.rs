@@ -21,7 +21,7 @@ const RANGE_INITIAL_CAP: usize = 1 << 16;
 /// One element's application, each preceded by the cancellation poll that the
 /// combinators owe every element.
 fn call(func: &Value, item: Value, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    mooring.check()?;
+    shell.poll()?;
     apply(func, vec![item], mooring, shell)
 }
 
@@ -101,7 +101,7 @@ pub(super) fn builtin_sort_by(
     ordered_sort(keyed, "sort-list-by")
 }
 
-pub(super) fn builtin_range(args: &[Value], mooring: &Mooring) -> Settled<Value> {
+pub(super) fn builtin_range(args: &[Value], shell: &Shell) -> Settled<Value> {
     let start = match &args[0] {
         Value::Int(n) => *n,
         other => {
@@ -139,7 +139,7 @@ pub(super) fn builtin_range(args: &[Value], mooring: &Mooring) -> Settled<Value>
         i += 1;
         since_poll += 1;
         if since_poll == INTERRUPT_POLL_CHUNK {
-            mooring.check()?;
+            shell.poll()?;
             since_poll = 0;
         }
     }
@@ -151,7 +151,7 @@ pub(super) fn builtin_fold(args: &[Value], mooring: &Mooring, shell: &mut Shell)
     let mut acc = args[1].clone();
     let items = args[2].as_list("fold")?;
     for item in &items {
-        mooring.check()?;
+        shell.poll()?;
         acc = apply(func, vec![acc, item.into_owned()], mooring, shell)?;
     }
     Ok(acc)
@@ -208,22 +208,15 @@ mod tests {
         Value::list((0..n).map(Value::Int).collect())
     }
 
-    fn status(b: Break) -> i32 {
-        match b {
-            Break::Error(e) => e.code(),
-            other @ Break::Escape(_) => panic!("expected Break::Error, got {other:?}"),
-        }
-    }
-
     #[test]
     fn map_polls_cancellation_within_its_loop() {
         let mut shell = crate::test_helper::core_shell();
         let m = Mooring::adrift();
         let func = lambda(&m, &mut shell, "{ |x| $x }");
-        m.cancel.cancel(crate::process::CancelCause::Interrupted);
+        shell.scope.cancel(crate::process::CancelCause::Interrupted);
         let err = builtin_map(&[func, ints(500)], &m, &mut shell)
             .expect_err("a cancelled scope must abort map");
-        assert_eq!(status(err), 130);
+        assert_eq!(err.code(), 130);
     }
 
     #[test]
@@ -231,10 +224,10 @@ mod tests {
         let mut shell = crate::test_helper::core_shell();
         let m = Mooring::adrift();
         let func = lambda(&m, &mut shell, "{ |x| $[0 == 0] }");
-        m.cancel.cancel(crate::process::CancelCause::Interrupted);
+        shell.scope.cancel(crate::process::CancelCause::Interrupted);
         let err = builtin_filter(&[func, ints(500)], &m, &mut shell)
             .expect_err("a cancelled scope must abort filter");
-        assert_eq!(status(err), 130);
+        assert_eq!(err.code(), 130);
     }
 
     #[test]
@@ -242,10 +235,10 @@ mod tests {
         let mut shell = crate::test_helper::core_shell();
         let m = Mooring::adrift();
         let func = lambda(&m, &mut shell, "{ |acc x| $x }");
-        m.cancel.cancel(crate::process::CancelCause::Interrupted);
+        shell.scope.cancel(crate::process::CancelCause::Interrupted);
         let err = builtin_fold(&[func, Value::Int(0), ints(500)], &m, &mut shell)
             .expect_err("a cancelled scope must abort fold");
-        assert_eq!(status(err), 130);
+        assert_eq!(err.code(), 130);
     }
 
     #[test]
@@ -253,28 +246,28 @@ mod tests {
         let mut shell = crate::test_helper::core_shell();
         let m = Mooring::adrift();
         let func = lambda(&m, &mut shell, "{ |x| $x }");
-        m.cancel.cancel(crate::process::CancelCause::Interrupted);
+        shell.scope.cancel(crate::process::CancelCause::Interrupted);
         let err = builtin_each(&[func, ints(500)], &m, &mut shell)
             .expect_err("a cancelled scope must abort each");
-        assert_eq!(status(err), 130);
+        assert_eq!(err.code(), 130);
     }
 
     #[test]
     fn long_range_polls_past_the_chunk() {
-        let m = Mooring::adrift();
-        m.cancel.cancel(crate::process::CancelCause::Interrupted);
-        let err = builtin_range(&[Value::Int(0), Value::Int(4096)], &m)
+        let shell = crate::test_helper::core_shell();
+        shell.scope.cancel(crate::process::CancelCause::Interrupted);
+        let err = builtin_range(&[Value::Int(0), Value::Int(4096)], &shell)
             .expect_err("a long range under a cancelled scope must abort");
-        assert_eq!(status(err), 130);
+        assert_eq!(err.code(), 130);
     }
 
     /// The other half of the chunk contract: a short range is cheap because
     /// it never polls, so a cancelled scope does not stop it.
     #[test]
     fn short_range_pays_no_poll() {
-        let m = Mooring::adrift();
-        m.cancel.cancel(crate::process::CancelCause::Interrupted);
-        let v = builtin_range(&[Value::Int(0), Value::Int(10)], &m)
+        let shell = crate::test_helper::core_shell();
+        shell.scope.cancel(crate::process::CancelCause::Interrupted);
+        let v = builtin_range(&[Value::Int(0), Value::Int(10)], &shell)
             .expect("a short range pays no poll and completes");
         assert_eq!(v.as_list("range").expect("list").len(), 10);
     }

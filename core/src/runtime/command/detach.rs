@@ -99,7 +99,7 @@ pub(crate) fn detach(
         &plan,
         crate::sandbox::Ownership::Surrendered,
         shell,
-        mooring.cancel.as_scope(),
+        shell.scope.as_scope(),
     )?;
     launch.stdin(StdioSpec::null());
     launch.stdout(StdioSpec::null());

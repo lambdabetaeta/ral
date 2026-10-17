@@ -37,8 +37,8 @@ impl Action {
     }
 }
 
-/// A scheduled action, skipped when it comes due if a dropped [`Deadline`]
-/// has cleared `armed`.
+/// A scheduled action, skipped when it comes due if a disarmed [`Deadline`]
+/// has cleared `armed`; `fired` rises once a claimed action has landed.
 ///
 /// [`BinaryHeap`] is a max-heap, so the ordering below is inverted: the
 /// earliest `when` compares greatest and sits at the root.  Entries sharing an
@@ -47,6 +47,7 @@ struct Scheduled {
     when: Instant,
     action: Action,
     armed: Arc<AtomicBool>,
+    fired: Arc<AtomicBool>,
 }
 
 impl PartialEq for Scheduled {
@@ -102,14 +103,20 @@ fn arm(action: Action, after: Duration) -> Deadline {
     let daemon = &*DAEMON;
     let when = Instant::now() + after;
     let armed = Arc::new(AtomicBool::new(true));
+    let fired = Arc::new(AtomicBool::new(false));
     daemon.heap.lock_ignore_poison().push(Scheduled {
         when,
         action,
         armed: armed.clone(),
+        fired: fired.clone(),
     });
     // This entry may beat the deadline the daemon is sleeping toward.
     daemon.wake.notify_one();
-    Deadline { armed, keep: false }
+    Deadline {
+        armed,
+        fired,
+        keep: false,
+    }
 }
 
 /// A handle to an armed deadline.
@@ -120,6 +127,7 @@ fn arm(action: Action, after: Duration) -> Deadline {
 #[must_use]
 pub struct Deadline {
     armed: Arc<AtomicBool>,
+    fired: Arc<AtomicBool>,
     keep: bool,
 }
 
@@ -129,12 +137,24 @@ impl Deadline {
     pub fn keep(mut self) {
         self.keep = true;
     }
+
+    /// Call once: `true` if this call disarmed the entry, so it never fires;
+    /// `false` if the daemon claimed it first, its action landing momentarily
+    /// (wait on `fired`).
+    pub fn disarm(&self) -> bool {
+        self.armed.swap(false, Ordering::AcqRel)
+    }
+
+    /// Whether a claimed firing's action has landed.
+    pub fn fired(&self) -> bool {
+        self.fired.load(Ordering::Acquire)
+    }
 }
 
 impl Drop for Deadline {
     fn drop(&mut self) {
         if !self.keep {
-            self.armed.store(false, Ordering::Release);
+            self.disarm();
         }
     }
 }
@@ -171,8 +191,9 @@ fn daemon_loop(daemon: &Daemon) {
                     // Never run an entry's effect while holding the schedule:
                     // a `Run` closure may re-arm, which locks this same heap.
                     drop(heap);
-                    if due.armed.load(Ordering::Acquire) {
+                    if due.armed.swap(false, Ordering::AcqRel) {
                         due.action.fire();
+                        due.fired.store(true, Ordering::Release);
                     }
                     heap = daemon.heap.lock_ignore_poison();
                 } else {
@@ -191,7 +212,7 @@ mod tests {
 
     #[test]
     fn arm_does_not_fire_before_the_ceiling() {
-        let scope = CancelScope::default();
+        let scope = CancelScope::root();
         let _d = arm_lifetime(scope.clone(), Duration::from_hours(1));
         std::thread::sleep(Duration::from_millis(50));
         assert!(
@@ -203,8 +224,8 @@ mod tests {
     /// Exercises the daemon's pop-and-re-peek, not just its first entry.
     #[test]
     fn multiple_armed_scopes_each_fire() {
-        let one = CancelScope::default();
-        let two = CancelScope::default();
+        let one = CancelScope::root();
+        let two = CancelScope::root();
         let _d1 = arm_lifetime(one.clone(), Duration::from_millis(20));
         let _d2 = arm_lifetime(two.clone(), Duration::from_millis(20));
 
@@ -220,8 +241,26 @@ mod tests {
     }
 
     #[test]
+    fn a_claimed_deadline_is_reported() {
+        let scope = CancelScope::root();
+        let claimed = arm_lifetime(scope.clone(), Duration::from_millis(1));
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(!claimed.disarm(), "the daemon has claimed it");
+        while !claimed.fired() {
+            std::thread::yield_now();
+        }
+        assert!(scope.is_cancelled());
+
+        let scope = CancelScope::root();
+        let distant = arm_lifetime(scope.clone(), Duration::from_hours(1));
+        assert!(distant.disarm());
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(!scope.is_cancelled() && !distant.fired());
+    }
+
+    #[test]
     fn disarmed_deadline_does_not_fire() {
-        let scope = CancelScope::default();
+        let scope = CancelScope::root();
         drop(arm_lifetime(scope.clone(), Duration::from_millis(20)));
         std::thread::sleep(Duration::from_millis(80));
         assert!(
@@ -232,7 +271,7 @@ mod tests {
 
     #[test]
     fn kept_deadline_fires_after_handle_dropped() {
-        let scope = CancelScope::default();
+        let scope = CancelScope::root();
         arm_lifetime(scope.clone(), Duration::from_millis(20)).keep();
 
         let mut fired = false;

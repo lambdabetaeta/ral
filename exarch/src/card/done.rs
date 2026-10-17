@@ -16,6 +16,8 @@ use super::{Role, Span};
 pub enum DoneOutcome {
     Ok,
     Err { message: String, status: i64 },
+    Exited { status: i64 },
+    Stopped { cause: String },
     Panic { message: String },
 }
 
@@ -29,6 +31,10 @@ pub(crate) fn value_to_done(v: &FOValue) -> Option<(u64, String, DoneOutcome)> {
         Done::Err(rec) => DoneOutcome::Err {
             message: rec.message().to_owned(),
             status: rec.status().into(),
+        },
+        Done::Exited(n) => DoneOutcome::Exited { status: n.into() },
+        Done::Stopped(c) => DoneOutcome::Stopped {
+            cause: c.message().to_owned(),
         },
         Done::Panic(message) => DoneOutcome::Panic { message },
     };
@@ -46,6 +52,8 @@ pub fn settled_spans(id: Option<u64>, cmd: &str, outcome: &DoneOutcome) -> Vec<S
         DoneOutcome::Err { message, status } => {
             (Role::Bad, format!("exit {status}"), message.as_str())
         }
+        DoneOutcome::Exited { status } => (Role::Bad, format!("exited {status}"), ""),
+        DoneOutcome::Stopped { cause } => (Role::Bad, cause.clone(), ""),
         DoneOutcome::Panic { message } => (Role::Bad, "panic".to_string(), message.as_str()),
     };
     let mut spans = vec![

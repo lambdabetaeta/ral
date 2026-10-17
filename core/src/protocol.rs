@@ -20,7 +20,7 @@ pub mod probe;
 /// The frame algebra's generation, checked at `Attach` and refused on
 /// mismatch.  Public because a build has to compare it against the engine
 /// sitting in the guest media beside it: see [`check_media`].
-pub const PROTOCOL_VERSION: u32 = 21;
+pub const PROTOCOL_VERSION: u32 = 22;
 
 /// The key `vm-image/build-boot.sh` records [`PROTOCOL_VERSION`] under in the
 /// boot media's manifest, `vm-image/out/boot/boot-manifest.txt`.
@@ -274,6 +274,9 @@ pub struct Run {
     /// `Some(d)` arms a deadline cancel on the run's foreground scope `d`
     /// after it starts; `None` leaves the run uncapped.
     pub wall: Option<std::time::Duration>,
+    /// What a `guard` cleanup gets, from the strike, before the stop ends
+    /// it: the host's policy, as `wall` is.
+    pub cleanup_grace: std::time::Duration,
     /// For workers deferred at the durable root. `None` keeps one until
     /// `cancel`, root abort, or session exit; `Some` reaps a still-running one
     /// unobserved for `lease.idle` — renewed by every `poll`/`await`/`race`
@@ -313,6 +316,7 @@ impl Run {
             script_name: script_name.into(),
             caps: crate::capability::GrantStack::root(),
             wall: None,
+            cleanup_grace: std::time::Duration::from_secs(5),
             deferred_lease: None,
             worker_cap: None,
             io: RunIo::Inherit,
@@ -494,7 +498,7 @@ impl FailureStatus {
 ///
 /// The protocol projection of the engine's [`Ending`](crate::run::Ending),
 /// rendered against a [`SourceDb`](crate::source::SourceDb) — a live `Error`
-/// cannot cross the protocol, so [`Self::Raised`]/[`Self::Walled`] carry the
+/// cannot cross the protocol, so [`Self::Raised`]/[`Self::Stopped`] carry the
 /// string it rendered to, and the record `try` would hand its handler.
 /// `status` is carried explicitly wherever it
 /// is not the whole of the arm's payload, since a renderer that has already
@@ -518,11 +522,12 @@ pub enum Ending {
         single_command: bool,
         status: FailureStatus,
     },
-    /// A raise the wall itself caused. No `command_exit`/`single_command`:
-    /// the timeout remedy is unconditional, so no renderer reads them here.
-    Walled {
+    /// A stop that reached the top: the run was ended, not failed.  `cause`
+    /// picks a host's remedy (the timeout tip for `TimedOut`); `rendered` is
+    /// empty for `ReaderGone`, whose status is the whole report.
+    Stopped {
         rendered: String,
-        record: FOValue,
+        cause: CancelCause,
         status: FailureStatus,
     },
     /// The run settled, but on a value that is not data — a handle, a block,
@@ -543,7 +548,7 @@ impl Ending {
     pub fn status(&self) -> i32 {
         match self {
             Self::Settled { status, .. } | Self::Exited(status) => *status,
-            Self::Raised { status, .. } | Self::Walled { status, .. } => status.get(),
+            Self::Raised { status, .. } | Self::Stopped { status, .. } => status.get(),
             Self::Unreturnable { .. } => 1,
         }
     }
@@ -590,12 +595,20 @@ mod ending_wire_round_trip_tests {
     }
 
     #[test]
-    fn walled_round_trips() {
-        round_trips(&ran(Ending::Walled {
+    fn stopped_round_trips() {
+        let stopped = ran(Ending::Stopped {
             rendered: "error: timed out\n".into(),
-            record: FOValue::Unit,
+            cause: CancelCause::TimedOut,
             status: 124.into(),
-        }));
+        });
+        round_trips(&stopped);
+        let Report::Ran { ending, .. } = &stopped else {
+            unreachable!()
+        };
+        assert_eq!(
+            serde_json::to_string(ending).expect("Ending must encode"),
+            r#"{"Stopped":{"rendered":"error: timed out\n","cause":"timed-out","status":124}}"#,
+        );
     }
 
     #[test]
@@ -618,9 +631,9 @@ mod ending_wire_round_trip_tests {
         round_trips(&ran(raised));
 
         let smuggled: Ending = serde_json::from_str(
-            r#"{"Walled":{"rendered":"error: timed out\n","record":"unit","status":0}}"#,
+            r#"{"Stopped":{"rendered":"error: timed out\n","cause":"timed-out","status":0}}"#,
         )
-        .expect("a Walled ending must decode");
+        .expect("a Stopped ending must decode");
         assert_eq!(smuggled.status(), 1, "a decoded raise reported success");
     }
 

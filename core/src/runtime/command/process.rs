@@ -10,11 +10,7 @@ use super::vet::SpawnPlan;
 
 impl From<Refusal> for Break {
     fn from(refusal: Refusal) -> Self {
-        match refusal {
-            #[cfg(windows)]
-            Refusal::Cancelled(cause) => Self::Error(Error::cancelled(cause)),
-            other => sig(other.to_string()),
-        }
+        sig(refusal.to_string())
     }
 }
 
@@ -43,7 +39,17 @@ pub(crate) fn build_launch(
         // A `grant` body evaluates in this process unconfined; spawned children
         // are the only thing an OS sandbox reaches, and this is where it does.
         crate::sandbox::projection_enforceable(&projection)?;
-        crate::sandbox::sandboxed_command(&projection, admitted, ownership, &shell.cwd(), cancel)?
+        crate::sandbox::sandboxed_command(&projection, admitted, ownership, &shell.cwd(), cancel)
+            .map_err(|refusal| match refusal {
+                #[cfg(windows)]
+                Refusal::Cancelled(cause) => Break::of_child(
+                    &plan.shown,
+                    crate::process::ChildEnd::Cancelled(cause),
+                    cancel,
+                    shell,
+                ),
+                other => Break::from(other),
+            })?
     } else {
         match admitted.program() {
             Program::File { path, real } => {
@@ -100,15 +106,15 @@ pub(crate) fn spawn(
 }
 
 /// `err` with the kernel's denial hint, when a sandboxed child failed on its
-/// own account.  Only then are `pids` sampled: an unsandboxed or cancelled
-/// failure never pays for the process-table walk.
+/// own account.  Only then are `pids` sampled: an unsandboxed failure never
+/// pays for the process-table walk.
 pub(crate) fn with_denials(
     err: Error,
     shell: &Shell,
     pids: impl FnOnce() -> std::collections::HashSet<u32>,
     since: std::time::Instant,
 ) -> Error {
-    if shell.sandbox_projection().is_none() || err.cancelled_by().is_some() {
+    if shell.sandbox_projection().is_none() {
         return err;
     }
     if let Some(hint) = crate::sandbox::denial_hint(&pids(), since, err.code()) {
@@ -307,7 +313,7 @@ mod judged_program {
             plan,
             crate::sandbox::Ownership::Kept,
             shell,
-            &CancelScope::default(),
+            &CancelScope::root(),
         )
         .expect("the launch builds");
         cmd.stdout(StdioSpec::piped());

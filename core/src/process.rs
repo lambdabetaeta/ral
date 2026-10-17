@@ -3,7 +3,7 @@
 //!
 //! Cancellation is the subsystem's common currency — a signal handler, a
 //! terminal interrupt, and an elapsed deadline all arrive as a [`CancelCause`]
-//! on a [`CancelScope`], observed at the evaluator's poll points via [`Mooring::check`](crate::types::Mooring::check).
+//! on a [`CancelScope`], observed at the evaluator's poll points via [`Shell::poll`](crate::types::Shell::poll).
 
 pub mod cancel;
 pub(crate) mod child;
@@ -31,11 +31,11 @@ pub use deadline::{Deadline, arm_callback, arm_lifetime};
 pub(crate) use reaper::Watch;
 pub(crate) use tree::sample_descendants;
 
-pub(crate) use cancel::TEARDOWN_GRACE;
 pub use cancel::{
-    Ambient, AmbientForward, CancelCause, CancelScope, CancelWatch, DurableRoot, ForegroundScope,
-    forward_ambient, interrupt_epoch, request_interrupt, request_root_cancel, watch_cancel,
+    Ambient, AmbientForward, CancelCause, CancelScope, DurableRoot, ForegroundScope, ScopeId,
+    WorkerStop, forward_ambient, interrupt_epoch, request_interrupt, request_root_cancel,
 };
+pub(crate) use cancel::{POLL_SLICE, TEARDOWN_GRACE};
 
 pub use child::ChildHandle;
 pub(crate) use group::{Group, Membership};
@@ -63,8 +63,8 @@ pub use slot::clobber_slot;
 #[cfg(windows)]
 pub use foreground::TerminalLoan;
 #[cfg(windows)]
-pub use group::{ReapStatus, break_pipeline_group, disown_pipeline_group, try_reap_leader};
+pub(crate) use group::release_win_group;
 #[cfg(windows)]
-pub(crate) use group::{release_win_group, wait_leader_blocking};
+pub use group::{ReapStatus, break_pipeline_group, disown_pipeline_group, try_reap_leader};
 #[cfg(windows)]
 pub use signal::{install_handlers, install_interrupt_handler, reset_child_signals};

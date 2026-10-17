@@ -1,7 +1,12 @@
 //! Small builtins with no cluster of their own: `clear`, `reset`, `fail`,
 //! `exit`, `surface`, `warn`, and `ask`.
 
-use crate::types::{Break, Error, Escape, Mooring, Settled, Shell, Value, sig};
+use crate::fact::Reason;
+use crate::first_order::{FOValue, datum::Datum};
+use crate::process::{CommandFailure, Signal, SpawnFailure, WorkerStop};
+use crate::types::{
+    Break, CallSite, Error, Escape, Map, Mooring, Settled, Shell, Status, Value, sig,
+};
 
 const CLEAR_SEQ: &[u8] = b"\x1b[H\x1b[2J\x1b[3J";
 /// `ESC c` (RIS): a terminal reset that leaves stty modes untouched.
@@ -33,30 +38,102 @@ fn fail_status_code(status: i64) -> Result<i32, Break> {
     status_i32("fail", status)
 }
 
+/// A record field decoded as `T`; `None` when absent.
+fn optional<T: Datum>(m: &Map, key: &str) -> Result<Option<T>, Break> {
+    m.get(key)
+        .map(|v| {
+            FOValue::try_from(&*v)
+                .map_err(|_| "not plain data".to_string())
+                .and_then(|fo| T::decode(&fo))
+                .map_err(|why| sig(format!("fail: `{key}`: {why}")))
+        })
+        .transpose()
+}
+
+/// The failure a record's `reason` names, at the record's `status`.
+fn projected(reason: Reason, status: i32) -> Result<Status, Break> {
+    Ok(match reason {
+        Reason::Exited(n) => Status::Process(CommandFailure::ExitCode(n)),
+        Reason::Signaled(n) if (1..=127).contains(&n) => {
+            Status::Process(CommandFailure::Signal(Signal::new(n)))
+        }
+        Reason::Signaled(n) => {
+            return Err(sig(format!(
+                "fail: `signaled {n}` names no signal; signals are 1 to 127"
+            )));
+        }
+        Reason::NotFound => Status::Process(CommandFailure::Spawn(SpawnFailure::NotFound)),
+        Reason::NotRunnable => {
+            Status::Process(CommandFailure::Spawn(SpawnFailure::PermissionDenied {
+                found: None,
+            }))
+        }
+        Reason::Cancelled => Status::WorkerStopped(WorkerStop::Cancelled),
+        Reason::TimedOut => Status::WorkerStopped(WorkerStop::TimedOut),
+        Reason::Raised => Status::Raised(status),
+    })
+}
+
 /// The checker demands `[status: Int, message: String, ...]` of `fail`, so the
 /// shape refusals here answer only a record that reached the call through an
-/// unchecked boundary — a decoder's result, or a module's asserted shape.
-pub(super) fn builtin_fail(args: &[Value]) -> Break {
+/// unchecked boundary: a decoder's result, or a module's asserted shape.
+/// A record `try` handed over re-raises faithfully: `reason`, `cmd` and `site`
+/// ride along.
+fn reraise(args: &[Value]) -> Result<Error, Break> {
     let Some(Value::Map(m)) = args.first() else {
-        return sig("fail expects an error record [status: Int, message: String, ...]");
+        return Err(sig(
+            "fail expects an error record [status: Int, message: String, ...]",
+        ));
     };
-    let lookup = |k: &str| m.get(k);
-    let Some(status) = lookup("status").as_deref().and_then(Value::as_int) else {
-        return sig("fail: error record missing or non-integer 'status' field");
+    let Some(status) = m.get("status").as_deref().and_then(Value::as_int) else {
+        return Err(sig(
+            "fail: error record missing or non-integer 'status' field",
+        ));
     };
-    let code = match fail_status_code(status) {
-        Ok(code) => code,
-        Err(b) => return b,
+    let status = fail_status_code(status)?;
+    let message = m.get("message");
+    let Some(Value::String(message)) = message.as_deref() else {
+        return Err(sig(
+            "fail: this error record has no String `message`; the message is the text the failure carries",
+        ));
     };
-    let message = match lookup("message").as_deref() {
-        Some(Value::String(s)) => s.to_string(),
-        _ => {
-            return sig(
-                "fail: this error record has no String `message`; the message is the text the failure carries",
-            );
-        }
-    };
-    Error::raised(message, code).into()
+    let message = message.to_string();
+    let reason = m
+        .get("reason")
+        .map(|v| {
+            FOValue::try_from(&*v)
+                .ok()
+                .and_then(|fo| Reason::decode(&fo).ok())
+                .ok_or_else(|| {
+                    sig(format!(
+                        "fail: reason {} is not a reason; see try's error record",
+                        *v
+                    ))
+                })
+        })
+        .transpose()?;
+    let projected = reason.map_or(Ok(Status::Raised(status)), |r| projected(r, status))?;
+    if projected.code() != status {
+        let (shown, code) = (
+            Value::from_datum(reason.expect("only a reason projects")),
+            projected.code(),
+        );
+        return Err(sig(format!(
+            "fail: status {status} disagrees with reason {shown}: that failure has status {code}; \
+             set status to {code}, or drop reason"
+        )));
+    }
+    let command = optional::<String>(m, "cmd")?;
+    let site = optional::<Option<CallSite>>(m, "site")?.flatten();
+    Ok(Error {
+        command: command.map(Into::into),
+        site: site.map(Box::new),
+        ..Error::with_status(message, projected)
+    })
+}
+
+pub(super) fn builtin_fail(args: &[Value]) -> Break {
+    reraise(args).map_or_else(|b| b, Break::Error)
 }
 
 pub(super) fn builtin_exit(args: &[Value], _env: &mut Shell) -> Settled<Value> {
@@ -139,4 +216,105 @@ pub(super) fn builtin_ask(args: &[Value]) -> Result<Value, Error> {
     }
     line.truncate(line.len() - crate::io::terminator_len(line.as_bytes()));
     Ok(Value::string(line))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fact::ErrorRecord;
+    use crate::process::CancelCause;
+
+    fn site() -> CallSite {
+        CallSite {
+            script: "a.ral".into(),
+            line: 3,
+            col: 4,
+        }
+    }
+
+    fn reraised(record: &ErrorRecord) -> Error {
+        match builtin_fail(&[Value::from_datum(record.clone())]) {
+            Break::Error(e) => e,
+            other @ Break::Escape(_) => panic!("expected an error, got {other:?}"),
+        }
+    }
+
+    fn refusal(record: Value) -> String {
+        match builtin_fail(&[record]) {
+            Break::Error(e) => e.message,
+            other @ Break::Escape(_) => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    fn record_value(status: i64, reason: Value) -> Value {
+        Value::map(vec![
+            ("status".into(), Value::Int(status)),
+            ("message".into(), Value::string("m")),
+            ("reason".into(), reason),
+        ])
+    }
+
+    #[test]
+    fn fail_of_a_record_is_a_faithful_reraise() {
+        let statuses = [
+            Status::Raised(9),
+            Status::Process(CommandFailure::ExitCode(3)),
+            Status::Process(CommandFailure::Signal(Signal::new(9))),
+            Status::Process(CommandFailure::Spawn(SpawnFailure::NotFound)),
+            Status::Process(CommandFailure::Spawn(SpawnFailure::PermissionDenied {
+                found: None,
+            })),
+            Status::WorkerStopped(WorkerStop::Cancelled),
+            Status::WorkerStopped(WorkerStop::TimedOut),
+        ];
+        for status in statuses {
+            for site in [None, Some(site())] {
+                let record = ErrorRecord::new("cmd", &status, "boom", site);
+                assert_eq!(reraised(&record).record_at(None), record);
+            }
+        }
+        assert_eq!(
+            Status::WorkerStopped(WorkerStop::Cancelled).code(),
+            i32::from(CancelCause::Cancelled.code())
+        );
+        assert_eq!(
+            Status::WorkerStopped(WorkerStop::TimedOut).code(),
+            i32::from(CancelCause::TimedOut.code())
+        );
+    }
+
+    #[test]
+    fn fail_refuses_a_status_that_disagrees_with_its_reason() {
+        let msg = refusal(record_value(
+            5,
+            Value::variant("exited", Some(Value::Int(3))),
+        ));
+        assert!(
+            msg.contains("disagrees with reason") && msg.contains("set status to 3"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn fail_refuses_a_signal_out_of_range() {
+        let msg = refusal(record_value(
+            1,
+            Value::variant("signaled", Some(Value::Int(200))),
+        ));
+        assert!(msg.contains("names no signal"), "{msg}");
+    }
+
+    #[test]
+    fn fail_keeps_a_records_site() {
+        let record = ErrorRecord::new("cmd", &Status::Raised(2), "boom", Some(site()));
+        assert_eq!(reraised(&record).site.as_deref(), Some(&site()));
+    }
+
+    #[test]
+    fn fail_keeps_runtime_as_cmd() {
+        let record = ErrorRecord::new("<runtime>", &Status::Raised(2), "boom", None);
+        let error = reraised(&record);
+        assert_eq!(error.command.as_deref(), Some("<runtime>"));
+        assert_eq!(error.record_at(None).cmd(), "<runtime>");
+    }
 }

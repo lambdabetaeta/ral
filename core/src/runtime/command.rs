@@ -8,7 +8,7 @@
 //! same way.
 
 use crate::process::Group;
-use crate::types::{Break, Error, Mooring, Settled, Shell, Value};
+use crate::types::{Break, Mooring, Settled, Shell, Value};
 
 mod child;
 #[cfg(unix)]
@@ -50,9 +50,9 @@ pub(crate) fn run(
         &rc,
         crate::sandbox::Ownership::Kept,
         shell,
-        mooring.cancel.as_scope(),
+        shell.scope.as_scope(),
     )?;
-    mooring.check()?;
+    shell.poll()?;
 
     let inherit_tty = inherit_tty(shell);
     let pumps = wire_stdio(
@@ -97,35 +97,41 @@ pub(crate) fn run(
         cmd_name.clone(),
         pumps,
         group,
-        mooring.cancel.as_scope().clone(),
+        shell.scope.as_scope().clone(),
         jail,
     );
 
     let waited: WaitedChild = running.wait();
-    // The terminal returns the instant its tenant is dead, and what the
-    // tenant heard is struck on the frame before the next poll.
+    // The terminal returns the instant its tenant is dead; a key it heard is
+    // struck on the node, which the current scope reads or a shield masks.
     let outcome = waited.outcome.enveloped(confinement.is_some());
-    let pressed = loan.and_then(|loan| loan.reclaim(outcome.death()));
-    let cause = waited.cause.max(pressed);
+    if let Some(loan) = loan {
+        loan.reclaim(outcome.death());
+    }
+    // The current scope, read once after the strike: under a shield a key
+    // the tenant heard is not the child's cause, and its death is a failure.
+    let cause = waited.cause.max(shell.scope.cause());
 
     // Only joins the pump threads: under audit the bytes are already
     // captured by the dispatch-level Tee on `shell.io.stdout` / `stderr`.
-    waited.settle();
+    waited.settle(shell.scope.as_scope());
     // A command inside a pipeline stage cannot take SIGPIPE from an interior
     // edge — the parent holds that edge's read end — so any SIGPIPE it
     // suffers is from a pipe of its own making and is its own failure.
+    // Only this child and its descendants may claim a kernel deny line.
+    let pids = || {
+        let mut pids = crate::process::sample_descendants(child_pid);
+        pids.insert(child_pid);
+        pids
+    };
     match outcome.classify(cause) {
         None => Ok(Value::Unit),
-        Some(end) => {
-            let err = Error::of_child(&cmd_name, end, shell);
-            // Only this child and its descendants may claim a kernel deny line.
-            let pids = || {
-                let mut pids = crate::process::sample_descendants(child_pid);
-                pids.insert(child_pid);
-                pids
-            };
-            Err(Break::Error(with_denials(err, shell, pids, started)))
-        }
+        Some(end) => Err(
+            match Break::of_child(&cmd_name, end, shell.scope.as_scope(), shell) {
+                Break::Error(err) => Break::Error(with_denials(err, shell, pids, started)),
+                escape @ Break::Escape(_) => escape,
+            },
+        ),
     }
 }
 

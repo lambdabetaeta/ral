@@ -10,19 +10,15 @@ use super::route::{ByteIn, ByteOut, StageRoute};
 use super::stage::{ExternalStage, StageHandle, StageKind};
 use super::thread::launch_thread_stage;
 use crate::io::{Sink, Source, SourceReader};
-use crate::process::PgidPolicy;
+use crate::process::{CancelScope, PgidPolicy};
 use crate::types::{Env, Error, Mooring, Settled, Shell, Value};
 use std::sync::Arc;
 
 /// A thread reads what a child would inherit, except a tty: reading the
 /// controlling terminal from the shell's own process would SIGTTIN the whole
-/// shell, so it sees EOF, as under capture.  The thread's own wake ends a
+/// shell, so it sees EOF, as under capture.  A cause on `scope` ends a
 /// blocked read as EOF.
-pub(super) fn stage_stdin(
-    route: ByteIn,
-    shell: &Shell,
-    wake: &Arc<crate::io::Wake>,
-) -> Settled<Source> {
+pub(super) fn stage_stdin(route: ByteIn, shell: &Shell, scope: &CancelScope) -> Settled<Source> {
     let reader = match route {
         ByteIn::Upstream(r) => Some(SourceReader::pipe(r)),
         ByteIn::Parent => match &shell.io.stdin {
@@ -38,7 +34,7 @@ pub(super) fn stage_stdin(
         },
     };
     Ok(reader.map_or(Source::Empty, |r| {
-        Source::Reader(r.interruptible(Arc::clone(wake)))
+        Source::Reader(r.interruptible(scope.clone()))
     }))
 }
 
@@ -80,11 +76,12 @@ fn wire_stage(
     let downstream;
     let stdout = match stdout {
         ByteOut::Downstream(writer, edge) => {
-            let wake = crate::io::Wake::new().map_err(|e| Error::io("pipe", &e))?;
+            // A direct external's pipe: nothing of ral's writes to it, the name
+            // is for the type.
             downstream = Sink::Pipe {
                 writer: Arc::new(writer),
-                wake,
                 edge,
+                stage: shell.scope.id(),
             };
             &downstream
         }
@@ -156,11 +153,11 @@ fn launch_external_stage_direct(
         &rc,
         crate::sandbox::Ownership::Kept,
         cx.shell,
-        cx.mooring.cancel.as_scope(),
+        cx.shell.scope.as_scope(),
     )?;
     // Confinement may have taken seconds since the caller's own poll, so poll
     // again rather than spawn into an expired wall.
-    cx.mooring.check()?;
+    cx.shell.poll()?;
 
     let pumps = wire_stage(&mut cmd, stdin, stdout, cx.holds_terminal, cx.shell)?;
 
@@ -170,7 +167,7 @@ fn launch_external_stage_direct(
         &rc.shown,
         cx.shell,
     )?;
-    let pumps = pumps.start(&mut child);
+    let pumps = pumps.start(&mut child, cx.shell.scope.as_scope());
     // A joining stage leads a group only behind an envelope, whose payload
     // leads a session of its own out of the pipeline group's reach.
     Ok(ExternalStage {

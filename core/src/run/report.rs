@@ -7,6 +7,7 @@
 
 use crate::first_order::datum::Datum;
 use crate::first_order::{FOValue, NotData, Opaque};
+use crate::process::CancelCause;
 use crate::protocol::{Ending, FailureStatus, Report};
 use crate::run::{RunReport, StaticDiagnostics};
 use crate::types::{Error, Shell};
@@ -79,20 +80,22 @@ fn render_ending(ending: crate::run::Ending, shell: &Shell) -> Ending {
                 status,
             }
         }
-        Raw::Walled { error, compact } => {
-            let (rendered, record, status) = render_raise(&error, compact, shell);
-            Ending::Walled {
-                rendered,
-                record,
-                status,
-            }
-        }
+        // The closed-stdout stop prints nothing, as a SIGPIPE death does: the
+        // status is the whole report.
+        Raw::Stopped { cause, at, compact } => Ending::Stopped {
+            rendered: if cause == CancelCause::ReaderGone {
+                String::new()
+            } else {
+                Error::render_stop(cause, at, shell.sources(), compact)
+            },
+            cause,
+            status: FailureStatus::from(i32::from(cause.code())),
+        },
         Raw::Exited(code) => Ending::Exited(code.clamp(0, 255)),
     }
 }
 
-/// What `Raised` and `Walled` share: the rendered error, its record and its
-/// status.
+/// What `Raised` renders: the error, its record and its status.
 fn render_raise(
     error: &Error,
     compact: Option<crate::source::FileId>,

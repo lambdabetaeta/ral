@@ -7,6 +7,7 @@
 //! itself.
 
 use super::{ToolResult, ral_value_to_text};
+use ral_core::process::CancelCause;
 use ral_core::protocol::Ending;
 use ral_core::protocol::probe::WorkerRow;
 use std::collections::HashSet;
@@ -59,11 +60,15 @@ fn render(
     let mut out = String::new();
     let exit = match ending {
         Ending::Settled { .. } => return (out, 0),
-        Ending::Walled {
-            rendered, status, ..
+        Ending::Stopped {
+            rendered,
+            cause,
+            status,
         } => {
             out.push_str(rendered);
-            out.push_str(&timeout_tip(timeout_secs));
+            if *cause == CancelCause::TimedOut {
+                out.push_str(&timeout_tip(timeout_secs));
+            }
             status.get()
         }
         Ending::Raised {

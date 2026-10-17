@@ -373,7 +373,8 @@ fn settle_record(value_ty: Ty) -> Ty {
 /// by returning, raising, or panicking — and what it has written so far while
 /// it runs (a cumulative, non-destructive snapshot).  Being `await`'s
 /// non-blocking dual, `poll` reports a failure inside the settled outcome
-/// rather than re-raising it.
+/// rather than re-raising it: a panic, an `exit` and a foreign stop are
+/// re-raised; a failure, and the worker's own stop, settle inside `` `err ``.
 pub(crate) fn poll_variant(value_ty: Ty) -> Ty {
     closed_variant(&[("pending", Io::ty()), ("settled", settle_record(value_ty))])
 }

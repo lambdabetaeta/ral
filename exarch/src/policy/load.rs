@@ -49,6 +49,9 @@ fn load<T>(path: &Path, flag: &str, read: impl FnOnce() -> Result<T, Break>) -> 
         let detail = match e {
             Break::Error(err) => err.message,
             Break::Escape(Escape::Exit(code)) => format!("exit {code}"),
+            Break::Escape(Escape::Stopped { cause, .. }) => {
+                format!("stopped: {}", cause.message())
+            }
         };
         format!("{flag} {}: {detail}", path.display())
     })

@@ -129,7 +129,7 @@ fn a_redirected_allowance_refuses_the_launch_before_the_memo_is_consulted() {
     };
     let confine = || {
         let mut launch = Launch::new(r"C:\Windows\System32\cmd.exe");
-        super::confine(&mut launch, &projection, None, &CancelScope::default())
+        super::confine(&mut launch, &projection, None, &CancelScope::root())
     };
     confine().expect("a real directory is granted");
     std::fs::remove_dir(&granted).unwrap();
@@ -215,7 +215,7 @@ fn confined_child_writes_inside_the_grant_and_not_outside() {
         launch.stdin(StdioSpec::null());
         launch.stdout(StdioSpec::null());
         launch.stderr(StdioSpec::null());
-        super::confine(&mut launch, &projection, Some(cmd), &CancelScope::default())
+        super::confine(&mut launch, &projection, Some(cmd), &CancelScope::root())
             .expect("confine under a derived capability SID");
         let (mut child, _pgid, _) = launch
             .spawn(PgidPolicy::Inherit)
@@ -281,7 +281,7 @@ fn confined_child_denies_protected_and_explicit_descendants() {
                 &mut launch,
                 &projection(deny),
                 Some(cmd),
-                &CancelScope::default(),
+                &CancelScope::root(),
             )
             .unwrap();
             let (mut child, _pgid, _) = launch.spawn(PgidPolicy::Inherit).unwrap();

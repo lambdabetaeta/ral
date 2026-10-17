@@ -110,8 +110,12 @@ cut it anticipates is dynamic, and lands at the write.** An interior edge is
 dead once its reader stage has ended, and a stage feels that death at exactly
 one place — its next write to the dead edge — and nowhere else: everything it
 did before that write, on its own account, runs to completion regardless.
-That break is the pipeline's only forgiven death — every other exit status,
-whatever it is, is kept. A stage whose own redirect diverts every byte of its
+That break is the pipeline's only forgiven death — a stop naming the stage's
+own node, `Break::stopped(ReaderGone, Some(stage))`, consumed by the collector
+and seen by no `try` in the stage; every stop naming a stage's node is the
+collector's to consume, and a sibling's escape tears the pipeline down
+([[decisions/261016_delimiters-are-handlers-for-poll|delimiters-are-handlers-for-poll]]).
+Every other exit status, whatever it is, is kept. A stage whose own redirect diverts every byte of its
 stdout to a file is a corollary of the same rule, not an exception to it: it
 never performs the write the cut watches for, so `cmd > file | next` runs
 `cmd`'s redirect to completion regardless of when `next` settles. Every

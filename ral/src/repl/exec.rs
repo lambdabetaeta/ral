@@ -80,7 +80,9 @@ fn fire(t: &dyn Transport, host: &Arc<ReplHost>, event: HookEvent, record: &FOVa
         // Printed, not deferred: a lifecycle hook runs with the terminal
         // already stable, and a deferred message would wait for a next prompt
         // the last command before exit never reaches.
-        if let Outcome::Faulted(fault) | Outcome::Walled(fault) = hr.outcome {
+        if let Outcome::Faulted(fault) | Outcome::Walled(fault) | Outcome::Stopped(fault) =
+            hr.outcome
+        {
             errln!("{fault}");
         }
     }
@@ -100,7 +102,7 @@ fn pre_exec(t: &dyn Transport, host: &Arc<ReplHost>, src: String) -> String {
             None,
         );
         match hr.outcome {
-            Outcome::Faulted(fault) | Outcome::Walled(fault) => {
+            Outcome::Faulted(fault) | Outcome::Walled(fault) | Outcome::Stopped(fault) => {
                 errln!("{fault}");
                 src
             }
@@ -156,7 +158,7 @@ pub(super) fn step(
                     Step::Continue
                 }
                 Ending::Raised { rendered, .. }
-                | Ending::Walled { rendered, .. }
+                | Ending::Stopped { rendered, .. }
                 | Ending::Unreturnable { rendered, .. } => {
                     err!("{rendered}");
                     Step::Continue

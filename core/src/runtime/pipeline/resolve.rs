@@ -123,6 +123,8 @@ mod tests {
         shell.session.terminal_lease = crate::process::TerminalLease::mint_at_startup(true);
         let mooring = Mooring {
             terminal_access: TerminalAccess::Leased,
+            home: crate::process::DurableRoot::default().worker(),
+            cleanup_grace: std::time::Duration::ZERO,
             ..Mooring::adrift()
         };
         (shell, mooring)

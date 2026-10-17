@@ -81,7 +81,7 @@ fn source_rc(path: &str, mooring: &Mooring, shell: &mut Shell) -> Result<RcSetti
         .map_err(|msg| Stop::Failed(format!("{path}: {msg}")))?;
     plan.apply(mooring, shell).map_err(|b| match b {
         Break::Escape(Escape::Exit(code)) => Stop::Exit(code),
-        Break::Error(e) => Stop::Failed(format!("{path}: {}", e.message)),
+        halt => Stop::Failed(format!("{path}: {halt}")),
     })
 }
 
@@ -122,6 +122,9 @@ fn evaluate(
             Err(Stop::Reported)
         }
         Err(Break::Escape(Escape::Exit(code))) => Err(Stop::Exit(code)),
+        Err(Break::Escape(Escape::Stopped { cause, .. })) => {
+            Err(Stop::Failed(format!("{path}: {}", cause.message())))
+        }
     }
 }
 

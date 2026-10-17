@@ -58,7 +58,7 @@ impl PipeNode {
         mooring: &Mooring,
         shell: &mut Shell,
     ) -> Settled<Self> {
-        mooring.check()?;
+        shell.poll()?;
         let plan = resolve_pipeline(stages, env, eval, mooring, shell)?;
 
         // Window start for the sandbox-denial reader.
@@ -73,7 +73,14 @@ impl PipeNode {
             .then(|| group.lend(shell, mooring))
             .flatten();
 
-        let collect = CollectState::new(rx, &tx, group.group(), loan, mooring, started);
+        let collect = CollectState::new(
+            rx,
+            group.group(),
+            loan,
+            shell.scope.as_scope().clone(),
+            mooring.cleanup_grace,
+            started,
+        );
         let mut node = Self { collect, group };
         // Declared after `node` so unconsumed routes close before it tears
         // down: a half-wired neighbour must see EOF.
@@ -88,7 +95,7 @@ impl PipeNode {
             holds_terminal: node.collect.holds_terminal(),
         };
         for (ix, ((stage, spec), route)) in stages.iter().zip(&plan.specs).zip(routes).enumerate() {
-            mooring.check()?;
+            cx.shell.poll()?;
             let handle = spawn_stage(stage, spec, route, &mut cx, Slot { ix, tx: tx.clone() })?;
             node.collect.push(handle);
         }

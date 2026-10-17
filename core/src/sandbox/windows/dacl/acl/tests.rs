@@ -56,7 +56,7 @@ fn needing_grant_drops_well_known_grant() {
             &granted,
             "S-1-1-0",
             GrantKind::ReadWrite,
-            &crate::process::cancel::CancelScope::default(),
+            &crate::process::cancel::CancelScope::root(),
         )
         .unwrap();
 

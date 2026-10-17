@@ -10,7 +10,7 @@
 use crate::capability::FsOp;
 use crate::glob::Glob;
 use crate::path::walk::{DirEntry, FileInfo, Kind, Leaf, Stat};
-use crate::types::{Break, Mooring, Settled, Shell, Value, sig};
+use crate::types::{Break, Settled, Shell, Value, sig};
 use std::path::Path;
 
 use super::util::{admits_read, checked_read_path};
@@ -67,7 +67,7 @@ pub(super) fn builtin_temp_file(_args: &[Value], shell: &mut Shell) -> Settled<V
 
 /// Glob, preserving the pattern's shape: a cwd-relative pattern yields
 /// cwd-relative matches, a sigil-rooted or absolute one absolute matches.
-pub(super) fn builtin_glob(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_glob(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let raw = args[0].as_str("glob")?;
     let home = shell.context.home();
     let expanded = crate::path::sigil::expand_path_prefix(raw, home.as_deref());
@@ -75,7 +75,7 @@ pub(super) fn builtin_glob(args: &[Value], mooring: &Mooring, shell: &mut Shell)
     let pattern = checked_read_path(shell, raw)?;
     let glob = Glob::parse(pattern.as_path()).map_err(|e| sig(format!("glob: {e}")))?;
     let mut hits = Vec::new();
-    for hit in glob.walk(mooring) {
+    for hit in glob.walk(shell.scope.as_scope().clone()) {
         let hit = hit?;
         let shown = base
             .as_ref()

@@ -4,7 +4,8 @@
 //! A wildcard never matches a name beginning with `.`; only a literal
 //! component names a dotfile.
 
-use crate::types::{Mooring, Settled, sig};
+use crate::process::CancelScope;
+use crate::types::{Settled, sig};
 use globset::{GlobBuilder, GlobMatcher};
 use ignore::WalkBuilder;
 use std::ffi::{OsStr, OsString};
@@ -43,12 +44,12 @@ impl Glob {
         Ok(glob)
     }
 
-    /// Every path the pattern matches, polling `mooring` at each entry visited.
+    /// Every path the pattern matches, polling `scope` at each entry visited.
     #[allow(
         clippy::disallowed_methods,
         reason = "[silent:glob-walk] `glob`'s directory walk: a listing predicate, not turn-time model data I/O; the caller judges each hit against the live grant, and the walk polls the cancel check per entry. Also stats an unfollowable entry to tell a dangling link from a vanished one."
     )]
-    pub(crate) fn walk(self, mooring: &Mooring) -> impl Iterator<Item = Settled<PathBuf>> + '_ {
+    pub(crate) fn walk(self, scope: CancelScope) -> impl Iterator<Item = Settled<PathBuf>> {
         /// What a walk error leaves of its entry: a link the walker could not
         /// follow (dangling, or back to an ancestor) is still an entry; a
         /// vanished one is not.
@@ -77,7 +78,7 @@ impl Glob {
             .filter_entry(move |e| !alive.reach(e.path()).is_empty())
             .build()
             .filter_map(move |item| {
-                if let Err(b) = mooring.check() {
+                if let Err(b) = scope.poll() {
                     return Some(Err(b));
                 }
                 let path = match item.map(ignore::DirEntry::into_path) {

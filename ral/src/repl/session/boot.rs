@@ -26,7 +26,8 @@ use super::super::host::ReplHost;
 ///   `SIGCONT` by the reaper)
 /// - SIGTTOU → `SIG_IGN`  (shell writes terminal settings without being stopped)
 /// - SIGTTIN → `SIG_IGN`  (shell reads stdin without being stopped if not fg)
-/// - SIGPIPE → `SIG_IGN`  (writing to a closed pipe yields an error, not death)
+/// - SIGPIPE → `SIG_IGN`  (as Rust leaves it: a write to a closed pipe is an error, and on
+///   the host's stdout the run's stop)
 ///
 /// Every disposition goes through core's signal installers, which snapshot
 /// the inherited ignores first so children get them back (the nohup rule).

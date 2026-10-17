@@ -1,6 +1,6 @@
 ---
-generated_at_commit: eecd78ad
-generated_at_date: 2026-10-12
+generated_at_commit: dad6a1b3
+generated_at_date: 2026-10-17
 covers_paths: [ral/src/repl.rs, ral/src/repl/session.rs, ral/src/repl/session/, ral/src/repl/exec.rs, ral/src/repl/host.rs, ral/src/repl/enquiry.rs, ral/src/repl/prompt.rs, ral/src/repl/config.rs, ral/src/repl/config/, ral/src/repl/theme.rs, ral/src/repl/errfmt.rs, ral/src/repl/cursor.rs, ral/src/boot_door.rs, ral/src/surface.rs]
 ---
 
@@ -165,10 +165,11 @@ It matches the one flat `Report`:
 - `Static` — a parse, type, or host failure that never reached evaluation; its
   `rendered` is the whole caret report, printed verbatim.
 - `Ran` — a run that compiled, matched on its `Ending`: `Settled` prints via
-  `print_result`; `Raised`, `Walled`, and `Unreturnable` (a settled value the
-  wire cannot carry) print the diagnostic already rendered at the transport
-  seam; `Exited(code)` ends the loop (clamped through
-  `platform::exit_byte`). There is no `Stopped` arm
+  `print_result`; `Raised`, `Stopped`, and `Unreturnable` (a settled value
+  the wire cannot carry) print the diagnostic already rendered at the
+  transport seam, verbatim (a closed-stdout stop renders to nothing);
+  `Exited(code)` ends the loop (clamped through `platform::exit_byte`).
+  `Stopped` is a cancellation, not a process stop: ral does not suspend
   ([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]).
 
 The same door backs every host program the REPL holds as a value: the prompt

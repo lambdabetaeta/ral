@@ -530,10 +530,6 @@ mod win_groups {
         release(leader);
     }
 
-    pub(crate) fn wait_job_blocking(leader: i32) -> ReapStatus {
-        wait_job(leader, INFINITE)
-    }
-
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -644,14 +640,8 @@ pub enum ReapStatus {
     Exited(i32),
 }
 
-/// Block until every member of the group has exited, then report the leader's
-/// exit code.  `Unknown` once the group is no longer tracked.
-pub(crate) fn wait_leader_blocking(pgid: Pgid) -> ReapStatus {
-    win_groups::wait_job_blocking(pgid.as_raw())
-}
-
-/// Non-blocking poll of the whole-job completion [`wait_leader_blocking`] blocks
-/// on.
+/// Non-blocking poll of the whole-job completion: the leader's exit code once
+/// every member has exited; `Unknown` once the group is no longer tracked.
 pub fn try_reap_leader(pgid: Pgid) -> ReapStatus {
     win_groups::wait_job(pgid.as_raw(), 0)
 }

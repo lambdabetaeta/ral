@@ -1,6 +1,6 @@
 ---
-verified_at_commit: cd4b16e4
-verified_at_date: 2026-09-02
+verified_at_commit: dad6a1b3
+verified_at_date: 2026-10-17
 anchors: [run, run_under, Program, register_hook, RunRequest, RunReport, Ending, RunIo, TrailScope, Mooring, IoLoan, compile_run, build_run, run_framed, run_phrases, compile_and_typecheck]
 ---
 
@@ -126,18 +126,18 @@ module's framed scaffold:
   halted run keeps every write that landed before the halt and the run
   remains a resume point regardless of completion, error, or `exit`
   ([[invariants/turn-ends-ready|exchange-ends-ready]]). Before the status is
-  read, `run_framed` polls `Mooring::check` once more so a sticky
-  cancellation — a key a terminal loan heard back and struck on the frame
-  included — cannot be absorbed by `try`; it then computes the transport
+  read, `run_framed` disarms the wall (waiting on a firing already claimed)
+  and makes the **closing poll**, `final_poll` on the run's node, so a stop
+  that landed after the body's last poll — a key a terminal loan heard back
+  and struck on the node included — is not lost; a stop is an escape no `try`
+  absorbs anyway. It then computes the transport
   status and emits ready-boundary notices while the
   run frame and sinks are still installed. Only then does the IO guard drop.
-- Back in `run_built`, the wall is **disarmed before the cause is read**, so a
-  reaper tripping in the gap between eval returning and classification cannot
-  misread a run that finished inside its budget as timed out. `classify_ending`
-  then folds the settled `Result`, the transport status, `single_command`,
-  `root`, and whether a `Deadline` cause genuinely elapsed into one
-  `run::Ending` — `Settled`, `Raised`, `Walled`, or `Exited` — so `Ok`
-  beside a stray "timed out" flag is not a state the type can hold. `RunReport::Ran { ending, captured, trail }` carries it home; `trail`
+- Back in `run_built`, `classify_ending` folds the settled `Result`, the
+  transport status, `single_command` and `root` into one `run::Ending` —
+  `Settled`, `Raised`, `Stopped`, or `Exited` — a wall being simply a
+  `TimedOut` stop, so no separate "timed out" flag exists to disagree with
+  the result. `RunReport::Ran { ending, captured, trail }` carries it home; `trail`
   starts `Vec::new()` here — `run_built` has no view of the dispatch's own
   scope, only of what a body opened and closed on its own account.
 - One level up, at `Shell::enter` — the durability wrapper all three run doors
@@ -150,7 +150,7 @@ module's framed scaffold:
   observations land in `RunReport::Ran.trail`; a caught panic's are drained
   and discarded — the panicked dispatch reports `Static`, never a trail.
   `RunReport::into_report` then renders the engine's `Ending` against the
-  shell — a `Raised`/`Walled` error becomes the string the host prints
+  shell — a `Raised` error or a `Stopped` stop becomes the string the host prints
   verbatim and the `{cmd, status, message, site}` record `try` would hand its
   handler, `command_exit`/`status` computed alongside it; a `Settled` value
   the wire cannot carry (a handle, block, or function) becomes `Unreturnable`,

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e028f5a3
-generated_at_date: 2026-10-13
+generated_at_commit: dad6a1b3
+generated_at_date: 2026-10-17
 covers_paths: [core/src/builtins/, core/src/builtins.rs, core/src/uutils.rs]
 ---
 
@@ -149,9 +149,11 @@ Bodies are grouped by concern, one submodule each:
   `try` hands its handler) or `` `pending `` `{stdout, stderr}` (a *cumulative,
   non-destructive* `CapturedBytes::peek` snapshot of the running worker's output — the
   buffers are left for the one-shot completion `CapturedBytes::take`, so a partial poll
-  never steals bytes) — the block's outcome is data, not a status. `await`
-  and `poll` gate first on `ensure_live`, the cancelled pre-check
-  ([[decisions/260615_poll-total-failed-arm|the settle decision]],
+  never steals bytes) — the block's outcome is data, not a status. `poll` is
+  total: a handle `cancel` detached settles with the owner's `WorkerStopped`
+  record, and an `exit`, a foreign stop or a panic is re-raised, as `await`
+  re-raises them ([[decisions/261016_delimiters-are-handlers-for-poll|delimiters-are-handlers-for-poll]],
+  [[decisions/260615_poll-total-failed-arm|the settle decision]],
   [[decisions/260702_partial-poll-pending-output|partial-poll-pending-output]]).
   A worker hangs under the durable session root, not the run's
   foreground scope, so a foreground cancel never reaps it; `await` shares

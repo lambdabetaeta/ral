@@ -21,7 +21,7 @@ share one return type.
 on success it returns `B`'s value, on failure it calls the handler `H` with an
 error record `[status, cmd, message, site]` and returns *its* value,
 unifying both outcomes into one type. It catches recoverable runtime errors and
-nothing else — `exit`, `Escape`'s one variant, bypasses it. When a
+nothing else — `exit` and a stop, the two `Escape`s, bypass it. When a
 command encodes its result in its exit status rather than a value — an external
 `grep -q`, say — `try` is how that success drives a branch:
 `try { grep -q p f; echo found } { |_| echo missing }`. There is no
@@ -41,6 +41,8 @@ The cleanup forms differ only in what they do with the original failure:
   Log-and-continue is one keystroke away — `guard B { try C { |e| … } }` — and
   the primitive stays strict
   ([[decisions/260819_a-failing-cleanup-pre-empts|a-failing-cleanup-pre-empts]]);
+  the cleanup runs shielded against a stop for the run's grace from the strike
+  ([[decisions/261016_a-cleanup-is-shielded-within-its-grace|a-cleanup-is-shielded-within-its-grace]]);
 - the prelude's `attempt` discards both result and failure.
 
 The kernel model carries both forms as of 2026-08-19. In `dev/agda` a failure is
@@ -85,6 +87,6 @@ See also [[design/syscalls-are-effects|syscalls-are-effects]] (failure is an ope
 [[design/control-operators|control-operators]], [[design/types|types]],
 [[design/cbpv|cbpv]].
 Cite: RATIONALE §"Failure is not truth", §"Pipelines follow their edges";
-`docs/SPEC.md` §2.5, §8, §8.6–§8.7; the `Try` / `Guard` arms and frames in
+`docs/SPEC.md` §2.5, §8, §8.6–§8.7; `Break::stopped`; the `Try` / `Guard` arms and frames in
 `core/src/evaluator/machine.rs` (`?` elaborates to nested `try`, no frame of
 its own), `try` / `guard` typing in `core/src/typecheck/scope.rs`.

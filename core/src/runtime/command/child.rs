@@ -4,7 +4,9 @@
 //! before wait" and "wait twice" unwritable.
 
 use crate::io::Sink;
-use crate::process::{CancelCause, Group};
+use crate::process::{CancelCause, CancelScope, Group, POLL_SLICE, WaitOutcome};
+use std::sync::mpsc::RecvTimeoutError;
+use std::time::Instant;
 
 /// A child's stdout/stderr pumps: planned as the [`Sink`] each drains into,
 /// `None` where that fd is inherited or wired straight to an OS pipe, then
@@ -35,15 +37,20 @@ impl Pumps<Sink> {
         self.stdout.is_some()
     }
 
-    /// Start the planned drainers over `child`'s piped stdout/stderr.
-    pub(crate) fn start(self, child: &mut crate::process::ChildHandle) -> Pumps {
+    /// Start the planned drainers over `child`'s piped stdout/stderr, each
+    /// reading `scope`, the launching computation's current scope.
+    pub(crate) fn start(
+        self,
+        child: &mut crate::process::ChildHandle,
+        scope: &CancelScope,
+    ) -> Pumps {
         Pumps {
             stdout: self
                 .stdout
-                .and_then(|sink| child.take_stdout().map(|s| sink.pump(s))),
+                .and_then(|sink| child.take_stdout().map(|s| sink.pump(s, scope.clone()))),
             stderr: self
                 .stderr
-                .and_then(|sink| child.take_stderr().map(|s| sink.pump(s))),
+                .and_then(|sink| child.take_stderr().map(|s| sink.pump(s, scope.clone()))),
         }
     }
 }
@@ -55,13 +62,30 @@ impl Pumps {
             let _ = jh.join();
         }
     }
-}
 
-/// What `RunningChild::wait` hears from the reaper's `Watch` or from a
-/// cancel: the wire type for its own single-child fold.
-enum ChildEvent {
-    Ended(crate::process::WaitOutcome),
-    Cancelled(CancelCause),
+    /// Join both drainers a slice at a time.  On a cause in force on `scope`,
+    /// `kill` once: a pump a leader's survivor holds open ends only when the
+    /// survivor's pipe closes.  On Windows, where a pipe write cannot be
+    /// polled, the pumps are interrupted every slice too: one blocked on an
+    /// edge a teardown left undrained would otherwise wait for a read end the
+    /// collector holds until this very stage files.
+    pub(crate) fn join_under(self, scope: &CancelScope, kill: impl FnOnce()) {
+        let handles: Vec<_> = [self.stdout, self.stderr].into_iter().flatten().collect();
+        let mut kill = Some(kill);
+        while !handles.iter().all(std::thread::JoinHandle::is_finished) {
+            if scope.is_cancelled() {
+                if let Some(kill) = kill.take() {
+                    kill();
+                }
+                #[cfg(windows)]
+                handles.iter().for_each(crate::io::interrupt);
+            }
+            std::thread::sleep(POLL_SLICE);
+        }
+        for jh in handles {
+            let _ = jh.join();
+        }
+    }
 }
 
 /// A spawned external child, watched by the reaper, plus the threads
@@ -78,8 +102,7 @@ enum ChildEvent {
 /// Audit-agnostic: byte capture belongs to the caller.
 pub(crate) struct RunningChild {
     watch: Option<crate::process::Watch>,
-    events: std::sync::mpsc::Receiver<ChildEvent>,
-    tx: std::sync::mpsc::Sender<ChildEvent>,
+    events: std::sync::mpsc::Receiver<WaitOutcome>,
     /// The group this child landed in: `Owns` is released on Windows and
     /// signalled or killed whole; `None` shares ral's own group, addressed by
     /// pid.
@@ -92,10 +115,11 @@ pub(crate) struct RunningChild {
     name: String,
     #[cfg_attr(not(debug_assertions), allow(dead_code))]
     pid: u32,
-    /// Polled through `watch_cancel` in `wait`, so a cancel — exarch's tool
-    /// timeout, a signal the platform handler translated into a cause — can
-    /// preempt a child that never exits on its own.
-    cancel: crate::process::CancelScope,
+    /// The launching computation's current scope, read a slice at a time in
+    /// `wait`, so a cancel — exarch's tool timeout, a signal the platform
+    /// handler translated into a cause — can preempt a child that never exits
+    /// on its own, and a cleanup's child is not torn down during the grace.
+    cancel: CancelScope,
     /// The strongest cause in force when the child ended: the sole input to
     /// attribution, forgiveness, and whether the drainers are joined.
     cause: Option<CancelCause>,
@@ -105,9 +129,12 @@ pub(crate) struct RunningChild {
 /// [`RunningChild::wait`] is the only constructor, so atomic-redirect commit and
 /// status interpretation carry a borrow-check proof that the child has exited.
 pub(crate) struct WaitedChild {
-    pub(crate) outcome: crate::process::WaitOutcome,
+    pub(crate) outcome: WaitOutcome,
     pub(crate) cause: Option<CancelCause>,
     pumps: Pumps,
+    /// The group the child landed in: an owned one is killed whole when a
+    /// cause ends the pump join.
+    group: Option<Group>,
     /// Trace context carried from the `RunningChild` so `settle`'s pump-join
     /// timings attribute to the same command instance.
     #[cfg_attr(not(debug_assertions), allow(dead_code))]
@@ -131,18 +158,17 @@ impl RunningChild {
         name: String,
         pumps: Pumps<Sink>,
         group: Option<Group>,
-        cancel: crate::process::CancelScope,
+        cancel: CancelScope,
         jail: Option<crate::process::jail::JailCgroup>,
     ) -> Self {
         let mut child = child;
         let pid = child.id();
-        let pumps = pumps.start(&mut child);
+        let pumps = pumps.start(&mut child, &cancel);
         let (tx, events) = std::sync::mpsc::channel();
-        let watch = child.into_watch(tx.clone(), ChildEvent::Ended);
+        let watch = child.into_watch(tx, std::convert::identity);
         Self {
             watch: Some(watch),
             events,
-            tx,
             group,
             jail,
             pumps,
@@ -182,26 +208,31 @@ impl RunningChild {
     /// catches the grandchild that `setsid()`'d out of the signal's reach.
     ///
     /// [`grace_signal`]: crate::process::grace_signal
-    fn terminate(
-        &self,
-        watch: &crate::process::Watch,
-        cause: CancelCause,
-    ) -> Option<crate::process::WaitOutcome> {
+    fn terminate(&self, watch: &crate::process::Watch, cause: CancelCause) -> Option<WaitOutcome> {
         let graced = crate::process::grace_signal(cause)
             .is_some_and(|signal| self.open_teardown(watch, signal, cause));
-        let reaped = graced
-            .then(
-                || match self.events.recv_timeout(crate::process::TEARDOWN_GRACE) {
-                    Ok(ChildEvent::Ended(o)) => Some(o),
-                    Ok(ChildEvent::Cancelled(_)) | Err(_) => None,
-                },
-            )
-            .flatten();
+        let reaped = graced.then(|| self.grace_wait()).flatten();
         // Idempotent on an already-reaped child, so this always runs —
         // harmless on a tree that already left, decisive against a
         // grandchild that trapped the signal and still holds the pipe.
         self.kill_group(watch);
         reaped
+    }
+
+    /// The exit within `TEARDOWN_GRACE`, a slice at a time; a root abort ends
+    /// the wait at once, there being no grace for a defect.
+    fn grace_wait(&self) -> Option<WaitOutcome> {
+        let end = Instant::now() + crate::process::TEARDOWN_GRACE;
+        loop {
+            match self.events.recv_timeout(POLL_SLICE) {
+                Ok(o) => return Some(o),
+                Err(RecvTimeoutError::Disconnected) => return None,
+                Err(RecvTimeoutError::Timeout) => {}
+            }
+            if Instant::now() >= end || self.cancel.cause() == Some(CancelCause::Aborted) {
+                return None;
+            }
+        }
     }
 
     /// Send `signal` where it is this waiter's to send — a pipeline member
@@ -248,44 +279,39 @@ impl RunningChild {
     /// Wait for the child to terminate, consuming `self`; the returned
     /// `WaitedChild` is from here on the only handle on the drainer threads.
     ///
-    /// One `recv`, no poll and no sleep: the reaper posts the exit and a
-    /// cancel arrives the same way.  A stop never reaches here — the reaper
-    /// answers it with `SIGCONT` itself, the one rule in one place.
+    /// A slice at a time: the reaper posts the exit, and the scope is read
+    /// between slices.  A stop never reaches here — the reaper answers it with
+    /// `SIGCONT` itself, the one rule in one place.
     pub(crate) fn wait(mut self) -> WaitedChild {
         // Taking the watch disarms `Drop` for the success path.
         let watch = self.watch.take().expect("RunningChild has no watch");
         let pid = self.pid;
-        let t_enter = std::time::Instant::now();
+        let t_enter = Instant::now();
         crate::dbg_trace!("wait", "enter name={} pid={}", self.name, pid);
 
-        let tx = self.tx.clone();
-        let _cancel = crate::process::watch_cancel(self.cancel.clone(), move |cause| {
-            let _ = tx.send(ChildEvent::Cancelled(cause));
-        });
-
-        let outcome = match self.events.recv().expect("tx outlives this recv") {
-            ChildEvent::Ended(o) => {
-                // A cause may land after the child's death but before this read.
-                self.cause = self.cause.max(self.cancel.cause());
-                o
-            }
-            ChildEvent::Cancelled(cause) => {
-                crate::dbg_trace!(
-                    "wait",
-                    "cancel name={} pid={} cause={cause:?}",
-                    self.name,
-                    pid
-                );
-                self.cause = Some(cause);
-                match self.terminate(&watch, cause) {
-                    Some(o) => o,
-                    None => loop {
-                        if let ChildEvent::Ended(o) =
-                            self.events.recv().expect("tx outlives this recv")
-                        {
-                            break o;
-                        }
-                    },
+        let outcome = loop {
+            match self.events.recv_timeout(POLL_SLICE) {
+                Ok(o) => {
+                    // A cause may land after the child's death but before this read.
+                    self.cause = self.cause.max(self.cancel.cause());
+                    break o;
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    if let Some(cause) = self.cancel.cause() {
+                        crate::dbg_trace!(
+                            "wait",
+                            "cancel name={} pid={} cause={cause:?}",
+                            self.name,
+                            pid
+                        );
+                        self.cause = Some(cause);
+                        break self.terminate(&watch, cause).unwrap_or_else(|| {
+                            self.events.recv().expect("the watch outlives this recv")
+                        });
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    unreachable!("the watch outlives this recv")
                 }
             }
         };
@@ -301,8 +327,18 @@ impl RunningChild {
         // the handle goes.  A pipeline stage never lands here: its release
         // belongs to `PipelineGroup::Drop`.
         #[cfg(windows)]
-        if let Some(Group::Owns(group)) = self.group {
-            let _ = crate::process::wait_leader_blocking(group);
+        if let Some(Group::Owns(group)) = &self.group {
+            let mut killed = false;
+            while matches!(
+                crate::process::try_reap_leader(*group),
+                crate::process::ReapStatus::Running
+            ) {
+                if !killed && self.cancel.is_cancelled() {
+                    group.kill();
+                    killed = true;
+                }
+                std::thread::sleep(POLL_SLICE);
+            }
             crate::process::release_win_group(group.as_raw());
         }
         // The leader is dead here, so finish the cgroup lest a straggler
@@ -316,6 +352,7 @@ impl RunningChild {
             outcome,
             cause: self.cause,
             pumps: std::mem::take(&mut self.pumps),
+            group: self.group.take(),
             name: self.name.clone(),
             pid,
             t_enter,
@@ -324,9 +361,11 @@ impl RunningChild {
 }
 
 impl WaitedChild {
-    /// Join the drainer threads — or, for a child ral killed because its
-    /// reader was gone, detach them; see [`Pumps::join`].
-    pub(crate) fn settle(self) {
+    /// Join the drainer threads under `scope`, killing an owned group if a
+    /// cause ends the join — or, for a child ral killed because its reader was
+    /// gone, detach them; see [`Pumps::join_under`].  A joined or shared group
+    /// has no address, so the join waits.
+    pub(crate) fn settle(self, scope: &CancelScope) {
         let detach = self.cause == Some(CancelCause::ReaderGone);
         crate::dbg_trace!(
             "wait",
@@ -336,7 +375,11 @@ impl WaitedChild {
             self.t_enter.elapsed(),
         );
         if !detach {
-            self.pumps.join();
+            self.pumps.join_under(scope, || {
+                if let Some(Group::Owns(g)) = &self.group {
+                    g.kill();
+                }
+            });
         }
         crate::dbg_trace!(
             "wait",
@@ -402,14 +445,15 @@ mod tests {
             scope.clone(),
             None,
         );
+        let striker = scope.clone();
         let canceller = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(200));
-            scope.cancel(CancelCause::TimedOut);
+            striker.cancel(CancelCause::TimedOut);
         });
 
         let waited = running.wait();
         let end = waited.outcome.classify(waited.cause);
-        waited.settle();
+        waited.settle(&scope);
         canceller.join().expect("canceller thread");
 
         assert_eq!(end, Some(ChildEnd::Cancelled(CancelCause::TimedOut)));
@@ -417,8 +461,8 @@ mod tests {
 
     /// Run `sh` under a scope struck with `cause` — before the dispatch when
     /// `early`, else once the child has proved itself running — and return the
-    /// error the run raised.
-    fn struck(cause: CancelCause, early: bool) -> crate::types::Error {
+    /// cause the run stopped with.
+    fn struck(cause: CancelCause, early: bool) -> CancelCause {
         let dir = tempfile::tempdir().expect("a temp dir");
         let marker = dir.path().join("running");
         let mut shell = crate::test_helper::core_shell();
@@ -446,15 +490,14 @@ mod tests {
         }
         match report {
             crate::run::RunReport::Ran {
-                ending:
-                    crate::run::Ending::Raised { error, .. } | crate::run::Ending::Walled { error, .. },
+                ending: crate::run::Ending::Stopped { cause, .. },
                 ..
-            } => error,
-            _ => panic!("a struck run must raise"),
+            } => cause,
+            _ => panic!("a struck run must stop"),
         }
     }
 
-    /// A run's failure is a function of its cause, never of where the cancel
+    /// A run's stop is a function of its cause, never of where the cancel
     /// landed: before the dispatch, a poll point reports it; during it, the
     /// child's teardown does — and the two must agree.
     #[test]
@@ -467,15 +510,52 @@ mod tests {
             CancelCause::Aborted,
         ] {
             let (before, during) = (struck(cause, true), struck(cause, false));
-            assert_eq!(before.code(), during.code(), "{cause:?}: code");
-            assert_eq!(
-                crate::types::Reason::from(&before.status),
-                crate::types::Reason::from(&during.status),
-                "{cause:?}: reason"
-            );
-            assert_eq!(before.message, during.message, "{cause:?}: message");
-            assert_eq!(before.hint, during.hint, "{cause:?}: hint");
+            assert_eq!(before, during, "{cause:?}: cause");
+            assert_eq!(before, cause, "{cause:?}: reported cause");
         }
+    }
+
+    /// A descendant the leader left holding the pump's pipe does not hold the
+    /// run past its wall: the join reads the scope and kills the group.
+    #[test]
+    fn a_descendant_holding_the_pipe_does_not_hold_the_run() {
+        assert_walled_within_2s("/bin/sh -c 'sleep 30 & exit 0'");
+    }
+
+    /// Its pipeline sibling: the external settlement's `join_under` reads the
+    /// scope, and the kill closes the survivor's pipe.
+    #[test]
+    fn a_pipelines_pump_survivor_does_not_hold_the_run() {
+        assert_walled_within_2s("^true | /bin/sh -c 'sleep 30 & exit 0'");
+    }
+
+    fn assert_walled_within_2s(src: &str) {
+        let mut shell = crate::test_helper::core_shell();
+        let scope = shell.run_cancel_handle();
+        let run = crate::protocol::Run {
+            wall: Some(std::time::Duration::from_millis(300)),
+            ..crate::protocol::Run::captured(src, "<test>")
+        };
+        let t0 = std::time::Instant::now();
+        let report = shell.run_under(&scope, crate::run::RunRequest::from(run));
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(2),
+            "held for {:?}",
+            t0.elapsed()
+        );
+        let crate::run::RunReport::Ran { ending, .. } = report else {
+            panic!("the run must reach evaluation");
+        };
+        assert!(
+            matches!(
+                ending,
+                crate::run::Ending::Stopped {
+                    cause: CancelCause::TimedOut,
+                    ..
+                }
+            ),
+            "{ending:?}"
+        );
     }
 
     /// An interrupt's SIGINT grace must not become a wait on the child's own
@@ -514,15 +594,16 @@ mod tests {
 
         // `wait` is a single blocking `recv`, so any delay past the sleep
         // still lands well inside it.
+        let striker = scope.clone();
         let canceller = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(200));
-            scope.cancel(CancelCause::Interrupted);
+            striker.cancel(CancelCause::Interrupted);
         });
 
         let t0 = std::time::Instant::now();
         let waited = running.wait();
         let elapsed = t0.elapsed();
-        waited.settle();
+        waited.settle(&scope);
         canceller.join().expect("canceller thread");
 
         // Property 1: grace is 500 ms then group SIGKILL, so real time is well
@@ -567,19 +648,20 @@ mod tests {
         rustix::process::kill_process(pgid.as_pid(), rustix::process::Signal::STOP)
             .expect("SIGSTOP the sleep");
 
+        let scope = CancelScope::root();
         let running = RunningChild::assemble_with_owner(
             crate::process::ChildHandle::from_std(child),
             "sleep".to_string(),
             Pumps::default(),
             Some(Group::Owns(pgid)),
-            CancelScope::root(),
+            scope.clone(),
             None,
         );
 
         let t0 = std::time::Instant::now();
         let waited = running.wait();
         let elapsed = t0.elapsed();
-        waited.settle();
+        waited.settle(&scope);
 
         assert!(
             elapsed.as_secs() < 5,
@@ -620,6 +702,7 @@ mod tests {
                 own.clone(),
                 None,
             );
+            let settle_scope = own.clone();
             let striker = std::thread::spawn(move || {
                 crate::test_helper::eventually(std::time::Duration::from_secs(5), || {
                     ready.exists().then_some(())
@@ -632,7 +715,7 @@ mod tests {
             let waited = running.wait();
             striker.join().expect("striker thread");
             let outcome = waited.outcome;
-            waited.settle();
+            waited.settle(&settle_scope);
 
             let heard = std::fs::read_to_string(&hits)
                 .unwrap_or_default()

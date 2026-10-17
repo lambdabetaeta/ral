@@ -21,9 +21,14 @@ pub mod pty;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+
+/// `stderr` without debug-build trace lines (`[[DEBUG] …`).
+pub fn diagnostics(stderr: &str) -> String {
+    stderr.lines().filter(|l| !l.starts_with("[[DEBUG] ")).collect::<Vec<_>>().join("\n")
+}
 
 /// Captured result of a one-shot `ral` invocation.
 pub struct Output {
@@ -150,71 +155,73 @@ pub fn run_with_stdin(prefix: &str, script: &str, stdin_data: &[u8]) -> Output {
     }
 }
 
-/// Like [`run`], but passes `args` ahead of the script path and gives up
-/// (returning `None`) if the child hasn't exited within `timeout` —
-/// killing it first so nothing is left running.  Used by tests guarding
-/// against a hang rather than a wrong answer.
-pub fn run_with_timeout(
-    prefix: &str,
-    args: &[&str],
-    script: &str,
-    timeout: Duration,
-) -> Option<Output> {
-    use std::io::Read;
-
+/// Write `script` to a fresh temp file and spawn `ral <args> <file>` on it,
+/// stdin null and both output streams piped; the caller removes the file.
+pub fn spawn_script(prefix: &str, args: &[&str], script: &str) -> (Child, PathBuf) {
     let tmp = fresh_tmp_path(prefix, "ral");
     std::fs::write(&tmp, script).unwrap();
-
-    let mut child = ral_command();
-    child
+    let child = ral_command()
         .args(args)
         .arg(&tmp)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn ral");
+    (child, tmp)
+}
 
-    let mut child = child.spawn().expect("spawn ral");
-    let stdout_reader = child.stdout.take().map(|mut stdout| {
+/// Collect `child`'s output, or give up (returning `None`) if it hasn't
+/// exited within `timeout`, killing it first so nothing is left running.
+/// Used by tests guarding against a hang rather than a wrong answer.
+pub fn wait_with_timeout(mut child: Child, timeout: Duration) -> Option<Output> {
+    use std::io::Read;
+
+    fn drain(mut pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<String> {
         std::thread::spawn(move || {
             let mut buf = Vec::new();
-            let _ = stdout.read_to_end(&mut buf);
-            buf
+            let _ = pipe.read_to_end(&mut buf);
+            String::from_utf8_lossy(&buf).into_owned()
         })
-    });
-    let stderr_reader = child.stderr.take().map(|mut stderr| {
-        std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            let _ = stderr.read_to_end(&mut buf);
-            buf
-        })
-    });
+    }
+    let stdout = child.stdout.take().map(drain);
+    let stderr = child.stderr.take().map(drain);
 
     let start = std::time::Instant::now();
     loop {
         match child.try_wait().unwrap() {
             Some(status) => {
-                std::fs::remove_file(&tmp).ok();
+                let text = |h: Option<std::thread::JoinHandle<String>>| {
+                    h.and_then(|h| h.join().ok()).unwrap_or_default()
+                };
                 return Some(Output {
-                    stdout: stdout_reader
-                        .and_then(|jh| jh.join().ok())
-                        .map(|buf| String::from_utf8_lossy(&buf).into_owned())
-                        .unwrap_or_default(),
-                    stderr: stderr_reader
-                        .and_then(|jh| jh.join().ok())
-                        .map(|buf| String::from_utf8_lossy(&buf).into_owned())
-                        .unwrap_or_default(),
+                    stdout: text(stdout),
+                    stderr: text(stderr),
                     status: status.code().unwrap_or(1),
                 });
             }
             None if start.elapsed() > timeout => {
                 child.kill().ok();
                 let _ = child.wait();
-                std::fs::remove_file(&tmp).ok();
                 return None;
             }
             None => std::thread::sleep(Duration::from_millis(20)),
         }
     }
+}
+
+/// [`spawn_script`] then [`wait_with_timeout`]: `args` ahead of the script
+/// path, `None` if the child hung.  The temp file is removed either way.
+pub fn run_with_timeout(
+    prefix: &str,
+    args: &[&str],
+    script: &str,
+    timeout: Duration,
+) -> Option<Output> {
+    let (child, tmp) = spawn_script(prefix, args, script);
+    let out = wait_with_timeout(child, timeout);
+    std::fs::remove_file(&tmp).ok();
+    out
 }
 
 /// Every `.ral` file under `dir`, sorted, never entering a directory named in

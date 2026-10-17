@@ -3,6 +3,12 @@ status: active
 generated_at_commit: e536d55d
 ---
 
+> Amended 2026-10-16 by
+> [[decisions/261016_delimiters-are-handlers-for-poll|delimiters-are-handlers-for-poll]]:
+> the break at the write is a stop, `Break::stopped(ReaderGone, Some(stage))`,
+> naming the writing stage's node, and the collector forgives it by that name;
+> `DeadEdge` and `Error::cancelled(ReaderGone)` are gone.
+
 # The cut is at the write
 
 **An interior edge is dead once its reader stage has ended, and a stage feels

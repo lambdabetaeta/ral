@@ -5,20 +5,21 @@
 //! items are re-exported here as `crate::io::*`.
 
 mod edge;
+mod poll;
 mod regime;
 mod sink;
 mod source;
-mod wake;
 
 use crate::terminal::TerminalState;
-pub(crate) use edge::{DeadEdge, Edge};
+pub(crate) use edge::{Edge, WriteStopped};
+#[cfg(unix)]
+pub(crate) use poll::poll_slice;
+#[cfg(windows)]
+pub(crate) use poll::{aborted, interrupt};
 pub use regime::{RunIo, RunStdin};
 pub use sink::{ByteBuffer, Captured, CapturedBytes, LineFn, Sink};
 pub(crate) use sink::{SINK_BUFFER_CAP, new_buffer, tee_with_buffer, terminator_len};
 pub use source::{Source, SourceReader};
-#[cfg(unix)]
-pub(crate) use wake::Readiness;
-pub(crate) use wake::Wake;
 
 /// All pipeline-stage IO state for a single Shell.
 pub(crate) struct Io {
