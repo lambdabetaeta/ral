@@ -764,7 +764,8 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
             Some(unbound_variable_hint(name, suggestions))
         }
         TypeErrorKind::HeadBoundToValue { name, .. } => Some(format!(
-            "to run the command on PATH instead, write `^{name}`"
+            "a binding shadows the command of the same name: did you mean the command? \
+             `^{name}` runs it, and `${name}` is the value"
         )),
         TypeErrorKind::IndexContainerUnknown { .. } => Some(
             "a function that indexes with a computed key has one container type per program: \
@@ -900,12 +901,14 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
              with at least the named fields"
                 .to_string(),
         ),
-        Reason::Argument => Some(
-            "the function's parameter type and the argument's type \
-             must agree: check what the function expects and what \
-             you're passing in"
-                .to_string(),
-        ),
+        Reason::Argument => argument_hint(kind).or_else(|| {
+            Some(
+                "the function's parameter type and the argument's type \
+                 must agree: check what the function expects and what \
+                 you're passing in"
+                    .to_string(),
+            )
+        }),
         Reason::NotOperand => Some(
             "`not` flips a Bool: its operand has to be a Bool (`true` / `false` or a comparison)"
                 .to_string(),
@@ -990,9 +993,10 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
                 .to_string(),
         ),
         Reason::ListElem => Some(
-            "a list is homogeneous: every element has the one type, so this \
-             element must be what its neighbours are; give it their shape, or make \
-             every element a tagged value and `case` on it downstream"
+            "a list holds one type, and this element's differs from its neighbours': \
+             to keep different things side by side, write a record, as in \
+             `[name: $n, status: $s]`; for alternatives, tag each element and `case` \
+             on it downstream"
                 .to_string(),
         ),
         Reason::MapElem => Some(
@@ -1093,6 +1097,38 @@ fn list_spread_shape_hint(kind: &TypeErrorKind) -> Option<String> {
     })
 }
 
+/// An argument of a familiar shape where its neighbour was wanted: text for a
+/// list, or a record for one of its `String` fields.  Which side lands in
+/// `expected` is an accident of the call site, so both orders are checked.
+fn argument_hint(kind: &TypeErrorKind) -> Option<String> {
+    let TypeErrorKind::TyMismatch { expected, actual } = kind else {
+        return None;
+    };
+    [(&**expected, &**actual), (&**actual, &**expected)]
+        .into_iter()
+        .find_map(|pair| match pair {
+            (Ty::List(_), Ty::String) => Some(
+                "a String is not a list: `slice $s 0 n` cuts text and `lines $s` splits \
+                 it into a list; a list is cut with `take`/`drop`, and strings join by \
+                 interpolation, `\"$a$b\"`, or `intercalate '' $xs`"
+                    .to_string(),
+            ),
+            (Ty::Record(row), Ty::String) => {
+                let text = row.fields().find_map(|(label, ty)| match (label, ty) {
+                    (Label::Field(name), Ty::String) => Some(name),
+                    _ => None,
+                })?;
+                let fields: Vec<_> = row.fields().map(|(label, _)| label.name()).collect();
+                Some(format!(
+                    "this is a record (available: {}): did you mean one of its fields, \
+                     as in `$x[{text}]`?",
+                    fields.join(", ")
+                ))
+            }
+            _ => None,
+        })
+}
+
 /// Reasons where two types meet on equal footing, so a hint read off
 /// their shapes beats the reason's own sentence.
 fn meets_as_peers(reason: &Reason) -> bool {
@@ -1174,9 +1210,9 @@ fn row_has_status_int(row: &Row) -> bool {
 fn byte_writer_hint(expected: &Ty, actual: &Ty) -> Option<String> {
     let list_for_bytes = |a: &Ty, b: &Ty| matches!(a, Ty::List(_)) && matches!(b, Ty::Bytes);
     (list_for_bytes(expected, actual) || list_for_bytes(actual, expected)).then(|| {
-        "a Bytes value and a list are different things: `from-bytes` yields Bytes \
-         and `to-bytes` writes it back; a list of numbers is written by \
-         `ints-to-bytes`, a list of lines by `to-lines`"
+        "Bytes are not a list: read them as text with `bytes-to-string $b`, or as \
+         lines with `lines !{bytes-to-string $b}`; a list of numbers is written as \
+         Bytes by `ints-to-bytes`, a list of lines by `to-lines`"
             .to_string()
     })
 }
@@ -1339,5 +1375,37 @@ mod tests {
                 .is_some_and(|h| h.contains("block value"))
         );
         assert_eq!(forward, backward);
+    }
+
+    #[test]
+    fn text_for_a_list_hint_is_the_same_in_both_orders() {
+        let list = || Ty::list(Ty::Var(crate::ty::TyVar(0)));
+        let forward = argument_hint(&mismatch(list(), Ty::String));
+        let backward = argument_hint(&mismatch(Ty::String, list()));
+        assert!(forward.as_deref().is_some_and(|h| h.contains("`lines $s`")));
+        assert_eq!(forward, backward);
+    }
+
+    #[test]
+    fn record_for_text_hint_is_the_same_in_both_orders() {
+        let entry = || {
+            Ty::Record(Row::Empty)
+                .extend("size", Ty::Int)
+                .extend("name", Ty::String)
+        };
+        let forward = argument_hint(&mismatch(entry(), Ty::String));
+        let backward = argument_hint(&mismatch(Ty::String, entry()));
+        assert!(
+            forward
+                .as_deref()
+                .is_some_and(|h| h.contains("(available: name, size)") && h.contains("`$x[name]`"))
+        );
+        assert_eq!(forward, backward);
+    }
+
+    #[test]
+    fn record_without_text_has_no_argument_hint() {
+        let point = Ty::Record(Row::Empty).extend("x", Ty::Int);
+        assert_eq!(argument_hint(&mismatch(point, Ty::String)), None);
     }
 }

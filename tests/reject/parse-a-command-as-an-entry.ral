@@ -1,0 +1,5 @@
+# codes: P0003
+# contains: an entry is one value, and `,` separates entries
+# contains: write `!{str $x[type]}`, or, if these are separate entries, put `,` between them
+let x = [type: file, size: 3]
+echo [str $x[type], $x[size]]

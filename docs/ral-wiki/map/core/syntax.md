@@ -1,6 +1,6 @@
 ---
-generated_at_commit: b620692f
-generated_at_date: 2026-10-13
+generated_at_commit: 677fc58d
+generated_at_date: 2026-10-17
 covers_paths: [core/src/syntax/]
 ---
 
@@ -49,7 +49,10 @@ sees raw bytes and bare words.
   name or a single-quoted word; a tag is refused there for literal and pattern
   alike, since a tag keys nothing. The items are read in one pass, each
   lifting the literal to at least its own kind, so no token-level lookahead has
-  to skip a spread's nested brackets. The `$[…]`
+  to skip a spread's nested brackets. Every item is one atom
+  (`parse_entry_value`): a command written as one is P0003
+  (`ParseErrorKind::EntryRuns`), whose help `syntax/report.rs` draws from
+  `EntryReading`. The `$[…]`
   body is a Pratt parser whose operands are
   `parse_atom`'s atoms, plus `(…)` grouping and the prefixes `-` and `not`;
   an operator in operand position, or two operands with no operator between

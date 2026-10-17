@@ -43,3 +43,9 @@ A session binding can hide a command the author forgot existed, such as
 `let test = …` silently replacing `test`. Reading `$test` still shows the
 binding, `explain name` reports what it shadows, and `^test` names the
 command. Hiding a prelude function or builtin was already legal.
+
+Running such a binding as a program is refused by T0072
+(`HeadBoundToValue`), whose hint asks whether the command was meant and
+names `^name` and `$name`: a bare head, `$name args` and `!$name` alike, so
+the user is told of the shadowing rather than of the `!` operator they never
+wrote.

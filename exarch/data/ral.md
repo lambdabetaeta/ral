@@ -27,7 +27,7 @@ Captured stdout from an external command is a `String`; ral heads may instead re
 
 A command's value is its output: `let host = hostname` binds what it writes, and so does `let host = f` when `f` is a block or function that runs a command. `| from-lines`, `| from-json` choose another decoding.
 
-A binding shadows a command of the same name; `^name` reaches the command.
+A binding shadows the command of the same name for the rest of the session, so don't name a binding `ls`, `head` or `tail`; `^ls` runs the command.
 
 The shell's own state is read by six builtins, not variables: `cwd`, `env`, `args`, `user`, `home`, `nproc`. Use them as `let [a, b] = args`, `!{env}[HOME]`, `"!{cwd}/x"`.
 
@@ -166,7 +166,7 @@ Arithmetic and Boolean expressions must be in `$[…]` blocks: `$[$x == 0]`, `$[
     elsif $[$x > 0 ] { f #'positive'# }
     else             { g #'negative'# }
 
-`if` with both branches returns a value, so it can sit on the right of a `let`.
+`if` with both branches returns a value, so it can sit on the right of a `let`; anywhere else a value is expected, such as a collection entry, write `!{if …}`.
 
 ## Structured values
 
@@ -180,6 +180,8 @@ Arithmetic and Boolean expressions must be in `$[…]` blocks: `$[$x == 0]`, `$[
     ls ...$flags ...$dirs                # …and to splice arguments
 
 Indexing `$h[key]` works in any context (pipelines, blocks, double quoted): e.g. `view-text-around $h[file] $h[line] 3`.
+
+An entry is a value: `[n: !{length $xs}, s: !{str $x}]`; `let` takes a command, a literal does not.
 
 A map is not a record: its keys are runtime data and its values all share one type. A literal is a map if any key is data: `"quoted"` (`["a": 1, "b": 2]`) or computed (`[$k: 1]`). A bare or `'single-quoted'` key is a label, and labels alone make a record; `[:]` is the empty map. Only maps support `keys`, `values`, `has`, `get` (with default), `union`, `entries`, and only a map is read by a computed key (`$m[$k]`); a bare key like `$r[host]` always reads a record field. 
 

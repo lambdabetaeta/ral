@@ -44,8 +44,9 @@ Entry points (`typecheck.rs`):
   it finds a handler
   ([[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
   Every name the seed and the program bind is therefore known to the checker: a
-  `$name` outside them is `UnboundVariable` (T0071), and a session binding of a
-  non-thunk in head position is `HeadBoundToValue` (T0072)
+  `$name` outside them is `UnboundVariable` (T0071), and a binding of a
+  non-thunk run as a program (bare head, `$name args`, `!$name`) is
+  `HeadBoundToValue` (T0072)
   ([[internals/type-inference|type-inference]]).
 - `bake_prelude(phrases, &Manifest) -> Toplevel` — called by
   `boot::bake_prelude_to_out_dir` from each host's build script: returns the

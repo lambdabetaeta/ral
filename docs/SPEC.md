@@ -1160,6 +1160,9 @@ echo $host
 return $host
 ```
 
+A command written as a collection entry, `[n: length $xs]`, is refused, and
+the diagnostic offers its spelling as a value, `[n: !{length $xs}]`.
+
 A value written alone in command context returns itself. This lets a literal or
 collection be the result of a block:
 
@@ -3843,7 +3846,7 @@ computation, though it records status 1 for shell-style status inspection.
 
 The prelude builds the familiar derived operations from these primitives:
 `for`, `reduce`, `reverse`, `last`, `take`, `drop`, `take-while`, `drop-while`,
-`first`, `option-or`, `elem`, `contains`, `nub`, `zip`, `flat-map`, `enumerate`,
+`first-where`, `option-or`, `elem`, `contains`, `nub`, `zip`, `flat-map`, `enumerate`,
 `concat`, `sum`, `max`, `min`, `maximum`, `minimum`, `cross`,
 `group-by`, `median`, and `median-by`.
 

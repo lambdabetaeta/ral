@@ -2667,6 +2667,28 @@ fn a_return_before_a_statement_keyword_says_why() {
 }
 
 #[test]
+fn an_entry_that_runs_a_command_says_how() {
+    use EntryReading::{Command, Statement, Value};
+    for (src, want) in [
+        ("[k: map { |x| $x } $y]", Command),
+        ("[str $x]", Command),
+        ("[k: $f 1]", Command),
+        ("[k: if $c { 1 } else { 2 }]", Statement("if".into())),
+        ("[1 2]", Value),
+        ("within [dir: pwd -P] { ls }", Command),
+    ] {
+        let err = parse(src).expect_err(src);
+        let ParseErrorKind::EntryRuns { reading, .. } = err.kind else {
+            panic!("{src:?}: {err}");
+        };
+        assert_eq!(reading, want, "{src:?}");
+    }
+    for src in ["[if, else]", "[hostname, uname]", "[k: !{str $x}]"] {
+        assert!(parse(src).is_ok(), "{src:?} must parse");
+    }
+}
+
+#[test]
 fn a_glued_equals_in_a_binding_says_to_space_it() {
     refused_saying(&[
         (

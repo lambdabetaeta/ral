@@ -1,2 +1,3 @@
-# contains: a list is homogeneous: every element has the one type
+# contains: a list holds one type
+# contains: write a record, as in `[name: $n, status: $s]`
 let xs = ["a", 1]

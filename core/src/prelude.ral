@@ -327,10 +327,10 @@ let flat-map = { |f items|
 
 ## Find the first element matching pred, as an Option: `` `some`` the
 ## matching element, or `` `none`` when nothing matches.
-let first = { |pred items|
+let first-where = { |pred items|
     if !{is-empty $items} { return `none } else {
         let [head, ...rest] = $items
-        if !{$pred $head} { return `some $head } else { first $pred $rest }
+        if !{$pred $head} { return `some $head } else { first-where $pred $rest }
     }
 }
 

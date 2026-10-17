@@ -1,2 +1,3 @@
-# contains: ',' or ']'
+# codes: P0003
+# contains: `a b c` runs a command: write `!{a b c}`, or, if these are separate entries, put `,` between them
 [a b c]

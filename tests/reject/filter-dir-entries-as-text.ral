@@ -1,0 +1,4 @@
+# codes: T0010
+# contains: this is a record (available: name, type, size, mtime)
+# contains: `$x[name]`
+filter { |e| re-match #'\.ral$'# $e } !{list-dir .}

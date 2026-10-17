@@ -1,3 +1,4 @@
-# contains: cannot be used as a command head
+# codes: T0072
+# contains: so it is not a program
 let x = 42
 $x foo

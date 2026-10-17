@@ -211,7 +211,9 @@ The atom list is `continues_bare_word` and the quote and splice scanners in
 `core/src/syntax/lexer.rs`; the word rule is checked once at the end of every unit
 (`Parser::end_unit`, with `touches_after`), in every position, and the
 grammar's attachments (`^`, `...`, `!`, an index) must touch;
-the diagnostic is `P0002`, with a two-reading help. Spec
+the diagnostic is `P0002`, with a two-reading help; its sibling `P0003`
+refuses two atoms *with* space between them where one value is wanted, a
+collection entry. Spec
 §3.5 states the rule after "Quote a word when there is any doubt"; `ral.md`
 no longer needs to tell the agent that a composite path is one quoted word,
 because the parser tells it, with the spelling.

@@ -265,7 +265,7 @@ pub enum TypeErrorKind {
         name: String,
         suggestions: Vec<String>,
     },
-    /// A session binding of something other than a thunk in command position.
+    /// A binding of data run as a program: a bare head, `$name args`, or `!$name`.
     HeadBoundToValue {
         name: String,
         ty: Ty,

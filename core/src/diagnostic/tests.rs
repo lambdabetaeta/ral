@@ -132,6 +132,31 @@ fn touching_words_render_both_readings() {
 }
 
 #[test]
+fn an_entry_that_runs_renders_its_readings() {
+    for (src, help) in [
+        (
+            "[str $x[type], $x[size]]",
+            "Help: `str $x[type]` runs a command: write `!{str $x[type]}`, or, if these are \
+             separate entries, put `,` between them",
+        ),
+        (
+            "[k: if $c { 1 } else { 2 }]",
+            "Help: `if` begins a statement: write `!{if …}`, or bind it first with `let`",
+        ),
+        ("[1 2]", "Help: if these are separate entries, put `,` between them"),
+        (
+            "[\n  str\n  $x\n]",
+            "Help: if these are separate entries, put `,` between them; or, to run",
+        ),
+    ] {
+        let err = crate::syntax::parser::parse(src).unwrap_err();
+        let output = drawn("test.ral", src, &err);
+        assert!(output.contains("P0003"), "{src}:\n{output}");
+        assert!(output.contains(help), "{src}:\n{output}");
+    }
+}
+
+#[test]
 fn touching_words_label_both_atoms() {
     let output = touching_help("echo --prefix=$d");
     assert!(output.contains("words touch: whitespace separates words, and nothing joins them"));

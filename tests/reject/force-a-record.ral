@@ -1,4 +1,5 @@
-# contains: couldn't match
+# codes: T0072
+# contains: so it is not a program
 let t = [a: 1]
 let x = !$t
 return $x

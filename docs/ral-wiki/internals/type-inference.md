@@ -31,7 +31,11 @@ decoder). The runtime's "undefined variable" survives only as a defensive
 error. The same rule holds at a head: a binding met as a bare head is applied at
 its thunk's computation type, a binding of still-unknown type is taken to be a
 thunk, and a binding of anything else is `HeadBoundToValue` (T0072) —
-`instantiate_comp` never mints a computation variable for it.
+`instantiate_comp` never mints a computation variable for it. A bound bare
+head is elaborated as `Force` of the variable, so the `Force` rule asks the
+same question through the same `thunk_body`, and a variable head in `App`
+(`$date +%s`) is named the same way: a user's own `let ls = …` then `ls /tmp`
+is told of the shadowing, not of a `!` it never wrote.
 
 **A block argument is checked last, and against its own call.** `apply_args_capped`
 unifies the arrow spine from the arguments in source order, but a `Val::Thunk`

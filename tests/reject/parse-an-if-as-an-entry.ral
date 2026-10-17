@@ -1,0 +1,4 @@
+# codes: P0003
+# contains: `if` begins a statement: write `!{if …}`, or bind it first with `let`
+let c = true
+let r = [dir: if $c { 'a' } else { 'b' }]

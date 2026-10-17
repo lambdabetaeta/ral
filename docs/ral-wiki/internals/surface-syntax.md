@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 870865ed
-verified_at_date: 2026-10-08
-anchors: [lex, parse, Head, DelimKind, Operator, scan_token_group, scan_splice, end_unit, touches_after, eat_continuation, parse_control_op, collect_trailing_redirects, Ast::Redirected, LexErrorKind::Mismatched, WordLiteral::classify, is_bare_word]
+verified_at_commit: 677fc58d
+verified_at_date: 2026-10-17
+anchors: [lex, parse, Head, DelimKind, Operator, scan_token_group, scan_splice, end_unit, touches_after, eat_continuation, parse_control_op, collect_trailing_redirects, Ast::Redirected, LexErrorKind::Mismatched, WordLiteral::classify, is_bare_word, parse_entry_value]
 ---
 
 # Surface syntax: lexing and parsing
@@ -69,6 +69,14 @@ a parenthesised group and `not` in `$[…]` each end their unit there, and
 nowhere else, so the rule holds in every position, brackets and `$[…]`
 included. The grammar's attachments (`^`, `...`, `!`, an index) are the
 exceptions that must *touch*: `^ ls` is an error naming `^ls`, not a spacing.
+
+**A collection entry is one atom.** A list element, an entry's value, a
+spread and an option are value contexts, read by `parse_entry_value`; a second
+atom after the first is an application written where `!{…}` belongs, or a
+missing `,`. It is refused as P0003 over the run up to the next `,` or `]`,
+the help choosing its readings by the first token (`EntryReading`): `if`
+wants `!{if …}`, a command head offers `!{…}` or a `,`, any other value
+only the `,`.
 
 **A word's *literal* shape is lexical too.** `WordLiteral::classify` (`ast.rs`)
 reads a bare word, by the grammar in `syntax/numeral.rs` that the lexer also scans by, and nothing else — no expected type, no scope, no head — so a

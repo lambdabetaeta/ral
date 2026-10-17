@@ -156,7 +156,7 @@ Sourced into the shell at boot:
   rendered rollup forward through `` exarch-pins `set ``/`` `clear ``
   (`tasks-sync`) rather than threading a bound list through every mutator;
   `exarch-tasks` `` `list `` is the read point, and the kit ships no query
-  functions — `filter`/`first` over it is how you query
+  functions — `filter`/`first-where` over it is how you query
   ([[map/exarch/cards|cards]]).
 - `exarch-goal` `` `set ``/`` `clear `` — `exarch-pins` `` `set ``/`` `clear ``
   under the `goal` register key, kept visible by the

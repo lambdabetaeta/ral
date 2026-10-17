@@ -1,0 +1,4 @@
+# codes: T0010
+# contains: a String is not a list
+# contains: `slice $s 0 n` cuts text
+take 1 'hello'

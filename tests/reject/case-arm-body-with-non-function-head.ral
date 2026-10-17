@@ -1,3 +1,4 @@
-# contains: a command head must be
+# codes: T0072
+# contains: `n` is bound to a value of type Integer
 let n = 7
 case `a () [`a: { |_| $n x }]

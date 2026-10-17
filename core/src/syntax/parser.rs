@@ -56,6 +56,36 @@ pub(crate) enum ParseErrorKind {
         second: Span,
         run: Span,
     },
+    /// An entry whose value is followed by more: the would-be application
+    /// up to the next `,` or `]`, and the value it opens with.
+    EntryRuns {
+        entry: Span,
+        head: Span,
+        reading: EntryReading,
+    },
+}
+
+/// What an entry that runs on was most likely meant as, read off its first
+/// token.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum EntryReading {
+    /// `if`, `case`, a control operator: no `,` can rescue it.
+    Statement(String),
+    /// A bare word, `$f`, `!…` or a block: a command, or a missing `,`.
+    Command,
+    /// A number, string or collection: a missing `,`.
+    Value,
+}
+
+impl EntryReading {
+    fn of(tok: &Token) -> Self {
+        match tok {
+            Token::Word(Word::Plain(w)) if begins_statement(w) => Self::Statement(w.clone()),
+            Token::Word(Word::Plain(w)) if WordLiteral::classify(w).is_some() => Self::Value,
+            Token::Word(_) | Token::Variable { .. } | Token::Bang | Token::LBrace => Self::Command,
+            _ => Self::Value,
+        }
+    }
 }
 
 impl ParseError {
@@ -1724,14 +1754,14 @@ impl Parser {
     fn parse_collection_item(&mut self) -> Result<CollectionItem, ParseError> {
         if self.eat(&Token::Spread) {
             self.attached(SPREAD_ATTACHES)?;
-            return Ok(CollectionItem::Spread(self.spanned(Self::parse_atom)?));
+            return Ok(CollectionItem::Spread(self.parse_entry_value()?));
         }
         if self.key_colon_here(KeyAlphabet::Data) {
             let key = self.parse_map_key()?;
             self.expect(&Token::Colon)?;
             return Ok(CollectionItem::Entry {
                 key,
-                value: self.spanned(Self::parse_atom)?,
+                value: self.parse_entry_value()?,
             });
         }
         if let Token::Word(Word::Plain(word)) = self.peek()
@@ -1743,7 +1773,49 @@ impl Parser {
                  colon: `{key}: value`"
             )));
         }
-        Ok(CollectionItem::Elem(self.spanned(Self::parse_atom)?))
+        Ok(CollectionItem::Elem(self.parse_entry_value()?))
+    }
+
+    /// An entry is one atom: a command written as one is refused with the
+    /// readings it may have meant.
+    fn parse_entry_value(&mut self) -> Result<Spanned<Ast>, ParseError> {
+        let first = self.pos;
+        let (head, value) = self.capture_span(Self::parse_atom)?;
+        if !is_atom_start(self.peek()) {
+            return Ok(Spanned::new(head, value));
+        }
+        let entry = head.join(self.entry_end());
+        Err(ParseError {
+            kind: ParseErrorKind::EntryRuns {
+                entry,
+                head,
+                reading: EntryReading::of(&self.tokens[first].token),
+            },
+            ..ParseError::new(
+                Some(entry),
+                "an entry is one value, and `,` separates entries",
+            )
+        })
+    }
+
+    /// The last token before the next `,` or `]` at the cursor's depth.
+    fn entry_end(&self) -> Span {
+        let mut depth = 0usize;
+        let mut last = self.prev_byte_span();
+        for l in &self.tokens[self.pos..] {
+            match l.token {
+                Token::LBracket | Token::LBrace | Token::LParen => depth += 1,
+                Token::RBracket | Token::RBrace | Token::RParen | Token::Comma | Token::Eof
+                    if depth == 0 =>
+                {
+                    break;
+                }
+                Token::RBracket | Token::RBrace | Token::RParen => depth -= 1,
+                _ => {}
+            }
+            last = l.span;
+        }
+        last
     }
 
     /// True when the next token is a map key followed by `:`.  The one shape

@@ -322,7 +322,7 @@ A named function used as data needs `$`:
     map upper  [hello, world]   # passes the string "upper"
 
 Only head position invokes a bound block implicitly. Use `explain NAME` for
-the current signature of `map`, `first`, `sort-list-by`, `group-by`, and the
+the current signature of `map`, `first-where`, `sort-list-by`, `group-by`, and the
 rest of the prelude.
 
 ### Variants

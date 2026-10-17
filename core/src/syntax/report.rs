@@ -1,7 +1,7 @@
 //! A parse failure as a [`Report`].
 
 use super::lexer::LexErrorKind;
-use super::parser::{ParseError, ParseErrorKind};
+use super::parser::{EntryReading, ParseError, ParseErrorKind};
 use super::quote::one_word;
 use crate::diagnostic::{Label, Report};
 use crate::source::{Source, Span};
@@ -22,6 +22,11 @@ impl ParseError {
             ParseErrorKind::Touching { first, second, run } => {
                 Some(self.touching(src, *first, *second, *run))
             }
+            ParseErrorKind::EntryRuns {
+                entry,
+                head,
+                reading,
+            } => Some(self.entry_runs(src, *entry, *head, reading)),
             ParseErrorKind::Plain => None,
         }
         .unwrap_or_else(|| Report {
@@ -49,6 +54,38 @@ impl ParseError {
                 Some(one) => format!("{two}; one argument: {one}"),
                 None => two,
             }),
+        }
+    }
+
+    /// An entry that runs past its value: a command for `!{…}`, or a missing
+    /// `,`, which leads when a newline follows the value.
+    fn entry_runs(&self, src: &Source, entry: Span, head: Span, reading: &EntryReading) -> Report {
+        let text = |span: Span| &src.as_str()[span.range()];
+        let comma = "if these are separate entries, put `,` between them";
+        let gap = &src.as_str()[head.end as usize..entry.end as usize];
+        let broken = gap
+            .chars()
+            .take_while(|c| c.is_whitespace())
+            .any(|c| c == '\n');
+        let hint = match reading {
+            EntryReading::Statement(word) => format!(
+                "`{word}` begins a statement: write `!{{{word} …}}`, or bind it first with `let`"
+            ),
+            EntryReading::Command if broken => {
+                format!("{comma}; or, to run a command, write the entry as `!{{…}}`")
+            }
+            EntryReading::Command => format!(
+                "`{e}` runs a command: write `!{{{e}}}`, or, {comma}",
+                e = text(entry)
+            ),
+            EntryReading::Value => comma.into(),
+        };
+        Report {
+            code: Some("P0003"),
+            message: self.message.clone(),
+            at: Some(label(Some(entry), "this entry holds more than one value")),
+            also: Some(label(Some(head), "its first value ends here")),
+            hint: Some(hint),
         }
     }
 }

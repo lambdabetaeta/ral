@@ -1,5 +1,6 @@
-# codes: T0010 T0011
+# codes: T0072 T0072
 # contains: Integer
+# contains: `^date` runs it
 let date = 5
 date +%s
 $date +%s

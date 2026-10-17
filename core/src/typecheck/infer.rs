@@ -765,19 +765,22 @@ impl Inferencer<'_> {
     }
 
     /// Instantiate the scheme head `name` is bound at and strip the outer
-    /// `Thunk` it carries.  A head still a variable is a thunk by use; one
-    /// bound to anything else is no program.
+    /// `Thunk` it carries.
     fn instantiate_comp(&mut self, name: &str, scheme: &Scheme) -> CompTy {
         let ty = self.ctx.instantiate(scheme);
-        match self.ctx.unifier.resolve_ty(&ty) {
+        self.thunk_body(name, &ty, Reason::AutoderefHead)
+    }
+
+    /// The computation `ty`, the type `name` is bound at, suspends.  A type
+    /// still a variable is a thunk by use; `name` bound to anything else is
+    /// no program.
+    fn thunk_body(&mut self, name: &str, ty: &Ty, reason: Reason) -> CompTy {
+        match self.ctx.unifier.resolve_ty(ty) {
             Ty::Thunk(body) => *body,
             Ty::Var(_) => {
                 let body = self.ctx.unifier.fresh_comp_ty();
-                self.ctx.unify_ty(
-                    &ty,
-                    &Ty::Thunk(Box::new(body.clone())),
-                    Reason::AutoderefHead,
-                );
+                self.ctx
+                    .unify_ty(ty, &Ty::Thunk(Box::new(body.clone())), reason);
                 body
             }
             ty => {
@@ -1823,6 +1826,9 @@ impl Inferencer<'_> {
             CompKind::Lam { param, body } => self.infer_binding_value(Some(param), body),
             CompKind::Force(value) => {
                 let val_ty = self.infer_val(value);
+                if let Some(name) = written(value) {
+                    return self.thunk_body(name, &val_ty, Reason::ForceOperand);
+                }
                 let cty = self.ctx.unifier.fresh_comp_ty();
                 self.ctx.unify_ty(
                     &val_ty,
@@ -1856,7 +1862,15 @@ impl Inferencer<'_> {
                 if !positional.is_empty()
                     && let Some(ty) = self.command_non_function_ty(&head_ty)
                 {
-                    let kind = TypeErrorKind::CommandNotFunction { ty };
+                    let kind = match &head.item {
+                        CompKind::Return(v) if let Some(name) = written(v) => {
+                            TypeErrorKind::HeadBoundToValue {
+                                name: name.to_string(),
+                                ty,
+                            }
+                        }
+                        _ => TypeErrorKind::CommandNotFunction { ty },
+                    };
                     self.ctx.diagnose(kind);
                     // Check the args anyway, then hand the enclosing pipeline
                     // or chain a coherent fresh result.
