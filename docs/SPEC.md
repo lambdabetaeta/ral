@@ -2935,7 +2935,7 @@ A *selector* names a set of directories that the environment chooses, not a path
 
 | Selector | Denotes |
 |---|---|
-| `` `path `` | every absolute directory in the host process's `$PATH` at decode time; an error if there are none |
+| `` `path `` | every absolute directory in the host process's `$PATH` at decode time; an error if there are none, or if an entry is the filesystem root, the home or an ancestor of the home |
 | `` `system `` | ral's platform-defined system tool directories, without Homebrew |
 | a package manager, such as `` `rustup `` or `` `homebrew `` | the directories that manager runs programs from, where they exist; nothing if the manager is absent (§12.3) |
 
@@ -2997,7 +2997,7 @@ An omitted `exec` is every program, and a host that extends a base that omits it
 
 A selector may be the payload of `dir`:
 
-- `` `path `` — every absolute directory in the current `$PATH`;
+- `` `path `` — every absolute directory in the current `$PATH`; an entry that is the filesystem root, the home or an ancestor of the home is a freeze error, as for an override below;
 - `` `system `` — ral's platform-defined system tool directories, without Homebrew;
 - a package manager, such as `` `rustup ``, `` `cargo ``, `` `go ``, `` `pyenv ``, `` `homebrew `` or `` `scoop ``. The implementation holds them as one table, and the checker's refusal of an unknown selector lists every name.
 

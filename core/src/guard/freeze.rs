@@ -7,9 +7,8 @@
 //! once, so a later `chdir` or `TMPDIR` change cannot retroactively widen a
 //! grant.  A selector names directories the environment chooses, and is
 //! exec-only: its expansion is held under no `home`, but a toolchain
-//! override may not name the world ([`toolchains`]).  XDG
-//! uses the Linux defaults on every platform, macOS included
-//! ([`crate::host`]).
+//! override or `$PATH` entry may not name the world.  XDG uses the Linux
+//! defaults on every platform, macOS included ([`crate::host`]).
 //!
 //! An `absolute` payload is classified on the raw string, before any folding,
 //! host first, so that one profile loads on both platforms: live if absolute
@@ -49,6 +48,7 @@ use crate::syntax::quote::quote_word;
 use crate::text::code;
 use crate::types::{Break, Error, Shell};
 use std::borrow::Cow;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use strum::VariantArray;
@@ -362,11 +362,11 @@ impl FreezeCtx {
     /// every grant path.
     ///
     /// # Errors
-    /// `path` over a `$PATH` with no absolute entry, or a toolchain override
-    /// that names the filesystem root or the home.
+    /// `path` over a `$PATH` with no absolute entry, or a `$PATH` entry or
+    /// toolchain override that names the filesystem root or the home.
     pub fn selector(&self, selector: Selector) -> Result<Vec<FrozenPath>, PolicyError> {
         match selector {
-            Selector::Path => path_dirs(),
+            Selector::Path => path_dirs(self.home()),
             Selector::Toolchain(t) => toolchains::expand(t, self.home())?
                 .iter()
                 .map(freeze)
@@ -608,15 +608,55 @@ fn freeze(path: impl AsRef<Path>) -> Result<FrozenPath, PolicyError> {
     FrozenPath::freeze(path).map_err(PolicyError::new)
 }
 
-/// `$PATH` split on the platform separator, keeping the absolute entries.  A
-/// relative `$PATH` entry is the environment's business, not the grant
-/// author's, so unlike a relative grant path it is dropped in silence.
-fn path_dirs() -> Result<Vec<FrozenPath>, PolicyError> {
+/// A directory chosen for `selector` that is the root, the home or an
+/// ancestor of it would make running reads a read of everything, `~/.ssh`
+/// included.  Judged on the directory, by containment of symlink-followed
+/// forms as [`FreezeCtx::xdg`] judges, so a home that is a symlink is still
+/// caught.  `subject` says what chose it; `var` is what to check.
+///
+/// # Errors
+/// `dir` is the filesystem root, the home or an ancestor of it.
+pub(super) fn refuse_the_world(
+    selector: Selector,
+    subject: &str,
+    var: &str,
+    dir: impl AsRef<Path>,
+    home: Option<&str>,
+) -> Result<(), PolicyError> {
+    let dir = FrozenPath::from_surface(dir);
+    let holds = |outer: &FrozenPath, inner: &FrozenPath| outer.contains::<Allow>(inner.real_path());
+    let home = home.map(FrozenPath::from_surface);
+    let what = match &home {
+        _ if dir.is_universal() => "the filesystem root",
+        Some(home) if holds(&dir, home) && holds(home, &dir) => "the home directory itself",
+        Some(home) if holds(&dir, home) => "an ancestor of the home directory",
+        _ => return Ok(()),
+    };
+    let selector = code(&format!("`dir `{}", selector.name()));
+    Err(PolicyError::new(format!(
+        "{subject}, {what}, so {selector} would run and read all of it. Is {var} set correctly?"
+    )))
+}
+
+/// [`path_dirs_in`] over the host's `$PATH`.
+fn path_dirs(home: Option<&str>) -> Result<Vec<FrozenPath>, PolicyError> {
     #[allow(clippy::disallowed_methods, reason = "PATH, not an XDG basedir")]
     let path = std::env::var_os("PATH").unwrap_or_default();
-    let dirs: Vec<_> = std::env::split_paths(&path)
+    path_dirs_in(&path, home)
+}
+
+/// `path` split on the platform separator, keeping the absolute entries.  A
+/// relative entry is the environment's business, not the grant author's, so
+/// unlike a relative grant path it is dropped in silence; one naming the
+/// world is not ([`refuse_the_world`]).
+fn path_dirs_in(path: &OsStr, home: Option<&str>) -> Result<Vec<FrozenPath>, PolicyError> {
+    let dirs: Vec<_> = std::env::split_paths(path)
         .filter(|entry| entry.is_absolute())
-        .map(freeze)
+        .map(|entry| {
+            let subject = format!("PATH holds {}", entry.display());
+            refuse_the_world(Selector::Path, &subject, "PATH", &entry, home)?;
+            freeze(entry)
+        })
         .collect::<Result<_, _>>()?;
     if dirs.is_empty() {
         return Err(PolicyError::new(format!(
@@ -677,6 +717,41 @@ mod tests {
 
     fn refusal(place: &Place, ctx: &FreezeCtx) -> String {
         ctx.place(place).unwrap_err().message
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_entries_naming_the_world_are_refused() {
+        for (home, entry, what) in [
+            ("/h", "/", "the filesystem root"),
+            ("/h", "/h", "the home directory itself"),
+            ("/home/a", "/home", "an ancestor of the home directory"),
+        ] {
+            let path = format!("/usr/bin:{entry}");
+            let err = path_dirs_in(OsStr::new(&path), Some(home)).unwrap_err();
+            assert_eq!(
+                err.message,
+                format!(
+                    "PATH holds {entry}, {what}, so `` `dir `path `` would run and read all \
+                     of it. Is PATH set correctly?"
+                ),
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_homeless_path_is_refused_only_for_the_root() {
+        assert!(path_dirs_in(OsStr::new("/usr/bin:/h"), None).is_ok());
+        assert!(path_dirs_in(OsStr::new("/usr/bin:/"), None).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_home_subdirectory_on_path_is_accepted() {
+        let dirs = path_dirs_in(OsStr::new("/usr/bin:/h/bin:relative"), Some("/h")).unwrap();
+        let dirs: Vec<_> = dirs.iter().map(FrozenPath::as_str).collect();
+        assert_eq!(dirs, ["/usr/bin", "/h/bin"]);
     }
 
     // Unix-only: `PathBuf::join` yields `\` separators on Windows.

@@ -11,10 +11,9 @@
 //! [`expand_in`] is pure over an injected environment, home and `exists`;
 //! [`expand`] is its live wrapper, which the freeze and the fs floor read.
 
-use super::freeze::PolicyError;
+use super::freeze::{PolicyError, Selector, refuse_the_world};
 use crate::host::{XdgKind, resolve_xdg_in};
 use crate::path::{Allow, FrozenPath, is_absolute};
-use crate::text::code;
 use std::ffi::OsStr;
 use std::path::PathBuf;
 use strum::{EnumString, IntoStaticStr, VariantArray};
@@ -396,36 +395,16 @@ impl Location {
                 .collect());
         };
         let dir = join(&value, over.sub());
-        refuse_the_world(toolchain, over.var(), &value, &dir, home)?;
+        let subject = format!("{} is {value}", over.var());
+        refuse_the_world(
+            Selector::Toolchain(toolchain),
+            &subject,
+            over.var(),
+            &dir,
+            home,
+        )?;
         Ok(vec![dir])
     }
-}
-
-/// An override choosing the root, the home or an ancestor of it would make
-/// running reads a read of everything, `~/.ssh` included.  Judged on the
-/// chosen directory, by containment of symlink-followed forms as
-/// `FreezeCtx::xdg` judges, so a home that is a symlink is still caught.
-fn refuse_the_world(
-    toolchain: Toolchain,
-    var: &str,
-    value: &str,
-    dir: &str,
-    home: Option<&str>,
-) -> Result<(), PolicyError> {
-    let dir = FrozenPath::from_surface(dir);
-    let holds = |outer: &FrozenPath, inner: &FrozenPath| outer.contains::<Allow>(inner.real_path());
-    let home = home.map(FrozenPath::from_surface);
-    let what = match &home {
-        _ if dir.is_universal() => "the filesystem root",
-        Some(home) if holds(&dir, home) && holds(home, &dir) => "the home directory itself",
-        Some(home) if holds(&dir, home) => "an ancestor of the home directory",
-        _ => return Ok(()),
-    };
-    let selector = code(&format!("`dir `{}", <&str>::from(toolchain)));
-    Err(PolicyError::new(format!(
-        "{var} is {value}, {what}, so {selector} would run and read all of it. \
-         Is {var} set correctly?"
-    )))
 }
 
 /// The directories `toolchain` expands to over an injected environment, home

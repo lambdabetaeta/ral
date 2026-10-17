@@ -101,7 +101,9 @@ launch hardening.
   reads would make the selector a read of everything, `~/.ssh` included. The
   check is on the directory, not the variable (`GOPATH=~` chooses `~/bin` and is
   fine), by containment of symlink-followed forms. Defaults are fixed and need no
-  check. `path` has the same hazard and is not yet guarded.
+  check. `path` has the same hazard and the same guard, one function
+  (`refuse_the_world`, in `freeze.rs`): a `$PATH` entry naming the world is a
+  freeze error naming `PATH`, not a silent skip like a relative entry.
 - **`system` is a row, and `homebrew` is another.** `system` is the platform's
   own tool roots and no longer holds Homebrew. `` `dir `homebrew `` is
   `HOMEBREW_PREFIX` when usable, else `/opt/homebrew` or Linuxbrew's
