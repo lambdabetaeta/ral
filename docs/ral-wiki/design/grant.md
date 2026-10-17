@@ -336,7 +336,19 @@ reaches the stack or the IPC wire.
 This is the boundary [[map/exarch|exarch]] reuses as its sandbox: each agent
 run evaluates under a profile's capabilities pushed onto this same stack.
 
-**Concessions.** Four caveats are inherent to the design, not defects:
+**Concessions.** Five caveats are inherent to the design, not defects:
+- **The sandbox bounds a running session, not what it leaves behind.** It
+  bounds what a session reads (credentials, `~/.ssh`), what it damages outside
+  the project, and what it runs. It does not stop a hostile session from
+  leaving code in the project that the user later runs unconfined:
+  `.git/config` (`core.fsmonitor` runs on the next `git status`;
+  `core.hooksPath`), `.git/hooks`, ignored build outputs (`node_modules/.bin`,
+  `.venv/bin`, `target/`) and build scripts. One such unconfined run reaches
+  the whole account. Against that attacker, write confinement only delays it;
+  only reviewing the session's work, or running one's own builds confined too,
+  closes the path. `.git/config` and `.git/hooks` stay writable because a
+  grant's `deny` forbids reads too and git reads its config on every command;
+  no write-only exclusion exists yet, which is an open gap.
 - **Bare command names are ambient.** A bare exec name like `` `name git `` resolves through
   `PATH`, so it is not a strict object-capability; the mitigation is the base
   profile's deny on shells together with the `fs` deny on writing `` `xdg-bin `` — the
@@ -345,17 +357,16 @@ run evaluates under a profile's capabilities pushed onto this same stack.
   source, so the OS profile and the in-process check cannot disagree, but symlink
   races inside the admitted set are a known surface, not a closed one.
 - **Builds start cold.** No profile writes a cache the user's own tools read.
-  Most caches are trusted on use (cargo's unpacked sources, Go's module and
-  build caches, Maven's repository, uv's wheels, Bun's cache), so a write there
-  by a prompt-injected agent is a backdoor that outlives the session, reaches
-  every project and runs unconfined in the user's next build. So every cache a
-  session writes lives in its scratch, which is deleted when the session ends,
-  and `reasonable` and `minimal` do not write `xdg-cache`; a cache shared
-  between sessions was rejected because it grows without bound and could not be
-  emptied while another session ran. In-tree build outputs (`target/`,
-  `node_modules`, `.venv`) are just as trusted and as invisible to `git diff`
-  but reach one project, the one the session was given, and stay accepted with
-  the writable `cwd` ([[map/exarch|exarch]]'s `Scratch` lists the redirected tool homes).
+  This is hygiene, not a barrier against a hostile agent while the project and
+  `.git` stay writable: sessions never contaminate each other or the user's
+  caches (cargo's unpacked sources, Go's module and build caches, Maven's
+  repository, uv's wheels, Bun's cache), and a scratch dies with its session.
+  So every cache a session writes lives in its scratch, which is deleted when
+  the session ends, and `reasonable` and `minimal` do not write `xdg-cache`; a
+  cache shared between sessions was rejected because it grows without bound and
+  could not be emptied while another session ran. In-tree build outputs
+  (`target/`, `node_modules`, `.venv`) stay writable with `cwd`
+  ([[map/exarch|exarch]]'s `Scratch` lists the redirected tool homes).
 - **Exec admission is not containment; the projection is.** A prefix that is
   both `exec`-admitted and `fs`-writable reads like an escape hatch — drop a
   binary, the next call admits it — but inside one projection it escalates

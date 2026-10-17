@@ -14,8 +14,8 @@
 #
 # Default base when `--base` is omitted.
 
-# rustup's lock file and the `self-update` directory beside it, under a
-# usable (non-empty, absolute) `RUSTUP_HOME`, else `~/.rustup`.  `env` is
+# rustup's lock file, under a usable (non-empty, absolute) `RUSTUP_HOME`,
+# else `~/.rustup`.  `env` is
 # the host's here: exarch does not redirect `RUSTUP_HOME`.
 let host-env = !{env}
 let rustup-home = if !{has $host-env RUSTUP_HOME} { return $host-env[RUSTUP_HOME] } else { return '' }
@@ -26,7 +26,6 @@ let rustup-at = { |sub|
     return `home ".rustup/$sub"
   }
 }
-let self-update = !{rustup-at self-update}
 let self-update-lock = !{rustup-at self-update/self-update.lock}
 
 return [
@@ -106,10 +105,9 @@ return [
       `home .gitignore_global,  # path `core.excludesfile` points at by default
       `xdg-config git,
     ],
-    # A session writes no cache that the user's own tools read.  Most
-    # caches are trusted on use, so a write there by a prompt-injected
-    # agent outlives the session and runs unconfined in the user's next
-    # build.  Every cache a session writes lives in its scratch,
+    # A session writes no cache that the user's own tools read: hygiene,
+    # not a barrier.  Sessions never contaminate each other or the user's
+    # caches.  Every cache a session writes lives in its scratch,
     # `$EXARCH_SCRATCH`, which is deleted when the session ends: exarch's
     # runtime points `$XDG_CACHE_HOME` and the legacy tool homes (cargo,
     # npm, gradle, maven, go, …) there at session entry, so `cargo build`
@@ -125,16 +123,17 @@ return [
     # (`core.pager` is a command); persistent state and caches are trusted
     # by whatever wrote them.
     #
-    # The writable set below is not free of that hazard — `cwd` and
-    # `gitdir` hold hooks, `.envrc`, `package.json` scripts, Makefiles,
-    # all of which the user's unconfined tooling executes on sight.  No
-    # capability names that class today; see the wiki's `design/grant`.
+    # The writable set below bounds what a session does while it runs,
+    # not what it leaves behind: `cwd` and `gitdir` hold `.git/config`,
+    # hooks, build scripts and outputs, which the user's unconfined tooling
+    # later runs.  Only review, or confined builds, close that; see the
+    # wiki's `design/grant` §Concessions.
     write: [
       `cwd .,
       `absolute /tmp,
       `tempdir .,
       `gitdir .,
-      $self-update-lock,  # rustup locks it on every proxy run; `self-update` is not run (exec below)
+      $self-update-lock,  # rustup locks it on every proxy run
     ],
 
     # Per-tool credential subdirs of `xdg-config`.  The broad `xdg-config`
@@ -310,13 +309,6 @@ return [
       `name ps,
       `name lsof,
       `name pgrep,
-    ],
-
-    # rustup stages the updater it later runs unconfined in `self-update`,
-    # whose lock is writable above: it must never run, whatever `rustup`
-    # admits.  An exclusion beats every allowance.
-    deny: [
-      `dir $self-update,
     ],
   ],
 ]

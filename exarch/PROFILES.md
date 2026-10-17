@@ -308,11 +308,15 @@ system-wide prefixes, and every restricted read can read them where they exist.
 
 ## Build-tool caches
 
-No profile writes a cache that the user's own tools read. Most caches are
-trusted on use: cargo's unpacked sources, Go's module and build caches, Maven's
-repository, uv's built wheels and Bun's cache are not re-verified. A write there
-by a prompt-injected agent would outlive the session, reach every project, and
-run unconfined in your next build. So every cache a session writes lives in
+No profile writes a cache that the user's own tools read. This is hygiene:
+sessions never contaminate each other or your caches (cargo's unpacked sources,
+Go's module and build caches, Maven's repository, uv's built wheels, Bun's
+cache), and a scratch dies with its session. It is not a barrier against a
+hostile agent while the project and `.git` stay writable: the sandbox bounds
+what a session does while it runs, not code it leaves in the project, such as
+`.git/config`, hooks or build outputs, that you later run unconfined. Only
+reviewing its work, or confining your own builds, closes that (wiki:
+`design/grant` §Concessions). So every cache a session writes lives in
 `$EXARCH_SCRATCH`, which is deleted when the session ends, and builds start
 cold. `reasonable`, `edit-only` and `read-only` still read `` `xdg-cache `` and
 `~/Library/Caches`; `reasonable` and `minimal` no longer write `` `xdg-cache ``.
@@ -355,9 +359,7 @@ world has its cache writes refused, and the refusal names the path.
   including a missing target or component, is refused as a write. The one
   exception is `self-update/self-update.lock`, which recent rustup opens for
   writing on every proxy run: `reasonable` writes that one file, under
-  `$RUSTUP_HOME` or `~/.rustup`, and excludes the `self-update` directory from
-  running, since rustup stages there the updater it later runs unconfined. On
-  Linux the lock must already exist.
+  `$RUSTUP_HOME` or `~/.rustup`. On Linux the lock must already exist.
 - **A scratch is deleted when its session ends.** A session killed before it can
   clean up leaves its scratch to the next session's sweep.
 

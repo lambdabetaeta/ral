@@ -506,13 +506,11 @@ mod tests {
         assert_eq!(dir_selectors(REASONABLE_RAL), want);
     }
 
-    /// rustup takes its lock for writing on every proxy run, and stages the
-    /// updater it later runs beside it: the lock is writable, its directory
-    /// excluded from `exec`.  `RUSTUP_HOME` is emptied, which the profile
-    /// reads as unset.
+    /// rustup takes its lock for writing on every proxy run, so the lock is
+    /// writable.  `RUSTUP_HOME` is emptied, which the profile reads as unset.
     #[cfg(unix)]
     #[test]
-    fn reasonable_writes_the_rustup_lock_and_never_runs_self_update() {
+    fn reasonable_writes_the_rustup_lock() {
         let ctx = FreezeCtx {
             home: Some(host_home()),
             cwd: "/".into(),
@@ -525,13 +523,6 @@ mod tests {
             fs.write_prefixes.contains(&lock),
             "reasonable should write {}",
             lock.as_str()
-        );
-        let self_update = home(".rustup/self-update");
-        let exec = caps.exec.as_ref().expect("reasonable declares exec");
-        assert!(
-            dirs(exec).any(|(p, v)| p == self_update.as_str() && !v),
-            "reasonable should exclude {} from exec",
-            self_update.as_str()
         );
     }
 
