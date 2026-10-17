@@ -132,8 +132,22 @@ positive scope that does not nest needs an explicit intersection first.
   so `b` supports `j̃`; `a` supports `j̃` since `j` holds it (1). So `j`
   survives in the meet and holds `s`. ∎
 
-Hence the meet is commutative, associative and idempotent *structurally*:
-`a ∧ a = a`. Pinned by property tests over a universe of directories, files,
+The generic law is mechanised in `dev/agda/Core/Authority/Table.agda`
+(`denote-meet`), using the separate Belnap algebra in `Core.Belnap`.
+`Core.Authority.Prefix` discharges the three obligations for resolved component
+prefixes, with negative matching independent of the positive relation. The
+exec and fs scope constructors are modelled in `Core.Authority.Exec` and
+`Core.Authority.Fs`, which discharge the scope laws from a common resolved-path
+geometry and enforce polarity restrictions in their types. The
+proof uses lists of legal positive and negative scopes and establishes
+denotational equality; correspondence with Rust's concrete path operations,
+map normalisation and the machine's grant semantics remains to be proved.
+The working record is `dev/docs/agda-progress.md`.
+
+The pointwise law gives commutativity, associativity and idempotence of
+denotations. Rust's normalised map representation also satisfies these laws
+*structurally*, including `a ∧ a = a`; this stronger claim is checked by
+property tests over a universe of directories, files,
 tools, vetoes and `Any` holding case pairs and an NFC/NFD pair, so a name one
 filesystem keeps apart and another merges (`laws` in `capability/table.rs`).
 

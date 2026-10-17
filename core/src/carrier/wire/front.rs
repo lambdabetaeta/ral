@@ -221,7 +221,7 @@ impl WireTransport {
         // A duplicate fd, so the reader can park in `read_frame` while the
         // ticker and the front-end write on the same socket.
         let writer = reader_ch.try_clone()?;
-        writer.set_write_deadline(liveness.deadline)?;
+        let deadline = writer.set_write_deadline(liveness.deadline);
         // A second duplicate, held back from ever taking the write lock, so
         // `Drop` can sever the connection without parking behind a write in
         // progress.
@@ -234,6 +234,12 @@ impl WireTransport {
         let write_tx = Arc::new(Mutex::new(writer));
         let control = ControlSender::new(Door::Wire((write_tx.clone(), severance.clone())));
         let ends = Ends::new(control, EventReceiver::new(event_rx), severance);
+        // Darwin refuses options on a socket whose peer is already gone:
+        // the death Linux learns at the first read, learnt here.
+        if let Err(e) = deadline {
+            sever(&ends.severance, Severed::Closed(e.to_string()));
+            shutdown.shutdown();
+        }
         let reader = spawn_wire_reader(
             reader_ch,
             event_tx,

@@ -30,6 +30,83 @@ aliases, `eval`, subshells, and trap handlers: a block can be bound, passed,
 returned, or installed as an effect handler. Currying desugars to nested
 lambdas, so partial and under-application are uniform.
 
+The Agda core in `dev/agda` defines contextual equivalence by program tests
+returning `Unit`: a test must use a thunk to observe it. The relation is
+closed under substitution contexts. Its checked laws are:
+
+- thunk/force β: `force (thunk M) ≈ M`;
+- thunk/force η for closed values: `thunk (force V) ≈ V`;
+- bind β: `return V to N ≈ N[V/x]`;
+- bind η: `M to return x ≈ M`;
+- bind associativity: `(M to N) to P ≈ M to (N to shift-under P)`;
+- function β: `(λx. M) V ≈ M[V/x]`;
+- function η: `λx. M x ≈ M`, for fresh `x`.
+
+Administrative simulations preserve exact finite ground observations in both
+directions, including byte routing, failure and pipeline scheduling. The
+bind and function laws also hold under arbitrary closing substitutions.
+The reverse step theorem ends at a value-returning type `F A`, so a function
+focus necessarily has an argument frame; it makes no claim about an
+unapplied function computation at an empty stack.
+These are finite may-observation equivalences, without fairness or
+must-convergence claims. The separate stack relation compares returned value
+syntax; `Core.Contextual.StackCounterexample` proves why its laws alone do
+not establish higher-order congruence.
+
+Statement associativity follows from bind associativity, preserving byte
+flow and failure even under stored code. The independent finite-behaviour
+algebra now provides sequencing and capture operations. Capture closes its
+image under finite prefixes to include observations after a flush but before
+a halt; this process has checked soundness and completeness for finite
+observable views at the empty stack.
+Continuous process operators have least fixed points given by the union of
+finite unfoldings. Checked unfolding and induction laws give recursion a
+compositional meaning. Repetition of a closed body agrees with this construction
+in the term semantics and, at base scope when the body is complete, with
+machine execution. Finite-execution induction justifies the recursive call.
+Capture of repetition agrees with the prefix-closed capture image of that
+fixed point. The external-command instance may emit arbitrarily many command
+events or fail, but cannot return successfully. A silent self-loop has exactly
+the bottom machine process. Recursive adequacy across the whole syntax and
+ambient scope remains open.
+The fundamental theorem now gives exact machine agreement for the CBPV
+fragment with general recursion, higher-order values, external commands,
+halts, capture, recovery, cleanup, data elimination, codecs and register
+reads at base scope.
+Its logical relation retains computability
+of returned thunks and functions at the remaining execution bound; closing
+substitutions preserve that relation. Coverage is a predicate over the existing
+syntax. Cleanup preserves the saved higher-order result; ground-data types
+supply the returned-value property for codecs and register reads. Sum, product
+and list elimination preserve computability of suspended code in their data.
+Their β laws equate a match with its selected body after substitution in the
+term semantics, at any scope/world. Ambient
+layers and remaining primitives still need cases;
+the theorem does not require separate completeness assumptions for subterms
+inside its covered fragment.
+The scope laws in `Core.Semantics.Scoping` establish distribution over bind
+and capture for valid environment overlays and handlers. Returning a thunk
+does not capture that temporary dynamic scope; the corresponding machine law
+holds for arbitrary bodies and surrounding stacks
+([[design/scoping|lexical and dynamic scope]]).
+The term-directed interpretation now covers an initial sequential fragment
+with explicit scope and world responses, and checks its basic β laws.
+Every finite behaviour derived by the current term interpretation has checked
+machine soundness, including capture beneath sequencing and scoped handlers.
+The term interpretation also proves terminal `try` laws,
+identity cleanup and precedence of a halting cleanup over a halted body.
+Reverse agreement is checked for terminal terms and unconstrained external
+commands at base scope. It composes through forcing, capture, bind,
+application, try and cleanup under explicit completeness premises. The
+execution decomposition preserves exact events, including output before
+failure; an application needs completeness only for functions its body can
+return. Separate scoped rules establish agreement for environment/handler
+entry, reads, dispatch and codecs under finite layer stacks. Checked examples
+return both inner and restored environments and execute a self-masking
+handler under capture. Uniform composition across those scoped and sequential
+rules, general recursion, complete syntax coverage, contextual capture/failure
+laws and alignment with producer grades remain outstanding. The plan and theorem audit are in `dev/docs/agda-progress.md`.
+
 Bindings are immutable. Re-`let` introduces a fresh binding that shadows the
 outer one within its lexical scope; closures capture at definition time. This
 buys equational reasoning in the pure fragment and makes `spawn` safe — a

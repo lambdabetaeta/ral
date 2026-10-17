@@ -55,6 +55,30 @@ which self-masking keeps from diverging; the live semantic question is therefore
 masking discipline — which handler is in scope at each point — not how a captured
 continuation is re-entered.
 
+Self-masking removes exactly the owning frame; nearer unmatched frames remain
+visible too. In particular, an outer named arm wins over a nearer catch-all,
+and that catch-all remains available while the named arm runs. The checked
+Agda `HandlerSelection` development in `dev/agda` states this as ordered frame
+deletion and proves preservation of predicates on the remaining code.
+`HandlerCompleteness` connects command invocation to compositional semantics
+when installed code belongs to the scoped fundamental fragment, including
+recursion, capture, recovery and cleanup. Installation and capture preserve
+that agreement; an example recovers from a handler's failure through capture.
+This fragment includes direct external commands inside handler bodies but
+excludes named calls, so general
+forwarding and recursive handler invocation remain proof obligations. The
+model also omits Rust's permanent base-handler layer between named run entries
+and catch-alls.
+
+The separate `CoveragePreservation` theorem now permits named calls inside
+stored code and recursive handler bodies: renaming, substitution and semantic
+evaluation preserve membership in the interpreted fragment. `ScopeCoverage`
+shows that dispatch selects covered code and retains a covered scope after
+masking. The result theorem needs no ambient-code premise because command
+results in this core are `Unit`; the invocation completeness proof still
+needs the scope premise. This supplies the invariant for general named
+forwarding. Agreement for all finite executions of that fragment remains open.
+
 See also [[design/syscalls-are-effects|syscalls-are-effects]], [[design/control-operators|control-operators]], [[design/scoping|scoping]], [[design/grant|grant]], [[related/system-c|system-c]] (self-masking as capability-set subtraction), [[related/handlers-of-algebraic-effects|handlers-of-algebraic-effects]] (the calculus this fragment restricts).
 
 **Realised in** [[internals/handler-dispatch|handler-dispatch]].

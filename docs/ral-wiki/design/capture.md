@@ -1,3 +1,7 @@
+---
+generated_at_commit: 195ad6b4
+---
+
 # Capture: a command's value is its output
 
 **A command's value is its output. Where a value is demanded of a command, the
@@ -69,9 +73,8 @@ meaning. In the grade it passes through all three. The price is the rule's
 placement: it is decided in checking mode, in program order
 ([[decisions/260930_graded-f|graded-f]] records the one order-dependence).
 
-**The node returns bytes; the text is composed.** `capture M : F Bytes` is
-total and exact — precisely the bytes `M` wrote, nothing stripped and nothing
-decoded. Reading them as a `String` is a second step the checker composes over
+**The node returns bytes; the text is composed.** On success, `capture M : F Bytes`
+returns precisely the bytes `M` wrote, nothing stripped and nothing decoded. Reading them as a `String` is a second step the checker composes over
 it, `decode (capture M)`, and that step owns both things that can go wrong: one
 trailing terminator is dropped, and output that is not valid UTF-8 fails there,
 naming `| from-bytes` as the way to keep it. Each is its own term in the IR
@@ -95,15 +98,56 @@ catchable by `try`. The human keeps the bytes; the binding does not happen.
 **Failure flushes.** `Frame::Capture` pushes a fresh buffer as `shell.io.stdout`,
 holding the sink it replaced. On return it restores that sink and yields the
 buffer as `Bytes`; on a halt it writes what the body wrote to the sink it
-replaced (`Shell::write_sink`) and propagates the halt, so whatever a failing
-captured command wrote before it failed stays where it would have gone. Under `!{ … } > f` the file is that
+replaced (`Shell::write_sink`). Its clause is `raise s ↦ write_out buf ; raise s`: an
+accepted write preserves the body signal; a refused write pre-empts it. Bytes
+delivered before refusal remain visible. Under `!{ … } > f` the file is that
 sink, so the flush lands in `f`.
 
-**The kernel proves the two halves.** `dev/agda` states capture for the
-route-free calculus: a terminating `M` has `capture M` return exactly the bytes
-`M` wrote and write nothing itself (`capture-returns`); a halting one halts with
-the same signal after writing what `M` wrote (`capture-halts`). The kernel
-covers this ruling only — no kinds, rows, weak variables or boundaries.
+**The kernel proves the two halves for accepting body runs.** With unbounded
+buffers, `capture-returns` retains exactly stdout and writes nothing outward.
+`capture-halts-response` follows the outer write verdict: acceptance preserves
+the body's signal and stdout (`capture-halts`); refusal reports the write error
+and the delivered prefix. The acceptance premise concerns comparison with the
+bare body at the empty stack: nested writes handled by capture cannot refuse.
+Absorption by a capture buffer, pipe wire or redirect frame succeeds; file-world
+refusal remains outside the model.
+
+The independent finite-behaviour algebra groups each action's channel
+traffic into one atomic event. `Core.Semantics.Process` closes sets of
+behaviours under finite prefixes. The capture operation handles body writes
+by an accepting buffer and permits refusal only at its outer flush, so its
+characterisation and evaluation equation are unconditional. Its image needs
+prefix closure too: the buffer can be flushed before an observation reports the halt. The
+checked `FlushBoundary` counterexample rules out a direct-image account of
+all capture observations. `Core.Machine.CaptureCompleteness.capture-characterisation`
+proves exact agreement of finite views between `capture M` and the
+prefix-closed capture operation on the body's process, for closed
+`M : F Unit` at the empty stack. It preserves stdin, stderr and file events,
+accounts for write-error precedence, and includes internal pipeline scheduling.
+
+The term-directed interpretation has checked capture soundness with
+explicit ambient scope. Its continuation argument tracks updates to enclosing
+buffers, including nested failure flushes and handlers inside capture. Every
+derived behaviour has a machine execution with exactly the same atomic events.
+Exact reverse recovery at the empty stack preserves those action boundaries,
+including empty traffic and internal flushes. Thus capture preserves term
+completeness whenever its body is complete; captured external commands have
+checked agreement in both directions. A complete self-masking handler also
+retains agreement when captured. Completeness composes through sequential bind,
+application, try and cleanup; a captured command sequence with failure
+recovery and cleanup has checked agreement in both directions.
+
+**Capture preserves ambient scope in the scoped fundamental theorem.**
+`DelimitedCaptureReflection` preserves body reads and dispatch under equal-scope
+boundaries while accounting for collected stdout. `DelimitedCaptureExecution`
+recovers the body behaviour, including the failure-flush prefix, within the
+captured execution's step budget. This gives capture closure alongside
+higher-order CBPV, general recursion, recovery and cleanup in the covered
+fragment. A valid environment overlay commutes with capture at the level of
+whole machine processes for covered terms. A scoped external-command instance
+checks success, failure and the prefix after flushing; its dispatch premise
+is explicit. Arbitrary handler invocation, the remaining language rules,
+contextual capture laws and Rust refinement remain open.
 
 The capture is of the whole computation, so everything the body writes is
 retained, a `guard`'s cleanup included: `let x = !{ guard { cmd } { echo clean } }`

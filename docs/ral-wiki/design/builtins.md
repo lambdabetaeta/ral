@@ -36,6 +36,17 @@ spelling would be a second thing to keep capability-checked
 
 ## The families
 
+The Agda core's scalar fragment now has a shared value-or-error semantics in
+`Core.Semantics.Scalar`: arithmetic, comparisons, concatenation and scalar
+rendering return a value or raise an error without emitting bytes. Its
+deterministic reductions agree with machine execution and compose with
+higher-order code, recursion and recovery in `ScopedFundamental`.
+The numerical domains are still an abstraction: integers are unbounded,
+raw float literals are not indexed by finiteness, and mixed-number promotion
+is absent. Rust's checked integers and finite-float representation remain
+separate refinement obligations; the scalar theorem does not cover the
+whole builtin library.
+
 The core entries group by what they compute:
 
 - **List & higher-order** — `each` `map` `filter` `fold` `sort-list` `sort-list-by`

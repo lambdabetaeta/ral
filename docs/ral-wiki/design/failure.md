@@ -58,6 +58,16 @@ calculus now say it in the same words. `?` needs no form of its own there: it is
 equation that makes that a definition rather than a resemblance — `fail W ? N`
 is `N`.
 
+**Recovery and cleanup preserve the dynamic scope of their caller.** The
+scoped Agda fundamental theorem covers both constructs alongside higher-order
+CBPV and recursion. A returned thunk remains usable after recovery and cleanup;
+a checked example forces it after leaving an environment overlay and reads
+the restored caller environment. For two halting computations under `guard`,
+`CleanupPreempts` proves that every finite machine behaviour is a prefix of
+the cleanup's halt, for arbitrary error/escape signals and ambient scope
+layers. These results concern the covered finite-behaviour model; handler
+invocation and Rust refinement remain separate obligations.
+
 Failure propagates predictably through the rest of the grammar:
 
 - a sequence `a; b; c` halts at the first failure, and the error says how many

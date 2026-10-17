@@ -577,6 +577,28 @@ fn under_exec_deny(bin: &std::path::Path, deny: &str, body: &str) -> common::Out
 const RESPELLED: &str =
     "under another spelling (case or Unicode form); a deny holds under every spelling";
 
+/// A volume that takes `made` and the absent `denied` for one name
+/// re-resolves the deny to `made`, holding it as stored; elsewhere it holds
+/// only by a fold, and the refusal says so.
+#[cfg(unix)]
+fn assert_names_the_deny(
+    out: &common::Output,
+    kind: &str,
+    denied: &std::path::Path,
+    made: &std::path::Path,
+) {
+    let said = if denied.exists() {
+        format!("is excluded by `` {kind}{} ``", made.display())
+    } else {
+        format!("is the denied `` {kind}{} `` {RESPELLED}", denied.display())
+    };
+    assert!(
+        out.stderr.contains(&said),
+        "the refusal must name the deny and say why: {said}; stderr:\n{}",
+        out.stderr
+    );
+}
+
 /// E1: an exec deny frozen while its name is absent holds the program a
 /// later create makes under another spelling, and the refusal says why.
 /// Without `Evil` on disk the deny keeps its spelling; the body makes `evil`.
@@ -609,12 +631,11 @@ fn an_absent_exec_deny_holds_a_case_variant() {
         "`evil/x` must be refused; stderr:\n{}",
         out.stderr
     );
-    assert!(
-        out.stderr
-            .contains(&format!("the denied `` `dir `absolute {b}/Evil ``"))
-            && out.stderr.contains(RESPELLED),
-        "the refusal must name the deny and say why; stderr:\n{}",
-        out.stderr
+    assert_names_the_deny(
+        &out,
+        "`dir `absolute ",
+        &bin.join("Evil"),
+        &bin.join("evil"),
     );
 
     let scratch = ExecScratch::new("stored");
@@ -665,13 +686,7 @@ fn an_absent_exec_path_deny_holds_a_case_variant() {
         "`tool` must be refused; stderr:\n{}",
         out.stderr
     );
-    assert!(
-        out.stderr
-            .contains(&format!("the denied `` `absolute {b}/Tool ``"))
-            && out.stderr.contains(RESPELLED),
-        "the refusal must name the deny and say why; stderr:\n{}",
-        out.stderr
-    );
+    assert_names_the_deny(&out, "`absolute ", &bin.join("Tool"), &bin.join("tool"));
 }
 
 /// E2: Seatbelt folds an exec deny as the guard does, so a child's exec of

@@ -42,6 +42,78 @@ hoisted, and so run before the form chose, is refused at elaboration: bind it
 first. The type of the form is the type of the body, so no arm rule is
 specific to scoping ([[decisions/260930_capture-is-decided-by-syntax|capture-is-decided-by-syntax]]).
 
+**The checked core laws distinguish returning code from running it.** In
+`dev/agda`, `Core.Semantics.Scoping` proves:
+
+- Valid environment overlays and handler installation preserve return and
+  halt, distribute over sequencing, recovery and cleanup, and commute with capture in the term
+  interpretation, at every ambient scope and world.
+- Distribution over recovery or cleanup applies the scope to both the body
+  and the recovery/cleanup computation. `ScopedFundamental.EnvironmentControl`
+  transfers the environment equations to machine behaviours for covered
+  terms under finite ambient layers.
+- A thunk returned from a temporary scope and forced afterward runs in the
+  caller's scope. `Core.Machine.ScopingLaws` proves exact finite-behaviour
+  agreement for this equation under any surrounding stack, for arbitrary
+  body syntax. Lexical values remain supplied by substitution.
+- Invalid environment entries fail before the body runs. Moving capture
+  across that failure changes the model's atomic empty-flush event, although
+  the projected channel/outcome views agree; the capture equation therefore
+  requires a valid overlay.
+
+Scoped higher-order adequacy accounts for the scope where suspended code is
+later invoked; coverage of the whole core remains open.
+The checked operational decomposition retains ambient scope while splitting
+execution into a body and its continuation (`Core.Machine.DelimitedExecution`).
+The body can return a function before a pending application; the surrounding
+layers remain installed during its reads and dispatch. The theorem preserves
+exact events and accounts for every step, for a nonempty outer boundary that
+passes byte channels unchanged, collects no audit entries and contains no live
+pipeline stage. Pipelines and channel frames may still occur inside the body.
+`Core.Machine.BoundaryExchange` proves that changing such an outer boundary
+while preserving its scope leaves all body behaviours and their step counts
+unchanged. The continuation may consume the result differently, even at a
+different final result type. `DelimitedCompleteness` uses this law to express
+body completeness at a scope independently of a particular continuation;
+the existing fundamental theorem supplies it at base scope.
+
+`DelimitedScoping` connects body and whole executions under finite scope
+layers for computations returning values, including suspended code. Scope
+entry, handler dispatch, sequencing and application preserve completeness
+under explicit premises about their bodies and returned functions. A checked
+example calls a function inside an environment overlay and then reads the
+restored caller environment. `ScopedRecursion` supplies finite-execution
+induction under those layers: repetition of any independently complete closed body agrees exactly
+with its least fixed point, and the silent self-loop denotes bottom. This
+recursion result preserves the ambient scope throughout each iteration.
+
+`DelimitedNesting` retains an outer continuation when splitting a body at an
+inner boundary, preserving both behaviours and total execution cost. This
+supports bind and application completeness at arbitrary computation result
+types in `DelimitedSequential`: an intermediate result may itself be a
+function.
+
+**Returned code is computable at its invocation scope** in the covered
+`ScopedFundamental` fragment. Its logical relation quantifies over compatible
+ambient boundaries and proves substitution compatibility for higher-order
+CBPV, general recursion, data elimination, codecs, register reads, environment
+entry, handler installation, capture, recovery, cleanup and halt. This yields both
+directions of finite behaviour agreement at `F A`, including suspended values, without assumptions
+about subterm completeness. An escaping thunk reads the restored caller
+environment after its creation overlay ends. Capture preserves the same
+scope while collecting stdout and flushing on failure. Handler invocation
+remains outside this scoped theorem: dispatch needs a computability condition
+on selected handler code. The result does not establish whole-core adequacy.
+
+Direct external commands now compose with this higher-order scoped theorem.
+An escaping command thunk executes at the caller's scope: leaving its creation
+overlay restores the environment and authority used when it is forced.
+`DirectExamples` checks both permitted and denied calls, and capture around a
+recursive list of commands. The direct-command case requires a semantic world
+admitting every response of the current unconstrained machine. This leaves
+the arbitrary-world result for command-free code intact; it does not establish
+adequacy for a machine constrained to a particular operating system.
+
 ## Two layers: lexical scope vs fork inheritance
 
 The lexical scoping above is one mechanism; *crossing a shell boundary* is a

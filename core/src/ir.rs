@@ -736,7 +736,7 @@ pub enum CompKind {
     /// `handler`, a thunk of one argument.
     Try { body: Val, handler: Val },
     /// `guard BODY CLEANUP` — `cleanup` runs unconditionally; a failure in
-    /// it is reported but does not mask the body's result.
+    /// it replaces the body's outcome.
     Guard { body: Val, cleanup: Val },
     /// `audit BODY` — record an audit subtree over `body` and reify it as a
     /// `[outcome: `ok v | `err e, trail]` record.
