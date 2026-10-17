@@ -490,9 +490,12 @@ mod tests {
     use super::{CapturedBytes, Edge, Sink, terminator_len};
     #[cfg(unix)]
     use crate::process::CancelCause;
-    use crate::process::{DurableRoot, Scope};
+    use crate::process::DurableRoot;
+    #[cfg(unix)]
+    use crate::process::Scope;
     #[cfg(unix)]
     use std::io::Read as _;
+    #[cfg(unix)]
     use std::io::Write as _;
     use std::sync::{Arc, Mutex};
     #[cfg(unix)]
