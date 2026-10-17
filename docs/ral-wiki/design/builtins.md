@@ -37,7 +37,7 @@ spelling would be a second thing to keep capability-checked
 ## The families
 
 The Agda core's scalar fragment now has a shared value-or-error semantics in
-`Core.Semantics.Scalar`: arithmetic, comparisons, concatenation and scalar
+`CK.Semantics.Scalar`: arithmetic, comparisons, concatenation and scalar
 rendering return a value or raise an error without emitting bytes. Its
 deterministic reductions agree with machine execution and compose with
 higher-order code, recursion and recovery in `ScopedFundamental`.

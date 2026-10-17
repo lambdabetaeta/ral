@@ -126,7 +126,7 @@ demand wraps in it is decided by the checker, not here
 ([[decisions/260930_graded-f|graded-f]]).
 
 `a ? b ? c` has no frame of its own: it elaborates to nested `try` (kernel
-`_؟_`, `Core.Derived`), right-associated so the last arm stays in tail
+`_؟_`, `CK.Derived`), right-associated so the last arm stays in tail
 position.
 
 **Tail calls push nothing.** β binds the parameter into the closure's

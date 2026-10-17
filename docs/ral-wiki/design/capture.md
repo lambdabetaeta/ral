@@ -119,7 +119,7 @@ by an accepting buffer and permits refusal only at its outer flush, so its
 characterisation and evaluation equation are unconditional. Its image needs
 prefix closure too: the buffer can be flushed before an observation reports the halt. The
 checked `FlushBoundary` counterexample rules out a direct-image account of
-all capture observations. `Core.Machine.CaptureCompleteness.capture-characterisation`
+all capture observations. `CK.Machine.CaptureCompleteness.capture-characterisation`
 proves exact agreement of finite views between `capture M` and the
 prefix-closed capture operation on the body's process, for closed
 `M : F Unit` at the empty stack. It preserves stdin, stderr and file events,

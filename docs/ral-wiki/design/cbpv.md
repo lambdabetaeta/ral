@@ -30,7 +30,7 @@ aliases, `eval`, subshells, and trap handlers: a block can be bound, passed,
 returned, or installed as an effect handler. Currying desugars to nested
 lambdas, so partial and under-application are uniform.
 
-The Agda core in `dev/agda` defines contextual equivalence by program tests
+The frozen Agda CK core in `dev/agda/CK` defines contextual equivalence by program tests
 returning `Unit`: a test must use a thunk to observe it. The relation is
 closed under substitution contexts. Its checked laws are:
 
@@ -50,7 +50,7 @@ focus necessarily has an argument frame; it makes no claim about an
 unapplied function computation at an empty stack.
 These are finite may-observation equivalences, without fairness or
 must-convergence claims. The separate stack relation compares returned value
-syntax; `Core.Contextual.StackCounterexample` proves why its laws alone do
+syntax; `CK.Contextual.StackCounterexample` proves why its laws alone do
 not establish higher-order congruence.
 
 Statement associativity follows from bind associativity, preserving byte
@@ -84,7 +84,7 @@ term semantics, at any scope/world. Ambient
 layers and remaining primitives still need cases;
 the theorem does not require separate completeness assumptions for subterms
 inside its covered fragment.
-The scope laws in `Core.Semantics.Scoping` establish distribution over bind
+The scope laws in `CK.Semantics.Scoping` establish distribution over bind
 and capture for valid environment overlays and handlers. Returning a thunk
 does not capture that temporary dynamic scope; the corresponding machine law
 holds for arbitrary bodies and surrounding stacks
@@ -105,7 +105,19 @@ entry, reads, dispatch and codecs under finite layer stacks. Checked examples
 return both inner and restored environments and execute a self-masking
 handler under capture. Uniform composition across those scoped and sequential
 rules, general recursion, complete syntax coverage, contextual capture/failure
-laws and alignment with producer grades remain outstanding. The plan and theorem audit are in `dev/docs/agda-progress.md`.
+laws and alignment with producer grades remain outstanding.
+
+The active `dev/agda/CEK` foundation has graded intrinsic syntax with bounded
+type variables and proves closure under simultaneous type/grade substitution.
+Substitution preserves kinds, including recursive data bounds and intersections.
+Ground kind views classify the types available to primitive interpretations;
+closed data types contain no thunks. Instantiation leaves
+erased code unchanged: unit upcast disappears, capture/decode remain. Direct
+adaptation has a unique action for its source and target types. These proofs
+check with `--safe --without-K`; they do not yet give operational erasure or
+graded contextual βη laws. Sorted rows, schemes and the environment machine
+remain to be built. The theorem maps are `dev/agda/CEK/README.md` and
+`dev/agda/CK/README.md`; the frontier is `dev/docs/agda-progress.md`.
 
 Bindings are immutable. Re-`let` introduces a fresh binding that shadows the
 outer one within its lexical scope; closures capture at definition time. This

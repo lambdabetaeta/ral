@@ -324,7 +324,7 @@ lands, when a mask ends, and for a process which write is first dead.
 - The Agda's obligations: `Esc` instantiated with `exit n | stop ν? c`, the
   world extended with the node store and a clock, a non-focal `ξpoll`, `βstop`
   consuming by name, and `_⊕_` refined to the cause order
-  (`dev/agda/RUST.md`).
+  (`dev/agda/CK/RUST.md`).
 - Windows has no sliced pipe wait: a thread stage's blocked I/O is
   interrupted (`CancelSynchronousIo`) when the collector writes its node and
   each pass while its chain carries a cause, and a pump each slice of
@@ -338,7 +338,7 @@ lands, when a mask ends, and for a process which write is first dead.
   (`βguard-halt`), the shield changing only what the cleanup's polls read;
   owner-frame masking for command handlers (`mask-layer`,
   `HandlerSelection.Removes`) is the shape of a `poll` owner;
-  `Core.Machine.Focal` classes every scope-reading step as non-focal. To
+  `CK.Machine.Focal` classes every scope-reading step as non-focal. To
   state: (1) `Esc` instantiated with `exit n | stop ν? c`, ν a generated name,
   absent for the closed-stdout stop, `_⊕_` extended to the cause order (law
   5); (2) the `World` extended with the node store `W` and a clock, a scope
@@ -354,7 +354,7 @@ lands, when a mask ends, and for a process which write is first dead.
   name and running its cleanup before `report`, so law 6 is a theorem; (4)
   `shield!⟨since, grace⟩` as a `mask-layer` instance over a monotone clock,
   `CleanupPreempts` the base law 3 extends; (5) `fail`'s faithfulness as a
-  lemma about the record projection. See `dev/agda/RUST.md`.
+  lemma about the record projection. See `dev/agda/CK/RUST.md`.
 - **A nursery**: a scoped `spawn` whose node is the call's, so a stop, an
   `exit` or a failure leaving the scope reaches its workers through the chain
   and the scope frame joins them; Trio's nursery is the precedent. Until then

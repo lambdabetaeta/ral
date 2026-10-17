@@ -74,7 +74,7 @@ The kernel's term formers are now `_to_`, `_؛_`, `_∣_`, `exec`, `capture`,
 former, and it is where the Agda model carries the failure clause.
 
 > **2026-08-30.** `_؛_` is no longer a former: the kernel has one bind,
-> `_to_`, at either route, and `M ؛ N` is `M to shift N` (`Core.Derived`).
+> `_to_`, at either route, and `M ؛ N` is `M to shift N` (`CK.Derived`).
 >
 > **Superseded in its facts, not its decision (2026-08-19).** The decision above
 > stands: the coercion is syntax, and `Decode(Capture(M))` is what the checker
@@ -86,7 +86,7 @@ former, and it is where the Agda model carries the failure clause.
 > kernel has handlers, and a decode that cannot read raises a signal that climbs
 > the stack until a `try` catches it or the run ends at the `abort` leaf. The
 > paragraph below records what was true on 2026-08-12 and is kept for the
-> record; `dev/agda/README.md` is the current account.
+> record; `dev/agda/CK/README.md` is the current account.
 
 The model carries it as of 2026-08-12. `dev/agda` gained a `String` base type
 with `str` as its introduction form, a `decode` former over a *computation* —
