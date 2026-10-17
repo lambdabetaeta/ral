@@ -649,8 +649,9 @@ the whole block.
 Each mentioned dimension becomes deny-by-default:
 
 - `exec:` lists `allow` and `deny` targets: `` `name git ``, a place such as
-  `` `absolute /opt/tools/lint ``, or `` `dir `system `` (or `` `dir `path ``,
-  `` `dir `homebrew ``) for a directory. An allowed target runs with any
+  `` `absolute /opt/tools/lint ``, or `` `dir `system `` (or `` `dir `path ``, or
+  a package manager such as `` `dir `rustup `` or `` `dir `homebrew ``) for a
+  directory. An allowed target runs with any
   arguments; ral does not filter arguments;
 - `fs:` lists the places that are readable, writable, and denied;
 - `net:` is `` `offline `` or omitted; a grant cannot ask for the network;

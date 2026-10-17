@@ -215,7 +215,8 @@ fn place_row() -> Tags {
 }
 
 fn dir_target_row() -> Tags {
-    [place_row(), nullary::<Selector>()].concat()
+    let selectors = Selector::names().map(|n| (n.to_string(), Ty::Unit));
+    place_row().into_iter().chain(selectors).collect()
 }
 
 fn exec_target_row() -> Tags {

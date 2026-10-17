@@ -6,7 +6,8 @@
 //! `tempdir .`, `gitdir .` or `xdg-NAME sub`, and the anchor is read here,
 //! once, so a later `chdir` or `TMPDIR` change cannot retroactively widen a
 //! grant.  A selector names directories the environment chooses, and is
-//! exec-only: its expansion has no containment guard.  XDG
+//! exec-only: its expansion is held under no `home`, but a toolchain
+//! override may not name the world ([`toolchains`]).  XDG
 //! uses the Linux defaults on every platform, macOS included
 //! ([`crate::host`]).
 //!
@@ -36,6 +37,7 @@
 //! [`PolicyError`], never a wider grant.  `tempdir` alone trusts its source as
 //! given, `TMPDIR` being the launching user's to set.
 
+use super::toolchains::{self, Toolchain};
 use crate::host::{XdgKind, resolve_xdg};
 use crate::path::git::{BadPointer, Pointer, discover_git_dir};
 use crate::path::identity::windows_identity_components;
@@ -48,7 +50,8 @@ use crate::text::code;
 use crate::types::{Break, Error, Shell};
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
-use strum::{EnumString, IntoStaticStr, VariantArray};
+use std::str::FromStr;
+use strum::VariantArray;
 
 /// One path a grant names: a tag and a subpath.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,15 +149,37 @@ impl Place {
 }
 
 /// A set of directories the environment chooses, valid only under `dir`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, VariantArray, EnumString, IntoStaticStr)]
-#[strum(serialize_all = "kebab-case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Selector {
     /// Every absolute directory in the host's `$PATH`.
     Path,
-    /// The platform's tool roots ([`system_tool_roots`]).
-    System,
-    /// The Homebrew prefixes present on this host ([`homebrew_roots`]).
-    Homebrew,
+    /// A package manager's, or the platform's, directories ([`Toolchain`]).
+    Toolchain(Toolchain),
+}
+
+impl Selector {
+    /// Every selector's name, as a grant spells it.
+    pub fn names() -> impl Iterator<Item = &'static str> {
+        std::iter::once("path").chain(Toolchain::VARIANTS.iter().map(|&t| <&str>::from(t)))
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Path => "path",
+            Self::Toolchain(t) => t.into(),
+        }
+    }
+}
+
+impl FromStr for Selector {
+    type Err = strum::ParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "path" => Ok(Self::Path),
+            _ => s.parse().map(Self::Toolchain),
+        }
+    }
 }
 
 /// A capability-policy decode/freeze failure.
@@ -333,16 +358,19 @@ impl FreezeCtx {
     }
 
     /// The directories a selector names.  Selectors read the host, not the
-    /// anchor; they sit here so that one resolver freezes every grant path.
+    /// anchor, save for the home; they sit here so that one resolver freezes
+    /// every grant path.
     ///
     /// # Errors
-    /// `path` over a `$PATH` with no absolute entry.
-    #[allow(clippy::unused_self, reason = "one resolver for places and selectors")]
+    /// `path` over a `$PATH` with no absolute entry, or a toolchain override
+    /// that names the filesystem root or the home.
     pub fn selector(&self, selector: Selector) -> Result<Vec<FrozenPath>, PolicyError> {
         match selector {
             Selector::Path => path_dirs(),
-            Selector::System => system_dirs(),
-            Selector::Homebrew => homebrew_dirs(),
+            Selector::Toolchain(t) => toolchains::expand(t, self.home())?
+                .iter()
+                .map(freeze)
+                .collect(),
         }
     }
 
@@ -598,117 +626,6 @@ fn path_dirs() -> Result<Vec<FrozenPath>, PolicyError> {
         )));
     }
     Ok(dirs)
-}
-
-/// `homebrew` expansion.  An absent Homebrew expands to nothing, not an error.
-fn homebrew_dirs() -> Result<Vec<FrozenPath>, PolicyError> {
-    live_homebrew_roots().iter().map(freeze).collect()
-}
-
-/// [`homebrew_roots`] over the live environment and filesystem: what the
-/// `homebrew` selector and the fs floor both expand to.
-pub(crate) fn live_homebrew_roots() -> Vec<String> {
-    homebrew_roots(|k| std::env::var(k).ok(), crate::path::exists)
-}
-
-/// `system` expansion.  Unlike `path` it can never come back empty, the
-/// platform's own tool roots being unconditional, so the only error is a
-/// root that cannot be frozen.
-fn system_dirs() -> Result<Vec<FrozenPath>, PolicyError> {
-    system_tool_roots().iter().map(freeze).collect()
-}
-
-/// The platform's tool-root directories, what the `system` selector expands
-/// to.
-///
-/// Feeds [`unix_tool_roots`] or [`windows_tool_roots`] the live filesystem and
-/// environment.  Both stay parameterised over those inputs so each platform's
-/// list is unit-testable on every host, not only the one compiling it, the
-/// pattern `which`'s `name_key_on` follows too.
-pub fn system_tool_roots() -> Vec<String> {
-    #[cfg(windows)]
-    {
-        let system_root = std::env::var("SystemRoot").unwrap_or_default();
-        let program_files = std::env::var("ProgramFiles").unwrap_or_default();
-        let program_files_x86 = std::env::var("ProgramFiles(x86)").unwrap_or_default();
-        let program_files_dirs: Vec<&str> = [program_files.as_str(), program_files_x86.as_str()]
-            .into_iter()
-            .filter(|s| !s.is_empty())
-            .collect();
-        windows_tool_roots(&system_root, &program_files_dirs, crate::path::exists)
-    }
-    #[cfg(not(windows))]
-    {
-        unix_tool_roots(crate::path::exists)
-    }
-}
-
-/// `/usr/bin` and `/bin` unconditionally, plus whichever of the toolchain
-/// roots `exists` reports.
-///
-/// The one place platform tool roots live as grant data: the OS sandboxes
-/// admit nothing beyond what a grant names, so program behaviour that no
-/// carrier explains (`cc → cc1`, `git → git-remote-https`, `clang → ld`)
-/// needs its directory here.
-#[cfg_attr(not(any(unix, test)), allow(dead_code))]
-pub(crate) fn unix_tool_roots(exists: impl Fn(&str) -> bool) -> Vec<String> {
-    let mut roots = vec!["/usr/bin".to_string(), "/bin".to_string()];
-    roots.extend(
-        [
-            "/usr/libexec",
-            "/usr/lib/git-core",
-            "/usr/lib/gcc",
-            "/Library/Developer/CommandLineTools",
-            "/Applications/Xcode.app/Contents/Developer",
-        ]
-        .into_iter()
-        .filter(|root| exists(root))
-        .map(str::to_string),
-    );
-    roots
-}
-
-/// The Homebrew prefixes that `exists` reports: an absolute `HOMEBREW_PREFIX`
-/// alone when `env` sets one, else `/opt/homebrew` if present.  Intel macOS's
-/// `/usr/local` is shared with everything else, so only `HOMEBREW_PREFIX`
-/// reaches it.
-pub(crate) fn homebrew_roots(
-    env: impl Fn(&str) -> Option<String>,
-    exists: impl Fn(&str) -> bool,
-) -> Vec<String> {
-    let root = env("HOMEBREW_PREFIX")
-        .filter(|p| p.starts_with('/'))
-        .unwrap_or_else(|| "/opt/homebrew".to_string());
-    exists(&root).then_some(root).into_iter().collect()
-}
-
-/// `%SystemRoot%\System32` and the bundled Windows PowerShell home, falling
-/// back to the conventional `C:\Windows` when `system_root` is empty.
-///
-/// A Git-for-Windows `usr\bin` joins them, under whichever
-/// `program_files_dirs` entry `exists` reports.
-#[cfg_attr(not(any(windows, test)), allow(dead_code))]
-pub(crate) fn windows_tool_roots(
-    system_root: &str,
-    program_files_dirs: &[&str],
-    exists: impl Fn(&str) -> bool,
-) -> Vec<String> {
-    let system_root = if system_root.is_empty() {
-        r"C:\Windows"
-    } else {
-        system_root
-    };
-    let mut roots = vec![
-        format!(r"{system_root}\System32"),
-        format!(r"{system_root}\System32\WindowsPowerShell\v1.0"),
-    ];
-    for pf in program_files_dirs {
-        let git_bin = format!(r"{pf}\Git\usr\bin");
-        if exists(&git_bin) {
-            roots.push(git_bin);
-        }
-    }
-    roots
 }
 
 #[cfg(test)]
@@ -1053,127 +970,5 @@ mod tests {
         }
         assert_eq!(expand_path_prefix("~/.gitconfig", None), "~/.gitconfig");
         assert_eq!(expand_path_prefix("xdg:config/git", None), "xdg:config/git");
-    }
-
-    #[test]
-    fn unix_tool_roots_always_carries_usr_bin_and_bin() {
-        let roots = unix_tool_roots(|_| false);
-        assert_eq!(roots, vec!["/usr/bin".to_string(), "/bin".to_string()]);
-    }
-
-    #[test]
-    fn unix_tool_roots_carries_no_homebrew() {
-        let roots = unix_tool_roots(|p| p.contains("brew"));
-        assert_eq!(roots, ["/usr/bin", "/bin"]);
-    }
-
-    #[test]
-    fn homebrew_roots_table() {
-        let all = |_: &str| true;
-        let none = |_: &str| false;
-        let prefix =
-            |v: &'static str| move |k: &str| (k == "HOMEBREW_PREFIX").then(|| v.to_string());
-        let unset = |_: &str| None;
-        let cases: [(&str, Vec<String>, Vec<String>); 6] = [
-            (
-                "default",
-                homebrew_roots(unset, all),
-                vec!["/opt/homebrew".into()],
-            ),
-            ("absent", homebrew_roots(unset, none), vec![]),
-            (
-                "prefix replaces default",
-                homebrew_roots(prefix("/usr/local"), all),
-                vec!["/usr/local".into()],
-            ),
-            (
-                "absent prefix is nothing",
-                homebrew_roots(prefix("/usr/local"), |p| p != "/usr/local"),
-                vec![],
-            ),
-            (
-                "relative prefix ignored",
-                homebrew_roots(prefix("brew"), |p| p == "/opt/homebrew"),
-                vec!["/opt/homebrew".into()],
-            ),
-            (
-                "system without homebrew",
-                unix_tool_roots(|p| p.contains("brew")),
-                vec!["/usr/bin".into(), "/bin".into()],
-            ),
-        ];
-        for (name, got, want) in cases {
-            assert_eq!(got, want, "{name}");
-        }
-    }
-
-    #[test]
-    fn unix_tool_roots_adds_each_present_toolchain_root_only() {
-        let toolchains = [
-            "/usr/libexec",
-            "/usr/lib/git-core",
-            "/usr/lib/gcc",
-            "/Library/Developer/CommandLineTools",
-            "/Applications/Xcode.app/Contents/Developer",
-        ];
-        assert_eq!(
-            unix_tool_roots(|p| toolchains.contains(&p)).split_at(2).1,
-            toolchains
-        );
-        for present in toolchains {
-            let roots = unix_tool_roots(|p| p == present);
-            assert_eq!(roots, ["/usr/bin", "/bin", present], "{present}");
-        }
-    }
-
-    /// No `cfg(windows)` on any of the Windows-shape tests: they run on the
-    /// macOS and Linux CI hosts that never compile `system_tool_roots`' other
-    /// half.
-    #[test]
-    fn windows_tool_roots_always_carries_system32_and_powershell() {
-        let roots = windows_tool_roots(r"C:\Windows", &[], |_| false);
-        assert_eq!(
-            roots,
-            vec![
-                r"C:\Windows\System32".to_string(),
-                r"C:\Windows\System32\WindowsPowerShell\v1.0".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn windows_tool_roots_falls_back_when_system_root_unset() {
-        let roots = windows_tool_roots("", &[], |_| false);
-        assert!(roots[0].starts_with(r"C:\Windows"), "got {roots:?}");
-    }
-
-    #[test]
-    fn windows_tool_roots_adds_git_for_windows_usr_bin_when_present() {
-        let roots = windows_tool_roots(r"C:\Windows", &[r"C:\Program Files"], |p| {
-            p == r"C:\Program Files\Git\usr\bin"
-        });
-        assert!(
-            roots.contains(&r"C:\Program Files\Git\usr\bin".to_string()),
-            "got {roots:?}"
-        );
-    }
-
-    #[test]
-    fn windows_tool_roots_omits_git_for_windows_when_absent() {
-        let roots = windows_tool_roots(r"C:\Windows", &[r"C:\Program Files"], |_| false);
-        assert!(!roots.iter().any(|r| r.contains("Git")), "got {roots:?}");
-    }
-
-    #[test]
-    fn windows_tool_roots_checks_both_program_files_locations() {
-        let roots = windows_tool_roots(
-            r"C:\Windows",
-            &[r"C:\Program Files", r"C:\Program Files (x86)"],
-            |p| p == r"C:\Program Files (x86)\Git\usr\bin",
-        );
-        assert!(
-            roots.contains(&r"C:\Program Files (x86)\Git\usr\bin".to_string()),
-            "got {roots:?}"
-        );
     }
 }

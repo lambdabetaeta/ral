@@ -29,10 +29,10 @@ on, while `confined` turns the network off but allows project writes.
 | profile      | network | project       | reads beyond the project                  | executable surface                                  |
 |--------------|---------|---------------|-------------------------------------------|-----------------------------------------------------|
 | `dangerous`  | inherit | inherit       | inherit                                   | inherit                                             |
-| `reasonable` | on      | read + write  | broad config, state, and toolchain caches | `PATH`, system roots, user toolchains, named tools  |
+| `reasonable` | on      | read + write  | broad config, state, and toolchain caches | `PATH`, system roots, package-manager toolchains, named tools |
 | `edit-only`  | on      | read + write  | broad config and toolchain caches         | system and editing tools; Git denied                |
 | `read-only`  | on      | read only     | broad config and toolchain caches         | system and review tools, including Git              |
-| `minimal`    | on      | read + write  | none; `` `xdg-cache `` is writable             | system roots, project, and scratch                  |
+| `minimal`    | on      | read + write  | none                                      | system roots, project, and scratch                  |
 | `confined`   | off     | read + write  | none                                      | system roots, Homebrew, `/usr/local/bin`, project, and scratch |
 
 ### `reasonable` — everyday coding
@@ -43,18 +43,24 @@ and use installed development toolchains.
 - **Reads:** the project and Git directory, scratch, XDG config/data/cache/state
   directories, common toolchain caches, user toolchains, and macOS
   `~/Library/Caches`.
-- **Writes:** the project and Git directory, scratch, and `` `xdg-cache ``. Persistent
-  config, data, state, user binaries, SSH keys, and system directories are not
-  writable.
-- **Programs:** commands resolved through `PATH`, platform tool roots, common
-  user-toolchain directories, project and scratch executables, and a named set
-  of everyday tools.
+- **Writes:** the project and Git directory, scratch, and one file of rustup's
+  (below). No cache is writable, and neither are persistent config, data, state,
+  user binaries, SSH keys, and system directories: see
+  [Build-tool caches](#build-tool-caches).
+- **Programs:** commands resolved through `PATH`, platform tool roots, the
+  directories of every package manager it knows (`rustup`, `cargo`, `go`,
+  `pyenv`, `nvm`, `homebrew`, and so on; see
+  [Package-manager selectors](#package-manager-selectors)), project and scratch
+  executables, and a named set of everyday tools.
 - **Network:** on.
 
 Interactive shells are not singled out: `bash` and `zsh` are admitted through
 the same `PATH` and system-root entries as any other binary. What a shell can
 do here is what this profile allows, so denying it by name would steer rather
 than confine. Use `minimal`, which denies both, when the ban must hold.
+
+`~/.dotnet` runs, and so is read, wherever .NET is installed; its `corefx`
+subtree holds .NET's certificate store, private keys included, and is denied.
 
 Git works locally, including unsigned commits. SSH and GPG keys are not
 readable, so SSH pushes and signed commits fail unless you deliberately extend
@@ -127,7 +133,7 @@ network isolation.
 `minimal` is the smallest useful starting point for a custom profile.
 
 - **Reads:** project and scratch only.
-- **Writes:** project, scratch, and `` `xdg-cache ``.
+- **Writes:** project and scratch.
 - **Programs:** platform system roots, project executables, and scratch
   executables.
 - **Network:** on.
@@ -141,8 +147,10 @@ the supplied extension adds Git config and admits Git wherever it is installed:
 exarch --base minimal --extend exarch/examples/git.exarch.ral
 ```
 
-`minimal` leaves Homebrew unlisted; add brew tools with `--extend` (a file
-allowing `` `dir `homebrew ``). Other system roots remain platform-dependent.
+`minimal` leaves Homebrew and every other package manager unlisted; add
+their tools with `--extend` (a file allowing `` `dir `homebrew ``, or
+`` `dir `rustup `` and `` `dir `cargo ``). Other system roots remain
+platform-dependent.
 
 ### `confined` — offline build jail
 
@@ -235,7 +243,7 @@ not stamp every drive; grant the folders the program needs instead. The
 in-process guard still judges, and in-process work is unaffected.
 
 Each file is frozen as it loads: the places `` `home ``, `` `xdg-* ``, `` `cwd ``,
-`` `tempdir ``, `` `gitdir ``, and the `` `system ``, `` `homebrew `` and `` `path `` selectors resolve to
+`` `tempdir ``, `` `gitdir ``, and the `dir` selectors (`` `path ``, `` `system ``, the package managers) resolve to
 fixed paths for that session before the capabilities are composed. Changing the environment later cannot move those grants.
 
 Two of them are read from a source the session does not author, and each is
@@ -273,26 +281,85 @@ Unix-only path entries are discarded on Windows rather than making the whole
 profile fail to load. The audit trail (`ral --audit --capabilities FILE -c true`) therefore
 reports only grants the current platform can back.
 
+## Package-manager selectors
+
+Besides `` `dir `system ``, `` `dir `NAME `` names where a package manager runs
+programs from: `rustup`, `cargo`, `go`, `pyenv`, `nvm`, `uv`, `poetry`, `conda`,
+`sdkman`, `homebrew`, `scoop` and many more. A refusal of an unknown name lists
+them all, and the table behind them is `core/src/guard/toolchains.rs`. Each
+manager is a few locations, each with environment-variable overrides and
+defaults:
+
+- the first usable override chooses the location (non-empty and absolute;
+  `CARGO_HOME`, `GOPATH`'s first entry, `PYENV_ROOT`, …), else its defaults do;
+- only directories that exist are kept. An override naming a missing directory
+  yields nothing, not the defaults; an absent manager expands to nothing;
+- overrides are read from the host process environment, never from the session's
+  variables, so the redirects below do not move a grant, and never from a tool's
+  own configuration files: name such a directory with `` `dir `absolute ``;
+- an override that names the filesystem root, the home or an ancestor of it
+  refuses the session, naming the variable: running reads would make it a read of
+  everything. `GOPATH=~`, which chooses `~/bin`, is fine.
+
+A location is the narrowest directory that holds what runs, and a directory a
+selector runs is readable. So `reasonable` lists no read entry for them, only
+caches and registries. `homebrew`, `macports`, `nix` and `pkgsrc` are
+system-wide prefixes, and every restricted read can read them where they exist.
+
 ## Build-tool caches
 
-`reasonable` and `minimal` permit writes to `` `xdg-cache ``, so modern tools that
-honour `$XDG_CACHE_HOME` use an allowed cache automatically.
+No profile writes a cache that the user's own tools read. Most caches are
+trusted on use: cargo's unpacked sources, Go's module and build caches, Maven's
+repository, uv's built wheels and Bun's cache are not re-verified. A write there
+by a prompt-injected agent would outlive the session, reach every project, and
+run unconfined in your next build. So every cache a session writes lives in
+`$EXARCH_SCRATCH`, which is deleted when the session ends, and builds start
+cold. `reasonable`, `edit-only` and `read-only` still read `` `xdg-cache `` and
+`~/Library/Caches`; `reasonable` and `minimal` no longer write `` `xdg-cache ``.
 
-For common tools that use older home-directory conventions, exarch redirects
-these variables into `$EXARCH_SCRATCH` when the session starts:
+When the session starts, exarch replaces these variables, whatever was
+inherited, with a value under the scratch:
 
-| variable           | tool   | scratch directory |
-|--------------------|--------|-------------------|
-| `CARGO_HOME`       | Cargo  | `cargo`           |
-| `npm_config_cache` | npm    | `npm-cache`       |
-| `GRADLE_USER_HOME` | Gradle | `gradle`          |
-| `GOPATH`           | Go     | `go`              |
-| `GOMODCACHE`       | Go     | `go/pkg/mod`      |
-| `RUSTUP_HOME`      | rustup | `rustup`          |
+| variable                 | tool                                             | value under the scratch          |
+|--------------------------|--------------------------------------------------|----------------------------------|
+| `XDG_CACHE_HOME`         | everything that honours it (uv, Deno, pre-commit, Yarn 1, Corepack, pip and Go's build cache on Linux) | `xdg-cache` |
+| `CARGO_HOME`             | Cargo                                            | `cargo`                          |
+| `GRADLE_USER_HOME`       | Gradle                                           | `gradle`                         |
+| `GOPATH`                 | Go                                               | `go`                             |
+| `GOMODCACHE`             | Go                                               | `go/pkg/mod`                     |
+| `npm_config_cache`       | npm                                              | `npm-cache`                      |
+| `GOCACHE`                | Go (macOS ignores `XDG_CACHE_HOME`)              | `go-build`                       |
+| `PIP_CACHE_DIR`          | pip (macOS honours the XDG variable only from 26.2) | `pip`                         |
+| `POETRY_CACHE_DIR`       | Poetry, including the virtualenvs it creates     | `poetry`                         |
+| `pnpm_config_store_dir`  | pnpm 11                                          | `pnpm-store`                     |
+| `npm_config_store_dir`   | pnpm 10 and earlier                              | `pnpm-store`                     |
+| `BUN_INSTALL_CACHE_DIR`  | Bun                                              | `bun`                            |
+| `YARN_GLOBAL_FOLDER`     | Yarn 2 and later                                 | `yarn-berry`                     |
+| `MAVEN_ARGS`             | Maven 3.9 and later                              | `-Dmaven.repo.local=<scratch>/maven` |
 
-These values replace inherited ones. A build therefore writes to disposable
-scratch instead of silently targeting a real cache that the active profile
-does not permit.
+A build therefore writes to disposable scratch instead of silently targeting a
+real cache the profile does not permit. A tool in neither this table nor the XDG
+world has its cache writes refused, and the refusal names the path.
+
+- **`MAVEN_ARGS` is set outright.** A session ignores your own `MAVEN_ARGS`, as
+  `CARGO_HOME` already hides `~/.cargo/config.toml` and `GRADLE_USER_HOME` hides
+  `gradle.properties`. A Maven older than 3.9, a wrapper's pinned one included,
+  ignores the variable, so its writes to `~/.m2` are refused.
+- **pnpm's store moves.** pnpm records its store in a project's
+  `node_modules/.modules.yaml`, so after a session's `pnpm install` your own next
+  `pnpm install` there reports `ERR_PNPM_UNEXPECTED_STORE` and offers to rebuild
+  `node_modules`; without a terminal it aborts, and `pnpm add` fails.
+- **`RUSTUP_HOME` stays yours.** It holds the toolchains that run, not a cache,
+  so it is not redirected: `cargo` in a session runs your rustup toolchains.
+  They are read-only, so an install that a `rust-toolchain.toml` triggers,
+  including a missing target or component, is refused as a write. The one
+  exception is `self-update/self-update.lock`, which recent rustup opens for
+  writing on every proxy run: `reasonable` writes that one file, under
+  `$RUSTUP_HOME` or `~/.rustup`, and excludes the `self-update` directory from
+  running, since rustup stages there the updater it later runs unconfined. On
+  Linux the lock must already exist.
+- **A scratch is deleted when its session ends.** A session killed before it can
+  clean up leaves its scratch to the next session's sweep.
 
 One further variable is forced, though it relocates nothing:
 

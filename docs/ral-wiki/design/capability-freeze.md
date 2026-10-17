@@ -26,7 +26,7 @@ function. It walks a `.ral` profile's terminal record — or the inline
 returning. In that pass it:
 
 - **resolves** every place (`` `cwd ``, `` `home ``, `` `tempdir ``, `` `gitdir ``,
-  `` `xdg-* ``, `` `absolute ``) and every selector (`` `path ``, `` `system ``)
+  `` `xdg-* ``, `` `absolute ``) and every selector (`` `path ``, `` `system ``, the package managers)
   against a `FreezeCtx` (owned `home` and `cwd`, `FreezeCtx::of(&Shell)`;
   `` `tempdir `` against the process temp dir). The freeze is `guard/freeze.rs`:
   `FreezeCtx::place` is the one place a grant's place becomes a `FrozenPath`,

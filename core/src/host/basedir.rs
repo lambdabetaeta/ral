@@ -47,12 +47,18 @@ impl XdgKind {
     }
 }
 
-/// Resolve an XDG kind: an absolute `XDG_*_HOME`, else `home` joined with the
-/// kind's [default suffix](XdgKind::default_suffix).
+/// [`resolve_xdg_in`] over the host process environment.
+pub(crate) fn resolve_xdg(kind: XdgKind, home: Option<&str>) -> Option<PathBuf> {
+    resolve_xdg_in(super::host_var, kind, home)
+}
+
+/// Resolve an XDG kind: an absolute `XDG_*_HOME` read through `env`, else
+/// `home` joined with the kind's [default suffix](XdgKind::default_suffix).
 ///
 /// `home` is the caller's, never a process-level `HOME` lookup, so a
 /// shell-scoped `HOME=` reaches here exactly as it reaches tilde expansion.
-/// The `XDG_*_HOME` vars themselves still come from the process environment.
+/// The `XDG_*_HOME` vars themselves come from `env`: the process environment
+/// for [`resolve_xdg`].
 ///
 /// `None` when nothing absolute resolves: no home to default under, and no
 /// absolute override to stand in for one.  An unknown home is thus not the
@@ -62,28 +68,25 @@ impl XdgKind {
     clippy::disallowed_methods,
     reason = "path-form: lifts the caller's `home` to join the spec's default suffix under it"
 )]
-pub(crate) fn resolve_xdg(kind: XdgKind, home: Option<&str>) -> Option<PathBuf> {
-    absolute_env_var(kind.env_var()).or_else(|| {
-        // `default_suffix()` is spelled with the spec's `/`, so join it
-        // component-by-component rather than as one literal — otherwise the
-        // result mixes native separators with a stray `/` on Windows.
-        Some(
-            kind.default_suffix()
-                .split('/')
-                .fold(Path::new(home?).to_path_buf(), |acc, part| acc.join(part)),
-        )
-    })
-}
-
-/// The var's value, kept only when absolute — the spec ignores relative ones.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "host-env: an `XDG_*_HOME` override is the host's, kept only when absolute per the spec"
-)]
-fn absolute_env_var(key: &str) -> Option<PathBuf> {
-    std::env::var_os(key)
+pub(crate) fn resolve_xdg_in(
+    env: impl Fn(&str) -> Option<String>,
+    kind: XdgKind,
+    home: Option<&str>,
+) -> Option<PathBuf> {
+    // The spec ignores a relative override.
+    env(kind.env_var())
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
+        .or_else(|| {
+            // `default_suffix()` is spelled with the spec's `/`, so join it
+            // component-by-component rather than as one literal — otherwise the
+            // result mixes native separators with a stray `/` on Windows.
+            Some(
+                kind.default_suffix()
+                    .split('/')
+                    .fold(Path::new(home?).to_path_buf(), |acc, part| acc.join(part)),
+            )
+        })
 }
 
 // Unix-only: the resolver is platform-agnostic, the asserted literals are not.

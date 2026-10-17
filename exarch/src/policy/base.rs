@@ -113,7 +113,21 @@ mod tests {
     /// Parse *and* freeze a bake-in: the loader resolves places, so a failure
     /// here is malformed source, a refused payload, or an xdg escape.
     fn load(name: &str, text: &str, ctx: &FreezeCtx) -> Capabilities {
+        load_with_env(name, text, ctx, &[])
+    }
+
+    /// [`load`] under shell-level overrides of the environment a profile's
+    /// `env` reads.
+    fn load_with_env(
+        name: &str,
+        text: &str,
+        ctx: &FreezeCtx,
+        env: &[(&str, &str)],
+    ) -> Capabilities {
         let mut shell = ral_core::test_helper::core_shell();
+        for (k, v) in env {
+            shell.set_env_var(*k, *v);
+        }
         ral_core::load::profile::load_capabilities_from_str(
             &ral_core::types::Mooring::adrift(),
             &mut shell,
@@ -441,68 +455,102 @@ mod tests {
         );
     }
 
-    /// Rustup resolves `cargo` under `~/.rustup/toolchains/`, a path shape easy
-    /// to miss when hand-enumerating exec roots.
+    /// The selector names `text`'s `exec` allow list targets as `` `dir `NAME ``,
+    /// read from the evaluated profile before it is decoded and frozen.
+    fn dir_selectors(text: &str) -> std::collections::BTreeSet<String> {
+        use ral_core::types::Value;
+        let mut shell = ral_core::test_helper::core_shell();
+        let profile = ral_core::load::evaluate_source(
+            &ral_core::types::Mooring::adrift(),
+            &mut shell,
+            text,
+            "<test-base:selectors>",
+            None,
+        )
+        .unwrap_or_else(|e| panic!("profile failed to evaluate: {e:?}"));
+        let field = |v: &Value, k: &str| match v {
+            Value::Map(m) => m.get(k).map(std::borrow::Cow::into_owned),
+            _ => None,
+        };
+        let allow = field(&profile, "exec")
+            .and_then(|exec| field(&exec, "allow"))
+            .expect("the profile has an exec allow list");
+        let Value::List(targets) = allow else {
+            panic!("exec allow is a list");
+        };
+        targets
+            .iter()
+            .filter_map(|t| match &*t {
+                Value::Variant { label, payload } if &**label == "dir" => {
+                    payload.as_deref().cloned()
+                }
+                _ => None,
+            })
+            .filter_map(|inner| match inner {
+                Value::Variant {
+                    label,
+                    payload: None,
+                } => Some(label.to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every selector, `path` included, is listed under `dir`: read off the
+    /// profile's own value, since what a selector expands to depends on the
+    /// host, and a manager absent here would pass vacuously.
+    #[test]
+    fn reasonable_lists_every_selector() {
+        use ral_core::guard::freeze::Selector;
+        let want = Selector::names().map(String::from).collect();
+        assert_eq!(dir_selectors(REASONABLE_RAL), want);
+    }
+
+    /// rustup takes its lock for writing on every proxy run, and stages the
+    /// updater it later runs beside it: the lock is writable, its directory
+    /// excluded from `exec`.  `RUSTUP_HOME` is emptied, which the profile
+    /// reads as unset.
     #[cfg(unix)]
     #[test]
-    fn reasonable_admits_cargo_under_rustup_toolchain() {
-        let home = host_home();
+    fn reasonable_writes_the_rustup_lock_and_never_runs_self_update() {
         let ctx = FreezeCtx {
-            home: Some(home.clone()),
+            home: Some(host_home()),
             cwd: "/".into(),
         };
-        let caps = load("reasonable", REASONABLE_RAL, &ctx);
-        let cargo = object(&format!(
-            "{home}/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo"
-        ));
+        let caps = load_with_env("reasonable", REASONABLE_RAL, &ctx, &[("RUSTUP_HOME", "")]);
+        let home = |sub: &str| frozen(&Place::Home(sub.into()), &ctx);
+        let lock = home(".rustup/self-update/self-update.lock");
+        let fs = caps.fs.as_ref().expect("reasonable declares fs");
         assert!(
-            admits(caps, &cargo),
-            "rustup toolchain cargo must be admitted"
+            fs.write_prefixes.contains(&lock),
+            "reasonable should write {}",
+            lock.as_str()
+        );
+        let self_update = home(".rustup/self-update");
+        let exec = caps.exec.as_ref().expect("reasonable declares exec");
+        assert!(
+            dirs(exec).any(|(p, v)| p == self_update.as_str() && !v),
+            "reasonable should exclude {} from exec",
+            self_update.as_str()
         );
     }
 
+    /// A session writes no cache the user's own tools read.
     #[cfg(unix)]
     #[test]
-    fn reasonable_admits_go_official_and_user_tools() {
-        let home = host_home();
+    fn reasonable_and_minimal_write_no_user_cache() {
         let ctx = FreezeCtx {
-            home: Some(home.clone()),
+            home: Some(host_home()),
             cwd: "/".into(),
         };
-        let caps = load("reasonable", REASONABLE_RAL, &ctx);
-        let gobin = object(&format!("{home}/go/bin/goimports"));
-        for abs in ["/usr/local/go/bin/go", gobin.as_str()] {
-            assert!(admits(caps.clone(), abs), "{abs} must be admitted");
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn reasonable_admits_nvm_node() {
-        let home = host_home();
-        let ctx = FreezeCtx {
-            home: Some(home.clone()),
-            cwd: "/".into(),
-        };
-        let caps = load("reasonable", REASONABLE_RAL, &ctx);
-        let node = object(&format!("{home}/.nvm/versions/node/v22.0.0/bin/node"));
-        assert!(admits(caps, &node), "nvm node must be admitted");
-    }
-
-    /// Both the versioned install and the shim layer pyenv puts on `$PATH`.
-    #[cfg(unix)]
-    #[test]
-    fn reasonable_admits_pyenv_python() {
-        let home = host_home();
-        let ctx = FreezeCtx {
-            home: Some(home.clone()),
-            cwd: "/".into(),
-        };
-        let caps = load("reasonable", REASONABLE_RAL, &ctx);
-        let versioned = object(&format!("{home}/.pyenv/versions/3.12.0/bin/python3"));
-        let shim = object(&format!("{home}/.pyenv/shims/python3"));
-        for abs in [versioned.as_str(), shim.as_str()] {
-            assert!(admits(caps.clone(), abs), "{abs} must be admitted");
+        let cache = frozen(&xdg(XdgKind::Cache, "."), &ctx);
+        for (name, text) in [("minimal", MINIMAL_RAL), ("reasonable", REASONABLE_RAL)] {
+            let fs = load(name, text, &ctx).fs.expect("declares fs");
+            assert!(
+                !fs.write_prefixes.contains(&cache),
+                "{name} must not write {}",
+                cache.as_str()
+            );
         }
     }
 
@@ -731,8 +779,8 @@ mod tests {
 
     /// `system` must expand to an allowance for every live tool root —
     /// merely finding the key would pass on a deny too, which is the whole
-    /// point.  Ungated, since `system_tool_roots` walks the
-    /// platform's own branch and the assertion holds either way.
+    /// point.  Ungated, since the expansion is the host's own and the
+    /// assertion holds either way.
     #[test]
     fn every_exec_base_admits_live_system_tool_roots() {
         let home = host_home();
@@ -743,7 +791,11 @@ mod tests {
             home: Some(home),
             cwd,
         };
-        let roots = ral_core::guard::freeze::system_tool_roots();
+        let roots = ral_core::guard::toolchains::expand(
+            ral_core::guard::toolchains::Toolchain::System,
+            ctx.home.as_deref(),
+        )
+        .expect("the system roots expand");
         for (name, text) in [
             ("reasonable", REASONABLE_RAL),
             ("edit-only", EDIT_ONLY_RAL),

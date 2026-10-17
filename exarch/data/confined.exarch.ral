@@ -31,10 +31,10 @@ return [
   # Host binaries are admitted by subpath, never enumerated: the build
   # sandbox trusts whatever lives in the platform's tool roots
   # (`dir `system`, and `dir `homebrew` for a Homebrew tree when the host
-  # has one; both expand in `core/src/guard/freeze.rs`) — a build jail
-  # plausibly needs a Homebrew-installed compiler.  Apple's toolchain
-  # (CommandLineTools, Xcode) is among the `system` roots, so `gcc → cc1 → as → ld` resolves
-  # without listing each tool here.
+  # has one; both are rows of `core/src/guard/toolchains.rs`) — a build
+  # jail plausibly needs a Homebrew-installed compiler.  Apple's
+  # toolchain (CommandLineTools, Xcode) is among the `system` roots, so
+  # `gcc → cc1 → as → ld` resolves without listing each tool here.
   exec: [
     allow: [
       `dir `system,                   # sh, bash, uname, dirname, env, sed, awk, …

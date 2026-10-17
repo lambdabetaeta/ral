@@ -81,7 +81,7 @@ child's rides its bequest's env overrides); no engine mints a
 scratch, so no lock crosses a process boundary and nothing must live as long as
 an engine.
 
-The scratch carries the tool homes (`CARGO_HOME`, `GOPATH`, `RUSTUP_HOME`, …),
+The scratch carries the tool homes (`CARGO_HOME`, `GOPATH`, …),
 shared by every agent in one tree; on the guest the scratch is `/tmp` itself.
 A narrowed child (a `read-only` grant may still write the scratch) can therefore
 plant `$CARGO_HOME/config.toml` or `$CARGO_HOME/bin/*` for a wider sibling or

@@ -15,6 +15,7 @@ mod enforce;
 pub mod freeze;
 mod grant;
 mod shell;
+pub mod toolchains;
 
 pub use decode::decode_capability_map;
 pub(crate) use enforce::{Denial, deny_head};

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 646bff0a
-generated_at_date: 2026-10-13
+generated_at_commit: 95858e12
+generated_at_date: 2026-10-17
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/guard/, core/src/guard.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
 
@@ -138,10 +138,17 @@ grant string becomes a frozen path.
   `home` and `cwd`) and its `place` (`None` is a dead grant, an `absolute`
   payload classified on the raw string) and `selector`; the tags `absolute`,
   `cwd`, `home`, `tempdir`, `gitdir` and `xdg-*`, `PolicyError`, the `gitdir`
-  refusals (`From<BadPointer>`), and the directory selectors `path`, `system` and `homebrew`
-  (`path_dirs`, `system_dirs`, `system_tool_roots`, the Homebrew expansion the
-  fs floor shares); `FrozenPath` freezing refuses a real path that is not
-  Unicode;
+  refusals (`From<BadPointer>`), `Selector` (`Path | Toolchain(Toolchain)`) and
+  the `path` selector (`path_dirs`); `FrozenPath` freezing refuses a real path
+  that is not Unicode;
+- `toolchains.rs` — every other directory selector as one table: `enum
+  Toolchain` (`system` and the package managers), each a few `Location`s of
+  overrides and defaults, from one exhaustive `match`; the pure `expand_in`
+  over an injected environment, home and `exists`, its live wrapper `expand`
+  (what `FreezeCtx::selector` calls), the home guard `refuse_the_world`, and
+  `FLOOR`, the four system-wide prefixes (`homebrew`, `macports`, `nix`,
+  `pkgsrc`) that `fs::floor` reads through `floor` and keeps only outside the
+  process's home ([[design/grant|grant]] §Selectors states the rules);
 - `decode.rs` — `decode_capability_map`, which walks a `grant [...]` /
   `--capabilities` `Value` map into a frozen `Capabilities`, one dimension
   decoder per `exec` / `fs` / `net` / `editor` / `shell` key, nested tables

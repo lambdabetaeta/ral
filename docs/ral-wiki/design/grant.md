@@ -58,18 +58,68 @@ launch hardening.
 
 ## Selectors, refusals and summaries
 
-- **`system` and `homebrew`.** `system` is the platform's own tool roots and no
-  longer holds Homebrew; `` `dir `homebrew `` is the Homebrew prefixes that exist
-  at freeze time. `HOMEBREW_PREFIX`, read from the host environment as `path`
-  reads `$PATH`, replaces the default when it is an absolute path; otherwise the
-  default is `/opt/homebrew` if it exists, and an absent Homebrew expands to nothing, never an
-  error. Intel macOS's `/usr/local` is reached only through `HOMEBREW_PREFIX`,
-  since that prefix is shared with everything else. The root is the whole prefix,
-  so a formula's `bin` link and the `Cellar` file it resolves to are both
-  admitted, and readable by running. The fs floor's Homebrew entries are the same
-  expansion: a brew program admitted by name or by `path` maps its libraries from
-  its prefix wherever its admission came from. The floor is an allowance like
-  any other, so it renders frozen and a redirected root shows nothing.
+- **A selector is a set of locations, and the table is one file.** The names are
+  `path`, which reads `$PATH`, and `enum Toolchain` in
+  `core/src/guard/toolchains.rs`: `system` and every package manager, each a
+  few rows of data (`Location { overrides, defaults }`), checked complete by one
+  exhaustive `match`. The rules below are stated here once; the table is the
+  data, and no page copies it. `FreezeCtx::selector` dispatches to it, and
+  `fs::floor` calls the same live expansion over the same rows.
+- **Choose, then keep what exists.** A location's *overrides* are host
+  environment variables with an optional subpath (`$CARGO_HOME/bin`), tried in
+  order. The first usable one (non-empty and absolute under the host's rules;
+  an empty or relative value is skipped, as `path` skips a relative entry) is
+  all the location has; with none, every default is chosen. Then only
+  directories that exist are kept. An override that chose a missing directory
+  yields nothing and does not fall back to the defaults: the environment said
+  where the manager is, so falling back would grant a directory it disowned. An
+  absent manager expands to nothing, never an error. `GOPATH` alone holds a
+  list, and only its first entry counts.
+- **Overrides are the host's.** They are read from the host process
+  environment, as `path` reads `$PATH`, never from a session's variables and
+  never from a tool's own configuration files (cargo's `install.root`, an
+  `.npmrc` `prefix`; a user who relies on them writes `` `dir `absolute ``).
+  exarch redirects `CARGO_HOME` and `GOPATH` into the scratch inside a session;
+  that must not move a profile's grants. This is why the table lives in core and
+  not in helpers inside the profiles, which would read the shell's variables.
+  The home comes from the `FreezeCtx`; a home default with no bound home is
+  absent. A `‹config›`, `‹data›` or `‹cache›` default resolves as the matching
+  `xdg-*` place does (`resolve_xdg_in`). A default that is not absolute under the
+  host's rules belongs to the other platform and is skipped, so no row carries a
+  platform mark and one profile loads on both.
+- **A location names what runs, and holds no secret.** It is what a manager
+  installs and its shims dispatch into, and running reads make it readable, so
+  where a root also holds credentials or user data the location is the narrowest
+  subtree that holds what runs (`cargo` runs `bin`, not `credentials.toml`;
+  `stack` runs `programs`, not `upload/`). `~/.dotnet` is the one exception,
+  because .NET keeps private keys under `~/.dotnet/corefx` wherever it is
+  installed and its runnable parts include a file; `reasonable` excludes that
+  subtree. Caches and registries stay `fs` entries.
+- **No override names the world.** An override whose chosen directory, after its
+  subpath, is the filesystem root, the home or an ancestor of it is a freeze
+  error naming the variable and asking whether it is set correctly: running
+  reads would make the selector a read of everything, `~/.ssh` included. The
+  check is on the directory, not the variable (`GOPATH=~` chooses `~/bin` and is
+  fine), by containment of symlink-followed forms. Defaults are fixed and need no
+  check. `path` has the same hazard and is not yet guarded.
+- **`system` is a row, and `homebrew` is another.** `system` is the platform's
+  own tool roots and no longer holds Homebrew. `` `dir `homebrew `` is
+  `HOMEBREW_PREFIX` when usable, else `/opt/homebrew` or Linuxbrew's
+  `/home/linuxbrew/.linuxbrew`, where they exist. Intel macOS's `/usr/local` is
+  reached only through `HOMEBREW_PREFIX`, since that prefix is shared with
+  everything else. The root is the whole prefix, so a formula's `bin` link and
+  the `Cellar` file it resolves to are both admitted, and readable by running.
+- **Four rows are on the read floor.** `homebrew`, `macports`, `nix` and
+  `pkgsrc` are system-wide prefixes outside any home, world-readable trees of
+  the standing of `/usr`, and a program from one maps its libraries from its
+  prefix wherever its admission came from. They join `fs::floor`. No home-based
+  row does: a home tree is the user's, and reading it must be granted. An
+  override can still choose one (`HOMEBREW_PREFIX` on a home Linuxbrew), so the
+  floor keeps only chosen directories outside the process's home, the floor
+  having no `FreezeCtx`; such a prefix is run, and read by running, wherever
+  `homebrew` is granted, and is not floored. The floor drops a row that fails to
+  freeze, where the selector raises the error. The floor is an allowance like any
+  other, so it renders frozen and a redirected root shows nothing.
   An exclusion means "not allowed", never "not included": a profile that merely
   leaves something unlisted does not exclude it.
 - **A refusal says why, in one of a few shapes.** *Missing allowance* names the
@@ -256,7 +306,7 @@ nested records of lists, `net` is `` `offline ``, `editor` and `shell` are
 verb lists. The checker ascribes the nested tables too, so a bare string where
 a place belongs, a misspelled tag or `net: true` fails before the program
 runs, naming the tags on offer. Every list is a set, with repeats idempotent;
-extension joins verb lists; a selector (`path`, `system`, `homebrew`) is valid only under
+extension joins verb lists; a selector (`path`, `system` or a package manager) is valid only under
 `dir`; and there is no argument filter
 ([[decisions/261012_grant-surface-is-typed|grant-surface-is-typed]]). Values
 the checker cannot type still reach the runtime decoder, which judges the same
@@ -284,7 +334,7 @@ reaches the stack or the IPC wire.
 This is the boundary [[map/exarch|exarch]] reuses as its sandbox: each agent
 run evaluates under a profile's capabilities pushed onto this same stack.
 
-**Concessions.** Three caveats are inherent to the design, not defects:
+**Concessions.** Four caveats are inherent to the design, not defects:
 - **Bare command names are ambient.** A bare exec name like `` `name git `` resolves through
   `PATH`, so it is not a strict object-capability; the mitigation is the base
   profile's deny on shells together with the `fs` deny on writing `` `xdg-bin `` — the
@@ -292,6 +342,18 @@ run evaluates under a profile's capabilities pushed onto this same stack.
 - **TOCTOU on path resolution.** The resolver-form and bind-form checks share one
   source, so the OS profile and the in-process check cannot disagree, but symlink
   races inside the admitted set are a known surface, not a closed one.
+- **Builds start cold.** No profile writes a cache the user's own tools read.
+  Most caches are trusted on use (cargo's unpacked sources, Go's module and
+  build caches, Maven's repository, uv's wheels, Bun's cache), so a write there
+  by a prompt-injected agent is a backdoor that outlives the session, reaches
+  every project and runs unconfined in the user's next build. So every cache a
+  session writes lives in its scratch, which is deleted when the session ends,
+  and `reasonable` and `minimal` do not write `xdg-cache`; a cache shared
+  between sessions was rejected because it grows without bound and could not be
+  emptied while another session ran. In-tree build outputs (`target/`,
+  `node_modules`, `.venv`) are just as trusted and as invisible to `git diff`
+  but reach one project, the one the session was given, and stay accepted with
+  the writable `cwd` ([[map/exarch|exarch]]'s `Scratch` lists the redirected tool homes).
 - **Exec admission is not containment; the projection is.** A prefix that is
   both `exec`-admitted and `fs`-writable reads like an escape hatch — drop a
   binary, the next call admits it — but inside one projection it escalates

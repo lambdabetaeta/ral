@@ -50,7 +50,7 @@ fn hold_exclusive(file: File) -> io::Result<fd_lock::RwLock<File>> {
 /// Everything ephemeral the agent scribbles belongs here, because
 /// `reasonable` denies writes to the user's real cache dirs.
 ///
-/// A scratch holds whole tool caches — see [`LEGACY_TOOL_HOMES`] — and the
+/// A scratch holds whole tool caches — see [`TOOL_HOMES`] — and the
 /// temp directory around it is swept by the OS on no schedule worth trusting:
 /// Windows never sweeps it, macOS only across a reboot, and Linux only where
 /// `/tmp` is not a tmpfs.  So exarch sweeps its own: a session holds a lock
@@ -64,30 +64,74 @@ pub struct Scratch {
 
 /// What answers for a scratch's life, and so what ends it.
 ///
-/// A session's lock is read by the next session's [`reap_unheld`]; a test's
-/// guard is read by nobody, because the test's own end deletes the directory.
+/// A session's lock is read by [`reap_unheld`] only after a session dies
+/// without its drop; a test's guard is read by nobody, because the test's own
+/// end deletes the directory.
 #[expect(
     dead_code,
-    reason = "each variant is held for what its Drop does (closing the lock's fd, deleting the test's directory) and so is never read"
+    reason = "each variant is held for what its Drop does (deleting the session's scratch, deleting the test's directory) and so is never read"
 )]
 enum Hold {
-    Session(fd_lock::RwLock<File>),
+    Session(SessionHold),
     Test(tempfile::TempDir),
+}
+
+/// A live session's scratch and the lock that says so.
+struct SessionHold {
+    dir: PathBuf,
+    lock_path: PathBuf,
+    lock: Option<fd_lock::RwLock<File>>,
+}
+
+impl Drop for SessionHold {
+    /// The directory, then the lock: closed before it is unlinked, because
+    /// Windows will not unlink an open file.
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.dir);
+        drop(self.lock.take());
+        let _ = fs::remove_file(&self.lock_path);
+    }
 }
 
 /// The lock file's name is its scratch's plus this, so each stands beside the
 /// other and either names the other by [`Path::with_extension`].
 const LOCK_SUFFIX: &str = ".lock";
 
-/// Build-tool homes that pre-date or ignore XDG, each given its own scratch
-/// subdir.  Anything that respects `$XDG_CACHE_HOME` needs no entry here.
-const LEGACY_TOOL_HOMES: &[(&str, &str)] = &[
-    ("CARGO_HOME", "cargo"),
-    ("npm_config_cache", "npm-cache"),
-    ("GRADLE_USER_HOME", "gradle"),
-    ("GOPATH", "go"),
-    ("GOMODCACHE", "go/pkg/mod"),
-    ("RUSTUP_HOME", "rustup"),
+/// What a tool home takes under a scratch: a subdirectory, or a command-line
+/// flag whose value is one.
+#[derive(Clone, Copy)]
+enum Home {
+    Dir(&'static str),
+    Flag(&'static str, &'static str),
+}
+
+impl Home {
+    fn value(self, scratch: &str) -> String {
+        match self {
+            Self::Dir(sub) => format!("{scratch}/{sub}"),
+            Self::Flag(prefix, sub) => format!("{prefix}{scratch}/{sub}"),
+        }
+    }
+}
+
+/// Every cache a session writes lives in its scratch: each variable is
+/// replaced, whatever the host inherited, by a value under the scratch.
+const TOOL_HOMES: &[(&str, Home)] = &[
+    // Caches only: RUSTUP_HOME holds what runs, so it stays the host's.
+    ("XDG_CACHE_HOME", Home::Dir("xdg-cache")),
+    ("CARGO_HOME", Home::Dir("cargo")),
+    ("GRADLE_USER_HOME", Home::Dir("gradle")),
+    ("GOPATH", Home::Dir("go")),
+    ("GOMODCACHE", Home::Dir("go/pkg/mod")),
+    ("npm_config_cache", Home::Dir("npm-cache")),
+    ("GOCACHE", Home::Dir("go-build")),
+    ("PIP_CACHE_DIR", Home::Dir("pip")),
+    ("POETRY_CACHE_DIR", Home::Dir("poetry")),
+    ("pnpm_config_store_dir", Home::Dir("pnpm-store")),
+    ("npm_config_store_dir", Home::Dir("pnpm-store")),
+    ("BUN_INSTALL_CACHE_DIR", Home::Dir("bun")),
+    ("YARN_GLOBAL_FOLDER", Home::Dir("yarn-berry")),
+    ("MAVEN_ARGS", Home::Flag("-Dmaven.repo.local=", "maven")),
 ];
 
 /// Settings the confinement forces on a tool, as against relocating one.
@@ -121,14 +165,18 @@ impl Scratch {
             .tempfile_in(&temp)?
             .keep()
             .map_err(|kept| kept.error)?;
-        let hold = hold_exclusive(file)?;
+        let lock_guard = hold_exclusive(file)?;
         let dir = lock.with_extension("");
         fs::create_dir(&dir)?;
         reap_unheld(&temp, &prefix, &lock);
         Ok(Self {
             app,
+            hold: Hold::Session(SessionHold {
+                dir: dir.clone(),
+                lock_path: lock,
+                lock: Some(lock_guard),
+            }),
             dir,
-            hold: Hold::Session(hold),
         })
     }
 
@@ -190,7 +238,7 @@ impl Scratch {
         Ok(path)
     }
 
-    /// Seed [`Scratch::var`], the legacy-tool homes and
+    /// Seed [`Scratch::var`], the [`TOOL_HOMES`] and
     /// [`CONFINED_TOOL_SETTINGS`] into `shell`, overriding whatever was
     /// inherited: a `CARGO_HOME` under `~/.cargo` lands outside reasonable's
     /// write set, so the sandbox is the trust boundary, not the environment
@@ -210,14 +258,14 @@ impl Scratch {
 
 /// What a scratch at `dir` names to the agent.
 ///
-/// The scratch var, the legacy tool homes under it, and the confined tool
-/// settings: one spelling for a host's own `Scratch` and for a guest path the
-/// host cannot hold.
+/// The scratch var, the tool homes under it, and the confined tool settings:
+/// one spelling for a host's own `Scratch` and for a guest path the host
+/// cannot hold.
 pub fn scratch_env(app: App, dir: &Path) -> Vec<(String, String)> {
     let scratch = dir.to_string_lossy().into_owned();
-    let homes = LEGACY_TOOL_HOMES
+    let homes = TOOL_HOMES
         .iter()
-        .map(|(var, sub)| ((*var).to_string(), format!("{scratch}/{sub}")));
+        .map(|(var, home)| ((*var).to_string(), home.value(&scratch)));
     let settings = CONFINED_TOOL_SETTINGS
         .iter()
         .map(|(var, value)| ((*var).to_string(), (*value).to_string()));
@@ -537,7 +585,7 @@ pub(crate) fn seed_var(shell: &mut Shell, name: &str, value: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        CONFINED_TOOL_SETTINGS, EXARCH, LEGACY_TOOL_HOMES, LOCK_SUFFIX, hold_exclusive,
+        CONFINED_TOOL_SETTINGS, EXARCH, LOCK_SUFFIX, Scratch, TOOL_HOMES, hold_exclusive,
         normalize_resume_target, project_slug, reap_unheld, resume_candidates_in, scratch_env,
     };
     use std::fs;
@@ -547,15 +595,49 @@ mod tests {
         let env = scratch_env(EXARCH, std::path::Path::new("/tmp/x"));
         assert_eq!(
             env.len(),
-            1 + LEGACY_TOOL_HOMES.len() + CONFINED_TOOL_SETTINGS.len()
+            1 + TOOL_HOMES.len() + CONFINED_TOOL_SETTINGS.len()
         );
         assert_eq!(env[0], (EXARCH.scratch_var(), "/tmp/x".to_string()));
-        for (var, sub) in LEGACY_TOOL_HOMES {
-            assert!(env.contains(&((*var).to_string(), format!("/tmp/x/{sub}"))));
+        for (var, home) in TOOL_HOMES {
+            assert!(env.contains(&((*var).to_string(), home.value("/tmp/x"))));
         }
         for (var, value) in CONFINED_TOOL_SETTINGS {
             assert!(env.contains(&((*var).to_string(), (*value).to_string())));
         }
+        let get = |name: &str| {
+            env.iter()
+                .find(|(var, _)| var == name)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(get("XDG_CACHE_HOME"), Some("/tmp/x/xdg-cache"));
+        assert_eq!(get("GOMODCACHE"), Some("/tmp/x/go/pkg/mod"));
+        assert_eq!(get("MAVEN_ARGS"), Some("-Dmaven.repo.local=/tmp/x/maven"));
+        assert_eq!(get("RUSTUP_HOME"), None);
+    }
+
+    #[test]
+    fn an_inherited_maven_args_is_replaced() {
+        let scratch = Scratch::for_test(EXARCH, "maven-args").expect("test scratch");
+        let mut shell = crate::boot::test_shell();
+        shell.set_env_var("MAVEN_ARGS", "-Dmaven.repo.local=/home/u/.m2 -T4");
+        scratch.install_into(&mut shell);
+        assert_eq!(
+            shell.env_var("MAVEN_ARGS"),
+            Some(format!(
+                "-Dmaven.repo.local={}/maven",
+                scratch.path().display()
+            ))
+        );
+    }
+
+    #[test]
+    fn dropping_a_session_scratch_removes_its_directory_and_its_lock() {
+        let scratch = Scratch::new(EXARCH).expect("session scratch");
+        let dir = scratch.path().to_path_buf();
+        let lock = dir.with_extension(LOCK_SUFFIX.trim_start_matches('.'));
+        assert!(dir.exists() && lock.exists());
+        drop(scratch);
+        assert!(!dir.exists() && !lock.exists());
     }
 
     /// Seed a scratch and its lock file, as [`super::Scratch::new`] would.

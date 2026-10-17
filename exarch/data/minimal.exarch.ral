@@ -1,7 +1,8 @@
 # `minimal` bake-in.  The smallest base that's actually useful as a
 # starting point for additive `--extend` composition: the
-# platform's tool roots (`dir `system`)
-# + cwd + scratch, network on, chdir allowed.  Nothing from the
+# platform's tool roots (`dir `system`, a row of the table in
+# `core/src/guard/toolchains.rs`) + cwd + scratch, network on, chdir
+# allowed.  Nothing from the
 # user's home except scratch: `xdg-bin` is not admitted (so a fresh
 # tool dropped in `~/.local/bin` is a deliberate choice via
 # `--extend`, not an implicit one); a Homebrew tree is not admitted
@@ -25,13 +26,11 @@
 # `include_str!`.
 
 return [
-  # Reads and writes mirror the threat model of `reasonable` —
-  # writes go only to ephemeral / recoverable surfaces (cwd, scratch,
-  # `xdg-cache`) so a hallucinating agent can't corrupt persistent
-  # state.  Modern tools that respect `$XDG_CACHE_HOME` land there
-  # automatically.  Legacy build tools (cargo, npm, gradle, …) get
-  # their home env vars redirected to `$EXARCH_SCRATCH/<tool>` by
-  # exarch's runtime.
+  # Reads and writes mirror the threat model of `reasonable`.  A session
+  # writes no cache that the user's own tools read: writes go only to the
+  # working tree and scratch, and exarch's runtime points
+  # `$XDG_CACHE_HOME` and the legacy tool homes (cargo, npm, gradle, …)
+  # at `$EXARCH_SCRATCH`, which is deleted when the session ends.
   fs: [
     read: [
       `cwd .,
@@ -42,7 +41,6 @@ return [
       `cwd .,
       `absolute /tmp,
       `tempdir .,
-      `xdg-cache .,
     ],
   ],
 
@@ -54,10 +52,10 @@ return [
   # matches what users actually want from "tight but functional."
   #
   # `system` is the platform's own tool roots (see
-  # `core/src/guard/freeze.rs::system_tool_roots`) and carries no
-  # Homebrew tree.  Apple's toolchain (CommandLineTools, Xcode) is
-  # folded in by `system`, so building from source works without
-  # listing each tool here.
+  # `core/src/guard/toolchains.rs`) and carries no Homebrew tree.
+  # Apple's toolchain (CommandLineTools, Xcode) is folded in by
+  # `system`, so building from source works without listing each tool
+  # here.
   #
   # `bash` and `zsh` live under a tool root (admitted by `system`
   # above), but a `name` exclusion beats the subpath allowance.

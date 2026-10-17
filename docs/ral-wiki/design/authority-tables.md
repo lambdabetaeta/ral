@@ -325,10 +325,10 @@ which on fs leaves the floor alone; being empty never makes a table omitted.
 - **A fragment pairs nothing on its own.** `join_top` keeps a fragment's exec
   allowances beside `every`, so the ceiling's table holds them, and a name in an
   extension is resolved afresh at every run like every other name.
-- **A toolchain can be written once, in exec.** `reasonable`'s duplicate read
-  entries stay until selectors replace its toolchain directories; its run
-  allowances are narrower than its reads today (it runs `~/.rustup/toolchains/`
-  and reads `~/.rustup`).
+- **A toolchain is written once, in exec.** `reasonable` lists a `dir` selector
+  per toolchain and no read entry for what a selector runs, running reads
+  covering it ([[design/grant|grant]] §Selectors); it keeps `fs` entries only
+  for caches and registries.
 - The guard keeps compilation off permitted reads: the read judgment
   (`GrantStack::read`) asks `fs::region(…, places: false)` and only on
   `MissingAllowance` `region(…, true)`; places add only positive evidence, so a
@@ -733,10 +733,12 @@ argues from.
   through a held handle, with no redirecting reparse point on its path (a symlink,
   junction or other name surrogate is refused; a cloud-files placeholder is not).
 - **The floor is an allowance like any other.** It is frozen once per process, on
-  the premise that its roots are the system's; a
-  `HOMEBREW_PREFIX` can be the user's, and a child that writes the parent of such
-  a root could replace it with a symlink, so the floor renders frozen too and a
-  redirected root shows nothing. What loading needs is not authored, so a floor
+  the premise that its roots are the system's: its package-prefix entries are the
+  rows `homebrew`, `macports`, `nix` and `pkgsrc` outside the process's home
+  ([[design/grant|grant]] §Selectors). An override such as `HOMEBREW_PREFIX` can
+  still be the user's, and a child that writes the parent of such a root could
+  replace it with a symlink, so the floor renders frozen too and a redirected
+  root shows nothing. What loading needs is not authored, so a floor
   entry that resolves through a non-Unicode name is dropped, not refused
   (`freeze_floor`); a place that `PATH` resolved to and that is not Unicode
   cannot be frozen as an allowance in the first place.

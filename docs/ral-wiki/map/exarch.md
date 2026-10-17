@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e028f5a3
-generated_at_date: 2026-10-13
+generated_at_commit: 95858e12
+generated_at_date: 2026-10-17
 covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/data/system.md, exarch/data/agents.md, exarch/data/reply.md, exarch/data/ral.md, exarch/data/script-style.md, exarch/data/context.md]
 ---
 
@@ -160,10 +160,18 @@ the shell every seat starts from.
   there, `cwd`, `user` and `home` come from `ral_core::host`; best-effort, a missing
   value drops its line.
 - **`Scratch`** — the disposable per-session directory, exposed under its
-  `App`'s own name (`$EXARCH_SCRATCH`; synod's is `$SYNOD_SCRATCH`), with the
-  legacy build-tool homes (`CARGO_HOME`, …) redirected
-  into it so a write lands inside the grant rather than in a denied real cache,
-  and beside them the one setting the confinement forces without relocating
+  `App`'s own name (`$EXARCH_SCRATCH`; synod's is `$SYNOD_SCRATCH`), with every
+  cache a session writes redirected into it: `TOOL_HOMES`, one table of
+  variables, each replacing the inherited value with a subdirectory of the
+  scratch (`XDG_CACHE_HOME`, `CARGO_HOME`, `GOPATH`, `GOCACHE`, the pnpm, Bun and
+  Yarn stores, …) or, for Maven, which has no such variable, `MAVEN_ARGS` set to
+  `-Dmaven.repo.local=<scratch>/maven`; `scratch_env` stays a function of the
+  app and the scratch alone, which the guest needs. No profile writes the user's
+  caches, so a write lands in the scratch rather than in a denied real one.
+  `RUSTUP_HOME` is not in the table: it holds what runs and stays the host's. A
+  `Hold::Session`'s drop deletes the directory, then closes and removes its
+  lock; `reap_unheld` remains for a session killed before its drop runs. Beside
+  the table is the one setting the confinement forces without relocating
   anything (`CARGO_NET_GIT_FETCH_WITH_CLI`, because cargo's bundled TLS reaches
   the keychain door the profile withholds — see
   [[map/core/capabilities|capabilities]]).

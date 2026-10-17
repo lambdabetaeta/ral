@@ -24,7 +24,7 @@
 use super::exec::ExecRules;
 use super::table::{Scope, Table, Withheld};
 use super::{Evidence, FsPolicy, GrantStack, Join, Meet};
-use crate::guard::freeze::live_homebrew_roots;
+use crate::guard::toolchains;
 use crate::path::{FrozenPath, Polarity, RealPath};
 use std::path::Path;
 use std::sync::LazyLock;
@@ -109,8 +109,8 @@ fn freeze_floor(paths: impl IntoIterator<Item = impl AsRef<Path>>) -> Vec<Frozen
 }
 
 /// The read-only system paths admitted under every restricted `read`, frozen
-/// once per process, with the Homebrew prefixes `homebrew` expands to.  Those
-/// absent on this host are dropped.
+/// once per process, with the system-wide prefixes of [`toolchains::FLOOR`]
+/// outside the process's home.  Those absent on this host are dropped.
 pub(crate) fn floor() -> &'static [FrozenPath] {
     static FLOOR: LazyLock<Vec<FrozenPath>> = LazyLock::new(|| {
         #[cfg(windows)]
@@ -169,9 +169,13 @@ pub(crate) fn floor() -> &'static [FrozenPath] {
         ];
         #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
         let listed: [&str; 0] = [];
-        let brew = live_homebrew_roots();
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "the floor has no FreezeCtx: its home is the process's, as `home` places default to"
+        )]
+        let prefixes = toolchains::floor(crate::host::home().as_deref());
         let present = (listed.iter().map(ToString::to_string)).filter(|p| crate::path::exists(p));
-        freeze_floor(present.chain(brew))
+        freeze_floor(present.chain(prefixes))
     });
     &FLOOR
 }

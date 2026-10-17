@@ -16,7 +16,7 @@ mod basedir;
 use std::path::PathBuf;
 
 pub use basedir::XdgKind;
-pub(crate) use basedir::resolve_xdg;
+pub(crate) use basedir::{resolve_xdg, resolve_xdg_in};
 
 pub(crate) const HOME_VARS: [&str; 2] = ["HOME", "USERPROFILE"];
 pub(crate) const USER_VARS: [&str; 2] = ["USER", "USERNAME"];
