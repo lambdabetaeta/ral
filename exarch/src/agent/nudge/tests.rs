@@ -29,7 +29,7 @@ fn transient_surfaces_without_nudge() {
     let mut nudges = Nudges::new(true);
     let mut log = fresh_log();
     let error = ProviderError::Transient {
-        cause: "stream idle: no response within timeout".into(),
+        cause: "model response headers timed out".into(),
         attempts: 3,
         body: None,
         status: None,
@@ -76,6 +76,35 @@ fn exhausted_budget_stops() {
         assert!(nudges.react(EMPTY, &facts(), &mut log).is_some());
     }
     assert!(nudges.react(EMPTY, &facts(), &mut log).is_none());
+}
+
+/// A stall is not an output cap: the model is told the connection failed.
+#[test]
+fn a_stalled_truncation_gets_its_own_message_and_cause() {
+    let mut nudges = Nudges::new(true);
+    let mut log = fresh_log();
+    let error = ProviderError::Truncated {
+        cause: Box::new(CutShort::Stalled(ProviderError::local_transient(
+            "model response body read timed out",
+        ))),
+    };
+    assert_eq!(
+        nudges.react(Err(&error), &facts(), &mut log),
+        Some(wrap_reminder(STALLED_MESSAGE))
+    );
+    assert_eq!(nudges.used, 1);
+}
+
+#[test]
+fn reset_restores_the_spent_budget() {
+    let mut nudges = Nudges::new(true);
+    let mut log = fresh_log();
+    for _ in 0..BUDGET {
+        assert!(nudges.react(EMPTY, &facts(), &mut log).is_some());
+    }
+    assert!(nudges.react(EMPTY, &facts(), &mut log).is_none());
+    nudges.reset();
+    assert!(nudges.react(EMPTY, &facts(), &mut log).is_some());
 }
 
 /// A toolless trunk has nothing to be steered toward: no repair, no

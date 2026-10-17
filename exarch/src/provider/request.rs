@@ -1,6 +1,7 @@
 //! Provider-independent request shaping.
 
 use super::Toolset;
+use super::tls::{STREAM_HEADER_TIMEOUT, STREAM_READ_TIMEOUT};
 use genai::chat::{ChatMessage, ChatOptions, ReasoningEffort};
 use serde::{Deserialize, Serialize};
 
@@ -122,7 +123,8 @@ fn openrouter_extra_body(slug: &str) -> serde_json::Value {
 
 /// Assemble the per-request `ChatOptions`. The four `capture_*` flags are on
 /// regardless of `tuning`: `step_out_from_end` in `stream.rs` reads usage,
-/// content, tool calls, and reasoning back off every `StreamEnd`.
+/// content, tool calls, and reasoning back off every `StreamEnd`. The stream's
+/// liveness bounds are set on every request.
 pub(super) fn complete_options(
     cache_key: &str,
     max_tokens_override: Option<u32>,
@@ -134,6 +136,8 @@ pub(super) fn complete_options(
         .with_capture_content(true)
         .with_capture_tool_calls(true)
         .with_capture_reasoning_content(true)
+        .with_stream_header_timeout(STREAM_HEADER_TIMEOUT)
+        .with_stream_read_timeout(STREAM_READ_TIMEOUT)
         .with_prompt_cache_key(cache_key);
     if let Some(max_tokens) = max_tokens_override {
         options = options.with_max_tokens(max_tokens);
@@ -165,6 +169,8 @@ mod tests {
         assert_eq!(options.top_p, None);
         assert!(options.reasoning_effort.is_none());
         assert!(options.extra_body.is_none());
+        assert_eq!(options.stream_header_timeout, Some(STREAM_HEADER_TIMEOUT));
+        assert_eq!(options.stream_read_timeout, Some(STREAM_READ_TIMEOUT));
     }
 
     #[test]

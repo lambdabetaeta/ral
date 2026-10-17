@@ -366,7 +366,8 @@ fn project_display_helper(display: &Display) -> Option<SynodEvent> {
 /// sees.
 fn project_forensic(forensic: &Forensic) -> Option<SynodEvent> {
     match forensic {
-        Forensic::UsageDelta { usage } => Some(SynodEvent::Usage {
+        // An unreported turn carries no figures; the stall readout says what happened.
+        Forensic::UsageDelta { usage } if usage.unreported == 0 => Some(SynodEvent::Usage {
             input: usage.input,
             output: usage.output,
             dollars: usage.dollars,
@@ -401,6 +402,8 @@ fn project_forensic(forensic: &Forensic) -> Option<SynodEvent> {
         | Forensic::SessionStarted { .. }
         | Forensic::SessionResumed { .. }
         | Forensic::SessionEnded
+        | Forensic::Retried { .. }
+        | Forensic::UsageDelta { .. }
         | Forensic::TurnStarted { .. } => None,
     }
 }
@@ -409,7 +412,8 @@ fn project_forensic(forensic: &Forensic) -> Option<SynodEvent> {
 /// one bill; every other breadcrumb is its own business.
 fn project_forensic_helper(forensic: &Forensic) -> Option<SynodEvent> {
     match forensic {
-        Forensic::UsageDelta { usage } => Some(SynodEvent::Usage {
+        // An unreported turn carries no figures; the stall readout says what happened.
+        Forensic::UsageDelta { usage } if usage.unreported == 0 => Some(SynodEvent::Usage {
             input: usage.input,
             output: usage.output,
             dollars: usage.dollars,
@@ -430,6 +434,8 @@ fn project_forensic_helper(forensic: &Forensic) -> Option<SynodEvent> {
         | Forensic::SessionStarted { .. }
         | Forensic::SessionResumed { .. }
         | Forensic::SessionEnded
+        | Forensic::Retried { .. }
+        | Forensic::UsageDelta { .. }
         | Forensic::TurnStarted { .. } => None,
     }
 }
@@ -807,6 +813,20 @@ mod tests {
     }
 
     #[test]
+    fn an_unreported_usage_routes_to_no_event() {
+        let mut router = Router::default();
+        router.route_transient(AgentId::new(0), &Transient::State(AgentState::Ready));
+        let usage = exarch::provider::Usage {
+            unreported: 1,
+            ..exarch::provider::Usage::default()
+        };
+        let fact = Record::Forensic(Forensic::UsageDelta { usage });
+        for id in [0, 1] {
+            assert!(router.route_fact(AgentId::new(id), &fact).is_none());
+        }
+    }
+
+    #[test]
     fn a_helpers_usage_still_counts_toward_the_one_bill() {
         let mut router = Router::default();
         router.route_transient(AgentId::new(0), &Transient::State(AgentState::Ready));
@@ -818,6 +838,7 @@ mod tests {
             cache_read: None,
             dollars: 0.125,
             unmetered: false,
+            unreported: 0,
         };
         let fact = Record::Forensic(Forensic::UsageDelta { usage });
         let Some(SynodEvent::Usage { input, .. }) = router.route_fact(AgentId::new(1), &fact)

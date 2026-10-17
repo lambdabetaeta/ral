@@ -144,11 +144,25 @@ impl Avatar {
                             Delta::Think(r) => {
                                 recorder.transient(Transient::Thinking(r.to_string()));
                             }
+                            Delta::Retry { .. } => {}
                         }
                         if unrecorded.is_none()
                             && let Err(error) = stream.push(&recorder, delta)
                         {
                             *unrecorded = Some(error);
+                        }
+                        if let Delta::Retry { cause, lost } = delta {
+                            recorder.transient(Transient::Boundary);
+                            if let Some(usage) = lost
+                                && let Err(error) = recorder.emit(Forensic::UsageDelta { usage })
+                            {
+                                recorder.report_fault(&error);
+                            }
+                            if let Err(error) = recorder.emit(Forensic::Retried {
+                                error: cause.clone(),
+                            }) {
+                                recorder.report_fault(&error);
+                            }
                         }
                     },
                     &token,
@@ -214,10 +228,12 @@ impl Avatar {
                 log.record_usage(usage)?;
                 log.context().log_len()
             };
-            self.readings.measure = Some(Measure {
-                tokens: usage.input,
-                at: measured_at,
-            });
+            if let Some(tokens) = usage.measured_input() {
+                self.readings.measure = Some(Measure {
+                    tokens,
+                    at: measured_at,
+                });
+            }
             // Routine boundaries and `MaxTokens` (handled below) stay silent.
             if let Some(reason) = &stop_reason {
                 match reason {
@@ -273,6 +289,7 @@ impl Avatar {
                 .borrow_mut()
                 .append_tool_results(results)
                 .map_err(Fault::Log)?;
+            self.readings.nudges.reset();
             // A tool call in the batch just run may have found the engine
             // gone; no further dispatch can run once it has.
             if let Some(s) = self.seat.severed() {

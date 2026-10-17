@@ -34,9 +34,9 @@ impl Reply {
         }
     }
 
-    /// A turn whose stream broke after `text` reached the caller.  The cause is
-    /// terminal — genai's shape for a frame it could not parse, which a retry
-    /// only re-loses — so the driver must report it rather than resend.
+    /// A turn whose stream broke after `text` reached the caller, on a cause
+    /// the driver would retry: production stalls only on those, and reports
+    /// no usage for the cut turn.
     pub fn stalled(text: &str) -> Self {
         Self {
             reasoning: String::new(),
@@ -45,10 +45,10 @@ impl Reply {
             outcome: Ok(StepOut {
                 assistant_message: ChatMessage::assistant(text.to_string()),
                 tool_calls: Vec::new(),
-                usage: Usage::default(),
+                usage: Usage::unreported(true),
                 stop_reason: None,
-                cut_short: Some(CutShort::Stalled(ProviderError::Other(
-                    "Failed to parse stream data for model 'test-model'".into(),
+                cut_short: Some(CutShort::Stalled(ProviderError::local_transient(
+                    "model response body read timed out",
                 ))),
             }),
         }

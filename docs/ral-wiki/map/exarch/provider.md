@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e028f5a3
-generated_at_date: 2026-10-13
+generated_at_commit: d13f07b0
+generated_at_date: 2026-10-17
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs]
 ---
 
@@ -408,7 +408,9 @@ disk-caches both paths:
 - `complete(request, on_delta, cancel)`, a `Request { system, transcript,
   tools, search }` —
   streams one assistant reply, calling `on_delta` with a `Delta::Say` per text
-  chunk and a `Delta::Think` per reasoning chunk, and projects the `StreamEnd`
+  chunk, a `Delta::Think` per reasoning chunk, and a `Delta::Retry(&ProviderError)`
+  when an attempt failed and is being re-issued (the deltas before it belong to
+  the failed attempt, the ones after to the new), and projects the `StreamEnd`
   into a `StepOut` (assistant message, tool calls, `Usage`, `StopReason`). One
   callback rather than two because the *order* of the two kinds is the
   caller's whole interest: a reasoning run ends exactly where the prose after
@@ -420,17 +422,18 @@ disk-caches both paths:
   are captured in the `End` frame and replayed by `step_out_from_end`, so they
   are dropped by a *named* arm, never a wildcard, and a new genai stream variant
   fails the build (X10).
-- A **per-attempt idle timeout** bounds request open and every gap between
-  decoded `ChatStreamEvent`s. The first attempt uses `STREAM_IDLE_TIMEOUT`
-  (180s, `provider/tls.rs`); retries use a one-minute bound. Each event,
-  including a provider heartbeat, re-arms the semantic watchdog, while
-  reqwest's per-read timeout — `READ_TIMEOUT`, held 30s clear of the semantic
-  bound so the two never race to name the same silence — turns true byte-level
-  silence into a retryable stream error. A ping genai consumes below the
-  semantic event layer may keep the transport read alive, but cannot re-arm
-  exarch's event watchdog; only a decoded event can do that.
-  This lands the first local slice of
-  [[decisions/260702_provider-heartbeats-and-retry-boundaries|provider-heartbeats-and-retry-boundaries]].
+- **Liveness is one byte-level clock, owned by genai.** `complete_options` sets
+  `stream_header_timeout` (`STREAM_HEADER_TIMEOUT`, 3 min) and
+  `stream_read_timeout` (`STREAM_READ_TIMEOUT`, 10 min, per raw body chunk, SSE
+  comments included) on every request, and the stream loop races only the cancel
+  token against `next()`; a `Heartbeat` event adds nothing there. The bound is
+  patient because HTTP/2 PING and TCP keepalives (`provider/tls.rs`) evict a
+  dead peer in about 45 s, so it only judges a live server gone quiet.
+  reqwest's `READ_TIMEOUT` stays as the backstop for every client sharing it,
+  held 30 s above the read bound so genai's named `StreamTimeout` wins; `Fault`
+  classifies it `Transient`. This lands the slice of
+  [[decisions/260702_provider-heartbeats-and-retry-boundaries|provider-heartbeats-and-retry-boundaries]]
+  that fits genai as released: no fork, no semantic clock.
 - Streaming is the **only** call the engine makes. There is no second,
   non-streamed path: bounding the window is
   [[map/exarch/agent|`Avatar::evict`]]'s job and it makes no provider call at
@@ -449,15 +452,23 @@ Both paths in `provider/stream.rs` run on a tokio runtime through **one retry
 driver**, `provider/retry.rs::retry_with_backoff`, over an `Attempt<T>` (`Done`
 / `Failed`):
 
-- The streaming-specific rule rides on `Done`: once text or reasoning has
-  flowed to `on_delta` the UI has committed to a partial render, so a
-  re-issue that would double output is *not* retried — `stalled_step_out`
-  projects the streamed prefix and reasoning into a `CutShort::Stalled`
-  `StepOut` returned as `Attempt::Done`, and the session commits it. No third
-  "don't retry" variant is needed. `CutShort` lives in `provider/error.rs`
+- The streaming-specific rule rides on `Done`: only answer text survives into
+  the transcript, so once prose has flowed to `on_delta` a re-issue would
+  double it. A failure then commits as `stalled_step_out`, a `CutShort::Stalled`
+  `StepOut` returned as `Attempt::Done`, *only if* `ProviderError::retryable`
+  (the driver's own verdict, `retry.rs::budget`) says it would be retried; any
+  other error surfaces as itself. A failure before any prose, reasoning alone
+  included, goes to the ordinary retry loop. No third "don't retry" variant is
+  needed. `CutShort` lives in `provider/error.rs`
   beside `ProviderError`, whose `Truncated` carries it: one type says why a
   turn was cut short, and each arm carries its own remedy
   ([[internals/provider-fault-recovery|provider-fault-recovery]]).
+- Each attempt is handed the failure it replaces (`None` first), which the stream
+  emits as `Delta::Retry { cause, lost }` before the new attempt's deltas
+  (`lost`: the usage of an attempt that streamed output the provider never
+  reported): the commit producer seals the failed attempt's lanes there and
+  `deliberate` records the lost usage and a `Forensic::Retried`, the log's
+  alone, drawn by no renderer.
 - Rate limits get a larger budget and a higher backoff ceiling than transient
   failures, and a named wait is honoured. A `Refused` whose
   reset lies past that ceiling (`Recovery::Deferred`) surfaces on its first
@@ -524,6 +535,14 @@ panic (X8).
   [[map/exarch/frontend|TUI]] styles them. An `unmetered` turn (a flat
   subscription) renders its cost slot as `subscription` rather than a price;
   the token counts still render.
+- `Usage::unreported` counts turns whose usage the provider never sent (a
+  stalled stream, an `End` without usage). It adds like every other field, a
+  total with any is a lower bound, and the cost slot says so (`$0.0364 + ?`).
+  `Usage::measured_input()` is the one reading of `input` as a context
+  measurement and is `None` for such a usage, so neither the pressure gauge's
+  `Measure` nor the view's `last_input` is ever overwritten by a zero.
+  Headless `total_cost_usd` is `null` and `usage.unreported_turns` is set
+  likewise.
 - `provider/pricing.rs` fetches OpenRouter's `/api/v1/models` catalog once per process
   and caches it; `ModelPricing::dollars` strips the cache counts out of `input`
   and bills uncached/cache-creation/cache-read/output each at its rate, falling

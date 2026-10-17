@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e028f5a3
-generated_at_date: 2026-10-13
+generated_at_commit: d13f07b0
+generated_at_date: 2026-10-17
 covers_paths: [exarch/src/agent.rs, exarch/src/latch.rs, exarch/src/agent/, exarch/src/signals.rs, exarch/src/cancel.rs, exarch/src/schedule.rs, exarch/src/enquiry.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
 
@@ -216,7 +216,10 @@ Three nested loops, the same for trunk and child alike:
   nudge reaction. A genuine exchange boundary resets the nudge budget and
   clears the sticky cancel token (`cancel::Token::reset`), so a prior
   exchange's Esc cannot bleed into the next; a self-nudge is the same exchange
-  continuing and resets neither. Every `reply` deposits its value on the
+  continuing and resets neither. The budget counts *consecutive* repairs, so
+  `deliberate` also clears it after every completed tool round: faults
+  scattered through a long headless run, which is one exchange, never add up to
+  one that ends it. Every `reply` deposits its value on the
   agent itself (`Agent::deposit_reply`, which also posts the one-line notice
   to a parent); a child then parks `Engaged`, and only a parentless returning
   agent — the headless root — ends its loop on it, its driver reading the
@@ -255,7 +258,9 @@ Three nested loops, the same for trunk and child alike:
   stub for an otherwise-empty assistant message (X7), so every committed message
   serialises to a request a strict backend accepts. `StopReason::MaxTokens`
   *with no captured tool call* raises `ProviderError::Truncated` after appending
-  the partial, so a `continue` nudge keeps the work as context; *with* captured
+  the partial, so a `continue` nudge keeps the work as context (a stall's
+  partial is prose, since reasoning alone is retried below the transcript, and
+  its nudge says the connection failed rather than that the output was capped); *with* captured
   tool calls it dispatches them and continues instead, since returning `Truncated`
   there would strand the protocol in `AwaitingToolResults` and fail the nudge's
   next `append_user` (X6). Nothing bounds the number of round-trips: a
@@ -381,7 +386,7 @@ Nudging splits into two disciplines, named and owned by `agent/nudge.rs`'s
 `--chat` trunk): a
 **repair** — `Empty`, `Stopped`, `Truncated`, or a returning agent's
 `Complete` without `reply` — is event-shaped, exceptional, and spends the
-per-exchange repair budget (`BUDGET`, 3); a **standing condition** — the pin
+consecutive-repair budget (`BUDGET`, 3); a **standing condition** — the pin
 register here, and the ladder conditions of `agent/gauge.rs` below — is a fact
 about the agent's own live state, **edge-triggered**: told once when it
 changes, silent while it holds, budget-free.

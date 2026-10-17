@@ -123,7 +123,8 @@ impl Default for Stream {
 
 impl Stream {
     /// Absorb one delta into its lane.  Prose closes the reasoning lane
-    /// first, which is where a run ends.
+    /// first, which is where a run ends.  A retry ends the failed attempt's
+    /// lanes where they stand; the new attempt opens fresh ones.
     ///
     /// # Errors
     /// Propagates a failed record of either lane.
@@ -134,6 +135,7 @@ impl Stream {
                 .trace
                 .flush(emitter)
                 .and_then(|()| self.prose.push(emitter, text)),
+            Delta::Retry { .. } => self.seal(emitter).map(|()| *self = Self::default()),
         }
     }
 

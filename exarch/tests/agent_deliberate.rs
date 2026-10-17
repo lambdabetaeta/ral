@@ -246,7 +246,7 @@ fn stalled_stream_commits_partial_and_truncates() {
             match cause.as_ref() {
                 CutShort::Stalled(cause) => assert_eq!(
                     cause.summary(),
-                    "Failed to parse stream data for model 'test-model'"
+                    "connection failed: model response body read timed out"
                 ),
                 other @ CutShort::OutputCap { .. } => {
                     panic!("a stall must carry its own cut, got {other:?}")
@@ -290,8 +290,8 @@ fn stalled_stream_commits_partial_and_truncates() {
     assert!(
         matches!(
             error.stall_cause(),
-            Some(ProviderError::Other(cause))
-                if cause == "Failed to parse stream data for model 'test-model'"
+            Some(ProviderError::Transient { cause, .. })
+                if cause == "model response body read timed out"
         ),
         "the stall cause must reach the renderers through stall_cause, \
          got {error:?}",

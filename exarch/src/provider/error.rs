@@ -60,8 +60,8 @@ pub enum ProviderError {
         /// the renderer only `cause`.
         body: Option<Body>,
         /// The HTTP status when this came from a 5xx response; `None` for a
-        /// transport fault (connect/timeout/DNS) or a locally-raised idle
-        /// timeout, neither of which ever reached one.  What `summary`/the
+        /// transport fault (connect/timeout/DNS) or a locally-raised fault,
+        /// neither of which ever reached one.  What `summary`/the
         /// TUI headline key their label on.
         status: Option<u16>,
     },
@@ -388,11 +388,15 @@ impl<'a> Fault<'a> {
         }
     }
 
-    /// A `WebStream` boxes its cause: a `genai::Error`, walked in turn, or a
-    /// bare `reqwest::Error`.  Anything else is terminal, its own message kept.
+    /// A `WebStream` boxes its cause: a `genai::Error`, walked in turn, genai's
+    /// own `StreamTimeout`, or a bare `reqwest::Error`.  Anything else is
+    /// terminal, its own message kept.
     fn of_boxed(err: &'a (dyn std::error::Error + 'static)) -> Self {
         if let Some(genai) = err.downcast_ref::<genai::Error>() {
             return Fault::of(genai);
+        }
+        if let Some(timeout) = err.downcast_ref::<genai::webc::StreamTimeout>() {
+            return Fault::Transport(Some(timeout.to_string()));
         }
         if let Some(reqwest) = err.downcast_ref::<reqwest::Error>() {
             return Self::of_reqwest(reqwest);
@@ -510,6 +514,12 @@ impl ProviderError {
     pub fn summary(&self) -> String {
         match self {
             Self::Cancelled(site) => format!("cancelled {site}"),
+            Self::Transient {
+                cause,
+                body: None,
+                status: None,
+                ..
+            } => format!("{}: {}", transient_label(None), first_line(cause)),
             Self::Transient { body, status, .. } => {
                 with_body_message(transient_label(*status), body.as_deref())
             }
@@ -565,7 +575,7 @@ impl CutShort {
 
 /// `Transient`'s kind label, shared with the TUI's structured renderer: a 5xx
 /// response is a server failure, anything without a status never got one — a
-/// dropped connection, a timeout, an idle stream.
+/// dropped connection, a timeout, a silent stream.
 pub(crate) fn transient_label(status: Option<u16>) -> &'static str {
     if status.is_some() {
         "server error"
@@ -728,6 +738,31 @@ mod tests {
             obj.get("provider").and_then(serde_json::Value::as_str),
             Some("ModelRun"),
             "the relaying provider's name is the one thing the envelope owns"
+        );
+    }
+
+    fn web_stream_timeout(timeout: genai::webc::StreamTimeout) -> genai::Error {
+        genai::Error::WebStream {
+            model_iden: iden("m"),
+            cause: "stream failed".into(),
+            error: Box::new(timeout),
+        }
+    }
+
+    #[test]
+    fn from_genai_classifies_stream_timeouts_as_transient() {
+        use genai::webc::StreamTimeout;
+        for timeout in [StreamTimeout::Read, StreamTimeout::Headers] {
+            let e = ProviderError::from_genai(&web_stream_timeout(timeout), "m");
+            assert!(
+                matches!(&e, ProviderError::Transient { cause, .. } if *cause == timeout.to_string()),
+                "got {e:?}"
+            );
+        }
+        let e = ProviderError::from_genai(&web_stream_timeout(StreamTimeout::Read), "m");
+        assert_eq!(
+            e.summary(),
+            "connection failed: model response body read timed out"
         );
     }
 

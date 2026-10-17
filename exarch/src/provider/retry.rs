@@ -1,7 +1,6 @@
-//! Cancellation-aware retry policy and idle budgets for the attempt loops in
-//! `stream.rs`, keyed on the variant `error.rs` classified.
+//! Cancellation-aware retry policy for the attempt loop in `stream.rs`, keyed
+//! on the variant `error.rs` classified.
 
-use super::tls::STREAM_IDLE_TIMEOUT;
 use super::{CancelSite, ProviderError, Refusal};
 use crate::cancel;
 use crate::clock;
@@ -16,7 +15,6 @@ const BASE_DELAY_MS: u64 = 750;
 const MAX_DELAY_MS: u64 = 8_000;
 /// High enough to honour the tens of seconds a `Retry-After` commonly asks for.
 const RATE_LIMIT_MAX_DELAY_MS: u64 = 30_000;
-const RETRY_IDLE_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// A server-named wait the patient tier sits out in place: only
 /// [`Wait::patient`] makes one, so no provider value can stall the loop.
@@ -58,16 +56,6 @@ impl Refusal {
     }
 }
 
-/// The first attempt keeps the full [`STREAM_IDLE_TIMEOUT`]; retries take the
-/// shorter one, spending the attempt budget rather than the clock.
-pub(super) fn idle_timeout(attempt: u32) -> Duration {
-    if attempt <= 1 {
-        STREAM_IDLE_TIMEOUT
-    } else {
-        RETRY_IDLE_TIMEOUT
-    }
-}
-
 /// The server's own [`Wait`] wins when present; the shift cap only guards
 /// `1u64 << shift` against overflow.
 async fn backoff_sleep(attempt: u32, retry_after: Option<Wait>, max_delay_ms: u64) {
@@ -88,33 +76,51 @@ pub(super) enum Attempt<T> {
     Failed(ProviderError),
 }
 
+/// `(max attempts, max delay ms, server wait)` the loop grants a failure;
+/// `None` surfaces it at once.
+fn budget(error: &ProviderError) -> Option<(u32, u64, Option<Wait>)> {
+    match error {
+        ProviderError::Refused(refusal) => match refusal.recovery() {
+            Recovery::InPlace(wait) => {
+                Some((RATE_LIMIT_MAX_ATTEMPTS, RATE_LIMIT_MAX_DELAY_MS, wait))
+            }
+            Recovery::Deferred(_) => None,
+        },
+        ProviderError::Transient { .. } => Some((MAX_ATTEMPTS, MAX_DELAY_MS, None)),
+        _ => None,
+    }
+}
+
+impl ProviderError {
+    /// The retry driver's own verdict, shared with the stream's partial-reply rule.
+    pub(super) fn retryable(&self) -> bool {
+        budget(self).is_some()
+    }
+}
+
 /// Drive `one` through the shared retry policy: only `Transient` and a
 /// `Refused` waited in place are retried, each against its own budget, and
 /// cancellation races the backoff sleep, so a cancel mid-delay never waits it
-/// out.
+/// out. `one` sees `None` on the first attempt, then the failure it replaces.
 pub(super) async fn retry_with_backoff<T>(
     cancel_site: CancelSite,
     cancel: &cancel::Token,
-    mut one: impl AsyncFnMut(u32) -> Attempt<T>,
+    mut one: impl AsyncFnMut(Option<&ProviderError>) -> Attempt<T>,
 ) -> Result<T, ProviderError> {
     let mut attempt = 0;
+    let mut replaced = None;
     loop {
         attempt += 1;
         if cancel.is_cancelled() {
             return Err(ProviderError::Cancelled(cancel_site));
         }
-        let mut error = match one(attempt).await {
+        let mut error = match one(replaced.as_ref()).await {
             Attempt::Done(value) => return Ok(value),
             Attempt::Failed(error @ ProviderError::Cancelled(_)) => return Err(error),
             Attempt::Failed(error) => error,
         };
-        let (max_attempts, max_delay_ms, retry_after) = match &error {
-            ProviderError::Refused(refusal) => match refusal.recovery() {
-                Recovery::InPlace(wait) => (RATE_LIMIT_MAX_ATTEMPTS, RATE_LIMIT_MAX_DELAY_MS, wait),
-                Recovery::Deferred(_) => return Err(error),
-            },
-            ProviderError::Transient { .. } => (MAX_ATTEMPTS, MAX_DELAY_MS, None),
-            _ => return Err(error),
+        let Some((max_attempts, max_delay_ms, retry_after)) = budget(&error) else {
+            return Err(error);
         };
         if attempt >= max_attempts {
             if let ProviderError::Transient { attempts, .. } = &mut error {
@@ -129,6 +135,7 @@ pub(super) async fn retry_with_backoff<T>(
             }
             () = backoff_sleep(attempt, retry_after, max_delay_ms) => {}
         }
+        replaced = Some(error);
     }
 }
 
@@ -153,7 +160,7 @@ mod tests {
     }
 
     #[test]
-    fn idle_timeout_before_token_is_retried_then_surfaced() {
+    fn a_timeout_before_any_token_is_retried_then_surfaced() {
         let calls = std::cell::Cell::new(0u32);
         let out: Result<(), ProviderError> = runtime().block_on(retry_with_backoff(
             CancelSite::BeforeRequest,
@@ -161,7 +168,7 @@ mod tests {
             async |_attempt| {
                 calls.set(calls.get() + 1);
                 Attempt::Failed(ProviderError::Transient {
-                    cause: "stream idle: no response within timeout".into(),
+                    cause: "model response headers timed out".into(),
                     attempts: 1,
                     body: None,
                     status: None,
@@ -212,11 +219,23 @@ mod tests {
     }
 
     #[test]
-    fn idle_timeout_budget_stays_bounded() {
-        let worst_case: Duration = (1..=MAX_ATTEMPTS).map(idle_timeout).sum();
-        assert!(worst_case < Duration::from_mins(10));
-        assert_eq!(idle_timeout(1), STREAM_IDLE_TIMEOUT);
-        assert!(idle_timeout(2) < STREAM_IDLE_TIMEOUT);
+    fn each_attempt_sees_the_failure_it_replaces() {
+        let seen = std::cell::RefCell::new(Vec::new());
+        let _: Result<(), ProviderError> = runtime().block_on(retry_with_backoff(
+            CancelSite::BeforeRequest,
+            &cancel::Token::new(),
+            async |replaced: Option<&ProviderError>| {
+                seen.borrow_mut().push(replaced.map(ProviderError::summary));
+                Attempt::Failed(ProviderError::local_transient(format!(
+                    "failure {}",
+                    seen.borrow().len()
+                )))
+            },
+        ));
+        let seen = seen.into_inner();
+        assert_eq!(seen[0], None);
+        assert_eq!(seen[1], Some("connection failed: failure 1".to_string()));
+        assert_eq!(seen.len(), MAX_ATTEMPTS as usize);
     }
 
     #[test]

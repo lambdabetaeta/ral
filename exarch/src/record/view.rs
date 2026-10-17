@@ -198,7 +198,7 @@ impl Blocks {
         self.usage
     }
 
-    /// The last turn's prompt size, overwritten (not summed) by each usage delta.
+    /// The last turn's prompt size, overwritten (not summed) by each measured usage delta.
     pub fn last_input(&self) -> u64 {
         self.last_input
     }
@@ -348,7 +348,9 @@ impl Blocks {
     fn step_forensic(&mut self, seq: Seq, f: Forensic) -> Delta {
         match f {
             Forensic::UsageDelta { usage } => {
-                self.last_input = usage.input;
+                if let Some(input) = usage.measured_input() {
+                    self.last_input = input;
+                }
                 self.usage += usage;
                 Delta::Quiet
             }
@@ -379,6 +381,7 @@ impl Blocks {
             | Forensic::Prune { .. }
             | Forensic::Unpin { .. }
             | Forensic::SessionEnded
+            | Forensic::Retried { .. }
             | Forensic::TurnStarted { .. } => Delta::Quiet,
             // A head bookend opens the session under a model exactly as a
             // switch names one mid-session, so all three land in the memo and

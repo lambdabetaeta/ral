@@ -2,7 +2,7 @@
 //!
 //! Two kinds of nudge, one message: a **repair** (`Empty`, `Stopped`,
 //! `Truncated`, a returning agent's un-replied `Complete`) is event-shaped,
-//! exceptional, and spends the per-exchange [`BUDGET`]; a **standing
+//! exceptional, and spends the consecutive-repair [`BUDGET`]; a **standing
 //! condition** — the pin register here, the ladders of
 //! [`gauge`](crate::agent::gauge) — is a fact about the agent's own live
 //! state, told once when it changes and never re-told while it holds,
@@ -18,18 +18,18 @@
 //!
 //! [`Nudges`] is per-session because the attend loop runs one
 //! `Avatar::deliberate` per inbox item, not one per exchange, so this state
-//! must outlive a single deliberation.  [`Nudges::reset`] clears the budget at
-//! a genuine exchange boundary, never on a self-nudge; the edge fields survive
-//! it — a new exchange is not a new condition.  Every path that discards a
+//! must outlive a single deliberation.  [`Nudges::reset`] clears the repair
+//! count at an exchange opening and after each completed tool round, never on a
+//! self-nudge; the edge fields survive it.  Every path that discards a
 //! decided-but-uncommitted nudge (`/clear`, `/rewind`) is reborn whole
 //! ([`Nudges::reborn`]), since a decided edge cannot be un-consumed piecemeal.
 
 use crate::agent::deliberate::Outcome;
-use crate::provider::ProviderError;
+use crate::provider::{CutShort, ProviderError};
 use crate::record::{AgentLog, Spent};
 
-/// Per-exchange repair budget, distinct from the provider's transport
-/// retries: this one is for model-visible recovery.
+/// Consecutive model-visible repairs, distinct from the provider's transport
+/// retries.
 const BUDGET: u32 = 3;
 
 /// Brackets every synthetic nudge, so the model can tell a system reminder
@@ -136,7 +136,7 @@ pub(crate) struct Nudges {
     /// toolless `--chat` trunk — every nudge would steer it toward a tool it
     /// does not have, so nothing is ever said.
     steers: bool,
-    /// Repairs spent this exchange.
+    /// Consecutive repairs spent.
     used: u32,
     /// The pin digest last told to the model; a differing register re-arms.
     pinned_told: Option<String>,
@@ -160,9 +160,9 @@ impl Nudges {
         Self::new(self.steers)
     }
 
-    /// Clear the repair budget — the attend loop calls this on every
-    /// exchange-opening item.  Edge state survives: a new exchange is not a
-    /// new condition.
+    /// Clear the repair budget: at every exchange-opening item and after every
+    /// completed tool round.  Edge state survives: a new exchange is not a new
+    /// condition.
     pub fn reset(&mut self) {
         self.used = 0;
     }
@@ -195,9 +195,12 @@ impl Nudges {
             Ok(Outcome::Stopped { reason }) => {
                 self.repair(format!("stop={reason}"), EARLY_STOP_MESSAGE, log)
             }
-            Err(ProviderError::Truncated { .. }) => {
-                self.repair("truncated".into(), TRUNCATED_MESSAGE, log)
-            }
+            Err(ProviderError::Truncated { cause }) => match cause.as_ref() {
+                CutShort::OutputCap { .. } => {
+                    self.repair("truncated".into(), TRUNCATED_MESSAGE, log)
+                }
+                CutShort::Stalled(_) => self.repair("stalled".into(), STALLED_MESSAGE, log),
+            },
             // A reply is final; a cancel was asked for; every other provider
             // error is the transport's own.
             _ => None,
@@ -295,6 +298,9 @@ const EARLY_STOP_MESSAGE: &str = "Your previous turn ended early on a provider-s
 
 const TRUNCATED_MESSAGE: &str = "Your previous reply was cut off before it completed. \
     Continue concisely from where it stopped.";
+
+const STALLED_MESSAGE: &str = "The connection to the model failed partway through your reply. \
+    What you had written so far is kept above; continue from where it ends.";
 
 #[cfg(test)]
 mod tests;

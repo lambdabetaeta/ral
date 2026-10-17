@@ -1,5 +1,6 @@
 use super::*;
 use crate::bus::{BusReceiver, FleetSink, UsageMeter, channel};
+use crate::provider::ProviderError;
 use crate::record::AgentId;
 use crate::record::Record;
 
@@ -58,6 +59,40 @@ fn a_reasoning_run_records_ahead_of_all_the_prose_that_follows_it() {
             );
         }
         other => panic!("expected the reasoning run first, got {other:?}"),
+    }
+}
+
+/// A retry seals the failed attempt's reasoning where it stands: the new
+/// attempt's reasoning is a separate record, never a continuation of it.
+#[test]
+fn a_retry_seals_the_failed_attempts_lanes() {
+    let (emit, rx) = emitter();
+    let mut stream = Stream::default();
+    let cause = ProviderError::local_transient("model response body read timed out");
+    stream.push(&emit, Delta::Think("first try")).unwrap();
+    stream
+        .push(
+            &emit,
+            Delta::Retry {
+                cause: &cause,
+                lost: None,
+            },
+        )
+        .unwrap();
+    stream.push(&emit, Delta::Think("second try")).unwrap();
+    stream.push(&emit, Delta::Say("answer")).unwrap();
+    stream.seal(&emit).unwrap();
+
+    match drain_display(&rx).as_slice() {
+        [
+            Display::Thinking { text: first },
+            Display::Thinking { text: second },
+            Display::Answer { .. },
+        ] => {
+            assert_eq!(first, "first try");
+            assert_eq!(second, "second try");
+        }
+        other => panic!("expected two thinking records then the answer, got {other:?}"),
     }
 }
 

@@ -181,12 +181,13 @@ fn result_json(h: &Headless, r: &Result<(), String>, elapsed: std::time::Duratio
         }),
         "num_turns": h.turns,
         "duration_ms": duration_ms,
-        "total_cost_usd": u.dollars,
+        "total_cost_usd": (u.unreported == 0).then_some(u.dollars),
         "usage": {
             "input_tokens": u.input,
             "output_tokens": u.output,
             "cache_creation_input_tokens": u.cache_creation,
             "cache_read_input_tokens": u.cache_read,
+            "unreported_turns": u.unreported,
         },
     });
     if let Err(e) = r

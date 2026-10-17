@@ -1,7 +1,7 @@
 ---
-verified_at_commit: f7ceae58
-verified_at_date: 2026-10-10
-anchors: [from_genai, refused, error_object, Fault, of_webc, of_boxed, of_reqwest, ProviderError, Refused, Refusal, Limit, Recovery, recovery, Transient, Api, Truncated, retry_with_backoff, Attempt, backoff_sleep, parse_retry_after, unwaitable, BODY_KEYS, epoch_or_delta, Wait::patient, RATE_LIMIT_MAX_DELAY_MS, json_status_code, CutShort, stall_cause, root_cause, body_detail, Readout, stalled_step_out, STREAM_IDLE_TIMEOUT, MAX_ATTEMPTS, RATE_LIMIT_MAX_ATTEMPTS, manufacture, Sealed]
+verified_at_commit: d13f07b0
+verified_at_date: 2026-10-17
+anchors: [from_genai, refused, error_object, Fault, of_webc, of_boxed, of_reqwest, ProviderError, Refused, Refusal, Limit, Recovery, recovery, Transient, Api, Truncated, retry_with_backoff, Attempt, backoff_sleep, parse_retry_after, unwaitable, BODY_KEYS, epoch_or_delta, Wait::patient, RATE_LIMIT_MAX_DELAY_MS, json_status_code, CutShort, stall_cause, root_cause, body_detail, Readout, stalled_step_out, STREAM_HEADER_TIMEOUT, STREAM_READ_TIMEOUT, budget, retryable, MAX_ATTEMPTS, RATE_LIMIT_MAX_ATTEMPTS, manufacture, Sealed]
 ---
 
 # Provider faults and recovery
@@ -84,8 +84,9 @@ touches the `Display` text:
   `Terminal`.
 - `WebStream` → `of_boxed`, which downcasts the boxed leaf: a `genai::Error`
   **recurses back into `Fault::of`** (so a boxed `HttpError` reuses the same
-  `Response` arm), a `reqwest::Error` goes to `of_reqwest`, and a corrupt-UTF-8
-  box falls through to `Terminal`.
+  `Response` arm), genai's own `webc::StreamTimeout` (its header or body-read
+  bound) is a `Transport` carrying its message, a `reqwest::Error` goes to
+  `of_reqwest`, and a corrupt-UTF-8 box falls through to `Terminal`.
 - `ChatResponse` → `Response`, retaining the body whether or not
   `json_status_code` finds a numeric status. String codes remain error fields.
 - every other variant → the `_ => Terminal` floor.
@@ -203,8 +204,9 @@ Two more `ProviderError` variants never come from `from_genai`:
   record of its own at the point it happened, so a survived stall drew two
   error blocks — one saying the turn resumes, one immediately reading as the
   end of the run. Now the caller's `record_provider_error` writes it once, and
-  `ProviderError::stall_cause` is the one place the "survived, not fatal"
-  reading is derived: the TUI fold, synod's seam and the headless printer each
+  `ProviderError::stall_cause` is the one place a stall that kept its partial
+  reply is told from a fatal error (whether the exchange goes on is the
+  nudge's to say): the TUI fold, synod's seam and the headless printer each
   ask it rather than re-matching the shape.
 
 ## The retry driver
@@ -225,6 +227,13 @@ The loop is small and the rules read straight off it:
   `Deferred` `Refused`, `Other`) surfaces at once, and a `Transient` out of
   budget is stamped with its final attempt count. So a 4xx never burns the
   budget, and a refusal past the patient tier surfaces on its first attempt.
+  That verdict is one function, `budget`, which `ProviderError::retryable`
+  exposes to the stream's partial-reply rule below.
+- Each attempt is told the failure it replaces (`None` on the first), so the
+  stream can mark the boundary: `Delta::Retry(&ProviderError)` precedes the new
+  attempt's deltas, and `deliberate` records a `Forensic::Retried`: the
+  log's alone, drawn by no renderer, so every retried failure leaves a record
+  and no mark on screen.
 - Between attempts it `select!`s the backoff sleep against the cancel token, so
   a user can interrupt a wait.
 
@@ -287,48 +296,61 @@ Because transport retry lives entirely here, [[map/exarch/agent|the nudge
 rules]] upstream cover only *model-behaviour* outcomes — they never see a
 transport blip.
 
-## The streaming-specific rule: commit, don't double-render
+## The streaming-specific rule: keep prose, retry the rest
 
-Streaming adds one wrinkle the driver respects. Once text or reasoning has
-flowed to `on_delta`, the UI has *committed* to a partial render; a
-re-issue would print that content twice. So `complete` tracks whether either
-stream has yielded content, and when the stream breaks:
+Streaming adds one wrinkle the driver respects. Only answer text survives into
+the transcript: `admit_assistant` treats reasoning alone as non-substantive and
+replaces it with a stub, so a partial that holds only reasoning keeps nothing.
+`complete` therefore tracks whether the answer has spoken (`spoke`, set by
+`Chunk` alone), and when the stream breaks:
 
-- **no text or reasoning streamed** → return `Attempt::Failed(Transient)` and
-  let the driver re-issue (nothing was shown).
-- **content already streamed** → `stalled_step_out` projects the text prefix
-  and reasoning into a `CutShort::Stalled` `StepOut` — no tool calls, no stop
-  reason, the stall cause carried for the operator note — and hands it back as
-  `Attempt::Done`. The session commits the prefix and continues the exchange,
-  mirroring the output-cap truncation path.
+- **no prose streamed** → return `Attempt::Failed` and let the driver re-issue;
+  the failed attempt's reasoning stays recorded as what was seen, sealed at the
+  `Delta::Retry` boundary so no half line is glued to the new attempt's text.
+- **prose already streamed and the error is `retryable`** → `stalled_step_out`
+  projects the text prefix and reasoning into a `CutShort::Stalled` `StepOut`
+  (no tool calls, no stop reason, the cause carried for the operator note) and
+  hands it back as `Attempt::Done`. The session commits the prefix and the
+  `Stalled` nudge asks the model to continue from where it ends.
+- **prose already streamed and any other error** (`Api`, `Other`, a deferred
+  refusal) → `Attempt::Failed`: the error surfaces as itself, the streamed text
+  staying on screen through `abandon_turn`, rather than being re-driven by a
+  nudge the retry policy would never have granted.
 
 This is why `Attempt` needs no third "don't retry" variant: a committed stall is
 simply a `Done` carrying partial work. A stream that ends without an `End` frame
-is classified `Transient` for the same machinery — retried when nothing showed,
-committed when something did.
+is classified `Transient` for the same machinery.
 
-## The idle timeout
+## Stream liveness
 
-Before a streaming response opens, `idle_timeout` bounds connect and
-time-to-first-event: the first attempt gets `STREAM_IDLE_TIMEOUT` (180 s), then
-retries get `RETRY_IDLE_TIMEOUT` (60 s). Once a stream is open there is no
-timeout between decoded `ChatStreamEvent`s. Liveness moves down to the
-transport's per-read timeout, so raw byte silence fails while SSE pings or
-provider heartbeats consumed below the semantic event layer keep a
-long-thinking model alive. A read timeout surfaces as a stream error and enters
-the same transient-or-committed rule above.
+Liveness is one byte-level clock, owned by genai: `complete_options` sets
+`stream_header_timeout` (`STREAM_HEADER_TIMEOUT`, 3 min, connect to headers) and
+`stream_read_timeout` (`STREAM_READ_TIMEOUT`, 10 min, per raw body chunk) on
+every request. A raw chunk includes an SSE `:` comment line, which genai's
+parser drops before it becomes an event, so a keepalive counts as life where an
+event-level timer would not. exarch keeps no timer of its own in the stream
+loop, only the cancel arms; a heartbeat event adds nothing there.
 
-That read timeout is held 30 s clear of `STREAM_IDLE_TIMEOUT` (210 s) so the
-two bounds do not race: whichever fires names the failure, and only the stream
-loop's own arm can say *which* wait ran out. Held equal, reqwest's — armed on
-the last byte, not the last event — won every first attempt, and every silent
-provider read as "error decoding response body". The socket bound is the
-backstop under the semantic one, for bytes stopping where no `next()` waits.
+The bound is long enough to ride out an upstream buffering mid-think (100 s
+observed in TB2.1); a dead peer is the HTTP/2 PING and TCP keepalives' to catch
+(about 45 s, `tls.rs`). A timeout arrives as
+`WebStream { StreamTimeout }`, classified `Transient` with genai's message as
+the cause (`connection failed: model response body read timed out`), and enters
+the retry rule above.
 
-The worst pre-stream idle burn is bounded by construction at 180 + 60 + 60 =
-300 seconds. Tests pin the
-first-attempt/retry distinction and the aggregate budget; the transport rule is
-the local slice of [[decisions/260702_provider-heartbeats-and-retry-boundaries|provider-heartbeats-and-retry-boundaries]].
+reqwest's per-read `READ_TIMEOUT` stays as the backstop for every client that
+shares it, held 30 s above `STREAM_READ_TIMEOUT` so genai's named error always
+wins on a stream; held equal, reqwest's would race it and read as "error
+decoding response body". The transport rule is the local slice of
+[[decisions/260702_provider-heartbeats-and-retry-boundaries|provider-heartbeats-and-retry-boundaries]].
+
+## The repair budget
+
+A `Stalled` truncation gets its own nudge (`STALLED_MESSAGE`, cause `"stalled"`);
+the output-cap message is unchanged. The one repair `BUDGET` counts
+*consecutive* model-visible repairs: it clears at an exchange-opening item and
+after every completed tool round, so faults scattered through a long headless
+run, which is one exchange, never add up to the one that ends it.
 
 ## What is deliberately terminal
 
@@ -368,12 +390,14 @@ for real would need a network integration test (connect to a dead port) — flak
 and slow — so it stays open rather than faked. The retry driver itself *is*
 tested end to end: a forced `Transient` is driven through the real loop and must
 exhaust `MAX_ATTEMPTS`, then surface bounded — the same path that stamps the
-attempt count.
+attempt count — and each attempt is checked to see the failure it replaces.
+genai's `StreamTimeout` is a plain value, so both of its arms are tested
+directly.
 
 ## See also
 
 - [[map/exarch/provider|provider]] — the transport this classifies for:
-  identity, client building, the streaming call, the idle timeout,
+  identity, client building, the streaming call, the liveness bounds,
   usage and pricing.
 - [[internals/cancellation|cancellation]] — the per-exchange `Token` the
   `Cancelled` variant reports, and the cancel-aware backoff select.
@@ -387,5 +411,5 @@ attempt count.
 - `exarch/src/provider/error.rs` (`from_genai`, `refused`, `Fault`),
   `exarch/src/provider/reset.rs` (`at`, `unwaitable`; one test per convention),
   `exarch/src/provider/retry.rs` (`retry_with_backoff`), and
-  `exarch/src/provider/tls.rs` (`STREAM_IDLE_TIMEOUT`, the `READ_TIMEOUT`
-  backstop under it).
+  `exarch/src/provider/tls.rs` (`STREAM_HEADER_TIMEOUT`, `STREAM_READ_TIMEOUT`, the
+  `READ_TIMEOUT` backstop over it).

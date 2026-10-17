@@ -15,6 +15,10 @@ pub struct Usage {
     pub cache_read: Option<u64>,
     pub dollars: f64,
     pub unmetered: bool,
+    /// Turns whose usage the provider never reported (a stream cut short, an
+    /// `End` without usage); the other fields cover only the rest, so a total
+    /// with any is a lower bound.
+    pub unreported: u32,
 }
 
 /// Sum two per-turn counts, yielding `None` only when both sides are: a total
@@ -38,6 +42,7 @@ impl std::ops::AddAssign for Usage {
         // A total spanning a provider switch reads unmetered if any turn was,
         // so `parts` says "subscription" over real dollars from the metered ones.
         self.unmetered = self.unmetered || rhs.unmetered;
+        self.unreported += rhs.unreported;
     }
 }
 
@@ -76,6 +81,20 @@ pub struct UsageParts {
 }
 
 impl Usage {
+    /// A turn whose usage never arrived.
+    pub(crate) fn unreported(metered: bool) -> Self {
+        Self {
+            unmetered: !metered,
+            unreported: 1,
+            ..Self::default()
+        }
+    }
+
+    /// The input count as a context measurement; `None` when it was never reported.
+    pub fn measured_input(&self) -> Option<u64> {
+        (self.unreported == 0).then_some(self.input)
+    }
+
     pub fn parts(&self) -> UsageParts {
         let field = |value: Option<u64>| match value {
             Some(n) => humanize_tokens(n),
@@ -84,19 +103,27 @@ impl Usage {
         // A reported zero hides the segment too: no cache traffic, nothing to say.
         let show_cache = matches!(self.cache_creation, Some(n) if n > 0)
             || matches!(self.cache_read, Some(n) if n > 0);
-        UsageParts {
-            input: humanize_tokens(self.input),
-            output: humanize_tokens(self.output),
-            cache: show_cache.then(|| (field(self.cache_creation), field(self.cache_read))),
-            cost: if self.unmetered {
-                "subscription".into()
-            } else if self.dollars > 0.0 {
+        let cost = if self.unmetered {
+            "subscription".into()
+        } else {
+            let known = if self.dollars > 0.0 {
                 format!("${:.4}", self.dollars)
             } else {
                 // Metered yet costing nothing means `pricing::lookup_for` found
                 // no rate for the model, not that the turn was free.
                 "—".into()
-            },
+            };
+            if self.unreported > 0 {
+                format!("{known} + ?")
+            } else {
+                known
+            }
+        };
+        UsageParts {
+            input: humanize_tokens(self.input),
+            output: humanize_tokens(self.output),
+            cache: show_cache.then(|| (field(self.cache_creation), field(self.cache_read))),
+            cost,
         }
     }
 }
@@ -152,6 +179,7 @@ pub(super) fn usage_from(
         cache_read,
         dollars,
         unmetered: !metered,
+        unreported: 0,
     }
 }
 
@@ -208,5 +236,33 @@ mod tests {
         assert_eq!(total.input, 3_000);
         assert_eq!(total.cache_creation, Some(42));
         assert_eq!(total.cache_read, Some(2_000));
+    }
+
+    #[test]
+    fn unreported_adds_and_voids_the_measurement() {
+        let mut total = Usage {
+            input: 1_000,
+            dollars: 0.0364,
+            ..Usage::default()
+        };
+        assert_eq!(total.measured_input(), Some(1_000));
+        total += Usage::unreported(true);
+        total += Usage::unreported(true);
+        assert_eq!(total.unreported, 2);
+        assert_eq!(total.input, 1_000);
+        assert_eq!(total.measured_input(), None);
+        assert_eq!(Usage::unreported(true).measured_input(), None);
+    }
+
+    #[test]
+    fn unreported_cost_is_a_lower_bound() {
+        let priced = Usage {
+            dollars: 0.0364,
+            unreported: 1,
+            ..Usage::default()
+        };
+        assert_eq!(priced.parts().cost, "$0.0364 + ?");
+        assert_eq!(Usage::unreported(true).parts().cost, "— + ?");
+        assert_eq!(Usage::unreported(false).parts().cost, "subscription");
     }
 }

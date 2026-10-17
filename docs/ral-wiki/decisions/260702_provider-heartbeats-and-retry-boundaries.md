@@ -1,8 +1,23 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Provider heartbeats are not model turns
+
+> *Amended 2026-10-17*: the raw silence clock is genai's own
+> `stream_read_timeout` (10 minutes, per raw body chunk, `:` comments included)
+> with `stream_header_timeout` (3 minutes) for the open; no fork is needed and
+> exarch's event timers are gone. There is no semantic clock and no
+> attempt-dependent bound. Only answer text makes a partial *committed
+> context*, because only prose survives into the transcript: a reasoning-only
+> failure is therefore retried below the transcript, with a recorded boundary
+> (`Delta::Retry`, recorded as `Forensic::Retried` and drawn nowhere), and a failure after prose keeps
+> the prefix only when the error is one the retry driver would retry. The
+> repair budget counts consecutive repairs, cleared after every completed tool
+> round. Provider usage a stream never reported is a counted fact
+> (`Usage::unreported`), not a zero
+> ([[map/exarch/provider|provider]],
+> [[internals/provider-fault-recovery|provider-fault-recovery]]).
 
 > *Amended 2026-09-29*: a 429 whose reset lies past the patient tier
 > (`Recovery::Deferred`) surfaces on its first attempt rather than being

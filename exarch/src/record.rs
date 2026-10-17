@@ -426,7 +426,7 @@ pub enum Forensic {
     Error {
         text: String,
     },
-    /// The agent steering itself: a repair spends the per-exchange budget, a
+    /// The agent steering itself: a repair spends the consecutive-repair budget, a
     /// standing-condition reminder spends nothing.
     Nudge {
         cause: String,
@@ -434,6 +434,11 @@ pub enum Forensic {
         spent: Option<Spent>,
     },
     ProviderError {
+        error: ProviderError,
+    },
+    /// A provider attempt that failed and was re-issued; the log's alone,
+    /// drawn nowhere.
+    Retried {
         error: ProviderError,
     },
     /// An operational note the attend loop issued — the model never saw it.
@@ -626,7 +631,7 @@ impl TurnKind {
     }
 }
 
-/// What a repair spent of the per-exchange budget, as the record keeps it.
+/// What a repair spent of the consecutive-repair budget, as the record keeps it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Spent {
     pub used: u32,

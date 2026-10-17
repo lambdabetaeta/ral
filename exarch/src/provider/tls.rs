@@ -6,22 +6,17 @@
 
 use std::time::Duration;
 
-/// Longest the socket may go without reading a byte before the connection is
-/// judged dead. Armed per read and reset by every byte, so an SSE keepalive
-/// counts as life and a slow completion runs as long as it likes; only true
-/// silence — TCP open, bytes stopped, `next()` never waking — trips it, into a
-/// retryable transport error. `retry::idle_timeout` reuses the value as attempt
-/// one's bound on opening a stream and on the gap between its events, where
-/// three minutes is the room a slow high-effort time-to-first-token needs.
-pub(crate) const STREAM_IDLE_TIMEOUT: Duration = Duration::from_mins(3);
+/// Longest genai waits for a stream's response headers: room for a slow upstream to open.
+pub(crate) const STREAM_HEADER_TIMEOUT: Duration = Duration::from_mins(3);
 
-/// The socket's own bound, held clear of [`STREAM_IDLE_TIMEOUT`] so the stream
-/// loop's idle arm always wins the race to name a silent provider: it says
-/// which wait ran out, where reqwest's read timeout arrives as the same
-/// "error decoding response body" every other mid-stream body failure does.
-/// This is the backstop under it, for a socket that goes quiet where no
-/// `next()` is waiting on it.
-const READ_TIMEOUT: Duration = Duration::from_secs(STREAM_IDLE_TIMEOUT.as_secs() + 30);
+/// Longest genai waits for the next raw body chunk, comments included. Long
+/// enough to ride out an upstream buffering mid-think (100 s observed); a dead
+/// peer is the keep-alives' to catch.
+pub(crate) const STREAM_READ_TIMEOUT: Duration = Duration::from_mins(10);
+
+/// The backstop under genai's stream bounds for every client sharing this one,
+/// held clear so genai's named timeout wins on a stream.
+const READ_TIMEOUT: Duration = Duration::from_secs(STREAM_READ_TIMEOUT.as_secs() + 30);
 
 /// rustls config validating against the bundled Mozilla webpki roots, never the
 /// host's trust store: exarch must run unchanged on container images that ship

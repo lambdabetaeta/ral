@@ -2,7 +2,7 @@
 
 use super::error::{CancelSite, CutShort};
 use super::request::{Request, complete_options};
-use super::retry::{Attempt, idle_timeout, retry_with_backoff, wait_for_cancel};
+use super::retry::{Attempt, retry_with_backoff, wait_for_cancel};
 use super::transport::{Engine, Transport};
 use super::usage::{Usage, usage_from};
 use super::wire::{manufacture, tool_defs};
@@ -21,7 +21,7 @@ pub struct StepOut {
     pub cut_short: Option<CutShort>,
 }
 
-/// One streamed piece of an assistant turn.
+/// One streamed event of an assistant turn.
 ///
 /// Prose and reasoning arrive interleaved on a single stream and their order
 /// carries meaning — a reasoning run ends exactly where the prose after it
@@ -31,6 +31,15 @@ pub struct StepOut {
 pub enum Delta<'a> {
     Say(&'a str),
     Think(&'a str),
+    /// The attempt whose deltas came before failed and is being re-issued;
+    /// deltas after it belong to the new attempt.
+    Retry {
+        /// The failure being retried.
+        cause: &'a ProviderError,
+        /// The failed attempt's usage when it streamed output the provider
+        /// never reported; `None` when it failed before any.
+        lost: Option<Usage>,
+    },
 }
 
 impl Engine {
@@ -54,13 +63,21 @@ impl Engine {
             route,
         );
 
+        let mut heard = false;
         self.block_on(retry_with_backoff(
             CancelSite::BeforeRequest,
             cancel,
-            async |attempt| {
+            async |retrying| {
+                if let Some(cause) = retrying {
+                    on_delta(Delta::Retry {
+                        cause,
+                        lost: heard.then(|| Usage::unreported(transport.metered())),
+                    });
+                }
+                heard = false;
                 let wire =
                     manufacture(adapter, request.system, request.transcript, &tools).into_request();
-                let mut seen_streamed_content = false;
+                let mut spoke = false;
                 let mut streamed = String::new();
                 let mut streamed_reasoning = String::new();
                 let attempt_result: Result<StreamEnd, ProviderError> = async {
@@ -69,11 +86,6 @@ impl Engine {
                         () = wait_for_cancel(cancel) => {
                             return Err(ProviderError::Cancelled(CancelSite::BeforeRequest));
                         }
-                        () = tokio::time::sleep(idle_timeout(attempt)) => {
-                            return Err(ProviderError::local_transient(
-                                "stream idle: no response within timeout",
-                            ));
-                        }
                         result = transport.client().exec_chat_stream(
                             model,
                             wire,
@@ -81,18 +93,10 @@ impl Engine {
                         ) => result.map_err(|error| ProviderError::from_genai(&error, model))?,
                     };
                     loop {
-                        // The opening's bound, re-armed by every event: a
-                        // `Heartbeat` through a long think counts as life, so only
-                        // true silence ends the stream.
                         let event = tokio::select! {
                             biased;
                             () = wait_for_cancel(cancel) => {
                                 return Err(ProviderError::Cancelled(CancelSite::MidStream));
-                            }
-                            () = tokio::time::sleep(idle_timeout(attempt)) => {
-                                return Err(ProviderError::local_transient(
-                                    "stream idle: no event within timeout",
-                                ));
                             }
                             event = response.stream.next() => match event {
                                 Some(Ok(event)) => event,
@@ -104,20 +108,22 @@ impl Engine {
                         };
                         match event {
                             ChatStreamEvent::Chunk(chunk) => {
-                                seen_streamed_content |= !chunk.content.is_empty();
+                                spoke |= !chunk.content.trim().is_empty();
+                                heard |= !chunk.content.is_empty();
                                 streamed.push_str(&chunk.content);
                                 on_delta(Delta::Say(&chunk.content));
                             }
                             ChatStreamEvent::End(end) => return Ok(end),
                             ChatStreamEvent::ReasoningChunk(chunk) => {
-                                seen_streamed_content |= !chunk.content.is_empty();
+                                heard |= !chunk.content.is_empty();
                                 streamed_reasoning.push_str(&chunk.content);
                                 on_delta(Delta::Think(&chunk.content));
                             }
                             // Nothing to add to the turn: signatures and tool calls
-                            // arrive whole in `End`, and a heartbeat's only use is
-                            // the re-arming above. Named rather than wildcarded so
-                            // a new event cannot slip past.
+                            // arrive whole in `End`, and liveness is genai's
+                            // byte-level bound, so a heartbeat adds nothing here.
+                            // Named rather than wildcarded so a new event cannot
+                            // slip past.
                             ChatStreamEvent::Start
                             | ChatStreamEvent::Heartbeat
                             | ChatStreamEvent::ThoughtSignatureChunk(_)
@@ -130,21 +136,18 @@ impl Engine {
                 }
                 .await;
 
-                // Text already streamed live cannot be unsent, so a failure past
-                // the first chunk commits as `Stalled` instead of retrying.
-                // Cancellation is exempt: `deliberate` discards the turn whole.
+                // Prose already streamed live cannot be unsent, so a failure the
+                // driver would retry commits as `Stalled` once it has spoken;
+                // any other failure, or one before prose, goes to the driver.
                 match attempt_result {
                     Ok(end) => {
                         Attempt::Done(step_out_from_end(model, end, transport.metered(), adapter))
                     }
-                    Err(error @ ProviderError::Cancelled(_)) => Attempt::Failed(error),
-                    Err(error) if seen_streamed_content => Attempt::Done(stalled_step_out(
-                        model,
+                    Err(error) if spoke && error.retryable() => Attempt::Done(stalled_step_out(
                         &streamed,
                         &streamed_reasoning,
                         &error,
                         transport.metered(),
-                        adapter,
                     )),
                     Err(error) => Attempt::Failed(error),
                 }
@@ -154,7 +157,10 @@ impl Engine {
 }
 
 fn step_out_from_end(model: &str, end: StreamEnd, metered: bool, adapter: AdapterKind) -> StepOut {
-    let raw_usage = end.captured_usage.clone().unwrap_or_default();
+    let usage = end.captured_usage.as_ref().map_or_else(
+        || Usage::unreported(metered),
+        |raw| usage_from(model, raw, metered, adapter),
+    );
     let stop_reason = end.captured_stop_reason.clone();
     let reasoning = end.captured_reasoning_content.clone();
     let content = end.captured_content.clone().unwrap_or_default();
@@ -168,26 +174,24 @@ fn step_out_from_end(model: &str, end: StreamEnd, metered: bool, adapter: Adapte
     StepOut {
         assistant_message: ChatMessage::assistant(content).with_reasoning_content(reasoning),
         tool_calls,
-        usage: usage_from(model, &raw_usage, metered, adapter),
+        usage,
         stop_reason,
         cut_short,
     }
 }
 
 fn stalled_step_out(
-    model: &str,
     streamed: &str,
     streamed_reasoning: &str,
     cause: &ProviderError,
     metered: bool,
-    adapter: AdapterKind,
 ) -> StepOut {
     let reasoning = (!streamed_reasoning.is_empty()).then(|| streamed_reasoning.to_string());
     StepOut {
         assistant_message: ChatMessage::assistant(streamed.to_string())
             .with_reasoning_content(reasoning),
         tool_calls: Vec::new(),
-        usage: usage_from(model, &genai::chat::Usage::default(), metered, adapter),
+        usage: Usage::unreported(metered),
         stop_reason: None,
         cut_short: Some(CutShort::Stalled(cause.clone())),
     }
@@ -300,14 +304,7 @@ mod tests {
             &web_stream_http(StatusCode::SERVICE_UNAVAILABLE),
             "test-model",
         );
-        let step = stalled_step_out(
-            "test-model",
-            "partial answer so far",
-            "",
-            &cause,
-            false,
-            AdapterKind::OpenAI,
-        );
+        let step = stalled_step_out("partial answer so far", "", &cause, false);
         assert!(
             matches!(
                 step.cut_short,
@@ -339,12 +336,10 @@ mod tests {
             "test-model",
         );
         let step = stalled_step_out(
-            "test-model",
-            "",
+            "partial answer",
             "let me work through the cases",
             &cause,
             false,
-            AdapterKind::OpenAI,
         );
         assert!(step.assistant_message.content.iter().any(|part| matches!(
             part,

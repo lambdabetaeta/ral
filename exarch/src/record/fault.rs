@@ -62,13 +62,12 @@ impl Readout {
         }
     }
 
-    /// A stall the exchange survived: the same field list a fatal failure
-    /// gets, under a headline that says so.  The `continuing` field is the
-    /// whole distinction — without it the readout would read as the end of
-    /// the run, which is precisely what a stall is not.
+    /// A stall that kept its partial reply: the same field list a fatal failure
+    /// gets, under a headline that says so.  Whether the exchange goes on is
+    /// the nudge's record to say, not this readout's.
     pub fn stall(e: &ProviderError) -> Self {
         let mut fields = error_fields(e);
-        fields.push(text_field("continuing", "partial reply kept"));
+        fields.push(text_field("kept", "partial reply"));
         Self {
             headline: "stream stalled".to_string(),
             fields,
