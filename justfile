@@ -29,7 +29,7 @@ _build $RUSTFLAGS=deny:
 
 # Run the workspace test suite.
 test $RUSTFLAGS=deny: _build
-    cargo test --workspace {{gui}} --features ral-core/test-util,exarch/test-util
+    cargo test --workspace {{gui}} --features ral-core/test-util,exarch/test-util --no-fail-fast
 
 # Compiles nothing, so it is the cheapest step CI has and the one worth failing
 # first. `--all` reaches vendor/ too, where vendor/rustfmt.toml turns formatting
