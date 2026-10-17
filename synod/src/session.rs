@@ -243,8 +243,7 @@ impl Conversation {
         // the guest's namespace: the engine lives there, and the host path
         // of the folder names nothing inside it.
         let caps = grant.capabilities();
-        let system =
-            crate::prompt::assemble(&caps, machine.workspace_path(), &grant.name(), &config_dir)?;
+        let system = crate::prompt::assemble(machine.workspace_path(), &grant.name(), &config_dir)?;
 
         // Synod's engine is per-conversation; the credentials, catalog, and
         // allowance record it draws on are the application's, held for its

@@ -106,14 +106,9 @@ pub fn for_invocation(
         stack.push(deny_layer(&crate::provider::credential_files(), &ctx)?);
     }
 
-    let own = self_layer()?;
-    stack.push(own.clone());
+    stack.push(self_layer()?);
 
-    Ok(Invocation {
-        stack,
-        restricts,
-        own,
-    })
+    Ok(Invocation { stack, restricts })
 }
 
 /// A session's composed authority, with the pieces its callers need by name.
@@ -123,20 +118,6 @@ pub struct Invocation {
     pub stack: GrantStack,
     /// Absolute paths of the `--restrict` files.
     pub restricts: Vec<PathBuf>,
-    /// The self layer, which the stack also carries.
-    pub own: Capabilities,
-}
-
-impl Invocation {
-    /// The stack's layers, each with whether it is the self layer: the last,
-    /// which `for_invocation` always pushes, so a ceiling equal to it is not.
-    pub fn layers(&self) -> impl Iterator<Item = (&Capabilities, bool)> {
-        let last = self.stack.iter().count().saturating_sub(1);
-        self.stack
-            .iter()
-            .enumerate()
-            .map(move |(i, c)| (c, i == last))
-    }
 }
 
 /// The bake-in bases a spawn's `grant` may name — a subset of what

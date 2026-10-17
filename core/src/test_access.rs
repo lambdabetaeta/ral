@@ -292,7 +292,7 @@ pub fn worker_count(transport: &dyn Transport) -> Result<u64, ProbeError> {
 /// # Errors
 /// As [`Transport::cwd`].
 pub fn grant_depth(transport: &dyn Transport) -> Result<u64, ProbeError> {
-    crate::carrier::read(transport, &Probe::GrantDepth)
+    transport.grants().map(|stack| stack.len() as u64)
 }
 
 /// `Shell::workers` on the engine behind `transport`, each entry's handle

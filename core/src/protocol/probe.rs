@@ -8,7 +8,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use crate::first_order::FOValue;
+use crate::capability::GrantStack;
+use crate::first_order::{Bytes, FOValue};
 use crate::first_order::datum::{Datum, tag, untag};
 use crate::record;
 use crate::types::{HandleState, LeaseClass};
@@ -35,10 +36,10 @@ pub enum Probe {
     Bindings,
     /// The entries of a directory, resolved against the engine's cwd.
     PathEntries(PathBuf),
+    /// The session's own grant stack, without any run's ceiling.
+    Grants,
     #[cfg(feature = "test-util")]
     WorkerCount,
-    #[cfg(feature = "test-util")]
-    GrantDepth,
 }
 
 /// One row of the worker table.
@@ -117,6 +118,18 @@ impl Datum for HandleState {
     }
 }
 
+/// Opaque to ral, as a seed is: the stack crosses in the codec `Run.caps` rides.
+impl Datum for GrantStack {
+    fn encode(self) -> FOValue {
+        Bytes::from(serde_json::to_vec(&self).expect("a grant stack is plain data")).encode()
+    }
+
+    fn decode(v: &FOValue) -> Result<Self, String> {
+        serde_json::from_slice(&Bytes::decode(v)?)
+            .map_err(|e| format!("expected an encoded grant stack: {e}"))
+    }
+}
+
 /// The names a completer offers beside the builtins, which have their own
 /// probe.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,6 +187,19 @@ mod tests {
         })
         .expect_err("a row with only an id");
         assert!(why.contains("`cmd"), "{why}");
+    }
+
+    /// A grant stack crosses a probe layer for layer, exec keys and all.
+    #[test]
+    fn a_grant_stack_round_trips() {
+        use crate::capability::{Capabilities, Evidence, ExecGrant, ExecKey, Net};
+        let mut stack = GrantStack::root();
+        stack.push(Capabilities {
+            exec: Some(ExecGrant::from_iter([(ExecKey::Name("git".into()), Evidence::ALLOW)])),
+            net: Some(Net::Offline),
+            ..Capabilities::root()
+        });
+        assert_eq!(GrantStack::decode(&stack.clone().encode()), Ok(stack));
     }
 
     /// Every row a new reading answers in survives its own round trip.

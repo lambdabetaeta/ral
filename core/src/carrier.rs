@@ -12,6 +12,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use crate::capability::GrantStack;
 use crate::engine::Scopes;
 use crate::first_order::FOValue;
 use crate::first_order::datum::Datum;
@@ -258,6 +259,16 @@ pub trait Transport: Send + Sync {
     /// As [`Self::cwd`].
     fn env_var(&self, name: &str) -> Result<Option<String>, ProbeError> {
         read(self, &Probe::EnvVar(name.to_string()))
+    }
+
+    /// The engine session's grant stack: what every run's ceiling is pushed
+    /// onto, so a forked child's carries its parent's authority and its own
+    /// layer.
+    ///
+    /// # Errors
+    /// As [`Self::cwd`].
+    fn grants(&self) -> Result<GrantStack, ProbeError> {
+        read(self, &Probe::Grants)
     }
 
     /// Every builtin the engine's shell resolves, internals included.

@@ -80,8 +80,9 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
   folder. One grant, read twice: once as authority, once as a workspace.
 - `prompt.rs` + `data/*.md` — the office persona and the office toolbox,
   assembled through exarch's own section renderer (`exarch::prompt::render`)
-  and grant rendering (`exarch::prompt::grant_summary`), over a `host_section`
-  of synod's own that tells the agent guest truths only. The ral language
+  and grant placeholder (`exarch::prompt::GRANT_PLACEHOLDER`, filled per agent
+  from its own engine), over a `host_section` of synod's own that tells the
+  agent guest truths only. The ral language
   body itself is exarch's shared `data/ral.md`, included verbatim
   (`include_str!("../../exarch/data/ral.md")`), with synod's own
   `data/ral-examples.md` supplying the per-product examples beside it —

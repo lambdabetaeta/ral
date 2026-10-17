@@ -11,7 +11,7 @@
 
 use exarch::app::{EXARCH, SYNOD, Scratch};
 use exarch::policy::{Invocation, for_invocation};
-use exarch::prompt::{SCRATCH_PLACEHOLDER, host_section};
+use exarch::prompt::{GRANT_PLACEHOLDER, SCRATCH_PLACEHOLDER, grant_summary, host_section};
 use ral_core::capability::FsOp;
 use ral_core::capability::GrantStack;
 use ral_core::host::XdgKind;
@@ -463,7 +463,7 @@ fn the_grant_summary_agrees_with_an_attenuated_grant() {
     let dir = Scratch::for_test(EXARCH, "grant-prompt").expect("scratch dir");
     let cwd = dir.path().to_string_lossy().into_owned();
     let invocation = for_invocation(&cwd, "minimal", None, &[]).expect("minimal composes");
-    let text = host_section(&invocation, EXARCH);
+    let text = grant_summary(&invocation.stack);
 
     assert!(
         !text.contains("Ambient authority"),
@@ -483,26 +483,33 @@ fn the_grant_summary_agrees_with_an_attenuated_grant() {
     let frozen_cwd = FrozenPath::from_surface(&cwd).into_string();
     assert!(bullet(&text, "- fs read:").contains(&frozen_cwd), "{text}");
     assert!(bullet(&text, "- fs write:").contains(&frozen_cwd), "{text}");
+}
+
+/// The Host section leaves the grant to each agent's own engine, and still
+/// names the scratch the agent needs.
+#[test]
+fn the_host_section_defers_the_grant_and_names_the_scratch() {
+    let text = host_section(EXARCH);
+    assert!(text.contains(GRANT_PLACEHOLDER), "{text}");
     assert!(bullet(&text, "- scratch:").contains(SCRATCH_PLACEHOLDER));
 }
 
 /// `dangerous` is every program less exarch itself: the summary says so, names
-/// the one exclusion, and says nothing of fs or net, and still names the
-/// scratch the agent needs.
+/// the one exclusion, and says nothing of fs.
 #[test]
 fn the_grant_summary_of_dangerous_is_every_program_less_exarch() {
     let dir = Scratch::for_test(EXARCH, "grant-prompt-dangerous").expect("scratch dir");
     let cwd = dir.path().to_string_lossy().into_owned();
     let invocation = for_invocation(&cwd, "dangerous", None, &[]).expect("dangerous composes");
-    let text = host_section(&invocation, EXARCH);
+    let text = grant_summary(&invocation.stack);
 
     assert!(!text.contains("Ambient authority"), "{text}");
     assert_eq!(
         bullet(&text, "- exec:"),
-        "- exec: every program, less exarch itself"
+        "- exec: every program, less the exclusions below"
     );
+    assert!(!bullet(&text, "- exec deny:").is_empty(), "{text}");
     assert!(!text.contains("- fs "), "{text}");
-    assert!(bullet(&text, "- scratch:").contains(SCRATCH_PLACEHOLDER));
 }
 
 /// A ceiling of `every` beside a run place, fs omitted, denotes `t` and yet
@@ -520,10 +527,10 @@ fn a_layer_naming_a_run_place_is_summarised_though_it_denotes_top() {
     let nothing = profile(&dir, "nothing.ral", "return [exec: [allow: [`name ls]]]\n");
 
     let invocation = for_invocation(&cwd, "dangerous", Some(&place), &[]).expect("composes");
-    let text = host_section(&invocation, EXARCH);
+    let text = grant_summary(&invocation.stack);
     assert!(bullet(&text, "- exec:").contains("also named"), "{text}");
     let invocation = for_invocation(&cwd, "dangerous", Some(&nothing), &[]).expect("composes");
-    let text = host_section(&invocation, EXARCH);
+    let text = grant_summary(&invocation.stack);
     assert!(bullet(&text, "- exec:").contains("also named"), "{text}");
 }
 

@@ -400,7 +400,7 @@ mod probe_tests {
         let transport = fresh();
         assert_eq!(read::<u64>(&transport, &Probe::WorkerCount), Ok(0));
         assert!(
-            read::<u64>(&transport, &Probe::GrantDepth).is_ok_and(|depth| depth >= 1),
+            transport.grants().is_ok_and(|stack| !stack.is_empty()),
             "a fresh shell still carries the ambient root frame"
         );
     }

@@ -147,7 +147,7 @@ launch hardening.
   nested fs-only restriction it makes `s` readable, so the reader needs to be
   told. "Activates confinement" and "says something the reader needs" are two
   predicates. The self layer is summarised like any exclusion: "every program,
-  less exarch itself".
+  less the exclusions below", exarch's binary under `exec deny`.
 
 ## Policy, extension and the six rules
 

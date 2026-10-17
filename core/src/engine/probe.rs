@@ -46,10 +46,9 @@ pub(crate) fn answer(shell: &Shell, probe: &Probe) -> FOValue {
         Probe::CompletionNames => completion_names(shell).encode(),
         Probe::Bindings => binding_rows(shell).encode(),
         Probe::PathEntries(dir) => fs::entries(&shell.cwd().join(dir)).encode(),
+        Probe::Grants => shell.context.grants.clone().encode(),
         #[cfg(feature = "test-util")]
         Probe::WorkerCount => shell.worker_count().encode(),
-        #[cfg(feature = "test-util")]
-        Probe::GrantDepth => shell.grant_depth().encode(),
     }
 }
 

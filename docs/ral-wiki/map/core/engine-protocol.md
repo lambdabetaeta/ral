@@ -129,11 +129,13 @@ The probe vocabulary, typed once for both ends.
 - `Probe` — the payload of `Frame::Probe`: `BindingCount`,
   `LeasedBindingCount`, `LargestBindingBytes`, `EnvVar(String)`, `Cwd`,
   `Home`, `BuiltinNames`, `PathBytes(PathBuf)`, `Workers`, `SessionEnded`,
-  `CompletionNames`, `Bindings`, `PathEntries(PathBuf)`; `WorkerCount` and
-  `GrantDepth` exist only under `test-util`. Each variant states what it
+  `CompletionNames`, `Bindings`, `PathEntries(PathBuf)`, `Grants`;
+  `WorkerCount` exists only under `test-util`. Each variant states what it
   takes, so a payload its probe does not take is not representable.
 - The rows the answers come in, rendered engine-side, each a `record!`:
   `WorkerRow`, `BindingRow`/`HandleRow`, `CompletionNames`, `PathEntry`.
+  `Grants` answers the session's `GrantStack` (no run's ceiling) as opaque
+  bytes in the JSON codec `Run.caps` already rides, as a sealed seed does.
 
 ## `core/src/protocol/channel.rs`
 

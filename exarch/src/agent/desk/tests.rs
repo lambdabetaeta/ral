@@ -1507,6 +1507,41 @@ fn agent_start_refuses_after_clear() {
     );
 }
 
+/// A child is told its own grant, not its parent's: the layer its `start`
+/// asked for was resolved in its own engine, and its prompt is read there.
+#[test]
+fn a_child_is_told_its_own_grant() {
+    let (services, _fleet, parent_inbox) = services_with(
+        3,
+        crate::agent::fleet::Launch {
+            system: crate::prompt::GRANT_PLACEHOLDER.into(),
+            ..crate::agent::fleet::Launch::for_test()
+        },
+        |_| {},
+    );
+    let desk = Arc::new(ExarchDesk { services });
+    desk.services.agent.provider.swap(Arc::new(Provider::scripted(
+        "test-model",
+        Script::new().then(Reply::tool_calls(vec![ral_call(
+            "r1",
+            "exarch-agents `reply 'done'",
+        )])),
+    )));
+    parked_by(
+        &desk,
+        r"exarch-agents `start [prompt: #'go'#, name: 'helper', type: `amnemon, grant: `confined, provider: `inherit, model: `inherit]",
+        |desk, session| desk.ask(start_req(session, "go", "helper")),
+    )
+    .expect("a confined child starts");
+    let child = desk.services.fleet.resolve("helper").expect("the child is live");
+    assert!(
+        child.system.contains("- net: deny\n"),
+        "an unrestricted parent's confined child must be told it is offline:\n{}",
+        child.system
+    );
+    let _ = wait_for_settle(&parent_inbox);
+}
+
 /// A refusal at adoption: here, a restriction record the capability
 /// decoder will not read, which only the engine's own freeze discovers:
 /// drops the bequest rather than leaving it to be adopted twice.  The grant

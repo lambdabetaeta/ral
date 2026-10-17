@@ -239,6 +239,12 @@ agent, so a root, identity fork, and wire child each receive their own surface.
   ambient-authority line when nothing is attenuated. The name is a second
   placeholder beside the builtin index (`NAME_PLACEHOLDER`), filled per agent by
   `BuiltinIndex::apply`, because the section is otherwise baked once at boot.
+  The grant is a third (`GRANT_PLACEHOLDER`), filled per agent by
+  `prompt::with_grant` from its own engine's `Probe::Grants` followed by the
+  ceiling its host pushes per run: a child's layer is resolved in its own
+  engine (`Shell::child_of`), so only that engine can name it. A child's
+  session already holds its parent's ceiling, which the host pushes again;
+  `grant_summary` tells a repeated layer once, the meet being idempotent.
 - **`Workspace`** (`discover_agents`) collects the `AGENTS.md` instruction files,
   outermost first so the deepest file's recency wins: the operator's
   `<config>/AGENTS.md`, then every repo `AGENTS.md` from the git root down to cwd

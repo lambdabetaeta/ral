@@ -3,13 +3,12 @@
 //! The shape is exarch's: an ordered list of `(heading, body)` pairs walked
 //! by one renderer, so the Vec built in [`assemble`] *is* the prompt.  Synod
 //! borrows the renderer itself ([`exarch::prompt::render`]) and the grant
-//! rendering ([`exarch::prompt::grant_summary`]) rather than growing a
+//! placeholder ([`exarch::prompt::GRANT_PLACEHOLDER`]) rather than growing a
 //! second copy of either; what it does not borrow is the *voice*, which is
 //! the whole difference between a coding agent and an office one — nor the
 //! situation report, whose every line is a host truth this agent, alone in
 //! its own machine, must never be told.
 
-use ral_core::capability::Capabilities;
 use std::path::Path;
 
 /// The office house rules, if the operator deployed any: a plain-language
@@ -62,8 +61,9 @@ const HOUSE_RULES: &str = "house-rules.md";
 ///    Exarch's section reports this process's cwd, user, `HOME` and git
 ///    state — host facts that are all false inside the machine the agent
 ///    actually works in — so synod composes when now is, where the agent
-///    stands, and the scratch space around the shared grant summary
-///    ([`exarch::prompt::grant_summary`]).
+///    stands, and the scratch space around the shared grant placeholder
+///    ([`exarch::prompt::GRANT_PLACEHOLDER`]), which the trunk fills from
+///    its own engine.
 /// 8. **House rules** (optional) — `<config_dir>/house-rules.md`.
 /// 9. **Talking to the user** (`data/surface.md`) — the card grammar and
 ///    the register to write in.  Last, where its recency carries.
@@ -71,7 +71,6 @@ const HOUSE_RULES: &str = "house-rules.md";
 /// # Errors
 /// Returns `Err` if `<config_dir>/house-rules.md` exists but cannot be read.
 pub fn assemble(
-    caps: &Capabilities,
     workspace: &Path,
     folder_name: &str,
     config_dir: &Path,
@@ -100,7 +99,7 @@ pub fn assemble(
         ),
     ));
     sections.push((Some("Network"), include_str!("../data/network.md").into()));
-    sections.push((Some("Host"), host_section(caps, workspace)));
+    sections.push((Some("Host"), host_section(workspace)));
     let rules = config_dir.join(HOUSE_RULES);
     #[allow(
         clippy::disallowed_methods,
@@ -127,7 +126,7 @@ pub fn assemble(
 /// in, and the scratch its engine names, filled in once the engine is up.
 /// Only `now` is taken from the host, because the machine's clock is set
 /// from it and a letter must carry today's date.
-fn host_section(caps: &Capabilities, workspace: &Path) -> String {
+fn host_section(workspace: &Path) -> String {
     use std::fmt::Write;
     let mut s = String::new();
     let _ = writeln!(s, "- os: Linux (Ubuntu userland)");
@@ -135,14 +134,11 @@ fn host_section(caps: &Capabilities, workspace: &Path) -> String {
         let _ = writeln!(s, "- now: {now}");
     }
     let _ = writeln!(s, "- cwd: {}", workspace.display());
-    let scratch_line = format!(
-        "`${}` = {} — this machine's own temporary space, gone when the conversation ends",
+    format!(
+        "{s}\n{}- scratch: `${}` = {} — this machine's own temporary space, gone when the conversation ends\n",
+        exarch::prompt::GRANT_PLACEHOLDER,
         exarch::app::EXARCH.scratch_var(),
         exarch::prompt::SCRATCH_PLACEHOLDER
-    );
-    format!(
-        "{s}\n{}",
-        exarch::prompt::grant_summary(caps, &scratch_line)
     )
 }
 
@@ -184,7 +180,6 @@ mod tests {
 
     fn prompt() -> String {
         assemble(
-            &Capabilities::root(),
             Path::new("/work"),
             "Admissions",
             Path::new("/nonexistent-config"),
@@ -241,33 +236,23 @@ mod tests {
     }
 
     /// The two bullets the model reads its own authority off, in the
-    /// spelling that has to reach the guest.
-    ///
-    /// No other test in this file can see them: [`prompt`] above builds on
-    /// [`Capabilities::root`], which is ambient, so `grant_summary`
-    /// collapses the whole section to one line and every fs bullet is
-    /// absent.  With the real grant, this renders the line a Windows host
-    /// once produced as `- fs read: \work, \tmp` — a grant that reads as
-    /// though the folder had been granted, over paths naming nothing in
-    /// the machine.
+    /// spelling that has to reach the guest.  With the real grant, this
+    /// renders the line a Windows host once produced as
+    /// `- fs read: \work, \tmp` — a grant that reads as though the folder
+    /// had been granted, over paths naming nothing in the machine.
     #[test]
     fn the_grant_bullets_name_the_guests_paths_as_the_guest_spells_them() {
         let dir = crate::test_fixture::workshop("prompt-grant-bullets");
         let root = dir.path().join("Admissions");
         std::fs::create_dir(&root).expect("granted folder");
         let grant = crate::grant::Grant::open(&root).expect("fixture folder must open");
-        let p = assemble(
-            &grant.capabilities(),
-            Path::new(vm_manager::MachineSpec::GUEST_WORKSPACE),
-            &grant.name(),
-            Path::new("/nonexistent-config"),
-        )
-        .expect("no house rules to read");
+        let text = exarch::prompt::grant_summary(&ral_core::capability::GrantStack::of(
+            grant.capabilities(),
+        ));
         for bullet in ["- fs read: /work, /tmp", "- fs write: /work, /tmp"] {
             assert!(
-                p.contains(bullet),
-                "the grant must reach the model as {bullet:?}; the Host section reads:\n{}",
-                p.split("# Host").nth(1).unwrap_or(&p)
+                text.contains(bullet),
+                "the grant must reach the model as {bullet:?}; it reads:\n{text}"
             );
         }
     }
@@ -313,7 +298,6 @@ mod tests {
         )
         .expect("write house rules");
         let p = assemble(
-            &Capabilities::root(),
             Path::new("/work"),
             "Admissions",
             dir.path(),
