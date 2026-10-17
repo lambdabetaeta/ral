@@ -74,7 +74,7 @@ and its reasoning; read them against this note.
 
 ## Context
 
-A Terminal-Bench run (`exarch-bench/.../2026-06-18__13-40-33`) hangs on the two
+A Terminal-Bench run (`dev/exarch-bench/.../2026-06-18__13-40-33`) hangs on the two
 daemon tasks `kv-store-grpc` and `pypi-server`: both score reward `1.0`, the model
 finishes in ~80 s, then exarch idles ~13.5 min until Harbor SIGKILLs it at the
 900 s wall. `result.json` is 0 bytes; the session log ends on the model's final

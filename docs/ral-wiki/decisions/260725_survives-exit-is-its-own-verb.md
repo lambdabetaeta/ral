@@ -29,7 +29,7 @@ rule from that page and the rejection of a lifetime knob on `spawn` from
 
 ## The finding that forced this
 
-terminal-bench run `exarch-bench/terminal-bench/jobs/2026-07-25__02-04-52/`,
+terminal-bench run `dev/exarch-bench/terminal-bench/jobs/2026-07-25__02-04-52/`,
 `exarch__openai/gpt-5.6-sol` against `mini-swe-agent__openai/gpt-5.6-sol`,
 five trials each on terminal-bench-2-1. exarch scored a mean of 0.6. **Both
 of its two zeros are the two tasks that require a live listener at grade
@@ -95,7 +95,7 @@ an escape hatch. It believed it had one.
 ## What actually happens: the exact chain
 
 The benchmark runs `exarch --headless --output-format json`
-(`exarch-bench/terminal-bench/agents/exarch_agent.py:253`), so
+(`dev/exarch-bench/terminal-bench/agents/exarch_agent.py:253`), so
 `exarch/src/headless.rs:381` runs and `tui::run` never does — but the frontend
 turns out to be irrelevant, since both return into the same tail of
 `exarch::run` (`exarch/src/lib.rs:310-331`) and drop the same locals. All five
