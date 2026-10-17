@@ -372,9 +372,8 @@ struct ResolvedEdit {
     new: String,
 }
 
-/// Backslash letters that read as a C-style escape but are not one here:
-/// replacement text is verbatim, so `\n` lands as two characters.  A model
-/// reaching for the familiar syntax nearly always meant the real one.
+/// Backslash letters that read as a C-style escape.  Only a FROM that failed
+/// to match is checked: a TO is often source code whose escapes are meant.
 const SUSPECT_ESCAPE_LETTERS: [char; 7] = ['n', 't', 'r', '0', '\\', '\'', '"'];
 
 fn has_suspicious_escapes(text: &str) -> bool {
@@ -385,15 +384,9 @@ fn has_suspicious_escapes(text: &str) -> bool {
 
 /// Note a completed edit on stderr, kept apart from the `write` observation,
 /// which stays the structured record of the commit.
-fn note_edit(shell: &mut Shell, path: &str, lines: &str, plural: bool, any_escapes: bool) {
+fn note_edit(shell: &mut Shell, path: &str, lines: &str, plural: bool) {
     let word = if plural { "lines" } else { "line" };
-    let warning = if any_escapes {
-        " [WARNING: replacements contain escapes, did you mean to do that?]"
-    } else {
-        ""
-    };
-    let _ = shell
-        .write_stderr(format!("[EXARCH] Replaced {word} {lines} of {path}.{warning}\n").as_bytes());
+    let _ = shell.write_stderr(format!("[EXARCH] Replaced {word} {lines} of {path}.\n").as_bytes());
 }
 
 /// `edit-hash PATH EDITS` — apply a batch of `[hash: …, line: …]` records in one
@@ -507,8 +500,7 @@ fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
         .map(usize::to_string)
         .collect::<Vec<_>>()
         .join(", ");
-    let any_escapes = resolved.iter().any(|r| has_suspicious_escapes(&r.new));
-    note_edit(shell, path, &lines, line_nums.len() > 1, any_escapes);
+    note_edit(shell, path, &lines, line_nums.len() > 1);
 
     Ok(Value::Unit)
 }
@@ -582,13 +574,7 @@ fn builtin_edit_replace(args: &[Value], mooring: &Mooring, shell: &mut Shell) ->
     } else {
         format!("{start_line}-{end_line}")
     };
-    note_edit(
-        shell,
-        path,
-        &lines,
-        start_line != end_line,
-        has_suspicious_escapes(to),
-    );
+    note_edit(shell, path, &lines, start_line != end_line);
 
     Ok(Value::Unit)
 }

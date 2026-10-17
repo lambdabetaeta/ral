@@ -516,8 +516,7 @@ fn edit_batch_rejects_two_edits_naming_one_line() {
 }
 
 /// A committed `edit-hash` notes what it changed on stderr for the model,
-/// plus a warning when a replacement looks like it carries an unintended
-/// `\n`/`\t`-style escape rather than the real character.
+/// and no warning for a verbatim backslash: `"\n"` in C source is meant.
 #[test]
 fn edit_notes_changed_lines_on_stderr() {
     let engine = fresh();
@@ -547,11 +546,8 @@ fn edit_notes_changed_lines_on_stderr() {
     assert_eq!(batch.exit, 0, "batch edit must succeed");
     assert_eq!(
         String::from_utf8_lossy(&batch.stderr),
-        format!(
-            "[EXARCH] Replaced lines 2, 3 of {path}. \
-             [WARNING: replacements contain escapes, did you mean to do that?]\n"
-        ),
-        "a multi-line batch notes the plural form, sorted, with an escape warning"
+        format!("[EXARCH] Replaced lines 2, 3 of {path}.\n"),
+        "a multi-line batch notes the plural form, sorted, with no escape warning"
     );
 }
 
@@ -569,11 +565,8 @@ fn edit_replace_notes_changed_line_range_on_stderr() {
     assert_eq!(r.exit, 0, "edit-replace must succeed");
     assert_eq!(
         String::from_utf8_lossy(&r.stderr),
-        format!(
-            "[EXARCH] Replaced line 2 of {path}. \
-             [WARNING: replacements contain escapes, did you mean to do that?]\n"
-        ),
-        "a single-line match notes the singular form with an escape warning"
+        format!("[EXARCH] Replaced line 2 of {path}.\n"),
+        "a single-line match notes the singular form with no escape warning"
     );
 
     let (_dir2, path2) = scratch_file("edit-replace-note-span", "g.txt", "one\ntwo\nthree\n");
@@ -588,7 +581,7 @@ fn edit_replace_notes_changed_line_range_on_stderr() {
     assert_eq!(
         String::from_utf8_lossy(&spanning.stderr),
         format!("[EXARCH] Replaced lines 2-3 of {path2}.\n"),
-        "a match spanning two lines notes the plural range, no escapes here"
+        "a match spanning two lines notes the plural range"
     );
 }
 
