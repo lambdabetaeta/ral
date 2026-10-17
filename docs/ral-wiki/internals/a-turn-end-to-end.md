@@ -30,8 +30,7 @@ unframed evaluation against a stale frame
 
 **There are two doors, and which one you use is decided by what you hold.**
 `Shell::run` is for a host with no run in hand: its frame is minted under
-`SessionState::anchor`. A host that already holds a pre-minted
-`ForegroundScope` uses `Shell::run_under(&scope, req)`; the identity and wire
+`SessionState::anchor`. A host that already holds a pre-minted dispatch scope (`Scopes::open`'s view) uses `Shell::run_under(&scope, req)`; the identity and wire
 transports use this form so cancellation can land before a frame exists. Code
 *already inside* a run — a builtin body — opens no second run: it applies a
 function under the `Mooring` it was given, so the outer run's interrupt and

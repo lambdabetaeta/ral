@@ -60,16 +60,12 @@ fn render(
     let mut out = String::new();
     let exit = match ending {
         Ending::Settled { .. } => return (out, 0),
-        Ending::Stopped {
-            rendered,
-            cause,
-            status,
-        } => {
+        Ending::Stopped { rendered, cause } => {
             out.push_str(rendered);
             if *cause == CancelCause::TimedOut {
                 out.push_str(&timeout_tip(timeout_secs));
             }
-            status.get()
+            ending.status()
         }
         Ending::Raised {
             rendered,

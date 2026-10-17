@@ -5,6 +5,7 @@
 
 use super::acl::wide;
 use super::*;
+use crate::process::cancel::DurableRoot;
 use std::fs;
 use std::os::windows::fs::OpenOptionsExt;
 use windows_sys::Win32::Foundation::ERROR_SUCCESS;
@@ -91,7 +92,7 @@ impl DenyTree {
             &self.allow,
             CAP_SID,
             GrantKind::ReadOnly,
-            &CancelScope::root(),
+            &DurableRoot::default().worker(),
         )
         .unwrap();
         self.shape();
@@ -194,7 +195,13 @@ fn deny_covers_protected_and_explicit_descendants() {
     with_state(|| {
         let tree = DenyTree::new();
         tree.grant_and_shape();
-        ensure_fs_grant(&tree.deny, CAP_SID, GrantKind::Deny, &CancelScope::root()).unwrap();
+        ensure_fs_grant(
+            &tree.deny,
+            CAP_SID,
+            GrantKind::Deny,
+            &DurableRoot::default().worker(),
+        )
+        .unwrap();
         tree.assert_denies();
     });
 }
@@ -212,7 +219,13 @@ fn an_old_deny_stamp_does_not_witness_the_descendant_walk() {
                 .iter()
                 .any(|ace| ace.ace_type == AceType::Allow)
         );
-        ensure_fs_grant(&tree.deny, CAP_SID, GrantKind::Deny, &CancelScope::root()).unwrap();
+        ensure_fs_grant(
+            &tree.deny,
+            CAP_SID,
+            GrantKind::Deny,
+            &DurableRoot::default().worker(),
+        )
+        .unwrap();
         tree.assert_denies();
     });
 }
@@ -222,7 +235,13 @@ fn a_failed_walk_of_a_recreated_root_leaves_no_witness_and_retries() {
     with_state(|| {
         let tree = DenyTree::new();
         tree.grant_and_shape();
-        ensure_fs_grant(&tree.deny, CAP_SID, GrantKind::Deny, &CancelScope::root()).unwrap();
+        ensure_fs_grant(
+            &tree.deny,
+            CAP_SID,
+            GrantKind::Deny,
+            &DurableRoot::default().worker(),
+        )
+        .unwrap();
         fs::rename(&tree.deny, tree.allow.join("old")).unwrap();
         tree.populate();
         tree.shape();
@@ -234,13 +253,24 @@ fn a_failed_walk_of_a_recreated_root_leaves_no_witness_and_retries() {
             .share_mode(0)
             .open(&blocked)
             .unwrap();
-        let error = ensure_fs_grant(&tree.deny, CAP_SID, GrantKind::Deny, &CancelScope::root())
-            .expect_err("a descendant that cannot be inspected must refuse the grant");
+        let error = ensure_fs_grant(
+            &tree.deny,
+            CAP_SID,
+            GrantKind::Deny,
+            &DurableRoot::default().worker(),
+        )
+        .expect_err("a descendant that cannot be inspected must refuse the grant");
         assert!(error.to_string().contains("blocked.txt"), "{error}");
         assert!(!stamp_recorded(&stamp_key(&tree.deny, GrantKind::Deny)));
         drop(busy);
 
-        ensure_fs_grant(&tree.deny, CAP_SID, GrantKind::Deny, &CancelScope::root()).unwrap();
+        ensure_fs_grant(
+            &tree.deny,
+            CAP_SID,
+            GrantKind::Deny,
+            &DurableRoot::default().worker(),
+        )
+        .unwrap();
         tree.assert_denies();
         assert!(stamp_recorded(&stamp_key(&tree.deny, GrantKind::Deny)));
     });
@@ -260,7 +290,13 @@ fn a_deny_walk_does_not_follow_a_junction() {
             .unwrap();
         assert!(output.status.success(), "create junction: {output:?}");
         tree.grant_and_shape();
-        ensure_fs_grant(&tree.deny, CAP_SID, GrantKind::Deny, &CancelScope::root()).unwrap();
+        ensure_fs_grant(
+            &tree.deny,
+            CAP_SID,
+            GrantKind::Deny,
+            &DurableRoot::default().worker(),
+        )
+        .unwrap();
         for path in [&outside, &outside.join("key.txt")] {
             assert!(
                 super::tests::sid_ace_sequence(path, CAP_SID)
@@ -293,8 +329,13 @@ fn a_null_dacl_is_refused_without_removing_ordinary_access() {
             };
             assert_eq!(rc, ERROR_SUCCESS);
             assert!(descriptor_shape(&path).1);
-            let error = ensure_fs_grant(&tree.deny, CAP_SID, GrantKind::Deny, &CancelScope::root())
-                .expect_err("a deny-only DACL would also deny the host user");
+            let error = ensure_fs_grant(
+                &tree.deny,
+                CAP_SID,
+                GrantKind::Deny,
+                &DurableRoot::default().worker(),
+            )
+            .expect_err("a deny-only DACL would also deny the host user");
             assert!(error.to_string().contains("null DACL"), "{error}");
             assert!(
                 error.to_string().contains(path.to_str().unwrap()),

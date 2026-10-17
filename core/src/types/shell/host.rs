@@ -9,7 +9,7 @@ use super::TerminalAccess;
 use super::bindings::BindingLease;
 use super::detached::DetachPolicy;
 use crate::io::Sink;
-use crate::process::{DurableRoot, ForegroundScope, TerminalLease};
+use crate::process::{DurableRoot, ScopeNode, TerminalLease};
 use crate::source::SourceDb;
 use crate::terminal::TerminalState;
 use crate::ty::Fixings;
@@ -46,7 +46,7 @@ impl Shell {
     /// arrives before the run's own frame exists: the frame is born a descendant
     /// and reads the flag on its first poll.  Hung under the session anchor like
     /// every other top-level frame, so session teardown reaches it.
-    pub(crate) fn run_cancel_handle(&self) -> ForegroundScope {
+    pub(crate) fn run_cancel_handle(&self) -> ScopeNode {
         self.session.anchor.child()
     }
 
@@ -78,10 +78,6 @@ impl Shell {
     /// here so background output lands above the prompt.
     pub fn set_stdout(&mut self, stdout: Sink) {
         self.io.stdout = stdout;
-    }
-
-    pub fn stderr_mut(&mut self) -> &mut Sink {
-        &mut self.io.stderr
     }
 
     /// Every installed builtin's name, for tab completion.

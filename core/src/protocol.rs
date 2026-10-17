@@ -20,7 +20,7 @@ pub mod probe;
 /// The frame algebra's generation, checked at `Attach` and refused on
 /// mismatch.  Public because a build has to compare it against the engine
 /// sitting in the guest media beside it: see [`check_media`].
-pub const PROTOCOL_VERSION: u32 = 22;
+pub const PROTOCOL_VERSION: u32 = 23;
 
 /// The key `vm-image/build-boot.sh` records [`PROTOCOL_VERSION`] under in the
 /// boot media's manifest, `vm-image/out/boot/boot-manifest.txt`.
@@ -503,8 +503,8 @@ impl FailureStatus {
 /// `status` is carried explicitly wherever it
 /// is not the whole of the arm's payload, since a renderer that has already
 /// discarded the engine `Error` for its `rendered` string has no other way
-/// back to it; on the two failing arms it is a [`FailureStatus`], which has
-/// no success code to carry.
+/// back to it; on [`Self::Raised`] it is a [`FailureStatus`], which has no
+/// success code to carry, and [`Self::Stopped`] derives it from its cause.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Ending {
     Settled {
@@ -528,7 +528,6 @@ pub enum Ending {
     Stopped {
         rendered: String,
         cause: CancelCause,
-        status: FailureStatus,
     },
     /// The run settled, but on a value that is not data — a handle, a block,
     /// a function — which the protocol cannot carry. Nothing failed, yet the
@@ -548,7 +547,8 @@ impl Ending {
     pub fn status(&self) -> i32 {
         match self {
             Self::Settled { status, .. } | Self::Exited(status) => *status,
-            Self::Raised { status, .. } | Self::Stopped { status, .. } => status.get(),
+            Self::Raised { status, .. } => status.get(),
+            Self::Stopped { cause, .. } => i32::from(cause.code()),
             Self::Unreturnable { .. } => 1,
         }
     }
@@ -599,7 +599,6 @@ mod ending_wire_round_trip_tests {
         let stopped = ran(Ending::Stopped {
             rendered: "error: timed out\n".into(),
             cause: CancelCause::TimedOut,
-            status: 124.into(),
         });
         round_trips(&stopped);
         let Report::Ran { ending, .. } = &stopped else {
@@ -607,7 +606,7 @@ mod ending_wire_round_trip_tests {
         };
         assert_eq!(
             serde_json::to_string(ending).expect("Ending must encode"),
-            r#"{"Stopped":{"rendered":"error: timed out\n","cause":"timed-out","status":124}}"#,
+            r#"{"Stopped":{"rendered":"error: timed out\n","cause":"timed-out"}}"#,
         );
     }
 
@@ -629,12 +628,6 @@ mod ending_wire_round_trip_tests {
         };
         assert_eq!(raised.status(), 1, "a raise reported success");
         round_trips(&ran(raised));
-
-        let smuggled: Ending = serde_json::from_str(
-            r#"{"Stopped":{"rendered":"error: timed out\n","cause":"timed-out","status":0}}"#,
-        )
-        .expect("a Stopped ending must decode");
-        assert_eq!(smuggled.status(), 1, "a decoded raise reported success");
     }
 
     #[test]

@@ -90,7 +90,6 @@ where
 mod tests {
     use super::*;
     use crate::types::CapturePolicy;
-    use std::io::Write as _;
 
     #[test]
     fn audit_caps_both_streams_without_limiting_ordinary_capture() {
@@ -102,8 +101,8 @@ mod tests {
         shell.io.stderr = err_sink;
         let ((result, io), captured, overflowed) = with_capture(&mut shell, |shell| {
             with_audit_capture(shell, |shell| {
-                shell.io.stdout.write_all(&stdout)?;
-                shell.io.stderr.write_all(&stderr)
+                shell.write_stdout(&stdout)?;
+                shell.write_stderr(&stderr)
             })
         });
         result.unwrap();
@@ -124,7 +123,7 @@ mod tests {
         let (sink, _buf) = new_buffer();
         shell.io.stdout = sink;
         let (result, io) = with_audit_capture(&mut shell, |shell| {
-            shell.io.stdout.write_all(&vec![0; AUDIT_BUFFER_CAP])
+            shell.write_stdout(&vec![0; AUDIT_BUFFER_CAP])
         });
         result.unwrap();
         let _trail = shell.local.audit.close(scope);

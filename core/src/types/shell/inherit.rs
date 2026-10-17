@@ -12,7 +12,7 @@ use super::bindings::BindingLedger;
 use super::workers::Roster;
 use super::{LocalState, Mooring, SessionState, Shell};
 use crate::io::{Io, Source};
-use crate::process::{DurableRoot, ForegroundScope};
+use crate::process::{DurableRoot, Scope};
 use crate::types::Audit;
 use std::sync::Arc;
 
@@ -20,7 +20,7 @@ use std::sync::Arc;
 struct Holding {
     root: DurableRoot,
     /// The child's session anchor and its current scope: one node at birth.
-    scope: ForegroundScope,
+    scope: Scope,
     workers: Roster,
 }
 
@@ -81,7 +81,7 @@ impl Shell {
     /// it from the run it was aimed at.
     pub fn join_session(&self) -> Self {
         let root = self.session.root.clone();
-        let scope = root.worker();
+        let scope = Scope::clone(&root.worker());
         self.child(Holding {
             root,
             scope,
@@ -112,7 +112,7 @@ impl Shell {
     {
         let mut child = self.child(Holding {
             root: self.session.root.clone(),
-            scope: mooring.home.clone(),
+            scope: Scope::clone(&mooring.home),
             workers: self.local.workers.share(),
         });
         let live = self.local.workers.live_ticket();

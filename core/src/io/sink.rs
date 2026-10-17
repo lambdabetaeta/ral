@@ -6,7 +6,7 @@
 //! the [`ByteBuffer`] idiom for captured bytes.
 
 use super::edge::{Edge, WriteStopped};
-use crate::process::{CancelCause, CancelScope, ScopeId};
+use crate::process::{CancelCause, Scope, ScopeId};
 use crate::sync::LockExt as _;
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
@@ -77,7 +77,7 @@ impl CapturedBytes {
     }
 
     /// Count every byte; retain the prefix and at most one marker.
-    fn append(&self, bytes: &[u8]) {
+    pub(crate) fn append(&self, bytes: &[u8]) {
         let mut g = self.bytes.lock_ignore_poison();
         g.1 += bytes.len() as u64;
         let cur = g.0.len();
@@ -116,6 +116,14 @@ impl ChildStdioPlan {
     pub(crate) fn inherit() -> Self {
         Self {
             stdio: crate::process::StdioSpec::inherit(),
+            pump: None,
+        }
+    }
+
+    /// A pipeline edge handed to the child whole: nothing of ral's writes it.
+    pub(crate) fn edge(writer: os_pipe::PipeWriter) -> Self {
+        Self {
+            stdio: crate::process::StdioSpec::from_pipe_writer(writer),
             pump: None,
         }
     }
@@ -166,14 +174,13 @@ pub enum Sink {
 /// edge is the stage's reader-gone stop, judged after landing, not refused
 /// before, so the sentinel hears the write; a chunk that cannot land on one
 /// (the pipe full, nobody draining) is the reader-gone stop too, judged at the
-/// slice.  `scope: None` is a raw `Write` on the sink, which cannot poll and
-/// so does not.
+/// slice.
 #[cfg(unix)]
 fn write_sliced(
     w: &os_pipe::PipeWriter,
     edge: &Edge,
     stage: &ScopeId,
-    scope: Option<&CancelScope>,
+    scope: &Scope,
     mut bytes: &[u8],
 ) -> io::Result<()> {
     use super::poll_slice;
@@ -181,7 +188,7 @@ fn write_sliced(
     let stopped = |cause, owner| io::Error::other(WriteStopped { cause, owner });
     let reader_gone = || stopped(CancelCause::ReaderGone, Some(stage.clone()));
     while !bytes.is_empty() {
-        if let Some((cause, owner)) = scope.and_then(CancelScope::in_force) {
+        if let Some((cause, owner)) = scope.in_force() {
             return Err(stopped(cause, Some(owner)));
         }
         let Some(revents) = poll_slice(w, PollFlags::OUT)? else {
@@ -209,19 +216,19 @@ const PIPE_CHUNK: usize = 4096;
 
 /// The same loop, a chunk per `write`; a blocked chunk is aborted by an
 /// `interrupt`, which re-reads the scope and the edge.  A cause in force
-/// stops; none (shielded, or a raw write) retries the chunk.
+/// stops; none (shielded) retries the chunk.
 #[cfg(windows)]
 fn write_sliced(
     w: &os_pipe::PipeWriter,
     edge: &Edge,
     stage: &ScopeId,
-    scope: Option<&CancelScope>,
+    scope: &Scope,
     mut bytes: &[u8],
 ) -> io::Result<()> {
     let stopped = |cause, owner| io::Error::other(WriteStopped { cause, owner });
     let reader_gone = || stopped(CancelCause::ReaderGone, Some(stage.clone()));
     while !bytes.is_empty() {
-        if let Some((cause, owner)) = scope.and_then(CancelScope::in_force) {
+        if let Some((cause, owner)) = scope.in_force() {
             return Err(stopped(cause, Some(owner)));
         }
         match (&*w).write(&bytes[..bytes.len().min(PIPE_CHUNK)]) {
@@ -320,20 +327,52 @@ impl Sink {
         }
     }
 
-    /// `write_all` with `scope` threaded to every `Pipe`, through `Tee`: a
-    /// write blocked on a full edge reads `scope` between slices.
-    pub(crate) fn write_under(&mut self, scope: &CancelScope, bytes: &[u8]) -> io::Result<()> {
+    /// Write all of `bytes`, or error; no variant reports a short write.  A
+    /// `Pipe` blocked on a full edge reads `scope` between slices, through
+    /// `Tee`.
+    pub(crate) fn write_under(&mut self, scope: &Scope, bytes: &[u8]) -> io::Result<()> {
         match self {
-            Self::Pipe {
-                writer,
-                edge,
-                stage,
-            } => write_sliced(writer, edge, stage, Some(scope), bytes),
+            Self::Terminal => io::stdout().write_all(bytes),
+            Self::Stderr => io::stderr().write_all(bytes),
+            Self::File(f) => (&**f).write_all(bytes),
+            Self::Buffer(b) => {
+                b.append(bytes);
+                Ok(())
+            }
             Self::Tee(a, b) => {
                 a.write_under(scope, bytes)?;
                 b.write_under(scope, bytes)
             }
-            _ => self.write_all(bytes),
+            Self::Pipe {
+                writer,
+                edge,
+                stage,
+            } => write_sliced(writer, edge, stage, scope, bytes),
+            Self::Watch { line, pending } => {
+                pending.extend_from_slice(bytes);
+                while let Some(pos) = pending.iter().position(|&b| b == b'\n') {
+                    let whole = &pending[..=pos];
+                    line(&whole[..whole.len() - terminator_len(whole)]);
+                    pending.drain(..=pos);
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// `Watch` deliberately keeps its tail here: flushing a partial line
+    /// would terminate it and frame the rest as a new one.  That belongs to
+    /// [`Sink::flush_pending`], at end of stream.
+    pub(crate) fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Terminal => io::stdout().flush(),
+            Self::Stderr => io::stderr().flush(),
+            Self::File(f) => (&**f).flush(),
+            Self::Tee(a, b) => {
+                a.flush()?;
+                b.flush()
+            }
+            _ => Ok(()),
         }
     }
 
@@ -358,7 +397,7 @@ impl Sink {
     pub(crate) fn pump(
         self,
         mut reader: impl Read + Send + 'static,
-        scope: CancelScope,
+        scope: Scope,
     ) -> std::thread::JoinHandle<()> {
         std::thread::spawn(move || {
             let mut sink = self;
@@ -440,60 +479,6 @@ pub(crate) fn terminator_len(bytes: &[u8]) -> usize {
     }
 }
 
-impl Write for Sink {
-    /// Consumes the whole slice or errors; no variant reports a short write.
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.write_all(buf)?;
-        Ok(buf.len())
-    }
-
-    fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
-        match self {
-            Self::Terminal => io::stdout().write_all(bytes),
-            Self::Stderr => io::stderr().write_all(bytes),
-            Self::File(f) => (&**f).write_all(bytes),
-            Self::Buffer(b) => {
-                b.append(bytes);
-                Ok(())
-            }
-            Self::Tee(a, b) => {
-                a.write_all(bytes)?;
-                b.write_all(bytes)
-            }
-            Self::Pipe {
-                writer,
-                edge,
-                stage,
-            } => write_sliced(writer, edge, stage, None, bytes),
-            Self::Watch { line, pending } => {
-                pending.extend_from_slice(bytes);
-                while let Some(pos) = pending.iter().position(|&b| b == b'\n') {
-                    let whole = &pending[..=pos];
-                    line(&whole[..whole.len() - terminator_len(whole)]);
-                    pending.drain(..=pos);
-                }
-                Ok(())
-            }
-        }
-    }
-
-    /// `Watch` deliberately keeps its tail here: flushing a partial line
-    /// would terminate it and frame the rest as a new one.  That belongs to
-    /// [`Sink::flush_pending`], at end of stream.
-    fn flush(&mut self) -> io::Result<()> {
-        match self {
-            Self::Terminal => io::stdout().flush(),
-            Self::Stderr => io::stderr().flush(),
-            Self::File(f) => (&**f).flush(),
-            Self::Tee(a, b) => {
-                a.flush()?;
-                b.flush()
-            }
-            _ => Ok(()),
-        }
-    }
-}
-
 #[cfg(test)]
 #[allow(
     clippy::disallowed_methods,
@@ -505,7 +490,7 @@ mod tests {
     use super::{CapturedBytes, Edge, Sink, terminator_len};
     #[cfg(unix)]
     use crate::process::CancelCause;
-    use crate::process::CancelScope;
+    use crate::process::{DurableRoot, Scope};
     #[cfg(unix)]
     use std::io::Read as _;
     use std::io::Write as _;
@@ -553,16 +538,17 @@ mod tests {
 
     #[test]
     fn pipe_write_is_read_by_pair() {
-        use std::io::{Read, Write};
+        use std::io::Read;
         use std::sync::Arc;
 
         let (mut reader, writer) = crate::process::cloexec_pipe().expect("pipe");
         let mut sink = Sink::Pipe {
             writer: Arc::new(writer),
             edge: Edge::new(),
-            stage: CancelScope::root().id(),
+            stage: DurableRoot::default().worker().id(),
         };
-        sink.write_all(b"hello").expect("write");
+        sink.write_under(&DurableRoot::default().worker(), b"hello")
+            .expect("write");
         drop(sink);
 
         let mut buf = Vec::new();
@@ -574,7 +560,7 @@ mod tests {
     /// writer `fill` can top up.
     #[cfg(unix)]
     fn pipe_sink(
-        node: &CancelScope,
+        node: &Scope,
     ) -> (
         os_pipe::PipeReader,
         Sink,
@@ -611,10 +597,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_write_past_a_dead_edge_is_the_stages_reader_gone_stop() {
-        let node = CancelScope::root();
+        let node = DurableRoot::default().worker();
         let (_reader, mut sink, edge, _writer) = pipe_sink(&node);
         edge.mark_dead();
-        let stop = write_stopped(sink.write_all(b"x").expect_err("a dead edge"));
+        let stop = write_stopped(sink.write_under(&node, b"x").expect_err("a dead edge"));
         assert_eq!(stop.cause, CancelCause::ReaderGone);
         assert_eq!(stop.owner, Some(node.id()));
     }
@@ -622,7 +608,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_write_blocked_under_a_cause_is_stopped_within_a_slice() {
-        let (node, scope) = (CancelScope::root(), CancelScope::root());
+        let (node, scope) = (
+            DurableRoot::default().worker(),
+            DurableRoot::default().worker(),
+        );
         let (_reader, mut sink, _edge, writer) = pipe_sink(&node);
         fill(&writer);
         let canceller = scope.clone();
@@ -639,13 +628,16 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_pump_blocked_on_a_full_edge_ends_within_a_slice() {
-        let (node, scope) = (CancelScope::root(), CancelScope::root());
+        let (node, scope) = (
+            DurableRoot::default().worker(),
+            DurableRoot::default().worker(),
+        );
         let (_edge_reader, sink, _edge, writer) = pipe_sink(&node);
         fill(&writer);
         let (source, mut feed) = crate::process::cloexec_pipe().expect("source");
         let feeder =
             std::thread::spawn(move || feed.write_all(&vec![b'x'; 1 << 20]).expect("feed"));
-        let pump = sink.pump(source, scope.clone());
+        let pump = sink.pump(source, Scope::clone(&scope));
         std::thread::sleep(Duration::from_millis(30));
         assert!(
             !pump.is_finished(),
@@ -666,8 +658,8 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_write_under_a_shield_waits_while_a_raw_write_cannot_poll() {
-        let node = CancelScope::root();
+    fn a_write_under_a_shield_waits() {
+        let node = DurableRoot::default().worker();
         let (mut reader, mut sink, _edge, writer) = pipe_sink(&node);
         node.cancel(CancelCause::Interrupted);
         let shield = node.shielded(Duration::from_secs(1));
@@ -677,16 +669,15 @@ mod tests {
         assert!(!blocked.is_finished(), "a shielded write should wait");
         reader.read_exact(&mut [0; libc::PIPE_BUF]).expect("drain");
         blocked.join().expect("writer").expect("ok once drained");
-
-        let (_r, mut raw, ..) = pipe_sink(&node);
-        raw.write_all(b"x")
-            .expect("a raw write cannot poll, so it is not stopped");
     }
 
     #[cfg(unix)]
     #[test]
     fn an_always_ready_pipe_still_polls_per_chunk() {
-        let (node, scope) = (CancelScope::root(), CancelScope::root());
+        let (node, scope) = (
+            DurableRoot::default().worker(),
+            DurableRoot::default().worker(),
+        );
         let (mut reader, mut sink, ..) = pipe_sink(&node);
         let drain = std::thread::spawn(move || {
             let mut buf = [0u8; 4096];
@@ -708,7 +699,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_full_dead_edge_stops_a_blocked_write_within_a_slice() {
-        let node = CancelScope::root();
+        let node = DurableRoot::default().worker();
         let (_reader, mut sink, edge, writer) = pipe_sink(&node);
         node.cancel(CancelCause::Interrupted);
         let shield = node.shielded(Duration::from_secs(1));
@@ -733,7 +724,7 @@ mod tests {
         let sink = Sink::Pipe {
             writer: Arc::new(writer),
             edge: Edge::new(),
-            stage: CancelScope::root().id(),
+            stage: DurableRoot::default().worker().id(),
         };
         let plan = sink.child_stdout(false).expect("plan");
         assert!(plan.pump.is_none());
@@ -763,7 +754,7 @@ mod tests {
         let sink = Sink::Pipe {
             writer: writer.clone(),
             edge: Edge::new(),
-            stage: CancelScope::root().id(),
+            stage: DurableRoot::default().worker().id(),
         };
         let plan = sink.child_stdout(false).expect("plan");
 
@@ -839,8 +830,10 @@ mod tests {
             line: Arc::new(move |line| log.lock().unwrap().push(line.to_vec())),
             pending: Vec::new(),
         };
-        sink.write_all(b"one\r\ntw").unwrap();
-        sink.write_all(b"o\nthree").unwrap();
+        sink.write_under(&DurableRoot::default().worker(), b"one\r\ntw")
+            .unwrap();
+        sink.write_under(&DurableRoot::default().worker(), b"o\nthree")
+            .unwrap();
         sink.flush_pending();
         let seen = seen.lock().unwrap();
         assert_eq!(*seen, [b"one".to_vec(), b"two".to_vec(), b"three".to_vec()]);

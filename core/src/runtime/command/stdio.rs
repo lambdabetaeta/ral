@@ -62,10 +62,16 @@ pub(super) fn inherit_tty(shell: &Shell) -> bool {
     shell.io.terminal.startup_stdout_tty && matches!(shell.io.stdout, Sink::Terminal)
 }
 
+/// Where a child's stdout goes: a ral sink, or a pipeline edge handed over whole.
+pub(crate) enum ChildOut<'a> {
+    Sink(&'a Sink),
+    Edge(os_pipe::PipeWriter),
+}
+
 /// The streams a child's three fds are wired from.
 pub(crate) struct ChildIo<'a> {
     pub(crate) stdin: &'a Source,
-    pub(crate) stdout: &'a Sink,
+    pub(crate) stdout: ChildOut<'a>,
     pub(crate) stderr: &'a Sink,
 }
 
@@ -73,7 +79,7 @@ impl<'a> From<&'a Io> for ChildIo<'a> {
     fn from(io: &'a Io) -> Self {
         Self {
             stdin: &io.stdin,
-            stdout: &io.stdout,
+            stdout: ChildOut::Sink(&io.stdout),
             stderr: &io.stderr,
         }
     }
@@ -122,19 +128,23 @@ fn wire_stdin(
 pub(crate) fn wire_stdio(
     command: &mut crate::process::Launch,
     shell: &Shell,
-    io: &ChildIo<'_>,
+    io: ChildIo<'_>,
     grant: Option<TtyInputPermit>,
     inherit_tty: bool,
 ) -> Settled<Pumps<Sink>> {
     let stdin = wire_stdin(io.stdin, shell.io.terminal.startup_stdin_tty, grant)?;
     command.stdin(stdin.into_stdio());
-    let out = io
-        .stdout
-        .child_stdout(inherit_tty)
-        .map_err(|e| Error::io("pipe", &e))?;
+    let (out, joined) = match io.stdout {
+        ChildOut::Sink(s) => (
+            s.child_stdout(inherit_tty)
+                .map_err(|e| Error::io("pipe", &e))?,
+            io.stderr.same_destination(s).then_some(s),
+        ),
+        ChildOut::Edge(w) => (crate::io::ChildStdioPlan::edge(w), None),
+    };
     command.stdout(out.stdio);
-    let err_pump = if io.stderr.same_destination(io.stdout) {
-        join_stderr(command, io.stdout)?
+    let err_pump = if let Some(s) = joined {
+        join_stderr(command, s)?
     } else {
         let err = io
             .stderr
@@ -214,11 +224,12 @@ mod tests {
     #[test]
     fn wire_stdin_borrows_a_stage_shaped_source() {
         use crate::io::SourceReader;
+        use crate::process::{DurableRoot, Scope};
 
         let mut shell = crate::test_helper::core_shell();
         let (r, _w) = crate::process::cloexec_pipe().expect("data pipe");
         shell.io.stdin = Source::Reader(
-            SourceReader::pipe(r).interruptible(crate::process::CancelScope::root()),
+            SourceReader::pipe(r).interruptible(Scope::clone(&DurableRoot::default())),
         );
 
         let route = wire_stdin(&shell.io.stdin, shell.io.terminal.startup_stdin_tty, None)

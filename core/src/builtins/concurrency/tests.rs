@@ -7,12 +7,11 @@ use super::eliminate::await_handle;
 use super::*;
 use crate::first_order::FOValue;
 use crate::io::new_buffer;
-use crate::process::{CancelCause, WorkerStop};
+use crate::process::{CancelCause, DurableRoot, Scope, ScopeNode, WorkerStop};
 use crate::types::{
     Break, CompletedHandle, DeferredSink, Error, Escape, EventSink, HandleInner, HandleState,
     LeaseClass, Map, ReapCause, Status, SurfaceBuffer, ThreadEnd, WorkerLease,
 };
-use std::io::Write as _;
 use std::sync::{Arc, Mutex, mpsc};
 
 fn status(b: Break) -> i32 {
@@ -22,26 +21,19 @@ fn status(b: Break) -> i32 {
     }
 }
 
+fn handle_over(rx: mpsc::Receiver<ThreadEnd>) -> HandleInner {
+    HandleInner::new("<test>", DurableRoot::default().worker(), Some(rx))
+}
+
 /// A handle whose worker dropped its `Sender` unsent, modelling a panic.
-/// The buffers are pre-seeded so a settled outcome can be checked for them
-/// — through their sinks, as a real worker fills them.
+/// The buffers are pre-seeded so a settled outcome can be checked for them.
 fn handle_with_disconnected_worker(stdout: &[u8], stderr: &[u8]) -> HandleInner {
-    use std::io::Write;
     let (tx, rx) = mpsc::channel::<ThreadEnd>();
     drop(tx);
-    let (mut out_sink, stdout_buf) = new_buffer();
-    let (mut err_sink, stderr_buf) = new_buffer();
-    out_sink
-        .write_all(stdout)
-        .expect("a buffer sink cannot fail");
-    err_sink
-        .write_all(stderr)
-        .expect("a buffer sink cannot fail");
-    HandleInner {
-        stdout_buf,
-        stderr_buf,
-        ..HandleInner::new("<test>", crate::process::CancelScope::root(), Some(rx))
-    }
+    let handle = handle_over(rx);
+    handle.stdout_buf.append(stdout);
+    handle.stderr_buf.append(stderr);
+    handle
 }
 
 fn expect_variant<'a>(v: &'a Value, label: &str) -> &'a Value {
@@ -144,10 +136,7 @@ fn a_cancelled_handle_polls_settled() {
 /// A worker polling its own scope, reporting the
 /// status it saw once `cancel_via` fires.  `ready` confirms it is alive
 /// first, so a test pins propagation, not a worker that never ran.
-fn spawn_polling_worker(
-    shell: &Shell,
-    cancel_via: impl FnOnce(&crate::process::CancelScope),
-) -> (i32, crate::process::CancelScope) {
+fn spawn_polling_worker(shell: &Shell, cancel_via: impl FnOnce(&ScopeNode)) -> (i32, ScopeNode) {
     let (ready_tx, ready_rx) = mpsc::channel();
     let (done_tx, done_rx) = mpsc::channel();
     let node = shell.session.root.worker();
@@ -165,8 +154,8 @@ fn spawn_polling_worker(
         })
         .expect("spawn_thread");
     ready_rx.recv().unwrap();
-    cancel_via(node.as_scope());
-    (done_rx.recv().unwrap(), node.as_scope().clone())
+    cancel_via(&node);
+    (done_rx.recv().unwrap(), node)
 }
 
 /// Cancelling a worker's own scope stops it and leaves a sibling from the
@@ -232,14 +221,14 @@ fn foreground_cancel_spares_worker() {
 /// bare `recv`, yet the root-parented worker it awaited stays awaitable.
 #[test]
 fn await_unwinds_on_foreground_cancel_sparing_the_worker() {
-    let shell = crate::test_helper::core_shell();
+    let mut shell = crate::test_helper::core_shell();
 
     // A still-running worker, root-parented as a real `spawn`'s is.  Its
     // `Sender` stays alive, so the receiver reports `Empty`, not `Disconnected`.
     let (_tx, rx) = mpsc::channel::<ThreadEnd>();
     let (_sink, stdout_buf) = new_buffer();
     let (_sink2, stderr_buf) = new_buffer();
-    let worker_scope = shell.session.root.worker().as_scope().clone();
+    let worker_scope = shell.session.root.worker();
     let handle = HandleInner {
         stdout_buf,
         stderr_buf,
@@ -248,7 +237,8 @@ fn await_unwinds_on_foreground_cancel_sparing_the_worker() {
 
     // Cancel the foreground (run deadline / interrupt), not the root.
     let m = Mooring::adrift();
-    shell.scope.cancel(crate::process::CancelCause::Interrupted);
+    shell.scope = Scope::clone(&m.home);
+    m.home.cancel(crate::process::CancelCause::Interrupted);
 
     let err = await_handle(&handle, &m, &shell)
         .expect_err("await must unwind on a foreground cancel, not block");
@@ -363,7 +353,7 @@ impl crate::types::EnquiryDesk for EchoDesk {
     fn enquire(
         &self,
         req: crate::first_order::FOValue,
-        _cancel: &crate::process::CancelScope,
+        _scope: &crate::process::Scope,
     ) -> Settled<crate::first_order::FOValue> {
         Ok(req)
     }
@@ -1009,17 +999,13 @@ fn deferred_surface_replays_once_on_await_not_poll() {
     // so the receiver sees a value rather than a disconnect.
     let (tx, rx) = mpsc::channel::<ThreadEnd>();
     tx.send(ThreadEnd::Settled(Ok(Value::Unit))).unwrap();
-    let (_s, stdout_buf) = new_buffer();
-    let (_s2, stderr_buf) = new_buffer();
     let surface_buf: SurfaceBuffer = Arc::new(Mutex::new(vec![FOValue::Variant {
         label: "patch".into(),
         payload: None,
     }]));
     let handle = HandleInner {
-        stdout_buf,
-        stderr_buf,
         surface_buf,
-        ..HandleInner::new("<test>", crate::process::CancelScope::root(), Some(rx))
+        ..handle_over(rx)
     };
 
     builtin_poll(&[Value::Handle(Box::new(handle.clone()))], &shell).expect("poll ok");
@@ -1129,14 +1115,10 @@ fn watched_lines_surface_one_by_one() {
     };
     let handle = spawn_child(&m, &mut shell, birth, "job", |_, child| {
         child
-            .io
-            .stdout
-            .write_all(b"one\ntwo")
+            .write_stdout(b"one\ntwo")
             .map_err(|e| sig(e.to_string()))?;
         child
-            .io
-            .stderr
-            .write_all(b"bad\r\n")
+            .write_stderr(b"bad\r\n")
             .map_err(|e| sig(e.to_string()))?;
         Ok(Value::Unit)
     })
@@ -1866,7 +1848,7 @@ fn polling_an_exited_worker_exits() {
 fn a_foreign_stop_is_reraised_by_await_and_poll() {
     let mut shell = crate::test_helper::core_shell();
     let m = Mooring::adrift();
-    let foreign = shell.session.root.as_scope().id();
+    let foreign = shell.session.root.id();
     let body = move |_: &Mooring, _: &mut Shell| {
         Err(Break::stopped(
             CancelCause::Terminated,
@@ -1916,10 +1898,7 @@ fn a_stop_naming_the_workers_node_is_its_own_and_no_other_is() {
         other => panic!("expected the worker's error, got {other:?}"),
     }
     let foreign = convert_own_stop(
-        Err(Break::stopped(
-            CancelCause::Terminated,
-            Some(root.as_scope().id()),
-        )),
+        Err(Break::stopped(CancelCause::Terminated, Some(root.id()))),
         &node,
     );
     assert!(matches!(
@@ -1937,7 +1916,7 @@ fn a_stop_naming_the_workers_node_is_its_own_and_no_other_is() {
 fn a_workers_poll_names_its_own_node() {
     let mut shell = crate::test_helper::core_shell();
     let node = shell.session.root.worker();
-    shell.scope = node.clone();
+    shell.scope = Scope::clone(&node);
     node.cancel(CancelCause::Cancelled);
     match shell.poll() {
         Err(Break::Escape(Escape::Stopped {

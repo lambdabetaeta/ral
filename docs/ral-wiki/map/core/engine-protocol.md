@@ -1,5 +1,5 @@
 ---
-generated_at_commit: dad6a1b3
+generated_at_commit: e4025de9
 generated_at_date: 2026-10-17
 covers_paths: [core/src/protocol.rs, core/src/protocol/, core/src/carrier.rs, core/src/carrier/, core/src/engine.rs, core/src/engine/, core/src/run/report.rs, core/src/seed.rs, core/src/guard/grant.rs]
 ---
@@ -38,7 +38,8 @@ parent's seal, so core holds no spawn machinery for it.** The why is
   sealed.unseal()?.decode(&runtime)?, narrow)`, and no recipe runs. There is no
   `Keep`: the attach is the birth, and the scratch is the host's, named in a
   root's env.
-  `Engine::run` runs one dispatch under the scope `Scopes::open` minted;
+  `Engine::run` runs one dispatch under the view `Scopes::open` hands it;
+  `Scopes` keeps the node, its one writer;
   `Engine::probe` (`engine/probe.rs`) answers one `Probe`.
 - `Rails` — one dispatch's host-facing rails as its carrier lays them: the
   `Outlet` its events leave by, the deferred sink, the desk, the `Fork` arm.
@@ -56,7 +57,7 @@ parent's seal, so core holds no spawn machinery for it.** The why is
 
 The frame algebra. Everything on it is a wire type; nothing here carries.
 
-- `PROTOCOL_VERSION` (currently 22) — checked at `Attach`; a mismatch refuses.
+- `PROTOCOL_VERSION` (currently 23) — checked at `Attach`; a mismatch refuses.
 - `check_media` — the same number compared at *build* time, against the
   `proto_version=` line `vm-image/build-boot.sh` records for the engine in the
   guest media; `synod/examples/check-media.rs`, tauri's `beforeBuildCommand`,

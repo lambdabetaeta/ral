@@ -18,7 +18,7 @@ use ral_core::types::{Break, BuiltinBody, BuiltinEntry, Mooring, Observed, Settl
 use ral_core::{HostSurface, Shell, Value};
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::io::{Read as _, Write};
+use std::io::Read as _;
 use std::sync::Arc;
 
 mod fff_index;
@@ -392,10 +392,8 @@ fn note_edit(shell: &mut Shell, path: &str, lines: &str, plural: bool, any_escap
     } else {
         ""
     };
-    let _ = writeln!(
-        shell.stderr_mut(),
-        "[EXARCH] Replaced {word} {lines} of {path}.{warning}"
-    );
+    let _ = shell
+        .write_stderr(format!("[EXARCH] Replaced {word} {lines} of {path}.{warning}\n").as_bytes());
 }
 
 /// `edit-hash PATH EDITS` — apply a batch of `[hash: …, line: …]` records in one
@@ -707,7 +705,7 @@ fn builtin_explore_dir(args: &[Value], _mooring: &Mooring, shell: &mut Shell) ->
                 results.push(Value::string(rel));
             }
             Err(e) => {
-                let _ = writeln!(shell.stderr_mut(), "explore-dir: {e}");
+                let _ = shell.write_stderr(format!("explore-dir: {e}\n").as_bytes());
             }
         }
     }

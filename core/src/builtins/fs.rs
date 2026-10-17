@@ -75,7 +75,7 @@ pub(super) fn builtin_glob(args: &[Value], shell: &mut Shell) -> Settled<Value> 
     let pattern = checked_read_path(shell, raw)?;
     let glob = Glob::parse(pattern.as_path()).map_err(|e| sig(format!("glob: {e}")))?;
     let mut hits = Vec::new();
-    for hit in glob.walk(shell.scope.as_scope().clone()) {
+    for hit in glob.walk(shell.scope.clone()) {
         let hit = hit?;
         let shown = base
             .as_ref()

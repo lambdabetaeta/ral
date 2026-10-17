@@ -18,7 +18,9 @@ pub(crate) use poll::poll_slice;
 pub(crate) use poll::{aborted, interrupt};
 pub use regime::{RunIo, RunStdin};
 pub use sink::{ByteBuffer, Captured, CapturedBytes, LineFn, Sink};
-pub(crate) use sink::{SINK_BUFFER_CAP, new_buffer, tee_with_buffer, terminator_len};
+pub(crate) use sink::{
+    ChildStdioPlan, SINK_BUFFER_CAP, new_buffer, tee_with_buffer, terminator_len,
+};
 pub use source::{Source, SourceReader};
 
 /// All pipeline-stage IO state for a single Shell.

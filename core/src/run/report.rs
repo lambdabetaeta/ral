@@ -89,7 +89,6 @@ fn render_ending(ending: crate::run::Ending, shell: &Shell) -> Ending {
                 Error::render_stop(cause, at, shell.sources(), compact)
             },
             cause,
-            status: FailureStatus::from(i32::from(cause.code())),
         },
         Raw::Exited(code) => Ending::Exited(code.clamp(0, 255)),
     }

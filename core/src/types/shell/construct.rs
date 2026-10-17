@@ -10,7 +10,7 @@ use super::{Context, DEFAULT_STACK_LIMIT, LocalState, SessionState, Shell};
 use crate::capability::GrantStack;
 use crate::guard::{GrantNarrower, SpawnGrant};
 use crate::io::{Io, Source};
-use crate::process::{DurableRoot, TerminalLease};
+use crate::process::{DurableRoot, Scope, TerminalLease};
 use crate::source::SourceDb;
 use crate::terminal::TerminalState;
 use crate::ty::Fixings;
@@ -218,7 +218,7 @@ impl Shell {
             let baseline = env.all_bindings(&sig).into_iter().map(|(name, _)| name);
             bindings.arm(lease, baseline);
         }
-        let anchor = durable.worker();
+        let anchor = Scope::clone(&durable.worker());
         Self {
             env,
             sig,

@@ -2,7 +2,7 @@
 
 use super::error::Error;
 use super::value::Value;
-use crate::process::{CancelCause, CancelScope, ChildEnd, ForegroundScope, ScopeId};
+use crate::process::{CancelCause, ChildEnd, Scope, ScopeId};
 use crate::source::Span;
 
 /// Non-catchable exits from a delimited scope.
@@ -65,7 +65,7 @@ impl Break {
     pub(crate) fn of_child(
         cmd: &str,
         end: ChildEnd,
-        scope: &CancelScope,
+        scope: &Scope,
         shell: &crate::types::Shell,
     ) -> Self {
         match end {
@@ -125,7 +125,7 @@ impl From<Escape> for Break {
 /// caret, when it outranks the join or equals it *naming the join's owner*:
 /// an equal-cause stop naming someone else is superseded, or a base's own
 /// switch would convert the wrong owner's stop.  An `exit` has already left.
-pub(crate) fn final_poll(settled: Settled<Value>, node: &ForegroundScope) -> Settled<Value> {
+pub(crate) fn final_poll(settled: Settled<Value>, node: &Scope) -> Settled<Value> {
     match (node.in_force(), settled) {
         (_, exit @ Err(Break::Escape(Escape::Exit(_)))) => exit,
         (
@@ -176,7 +176,7 @@ pub(crate) fn panic_text(payload: &dyn std::any::Any) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::process::{CancelCause as C, DurableRoot, WorkerStop};
+    use crate::process::{CancelCause as C, DurableRoot, ScopeNode, WorkerStop};
     use crate::source::FileId;
     use crate::types::Status;
 
@@ -206,7 +206,7 @@ mod tests {
         Err(Break::Escape(Escape::Stopped { cause, owner, at }))
     }
 
-    fn node_under(cause: C) -> ForegroundScope {
+    fn node_under(cause: C) -> ScopeNode {
         let node = DurableRoot::default().worker();
         node.cancel(cause);
         node
@@ -232,7 +232,7 @@ mod tests {
             )),
             (C::Interrupted, Some(node.id()), Some(sp))
         );
-        let other = crate::process::CancelScope::root().id();
+        let other = crate::process::DurableRoot::default().worker().id();
         assert_eq!(
             cause(final_poll(
                 stopped(C::Interrupted, Some(other), Some(sp)),

@@ -217,7 +217,6 @@ impl RedirectState {
     /// Flushes, then restores the sinks and stdin. Idempotent: a second call
     /// sees only emptied slots.
     fn tear_down(&mut self, shell: &mut Shell) {
-        use std::io::Write;
         // Flush before swapping the sinks back, or buffered bytes land at
         // the parent.
         let _ = shell.io.stdout.flush();

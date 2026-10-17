@@ -24,7 +24,7 @@ pub(crate) use child::{Pumps, RunningChild};
 pub(crate) use detach::detach;
 pub(crate) use head::Head;
 pub(crate) use process::{brake, build_launch, spawn, with_denials};
-pub(crate) use stdio::{ChildIo, TtyInputPermit, wire_stdio};
+pub(crate) use stdio::{ChildIo, ChildOut, TtyInputPermit, wire_stdio};
 pub(crate) use vet::vet;
 
 use child::WaitedChild;
@@ -46,19 +46,14 @@ pub(crate) fn run(
     // Confinement can run for minutes on Windows, so the run's scope goes in
     // with it and is read again on the way out: a wall that expired mid-stamp
     // must not be discovered only once the child is already running.
-    let mut command = build_launch(
-        &rc,
-        crate::sandbox::Ownership::Kept,
-        shell,
-        shell.scope.as_scope(),
-    )?;
+    let mut command = build_launch(&rc, crate::sandbox::Ownership::Kept, shell, &shell.scope)?;
     shell.poll()?;
 
     let inherit_tty = inherit_tty(shell);
     let pumps = wire_stdio(
         &mut command,
         shell,
-        &ChildIo::from(&shell.io),
+        ChildIo::from(&shell.io),
         Some(TtyInputPermit::for_standalone_external()),
         inherit_tty,
     )?;
@@ -97,7 +92,7 @@ pub(crate) fn run(
         cmd_name.clone(),
         pumps,
         group,
-        shell.scope.as_scope().clone(),
+        shell.scope.clone(),
         jail,
     );
 
@@ -114,7 +109,7 @@ pub(crate) fn run(
 
     // Only joins the pump threads: under audit the bytes are already
     // captured by the dispatch-level Tee on `shell.io.stdout` / `stderr`.
-    waited.settle(shell.scope.as_scope());
+    waited.settle(&shell.scope);
     // A command inside a pipeline stage cannot take SIGPIPE from an interior
     // edge — the parent holds that edge's read end — so any SIGPIPE it
     // suffers is from a pipe of its own making and is its own failure.
@@ -126,12 +121,10 @@ pub(crate) fn run(
     };
     match outcome.classify(cause) {
         None => Ok(Value::Unit),
-        Some(end) => Err(
-            match Break::of_child(&cmd_name, end, shell.scope.as_scope(), shell) {
-                Break::Error(err) => Break::Error(with_denials(err, shell, pids, started)),
-                escape @ Break::Escape(_) => escape,
-            },
-        ),
+        Some(end) => Err(match Break::of_child(&cmd_name, end, &shell.scope, shell) {
+            Break::Error(err) => Break::Error(with_denials(err, shell, pids, started)),
+            escape @ Break::Escape(_) => escape,
+        }),
     }
 }
 
@@ -186,7 +179,7 @@ fn trace_io_wiring(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::process::{CancelScope, Membership, Pgid};
+    use crate::process::{DurableRoot, Membership, Pgid, Scope};
 
     fn pgid(raw: i32) -> Pgid {
         Pgid::from_raw(raw).expect("positive")
@@ -196,7 +189,7 @@ mod tests {
     /// owner; a plain member joins; a top-level `Inherit` child has none.
     #[test]
     fn a_child_owns_what_it_leads_and_joins_what_it_only_entered() {
-        let stage = Membership::new(pgid(7), CancelScope::root());
+        let stage = Membership::new(pgid(7), Scope::clone(&DurableRoot::default().worker()));
         assert!(matches!(
             landed_in(Some(pgid(9)), Some(&stage)),
             Some(Group::Owns(g)) if g == pgid(9)

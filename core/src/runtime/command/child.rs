@@ -4,7 +4,7 @@
 //! before wait" and "wait twice" unwritable.
 
 use crate::io::Sink;
-use crate::process::{CancelCause, CancelScope, Group, POLL_SLICE, WaitOutcome};
+use crate::process::{CancelCause, Group, POLL_SLICE, Scope, WaitOutcome};
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::Instant;
 
@@ -39,11 +39,7 @@ impl Pumps<Sink> {
 
     /// Start the planned drainers over `child`'s piped stdout/stderr, each
     /// reading `scope`, the launching computation's current scope.
-    pub(crate) fn start(
-        self,
-        child: &mut crate::process::ChildHandle,
-        scope: &CancelScope,
-    ) -> Pumps {
+    pub(crate) fn start(self, child: &mut crate::process::ChildHandle, scope: &Scope) -> Pumps {
         Pumps {
             stdout: self
                 .stdout
@@ -69,7 +65,7 @@ impl Pumps {
     /// polled, the pumps are interrupted every slice too: one blocked on an
     /// edge a teardown left undrained would otherwise wait for a read end the
     /// collector holds until this very stage files.
-    pub(crate) fn join_under(self, scope: &CancelScope, kill: impl FnOnce()) {
+    pub(crate) fn join_under(self, scope: &Scope, kill: impl FnOnce()) {
         let handles: Vec<_> = [self.stdout, self.stderr].into_iter().flatten().collect();
         let mut kill = Some(kill);
         while !handles.iter().all(std::thread::JoinHandle::is_finished) {
@@ -119,7 +115,7 @@ pub(crate) struct RunningChild {
     /// `wait`, so a cancel — exarch's tool timeout, a signal the platform
     /// handler translated into a cause — can preempt a child that never exits
     /// on its own, and a cleanup's child is not torn down during the grace.
-    cancel: CancelScope,
+    cancel: Scope,
     /// The strongest cause in force when the child ended: the sole input to
     /// attribution, forgiveness, and whether the drainers are joined.
     cause: Option<CancelCause>,
@@ -158,7 +154,7 @@ impl RunningChild {
         name: String,
         pumps: Pumps<Sink>,
         group: Option<Group>,
-        cancel: CancelScope,
+        cancel: Scope,
         jail: Option<crate::process::jail::JailCgroup>,
     ) -> Self {
         let mut child = child;
@@ -365,7 +361,7 @@ impl WaitedChild {
     /// cause ends the join — or, for a child ral killed because its reader was
     /// gone, detach them; see [`Pumps::join_under`].  A joined or shared group
     /// has no address, so the join waits.
-    pub(crate) fn settle(self, scope: &CancelScope) {
+    pub(crate) fn settle(self, scope: &Scope) {
         let detach = self.cause == Some(CancelCause::ReaderGone);
         crate::dbg_trace!(
             "wait",
@@ -436,13 +432,13 @@ mod tests {
         let (child, pgid) = spawn_with_pgid(&mut cmd, PgidPolicy::NewLeader)
             .expect("spawn /bin/sleep under a pgid");
 
-        let scope = CancelScope::root();
+        let scope = DurableRoot::default().worker();
         let running = RunningChild::assemble_with_owner(
             crate::process::ChildHandle::from_std(child),
             "sleep".to_string(),
             Pumps::default(),
             Some(Group::Owns(pgid.expect("NewLeader yields a tracked pgid"))),
-            scope.clone(),
+            Scope::clone(&scope),
             None,
         );
         let striker = scope.clone();
@@ -582,13 +578,13 @@ mod tests {
             line
         });
 
-        let scope = CancelScope::root();
+        let scope = DurableRoot::default().worker();
         let running = RunningChild::assemble_with_owner(
             crate::process::ChildHandle::from_std(child),
             "sh".to_string(),
             Pumps::default(),
             Some(Group::Owns(pgid.expect("NewLeader yields a tracked pgid"))),
-            scope.clone(),
+            Scope::clone(&scope),
             None,
         );
 
@@ -648,13 +644,13 @@ mod tests {
         rustix::process::kill_process(pgid.as_pid(), rustix::process::Signal::STOP)
             .expect("SIGSTOP the sleep");
 
-        let scope = CancelScope::root();
+        let scope = DurableRoot::default().worker();
         let running = RunningChild::assemble_with_owner(
             crate::process::ChildHandle::from_std(child),
             "sleep".to_string(),
             Pumps::default(),
             Some(Group::Owns(pgid)),
-            scope.clone(),
+            Scope::clone(&scope),
             None,
         );
 
@@ -689,7 +685,7 @@ mod tests {
             let (child, pgid) =
                 spawn_with_pgid(&mut cmd, PgidPolicy::NewLeader).expect("spawn the trapper");
 
-            let stage = CancelScope::root();
+            let stage = DurableRoot::default().worker();
             let own = stage.child();
             let running = RunningChild::assemble_with_owner(
                 crate::process::ChildHandle::from_std(child),
@@ -697,9 +693,9 @@ mod tests {
                 Pumps::default(),
                 Some(Group::Joins(Membership::new(
                     pgid.expect("NewLeader yields a tracked pgid"),
-                    stage.clone(),
+                    Scope::clone(&stage),
                 ))),
-                own.clone(),
+                Scope::clone(&own),
                 None,
             );
             let settle_scope = own.clone();

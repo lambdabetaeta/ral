@@ -10,7 +10,7 @@ use super::route::{ByteIn, ByteOut, StageRoute};
 use super::stage::{ExternalStage, StageHandle, StageKind};
 use super::thread::launch_thread_stage;
 use crate::io::{Sink, Source, SourceReader};
-use crate::process::{CancelScope, PgidPolicy};
+use crate::process::{PgidPolicy, Scope};
 use crate::types::{Env, Error, Mooring, Settled, Shell, Value};
 use std::sync::Arc;
 
@@ -18,7 +18,7 @@ use std::sync::Arc;
 /// controlling terminal from the shell's own process would SIGTTIN the whole
 /// shell, so it sees EOF, as under capture.  A cause on `scope` ends a
 /// blocked read as EOF.
-pub(super) fn stage_stdin(route: ByteIn, shell: &Shell, scope: &CancelScope) -> Settled<Source> {
+pub(super) fn stage_stdin(route: ByteIn, shell: &Shell, scope: &Scope) -> Settled<Source> {
     let reader = match route {
         ByteIn::Upstream(r) => Some(SourceReader::pipe(r)),
         ByteIn::Parent => match &shell.io.stdin {
@@ -73,19 +73,9 @@ fn wire_stage(
         }
         ByteIn::Parent => &shell.io.stdin,
     };
-    let downstream;
     let stdout = match stdout {
-        ByteOut::Downstream(writer, edge) => {
-            // A direct external's pipe: nothing of ral's writes to it, the name
-            // is for the type.
-            downstream = Sink::Pipe {
-                writer: Arc::new(writer),
-                edge,
-                stage: shell.scope.id(),
-            };
-            &downstream
-        }
-        ByteOut::Parent => &shell.io.stdout,
+        ByteOut::Downstream(writer, _edge) => command::ChildOut::Edge(writer),
+        ByteOut::Parent => command::ChildOut::Sink(&shell.io.stdout),
     };
     let io = command::ChildIo {
         stdin,
@@ -95,7 +85,7 @@ fn wire_stage(
     // Inherit ral's real fd 1 so a pager or `ls` still sees a TTY.
     let inherit_tty = shell.io.terminal.startup_stdout_tty && holds_terminal;
     let grant = holds_terminal.then(command::TtyInputPermit::for_pure_external_pipeline);
-    command::wire_stdio(cmd, shell, &io, grant, inherit_tty)
+    command::wire_stdio(cmd, shell, io, grant, inherit_tty)
 }
 
 pub(super) struct LaunchCx<'a> {
@@ -153,7 +143,7 @@ fn launch_external_stage_direct(
         &rc,
         crate::sandbox::Ownership::Kept,
         cx.shell,
-        cx.shell.scope.as_scope(),
+        &cx.shell.scope,
     )?;
     // Confinement may have taken seconds since the caller's own poll, so poll
     // again rather than spawn into an expired wall.
@@ -167,7 +157,7 @@ fn launch_external_stage_direct(
         &rc.shown,
         cx.shell,
     )?;
-    let pumps = pumps.start(&mut child, cx.shell.scope.as_scope());
+    let pumps = pumps.start(&mut child, &cx.shell.scope);
     // A joining stage leads a group only behind an envelope, whose payload
     // leads a session of its own out of the pipeline group's reach.
     Ok(ExternalStage {

@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use crate::engine::{Engine, EngineInstaller, Outlet, Rails};
 use crate::first_order::FOValue;
-use crate::process::{CancelCause, ForegroundScope, POLL_SLICE};
+use crate::process::{CancelCause, POLL_SLICE, Scope};
 use crate::protocol::channel::{HOST_SILENCE_DEADLINE, WireChannel, WriteError, write_or_sever};
 use crate::protocol::probe::Probe;
 use crate::protocol::{
@@ -147,7 +147,7 @@ struct WireDesk {
 }
 
 impl EnquiryDesk for WireDesk {
-    fn enquire(&self, req: FOValue, cancel: &crate::process::CancelScope) -> Settled<FOValue> {
+    fn enquire(&self, req: FOValue, scope: &crate::process::Scope) -> Settled<FOValue> {
         let eid = EnquiryId(self.parks.next.fetch_add(1, Ordering::Relaxed));
         // Registered before the send: the answer may be back before this
         // thread reaches the park below.
@@ -178,7 +178,7 @@ impl EnquiryDesk for WireDesk {
                 Err(mpsc::TryRecvError::Empty) => {}
                 Err(mpsc::TryRecvError::Disconnected) => unreachable!("{ORPHANED}"),
             }
-            if let Err(stop) = cancel.poll() {
+            if let Err(stop) = scope.poll() {
                 self.parks.parked.lock_ignore_poison().remove(&eid);
                 return Err(stop);
             }
@@ -197,7 +197,7 @@ impl EnquiryDesk for WireDesk {
 enum WorkItem {
     /// Boxed so a probe is not sized to `Run`'s stack footprint. The scope is
     /// the one its frame is born under.
-    Run(Box<Run>, ForegroundScope),
+    Run(Box<Run>, Scope),
     Probe(Probe),
 }
 
@@ -591,7 +591,7 @@ fn engine_session(
 #[allow(clippy::disallowed_methods, reason = "test scaffolding")]
 mod wire_desk_tests {
     use super::*;
-    use crate::process::{CancelCause, CancelScope};
+    use crate::process::{CancelCause, DurableRoot};
 
     /// A desk for dispatch `id` whose events leave on `ours`.
     fn desk_over(ours: WireChannel, id: u64) -> WireDesk {
@@ -623,7 +623,7 @@ mod wire_desk_tests {
             filler.parks.fill(eid, Ok(FOValue::Int { value: 42 }));
         });
 
-        let answer = desk.enquire(FOValue::Int { value: 41 }, &CancelScope::root());
+        let answer = desk.enquire(FOValue::Int { value: 41 }, &DurableRoot::default().worker());
         front_end.join().expect("front-end thread");
         assert_eq!(answer.expect("answered"), FOValue::Int { value: 42 });
         assert!(
@@ -649,7 +649,7 @@ mod wire_desk_tests {
         });
 
         let Break::Error(err) = desk
-            .enquire(FOValue::Unit, &CancelScope::root())
+            .enquire(FOValue::Unit, &DurableRoot::default().worker())
             .expect_err("refused")
         else {
             panic!("a refusal is an error, not a stop");
@@ -683,7 +683,7 @@ mod wire_desk_tests {
     #[test]
     fn cancel_wakes_a_parked_enquiry() {
         let (desk, _peer) = lone_desk();
-        let scope = CancelScope::root();
+        let scope = DurableRoot::default().worker();
 
         // Long enough that `enquire` is provably parked before the cancel
         // lands, so this test cannot pass by the pre-park check alone.
@@ -721,7 +721,7 @@ mod wire_desk_tests {
     #[test]
     fn cancel_before_the_enquiry_never_parks() {
         let (desk, _peer) = lone_desk();
-        let scope = CancelScope::root();
+        let scope = DurableRoot::default().worker();
         scope.cancel(CancelCause::Cancelled);
 
         let stop = desk.enquire(FOValue::Unit, &scope).expect_err("cancelled");

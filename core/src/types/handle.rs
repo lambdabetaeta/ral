@@ -4,6 +4,7 @@
 use super::flow::ThreadEnd;
 use super::value::Value;
 use crate::io::ByteBuffer;
+use crate::process::ScopeNode;
 use crate::sync::LockExt as _;
 use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -116,7 +117,7 @@ pub struct HandleInner {
     /// *session* root, not of the spawning run, so a foreground interrupt
     /// cannot collaterally kill it.  `cancel` and `race`'s losers fire it, and
     /// the worker stops at its next poll rather than running on.
-    pub cancel: crate::process::CancelScope,
+    pub cancel: ScopeNode,
 }
 
 /// A handle's lifecycle, read and transitioned only through [`HandleInner`]'s
@@ -141,7 +142,7 @@ impl HandleInner {
     /// `result`; its buffers start empty.
     pub fn new(
         cmd: impl Into<std::string::String>,
-        cancel: crate::process::CancelScope,
+        cancel: ScopeNode,
         result: Option<Receiver<ThreadEnd>>,
     ) -> Self {
         Self {
@@ -256,7 +257,7 @@ impl HandleInner {
 pub(crate) fn idle_handle() -> Value {
     Value::Handle(Box::new(HandleInner::new(
         "<test>",
-        crate::process::CancelScope::root(),
+        crate::process::DurableRoot::default().worker(),
         None,
     )))
 }

@@ -1,7 +1,7 @@
 ---
-verified_at_commit: dad6a1b3
+verified_at_commit: e4025de9
 verified_at_date: 2026-10-17
-anchors: [Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, CancelScope::shielded, ScopeId, POLL_SLICE, final_poll, Break::code, Break::of_child, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, CancelScope, CancelCause, Terminate, DurableRoot, ForegroundScope, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, ChildEnd, WaitOutcome::classify, KILL_EXIT_CODE, CancelCause::code, Signal::status, RunningChild::wait, Membership::owes, break_pipeline_group, escalation_pending]
+anchors: [Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, Break::code, Break::of_child, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, Terminate, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, ChildEnd, WaitOutcome::classify, KILL_EXIT_CODE, CancelCause::code, Signal::status, RunningChild::wait, Membership::owes, break_pipeline_group, escalation_pending]
 ---
 
 # Cancellation
@@ -21,7 +21,7 @@ host.
 
 The two pieces answer different questions:
 
-- **The scope tree** (`CancelScope`) answers *"which subtree should unwind, and
+- **The scope tree** (`Scope`, `ScopeNode`) answers *"which subtree should unwind, and
   why?"* — a structured-concurrency primitive that names a *cause* and reaches
   exactly the workers that inherited the cancelled scope. It is the only thing
   `Shell::poll` reads, and what it raises is a *stop*: an escape naming its
@@ -61,7 +61,7 @@ and *only* a real delivered signal walks the ladder.
 
 ## The scope tree and its cause lattice
 
-A `CancelScope` is a node `{ flag, cancelled_at, parent, shield }` in a tree of
+A scope node is `{ flag, cancelled_at, parent, shield }` in a tree of
 `Arc`-linked nodes. **Its cancellation is a *join*:**
 
     j(s) = ⨆ over chain(s) of flag(n)
@@ -108,18 +108,18 @@ A `CancelScope` is a node `{ flag, cancelled_at, parent, shield }` in a tree of
 `poll` mints `Break::stopped(cause, owner)`, an escape; its message is
 `CancelCause::message`, the one vocabulary every poll point shares.
 
-### Two typed scopes name the one invariant
+### Three types name the capabilities
 
-The tree's load-bearing rule — *a run's foreground scope is always a descendant
-of the session's durable root* — is spelled in the type system, not left to
-discipline ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]).
+The tree's capabilities are spelled in the type system, not left to
+discipline ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]):
+**`Scope`** reads (`poll`, `cause`, `child`, `shielded`) and has no write;
+**`ScopeNode`** writes (`cancel`) and derefs to its view.
 
-- **`DurableRoot`** (`shell.session.root`) is minted once per `Shell`. Detached
+- **`DurableRoot`** (`shell.session.root`) is minted once per `Shell`, is the
+  only free root, and never yields its own node, so every node descends from
+  one and none is installed as a home. Detached
   workers — `spawn`, `watch` — parent under it, so a *foreground* cancel
   never reaches them ([[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]]).
-- **`ForegroundScope`** (`Mooring::home`) is the run's work scope. It can be
-  minted *only* from a `DurableRoot` (or by nesting another foreground), so an
-  unrelated root can never be installed as a foreground by accident.
 - `DurableRoot::worker` mints the scopes beside a run: shell init's anchor and
   `spawn_thread`'s worker. A run's frame nests under the anchor, so
   cancelling it never reaches a worker, while cancelling the root reaches both.
@@ -136,7 +136,7 @@ discipline ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]).
 
 ## The ambient causes
 
-A signal handler must not lock and cannot hold a `CancelScope` by value, so it
+A signal handler must not lock and cannot hold a `ScopeNode` by value, so it
 raises a cause on a process-lifetime `static`, and a host thread hears it off
 signal context. The two are different kinds of proposition.
 
@@ -250,13 +250,14 @@ the contract is *cooperative*.
 ### The two cells
 
 The **owner's node** is the base of a machine's tree — a run's, a worker's, a
-stage's — and is run-invariant, so it lives on `Mooring::home`. It is what
+stage's — and is run-invariant, so it lives on `Mooring::home`, a `ScopeNode`. It is what
 *writes* aim at: the key a terminal tenant heard, a stage's group membership,
 a lease and a `cancel`. The **current scope** is a descendant swapped by
-frames; it lives on `Shell::scope` and is what *reads* consult: `poll`, every
+frames; it lives on `Shell::scope`, a `Scope`, which has no write, and is what *reads* consult: `poll`, every
 sliced wait, a child's attribution, the collector's loop. At a base the two
 coincide; inside a cleanup the scope is a shield under the node. A write never
-aims at the current scope, so nothing ever writes a shield.
+aims at the current scope. A shield is minted as a `Scope` alone, so no
+`ScopeNode` of it exists and nothing can write it.
 
 A stop at a base is consumed iff it names that owner's node: a worker turns a
 stop naming its own node into the handle's `WorkerStopped` error; a collector
@@ -273,8 +274,9 @@ Everything launched inside — a pipeline's stages, an external child, a nested
 machine — reads the current scope and is masked with it. A shielded node's
 fold admits from its ancestors only `Aborted` and, once `since + grace` has
 passed, everything; `since` is the earliest `cancelled_at` on the chain above
-it, and the grace is capped by the nearest enclosing shield's. Its own flag is
-written by nobody, so a descendant's own cause stays visible. Every cleanup of
+it, and the grace is capped by the nearest enclosing shield's. It exists
+only as a `Scope`, so its own flag is never written and a descendant's own
+cause stays visible. Every cleanup of
 one unwinding therefore ends by one instant, and a run ends within `wall +
 grace + TEARDOWN_GRACE`. The shield is cooperative: a signal the tty or the
 collector sends to the group still reaches a cleanup's children, and a child

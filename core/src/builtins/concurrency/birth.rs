@@ -3,13 +3,12 @@
 use super::watch_event;
 use crate::fact::Worker;
 use crate::io::{Sink, new_buffer};
-use crate::process::{ForegroundScope, WorkerStop};
+use crate::process::{Scope, WorkerStop};
 use crate::types::{
     Break, CapReached, DeferredSurface, Done, Error, Escape, FlushGuard, HandleInner, Latch,
     LeaseChain, LeaseClass, Mooring, Observed, Settled, Shell, SurfaceBuffer, ThreadEnd, Value,
     WorkerEntry, WorkerId, final_poll, sig,
 };
-use std::io::Write as _;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -91,7 +90,7 @@ where
         Birth::Spawn | Birth::Service => (stdout_sink, stderr_sink),
         Birth::Watch { label } => {
             if mooring.deferred.is_none() {
-                let _ = shell.io.stderr.write_all(
+                let _ = shell.write_stderr(
                     format!(
                         "note: watch '{label}': this host installs no deferred sink, \
                          so the worker's lines are dropped\n"
@@ -127,7 +126,7 @@ where
         stderr_buf,
         surface_buf,
         joined,
-        ..HandleInner::new(cmd.clone(), node.as_scope().clone(), Some(rx))
+        ..HandleInner::new(cmd.clone(), node, Some(rx))
     };
     let worker = handle.clone();
     shell
@@ -192,7 +191,7 @@ where
 /// The boundary's switch: a stop naming this worker's own node, and only
 /// that, becomes the handle's error, carrying the stop's cause.  Any other
 /// stop passes through as the escape it is.
-pub(super) fn convert_own_stop(result: Settled<Value>, own: &ForegroundScope) -> Settled<Value> {
+pub(super) fn convert_own_stop(result: Settled<Value>, own: &Scope) -> Settled<Value> {
     match result {
         Err(Break::Escape(Escape::Stopped {
             cause,

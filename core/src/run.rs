@@ -15,14 +15,13 @@
 use crate::compile::compile_and_typecheck;
 use crate::diagnostic::{Rejection, Report};
 use crate::io::{Captured, Io, RunIo, RunStdin, Sink, Source};
-use crate::process::{CancelCause, Deadline, ForegroundScope, RequestedTerminalAccess};
+use crate::process::{CancelCause, Deadline, RequestedTerminalAccess, Scope, ScopeNode};
 use crate::protocol::{Program, Run};
 use crate::source::{FileId, Span};
 use crate::types::{
     Break, DeferredSink, Desk, Error, Escape, Fork, Mooring, Notice, NurseryGuard, Observation,
     Settled, Shell, SurfaceSink, TrailScope, Value, final_poll,
 };
-use std::io::Write as _;
 use std::sync::Arc;
 
 mod report;
@@ -173,9 +172,9 @@ impl Ending {
 /// deadline reaches every frame nested under it.
 fn arm_wall(
     wall: std::time::Duration,
-    foreground: &crate::process::ForegroundScope,
+    foreground: &crate::process::ScopeNode,
 ) -> crate::process::Deadline {
-    crate::process::arm_lifetime(foreground.as_scope().clone(), wall)
+    crate::process::arm_lifetime(foreground.clone(), wall)
 }
 
 impl Shell {
@@ -205,7 +204,7 @@ impl Shell {
     /// cannot skip keeps the opener's close law true at dispatch
     /// granularity. A panic reports `Static` by declaration — the trail
     /// closes and is discarded, never attached.
-    pub(crate) fn run_under(&mut self, under: &ForegroundScope, req: RunRequest) -> RunReport {
+    pub(crate) fn run_under(&mut self, under: &Scope, req: RunRequest) -> RunReport {
         // A run is the extent of ral's picture of `PATH`: whatever happened to
         // the filesystem between runs is admitted here, and within a run a
         // walk is paid once per name.
@@ -242,7 +241,7 @@ impl Shell {
 
     /// Resolve the run's [`Program`] and hand it to the framed scaffold, with
     /// this run's foreground frame minted under `under`.
-    fn dispatch(&mut self, under: &ForegroundScope, mut req: RunRequest) -> RunReport {
+    fn dispatch(&mut self, under: &Scope, mut req: RunRequest) -> RunReport {
         // Armed *before* compiling, so the limit bounds compile and typecheck
         // too: `compile_run`'s `process::clear` touches only the signal
         // escalation count, never the reaper. The guard disarms on drop, so
@@ -336,7 +335,7 @@ impl Shell {
     fn run_built(
         &mut self,
         req: RunRequest,
-        foreground: ForegroundScope,
+        foreground: ScopeNode,
         wall: Option<Deadline>,
         compact: Option<FileId>,
         body: impl FnOnce(&Mooring, &mut Self) -> Settled<Value>,
@@ -408,7 +407,7 @@ fn classify_ending(result: Settled<Value>, status: i32, compact: Option<FileId>)
 struct IoLoan<'s> {
     shell: &'s mut Shell,
     saved: Io,
-    saved_scope: ForegroundScope,
+    saved_scope: Scope,
     saved_root: Option<FileId>,
     saved_site: Option<Span>,
 }
@@ -416,7 +415,7 @@ struct IoLoan<'s> {
 impl<'s> IoLoan<'s> {
     /// The run starts with the registers cleared, not inherited: a fresh run
     /// has no call site and no root file until it registers one.
-    fn install(shell: &'s mut Shell, next: Io, scope: ForegroundScope) -> Self {
+    fn install(shell: &'s mut Shell, next: Io, scope: Scope) -> Self {
         let saved = std::mem::replace(&mut shell.io, next);
         let saved_scope = std::mem::replace(&mut shell.scope, scope);
         let saved_root = shell.session.root_file.take();
@@ -546,7 +545,7 @@ pub(crate) fn run_framed(
     wall: Option<Deadline>,
     body: impl FnOnce(&Mooring, &mut Shell) -> Settled<Value>,
 ) -> (Settled<Value>, i32) {
-    let guard = IoLoan::install(shell, next, mooring.home.clone());
+    let guard = IoLoan::install(shell, next, Scope::clone(&mooring.home));
     let shell = &mut *guard.shell;
     // Only a source run registers: a hook's spans point into the file the hook
     // was defined in, so an entry for its absent text would name nothing and
@@ -562,15 +561,10 @@ pub(crate) fn run_framed(
     let result = shell.with_layers(run.caps.clone(), |s| body(mooring, s));
 
     // The run's last step boundary.  The wall is disarmed first; a firing
-    // the daemon has already claimed lands momentarily and is waited for
-    // on its own flag (the node may already carry a weaker cause), so
-    // nothing fires after this poll.
-    if let Some(wall) = wall
-        && !wall.disarm()
-    {
-        while !wall.fired() {
-            std::thread::yield_now();
-        }
+    // the daemon has already claimed is waited for (the node may already
+    // carry a weaker cause), so nothing fires after this poll.
+    if let Some(claimed) = wall.and_then(Deadline::disarm) {
+        claimed.wait();
     }
     let result = final_poll(result, &mooring.home);
 
@@ -606,7 +600,7 @@ impl Shell {
         // listening, and its notice waits in the ledger either way.
         self.local.workers.sweep_retention();
         for notice in self.local.bindings.take_large_binding_notices() {
-            let _ = writeln!(self.io.stderr, "{notice}");
+            let _ = self.write_stderr(format!("{notice}\n").as_bytes());
         }
         if mooring.surface.is_none() {
             return;

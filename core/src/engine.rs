@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::first_order::FOValue;
 use crate::guard::GrantNarrower;
-use crate::process::{CancelCause, DurableRoot, ForegroundScope};
+use crate::process::{CancelCause, DurableRoot, Scope, ScopeNode};
 use crate::protocol::channel::WriteError;
 use crate::protocol::{
     Attach, Control, DispatchId, EngineSpec, Event, Origin, PROTOCOL_VERSION, Report, Root, Run,
@@ -134,7 +134,7 @@ impl Engine {
     pub(crate) fn new(shell: Shell, installer: &'static EngineInstaller) -> Self {
         let runtime = Arc::clone(&shell.session.runtime);
         let scopes = Arc::new(Scopes {
-            dispatches: shell.run_cancel_handle(),
+            dispatches: Scope::clone(&shell.run_cancel_handle()),
             root: shell.cancel_handle(),
             slot: Mutex::default(),
         });
@@ -159,13 +159,7 @@ impl Engine {
     }
 
     /// Run dispatch `id` under the scope [`Scopes::open`] minted for it.
-    pub(crate) fn run(
-        &mut self,
-        id: DispatchId,
-        run: Run,
-        rails: Rails,
-        scope: &ForegroundScope,
-    ) -> Report {
+    pub(crate) fn run(&mut self, id: DispatchId, run: Run, rails: Rails, scope: &Scope) -> Report {
         let req = crate::run::RunRequest {
             surface: Some(Arc::new(Surface {
                 id,
@@ -184,7 +178,7 @@ impl Engine {
 /// `Control`: each dispatch's scope hangs off `dispatches`, and everything —
 /// workers too — off `root`.
 pub(crate) struct Scopes {
-    dispatches: ForegroundScope,
+    dispatches: Scope,
     root: DurableRoot,
     slot: Mutex<Slot>,
 }
@@ -194,22 +188,23 @@ struct Slot {
     /// The dispatch `Interrupt` and `Cancel` strike. Replaced, never cleared:
     /// a settled run's scope is dead, so striking it is a no-op, and a stale
     /// id names a dispatch the next run does not bear.
-    current: Option<(DispatchId, ForegroundScope)>,
+    current: Option<(DispatchId, ScopeNode)>,
     /// A strike that overtook the dispatch it names, with its cause.
     foretold: Option<(DispatchId, CancelCause)>,
 }
 
 impl Scopes {
-    /// Mint `id`'s scope ahead of its run's frame, so a cancel raised
+    /// Mint `id`'s node ahead of its run's frame, so a cancel raised
     /// meanwhile has somewhere to land; struck already if a strike foretold
-    /// it.
-    pub(crate) fn open(&self, id: DispatchId) -> ForegroundScope {
-        let scope = self.dispatches.child();
+    /// it.  The run gets its view.
+    pub(crate) fn open(&self, id: DispatchId) -> Scope {
+        let node = self.dispatches.child();
         let mut slot = self.slot.lock_ignore_poison();
         if let Some((_, cause)) = slot.foretold.take_if(|(pending, _)| *pending == id) {
-            scope.cancel(cause);
+            node.cancel(cause);
         }
-        slot.current = Some((id, scope.clone()));
+        let scope = Scope::clone(&node);
+        slot.current = Some((id, node));
         scope
     }
 

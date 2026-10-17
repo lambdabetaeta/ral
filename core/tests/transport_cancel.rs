@@ -2,7 +2,7 @@
 //! interrupt arriving mid-dispatch must actually stop the run.
 //!
 //! `ControlSender::interrupt` aims at the dispatch this front-end has in
-//! flight, and the identity arm strikes the `ForegroundScope` that `dispatch`
+//! flight, and the identity arm strikes the dispatch node that `dispatch`
 //! opened for it, beneath which `run_under` seats the run's frame. The wall
 //! clock is the discriminating half: the child would sleep far longer than
 //! the ceiling asserted here.  A SIGINT reaches the engine the same way,

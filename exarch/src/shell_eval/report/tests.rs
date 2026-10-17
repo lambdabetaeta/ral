@@ -1,7 +1,6 @@
 use super::*;
 use ral_core::first_order::FOValue;
 use ral_core::process::CancelCause;
-use ral_core::protocol::FailureStatus;
 use ral_core::types::LeaseClass;
 
 fn born(ids: &[u64]) -> HashSet<u64> {
@@ -37,16 +36,11 @@ fn a_returning_call_says_nothing() {
 }
 
 /// The status a walled run carries: its deadline cancellation's own.
-fn deadline_status() -> ral_core::protocol::FailureStatus {
-    FailureStatus::from(i32::from(CancelCause::TimedOut.code()))
-}
-
 #[test]
 fn wall_composes_rendering_remedy_audit_and_orphan_in_order() {
     let ending = Ending::Stopped {
         rendered: "error: sleep 30\n".into(),
         cause: CancelCause::TimedOut,
-        status: deadline_status(),
     };
     let births = born(&[1]);
     let workers = vec![worker_row(1, "sleep 20", true)];
@@ -66,16 +60,15 @@ fn wall_composes_rendering_remedy_audit_and_orphan_in_order() {
 /// Only a deadline's stop earns the timeout tip; a reader-gone stop says nothing.
 #[test]
 fn only_a_timed_out_stop_carries_the_tip() {
-    let stopped = |rendered: &str, cause, status: i32| Ending::Stopped {
+    let stopped = |rendered: &str, cause| Ending::Stopped {
         rendered: rendered.into(),
         cause,
-        status: status.into(),
     };
-    let interrupted = stopped("error: interrupted\n", CancelCause::Interrupted, 130);
+    let interrupted = stopped("error: interrupted\n", CancelCause::Interrupted);
     let (out, exit) = render(&interrupted, &HashSet::new(), None, &[], 5);
     assert_eq!((out.as_str(), exit), ("error: interrupted\n", 130));
 
-    let gone = stopped("", CancelCause::ReaderGone, 141);
+    let gone = stopped("", CancelCause::ReaderGone);
     let (out, exit) = render(&gone, &HashSet::new(), None, &[], 5);
     assert_eq!((out.as_str(), exit), ("", 141));
 }
@@ -177,7 +170,6 @@ fn ending_matrix_gates_audit_and_orphan_on_unshown_effects() {
             Ending::Stopped {
                 rendered: "error: wall\n".into(),
                 cause: CancelCause::TimedOut,
-                status: deadline_status(),
             },
             124,
         ),

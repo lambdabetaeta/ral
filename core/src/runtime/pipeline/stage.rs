@@ -7,7 +7,7 @@ use super::route::HeldEdge;
 use super::sentinel;
 use super::thread::ThreadStage;
 #[cfg(test)]
-use crate::process::CancelScope;
+use crate::process::Scope;
 use crate::process::{CancelCause, Pgid, WaitOutcome, Watch};
 use std::sync::Arc;
 
@@ -186,7 +186,7 @@ impl StageHandle {
     /// stage's own end would; the stage's scope comes back, so a test can name
     /// its reader-gone stop and read what the collector wrote.
     #[cfg(test)]
-    pub(super) fn fake_thread_for_step_test(slot: Slot) -> (Self, CancelScope) {
+    pub(super) fn fake_thread_for_step_test(slot: Slot) -> (Self, Scope) {
         let (stage, scope) = ThreadStage::fake();
         (Self::new(StageKind::Thread(stage), None, slot), scope)
     }

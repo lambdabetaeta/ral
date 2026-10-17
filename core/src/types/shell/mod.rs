@@ -45,7 +45,7 @@ use super::mooring::{Mooring, TerminalAccess};
 use super::sig;
 use crate::capability::GrantStack;
 use crate::io::{Io, WriteStopped};
-use crate::process::{CancelCause, CancelScope, DurableRoot, ForegroundScope};
+use crate::process::{CancelCause, DurableRoot, Scope};
 use crate::source::{CallSite, FileId, Source, SourceDb, Span};
 use std::sync::Arc;
 use std::time::Duration;
@@ -99,7 +99,7 @@ pub struct SessionState {
     pub(crate) root: DurableRoot,
     /// The scope a run entered through [`Shell::run`](crate::Shell::run) nests
     /// its foreground frame under.
-    pub(crate) anchor: ForegroundScope,
+    pub(crate) anchor: Scope,
     /// Durable source registry, read by hosts *after* a run returns to render
     /// its runtime errors.  Append-only for the whole session, so a nested
     /// run's spans can never alias an outer run's [`FileId`].
@@ -191,11 +191,11 @@ pub struct Shell {
     pub(crate) sig: Arc<crate::types::Signature>,
     pub(crate) context: Context,
     pub(crate) io: Io,
-    /// The scope the computation in focus polls: a thread base sets it to
-    /// its mooring's node; `Frame::Cleanup` swaps it for a shielded child
-    /// for a cleanup's extent and restores it, as `Frame::Capture` does
-    /// `io.stdout`.  Read, never written: writes aim at `Mooring::home`.
-    pub(crate) scope: ForegroundScope,
+    /// The scope the computation in focus polls: a thread base sets it to its
+    /// mooring's node; `Frame::Cleanup` swaps it for a shield for a cleanup's
+    /// extent and restores it, as `Frame::Capture` does `io.stdout`.  A view:
+    /// writes aim at `Mooring::home`.
+    pub(crate) scope: Scope,
     pub(crate) session: SessionState,
     pub(crate) local: LocalState,
 }
@@ -214,7 +214,7 @@ impl Shell {
     /// Enter a cleanup: the current scope becomes a shielded child for
     /// `grace` from the strike; the previous one comes back for the frame
     /// to restore.
-    pub(crate) fn shield(&mut self, grace: Duration) -> ForegroundScope {
+    pub(crate) fn shield(&mut self, grace: Duration) -> Scope {
         let shielded = self.scope.shielded(grace);
         std::mem::replace(&mut self.scope, shielded)
     }
@@ -263,7 +263,7 @@ impl Shell {
         req: crate::first_order::FOValue,
     ) -> Settled<crate::first_order::FOValue> {
         match mooring.desk.as_ref() {
-            Some(desk) => desk.enquire(req, self.scope.as_scope()),
+            Some(desk) => desk.enquire(req, &self.scope),
             None => Err(Break::Error(
                 Error::raised(crate::types::NO_DESK, crate::types::NO_DESK_STATUS)
                     .with_hint(crate::types::NO_DESK_HINT),
@@ -292,7 +292,7 @@ impl Shell {
     /// # Errors
     /// See [`Self::write_sink`].
     pub(crate) fn write_stdout(&mut self, bytes: &[u8]) -> Settled<()> {
-        Self::write_sink(&mut self.io.stdout, self.scope.as_scope(), bytes, "stdout")
+        Self::write_sink(&mut self.io.stdout, &self.scope, bytes, "stdout")
     }
 
     /// Write `bytes` to the current stderr sink — where `warn` and the shell's
@@ -300,8 +300,8 @@ impl Shell {
     ///
     /// # Errors
     /// See [`Self::write_sink`].
-    pub(crate) fn write_stderr(&mut self, bytes: &[u8]) -> Settled<()> {
-        Self::write_sink(&mut self.io.stderr, self.scope.as_scope(), bytes, "stderr")
+    pub fn write_stderr(&mut self, bytes: &[u8]) -> Settled<()> {
+        Self::write_sink(&mut self.io.stderr, &self.scope, bytes, "stderr")
     }
 
     /// The one place a reader leaving becomes the stop it is.  A broken pipe
@@ -309,7 +309,7 @@ impl Shell {
     /// dropped, as every Unix program drops it.
     pub(crate) fn write_sink(
         sink: &mut crate::io::Sink,
-        scope: &CancelScope,
+        scope: &Scope,
         bytes: &[u8],
         what: &str,
     ) -> Settled<()> {

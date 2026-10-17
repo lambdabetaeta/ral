@@ -175,7 +175,7 @@ is why** (`sandbox::Refusal::Unavailable`).
   [[decisions/260902_stages-are-threads|stages-are-threads]]).
 - **Any synchronous child wait a host still performs must have an out-of-band
   cancellation path.** A parent blocked reading a framed response cannot see its
-  own foreground `CancelScope` by polling, since the poll never runs while the
+  own foreground `Scope` by polling, since the poll never runs while the
   read is parked. Deadline and Esc can break a wedged wait only if the parent
   has a side channel that signals the confined child's subtree from outside.
   Giving the child more signal authority is no substitute: it lets the child

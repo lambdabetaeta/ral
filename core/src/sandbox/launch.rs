@@ -73,7 +73,7 @@ pub(crate) fn sandboxed_command(
     admitted: &Admitted,
     ownership: Ownership,
     cwd: &Path,
-    cancel: &crate::process::cancel::CancelScope,
+    cancel: &crate::process::cancel::Scope,
 ) -> Result<crate::process::Launch, Refusal> {
     // Only the Windows backend does work here a cancel could interrupt: bwrap
     // and Seatbelt render a profile in memory, while an `AppContainer` stamps
@@ -110,7 +110,7 @@ pub(crate) fn sandboxed_command(
 fn windows_sandboxed_command(
     projection: &SandboxProjection,
     admitted: &Admitted,
-    cancel: &crate::process::cancel::CancelScope,
+    cancel: &crate::process::cancel::Scope,
 ) -> Result<crate::process::Launch, Refusal> {
     use crate::capability::Program;
     let args = admitted.args();

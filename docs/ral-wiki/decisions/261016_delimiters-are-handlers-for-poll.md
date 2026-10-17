@@ -2,7 +2,7 @@
 status: active
 generated_at_commit: dad6a1b3
 verified_at_commit: dad6a1b3
-anchors: [Escape::Stopped, Break::stopped, Break::of_child, final_poll, ThreadEnd, Shell::poll, Shell::scope, Mooring::home, CancelScope::in_force, ScopeId, POLL_SLICE, WorkerStop, Status::WorkerStopped, convert_own_stop, StageObservation::names, CollectState::cancel_all, CollectState::recv, Ending::Stopped]
+anchors: [Escape::Stopped, Break::stopped, Break::of_child, final_poll, ThreadEnd, Shell::poll, Shell::scope, Mooring::home, Scope::in_force, ScopeId, POLL_SLICE, WorkerStop, Status::WorkerStopped, convert_own_stop, StageObservation::names, CollectState::cancel_all, CollectState::recv, Ending::Stopped]
 ---
 
 # Delimiters are handlers for `poll`
@@ -46,7 +46,8 @@ defect in the area was one face of that spelling.
   a stage's group membership). The *current scope* is a descendant swapped by
   frames and is what reads consult: `Shell::scope`. At a base they coincide;
   inside a cleanup the scope is a shield under the node. Nothing ever writes a
-  shield.
+  shield: `Mooring::home` is a `ScopeNode`, `Shell::scope` a `Scope`, and a
+  shield exists only as a `Scope`.
 - **One writer per node.** The root by SIGTERM/SIGHUP/Ctrl-`\`; the dispatch
   scope by the host's interrupt; a run's node by its wall and the heard key; a
   worker's by `cancel`, a `race` loss, its lease, the session wipe; a stage's
@@ -391,7 +392,7 @@ lands, when a mask ends, and for a process which write is first dead.
 ## Where
 
 `Escape`, `Break::stopped`, `Break::of_child`, `final_poll`, `ThreadEnd` in
-`core/src/types/flow.rs`; `ScopeId`, `WorkerStop`, `POLL_SLICE`, `resolve` in
+`core/src/types/flow.rs`; `Scope`, `ScopeNode`, `ScopeId`, `WorkerStop`, `POLL_SLICE`, `resolve` in
 `core/src/process/cancel.rs`; `Shell::scope`, `Shell::poll`,
 `Shell::write_sink` in `core/src/types/shell/mod.rs`; `Mooring::home` in
 `core/src/types/mooring.rs`; the collector's `rank`, `recv`, `escalate`,

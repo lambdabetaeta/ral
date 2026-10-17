@@ -63,7 +63,7 @@ pub(crate) fn linkers() -> Vec<RealPath> {
         "/lib/*/ld*.so*",
         "/usr/lib/*/ld*.so*",
     ];
-    let scope = crate::process::CancelScope::root();
+    let scope = crate::process::Scope::clone(&crate::process::DurableRoot::default());
     let found: BTreeSet<RealPath> = PATTERNS
         .iter()
         .filter_map(|p| crate::glob::Glob::parse(&PathBuf::from(*p)).ok())

@@ -2,7 +2,7 @@
 status: active
 generated_at_commit: dad6a1b3
 verified_at_commit: dad6a1b3
-anchors: [Frame::Cleanup, Shell::shield, CancelScope::shielded, cleanup_grace, CollectState::cancel_all]
+anchors: [Frame::Cleanup, Shell::shield, Scope::shielded, cleanup_grace, CollectState::cancel_all]
 ---
 
 # A cleanup is shielded within its grace
@@ -34,7 +34,7 @@ whose precedence rule stands unchanged.
   `map` applying a function — reads the current scope and is masked with it,
   with no code of its own.
 - **What it masks.** The shielded node's fold admits from its ancestors only
-  `Aborted` and, once the mask has ended, everything. Its own flag is written
+  `Aborted` and, once the mask has ended, everything. It is minted as a `Scope` alone, so its own flag is written
   by nobody, so a descendant's own cause (a reader-gone stop of a stage inside
   the cleanup) is never masked. It acts on the chain, before the join, so a
   descendant's cause stays visible under a masked ancestor's stronger one.
@@ -107,7 +107,7 @@ whose precedence rule stands unchanged.
 ## Where
 
 `Frame::Guard` and `Frame::Cleanup` in `core/src/evaluator/machine.rs`;
-`Shell::shield` in `core/src/types/shell/mod.rs`; `CancelScope::shielded` and
+`Shell::shield` in `core/src/types/shell/mod.rs`; `Scope::shielded` and
 `resolve` in `core/src/process/cancel.rs`; `Mooring::cleanup_grace`;
 `Run::cleanup_grace` in `core/src/protocol.rs`; `CollectState::cancel_all` in
 `core/src/runtime/pipeline/collect.rs`. See

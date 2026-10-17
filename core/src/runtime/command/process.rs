@@ -25,7 +25,7 @@ pub(crate) fn build_launch(
     plan: &SpawnPlan,
     ownership: crate::sandbox::Ownership,
     shell: &Shell,
-    cancel: &crate::process::cancel::CancelScope,
+    cancel: &crate::process::cancel::Scope,
 ) -> Settled<crate::process::Launch> {
     // A guest jail is already the guest's sandbox: bwrap needs unprivileged
     // user namespaces and the guest boots with `user.max_user_namespaces = 0`.
@@ -271,7 +271,7 @@ mod judged_program {
     use super::build_launch;
     use crate::ir::CommandName;
     use crate::path::RealPath;
-    use crate::process::{CancelScope, PgidPolicy, StdioSpec};
+    use crate::process::{DurableRoot, PgidPolicy, StdioSpec};
     use crate::types::{Shell, Value};
     use std::io::Read;
     use std::os::unix::fs::{PermissionsExt, symlink};
@@ -313,7 +313,7 @@ mod judged_program {
             plan,
             crate::sandbox::Ownership::Kept,
             shell,
-            &CancelScope::root(),
+            &DurableRoot::default().worker(),
         )
         .expect("the launch builds");
         cmd.stdout(StdioSpec::piped());

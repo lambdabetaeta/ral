@@ -3,7 +3,7 @@
 //!
 //! Cancellation is the subsystem's common currency — a signal handler, a
 //! terminal interrupt, and an elapsed deadline all arrive as a [`CancelCause`]
-//! on a [`CancelScope`], observed at the evaluator's poll points via [`Shell::poll`](crate::types::Shell::poll).
+//! on a [`Scope`], observed at the evaluator's poll points via [`Shell::poll`](crate::types::Shell::poll).
 
 pub mod cancel;
 pub(crate) mod child;
@@ -32,8 +32,8 @@ pub(crate) use reaper::Watch;
 pub(crate) use tree::sample_descendants;
 
 pub use cancel::{
-    Ambient, AmbientForward, CancelCause, CancelScope, DurableRoot, ForegroundScope, ScopeId,
-    WorkerStop, forward_ambient, interrupt_epoch, request_interrupt, request_root_cancel,
+    Ambient, AmbientForward, CancelCause, DurableRoot, Scope, ScopeId, ScopeNode, WorkerStop,
+    forward_ambient, interrupt_epoch, request_interrupt, request_root_cancel,
 };
 pub(crate) use cancel::{POLL_SLICE, TEARDOWN_GRACE};
 

@@ -303,8 +303,7 @@ other external settlement joins its pumps a slice at a time and, on a cause in
 force, kills an owned group once, so a survivor holding the pipe cannot hold
 the run past the stop. A direct external has no node; the collector's own
 record of what it sent (`sent`) is its name, and a death by what was sent is
-consumed as a thread's is — `WaitOutcome::classify`'s `ReaderGone`
-forgiveness is this rule for a reader that left. The stage's own external child (if
+consumed as a thread's is, by the collector reading `sent`. The stage's own external child (if
 it has one) is torn down by pid inside that stage's own `RunningChild::wait`.
 A nested pipeline's stages are cancelled transitively the same way, each
 stage's own edge check or sentinel ending only that stage's own write. This

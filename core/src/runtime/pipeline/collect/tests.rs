@@ -1,8 +1,8 @@
 use super::super::group::PipelineGroup;
 use super::*;
-use crate::process::CancelScope;
 #[cfg(unix)]
 use crate::process::Membership;
+use crate::process::{DurableRoot, Scope};
 use crate::source::{FileId, Span};
 use crate::types::Escape;
 use std::time::Duration;
@@ -92,7 +92,7 @@ fn breaks_join_by_rank_earlier_stage_breaking_ties() {
         Some((interrupted, Some(1))),
         "equal stops keep the earlier"
     );
-    let root = CancelScope::root();
+    let root = DurableRoot::default().worker();
     assert!(is_error(&stronger(cut(&root.id()), error_break(7, "x")), 7));
     assert!(is_error(&stronger(error_break(7, "x"), cut(&root.id())), 7));
     assert!(matches!(
@@ -132,7 +132,7 @@ fn owning_pipeline(
         rx,
         group.group(),
         None,
-        shell.scope.as_scope().clone(),
+        shell.scope.clone(),
         mooring.cleanup_grace,
         Instant::now(),
     );
@@ -286,7 +286,8 @@ fn a_joining_collector_cancel_all_kills_its_externals_and_returns() {
     let owner =
         PipelineGroup::prepare(&shell, std::sync::mpsc::channel().0).expect("anchor spawns");
     let pgid = owner.leader_pgid();
-    let joining = PipelineGroup::joining(owner.membership(&crate::process::CancelScope::root()));
+    let joining =
+        PipelineGroup::joining(owner.membership(&crate::process::DurableRoot::default().worker()));
 
     let mut cmd = std::process::Command::new("/bin/sh");
     cmd.args(["-c", "sleep 30"]);
@@ -299,7 +300,7 @@ fn a_joining_collector_cancel_all_kills_its_externals_and_returns() {
         rx,
         joining.group(),
         None,
-        CancelScope::root(),
+        Scope::clone(&DurableRoot::default().worker()),
         Duration::ZERO,
         Instant::now(),
     );
@@ -353,7 +354,7 @@ fn state_with(n: usize) -> CollectState {
 }
 
 /// `n` fake thread stages, their scopes, and the sender their slots address.
-fn threads_with(n: usize) -> (CollectState, Vec<CancelScope>, Sender<Event>) {
+fn threads_with(n: usize) -> (CollectState, Vec<Scope>, Sender<Event>) {
     let (mut state, tx) = CollectState::for_step_test();
     let scopes = (0..n)
         .map(|ix| {
@@ -529,14 +530,13 @@ fn a_stage_dead_of_the_key_is_cancelled_only_if_it_was_pressed() {
     };
     let group = Group::Joins(Membership::new(
         Pgid::from_raw(1).expect("1 is positive"),
-        CancelScope::root(),
+        Scope::clone(&DurableRoot::default().worker()),
     ));
-    let settled =
-        |scope: &CancelScope| match end().settle(&shell, Instant::now(), scope, &group).end {
-            ThreadEnd::Settled(s) => s,
-            ThreadEnd::Panicked(t) => panic!("{t}"),
-        };
-    let pressed = CancelScope::root();
+    let settled = |scope: &Scope| match end().settle(&shell, Instant::now(), scope, &group).end {
+        ThreadEnd::Settled(s) => s,
+        ThreadEnd::Panicked(t) => panic!("{t}"),
+    };
+    let pressed = DurableRoot::default().worker();
     pressed.cancel(CancelCause::Interrupted);
     match settled(&pressed) {
         Err(Break::Escape(Escape::Stopped { cause, .. })) => {
@@ -544,7 +544,7 @@ fn a_stage_dead_of_the_key_is_cancelled_only_if_it_was_pressed() {
         }
         other => panic!("expected the key's stop, got {other:?}"),
     }
-    match settled(&CancelScope::root()) {
+    match settled(&DurableRoot::default().worker()) {
         Err(Break::Error(e)) => assert!(
             matches!(
                 e.status,
@@ -635,7 +635,9 @@ fn a_stage_kill_is_forgiven_by_sent_and_kept_without_it() {
 
     // An ancestor's reader-gone stop forgives nothing this collector did not send.
     let mut ancestors = state_with(1);
-    ancestors.scope.cancel(CancelCause::ReaderGone);
+    let above = DurableRoot::default().worker();
+    ancestors.scope = Scope::clone(&above);
+    above.cancel(CancelCause::ReaderGone);
     let _ = step(&mut ancestors, Event::Ended(0, kill));
     match ancestors.fold(&mooring, &mut shell) {
         Err(Break::Error(e)) => assert!(
@@ -707,7 +709,7 @@ fn a_foreign_reader_gone_is_forwarded() {
     let (mut state, _scopes, _tx) = threads_with(1);
     let _ = step(
         &mut state,
-        returned(0, halted(cut(&CancelScope::root().id()))),
+        returned(0, halted(cut(&DurableRoot::default().worker().id()))),
     );
     match fold_of(state) {
         Err(Break::Escape(Escape::Stopped { cause, .. })) => {
@@ -721,7 +723,7 @@ fn a_foreign_reader_gone_is_forwarded() {
 #[test]
 fn an_armed_stage_that_ends_interrupted_is_kept() {
     let (mut state, _scopes, _tx) = threads_with(1);
-    let root = CancelScope::root().id();
+    let root = DurableRoot::default().worker().id();
     let stop = Break::stopped(CancelCause::Interrupted, Some(root));
     let _ = step(&mut state, returned(0, halted(stop)));
     match fold_of(state) {
@@ -754,7 +756,7 @@ fn a_nested_reader_gone_stop_ranks_under_a_siblings_error() {
     );
     let _ = step(
         &mut state,
-        returned(1, halted(cut(&CancelScope::root().id()))),
+        returned(1, halted(cut(&DurableRoot::default().worker().id()))),
     );
     assert!(matches!(fold_of(state), Err(Break::Error(e)) if e.code() == 7));
 }
@@ -996,8 +998,8 @@ fn a_panic_mid_teardown_escalates_to_abort() {
 #[test]
 fn a_stronger_cause_mid_teardown_is_written_on_the_stages() {
     let (mut state, scopes, tx) = threads_with(2);
-    let held = CancelScope::root();
-    state.scope = held.clone();
+    let held = DurableRoot::default().worker();
+    state.scope = Scope::clone(&held);
     let helper = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(100));
         held.cancel(CancelCause::Cancelled);
@@ -1067,8 +1069,8 @@ fn a_dropped_collector_writes_terminated_on_its_stages() {
 #[test]
 fn a_cancelled_scope_is_read_between_slices() {
     let (mut state, _tx) = CollectState::for_step_test();
-    let held = CancelScope::root();
-    state.scope = held.clone();
+    let held = DurableRoot::default().worker();
+    state.scope = Scope::clone(&held);
     let striker = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(50));
         held.cancel(CancelCause::Interrupted);

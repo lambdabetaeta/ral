@@ -115,7 +115,7 @@ fn a_drive_root_is_not_the_universal_prefix() {
 #[allow(clippy::disallowed_methods, reason = "[test] junction fixture")]
 fn a_redirected_allowance_refuses_the_launch_before_the_memo_is_consulted() {
     use crate::process::Launch;
-    use crate::process::cancel::CancelScope;
+    use crate::process::cancel::DurableRoot;
     use crate::sandbox::{ExecProjection, FsProjection, SandboxProjection};
     let _env = crate::test_env::env_guard();
     let root = tempfile::tempdir().unwrap();
@@ -129,7 +129,12 @@ fn a_redirected_allowance_refuses_the_launch_before_the_memo_is_consulted() {
     };
     let confine = || {
         let mut launch = Launch::new(r"C:\Windows\System32\cmd.exe");
-        super::confine(&mut launch, &projection, None, &CancelScope::root())
+        super::confine(
+            &mut launch,
+            &projection,
+            None,
+            &DurableRoot::default().worker(),
+        )
     };
     confine().expect("a real directory is granted");
     std::fs::remove_dir(&granted).unwrap();
@@ -165,7 +170,7 @@ fn a_redirected_allowance_refuses_the_launch_before_the_memo_is_consulted() {
 )]
 fn confined_child_writes_inside_the_grant_and_not_outside() {
     let _env = crate::test_env::env_guard();
-    use crate::process::cancel::CancelScope;
+    use crate::process::cancel::DurableRoot;
     use crate::process::{Launch, PgidPolicy, StdioSpec, WaitOutcome};
     use crate::sandbox::{ExecProjection, FsProjection, SandboxProjection};
     use std::path::Path;
@@ -215,8 +220,13 @@ fn confined_child_writes_inside_the_grant_and_not_outside() {
         launch.stdin(StdioSpec::null());
         launch.stdout(StdioSpec::null());
         launch.stderr(StdioSpec::null());
-        super::confine(&mut launch, &projection, Some(cmd), &CancelScope::root())
-            .expect("confine under a derived capability SID");
+        super::confine(
+            &mut launch,
+            &projection,
+            Some(cmd),
+            &DurableRoot::default().worker(),
+        )
+        .expect("confine under a derived capability SID");
         let (mut child, _pgid, _) = launch
             .spawn(PgidPolicy::Inherit)
             .expect("CreateProcessW must accept the derived capability SIDs");
@@ -251,7 +261,7 @@ fn confined_child_writes_inside_the_grant_and_not_outside() {
 )]
 fn confined_child_denies_protected_and_explicit_descendants() {
     use super::super::dacl::deny_tests::{DenyTree, READABLE, with_state};
-    use crate::process::cancel::CancelScope;
+    use crate::process::cancel::DurableRoot;
     use crate::process::{Launch, PgidPolicy, StdioSpec};
     use crate::sandbox::{ExecProjection, FsProjection, SandboxProjection};
     use std::io::Read;
@@ -281,7 +291,7 @@ fn confined_child_denies_protected_and_explicit_descendants() {
                 &mut launch,
                 &projection(deny),
                 Some(cmd),
-                &CancelScope::root(),
+                &DurableRoot::default().worker(),
             )
             .unwrap();
             let (mut child, _pgid, _) = launch.spawn(PgidPolicy::Inherit).unwrap();

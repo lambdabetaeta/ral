@@ -13,7 +13,7 @@ use crate::guard::freeze::FreezeCtx;
 use crate::io::{self, Sink};
 use crate::ir::Redirects;
 use crate::ir::{Args, CaseArm, Comp, CompKind, GroupNode, Val, ValListElem};
-use crate::process::{CancelScope, ForegroundScope};
+use crate::process::Scope;
 use crate::runtime::command_call::{self, Resolution};
 use crate::runtime::pipeline;
 use crate::runtime::redirect::scope::{RedirectState, WriteFate};
@@ -87,7 +87,7 @@ enum Frame {
         outcome: Settled<Value>,
         /// The current scope before the cleanup's shield, restored on pop
         /// and on abandon.
-        prev: ForegroundScope,
+        prev: Scope,
     },
     Within(WithinUndo),
     /// Where its layer sits: a session frame pushed above survives the pop.
@@ -171,7 +171,7 @@ fn as_value(t: Terminal) -> Result<Value, Break> {
 /// replaced before the halt rather than dying in the abandoned buffer.
 fn abandon_capture(
     prev: &mut Sink,
-    scope: &CancelScope,
+    scope: &Scope,
     bytes: &[u8],
     error: Error,
     span: Option<Span>,
@@ -823,7 +823,7 @@ impl Machine {
                 let focus = if buf.overflowed() {
                     Err(abandon_capture(
                         &mut prev,
-                        shell.scope.as_scope(),
+                        &shell.scope,
                         &bytes,
                         capture_overflowed(),
                         span,
@@ -890,7 +890,7 @@ impl Machine {
             Frame::Capture { mut prev, buf, .. } => {
                 let flushed = Shell::write_sink(
                     &mut prev,
-                    shell.scope.as_scope(),
+                    &shell.scope,
                     &buf.take(),
                     "the surrounding stream",
                 );
@@ -1507,8 +1507,9 @@ mod tests {
     fn a_cancelled_tight_loop_returns() {
         let mut shell = new_shell();
         let mooring = Mooring::adrift();
-        shell
-            .scope
+        shell.scope = Scope::clone(&mooring.home);
+        mooring
+            .home
             .cancel(crate::process::cancel::CancelCause::Cancelled);
         let out = run_with("let f = { !$f }\n!$f", &mooring, &mut shell);
         assert!(
@@ -1525,8 +1526,9 @@ mod tests {
         for source in ["let f = { !$f }\n!$f", "if true { let x = 1; return $x }"] {
             let mut shell = new_shell();
             let mooring = Mooring::adrift();
-            shell
-                .scope
+            shell.scope = Scope::clone(&mooring.home);
+            mooring
+                .home
                 .cancel(crate::process::cancel::CancelCause::Cancelled);
             match run_with(source, &mooring, &mut shell) {
                 Err(Break::Escape(Escape::Stopped { at, .. })) => {

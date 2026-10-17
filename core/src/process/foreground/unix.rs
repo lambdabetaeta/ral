@@ -7,7 +7,7 @@ use rustix::process::Pid;
 use rustix::termios::{OptionalActions, Termios};
 
 use crate::process::Signal;
-use crate::process::cancel::{CancelCause, ForegroundScope};
+use crate::process::cancel::{CancelCause, ScopeNode};
 use crate::process::signal::gesture;
 
 /// Capture stdin's line-discipline state; `None` when stdin is not a tty.  The
@@ -40,7 +40,7 @@ pub struct TerminalLoan {
     saved_pgid: Pid,
     saved_termios: Option<Termios>,
     /// The run's node, struck with every key heard (never the current scope).
-    frame: ForegroundScope,
+    frame: ScopeNode,
     pressed: Option<CancelCause>,
 }
 
@@ -53,7 +53,7 @@ impl TerminalLoan {
     pub(crate) fn try_acquire(
         target: i32,
         _lease: &crate::process::TerminalLease,
-        frame: &ForegroundScope,
+        frame: &ScopeNode,
     ) -> Option<Self> {
         if target <= 0 {
             return None;
@@ -90,7 +90,7 @@ impl TerminalLoan {
     /// A loan with no handoff, so the strike can be tested alone: restoring
     /// the foreground as found is a no-op.
     #[cfg(test)]
-    pub(crate) fn for_test(frame: &ForegroundScope) -> Self {
+    pub(crate) fn for_test(frame: &ScopeNode) -> Self {
         Self {
             saved_pgid: rustix::termios::tcgetpgrp(rustix::stdio::stdin())
                 .unwrap_or_else(|_| rustix::process::getpgrp()),

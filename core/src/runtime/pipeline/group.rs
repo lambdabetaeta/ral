@@ -9,7 +9,7 @@
 
 use super::super::command;
 use super::collect::Event;
-use crate::process::{CancelScope, Group, Membership, Pgid, PgidPolicy, TerminalLoan};
+use crate::process::{Group, Membership, Pgid, PgidPolicy, Scope, TerminalLoan};
 use crate::types::{Error, Mooring, Settled, Shell, sig};
 use std::sync::mpsc::Sender;
 
@@ -44,7 +44,7 @@ impl PipelineGroup {
     /// What a stage running under `stage` joins: an owner's leader paired
     /// with that scope, or a joiner's own membership, so a nested stage
     /// answers to the outermost owner's stage scope.
-    pub(super) fn membership(&self, stage: &CancelScope) -> Membership {
+    pub(super) fn membership(&self, stage: &Scope) -> Membership {
         match &self.group {
             Group::Owns(leader) => Membership::new(*leader, stage.clone()),
             Group::Joins(membership) => membership.clone(),
@@ -215,7 +215,7 @@ fn read_anchor_reports(mut report: os_pipe::PipeReader, tx: &Sender<Event>) {
 mod tests {
     use super::*;
     #[cfg(unix)]
-    use crate::process::CancelCause;
+    use crate::process::{CancelCause, DurableRoot};
 
     /// An owning group whose channel nobody reads — enough for every test
     /// that only wants a real pgid.
@@ -235,12 +235,12 @@ mod tests {
     #[test]
     fn a_nested_stage_answers_to_the_outermost_owners_stage() {
         let owner = prepared(&crate::test_helper::core_shell());
-        let outer = CancelScope::root();
+        let outer = DurableRoot::default().worker();
         let membership = owner.membership(&outer);
         assert_eq!(membership.group(), owner.leader_pgid());
 
         let joiner = PipelineGroup::joining(membership);
-        let inner = CancelScope::root();
+        let inner = DurableRoot::default().worker();
         let nested = joiner.membership(&inner);
         assert_eq!(nested.group(), owner.leader_pgid());
         #[cfg(unix)]

@@ -21,7 +21,7 @@ use strum::{IntoStaticStr, VariantArray};
 use crate::sync::LockExt as _;
 use crate::types::{Break, Settled};
 
-/// Why a [`CancelScope`] was cancelled.
+/// Why a [`Scope`] was cancelled.
 ///
 /// The causes escalate `ReaderGone < Interrupted < Cancelled < TimedOut <
 /// Terminated < Aborted`; a scope records the highest ever applied to it and
@@ -47,7 +47,7 @@ use crate::types::{Break, Settled};
 #[repr(u8)]
 pub enum CancelCause {
     /// A pipeline stage's reader stage has already been observed; the
-    /// mildest cause, and the one ending `WaitOutcome::classify` forgives.
+    /// mildest cause; its owner, the collector, forgives it.
     ReaderGone = 1,
     /// Ctrl-C / Esc.
     Interrupted = 2,
@@ -260,7 +260,7 @@ impl WorkerStop {
 
 /// A scope node's identity: the name a stop carries for its owner.
 #[derive(Clone)]
-pub struct ScopeId(Arc<ScopeNode>);
+pub struct ScopeId(Arc<Vertex>);
 
 impl PartialEq for ScopeId {
     fn eq(&self, other: &Self) -> bool {
@@ -280,7 +280,7 @@ impl std::fmt::Debug for ScopeId {
 pub(crate) const POLL_SLICE: Duration = Duration::from_millis(10);
 
 #[derive(Debug)]
-struct ScopeNode {
+struct Vertex {
     flag: AtomicU8,
     /// The instant the flag first rose, set in the act that raised it: a
     /// shield's budget runs from the earliest of these on its chain.
@@ -294,7 +294,7 @@ struct ScopeNode {
 /// earliest strike on the chain.
 struct InForce<'a> {
     cause: u8,
-    node: &'a Arc<ScopeNode>,
+    node: &'a Arc<Vertex>,
     since: Instant,
 }
 
@@ -303,8 +303,8 @@ struct InForce<'a> {
 /// node with something above it.  Root-first over the chain, iteratively:
 /// the chain is as deep as the nested cleanups, which only the recursion
 /// limit bounds.
-fn resolve(scope: &Arc<ScopeNode>) -> Option<InForce<'_>> {
-    let chain: Vec<&Arc<ScopeNode>> =
+fn resolve(scope: &Arc<Vertex>) -> Option<InForce<'_>> {
+    let chain: Vec<&Arc<Vertex>> =
         std::iter::successors(Some(scope), |n| n.parent.as_ref()).collect();
     chain.iter().rev().fold(None, |above, &node| {
         let above = above.filter(|j: &InForce<'_>| {
@@ -342,53 +342,39 @@ fn resolve(scope: &Arc<ScopeNode>) -> Option<InForce<'_>> {
     })
 }
 
-/// A handle into the cancel-scope tree.
+fn mint(parent: Option<&Arc<Vertex>>, shield: Option<Duration>) -> Arc<Vertex> {
+    Arc::new(Vertex {
+        flag: AtomicU8::new(0),
+        cancelled_at: OnceLock::new(),
+        parent: parent.cloned(),
+        shield,
+    })
+}
+
+/// A view of a scope node: its chain's join, and nothing to write it with.
 ///
 /// Cheap to clone (one `Arc` bump), cheap to check (a chain of atomic loads).
 /// Cancellation is one-way and monotone in the [`CancelCause`] order: a
 /// cancelled scope stays cancelled and its recorded cause only rises.
 #[derive(Debug, Clone)]
-pub struct CancelScope(Arc<ScopeNode>);
+pub struct Scope(Arc<Vertex>);
 
-impl CancelScope {
-    /// The one constructor every scope in the tree goes through.
-    fn mint(parent: Option<Arc<ScopeNode>>, shield: Option<Duration>) -> Self {
-        Self(Arc::new(ScopeNode {
-            flag: AtomicU8::new(0),
-            cancelled_at: OnceLock::new(),
-            parent,
-            shield,
-        }))
-    }
-
-    /// A fresh top-level scope.  Spawned workers take a
-    /// [`child`](Self::child) instead, so cancellation reaches them.
-    pub(crate) fn root() -> Self {
-        Self::mint(None, None)
-    }
-
-    /// A scope nested under `self`, cancelled by `self` or any ancestor.
-    pub fn child(&self) -> Self {
-        Self::mint(Some(Arc::clone(&self.0)), None)
+impl Scope {
+    /// A node nested under this scope; writing it touches only itself.
+    pub fn child(&self) -> ScopeNode {
+        ScopeNode(Self(mint(Some(&self.0), None)))
     }
 
     /// A cleanup's scope: masked against every ancestor cause below `Aborted`
     /// for `grace` from the chain's strike, or for the nearest enclosing
-    /// shield's grace if that is shorter.  Nothing writes its own flag.
+    /// shield's grace if that is shorter.  A view only, so nothing writes it.
     pub(crate) fn shielded(&self, grace: Duration) -> Self {
         let enclosing =
             std::iter::successors(Some(&self.0), |n| n.parent.as_ref()).find_map(|n| n.shield);
-        Self::mint(
-            Some(Arc::clone(&self.0)),
+        Self(mint(
+            Some(&self.0),
             Some(enclosing.map_or(grace, |e| e.min(grace))),
-        )
-    }
-
-    /// The one write: the instant first, then the flag, so a reader that
-    /// sees the flag sees the instant.
-    pub fn cancel(&self, cause: CancelCause) {
-        self.0.cancelled_at.get_or_init(Instant::now);
-        self.0.flag.fetch_max(cause as u8, Ordering::Release);
+        ))
     }
 
     /// True if anything in this scope's join is in force.
@@ -428,33 +414,47 @@ impl CancelScope {
     }
 }
 
-// ── Typed root / foreground relation ───────────────────────────────────────
-//
-// The newtypes name one structural invariant: a `ForegroundScope` can only be
-// minted from a `DurableRoot` or by nesting another, so a run's foreground is
-// always a descendant of the session's durable root and no unrelated root can
-// be installed as one by accident.
-
-/// The session's durable cancel root.
-///
-/// workers (`spawn`, `watch`, `par`) parent under it, so a foreground
-/// cancel never reaches one: only a cancel on the root itself, or on the
-/// worker's own scope, stops it.
+/// A scope node with its write: what its one writer holds.
 #[derive(Debug, Clone)]
-pub struct DurableRoot(CancelScope);
+pub struct ScopeNode(Scope);
+
+impl std::ops::Deref for ScopeNode {
+    type Target = Scope;
+    fn deref(&self) -> &Scope {
+        &self.0
+    }
+}
+
+impl ScopeNode {
+    /// The one write: the instant first, then the flag, so a reader that
+    /// sees the flag sees the instant.
+    pub fn cancel(&self, cause: CancelCause) {
+        let v = &self.0.0;
+        v.cancelled_at.get_or_init(Instant::now);
+        v.flag.fetch_max(cause as u8, Ordering::Release);
+    }
+}
+
+/// The session's durable cancel root, and the only free root, so every node
+/// descends from one.  Its own node is never handed out, so it is never a
+/// run's home.
+///
+/// Workers (`spawn`, `watch`, `par`) hang under it beside the anchor a run's
+/// frame nests under: a foreground cancel never reaches one; a cancel on the
+/// root, or on the worker's own node, does.
+#[derive(Debug, Clone)]
+pub struct DurableRoot(ScopeNode);
 
 impl DurableRoot {
     /// Mint a fresh session root.  One per [`Shell`](crate::types::Shell).
     pub(crate) fn new() -> Self {
-        Self(CancelScope::root())
+        Self(ScopeNode(Scope(mint(None, None))))
     }
 
-    /// Mint a scope under this root that is *not* a run's foreground — a
-    /// worker's, and the anchor a session boots with.  A run's frame
-    /// nests under the anchor, so by that shape cancelling it never reaches a
-    /// worker, while cancelling the root reaches both.
-    pub fn worker(&self) -> ForegroundScope {
-        ForegroundScope(self.0.child())
+    /// A node under this root that is *not* a run's frame: a worker's, and
+    /// the anchor a session boots with.
+    pub fn worker(&self) -> ScopeNode {
+        self.child()
     }
 
     /// Record `cause` on the root, reaching the foreground run and every
@@ -462,10 +462,11 @@ impl DurableRoot {
     pub fn cancel(&self, cause: CancelCause) {
         self.0.cancel(cause);
     }
+}
 
-    /// Borrow the underlying scope for a host polling the session without a run
-    /// in hand.
-    pub fn as_scope(&self) -> &CancelScope {
+impl std::ops::Deref for DurableRoot {
+    type Target = Scope;
+    fn deref(&self) -> &Scope {
         &self.0
     }
 }
@@ -473,64 +474,6 @@ impl DurableRoot {
 impl Default for DurableRoot {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-/// A cancel scope installed as a run's foreground work scope.
-///
-/// Minted only from a [`DurableRoot`] or by nesting another, so it always
-/// descends from the session root.
-#[derive(Debug, Clone)]
-pub struct ForegroundScope(CancelScope);
-
-impl ForegroundScope {
-    /// Nest a child foreground scope: a deadline window over a run, or the
-    /// shared scope a same-thread body inherits.
-    pub fn child(&self) -> Self {
-        Self(self.0.child())
-    }
-
-    /// Record `cause` on this scope.
-    pub fn cancel(&self, cause: CancelCause) {
-        self.0.cancel(cause);
-    }
-
-    /// A cleanup's scope under this one; see [`CancelScope::shielded`].
-    pub(crate) fn shielded(&self, grace: Duration) -> Self {
-        Self(self.0.shielded(grace))
-    }
-
-    /// True if this scope or any ancestor is cancelled.
-    pub fn is_cancelled(&self) -> bool {
-        self.0.is_cancelled()
-    }
-
-    /// The strongest [`CancelCause`] in force along this scope's chain, or
-    /// `None`.
-    pub fn cause(&self) -> Option<CancelCause> {
-        self.0.cause()
-    }
-
-    /// See [`CancelScope::poll`].
-    ///
-    /// # Errors
-    /// The stop in force, as the escape it is.
-    pub fn poll(&self) -> Settled<()> {
-        self.0.poll()
-    }
-
-    pub(crate) fn in_force(&self) -> Option<(CancelCause, ScopeId)> {
-        self.0.in_force()
-    }
-
-    pub(crate) fn id(&self) -> ScopeId {
-        self.0.id()
-    }
-
-    /// Borrow the underlying [`CancelScope`] for a worker handle, a running
-    /// pipeline, or a host parked outside the evaluator's poll points.
-    pub fn as_scope(&self) -> &CancelScope {
-        &self.0
     }
 }
 
@@ -596,7 +539,7 @@ mod tests {
 
     #[test]
     fn parent_cancel_reaches_child() {
-        let parent = CancelScope::root();
+        let parent = DurableRoot::default();
         let child = parent.child();
         assert!(!child.is_cancelled(), "a fresh child starts uncancelled");
         parent.cancel(CancelCause::Interrupted);
@@ -608,7 +551,7 @@ mod tests {
 
     #[test]
     fn child_cancel_isolates_from_parent_and_siblings() {
-        let parent = CancelScope::root();
+        let parent = DurableRoot::default();
         let one = parent.child();
         let two = parent.child();
         one.cancel(CancelCause::Interrupted);
@@ -678,8 +621,8 @@ mod tests {
         );
     }
 
-    fn pair() -> (CancelScope, CancelScope) {
-        let parent = CancelScope::root();
+    fn pair() -> (DurableRoot, ScopeNode) {
+        let parent = DurableRoot::default();
         let node = parent.child();
         (parent, node)
     }

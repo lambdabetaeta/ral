@@ -4,7 +4,7 @@
 //! by a single lazily started daemon, so a session holding thousands of
 //! in-flight ceilings costs one thread rather than one watchdog apiece.
 //!
-//! An entry either cancels a [`CancelScope`] with [`CancelCause::TimedOut`] or
+//! An entry either cancels a [`ScopeNode`] with [`CancelCause::TimedOut`] or
 //! runs an opaque host closure — opaque so that no host notion of prompts,
 //! cron, or sessions leaks into core.  Entries are one-shot; recurrence is a
 //! producer re-arming the next occurrence from inside its own closure.
@@ -13,32 +13,32 @@
 //! before its ceiling is never fired by a late pop.  [`Deadline::keep`] leaves
 //! it armed for good, at the price of retaining whatever it captured until the
 //! ceiling elapses; a late cancel of a settled scope is harmless, since
-//! [`CancelScope::cancel`] is a monotone `fetch_max` nobody is left to observe.
+//! [`ScopeNode::cancel`] is a monotone `fetch_max` nobody is left to observe.
 
 use std::collections::BinaryHeap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
-use super::{CancelCause, CancelScope};
+use super::{CancelCause, ScopeNode};
 use crate::sync::{CondvarExt as _, LockExt as _};
 
 enum Action {
-    Cancel(CancelScope),
+    Cancel(ScopeNode),
     Run(Box<dyn FnOnce() + Send>),
 }
 
 impl Action {
     fn fire(self) {
         match self {
-            Self::Cancel(scope) => scope.cancel(CancelCause::TimedOut),
+            Self::Cancel(node) => node.cancel(CancelCause::TimedOut),
             Self::Run(run) => run(),
         }
     }
 }
 
 /// A scheduled action, skipped when it comes due if a disarmed [`Deadline`]
-/// has cleared `armed`; `fired` rises once a claimed action has landed.
+/// has cleared `armed`; `fired` is signalled once a claimed action has landed.
 ///
 /// [`BinaryHeap`] is a max-heap, so the ordering below is inverted: the
 /// earliest `when` compares greatest and sits at the root.  Entries sharing an
@@ -47,8 +47,11 @@ struct Scheduled {
     when: Instant,
     action: Action,
     armed: Arc<AtomicBool>,
-    fired: Arc<AtomicBool>,
+    fired: Landed,
 }
+
+/// Set and notified by the daemon once a claimed action has run.
+type Landed = Arc<(Mutex<bool>, Condvar)>;
 
 impl PartialEq for Scheduled {
     fn eq(&self, other: &Self) -> bool {
@@ -82,10 +85,10 @@ struct Daemon {
 /// `Arc` clone, so it never reads back through this still-unfilled slot.
 static DAEMON: LazyLock<Arc<Daemon>> = LazyLock::new(start_daemon);
 
-/// Cancel `scope` with [`CancelCause::TimedOut`] once `after` has elapsed from
+/// Cancel `node` with [`CancelCause::TimedOut`] once `after` has elapsed from
 /// now.  A run's wall clock arms one of these over its foreground scope.
-pub fn arm_lifetime(scope: CancelScope, after: Duration) -> Deadline {
-    arm(Action::Cancel(scope), after)
+pub fn arm_lifetime(node: ScopeNode, after: Duration) -> Deadline {
+    arm(Action::Cancel(node), after)
 }
 
 /// Invoke `run` once `after` has elapsed from now.
@@ -103,7 +106,7 @@ fn arm(action: Action, after: Duration) -> Deadline {
     let daemon = &*DAEMON;
     let when = Instant::now() + after;
     let armed = Arc::new(AtomicBool::new(true));
-    let fired = Arc::new(AtomicBool::new(false));
+    let fired = Landed::default();
     daemon.heap.lock_ignore_poison().push(Scheduled {
         when,
         action,
@@ -127,7 +130,7 @@ fn arm(action: Action, after: Duration) -> Deadline {
 #[must_use]
 pub struct Deadline {
     armed: Arc<AtomicBool>,
-    fired: Arc<AtomicBool>,
+    fired: Landed,
     keep: bool,
 }
 
@@ -138,23 +141,30 @@ impl Deadline {
         self.keep = true;
     }
 
-    /// Call once: `true` if this call disarmed the entry, so it never fires;
-    /// `false` if the daemon claimed it first, its action landing momentarily
-    /// (wait on `fired`).
-    pub fn disarm(&self) -> bool {
-        self.armed.swap(false, Ordering::AcqRel)
+    /// `None` if this call disarmed the entry, so it never fires; `Some` if
+    /// the daemon claimed it first, its action landing momentarily.
+    pub fn disarm(self) -> Option<Claimed> {
+        let disarmed = self.armed.swap(false, Ordering::AcqRel);
+        (!disarmed).then(|| Claimed(self.fired.clone()))
     }
+}
 
-    /// Whether a claimed firing's action has landed.
-    pub fn fired(&self) -> bool {
-        self.fired.load(Ordering::Acquire)
+/// A firing the daemon claimed before it could be disarmed.
+pub struct Claimed(Landed);
+
+impl Claimed {
+    /// Block until the claimed action has landed; never call it from a
+    /// deadline action, which the daemon thread itself runs.
+    pub fn wait(self) {
+        let (landed, cv) = &*self.0;
+        drop(cv.wait_while_ignore_poison(landed.lock_ignore_poison(), |done| !*done));
     }
 }
 
 impl Drop for Deadline {
     fn drop(&mut self) {
         if !self.keep {
-            self.disarm();
+            self.armed.store(false, Ordering::Release);
         }
     }
 }
@@ -193,7 +203,9 @@ fn daemon_loop(daemon: &Daemon) {
                     drop(heap);
                     if due.armed.swap(false, Ordering::AcqRel) {
                         due.action.fire();
-                        due.fired.store(true, Ordering::Release);
+                        let (landed, cv) = &*due.fired;
+                        *landed.lock_ignore_poison() = true;
+                        cv.notify_all();
                     }
                     heap = daemon.heap.lock_ignore_poison();
                 } else {
@@ -209,10 +221,11 @@ fn daemon_loop(daemon: &Daemon) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::process::DurableRoot;
 
     #[test]
     fn arm_does_not_fire_before_the_ceiling() {
-        let scope = CancelScope::root();
+        let scope = DurableRoot::default().worker();
         let _d = arm_lifetime(scope.clone(), Duration::from_hours(1));
         std::thread::sleep(Duration::from_millis(50));
         assert!(
@@ -224,8 +237,8 @@ mod tests {
     /// Exercises the daemon's pop-and-re-peek, not just its first entry.
     #[test]
     fn multiple_armed_scopes_each_fire() {
-        let one = CancelScope::root();
-        let two = CancelScope::root();
+        let one = DurableRoot::default().worker();
+        let two = DurableRoot::default().worker();
         let _d1 = arm_lifetime(one.clone(), Duration::from_millis(20));
         let _d2 = arm_lifetime(two.clone(), Duration::from_millis(20));
 
@@ -242,25 +255,22 @@ mod tests {
 
     #[test]
     fn a_claimed_deadline_is_reported() {
-        let scope = CancelScope::root();
+        let scope = DurableRoot::default().worker();
         let claimed = arm_lifetime(scope.clone(), Duration::from_millis(1));
         std::thread::sleep(Duration::from_millis(20));
-        assert!(!claimed.disarm(), "the daemon has claimed it");
-        while !claimed.fired() {
-            std::thread::yield_now();
-        }
+        claimed.disarm().expect("the daemon has claimed it").wait();
         assert!(scope.is_cancelled());
 
-        let scope = CancelScope::root();
+        let scope = DurableRoot::default().worker();
         let distant = arm_lifetime(scope.clone(), Duration::from_hours(1));
-        assert!(distant.disarm());
+        assert!(distant.disarm().is_none());
         std::thread::sleep(Duration::from_millis(20));
-        assert!(!scope.is_cancelled() && !distant.fired());
+        assert!(!scope.is_cancelled());
     }
 
     #[test]
     fn disarmed_deadline_does_not_fire() {
-        let scope = CancelScope::root();
+        let scope = DurableRoot::default().worker();
         drop(arm_lifetime(scope.clone(), Duration::from_millis(20)));
         std::thread::sleep(Duration::from_millis(80));
         assert!(
@@ -271,7 +281,7 @@ mod tests {
 
     #[test]
     fn kept_deadline_fires_after_handle_dropped() {
-        let scope = CancelScope::root();
+        let scope = DurableRoot::default().worker();
         arm_lifetime(scope.clone(), Duration::from_millis(20)).keep();
 
         let mut fired = false;

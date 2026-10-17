@@ -1,5 +1,5 @@
 ---
-generated_at_commit: dad6a1b3
+generated_at_commit: e4025de9
 generated_at_date: 2026-10-17
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs]
 ---
@@ -144,7 +144,7 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   fire-and-forget mode a worker's lease needs, since the worker
   outlives the `spawn` that armed it).
   The fired action is `Cancel(scope) | Run(closure)`: `Cancel` cancels a
-  `CancelScope` with `CancelCause::Deadline` (the foreground wall); `Run`
+  `ScopeNode` with `CancelCause::TimedOut` (the foreground wall); `Run`
   invokes an opaque host closure once, the shape a scheduled
   wakeup rides — exarch arms a `Run` that posts a prompt and wakes its idle
   loop, a agent worker arms a `Run` that cancels its own token at
@@ -174,8 +174,8 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   names its own event type — the pipeline collector's `Event::Ended`, the
   standalone command's bare `WaitOutcome` channel, `spawn_detached`'s own —
   over `WaitOutcome`, the reaper's one wire type.
-- `cancel.rs` — the cause-bearing `CancelScope` tree (`DurableRoot` /
-  `ForegroundScope`, `CancelCause`) for structured-concurrency cancellation,
+- `cancel.rs` — the cause-bearing scope tree (`Scope` read, `ScopeNode` written,
+  `DurableRoot`, `CancelCause`) for structured-concurrency cancellation,
   polled cooperatively in hot loops
   ([[decisions/260504_hot-path-cancellation|hot-path-cancellation]]). A scope's
   cancellation is a *join*: one private `resolve` over its chain's flags,
@@ -231,7 +231,7 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   `Address::signal` for a group — before escalating to `kill_pipeline_group`;
   a pid gets the kill alone.
 - `foreground.rs` — unix `TerminalLoan` takes the `&TerminalLease` and the
-  run's `ForegroundScope`, performs the `tcsetpgrp` handoff, snapshots and
+  run's node (`ScopeNode`), performs the `tcsetpgrp` handoff, snapshots and
   restores tty foreground / termios, blocks SIGTTOU for the parent-only
   restore window, hears the tenant's key back (`hear`, `reclaim`; `gesture`
   reads `GESTURES`) and strikes it on the frame on drop — uninhabited on

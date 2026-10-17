@@ -2,7 +2,7 @@
 
 use std::io::{self, Read};
 
-use crate::process::CancelScope;
+use crate::process::Scope;
 
 /// Where a stage's byte input comes from.
 ///
@@ -21,7 +21,7 @@ pub enum Source {
 /// a blocked read as EOF.  The scope is never handed to a child.
 pub struct SourceReader {
     fd: Fd,
-    scope: Option<CancelScope>,
+    scope: Option<Scope>,
 }
 
 enum Fd {
@@ -62,7 +62,7 @@ impl SourceReader {
     /// This reader as one that ends as EOF once `scope` carries a cause; a
     /// scope it already carried belonged to an enclosing computation and is
     /// replaced.
-    pub(crate) fn interruptible(self, scope: CancelScope) -> Self {
+    pub(crate) fn interruptible(self, scope: Scope) -> Self {
         Self {
             fd: self.fd,
             scope: Some(scope),
@@ -111,7 +111,7 @@ impl Read for Fd {
 /// The fd read under its scope.
 struct Scoped<'a> {
     fd: &'a mut Fd,
-    scope: &'a CancelScope,
+    scope: &'a Scope,
 }
 
 impl Read for Scoped<'_> {
@@ -149,7 +149,7 @@ impl Read for SourceReader {
 /// A scope carrying a cause reads as EOF, never as data.  The scope is read
 /// first, so a stream that is always ready still polls once per read.
 #[cfg(unix)]
-fn read_interruptible(fd: &mut Fd, scope: &CancelScope, buf: &mut [u8]) -> io::Result<usize> {
+fn read_interruptible(fd: &mut Fd, scope: &Scope, buf: &mut [u8]) -> io::Result<usize> {
     use super::poll_slice;
     use rustix::event::PollFlags;
     loop {
@@ -163,7 +163,7 @@ fn read_interruptible(fd: &mut Fd, scope: &CancelScope, buf: &mut [u8]) -> io::R
 }
 
 #[cfg(windows)]
-fn read_interruptible(fd: &mut Fd, scope: &CancelScope, buf: &mut [u8]) -> io::Result<usize> {
+fn read_interruptible(fd: &mut Fd, scope: &Scope, buf: &mut [u8]) -> io::Result<usize> {
     loop {
         if scope.is_cancelled() {
             return Ok(0);
@@ -214,9 +214,9 @@ mod tests {
     use super::*;
     use std::time::{Duration, Instant};
 
-    use crate::process::CancelCause;
+    use crate::process::{CancelCause, DurableRoot, ScopeNode};
 
-    fn cancel_after(scope: &CancelScope, ms: u64) -> std::thread::JoinHandle<()> {
+    fn cancel_after(scope: &ScopeNode, ms: u64) -> std::thread::JoinHandle<()> {
         let scope = scope.clone();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(ms));
@@ -227,8 +227,8 @@ mod tests {
     #[test]
     fn a_blocked_read_returns_eof_within_a_slice_of_the_cause() {
         let (r, _w) = crate::process::cloexec_pipe().expect("data pipe");
-        let scope = CancelScope::root();
-        let mut reader = SourceReader::pipe(r).interruptible(scope.clone());
+        let scope = DurableRoot::default().worker();
+        let mut reader = SourceReader::pipe(r).interruptible(Scope::clone(&scope));
         let canceller = cancel_after(&scope, 20);
 
         let start = Instant::now();
@@ -242,8 +242,8 @@ mod tests {
     #[test]
     fn data_written_before_the_cause_is_still_delivered() {
         let (r, mut w) = crate::process::cloexec_pipe().expect("data pipe");
-        let scope = CancelScope::root();
-        let mut reader = SourceReader::pipe(r).interruptible(scope.clone());
+        let scope = DurableRoot::default().worker();
+        let mut reader = SourceReader::pipe(r).interruptible(Scope::clone(&scope));
 
         use std::io::Write;
         w.write_all(b"hi").expect("write");
@@ -266,8 +266,8 @@ mod tests {
     fn a_ready_read_under_a_cause_is_eof() {
         use std::io::Write;
         let (r, mut w) = crate::process::cloexec_pipe().expect("data pipe");
-        let scope = CancelScope::root();
-        let mut reader = SourceReader::pipe(r).interruptible(scope.clone());
+        let scope = DurableRoot::default().worker();
+        let mut reader = SourceReader::pipe(r).interruptible(Scope::clone(&scope));
         w.write_all(b"pending").expect("write");
         scope.cancel(CancelCause::Interrupted);
         assert_eq!(reader.read(&mut [0u8; 8]).expect("read"), 0);

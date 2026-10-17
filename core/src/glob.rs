@@ -4,7 +4,7 @@
 //! A wildcard never matches a name beginning with `.`; only a literal
 //! component names a dotfile.
 
-use crate::process::CancelScope;
+use crate::process::Scope;
 use crate::types::{Settled, sig};
 use globset::{GlobBuilder, GlobMatcher};
 use ignore::WalkBuilder;
@@ -49,7 +49,7 @@ impl Glob {
         clippy::disallowed_methods,
         reason = "[silent:glob-walk] `glob`'s directory walk: a listing predicate, not turn-time model data I/O; the caller judges each hit against the live grant, and the walk polls the cancel check per entry. Also stats an unfollowable entry to tell a dangling link from a vanished one."
     )]
-    pub(crate) fn walk(self, scope: CancelScope) -> impl Iterator<Item = Settled<PathBuf>> {
+    pub(crate) fn walk(self, scope: Scope) -> impl Iterator<Item = Settled<PathBuf>> {
         /// What a walk error leaves of its entry: a link the walker could not
         /// follow (dangling, or back to an ancestor) is still an entry; a
         /// vanished one is not.

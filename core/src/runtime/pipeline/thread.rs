@@ -8,7 +8,9 @@ use super::resolve::StageSpec;
 use super::route::{ByteIn, ByteOut};
 use crate::io::{Io, Sink};
 use crate::ir::Comp;
-use crate::process::{CancelCause, CancelScope, POLL_SLICE, ScopeId};
+use crate::process::{CancelCause, POLL_SLICE, ScopeId, ScopeNode};
+#[cfg(test)]
+use crate::process::{DurableRoot, Scope};
 use crate::source::Span;
 use crate::types::{Break, Error, Mooring, Settled, ThreadEnd};
 use std::sync::Arc;
@@ -16,7 +18,7 @@ use std::sync::Arc;
 /// The parent's handle onto a running stage thread.
 pub(super) struct ThreadStage {
     join: Option<std::thread::JoinHandle<()>>,
-    cancel: CancelScope,
+    cancel: ScopeNode,
 }
 
 impl ThreadStage {
@@ -56,14 +58,15 @@ impl ThreadStage {
     /// A `ThreadStage` around no real thread, for `collect.rs`'s own
     /// transition-table tests, and the scope it was built over.
     #[cfg(test)]
-    pub(super) fn fake() -> (Self, CancelScope) {
-        let cancel = CancelScope::root();
+    pub(super) fn fake() -> (Self, Scope) {
+        let node = DurableRoot::default().worker();
+        let view = Scope::clone(&node);
         (
             Self {
                 join: None,
-                cancel: cancel.clone(),
+                cancel: node,
             },
-            cancel,
+            view,
         )
     }
 }
@@ -105,7 +108,7 @@ pub(super) fn launch_thread_stage(
     slot: Slot,
 ) -> Settled<ThreadStage> {
     let node = cx.shell.scope.child();
-    let stdin = super::launch::stage_stdin(stdin, cx.shell, node.as_scope())?;
+    let stdin = super::launch::stage_stdin(stdin, cx.shell, &node)?;
     let mooring = Mooring::for_stage_thread(cx.mooring, node.clone());
 
     let stdout = match stdout {
@@ -123,7 +126,7 @@ pub(super) fn launch_thread_stage(
         stderr: cx.shell.io.stderr.clone(),
         interactive: cx.shell.io.interactive,
         terminal: cx.shell.io.terminal,
-        stage: Some(cx.group.membership(node.as_scope())),
+        stage: Some(cx.group.membership(&node)),
     };
 
     let policy = cx.shell.local.audit.active_policy();
@@ -153,7 +156,7 @@ pub(super) fn launch_thread_stage(
 
     Ok(ThreadStage {
         join: Some(join),
-        cancel: node.as_scope().clone(),
+        cancel: node,
     })
 }
 

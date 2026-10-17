@@ -133,12 +133,10 @@ impl WaitOutcome {
 
     /// The end this outcome amounts to, or `None` for success, given the
     /// strongest `cause` in force when the child ended.  A death by one of
-    /// that cause's signals is the cause's — forgiven outright for
-    /// `ReaderGone`, the collector reclaiming a producer nobody read from —
-    /// and anything else stays as the OS reported it: no death mints a cause.
+    /// that cause's signals is the cause's, and anything else stays as the OS
+    /// reported it: no death mints a cause.
     pub(crate) fn classify(self, cause: Option<CancelCause>) -> Option<ChildEnd> {
         match cause.filter(|&cause| self.is_death_by(cause)) {
-            Some(CancelCause::ReaderGone) => None,
             Some(cause) => Some(ChildEnd::Cancelled(cause)),
             None => match self {
                 Self::Exited(0) | Self::NativeCode(0) | Self::Enveloped(0) => None,
@@ -245,12 +243,6 @@ mod tests {
     use super::*;
     use strum::VariantArray as _;
 
-    /// What `sent` makes of a death it caused: its own cancellation, or, for
-    /// `ReaderGone`, the collector's forgiven kill.
-    fn attributed(cause: CancelCause) -> Option<ChildEnd> {
-        (cause != CancelCause::ReaderGone).then_some(ChildEnd::Cancelled(cause))
-    }
-
     #[cfg(unix)]
     fn signaled(n: i32) -> WaitOutcome {
         WaitOutcome::Signaled(Signal::new(n))
@@ -337,12 +329,12 @@ mod tests {
             for n in expected {
                 assert_eq!(
                     signaled(n).classify(Some(cause)),
-                    attributed(cause),
+                    Some(ChildEnd::Cancelled(cause)),
                     "{cause:?}, signal {n}"
                 );
                 assert_eq!(
                     WaitOutcome::Enveloped(128 + n).classify(Some(cause)),
-                    attributed(cause),
+                    Some(ChildEnd::Cancelled(cause)),
                     "{cause:?}, enveloped exit {}",
                     128 + n
                 );
@@ -490,7 +482,7 @@ mod tests {
         for &cause in CancelCause::VARIANTS {
             assert_eq!(
                 WaitOutcome::Exited(KILL_EXIT_CODE).classify(Some(cause)),
-                attributed(cause),
+                Some(ChildEnd::Cancelled(cause)),
                 "{cause:?}"
             );
         }
@@ -509,7 +501,7 @@ mod tests {
         let ctrl_c = WaitOutcome::Exited(STATUS_CONTROL_C_EXIT);
         assert_eq!(
             ctrl_c.classify(Some(CancelCause::Interrupted)),
-            attributed(CancelCause::Interrupted)
+            Some(ChildEnd::Cancelled(CancelCause::Interrupted))
         );
         assert_eq!(
             ctrl_c.classify(None),
@@ -542,7 +534,7 @@ mod tests {
         ] {
             assert_eq!(
                 ctrl_break.classify(Some(cause)),
-                attributed(cause),
+                Some(ChildEnd::Cancelled(cause)),
                 "{cause:?}"
             );
         }

@@ -35,7 +35,7 @@ use windows_sys::Win32::System::SystemServices::SE_GROUP_ENABLED;
 use crate::capability::FsScope;
 use crate::path::{FrozenPath, RealPath};
 use crate::process::Launch;
-use crate::process::cancel::CancelScope;
+use crate::process::cancel::Scope;
 use crate::sandbox::Refusal;
 use crate::sandbox::{FsRules, SandboxProjection};
 use crate::sync::LockExt as _;
@@ -206,7 +206,7 @@ pub(crate) fn confine(
     launch: &mut Launch,
     projection: &SandboxProjection,
     program_image: Option<&Path>,
-    cancel: &CancelScope,
+    cancel: &Scope,
 ) -> Result<(), Refusal> {
     // Traced in three parts, because each is a different kind of cost and only
     // the middle one is per-path kernel work: minting the profile, the
@@ -378,7 +378,7 @@ fn ensure_allows(
     fs_cap_sids: &mut HashMap<String, FsCap>,
     pins: Vec<FrozenPin>,
     kind: GrantKind,
-    cancel: &CancelScope,
+    cancel: &Scope,
 ) -> Result<(), Refusal> {
     for pin in pins {
         let name = dacl::fs_capability_name(pin.path(), kind);
@@ -401,7 +401,7 @@ fn ensure_denies(
     proj: &mut ProjectionSandbox,
     fs_cap_sids: &mut HashMap<String, FsCap>,
     paths: Vec<PathBuf>,
-    cancel: &CancelScope,
+    cancel: &Scope,
 ) -> Result<(), Refusal> {
     for p in paths {
         let canonical = dacl::canonicalize_grant_target(&p)?;

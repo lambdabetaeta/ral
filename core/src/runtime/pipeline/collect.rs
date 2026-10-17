@@ -7,8 +7,8 @@ use super::super::command;
 use super::stage::StageHandle;
 use crate::fact::Command;
 use crate::process::{
-    CancelCause, CancelScope, ChildEnd, Group, POLL_SLICE, Pgid, ScopeId, TerminalLoan,
-    WaitOutcome, Watch,
+    CancelCause, ChildEnd, Group, POLL_SLICE, Pgid, Scope, ScopeId, TerminalLoan, WaitOutcome,
+    Watch,
 };
 use crate::types::{
     AuditFragment, AuditIo, Break, CommandOrigin, Error, Escape, Mooring, Observed, Settled, Shell,
@@ -59,7 +59,7 @@ fn finish_external_settlement(
     outcome: WaitOutcome,
     cause: Option<CancelCause>,
     sent: Option<CancelCause>,
-    scope: &CancelScope,
+    scope: &Scope,
     shell: &Shell,
     started: Instant,
 ) -> StageObservation {
@@ -104,7 +104,7 @@ impl StageEnd {
         self,
         shell: &Shell,
         started: Instant,
-        scope: &CancelScope,
+        scope: &Scope,
         group: &Group,
     ) -> StageObservation {
         match self {
@@ -355,7 +355,7 @@ pub(super) struct CollectState {
     loan: Option<TerminalLoan>,
     rx: Receiver<Event>,
     /// The launching computation's current scope, read between slices.
-    scope: CancelScope,
+    scope: Scope,
     cleanup_grace: Duration,
     /// The strongest cause this teardown has written on the stages; `None`
     /// before any teardown.  Only rises (`escalate`); the slice still
@@ -368,7 +368,7 @@ impl CollectState {
         rx: Receiver<Event>,
         group: Group,
         loan: Option<TerminalLoan>,
-        scope: CancelScope,
+        scope: Scope,
         cleanup_grace: Duration,
         started: Instant,
     ) -> Self {
@@ -421,6 +421,7 @@ impl CollectState {
     #[cfg(test)]
     pub(super) fn for_step_test() -> (Self, Sender<Event>) {
         let (tx, rx) = std::sync::mpsc::channel();
+        let anchor = Scope::clone(&crate::process::DurableRoot::default().worker());
         let state = Self {
             stages: Vec::new(),
             observed: Vec::new(),
@@ -428,11 +429,11 @@ impl CollectState {
             // Never `Owns`: a forced end would `kill(-pgid)` a pgid nobody owns.
             group: Group::Joins(crate::process::Membership::new(
                 Pgid::from_raw(1).expect("1 is positive"),
-                CancelScope::root(),
+                anchor.clone(),
             )),
             loan: None,
             rx,
-            scope: CancelScope::root(),
+            scope: anchor,
             cleanup_grace: Duration::ZERO,
             teardown: None,
         };

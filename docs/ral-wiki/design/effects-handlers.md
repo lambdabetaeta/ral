@@ -79,7 +79,7 @@ The shield is the fourth instance, `poll k ↦ k ()` while it masks:
 cleanup's extent and restores it on pop and abandon, exactly as
 `Frame::Capture` swaps `io.stdout`. So `Shell::scope` is a dynamically scoped
 cell beside `io.stdout`, *read* by every poll; the owner's name is
-`Mooring::home`, run-invariant and the target of every *write*. Owner-frame
+`Mooring::home`, run-invariant and the target of every *write*; the types say so, `Scope` against `ScopeNode`. Owner-frame
 masking here is the same shape as self-masking above: a frame lifts what an
 outer one would answer for the extent of its own body
 ([[decisions/261016_delimiters-are-handlers-for-poll|delimiters-are-handlers-for-poll]],

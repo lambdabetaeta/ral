@@ -243,12 +243,9 @@ fn a_settled_run_leaves_the_anchor_untouched() {
         !shell.session.anchor.is_cancelled(),
         "a settled run must not cancel the anchor it hung off"
     );
-    shell
-        .session
-        .anchor
-        .cancel(crate::process::CancelCause::Cancelled);
-    assert!(
-        pre.is_cancelled(),
+    assert_eq!(
+        shell.session.anchor.id(),
+        pre.id(),
         "the anchor must still be the pre-run scope, not the run's own child"
     );
 }
@@ -764,7 +761,7 @@ impl crate::types::EnquiryDesk for PanickingDesk {
     fn enquire(
         &self,
         _req: crate::first_order::FOValue,
-        _cancel: &crate::process::CancelScope,
+        _cancel: &crate::process::Scope,
     ) -> Settled<crate::first_order::FOValue> {
         panic!("run-door test: desk handler panic");
     }

@@ -2239,7 +2239,7 @@ mod tests {
     /// there being an envelope, not on which axis was attenuated.
     #[test]
     fn a_confined_payload_gets_its_grace_signal_not_the_monitors() {
-        use crate::process::{CancelCause, CancelScope, Group, PgidPolicy};
+        use crate::process::{CancelCause, DurableRoot, Group, PgidPolicy, Scope};
         use crate::runtime::command::{Pumps, RunningChild};
 
         let policy = unrestricted();
@@ -2255,7 +2255,7 @@ mod tests {
         );
 
         let shell = crate::test_helper::core_shell();
-        let scope = CancelScope::root();
+        let scope = DurableRoot::default().worker();
         let sh = Program::file("/bin/sh".into()).expect("/bin/sh exists");
         let mut launch = crate::sandbox::sandboxed_command(
             &policy,
@@ -2275,7 +2275,7 @@ mod tests {
             "sh".to_string(),
             Pumps::default(),
             pgid.map(Group::Owns),
-            scope.clone(),
+            Scope::clone(&scope),
             jail,
         );
 

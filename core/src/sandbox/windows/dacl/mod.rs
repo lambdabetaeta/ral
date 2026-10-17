@@ -57,7 +57,7 @@
 //! [`recover_orphaned_state`] sweeps a crashed session's ledger at the next
 //! boot, deleting its registered profiles.
 
-use crate::process::cancel::{CancelCause, CancelScope};
+use crate::process::cancel::{CancelCause, Scope};
 use std::fmt::Write as _;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -265,7 +265,7 @@ impl From<io::Error> for DaclError {
 
 /// The stamp loops' poll point: a chain of atomic loads, so it costs nothing
 /// against the security write it guards.
-fn cancelled(cancel: &CancelScope) -> Result<(), DaclError> {
+fn cancelled(cancel: &Scope) -> Result<(), DaclError> {
     match cancel.cause() {
         Some(cause) => Err(DaclError::Cancelled(cause)),
         None => Ok(()),
@@ -318,7 +318,7 @@ pub(crate) fn ensure_fs_grant(
     canonical: &Path,
     sid_str: &str,
     kind: GrantKind,
-    cancel: &CancelScope,
+    cancel: &Scope,
 ) -> Result<(), DaclError> {
     ensure_grant(Target::Named(canonical), sid_str, kind, cancel)
 }
@@ -331,7 +331,7 @@ pub(crate) fn ensure_frozen_grant(
     pin: &FrozenPin,
     sid_str: &str,
     kind: GrantKind,
-    cancel: &CancelScope,
+    cancel: &Scope,
 ) -> Result<(), DaclError> {
     debug_assert!(kind != GrantKind::Deny, "a deny is stamped by name");
     ensure_grant(pin.target(), sid_str, kind, cancel)
@@ -341,7 +341,7 @@ fn ensure_grant(
     target: Target<'_>,
     sid_str: &str,
     kind: GrantKind,
-    cancel: &CancelScope,
+    cancel: &Scope,
 ) -> Result<(), DaclError> {
     cancelled(cancel)?;
     let canonical = target.path();

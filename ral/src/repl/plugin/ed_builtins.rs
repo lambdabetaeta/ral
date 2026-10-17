@@ -596,7 +596,7 @@ mod tests {
         fn enquire(
             &self,
             req: FOValue,
-            _cancel: &ral_core::process::CancelScope,
+            _scope: &ral_core::process::Scope,
         ) -> ral_core::types::Settled<FOValue> {
             use super::super::super::enquiry::Enquiry;
             self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);

@@ -45,7 +45,7 @@ impl Token {
     }
 
     /// Cancel this token and every share of it, recording `cause`.  Monotone,
-    /// like `CancelScope::cancel`: a weaker cause arriving later (an Esc
+    /// like `ScopeNode::cancel`: a weaker cause arriving later (an Esc
     /// `Interrupt` after an `` exarch-agents `cancel `` `Explicit`) can never mask a
     /// stronger one already in force.
     pub fn cancel(&self, cause: CancelCause) {

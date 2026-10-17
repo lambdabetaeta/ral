@@ -13,7 +13,7 @@ impl TerminalLoan {
     pub(crate) fn try_acquire(
         _target: i32,
         _lease: &crate::process::TerminalLease,
-        _frame: &crate::process::ForegroundScope,
+        _frame: &crate::process::ScopeNode,
     ) -> Option<Self> {
         None
     }

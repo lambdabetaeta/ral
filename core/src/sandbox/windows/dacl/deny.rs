@@ -16,7 +16,7 @@ use super::acl::{
     AclKind, INHERITED_ACE_FLAG, Security, Target, attribute_tag, null_deny_dacl, win32_err_str,
 };
 use super::{AceType, DENY_MASK, DaclError, PathMutexGuard, apply_explicit_ace, cancelled};
-use crate::process::cancel::CancelScope;
+use crate::process::cancel::Scope;
 
 #[allow(
     clippy::disallowed_methods,
@@ -25,7 +25,7 @@ use crate::process::cancel::CancelScope;
 pub(super) fn descendants(
     root: &Path,
     sid: &str,
-    cancel: &CancelScope,
+    cancel: &Scope,
 ) -> Result<OwnedHandle, DaclError> {
     let (root_pin, _) =
         pin(root)?.ok_or_else(|| win32_err_str(root, "deny root became a reparse point"))?;

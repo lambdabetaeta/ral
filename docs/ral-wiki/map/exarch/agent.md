@@ -626,7 +626,7 @@ sticky token is cleared at each exchange boundary (`Token::reset`).
 
 Cancelling the durable root already reaches a cancelled node's own `ral`
 workers with no edge of its own: a worker's cancel scope is a child of its
-shell's durable root, and every `CancelScope::is_cancelled` walks its
+shell's durable root, and every `Scope::is_cancelled` walks its
 ancestors. What the cascade does *not* reach is a node that ends without ever
 being cancelled — the ordinary `reply`/settle path, or the trunk's own
 end-of-`attend` exit, where the avatar simply drops. `Avatar`'s `Drop`

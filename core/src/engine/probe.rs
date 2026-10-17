@@ -40,7 +40,6 @@ pub(crate) fn answer(shell: &Shell, probe: &Probe) -> FOValue {
             .encode(),
         Probe::SessionEnded => shell
             .durable_root()
-            .as_scope()
             .cause()
             .map(|cause| i32::from(cause.code()))
             .encode(),

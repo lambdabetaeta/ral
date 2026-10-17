@@ -77,7 +77,7 @@ impl PipeNode {
             rx,
             group.group(),
             loan,
-            shell.scope.as_scope().clone(),
+            shell.scope.clone(),
             mooring.cleanup_grace,
             started,
         );
@@ -124,7 +124,7 @@ impl PipeNode {
     reason = "[test] test fs/process scaffolding"
 )]
 mod tests {
-    use crate::process::{CancelCause, ForegroundScope};
+    use crate::process::{CancelCause, ScopeNode};
     use crate::test_helper::eventually;
     use std::path::PathBuf;
     use std::time::Duration;
@@ -168,7 +168,7 @@ mod tests {
 
     /// Run `src`, calling `strike` with the run's scope and the trapper's pid
     /// once its trap is set; the run's own end is not what these tests read.
-    fn run_struck(src: &str, trapper: &Trapper, strike: impl FnOnce(&ForegroundScope, i32) + Send) {
+    fn run_struck(src: &str, trapper: &Trapper, strike: impl FnOnce(&ScopeNode, i32) + Send) {
         let mut shell = crate::test_helper::core_shell();
         let scope = shell.run_cancel_handle();
         std::thread::scope(|s| {

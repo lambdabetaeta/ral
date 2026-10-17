@@ -8,7 +8,7 @@
 
 use std::num::NonZeroI32;
 
-use super::cancel::{CancelCause, CancelScope};
+use super::cancel::{CancelCause, Scope};
 #[cfg(unix)]
 use super::outcome::Signal;
 #[cfg(unix)]
@@ -132,11 +132,11 @@ impl PgidPolicy {
 #[derive(Clone, Debug)]
 pub(crate) struct Membership {
     group: Pgid,
-    stage: CancelScope,
+    stage: Scope,
 }
 
 impl Membership {
-    pub(crate) const fn new(group: Pgid, stage: CancelScope) -> Self {
+    pub(crate) const fn new(group: Pgid, stage: Scope) -> Self {
         Self { group, stage }
     }
 
@@ -179,15 +179,16 @@ impl Group {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::process::cancel::DurableRoot;
     use strum::VariantArray as _;
 
-    fn membership(stage: &CancelScope) -> Membership {
+    fn membership(stage: &Scope) -> Membership {
         Membership::new(Pgid::from_raw(1).expect("1 is positive"), stage.clone())
     }
 
     #[test]
     fn a_member_owes_only_what_its_stage_does_not_hold() {
-        let stage = CancelScope::root();
+        let stage = DurableRoot::default().worker();
         let member = membership(&stage);
         assert!(
             CancelCause::VARIANTS.iter().all(|&c| member.owes(c)),
@@ -215,7 +216,7 @@ mod tests {
 
     #[test]
     fn strike_order_does_not_change_what_a_member_owes() {
-        let stage = CancelScope::root();
+        let stage = DurableRoot::default().worker();
         let own = stage.child();
         own.cancel(CancelCause::Terminated);
         stage.cancel(CancelCause::TimedOut);

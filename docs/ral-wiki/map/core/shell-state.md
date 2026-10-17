@@ -1,5 +1,5 @@
 ---
-generated_at_commit: dad6a1b3
+generated_at_commit: e4025de9
 generated_at_date: 2026-10-17
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
@@ -133,8 +133,8 @@ checkpoint, since a run never writes it.
   (`Shell::poll`), which also genuinely changes within a run: a thread base
   sets it to its mooring's node, and `Frame::Cleanup` swaps it for a shielded
   child for a `guard` cleanup's extent and restores it, as a capture swaps
-  `io.stdout` (`Shell::shield`). It is read, never written: writes aim at
-  `Mooring::home`
+  `io.stdout` (`Shell::shield`). It is a `Scope`, read, never written: writes aim at
+  `Mooring::home`, a `ScopeNode`
   ([[decisions/261016_delimiters-are-handlers-for-poll|delimiters-are-handlers-for-poll]]).
 - **`SessionState`** — what survives every run's teardown: the durable cancel
   `root` that workers parent under (`Shell::join_session` *shares*

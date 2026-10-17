@@ -107,6 +107,12 @@ pub trait CondvarExt {
         guard: std::sync::MutexGuard<'a, T>,
         dur: std::time::Duration,
     ) -> (std::sync::MutexGuard<'a, T>, std::sync::WaitTimeoutResult);
+
+    fn wait_while_ignore_poison<'a, T>(
+        &self,
+        guard: std::sync::MutexGuard<'a, T>,
+        condition: impl FnMut(&mut T) -> bool,
+    ) -> std::sync::MutexGuard<'a, T>;
 }
 
 impl CondvarExt for std::sync::Condvar {
@@ -126,6 +132,16 @@ impl CondvarExt for std::sync::Condvar {
         dur: std::time::Duration,
     ) -> (std::sync::MutexGuard<'a, T>, std::sync::WaitTimeoutResult) {
         self.wait_timeout(guard, dur)
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[allow(clippy::disallowed_methods, reason = "the door itself")]
+    fn wait_while_ignore_poison<'a, T>(
+        &self,
+        guard: std::sync::MutexGuard<'a, T>,
+        condition: impl FnMut(&mut T) -> bool,
+    ) -> std::sync::MutexGuard<'a, T> {
+        self.wait_while(guard, condition)
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }

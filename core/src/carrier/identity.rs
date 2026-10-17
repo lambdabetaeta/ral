@@ -110,13 +110,13 @@ struct IdentityDesk {
 }
 
 impl crate::types::EnquiryDesk for IdentityDesk {
-    /// `_cancel` goes unpolled: [`EnquiryDesk::enquire`] is contractually
+    /// `_scope` goes unpolled: [`EnquiryDesk::enquire`] is contractually
     /// blocking and short, so a `Host` answers at once and leaves nothing
     /// here to park on.
     fn enquire(
         &self,
         req: FOValue,
-        _cancel: &crate::process::CancelScope,
+        _scope: &crate::process::Scope,
     ) -> crate::types::Settled<FOValue> {
         let mut carried = std::collections::VecDeque::new();
         while let Some((did, event)) = self.events.try_recv() {
