@@ -39,6 +39,11 @@ Locate, drop, deduplicate, and sample in one turn:
     each { |h| view-text-around $h[file] $h[line] 3; echo #'---'# } $few
     [total: !{length $hits}, shown: !{length $few}]
 
+A file read once into a binding can be sized and searched in the same turn:
+
+    let rows = from-lines < gates.txt
+    [lines: !{length $rows}, nand: !{filter { |l| re-match #'NAND'# $l } $rows}]
+
 `defer` long work **early**, then fill the waiting turns with real progress: read the next file, prepare the next edit, write the test you will run afterwards. When nothing useful remains, `await` the handle. It persists across turns, so awaiting it again later is always safe.
 
     let suite = defer { cargo test -q 2>&1 }
@@ -74,7 +79,6 @@ Handlers are deep (they hold for nested calls) and self-masking (inside a handle
 
 An elision in value/stdout/stderr means a command succeeded, but you asked to see too much. Narrow the call:
 - Bind, then slice: `length $hits`, `take 20 $hits`, `filter { … } $hits`. Never echo a large value whole.
-- Pre-size files, then read windows: `line-count $f` first; then `view-text $f A B` or `view-text-around $f LINE PEEK`.
 - For tests, ask for less: Name the single failing test or capture and slice the final log lines before returning them.
 
 As a general rule capture every stdout you might need to read.
