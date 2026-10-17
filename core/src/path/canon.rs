@@ -115,6 +115,15 @@ pub(crate) fn with_firmlink_twins(mut names: Vec<PathBuf>) -> Vec<PathBuf> {
     names
 }
 
+/// Each name a lookup of `p` stats on its way, the leaf included: every
+/// component under its parent's real path, never itself followed.
+#[cfg(unix)]
+pub(crate) fn lookup_walk(p: &Path) -> Vec<PathBuf> {
+    p.ancestors()
+        .filter_map(|a| Some(canonicalise_lenient(a.parent()?).join(a.file_name()?)))
+        .collect()
+}
+
 /// Engine behind [`render_paths`](super::render_paths).  Dedup keys on the
 /// exact path bytes, never a lossy rendering: two distinct non-UTF-8 paths
 /// decode to the same U+FFFD string, and collapsing them would attribute one

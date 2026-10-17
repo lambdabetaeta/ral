@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 646bff0a
-verified_at_date: 2026-10-13
+verified_at_commit: f0b81686
+verified_at_date: 2026-10-17
 anchors: [Head, ExecRules, ExecScope, Withheld, ExecDenial, Evidence, GrantStack, admit, check_exec, Admitted, for_kernel, places, deputy_prefixes]
 ---
 
@@ -84,8 +84,9 @@ holds the same table against programs the child starts itself.**
   linker. It yields to every exclusion on either axis, grants running and
   reading and never writing, and is computed for every confined launch.
   Bundled-tool scopes are dropped.
-- **macOS:** the Seatbelt profile renders the Rosetta loader, then every
-  positive `process-exec` clause, then every negative one. Ordering within a
+- **macOS:** the Seatbelt profile renders every positive `process-exec`
+  clause, then every negative one, and its fs section refuses running whatever
+  it does not read. Ordering within a
   group is for stable output; depth grants no exception, so an exclusion wins
   as it does in the guard. The kernel sees no argv, and no bundled tool's name
   ([[internals/seatbelt-profile|seatbelt-profile]]).

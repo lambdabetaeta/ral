@@ -416,8 +416,7 @@ so `ExecProjection::Restricted` carries the `ExecRules` itself.
 **What the kernel is handed.** `for_kernel(support)` drops the `Tool` scopes and
 joins the live support as `File` allowances, giving again an `ExecRules`. The
 kernel sees no tools and no argv, so the table is its poorer view of the same
-evidence. Seatbelt renders the Rosetta loader, then every positive clause, then
-every negative one; its last-match-wins puts every exclusion on top by
+evidence. Seatbelt renders every positive clause, then every negative one; its last-match-wins puts every exclusion on top by
 construction, and order within a group is for stable output only. Landlock
 renders allowances only, from `live()` and `permits()`, subtracting exclusions
 along their spines before it issues rules, and `Any` lowered against the
@@ -682,9 +681,7 @@ stored side. *Respelled* marks a refusal that names the excluded spelling.
   the author wrote none and dropped when an exec or an fs exclusion covers them.
   An excluded carrier therefore refuses the script that starts through it, and
   the confined child's hint says which exclusion, since an allowance cannot
-  override it. macOS's Rosetta loader is a directory and keeps a clause of its
-  own, emitted before the exclusions so that one reaches it
-  ([[decisions/261004_exec-carriers|exec-carriers]]).
+  override it ([[decisions/261004_exec-carriers|exec-carriers]]).
 
 ### What the kernel cannot see
 
@@ -728,7 +725,7 @@ argues from.
   projection (`SandboxProjection::of`) carries the read region as one list of
   live positives, run places and live support among them, beside the write
   prefixes, the floor and the exclusions; a surface spelling is never a
-  predicate of its own, since a name that was a symlink at freezing can later
+  predicate of its own (macOS lets a lookup stat it, no more), since a name that was a symlink at freezing can later
   hold a real directory the grant never named. Exclusions are re-resolved at
   render time. Each backend refuses a redirected allowance rather than following
   it: Linux's `openat2(RESOLVE_NO_SYMLINKS)` refuses the launch, Seatbelt matches

@@ -126,9 +126,11 @@ fn sandbox_projection_intersects_path_components() {
 #[test]
 fn sandbox_projection_does_not_leak_outer_raw_prefix() {
     let temp = tempfile::tempdir().unwrap();
-    let real = temp.path().join("real");
+    // Canonical, as the projection reads: macOS's temp dir lies under `/var`.
+    let root = std::fs::canonicalize(temp.path()).unwrap();
+    let real = root.join("real");
     let inner_dir = real.join("inner");
-    let link = temp.path().join("link");
+    let link = root.join("link");
     std::fs::create_dir_all(&inner_dir).unwrap();
     std::os::unix::fs::symlink(&real, &link).unwrap();
 

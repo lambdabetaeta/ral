@@ -68,9 +68,9 @@ impl std::fmt::Display for FsScope {
     }
 }
 
-/// Rosetta's runtime, the loader analogue: always readable, always admitted to exec.
+/// Rosetta's runtime, the loader analogue: always readable.
 #[cfg(target_os = "macos")]
-pub(crate) const ROSETTA: &str = "/Library/Apple/usr";
+const ROSETTA: &str = "/Library/Apple/usr";
 
 /// Fs evidence over one op: prefixes judged by their resolved form, an
 /// exclusion beating every allowance.  Only the read region holds a place, and
@@ -418,8 +418,8 @@ mod tests {
     }
 
     /// A floor entry that resolves through a non-Unicode name is dropped, not
-    /// held as a sibling its lossy form names.
-    #[cfg(unix)]
+    /// held as a sibling its lossy form names.  APFS refuses such a name.
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn a_non_unicode_floor_entry_is_dropped() {
         use std::os::unix::ffi::OsStrExt;

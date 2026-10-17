@@ -140,8 +140,7 @@ cannot override an exclusion.
 start:
 
 - the platform floor (part of the policy), the live support set (carriers, the
-  Linux linker candidates) and macOS's Rosetta loader, each with the reads its
-  loading needs;
+  Linux linker candidates), each with the reads its loading needs;
 - on Linux, the pinned bwrap and trampoline, readable at their own names;
 - the base profile's ambient allowances (`macos-base.sbpl`: the root's own entry,
   the timezone database, the discard and terminal devices) and the Linux

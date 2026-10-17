@@ -364,14 +364,13 @@ mod tests {
     }
 
     /// Writable only under `write_dir`, with `net`/`exec` left wide so the one
-    /// thing the profile denies is a write outside it.  The system reads
-    /// `/bin/sh` and the bundled tools need come from the macOS profile's
-    /// unconditional baseline, so the grant need not re-list them.
+    /// thing the profile denies is a write outside it.  It reads the floor, as
+    /// every restricted region does.
     #[cfg(target_os = "macos")]
     fn write_confined_to(write_dir: &str) -> SandboxProjection {
         SandboxProjection {
             fs: FsProjection::Restricted(FsRules {
-                read: vec![prefix(write_dir)],
+                read: std::iter::once(prefix(write_dir)).chain(floor()).collect(),
                 write: vec![prefix(write_dir)],
                 deny: Vec::new(),
                 pinned_dirs: Vec::new(),
@@ -564,8 +563,8 @@ mod tests {
         std::fs::canonicalize(unique_workdir(tag)).expect("canonical work dir")
     }
 
-    /// Reads `read` and writes `write` beside the floor-less base, with `deny`
-    /// carved out of both and `exec` as given.
+    /// Reads `read` and the floor, as every restricted region does, and writes
+    /// `write`, with `deny` carved out of both and `exec` as given.
     #[cfg(target_os = "macos")]
     fn confined_to(
         read: &[&Path],
@@ -573,10 +572,14 @@ mod tests {
         deny: &[&str],
         exec: ExecProjection,
     ) -> SandboxProjection {
-        let scopes = |dirs: &[&Path]| dirs.iter().map(|d| prefix(&d.to_string_lossy())).collect();
+        let scopes = |dirs: &[&Path]| {
+            dirs.iter()
+                .map(|d| prefix(&d.to_string_lossy()))
+                .collect::<Vec<_>>()
+        };
         SandboxProjection {
             fs: FsProjection::Restricted(FsRules {
-                read: scopes(read),
+                read: scopes(read).into_iter().chain(floor()).collect(),
                 write: scopes(write),
                 deny: deny.iter().map(FrozenPath::from_surface).collect(),
                 pinned_dirs: Vec::new(),
@@ -827,12 +830,21 @@ mod tests {
         assert_eq!(code, Some(0), "{stderr}");
     }
 
-    /// `cat file` confined to reading `read`, minus `deny`.
+    /// The floor, as read scopes.
+    #[cfg(target_os = "macos")]
+    fn floor() -> impl Iterator<Item = crate::capability::FsScope> {
+        crate::capability::floor()
+            .iter()
+            .cloned()
+            .map(crate::capability::FsScope::Prefix)
+    }
+
+    /// `cat file` confined to reading `read` and the floor, minus `deny`.
     #[cfg(target_os = "macos")]
     fn reads(read: Vec<crate::capability::FsScope>, deny: Vec<FrozenPath>, file: &Path) -> bool {
         let projection = SandboxProjection {
             fs: FsProjection::Restricted(FsRules {
-                read,
+                read: read.into_iter().chain(floor()).collect(),
                 write: Vec::new(),
                 deny,
                 pinned_dirs: Vec::new(),

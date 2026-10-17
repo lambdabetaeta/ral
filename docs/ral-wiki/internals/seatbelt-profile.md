@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 002c654a
-verified_at_date: 2026-10-13
+verified_at_commit: f0b81686
+verified_at_date: 2026-10-17
 anchors: [apply_profile, build_profile, Profile, emit_fs_restricted, emit_exec_rules, Clause, Filter, emit_ancestor_metadata, withheld_doors, rendered_ancestors, pinned_dirs, open_search_dir]
 ---
 
@@ -56,7 +56,14 @@ that — before making the profile say more.
 **fs.** `Restricted` renders the grant's read prefixes — which already carry
 the read `floor`, joined by the fold — and its write prefixes as `file-read*` subpaths with
 their ancestor chains, the write prefixes as `file-write*` subpaths, and then
-the denies. `Unrestricted` passes both through — `(allow file-read*)`,
+the denies: each exclusion denies reading, writing, linking and running, and
+`(deny process-exec (require-not (require-any (subpath …) …)))` over the read
+region refuses every program the fs does not read (plain `(deny process-exec)`
+when it reads nothing, which SBPL cannot say as an empty `require-any`).
+Seatbelt itself starts a program it may not read: measured on Darwin 25.5, a
+Mach-O, and a script's interpreter, need `process-exec` alone. So *running
+reads* is a clause here, not a kernel property; without it a descendant ran
+anything `every` admits, and an fs exclusion stopped nothing running. `Unrestricted` passes both through — `(allow file-read*)`,
 `(allow file-write*)` — so an exec-only grant can enter the sandbox for exec
 confinement without clamping the agent's cwd or `HOME`.
 
@@ -71,10 +78,10 @@ through the grant.
 
 **exec.** `Unrestricted` is `(allow process-exec)`, so an fs-only grant does
 not attenuate exec at the OS layer; `Any` (`every`) renders the same way, with
-the table's exclusions after it. `Restricted` first admits Rosetta's runtime
-(`/Library/Apple/usr`, the one path the backend adds itself; its read half is in
-the floor) in a `file-read* process-exec` clause of its own, emitted before the
-exclusions so that an exclusion reaches it. ral's own binary is *not* admitted:
+the table's exclusions after it, and the fs section's read bound below them.
+The backend admits nothing of its own: an Intel program under Rosetta needs
+`process-exec` on itself alone (measured), so `/Library/Apple/usr` is only read,
+through the floor. ral's own binary is *not* admitted:
 it is an ordinary file, allowed where a policy clause allows it and reached by
 the denies after the positives. Then every positive exec clause, then every
 negative one. Positive clauses are `process-exec` alone, `(allow process-exec
@@ -94,16 +101,20 @@ ancestor chains, computed from `live()` so that a suppressed scope never becomes
 an admitted root. Bundled tools run in the confined child, so no profile
 clause admits ral for them; they read ral's binary through fs. This layer still
 cannot see argv; its job is the interpreter-bypass class the guard never sees
-(`sh -c`, `env`, `xargs`, `find -exec`). Seatbelt needs `file-read*` to spawn a
-binary, so a program that runs only through `every` and is not read by the fs
-rules does not start. The confined child applies its profile after it has started, so its own
+(`sh -c`, `env`, `xargs`, `find -exec`). A program that runs only through
+`every`, or with exec omitted, starts only where the fs reads it, by the read
+bound above. The confined child applies its profile after it has started, so its own
 image is already mapped when the profile takes force.
 
 **Allowances render frozen.** Every read, write and run allowance is rendered as
 its frozen real path, with its firmlink twins, and as nothing else: a surface
 spelling is never a predicate of its own. Seatbelt checks the resolved path of
 each access against it, so a symlink put in an allowance's place reaches
-nothing. Exclusions are rendered from their re-resolved names.
+nothing. It does gate the `lstat` of each link a lookup passes, so the surface
+an allowance was granted by is stat-able and no more: `Object::walk` names each
+component of its lookup under its parent's real path, admitted as
+`file-read-metadata` literals. The spelling reaches the object while it leads
+there, and nothing beneath it once retargeted. Exclusions are rendered from their re-resolved names.
 
 **There is no write freeze.** An admitted directory a broad write covers stays
 writable, with or without a veto, under any fs; a name veto there is advisory to

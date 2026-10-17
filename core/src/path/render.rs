@@ -88,6 +88,10 @@ pub(crate) fn render_paths<S: AsRef<str>>(paths: &[S]) -> Result<Vec<Rendered>, 
 pub(crate) struct Object {
     pub(crate) real: Rendered,
     pub(crate) spellings: Vec<Rendered>,
+    /// What a lookup of each surface it was granted by stats on the way, on
+    /// macOS, where Seatbelt gates the `lstat` of every link passed.  No name
+    /// of the object: nothing beneath one is reached through it.
+    pub(crate) walk: Vec<Rendered>,
 }
 
 #[cfg(unix)]
@@ -100,7 +104,8 @@ impl Object {
 
 /// Each frozen allowance as its object, one entry per object.  The object is
 /// the frozen real path through [`render_real`], never re-resolved; the
-/// surface a prefix was granted by is only where Linux shows it.
+/// surface a prefix was granted by is only where Linux shows it, and the walk
+/// macOS lets a lookup take.
 ///
 /// # Errors
 ///
@@ -110,7 +115,7 @@ pub(crate) fn render_objects<'a>(
     grants: impl IntoIterator<Item = (super::RealPath, Option<&'a super::FrozenPath>)>,
 ) -> Result<Vec<Object>, String> {
     use std::collections::{BTreeMap, BTreeSet};
-    let mut objects = BTreeMap::<Rendered, BTreeSet<Rendered>>::new();
+    let mut objects = BTreeMap::<Rendered, [BTreeSet<Rendered>; 2]>::new();
     for (real, surface) in grants {
         let mut names = render_real(&real)?.into_iter();
         let Some(real) = names.next() else { continue };
@@ -118,15 +123,35 @@ pub(crate) fn render_objects<'a>(
             .filter(|_| cfg!(target_os = "linux"))
             .map(|surface| Rendered(surface.as_str().to_owned()))
             .filter(|surface| *surface != real);
-        objects.entry(real).or_default().extend(names.chain(shown));
+        let walk = surface
+            .filter(|_| cfg!(target_os = "macos"))
+            .map(render_walk);
+        let [spellings, walked] = objects.entry(real).or_default();
+        spellings.extend(names.chain(shown));
+        walked.extend(walk.transpose()?.into_iter().flatten());
     }
     Ok(objects
         .into_iter()
-        .map(|(real, spellings)| Object {
+        .map(|(real, [spellings, walk])| Object {
             real,
             spellings: spellings.into_iter().collect(),
+            walk: walk.into_iter().collect(),
         })
         .collect())
+}
+
+/// Every name a lookup of `surface` stats, with firmlink twins, the leaf
+/// never followed.
+#[cfg(unix)]
+fn render_walk(surface: &super::FrozenPath) -> Result<Vec<Rendered>, String> {
+    let walk =
+        |p: &std::path::Path| super::canon::with_firmlink_twins(super::canon::lookup_walk(p));
+    Ok(
+        super::canon::spelled(std::iter::once(surface.surface_path()), walk)?
+            .into_iter()
+            .map(Rendered)
+            .collect(),
+    )
 }
 
 /// `real` and its firmlink twin, never re-resolved: a frozen grant names
@@ -274,6 +299,7 @@ mod tests {
             [Object {
                 real: Rendered("/usr/bin".to_string()),
                 spellings: vec![Rendered("/bin".to_string())],
+                walk: Vec::new(),
             }]
         );
     }

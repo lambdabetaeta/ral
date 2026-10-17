@@ -11,7 +11,7 @@
 //! one allow/deny bit rather than an endpoint list.
 
 use super::{ExecProjection, FsProjection, RenderedRules, SandboxProjection};
-use crate::capability::{ExecScope, ROSETTA};
+use crate::capability::ExecScope;
 use crate::path::{Object, Rendered, render_paths, render_real, rendered_ancestors};
 use std::collections::BTreeSet;
 use std::ffi::{CStr, CString};
@@ -79,11 +79,12 @@ const NET_PROFILE: &str = include_str!("macos-net.sbpl");
 struct Profile {
     /// What the fs grant reads and writes, with the directory lookups it needs.
     fs_allows: Vec<String>,
-    /// The Rosetta loader, then every `process-exec` allow, then every deny.
+    /// Every `process-exec` allow, then every deny.
     exec_rules: Vec<String>,
     /// The lookups the exec admits need through their ancestors.
     exec_ancestors: Vec<String>,
-    /// What the fs grant carves out of its allows.
+    /// What the fs grant carves out of its allows, and every program it does
+    /// not read.
     fs_denies: Vec<String>,
     /// Directory names frozen in their parents, and ral's own file locked.
     pins: Vec<String>,
@@ -121,7 +122,7 @@ pub(super) fn build_profile(policy: &SandboxProjection) -> Result<String, String
     };
     let rendered = policy.rendered()?;
     match &rendered.fs {
-        FsProjection::Restricted(rules) => emit_fs_restricted(&mut profile.fs_allows, rules),
+        FsProjection::Restricted(rules) => emit_fs_restricted(&mut profile, rules),
         FsProjection::Unrestricted => {
             // Pass fs through, so an exec-only grant can enter the sandbox
             // for exec gating without clamping the agent's cwd or HOME.
@@ -131,26 +132,11 @@ pub(super) fn build_profile(policy: &SandboxProjection) -> Result<String, String
         }
     }
 
-    emit_exec_rules(&mut profile, &rendered.exec, crate::path::exists(ROSETTA))?;
+    emit_exec_rules(&mut profile, &rendered.exec)?;
 
     // Ral's own file, rendered like the rest: execve presents `/tmp/x` as
     // `/private/tmp/x`.  Protected whatever the grant, never admitted by it.
     let own = render_paths(&[super::reexec::own()?.exec_path().to_string_lossy()])?;
-    // `subpath` so a denied directory covers everything under it; `file-link`
-    // (Seatbelt has no `file-link*`) blocks `link(2)` against the source,
-    // closing the hole where a second name elsewhere would let writes bypass
-    // the deny.
-    for path in rendered
-        .fs
-        .rules()
-        .map(|r| r.deny.as_slice())
-        .unwrap_or_default()
-    {
-        profile.fs_denies.extend(
-            ["file-read*", "file-write*", "file-link"]
-                .map(|op| Clause::deny(op, Filter::Subpath(path)).to_string()),
-        );
-    }
     let pinned = rendered
         .fs
         .rules()
@@ -181,20 +167,43 @@ fn emit_pins<'a>(pins: &mut Vec<String>, dirs: impl IntoIterator<Item = &'a Rend
     }
 }
 
-/// Emit the allow rules and ancestor-metadata carve-outs for a restricted fs
-/// projection.  Every allowance renders as its frozen real path and its
-/// firmlink twin, never a surface spelling.  The read region carries what exec
-/// runs and what a launch needs beyond it, so exec's own clauses read nothing.
-fn emit_fs_restricted(lines: &mut Vec<String>, rules: &RenderedRules) {
-    fn names(objects: &[Object]) -> Vec<&Rendered> {
-        objects.iter().flat_map(Object::names).collect()
+/// Emit a restricted fs projection: its allows, the lookups they need, and its
+/// denies.  Every allowance renders as its frozen real path and its firmlink
+/// twin; the surface it was granted by is only stat-able on the way.  The read
+/// region carries what exec runs and what a launch needs beyond it, so exec's
+/// own clauses read nothing.
+fn emit_fs_restricted(profile: &mut Profile, rules: &RenderedRules) {
+    let objects = || rules.read.iter().chain(&rules.write);
+    let readable: Vec<&Rendered> = objects().flat_map(Object::names).collect();
+    let walk: BTreeSet<&Rendered> = objects().flat_map(|o| &o.walk).collect();
+    let stat: BTreeSet<Rendered> = rendered_ancestors(readable.iter().chain(&walk).copied())
+        .into_iter()
+        .chain(walk.into_iter().cloned())
+        .collect();
+    let lines = &mut profile.fs_allows;
+    for name in &stat {
+        lines.push(Clause::allow("file-read-metadata", Filter::Literal(name)).to_string());
     }
-    let (write, read) = (names(&rules.write), names(&rules.read));
-    let readable = || read.iter().chain(&write).copied();
-    emit_ancestor_metadata(lines, readable());
-    emit_read_subpaths(lines, readable());
-    for prefix in write {
+    for path in &readable {
+        lines.push(Clause::allow("file-read*", Filter::Subpath(path)).to_string());
+    }
+    for prefix in rules.write.iter().flat_map(Object::names) {
         lines.push(Clause::allow("file-write*", Filter::Subpath(prefix)).to_string());
+    }
+    // Seatbelt starts a program it may not read, so running reads is said here.
+    profile.fs_denies.push(match readable.as_slice() {
+        [] => "(deny process-exec)".to_string(),
+        read => Clause::deny("process-exec", Filter::Outside(read)).to_string(),
+    });
+    // `subpath` so a denied directory covers everything under it; `file-link`
+    // (Seatbelt has no `file-link*`) blocks `link(2)` against the source,
+    // closing the hole where a second name elsewhere would let writes bypass
+    // the deny.
+    for path in &rules.deny {
+        profile.fs_denies.extend(
+            ["file-read*", "file-write*", "file-link", "process-exec"]
+                .map(|op| Clause::deny(op, Filter::Subpath(path)).to_string()),
+        );
     }
 }
 
@@ -203,9 +212,9 @@ fn emit_fs_restricted(lines: &mut Vec<String>, rules: &RenderedRules) {
 pub(crate) const RENDERS_EXEC: bool = true;
 
 /// Render the `process-exec` rules.  `Unrestricted` is a wildcard.
-/// `Restricted` admits Rosetta's loader (when `loader`) first, then every
-/// positive scope (`Any` as the wildcard), then every negative one, so
-/// that an exclusion reaches everything above it: Seatbelt is last-match-wins.
+/// `Restricted` admits every positive scope (`Any` as the wildcard), then
+/// every negative one, so that an exclusion reaches everything above it:
+/// Seatbelt is last-match-wins.
 /// Order within a group is for stable output; depth grants no exception.  A
 /// scope holding both polarities emits both.  Support arrives among the
 /// positives as file allows.  Exec clauses are `process-exec` alone: reads are
@@ -214,24 +223,11 @@ pub(crate) const RENDERS_EXEC: bool = true;
 ///
 /// `Err` when a name's expansion is not valid UTF-8, which [`render_paths`]
 /// refuses.
-fn emit_exec_rules(
-    profile: &mut Profile,
-    exec: &ExecProjection,
-    loader: bool,
-) -> Result<(), String> {
+fn emit_exec_rules(profile: &mut Profile, exec: &ExecProjection) -> Result<(), String> {
     let ExecProjection::Restricted(rules) = exec else {
         profile.exec_rules.push(ANY_EXEC.to_string());
         return Ok(());
     };
-    // Toolchains (`gcc → cc1 → as → ld`) arrive through the grant, `system:`
-    // among them; only the loader, Rosetta's runtime, is ambient.
-    if loader {
-        let dirs = render_paths(&[ROSETTA])?;
-        profile.exec_rules.extend(
-            dirs.iter()
-                .map(|dir| Clause::allow("process-exec", Filter::Subpath(dir)).to_string()),
-        );
-    }
     let spell = |scope: &ExecScope, allow: bool| -> Result<Vec<String>, String> {
         let clause = |filter| {
             Clause {
@@ -291,6 +287,8 @@ enum Filter<'a> {
     Literal(&'a Rendered),
     /// A final path component, wherever the name resolves.
     Regex(&'a str),
+    /// Beneath none of these; never empty, which SBPL cannot say.
+    Outside(&'a [&'a Rendered]),
 }
 
 impl fmt::Display for Filter<'_> {
@@ -299,6 +297,13 @@ impl fmt::Display for Filter<'_> {
             Self::Subpath(path) => write!(f, "(subpath \"{}\")", escape_path(path)),
             Self::Literal(path) => write!(f, "(literal \"{}\")", escape_path(path)),
             Self::Regex(name) => write!(f, "(regex #\"/{}$\")", escape_regex(name)),
+            Self::Outside(paths) => {
+                f.write_str("(require-not (require-any")?;
+                for path in *paths {
+                    write!(f, " {}", Self::Subpath(path))?;
+                }
+                f.write_str("))")
+            }
         }
     }
 }
@@ -367,12 +372,6 @@ pub(super) fn withheld_door(name: &str) -> Option<&'static str> {
         .iter()
         .find(|(door, _)| name.starts_with(door))
         .map(|(_, why)| *why)
-}
-
-fn emit_read_subpaths<'a>(lines: &mut Vec<String>, paths: impl IntoIterator<Item = &'a Rendered>) {
-    for path in paths {
-        lines.push(Clause::allow("file-read*", Filter::Subpath(path)).to_string());
-    }
 }
 
 /// Seatbelt gates each directory lookup on the way to a granted name.
@@ -634,20 +633,23 @@ mod tests {
         assert!(any < deny);
     }
 
-    /// Rosetta's loader precedes every exclusion, so none is shadowed by it.
+    /// Running reads: under a restricted fs, a program outside the read
+    /// region starts under no exec rule, `every` included.
     #[test]
-    fn mac_profile_admits_the_loader_before_every_exec_deny() {
-        let mut profile = Profile::default();
-        let exec =
-            ExecProjection::Restricted(vec![veto("git"), dir("/x/y", false)].into_iter().collect());
-        super::emit_exec_rules(&mut profile, &exec, true).unwrap();
-        let lines = profile.exec_rules;
-        let loader = lines
-            .iter()
-            .position(|l| l == "(allow process-exec (subpath \"/Library/Apple/usr\"))")
-            .expect("loader clause");
-        let first_deny = lines.iter().position(|l| l.starts_with("(deny")).unwrap();
-        assert!(loader < first_deny, "out of order:\n{lines:#?}");
+    fn mac_profile_runs_nothing_the_fs_does_not_read() {
+        let any = || vec![(ExecScope::Any, Evidence::ALLOW)];
+        let profile =
+            build_profile(&restricted(reading(vec![prefix("/ral-test/r")]), any())).unwrap();
+        let wildcard = at(&profile, "(allow process-exec)\n");
+        let bound = at(
+            &profile,
+            "(deny process-exec (require-not (require-any (subpath \"/ral-test/r\"))))",
+        );
+        assert!(wildcard < bound);
+        let nothing = build_profile(&restricted(reading(Vec::new()), any())).unwrap();
+        at(&nothing, "(deny process-exec)\n");
+        let open = build_profile(&restricted(FsProjection::Unrestricted, any())).unwrap();
+        assert!(!open.contains("(deny process-exec"), "{open}");
     }
 
     /// Nothing is frozen: a write prefix covering an admitted dir, or a file
@@ -699,9 +701,10 @@ mod tests {
     }
 
     /// An allowance granted through a symlink reads as its frozen real path
-    /// alone: the surface it was written by is no predicate.
+    /// alone: the surface it was written by is only stat-able, so a lookup
+    /// may pass the link and reach nothing beneath it.
     #[test]
-    fn mac_profile_never_renders_the_surface_of_a_frozen_allowance() {
+    fn mac_profile_lets_a_lookup_stat_the_surface_of_a_frozen_allowance() {
         let linked = FsScope::Prefix(FrozenPath::for_test("/ral-test/link", "/ral-test/real"));
         let profile = build_profile(&SandboxProjection {
             fs: reading(vec![linked]),
@@ -709,7 +712,16 @@ mod tests {
         })
         .unwrap();
         at(&profile, "(allow file-read* (subpath \"/ral-test/real\"))");
-        assert!(!profile.contains("/ral-test/link"), "{profile}");
+        let kernel = rules(&profile);
+        let surface: Vec<&str> = kernel
+            .lines()
+            .filter(|l| l.contains("/ral-test/link"))
+            .collect();
+        assert_eq!(
+            surface,
+            ["(allow file-read-metadata (literal \"/ral-test/link\"))"],
+            "{profile}"
+        );
     }
 
     /// The kernel exec set is the rules: `/usr`, the toolchains and Homebrew
@@ -753,7 +765,8 @@ mod tests {
         );
     }
 
-    /// An empty exec table admits no program, ral included.
+    /// An empty exec table admits no program, ral and Rosetta's runtime
+    /// included: an Intel program needs `process-exec` on itself alone.
     #[test]
     fn mac_profile_admits_nothing_when_restricted_to_empty() {
         super::super::reexec::pin_self();
@@ -1083,7 +1096,7 @@ mod tests {
                 &profile,
                 &format!("(allow file-write* (subpath \"{form}\"))"),
             );
-            for op in ["file-read*", "file-write*", "file-link"] {
+            for op in ["file-read*", "file-write*", "file-link", "process-exec"] {
                 at(
                     &profile,
                     &format!("(deny {op} (subpath \"{form}/.exarch.toml\"))"),

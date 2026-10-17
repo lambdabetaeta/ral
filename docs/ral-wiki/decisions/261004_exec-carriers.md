@@ -28,7 +28,9 @@ means one thing on both kernels and in the guard
 
 **The platform base is the loader and ral.** Linux needs `Execute` on the ELF
 loader of every dynamic binary; macOS needs no `process-exec` on `dyld`
-(measured) and keeps only `/Library/Apple/usr`, Rosetta's runtime. ral's own
+(measured) and keeps only `/Library/Apple/usr`, Rosetta's runtime. *Amended
+2026-10-17*: Rosetta needs none either (measured, Darwin 25.5); the clause is
+gone and the runtime is only read. ral's own
 binary is the trampoline and every bundled tool.
 
 **A carrier is what `execve` forwards to before the program's own code runs**:
