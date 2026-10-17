@@ -1,6 +1,6 @@
 An agent is a function from a prompt and your bindings to a value. It runs in a copy of your shell, reads what you point it at, and replies with first-order ral data that you compute with. 
 
-`` exarch-agents `start [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: `inherit|`confined|`read-only|`edit-only|`reasonable|`restrict <caps>, search: <Bool>, provider: `inherit|`named <Str>, model: `inherit|`named <Str>] `` asynchronously launches an agent. `name` is a descriptive handle ('todo-scan', 'chunk-3'). `grant` is `` `inherit `` to run the child on your own authority verbatim, one of the profiles `` `confined ``, `` `read-only ``, `` `edit-only ``, `` `reasonable ``, or `` `restrict R `` for a capability record `R` — `[exec, fs, net, detach, editor, shell]`, every key optional, the same shape the `grant [...] { … }` form takes. Every form is one more layer on what you already hold, and a layer only narrows: a child can never be granted more than you have, and asking for more silently yields less rather than failing. An agent that only reads bindings and answers needs `` `confined ``. `search` says whether it may use the web. `explain exarch-agents` has the full documentation.
+`` exarch-agents `start [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: `inherit|`confined|`read-only|`edit-only|`reasonable|`restrict <caps>, provider: `inherit|`named <Str>, model: `inherit|`named <Str>] `` asynchronously launches an agent. `name` is a descriptive handle ('todo-scan', 'chunk-3'). `grant` is `` `inherit `` to run the child on your own authority verbatim, one of the profiles `` `confined ``, `` `read-only ``, `` `edit-only ``, `` `reasonable ``, or `` `restrict R `` for a capability record `R` — `[exec, fs, net, detach, editor, shell]`, every key optional, the same shape the `grant [...] { … }` form takes. Every form is one more layer on what you already hold, and a layer only narrows: a child can never be granted more than you have, and asking for more silently yields less rather than failing. An agent that only reads bindings and answers needs `` `confined ``. `explain exarch-agents` has the full documentation.
 
 `provider` and `model` say what the child runs on; write `` `inherit `` for both to run it on your own selection. Spend a cheaper, faster model on a child whose task is mechanical and whose answer you will check — a scan, a summary, a fan-out over chunks — with `` model: `named '<model>' `` and `` provider: `inherit ``, which keeps your own account. Keep your own model for work that needs judgement.
 
@@ -9,7 +9,7 @@ An agent's shell is a snapshot of yours at `start`, and has exactly the same def
 The agent's initial prompt may be constructed by using `ral`:
 
     let ctx = from-string < design.md
-    exarch-agents `start [prompt: #'Review the plan bound at $ctx against src/solver/. Reply [verdict: `ok|`revise, issues: [[file, line, why]]].'#, name: 'plan-review', type: `amnemon, grant: `read-only, search: false, provider: `inherit, model: `inherit]
+    exarch-agents `start [prompt: #'Review the plan bound at $ctx against src/solver/. Reply [verdict: `ok|`revise, issues: [[file, line, why]]].'#, name: 'plan-review', type: `amnemon, grant: `read-only, provider: `inherit, model: `inherit]
 
 Do not quote something that an agent can access from a binding. Never read a binding to echo it to an agent. The same goes for repeatable scripts, e.g. define `let run-suite = { … }` and ask the agent to run it by name. 
 
@@ -26,7 +26,7 @@ Example:
 
     let chunks = map { |f| from-string < $f } !{glob #'notes/*.md'#}
     for !{range 0 !{length $chunks}} { |i|
-      exarch-agents `start [prompt: "Summarise the text bound at $chunks[$i]. Reply [topic: Str, claims: [Str]].", name: "chunk-$i", type: `amnemon, grant: `confined, search: false, provider: `inherit, model: `inherit]
+      exarch-agents `start [prompt: "Summarise the text bound at $chunks[$i]. Reply [topic: Str, claims: [Str]].", name: "chunk-$i", type: `amnemon, grant: `confined, provider: `inherit, model: `inherit]
     }
 
 When all the agents are done:
@@ -38,7 +38,7 @@ When all the agents are done:
     let dirs = glob #'corpus/*'#
     for !{range 0 !{length $dirs}} { |i|
       let only-mine = [net: `offline, fs: [read: [`cwd "$dirs[$i]"]]]
-      exarch-agents `start [prompt: "Summarise the notes under $dirs[$i]. Reply [topic: Str, claims: [Str]].", name: "corpus-$i", type: `amnemon, grant: `restrict $only-mine, search: false, provider: `inherit, model: `inherit]
+      exarch-agents `start [prompt: "Summarise the notes under $dirs[$i]. Reply [topic: Str, claims: [Str]].", name: "corpus-$i", type: `amnemon, grant: `restrict $only-mine, provider: `inherit, model: `inherit]
     }
 
 DO NOT POLL AGENTS. Wait to be notified of their completion.

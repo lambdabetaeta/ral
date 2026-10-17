@@ -125,8 +125,8 @@ pub struct Agent {
     /// launches it.
     pub(crate) token: cancel::Token,
     /// Whether this agent may ride the provider's hosted web search: the
-    /// network policy's verdict at the trunk, and at most its parent's for a
-    /// fork, which a spawn may narrow and never widen.
+    /// network policy's verdict, inherited verbatim by every fork.  The tool
+    /// is attached per request, and only where the adapter has one.
     pub(crate) search: bool,
     /// Whether this agent holds `reply`: a headless trunk and every fork do, a
     /// conversing trunk and every `/branch` do not.  The desk's refusal and

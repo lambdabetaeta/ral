@@ -122,7 +122,6 @@ fn wire_spawnable_desk(fuel: u32, factory: Arc<FakeFactory>) -> (ExarchDesk, Arc
     spec.mailbox = parent_inbox.mailbox();
     spec.fuel = fuel;
     spec.returns = true;
-    spec.search = true;
     let agent =
         crate::agent::testkit::test_agent(&fleet, spec).expect("a fresh fleet's wire trunk");
     let (emit, _rx) = crate::bus::dummy_emitter();
@@ -154,7 +153,7 @@ fn parent_seal() -> Sealed {
 
 /// `` `exarch-agents `start `` as a wire engine sends it: its bequest, sealed.
 fn wire_start_req(name: &str, seed: Sealed) -> Request {
-    start(ForkClaim::Sealed(seed), spec("go", name, false))
+    start(ForkClaim::Sealed(seed), spec("go", name))
 }
 
 /// An engine that died at birth leaves the host a connection and no child,
@@ -205,7 +204,7 @@ fn wire_spawn_refuses_a_parked_fork_without_asking_the_factory() {
     let (desk, _fleet, _parent_inbox) = wire_spawnable_desk(3, factory.clone());
 
     let err = desk
-        .ask(super::start_req(NurseryId(0), "go", "in-process", false))
+        .ask(super::start_req(NurseryId(0), "go", "in-process"))
         .expect_err("a wire desk has no nursery to adopt a parked fork from");
     assert!(
         err.message.contains("`sealed <bytes>`"),
@@ -270,7 +269,6 @@ fn identity_and_wire_peers_exchange_messages_through_one_desk() {
     let mut parent_spec = crate::agent::testkit::TestAgentSpec::new("parent");
     parent_spec.fuel = 3;
     parent_spec.returns = true;
-    parent_spec.search = true;
     let parent =
         crate::agent::testkit::test_agent(&fleet, parent_spec).expect("a fresh fleet's trunk");
 

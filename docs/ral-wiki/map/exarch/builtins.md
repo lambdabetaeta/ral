@@ -353,7 +353,7 @@ so the model has the address before it asks for one.
   any depth of its argument (`first_order`), so the type variables its argument
   mentions are `data` and its row variables deep (`door` in `harness.rs`;
   [[decisions/260930_operators-are-kinded|operators-are-kinded]]).
-  `` `start [prompt: …, name: …, type: …, grant: …, search: …, provider: …, model: …] `` is the one
+  `` `start [prompt: …, name: …, type: …, grant: …, provider: …, model: …] `` is the one
   spawn: launch-only and always asynchronous, a one-line notice arriving
   through the inbox when the child replies, and the child's row in the answer carrying the `name` and
   `log-dir` the old receipt did. `name` is the child's identity — the tab-bar
@@ -373,10 +373,10 @@ so the model has the address before it asks for one.
   record itself is decoded by `decode_capability_map` off the `Form::Grant`
   table when `SpawnGrant::layer` resolves it against the child's cwd, so an
   unknown key is refused in that table's words
-  ([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]]); `search` is a `Bool`
-  admitting the provider's own hosted web search, clamped at the desk to at
-  most the caller's own bit, which the trunk takes from the network policy's
-  `search` verdict ([[map/exarch/agent|agent]]). `provider` and `model` are
+  ([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]]). There is
+  no `search` field: hosted web search is a tool, present in a request or not,
+  so the model never reasons about it in prose; a child inherits its parent's
+  bit verbatim ([[map/exarch/agent|agent]]). `provider` and `model` are
   each `` `inherit `` or `` `named <Str> ``, and both are always written:
   ral has no optional field, so absence is *data* carried by a variant
   ([[invariants/optionality-via-variants|optionality-via-variants]]) and the

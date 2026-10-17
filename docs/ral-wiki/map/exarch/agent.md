@@ -141,9 +141,10 @@ it is a model-facing verb — there is no `fetch-url` builtin
 is what `guest-net::Config::egress` takes: the policy and ledger a synod
 session's guest network is gated by are the fleet's own, not a second
 copy ([[design/egress|egress]], [[map/synod|synod]]). Host-mode exarch, which
-has no guest to police, still keeps `Egress` for one thing: the `search` bit
-that clamps the harness `` exarch-agents `start [... search: …] `` field
-([[map/exarch/builtins|builtins]]).
+has no guest to police, still keeps `Egress` for one thing: the `search` bit,
+which every fork inherits verbatim. `provider::wire::tool_defs` attaches the
+hosted search tool per request, only where the adapter has one, so a `/model`
+swap or a `named` child provider never leaves a stale verdict behind.
 
 A node built to converse — an attended or embedded trunk, and every
 `/branch` tab ([[decisions/260705_branch-minimal|branch-minimal]]) — withholds

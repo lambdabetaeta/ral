@@ -67,8 +67,6 @@ impl ExarchDesk {
             seat,
             provider,
             true,
-            // A child may narrow its parent's search reach, never widen it.
-            s.agent.search && spec.search,
             spec.memory == Memory::Mnemon,
         )?;
         self.spawn_child(child, name, spec.prompt)
@@ -166,10 +164,6 @@ impl ExarchDesk {
     /// A child of this call's agent, seated on `seat`: its fuel one less, and
     /// its log forked off the parent's. A returning child reports to its
     /// parent; one that does not roots its own tree and converses.
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "each is one axis a spawn kind decides; a struct would only rename them"
-    )]
     fn child(
         &self,
         verb: &str,
@@ -177,7 +171,6 @@ impl ExarchDesk {
         seat: Seat,
         provider: Arc<Provider>,
         returns: bool,
-        search: bool,
         inherit_context: bool,
     ) -> Result<Avatar, Error> {
         let s = &self.services;
@@ -225,7 +218,7 @@ impl ExarchDesk {
             fuel,
             provider: ProviderHandle::new(provider),
             returns,
-            search,
+            search: s.agent.search,
             fleet: s.fleet.clone(),
         })
         .map_err(|why| Error::new(format!("`` exarch-agents `{verb} `` refused: {why}")))
@@ -276,7 +269,6 @@ impl ExarchDesk {
             seat,
             s.agent.current_provider(),
             order.returns,
-            s.agent.search,
             !order.returns,
         )?;
         *order.child.lock_ignore_poison() = Some(child);

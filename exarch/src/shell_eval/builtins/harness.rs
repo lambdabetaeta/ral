@@ -156,7 +156,7 @@ fn door(data: &[TyVar], answers: &[TyVar], rows: &[RowVar], ty: Ty) -> Scheme {
     scheme(&vars, &rows, ty)
 }
 
-/// `exarch-agents :: ∀β:data α ρ1^d ρ2^d ρ3^d ρ4^d ρ5^d. <list | start [prompt: Str, name: Str, type: Variant ρ1, grant: Variant ρ2, search: Bool, provider: Variant ρ3, model: Variant ρ4] | message [to: Str, text: Str] | cancel Str | reply β | read Str | ρ5> → F α`
+/// `exarch-agents :: ∀β:data α ρ1^d ρ2^d ρ3^d ρ4^d ρ5^d. <list | start [prompt: Str, name: Str, type: Variant ρ1, grant: Variant ρ2, provider: Variant ρ3, model: Variant ρ4] | message [to: Str, text: Str] | cancel Str | reply β | read Str | ρ5> → F α`
 ///
 /// The outer tag row is open (`ρ5`) so an unrecognised tag reaches the
 /// runtime door that names the six legal ones, rather than dying as a
@@ -176,8 +176,7 @@ fn door(data: &[TyVar], answers: &[TyVar], rows: &[RowVar], ty: Ty) -> Scheme {
 /// it. The `type`, `grant`, `provider` and `model` rows *inside* `start` stay
 /// open, because a literal tag infers its own open row: closing them would
 /// make `` `bogus `` a bare row-mismatch diagnostic that never reaches the
-/// vocabulary's decoders, which enumerate the legal labels. `search` is
-/// two-state rather than an enumeration, so `Ty::Bool` closes it outright.
+/// vocabulary's decoders, which enumerate the legal labels.
 /// `reply`'s `β` is likewise trusted first-order data, checked at the door
 /// rather than by the row.
 fn scheme_agents(u: &mut Unifier) -> Scheme {
@@ -203,7 +202,6 @@ fn scheme_agents(u: &mut Unifier) -> Scheme {
                             ("name", Ty::String),
                             ("type", Ty::Variant(Row::Var(type_row))),
                             ("grant", Ty::Variant(Row::Var(grant_row))),
-                            ("search", Ty::Bool),
                             ("provider", Ty::Variant(Row::Var(provider_row))),
                             ("model", Ty::Variant(Row::Var(model_row))),
                         ]),
@@ -374,7 +372,7 @@ static HARNESS_BUILTINS_ARR: [BuiltinEntry; 6] = [
     BuiltinEntry::boundary(
         Cow::Borrowed("exarch-agents"),
         scheme_agents,
-        "exarch-agents <tag>  — agent control: `list extant agents, `start a new one, `message them, `cancel them, `reply to your parent, `read the reply of a descendant.\n\nexarch-agents `list: every extant agent (including yourself), along with their `spawner` (or `root). `state` is `busy while working, `waiting-on-agents while held only by a descendant, `replied, or `waiting if it is parked but has not replied. `idle-s` is seconds since it parked.\n\nexarch-agents `start [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: <permission>, search: <Bool>, provider: `inherit|`named <Str>, model: `inherit|`named <Str>]  — launch an agent, asynchronously; a reply will arrive later as a notice. An agent with an `amnemon` `type` starts with an empty context, while `mnemon` inherits yours (also reusing cache). Every new agent has the same bindings, cwd, and env as you, except live job handles. `prompt` is the agent's prompt, and can be computed as part of a ral script. `name` is the child's identity (non-empty, at most 24 characters, unique, ASCII only). `grant` controls permissions: `inherit (same as your authority), `confined (offline, no home reads), `read-only (may write to scratch), `edit-only (edits the cwd, no build tooling), `reasonable (everyday tooling), or `restrict <record>, which takes a capability record of the same shape as `grant [...]` (exec, fs, net, editor, shell); note that this may only restrict authority, not expand it. `search` states whether the child may use web search. `provider` and `model` control the inference provider and model: `inherit shares your own, and `named specifies a different one. A model the provider does not list is refused.\n\nexarch-agents `message [to: <Str>, text: <Str>]  — send `text` as a marked item to the agent named `to`.\n\nexarch-agents `cancel <name>; stop a descendant agent as soon as possible.\n\nexarch-agents `reply <value>  — hand `value` back to your parent agent. `value` must be first-order data (no blocks, handles, or environments).\n\nexarch-agents `read <name>  — fetch the value the descendant named `name` last handed to `reply, as [name: Str, reply: <value>].",
+        "exarch-agents <tag>  — agent control: `list extant agents, `start a new one, `message them, `cancel them, `reply to your parent, `read the reply of a descendant.\n\nexarch-agents `list: every extant agent (including yourself), along with their `spawner` (or `root). `state` is `busy while working, `waiting-on-agents while held only by a descendant, `replied, or `waiting if it is parked but has not replied. `idle-s` is seconds since it parked.\n\nexarch-agents `start [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: <permission>, provider: `inherit|`named <Str>, model: `inherit|`named <Str>]  — launch an agent, asynchronously; a reply will arrive later as a notice. An agent with an `amnemon` `type` starts with an empty context, while `mnemon` inherits yours (also reusing cache). Every new agent has the same bindings, cwd, and env as you, except live job handles. `prompt` is the agent's prompt, and can be computed as part of a ral script. `name` is the child's identity (non-empty, at most 24 characters, unique, ASCII only). `grant` controls permissions: `inherit (same as your authority), `confined (offline, no home reads), `read-only (may write to scratch), `edit-only (edits the cwd, no build tooling), `reasonable (everyday tooling), or `restrict <record>, which takes a capability record of the same shape as `grant [...]` (exec, fs, net, editor, shell); note that this may only restrict authority, not expand it. `provider` and `model` control the inference provider and model: `inherit shares your own, and `named specifies a different one. A model the provider does not list is refused.\n\nexarch-agents `message [to: <Str>, text: <Str>]  — send `text` as a marked item to the agent named `to`.\n\nexarch-agents `cancel <name>; stop a descendant agent as soon as possible.\n\nexarch-agents `reply <value>  — hand `value` back to your parent agent. `value` must be first-order data (no blocks, handles, or environments).\n\nexarch-agents `read <name>  — fetch the value the descendant named `name` last handed to `reply, as [name: Str, reply: <value>].",
         builtin_agents,
     ),
     BuiltinEntry::new(

@@ -95,7 +95,7 @@ that decision left open).
 The `` exarch-agents `start `` tag is **launch-only and always asynchronous**
 ([[decisions/260617_async-agent-tool|async-agent-tool]]). Its argument is a
 single closed record
-`[prompt: …, name: …, type: …, grant: …, search: …, provider: …, model: …]` —
+`[prompt: …, name: …, type: …, grant: …, provider: …, model: …]` —
 a record literal, so a missing or misspelled field is a *static* error naming
 it, while the `type` (`` `amnemon ``/`` `mnemon ``), `grant`, `provider` and
 `model` tags are
@@ -219,7 +219,6 @@ exarch-agents `start [
   name: 'researcher',
   type: `amnemon,
   grant: `read-only,
-  search: false,
   provider: `inherit,
   model: `inherit,
 ]

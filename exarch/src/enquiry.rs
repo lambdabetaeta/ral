@@ -298,7 +298,6 @@ pub(crate) struct Spec {
     pub(crate) prompt: String,
     pub(crate) name: Name,
     pub(crate) memory: Memory,
-    pub(crate) search: bool,
     pub(crate) provider: Selection,
     pub(crate) model: Selection,
 }
@@ -307,7 +306,6 @@ record!(Spec {
     prompt: "prompt",
     name: "name",
     memory: "type",
-    search: "search",
     provider: "provider",
     model: "model",
 });
@@ -1257,7 +1255,6 @@ mod tests {
                 prompt: "go".into(),
                 name: Name("scout".into()),
                 memory,
-                search: true,
                 provider: Selection::Inherit,
                 model,
             },

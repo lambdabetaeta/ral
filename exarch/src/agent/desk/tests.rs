@@ -36,8 +36,7 @@ fn fresh_log() -> AgentLog {
 
 /// A fresh fleet's trunk and the [`HostServices`] a desk running as it
 /// captures, with `configure` free to narrow the trunk's own config
-/// before it is born — `search: false` for the one case that must be
-/// narrowed rather than granted, a custom `system_base`/`index` for the
+/// before it is born — a custom `system_base`/`index` for the
 /// bookend test, `returns: false` for the one refusal that keys on it.
 /// Returns the fleet and the trunk's own inbox too, since a spawn test
 /// needs both to drive `` `start `` end to end.
@@ -52,7 +51,6 @@ fn services_with(
     spec.mailbox = parent_inbox.mailbox();
     spec.fuel = fuel;
     spec.returns = true;
-    spec.search = true;
     configure(&mut spec);
     let agent = crate::agent::testkit::test_agent(&fleet, spec).expect("a fresh fleet's trunk");
     let (emit, _rx) = crate::bus::dummy_emitter();
@@ -146,12 +144,11 @@ fn family_req(family: &str, label: &str, payload: Option<FOValue>) -> FOValue {
 
 /// The model's plainest spawn record: `` `amnemon ``, inheriting
 /// provider and model.
-pub(super) fn spec(prompt: &str, name: &str, search: bool) -> Spec {
+pub(super) fn spec(prompt: &str, name: &str) -> Spec {
     Spec {
         prompt: prompt.to_string(),
         name: Name(name.to_string()),
         memory: Memory::Amnemon,
-        search,
         provider: Selection::Inherit,
         model: Selection::Inherit,
     }
@@ -162,8 +159,8 @@ pub(super) fn start(fork: ForkClaim, spec: Spec) -> Request {
 }
 
 /// The in-process shape: the fork waits in this host's own nursery.
-pub(super) fn start_req(session: NurseryId, prompt: &str, name: &str, search: bool) -> Request {
-    start(ForkClaim::Parked(session), spec(prompt, name, search))
+pub(super) fn start_req(session: NurseryId, prompt: &str, name: &str) -> Request {
+    start(ForkClaim::Parked(session), spec(prompt, name))
 }
 
 pub(super) fn message_req(to: &str, text: &str) -> Request {
@@ -1029,7 +1026,7 @@ fn agent_start_spawns_and_delivers_result_to_parent_inbox() {
     desk.services.agent.provider.swap(provider);
 
     let answer = with_parked(&desk, |desk, session| {
-        desk.ask(start_req(session, "say hi", "helper", true))
+        desk.ask(start_req(session, "say hi", "helper"))
     })
     .expect("a valid `start must succeed");
 
@@ -1084,7 +1081,7 @@ fn agent_read_answers_the_childs_deposited_reply() {
     desk.services.agent.provider.swap(provider);
 
     with_parked(&desk, |desk, session| {
-        desk.ask(start_req(session, "say hi", "helper", true))
+        desk.ask(start_req(session, "say hi", "helper"))
     })
     .expect("a valid `start must succeed");
     let _ = wait_for_settle(&parent_inbox);
@@ -1125,7 +1122,7 @@ fn start_answers_the_fleets_state_not_a_receipt() {
 
     let (live, _) = summary_counts(
         &with_parked(&desk, |desk, session| {
-            desk.ask(start_req(session, "go", "helper", false))
+            desk.ask(start_req(session, "go", "helper"))
         })
         .expect("the spawn must succeed"),
     );
@@ -1203,7 +1200,7 @@ fn a_refused_selection_never_registers_a_child() {
             ForkClaim::Parked(NurseryId(0)),
             Spec {
                 model: Selection::Named("other-model".into()),
-                ..spec("go", "helper", false)
+                ..spec("go", "helper")
             },
         ))
         .expect_err("a scripted bureau must refuse to mint");
@@ -1221,7 +1218,7 @@ fn a_refused_selection_never_registers_a_child() {
 
 /// A `` `start `` whose spec record `edit` has spoilt, as no door sends it.
 fn spoilt_start(edit: impl FnOnce(&mut Vec<(String, FOValue)>)) -> FOValue {
-    let mut spec = spec("go", "scout", false).encode();
+    let mut spec = spec("go", "scout").encode();
     let FOValue::Map { entries } = &mut spec else {
         unreachable!("a spec is a record")
     };
@@ -1245,7 +1242,7 @@ fn start_refuses_a_spec_missing_a_field_by_name() {
         .expect_err("a spec missing `name` must be refused");
     assert_eq!(
         err.message,
-        "`` exarch-agents `start ``: `spec: no `name field in a record of 5 fields"
+        "`` exarch-agents `start ``: `spec: no `name field in a record of 4 fields"
     );
 }
 
@@ -1259,37 +1256,6 @@ fn start_refuses_a_misspelt_spec_field() {
         err.message,
         "`` exarch-agents `start ``: `spec: unknown field `nmae`: did you mean `name`?"
     );
-}
-
-/// A request above the parent's ceiling is narrowed, never refused — the
-/// child's stack gains one more layer from [`crate::policy::base_layer`].
-/// Only that half is visible here: the clamped bit lands in a private
-/// `Agent` field, so `agent::build`'s fork test asserts the narrowing
-/// itself.
-#[test]
-fn agent_start_admits_a_search_request_above_the_parents_ceiling() {
-    let (services, _fleet, parent_inbox) =
-        services_with(3, crate::agent::fleet::Launch::for_test(), |spec| {
-            spec.search = false;
-        });
-    let desk = Arc::new(ExarchDesk { services });
-    let provider = Arc::new(Provider::scripted(
-        "test-model",
-        Script::new().then(Reply::tool_calls(vec![ral_call(
-            "r1",
-            "exarch-agents `reply 'done'",
-        )])),
-    ));
-    desk.services.agent.provider.swap(provider);
-
-    let answer = with_parked(&desk, |desk, session| {
-        desk.ask(start_req(session, "go", "searcher", true))
-    });
-    assert!(
-        answer.is_ok(),
-        "a spawn asking for more search reach than its parent holds is narrowed, not refused"
-    );
-    let _ = wait_for_settle(&parent_inbox);
 }
 
 /// Read `system_prompt_bytes` off a session's opening bookend — the first
@@ -1345,7 +1311,7 @@ fn agent_start_bookend_records_the_childs_resolved_length() {
     desk.services.agent.provider.swap(provider);
 
     let answer = with_parked(&desk, |desk, session| {
-        desk.ask(start_req(session, "say hi", "helper", true))
+        desk.ask(start_req(session, "say hi", "helper"))
     })
     .expect("a valid `start must succeed");
 
@@ -1386,7 +1352,7 @@ fn agent_start_bookend_records_the_childs_resolved_length() {
 fn agent_start_refuses_at_zero_fuel_with_the_exhaustion_text() {
     let (desk, _fleet, _parent_inbox) = spawnable_desk(0);
     let (err, left_parked) = with_parked(&desk, |desk, session| {
-        let answer = desk.ask(start_req(session, "hi", "helper", true));
+        let answer = desk.ask(start_req(session, "hi", "helper"));
         (answer, still_parked(desk, session))
     });
     let err = err.expect_err("zero fuel must refuse");
@@ -1422,12 +1388,12 @@ fn agent_start_refuses_a_name_already_borne_by_a_live_agent() {
     desk.services.agent.provider.swap(provider);
 
     let answer = with_parked(&desk, |desk, session| {
-        desk.ask(start_req(session, "go", "helper", true))
+        desk.ask(start_req(session, "go", "helper"))
     });
     assert!(answer.is_ok(), "the first spawn must succeed");
 
     let (err, left_parked) = with_parked(&desk, |desk, session| {
-        let answer = desk.ask(start_req(session, "go again", "helper", true));
+        let answer = desk.ask(start_req(session, "go again", "helper"));
         (answer, still_parked(desk, session))
     });
     let err = err.expect_err("a second spawn naming a live agent must be refused");
@@ -1457,7 +1423,7 @@ fn agent_start_refuses_a_malformed_name_before_it_adopts_the_fork() {
     let (desk, _fleet, _parent_inbox) = spawnable_desk(3);
 
     let (err, left_parked) = with_parked(&desk, |desk, session| {
-        let answer = desk.ask(start_req(session, "go", "help/er", true));
+        let answer = desk.ask(start_req(session, "go", "help/er"));
         (answer, still_parked(desk, session))
     });
     let err = err.expect_err("a malformed name must be refused");
@@ -1503,7 +1469,7 @@ fn fuel_bounds_depth_not_fanout() {
 
     for i in 0..3 {
         let answer = with_parked(&desk, move |desk, session| {
-            desk.ask(start_req(session, "go", &format!("t{i}"), true))
+            desk.ask(start_req(session, "go", &format!("t{i}")))
         });
         assert!(
             answer.is_ok(),
@@ -1531,7 +1497,7 @@ fn agent_start_refuses_after_clear() {
     let (desk, _fleet, parent_inbox) = spawnable_desk(3);
     parent_inbox.clear(); // the /clear gesture, on this caller
     let err = with_parked(&desk, |desk, session| {
-        desk.ask(start_req(session, "hi", "helper", true))
+        desk.ask(start_req(session, "hi", "helper"))
     })
     .expect_err("a stale epoch must refuse");
     assert!(
@@ -1550,9 +1516,9 @@ fn refused_enquiry_leaves_the_nursery_empty() {
     let (desk, _fleet, _parent_inbox) = spawnable_desk(3);
     let (answer, left_parked) = parked_by(
         &desk,
-        r"exarch-agents `start [prompt: #'go'#, name: 'helper', type: `amnemon, grant: `restrict [net: 'yes'], search: false, provider: `inherit, model: `inherit]",
+        r"exarch-agents `start [prompt: #'go'#, name: 'helper', type: `amnemon, grant: `restrict [net: 'yes'], provider: `inherit, model: `inherit]",
         |desk, session| {
-            let answer = desk.ask(start_req(session, "go", "helper", false));
+            let answer = desk.ask(start_req(session, "go", "helper"));
             (answer, still_parked(desk, session))
         },
     );
@@ -1628,7 +1594,7 @@ fn surface_then_spawn_observes_the_surface_first() {
     let session = crate::agent::Avatar::for_test("system").unwrap();
     let (tx, rx) = channel();
     let emit = Emitter::new(tx, session.agent.id);
-    let _ = session.ral(r#"exarch-pins `clear "test-marker"; exarch-agents `start [prompt: #'go'#, name: 't', type: `amnemon, grant: `confined, search: true, provider: `inherit, model: `inherit]"#,
+    let _ = session.ral(r#"exarch-pins `clear "test-marker"; exarch-agents `start [prompt: #'go'#, name: 't', type: `amnemon, grant: `confined, provider: `inherit, model: `inherit]"#,
         5,
         &emit,
     );
