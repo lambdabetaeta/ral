@@ -113,21 +113,7 @@ mod tests {
     /// Parse *and* freeze a bake-in: the loader resolves places, so a failure
     /// here is malformed source, a refused payload, or an xdg escape.
     fn load(name: &str, text: &str, ctx: &FreezeCtx) -> Capabilities {
-        load_with_env(name, text, ctx, &[])
-    }
-
-    /// [`load`] under shell-level overrides of the environment a profile's
-    /// `env` reads.
-    fn load_with_env(
-        name: &str,
-        text: &str,
-        ctx: &FreezeCtx,
-        env: &[(&str, &str)],
-    ) -> Capabilities {
         let mut shell = ral_core::test_helper::core_shell();
-        for (k, v) in env {
-            shell.set_env_var(*k, *v);
-        }
         ral_core::load::profile::load_capabilities_from_str(
             &ral_core::types::Mooring::adrift(),
             &mut shell,
@@ -504,26 +490,6 @@ mod tests {
         use ral_core::guard::freeze::Selector;
         let want = Selector::names().map(String::from).collect();
         assert_eq!(dir_selectors(REASONABLE_RAL), want);
-    }
-
-    /// rustup takes its lock for writing on every proxy run, so the lock is
-    /// writable.  `RUSTUP_HOME` is emptied, which the profile reads as unset.
-    #[cfg(unix)]
-    #[test]
-    fn reasonable_writes_the_rustup_lock() {
-        let ctx = FreezeCtx {
-            home: Some(host_home()),
-            cwd: "/".into(),
-        };
-        let caps = load_with_env("reasonable", REASONABLE_RAL, &ctx, &[("RUSTUP_HOME", "")]);
-        let home = |sub: &str| frozen(&Place::Home(sub.into()), &ctx);
-        let lock = home(".rustup/self-update/self-update.lock");
-        let fs = caps.fs.as_ref().expect("reasonable declares fs");
-        assert!(
-            fs.write_prefixes.contains(&lock),
-            "reasonable should write {}",
-            lock.as_str()
-        );
     }
 
     /// A session writes no cache the user's own tools read.

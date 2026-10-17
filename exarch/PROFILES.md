@@ -356,10 +356,7 @@ world has its cache writes refused, and the refusal names the path.
 - **`RUSTUP_HOME` stays yours.** It holds the toolchains that run, not a cache,
   so it is not redirected: `cargo` in a session runs your rustup toolchains.
   They are read-only, so an install that a `rust-toolchain.toml` triggers,
-  including a missing target or component, is refused as a write. The one
-  exception is `self-update/self-update.lock`, which recent rustup opens for
-  writing on every proxy run: `reasonable` writes that one file, under
-  `$RUSTUP_HOME` or `~/.rustup`. On Linux the lock must already exist.
+  including a missing target or component, is refused as a write.
 - **A scratch is deleted when its session ends.** A session killed before it can
   clean up leaves its scratch to the next session's sweep.
 

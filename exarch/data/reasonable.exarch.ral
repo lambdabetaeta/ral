@@ -14,20 +14,6 @@
 #
 # Default base when `--base` is omitted.
 
-# rustup's lock file, under a usable (non-empty, absolute) `RUSTUP_HOME`,
-# else `~/.rustup`.  `env` is
-# the host's here: exarch does not redirect `RUSTUP_HOME`.
-let host-env = !{env}
-let rustup-home = if !{has $host-env RUSTUP_HOME} { return $host-env[RUSTUP_HOME] } else { return '' }
-let rustup-at = { |sub|
-  if !{re-match #'^(/|[A-Za-z]:[/\\])'# $rustup-home} {
-    return `absolute "$rustup-home/$sub"
-  } else {
-    return `home ".rustup/$sub"
-  }
-}
-let self-update-lock = !{rustup-at self-update/self-update.lock}
-
 return [
   # Build-toolchain caches, user-installed toolchains, and the
   # project tree itself.  The OS sandbox layer's readable system
@@ -133,7 +119,6 @@ return [
       `absolute /tmp,
       `tempdir .,
       `gitdir .,
-      $self-update-lock,  # rustup locks it on every proxy run
     ],
 
     # Per-tool credential subdirs of `xdg-config`.  The broad `xdg-config`

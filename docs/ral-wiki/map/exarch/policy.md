@@ -162,9 +162,8 @@ its own selector, `` `dir `homebrew ``, expanding to the prefixes that exist,
 `HOMEBREW_PREFIX` first); `%SystemRoot%\System32`, the PowerShell home, and
 Git-for-Windows' `usr\bin` on Windows. `reasonable` lists a selector for every
 package manager in the table and writes no read entry for what one runs;
-running reads cover it. It excludes `~/.dotnet/corefx` from `fs` and writes
-rustup's `self-update/self-update.lock`. No profile writes
-`xdg-cache`: `reasonable` and `minimal` write the working tree and scratch only,
+running reads cover it. It excludes `~/.dotnet/corefx` from `fs`. No profile
+writes `xdg-cache`: `reasonable` and `minimal` write the working tree and scratch only,
 and exarch points `XDG_CACHE_HOME` and the legacy tool homes into the scratch
 ([[map/exarch|exarch]]). `RUSTUP_HOME` is not redirected, since it holds what
 runs. Two consequences ride the selectors:
