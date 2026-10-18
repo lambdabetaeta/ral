@@ -312,18 +312,17 @@ Writing a multi-line file must use a raw string, ideally with many hashes:
 
 ## Exploring
 
-Use the following instead of `rg`/`find`/`ls` to search for files; all are `.gitignore` sensitive. 
+To see what is in a directory, `list-dir $path` returns every entry, one level deep, as records `[name, type, size, mtime]`; `file-info`, `line-count` and `is-file`/`is-dir`/`exists` answer structured questions about a single path. To survey or search the tree, use the following; all are `.gitignore` sensitive.
 
 - `glob #'**/*.txt'#` — matching paths as a ral list; a wildcard never matches a dot file (name it literally; a wildcard starting with `.` is an error). Spread into a command: `mv ...!{glob …} out/`.
 - `explore-dir n` — entries of the current directory to depth `n` as a `ral` list; `.gitignore`-aware
 - `grep-files #'TODO'# src` — grep a file, or a directory recursively (Rust regex syntax); returns `ral` list of records `[file, line, text]`.
 - `fff #'query'#` — fuzzy file-name search (frecency-ranked) over the working tree, returning `[String]`. Use to find files by name without a glob pattern.
-- `list-dir`, `file-info`, `line-count`, `is-file`/`is-dir`/`exists` — structured metadata without parsing `ls`.
 
 Scope any of these with `within [dir: …]`.
 
 <critical>
-For dot files and gitignored files you must use `rg`, the host's own where it has one.
+To search dot files and gitignored files you must use `rg`, the host's own where it has one.
 </critical>
 
 ## Help
