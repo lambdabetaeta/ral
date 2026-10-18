@@ -21,6 +21,15 @@ fn line_hash_ignores_trailing_whitespace() {
     assert_eq!(line_hash("x"), line_hash("x   "));
 }
 
+#[test]
+fn eol_round_trips_byte_for_byte() {
+    for body in ["a\r\nb\r\n", "a\r\r\nb", "a\r\nb\n", "a\rb", "a\n", ""] {
+        let eol = Eol::of(body.as_bytes());
+        assert_eq!(eol.encode(&eol.decode(body.to_string())), body);
+    }
+    assert!(matches!(Eol::of(b"a\r\nb\n"), Eol::Lf), "a mixed file stays raw");
+}
+
 /// In a file shorter than a full floor window, every window clamps to the
 /// whole file, so lines are told apart by offset alone, all at the floor.
 #[test]

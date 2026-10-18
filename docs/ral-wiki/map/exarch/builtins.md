@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e028f5a3
-generated_at_date: 2026-10-13
+generated_at_commit: bd69ff71
+generated_at_date: 2026-10-18
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/skill.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/src/enquiry.rs, exarch/src/library.rs, exarch/data/agent.ral]
 ---
 
@@ -39,6 +39,12 @@ through its `EngineInstaller`'s two halves
 The bulk-I/O atoms read in Rust, **below the redirect frame**, so each is one
 logical operation with one surface ([[map/exarch/io-surface|io-surface]]).
 
+The readers and editors share one line-ending policy (`Eol`): a file whose
+every `\n` follows a `\r` is CRLF, read as `\n` text and written back in CRLF;
+any other file, mixed ones included, is taken raw. So an unedited round trip is
+byte-exact, a multi-line `from` matches a CRLF file, and an edit never leaves
+mixed endings behind.
+
 - `view-text <path> <start> <end>` → `[{line, text}]`. The read primitive: the
   half-open line range `[start, end)`, each row carrying its 1-based line number
   and its text, verbatim — which is what `edit-replace` matches on. Surfaces one
@@ -51,7 +57,8 @@ logical operation with one surface ([[map/exarch/io-surface|io-surface]]).
   Rust regex search of `path`, a file or a directory walked recursively
   (`search_tree`; a hit names its file cwd-relative when under the cwd, else
   absolutely, so a reader takes it back unchanged; a missing path is an error,
-  not an empty search; binary detection quits at NUL, each file
+  not an empty search; CRLF-aware, so `$` anchors before `\r\n` and a hit's text
+  is the row `view-text` shows; binary detection quits at NUL, each file
   gated by `check_fs_read`, the walk polling the cancel check per entry via the
   one sanctioned `cancellable` door). Surfaces exactly one
   `Observed::Grep { scope, pattern }` observation for the whole search

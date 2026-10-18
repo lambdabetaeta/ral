@@ -1253,6 +1253,38 @@ fn edit_replace_replaces_unique_match_and_rejects_ambiguity() {
     );
 }
 
+/// A CRLF file reads and edits as `\n` text and keeps its ending: a multi-line
+/// FROM matches, `$` anchors before `\r\n`, and a grep hit is the bare row, so
+/// a line rebuilt from it gains no stray `\r`.  A mixed file stays as it is.
+#[test]
+fn a_crlf_file_edits_as_lf_and_keeps_its_ending() {
+    let engine = fresh();
+    let (tmp, path) = scratch_file("crlf", "win.txt", "one\r\ntwo\r\nthree\r\n");
+    let file = tmp.path().join("win.txt");
+    let read = || std::fs::read_to_string(&file).expect("read crlf file");
+
+    let r = run_once(&engine, &format!("edit-replace '{path}' 'one\ntwo' 'ONE\nTWO'"));
+    assert_eq!(r.exit, 0, "stderr was {:?}", String::from_utf8_lossy(&r.stderr));
+    assert_eq!(read(), "ONE\r\nTWO\r\nthree\r\n");
+
+    let r = run_once(
+        &engine,
+        &format!(
+            "let hits = grep-files 'three$' '{path}'\n\
+             let hit = $hits[0]\n\
+             let row = view-hash '{path}' $hit[line] $[$hit[line] + 1]\n\
+             edit-hash '{path}' [[hash: $row[0][hash], line: \"$hit[text]\nfour\"]]"
+        ),
+    );
+    assert_eq!(r.exit, 0, "stderr was {:?}", String::from_utf8_lossy(&r.stderr));
+    assert_eq!(read(), "ONE\r\nTWO\r\nthree\r\nfour\r\n");
+
+    std::fs::write(&file, "a\r\nb\n").expect("write mixed file");
+    let r = run_once(&engine, &format!("edit-replace '{path}' 'b' 'B'"));
+    assert_eq!(r.exit, 0, "stderr was {:?}", String::from_utf8_lossy(&r.stderr));
+    assert_eq!(read(), "a\r\nB\n");
+}
+
 /// An edit holds both texts, so it reads as its change however large the
 /// file around it, and as nothing but that change.
 #[test]

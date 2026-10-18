@@ -4,6 +4,7 @@
 
 use crate::card::{Diff, encode_edit};
 use crate::skill;
+use grep::matcher::LineTerminator;
 use grep::regex::RegexMatcherBuilder;
 use grep::searcher::{BinaryDetection, SearcherBuilder, sinks::Lossy};
 use ignore::WalkBuilder;
@@ -150,6 +151,44 @@ fn window_hashes(rows: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// A text file's line ending.  `Crlf` only when every `\n` follows a `\r`; a
+/// mixed file is `Lf`, its stray `\r`s kept as text.  So `encode` inverts
+/// `decode` byte for byte, and an edit rewrites no line it did not touch.
+#[derive(Clone, Copy)]
+enum Eol {
+    Lf,
+    Crlf,
+}
+
+impl Eol {
+    fn of(bytes: &[u8]) -> Self {
+        let bare_lf = bytes.starts_with(b"\n")
+            || bytes.windows(2).any(|w| w[1] == b'\n' && w[0] != b'\r');
+        if bytes.contains(&b'\n') && !bare_lf { Self::Crlf } else { Self::Lf }
+    }
+
+    const fn terminator(self) -> &'static str {
+        match self {
+            Self::Lf => "\n",
+            Self::Crlf => "\r\n",
+        }
+    }
+
+    fn decode(self, body: String) -> String {
+        match self {
+            Self::Lf => body,
+            Self::Crlf => body.replace("\r\n", "\n"),
+        }
+    }
+
+    fn encode(self, text: &str) -> Cow<'_, str> {
+        match self {
+            Self::Lf => Cow::Borrowed(text),
+            Self::Crlf => Cow::Owned(text.replace('\n', "\r\n")),
+        }
+    }
+}
+
 /// Split on raw `\n`, keeping the empty tail a terminal newline leaves, so
 /// `join("\n")` reproduces the body byte for byte: what lets a file's trailing
 /// newline survive an edit, where the edge-trimming `lines` would eat it.
@@ -202,7 +241,7 @@ fn view_range(
         )));
     }
 
-    let body = read_text_file(shell, path, tool)?;
+    let (_, body) = read_text_file(shell, path, tool)?;
     surface_read(shell, mooring, path);
     let rows = rows_of(&body);
     let hi = (end - 1).min(rows.len());
@@ -289,6 +328,7 @@ fn readable(shell: &mut Shell, rel: &str) -> bool {
 /// under it, else absolutely, so it can be handed straight back to a reader.
 fn search_tree(shell: &mut Shell, pattern: &str, path: &str) -> Settled<Vec<SearchHit>> {
     let matcher = RegexMatcherBuilder::new()
+        .crlf(true)
         .build(pattern)
         .map_err(|e| sig(regex_err("grep-files", pattern, &e.to_string())))?;
     let root = checked_read_path(shell, path)?;
@@ -299,6 +339,7 @@ fn search_tree(shell: &mut Shell, pattern: &str, path: &str) -> Settled<Vec<Sear
     }
     let cwd = shell.resolve(".").into_inner();
     let mut searcher = SearcherBuilder::new()
+        .line_terminator(LineTerminator::crlf())
         .line_number(true)
         .binary_detection(BinaryDetection::quit(b'\x00'))
         .build();
@@ -327,6 +368,8 @@ fn search_tree(shell: &mut Shell, pattern: &str, path: &str) -> Settled<Vec<Sear
         if file.read_to_end(&mut bytes).is_err() {
             continue;
         }
+        // Cut by the file's own ending, so a hit is the row `view-text` shows.
+        let term = Eol::of(&bytes).terminator();
         searcher
             .search_slice(
                 &matcher,
@@ -335,7 +378,7 @@ fn search_tree(shell: &mut Shell, pattern: &str, path: &str) -> Settled<Vec<Sear
                     results.push(SearchHit {
                         file: rel.clone(),
                         line: line_num,
-                        text: line.trim_end_matches(['\r', '\n']).to_string(),
+                        text: line.strip_suffix(term).unwrap_or(line).to_string(),
                     });
                     Ok(true)
                 }),
@@ -424,7 +467,7 @@ fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
         ));
     }
 
-    let body = read_text_file(shell, path, "edit-hash")?;
+    let (eol, body) = read_text_file(shell, path, "edit-hash")?;
     let rows = rows_of(&body);
     let n = rows.len();
     let hashes = window_hashes(&rows);
@@ -499,7 +542,7 @@ fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
         }
     }
     let final_text = out.join("\n");
-    shell.atomic_write(path, final_text.as_bytes())?;
+    shell.atomic_write(path, eol.encode(&final_text).as_bytes())?;
     surface_edit(mooring, path, &body, &final_text);
 
     let mut line_nums: Vec<usize> = resolved.iter().map(|r| r.at + 1).collect();
@@ -529,8 +572,9 @@ fn surface_edit(mooring: &Mooring, path: &str, old: &str, new: &str) {
 
 /// The witness layer's shared read door, gating on the live grant as a `< path`
 /// redirect would but staying in Rust, below the redirect frame — so each caller
-/// owns its own surface.  `tool` names the calling builtin in the error.
-fn read_text_file(shell: &mut Shell, path: &str, tool: &str) -> Settled<String> {
+/// owns its own surface.  `tool` names the calling builtin in the error.  The
+/// text comes back decoded through its [`Eol`], which the writer re-encodes.
+fn read_text_file(shell: &mut Shell, path: &str, tool: &str) -> Settled<(Eol, String)> {
     let rp = shell.resolve(path);
     let located = shell.locate(&rp, &FsOp::Read)?;
     let mut file = located.read().map_err(|e| {
@@ -546,11 +590,13 @@ fn read_text_file(shell: &mut Shell, path: &str, tool: &str) -> Settled<String> 
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)
         .map_err(|e| sig(format!("{tool}: cannot read {path}: {e}")))?;
-    String::from_utf8(bytes).map_err(|_| {
+    let eol = Eol::of(&bytes);
+    let body = String::from_utf8(bytes).map_err(|_| {
         sig(format!(
             "{tool}: '{path}' is not valid UTF-8; these tools read and edit text only."
         ))
-    })
+    })?;
+    Ok((eol, eol.decode(body)))
 }
 
 /// `edit-replace PATH FROM TO` — replace the one literal occurrence of `FROM`, so
@@ -564,14 +610,14 @@ fn builtin_edit_replace(args: &[Value], mooring: &Mooring, shell: &mut Shell) ->
     if from.is_empty() {
         return Err(sig("edit-replace: FROM must be non-empty."));
     }
-    let body = read_text_file(shell, path, "edit-replace")?;
+    let (eol, body) = read_text_file(shell, path, "edit-replace")?;
     let starts = ral_core::builtins::strings::occurrence_starts(&body, from);
     let &[start] = starts.as_slice() else {
         return Err(no_unique_match(&body, from, path, &starts));
     };
 
     let final_text = body.replacen(from, to, 1);
-    shell.atomic_write(path, final_text.as_bytes())?;
+    shell.atomic_write(path, eol.encode(&final_text).as_bytes())?;
     surface_edit(mooring, path, &body, &final_text);
 
     let start_line = line_of(&body, start);
