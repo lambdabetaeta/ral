@@ -174,7 +174,7 @@ Arithmetic and Boolean expressions must be in `$[…]` blocks: `$[$x == 0]`, `$[
     $xs[0]                               # #'a'#
     let r = [host: #'h'#, port: 80]        # record — fixed, heterogeneous fields
     $r[host]                             # bare-key indexing
-    let [head, ...rest] = $xs            # destructuring
+    let [first, ...rest] = $xs           # destructuring
     let wide = [...$xs, d, e]            # consing by spreading
     let at_end = [d, e, ...$xs]          # appending by spreading
     ls ...$flags ...$dirs                # …and to splice arguments
