@@ -57,6 +57,7 @@
 //! [`recover_orphaned_state`] sweeps a crashed session's ledger at the next
 //! boot, deleting its registered profiles.
 
+use crate::path::shown;
 use crate::process::cancel::{CancelCause, Scope};
 use std::fmt::Write as _;
 use std::io;
@@ -200,9 +201,9 @@ impl std::fmt::Display for DaclError {
             Self::NetworkPathRejected(p) => write!(
                 f,
                 "path is not local (network/UNC paths not supported): {}",
-                p.display()
+                shown(p)
             ),
-            Self::PathNotFound(p) => write!(f, "path does not exist: {}", p.display()),
+            Self::PathNotFound(p) => write!(f, "path does not exist: {}", shown(p)),
             Self::Redirected {
                 granted,
                 at,
@@ -213,8 +214,8 @@ impl std::fmt::Display for DaclError {
                  a volume mounted in a folder cannot be granted on Windows (it cannot be \
                  told from a junction). Would giving the volume a drive letter and \
                  granting that do?",
-                granted.display(),
-                at.display()
+                shown(granted),
+                shown(at)
             ),
             Self::Redirected {
                 granted,
@@ -224,11 +225,11 @@ impl std::fmt::Display for DaclError {
                 write!(
                     f,
                     "'{}' was granted by its real path, but ",
-                    granted.display()
+                    shown(granted)
                 )?;
                 match target {
-                    Some(t) => write!(f, "'{}' is now a link to '{}'", at.display(), t.display())?,
-                    None => write!(f, "'{}' is now a reparse point", at.display())?,
+                    Some(t) => write!(f, "'{}' is now a link to '{}'", shown(at), shown(t))?,
+                    None => write!(f, "'{}' is now a reparse point", shown(at))?,
                 }
                 f.write_str(
                     "; an allowance names what it named when granted. To allow the new \
@@ -237,10 +238,10 @@ impl std::fmt::Display for DaclError {
                 )
             }
             Self::WriteDacDenied { path, reason } => {
-                write!(f, "WRITE_DAC denied on {}: {reason}", path.display())
+                write!(f, "WRITE_DAC denied on {}: {reason}", shown(path))
             }
             Self::Win32 { path, reason } => {
-                write!(f, "Win32 error on {}: {reason}", path.display())
+                write!(f, "Win32 error on {}: {reason}", shown(path))
             }
             Self::LedgerIo(e) => write!(f, "DACL ledger I/O error: {e}"),
             Self::LedgerParse(s) => write!(f, "DACL ledger parse error: {s}"),
@@ -248,7 +249,7 @@ impl std::fmt::Display for DaclError {
             Self::MutexTimeout { path, timeout_ms } => write!(
                 f,
                 "timed out acquiring DACL mutex on {} after {timeout_ms} ms",
-                path.display()
+                shown(path)
             ),
             Self::Cancelled(cause) => write!(f, "{}", cause.message()),
         }

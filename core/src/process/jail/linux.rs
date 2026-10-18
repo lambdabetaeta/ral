@@ -92,7 +92,7 @@ fn make_delegated(cgroup: &Path) -> io::Result<()> {
             format!(
                 "{} has no parent, so it is not inside a cgroup2 mount. Is the jail root the \
                  path this guest actually mounts cgroup2 at?",
-                cgroup.display()
+                crate::path::shown(cgroup)
             ),
         )
     })?;
@@ -103,7 +103,7 @@ fn make_delegated(cgroup: &Path) -> io::Result<()> {
             format!(
                 "could not delegate {CONTROLLERS} from {}: {e}. Without them the cgroup below it \
                  has no memory.max or pids.max to write, and the command would run uncapped.",
-                parent.display()
+                crate::path::shown(parent)
             ),
         )
     })?;

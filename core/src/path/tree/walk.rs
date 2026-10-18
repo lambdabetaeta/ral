@@ -10,6 +10,7 @@
 use crate::capability::FsOp;
 use crate::path::LexicalPath;
 use crate::path::sigil::literal_relative;
+use crate::path::shown;
 use crate::process::Scope;
 use crate::types::{Settled, Shell, sig};
 use ignore::WalkBuilder;
@@ -158,8 +159,8 @@ impl Entry {
     pub fn name(&self) -> Settled<String> {
         self.shown
             .to_str()
-            .map(literal_relative)
-            .ok_or_else(|| unnameable(self.who, &self.shown))
+            .ok_or_else(|| unnameable(self.who, &self.shown))?;
+        Ok(literal_relative(&shown(&self.shown)))
     }
 }
 

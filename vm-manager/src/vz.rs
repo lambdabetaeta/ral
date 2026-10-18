@@ -455,13 +455,19 @@ fn block_device(
             &file_url(image),
             read_only,
         )
-        .map_err(|error| {
-            unavailable(&format!(
-                "the disk image {} could not be opened: {}",
-                image.display(),
-                ns_error(&error)
-            ))
-        })?;
+        .map_err(
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "outside ral: vm-manager does not depend on ral-core"
+            )]
+            |error| {
+                unavailable(&format!(
+                    "the disk image {} could not be opened: {}",
+                    image.display(),
+                    ns_error(&error)
+                ))
+            },
+        )?;
         Ok(VZVirtioBlockDeviceConfiguration::initWithAttachment(
             VZVirtioBlockDeviceConfiguration::alloc(),
             &attachment,

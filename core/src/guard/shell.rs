@@ -87,7 +87,7 @@ impl Shell {
     pub fn locate(&mut self, path: &LexicalPath, op: &FsOp) -> Settled<Located> {
         check_device_name(path)?;
         let located = crate::path::walk::walk(path, Leaf::Resolve)
-            .map_err(|e| crate::types::Error::io(path.display(), &e))?;
+            .map_err(|e| crate::types::Error::io(path.shown(), &e))?;
         if !path.is_discard() {
             let verdict = check_fs_exact(&self.context, located.real(), op);
             self.judged(verdict)?;

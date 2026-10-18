@@ -364,11 +364,11 @@ fn admit_exec(
         };
         // A file admit names that file alone, never what a directory since
         // put there holds.
-        if shape(&fd).map_err(|e| Error::admit(name.display(), e))? == FileType::Directory {
+        if shape(&fd).map_err(|e| Error::admit(crate::path::shown(name), e))? == FileType::Directory {
             continue;
         }
         (ruleset.admit(fd.as_fd(), Access::EXECUTE))
-            .map_err(|source| Error::admit(name.display(), source))?;
+            .map_err(|source| Error::admit(crate::path::shown(name), source))?;
     }
     let walks = vetoes_walk(table, fs);
     let masks: Vec<_> = (fs.rules().into_iter().flat_map(|rules| &rules.deny))

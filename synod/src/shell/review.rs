@@ -14,6 +14,7 @@
 //! is no status to distinguish, nothing to put back, and no conflict a
 //! put-back could discover.
 
+use ral_core::path::shown;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 
@@ -295,8 +296,8 @@ pub fn job_report(review: State<'_, Review>, folder: String) -> Result<WindowRep
         Some(held) if held.folder == folder => Ok(held.report.clone()),
         Some(held) => Err(format!(
             "The open report is for {}, not {} — refusing to answer for a different folder.",
-            held.folder.display(),
-            folder.display()
+            shown(&held.folder),
+            shown(&folder)
         )),
     };
     drop(guard);

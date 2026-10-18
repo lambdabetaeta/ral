@@ -8,6 +8,7 @@
 //! lexical, with no filesystem to gate.
 
 use crate::capability::FsOp;
+use crate::path::shown;
 use crate::path::tree::glob::Glob;
 use crate::path::walk::{DirEntry, FileInfo, Kind, Leaf, Stat};
 use crate::types::{Break, Settled, Shell, Value, sig};
@@ -53,7 +54,7 @@ pub(super) fn builtin_temp_dir(_args: &[Value], shell: &mut Shell) -> Settled<Va
         .tempdir_in(parent.real())
         .map_err(|e| sig(format!("temp-dir: {e}")))?
         .keep();
-    Ok(Value::string(path.to_string_lossy()))
+    Ok(Value::string(shown(&path)))
 }
 
 pub(super) fn builtin_temp_file(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
@@ -63,7 +64,7 @@ pub(super) fn builtin_temp_file(_args: &[Value], shell: &mut Shell) -> Settled<V
         .tempfile_in(parent.real())
         .map_err(|e| sig(format!("temp-file: {e}")))?;
     let (_file, path) = named.keep().map_err(|e| sig(format!("temp-file: {e}")))?;
-    Ok(Value::string(path.to_string_lossy()))
+    Ok(Value::string(shown(&path)))
 }
 
 /// Glob, preserving the pattern's shape: a cwd-relative pattern yields
@@ -85,7 +86,7 @@ pub(super) fn builtin_glob(args: &[Value], shell: &mut Shell) -> Settled<Value> 
 
 /// Label an `io::Error` with the operation and the path that provoked it.
 fn io_err(ctx: &str, path: &Path, e: &std::io::Error) -> Break {
-    sig(format!("{ctx}: {}: {e}", path.display()))
+    sig(format!("{ctx}: {}: {e}", shown(path)))
 }
 
 /// Portable per-path metadata: the `stat` fields `std::fs::Metadata` carries
@@ -107,7 +108,7 @@ pub(super) fn builtin_file_info(args: &[Value], shell: &mut Shell) -> Settled<Va
     let target = (stat.kind == Kind::Symlink)
         .then(|| located.read_link().ok())
         .flatten()
-        .map(|p| p.to_string_lossy().into_owned());
+        .map(|p| shown(&p));
     let name = path.file_name().unwrap_or(path.as_os_str());
     Ok(Value::from_datum(FileInfo::of(name, &stat, target)))
 }
@@ -117,7 +118,7 @@ pub(super) fn builtin_resolve_path(args: &[Value], shell: &mut Shell) -> Settled
     let resolved = checked_read_path(shell, s)?
         .canonicalise_strict()
         .map_err(|e| sig(format!("resolve-path: {s}: {e}")))?;
-    Ok(Value::string(resolved.to_string_lossy()))
+    Ok(Value::string(shown(&resolved)))
 }
 
 /// Lexical sibling of `resolve-path`: same anchoring, no
@@ -125,7 +126,7 @@ pub(super) fn builtin_resolve_path(args: &[Value], shell: &mut Shell) -> Settled
 /// and no `check_fs_read`, since that guard covers a stat this never does.
 pub(super) fn builtin_absolute_path(args: &[Value], shell: &Shell) -> Settled<Value> {
     let resolved = shell.resolve(args[0].as_str("absolute-path")?);
-    Ok(Value::string(resolved.as_path().to_string_lossy()))
+    Ok(Value::string(shown(resolved.as_path())))
 }
 
 pub(super) fn builtin_abbreviate_home(args: &[Value], shell: &Shell) -> Settled<Value> {

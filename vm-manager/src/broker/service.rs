@@ -119,6 +119,10 @@ pub fn cache() -> PathBuf {
 ///
 /// # Errors
 /// Returns a sentence if this executable's own location cannot be read.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "outside ral: vm-manager does not depend on ral-core"
+)]
 pub fn media() -> Result<BootArtifact, String> {
     let exe = std::env::current_exe()
         .map_err(|e| format!("the machine service could not find its own program: {e}"))?;
@@ -363,6 +367,10 @@ struct Booted {
 /// three subjects, which is what a person actually read off a stale guest
 /// image.  The reason alone crosses the pipe, and the client supplies the
 /// subject exactly once.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "outside ral: vm-manager does not depend on ral-core"
+)]
 fn refused_over(folder: &Path) -> impl FnOnce(Error) -> String {
     // Verbatim (`\\?\C:\…`) is how a canonicalised path arrives from a client,
     // and it is a convention of the Win32 call layer rather than anything a
@@ -476,6 +484,10 @@ impl Granted {
     ///
     /// Only [`open_for_client`] calls this in the service, with the client's
     /// token on the thread; tests call it directly, as themselves.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "outside ral: vm-manager does not depend on ral-core"
+    )]
     fn open(folder: &Path, read_only: bool) -> Result<Self, String> {
         let shown = crate::hcs::plain(folder.to_path_buf());
         let wide: Vec<u16> = folder.as_os_str().encode_wide().chain(Some(0)).collect();
@@ -545,6 +557,10 @@ impl Granted {
     ///
     /// # Errors
     /// Returns the sentence to show the person who granted the folder.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "outside ral: vm-manager does not depend on ral-core"
+    )]
     fn unchanged(&self) -> Result<(), String> {
         let shown = crate::hcs::plain(self.path.clone());
         let moved = || {
@@ -614,6 +630,10 @@ pub unsafe fn open_for_client(
 /// never looked. Other reparse points are the folder's own data kept in an
 /// unusual way — a `OneDrive` folder whose files are online-only is one — and
 /// refusing them would refuse an ordinary Documents folder.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "outside ral: vm-manager does not depend on ral-core"
+)]
 fn judge(shown: &Path, tag: FILE_ATTRIBUTE_TAG_INFO) -> Result<(), String> {
     if tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
         && tag.ReparseTag & REPARSE_TAG_NAME_SURROGATE != 0

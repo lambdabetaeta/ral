@@ -28,6 +28,7 @@
 //! path names nothing.  One substitution, in one function, which is why
 //! the construction lives here and is not scattered across the session.
 
+use ral_core::path::shown;
 use ral_core::capability::{Capabilities, Evidence, ExecKey, FsPolicy};
 use ral_core::path::{Allow, Deny, FrozenPath, RealPath};
 use std::collections::BTreeSet;
@@ -186,7 +187,7 @@ impl Grant {
     /// containing it) that it is far likelier to be a slip than an
     /// intention.  Every refusal says what to pick instead.
     pub fn open(folder: &Path) -> Result<Self, String> {
-        let shown = folder.display();
+        let shown = shown(folder);
         let root = RealPath::of(folder).map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => format!(
                 "There is nothing at {shown}. Check the name, \
@@ -266,10 +267,7 @@ impl Grant {
                      Choose the one folder that holds the documents for this job, \
                      such as {}.",
                     root,
-                    home.as_path()
-                        .join("Documents")
-                        .join("Admissions")
-                        .display()
+                    shown(home.as_path().join("Documents").join("Admissions"))
                 )
             } else {
                 format!(
@@ -292,7 +290,7 @@ impl Grant {
                  and some of what is kept there runs by itself the next time you sign in. \
                  Choose a folder of documents instead, such as one inside {}.",
                 root,
-                home.as_path().join("Documents").display()
+                shown(home.as_path().join("Documents"))
             )
         };
         for tree in &territory.settings {

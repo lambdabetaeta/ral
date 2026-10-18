@@ -9,6 +9,7 @@
 //! situation report, whose every line is a host truth this agent, alone in
 //! its own machine, must never be told.
 
+use ral_core::path::shown;
 use std::path::Path;
 
 /// The office house rules, if the operator deployed any: a plain-language
@@ -91,7 +92,7 @@ pub fn assemble(workspace: &Path, folder_name: &str, config_dir: &Path) -> Resul
         format!(
             "{}\nThe folder granted for this session is mounted at `{}`; outside it there is only the scratch space named under Host. To the user this folder is `{folder_name}` — speak of it by that name, never by its mounted path.\n",
             include_str!("../data/folder.md"),
-            workspace.display()
+            shown(workspace)
         ),
     ));
     sections.push((Some("Network"), include_str!("../data/network.md").into()));
@@ -129,7 +130,7 @@ fn host_section(workspace: &Path) -> String {
     if let Some(now) = exarch::prompt::host::now() {
         let _ = writeln!(s, "- now: {now}");
     }
-    let _ = writeln!(s, "- cwd: {}", workspace.display());
+    let _ = writeln!(s, "- cwd: {}", shown(workspace));
     format!(
         "{s}\n{}- scratch: `${}` = {} — this machine's own temporary space, gone when the conversation ends\n",
         exarch::prompt::GRANT_PLACEHOLDER,

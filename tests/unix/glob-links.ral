@@ -1,0 +1,14 @@
+# Test: glob over symlinks: a dangling link is an entry; a link to an ancestor is never descended
+
+let gdir = temp-dir
+within [dir: $gdir] {
+    # A dangling link is still an entry
+    ln -s nowhere dangling
+    echo !{glob 'dang*'}
+
+    # A link back to an ancestor is an entry, never descended
+    mkdir loop
+    ln -s . loop/self
+    echo !{length !{glob 'loop/**'}}
+}
+rm -rf $gdir

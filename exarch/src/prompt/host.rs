@@ -21,7 +21,7 @@ pub fn snapshot(exarch_state: &std::path::Path) -> String {
         let _ = writeln!(out, "- now: {d}");
     }
     if let Some(cwd) = ral_core::host::cwd() {
-        let _ = writeln!(out, "- cwd: {}", cwd.display());
+        let _ = writeln!(out, "- cwd: {}", ral_core::path::shown(&cwd));
     }
     if let Some(user) = ral_core::host::user() {
         let _ = writeln!(out, "- user: {user}");

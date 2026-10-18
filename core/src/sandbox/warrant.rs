@@ -23,7 +23,7 @@ use super::linux::landlock::Landlocked;
 use super::{ExecProjection, SandboxProjection};
 use crate::Role;
 use crate::capability::{Admitted, Program, Subject, Withheld};
-use crate::path::{Deny, RealPath};
+use crate::path::{Deny, RealPath, shown};
 use crate::process::SpawnFailure;
 use crate::syntax::quote::quote_word;
 use libc::c_int;
@@ -313,7 +313,7 @@ fn exec(
         });
     crate::terminal::cmd_error(
         "ral",
-        &format!("{}: {err}{}", real.display(), hint.unwrap_or_default()),
+        &format!("{}: {err}{}", shown(real), hint.unwrap_or_default()),
     );
     SpawnFailure::from(&err).code()
 }

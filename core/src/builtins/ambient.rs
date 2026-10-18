@@ -3,7 +3,7 @@
 use crate::types::{EnvVars, Error, Shell, Value};
 
 pub(super) fn cwd(shell: &Shell) -> Value {
-    Value::string(shell.cwd().to_string_lossy())
+    Value::string(crate::path::shown(shell.cwd()))
 }
 
 /// The host process environment, overlaid with `within [env: …]`.
@@ -65,7 +65,7 @@ mod tests {
     #[test]
     fn cwd_is_the_logical_cwd() {
         let shell = new_shell();
-        assert_eq!(cwd(&shell), Value::string(shell.cwd().to_string_lossy()));
+        assert_eq!(cwd(&shell), Value::string(crate::path::shown(shell.cwd())));
     }
 
     #[test]

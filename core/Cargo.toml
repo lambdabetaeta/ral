@@ -46,6 +46,7 @@ test-util = []
 
 [dependencies]
 os_pipe       = "1"
+dunce         = "1.0.5"
 globset       = "0.4"
 either        = "1"
 imbl          = { version = "7", features = ["serde"] }

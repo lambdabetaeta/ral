@@ -189,6 +189,7 @@ impl WithinUndo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::path::shown;
     use crate::protocol::Run;
     use crate::run::RunReport;
     use crate::types::Mooring;
@@ -296,7 +297,7 @@ mod tests {
         }
         .shell(crate::terminal::TerminalState::default());
         let before_cwd = shell.cwd();
-        let tmp = std::env::temp_dir().display().to_string();
+        let tmp = shown(std::env::temp_dir());
 
         match shell.run(Run::captured(
             format!("let checkpoint_leak = 1\ncd '{tmp}'\ncore-panic-now"),

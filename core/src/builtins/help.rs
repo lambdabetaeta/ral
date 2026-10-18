@@ -4,6 +4,7 @@
 //! prelude function, or host-installed library entry to its documentation and
 //! place in the shell.
 
+use crate::path::shown;
 use crate::ansi::{BOLD, CYAN, DIM, RESET};
 use crate::ir::CommandName;
 use crate::prelude_manifest::PRELUDE_DOCS;
@@ -421,8 +422,8 @@ impl fmt::Display for Where {
             // reporting as a handler someone installed, and its own doc and
             // argv type say the rest.  The reader needs no third word.
             Self::BaseFrame | Self::Builtin => f.write_str("builtin"),
-            Self::Path(path) => write!(f, "{}", path.display()),
-            Self::DeniedByGrant(path) => write!(f, "denied by grant ({})", path.display()),
+            Self::Path(path) => write!(f, "{}", shown(path)),
+            Self::DeniedByGrant(path) => write!(f, "denied by grant ({})", shown(path)),
         }
     }
 }

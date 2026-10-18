@@ -36,6 +36,7 @@
 //! [`PolicyError`], never a wider grant.  `tempdir` alone trusts its source as
 //! given, `TMPDIR` being the launching user's to set.
 
+use crate::path::shown;
 use super::toolchains::{self, Toolchain};
 use crate::host::resolve_xdg;
 use crate::path::XdgKind;
@@ -245,9 +246,9 @@ fn unclaimed_message(dot_git: &Path, target: &Path) -> PolicyError {
         "the .git file at '{dot_git}' points at '{target}', but that directory \
          does not name this working tree back, so {gitdir} will not grant it; \
          a pointer written inside the tree would otherwise choose the grant.",
-        dot_git = dot_git.display(),
+        dot_git = shown(dot_git),
         gitdir = code("`gitdir"),
-        target = target.display(),
+        target = shown(target),
     ))
     .with_hint(format!(
         "A linked worktree's git directory holds a `gitdir` file naming this \
@@ -264,7 +265,7 @@ fn no_pointer_message(dot_git: &Path) -> PolicyError {
     PolicyError::new(format!(
         "the .git entry at '{}' is a file with no `gitdir:` line, so there is \
          no git directory for {} to name.",
-        dot_git.display(),
+        shown(dot_git),
         code("`gitdir"),
     ))
     .with_hint(format!(
@@ -280,7 +281,7 @@ fn unreadable_message(dot_git: &Path, error: &std::io::Error) -> PolicyError {
     PolicyError::new(format!(
         "the .git file at '{}' cannot be read ({error}), so {} cannot \
          say which git directory the grant covers.",
-        dot_git.display(),
+        shown(dot_git),
         code("`gitdir"),
     ))
     .with_hint(
@@ -654,7 +655,7 @@ fn path_dirs_in(path: &OsStr, home: Option<&str>) -> Result<Vec<FrozenPath>, Pol
     let dirs: Vec<_> = std::env::split_paths(path)
         .filter(|entry| entry.is_absolute())
         .map(|entry| {
-            let subject = format!("PATH holds {}", entry.display());
+            let subject = format!("PATH holds {}", shown(&entry));
             refuse_the_world(Selector::Path, &subject, "PATH", &entry, home)?;
             freeze(entry)
         })

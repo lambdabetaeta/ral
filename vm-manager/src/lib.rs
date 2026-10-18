@@ -580,6 +580,10 @@ pub enum Error {
 }
 
 impl fmt::Display for Error {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "outside ral: vm-manager does not depend on ral-core"
+    )]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NoSuchFolder(path) => write!(

@@ -15,6 +15,7 @@
 //! finds it already settled or surfaces its one failure as a plain
 //! sentence.
 
+use ral_core::path::shown;
 use std::panic;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -558,7 +559,7 @@ fn open_with_default(app: &AppHandle, path: &Path) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
     app.opener()
         .open_path(path.to_string_lossy(), None::<&str>)
-        .map_err(|e| format!("Could not open {}: {e}", path.display()))
+        .map_err(|e| format!("Could not open {}: {e}", shown(path)))
 }
 
 #[cfg(test)]

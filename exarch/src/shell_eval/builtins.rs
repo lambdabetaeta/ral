@@ -896,11 +896,11 @@ fn builtin_skill(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settle
             mooring.surface(&Value::map(vec![
                 ("io".into(), Value::string("skill")),
                 ("name".into(), Value::string(name)),
-                ("dir".into(), Value::string(dir.to_string_lossy())),
+                ("dir".into(), Value::string(ral_core::path::shown(&dir))),
             ]));
             return Ok(Value::string(format!(
                 "// skill root: {}\n\n{}",
-                dir.display(),
+                ral_core::path::shown(&dir),
                 body
             )));
         }

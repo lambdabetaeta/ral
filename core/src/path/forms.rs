@@ -23,6 +23,7 @@
 //! [`RealPath::frozen`](super::RealPath::frozen) for exec, and no other:
 //! `surface` leaves the type only as a `String`, for rendering.
 
+use crate::path::shown;
 use super::PathRules;
 use super::identity::{Polarity, path_within};
 use serde::{Deserialize, Serialize};
@@ -44,14 +45,14 @@ impl LexicalPath {
         debug_assert!(
             path.is_absolute(),
             "LexicalPath must be absolute, got {}",
-            path.display()
+            shown(&path)
         );
         debug_assert!(
             !path
                 .components()
                 .any(|c| matches!(c, Component::CurDir | Component::ParentDir)),
             "LexicalPath must be `.`/`..`-collapsed, got {}",
-            path.display()
+            shown(&path)
         );
         debug_assert!(
             !path.as_os_str().is_empty(),
@@ -71,8 +72,8 @@ impl LexicalPath {
     }
 
     /// For audit fields and denial messages.
-    pub(crate) fn display(&self) -> std::path::Display<'_> {
-        self.0.display()
+    pub(crate) fn shown(&self) -> String {
+        shown(&self.0)
     }
 
     /// True iff this path names the host's discard device — `/dev/null` on
@@ -162,8 +163,8 @@ impl FrozenPath {
             format!(
                 "ral cannot hold '{}' as a grant: it resolves to '{}', which is not valid \
                  Unicode; grant a path that is, or one that does not pass through it",
-                surface.display(),
-                real.display()
+                shown(&surface),
+                shown(&real)
             )
         })
     }

@@ -261,6 +261,10 @@ impl Hypervisor for Hyperv {
 /// A free function rather than a method, because by this point nothing of the
 /// backend's own state is left to consult: the boot media has been resolved and
 /// the disks made, so every path this needs arrives as an argument.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "outside ral: vm-manager does not depend on ral-core"
+)]
 fn assemble(
     api: &'static api::Api,
     spec: &MachineSpec,
@@ -436,6 +440,10 @@ fn assemble(
 ///   whoever wants to confirm the emptiness;
 /// - there was **no console**, so the diagnostic was lost before the machine
 ///   existed, and saying so is better than implying the guest was silent.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "outside ral: vm-manager does not depend on ral-core"
+)]
 fn console_says(console: Option<&console::Console>) -> String {
     let Some(console) = console else {
         return "Synod could not open a console for this machine, so the guest has no words to \
@@ -723,6 +731,10 @@ fn unix_seconds() -> u64 {
 /// missing — and must not be raised over a stale file.  So: stderr, once, only
 /// when there is something to say, naming the file and what will eventually
 /// happen to it.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "outside ral: vm-manager does not depend on ral-core"
+)]
 fn release(session: &Path) {
     if let Err(why) = remove(session) {
         eprintln!(

@@ -34,6 +34,7 @@ disallowed-methods = [
     { path = "std::env::current_dir", reason = "Use Shell::cwd(). Process CWD is OS-global and races every parallel ral thread; caching it in a shell-scoped store is how PWD went stale across thunks." },
     { path = "std::env::set_current_dir", reason = "ral's `cd` mutates Shell::logical_cwd, not the process cwd. A process-cwd write is subprocess setup only." },
     { path = "std::path::Path::new", reason = "Use a named helper in crate::path (is_absolute / exists / basename / path_within_str / …) so the resolution rule lives in one place. FFI glue and env-var lifting #[allow] with a reason." },
+    { path = "std::path::Path::display", reason = "Use ral_core::path::shown: ral shows every path `/`-separated. A path handed to the OS #[allow]s with a reason opening `native:`." },
     { path = "std::process::Child::wait", reason = "Use crate::process::ChildHandle::{into_watch, reap} — the reaper owns the wait and answers a stop itself; reap is the blocking reap after a confirmed kill." },
     { path = "std::process::Child::try_wait", reason = "Use crate::process::ChildHandle::into_watch: the reaper owns every child wait and answers a stop itself. A raw try_wait reports a stopped child as still running (no WUNTRACED)." },
     { path = "std::env::var_os", reason = "An XDG basedir read goes through crate::host::xdg, which ignores a relative override per the spec. Other path-valued env reads #[allow] with a reason." },

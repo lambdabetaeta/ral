@@ -253,13 +253,14 @@ mod tests {
     /// they were pushed.
     #[test]
     fn narrow_cannot_escalate_a_restricted_parent() {
-        let confined = base_layer("confined", Path::new("/work/proj")).unwrap();
+        let cwd = std::env::temp_dir();
+        let confined = base_layer("confined", &cwd).unwrap();
         assert_eq!(
             confined.net,
             Some(Net::Offline),
             "confined layer has net off"
         );
-        let minimal = base_layer("minimal", Path::new("/work/proj")).unwrap();
+        let minimal = base_layer("minimal", &cwd).unwrap();
 
         let mut stack = GrantStack::root();
         stack.push(confined);

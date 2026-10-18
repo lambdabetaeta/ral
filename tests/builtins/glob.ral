@@ -72,15 +72,6 @@ within [dir: $gdir] {
     echo x > c.txt
     echo !{glob '{a,b}.txt'}
 
-    # A dangling link is still an entry
-    ln -s nowhere dangling
-    echo !{glob 'dang*'}
-
-    # A link back to an ancestor is an entry, never descended
-    mkdir loop
-    ln -s . loop/self
-    echo !{length !{glob 'loop/**'}}
-
     # A trailing `**` matches the directory itself and its non-dot descendants
     mkdir -p src/x/.y
     echo x > src/x/f

@@ -401,7 +401,7 @@ fn dealias(dir: &File, leaf: &OsStr, real: &Path) -> io::Result<PathBuf> {
         io::Error::other(format!(
             "cannot learn the stored name of {}; \
              ral refuses a name it cannot judge under every spelling",
-            real.display()
+            crate::path::shown(real)
         ))
     })
 }
@@ -425,8 +425,8 @@ fn open_attributes(dir: &File, name: &OsStr) -> io::Result<File> {
     open(dir, name.as_ref(), &opts)
 }
 
-/// The canonical path of the object behind `f`, verbatim head stripped so it
-/// is spelled as the rest of `crate::path` spells one.
+/// The canonical path of the object behind `f`, its verbatim head dropped
+/// where the path means the same without it.
 #[cfg(windows)]
 fn final_path(f: &File) -> Option<PathBuf> {
     use std::os::windows::io::AsRawHandle;
@@ -452,7 +452,7 @@ fn final_path(f: &File) -> Option<PathBuf> {
     }
     buf.truncate(written as usize);
     let name = String::from_utf16(&buf).ok()?;
-    Some(PathBuf::from(super::identity::windows_head(&name)))
+    Some(dunce::simplified(&PathBuf::from(name)).to_path_buf())
 }
 
 /// A search handle on `name` in `dir`: the right to resolve names through

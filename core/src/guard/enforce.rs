@@ -9,6 +9,7 @@
 //! door records.  The sandbox projects the same authority off the same folds,
 //! so the two cannot drift.
 
+use crate::path::shown;
 use crate::capability::{
     Admitted, ExecDenial, Flag, FsOp, FsScope, GrantStack, Program, Refused, ShellVerb, Withheld,
     ral_binary,
@@ -250,7 +251,7 @@ pub(crate) fn check_fs_exact(
     op: &FsOp,
 ) -> Result<(), Box<Denial>> {
     let name = <&str>::from(op);
-    let path = resolved.display();
+    let path = shown(resolved);
     let layers = ctx.grants.fs().count();
     let refusal = match fs_judge(&ctx.grants, resolved, op) {
         Ok(()) => return Ok(()),
@@ -299,7 +300,7 @@ pub(crate) fn check_fs_exact(
             ),
         ),
     };
-    let fields = [("op", name.to_string()), ("path", path.to_string())]
+    let fields = [("op", name.to_string()), ("path", path)]
         .into_iter()
         .chain(detail);
     Err(Box::new(Denial::new(Resource::Fs, fields, error)))

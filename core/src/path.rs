@@ -30,6 +30,7 @@ mod real;
 pub(crate) mod render;
 pub(crate) mod resolver;
 pub mod sigil;
+pub mod show;
 pub(crate) mod stage;
 pub mod tilde;
 pub mod tree;
@@ -38,6 +39,7 @@ pub(crate) mod which;
 
 pub use basedir::XdgKind;
 pub(crate) use basedir::resolve_xdg_in;
+pub use show::shown;
 pub use tilde::abbreviate_home;
 
 pub use forms::{FrozenPath, LexicalPath};

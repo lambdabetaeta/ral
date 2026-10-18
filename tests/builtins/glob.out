@@ -10,7 +10,5 @@ no match: 0
 glob: '.h*': a wildcard never matches a name starting with '.'; name the file literally, or filter `list-dir`?
 [a/.cfg]
 [a.txt, b.txt]
-[dangling]
-2
 [src, src/x, src/x/f]
 glob tests done

@@ -7,6 +7,7 @@
 // crash recovery only reclaims profiles. Ported units keep upstream's names
 // so each diffs against the one it was taken from.
 
+use crate::path::shown;
 use super::DaclError;
 use std::io;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
@@ -66,7 +67,7 @@ impl PathMutexGuard {
             crate::dbg_trace!(
                 "sandbox-win-dacl",
                 "acquired abandoned mutex for {}: previous holder terminated without releasing",
-                canonical.display()
+                shown(canonical)
             );
             return Ok(Self(handle, std::marker::PhantomData));
         }

@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::PathRules;
+use super::show::fold_for;
 
 /// `~` or `~/sub`, the suffix keeping its separator.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,12 +57,8 @@ pub fn abbreviate_home(path: &str, home: Option<&str>) -> String {
 
 /// [`abbreviate_home`] on strings, under given rules.
 ///
-/// Under Windows the result is folded to `/` separators: the `~/` head
-/// already commits the string to them, so a native-separator rest would print
-/// mixed (`~/projects\ral`), and folding the fallback arm too keeps the two
-/// shapes consistent.  Display only — never fed back into resolution or
-/// matching, which accept either spelling anyway.  Off Windows `\` is an
-/// ordinary filename byte, hence the gate.
+/// The result is folded as [`super::show::fold_for`] folds: the `~/` head
+/// commits the string to `/`, and both arms agree.  Display only.
 #[allow(
     clippy::disallowed_methods,
     reason = "lexical Path::new for the component-boundary strip: no I/O behind it; this module is part of crate::path, where the path-construction rule lives"
@@ -80,11 +77,7 @@ fn abbreviate_home_for(path: &str, home: Option<&str>, rules: PathRules) -> Stri
             Err(_) => path.to_string(),
         },
     };
-    if rules == PathRules::Windows {
-        shown.replace('\\', "/")
-    } else {
-        shown
-    }
+    fold_for(&shown, rules).into_owned()
 }
 
 /// The Windows half of [`abbreviate_home_for`]'s strip: containment under

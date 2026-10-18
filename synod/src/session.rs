@@ -27,6 +27,7 @@ mod menu;
 mod opening;
 mod signin;
 
+use ral_core::path::shown;
 use crate::grant::Grant;
 use crate::workspace;
 use baseline::Baseline;
@@ -216,7 +217,7 @@ impl Conversation {
             .log_run_dir(&grant.root().to_string_lossy())
             .map_err(|e| format!("could not make a log folder: {e}"))?;
         let run_lock = exarch::app::RunLock::try_acquire(&run_dir)
-            .map_err(|e| format!("could not lock the log folder {}: {e}", run_dir.display()))?;
+            .map_err(|e| format!("could not lock the log folder {}: {e}", shown(&run_dir)))?;
         let config_dir = SYNOD.xdg_dir(ral_core::path::XdgKind::Config);
 
         // The two slow arms of an opening wait on different things
@@ -235,7 +236,7 @@ impl Conversation {
         let machine = hypervisor.boot(&grant.machine_spec()).map_err(|e| {
             format!(
                 "could not start a machine for {}: {e}",
-                grant.root().display()
+                shown(grant.root())
             )
         })?;
 

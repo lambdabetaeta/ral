@@ -289,7 +289,7 @@ builtin_registry! {
         call: |_args, _mooring, shell| ambient::user(shell).map_err(Break::from), },
     Home { names: ["home"], ty: scheme::pure_string,
         doc: "home  — the current user's home directory, the one `~` abbreviates: HOME, or USERPROFILE where appropriate, from the effective environment.",
-        call: |_args, _mooring, shell| shell.context.home_dir().map(Value::string).map_err(Break::from), },
+        call: |_args, _mooring, shell| shell.context.home_dir().map(|h| Value::string(crate::path::shown(h))).map_err(Break::from), },
     Nproc { names: ["nproc"], ty: scheme::pure_int,
         doc: "nproc  — available processor parallelism as an Int, never less than 1.",
         call: |_args, _mooring, _shell| Ok(ambient::nproc()), },

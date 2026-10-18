@@ -2,6 +2,7 @@
 //! channel — the sealed engine seed and the engine wire in
 //! [`crate::protocol::channel`].
 
+use crate::path::shown;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::io::{self, Read, Write};
@@ -108,7 +109,7 @@ fn decode_body<T: DeserializeOwned>(body: &[u8]) -> io::Result<T> {
             let _ = dump_frame(&path, body);
             Err(io::Error::other(format!(
                 "{e} (raw frame written to {})",
-                path.display()
+                shown(&path)
             )))
         }
     }

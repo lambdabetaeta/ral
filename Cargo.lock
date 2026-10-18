@@ -5549,6 +5549,7 @@ dependencies = [
  "ctor",
  "ctrlc",
  "diffutils",
+ "dunce",
  "either",
  "fastrand",
  "getrandom 0.4.3",

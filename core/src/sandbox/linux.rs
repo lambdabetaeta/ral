@@ -148,7 +148,7 @@ pub(crate) fn bwrap_command(
     chdir: Option<&str>,
     ownership: Ownership,
 ) -> Result<(Command, Option<InfoFd>), Refusal> {
-    let bwrap = env.bwrap.arg0().display();
+    let bwrap = crate::path::shown(env.bwrap.arg0());
     let unavailable = |why: String| Err(Refusal::Unavailable(why));
     match env.host.builds {
         Builds::ByFd => {}
@@ -571,9 +571,9 @@ fn open_real(name: &Path, flags: OFlags) -> Result<Option<OwnedFd>, OpenError> {
     match openat2(CWD, name, flags, Mode::empty(), ResolveFlags::NO_SYMLINKS) {
         Ok(fd) => Ok(Some(fd)),
         Err(Errno::NOENT | Errno::NOTDIR) => Ok(None),
-        Err(Errno::LOOP) => Err(OpenError::Linked(name.display().to_string())),
+        Err(Errno::LOOP) => Err(OpenError::Linked(crate::path::shown(name))),
         Err(errno) => Err(OpenError::Failed {
-            name: name.display().to_string(),
+            name: crate::path::shown(name),
             source: errno.into(),
         }),
     }
@@ -636,7 +636,7 @@ pub(crate) fn seccomp_programs() -> Result<Vec<&'static [u8]>, String> {
 fn pinned(pins: [&Pinned; 2]) -> Result<Vec<(Rendered, OwnedFd)>, String> {
     let mut locked: Vec<(Rendered, OwnedFd)> = Vec::new();
     for pin in pins {
-        let what = pin.arg0().display();
+        let what = crate::path::shown(pin.arg0());
         let names = pin
             .names()
             .map_err(|e| format!("sandbox: cannot find where the pinned {what} lives now: {e}"))?;
@@ -645,7 +645,7 @@ fn pinned(pins: [&Pinned; 2]) -> Result<Vec<(Rendered, OwnedFd)>, String> {
             format!(
                 "sandbox: the pinned {what} now lives at {}, which is not valid UTF-8, \
                  and bwrap cannot be given it faithfully",
-                name.display()
+                crate::path::shown(&name)
             )
         })?;
         let Some(dest) = object(name)? else { continue };
@@ -1425,7 +1425,7 @@ mod tests {
     fn a_bwrap_that_cannot_mount_by_descriptor_launches_nothing() {
         let rendered = unrestricted().rendered().expect("renders");
         let pin = stand_in();
-        let path = pin.arg0().display().to_string();
+        let path = crate::path::shown(pin.arg0());
         let refusal = |builds| {
             let host = HostEnvelope { builds, ..WHOLE };
             let launch = bwrap_command(

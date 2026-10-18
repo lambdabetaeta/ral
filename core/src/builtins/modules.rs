@@ -64,7 +64,7 @@ pub(crate) fn builtin_use(
         .canonicalise_strict()
         .ok()
         .or_else(|| crate::path::ral_path::find_file(&path, shell.context.env_overrides()))
-        .map_or_else(|| path.clone(), |p| p.to_string_lossy().into_owned());
+        .map_or_else(|| path.clone(), |p| crate::path::shown(&p));
 
     let source = read_and_normalize(&abs_path, shell)?;
     let top = check_source(&source, &abs_path, shell, None).map_err(tag_loader_error)?;

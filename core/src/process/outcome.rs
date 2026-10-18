@@ -1,6 +1,7 @@
 //! What the OS reported when a child ended, and the user-facing failure it
 //! becomes: a `CommandFailure` travels on as `Status::Process` in `types/error.rs`.
 
+use crate::path::shown;
 use super::cancel::CancelCause;
 
 /// The exit code ral's every Windows kill uses (ASCII "RALK"), there being
@@ -213,7 +214,7 @@ impl CommandFailure {
             }
             Self::Spawn(SpawnFailure::PermissionDenied { found: Some(path) }) => format!(
                 "{cmd}: permission denied ({} is not executable)",
-                path.display()
+                shown(path)
             ),
             Self::Spawn(SpawnFailure::Io(msg)) => format!("{cmd}: {msg}"),
         }
