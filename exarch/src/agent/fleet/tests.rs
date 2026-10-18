@@ -20,7 +20,7 @@ fn agent(fleet: &Arc<Fleet>, name: &str, parent: Option<&Arc<Agent>>) -> Arc<Age
 
 fn spec(name: &str, parent: Option<&Arc<Agent>>) -> TestAgentSpec {
     let mut spec = TestAgentSpec::new(name);
-    spec.parent = parent.cloned();
+    spec.role = parent.map_or(crate::agent::Role::Converses, crate::agent::Role::child);
     spec
 }
 

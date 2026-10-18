@@ -2,7 +2,7 @@
 //! for the whole run, the by-name index a spawn claims its identity at, and
 //! the idle lease every reporting child is bounded by.
 //!
-//! It is not the tree.  The tree is [`Agent::parent`](crate::agent::Agent)
+//! It is not the tree.  The tree is [`Role::Child`](crate::agent::Role)
 //! and [`Agent::children`](crate::agent::Agent), and every walk over it — the
 //! roster, the cancel cascade, the scope check — runs there.  What lives here
 //! is what no single node owns: the run's settings, and whether a name is
@@ -25,9 +25,9 @@
 //! moved on.  Per inbox, not per fleet — a `/clear` in one tab must not drop
 //! work another tab is still waiting on.
 
+use crate::agent::index::BuiltinIndex;
 use crate::agent::{Agent, Factory};
 use crate::enquiry::check_name;
-use crate::prompt::BuiltinIndex;
 use crate::provider::Bureau;
 use crate::provider::Toolset;
 use ral_core::process::{self, CancelCause};
@@ -166,7 +166,7 @@ impl Fleet {
         }
         let mut names = self.names.lock_ignore_poison();
         Self::prune_names(&mut names);
-        if let Some(parent) = &agent.parent
+        if let Some(parent) = agent.role.parent()
             && parent.token.terminated()
         {
             return Err(Unborn::SessionDead);
@@ -178,7 +178,7 @@ impl Fleet {
         drop(names);
         // Adopted (or rooted) only after the name is claimed: a refused agent
         // must never appear in the fleet, however briefly.
-        match &agent.parent {
+        match agent.role.parent() {
             Some(parent) => {
                 parent.adopt(agent);
                 arm_lease(self, agent, self.lease);

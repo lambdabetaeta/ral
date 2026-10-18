@@ -55,15 +55,15 @@ fn reply_cancels_live_descendants() {
     child.seed("return early".into());
 
     let mut direct = TestAgentSpec::new("direct");
-    direct.parent = Some(child.agent.clone());
+    direct.role = crate::agent::Role::child(&child.agent);
     let transport = bare_transport();
     direct.reach = InterruptTarget::new(ral_core::carrier::Transport::control(&transport).clone());
     let direct = test_agent(&child.fleet, direct).expect("a live child of the replying agent");
     let mut grandchild = TestAgentSpec::new("grandchild");
-    grandchild.parent = Some(direct.clone());
+    grandchild.role = crate::agent::Role::child(&direct);
     let grandchild = test_agent(&child.fleet, grandchild).expect("a live grandchild");
     let mut sibling = TestAgentSpec::new("sibling");
-    sibling.parent = Some(parent.agent.clone());
+    sibling.role = crate::agent::Role::child(&parent.agent);
     let sibling = test_agent(&child.fleet, sibling).expect("a live sibling of the replier");
 
     let provider = scripted(

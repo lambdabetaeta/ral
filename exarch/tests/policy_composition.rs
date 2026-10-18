@@ -2,8 +2,8 @@
 
 //! [`exarch::policy::for_invocation`] end to end, in its own test binary: the
 //! two lattice phases in their fixed order, the deny that has to land on the
-//! real fs guard rather than merely on a list, the two diagnostics a user meets
-//! before a session starts, and the grant summary the model reads.
+//! real fs guard rather than merely on a list, and the two diagnostics a user
+//! meets before a session starts.
 //!
 //! Every scenario needs a directory of `.ral` profiles on disk — a composed
 //! grant is a fact about files, and the assertions here are worth only as much
@@ -11,11 +11,10 @@
 
 use exarch::app::{EXARCH, SYNOD, Scratch};
 use exarch::policy::{Invocation, for_invocation};
-use exarch::prompt::grant_summary;
 use ral_core::capability::FsOp;
 use ral_core::capability::GrantStack;
 use ral_core::path::XdgKind;
-use ral_core::path::{FrozenPath, Resolver, SearchCwd, resolve_in_path};
+use ral_core::path::{Resolver, SearchCwd, resolve_in_path};
 use ral_core::test_access::check_file;
 use ral_core::types::{Break, Settled, Shell};
 use std::path::PathBuf;
@@ -38,13 +37,6 @@ fn profile(dir: &Scratch, name: &str, source: &str) -> PathBuf {
     let path = dir.path().join(name);
     std::fs::write(&path, source).expect("profile file");
     path
-}
-
-/// The one summary line opening with `label`.
-fn bullet<'a>(text: &'a str, label: &str) -> &'a str {
-    text.lines()
-        .find(|l| l.starts_with(label))
-        .unwrap_or_else(|| panic!("no `{label}` line in:\n{text}"))
 }
 
 /// The real path of this test binary, standing for exarch's own.
@@ -463,71 +455,6 @@ fn the_credential_layer_follows_an_fs_restriction() {
     let Invocation { stack, .. } =
         for_invocation(&cwd, "dangerous", Some(&positive), &[]).expect("profiles compose");
     assert!(!carved(&stack), "a positive-only fs restricts nothing");
-}
-
-/// The summary is the model's only view of its own authority, so it has to
-/// agree with the grant the session holds: `minimal` must not read as ambient,
-/// and the veto it exists to carve out — `bash` on Unix, the interactive shell
-/// on Windows, where a Unix-rooted deny freezes to a dead grant — must reach
-/// the page.
-#[test]
-fn the_grant_summary_agrees_with_an_attenuated_grant() {
-    let dir = Scratch::for_test(EXARCH, "grant-prompt").expect("scratch dir");
-    let cwd = dir.path().to_string_lossy().into_owned();
-    let invocation = for_invocation(&cwd, "minimal", None, &[]).expect("minimal composes");
-    let text = grant_summary(&invocation.stack);
-
-    assert!(
-        !text.contains("Ambient authority"),
-        "an attenuated session must not be told it holds everything:\n{text}"
-    );
-    assert_eq!(
-        invocation.stack.net().count(),
-        0,
-        "minimal never restricts the net, and no layer has an opinion"
-    );
-    assert_eq!(bullet(&text, "- net:"), "- net: inherit");
-    let veto = if cfg!(windows) { "cmd" } else { "bash" };
-    assert!(
-        bullet(&text, "- exec deny:").contains(veto),
-        "minimal's {veto} veto must reach the model:\n{text}"
-    );
-    let frozen_cwd = FrozenPath::from_surface(&cwd).into_string();
-    assert!(bullet(&text, "- fs read:").contains(&frozen_cwd), "{text}");
-    assert!(bullet(&text, "- fs write:").contains(&frozen_cwd), "{text}");
-}
-
-/// `dangerous` restricts nothing, so the summary says it is ambient authority.
-#[test]
-fn the_grant_summary_of_dangerous_is_ambient_authority() {
-    let dir = Scratch::for_test(EXARCH, "grant-prompt-dangerous").expect("scratch dir");
-    let cwd = dir.path().to_string_lossy().into_owned();
-    let invocation = for_invocation(&cwd, "dangerous", None, &[]).expect("dangerous composes");
-    let text = grant_summary(&invocation.stack);
-
-    assert!(text.starts_with("Ambient authority"), "{text}");
-}
-
-/// A ceiling of `every` beside a run place, fs omitted, denotes `t` and yet
-/// makes the place readable under a nested fs restriction, so it is
-/// summarised; a name is a run place too.
-#[test]
-fn a_layer_naming_a_run_place_is_summarised_though_it_denotes_top() {
-    let dir = Scratch::for_test(EXARCH, "grant-prompt-place").expect("scratch dir");
-    let cwd = dir.path().to_string_lossy().into_owned();
-    let place = profile(
-        &dir,
-        "place.ral",
-        &format!("return [exec: [allow: [`absolute {}]]]\n", on_path("ls")),
-    );
-    let nothing = profile(&dir, "nothing.ral", "return [exec: [allow: [`name ls]]]\n");
-
-    let invocation = for_invocation(&cwd, "dangerous", Some(&place), &[]).expect("composes");
-    let text = grant_summary(&invocation.stack);
-    assert!(bullet(&text, "- exec:").contains("also named"), "{text}");
-    let invocation = for_invocation(&cwd, "dangerous", Some(&nothing), &[]).expect("composes");
-    let text = grant_summary(&invocation.stack);
-    assert!(bullet(&text, "- exec:").contains("also named"), "{text}");
 }
 
 /// A misspelt base names every live one back, and each name it offers really

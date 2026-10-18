@@ -5,12 +5,12 @@
 
 use crate::agent::factory::Factory;
 use crate::agent::fleet::{AGENT_LEASE_IDLE, Fleet, Launch, Unborn};
+use crate::agent::index::{BuiltinIndex, Grants};
 use crate::agent::seat::{self, Seat};
 use crate::agent::shell::LogCell;
-use crate::agent::{Agent, Avatar, Birth, ProviderHandle, Readings, ReplyCell, SPAWN_FUEL};
+use crate::agent::{Agent, Avatar, Birth, ProviderHandle, Readings, ReplyCell, Role, SPAWN_FUEL};
 use crate::app::Scratch;
 use crate::bus::{Emitter, Inbox};
-use crate::prompt::Grants;
 use crate::provider::Provider;
 use crate::provider::Toolset;
 use crate::record::AgentId;
@@ -76,12 +76,9 @@ pub(crate) struct Build {
     /// its own, so every construction site states which seat kind it builds.
     pub(crate) seat: Seat,
     pub(crate) log: AgentLog,
-    /// Whom the constructed agent reports to — `None` builds a root, the
-    /// trunk or a `/branch` child, which converses and never delivers.
-    pub(crate) parent: Option<Arc<Agent>>,
+    pub(crate) role: Role,
     pub(crate) fuel: u32,
     pub(crate) provider: ProviderHandle,
-    pub(crate) returns: bool,
     pub(crate) search: bool,
     /// Fresh for the trunk, the parent's clone for a fork: one fleet per run.
     pub(crate) fleet: Arc<Fleet>,
@@ -127,8 +124,11 @@ pub enum Trunk {
 }
 
 impl Trunk {
-    fn returns(self) -> bool {
-        matches!(self, Self::Headless)
+    fn role(self) -> Role {
+        match self {
+            Self::Headless => Role::Headless,
+            Self::Attended | Self::Embedded => Role::Converses,
+        }
     }
 
     fn attended(self) -> bool {
@@ -210,10 +210,9 @@ impl Avatar {
             caps,
             seat,
             log,
-            parent,
+            role,
             fuel,
             provider,
-            returns,
             search,
             fleet,
         } = b;
@@ -225,10 +224,9 @@ impl Avatar {
             started: Instant::now(),
             system: system_prompt.into(),
             caps,
-            parent,
+            role,
             fuel,
             provider,
-            returns,
             search,
             reach: seat.reach(),
             mailbox: inbox.mailbox(),
@@ -376,8 +374,7 @@ impl Avatar {
             .map_err(lost)?,
             RootSeat::Wire { transport, attach } => Seat::wire(*transport, attach).map_err(lost)?,
         };
-        let index =
-            crate::prompt::BuiltinIndex::resolve(seat.read(|t| t.builtin_names()).map_err(lost)?);
+        let index = BuiltinIndex::resolve(seat.read(|t| t.builtin_names()).map_err(lost)?);
         let scratch_var = crate::app::EXARCH.scratch_var();
         let scratch = seat
             .read(|t| t.env_var(&scratch_var))
@@ -388,7 +385,7 @@ impl Avatar {
             .into();
         let own =
             crate::prompt::with_grant(&system, &seat.read(|t| t.grants()).map_err(lost)?, &caps);
-        let returns = trunk.returns();
+        let role = trunk.role();
         // Chat advertises no tool, so its prompt takes no builtin surface at
         // all — no index, no taught section, the bare stand-in verbatim.
         let system_prompt = if tools.is_empty() {
@@ -397,7 +394,7 @@ impl Avatar {
             index.apply(
                 &own,
                 &Grants {
-                    returns,
+                    role: &role,
                     allow_schedule,
                     spawns: fuel > 0,
                 },
@@ -434,10 +431,9 @@ impl Avatar {
             caps,
             seat,
             log,
-            parent: None,
+            role,
             fuel,
             provider: ProviderHandle::new(provider),
-            returns,
             search,
             fleet,
         })
@@ -609,14 +605,14 @@ impl Avatar {
             &AgentLog::dir_of(&sessions_root, id),
         )
         .map_err(|s| io::Error::other(s.to_string()))?;
-        let index = crate::prompt::BuiltinIndex::resolve(
+        let index = BuiltinIndex::resolve(
             seat.read(|t| t.builtin_names())
                 .map_err(|s| io::Error::other(s.to_string()))?,
         );
         let system_prompt = index.apply(
             &system,
             &Grants {
-                returns: true,
+                role: &Role::Headless,
                 allow_schedule,
                 spawns: SPAWN_FUEL > 0,
             },
@@ -653,10 +649,9 @@ impl Avatar {
             caps: ral_core::capability::GrantStack::root(),
             seat,
             log,
-            parent: None,
+            role: Role::Headless,
             fuel: SPAWN_FUEL,
             provider,
-            returns: true,
             search,
             fleet,
         })

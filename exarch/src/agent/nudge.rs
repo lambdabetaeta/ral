@@ -284,8 +284,8 @@ fn record_error(log: &mut AgentLog, text: String) {
 
 /// The no-reply reminder: the agent finished with prose but never called `reply`,
 /// its sole return path.  Re-issued until [`BUDGET`] is spent, then the run fails.
-const REPLY_MESSAGE: &str = "You ended your turn without calling `reply`, so your parent will \
-    receive nothing. Return your result now with `ral { reply <value> }`: a string for a \
+const REPLY_MESSAGE: &str = "You ended your turn without calling `reply`, so nothing has been \
+    returned. Return your result now with `` exarch-agents `reply <value> ``: a string for a \
     markdown report, or a record/list for structured findings; if the value carries `$`, `!`, \
     or a quote, write it as a raw string `#'…'#`. This is the only way to hand your work back; \
     a final message on its own is not delivered.";

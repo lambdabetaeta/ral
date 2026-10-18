@@ -5,11 +5,11 @@
 //! deposited on the node's own agent and a non-reply end is delivered up its
 //! parent's mailbox by the spawn site.
 
-use crate::agent::Avatar;
 use crate::agent::deliberate::{Fault, Outcome};
 use crate::agent::gauge::{Warning, ration};
 use crate::agent::nudge;
 use crate::agent::seat::EngineLost;
+use crate::agent::{Avatar, Role};
 use crate::bus::{
     AgentOutcome, Emitter, Item, Next, ParkMode, Post, WORKER_PANIC_PREFIX, panic_msg,
 };
@@ -242,7 +242,7 @@ impl Avatar {
         // dispatch is in flight.
         let workers_idle = self.seat.read(|t| t.workers())?.is_empty();
         let facts = nudge::Facts {
-            must_reply: self.agent.returns,
+            must_reply: self.agent.role.returns(),
             pinned: self.pinned_digest(),
             // Nudged only when nothing else is already carrying this agent
             // forward: no reply standing for a consumer to fetch, no worker
@@ -264,9 +264,12 @@ impl Avatar {
                 )),
             }
         }
-        // Only a parentless returning agent — the headless root — ends on
-        // `reply`; a child parks on its deposit, to be messaged again.
-        let flow = if self.agent.parent.is_none() && matches!(outcome, Ok(Outcome::Replied)) {
+        // Only the headless root ends on `reply`; a child parks on its
+        // deposit, to be messaged again.
+        let flow = if matches!(
+            (&self.agent.role, &outcome),
+            (Role::Headless, Ok(Outcome::Replied))
+        ) {
             ControlFlow::Break(())
         } else {
             ControlFlow::Continue(())
@@ -306,7 +309,7 @@ impl Avatar {
             return ParkMode::Quiesce;
         }
         let agent = &self.agent;
-        if !agent.returns && self.fleet.launch.attended {
+        if matches!(agent.role, Role::Converses) && self.fleet.launch.attended {
             // `next_or_idle` lets a terminate cause end every park but `Held`,
             // so a conversing agent asks here instead: `/close` stamps this
             // token, and parking Held past it would be a zombie.
@@ -316,9 +319,8 @@ impl Avatar {
                 ParkMode::Held
             };
         }
-        // Only an agent with somewhere to report waits to be messaged; a
-        // headless root returns and ends.
-        if agent.parent.is_some() && agent.returns && (engaged || agent.has_reply()) {
+        // Only a child waits to be messaged; a headless root returns and ends.
+        if matches!(agent.role, Role::Child { .. }) && (engaged || agent.has_reply()) {
             return ParkMode::Engaged;
         }
         if agent.has_busy_children() {

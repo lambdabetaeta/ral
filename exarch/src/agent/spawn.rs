@@ -78,7 +78,7 @@ pub(crate) fn spawn_async(
     // Everything below is taken off `child` before it moves into the worker.
     let agent_id = child.agent.id;
     let log_dir = child.log_dir();
-    let spawner = child.agent.parent.as_ref().map(|p| p.id);
+    let spawner = child.agent.role.parent().map(|p| p.id);
     // Off a bus whose children are muted (headless's per-exchange default)
     // the child's receiver is already dropped, so it streams nowhere; either
     // way its own record seam is recorded through whether or not anyone

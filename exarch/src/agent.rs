@@ -6,7 +6,7 @@
 //! once for the whole run.
 //!
 //! No node is privileged by special-case code — the distinctions reduce to
-//! *position*.  Holding `reply` falls out of `returns`, parking out of the
+//! *position*.  Holding `reply` falls out of the [`Role`], parking out of the
 //! launch's `attended`.  A child's result is posted up its parent's mailbox
 //! by the spawn site, not by the loop, so the loop is identical for all.
 //!
@@ -20,7 +20,7 @@
 //! An agent is *live* while its avatar holds the `Arc`; nothing deregisters.
 //! The tree that carries that liveness has one direction of strength, and it
 //! is the invariant everything else here rests on: **nothing holds an
-//! `Arc<Agent>` to a descendant.**  Up is strong ([`Agent::parent`]), so the
+//! `Arc<Agent>` to a descendant.**  Up is strong ([`Role::Child`]), so the
 //! climb a scope check makes never dangles; down is weak
 //! ([`Agent::children`]), so a walk prunes what fails to upgrade, and reaper
 //! closures and results addressed upward carry [`std::sync::Weak`].
@@ -47,6 +47,7 @@ pub mod digest;
 mod factory;
 pub mod fleet;
 pub(crate) mod gauge;
+pub(crate) mod index;
 pub mod nudge;
 pub mod resources;
 pub mod roster;
@@ -102,11 +103,7 @@ pub struct Agent {
     /// ~38 KB template.
     pub(crate) system: Arc<str>,
     pub(crate) caps: ral_core::capability::GrantStack,
-    /// Strong and upward: `None` ⇔ this agent is a root — the trunk, or a
-    /// `/branch` child, which converses and reports to nobody.  A parent
-    /// whose avatar has gone is still reachable here, terminated token and
-    /// all, so `deposit_reply` and the scope climb never dangle.
-    pub(crate) parent: Option<Arc<Self>>,
+    pub(crate) role: Role,
     /// Weak and downward, so no cycle exists to reason about: a child that
     /// fails to upgrade has settled, and the walk that found it prunes it.
     children: Mutex<Vec<Weak<Self>>>,
@@ -128,10 +125,6 @@ pub struct Agent {
     /// network policy's verdict, inherited verbatim by every fork.  The tool
     /// is attached per request, and only where the adapter has one.
     pub(crate) search: bool,
-    /// Whether this agent holds `reply`: a headless trunk and every fork do, a
-    /// conversing trunk and every `/branch` do not.  The desk's refusal and
-    /// the prompt's builtin index read this same bit.
-    pub(crate) returns: bool,
     /// The seat's own reach into this agent's running eval: the cell its
     /// seat republishes on every rebuild, so it never goes stale.
     reach: InterruptTarget,
@@ -154,10 +147,50 @@ pub struct Agent {
     /// atomicity, nothing more — and a writer drops its guard before pushing
     /// to any inbox, since a park verdict reads this under one.
     status: Mutex<Status>,
-    /// The parent's envelope, minted at this agent's birth: the context a
-    /// line posted upward is addressed to, since the parent is who reads it.
-    /// `None` for a root, which reports to nobody.
-    consumer: Option<Stamp>,
+}
+
+/// Whom an agent answers, fixed at birth.  The desk's `reply` refusal and the
+/// prompt's taught sections read this one value, so they cannot disagree.
+pub(crate) enum Role {
+    /// Converses turn after turn and holds no `reply`: an attended or embedded
+    /// trunk, or a `/branch`, which roots its own tree.
+    Converses,
+    /// The headless trunk: replies once, to the process's caller, and ends.
+    Headless,
+    /// Spawned: replies to its parent and parks to be messaged again.
+    Child {
+        /// Strong and upward, so a parent whose avatar has gone is still
+        /// reachable, terminated token and all, and `deposit_reply` and the
+        /// scope climb never dangle.
+        parent: Arc<Agent>,
+        /// The parent's envelope, minted at birth: what a result posted
+        /// upward is addressed to.
+        consumer: Stamp,
+    },
+}
+
+impl Role {
+    /// A child of `parent`.  A `/clear` racing this only widens refusal —
+    /// the stamp would fall one epoch further behind — so minting it
+    /// unlocked is safe.
+    pub(crate) fn child(parent: &Arc<Agent>) -> Self {
+        Self::Child {
+            consumer: parent.mailbox.stamp(),
+            parent: parent.clone(),
+        }
+    }
+
+    pub(crate) fn returns(&self) -> bool {
+        !matches!(self, Self::Converses)
+    }
+
+    /// `None` ⇔ a root of its tree.
+    pub(crate) fn parent(&self) -> Option<&Arc<Agent>> {
+        match self {
+            Self::Child { parent, .. } => Some(parent),
+            Self::Converses | Self::Headless => None,
+        }
+    }
 }
 
 /// [`Agent`]'s single-writer register — see [`Agent::status`]'s doc for who
@@ -189,10 +222,9 @@ pub(crate) struct Birth {
     pub started: Instant,
     pub system: Arc<str>,
     pub caps: ral_core::capability::GrantStack,
-    pub parent: Option<Arc<Agent>>,
+    pub role: Role,
     pub fuel: u32,
     pub provider: ProviderHandle,
-    pub returns: bool,
     pub search: bool,
     pub reach: InterruptTarget,
     pub mailbox: Mailbox,
@@ -223,7 +255,7 @@ pub struct Avatar {
     reply: ReplyCell,
     /// The fleet itself, `Arc`-shared with every other node: the launch, the
     /// name a spawn claims, and the lease scan.  Not the tree — that is
-    /// [`Agent::parent`] and [`Agent::children`].
+    /// [`Role::Child`] and [`Agent::children`].
     pub(crate) fleet: Arc<Fleet>,
     /// What this avatar has measured and told about its context.
     readings: Readings,
@@ -294,10 +326,7 @@ impl ProviderHandle {
 }
 
 impl Agent {
-    /// The one literal: every register starts empty, and the parent's
-    /// envelope is minted now.  A `/clear` racing this only widens refusal —
-    /// the stamp would fall one epoch further behind — so minting it unlocked
-    /// is safe.
+    /// The one literal: every register starts empty.
     pub(crate) fn new(birth: Birth) -> Arc<Self> {
         let Birth {
             id,
@@ -306,15 +335,13 @@ impl Agent {
             started,
             system,
             caps,
-            parent,
+            role,
             fuel,
             provider,
-            returns,
             search,
             reach,
             mailbox,
         } = birth;
-        let consumer = parent.as_ref().map(|p| p.mailbox.stamp());
         Arc::new(Self {
             id,
             name,
@@ -322,13 +349,12 @@ impl Agent {
             started,
             system,
             caps,
-            parent,
+            role,
             children: Mutex::new(Vec::new()),
             fuel,
             provider,
             token: cancel::Token::new(),
             search,
-            returns,
             reach,
             mailbox,
             schedules: crate::schedule::ScheduleRegistry::new(),
@@ -338,7 +364,6 @@ impl Agent {
                 reply: None,
                 awaiting: BTreeSet::new(),
             }),
-            consumer,
         })
     }
 
@@ -402,7 +427,7 @@ impl Agent {
     /// Deliver `outcome` to the parent's inbox as this agent's result.  A root
     /// has no parent and reports to nobody.
     pub(crate) fn report(&self, outcome: AgentOutcome) {
-        let Some(consumer) = &self.consumer else {
+        let Role::Child { consumer, .. } = &self.role else {
             return;
         };
         consumer.post(Stamped::AgentResult(AgentResult {
@@ -418,7 +443,7 @@ impl Agent {
     /// awaited again; anyone else answers their own parent, not us.  Unscoped:
     /// any live agent may be messaged, in any direction across the tree.
     pub(crate) fn message(&self, to: &Self, text: String) {
-        if to.parent.as_ref().is_some_and(|p| p.id == self.id) {
+        if to.role.parent().is_some_and(|p| p.id == self.id) {
             self.status.lock_ignore_poison().awaiting.insert(to.id);
         }
         to.mailbox.exchange(Post::AgentMessage(AgentMessage {
@@ -506,12 +531,12 @@ impl Agent {
     /// from `target`'s *parent*, so it costs O(depth) and takes no lock, and
     /// so nothing is a proper descendant of itself.
     pub(crate) fn descendant(&self, target: &Arc<Self>) -> Option<Arc<Self>> {
-        let mut above = target.parent.as_ref();
+        let mut above = target.role.parent();
         while let Some(node) = above {
             if std::ptr::eq(Arc::as_ptr(node), std::ptr::from_ref(self)) {
                 return Some(target.clone());
             }
-            above = node.parent.as_ref();
+            above = node.role.parent();
         }
         None
     }
@@ -521,7 +546,7 @@ impl Agent {
     /// what keeps one tab's listing out of another's.
     pub(crate) fn root(self: &Arc<Self>) -> Arc<Self> {
         let mut here = self.clone();
-        while let Some(up) = here.parent.clone() {
+        while let Some(up) = here.role.parent().cloned() {
             here = up;
         }
         here
@@ -622,7 +647,7 @@ impl Avatar {
     /// Whether the trunk, refused until a reset, resumes there by a wakeup —
     /// the launch's say, for the trunk alone: a fork fails up to its parent.
     pub(crate) fn resumes_at_reset(&self) -> bool {
-        self.agent.parent.is_none() && self.fleet.launch.resume_on_reset
+        self.agent.role.parent().is_none() && self.fleet.launch.resume_on_reset
     }
 
     /// So a frontend's emitters mint mailboxes onto the queue the attend loop

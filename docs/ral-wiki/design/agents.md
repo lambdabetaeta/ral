@@ -2,48 +2,57 @@
 
 **An exarch run is a *fleet* of structurally identical *agents* arranged in a
 tree, driven by the single shared `attend` loop; the only thing that distinguishes
-one agent from another is its *position* — whether it has a parent.** A sub-agent
+one agent from another is its *role* — whom it answers.** A sub-agent
 is not a different machine: it is an `Agent` ([[map/exarch/agent|agent]]) forked
 from a value-snapshot of its parent's shell, under its parent's capability
-stack plus one layer, with a strong `Arc<Agent>` parent edge. The `Fleet` holds what every node
+stack plus one layer, with a strong `Arc<Agent>` parent edge inside its role. The `Fleet` holds what every node
 shares — the `Launch` fixed once for the run, the by-name index, and the idle
 lease ([[decisions/260827_agent-and-avatar|agent-and-avatar]]).
 
-## One predicate, fixed at construction
+## One role, fixed at construction
 
-There is no `is_root`. Whether an agent returns a value or converses with a human
-is a **construction-fixed `returns` bit** on the `Agent` — `true` for a `fork`ed
-sub-agent, `false` for a `/branch` child, and at the trunk decided by how it is
-driven (`Trunk`: a `Headless` trunk returns; an `Attended` or `Embedded` one
-converses). One bit is the single source of truth for every role reader:
-parking's conversing predicate, the desk's `reply` refusal
-([[map/exarch/builtins|builtins]]), and the per-agent builtin index resolved from
-the same bit at `Avatar::assemble` — so reply availability, parking, and the
-advertised vocabulary cannot disagree
+There is no `is_root`. Whom an agent answers is a **construction-fixed
+`Role`** on the `Agent`, one of three:
+
+- `Converses` — answers nobody, holds no `reply`: an attended or embedded
+  trunk, or a `/branch` child, each the root of its own tree;
+- `Headless` — the headless trunk, replying once to the process's caller;
+- `Child { parent, consumer }` — a `fork`ed sub-agent, replying to its parent,
+  whose strong edge and mailbox `Stamp` it carries.
+
+At the trunk the role is decided by how it is driven (`Trunk::Headless` builds
+`Headless`; `Attended` and `Embedded` build `Converses`). A parented agent that
+converses is unrepresentable. The role is the single source of truth for every
+reader: parking, the desk's `reply` refusal
+([[map/exarch/builtins|builtins]]), the nudge's must-reply fact, and the
+per-agent prompt resolved from it before `Avatar::assemble` — so reply
+availability, parking, and the advertised vocabulary cannot disagree
 ([[decisions/260705_branch-minimal|branch-minimal]]). **Fuel is a separate
 construction-fixed depth budget:** an agent's spawn surface is present exactly
 when `fuel > 0`; it does not decide whether the agent returns. Position still
-does two jobs — it fixes the tree edge (`parent`) and the signal path (only
+fixes the signal path (only
 the trunk's session is minted facing the ambient causes,
 [[decisions/260726_cancel-is-a-join|cancel-is-a-join]];
 [[decisions/260704_per-agent-eval-cancel|per-agent-eval-cancel]]) — but it does
 not decide who returns.
 
-- **A returning agent holds `reply`.** A returning node at any depth, *and* a headless trunk
-  (`parent = None`, `Trunk::Headless`) seeded once to produce one result, both
-  advertise it and terminate at quiescence. This is
+- **A returning agent holds `reply`.** A `Child` at any depth, *and* the
+  `Headless` trunk seeded once to produce one result, both advertise it. The
+  headless trunk ends on its reply; a child parks on it, to be messaged again.
+  This is
   [[decisions/260623_reply-terminates-returning-agents|reply-terminates-returning-agents]]'s
-  reply gate, read off the construction-fixed bit rather than off
+  reply gate, read off the construction-fixed role rather than off
   `is_root && interactive`.
 - **A conversing agent has `reply` withheld at construction** and parks for a human
   instead of returning. Its `reply` call is refused at the desk, and the verb is
-  dropped from its builtin index, both keyed on the same bit. The attended
+  dropped from its builtin index, both keyed on the same role. The attended
   trunk is one such agent — parent-less, its writer ever-present — but not the
   *only* one: a **branch** converses, `reply`-withheld, and — like the
   trunk — parent-less, a root of its own tree rather than a descendant
   ([[decisions/260705_branch-minimal|branch-minimal]]). "Parent-less" and
-  "converses" are not the same set, which is exactly why the property is a bit
-  fixed at construction rather than a predicate on position.
+  "converses" are not the same set — the headless trunk is parent-less and
+  returns — which is exactly why the property is a role fixed at construction
+  rather than a predicate on position.
 
 "Returns a value" and "does not park for a human" remain the *same fact*, read in
 one place ([[map/exarch/agent|agent]]). Parking is **computed, not stored** — a
@@ -62,15 +71,17 @@ reads both.
 The prompt is an *agent-invariant base* plus one per-agent resolution step. The
 same construction facts that govern the desk govern what the model is taught:
 
-- **`returns` gates `# Agent`.** Returning agents receive the deliberate-return
-  contract; conversing agents do not.
+- **The role gates `# Spawned` and `# Reply`.** Every returning agent receives
+  `Reply`, the deliberate-return contract, worded to be true of any receiver;
+  only a `Child` also receives `Spawned` — the spawner's snapshot, the spawner
+  binding the reply, the idle wait for follow-ups. The headless trunk is never
+  told it was spawned. Conversing agents receive neither.
 - **`interactive` gates `Surfacing`.** Human-facing guidance remains in the
   shared base, so a returning interactive child can receive both it and
-  `# Agent`.
+  `# Reply`.
 - **`fuel > 0` gates `# Agents`.** A leaf receives neither spawn
   guidance nor the spawn family in its builtin index.
-- **The builtin index has three bits** — `returns`, `allow_schedule`, and
-  `spawns` (`fuel > 0`) — cached once from the booted shell. The unresolved base
+- **The builtin index has three inputs** — the `Role`, `allow_schedule`, and `spawns` (`fuel > 0`) — cached once from the booted shell. The unresolved base
   stays on the node, and roots, identity forks, and wire children resolve their
   own prompt before the log bookend records its byte length.
 
@@ -418,7 +429,7 @@ tab's current exchange, never a subtree and never an agent
 ([[decisions/260705_cancel-per-tab|cancel-per-tab]]). The subtree cascade survives,
 but only behind the **lifecycle terminators**: the `` exarch-agents `cancel `` tag, the
 per-agent idle-lease reaper, and `/clear`. They share one cascade over the
-agent tree itself (`Agent::parent`/`Agent::children`), so terminating a
+agent tree itself (`Role::Child`/`Agent::children`), so terminating a
 mid-tree agent (`Agent::cancel_tree`) reaps everything below it
 (`Agent::cancel_descendants`, a walk over `children`); `/clear`
 (`Agent::forget`) additionally drains this agent's own inbox, whose
@@ -543,7 +554,7 @@ one field with six spellings, and why the CLI's two flags are not),
 [[decisions/260705_cancel-per-tab|cancel-per-tab]] (Esc/Ctrl-C are a per-tab exchange
 interrupt, not a subtree cascade),
 [[decisions/260705_branch-minimal|branch-minimal]] (the conversing child whose
-`returns` bit is fixed false at construction),
+role is fixed `Converses` at construction),
 [[design/engine-protocol|engine-protocol]] (why the daemon
 listens and the host dials, what that direction deletes, and the enquiry
 class per registry, every tag answering the registry's state),

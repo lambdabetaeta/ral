@@ -110,7 +110,7 @@ against it:
   teardown reaches its own workers through its shell's durable root (a
   worker's cancel scope is a child of that root, so cancelling it walks the
   ancestor chain with no extra edge), and reaches its schedules and
-  children through the tree itself (`Agent::parent`/`Agent::children`).
+  children through the tree itself (`Role::Child`/`Agent::children`).
 - **clear-epoch** — every session's inbox counts its own clears, bumped
   under the same lock the drain runs, and `/clear` bumps only that inbox's
   count. Anything settling across it is rejected at the inbox's own pop —

@@ -155,7 +155,7 @@ impl ActFragment {
 pub(crate) struct HostServices {
     /// This run's own agent: parent of what it spawns, root of the descendant
     /// check `` `message ``/`` `cancel `` enforce, and the source every
-    /// immutable-config read (`caps`, `fuel`, `returns`, …) is taken from.
+    /// immutable-config read (`caps`, `fuel`, `role`, …) is taken from.
     pub agent: Arc<Agent>,
     pub fleet: Arc<Fleet>,
     /// How this call's forks reach the desk: `` `start `` and `` `branch ``

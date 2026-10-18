@@ -28,7 +28,7 @@ fn test_log() -> AgentLog {
 /// tests never spawn from it.
 fn test_trunk(fleet: &Arc<Fleet>) -> Arc<crate::agent::Agent> {
     let mut spec = crate::agent::testkit::TestAgentSpec::new("wire-trunk");
-    spec.returns = true;
+    spec.role = crate::agent::Role::Headless;
     crate::agent::testkit::test_agent(fleet, spec).expect("a fresh fleet's trunk")
 }
 

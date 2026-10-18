@@ -300,7 +300,7 @@ fn agent_full_stack_round_trip_answers_the_summary_and_parks_a_reply() {
 fn agents_cancel_answer_still_counts_the_cancelled_agent() {
     let session = crate::agent::Avatar::for_test("system").unwrap();
     let mut doomed = crate::agent::testkit::TestAgentSpec::new("doomed");
-    doomed.parent = Some(session.agent.clone());
+    doomed.role = crate::agent::Role::child(&session.agent);
     let _doomed = crate::agent::testkit::test_agent(&session.fleet, doomed)
         .expect("a fresh child of a live parent");
 

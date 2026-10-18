@@ -121,7 +121,7 @@ fn wire_spawnable_desk(fuel: u32, factory: Arc<FakeFactory>) -> (ExarchDesk, Arc
     spec.reach = fake_wire_reach();
     spec.mailbox = parent_inbox.mailbox();
     spec.fuel = fuel;
-    spec.returns = true;
+    spec.role = crate::agent::Role::Headless;
     let agent =
         crate::agent::testkit::test_agent(&fleet, spec).expect("a fresh fleet's wire trunk");
     let (emit, _rx) = crate::bus::dummy_emitter();
@@ -268,20 +268,20 @@ fn identity_and_wire_peers_exchange_messages_through_one_desk() {
     let fleet = Fleet::for_test();
     let mut parent_spec = crate::agent::testkit::TestAgentSpec::new("parent");
     parent_spec.fuel = 3;
-    parent_spec.returns = true;
+    parent_spec.role = crate::agent::Role::Headless;
     let parent =
         crate::agent::testkit::test_agent(&fleet, parent_spec).expect("a fresh fleet's trunk");
 
     let identity_inbox = Inbox::new();
     let mut identity = crate::agent::testkit::TestAgentSpec::new("identity-peer");
-    identity.parent = Some(parent.clone());
+    identity.role = crate::agent::Role::child(&parent);
     identity.mailbox = identity_inbox.mailbox();
     let _identity_peer = crate::agent::testkit::test_agent(&fleet, identity)
         .expect("a fresh child of a live parent");
 
     let wire_inbox = Inbox::new();
     let mut wire = crate::agent::testkit::TestAgentSpec::new("wire-peer");
-    wire.parent = Some(parent.clone());
+    wire.role = crate::agent::Role::child(&parent);
     wire.reach = fake_wire_reach();
     wire.mailbox = wire_inbox.mailbox();
     let _wire_peer =

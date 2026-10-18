@@ -153,7 +153,7 @@ fn branch_imports_context_and_withholds_reply() {
     );
 
     assert!(
-        !child.agent.returns,
+        !child.agent.role.returns(),
         "a branch withholds `reply` and never returns"
     );
     assert_eq!(
@@ -164,74 +164,6 @@ fn branch_imports_context_and_withholds_reply() {
         child.agent.fuel,
         parent.agent.fuel - 1,
         "a branch is a fork: its fuel is one less than the parent's"
-    );
-}
-
-/// Read `system_prompt_bytes` off a session's `SessionStarted` bookend,
-/// the first record in its `record.jsonl`.
-fn recorded_system_prompt_bytes(log_dir: &Path) -> usize {
-    let records = crate::record::read_records(&log_dir.join("record.jsonl")).unwrap();
-    let first = records
-        .into_iter()
-        .next()
-        .expect("record.jsonl must have at least one record");
-    match first {
-        crate::record::Record::Forensic(crate::record::Forensic::SessionStarted {
-            system_prompt_bytes,
-            ..
-        }) => system_prompt_bytes,
-        other => panic!("first record must be SessionStarted, got {other:?}"),
-    }
-}
-
-/// The bookend records the child's own resolved length — never a
-/// parent's, never the raw template's — checked in both directions a
-/// `returns` flip can take.
-#[test]
-fn fork_and_branch_bookend_record_the_childs_own_resolved_length() {
-    let dir = tmp("bookend-resolved-length");
-    let template = format!(
-        "persona\n\n# Builtins\n\n{}",
-        crate::prompt::BUILTIN_INDEX_PLACEHOLDER
-    );
-    let root = Avatar::root(
-        RootConfig {
-            system: template,
-            ..root_config(dir.path(), SPAWN_FUEL)
-        },
-        identity_seat("bookend-resolved-length"),
-        scripted("test-model", Script::new()),
-    )
-    .expect("root trunk");
-
-    let child = root.fork().expect("fork child");
-    assert_ne!(
-        child.agent.system.len(),
-        root.agent.system.len(),
-        "the fork's bits must actually differ from its parent's for \
-         this test to be meaningful"
-    );
-    assert_eq!(
-        recorded_system_prompt_bytes(&child.log_dir()),
-        child.agent.system.len(),
-        "an ordinary fork's bookend must record its own resolved \
-         system, not its non-returning parent's"
-    );
-
-    let grandchild = child
-        .branch("grandchild".into(), &crate::bus::dummy_emitter().0)
-        .expect("branch grandchild");
-    assert_ne!(
-        grandchild.agent.system.len(),
-        child.agent.system.len(),
-        "the branch's bits must actually differ from its parent's for \
-         this test to be meaningful"
-    );
-    assert_eq!(
-        recorded_system_prompt_bytes(&grandchild.log_dir()),
-        grandchild.agent.system.len(),
-        "a /branch child's bookend must record its own resolved \
-         system, not its returning parent's"
     );
 }
 
@@ -323,7 +255,7 @@ fn clear_cancels_registered_workers_and_drops_their_late_surface() {
 fn late_child_result_after_clear_is_refused_at_the_pop() {
     let mut session = Avatar::for_test("system").unwrap();
     let mut spec = TestAgentSpec::new("worker");
-    spec.parent = Some(session.agent.clone());
+    spec.role = crate::agent::Role::child(&session.agent);
     let worker = test_agent(&session.fleet, spec).expect("a fresh child of a live session");
 
     session.clear().expect("clear must succeed");
@@ -346,7 +278,7 @@ fn a_clear_in_one_tab_leaves_another_tabs_late_result_alone() {
     let trunk = Avatar::for_test("system").unwrap();
     let mut branch = Avatar::for_test("system").unwrap();
     let mut spec = TestAgentSpec::new("worker");
-    spec.parent = Some(trunk.agent.clone());
+    spec.role = crate::agent::Role::child(&trunk.agent);
     let worker = test_agent(&trunk.fleet, spec).expect("a fresh child of the trunk");
 
     branch.clear().expect("clear must succeed");

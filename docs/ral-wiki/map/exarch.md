@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 95858e12
-generated_at_date: 2026-10-17
-covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/data/system.md, exarch/data/agents.md, exarch/data/reply.md, exarch/data/ral.md, exarch/data/script-style.md, exarch/data/context.md]
+generated_at_commit: 6b801828
+generated_at_date: 2026-10-18
+covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/data/system.md, exarch/data/agents.md, exarch/data/spawned.md, exarch/data/reply.md, exarch/data/ral.md, exarch/data/script-style.md, exarch/data/context.md]
 ---
 
 # Map: exarch
@@ -217,8 +217,9 @@ agent, so a root, identity fork, and wire child each receive their own surface.
   *name only* — a progressive-disclosure index the agent expands at runtime with
   `help`/`explain`, so the prompt cannot drift. `assemble` bakes a
   *placeholder* here: the real per-agent list — filtered to the harness verbs
-  that agent holds — is resolved by `BuiltinIndex::apply` once the agent's
-  own grants — `returns`, `allow_schedule`, `spawns` (`fuel > 0`) — are in reach,
+  that agent holds — is resolved by `BuiltinIndex::apply` (`agent/index.rs`)
+  once the agent's own grants — its `Role`, `allow_schedule`, `spawns`
+  (`fuel > 0`) — are in reach,
   without a live `Shell`; zero-fuel agents omit `agents` alone.
 - **`Tasks`** (`data/tasks.md`) is the task-management kit API.
 - **`Script style`** (`data/script-style.md`) is the reuse guide: one program, not
@@ -257,11 +258,12 @@ agent, so a root, identity fork, and wire child each receive their own surface.
   the five Bertin marks and role set
   ([[decisions/260619_surface-carries-documents|surface-carries-documents]],
   → [[map/exarch/cards|cards]]). Per-agent resolution then appends
-  **`Agents`** (`data/agents.md`) iff `fuel > 0`, followed by
-  **`Reply`** (`data/reply.md`) iff `returns`; returning interactive children
-  therefore keep both obligations. A headless root is returning too, so with
-  the normal positive spawn fuel it gets both late sections; only a zero-fuel
-  returning agent gets `Agent` alone.
+  **`Agents`** (`data/agents.md`) iff `fuel > 0`, then **`Spawned`**
+  (`data/spawned.md`) iff the agent is a child, then **`Reply`**
+  (`data/reply.md`) iff it returns at all. `Reply` says only what is true of
+  any receiver; `Spawned` carries the spawner's snapshot, its binding the
+  reply, and the idle wait for follow-ups. A headless root therefore gets
+  `Reply` but never `Spawned`.
 
 `--system FILE...` replaces *only* the persona slot with the user-supplied files;
 the per-agent index and optional sections still resolve from the stored base.
@@ -270,7 +272,7 @@ the per-agent index and optional sections still resolve from the stored base.
 
 - [[map/exarch/agent|agent]] — the uniform node and the thin `Fleet`: the attend loop
   (provider round-trips, tool-call batches with prompt-queue steering, context eviction,
-  the nudge-retry policy, sub-agent fork), the `parent` predicate, the owned
+  the nudge-retry policy, sub-agent fork), the `Role` each node is born with, the owned
   hot-swappable provider, dynamic focus, and the subtree cancel cascade.
 - [[map/exarch/provider|provider]] — LLM transport over genai: streaming, the retry
   driver, prompt caching, usage and dollar accounting.
@@ -282,7 +284,7 @@ the per-agent index and optional sections still resolve from the stored base.
   relay beside it; `provider/tools.rs` holds the wire half (a static `ToolSpec` and a
   `Copy` `Toolset` the agent carries, with no registry) and `agent/tools.rs` the dispatch. Every other harness verb — the
   `` exarch-agents `start `` spawn (one record-spec tag, `` `amnemon ``/`` `mnemon ``
-  by field, fuel-gated, `` `reply ``/`` `read `` gated on `returns`), the schedule family — is a builtin reached
+  by field, fuel-gated, `` `reply ``/`` `read `` gated on a returning `Role`), the schedule family — is a builtin reached
   through it, answered by the desk. The sub-agent model is [[design/agents|agents]].
 - [[map/exarch/builtins|builtins]] — the resident host atoms and the harness
   verbs: the hash-addressed edit primitives, the spawn/schedule/reply

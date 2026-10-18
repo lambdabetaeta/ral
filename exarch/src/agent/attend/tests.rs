@@ -93,7 +93,7 @@ fn park_mode_reads_engagement_from_the_exchange_clock() {
 fn an_unattended_conversing_trunk_waits_on_its_fleet_alone() {
     let embedded = trunk(false);
     assert!(
-        !embedded.agent.returns && !embedded.fleet.launch.attended,
+        !embedded.agent.role.returns() && !embedded.fleet.launch.attended,
         "the fixture is a conversing trunk nobody types into"
     );
     assert_eq!(
@@ -101,8 +101,7 @@ fn an_unattended_conversing_trunk_waits_on_its_fleet_alone() {
         ParkMode::Quiesce
     );
     let mut spec = TestAgentSpec::new("helper");
-    spec.parent = Some(embedded.agent.clone());
-    spec.returns = true;
+    spec.role = crate::agent::Role::child(&embedded.agent);
     let _helper = test_agent(&embedded.fleet, spec).expect("a live child");
     assert_eq!(
         embedded.park_mode(embedded.agent.engaged()),
@@ -110,8 +109,7 @@ fn an_unattended_conversing_trunk_waits_on_its_fleet_alone() {
     );
 }
 
-/// The `reply` refusal keys on the captured `returns` bit, not on
-/// trunk-ness, and is an ordinary call error rather than a termination.
+/// The `reply` refusal keys on the role, not on trunk-ness, and is an ordinary call error rather than a termination.
 #[test]
 fn reply_refused_identically_for_trunk_and_branch_conversing_agents() {
     let root = trunk(true);

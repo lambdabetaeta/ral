@@ -35,23 +35,18 @@ fn fresh_log() -> AgentLog {
 }
 
 /// A fresh fleet's trunk and the [`HostServices`] a desk running as it
-/// captures, with `configure` free to narrow the trunk's own config
-/// before it is born — a custom `system_base`/`index` for the
-/// bookend test, `returns: false` for the one refusal that keys on it.
-/// Returns the fleet and the trunk's own inbox too, since a spawn test
+/// captures.  Returns the fleet and the trunk's own inbox too, since a spawn test
 /// needs both to drive `` `start `` end to end.
 fn services_with(
     fuel: u32,
     launch: crate::agent::fleet::Launch,
-    configure: impl FnOnce(&mut crate::agent::testkit::TestAgentSpec),
 ) -> (HostServices, Arc<Fleet>, Inbox) {
     let parent_inbox = Inbox::new();
     let fleet = Fleet::new(launch, crate::agent::fleet::AGENT_LEASE_IDLE);
     let mut spec = crate::agent::testkit::TestAgentSpec::new("parent");
     spec.mailbox = parent_inbox.mailbox();
     spec.fuel = fuel;
-    spec.returns = true;
-    configure(&mut spec);
+    spec.role = crate::agent::Role::Headless;
     let agent = crate::agent::testkit::test_agent(&fleet, spec).expect("a fresh fleet's trunk");
     let (emit, _rx) = crate::bus::dummy_emitter();
     let services = HostServices {
@@ -72,7 +67,7 @@ fn services_with(
 /// The base capture every desk below builds on, so growing [`HostServices`]
 /// means touching one literal, not three.
 fn base_services() -> HostServices {
-    services_with(3, crate::agent::fleet::Launch::for_test(), |_| {}).0
+    services_with(3, crate::agent::fleet::Launch::for_test()).0
 }
 
 fn desk() -> ExarchDesk {
@@ -220,7 +215,6 @@ fn granted_desk() -> ExarchDesk {
                 allow_schedule: true,
                 ..crate::agent::fleet::Launch::for_test()
             },
-            |_| {},
         )
         .0,
     }
@@ -231,7 +225,7 @@ fn granted_desk() -> ExarchDesk {
 /// result is observable — unlike [`desk`].
 fn spawnable_desk(fuel: u32) -> (Arc<ExarchDesk>, Arc<Fleet>, Inbox) {
     let (services, fleet, parent_inbox) =
-        services_with(fuel, crate::agent::fleet::Launch::for_test(), |_| {});
+        services_with(fuel, crate::agent::fleet::Launch::for_test());
     (Arc::new(ExarchDesk { services }), fleet, parent_inbox)
 }
 
@@ -1116,7 +1110,7 @@ fn start_answers_the_fleets_state_not_a_receipt() {
     // Held for the whole test, and with no worker behind it, so it never
     // settles out from under the assertion below.
     let mut sibling = crate::agent::testkit::TestAgentSpec::new("already-there");
-    sibling.parent = Some(desk.services.agent.clone());
+    sibling.role = crate::agent::Role::child(&desk.services.agent);
     let _already_there =
         crate::agent::testkit::test_agent(&fleet, sibling).expect("a fresh child of a live parent");
 
@@ -1256,96 +1250,6 @@ fn start_refuses_a_misspelt_spec_field() {
         err.message,
         "`` exarch-agents `start ``: `spec: unknown field `nmae`: did you mean `name`?"
     );
-}
-
-/// Read `system_prompt_bytes` off a session's opening bookend — the first
-/// record in its `record.jsonl`.
-fn recorded_system_prompt_bytes(log_dir: &std::path::Path) -> usize {
-    let records = crate::record::read_records(&log_dir.join("record.jsonl")).unwrap();
-    let first = records
-        .into_iter()
-        .next()
-        .expect("record.jsonl must have at least one record");
-    match first {
-        crate::record::Record::Forensic(crate::record::Forensic::SessionStarted {
-            system_prompt_bytes,
-            ..
-        }) => system_prompt_bytes,
-        other => panic!("first record must be SessionStarted, got {other:?}"),
-    }
-}
-
-/// The recorded length is the child's own resolved system prompt, not the
-/// raw `system_template` [`ExarchDesk::launch`] forks its log from.
-#[test]
-fn agent_start_bookend_records_the_childs_resolved_length() {
-    let template = format!(
-        "persona\n\n# Builtins\n\n{}",
-        crate::prompt::BUILTIN_INDEX_PLACEHOLDER
-    );
-    // The production seam: the index table resolves from the same booted
-    // surface the parked child shells fork from.
-    let index = crate::prompt::BuiltinIndex::resolve(
-        crate::boot::test_shell()
-            .builtin_names()
-            .map(str::to_string)
-            .collect(),
-    );
-    let (services, _fleet, parent_inbox) = services_with(
-        3,
-        crate::agent::fleet::Launch {
-            system: template.as_str().into(),
-            index,
-            ..crate::agent::fleet::Launch::for_test()
-        },
-        |_| {},
-    );
-    let desk = Arc::new(ExarchDesk { services });
-    let provider = Arc::new(Provider::scripted(
-        "test-model",
-        Script::new().then(Reply::tool_calls(vec![ral_call(
-            "r1",
-            "exarch-agents `reply 'hi from child'",
-        )])),
-    ));
-    desk.services.agent.provider.swap(provider);
-
-    let answer = with_parked(&desk, |desk, session| {
-        desk.ask(start_req(session, "say hi", "helper"))
-    })
-    .expect("a valid `start must succeed");
-
-    let _ = summary_counts(&answer);
-    let rows = listed(&desk);
-    let child = rows
-        .iter()
-        .find(|row| row.name == "helper")
-        .expect("the child stands on the listing");
-
-    let expected = desk
-        .services
-        .fleet
-        .launch
-        .index
-        .apply(
-            &template,
-            &crate::prompt::Grants {
-                returns: true,
-                allow_schedule: desk.services.fleet.launch.allow_schedule,
-                spawns: desk.services.agent.fuel.saturating_sub(1) > 0,
-            },
-            "helper",
-        )
-        .len();
-    assert_eq!(
-        recorded_system_prompt_bytes(&child.log_dir),
-        expected,
-        "the bookend must record the spawned child's own resolved \
-         system, not the unresolved template HostServices captured"
-    );
-
-    // Drain the settle, so no background thread outlives this test.
-    let _ = wait_for_settle(&parent_inbox);
 }
 
 #[test]
@@ -1507,48 +1411,6 @@ fn agent_start_refuses_after_clear() {
     );
 }
 
-/// A child is told its own grant, not its parent's: the layer its `start`
-/// asked for was resolved in its own engine, and its prompt is read there.
-#[test]
-fn a_child_is_told_its_own_grant() {
-    let (services, _fleet, parent_inbox) = services_with(
-        3,
-        crate::agent::fleet::Launch {
-            system: crate::prompt::GRANT_PLACEHOLDER.into(),
-            ..crate::agent::fleet::Launch::for_test()
-        },
-        |_| {},
-    );
-    let desk = Arc::new(ExarchDesk { services });
-    desk.services
-        .agent
-        .provider
-        .swap(Arc::new(Provider::scripted(
-            "test-model",
-            Script::new().then(Reply::tool_calls(vec![ral_call(
-                "r1",
-                "exarch-agents `reply 'done'",
-            )])),
-        )));
-    parked_by(
-        &desk,
-        r"exarch-agents `start [prompt: #'go'#, name: 'helper', type: `amnemon, grant: `confined, provider: `inherit, model: `inherit]",
-        |desk, session| desk.ask(start_req(session, "go", "helper")),
-    )
-    .expect("a confined child starts");
-    let child = desk
-        .services
-        .fleet
-        .resolve("helper")
-        .expect("the child is live");
-    assert!(
-        child.system.contains("- net: deny\n"),
-        "an unrestricted parent's confined child must be told it is offline:\n{}",
-        child.system
-    );
-    let _ = wait_for_settle(&parent_inbox);
-}
-
 /// A refusal at adoption: here, a restriction record the capability
 /// decoder will not read, which only the engine's own freeze discovers:
 /// drops the bequest rather than leaving it to be adopted twice.  The grant
@@ -1581,13 +1443,12 @@ fn refused_enquiry_leaves_the_nursery_empty() {
 /// reaches any live agent but this one.
 #[test]
 fn cancel_scopes_to_descendants_and_message_does_not() {
-    let (services, fleet, _root_inbox) =
-        services_with(3, crate::agent::fleet::Launch::for_test(), |_| {});
+    let (services, fleet, _root_inbox) = services_with(3, crate::agent::fleet::Launch::for_test());
     let desk_root = ExarchDesk { services };
     // root -> mid -> grandchild, and root -> sibling (mid's sibling).
     let under = |name: &str, parent: &Arc<Agent>| {
         let mut spec = crate::agent::testkit::TestAgentSpec::new(name);
-        spec.parent = Some(parent.clone());
+        spec.role = crate::agent::Role::child(parent);
         crate::agent::testkit::test_agent(&fleet, spec).expect("a fresh child of a live parent")
     };
     let root = desk_root.services.agent.clone();
@@ -1822,31 +1683,6 @@ fn a_refused_schedule_tiers_its_act_row() {
 
 // ── `reply` ───────────────────────────────────────────────────────────
 
-/// Refused before the payload is decoded, and the cell is left empty.
-#[test]
-fn reply_refused_without_returns() {
-    let (emit, _rx) = crate::bus::dummy_emitter();
-    let (services, _fleet, _inbox) =
-        services_with(3, crate::agent::fleet::Launch::for_test(), |spec| {
-            spec.returns = false;
-        });
-    let mut d = ExarchDesk { services };
-    d.services.emit = emit;
-    let err = d
-        .ask(reply_req(FOValue::Int { value: 1 }))
-        .expect_err("a non-returning agent's reply must be refused");
-    assert!(
-        err.message
-            .contains("you converse with the user; you do not return"),
-        "got: {}",
-        err.message
-    );
-    assert!(
-        d.services.reply.take().is_none(),
-        "a refused reply must never reach the cell"
-    );
-}
-
 /// Each call also puts a subject-less act on the rail, carrying its value.
 #[test]
 fn reply_stages_the_payload_last_write_wins() {
@@ -2006,7 +1842,7 @@ fn attend_and_deliver(mut child: Avatar) -> std::thread::JoinHandle<()> {
 /// caller must hold what comes back — that is what keeps it live.
 fn keepalive(fleet: &Arc<Fleet>, parent: &Arc<Agent>) -> Arc<Agent> {
     let mut spec = crate::agent::testkit::TestAgentSpec::new(&format!("keepalive-{}", parent.id));
-    spec.parent = Some(parent.clone());
+    spec.role = crate::agent::Role::child(parent);
     crate::agent::testkit::test_agent(fleet, spec).expect("a fresh child of a live parent")
 }
 

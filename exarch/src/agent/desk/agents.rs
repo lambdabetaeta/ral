@@ -2,10 +2,10 @@
 
 use crate::agent::roster::summary;
 use crate::agent::seat::{Seat, SeatKind};
-use crate::agent::{Avatar, Build, ProviderHandle};
+use crate::agent::{Avatar, Build, ProviderHandle, Role};
 use crate::enquiry::{Deposit, ForkClaim, Memory, Message, Name, Selection, Start};
 use crate::provider::Provider;
-use crate::shell_eval::{self};
+use crate::shell_eval;
 use ral_core::first_order::FOValue;
 use ral_core::first_order::datum::Datum;
 use ral_core::sync::LockExt;
@@ -176,6 +176,11 @@ impl ExarchDesk {
         let s = &self.services;
         let launch = &s.fleet.launch;
         let fuel = s.agent.fuel.saturating_sub(1);
+        let role = if returns {
+            Role::child(&s.agent)
+        } else {
+            Role::Converses
+        };
         // Against the *child's* grants, never this agent's, so the opening
         // bookend records the child's real system length.  Its grant layer
         // was resolved in its own engine, so only that engine can name it.
@@ -186,8 +191,8 @@ impl ExarchDesk {
         })?;
         let system_prompt = launch.index.apply(
             &crate::prompt::with_grant(&launch.system, &session, &s.agent.caps),
-            &crate::prompt::Grants {
-                returns,
+            &crate::agent::index::Grants {
+                role: &role,
                 allow_schedule: launch.allow_schedule,
                 spawns: fuel > 0,
             },
@@ -220,10 +225,9 @@ impl ExarchDesk {
             caps: s.agent.caps.clone(),
             seat,
             log,
-            parent: returns.then(|| s.agent.clone()),
+            role,
             fuel,
             provider: ProviderHandle::new(provider),
-            returns,
             search: s.agent.search,
             fleet: s.fleet.clone(),
         })
@@ -379,16 +383,16 @@ impl ExarchDesk {
     }
 
     /// `` `reply `` — stage the payload into the cell [`Avatar::deliberate`] lifts
-    /// into a deposit on this agent's own status once the batch drains:
-    /// it parks the agent and hands the value to the parent's `` exarch-agents `read ``,
-    /// rather than ending the run. Refused on every non-returning agent, keyed
-    /// on `returns` and never on trunk-ness.
+    /// into a deposit on this agent's own status once the batch drains, for
+    /// its consumer: a parent's `` exarch-agents `read ``, or the headless
+    /// driver. Refused on every conversing agent, keyed on its [`Role`] and
+    /// never on trunk-ness.
     pub(super) fn agent_reply(&self, value: FOValue) -> Result<FOValue, Error> {
         let s = &self.services;
-        if !s.agent.returns {
+        if !s.agent.role.returns() {
             return Err(Error::new(
                 "exarch-agents `reply` refused: you converse with the user; you do not return. \
-                 `reply` parks you and hands your value to your parent's exarch-agents `read: \
+                 `reply` hands a spawned or headless agent's answer to whoever launched it; \
                  the interactive trunk and every /branch child instead keep talking, turn after \
                  turn, and hold no `reply` to call.",
             ));
@@ -399,7 +403,7 @@ impl ExarchDesk {
         } else {
             display
         };
-        // No subject: the parent is the only recipient a returning agent has.
+        // No subject: a returning agent has exactly one recipient.
         s.commit_act(DeskAct::Reply, None, payload, false);
         s.reply.set(value);
         Ok(self.summary())

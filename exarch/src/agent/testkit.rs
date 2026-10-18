@@ -2,7 +2,9 @@
 //! one of them needs belongs in that file instead.
 
 use crate::agent::fleet::Fleet;
-use crate::agent::{Agent, Avatar, Birth, ProviderHandle, RootConfig, RootSeat, SPAWN_FUEL, Trunk};
+use crate::agent::{
+    Agent, Avatar, Birth, ProviderHandle, Role, RootConfig, RootSeat, SPAWN_FUEL, Trunk,
+};
 use crate::app::Scratch;
 use crate::bus::{AgentOutcome, Emitter, Mailbox};
 use crate::cancel::InterruptTarget;
@@ -133,15 +135,13 @@ pub(crate) struct TestAgentSpec {
     pub(crate) name: String,
     pub(crate) reach: InterruptTarget,
     pub(crate) mailbox: Mailbox,
-    /// `None` builds a root, `Some` a reporting child of that agent.
-    pub(crate) parent: Option<Arc<Agent>>,
+    pub(crate) role: Role,
     /// How long this agent has already been idle at birth: `started` is
     /// backdated by it, so a test can stand past an idle threshold without
     /// waiting the threshold out.
     pub(crate) idle: Duration,
     pub(crate) caps: ral_core::capability::GrantStack,
     pub(crate) fuel: u32,
-    pub(crate) returns: bool,
     pub(crate) search: bool,
 }
 
@@ -154,11 +154,10 @@ impl TestAgentSpec {
                 ral_core::carrier::Transport::control(&bare_transport()).clone(),
             ),
             mailbox: crate::bus::Inbox::new().mailbox(),
-            parent: None,
+            role: Role::Converses,
             idle: Duration::ZERO,
             caps: ral_core::capability::GrantStack::root(),
             fuel: 0,
-            returns: false,
             search: false,
         }
     }
@@ -193,11 +192,10 @@ pub(crate) fn test_agent(
         name,
         reach,
         mailbox,
-        parent,
+        role,
         idle,
         caps,
         fuel,
-        returns,
         search,
     } = spec;
     let agent = Agent::new(Birth {
@@ -209,10 +207,9 @@ pub(crate) fn test_agent(
             .expect("a test's backdated birth stays inside the monotonic clock"),
         system: Arc::from(""),
         caps,
-        parent,
+        role,
         fuel,
         provider: ProviderHandle::new(scripted("test-model", Script::new())),
-        returns,
         search,
         reach,
         mailbox,

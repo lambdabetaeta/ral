@@ -21,8 +21,8 @@ impl AgentInfo {
         Self {
             name: agent.name.clone(),
             spawner: agent
-                .parent
-                .as_ref()
+                .role
+                .parent()
                 .map_or(Spawner::Root, |up| Spawner::Agent(up.name.clone())),
             log_dir: agent.log_dir.clone(),
             elapsed: agent.elapsed(),

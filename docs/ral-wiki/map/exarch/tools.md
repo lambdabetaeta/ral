@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 6c9047b6
-generated_at_date: 2026-10-08
+generated_at_commit: 6b801828
+generated_at_date: 2026-10-18
 covers_paths: [exarch/src/agent/tools.rs, exarch/src/agent/tools/, exarch/src/provider/tools.rs, exarch/src/agent/spawn.rs]
 ---
 
@@ -80,8 +80,8 @@ their value *is* the returned record, the whole read-only
 `` `exarch-transcript `` family among them. There is no `Gate`/`tools_for` axis any
 more — a fresh model never even sees a verb the desk would certainly refuse:
 `agents` is dropped from the per-agent builtin index when the agent neither
-spawns nor returns (its `` `reply `` needs only `returns`, so a fuelless
+spawns nor returns (its `` `reply `` needs only a returning role, so a fuelless
 returning leaf keeps the verb), and the
-self-wakeup family when the agent lacks the schedule grant (`prompt.rs`'s
+self-wakeup family when the agent lacks the schedule grant (`agent/index.rs`'s
 `BuiltinIndex`, resolved once against the boot shell), while authority
 itself is still enforced only at the desk, never by omission.

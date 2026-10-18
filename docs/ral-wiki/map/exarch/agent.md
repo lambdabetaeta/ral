@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d13f07b0
-generated_at_date: 2026-10-17
+generated_at_commit: 6b801828
+generated_at_date: 2026-10-18
 covers_paths: [exarch/src/agent.rs, exarch/src/latch.rs, exarch/src/agent/, exarch/src/signals.rs, exarch/src/cancel.rs, exarch/src/schedule.rs, exarch/src/enquiry.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
 
@@ -13,11 +13,14 @@ may touch what ([[decisions/260827_agent-and-avatar|agent-and-avatar]]).
 identity (`id`, `name`, `log_dir`), the two cancel layers (`token:
 cancel::Token` and the eval-layer `reach: InterruptTarget`, both in the crate-level `cancel.rs`), the sender half
 of its own `mailbox`, an owned hot-swappable `provider: ProviderHandle`, the
-per-node config fixed at birth (`caps`, `fuel`, `returns`, `search`, the
+per-node config fixed at birth (`caps`, `fuel`, `role`, `search`, the
 resolved `system` prompt), the single-writer `status: Mutex<Status>` — `{
-rest, reply, awaiting }` — `consumer` (the parent's `Stamp`, minted at this
-agent's birth; `None` for a root), a strong `parent: Option<Arc<Agent>>`,
-and a weak `children: Mutex<Vec<Weak<Agent>>>`.  Its fields are plain
+rest, reply, awaiting }` — and a weak `children: Mutex<Vec<Weak<Agent>>>`.
+**`role: Role`** says whom the agent answers: `Converses` (an attended or
+embedded trunk, or a `/branch`, rooting its own tree), `Headless` (the
+headless trunk, replying once to the process's caller), or `Child { parent,
+consumer }` — the strong parent edge and the parent's `Stamp`, minted at
+birth by `Role::child`. A parented agent that converses is unrepresentable.  Its fields are plain
 `pub(crate)`: a record, not an interface, read directly by the modules that
 run it.  What every node of a run shares — the host's settings and the
 services it opened — is not on the node at all but on the fleet's
@@ -55,8 +58,8 @@ schedules and records the session-ended bookend, and the last strong
 reference going with it is what a parent's `children` or the fleet's
 `roots`/`names` prune away at their next walk. There is no `Session`, no
 `is_root`: every distinction reduces to **position in the tree**, read from
-`Agent::parent` together with `returns`, the launch's `attended`, and the
-agent's own exchange clock. What every node *shares* — the `Launch`, the
+the agent's `Role`, the launch's `attended`, and the agent's own exchange
+clock. What every node *shares* — the `Launch`, the
 by-name index, the idle lease — lives on the [[#The Fleet|`Fleet`]], not on
 the node; the one [[map/exarch/frontend|`FleetBus`]] and the transport
 `Engine` are session-level handles the frontend builds and holds, not fields
@@ -104,7 +107,7 @@ it, `Agent::idle()` reads
 `mailbox.last_exchange().unwrap_or(started).elapsed()` — the roster's
 `idle-s` and the reaper's bound, in one door.
 
-**Up is strong, down is weak.** `Agent::parent` is a strong `Arc`, so
+**Up is strong, down is weak.** `Role::Child`'s parent is a strong `Arc`, so
 `deposit_reply` and the scope climb (`Agent::descendant`) never dangle: a
 parent whose own avatar has gone is still a reachable `Agent` with a
 terminated token, not an absence. `Agent::children` holds `Weak`, so there
@@ -149,28 +152,30 @@ swap or a `named` child provider never leaves a stale verdict behind.
 A node built to converse — an attended or embedded trunk, and every
 `/branch` tab ([[decisions/260705_branch-minimal|branch-minimal]]) — withholds
 `reply`; whether it also parks for a human is the launch's say, not the
-node's. Two bits, because they are two facts: `returns` is per node, fixed at
-birth; `attended` is per run, fixed at launch — a human at the inbox (the
+node's. Two facts: the `Role` is per node, fixed at birth; `attended` is per run, fixed at launch — a human at the inbox (the
 TUI), or none (synod drives one exchange at a time; headless seeds once).
 Both behaviours fall out of construction and position, never an `is_root`
 branch:
 
 ```
-  returns(a)      // fixed at birth: fork true, branch false, trunk by how it is driven (Headless returns)
+  role(a)         // fixed at birth: fork Child, branch Converses, trunk by how it is driven (Headless or Converses)
   attended        // fixed at launch, on the fleet: Trunk::Attended alone
   park_mode(a)  =  Quiesce        if a.seat severed
-                   Quiesce        if ¬returns(a) ∧ attended ∧ a.token.terminated()   // /close reaped it
-                   Held           if ¬returns(a) ∧ attended                          // immune to cancellation
-                   Engaged        if a.parent ∧ returns(a) ∧ (engaged ∨ a.has_reply())  // talked to, or holding a reply; a terminate cause still ends it
+                   Quiesce        if role(a) = Converses ∧ attended ∧ a.token.terminated()   // /close reaped it
+                   Held           if role(a) = Converses ∧ attended                          // immune to cancellation
+                   Engaged        if role(a) = Child ∧ (engaged ∨ a.has_reply())             // talked to, or holding a reply; a terminate cause still ends it
                    HeldByChildren if some live child of a is still awaited
                    UntilCancelled if a.schedules.armed()
                    Quiesce        otherwise
 ```
 
-`returns` (`agent.rs`) is a **construction-fixed field** — one bit read by
+`role` (`agent.rs`) is a **construction-fixed field** — one value read by
 parking, the desk's `reply` refusal ([[map/exarch/builtins|builtins]]), and
-the prompt's per-agent resolver. The resolver applies the index from
-`returns`, the launch's `allow_schedule`, and `spawns = fuel > 0`, so no
+the per-agent resolver (`agent/index.rs`: `BuiltinIndex`, `Grants`, the verb
+families and their sections; `prompt.rs` keeps only the shared base and its
+placeholders, so `prompt` never depends on `agent`). The resolver applies the
+index from the `Role`, the launch's `allow_schedule`, and
+`spawns = fuel > 0`, so no
 agent is shown a verb or section the desk would certainly refuse; the nudge
 layer, parking, reply availability, and advertised vocabulary cannot disagree
 ([[decisions/260623_reply-terminates-returning-agents|reply-terminates-returning-agents]]).
@@ -532,7 +537,7 @@ the `Toolset`, `disk_warn_bytes`, the `factory`, the `Bureau`, and the prompt
 template with the `BuiltinIndex` each node resolves it against. Held here
 once rather than copied into every `Agent`, so a fork's `Build` names only
 what is its own. It is not the tree: the tree is
-`Agent::parent`/`Agent::children`, and every walk — the roster, the cancel
+`Role::Child`/`Agent::children`, and every walk — the roster, the cancel
 cascade, the scope check — runs there. `names` is the by-name door a spawn
 claims identity at and `` exarch-agents `message ``/`` `cancel ``/`` `read ``
 resolve through (`Fleet::resolve`); `roots` holds the trunk and every
@@ -847,20 +852,22 @@ enquires `` exarch-agents `branch <receipt> ``, which the desk refuses on any
 call carrying no order. The desk takes the fork up under `` `inherit ``,
 imports the parent's context, and deposits a *conversing* peer tab with the
 parent's verbatim authority into the order
-([[decisions/260705_branch-minimal|branch-minimal]]) — `returns: false` means
-`parent` comes back `None`, so a branch is a root exactly as the trunk is.
-A test's `fork` is the same path with `returns: true`. A builtin
+([[decisions/260705_branch-minimal|branch-minimal]]) — `returns: false` builds
+`Role::Converses`, so a branch is a root exactly as the trunk is.
+A test's `fork` is the same path with `returns: true`, building `Role::child`. A builtin
 spawn's `` `start `` tag leaves its fork the same way, and the desk's
 `` exarch-agents `start `` arm collects it and assembles it at one less unit
 of fuel ([[map/exarch/builtins|builtins]]).
 
 Prompt resolution is shared across the root, identity-fork, and wire-child
 paths. The launch keeps the unresolved base and the index; each node
-applies its own `returns` and child-fuel bits beside the launch's
-`allow_schedule`; the resolver appends `Agents`
-iff fuel remains and `Agent` iff the child returns. The child's log bookend
-records that fully resolved prompt length, including the filtered index and
-late sections, so a child never inherits an already-appended `Agent` section.
+applies its own `Reply` and child-fuel bits beside the launch's
+`allow_schedule`; the resolver appends `Agents` iff fuel remains, `Spawned`
+(`data/spawned.md`: the snapshot, the spawner binding the reply, follow-ups)
+iff `ToSpawner`, and `Reply` (`data/reply.md`, true of any receiver) iff the
+agent returns. The headless root thus never reads that it was spawned. The
+child's log bookend records that fully resolved prompt length, including the
+filtered index and late sections.
 
 ### Wire-seat spawn
 

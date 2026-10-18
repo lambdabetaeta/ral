@@ -18,7 +18,7 @@ use super::{DEMOTE_IDLE, LINGER};
 pub(super) struct Tab {
     /// Wire identity: what every `Signal` names, so what a lookup matches on.
     id: AgentId,
-    /// Birth facts, off the `Born` notice; immutable, like `Agent::parent`, and
+    /// Birth facts, off the `Born` notice; immutable, like an agent's `Role`, and
     /// still readable once the agent has settled — which is what a lingering row's
     /// label and indentation need.
     name: String,
