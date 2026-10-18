@@ -1,12 +1,9 @@
-//! The REPL: the terminal guard, the agent worker thread, and the merged
-//! render+input loop the UI thread runs beside it.
+//! The REPL: the terminal guard, every root's worker thread, and the merged
+//! render+input loop the UI thread runs beside them.
 
 use std::{
     io::{self},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -17,15 +14,19 @@ use crossterm::event::{
 
 use crate::{
     SessionInfo,
-    agent::Avatar,
-    bus::{BusReceiver, FleetBus, Pass, Post, Rewrite, Signal},
+    agent::{
+        Avatar,
+        fleet::Fleet,
+        spawn::{AsyncSpawn, spawn_async},
+    },
+    bus::{BusReceiver, FleetBus, Pass, Signal},
     provider::{Bureau, Provider},
-    record::Emitter as Recorder,
+    record::Resumed,
 };
 use std::sync::mpsc::TryRecvError;
 
 use super::{
-    App, commands,
+    App, banner, commands,
     render::draw,
     terminal::{self, TerminalGuard},
 };
@@ -37,111 +38,59 @@ pub(super) struct Tui {
     pub(super) app: App,
 }
 
-/// Build the [`Tui`] on `screen`, run the worker beside the UI loop, then
-/// flush logs and print the paths and usage on the restored shell.
+/// Attend every root, the `seed` prompt going to the first, until the last
+/// ends.
+///
+/// Each root runs on its own worker thread beside the UI loop; afterwards the
+/// logs are flushed and the paths and usage printed on the restored shell.
 ///
 /// # Errors
-/// Returns `Err` if drawing the banner fails, or if the UI render/input loop
+/// Returns `Err` if a root cannot be started, or if the UI render/input loop
 /// hits a fatal terminal error.
-///
-/// # Panics
-/// Panics if the OS refuses to spawn the agent worker thread.
 pub fn run(
     screen: TerminalGuard,
-    session: &mut Avatar,
+    roots: Vec<(Avatar, Option<Resumed>)>,
     provider: &Arc<Provider>,
     info: &SessionInfo<'_>,
     bureau: &Bureau,
-    seed: Option<String>,
+    mut seed: Option<String>,
     vi: bool,
 ) -> Result<(), String> {
+    let fleet = Arc::clone(&roots.first().ok_or("there is no session to open")?.0.fleet);
+    // A *session*-lived bus, not per-exchange: a root's workers keep streaming
+    // to their tabs after the exchange that spawned them ends.
+    let bus = FleetBus::session();
+    let _signals = crate::signals::face(&fleet);
+    for (root, resumed) in roots {
+        let emit = bus.emitter(root.agent.id, root.agent.mailbox.clone());
+        let spec = AsyncSpawn {
+            name: root.agent.name.clone(),
+            prompt: seed.take(),
+            resumed,
+        };
+        spawn_async(root, spec, &emit)?;
+    }
+    // A root's `Born` is the first thing its thread sends, so the first signal
+    // names a tab: the app exists only once there is one to focus.
+    let first = bus.rx().recv().map_err(|e| e.to_string())?;
+    let (Signal::Fact(id, _) | Signal::Transient(id, _)) = &first;
     let mut tui = Tui {
         guard: screen,
-        app: App::new(
-            &session.agent,
-            session.fleet.clone(),
-            vi,
-            info.resumed.is_some(),
-            session.inbox(),
-        ),
+        app: App::new(*id, Arc::clone(&fleet), vi, banner::session_card(info)),
     };
     tui.app.update_live_model(provider, &bureau.available());
-    // A *session*-lived bus, not per-exchange: an async child keeps
-    // streaming to its tab after the exchange that spawned it ends.
-    let bus = FleetBus::session(&session.inbox());
-    if let Some(s) = seed {
-        session.seed(s);
-    }
-    tui.app
-        .banner(tui.guard.term(), info)
-        .map_err(|e| e.to_string())?;
+    dispatch(&mut tui, bus.rx(), first);
 
-    // The worker parks on an empty inbox until `/quit`; latching `done` on the
-    // way out is the only thing that lets the UI loop's next drain say `Stop`.
-    let done = AtomicBool::new(false);
-    let done_ref = &done;
-    // The worker crosses the thread boundary with an emitter, not the bus:
-    // `FleetBus` holds a single-consumer `Receiver` and so is not `Sync`, while
-    // an `Emitter` is `Send` and is all the worker needs.
-    let worker_emit = bus.emitter(session.agent.id);
-    // The UI thread's own door onto the record seam — reachable here, before
-    // the worker spawns, where `LogCell`'s no-wait rule is trivially
-    // satisfied.  A cheap `Arc<Log>` clone, so a `/model` switch or a login
-    // records through the same seam the worker's own commits use.
-    let recorder = session.recorder();
-    if let Some(crate::record::Resumed { turn, bytes }) = info.resumed {
-        // Fold the record log into a memo *before* the note below, so the
-        // note is the boundary: everything ahead of it is replayed history,
-        // everything after is the live session.  The memo becomes the
-        // scrollback's own, and its mirror is built the way a live commit
-        // builds one.
-        let record_path = session.log_dir().join("record.jsonl");
-        let blocks = crate::record::replay::<crate::record::View>(
-            &record_path,
-            crate::record::Blocks::default(),
-        )
-        .map_err(|e| format!("record.jsonl did not replay cleanly: {e}"))?;
-        // The fold's usage is cumulative, matching `total_usage`'s running sum.
-        tui.app.total_usage = blocks.usage();
-        if let Some(sb) = tui.app.tabs.scrollback_mut(session.agent.id) {
-            sb.seed(blocks);
-        }
-        // The boundary itself is chrome, never recorded: a second resume must
-        // not replay a prior resume's note as if it were history.
-        tui.app.push_note(
-            session.agent.id,
-            &format!("resumed: {turn} turns, {} KB", bytes.div_ceil(1024)),
-        );
+    let ctx = CommandCtx { bureau, info };
+    let r = ui_loop(&mut tui, &bus, &fleet, &ctx);
+    if r.is_err() {
+        commands::quit(&fleet);
     }
-    // Without a way to wake the parked worker with a `/quit`, the `join` below
-    // would deadlock whenever the UI loop dies first.
-    let quit_mailbox = session.inbox().mailbox();
-    let cmd_ctx = CommandCtx {
-        bureau,
-        info,
-        recorder: &recorder,
-    };
-    // This is the process's trunk — a fact of the launch, not of any position
-    // in the tree — so it is what an OS signal must reach, for as long as it
-    // attends.
-    let _signals = crate::signals::face(session.agent.reach());
-    std::thread::scope(|scope| -> Result<(), String> {
-        let worker = std::thread::Builder::new()
-            .stack_size(8 * 1024 * 1024)
-            .spawn_scoped(scope, move || {
-                let out = session.attend(&worker_emit);
-                done_ref.store(true, Ordering::Release);
-                out
-            })
-            .expect("spawn agent worker");
-
-        let r = ui_loop(&mut tui, &bus, done_ref, &cmd_ctx);
-        if r.is_err() {
-            quit_mailbox.push(Post::Rewrite(Rewrite::Quit));
-        }
-        let _ = worker.join();
-        r.map_err(|e| e.to_string())
-    })?;
+    // Every root's teardown writes its log's last records.
+    while !fleet.is_empty() {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    r.map_err(|e| e.to_string())?;
 
     let logs = tui
         .app
@@ -172,7 +121,6 @@ pub fn run(
 pub struct CommandCtx<'a> {
     pub(super) bureau: &'a Bureau,
     pub(super) info: &'a SessionInfo<'a>,
-    pub(super) recorder: &'a Recorder,
 }
 
 /// Route one `Signal` to its `App` entry point.
@@ -183,16 +131,15 @@ fn dispatch(tui: &mut Tui, rx: &BusReceiver, sig: Signal) {
     }
 }
 
-/// The drain contract — the worker's explicit `done` flag ends a pass, never
-/// the channel merely emptying — over the TUI's own dispatch loop, on its
+/// The drain contract — the fleet's emptiness, read *before* the pass, ends it,
+/// never the channel merely emptying — over the TUI's own dispatch loop, on its
 /// render cadence rather than a `Sink`'s blocking one.
 fn drain_signals(
     rx: &BusReceiver,
-    done: &AtomicBool,
+    finished: bool,
     max: Option<usize>,
     mut handle: impl FnMut(Signal),
 ) -> Pass {
-    let finished = done.load(Ordering::Acquire);
     let mut n = 0usize;
     loop {
         if max.is_some_and(|m| n >= m) {
@@ -211,18 +158,12 @@ fn drain_signals(
     }
 }
 
-/// The merged render + input loop, on the UI thread beside the worker's
-/// [`Avatar::attend`].  Returns once the worker is done, after one last frame
-/// that includes everything it emitted.
-fn ui_loop(
-    tui: &mut Tui,
-    bus: &FleetBus,
-    done: &AtomicBool,
-    ctx: &CommandCtx<'_>,
-) -> io::Result<()> {
+/// The merged render + input loop, on the UI thread beside the roots' workers.
+/// Returns once the fleet is empty, after one last frame that includes
+/// everything they emitted.
+fn ui_loop(tui: &mut Tui, bus: &FleetBus, fleet: &Fleet, ctx: &CommandCtx<'_>) -> io::Result<()> {
     const BATCH: usize = 64;
     let frame = Duration::from_millis(16); // ~60 FPS max
-    let mailbox = tui.app.inbox.mailbox();
     let rx = bus.rx();
     // Seeded a frame in the past so the first iteration paints at once.  Gating
     // draws on it decouples the redraw rate from the drain rate: a token flood
@@ -236,19 +177,19 @@ fn ui_loop(
     loop {
         let prev_focus = tui.app.tabs.focused();
         // The explicit-done contract, shared with the headless `Sink::drive`:
-        // stop only when the worker is *done*, never when the channel empties,
+        // stop only when every root is *done*, never when the channel empties,
         // so a background agent flooding the bus cannot end the loop
         // early.  The cap bounds how long that flood starves the input poll.
         let mut handled_any = false;
-        let more = match drain_signals(rx, done, Some(BATCH), |sig| {
+        let more = match drain_signals(rx, fleet.is_empty(), Some(BATCH), |sig| {
             handled_any = true;
             dispatch(tui, rx, sig);
         }) {
             Pass::Stop => {
-                // The cap binds even a `done` drain, so `Stop` can arrive with
+                // The cap binds even a finished drain, so `Stop` can arrive with
                 // events still buffered; nothing drains after this returns, so
                 // empty the channel uncapped before the final frame.
-                drain_signals(rx, done, None, |sig| dispatch(tui, rx, sig));
+                drain_signals(rx, true, None, |sig| dispatch(tui, rx, sig));
                 tui.app.mark_ready();
                 draw(&mut tui.app, tui.guard.term())?;
                 return Ok(());
@@ -284,7 +225,6 @@ fn ui_loop(
             match ct_read()? {
                 CtEvent::Key(k) if k.kind == KeyEventKind::Press => {
                     dirty = true;
-                    let focused = tui.app.tabs.focused();
                     let steerable = tui.app.is_steerable();
                     // An open slash-command popup owns its own keys — Enter
                     // takes the highlighted command instead of submitting the
@@ -305,22 +245,15 @@ fn ui_loop(
                     } else {
                         match action {
                             _ if consumed => {}
-                            // Every tab interrupts through its own agent, which
-                            // cancels the focused agent's token and its current
+                            // The focused agent cancels its token and its current
                             // dispatch scope by handle — published ahead of the
                             // engine lock, so the keypress cannot land on a run
-                            // that just ended — and never the durable root: the
+                            // that just ended — and never its durable root: the
                             // exchange dies, its descendants do not, and the
-                            // agent lives to take a next run. The trunk alone
-                            // also re-creates the SIGINT a foreground external
-                            // child would have received, the process's
-                            // terminal being the trunk's.
+                            // agent lives to take a next run.
                             KeyAction::Cancel | KeyAction::Interrupt => {
-                                if let Some(agent) = tui.app.tabs.agent(focused) {
+                                if let Some(agent) = tui.app.tabs.focused_agent() {
                                     agent.interrupt();
-                                }
-                                if focused == tui.app.tabs.root() {
-                                    crate::signals::raise_interrupt();
                                 }
                             }
                             KeyAction::Submit => {
@@ -329,7 +262,7 @@ fn ui_loop(
                                     // which parses before it forks on the
                                     // focused tab — so no slash line can be
                                     // mailed to the model.
-                                    commands::route_submit(text, tui, &mailbox, ctx)?;
+                                    commands::route_submit(text, tui, ctx);
                                 }
                             }
                             KeyAction::Edit => {

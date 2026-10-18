@@ -56,7 +56,6 @@ use exarch::headless::converse_settled;
 use exarch::provider::scripted::{Reply, Script};
 use exarch::provider::{Bureau, Provider, ToolCall};
 use exarch::record::AgentId;
-use exarch::record::RecordedAccount;
 use exarch::record::{Display, Record, Recorded, Settlement, Transient};
 use ral_core::capability::GrantStack;
 use std::path::PathBuf;
@@ -147,11 +146,6 @@ fn main() {
         system: "you are a helpful office assistant".to_string(),
         caps: GrantStack::root(),
         run_dir,
-        account: RecordedAccount {
-            label: "test".to_string(),
-            service: "scripted".to_string(),
-            id: "test".to_string(),
-        },
         trunk: exarch::agent::Trunk::Embedded,
         tools: exarch::provider::Toolset::offered(false),
         allow_schedule: false,

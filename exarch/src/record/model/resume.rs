@@ -4,7 +4,7 @@
 
 use super::Context;
 use crate::record::log::Log;
-use crate::record::{AgentId, Forensic, Record, Recorded};
+use crate::record::{Forensic, Record, Recorded};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -18,6 +18,13 @@ struct CrashTail {
 
 /// The `(model, window)` an overflow taught the live provider.
 pub type Learned = Option<(String, u64)>;
+
+/// What a root's head record names the session by.
+pub struct Head {
+    pub name: String,
+    pub model: String,
+    pub label: String,
+}
 
 /// Scanned backwards from the end, a window at a time, rather than forwards
 /// through the whole file: the tail is one torn record long however long the
@@ -98,17 +105,17 @@ fn quarantine_tail(path: &Path, tail: &CrashTail) -> io::Result<()> {
 /// The pass is a stream rather than a collection, so what a resume holds is
 /// the structure it is building and never the log it is building it from.
 ///
-/// Returns the structure alongside the `(model, label)` pair the head record
+/// Returns the structure alongside the [`Head`] the first record
 /// identifies the session by, and the `(model, window)` an overflow last taught
 /// the live provider unless a later selection forgot it. `AgentLog::resume`
 /// reads its own identity from here rather than re-deriving it, since a session's identity is a fact about
 /// its first record, not a second thing to keep in step.
 ///
 /// # Errors
-/// Returns an error if the file cannot be read, cannot be quarantined, has no
-/// `SessionStarted { session_id: 0, parent: None }` head record, or holds a
+/// Returns an error if the file cannot be read, cannot be quarantined, is not
+/// headed by a root's `SessionStarted { parent: None, .. }`, or holds a
 /// protocol record the fold refuses.
-pub fn resume(path: &Path) -> io::Result<(Context, String, String, Learned)> {
+pub fn resume(path: &Path) -> io::Result<(Context, Head, Learned)> {
     if let Some(tail) = find_crash_tail(path)? {
         quarantine_tail(path, &tail)?;
     }
@@ -121,23 +128,27 @@ pub fn resume(path: &Path) -> io::Result<(Context, String, String, Learned)> {
         if identity.is_none() {
             identity = Some(match record.value() {
                 Record::Forensic(Forensic::SessionStarted {
-                    session_id,
                     parent: None,
+                    name,
                     model,
                     label,
                     ..
-                }) if *session_id == AgentId::new(0) => (model.clone(), label.clone()),
+                }) => Head {
+                    name: name.clone(),
+                    model: model.clone(),
+                    label: label.clone(),
+                },
                 Record::Forensic(Forensic::SessionStarted {
                     session_id, parent, ..
                 }) => {
                     return Err(io::Error::other(format!(
-                        "cannot resume {}: the first record starts session {session_id} with parent {parent:?}; expected SessionStarted {{ session_id: 0, parent: None }}; is this a child log?",
+                        "cannot resume {}: the first record starts session {session_id} with parent {parent:?}; expected a root, SessionStarted {{ parent: None, .. }}; is this a child log?",
                         path.display()
                     )));
                 }
                 other @ (Record::Protocol(_) | Record::Display(_) | Record::Forensic(_)) => {
                     return Err(io::Error::other(format!(
-                        "cannot resume {}: the first record is {other:?}; expected SessionStarted {{ session_id: 0, parent: None }}; is this a copied child log?",
+                        "cannot resume {}: the first record is {other:?}; expected a root, SessionStarted {{ parent: None, .. }}; is this a copied child log?",
                         path.display()
                     )));
                 }
@@ -167,11 +178,11 @@ pub fn resume(path: &Path) -> io::Result<(Context, String, String, Learned)> {
             .step(Recorded::new(record.locus().clone(), protocol.clone()))
             .map_err(|refusal| io::Error::other(refusal.to_string()))?;
     }
-    let Some((model, label)) = identity else {
+    let Some(head) = identity else {
         return Err(io::Error::other(format!(
             "cannot resume {}: no complete session records were found; is the file truncated?",
             path.display()
         )));
     };
-    Ok((context, model, label, learned))
+    Ok((context, head, learned))
 }

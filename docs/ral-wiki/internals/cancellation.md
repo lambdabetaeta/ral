@@ -153,7 +153,7 @@ signal context. The two are different kinds of proposition.
   `Aborted` to `Abort` and any other root cause to `Terminate`, which cancel
   the durable root, and an interrupt to `Control::Interrupt(id)`, naming the
   dispatch its front-end has in flight. The REPL and batch hold one for the
-  session, and exarch forwards to its trunk's `Agent` (`signals::face`); a wire
+  session, and exarch forwards to every live root's `Agent` (`signals::face`); a wire
   engine hears only its own process's shutdown, since an interrupt is aimed by
   the front-end that sent the dispatch. So a process hosting many engines —
   exarch, a test binary — never has one signal reach them all.
@@ -471,12 +471,12 @@ The same two mechanisms are driven by different keys on different surfaces.
 | **Ctrl-C** | ral batch / `-c` | SIGINT → `handler` | `request_interrupt()`, forwarded as `Control::Interrupt`, + ladder `+1`; third press `_exit`s |
 | **SIGTERM / SIGHUP** | any ral host | `handler` (term disposition) | `request_root_cancel(Terminate)`, forwarded as `Control::Terminate` — foreground and workers unwind, externals torn down SIGTERM-first, exit 143; ladder `+1`, third delivery `_exit`s |
 | **Ctrl-C / Ctrl-Break** | ral on a Windows console | console event → the `ctrlc` handler | `request_interrupt()`, forwarded as `Control::Interrupt`, + ladder `+1`; third event `ExitProcess`es with 130. No console event is sent to any group: the struck run's teardown breaks the groups it owns, and a worker's are never reached |
-| **Ctrl-C / Esc** | exarch TUI, active exchange | `Agent::interrupt` on the focused agent (reached through that tab's own `Weak`); the trunk also `cancel::raise_interrupt` | cancels the focused agent's `Token` and, as `Control::Interrupt`, its dispatch in flight; on the trunk, additionally `interrupt_foreground_child` (Unix) or `request_interrupt()` (Windows) |
-| **Ctrl-C / Ctrl-Break** | exarch on a Windows console | console event → `console_ctrl_handler`, ahead of ral's | `request_interrupt()`, reported handled so ral's ladder never sees it; `face` forwards it to the trunk's `Agent::interrupt` |
+| **Ctrl-C / Esc** | exarch TUI, active exchange | `Agent::interrupt` on the focused agent, root or child (reached through that tab's own `Weak`) | cancels the focused agent's `Token` and, as `Control::Interrupt`, its dispatch in flight; nothing process-wide, since no exarch shell is ever foregrounded |
+| **Ctrl-C / Ctrl-Break** | exarch on a Windows console | console event → `console_ctrl_handler`, ahead of ral's | `request_interrupt()`, reported handled so ral's ladder never sees it; `face` forwards it to every live root's `Agent::interrupt` |
 | **Ctrl-C / Ctrl-D** | exarch TUI, idle prompt | key table → quit | drops the TUI guard; no cancellation |
 | **Ctrl-C / Ctrl-D / Esc** | exarch TUI overlay | key table → close overlay | returns to the underlying prompt / exchange; no root cancel |
-| **async SIGINT** | exarch | ral's non-escalating `interrupt_handler` | forwarded by `signals::face` to the trunk's `Agent::interrupt` |
-| **async SIGTERM / SIGHUP** | exarch | ral's `handler` | forwarded to the trunk's `Agent::cancel(Terminate)` — its `Token` and `Control::Terminate`; ladder `+1` |
+| **async SIGINT** | exarch | ral's non-escalating `interrupt_handler` | forwarded by `signals::face` to every live root's `Agent::interrupt` |
+| **async SIGTERM / SIGHUP** | exarch | ral's `handler` | forwarded to every live root's `Agent::cancel(Terminate)` — its `Token` and `Control::Terminate`; ladder `+1` |
 
 ### ral interactive signal dispositions
 
@@ -531,9 +531,8 @@ exarch layers a *per-agent* cancellation `Token` over ral's machinery
   token stops the attend loop between steps; the root cancel unwinds a `ral` eval
   already in flight at the evaluator's poll points — without it, a cancelled
   agent would grind to its tool's `timeout_secs` wall before noticing. No root
-  carries a lease, so a `terminate` lands on the trunk only as it ends. What
-  `raise_interrupt` still uniquely covers on the trunk is the SIGINT re-created
-  for a foreground external child
+  carries a lease, so a `terminate` lands on a root only as the process ends or
+  on its own `/close`
   ([[decisions/260704_per-agent-eval-cancel|per-agent-eval-cancel]]).
 - **A cancel may precede the run it names.** Both eval-layer channels into an
   identity transport — a `Control::Cancel` naming a dispatch id, and an
@@ -551,19 +550,18 @@ exarch layers a *per-agent* cancellation `Token` over ral's machinery
   leaving SIGTERM/SIGHUP on ral's `handler`, so the escalation ladder survives.
   Install order matters — ral's handlers first, then exarch's — and
   `boot::face_process_signals` (`exarch/src/boot.rs`) runs it once, at the process entry; each
-  site that launches a process trunk holds `signals::face` for the attend, which
-  forwards the ambient causes to that trunk's `Agent`. `/clear` touches no
+  site that launches a process holds `signals::face` for the run, which
+  forwards the ambient causes to every live root's `Agent`. `/clear` touches no
   process-wide state: SIGINT no longer ticks the ladder, so there is nothing
   for a rebuilt context to reset.
 - Raw mode disables `ISIG`, so a TUI keystroke is *not* a kernel signal. The TUI's
   key table (`exarch/src/tui/tui_loop.rs`) separates UI shape from cancellation:
   idle Ctrl-C/Ctrl-D quit, overlays close, and only active-exchange Ctrl-C/Esc
-  route to the focused agent's own `Agent::interrupt` — every tab, the trunk included.
-  The trunk's tab additionally raises `raise_interrupt`, since nothing else
-  delivers the foreground external child's SIGINT: it re-creates the SIGINT the
-  kernel would have sent a foreground *external* child via
-  `interrupt_foreground_child`. On Windows it raises ral's interrupt alone:
-  a tool child hears Ctrl-Break only from its run's teardown.
+  route to the focused agent's own `Agent::interrupt` — every tab alike, roots
+  included. No exarch shell is ever foregrounded (tool runs are captured, the
+  terminal denied), so there is no external child for a key to re-signal; a
+  tool child hears Ctrl-Break only from its run's teardown. A key interrupts
+  one agent; an OS signal reaches every root.
 - A cancelled turn is a distinct TUI `Chrome::Cancelled`: the rail maps it
   to the error `╳` so the broken-off work is visible, while
   `Scrollback::last_is_error` matches only the fold's `Error`,
@@ -576,8 +574,7 @@ A deliberate asymmetry worth stating plainly: **the third-signal `_exit` floor i
 unreachable from an interactive prompt.** Interactive SIGINT goes to
 `interrupt_handler`, which never ticks the ladder; the TUI's active-exchange
 Ctrl-C goes to
-`Agent::interrupt` (and, on the trunk, also `raise_interrupt`), neither
-of which ever touches the ladder. Repeated presses re-write the same cause
+`Agent::interrupt`, which never touches the ladder. Repeated presses re-write the same cause
 (`fetch_max`), never escalate. The hard
 floor exists for batch scripts (`handler`) and for external SIGTERM/SIGHUP. Interactive cancellation is cooperative
 by construction; the root-reap gesture is REPL Ctrl-`\`, not a TUI key.

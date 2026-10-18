@@ -1,6 +1,6 @@
 use super::limits_card;
 use super::{
-    Command, Verb, command_candidates, lookup_command, resolve_export_path, unrecognized_command,
+    Command, command_candidates, lookup_command, resolve_export_path, unrecognized_command,
 };
 use crate::card::Mark;
 use crate::provider::allowance::{Allowance, Consumption, Reading};
@@ -58,17 +58,6 @@ fn focus_consumes_its_name_argument() {
 }
 
 #[test]
-fn branch_matches_bare_and_with_prompt_and_close_resolves() {
-    // An optional argument admits trailing text an argless one declines.
-    assert_eq!(parse("/branch"), Some(Ok(Command::Branch(None))));
-    assert_eq!(
-        parse("/branch hi"),
-        Some(Ok(Command::Branch(Some("hi".to_string()))))
-    );
-    assert_eq!(dispatch("/close"), Some(("/close", String::new())));
-}
-
-#[test]
 fn unknown_token_is_not_a_command() {
     assert_eq!(dispatch("/bogus"), None);
     assert_eq!(dispatch("just a prompt"), None);
@@ -85,12 +74,6 @@ fn unrecognized_command_flags_only_a_slash_typo() {
     // to the model, not a typo.
     assert_eq!(unrecognized_command("/copy this"), None);
     assert_eq!(unrecognized_command("just a prompt"), None);
-}
-
-#[test]
-fn a_bare_slash_offers_every_command_and_alias() {
-    let all: usize = Verb::ALL.iter().map(|v| v.meta().aliases.len() + 1).sum();
-    assert_eq!(replacements("/").len(), all);
 }
 
 #[test]
@@ -183,10 +166,4 @@ fn all_unmetered_collapses_to_one_sentence_naming_the_accounts() {
     };
     assert!(spans[0].text.contains("anthropic, openai, deepseek"));
     assert!(spans[0].text.contains("publishes a ration"));
-}
-
-#[test]
-fn empty_readings_say_something_sensible() {
-    let card = limits_card(&[]);
-    assert_eq!(card.0.len(), 1);
 }

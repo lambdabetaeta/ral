@@ -6,7 +6,7 @@
 //! `agent`) may hold a sender clone forever. Both the headless [`Sink::drive`]
 //! and the TUI's `ui_loop` in `tui/tui_loop.rs` drive it, so they cannot drift.
 
-use super::{BusReceiver, Emitter, FleetBus, Signal, WORKER_PANIC_PREFIX};
+use super::{BusReceiver, Emitter, FleetBus, Mailbox, Signal, WORKER_PANIC_PREFIX};
 use crate::record::{AgentId, Forensic, Record, Recorded, Transient};
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -125,6 +125,7 @@ pub(crate) fn pump<S, R>(
     sink: &mut S,
     bus: &FleetBus,
     root_id: AgentId,
+    mailbox: Mailbox,
     recorder: &crate::record::Emitter,
     work: impl Send + FnOnce(&Emitter) -> R,
 ) -> io::Result<Option<R>>
@@ -136,7 +137,7 @@ where
     // outlives the spawned thread's `'env`.
     let done = AtomicBool::new(false);
     let done_ref = &done;
-    let emit = bus.emitter(root_id);
+    let emit = bus.emitter(root_id, mailbox);
     std::thread::scope(|s| -> io::Result<Option<R>> {
         let h = s.spawn(move || {
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&emit)));

@@ -1,18 +1,17 @@
 //! The agents family of the desk.
 
+use crate::agent::Avatar;
 use crate::agent::roster::summary;
 use crate::agent::seat::{Seat, SeatKind};
-use crate::agent::{Avatar, Build, ProviderHandle, Role};
-use crate::enquiry::{Deposit, ForkClaim, Memory, Message, Name, Selection, Start};
+use crate::enquiry::{Deposit, ForkClaim, Message, Name, Selection, Start};
 use crate::provider::Provider;
 use crate::shell_eval;
 use ral_core::first_order::FOValue;
 use ral_core::first_order::datum::Datum;
-use ral_core::sync::LockExt;
 use ral_core::types::Error;
 use std::sync::Arc;
 
-use super::{DeskAct, ExarchDesk, Fork};
+use super::{DeskAct, ExarchDesk};
 
 impl ExarchDesk {
     /// The spawn spine behind `` `start ``: take up the fork, fork its log off
@@ -60,14 +59,17 @@ impl ExarchDesk {
         // refusal unwinds nothing: no adopted shell, no forked log, no helper engine.
         let provider = self.child_provider(&spec.provider, &spec.model)?;
 
-        let seat = self.fork_seat("start", fork)?;
-        let child = self.child(
-            "start",
+        let seat = self.fork_seat(fork)?;
+        let child = Avatar::child_of(
+            &s.agent,
+            &s.log.borrow(),
+            &s.fleet,
             name.clone(),
             seat,
             provider,
-            Fork::Returning(spec.memory),
-        )?;
+            spec.memory,
+        )
+        .map_err(|why| Error::new(format!("`` exarch-agents `start `` refused: {why}")))?;
         self.spawn_child(child, name, spec.prompt)
     }
 
@@ -106,9 +108,9 @@ impl ExarchDesk {
     /// the parent's own transport, or make an engine for the sealed bequest
     /// across the wire.  The engine narrows by the bequest's grant on either
     /// seat.
-    fn fork_seat(&self, verb: &str, fork: ForkClaim) -> Result<Seat, Error> {
+    fn fork_seat(&self, fork: ForkClaim) -> Result<Seat, Error> {
         let refused =
-            |why: String| Error::new(format!("`` exarch-agents `{verb} `` refused: {why}"));
+            |why: String| Error::new(format!("`` exarch-agents `start `` refused: {why}"));
         match (&self.services.kind, fork) {
             (SeatKind::Identity(parent), ForkClaim::Parked(id)) => {
                 parent.adopt_parked(id).map(Seat::adopted).map_err(refused)
@@ -133,7 +135,7 @@ impl ExarchDesk {
     /// The wire arm: one engine from the factory, attached as the parent was
     /// plus its seal. The parent's enquiry is answered only once this returns,
     /// so the child is attached before the roster names it.
-    fn make_engine(
+    pub(super) fn make_engine(
         &self,
         engine: &ral_core::protocol::EngineSpec,
         seal: ral_core::seed::Sealed,
@@ -158,75 +160,6 @@ impl ExarchDesk {
         .map_err(|lost| crate::agent::EngineLost::starting(&lost, s.agent.run_dir()).to_string())
     }
 
-    /// A child of this call's agent, seated on `seat`: its fuel one less, and
-    /// its log forked off the parent's. A returning child reports to its
-    /// parent; a conversing one roots its own tree.
-    fn child(
-        &self,
-        verb: &str,
-        name: String,
-        seat: Seat,
-        provider: Arc<Provider>,
-        fork: Fork,
-    ) -> Result<Avatar, Error> {
-        let s = &self.services;
-        let launch = &s.fleet.launch;
-        let fuel = s.agent.fuel.saturating_sub(1);
-        let (role, inherits) = match fork {
-            Fork::Returning(memory) => (Role::child(&s.agent), memory == Memory::Mnemon),
-            Fork::Conversing => (Role::Converses, true),
-        };
-        // Against the *child's* grants, never this agent's, so the opening
-        // bookend records the child's real system length.  Its grant layer
-        // was resolved in its own engine, so only that engine can name it.
-        let session = seat.read(|t| t.grants()).map_err(|lost| {
-            Error::new(crate::agent::EngineLost::starting(&lost, s.agent.run_dir()).to_string())
-        })?;
-        let system_prompt = launch.index.apply(
-            &crate::prompt::with_grant(&launch.system, &session, &s.agent.caps),
-            &crate::agent::index::Grants {
-                role: &role,
-                allow_schedule: launch.allow_schedule,
-                spawns: fuel > 0,
-            },
-            &name,
-        );
-        let account =
-            crate::record::RecordedAccount::of(provider.account(), &launch.bureau.available());
-        let log = {
-            let parent_log = s.log.borrow();
-            let mut log = parent_log
-                .fork(
-                    crate::agent::fresh_id(),
-                    system_prompt.len(),
-                    &crate::record::RecordedModel::of(&provider),
-                    &account,
-                )
-                .map_err(|e| Error::new(format!("could not fork child session log: {e}")))?;
-            let inherited = inherits.then(|| parent_log.inherited_context());
-            drop(parent_log);
-            if let Some(inherited) = inherited {
-                log.import_context(inherited).map_err(Error::new)?;
-            }
-            log
-        };
-        Avatar::assemble(Build {
-            name,
-            system_prompt,
-            // The child's engine holds its own layer; the stack it runs under
-            // is its parent's.
-            caps: s.agent.caps.clone(),
-            seat,
-            log,
-            role,
-            fuel,
-            provider: ProviderHandle::new(provider),
-            search: s.agent.search,
-            fleet: s.fleet.clone(),
-        })
-        .map_err(|why| Error::new(format!("`` exarch-agents `{verb} `` refused: {why}")))
-    }
-
     /// Hand `child` to `spawn_async` and answer the roster it now appears in —
     /// the state, not a receipt, and the same answer from either arm.
     fn spawn_child(&self, child: Avatar, name: String, prompt: String) -> Result<FOValue, Error> {
@@ -239,6 +172,7 @@ impl ExarchDesk {
             crate::agent::spawn::AsyncSpawn {
                 name,
                 prompt: Some(prompt),
+                resumed: None,
             },
             &s.emit,
         );
@@ -252,29 +186,6 @@ impl ExarchDesk {
             Ok(_) => Ok(self.summary()),
             Err(reason) => Err(Error::new(reason)),
         }
-    }
-
-    /// `` `branch `` — the desk half of the host's `/branch`: the fork takes
-    /// the parent's whole authority and context, and waits for the host to
-    /// take it up. Refused on any call that is not the host's own `/branch`.
-    pub(super) fn agent_branch(&self, fork: ForkClaim) -> Result<FOValue, Error> {
-        let s = &self.services;
-        let Some(order) = &s.branch else {
-            return Err(Error::new(
-                "`` exarch-agents `branch `` is the host's own `/branch` door, and no /branch is \
-                 under way on this call",
-            ));
-        };
-        let seat = self.fork_seat("branch", fork)?;
-        let child = self.child(
-            "branch",
-            order.name.clone(),
-            seat,
-            s.agent.current_provider(),
-            order.fork,
-        )?;
-        *order.child.lock_ignore_poison() = Some(child);
-        Ok(FOValue::Unit)
     }
 
     /// The world after a transition — what every tag but `` `list `` and
@@ -369,7 +280,7 @@ impl ExarchDesk {
     /// `` `reply `` — stage the payload into the cell [`Avatar::deliberate`] lifts
     /// into a deposit on this agent's own status once the batch drains, for
     /// its consumer: a parent's `` exarch-agents `read ``, or the headless
-    /// driver. Refused on every conversing agent, keyed on its [`Role`] and
+    /// driver. Refused on every conversing agent, keyed on its [`Role`](crate::agent::Role) and
     /// never on trunk-ness.
     pub(super) fn agent_reply(&self, value: FOValue) -> Result<FOValue, Error> {
         let s = &self.services;
@@ -377,8 +288,8 @@ impl ExarchDesk {
             return Err(Error::new(
                 "exarch-agents `reply` refused: you converse with the user; you do not return. \
                  `reply` hands a spawned or headless agent's answer to whoever launched it; \
-                 the interactive trunk and every /branch child instead keep talking, turn after \
-                 turn, and hold no `reply` to call.",
+                 an interactive root instead keeps talking, turn after turn, and holds no \
+                 `reply` to call.",
             ));
         }
         let display = shell_eval::ral_value_to_text(&value).unwrap_or_default();

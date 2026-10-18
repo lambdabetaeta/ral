@@ -11,7 +11,7 @@
 use crate::agent::fleet::Fleet;
 use crate::agent::roster::listing;
 use crate::agent::seat::SeatKind;
-use crate::agent::{Agent, Avatar, LogCell, ReplyCell, SharedCell};
+use crate::agent::{Agent, LogCell, ReplyCell, SharedCell};
 use crate::bus::{Emitter, Stamp};
 use crate::enquiry::{
     Agents, Context, Hits, Indexed, Material, Pins, Request, Schedules, Survey, Transcript,
@@ -112,8 +112,8 @@ pub(crate) struct HostServices {
     /// immutable-config read (`caps`, `fuel`, `role`, …) is taken from.
     pub agent: Arc<Agent>,
     pub fleet: Arc<Fleet>,
-    /// How this call's forks reach the desk: `` `start `` and `` `branch ``
-    /// choose their arm on this fact.
+    /// How this call's forks reach the desk: `` `start `` chooses its arm on
+    /// this fact.
     pub kind: SeatKind,
     pub emit: Emitter,
     /// Where the `reply` handler stages its value, holding no `&mut Avatar` to
@@ -121,8 +121,6 @@ pub(crate) struct HostServices {
     pub reply: ReplyCell,
     /// A `mnemon` spawn forks its inherited context off this.
     pub log: LogCell,
-    /// The `/branch` this call serves, if it is the host's own.
-    pub branch: Option<Arc<BranchOrder>>,
     /// The calling agent's own envelope, minted at install, so a desk older
     /// than *its* `/clear` refuses to spawn.
     pub stamp: Stamp,
@@ -130,23 +128,6 @@ pub(crate) struct HostServices {
     /// back by [`crate::shell_eval::report::tool_result`] when a raise discards
     /// the bindings but not the acts.
     pub acts: ActFragment,
-}
-
-/// What a fork is born as.
-#[derive(Clone, Copy)]
-pub(crate) enum Fork {
-    /// Answers its parent through `reply`, starting from `Memory`.
-    Returning(crate::enquiry::Memory),
-    /// Converses on its own, with its parent's whole context: a `/branch`.
-    Conversing,
-}
-
-/// A `/branch` under way: the name the host chose, what the fork is born as,
-/// and the child the desk builds for it.
-pub(crate) struct BranchOrder {
-    pub name: String,
-    pub fork: Fork,
-    pub child: std::sync::Mutex<Option<Avatar>>,
 }
 
 impl HostServices {
@@ -209,7 +190,6 @@ impl ExarchDesk {
             Request::Agents(Agents::Cancel(name)) => self.agent_cancel(&name),
             Request::Agents(Agents::Reply(value)) => self.agent_reply(value),
             Request::Agents(Agents::Read(name)) => self.agent_read(name),
-            Request::Agents(Agents::Branch(fork)) => self.agent_branch(fork),
             Request::Schedules(Schedules::List) => {
                 self.require_schedule_grant("exarch-schedules `list")?;
                 Ok(self.schedule_table())

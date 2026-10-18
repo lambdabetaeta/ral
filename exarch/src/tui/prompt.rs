@@ -1,6 +1,6 @@
 use super::commands;
 use super::palette::SLATE;
-use crate::bus::Inbox;
+use crate::bus::Mailbox;
 use prompt_editor::completion::Menu;
 use prompt_editor::{EditMode, PromptEditor};
 use ratatui::crossterm::event::KeyCode;
@@ -48,11 +48,11 @@ impl PromptState {
 
     /// Pull every queued prompt back for revision, blank-line separated.  Declines
     /// while a draft or a history browse is live, so Up never discards typed text.
-    pub(super) fn edit_queued_prompt(&mut self, inbox: &Inbox) -> bool {
+    pub(super) fn edit_queued_prompt(&mut self, mailbox: &Mailbox) -> bool {
         if self.hist_pos.is_some() || !self.editor.is_empty() {
             return false;
         }
-        let Some(prompts) = inbox.pop_back_user_all() else {
+        let Some(prompts) = mailbox.pop_back_user_all() else {
             return false;
         };
         let joined = prompts.join("\n\n");
@@ -100,12 +100,12 @@ impl PromptState {
         self.editor.text()
     }
 
-    /// Glow cyan and bold when the line names a slash command and the trunk tab has
-    /// focus — `commands::route_submit` refuses one typed on a sub-agent tab.
+    /// Glow cyan and bold when the line names a slash command and the focused
+    /// tab is steerable — a watch-only tab takes no line, command or prompt.
     /// Restyled every frame by `render::draw`.
-    pub(super) fn style_prompt(&mut self, on_trunk: bool) {
+    pub(super) fn style_prompt(&mut self, steerable: bool) {
         let text = self.editor.text();
-        let style = if on_trunk && commands::is_slash_command(&text) {
+        let style = if steerable && commands::is_slash_command(&text) {
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD)

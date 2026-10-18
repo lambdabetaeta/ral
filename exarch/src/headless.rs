@@ -460,17 +460,16 @@ pub fn run(
     // A per-exchange bus over the trunk's *own* inbox, so the attend worker and
     // any in-exchange producer share one queue.  It closes when the worker
     // finishes, muting async children on the display — never in the trace.
-    let bus = FleetBus::per_exchange(&session.inbox());
+    let bus = FleetBus::per_exchange();
     // A headless trunk is a returning agent that does not park, so `attend`
     // runs this seeded work and returns once idle.
     session.seed(prompt);
     let root_id = session.agent.id;
     let recorder = session.recorder();
-    // This is the process's trunk — a fact of the launch, not of any position
-    // in the tree — so it is what an OS signal must reach, for as long as it
-    // attends.
-    let _signals = crate::signals::face(session.agent.reach());
-    let outcome = pump(&mut headless, &bus, root_id, &recorder, |emit| {
+    // An OS signal must reach the fleet's roots for as long as this one attends.
+    let _signals = crate::signals::face(&session.fleet);
+    let mailbox = session.agent.mailbox.clone();
+    let outcome = pump(&mut headless, &bus, root_id, mailbox, &recorder, |emit| {
         session.attend(emit)
     });
     // The attend digest: an outcome driving `is_error`/`error`, and the root's
@@ -580,11 +579,12 @@ pub fn converse_sink<S: Sink>(
 ) -> Result<(), String> {
     // Per-exchange: this call's channel closes when the exchange parks, so
     // draining can never block on a message the caller has not sent yet.
-    let bus = FleetBus::per_exchange(&session.inbox());
+    let bus = FleetBus::per_exchange();
     session.seed(message);
     let root_id = session.agent.id;
     let recorder = session.recorder();
-    let outcome = pump(sink, &bus, root_id, &recorder, |emit| {
+    let mailbox = session.agent.mailbox.clone();
+    let outcome = pump(sink, &bus, root_id, mailbox, &recorder, |emit| {
         session.attend_backlog(emit)
     });
     exchange_ending(session, outcome)
@@ -638,14 +638,17 @@ pub fn converse_settled<S: Sink>(
                 .to_string(),
         );
     }
-    let bus = FleetBus::per_exchange_live(&session.inbox());
+    let bus = FleetBus::per_exchange_live();
     session.seed(message);
     let root_id = session.agent.id;
     let recorder = session.recorder();
-    // The embedder's trunk, for the extent of the exchange it drives: an OS
-    // signal reaching this process must reach it.
-    let _signals = crate::signals::face(session.agent.reach());
-    let outcome = pump(sink, &bus, root_id, &recorder, |emit| session.attend(emit));
+    // The embedder's roots, for the extent of the exchange it drives: an OS
+    // signal reaching this process must reach them.
+    let _signals = crate::signals::face(&session.fleet);
+    let mailbox = session.agent.mailbox.clone();
+    let outcome = pump(sink, &bus, root_id, mailbox, &recorder, |emit| {
+        session.attend(emit)
+    });
     exchange_ending(session, outcome)
 }
 

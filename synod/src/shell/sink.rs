@@ -402,6 +402,7 @@ fn project_forensic(forensic: &Forensic) -> Option<SynodEvent> {
         | Forensic::SessionStarted { .. }
         | Forensic::SessionResumed { .. }
         | Forensic::SessionEnded
+        | Forensic::SessionClosed
         | Forensic::Retried { .. }
         | Forensic::UsageDelta { .. }
         | Forensic::TurnStarted { .. } => None,
@@ -434,6 +435,7 @@ fn project_forensic_helper(forensic: &Forensic) -> Option<SynodEvent> {
         | Forensic::SessionStarted { .. }
         | Forensic::SessionResumed { .. }
         | Forensic::SessionEnded
+        | Forensic::SessionClosed
         | Forensic::Retried { .. }
         | Forensic::UsageDelta { .. }
         | Forensic::TurnStarted { .. } => None,
@@ -853,10 +855,15 @@ mod tests {
         let mut router = Router::default();
         router.route_transient(AgentId::new(0), &Transient::State(AgentState::Ready));
 
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let recorder = exarch::record::Emitter::create(&dir.path().join("record.jsonl"))
+            .expect("a record log");
         let born = |id: AgentId| Transient::Born {
             log_dir: PathBuf::new(),
             name: format!("helper-{id}"),
             parent: Some(AgentId::new(0)),
+            resumed: None,
+            recorder: recorder.clone(),
         };
         let Some(SynodEvent::Helpers { live }) =
             router.route_transient(AgentId::new(1), &born(AgentId::new(1)))

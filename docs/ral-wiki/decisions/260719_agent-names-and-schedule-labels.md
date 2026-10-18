@@ -166,5 +166,4 @@ mistake.
 [[decisions/260702_agent-tool-to-exarch-builtin|agent-tool-to-exarch-builtin]] (the builtin migration this rides on),
 [[decisions/260617_async-agent-tool|async-agent-tool]] (the launch-only async edge kept),
 [[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]] (fuel bounds depth),
-[[decisions/260705_branch-minimal|branch-minimal]] (the conversing mnemon child),
 [[design/engine-protocol|engine-protocol]] (the rail the builtins answer over).

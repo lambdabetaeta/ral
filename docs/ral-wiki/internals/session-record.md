@@ -59,7 +59,9 @@ The outer `Record` vocabulary is closed:
   carry their round-trippable data, not a pre-rendered terminal image; the view
   fold builds the marks again.
 - `Forensic` is durable evidence that is not model context: the session
-  bookends (`SessionStarted`, `SessionResumed`, `SessionEnded`), the shape a
+  bookends (`SessionStarted`, which names the session and its tree parent,
+  `SessionResumed`, `SessionEnded`) and `SessionClosed`, the one record that
+  says `/close` ended a session for good, so resume skips it; the shape a
   turn's request goes out under — sampling and routing both (`TurnStarted`),
   usage deltas, cancellation, an overflow-learned window (`WindowNarrowed`),
   provider/stall/error rows, nudges, and other breadcrumbs. The view fold
@@ -254,8 +256,9 @@ later record or boundary resolves it.
 
 ## Resume and the user view
 
-On TUI resume, `tui_loop` replays `record.jsonl` into `Blocks` before the
-worker starts and hands that memo to the scrollback, which becomes its owner:
+On TUI resume, each reopened root's `Born` carries its summary and `App::replay`
+folds that root's `record.jsonl` into `Blocks`, handing the memo to the
+scrollback, which becomes its owner:
 `Scrollback::seed` builds its mirror block by block, exactly as a live commit
 does, and marks it as already present in `user.log`. The resumed session
 appends after that seeded prefix instead of writing the replayed window twice.

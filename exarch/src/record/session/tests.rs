@@ -306,6 +306,7 @@ fn a_rewind_removes_the_anchor_on_and_the_next_prompt_takes_its_id() {
     let mut s = AgentLog::root(
         sessions.path(),
         AgentId::new(0),
+        "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
         0,
@@ -480,6 +481,7 @@ fn head_marker_is_a_pure_function_of_the_table() {
     let mut live = AgentLog::root(
         sessions.path(),
         AgentId::new(0),
+        "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
         0,
@@ -1045,6 +1047,7 @@ fn resume_refuses_an_eviction_of_a_turn_not_in_the_context() {
     let mut live = AgentLog::root(
         sessions.path(),
         AgentId::new(0),
+        "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
         0,
@@ -1101,6 +1104,7 @@ fn a_forked_log_records_the_selection_it_was_handed() {
     let child = parent
         .fork(
             AgentId::new(1),
+            "child",
             0,
             &RecordedModel::for_test("other-model"),
             &RecordedAccount::for_test("other-provider"),
@@ -1153,6 +1157,7 @@ fn resume_replays_a_scripted_history_and_preserves_the_context() {
     let mut live = AgentLog::root(
         sessions.path(),
         AgentId::new(0),
+        "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
         0,
@@ -1181,6 +1186,7 @@ fn resume_quiesces_a_torn_turn_after_reopening_append_mode() {
     let mut live = AgentLog::root(
         sessions.path(),
         AgentId::new(0),
+        "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
         0,
@@ -1213,6 +1219,7 @@ fn resume_quarantines_only_an_unterminated_final_fragment() {
     let live = AgentLog::root(
         sessions.path(),
         AgentId::new(0),
+        "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
         0,
@@ -1242,6 +1249,7 @@ fn resume_refuses_a_complete_garbage_line_without_mutating_the_file() {
     let live = AgentLog::root(
         sessions.path(),
         AgentId::new(0),
+        "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
         0,
@@ -1267,6 +1275,7 @@ fn resume_refuses_foreign_protocol_data_without_mutating_the_file() {
     let live = AgentLog::root(
         sessions.path(),
         AgentId::new(0),
+        "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
         0,
@@ -1301,6 +1310,7 @@ fn resume_refuses_a_steering_line_with_no_turn_to_steer() {
     let live = AgentLog::root(
         sessions.path(),
         AgentId::new(0),
+        "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
         0,
@@ -1333,6 +1343,7 @@ fn resume_refuses_a_stale_id_as_foreign_data() {
     let mut live = AgentLog::root(
         sessions.path(),
         AgentId::new(0),
+        "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
         0,
@@ -1363,24 +1374,33 @@ fn resume_refuses_a_stale_id_as_foreign_data() {
 }
 
 #[test]
-fn resume_refuses_nonzero_session_ids_as_transient_children() {
+fn resume_refuses_a_child_log() {
     let sessions = sessions_root("resume-child");
-    let child = AgentLog::root(
+    let parent = AgentLog::root(
         sessions.path(),
-        AgentId::new(1),
+        AgentId::new(0),
+        "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
         0,
     )
     .unwrap();
-    drop(child);
+    let child = parent
+        .fork(
+            AgentId::new(1),
+            "child",
+            0,
+            &RecordedModel::for_test("model"),
+            &RecordedAccount::for_test("provider"),
+        )
+        .unwrap();
+    drop((parent, child));
     let error = AgentLog::resume(sessions.path(), AgentId::new(1))
         .err()
-        .expect("child logs are transient");
+        .expect("a child log has a parent, so it is no root");
     assert!(
-        error
-            .to_string()
-            .contains("children are transient by design")
+        error.to_string().contains("is this a child log?"),
+        "{error}"
     );
 }
 
@@ -1408,6 +1428,7 @@ fn resume_refuses_an_interior_tool_answer_lost_from_disk() {
     let mut live = AgentLog::root(
         sessions.path(),
         AgentId::new(0),
+        "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
         0,
@@ -1451,6 +1472,7 @@ fn resume_matches_live_after_a_small_edit_sequence_family() {
         let mut live = AgentLog::root(
             sessions.path(),
             AgentId::new(0),
+            "main",
             &RecordedModel::for_test("model"),
             &RecordedAccount::for_test("provider"),
             0,
@@ -1536,6 +1558,7 @@ fn resume_rebuilds_the_same_rows_and_notes() {
     let mut live = AgentLog::root(
         sessions.path(),
         AgentId::new(0),
+        "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
         0,
@@ -1570,6 +1593,7 @@ fn a_departed_turn_reads_back_after_resume() {
     let mut live = AgentLog::root(
         sessions.path(),
         AgentId::new(0),
+        "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
         0,
@@ -1614,6 +1638,7 @@ fn mnemon(parent: &AgentLog, child_id: AgentId) -> AgentLog {
     let mut child = parent
         .fork(
             child_id,
+            "child",
             0,
             &RecordedModel::for_test("model"),
             &RecordedAccount::for_test("provider"),
@@ -1699,6 +1724,7 @@ fn a_seeded_turn_reads_back_from_its_origin() {
     let mut parent = AgentLog::root(
         sessions.path(),
         AgentId::new(0),
+        "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
         0,
@@ -1761,6 +1787,7 @@ fn a_mnemon_child_reads_an_ancestors_evicted_turns_and_mints_ids_above_it() {
     let mut parent = AgentLog::root(
         sessions.path(),
         AgentId::new(0),
+        "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
         0,
@@ -1823,6 +1850,7 @@ fn turns_split_across_a_fork_read_back_out_of_both_files() {
     let mut parent = AgentLog::root(
         sessions.path(),
         AgentId::new(0),
+        "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
         0,
@@ -1880,6 +1908,7 @@ fn an_empty_parent_context_still_floors_the_childs_first_id() {
     let mut parent = AgentLog::root(
         sessions.path(),
         AgentId::new(0),
+        "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
         0,
@@ -1906,6 +1935,7 @@ fn admission_refuses_inherited_after_the_first_turn() {
     let mut live = AgentLog::root(
         sessions.path(),
         AgentId::new(0),
+        "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
         0,
@@ -1942,6 +1972,7 @@ fn a_broken_ancestry_link_is_refused_by_path_and_fault() {
     let mut parent = AgentLog::root(
         sessions.path(),
         AgentId::new(0),
+        "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
         0,
@@ -2003,6 +2034,7 @@ fn resume_rebuilds_the_same_rows_and_notes_across_a_link() {
     let mut ancestor = AgentLog::root(
         ancestry.path(),
         AgentId::new(0),
+        "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
         0,
@@ -2024,6 +2056,7 @@ fn resume_rebuilds_the_same_rows_and_notes_across_a_link() {
     let mut live = AgentLog::root(
         sessions.path(),
         AgentId::new(0),
+        "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
         0,
@@ -2070,6 +2103,7 @@ fn transcript_index_carries_the_inherited_table() {
     let mut parent = AgentLog::root(
         sessions.path(),
         AgentId::new(0),
+        "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
         0,
@@ -2114,6 +2148,7 @@ fn grep_walks_resident_then_freed_then_ancestors() {
     let mut parent = AgentLog::root(
         sessions.path(),
         AgentId::new(0),
+        "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
         0,
@@ -2162,6 +2197,7 @@ fn an_unnarrowed_grep_passes_over_an_unreadable_file() {
     let mut parent = AgentLog::root(
         sessions.path(),
         AgentId::new(0),
+        "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
         0,
@@ -2200,6 +2236,7 @@ fn resume_replays_a_learned_window_until_a_selection_forgets_it() {
     let mut live = AgentLog::root(
         sessions.path(),
         AgentId::new(0),
+        "main",
         &RecordedModel::for_test("m"),
         &RecordedAccount::for_test("provider"),
         0,

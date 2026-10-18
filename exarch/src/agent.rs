@@ -32,7 +32,7 @@ pub(crate) mod tools;
 
 #[cfg(test)]
 pub(crate) use build::TestTrunk;
-pub(crate) use build::{Build, fresh_id};
+pub(crate) use build::fresh_id;
 pub use build::{RootConfig, RootSeat, Trunk};
 pub use engine_lost::{EngineLost, EnginePhase};
 pub use factory::Factory;
@@ -90,7 +90,7 @@ pub struct Agent {
 /// prompt's taught sections read this one value, so they cannot disagree.
 pub(crate) enum Role {
     /// Converses turn after turn and holds no `reply`: an attended or embedded
-    /// trunk, or a `/branch`, which roots its own tree.
+    /// root.
     Converses,
     /// The headless trunk: replies once, to the process's caller, and ends.
     Headless,
@@ -161,7 +161,6 @@ pub(crate) struct Birth {
 /// An agent's embodiment in this process: the thread that runs it, owning
 /// everything only it touches.
 pub struct Avatar {
-    pub(crate) agent: Arc<Agent>,
     /// Shared with the per-call desk, which runs on this thread's stack.
     log: LogCell,
     pub(crate) seat: Seat,
@@ -170,6 +169,9 @@ pub struct Avatar {
     reply: ReplyCell,
     pub(crate) fleet: Arc<Fleet>,
     readings: Readings,
+    // Last: the fleet's `Weak` must outlive the seat's teardown and the log's
+    // `SessionEnded`, since a root's death is what ends the process.
+    pub(crate) agent: Arc<Agent>,
 }
 
 /// What an avatar has measured and told about one context: reborn whole on
@@ -435,9 +437,8 @@ impl Agent {
         None
     }
 
-    /// The root of this agent's tree — itself, if it is one.  The trunk for
-    /// anything the model spawned; a `/branch` tab is its own root, which is
-    /// what keeps one tab's listing out of another's.
+    /// The root of this agent's tree — itself, if it is one.  Every root is
+    /// its own session, which is what keeps one tab's listing out of another's.
     pub(crate) fn root(self: &Arc<Self>) -> Arc<Self> {
         let mut here = self.clone();
         while let Some(up) = here.role.parent().cloned() {
@@ -519,14 +520,14 @@ impl Avatar {
         self.seat.severed()
     }
 
-    /// Whether the trunk, refused until a reset, resumes there by a wakeup —
-    /// the launch's say, for the trunk alone: a fork fails up to its parent.
+    /// Whether a root, refused until a reset, resumes there by a wakeup —
+    /// the launch's say, for roots alone: a fork fails up to its parent.
     pub(crate) fn resumes_at_reset(&self) -> bool {
         self.agent.role.parent().is_none() && self.fleet.launch.resume_on_reset
     }
 
-    /// So a frontend's emitters mint mailboxes onto the queue the attend loop
-    /// is draining, rather than a second one.
+    /// The queue the attend loop is draining, for a test to read from.
+    #[cfg(test)]
     pub(crate) fn inbox(&self) -> Inbox {
         self.inbox.clone()
     }

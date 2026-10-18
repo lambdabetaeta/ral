@@ -5,7 +5,6 @@ use crate::bus::Signal;
 use crate::provider::Toolset;
 use crate::provider::scripted::{Reply, Script};
 use crate::record::AgentState;
-use crate::record::RecordedAccount;
 use crate::record::{Display, Record};
 use std::sync::Arc;
 
@@ -20,7 +19,6 @@ fn converse_trunk(tag: &str, script: Script) -> Avatar {
             system: "system".into(),
             caps: ral_core::capability::GrantStack::root(),
             run_dir: dir,
-            account: RecordedAccount::for_test("test"),
             trunk: Trunk::Embedded,
             tools: Toolset::offered(false),
             allow_schedule: false,
@@ -303,7 +301,6 @@ fn a_blank_seed_is_no_seed_and_the_refusal_names_every_flag() {
             extend: None,
             restrict_files: &[],
             cwd: "/tmp",
-            resumed: None,
         },
         &Provider::scripted("test-model", Script::new()),
         seed,
@@ -357,7 +354,6 @@ fn settled_trunk(tag: &str, script: Script, allow_schedule: bool, resume_on_rese
             system: "system".into(),
             caps: ral_core::capability::GrantStack::root(),
             run_dir: dir,
-            account: RecordedAccount::for_test("test"),
             trunk: Trunk::Embedded,
             tools: Toolset::offered(false),
             allow_schedule,
@@ -508,6 +504,7 @@ fn converse_settled_ends_even_when_a_child_never_replies() {
         AsyncSpawn {
             name: "flaky".into(),
             prompt: None,
+            resumed: None,
         },
         &spawn_emit,
     )

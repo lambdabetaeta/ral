@@ -124,8 +124,9 @@ child, and a pushed layer can only narrow past it
   does not hold is simply ANDed away, and needs no comparison against the
   parent to be safe.
 - **The ceiling is still stated at the spawn site, and still mandatory.**
-  `Avatar::fork_with` takes the child's authority as an argument rather than
-  cloning the parent's ([[map/exarch/agent|agent]]).
+  `` exarch-agents `start `` takes the child's authority as a mandatory
+  `grant` field rather than cloning the parent's
+  ([[map/exarch/agent|agent]]).
 - **The bundled-tools rule still bounds the bake-in names.** A base whose
   `exec` is directory prefixes alone leaves the child unable to run `ls` and
   with no way to ask for it back, which is why `minimal` is a `--base` name and

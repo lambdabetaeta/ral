@@ -1,18 +1,41 @@
 use super::*;
+use crate::agent::Agent;
 use crate::agent::testkit::{TestAgentSpec, test_agent};
-use crate::card::{Card, Mark};
+use crate::card::Mark;
 use crate::tui::palette::READ_W;
 use crate::tui::row::Row;
 use ral_core::types::{Observation, Observed};
 
-/// The trunk is returned alongside its `App` because the frontend resolves
+/// The root is returned alongside its `App` because the frontend resolves
 /// it through the fleet only: dropping it here would settle the agent mid-test.
 fn app() -> (App, BusReceiver, Arc<Agent>) {
     let (_tx, rx) = crate::bus::channel();
     let fleet = Fleet::for_test();
-    let root = test_agent(&fleet, TestAgentSpec::new("main")).expect("a fresh trunk");
-    let app = App::new(&root, fleet, false, false, Inbox::new());
+    let root = test_agent(&fleet, TestAgentSpec::new("main")).expect("a fresh root");
+    let mut app = App::new(root.id, fleet, false, Card(Vec::new()));
+    app.tabs.born(
+        root.id,
+        &std::env::temp_dir(),
+        "main".into(),
+        None,
+        Recorder::none(),
+        false,
+    );
     (app, rx, root)
+}
+
+fn born(app: &mut App, rx: &BusReceiver, id: AgentId, name: &str, parent: AgentId) {
+    app.transient(
+        id,
+        Transient::Born {
+            log_dir: std::env::temp_dir(),
+            name: name.into(),
+            parent: Some(parent),
+            resumed: None,
+            recorder: Recorder::none(),
+        },
+        rx,
+    );
 }
 
 fn text(app: &mut App, id: AgentId) -> String {
@@ -32,15 +55,7 @@ fn text(app: &mut App, id: AgentId) -> String {
 fn matrix_cursor_does_not_change_focus_until_enter() {
     let (mut app, rx, root) = app();
     let child = AgentId::new(root.id.get() + 1);
-    app.transient(
-        child,
-        Transient::Born {
-            log_dir: std::env::temp_dir(),
-            name: "child".into(),
-            parent: Some(root.id),
-        },
-        &rx,
-    );
+    born(&mut app, &rx, child, "child", root.id);
 
     let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
     app.key(key(KeyCode::Tab));
@@ -71,14 +86,12 @@ fn matrix_cursor_does_not_change_focus_until_enter() {
 #[test]
 fn esc_leaves_the_matrix_without_moving_focus() {
     let (mut app, rx, root) = app();
-    app.transient(
-        AgentId::new(root.id.get() + 1),
-        Transient::Born {
-            log_dir: std::env::temp_dir(),
-            name: "child".into(),
-            parent: Some(root.id),
-        },
+    born(
+        &mut app,
         &rx,
+        AgentId::new(root.id.get() + 1),
+        "child",
+        root.id,
     );
 
     let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
@@ -97,14 +110,12 @@ fn esc_leaves_the_matrix_without_moving_focus() {
 #[test]
 fn matrix_mode_swallows_prompt_editing() {
     let (mut app, rx, root) = app();
-    app.transient(
-        AgentId::new(root.id.get() + 1),
-        Transient::Born {
-            log_dir: std::env::temp_dir(),
-            name: "child".into(),
-            parent: Some(root.id),
-        },
+    born(
+        &mut app,
         &rx,
+        AgentId::new(root.id.get() + 1),
+        "child",
+        root.id,
     );
     app.prompt_state.set_prompt("draft");
     app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
@@ -199,15 +210,7 @@ fn a_dying_tab_admits_no_straggler() {
 
     let (mut app, rx, root) = app();
     let helper = AgentId::new(root.id.get() + 1);
-    app.transient(
-        helper,
-        Transient::Born {
-            log_dir: std::env::temp_dir(),
-            name: "helper".into(),
-            parent: Some(root.id),
-        },
-        &rx,
-    );
+    born(&mut app, &rx, helper, "helper", root.id);
     let locus = Locus::placeholder(Seq::new(1));
     app.fact(
         helper,

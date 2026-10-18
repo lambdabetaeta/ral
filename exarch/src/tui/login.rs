@@ -416,6 +416,8 @@ fn apply_login(tui: &mut Tui, ctx: &CommandCtx<'_>, token: &OAuthToken, replaced
         "; run /model to use it"
     };
     let text = format!("[{action} ChatGPT account {label}{next}]");
-    ctx.recorder
+    tui.app
+        .tabs
+        .focused_recorder()
         .emit_or_report(crate::record::Forensic::SystemNote { text });
 }

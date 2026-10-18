@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 6b801828
+generated_at_commit: d4299048
 generated_at_date: 2026-10-18
 covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/data/system.md, exarch/data/agents.md, exarch/data/spawned.md, exarch/data/reply.md, exarch/data/ral.md, exarch/data/script-style.md, exarch/data/context.md]
 ---
@@ -64,14 +64,15 @@ exit code.
   listed model and never holds none, and the pair it opens on is saved back, so
   a flag and the picker leave the same trace. Then `run` composes the capability lattice
   (`policy::for_invocation`, → [[map/exarch/policy|policy]]),
-  assembles the system prompt (`prompt::assemble`), builds the trunk
+  assembles the system prompt (`prompt::assemble`), builds the first root
   [[map/exarch/agent|`Avatar`]] via `Avatar::root(RootConfig, RootSeat, provider)`
-  — the ral binary seats it on `RootSeat::Identity`; a wire seat drives a
-  remote engine instead, and synod reuses the same construction — and hands
-  off to one frontend — the inline TUI or the pipe-friendly headless runner,
-  selected explicitly by `--headless` or implicitly by `--prompt` — which wraps
-  the trunk's shared handles in
-  a [[map/exarch/agent|`Fleet`]].
+  — or, for the TUI under `--resume`, every live root of the run via
+  `Avatar::resume` — the ral binary seats it on `RootSeat::Identity`; a wire
+  seat drives a remote engine instead, and synod reuses the same
+  construction — and hands off to one frontend — the inline TUI or the
+  pipe-friendly headless runner, selected explicitly by `--headless` or
+  implicitly by `--prompt` (which refuses to resume a run with more than one
+  open session) — which shares the roots' one [[map/exarch/agent|`Fleet`]].
 
 ## Accounts
 

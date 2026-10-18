@@ -56,7 +56,6 @@ fn wire_host_services(emit: &Emitter, parent: &Arc<crate::agent::Agent>) -> Host
         emit: emit.clone(),
         reply: crate::agent::ReplyCell::default(),
         log: crate::agent::LogCell::new(test_log()),
-        branch: None,
         acts: crate::agent::desk::ActFragment::default(),
     }
 }

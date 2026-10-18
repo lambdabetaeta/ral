@@ -11,6 +11,7 @@
 
 use super::log::Log;
 use super::{Class, Publish, Recorded, Transient};
+use std::fmt;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
@@ -20,6 +21,12 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct Emitter {
     log: Arc<Log>,
+}
+
+impl fmt::Debug for Emitter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Emitter").finish_non_exhaustive()
+    }
 }
 
 impl Emitter {

@@ -381,6 +381,7 @@ impl Blocks {
             | Forensic::Prune { .. }
             | Forensic::Unpin { .. }
             | Forensic::SessionEnded
+            | Forensic::SessionClosed
             | Forensic::Retried { .. }
             | Forensic::TurnStarted { .. } => Delta::Quiet,
             // A head bookend opens the session under a model exactly as a

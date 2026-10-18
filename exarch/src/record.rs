@@ -68,6 +68,13 @@ impl fmt::Display for AgentId {
     }
 }
 
+/// Whether a child starts blank or inherits its parent's conversation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Memory {
+    Amnemon,
+    Mnemon,
+}
+
 /// What an agent is doing — a total state, not a label the next event erases.
 ///
 /// Every moment of a session's life is one of these five, so a frontend can
@@ -371,6 +378,9 @@ pub enum Forensic {
     /// Head bookend, carrying enough metadata that the file reads on its own.
     SessionStarted {
         session_id: AgentId,
+        /// The fleet name the session answers to.
+        name: String,
+        /// The tree parent; `None` for every root, whatever opened it.
         parent: Option<AgentId>,
         model: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -407,6 +417,9 @@ pub enum Forensic {
     },
     /// Tail bookend.
     SessionEnded,
+    /// `/close`: the session is over for good, and a resume skips it.
+    /// [`Self::SessionEnded`] is written on every drop and says no such thing.
+    SessionClosed,
     /// The meta half of taking a turn: the shape the request goes out under,
     /// sampling and routing both.  The id the request will produce is the
     /// display twin's.
@@ -510,9 +523,12 @@ pub enum Transient {
         /// What the frontend must still know once the agent has settled: the row's label and indentation, the tombstone's log path.
         log_dir: PathBuf,
         name: String,
-        /// `None` for a `/branch` child: it roots its own tab tree, and that
-        /// is what `/close` reads to know what it may kill.
+        /// `None` for a root, which opens a session of its own.
         parent: Option<AgentId>,
+        /// What a resumed root picked up, for the frontend to replay.
+        resumed: Option<Resumed>,
+        /// The born agent's own record seam, for the frontend to record into.
+        recorder: Emitter,
     },
     Died,
     /// The durable copy already rides [`Protocol::AssistantMessage`].

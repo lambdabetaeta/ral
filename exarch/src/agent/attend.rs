@@ -312,10 +312,10 @@ impl Avatar {
             return ParkMode::Quiesce;
         }
         let agent = &self.agent;
-        if matches!(agent.role, Role::Converses) && self.fleet.launch.attended {
+        if matches!(agent.role, Role::Converses) && self.fleet.launch.trunk.attended() {
             // `next_or_idle` lets a terminate cause end every park but `Held`,
-            // so a conversing agent asks here instead: `/close` stamps this
-            // token, and parking Held past it would be a zombie.
+            // so a conversing agent asks here instead: a terminate-cause cancel
+            // (SIGTERM) stamps this token, and parking Held past it would be a zombie.
             return if agent.token.terminated() {
                 ParkMode::Quiesce
             } else {

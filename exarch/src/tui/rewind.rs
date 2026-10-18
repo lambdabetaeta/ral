@@ -6,11 +6,12 @@
 //! Display and input only; [`rewind`] drives it and posts the [`Rewrite`].
 
 use super::app::Overlay;
+use super::commands;
 use super::line::truncate_spans;
 use super::overlay::{self, Anchor};
 use super::palette::{CYAN, Col, SLATE};
 use super::tui_loop::{OverlayTick, Tui, overlay_tick};
-use crate::bus::{Mailbox, Post, Rewrite};
+use crate::bus::{Post, Rewrite};
 use ratatui::Frame;
 use ratatui::crossterm::event::KeyCode;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -121,28 +122,28 @@ impl RewindOverlay {
     }
 }
 
-/// `/rewind`: choose a prompt on the trunk's transcript and post the rewind
-/// to before it.  The viewport the preview moved is put back either way; a
-/// rewind that lands truncates the mirror as it always did.
-pub(super) fn rewind(tui: &mut Tui, mailbox: &Mailbox) {
-    let root = tui.app.tabs.root();
-    let Some(sb) = tui.app.tabs.scrollback_mut(root) else {
+/// `/rewind`: choose a prompt on the focused tab's transcript and post the
+/// rewind to before it.  The viewport the preview moved is put back either way;
+/// a rewind that lands truncates the mirror as it always did.
+pub(super) fn rewind(tui: &mut Tui) {
+    let focused = tui.app.tabs.focused();
+    let Some(sb) = tui.app.tabs.scrollback_mut(focused) else {
         return;
     };
     let Some(overlay) = RewindOverlay::new(sb.prompts()) else {
         tui.app
-            .push_error(root, "nothing to rewind: no prompt is on screen yet");
+            .push_error(focused, "nothing to rewind: no prompt is on screen yet");
         return;
     };
     let viewport = sb.viewport();
     tui.app.overlay = Some(Overlay::Rewind(overlay));
     let anchor = drive(tui);
     tui.app.overlay = None;
-    if let Some(sb) = tui.app.tabs.scrollback_mut(root) {
+    if let Some(sb) = tui.app.tabs.scrollback_mut(focused) {
         sb.set_viewport(viewport);
     }
     if let Some(anchor) = anchor {
-        mailbox.push(Post::Rewrite(Rewrite::Rewind(anchor)));
+        commands::post(tui, Post::Rewrite(Rewrite::Rewind(anchor)));
     }
 }
 

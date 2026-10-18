@@ -9,11 +9,10 @@
 //! free.
 //!
 //! A [`Fleet`] is shared behind one `Arc`, held by every agent it enrolled:
-//! the trunk and each fork reach the same one, so no node can disagree about
+//! every root and fork reaches the same one, so no node can disagree about
 //! what is live or what the run was launched with.  `names` is a lookup index;
-//! `roots` holds the trunk and every `/branch` — a root reports to nobody, so
-//! a walk over it is how `nearest_reap` reaches every live agent in the
-//! run.  Both hold [`Weak`], so an agent leaves the fleet by
+//! `roots` holds every session — a root reports to nobody, so a walk over it
+//! is how `nearest_reap` reaches every live agent in the run.  Both hold [`Weak`], so an agent leaves the fleet by
 //! its avatar being dropped and nothing else, and a lookup prunes.
 //!
 //! There is one late-settle fence, and it lives on the inbox, not the agent:
@@ -25,15 +24,24 @@
 //! moved on.  Per inbox, not per fleet — a `/clear` in one tab must not drop
 //! work another tab is still waiting on.
 
-use crate::agent::index::BuiltinIndex;
-use crate::agent::{Agent, Factory};
+use crate::agent::index::{BuiltinIndex, Grants};
+use crate::agent::seat::Seat;
+use crate::agent::{Agent, EngineLost, Factory, Role, Trunk};
+use crate::app::Scratch;
 use crate::enquiry::check_name;
 use crate::provider::Bureau;
 use crate::provider::Toolset;
+use crate::record::{AgentId, AgentLog};
+use ral_core::capability::GrantStack;
+use ral_core::carrier::Severed;
+use ral_core::engine::EngineInstaller;
 use ral_core::process::{self, CancelCause};
 use ral_core::sync::LockExt;
+use ral_core::terminal::TerminalState;
 use std::collections::HashMap;
 use std::fmt;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -44,25 +52,25 @@ use std::time::Duration;
 /// exactly this long after birth.
 pub const AGENT_LEASE_IDLE: Duration = Duration::from_hours(1);
 
-/// What every node of one run shares, fixed at launch: the host's settings
-/// and the services it opened, held once here rather than copied into each
-/// [`Agent`].
+/// What every node of one run shares, fixed at launch: the recipe for a root,
+/// and the services the host opened, held once here rather than copied into
+/// each [`Agent`].
 pub(crate) struct Launch {
-    /// Whether a human is attached to this run and types into a conversing
-    /// node's inbox — the TUI.  Off, a conversing trunk is driven one
+    /// How every root is driven.  Attended, a conversing root is typed into
+    /// by a human and parks between messages; otherwise it is driven one
     /// exchange at a time and waits on nothing but its fleet.
-    pub attended: bool,
+    pub trunk: Trunk,
     /// Whether the nodes hold the self-wakeup family.
     pub allow_schedule: bool,
-    /// Whether the trunk, refused until a reset past the in-place wait, arms
-    /// a wakeup to resume there: exarch's terminal trunk alone.
+    /// Whether a root, refused until a reset past the in-place wait, arms a
+    /// wakeup to resume there: exarch's terminal roots alone.
     pub resume_on_reset: bool,
     /// What a request advertises and dispatch recognises; empty for `--chat`,
     /// which is then never steered.
     pub tools: Toolset,
     /// The operator's disk ceiling; `None` never walks the dirs at all.
     pub disk_warn_bytes: Option<u64>,
-    /// Where a wire trunk gets its helper engines; `None` on an identity trunk.
+    /// Where a wire root gets its helper engines; `None` on an identity root.
     pub factory: Option<Arc<dyn Factory>>,
     /// The one owner of provider construction.
     pub bureau: Arc<Bureau>,
@@ -70,6 +78,90 @@ pub(crate) struct Launch {
     /// the index each node resolves it against for its own grants.
     pub system: Arc<str>,
     pub index: Arc<BuiltinIndex>,
+    /// The invocation stack every node runs under.
+    pub caps: GrantStack,
+    /// Every root's fuel: fuel is depth, and a root is depth 0.
+    pub fuel: u32,
+    /// The egress verdict on hosted web search.
+    pub search: bool,
+    /// Where `sessions/<id>/` hang.
+    pub sessions_root: PathBuf,
+    pub genesis: Option<Genesis>,
+}
+
+/// What a fresh root's engine boots from; `None` on a wire host, which boots none.
+pub(crate) struct Genesis {
+    pub(crate) installers: &'static [EngineInstaller],
+    pub(crate) cwd: PathBuf,
+    pub(crate) terminal: TerminalState,
+    /// The run's, and outliving every `/clear` and every root.
+    pub(crate) scratch: Arc<Scratch>,
+}
+
+impl Genesis {
+    /// A fresh identity engine for a root logging to `session_dir`.
+    ///
+    /// # Errors
+    /// The recipe's refusal.
+    pub(crate) fn seat(&self, session_dir: &Path) -> Result<Seat, Severed> {
+        Seat::root(
+            self.installers,
+            self.cwd.clone(),
+            self.terminal,
+            self.scratch.clone(),
+            session_dir,
+        )
+    }
+}
+
+impl Launch {
+    /// A fresh root's seat, booted for session `id`.
+    ///
+    /// # Errors
+    /// A host that boots no further engines, or the recipe's refusal.
+    pub(crate) fn seat(&self, id: AgentId) -> io::Result<Seat> {
+        let genesis = self.genesis.as_ref().ok_or_else(|| {
+            io::Error::other(
+                "this host boots no further engines, so it cannot open another session",
+            )
+        })?;
+        genesis
+            .seat(&AgentLog::dir_of(&self.sessions_root, id))
+            .map_err(|lost| {
+                io::Error::other(EngineLost::starting(&lost, self.sessions_root.parent()))
+            })
+    }
+
+    /// The system prompt a node on `seat` reads, resolved against its own
+    /// grants.  A chat launch advertises no tool, so its prompt takes no
+    /// builtin surface at all: no index, no taught section, the bare stand-in
+    /// verbatim.
+    ///
+    /// # Errors
+    /// The seat's engine is severed.
+    pub(crate) fn prompt_for(
+        &self,
+        seat: &Seat,
+        caps: &GrantStack,
+        role: &Role,
+        fuel: u32,
+        name: &str,
+    ) -> Result<String, Severed> {
+        let own = crate::prompt::with_grant(&self.system, &seat.read(|t| t.grants())?, caps);
+        Ok(if self.tools.is_empty() {
+            own
+        } else {
+            self.index.apply(
+                &own,
+                &Grants {
+                    role,
+                    allow_schedule: self.allow_schedule,
+                    spawns: fuel > 0,
+                },
+                name,
+            )
+        })
+    }
 }
 
 #[cfg(test)]
@@ -78,7 +170,7 @@ impl Launch {
     /// test's synthetic agents share.
     pub(crate) fn for_test() -> Self {
         Self {
-            attended: false,
+            trunk: Trunk::Headless,
             allow_schedule: false,
             resume_on_reset: false,
             tools: Toolset::offered(false),
@@ -92,6 +184,11 @@ impl Launch {
                     .map(str::to_string)
                     .collect(),
             ),
+            caps: GrantStack::root(),
+            fuel: 0,
+            search: false,
+            sessions_root: PathBuf::new(),
+            genesis: None,
         }
     }
 }
@@ -104,8 +201,8 @@ impl Launch {
 pub struct Fleet {
     /// Weak, so an agent leaves by its avatar being dropped and nothing else.
     names: Mutex<HashMap<String, Weak<Agent>>>,
-    /// The trunk and every `/branch` — a root reports to nobody, so this is
-    /// where a walk over the whole run starts.
+    /// Every root: one reports to nobody, so this is where a walk over the
+    /// whole run starts.
     roots: Mutex<Vec<Weak<Agent>>>,
     /// [`AGENT_LEASE_IDLE`] outside tests.
     lease: Duration,
@@ -161,9 +258,7 @@ impl Fleet {
     /// here and not only at the doors, because a wire peer is not trusted to
     /// have used one.
     pub(crate) fn enrol(self: &Arc<Self>, agent: &Arc<Agent>) -> Result<(), Unborn> {
-        if let Err(why) = check_name(&agent.name) {
-            return Err(Unborn::NameMalformed(why));
-        }
+        check_name(&agent.name).map_err(Unborn::NameMalformed)?;
         let mut names = self.names.lock_ignore_poison();
         Self::prune_names(&mut names);
         if let Some(parent) = agent.role.parent()
@@ -190,7 +285,7 @@ impl Fleet {
 
     /// This fleet's live roots, pruning the settled ones as it snapshots —
     /// the tree-walk twin of [`Agent::children`].
-    fn roots(&self) -> Vec<Arc<Agent>> {
+    pub(crate) fn roots(&self) -> Vec<Arc<Agent>> {
         let mut roots = self.roots.lock_ignore_poison();
         let live: Vec<Arc<Agent>> = roots.iter().filter_map(Weak::upgrade).collect();
         if live.len() != roots.len() {
@@ -215,7 +310,21 @@ impl Fleet {
         self.resolve(name).is_some()
     }
 
-    /// Whether any root — trunk or `/branch` — is still live.
+    /// [`Self::enrol`]'s name rules, asked before a log exists for the name,
+    /// so a refused one leaves no session directory behind.  Advisory: the
+    /// authoritative check is still `enrol`'s, under the lock.
+    ///
+    /// # Errors
+    /// [`Unborn::NameMalformed`] or [`Unborn::NameTaken`].
+    pub(crate) fn vacant(&self, name: &str) -> Result<(), Unborn> {
+        check_name(name).map_err(Unborn::NameMalformed)?;
+        if self.name_live(name) {
+            return Err(Unborn::NameTaken(name.to_string()));
+        }
+        Ok(())
+    }
+
+    /// Whether any root is still live.
     pub fn is_empty(&self) -> bool {
         self.roots().is_empty()
     }

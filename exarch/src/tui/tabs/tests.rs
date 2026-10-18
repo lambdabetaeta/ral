@@ -3,9 +3,9 @@ use super::*;
 use crate::agent::fleet::Fleet;
 use crate::agent::testkit::{TestAgentSpec, test_agent};
 
-/// A trunk that stays resolvable for as long as the returned `Arc` lives,
+/// A root that stays resolvable for as long as the returned `Arc` lives,
 /// which is the whole of each test.
-fn trunk(idle: Duration) -> (Arc<Fleet>, Arc<Agent>) {
+fn root(idle: Duration) -> (Arc<Fleet>, Arc<Agent>) {
     let fleet = Fleet::for_test();
     let root = test_agent(
         &fleet,
@@ -14,7 +14,7 @@ fn trunk(idle: Duration) -> (Arc<Fleet>, Arc<Agent>) {
             ..TestAgentSpec::new("main")
         },
     )
-    .expect("a fresh trunk");
+    .expect("a fresh root");
     (fleet, root)
 }
 
@@ -26,14 +26,16 @@ fn born(tabs: &mut Tabs, id: AgentId, name: &str, parent: Option<AgentId>) {
         Path::new("/tmp/exarch-tabs-test"),
         name.into(),
         parent,
-        AgentSlot(1),
+        Recorder::none(),
+        false,
     );
 }
 
 #[test]
 fn parent_focus_climbs_past_a_lingering_ancestor() {
-    let (fleet, root) = trunk(Duration::ZERO);
-    let mut tabs = Tabs::new(&root, fleet, false);
+    let (fleet, root) = root(Duration::ZERO);
+    let mut tabs = Tabs::new(root.id, fleet);
+    born(&mut tabs, root.id, "main", None);
     let (child, grandchild) = (
         AgentId::new(root.id.get() + 1),
         AgentId::new(root.id.get() + 2),
@@ -53,8 +55,9 @@ fn parent_focus_climbs_past_a_lingering_ancestor() {
 /// tombstoning frees only the expired view.
 #[test]
 fn tick_tombstones_only_the_expired_view_leaving_a_live_sibling_untouched() {
-    let (fleet, root) = trunk(Duration::ZERO);
-    let mut tabs = Tabs::new(&root, fleet, false);
+    let (fleet, root) = root(Duration::ZERO);
+    let mut tabs = Tabs::new(root.id, fleet);
+    born(&mut tabs, root.id, "main", None);
     let child = AgentId::new(root.id.get() + 1);
     born(&mut tabs, child, "child", Some(root.id));
     for (id, text) in [(child, "child says hi"), (root.id, "root says hi")] {

@@ -15,7 +15,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Padding, Paragraph},
 };
 
-use crate::record::{AgentId, AgentState};
+use crate::record::AgentState;
 
 use super::App;
 use super::app::Overlay;
@@ -121,24 +121,15 @@ fn indent(r: Rect) -> Rect {
 pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
     let area = Rect::from((Position::ORIGIN, term.size()?));
     let focused = app.tabs.focused();
-    let root = app.tabs.root();
     // Both strips are owned lines, so this frame's rows are read here and
     // dropped before the transcript's own `&mut` borrow of the focused view.
     let rows = app.tabs.rows();
-    let prompt_hint = prompt_hint(root, app.is_steerable(), app.tabs.focused_name(), focused);
+    let prompt_hint = prompt_hint(app.is_steerable(), app.tabs.focused_name());
     let queued_lines = queued_lines(app, area);
     let tab_h = matrix_height(app, area, queued_lines.len(), rows.len());
     let cursor = app.matrix_cursor(&rows);
-    let matrix_lines = (tab_h > 0).then(|| {
-        strip(
-            &rows,
-            focused,
-            root,
-            app.matrix_sort,
-            cursor,
-            usize::from(tab_h),
-        )
-    });
+    let matrix_lines =
+        (tab_h > 0).then(|| strip(&rows, focused, app.matrix_sort, cursor, usize::from(tab_h)));
     let navigating = app.matrix_navigating();
     let s = strips(
         app,
@@ -158,7 +149,7 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
         _ => Vec::new(),
     };
     let cut = match &app.overlay {
-        Some(Overlay::Rewind(overlay)) if focused == root => Some(overlay.anchor()),
+        Some(Overlay::Rewind(overlay)) => Some(overlay.anchor()),
         _ => None,
     };
     let (mut rows, offset, scroll_pct, cut_row) = match app.tabs.scrollback_mut(focused) {
@@ -188,7 +179,7 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
         offset,
     });
 
-    app.prompt_state.style_prompt(focused == root);
+    app.prompt_state.style_prompt(app.is_steerable());
     let state = app
         .tabs
         .scrollback(focused)
@@ -335,7 +326,11 @@ fn matrix_height(app: &App, area: Rect, queued_h: usize, row_count: usize) -> u1
 /// the commands queued among them, in the order typed, through the same
 /// chrome a committed prompt echo uses.  Capped at a third of the frame.
 fn queued_lines(app: &App, area: Rect) -> Vec<Line<'static>> {
-    let queued = app.inbox.queued_human_messages();
+    let queued = app
+        .tabs
+        .focused_agent()
+        .map(|agent| agent.mailbox.queued_human_messages())
+        .unwrap_or_default();
     if queued.is_empty() {
         return Vec::new();
     }
@@ -346,10 +341,10 @@ fn queued_lines(app: &App, area: Rect) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// Set the terminal tab title: a spinner until the root yields to the human,
-/// a block once it waits.  Skipped when the composed title is unchanged.
+/// Set the terminal tab title: a spinner until the focused agent yields to the
+/// human, a block once it waits.  Skipped when the composed title is unchanged.
 fn emit_tab_title(app: &mut App) {
-    let working = !app.inbox.waiting_for_input();
+    let working = !app.focused_waiting();
     let glyph = if working {
         SPINNER[(app.tabs.title_frame() / 4) as usize % SPINNER.len()]
     } else {
@@ -402,15 +397,10 @@ fn paint_hover(app: &App, rows: &mut [Row], offset: usize) {
     }
 }
 
-/// The watch-only banner for a subagent tab's prompt slot, or `None` where
-/// the textarea is editable.
-fn prompt_hint(
-    root: AgentId,
-    focused_steerable: bool,
-    name: &str,
-    focused: AgentId,
-) -> Option<Line<'static>> {
-    if focused == root || focused_steerable {
+/// The watch-only banner for a tab without a live agent in the prompt slot,
+/// or `None` where the textarea is editable.
+fn prompt_hint(steerable: bool, name: &str) -> Option<Line<'static>> {
+    if steerable {
         return None;
     }
     Some(Line::from(Span::styled(

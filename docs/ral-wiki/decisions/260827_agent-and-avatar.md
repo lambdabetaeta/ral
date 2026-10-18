@@ -92,9 +92,9 @@ indices — the by-name door a spawn claims identity at, the by-id door a
 frontend command resolves through a pruning walk from `roots` — plus the
 idle-lease duration every reporting child is armed with at `Fleet::enrol`.
 It is not the tree; the tree is `Agent::parent`/`Agent::children`, and every
-walk — the roster, the cancel cascade, the scope check — runs there. A
-`/branch` is a root exactly as the trunk is: parent-less, pushed onto
-`roots`, reporting to nobody.
+walk — the roster, the cancel cascade, the scope check — runs there. A root
+is parent-less, pushed onto `roots`, reporting to nobody, and a fleet may hold
+many (amended 2026-10-18, below).
 
 `HostServices` (`fleet/desk.rs`) is `Arc<Agent>` plus what is per *call*:
 `nursery`, `reply: ReplyCell`, `emit`, `acts`, `principal`, `generation`,
@@ -171,6 +171,25 @@ lifecycles left the node too: the run lock is the launcher's, and `--resume`
 is its own constructor, `Avatar::resume`. A reply is deposited on the agent by
 every node alike, roots included, so the loop returns an `AgentOutcome` and
 nothing else.*
+
+*Amended 2026-10-18: a root is a session, and a fleet holds any number.* The
+run's settings were the launch's; the recipe for a root joins them. `Launch`
+gained `trunk`, `caps`, `fuel`, `search`, `sessions_root` and `genesis:
+Option<Genesis>` — installers, cwd, terminal capabilities and the run's
+scratch, `None` on a wire host — and `Avatar::trunk` split in two:
+`Fleet::found` seats the first engine and settles the launch, `Avatar::hatch`
+makes one root of it. `Launch::prompt_for` is the one prompt resolver, shared
+by roots and children. Resume reopens every root not ended by the new
+`Forensic::SessionClosed`, each under the name `SessionStarted` now records.
+`/new` and `/branch` hatch roots at runtime (`Read::Hatch`), `/close` writes
+`SessionClosed`, `/quit` ends every root, resumable. The engine-side branch
+door went with the special case it served: `BranchOrder`, the
+`_exarch-branch` builtin, the `Agents::Branch` enquiry and `Avatar::fork_with` are
+deleted, `Avatar::child_of` is the one child builder, and a root is never a
+fork. `Avatar` declares `agent` last, since the fleet's `Weak` must outlive
+the seat's teardown and the log's `SessionEnded` when a root's death ends the
+process. In the frontend `Tabs` has no root and `FleetBus` no mailbox; every
+command acts on the focused tab's agent.
 
 ## Supersession
 

@@ -6,8 +6,8 @@
 //! ill-shaped request is refused in the same words at either end.
 
 use crate::card::{Card, encode_card, value_to_card};
-use crate::record::TranscriptPart;
 use crate::record::model::ContextSurvey;
+use crate::record::{Memory, TranscriptPart};
 use crate::schedule::{CronSchedule, ScheduleInfo, Trigger, fmt_duration, parse_duration};
 use ral_core::SpawnGrant;
 use ral_core::first_order::FOValue;
@@ -144,7 +144,7 @@ impl Request {
         match self {
             Self::Agents(Agents::List) => is::<Vec<AgentInfo>>,
             Self::Agents(Agents::Read(_)) => is::<Deposit>,
-            Self::Agents(Agents::Branch(_)) | Self::Pins(Pins::Set(_) | Pins::Clear(_)) => unit,
+            Self::Pins(Pins::Set(_) | Pins::Clear(_)) => unit,
             Self::Agents(_) => is::<Summary>,
             Self::Schedules(_) => is::<Vec<ScheduleInfo>>,
             Self::Pins(Pins::Read(_)) => pinned,
@@ -195,9 +195,6 @@ pub(crate) enum Agents {
     Cancel(String),
     Reply(FOValue),
     Read(String),
-    /// The host's own `/branch`, whose door is `_exarch-branch`; no model
-    /// is offered it.
-    Branch(ForkClaim),
 }
 
 impl Family for Agents {
@@ -216,7 +213,6 @@ impl Family for Agents {
             Self::Cancel(name) => tag("cancel", Some(name.encode())),
             Self::Reply(value) => tag("reply", Some(value)),
             Self::Read(name) => tag("read", Some(name.encode())),
-            Self::Branch(fork) => tag("branch", Some(fork.encode())),
         }
     }
 
@@ -228,7 +224,6 @@ impl Family for Agents {
             "cancel" => datum(payload).map(Self::Cancel),
             "reply" => carried(payload).cloned().map(Self::Reply),
             "read" => datum(payload).map(Self::Read),
-            "branch" => datum(payload).map(Self::Branch),
             _ => return None,
         })
     }
@@ -348,13 +343,6 @@ impl Datum for Name {
         check_name(&name)?;
         Ok(Self(name))
     }
-}
-
-/// Whether a child starts blank or inherits its parent's conversation.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Memory {
-    Amnemon,
-    Mnemon,
 }
 
 impl Datum for Memory {
@@ -1298,7 +1286,6 @@ mod tests {
             Request::Agents(Agents::Cancel("scout".into())),
             Request::Agents(Agents::Reply(restriction())),
             Request::Agents(Agents::Read("scout".into())),
-            Request::Agents(Agents::Branch(ForkClaim::Parked(NurseryId(1)))),
         ]);
     }
 

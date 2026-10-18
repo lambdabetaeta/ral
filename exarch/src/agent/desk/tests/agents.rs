@@ -1,4 +1,4 @@
-//! The agents family: `start`, `branch`, `cancel`, `message`, `read`, `reply`.
+//! The agents family: `start`, `cancel`, `message`, `read`, `reply`.
 
 use super::*;
 

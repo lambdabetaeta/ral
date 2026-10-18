@@ -47,10 +47,10 @@ different axes and do not compose into a depth limit.
   manage already-live agents rather than create new ones, so a fuel-exhausted
   agent keeps the ability to coordinate with whatever peers it was told about,
   even though it cannot mint new ones.
-- **`/branch` bypasses tool gating** — it is a host command that also calls
-  the fork primitive directly rather than going through a model tool, so it is
-  not subject to `Gate::Spawns`; a branch spends one unit of fuel like any
-  fork.
+- **`/new` and `/branch` bypass tool gating** — they are host commands that
+  hatch a root session rather than going through a model tool, so they are
+  not subject to `Gate::Spawns`. A root starts at the launch's own fuel (fuel
+  is depth, and a root is depth 0), not one unit below its creator's.
 - **Tool descriptions say depth is finite.** `amnemon`/`mnemon` now state
   that each spawn spends one unit of the caller's own budget on the child, so
   a chain cannot recurse forever.

@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 /// How a fork of this seat's engine reaches the desk that adopts it: parked in
 /// the parent's own transport, or made by the host's factory across a wire.
-/// `` `start `` and `/branch` choose their arm on this fact alone.
+/// `` `start `` chooses its arm on this fact alone.
 pub(crate) enum SeatKind {
     Identity(Arc<IdentityTransport>),
     /// A child is attached as this engine was, with its own seal.

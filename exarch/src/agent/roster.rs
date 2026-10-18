@@ -36,7 +36,7 @@ impl AgentInfo {
 /// id and `reader` among them.  An agent sees its whole tree, not only what it
 /// spawned, because what it may *message* is wider than what it spawned and a
 /// name it cannot see is a name it cannot be told to write to.  The climb stops
-/// at a root, so one `/branch` tab never lists another's.
+/// at a root, so one root's tab never lists another's.
 ///
 /// `spawner` carries the scope `` `cancel `` and `` `read `` still enforce: the
 /// listing states the rule it does not impose.

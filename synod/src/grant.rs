@@ -28,8 +28,8 @@
 //! path names nothing.  One substitution, in one function, which is why
 //! the construction lives here and is not scattered across the session.
 
-use ral_core::path::shown;
 use ral_core::capability::{Capabilities, Evidence, ExecKey, FsPolicy};
+use ral_core::path::shown;
 use ral_core::path::{Allow, Deny, FrozenPath, RealPath};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};

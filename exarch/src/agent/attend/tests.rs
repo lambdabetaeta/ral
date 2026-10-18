@@ -3,7 +3,7 @@ use crate::agent::TestTrunk;
 use crate::agent::testkit::*;
 use crate::provider::Refusal;
 use crate::provider::scripted::{Reply, Script};
-use crate::record::{Forensic, Record};
+use crate::record::{Forensic, Memory, Record};
 use ral_core::first_order::FOValue;
 use std::time::Duration;
 
@@ -37,7 +37,7 @@ fn park_mode_reads_engagement_from_the_exchange_clock() {
 fn an_unattended_conversing_trunk_waits_on_its_fleet_alone() {
     let embedded = trunk(false);
     assert!(
-        !embedded.agent.role.returns() && !embedded.fleet.launch.attended,
+        !embedded.agent.role.returns() && !embedded.fleet.launch.trunk.attended(),
         "the fixture is a conversing trunk nobody types into"
     );
     assert_eq!(
@@ -55,7 +55,7 @@ fn an_unattended_conversing_trunk_waits_on_its_fleet_alone() {
 
 /// The `reply` refusal keys on the role, not on trunk-ness, and is an ordinary call error rather than a termination.
 #[test]
-fn reply_refused_identically_for_trunk_and_branch_conversing_agents() {
+fn reply_refused_identically_for_every_conversing_root() {
     let root = trunk(true);
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, root.agent.id);
@@ -65,18 +65,17 @@ fn reply_refused_identically_for_trunk_and_branch_conversing_agents() {
 
     // A distinct name: `root` already holds `TRUNK_NAME` in this same
     // fleet, and names are unique among the live.
-    let branch = root
-        .branch("branch".into(), &crate::bus::dummy_emitter().0)
-        .expect("branch a conversing child");
-    let branch_result = branch.ral("exarch-agents `reply 1", 5, &emit).text;
+    let other = crate::agent::spawn::hatch_root(&root, Memory::Amnemon, Some("other".into()))
+        .expect("a second root");
+    let other_result = other.ral("exarch-agents `reply 1", 5, &emit).text;
     assert!(
-        branch_result.contains(refusal),
-        "a /branch child must be refused with the same text, got: {branch_result}"
+        other_result.contains(refusal),
+        "a second root must be refused with the same text, got: {other_result}"
     );
     assert_eq!(
-        branch.park_mode(branch.agent.engaged()),
+        other.park_mode(other.agent.engaged()),
         ParkMode::Held,
-        "a /branch child still parks Held after a refused reply"
+        "a second root still parks Held after a refused reply"
     );
 }
 

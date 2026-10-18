@@ -103,9 +103,11 @@ pub struct Resumed {
 /// `dev/docs/plans/260814_one_seam_one_log.md`.
 pub struct AgentLog {
     id: AgentId,
+    /// The fleet name, written into every `SessionStarted` this log authors.
+    name: String,
     dir: PathBuf,
     /// Held, with [`Self::account`], so `clear` re-emits `SessionStarted`
-    /// unchanged and `fork` passes both down to the child.
+    /// unchanged.
     model: RecordedModel,
     account: RecordedAccount,
     /// `<scratch>/sessions/`, under which `fork` makes each child's dir.
@@ -153,6 +155,7 @@ impl AgentLog {
     pub fn root(
         sessions_root: &Path,
         session_id: AgentId,
+        name: &str,
         model: &RecordedModel,
         account: &RecordedAccount,
         system_prompt_bytes: usize,
@@ -160,6 +163,7 @@ impl AgentLog {
         let mut s = Self::open_fresh(
             sessions_root.to_path_buf(),
             session_id,
+            name.to_string(),
             model.clone(),
             account.clone(),
         )?;
@@ -184,7 +188,7 @@ impl AgentLog {
             .prefix("exarch-agent-log-test-")
             .tempdir()?;
         let model = RecordedModel::for_test(model);
-        let log = Self::root(scratch.path(), session_id, &model, account, 0)?;
+        let log = Self::root(scratch.path(), session_id, "test", &model, account, 0)?;
         Ok(Self {
             _scratch: Some(scratch),
             ..log
@@ -204,6 +208,7 @@ impl AgentLog {
     pub fn fork(
         &self,
         child_id: AgentId,
+        name: &str,
         system_prompt_bytes: usize,
         model: &RecordedModel,
         account: &RecordedAccount,
@@ -211,6 +216,7 @@ impl AgentLog {
         let mut s = Self::open_fresh(
             self.sessions_root.clone(),
             child_id,
+            name.to_string(),
             model.clone(),
             account.clone(),
         )?;
@@ -235,11 +241,6 @@ impl AgentLog {
     /// Returns an error when the log is missing, malformed, foreign, or
     /// cannot be reopened after validation.
     pub fn resume(sessions_root: &Path, session_id: AgentId) -> io::Result<Self> {
-        if session_id != AgentId::new(0) {
-            return Err(io::Error::other(format!(
-                "cannot resume session {session_id}: children are transient by design and only session 0 can be resumed"
-            )));
-        }
         let dir = Self::dir_of(sessions_root, session_id);
         let record_path = dir.join("record.jsonl");
         if !record_path.exists() {
@@ -249,7 +250,7 @@ impl AgentLog {
                 dir.display()
             )));
         }
-        let (context, name, label, learned) =
+        let (context, head, learned) =
             crate::record::model::resume(&record_path).map_err(|error| {
                 io::Error::new(
                     error.kind(),
@@ -261,16 +262,17 @@ impl AgentLog {
         // `record_resumed` overwrites this with the live selection's full
         // identity before anything else observes it.
         let account = RecordedAccount {
-            label,
+            label: head.label,
             service: String::new(),
             id: String::new(),
         };
         let seam = crate::record::Emitter::append_to(&record_path)?;
         let mut resumed = Self {
             id: session_id,
+            name: head.name,
             dir,
             model: RecordedModel {
-                name,
+                name: head.model,
                 context_window: None,
             },
             account,
@@ -356,6 +358,43 @@ impl AgentLog {
     /// Where session `id`'s log lives under `sessions_root`, before it opens.
     pub(crate) fn dir_of(sessions_root: &Path, id: AgentId) -> PathBuf {
         sessions_root.join(id.to_string())
+    }
+
+    /// Every session directory under `sessions_root`, in id order.
+    ///
+    /// # Errors
+    /// The directory exists but cannot be read.
+    pub(crate) fn session_ids(sessions_root: &Path) -> io::Result<Vec<AgentId>> {
+        let entries = match fs::read_dir(sessions_root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let mut ids: Vec<AgentId> = entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let id = entry.file_name().to_str()?.parse().ok()?;
+                entry.file_type().ok()?.is_dir().then_some(AgentId::new(id))
+            })
+            .collect();
+        ids.sort_unstable();
+        Ok(ids)
+    }
+
+    /// The roots a resume reopens: every session whose record opens with a
+    /// root's `SessionStarted` and holds no `SessionClosed`, in id order, with
+    /// the name it was recorded under.
+    ///
+    /// # Errors
+    /// `sessions_root` exists but cannot be read.
+    pub fn live_roots(sessions_root: &Path) -> io::Result<Vec<(AgentId, String)>> {
+        Ok(Self::session_ids(sessions_root)?
+            .into_iter()
+            .filter_map(|id| {
+                let record = Self::dir_of(sessions_root, id).join("record.jsonl");
+                live_root(&record).map(|name| (id, name))
+            })
+            .collect())
     }
 
     /// The per-session directory `<sessions_root>/<id>/`.
@@ -706,6 +745,12 @@ impl AgentLog {
 
     /// # Errors
     /// See the meta-records note above.
+    pub fn record_session_closed(&mut self) -> io::Result<()> {
+        self.record_forensic(Forensic::SessionClosed)
+    }
+
+    /// # Errors
+    /// See the meta-records note above.
     pub fn record_error(&mut self, text: String) -> io::Result<()> {
         self.record_forensic(Forensic::Error { text })
     }
@@ -733,6 +778,7 @@ impl AgentLog {
     fn open_fresh(
         sessions_root: PathBuf,
         session_id: AgentId,
+        name: String,
         model: RecordedModel,
         account: RecordedAccount,
     ) -> io::Result<Self> {
@@ -745,6 +791,7 @@ impl AgentLog {
         let seam = crate::record::Emitter::create(&source)?;
         Ok(Self {
             id: session_id,
+            name,
             dir,
             model,
             account,
@@ -776,6 +823,7 @@ impl AgentLog {
     ) -> Forensic {
         Forensic::SessionStarted {
             session_id: self.id,
+            name: self.name.clone(),
             parent,
             model: self.model.name.clone(),
             context_window: self.model.context_window,
@@ -832,6 +880,22 @@ impl AgentLog {
             Err(error) => self.seam.report_fault(&error),
         }
     }
+}
+
+/// The name `record` was opened under if it heads a root and was never closed.
+/// A line that does not parse is skipped: a torn tail is a resume's to
+/// quarantine, not a reason to hide the root.
+fn live_root(record: &Path) -> Option<String> {
+    let mut records = super::log::Log::read(record).ok()?.filter_map(Result::ok);
+    let head = records.next()?;
+    let Record::Forensic(Forensic::SessionStarted {
+        parent: None, name, ..
+    }) = head.value()
+    else {
+        return None;
+    };
+    let closed = records.any(|r| matches!(r.value(), Record::Forensic(Forensic::SessionClosed)));
+    (!closed).then(|| name.clone())
 }
 
 /// The one `io::Error` a multi-file boundary reports, joining whatever

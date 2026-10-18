@@ -27,7 +27,6 @@ mod menu;
 mod opening;
 mod signin;
 
-use ral_core::path::shown;
 use crate::grant::Grant;
 use crate::workspace;
 use baseline::Baseline;
@@ -39,7 +38,7 @@ use exarch::provider::{
     models::resolve_account,
     pricing,
 };
-use exarch::record::RecordedAccount;
+use ral_core::path::shown;
 use ral_core::sync::LockExt;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -233,12 +232,9 @@ impl Conversation {
         let baseline =
             Baseline::spawn(grant.root().to_path_buf(), baseline_stop, baseline_progress);
 
-        let machine = hypervisor.boot(&grant.machine_spec()).map_err(|e| {
-            format!(
-                "could not start a machine for {}: {e}",
-                shown(grant.root())
-            )
-        })?;
+        let machine = hypervisor
+            .boot(&grant.machine_spec())
+            .map_err(|e| format!("could not start a machine for {}: {e}", shown(grant.root())))?;
 
         // Everything the agent is told, and everything it is allowed, is in
         // the guest's namespace: the engine lives there, and the host path
@@ -259,11 +255,6 @@ impl Conversation {
             system,
             caps: ral_core::capability::GrantStack::of(caps),
             run_dir,
-            account: RecordedAccount {
-                label: label.clone(),
-                service: account.service.name.as_str().to_string(),
-                id: account.id.as_str().to_string(),
-            },
             // Synod's agent may not schedule its own wakeups: a
             // conversing office assistant still runs on nothing but
             // the messages it is handed, never on its own authority.

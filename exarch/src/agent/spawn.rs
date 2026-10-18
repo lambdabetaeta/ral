@@ -1,55 +1,92 @@
-//! The fork-detach spine behind `/branch` and the desk's `` exarch-agents `start ``.
-//! Every spawn is launch-only: the child runs the same [`Avatar::attend`] loop
-//! on a detached thread; a reply notice reaches the parent's inbox when the
+//! The detach spine behind every attended root and the desk's `` exarch-agents `start ``.
+//! Every spawn is launch-only: the node runs the same [`Avatar::attend`] loop
+//! on a detached thread; a reply notice reaches the parent's inbox when a
 //! child replies, a non-reply end when it quiesces.
 
 use crate::agent::Avatar;
 use crate::bus::{AgentOutcome, Emitter};
-use crate::record::Transient;
+use crate::record::{AgentLog, Memory, Resumed, Transient};
+use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
-/// Mints `branch-{N}` labels for an unnamed branch; a label need only be
-/// distinguishable from the siblings on screen, so a process-lifetime counter
+/// Mints `root-{N}` names for an unnamed root; a name need only be
+/// distinguishable from the live ones on screen, so a process-lifetime counter
 /// suffices.
 static DISPATCH_SEQ: AtomicU64 = AtomicU64::new(1);
 
-/// Fork the trunk's conversation into a new tab under `name`, or under a minted
-/// `branch-{N}` where the human named none.  A branch converses: it roots its
-/// own tree, pushes no result upward, and parks for the human rather than
-/// seeding a first exchange — the fork *is* the whole of the command, and what
-/// to say next is said to the new tab.
-pub(crate) fn spawn_branch(
+/// A new root of `session`'s fleet under `name`, or under a minted `root-{N}`
+/// where the human named none: a fresh engine from the launch's genesis, blank
+/// for `Amnemon`, or importing `session`'s model-visible context for
+/// `Mnemon`.
+pub(crate) fn hatch_root(
     session: &Avatar,
-    name: Option<&str>,
+    memory: Memory,
+    name: Option<String>,
+) -> Result<Avatar, String> {
+    let name =
+        name.unwrap_or_else(|| format!("root-{}", DISPATCH_SEQ.fetch_add(1, Ordering::Relaxed)));
+    let id = crate::agent::fresh_id();
+    let seat = session.fleet.launch.seat(id).map_err(|e| e.to_string())?;
+    let inherited = (memory == Memory::Mnemon).then(|| session.log.borrow().inherited_context());
+    Avatar::hatch(
+        &session.fleet,
+        seat,
+        &name,
+        session.agent.current_provider(),
+        |sessions, model, account, bytes| {
+            let mut log = AgentLog::root(sessions, id, &name, model, account, bytes)?;
+            if let Some(inherited) = inherited {
+                log.import_context(inherited).map_err(io::Error::other)?;
+            }
+            Ok((log, ()))
+        },
+    )
+    .map(|(root, ())| root)
+    .map_err(|e| e.to_string())
+}
+
+/// Open a new root session as a tab ([`hatch_root`]).  A root converses and
+/// parks for the human rather than seeding a first exchange: what to say next
+/// is said to the new tab.
+pub(crate) fn spawn_root(
+    session: &Avatar,
+    memory: Memory,
+    name: Option<String>,
     emit: &Emitter,
 ) -> Result<SpawnedChild, String> {
-    let name = name.map_or_else(
-        || format!("branch-{}", DISPATCH_SEQ.fetch_add(1, Ordering::Relaxed)),
-        str::to_string,
-    );
-    let child = session.branch(name.clone(), emit)?;
-    // The branch row's display commit, authored beside the rail row
-    // `spawn_async` emits from the same inputs; a harness spawn's recorded
-    // row is the desk's own HarnessCall commit instead.
+    let root = hatch_root(session, memory, name)?;
+    let name = root.agent.name.clone();
+    let tool = match memory {
+        Memory::Amnemon => "/new",
+        Memory::Mnemon => "/branch",
+    };
+    // The row's display commit, authored beside the rail row `spawn_async`
+    // emits from the same inputs; a harness spawn's recorded row is the
+    // desk's own HarnessCall commit instead.
     session
         .recorder()
         .emit_or_report(crate::record::Display::ToolCall {
-            tool: "/branch".to_string(),
+            tool: tool.to_string(),
             cmd: "(waiting for you)".to_string(),
-            summary: Some(format!("Agent {name} spawned (/branch).")),
+            summary: Some(format!("Agent {name} spawned ({tool}).")),
         });
-    let spec = AsyncSpawn { name, prompt: None };
-    spawn_async(child, spec, emit)
+    let spec = AsyncSpawn {
+        name,
+        prompt: None,
+        resumed: None,
+    };
+    spawn_async(root, spec, emit)
 }
 
-/// The half of an async spawn that varies between `` exarch-agents `start ``'s two
-/// kinds (`amnemon`/`mnemon`) and `/branch`; [`spawn_async`] holds the half
-/// they share.
+/// The half of an async spawn that varies between `` exarch-agents `start ``,
+/// a new root, and a resumed one; [`spawn_async`] holds the half they share.
 pub(crate) struct AsyncSpawn {
     pub name: String,
     /// `None` parks for the human rather than seeding a first exchange.
     pub prompt: Option<String>,
+    /// What a resumed root picked up, for its tab to replay.
+    pub resumed: Option<Resumed>,
 }
 
 /// A start receipt, built only for a child genuinely running: an unspawnable
@@ -59,7 +96,7 @@ pub(crate) struct SpawnedChild {
     pub name: String,
 }
 
-/// Hand an already-forked, already-capped `child` to a worker thread that
+/// Hand an already-built `child` to a worker thread that
 /// attends it off the parent's critical path, and return its identity at once.
 /// Callers differ only in how they built `child` and `spec`.
 ///
@@ -74,7 +111,11 @@ pub(crate) fn spawn_async(
     spec: AsyncSpawn,
     emit: &Emitter,
 ) -> Result<SpawnedChild, String> {
-    let AsyncSpawn { name, prompt } = spec;
+    let AsyncSpawn {
+        name,
+        prompt,
+        resumed,
+    } = spec;
     // Everything below is taken off `child` before it moves into the worker.
     let agent_id = child.agent.id;
     let log_dir = child.log_dir().to_path_buf();
@@ -94,7 +135,7 @@ pub(crate) fn spawn_async(
         child.seed(p.clone());
     }
     // The dispatch's own row is authored at each caller with session access —
-    // `spawn_branch`'s `Display::ToolCall` beside this call, a harness spawn's
+    // `spawn_root`'s `Display::ToolCall` beside this call, a harness spawn's
     // at the desk's own commitment arm — so this spine mints no row of its own.
     // Taken before the move below, so a spawn that never runs can still
     // report through it.
@@ -113,6 +154,8 @@ pub(crate) fn spawn_async(
                 log_dir: log_dir.clone(),
                 name: born_name,
                 parent: spawner,
+                resumed,
+                recorder: recorder.clone(),
             });
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 child.attend(&child_emit)
@@ -125,8 +168,8 @@ pub(crate) fn spawn_async(
             });
             child.recorder().transient(Transient::Died);
             // A replied child's parent was notified at deposit time; `settle`
-            // skips a second report for it.  A branch reports to nobody and
-            // only `/close` on its own tab ever ends it.  Delivery precedes
+            // skips a second report for it.  A root reports to nobody and
+            // only `/close` or `/quit` on its own tab ever ends it.  Delivery precedes
             // retirement: a parent that finds this child gone always finds
             // the result already queued.
             child.settle(outcome);

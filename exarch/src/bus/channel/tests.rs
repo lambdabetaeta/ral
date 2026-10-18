@@ -83,6 +83,8 @@ fn bus_queue_lifecycle_events_survive_a_flood_uncrossed() {
             log_dir: std::path::PathBuf::new(),
             name: "a".into(),
             parent: Some(AgentId::new(0)),
+            resumed: None,
+            recorder: crate::record::Emitter::none(),
         },
     ))
     .unwrap();

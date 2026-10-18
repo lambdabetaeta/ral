@@ -2,7 +2,7 @@ use super::{Inbox, Item, Minted, Next, ParkMode, Post, Source, Stamped};
 use crate::bus::{AgentMessage, AgentOutcome, AgentResult, ScheduleId};
 use crate::bus::{Read, Rewrite};
 use crate::cancel;
-use crate::record::AgentId;
+use crate::record::{AgentId, Memory};
 use ral_core::test_helper::eventually;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -44,18 +44,18 @@ fn wakeup_at(id: u64, label: &str, trigger: &str, prompt: &str, epoch: u64) -> P
 fn inbox_waiting_for_input_tracks_human_park() {
     let inbox = Inbox::new();
     assert!(
-        inbox.waiting_for_input(),
+        inbox.mailbox().waiting_for_input(),
         "a fresh interactive inbox starts at the human boundary"
     );
 
     inbox.push_user("work".into());
     assert!(
-        !inbox.waiting_for_input(),
+        !inbox.mailbox().waiting_for_input(),
         "posting input wakes the consumer out of the yielded state"
     );
     assert!(matches!(inbox.next_item(), Some(Next::Item(Item::Human(s))) if s == "work"));
     assert!(
-        !inbox.waiting_for_input(),
+        !inbox.mailbox().waiting_for_input(),
         "draining an item means work has started; yield resumes only at park"
     );
 
@@ -67,15 +67,16 @@ fn inbox_waiting_for_input_tracks_human_park() {
 
     assert!(
         eventually(Duration::from_secs(1), || inbox
+            .mailbox()
             .waiting_for_input()
             .then_some(()))
         .is_some(),
         "a Held empty-inbox park is the human-input yield point"
     );
 
-    inbox.mailbox().push_user("next".into());
+    inbox.mailbox().push(Post::UserSteering("next".into()));
     assert!(
-        !inbox.waiting_for_input(),
+        !inbox.mailbox().waiting_for_input(),
         "a submitted prompt clears the yielded bit before waking the worker"
     );
     assert!(
@@ -83,7 +84,7 @@ fn inbox_waiting_for_input_tracks_human_park() {
         "the wakeup delivered the submitted prompt"
     );
     assert!(
-        !inbox.waiting_for_input(),
+        !inbox.mailbox().waiting_for_input(),
         "taking the item leaves the root working until it parks again"
     );
 }
@@ -96,7 +97,7 @@ fn inbox_waiting_for_input_ignores_non_human_parks() {
         inbox.next_item(),
         Some(Next::Item(Item::Human(_)))
     ));
-    assert!(!inbox.waiting_for_input());
+    assert!(!inbox.mailbox().waiting_for_input());
 
     let observed = Arc::new(AtomicBool::new(false));
     let worker_observed = observed.clone();
@@ -122,7 +123,7 @@ fn inbox_waiting_for_input_ignores_non_human_parks() {
     );
     std::thread::sleep(Duration::from_millis(150));
     assert!(
-        !inbox.waiting_for_input(),
+        !inbox.mailbox().waiting_for_input(),
         "waiting on children is still work, not a human-input yield"
     );
 
@@ -171,7 +172,7 @@ fn non_human_park_survives_an_interrupt() {
 
     token.cancel(ral_core::process::CancelCause::Interrupted);
 
-    inbox.mailbox().push_user("resume".into());
+    inbox.mailbox().push(Post::UserSteering("resume".into()));
     assert!(
         matches!(
             handle.join().expect("parked worker joins"),
@@ -251,7 +252,7 @@ fn held_park_survives_a_terminate_cause() {
 
     token.cancel(ral_core::process::CancelCause::Cancelled);
 
-    inbox.mailbox().push_user("resume".into());
+    inbox.mailbox().push(Post::UserSteering("resume".into()));
     assert!(
         matches!(
             handle.join().expect("parked worker joins"),
@@ -378,11 +379,14 @@ fn inbox_queued_human_messages_shows_typed_text_in_order() {
     let inbox = Inbox::new();
     inbox.push(wakeup(1, "morning", "@daily", "check"));
     inbox.push_user("first".into());
-    inbox.push(Post::Read(Read::Branch(Some("scout".into()))));
+    inbox.push(Post::Read(Read::Hatch {
+        memory: Memory::Mnemon,
+        name: Some("scout".into()),
+    }));
     inbox.push_user("second".into());
 
     assert_eq!(
-        inbox.queued_human_messages(),
+        inbox.mailbox().queued_human_messages(),
         vec![
             "first".to_string(),
             "/branch scout".to_string(),
@@ -396,7 +400,7 @@ fn inbox_queued_human_messages_shows_typed_text_in_order() {
     assert!(matches!(inbox.next_item(), Some(Next::Item(Item::Human(s))) if s == "first"));
     assert!(matches!(
         inbox.next_item(),
-        Some(Next::Read(Read::Branch(Some(s)))) if s == "scout"
+        Some(Next::Read(Read::Hatch { name: Some(s), .. })) if s == "scout"
     ));
     assert!(matches!(inbox.next_item(), Some(Next::Item(Item::Human(s))) if s == "second"));
 }
@@ -406,7 +410,11 @@ fn inbox_queued_human_messages_shows_typed_text_in_order() {
 fn inbox_pop_back_user_all_no_user_prompts() {
     let inbox = Inbox::new();
     inbox.push(wakeup(1, "x", "@", "p"));
-    assert_eq!(inbox.pop_back_user_all(), None, "no user prompts to recall");
+    assert_eq!(
+        inbox.mailbox().pop_back_user_all(),
+        None,
+        "no user prompts to recall"
+    );
     assert!(matches!(
         inbox.next_item(),
         Some(Next::Item(Item::Wakeup(_)))
@@ -426,7 +434,7 @@ fn inbox_pop_back_user_all_extracts_all_leaving_non_user_in_order() {
     inbox.push(Post::Read(Read::Resources));
     inbox.push_user("fourth".into());
     assert_eq!(
-        inbox.pop_back_user_all(),
+        inbox.mailbox().pop_back_user_all(),
         Some(vec![
             "first".to_string(),
             "second\nthird".to_string(),

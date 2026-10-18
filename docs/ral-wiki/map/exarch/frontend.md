@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e028f5a3
-generated_at_date: 2026-10-13
+generated_at_commit: d4299048
+generated_at_date: 2026-10-18
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/record/session.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/cancel.rs, exarch/src/boot.rs, exarch/src/agent/seat.rs, exarch/src/signals.rs, exarch/src/prompt/host.rs]
 ---
 
@@ -43,9 +43,9 @@ one inbound inbox**, mapped by `bus.rs`'s module doc across its submodules:
   A typed line is one of three classes, decided once at submit on the UI
   thread (`tui/commands.rs::route_submit`): an **immediate** view command
   (`/help`, `/copy`, `/model`, …) acts there and is never posted; a **read**
-  (`Post::Read` — `/branch`, `/context`, `/resources`) drains at the *next*
+  (`Post::Read` — `/new`, `/branch`, `/context`, `/resources`) drains at the *next*
   boundary of any kind, tool or exchange, in the order typed; a **rewrite**
-  (`Post::Rewrite` — `/clear`, `/evict`, `/rewind`, `/quit`) drains only at
+  (`Post::Rewrite` — `/clear`, `/close`, `/evict`, `/rewind`, `/quit`) drains only at
   the exchange boundary and holds everything typed after it, because there the
   order typed is part of what was said. Everything else — prompt text,
   including a slash-shaped line that names no command, wakeups, settled
@@ -61,14 +61,17 @@ one inbound inbox**, mapped by `bus.rs`'s module doc across its submodules:
   no frontend hook ([[decisions/260616_tool-boundary-steering|tool-boundary-steering]],
   [[decisions/260617_scheduled-wakeups|scheduled-wakeups]],
   [[decisions/260617_async-agent-tool|async-agent-tool]]).
-- a `FleetBus` (`bus/emitter.rs`) owns the channel and the inbox; `pump`
+- a `FleetBus` (`bus/emitter.rs`) owns the channel, and mints each root's
+  emitter over that root's own mailbox; `pump`
   (`bus/sink.rs`) borrows it, runs
   the worker on a scoped thread, drains signals into the sink, and reports a
   worker panic as a recorded `Forensic::Error`, prefixed so a sink can tell it
   from a clean completion (`bus::WORKER_PANIC_PREFIX`). Completion is the
-  per-exchange `done` flag, latched by `drain_signals` (`bus/sink.rs`, mirrored
-  by the TUI's own copy in `tui/tui_loop.rs`) so an exchange ends even while a
-  background producer keeps the channel non-empty — never the channel's state
+  per-exchange `done` flag, latched by `drain_signals` (`bus/sink.rs`), so an
+  exchange ends even while a background producer keeps the channel non-empty —
+  never the channel's state; the TUI's own `drain_signals` (`tui/tui_loop.rs`)
+  reads the fleet's emptiness before each pass instead, since its run ends
+  with its last root
   ([[decisions/260618_run-turn-host-loop|run-turn-host-loop]]).
 - the channel itself (`bus/channel.rs`) is coalescing but unbounded in depth, not a bare `mpsc` pair
   (`BusSender`/`BusReceiver`, same `send`/`try_recv`/`recv_timeout` shape):
@@ -166,11 +169,12 @@ the `/export` copy (`export_log`) beside each other, the single `user.log` I/O
 door, so the `/export` handler (`tui/commands.rs`, `resolve_export_path`)
 resolves and guards the destination but never reaches the filesystem itself.
 
-On resume, a scrollback takes over the fold's memo: `tui_loop::run` replays
-`record.jsonl` into `record::Blocks` before the worker spawns, hands it to the
-root scrollback (`Scrollback::seed`), and restores cumulative usage from the
-replayed deltas — the "resumed" note is the boundary between replayed history
-and the live session. `seed` walks that memo treating each block as `Opened`,
+On resume, a scrollback takes over the fold's memo: a resumed root's `Born`
+carries its `Resumed` summary, and `App::replay` folds that root's
+`record.jsonl` into `record::Blocks`, hands it to the root's scrollback
+(`Scrollback::seed`), and adds the replayed deltas to the run's usage — the
+"resumed" note is the boundary between replayed history and the live session.
+Every reopened root does so for its own tab. `seed` walks that memo treating each block as `Opened`,
 and marks the mirror it builds as already in `user.log`, written by the run
 that recorded it, so the resumed transcript continues rather than repeats. For
 the running session the scrollback is fed one `Signal` at a time:
@@ -353,18 +357,21 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  the same either way, so no field shifts. The `StateSpan` (state, entry instant,
  characters streamed since) lives on `Scrollback`, not `App`, so each tab times
  its own.
- A tab is a `Weak<Agent>` for reach, the birth facts off its `Born` notice
- (name, parent, log path) for the record, and a linger clock — one `Tab` per
- agent the stream has announced, in a single `Vec` in birth order, root first.
- The frontend holds no `Fleet` and no `Arc<Agent>`: reach is
- `Tabs::agent(id)`, an upgrade held for one handler and never stored, so the
- avatar alone decides how long an agent lives. Liveness and death are
+ A tab is the birth facts off its `Born` notice (name, parent, log path), the
+ agent's own record seam (`recorder`, through which a command the frontend
+ owns, `/model` or `/limits`, is recorded in that tab's log), and a linger
+ clock — one `Tab` per agent the stream has announced, in a single `Vec` in id
+ order. There is no root tab: every root is a tab born by its own `Born`, and
+ `Tabs` is never empty once the first has landed. The frontend holds the
+ `Fleet`, to resolve a tab's name and to reach the live roots on `/quit`, and
+ no `Arc<Agent>`: reach is `Tabs::agent(id)`, an upgrade held for one handler
+ and never stored, so the avatar alone decides how long an agent lives. Liveness and death are
  different questions asked of different things — a failed upgrade says the
  agent is gone *now*, while `Transient::Died` sits at a *position* in the bus
  queue, and only that position can say which buffered events preceded it, so
- `Died` (and `/clear`'s `retire_all`, the frontend declaring death ahead of
- the fact) remains the death cue and `App::admits` refuses everything after
- it. The birth facts ride the notice rather than being read back off the
+ `Died` (and `/clear`'s `retire_subtree`, the frontend declaring its
+ descendants' death ahead of the fact) remains the death cue, and `App` drops
+ everything a lingering tab is sent after it. The birth facts ride the notice rather than being read back off the
  agent, so a child that settles before the frontend drains its `Born` still
  gets a properly labelled tree row. `App`'s matrix navigation is modal, and
  its whole retained state is `Matrix` — the agent identity the cursor names,
@@ -377,17 +384,17 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  side it hides — and connectors are derived from the whole spawn forest before
  the window clips it. While navigation owns the keyboard the strip is always
  drawn, taking a row from the transcript if it must; otherwise it fits in
- whatever the transcript's floor leaves over. Demotion — a child idle and
+ whatever the transcript's floor leaves over. Demotion — a tab idle and
  parked past `DEMOTE_IDLE` (`tui.rs`, beside `LINGER`) becoming a compact
- slate row in place, keeping its position in the spawn tree — is read off the
+ slate row in place, keeping its position in the spawn tree, the focused tab
+ alone exempt — is read off the
  agent's own exchange clock, computed per row per frame and never stored.
  Sub-agent sessions get matrix rows/tabs that linger for 90 seconds
  (`LINGER`, `tui.rs`) after `Died`, each keeping its own scroll position; dead
- rows dim and keep their final turn cells without a countdown. The conversing
- trunk is label-only in the matrix — no turn cells, token readout, or size bar
- — so those columns describe workers only. An async agent on the
- session-lived bus streams its tab the same way, and `/clear` retires every
- live sub-tab through the same linger window
+ rows dim and keep their final turn cells without a countdown. Every row,
+ roots included, carries turn cells, a token readout and a size bar. An async
+ agent on the session-lived bus streams its tab the same way, and `/clear`
+ retires the cleared agent's descendant tabs through the same linger window
  ([[decisions/260621_session-lifetime-event-bus|session-lifetime-event-bus]]).
  Once `LINGER` elapses, `Tabs::tick` tombstones the dead view
  (`Scrollback::evict_to_tombstone`): its mirror (blocks and their render
@@ -405,19 +412,18 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  the session's opening block (`Blocks::origin`). Nothing is rebuilt: a record
  moves one block, and the mirror moves that block
  ([[decisions/260909_the-fold-reports-the-printer-mirrors|the-fold-reports-the-printer-mirrors]]).
- `/clear` also cancels the in-flight exchange: `route_submit` raises
- `cancel::raise_interrupt`, then on the root agent `interrupt` and
- `cancel_descendants(Explicit)`, all *before* blanking
- the scrollback, so the streaming `select!` in `provider::complete` unwinds within
- one `wait_for_cancel` poll (~50 ms) rather than running to its natural end.
- Straggler tokens the worker already emitted into the bus before the
- cancel noticed are dropped by `App`'s `root_clear_drain` guard, which arms in
- `App::clear` and disarms at the next `Transient::Cleared` — or, if that
- acknowledgement itself was lost, at the next `Display::Prompt` fact.
+ `/clear`, `/close` and `/quit` share one helper: interrupt the agent, then queue
+ the `Rewrite` behind the interrupt, so the streaming `select!` in
+ `provider::complete` unwinds within one `wait_for_cancel` poll (~50 ms)
+ rather than running to its natural end. `/clear` does not blank the view at
+ the keystroke: on `Transient::Cleared(id)`, published only when the agent's
+ clear succeeded, `App` retires `id`'s descendant tabs
+ (`Tabs::retire_subtree`), resets `id`'s scrollback and pushes a fresh session
+ card; the run's total usage is not reset.
  The TUI owns the REPL loop and the raw-mode / bracketed-paste /
  alt-screen / mouse-capture guard. Every tab shares one submit path: a typed
- line goes to the *focused* agent (the prompt chrome follows the focused tab,
- not the trunk), and a prompt submitted while an exchange runs
+ line goes to the *focused* agent (the prompt chrome follows the focused tab),
+ and a prompt submitted while an exchange runs
  is posted to the `Inbox`; `run_batch` drains non-slash steering at
  the next safe tool boundary, and the rest lands at the exchange
  boundary — a coalesced human run, or a wakeup / settled agent as its own
@@ -426,15 +432,19 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  Slash-prefixed prompts
  stay on the REPL command path (`tui/commands.rs`, parsed uniformly on every
  tab). View commands (`/help`, `/legend`, `/copy`,
- `/export`, `/model`, `/login`, `/providers`, `/limits`, `/thinking`, `/close`, `/focus`) run
+ `/export`, `/model`, `/login`, `/providers`, `/limits`, `/thinking`, `/focus`) run
  on the UI thread; `/help` answers with a framed card of `(command, gloss)`
  rows, and `/copy` answers where every copy does — the transient corner
  toast of `gesture::Toast`, never a block in the transcript; copies go
  through the `clipboard` crate, native locally and OSC 52 over ssh;
- session commands are parsed at submit into a `Read` (`/branch`,
- `/context`, `/resources`) or a `Rewrite` (`/clear`, `/evict`, `/rewind`,
- `/quit`) and enter the trunk's inbox. `/rewind` takes no argument: it opens
- the `tui/rewind.rs` overlay over the trunk's turn-opening prompts (the
+ session commands are parsed at submit into a `Read` (`/new`, `/branch`,
+ `/context`, `/resources`) or a `Rewrite` (`/clear`, `/close`, `/evict`,
+ `/rewind`, `/quit`) and enter the focused agent's inbox; `/quit` alone posts
+ to every live root, and a session command on a tab whose agent has ended
+ answers "this tab's agent has ended". Every command acts on, and reports
+ into, the focused tab: a tab is a tab, and none is the root. `/rewind` takes
+ no argument: it opens
+ the `tui/rewind.rs` overlay over the focused tab's turn-opening prompts (the
  fold's `Blocks::prompts`, since `Display::Prompt` carries the `turn` it
  opens — `None` for a steering line, which opens none), the latest
  highlighted. The eight-row list keeps the selection near its centre, shows
@@ -443,13 +453,13 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  the transcript, clamped at either end, and returns its row, from which
  rows are ghosted (`Row::ghost`) in `render::draw`. The viewport is restored
  on close; ⏎ posts `Rewrite::Rewind(turn)`. Both cuts use `Blocks::rewind_point`.
- `/branch [name]`
- forks a *conversing* tab from the focused context — a peer conversation
- under [[decisions/260705_branch-minimal|branch-minimal]], named by the human
- or by a minted `branch-{N}`, and parked for them rather than seeded with a
- prompt — and `/close`,
- admitted off the trunk like `/focus` and `/thinking`, kills the focused branch
- and its subtree. The idle wait
+ `/new [name]` and `/branch [name]` open a *root session*: a new tab with an
+ engine of its own, named by the human or by a minted `root-{N}`, and parked
+ for them rather than seeded with a prompt — blank for `/new`, carrying the
+ focused tab's context for `/branch`, with a fresh shell either way. `/close`
+ ends the focused tab's session for good (`--resume` will not reopen it) and
+ `/quit` ends every root, resumable; the process exits once the last root's
+ avatar has dropped. The idle wait
  selects over input, inbox (`bus/inbox.rs`), and the session bus (`bus/channel.rs`)
  ([[decisions/260616_tool-boundary-steering|tool-boundary-steering]],
  [[decisions/260617_scheduled-wakeups|scheduled-wakeups]]).
@@ -523,15 +533,16 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
 
 `cancel.rs` is the per-agent exchange cancellation layered on ral's interrupt
 handling, and `signals.rs` the process's half: the signal dispositions and
-`face`, which forwards an ambient cause to the trunk that launched. Every
+`face`, which forwards an ambient cause to every live root of the fleet. Every
 agent holds one **sticky** `Token` (an `Arc<AtomicU8>`) for its
 whole attend; the attend loop `reset`s it at each genuine exchange boundary. Esc /
 Ctrl-C interrupt the *focused tab's* current exchange — never a cascade, never a
 subtree kill ([[decisions/260705_cancel-per-tab|cancel-per-tab]]): the focused
 tab's own `Weak` upgrades (`Tabs::agent`) and `Agent::interrupt` unwinds that
-agent's exchange and eval root. The trunk alone also calls `raise_interrupt`,
-the process-wide half: on Unix it re-creates the SIGINT raw mode swallowed, for
-a foreground external child's own process group; its Windows form follows.
+agent's exchange and eval root. No exarch
+shell is ever foregrounded (tool runs are `Run::captured`, the terminal
+`Denied`), so a key has no process-wide half: a key interrupts one agent, an
+OS signal reaches every root.
 The TUI key table keeps UI control separate from cancellation: a modal
 overlay's (`/model`, `/login`, `/providers`) Ctrl-C/Ctrl-D/Esc close it (`overlay_tick`), only
 `/quit`/`/exit` end the session, and Ctrl-C/Esc otherwise always drive the
@@ -549,9 +560,8 @@ escalating disposition never ticks for an exchange-cancel; window-close / logoff
 shutdown pass through unhandled to that disposition, the analogue of
 SIGTERM/SIGHUP staying on the escalating path. Raw mode disables
 `ENABLE_PROCESSED_INPUT`, so Ctrl-C reaches the TUI as an ordinary key event
-and `raise_interrupt` calls `request_interrupt` in-process — never a
-`GenerateConsoleCtrlEvent` re-injection, which would broadcast to the console
-group and tick ral's escalation counter.
+and nothing re-injects a console event: a `GenerateConsoleCtrlEvent` would
+broadcast to the console group and tick ral's escalation counter.
 A genuine external signal still routes through ral's one cause-carrying
 delivery path ([[decisions/260706_signals-are-causes|signals-are-causes]]).
 `boot::face_process_signals` (`boot.rs`) runs once per entry point: it discards
@@ -563,10 +573,10 @@ agent's `InterruptTarget` (`cancel.rs`), so Esc and SIGINT after `/clear` still
 reach the new shell. `prompt/host.rs` snapshots the machine (OS, date, cwd,
 user, home, git state, exarch's log directory) once at startup for the [[map/exarch/policy|system prompt]].
         - `tui.rs` — thin façade: module declarations, re-exports, `LINGER`, `DEMOTE_IDLE`
-        - `tui/app.rs` — the `App` orchestrator: event routing, the `root_clear_drain` guard, per-kind push methods
-        - `tui/tui_loop.rs` — REPL/ui loop: `run`, `Tui`, `CommandCtx`, `ui_loop`, `OverlayTick`, `overlay_tick`, `KeyAction`, `key_action`, `ctrl_key`
+        - `tui/app.rs` — the `App` orchestrator: event routing, a root's `Born` (card, replay), per-kind push methods
+        - `tui/tui_loop.rs` — REPL/ui loop: `run` (every root through `spawn_async`, the UI loop until the fleet is empty), `Tui`, `CommandCtx`, `ui_loop`, `OverlayTick`, `overlay_tick`, `KeyAction`, `key_action`, `ctrl_key`
         - `tui/terminal.rs` — terminal lifetime: `TerminalGuard`, raw mode, alt screen, panic hook, stderr redirect, editor hatch, `compose_in_editor`
-        - `tui/tabs.rs` — session/view lifecycle: `Tab` (`Weak<Agent>`, birth facts, `Scrollback`, linger clock), `Tabs` as one birth-ordered `Vec`, `TabRow` (the matrix's per-frame projection, demotion included), titles, attachment management and the parent climb, `tick`'s tombstone eviction past `LINGER`
+        - `tui/tabs.rs` — session/view lifecycle: `Tab` (`Weak<Agent>`, birth facts, `Scrollback`, linger clock), `Tabs` as one id-ordered `Vec` with no root, `TabRow` (the matrix's per-frame projection, demotion included), titles, attachment management, the parent climb and `root_of`, `tick`'s tombstone eviction past `LINGER`
         - `tui/scrollback.rs` — per-session scrollback as a mirror of the view fold: `Scrollback`, `Scrollback::fact` acting on a `Delta` (`opened`/`grew`/`patched`), the record vocabulary decoded once into `Item`s, `absorb`'s tail rules (an effect walks back to its call, a change joins the run of changes at the tail, everything else grows the tail), `trim`'s head retirement against the fold's own window, `live_tail`, `screen`'s one seam rule, the `Log` transcript writer
         - `record/commit.rs` — the model's stream, cut into records worker-side: `Stream`/`Chopper` into `Display::Answer`/`Thinking` commits
         - `tui/prompt.rs` — prompt editor state: `PromptState`, history, draft, editor request, key input, the live slash-command popup (`refresh_menu`, `menu_key`)

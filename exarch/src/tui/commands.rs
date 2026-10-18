@@ -1,7 +1,6 @@
 //! Prompt-box slash commands — registry, routing, and handlers.
 
 use std::fmt::Write;
-use std::io;
 use std::path::PathBuf;
 
 use super::App;
@@ -14,9 +13,12 @@ use super::rewind;
 use super::scrollback;
 use super::tui_loop::Tui;
 use crate::SessionInfo;
-use crate::bus::{Mailbox, Post, Read, Rewrite};
+use crate::agent::Agent;
+use crate::agent::fleet::Fleet;
+use crate::bus::{Post, Read, Rewrite};
 use crate::card::{Card, Field, FieldVal, Mark, Readout, Span};
 use crate::provider::allowance::{Allowance, Reading};
+use crate::record::Memory;
 use jiff::Timestamp;
 use prompt_editor::completion::Candidate;
 use ral_core::path::sigil::expand_path_prefix;
@@ -35,7 +37,7 @@ macro_rules! verbs {
 }
 
 verbs! {
-    Help, Legend, Thinking, Clear, Copy, Export, Model, Login, Providers, Limits, Branch,
+    Help, Legend, Thinking, Clear, Copy, Export, Model, Login, Providers, Limits, New, Branch,
     Close, Focus, Evict, Context, Rewind, Resources, Quit,
 }
 
@@ -45,10 +47,6 @@ pub(super) struct Meta {
     /// The trailing argument, e.g. `Some("<path>")` for `/export`; `None` marks
     /// a command that matches only when typed alone.
     pub(super) arg: Option<&'static str>,
-    /// Whether the command runs wherever it is typed.  A command that reaches
-    /// the session inbox belongs to the trunk's context and is refused off
-    /// it; one that touches only the view runs on any tab.
-    pub(super) any_tab: bool,
     pub(super) help: &'static str,
 }
 
@@ -56,14 +54,12 @@ const fn meta(
     name: &'static str,
     aliases: &'static [&'static str],
     arg: Option<&'static str>,
-    any_tab: bool,
     help: &'static str,
 ) -> Meta {
     Meta {
         name,
         aliases,
         arg,
-        any_tab,
         help,
     }
 }
@@ -71,114 +67,105 @@ const fn meta(
 impl Verb {
     pub(super) const fn meta(self) -> Meta {
         match self {
-            Self::Help => meta("/help", &[], None, false, "List the available commands."),
+            Self::Help => meta("/help", &[], None, "List the available commands."),
             Self::Legend => meta(
                 "/legend",
                 &[],
                 None,
-                false,
                 "Decode the rail, bars, grain, and fidelity treatments.",
             ),
             Self::Thinking => meta(
                 "/thinking",
                 &[],
                 None,
-                true,
                 "Collapse or expand thinking, on screen and to come.",
             ),
             Self::Clear => meta(
                 "/clear",
                 &[],
                 None,
-                false,
                 "Forget the conversation and clear the screen.",
             ),
             Self::Copy => meta(
                 "/copy",
                 &[],
                 None,
-                false,
                 "Copy the latest reply to the clipboard.",
             ),
             Self::Export => meta(
                 "/export",
                 &[],
                 Some("<path>"),
-                false,
                 "Write the user view to a file.",
             ),
-            Self::Model => meta("/model", &[], None, false, "Switch the model or provider."),
+            Self::Model => meta("/model", &[], None, "Switch the model or provider."),
             Self::Login => meta(
                 "/login",
                 &[],
                 None,
-                false,
                 "Sign in with ChatGPT: adds a plan-backed provider.",
             ),
             Self::Providers => meta(
                 "/providers",
                 &[],
                 None,
-                false,
                 "Manage providers: API keys, custom endpoints, ChatGPT sign-in.",
             ),
             Self::Limits => meta(
                 "/limits",
                 &[],
                 None,
-                false,
                 "Show what is left of each subscription's ration.",
             ),
+            Self::New => meta("/new", &[], Some("[name]"), "Open a new, empty session."),
             Self::Branch => meta(
                 "/branch",
                 &[],
                 Some("[name]"),
-                false,
-                "Fork this conversation into a new tab (same context).",
+                "Open a new session with this tab's context (fresh shell).",
             ),
             Self::Close => meta(
                 "/close",
                 &[],
                 None,
-                true,
-                "Close this branch (its tab and any agents it spawned).",
+                "End this session for good: --resume will not reopen it.",
             ),
             Self::Focus => meta(
                 "/focus",
                 &[],
                 Some("<name>"),
-                true,
                 "Attach to a live agent by name.",
             ),
             Self::Evict => meta(
                 "/evict",
                 &[],
                 None,
-                false,
                 "Evict the older half of the context; it stays readable to the model.",
             ),
             Self::Context => meta(
                 "/context",
                 &[],
                 None,
-                false,
                 "Survey the model context without changing it.",
             ),
             Self::Rewind => meta(
                 "/rewind",
                 &[],
                 None,
-                false,
                 "Pick a prompt to go back to; descendants and the shell are untouched.",
             ),
             Self::Resources => meta(
                 "/resources",
                 &[],
                 None,
-                false,
                 "Show the agent's resource probes: workers, inbox, log, disk.",
             ),
-            Self::Quit => meta("/quit", &["/exit"], None, false, "Leave exarch."),
+            Self::Quit => meta(
+                "/quit",
+                &["/exit"],
+                None,
+                "End every session; --resume reopens them.",
+            ),
         }
     }
 
@@ -201,6 +188,7 @@ impl Verb {
             Self::Resources => Command::Resources,
             Self::Rewind => Command::Rewind,
             Self::Quit => Command::Quit,
+            Self::New => Command::New((!arg.is_empty()).then(|| arg.to_string())),
             Self::Branch => Command::Branch((!arg.is_empty()).then(|| arg.to_string())),
             Self::Export if arg.is_empty() => return Err("usage: /export <path>".into()),
             Self::Export => Command::Export(arg.to_string()),
@@ -223,6 +211,7 @@ pub(super) enum Command {
     Login,
     Providers,
     Limits,
+    New(Option<String>),
     Branch(Option<String>),
     Close,
     Focus(String),
@@ -351,11 +340,11 @@ pub(super) fn cmd_help(app: &mut App) {
         })
         .collect();
     let card = Card(vec![Mark::heading("commands"), Mark::Fields { rows }]);
-    app.push_chrome(app.tabs.root(), Chrome::Framed(card));
+    app.push_chrome(app.tabs.focused(), Chrome::Framed(card));
 }
 
 pub(super) fn cmd_legend(app: &mut App) {
-    app.push_chrome(app.tabs.root(), Chrome::Legend);
+    app.push_chrome(app.tabs.focused(), Chrome::Legend);
 }
 
 /// Flip the disclosure of deliberation everywhere at once: one setting, so a
@@ -370,7 +359,7 @@ pub(super) fn cmd_thinking(app: &mut App) {
 /// toast, as a drag-selection's copy is: a copy is a gesture on the transcript,
 /// not an event in it.
 pub(super) fn cmd_copy(app: &mut App) {
-    let id = app.tabs.root();
+    let id = app.tabs.focused();
     let reply = app.latest_reply();
     if reply.is_empty() {
         app.push_error(id, "no reply to copy yet");
@@ -384,7 +373,7 @@ pub(super) fn cmd_copy(app: &mut App) {
 /// Write the focused tab's rendered `user.log` to `arg`, never over an existing
 /// file.  The copy goes through [`scrollback::export_log`], the I/O door.
 pub(super) fn cmd_export(app: &mut App, arg: &str, info: &SessionInfo<'_>) {
-    let id = app.tabs.root();
+    let id = app.tabs.focused();
     let dest = resolve_export_path(arg, info.cwd);
     if dest.exists() {
         app.push_error(id, &format!("refusing to overwrite {}", dest.display()));
@@ -416,14 +405,14 @@ pub(super) fn cmd_focus(app: &mut App, arg: &str) {
 /// Survey every account's ration on a background thread, so the card lands
 /// whole or not at all — a per-account failure is already a row on it.
 pub(super) fn cmd_limits(app: &mut App, ctx: &super::tui_loop::CommandCtx<'_>) {
-    let id = app.tabs.root();
+    let id = app.tabs.focused();
     match ctx.bureau.survey_allowances() {
         None => app.push_error(
             id,
             "this session replays a scripted provider and surveys no accounts",
         ),
         Some(survey) => {
-            let recorder = ctx.recorder.clone();
+            let recorder = app.tabs.focused_recorder().clone();
             std::thread::spawn(move || {
                 let card = limits_card(&survey.settle());
                 recorder.transient(crate::record::Transient::Limits { card });
@@ -497,117 +486,96 @@ fn allowance_field(a: &Allowance, now: Timestamp) -> Field {
 }
 
 /// The one submit path for every tab: parse once, then act on the parse and the
-/// focused tab.  A command typed on a sub-agent tab is refused rather than
-/// misfired — the trunk's inbox would act on the wrong session — save those
-/// the registry marks `any_tab`, which touch no inbox.  A plain line steers
-/// the focused tab instead.  Errors land on the focused tab, where the user
-/// typed.
-pub(super) fn route_submit(
-    text: String,
-    tui: &mut Tui,
-    mailbox: &Mailbox,
-    ctx: &super::tui_loop::CommandCtx<'_>,
-) -> io::Result<()> {
+/// focused tab.  A plain line steers the focused tab's agent.  Errors land on
+/// the focused tab, where the user typed.
+pub(super) fn route_submit(text: String, tui: &mut Tui, ctx: &super::tui_loop::CommandCtx<'_>) {
     let trimmed = text.trim();
-    let root = tui.app.tabs.root();
     let focused = tui.app.tabs.focused();
-    let unrecognized = unrecognized_command(trimmed);
     match lookup_command(trimmed) {
-        Some((verb, _)) if focused != root && !verb.meta().any_tab => {
-            tui.app.push_error(
-                focused,
-                &format!("{} is not available on this tab", verb.meta().name),
-            );
-        }
         Some((verb, arg)) => match verb.parse(arg) {
-            Ok(command) => run(command, tui, mailbox, ctx)?,
+            Ok(command) => run(command, tui, ctx),
             Err(usage) => tui.app.push_error(focused, &usage),
         },
         // A typo is not a prompt in disguise: say so rather than mail it to the
         // model as one.
-        None if unrecognized.is_some() => {
-            let head = unrecognized.expect("checked Some above");
-            tui.app
-                .push_error(focused, &format!("unknown command: {head} (see /help)"));
-        }
-        // `steer` is the one delivery door: it renews the agent's idle lease,
-        // and the line is dropped if that agent died since it was focused.
-        None => {
-            if focused == root {
-                mailbox.push_user(text);
-            } else if let Some(agent) = tui.app.tabs.agent(focused) {
-                agent.mailbox.steer(text);
+        None => match unrecognized_command(trimmed) {
+            Some(head) => tui
+                .app
+                .push_error(focused, &format!("unknown command: {head} (see /help)")),
+            // `steer` is the one delivery door: it renews the agent's idle
+            // lease, and the line is dropped if that agent died since it was
+            // focused.
+            None => {
+                if let Some(agent) = tui.app.tabs.agent(focused) {
+                    agent.mailbox.steer(text);
+                }
             }
-        }
+        },
     }
-    Ok(())
+}
+
+/// Interrupt `agent`'s exchange, then queue `rewrite` behind it.
+fn end(agent: &Agent, rewrite: Rewrite) {
+    agent.interrupt();
+    agent.mailbox.push(Post::Rewrite(rewrite));
+}
+
+/// `/quit`, and the TUI's way out of a failed loop: every live root ends,
+/// resumable.
+pub(super) fn quit(fleet: &Fleet) {
+    for root in fleet.roots() {
+        end(&root, Rewrite::Quit);
+    }
+}
+
+/// Run `f` on the focused tab's agent, or say it has ended.
+fn session(tui: &mut Tui, f: impl FnOnce(&Agent)) {
+    if let Some(agent) = tui.app.tabs.focused_agent() {
+        f(&agent);
+    } else {
+        let focused = tui.app.tabs.focused();
+        tui.app.push_error(focused, "this tab's agent has ended");
+    }
+}
+
+/// Queue `post` on the focused tab's agent.
+pub(super) fn post(tui: &mut Tui, post: Post) {
+    session(tui, |agent| agent.mailbox.push(post));
 }
 
 /// Act on a well-formed command.  A view command (`/help`, `/legend`, `/copy`,
 /// `/export`, `/model`, `/login`, `/limits`, `/thinking`) touches only the App,
 /// clipboard, file, or picker, so it runs here on the UI thread; a session
-/// command becomes its [`Read`] or [`Rewrite`] and rides the trunk's inbox to
-/// the attend thread, which owns the context.  `/rewind` is both: its picker
-/// runs here, and the choice rides the inbox.
-fn run(
-    command: Command,
-    tui: &mut Tui,
-    mailbox: &Mailbox,
-    ctx: &super::tui_loop::CommandCtx<'_>,
-) -> io::Result<()> {
-    let info = ctx.info;
-    let root = tui.app.tabs.root();
-    let focused = tui.app.tabs.focused();
+/// command becomes its [`Read`] or [`Rewrite`] and rides the focused agent's
+/// inbox to its attend thread, which owns the context.  `/rewind` is both: its
+/// picker runs here, and the choice rides the inbox.
+fn run(command: Command, tui: &mut Tui, ctx: &super::tui_loop::CommandCtx<'_>) {
     match command {
-        Command::Close => {
-            if focused == root {
-                tui.app
-                    .push_error(root, "nothing to close here; /quit ends the session");
-            } else if !tui.app.tabs.is_branch(focused) {
-                tui.app
-                    .push_error(focused, "/close closes a branch, not this tab");
-            } else if let Some(agent) = tui.app.tabs.focused_agent() {
-                agent.cancel_tree(ral_core::process::CancelCause::Cancelled);
-            } else {
-                tui.app.push_error(
-                    focused,
-                    "this branch has already ended; its tab fades on its own",
-                );
-            }
-        }
         Command::Focus(name) => cmd_focus(&mut tui.app, &name),
         Command::Thinking => cmd_thinking(&mut tui.app),
         Command::Help => cmd_help(&mut tui.app),
         Command::Legend => cmd_legend(&mut tui.app),
         Command::Copy => cmd_copy(&mut tui.app),
-        Command::Export(path) => cmd_export(&mut tui.app, &path, info),
+        Command::Export(path) => cmd_export(&mut tui.app, &path, ctx.info),
         Command::Model => pick_model(tui, ctx),
         Command::Login => login::login(tui, ctx),
         Command::Providers => providers::providers(tui, ctx),
         Command::Limits => cmd_limits(&mut tui.app, ctx),
-        // Cancel before blanking: tokens already in flight would otherwise
-        // paint into the cleared scrollback until the worker's next poll, and
-        // what the bus still holds `App::handle`'s clear-drain drops.
-        // Descendants only — a terminate-class cause on the trunk's own
-        // token is permanent, and `/clear` rebuilds the trunk in place.
-        // The pre-blank cancel reaches a foreground external child too.
-        Command::Clear => {
-            crate::signals::raise_interrupt();
-            if let Some(agent) = tui.app.tabs.agent(root) {
-                agent.interrupt();
-                agent.cancel_descendants(ral_core::process::CancelCause::Cancelled);
-            }
-            tui.app.clear(info, tui.guard.term())?;
-            mailbox.push(Post::Rewrite(Rewrite::Clear));
-        }
-        Command::Evict => mailbox.push(Post::Rewrite(Rewrite::Evict)),
-        Command::Quit => mailbox.push(Post::Rewrite(Rewrite::Quit)),
-        Command::Rewind => rewind::rewind(tui, mailbox),
-        Command::Branch(name) => mailbox.push(Post::Read(Read::Branch(name))),
-        Command::Context => mailbox.push(Post::Read(Read::Context)),
-        Command::Resources => mailbox.push(Post::Read(Read::Resources)),
+        Command::Clear => session(tui, |agent| end(agent, Rewrite::Clear)),
+        Command::Close => session(tui, |agent| end(agent, Rewrite::Close)),
+        Command::Quit => quit(tui.app.tabs.fleet()),
+        Command::Evict => post(tui, Post::Rewrite(Rewrite::Evict)),
+        Command::Rewind => rewind::rewind(tui),
+        Command::New(name) => hatch(tui, Memory::Amnemon, name),
+        Command::Branch(name) => hatch(tui, Memory::Mnemon, name),
+        Command::Context => post(tui, Post::Read(Read::Context)),
+        Command::Resources => post(tui, Post::Read(Read::Resources)),
     }
-    Ok(())
+}
+
+/// `/new` and `/branch`: the focused agent opens a root session of its fleet.
+fn hatch(tui: &mut Tui, memory: Memory, name: Option<String>) {
+    post(tui, Post::Read(Read::Hatch { memory, name }));
 }
 
 #[cfg(test)]

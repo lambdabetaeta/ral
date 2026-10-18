@@ -160,7 +160,7 @@ impl Emitter {
     }
 }
 
-/// The event channel and its inbox, over one of two lifetimes crossed with
+/// The event channel, over one of two lifetimes crossed with
 /// whether spawned children are live or muted on it: [`Self::session`], held
 /// across the whole REPL session (the TUI) with live children, so an async
 /// `agent` child (a worker) streams to a live tab; [`Self::per_exchange`], closing with the
@@ -172,31 +172,29 @@ impl Emitter {
 pub(crate) struct FleetBus {
     tx: BusSender,
     rx: BusReceiver,
-    mailbox: Mailbox,
     children: Children,
     /// The one meter every emitter minted from this bus shares.
     meter: UsageMeter,
 }
 
 impl FleetBus {
-    pub(crate) fn session(inbox: &Inbox) -> Self {
-        Self::build(inbox.mailbox(), Children::Live)
+    pub(crate) fn session() -> Self {
+        Self::build(Children::Live)
     }
 
-    pub(crate) fn per_exchange(inbox: &Inbox) -> Self {
-        Self::build(inbox.mailbox(), Children::Muted)
+    pub(crate) fn per_exchange() -> Self {
+        Self::build(Children::Muted)
     }
 
-    pub(crate) fn per_exchange_live(inbox: &Inbox) -> Self {
-        Self::build(inbox.mailbox(), Children::Live)
+    pub(crate) fn per_exchange_live() -> Self {
+        Self::build(Children::Live)
     }
 
-    fn build(mailbox: Mailbox, children: Children) -> Self {
+    fn build(children: Children) -> Self {
         let (tx, rx) = channel();
         Self {
             tx,
             rx,
-            mailbox,
             children,
             meter: UsageMeter::default(),
         }
@@ -207,13 +205,14 @@ impl FleetBus {
         &self.rx
     }
 
-    /// The root emitter for this bus; children derive from it with
-    /// [`Emitter::child`] / [`Emitter::muted_child`] and inherit the meter.
-    pub(crate) fn emitter(&self, id: AgentId) -> Emitter {
+    /// A root's emitter on this bus, stamping `mailbox`, its own; children
+    /// derive from it with [`Emitter::child`] / [`Emitter::muted_child`] and
+    /// inherit the meter.
+    pub(crate) fn emitter(&self, id: AgentId, mailbox: Mailbox) -> Emitter {
         Emitter {
             tx: self.tx.clone(),
             id,
-            mailbox: self.mailbox.clone(),
+            mailbox,
             children: self.children,
             meter: self.meter.clone(),
         }
@@ -257,8 +256,8 @@ mod tests {
             ..Usage::default()
         };
 
-        let bus = FleetBus::per_exchange(&Inbox::new());
-        let root = bus.emitter(AgentId::new(0));
+        let bus = FleetBus::per_exchange();
+        let root = bus.emitter(AgentId::new(0), Inbox::new().mailbox());
         let child = root.muted_child(AgentId::new(1));
 
         let root_seam = Recorder::none();

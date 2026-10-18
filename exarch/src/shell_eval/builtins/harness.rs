@@ -5,14 +5,13 @@
 //!
 //! Each door reads the model's argument as a [`Request`] before it enquires,
 //! so a malformed call never reaches the host, and is refused in the words
-//! the desk would use. `exarch-agents`'s `` `start `` tag, and the host-only
-//! `_exarch-branch`, fork this shell and tell the host how to reach the fork,
-//! which is what the run's [`Fork`] door says: an in-process host adopts a
-//! bequest parked in the run's nursery, since the reentrancy law bars a desk
-//! handler from holding `&mut Shell` to fork one itself; a host across a wire
-//! is named a sealed bequest, and builds an engine around it while it
-//! answers. [`crate::agent::desk::ExarchDesk`] answers every enquiry on the
-//! other side.
+//! the desk would use. `exarch-agents`'s `` `start `` tag forks this shell and
+//! tells the host how to reach the fork, which is what the run's [`Fork`] door
+//! says: an in-process host adopts a bequest parked in the run's nursery,
+//! since the reentrancy law bars a desk handler from holding `&mut Shell` to
+//! fork one itself; a host across a wire is named a sealed bequest, and builds
+//! an engine around it while it answers. [`crate::agent::desk::ExarchDesk`]
+//! answers every enquiry on the other side.
 //!
 //! All but `exarch-transcript` name a state, and answer it afterwards.
 //! `exarch-transcript` names the record instead, which no tag of it writes,
@@ -106,17 +105,9 @@ fn agents(args: &[Value], mooring: &Mooring, shell: &Shell) -> Settled<Value> {
     }
 }
 
-/// `_exarch-branch`: the engine half of the host's `/branch`, forking this
-/// session for the desk to adopt with the parent's whole authority.
-fn builtin_branch(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    fork_then_enquire(SpawnGrant::Inherit, mooring, shell, |fork| {
-        Request::Agents(Agents::Branch(fork))
-    })
-}
-
 /// Fork this shell and enquire `request` of the fork's receipt, through the
 /// door this run's [`Fork`] names: parked in process, or sealed across a
-/// wire. `` `start `` and `/branch` differ only in the request.
+/// wire.
 fn fork_then_enquire(
     grant: SpawnGrant,
     mooring: &Mooring,
@@ -136,10 +127,6 @@ fn fork_then_enquire(
         }
     };
     ask(AGENTS, request(claim), mooring, shell)
-}
-
-fn scheme_branch(_u: &mut Unifier) -> Scheme {
-    scheme(&[], &[], thunk(pure(Ty::Unit)))
 }
 
 /// A family door's scheme.  `first_order` refuses a block or handle at any
@@ -368,7 +355,7 @@ fn scheme_transcript(u: &mut Unifier) -> Scheme {
 
 // A named array, not a promoted temporary: rustc refuses promotion once an
 // entry carries `BuiltinEntry`'s interior-mutable arity cache.
-static HARNESS_BUILTINS_ARR: [BuiltinEntry; 6] = [
+static HARNESS_BUILTINS_ARR: [BuiltinEntry; 5] = [
     BuiltinEntry::boundary(
         Cow::Borrowed("exarch-agents"),
         scheme_agents,
@@ -398,12 +385,6 @@ static HARNESS_BUILTINS_ARR: [BuiltinEntry; 6] = [
         scheme_transcript,
         "exarch-transcript <tag>  — every turn of this session, evicted ones included, by the ids `exarch-context `survey` shows.\n\nexarch-transcript `index  — [[id: Int, role: Str, kind: Str, label: Str, bytes: Int, held: Str]], every turn in order: the survey's fields, and `held`, `resident` or `evicted`.\nexarch-transcript `read [turns: [Int]]  — [[turn: Int, role: Str, messages: [Message]]] in id order, each message exactly as sent. A Message is [role: `system|`user|`assistant|`tool, parts: [Part]]; a Part is `text [content: Str], `program [tool: Str, source: Str, keys: [Str]] (a tool call: the ral tool's script in `source`, any other tool's argument names in `keys`), `result [content: Str], `reasoning [content: Str], `binary [content-type: Str, name: Str, bytes: Int] (metadata only), or `custom [provider: Str, model: Str].\nexarch-transcript `grep [pattern: Str, turns: `all|`only [Int]]  — [hits: [[turn: Int, role: Str, line: Int, text: Str]], total: Int]: lines matching `pattern` (a Rust regex), at most the 100 oldest, `text` clipped to 200 bytes, `line` 1-based within its message; `total` counts them all.",
         boundary_family::<Transcript>,
-    ),
-    BuiltinEntry::new(
-        Cow::Borrowed("_exarch-branch"),
-        scheme_branch,
-        "_exarch-branch  — the host's `/branch`, internal: fork this session for the desk to adopt as a conversing branch.",
-        BuiltinBody::Static(builtin_branch),
     ),
 ];
 pub static HARNESS_BUILTINS: &[BuiltinEntry] = &HARNESS_BUILTINS_ARR;

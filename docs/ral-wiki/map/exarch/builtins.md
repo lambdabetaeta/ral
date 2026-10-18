@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 6c0ea0ea
+generated_at_commit: d4299048
 generated_at_date: 2026-10-18
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/skill.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/src/enquiry.rs, exarch/src/library.rs, exarch/data/agent.ral]
 ---
@@ -358,7 +358,7 @@ so the model has the address before it asks for one.
   `` `list `` alone answers the rows,
   `[[name: Str, spawner: <root|agent Str>, state: <busy|waiting-on-agents|replied|waiting>, idle-s: Int, elapsed-s: Int, log-dir: Str]]`
   — the reader's whole tree, itself among them, since what it may *message* is
-  wider than what it spawned. The climb stops at a root, so one `/branch` tab
+  wider than what it spawned. The climb stops at a root, so one root session
   never lists another's. `` `read `` answers `[name: Str, reply: α]`,
   the value a replied child deposited, which is why the family's answer type is
   a bare `α` (the `` exarch-pins `read `` precedent) rather than a roster

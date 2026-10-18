@@ -415,7 +415,7 @@ impl Scrollback {
     }
 
     /// Wipe scrollback, scroll state, and streaming buffers, truncating
-    /// `user.log` by reopening it.  `/clear` on the root.
+    /// `user.log` by reopening it.  `/clear`.
     pub(super) fn reset(&mut self) {
         let log_path = self.log_path.clone();
         let agent = self.agent;

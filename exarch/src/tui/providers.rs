@@ -547,9 +547,9 @@ impl ProvidersOverlay {
 
 pub(super) fn providers(tui: &mut Tui, ctx: &CommandCtx<'_>) {
     let Some(holdings) = ctx.bureau.holdings() else {
-        let root = tui.app.tabs.root();
+        let focused = tui.app.tabs.focused();
         tui.app.push_error(
-            root,
+            focused,
             "this session replays a scripted provider and keeps no accounts",
         );
         return;
@@ -638,7 +638,9 @@ fn drive(tui: &mut Tui, ctx: &CommandCtx<'_>, holdings: &Holdings, wallet: &Wall
             let text = format!(
                 "[{done} {label}; the running model keeps its connection until you /model]"
             );
-            ctx.recorder
+            tui.app
+                .tabs
+                .focused_recorder()
                 .emit_or_report(crate::record::Forensic::SystemNote { text });
         }
     }

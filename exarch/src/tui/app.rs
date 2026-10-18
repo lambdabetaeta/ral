@@ -2,27 +2,23 @@
 //! the [`crate::bus::Signal`] stream — `Fact` through [`App::fact`],
 //! `Transient` through [`App::transient`] — into scrollback blocks.
 
-use super::banner;
-use super::block::{AgentSlot, Chrome};
+use super::block::Chrome;
 use super::gesture::{Effect, GestureState, Toast};
 use super::login::LoginOverlay;
 use super::matrix::{self, Matrix, MatrixSort, Nav};
-use super::palette::AGENT_HUES;
 use super::picker::Picker;
 use super::prompt::PromptState;
 use super::providers::ProvidersOverlay;
-use super::render::draw;
 use super::resources::{BusFigures, ScrollbackFigures, frontend_rows};
 use super::rewind::RewindOverlay;
 use super::scrollback::Scrollback;
 use super::tabs::{TabRow, Tabs};
-use super::terminal::Term;
-use crate::agent::Agent;
 use crate::agent::fleet::Fleet;
-use crate::bus::{BusReceiver, Inbox};
+use crate::bus::BusReceiver;
+use crate::card::Card;
 use crate::provider::identity::Account;
 use crate::provider::{Provider, Usage};
-use crate::record::{AgentId, AgentState};
+use crate::record::{AgentId, AgentState, Emitter as Recorder, Resumed};
 use crate::record::{Display, Forensic, Record, Recorded, Transient};
 use clipboard::Clipboard;
 
@@ -31,7 +27,7 @@ use ratatui::crossterm::event::{
 };
 use std::{
     io::{self},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
@@ -53,10 +49,8 @@ pub(super) enum Overlay {
 pub(crate) struct App {
     pub(super) tabs: Tabs,
     pub(super) prompt_state: PromptState,
-    /// Shared with the editor and the worker, which drains a non-slash prefix
-    /// mid-turn (`Avatar::run_batch`) and the rest at the exchange boundary
-    /// (`Inbox::next_or_idle`).
-    pub(super) inbox: Inbox,
+    /// What opens every session's tab, born or cleared.
+    opening: Card,
     pub(super) total_usage: Usage,
     pub(super) status_model: String,
     /// Modal in behaviour — an early-return guard in [`Self::key`] — and in
@@ -70,33 +64,22 @@ pub(crate) struct App {
     /// around the matrix must not retarget the prompt until the user presses
     /// Enter.
     pub(super) matrix: Matrix,
-    /// Armed by [`Self::clear`]: drops root's straggler events — tokens the
-    /// worker emitted before the streaming select noticed the cancel — until
-    /// the clear acknowledgement. Sub-agent tabs are covered instead by the
-    /// `dying` window in [`Self::admits`].
-    root_clear_drain: bool,
     pub(super) cwd_basename: String,
     /// Lets `render::emit_tab_title` skip the write when the title is unchanged.
     pub(super) last_title: String,
 }
 
 impl App {
-    pub fn new(
-        root: &Arc<Agent>,
-        fleet: Arc<Fleet>,
-        vi: bool,
-        append_log: bool,
-        inbox: Inbox,
-    ) -> Self {
-        let tabs = Tabs::new(root, fleet, append_log);
+    /// Focused on `first`, whose `Born` must be the first signal folded.
+    pub fn new(first: AgentId, fleet: Arc<Fleet>, vi: bool, opening: Card) -> Self {
         let cwd_basename = std::env::current_dir()
             .ok()
             .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
             .unwrap_or_else(|| "?".into());
         Self {
-            tabs,
+            tabs: Tabs::new(first, fleet),
             prompt_state: PromptState::new(vi),
-            inbox,
+            opening,
             total_usage: Usage::default(),
             status_model: String::new(),
             overlay: None,
@@ -104,7 +87,6 @@ impl App {
             clipboard: Clipboard::default(),
             matrix_sort: MatrixSort::default(),
             matrix: Matrix::Watching,
-            root_clear_drain: false,
             cwd_basename,
             last_title: String::new(),
         }
@@ -127,9 +109,9 @@ impl App {
         self.status_model = format!("{status_provider}/{} ({effort})", p.model());
     }
 
-    /// Whether the focused tab has an agent to steer.  Root's own handle
-    /// upgrades for exactly as long as the trunk attends, which is exactly as
-    /// long as steering means anything.
+    /// Whether the focused tab has an agent to steer: its handle upgrades for
+    /// exactly as long as the agent lives, which is exactly as long as
+    /// steering means anything.
     pub(super) fn is_steerable(&self) -> bool {
         self.tabs.focused_agent().is_some()
     }
@@ -148,7 +130,7 @@ impl App {
     }
 
     /// The cursor this frame draws: a cursor whose agent has gone reads as the
-    /// attached tab, the way a stale focus reads as root.  Resolved at every
+    /// attached tab, the way a stale focus reads.  Resolved at every
     /// use, so a dying child never strands the selection off-list and nothing
     /// has to reconcile it.
     pub(super) fn matrix_cursor(&self, rows: &[TabRow<'_>]) -> Option<AgentId> {
@@ -245,66 +227,17 @@ impl App {
         pending || self.gesture.toast_live(margin) || !self.focused_waiting()
     }
 
-    /// Age out sub-session tabs, reset root scrollback, zero cost, redraw the
-    /// banner. The workers `/clear` cancels fade out through the usual
-    /// `dying`/`LINGER` path, so their scrollbacks still reach `flush_logs`.
-    pub fn clear(&mut self, info: &crate::SessionInfo<'_>, term: &mut Term) -> io::Result<()> {
-        let root = self.tabs.root();
-        // A tab already dying keeps its earlier death instant, so a child that
-        // died just before the clear is not given a fresh full window.
-        self.tabs.retire_all();
-        // `route_submit` cancels the in-flight response, but the unbounded bus
-        // still holds whatever the worker emitted before the streaming select
-        // noticed the flag — one `wait_for_cancel` poll, ~50 ms.
-        self.root_clear_drain = true;
-        if let Some(sb) = self.tabs.scrollback_mut(root) {
-            sb.reset();
-        }
-        self.total_usage = Usage::default();
-        self.gesture.clear_selection();
-        // Queued prompts and undrained wakeups belong to the old context.
-        self.inbox.clear();
-        self.banner(term, info)
-    }
-
-    /// The dying-tab guard and the `/clear` drain gate, shared by every
-    /// entry point a `Signal` reaches `App` through ([`Self::fact`],
-    /// [`Self::transient`]).
-    ///
-    /// A tab in the linger window is frozen: it still renders its final frame
-    /// and ages out, but no further event belongs in it, so a worker
-    /// cancelled by `/clear` cannot paint into the rebuilt session. And past
-    /// a `/clear`, everything before the acknowledgement is cancelled-exchange
-    /// residue, everything after it is new context — `disarm` is whether this
-    /// particular occurrence is that acknowledgement (`Transient::Cleared`, or
-    /// a fresh prompt arriving as a `Display::Prompt` fact when the ack itself
-    /// was lost).
-    fn admits(&mut self, id: AgentId, disarm: bool) -> bool {
-        if self.tabs.lingering(id) {
-            return false;
-        }
-        if id == self.tabs.root() && self.root_clear_drain {
-            if disarm {
-                self.root_clear_drain = false;
-            } else {
-                return false;
-            }
-        }
-        true
-    }
-
     /// Fold one witnessed record fact into the screen — the sole way a
     /// `Display`/`Forensic` commit reaches it.  The recording scrollback steps
     /// its own fold-memo and draws what the step reports
     /// ([`Scrollback::fact`]);
-    /// [`Display::SubagentDone`] always lands in root's scrollback, whatever
-    /// nesting depth drained the result, since the trunk is the permanent
-    /// record of delegated work.
+    /// [`Display::SubagentDone`] always lands in its tree's root scrollback,
+    /// whatever nesting depth drained the result, since the root is the
+    /// permanent record of delegated work.  A tab in the linger window is
+    /// frozen: it still renders its final frame and ages out, but no further
+    /// event belongs in it.
     pub fn fact(&mut self, id: AgentId, rec: &Recorded<Record>) {
-        if !self.admits(
-            id,
-            matches!(rec.value(), Record::Display(Display::Prompt { .. })),
-        ) {
+        if self.tabs.lingering(id) {
             return;
         }
         // The fleet-wide running sum is a different quantity from a session's
@@ -315,7 +248,7 @@ impl App {
             self.total_usage += u;
         }
         let target = match rec.value() {
-            Record::Display(Display::SubagentDone { .. }) => self.tabs.root(),
+            Record::Display(Display::SubagentDone { .. }) => self.tabs.root_of(id),
             _ => id,
         };
         self.with_scrollback(target, |sb| sb.fact(rec));
@@ -327,14 +260,7 @@ impl App {
     /// `Scrollback` cannot see, so they are answered here; everything else
     /// forwards to [`Scrollback::transient`] on the recording scrollback.
     pub fn transient(&mut self, id: AgentId, t: Transient, bus: &BusReceiver) {
-        // A `Cleared` answering *our* `/clear` is the gate's key and nothing
-        // more: [`Self::clear`] already blanked the scrollback and redrew the
-        // banner at the keystroke, and the drain kept the interval empty, so
-        // wiping again here would only cost the banner.  A `Cleared` this
-        // frontend did not author finds no armed gate and blanks as ever.
-        let cleared = matches!(t, Transient::Cleared);
-        let ours = cleared && id == self.tabs.root() && self.root_clear_drain;
-        if !self.admits(id, cleared) || ours {
+        if self.tabs.lingering(id) {
             return;
         }
         match t {
@@ -342,19 +268,69 @@ impl App {
                 log_dir,
                 name,
                 parent,
-            } => {
-                #[allow(
-                    clippy::cast_possible_truncation,
-                    reason = "modulus by AGENT_HUES.len() yields 0..6, fits u8"
-                )]
-                let agent_slot = AgentSlot((self.tabs.len() % AGENT_HUES.len()) as u8);
-                self.tabs.born(id, &log_dir, name, parent, agent_slot);
-            }
-            // Root never enters the linger window; it outlives the session.
+                resumed,
+                recorder,
+            } => self.born(id, &log_dir, name, parent, recorder, resumed),
             Transient::Died => self.tabs.died(id),
+            // The agent has rebuilt itself: its descendants are cancelled and
+            // its view starts over, under a fresh card.
+            Transient::Cleared => {
+                self.tabs.retire_subtree(id);
+                self.with_scrollback(id, Scrollback::reset);
+                self.gesture.clear_selection();
+                self.open(id);
+            }
             Transient::Resources { card, .. } => self.frontend_resources(id, card, bus),
             Transient::Limits { card } => self.push_chrome(id, Chrome::Framed(card)),
             other => self.with_scrollback(id, |sb| sb.transient(&other)),
+        }
+    }
+
+    /// Open a tab, and for a root its session: the card, and a resumed
+    /// session's replayed record, spend and boundary note.
+    fn born(
+        &mut self,
+        id: AgentId,
+        log_dir: &Path,
+        name: String,
+        parent: Option<AgentId>,
+        recorder: Recorder,
+        resumed: Option<Resumed>,
+    ) {
+        self.tabs
+            .born(id, log_dir, name, parent, recorder, resumed.is_some());
+        if parent.is_some() {
+            return;
+        }
+        self.open(id);
+        if let Some(resumed) = resumed {
+            self.replay(id, log_dir, resumed);
+        }
+    }
+
+    fn open(&mut self, id: AgentId) {
+        self.push_chrome(id, Chrome::Opening(self.opening.clone()));
+    }
+
+    /// Fold `log_dir`'s record into `id`'s scrollback, so the note below is
+    /// the boundary: everything ahead of it is replayed history, everything
+    /// after is the live session.  The boundary is chrome, never recorded: a
+    /// second resume must not replay a prior one's note as history.
+    fn replay(&mut self, id: AgentId, log_dir: &Path, Resumed { turn, bytes }: Resumed) {
+        let record = log_dir.join("record.jsonl");
+        match crate::record::replay::<crate::record::View>(
+            &record,
+            crate::record::Blocks::default(),
+        ) {
+            Ok(blocks) => {
+                self.total_usage += blocks.usage();
+                self.with_scrollback(id, |sb| sb.seed(blocks));
+                self.push_note(
+                    id,
+                    &format!("resumed: {turn} turns, {} KB", bytes.div_ceil(1024)),
+                );
+            }
+            Err(e) => self.push_error(id, &format!("record.jsonl did not replay cleanly: {e}")),
         }
     }
 
@@ -468,16 +444,20 @@ impl App {
             // Up/Down walk history only from the prompt's edge rows; mid-text in
             // a multi-line draft they fall through and move the cursor. On an
             // empty prompt, Up dequeues the whole queued run back for revision.
-            KeyCode::Up if self.tabs.focused() == self.tabs.root() && k.modifiers.is_empty() => {
+            KeyCode::Up if can_edit && k.modifiers.is_empty() => {
                 if self.prompt_state.row() == 0 {
-                    if !self.prompt_state.edit_queued_prompt(&self.inbox) {
+                    let recalled = self
+                        .tabs
+                        .focused_agent()
+                        .is_some_and(|agent| self.prompt_state.edit_queued_prompt(&agent.mailbox));
+                    if !recalled {
                         self.prompt_state.history_prev();
                     }
                 } else {
                     self.prompt_state.edit_input(k);
                 }
             }
-            KeyCode::Down if self.tabs.focused() == self.tabs.root() && k.modifiers.is_empty() => {
+            KeyCode::Down if can_edit && k.modifiers.is_empty() => {
                 let last_row = self.prompt_state.row_count().saturating_sub(1);
                 if self.prompt_state.row() == last_row {
                     self.prompt_state.history_next();
@@ -543,8 +523,7 @@ impl App {
     }
 
     /// Flush every scrollback — live, dying, or aged-out — to its session's
-    /// `user.log`. Returns the paths root first, then subagents in dispatch
-    /// order, stable across runs.
+    /// `user.log`. Returns the paths in id order, stable across runs.
     pub fn flush_logs(&mut self) -> io::Result<Vec<PathBuf>> {
         self.tabs
             .views_mut()
@@ -569,13 +548,6 @@ impl App {
             .scrollback_mut(focused)
             .expect("focused tab always has a scrollback");
         Ok(sb.flush_log()?.to_path_buf())
-    }
-
-    pub fn banner(&mut self, term: &mut Term, s: &crate::SessionInfo<'_>) -> io::Result<()> {
-        if let Some(sb) = self.tabs.scrollback_mut(self.tabs.root()) {
-            sb.push_chrome(Chrome::Opening(banner::session_card(s)));
-        }
-        draw(self, term)
     }
 }
 

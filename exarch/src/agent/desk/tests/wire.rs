@@ -15,7 +15,6 @@ use crate::test_helper::spawn_engine_on;
 use ral_core::seed::{Sealed, seal};
 use ral_core::types::NurseryId;
 use std::os::unix::net::UnixStream;
-use std::sync::Mutex;
 use std::sync::Mutex as StdMutex;
 
 /// Each log takes the next session id, so two of them are never the same
@@ -137,7 +136,6 @@ fn wire_spawnable_desk(fuel: u32, factory: Arc<FakeFactory>) -> (ExarchDesk, Arc
             emit,
             reply: ReplyCell::default(),
             log: LogCell::new(fresh_log()),
-            branch: None,
             acts: ActFragment::default(),
         },
     };
@@ -219,33 +217,20 @@ fn wire_spawn_refuses_a_parked_fork_without_asking_the_factory() {
 }
 
 /// The seal crosses the host untouched: the engine the factory made is a
-/// child of the sealing parent, attached before the desk answers. `branch`
-/// takes the same arm as `start` but leaves the child in the order, where
-/// its seat can be probed.
+/// child of the sealing parent, attached before the desk answers.  The seat is
+/// taken straight off the desk, where it can be probed.
 #[test]
 fn a_sealed_bequest_reaches_the_child_engine() {
     let factory = FakeFactory::new(Guest::Spawns);
-    let (mut desk, _fleet, _parent_inbox) = wire_spawnable_desk(3, factory.clone());
-    let order = Arc::new(BranchOrder {
-        name: "sealed-branch".into(),
-        fork: Fork::Returning(crate::enquiry::Memory::Amnemon),
-        child: Mutex::default(),
-    });
-    desk.services.branch = Some(order.clone());
-
-    desk.ask(Request::Agents(Agents::Branch(ForkClaim::Sealed(
-        parent_seal(),
-    ))))
-    .expect("a sealed branch makes a child engine");
-    let child = order
-        .child
-        .lock()
-        .unwrap()
-        .take()
-        .expect("the branch's child");
+    let (desk, _fleet, _parent_inbox) = wire_spawnable_desk(3, factory.clone());
+    let SeatKind::Wire { engine } = &desk.services.kind else {
+        panic!("a wire desk makes its children over a wire")
+    };
+    let child = desk
+        .make_engine(engine, parent_seal())
+        .expect("a sealed bequest makes a child engine");
     assert_eq!(
         child
-            .seat
             .read(|t| t.env_var("PARENT_MARK"))
             .expect("the child engine answers a probe"),
         Some("1".to_string()),
@@ -301,7 +286,6 @@ fn identity_and_wire_peers_exchange_messages_through_one_desk() {
             emit,
             reply: ReplyCell::default(),
             log: LogCell::new(fresh_log()),
-            branch: None,
             acts: ActFragment::default(),
         },
     };

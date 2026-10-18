@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 6b801828
+generated_at_commit: d4299048
 generated_at_date: 2026-10-18
 covers_paths: [exarch/src/agent/tools.rs, exarch/src/agent/tools/, exarch/src/provider/tools.rs, exarch/src/agent/spawn.rs]
 ---
@@ -61,11 +61,12 @@ for every tool.
   model may narrate between calls without ending its turn. A record failure is
   a seam fault, not a tool error: the model still gets its acknowledgement.
 - **`agent/spawn.rs`** — not a tool module but the
-  fork-spawn-register spine every launch shares: `spawn_async`, `AsyncSpawn`,
-  `SpawnedChild`. Both `/branch`'s `spawn_branch` and the desk's
+  spawn spine every launch shares: `spawn_async`, `AsyncSpawn`,
+  `SpawnedChild`. The attended roots (`main`, a resumed one, a `/new` or
+  `/branch` root hatched by `spawn_root`) and the desk's
   `` exarch-agents `start `` handler build on it — either arm of it, in-process or
-  across a wire — so `/branch` and the harness spawn verb share one
-  mechanism ([[design/agents|agents]], [[map/exarch/agent|agent]]).
+  across a wire — so a root and a harness-spawned child run one mechanism
+  ([[design/agents|agents]], [[map/exarch/agent|agent]]).
 
 The harness verbs are answered by the `ExarchDesk` (`exarch/src/agent/desk.rs`),
 installed per `ral` call and reached through `shell.enquire(...)` from the

@@ -1,13 +1,12 @@
-//! Where every [`Avatar`] comes from and how it ends: `root`, `resume` and
-//! `for_test` build a trunk, `fork` and `branch` a child, all through
+//! Where every [`Avatar`] comes from and how it ends: `root`, `resume`, `hatch`
+//! and `for_test` build a root, `child_of` a returning child, all through
 //! `assemble` and its [`Build`] bundle. `clear` rebuilds a node's context in
 //! place rather than ending it; `Drop` is the one exit every life takes.
 
 use crate::agent::EngineLost;
-use crate::agent::desk::Fork;
 use crate::agent::factory::Factory;
-use crate::agent::fleet::{AGENT_LEASE_IDLE, Fleet, Launch, Unborn};
-use crate::agent::index::{BuiltinIndex, Grants};
+use crate::agent::fleet::{AGENT_LEASE_IDLE, Fleet, Genesis, Launch, Unborn};
+use crate::agent::index::BuiltinIndex;
 use crate::agent::seat::Seat;
 use crate::agent::{
     Agent, Avatar, Birth, LogCell, ProviderHandle, Readings, ReplyCell, Role, SPAWN_FUEL,
@@ -17,15 +16,13 @@ use crate::bus::{Emitter, Inbox};
 use crate::provider::Provider;
 use crate::provider::Toolset;
 use crate::record::AgentId;
-use crate::record::{AgentLog, RecordedAccount, RecordedModel, Resumed};
+use crate::record::{AgentLog, Memory, RecordedAccount, RecordedModel, Resumed};
 use ral_core::carrier::Severed;
 use ral_core::engine::EngineInstaller;
-use ral_core::protocol::{Ending, Report};
-use ral_core::sync::LockExt;
 use std::io;
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub(crate) fn fresh_id() -> AgentId {
@@ -35,28 +32,18 @@ pub(crate) fn fresh_id() -> AgentId {
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
 fn seed_id_counter(sessions_root: &Path) -> io::Result<()> {
-    let max = match std::fs::read_dir(sessions_root) {
-        Ok(entries) => entries
-            .filter_map(Result::ok)
-            .filter_map(|entry| {
-                entry.file_type().ok().filter(std::fs::FileType::is_dir)?;
-                entry.file_name().to_str()?.parse::<u64>().ok()
-            })
-            .max()
-            .unwrap_or(0),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => 0,
-        Err(error) => return Err(error),
-    };
-    NEXT_ID.fetch_max(max.saturating_add(1), Ordering::Relaxed);
+    if let Some(last) = AgentLog::session_ids(sessions_root)?.last() {
+        NEXT_ID.fetch_max(last.get().saturating_add(1), Ordering::Relaxed);
+    }
     Ok(())
 }
 
-/// The trunk's fleet name, and so the label its tab carries: the frontend reads
-/// the root tab's name off the agent, which is what lets `/focus` resolve the
-/// trunk by the same name every other agent answers to.
+/// The first root's fleet name, and so the label its tab carries: the frontend
+/// reads a tab's name off the agent, which is what lets `/focus` resolve it by
+/// the same name every other agent answers to.
 const TRUNK_NAME: &str = "main";
 
-/// The note a resumed trunk's model reads first: what the record kept, and
+/// The note a resumed root's model reads first: what the record kept, and
 /// what died with the process.
 const RESUME_NOTE: &str = "session resumed from disk; the shell is fresh: bindings, workers, and \
     cwd from before are gone, the scratch dir is new ($EXARCH_SCRATCH is per-pid, so scratch paths \
@@ -64,13 +51,10 @@ const RESUME_NOTE: &str = "session resumed from disk; the shell is fresh: bindin
     and exarch-schedules `list to confirm), and any sub-agents from before have ended.";
 
 /// What `Avatar::assemble` needs: the node's own bits, and the fleet it joins.
-/// Fields are `pub(crate)` because a desk handler builds every child's literal
-/// from its captured `HostServices`, where the adopted fork is seated.
 pub(crate) struct Build {
-    /// The tab-bar identity — known to every caller before construction, `/branch`'s
-    /// and `` exarch-agents `start ``'s own choice reached down to here.
+    /// The tab-bar identity: known to every caller before construction.
     pub(crate) name: String,
-    /// The launch's template resolved for this node's own [`Grants`] — what
+    /// The launch's template resolved for this node's own grants — what
     /// reaches the model.  The caller resolves it because the log's
     /// `SessionStarted` bookend records the resolved length, and the log must
     /// exist before the agent it describes does.
@@ -84,36 +68,11 @@ pub(crate) struct Build {
     pub(crate) fuel: u32,
     pub(crate) provider: ProviderHandle,
     pub(crate) search: bool,
-    /// Fresh for the trunk, the parent's clone for a fork: one fleet per run.
+    /// One fleet per run, shared by every root and child.
     pub(crate) fleet: Arc<Fleet>,
 }
 
-/// Long enough for a fork, never a turn's worth of wall.
-const BRANCH_TIMEOUT_SECS: u64 = 30;
-
-/// A run's refusal in its own words; `None` for one that settled.
-fn refusal(report: Report) -> Option<String> {
-    match report {
-        Report::Ran {
-            ending: Ending::Settled { .. },
-            ..
-        } => None,
-        Report::Ran {
-            ending:
-                Ending::Raised { rendered, .. }
-                | Ending::Stopped { rendered, .. }
-                | Ending::Unreturnable { rendered, .. },
-            ..
-        }
-        | Report::Static { rendered, .. } => Some(rendered),
-        Report::Ran {
-            ending: Ending::Exited(status),
-            ..
-        } => Some(format!("the fork's run exited with status {status}")),
-    }
-}
-
-/// How a trunk is driven — which fixes whether it holds `reply` and whom it
+/// How a root is driven — which fixes whether it holds `reply` and whom it
 /// waits for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Trunk {
@@ -128,61 +87,60 @@ pub enum Trunk {
 }
 
 impl Trunk {
-    fn role(self) -> Role {
+    pub(crate) fn role(self) -> Role {
         match self {
             Self::Headless => Role::Headless,
             Self::Attended | Self::Embedded => Role::Converses,
         }
     }
 
-    fn attended(self) -> bool {
+    pub(crate) fn attended(self) -> bool {
         matches!(self, Self::Attended)
     }
 }
 
-/// Everything a trunk needs beyond the seat choice and the provider.
+/// Everything a run's roots need beyond the seat choice and the provider.
 pub struct RootConfig {
     pub system: String,
     pub caps: ral_core::capability::GrantStack,
     /// The run's directory — the one its `sessions/` hangs under, and the
     /// one [`Avatar::resume`] reads back.
     pub run_dir: std::path::PathBuf,
-    pub account: RecordedAccount,
     pub trunk: Trunk,
     /// What requests advertise; empty for `--chat`, whose prompt then takes
     /// no builtin surface at all.
     pub tools: Toolset,
     pub allow_schedule: bool,
     /// Whether a turn refused until a reset past the in-place wait is resumed
-    /// there by a harness wakeup. Only exarch's terminal trunk sets it: a
+    /// there by a harness wakeup. Only exarch's terminal roots set it: a
     /// headless run fails fast, synod's exchange ends on the refusal, and a
     /// child fails up to its parent.
     pub resume_on_reset: bool,
     pub disk_warn_bytes: Option<u64>,
-    /// The depth budget this trunk starts with — `SPAWN_FUEL`, the one
-    /// figure both products' trunks carry: every agent may delegate, and an
+    /// The depth budget every root starts with — `SPAWN_FUEL`, the one
+    /// figure both products' roots carry: every agent may delegate, and an
     /// exchange or a chain of forks ends only once the whole tree does.
     pub fuel: u32,
-    /// The network policy, whose `search` verdict is the trunk's reach and
+    /// The network policy, whose `search` verdict is every root's reach and
     /// the ceiling every fork narrows under.
     pub egress: crate::egress::Egress,
-    /// Where a wire trunk gets its helper engines; `None` for every identity
-    /// trunk. A wire trunk built with `fuel > 0` and no factory is refused
+    /// Where a wire root gets its helper engines; `None` for every identity
+    /// root. A wire root built with `fuel > 0` and no factory is refused
     /// here — never a runtime surprise reached only once a model calls
     /// `agent`.
     pub factory: Option<Arc<dyn Factory>>,
-    /// Where this trunk's providers come from, shared by every fork.  A host
+    /// Where this run's providers come from, shared by every fork.  A host
     /// that mints no providers of its own passes
     /// [`Bureau::Scripted`](crate::provider::Bureau::Scripted).
     pub bureau: Arc<crate::provider::Bureau>,
 }
 
-/// Where the trunk's engine lives — the trunk constructors' one
+/// Where the first root's engine lives — the root constructors' one
 /// construction-time choice.
 pub enum RootSeat {
     /// In-process, over an identity transport. `cwd` is stated rather than
     /// read from the process, since a GUI host has no per-conversation
-    /// process directory to chdir into; the scratch is the session's, and
+    /// process directory to chdir into; the scratch is the run's, and
     /// outlives every `/clear`.
     Identity {
         scratch: Arc<Scratch>,
@@ -197,6 +155,106 @@ pub enum RootSeat {
         transport: Box<ral_core::carrier::WireTransport>,
         attach: ral_core::protocol::Attach,
     },
+}
+
+impl Fleet {
+    /// Found a run's fleet: seat its first root's engine, read the builtin
+    /// index and `$EXARCH_SCRATCH` off it, and settle the [`Launch`] every
+    /// later root and child is made from.  The seat comes back for the caller
+    /// to [`Avatar::hatch`] the first root on.
+    ///
+    /// # Errors
+    /// A wire seat with spawn fuel and no engine factory, or a start failure
+    /// of the engine.
+    pub(crate) fn found(
+        cfg: RootConfig,
+        root_seat: RootSeat,
+        first: AgentId,
+        installers: &'static [EngineInstaller],
+        lease: Duration,
+    ) -> io::Result<(Arc<Self>, Seat)> {
+        let RootConfig {
+            system,
+            caps,
+            run_dir,
+            trunk,
+            tools,
+            allow_schedule,
+            resume_on_reset,
+            disk_warn_bytes,
+            fuel,
+            egress,
+            factory,
+            bureau,
+        } = cfg;
+        // Stated, not discovered by a model calling `agent`: a fuelled wire
+        // root with no engine factory to make helpers with cannot ever answer
+        // `` exarch-agents `start ``'s wire arm, so refuse the construction itself.
+        if matches!(&root_seat, RootSeat::Wire { .. }) && fuel > 0 && factory.is_none() {
+            return Err(io::Error::other(
+                "a wire root with spawn fuel needs an engine factory to make helper engines with: \
+                 pass one via RootConfig::factory, or build this root with fuel: 0",
+            ));
+        }
+        let sessions_root = run_dir.join("sessions");
+        // A root's attach: nothing has run here yet, so this is a start
+        // failure and says so, and it names the run directory it has just
+        // made — which is where the engine's own output was captured, if
+        // anything was. Carried whole, not flattened: synod downcasts this to
+        // tell a dead engine from a log directory it could not make, and only
+        // the former has a guest console worth saving.
+        let lost = |s: Severed| io::Error::other(EngineLost::starting(&s, Some(&run_dir)));
+        let (seat, genesis) = match root_seat {
+            RootSeat::Identity {
+                scratch,
+                cwd,
+                terminal,
+            } => {
+                let genesis = Genesis {
+                    installers,
+                    cwd,
+                    terminal,
+                    scratch,
+                };
+                let seat = genesis
+                    .seat(&AgentLog::dir_of(&sessions_root, first))
+                    .map_err(lost)?;
+                (seat, Some(genesis))
+            }
+            RootSeat::Wire { transport, attach } => {
+                (Seat::wire(*transport, attach).map_err(lost)?, None)
+            }
+        };
+        let index = BuiltinIndex::resolve(seat.read(|t| t.builtin_names()).map_err(lost)?);
+        let scratch_var = crate::app::EXARCH.scratch_var();
+        let scratch = seat
+            .read(|t| t.env_var(&scratch_var))
+            .map_err(lost)?
+            .ok_or_else(|| io::Error::other(format!("the engine names no ${scratch_var}")))?;
+        let fleet = Self::new(
+            Launch {
+                trunk,
+                allow_schedule,
+                resume_on_reset,
+                tools,
+                disk_warn_bytes,
+                factory,
+                bureau,
+                system: system
+                    .replace(crate::prompt::SCRATCH_PLACEHOLDER, &scratch)
+                    .into(),
+                index,
+                caps,
+                fuel,
+                // The policy's one verdict the tree reads; the ledger is the host's.
+                search: egress.policy.search,
+                sessions_root,
+                genesis,
+            },
+            lease,
+        );
+        Ok((fleet, seat))
+    }
 }
 
 impl Avatar {
@@ -248,38 +306,36 @@ impl Avatar {
         })
     }
 
-    /// The trunk — the root of a fresh fleet, over a fresh session log.
+    /// The first root of a fresh fleet, over a fresh session log.
     ///
     /// # Errors
-    /// If the trunk's session directory or its record cannot be opened, or
+    /// If the root's session directory or its record cannot be opened, or
     /// its engine is lost before it starts.
     pub fn root(cfg: RootConfig, seat: RootSeat, provider: Arc<Provider>) -> io::Result<Self> {
-        let id = fresh_id();
-        Self::trunk(
+        Self::first(
+            fresh_id(),
             cfg,
             seat,
             provider,
-            id,
             &crate::INSTALLERS,
             AGENT_LEASE_IDLE,
-            |sessions, model, account, bytes| {
-                AgentLog::root(sessions, id, model, account, bytes).map(|log| (log, ()))
-            },
         )
-        .map(|(avatar, ())| avatar)
     }
 
-    /// The trunk, over session 0's record in `cfg.run_dir` replayed: the
-    /// model's context survives, the shell is fresh and is told so.
+    /// Every root of `cfg.run_dir` that was not `/close`d, over its record
+    /// replayed: each model's context survives, each shell is fresh and is
+    /// told so.  The first is seated by the fleet's founding, the rest by its
+    /// genesis.
     ///
     /// # Errors
-    /// A chat trunk, which keeps no resumable history; a wire seat, whose
-    /// engine process is gone; or whatever [`Self::root`] refuses.
+    /// A chat run, which keeps no resumable history; a wire seat, whose
+    /// engine process is gone; a run with no open session; or whatever
+    /// [`Self::root`] refuses.
     pub fn resume(
         cfg: RootConfig,
         seat: RootSeat,
-        provider: Arc<Provider>,
-    ) -> io::Result<(Self, Resumed)> {
+        provider: &Arc<Provider>,
+    ) -> io::Result<Vec<(Self, Resumed)>> {
         if cfg.tools.is_empty() {
             return Err(io::Error::other(
                 "cannot resume a chat session: chat keeps no resumable harness history",
@@ -290,17 +346,45 @@ impl Avatar {
                 "--resume is unavailable for a wire seat: the engine process is gone; resume an identity session instead",
             ));
         }
-        seed_id_counter(&cfg.run_dir.join("sessions"))?;
+        let sessions_root = cfg.run_dir.join("sessions");
+        seed_id_counter(&sessions_root)?;
+        let live = AgentLog::live_roots(&sessions_root)?;
+        let Some(&(first, _)) = live.first() else {
+            return Err(io::Error::other(format!(
+                "cannot resume {}: no session is open there; were they all closed with /close?",
+                cfg.run_dir.display()
+            )));
+        };
+        let (fleet, first_seat) =
+            Fleet::found(cfg, seat, first, &crate::INSTALLERS, AGENT_LEASE_IDLE)?;
+        let mut first_seat = Some(first_seat);
+        live.into_iter()
+            .map(|(id, name)| {
+                let seat = match first_seat.take() {
+                    Some(seat) => seat,
+                    None => fleet.launch.seat(id)?,
+                };
+                Self::reopen(&fleet, seat, id, &name, provider.clone())
+            })
+            .collect()
+    }
+
+    /// Session `id`'s root, over its record replayed.
+    fn reopen(
+        fleet: &Arc<Fleet>,
+        seat: Seat,
+        id: AgentId,
+        name: &str,
+        provider: Arc<Provider>,
+    ) -> io::Result<(Self, Resumed)> {
         let live = provider.clone();
-        let (avatar, resumed) = Self::trunk(
-            cfg,
+        let (avatar, resumed) = Self::hatch(
+            fleet,
             seat,
+            name,
             provider,
-            AgentId::new(0),
-            &crate::INSTALLERS,
-            AGENT_LEASE_IDLE,
             |sessions, _, account, bytes| {
-                let mut log = AgentLog::resume(sessions, AgentId::new(0))?;
+                let mut log = AgentLog::resume(sessions, id)?;
                 let resumed = log.resumed_summary();
                 if let Some((model, window)) = log.learned_window()
                     && model == live.model()
@@ -324,130 +408,130 @@ impl Avatar {
         Ok((avatar, resumed))
     }
 
-    /// Seat the trunk's engine, resolve its prompt against it, open its log
-    /// through `open` — which may hand back a fact of the opening beside it —
-    /// and found the fleet around it.
-    fn trunk<T>(
-        cfg: RootConfig,
-        root_seat: RootSeat,
-        provider: Arc<Provider>,
+    /// A fresh fleet's first root, session `id` under the name `main`.
+    fn first(
         id: AgentId,
+        cfg: RootConfig,
+        seat: RootSeat,
+        provider: Arc<Provider>,
         installers: &'static [EngineInstaller],
         lease: Duration,
+    ) -> io::Result<Self> {
+        let (fleet, seat) = Fleet::found(cfg, seat, id, installers, lease)?;
+        Self::hatch(
+            &fleet,
+            seat,
+            TRUNK_NAME,
+            provider,
+            |sessions, model, account, bytes| {
+                AgentLog::root(sessions, id, TRUNK_NAME, model, account, bytes).map(|log| (log, ()))
+            },
+        )
+        .map(|(avatar, ())| avatar)
+    }
+
+    /// A root of `fleet` on `seat` under `name`: its prompt resolved against
+    /// its own grants, its log opened through `open` — which may hand back a
+    /// fact of the opening beside it — and its launch recipe read off the
+    /// fleet.
+    ///
+    /// # Errors
+    /// A name the fleet refuses, a severed engine, a log that will not open,
+    /// or whatever `open` refuses.  The refusal comes before the log exists,
+    /// so a refused name leaves no session behind.
+    pub(crate) fn hatch<T>(
+        fleet: &Arc<Fleet>,
+        seat: Seat,
+        name: &str,
+        provider: Arc<Provider>,
         open: impl FnOnce(&Path, &RecordedModel, &RecordedAccount, usize) -> io::Result<(AgentLog, T)>,
     ) -> io::Result<(Self, T)> {
-        let RootConfig {
-            system,
-            caps,
-            run_dir,
-            account,
-            trunk,
-            tools,
-            allow_schedule,
-            resume_on_reset,
-            disk_warn_bytes,
-            fuel,
-            egress,
-            factory,
-            bureau,
-        } = cfg;
-        // Stated, not discovered by a model calling `agent`: a fuelled wire
-        // trunk with no engine factory to make helpers with cannot ever answer
-        // `` exarch-agents `start ``'s wire arm, so refuse the construction itself.
-        if matches!(&root_seat, RootSeat::Wire { .. }) && fuel > 0 && factory.is_none() {
-            return Err(io::Error::other(
-                "a wire trunk with spawn fuel needs an engine factory to make helper engines with: \
-                 pass one via RootConfig::factory, or build this trunk with fuel: 0",
-            ));
-        }
-        let sessions_root = run_dir.join("sessions");
-        // A trunk's attach: nothing has run here yet, so this is a start
-        // failure and says so, and it names the run directory it has just
-        // made — which is where the engine's own output was captured, if
-        // anything was. Carried whole, not flattened: synod downcasts this to
-        // tell a dead engine from a log directory it could not make, and only
-        // the former has a guest console worth saving.
-        let lost = |s: Severed| io::Error::other(EngineLost::starting(&s, Some(&run_dir)));
-        let seat = match root_seat {
-            RootSeat::Identity {
-                scratch,
-                cwd,
-                terminal,
-            } => Seat::root(
-                installers,
-                cwd,
-                terminal,
-                scratch,
-                &AgentLog::dir_of(&sessions_root, id),
-            )
-            .map_err(lost)?,
-            RootSeat::Wire { transport, attach } => Seat::wire(*transport, attach).map_err(lost)?,
-        };
-        let index = BuiltinIndex::resolve(seat.read(|t| t.builtin_names()).map_err(lost)?);
-        let scratch_var = crate::app::EXARCH.scratch_var();
-        let scratch = seat
-            .read(|t| t.env_var(&scratch_var))
-            .map_err(lost)?
-            .ok_or_else(|| io::Error::other(format!("the engine names no ${scratch_var}")))?;
-        let system: Arc<str> = system
-            .replace(crate::prompt::SCRATCH_PLACEHOLDER, &scratch)
-            .into();
-        let own =
-            crate::prompt::with_grant(&system, &seat.read(|t| t.grants()).map_err(lost)?, &caps);
-        let role = trunk.role();
-        // Chat advertises no tool, so its prompt takes no builtin surface at
-        // all — no index, no taught section, the bare stand-in verbatim.
-        let system_prompt = if tools.is_empty() {
-            own
-        } else {
-            index.apply(
-                &own,
-                &Grants {
-                    role: &role,
-                    allow_schedule,
-                    spawns: fuel > 0,
-                },
-                TRUNK_NAME,
-            )
-        };
+        let launch = &fleet.launch;
+        fleet
+            .vacant(name)
+            .map_err(|why| io::Error::other(why.to_string()))?;
+        let role = launch.trunk.role();
+        let system_prompt = launch
+            .prompt_for(&seat, &launch.caps, &role, launch.fuel, name)
+            .map_err(|lost| {
+                io::Error::other(EngineLost::starting(&lost, launch.sessions_root.parent()))
+            })?;
+        let account = RecordedAccount::of(provider.account(), &launch.bureau.available());
         let (log, opened) = open(
-            &sessions_root,
+            &launch.sessions_root,
             &RecordedModel::of(&provider),
             &account,
             system_prompt.len(),
         )?;
-        // The policy's one verdict the tree reads; the ledger is the host's.
-        let search = egress.policy.search;
-        let fleet = Fleet::new(
-            Launch {
-                attended: trunk.attended(),
-                allow_schedule,
-                resume_on_reset,
-                tools,
-                disk_warn_bytes,
-                factory,
-                bureau,
-                system,
-                index,
-            },
-            lease,
-        );
-        // A brand-new fleet, so this can never collide or find its rootless
-        // self dead.
         let avatar = Self::assemble(Build {
-            name: TRUNK_NAME.to_string(),
+            name: name.to_string(),
             system_prompt,
-            caps,
+            caps: launch.caps.clone(),
+            seat,
+            log,
+            role,
+            fuel: launch.fuel,
+            provider: ProviderHandle::new(provider),
+            search: launch.search,
+            fleet: fleet.clone(),
+        })
+        .map_err(|why| io::Error::other(why.to_string()))?;
+        Ok((avatar, opened))
+    }
+
+    /// A returning child of `parent`, seated on `seat`: its fuel one less,
+    /// its prompt resolved against its own grants, its log forked off
+    /// `parent_log`, and — for a `mnemon` — carrying the parent's context.
+    ///
+    /// # Errors
+    /// A severed engine, a log that will not fork, or whatever
+    /// [`Fleet::enrol`] refuses; in words that read after "refused:".
+    pub(crate) fn child_of(
+        parent: &Arc<Agent>,
+        parent_log: &AgentLog,
+        fleet: &Arc<Fleet>,
+        name: String,
+        seat: Seat,
+        provider: Arc<Provider>,
+        memory: Memory,
+    ) -> Result<Self, String> {
+        let launch = &fleet.launch;
+        let fuel = parent.fuel.saturating_sub(1);
+        let role = Role::child(parent);
+        // Against the *child's* grants, never the parent's, so the opening
+        // bookend records the child's real system length.  Its grant layer
+        // was resolved in its own engine, so only that engine can name it.
+        let system_prompt = launch
+            .prompt_for(&seat, &parent.caps, &role, fuel, &name)
+            .map_err(|lost| EngineLost::starting(&lost, parent.run_dir()).to_string())?;
+        let account = RecordedAccount::of(provider.account(), &launch.bureau.available());
+        let mut log = parent_log
+            .fork(
+                fresh_id(),
+                &name,
+                system_prompt.len(),
+                &RecordedModel::of(&provider),
+                &account,
+            )
+            .map_err(|e| format!("could not fork child session log: {e}"))?;
+        if memory == Memory::Mnemon {
+            log.import_context(parent_log.inherited_context())?;
+        }
+        Self::assemble(Build {
+            name,
+            system_prompt,
+            // The child's engine holds its own layer; the stack it runs under
+            // is its parent's.
+            caps: parent.caps.clone(),
             seat,
             log,
             role,
             fuel,
             provider: ProviderHandle::new(provider),
-            search,
-            fleet,
+            search: parent.search,
+            fleet: fleet.clone(),
         })
-        .expect("a fresh fleet's trunk is born unrefused");
-        Ok((avatar, opened))
+        .map_err(|why| why.to_string())
     }
 
     pub(crate) fn clear(&mut self) -> io::Result<()> {
@@ -500,60 +584,25 @@ impl Avatar {
         self.fork_named(&format!("fork-{}", SEQ.fetch_add(1, Ordering::Relaxed)))
     }
 
-    /// A returning fork under a chosen name, for a test that goes on to name
-    /// the child in an assertion.
+    /// A returning child under a chosen name, for a test that goes on to
+    /// name it in an assertion.  Seated fresh on the genesis, like every
+    /// root, so it carries none of this shell's state.
     #[cfg(test)]
     pub(crate) fn fork_named(&self, name: &str) -> Result<Self, String> {
-        let (emit, _rx) = crate::bus::dummy_emitter();
-        self.fork_with(
+        let seat = self
+            .fleet
+            .launch
+            .seat(self.agent.id)
+            .map_err(|e| e.to_string())?;
+        Self::child_of(
+            &self.agent,
+            &self.log.borrow(),
+            &self.fleet,
             name.to_string(),
-            Fork::Returning(crate::enquiry::Memory::Amnemon),
-            &emit,
+            seat,
+            self.agent.current_provider(),
+            Memory::Amnemon,
         )
-    }
-
-    /// Fork a conversing child under `name`: the creator's context and
-    /// authority verbatim, but `reply` withheld, so it parks for the human
-    /// instead of returning a value.
-    ///
-    /// # Errors
-    /// Whatever [`Self::fork_with`] refuses.
-    pub(crate) fn branch(&self, name: String, emit: &Emitter) -> Result<Self, String> {
-        self.fork_with(name, Fork::Conversing, emit)
-    }
-
-    /// A child of this agent, forked by its own engine the way a spawn is —
-    /// `_exarch-branch`, answered by the desk — so no shell ever crosses here.
-    fn fork_with(&self, name: String, fork: Fork, emit: &Emitter) -> Result<Self, String> {
-        let lost = |s: Severed| EngineLost::running(&s, self.agent.run_dir()).to_string();
-        let order = Arc::new(crate::agent::desk::BranchOrder {
-            name,
-            fork,
-            child: Mutex::default(),
-        });
-        let mut services = self.host_services(emit);
-        services.branch = Some(order.clone());
-        let host = Arc::new(crate::agent::desk::RunHost {
-            desk: crate::agent::desk::ExarchDesk { services },
-            apply: crate::shell_eval::surface::SurfaceApplier::new(self.recorder()),
-        });
-        let report = crate::shell_eval::run_shell(
-            self.seat.transport(),
-            &self.agent.caps,
-            "/branch",
-            "_exarch-branch",
-            BRANCH_TIMEOUT_SECS,
-            host,
-        )
-        .map_err(lost)?;
-        if let Some(why) = refusal(report) {
-            return Err(why);
-        }
-        order
-            .child
-            .lock_ignore_poison()
-            .take()
-            .ok_or_else(|| "the engine forked, but the desk was never asked to take it up".into())
     }
 
     /// Seed a freshly forked child's inbox with its launch prompt — the spawn
@@ -604,7 +653,6 @@ impl Avatar {
             system,
             caps: ral_core::capability::GrantStack::root(),
             run_dir,
-            account: RecordedAccount::for_test("test"),
             trunk: Trunk::Headless,
             tools: Toolset::offered(false),
             allow_schedule,
@@ -624,18 +672,7 @@ impl Avatar {
             "test-model",
             crate::provider::scripted::Script::new(),
         ));
-        Self::trunk(
-            config,
-            seat,
-            provider,
-            id,
-            installers,
-            lease,
-            |sessions, model, account, bytes| {
-                AgentLog::root(sessions, id, model, account, bytes).map(|log| (log, ()))
-            },
-        )
-        .map(|(avatar, ())| avatar)
+        Self::first(id, config, seat, provider, installers, lease)
     }
 }
 

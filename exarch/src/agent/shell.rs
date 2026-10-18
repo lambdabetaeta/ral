@@ -132,7 +132,6 @@ impl Avatar {
             emit: emit.clone(),
             reply: self.reply.clone(),
             log: self.log.clone(),
-            branch: None,
             stamp: self.agent.mailbox.stamp(),
             // Minted here, once per `ral` call: this is the one place a call's
             // whole desk capture is built, so the fragment's extent is the call's.

@@ -12,7 +12,6 @@ fn sample(base: &'static str) -> SessionInfo<'static> {
         extend: None,
         restrict_files: &[],
         cwd: "/Users/me/projects/ral",
-        resumed: None,
     }
 }
 

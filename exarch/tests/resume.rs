@@ -10,7 +10,6 @@ use exarch::bus::{Emitter, channel};
 use exarch::provider::Provider;
 use exarch::provider::Toolset;
 use exarch::provider::scripted::{Reply, Script};
-use exarch::record::RecordedAccount;
 use exarch::record::{self, Blocks, Refusal, View};
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -54,7 +53,6 @@ fn root_config(run_dir: &Path) -> RootConfig {
         system: "system".into(),
         caps: ral_core::capability::GrantStack::root(),
         run_dir: run_dir.to_path_buf(),
-        account: RecordedAccount::for_test("test"),
         trunk: Trunk::Attended,
         tools: Toolset::offered(false),
         allow_schedule: false,
@@ -104,12 +102,15 @@ fn scripted_run_kill_resume_and_continue() {
     child.kill().expect("terminate scripted child");
     let _ = child.wait();
 
-    let (mut resumed, _) = Avatar::resume(
-        root_config(&child_dir),
-        identity_seat("resume-parent"),
-        scripted("test-model", Script::new()),
+    let [(mut resumed, _)] = <[_; 1]>::try_from(
+        Avatar::resume(
+            root_config(&child_dir),
+            identity_seat("resume-parent"),
+            &scripted("test-model", Script::new()),
+        )
+        .expect("resume child ledger"),
     )
-    .expect("resume child ledger");
+    .unwrap_or_else(|roots| panic!("one open session, got {}", roots.len()));
     assert!(resumed.is_ready());
     assert!(
         resumed

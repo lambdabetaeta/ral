@@ -61,6 +61,12 @@ so the key layer needs no split:
 > land. See [[internals/cancellation|cancellation]] and
 > [[map/exarch/agent|agent]] for the current shape.
 
+> **Superseded further.** `raise_interrupt` is deleted: no exarch shell is ever
+> foregrounded (tool runs are captured, the terminal denied), so a key has
+> nothing process-wide to raise. Esc and Ctrl-C are `Agent::interrupt` on the
+> focused agent whichever root or child it is; OS signals reach every root
+> through `signals::face`.
+
 A focused agent parks `Held`, so the tab you just interrupted is always left alive
 and steerable — the whole point. A defocused idle sub-agent you interrupt and then
 `TAB` away from still quiesces and reaps, but that is the ordinary idle-reclaim

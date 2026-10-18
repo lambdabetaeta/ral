@@ -148,7 +148,7 @@ fn ms_lease_reaping_a_child_mid_exchange_is_cancelled() {
         ..crate::agent::TestTrunk::new("system")
     })
     .unwrap();
-    let child = parent.fork_named("child-a").expect("fork child a");
+    let child = crate::agent::testkit::started_child(&parent, "child-a");
     child.agent.provider.swap(Arc::new(Provider::scripted(
         "test-model",
         Script::new().then(Reply::tool_calls(vec![ral_call(

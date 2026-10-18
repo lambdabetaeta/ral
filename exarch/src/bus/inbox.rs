@@ -184,11 +184,6 @@ impl Mailbox {
         self.shared.push(msg);
     }
 
-    /// Post a user-typed steering prompt — the TUI's `Enter`-while-busy path.
-    pub(crate) fn push_user(&self, prompt: String) {
-        self.push(Post::UserSteering(prompt));
-    }
-
     /// The fleet's delivery door for a human message: an exchange, so it
     /// stamps the clock in the same step as it delivers.
     pub(crate) fn steer(&self, text: String) {
@@ -226,6 +221,46 @@ impl Mailbox {
             .posts
             .iter()
             .any(|m| queued_wakeup_for(m, id))
+    }
+
+    /// Everything the human typed and is still waiting on, oldest first, for
+    /// the TUI's queue strip: prompts and the commands queued among them, in
+    /// the one order they were typed.  A command earns its place because it can
+    /// be the reason the rest are waiting — a rewrite holds the queue behind
+    /// it, and a strip that showed only prompts would leave that wait with no
+    /// visible cause.  Other deliveries stay invisible: they are work, not
+    /// queued human text.
+    pub(crate) fn queued_human_messages(&self) -> Vec<String> {
+        self.shared
+            .lock()
+            .posts
+            .iter()
+            .filter_map(|msg| match msg {
+                Post::UserSteering(s) => Some(s.clone()),
+                Post::Read(r) => Some(r.to_string()),
+                Post::Rewrite(r) => Some(r.to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Pull every queued user prompt back out for editing, oldest first,
+    /// wherever it sits: a prompt queued behind a wakeup is still the user's
+    /// draft, and the wakeup, left in place, is not.
+    pub(crate) fn pop_back_user_all(&self) -> Option<Vec<String>> {
+        let mut guard = self.shared.lock();
+        let q = &mut guard.posts;
+        let mut prompts: Vec<String> = Vec::new();
+        let mut kept: VecDeque<Post> = VecDeque::with_capacity(q.len());
+        while let Some(msg) = q.pop_front() {
+            match msg {
+                Post::UserSteering(s) => prompts.push(s),
+                other => kept.push_back(other),
+            }
+        }
+        *q = kept;
+        drop(guard);
+        (!prompts.is_empty()).then_some(prompts)
     }
 
     /// Mint the addressed envelope for a message composed now but pushed
@@ -310,12 +345,6 @@ impl Inbox {
         self.shared.lock().posts.is_empty()
     }
 
-    /// True once the consumer yields on an empty queue, cleared the moment a
-    /// producer enqueues work.  The chrome reads a [`Mailbox`]'s, not this.
-    pub(crate) fn waiting_for_input(&self) -> bool {
-        self.shared.waiting_for_input.load(Ordering::Acquire)
-    }
-
     /// Queue depth per source for the `/resources` fold, zeros included so the
     /// row set is stable.  One pass under the lock; nothing is drained or woken.
     pub(crate) fn source_depths(&self) -> Vec<(Source, u64)> {
@@ -326,46 +355,6 @@ impl Inbox {
             }
         }
         rows
-    }
-
-    /// Everything the human typed and is still waiting on, oldest first, for
-    /// the TUI's queue strip: prompts and the commands queued among them, in
-    /// the one order they were typed.  A command earns its place because it can
-    /// be the reason the rest are waiting — a rewrite holds the queue behind
-    /// it, and a strip that showed only prompts would leave that wait with no
-    /// visible cause.  Other deliveries stay invisible: they are work, not
-    /// queued human text.
-    pub(crate) fn queued_human_messages(&self) -> Vec<String> {
-        self.shared
-            .lock()
-            .posts
-            .iter()
-            .filter_map(|msg| match msg {
-                Post::UserSteering(s) => Some(s.clone()),
-                Post::Read(r) => Some(r.to_string()),
-                Post::Rewrite(r) => Some(r.to_string()),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// Pull every queued user prompt back out for editing, oldest first,
-    /// wherever it sits: a prompt queued behind a wakeup is still the user's
-    /// draft, and the wakeup, left in place, is not.
-    pub(crate) fn pop_back_user_all(&self) -> Option<Vec<String>> {
-        let mut guard = self.shared.lock();
-        let q = &mut guard.posts;
-        let mut prompts: Vec<String> = Vec::new();
-        let mut kept: VecDeque<Post> = VecDeque::with_capacity(q.len());
-        while let Some(msg) = q.pop_front() {
-            match msg {
-                Post::UserSteering(s) => prompts.push(s),
-                other => kept.push_back(other),
-            }
-        }
-        *q = kept;
-        drop(guard);
-        (!prompts.is_empty()).then_some(prompts)
     }
 
     /// Mid-exchange drain at a tool-call boundary: the reads to run and the

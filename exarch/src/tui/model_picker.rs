@@ -219,7 +219,9 @@ fn apply_model_switch(tui: &mut Tui, ctx: &CommandCtx<'_>, pick: &Pick) {
         tui.app
             .push_error(focused, &format!("could not persist selection: {e}"));
     }
-    ctx.recorder
+    tui.app
+        .tabs
+        .focused_recorder()
         .emit_or_report(crate::record::Forensic::ModelChanged {
             model: pick.model.clone(),
             context_window,

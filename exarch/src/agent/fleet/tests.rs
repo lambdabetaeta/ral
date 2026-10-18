@@ -425,12 +425,12 @@ fn the_summary_counts_company_and_what_is_owed() {
     );
 }
 
-/// A `/branch` child roots its own tree rather than joining its creator's:
+/// A second root roots its own tree rather than joining its creator's:
 /// the listing climbs to a root and stops, so one tab never lists another's
 /// agents, and the model's own cancel verb cannot reach them either.  Only
 /// `` `message `` crosses, by a name the human must have carried over.
 #[test]
-fn a_branch_is_a_root_outside_its_spawners_fleet() {
+fn a_second_root_is_outside_the_first_roots_tree() {
     let fleet = Fleet::for_test();
     let trunk = agent(&fleet, "trunk", None);
     let branch = agent(&fleet, "branch", None);
@@ -442,7 +442,7 @@ fn a_branch_is_a_root_outside_its_spawners_fleet() {
     assert_eq!(
         names,
         vec!["trunk".to_string()],
-        "the trunk's listing omits a branch that shares its fleet but no edge"
+        "the trunk's listing omits a root that shares its fleet but no edge"
     );
     assert!(
         trunk.descendant(&branch).is_none(),

@@ -127,8 +127,6 @@ pub struct SessionInfo<'a> {
     pub extend: Option<&'a std::path::Path>,
     pub restrict_files: &'a [std::path::PathBuf],
     pub cwd: &'a str,
-    /// What a `--resume` picked up, `None` for a fresh session.
-    pub resumed: Option<crate::record::Resumed>,
 }
 
 /// The binary's entry point, lifted into the library so integration tests can
@@ -215,6 +213,16 @@ pub fn run() -> Result<(), String> {
     boot::face_process_signals(&terminal);
     // Held for the whole run: the lock is the launcher's, not the node's.
     let (run_dir, _run_lock, resumes) = resolve_run(&cwd, c.resume)?;
+    if headless && resumes {
+        let open = record::AgentLog::live_roots(&run_dir.join("sessions"))
+            .map_err(|e| format!("could not inspect {}: {e}", run_dir.display()))?
+            .len();
+        if open != 1 {
+            return Err(format!(
+                "this run has {open} open sessions: resume it in the TUI, which reopens all of them"
+            ));
+        }
+    }
     let config_dir = app::EXARCH.xdg_dir(ral_core::path::XdgKind::Config);
     let cwd_path = std::path::PathBuf::from(&cwd);
     // Chat registers no tools, so there is nothing for a system prompt to say.
@@ -252,7 +260,6 @@ pub fn run() -> Result<(), String> {
         system,
         caps: invocation.stack,
         run_dir: run_dir.clone(),
-        account: record::RecordedAccount::of(provider.account(), &available),
         // An attended trunk parks for the human; a headless one terminates
         // once its seeded work is idle.
         trunk: if headless {
@@ -278,10 +285,15 @@ pub fn run() -> Result<(), String> {
         cwd: cwd_path,
         terminal,
     };
-    let (mut session, resumed) = if resumes {
-        Avatar::resume(config, seat, Arc::clone(&provider)).map(|(s, r)| (s, Some(r)))
+    let roots: Vec<_> = if resumes {
+        Avatar::resume(config, seat, &provider).map(|roots| {
+            roots
+                .into_iter()
+                .map(|(root, resumed)| (root, Some(resumed)))
+                .collect()
+        })
     } else {
-        Avatar::root(config, seat, Arc::clone(&provider)).map(|s| (s, None))
+        Avatar::root(config, seat, Arc::clone(&provider)).map(|root| vec![(root, None)])
     }
     .map_err(|e| format!("session init: {e}"))?;
 
@@ -292,22 +304,23 @@ pub fn run() -> Result<(), String> {
         extend: c.extend.as_deref(),
         restrict_files: &invocation.restricts,
         cwd: &cwd,
-        resumed,
     };
     if headless {
+        let [(mut session, _)] =
+            <[_; 1]>::try_from(roots).map_err(|_| "a headless run holds exactly one root")?;
         headless::run(&mut session, &info, &provider, seed, c.output_format)
     } else {
         let screen = match screen {
             Some(screen) => screen,
             None => tui::enter(&run_dir)?,
         };
-        tui::run(screen, &mut session, &provider, &info, &bureau, seed, c.vi)
+        tui::run(screen, roots, &provider, &info, &bureau, seed, c.vi)
     }
 }
 
 /// Resolve a fresh or resumable run directory, retaining the lock for the
-/// process that owns it; the flag says whether session 0 is to be resumed
-/// from it.
+/// process that owns it; the flag says whether its open sessions are to be
+/// resumed.
 #[allow(
     clippy::option_option,
     reason = "the CLI distinguishes absent, bare, and named resume"
@@ -325,13 +338,13 @@ fn resolve_run(
                 .map_err(|error| format!("could not inspect resumable runs: {error}"))?,
         };
         for run_dir in candidates {
-            let record = run_dir.join("sessions/0/record.jsonl");
-            if !record.is_file() {
+            let open = record::AgentLog::live_roots(&run_dir.join("sessions"))
+                .map_err(|error| format!("cannot inspect {}: {error}", run_dir.display()))?;
+            if open.is_empty() {
                 if explicit {
                     return Err(format!(
-                        "--resume target {} has no {}; pass a run directory containing sessions/0/record.jsonl",
-                        run_dir.display(),
-                        record.display()
+                        "--resume target {} has no open session; pass a run directory with a sessions/<n>/record.jsonl that was not closed with /close",
+                        run_dir.display()
                     ));
                 }
                 continue;
@@ -356,7 +369,7 @@ fn resolve_run(
             }
         }
         return Err(format!(
-            "--resume found no unlocked run with sessions/0/record.jsonl under {}",
+            "--resume found no unlocked run with an open session under {}",
             app::EXARCH.project_dir(cwd).display()
         ));
     }

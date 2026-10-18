@@ -7,14 +7,15 @@ use std::sync::Arc;
 
 fn tree() -> (Arc<crate::agent::Agent>, super::super::tabs::Tabs) {
     let fleet = Fleet::for_test();
-    let root = test_agent(&fleet, TestAgentSpec::new("main")).expect("fresh trunk");
-    let mut tabs = super::super::tabs::Tabs::new(&root, fleet, false);
+    let root = test_agent(&fleet, TestAgentSpec::new("main")).expect("fresh root");
+    let mut tabs = super::super::tabs::Tabs::new(root.id, fleet);
     let a = AgentId::new(root.id.get() + 1);
     let a1 = AgentId::new(root.id.get() + 2);
     let a2 = AgentId::new(root.id.get() + 3);
     let b = AgentId::new(root.id.get() + 4);
     let b1 = AgentId::new(root.id.get() + 5);
     for (id, name, parent) in [
+        (root.id, "main", None),
         (a, "a", Some(root.id)),
         (a1, "a1", Some(a)),
         (a2, "a2", Some(a)),
@@ -26,7 +27,8 @@ fn tree() -> (Arc<crate::agent::Agent>, super::super::tabs::Tabs) {
             Path::new("/tmp/exarch-matrix-test"),
             name.into(),
             parent,
-            super::super::block::AgentSlot(1),
+            crate::record::Emitter::none(),
+            false,
         );
     }
     (root, tabs)

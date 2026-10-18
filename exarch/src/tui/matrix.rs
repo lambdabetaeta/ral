@@ -94,21 +94,13 @@ fn focus_label(name: &str, hue: Color, focused: bool, dying: bool) -> (String, S
 pub(super) fn strip(
     rows: &[TabRow<'_>],
     focused: AgentId,
-    root: AgentId,
     sort: MatrixSort,
     cursor: Option<AgentId>,
     height: usize,
 ) -> Vec<Line<'static>> {
     // The ramp is relative to this frame's heaviest spender, because token
-    // counts dwarf `rail::value_step`'s line-count thresholds.  Root is left
-    // out: its cells are blank, so counting its spend would only flatten the
-    // ramp for everyone else.
-    let max_tokens = rows
-        .iter()
-        .filter(|row| row.id != root)
-        .map(token_spend)
-        .max()
-        .unwrap_or(0);
+    // counts dwarf `rail::value_step`'s line-count thresholds.
+    let max_tokens = rows.iter().map(token_spend).max().unwrap_or(0);
     // Widths are measured over every row, not the visible slice, so scrolling
     // does not reflow the columns.
     let display: Vec<MatrixRow> = forest(rows, sort)
@@ -118,7 +110,6 @@ pub(super) fn strip(
             MatrixRow::new(
                 row,
                 focused,
-                root,
                 max_tokens,
                 &tree.prefix,
                 cursor == Some(row.id),
@@ -350,7 +341,6 @@ impl MatrixRow {
     fn new(
         row: &TabRow<'_>,
         focused: AgentId,
-        root: AgentId,
         max_tokens: u64,
         prefix: &str,
         cursor: bool,
@@ -387,23 +377,12 @@ impl MatrixRow {
         Self {
             id,
             label,
-            turns: if id == root {
-                String::new()
-            } else if let Some(idle) = idle {
-                idle_age_mark(idle)
-            } else {
-                turn_cells(sb, dim)
+            turns: match idle {
+                Some(idle) => idle_age_mark(idle),
+                None => turn_cells(sb, dim),
             },
-            tokens: if id == root {
-                String::new()
-            } else {
-                provider::humanize_tokens(tokens)
-            },
-            bar: if id == root {
-                String::new()
-            } else {
-                line::size_bar_text(sb.lines_touched())
-            },
+            tokens: provider::humanize_tokens(tokens),
+            bar: line::size_bar_text(sb.lines_touched()),
             label_style,
             hue,
             token_style,

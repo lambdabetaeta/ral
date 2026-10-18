@@ -2,6 +2,7 @@ use super::*;
 use crate::agent::testkit::*;
 use crate::bus::{Emitter, Item, Next, Post};
 use crate::provider::scripted::Script;
+use crate::record::Memory;
 use genai::chat::ChatMessage;
 use std::fs;
 
@@ -10,7 +11,6 @@ fn root_config(run_dir: &Path, fuel: u32) -> RootConfig {
         system: "system".into(),
         caps: ral_core::capability::GrantStack::root(),
         run_dir: run_dir.to_path_buf(),
-        account: RecordedAccount::for_test("test"),
         trunk: Trunk::Attended,
         tools: Toolset::offered(false),
         allow_schedule: false,
@@ -120,11 +120,12 @@ fn fork_seeds_its_own_provider_handle() {
     );
 }
 
-/// A branch imports the creator's context and withholds `reply`, but is
-/// otherwise an ordinary fork: caps verbatim, one less fuel.
+/// A `mnemon` root imports the creator's context and withholds `reply`;
+/// like every root it runs under the launch's caps and fuel, and its record
+/// folds back through a resume.
 #[test]
-fn branch_imports_context_and_withholds_reply() {
-    let parent = Avatar::for_test("system").unwrap();
+fn mnemon_root_imports_context_withholds_reply_and_resumes() {
+    let parent = trunk(true);
     parent
         .log
         .borrow_mut()
@@ -140,9 +141,8 @@ fn branch_imports_context_and_withholds_reply() {
         )
         .unwrap();
 
-    let child = parent
-        .branch("branch".into(), &crate::bus::dummy_emitter().0)
-        .expect("branch child");
+    let child = crate::agent::spawn::hatch_root(&parent, Memory::Mnemon, Some("fork".into()))
+        .expect("mnemon root");
 
     let view = serde_json::to_string(&child.rendered_messages()).unwrap();
     assert!(view.contains("what did we learn?"));
@@ -154,17 +154,51 @@ fn branch_imports_context_and_withholds_reply() {
 
     assert!(
         !child.agent.role.returns(),
-        "a branch withholds `reply` and never returns"
+        "a root withholds `reply` and never returns"
     );
+    assert!(child.agent.role.parent().is_none(), "a root has no parent");
+    assert_eq!(child.agent.caps, parent.agent.caps);
+    assert_eq!(child.agent.fuel, parent.agent.fuel, "a root is depth 0");
+
+    let sessions = parent.log_dir().parent().expect("sessions root");
+    let live = AgentLog::live_roots(sessions).expect("live roots");
+    let names: Vec<_> = live.iter().map(|(_, name)| name.as_str()).collect();
+    assert_eq!(names, ["main", "fork"]);
+
+    let dir = child.log_dir().to_path_buf();
+    let before = child.rendered_messages();
+    drop(child);
+    let resumed = AgentLog::resume(
+        sessions,
+        AgentId::new(
+            dir.file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.parse().ok())
+                .expect("numeric session dir"),
+        ),
+    )
+    .expect("a mnemon root's record folds back through resume");
     assert_eq!(
-        child.agent.caps, parent.agent.caps,
-        "a branch inherits the creator's capabilities verbatim"
+        serde_json::to_vec(&resumed.context().rendered()).unwrap(),
+        serde_json::to_vec(&before).unwrap(),
+        "the imported context survives the resume"
     );
-    assert_eq!(
-        child.agent.fuel,
-        parent.agent.fuel - 1,
-        "a branch is a fork: its fuel is one less than the parent's"
-    );
+}
+
+/// `/close` is durable: a closed root is no longer a live one.
+#[test]
+fn a_closed_root_is_not_resumable() {
+    let mut session = Avatar::for_test("system").unwrap();
+    let sessions = session
+        .log_dir()
+        .parent()
+        .expect("sessions root")
+        .to_path_buf();
+    assert_eq!(AgentLog::live_roots(&sessions).unwrap().len(), 1);
+    let (emit, _rx) = crate::bus::dummy_emitter();
+    let flow = session.rewrite(&crate::bus::Rewrite::Close, &emit);
+    assert!(flow.is_break());
+    assert_eq!(AgentLog::live_roots(&sessions).unwrap(), vec![]);
 }
 
 /// `/clear` cancels every registered worker, the durable class included,
@@ -437,7 +471,7 @@ fn fork_child_inherited_scratch_is_baseline() {
     let emit = Emitter::new(tx, session.agent.id);
     session.ral("let parent_scratch = 1", 5, &emit);
 
-    let child = session.fork().expect("fork");
+    let child = started_child(&session, "child");
     assert!(
         scope_has(&child, "parent_scratch"),
         "a fork snapshots the parent's whole scope"
@@ -463,6 +497,7 @@ fn resumed_agent_adds_only_the_fresh_shell_note() {
     let mut log = AgentLog::root(
         &sessions,
         AgentId::new(0),
+        "main",
         &RecordedModel::for_test("old-model"),
         &RecordedAccount::for_test("old-provider"),
         0,
@@ -474,15 +509,15 @@ fn resumed_agent_adds_only_the_fresh_shell_note() {
     let before = log.context().rendered();
     drop(log);
 
-    let (agent, resumed) = Avatar::resume(
-        RootConfig {
-            account: RecordedAccount::for_test("new-provider"),
-            ..root_config(dir.path(), 0)
-        },
-        identity_seat("resume-agent"),
-        scripted("new-model", Script::new()),
+    let [(agent, resumed)] = <[_; 1]>::try_from(
+        Avatar::resume(
+            root_config(dir.path(), 0),
+            identity_seat("resume-agent"),
+            &scripted("new-model", Script::new()),
+        )
+        .expect("resumed agent"),
     )
-    .expect("resumed agent");
+    .unwrap_or_else(|roots| panic!("one open session, got {}", roots.len()));
 
     assert_eq!(resumed.turn, 2, "the summary is taken before the note");
     assert!(agent.is_ready());
@@ -587,6 +622,7 @@ fn resume_seeds_child_ids_past_existing_session_directories() {
     let log = AgentLog::root(
         &sessions,
         AgentId::new(0),
+        "main",
         &RecordedModel::for_test("old-model"),
         &RecordedAccount::for_test("old-provider"),
         0,
@@ -597,14 +633,12 @@ fn resume_seeds_child_ids_past_existing_session_directories() {
     drop(log);
 
     let (root, _) = Avatar::resume(
-        RootConfig {
-            account: RecordedAccount::for_test("new-provider"),
-            ..root_config(dir.path(), 1)
-        },
+        root_config(dir.path(), 1),
         identity_seat("resume-id-seed"),
-        scripted("new-model", Script::new()),
+        &scripted("new-model", Script::new()),
     )
-    .expect("resumed root");
+    .expect("resumed root")
+    .remove(0);
     let child = root.fork().expect("post-resume child");
     let child_id = child
         .log_dir()

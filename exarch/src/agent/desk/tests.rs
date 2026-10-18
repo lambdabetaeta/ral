@@ -8,16 +8,15 @@ use crate::bus::{Inbox, Signal, channel};
 use crate::card::Card;
 use crate::enquiry::AgentInfo;
 use crate::enquiry::{
-    Add, Evict, ForkClaim, Grep, Memory, Message, Name, Note, Pin, Reading, Selection, Spec, Start,
-    Turns,
+    Add, Evict, ForkClaim, Grep, Message, Name, Note, Pin, Reading, Selection, Spec, Start, Turns,
 };
 use crate::provider::{
     Provider,
     scripted::{Reply, Script},
 };
-use crate::record::AgentId;
 use crate::record::AgentLog;
 use crate::record::EditAuthority;
+use crate::record::{AgentId, Memory};
 use crate::record::{Display, Record, Transient};
 use crate::schedule::{Trigger, parse_duration};
 use ral_core::first_order::datum::tag;
@@ -57,7 +56,6 @@ fn services_with(
         emit,
         reply: ReplyCell::default(),
         log: LogCell::new(fresh_log()),
-        branch: None,
         acts: ActFragment::default(),
     };
     (services, fleet, parent_inbox)
@@ -190,7 +188,7 @@ fn spawnable_desk(fuel: u32) -> (Arc<ExarchDesk>, Arc<Fleet>, Inbox) {
 
 type Parked<R> = Box<dyn FnOnce(&ExarchDesk, NurseryId) -> R + Send>;
 
-/// Answers the one fork a real run enquires of, `` `branch `` or `` `start ``,
+/// Answers the one fork a real run enquires of, `` `start ``,
 /// by running its `f` against the bequest that run parked, while it is still
 /// in its pen.
 struct Parking<R> {
@@ -203,13 +201,10 @@ impl<R: Send> Host for Parking<R> {
     fn surface(&self, _val: &FOValue) {}
 
     fn enquire(&self, req: FOValue) -> Result<FOValue, EnquiryError> {
-        let Ok(Request::Agents(
-            Agents::Branch(ForkClaim::Parked(id))
-            | Agents::Start(Start {
-                fork: ForkClaim::Parked(id),
-                ..
-            }),
-        )) = Request::decode(&req)
+        let Ok(Request::Agents(Agents::Start(Start {
+            fork: ForkClaim::Parked(id),
+            ..
+        }))) = Request::decode(&req)
         else {
             panic!("an identity run parks its bequest")
         };
@@ -225,7 +220,11 @@ fn with_parked<R: Send + 'static>(
     desk: &Arc<ExarchDesk>,
     f: impl FnOnce(&ExarchDesk, NurseryId) -> R + Send + 'static,
 ) -> R {
-    parked_by(desk, "_exarch-branch", f)
+    parked_by(
+        desk,
+        r"exarch-agents `start [prompt: #'go'#, name: 'parked', type: `amnemon, grant: `inherit, provider: `inherit, model: `inherit]",
+        f,
+    )
 }
 
 /// [`with_parked`], the fork made by running `source`.

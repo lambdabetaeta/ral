@@ -7,7 +7,7 @@ use ral_core::first_order::FOValue;
 use std::fmt;
 use std::time::Duration;
 
-use crate::record::{AgentId, Settlement};
+use crate::record::{AgentId, Memory, Settlement};
 
 /// A schedule's id: monotonic, and never reused, not even across `/clear`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -40,12 +40,17 @@ pub fn elapsed_phrase(elapsed: Duration) -> String {
     PRINTER.unsigned_duration_to_string(&Duration::from_secs(elapsed.as_secs()))
 }
 
-/// A session command that reads or forks the trunk's context, never changing
-/// it.  Drains at the next boundary of any kind — a tool batch settling or the
-/// exchange ending — in the order typed, alongside every delivery.
+/// A session command that reads the context or opens another session from
+/// it, never changing it.  Drains at the next boundary of any kind — a tool
+/// batch settling or the exchange ending — in the order typed, alongside every
+/// delivery.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Read {
-    Branch(Option<String>),
+    /// Open a root session, blank or carrying this context.
+    Hatch {
+        memory: Memory,
+        name: Option<String>,
+    },
     Context,
     Resources,
 }
@@ -59,14 +64,22 @@ pub enum Rewrite {
     Clear,
     Evict,
     Rewind(u64),
+    /// End this session for good: a resume will not reopen it.
+    Close,
+    /// End this session, resumable.
     Quit,
 }
 
 impl std::fmt::Display for Read {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Branch(Some(name)) => write!(f, "/branch {name}"),
-            Self::Branch(None) => f.write_str("/branch"),
+            Self::Hatch { memory, name } => {
+                f.write_str(match memory {
+                    Memory::Amnemon => "/new",
+                    Memory::Mnemon => "/branch",
+                })?;
+                name.iter().try_for_each(|name| write!(f, " {name}"))
+            }
             Self::Context => f.write_str("/context"),
             Self::Resources => f.write_str("/resources"),
         }
@@ -79,6 +92,7 @@ impl std::fmt::Display for Rewrite {
             Self::Clear => f.write_str("/clear"),
             Self::Evict => f.write_str("/evict"),
             Self::Rewind(turn) => write!(f, "/rewind {turn}"),
+            Self::Close => f.write_str("/close"),
             Self::Quit => f.write_str("/quit"),
         }
     }

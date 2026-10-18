@@ -458,7 +458,7 @@ fn builtin_t2_queue_prompt(
 ) -> Settled<Value> {
     T2_QUEUE.with(|cell| {
         if let Some(mailbox) = cell.borrow().as_ref() {
-            mailbox.push_user("queued prompt".into());
+            mailbox.push(Post::UserSteering("queued prompt".into()));
         }
     });
     Ok(Value::Unit)
@@ -665,7 +665,7 @@ fn a_read_queued_mid_exchange_runs_at_the_tool_boundary_ahead_of_the_next_step()
 
 /// The arrivals keep the order typed: a read queued *after* a prompt at
 /// the same boundary runs after that prompt has landed, so a `/branch`
-/// typed beside a prompt forks with it.
+/// typed beside a prompt carries it.
 #[test]
 fn a_read_queued_after_a_prompt_runs_after_it_lands() {
     let mut session = dressed_trunk(|runtime| runtime.install_builtins(T2_CANCEL_BUILTINS));
@@ -848,7 +848,7 @@ fn current_epoch_surface_batch_reaches_the_model() {
 #[test]
 fn cancel_cascade_reaches_a_cancelled_sub_agents_workers() {
     let parent = dressed_trunk(|runtime| runtime.install_builtins(WORKER_REGISTRY_TEST_BUILTINS));
-    let child = parent.fork().expect("fork child");
+    let child = started_child(&parent, "child");
 
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::with_mailbox(tx, child.agent.id, child.inbox.mailbox());

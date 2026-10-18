@@ -11,7 +11,6 @@ use crate::cancel::InterruptTarget;
 use crate::provider::Toolset;
 use crate::provider::scripted::Script;
 use crate::provider::{Provider, ToolCall};
-use crate::record::RecordedAccount;
 use ral_core::HostSurface;
 use ral_core::Runtime;
 use ral_core::Shell;
@@ -330,7 +329,6 @@ fn root(trunk: Trunk, tools: Toolset) -> Avatar {
             system: "system".into(),
             caps: ral_core::capability::GrantStack::root(),
             run_dir,
-            account: RecordedAccount::for_test("test"),
             trunk,
             tools,
             allow_schedule: false,
@@ -349,6 +347,85 @@ fn root(trunk: Trunk, tools: Toolset) -> Avatar {
         scripted("test-model", Script::new()),
     )
     .expect("root trunk")
+}
+
+/// A child of `parent` made the production way: `` exarch-agents `start `` forks
+/// the parent's shell and parks it, and the host adopts it, so the child
+/// carries the parent's whole scope and builtins — what a genesis-seated
+/// [`Avatar::fork_named`] does not.
+pub(crate) fn started_child(parent: &Avatar, name: &str) -> Avatar {
+    use crate::agent::seat::{Seat, SeatKind};
+    use crate::enquiry::{Agents, ForkClaim, Request, Start};
+    use ral_core::carrier::Host;
+    use ral_core::first_order::FOValue;
+    use ral_core::first_order::datum::Datum as _;
+    use ral_core::protocol::{EnquiryError, Run};
+
+    struct Adopt {
+        parent: Arc<Agent>,
+        log: crate::agent::LogCell,
+        fleet: Arc<Fleet>,
+        transport: Arc<ral_core::carrier::IdentityTransport>,
+        name: String,
+        child: std::sync::Mutex<Option<Avatar>>,
+    }
+
+    impl Host for Adopt {
+        fn surface(&self, _val: &FOValue) {}
+
+        fn enquire(&self, req: FOValue) -> Result<FOValue, EnquiryError> {
+            let Ok(Request::Agents(Agents::Start(Start {
+                spec,
+                fork: ForkClaim::Parked(id),
+            }))) = Request::decode(&req)
+            else {
+                panic!("an identity run parks its bequest")
+            };
+            let seat = self
+                .transport
+                .adopt_parked(id)
+                .map(Seat::adopted)
+                .expect("the fork this run parked");
+            let child = Avatar::child_of(
+                &self.parent,
+                &self.log.borrow(),
+                &self.fleet,
+                self.name.clone(),
+                seat,
+                self.parent.current_provider(),
+                spec.memory,
+            )
+            .expect("an adopted child is born");
+            *self.child.lock().unwrap() = Some(child);
+            Ok(FOValue::Unit)
+        }
+    }
+
+    let SeatKind::Identity(transport) = parent.seat.kind() else {
+        panic!("a test parent sits on an identity seat")
+    };
+    let host = Arc::new(Adopt {
+        parent: parent.agent.clone(),
+        log: parent.log.clone(),
+        fleet: parent.fleet.clone(),
+        transport: transport.clone(),
+        name: name.to_string(),
+        child: std::sync::Mutex::default(),
+    });
+    let script = format!(
+        "exarch-agents `start [prompt: #'go'#, name: '{name}', type: `amnemon, grant: `inherit, provider: `inherit, model: `inherit]"
+    );
+    let report = ral_core::carrier::dispatch_to_report(
+        &*transport,
+        Run::captured(script.as_str(), "<test>"),
+        host.clone(),
+    )
+    .expect("an identity engine never severs");
+    host.child
+        .lock()
+        .unwrap()
+        .take()
+        .unwrap_or_else(|| panic!("the run never started a child: {report:?}"))
 }
 
 /// Drive a forked peer to quiescence, returning what its `attend` settles.

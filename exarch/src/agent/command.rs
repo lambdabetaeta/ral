@@ -7,18 +7,18 @@ use std::ops::ControlFlow;
 use crate::agent::Avatar;
 use crate::bus::{Emitter, Read, Rewrite};
 use crate::record::Transient;
+use ral_core::process::CancelCause;
 
 impl Avatar {
-    /// Survey or fork the context; it is left as it was.
+    /// Survey the context or open a session from it; it is left as it was.
     pub(crate) fn read(&self, cmd: &Read, emit: &Emitter) {
         match cmd {
-            Read::Branch(name) => {
-                match crate::agent::spawn::spawn_branch(self, name.as_deref(), emit) {
-                    Ok(child) => self.note(format!(
-                        "branch {} started (agent {})",
-                        child.name, child.id
-                    )),
-                    Err(e) => self.note_error(&format!("could not start branch: {e}")),
+            Read::Hatch { memory, name } => {
+                match crate::agent::spawn::spawn_root(self, *memory, name.clone(), emit) {
+                    Ok(root) => {
+                        self.note(format!("session {} opened (agent {})", root.name, root.id));
+                    }
+                    Err(e) => self.note_error(&format!("could not open a session: {e}")),
                 }
             }
             Read::Context => self.emit_context_survey(),
@@ -29,13 +29,10 @@ impl Avatar {
     /// Rewrite or end the context; `Break` ends the attend loop.
     pub(crate) fn rewrite(&mut self, cmd: &Rewrite, emit: &Emitter) -> ControlFlow<()> {
         match cmd {
-            Rewrite::Clear => {
-                let result = self.clear();
-                self.recorder().transient(Transient::Cleared);
-                if let Err(error) = result {
-                    self.note_error(&format!("clear failed: {error}"));
-                }
-            }
+            Rewrite::Clear => match self.clear() {
+                Ok(()) => self.recorder().transient(Transient::Cleared),
+                Err(error) => self.note_error(&format!("clear failed: {error}")),
+            },
             Rewrite::Evict => {
                 if self.log.borrow().context().can_evict() {
                     self.shed();
@@ -47,6 +44,14 @@ impl Avatar {
                 if let Err(error) = self.rewind(*anchor, emit) {
                     self.note_error(&error);
                 }
+            }
+            Rewrite::Close => {
+                self.agent.cancel_descendants(CancelCause::Cancelled);
+                let closed = self.log.borrow_mut().record_session_closed();
+                if let Err(error) = closed {
+                    self.recorder().report_fault(&error);
+                }
+                return ControlFlow::Break(());
             }
             Rewrite::Quit => return ControlFlow::Break(()),
         }

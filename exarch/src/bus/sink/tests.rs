@@ -18,20 +18,30 @@ fn pump_returns_on_worker_done_not_sender_disconnect() {
     }
 
     let mut sink = CountSink(0);
-    let bus = FleetBus::session(&Inbox::new());
+    let bus = FleetBus::session();
     // Outlives `pump`, holding an `Emitter` clone whose sender keeps the
     // channel from ever disconnecting.
     let holder: Mutex<Option<Emitter>> = Mutex::new(None);
 
     let recorder = crate::record::Emitter::none();
-    recorder.attach(bus.emitter(AgentId::new(0)).fleet_sink());
+    recorder.attach(
+        bus.emitter(AgentId::new(0), Inbox::new().mailbox())
+            .fleet_sink(),
+    );
 
     let t0 = Instant::now();
-    let r = pump(&mut sink, &bus, AgentId::new(0), &recorder, |emit| {
-        *holder.lock().unwrap() = Some(emit.clone());
-        recorder.transient(Transient::Boundary);
-        "done"
-    })
+    let r = pump(
+        &mut sink,
+        &bus,
+        AgentId::new(0),
+        Inbox::new().mailbox(),
+        &recorder,
+        |emit| {
+            *holder.lock().unwrap() = Some(emit.clone());
+            recorder.transient(Transient::Boundary);
+            "done"
+        },
+    )
     .expect("pump returns Ok");
 
     assert!(
@@ -58,13 +68,21 @@ fn recovered_panic_records_a_forensic_error() {
     }
 
     let mut sink = FactSink(Vec::new());
-    let bus = FleetBus::session(&Inbox::new());
+    let bus = FleetBus::session();
     let recorder = crate::record::Emitter::none();
-    recorder.attach(bus.emitter(AgentId::new(0)).fleet_sink());
+    recorder.attach(
+        bus.emitter(AgentId::new(0), Inbox::new().mailbox())
+            .fleet_sink(),
+    );
 
-    let r = pump(&mut sink, &bus, AgentId::new(0), &recorder, |_emit| {
-        panic!("boom")
-    })
+    let r = pump(
+        &mut sink,
+        &bus,
+        AgentId::new(0),
+        Inbox::new().mailbox(),
+        &recorder,
+        |_emit| panic!("boom"),
+    )
     .expect("pump returns Ok even when the worker panics");
 
     assert_eq!(r, None, "a panicked worker yields no value");

@@ -486,11 +486,11 @@ pub(crate) fn now_unix_ms() -> u64 {
         .map_or(0, |d| d.as_millis().try_into().unwrap_or(u64::MAX))
 }
 
-/// Normalize a run directory or its session-0 child to the run directory.
+/// Normalize a run directory or one of its session directories to the run
+/// directory.
 ///
 /// # Errors
-/// Returns a sentence when the target names a child or malformed session
-/// directory.
+/// Returns a sentence when the target names a malformed session directory.
 pub fn normalize_resume_target(target: &Path) -> Result<PathBuf, String> {
     let Some(session) = target.file_name().and_then(|name| name.to_str()) else {
         return Err(format!(
@@ -504,15 +504,9 @@ pub fn normalize_resume_target(target: &Path) -> Result<PathBuf, String> {
     if sessions != "sessions" {
         return Ok(target.to_path_buf());
     }
-    let Ok(id) = session.parse::<u64>() else {
+    if session.parse::<u64>().is_err() {
         return Err(format!(
             "cannot resume {}: the session directory name must be a number",
-            target.display()
-        ));
-    };
-    if id != 0 {
-        return Err(format!(
-            "cannot resume {}: session {id} is a child log; children are transient by design and only session 0 can be resumed",
             target.display()
         ));
     }
@@ -716,14 +710,13 @@ mod tests {
     }
 
     #[test]
-    fn resume_target_normalizes_session_zero_and_refuses_children() {
+    fn resume_target_normalizes_any_session_and_refuses_a_malformed_one() {
         let run = std::path::Path::new("/tmp/exarch-run");
-        assert_eq!(
-            normalize_resume_target(&run.join("sessions/0")).unwrap(),
-            run
-        );
-        let error = normalize_resume_target(&run.join("sessions/1")).unwrap_err();
-        assert!(error.contains("children are transient by design"));
+        for session in ["sessions/0", "sessions/3"] {
+            assert_eq!(normalize_resume_target(&run.join(session)).unwrap(), run);
+        }
+        let error = normalize_resume_target(&run.join("sessions/main")).unwrap_err();
+        assert!(error.contains("must be a number"));
     }
 
     #[test]

@@ -1,23 +1,20 @@
-//! The process's signals, and the trunk that hears them.
+//! The process's signals, and the roots that hear them.
 //!
 //! No engine faces the process's signals itself.  ral's handlers raise ambient
-//! causes, and [`face`] forwards them to the trunk as that agent's own
-//! interrupt or cancel — the trunk being a fact of the launch, not of any
-//! position in the tree, so each site that launches one holds the guard.
+//! causes, and [`face`] forwards them to every live root of the fleet as that
+//! agent's own interrupt or cancel: OS signals reach every root.
 //!
-//! Esc and Ctrl-C are a per-tab exchange interrupt — never a cascade, never an
-//! agent's death, and they never tick ral's escalation ladder.  Every focused
-//! tab routes through [`crate::agent::Agent::interrupt`], which cancels that
-//! agent's own token and, through `Control`, its dispatch in flight, never its
-//! durable root; the trunk additionally calls [`raise_interrupt`], which on
-//! Unix re-creates the SIGINT a foreground external child would have received
-//! and on Windows raises ral's interrupt alone.
+//! Esc and Ctrl-C are the other way round: a per-tab exchange interrupt on the
+//! one focused agent, never a cascade, never an agent's death, and they never
+//! tick ral's escalation ladder.  They route through
+//! [`crate::agent::Agent::interrupt`], which cancels that agent's own token
+//! and, through `Control`, its dispatch in flight, never its durable root.
 //!
 //! On Unix [`install`] points SIGINT at ral's *non-escalating*
 //! `interrupt_handler`, never the `term_handler` whose third delivery
 //! `_exit`s: a stray SIGINT reaching the supervising TUI must cancel the
 //! exchange, not kill exarch.  SIGTERM and SIGHUP keep `term_handler`, and
-//! reach the trunk as `Terminate`, so a park reading the token agrees with the
+//! reach every root as `Terminate`, so a park reading the token agrees with the
 //! engine's root about why the agent is ending.
 //!
 //! Windows has no single disposition to replace — `SetConsoleCtrlHandler` keeps
@@ -35,15 +32,21 @@
 //! On both, [`crate::boot::face_process_signals`] owns the install
 //! ceremony, once per process.
 
-use crate::cancel;
+use crate::agent::fleet::Fleet;
 use ral_core::process::{Ambient, AmbientForward};
+use std::sync::Arc;
 
-/// Forward this process's signals to `reach` for as long as the guard lives:
-/// an interrupt unwinds its exchange, a shutdown ends it.
-pub(crate) fn face(reach: cancel::Reach) -> AmbientForward {
-    ral_core::process::forward_ambient(move |ambient| match ambient {
-        Ambient::Interrupt => reach.interrupt(),
-        Ambient::Root(cause) => reach.cancel(cause),
+/// Forward this process's signals to every live root of `fleet` for as long
+/// as the guard lives: an interrupt unwinds each exchange, a shutdown ends it.
+pub(crate) fn face(fleet: &Arc<Fleet>) -> AmbientForward {
+    let fleet = Arc::clone(fleet);
+    ral_core::process::forward_ambient(move |ambient| {
+        for root in fleet.roots() {
+            match ambient {
+                Ambient::Interrupt => root.interrupt(),
+                Ambient::Root(cause) => root.cancel(cause),
+            }
+        }
     })
 }
 
@@ -52,34 +55,6 @@ pub(crate) fn face(reach: cancel::Reach) -> AmbientForward {
 #[cfg(unix)]
 pub(crate) fn install() {
     ral_core::process::install(libc::SIGINT, ral_core::process::interrupt_handler());
-}
-
-/// The process-wide half of the trunk's interrupt, beside the per-agent one
-/// every focused tab gets.
-///
-/// Recreate the SIGINT raw mode swallowed — `ISIG` is off, so the kernel no
-/// longer delivers one to the foreground job.  A foreground external child
-/// gets a real SIGINT through its own process group
-/// ([`ral_core::process::interrupt_foreground_child`]); signalling *another*
-/// group carries no escalation.  ral itself hears the interrupt through the
-/// trunk's `Control`, which spares workers and ticks no counter
-/// toward a third-signal `_exit`.
-#[cfg(unix)]
-pub(crate) fn raise_interrupt() {
-    ral_core::process::interrupt_foreground_child();
-}
-
-/// Raise ral's interrupt in-process, as its own console handler would.
-///
-/// Raw mode suppresses the console's automatic Ctrl-C handling, so Esc and
-/// Ctrl-C both surface as ordinary key events.  Re-injecting with
-/// `GenerateConsoleCtrlEvent` would broadcast to the whole console group and
-/// re-enter `SetConsoleCtrlHandler`'s chain, ticking ral's escalation counter
-/// on every trunk interrupt.  A child hears it only through the teardown of
-/// the scope that owns it.
-#[cfg(windows)]
-pub(crate) fn raise_interrupt() {
-    ral_core::process::request_interrupt();
 }
 
 /// Whether a delivered Windows console-control event is an exchange-cancel
@@ -126,9 +101,9 @@ pub(crate) fn install() {
 /// The routine Windows calls on Ctrl-C/Ctrl-Break/console-close events.
 ///
 /// Runs on a dedicated OS thread rather than in signal context, so plain atomics
-/// are all it needs.  A Ctrl-C/Ctrl-Break is handled here in full — the same
-/// non-escalating interrupt `raise_interrupt` raises for a raw-mode key event
-/// — and reported `TRUE`; every other event reports `FALSE`, deferring to
+/// are all it needs.  A Ctrl-C/Ctrl-Break is handled here in full — the
+/// non-escalating interrupt, fanned out by [`face`] to every root — and
+/// reported `TRUE`; every other event reports `FALSE`, deferring to
 /// ral's escalating disposition unchanged.
 #[cfg(windows)]
 extern "system" fn console_ctrl_handler(ctrl_type: u32) -> windows_sys::core::BOOL {
@@ -179,29 +154,7 @@ mod tests {
     use super::*;
     use crate::agent::testkit::{TestAgentSpec, test_agent};
     use ral_core::test_helper::eventually;
-    use std::sync::Mutex;
     use std::time::Duration;
-
-    /// These tests touch the escalation ladder, so they must not run
-    /// concurrently.
-    static SERIAL: Mutex<()> = Mutex::new(());
-
-    /// The ladder is ral's road to a force-exit; however many times Esc is
-    /// pressed, it must never take a step down it.
-    #[test]
-    fn raise_interrupt_never_ticks_the_escalation_ladder() {
-        let _g = SERIAL.lock().unwrap();
-        ral_core::process::clear();
-        install();
-        for _ in 0..5 {
-            raise_interrupt();
-        }
-        assert!(
-            !ral_core::process::escalation_pending(),
-            "the Esc path never ticks the escalation ladder, so it cannot force-exit"
-        );
-        ral_core::process::clear();
-    }
 
     /// Without the entry ceremony, ral's bare handler would run alone: a
     /// delivered SIGINT would tick the escalation ladder. With it, the SIGINT
@@ -216,7 +169,7 @@ mod tests {
         crate::boot::face_process_signals(&ral_core::terminal::TerminalState::default());
         let fleet = crate::agent::fleet::Fleet::for_test();
         let trunk = test_agent(&fleet, TestAgentSpec::new("trunk")).expect("a fresh trunk");
-        let _signals = face(trunk.reach());
+        let _signals = face(&fleet);
 
         assert_eq!(unsafe { libc::raise(libc::SIGINT) }, 0, "raise SIGINT");
         assert!(
