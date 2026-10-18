@@ -35,7 +35,7 @@ fn value_head(ast: Ast) -> Head {
 
 fn app(head: Head, args: Vec<Ast>) -> Ast {
     Ast::Call {
-        head,
+        head: Spanned::synthetic(head),
         args: args.into_iter().map(Spanned::synthetic).collect(),
     }
 }
@@ -105,7 +105,7 @@ fn strip_head(head: Head) -> Head {
 /// can name the shape without predicting byte positions.
 fn strip_one(n: Ast) -> Ast {
     match n {
-        Ast::Call { head, args } if args.is_empty() => match head {
+        Ast::Call { head, args } if args.is_empty() => match head.item {
             Head::Bare(s) => plain(&s),
             Head::Path(s) => Ast::Word(Word::Slash(s)),
             Head::TildePath(path) => tilde_word(path),
@@ -122,12 +122,12 @@ fn strip_one(n: Ast) -> Ast {
         },
         Ast::Call { head, args } => {
             let plain_args: Vec<Ast> = args.into_iter().map(|sp| sp.item).collect();
-            app(strip_head(head), strip_args(plain_args))
+            app(strip_head(head.item), strip_args(plain_args))
         }
         Ast::Redirected { stage, redirects } => match *stage.item {
             Ast::Call { head, args } => {
                 let plain_args: Vec<Ast> = args.into_iter().map(|sp| sp.item).collect();
-                app_redir(strip_head(head), strip_args(plain_args), redirects)
+                app_redir(strip_head(head.item), strip_args(plain_args), redirects)
             }
             other => redirected(strip_one(other), redirects),
         },
@@ -312,7 +312,7 @@ fn parse_external_name_head_without_args() {
             },
         ] => {
             assert_eq!(args.as_slice(), []);
-            assert_eq!(head, &external_head("git"));
+            assert_eq!(&head.item, &external_head("git"));
         }
         _ => panic!("expected zero-arg external-name app, got {ast:?}"),
     }
@@ -1159,7 +1159,7 @@ fn parse_command_with_lambda_arg() {
     let ast = unwrap_stmts(parse("for $items { |x| echo $x }").unwrap());
     match &ast[0] {
         Ast::Call { head, args, .. } => {
-            assert_eq!(head, &bare_head("for"));
+            assert_eq!(&head.item, &bare_head("for"));
             assert_eq!(args.len(), 2); // $items and the lambda
             assert!(matches!(args[0].item, Ast::Variable(_)));
             assert!(matches!(args[1].item, Ast::Lambda { .. }));
@@ -1337,7 +1337,7 @@ fn parse_record_with_blocks() {
     let ast = unwrap_stmts(parse(src).unwrap());
     match &ast[0] {
         Ast::Call { head, args, .. } => {
-            assert_eq!(head, &bare_head("dispatch"));
+            assert_eq!(&head.item, &bare_head("dispatch"));
             assert_eq!(args.len(), 2);
             assert!(matches!(&args[1].item, Ast::Record(_)));
         }
@@ -1834,7 +1834,7 @@ fn parse_tilde_path_command_head_without_args() {
         ] => {
             assert_eq!(args.as_slice(), []);
             assert_eq!(
-                head,
+                &head.item,
                 &Head::TildePath(TildePath {
                     suffix: Some("/.local/bin/claude".into()),
                 })
@@ -1872,7 +1872,7 @@ fn parse_literal_path_head_without_args() {
             },
         ] => {
             assert_eq!(args.as_slice(), []);
-            assert_eq!(head, &path_head("./script"));
+            assert_eq!(&head.item, &path_head("./script"));
         }
         _ => panic!("expected zero-arg path app, got {ast:?}"),
     }
@@ -2189,7 +2189,7 @@ fn redirected_scope(src: &str) -> (ScopeAst, Redirects<Ast>) {
 fn unwrap_single_exec(ast: Vec<Stmt>) -> (Head, Vec<Ast>) {
     let stripped: Vec<_> = ast.into_iter().map(|s| s.item).collect();
     match stripped.as_slice() {
-        [Ast::Call { head, args }] => (head.clone(), args.iter().map(|s| s.item.clone()).collect()),
+        [Ast::Call { head, args }] => (head.item.clone(), args.iter().map(|s| s.item.clone()).collect()),
         _ => panic!("expected a single Ast::Call, got {stripped:?}"),
     }
 }

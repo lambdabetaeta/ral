@@ -1,5 +1,5 @@
 # codes: T0072
-# contains: `t` is bound to a value of type Integer, so it is not a program
+# contains: `t` is bound to an Int, so it is not a program
 let t = 42
 let x = !$t
 return $x

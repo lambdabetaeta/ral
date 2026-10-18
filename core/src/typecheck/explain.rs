@@ -105,11 +105,7 @@ impl TypeErrorKind {
             }
             Self::UnboundVariable { name, .. } => format!("undefined variable: ${name}"),
             Self::HeadBoundToValue { name, ty } => {
-                let ctx = FmtCtx::for_value_types(&[ty]);
-                format!(
-                    "`{name}` is bound to a value of type {}, so it is not a program",
-                    fmt_ty_ctx(ty, &ctx)
-                )
+                format!("`{name}` is bound to {}, so it is not a program", describe(ty))
             }
             Self::IndexContainerUnknown { names, .. } => {
                 let (target, read, key) = match names {
@@ -275,10 +271,7 @@ impl TypeErrorKind {
                 format!("this index belongs to {literal} alone")
             }
             Self::IndexContainerUnknown { .. } => "a list or a map?".into(),
-            Self::HeadBoundToValue { ty, .. } => {
-                let ctx = FmtCtx::for_value_types(&[ty]);
-                format!("{} is not a command", fmt_ty_ctx(ty, &ctx))
-            }
+            Self::HeadBoundToValue { name, ty } => format!("this `{name}` is {}", describe(ty)),
         }
     }
 }

@@ -1854,7 +1854,7 @@ impl Inferencer<'_> {
                 self.infer_comp(rest)
             }
             CompKind::App { head, args } => {
-                let head_ty = self.infer_comp(head);
+                let head_ty = self.with_span(head.span, |this| this.infer_comp(head));
                 // Name a literal used as a command head before the general
                 // `Cmd a vs a → b` mismatch says it in jargon.  Needs a
                 // positional arg; a spread-only call wants the cascading check.
@@ -1862,16 +1862,16 @@ impl Inferencer<'_> {
                 if !positional.is_empty()
                     && let Some(ty) = self.command_non_function_ty(&head_ty)
                 {
-                    let kind = match &head.item {
+                    match &head.item {
                         CompKind::Return(v) if let Some(name) = written(v) => {
-                            TypeErrorKind::HeadBoundToValue {
+                            let kind = TypeErrorKind::HeadBoundToValue {
                                 name: name.to_string(),
                                 ty,
-                            }
+                            };
+                            self.with_span(head.span, |this| this.ctx.diagnose(kind));
                         }
-                        _ => TypeErrorKind::CommandNotFunction { ty },
-                    };
-                    self.ctx.diagnose(kind);
+                        _ => self.ctx.diagnose(TypeErrorKind::CommandNotFunction { ty }),
+                    }
                     // Check the args anyway, then hand the enclosing pipeline
                     // or chain a coherent fresh result.
                     for slot in args.iter().map(ValListElem::slot) {

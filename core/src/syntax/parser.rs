@@ -1542,7 +1542,7 @@ impl Parser {
         if let Some(message) = headless {
             return Err(self.error(message));
         }
-        let head = self.parse_head()?;
+        let head = self.spanned(Self::parse_head)?;
         let mut args: Vec<Spanned<Ast>> = Vec::new();
         let mut redirects = Redirects::default();
         while !self.at_cmd_end() {
@@ -1556,7 +1556,7 @@ impl Parser {
         // A value head with nothing applied sheds the `Ast::Call` wrapper,
         // so downstream passes see the value itself.
         if args.is_empty()
-            && let Head::Value(value) = head
+            && let Head::Value(value) = head.item
         {
             return Ok((*value, redirects));
         }

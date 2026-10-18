@@ -372,7 +372,7 @@ impl Elaborator {
     /// A head applied to `args`, with the stage's trailing `redirects`.
     fn elab_call(
         &mut self,
-        head: &Head,
+        head: &Spanned<Head>,
         args: &[Spanned<Ast>],
         redirects: &Redirects<Ast>,
         binds: &mut Vec<(Pattern, Comp)>,
@@ -380,8 +380,8 @@ impl Elaborator {
         // A value head can hoist binds of its own, and its effects
         // precede the arguments' in source order — so it is elaborated
         // before the args below, or its binds land after theirs.
-        let value_head_comp = if let Head::Value(value) = head {
-            Some(self.elab_expr(value, binds))
+        let value_head_comp = if let Head::Value(value) = &head.item {
+            Some(self.with_span(head.span, |this| this.elab_expr(value, binds)))
         } else {
             None
         };
@@ -403,7 +403,7 @@ impl Elaborator {
             .collect();
         let redirect_vals = self.lower_redirects(redirects, binds);
 
-        match head {
+        match &head.item {
             Head::ExternalName(s) => self.exec(
                 CommandWord::External(CommandName::Bare(s.clone().into())),
                 arg_vals,
@@ -413,7 +413,9 @@ impl Elaborator {
                 // The `Force` is what makes the `Force` rule run a
                 // bound block inside the redirect frame wrapped
                 // around it.
-                let head_comp = comp!(self, CompKind::Force(Val::Variable(s.clone().into())));
+                let head_comp = self.with_span(head.span, |this| {
+                    comp!(this, CompKind::Force(Val::Variable(s.clone().into())))
+                });
                 self.apply_head(head_comp, arg_vals, redirect_vals)
             }
             Head::Bare(s) => self.exec(

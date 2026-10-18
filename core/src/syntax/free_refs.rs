@@ -64,7 +64,7 @@ impl FreeRefs<'_> {
                 self.ast(&value.item);
             }
             Ast::Call { head, args } => {
-                self.head(head);
+                self.head(&head.item);
                 for arg in args {
                     self.ast(&arg.item);
                 }

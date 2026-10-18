@@ -59,7 +59,7 @@ pub enum Ast {
     /// [`crate::ir::CompKind::Exec`] for a name it dispatches, and
     /// [`crate::ir::CompKind::App`] when the head resolves to a bound value.
     Call {
-        head: Head,
+        head: Spanned<Head>,
         args: Vec<Spanned<Self>>,
     },
     /// A stage with its redirects, the stage being any of the five forms. One

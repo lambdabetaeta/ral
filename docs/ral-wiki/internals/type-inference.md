@@ -35,7 +35,9 @@ thunk, and a binding of anything else is `HeadBoundToValue` (T0072) —
 head is elaborated as `Force` of the variable, so the `Force` rule asks the
 same question through the same `thunk_body`, and a variable head in `App`
 (`$date +%s`) is named the same way: a user's own `let ls = …` then `ls /tmp`
-is told of the shadowing, not of a `!` it never wrote.
+is told of the shadowing, not of a `!` it never wrote. T0072 stands on the
+head's own span (`Ast::Call`'s head is `Spanned`) and names the value's shape
+(`describe`), never its full type, which for a record can run to kilobytes.
 
 **A block argument is checked last, and against its own call.** `apply_args_capped`
 unifies the arrow spine from the arguments in source order, but a `Val::Thunk`

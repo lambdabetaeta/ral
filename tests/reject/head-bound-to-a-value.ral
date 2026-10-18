@@ -1,5 +1,5 @@
 # codes: T0072 T0072
-# contains: Integer
+# contains: `date` is bound to an Int
 # contains: `^date` runs it
 let date = 5
 date +%s

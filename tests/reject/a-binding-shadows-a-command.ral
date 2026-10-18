@@ -1,5 +1,5 @@
 # codes: T0072
-# contains: `ls` is bound to a value of type [String]
+# contains: `ls` is bound to a list
 # contains: `^ls` runs it, and `$ls` is the value
 let ls = [a]
 ls /tmp
