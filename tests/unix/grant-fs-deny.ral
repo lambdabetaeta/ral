@@ -43,5 +43,13 @@ echo $unrestricted
 let none = [read: []]
 try { grant [fs: $none] { let _ = from-string < "$dir/visible.txt" } } { |_| echo 'bound empty read list restricts' }
 
+# A walked entry is judged by its own path and named to read back: `~` here is
+# a directory, not HOME
+mkdir -p "$dir/~"
+to-string tilde > "$dir/~/t.txt"
+let tilde = grant [fs: [read: [`absolute $dir]]] { within [dir: $dir] { glob '*/*.txt' } }
+echo $tilde
+echo !{within [dir: $dir] { from-string < "$tilde[0]" }}
+
 rm -rf $dir
 echo 'grant fs deny tests done'

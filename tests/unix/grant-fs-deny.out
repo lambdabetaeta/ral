@@ -9,4 +9,6 @@ overlap denies as one
 empty read list restricts
 ok
 bound empty read list restricts
+[./~/t.txt, forbidden/leaf.txt]
+tilde
 grant fs deny tests done

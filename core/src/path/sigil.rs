@@ -7,7 +7,8 @@
 //! XDG uses the Linux defaults on every platform, macOS included
 //! ([`crate::host`]).
 
-use crate::host::{XdgKind, resolve_xdg};
+use crate::host::resolve_xdg;
+use crate::path::XdgKind;
 use crate::path::tilde::TildePath;
 
 /// Parse `xdg:NAME[/sub]`; `None` for a non-`xdg:` input or an unknown name.
@@ -25,6 +26,16 @@ pub(crate) fn parse_xdg_token(input: &str) -> Option<(XdgKind, Option<&str>)> {
 /// base outright — `xdg:data//etc` would otherwise name `/etc`.
 fn relative_suffix(s: &str) -> &str {
     s.trim_start_matches(['/', '\\'])
+}
+
+/// A relative `name` spelled so [`expand_path_prefix`] leaves it as it is:
+/// `./~/x` for a directory named `~`.
+pub(crate) fn literal_relative(name: &str) -> String {
+    if parse_xdg_token(name).is_some() || TildePath::parse(name).is_some() {
+        format!("./{name}")
+    } else {
+        name.to_owned()
+    }
 }
 
 /// Expand a `~` or `xdg:` head, or return `input` unchanged.  The runtime half

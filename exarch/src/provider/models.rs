@@ -490,7 +490,7 @@ pub fn listing_of<S: ModelSource + Clone>(
 /// `None` when no cache base resolves (`HOME` unset, no absolute override) —
 /// the catalog then runs memo-only.
 fn cache_path(app: crate::app::App) -> Option<PathBuf> {
-    let dir = app.xdg_dir(ral_core::host::XdgKind::Cache);
+    let dir = app.xdg_dir(ral_core::path::XdgKind::Cache);
     dir.is_absolute().then(|| dir.join("models.json"))
 }
 

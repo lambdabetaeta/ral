@@ -129,7 +129,7 @@ return ()
     reason = "[silent:rc-write] persists the default repl config dir + rc file; not turn-time model I/O"
 )]
 pub(super) fn create_default_rc() -> Option<String> {
-    let (dir, path) = ral_core::host::xdg(ral_core::host::XdgKind::Config)
+    let (dir, path) = ral_core::host::xdg(ral_core::path::XdgKind::Config)
         .map(|d| d.join("ral"))
         .map(|dir| {
             let file = dir.join("rc");
@@ -330,7 +330,7 @@ impl RcPlan {
 /// Search for an existing RC file in the standard locations.
 pub(super) fn find_ralrc() -> Option<String> {
     let candidates = [
-        ral_core::host::xdg(ral_core::host::XdgKind::Config).map(|d| d.join("ral/rc")),
+        ral_core::host::xdg(ral_core::path::XdgKind::Config).map(|d| d.join("ral/rc")),
         ral_core::host::home_dot(".ralrc"),
     ];
     for cand in candidates.into_iter().flatten() {
@@ -348,7 +348,7 @@ pub(super) fn find_ralrc() -> Option<String> {
     reason = "[silent:history-mkdir] ensures the repl config dir exists for the history file; not turn-time model I/O"
 )]
 pub(super) fn dirs_history() -> Option<String> {
-    if let Some(dir) = ral_core::host::xdg(ral_core::host::XdgKind::Config).map(|d| d.join("ral")) {
+    if let Some(dir) = ral_core::host::xdg(ral_core::path::XdgKind::Config).map(|d| d.join("ral")) {
         let _ = std::fs::create_dir_all(&dir);
         return Some(dir.join("history").to_string_lossy().into_owned());
     }

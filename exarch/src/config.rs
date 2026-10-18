@@ -46,7 +46,7 @@ pub fn disk_warn_bytes() -> Result<Option<u64>, String> {
 /// Where exarch's declarations live.
 pub fn path() -> std::path::PathBuf {
     crate::app::EXARCH
-        .xdg_dir(ral_core::host::XdgKind::Config)
+        .xdg_dir(ral_core::path::XdgKind::Config)
         .join(CONFIG_FILE)
 }
 

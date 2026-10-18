@@ -66,10 +66,14 @@ pub(crate) fn linkers() -> Vec<RealPath> {
     let scope = crate::process::Scope::clone(&crate::process::DurableRoot::default());
     let found: BTreeSet<RealPath> = PATTERNS
         .iter()
-        .filter_map(|p| crate::glob::Glob::parse(&PathBuf::from(*p)).ok())
+        .filter_map(|p| crate::path::tree::glob::Glob::parse(&PathBuf::from(*p)).ok())
+        .map(std::sync::Arc::new)
         .flat_map(|g| {
-            g.walk(scope.clone())
+            g.walk()
+                .sightings(scope.clone())
                 .filter_map(Result::ok)
+                .map(|s| s.path)
+                .filter(|p| g.matches(p))
                 .collect::<Vec<_>>()
         })
         // Merged-/usr makes /lib/x and /usr/lib/x one inode: one real path.

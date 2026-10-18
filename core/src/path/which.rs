@@ -10,6 +10,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -259,8 +260,8 @@ fn anchor_to_cwd(p: PathBuf, cwd: SearchCwd<'_>) -> PathBuf {
 /// outright.  A user who wants the cwd searched writes `.`, which
 /// [`anchor_to_cwd`] honours deliberately.  The filter runs on the element as
 /// written, before anchoring turns `""` into the cwd itself.
-fn path_dirs(path_value: &str, cwd: SearchCwd<'_>) -> Vec<PathBuf> {
-    std::env::split_paths(&std::ffi::OsString::from(path_value))
+pub fn path_dirs(path_value: impl AsRef<OsStr>, cwd: SearchCwd<'_>) -> Vec<PathBuf> {
+    std::env::split_paths(path_value.as_ref())
         .filter(|dir| !dir.as_os_str().is_empty())
         .map(|dir| anchor_to_cwd(dir, cwd))
         .collect()
@@ -387,7 +388,6 @@ fn name_key_on(name: &str, rules: PathRules) -> std::borrow::Cow<'_, str> {
     reason = "PATHEXT is the Windows resolver's suffix list, not an XDG basedir: a PATH-probe env read, allowed at the call site like the other which/PATH probes here"
 )]
 fn windows_pathext_suffixes() -> Vec<String> {
-    use std::ffi::OsStr;
     let pathext =
         std::env::var_os("PATHEXT").unwrap_or_else(|| OsStr::new(DEFAULT_PATHEXT).to_os_string());
     pathext
@@ -642,44 +642,6 @@ mod memo_tests {
         // No `forget`, and still a fresh answer.
         assert_eq!(locate("./runme", None, SearchCwd::of(tmp.path())), None);
     }
-
-    /// `PATH` with a trailing separator, so the split yields an empty element.
-    fn with_trailing_separator(dir: &Path) -> String {
-        let sep = if cfg!(windows) { ';' } else { ':' };
-        format!("{}{sep}", as_path_value(dir))
-    }
-
-    #[test]
-    fn an_empty_path_entry_never_means_the_cwd() {
-        let _guard = cache_guard();
-        let here = tempfile::tempdir().unwrap();
-        let elsewhere = tempfile::tempdir().unwrap();
-        plant(here.path(), "runme");
-        let path_value = with_trailing_separator(elsewhere.path());
-
-        // The trailing separator is the user's `PATH` ending in `;` — noise,
-        // not a request to search wherever they happen to stand.
-        assert_eq!(
-            locate("runme", Some(&path_value), SearchCwd::of(here.path())),
-            None,
-        );
-    }
-
-    #[test]
-    fn search_misses_the_cwd_through_an_empty_entry() {
-        let _guard = cache_guard();
-        let here = tempfile::tempdir().unwrap();
-        let elsewhere = tempfile::tempdir().unwrap();
-        plant(here.path(), "runme");
-        let path_value = with_trailing_separator(elsewhere.path());
-
-        // The presence half walks the same list, so it cannot see a file the
-        // executable half was never offered — which is what a spurious 126 is.
-        assert!(matches!(
-            search("runme", Some(&path_value), SearchCwd::of(here.path())),
-            PathSearch::Missing,
-        ));
-    }
 }
 
 /// The Windows resolver's own rules: `%PATHEXT%` suffixes append to the name
@@ -801,13 +763,12 @@ mod tests {
     }
 
     #[test]
-    fn resolve_in_path_folds_the_dots_out_of_a_relative_entry() {
-        let tmp = tempfile::tempdir().unwrap();
-        let bin = tmp.path().join("bin");
-        std::fs::create_dir(&bin).unwrap();
-        touch(&bin.join("runme"), 0o755);
-        let hit = resolve_in_path("runme", "./bin", SearchCwd::of(tmp.path())).unwrap();
-        assert_eq!(hit, bin.join("runme").to_str().unwrap());
+    fn path_dirs_drops_empties_anchors_relatives_and_keeps_absolutes() {
+        let dirs = path_dirs("/usr/bin::./a/../b:/abs", SearchCwd::of(Path::new("/w")));
+        assert_eq!(
+            dirs,
+            [Path::new("/usr/bin"), Path::new("/w/b"), Path::new("/abs")]
+        );
     }
 
     /// The 126 case, and the only platform that has one: the presence half

@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use crate::capability::GrantStack;
-use crate::first_order::{Bytes, FOValue};
 use crate::first_order::datum::{Datum, tag, untag};
+use crate::first_order::{Bytes, FOValue};
 use crate::record;
 use crate::types::{HandleState, LeaseClass};
 
@@ -195,7 +195,10 @@ mod tests {
         use crate::capability::{Capabilities, Evidence, ExecGrant, ExecKey, Net};
         let mut stack = GrantStack::root();
         stack.push(Capabilities {
-            exec: Some(ExecGrant::from_iter([(ExecKey::Name("git".into()), Evidence::ALLOW)])),
+            exec: Some(ExecGrant::from_iter([(
+                ExecKey::Name("git".into()),
+                Evidence::ALLOW,
+            )])),
             net: Some(Net::Offline),
             ..Capabilities::root()
         });

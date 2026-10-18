@@ -1,8 +1,10 @@
 //! The single XDG base-directory resolver.
 //!
 //! Everything that asks where the user keeps their config/data/… goes
-//! through [`resolve_xdg`]: [`super::xdg`] for the host's own, and the `xdg:`
-//! grant sigil in [`crate::path::sigil`] with the overlay's home.
+//! through [`resolve_xdg_in`], which is pure: it reads variables through a closure.
+//! [`crate::host::resolve_xdg`] closes it over the process environment, for
+//! [`crate::host::xdg`] (the host's own bases) and the `xdg:` grant sigil in
+//! [`crate::path::sigil`] with the overlay's home.
 //!
 //! XDG everywhere: the Linux defaults (`.config`, `.local/share`, …) apply on
 //! every platform, macOS included.  An `XDG_*_HOME` override counts only when
@@ -47,18 +49,13 @@ impl XdgKind {
     }
 }
 
-/// [`resolve_xdg_in`] over the host process environment.
-pub(crate) fn resolve_xdg(kind: XdgKind, home: Option<&str>) -> Option<PathBuf> {
-    resolve_xdg_in(super::host_var, kind, home)
-}
-
 /// Resolve an XDG kind: an absolute `XDG_*_HOME` read through `env`, else
 /// `home` joined with the kind's [default suffix](XdgKind::default_suffix).
 ///
 /// `home` is the caller's, never a process-level `HOME` lookup, so a
 /// shell-scoped `HOME=` reaches here exactly as it reaches tilde expansion.
 /// The `XDG_*_HOME` vars themselves come from `env`: the process environment
-/// for [`resolve_xdg`].
+/// for [`crate::host::resolve_xdg`].
 ///
 /// `None` when nothing absolute resolves: no home to default under, and no
 /// absolute override to stand in for one.  An unknown home is thus not the
@@ -93,51 +90,37 @@ pub(crate) fn resolve_xdg_in(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use crate::test_env::with_var;
-
-    #[test]
-    fn unset_var_falls_back_to_home_default() {
-        with_var("XDG_STATE_HOME", None, || {
-            assert_eq!(
-                resolve_xdg(XdgKind::State, Some("/h")),
-                Some(PathBuf::from("/h/.local/state"))
-            );
-        });
-    }
-
-    #[test]
-    fn absolute_var_overrides_home() {
-        with_var("XDG_CACHE_HOME", Some("/var/cache/me"), || {
-            assert_eq!(
-                resolve_xdg(XdgKind::Cache, Some("/h")),
-                Some(PathBuf::from("/var/cache/me"))
-            );
-        });
-    }
-
-    #[test]
-    fn relative_var_is_ignored_per_spec() {
-        with_var("XDG_CONFIG_HOME", Some("relative/conf"), || {
-            assert_eq!(
-                resolve_xdg(XdgKind::Config, Some("/h")),
-                Some(PathBuf::from("/h/.config"))
-            );
-        });
-    }
 
     /// With no home the default has nothing to hang off, so the kind is
-    /// unresolved rather than rooted at `/` — but an absolute override still
+    /// unresolved rather than rooted at `/`; an absolute override still
     /// answers, home or no home.
     #[test]
-    fn unknown_home_resolves_only_through_an_absolute_override() {
-        with_var("XDG_DATA_HOME", None, || {
-            assert_eq!(resolve_xdg(XdgKind::Data, None), None);
-        });
-        with_var("XDG_DATA_HOME", Some("/srv/data"), || {
+    fn resolution_follows_the_override_then_the_home_default() {
+        use XdgKind::*;
+        let cases = [
+            (State, None, Some("/h"), Some("/h/.local/state")),
+            (
+                Cache,
+                Some("/var/cache/me"),
+                Some("/h"),
+                Some("/var/cache/me"),
+            ),
+            (
+                Config,
+                Some("relative/conf"),
+                Some("/h"),
+                Some("/h/.config"),
+            ),
+            (Data, None, None, None),
+            (Data, Some("/srv/data"), None, Some("/srv/data")),
+        ];
+        for (kind, var, home, want) in cases {
+            let env = |k: &str| var.filter(|_| k == kind.env_var()).map(String::from);
             assert_eq!(
-                resolve_xdg(XdgKind::Data, None),
-                Some(PathBuf::from("/srv/data"))
+                resolve_xdg_in(env, kind, home),
+                want.map(PathBuf::from),
+                "{kind:?} with {var:?} under {home:?}"
             );
-        });
+        }
     }
 }

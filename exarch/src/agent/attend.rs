@@ -348,7 +348,7 @@ impl Avatar {
             return Ok(None);
         }
         self.disk_checked = Some(Instant::now());
-        let mut total = crate::agent::resources::dir_size(self.log.borrow().dir());
+        let mut total = ral_core::path::tree::bytes(self.log.borrow().dir());
         if let Some((_, bytes)) = self.scratch_bytes()? {
             total += bytes;
         }

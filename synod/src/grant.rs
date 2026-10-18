@@ -29,7 +29,7 @@
 //! the construction lives here and is not scattered across the session.
 
 use ral_core::capability::{Capabilities, Evidence, ExecKey, FsPolicy};
-use ral_core::path::FrozenPath;
+use ral_core::path::{Allow, Deny, FrozenPath, RealPath};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -165,7 +165,7 @@ pub(crate) const GUEST_SCRATCH: &str = "/tmp";
 pub struct Grant {
     /// The granted folder: absolute, symlink-resolved, known to exist
     /// and to be a readable directory at the moment of opening.
-    root: PathBuf,
+    root: RealPath,
 }
 
 impl Grant {
@@ -187,14 +187,7 @@ impl Grant {
     /// intention.  Every refusal says what to pick instead.
     pub fn open(folder: &Path) -> Result<Self, String> {
         let shown = folder.display();
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "path: strict canonicalisation of the folder the user just pointed at. \
-                      `canonicalise_strict` names exactly this shape but is pub(crate) in \
-                      ral_core, so the discipline's own helper does not cross the crate \
-                      boundary; the io::ErrorKind is what every refusal below is phrased from"
-        )]
-        let root = std::fs::canonicalize(folder).map_err(|e| match e.kind() {
+        let root = RealPath::of(folder).map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => format!(
                 "There is nothing at {shown}. Check the name, \
                  or choose the folder again from the picker."
@@ -206,7 +199,7 @@ impl Grant {
             _ => format!("Synod could not open {shown}: {e}. Please choose another folder."),
         })?;
 
-        if !root.is_dir() {
+        if !root.as_path().is_dir() {
             return Err(format!(
                 "{shown} is a single file, not a folder. \
                  Choose the folder that holds it, and synod will work on everything inside."
@@ -221,11 +214,10 @@ impl Grant {
             reason = "REASONED-SILENT: checking the folder is listable before minting \
                       the grant, before any model runs"
         )]
-        std::fs::read_dir(&root).map_err(|e| {
+        std::fs::read_dir(root.as_path()).map_err(|e| {
             format!(
-                "Synod cannot see what is inside {} ({e}). \
+                "Synod cannot see what is inside {root} ({e}). \
                  Ask whoever administers this computer whether you have permission to open this folder.",
-                root.display()
             )
         })?;
 
@@ -256,40 +248,41 @@ impl Grant {
     /// [`Territory::scratch`]: on Windows the temp folder lives under the
     /// local `AppData`, but it holds no settings and runs nothing at sign-in,
     /// and it is where a document opened from an email attachment lands.
-    fn refuse_too_much(root: &Path, territory: &Territory) -> Result<(), String> {
-        if root.parent().is_none() {
+    fn refuse_too_much(root: &RealPath, territory: &Territory) -> Result<(), String> {
+        if root.as_path().parent().is_none() {
             return Err(format!(
-                "{} is the whole disk — every file on this computer. \
-                 Choose the one folder that holds the documents for this job.",
-                root.display()
+                "{root} is the whole disk — every file on this computer. \
+                 Choose the one folder that holds the documents for this job."
             ));
         }
 
-        let Some(home) = territory.home.as_deref() else {
+        let Some(home) = territory.home.as_ref() else {
             return Ok(()); // No home to contain: nothing for either law to say.
         };
-        if within(home, root) {
-            return Err(if within(root, home) {
+        if home.within::<Deny>(root) {
+            return Err(if root.within::<Deny>(home) {
                 format!(
                     "{} is your whole home folder — your entire computer's worth of files. \
                      Choose the one folder that holds the documents for this job, \
                      such as {}.",
-                    root.display(),
-                    home.join("Documents").join("Admissions").display()
+                    root,
+                    home.as_path()
+                        .join("Documents")
+                        .join("Admissions")
+                        .display()
                 )
             } else {
                 format!(
-                    "{} contains your home folder, and so nearly everything you own. \
-                     Choose the one folder that holds the documents for this job.",
-                    root.display()
+                    "{root} contains your home folder, and so nearly everything you own. \
+                     Choose the one folder that holds the documents for this job."
                 )
             });
         }
 
         let in_scratch = territory
             .scratch
-            .as_deref()
-            .is_some_and(|tmp| strictly_within(root, tmp));
+            .as_ref()
+            .is_some_and(|tmp| root.within::<Allow>(tmp) && root != tmp);
         if in_scratch {
             return Ok(());
         }
@@ -298,27 +291,28 @@ impl Grant {
                 "{} is where the programs on this computer keep their own settings, \
                  and some of what is kept there runs by itself the next time you sign in. \
                  Choose a folder of documents instead, such as one inside {}.",
-                root.display(),
-                home.join("Documents").display()
+                root,
+                home.as_path().join("Documents").display()
             )
         };
         for tree in &territory.settings {
-            if within(root, tree) {
+            if root.within::<Deny>(tree) {
                 return Err(settings_refusal());
             }
-            if within(tree, root) {
+            if tree.within::<Deny>(root) {
                 return Err(format!(
-                    "{} holds {}, where the programs on this computer keep their own settings, \
+                    "{root} holds {tree}, where the programs on this computer keep their own settings, \
                      and some of what is kept there runs by itself the next time you sign in. \
-                     Choose the one folder inside it that holds the documents for this job.",
-                    root.display(),
-                    tree.display()
+                     Choose the one folder inside it that holds the documents for this job."
                 ));
             }
         }
-        let hidden = rest_after(root, home)
-            .and_then(|mut rest| rest.next())
-            .is_some_and(|first| first.as_os_str().to_string_lossy().starts_with('.'));
+        let hidden = root.within::<Deny>(home)
+            && root
+                .as_path()
+                .components()
+                .nth(home.as_path().components().count())
+                .is_some_and(|first| first.as_os_str().to_string_lossy().starts_with('.'));
         if hidden {
             return Err(settings_refusal());
         }
@@ -327,7 +321,7 @@ impl Grant {
 
     /// The granted folder, absolute and resolved.
     pub fn root(&self) -> &Path {
-        &self.root
+        self.root.as_path()
     }
 
     /// The folder's name as the user sees it in Finder or Explorer — the
@@ -335,8 +329,8 @@ impl Grant {
     /// Always the final component: [`Self::open`] refuses the disk root,
     /// the only canonical path without one.
     pub fn name(&self) -> String {
-        self.root.file_name().map_or_else(
-            || self.root.display().to_string(),
+        self.root.as_path().file_name().map_or_else(
+            || self.root.to_string(),
             |n| n.to_string_lossy().into_owned(),
         )
     }
@@ -356,7 +350,7 @@ impl Grant {
     pub fn machine_spec(&self) -> vm_manager::MachineSpec {
         vm_manager::MachineSpec {
             memory_mib: 6144,
-            ..vm_manager::MachineSpec::for_folder(self.root.clone())
+            ..vm_manager::MachineSpec::for_folder(self.root.as_path())
         }
     }
 
@@ -446,14 +440,14 @@ impl Grant {
 #[derive(Debug, Default)]
 struct Territory {
     /// The user's home folder, if the host names one.
-    home: Option<PathBuf>,
+    home: Option<RealPath>,
     /// The per-user application-data trees: where programs keep their
     /// settings, and where the places that run things at sign-in live.
     /// See [`settings_trees`].
-    settings: Vec<PathBuf>,
+    settings: Vec<RealPath>,
     /// The system temp folder, strictly inside which a grant is allowed
     /// even when the temp folder itself lies in a settings tree.
-    scratch: Option<PathBuf>,
+    scratch: Option<RealPath>,
 }
 
 impl Territory {
@@ -461,22 +455,20 @@ impl Territory {
     #[allow(
         clippy::disallowed_methods,
         reason = "host-env: the territory being protected is the launching user's real home and \
-                  application-data folders, read from this process's own environment and \
-                  canonicalised for the comparison"
+                  application-data folders, read from this process's own environment"
     )]
     fn of_this_host() -> Self {
-        // A tree that does not exist yet is compared as spelled: it can
-        // still be created inside a grant, so it is still refused.
-        let canonical = |p: PathBuf| std::fs::canonicalize(&p).unwrap_or(p);
-        let home = ral_core::host::home().map(|h| canonical(PathBuf::from(h)));
+        // Lenient: a settings tree not created yet is still refused.
+        let home = ral_core::host::home().map(PathBuf::from);
         let settings = settings_trees(home.as_deref(), |name| std::env::var_os(name))
-            .into_iter()
-            .map(canonical)
+            .iter()
+            .map(|p| RealPath::lenient(p))
             .collect();
+        let home = home.map(|h| RealPath::lenient(&h));
         Self {
             home,
             settings,
-            scratch: Some(canonical(std::env::temp_dir())),
+            scratch: Some(RealPath::lenient(&std::env::temp_dir())),
         }
     }
 }
@@ -513,50 +505,6 @@ fn settings_trees(
         trees.extend([h.join(".config"), h.join(".local")]);
     }
     trees
-}
-
-/// What remains of `path` after `base`, if `path` is `base` or lies inside
-/// it — compared component by component, as [`Path::starts_with`] does,
-/// and on Windows without regard to case, since its filesystem folds case.
-/// A drive prefix compares by its letter alone, so `\\?\C:` (the canonical
-/// spelling) and `C:` (an environment variable's) agree.
-fn rest_after<'a>(path: &'a Path, base: &Path) -> Option<std::path::Components<'a>> {
-    let mut rest = path.components();
-    for want in base.components() {
-        if !same_component(rest.next()?, want) {
-            return None;
-        }
-    }
-    Some(rest)
-}
-
-/// Whether `path` is `base` or lies inside it.
-fn within(path: &Path, base: &Path) -> bool {
-    rest_after(path, base).is_some()
-}
-
-/// Whether `path` lies inside `base` and is not `base` itself.
-fn strictly_within(path: &Path, base: &Path) -> bool {
-    rest_after(path, base).is_some_and(|mut rest| rest.next().is_some())
-}
-
-/// One component of [`rest_after`]'s comparison.
-fn same_component(a: std::path::Component<'_>, b: std::path::Component<'_>) -> bool {
-    use std::path::{Component, Prefix};
-    if !cfg!(windows) {
-        return a == b;
-    }
-    let disk = |c: Component<'_>| match c {
-        Component::Prefix(p) => match p.kind() {
-            Prefix::Disk(d) | Prefix::VerbatimDisk(d) => Some(d.to_ascii_uppercase()),
-            _ => None,
-        },
-        _ => None,
-    };
-    match (disk(a), disk(b)) {
-        (Some(x), Some(y)) => x == y,
-        _ => a.as_os_str().eq_ignore_ascii_case(b.as_os_str()),
-    }
 }
 
 #[cfg(test)]
@@ -644,14 +592,17 @@ mod tests {
         let home = fake_home();
         let app_data = home.join("AppData");
         Territory {
-            settings: vec![app_data.join("Roaming"), app_data.join("Local")],
-            scratch: Some(app_data.join("Local").join("Temp")),
-            home: Some(home),
+            settings: vec![
+                RealPath::assumed(app_data.join("Roaming")),
+                RealPath::assumed(app_data.join("Local")),
+            ],
+            scratch: Some(RealPath::assumed(app_data.join("Local").join("Temp"))),
+            home: Some(RealPath::assumed(home)),
         }
     }
 
     fn judged(root: &Path) -> Result<(), String> {
-        Grant::refuse_too_much(root, &fake_territory())
+        Grant::refuse_too_much(&RealPath::assumed(root), &fake_territory())
     }
 
     /// The finding this law answers: the Startup folder runs what it holds
@@ -722,27 +673,6 @@ mod tests {
         judged(&temp).expect_err("the whole temp folder is still a settings tree's");
     }
 
-    /// Windows paths fold case and have two spellings of a drive; the
-    /// comparison must agree with the filesystem on both, or a grant of
-    /// `c:\users\ada\appdata\roaming` would slip past the law.
-    #[cfg(windows)]
-    #[test]
-    fn the_comparison_folds_case_and_drive_spelling_on_windows() {
-        for root in [
-            r"\\?\c:\users\ADA\appdata\roaming\Microsoft",
-            r"c:\USERS\ada\AppData\Roaming",
-        ] {
-            judged(Path::new(root)).expect_err("the same folder spelled differently");
-        }
-        assert!(
-            judged(Path::new(r"\\?\C:\USERS\ADA"))
-                .expect_err("home, spelled differently")
-                .contains("your whole home folder")
-        );
-        judged(Path::new(r"D:\Users\ada\AppData\Roaming"))
-            .expect("another drive is another folder");
-    }
-
     #[cfg(windows)]
     #[test]
     fn the_settings_trees_on_windows_follow_the_environment() {
@@ -796,11 +726,12 @@ mod tests {
         let Some(roaming) = std::env::var_os("APPDATA").map(PathBuf::from) else {
             return; // Nothing names a roaming AppData here; nothing to assert.
         };
-        let roaming = std::fs::canonicalize(&roaming).unwrap_or(roaming);
-        let startup = roaming.join(r"Microsoft\Windows\Start Menu\Programs\Startup");
+        let startup =
+            RealPath::lenient(&roaming.join(r"Microsoft\Windows\Start Menu\Programs\Startup"));
         Grant::refuse_too_much(&startup, &territory).expect_err("the real Startup folder");
         let (_dir, grant) = granted("grant-real-temp");
-        Grant::refuse_too_much(grant.root(), &territory).expect("a folder inside temp");
+        Grant::refuse_too_much(&RealPath::assumed(grant.root()), &territory)
+            .expect("a folder inside temp");
     }
 
     /// An ordinary folder opens, and `root` is the resolved form — the

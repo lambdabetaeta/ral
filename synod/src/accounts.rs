@@ -42,7 +42,7 @@ pub fn wallet() -> Wallet {
     Wallet {
         keychain: Keychain::for_app(SYNOD),
         declarations: SYNOD
-            .xdg_dir(ral_core::host::XdgKind::Config)
+            .xdg_dir(ral_core::path::XdgKind::Config)
             .join(DECLARATIONS_FILE),
         label: LABEL,
     }

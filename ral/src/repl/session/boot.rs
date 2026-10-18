@@ -201,7 +201,7 @@ pub(super) fn setup_panic_hook() {
 fn crash_log_dir() -> std::path::PathBuf {
     // A crash report must land somewhere; with no home the temp dir is the
     // honest last resort, where writing it under the cwd would not be.
-    ral_core::host::xdg(ral_core::host::XdgKind::State)
+    ral_core::host::xdg(ral_core::path::XdgKind::State)
         .unwrap_or_else(std::env::temp_dir)
         .join("ral")
 }

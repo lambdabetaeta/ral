@@ -75,10 +75,10 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     // ── core ──────────────────────────────────────────────────────────────
     ("core/src/builtins/misc.rs", "silent:ask-tty"),
     ("core/src/builtins/modules.rs", "silent:module-load"),
-    ("core/src/glob.rs", "silent:glob-walk"),
     ("core/build.rs", "silent:prelude-bake-build"),
     ("core/src/invocation.rs", "silent:argv-before-main"),
     ("core/src/load/profile.rs", "silent:cap-load"),
+    ("core/src/path/tree/walk.rs", "silent:tree-walk"),
     ("core/src/boot.rs", "silent:prelude-bake"),
     // The fs sites: `path/walk.rs` is the one file that opens a model-named
     // object, so every site below is a step of the locate-then-open recipe.
@@ -110,7 +110,7 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
         "silent:cloexec-socketpair",
     ),
     ("core/src/process/spawn_lock.rs", "silent:spawn-door"),
-    ("core/src/engine/probe/fs.rs", "silent:probe-path-bytes"),
+    ("core/src/path/tree.rs", "silent:tree-bytes"),
     ("core/src/engine/probe/fs.rs", "silent:probe-path-entries"),
     ("core/src/sandbox/reexec.rs", "silent:self-reexec-windows"),
     ("core/src/sandbox.rs", "silent:restricted-envelope-probe"),
@@ -183,7 +183,6 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ("guest-net/src/vet.rs", "silent:vet-dial"),
     ("guest-net/src/vet.rs", "silent:vet-resolve"),
     // ── exarch ────────────────────────────────────────────────────────────
-    ("exarch/src/shell_eval/builtins.rs", "silent:tree-walk"),
     ("exarch/src/app.rs", "silent:log-run-dir"),
     ("exarch/src/app.rs", "silent:scratch-bootstrap"),
     ("exarch/src/app.rs", "silent:scratch-reap"),
@@ -258,10 +257,6 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ("exarch/src/skill.rs", "surface:skill-list"),
     ("exarch/src/provider/state.rs", "silent:state-read"),
     ("exarch/src/provider/state.rs", "silent:state-write"),
-    (
-        "exarch/src/agent/resources.rs",
-        "silent:resources-disk-probe",
-    ),
     ("exarch/src/tui/terminal.rs", "silent:editor-compose"),
     ("exarch/src/tui/terminal.rs", "silent:stderr-log"),
     ("exarch/src/tui/terminal.rs", "silent:stderr-log-windows"),

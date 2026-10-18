@@ -7,11 +7,10 @@ use crate::skill;
 use grep::matcher::LineTerminator;
 use grep::regex::RegexMatcherBuilder;
 use grep::searcher::{BinaryDetection, SearcherBuilder, sinks::Lossy};
-use ignore::WalkBuilder;
-use ral_core::builtins::util::regex_err;
+use ral_core::builtins::util::{checked_read_path, regex_err};
 use ral_core::capability::FsOp;
 use ral_core::fact::{Grep, Read};
-use ral_core::path::LexicalPath;
+use ral_core::path::tree::walk::Walk;
 use ral_core::text::rank;
 use ral_core::ty::Site;
 use ral_core::ty::{Scheme, Ty, closed_record};
@@ -22,6 +21,7 @@ use ral_core::{HostSurface, Shell, Value};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::Read as _;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 pub(crate) mod harness;
@@ -163,9 +163,13 @@ enum Eol {
 
 impl Eol {
     fn of(bytes: &[u8]) -> Self {
-        let bare_lf = bytes.starts_with(b"\n")
-            || bytes.windows(2).any(|w| w[1] == b'\n' && w[0] != b'\r');
-        if bytes.contains(&b'\n') && !bare_lf { Self::Crlf } else { Self::Lf }
+        let bare_lf =
+            bytes.starts_with(b"\n") || bytes.windows(2).any(|w| w[1] == b'\n' && w[0] != b'\r');
+        if bytes.contains(&b'\n') && !bare_lf {
+            Self::Crlf
+        } else {
+            Self::Lf
+        }
     }
 
     const fn terminator(self) -> &'static str {
@@ -295,54 +299,6 @@ fn builtin_view_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
     ))
 }
 
-/// A walked entry the live grant admits by name: `path` as the guards judge
-/// it, and `shown`, the name a reader takes back (cwd-relative when under the
-/// cwd, else absolute).
-struct Listed {
-    entry: ignore::DirEntry,
-    path: LexicalPath,
-    shown: String,
-}
-
-impl Listed {
-    fn is_file(&self) -> bool {
-        self.entry.file_type().is_some_and(|ft| ft.is_file())
-    }
-}
-
-/// Walk `builder`'s tree, handing `visit` each entry the live grant admits.
-/// An `ignore::Walk` runs to completion regardless of cancellation, so this
-/// polls atop every entry.  A denied entry and one the walk cannot read are
-/// both skipped silently: one off-limits path cannot blank a listing, and no
-/// refusal or error names it.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:tree-walk] The one sanctioned WalkBuilder::build site, beneath every exarch tree walk: a listing's value is the list it returns, and grep-files surfaces one `grep` card above the whole walk."
-)]
-fn walk_admitted(
-    shell: &mut Shell,
-    builder: &WalkBuilder,
-    mut visit: impl FnMut(&mut Shell, Listed) -> Settled<()>,
-) -> Settled<()> {
-    let cwd = shell.resolve(".").into_inner();
-    for raw in builder.build() {
-        shell.poll()?;
-        let Ok(entry) = raw else { continue };
-        let path = shell.anchor(entry.path());
-        if !shell.admits_fs_exact(&FsOp::Read, &path.canonicalise_lenient()) {
-            continue;
-        }
-        let shown = entry
-            .path()
-            .strip_prefix(&cwd)
-            .unwrap_or_else(|_| entry.path())
-            .to_string_lossy()
-            .into_owned();
-        visit(shell, Listed { entry, path, shown })?;
-    }
-    Ok(())
-}
-
 /// One matching line from [`search_tree`], its file named as `view-text` takes it.
 struct SearchHit {
     file: String,
@@ -360,7 +316,7 @@ const fn grep_name(hidden: bool) -> &'static str {
 /// ignored entries, or with `hidden` only `.git`; `path` itself is always
 /// searched.  A file is read through the door on the object it names, and
 /// binary detection quits at NUL; this is the one site both grep builtins
-/// compose over.  A hit names its file as [`walk_admitted`] shows it.
+/// compose over.  A hit names its file as its admitted [`Walk`] does.
 fn search_tree(
     shell: &mut Shell,
     hidden: bool,
@@ -372,18 +328,12 @@ fn search_tree(
         .crlf(true)
         .build(pattern)
         .map_err(|e| sig(regex_err(name, pattern, &e.to_string())))?;
-    let root = checked_read_path(shell, path)?;
-    if !root.exists() {
-        return Err(sig(format!(
-            "{name}: {path} does not exist; the path is a file or directory, relative to the cwd or absolute."
-        )));
-    }
-    let mut walk = WalkBuilder::new(&root);
-    walk.git_global(false);
-    if hidden {
-        walk.standard_filters(false)
-            .filter_entry(|e| e.file_name() != ".git");
-    }
+    let root = walk_root(shell, name, path)?;
+    let tree = if hidden {
+        Walk::everything(&root).keeping(|p| p.file_name() != Some(".git".as_ref()))
+    } else {
+        Walk::tracked(&root)
+    };
     let mut searcher = SearcherBuilder::new()
         .line_terminator(LineTerminator::crlf())
         .line_number(true)
@@ -391,12 +341,13 @@ fn search_tree(
         .build();
 
     let mut results = Vec::new();
-    walk_admitted(shell, &walk, |shell, listed| {
-        if !listed.is_file() {
-            return Ok(());
+    let mut walk = tree.admitted(shell, name, path);
+    while let Some(entry) = walk.next(shell)? {
+        if !entry.is_file() {
+            continue;
         }
-        let Some(located) = shell.locate_if_admitted(&listed.path, &FsOp::Read) else {
-            return Ok(());
+        let Some(located) = shell.locate_if_admitted(&entry.path, &FsOp::Read) else {
+            continue;
         };
         let mut bytes = Vec::new();
         if located
@@ -404,25 +355,30 @@ fn search_tree(
             .and_then(|mut f| f.read_to_end(&mut bytes))
             .is_err()
         {
-            return Ok(());
+            continue;
         }
         // Cut by the file's own ending, so a hit is the row `view-text` shows.
         let term = Eol::of(&bytes).terminator();
+        let mut lines = Vec::new();
         searcher
             .search_slice(
                 &matcher,
                 &bytes,
-                Lossy(|line_num, line| {
-                    results.push(SearchHit {
-                        file: listed.shown.clone(),
-                        line: line_num,
-                        text: line.strip_suffix(term).unwrap_or(line).to_string(),
-                    });
+                Lossy(|line, text| {
+                    lines.push((line, text.strip_suffix(term).unwrap_or(text).to_string()));
                     Ok(true)
                 }),
             )
-            .map_err(|e| sig(format!("{name}: {}: {e}", listed.shown)))
-    })?;
+            .map_err(|e| sig(format!("{name}: {}: {e}", entry.path.as_path().display())))?;
+        if !lines.is_empty() {
+            let file = entry.name()?;
+            results.extend(lines.into_iter().map(|(line, text)| SearchHit {
+                file: file.clone(),
+                line,
+                text,
+            }));
+        }
+    }
     Ok(results)
 }
 
@@ -742,7 +698,7 @@ fn unindented_match(body: &str, from: &str) -> Option<usize> {
         .map(|i| i + 1)
 }
 
-/// `explore-dir DEPTH` — list the cwd's tree (ignore-aware) to `DEPTH`.
+/// `explore-dir DEPTH PATH` — list PATH's tree (ignore-aware) to `DEPTH`.
 fn builtin_explore_dir(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let depth: usize = match &args[0] {
         Value::Int(n) if *n >= 0 => {
@@ -766,20 +722,17 @@ fn builtin_explore_dir(args: &[Value], _mooring: &Mooring, shell: &mut Shell) ->
             )));
         }
     };
-    let root = checked_read_path(shell, ".")?;
+    let path = args[1].as_str("explore-dir")?;
+    let root = walk_root(shell, "explore-dir", path)?;
+    let mut walk = Walk::tracked(&root)
+        .depth(Some(depth))
+        .admitted(shell, "explore-dir", path);
     let mut entries = Vec::new();
-    walk_admitted(
-        shell,
-        WalkBuilder::new(&root)
-            .max_depth(Some(depth))
-            .git_global(false),
-        |_, listed| {
-            if listed.entry.depth() > 0 {
-                entries.push(Value::string(listed.shown));
-            }
-            Ok(())
-        },
-    )?;
+    while let Some(entry) = walk.next(shell)? {
+        if entry.depth > 0 {
+            entries.push(Value::string(entry.name()?));
+        }
+    }
     Ok(Value::list(entries))
 }
 
@@ -791,29 +744,33 @@ macro_rules! find_limit {
 }
 const FIND_LIMIT: usize = find_limit!();
 
-/// `find-files QUERY` — the cwd's files, walked as `grep-files` walks, ranked
-/// by path against QUERY.  The grant filters before the ranking cuts, so a
-/// denied match neither takes a slot nor shows in the count.
+/// `find-files QUERY PATH` — the files under PATH, walked as `grep-files`
+/// walks, ranked by path against QUERY.  The grant filters before the ranking
+/// cuts, so a denied match neither takes a slot nor shows in the count.
 fn builtin_find_files(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let query = args[0].as_str("find-files")?;
-    let root = checked_read_path(shell, ".")?;
+    let path = args[1].as_str("find-files")?;
+    let root = walk_root(shell, "find-files", path)?;
+    let mut walk = Walk::tracked(&root).admitted(shell, "find-files", path);
     let mut files = Vec::new();
-    walk_admitted(
-        shell,
-        WalkBuilder::new(&root).git_global(false),
-        |_, listed| {
-            if listed.is_file() {
-                files.push(listed.shown);
-            }
-            Ok(())
-        },
-    )?;
+    while let Some(entry) = walk.next(shell)? {
+        if entry.is_file() {
+            files.push(entry.name()?);
+        }
+    }
     let best = rank(query, files).into_iter().take(FIND_LIMIT);
     Ok(Value::list(best.map(Value::string).collect()))
 }
 
-fn checked_read_path(shell: &mut Shell, path: &str) -> Settled<std::path::PathBuf> {
-    Ok(ral_core::builtins::util::checked_read_path(shell, path)?.into_inner())
+/// The grant-checked root of a walk; a missing one is an error, not an empty walk.
+fn walk_root(shell: &mut Shell, who: &str, path: &str) -> Settled<PathBuf> {
+    let root = checked_read_path(shell, path)?.into_inner();
+    if !root.exists() {
+        return Err(sig(format!(
+            "{who}: {path} does not exist; the path is a file or directory, relative to the cwd or absolute."
+        )));
+    }
+    Ok(root)
 }
 
 fn scheme_grep_files(_u: &mut Unifier) -> Scheme {
@@ -887,10 +844,18 @@ fn scheme_edit_replace(_u: &mut Unifier) -> Scheme {
     )
 }
 fn scheme_explore_dir(_u: &mut Unifier) -> Scheme {
-    scheme(&[], &[], thunk(fun(Ty::Int, pure(Ty::list(Ty::String)))))
+    scheme(
+        &[],
+        &[],
+        thunk(fun(Ty::Int, fun(Ty::String, pure(Ty::list(Ty::String))))),
+    )
 }
 fn scheme_find_files(_u: &mut Unifier) -> Scheme {
-    scheme(&[], &[], thunk(fun(Ty::String, pure(Ty::list(Ty::String)))))
+    scheme(
+        &[],
+        &[],
+        thunk(fun(Ty::String, fun(Ty::String, pure(Ty::list(Ty::String))))),
+    )
 }
 
 fn scheme_skill(_u: &mut Unifier) -> Scheme {
@@ -908,7 +873,7 @@ fn builtin_skill(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settle
         )));
     }
     let cwd = shell.cwd();
-    let config_dir = crate::app::EXARCH.xdg_dir(ral_core::host::XdgKind::Config);
+    let config_dir = crate::app::EXARCH.xdg_dir(ral_core::path::XdgKind::Config);
     for root in skill::skill_roots(&cwd, &config_dir) {
         let dir = root.join(name);
         let sk_md = dir.join("SKILL.md");
@@ -921,7 +886,10 @@ fn builtin_skill(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settle
                 continue;
             }
             let body = skill::read_skill_body(&dir).map_err(|why| {
-                sig(format!("skill: could not load '{name}' from {}: {why}", sk_md.display()))
+                sig(format!(
+                    "skill: could not load '{name}' from {}: {why}",
+                    sk_md.display()
+                ))
             })?;
             // Only once the body is in hand, so the card never claims a load
             // that did not happen.
@@ -954,7 +922,7 @@ fn scheme_skill_list(_u: &mut Unifier) -> Scheme {
 )]
 fn builtin_skill_list(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let cwd = shell.cwd();
-    let config_dir = crate::app::EXARCH.xdg_dir(ral_core::host::XdgKind::Config);
+    let config_dir = crate::app::EXARCH.xdg_dir(ral_core::path::XdgKind::Config);
     let all = skill::discover_all(&cwd, &config_dir);
     let (mut entries, mut errors) = (Vec::new(), Vec::new());
     for (name, dir) in &all {
@@ -1081,7 +1049,7 @@ static EXARCH_BUILTINS_ARR: [BuiltinEntry; 12] = [
     BuiltinEntry::new(
         Cow::Borrowed("explore-dir"),
         scheme_explore_dir,
-        "explore-dir <n>  — list directory entries up to depth n respecting ignore files.",
+        "explore-dir <n> <path>  — the entries beneath PATH up to depth n, as [String], each named as view-text takes it. The walk skips hidden and ignored entries beneath PATH, as grep-files does.",
         BuiltinBody::Static(builtin_explore_dir),
     ),
     BuiltinEntry::new(
@@ -1100,9 +1068,9 @@ static EXARCH_BUILTINS_ARR: [BuiltinEntry; 12] = [
         Cow::Borrowed("find-files"),
         scheme_find_files,
         concat!(
-            "find-files <query>  — the working tree's files fuzzy-ranked by path against QUERY, best first, at most ",
+            "find-files <query> <path>  — the files under PATH, a file or a directory, fuzzy-ranked by path against QUERY, best first, at most ",
             find_limit!(),
-            ", as [String]. The walk skips hidden and ignored entries, as grep-files does."
+            ", as [String]; each is named as view-text takes it. The walk skips hidden and ignored entries beneath PATH, as grep-files does."
         ),
         BuiltinBody::Static(builtin_find_files),
     ),

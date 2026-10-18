@@ -214,9 +214,9 @@ fn read_anchor_reports(mut report: os_pipe::PipeReader, tx: &Sender<Event>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::process::DurableRoot;
     #[cfg(unix)]
     use crate::process::CancelCause;
+    use crate::process::DurableRoot;
 
     /// An owning group whose channel nobody reads — enough for every test
     /// that only wants a real pgid.

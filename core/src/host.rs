@@ -5,18 +5,16 @@
 //! one.  Nothing here reads language state: a `within [env: …]` overlay never
 //! applies, and code holding a shell threads its overlay through
 //! [`EnvVars::home`](crate::types::EnvVars::home) instead.  This module imports
-//! nothing from the crate, so the host's facts are read here and only here.
+//! nothing from the crate but the pure XDG rules of [`crate::path::basedir`], so
+//! the host's facts are read here and only here.
 //!
 //! A fact that is absent stays absent: no `.`, no `/`, no placeholder.
 //! Substituting one would spend the caller's only chance to say something
 //! true, and every caller has a different true thing to say.
 
-mod basedir;
-
 use std::path::PathBuf;
 
-pub use basedir::XdgKind;
-pub(crate) use basedir::{resolve_xdg, resolve_xdg_in};
+use crate::path::{XdgKind, resolve_xdg_in};
 
 pub(crate) const HOME_VARS: [&str; 2] = ["HOME", "USERPROFILE"];
 pub(crate) const USER_VARS: [&str; 2] = ["USER", "USERNAME"];
@@ -33,6 +31,11 @@ pub(crate) fn first_bound(keys: &[&str], read: impl Fn(&str) -> Option<String>) 
 
 fn host_var(key: &str) -> Option<String> {
     std::env::var(key).ok()
+}
+
+/// [`resolve_xdg_in`] over the host process environment.
+pub(crate) fn resolve_xdg(kind: XdgKind, home: Option<&str>) -> Option<PathBuf> {
+    resolve_xdg_in(host_var, kind, home)
 }
 
 /// Process working directory, for callers with no shell to ask; shells go

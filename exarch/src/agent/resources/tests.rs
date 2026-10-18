@@ -26,19 +26,6 @@ fn resources_card_renders_one_field_per_row() {
     assert_eq!(spans[0].text, "7", "an unarmed cap adds nothing");
 }
 
-/// A missing directory reads zero rather than failing the fold.
-#[test]
-fn dir_size_sums_files_recursively() {
-    let root = std::env::temp_dir().join(format!("exarch-dirsize-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(root.join("sub")).unwrap();
-    std::fs::write(root.join("a"), b"12345").unwrap();
-    std::fs::write(root.join("sub/b"), b"123").unwrap();
-    assert_eq!(dir_size(&root), 8);
-    assert_eq!(dir_size(&root.join("missing")), 0);
-    let _ = std::fs::remove_dir_all(&root);
-}
-
 fn row<'a>(rows: &'a [ProbeRow], name: &str) -> &'a ProbeRow {
     rows.iter()
         .find(|r| r.name == name)

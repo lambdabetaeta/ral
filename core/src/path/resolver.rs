@@ -32,6 +32,11 @@ impl Resolver<'_> {
         }
     }
 
+    /// Whether `raw` resolves against `cwd`: no sigil head, and relative.
+    pub fn is_relative(&self, raw: &str) -> bool {
+        !lex::is_absolute(&sigil::expand_path_prefix(raw, self.home.as_deref()))
+    }
+
     /// Stages 1 and 2: expand `~`/`xdg:`, then anchor and fold against `cwd`.
     /// Pure — no filesystem access.
     pub fn resolve(&self, raw: &str) -> LexicalPath {

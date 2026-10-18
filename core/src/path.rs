@@ -5,7 +5,8 @@
 //! ancestor-walk fallback (`canon`), alias-aware containment
 //! (`identity::path_within`), and — only where a name is about to be *written
 //! through* — symlink-free location of the object itself (`walk`), so the
-//! guard judges what the kernel will touch.
+//! guard judges what the kernel will touch.  Beside the stages, `tree`
+//! enumerates a directory tree, judging each entry by its own path.
 //!
 //! Stage 2 mints a [`LexicalPath`]; the grant side mints a
 //! [`FrozenPath`] through the same folding kernel, so an access-side
@@ -17,6 +18,7 @@
 //! caller — both fs (`FrozenPath::contains`) and exec (`RealPath::within`,
 //! over a prefix's frozen `real` form) judge the object.
 
+pub(crate) mod basedir;
 pub(crate) mod canon;
 pub(crate) mod device;
 pub(crate) mod forms;
@@ -30,20 +32,23 @@ pub(crate) mod resolver;
 pub mod sigil;
 pub(crate) mod stage;
 pub mod tilde;
+pub mod tree;
 pub(crate) mod walk;
 pub(crate) mod which;
 
+pub use basedir::XdgKind;
+pub(crate) use basedir::resolve_xdg_in;
 pub use tilde::abbreviate_home;
 
 pub use forms::{FrozenPath, LexicalPath};
 pub use git::find_git_entry;
-pub(crate) use identity::{Allow, Deny, Polarity};
+pub use identity::{Allow, Deny, Polarity};
 pub(crate) use lex::proper_ancestors;
 pub use lex::{
     PathShape, basename, exists, is_absolute, is_dir, resolve_path, resolve_relative_to_script,
     resolve_str, shape,
 };
-pub(crate) use real::RealPath;
+pub use real::RealPath;
 #[cfg(unix)]
 pub(crate) use render::render_real;
 #[cfg(target_os = "macos")]
@@ -54,7 +59,7 @@ pub use resolver::Resolver;
 pub use walk::Located;
 pub(crate) use which::is_executable_file;
 pub(crate) use which::{PathSearch, search};
-pub use which::{SearchCwd, forget_located_commands, locate, resolve_in_path};
+pub use which::{SearchCwd, forget_located_commands, locate, path_dirs, resolve_in_path};
 pub(crate) use which::{WINDOWS_EXEC_EXTENSIONS, command_name_key};
 
 /// Which platform's path rules a question is asked under.

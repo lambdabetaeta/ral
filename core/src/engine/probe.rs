@@ -31,7 +31,7 @@ pub(crate) fn answer(shell: &Shell, probe: &Probe) -> FOValue {
             .map(str::to_string)
             .collect::<Vec<_>>()
             .encode(),
-        Probe::PathBytes(path) => fs::tree_bytes(&shell.cwd().join(path)).encode(),
+        Probe::PathBytes(path) => crate::path::tree::bytes(&shell.cwd().join(path)).encode(),
         Probe::Workers => shell
             .workers()
             .iter()

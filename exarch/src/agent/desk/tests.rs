@@ -1520,20 +1520,27 @@ fn a_child_is_told_its_own_grant() {
         |_| {},
     );
     let desk = Arc::new(ExarchDesk { services });
-    desk.services.agent.provider.swap(Arc::new(Provider::scripted(
-        "test-model",
-        Script::new().then(Reply::tool_calls(vec![ral_call(
-            "r1",
-            "exarch-agents `reply 'done'",
-        )])),
-    )));
+    desk.services
+        .agent
+        .provider
+        .swap(Arc::new(Provider::scripted(
+            "test-model",
+            Script::new().then(Reply::tool_calls(vec![ral_call(
+                "r1",
+                "exarch-agents `reply 'done'",
+            )])),
+        )));
     parked_by(
         &desk,
         r"exarch-agents `start [prompt: #'go'#, name: 'helper', type: `amnemon, grant: `confined, provider: `inherit, model: `inherit]",
         |desk, session| desk.ask(start_req(session, "go", "helper")),
     )
     .expect("a confined child starts");
-    let child = desk.services.fleet.resolve("helper").expect("the child is live");
+    let child = desk
+        .services
+        .fleet
+        .resolve("helper")
+        .expect("the child is live");
     assert!(
         child.system.contains("- net: deny\n"),
         "an unrestricted parent's confined child must be told it is offline:\n{}",

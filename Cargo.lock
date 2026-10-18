@@ -1909,7 +1909,6 @@ dependencies = [
  "getrandom 0.4.3",
  "gray_matter",
  "grep",
- "ignore",
  "jiff",
  "keyring",
  "libc",

@@ -27,7 +27,11 @@ use std::time::Duration;
 
 /// `stderr` without debug-build trace lines (`[[DEBUG] …`).
 pub fn diagnostics(stderr: &str) -> String {
-    stderr.lines().filter(|l| !l.starts_with("[[DEBUG] ")).collect::<Vec<_>>().join("\n")
+    stderr
+        .lines()
+        .filter(|l| !l.starts_with("[[DEBUG] "))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Captured result of a one-shot `ral` invocation.

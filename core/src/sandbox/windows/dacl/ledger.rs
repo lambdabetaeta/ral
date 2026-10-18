@@ -191,7 +191,7 @@ pub(crate) fn recover_orphaned_state() -> Result<RecoveryReport, DaclError> {
     reason = "host-env: the sandbox ledger is process state under the host's XDG state base, not script-visible data"
 )]
 pub(super) fn ledger_dir() -> PathBuf {
-    let dir = crate::host::xdg(crate::host::XdgKind::State)
+    let dir = crate::host::xdg(crate::path::XdgKind::State)
         .unwrap_or_else(std::env::temp_dir)
         .join("ral")
         .join("sandbox-dacl");

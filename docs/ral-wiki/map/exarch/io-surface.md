@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 8142a446
-generated_at_date: 2026-10-17
-covers_paths: [core/src/types/audit/observation.rs, exarch/src/tui/group.rs, core/src/types/audit/door.rs, core/src/evaluator/call.rs, core/src/runtime/command_call.rs, core/src/path/walk.rs, core/src/guard/shell.rs, core/src/runtime/redirect.rs, core/src/path/stage.rs, core/src/runtime/command/detach.rs, core/src/runtime/pipeline/collect.rs, core/src/runtime/redirect/scope.rs, core/src/runtime/command.rs, core/src/runtime/command/stdio.rs, core/src/types/shell/mod.rs, core/src/types/mooring.rs, exarch/src/card.rs, exarch/src/card/diff.rs, exarch/src/card/value.rs, exarch/src/card/decode.rs, exarch/src/card/encode.rs, exarch/src/card/observation.rs, exarch/src/card/done.rs, exarch/src/card/testkit.rs, exarch/src/agent/desk.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/commit.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, core/src/glob.rs, clippy.toml, core/tests/syscall_sites.rs]
+generated_at_commit: 6c0ea0ea
+generated_at_date: 2026-10-18
+covers_paths: [core/src/types/audit/observation.rs, exarch/src/tui/group.rs, core/src/types/audit/door.rs, core/src/evaluator/call.rs, core/src/runtime/command_call.rs, core/src/path/walk.rs, core/src/guard/shell.rs, core/src/runtime/redirect.rs, core/src/path/stage.rs, core/src/runtime/command/detach.rs, core/src/runtime/pipeline/collect.rs, core/src/runtime/redirect/scope.rs, core/src/runtime/command.rs, core/src/runtime/command/stdio.rs, core/src/types/shell/mod.rs, core/src/types/mooring.rs, exarch/src/card.rs, exarch/src/card/diff.rs, exarch/src/card/value.rs, exarch/src/card/decode.rs, exarch/src/card/encode.rs, exarch/src/card/observation.rs, exarch/src/card/done.rs, exarch/src/card/testkit.rs, exarch/src/agent/desk.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/commit.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, core/src/path/tree/walk.rs, clippy.toml, core/tests/syscall_sites.rs]
 ---
 
 # Map: exarch / io surface
@@ -334,9 +334,9 @@ child-wait.
   `OpenOptions::open`, the one-shot `fs::{read,read_to_string,write,read_dir,
   metadata,symlink_metadata,read_link,remove_file,remove_dir_all,create_dir_all,
   rename,copy,set_permissions}`, `Command::new`, `CommandExt::exec`, and
-  `ignore::WalkBuilder::build` (directory walks root at the two cancellable
-  sites: exarch's `walk_admitted`, beneath `grep-files`, `explore-dir` and
-  `find-files`, and `glob`). The whole `cap_primitives::fs` surface is banned alongside it,
+  `ignore::WalkBuilder::build` (every directory walk roots at the one
+  cancellable site, core's `path/tree/walk.rs`, beneath `glob` and exarch's
+  `grep-files`, `explore-dir` and `find-files`). The whole `cap_primitives::fs` surface is banned alongside it,
   not just the entries `path/walk.rs` uses today: a ban naming only the
   current callers is exactly what let the fs site move out from under this
   list once already, when the opens migrated from `runtime/command/redirect.rs`
@@ -364,8 +364,7 @@ child-wait.
   fuse a surface into the operation),
   `[silent:<slug>]` (fs work that is not the model's data I/O —
   canonicalisation, `which` probes, module loading, stat predicates, the
-  `glob` walk and exarch's tree walk (`grep-files` raises its one card above
-  it), capability
+  tree walk (`grep-files` raises its one card above it), capability
   load, sandbox respawn/exec, prelude bake, exarch/ral infra), or `[test]`
   (test scaffolding, blanket-allowed and not a syscall site). The slug is
   unique within its file, so the tag is stable across line shifts, and

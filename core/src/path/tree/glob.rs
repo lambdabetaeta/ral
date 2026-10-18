@@ -1,15 +1,12 @@
 //! Glob patterns: a regular language over path components, and the walk
-//! that enumerates a pattern's matches.
+//! that enumerates a pattern's candidates.
 //!
 //! A wildcard never matches a name beginning with `.`; only a literal
 //! component names a dotfile.
 
-use crate::process::Scope;
-use crate::types::{Settled, sig};
+use super::walk::Walk;
 use globset::{GlobBuilder, GlobMatcher};
-use ignore::WalkBuilder;
 use std::ffi::{OsStr, OsString};
-use std::io::ErrorKind;
 use std::iter::successors;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -44,54 +41,19 @@ impl Glob {
         Ok(glob)
     }
 
-    /// Every path the pattern matches, polling `scope` at each entry visited.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:glob-walk] `glob`'s directory walk: a listing predicate, not turn-time model data I/O; the caller judges each hit against the live grant, and the walk polls the cancel check per entry. Also stats an unfollowable entry to tell a dangling link from a vanished one."
-    )]
-    pub(crate) fn walk(self, scope: Scope) -> impl Iterator<Item = Settled<PathBuf>> {
-        /// What a walk error leaves of its entry: a link the walker could not
-        /// follow (dangling, or back to an ancestor) is still an entry; a
-        /// vanished one is not.
-        fn unfollowed(e: ignore::Error) -> Result<Option<PathBuf>, ignore::Error> {
-            match e {
-                ignore::Error::WithDepth { err, .. } => unfollowed(*err),
-                ignore::Error::Loop { child, .. } => Ok(Some(child)),
-                ignore::Error::WithPath { path, err }
-                    if err
-                        .io_error()
-                        .is_some_and(|io| io.kind() == ErrorKind::NotFound) =>
-                {
-                    Ok(std::fs::symlink_metadata(&path).is_ok().then_some(path))
-                }
-                e => Err(e),
-            }
-        }
+    /// The walk over the pattern's candidates, entering only directories
+    /// a match can lie beneath; [`Self::matches`] picks the matches out.
+    pub(crate) fn walk(self: &Arc<Self>) -> Walk {
+        let bounded = !self.steps.iter().any(|s| matches!(s, Step::Any));
+        let alive = Arc::clone(self);
+        Walk::everything(&self.root)
+            .following_links()
+            .depth(bounded.then_some(self.steps.len()))
+            .keeping(move |p| !alive.reach(p).is_empty())
+    }
 
-        let glob = Arc::new(self);
-        let bounded = !glob.steps.iter().any(|s| matches!(s, Step::Any));
-        let alive = Arc::clone(&glob);
-        WalkBuilder::new(&glob.root)
-            .standard_filters(false)
-            .follow_links(true)
-            .max_depth(bounded.then_some(glob.steps.len()))
-            .filter_entry(move |e| !alive.reach(e.path()).is_empty())
-            .build()
-            .filter_map(move |item| {
-                if let Err(b) = scope.poll() {
-                    return Some(Err(b));
-                }
-                let path = match item.map(ignore::DirEntry::into_path) {
-                    Ok(path) => path,
-                    Err(e) => match unfollowed(e) {
-                        Ok(path) => path?,
-                        Err(e) => return Some(Err(sig(format!("glob: {e}")))),
-                    },
-                };
-                glob.reach(&path)
-                    .contains(&glob.steps.len())
-                    .then_some(Ok(path))
-            })
+    pub(crate) fn matches(&self, path: &Path) -> bool {
+        self.reach(path).contains(&self.steps.len())
     }
 
     /// The steps `path` can have reached, closed under `**` matching nothing.

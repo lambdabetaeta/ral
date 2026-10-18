@@ -70,11 +70,7 @@ const HOUSE_RULES: &str = "house-rules.md";
 ///
 /// # Errors
 /// Returns `Err` if `<config_dir>/house-rules.md` exists but cannot be read.
-pub fn assemble(
-    workspace: &Path,
-    folder_name: &str,
-    config_dir: &Path,
-) -> Result<String, String> {
+pub fn assemble(workspace: &Path, folder_name: &str, config_dir: &Path) -> Result<String, String> {
     let mut sections: Vec<(Option<&str>, String)> = Vec::new();
     sections.push((None, include_str!("../data/system.md").into()));
     sections.push((
@@ -297,12 +293,7 @@ mod tests {
             "Letters are signed by the Registrar.",
         )
         .expect("write house rules");
-        let p = assemble(
-            Path::new("/work"),
-            "Admissions",
-            dir.path(),
-        )
-        .expect("house rules read");
+        let p = assemble(Path::new("/work"), "Admissions", dir.path()).expect("house rules read");
         assert!(p.contains("# House rules"));
         assert!(p.contains("signed by the Registrar"));
         assert!(!prompt().contains("# House rules"));

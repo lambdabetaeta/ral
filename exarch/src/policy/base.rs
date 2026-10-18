@@ -91,7 +91,7 @@ mod tests {
     #[cfg(unix)]
     use ral_core::guard::freeze::Place;
     #[cfg(unix)]
-    use ral_core::host::XdgKind;
+    use ral_core::path::XdgKind;
 
     fn bare(s: &str) -> ExecKey {
         ExecKey::Name(s.into())

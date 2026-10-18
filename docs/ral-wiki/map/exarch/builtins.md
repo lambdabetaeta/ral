@@ -1,5 +1,5 @@
 ---
-generated_at_commit: bd69ff71
+generated_at_commit: 6c0ea0ea
 generated_at_date: 2026-10-18
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/skill.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/src/enquiry.rs, exarch/src/library.rs, exarch/data/agent.ral]
 ---
@@ -55,11 +55,11 @@ mixed endings behind.
   range reader and differ only in the column.
 - `grep-files <pattern> <path>` → `[{ file, line, text }]`. An ignore-aware
   Rust regex search of `path`, a file or a directory walked recursively
-  (`search_tree`; a hit names its file cwd-relative when under the cwd, else
-  absolutely, so a reader takes it back unchanged; a missing path is an error,
+  (`search_tree`; a hit names its file in the shape `path` was written, so a
+  reader takes it back unchanged; a missing path is an error,
   not an empty search; CRLF-aware, so `$` anchors before `\r\n` and a hit's text
   is the row `view-text` shows; binary detection quits at NUL, the walk the
-  shared `walk_admitted` below). Surfaces exactly one
+  shared one below). Surfaces exactly one
   `Observed::Grep { scope, pattern }` observation for the whole search
   ([[map/exarch/io-surface|io-surface]]).
 - `edit-hash <path> <edits>` → `Unit`. The edit verb: `edits` is a list of
@@ -82,23 +82,23 @@ mixed endings behind.
   another builtin's: several matches name the lines, and a miss names the
   mangling it can prove — a literal `\n`-style escape in `from`, or a line
   matching apart from its indentation.
-- `explore-dir <n>` → `[String]`. List directory entries to depth `n`,
-  ignore-aware, skipping the root and any denied path.
-- `find-files <query>` → `[String]`. The cwd's files, walked as `grep-files`
-  walks, fuzzy-ranked by path through core's `text::rank` (nucleo), cut to
+- `explore-dir <n> <path>` → `[String]`. List the entries beneath `path` to
+  depth `n`, ignore-aware, skipping the root and any denied path.
+- `find-files <query> <path>` → `[String]`. The files under PATH (resolved and
+  existence-checked as `grep-files` does), walked as `grep-files` walks,
+  fuzzy-ranked by path through core's `text::rank` (nucleo), cut to
   `FIND_LIMIT`. It filters before the cut: a denied match neither takes a
   slot nor shows in the count. No index is kept, so every name the model
   learns has passed the door this call.
 
-All three walks run through `walk_admitted`, the one `WalkBuilder::build`
-site: it polls for cancel per entry, anchors each entry's own path with
-`Shell::anchor` (no string round trip, so a file named `~` or `xdg:x` is that
-file, not a sigil's expansion), admits it by name with a silent
-`admits_fs_exact`, and hands the visitor a `Listed` with the name a reader
-takes back. A denied entry and one the walk cannot read are both skipped
-silently, so neither a refusal nor an error names a withheld path. `grep-files`
-then reads each listed file through `locate_if_admitted`, judging the object
-it opens.
+Each walk resolves its `path` through `walk_root` (grant-checked; missing is
+an error) and runs core's admitted `Walk` over it
+([[map/core/capabilities|capabilities]]), as `glob` does: cancel is polled per
+entry, each entry is anchored by its own path (so a file named `~` or `xdg:x`
+is that file, not a sigil's expansion) and admitted silently, and a denied or
+unreadable entry is skipped, so neither a refusal nor an error names a withheld
+path. `grep-files` then reads each listed file through `locate_if_admitted`,
+judging the object it opens.
 - `skill-list` / `skill <name>` — Agent Skills with progressive disclosure: list
   the available skills (fresh scan each call, filtered by the grant), then load
   one skill's full `SKILL.md` body on demand; the scan and frontmatter parse

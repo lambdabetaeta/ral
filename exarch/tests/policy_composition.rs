@@ -14,7 +14,7 @@ use exarch::policy::{Invocation, for_invocation};
 use exarch::prompt::grant_summary;
 use ral_core::capability::FsOp;
 use ral_core::capability::GrantStack;
-use ral_core::host::XdgKind;
+use ral_core::path::XdgKind;
 use ral_core::path::{FrozenPath, Resolver, SearchCwd, resolve_in_path};
 use ral_core::test_access::check_file;
 use ral_core::types::{Break, Settled, Shell};

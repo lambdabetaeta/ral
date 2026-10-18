@@ -16,8 +16,16 @@ pub struct RealPath(PathBuf);
 
 impl RealPath {
     /// `realpath(3)` of `path`, which must exist.
-    pub(crate) fn of(path: &Path) -> std::io::Result<Self> {
+    ///
+    /// # Errors
+    /// The `io::Error` of the failed resolution, e.g. `NotFound`.
+    pub fn of(path: &Path) -> std::io::Result<Self> {
         super::canon::canonicalise_strict(path).map(Self)
+    }
+
+    /// The real path `path` has, or will have once its missing tail is created.
+    pub fn lenient(path: &Path) -> Self {
+        Self(super::canon::canonicalise_lenient(path))
     }
 
     /// The prefix's `resolved` form, as it froze: no disk access.
@@ -38,13 +46,13 @@ impl RealPath {
     }
 
     #[cfg(any(test, feature = "test-util"))]
-    pub(crate) fn assumed(path: impl Into<PathBuf>) -> Self {
+    pub fn assumed(path: impl Into<PathBuf>) -> Self {
         Self(path.into())
     }
 
     /// Whether this path lies inside `dir`, modulo firmlink aliases, as a
     /// rule of polarity `P` reads names.
-    pub(crate) fn within<P: Polarity>(&self, dir: &Self) -> bool {
+    pub fn within<P: Polarity>(&self, dir: &Self) -> bool {
         super::identity::path_within(&self.0, &dir.0, P::IDENTITY)
     }
 
@@ -61,7 +69,7 @@ impl RealPath {
         Self(self.0.join(name))
     }
 
-    pub(crate) fn as_path(&self) -> &Path {
+    pub fn as_path(&self) -> &Path {
         &self.0
     }
 

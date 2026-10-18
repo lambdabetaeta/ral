@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d4741109
-generated_at_date: 2026-10-17
+generated_at_commit: 6c0ea0ea
+generated_at_date: 2026-10-18
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/guard/, core/src/guard.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
 
@@ -219,6 +219,22 @@ round trip.
 (`ral_path.rs` in the same directory owns `RAL_PATH` module search, used by `use`
 and the plugin loader, not by grant matching.)
 
+`tree/walk.rs` is the one directory-tree walk, `Walk`, and the one
+`ignore::WalkBuilder::build` site; `tree/glob.rs` is glob's pattern language,
+enumerated by it. A `Walk` is told what it may enter (`tracked`: hidden and
+ignored entries skipped; `everything`; a depth; a `keeping` predicate; link
+following), polls the cancel scope at each entry, and skips every walk error
+but an unfollowable link, which is still an entry. `sightings` yields entries
+judged by no grant, for host-side walks (the sandbox's linker discovery).
+`admitted` judges each entry by its own path, anchored with `Resolver::anchor`
+and admitted silently with `admits_fs_exact`, and names it in the shape its
+root was written (`Resolver::is_relative`): a cwd-relative root gives
+cwd-relative names where it can, any other absolute ones. A name reads back as
+itself: one a sigil would claim is spelled `./~/x` (`sigil::literal_relative`),
+and one no ral string can hold is refused when asked for.
+`glob` and exarch's `grep-files`, `grep-hidden`, `find-files` and
+`explore-dir` all walk through it.
+
 `which.rs` is the one `PATH` walk. **Its anchor is a `SearchCwd`, minted only
 from a named provenance — `Context::search_cwd`, `Resolver::search_cwd`,
 `SearchCwd::of` for a front end already holding the shell's cwd, or
@@ -259,8 +275,8 @@ spelling question stays here. `real.rs` holds `RealPath`, the exec subject and t
 ordered as the host identifies files; `RealPath::frozen` for an allowance,
 `RealPath::live` for an exclusion.
 
-XDG base directories resolve through one resolver, `host/basedir.rs`
-(`XdgKind`, `resolve_xdg`; the host's own bases through `host::xdg`): an absolute `XDG_*_HOME` override else the
+XDG base directories resolve through one resolver, `path/basedir.rs`
+(`XdgKind`, the pure `resolve_xdg_in`; `host::resolve_xdg` and `host::xdg` read the host env): an absolute `XDG_*_HOME` override else the
 home-joined Linux default on every platform, and `None` where there is neither
 — a host fact answers with an `Option`, so each caller picks its own fallback
 rather than inheriting a fabricated home (the Windows sandbox ledger takes the

@@ -48,7 +48,7 @@ static DEFAULT_EXIT_HINTS: &str = include_str!("../../data/exit-hints.txt");
     reason = "[silent:exit-hints-read] startup read of the optional exit-hints override file; not turn-time model I/O"
 )]
 pub(crate) fn load_exit_hints() -> ExitHints {
-    let text = ral_core::host::xdg(ral_core::host::XdgKind::Data)
+    let text = ral_core::host::xdg(ral_core::path::XdgKind::Data)
         .map(|d| d.join("ral/exit-hints.txt"))
         .and_then(|p| std::fs::read_to_string(p).ok())
         .unwrap_or_default();

@@ -12,8 +12,8 @@
 //! [`expand`] is its live wrapper, which the freeze and the fs floor read.
 
 use super::freeze::{PolicyError, Selector, refuse_the_world};
-use crate::host::{XdgKind, resolve_xdg_in};
 use crate::path::{Allow, FrozenPath, is_absolute};
+use crate::path::{XdgKind, resolve_xdg_in};
 use std::ffi::OsStr;
 use std::path::PathBuf;
 use strum::{EnumString, IntoStaticStr, VariantArray};

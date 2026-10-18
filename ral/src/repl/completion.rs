@@ -23,6 +23,7 @@
 use ral_core::carrier::Transport;
 use ral_core::first_order::FOValue;
 use ral_core::first_order::datum::{Datum, exact_keys, field};
+use ral_core::path::SearchCwd;
 use ral_core::protocol::probe::PathEntry;
 use ral_core::record;
 use ral_core::source::Span as ByteSpan;
@@ -91,11 +92,8 @@ impl Sources<'_> {
     /// [`matching`] re-sorts.
     ///
     /// The one place `PATH` is enumerated, if this is the first request since
-    /// the scan was dropped.  The enumeration mirrors `locate`'s rules —
-    /// relative entries anchored against the engine's cwd, the executable bit
-    /// required, and an empty `PATH` element dropped rather than read as the
-    /// cwd, so a trailing `;` does not offer every file of the current
-    /// directory as a command.  Dispatch still goes through the fresh
+    /// the scan was dropped.  It walks `locate`'s own directory list, and
+    /// requires the executable bit.  Dispatch still goes through the fresh
     /// `locate`, so a scan gone stale can only misinform a menu, never
     /// misdirect a spawn.
     fn command_names(&self) -> Vec<&String> {
@@ -106,8 +104,8 @@ impl Sources<'_> {
                 .path
                 .as_deref()
                 .map(|path| {
-                    std::env::split_paths(path)
-                        .filter(|dir| !dir.as_os_str().is_empty())
+                    ral_core::path::path_dirs(path, SearchCwd::nowhere())
+                        .into_iter()
                         .flat_map(|dir| entries(self.engine, &dir))
                         .filter_map(|e| e.exec.then_some(e.name))
                         .collect()

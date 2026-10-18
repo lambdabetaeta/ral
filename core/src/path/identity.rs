@@ -30,7 +30,7 @@ fn path_aliases(p: &Path) -> Vec<PathBuf> {
 /// [`Stored`](Self::Stored), a deny under [`Collision`](Self::Collision): a
 /// rule's [`Polarity`] picks, never a caller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Identity {
+pub enum Identity {
     /// The name as stored, with Windows heads and separators normalised.
     Stored,
     /// Every name some filesystem takes for the same: [`collision_key`] per
@@ -39,15 +39,16 @@ pub(crate) enum Identity {
 }
 
 /// Which way a rule speaks, and so which [`Identity`] it reads names under.
-pub(crate) trait Polarity {
+/// Sealed: `Identity` cannot be named outside the crate.
+pub trait Polarity {
     const IDENTITY: Identity;
 }
 
 /// An allow holds a name as stored.
-pub(crate) enum Allow {}
+pub enum Allow {}
 
 /// A deny holds every spelling of a name.
-pub(crate) enum Deny {}
+pub enum Deny {}
 
 impl Polarity for Allow {
     const IDENTITY: Identity = Identity::Stored;
@@ -258,90 +259,46 @@ mod tests {
         PathBuf::from(s)
     }
 
+    /// Each row: a path and the alias it gains on macOS (none elsewhere).
     #[test]
-    fn aliases_no_false_match_on_substring() {
-        let a = path_aliases(Path::new("/tmpx/foo"));
-        assert_eq!(a, vec![pb("/tmpx/foo")]);
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn aliases_tmp_both_directions() {
-        let a = path_aliases(Path::new("/tmp/foo"));
-        assert!(a.contains(&pb("/tmp/foo")));
-        assert!(a.contains(&pb("/private/tmp/foo")));
-
-        let b = path_aliases(Path::new("/private/tmp/foo"));
-        assert!(b.contains(&pb("/tmp/foo")));
-        assert!(b.contains(&pb("/private/tmp/foo")));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn aliases_var_folders() {
-        let a = path_aliases(Path::new("/var/folders/xy/abc"));
-        assert!(a.contains(&pb("/private/var/folders/xy/abc")));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn aliases_root_only() {
-        let a = path_aliases(Path::new("/tmp"));
-        assert!(a.contains(&pb("/private/tmp")));
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn aliases_no_op_off_macos() {
-        for s in [
-            "/tmp/foo",
-            "/private/tmp/foo",
-            "/var/folders/xy",
-            "/etc/passwd",
-        ] {
-            assert_eq!(path_aliases(Path::new(s)), vec![pb(s)]);
+    fn aliases_cross_the_firmlinks_on_macos_only() {
+        let rows = [
+            ("/tmpx/foo", None),
+            ("/tmp/foo", Some("/private/tmp/foo")),
+            ("/private/tmp/foo", Some("/tmp/foo")),
+            ("/var/folders/xy/abc", Some("/private/var/folders/xy/abc")),
+            ("/tmp", Some("/private/tmp")),
+        ];
+        for (path, alias) in rows {
+            let got = path_aliases(Path::new(path));
+            assert!(got.contains(&pb(path)), "{path}");
+            match alias.filter(|_| cfg!(target_os = "macos")) {
+                Some(alias) => assert!(got.contains(&pb(alias)), "{path}"),
+                None => assert_eq!(got, vec![pb(path)], "{path}"),
+            }
         }
     }
 
     #[test]
-    fn path_within_self() {
-        assert!(path_within(
-            Path::new("/a/b"),
-            Path::new("/a/b"),
-            Identity::Stored
-        ));
-    }
-
-    #[test]
-    fn path_within_strict_descendant() {
-        assert!(path_within(
-            Path::new("/a/b/c"),
-            Path::new("/a/b"),
-            Identity::Stored
-        ));
-    }
-
-    #[test]
-    fn path_within_not_a_descendant() {
-        assert!(!path_within(
-            Path::new("/a/b"),
-            Path::new("/a/c"),
-            Identity::Stored
-        ));
-        assert!(!path_within(
-            Path::new("/a"),
-            Path::new("/a/b"),
-            Identity::Stored
-        ));
-    }
-
-    #[test]
-    fn path_within_no_substring_pseudomatch() {
-        assert!(!path_within(
-            Path::new("/tmpx"),
-            Path::new("/tmp"),
-            Identity::Stored
-        ));
+    fn path_within_is_component_wise_modulo_aliases() {
+        let rows = [
+            ("/a/b", "/a/b", true),
+            ("/a/b/c", "/a/b", true),
+            ("/a/b", "/a/c", false),
+            ("/a", "/a/b", false),
+            ("/tmpx", "/tmp", false),
+            #[cfg(target_os = "macos")]
+            ("/tmp/foo", "/private/tmp", true),
+            #[cfg(target_os = "macos")]
+            ("/private/tmp/foo", "/tmp", true),
+        ];
+        for (path, dir, want) in rows {
+            assert_eq!(
+                path_within(Path::new(path), Path::new(dir), Identity::Stored),
+                want,
+                "{path} within {dir}"
+            );
+        }
     }
 
     /// Security regression: two distinct non-UTF-8 byte sequences can decode
@@ -371,21 +328,6 @@ mod tests {
             !path_within(&candidate_path, prefix, Identity::Stored),
             "distinct non-UTF-8 paths must not collide via lossy string comparison"
         );
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn path_within_via_alias() {
-        assert!(path_within(
-            Path::new("/tmp/foo"),
-            Path::new("/private/tmp"),
-            Identity::Stored
-        ));
-        assert!(path_within(
-            Path::new("/private/tmp/foo"),
-            Path::new("/tmp"),
-            Identity::Stored
-        ));
     }
 
     /// T1: the key merges every pair some filesystem merges, and nothing
@@ -460,12 +402,6 @@ mod tests {
     const W: PathRules = PathRules::Windows;
 
     #[test]
-    fn windows_identity_ignores_case() {
-        assert!(starts_with_identity(r"C:\WORK\sub", r"c:\work", W));
-        assert!(starts_with_identity(r"c:\Work\Sub", r"C:\WORK", W));
-    }
-
-    #[test]
     fn windows_stored_names_distinguish_case_except_in_the_drive() {
         assert_eq!(
             windows_stored_components(r"\\?\C:\Work\file"),
@@ -477,71 +413,39 @@ mod tests {
         );
     }
 
+    /// `(path, prefix, rules, expected)`.  The forward-slash verbatim rows
+    /// matter: a `//?/`-spelled access must not bypass a `\\?\`- or
+    /// plain-spelled deny, so `/` and `\` are interchangeable throughout; a
+    /// `UNC` head folds only after a verbatim prefix.
     #[test]
-    fn windows_identity_unifies_forward_and_back_slashes() {
-        assert!(starts_with_identity(r"c:/work/sub", r"C:\work", W));
-        assert!(starts_with_identity(r"C:\work\sub", "c:/work", W));
-    }
-
-    #[test]
-    fn windows_identity_strips_verbatim_prefix() {
-        assert!(starts_with_identity(r"\\?\C:\work\sub", r"C:\work", W));
-        assert!(starts_with_identity(r"C:\work\sub", r"\\?\C:\work", W));
-        assert!(starts_with_identity(r"\\?\C:\work\sub", r"\\?\c:\WORK", W));
-    }
-
-    #[test]
-    fn windows_identity_folds_verbatim_unc() {
-        assert!(starts_with_identity(
-            r"\\?\UNC\server\share\sub",
-            r"\\server\share",
-            W
-        ));
-    }
-
-    /// Without this, a `//?/`-spelled access path bypasses a `\\?\`- or
-    /// plain-spelled deny: real Windows accepts only the backslash form, but
-    /// this matcher holds `/` and `\` interchangeable, so a deny authored in
-    /// one spelling must catch an access spelled the other way.
-    #[test]
-    fn windows_identity_strips_forward_slash_verbatim_prefix() {
-        assert!(starts_with_identity(r"//?/C:/work/sub", r"C:\work", W));
-        assert!(starts_with_identity(r"C:\work\sub", "//?/c:/work", W));
-        assert!(starts_with_identity(r"//?/C:/work/sub", r"\\?\c:\WORK", W));
-        assert!(starts_with_identity(r"//?\C:\work/sub", r"C:\work", W));
-    }
-
-    #[test]
-    fn windows_identity_folds_forward_slash_verbatim_unc() {
-        assert!(starts_with_identity(
-            "//?/UNC/server/share/sub",
-            r"\\server\share",
-            W
-        ));
-    }
-
-    #[test]
-    fn windows_head_folds_unc_only_after_a_verbatim_prefix() {
-        assert_eq!(windows_head(r"\\?\unc\srv\sh"), r"\srv\sh");
-        assert_eq!(windows_head(r"UNC\srv"), r"UNC\srv");
-    }
-
-    #[test]
-    fn windows_identity_respects_component_boundaries() {
-        assert!(!starts_with_identity(r"C:\workshop", r"C:\work", W));
-    }
-
-    #[test]
-    fn windows_identity_rejects_unrelated_drive() {
-        assert!(!starts_with_identity(r"D:\work\sub", r"C:\work", W));
-    }
-
-    #[test]
-    fn posix_identity_is_byte_exact() {
-        assert!(!starts_with_identity(
-            r"C:\WORK",
-            r"C:\work",
-            PathRules::Posix
-        ));
+    fn starts_with_identity_table() {
+        const P: PathRules = PathRules::Posix;
+        let rows = [
+            (r"C:\WORK\sub", r"c:\work", W, true),
+            (r"c:\Work\Sub", r"C:\WORK", W, true),
+            (r"c:/work/sub", r"C:\work", W, true),
+            (r"C:\work\sub", "c:/work", W, true),
+            (r"\\?\C:\work\sub", r"C:\work", W, true),
+            (r"C:\work\sub", r"\\?\C:\work", W, true),
+            (r"\\?\C:\work\sub", r"\\?\c:\WORK", W, true),
+            (r"\\?\UNC\server\share\sub", r"\\server\share", W, true),
+            (r"//?/C:/work/sub", r"C:\work", W, true),
+            (r"C:\work\sub", "//?/c:/work", W, true),
+            (r"//?/C:/work/sub", r"\\?\c:\WORK", W, true),
+            (r"//?\C:\work/sub", r"C:\work", W, true),
+            ("//?/UNC/server/share/sub", r"\\server\share", W, true),
+            (r"\\?\unc\srv\sh\x", r"\\srv\sh", W, true),
+            (r"UNC\srv\x", r"\\srv", W, false),
+            (r"C:\workshop", r"C:\work", W, false),
+            (r"D:\work\sub", r"C:\work", W, false),
+            (r"C:\WORK", r"C:\work", P, false),
+        ];
+        for (path, prefix, rules, want) in rows {
+            assert_eq!(
+                starts_with_identity(path, prefix, rules),
+                want,
+                "{path} under {prefix} ({rules:?})"
+            );
+        }
     }
 }

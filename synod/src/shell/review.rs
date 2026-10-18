@@ -17,6 +17,7 @@
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 
+use ral_core::path::{Allow, RealPath};
 use ral_core::sync::LockExt;
 use serde::Serialize;
 use synod::workspace::{Change, JobReport};
@@ -245,15 +246,9 @@ pub(crate) fn file_to_open(review: &Review, index: usize, shown: &str) -> Result
         return Err(format!("{rel} is not a file, so there is nothing to open."));
     }
 
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "path: strict canonicalisation of the folder and of the file a card names, \
-                  so a linked folder on the way cannot carry the file outside it. \
-                  `canonicalise_strict` is pub(crate) in ral_core, as grant.rs notes"
-    )]
-    let (root, real) = (std::fs::canonicalize(&folder), std::fs::canonicalize(&path));
+    let (root, real) = (RealPath::of(&folder), RealPath::of(&path));
     match (root, real) {
-        (Ok(root), Ok(real)) if real.starts_with(&root) => Ok(Target { path, how }),
+        (Ok(root), Ok(real)) if real.within::<Allow>(&root) => Ok(Target { path, how }),
         (Ok(_), Ok(_)) => Err(format!(
             "{rel} leads outside your folder, so synod will not open it."
         )),

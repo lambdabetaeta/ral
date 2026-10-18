@@ -298,7 +298,7 @@ Core's own test engines, booted as every engine is (`BARE`, `boot`, `eval`).
 
 The engine's answers: `Engine::probe` reads one `Probe` off the shell
 (`answer`), rendering rows engine-side — never a live handle.
-`probe/fs.rs` — `tree_bytes` and `entries`: read-only
+`probe/fs.rs` — `entries` (and `path::tree::bytes`, behind `Probe::PathBytes`): read-only
 metadata walks of the engine's own filesystem, under its cwd.
 
 ## `core/src/guard/grant.rs`

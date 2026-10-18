@@ -27,7 +27,10 @@ fn eol_round_trips_byte_for_byte() {
         let eol = Eol::of(body.as_bytes());
         assert_eq!(eol.encode(&eol.decode(body.to_string())), body);
     }
-    assert!(matches!(Eol::of(b"a\r\nb\n"), Eol::Lf), "a mixed file stays raw");
+    assert!(
+        matches!(Eol::of(b"a\r\nb\n"), Eol::Lf),
+        "a mixed file stays raw"
+    );
 }
 
 /// In a file shorter than a full floor window, every window clamps to the
@@ -102,32 +105,6 @@ fn window_hashes_are_unique_across_a_long_identical_run() {
         rows.len(),
         "every line, even deep in a 200-line identical run, must witness uniquely"
     );
-}
-
-/// A pre-cancelled scope aborts `search_tree`'s walk at its first poll,
-/// before any filesystem entry is touched.
-#[test]
-fn search_files_honours_a_cancelled_scope() {
-    let mut shell = ral_core::test_helper::core_shell();
-    let m = Mooring::adrift();
-    shell
-        .cancel_handle()
-        .cancel(ral_core::process::CancelCause::Interrupted);
-    let err = builtin_grep_files(&[Value::string("x"), Value::string(".")], &m, &mut shell)
-        .expect_err("a cancelled scope must abort the search walk");
-    assert_eq!(err.code(), 130);
-}
-
-#[test]
-fn explore_dir_honours_a_cancelled_scope() {
-    let mut shell = ral_core::test_helper::core_shell();
-    let m = Mooring::adrift();
-    shell
-        .cancel_handle()
-        .cancel(ral_core::process::CancelCause::Interrupted);
-    let err = builtin_explore_dir(&[Value::Int(3)], &m, &mut shell)
-        .expect_err("a cancelled scope must abort the directory walk");
-    assert_eq!(err.code(), 130);
 }
 
 // ── `service-handle` builtin ─────────────────────────────────────────

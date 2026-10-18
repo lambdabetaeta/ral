@@ -380,7 +380,7 @@ impl App {
         clippy::disallowed_methods,
         reason = "host-env: exarch's own config/state directories live under the launching user's XDG bases"
     )]
-    pub fn xdg_dir(self, kind: ral_core::host::XdgKind) -> PathBuf {
+    pub fn xdg_dir(self, kind: ral_core::path::XdgKind) -> PathBuf {
         ral_core::host::xdg(kind)
             .unwrap_or_else(std::env::temp_dir)
             .join(self.0)
@@ -392,7 +392,7 @@ impl App {
     /// launched, never scattered into cwd.
     #[must_use]
     pub fn project_dir(self, cwd: &str) -> PathBuf {
-        self.xdg_dir(ral_core::host::XdgKind::State)
+        self.xdg_dir(ral_core::path::XdgKind::State)
             .join(project_slug(cwd))
     }
 

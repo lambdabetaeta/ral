@@ -180,7 +180,9 @@ impl ExarchDesk {
         // bookend records the child's real system length.  Its grant layer
         // was resolved in its own engine, so only that engine can name it.
         let session = seat.read(|t| t.grants()).map_err(|lost| {
-            Error::new(crate::agent::seat::EngineLost::starting(&lost, s.agent.run_dir()).to_string())
+            Error::new(
+                crate::agent::seat::EngineLost::starting(&lost, s.agent.run_dir()).to_string(),
+            )
         })?;
         let system_prompt = launch.index.apply(
             &crate::prompt::with_grant(&launch.system, &session, &s.agent.caps),

@@ -262,7 +262,7 @@ fn check_is_manifest(val: &Value) -> Result<(), Error> {
 /// 3. The literal path, then `<name>.ral`
 fn resolve_plugin_path(name_or_path: &str, shell: &Shell) -> Result<String, Error> {
     let plugin_file = format!("{name_or_path}.ral");
-    let config_candidate = ral_core::host::xdg(ral_core::host::XdgKind::Config)
+    let config_candidate = ral_core::host::xdg(ral_core::path::XdgKind::Config)
         .map(|d| d.join("ral/plugins"))
         .map(|dir| dir.join(&plugin_file));
     let ral_path_candidates = ral_core::path::ral_path::entries(shell.env_overrides())

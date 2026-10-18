@@ -217,7 +217,7 @@ impl Conversation {
             .map_err(|e| format!("could not make a log folder: {e}"))?;
         let run_lock = exarch::app::RunLock::try_acquire(&run_dir)
             .map_err(|e| format!("could not lock the log folder {}: {e}", run_dir.display()))?;
-        let config_dir = SYNOD.xdg_dir(ral_core::host::XdgKind::Config);
+        let config_dir = SYNOD.xdg_dir(ral_core::path::XdgKind::Config);
 
         // The two slow arms of an opening wait on different things
         // entirely: the boot on a guest kernel coming up, the baseline on

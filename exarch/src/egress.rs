@@ -117,7 +117,7 @@ impl AuditLog {
     /// Returns `Err` if the ledger cannot be created or opened.
     pub fn open(app: crate::app::App) -> std::io::Result<Self> {
         let path = app
-            .xdg_dir(ral_core::host::XdgKind::State)
+            .xdg_dir(ral_core::path::XdgKind::State)
             .join("net-audit.jsonl");
         Self::at(&path)
     }

@@ -784,7 +784,7 @@ by construction: no walk, no cost, ever. Configured, it walks at most once
 per `DISK_WARN_CHECK_INTERVAL` (a minute, off `Avatar::disk_checked`),
 weighed at the tool boundary with the other gauges.
 Crossing the ceiling (the session log dir, sized host-side by
-`resources::dir_size`, plus `EXARCH_SCRATCH`, read and sized in the engine by
+`path::tree::bytes`, plus `EXARCH_SCRATCH`, read and sized in the engine by
 `Transport::env_var` and `Transport::path_bytes`) is told to the user once, as a
 `Forensic::SystemNote`, on the disk ladder's `Latch` — one warning per
 excursion, not one per boundary.

@@ -57,13 +57,6 @@ pub fn checked_read_path(shell: &mut Shell, path: &str) -> Settled<crate::path::
     Ok(rp)
 }
 
-/// [`checked_read_path`] as a predicate, so a walk skips an off-limits entry
-/// instead of aborting.
-pub(crate) fn admits_read(shell: &mut Shell, path: &str) -> bool {
-    let rp = shell.resolve(path);
-    shell.check_fs_read(&rp).is_ok()
-}
-
 /// The one stdin policy every reading builtin shares: an installed `Source`
 /// (pipeline pipe or `<` redirect) if there is one; else a refusal when startup
 /// stdin was a terminal, since these builtins want bytes and not a prompt; else

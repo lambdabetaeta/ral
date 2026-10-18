@@ -336,7 +336,7 @@ pub fn render(sections: &[(Option<&str>, String)]) -> String {
 /// alone — synod's engine lives in a guest VM where none of them hold, so it
 /// builds its own around the shared [`GRANT_PLACEHOLDER`].
 pub fn host_section(app: crate::app::App) -> String {
-    let state = app.xdg_dir(ral_core::host::XdgKind::State);
+    let state = app.xdg_dir(ral_core::path::XdgKind::State);
     format!(
         "You are an agent named '{NAME_PLACEHOLDER}'.\n\n{}\n{GRANT_PLACEHOLDER}- scratch: `${}` = {SCRATCH_PLACEHOLDER}\n",
         host::snapshot(&state),

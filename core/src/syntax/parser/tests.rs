@@ -2189,7 +2189,10 @@ fn redirected_scope(src: &str) -> (ScopeAst, Redirects<Ast>) {
 fn unwrap_single_exec(ast: Vec<Stmt>) -> (Head, Vec<Ast>) {
     let stripped: Vec<_> = ast.into_iter().map(|s| s.item).collect();
     match stripped.as_slice() {
-        [Ast::Call { head, args }] => (head.item.clone(), args.iter().map(|s| s.item.clone()).collect()),
+        [Ast::Call { head, args }] => (
+            head.item.clone(),
+            args.iter().map(|s| s.item.clone()).collect(),
+        ),
         _ => panic!("expected a single Ast::Call, got {stripped:?}"),
     }
 }

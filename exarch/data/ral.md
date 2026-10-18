@@ -18,12 +18,12 @@ Commands are sequenced by newlines or `;` (there is no `&&`). An uncaught failur
     echo "notes.txt ($n lines) as of $today"
 
 <critical>
-Bound variables are **AVAILABLE IN EVERY TURN, FOR THE REST OF THE SESSION**. **YOU DO NOT NEED TO RE-DEFINE THEM IN THE NEXT TURN, JUST USE THEM AGAIN.** In the following turn do NOT re-bind `n`, just use it again:
+Bound variables are available for the rest of the session; you do not need to redefine them:
 
     echo "notes.txt now has !{line-count notes.txt} while it had $n before"
 </critical>
 
-Captured stdout from an external command is a `String`; ral heads may instead return structured values. For example, `let text = cat notes.txt` binds a `String`, while `let n = line-count $file` binds an `Int` and `let files = list-dir #'.'#` binds a list. Split captured text explicitly with `lines $text`, and parse numeric text with `int $text` or `float $text`.
+Captured stdout from an external command is a `String`. `let n = line-count $file` binds an `Int` and `let files = list-dir #'.'#` binds a list.
 
 A command's value is its output: `let host = hostname` binds what it writes, and so does `let host = f` when `f` is a block or function that runs a command. `| from-lines`, `| from-json` choose another decoding.
 
@@ -75,7 +75,7 @@ Codecs bridge bytes to values: `from-line` takes `Bytes` to a `String` with no t
     let first   = head -n1 notes.txt
     let commits = git log --oneline | from-lines
 
-There are also corresponding `to-line`, `to-string`, `to-lines`, `to-json` that take values to bytes. Text decoders require UTF-8; use `from-bytes` when bytes are not text. 
+There are also corresponding `to-line`, `to-string`, `to-lines`, `to-json` that take values to bytes. Text decoders require UTF-8; use `from-bytes` when bytes are not text.
 
 Decoders read from the byte channel.  To decode bytes in a definition, use `bytes-to-string $r[stdout]`.
 
@@ -131,19 +131,16 @@ In summary: `;` sequences, `attempt` tolerates a failure, `?` supplies a fallbac
 
       echo "hi $first-name $(last-name): $h[file] line $h[line], today !{date +%F | from-line}, sum $[2 + 3]"
 
-  `$(name)` delimits variables from post-fixes that do not belong to them. Words never glue: `$dir/file` is a parse error, not a path; a composite word is one double-quoted word, `"$dir/file"`.
-- A double-quoted string that begins with `~/` (or is just `"~"`) is home-rooted, like a bare `~/x`: `ls "~/To process at work"`. `!{home}` is the same value. `'~/x'` is verbatim.
-
-* Escapes are a fixed set (`\n`, `\r`, `\t`, `\\`, `\"`, `\$`, `\!`, `\~`, `\0`, `\e`, `\xNN` for ASCII, `\u{…}`, and backslash-newline continuation).
-- Raw strings `#'…'#` are the verbatim string form; they need NO escapes and carry NO interpolation. They can contain any character including apostrophes. If the content itself contains `'#`, add more hashes, e.g. `#####'…'#####`. A hash not followed by a single-quote starts a comment to end of line.
-
-  A raw string is also how an argument thick with metacharacters reaches an external tool: ral passes it through as one word, untouched, so a `sed` script needs no escaping at all and there is never a reason to hand it to a shell instead.
-
-      sed -i #'s|^old_value$|new_value|'# config.txt
-
+- Parentheses delimit a variable inside an interpolated word: `"$(today)-checkout"`.
+- Words never glue: `$dir/file` is a parse error; interpolate instead: `"$dir/file"`.
+- In double quotes, a leading `~` or `~/` expands to the home directory, e.g. `ls "~/Work Invoices"`. `!{home}` is the same value.
+- Escapes are a fixed set (`\n`, `\r`, `\t`, `\\`, `\"`, `\$`, `\!`, `\~`, `\0`, `\e`, `\xNN` for ASCII, `\u{…}`, and backslash-newline continuation).
+- A raw string is written `#'…'#`: no escapes, no interpolation. If the content itself contains `'#`, add more hashes, e.g. `#####'…'#####`. Always use this form to pass arguments to an external tool, e.g. `sed -i #'s|^old_value$|new_value|'# config.txt`.
 - `dedent` strips the common leading indentation from a multiline string.
-- There are no `<<EOF` heredocs. `cmd << #'…'#` (space after `<<` required) feeds the string to `cmd`'s stdin (a stored string works too: `cmd << $body`). One newline at the very front of the string is dropped, so the body can start on the line under the command. Write a file with `echo #'…'# > path`.
+- There are no `<<EOF` heredocs. `cmd << $body` or `cmd << #'…'#` feeds a string to `cmd`'s stdin. One newline at the very start of the string is dropped, so the body can start on the line under the command.
 - There is no `1>&2`. Say it with `warn "…"`, which puts one line on stderr and returns unit: a note for the human, off the byte channel a caller may be binding. `2> f` and `2>&1` are unchanged, for an external command's own stderr. Those, with `< f`, `<< str`, `> f`, `>> f` and `>~ f`, are the whole of ral's fd vocabulary: there is no fd plumbing, so `1< f`, `1> f`, `0< f`, `0> f` and any fd past 2 are parse errors rather than something quietly reinterpreted, and `echo 1>file` is refused rather than writing an empty file. Each stream takes at most one redirect (`cmd > a > b` and `2> e 2>&1` are parse errors), and `2>&1` means "stderr goes wherever stdout goes" whichever side of `> f` it is written.
+- Split captured text explicitly with `lines $text`.
+- Parse numeric text with `int $text` or `float $text`.
 
 Search and replacement are regex builtins (Rust regex syntax — #'a|b'#, DO NOT USE ESCAPES `\|`):
 
@@ -153,7 +150,7 @@ Search and replacement are regex builtins (Rust regex syntax — #'a|b'#, DO NOT
 
 ## Numbers and booleans
 
-A bare word that looks like a number IS that number, in every position — argument, value, list element — and quoting is how you ask for the text instead. Each number has one printed spelling, so a non-canonical numeral comes back normalised: `echo 007` prints `7`, `echo 1.50` prints `1.5`, and a whole float keeps its point (`3.0`). Note that `3.10` is the number 3.1: version-like tokens MUST be quoted.
+A bare word that looks like a number IS that number: `echo 007` prints `7`, `echo 1.50` prints `1.5`, and `echo #'3.100'#` prints `3.100`:
 
     let ver = '3.10'                 # a version is text; bare, it would be 3.1
 
@@ -170,7 +167,7 @@ Arithmetic and Boolean expressions must be in `$[…]` blocks: `$[$x == 0]`, `$[
 
 ## Structured values
 
-    let xs = [a, b, c]                   # list — commas, not spaces
+    let xs = [a, b, c]                   # list, with elements separated by commas
     $xs[0]                               # #'a'#
     let r = [host: #'h'#, port: 80]        # record — fixed, heterogeneous fields
     $r[host]                             # bare-key indexing
@@ -183,7 +180,7 @@ Indexing `$h[key]` works in any context (pipelines, blocks, double quoted): e.g.
 
 An entry is a value: `[n: !{length $xs}, s: !{str $x}]`; `let` takes a command, a literal does not.
 
-A map is not a record: its keys are runtime data and its values all share one type. A literal is a map if any key is data: `"quoted"` (`["a": 1, "b": 2]`) or computed (`[$k: 1]`). A bare or `'single-quoted'` key is a label, and labels alone make a record; `[:]` is the empty map. Only maps support `keys`, `values`, `has`, `get` (with default), `union`, `entries`, and only a map is read by a computed key (`$m[$k]`); a bare key like `$r[host]` always reads a record field. 
+A map is not a record: its keys are runtime data and its values all share one type. A literal is a map if any key is data: `"quoted"` (`["a": 1, "b": 2]`) or computed (`[$k: 1]`). A bare or `'single-quoted'` key is a label, and labels alone make a record; `[:]` is the empty map. Only maps support `keys`, `values`, `has`, `get` (with default), `union`, `entries`, and only a map is read by a computed key (`$m[$k]`); a bare key like `$r[host]` always reads a record field.
 
 When you write an rc file, a plugin manifest, or a capability profile — anything whose terminal `return` a host checks against a fixed keyset — write a record: `return [edit-mode: 'vi']`. A misspelled key is then a type error before the file runs at all. `return ["edit-mode": 'vi']` is a map, not a record, and `[]` is the empty *list*; both are type errors too. A file with nothing to set returns `()`.
 
@@ -231,7 +228,7 @@ Prelude functions cover common cases:
     attempt { rm stale.lock }          # suppress any failure
     retry 3 { curl -s $url }           # up to 3 attempts
 
-`guard BODY CLEANUP` runs the cleanup block whether the body succeeds or fails, then hands back the body's own result — so a failure keeps propagating. A cleanup that fails or exits pre-empts that result and becomes the outcome; write `guard BODY { attempt { … } }` if the cleanup's own failure should be ignored. 
+`guard BODY CLEANUP` runs the cleanup block whether the body succeeds or fails, then hands back the body's own result — so a failure keeps propagating. A cleanup that fails or exits pre-empts that result and becomes the outcome; write `guard BODY { attempt { … } }` if the cleanup's own failure should be ignored.
 
 An error may be raised deliberately using e.g. `fail [status: 2, message: #'failure caused by x'#]`.
 
@@ -269,17 +266,17 @@ The first argument is a description of the task; the second is a block to run as
 
 Important: The lifetime of a `defer` or `service` ends when the session ends.
 
-Should you wish for a service that runs *after* the session is over, use `detach`: 
+Should you wish for a service that runs *after* the session is over, use `detach`:
 
     let d = within [dir: #'/data'#] { detach #'background export job'# python3 export.py }
 
-`detach` takes a description of the task, a binary to call (not a block!), and some arguments. It then asks the OS to run this binary with these arguments, returning a receipt `[pid, desc]`. Stdin, stdout and stderr are `/dev/null`, so you will not receive any updates. Polling and killing can happen only through the OS — and, from inside a grant, only through what the survivor serves: each grant's children live in their own process namespace, so a later grant cannot `ps` or `kill` a survivor an earlier one detached. 
+`detach` takes a description of the task, a binary to call (not a block!), and some arguments. It then asks the OS to run this binary with these arguments, returning a receipt `[pid, desc]`. Stdin, stdout and stderr are `/dev/null`, so you will not receive any updates. Polling and killing can happen only through the OS — and, from inside a grant, only through what the survivor serves: each grant's children live in their own process namespace, so a later grant cannot `ps` or `kill` a survivor an earlier one detached.
 
 ## Within
 
 `within` is an effect handler that runs a block with a changed directory, environment, or handling of a command call:
 
-    within [dir: #'src'#] { explore-dir 2 }
+    within [dir: #'exarch'#] { cargo check }
     let h = defer { within [env: [LOG_LEVEL: #'debug'#]] { convert-all } }
     within [ env : [ API_KEY : #''# ], handlers: [curl: { |args| echo #'offline stub'# }]] { fetch-all }
     let all_stubbed = { |name args| echo "stubbed: $name ...$args" }
@@ -290,7 +287,7 @@ A per-command `handlers:` entry is a one-arg function receiving argvs. Like `cas
 
 `within`'s and `grant`'s brackets are the forms' own, not collection literals: `[]` is the empty option set (so `grant [] { … }` is the empty grant), `[:]` names no options at all, and the option names are always written in the bracket — a bundle bound elsewhere (`within $o { … }`) or spread in is a parse error — while their values may be computed: `within [dir: $d] { … }`. A misspelled option is a static error naming the form's own list. `grant`'s own keys are `exec`, `fs`, `net`, `editor` and `shell`, each optional and each only ever narrowing what the surrounding frame already holds — the same record a sub-agent's `` grant: `restrict `` takes. Their values are tagged: `exec: [allow: [`name git, `dir `system], deny: [`name rm]]` (targets are `` `name N``, a place, or `` `dir <place or selector>``, a selector being `` `path``, `` `system`` or a package manager such as `` `rustup`` or `` `homebrew``; no argument filtering), `fs: [read: [`cwd .], write: [`cwd build], deny: [`cwd .git]]` (places: `` `absolute`` takes an absolute path; the anchors `` `cwd``, `` `home``, `` `tempdir``, `` `gitdir``, `` `xdg-config|data|cache|state|bin`` each take a relative subpath, `.` for the anchor), `` net: `offline``, and verb lists `` editor: [`read, `write, `tui]``, `` shell: [`chdir, `detach]``. Lists are sets; a written dimension restricts, an omitted one inherits, and `` shell: [`chdir]`` withholds `detach`.
 
-Use `within` instead of `cd`. Paths in results are relative to the `within` directory, so consume them under the same `within`. `env:` values must be scalars. 
+Use `within` instead of `cd`. Paths in results are relative to the `within` directory, so consume them under the same `within`. `env:` values must be scalars.
 
 ## I/O
 
@@ -303,24 +300,32 @@ Read with `from-X < PATH`, write with `to-X $v > PATH`:
     to-string $report >> $file         # append
     to-json   $cfg    >  $file         # JSON write
 
+Write a file with `echo #'…'# > path`.
+
 <critical>
 Writing a multi-line file must use a raw string, ideally with many hashes:
 
-    to-string #####'first line
+    echo #####'first line
     second 'quoted' line'##### > $file
 </critical>
 
 ## Exploring
 
+The exploration tools skip dotfiles and `.gitignore`d files, unless stated otherwise.
+
 Look at a directory with `ls`. To compute over its entries, `list-dir $path` returns every one as records `[name, type, size, mtime]`; `file-info`, `line-count` and `is-file`/`is-dir`/`exists` answer structured questions about a single path. To survey or search the tree:
 
-- `glob #'**/*.txt'#` — matching paths as a ral list; a wildcard never matches a dot file (name it literally; a wildcard starting with `.` is an error). Spread into a command: `mv ...!{glob …} out/`.
-- `explore-dir n` — entries of the current directory to depth `n` as a `ral` list, skipping hidden and `.gitignore`d entries.
-- `grep-files #'TODO'# src` — grep a file, or a directory recursively (Rust regex syntax), skipping hidden and `.gitignore`d entries; returns `ral` list of records `[file, line, text]`.
-- `grep-hidden #'API_KEY'# .` — `grep-files` that enters hidden and `.gitignore`d entries too; only `.git` is skipped.
-- `find-files #'query'#` — the working tree's files fuzzy-ranked by path, best first and truncated, skipping hidden and `.gitignore`d entries; returns `[String]`. Use to find files by name without a glob pattern.
+- `glob #'**/*.txt'#` returns matching paths as a list. `.gitignore`d files match; a wildcard never matches a dotfile, so name one literally. Spread into a command: `mv ...!{glob …} out/`.
+- `explore-dir 2 src` lists the entries beneath a directory to depth 2 as a list.
+- `grep-files #'TODO'# src` searches a file, or a directory recursively.
+- `grep-hidden #'API_KEY'# .` also searches hidden and `.gitignore`d files, but skips `.git`.
+- `find-files #'query'# src` returns the files under a file or directory as `[String]`, fuzzy-ranked by path, best first and truncated. Use it to find files by name without a glob pattern.
 
 Scope any of these with `within [dir: …]`. A walk skips only what it finds: a path you name is always searched, so `grep-files #'x'# target` searches a gitignored directory and `grep-files #'x'# .env` a dot file.
+
+## Coreutils
+
+All Rust uutils are available.
 
 ## Help
 

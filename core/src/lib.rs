@@ -27,7 +27,6 @@ pub mod evaluator;
 pub mod fact;
 pub mod first_order;
 pub(crate) mod frame;
-pub(crate) mod glob;
 pub mod guard;
 pub mod host;
 pub mod invocation;

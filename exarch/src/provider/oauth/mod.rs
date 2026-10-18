@@ -852,7 +852,7 @@ fn finalize(granted: Granted, sign_in: &SignIn) -> Result<OAuthToken, String> {
 /// account's tokens live here, so every grant has to carve this path out.
 pub(crate) fn token_path() -> PathBuf {
     crate::app::EXARCH
-        .xdg_dir(ral_core::host::XdgKind::State)
+        .xdg_dir(ral_core::path::XdgKind::State)
         .join("oauth.json")
 }
 

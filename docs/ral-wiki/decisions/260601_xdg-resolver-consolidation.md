@@ -52,6 +52,6 @@ Realised in `core/src/path/basedir.rs`, `core/src/path/sigil.rs`,
 `core/src/path/config.rs`, and `core/src/serial.rs`. See
 [[map/core/capabilities|capabilities]] and [[map/core/transport|transport]].
 
-*Update 2026-10-06:* the resolver lives at `core/src/host/basedir.rs`; `path::config` is gone.
+*Update 2026-10-06:* the resolver lived at `core/src/host/basedir.rs`, and is back under `core/src/path/basedir.rs` (`host` keeps only the env reads); `path::config` is gone.
 `host::{xdg, home_dot, cwd, home, user}` are the host's facts, read once; the four
 former copies of `resolve_xdg(kind, host::home())` now call `host::xdg(kind)`.

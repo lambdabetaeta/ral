@@ -215,7 +215,7 @@ pub fn run() -> Result<(), String> {
     boot::face_process_signals(&terminal);
     // Held for the whole run: the lock is the launcher's, not the node's.
     let (run_dir, _run_lock, resumes) = resolve_run(&cwd, c.resume)?;
-    let config_dir = app::EXARCH.xdg_dir(ral_core::host::XdgKind::Config);
+    let config_dir = app::EXARCH.xdg_dir(ral_core::path::XdgKind::Config);
     let cwd_path = std::path::PathBuf::from(&cwd);
     // Chat registers no tools, so there is nothing for a system prompt to say.
     let system = if c.chat {

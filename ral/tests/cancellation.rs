@@ -139,7 +139,11 @@ fn close_stdout_after_a_line(script: &str) -> Output {
 fn a_closed_stdout_is_a_stop() {
     let out = close_stdout_after_a_line(WRITER);
     assert_eq!(out.status, SIGPIPE_STATUS);
-    assert_eq!(diagnostics(&out.stderr), "", "a closed stdout prints nothing");
+    assert_eq!(
+        diagnostics(&out.stderr),
+        "",
+        "a closed stdout prints nothing"
+    );
 }
 
 #[test]

@@ -37,7 +37,8 @@
 //! given, `TMPDIR` being the launching user's to set.
 
 use super::toolchains::{self, Toolchain};
-use crate::host::{XdgKind, resolve_xdg};
+use crate::host::resolve_xdg;
+use crate::path::XdgKind;
 use crate::path::git::{BadPointer, Pointer, discover_git_dir};
 use crate::path::identity::windows_identity_components;
 use crate::path::lex::{Root, root};

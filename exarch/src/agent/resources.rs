@@ -120,40 +120,6 @@ pub(crate) fn resources_card(rows: &[ProbeRow]) -> Card {
     Card(vec![Mark::heading("resources"), rows_mark(rows)])
 }
 
-/// Total bytes of every regular file under `root`, recursively; symlinks are
-/// not followed (their target may leave the probed tree) and an unreadable
-/// entry counts zero rather than failing the fold.
-///
-/// Sizes come per-path from `symlink_metadata`, not the `DirEntry`: on
-/// Windows the enumeration figure is the directory's *cached* size, which
-/// NTFS refreshes only when the last writer closes, so a live, still-open log
-/// file would probe as 0.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:resources-disk-probe] the /resources disk figure: a read-only metadata walk of the session's own log/scratch dirs, priced at invocation; operator diagnostics, not turn-time model I/O"
-)]
-pub(crate) fn dir_size(root: &Path) -> u64 {
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return 0;
-    };
-    entries
-        .flatten()
-        .map(|entry| {
-            let path = entry.path();
-            let Ok(meta) = std::fs::symlink_metadata(&path) else {
-                return 0;
-            };
-            if meta.is_dir() {
-                dir_size(&path)
-            } else if meta.is_file() {
-                meta.len()
-            } else {
-                0
-            }
-        })
-        .sum()
-}
-
 /// The eviction-pressure rows, mirroring `Avatar::evict`'s own trigger so
 /// the pressure shown is the pressure that fires: a known window evicts on
 /// tokens against that window, and only the unknown-window fallback still
@@ -347,7 +313,7 @@ impl Avatar {
         let log_dir = self.log.borrow().dir().to_path_buf();
         rows.push(ProbeRow::new(
             "disk.log_dir",
-            dir_size(&log_dir),
+            ral_core::path::tree::bytes(&log_dir),
             None,
             Policy::Warn,
             Some(log_dir.display().to_string()),

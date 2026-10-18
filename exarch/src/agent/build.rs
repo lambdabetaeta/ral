@@ -386,7 +386,8 @@ impl Avatar {
         let system: Arc<str> = system
             .replace(crate::prompt::SCRATCH_PLACEHOLDER, &scratch)
             .into();
-        let own = crate::prompt::with_grant(&system, &seat.read(|t| t.grants()).map_err(lost)?, &caps);
+        let own =
+            crate::prompt::with_grant(&system, &seat.read(|t| t.grants()).map_err(lost)?, &caps);
         let returns = trunk.returns();
         // Chat advertises no tool, so its prompt takes no builtin surface at
         // all — no index, no taught section, the bare stand-in verbatim.

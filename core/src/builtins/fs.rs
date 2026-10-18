@@ -8,12 +8,13 @@
 //! lexical, with no filesystem to gate.
 
 use crate::capability::FsOp;
-use crate::glob::Glob;
+use crate::path::tree::glob::Glob;
 use crate::path::walk::{DirEntry, FileInfo, Kind, Leaf, Stat};
 use crate::types::{Break, Settled, Shell, Value, sig};
 use std::path::Path;
+use std::sync::Arc;
 
-use super::util::{admits_read, checked_read_path};
+use super::util::checked_read_path;
 
 pub(super) fn builtin_list_dir(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let rp = shell.resolve(args[0].as_str("list-dir")?);
@@ -69,46 +70,17 @@ pub(super) fn builtin_temp_file(_args: &[Value], shell: &mut Shell) -> Settled<V
 /// cwd-relative matches, a sigil-rooted or absolute one absolute matches.
 pub(super) fn builtin_glob(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let raw = args[0].as_str("glob")?;
-    let home = shell.context.home();
-    let expanded = crate::path::sigil::expand_path_prefix(raw, home.as_deref());
-    let base = (!crate::path::is_absolute(&expanded)).then(|| shell.cwd());
     let pattern = checked_read_path(shell, raw)?;
-    let glob = Glob::parse(pattern.as_path()).map_err(|e| sig(format!("glob: {e}")))?;
+    let glob = Arc::new(Glob::parse(pattern.as_path()).map_err(|e| sig(format!("glob: {e}")))?);
+    let mut walk = glob.walk().admitted(shell, "glob", raw);
     let mut hits = Vec::new();
-    for hit in glob.walk(shell.scope.clone()) {
-        let hit = hit?;
-        let shown = base
-            .as_ref()
-            .and_then(|cwd| hit.strip_prefix(cwd).ok())
-            .unwrap_or(&hit);
-        match shown.to_str() {
-            // As in `list-dir`: the *pattern* was admitted, the hits under it were not.
-            Some(s) if admits_read(shell, s) => hits.push(s.to_owned()),
-            Some(_) => {}
-            None => {
-                if let Some(refusal) = unnameable(shell, &hit) {
-                    return Err(refusal);
-                }
-            }
+    while let Some(entry) = walk.next(shell)? {
+        if glob.matches(entry.path.as_path()) {
+            hits.push(entry.name()?);
         }
     }
     hits.sort();
     Ok(Value::list(hits.into_iter().map(Value::string).collect()))
-}
-
-/// A hit no ral string can hold, refused where its directory is readable.
-#[allow(
-    clippy::unnecessary_debug_formatting,
-    reason = "Debug escapes the invalid bytes; Display would mangle them"
-)]
-fn unnameable(shell: &mut Shell, hit: &Path) -> Option<Break> {
-    let dir = hit.ancestors().find_map(Path::to_str)?;
-    admits_read(shell, dir).then(|| {
-        let name = hit.strip_prefix(dir).unwrap_or(hit);
-        sig(format!(
-            "glob: {dir}: {name:?} is not valid UTF-8, so no ral string can hold it; rename it?"
-        ))
-    })
 }
 
 /// Label an `io::Error` with the operation and the path that provoked it.

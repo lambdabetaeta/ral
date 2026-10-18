@@ -143,7 +143,7 @@ impl Keychain {
     /// running as the user who owns it.
     pub(crate) fn fallback_path(self) -> PathBuf {
         self.app
-            .xdg_dir(ral_core::host::XdgKind::Config)
+            .xdg_dir(ral_core::path::XdgKind::Config)
             .join(FALLBACK_FILE)
     }
 

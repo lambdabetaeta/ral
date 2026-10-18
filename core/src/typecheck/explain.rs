@@ -105,7 +105,10 @@ impl TypeErrorKind {
             }
             Self::UnboundVariable { name, .. } => format!("undefined variable: ${name}"),
             Self::HeadBoundToValue { name, ty } => {
-                format!("`{name}` is bound to {}, so it is not a program", describe(ty))
+                format!(
+                    "`{name}` is bound to {}, so it is not a program",
+                    describe(ty)
+                )
             }
             Self::IndexContainerUnknown { names, .. } => {
                 let (target, read, key) = match names {
