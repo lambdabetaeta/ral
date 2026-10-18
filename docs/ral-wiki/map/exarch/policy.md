@@ -37,9 +37,10 @@ pushed layer**:
   denotation, so `dangerous` extended with a positive-only fs gets none);
 - pushes last the *self layer*: an exec exclusion of exarch's own binary, by
   the path it was pinned from, built as `deny_layer` is (`join_top` over a
-  fragment of one exclusion), in every session, `dangerous` included, so every
-  spawned agent inherits it. The agent cannot start exarch as a process; `dangerous`
-  is ambient authority less starting exarch, and its stack restricts.
+  fragment of one exclusion), wherever some layer's exec restricts, so every
+  spawned agent of a restricted session inherits it. The agent cannot start
+  exarch as a process there; `dangerous` is ambient authority, its stack
+  restricts nothing, and it needs no OS sandbox.
 
 Composition emits no confused-deputy warning naming every prefix both
 exec-admitted and writable. That predicate is not the one that matters —
@@ -118,8 +119,7 @@ that can read the same bytes a hundred other ways.
 `policy/base.rs` embeds the six bake-in profiles from `exarch/data/*.exarch.ral`
 via `include_str!`, ordered from most to least authority:
 
-- `dangerous` — `Capabilities::root`, lattice top, no attenuation of its own
-  (the self layer still excludes exarch's binary);
+- `dangerous` — `Capabilities::root`, lattice top, no attenuation;
 - `reasonable` — default; everyday tooling + standard binary dirs;
 - `edit-only` — reasonable's reads, writes to the working tree and scratch,
   network on; for patch/refactor jobs that never run a build;

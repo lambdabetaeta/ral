@@ -2022,15 +2022,16 @@ mod self_layer {
         assert!(to.exists(), "mv moved the file");
     }
 
+    /// The extension admits exarch's own directory, so only the self layer
+    /// refuses it.
     #[test]
-    fn exarch_is_refused_in_a_dangerous_and_a_reasonable_session() {
+    fn exarch_is_refused_in_a_reasonable_session() {
         let Some(f) = fixture() else { return };
-        for base in ["dangerous", "reasonable"] {
-            let crate::policy::Invocation { stack, .. } =
-                crate::policy::for_invocation(&f.cwd, base, Some(&f.extend), &[]).expect(base);
-            refuses_exarch(&f, &stack);
-            bundled_tool_runs(&f, &stack);
-        }
+        let crate::policy::Invocation { stack, .. } =
+            crate::policy::for_invocation(&f.cwd, "reasonable", Some(&f.extend), &[])
+                .expect("reasonable composes");
+        refuses_exarch(&f, &stack);
+        bundled_tool_runs(&f, &stack);
     }
 
     /// A spawned child's `Base` or `Restrict` layer is pushed without passing
@@ -2039,8 +2040,8 @@ mod self_layer {
     fn a_spawned_child_inherits_the_self_layer() {
         let Some(f) = fixture() else { return };
         let crate::policy::Invocation { stack: parent, .. } =
-            crate::policy::for_invocation(&f.cwd, "dangerous", Some(&f.extend), &[])
-                .expect("dangerous composes");
+            crate::policy::for_invocation(&f.cwd, "reasonable", Some(&f.extend), &[])
+                .expect("reasonable composes");
         let ctx = ral_core::guard::freeze::FreezeCtx {
             home: None,
             cwd: f.cwd.clone().into(),

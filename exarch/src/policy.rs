@@ -2,7 +2,7 @@
 //!
 //! ```text
 //!   ceiling = base ◁ extend?
-//!   stack   = [ceiling, restrict₁, restrict₂, ..., deny(restricts)?, deny(credentials)?, self]
+//!   stack   = [ceiling, restrict₁, restrict₂, ..., deny(restricts)?, deny(credentials)?, self?]
 //! ```
 //!
 //! One optional extension shapes the ceiling, in its own layer; every other
@@ -38,9 +38,10 @@ use std::path::{Path, PathBuf};
 /// trust-source concern rather than a containment one.  On the same
 /// footing the stack denies
 /// [`provider::credential_files`](crate::provider::credential_files) in
-/// its own layer.  Last in every
-/// session, `dangerous` included, a layer excludes exarch's own binary from
-/// exec, so the agent cannot start exarch.
+/// its own layer.  Last, wherever some layer's exec restricts, a layer
+/// excludes exarch's own binary from exec, so the agent cannot start exarch.
+/// A session whose fs and exec are unrestricted gets no exclusion, so
+/// `dangerous` is ambient authority and needs no OS sandbox.
 ///
 /// # Errors
 /// Unknown `base_name`, a profile that fails to load, or an exarch binary
@@ -106,7 +107,13 @@ pub fn for_invocation(
         stack.push(deny_layer(&crate::provider::credential_files(), &ctx)?);
     }
 
-    stack.push(self_layer()?);
+    // On the same footing: exec unrestricted asked not to be confined, and an
+    // exec exclusion would confine every launch, which on Linux needs bwrap.
+    // A child a `dangerous` parent narrows thus runs exarch, regaining only the
+    // parent's own authority.
+    if !stack.exec_is_top() {
+        stack.push(self_layer()?);
+    }
 
     Ok(Invocation { stack, restricts })
 }
@@ -114,7 +121,7 @@ pub fn for_invocation(
 /// A session's composed authority, with the pieces its callers need by name.
 #[derive(Debug)]
 pub struct Invocation {
-    /// The whole meet, self layer last.
+    /// The whole meet, the self layer, if any, last.
     pub stack: GrantStack,
     /// Absolute paths of the `--restrict` files.
     pub restricts: Vec<PathBuf>,
@@ -230,6 +237,15 @@ mod tests {
 
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_dir(cwd);
+    }
+
+    /// `dangerous` restricts no axis, so no exclusion is pushed and no launch
+    /// needs an OS sandbox: a host without bwrap still runs commands.
+    #[test]
+    fn a_dangerous_session_restricts_nothing() {
+        let cwd = std::env::temp_dir().to_string_lossy().into_owned();
+        let Invocation { stack, .. } = for_invocation(&cwd, "dangerous", None, &[]).unwrap();
+        assert!(!stack.is_restrictive(), "{stack:?}");
     }
 
     /// The stack ANDs the verdicts, so a `confined` layer (network off) under

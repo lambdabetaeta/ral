@@ -270,11 +270,11 @@ fn no_attenuated_base_can_read_a_credential_file() {
     }
 }
 
-/// `dangerous` is ambient authority, less starting exarch: it installs no fs
-/// policy, and two denies are not worth turning every unconfined session into
-/// a confined one against an agent that can reach the same bytes a hundred
-/// other ways.  Naming a restrict file *does* attenuate, and then the
-/// credential carve-out lands with it.  The self layer is there throughout.
+/// `dangerous` is ambient authority: it installs no restriction, and three
+/// denies are not worth turning every unconfined session into a confined one
+/// against an agent that can reach the same bytes a hundred other ways.
+/// Naming a restrict file *does* attenuate, and then the credential carve-out
+/// lands with it.
 #[test]
 fn dangerous_stays_ambient_until_something_attenuates_it() {
     let dir = Scratch::for_test(EXARCH, "credential-deny-dangerous").expect("scratch dir");
@@ -283,14 +283,11 @@ fn dangerous_stays_ambient_until_something_attenuates_it() {
 
     let Invocation { stack, .. } =
         for_invocation(&cwd, "dangerous", None, &[]).expect("dangerous composes");
-    assert!(
-        stack.fs().next().is_none(),
-        "dangerous must attenuate nothing on fs"
-    );
+    assert!(!stack.is_restrictive(), "dangerous must attenuate nothing");
     let mut shell = ral_core::test_helper::core_shell();
     install(&mut shell, &stack);
-    refusal(check_file(&mut shell, &own_binary(), &[]));
-    check_file(&mut shell, &on_path("ls"), &[]).expect("everything else still runs");
+    check_file(&mut shell, &own_binary(), &[]).expect("exarch runs");
+    check_file(&mut shell, &on_path("ls"), &[]).expect("everything runs");
 
     let restrict = profile(
         &dir,
@@ -342,8 +339,8 @@ fn only_an_fs_restricting_restrict_file_is_excluded() {
 }
 
 /// An extension's allowance never removes permission, so `dangerous` stays
-/// unrestricted; its exclusion makes every request, less it.  Exarch's own
-/// binary stays out of reach either way.
+/// unrestricted, exarch's own binary included; its exclusion makes every
+/// request, less it, and so restricts exec and brings the self layer.
 #[test]
 fn dangerous_extended_is_unrestricted_less_the_extensions_exclusions() {
     let dir = Scratch::for_test(EXARCH, "extend-dangerous").expect("scratch dir");
@@ -364,7 +361,7 @@ fn dangerous_extended_is_unrestricted_less_the_extensions_exclusions() {
     let mut shell = ral_core::test_helper::core_shell();
     install(&mut shell, &stack);
     check_file(&mut shell, &on_path("rustc"), &[]).expect("`every` still runs what is unnamed");
-    refusal(check_file(&mut shell, &own_binary(), &[]));
+    check_file(&mut shell, &own_binary(), &[]).expect("exec is top, so no self layer");
 
     let Invocation { stack, .. } =
         for_invocation(&cwd, "dangerous", Some(&excluding), &[]).expect("profiles compose");
@@ -373,6 +370,7 @@ fn dangerous_extended_is_unrestricted_less_the_extensions_exclusions() {
     let message = refusal(check_file(&mut shell, &on_path("rustc"), &[]));
     assert!(message.contains(&on_path("rustc")), "{message}");
     check_file(&mut shell, &on_path("ls"), &[]).expect("every request less the exclusion");
+    refusal(check_file(&mut shell, &own_binary(), &[]));
 }
 
 /// `--restrict` files apply in argument order: a layer reads the run places
@@ -407,19 +405,33 @@ fn restrictions_apply_in_argument_order() {
     verdict([runs, reads_nothing]).expect("the run beneath makes the program readable");
 }
 
-/// The self layer is pushed in every session: exarch's own binary is refused
-/// under `reasonable` and `dangerous` alike.
+/// The self layer follows exec restriction, as the credential layer follows
+/// fs: a restrict file admitting exarch's own directory leaves the self layer
+/// alone to refuse the binary, and plain `dangerous`, restricting no exec,
+/// pushes none.
 #[test]
-fn the_self_layer_refuses_exarch_in_every_session() {
+fn the_self_layer_follows_an_exec_restriction() {
     let dir = Scratch::for_test(EXARCH, "self-layer").expect("scratch dir");
     let cwd = dir.path().to_string_lossy().into_owned();
-    for base in ["reasonable", "dangerous"] {
+    let exe = own_binary();
+    let parent = std::path::Path::new(&exe).parent().expect("a directory");
+    let admitting = profile(
+        &dir,
+        "admitting.ral",
+        &format!(
+            "return [exec: [allow: [`dir `absolute {}]]]\n",
+            parent.display()
+        ),
+    );
+    let verdict = |restricts: &[PathBuf]| {
         let Invocation { stack, .. } =
-            for_invocation(&cwd, base, None, &[]).expect("base composes");
+            for_invocation(&cwd, "dangerous", None, restricts).expect("profiles compose");
         let mut shell = ral_core::test_helper::core_shell();
         install(&mut shell, &stack);
-        refusal(check_file(&mut shell, &own_binary(), &[]));
-    }
+        check_file(&mut shell, &exe, &[])
+    };
+    refusal(verdict(std::slice::from_ref(&admitting)));
+    verdict(&[]).expect("plain `dangerous` restricts no exec, so pushes no self layer");
 }
 
 /// The credential layer follows fs restriction, not fs presence: an extension
@@ -485,22 +497,15 @@ fn the_grant_summary_agrees_with_an_attenuated_grant() {
     assert!(bullet(&text, "- fs write:").contains(&frozen_cwd), "{text}");
 }
 
-/// `dangerous` is every program less exarch itself: the summary says so, names
-/// the one exclusion, and says nothing of fs.
+/// `dangerous` restricts nothing, so the summary says it is ambient authority.
 #[test]
-fn the_grant_summary_of_dangerous_is_every_program_less_exarch() {
+fn the_grant_summary_of_dangerous_is_ambient_authority() {
     let dir = Scratch::for_test(EXARCH, "grant-prompt-dangerous").expect("scratch dir");
     let cwd = dir.path().to_string_lossy().into_owned();
     let invocation = for_invocation(&cwd, "dangerous", None, &[]).expect("dangerous composes");
     let text = grant_summary(&invocation.stack);
 
-    assert!(!text.contains("Ambient authority"), "{text}");
-    assert_eq!(
-        bullet(&text, "- exec:"),
-        "- exec: every program, less the exclusions below"
-    );
-    assert!(!bullet(&text, "- exec deny:").is_empty(), "{text}");
-    assert!(!text.contains("- fs "), "{text}");
+    assert!(text.starts_with("Ambient authority"), "{text}");
 }
 
 /// A ceiling of `every` beside a run place, fs omitted, denotes `t` and yet

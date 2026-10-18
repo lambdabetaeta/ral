@@ -209,26 +209,24 @@ rules and verbs among it, does not bind it, so under an exec allow-list that
 admits ral, `ral -c 'mv a b'` runs the bundled `mv` the list omits. A grant whose
 guard-only rules must hold against a nested ral does not admit it.
 
-**exarch's agent cannot start exarch as a process.** In every session,
-`dangerous` included, exarch pushes as its last layer an exec exclusion of its
-own binary, by the path it was pinned from; spawned agents inherit it. It names
+**exarch's agent cannot start exarch as a process, wherever exec restricts.**
+In such a session exarch pushes as its last layer an exec exclusion of its own
+binary, by the path it was pinned from; spawned agents inherit it. It names
 that binary and nothing else, so another install of exarch or ral, in a folder
-a grant admits, runs. `dangerous` is therefore ambient authority *less starting
-exarch*: its stack is restrictive, launch hardening applies, and on Linux and
-macOS every launch is sandboxed. The shell still evaluates ral in its own
-process.
+a grant admits, runs. `dangerous` restricts nothing, so it gets no such layer
+and needs no OS sandbox: an exclusion there would make every launch sandboxed,
+and on Linux a host without bwrap would run no command at all.
 
-Why unconditional: a spawn forks the parent's stack and pushes one layer without
-passing through `for_invocation`, so a layer pushed only where exec restricts
-would miss a `dangerous` parent's restricted child; an always-present layer is
-inherited by every descendant. Nothing the agent legitimately does re-execs
+The cost of the condition: a spawn forks the parent's stack and pushes one
+layer without passing through `for_invocation`, so a `dangerous` parent's
+restricted child has no self layer, and can start exarch and so regain the
+parent's authority, which the parent holds anyway. Nothing the agent legitimately does re-execs
 exarch (its shell evaluates in exarch's process, bundled tools run in-process in
 the confined child, pipeline anchors are spawned unconfined by exarch itself), so
 the exclusion is exec only: an fs exclusion of exarch's binary would refuse every
 bundled tool. Costs: on Linux, a program created during a launch directly on the
 spine of exarch's binary (`~`, `~/.cargo`, `~/.cargo/bin` for a cargo install)
-runs from the next launch; under `dangerous` with an fs-restricting restrict
-file, a program built in the envelope's private `/tmp` does not run. Windows pays
+runs from the next launch. Windows pays
 nothing: exec is enforced only in process and an exec-only restriction projects
 nothing there. synod builds its own stack and its guest holds no exarch binary,
 so it has no self layer. Like every exclusion it is a guardrail: it does not hold

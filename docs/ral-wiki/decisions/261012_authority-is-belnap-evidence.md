@@ -155,8 +155,8 @@ The mechanism:
   itself and the layers beneath it.
 - **ral's binary is an ordinary host file**; a bundled tool reads it. Both
   kernels' admissions of ral's own image are deleted.
-- **exarch's self layer.** An exec exclusion of exarch's own binary, pushed in
-  every session.
+- **exarch's self layer.** An exec exclusion of exarch's own binary, pushed
+  wherever exec restricts.
 - **`--extend-base` is `--extend`.** The flag names the operation, `◁`, and no
   longer suggests that it only widens. No alias; clap's own suggestion answers
   the old spelling. The help text says what the rules say: the file's allowances
@@ -261,36 +261,39 @@ The mechanism:
    new spelling would escape them); *shaped* places, a file read exactly, which
    made the fs meet need shaped probes for nothing a write to the file's parent
    could not already reach. A run place reads as a prefix. Every allowance renders as its frozen real path alone: a surface spelling is never a predicate of its own, since a name that was a symlink at freezing can later hold a real directory the grant never named. Synod's guest grant is the unfinished half (see *As built*).
-10. **exarch excludes its own binary, in every session.** Alex: "avoid exarch
-    running ral running exarch; not sure why you'd re-exec exarch". A nested
-    exarch is an agent outside the session's stack: `exarch --ral-bundled-tool mv` runs with
-    no grants at all. Nothing the agent legitimately does re-execs exarch, so
+10. **exarch excludes its own binary wherever exec restricts.** Alex: "avoid
+    exarch running ral running exarch; not sure why you'd re-exec exarch". A
+    nested exarch is an agent outside the session's stack: `exarch
+    --ral-bundled-tool mv` runs with no grants at all. Nothing the agent
+    legitimately does re-execs exarch, so wherever some layer's exec restricts,
     `for_invocation` pushes an exec exclusion of the binary, by the path it was
-    pinned from, which re-resolves like every exclusion. It is pushed always,
-    `dangerous` included: a spawn forks the parent's stack and pushes one layer
-    without passing through `for_invocation`, so a conditional layer would miss
-    a `dangerous` parent's restricted child, whereas an unconditional layer is
-    inherited by every descendant (Codex's seventh-review finding, and a
-    conditional layer would have needed a second installation site on the spawn
-    route). Alex chose always over only-where-exec-restricts, which was
-    recommended for its lower cost. Costs accepted: `dangerous` is ambient
-    authority *less starting exarch*, so its stack is restrictive and launch
-    hardening applies; on Linux and macOS every launch is sandboxed; on Linux a
-    program created during a launch directly on the spine of exarch's binary
-    waits for the next launch, and under `dangerous` with an fs-restricting
-    restrict file a program built in the envelope's private `/tmp` does not run.
-    Windows pays nothing (exec is enforced only in process). synod builds its
-    own stack and has no self layer. The earlier self layer also vetoed `exarch`
-    and `ral` by name; the layer names that binary alone, so another install of
-    either, in a folder a grant admits, runs. Rejected: vetoing `exarch` and
-    `ral` by name (another install is an ordinary file, and name vetoes are
-    advisory beneath writable directories); pushing it only where exec
-    restricts, or wherever the stack restricts (the spawn gap, and a `dangerous`
-    session that could still start exarch); no self layer (shedding the
-    session's grants through a nested exarch should take more than one
-    command). It is built as `deny_layer` is, by `join_top` over a fragment of
-    one exclusion, and is exec only, since an fs exclusion of exarch's binary
-    would refuse every bundled tool.
+    pinned from, which re-resolves like every exclusion. It is the credential
+    deny's rule, on exec. The layer was first pushed in every session,
+    `dangerous` included, so that a spawn, which forks the parent's stack and
+    pushes one layer without passing through `for_invocation`, could not miss
+    it. That made `dangerous` restrictive, so every launch went through the OS
+    sandbox, and on Linux a host without bwrap, such as every Terminal-Bench
+    container, ran no external command at all (exarch-bench, 2026-10-18).
+    Costs accepted: a child that a `dangerous` parent's spawn grant narrows
+    can start exarch, regaining the parent's unconfined authority, which the
+    parent holds anyway, so nothing escalates; the same child can read the
+    credential files. Where exec restricts, on Linux a program created during
+    a launch directly on the spine of exarch's binary waits for the next
+    launch. Windows pays nothing (exec is enforced only in process). synod
+    builds its own stack and has no self layer. The earlier self layer also
+    vetoed `exarch` and `ral` by name; the layer names that binary alone, so
+    another install of either, in a folder a grant admits, runs. Rejected:
+    vetoing `exarch` and `ral` by name (another install is an ordinary file,
+    and name vetoes are advisory beneath writable directories); pushing it in
+    every session (it confines `dangerous`, which then needs an OS sandbox the
+    host may not have); making the exclusions a part of the stack met in on
+    each axis wherever any layer restricts it, at any depth (it closes the
+    spawn gap, but gives `GrantStack` a second component for a gap that
+    escalates nothing); no self layer (shedding a restricted session's grants
+    through a nested exarch should take more than one command). It is built as
+    `deny_layer` is, by `join_top` over a fragment of one exclusion, and is
+    exec only, since an fs exclusion of exarch's binary would refuse every
+    bundled tool.
 11. **Windows refuses the universal prefix.** `FrozenPath::root` means every
     path on every volume; stamped as a path it becomes the current drive. A
     launch whose fs projection holds it is refused before anything is stamped;
@@ -484,8 +487,8 @@ reported before its permissions change.
   nothing); under one that admits ral's folder a nested ral runs, bound by the
   kernel alone. An fs exclusion of ral's binary refuses every bundled tool; an
   exec exclusion leaves them alone.
-- **exarch's agent cannot start exarch**, in every session; `dangerous` is
-  ambient authority less starting exarch.
+- **exarch's agent cannot start exarch** wherever exec restricts; `dangerous`
+  is ambient authority.
 - **Windows refuses "every path, less exclusions"**: in exarch, `dangerous` with
   an fs exclusion from `--extend` or a restrict file. Today's stamping of the
   current drive's root ends.

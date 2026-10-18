@@ -67,11 +67,11 @@ pub struct Cli {
     /// Use `reasonable` for normal work, `edit-only` to allow edits but not
     /// builds, `read-only` to keep writes in scratch space, `minimal` for
     /// system tools, the working directory and network access, or `confined`
-    /// for an offline build jail. `dangerous` itself places no restriction on
-    /// the agent, though exarch always excludes its own binary, and its
-    /// credential files once the filesystem is restricted, and every
-    /// `--restrict` file. Use it only inside another trusted boundary. The
-    /// default is `reasonable`.
+    /// for an offline build jail. `dangerous` places no restriction on the
+    /// agent. Once commands are restricted, exarch excludes its own binary;
+    /// once the filesystem is, its credential files and every `--restrict`
+    /// file. Use it only inside another trusted boundary. The default is
+    /// `reasonable`.
     #[arg(long = "base", value_name = "NAME", default_value = "reasonable")]
     pub base: String,
     /// Join one ral file's allowances and exclusions to the starting permission set.
