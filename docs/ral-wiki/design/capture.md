@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 195ad6b4
+generated_at_commit: 6ca71142
 ---
 
 # Capture: a command's value is its output
@@ -103,7 +103,44 @@ accepted write preserves the body signal; a refused write pre-empts it. Bytes
 delivered before refusal remain visible. Under `!{ … } > f` the file is that
 sink, so the flush lands in `f`.
 
-**The kernel proves the two halves for accepting body runs.** With unbounded
+**The active CEK model has typed capture frames and a stateful flush boundary.**
+`CEK.CaptureRouting` walks ordinary and generalisation frames to the nearest
+buffer; its concatenation law preserves byte order, and stderr passes through.
+Successful pop returns the exact buffer. A halt pops before flushing, so an
+outer capture absorbs the bytes; only an external destination invokes the world.
+Acceptance preserves the halt. Refusal exposes the delivered prefix and raises
+the write error instead. Checked traces cover nested recovery, cleanup,
+polymorphic bind, feed/environment/directory restoration and flush errors overriding both errors and
+exits. `CEK.CaptureLaws` gives general command-success and halt-boundary rules;
+contextual transfer remains open.
+`CEK.Continuation` now lifts internal paths beneath any compatible typed
+continuation, and `CEK.CaptureContinuation` proves that adding capture
+preserves inner buffers and absorbs outward stdout. Internally terminating
+bodies consequently return empty bytes or reach an empty-buffer halt flush.
+
+A general bare-run comparison needs a delivery condition. A nested failure
+can flush to the world before bare recovery, changing world state or replacing
+the error. An enclosing capture absorbs that same flush. Checked CEK traces
+exhibit the state difference for the same command response.
+
+`CEK.BufferedWorld` supplies that accepting reference destination: command
+execution is unchanged, but outward flushes accept fully without changing
+world state; directory admission is unchanged too. `CEK.CaptureSimulation`
+proves the forward direction for every finite reference-body execution,
+including handler/base calls, environment/directory entry, refusal and
+handler/scope restoration, without a
+syntax coverage predicate. It preserves stderr, stdin and body world changes, while capture
+accumulates reference stdout. Success returns the whole byte word. Halt uses
+the actual outer flush response, including partial refusal and error
+replacement. `CEK.CaptureReflection` reverses each captured step into a body
+step, successful pop or outer flush. `CEK.CaptureCompleteness.capture-complete`
+reconstructs a terminating reference-body run from every terminating capture
+at the empty stack, retaining output, outcome, final configuration and the
+actual flush response. Stderr agrees exactly. Both directions of finite
+termination now check; contextual equivalence, finite-prefix characterisation
+and divergence remain open.
+
+**The frozen CK kernel proves the two halves for accepting body runs.** With unbounded
 buffers, `capture-returns` retains exactly stdout and writes nothing outward.
 `capture-halts-response` follows the outer write verdict: acceptance preserves
 the body's signal and stdout (`capture-halts`); refusal reports the write error

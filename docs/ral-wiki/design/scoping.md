@@ -33,6 +33,56 @@ Each dynamic frame nests by its own algebra:
 A tail-recursive call inside a `within` or `grant` block stays under that scope
 across every tail landing.
 
+The active Agda runtime (`dev/agda/CEK/Runtime.agda`) makes the lexical half
+explicit: closures contain typed code and lexical environments, with no
+dynamic-scope payload. Environment entries hold scheme-indexed values;
+instantiation preserves their erased data and captured code. Total typed
+value evaluation agrees with an untyped evaluator using positional lookup.
+The CEK structural/control rules execute those closures and preserve lexical
+capture across caller shadowing. Generalisation evaluates its producer once;
+later occurrences instantiate the returned value. Byte feeds save the caller's
+remaining stdin and install a closed queue for the body. On return or escape,
+the frame restores that remainder without rolling back world state or output.
+Checked traces distinguish cleanup inside a feed, which reads its remaining
+bytes, from cleanup outside, which reads restored caller stdin. A returned
+closure reads the input of its eventual caller. Capture routes stdout through
+these typed frames to its nearest buffer; nested failure flushes can therefore
+remain inside an enclosing capture.
+
+The active CEK environment rule now validates a sorted text-map overlay,
+refuses PWD and OLDPWD before the body runs, saves the caller map, and forces
+the supplied thunk under inner shadowing. `CEK.Environment` proves shadowing,
+preservation of unshadowed entries, binding provenance and exact reserved-key
+validation. On return, error or exit the frame restores the saved environment
+without rolling back world state, output or stdin. Commands observe the active
+map. Checked traces distinguish cleanup inside/outside a scope and recovery
+after restoration; a returned command thunk uses its later caller's map.
+`CEK.CommandMachine` proves total entry and immediate return/fail/exit laws
+at arbitrary continuations. Forward and reverse capture simulation include
+environment entry, refusal and restoration (`CEK/EnvironmentExamples`).
+
+Directory scopes now have matching typed frames. Empty paths raise locally;
+`empty-directory-step` characterises every possible first step, excluding a
+world call. Nonempty paths use a stateful admission judgment supplied by the
+world. Admission saves/sets the opaque path and forces the thunk; refusal
+raises before the body. Pop restores only the saved path on every outcome,
+retaining admission/body world changes. Checked traces cover nested resolution,
+cleanup/recovery, refusal, capture and returned closures using caller directory
+(`CEK/DirectoryExamples`). Both capture simulations include these steps.
+The world judgment abstracts resolution, permission and existence validation;
+its ordered OS/authority refinement remains open. Unbracketed `cd` is outside
+this core. File redirects, authority scopes, contextual scope laws and the
+dynamic-authority theorem remain open.
+
+Handler scope is now a separate CEK configuration field. Installation evaluates
+lexical arms and pushes a user frame; invocation masks exactly its owner and
+restores the saved caller scope on return, error or exit. The host base table
+is searched after user names and before catch-alls, and its calls run unmasked.
+Scope restoration preserves world changes and byte traffic. Checked traces
+show deep restoration between calls and returned command thunks using their
+later caller's handlers. Both capture simulations preserve the handler
+component; contextual scope laws and general handler adequacy remain open.
+
 **A scoping form's body is a thunk the form forces.** `within` and `grant` take
 a thunk `U C` — a literal `{ … }`, or a name holding one — and run it inside the
 frame they push; `guard`, `try` and `?` take theirs the same way, as `if` and

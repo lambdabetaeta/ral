@@ -19,7 +19,7 @@ share one return type.
 
 **`try` turns failure into data, and is ral's only `||`.** `try B H` runs `B`;
 on success it returns `B`'s value, on failure it calls the handler `H` with an
-error record `[status, cmd, message, site]` and returns *its* value,
+error record `[status, cmd, reason, message, site]` and returns *its* value,
 unifying both outcomes into one type. It catches recoverable runtime errors and
 nothing else — `exit` and a stop, the two `Escape`s, bypass it. When a
 command encodes its result in its exit status rather than a value — an external
@@ -69,6 +69,15 @@ the restored caller environment. For two halting computations under `guard`,
 the cleanup's halt, for arbitrary error/escape signals and ambient scope
 layers. These results concern the covered finite-behaviour model; handler
 invocation and Rust refinement remain separate obligations.
+
+The active CEK direct-command model derives `status` and `reason` from one
+process outcome. Exit zero returns unit; nonzero exit, signal, not-found and
+not-runnable become ordinary errors. Exit 129 and signal 1 have equal statuses
+but different reasons. Source `exit` stays an escape. Checked command traces
+retain stdout/stderr and the stdin remainder on failure, preserve the command's
+syntax-stamped site, and carry an error across generalisation into recovery.
+This covers the atomic direct-command layer; named dispatch, capture and
+pipeline failure rules remain open (`dev/agda/CEK/CommandExamples.agda`).
 
 Failure propagates predictably through the rest of the grammar:
 

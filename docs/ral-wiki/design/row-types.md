@@ -75,4 +75,25 @@ literature in [[related/rows-and-handlers|rows-and-handlers]].
 
 **Realised in** [[internals/type-inference|type-inference]] (row unification by the Rémy rewrite).
 
+The Agda foundation in `dev/agda/CEK` checks scoped open rows:
+strictly sorted field/tag alphabets, unique field types, and replacement that
+preserves the label set. Intrinsic records, variants and exhaustive case arms
+are closed under simultaneous type/row/grade substitution, including deep data
+bounds. Literals and exhaustive cases have closed rows; selection, injection
+and type-changing update use known fields of an open row.
+The substitution machinery has a certified disjoint merge, with identity,
+commutativity, associativity and payload-substitution laws. Replacement bounds
+specify excluded labels and deep data requirements; admission supplies the
+disjointness premise and survives type substitution. The `OpenRow` algebra has
+scoped variable tails whose bounds exclude the known prefix; open substitution
+preserves these bounds and satisfies identity, composition and pointwise
+congruence. These laws lift into the recursive type grammar, and substitution
+preserves intrinsic typing and erased code even when tail fields interleave
+the prefix. Prenex schemes quantify both row sorts with their bounds;
+substitution avoids capture and preserves bounded instantiation witnesses.
+Contexts bind these schemes, and variable occurrences instantiate them.
+Generalisation checks the body under fresh quantifiers and a weakened outer
+context; substitution preserves typing and erased code through the bind.
+The operational account remains on the frontier in `dev/docs/agda-progress.md`.
+
 Cite: RATIONALE §"Structured values cross once"; `docs/SPEC.md` §4, §4.5.
