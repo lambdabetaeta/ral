@@ -172,6 +172,7 @@ impl Verb {
     /// Type the trailing argument, or say how it is malformed — the usage
     /// hints live here, so [`run`] receives only well-formed commands.
     fn parse(self, arg: &str) -> Result<Command, String> {
+        let named = || (!arg.is_empty()).then(|| arg.to_string());
         Ok(match self {
             Self::Help => Command::Help,
             Self::Legend => Command::Legend,
@@ -188,8 +189,8 @@ impl Verb {
             Self::Resources => Command::Resources,
             Self::Rewind => Command::Rewind,
             Self::Quit => Command::Quit,
-            Self::New => Command::New((!arg.is_empty()).then(|| arg.to_string())),
-            Self::Branch => Command::Branch((!arg.is_empty()).then(|| arg.to_string())),
+            Self::New => Command::Hatch(Memory::Amnemon, named()),
+            Self::Branch => Command::Hatch(Memory::Mnemon, named()),
             Self::Export if arg.is_empty() => return Err("usage: /export <path>".into()),
             Self::Export => Command::Export(arg.to_string()),
             Self::Focus if arg.is_empty() => return Err("usage: /focus <name>".into()),
@@ -211,8 +212,9 @@ pub(super) enum Command {
     Login,
     Providers,
     Limits,
-    New(Option<String>),
-    Branch(Option<String>),
+    /// `/new` and `/branch`: the focused agent opens a root session of its
+    /// fleet.
+    Hatch(Memory, Option<String>),
     Close,
     Focus(String),
     Evict,
@@ -566,16 +568,10 @@ fn run(command: Command, tui: &mut Tui, ctx: &super::tui_loop::CommandCtx<'_>) {
         Command::Quit => quit(tui.app.tabs.fleet()),
         Command::Evict => post(tui, Post::Rewrite(Rewrite::Evict)),
         Command::Rewind => rewind::rewind(tui),
-        Command::New(name) => hatch(tui, Memory::Amnemon, name),
-        Command::Branch(name) => hatch(tui, Memory::Mnemon, name),
+        Command::Hatch(memory, name) => post(tui, Post::Read(Read::Hatch { memory, name })),
         Command::Context => post(tui, Post::Read(Read::Context)),
         Command::Resources => post(tui, Post::Read(Read::Resources)),
     }
-}
-
-/// `/new` and `/branch`: the focused agent opens a root session of its fleet.
-fn hatch(tui: &mut Tui, memory: Memory, name: Option<String>) {
-    post(tui, Post::Read(Read::Hatch { memory, name }));
 }
 
 #[cfg(test)]

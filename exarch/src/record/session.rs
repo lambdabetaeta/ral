@@ -237,10 +237,12 @@ impl AgentLog {
     /// `record.jsonl` refuses cleanly rather than silently starting an empty
     /// session.
     ///
+    /// `name` is the one [`Self::live_roots`] read off the same head record.
+    ///
     /// # Errors
     /// Returns an error when the log is missing, malformed, foreign, or
     /// cannot be reopened after validation.
-    pub fn resume(sessions_root: &Path, session_id: AgentId) -> io::Result<Self> {
+    pub fn resume(sessions_root: &Path, session_id: AgentId, name: &str) -> io::Result<Self> {
         let dir = Self::dir_of(sessions_root, session_id);
         let record_path = dir.join("record.jsonl");
         if !record_path.exists() {
@@ -269,7 +271,7 @@ impl AgentLog {
         let seam = crate::record::Emitter::append_to(&record_path)?;
         let mut resumed = Self {
             id: session_id,
-            name: head.name,
+            name: name.to_string(),
             dir,
             model: RecordedModel {
                 name: head.model,
@@ -386,15 +388,27 @@ impl AgentLog {
     /// the name it was recorded under.
     ///
     /// # Errors
-    /// `sessions_root` exists but cannot be read.
+    /// `sessions_root` exists but cannot be read, or a session's record
+    /// cannot: one unreadable record is named rather than skipped, since
+    /// skipping it would resume the others as if it had never been open.
     pub fn live_roots(sessions_root: &Path) -> io::Result<Vec<(AgentId, String)>> {
-        Ok(Self::session_ids(sessions_root)?
+        Self::session_ids(sessions_root)?
             .into_iter()
             .filter_map(|id| {
                 let record = Self::dir_of(sessions_root, id).join("record.jsonl");
-                live_root(&record).map(|name| (id, name))
+                live_root(&record)
+                    .map_err(|error| {
+                        io::Error::new(
+                            error.kind(),
+                            format!(
+                                "cannot read sessions/{id}/record.jsonl: {error}; move that session aside to resume the others?"
+                            ),
+                        )
+                    })
+                    .transpose()
+                    .map(|name| name.map(|name| (id, name)))
             })
-            .collect())
+            .collect()
     }
 
     /// The per-session directory `<sessions_root>/<id>/`.
@@ -885,17 +899,28 @@ impl AgentLog {
 /// The name `record` was opened under if it heads a root and was never closed.
 /// A line that does not parse is skipped: a torn tail is a resume's to
 /// quarantine, not a reason to hide the root.
-fn live_root(record: &Path) -> Option<String> {
-    let mut records = super::log::Log::read(record).ok()?.filter_map(Result::ok);
-    let head = records.next()?;
+///
+/// A directory with no record is no session, hence not live.
+///
+/// # Errors
+/// The record exists but cannot be opened.
+fn live_root(record: &Path) -> io::Result<Option<String>> {
+    let records = match super::log::Log::read(record) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        records => records?,
+    };
+    let mut records = records.filter_map(Result::ok);
+    let Some(head) = records.next() else {
+        return Ok(None);
+    };
     let Record::Forensic(Forensic::SessionStarted {
         parent: None, name, ..
     }) = head.value()
     else {
-        return None;
+        return Ok(None);
     };
     let closed = records.any(|r| matches!(r.value(), Record::Forensic(Forensic::SessionClosed)));
-    (!closed).then(|| name.clone())
+    Ok((!closed).then(|| name.clone()))
 }
 
 /// The one `io::Error` a multi-file boundary reports, joining whatever

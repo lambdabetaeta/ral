@@ -197,6 +197,7 @@ pub(crate) fn test_agent(
         fuel,
         search,
     } = spec;
+    let claim = fleet.claim(&name)?;
     let agent = Agent::new(Birth {
         id: crate::agent::fresh_id(),
         name,
@@ -213,7 +214,7 @@ pub(crate) fn test_agent(
         reach,
         mailbox,
     });
-    fleet.enrol(&agent)?;
+    fleet.enrol(&agent, claim)?;
     Ok(agent)
 }
 
@@ -390,7 +391,7 @@ pub(crate) fn started_child(parent: &Avatar, name: &str) -> Avatar {
                 &self.parent,
                 &self.log.borrow(),
                 &self.fleet,
-                self.name.clone(),
+                self.fleet.claim(&self.name).expect("a free name"),
                 seat,
                 self.parent.current_provider(),
                 spec.memory,

@@ -21,7 +21,7 @@ use crate::{
     },
     bus::{BusReceiver, FleetBus, Pass, Signal},
     provider::{Bureau, Provider},
-    record::Resumed,
+    record::{Resumed, Transient},
 };
 use std::sync::mpsc::TryRecvError;
 
@@ -70,16 +70,20 @@ pub fn run(
         };
         spawn_async(root, spec, &emit)?;
     }
-    // A root's `Born` is the first thing its thread sends, so the first signal
-    // names a tab: the app exists only once there is one to focus.
-    let first = bus.rx().recv().map_err(|e| e.to_string())?;
-    let (Signal::Fact(id, _) | Signal::Transient(id, _)) = &first;
+    // A root's `Born` is the first thing its thread sends: the app exists only
+    // once there is a tab to focus.
+    let Signal::Transient(id, Transient::Born(born)) =
+        bus.rx().recv().map_err(|e| e.to_string())?
+    else {
+        return Err(
+            "the first signal of a run was not a root's birth: there is no tab to open".into(),
+        );
+    };
     let mut tui = Tui {
         guard: screen,
-        app: App::new(*id, Arc::clone(&fleet), vi, banner::session_card(info)),
+        app: App::new(id, born, Arc::clone(&fleet), vi, banner::session_card(info)),
     };
     tui.app.update_live_model(provider, &bureau.available());
-    dispatch(&mut tui, bus.rx(), first);
 
     let ctx = CommandCtx { bureau, info };
     let r = ui_loop(&mut tui, &bus, &fleet, &ctx);
@@ -87,9 +91,7 @@ pub fn run(
         commands::quit(&fleet);
     }
     // Every root's teardown writes its log's last records.
-    while !fleet.is_empty() {
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    fleet.wait_empty();
     r.map_err(|e| e.to_string())?;
 
     let logs = tui

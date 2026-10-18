@@ -125,7 +125,7 @@ Spawning is **available to every agent with fuel left**, so the spawn tree is
 not capped at one level. The effective `spawns` bit is `fuel > 0`; when it is
 false, the prompt index omits `exarch-agents` as a dead family, while the desk remains
 the runtime authority. Depth-N works
-structurally — a child enrols in the fleet by name and joins its parent's
+structurally — a child claims its name, enrols in the fleet and joins its parent's
 `children` and `fork` snapshots the parent's shell by value at any depth —
 but each `fork` hands the child one
 less unit of `fuel` than the parent holds (the parent's own `fuel` is untouched,

@@ -19,9 +19,8 @@ struct CrashTail {
 /// The `(model, window)` an overflow taught the live provider.
 pub type Learned = Option<(String, u64)>;
 
-/// What a root's head record names the session by.
+/// What a root's head record says about the session.
 pub struct Head {
-    pub name: String,
     pub model: String,
     pub label: String,
 }
@@ -108,8 +107,8 @@ fn quarantine_tail(path: &Path, tail: &CrashTail) -> io::Result<()> {
 /// Returns the structure alongside the [`Head`] the first record
 /// identifies the session by, and the `(model, window)` an overflow last taught
 /// the live provider unless a later selection forgot it. `AgentLog::resume`
-/// reads its own identity from here rather than re-deriving it, since a session's identity is a fact about
-/// its first record, not a second thing to keep in step.
+/// reads its model and label from here rather than re-deriving them; the name
+/// is the one `AgentLog::live_roots` read off the same record.
 ///
 /// # Errors
 /// Returns an error if the file cannot be read, cannot be quarantined, is not
@@ -129,12 +128,10 @@ pub fn resume(path: &Path) -> io::Result<(Context, Head, Learned)> {
             identity = Some(match record.value() {
                 Record::Forensic(Forensic::SessionStarted {
                     parent: None,
-                    name,
                     model,
                     label,
                     ..
                 }) => Head {
-                    name: name.clone(),
                     model: model.clone(),
                     label: label.clone(),
                 },

@@ -309,7 +309,7 @@ record!(Spec {
 ///
 /// Non-empty, at most 24 characters, ASCII alphanumeric plus `-`/`_`, since the
 /// tab bar lays a name out as a single token.  Stated here because this is where
-/// a name becomes identity — `Fleet::enrol` refuses whatever this refuses,
+/// a name becomes identity — `Fleet::claim` refuses whatever this refuses,
 /// so no door can mint an agent around it, however a name reached that door.
 ///
 /// # Errors
@@ -329,7 +329,7 @@ pub fn check_name(name: &str) -> Result<(), String> {
     ))
 }
 
-/// An agent's name, admitted by [`check_name`]; `Fleet::enrol`
+/// An agent's name, admitted by [`check_name`]; `Fleet::claim`
 /// is what makes that unskippable.
 pub(crate) struct Name(pub(crate) String);
 

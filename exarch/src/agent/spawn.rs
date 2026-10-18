@@ -5,8 +5,9 @@
 
 use crate::agent::Avatar;
 use crate::bus::{AgentOutcome, Emitter};
-use crate::record::{AgentLog, Memory, Resumed, Transient};
+use crate::record::{AgentLog, Born, Memory, Resumed, Transient};
 use std::io;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
@@ -26,15 +27,16 @@ pub(crate) fn hatch_root(
 ) -> Result<Avatar, String> {
     let name =
         name.unwrap_or_else(|| format!("root-{}", DISPATCH_SEQ.fetch_add(1, Ordering::Relaxed)));
-    let id = crate::agent::fresh_id();
-    let seat = session.fleet.launch.seat(id).map_err(|e| e.to_string())?;
+    let claim = session.fleet.claim(&name).map_err(|e| e.to_string())?;
+    let seat = session.fleet.launch.seat().map_err(|e| e.to_string())?;
     let inherited = (memory == Memory::Mnemon).then(|| session.log.borrow().inherited_context());
     Avatar::hatch(
         &session.fleet,
+        claim,
         seat,
-        &name,
         session.agent.current_provider(),
         |sessions, model, account, bytes| {
+            let id = crate::agent::fresh_id();
             let mut log = AgentLog::root(sessions, id, &name, model, account, bytes)?;
             if let Some(inherited) = inherited {
                 log.import_context(inherited).map_err(io::Error::other)?;
@@ -120,6 +122,7 @@ pub(crate) fn spawn_async(
     let agent_id = child.agent.id;
     let log_dir = child.log_dir().to_path_buf();
     let spawner = child.agent.role.parent().map(|p| p.id);
+    let fleet = Arc::clone(&child.fleet);
     // Off a bus whose children are muted (headless's per-exchange default)
     // the child's receiver is already dropped, so it streams nowhere; either
     // way its own record seam is recorded through whether or not anyone
@@ -150,13 +153,13 @@ pub(crate) fn spawn_async(
             // own coupling, so the birth is on air before the first token.
             let recorder = child.recorder();
             child.couple(&child_emit);
-            recorder.transient(Transient::Born {
-                log_dir: log_dir.clone(),
+            recorder.transient(Transient::Born(Born {
+                log_dir,
                 name: born_name,
                 parent: spawner,
                 resumed,
                 recorder: recorder.clone(),
-            });
+            }));
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 child.attend(&child_emit)
             }))
@@ -173,6 +176,7 @@ pub(crate) fn spawn_async(
             // retirement: a parent that finds this child gone always finds
             // the result already queued.
             child.settle(outcome);
+            fleet.departed();
         });
     match worker {
         Ok(_) => Ok(SpawnedChild { id: agent_id, name }),

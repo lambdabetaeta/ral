@@ -12,8 +12,9 @@
 //! every root and fork reaches the same one, so no node can disagree about
 //! what is live or what the run was launched with.  `names` is a lookup index;
 //! `roots` holds every session — a root reports to nobody, so a walk over it
-//! is how `nearest_reap` reaches every live agent in the run.  Both hold [`Weak`], so an agent leaves the fleet by
-//! its avatar being dropped and nothing else, and a lookup prunes.
+//! is how `nearest_reap` reaches every live agent in the run.  Both hold
+//! [`Weak`], so an agent leaves the fleet by its avatar being dropped and
+//! nothing else, and a lookup prunes.
 //!
 //! There is one late-settle fence, and it lives on the inbox, not the agent:
 //! each session's own `crate::bus::inbox` counts its clears as a
@@ -31,18 +32,17 @@ use crate::app::Scratch;
 use crate::enquiry::check_name;
 use crate::provider::Bureau;
 use crate::provider::Toolset;
-use crate::record::{AgentId, AgentLog};
 use ral_core::capability::GrantStack;
 use ral_core::carrier::Severed;
 use ral_core::engine::EngineInstaller;
 use ral_core::process::{self, CancelCause};
-use ral_core::sync::LockExt;
+use ral_core::sync::{CondvarExt, LockExt};
 use ral_core::terminal::TerminalState;
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, Weak};
+use std::path::PathBuf;
+use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::Duration;
 
 /// A child's idle lease: the span since its last human exchange (birth is the
@@ -99,37 +99,34 @@ pub(crate) struct Genesis {
 }
 
 impl Genesis {
-    /// A fresh identity engine for a root logging to `session_dir`.
+    /// A fresh identity engine for a root.
     ///
     /// # Errors
     /// The recipe's refusal.
-    pub(crate) fn seat(&self, session_dir: &Path) -> Result<Seat, Severed> {
+    pub(crate) fn seat(&self) -> Result<Seat, Severed> {
         Seat::root(
             self.installers,
             self.cwd.clone(),
             self.terminal,
             self.scratch.clone(),
-            session_dir,
         )
     }
 }
 
 impl Launch {
-    /// A fresh root's seat, booted for session `id`.
+    /// A fresh root's seat.
     ///
     /// # Errors
     /// A host that boots no further engines, or the recipe's refusal.
-    pub(crate) fn seat(&self, id: AgentId) -> io::Result<Seat> {
+    pub(crate) fn seat(&self) -> io::Result<Seat> {
         let genesis = self.genesis.as_ref().ok_or_else(|| {
             io::Error::other(
                 "this host boots no further engines, so it cannot open another session",
             )
         })?;
-        genesis
-            .seat(&AgentLog::dir_of(&self.sessions_root, id))
-            .map_err(|lost| {
-                io::Error::other(EngineLost::starting(&lost, self.sessions_root.parent()))
-            })
+        genesis.seat().map_err(|lost| {
+            io::Error::other(EngineLost::starting(&lost, self.sessions_root.parent()))
+        })
     }
 
     /// The system prompt a node on `seat` reads, resolved against its own
@@ -193,17 +190,66 @@ impl Launch {
     }
 }
 
+/// A name's standing in [`Fleet::names`]: spoken for by a [`Claim`] whose
+/// agent is still being built, or borne by one that is born.
+enum Slot {
+    Claimed,
+    Live(Weak<Agent>),
+}
+
+impl Slot {
+    fn agent(&self) -> Option<Arc<Agent>> {
+        match self {
+            Self::Claimed => None,
+            Self::Live(weak) => weak.upgrade(),
+        }
+    }
+
+    /// Whether the name is free: only a settled bearer frees it.
+    fn vacated(&self) -> bool {
+        matches!(self, Self::Live(weak) if weak.strong_count() == 0)
+    }
+}
+
+/// A name held for an agent not yet built, so the name rules are settled
+/// before any log exists for it.  [`Fleet::enrol`] consumes it; one dropped
+/// unconsumed gives its name back.
+#[must_use = "a claim only holds its name until it is dropped"]
+pub(crate) struct Claim {
+    fleet: Arc<Fleet>,
+    name: String,
+}
+
+impl Claim {
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        let mut names = self.fleet.names.lock_ignore_poison();
+        if matches!(names.get(&self.name), Some(Slot::Claimed)) {
+            names.remove(&self.name);
+        }
+    }
+}
+
 /// The fleet's two indices, each independently locked, plus the launch and
 /// the idle bound every node shares.
 ///
 /// [`Self::names`] is touched by every spawn and every name lookup;
 /// [`Self::roots`] only by a root's birth and a walk from the top.
 pub struct Fleet {
-    /// Weak, so an agent leaves by its avatar being dropped and nothing else.
-    names: Mutex<HashMap<String, Weak<Agent>>>,
+    /// Each name's [`Slot`]; a live one is `Weak`, so an agent leaves by its
+    /// avatar being dropped and nothing else.
+    names: Mutex<HashMap<String, Slot>>,
     /// Every root: one reports to nobody, so this is where a walk over the
     /// whole run starts.
     roots: Mutex<Vec<Weak<Agent>>>,
+    /// Held by [`Self::departed`] and [`Self::wait_empty`] alone.
+    exits: Mutex<()>,
+    departures: Condvar,
     /// [`AGENT_LEASE_IDLE`] outside tests.
     lease: Duration,
     pub(crate) launch: Launch,
@@ -216,6 +262,8 @@ impl Fleet {
         Arc::new(Self {
             names: Mutex::new(HashMap::new()),
             roots: Mutex::new(Vec::new()),
+            exits: Mutex::new(()),
+            departures: Condvar::new(),
             lease,
             launch,
         })
@@ -235,43 +283,53 @@ impl Fleet {
 
     /// Drop what has settled from `names`, so a name is free the moment its
     /// bearer's avatar goes.
-    fn prune_names(names: &mut HashMap<String, Weak<Agent>>) {
-        names.retain(|_, weak| weak.strong_count() > 0);
+    fn prune_names(names: &mut HashMap<String, Slot>) {
+        names.retain(|_, slot| !slot.vacated());
     }
 
-    /// Bring a newborn `agent` into the fleet: claim its name, hang it under
-    /// its parent or push it onto [`Self::roots`], and arm the lease a
-    /// reporting child is bounded by.  The one door — construction is the
-    /// only place an agent joins, and every refusal is decided here.
+    /// Speak for `name` ahead of the agent that will bear it, so a refused
+    /// name leaves no session directory behind and two same-name spawns racing
+    /// within one turn cannot both succeed.
+    ///
+    /// # Errors
+    /// [`Unborn::NameMalformed`] when the name breaks [`check_name`].
+    ///
+    /// [`Unborn::NameTaken`] when a live agent, or another claim, holds it.
+    pub(crate) fn claim(self: &Arc<Self>, name: &str) -> Result<Claim, Unborn> {
+        check_name(name).map_err(Unborn::NameMalformed)?;
+        let mut names = self.names.lock_ignore_poison();
+        Self::prune_names(&mut names);
+        if names.contains_key(name) {
+            return Err(Unborn::NameTaken(name.to_string()));
+        }
+        names.insert(name.to_string(), Slot::Claimed);
+        drop(names);
+        Ok(Claim {
+            fleet: Arc::clone(self),
+            name: name.to_string(),
+        })
+    }
+
+    /// Bring a newborn `agent` into the fleet under the name `claim` holds:
+    /// hang it under its parent or push it onto [`Self::roots`], and arm the
+    /// lease a reporting child is bounded by.  The one door — construction is
+    /// the only place an agent joins, and no agent can join under a name no
+    /// claim holds.
     ///
     /// # Errors
     /// [`Unborn::SessionDead`] when the parent is already terminated — a spawn
-    /// racing a cancel on its own parent.  Checked under the very lock a racing
-    /// spawn's own claim takes.
-    ///
-    /// [`Unborn::NameTaken`] when another live agent bears the name.  Also
-    /// under that lock, so two same-name spawns racing within one turn cannot
-    /// both succeed — the authoritative half of the spawn-uniqueness rule,
-    /// [`Self::name_live`] the cheap one.
-    ///
-    /// [`Unborn::NameMalformed`] when the name breaks [`check_name`].  Checked
-    /// here and not only at the doors, because a wire peer is not trusted to
-    /// have used one.
-    pub(crate) fn enrol(self: &Arc<Self>, agent: &Arc<Agent>) -> Result<(), Unborn> {
-        check_name(&agent.name).map_err(Unborn::NameMalformed)?;
+    /// racing a cancel on its own parent.  The claim is then given back.
+    pub(crate) fn enrol(self: &Arc<Self>, agent: &Arc<Agent>, claim: Claim) -> Result<(), Unborn> {
         let mut names = self.names.lock_ignore_poison();
-        Self::prune_names(&mut names);
         if let Some(parent) = agent.role.parent()
             && parent.token.terminated()
         {
             return Err(Unborn::SessionDead);
         }
-        if names.contains_key(&agent.name) {
-            return Err(Unborn::NameTaken(agent.name.clone()));
-        }
-        names.insert(agent.name.clone(), Arc::downgrade(agent));
-        drop(names);
-        // Adopted (or rooted) only after the name is claimed: a refused agent
+        names.insert(claim.name.clone(), Slot::Live(Arc::downgrade(agent)));
+        // The guard goes first: the claim's drop locks `names` again.
+        drop((names, claim));
+        // Adopted (or rooted) only after the name is live: a refused agent
         // must never appear in the fleet, however briefly.
         match agent.role.parent() {
             Some(parent) => {
@@ -294,39 +352,36 @@ impl Fleet {
         live
     }
 
-    /// At most one agent can match, since [`Self::enrol`] keeps names unique
+    /// At most one agent can match, since [`Self::claim`] keeps names unique
     /// among the live.  The `` `cancel ``, `` `message ``, and `` `read `` tags
     /// all come through here before the scope climb.
     pub fn resolve(&self, name: &str) -> Option<Arc<Agent>> {
         let mut names = self.names.lock_ignore_poison();
         Self::prune_names(&mut names);
-        names.get(name).and_then(Weak::upgrade)
-    }
-
-    /// The cheap half of the spawn-uniqueness rule [`Self::enrol`] enforces
-    /// authoritatively: `` exarch-agents `start `` reads this before forking a nursery
-    /// session, so the ordinary duplicate refuses without a fork to unwind.
-    pub fn name_live(&self, name: &str) -> bool {
-        self.resolve(name).is_some()
-    }
-
-    /// [`Self::enrol`]'s name rules, asked before a log exists for the name,
-    /// so a refused one leaves no session directory behind.  Advisory: the
-    /// authoritative check is still `enrol`'s, under the lock.
-    ///
-    /// # Errors
-    /// [`Unborn::NameMalformed`] or [`Unborn::NameTaken`].
-    pub(crate) fn vacant(&self, name: &str) -> Result<(), Unborn> {
-        check_name(name).map_err(Unborn::NameMalformed)?;
-        if self.name_live(name) {
-            return Err(Unborn::NameTaken(name.to_string()));
-        }
-        Ok(())
+        names.get(name).and_then(Slot::agent)
     }
 
     /// Whether any root is still live.
     pub fn is_empty(&self) -> bool {
         self.roots().is_empty()
+    }
+
+    /// Wake every [`Self::wait_empty`], once an avatar has fully dropped.
+    /// Taking the mutex after the drop is what rules out a lost wakeup: a
+    /// waiter is either before its emptiness check, and sees the drop, or
+    /// already parked, and is woken.
+    pub(crate) fn departed(&self) {
+        drop(self.exits.lock_ignore_poison());
+        self.departures.notify_all();
+    }
+
+    /// Block until no root is live.
+    pub fn wait_empty(&self) {
+        let exits = self.exits.lock_ignore_poison();
+        drop(
+            self.departures
+                .wait_while_ignore_poison(exits, |()| !self.is_empty()),
+        );
     }
 
     /// The nearest time-to-reap across the leased agents, `None` when none is
@@ -360,7 +415,7 @@ impl fmt::Display for Unborn {
             Self::NameTaken(name) => write!(
                 f,
                 "a live agent already bears the name '{name}': pick another, or wait for it \
-                 to settle"
+                 to settle. Names identify live agents; agents lists yours."
             ),
             Self::NameMalformed(why) => write!(f, "{why}"),
         }

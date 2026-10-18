@@ -1,5 +1,5 @@
 ---
-generated_at_commit: d4299048
+generated_at_commit: 09ea1e45
 generated_at_date: 2026-10-18
 covers_paths: [exarch/src/agent.rs, exarch/src/latch.rs, exarch/src/agent/, exarch/src/signals.rs, exarch/src/cancel.rs, exarch/src/schedule.rs, exarch/src/enquiry.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
@@ -126,18 +126,20 @@ fleet and hatches `main` (`TRUNK_NAME`) over a fresh `AgentLog::root`;
 `Avatar::resume(RootConfig, RootSeat, provider)` lists the run's live roots
 (`AgentLog::live_roots`: every `sessions/<n>/record.jsonl` that opens with a
 root's `SessionStarted { parent: None, .. }` and holds no `SessionClosed`, in
-id order, with its recorded name), founds the fleet seated for the first, and
-hatches each over its record replayed, the rest seated through the launch's
-`genesis`. It hands back one `Resumed { turn, bytes }` (`record/session.rs`)
+id order, with its recorded name; a record that cannot be read is an error
+naming its session, not a skipped root), founds the fleet seated for the first,
+and hatches each over its record replayed (`AgentLog::resume` takes that same
+name, which `Head` therefore no longer carries), the rest seated through the
+launch's `genesis`. It hands back one `Resumed { turn, bytes }` (`record/session.rs`)
 per root, which the TUI's tab replays.
 
-The two halves are `Fleet::found(cfg, root_seat, first, installers, lease)`
-and `Avatar::hatch(fleet, seat, name, provider, open)`. `found` seats the first
+The two halves are `Fleet::found(cfg, root_seat, installers, lease)`
+and `Avatar::hatch(fleet, claim, seat, provider, open)`. `found` seats the first
 engine (an identity seat through `Genesis::seat`; a wire seat is adopted as
 built), reads the builtin index and `$EXARCH_SCRATCH` off it, substitutes the
 scratch placeholder into the prompt template, and settles the `Launch`; it
 refuses a fuelled wire root with no `factory`. `hatch` makes one root of that
-fleet: it asks the fleet whether the name is vacant, resolves the prompt
+fleet under the name its `Claim` holds (each caller claims first, then seats, then hatches, so a refused name boots no engine), resolves the prompt
 (`Launch::prompt_for`), opens the log through `open` (which may hand a fact of
 the opening back beside it, as `resume` does its `Resumed`), and `assemble`s it
 under the launch's `Trunk` role, `caps`, `fuel` and `search`. The recorded
@@ -565,9 +567,10 @@ refused, `Provider::complete` refuses every later request the hold covers
 
 ## The Fleet
 
-`agent/fleet.rs`'s `Fleet` is `{ names: Mutex<HashMap<String, Weak<Agent>>>, roots:
-Mutex<Vec<Weak<Agent>>>, lease: Duration, launch: Launch }` — two `Weak`
-indices, the idle-lease bound, and the **`Launch`**: what every node of one
+`agent/fleet.rs`'s `Fleet` is `{ names: Mutex<HashMap<String, Slot>>, roots:
+Mutex<Vec<Weak<Agent>>>, exits, departures, lease: Duration, launch: Launch }`
+— two indices (`Slot` is `Claimed` or `Live(Weak<Agent>)`), a mutex and
+condvar that wake `wait_empty`, the idle-lease bound, and the **`Launch`**: what every node of one
 run shares, fixed once — `trunk` (how every root is driven; `trunk.attended()`
 is whether a human types into it), `allow_schedule`, `resume_on_reset`,
 the `Toolset`, `disk_warn_bytes`, the `factory`, the `Bureau`, the prompt
@@ -578,7 +581,7 @@ once rather than copied into every `Agent`, so a fork's `Build` names only
 what is its own. It is not the tree: the tree is
 `Role::Child`/`Agent::children`, and every walk — the roster, the cancel
 cascade, the scope check — runs there. `names` is the by-name door a spawn
-claims identity at and `` exarch-agents `message ``/`` `cancel ``/`` `read ``
+claims identity at (`Fleet::claim`) and `` exarch-agents `message ``/`` `cancel ``/`` `read ``
 resolve through (`Fleet::resolve`); `roots` holds every root session —
 a root reports to nobody, so a walk from `roots`
 (`nearest_reap`) is how the idle-lease scan reaches every live agent in the
@@ -596,20 +599,25 @@ shares through `Fleet` is only identity resolution and the lease.
   terminal capabilities, the run's `Scratch` — is `Some` on an identity host
   and `None` on a wire host, which boots no further engine. `Genesis::seat`
   is `Seat::root`, so the first root, a `/new` or `/branch` root and a
-  resumed root each get a fresh engine the same way, `$EXARCH_SESSION_DIR`
-  naming their own directory; the scratch is the run's and outlives every
-  root and every `/clear`. `Launch::seat(id)` is the door that refuses, in a
-  sentence, a host with no genesis.
-- **One door: `Fleet::enrol`.** Construction is the only place an agent
-  joins the fleet, and every refusal (`Unborn::SessionDead` — the parent
-  raced a cancel; `NameTaken`; `NameMalformed`, checked here too since a wire
-  peer is not trusted to have used `check_name`) is decided under the one
-  lock a racing spawn's own claim takes. A refused agent never appears in
-  the fleet, however briefly: the name is claimed, then — only then — the
-  agent is adopted into its parent's `children` or pushed onto `roots`, and
-  a parented birth arms its lease (`arm_lease`).
+  resumed root each get a fresh engine the same way; the scratch is the
+  run's and outlives every root and every `/clear`. `Launch::seat()` is the
+  door that refuses, in a sentence, a host with no genesis.
+- **Two steps: `Fleet::claim`, then `Fleet::enrol`.** A name is claimed
+  before any log or engine seat exists (by each root's caller ahead of
+  `Avatar::hatch`, by the desk's spawn path for a child), under the one lock a racing spawn's own claim takes:
+  `check_name` (`NameMalformed`, so a wire peer cannot go around it) and
+  the taken test (`NameTaken`) are decided there, and the name is held as
+  `Slot::Claimed`. The `Claim` rides the `Build` and `enrol` consumes it,
+  turning the slot `Live`, so no agent is enrolled under an unclaimed name;
+  one dropped unconsumed gives its name back. The one remaining refusal,
+  `Unborn::SessionDead` (the parent raced a cancel), is decided in `enrol`.
+  A refused agent never appears in the fleet, however briefly: only after
+  the name is live is the agent adopted into its parent's `children` or
+  pushed onto `roots`, and a parented birth arms its lease (`arm_lease`).
 - **The fleet is alive while `roots` prunes to empty** — the literal "dies
-  when no active agents remain" (`Fleet::is_empty`). An agent leaves by its
+  when no active agents remain" (`Fleet::is_empty`; `Fleet::wait_empty`
+  blocks on it, woken by `Fleet::departed`, which `spawn_async`'s worker calls
+  once its avatar has fully dropped). An agent leaves by its
   avatar dropping (quiescence, cancel, a non-reply finish); a conversing
   node stays until `/quit` or `/close` because it parks, and the process ends
   with its last root; a headless root leaves at quiescence; a replied sub-agent parks under its idle lease and
@@ -640,11 +648,11 @@ The single cascade serves the deliberate teardowns — `` exarch-agents `cancel 
 returning agent's `reply`, and the `/clear` / `/close` subtree reaps — and it
 runs over the agent tree itself, not a registry. `Agent::name` is its
 identity — well-formed and unique among live agents, both enforced at
-`Fleet::enrol` (`Unborn::NameMalformed`/`NameTaken`; the trunk holds
+`Fleet::claim` (`Unborn::NameMalformed`/`NameTaken`; the trunk holds
 `TRUNK_NAME`, `agent/build.rs`), which is where a name *becomes* identity and
-so the one place a wire peer cannot go around. The desk refuses both a beat
-earlier, before it forks a log or dials anything, but only `enrol` is
-authoritative. A name is also the handle `` exarch-agents `message ``/`` `cancel `` resolve by,
+so the one place a wire peer cannot go around. Both doors claim before they
+fork a log or dial anything, and `enrol` takes the claim, so the check is
+race-free and there is no second, advisory one. A name is also the handle `` exarch-agents `message ``/`` `cancel `` resolve by,
 through `Fleet::resolve` — and then, for `` `cancel `` and `` `read `` alone,
 the scope climb (`Agent::descendant`); a message needs no climb. The roster
 (`agent/roster.rs`'s `listing`) walks the same tree instead — `Agent::walk` from
@@ -915,8 +923,8 @@ remaining fuel.
 
 `/new` and `/branch` take no fork at all: a root is not a child. `Read::Hatch
 { memory, name }`, run by `Avatar::read`, calls `spawn::spawn_root`, which mints
-the name (the given one, else `root-{N}` off one process counter) and a fresh id,
-seats a new engine through `Launch::seat` and hatches the root on the focused
+the name (the given one, else `root-{N}` off one process counter),
+claims it, seats a new engine through `Launch::seat` and hatches the root on the focused
 agent's current provider (`hatch_root`). The log opens as `AgentLog::root`, and
 for `Mnemon` imports the focused agent's `inherited_context()`, the same import
 a `mnemon` spawn makes, with a fresh shell. The root then goes to `spawn_async`

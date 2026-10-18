@@ -61,8 +61,10 @@ The outer `Record` vocabulary is closed:
 - `Forensic` is durable evidence that is not model context: the session
   bookends (`SessionStarted`, which names the session and its tree parent,
   `SessionResumed`, `SessionEnded`) and `SessionClosed`, the one record that
-  says `/close` ended a session for good, so resume skips it; the shape a
-  turn's request goes out under — sampling and routing both (`TurnStarted`),
+  says `/close` ended a session for good, so resume skips it (a record that
+  cannot be read at all is an error naming its session, never a silent skip);
+  the shape a turn's request goes out under — sampling and routing both
+  (`TurnStarted`),
   usage deltas, cancellation, an overflow-learned window (`WindowNarrowed`),
   provider/stall/error rows, nudges, and other breadcrumbs. The view fold
   admits the rows that belong on scrollback; the model fold ignores them.

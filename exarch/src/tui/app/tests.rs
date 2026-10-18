@@ -12,30 +12,13 @@ fn app() -> (App, BusReceiver, Arc<Agent>) {
     let (_tx, rx) = crate::bus::channel();
     let fleet = Fleet::for_test();
     let root = test_agent(&fleet, TestAgentSpec::new("main")).expect("a fresh root");
-    let mut app = App::new(root.id, fleet, false, Card(Vec::new()));
-    app.tabs.born(
-        root.id,
-        &std::env::temp_dir(),
-        "main".into(),
-        None,
-        Recorder::none(),
-        false,
-    );
+    let born = Born::for_test("main", None);
+    let app = App::new(root.id, born, fleet, false, Card(Vec::new()));
     (app, rx, root)
 }
 
 fn born(app: &mut App, rx: &BusReceiver, id: AgentId, name: &str, parent: AgentId) {
-    app.transient(
-        id,
-        Transient::Born {
-            log_dir: std::env::temp_dir(),
-            name: name.into(),
-            parent: Some(parent),
-            resumed: None,
-            recorder: Recorder::none(),
-        },
-        rx,
-    );
+    app.transient(id, Transient::Born(Born::for_test(name, Some(parent))), rx);
 }
 
 fn text(app: &mut App, id: AgentId) -> String {
@@ -138,6 +121,12 @@ fn a_pin_never_splits_a_coalesced_observation_run() {
     use ral_core::first_order::datum::Datum as _;
 
     let (mut app, rx, root) = app();
+    let opening = app
+        .tabs
+        .scrollback(root.id)
+        .expect("root has a scrollback")
+        .probe_figures()
+        .0;
     let mut seq = 0;
     let mut fact = |app: &mut App, display| {
         seq += 1;
@@ -183,7 +172,7 @@ fn a_pin_never_splits_a_coalesced_observation_run() {
 
     let sb = app.tabs.scrollback(root.id).expect("root has a scrollback");
     assert_eq!(
-        sb.probe_figures().0,
+        sb.probe_figures().0 - opening,
         1,
         "the call and the two reads it produced are one block"
     );

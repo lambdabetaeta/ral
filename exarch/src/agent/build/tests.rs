@@ -176,6 +176,7 @@ fn mnemon_root_imports_context_withholds_reply_and_resumes() {
                 .and_then(|n| n.parse().ok())
                 .expect("numeric session dir"),
         ),
+        "fork",
     )
     .expect("a mnemon root's record folds back through resume");
     assert_eq!(

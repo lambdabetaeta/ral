@@ -5,7 +5,7 @@
 
 use crate::agent::EngineLost;
 use crate::agent::factory::Factory;
-use crate::agent::fleet::{AGENT_LEASE_IDLE, Fleet, Genesis, Launch, Unborn};
+use crate::agent::fleet::{AGENT_LEASE_IDLE, Claim, Fleet, Genesis, Launch, Unborn};
 use crate::agent::index::BuiltinIndex;
 use crate::agent::seat::Seat;
 use crate::agent::{
@@ -52,8 +52,9 @@ const RESUME_NOTE: &str = "session resumed from disk; the shell is fresh: bindin
 
 /// What `Avatar::assemble` needs: the node's own bits, and the fleet it joins.
 pub(crate) struct Build {
-    /// The tab-bar identity: known to every caller before construction.
-    pub(crate) name: String,
+    /// The tab-bar identity, held before construction; the agent's name is
+    /// the claim's.
+    pub(crate) claim: Claim,
     /// The launch's template resolved for this node's own grants — what
     /// reaches the model.  The caller resolves it because the log's
     /// `SessionStarted` bookend records the resolved length, and the log must
@@ -169,7 +170,6 @@ impl Fleet {
     pub(crate) fn found(
         cfg: RootConfig,
         root_seat: RootSeat,
-        first: AgentId,
         installers: &'static [EngineInstaller],
         lease: Duration,
     ) -> io::Result<(Arc<Self>, Seat)> {
@@ -216,9 +216,7 @@ impl Fleet {
                     terminal,
                     scratch,
                 };
-                let seat = genesis
-                    .seat(&AgentLog::dir_of(&sessions_root, first))
-                    .map_err(lost)?;
+                let seat = genesis.seat().map_err(lost)?;
                 (seat, Some(genesis))
             }
             RootSeat::Wire { transport, attach } => {
@@ -267,7 +265,7 @@ impl Avatar {
     /// avatar exists, so there is nothing to unwind.
     pub(crate) fn assemble(b: Build) -> Result<Self, Unborn> {
         let Build {
-            name,
+            claim,
             system_prompt,
             caps,
             seat,
@@ -281,7 +279,7 @@ impl Avatar {
         let inbox = Inbox::new();
         let agent = Agent::new(Birth {
             id: log.id(),
-            name,
+            name: claim.name().to_string(),
             log_dir: log.dir().to_path_buf(),
             started: Instant::now(),
             system: system_prompt.into(),
@@ -293,7 +291,7 @@ impl Avatar {
             reach: seat.reach(),
             mailbox: inbox.mailbox(),
         });
-        fleet.enrol(&agent)?;
+        fleet.enrol(&agent, claim)?;
         let readings = Readings::new(!fleet.launch.tools.is_empty());
         Ok(Self {
             agent,
@@ -348,43 +346,45 @@ impl Avatar {
         }
         let sessions_root = cfg.run_dir.join("sessions");
         seed_id_counter(&sessions_root)?;
-        let live = AgentLog::live_roots(&sessions_root)?;
-        let Some(&(first, _)) = live.first() else {
+        let mut live = AgentLog::live_roots(&sessions_root)?.into_iter();
+        let Some(first) = live.next() else {
             return Err(io::Error::other(format!(
                 "cannot resume {}: no session is open there; were they all closed with /close?",
                 cfg.run_dir.display()
             )));
         };
-        let (fleet, first_seat) =
-            Fleet::found(cfg, seat, first, &crate::INSTALLERS, AGENT_LEASE_IDLE)?;
-        let mut first_seat = Some(first_seat);
-        live.into_iter()
+        let (fleet, first_seat) = Fleet::found(cfg, seat, &crate::INSTALLERS, AGENT_LEASE_IDLE)?;
+        let mut founding = Some(first_seat);
+        std::iter::once(first)
+            .chain(live)
             .map(|(id, name)| {
-                let seat = match first_seat.take() {
-                    Some(seat) => seat,
-                    None => fleet.launch.seat(id)?,
-                };
-                Self::reopen(&fleet, seat, id, &name, provider.clone())
+                let claim = fleet
+                    .claim(&name)
+                    .map_err(|why| io::Error::other(why.to_string()))?;
+                let seat = founding.take().map_or_else(|| fleet.launch.seat(), Ok)?;
+                Self::reopen(&fleet, claim, seat, id, provider.clone())
             })
             .collect()
     }
 
-    /// Session `id`'s root, over its record replayed.
+    /// Session `id`'s root, under the name `claim` holds, over its record
+    /// replayed.
     fn reopen(
         fleet: &Arc<Fleet>,
+        claim: Claim,
         seat: Seat,
         id: AgentId,
-        name: &str,
         provider: Arc<Provider>,
     ) -> io::Result<(Self, Resumed)> {
         let live = provider.clone();
+        let name = claim.name().to_string();
         let (avatar, resumed) = Self::hatch(
             fleet,
+            claim,
             seat,
-            name,
             provider,
             |sessions, _, account, bytes| {
-                let mut log = AgentLog::resume(sessions, id)?;
+                let mut log = AgentLog::resume(sessions, id, &name)?;
                 let resumed = log.resumed_summary();
                 if let Some((model, window)) = log.learned_window()
                     && model == live.model()
@@ -417,11 +417,14 @@ impl Avatar {
         installers: &'static [EngineInstaller],
         lease: Duration,
     ) -> io::Result<Self> {
-        let (fleet, seat) = Fleet::found(cfg, seat, id, installers, lease)?;
+        let (fleet, seat) = Fleet::found(cfg, seat, installers, lease)?;
+        let claim = fleet
+            .claim(TRUNK_NAME)
+            .map_err(|why| io::Error::other(why.to_string()))?;
         Self::hatch(
             &fleet,
+            claim,
             seat,
-            TRUNK_NAME,
             provider,
             |sessions, model, account, bytes| {
                 AgentLog::root(sessions, id, TRUNK_NAME, model, account, bytes).map(|log| (log, ()))
@@ -430,29 +433,26 @@ impl Avatar {
         .map(|(avatar, ())| avatar)
     }
 
-    /// A root of `fleet` on `seat` under `name`: its prompt resolved against
-    /// its own grants, its log opened through `open` — which may hand back a
+    /// A root of `fleet` on `seat` under the name `claim` holds: its prompt
+    /// resolved against its own grants, its log opened through `open` — which may hand back a
     /// fact of the opening beside it — and its launch recipe read off the
     /// fleet.
     ///
     /// # Errors
-    /// A name the fleet refuses, a severed engine, a log that will not open,
-    /// or whatever `open` refuses.  The refusal comes before the log exists,
-    /// so a refused name leaves no session behind.
+    /// A severed engine, a log that will not open, or whatever `open`
+    /// refuses.  The caller claims the name before seating and hatching, so
+    /// a refused name boots no engine and leaves no session behind.
     pub(crate) fn hatch<T>(
         fleet: &Arc<Fleet>,
+        claim: Claim,
         seat: Seat,
-        name: &str,
         provider: Arc<Provider>,
         open: impl FnOnce(&Path, &RecordedModel, &RecordedAccount, usize) -> io::Result<(AgentLog, T)>,
     ) -> io::Result<(Self, T)> {
         let launch = &fleet.launch;
-        fleet
-            .vacant(name)
-            .map_err(|why| io::Error::other(why.to_string()))?;
         let role = launch.trunk.role();
         let system_prompt = launch
-            .prompt_for(&seat, &launch.caps, &role, launch.fuel, name)
+            .prompt_for(&seat, &launch.caps, &role, launch.fuel, claim.name())
             .map_err(|lost| {
                 io::Error::other(EngineLost::starting(&lost, launch.sessions_root.parent()))
             })?;
@@ -464,7 +464,7 @@ impl Avatar {
             system_prompt.len(),
         )?;
         let avatar = Self::assemble(Build {
-            name: name.to_string(),
+            claim,
             system_prompt,
             caps: launch.caps.clone(),
             seat,
@@ -479,9 +479,10 @@ impl Avatar {
         Ok((avatar, opened))
     }
 
-    /// A returning child of `parent`, seated on `seat`: its fuel one less,
-    /// its prompt resolved against its own grants, its log forked off
-    /// `parent_log`, and — for a `mnemon` — carrying the parent's context.
+    /// A returning child of `parent` under the name `claim` holds, seated on
+    /// `seat`: its fuel one less, its prompt resolved against its own grants,
+    /// its log forked off `parent_log`, and — for a `mnemon` — carrying the
+    /// parent's context.
     ///
     /// # Errors
     /// A severed engine, a log that will not fork, or whatever
@@ -490,7 +491,7 @@ impl Avatar {
         parent: &Arc<Agent>,
         parent_log: &AgentLog,
         fleet: &Arc<Fleet>,
-        name: String,
+        claim: Claim,
         seat: Seat,
         provider: Arc<Provider>,
         memory: Memory,
@@ -502,13 +503,13 @@ impl Avatar {
         // bookend records the child's real system length.  Its grant layer
         // was resolved in its own engine, so only that engine can name it.
         let system_prompt = launch
-            .prompt_for(&seat, &parent.caps, &role, fuel, &name)
+            .prompt_for(&seat, &parent.caps, &role, fuel, claim.name())
             .map_err(|lost| EngineLost::starting(&lost, parent.run_dir()).to_string())?;
         let account = RecordedAccount::of(provider.account(), &launch.bureau.available());
         let mut log = parent_log
             .fork(
                 fresh_id(),
-                &name,
+                claim.name(),
                 system_prompt.len(),
                 &RecordedModel::of(&provider),
                 &account,
@@ -518,7 +519,7 @@ impl Avatar {
             log.import_context(parent_log.inherited_context())?;
         }
         Self::assemble(Build {
-            name,
+            claim,
             system_prompt,
             // The child's engine holds its own layer; the stack it runs under
             // is its parent's.
@@ -589,16 +590,13 @@ impl Avatar {
     /// root, so it carries none of this shell's state.
     #[cfg(test)]
     pub(crate) fn fork_named(&self, name: &str) -> Result<Self, String> {
-        let seat = self
-            .fleet
-            .launch
-            .seat(self.agent.id)
-            .map_err(|e| e.to_string())?;
+        let seat = self.fleet.launch.seat().map_err(|e| e.to_string())?;
+        let claim = self.fleet.claim(name).map_err(|e| e.to_string())?;
         Self::child_of(
             &self.agent,
             &self.log.borrow(),
             &self.fleet,
-            name.to_string(),
+            claim,
             seat,
             self.agent.current_provider(),
             Memory::Amnemon,

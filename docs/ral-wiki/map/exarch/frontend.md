@@ -1,5 +1,5 @@
 ---
-generated_at_commit: d4299048
+generated_at_commit: 09ea1e45
 generated_at_date: 2026-10-18
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/record/session.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/cancel.rs, exarch/src/boot.rs, exarch/src/agent/seat.rs, exarch/src/signals.rs, exarch/src/prompt/host.rs]
 ---
@@ -361,8 +361,14 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  agent's own record seam (`recorder`, through which a command the frontend
  owns, `/model` or `/limits`, is recorded in that tab's log), and a linger
  clock — one `Tab` per agent the stream has announced, in a single `Vec` in id
- order. There is no root tab: every root is a tab born by its own `Born`, and
- `Tabs` is never empty once the first has landed. The frontend holds the
+ order. There is no root tab: every root is a tab born by its own `Born`
+ (`Transient::Born(Born)`, the birth facts travelling as one struct), and
+ `Tabs` is non-empty by construction: `tui_loop::run` takes the run's first
+ signal, which must be a `Born`, and `App::new` builds `Tabs::new` around
+ it, giving that first root the same card and replay (`App::welcome`) as any
+ later one. A stale focus resolves to the first *attended* tab (in the bar,
+ not lingering), else the first in the bar, else the first tab, the same
+ predicate `parent_focus` climbs by. The frontend holds the
  `Fleet`, to resolve a tab's name and to reach the live roots on `/quit`, and
  no `Arc<Agent>`: reach is `Tabs::agent(id)`, an upgrade held for one handler
  and never stored, so the avatar alone decides how long an agent lives. Liveness and death are
@@ -437,8 +443,9 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  rows, and `/copy` answers where every copy does — the transient corner
  toast of `gesture::Toast`, never a block in the transcript; copies go
  through the `clipboard` crate, native locally and OSC 52 over ssh;
- session commands are parsed at submit into a `Read` (`/new`, `/branch`,
- `/context`, `/resources`) or a `Rewrite` (`/clear`, `/close`, `/evict`,
+ session commands are parsed at submit into a `Read` (`/new` and `/branch`
+ first typed as the one `Command::Hatch(Memory, Option<name>)`, mirroring
+ `Read::Hatch`; `/context`, `/resources`) or a `Rewrite` (`/clear`, `/close`, `/evict`,
  `/rewind`, `/quit`) and enter the focused agent's inbox; `/quit` alone posts
  to every live root, and a session command on a tab whose agent has ended
  answers "this tab's agent has ended". Every command acts on, and reports
@@ -459,7 +466,8 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  focused tab's context for `/branch`, with a fresh shell either way. `/close`
  ends the focused tab's session for good (`--resume` will not reopen it) and
  `/quit` ends every root, resumable; the process exits once the last root's
- avatar has dropped. The idle wait
+ avatar has dropped (`Fleet::wait_empty`, woken by each worker's
+ `Fleet::departed`, not polled). The idle wait
  selects over input, inbox (`bus/inbox.rs`), and the session bus (`bus/channel.rs`)
  ([[decisions/260616_tool-boundary-steering|tool-boundary-steering]],
  [[decisions/260617_scheduled-wakeups|scheduled-wakeups]]).
@@ -574,7 +582,7 @@ reach the new shell. `prompt/host.rs` snapshots the machine (OS, date, cwd,
 user, home, git state, exarch's log directory) once at startup for the [[map/exarch/policy|system prompt]].
         - `tui.rs` — thin façade: module declarations, re-exports, `LINGER`, `DEMOTE_IDLE`
         - `tui/app.rs` — the `App` orchestrator: event routing, a root's `Born` (card, replay), per-kind push methods
-        - `tui/tui_loop.rs` — REPL/ui loop: `run` (every root through `spawn_async`, the UI loop until the fleet is empty), `Tui`, `CommandCtx`, `ui_loop`, `OverlayTick`, `overlay_tick`, `KeyAction`, `key_action`, `ctrl_key`
+        - `tui/tui_loop.rs` — REPL/ui loop: `run` (every root through `spawn_async`, the UI loop until the fleet is empty, then `Fleet::wait_empty`), `Tui`, `CommandCtx`, `ui_loop`, `OverlayTick`, `overlay_tick`, `KeyAction`, `key_action`, `ctrl_key`
         - `tui/terminal.rs` — terminal lifetime: `TerminalGuard`, raw mode, alt screen, panic hook, stderr redirect, editor hatch, `compose_in_editor`
         - `tui/tabs.rs` — session/view lifecycle: `Tab` (`Weak<Agent>`, birth facts, `Scrollback`, linger clock), `Tabs` as one id-ordered `Vec` with no root, `TabRow` (the matrix's per-frame projection, demotion included), titles, attachment management, the parent climb and `root_of`, `tick`'s tombstone eviction past `LINGER`
         - `tui/scrollback.rs` — per-session scrollback as a mirror of the view fold: `Scrollback`, `Scrollback::fact` acting on a `Delta` (`opened`/`grew`/`patched`), the record vocabulary decoded once into `Item`s, `absorb`'s tail rules (an effect walks back to its call, a change joins the run of changes at the tail, everything else grows the tail), `trim`'s head retirement against the fold's own window, `live_tail`, `screen`'s one seam rule, the `Log` transcript writer

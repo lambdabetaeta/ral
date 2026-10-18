@@ -492,7 +492,7 @@ fn project_transient(t: &Transient) -> Option<SynodEvent> {
         | Transient::Unpin { .. } => None,
         // Intercepted by `Router::route_transient` before this fold ever
         // runs — a helper's own lifecycle, folded into `Helpers` instead.
-        Transient::Born { .. } | Transient::Died => None,
+        Transient::Born(_) | Transient::Died => None,
     }
 }
 
@@ -517,7 +517,7 @@ fn project_transient_helper(t: &Transient) -> Option<SynodEvent> {
         | Transient::Cleared
         | Transient::Pin { .. }
         | Transient::Unpin { .. } => None,
-        Transient::Born { .. } | Transient::Died => None,
+        Transient::Born(_) | Transient::Died => None,
     }
 }
 
@@ -576,7 +576,7 @@ impl Router {
     /// per-agent fold.
     fn route_transient(&mut self, id: AgentId, t: &Transient) -> Option<SynodEvent> {
         match t {
-            Transient::Born { .. } => return Some(self.bump_helpers(1)),
+            Transient::Born(_) => return Some(self.bump_helpers(1)),
             Transient::Died => return Some(self.bump_helpers(-1)),
             Transient::Token(_)
             | Transient::Thinking(_)
@@ -858,12 +858,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp dir");
         let recorder = exarch::record::Emitter::create(&dir.path().join("record.jsonl"))
             .expect("a record log");
-        let born = |id: AgentId| Transient::Born {
-            log_dir: PathBuf::new(),
-            name: format!("helper-{id}"),
-            parent: Some(AgentId::new(0)),
-            resumed: None,
-            recorder: recorder.clone(),
+        let born = |id: AgentId| {
+            Transient::Born(exarch::record::Born {
+                log_dir: PathBuf::new(),
+                name: format!("helper-{id}"),
+                parent: Some(AgentId::new(0)),
+                resumed: None,
+                recorder: recorder.clone(),
+            })
         };
         let Some(SynodEvent::Helpers { live }) =
             router.route_transient(AgentId::new(1), &born(AgentId::new(1)))

@@ -561,7 +561,6 @@ fn the_recipe_gains_detach_and_its_budget() {
 #[cfg(unix)]
 #[test]
 fn clear_reboots_a_shell_that_still_carries_detach() {
-    let dir = std::env::temp_dir().join(format!("exarch-detach-clear-{}", std::process::id()));
     let scratch = std::sync::Arc::new(
         crate::app::Scratch::for_test(crate::app::EXARCH, "detach-clear").expect("scratch dir"),
     );
@@ -571,7 +570,6 @@ fn clear_reboots_a_shell_that_still_carries_detach() {
         cwd,
         ral_core::terminal::TerminalState::default(),
         scratch,
-        &dir,
     )
     .expect("the recipe boots");
 

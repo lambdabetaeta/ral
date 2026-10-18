@@ -58,7 +58,7 @@ use std::time::{Duration, Instant};
 /// the `Arc`.
 pub struct Agent {
     pub id: AgentId,
-    /// Unique among live agents, enforced at [`Fleet::enrol`].
+    /// Unique among live agents, enforced at [`Fleet::claim`].
     pub(crate) name: String,
     pub(crate) log_dir: PathBuf,
     started: Instant,

@@ -79,13 +79,13 @@ fn bus_queue_lifecycle_events_survive_a_flood_uncrossed() {
     let (tx, rx) = channel();
     tx.send_signal(Signal::Transient(
         AgentId::new(1),
-        Transient::Born {
+        Transient::Born(crate::record::Born {
             log_dir: std::path::PathBuf::new(),
             name: "a".into(),
             parent: Some(AgentId::new(0)),
             resumed: None,
             recorder: crate::record::Emitter::none(),
-        },
+        }),
     ))
     .unwrap();
     for _ in 0..50 {
@@ -114,7 +114,7 @@ fn bus_queue_lifecycle_events_survive_a_flood_uncrossed() {
     );
     assert!(matches!(
         rx.try_recv().unwrap(),
-        Signal::Transient(ONE, Transient::Born { .. })
+        Signal::Transient(ONE, Transient::Born(_))
     ));
     match rx.try_recv().unwrap() {
         Signal::Transient(ONE, Transient::Token(t)) => assert_eq!(t, "x".repeat(50)),

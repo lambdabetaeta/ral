@@ -195,8 +195,8 @@ fn agent_start_refuses_at_zero_fuel_with_the_exhaustion_text() {
     );
 }
 
-/// [`Fleet::name_live`] catches the ordinary case before the parked
-/// fork is ever adopted, so the refused spawn registers no child.
+/// [`Fleet::claim`] refuses the name before the parked fork is ever
+/// adopted, so the refused spawn registers no child.
 #[test]
 fn agent_start_refuses_a_name_already_borne_by_a_live_agent() {
     let (desk, _fleet, _parent_inbox) = spawnable_desk(3);

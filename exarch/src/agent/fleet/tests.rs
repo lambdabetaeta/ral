@@ -300,7 +300,10 @@ fn an_agent_resolves_only_while_something_holds_it() {
     let trunk = agent(&fleet, "trunk", None);
     let child = agent(&fleet, "child", Some(&trunk));
 
-    assert!(fleet.name_live("child"), "a live agent resolves by name");
+    assert!(
+        fleet.resolve("child").is_some(),
+        "a live agent resolves by name"
+    );
     assert_eq!(
         roster::listing(&trunk).len(),
         2,
@@ -310,7 +313,7 @@ fn an_agent_resolves_only_while_something_holds_it() {
     drop(child);
 
     assert!(
-        !fleet.name_live("child"),
+        fleet.resolve("child").is_none(),
         "a settled agent resolves nowhere, and frees its name"
     );
     assert_eq!(
@@ -466,7 +469,10 @@ fn a_terminated_parent_bears_no_more_children() {
         Some(Unborn::SessionDead),
         "a parent already carrying a terminate cause refuses new children"
     );
-    assert!(!fleet.name_live("late-child"), "and the name stays free");
+    assert!(
+        fleet.resolve("late-child").is_none(),
+        "and the name stays free"
+    );
     assert!(
         parent.children().is_empty(),
         "a refused child is never adopted"
@@ -474,8 +480,7 @@ fn a_terminated_parent_bears_no_more_children() {
 }
 
 /// Two same-name births never both succeed, even with nothing settled
-/// between them: the desk's [`Fleet::name_live`] pre-check is the cheap
-/// half, this the check that closes the race.
+/// between them: the second claim finds the name held.
 #[test]
 fn a_name_borne_by_a_live_agent_refuses_a_second() {
     let fleet = Fleet::for_test();

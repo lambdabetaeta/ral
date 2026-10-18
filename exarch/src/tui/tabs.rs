@@ -1,7 +1,7 @@
 //! Session/view lifecycle — one [`Tab`] per agent the stream has announced,
 //! in id order.  [`super::App`]'s `tabs` field.
 
-use std::path::Path;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -9,7 +9,7 @@ use super::palette::AGENT_HUES;
 use super::resources::ViewFigures;
 use crate::agent::Agent;
 use crate::agent::fleet::Fleet;
-use crate::record::{AgentId, Emitter as Recorder};
+use crate::record::{AgentId, Born, Emitter as Recorder};
 
 use super::block::{AgentSlot, Detail};
 use super::scrollback::Scrollback;
@@ -39,6 +39,28 @@ pub(super) struct Tab {
 }
 
 impl Tab {
+    /// The tab `born` announces, `slot`ted among the bar's hues.
+    fn new(id: AgentId, born: &Born, slot: usize, thinking: Detail) -> Self {
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "modulus by AGENT_HUES.len() yields 0..6, fits u8"
+        )]
+        let slot = AgentSlot((slot % AGENT_HUES.len()) as u8);
+        Self {
+            id,
+            name: born.name.clone(),
+            parent: born.parent,
+            recorder: born.recorder.clone(),
+            scrollback: Scrollback::new(
+                born.log_dir.join("user.log"),
+                slot,
+                born.resumed.is_some(),
+                thinking,
+            ),
+            retired: None,
+        }
+    }
+
     /// Whether the bar still shows this row: read off the scrollback, which
     /// [`Tabs::tick`] tombstones at the very moment the row goes.
     fn in_bar(&self) -> bool {
@@ -49,6 +71,11 @@ impl Tab {
     /// it.
     fn lingering(&self) -> bool {
         self.retired.is_some() && self.in_bar()
+    }
+
+    /// In the bar and not frozen: a tab focus may land on.
+    fn attended(&self) -> bool {
+        self.in_bar() && !self.lingering()
     }
 
     /// Resolved afresh each time and never stored: the frontend must not hold
@@ -82,8 +109,8 @@ pub(super) struct TabRow<'a> {
     pub demoted: Option<Duration>,
 }
 
-/// Every tab the stream has announced, in id order; never empty once the
-/// first `Born` has landed.
+/// Every tab the stream has announced, in id order; never empty, since it is
+/// built around the first.
 ///
 /// Focus is purely presentational: matrix `Enter` and `/focus` write it, and
 /// no agent-side lifecycle reads it. [`Self::focused`] resolves a stale id —
@@ -104,14 +131,15 @@ pub(super) struct Tabs {
 }
 
 impl Tabs {
-    /// No tabs yet, focused on `first`, whose `Born` must be the next to land.
-    pub fn new(first: AgentId, fleet: Arc<Fleet>) -> Self {
+    /// One tab, `first`'s, born as `born` says, and focused.
+    pub fn new(first: AgentId, born: &Born, fleet: Arc<Fleet>) -> Self {
+        // Born collapsed: deliberation reads as its grain and bulk, and
+        // `/thinking` opens the text for whoever wants it.
+        let thinking = Detail::Summary;
         Self {
-            tabs: Vec::new(),
+            tabs: vec![Tab::new(first, born, 0, thinking)],
             focus: first,
-            // Born collapsed: deliberation reads as its grain and bulk, and
-            // `/thinking` opens the text for whoever wants it.
-            thinking: Detail::Summary,
+            thinking,
             title_frame: 0,
             fleet,
         }
@@ -125,22 +153,25 @@ impl Tabs {
         self.tabs.iter_mut().find(|t| t.id == id)
     }
 
-    /// The first tab in the bar, else the first tab: where a stale id lands.
-    fn fallback(&self) -> AgentId {
-        self.tabs
-            .iter()
-            .find(|t| t.in_bar())
-            .or_else(|| self.tabs.first())
-            .map_or(self.focus, |t| t.id)
+    /// The first attended tab, else the first in the bar, else the first tab:
+    /// where a stale id lands.
+    fn fallback(&self) -> &Tab {
+        let first = |keep: fn(&Tab) -> bool| self.tabs.iter().find(|t| keep(t));
+        first(Tab::attended)
+            .or_else(|| first(Tab::in_bar))
+            .unwrap_or(&self.tabs[0])
     }
 
     /// The focused tab, resolving a stale focus — a tab that aged out of the
     /// bar — to [`Self::fallback`].
+    fn focused_tab(&self) -> &Tab {
+        self.tab(self.focus)
+            .filter(|t| t.in_bar())
+            .unwrap_or_else(|| self.fallback())
+    }
+
     pub(super) fn focused(&self) -> AgentId {
-        match self.tab(self.focus) {
-            Some(tab) if tab.in_bar() => self.focus,
-            _ => self.fallback(),
-        }
+        self.focused_tab().id
     }
 
     /// The tab's ancestors, nearest first.
@@ -161,8 +192,7 @@ impl Tabs {
 
     /// The focused tab's label, for the watch-only prompt hint.
     pub(super) fn focused_name(&self) -> &str {
-        self.tab(self.focused())
-            .map_or("?", |tab| tab.name.as_str())
+        &self.focused_tab().name
     }
 
     /// The live agent behind `id`, for one handler's duration — the frontend's
@@ -177,13 +207,10 @@ impl Tabs {
 
     /// The focused tab's own record seam.
     pub(super) fn focused_recorder(&self) -> &Recorder {
-        &self
-            .tab(self.focused())
-            .expect("the focused tab always exists")
-            .recorder
+        &self.focused_tab().recorder
     }
 
-    /// The live tab named `name` — `/focus`'s target. `Fleet::enrol` keeps
+    /// The live tab named `name` — `/focus`'s target. `Fleet::claim` keeps
     /// names unique among the live, so a lingering tab sharing its name with
     /// a newborn is ruled out by the liveness test rather than by luck.
     pub(super) fn by_name(&self, name: &str) -> Option<AgentId> {
@@ -198,8 +225,8 @@ impl Tabs {
     /// is climbed past, not landed on.
     pub(super) fn parent_focus(&self, id: AgentId) -> AgentId {
         self.ancestors(id)
-            .find(|&a| self.tab(a).is_some_and(|t| t.in_bar() && !t.lingering()))
-            .unwrap_or_else(|| self.fallback())
+            .find(|&a| self.tab(a).is_some_and(Tab::attended))
+            .unwrap_or_else(|| self.fallback().id)
     }
 
     /// Age retired tabs out past [`LINGER`], once per frame.  An expired view is
@@ -231,35 +258,13 @@ impl Tabs {
     /// its `user.log` when it is resumed.  A second `Born` for an id already
     /// listed is ignored: a tab is opened once, and its birth facts never
     /// change.
-    pub(super) fn born(
-        &mut self,
-        id: AgentId,
-        log_dir: &Path,
-        name: String,
-        parent: Option<AgentId>,
-        recorder: Recorder,
-        append: bool,
-    ) {
+    pub(super) fn born(&mut self, id: AgentId, born: &Born) {
         if self.tab(id).is_some() {
             return;
         }
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "modulus by AGENT_HUES.len() yields 0..6, fits u8"
-        )]
-        let slot = AgentSlot((self.len() % AGENT_HUES.len()) as u8);
         let at = self.tabs.partition_point(|t| t.id < id);
-        self.tabs.insert(
-            at,
-            Tab {
-                id,
-                name,
-                parent,
-                recorder,
-                scrollback: Scrollback::new(log_dir.join("user.log"), slot, append, self.thinking),
-                retired: None,
-            },
-        );
+        let tab = Tab::new(id, born, self.len(), self.thinking);
+        self.tabs.insert(at, tab);
     }
 
     /// Flip the standing rung for deliberation and apply it to every view at
@@ -293,7 +298,7 @@ impl Tabs {
     /// Focus on a retired tab returns to `id`.
     pub(super) fn retire_subtree(&mut self, id: AgentId) {
         let now = Instant::now();
-        let doomed: Vec<AgentId> = self
+        let doomed: HashSet<AgentId> = self
             .tabs
             .iter()
             .filter(|t| t.in_bar() && self.ancestors(t.id).any(|a| a == id))

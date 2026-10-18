@@ -503,6 +503,35 @@ pub enum Forensic {
     },
 }
 
+/// An agent's birth facts, announced whole on the channel.
+#[derive(Debug, Clone)]
+pub struct Born {
+    /// What the frontend must still know once the agent has settled: the
+    /// row's label and indentation, the tombstone's log path.
+    pub log_dir: PathBuf,
+    pub name: String,
+    /// `None` for a root, which opens a session of its own.
+    pub parent: Option<AgentId>,
+    /// What a resumed root picked up, for the frontend to replay.
+    pub resumed: Option<Resumed>,
+    /// The born agent's own record seam, for the frontend to record into.
+    pub recorder: Emitter,
+}
+
+#[cfg(test)]
+impl Born {
+    /// A birth with no log and no replay, for a test's tab.
+    pub(crate) fn for_test(name: &str, parent: Option<AgentId>) -> Self {
+        Self {
+            log_dir: std::env::temp_dir(),
+            name: name.into(),
+            parent,
+            resumed: None,
+            recorder: Emitter::none(),
+        }
+    }
+}
+
 /// The channel's other passenger: content that dies with the channel and
 /// never reaches the log.
 ///
@@ -519,17 +548,7 @@ pub enum Transient {
     /// step's last record has landed: a printer may take it as leave to drop
     /// whatever line each lane still has open, since no record will cover it.
     Boundary,
-    Born {
-        /// What the frontend must still know once the agent has settled: the row's label and indentation, the tombstone's log path.
-        log_dir: PathBuf,
-        name: String,
-        /// `None` for a root, which opens a session of its own.
-        parent: Option<AgentId>,
-        /// What a resumed root picked up, for the frontend to replay.
-        resumed: Option<Resumed>,
-        /// The born agent's own record seam, for the frontend to record into.
-        recorder: Emitter,
-    },
+    Born(Born),
     Died,
     /// The durable copy already rides [`Protocol::AssistantMessage`].
     StopReason(String),

@@ -1186,7 +1186,7 @@ impl Scrollback {
                 self.answer.clear();
                 self.thinking_line.clear();
             }
-            Transient::Born { .. }
+            Transient::Born(_)
             | Transient::Died
             | Transient::Resources { .. }
             | Transient::Limits { .. } => {}

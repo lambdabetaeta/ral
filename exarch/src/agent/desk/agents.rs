@@ -45,15 +45,12 @@ impl ExarchDesk {
             ));
         }
 
-        // Didactic, not race-free: `register` below re-checks under its own
-        // lock, and that is what closes a same-name race.
-        if s.fleet.name_live(&name) {
-            return Err(Error::new(format!(
-                "`` exarch-agents `start `` refused: a live agent already bears the name '{name}'; pick \
-                     another, or wait for it to settle. Names identify live agents; agents \
-                     lists yours."
-            )));
-        }
+        // Before the fork is taken up, so a refused name unwinds nothing and
+        // two same-name spawns have one winner.
+        let claim = s
+            .fleet
+            .claim(&name)
+            .map_err(|why| Error::new(format!("`` exarch-agents `start `` refused: {why}")))?;
 
         // Before the seat split, so both arms share one resolution and a
         // refusal unwinds nothing: no adopted shell, no forked log, no helper engine.
@@ -64,7 +61,7 @@ impl ExarchDesk {
             &s.agent,
             &s.log.borrow(),
             &s.fleet,
-            name.clone(),
+            claim,
             seat,
             provider,
             spec.memory,

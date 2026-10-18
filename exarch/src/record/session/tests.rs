@@ -345,7 +345,8 @@ fn a_rewind_removes_the_anchor_on_and_the_next_prompt_takes_its_id() {
 
     let expected = serde_json::to_vec(&s.context().rendered().iter().collect::<Vec<_>>()).unwrap();
     drop(s);
-    let resumed = AgentLog::resume(sessions.path(), AgentId::new(0)).expect("resume after rewinds");
+    let resumed =
+        AgentLog::resume(sessions.path(), AgentId::new(0), "main").expect("resume after rewinds");
     assert_eq!(
         serde_json::to_vec(&resumed.context().rendered().iter().collect::<Vec<_>>()).unwrap(),
         expected
@@ -500,7 +501,7 @@ fn head_marker_is_a_pure_function_of_the_table() {
     assert_eq!(head_marker(&live).as_ref(), Some(&first));
     drop(live);
 
-    let resumed = AgentLog::resume(sessions.path(), AgentId::new(0)).expect("resume");
+    let resumed = AgentLog::resume(sessions.path(), AgentId::new(0), "main").expect("resume");
     assert_eq!(head_marker(&resumed), Some(first));
 }
 
@@ -1069,7 +1070,7 @@ fn resume_refuses_an_eviction_of_a_turn_not_in_the_context() {
     file.write_all(b"\n").unwrap();
     file.flush().unwrap();
 
-    let error = AgentLog::resume(sessions.path(), AgentId::new(0))
+    let error = AgentLog::resume(sessions.path(), AgentId::new(0), "main")
         .err()
         .expect("an eviction of a turn not in the context is foreign data");
     let text = error.to_string();
@@ -1172,7 +1173,7 @@ fn resume_replays_a_scripted_history_and_preserves_the_context() {
         serde_json::to_vec(&live.context().rendered().iter().collect::<Vec<_>>()).unwrap();
     drop(live);
 
-    let resumed = AgentLog::resume(sessions.path(), AgentId::new(0)).expect("resume");
+    let resumed = AgentLog::resume(sessions.path(), AgentId::new(0), "main").expect("resume");
     assert!(resumed.context().is_ready());
     assert_eq!(
         serde_json::to_vec(&resumed.context().rendered().iter().collect::<Vec<_>>()).unwrap(),
@@ -1197,7 +1198,7 @@ fn resume_quiesces_a_torn_turn_after_reopening_append_mode() {
         .unwrap();
     drop(live);
 
-    let mut resumed = AgentLog::resume(sessions.path(), AgentId::new(0)).expect("resume");
+    let mut resumed = AgentLog::resume(sessions.path(), AgentId::new(0), "main").expect("resume");
     assert!(resumed.context().is_ready());
     let recorded = records(&resumed);
     assert!(
@@ -1233,8 +1234,8 @@ fn resume_quarantines_only_an_unterminated_final_fragment() {
     file.write_all(fragment).unwrap();
     file.flush().unwrap();
 
-    let resumed =
-        AgentLog::resume(sessions.path(), AgentId::new(0)).expect("torn tail is recoverable");
+    let resumed = AgentLog::resume(sessions.path(), AgentId::new(0), "main")
+        .expect("torn tail is recoverable");
     assert!(resumed.context().is_ready());
     assert_eq!(fs::read(&path).unwrap(), prefix);
     assert_eq!(
@@ -1263,7 +1264,7 @@ fn resume_refuses_a_complete_garbage_line_without_mutating_the_file() {
     let before = fs::read(&path).unwrap();
 
     assert!(
-        AgentLog::resume(sessions.path(), AgentId::new(0)).is_err(),
+        AgentLog::resume(sessions.path(), AgentId::new(0), "main").is_err(),
         "garbage is not a crash tail"
     );
     assert_eq!(fs::read(&path).unwrap(), before);
@@ -1296,7 +1297,7 @@ fn resume_refuses_foreign_protocol_data_without_mutating_the_file() {
     file.flush().unwrap();
     let before = fs::read(&path).unwrap();
 
-    let error = AgentLog::resume(sessions.path(), AgentId::new(0))
+    let error = AgentLog::resume(sessions.path(), AgentId::new(0), "main")
         .err()
         .expect("foreign data must refuse");
     let text = error.to_string();
@@ -1327,7 +1328,7 @@ fn resume_refuses_a_steering_line_with_no_turn_to_steer() {
     file.write_all(b"\n").unwrap();
     file.flush().unwrap();
 
-    let error = AgentLog::resume(sessions.path(), AgentId::new(0))
+    let error = AgentLog::resume(sessions.path(), AgentId::new(0), "main")
         .err()
         .expect("a steering line with no turn is foreign data");
     let text = error.to_string();
@@ -1364,7 +1365,7 @@ fn resume_refuses_a_stale_id_as_foreign_data() {
     file.flush().unwrap();
     let before = fs::read(&path).unwrap();
 
-    let error = AgentLog::resume(sessions.path(), AgentId::new(0))
+    let error = AgentLog::resume(sessions.path(), AgentId::new(0), "main")
         .err()
         .expect("a stale id is foreign data");
     let text = error.to_string();
@@ -1395,7 +1396,7 @@ fn resume_refuses_a_child_log() {
         )
         .unwrap();
     drop((parent, child));
-    let error = AgentLog::resume(sessions.path(), AgentId::new(1))
+    let error = AgentLog::resume(sessions.path(), AgentId::new(1), "main")
         .err()
         .expect("a child log has a parent, so it is no root");
     assert!(
@@ -1411,7 +1412,7 @@ fn resume_refuses_a_pre_plan_session_with_no_record_log() {
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("events.jsonl"), b"").unwrap();
 
-    let error = AgentLog::resume(sessions.path(), AgentId::new(0))
+    let error = AgentLog::resume(sessions.path(), AgentId::new(0), "main")
         .err()
         .expect("a directory with no record.jsonl must refuse, not start empty");
     let text = error.to_string();
@@ -1453,7 +1454,7 @@ fn resume_refuses_an_interior_tool_answer_lost_from_disk() {
     }
     fs::write(&path, &torn).unwrap();
 
-    let error = AgentLog::resume(sessions.path(), AgentId::new(0))
+    let error = AgentLog::resume(sessions.path(), AgentId::new(0), "main")
         .err()
         .expect("an interior gap is a hand-edited file");
     let text = error.to_string();
@@ -1538,8 +1539,8 @@ fn resume_matches_live_after_a_small_edit_sequence_family() {
         let expected =
             serde_json::to_vec(&live.context().rendered().iter().collect::<Vec<_>>()).unwrap();
         drop(live);
-        let resumed =
-            AgentLog::resume(sessions.path(), AgentId::new(0)).expect("resume edit sequence");
+        let resumed = AgentLog::resume(sessions.path(), AgentId::new(0), "main")
+            .expect("resume edit sequence");
         assert!(resumed.context().is_ready());
         assert_eq!(
             serde_json::to_vec(&resumed.context().rendered().iter().collect::<Vec<_>>()).unwrap(),
@@ -1579,7 +1580,7 @@ fn resume_rebuilds_the_same_rows_and_notes() {
     let notes = live.context().notes().to_vec();
     drop(live);
 
-    let resumed = AgentLog::resume(sessions.path(), AgentId::new(0)).expect("resume");
+    let resumed = AgentLog::resume(sessions.path(), AgentId::new(0), "main").expect("resume");
     assert_eq!(resumed.context().transcript_index(), rows);
     assert_eq!(resumed.context().notes(), notes.as_slice());
 }
@@ -1609,7 +1610,7 @@ fn a_departed_turn_reads_back_after_resume() {
     );
     drop(live);
 
-    let resumed = AgentLog::resume(sessions.path(), AgentId::new(0)).expect("resume");
+    let resumed = AgentLog::resume(sessions.path(), AgentId::new(0), "main").expect("resume");
     assert_eq!(
         resumed
             .context()
@@ -1954,7 +1955,7 @@ fn admission_refuses_inherited_after_the_first_turn() {
     file.write_all(b"\n").unwrap();
     file.flush().unwrap();
 
-    let error = AgentLog::resume(sessions.path(), AgentId::new(0))
+    let error = AgentLog::resume(sessions.path(), AgentId::new(0), "main")
         .err()
         .expect("a late link is foreign data");
     let text = error.to_string();
@@ -2089,7 +2090,7 @@ fn resume_rebuilds_the_same_rows_and_notes_across_a_link() {
     let notes = live.context().notes().to_vec();
     drop(live);
 
-    let resumed = AgentLog::resume(sessions.path(), AgentId::new(0)).expect("resume");
+    let resumed = AgentLog::resume(sessions.path(), AgentId::new(0), "main").expect("resume");
     assert_eq!(resumed.context().transcript_index(), rows);
     assert_eq!(resumed.context().notes(), notes.as_slice());
 }
@@ -2247,7 +2248,7 @@ fn resume_replays_a_learned_window_until_a_selection_forgets_it() {
     })
     .unwrap();
     let learned = |sessions: &tempfile::TempDir| {
-        AgentLog::resume(sessions.path(), AgentId::new(0))
+        AgentLog::resume(sessions.path(), AgentId::new(0), "main")
             .expect("resume")
             .learned_window()
             .cloned()

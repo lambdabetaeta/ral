@@ -18,7 +18,7 @@ use crate::bus::BusReceiver;
 use crate::card::Card;
 use crate::provider::identity::Account;
 use crate::provider::{Provider, Usage};
-use crate::record::{AgentId, AgentState, Emitter as Recorder, Resumed};
+use crate::record::{AgentId, AgentState, Born, Resumed};
 use crate::record::{Display, Forensic, Record, Recorded, Transient};
 use clipboard::Clipboard;
 
@@ -70,14 +70,15 @@ pub(crate) struct App {
 }
 
 impl App {
-    /// Focused on `first`, whose `Born` must be the first signal folded.
-    pub fn new(first: AgentId, fleet: Arc<Fleet>, vi: bool, opening: Card) -> Self {
+    /// Opens on `first`, the first agent born: its tab, focused, and its
+    /// session's card and replay, as any later root's.
+    pub fn new(first: AgentId, born: Born, fleet: Arc<Fleet>, vi: bool, opening: Card) -> Self {
         let cwd_basename = std::env::current_dir()
             .ok()
             .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
             .unwrap_or_else(|| "?".into());
-        Self {
-            tabs: Tabs::new(first, fleet),
+        let mut app = Self {
+            tabs: Tabs::new(first, &born, fleet),
             prompt_state: PromptState::new(vi),
             opening,
             total_usage: Usage::default(),
@@ -89,7 +90,9 @@ impl App {
             matrix: Matrix::Watching,
             cwd_basename,
             last_title: String::new(),
-        }
+        };
+        app.welcome(first, born);
+        app
     }
 
     pub fn total_usage(&self) -> Usage {
@@ -264,13 +267,10 @@ impl App {
             return;
         }
         match t {
-            Transient::Born {
-                log_dir,
-                name,
-                parent,
-                resumed,
-                recorder,
-            } => self.born(id, &log_dir, name, parent, recorder, resumed),
+            Transient::Born(born) => {
+                self.tabs.born(id, &born);
+                self.welcome(id, born);
+            }
             Transient::Died => self.tabs.died(id),
             // The agent has rebuilt itself: its descendants are cancelled and
             // its view starts over, under a fresh card.
@@ -286,25 +286,24 @@ impl App {
         }
     }
 
-    /// Open a tab, and for a root its session: the card, and a resumed
-    /// session's replayed record, spend and boundary note.
-    fn born(
+    /// For a root, its session's opening: the card, and a resumed session's
+    /// replayed record, spend and boundary note.
+    fn welcome(
         &mut self,
         id: AgentId,
-        log_dir: &Path,
-        name: String,
-        parent: Option<AgentId>,
-        recorder: Recorder,
-        resumed: Option<Resumed>,
+        Born {
+            log_dir,
+            parent,
+            resumed,
+            ..
+        }: Born,
     ) {
-        self.tabs
-            .born(id, log_dir, name, parent, recorder, resumed.is_some());
         if parent.is_some() {
             return;
         }
         self.open(id);
         if let Some(resumed) = resumed {
-            self.replay(id, log_dir, resumed);
+            self.replay(id, &log_dir, resumed);
         }
     }
 

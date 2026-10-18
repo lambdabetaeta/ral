@@ -208,8 +208,8 @@ impl Shell {
     }
 
     /// Set a dynamic env-var override for the rest of the session — how a host
-    /// seeds `NO_COLOR`, `EXARCH_SESSION_DIR`, and the like.  `within [env: …]`
-    /// wants the scoped [`Shell::with_env`] instead, which restores on exit.
+    /// seeds `NO_COLOR` and the like.  `within [env: …]` wants the scoped
+    /// [`Shell::with_env`] instead, which restores on exit.
     pub fn set_env_var(&mut self, k: impl Into<String>, v: impl Into<String>) {
         self.context.set_env_var(k, v);
     }
