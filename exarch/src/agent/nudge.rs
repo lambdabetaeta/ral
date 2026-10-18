@@ -24,7 +24,8 @@
 //! decided-but-uncommitted nudge (`/clear`, `/rewind`) is reborn whole
 //! ([`Nudges::reborn`]), since a decided edge cannot be un-consumed piecemeal.
 
-use crate::agent::deliberate::Outcome;
+use crate::agent::gauge::Reminder;
+use crate::agent::outcome::Outcome;
 use crate::provider::{CutShort, ProviderError};
 use crate::record::{AgentLog, Spent};
 
@@ -39,29 +40,6 @@ const EXARCH_REMINDER_CLOSE: &str = " [/EXARCH_REMINDER]";
 
 fn wrap_reminder(body: &str) -> String {
     format!("{EXARCH_REMINDER_OPEN}{body}{EXARCH_REMINDER_CLOSE}")
-}
-
-/// A standing condition a gauge found newly crossed — the figures, not the
-/// sentence, which is this module's to word.
-pub(crate) enum Reminder {
-    /// The context has crossed the soft line; `planned` is the turns the next
-    /// boundary's cut would take, `None` when nothing is old enough to shed.
-    Pressure {
-        /// The rendered figure, e.g. "173000 of 200000 tokens".
-        detail: String,
-        planned: Option<Vec<u64>>,
-    },
-    /// An allowance window on `service` has climbed past a rung.
-    Ration {
-        service: String,
-        label: String,
-        pct: u32,
-        /// Whether the allowance resets on its own — a window — or must be
-        /// topped up.
-        windowed: bool,
-        /// Whether this agent resumes at the reset, or merely waits it out.
-        resumes: bool,
-    },
 }
 
 impl Reminder {
@@ -113,7 +91,7 @@ impl Reminder {
     }
 }
 
-/// The agent-side facts one nudge decision reads, assembled by `take_up` in
+/// The agent-side facts one nudge decision reads, assembled by `follow_up` in
 /// `agent/attend.rs`.
 pub(crate) struct Facts {
     /// True for an agent that returns through `reply` — a fork or the

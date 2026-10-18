@@ -9,14 +9,13 @@
 //! cannot immortalise the zombies it exists to reveal.
 
 use crate::agent::Avatar;
+use crate::agent::EngineLost;
 use crate::agent::fleet::AGENT_LEASE_IDLE;
 use crate::agent::gauge::{EVICT_THRESHOLD, eviction_trigger};
-use crate::agent::seat::EngineLost;
 use crate::card::{Card, Field, FieldVal, Mark, Role, Span};
 use crate::shell_eval;
 use ral_core::carrier::Severed;
 use std::fmt;
-use std::path::Path;
 
 /// How an accumulator is kept bounded — or that it is not.  Stated even where
 /// the enforcement lands later, the row then carrying `cap: None` and a note
@@ -168,18 +167,6 @@ fn pressure_rows(measured: Option<u64>, history_bytes: u64, window: Option<u64>)
 }
 
 impl Avatar {
-    /// The engine's scratch and its size, both read where the scratch is.
-    ///
-    /// # Errors
-    /// The engine's severance.
-    pub(super) fn scratch_bytes(&self) -> Result<Option<(String, u64)>, Severed> {
-        let Some(scratch) = self.seat.read(|t| t.env_var("EXARCH_SCRATCH"))? else {
-            return Ok(None);
-        };
-        let bytes = self.seat.read(|t| t.path_bytes(Path::new(&scratch)))?;
-        Ok(Some((scratch, bytes)))
-    }
-
     /// Assemble this agent's half of the fold — one [`ProbeRow`] per
     /// accumulator this attend thread may legally read: the shell's worker
     /// registry and bindings, the inbox, the event log, the log-dir and
@@ -365,10 +352,8 @@ impl Avatar {
         let survey = self.log.borrow().context().context_survey();
         // The card is a rendering the scrollback fold rebuilds at draw time,
         // never what the log carries.
-        let recorder = self.recorder();
-        if let Err(error) = recorder.emit(crate::record::Display::Context { turns: survey.rows }) {
-            recorder.report_fault(&error);
-        }
+        self.recorder()
+            .emit_or_report(crate::record::Display::Context { turns: survey.rows });
     }
 }
 

@@ -1,8 +1,9 @@
 use super::super::*;
-use crate::agent::desk::{ExarchDesk, HostServices, RunHost, SurfaceApplier};
+use crate::agent::desk::{ExarchDesk, HostServices, RunHost};
 use crate::agent::fleet::Fleet;
 use crate::bus::{Emitter, Inbox};
 use crate::record::{AgentId, AgentLog};
+use crate::shell_eval::surface::SurfaceApplier;
 use crate::test_helper::engine_over_socketpair;
 use ral_core::carrier::{Host, WireTransport};
 use ral_core::protocol::channel::Liveness;
@@ -57,7 +58,6 @@ fn wire_host_services(emit: &Emitter, parent: &Arc<crate::agent::Agent>) -> Host
         log: crate::agent::LogCell::new(test_log()),
         branch: None,
         acts: crate::agent::desk::ActFragment::default(),
-        principal: ral_core::host::user(),
     }
 }
 

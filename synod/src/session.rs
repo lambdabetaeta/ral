@@ -382,8 +382,8 @@ impl Conversation {
             return Ok(());
         };
         let run_dir = self.agent.run_dir();
-        let lost = exarch::agent::EngineLost::running(&cause, run_dir.as_deref());
-        if let Some(run_dir) = &run_dir {
+        let lost = exarch::agent::EngineLost::running(&cause, run_dir);
+        if let Some(run_dir) = run_dir {
             engine_log::capture(run_dir, &lost.logged(), &self.factory.console());
         }
         let sentence = lost.to_string();

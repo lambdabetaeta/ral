@@ -314,7 +314,7 @@ replaces it with a stub, so a partial that holds only reasoning keeps nothing.
   `Stalled` nudge asks the model to continue from where it ends.
 - **prose already streamed and any other error** (`Api`, `Other`, a deferred
   refusal) → `Attempt::Failed`: the error surfaces as itself, the streamed text
-  staying on screen through `abandon_turn`, rather than being re-driven by a
+  staying on screen through the stream's best-effort close, rather than being re-driven by a
   nudge the retry policy would never have granted.
 
 This is why `Attempt` needs no third "don't retry" variant: a committed stall is

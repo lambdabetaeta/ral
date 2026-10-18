@@ -1,54 +1,26 @@
-//! The uniform agent node: canonical record log, persistent shell, capability
-//! set, hot-swappable provider, and the attend loop every node runs.
+//! The agent node, split by who may touch what: [`Agent`], the public half
+//! the fleet shares behind an `Arc`, and [`Avatar`], the private half the
+//! attend thread owns.  Nodes differ only by [`Role`]; the loop is one.
 //!
-//! A run is a tree of these; [`Fleet`] holds what they
-//! share — the lookup by name, and the [`Launch`](fleet::Launch) fixed
-//! once for the whole run.
-//!
-//! No node is privileged by special-case code — the distinctions reduce to
-//! *position*.  Holding `reply` falls out of the [`Role`], parking out of the
-//! launch's `attended`.  A child's result is posted up its parent's mailbox
-//! by the spawn site, not by the loop, so the loop is identical for all.
-//!
-//! Two types, split along who may touch what.  [`Agent`] is the public half —
-//! identity and immutable per-node config — held behind an `Arc` so the fleet
-//! can share it.  [`Avatar`] is the private half — the log, the seat, the
-//! inbox, and every other field only the attend thread touches — plus the
-//! `Arc<Agent>` it embodies; every method that runs the agent takes
-//! `&mut Avatar`.
-//!
-//! An agent is *live* while its avatar holds the `Arc`; nothing deregisters.
-//! The tree that carries that liveness has one direction of strength, and it
-//! is the invariant everything else here rests on: **nothing holds an
-//! `Arc<Agent>` to a descendant.**  Up is strong ([`Role::Child`]), so the
-//! climb a scope check makes never dangles; down is weak
-//! ([`Agent::children`]), so a walk prunes what fails to upgrade, and reaper
-//! closures and results addressed upward carry [`std::sync::Weak`].
-//!
-//! Two per-agent mutexes, [`Agent::status`] and [`Agent::children`].  Rule:
-//! hold at most one at a time.  `children` is locked to push or to snapshot,
-//! never across a walk; `status` is a single-writer register, and nothing is
-//! computed under it.  [`Agent::schedules`] and [`Agent::pins`] are two more
-//! cells of public agent state, each already self-locked by its own type;
-//! the same rule extends to them, and neither is ever held while pushing
-//! into an inbox — a fired schedule drops its registry lock before posting
-//! the wakeup.
-//!
-//! This file holds the state; the machinery lives in [`build`], [`attend`],
-//! [`deliberate`], [`shell`], [`gauge`], and [`resources`], which reach these
-//! private fields directly.
+//! Nothing holds an `Arc<Agent>` to a descendant: up is strong
+//! ([`Role::Child`]), down is weak ([`Agent::children`]).  An agent's locks
+//! (`status`, `children`, `schedules`, `pins`) are held one at a time, and
+//! never while pushing into an inbox.
 
+mod arrival;
 mod attend;
 mod build;
 mod command;
-pub mod deliberate;
+mod deliberate;
 pub(crate) mod desk;
 pub mod digest;
+mod engine_lost;
 mod factory;
 pub mod fleet;
 pub(crate) mod gauge;
 pub(crate) mod index;
 pub mod nudge;
+pub mod outcome;
 pub mod resources;
 pub mod roster;
 pub(crate) mod seat;
@@ -62,9 +34,9 @@ pub(crate) mod tools;
 pub(crate) use build::TestTrunk;
 pub(crate) use build::{Build, fresh_id};
 pub use build::{RootConfig, RootSeat, Trunk};
+pub use engine_lost::{EngineLost, EnginePhase};
 pub use factory::Factory;
-pub use seat::{EngineLost, EnginePhase};
-pub(crate) use shell::{Evaluated, LogCell, ReplyCell};
+pub(crate) use shell::{Evaluated, LogCell, ReplyCell, SharedCell};
 
 use crate::agent::fleet::Fleet;
 use crate::agent::seat::Seat;
@@ -81,71 +53,36 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-/// What the fleet knows an agent as.
-///
-/// Identity and per-node config, fixed at construction — except
-/// [`Self::status`], the one register the avatar writes as it runs, and
-/// [`Self::children`], which the spawn site pushes onto.  Live exactly while
-/// its [`Avatar`] holds the `Arc`: its parent and the fleet's [`Fleet`] hold
-/// only [`Weak`], and every walk prunes what fails to upgrade.  What every
-/// node shares is the fleet's [`Launch`](fleet::Launch), not a field
-/// here.
+/// What the fleet knows an agent as: identity and config fixed at birth, plus
+/// the registers other threads read.  Live exactly while its [`Avatar`] holds
+/// the `Arc`.
 pub struct Agent {
     pub id: AgentId,
-    /// The tab-bar identity [`crate::enquiry::check_name`] validates — unique
-    /// among live agents, enforced at [`Fleet::enrol`].
+    /// Unique among live agents, enforced at [`Fleet::enrol`].
     pub(crate) name: String,
-    /// Where this agent's own session log is written.
     pub(crate) log_dir: PathBuf,
     started: Instant,
-    /// The resolved prompt that reaches the model on every turn.  `Arc<str>`
-    /// so a fork's per-turn read is a refcount bump, never a re-copy of the
-    /// ~38 KB template.
+    /// `Arc<str>`: a fork's per-turn read must not re-copy the template.
     pub(crate) system: Arc<str>,
     pub(crate) caps: ral_core::capability::GrantStack,
     pub(crate) role: Role,
-    /// Weak and downward, so no cycle exists to reason about: a child that
-    /// fails to upgrade has settled, and the walk that found it prunes it.
+    /// Weak: a child that fails to upgrade has settled, and is pruned.
     children: Mutex<Vec<Weak<Self>>>,
-    /// Spawn generations still available below here.  Bounds depth, not
-    /// fan-out: a fork spends none of the parent's, only handing the child one
-    /// less, and at zero the desk refuses `` exarch-agents `start ``.
+    /// Spawn generations left below here.  Bounds depth, not fan-out.
     pub(crate) fuel: u32,
-    /// A `/model` swaps this handle alone; a fork seeds the child's from a
-    /// snapshot, so neither disturbs the other.
     pub(crate) provider: ProviderHandle,
-    /// One sticky token for this agent's life, so the subtree cascade reaches
-    /// the live exchange.  The attend loop
-    /// [`reset`](cancel::Token::reset)s it at each exchange boundary so an Esc
-    /// never bleeds into the next; the process's trunk additionally hears OS
-    /// signals through [`crate::signals::face`], called by the site that
-    /// launches it.
+    /// Sticky for the agent's life, so a subtree cascade reaches the live
+    /// exchange; reset at each exchange boundary.
     pub(crate) token: cancel::Token,
-    /// Whether this agent may ride the provider's hosted web search: the
-    /// network policy's verdict, inherited verbatim by every fork.  The tool
-    /// is attached per request, and only where the adapter has one.
+    /// The network policy's verdict on hosted web search.
     pub(crate) search: bool,
-    /// The seat's own reach into this agent's running eval: the cell its
-    /// seat republishes on every rebuild, so it never goes stale.
     reach: InterruptTarget,
-    /// The sender end of this agent's own inbox; the [`Inbox`] itself stays on
-    /// [`Avatar`], reachable only by the attend thread.
     pub(crate) mailbox: Mailbox,
-    /// Live wakeups (cron / after), posted into this agent's own inbox; the
-    /// builtins that arm them gate on the launch's `allow_schedule`.  Public
-    /// agent state: the desk writes it and other threads read it, so it lives
-    /// here rather than on [`Avatar`].
     pub(crate) schedules: crate::schedule::ScheduleRegistry,
-    /// Pins flow straight past the session to the frontend; the periodic
-    /// [`nudge`] reminder reads this mirror to name what the model has
-    /// pinned.  Public agent state, for the same reason as [`Self::schedules`].
+    /// Mirrors the pin register, for the nudge to name what is pinned.
     pub(crate) pins: shell_eval::PinDigests,
-    /// A process publishing its status: written by the avatar alone
-    /// ([`Self::set_resting`], [`Self::deposit_reply`], [`Self::heard`],
-    /// [`Self::message`], [`Self::forget`]), read by everyone else.  A reader
-    /// takes one snapshot and computes nothing under the lock — the mutex buys
-    /// atomicity, nothing more — and a writer drops its guard before pushing
-    /// to any inbox, since a park verdict reads this under one.
+    /// Written by the avatar alone, read by everyone; nothing is computed
+    /// under the lock.
     status: Mutex<Status>,
 }
 
@@ -193,28 +130,19 @@ impl Role {
     }
 }
 
-/// [`Agent`]'s single-writer register — see [`Agent::status`]'s doc for who
-/// writes what.
 struct Status {
-    /// When this agent parked waiting for a message, or `None` while it is
-    /// working.  The roster's `idle-s`, and the whole of "not busy".
+    /// When this agent parked for a message; `None` while it works.
     rest: Option<Instant>,
-    /// The value this agent last passed to `reply`, held for whoever consumes
-    /// it: a parent's `` exarch-agents `read ``, or the driver of a root's
-    /// loop.  Kept apart from [`Self::rest`] because it must survive a wake: a
-    /// messaged agent is busy again with its reply still standing, until it
-    /// replies afresh.
+    /// The last value passed to `reply`.  Survives a wake: a messaged agent
+    /// works again with its reply still standing.
     reply: Option<FOValue>,
-    /// Direct children this agent has spoken to — spawned or messaged — and
-    /// not yet heard back from.  The busy/at-rest bit of the parent–child
-    /// edge lives here, on the side that consumes the result, so the park
-    /// verdict flips exactly when the result is taken up and never reads a
-    /// child's own status.
+    /// Direct children spoken to and not yet heard back from.  Kept on the
+    /// consuming side, so the park verdict flips exactly when a result is
+    /// taken up.
     awaiting: BTreeSet<AgentId>,
 }
 
-/// What an [`Agent`] is born with — the one literal, which [`Agent::new`]
-/// completes with the registers every agent starts empty.
+/// What an [`Agent`] is born with; [`Agent::new`] adds the empty registers.
 pub(crate) struct Birth {
     pub id: AgentId,
     pub name: String,
@@ -230,47 +158,23 @@ pub(crate) struct Birth {
     pub mailbox: Mailbox,
 }
 
-/// An agent's embodiment in this process: the thread that thinks and acts
-/// for it, owning everything only it touches, so every method is plain
-/// `&mut self`.
+/// An agent's embodiment in this process: the thread that runs it, owning
+/// everything only it touches.
 pub struct Avatar {
-    /// The public half this avatar embodies — readable crate-wide, so a
-    /// caller outside the `agent` module reaches identity and config at
-    /// `.agent.…` rather than through a delegator for every field.
     pub(crate) agent: Arc<Agent>,
-    /// Under its own cell so a per-call desk can capture it off `&mut Avatar`.
-    /// [`LogCell::borrow_mut`] panics on contention rather than blocking — the desk
-    /// runs only while the attend thread is parked in `run_shell`.
+    /// Shared with the per-call desk, which runs on this thread's stack.
     log: LogCell,
-    /// Every engine-side reach goes through this seat's methods.
     pub(crate) seat: Seat,
-    /// Self-nudges and armed wakeups land here; a child's result lands in its
-    /// *parent's*, never reaching across into a sibling's.
     inbox: Inbox,
-    /// Where the desk's `reply` handler stages the value a `ral` call returns,
-    /// holding no `&mut Avatar` to write it any other way.  Within one batch
-    /// the last write wins; [`Self::deliberate`] takes it once the batch
-    /// drains and empties it on entry, so a reply a cancel or an error cut
-    /// short never poisons the next deliberation.
+    /// Where the desk's `reply` stages a value for [`Self::deliberate`].
     reply: ReplyCell,
-    /// The fleet itself, `Arc`-shared with every other node: the launch, the
-    /// name a spawn claims, and the lease scan.  Not the tree — that is
-    /// [`Role::Child`] and [`Agent::children`].
     pub(crate) fleet: Arc<Fleet>,
-    /// What this avatar has measured and told about its context.
     readings: Readings,
-    /// When the disk ceiling was last walked; `None` before the first walk.
-    disk_checked: Option<Instant>,
 }
 
-/// What an avatar has measured and told about one context — the token
-/// measure the gauges weigh, the ladders they have climbed, the nudges owed —
-/// reborn whole with the context on `/clear`, since a rebuilt context has been
-/// told nothing.
+/// What an avatar has measured and told about one context: reborn whole on
+/// `/clear`, since a rebuilt context has been told nothing.
 struct Readings {
-    /// The provider's last input-token count and where in the log it landed:
-    /// the numerator for the eviction trigger and the pressure gauge, `None`
-    /// until a completion has reported one.
     measure: Option<gauge::Measure>,
     gauges: gauge::Gauges,
     nudges: nudge::Nudges,
@@ -371,18 +275,8 @@ impl Agent {
         self.provider.current()
     }
 
-    /// The whole run's directory — the one a session's `sessions/<id>/` hangs
-    /// under, and so the one that holds everything a failed start left behind:
-    /// the engine's captured output, the readable log, the lock.  It is what a
-    /// failure invites a reader into, because a start that never reached a
-    /// first turn has nothing in its session directory worth opening.
-    ///
-    /// Derived rather than stored: the layout is `<run>/sessions/<id>`, fixed
-    /// by [`App::log_run_dir`](crate::app::App::log_run_dir) and by
-    /// [`AgentLog`](crate::record::AgentLog) between them, and a second
-    /// copy of the path would be a second thing to keep true.  `None` only
-    /// for a log rooted somewhere shallower than that shape, which is the
-    /// test fixtures' business and not a run's.
+    /// The run's directory, `<run>/sessions/<id>` read backwards: where the
+    /// engine's captured output and the lock live.
     pub(crate) fn run_dir(&self) -> Option<&Path> {
         self.log_dir.parent()?.parent()
     }
@@ -594,15 +488,8 @@ impl Agent {
 }
 
 impl Avatar {
-    /// This agent's wire identity — the public half's `id`, reachable without
-    /// the `agent` field's crate-only visibility.
     pub fn id(&self) -> AgentId {
         self.agent.id
-    }
-
-    /// The fleet this avatar's agent is enrolled in, for a frontend that resolves tabs by name.
-    pub fn fleet(&self) -> Arc<Fleet> {
-        self.fleet.clone()
     }
 
     /// Deliver `outcome` to the parent, then retire: dropping the avatar is the
@@ -616,30 +503,18 @@ impl Avatar {
         drop(self);
     }
 
-    /// Where this agent's own session log is written — `record.jsonl` and its
-    /// siblings sit directly inside.
-    pub fn log_dir(&self) -> PathBuf {
-        self.agent.log_dir.clone()
+    /// Where `record.jsonl` and its siblings are written.
+    pub fn log_dir(&self) -> &Path {
+        &self.agent.log_dir
     }
 
-    /// The whole run's directory — the parent of the `sessions/` this agent's
-    /// own log lives under, and where a front-end puts anything that belongs
-    /// to the run rather than to one session: the engine's captured output,
-    /// the lock.  See [`Agent::run_dir`] on why it is derived and when it is
-    /// `None`.
-    pub fn run_dir(&self) -> Option<PathBuf> {
-        self.agent.run_dir().map(Path::to_path_buf)
+    /// See [`Agent::run_dir`].
+    pub fn run_dir(&self) -> Option<&Path> {
+        self.agent.run_dir()
     }
 
-    /// Why no further frame will cross this agent's seat, if that has already
-    /// happened.
-    ///
-    /// A front-end asks after an exchange that failed, because a severed
-    /// engine is the one failure whose explanation is not in this process at
-    /// all — it is wherever the engine was — and the front-end is the only
-    /// party that knows how to go and fetch it while the corpse is still
-    /// warm.  synod reaches its guest's console this way; an exchange that
-    /// merely went badly answers `None` and nothing is fetched.
+    /// Why the engine is gone, if it is: for a front-end to fetch the
+    /// engine's own account from wherever it ran.
     pub fn severance(&self) -> Option<ral_core::carrier::Severed> {
         self.seat.severed()
     }
@@ -659,7 +534,7 @@ impl Avatar {
     /// Every deliberation must hand the session back at a ready boundary.
     ///
     /// # Panics
-    /// Panics if the log cell is contended — see [`LogCell::borrow`].
+    /// Panics if the log cell is contended — see [`SharedCell::borrow`].
     pub fn is_ready(&self) -> bool {
         self.log.borrow().context().is_ready()
     }
@@ -667,7 +542,7 @@ impl Avatar {
     /// The model-view messages the next request would carry.
     ///
     /// # Panics
-    /// Panics if the log cell is contended — see [`LogCell::borrow`].
+    /// Panics if the log cell is contended — see [`SharedCell::borrow`].
     pub fn rendered_messages(&self) -> Vec<genai::chat::ChatMessage> {
         self.log.borrow().context().rendered()
     }

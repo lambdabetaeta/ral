@@ -1,7 +1,7 @@
 ---
 generated_at_commit: dad6a1b3
 generated_at_date: 2026-10-17
-covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/builtins.rs, exarch/data/agent.ral]
+covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/surface.rs, exarch/src/shell_eval/builtins.rs, exarch/data/agent.ral]
 ---
 
 # Map: exarch / shell eval
@@ -81,8 +81,8 @@ Surface delivery and enquiry answering are not `Run` fields: `dispatch_to_report
 takes one `host: Arc<dyn Host>` —
 [[map/core/engine-protocol|engine-protocol]]'s single object for a run's whole
 host-facing surface. Every real caller builds `agent::desk::RunHost`, pairing
-the per-call `ExarchDesk` with a `SurfaceApplier`
-([[map/exarch/builtins|builtins]]); a bare `SurfaceApplier` alone is the mute
+the per-call `ExarchDesk` with a `SurfaceApplier` (`shell_eval/surface.rs`,
+[[map/exarch/builtins|builtins]]); a bare `SurfaceApplier` alone is the mute
 host the harness runs under, whose `enquire` answers the honest
 `EnquiryError::no_desk()` rather than reaching a handler.
 
@@ -206,12 +206,15 @@ observation on the surface, so a trail would only retain, until the run ends,
 records nothing reads. "This command completed, that one was cut" is the
 engine diagnostic's job.
 
-**Surface decoding.** `decode_surface` is the single decoder both delivery
+**Surface decoding.** `shell_eval/surface.rs` is everything a surfaced value
+becomes in the record. `decode_surface` is the single decoder both delivery
 regimes share: the live path — `dispatch_to_report`'s drain loop calling
-`host.surface(val)` for every `Event::Surface`, which `SurfaceApplier::live`
-decodes — and the deferred sink (`deferred_sink`, installed on the transport
-before each dispatch) mints identical events when a worker's batch
-flushes, both calling it directly, with no guard layered over it. The
+`host.surface(val)` for every `Event::Surface`, which `SurfaceApplier`
+decodes and records — and the deferred sink (`deferred_sink`, installed on
+the transport before each dispatch), whose batch is posted to the inbox when
+a worker flushes and recorded by `surface::replay` as the item arrives; both
+go through one private `decode_loudly` and one `surface::record`, with no
+guard layered over them. The
 codomain is `Surface`, the shell's own closed vocabulary, wrapped in
 `Decoded` beside `Landed` and `Unknown`. The decoder tries observation, then
 notice, card, and done — the shapes are disjoint, so the order carries no
@@ -219,7 +222,7 @@ meaning — and has no pin arm. It carries only
 the structured value each channel names —
 no `Card` mark tree, since that is built by whoever renders — a printer's fold
 over the recorded `Display` commit ([[map/exarch/frontend|frontend]]) — and
-never by the decoder or by the seam that records it (`absorb_surface`):
+never by the decoder or by the seam that records it (`surface::record`):
 
 - the register is not decoded here at all: `exarch-pins` reaches it through
   the desk, which builds `Surface::Pin { key, card }` / `Surface::Unpin
@@ -241,9 +244,9 @@ never by the decoder or by the seam that records it (`absorb_surface`):
   / `render_card` decode-and-bind path live in [[map/exarch/cards|cards]];
 - the `` `done `` completion event a worker flushes at the end of its
   batch decodes to `Surface::Done`;
-- a value that is none of these is `Decoded::Unknown`: its caller records a
-  `Forensic::SystemNote` (`unknown_surface_note`) naming the shape it dropped,
-  the extension law's loud unknown class.
+- a value that is none of these is `Decoded::Unknown`: `decode_loudly` records
+  a `Forensic::SystemNote` naming the shape it dropped, the extension law's
+  loud unknown class.
 
 The producer is a direct `exarch-surface` call at each kit site, with no cross-language
 sentinel constant. Same-thread children inherit the sink; workers do

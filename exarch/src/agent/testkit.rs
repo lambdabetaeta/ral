@@ -436,3 +436,19 @@ static WORKER_REGISTRY_TEST_BUILTINS_ARR: [BuiltinEntry; 2] = [
 ];
 pub(crate) static WORKER_REGISTRY_TEST_BUILTINS: &[BuiltinEntry] =
     &WORKER_REGISTRY_TEST_BUILTINS_ARR;
+
+/// Poll `inbox` for the next exchange-boundary item — a spawned child's
+/// settled [`crate::bus::AgentResult`] lands here.
+pub(crate) fn wait_for_settle(inbox: &crate::bus::Inbox) -> crate::bus::Next {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if let Some(item) = inbox.next_item() {
+            return item;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "child did not settle within the timeout"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}

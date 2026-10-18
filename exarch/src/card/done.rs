@@ -22,7 +22,7 @@ pub enum DoneOutcome {
 }
 
 /// Decode a `` `done `` value into the worker's `cmd` and how it settled,
-/// `None` for anything else — and since `decode_surface` in `shell_eval.rs`
+/// `None` for anything else — and since `shell_eval::surface::decode_surface`
 /// tries this branch last, `None` drops the value rather than passing it on.
 pub(crate) fn value_to_done(v: &FOValue) -> Option<(u64, String, DoneOutcome)> {
     let DoneEvent { id, cmd, outcome } = DoneEvent::from_surface(v)?;

@@ -12,7 +12,7 @@ use ral_core::sync::LockExt;
 use ral_core::types::Error;
 use std::sync::Arc;
 
-use super::{DeskAct, ExarchDesk};
+use super::{DeskAct, ExarchDesk, Fork};
 
 impl ExarchDesk {
     /// The spawn spine behind `` `start ``: take up the fork, fork its log off
@@ -66,8 +66,7 @@ impl ExarchDesk {
             name.clone(),
             seat,
             provider,
-            true,
-            spec.memory == Memory::Mnemon,
+            Fork::Returning(spec.memory),
         )?;
         self.spawn_child(child, name, spec.prompt)
     }
@@ -156,38 +155,32 @@ impl ExarchDesk {
             transport,
             ral_core::protocol::Attach::child(engine.clone(), seal),
         )
-        .map_err(|lost| {
-            crate::agent::seat::EngineLost::starting(&lost, s.agent.run_dir()).to_string()
-        })
+        .map_err(|lost| crate::agent::EngineLost::starting(&lost, s.agent.run_dir()).to_string())
     }
 
     /// A child of this call's agent, seated on `seat`: its fuel one less, and
     /// its log forked off the parent's. A returning child reports to its
-    /// parent; one that does not roots its own tree and converses.
+    /// parent; a conversing one roots its own tree.
     fn child(
         &self,
         verb: &str,
         name: String,
         seat: Seat,
         provider: Arc<Provider>,
-        returns: bool,
-        inherit_context: bool,
+        fork: Fork,
     ) -> Result<Avatar, Error> {
         let s = &self.services;
         let launch = &s.fleet.launch;
         let fuel = s.agent.fuel.saturating_sub(1);
-        let role = if returns {
-            Role::child(&s.agent)
-        } else {
-            Role::Converses
+        let (role, inherits) = match fork {
+            Fork::Returning(memory) => (Role::child(&s.agent), memory == Memory::Mnemon),
+            Fork::Conversing => (Role::Converses, true),
         };
         // Against the *child's* grants, never this agent's, so the opening
         // bookend records the child's real system length.  Its grant layer
         // was resolved in its own engine, so only that engine can name it.
         let session = seat.read(|t| t.grants()).map_err(|lost| {
-            Error::new(
-                crate::agent::seat::EngineLost::starting(&lost, s.agent.run_dir()).to_string(),
-            )
+            Error::new(crate::agent::EngineLost::starting(&lost, s.agent.run_dir()).to_string())
         })?;
         let system_prompt = launch.index.apply(
             &crate::prompt::with_grant(&launch.system, &session, &s.agent.caps),
@@ -210,7 +203,7 @@ impl ExarchDesk {
                     &account,
                 )
                 .map_err(|e| Error::new(format!("could not fork child session log: {e}")))?;
-            let inherited = inherit_context.then(|| parent_log.inherited_context());
+            let inherited = inherits.then(|| parent_log.inherited_context());
             drop(parent_log);
             if let Some(inherited) = inherited {
                 log.import_context(inherited).map_err(Error::new)?;
@@ -278,8 +271,7 @@ impl ExarchDesk {
             order.name.clone(),
             seat,
             s.agent.current_provider(),
-            order.returns,
-            !order.returns,
+            order.fork,
         )?;
         *order.child.lock_ignore_poison() = Some(child);
         Ok(FOValue::Unit)
@@ -299,45 +291,29 @@ impl ExarchDesk {
     /// violation raises.
     pub(super) fn agent_cancel(&self, name: &str) -> Result<FOValue, Error> {
         let s = &self.services;
-        // The row is derived after the call: one claiming "cancelled" ahead of
-        // it would assert an effect the world never saw. `cancel` takes no
-        // argument, so its payload column carries the outcome instead.
-        let cancelled = match s.fleet.resolve(name) {
-            None => Ok(false),
+        // `cancel` takes no argument, so its payload column carries the
+        // outcome, derived after the call: a row claiming "cancelled" ahead of
+        // it would assert an effect the world never saw.
+        let verdict = match s.fleet.resolve(name) {
+            None => Ok(Said::new(
+                "no live agent by that name",
+                format!("no live agent named '{name}'"),
+            )),
             Some(found) => match s.agent.descendant(&found) {
                 Some(target) => {
                     target.cancel_tree(ral_core::process::CancelCause::Cancelled);
-                    Ok(true)
+                    Ok(Said::new("", format!("cancelling agent '{name}'")))
                 }
-                None => Err(()),
+                None => Err(Said::new(
+                    "refused: not a descendant",
+                    format!(
+                        "agent '{name}' is not an agent you started; {} may only reach a descendant of yours",
+                        ral_core::text::code("exarch-agents `cancel")
+                    ),
+                )),
             },
         };
-        let (payload, content, refused) = match cancelled {
-            Ok(true) => (String::new(), format!("cancelling agent '{name}'"), false),
-            Ok(false) => (
-                "no live agent by that name".to_string(),
-                format!("no live agent named '{name}'"),
-                false,
-            ),
-            Err(()) => (
-                "refused: not a descendant".to_string(),
-                format!(
-                    "agent '{name}' is not an agent you started; {} may only reach a descendant of yours",
-                    ral_core::text::code("exarch-agents `cancel")
-                ),
-                true,
-            ),
-        };
-        s.commit_act(DeskAct::Cancel, Some(name), payload, refused);
-        s.record_forensic(crate::record::Forensic::HarnessResult {
-            text: content.clone(),
-        });
-        // The raise is the model's only copy of a scope violation.
-        if refused {
-            Err(Error::new(content))
-        } else {
-            Ok(self.summary())
-        }
+        self.conclude(DeskAct::Cancel, name, verdict)
     }
 
     /// `` `message `` — resolve any live agent by name and send it a note.
@@ -348,37 +324,45 @@ impl ExarchDesk {
         // Unlike `cancel`, an unresolved name refuses rather than no-ops:
         // `message` promises delivery and there is nothing to deliver to. A
         // target settling between the name resolving and the send lands in the
-        // same arm, one step later. The row goes up after the send, since a
-        // delivery's payload is its text but a refusal's is why.
-        let sent = text.clone();
-        let (payload, content, ok) = match s.fleet.resolve(&name) {
-            None => (
-                "refused: no live agent by that name".to_string(),
+        // same arm, one step later.
+        let verdict = match s.fleet.resolve(&name) {
+            None => Err(Said::new(
+                "refused: no live agent by that name",
                 format!("no live agent named '{name}'; did it finish already?"),
-                false,
-            ),
-            Some(to) if to.id == s.agent.id => (
-                "refused: that is you".to_string(),
+            )),
+            Some(to) if to.id == s.agent.id => Err(Said::new(
+                "refused: that is you",
                 format!(
                     "agent '{name}' is you; `` exarch-agents `message `` reaches another agent: to wake yourself, arm a `exarch-schedules` fire"
                 ),
-                false,
-            ),
+            )),
             Some(to) => {
+                let said = Said::new(text.clone(), format!("sent message to agent '{name}'"));
                 s.agent.message(&to, text);
-                (sent, format!("sent message to agent '{name}'"), true)
+                Ok(said)
             }
         };
-        s.commit_act(DeskAct::Message, Some(&name), payload, !ok);
-        s.record_forensic(crate::record::Forensic::HarnessResult {
-            text: content.clone(),
-        });
-        // A delivery answers the roster like every other tag; a refusal raises,
-        // and the raise is the model's only copy of it.
-        if ok {
-            Ok(self.summary())
+        self.conclude(DeskAct::Message, &name, verdict)
+    }
+
+    /// Commit `verdict`, `Err` being a refusal, and answer: the summary for an
+    /// act that stands, a raise for a refusal, since the raise is the model's
+    /// only copy of it.
+    fn conclude(
+        &self,
+        act: DeskAct,
+        subject: &str,
+        verdict: Result<Said, Said>,
+    ) -> Result<FOValue, Error> {
+        let s = &self.services;
+        let refused = verdict.is_err();
+        let (Ok(Said { payload, text }) | Err(Said { payload, text })) = verdict;
+        s.commit_act(act, Some(subject), payload, refused);
+        s.record_forensic(crate::record::Forensic::HarnessResult { text: text.clone() });
+        if refused {
+            Err(Error::new(text))
         } else {
-            Err(Error::new(content))
+            Ok(self.summary())
         }
     }
 
@@ -405,7 +389,7 @@ impl ExarchDesk {
         };
         // No subject: a returning agent has exactly one recipient.
         s.commit_act(DeskAct::Reply, None, payload, false);
-        s.reply.set(value);
+        *s.reply.borrow_mut() = Some(value);
         Ok(self.summary())
     }
 
@@ -449,6 +433,22 @@ impl ExarchDesk {
                 s.record_forensic(crate::record::Forensic::HarnessResult { text: text.clone() });
                 Err(Error::new(text))
             }
+        }
+    }
+}
+
+/// An act's two traces: the payload its rail row carries, and the sentence
+/// its harness note says.
+struct Said {
+    payload: String,
+    text: String,
+}
+
+impl Said {
+    fn new(payload: impl Into<String>, text: String) -> Self {
+        Self {
+            payload: payload.into(),
+            text,
         }
     }
 }

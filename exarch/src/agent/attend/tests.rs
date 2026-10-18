@@ -3,65 +3,9 @@ use crate::agent::TestTrunk;
 use crate::agent::testkit::*;
 use crate::provider::Refusal;
 use crate::provider::scripted::{Reply, Script};
-use crate::record::AgentId;
-use crate::record::{Display, Forensic, Record};
+use crate::record::{Forensic, Record};
 use ral_core::first_order::FOValue;
-
-/// Every item `announce` draws records its display commit: a prompt
-/// commits `Display::Prompt`, and a subagent's breadcrumb commits
-/// `Display::SubagentDone`.
-#[test]
-fn announce_records_display_facts() {
-    use crate::bus::AgentResult;
-
-    let (tx, rx) = crate::bus::channel();
-    let recorder = crate::record::Emitter::none();
-    recorder.attach(Box::new(crate::bus::FleetSink {
-        id: AgentId::new(0),
-        tx: tx.downgrade(),
-        meter: crate::bus::UsageMeter::default(),
-    }));
-
-    announce(&Item::Human("hello".into()), Some(1), &recorder);
-    announce(
-        &Item::Agent(AgentResult {
-            id: AgentId::new(7),
-            name: "helper".into(),
-            outcome: AgentOutcome::Failed("boom".into()),
-            elapsed: std::time::Duration::from_millis(1500),
-        }),
-        None,
-        &recorder,
-    );
-
-    let mut facts: Vec<&'static str> = Vec::new();
-    for record in crate::bus::drain_records(&rx) {
-        match record {
-            Record::Display(Display::Prompt { text, turn }) => {
-                assert_eq!((text.as_str(), turn), ("hello", Some(1)));
-                facts.push("prompt");
-            }
-            Record::Display(Display::SubagentDone {
-                name,
-                outcome,
-                elapsed_ms,
-                ..
-            }) => {
-                assert_eq!(name, "helper");
-                assert_eq!(
-                    outcome,
-                    crate::record::Settlement::Failed {
-                        reason: "boom".into()
-                    }
-                );
-                assert_eq!(elapsed_ms, 1500);
-                facts.push("subagent");
-            }
-            _ => {}
-        }
-    }
-    assert_eq!(facts, ["prompt", "subagent"], "both commits land");
-}
+use std::time::Duration;
 
 /// The park verdict reads engagement off the agent's own exchange clock,
 /// never off the TUI's focus cursor.
@@ -392,44 +336,6 @@ fn chat_trunk_never_nudges() {
     );
 }
 
-/// Unconfigured, the check returns before any bookkeeping: no walk, no
-/// warning, no cost.
-#[test]
-fn disk_warning_unconfigured_never_walks_or_warns() {
-    let mut session = Avatar::for_test("system").unwrap();
-    assert!(session.fleet.launch.disk_warn_bytes.is_none());
-
-    assert!(
-        session
-            .disk_warning()
-            .expect("an identity seat never severs")
-            .is_none(),
-        "unconfigured: never warns, ever"
-    );
-    assert!(
-        session.disk_checked.is_none(),
-        "the early return never stamps a walk"
-    );
-}
-
-/// The walk is real: 64 KiB sits above a fresh session's own footprint,
-/// and the file alone crosses it.
-#[test]
-fn disk_warning_walks_the_log_dir() {
-    let mut session = Avatar::for_test_with(TestTrunk {
-        disk_warn_bytes: Some(64 * 1024),
-        ..TestTrunk::new("system")
-    })
-    .expect("a trunk under a disk-warn ceiling");
-    std::fs::write(session.log_dir().join("big.txt"), vec![0u8; 1024 * 1024]).unwrap();
-    assert!(
-        session
-            .disk_warning()
-            .expect("an identity seat never severs")
-            .is_some()
-    );
-}
-
 /// A trunk refused twice, until a reset `resets_in` after each refusal.
 fn refused_twice(resume_on_reset: bool, resets_in: Duration) -> Avatar {
     let mut session = Avatar::for_test_with(TestTrunk {
@@ -479,3 +385,5 @@ fn only_a_resuming_trunk_arms_a_resume_and_only_past_the_in_place_wait() {
     assert!(!armed(false, Duration::from_hours(5)));
     assert!(!armed(true, Duration::from_secs(5)));
 }
+
+mod lifecycle;

@@ -38,16 +38,10 @@ fn drain_display(rx: &BusReceiver) -> Vec<Display> {
 fn a_reasoning_run_records_ahead_of_all_the_prose_that_follows_it() {
     let (emit, rx) = emitter();
     let mut stream = Stream::default();
-    stream
-        .push(&emit, Delta::Think("weighing the cases\n"))
-        .unwrap();
-    stream
-        .push(&emit, Delta::Say("First paragraph.\n\n"))
-        .unwrap();
-    stream
-        .push(&emit, Delta::Say("Second paragraph.\n\ntail"))
-        .unwrap();
-    stream.seal(&emit).unwrap();
+    stream.push(&emit, Delta::Think("weighing the cases\n"));
+    stream.push(&emit, Delta::Say("First paragraph.\n\n"));
+    stream.push(&emit, Delta::Say("Second paragraph.\n\ntail"));
+    stream.close(&emit).unwrap();
 
     let commits = drain_display(&rx);
     match commits.as_slice() {
@@ -69,19 +63,17 @@ fn a_retry_seals_the_failed_attempts_lanes() {
     let (emit, rx) = emitter();
     let mut stream = Stream::default();
     let cause = ProviderError::local_transient("model response body read timed out");
-    stream.push(&emit, Delta::Think("first try")).unwrap();
-    stream
-        .push(
-            &emit,
-            Delta::Retry {
-                cause: &cause,
-                lost: None,
-            },
-        )
-        .unwrap();
-    stream.push(&emit, Delta::Think("second try")).unwrap();
-    stream.push(&emit, Delta::Say("answer")).unwrap();
-    stream.seal(&emit).unwrap();
+    stream.push(&emit, Delta::Think("first try"));
+    stream.push(
+        &emit,
+        Delta::Retry {
+            cause: &cause,
+            lost: None,
+        },
+    );
+    stream.push(&emit, Delta::Think("second try"));
+    stream.push(&emit, Delta::Say("answer"));
+    stream.close(&emit).unwrap();
 
     match drain_display(&rx).as_slice() {
         [
@@ -102,10 +94,8 @@ fn a_retry_seals_the_failed_attempts_lanes() {
 fn a_wordless_step_seals_its_reasoning_at_the_boundary() {
     let (emit, rx) = emitter();
     let mut stream = Stream::default();
-    stream
-        .push(&emit, Delta::Think("straight to the shell\n"))
-        .unwrap();
-    stream.seal(&emit).unwrap();
+    stream.push(&emit, Delta::Think("straight to the shell\n"));
+    stream.close(&emit).unwrap();
 
     match drain_display(&rx).as_slice() {
         [Display::Thinking { text }] => assert_eq!(text, "straight to the shell\n"),
@@ -122,9 +112,9 @@ fn the_records_reassemble_the_whole_stream() {
     let mut stream = Stream::default();
     let deltas = ["first\n\n", "\n\n", "second\n\n", "tail"];
     for delta in deltas {
-        stream.push(&emit, Delta::Say(delta)).unwrap();
+        stream.push(&emit, Delta::Say(delta));
     }
-    stream.seal(&emit).unwrap();
+    stream.close(&emit).unwrap();
 
     let recorded: String = drain_display(&rx)
         .into_iter()
@@ -147,14 +137,14 @@ fn the_records_reassemble_the_whole_stream() {
 fn a_line_records_where_it_completes_and_the_open_line_waits() {
     let (emit, rx) = emitter();
     let mut stream = Stream::default();
-    stream.push(&emit, Delta::Say("```ral\nlet x = 1")).unwrap();
+    stream.push(&emit, Delta::Say("```ral\nlet x = 1"));
     match drain_display(&rx).as_slice() {
         [Display::Answer { text }] => assert_eq!(text, "```ral\n"),
         other => panic!("expected the completed line alone, got {other:?}"),
     }
 
-    stream.push(&emit, Delta::Say("\n```\n")).unwrap();
-    stream.seal(&emit).unwrap();
+    stream.push(&emit, Delta::Say("\n```\n"));
+    stream.close(&emit).unwrap();
     match drain_display(&rx).as_slice() {
         [Display::Answer { text }] => assert_eq!(text, "let x = 1\n```\n"),
         other => panic!("expected both lines in one record, got {other:?}"),
@@ -167,13 +157,13 @@ fn a_line_records_where_it_completes_and_the_open_line_waits() {
 fn whitespace_alone_waits_for_the_words_after_it() {
     let (emit, rx) = emitter();
     let mut stream = Stream::default();
-    stream.push(&emit, Delta::Say("\n\n")).unwrap();
+    stream.push(&emit, Delta::Say("\n\n"));
     assert!(
         drain_display(&rx).is_empty(),
         "blank lines alone are not worth a block"
     );
 
-    stream.push(&emit, Delta::Say("a word\n")).unwrap();
+    stream.push(&emit, Delta::Say("a word\n"));
     match drain_display(&rx).as_slice() {
         [Display::Answer { text }] => assert_eq!(text, "\n\na word\n"),
         other => panic!("expected the blank lines to ride along, got {other:?}"),

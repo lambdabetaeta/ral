@@ -311,7 +311,7 @@ impl Post {
 }
 
 /// The notice [`Item::Surface`] wakes the model with.  The cards already reached
-/// the rail through `agent::attend::announce`, so this only names the outcome.
+/// the rail through `Avatar::arrive`, so this only names the outcome.
 fn surface_notice(values: &[FOValue]) -> String {
     let settled = values
         .iter()
@@ -350,11 +350,11 @@ pub(crate) enum Item {
     /// opens no new exchange.
     Nudge { prompt: u64, text: String },
     /// A `spawn` worker's deferred `surface` batch.  Staleness is
-    /// already settled at the pop; `agent::attend::announce` decodes `values`
+    /// already settled at the pop; `Avatar::arrive` decodes `values`
     /// into the *root* scrollback exactly as a live tool run would, and
     /// [`Self::text`] wakes the model.
     Surface {
-        /// The stamped session id.  `Avatar::heard`'s debug assertion checks
+        /// The stamped session id.  `Avatar::arrive`'s debug assertion checks
         /// it matches the draining session's, so a misrouted batch trips
         /// there rather than rendering silently into the wrong scrollback.
         id: AgentId,

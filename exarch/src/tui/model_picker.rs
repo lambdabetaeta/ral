@@ -219,13 +219,12 @@ fn apply_model_switch(tui: &mut Tui, ctx: &CommandCtx<'_>, pick: &Pick) {
         tui.app
             .push_error(focused, &format!("could not persist selection: {e}"));
     }
-    if let Err(error) = ctx.recorder.emit(crate::record::Forensic::ModelChanged {
-        model: pick.model.clone(),
-        context_window,
-        label: identity::label(&pick.account, &available),
-        service: Some(pick.account.service.name.as_str().to_string()),
-        account: Some(pick.account.id.as_str().to_string()),
-    }) {
-        ctx.recorder.report_fault(&error);
-    }
+    ctx.recorder
+        .emit_or_report(crate::record::Forensic::ModelChanged {
+            model: pick.model.clone(),
+            context_window,
+            label: identity::label(&pick.account, &available),
+            service: Some(pick.account.service.name.as_str().to_string()),
+            account: Some(pick.account.id.as_str().to_string()),
+        });
 }

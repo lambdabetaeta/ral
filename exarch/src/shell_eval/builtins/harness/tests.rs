@@ -702,7 +702,7 @@ fn double_reply_in_one_exchange_is_last_wins() {
     let provider_handle = session.agent.current_provider();
     let outcome = session.deliberate(&provider_handle, Some("go".into()), None, &emit);
     match outcome {
-        Ok(crate::agent::deliberate::Outcome::Replied) => {
+        Ok(crate::agent::outcome::Outcome::Replied) => {
             let v = session.agent.reply().expect("the reply is deposited");
             assert_eq!(
                 v,

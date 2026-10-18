@@ -14,7 +14,7 @@
 use std::io;
 
 use crate::provider::Delta;
-use crate::record::{Display, Emitter};
+use crate::record::{Display, Emitter, Transient};
 
 /// Which lane's block a chopper's records grow.
 #[derive(Clone, Copy)]
@@ -97,11 +97,12 @@ fn unrecorded(what: &str, error: &io::Error) -> io::Error {
 /// A run no prose follows flushes at the boundary.
 ///
 /// A streaming callback has no error channel of its own, so the first failed
-/// record is stashed and answered at [`Self::seal`]; nothing records after
+/// record is stashed and answered at [`Self::close`]; nothing records after
 /// it, a half-ordered scrollback being worse than a short one.
 pub(crate) struct Stream {
     prose: Chopper,
     trace: Chopper,
+    failed: Option<io::Error>,
 }
 
 impl Default for Stream {
@@ -117,6 +118,7 @@ impl Default for Stream {
                 open: String::new(),
                 committed: 0,
             },
+            failed: None,
         }
     }
 }
@@ -125,28 +127,41 @@ impl Stream {
     /// Absorb one delta into its lane.  Prose closes the reasoning lane
     /// first, which is where a run ends.  A retry ends the failed attempt's
     /// lanes where they stand; the new attempt opens fresh ones.
-    ///
-    /// # Errors
-    /// Propagates a failed record of either lane.
-    pub(crate) fn push(&mut self, emitter: &Emitter, delta: Delta<'_>) -> io::Result<()> {
-        match delta {
+    pub(crate) fn push(&mut self, emitter: &Emitter, delta: Delta<'_>) {
+        if self.failed.is_some() {
+            return;
+        }
+        let pushed = match delta {
             Delta::Think(run) => self.trace.push(emitter, run),
             Delta::Say(text) => self
                 .trace
                 .flush(emitter)
                 .and_then(|()| self.prose.push(emitter, text)),
             Delta::Retry { .. } => self.seal(emitter).map(|()| *self = Self::default()),
-        }
+        };
+        self.failed = pushed.err();
     }
 
-    /// Seal the step: the reasoning tail no prose followed, then the prose
-    /// tail — the same two lanes in the same order a prose delta takes them,
-    /// at whichever boundary ends the stream, completed or stalled or
-    /// cancelled.
+    /// Close the step at whichever boundary ends the stream — completed,
+    /// stalled or cancelled: its tails, then the boundary that lets a printer
+    /// retire its live edge.  The boundary follows whether or not the tails
+    /// held: a live edge outliving its turn is the one failure a printer
+    /// cannot recover from on its own.
     ///
     /// # Errors
-    /// Propagates the failed record of either.
-    pub(crate) fn seal(&mut self, emitter: &Emitter) -> io::Result<()> {
+    /// The first record that failed anywhere in the step.
+    pub(crate) fn close(mut self, emitter: &Emitter) -> io::Result<()> {
+        let sealed = match self.failed.take() {
+            Some(error) => Err(error),
+            None => self.seal(emitter),
+        };
+        emitter.transient(Transient::Boundary);
+        sealed
+    }
+
+    /// The reasoning tail no prose followed, then the prose tail — the same
+    /// two lanes in the same order a prose delta takes them.
+    fn seal(&mut self, emitter: &Emitter) -> io::Result<()> {
         self.trace
             .flush(emitter)
             .and_then(|()| self.prose.flush(emitter))

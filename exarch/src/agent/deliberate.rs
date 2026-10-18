@@ -1,87 +1,42 @@
 //! One prompt run to quiescence against the provider.
 //!
-//! [`Avatar::deliberate`] drives the provider until it stops calling tools.
-//! Auto-eviction is weighed at every turn boundary, against the thresholds in
-//! [`gauge`]; the standing-condition warnings ride the
-//! steering channel at a tool boundary.  [`Avatar::attend`] is the loop around
-//! this, one call per inbox item.
+//! [`Avatar::deliberate`] drives one round-trip at a time until the model
+//! stops calling tools.  Auto-eviction is weighed at every turn boundary,
+//! against the thresholds in [`gauge`](super::gauge); the standing-condition
+//! warnings ride the steering channel at a tool boundary.
+//! [`Avatar::attend`] is the loop around this, one call per inbox item.
 
 use crate::agent::Avatar;
-use crate::agent::attend::announce;
-use crate::agent::gauge::{self, EVICT_THRESHOLD, Measure, suffix_keep_budget};
+use crate::agent::gauge::Warning;
+use crate::agent::outcome::{Fault, Outcome};
 use crate::agent::tools;
 use crate::bus::{Emitter, Next};
 use crate::provider::{Delta, Provider, ProviderError, StepOut, StopReason, ToolCall};
-use crate::record::Transient;
-use crate::record::{AgentState, Forensic};
-use crate::record::{EditAuthority, QuiesceReason, ToolResult as SessionToolResult};
-use ral_core::carrier::Severed;
+use crate::record::ToolResult as SessionToolResult;
+use crate::record::commit::Stream;
+use crate::record::{AgentState, EditAuthority, Forensic, QuiesceReason, Transient};
 use ral_core::first_order::FOValue;
-use std::io;
+use ral_core::process::CancelCause;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
-/// Outcome of one [`Avatar::deliberate`].  [`Self::Empty`] and
-/// [`Self::Stopped`] become nudges, [`Self::Cancelled`] does not.
-#[derive(Debug)]
-pub enum Outcome {
-    /// The model spoke and called no tool.
-    Complete,
-    /// A returning agent called `reply`: the value is deposited on its agent
-    /// for its consumer to read.  Distinct from [`Self::Complete`] so the
-    /// nudge layer never re-nudges an agent that already answered.
-    Replied,
-    Empty,
-    Stopped {
-        reason: String,
-    },
-    Cancelled,
-}
-
-/// Why a deliberation ended short of an [`Outcome`].
-#[derive(Debug)]
-pub enum Fault {
-    /// The provider's own failure, which the attend loop records and may
-    /// nudge over.
-    Provider(ProviderError),
-    /// The engine is gone: no further tool call can dispatch, and the loop
-    /// around this one ends too.
-    Severed(Severed),
-    /// The session log refused or failed an append; the context is left as
-    /// it lay.
-    Log(String),
-}
-
-impl From<ProviderError> for Fault {
-    fn from(error: ProviderError) -> Self {
-        Self::Provider(error)
-    }
-}
-
-impl From<Severed> for Fault {
-    fn from(severed: Severed) -> Self {
-        Self::Severed(severed)
-    }
-}
-
-impl From<io::Error> for Fault {
-    fn from(error: io::Error) -> Self {
-        Self::Log(error.to_string())
-    }
+/// What one round-trip leaves the deliberation with.
+enum Turn {
+    Ends(Outcome),
+    /// Results are owed to these before the next round-trip.
+    Calls(Vec<ToolCall>),
+    /// An overflow an eviction relieved: the round-trip is taken again.
+    Retry,
 }
 
 impl Avatar {
-    /// Run one deliberation: optionally commit `prompt`, then drive the
-    /// provider round-trip loop to quiescence over `provider`, read once by
-    /// the caller so a `/model` swap lands on the next item rather than
-    /// mid-item.
+    /// Run one deliberation: optionally commit `prompt`, then drive
+    /// round-trips to quiescence over `provider`, read once by the caller so a
+    /// `/model` swap lands on the next item rather than mid-item.
     ///
     /// # Errors
     /// A provider round-trip failed, the engine was lost, or a session-log
     /// mutation failed.
-    ///
-    /// # Panics
-    /// Panics if a turn is truncated with no tool calls yet no cut-short cause
-    /// was recorded.
     pub fn deliberate(
         &mut self,
         provider: &Arc<Provider>,
@@ -90,273 +45,260 @@ impl Avatar {
         emit: &Emitter,
     ) -> Result<Outcome, Fault> {
         self.couple(emit);
-        // The commit producer's handle: answer paragraphs and reasoning runs
-        // are recorded as they are decided, worker-side.
-        let recorder = self.recorder();
-        let token = self.agent.token.clone();
-        // A reply staged by a batch a cancel or an error cut short must not
-        // outlive it; entry is the one point every route into a deliberation
-        // is guaranteed to cross.
-        self.reply.take();
+        // Entry is the one point every route into a deliberation crosses, so a
+        // reply staged by a batch a cancel or an error cut short dies here.
+        self.reply.borrow_mut().take();
         if let Some(p) = prompt {
             self.log
                 .borrow_mut()
                 .append_user(p, continues)
                 .map_err(Fault::Log)?;
         }
-        let mut recovering = false;
+        let mut retried = false;
         loop {
             // Every turn boundary is weighed, this one included: the turn a
-            // cut would take is never the one in hand, so there is no point in
-            // the loop where the work at issue could leave.
-            if self.eviction_due(provider) {
+            // cut would take is never the one in hand.
+            if self.must_evict(provider) {
                 self.shed();
             }
-            // The turn's live row derives from the published `Display::Turn`
-            // record, which `record_turn_start` authors alongside the
-            // protocol one — so this is the one authoring site.
-            self.log.borrow_mut().record_turn_start(
-                provider.tuning().clone(),
-                provider.openrouter_route().map(str::to_owned),
-            )?;
-            let messages = self.log.borrow().render_messages().map_err(Fault::Log)?;
-            recorder.transient(Transient::State(AgentState::AwaitingModel));
-            // One producer per turn, sealed at whichever boundary ends the
-            // stream below.  A streaming callback has no error channel of its
-            // own, so the first failed commit is stashed and answered at that
-            // boundary; nothing commits after it, a half-ordered scrollback
-            // being worse than a short one.
-            let mut stream = crate::record::commit::Stream::default();
-            let mut unrecorded: Option<io::Error> = None;
-            let taken = {
-                let stream = &mut stream;
-                let unrecorded = &mut unrecorded;
-                provider.complete(
-                    crate::provider::Request {
-                        system: &self.agent.system,
-                        transcript: &messages,
-                        tools: self.fleet.launch.tools,
-                        search: self.agent.search,
-                    },
-                    &mut |delta: Delta<'_>| {
-                        match delta {
-                            Delta::Say(t) => recorder.transient(Transient::Token(t.to_string())),
-                            Delta::Think(r) => {
-                                recorder.transient(Transient::Thinking(r.to_string()));
-                            }
-                            Delta::Retry { .. } => {}
-                        }
-                        if unrecorded.is_none()
-                            && let Err(error) = stream.push(&recorder, delta)
-                        {
-                            *unrecorded = Some(error);
-                        }
-                        if let Delta::Retry { cause, lost } = delta {
-                            recorder.transient(Transient::Boundary);
-                            if let Some(usage) = lost
-                                && let Err(error) = recorder.emit(Forensic::UsageDelta { usage })
-                            {
-                                recorder.report_fault(&error);
-                            }
-                            if let Err(error) = recorder.emit(Forensic::Retried {
-                                error: cause.clone(),
-                            }) {
-                                recorder.report_fault(&error);
-                            }
-                        }
-                    },
-                    &token,
-                )
-            };
-            if token.is_cancelled() {
-                abandon_turn(&mut stream, unrecorded, &recorder);
-                return Ok(self.cancelled());
-            }
-            let StepOut {
-                mut assistant_message,
-                tool_calls,
-                usage,
-                stop_reason,
-                cut_short,
-            } = match taken {
-                Ok(s) => {
-                    recovering = false;
-                    s
-                }
-                Err(ProviderError::Cancelled(_)) => {
-                    abandon_turn(&mut stream, unrecorded, &recorder);
-                    return Ok(self.cancelled());
-                }
-                Err(error @ ProviderError::Overflow { .. }) => {
-                    abandon_turn(&mut stream, unrecorded, &recorder);
-                    if let (Some(w), ProviderError::Overflow { listed, .. }) =
-                        (provider.context_window(), &error)
-                        && *listed != Some(w)
-                        && let Err(e) =
-                            recorder.emit(Forensic::WindowNarrowed { context_window: w })
-                    {
-                        recorder.report_fault(&e);
+            match self.round_trip(provider, retried)? {
+                Turn::Ends(outcome) => return Ok(outcome),
+                Turn::Retry => retried = true,
+                Turn::Calls(calls) => {
+                    retried = false;
+                    if let ControlFlow::Break(outcome) = self.answer(calls, provider, emit)? {
+                        return Ok(outcome);
                     }
-                    if !recovering && self.shed() {
-                        recovering = true;
-                        self.note(format!(
-                            "[{}; evicted the older turns and retrying]",
-                            error.summary()
-                        ));
-                        continue;
-                    }
-                    return Err(error.into());
                 }
-                Err(e) => {
-                    abandon_turn(&mut stream, unrecorded, &recorder);
-                    return Err(e.into());
-                }
-            };
-            close_turn(&mut stream, unrecorded, &recorder)?;
-            // The committed message is the outcome's source of truth, not the
-            // streaming accumulator: a provider that returns final text with
-            // no `Say` deltas would otherwise read as an empty turn. Read
-            // before `admit_assistant` below can replace empty content with
-            // its stub.
-            let spoke = assistant_message
-                .content
-                .first_text()
-                .is_some_and(|text| !text.is_empty());
-            // The live numerator the next `evict` weighs against the window.
-            let measured_at = {
-                let mut log = self.log.borrow_mut();
-                log.record_usage(usage)?;
-                log.context().log_len()
-            };
-            if let Some(tokens) = usage.measured_input() {
-                self.readings.measure = Some(Measure {
-                    tokens,
-                    at: measured_at,
-                });
-            }
-            // Routine boundaries and `MaxTokens` (handled below) stay silent.
-            if let Some(reason) = &stop_reason {
-                match reason {
-                    StopReason::Completed(_)
-                    | StopReason::ToolCall(_)
-                    | StopReason::MaxTokens(_) => {}
-                    _ => recorder.transient(Transient::StopReason(reason.raw().to_string())),
-                }
-            }
-            admit_assistant(&mut assistant_message);
-            let tool_ids: Vec<String> = tool_calls.iter().map(|tc| tc.call_id.clone()).collect();
-            self.log
-                .borrow_mut()
-                .append_assistant(
-                    assistant_message,
-                    tool_ids,
-                    stop_reason.as_ref().map(|r| r.raw().to_string()),
-                )
-                .map_err(Fault::Log)?;
-            let truncated = cut_short.is_some();
-            // A cut-short turn with no tool calls is final; `Truncated` lets the
-            // nudge re-drive it.  With tool calls the session now sits in
-            // `AwaitingToolResults`, and returning would strand it there — the
-            // nudge's `append_user` would fail on pending results — so fall
-            // through and let the next round-trip resume with the results.
-            if truncated && tool_calls.is_empty() {
-                // The cut rides on whole, cause and all: the caller's own
-                // `record_provider_error` is the one record of it, and the
-                // renderers read the remedy — and, for a stall, the fact that
-                // the exchange survives it — off the cause itself.
-                let cause = cut_short.expect("truncated implies cut_short");
-                return Err(ProviderError::Truncated {
-                    cause: Box::new(cause),
-                }
-                .into());
-            }
-            if tool_calls.is_empty() {
-                return Ok(match &stop_reason {
-                    Some(r) if !matches!(r, StopReason::Completed(_) | StopReason::ToolCall(_)) => {
-                        Outcome::Stopped {
-                            reason: r.raw().to_string(),
-                        }
-                    }
-                    _ if spoke => Outcome::Complete,
-                    _ => Outcome::Empty,
-                });
-            }
-            if truncated {
-                self.note("[Truncated mid-tool-call; continuing]".into());
-            }
-            let results = self.run_batch(tool_calls, emit);
-            self.log
-                .borrow_mut()
-                .append_tool_results(results)
-                .map_err(Fault::Log)?;
-            self.readings.nudges.reset();
-            // A tool call in the batch just run may have found the engine
-            // gone; no further dispatch can run once it has.
-            if let Some(s) = self.seat.severed() {
-                return Err(s.into());
-            }
-            // A cancelled batch admits nothing: a read run or a steer recorded
-            // here would belong to the exchange being dropped.
-            if token.is_cancelled() {
-                return Ok(self.cancelled());
-            }
-            // The arrivals are taken in the order typed: a read runs against
-            // the context as it stands at its place in the queue, a delivery
-            // lands as a steering line of its own, `announce` drawing each
-            // arrival's chrome.  The warnings trail them.
-            for next in self.inbox.drain_mid_exchange() {
-                match next {
-                    Next::Read(read) => self.read(&read, emit),
-                    Next::Item(item) => {
-                        self.heard(&item);
-                        announce(&item, None, &recorder);
-                        self.log
-                            .borrow_mut()
-                            .append_steering(item.text())
-                            .map_err(Fault::Log)?;
-                    }
-                    Next::Rewrite(_) => unreachable!("the mid-exchange drain holds at a rewrite"),
-                }
-            }
-            let warnings = self.warnings(provider)?;
-            if !warnings.is_empty() {
-                self.log
-                    .borrow_mut()
-                    .append_steering(warnings.join("\n"))
-                    .map_err(Fault::Log)?;
-            }
-            // A `reply` in the fully drained batch ends the run here, not at
-            // another round-trip.
-            if let Some(payload) = self.reply.take() {
-                return Ok(self.replied(payload));
             }
         }
     }
 
-    /// The turns an eviction would take were it to run now, `None` when
-    /// nothing is old enough to shed.
-    /// [`crate::record::model::Context::plan_eviction`] never names the
-    /// newest turn, so this never answers with the work in hand either.
-    pub(crate) fn planned_eviction(&self) -> Option<Vec<u64>> {
-        let log = self.log.borrow();
-        let context = log.context();
-        let plan = context
-            .can_evict()
-            .then(|| context.plan_eviction(suffix_keep_budget(context.history_bytes())));
-        drop(log);
-        plan.flatten()
+    /// One request to the provider, streamed onto the record as it arrives.
+    /// `retried` is whether this round-trip already follows an overflow's
+    /// eviction, which is never taken twice running.
+    fn round_trip(&mut self, provider: &Provider, retried: bool) -> Result<Turn, Fault> {
+        // The turn's live row derives from the `Display::Turn` record this
+        // authors alongside the protocol one.
+        self.log.borrow_mut().record_turn_start(
+            provider.tuning().clone(),
+            provider.openrouter_route().map(str::to_owned),
+        )?;
+        let messages = self.log.borrow().render_messages().map_err(Fault::Log)?;
+        let recorder = self.recorder();
+        recorder.transient(Transient::State(AgentState::AwaitingModel));
+        let mut stream = Stream::default();
+        let token = &self.agent.token;
+        let taken = provider.complete(
+            crate::provider::Request {
+                system: &self.agent.system,
+                transcript: &messages,
+                tools: self.fleet.launch.tools,
+                search: self.agent.search,
+            },
+            &mut |delta: Delta<'_>| {
+                match delta {
+                    Delta::Say(t) => recorder.transient(Transient::Token(t.to_string())),
+                    Delta::Think(r) => recorder.transient(Transient::Thinking(r.to_string())),
+                    Delta::Retry { .. } => {}
+                }
+                stream.push(&recorder, delta);
+                if let Delta::Retry { cause, lost } = delta {
+                    recorder.transient(Transient::Boundary);
+                    if let Some(usage) = lost {
+                        recorder.emit_or_report(Forensic::UsageDelta { usage });
+                    }
+                    recorder.emit_or_report(Forensic::Retried {
+                        error: cause.clone(),
+                    });
+                }
+            },
+            token,
+        );
+        let cancelled = token.is_cancelled() || matches!(taken, Err(ProviderError::Cancelled(_)));
+        let closed = stream.close(&recorder);
+        match taken {
+            _ if cancelled => {
+                abandoned(&recorder, closed);
+                Ok(Turn::Ends(self.cancelled()))
+            }
+            Ok(step) => {
+                closed?;
+                self.settle_turn(step)
+            }
+            Err(error) => {
+                abandoned(&recorder, closed);
+                self.relieve(error, provider, retried)
+            }
+        }
     }
 
-    /// Auto-eviction tracks real context pressure: the tokens the model last
-    /// saw against its window, firing once they grow into the reserve. An
-    /// unknown window falls back to the byte heuristic.
-    fn eviction_due(&self, provider: &Provider) -> bool {
-        match provider.context_window() {
-            Some(window) => self
-                .measured_input()
-                .is_some_and(|tokens| gauge::eviction_due(tokens, window)),
-            None => self.log.borrow().context().history_bytes() >= EVICT_THRESHOLD,
+    /// A provider failure, unless it is an overflow an eviction relieves.
+    fn relieve(
+        &self,
+        error: ProviderError,
+        provider: &Provider,
+        retried: bool,
+    ) -> Result<Turn, Fault> {
+        let ProviderError::Overflow { listed, .. } = &error else {
+            return Err(error.into());
+        };
+        if let Some(window) = provider.context_window()
+            && *listed != Some(window)
+        {
+            self.recorder().emit_or_report(Forensic::WindowNarrowed {
+                context_window: window,
+            });
         }
+        if retried || !self.shed() {
+            return Err(error.into());
+        }
+        self.note(format!(
+            "[{}; evicted the older turns and retrying]",
+            error.summary()
+        ));
+        Ok(Turn::Retry)
+    }
+
+    /// Commit a completed round-trip, and read off what it leaves.
+    fn settle_turn(&mut self, step: StepOut) -> Result<Turn, Fault> {
+        let StepOut {
+            mut assistant_message,
+            tool_calls,
+            usage,
+            stop_reason,
+            cut_short,
+        } = step;
+        // The committed message, not the streaming accumulator, is the
+        // outcome's source of truth: a provider may return final text with no
+        // `Say` deltas.  Read before `admit_assistant` can stub empty content.
+        let spoke = assistant_message
+            .content
+            .first_text()
+            .is_some_and(|text| !text.is_empty());
+        self.measure(usage)?;
+        // Routine boundaries and `MaxTokens` (handled below) stay silent.
+        if let Some(reason) = &stop_reason
+            && !matches!(
+                reason,
+                StopReason::Completed(_) | StopReason::ToolCall(_) | StopReason::MaxTokens(_)
+            )
+        {
+            self.recorder()
+                .transient(Transient::StopReason(reason.raw().to_string()));
+        }
+        admit_assistant(&mut assistant_message);
+        let tool_ids = tool_calls.iter().map(|tc| tc.call_id.clone()).collect();
+        self.log
+            .borrow_mut()
+            .append_assistant(
+                assistant_message,
+                tool_ids,
+                stop_reason.as_ref().map(|r| r.raw().to_string()),
+            )
+            .map_err(Fault::Log)?;
+        match (cut_short, tool_calls.is_empty()) {
+            // The cut rides on whole, cause and all: the caller's own
+            // `record_provider_error` is its one record, and the renderers
+            // read the remedy off the cause itself.
+            (Some(cause), true) => Err(ProviderError::Truncated {
+                cause: Box::new(cause),
+            }
+            .into()),
+            // The session now awaits tool results, so returning would strand
+            // it there: the next round-trip resumes with them instead.
+            (cut, false) => {
+                if cut.is_some() {
+                    self.note("[Truncated mid-tool-call; continuing]".into());
+                }
+                Ok(Turn::Calls(tool_calls))
+            }
+            (None, true) => Ok(Turn::Ends(match stop_reason {
+                None | Some(StopReason::Completed(_) | StopReason::ToolCall(_)) => {
+                    if spoke {
+                        Outcome::Complete
+                    } else {
+                        Outcome::Empty
+                    }
+                }
+                Some(reason) => Outcome::Stopped {
+                    reason: reason.raw().to_string(),
+                },
+            })),
+        }
+    }
+
+    /// Answer the model's calls, then take in what arrived meanwhile and
+    /// what has newly climbed.  `Break` ends the deliberation.
+    fn answer(
+        &mut self,
+        calls: Vec<ToolCall>,
+        provider: &Provider,
+        emit: &Emitter,
+    ) -> Result<ControlFlow<Outcome>, Fault> {
+        let results = self.run_batch(calls, emit);
+        self.log
+            .borrow_mut()
+            .append_tool_results(results)
+            .map_err(Fault::Log)?;
+        self.readings.nudges.reset();
+        // A call in the batch may have found the engine gone.
+        if let Some(s) = self.seat.severed() {
+            return Err(s.into());
+        }
+        // A cancelled batch admits nothing: a read run or a steer recorded
+        // here would belong to the exchange being dropped.
+        if self.agent.token.is_cancelled() {
+            return Ok(ControlFlow::Break(self.cancelled()));
+        }
+        // Arrivals are taken in the order typed: a read runs against the
+        // context as it stands at its place in the queue, a delivery lands as
+        // a steering line of its own.  The warnings trail them.
+        for next in self.inbox.drain_mid_exchange() {
+            match next {
+                Next::Read(read) => self.read(&read, emit),
+                Next::Item(item) => {
+                    self.arrive(&item, None);
+                    self.log
+                        .borrow_mut()
+                        .append_steering(item.text())
+                        .map_err(Fault::Log)?;
+                }
+                Next::Rewrite(_) => unreachable!("the mid-exchange drain holds at a rewrite"),
+            }
+        }
+        let climbed = self.climbed(provider)?;
+        let steering = self.tell(climbed);
+        if !steering.is_empty() {
+            self.log
+                .borrow_mut()
+                .append_steering(steering.join("\n"))
+                .map_err(Fault::Log)?;
+        }
+        // A `reply` in the fully drained batch ends the run here, not at
+        // another round-trip.
+        Ok(match self.reply.borrow_mut().take() {
+            Some(payload) => ControlFlow::Break(self.replied(payload)),
+            None => ControlFlow::Continue(()),
+        })
+    }
+
+    /// Note each user line; word each model one as a reminder, returned as
+    /// steering.
+    fn tell(&self, warnings: Vec<Warning>) -> Vec<String> {
+        warnings
+            .into_iter()
+            .filter_map(|warning| match warning {
+                Warning::User(line) => {
+                    self.note(line);
+                    None
+                }
+                Warning::Model(reminder) => self
+                    .readings
+                    .nudges
+                    .remind(&reminder, &mut self.log.borrow_mut()),
+            })
+            .collect()
     }
 
     /// Shed the older half of the context, the harness writing no note of its
@@ -398,8 +340,7 @@ impl Avatar {
             }
             // A severed seat runs nothing more, so the rest answer its loss.
             if let Some(s) = self.seat.severed() {
-                let lost =
-                    crate::agent::seat::EngineLost::running(&s, self.agent.run_dir()).to_string();
+                let lost = crate::agent::EngineLost::running(&s, self.agent.run_dir()).to_string();
                 results.extend(std::iter::once(call).chain(it).map(|r| SessionToolResult {
                     id: r.call_id,
                     content: lost.clone(),
@@ -442,8 +383,7 @@ impl Avatar {
     /// with its own breadcrumb.  A child then parks, deposit and all; only a
     /// parentless agent's `attend` loop stops here.
     fn replied(&self, payload: FOValue) -> Outcome {
-        self.agent
-            .cancel_descendants(ral_core::process::CancelCause::Cancelled);
+        self.agent.cancel_descendants(CancelCause::Cancelled);
         self.agent.deposit_reply(payload);
         self.log.borrow_mut().quiesce(QuiesceReason::Replied);
         Outcome::Replied
@@ -458,48 +398,19 @@ impl Avatar {
     }
 }
 
+/// A turn's close on an exit already cancelling or failing: the streamed
+/// prefix is what the user saw, so it still commits, best-effort, and the
+/// exit in flight stays the one reported.
+fn abandoned(recorder: &crate::record::Emitter, closed: std::io::Result<()>) {
+    if let Err(error) = closed {
+        recorder.report_fault(&error);
+    }
+}
+
 fn cancelled_result(id: String) -> SessionToolResult {
     SessionToolResult {
         id,
         content: "[EXARCH // Request interrupted by user, before tool execution.]".into(),
-    }
-}
-
-/// Close a streaming turn: every commit it still owes, then the boundary
-/// that lets a printer retire its live edge.  The boundary follows the seal
-/// whether or not it held — a live edge outliving its turn is the one
-/// failure the printer cannot recover from on its own.
-///
-/// A commit the streaming callback could not make is answered here, since a
-/// callback has no error channel of its own; nothing commits on top of it,
-/// the order being broken already.
-///
-/// # Errors
-/// The first commit that failed anywhere in the turn.
-fn close_turn(
-    stream: &mut crate::record::commit::Stream,
-    unrecorded: Option<io::Error>,
-    recorder: &crate::record::Emitter,
-) -> io::Result<()> {
-    let sealed = match unrecorded {
-        Some(error) => Err(error),
-        None => stream.seal(recorder),
-    };
-    recorder.transient(Transient::Boundary);
-    sealed
-}
-
-/// [`close_turn`] on an exit path that is already cancelling or erroring:
-/// the streamed prefix is what the user saw, so it still commits,
-/// best-effort — the exit in flight is the error being reported, and this
-/// one must not mask it.
-fn abandon_turn(
-    stream: &mut crate::record::commit::Stream,
-    unrecorded: Option<io::Error>,
-    recorder: &crate::record::Emitter,
-) {
-    if let Err(error) = close_turn(stream, unrecorded, recorder) {
-        recorder.report_fault(&error);
     }
 }
 

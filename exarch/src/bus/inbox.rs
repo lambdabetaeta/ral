@@ -201,13 +201,6 @@ impl Mailbox {
         self.shared.exchange(msg);
     }
 
-    /// Stamp the exchange clock with no delivery, for tests whose scripted
-    /// consumer has nothing to answer a steer with.
-    #[cfg(test)]
-    pub(crate) fn stamp_exchange(&self) {
-        self.shared.lock().last_exchange = Some(Instant::now());
-    }
-
     /// The last exchange this inbox witnessed, or `None` before the first.
     pub(crate) fn last_exchange(&self) -> Option<Instant> {
         self.shared.lock().last_exchange

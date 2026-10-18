@@ -59,7 +59,7 @@ pub fn run(
         guard: screen,
         app: App::new(
             &session.agent,
-            session.fleet(),
+            session.fleet.clone(),
             vi,
             info.resumed.is_some(),
             session.inbox(),

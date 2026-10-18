@@ -3,7 +3,7 @@
 //! a grep ran, a capability check was denied.  A write lands as a
 //! [`Change`](super::Change) instead.  Decoding
 //! the surfaced value back into an `Observation` is core's own
-//! `Observation::from_surface`, called at `shell_eval.rs`'s `decode_surface`;
+//! `Observation::from_surface`, called at `shell_eval::surface::decode_surface`;
 //! this module only renders what core already decoded.
 
 use std::borrow::Cow;

@@ -1,4 +1,5 @@
 use super::*;
+use crate::agent::TestTrunk;
 
 fn over() -> Pressure {
     Pressure::Over {
@@ -63,4 +64,42 @@ fn disk_tells_the_user_alone() {
         panic!("a crossing tells the user");
     };
     assert!(line.contains("disk") && line.contains("2048 KiB"), "{line}");
+}
+
+/// Unconfigured, the check returns before any bookkeeping: no walk, no
+/// warning, no cost.
+#[test]
+fn disk_warning_unconfigured_never_walks_or_warns() {
+    let mut session = Avatar::for_test("system").unwrap();
+    assert!(session.fleet.launch.disk_warn_bytes.is_none());
+
+    assert!(
+        session
+            .disk_warning()
+            .expect("an identity seat never severs")
+            .is_none(),
+        "unconfigured: never warns, ever"
+    );
+    assert!(
+        session.readings.gauges.disk_walked.is_none(),
+        "the early return never stamps a walk"
+    );
+}
+
+/// The walk is real: 64 KiB sits above a fresh session's own footprint,
+/// and the file alone crosses it.
+#[test]
+fn disk_warning_walks_the_log_dir() {
+    let mut session = Avatar::for_test_with(TestTrunk {
+        disk_warn_bytes: Some(64 * 1024),
+        ..TestTrunk::new("system")
+    })
+    .expect("a trunk under a disk-warn ceiling");
+    std::fs::write(session.log_dir().join("big.txt"), vec![0u8; 1024 * 1024]).unwrap();
+    assert!(
+        session
+            .disk_warning()
+            .expect("an identity seat never severs")
+            .is_some()
+    );
 }

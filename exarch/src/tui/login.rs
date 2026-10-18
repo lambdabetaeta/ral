@@ -416,10 +416,6 @@ fn apply_login(tui: &mut Tui, ctx: &CommandCtx<'_>, token: &OAuthToken, replaced
         "; run /model to use it"
     };
     let text = format!("[{action} ChatGPT account {label}{next}]");
-    if let Err(error) = ctx
-        .recorder
-        .emit(crate::record::Forensic::SystemNote { text })
-    {
-        ctx.recorder.report_fault(&error);
-    }
+    ctx.recorder
+        .emit_or_report(crate::record::Forensic::SystemNote { text });
 }

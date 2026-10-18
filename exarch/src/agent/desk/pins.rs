@@ -1,17 +1,17 @@
 //! The pins family of the desk.
 
 use crate::card::{Card, encode_card};
-use crate::shell_eval::{self, Surface};
+use crate::shell_eval::{self, surface, surface::Surface};
 use ral_core::first_order::FOValue;
 use ral_core::first_order::datum::Datum;
 use ral_core::sync::LockExt;
 
-use super::{ExarchDesk, absorb_surface};
+use super::ExarchDesk;
 
 impl ExarchDesk {
     /// `` `set ``/`` `clear `` — write or empty the register slot under
     /// `key`: update the mirror `` `read ``/`` `list `` answer from, then draw
-    /// the forensic row and transient through [`absorb_surface`]. Answers
+    /// the forensic row and transient through [`surface::record`]. Answers
     /// `()`.
     pub(super) fn apply_pin(&self, key: String, card: Option<Card>) -> FOValue {
         {
@@ -30,9 +30,7 @@ impl ExarchDesk {
             Some(card) => Surface::Pin { key, card },
             None => Surface::Unpin { key },
         };
-        if let Err(error) = absorb_surface(&recorder, &surface) {
-            recorder.report_fault(&error);
-        }
+        surface::record(&recorder, &surface);
         FOValue::Unit
     }
 

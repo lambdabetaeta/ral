@@ -9,15 +9,15 @@
 
 pub mod builtins;
 pub(crate) mod report;
+pub mod surface;
 
 use crate::bus::{Emitter, Stamp, Stamped};
-use crate::card::{Change, Landed, value_to_card, value_to_done, value_to_edit};
 use crate::record::AgentId;
 use base64::Engine;
 use ral_core::Shell;
 use ral_core::Value as RalValue;
 use ral_core::first_order::FOValue;
-use ral_core::types::{DeferredSink, Observation};
+use ral_core::types::DeferredSink;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -99,98 +99,6 @@ impl PinDigest {
 /// and by the boundary nudge.
 pub type PinDigests = Arc<Mutex<std::collections::BTreeMap<String, PinDigest>>>;
 
-/// What the record absorbs: the shapes the `surface` channel carries, plus
-/// the register writes `exarch-pins` makes — closed and named rather than
-/// borrowed from the bus's vocabulary.
-///
-/// `Surface` carries the fact a card *is* (`Card`, `Pin`) rather than one a
-/// printer merely wants a copy of — an observation, a change, a notice, and
-/// a done keep only their structured value, so a printer's own mark tree is
-/// built once, by whoever renders, not eagerly here and thrown away by
-/// whoever records.
-pub enum Surface {
-    Observation(Box<Observation>),
-    /// What a write or an edit did to a file.
-    Change(crate::card::Change),
-    Card(crate::card::Card),
-    Notice(ral_core::types::Notice),
-    Done {
-        id: Option<u64>,
-        cmd: String,
-        outcome: crate::card::DoneOutcome,
-    },
-    Pin {
-        key: String,
-        card: crate::card::Card,
-    },
-    Unpin {
-        key: String,
-    },
-}
-
-/// What [`decode_surface`] made of one surfaced value — its two silences are
-/// not the same fact, so a caller that must tell them apart (the extension
-/// law's loud-unknown-class clause) can.
-pub enum Decoded {
-    /// A recognised surface class, ready to apply.
-    Surface(Surface),
-    /// An observation `Landed::of` declines to render: a known shape this host
-    /// chooses to keep off the rail, not a decode failure.
-    Landed,
-    /// No surface class recognises this value's shape at all.
-    Unknown,
-}
-
-/// Decode one surfaced `Value` into the [`Surface`] it names — the single
-/// decoder both delivery regimes share, so the live sink's events and the
-/// deferred sink's later `deliver` cannot drift.
-///
-/// Every class riding the one `exarch-surface` channel is a variant with a
-/// distinct label, so the arm order below carries no meaning.  Anything else
-/// is [`Decoded::Unknown`].
-///
-/// The register is not among them: a pin is *state*, keyed to a slot and
-/// overwritten in place, and `exarch-pins` is its only door.
-pub fn decode_surface(ev: &FOValue) -> Decoded {
-    if let Some(event) = Observation::from_surface(ev) {
-        // Core reports every observation it makes and judges none of them;
-        // `Landed::of` is where this host says which it wants, and a write is
-        // wanted as the change it made.  One core dispatch is one
-        // observation, so a rejected one is dropped outright rather than
-        // offered to the decoders below — deliberately, so it is `Landed`,
-        // not `Unknown`.
-        match (Change::of(&event.what), Landed::of(&event.what)) {
-            (Some(change), _) => Decoded::Surface(Surface::Change(change)),
-            (None, Some(_)) => Decoded::Surface(Surface::Observation(Box::new(event))),
-            (None, None) => Decoded::Landed,
-        }
-    } else if let Some(change) = value_to_edit(ev) {
-        Decoded::Surface(Surface::Change(change))
-    } else if let Some(notice) = ral_core::types::Notice::from_surface(ev) {
-        Decoded::Surface(Surface::Notice(notice))
-    } else if let Some(card) = value_to_card(ev) {
-        Decoded::Surface(Surface::Card(card))
-    } else if let Some((id, cmd, outcome)) = value_to_done(ev) {
-        Decoded::Surface(Surface::Done {
-            id: Some(id),
-            cmd,
-            outcome,
-        })
-    } else {
-        Decoded::Unknown
-    }
-}
-
-/// The extension law's loud-unknown-class note, worded once for every
-/// [`Decoded::Unknown`] site — the live sink
-/// ([`crate::agent::desk::SurfaceApplier::live`]) and a deferred batch's
-/// replay alike.
-pub(crate) fn unknown_surface_note(shape: impl std::fmt::Display) -> crate::record::Forensic {
-    crate::record::Forensic::SystemNote {
-        text: format!("surface: no rendering for a {shape} value; it was dropped"),
-    }
-}
-
 /// The deferred half of `surface`: the session-lived [`DeferredSink`] a
 /// `spawn` worker flushes its buffered batch to at completion.  Not a
 /// second channel — the live sink's own vocabulary, posted through the
@@ -233,7 +141,7 @@ pub(crate) fn deferred_sink(emit: &Emitter) -> Arc<dyn DeferredSink> {
 /// `source` names the call's text wherever a position is shown — a
 /// diagnostic, a trail site, a worker spawned from it.  `host` is the host's
 /// side of this run — the test harness's bare `IdentityTransport` hands a
-/// pin-less, desk-less [`crate::agent::desk::SurfaceApplier`], every real
+/// pin-less, desk-less [`surface::SurfaceApplier`], every real
 /// caller a [`crate::agent::desk::RunHost`].
 pub(crate) fn run_shell(
     transport: &dyn ral_core::carrier::Transport,

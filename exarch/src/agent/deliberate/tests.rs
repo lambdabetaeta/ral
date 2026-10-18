@@ -1,4 +1,5 @@
 use super::*;
+use crate::agent::gauge::{EVICT_THRESHOLD, Measure};
 use crate::agent::testkit::*;
 use crate::bus::{AgentOutcome, Item, Post, Stamped};
 use crate::cancel::InterruptTarget;

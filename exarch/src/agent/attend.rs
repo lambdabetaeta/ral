@@ -5,24 +5,20 @@
 //! deposited on the node's own agent and a non-reply end is delivered up its
 //! parent's mailbox by the spawn site.
 
-use crate::agent::deliberate::{Fault, Outcome};
-use crate::agent::gauge::{Warning, ration};
+use crate::agent::EngineLost;
 use crate::agent::nudge;
-use crate::agent::seat::EngineLost;
+use crate::agent::outcome::{Fault, Outcome};
 use crate::agent::{Avatar, Role};
 use crate::bus::{
     AgentOutcome, Emitter, Item, Next, ParkMode, Post, WORKER_PANIC_PREFIX, panic_msg,
 };
 use crate::clock;
-use crate::provider::{Limit, Provider, ProviderError, Recovery};
-use crate::record::AgentState;
-use crate::record::QuiesceReason;
-use crate::record::Transient;
+use crate::provider::{Limit, ProviderError, Recovery};
+use crate::record::{AgentState, QuiesceReason, Transient};
 use crate::schedule::Trigger;
-use crate::shell_eval;
 use ral_core::carrier::Severed;
+use ral_core::sync::LockExt;
 use std::ops::ControlFlow;
-use std::time::{Duration, Instant};
 
 /// How an empty inbox ends a pass: parked on the verdict [`Avatar::park_mode`]
 /// gives, or handed back to the caller at once.
@@ -55,10 +51,6 @@ impl Step {
         }
     }
 }
-
-/// Between disk-ceiling walks: a full scan of the session log dir and
-/// scratch, too costly to pay at every tool boundary.
-const DISK_WARN_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 
 /// The label of the one-shot wakeup armed at a refusal's reset.
 const RESUME_LABEL: &str = "provider-reset";
@@ -179,7 +171,6 @@ impl Avatar {
             Next::Rewrite(cmd) => return Ok(Step::command(self.rewrite(cmd, emit))),
             Next::Item(item) => item,
         };
-        self.heard(item);
         // Only a genuine boundary clears the latches, a prior exchange's Esc,
         // and any nudge still queued behind it — that nudge continued the
         // exchange this one closes.  A self-nudge is the same exchange
@@ -190,80 +181,25 @@ impl Avatar {
             self.inbox.drop_nudges();
         }
         let opens = self.log.borrow().opens(item.continues());
-        announce(item, opens, &self.recorder());
-        // Read once, so a `/model` swap on the UI thread lands on the next
-        // item rather than mid-item.
-        let active = self.agent.provider.current();
-        let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.deliberate(&active, Some(item.text()), item.continues(), emit)
-        }));
-        // A provider error or an unwind can leave the session mid-protocol;
-        // quiesce now so the next prompt — nudge or user — is admissible.
-        self.abort_unready();
-        let outcome: Result<Outcome, ProviderError> = match attempt {
-            Ok(Ok(outcome)) => Ok(outcome),
-            Ok(Err(Fault::Provider(error))) => Err(error),
-            Ok(Err(Fault::Severed(s))) => return Err(s),
-            Ok(Err(Fault::Log(why))) => {
+        self.arrive(item, opens);
+        let outcome = match self.attempt(item, emit) {
+            Ok(outcome) => Ok(outcome),
+            Err(Fault::Provider(error)) => {
+                self.record_failure(&error);
+                Err(error)
+            }
+            Err(Fault::Severed(s)) => return Err(s),
+            // Recording and continuing keeps one host-side crash from sinking
+            // the agent.
+            Err(Fault::Log(why) | Fault::Panicked(why)) => {
                 self.note_error(&why);
                 return Ok(Step::settled(
                     AgentOutcome::Failed(why),
                     ControlFlow::Continue(()),
                 ));
             }
-            // Host-side only — transport, surface decode, render.  An
-            // eval-side panic is caught at `Shell::run`, which rolls the
-            // dynamic state back, so it never unwinds this far.  Recording
-            // and continuing keeps one crash from sinking the agent.
-            Err(payload) => {
-                let msg = format!("{WORKER_PANIC_PREFIX}{}", panic_msg(&payload));
-                self.note_error(&msg);
-                return Ok(Step::settled(
-                    AgentOutcome::Failed(msg),
-                    ControlFlow::Continue(()),
-                ));
-            }
         };
-        // Before any nudge decision, and whether or not one follows: a chat
-        // trunk keeps no registry, and its failures must still reach the human.
-        if let Err(error) = &outcome {
-            let recorded = self.log.borrow_mut().record_provider_error(error);
-            if let Err(unrecorded) = recorded {
-                self.recorder().report_fault(&unrecorded);
-            }
-            if let ProviderError::Refused(refusal) = error
-                && self.resumes_at_reset()
-                && let Recovery::Deferred(at) = refusal.recovery()
-            {
-                self.resume_at(at, refusal.limit);
-            }
-        }
-        // A boundary read, legal here: the batch has fully drained and no
-        // dispatch is in flight.
-        let workers_idle = self.seat.read(|t| t.workers())?.is_empty();
-        let facts = nudge::Facts {
-            must_reply: self.agent.role.returns(),
-            pinned: self.pinned_digest(),
-            // Nudged only when nothing else is already carrying this agent
-            // forward: no reply standing for a consumer to fetch, no worker
-            // still running, no busy children.
-            quiet: !self.agent.has_reply() && workers_idle && !self.agent.has_busy_children(),
-        };
-        let nudged =
-            self.readings
-                .nudges
-                .react(outcome.as_ref(), &facts, &mut self.log.borrow_mut());
-        if let Some(text) = nudged {
-            let prompt = self.log.borrow().context().current_prompt();
-            match prompt {
-                Some(prompt) => self.inbox.push(Post::Nudge { prompt, text }),
-                // Unreachable: every outcome `react` answers followed a
-                // deliberation whose prompt `append_user` committed.
-                None => self.note_error(&format!(
-                    "a nudge was decided with no prompt in hand to continue: dropping it: {text}"
-                )),
-            }
-        }
+        self.follow_up(outcome.as_ref())?;
         // Only the headless root ends on `reply`; a child parks on its
         // deposit, to be messaged again.
         let flow = if matches!(
@@ -277,22 +213,89 @@ impl Avatar {
         Ok(Step::settled(agent_outcome(&outcome), flow))
     }
 
-    /// Book a drawn item against the park verdict: a direct child's
-    /// result means it is no longer awaited.  [`Avatar::settle`] makes
-    /// deliver-then-retire structural, so a parked parent never sees "no live
-    /// child" without the result already queued.  Every item reaching here
-    /// already survived the inbox's own pop-time fence against a `/clear`
-    /// (`crate::bus::inbox`'s clear-epoch), so there is nothing left to
-    /// admit — the `Surface` arm is a routing tripwire, not an admission.
-    pub(super) fn heard(&self, item: &Item) {
-        match item {
-            Item::Agent(r) => self.agent.heard(r.id),
-            Item::Surface { id, .. } => debug_assert_eq!(
-                *id, self.agent.id,
-                "a spawn's surface batch always drains in the session it was stamped with"
-            ),
-            _ => {}
+    /// Deliberate over `item`, a host-side panic caught as a fault; the log
+    /// is left ready however it ends.
+    fn attempt(&mut self, item: &Item, emit: &Emitter) -> Result<Outcome, Fault> {
+        // Read once, so a `/model` swap on the UI thread lands on the next
+        // item rather than mid-item.
+        let active = self.agent.provider.current();
+        let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.deliberate(&active, Some(item.text()), item.continues(), emit)
+        }));
+        // A provider error or an unwind can leave the session mid-protocol;
+        // quiesce now so the next prompt — nudge or user — is admissible.
+        self.abort_unready();
+        attempt.unwrap_or_else(|payload| {
+            Err(Fault::Panicked(format!(
+                "{WORKER_PANIC_PREFIX}{}",
+                panic_msg(&payload)
+            )))
+        })
+    }
+
+    /// Record a provider failure whether or not a nudge follows — a chat
+    /// trunk keeps no registry, and its failures must still reach the human —
+    /// and arm the resume a refusal with a known reset earns.
+    fn record_failure(&self, error: &ProviderError) {
+        let recorded = self.log.borrow_mut().record_provider_error(error);
+        if let Err(unrecorded) = recorded {
+            self.recorder().report_fault(&unrecorded);
         }
+        if let ProviderError::Refused(refusal) = error
+            && self.resumes_at_reset()
+            && let Recovery::Deferred(at) = refusal.recovery()
+        {
+            self.resume_at(at, refusal.limit);
+        }
+    }
+
+    /// Self-post the nudge `outcome` earns, if any.
+    ///
+    /// # Errors
+    /// The engine's severance, from the worker probe.
+    fn follow_up(&mut self, outcome: Result<&Outcome, &ProviderError>) -> Result<(), Severed> {
+        // A boundary read, legal here: the batch has fully drained and no
+        // dispatch is in flight.
+        let workers_idle = self.seat.read(|t| t.workers())?.is_empty();
+        let facts = nudge::Facts {
+            must_reply: self.agent.role.returns(),
+            pinned: self.pinned_digest(),
+            // Nudged only when nothing else is already carrying this agent
+            // forward: no reply standing for a consumer to fetch, no worker
+            // still running, no busy children.
+            quiet: !self.agent.has_reply() && workers_idle && !self.agent.has_busy_children(),
+        };
+        let nudged = self
+            .readings
+            .nudges
+            .react(outcome, &facts, &mut self.log.borrow_mut());
+        let Some(text) = nudged else {
+            return Ok(());
+        };
+        let prompt = self.log.borrow().context().current_prompt();
+        match prompt {
+            Some(prompt) => self.inbox.push(Post::Nudge { prompt, text }),
+            // Unreachable: every outcome `react` answers followed a
+            // deliberation whose prompt `append_user` committed.
+            None => self.note_error(&format!(
+                "a nudge was decided with no prompt in hand to continue: dropping it: {text}"
+            )),
+        }
+        Ok(())
+    }
+
+    /// Every pinned slot's summary joined onto one line, `None` when nothing
+    /// is pinned.  Rendered through the rail's own `summary_line`, so the
+    /// reminder reads as the user sees it.
+    fn pinned_digest(&self) -> Option<String> {
+        let lines: Vec<String> = self
+            .agent
+            .pins
+            .lock_ignore_poison()
+            .values()
+            .map(|pin| crate::card::summary_line(&pin.card))
+            .collect();
+        (!lines.is_empty()).then(|| lines.join("; "))
     }
 
     /// How an empty inbox should be treated, recomputed on every wake, from
@@ -332,77 +335,6 @@ impl Avatar {
         ParkMode::Quiesce
     }
 
-    /// The disk-warn ceiling's verdict, as an operational note once per
-    /// excursion — nothing is ever rotated or deleted.  Unconfigured it walks
-    /// nothing at all; otherwise it walks at most once per
-    /// [`DISK_WARN_CHECK_INTERVAL`].
-    ///
-    /// # Errors
-    /// The engine's severance, from the `EXARCH_SCRATCH` probe.
-    fn disk_warning(&mut self) -> Result<Option<Warning>, Severed> {
-        let Some(ceiling) = self.fleet.launch.disk_warn_bytes else {
-            return Ok(None);
-        };
-        if self
-            .disk_checked
-            .is_some_and(|at| at.elapsed() < DISK_WARN_CHECK_INTERVAL)
-        {
-            return Ok(None);
-        }
-        self.disk_checked = Some(Instant::now());
-        let mut total = ral_core::path::tree::bytes(self.log.borrow().dir());
-        if let Some((_, bytes)) = self.scratch_bytes()? {
-            total += bytes;
-        }
-        Ok(self.readings.gauges.disk(total, ceiling))
-    }
-
-    /// Every standing condition newly climbed, told: the user's lines noted,
-    /// the model's reminders returned as the steering that trails a tool
-    /// batch's arrivals.
-    ///
-    /// # Errors
-    /// The engine's severance, from the disk probe.
-    pub(super) fn warnings(&mut self, provider: &Provider) -> Result<Vec<String>, Severed> {
-        let pressure = self.pressure_gauge(provider);
-        let mut told: Vec<Warning> = self
-            .readings
-            .gauges
-            .pressure(pressure)
-            .into_iter()
-            .collect();
-        told.extend(self.disk_warning()?);
-        let account = provider.account();
-        told.extend(ration::told(
-            account,
-            &provider.climb_allowances(ration::USER_HEARS),
-        ));
-        told.extend(self.readings.gauges.ration.climb(
-            account,
-            &provider.allowances(),
-            self.resumes_at_reset(),
-        ));
-        Ok(self.tell(told))
-    }
-
-    /// Note each user line; word each model one as a reminder — none for a
-    /// trunk that steers nothing.
-    fn tell(&self, warnings: Vec<Warning>) -> Vec<String> {
-        warnings
-            .into_iter()
-            .filter_map(|warning| match warning {
-                Warning::User(line) => {
-                    self.note(line);
-                    None
-                }
-                Warning::Model(reminder) => self
-                    .readings
-                    .nudges
-                    .remind(&reminder, &mut self.log.borrow_mut()),
-            })
-            .collect()
-    }
-
     /// Arm the one-shot wakeup that resumes the task at a refusal's reset,
     /// replacing any earlier one.
     fn resume_at(&self, resets_at: jiff::Timestamp, limit: Limit) {
@@ -440,66 +372,6 @@ impl Avatar {
         if !log.context().is_ready() {
             log.quiesce(QuiesceReason::Aborted);
         }
-    }
-}
-
-/// Emit the chrome an item's source shows as it enters context, `opens` being
-/// the turn a prompt opens ([`crate::record::AgentLog::opens`]).  A nudge is an internal
-/// continuation and a command never reaches the model, so both are quiet.
-pub(super) fn announce(item: &Item, opens: Option<u64>, recorder: &crate::record::Emitter) {
-    match item {
-        Item::Human(_) | Item::Wakeup(_) | Item::Message(_) => {
-            // The live row derives from the published `Display::Prompt`
-            // record, so this is the one authoring site.
-            record_commit(
-                recorder,
-                crate::record::Display::Prompt {
-                    text: item.text(),
-                    turn: opens,
-                },
-            );
-        }
-        Item::Agent(r) => {
-            record_commit(
-                recorder,
-                crate::record::Display::SubagentDone {
-                    name: r.name.clone(),
-                    outcome: r.outcome.settlement(),
-                    elapsed_ms: u64::try_from(r.elapsed.as_millis()).unwrap_or(u64::MAX),
-                },
-            );
-        }
-        // A `spawn` worker's deferred batch, decoded as the live foreground
-        // decode would.  It was stamped with and posted to this same session,
-        // so the emitter's id already routes its cards to the right scrollback.
-        Item::Surface { values, .. } => {
-            for v in values {
-                match shell_eval::decode_surface(v) {
-                    shell_eval::Decoded::Surface(surface) => {
-                        if let Err(error) = crate::agent::desk::absorb_surface(recorder, &surface) {
-                            recorder.report_fault(&error);
-                        }
-                    }
-                    shell_eval::Decoded::Landed => {}
-                    shell_eval::Decoded::Unknown => {
-                        if let Err(error) =
-                            recorder.emit(shell_eval::unknown_surface_note(v.shape()))
-                        {
-                            recorder.report_fault(&error);
-                        }
-                    }
-                }
-            }
-        }
-        Item::Nudge { .. } => {}
-    }
-}
-
-/// Record one display commit, surfacing a failed append as a
-/// `Transient::Fault` exactly as the surface path does.
-fn record_commit(recorder: &crate::record::Emitter, commit: crate::record::Display) {
-    if let Err(error) = recorder.emit(commit) {
-        recorder.report_fault(&error);
     }
 }
 

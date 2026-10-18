@@ -2,8 +2,7 @@
 //! account, on latches [`Rations`](crate::provider::Rations) keeps; the model
 //! is reminded at [`MODEL_HEARS`] on latches of the agent's own.
 
-use super::Warning;
-use crate::agent::nudge::Reminder;
+use super::{Reminder, Warning};
 use crate::latch::Latch;
 use crate::provider::allowance::Allowance;
 use crate::provider::{Account, AccountId};

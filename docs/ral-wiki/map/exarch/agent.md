@@ -45,10 +45,10 @@ the `EngineSpec` it was attached with
 ([[map/core/engine-protocol|engine-protocol]]) — the
 canonical run and probe vocabulary either way
 ([[map/core/engine-protocol|engine-protocol]]) — plus the `inbox`, the
-`reply: ReplyCell` (an `Arc<AtomicRefCell<_>>`, borrowed rather than locked, as `LogCell` is for the `AgentLog`) the desk's `reply` handler stages into, the `readings`
+`reply: ReplyCell` (a `SharedCell`, borrowed rather than locked, as `LogCell` is for the `AgentLog`: one thread, so a failed borrow is reentrancy and panics) the desk's `reply` handler stages into, the `readings`
 (the token `Measure`, the `Gauges`, the `Nudges` — everything this avatar has
-measured and told about one context, reborn whole with it), the
-`disk_checked` instant, and the `Arc<Agent>` it embodies (`.agent`,
+measured and told about one context, reborn whole with it), and the
+`Arc<Agent>` it embodies (`.agent`,
 `pub(crate)` so a caller outside `agent` reaches identity and config at
 `.agent.…` directly). Every method that runs the agent takes `&mut Avatar`.
 
@@ -218,8 +218,12 @@ Three nested loops, the same for trunk and child alike:
   Option<AgentOutcome>, flow: ControlFlow }` or the engine's `Severed`: every
   item reaching here already survived the inbox's own pop-time fence, so what
   is left is the exchange-boundary latch reset, a session command's run
-  (`Avatar::read`, `Avatar::rewrite`), the `deliberate` call itself, and the
-  nudge reaction. A genuine exchange boundary resets the nudge budget and
+  (`Avatar::read`, `Avatar::rewrite`), the item's `arrive` (booked against
+  the park verdict and announced, `agent/arrival.rs`, the same door a
+  mid-exchange arrival takes), its `attempt` (`deliberate` under
+  `catch_unwind`, the log quiesced however it ended), `record_failure` (a
+  provider error recorded, a refusal's resume armed), and the nudge reaction,
+  `follow_up`. A genuine exchange boundary resets the nudge budget and
   clears the sticky cancel token (`cancel::Token::reset`), so a prior
   exchange's Esc cannot bleed into the next; a self-nudge is the same exchange
   continuing and resets neither. The budget counts *consecutive* repairs, so
@@ -238,8 +242,8 @@ Three nested loops, the same for trunk and child alike:
   then drops (a child's drops when its detached thread returns), pruned from
   its parent's `children` and the fleet's indices at their next walk — the
   whole of deregistration — so the fleet empties as its
-  last agent's avatar goes. A panic `take_up` catches around its
-  `deliberate` call is a
+  last agent's avatar goes. A panic `attempt` catches around its
+  `deliberate` call, `Fault::Panicked`, is a
   *host-side* fault (provider transport, surface decode, render, digest),
   recorded as `AgentOutcome::Failed`; an eval-side panic never unwinds this far —
   the engine's own run door (`Shell::run`) checkpoints `env` / `context`
@@ -251,14 +255,21 @@ Three nested loops, the same for trunk and child alike:
   stack, so a panic unwinding through `deliberate` drops it with everything
   else there, with nothing separate to retire.
 - `deliberate` — one prompt driven to quiescence over the agent's *own* provider
-  (`self.provider.current()`, read once at the top by `take_up` so a `/model` swap
+  (`self.provider.current()`, read once by `attempt` so a `/model` swap
   lands next item, never mid-deliberation), answering `Result<Outcome, Fault>`
-  where `Fault` is the provider's own error, the engine's `Severed`, or a log
-  append refused: weigh the context for an eviction,
-  record the turn's start, render the context, stream a reply through
-  `provider.complete` (one turn), **admit** then append the assistant message, run the
-  resulting tool-call batch (`run_batch`), append their results, optionally append a drained steering prompt,
-  repeat until the model emits no tool call. The admission step (`admit_assistant`,
+  where `Fault` is the provider's own error, the engine's `Severed`, a log
+  append refused, or a host-side panic. Both types live in the leaf
+  `agent/outcome.rs`, which `attend` and `nudge` read without depending on
+  the loop. `deliberate` itself is a short driver: weigh the context for an
+  eviction (`must_evict`), take one `round_trip`, and act on the `Turn` it
+  answers — `Ends(Outcome)`, `Calls`, or `Retry` after an overflow that
+  `relieve` answered with an eviction, never twice running. `round_trip`
+  records the turn's start, renders the context and streams a reply through
+  `provider.complete`; `settle_turn` records its usage, **admits** then
+  appends the assistant message, and reads the turn's verdict off its cut and
+  its calls; `answer` runs the batch (`run_batch`), appends the results, takes
+  in the mid-exchange arrivals and the newly climbed warnings as steering, and
+  ends the deliberation on a cancel or a staged `reply`. The admission step (`admit_assistant`,
   at the commit boundary) enforces the [[invariants/transcript-admission|transcript-admission invariant]]:
   it repairs a non-object tool-call `fn_arguments` to `{}` (X2) and substitutes a
   stub for an otherwise-empty assistant message (X7), so every committed message
@@ -297,11 +308,13 @@ Three nested loops, the same for trunk and child alike:
   same one admitted message
   ([[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]]).
 
-  A streamed turn closes through one `close_turn` door: it seals the answer and
-  reasoning choppers, then publishes `Transient::Boundary`, even when the
-  provider or cancellation path already carries an error. `abandon_turn` uses
-  the same ordering best-effort, so a live display edge cannot survive into the
-  next turn ([[map/exarch/frontend|frontend]]).
+  A streamed turn closes through one door, `commit::Stream::close`: the stream
+  keeps the first record that failed (a streaming callback has no error
+  channel), seals the answer and reasoning choppers, then publishes
+  `Transient::Boundary`, even when the provider or cancellation path already
+  carries an error. On such an exit the close is best-effort (`abandoned`), so
+  a live display edge cannot survive into the next turn
+  ([[map/exarch/frontend|frontend]]).
 
 Worker-reap and large-binding notices need no drain at `attend`'s top:
 core's own engine pushes both as `` `notice `` surface classes at the ready
@@ -403,7 +416,7 @@ and the pin reminder into at most one `EXARCH_REMINDER` message per
 completion, self-posted as `Post::Nudge` and committed by `append_user` inside
 the same exchange, gated on `quiet` — no standing reply, no running
 worker, no busy children, the one condition those kinds share.
-`Nudges::remind` is the other entry point, reached from `Avatar::warnings` at
+`Nudges::remind` is the other entry point, reached from `deliberate`'s `tell` at
 a *tool* boundary, where a gauge's `Reminder` — figures, not words; every
 model-facing sentence is `nudge.rs`'s to word — lands as steering trailing
 the batch's arrivals: an agentic run takes one prompt and then two
@@ -422,7 +435,7 @@ a repair's records what it spent (`spent: Some(Spent { used, max })`).
 | pressure reminder | steering | gauge `Over` ∧ excursion untold | free |
 | usage reminder | steering | an allowance window climbs past 90 or 95% | free |
 
-The pressure reminder names the set it is warning about: `pressure_gauge`
+The pressure reminder names the set it is warning about: the pressure reading
 calls `Avatar::planned_eviction` — a walk back over the turn table's own
 summed weights, no rendering — and carries the answer as
 `Pressure::Over { detail, planned }`, so the message tells the model which
@@ -441,7 +454,7 @@ provider error (the transport's own).
 (`pinned_told`); the ladder latches are `gauge::Gauges`' (below), and the
 two sit together with the token `Measure` in `Avatar::readings` — what the
 avatar has measured and told about one context.
-`pressure_gauge` is a pure `&self` reading with no latch of its own, and
+The pressure reading (`gauge.rs`'s `Avatar::pressure`) is a pure `&self` reading with no latch of its own, and
 `deliberate` neither latches nor unlatches around it. An edge is **consumed
 at decide time, in the same act as the part's emission**, so "told but not
 sent" and "sent but not told" have no spelling. `reset()`, called on every
@@ -451,7 +464,7 @@ per delivered item. Every path that discards a decided-but-uncommitted nudge
 instead rebuilds `Nudges` whole: `/clear` (`Inbox::clear` sweeps the queue,
 `Avatar::clear` rebirths the whole `Readings`) and `/rewind` (`drop_nudges`
 sheds the queued nudge, `rewind` rebirths `Nudges`) — the rebirth also covers a `/rewind` typed mid-
-deliberation, whose `Barrier` queues ahead of the nudge `take_up` posts
+deliberation, whose `Barrier` queues ahead of the nudge `follow_up` posts
 after it: the nudge is decided (its edges already consumed) and then shed,
 so without the rebirth the telling would be recorded but never committed.
 
@@ -484,7 +497,7 @@ A `--chat` trunk's `Nudges` **steers nothing** (`Nudges::new(false)`, the
 launch's `Toolset` being empty): every nudge steers the model toward a
 tool it does not have, so no rule runs, no reminder fires, and nothing
 synthetic ever joins the conversation. Its provider errors still reach the
-human, since that report is the attend loop's own step — `take_up` emits
+human, since that report is the attend loop's own step — `record_failure` emits
 `Forensic::ProviderError` for whatever error the attempt carries before it
 ever asks for a nudge, so `react` decides and nothing more.
 
@@ -494,16 +507,18 @@ One `Latch` (`latch.rs`) serves every ladder: it keeps the level last weighed,
 and `climb` answers the highest rung between that and the new level, so a first
 reading past two rungs tells the higher alone; `cross` is the one-rung ladder
 of a yes-or-no condition. A ladder is bare numbers, and who hears a rung is written
-once, where its `Warning` is built. Three ladders ride it; two are gathered in
-`Avatar::gauges`, the third's user latches live in `Rations`:
+once, where its `Warning` is built. Every measurement the avatar takes of
+itself lives in `gauge.rs` too: the token `Measure`, the eviction trigger and
+plan, the scratch probe. Three ladders ride it; their latches are gathered in
+`gauge::Gauges`, except the third's user latches, which live in `Rations`:
 
 | condition | reading | rungs | audience |
 |---|---|---|---|
-| context pressure | `pressure_gauge` (`Unknown` leaves the latch) | over the soft line | model |
-| disk ceiling | `disk_warning`, walked every `DISK_WARN_CHECK_INTERVAL` ral calls | over `disk_warn_bytes` | user |
+| context pressure | `Avatar::pressure` (`Unknown` leaves the latch) | over the soft line | model |
+| disk ceiling | `disk_warning`, walked at most once per `DISK_WALK_INTERVAL` (a minute) | over `disk_warn_bytes` | user |
 | usage allowance | `Allowance::percent` of `Provider::allowances`, per account and window | user 50, 75, 90, 95% (`USER_HEARS`); model 90, 95% (`MODEL_HEARS`) | user once per account; model once per agent |
 
-`Avatar::warnings` weighs all three after every tool batch, and `tell` delivers
+`Avatar::climbed` weighs all three after every tool batch, and `tell` delivers
 each climbed rung: a user line as a `Forensic::SystemNote`, a model
 `Reminder` worded by `Nudges::remind` into the steering message — nothing for
 a `--chat` trunk, which reaches no tool boundary anyway. The ration gauge reads nothing
@@ -519,7 +534,7 @@ it. The network is read once per account; the user hears once per account,
 each conversation's model once.
 
 A refusal whose reset lies past the in-place wait ends as a provider error:
-on the terminal trunk alone (`resumes_at_reset`), `take_up` answers
+on the terminal trunk alone (`resumes_at_reset`), `record_failure` answers
 `ProviderError::Refused` with `resume_at`, which replaces any `provider-reset`
 schedule with a one-shot wakeup at the reset and notes the time to the user.
 Headless, synod and every fork fail instead. Once one agent's request is
@@ -651,7 +666,7 @@ agent leaks neither
 ## The provider is per-agent and hot-swappable
 
 `ProviderHandle` is owned by the `Agent`, not threaded through `attend`'s
-parameters. `take_up` reads `self.provider.current()` once per item. `/model` swaps
+parameters. `attempt` reads `self.provider.current()` once per item. `/model` swaps
 the **focused** agent's handle directly on the UI thread (resolved through
 the fleet by id), so a
 swap on one agent never disturbs another. `fork` seeds the child's own handle
@@ -773,7 +788,7 @@ fact. `Avatar::rewind` publishes `Display::Rewound { anchor }` beside it, sheds
 queued self-nudges, and rebuilds the nudge state. The shell is not rewound,
 and the picker says so. `AgentLog::opens(continues)` decides once whether a
 prompt opens a turn (`UserPrompt { turn }`) or extends the live one
-(`Steering`), and `announce` stamps that same verdict on the prompt's
+(`Steering`), and `arrive` stamps that same verdict on the prompt's
 `Display::Prompt { turn }` echo, so the screen knows exactly which turn each
 prompt opened;
 `/context` surveys the context without editing it — `emit_context_survey`
@@ -786,7 +801,8 @@ resident turn range answering it and its weight — a `Read` beside
 and warn only") — report-and-warn only, never rotation or deletion.
 Unconfigured (`config::disk_warn_bytes` absent, the default) it is a no-op
 by construction: no walk, no cost, ever. Configured, it walks at most once
-per `DISK_WARN_CHECK_INTERVAL` (a minute, off `Avatar::disk_checked`),
+per `DISK_WALK_INTERVAL` (a minute, stamped on the `Gauges`, so a `/clear`
+walks afresh),
 weighed at the tool boundary with the other gauges.
 Crossing the ceiling (the session log dir, sized host-side by
 `path::tree::bytes`, plus `EXARCH_SCRATCH`, read and sized in the engine by
@@ -845,16 +861,16 @@ mirrors on the bus as `Transient::Born` / `Transient::Died` regardless of
 remaining fuel.
 
 `/branch` rides the spawn's own fork path. `Avatar::branch` (`fork_with(name,
-false, emit)`) dispatches the internal `_exarch-branch` builtin — `_`-prefixed,
+Fork::Conversing, emit)`) dispatches the internal `_exarch-branch` builtin — `_`-prefixed,
 so the model's index never lists it — with a `RunHost` whose `HostServices`
 carries a `BranchOrder`; the builtin forks through `fork_then_enquire` and
 enquires `` exarch-agents `branch <receipt> ``, which the desk refuses on any
 call carrying no order. The desk takes the fork up under `` `inherit ``,
 imports the parent's context, and deposits a *conversing* peer tab with the
 parent's verbatim authority into the order
-([[decisions/260705_branch-minimal|branch-minimal]]) — `returns: false` builds
+([[decisions/260705_branch-minimal|branch-minimal]]) — `Fork::Conversing` builds
 `Role::Converses`, so a branch is a root exactly as the trunk is.
-A test's `fork` is the same path with `returns: true`, building `Role::child`. A builtin
+A test's `fork` is the same path with `Fork::Returning(Memory::Amnemon)`, building `Role::child`. A builtin
 spawn's `` `start `` tag leaves its fork the same way, and the desk's
 `` exarch-agents `start `` arm collects it and assembles it at one less unit
 of fuel ([[map/exarch/builtins|builtins]]).

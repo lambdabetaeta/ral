@@ -3,12 +3,15 @@
 //! `assemble` and its [`Build`] bundle. `clear` rebuilds a node's context in
 //! place rather than ending it; `Drop` is the one exit every life takes.
 
+use crate::agent::EngineLost;
+use crate::agent::desk::Fork;
 use crate::agent::factory::Factory;
 use crate::agent::fleet::{AGENT_LEASE_IDLE, Fleet, Launch, Unborn};
 use crate::agent::index::{BuiltinIndex, Grants};
-use crate::agent::seat::{self, Seat};
-use crate::agent::shell::LogCell;
-use crate::agent::{Agent, Avatar, Birth, ProviderHandle, Readings, ReplyCell, Role, SPAWN_FUEL};
+use crate::agent::seat::Seat;
+use crate::agent::{
+    Agent, Avatar, Birth, LogCell, ProviderHandle, Readings, ReplyCell, Role, SPAWN_FUEL,
+};
 use crate::app::Scratch;
 use crate::bus::{Emitter, Inbox};
 use crate::provider::Provider;
@@ -16,13 +19,14 @@ use crate::provider::Toolset;
 use crate::record::AgentId;
 use crate::record::{AgentLog, RecordedAccount, RecordedModel, Resumed};
 use ral_core::carrier::Severed;
+use ral_core::engine::EngineInstaller;
 use ral_core::protocol::{Ending, Report};
 use ral_core::sync::LockExt;
 use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub(crate) fn fresh_id() -> AgentId {
     AgentId::new(NEXT_ID.fetch_add(1, Ordering::Relaxed))
@@ -241,7 +245,6 @@ impl Avatar {
             reply: ReplyCell::default(),
             fleet,
             readings,
-            disk_checked: None,
         })
     }
 
@@ -257,6 +260,8 @@ impl Avatar {
             seat,
             provider,
             id,
+            &crate::INSTALLERS,
+            AGENT_LEASE_IDLE,
             |sessions, model, account, bytes| {
                 AgentLog::root(sessions, id, model, account, bytes).map(|log| (log, ()))
             },
@@ -292,6 +297,8 @@ impl Avatar {
             seat,
             provider,
             AgentId::new(0),
+            &crate::INSTALLERS,
+            AGENT_LEASE_IDLE,
             |sessions, _, account, bytes| {
                 let mut log = AgentLog::resume(sessions, AgentId::new(0))?;
                 let resumed = log.resumed_summary();
@@ -325,6 +332,8 @@ impl Avatar {
         root_seat: RootSeat,
         provider: Arc<Provider>,
         id: AgentId,
+        installers: &'static [EngineInstaller],
+        lease: Duration,
         open: impl FnOnce(&Path, &RecordedModel, &RecordedAccount, usize) -> io::Result<(AgentLog, T)>,
     ) -> io::Result<(Self, T)> {
         let RootConfig {
@@ -358,14 +367,14 @@ impl Avatar {
         // anything was. Carried whole, not flattened: synod downcasts this to
         // tell a dead engine from a log directory it could not make, and only
         // the former has a guest console worth saving.
-        let lost = |s: Severed| io::Error::other(seat::EngineLost::starting(&s, Some(&run_dir)));
+        let lost = |s: Severed| io::Error::other(EngineLost::starting(&s, Some(&run_dir)));
         let seat = match root_seat {
             RootSeat::Identity {
                 scratch,
                 cwd,
                 terminal,
             } => Seat::root(
-                &crate::INSTALLERS,
+                installers,
                 cwd,
                 terminal,
                 scratch,
@@ -421,7 +430,7 @@ impl Avatar {
                 system,
                 index,
             },
-            AGENT_LEASE_IDLE,
+            lease,
         );
         // A brand-new fleet, so this can never collide or find its rootless
         // self dead.
@@ -496,7 +505,11 @@ impl Avatar {
     #[cfg(test)]
     pub(crate) fn fork_named(&self, name: &str) -> Result<Self, String> {
         let (emit, _rx) = crate::bus::dummy_emitter();
-        self.fork_with(name.to_string(), true, &emit)
+        self.fork_with(
+            name.to_string(),
+            Fork::Returning(crate::enquiry::Memory::Amnemon),
+            &emit,
+        )
     }
 
     /// Fork a conversing child under `name`: the creator's context and
@@ -506,24 +519,23 @@ impl Avatar {
     /// # Errors
     /// Whatever [`Self::fork_with`] refuses.
     pub(crate) fn branch(&self, name: String, emit: &Emitter) -> Result<Self, String> {
-        self.fork_with(name, false, emit)
+        self.fork_with(name, Fork::Conversing, emit)
     }
 
     /// A child of this agent, forked by its own engine the way a spawn is —
     /// `_exarch-branch`, answered by the desk — so no shell ever crosses here.
-    /// `returns` decides whether it holds `reply`.
-    fn fork_with(&self, name: String, returns: bool, emit: &Emitter) -> Result<Self, String> {
-        let lost = |s: Severed| seat::EngineLost::running(&s, self.agent.run_dir()).to_string();
+    fn fork_with(&self, name: String, fork: Fork, emit: &Emitter) -> Result<Self, String> {
+        let lost = |s: Severed| EngineLost::running(&s, self.agent.run_dir()).to_string();
         let order = Arc::new(crate::agent::desk::BranchOrder {
             name,
-            returns,
+            fork,
             child: Mutex::default(),
         });
         let mut services = self.host_services(emit);
         services.branch = Some(order.clone());
         let host = Arc::new(crate::agent::desk::RunHost {
             desk: crate::agent::desk::ExarchDesk { services },
-            apply: crate::agent::desk::SurfaceApplier::new(self.recorder()),
+            apply: crate::shell_eval::surface::SurfaceApplier::new(self.recorder()),
         });
         let report = crate::shell_eval::run_shell(
             self.seat.transport(),
@@ -580,82 +592,50 @@ impl Avatar {
             lease,
             installers,
         } = cfg;
-        // Derived from the policy, exactly as `root` derives it, so a fixture
-        // can never claim a reach its own egress denies.
-        let search = egress.policy.search;
         let id = fresh_id();
         // Keyed by this agent's own fresh id, so concurrent tests never
-        // contend on one dir.  Named in the Attach exactly as a real root
-        // names it: unnamed, an `$EXARCH_SCRATCH` probe falls through to the
-        // host process env, and a suite run from inside a live exarch session
-        // would measure *that* session's scratch.
+        // contend on one dir; the run beside it goes when the scratch does.
         let scratch = Arc::new(Scratch::for_test(
             crate::app::EXARCH,
             &format!("agent-{id}"),
         )?);
-        // Beside the scratch, which the seat below owns: the session's whole
-        // footprint is then one directory, and it goes when the agent does.
-        let sessions_root = scratch.test_sibling("sessions")?;
-        let cwd = std::env::current_dir().expect("test process has a cwd");
-        let seat = Seat::root(
-            installers,
-            cwd,
-            ral_core::terminal::TerminalState::default(),
+        let run_dir = scratch.test_sibling("run")?;
+        let config = RootConfig {
+            system,
+            caps: ral_core::capability::GrantStack::root(),
+            run_dir,
+            account: RecordedAccount::for_test("test"),
+            trunk: Trunk::Headless,
+            tools: Toolset::offered(false),
+            allow_schedule,
+            resume_on_reset,
+            disk_warn_bytes,
+            fuel: SPAWN_FUEL,
+            egress,
+            factory: None,
+            bureau: Arc::new(crate::provider::Bureau::Scripted),
+        };
+        let seat = RootSeat::Identity {
             scratch,
-            &AgentLog::dir_of(&sessions_root, id),
-        )
-        .map_err(|s| io::Error::other(s.to_string()))?;
-        let index = BuiltinIndex::resolve(
-            seat.read(|t| t.builtin_names())
-                .map_err(|s| io::Error::other(s.to_string()))?,
-        );
-        let system_prompt = index.apply(
-            &system,
-            &Grants {
-                role: &Role::Headless,
-                allow_schedule,
-                spawns: SPAWN_FUEL > 0,
-            },
-            TRUNK_NAME,
-        );
-        let log = AgentLog::root(
-            &sessions_root,
-            id,
-            &RecordedModel::for_test("test-model"),
-            &RecordedAccount::for_test("test"),
-            system_prompt.len(),
-        )?;
-        let provider = ProviderHandle::new(Arc::new(Provider::scripted(
+            cwd: std::env::current_dir().expect("test process has a cwd"),
+            terminal: ral_core::terminal::TerminalState::default(),
+        };
+        let provider = Arc::new(Provider::scripted(
             "test-model",
             crate::provider::scripted::Script::new(),
-        )));
-        let fleet = Fleet::new(
-            Launch {
-                attended: false,
-                allow_schedule,
-                resume_on_reset,
-                tools: Toolset::offered(false),
-                disk_warn_bytes,
-                factory: None,
-                bureau: Arc::new(crate::provider::Bureau::Scripted),
-                system: system.into(),
-                index,
-            },
-            lease,
-        );
-        Ok(Self::assemble(Build {
-            name: TRUNK_NAME.to_string(),
-            system_prompt,
-            caps: ral_core::capability::GrantStack::root(),
+        ));
+        Self::trunk(
+            config,
             seat,
-            log,
-            role: Role::Headless,
-            fuel: SPAWN_FUEL,
             provider,
-            search,
-            fleet,
-        })
-        .expect("a fresh fleet's trunk is born unrefused"))
+            id,
+            installers,
+            lease,
+            |sessions, model, account, bytes| {
+                AgentLog::root(sessions, id, model, account, bytes).map(|log| (log, ()))
+            },
+        )
+        .map(|(avatar, ())| avatar)
     }
 }
 

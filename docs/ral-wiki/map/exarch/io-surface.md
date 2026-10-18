@@ -179,7 +179,7 @@ alone — no card built yet, since the decoder's own codomain carries the
 structured value and nothing a printer merely wants a copy of. The card is
 bound by `observation_card` only at draw time — from whichever printer's fold
 reads the recorded `Display::Observation` — never by the seam
-(`agent/desk.rs`'s `absorb_surface`) that records it: the
+(`shell_eval/surface.rs`'s `record`) that records it: the
 observation crosses the seam as its raw wire form alone (`Datum::encode` of the `Observation`),
 and the card is rebuilt fresh wherever it is drawn. The other surface shapes
 (edit, notice, card, done) have their own arms; a value matching none drops,

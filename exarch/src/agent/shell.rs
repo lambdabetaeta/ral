@@ -1,15 +1,13 @@
-//! One `ral` call — [`Avatar::ral`] — and the two `Arc`-shared cells a
-//! desk handler writes the agent through: a handler answers mid-dispatch, on
-//! the attend thread's own stack inside [`shell_eval::run_shell`], so it can
-//! never take `&mut Avatar` and reaches [`ReplyCell`] and [`LogCell`] through
-//! the [`desk::HostServices`] capture instead.  One thread means a failed
-//! borrow conflict is reentrancy, not contention, so both cells panic where a
-//! `Mutex` would deadlock.
+//! One `ral` call — [`Avatar::ral`] — and the [`SharedCell`]s a desk handler
+//! writes the agent through: a handler answers mid-dispatch, on the attend
+//! thread's own stack inside [`shell_eval::run_shell`], so it can never take
+//! `&mut Avatar` and reaches them through the [`desk::HostServices`] capture
+//! instead.
 
 use crate::agent::Avatar;
+use crate::agent::EngineLost;
 use crate::agent::desk;
 use crate::agent::digest::{OPAQUE_CAP, clip, render};
-use crate::agent::seat::EngineLost;
 use crate::bus::Emitter;
 use crate::record::AgentState;
 use crate::record::{AgentLog, EditAuthority};
@@ -17,67 +15,56 @@ use crate::shell_eval;
 use atomic_refcell::{AtomicRef, AtomicRefCell, AtomicRefMut};
 use ral_core::first_order::FOValue;
 use ral_core::protocol::Report;
-use ral_core::sync::LockExt;
 use std::fmt::Write;
 use std::io;
 use std::sync::Arc;
 
+/// State the attend thread shares with the desk handlers that run on its own
+/// stack.  One thread, so a failed borrow is reentrancy, not contention: it
+/// panics where a `Mutex` would deadlock.
+pub(crate) struct SharedCell<T>(Arc<AtomicRefCell<T>>);
+
+/// The session log, which the spawn spine forks a child's log off.
+pub(crate) type LogCell = SharedCell<AgentLog>;
+
 /// The desk's `reply` slot: within one batch the last write wins, and
 /// [`Avatar::deliberate`] takes it once the batch drains.
-#[derive(Clone, Default)]
-pub(crate) struct ReplyCell(Arc<AtomicRefCell<Option<FOValue>>>);
+pub(crate) type ReplyCell = SharedCell<Option<FOValue>>;
 
-impl ReplyCell {
-    /// Never waits: the one thread that could hold this borrow is the asker.
-    fn borrow_mut(&self) -> AtomicRefMut<'_, Option<FOValue>> {
-        self.0.try_borrow_mut().unwrap_or_else(|_| {
-            panic!(
-                "reply cell contended: a desk handler may only run while the attend thread is \
-                 parked in run_shell"
-            )
-        })
+impl<T> SharedCell<T> {
+    pub(crate) fn new(value: T) -> Self {
+        Self(Arc::new(AtomicRefCell::new(value)))
     }
 
-    pub(crate) fn set(&self, value: FOValue) {
-        *self.borrow_mut() = Some(value);
+    pub(crate) fn borrow(&self) -> AtomicRef<'_, T> {
+        self.0.try_borrow().unwrap_or_else(|_| Self::contended())
     }
 
-    pub(crate) fn take(&self) -> Option<FOValue> {
-        self.borrow_mut().take()
-    }
-}
-
-/// [`Avatar::log`] behind its own cell, so a desk handler can be handed the log
-/// off `&Avatar` — the spawn spine forks a child's log through it — instead of
-/// reaching back through `&mut Avatar`.
-#[derive(Clone)]
-pub(crate) struct LogCell(Arc<AtomicRefCell<AgentLog>>);
-
-impl LogCell {
-    pub(crate) fn new(log: AgentLog) -> Self {
-        Self(Arc::new(AtomicRefCell::new(log)))
-    }
-
-    /// The crate's one way onto the log for writing, and it never waits: a
-    /// failed borrow means a handler asked for a borrow its own attend thread
-    /// already holds.
-    pub(crate) fn borrow_mut(&self) -> AtomicRefMut<'_, AgentLog> {
+    pub(crate) fn borrow_mut(&self) -> AtomicRefMut<'_, T> {
         self.0
             .try_borrow_mut()
             .unwrap_or_else(|_| Self::contended())
     }
 
-    /// The read-only way onto the log; conflicts exactly as [`Self::borrow_mut`].
-    pub(crate) fn borrow(&self) -> AtomicRef<'_, AgentLog> {
-        self.0.try_borrow().unwrap_or_else(|_| Self::contended())
-    }
-
     fn contended() -> ! {
         panic!(
-            "log cell contended: the log may only be borrowed by the attend thread between \
-             calls or by a desk handler while the attend thread is parked in run_shell: \
-             concurrent access is a scheduling bug, not a wait"
+            "{} contended: only the attend thread between calls, or a desk handler while it \
+             is parked in run_shell, may borrow it; concurrent access is a scheduling bug, \
+             not a wait",
+            std::any::type_name::<T>()
         )
+    }
+}
+
+impl<T> Clone for SharedCell<T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<T: Default> Default for SharedCell<T> {
+    fn default() -> Self {
+        Self::new(T::default())
     }
 }
 
@@ -130,10 +117,8 @@ impl Avatar {
     /// An operational note: recorded as a [`crate::record::Forensic::SystemNote`], with no
     /// model-view twin, since the model never saw it.
     pub(crate) fn note(&self, text: String) {
-        let recorder = self.recorder();
-        if let Err(error) = recorder.emit(crate::record::Forensic::SystemNote { text }) {
-            recorder.report_fault(&error);
-        }
+        self.recorder()
+            .emit_or_report(crate::record::Forensic::SystemNote { text });
     }
 
     /// Everything a desk handler may read off `&Avatar`, since the reentrancy
@@ -152,7 +137,6 @@ impl Avatar {
             // Minted here, once per `ral` call: this is the one place a call's
             // whole desk capture is built, so the fragment's extent is the call's.
             acts: desk::ActFragment::default(),
-            principal: ral_core::host::user(),
         }
     }
 
@@ -167,7 +151,7 @@ impl Avatar {
             desk: desk::ExarchDesk {
                 services: self.host_services(emit),
             },
-            apply: desk::SurfaceApplier::new(self.recorder()),
+            apply: shell_eval::surface::SurfaceApplier::new(self.recorder()),
         });
         // Stamped with this session's inbox epoch as read now, so a batch
         // from a worker that settles after a `/clear` is dropped.
@@ -209,20 +193,6 @@ impl Avatar {
             let _ = write!(text, "\nTURN: {turn}");
         }
         Evaluated { text, failed }
-    }
-
-    /// Every pinned slot's summary joined onto one line, for the periodic
-    /// nudge reminder; `None` when nothing is pinned.  Rendered through the
-    /// rail's own `summary_line`, so the reminder reads as the user sees it.
-    pub(super) fn pinned_digest(&self) -> Option<String> {
-        let lines: Vec<String> = self
-            .agent
-            .pins
-            .lock_ignore_poison()
-            .values()
-            .map(|pin| crate::card::summary_line(&pin.card))
-            .collect();
-        (!lines.is_empty()).then(|| lines.join("; "))
     }
 }
 

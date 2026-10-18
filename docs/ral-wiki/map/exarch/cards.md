@@ -109,8 +109,8 @@ rather than anything the window's reader has business with.
 Core's ready-boundary housekeeping (`ral_core::types::Notice`, decoded by
 `Notice::from_surface` in `decode_surface`) has no card. A reaped worker and a pruned binding are each something nobody observed
 for a long while — housekeeping, not news — so they are recorded as
-`Forensic::Reap` and `Forensic::Prune`, written by `agent::desk`'s
-`absorb_surface` — breadcrumbs no fold projects
+`Forensic::Reap` and `Forensic::Prune`, written by `shell_eval::surface`'s
+`record` — breadcrumbs no fold projects
 ([[map/core/engine-protocol|engine-protocol]], [[map/exarch/agent|agent]]).
 
 ## Render — one interpreter, one binding table

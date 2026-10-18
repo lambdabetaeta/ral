@@ -75,7 +75,7 @@ past the bound is examined: a name whose value still structurally reaches a
 deliberately never looks inside a closure's captured environment);
 everything else is unset — value and type-scheme seed
 in one act — and one `Notice::Prune` surfaces to the host, which records it as a
-`Forensic::Prune` naming what fell (`agent::desk`'s `absorb_surface`), shown to
+`Forensic::Prune` naming what fell (`shell_eval::surface::record`), shown to
 no one. A pruned name cannot
 come back through a panic rollback: `Shell::run` checkpoints `env` / `context`
 at *run entry*, after any earlier prune, so the rollback target

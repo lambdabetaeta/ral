@@ -83,6 +83,14 @@ impl Emitter {
         Ok(Recorded::new(stamp, value))
     }
 
+    /// [`Self::emit`] where a failed append has nowhere to go but
+    /// [`Self::report_fault`].
+    pub fn emit_or_report<C: Class>(&self, value: C) {
+        if let Err(error) = self.emit(value) {
+            self.report_fault(&error);
+        }
+    }
+
     /// Publish a transient — a delta, the open thinking line, chrome — with no
     /// durable form and no sequence number of its own.
     pub fn transient(&self, t: Transient) {

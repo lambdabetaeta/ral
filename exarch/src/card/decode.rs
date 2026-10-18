@@ -2,7 +2,7 @@
 //!
 //! Decoding is total: an unknown mark or malformed field degrades to plain
 //! text rather than dropping the card around it, since a card is a deliberate
-//! user-facing act.  `decode_surface` in `shell_eval.rs` calls in here.
+//! user-facing act.  `shell_eval::surface::decode_surface` calls in here.
 
 use ral_core::first_order::FOValue;
 use ral_core::types::WriteOutcome;

@@ -3,7 +3,8 @@
 //! Process-boundary resume coverage: a scripted child leaves a mid-exchange
 //! ledger, the parent terminates it, and a fresh root continues the session.
 
-use exarch::agent::{Avatar, RootConfig, RootSeat, Trunk, deliberate};
+use exarch::agent::outcome::Outcome;
+use exarch::agent::{Avatar, RootConfig, RootSeat, Trunk};
 use exarch::app::{EXARCH, Scratch};
 use exarch::bus::{Emitter, channel};
 use exarch::provider::Provider;
@@ -45,7 +46,7 @@ fn drive(session: &mut Avatar, provider: &Arc<Provider>, prompt: &str) {
     let (tx, _rx) = channel();
     let emit = Emitter::new(tx, session.id());
     let outcome = session.deliberate(provider, Some(prompt.to_string()), None, &emit);
-    assert!(matches!(outcome, Ok(deliberate::Outcome::Complete)));
+    assert!(matches!(outcome, Ok(Outcome::Complete)));
 }
 
 fn root_config(run_dir: &Path) -> RootConfig {

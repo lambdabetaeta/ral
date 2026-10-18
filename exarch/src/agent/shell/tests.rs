@@ -4,7 +4,7 @@
 //! rest on.
 
 use super::*;
-use crate::agent::deliberate;
+use crate::agent::outcome::Outcome;
 use crate::agent::testkit::*;
 use crate::provider::scripted::{Reply, Script};
 use ral_core::Shell;
@@ -114,7 +114,7 @@ fn worker_panic_preserves_completed_bindings_and_clean_context() {
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.agent.id);
     match session.deliberate(&provider2, Some("continue".into()), None, &emit) {
-        Ok(deliberate::Outcome::Complete) => {}
+        Ok(Outcome::Complete) => {}
         other => panic!("next exchange on the healed shell must complete, got {other:?}"),
     }
 }

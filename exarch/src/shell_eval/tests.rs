@@ -7,8 +7,10 @@
 //! contract itself is covered in `core/tests/top_level_vs_block.rs`; these
 //! pin that `run_shell`'s wrapping does not perturb it.
 
+use super::surface::{Decoded, Surface, decode_surface};
 use super::*;
 use crate::bus::{Emitter, Inbox, channel};
+use crate::card::Change;
 use crate::card::Row;
 use ral_core::capability::Capabilities;
 use ral_core::carrier::IdentityTransport;
@@ -16,8 +18,8 @@ use ral_core::fact::Read;
 use ral_core::first_order::datum::Datum as _;
 use ral_core::types::WriteOutcome;
 use ral_core::types::{
-    CallSite, Done, DoneEvent, LeaseClass, Notice, Observed, Pruned, ReapCause, ReapNotice,
-    WorkerId,
+    CallSite, Done, DoneEvent, LeaseClass, Notice, Observation, Observed, Pruned, ReapCause,
+    ReapNotice, WorkerId,
 };
 
 /// Render a path without a trailing separator.  Some hosts return
@@ -65,7 +67,7 @@ fn run_shell_under(
     timeout_secs: u64,
     recorder: &crate::record::Emitter,
 ) -> ToolResult {
-    let applier = Arc::new(crate::agent::desk::SurfaceApplier::new(recorder.clone()));
+    let applier = Arc::new(super::surface::SurfaceApplier::new(recorder.clone()));
     let outcome = run_shell(
         transport,
         stack,

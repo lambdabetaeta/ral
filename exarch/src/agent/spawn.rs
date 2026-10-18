@@ -32,13 +32,13 @@ pub(crate) fn spawn_branch(
     // The branch row's display commit, authored beside the rail row
     // `spawn_async` emits from the same inputs; a harness spawn's recorded
     // row is the desk's own HarnessCall commit instead.
-    if let Err(error) = session.recorder().emit(crate::record::Display::ToolCall {
-        tool: "/branch".to_string(),
-        cmd: "(waiting for you)".to_string(),
-        summary: Some(format!("Agent {name} spawned (/branch).")),
-    }) {
-        session.recorder().report_fault(&error);
-    }
+    session
+        .recorder()
+        .emit_or_report(crate::record::Display::ToolCall {
+            tool: "/branch".to_string(),
+            cmd: "(waiting for you)".to_string(),
+            summary: Some(format!("Agent {name} spawned (/branch).")),
+        });
     let spec = AsyncSpawn { name, prompt: None };
     spawn_async(child, spec, emit)
 }
@@ -77,7 +77,7 @@ pub(crate) fn spawn_async(
     let AsyncSpawn { name, prompt } = spec;
     // Everything below is taken off `child` before it moves into the worker.
     let agent_id = child.agent.id;
-    let log_dir = child.log_dir();
+    let log_dir = child.log_dir().to_path_buf();
     let spawner = child.agent.role.parent().map(|p| p.id);
     // Off a bus whose children are muted (headless's per-exchange default)
     // the child's receiver is already dropped, so it streams nowhere; either
@@ -118,11 +118,9 @@ pub(crate) fn spawn_async(
                 child.attend(&child_emit)
             }))
             .unwrap_or_else(|_| {
-                if let Err(error) = recorder.emit(crate::record::Forensic::Error {
+                recorder.emit_or_report(crate::record::Forensic::Error {
                     text: "sub-agent panicked".into(),
-                }) {
-                    recorder.report_fault(&error);
-                }
+                });
                 AgentOutcome::Failed("sub-agent panicked".into())
             });
             child.recorder().transient(Transient::Died);
@@ -139,11 +137,7 @@ pub(crate) fn spawn_async(
             // The closure never ran, so `child` fell with it, and that drop is
             // the whole of the unwind.
             let msg = format!("could not spawn a worker thread for agent {agent_id}: {e}");
-            if let Err(error) =
-                spawn_recorder.emit(crate::record::Forensic::Error { text: msg.clone() })
-            {
-                spawn_recorder.report_fault(&error);
-            }
+            spawn_recorder.emit_or_report(crate::record::Forensic::Error { text: msg.clone() });
             Err(msg)
         }
     }

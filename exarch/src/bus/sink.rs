@@ -143,9 +143,7 @@ where
             if let Err(p) = &r {
                 let msg = panic_msg(p);
                 let text = format!("{WORKER_PANIC_PREFIX}{msg}");
-                if let Err(e) = recorder.emit(Forensic::Error { text }) {
-                    recorder.report_fault(&e);
-                }
+                recorder.emit_or_report(Forensic::Error { text });
             }
             // Set before `emit` — and its sender clone — drops: the drain stops
             // on this, not on the channel closing.

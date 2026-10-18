@@ -15,6 +15,7 @@ use crate::test_helper::spawn_engine_on;
 use ral_core::seed::{Sealed, seal};
 use ral_core::types::NurseryId;
 use std::os::unix::net::UnixStream;
+use std::sync::Mutex;
 use std::sync::Mutex as StdMutex;
 
 /// Each log takes the next session id, so two of them are never the same
@@ -138,7 +139,6 @@ fn wire_spawnable_desk(fuel: u32, factory: Arc<FakeFactory>) -> (ExarchDesk, Arc
             log: LogCell::new(fresh_log()),
             branch: None,
             acts: ActFragment::default(),
-            principal: ral_core::host::user(),
         },
     };
     (desk, fleet, parent_inbox)
@@ -228,7 +228,7 @@ fn a_sealed_bequest_reaches_the_child_engine() {
     let (mut desk, _fleet, _parent_inbox) = wire_spawnable_desk(3, factory.clone());
     let order = Arc::new(BranchOrder {
         name: "sealed-branch".into(),
-        returns: true,
+        fork: Fork::Returning(crate::enquiry::Memory::Amnemon),
         child: Mutex::default(),
     });
     desk.services.branch = Some(order.clone());
@@ -303,7 +303,6 @@ fn identity_and_wire_peers_exchange_messages_through_one_desk() {
             log: LogCell::new(fresh_log()),
             branch: None,
             acts: ActFragment::default(),
-            principal: ral_core::host::user(),
         },
     };
 

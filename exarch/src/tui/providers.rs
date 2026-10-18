@@ -638,12 +638,8 @@ fn drive(tui: &mut Tui, ctx: &CommandCtx<'_>, holdings: &Holdings, wallet: &Wall
             let text = format!(
                 "[{done} {label}; the running model keeps its connection until you /model]"
             );
-            if let Err(error) = ctx
-                .recorder
-                .emit(crate::record::Forensic::SystemNote { text })
-            {
-                ctx.recorder.report_fault(&error);
-            }
+            ctx.recorder
+                .emit_or_report(crate::record::Forensic::SystemNote { text });
         }
     }
 }

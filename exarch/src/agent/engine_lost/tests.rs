@@ -1,4 +1,7 @@
-use super::super::{EngineLost, EnginePhase};
+//! The sentence is the product here: one sentence, a start told apart from a
+//! death, and both things a debugger needs.
+
+use super::{EngineLost, EnginePhase};
 use ral_core::carrier::Severed;
 
 fn closed() -> Severed {
