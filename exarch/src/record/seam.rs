@@ -10,7 +10,7 @@
 //! sequence number.
 
 use super::log::Log;
-use super::{Class, Publish, Recorded, Transient};
+use super::{Class, Cursor, Publish, Record, Recorded, Transient};
 use std::fmt;
 use std::io;
 use std::path::Path;
@@ -80,6 +80,18 @@ impl Emitter {
         self.log.attach(sink);
     }
 
+    /// A mirror's catch-up: where `after` stands in the current segment,
+    /// and the records past it.  See [`super::log::Log::since`].
+    ///
+    /// # Errors
+    /// The log will not open.
+    pub(crate) fn since(
+        &self,
+        after: Option<Cursor>,
+    ) -> io::Result<(Cursor, impl Iterator<Item = io::Result<Recorded<Record>>> + use<>)> {
+        self.log.since(after)
+    }
+
     /// Append `value` and publish it, in that order, under one lock.
     ///
     /// # Errors
@@ -145,7 +157,7 @@ mod tests {
                 assert_eq!(id, AgentId::new(7));
                 assert!(text.contains("disk is full"), "{text}");
             }
-            Signal::Fact(..) | Signal::Transient(..) => {
+            Signal::Fact(..) | Signal::Born(..) | Signal::Transient(..) => {
                 panic!("expected a Transient::Fault")
             }
         }

@@ -56,8 +56,9 @@ fn drive_deliberate(session: &mut Avatar, provider: &Arc<Provider>, prompt: Opti
     let mut transients = Vec::new();
     for sig in rx {
         match sig {
-            exarch::bus::Signal::Fact(_, fact) => facts.push(fact.into_value()),
+            exarch::bus::Signal::Fact(_, _, fact) => facts.push(fact.into_value()),
             exarch::bus::Signal::Transient(_, transient) => transients.push(transient),
+            exarch::bus::Signal::Born(..) => {}
         }
     }
     Drive {

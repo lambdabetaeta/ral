@@ -20,7 +20,7 @@ pub use signal::Signal;
 pub use sink::Sink;
 
 pub(crate) use channel::MERGE_TEXT_CAP;
-pub(crate) use emitter::FleetBus;
+pub(crate) use emitter::{FleetBus, UsageMeter};
 pub(crate) use inbox::{Inbox, ParkMode, Stamp};
 pub(crate) use post::{AgentMessage, AgentResult, Item, Next, Post, Read, Rewrite, Stamped};
 pub(crate) use signal::WORKER_PANIC_PREFIX;
@@ -29,4 +29,4 @@ pub(crate) use sink::drain_records;
 pub(crate) use sink::{Pass, panic_msg, pump};
 
 #[cfg(test)]
-pub(crate) use emitter::{FleetSink, UsageMeter, dummy_emitter};
+pub(crate) use emitter::{FleetSink, dummy_emitter};

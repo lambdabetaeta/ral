@@ -170,7 +170,7 @@ fn host_panic_is_recorded_and_the_next_prompt_still_deliberates() {
     assert!(
         signals.iter().any(|s| matches!(
             s,
-            crate::bus::Signal::Fact(_, fact)
+            crate::bus::Signal::Fact(_, _, fact)
                 if matches!(fact.value(), Record::Forensic(Forensic::Error { text }) if text.starts_with(WORKER_PANIC_PREFIX))
         )),
         "the unwind must reach the user as an error too"

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 09ea1e45
-generated_at_date: 2026-10-18
+generated_at_commit: 00bf6d29
+generated_at_date: 2026-10-19
 covers_paths: [exarch/src/agent.rs, exarch/src/latch.rs, exarch/src/agent/, exarch/src/signals.rs, exarch/src/cancel.rs, exarch/src/schedule.rs, exarch/src/enquiry.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
 
@@ -131,7 +131,7 @@ naming its session, not a skipped root), founds the fleet seated for the first,
 and hatches each over its record replayed (`AgentLog::resume` takes that same
 name, which `Head` therefore no longer carries), the rest seated through the
 launch's `genesis`. It hands back one `Resumed { turn, bytes }` (`record/session.rs`)
-per root, which the TUI's tab replays.
+per root, which the TUI's tab notes after mirroring the log.
 
 The two halves are `Fleet::found(cfg, root_seat, installers, lease)`
 and `Avatar::hatch(fleet, claim, seat, provider, open)`. `found` seats the first
@@ -748,11 +748,12 @@ old record. The record rename is the rotation commit point. The rotation
 swaps the *file* behind the seam, never the seam: the `Emitter` and its
 attached bus sink are the session's, so every clone already handed out — the
 surface buffer's, the frontend's coupled channel — writes into the new
-segment and keeps publishing. Swapping the `Emitter` instead stranded them
-on the rotated-away file, and the frontend, which resets the tab's view on
-the `Transient::Cleared` that seam publishes, stayed dark for the whole first
-exchange of the cleared session. `Rewrite::Clear` publishes `Cleared` only
-when the clear succeeded; a failed one is an error note alone. Clear then has the agent `forget` — cancel
+segment and keeps publishing, under the log's next `Segment` — which is how
+the frontend learns of the clear, its mirror starting over on the first fact
+that carries it. Swapping the `Emitter` instead stranded them on the
+rotated-away file, and the frontend stayed dark for the whole first exchange
+of the cleared session. A failed clear rotates nothing and is an error note
+alone. Clear then has the agent `forget` — cancel
 its subtree, drop what it was awaiting, clear its wakeups and its pins — and
 rebirths the avatar's `Readings` whole, a rebuilt context having been
 measured and told nothing. It touches no process-wide state: a `/clear` on
@@ -918,8 +919,10 @@ prompt drops the spawn family — `exarch-agents` — and the desk refuses
 `` exarch-agents `start `` with the exhaustion text; the desk remains the runtime wall
 ([[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]]) — so a delegation
 chain bottoms out by refusal a fixed number of generations down. The fork
-mirrors on the bus as `Transient::Born` / `Transient::Died` regardless of
-remaining fuel.
+mirrors on the bus as `Signal::Born` — sent by `spawn_async` minting the
+child's emitter, before its worker thread exists, so it precedes everything the
+child sends — and `Transient::Died`, regardless of remaining fuel; a worker
+thread that cannot be spawned sends the `Died` itself.
 
 `/new` and `/branch` take no fork at all: a root is not a child. `Read::Hatch
 { memory, name }`, run by `Avatar::read`, calls `spawn::spawn_root`, which mints

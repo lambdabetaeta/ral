@@ -172,9 +172,8 @@ pub struct Blocks {
     /// eviction — the door [`Self::blocks`] no longer names once the window
     /// has moved off the session's opening block.
     origin: Option<Seq>,
-    /// High-water [`Seq`]: a resumed memo is seeded from the file and then
-    /// handed the same head records again when the seam's sink attaches, so a
-    /// record at or below this has been folded already.
+    /// High-water [`Seq`]: a record at or below it has been folded already,
+    /// which is what makes a step idempotent.
     seen: Option<Seq>,
 }
 

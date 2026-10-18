@@ -240,9 +240,7 @@ impl Sink for Headless<'_> {
             | Transient::Token(_)
             | Transient::Thinking(_)
             | Transient::State(_)
-            | Transient::Born(_)
             | Transient::Died
-            | Transient::Cleared
             | Transient::Pin { .. }
             | Transient::Unpin { .. } => {}
         }

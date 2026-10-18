@@ -21,13 +21,13 @@ fn root(idle: Duration) -> (Arc<Fleet>, Arc<Agent>) {
 /// A subagent tab whose agent has already settled — the ordinary state of a
 /// tab the frontend still draws.
 fn born(tabs: &mut Tabs, id: AgentId, name: &str, parent: Option<AgentId>) {
-    tabs.born(id, &Born::for_test(name, parent));
+    tabs.born(id, &Born::for_test(name, parent), None);
 }
 
 #[test]
 fn parent_focus_climbs_past_a_lingering_ancestor() {
     let (fleet, root) = root(Duration::ZERO);
-    let mut tabs = Tabs::new(root.id, &Born::for_test("main", None), fleet);
+    let mut tabs = Tabs::new(root.id, &Born::for_test("main", None), fleet, None);
     let (child, grandchild) = (
         AgentId::new(root.id.get() + 1),
         AgentId::new(root.id.get() + 2),
@@ -48,7 +48,7 @@ fn parent_focus_climbs_past_a_lingering_ancestor() {
 #[test]
 fn tick_tombstones_only_the_expired_view_leaving_a_live_sibling_untouched() {
     let (fleet, root) = root(Duration::ZERO);
-    let mut tabs = Tabs::new(root.id, &Born::for_test("main", None), fleet);
+    let mut tabs = Tabs::new(root.id, &Born::for_test("main", None), fleet, None);
     let child = AgentId::new(root.id.get() + 1);
     born(&mut tabs, child, "child", Some(root.id));
     for (id, text) in [(child, "child says hi"), (root.id, "root says hi")] {

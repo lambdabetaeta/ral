@@ -1,6 +1,7 @@
 //! One [`App`] owns the tabs, scrollbacks, prompt, and gesture state, and folds
-//! the [`crate::bus::Signal`] stream — `Fact` through [`App::fact`],
-//! `Transient` through [`App::transient`] — into scrollback blocks.
+//! the [`crate::bus::Signal`] stream — `Fact` through [`App::fact`], `Born`
+//! through [`App::born`], `Transient` through [`App::transient`] — into
+//! scrollback blocks.
 
 use super::block::Chrome;
 use super::gesture::{Effect, GestureState, Toast};
@@ -14,12 +15,11 @@ use super::rewind::RewindOverlay;
 use super::scrollback::Scrollback;
 use super::tabs::{TabRow, Tabs};
 use crate::agent::fleet::Fleet;
-use crate::bus::BusReceiver;
+use crate::bus::{BusReceiver, UsageMeter};
 use crate::card::Card;
 use crate::provider::identity::Account;
 use crate::provider::{Provider, Usage};
-use crate::record::{AgentId, AgentState, Born, Resumed};
-use crate::record::{Display, Forensic, Record, Recorded, Transient};
+use crate::record::{AgentId, AgentState, Born, Record, Recorded, Resumed, Segment, Transient};
 use clipboard::Clipboard;
 
 use ratatui::crossterm::event::{
@@ -27,7 +27,7 @@ use ratatui::crossterm::event::{
 };
 use std::{
     io::{self},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::Arc,
     time::Duration,
 };
@@ -49,9 +49,12 @@ pub(super) enum Overlay {
 pub(crate) struct App {
     pub(super) tabs: Tabs,
     pub(super) prompt_state: PromptState,
-    /// What opens every session's tab, born or cleared.
+    /// What opens every root's view, born or cleared.
     opening: Card,
-    pub(super) total_usage: Usage,
+    /// This run's spend, metered at the seam whatever any view shows.
+    meter: UsageMeter,
+    /// What the resumed sessions' histories had spent.
+    recalled: Usage,
     pub(super) status_model: String,
     /// Modal in behaviour — an early-return guard in [`Self::key`] — and in
     /// rendering: drawn last, over the dimmed session.
@@ -72,16 +75,24 @@ pub(crate) struct App {
 impl App {
     /// Opens on `first`, the first agent born: its tab, focused, and its
     /// session's card and replay, as any later root's.
-    pub fn new(first: AgentId, born: Born, fleet: Arc<Fleet>, vi: bool, opening: Card) -> Self {
+    pub fn new(
+        first: AgentId,
+        born: &Born,
+        fleet: Arc<Fleet>,
+        meter: UsageMeter,
+        vi: bool,
+        opening: Card,
+    ) -> Self {
         let cwd_basename = std::env::current_dir()
             .ok()
             .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
             .unwrap_or_else(|| "?".into());
         let mut app = Self {
-            tabs: Tabs::new(first, &born, fleet),
+            tabs: Tabs::new(first, born, fleet, Some(opening.clone())),
+            meter,
+            recalled: Usage::default(),
             prompt_state: PromptState::new(vi),
             opening,
-            total_usage: Usage::default(),
             status_model: String::new(),
             overlay: None,
             gesture: GestureState::new(),
@@ -91,12 +102,12 @@ impl App {
             cwd_basename,
             last_title: String::new(),
         };
-        app.welcome(first, born);
+        app.welcome(first, born.resumed);
         app
     }
 
     pub fn total_usage(&self) -> Usage {
-        self.total_usage
+        self.recalled + self.meter.total()
     }
 
     /// Set the status bar label from the focused agent's provider. Call at
@@ -231,35 +242,51 @@ impl App {
     }
 
     /// Fold one witnessed record fact into the screen — the sole way a
-    /// `Display`/`Forensic` commit reaches it.  The recording scrollback steps
-    /// its own fold-memo and draws what the step reports
-    /// ([`Scrollback::fact`]);
-    /// [`Display::SubagentDone`] always lands in its tree's root scrollback,
-    /// whatever nesting depth drained the result, since the root is the
-    /// permanent record of delegated work.  A tab in the linger window is
-    /// frozen: it still renders its final frame and ages out, but no further
-    /// event belongs in it.
-    pub fn fact(&mut self, id: AgentId, rec: &Recorded<Record>) {
+    /// `Display`/`Forensic` commit reaches it — through the scrollback that
+    /// mirrors its log ([`Scrollback::fact`]).  A fact that starts the mirror
+    /// over is a `/clear`, which retires the agent's descendants' tabs.  A
+    /// tab in the linger window is frozen: it still renders its final frame
+    /// and ages out, but no further event belongs in it.
+    pub fn fact(&mut self, id: AgentId, segment: Segment, rec: &Recorded<Record>) {
         if self.tabs.lingering(id) {
             return;
         }
-        // The fleet-wide running sum is a different quantity from a session's
-        // own — it must survive a tab's retirement, where `Scrollback::usage`
-        // reads off the view fold it is stepped alongside below.
-        if let Record::Forensic(Forensic::UsageDelta { usage }) = rec.value() {
-            let u = *usage;
-            self.total_usage += u;
+        if self.with_scrollback(id, |sb| sb.fact(segment, rec)) == Some(true) {
+            self.tabs.retire_subtree(id);
+            self.gesture.clear_selection();
         }
-        let target = match rec.value() {
-            Record::Display(Display::SubagentDone { .. }) => self.tabs.root_of(id),
-            _ => id,
+    }
+
+    /// Open the newborn's tab — a root's under the session card — and mirror
+    /// its log as it stands, a resumed session's under the note that marks
+    /// where its history ends.
+    pub fn born(&mut self, id: AgentId, born: &Born) {
+        let opening = born.parent.is_none().then(|| self.opening.clone());
+        self.tabs.born(id, born, opening);
+        self.welcome(id, born.resumed);
+    }
+
+    fn welcome(&mut self, id: AgentId, resumed: Option<Resumed>) {
+        let Some(Resumed { turn, bytes }) = resumed else {
+            self.with_scrollback(id, Scrollback::catch_up);
+            return;
         };
-        self.with_scrollback(target, |sb| sb.fact(rec));
+        if let Some(spent) = self.with_scrollback(id, |sb| {
+            sb.recall(bytes);
+            sb.usage()
+        }) {
+            self.recalled += spent;
+        }
+        self.push_note(
+            id,
+            &format!("resumed: {turn} turns, {} KB", bytes.div_ceil(1024)),
+        );
+        self.with_scrollback(id, Scrollback::catch_up);
     }
 
     /// Draw one live-only transient directly, with no log-backed fold: the
     /// mirror of [`Self::fact`] for [`crate::bus::Signal::Transient`].
-    /// [`Transient::Born`]/[`Transient::Died`]/[`Transient::Resources`] need the tabs a bare
+    /// [`Transient::Died`]/[`Transient::Resources`] need the tabs a bare
     /// `Scrollback` cannot see, so they are answered here; everything else
     /// forwards to [`Scrollback::transient`] on the recording scrollback.
     pub fn transient(&mut self, id: AgentId, t: Transient, bus: &BusReceiver) {
@@ -267,69 +294,12 @@ impl App {
             return;
         }
         match t {
-            Transient::Born(born) => {
-                self.tabs.born(id, &born);
-                self.welcome(id, born);
-            }
             Transient::Died => self.tabs.died(id),
-            // The agent has rebuilt itself: its descendants are cancelled and
-            // its view starts over, under a fresh card.
-            Transient::Cleared => {
-                self.tabs.retire_subtree(id);
-                self.with_scrollback(id, Scrollback::reset);
-                self.gesture.clear_selection();
-                self.open(id);
-            }
             Transient::Resources { card, .. } => self.frontend_resources(id, card, bus),
             Transient::Limits { card } => self.push_chrome(id, Chrome::Framed(card)),
-            other => self.with_scrollback(id, |sb| sb.transient(&other)),
-        }
-    }
-
-    /// For a root, its session's opening: the card, and a resumed session's
-    /// replayed record, spend and boundary note.
-    fn welcome(
-        &mut self,
-        id: AgentId,
-        Born {
-            log_dir,
-            parent,
-            resumed,
-            ..
-        }: Born,
-    ) {
-        if parent.is_some() {
-            return;
-        }
-        self.open(id);
-        if let Some(resumed) = resumed {
-            self.replay(id, &log_dir, resumed);
-        }
-    }
-
-    fn open(&mut self, id: AgentId) {
-        self.push_chrome(id, Chrome::Opening(self.opening.clone()));
-    }
-
-    /// Fold `log_dir`'s record into `id`'s scrollback, so the note below is
-    /// the boundary: everything ahead of it is replayed history, everything
-    /// after is the live session.  The boundary is chrome, never recorded: a
-    /// second resume must not replay a prior one's note as history.
-    fn replay(&mut self, id: AgentId, log_dir: &Path, Resumed { turn, bytes }: Resumed) {
-        let record = log_dir.join("record.jsonl");
-        match crate::record::replay::<crate::record::View>(
-            &record,
-            crate::record::Blocks::default(),
-        ) {
-            Ok(blocks) => {
-                self.total_usage += blocks.usage();
-                self.with_scrollback(id, |sb| sb.seed(blocks));
-                self.push_note(
-                    id,
-                    &format!("resumed: {turn} turns, {} KB", bytes.div_ceil(1024)),
-                );
+            other => {
+                self.with_scrollback(id, |sb| sb.transient(&other));
             }
-            Err(e) => self.push_error(id, &format!("record.jsonl did not replay cleanly: {e}")),
         }
     }
 
@@ -361,17 +331,16 @@ impl App {
     }
 
     /// Hand the session's scrollback to `f`.
-    fn with_scrollback(&mut self, id: AgentId, f: impl FnOnce(&mut Scrollback)) {
-        match self.tabs.scrollback_mut(id) {
-            Some(sb) => f(sb),
-            None => {
-                ral_core::dbg_trace!(
-                    "tui",
-                    "scrollback event DROPPED: no scrollback for id={id}; known={:?}",
-                    self.tabs.ids()
-                );
-            }
-        }
+    fn with_scrollback<R>(&mut self, id: AgentId, f: impl FnOnce(&mut Scrollback) -> R) -> Option<R> {
+        let Some(sb) = self.tabs.scrollback_mut(id) else {
+            ral_core::dbg_trace!(
+                "tui",
+                "scrollback event DROPPED: no scrollback for id={id}; known={:?}",
+                self.tabs.ids()
+            );
+            return None;
+        };
+        Some(f(sb))
     }
 
     pub(super) fn push_chrome(&mut self, id: AgentId, chrome: Chrome) {

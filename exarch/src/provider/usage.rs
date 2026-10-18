@@ -46,6 +46,15 @@ impl std::ops::AddAssign for Usage {
     }
 }
 
+impl std::ops::Add for Usage {
+    type Output = Self;
+
+    fn add(mut self, rhs: Self) -> Self {
+        self += rhs;
+        self
+    }
+}
+
 /// Humanise a token count with the one format shared by every surface.
 pub fn humanize_tokens(n: u64) -> String {
     // Just under a million: otherwise the thousands branch rounds 999_999 to

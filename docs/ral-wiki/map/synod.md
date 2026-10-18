@@ -313,8 +313,8 @@ dropped (a helper's prose is not the conversation); its `Observation`/`Notice`/`
 `Resources` fold to `ProcessCard` exactly as the root's do, `Done` is dropped for both, and its
 `Card` folds in beside them — deliberately, where the root's own `Card` stays
 first-class, since a helper's card is process, not conversation; `Usage`
-still counts, the bill being the exchange's whoever spent it. `Born`/`Died`
-become `SynodEvent::Helpers { live: u32 }`, a counter the sink accumulates and
+still counts, the bill being the exchange's whoever spent it. A birth
+(`Sink::born`) and a `Transient::Died` become `SynodEvent::Helpers { live: u32 }`, a counter the sink accumulates and
 emits on change — one fixed-position magnitude mark in the dial region, no
 stream, no animation, nothing entering the transcript. `SubagentDone` — which
 arrives on the *root's* emitter, since `announce` runs in the parent's own

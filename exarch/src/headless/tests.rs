@@ -4,7 +4,7 @@ use crate::agent::{RootConfig, RootSeat, SPAWN_FUEL, Trunk};
 use crate::bus::Signal;
 use crate::provider::Toolset;
 use crate::provider::scripted::{Reply, Script};
-use crate::record::AgentState;
+use crate::record::{AgentState, Segment};
 use crate::record::{Display, Record};
 use std::sync::Arc;
 
@@ -92,6 +92,7 @@ fn recovered_worker_panic_reports_error_not_success() {
     let mut h = Headless::new(Projection::HeadlessJson, root, &mut sink_out, &mut sink_err);
     h.accept(Signal::Fact(
         root,
+        Segment::placeholder(),
         Recorded::new(
             Locus::placeholder(Seq::new(1)),
             Record::Forensic(Forensic::Error {
@@ -121,6 +122,7 @@ fn num_turns_counts_root_turns() {
         seq += 1;
         Signal::Fact(
             id,
+            Segment::placeholder(),
             Recorded::new(
                 Locus::placeholder(Seq::new(seq)),
                 Record::Display(Display::Turn { id: turn }),
@@ -150,6 +152,7 @@ fn a_card_fact_reaches_stderr_through_the_view_fold() {
     }]);
     h.accept(Signal::Fact(
         root,
+        Segment::placeholder(),
         Recorded::new(
             Locus::placeholder(Seq::new(1)),
             Record::Display(Display::Card { card }),

@@ -13,12 +13,12 @@ fn app() -> (App, BusReceiver, Arc<Agent>) {
     let fleet = Fleet::for_test();
     let root = test_agent(&fleet, TestAgentSpec::new("main")).expect("a fresh root");
     let born = Born::for_test("main", None);
-    let app = App::new(root.id, born, fleet, false, Card(Vec::new()));
+    let app = App::new(root.id, &born, fleet, UsageMeter::default(), false, Card(Vec::new()));
     (app, rx, root)
 }
 
-fn born(app: &mut App, rx: &BusReceiver, id: AgentId, name: &str, parent: AgentId) {
-    app.transient(id, Transient::Born(Born::for_test(name, Some(parent))), rx);
+fn born(app: &mut App, id: AgentId, name: &str, parent: AgentId) {
+    app.born(id, &Born::for_test(name, Some(parent)));
 }
 
 fn text(app: &mut App, id: AgentId) -> String {
@@ -36,9 +36,9 @@ fn text(app: &mut App, id: AgentId) -> String {
 
 #[test]
 fn matrix_cursor_does_not_change_focus_until_enter() {
-    let (mut app, rx, root) = app();
+    let (mut app, _, root) = app();
     let child = AgentId::new(root.id.get() + 1);
-    born(&mut app, &rx, child, "child", root.id);
+    born(&mut app, child, "child", root.id);
 
     let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
     app.key(key(KeyCode::Tab));
@@ -68,10 +68,9 @@ fn matrix_cursor_does_not_change_focus_until_enter() {
 
 #[test]
 fn esc_leaves_the_matrix_without_moving_focus() {
-    let (mut app, rx, root) = app();
+    let (mut app, _, root) = app();
     born(
         &mut app,
-        &rx,
         AgentId::new(root.id.get() + 1),
         "child",
         root.id,
@@ -92,10 +91,9 @@ fn esc_leaves_the_matrix_without_moving_focus() {
 
 #[test]
 fn matrix_mode_swallows_prompt_editing() {
-    let (mut app, rx, root) = app();
+    let (mut app, _, root) = app();
     born(
         &mut app,
-        &rx,
         AgentId::new(root.id.get() + 1),
         "child",
         root.id,
@@ -132,6 +130,7 @@ fn a_pin_never_splits_a_coalesced_observation_run() {
         seq += 1;
         app.fact(
             root.id,
+            Segment::placeholder(),
             &Recorded::new(Locus::placeholder(Seq::new(seq)), Record::Display(display)),
         );
     };
@@ -199,10 +198,11 @@ fn a_dying_tab_admits_no_straggler() {
 
     let (mut app, rx, root) = app();
     let helper = AgentId::new(root.id.get() + 1);
-    born(&mut app, &rx, helper, "helper", root.id);
+    born(&mut app, helper, "helper", root.id);
     let locus = Locus::placeholder(Seq::new(1));
     app.fact(
         helper,
+        Segment::placeholder(),
         &Recorded::new(
             locus,
             Record::Display(Display::Answer {
@@ -221,6 +221,7 @@ fn a_dying_tab_admits_no_straggler() {
     let locus = Locus::placeholder(Seq::new(2));
     app.fact(
         helper,
+        Segment::placeholder(),
         &Recorded::new(
             locus,
             Record::Display(Display::Answer {

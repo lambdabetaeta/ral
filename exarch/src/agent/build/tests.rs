@@ -581,7 +581,6 @@ fn clear_rotates_record_jsonl_and_shared_emitters_follow_the_new_segment() {
             turn: Some(1),
         })
         .expect("the pre-clear recorder still appends");
-    recorder.transient(crate::record::Transient::Cleared);
 
     let current_records = crate::record::read_records(&record).unwrap();
     assert!(matches!(
@@ -597,22 +596,25 @@ fn clear_rotates_record_jsonl_and_shared_emitters_follow_the_new_segment() {
         "the pre-clear recorder must write into the new segment, not the rotated one"
     );
 
-    let published: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    let published: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter_map(|s| match s {
+            crate::bus::Signal::Fact(_, segment, rec) => Some((segment, rec.into_value())),
+            crate::bus::Signal::Born(..) | crate::bus::Signal::Transient(..) => None,
+        })
+        .collect();
     assert!(
-        published.iter().any(|s| matches!(
-            s,
-            crate::bus::Signal::Fact(_, rec)
-                if matches!(rec.value(), crate::record::Record::Display(
-                    crate::record::Display::Prompt { text, .. }) if text == "after the clear")
+        published.iter().any(|(_, r)| matches!(
+            r,
+            crate::record::Record::Display(crate::record::Display::Prompt { text, .. })
+                if text == "after the clear"
         )),
         "and the bus coupled before the clear must still see it"
     );
     assert!(
-        published.iter().any(|s| matches!(
-            s,
-            crate::bus::Signal::Transient(_, crate::record::Transient::Cleared)
-        )),
-        "including the `Cleared` acknowledgement the frontend waits on"
+        published
+            .iter()
+            .all(|&(segment, _)| segment > crate::record::Segment::placeholder()),
+        "under a new segment, which is how a mirror learns of the clear"
     );
 }
 

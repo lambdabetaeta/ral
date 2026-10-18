@@ -20,7 +20,7 @@ use exarch::bus::Sink;
 use exarch::card::{Card, Field, Hunk, Mark, Measure, Span, change_card, observation_display_card};
 use exarch::clock;
 use exarch::provider::ProviderError;
-use exarch::record::AgentId;
+use exarch::record::{AgentId, Born};
 use exarch::record::fault::{Datum, Readout, Remedy};
 use exarch::record::{
     Display, Forensic, Protocol, Record, Recorded, Settlement, Transient, context_rows_card,
@@ -219,7 +219,7 @@ pub enum SynodEvent {
     ProcessCard {
         marks: Vec<MarkDto>,
     },
-    /// The live helper count, folded from every `Transient::Born`/`Died` on
+    /// The live helper count, folded from every birth and `Transient::Died` on
     /// the bus into one running number — the dial's fixed station for "how
     /// many are working", emitted only when the count actually changes.
     Helpers {
@@ -483,16 +483,12 @@ fn project_transient(t: &Transient) -> Option<SynodEvent> {
             message: text.clone(),
         }),
         Transient::Boundary => Some(SynodEvent::Boundary),
-        // A live reasoning chunk has no block of its own here, a cleared
-        // segment draws nothing on its own, and the live pin register is a
-        // slot the window does not have.
-        Transient::Thinking(_)
-        | Transient::Cleared
-        | Transient::Pin { .. }
-        | Transient::Unpin { .. } => None,
+        // A live reasoning chunk has no block of its own here, and the live
+        // pin register is a slot the window does not have.
+        Transient::Thinking(_) | Transient::Pin { .. } | Transient::Unpin { .. } => None,
         // Intercepted by `Router::route_transient` before this fold ever
         // runs — a helper's own lifecycle, folded into `Helpers` instead.
-        Transient::Born(_) | Transient::Died => None,
+        Transient::Died => None,
     }
 }
 
@@ -514,10 +510,9 @@ fn project_transient_helper(t: &Transient) -> Option<SynodEvent> {
         | Transient::State(_)
         | Transient::Boundary
         | Transient::StopReason(_)
-        | Transient::Cleared
         | Transient::Pin { .. }
-        | Transient::Unpin { .. } => None,
-        Transient::Born(_) | Transient::Died => None,
+        | Transient::Unpin { .. }
+        | Transient::Died => None,
     }
 }
 
@@ -570,20 +565,18 @@ impl Router {
         }
     }
 
-    /// Route one live delta: a helper's own [`Transient::Born`]/[`Died`] cut
-    /// across the split the same way — a helper's own lifecycle, folded into
-    /// the one running [`SynodEvent::Helpers`] count rather than either
-    /// per-agent fold.
+    /// Route one live delta: a helper's own [`Transient::Died`] cuts across
+    /// the split the same way its birth does (`Sink::born`) — a helper's
+    /// own lifecycle, folded into the one running [`SynodEvent::Helpers`]
+    /// count rather than either per-agent fold.
     fn route_transient(&mut self, id: AgentId, t: &Transient) -> Option<SynodEvent> {
         match t {
-            Transient::Born(_) => return Some(self.bump_helpers(1)),
             Transient::Died => return Some(self.bump_helpers(-1)),
             Transient::Token(_)
             | Transient::Thinking(_)
             | Transient::State(_)
             | Transient::Boundary
             | Transient::StopReason(_)
-            | Transient::Cleared
             | Transient::Resources { .. }
             | Transient::Limits { .. }
             | Transient::Pin { .. }
@@ -643,6 +636,11 @@ impl Sink for TauriSink {
         self.send(dto);
     }
 
+    fn born(&mut self, _id: AgentId, _born: &Born) {
+        let dto = Some(self.router.bump_helpers(1));
+        self.send(dto);
+    }
+
     fn transient(&mut self, id: AgentId, t: &Transient) {
         let dto = self.router.route_transient(id, t);
         self.send(dto);
@@ -658,7 +656,6 @@ mod tests {
     use ral_core::fact::Worker;
     use ral_core::first_order::datum::Datum as _;
     use ral_core::types::{Observation, Observed};
-    use std::path::PathBuf;
 
     /// The wire form a `Display::Observation` carries.
     fn observation_wire(what: Observed) -> ral_core::first_order::FOValue {
@@ -855,28 +852,12 @@ mod tests {
         let mut router = Router::default();
         router.route_transient(AgentId::new(0), &Transient::State(AgentState::Ready));
 
-        let dir = tempfile::tempdir().expect("a temp dir");
-        let recorder = exarch::record::Emitter::create(&dir.path().join("record.jsonl"))
-            .expect("a record log");
-        let born = |id: AgentId| {
-            Transient::Born(exarch::record::Born {
-                log_dir: PathBuf::new(),
-                name: format!("helper-{id}"),
-                parent: Some(AgentId::new(0)),
-                resumed: None,
-                recorder: recorder.clone(),
-            })
-        };
-        let Some(SynodEvent::Helpers { live }) =
-            router.route_transient(AgentId::new(1), &born(AgentId::new(1)))
-        else {
-            panic!("a Born must announce the live count");
+        let SynodEvent::Helpers { live } = router.bump_helpers(1) else {
+            panic!("a birth must announce the live count");
         };
         assert_eq!(live, 1);
-        let Some(SynodEvent::Helpers { live }) =
-            router.route_transient(AgentId::new(2), &born(AgentId::new(2)))
-        else {
-            panic!("a second Born must announce the live count");
+        let SynodEvent::Helpers { live } = router.bump_helpers(1) else {
+            panic!("a second birth must announce the live count");
         };
         assert_eq!(live, 2);
         let Some(SynodEvent::Helpers { live }) =

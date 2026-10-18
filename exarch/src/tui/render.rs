@@ -188,13 +188,13 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
         .tabs
         .scrollback(focused)
         .map_or((0, None), Scrollback::gauge);
+    let total_usage = app.total_usage();
     // Field-wise from here: the editor draws through `&mut prompt_state` while
     // the rest of the frame reads its siblings.
     let App {
         prompt_state,
         gesture,
         overlay,
-        total_usage,
         status_model,
         ..
     } = &mut *app;
@@ -218,7 +218,7 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
                 s.text.width.min(READ_W) as usize,
                 state,
                 scroll_pct,
-                total_usage,
+                &total_usage,
                 last_input,
                 context_window,
                 status_model,

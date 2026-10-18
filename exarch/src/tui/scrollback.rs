@@ -11,8 +11,14 @@
 //!
 //! [`Scrollback::fact`] is the sole producer: it steps the fold beside the
 //! mirror and acts on what the step reports, and [`Scrollback::transient`]
-//! draws whatever is live-only — [`Scrollback::push_chrome`], the chrome door, and
-//! [`Scrollback::push_thinking`], which carries the open line the live tail draws.
+//! draws whatever is live-only — [`Scrollback::push_chrome`], the chrome door,
+//! and [`Scrollback::push_thinking`], which carries the open line the live
+//! tail draws.
+//!
+//! The mirror is a cursor over one log, and the channel only its fast path:
+//! what the channel cannot vouch for — the log as it stood at birth, a gap, a
+//! new segment — it reads from the log itself ([`Scrollback::catch_up`]), and
+//! a record heard twice folds once.
 
 use super::block::{AgentSlot, Block, BlockKind, Chrome, Detail, Member, Part, seam};
 use super::fidelity::Fidelity;
@@ -24,7 +30,10 @@ use super::row::Row;
 use super::select::plain_slice;
 use crate::card::{self, Card, Change, Landed, observation_card, observation_spans};
 use crate::provider::Usage;
-use crate::record::{self, BlockId, Blocks, Delta, Seq, Transient};
+use crate::record::{
+    self, BlockId, Blocks, Cursor, Delta, Emitter as Recorder, Record, Recorded, Segment, Seq,
+    Transient,
+};
 use ral_core::first_order::datum::Datum as _;
 use ral_core::types::{Observation, Observed};
 use std::fs;
@@ -77,6 +86,13 @@ pub(super) struct Scrollback {
     /// Its window is the one window: a block leaves the mirror exactly as the
     /// block it was built from leaves the fold.
     fold: Blocks,
+    /// The log this mirrors, read back whenever the channel cannot vouch for
+    /// the next record.
+    recorder: Recorder,
+    /// How far the mirror has read its log; `None` until it first does.
+    cursor: Option<Cursor>,
+    /// The chrome a segment opens under: a root's session card.
+    opening: Option<Card>,
     /// Top visible visual row, per-scrollback so each tab keeps its place.
     offset: usize,
     /// Follow the tail.  Cleared by a scroll either way, re-armed at the bottom.
@@ -287,12 +303,19 @@ pub(super) fn export_log(src: &Path, dest: &Path) -> io::Result<u64> {
 impl Scrollback {
     /// `append` continues a resumed session's `user.log` where the run that
     /// recorded it left off; a fresh session starts the file empty.  The
-    /// resumed mirror itself is built by [`Self::seed`], which is what keeps
+    /// resumed mirror itself is built by [`Self::recall`], which is what keeps
     /// the continuation from repeating what the file already holds.
     /// `thinking` is the standing rung a view is born at — owned by the caller
     /// ([`super::tabs::Tabs`]'s own), so a new view is never told twice, nor
-    /// left disagreeing.
-    pub(super) fn new(log_path: PathBuf, agent: AgentSlot, append: bool, thinking: Detail) -> Self {
+    /// left disagreeing.  The mirror holds nothing until it reads `recorder`.
+    pub(super) fn new(
+        log_path: PathBuf,
+        agent: AgentSlot,
+        append: bool,
+        thinking: Detail,
+        recorder: Recorder,
+        opening: Option<Card>,
+    ) -> Self {
         Self {
             log: Log::open(&log_path, append),
             blocks: Vec::new(),
@@ -301,6 +324,9 @@ impl Scrollback {
             answer: String::new(),
             thinking_line: String::new(),
             fold: Blocks::default(),
+            recorder,
+            cursor: None,
+            opening,
             offset: 0,
             sticky: true,
             log_path,
@@ -311,26 +337,70 @@ impl Scrollback {
         }
     }
 
-    /// Build the mirror of a resumed session's replayed fold, which becomes
-    /// this printer's own memo.  Every block in it opened once, in order, so
-    /// live and resumed scrollback are the same construction; the run that
-    /// recorded them already wrote them into `user.log`, so the seeded prefix
-    /// is marked as the file's own and the transcript continues rather than
-    /// repeats.
-    pub(super) fn seed(&mut self, fold: Blocks) {
-        self.fold = fold;
-        for at in 0..self.fold.blocks().len() {
-            self.opened(at);
-        }
+    /// Mirror a resumed session's history: the records in the log's first
+    /// `bytes`.  The run that recorded them already wrote their blocks into
+    /// `user.log`, so the file is withheld from `trim` meanwhile and the
+    /// mirror marked as its own: the transcript continues rather than repeats.
+    pub(super) fn recall(&mut self, bytes: u64) {
+        let file = self.log.file.take();
+        self.read_log(|rec| rec.locus().bytes().start < bytes);
+        self.log.file = file;
         self.log.seeded = self.blocks.len();
+    }
+
+    /// Read the log past this mirror's cursor — all of the current segment
+    /// when the mirror holds an older one — exactly as if it had arrived
+    /// live.
+    pub(super) fn catch_up(&mut self) {
+        self.read_log(|_| true);
+    }
+
+    /// [`Self::catch_up`], stopping at the first record `keep` refuses.
+    fn read_log(&mut self, keep: impl Fn(&Recorded<Record>) -> bool) {
+        let read = self.recorder.since(self.cursor).and_then(|(from, records)| {
+            self.adopt(from);
+            for rec in records {
+                let rec = rec?;
+                if !keep(&rec) {
+                    break;
+                }
+                self.step(&rec);
+            }
+            Ok(())
+        });
+        if let Err(e) = read {
+            self.push_chrome(Chrome::Error(format!(
+                "record.jsonl did not read back: {e}; this view may be missing some of it"
+            )));
+        }
+    }
+
+    /// Read on from `from`.  A newer segment than the mirror's starts it over
+    /// under its opening; the log never hands back an older one.
+    fn adopt(&mut self, from: Cursor) {
+        let held = self.cursor.map(Cursor::segment);
+        if held >= Some(from.segment()) {
+            return;
+        }
+        if held.is_some() {
+            self.reset();
+        }
+        self.cursor = Some(from);
+        if let Some(card) = self.opening.clone() {
+            self.push_chrome(Chrome::Opening(card));
+        }
+    }
+
+    /// The log this view mirrors, for a command the frontend records into it.
+    pub(super) fn recorder(&self) -> &Recorder {
+        &self.recorder
     }
 
     pub(super) fn agent(&self) -> AgentSlot {
         self.agent
     }
 
-    /// This session's spend — the matrix's per-agent readout, where
-    /// `App::total_usage` is the rule line's sum over all of them.
+    /// This segment's spend — the matrix's per-agent readout.
     pub(super) fn usage(&self) -> Usage {
         self.fold.usage()
     }
@@ -415,11 +485,17 @@ impl Scrollback {
     }
 
     /// Wipe scrollback, scroll state, and streaming buffers, truncating
-    /// `user.log` by reopening it.  `/clear`.
-    pub(super) fn reset(&mut self) {
-        let log_path = self.log_path.clone();
-        let agent = self.agent;
-        *self = Self::new(log_path, agent, false, self.thinking);
+    /// `user.log` by reopening it: `/clear`.  The log and opening carry over;
+    /// the cursor is the caller's to set.
+    fn reset(&mut self) {
+        *self = Self::new(
+            self.log_path.clone(),
+            self.agent,
+            false,
+            self.thinking,
+            self.recorder.clone(),
+            self.opening.take(),
+        );
     }
 
     /// Whether this view has been evicted — the one bit that says its tab has
@@ -1148,7 +1224,7 @@ impl Scrollback {
     /// instead — a mirror never mints a [`record::Block`] of its own — and
     /// grows the block it belongs to.
     ///
-    /// [`Transient::Born`], [`Transient::Died`], [`Transient::Resources`], and
+    /// [`Transient::Died`], [`Transient::Resources`], and
     /// [`Transient::Limits`] reach no-ops here: each needs either the tabs a
     /// bare `Scrollback` cannot see or routing by id, so `App::transient`
     /// intercepts and answers them itself, ahead of this call.
@@ -1168,7 +1244,6 @@ impl Scrollback {
                 self.push_thinking(text);
             }
             Transient::State(state) => self.set_state(*state),
-            Transient::Cleared => self.reset(),
             Transient::StopReason(raw) => {
                 self.push_chrome(Chrome::StopReason(raw.clone()));
             }
@@ -1186,11 +1261,32 @@ impl Scrollback {
                 self.answer.clear();
                 self.thinking_line.clear();
             }
-            Transient::Born(_)
-            | Transient::Died
-            | Transient::Resources { .. }
-            | Transient::Limits { .. } => {}
+            Transient::Died | Transient::Resources { .. } | Transient::Limits { .. } => {}
         }
+    }
+
+    /// Mirror one fact heard live in `segment`, first reading the log when
+    /// the fact is not the next one this mirror holds: a newer segment, or a
+    /// gap.  A straggler from an older segment is dropped.  Reports whether
+    /// the fact started the mirror over — a `/clear`.
+    pub(super) fn fact(&mut self, segment: Segment, rec: &Recorded<Record>) -> bool {
+        let held = self.cursor.map(Cursor::segment);
+        if Some(segment) < held {
+            return false;
+        }
+        let seq = rec.locus().seq().get();
+        if Some(segment) > held || self.cursor.is_some_and(|c| seq > c.next()) {
+            self.catch_up();
+            // A catch-up that could not read leaves the channel to trust.
+            self.adopt(Cursor::at(segment));
+        }
+        if let Some(cursor) = self.cursor
+            && cursor.segment() == segment
+            && seq >= cursor.next()
+        {
+            self.step(rec);
+        }
+        held.is_some() && self.cursor.map(Cursor::segment) != held
     }
 
     /// Step the fold beside the mirror and draw what the step reports.  A
@@ -1201,7 +1297,8 @@ impl Scrollback {
     /// The record is handed over only to step that memo: the drawing below
     /// reads [`record::BlockKind`] off the fold, never the record vocabulary,
     /// so a second hand-rolled projection cannot compile.
-    pub(super) fn fact(&mut self, rec: &record::Recorded<record::Record>) {
+    fn step(&mut self, rec: &Recorded<Record>) {
+        self.cursor = self.cursor.map(|cursor| cursor.past(rec.locus()));
         // `Blocks::step` never actually refuses a live commit — no arm returns
         // `Err` — so a refusal here would mean the fold learned a new failure
         // mode this mirror does not yet know to report.

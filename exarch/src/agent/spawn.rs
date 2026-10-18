@@ -118,21 +118,24 @@ pub(crate) fn spawn_async(
         prompt,
         resumed,
     } = spec;
-    // Everything below is taken off `child` before it moves into the worker.
     let agent_id = child.agent.id;
-    let log_dir = child.log_dir().to_path_buf();
-    let spawner = child.agent.role.parent().map(|p| p.id);
     let fleet = Arc::clone(&child.fleet);
     // Off a bus whose children are muted (headless's per-exchange default)
     // the child's receiver is already dropped, so it streams nowhere; either
     // way its own record seam is recorded through whether or not anyone
     // watches.
     let child_emit = if emit.spawns_live_children() {
-        emit.child(agent_id, child.agent.mailbox.clone())
+        let born = Born {
+            log_dir: child.log_dir().to_path_buf(),
+            name: name.clone(),
+            parent: child.agent.role.parent().map(|p| p.id),
+            resumed,
+            recorder: child.recorder(),
+        };
+        emit.child(agent_id, child.agent.mailbox.clone(), born)
     } else {
         emit.muted_child(agent_id)
     };
-    let born_name = name.clone();
     // The only downward edge into the child is this one write.
     if let Some(p) = &prompt {
         child.seed(p.clone());
@@ -141,25 +144,14 @@ pub(crate) fn spawn_async(
     // `spawn_root`'s `Display::ToolCall` beside this call, a harness spawn's
     // at the desk's own commitment arm — so this spine mints no row of its own.
     // Taken before the move below, so a spawn that never runs can still
-    // report through it.
+    // report through them, and end the birth already announced.
     let spawn_recorder = child.recorder();
+    let mourner = child_emit.fleet_sink();
     let worker = thread::Builder::new()
         .name(format!("exarch-agent-{agent_id}"))
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
-            // Opens the child's tab before its first token, and the stamped id
-            // routes every later event to it; a no-op on a muted emitter. The
-            // child's own recorder, coupled to this bus ahead of `attend`'s
-            // own coupling, so the birth is on air before the first token.
             let recorder = child.recorder();
-            child.couple(&child_emit);
-            recorder.transient(Transient::Born(Born {
-                log_dir,
-                name: born_name,
-                parent: spawner,
-                resumed,
-                recorder: recorder.clone(),
-            }));
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 child.attend(&child_emit)
             }))
@@ -185,6 +177,7 @@ pub(crate) fn spawn_async(
             // the whole of the unwind.
             let msg = format!("could not spawn a worker thread for agent {agent_id}: {e}");
             spawn_recorder.emit_or_report(crate::record::Forensic::Error { text: msg.clone() });
+            mourner.transient(Transient::Died);
             Err(msg)
         }
     }

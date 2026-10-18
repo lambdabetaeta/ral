@@ -7,7 +7,7 @@
 //! and the TUI's `ui_loop` in `tui/tui_loop.rs` drive it, so they cannot drift.
 
 use super::{BusReceiver, Emitter, FleetBus, Mailbox, Signal, WORKER_PANIC_PREFIX};
-use crate::record::{AgentId, Forensic, Record, Recorded, Transient};
+use crate::record::{AgentId, Born, Forensic, Record, Recorded, Transient};
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
@@ -78,8 +78,13 @@ pub trait Sink {
     /// the record only to step its own memo — never to render the record
     /// vocabulary from it, which it draws from
     /// [`BlockKind`](crate::record::BlockKind) off the memo instead, so a
-    /// second hand-rolled projection cannot compile.
+    /// second hand-rolled projection cannot compile.  A sink narrates one
+    /// exchange, which no `/clear` crosses, and keeps no cursor into the log,
+    /// so it is not told the fact's segment.
     fn fact(&mut self, _id: AgentId, _rec: &Recorded<Record>) {}
+
+    /// An agent's birth, ahead of anything it sends.
+    fn born(&mut self, _id: AgentId, _born: &Born) {}
 
     /// A [`Transient`] delta reaching the sink live — no durable form and no
     /// sequence number, so only a frontend folding over `Transient` directly
@@ -103,10 +108,11 @@ pub trait Sink {
         }
     }
 
-    /// Route one raw signal to `fact` or `transient`.
+    /// Route one raw signal to `fact`, `born` or `transient`.
     fn accept(&mut self, sig: Signal) {
         match sig {
-            Signal::Fact(id, fact) => self.fact(id, &fact),
+            Signal::Fact(id, _, fact) => self.fact(id, &fact),
+            Signal::Born(id, born) => self.born(id, &born),
             Signal::Transient(id, t) => self.transient(id, &t),
         }
     }
@@ -162,8 +168,8 @@ where
 pub(crate) fn drain_records(rx: &BusReceiver) -> Vec<Record> {
     std::iter::from_fn(|| rx.try_recv().ok())
         .filter_map(|sig| match sig {
-            Signal::Fact(_, rec) => Some(rec.into_value()),
-            Signal::Transient(..) => None,
+            Signal::Fact(_, _, rec) => Some(rec.into_value()),
+            Signal::Born(..) | Signal::Transient(..) => None,
         })
         .collect()
 }

@@ -1,9 +1,10 @@
 //! The syscall site for `sessions/<n>/record.jsonl`: the only file handle in the
 //! tree for this log.  `append` is reachable only from [`super::seam`], and
-//! `read` only from [`super::replay()`] — Rust cannot restrict a `pub` item to
-//! one specific sibling module, so both are `pub(super)`, visible across
-//! `record/` and nowhere past it; the narrower promise is a matter of review,
-//! not the type system, exactly as the module map's own risk note admits.
+//! `read` only from [`super::replay()`] and [`Log::since`] — Rust cannot
+//! restrict a `pub` item to one specific sibling module, so both are
+//! `pub(super)`, visible across `record/` and nowhere past it; the narrower
+//! promise is a matter of review, not the type system, exactly as the module
+//! map's own risk note admits.
 //!
 //! The fleet publisher lives inside the same mutex as the writer ([`Inner`]),
 //! so a record can only be published while its append is held: no code path
@@ -25,17 +26,15 @@
 //! be truncated, tailed, grepped or deleted without any consequence for
 //! resume.
 //!
-//! The seam therefore delivers every record to the sink exactly once,
-//! whenever the sink arrives: records appended before the first attach are
-//! kept and published, in order, by [`Log::attach`].  A publish onto a *dead*
-//! channel stays a no-op on purpose — the record is already durable, and a
-//! consumer that stopped listening catches up from the file.
+//! The channel is a fast path, never the record: a record appended with no
+//! sink attached, or onto a dead channel, is published nowhere.  A consumer
+//! that mirrors the log catches up from the file instead ([`Log::since`]).
 
-use super::{Entry, Locus, Publish, Record, Recorded, Seq, Transient};
+use super::{Cursor, Entry, Locus, Publish, Record, Recorded, Segment, Seq, Transient};
 use crate::app::now_unix_ms;
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufRead, BufReader, BufWriter, Write};
-use std::path::Path;
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 /// `inner` is outside the workspace's poison door ([`ral_core::sync::LockExt`])
@@ -49,20 +48,17 @@ pub(crate) struct Log {
 }
 
 struct Inner {
-    /// `None` for the store-less log tests build: facts still stamp and
-    /// publish, they just have no durable form.
-    writer: Option<BufWriter<File>>,
+    /// The segment's file and its writer.  `None` for the store-less log
+    /// tests build: facts still stamp and publish, they just have no durable
+    /// form.
+    writer: Option<(PathBuf, BufWriter<File>)>,
     /// The readable mirror described in the module docs.  `None` both where
     /// there is no `writer` at all and where the mirror could not be opened —
     /// a diagnostic that cannot be written is not a reason to fail a session
     /// whose real record is going down fine.
     plain: Option<BufWriter<File>>,
     sink: Option<Box<dyn Publish>>,
-    /// What was appended before any sink attached — a session's bookend, a
-    /// fork's inherited context — held so the first sink to arrive is not
-    /// missing the head of its own log.  Emptied by [`Log::attach`] and never
-    /// refilled: after an attach there is a sink, live or dead.
-    pending: Vec<Recorded<Record>>,
+    segment: Segment,
     seq: u64,
     /// This process's own append cursor, tracked rather than re-derived from
     /// `Seek`, so a flush never has to double as a position query.
@@ -81,7 +77,7 @@ impl Log {
     pub(crate) fn create(path: &Path) -> io::Result<Self> {
         let file = File::create(path)?;
         Ok(Self::over(
-            Some(BufWriter::new(file)),
+            Some((path.to_path_buf(), BufWriter::new(file))),
             plain_writer(path, false),
             0,
             0,
@@ -115,7 +111,8 @@ impl Log {
                         break;
                     }
                     pos += read;
-                    seq += u64::from(line.ends_with(b"\n"));
+                    // `read`'s own rule: a terminated line that is not empty.
+                    seq += u64::from(line.len() > 1 && line.ends_with(b"\n"));
                 }
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -123,7 +120,7 @@ impl Log {
         }
         let file = OpenOptions::new().create(true).append(true).open(path)?;
         Ok(Self::over(
-            Some(BufWriter::new(file)),
+            Some((path.to_path_buf(), BufWriter::new(file))),
             plain_writer(path, true),
             seq,
             pos,
@@ -137,7 +134,7 @@ impl Log {
     }
 
     fn over(
-        writer: Option<BufWriter<File>>,
+        writer: Option<(PathBuf, BufWriter<File>)>,
         plain: Option<BufWriter<File>>,
         seq: u64,
         pos: u64,
@@ -147,7 +144,7 @@ impl Log {
                 writer,
                 plain,
                 sink: None,
-                pending: Vec::new(),
+                segment: Segment(0),
                 seq,
                 pos,
             }),
@@ -160,10 +157,10 @@ impl Log {
     /// the file's, never the session's: swapping the `Log` instead would
     /// strand the bus and every `Emitter` clone on the rotated-away file.
     ///
-    /// `Seq`/`Locus` ranges are per-segment, not per-session: this only stays
-    /// sound because `rotate`'s one caller, `/clear`, resets every fold
-    /// (model memo, view) in the same beat, so nothing straddling the old
-    /// numbering survives to be confused by the new one starting at zero.
+    /// `Seq`/`Locus` ranges are per-segment, not per-session: the model memo
+    /// is reset by `/clear`, `rotate`'s one caller, in the same beat, and a
+    /// live consumer tells the numberings apart by the [`Segment`] bumped
+    /// here.
     ///
     /// # Errors
     /// Returns `Err` if the new file cannot be created, or the lock is
@@ -174,7 +171,9 @@ impl Log {
     )]
     #[allow(clippy::disallowed_methods, reason = "see [`Log`]")]
     pub(super) fn rotate(&self, path: Option<&Path>) -> io::Result<()> {
-        let writer = path.map(File::create).transpose()?.map(BufWriter::new);
+        let writer = path
+            .map(|path| File::create(path).map(|file| (path.to_path_buf(), BufWriter::new(file))))
+            .transpose()?;
         // The readable mirror rotates with the file it mirrors, and for the
         // same reason `/clear` rotates at all: a segment's lines belong to the
         // segment, and a mirror left pointing at the old one would narrate a
@@ -186,30 +185,52 @@ impl Log {
             .map_err(|_| io::Error::other("record log lock poisoned"))?;
         inner.writer = writer;
         inner.plain = plain;
-        // Undelivered records of the segment being left behind: the new
-        // numbering starts at zero, so publishing them past this point would
-        // hand a fold two records claiming one `Seq`.
-        inner.pending.clear();
+        inner.segment = inner.segment.next();
         inner.seq = 0;
         inner.pos = 0;
         drop(inner);
         Ok(())
     }
 
-    /// Point this log's publisher at a live fleet channel, delivering whatever
-    /// was appended before any sink existed.  Called wherever a session's seam
-    /// meets a run's bus (attend, deliberate, a direct `Avatar::ral`);
-    /// re-attaching over a dead per-exchange channel is the ordinary way a
-    /// headless session's next exchange comes back on air.
+    /// Point this log's publisher at a fleet channel.  Called wherever a
+    /// session's seam meets a run's bus (attend, deliberate, a direct
+    /// `Avatar::ral`); re-attaching over a dead per-exchange channel is the
+    /// ordinary way a headless session's next exchange comes back on air.
     #[allow(clippy::disallowed_methods, reason = "see [`Log`]")]
     pub(super) fn attach(&self, sink: Box<dyn Publish>) {
-        let Ok(mut inner) = self.inner.lock() else {
-            return;
-        };
-        for recorded in std::mem::take(&mut inner.pending) {
-            sink.fact(recorded);
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.sink = Some(sink);
         }
-        inner.sink = Some(sink);
+    }
+
+    /// Where `after` stands in the current segment — at its head when `after`
+    /// names another segment, or none — and the records past it.  The lock
+    /// fixes only the segment, its extent and a handle on its file: whatever
+    /// lands later reaches the channel, so a consumer that reads this and
+    /// then drains misses nothing.
+    ///
+    /// # Errors
+    /// The lock is poisoned or the file will not open; a line that will not
+    /// parse arrives as an `Err` item.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[silent:record-file-read] streams the session's record.jsonl for a mirror's catch-up; output infra, not turn-time data I/O"
+    )]
+    pub(super) fn since(
+        &self,
+        after: Option<Cursor>,
+    ) -> io::Result<(Cursor, impl Iterator<Item = io::Result<Recorded<Record>>> + use<>)> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| io::Error::other("record log lock poisoned"))?;
+        let from = after
+            .filter(|cursor| cursor.segment == inner.segment)
+            .unwrap_or_else(|| Cursor::at(inner.segment));
+        let file = inner.writer.as_ref().map(|(path, _)| File::open(path)).transpose()?;
+        let until = inner.pos;
+        drop(inner);
+        Ok((from, Self::records(file, from.seq, from.end, until)?))
     }
 
     /// Append `record`, then publish it on the attached channel before
@@ -231,7 +252,7 @@ impl Log {
         line.push(b'\n');
         let Entry { record, .. } = entry;
         let start = inner.pos;
-        if let Some(writer) = inner.writer.as_mut() {
+        if let Some((_, writer)) = inner.writer.as_mut() {
             writer.write_all(&line)?;
             writer.flush()?;
         }
@@ -254,9 +275,8 @@ impl Log {
         let body = &line[..line.len() - 1];
         let locus = Locus::over(Seq::new(inner.seq), start, body);
         let recorded = Recorded::new(locus.clone(), record);
-        match &inner.sink {
-            Some(sink) => sink.fact(recorded),
-            None => inner.pending.push(recorded),
+        if let Some(sink) = &inner.sink {
+            sink.fact(inner.segment, recorded);
         }
         drop(inner);
         Ok(locus)
@@ -289,12 +309,28 @@ impl Log {
     )]
     pub(super) fn read(
         path: &Path,
-    ) -> io::Result<impl Iterator<Item = io::Result<Recorded<Record>>>> {
-        let mut lines = BufReader::new(File::open(path)?).split(b'\n');
-        let (mut seq, mut pos) = (0u64, 0u64);
+    ) -> io::Result<impl Iterator<Item = io::Result<Recorded<Record>>> + use<>> {
+        Self::records(Some(File::open(path)?), 0, 0, u64::MAX)
+    }
+
+    /// The records of `file` from byte `pos`, where record `seq` ended, up to
+    /// byte `until`; none without a file.
+    fn records(
+        file: Option<File>,
+        mut seq: u64,
+        mut pos: u64,
+        until: u64,
+    ) -> io::Result<impl Iterator<Item = io::Result<Recorded<Record>>> + use<>> {
+        let mut lines = match file {
+            Some(mut file) => {
+                let _at = file.seek(SeekFrom::Start(pos))?;
+                Some(BufReader::new(file.take(until.saturating_sub(pos))).split(b'\n'))
+            }
+            None => None,
+        };
         Ok(std::iter::from_fn(move || {
             loop {
-                let line = match lines.next()? {
+                let line = match lines.as_mut()?.next()? {
                     Ok(line) => line,
                     Err(error) => return Some(Err(error)),
                 };

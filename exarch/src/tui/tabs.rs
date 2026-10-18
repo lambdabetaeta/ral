@@ -9,6 +9,7 @@ use super::palette::AGENT_HUES;
 use super::resources::ViewFigures;
 use crate::agent::Agent;
 use crate::agent::fleet::Fleet;
+use crate::card::Card;
 use crate::record::{AgentId, Born, Emitter as Recorder};
 
 use super::block::{AgentSlot, Detail};
@@ -26,21 +27,19 @@ pub(super) struct Tab {
     /// The spawning agent, so focus can climb toward it when the focused agent
     /// ends.  `None` for a root.
     parent: Option<AgentId>,
-    /// The agent's own record seam, off `Born`: how a command the frontend
-    /// owns (`/model`, `/limits`) is recorded in this tab's log.
-    recorder: Recorder,
     /// Retained past death and past bar expiry — tombstoned, not dropped — so
     /// `App::flush_logs` can still write this session's `user.log`.
     scrollback: Scrollback,
-    /// The linger clock: the stream position of `Died`, or of the `Cleared`
+    /// The linger clock: the stream position of `Died`, or of the `/clear`
     /// that retired this tab's creator.  In the bar while `None` or younger
     /// than [`LINGER`].
     retired: Option<Instant>,
 }
 
 impl Tab {
-    /// The tab `born` announces, `slot`ted among the bar's hues.
-    fn new(id: AgentId, born: &Born, slot: usize, thinking: Detail) -> Self {
+    /// The tab `born` announces, `slot`ted among the bar's hues, its view
+    /// opening under `opening`.
+    fn new(id: AgentId, born: &Born, slot: usize, thinking: Detail, opening: Option<Card>) -> Self {
         #[allow(
             clippy::cast_possible_truncation,
             reason = "modulus by AGENT_HUES.len() yields 0..6, fits u8"
@@ -50,12 +49,13 @@ impl Tab {
             id,
             name: born.name.clone(),
             parent: born.parent,
-            recorder: born.recorder.clone(),
             scrollback: Scrollback::new(
                 born.log_dir.join("user.log"),
                 slot,
                 born.resumed.is_some(),
                 thinking,
+                born.recorder.clone(),
+                opening,
             ),
             retired: None,
         }
@@ -132,12 +132,12 @@ pub(super) struct Tabs {
 
 impl Tabs {
     /// One tab, `first`'s, born as `born` says, and focused.
-    pub fn new(first: AgentId, born: &Born, fleet: Arc<Fleet>) -> Self {
+    pub fn new(first: AgentId, born: &Born, fleet: Arc<Fleet>, opening: Option<Card>) -> Self {
         // Born collapsed: deliberation reads as its grain and bulk, and
         // `/thinking` opens the text for whoever wants it.
         let thinking = Detail::Summary;
         Self {
-            tabs: vec![Tab::new(first, born, 0, thinking)],
+            tabs: vec![Tab::new(first, born, 0, thinking, opening)],
             focus: first,
             thinking,
             title_frame: 0,
@@ -181,11 +181,6 @@ impl Tabs {
         })
     }
 
-    /// The root of `id`'s tree — itself, if it is one.
-    pub(super) fn root_of(&self, id: AgentId) -> AgentId {
-        self.ancestors(id).last().unwrap_or(id)
-    }
-
     pub(super) fn fleet(&self) -> &Fleet {
         &self.fleet
     }
@@ -207,7 +202,7 @@ impl Tabs {
 
     /// The focused tab's own record seam.
     pub(super) fn focused_recorder(&self) -> &Recorder {
-        &self.focused_tab().recorder
+        self.focused_tab().scrollback.recorder()
     }
 
     /// The live tab named `name` — `/focus`'s target. `Fleet::claim` keeps
@@ -255,15 +250,11 @@ impl Tabs {
     }
 
     /// Open a tab for an agent the stream has just announced, `append`ing to
-    /// its `user.log` when it is resumed.  A second `Born` for an id already
-    /// listed is ignored: a tab is opened once, and its birth facts never
-    /// change.
-    pub(super) fn born(&mut self, id: AgentId, born: &Born) {
-        if self.tab(id).is_some() {
-            return;
-        }
+    /// its `user.log` when it is resumed.  Once per agent: a birth is sent by
+    /// minting the agent's one emitter.
+    pub(super) fn born(&mut self, id: AgentId, born: &Born, opening: Option<Card>) {
         let at = self.tabs.partition_point(|t| t.id < id);
-        let tab = Tab::new(id, born, self.len(), self.thinking);
+        let tab = Tab::new(id, born, self.len(), self.thinking, opening);
         self.tabs.insert(at, tab);
     }
 

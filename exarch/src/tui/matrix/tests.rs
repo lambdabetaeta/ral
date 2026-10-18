@@ -8,7 +8,7 @@ fn tree() -> (Arc<crate::agent::Agent>, super::super::tabs::Tabs) {
     let fleet = Fleet::for_test();
     let root = test_agent(&fleet, TestAgentSpec::new("main")).expect("fresh root");
     let mut tabs =
-        super::super::tabs::Tabs::new(root.id, &crate::record::Born::for_test("main", None), fleet);
+        super::super::tabs::Tabs::new(root.id, &crate::record::Born::for_test("main", None), fleet, None);
     let a = AgentId::new(root.id.get() + 1);
     let a1 = AgentId::new(root.id.get() + 2);
     let a2 = AgentId::new(root.id.get() + 3);
@@ -21,7 +21,7 @@ fn tree() -> (Arc<crate::agent::Agent>, super::super::tabs::Tabs) {
         (b, "b", Some(root.id)),
         (b1, "b1", Some(b)),
     ] {
-        tabs.born(id, &crate::record::Born::for_test(name, parent));
+        tabs.born(id, &crate::record::Born::for_test(name, parent), None);
     }
     (root, tabs)
 }

@@ -128,7 +128,7 @@ impl AgentState {
 /// that ride beside them: the one door onto the live channel, attachable after
 /// the log exists because the log outlives any bus.
 pub(crate) trait Publish: Send {
-    fn fact(&self, recorded: Recorded<Record>);
+    fn fact(&self, segment: Segment, recorded: Recorded<Record>);
     fn transient(&self, t: Transient);
 }
 
@@ -503,7 +503,8 @@ pub enum Forensic {
     },
 }
 
-/// An agent's birth facts, announced whole on the channel.
+/// An agent's birth facts, announced whole on the channel by the minting of
+/// its emitter (`bus::Emitter::child`), so they precede every signal it sends.
 #[derive(Debug, Clone)]
 pub struct Born {
     /// What the frontend must still know once the agent has settled: the
@@ -512,9 +513,10 @@ pub struct Born {
     pub name: String,
     /// `None` for a root, which opens a session of its own.
     pub parent: Option<AgentId>,
-    /// What a resumed root picked up, for the frontend to replay.
+    /// What a resumed root picked up, for the frontend to note.
     pub resumed: Option<Resumed>,
-    /// The born agent's own record seam, for the frontend to record into.
+    /// The born agent's own record seam: the frontend records into it, and
+    /// catches up from it ([`Emitter::since`]).
     pub recorder: Emitter,
 }
 
@@ -548,12 +550,9 @@ pub enum Transient {
     /// step's last record has landed: a printer may take it as leave to drop
     /// whatever line each lane still has open, since no record will cover it.
     Boundary,
-    Born(Born),
     Died,
     /// The durable copy already rides [`Protocol::AssistantMessage`].
     StopReason(String),
-    /// The durable fact is the new segment's bookend.
-    Cleared,
     /// Drawn, not recorded.
     Resources {
         card: Card,
@@ -749,6 +748,66 @@ impl Seq {
 
     pub fn get(self) -> u64 {
         self.0
+    }
+}
+
+/// Which file of a log a live fact was appended to.
+///
+/// One per `/clear`, counted by the log from its opening.  A [`Seq`]
+/// numbers lines within one segment, so a consumer's cursor is the pair.
+/// Process-local and never persisted: a persisted [`Locus`] names its file by
+/// path instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Segment(u64);
+
+impl Segment {
+    fn next(self) -> Self {
+        Self(self.0 + 1)
+    }
+
+    /// The segment a log opens on, for a test's hand-built fact.
+    #[cfg(test)]
+    pub(crate) fn placeholder() -> Self {
+        Self(0)
+    }
+}
+
+/// How far a reader has come through one log: a segment, and the last record
+/// of it read — its [`Seq`] and the byte its line ends at — if any.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cursor {
+    segment: Segment,
+    seq: u64,
+    end: u64,
+}
+
+impl Cursor {
+    /// The head of `segment`, before its first record.
+    pub fn at(segment: Segment) -> Self {
+        Self {
+            segment,
+            seq: 0,
+            end: 0,
+        }
+    }
+
+    pub fn segment(self) -> Segment {
+        self.segment
+    }
+
+    /// The [`Seq`] the segment's next record carries.
+    pub fn next(self) -> u64 {
+        self.seq + 1
+    }
+
+    /// Past `locus`, a record of this segment.
+    #[must_use]
+    pub fn past(self, locus: &Locus) -> Self {
+        Self {
+            seq: locus.seq().get(),
+            end: locus.bytes().end,
+            ..self
+        }
     }
 }
 

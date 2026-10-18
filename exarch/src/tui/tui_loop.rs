@@ -21,7 +21,7 @@ use crate::{
     },
     bus::{BusReceiver, FleetBus, Pass, Signal},
     provider::{Bureau, Provider},
-    record::{Resumed, Transient},
+    record::Resumed,
 };
 use std::sync::mpsc::TryRecvError;
 
@@ -70,18 +70,24 @@ pub fn run(
         };
         spawn_async(root, spec, &emit)?;
     }
-    // A root's `Born` is the first thing its thread sends: the app exists only
-    // once there is a tab to focus.
-    let Signal::Transient(id, Transient::Born(born)) =
-        bus.rx().recv().map_err(|e| e.to_string())?
-    else {
+    // The first root's birth went out as the loop above minted its emitter,
+    // before any thread could send: the app exists only once there is a tab
+    // to focus.
+    let Signal::Born(id, born) = bus.rx().recv().map_err(|e| e.to_string())? else {
         return Err(
             "the first signal of a run was not a root's birth: there is no tab to open".into(),
         );
     };
     let mut tui = Tui {
         guard: screen,
-        app: App::new(id, born, Arc::clone(&fleet), vi, banner::session_card(info)),
+        app: App::new(
+            id,
+            &born,
+            Arc::clone(&fleet),
+            bus.meter(),
+            vi,
+            banner::session_card(info),
+        ),
     };
     tui.app.update_live_model(provider, &bureau.available());
 
@@ -128,7 +134,8 @@ pub struct CommandCtx<'a> {
 /// Route one `Signal` to its `App` entry point.
 fn dispatch(tui: &mut Tui, rx: &BusReceiver, sig: Signal) {
     match sig {
-        Signal::Fact(id, fact) => tui.app.fact(id, &fact),
+        Signal::Fact(id, segment, fact) => tui.app.fact(id, segment, &fact),
+        Signal::Born(id, born) => tui.app.born(id, &born),
         Signal::Transient(id, t) => tui.app.transient(id, t, rx),
     }
 }

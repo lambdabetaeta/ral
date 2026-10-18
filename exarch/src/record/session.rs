@@ -716,10 +716,14 @@ impl AgentLog {
             }
         }
         self.seam.rotate(Some(path)).err().map(|error| {
+            // The live writer still holds the renamed file; readers find it by name.
+            let back = fs::rename(&rotated, path).err().map_or_else(String::new, |e| {
+                format!(", though it stays at {} ({e})", rotated.display())
+            });
             io::Error::new(
                 error.kind(),
                 format!(
-                    "clear committed, but a fresh {} could not be opened; the old record segment stays live: {error}",
+                    "clear committed, but a fresh {} could not be opened; the old record segment stays live{back}: {error}",
                     path.display()
                 ),
             )

@@ -9,7 +9,7 @@ fn scrollback() -> Scrollback {
         std::process::id(),
         N.fetch_add(1, Ordering::Relaxed),
     ));
-    Scrollback::new(path, AgentSlot(0), false, Detail::Full)
+    Scrollback::new(path, AgentSlot(0), false, Detail::Full, Recorder::none(), None)
 }
 
 fn rail_rows(rows: &[Row], glyph: &str) -> Vec<usize> {
@@ -31,7 +31,7 @@ impl Stream {
     fn land(&mut self, sb: &mut Scrollback, record: Record) -> Seq {
         self.0 += 1;
         let seq = Seq::new(self.0);
-        sb.fact(&Recorded::new(Locus::placeholder(seq), record));
+        sb.step(&Recorded::new(Locus::placeholder(seq), record));
         seq
     }
 
@@ -541,39 +541,122 @@ fn a_second_flush_rewinds_the_provisional_tail() {
     assert_eq!(logged(&path, "marker 3"), 1, "and the new block joins it");
 }
 
+fn prompt(text: &str) -> Display {
+    Display::Prompt {
+        text: text.into(),
+        turn: None,
+    }
+}
+
 /// A resumed session's mirror was rendered by the run that recorded it, so
-/// the continuation appends to that transcript instead of repeating it.
+/// the continuation appends to that transcript instead of repeating it —
+/// including what the new run recorded before its tab first read the log.
 #[test]
 fn a_resumed_transcript_continues_rather_than_repeats() {
-    let mut first = scrollback();
-    let mut log = Stream::new();
-    let path = first.log_path.clone();
-    let _ = log.land(
-        &mut first,
-        Record::Display(Display::Prompt {
-            text: "one".into(),
-            turn: Some(1),
-        }),
-    );
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let record = dir.path().join("record.jsonl");
+    let recorder = Recorder::create(&record).expect("a record log");
+    let path = dir.path().join("user.log");
+    let new = |append| {
+        Scrollback::new(path.clone(), AgentSlot(0), append, Detail::Full, recorder.clone(), None)
+    };
+    let _recorded = recorder.emit(prompt("one")).expect("the log appends");
+    let mut first = new(false);
+    first.catch_up();
     first.flush_log().expect("the transcript flushes");
     assert_eq!(logged(&path, "one"), 1);
 
-    let replayed = std::mem::take(&mut first.fold);
-    let mut resumed = Scrollback::new(path.clone(), AgentSlot(0), true, Detail::Full);
-    resumed.seed(replayed);
-    let _ = log.land(
-        &mut resumed,
-        Record::Display(Display::Prompt {
-            text: "two".into(),
-            turn: Some(3),
-        }),
-    );
+    let history = fs::metadata(&record).expect("the log exists").len();
+    let _recorded = recorder.emit(prompt("two")).expect("the log appends");
+    let mut resumed = new(true);
+    resumed.recall(history);
+    resumed.catch_up();
     resumed.flush_log().expect("the transcript flushes");
 
-    assert_eq!(
-        logged(&path, "one"),
-        1,
-        "the seeded prefix is not rewritten"
-    );
+    assert_eq!(logged(&path, "one"), 1, "the recalled prefix is not rewritten");
     assert_eq!(logged(&path, "two"), 1, "and the new block joins it");
+}
+
+/// A record log publishing onto a fresh channel, and the facts it has sent.
+fn on_air(recorder: &Recorder) -> crate::bus::BusReceiver {
+    let (tx, rx) = crate::bus::channel();
+    recorder.attach(crate::bus::Emitter::new(tx, crate::record::AgentId::new(0)).fleet_sink());
+    rx
+}
+
+fn heard(rx: &crate::bus::BusReceiver) -> Vec<(Segment, Recorded<Record>)> {
+    std::iter::from_fn(|| rx.try_recv().ok())
+        .filter_map(|sig| match sig {
+            crate::bus::Signal::Fact(_, segment, rec) => Some((segment, rec)),
+            crate::bus::Signal::Born(..) | crate::bus::Signal::Transient(..) => None,
+        })
+        .collect()
+}
+
+/// A mirror born after its log began reads what it missed, folds what it
+/// then hears again only once, and reads past a gap rather than skip it.
+#[test]
+fn a_late_mirror_catches_up_hears_nothing_twice_and_reads_past_a_gap() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let recorder = Recorder::create(&dir.path().join("record.jsonl")).expect("a record log");
+    let emit = |text| {
+        let _recorded = recorder.emit(prompt(text)).expect("the log appends");
+    };
+    emit("alpha");
+    let rx = on_air(&recorder);
+    emit("bravo");
+    let mut sb = Scrollback::new(
+        dir.path().join("user.log"),
+        AgentSlot(0),
+        false,
+        Detail::Full,
+        recorder.clone(),
+        None,
+    );
+    sb.catch_up();
+    for (segment, rec) in heard(&rx) {
+        sb.fact(segment, &rec);
+    }
+    emit("charlie");
+    emit("delta");
+    let (segment, delta) = heard(&rx).pop().expect("delta is heard");
+    sb.fact(segment, &delta);
+
+    let all = text(&mut sb);
+    for word in ["alpha", "bravo", "charlie", "delta"] {
+        assert_eq!(all.matches(word).count(), 1, "{word} once: {all:?}");
+    }
+}
+
+/// A fact from a newer segment starts the mirror over on that segment —
+/// a `/clear` — and a straggler from the segment it left is dropped.
+#[test]
+fn a_new_segment_starts_the_mirror_over_and_drops_the_old_ones_stragglers() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let recorder = Recorder::create(&dir.path().join("record.jsonl")).expect("a record log");
+    let rx = on_air(&recorder);
+    let _recorded = recorder.emit(prompt("before")).expect("the log appends");
+    let mut sb = Scrollback::new(
+        dir.path().join("user.log"),
+        AgentSlot(0),
+        false,
+        Detail::Full,
+        recorder.clone(),
+        None,
+    );
+    sb.catch_up();
+    recorder
+        .rotate(Some(&dir.path().join("record.1.jsonl")))
+        .expect("the log rotates");
+    let _recorded = recorder.emit(prompt("after")).expect("the log appends");
+    let mut live = heard(&rx);
+    let (newer, after) = live.pop().expect("the new segment's fact");
+    let (older, before) = live.pop().expect("the old segment's fact");
+
+    assert!(sb.fact(newer, &after), "a new segment is a clear");
+    assert!(!sb.fact(older, &before), "a straggler is not");
+
+    let all = text(&mut sb);
+    assert!(all.contains("after"), "{all:?}");
+    assert!(!all.contains("before"), "{all:?}");
 }

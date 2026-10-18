@@ -6,7 +6,7 @@ use super::inbox::{Inbox, Mailbox};
 use super::signal::Signal;
 use crate::provider::Usage;
 use crate::record::AgentId;
-use crate::record::{Forensic, Publish, Record, Recorded, Transient};
+use crate::record::{Born, Forensic, Publish, Record, Recorded, Segment, Transient};
 use ral_core::sync::LockExt;
 use std::sync::{Arc, Mutex};
 
@@ -41,13 +41,13 @@ pub(crate) struct FleetSink {
 }
 
 impl Publish for FleetSink {
-    fn fact(&self, recorded: Recorded<Record>) {
+    fn fact(&self, segment: Segment, recorded: Recorded<Record>) {
         if let Record::Forensic(Forensic::UsageDelta { usage }) = recorded.value() {
             self.meter.add(*usage);
         }
         if self
             .tx
-            .send_signal(Signal::Fact(self.id, recorded))
+            .send_signal(Signal::Fact(self.id, segment, recorded))
             .is_err()
         {
             // No live receiver; the record is already durable on disk, which is
@@ -117,8 +117,12 @@ impl Emitter {
     }
 
     /// A sibling emitter on the same channel for a child session: the child's
-    /// own mailbox, never the parent's, but the shared run meter.
-    pub(crate) fn child(&self, id: AgentId, mailbox: Mailbox) -> Self {
+    /// own mailbox, never the parent's, but the shared run meter.  Minting it
+    /// announces `born`, so the birth precedes every signal it can stamp.
+    pub(crate) fn child(&self, id: AgentId, mailbox: Mailbox, born: Born) -> Self {
+        if self.tx.send_signal(Signal::Born(id, born)).is_err() {
+            // A dead channel: the birth goes nowhere, as all that follows would.
+        }
         Self {
             tx: self.tx.clone(),
             id,
@@ -221,6 +225,11 @@ impl FleetBus {
     /// The run total across the root and every child — what headless reports.
     pub(crate) fn usage_total(&self) -> Usage {
         self.meter.total()
+    }
+
+    /// The meter itself, for a frontend that reads the total as it grows.
+    pub(crate) fn meter(&self) -> UsageMeter {
+        self.meter.clone()
     }
 }
 

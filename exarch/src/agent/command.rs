@@ -6,7 +6,6 @@ use std::ops::ControlFlow;
 
 use crate::agent::Avatar;
 use crate::bus::{Emitter, Read, Rewrite};
-use crate::record::Transient;
 use ral_core::process::CancelCause;
 
 impl Avatar {
@@ -29,10 +28,12 @@ impl Avatar {
     /// Rewrite or end the context; `Break` ends the attend loop.
     pub(crate) fn rewrite(&mut self, cmd: &Rewrite, emit: &Emitter) -> ControlFlow<()> {
         match cmd {
-            Rewrite::Clear => match self.clear() {
-                Ok(()) => self.recorder().transient(Transient::Cleared),
-                Err(error) => self.note_error(&format!("clear failed: {error}")),
-            },
+            // The new segment's own bookend tells every mirror of the clear.
+            Rewrite::Clear => {
+                if let Err(error) = self.clear() {
+                    self.note_error(&format!("clear failed: {error}"));
+                }
+            }
             Rewrite::Evict => {
                 if self.log.borrow().context().can_evict() {
                     self.shed();

@@ -637,7 +637,7 @@ fn a_read_queued_mid_exchange_runs_at_the_tool_boundary_ahead_of_the_next_step()
         .position(|sig| {
             matches!(
                 sig,
-                crate::bus::Signal::Fact(_, rec) if matches!(
+                crate::bus::Signal::Fact(_, _, rec) if matches!(
                     rec.value(),
                     crate::record::Record::Protocol(
                         crate::record::Protocol::AssistantMessage { message, .. }
@@ -694,7 +694,7 @@ fn a_read_queued_after_a_prompt_runs_after_it_lands() {
         .position(|sig| {
             matches!(
                 sig,
-                crate::bus::Signal::Fact(_, rec) if matches!(
+                crate::bus::Signal::Fact(_, _, rec) if matches!(
                     rec.value(),
                     crate::record::Record::Display(
                         crate::record::Display::Prompt { text, .. }

@@ -77,15 +77,9 @@ fn bus_queue_flood_past_the_byte_cap_yields_one_overflow_marker() {
 #[test]
 fn bus_queue_lifecycle_events_survive_a_flood_uncrossed() {
     let (tx, rx) = channel();
-    tx.send_signal(Signal::Transient(
+    tx.send_signal(Signal::Born(
         AgentId::new(1),
-        Transient::Born(crate::record::Born {
-            log_dir: std::path::PathBuf::new(),
-            name: "a".into(),
-            parent: Some(AgentId::new(0)),
-            resumed: None,
-            recorder: crate::record::Emitter::none(),
-        }),
+        crate::record::Born::for_test("a", Some(AgentId::new(0))),
     ))
     .unwrap();
     for _ in 0..50 {
@@ -112,10 +106,7 @@ fn bus_queue_lifecycle_events_survive_a_flood_uncrossed() {
         5,
         "Born, one merged run, Boundary, one merged run, Died: five entries"
     );
-    assert!(matches!(
-        rx.try_recv().unwrap(),
-        Signal::Transient(ONE, Transient::Born(_))
-    ));
+    assert!(matches!(rx.try_recv().unwrap(), Signal::Born(ONE, _)));
     match rx.try_recv().unwrap() {
         Signal::Transient(ONE, Transient::Token(t)) => assert_eq!(t, "x".repeat(50)),
         _ => panic!("expected the pre-Boundary merged run"),
