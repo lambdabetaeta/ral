@@ -705,4 +705,26 @@ mod tests {
         assert!(!text.contains("meet of"), "{text}");
         assert!(text.contains("- net: deny\n"), "{text}");
     }
+
+    /// The Host section leaves the grant to each agent, and once filled, the
+    /// scratch bullet stands on its own line whether the grant is ambient or
+    /// restricted.
+    #[test]
+    fn the_scratch_bullet_survives_any_grant() {
+        use ral_core::capability::Net;
+        let template = host_section(crate::app::EXARCH);
+        let ambient = GrantStack::of(Capabilities::root());
+        let offline = GrantStack::of(Capabilities {
+            net: Some(Net::Offline),
+            ..Capabilities::root()
+        });
+        for stack in [ambient, offline] {
+            let text = with_grant(&template, &stack, &stack);
+            assert!(
+                text.lines()
+                    .any(|l| l.starts_with("- scratch:") && l.contains(SCRATCH_PLACEHOLDER)),
+                "{text}"
+            );
+        }
+    }
 }

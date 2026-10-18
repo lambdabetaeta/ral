@@ -11,7 +11,7 @@
 
 use exarch::app::{EXARCH, SYNOD, Scratch};
 use exarch::policy::{Invocation, for_invocation};
-use exarch::prompt::{GRANT_PLACEHOLDER, SCRATCH_PLACEHOLDER, grant_summary, host_section};
+use exarch::prompt::grant_summary;
 use ral_core::capability::FsOp;
 use ral_core::capability::GrantStack;
 use ral_core::host::XdgKind;
@@ -483,15 +483,6 @@ fn the_grant_summary_agrees_with_an_attenuated_grant() {
     let frozen_cwd = FrozenPath::from_surface(&cwd).into_string();
     assert!(bullet(&text, "- fs read:").contains(&frozen_cwd), "{text}");
     assert!(bullet(&text, "- fs write:").contains(&frozen_cwd), "{text}");
-}
-
-/// The Host section leaves the grant to each agent's own engine, and still
-/// names the scratch the agent needs.
-#[test]
-fn the_host_section_defers_the_grant_and_names_the_scratch() {
-    let text = host_section(EXARCH);
-    assert!(text.contains(GRANT_PLACEHOLDER), "{text}");
-    assert!(bullet(&text, "- scratch:").contains(SCRATCH_PLACEHOLDER));
 }
 
 /// `dangerous` is every program less exarch itself: the summary says so, names
