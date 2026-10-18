@@ -899,15 +899,13 @@ fn scheme_skill(_u: &mut Unifier) -> Scheme {
 
 /// `skill NAME` — load a skill's full body, rescanning at each call so a skill
 /// added or edited mid-session is found.
-#[allow(
-    clippy::unnecessary_wraps,
-    reason = "installed as a `BuiltinBody::Static` fn pointer, whose signature fixes the `Settled` return; a skill that cannot be read answers with a message rather than raising."
-)]
 fn builtin_skill(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let name = args[0].as_str("skill")?;
     // Rejecting it here is what keeps `root.join(&name)` inside the skills root.
     if !skill::valid_skill_name(name) {
-        return Settled::Ok(Value::string(format!("skill not found: {name}")));
+        return Err(sig(format!(
+            "skill: '{name}' is not a skill name; names are lowercase letters, digits and single hyphens"
+        )));
     }
     let cwd = shell.cwd();
     let config_dir = crate::app::EXARCH.xdg_dir(ral_core::host::XdgKind::Config);
@@ -922,15 +920,9 @@ fn builtin_skill(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settle
             if !sk_md.is_file() {
                 continue;
             }
-            let body = match skill::read_skill_body(&dir) {
-                Ok(body) => body,
-                Err(why) => {
-                    return Settled::Ok(Value::string(format!(
-                        "could not load skill {name:?} from {}: {why}",
-                        sk_md.display()
-                    )));
-                }
-            };
+            let body = skill::read_skill_body(&dir).map_err(|why| {
+                sig(format!("skill: could not load '{name}' from {}: {why}", sk_md.display()))
+            })?;
             // Only once the body is in hand, so the card never claims a load
             // that did not happen.
             mooring.surface(&Value::map(vec![
@@ -938,14 +930,16 @@ fn builtin_skill(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settle
                 ("name".into(), Value::string(name)),
                 ("dir".into(), Value::string(dir.to_string_lossy())),
             ]));
-            return Settled::Ok(Value::string(format!(
+            return Ok(Value::string(format!(
                 "// skill root: {}\n\n{}",
                 dir.display(),
                 body
             )));
         }
     }
-    Settled::Ok(Value::string(format!("skill not found: {name}")))
+    Err(sig(format!(
+        "skill: no skill named '{name}'; did you mean one that `skill-list` shows?"
+    )))
 }
 
 fn scheme_skill_list(_u: &mut Unifier) -> Scheme {
@@ -1099,7 +1093,7 @@ static EXARCH_BUILTINS_ARR: [BuiltinEntry; 12] = [
     BuiltinEntry::new(
         Cow::Borrowed("skill"),
         scheme_skill,
-        "skill <name>  — load the full SKILL.md body for the named skill (discovered from .exarch/skills/ and your config). Returns its Markdown instructions, or an error string if not found.",
+        "skill <name>  — load the full SKILL.md body for the named skill (discovered from .exarch/skills/ and your config). Returns its Markdown instructions; fails on a name no skill bears.",
         BuiltinBody::Static(builtin_skill),
     ),
     BuiltinEntry::new(

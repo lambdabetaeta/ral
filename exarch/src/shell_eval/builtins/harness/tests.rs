@@ -1036,65 +1036,29 @@ fn sub_agent_pinning_tasks_leaves_the_parents_register_untouched() {
     );
 }
 
-/// `` exarch-tasks `load `` decodes a file inside a stored function, so its
-/// decoder's site lives in the library's own IR: a list saved and loaded
-/// back passes that site, statuses and tags included.
+/// Finishing every task keeps the board: only `` `clear `` empties the pin,
+/// after which `` exarch-tasks `add `` restarts id allocation at 1.
 #[test]
-fn a_saved_task_list_loads_back_through_its_decoder_site() {
-    let session = crate::agent::Avatar::for_test("system").unwrap();
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-    let path = std::env::temp_dir().join(format!("tasks-{}.json", std::process::id()));
-
-    session.ral(r#"exarch-tasks `add "keep me""#, 5, &emit);
-    session.ral(r#"exarch-tasks `tag [id: 1, tag: "urgent"]"#, 5, &emit);
-    session.ral("exarch-tasks `status [id: 1, status: `doing]", 5, &emit);
-    let saved = session
-        .ral(
-            &format!("exarch-tasks `save '{}'", path.display()),
-            5,
-            &emit,
-        )
-        .text;
-    assert!(
-        !saved.contains("denied"),
-        "the save must land, got: {saved}"
-    );
-    session.ral(r#"exarch-pins `clear "tasks""#, 5, &emit);
-    let loaded = session
-        .ral(
-            &format!("exarch-tasks `load '{}'", path.display()),
-            5,
-            &emit,
-        )
-        .text;
-    let listed = session.ral("exarch-tasks `list", 5, &emit).text;
-    let _ = std::fs::remove_file(&path);
-    assert!(
-        !loaded.contains("the value"),
-        "the decode must admit what save wrote, got: {loaded}"
-    );
-    for field in ["keep me", "urgent", "`doing"] {
-        assert!(listed.contains(field), "missing {field} in: {listed}");
-    }
-}
-
-/// `tasks-sync` clears the slot once no work remains: transitioning the
-/// last open task to `` `done `` empties the pin, and a later `` exarch-tasks `add ``
-/// finds no register and restarts id allocation at 1.
-#[test]
-fn transitioning_the_last_open_task_to_done_clears_the_pin_and_restarts_ids() {
+fn an_all_done_list_stays_pinned_until_cleared() {
     let session = crate::agent::Avatar::for_test("system").unwrap();
     let (tx, _rx) = crate::bus::channel();
     let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
     session.ral(r#"exarch-tasks `add "only task""#, 5, &emit);
     session.ral("exarch-tasks `status [id: 1, status: `done]", 5, &emit);
+    let listed = session.ral("exarch-tasks `list", 5, &emit).text;
+    for field in ["only task", "`done"] {
+        assert!(
+            listed.contains(field),
+            "an all-done list must stay listed, missing {field} in: {listed}"
+        );
+    }
 
+    session.ral("exarch-tasks `clear", 5, &emit);
     let read = session.ral(r#"exarch-pins `read "tasks""#, 5, &emit).text;
     assert!(
         read.contains("`none") && !read.contains("`some"),
-        "an all-done list must clear the pin to `none, got: {read}"
+        "`clear must empty the pin, got: {read}"
     );
 
     session.ral(r#"exarch-tasks `add "fresh""#, 5, &emit);

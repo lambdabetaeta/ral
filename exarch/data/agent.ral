@@ -28,8 +28,8 @@ let view-hash-around = { |path line peek|
 # writes it back through `tasks-sync`, so state survives blocks, `within`,
 # and skipped rebinds.  `exarch-pins` is foreground-only, so `exarch-tasks`
 # is too — not inside `spawn { … }`, and not as a stage of a `|` pipeline.
-# The pin clears when no work is left, so a finished board stops being named
-# by the boundary nudge.  No Rust knows what a task or a goal is: both kits
+# Finishing every task keeps the board; only an empty list clears the pin.
+# No Rust knows what a task or a goal is: both kits
 # below are pure prelude over `exarch-pins`.
 
 let task-new = { |id desc|
@@ -150,11 +150,11 @@ let tasks-decode = { |v|
 
 let tasks-list = { tasks-decode !{exarch-pins `read "tasks"} }
 
-## The kit's one write point: an empty or all-`done` list clears the slot —
-## no outstanding work, no pin — otherwise it holds `tasks-card`'s rendering.
-## Answers `ts` unchanged, so every `exarch-tasks` arm can end by calling this.
+## The kit's one write point: an empty list clears the slot, otherwise it
+## holds `tasks-card`'s rendering.  Answers `ts` unchanged, so every
+## `exarch-tasks` arm can end by calling this.
 let tasks-sync = { |ts|
-  if !{is-empty !{filter { |t| $[not !{equal $t[status] `done}] } $ts}} { exarch-pins `clear "tasks" }
+  if !{is-empty $ts} { exarch-pins `clear "tasks" }
   else { exarch-pins `set [key: "tasks", body: !{tasks-card $ts}] }
   $ts
 }
@@ -190,32 +190,6 @@ let exarch-tasks = { |cmd|
     `note:   { |[id: id, note: n]|   tasks-edit $id { |t| task-set-notes $t $n } },
     `retag:  { |[id: id, tags: gs]|  for $gs { |g| check-tag "retag" $g }
                                      tasks-edit $id { |t| task-set-tags $t $gs } },
-    `save:   { |path|
-                 ## `to-json`/`from-json` do not round-trip a bare variant (a JSON tag
-                 ## reads back as a record, not `status` itself), so `status` crosses
-                 ## the file as its word and is translated back on the way in; every
-                 ## other field is already JSON-native.
-                 let ts = !{tasks-list}
-                 to-json !{map { |t|
-                   let word =
-                     if    !{equal $t[status] `done}    { "done" }
-                     elsif !{equal $t[status] `doing}   { "doing" }
-                     elsif !{equal $t[status] `blocked} { "blocked" }
-                     else                                { "open" }
-                   task-set-status $t $word
-                 } $ts} > $path
-                 $ts },
-    `load:   { |path|
-                 let ts = map { |t|
-                   let status =
-                     if    !{equal $t[status] "done"}    { `done }
-                     elsif !{equal $t[status] "doing"}   { `doing }
-                     elsif !{equal $t[status] "blocked"} { `blocked }
-                     else                                 { `open }
-                   task-set-status $t $status
-                 } !{from-json < $path}
-                 for $ts { |t| for $t[tags] { |g| check-tag "load" $g } }
-                 tasks-sync $ts },
   ]
 }
 

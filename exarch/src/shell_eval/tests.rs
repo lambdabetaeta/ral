@@ -1513,10 +1513,10 @@ fn skill_name_validation_confines_the_join_to_the_skills_root() {
 
     for name in ["../secret", "demo/../../secret", ".", "../../etc/passwd"] {
         let r = run_once(&engine, &format!("skill '{name}'"));
-        assert_eq!(
-            r.value.as_deref(),
-            Some(format!("skill not found: {name}").as_str()),
-            "a name that could climb out of the root is refused unread"
+        let err = String::from_utf8_lossy(&r.stderr);
+        assert!(
+            r.exit != 0 && err.contains("is not a skill name"),
+            "a name that could climb out of the root is refused unread, got: {err}"
         );
     }
 }
@@ -1534,10 +1534,10 @@ fn absent_skill_is_not_found_not_unreadable() {
     // `root` has no `.exarch/skills`, so the local root lacks `nowhere`;
     // the config root must still be consulted before declaring it missing.
     let r = run_once(&engine, &format!("cd '{root}'; skill 'nowhere'"));
-    assert_eq!(
-        r.value.as_deref(),
-        Some("skill not found: nowhere"),
-        "a skill missing from every root is not-found, never could-not-read"
+    let err = String::from_utf8_lossy(&r.stderr);
+    assert!(
+        r.exit != 0 && err.contains("no skill named 'nowhere'"),
+        "a skill missing from every root is not-found, never could-not-read, got: {err}"
     );
 }
 
