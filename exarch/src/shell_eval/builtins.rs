@@ -321,21 +321,40 @@ fn readable(shell: &mut Shell, rel: &str) -> bool {
     shell.check_fs_read(&rp).is_ok()
 }
 
-/// Search `path`, a file or a directory walked recursively (ignore-aware, Rust
-/// regex), reading each file's bytes once.  The cancellation poll, the per-file
-/// deny skip, and the binary-detection quit all live here, the one site
-/// `grep-files` composes over.  A hit names its file relative to the cwd when
-/// under it, else absolutely, so it can be handed straight back to a reader.
-fn search_tree(shell: &mut Shell, pattern: &str, path: &str) -> Settled<Vec<SearchHit>> {
+/// The builtin a search runs as: `hidden` is `grep-hidden`.
+const fn grep_name(hidden: bool) -> &'static str {
+    if hidden { "grep-hidden" } else { "grep-files" }
+}
+
+/// Search `path`, a file or a directory walked recursively (Rust regex),
+/// reading each file's bytes once.  Beneath `path` the walk skips hidden and
+/// ignored entries, or with `hidden` only `.git`; `path` itself is always
+/// searched.  The cancellation poll, the per-file deny skip,
+/// and the binary-detection quit all live here, the one site both grep
+/// builtins compose over.  A hit names its file relative to the cwd when under
+/// it, else absolutely, so it can be handed straight back to a reader.
+fn search_tree(
+    shell: &mut Shell,
+    hidden: bool,
+    pattern: &str,
+    path: &str,
+) -> Settled<Vec<SearchHit>> {
+    let name = grep_name(hidden);
     let matcher = RegexMatcherBuilder::new()
         .crlf(true)
         .build(pattern)
-        .map_err(|e| sig(regex_err("grep-files", pattern, &e.to_string())))?;
+        .map_err(|e| sig(regex_err(name, pattern, &e.to_string())))?;
     let root = checked_read_path(shell, path)?;
     if !root.exists() {
         return Err(sig(format!(
-            "grep-files: {path} does not exist; the path is a file or directory, relative to the cwd or absolute."
+            "{name}: {path} does not exist; the path is a file or directory, relative to the cwd or absolute."
         )));
+    }
+    let mut walk = WalkBuilder::new(&root);
+    walk.git_global(false);
+    if hidden {
+        walk.standard_filters(false)
+            .filter_entry(|e| e.file_name() != ".git");
     }
     let cwd = shell.resolve(".").into_inner();
     let mut searcher = SearcherBuilder::new()
@@ -345,7 +364,7 @@ fn search_tree(shell: &mut Shell, pattern: &str, path: &str) -> Settled<Vec<Sear
         .build();
 
     let mut results = Vec::new();
-    for raw in cancellable(WalkBuilder::new(&root).git_global(false)) {
+    for raw in cancellable(&walk) {
         shell.poll()?;
         let entry = match raw {
             Ok(e) if e.file_type().is_some_and(|ft| ft.is_file()) => e,
@@ -383,16 +402,25 @@ fn search_tree(shell: &mut Shell, pattern: &str, path: &str) -> Settled<Vec<Sear
                     Ok(true)
                 }),
             )
-            .map_err(|e| sig(format!("grep-files: {rel}: {e}")))?;
+            .map_err(|e| sig(format!("{name}: {rel}: {e}")))?;
     }
     Ok(results)
 }
 
-/// `grep-files PATTERN PATH` — [`search_tree`] over `PATH`, emitting exactly one
-/// `grep` surface for the whole walk rather than a card per file read.
 fn builtin_grep_files(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    let pattern = args[0].as_str("grep-files")?;
-    let path = args[1].as_str("grep-files")?;
+    grep(false, args, mooring, shell)
+}
+
+fn builtin_grep_hidden(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+    grep(true, args, mooring, shell)
+}
+
+/// `grep-files`/`grep-hidden PATTERN PATH` — [`search_tree`] over `PATH`,
+/// emitting exactly one `grep` surface for the whole walk rather than a card
+/// per file read.
+fn grep(hidden: bool, args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+    let pattern = args[0].as_str(grep_name(hidden))?;
+    let path = args[1].as_str(grep_name(hidden))?;
 
     let grep = Observed::Grep(Grep {
         scope: path.to_string(),
@@ -400,7 +428,7 @@ fn builtin_grep_files(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
     });
     mooring.surface_data(&shell.observation(grep).to_surface());
 
-    let results = search_tree(shell, pattern, path)?
+    let results = search_tree(shell, hidden, pattern, path)?
         .into_iter()
         .map(|hit| {
             #[allow(
@@ -998,7 +1026,7 @@ fn builtin_service_handle(
 
 // A named array, not a promoted temporary: rustc refuses promotion once an
 // entry carries `BuiltinEntry`'s interior-mutable arity cache.
-static EXARCH_BUILTINS_ARR: [BuiltinEntry; 11] = [
+static EXARCH_BUILTINS_ARR: [BuiltinEntry; 12] = [
     BuiltinEntry::new(
         Cow::Borrowed("exarch-surface"),
         ral_core::typecheck::builtins::scheme::surface_op,
@@ -1020,8 +1048,14 @@ static EXARCH_BUILTINS_ARR: [BuiltinEntry; 11] = [
     BuiltinEntry::new(
         Cow::Borrowed("grep-files"),
         scheme_grep_files,
-        "grep-files <pattern> <path>  — search PATH, a file or a directory walked recursively (ignore-aware, Rust regex), in one read per matched file, giving [{file, line, text}]; `file` is named as view-text takes it.",
+        "grep-files <pattern> <path>  — search PATH, a file or a directory walked recursively (Rust regex), in one read per matched file, giving [{file, line, text}]; `file` is named as view-text takes it. The walk skips hidden and ignored entries beneath PATH, never PATH itself: name one to search it.",
         BuiltinBody::Static(builtin_grep_files),
+    ),
+    BuiltinEntry::new(
+        Cow::Borrowed("grep-hidden"),
+        scheme_grep_files,
+        "grep-hidden <pattern> <path>  — `grep-files`, whose walk enters every entry beneath PATH, hidden (`.env`, `.github`) and gitignored alike, except `.git`.",
+        BuiltinBody::Static(builtin_grep_hidden),
     ),
     BuiltinEntry::new(
         Cow::Borrowed("edit-hash"),

@@ -312,18 +312,15 @@ Writing a multi-line file must use a raw string, ideally with many hashes:
 
 ## Exploring
 
-To see what is in a directory, `list-dir $path` returns every entry, one level deep, as records `[name, type, size, mtime]`; `file-info`, `line-count` and `is-file`/`is-dir`/`exists` answer structured questions about a single path. To survey or search the tree, use the following; all are `.gitignore` sensitive.
+Look at a directory with `ls`. To compute over its entries, `list-dir $path` returns every one as records `[name, type, size, mtime]`; `file-info`, `line-count` and `is-file`/`is-dir`/`exists` answer structured questions about a single path. To survey or search the tree:
 
 - `glob #'**/*.txt'#` — matching paths as a ral list; a wildcard never matches a dot file (name it literally; a wildcard starting with `.` is an error). Spread into a command: `mv ...!{glob …} out/`.
-- `explore-dir n` — entries of the current directory to depth `n` as a `ral` list; `.gitignore`-aware
-- `grep-files #'TODO'# src` — grep a file, or a directory recursively (Rust regex syntax); returns `ral` list of records `[file, line, text]`.
+- `explore-dir n` — entries of the current directory to depth `n` as a `ral` list, skipping hidden and `.gitignore`d entries.
+- `grep-files #'TODO'# src` — grep a file, or a directory recursively (Rust regex syntax), skipping hidden and `.gitignore`d entries; returns `ral` list of records `[file, line, text]`.
+- `grep-hidden #'API_KEY'# .` — `grep-files` that enters hidden and `.gitignore`d entries too; only `.git` is skipped.
 - `fff #'query'#` — fuzzy file-name search (frecency-ranked) over the working tree, returning `[String]`. Use to find files by name without a glob pattern.
 
-Scope any of these with `within [dir: …]`.
-
-<critical>
-To search dot files and gitignored files you must use `rg`, the host's own where it has one.
-</critical>
+Scope any of these with `within [dir: …]`. A walk skips only what it finds: a path you name is always searched, so `grep-files #'x'# target` searches a gitignored directory and `grep-files #'x'# .env` a dot file.
 
 ## Help
 

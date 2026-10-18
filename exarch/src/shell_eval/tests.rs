@@ -1203,6 +1203,61 @@ fn grep_files_scopes_to_a_file_or_a_subtree() {
     );
 }
 
+/// A walk skips only what it finds: `grep-files` passes over hidden and
+/// ignored entries, `grep-hidden` enters all of them bar `.git`, and a path
+/// named outright is searched by either.
+#[test]
+fn grep_walks_skip_only_what_they_find() {
+    let engine = fresh();
+    let scratch = scratch_dir("grep-hidden");
+    let tmp = scratch
+        .path()
+        .canonicalize()
+        .expect("canonical scratch dir");
+    for dir in [".git", ".github", "src", "target"] {
+        std::fs::create_dir_all(tmp.join(dir)).expect("create fixture dir");
+    }
+    for (file, body) in [
+        (".gitignore", "target/\n"),
+        (".git/config", "NEEDLE\n"),
+        (".github/ci.yml", "NEEDLE\n"),
+        (".env", "NEEDLE\n"),
+        ("src/a.txt", "NEEDLE\n"),
+        ("target/out.txt", "NEEDLE\n"),
+    ] {
+        std::fs::write(tmp.join(file), body).expect("write fixture");
+    }
+    let root = display_no_trailing_sep(&tmp);
+    let files = |search: &str| -> String {
+        let r = run_once(
+            &engine,
+            &format!("cd '{root}'\nmap {{ |h| $h[file] }} !{{{search}}}"),
+        );
+        assert_eq!(
+            r.exit,
+            0,
+            "{search}: stderr was {:?}",
+            String::from_utf8_lossy(&r.stderr)
+        );
+        r.value.expect("a search returns its hits")
+    };
+
+    let visible = files("grep-files NEEDLE .");
+    assert!(visible.contains("src/a.txt"), "{visible}");
+    for skipped in [".env", ".github", ".git/", "target"] {
+        assert!(!visible.contains(skipped), "{skipped} in {visible}");
+    }
+
+    let hidden = files("grep-hidden NEEDLE .");
+    for found in ["src/a.txt", ".env", ".github/ci.yml", "target/out.txt"] {
+        assert!(hidden.contains(found), "{found} missing from {hidden}");
+    }
+    assert!(!hidden.contains(".git/"), ".git/ in {hidden}");
+
+    assert!(files("grep-files NEEDLE .env").contains(".env"));
+    assert!(files("grep-files NEEDLE target").contains("target/out.txt"));
+}
+
 /// `edit-replace` collapses the read/`string-replace`/write idiom into one
 /// call: a unique match rewrites the file, and 0 or >1 matches error rather
 /// than guess.
