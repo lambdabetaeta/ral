@@ -33,9 +33,8 @@ use super::super::host::ReplHost;
 /// the inherited ignores first so children get them back (the nohup rule).
 ///
 /// SIGWINCH (owned in-process by crossterm's `signal-hook-registry` master
-/// handler) and SIGSEGV (claimed by fff-search's crash hook, if installed)
-/// must never be named here: a raw install would silently and permanently
-/// disconnect that registry's dispatch for the signal.
+/// handler) must never be named here: a raw install would silently and
+/// permanently disconnect that registry's dispatch for it.
 ///
 /// Windows: `signal::install_interrupt_handler`, likewise non-escalating.
 #[cfg_attr(windows, allow(clippy::unnecessary_wraps))]

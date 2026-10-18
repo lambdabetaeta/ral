@@ -80,6 +80,12 @@ impl Shell {
         self.context.resolver().resolve(path)
     }
 
+    /// [`Self::resolve`] for a path the host already holds, taken as it is:
+    /// see [`crate::path::Resolver::anchor`].
+    pub fn anchor(&self, path: &std::path::Path) -> crate::path::LexicalPath {
+        self.context.resolver().anchor(path)
+    }
+
     /// Absolute path of the executable the shell would run for `name`, via the
     /// effective `PATH` and cwd; `None` if there is none.
     ///

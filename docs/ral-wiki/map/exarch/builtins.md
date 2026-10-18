@@ -58,9 +58,8 @@ mixed endings behind.
   (`search_tree`; a hit names its file cwd-relative when under the cwd, else
   absolutely, so a reader takes it back unchanged; a missing path is an error,
   not an empty search; CRLF-aware, so `$` anchors before `\r\n` and a hit's text
-  is the row `view-text` shows; binary detection quits at NUL, each file
-  gated by `check_fs_read`, the walk polling the cancel check per entry via the
-  one sanctioned `cancellable` door). Surfaces exactly one
+  is the row `view-text` shows; binary detection quits at NUL, the walk the
+  shared `walk_admitted` below). Surfaces exactly one
   `Observed::Grep { scope, pattern }` observation for the whole search
   ([[map/exarch/io-surface|io-surface]]).
 - `edit-hash <path> <edits>` → `Unit`. The edit verb: `edits` is a list of
@@ -85,6 +84,21 @@ mixed endings behind.
   matching apart from its indentation.
 - `explore-dir <n>` → `[String]`. List directory entries to depth `n`,
   ignore-aware, skipping the root and any denied path.
+- `find-files <query>` → `[String]`. The cwd's files, walked as `grep-files`
+  walks, fuzzy-ranked by path through core's `text::rank` (nucleo), cut to
+  `FIND_LIMIT`. It filters before the cut: a denied match neither takes a
+  slot nor shows in the count. No index is kept, so every name the model
+  learns has passed the door this call.
+
+All three walks run through `walk_admitted`, the one `WalkBuilder::build`
+site: it polls for cancel per entry, anchors each entry's own path with
+`Shell::anchor` (no string round trip, so a file named `~` or `xdg:x` is that
+file, not a sigil's expansion), admits it by name with a silent
+`admits_fs_exact`, and hands the visitor a `Listed` with the name a reader
+takes back. A denied entry and one the walk cannot read are both skipped
+silently, so neither a refusal nor an error names a withheld path. `grep-files`
+then reads each listed file through `locate_if_admitted`, judging the object
+it opens.
 - `skill-list` / `skill <name>` — Agent Skills with progressive disclosure: list
   the available skills (fresh scan each call, filtered by the grant), then load
   one skill's full `SKILL.md` body on demand; the scan and frontmatter parse
@@ -92,9 +106,6 @@ mixed endings behind.
   lists valid skills, then names each skipped `SKILL.md` by path with its cause;
   its count covers only valid skills. `skill` reports a read or frontmatter
   failure with the skill's name and path.
-- `fff <query>` → `[String]`. Frecency-ranked fuzzy filename search over the
-  working tree (`fff_index`, the `fff-search` crate); the per-directory index is
-  cached process-globally, so forked children sharing the cwd reuse it.
 
 Reads resolve through `checked_read_path` / `check_fs_read`; the edit writes go
 through core's atomic write site under the run's pushed [[design/grant|grant]]
@@ -462,7 +473,7 @@ is a second, narration-only tool outside this harness/tool boundary
 
 ## Where to look
 
-- `exarch/src/shell_eval/builtins.rs` (+ `builtins/fff_index.rs`) — the Rust
+- `exarch/src/shell_eval/builtins.rs` — the Rust
   atoms, their type schemes, and `EXARCH_BUILTINS`.
 - `exarch/src/shell_eval/builtins/harness.rs` — the harness verbs above,
   `HARNESS_BUILTINS`.

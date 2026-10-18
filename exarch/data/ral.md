@@ -318,7 +318,7 @@ Look at a directory with `ls`. To compute over its entries, `list-dir $path` ret
 - `explore-dir n` — entries of the current directory to depth `n` as a `ral` list, skipping hidden and `.gitignore`d entries.
 - `grep-files #'TODO'# src` — grep a file, or a directory recursively (Rust regex syntax), skipping hidden and `.gitignore`d entries; returns `ral` list of records `[file, line, text]`.
 - `grep-hidden #'API_KEY'# .` — `grep-files` that enters hidden and `.gitignore`d entries too; only `.git` is skipped.
-- `fff #'query'#` — fuzzy file-name search (frecency-ranked) over the working tree, returning `[String]`. Use to find files by name without a glob pattern.
+- `find-files #'query'#` — the working tree's files fuzzy-ranked by path, best first and truncated, skipping hidden and `.gitignore`d entries; returns `[String]`. Use to find files by name without a glob pattern.
 
 Scope any of these with `within [dir: …]`. A walk skips only what it finds: a path you name is always searched, so `grep-files #'x'# target` searches a gitignored directory and `grep-files #'x'# .env` a dot file.
 

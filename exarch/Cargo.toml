@@ -51,7 +51,6 @@ syntect      = { version = "5.3", default-features = false, features = ["default
 two-face     = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
 os_info    = { version = "3", default-features = false }
 unicode-width = "0.2"
-fff-search = "0.11"
 prompt-editor = { path = "../prompt-editor" }
 grep       = "0.4"
 ignore     = "0.4"

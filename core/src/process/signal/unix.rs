@@ -17,9 +17,8 @@ use crate::process::cancel::{CancelCause, request_interrupt, request_root_cancel
 ///
 /// [`install`] snapshots the inherited `SIG_IGN` dispositions first, since
 /// afterwards ral's own are indistinguishable from the parent's.  Never name
-/// SIGWINCH or SIGSEGV here: crossterm's `signal-hook-registry` owns one and
-/// fff-search's crash hook may own the other, and a raw `signal(2)` install
-/// unhooks it for good.
+/// SIGWINCH here: crossterm's `signal-hook-registry` owns it, and a raw
+/// `signal(2)` install unhooks it for good.
 pub fn install_handlers() {
     for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
         install(sig, handler);

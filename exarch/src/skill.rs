@@ -64,7 +64,7 @@ pub fn discover_metadata(
     config_dir: &Path,
     grants: &ral_core::capability::GrantStack,
 ) -> Vec<Skill> {
-    // Shell-less as at the fff index: every candidate is `cwd`/`config_dir`
+    // Shell-less: every candidate is `cwd`/`config_dir`
     // joined absolute, so the resolver's home and cwd are never consulted.
     let resolver = ral_core::path::Resolver::shell_less();
     let mut skills = Vec::new();

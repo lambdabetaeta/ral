@@ -335,7 +335,8 @@ child-wait.
   metadata,symlink_metadata,read_link,remove_file,remove_dir_all,create_dir_all,
   rename,copy,set_permissions}`, `Command::new`, `CommandExt::exec`, and
   `ignore::WalkBuilder::build` (directory walks root at the two cancellable
-  sites: grep and `glob`). The whole `cap_primitives::fs` surface is banned alongside it,
+  sites: exarch's `walk_admitted`, beneath `grep-files`, `explore-dir` and
+  `find-files`, and `glob`). The whole `cap_primitives::fs` surface is banned alongside it,
   not just the entries `path/walk.rs` uses today: a ban naming only the
   current callers is exactly what let the fs site move out from under this
   list once already, when the opens migrated from `runtime/command/redirect.rs`
@@ -359,10 +360,12 @@ child-wait.
 - **Each site is accounted for, surfacing or silent (reasoned allow).** Each
   allowlisted site carries an `#[allow(clippy::disallowed_methods, reason = …)]`
   whose reason opens with a stable tag — `[surface:<slug>]` (the open
-  and the atomic-write steps in `path/walk.rs`, plus the exec and grep-walk
-  sites, that fuse a surface into the operation),
+  and the atomic-write steps in `path/walk.rs`, plus the exec site, that
+  fuse a surface into the operation),
   `[silent:<slug>]` (fs work that is not the model's data I/O —
-  canonicalisation, `which` probes, module loading, stat predicates, the `glob` walk, capability
+  canonicalisation, `which` probes, module loading, stat predicates, the
+  `glob` walk and exarch's tree walk (`grep-files` raises its one card above
+  it), capability
   load, sandbox respawn/exec, prelude bake, exarch/ral infra), or `[test]`
   (test scaffolding, blanket-allowed and not a syscall site). The slug is
   unique within its file, so the tag is stable across line shifts, and

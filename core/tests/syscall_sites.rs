@@ -183,11 +183,7 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ("guest-net/src/vet.rs", "silent:vet-dial"),
     ("guest-net/src/vet.rs", "silent:vet-resolve"),
     // ── exarch ────────────────────────────────────────────────────────────
-    ("exarch/src/shell_eval/builtins.rs", "surface:grep-walk"),
-    (
-        "exarch/src/shell_eval/builtins/fff_index.rs",
-        "silent:fff-db-dir",
-    ),
+    ("exarch/src/shell_eval/builtins.rs", "silent:tree-walk"),
     ("exarch/src/app.rs", "silent:log-run-dir"),
     ("exarch/src/app.rs", "silent:scratch-bootstrap"),
     ("exarch/src/app.rs", "silent:scratch-reap"),

@@ -921,7 +921,7 @@ child's inbox, so the prompt enters through the same item path.
 
 Routing the fork through core matters because the builtin table is the easiest
 thing to drop. The exarch host builtins — `view-text`/`view-hash`, `grep-files`,
-`edit-hash`, `edit-replace`, `explore-dir`, `fff`, the skill loaders
+`edit-hash`, `edit-replace`, `explore-dir`, `find-files`, the skill loaders
 ([[map/exarch/builtins|builtins]]) — live in the agent's own dispatch table
 rather than in the environment, and the
 `view-text-around` helper in `agent.ral` calls `view-text`. A fork that copied

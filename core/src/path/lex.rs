@@ -72,15 +72,20 @@ fn server_share<'a>(mut parts: impl Iterator<Item = &'a str>) -> bool {
 /// `None`, folding `.` and `..`.  Purely lexical — no symlink resolution —
 /// so the answer can differ from `canonicalize`.
 pub fn resolve_path(cwd: Option<&Path>, path: &str) -> PathBuf {
-    let input = PathBuf::from(path);
+    anchor(cwd, &PathBuf::from(path))
+}
+
+/// [`resolve_path`] for a path already on the host's terms, which needs no
+/// lifting from a string.
+pub fn anchor(cwd: Option<&Path>, input: &Path) -> PathBuf {
     let joined = if input.is_absolute() {
-        input
+        input.to_path_buf()
     } else if let Some(cwd) = cwd {
         cwd.join(input)
     } else if let Some(cwd) = host::cwd() {
         cwd.join(input)
     } else {
-        input
+        input.to_path_buf()
     };
 
     let normalized = fold_dots(&joined);

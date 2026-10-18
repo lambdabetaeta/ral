@@ -120,14 +120,14 @@ fn projecting_caps() -> Capabilities {
     }
 }
 
-/// A denied subtree drops out of both tree walks: `grep-files` and
-/// `explore-dir` filter each entry through the live grant, so a narrowed
+/// A denied subtree drops out of every tree walk: `grep-files`, `explore-dir`
+/// and `find-files` filter each entry through the live grant, so a narrowed
 /// agent neither reads a denied file's lines nor learns its name — and the
 /// skip is a `continue`, so one off-limits path cannot blank the listing
 /// around it.
 #[cfg(unix)]
 #[test]
-fn a_denied_subtree_is_skipped_by_grep_and_explore() {
+fn a_denied_subtree_is_skipped_by_every_walk() {
     let scratch = scratch_dir("denied-walk");
     // Canonical, because the walk reports the paths it resolved: on macOS
     // the temp directory is itself a symlink.
@@ -156,7 +156,8 @@ fn a_denied_subtree_is_skipped_by_grep_and_explore() {
             "cd '{root}'\n\
              let hits = grep-files 'NEEDLE' .\n\
              let listing = explore-dir 3\n\
-             return [hits: $hits, listing: $listing]"
+             let found = find-files 'hit'\n\
+             return [hits: $hits, listing: $listing, found: $found]"
         );
         let r = run_shell_direct(&engine, &caps, &cmd, 30, &crate::record::Emitter::none());
         assert_eq!(
@@ -165,7 +166,7 @@ fn a_denied_subtree_is_skipped_by_grep_and_explore() {
             "a denied entry is skipped, never raised; stderr was: {}",
             String::from_utf8_lossy(&r.stderr)
         );
-        r.value.expect("both walks return a value")
+        r.value.expect("every walk returns a value")
     };
 
     // Both directions, so a walk that answers with nothing at all fails one.
@@ -184,8 +185,82 @@ fn a_denied_subtree_is_skipped_by_grep_and_explore() {
             "a denied file's contents must not leak through grep: {val}"
         );
     }
+}
 
-    let _ = std::fs::remove_dir_all(&tmp);
+/// `find-files` filters before it cuts: denied matches outranking every
+/// admitted one take no slot, so the admitted file still comes back.
+#[cfg(unix)]
+#[test]
+fn find_files_filters_before_the_cut() {
+    let scratch = scratch_dir("find-cut");
+    let tmp = scratch
+        .path()
+        .canonicalize()
+        .expect("canonical scratch dir");
+    std::fs::create_dir_all(tmp.join("secret")).expect("create secret");
+    for i in 0..60 {
+        std::fs::write(tmp.join("secret").join(format!("needle{i}.txt")), "").expect("write decoy");
+    }
+    std::fs::write(tmp.join("n-e-e-d-l-e.txt"), "").expect("write target");
+    let root = display_no_trailing_sep(&tmp);
+    let caps = Capabilities {
+        fs: Some(ral_core::capability::FsPolicy {
+            read_prefixes: vec![ral_core::path::FrozenPath::root()],
+            write_prefixes: vec![ral_core::path::FrozenPath::root()],
+            deny_paths: vec![ral_core::path::FrozenPath::from_surface(tmp.join("secret"))],
+        }),
+        ..Capabilities::root()
+    };
+    let cmd = format!("cd '{root}'\nfind-files 'needle'");
+    let open = run_once(&fresh(), &cmd)
+        .value
+        .expect("find-files returns a value");
+    assert!(
+        !open.contains("n-e-e-d-l-e.txt"),
+        "precondition: admitted, the decoys outrank the target past the cut: {open}"
+    );
+    let r = run_shell_direct(&fresh(), &caps, &cmd, 30, &crate::record::Emitter::none());
+    assert_eq!(
+        r.exit,
+        0,
+        "stderr was: {}",
+        String::from_utf8_lossy(&r.stderr)
+    );
+    let val = r.value.expect("find-files returns a value");
+    assert!(
+        val.contains("n-e-e-d-l-e.txt"),
+        "the admitted match survives: {val}"
+    );
+    assert!(!val.contains("secret"), "no denied match is named: {val}");
+}
+
+/// A walked entry is judged and read as the file it is: a directory named
+/// `~` is not the home directory, so its files are searched like any other.
+#[test]
+fn a_walked_tilde_is_a_file_not_home() {
+    let scratch = scratch_dir("walk-tilde");
+    let tmp = scratch
+        .path()
+        .canonicalize()
+        .expect("canonical scratch dir");
+    std::fs::create_dir_all(tmp.join("~")).expect("create ~");
+    std::fs::write(tmp.join("~").join("tilde-probe.txt"), "NEEDLE here\n").expect("write probe");
+    let root = display_no_trailing_sep(&tmp);
+    let r = run_once(
+        &fresh(),
+        &format!(
+            "cd '{root}'\n\
+             let hits = grep-files 'NEEDLE' .\n\
+             return \"!{{length $hits}} $hits[0][text]\""
+        ),
+    );
+    assert_eq!(
+        r.exit,
+        0,
+        "stderr was: {}",
+        String::from_utf8_lossy(&r.stderr)
+    );
+    assert_eq!(r.value.as_deref(), Some("1 NEEDLE here"));
 }
 
 /// `view-hash` returns one record per line: its number, its witness hash,

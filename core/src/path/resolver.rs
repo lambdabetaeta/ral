@@ -1,6 +1,7 @@
 //! Stages 1–3 of `crate::path` composed against one `HOME`/cwd pair.
 //!
-//! [`Resolver::resolve`] is the sole constructor of a [`LexicalPath`], and
+//! [`Resolver::resolve`] and [`Resolver::anchor`] are the sole constructors
+//! of a [`LexicalPath`], and
 //! outside `crate::path` the canonicalisers are reachable only through one —
 //! so the stage order is enforced by the types, not by convention.
 
@@ -21,7 +22,7 @@ pub struct Resolver<'a> {
 
 impl Resolver<'_> {
     /// A resolver for callers with no shell — the `RAL_PATH` walker, the
-    /// plugin loader, exarch's fff index — who already hold an absolute
+    /// plugin loader, exarch's skill scan — who already hold an absolute
     /// candidate.  Safe only for those: with no `home`, `~/x` resolves to
     /// itself, and a `None` cwd sends `lex::resolve_path` to the process cwd.
     pub fn shell_less() -> Self {
@@ -36,6 +37,13 @@ impl Resolver<'_> {
     pub fn resolve(&self, raw: &str) -> LexicalPath {
         let expanded = sigil::expand_path_prefix(raw, self.home.as_deref());
         LexicalPath::from_lexed(lex::resolve_path(self.cwd, &expanded))
+    }
+
+    /// Stage 2 alone, for a path the host already holds, such as a walked
+    /// entry: no sigil may reinterpret it, so a file named `~` is that file,
+    /// and no string round trip may rename it.
+    pub fn anchor(&self, path: &Path) -> LexicalPath {
+        LexicalPath::from_lexed(lex::anchor(self.cwd, path))
     }
 
     /// The whole pipeline: [`Self::resolve`], then canonicalise leniently —

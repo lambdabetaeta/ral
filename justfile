@@ -50,8 +50,8 @@ lint $RUSTFLAGS=deny:
 
 # Never links, so a Unix host can run it. `cargo xwin` (rust-cross/cargo-xwin)
 # splats the real MSVC CRT and Windows SDK headers exarch's `rustls ->
-# aws-lc-sys` and `guest-net`'s `fff-search -> git2 -> libgit2-sys` need to
-# actually compile C — no workspace member is excluded. One-time host setup:
+# aws-lc-sys` needs to actually compile C — no workspace member is excluded.
+# One-time host setup:
 #   brew install llvm lld && cargo install cargo-xwin
 # then put both kegs' bin/ on PATH (they're keg-only). Real Windows *test
 # execution* still needs .github/workflows/windows.yml.

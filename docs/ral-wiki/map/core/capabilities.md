@@ -207,10 +207,14 @@ plus `which.rs` for PATH search.
   both take `windows` as a parameter rather than reading `cfg!`, so neither
   table is dark on the other host.
 
-`resolver.rs` composes the stages — `Resolver::resolve` is the *sole*
-constructor of a `LexicalPath` (`forms.rs`, with its grant-side twin
-`FrozenPath`), so canonicalisation cannot run before
-sigil-expansion-then-lex: the ordering is in the types, not convention.
+`resolver.rs` composes the stages — `Resolver::resolve` and
+`Resolver::anchor` are the *sole* constructors of a `LexicalPath`
+(`forms.rs`, with its grant-side twin `FrozenPath`), so canonicalisation
+cannot run before lexing: the ordering is in the types, not convention.
+`resolve` takes surface text and expands sigils first; `anchor` takes a path
+the host already holds, a walked entry say, and expands nothing, so a file
+named `~` stays that file and a non-UTF-8 name is never renamed by a string
+round trip.
 
 (`ral_path.rs` in the same directory owns `RAL_PATH` module search, used by `use`
 and the plugin loader, not by grant matching.)
