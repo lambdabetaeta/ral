@@ -757,8 +757,7 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
             Some(unbound_variable_hint(name, suggestions))
         }
         TypeErrorKind::HeadBoundToValue { name, .. } => Some(format!(
-            "a binding shadows the command of the same name: did you mean the command? \
-             `^{name}` runs it, and `${name}` is the value"
+            "`${name}` is the value; if you meant a command named `{name}`, `^{name}` runs it"
         )),
         TypeErrorKind::IndexContainerUnknown { .. } => Some(
             "a function that indexes with a computed key has one container type per program: \

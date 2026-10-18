@@ -45,7 +45,7 @@ binding, `explain name` reports what it shadows, and `^test` names the
 command. Hiding a prelude function or builtin was already legal.
 
 Running such a binding as a program is refused by T0072
-(`HeadBoundToValue`), whose hint asks whether the command was meant and
-names `^name` and `$name`: a bare head, `$name args` and `!$name` alike, so
-the user is told of the shadowing rather than of the `!` operator they never
-wrote.
+(`HeadBoundToValue`) for a bare head, `$name args` and `!$name` alike, so
+the user is told of the binding rather than of the `!` operator they never
+wrote. Its hint names `$name` as the value and offers `^name` should a
+command have been meant; it never consults `PATH` to say whether one exists.

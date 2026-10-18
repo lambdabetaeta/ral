@@ -71,6 +71,9 @@ impl ParseError {
             EntryReading::Statement(word) => format!(
                 "`{word}` begins a statement: write `!{{{word} …}}`, or bind it first with `let`"
             ),
+            EntryReading::Binding => "a `let` binds for the statements after it, not inside an entry: \
+                 write the `let` before this collection, and put its name here"
+                .into(),
             EntryReading::Command if broken => {
                 format!("{comma}; or, to run a command, write the entry as `!{{…}}`")
             }
@@ -80,11 +83,20 @@ impl ParseError {
             ),
             EntryReading::Value => comma.into(),
         };
+        let (at, also) = match reading {
+            EntryReading::Statement(_) | EntryReading::Binding => {
+                (label(Some(entry), "this entry is a statement, not a value"), None)
+            }
+            EntryReading::Command | EntryReading::Value => (
+                label(Some(entry), "this entry holds more than one value"),
+                Some(label(Some(head), "its first value ends here")),
+            ),
+        };
         Report {
             code: Some("P0003"),
             message: self.message.clone(),
-            at: Some(label(Some(entry), "this entry holds more than one value")),
-            also: Some(label(Some(head), "its first value ends here")),
+            at: Some(at),
+            also,
             hint: Some(hint),
         }
     }

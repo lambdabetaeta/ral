@@ -1,5 +1,5 @@
 # codes: T0072
 # contains: `ls` is bound to a list
-# contains: `^ls` runs it, and `$ls` is the value
+# contains: `$ls` is the value; if you meant a command named `ls`, `^ls` runs it
 let ls = [a]
 ls /tmp

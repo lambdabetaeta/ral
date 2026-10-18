@@ -157,6 +157,16 @@ fn an_entry_that_runs_renders_its_readings() {
 }
 
 #[test]
+fn a_statement_entry_is_not_labelled_a_value() {
+    for src in ["[k: if $c { 1 } else { 2 }]", "[k: let x = 1]"] {
+        let err = crate::syntax::parser::parse(src).unwrap_err();
+        let output = drawn("test.ral", src, &err);
+        assert!(output.contains("this entry is a statement, not a value"), "{src}:\n{output}");
+        assert!(!output.contains("its first value ends here"), "{src}:\n{output}");
+    }
+}
+
+#[test]
 fn touching_words_label_both_atoms() {
     let output = touching_help("echo --prefix=$d");
     assert!(output.contains("words touch: whitespace separates words, and nothing joins them"));

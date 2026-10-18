@@ -75,7 +75,7 @@ spread and an option are value contexts, read by `parse_entry_value`; a second
 atom after the first is an application written where `!{…}` belongs, or a
 missing `,`. It is refused as P0003 over the run up to the next `,` or `]`,
 the help choosing its readings by the first token (`EntryReading`): `if`
-wants `!{if …}`, a command head offers `!{…}` or a `,`, any other value
+wants `!{if …}`, a `let` wants hoisting before the collection, a command head offers `!{…}` or a `,`, any other value
 only the `,`.
 
 **A word's *literal* shape is lexical too.** `WordLiteral::classify` (`ast.rs`)

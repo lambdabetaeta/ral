@@ -2668,12 +2668,13 @@ fn a_return_before_a_statement_keyword_says_why() {
 
 #[test]
 fn an_entry_that_runs_a_command_says_how() {
-    use EntryReading::{Command, Statement, Value};
+    use EntryReading::{Binding, Command, Statement, Value};
     for (src, want) in [
         ("[k: map { |x| $x } $y]", Command),
         ("[str $x]", Command),
         ("[k: $f 1]", Command),
         ("[k: if $c { 1 } else { 2 }]", Statement("if".into())),
+        ("[k: let x = 1]", Binding),
         ("[1 2]", Value),
         ("within [dir: pwd -P] { ls }", Command),
     ] {

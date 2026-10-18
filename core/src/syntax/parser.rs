@@ -71,6 +71,8 @@ pub(crate) enum ParseErrorKind {
 pub(crate) enum EntryReading {
     /// `if`, `case`, a control operator: no `,` can rescue it.
     Statement(String),
+    /// `let`, whose scope is the statements after it, never an entry.
+    Binding,
     /// A bare word, `$f`, `!…` or a block: a command, or a missing `,`.
     Command,
     /// A number, string or collection: a missing `,`.
@@ -80,6 +82,7 @@ pub(crate) enum EntryReading {
 impl EntryReading {
     fn of(tok: &Token) -> Self {
         match tok {
+            Token::Word(Word::Plain(w)) if w == "let" => Self::Binding,
             Token::Word(Word::Plain(w)) if begins_statement(w) => Self::Statement(w.clone()),
             Token::Word(Word::Plain(w)) if WordLiteral::classify(w).is_some() => Self::Value,
             Token::Word(_) | Token::Variable { .. } | Token::Bang | Token::LBrace => Self::Command,
