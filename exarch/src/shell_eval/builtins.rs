@@ -267,7 +267,7 @@ fn cancellable(builder: &WalkBuilder) -> ignore::Walk {
     builder.build()
 }
 
-/// One matching line from [`search_tree`], its path relative to the walk root.
+/// One matching line from [`search_tree`], its file named as `view-text` takes it.
 struct SearchHit {
     file: String,
     line: u64,
@@ -282,14 +282,22 @@ fn readable(shell: &mut Shell, rel: &str) -> bool {
     shell.check_fs_read(&rp).is_ok()
 }
 
-/// Recursively search the cwd for `pattern` (ignore-aware, Rust regex), reading
-/// each file's bytes once.  The cancellation poll, the per-file deny skip, and
-/// the binary-detection quit all live here, the one site `grep-files` composes over.
-fn search_tree(shell: &mut Shell, pattern: &str) -> Settled<Vec<SearchHit>> {
+/// Search `path`, a file or a directory walked recursively (ignore-aware, Rust
+/// regex), reading each file's bytes once.  The cancellation poll, the per-file
+/// deny skip, and the binary-detection quit all live here, the one site
+/// `grep-files` composes over.  A hit names its file relative to the cwd when
+/// under it, else absolutely, so it can be handed straight back to a reader.
+fn search_tree(shell: &mut Shell, pattern: &str, path: &str) -> Settled<Vec<SearchHit>> {
     let matcher = RegexMatcherBuilder::new()
         .build(pattern)
         .map_err(|e| sig(regex_err("grep-files", pattern, &e.to_string())))?;
-    let root = checked_read_path(shell, ".")?;
+    let root = checked_read_path(shell, path)?;
+    if !root.exists() {
+        return Err(sig(format!(
+            "grep-files: {path} does not exist; the path is a file or directory, relative to the cwd or absolute."
+        )));
+    }
+    let cwd = shell.resolve(".").into_inner();
     let mut searcher = SearcherBuilder::new()
         .line_number(true)
         .binary_detection(BinaryDetection::quit(b'\x00'))
@@ -304,7 +312,7 @@ fn search_tree(shell: &mut Shell, pattern: &str) -> Settled<Vec<SearchHit>> {
         };
         let abs = entry.path();
         let rel = abs
-            .strip_prefix(&root)
+            .strip_prefix(&cwd)
             .unwrap_or(abs)
             .to_string_lossy()
             .into_owned();
@@ -337,18 +345,19 @@ fn search_tree(shell: &mut Shell, pattern: &str) -> Settled<Vec<SearchHit>> {
     Ok(results)
 }
 
-/// `grep-files PATTERN` — [`search_tree`] over the cwd, emitting exactly one
+/// `grep-files PATTERN PATH` — [`search_tree`] over `PATH`, emitting exactly one
 /// `grep` surface for the whole walk rather than a card per file read.
 fn builtin_grep_files(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let pattern = args[0].as_str("grep-files")?;
+    let path = args[1].as_str("grep-files")?;
 
     let grep = Observed::Grep(Grep {
-        scope: ".".to_string(),
+        scope: path.to_string(),
         pattern: pattern.to_string(),
     });
     mooring.surface_data(&shell.observation(grep).to_surface());
 
-    let results = search_tree(shell, pattern)?
+    let results = search_tree(shell, pattern, path)?
         .into_iter()
         .map(|hit| {
             #[allow(
@@ -708,11 +717,14 @@ fn scheme_grep_files(_u: &mut Unifier) -> Scheme {
         &[],
         thunk(fun(
             Ty::String,
-            pure(Ty::list(closed_record(&[
-                ("file", Ty::String),
-                ("line", Ty::Int),
-                ("text", Ty::String),
-            ]))),
+            fun(
+                Ty::String,
+                pure(Ty::list(closed_record(&[
+                    ("file", Ty::String),
+                    ("line", Ty::Int),
+                    ("text", Ty::String),
+                ]))),
+            ),
         )),
     )
 }
@@ -962,7 +974,7 @@ static EXARCH_BUILTINS_ARR: [BuiltinEntry; 11] = [
     BuiltinEntry::new(
         Cow::Borrowed("grep-files"),
         scheme_grep_files,
-        "grep-files <pattern>  — recursively search the cwd (ignore-aware, Rust regex) in one read per matched file, giving [{file, line, text}].",
+        "grep-files <pattern> <path>  — search PATH, a file or a directory walked recursively (ignore-aware, Rust regex), in one read per matched file, giving [{file, line, text}]; `file` is named as view-text takes it.",
         BuiltinBody::Static(builtin_grep_files),
     ),
     BuiltinEntry::new(

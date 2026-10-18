@@ -154,7 +154,7 @@ fn a_denied_subtree_is_skipped_by_grep_and_explore() {
         let engine = fresh();
         let cmd = format!(
             "cd '{root}'\n\
-             let hits = grep-files 'NEEDLE'\n\
+             let hits = grep-files 'NEEDLE' .\n\
              let listing = explore-dir 3\n\
              return [hits: $hits, listing: $listing]"
         );
@@ -1124,7 +1124,7 @@ fn programmatic_todo_sweep_rewrites_every_match() {
 
     let src = format!(
         r"cd '{tmp_str}'
-let hits = grep-files #'\[TODO\]'#
+let hits = grep-files #'\[TODO\]'# .
 let files = nub !{{map {{ |h| $h[file] }} $hits}}
 each {{ |f|
     let lc = line-count $f
@@ -1156,6 +1156,50 @@ return !{{length $hits}}"
     assert_eq!(
         std::fs::read_to_string(tmp.path().join("b.txt")).expect("read b"),
         "gamma\ndelta [DONE] three\n"
+    );
+}
+
+/// `grep-files` searches one file or one subtree, and names each hit's file
+/// so a reader takes it back unchanged; a missing path is an error, not an
+/// empty search.
+#[test]
+fn grep_files_scopes_to_a_file_or_a_subtree() {
+    let engine = fresh();
+    let scratch = scratch_dir("grep-scope");
+    let tmp = scratch.path().canonicalize().expect("canonical scratch dir");
+    std::fs::create_dir_all(tmp.join("src")).expect("create src");
+    std::fs::write(tmp.join("src").join("a.txt"), "x\nNEEDLE one\n").expect("write a");
+    std::fs::write(tmp.join("gates.txt"), "NEEDLE two\n").expect("write gates");
+    let root = display_no_trailing_sep(&tmp);
+
+    let r = run_once(
+        &engine,
+        &format!(
+            "cd '{root}'\n\
+             let one  = grep-files 'NEEDLE' gates.txt\n\
+             let tree = grep-files 'NEEDLE' src\n\
+             let h    = $tree[0]\n\
+             let back = view-text $h[file] $h[line] $[$h[line] + 1]\n\
+             return \"!{{length $one}} $one[0][file]:$one[0][line] !{{length $tree}} $h[file]:$h[line] $back[0][text]\""
+        ),
+    );
+    assert_eq!(
+        r.exit,
+        0,
+        "scoped searches must succeed; stderr was {:?}",
+        String::from_utf8_lossy(&r.stderr)
+    );
+    assert_eq!(
+        r.value.as_deref(),
+        Some("1 gates.txt:1 1 src/a.txt:2 NEEDLE one")
+    );
+
+    let r = run_once(&engine, &format!("cd '{root}'\ngrep-files 'NEEDLE' nope"));
+    assert_ne!(r.exit, 0, "a missing path must fail");
+    assert!(
+        String::from_utf8_lossy(&r.stderr).contains("nope does not exist"),
+        "the error names the missing path; stderr was {:?}",
+        String::from_utf8_lossy(&r.stderr)
     );
 }
 
@@ -1867,5 +1911,53 @@ mod self_layer {
             child.push(layer);
             refuses_exarch(&f, &child);
         }
+    }
+}
+
+/// The indented code block in prompt text `md` that opens with `first`,
+/// dedented: so a test runs the snippet the model is shown, not a copy.
+fn prompt_snippet(md: &str, first: &str) -> String {
+    let block: Vec<&str> = md
+        .lines()
+        .skip_while(|l| l.trim_start() != first)
+        .take_while(|l| l.starts_with("    "))
+        .map(|l| &l[4..])
+        .collect();
+    assert!(!block.is_empty(), "no code block opening with {first:?}");
+    block.join("\n")
+}
+
+/// Each edit scheme's grep idiom runs as printed: one search, then its
+/// mode's reader around every hit, in one turn.
+#[test]
+fn the_prompt_grep_idioms_run() {
+    let engine = fresh();
+    let scratch = scratch_dir("grep-idioms");
+    let tmp = scratch.path().canonicalize().expect("canonical scratch dir");
+    std::fs::create_dir_all(tmp.join("src")).expect("create src");
+    std::fs::write(tmp.join("src").join("a.rs"), "x\nfn parse_a() {}\ny\n").expect("write a");
+    let root = display_no_trailing_sep(&tmp);
+    let first = "let hits = grep-files #'fn parse_'# src";
+    for (md, witnessed) in [
+        (include_str!("../../data/edit-hash.md"), true),
+        (include_str!("../../data/edit-replace.md"), false),
+    ] {
+        let r = run_once(&engine, &format!("cd '{root}'\n{}", prompt_snippet(md, first)));
+        assert_eq!(
+            r.exit,
+            0,
+            "the idiom must run; stderr was {:?}",
+            String::from_utf8_lossy(&r.stderr)
+        );
+        let value = r.value.expect("the idiom answers with a record");
+        assert!(
+            value.contains("total: 1") && value.contains("fn parse_a() {}"),
+            "one hit, read back in context: {value}"
+        );
+        assert_eq!(
+            value.contains("hash: "),
+            witnessed,
+            "only the hash scheme's reader carries witnesses: {value}"
+        );
     }
 }

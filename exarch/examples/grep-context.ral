@@ -5,32 +5,30 @@
 #     ral grep-context.ral 'TODO'           # search cwd
 #     ral grep-context.ral 'TODO' src/      # scope to src/
 #
-# `grep-files PATTERN` returns a list of `[file, line, text]`
-# records from a recursive walk of cwd.  The bash post-grep dance is
-# to re-parse `file:line:text` back into pieces; here the pieces
-# never left.  `view-text-around PATH LINE PEEK` reads the file
-# centred on a given 1-based line — composing them is one loop, no
-# parsing — and tags each line with its number.
+# `grep-files PATTERN PATH` returns a list of `[file, line, text]`
+# records from a file, or a recursive walk of a directory.  The bash
+# post-grep dance is to re-parse `file:line:text` back into pieces;
+# here the pieces never left.  `view-text-around PATH LINE PEEK`
+# reads the file centred on a given 1-based line — composing them is
+# one loop, no parsing — and tags each line with its number.
 
 if !{is-empty !{args}} {
-    warn 'usage: grep-context.ral PATTERN [DIR]'
+    warn 'usage: grep-context.ral PATTERN [PATH]'
     exit 2
 }
 
 let [pattern, ...rest] = args
 let where = if !{is-empty $rest} { return '.' } else { return $rest[0] }
 
-within [dir: $where] {
-    let hits = !{grep-files $pattern}
+let hits = grep-files $pattern $where
 
-    if !{is-empty $hits} {
-        echo 'no matches'
-        exit 1
-    }
+if !{is-empty $hits} {
+    echo 'no matches'
+    exit 1
+}
 
-    for $hits { |h|
-        echo "!{styled cyan "==> $h[file]:$h[line]"}"
-        view-text-around $h[file] $h[line] 2
-        echo ''
-    }
+for $hits { |h|
+    echo "!{styled cyan "==> $h[file]:$h[line]"}"
+    view-text-around $h[file] $h[line] 2
+    echo ''
 }

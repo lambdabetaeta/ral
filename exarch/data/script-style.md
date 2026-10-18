@@ -6,7 +6,7 @@ A ral tool call should be a full program: gather, transform, and compute as much
 
 Capture every query in a `let`, then read from the definition:
 
-    let hits = grep-files #'register_handler'#
+    let hits = grep-files #'register_handler'# .
     let live = filter { |h| $[not !{re-match #'^tests/'# $h[file]}] } $hits
     let few  = take 5 $live
     [total: !{length $hits}, live: !{length $live}, sample: $few]
@@ -27,17 +27,10 @@ Bindings are immutable but shadowable: re-bind `let cargo-in = …` when the beh
 
 Locate, drop, deduplicate, and sample in one turn:
 
-    let hits  = within [dir: #'src'#] { grep-files #'register_handler'# }
+    let hits  = grep-files #'register_handler'# src
     let live  = filter { |h| $[not !{re-match #'^tests/'# $h[file]}] } $hits
     let files = fold { |acc h| if !{elem $h[file] $acc} { $acc } else { [...$acc, $h[file]] } } [] $live
     [total: !{length $hits}, live: !{length $live}, files: $files, sample: !{take 3 $live}]
-
-`grep-files` hit carries its file and line; a `view-text-around` over the hit shows the place verbatim, which is what an edit must then match:
-
-    let hits = grep-files #'fn parse_'#
-    let few  = take 5 $hits
-    each { |h| view-text-around $h[file] $h[line] 3; echo #'---'# } $few
-    [total: !{length $hits}, shown: !{length $few}]
 
 A file read once into a binding can be sized and searched in the same turn:
 
@@ -47,7 +40,7 @@ A file read once into a binding can be sized and searched in the same turn:
 `defer` long work **early**, then fill the waiting turns with real progress: read the next file, prepare the next edit, write the test you will run afterwards. When nothing useful remains, `await` the handle. It persists across turns, so awaiting it again later is always safe.
 
     let suite = defer { cargo test -q 2>&1 }
-    let impl  = within [dir: #'src/widget'#] { grep-files #'fn render'# }
+    let impl  = grep-files #'fn render'# src/widget
     let tests = await $suite
     let log   = lines !{bytes-to-string !{commands $tests[value]}[0][stdout]}
     [impl: !{take 4 $impl}, ok: !{succeeded $tests[value]}, log: !{take 20 $log}]

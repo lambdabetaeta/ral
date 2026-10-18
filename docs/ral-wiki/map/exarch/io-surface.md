@@ -262,7 +262,7 @@ frame:
   redirect frame would have pushed.
 - **`grep-files`** does one `fs::read` per matched file (the `search_tree` walk
   reads the bytes the search already needs) and constructs **one**
-  `Observed::Grep { scope: ".", pattern }` for the whole logical search — not
+  `Observed::Grep { scope: path, pattern }` for the whole logical search — not
   one read card per file.
 - **`edit-hash`** / **`edit-replace`**
   ([[design/hash-addressed-editing|hash-addressed editing]]) read, resolve,

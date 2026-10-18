@@ -112,7 +112,7 @@
         <div class="listing">
           <div class="listing-bar">one call</div>
 <pre><code>let suite = defer { cargo test -q 2&gt;&amp;1 }
-let impl  = within [dir: #'src/widget'#] { grep-files #'fn render'# }
+let impl  = grep-files #'fn render'# src/widget
 let tests = await $suite
 let log   = lines !{bytes-to-string !{commands $tests[value]}[0][stdout]}
 [impl: !{take 4 $impl}, ok: !{succeeded $tests[value]}, log: !{take 20 $log}]</code></pre>
@@ -126,7 +126,7 @@ let log   = lines !{bytes-to-string !{commands $tests[value]}[0][stdout]}
         <div class="exchange">
           <div class="listing">
             <div class="listing-bar">the agent writes</div>
-<pre><code>let hits = grep-files #'fn render'#
+<pre><code>let hits = grep-files #'fn render'# .
 cargo test -q
 echo $[!{length $hits} + #' matches'#]</code></pre>
           </div>

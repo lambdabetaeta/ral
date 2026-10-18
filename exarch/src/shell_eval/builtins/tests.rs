@@ -104,7 +104,7 @@ fn search_files_honours_a_cancelled_scope() {
     shell
         .cancel_handle()
         .cancel(ral_core::process::CancelCause::Interrupted);
-    let err = builtin_grep_files(&[Value::string("x")], &m, &mut shell)
+    let err = builtin_grep_files(&[Value::string("x"), Value::string(".")], &m, &mut shell)
         .expect_err("a cancelled scope must abort the search walk");
     assert_eq!(err.code(), 130);
 }

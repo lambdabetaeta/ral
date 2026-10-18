@@ -47,8 +47,11 @@ logical operation with one surface ([[map/exarch/io-surface|io-surface]]).
   each row's witness, the handle `edit-hash` checks. Reads *and hashes* the whole
   file, since the witness depends on file-wide uniqueness; both readers share one
   range reader and differ only in the column.
-- `grep-files <pattern>` → `[{ file, line, text }]`. An ignore-aware Rust
-  regex walk of the cwd (`search_tree`, binary detection quits at NUL, each file
+- `grep-files <pattern> <path>` → `[{ file, line, text }]`. An ignore-aware
+  Rust regex search of `path`, a file or a directory walked recursively
+  (`search_tree`; a hit names its file cwd-relative when under the cwd, else
+  absolutely, so a reader takes it back unchanged; a missing path is an error,
+  not an empty search; binary detection quits at NUL, each file
   gated by `check_fs_read`, the walk polling the cancel check per entry via the
   one sanctioned `cancellable` door). Surfaces exactly one
   `Observed::Grep { scope, pattern }` observation for the whole search

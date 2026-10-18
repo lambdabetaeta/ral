@@ -1,4 +1,7 @@
-`view-text PATH START END` shows the half-open line range `[START, END)` as a list of `[line, text]` records; `view-text-around PATH LINE PEEK` shows the `2*PEEK + 1` lines centred on `LINE`. The text is verbatim — what you read is what an edit must match.
+`view-text PATH START END` shows the half-open line range `[START, END)` as a list of `[line, text]` records; `view-text-around PATH LINE PEEK` shows the `2*PEEK + 1` lines centred on `LINE`. The text is verbatim — what you read is what an edit must match. A `grep-files` hit carries its file and line, so a search and the text around its hits fit in one turn:
+
+    let hits = grep-files #'fn parse_'# src
+    [total: !{length $hits}, around: !{map { |h| view-text-around $h[file] $h[line] 3 } !{take 5 $hits}}]
 
 `edit-replace PATH FROM TO` is the file-editing affordance: it reads PATH, replaces the one literal occurrence of FROM with TO, and writes the result back — failing on 0 or >1 matches, same contract as `string-replace`.
 
@@ -18,5 +21,5 @@ When a target can repeat, or the edit is to a structured value rather than plain
 
 To sweep a tree, `grep-files` locates hits and every match in each touched file is replaced at once with `re-replace-all` (Rust regex syntax):
 
-    let files = nub !{map { |h| $h[file] } !{grep-files #'\[TODO\]'#}}
+    let files = nub !{map { |h| $h[file] } !{grep-files #'\[TODO\]'# .}}
     each { |f| to-string !{re-replace-all #'\[TODO\]'# #'[DONE]'# !{from-string < $f}} > $f } $files

@@ -279,7 +279,7 @@ Should you wish for a service that runs *after* the session is over, use `detach
 
 `within` is an effect handler that runs a block with a changed directory, environment, or handling of a command call:
 
-    within [dir: #'src'#] { grep-files ##'#TODO'## }
+    within [dir: #'src'#] { explore-dir 2 }
     let h = defer { within [env: [LOG_LEVEL: #'debug'#]] { convert-all } }
     within [ env : [ API_KEY : #''# ], handlers: [curl: { |args| echo #'offline stub'# }]] { fetch-all }
     let all_stubbed = { |name args| echo "stubbed: $name ...$args" }
@@ -316,7 +316,7 @@ Use the following instead of `rg`/`find`/`ls` to search for files; all are `.git
 
 - `glob #'**/*.txt'#` — matching paths as a ral list; a wildcard never matches a dot file (name it literally; a wildcard starting with `.` is an error). Spread into a command: `mv ...!{glob …} out/`.
 - `explore-dir n` — entries of the current directory to depth `n` as a `ral` list; `.gitignore`-aware
-- `grep-files #'TODO'#` — recursive grep of the current directory (Rust regex syntax); returns `ral` list of records `[file, line, text]`.
+- `grep-files #'TODO'# src` — grep a file, or a directory recursively (Rust regex syntax); returns `ral` list of records `[file, line, text]`.
 - `fff #'query'#` — fuzzy file-name search (frecency-ranked) over the working tree, returning `[String]`. Use to find files by name without a glob pattern.
 - `list-dir`, `file-info`, `line-count`, `is-file`/`is-dir`/`exists` — structured metadata without parsing `ls`.
 
