@@ -59,7 +59,7 @@ Web search remains subject to the account's policy.
 
 ## Known gap
 
-genai 0.7.0-rc.2 collapses a mid-stream `response.failed` to
+genai 0.7.0-rc.8 still collapses a mid-stream `response.failed` to
 `Error::StreamParse(message)`, losing `error.code`, so such a failure surfaces
 as `ProviderError::Other` with the message. The fix is upstream: surface it as
 `Error::ChatResponse { body }`, as the `error` event already is.

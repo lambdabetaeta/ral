@@ -2382,9 +2382,9 @@ dependencies = [
 
 [[package]]
 name = "genai"
-version = "0.7.0-rc.2"
+version = "0.7.0-rc.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b337726c08f4c45d6be30e36262d55ac0d0cd87c4666890092c387f4ba48a567"
+checksum = "56ec11ecdfeec749fa0fc0133b2ce3069a826a1a28cb8b008d7ecbeb7c7e03e3"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -2392,7 +2392,7 @@ dependencies = [
  "futures",
  "macro_rules_attribute",
  "mime_guess",
- "paste",
+ "pastey",
  "regex",
  "reqwest",
  "serde",
@@ -4969,12 +4969,6 @@ dependencies = [
  "num-traits",
  "winnow 1.0.4",
 ]
-
-[[package]]
-name = "paste"
-version = "1.0.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "pastey"
