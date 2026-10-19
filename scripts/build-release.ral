@@ -54,17 +54,17 @@
 # ── Helpers ───────────────────────────────────────────────────────────────
 
 let has = { |x list|
-    fold { |acc y| if $acc { return true } else { return !{equal $y $x} } } false $list
+    fold { |acc y| if $acc { return true } else { return $[$y == $x] } } false $list
 }
 
 # Normalize `uname -s` / `uname -m` into the names used by the artifact
 # matrix.  Keeps `--local` and `--macos` aligned with the matrix so a
 # local build produces the same filename a published one would.
 let norm_os = { |s|
-    if !{equal $s 'Darwin'} { return 'macos' } else { return !{lower $s} }
+    if $[$s == 'Darwin'] { return 'macos' } else { return !{lower $s} }
 }
 let norm_arch = { |s|
-    if !{equal $s 'aarch64'} { return 'arm64' } else { return $s }
+    if $[$s == 'aarch64'] { return 'arm64' } else { return $s }
 }
 
 let flags = ['--linux', '--macos', '--all', '--local',
@@ -239,7 +239,7 @@ let main = {
     # osxcross, so cross-compilation needs the host toolchain.
     if $build_macos {
         let kernel = uname -s
-        if !{equal $kernel 'Darwin'} {
+        if $[$kernel == 'Darwin'] {
             host_variants_ral    "$cache_dir/target-macos" 'macos' !{norm_arch !{uname -m}} true
             host_variants_exarch "$cache_dir/target-macos" 'macos' !{norm_arch !{uname -m}} true
         } else {

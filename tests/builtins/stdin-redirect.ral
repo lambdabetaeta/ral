@@ -8,7 +8,7 @@
 # how interactively the shell was launched.
 
 let assert_eq = { |name expected actual|
-    if $[not !{equal $expected $actual}] {
+    if $[$expected != $actual] {
         warn "FAIL: $name expected: $expected actual: $actual"
         fail [status: 1, message: "assertion failed: $name"]
     }

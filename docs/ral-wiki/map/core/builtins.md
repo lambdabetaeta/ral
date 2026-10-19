@@ -1,6 +1,6 @@
 ---
-generated_at_commit: dad6a1b3
-generated_at_date: 2026-10-17
+generated_at_commit: d834a9da
+generated_at_date: 2026-10-19
 covers_paths: [core/src/builtins/, core/src/builtins.rs, core/src/uutils.rs]
 ---
 
@@ -93,8 +93,8 @@ Bodies are grouped by concern, one submodule each:
   away before the common margin is stripped, while content-line whitespace is
   preserved;
 - `collections.rs`, `predicates.rs` (`keys`, `has`: ordering and equality are
-  `Value::compare` / `Value::equals`, and `equal`, `lt`, `gt`, `is-empty`,
-  `sort-list`, `identity` are prelude one-liners over `==`, `<`, `>`, `length`
+  `Value::compare` / `Value::equals`, and `lt`, `gt`, `is-empty`,
+  `sort-list`, `identity` are prelude one-liners over `<`, `>`, `length`
   and `sort-list-by`), `fs.rs`, `codecs.rs` — the last is also
   home to `builtin_echo`, `to-line`'s neighbour by nature: every argument
   rendered through the total `to-string` — `Value`'s `Display`, mapped over the
@@ -244,7 +244,9 @@ Bodies are grouped by concern, one submodule each:
   registries, never the caller's block. `LANGUAGE_DOCS` gives every parser
   keyword and Boolean literal a standalone guide; a completeness test pairs
   that table with `CONTROL_OPERATORS`, `FLOW_KEYWORDS`, and
-  `LANGUAGE_CONSTANTS`, so new syntax cannot land undocumented. One `Where`
+  `LANGUAGE_CONSTANTS`, so new syntax cannot land undocumented. The `grant`
+  guide owns the capability schema and examples of exclusions and computed
+  paths; the agent prompt points here for those details. One `Where`
   answers both halves of a resolved command entry: the line naming the frame
   that would run, and the doc ladder that asks *that* registry — a session
   binding owning its name outright rather than inheriting the doc of what it

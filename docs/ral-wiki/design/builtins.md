@@ -57,7 +57,7 @@ The core entries group by what they compute:
   `re-match` `re-split` `re-find-match` `re-find-matches` `re-replace`
   `re-replace-all` `string-replace` `ral-quote` `posix-quote` `posix-split`.
 - **Parsing** — `int` `float` `str`: value→scalar coercions.
-- **Structure & comparison** — `length` `is-empty` `keys` `has` `equal` `lt` `gt`:
+- **Structure & comparison** — `length` `is-empty` `keys` `has` `lt` `gt`:
   ad-hoc-polymorphic, dispatched on the runtime value's shape.
 - **Structured filesystem queries** — `list-dir` `file-info`
   `is-file` / `is-dir` / `is-link` / `is-readable` / `is-writable` `exists` `glob`

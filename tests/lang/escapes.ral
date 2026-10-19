@@ -4,22 +4,22 @@
 # Single quotes go through a different lexer path — no escape processing — so
 # the comparisons are not tautological.
 
-echo !{equal "\x41" 'A'}
+echo $["\x41" == 'A']
 # Expected: true
-echo !{equal "\u{1F600}" '😀'}
+echo $["\u{1F600}" == '😀']
 # Expected: true
-echo !{equal "\t" '	'}
+echo $["\t" == '	']
 # Expected: true
-echo !{equal "\\" '\'}
+echo $["\\" == '\']
 # Expected: true
 
 # `\!` keeps the bang textual: without it, `!{rm -rf x}` would run.
-echo !{equal "\!{rm -rf x}" '!{rm -rf x}'}
+echo $["\!{rm -rf x}" == '!{rm -rf x}']
 # Expected: true
 
 # A backslash before a newline continues the line and emits nothing.
-echo !{equal "a\
-b" 'ab'}
+echo $["a\
+b" == 'ab']
 # Expected: true
 
 # Escapes with no printable literal to compare against: check their length.

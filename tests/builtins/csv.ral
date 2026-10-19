@@ -12,7 +12,7 @@ to-csv $rows
 
 # A row short of the header decodes as empty strings, not an error.
 let short = !{to-string "a,b\n1\n" | from-csv}
-echo !{equal $short[0][b] ''}
+echo $[$short[0][b] == '']
 
 # A duplicate header column is refused: a map cannot hold two `a`s.
 try { let _dup = !{to-string "a,a\n1,2\n" | from-csv} } { |e| echo $e[message] }

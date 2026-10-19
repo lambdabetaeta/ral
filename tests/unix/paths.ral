@@ -5,25 +5,25 @@
 let real_home = !{absolute-path '~'}
 let t = temp-dir
 cd $t
-if !{equal !{absolute-path 'a/../b'} "$t/b"} { echo 'cd anchors' }
-if !{equal !{absolute-path './c'} "$t/c"} { echo 'cd persists' }
+if $[!{absolute-path 'a/../b'} == "$t/b"] { echo 'cd anchors' }
+if $[!{absolute-path './c'} == "$t/c"] { echo 'cd persists' }
 
 # `~` expands against the scoped HOME overlay, not the host's.
 within [env: [HOME: '/ral-home-probe']] {
-    if !{equal !{absolute-path '~/x'} '/ral-home-probe/x'} { echo 'scoped home' }
-    if !{equal !{absolute-path '~'} '/ral-home-probe'} { echo 'bare tilde' }
+    if $[!{absolute-path '~/x'} == '/ral-home-probe/x'] { echo 'scoped home' }
+    if $[!{absolute-path '~'} == '/ral-home-probe'] { echo 'bare tilde' }
 }
-if !{equal !{absolute-path '~/x'} "$real_home/x"} { echo 'home restored' }
+if $[!{absolute-path '~/x'} == "$real_home/x"] { echo 'home restored' }
 
 # `within [dir:]` anchors relative paths of builtins and the cwd of children
 let wd = temp-dir
 within [dir: $wd] {
     to-string hello > 'note.txt'
-    echo !{equal !{cwd} $wd}
+    echo $[!{cwd} == $wd]
     echo !{from-string < 'note.txt'}
     echo !{exists 'note.txt'}
     echo !{length !{glob '*.txt'}}
-    echo !{equal !{/bin/pwd} $wd}
+    echo $[!{/bin/pwd} == $wd]
 }
 rm -rf $wd
 
@@ -36,19 +36,19 @@ let lexroot = temp-dir
 mkdir -p "$lexroot/d1/real"
 ln -s "$lexroot/d1/real" "$lexroot/link"
 within [dir: $lexroot] {
-    echo !{equal !{absolute-path 'no/such/./dir/../leaf'} "$lexroot/no/such/leaf"}
-    echo !{equal !{absolute-path 'link'} "$lexroot/link"}
-    echo !{equal !{absolute-path 'link/../x'} "$lexroot/x"}
-    echo !{equal !{absolute-path ''} $lexroot}
-    echo !{equal !{absolute-path 'sub/'} "$lexroot/sub"}
+    echo $[!{absolute-path 'no/such/./dir/../leaf'} == "$lexroot/no/such/leaf"]
+    echo $[!{absolute-path 'link'} == "$lexroot/link"]
+    echo $[!{absolute-path 'link/../x'} == "$lexroot/x"]
+    echo $[!{absolute-path ''} == $lexroot]
+    echo $[!{absolute-path 'sub/'} == "$lexroot/sub"]
 }
 echo !{absolute-path '/..'}
 echo !{absolute-path '/a/../../x'}
 
 # `resolve-path` is physical but still anchors to the logical cwd
 to-string x > "$lexroot/leaf"
-within [dir: $lexroot] { echo !{equal !{resolve-path 'leaf'} !{resolve-path "$lexroot/leaf"}} }
-within [dir: $lexroot] { echo !{equal !{resolve-path 'link'} !{resolve-path "$lexroot/d1/real"}} }
+within [dir: $lexroot] { echo $[!{resolve-path 'leaf'} == !{resolve-path "$lexroot/leaf"}] }
+within [dir: $lexroot] { echo $[!{resolve-path 'link'} == !{resolve-path "$lexroot/d1/real"}] }
 rm -rf $lexroot
 
 rm -rf $t

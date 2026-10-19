@@ -292,7 +292,7 @@ deep bit, and a row variable a deep bit alone. The unconstrained `any` has every
 head; five are named — `number` (`+ - * /`, unary `-`), `comparable` (`<`, `lt`,
 `gt`, `sort-list`, `int`, `float`), `scalar` (each interpolation part), `sized`
 (`length`, `is-empty`) and `data`, every head but a block and a handle, *deep*
-(`==`, `equal`, `str`, the encoders). The unifier holds them beside the store, on
+(`==`, `!=`, `str`, the encoders). The unifier holds them beside the store, on
 the free variable's root: `Kinded { kind, witness }`, the witness being the span
 in force (`Unifier::at`, set by `InferCtx` before it unifies or instantiates)
 when the kind last narrowed. `unite_tys` unites at the meet and refuses an empty

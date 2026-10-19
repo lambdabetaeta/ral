@@ -28,7 +28,7 @@ let free-pct = {
 
 let matching = { |snapshot app|
     let needle = lower $app
-    return !{filter { |p| equal !{lower $p[comm]} $needle } $snapshot}
+    return !{filter { |p| $[!{lower $p[comm]} == $needle] } $snapshot}
 }
 
 let before = !$free-pct

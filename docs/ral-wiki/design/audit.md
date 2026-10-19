@@ -44,7 +44,7 @@ the doors to the world — an external or detached process, a redirect's read
 or write, a worker's birth, a capability check, a host door — and a builtin
 reaches the world only through one of those doors, which records the effect
 there, typed as what it is: `edit-hash` lands as the `` `write `` its
-`atomic_write` commits, `spawn` as its `` `worker ``, a bare `equal` as
+`atomic_write` commits, `spawn` as its `` `worker ``, a `==` comparison as
 nothing, because the pure fragment performs no effect
 ([[design/syscalls-are-effects|syscalls-are-effects]]). The inventory of
 observed doors is the inventory capability enforcement guards —

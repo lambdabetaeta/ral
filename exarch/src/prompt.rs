@@ -74,10 +74,6 @@ pub fn assemble(
     sections.push((Some("Builtins"), BUILTIN_INDEX_PLACEHOLDER.to_string()));
     sections.push((Some("Tasks"), include_str!("../data/tasks.md").into()));
     sections.push((
-        Some("Script style"),
-        include_str!("../data/script-style.md").into(),
-    ));
-    sections.push((
         Some("Context management"),
         include_str!("../data/context.md").into(),
     ));

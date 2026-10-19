@@ -780,7 +780,7 @@ attempt to index another value kind is an error.
 
 ### 4.8. Equality and ordering
 
-`equal a b` and `==` or `!=` inside `$[...]` use the same structural equality.
+`==` and `!=` inside `$[...]` compare data structurally.
 The two operands have one type, and it is *data* (§17.3): no block, function
 or handle at any depth.
 
@@ -793,7 +793,7 @@ or handle at any depth.
 
 Blocks, functions, and handles have no equality operation. Comparing one is a
 static error, including when it is nested in a collection, and so is comparing
-values of two different types: `equal 42 hello` is refused, and `equal 3 3.0`
+values of two different types: `$[42 == hello]` is refused, and `$[3 == 3.0]`
 too, since the checker keeps `Int` and `Float` apart.
 
 Ordering is defined only for numbers and strings, and both operands have one
@@ -3578,7 +3578,7 @@ fragment — builtins, prelude functions, lexical bindings — performs no effec
 and a builtin that reaches the world does so through a door the trail already
 watches: a redirect, an atomic write, a worker's birth, a capability check. The
 door records the effect there, as the `` `write ``, `` `read ``, `` `worker ``
-or `` `check `` it is, so `equal` applied a million times inside `audit { }`
+or `` `check `` it is, so `==` evaluated a million times inside `audit { }`
 adds nothing to the trail and a file edit lands once, as the write it made.
 
 User-function application is transparent. Control forms and scopes, including
@@ -3685,11 +3685,11 @@ failed run into a successful one.
 ### 13.5. Testing ral programs
 
 The language does not reserve a privileged assertion form. Tests can build
-small assertions from `equal`, `fail`, and ordinary functions:
+small assertions from `==`, `fail`, and ordinary functions:
 
 ```ral
 let assert-equal = { |name expected actual|
-    if $[not !{equal $expected $actual}] {
+    if $[$expected != $actual] {
         fail [
             status: 1,
             message: "assertion failed: $name",
@@ -3823,7 +3823,7 @@ The collection family includes:
 - `sort-list` and `sort-list-by`;
 - `range start end`, whose end is exclusive;
 - `length`, `is-empty`, `keys`, and `has`;
-- `equal`, `lt`, and `gt`.
+- `lt` and `gt`.
 
 ```ral
 let items = range 0 5
@@ -3836,8 +3836,7 @@ operations stop and propagate an error if their callback fails. Lists remain
 homogeneous, and the typechecker rejects a callback or accumulator with an
 incompatible type.
 
-`equal` is structural over data, and its two arguments have one type. `lt` and
-`gt` compare numbers numerically and strings lexicographically, both of one
+`lt` and `gt` compare numbers numerically and strings lexicographically, both of one
 type; unsupported or incompatible shapes are type errors. `length` and
 `is-empty` take text, bytes, a list or a map, and `sort-list` a list of numbers
 or of text. The
@@ -4940,7 +4939,7 @@ number       Int, Float                          + - * /, unary -
 comparable   Int, Float, String                  < > <= >=, lt, gt, sort-list, int, float
 scalar       Bool, Int, Float, String            each interpolation part
 sized        String, Bytes, List, Map            length, is-empty
-data (deep)  every head but U and Handle         == !=, equal, str, the encoders
+data (deep)  every head but U and Handle         == !=, str, the encoders
 ```
 
 `%` is `Int -> Int -> Int`. Two variables unite at the *meet* of their kinds, the

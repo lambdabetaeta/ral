@@ -16,6 +16,6 @@ let cargo_home = try { return !{env}[CARGO_HOME] } { |_| return "~/.cargo" }
 let exarch_bin    = "$cargo_home/bin/exarch"
 let kernel     = uname -s
 
-if $[!{equal $kernel 'Darwin'} && !{is-file $exarch_bin}] {
+if $[$kernel == 'Darwin' && !{is-file $exarch_bin}] {
     attempt { codesign -s - $exarch_bin }
 }

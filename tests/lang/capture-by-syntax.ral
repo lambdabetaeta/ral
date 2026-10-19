@@ -2,14 +2,14 @@
 # is captured; where a command is wanted, a command runs.
 
 let assert_eq = { |name expected actual|
-    if !{equal $expected $actual} {} else {
+    if $[$expected == $actual] {} else {
         warn "FAIL: $name expected: $expected actual: $actual"
         fail [status: 1, message: "assertion failed: $name"]
     }
 }
 
 let assert_unit = { |name actual|
-    if !{equal () $actual} {} else {
+    if $[() == $actual] {} else {
         warn "FAIL: $name expected: nothing"
         fail [status: 1, message: "assertion failed: $name"]
     }

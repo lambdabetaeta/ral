@@ -6,7 +6,7 @@ echo $result
 
 # Explicit unit return (no implicit value->command coercion)
 let result = !{return ()}
-echo !{equal $result ()}
+echo $[$result == ()]
 
 # Multi-statement force returns last explicit return
 let result = !{

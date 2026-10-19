@@ -16,7 +16,7 @@ Near the window the harness evicts the oldest turns itself, without a note, and 
 Find ids with `grep`, then `read` only those turns. A hit is `[turn, role, line, text]`; `hits` holds the 100 oldest matches, each clipped to 200 bytes, and `total` counts them all.
 
     let found = exarch-transcript `grep [pattern: 'test result: FAILED', turns: `all]
-    let mine = filter { |h| equal $h[role] 'assistant' } $found[hits]
+    let mine = filter { |h| $[$h[role] == 'assistant'] } $found[hits]
     map { |h| [$h[turn], $h[line]] } $mine     # [[40, 79], [40, 85], ...]
 
     let turns = exarch-transcript `read [turns: [40]]

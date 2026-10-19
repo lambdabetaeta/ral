@@ -12,8 +12,8 @@ let scan = { |dir|
     case $listing [
         `denied: { |_| return [verdict: `unknown, rows: [[path: $dir, verdict: `unknown]]] },
         `ok: { |items|
-            let dirs = filter { |e| equal $e[type] `dir } $items
-            let files = filter { |e| equal $e[type] `file } $items
+            let dirs = filter { |e| $[$e[type] == `dir] } $items
+            let files = filter { |e| $[$e[type] == `file] } $items
             let kids = map { |e| scan "$dir/$e[name]" } $dirs
             let evidence = if !{is-empty $files} {
                 return !{map { |k| return $k[verdict] } $kids}
@@ -33,11 +33,11 @@ let scan = { |dir|
 
 let rows = !{scan $root}[rows]
 
-let undecided = filter { |r| return !{equal $r[verdict] `unknown} } $rows
+let undecided = filter { |r| return $[$r[verdict] == `unknown] } $rows
 if $[not !{is-empty $undecided}] {
     for $undecided { |r| warn "cannot read, so cannot judge: $r[path]" }
     let count = length $undecided
     fail [status: 1, message: "$count directories could not be read"]
 }
 
-for !{filter { |r| return !{equal $r[verdict] `empty} } $rows} { |r| echo $r[path] }
+for !{filter { |r| return $[$r[verdict] == `empty] } $rows} { |r| echo $r[path] }

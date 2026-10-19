@@ -1,8 +1,6 @@
 # ral prelude — standard library
 
 # Comparison and size — the `$[…]` operators and `length` under names.
-## Whether `a` and `b` are structurally equal; blocks, functions and handles refuse.
-let equal = { |a b| return $[$a == $b] }
 ## Whether `a` < `b`: numbers numerically, strings lexicographically.
 let lt = { |a b| return $[$a < $b] }
 ## Whether `a` > `b`: numbers numerically, strings lexicographically.
@@ -136,7 +134,7 @@ let extension = { |p|
 let indent = { |n s|
     let spaces = repeat $n ' '
     let lns = lines $s
-    let indented = map { |l| if $[not !{equal $l ''}] { "$spaces$l" } else { $l } } $lns
+    let indented = map { |l| if $[$l != ''] { "$spaces$l" } else { $l } } $lns
     intercalate "\n" $indented
 }
 
@@ -239,7 +237,7 @@ let file-empty  = { |p|
     if !{is-dir $p} {
         is-empty !{list-dir $p}
     } else {
-        equal !{file-info $p}[size] 0
+        $[!{file-info $p}[size] == 0]
     }
 }
 
@@ -387,15 +385,15 @@ let each-line = { |f|
 let styled = { |style text|
     if !{_ansi-ok} {
         let code =
-            if    !{equal $style 'reset'}   { '\e[0m'    }
-            elsif !{equal $style 'bold'}    { '\e[1m'    }
-            elsif !{equal $style 'dim'}     { '\e[2m'    }
-            elsif !{equal $style 'red'}     { '\e[0;31m' }
-            elsif !{equal $style 'green'}   { '\e[0;32m' }
-            elsif !{equal $style 'yellow'}  { '\e[0;33m' }
-            elsif !{equal $style 'blue'}    { '\e[0;34m' }
-            elsif !{equal $style 'magenta'} { '\e[0;35m' }
-            elsif !{equal $style 'cyan'}    { '\e[0;36m' }
+            if    $[$style == 'reset']   { '\e[0m'    }
+            elsif $[$style == 'bold']    { '\e[1m'    }
+            elsif $[$style == 'dim']     { '\e[2m'    }
+            elsif $[$style == 'red']     { '\e[0;31m' }
+            elsif $[$style == 'green']   { '\e[0;32m' }
+            elsif $[$style == 'yellow']  { '\e[0;33m' }
+            elsif $[$style == 'blue']    { '\e[0;34m' }
+            elsif $[$style == 'magenta'] { '\e[0;35m' }
+            elsif $[$style == 'cyan']    { '\e[0;36m' }
             else { fail [status: 2, message: "styled: unknown style '$style'"] }
         return "$code$text\e[0m"
     } else {
@@ -412,7 +410,7 @@ let styled = { |style text|
 let elem = { |x items|
     if !{is-empty $items} { return false } else {
         let [head, ...rest] = $items
-        if !{equal $head $x} { return true } else { elem $x $rest }
+        if $[$head == $x] { return true } else { elem $x $rest }
     }
 }
 
@@ -420,7 +418,7 @@ let elem = { |x items|
 let contains = { |items x| elem $x $items }
 
 ## De-duplicate a list, keeping the first occurrence of each element
-## (compared with `equal`); the result preserves first-seen order.
+## (compared with `==`); the result preserves first-seen order.
 let nub = { |xs| fold { |acc x| if !{elem $x $acc} { $acc } else { [...$acc, $x] } } [] $xs }
 
 ## Spawn a thunk under audit and return the handle.  The spawned block

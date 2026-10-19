@@ -1,7 +1,7 @@
 ---
-generated_at_commit: d4299048
-generated_at_date: 2026-10-18
-covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/data/system.md, exarch/data/agents.md, exarch/data/spawned.md, exarch/data/reply.md, exarch/data/ral.md, exarch/data/script-style.md, exarch/data/context.md]
+generated_at_commit: d834a9da
+generated_at_date: 2026-10-19
+covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/data/system.md, exarch/data/agents.md, exarch/data/spawned.md, exarch/data/reply.md, exarch/data/ral.md, exarch/data/context.md]
 ---
 
 # Map: exarch
@@ -193,15 +193,15 @@ the shell every seat starts from.
 
 `prompt::assemble` builds an agent-invariant base from `(heading, body)` sections
 walked by one uniform renderer, in order **persona, `Ral`, `Editing`, `Builtins`,
-`Tasks`, `Script style`, `Context management`, `Host`, [`Workspace`], [`Skills`],
+`Tasks`, `Context management`, `Host`, [`Workspace`], [`Skills`],
 [`Surfacing`]**. The builtin placeholder and the late sections are resolved
 once per constructed
 agent, so a root, identity fork, and wire child each receive their own surface.
 
 - **Persona** (`data/system.md`, unheaded — it sets the tone, not a topic) frames
   the session as *one continuing shell script*: definitions, working directory,
-  and worker threads persist across turns, and the working method is act early,
-  batch what belongs together, never re-derive.
+  and worker threads persist across turns. It teaches selective binding, bounded
+  inspection, batching known steps, and deferring independent work.
 - **`Ral`** (`data/ral.md`) is the language and tool reference; its handler docs
   follow the lambda-only install rule
   ([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]):
@@ -209,6 +209,9 @@ agent, so a root, identity fork, and wire child each receive their own surface.
   `handler:` binary `{ |name args| … }`. It directs the model to `explain` for
   standalone language-form and command guides and names the labelled `Type:`,
   `Source:`, and `Shadows:` facts that make those results machine-readable.
+  Returned values, captured stdout, and forcing are introduced together; blocks
+  retain their lexical bindings when a helper is shadowed;
+  the capability schema and worked examples live in `explain grant`.
 - **`Editing`** documents the file-editing scheme the `--edit` flag selects:
   line-hash over `view-hash` (`data/edit-hash.md`, `--edit hash`) or
   string-replace over `view-text` (`data/edit-replace.md`, `--edit replace`); only the
@@ -223,11 +226,6 @@ agent, so a root, identity fork, and wire child each receive their own surface.
   (`fuel > 0`) — are in reach,
   without a live `Shell`; zero-fuel agents omit `agents` alone.
 - **`Tasks`** (`data/tasks.md`) is the task-management kit API.
-- **`Script style`** (`data/script-style.md`) is the reuse guide: one program, not
-  a nervous probe — define then query, parameterised blocks, records for knobs,
-  blocks as policy, long-running work behind `defer`/`await`, and work that must
-  outlive the session behind `detach`
-  ([[decisions/260725_survives-exit-is-its-own-verb|survives-exit-is-its-own-verb]]).
 - **`Context management`** (`data/context.md`) is strategy, not reference — the
   builtins' `explain` text owns the shapes and rules: the context is the only
   memory that can be taken away, so promote before evicting, evict with a note,
@@ -324,9 +322,9 @@ indefinitely is real authority. The inbox/reaper mechanics live on the
 
 ## Where to look
 
-- `exarch/data/{system.md, ral.md, edit-hash.md, edit-replace.md, tasks.md, script-style.md, context.md, grant-legend.md, surface.md, agents.md, reply.md, agent.ral}` —
-  the persona rules, ral reference, editing schemes, task kit, reusable-script
-  guide, context discipline, grant legend, surfacing guidance, returning-agent
+- `exarch/data/{system.md, ral.md, edit-hash.md, edit-replace.md, tasks.md, context.md, grant-legend.md, surface.md, agents.md, reply.md, agent.ral}` —
+  the persona rules, ral reference, editing schemes, task kit,
+  context discipline, grant legend, surfacing guidance, returning-agent
   and spawn contracts,
   and the embedded agent helper library.
 - Provider configuration — a famous provider auto-populates from its env key, an

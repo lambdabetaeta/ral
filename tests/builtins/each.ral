@@ -7,7 +7,7 @@
 each { |n| echo $n } [1, 2]
 
 let ints = each { |n| return $[$n + 100] } [1, 2, 3]
-echo !{equal $ints ()}
+echo $[$ints == ()]
 
 let texts = each { |s| return "[$s]" } ['a', 'b']
-echo !{equal $texts ()}
+echo $[$texts == ()]

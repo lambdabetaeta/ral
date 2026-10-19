@@ -20,4 +20,4 @@ let new = scan $b
 
 for !{keys !{difference $new $old}} { |p| echo "+ $p" }
 for !{keys !{difference $old $new}} { |p| echo "- $p" }
-for !{filter { |p| return $[not !{equal $old[$p] $new[$p]}] } !{keys !{intersection $old $new}}} { |p| echo "~ $p" }
+for !{filter { |p| return $[$old[$p] != $new[$p]] } !{keys !{intersection $old $new}}} { |p| echo "~ $p" }

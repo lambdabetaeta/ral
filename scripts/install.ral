@@ -30,7 +30,7 @@ let kernel     = uname -s
 # so has no status of its own to report — unwrapped, the gate below would end
 # every Windows and Linux `just install` in a failure the install did not have.
 attempt {
-    if $[!{equal $kernel 'Darwin'} && !{is-file $ral_bin}] {
+    if $[$kernel == 'Darwin' && !{is-file $ral_bin}] {
         codesign -s - $ral_bin
     }
 }

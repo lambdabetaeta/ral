@@ -5,17 +5,18 @@ mkdir -p "$t/sub"
 
 # Under a scoped HOME, so nothing names the host's
 within [env: [HOME: $t]] {
-    echo !{equal "~/a b" "!{home}/a b"}
-    echo !{equal "~" !{home}}
+    echo $["~/a b" == "!{home}/a b"]
+    echo $["~" == !{home}]
     let h = ~
-    echo !{equal $h !{home}}
-    echo !{equal ~/sub "$t/sub"}
+    echo $[$h == !{home}]
+    let expanded = return ~/sub
+    echo $[$expanded == "$t/sub"]
 
     # cwd is absolute; abbreviation is for display alone
     cd ~/sub
     let c = cwd
-    echo !{equal $c !{cwd}}
-    echo !{equal $c "$t/sub"}
+    echo $[$c == !{cwd}]
+    echo $[$c == "$t/sub"]
     echo !{abbreviate-home $c}
     echo !{abbreviate-home !{home}}
 }

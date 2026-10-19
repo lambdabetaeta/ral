@@ -10,11 +10,11 @@ echo "let version = 1\nlet _private = 42" > "$tmpdir/lib.ral"
 let m = use "$tmpdir/lib.ral"
 echo $m[version]
 let private = try { let probe = use "$tmpdir/lib.ral"; return $probe[_private] } { |_| return -1 }
-echo !{equal $private -1}
+echo $[$private == -1]
 
 # re-using an unchanged file yields a structurally equal record
 let m2 = use "$tmpdir/lib.ral"
-echo !{equal $m $m2}
+echo $[$m == $m2]
 
 # caller-file-relative module loading
 mkdir -p "$tmpdir/sub"
@@ -22,7 +22,7 @@ echo "let x = 9" > "$tmpdir/sub/inner.ral"
 echo #'let m = !{use 'sub/inner.ral'}
 let via_use = $m[x]'# > "$tmpdir/entry.ral"
 let entry = use "$tmpdir/entry.ral"
-if $[not !{equal $entry[via_use] 9}] { fail [status: 1, message: "module: caller-relative use did not resolve sub/inner.ral"] }
+if $[$entry[via_use] != 9] { fail [status: 1, message: "module: caller-relative use did not resolve sub/inner.ral"] }
 
 # use is cacheless: each call re-reads the file, so rewriting a module
 # between two `use` calls surfaces the new bindings.
@@ -30,7 +30,7 @@ echo "let version = 1" > "$tmpdir/reload.ral"
 let m1 = use "$tmpdir/reload.ral"
 echo "let version = 2" > "$tmpdir/reload.ral"
 let mfresh = use "$tmpdir/reload.ral"
-if $[not !{equal $mfresh[version] 2}] { fail [status: 1, message: "module: reload did not pick up the rewritten file"] }
+if $[$mfresh[version] != 2] { fail [status: 1, message: "module: reload did not pick up the rewritten file"] }
 
 # A module that uses itself is a cycle
 echo "let _ = use '$tmpdir/cycle.ral'" > "$tmpdir/cycle.ral"

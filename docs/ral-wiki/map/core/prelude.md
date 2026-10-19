@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 446e3123
-generated_at_date: 2026-09-25
+generated_at_commit: d834a9da
+generated_at_date: 2026-10-19
 covers_paths: [core/src/prelude.ral]
 ---
 
@@ -28,6 +28,9 @@ report's `` `command `` facts, in trail order), `succeeded` (an `audit`
 report's outcome as a `Bool`), …) layered over the directly-registered Rust
 builtins (`each`, `map`, `filter`, `fold`, …). These are ordinary
 [[design/cbpv|values]] of fixed arity ([[invariants/fixed-arity|fixed-arity]]).
+
+Structural equality is the `==` / `!=` expression operator; callbacks use
+ordinary lambdas such as `{ |a b| $[$a == $b] }`.
 
 The branching and exception forms `if`, `case`, and `try` are *not* prelude
 bindings — they are IR primitives (`CompKind::If` / `Case` / `Try`, see

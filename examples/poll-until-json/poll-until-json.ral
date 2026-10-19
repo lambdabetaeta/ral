@@ -7,7 +7,7 @@
 let [url, field, target, tries] = args
 let probe = { |left|
     let doc = curl -fsS --max-time 10 $url | from-json
-    if !{equal !{str $doc[$field]} $target} {
+    if $[!{str $doc[$field]} == $target] {
         echo "$field reached $target"
     } elsif $[$left <= 0] {
         warn "gave up waiting for $field=$target"

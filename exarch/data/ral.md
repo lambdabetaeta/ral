@@ -10,18 +10,18 @@ Commands are sequenced by newlines or `;` (there is no `&&`). An uncaught failur
 
 ## Definitions
 
-`let x = 42` defines `x` to be `42`. Use it as `$x`. When used with a command it captures stdout:
+`let x = 42` defines `x` to be `42`. Use it as `$x`. The right-hand side is a computation: if it returns a value, `let` binds that value; if it is a command, `let` captures its stdout:
 
-    let today = date +%F
-    let body  = from-string < notes.txt
-    let n     = line-count notes.txt
+    let today = date +%F                 # captured stdout: String
+    let body  = from-string < notes.txt  # returned value: String
+    let n     = line-count notes.txt     # returned value: Int
     echo "notes.txt ($n lines) as of $today"
 
-<critical>
+<CRITICAL>
 Bound variables are available for the rest of the session; you do not need to redefine them:
 
     echo "notes.txt now has !{line-count notes.txt} while it had $n before"
-</critical>
+</CRITICAL>
 
 Captured stdout from an external command is a `String`. `let n = line-count $file` binds an `Int` and `let files = list-dir #'.'#` binds a list.
 
@@ -29,7 +29,7 @@ A command's value is its output: `let host = hostname` binds what it writes, and
 
 A binding shadows the command of the same name for the rest of the session, so don't name a binding `ls`, `head` or `tail`; `^ls` runs the command.
 
-The shell's own state is read by six builtins, not variables: `cwd`, `env`, `args`, `user`, `home`, `nproc`. Use them as `let [a, b] = args`, `!{env}[HOME]`, `"!{cwd}/x"`.
+The shell's own state is read by six builtins: `cwd`, `env`, `args`, `user`, `home`, `nproc`. Use them as `let [a, b] = args`, `!{env}[HOME]`, `"!{cwd}/x"`.
 
 A turn ending in `let` returns nothing; end with what you mean to see as `VALUE`.
 
@@ -50,7 +50,7 @@ Blocks may take space-separated, lexically-scoped, curried parameters:
     let f = { |a b| $[$a + $b] }          # two parameters
     { |a, b| … }                          # PARSE ERROR — no commas
 
-Blocks can be used with higher-order functions, such as `map`, `filter`, `each`, `fold`, ...:
+Blocks can be used with and as recursive higher-order functions, such as `map`, `filter`, `each`, `fold`, ...:
 
     map { |f| line-count $f } !{glob #'**/*.txt'#}
     filter { |h| re-match #'^src/'# $h[file] } $hits
@@ -63,67 +63,15 @@ Omitting the `$` in `$in-src` makes `in-src` just a string argument in the above
 
 You have the standard prelude found in functional programming, listed below; call `help` to find out more about a function.
 
-Blocks support recursive definitions.
+Bindings are immutable but shadowable. Blocks capture lexically: earlier blocks keep the bindings they captured, so shadowing a helper does not change those blocks.
 
-## Pipelines
+`let` accepts a computation on its right; an argument or record field needs a value. Force an anonymous block to use a computation there:
 
-`ral` pipes carry bytes from the stdout of a script to the stdin of another (UNIX-style). The *last* stage in a pipeline may also return a `ral` value.
+    let xs = [a, b, c]
+    let n = length $xs
+    [count: !{length $xs}]
 
-Codecs bridge bytes to values: `from-line` takes `Bytes` to a `String` with no trailing `\n`, and `from-string` with it; `from-lines` gives a list of lines; `from-json` turns JSON bytes into a `ral` value:
-
-    let cfg     = curl -s https://api.example.com/cfg | from-json
-    let first   = head -n1 notes.txt
-    let commits = git log --oneline | from-lines
-
-There are also corresponding `to-line`, `to-string`, `to-lines`, `to-json` that take values to bytes. Text decoders require UTF-8; use `from-bytes` when bytes are not text.
-
-Decoders read from the byte channel.  To decode bytes in a definition, use `bytes-to-string $r[stdout]`.
-
-`from-json` and `from-jsonl` results are checked against how the script uses the value: a read of a field the file lacks, or a number used as text, fails at the decode, naming the JSON pointer (`/items/3/size`) and the line of the use. To read one value out of a document, `from-json-at ['items', '3', 'size'] < $file` takes the path as a list of keys and indexes, never as a spliced string.
-
-A decoder ends the byte pipeline: its value never travels down a further `|`, so `git log --oneline | from-lines | head -n5` is refused — a stage feeds the next by writing, and `from-lines` returns a list. Bind the list, then `take 5 $commits`.
-
-## Audit
-
-`audit { … }` evaluates its body and returns a report with two fields: `outcome`, which is `` `ok `` of the value the body returned or `` `err `` of an error record, and `trail`, a flat list of everything the body did. `audit` turns any failure into data, so it never fails, and it keeps each command's stdout and stderr apart, so you need not `2>&1` to capture stderr.
-
-Read a report with two prelude functions: `succeeded $r` is a `Bool`, and `commands $r` gives the trail's exec calls in order, each with its own `argv`, exit `status`, `stdout`, `stderr` and `error`. This is how you read a tool whose exit code is data, e.g. `grep` exit 1 meaning no match:
-
-    let r   = audit { grep -c ERROR app.log }
-    let out = bytes-to-string !{commands $r}[0][stdout]
-    if !{succeeded $r} { $out } else { #'no matches'# }
-
-Each command retains at most 1 MiB per stream. `stdout-total` and
-`stderr-total` count everything written, so the bytes are complete exactly
-when the total equals `length $c[stdout]`. Capture includes intermediate
-pipeline output; all bytes still flow to their destination. Redirect large
-output to a file and read a bounded window when you need more.
-
-Prefer `!{commands $r}` to a `case` on the trail whenever only commands matter. When you want the failure itself, `case` on the outcome — the `` `err `` record is exactly what `try` hands its handler:
-
-    case $r[outcome] [
-      `ok:  { |v| $v },
-      `err: { |e| echo $e[message] },
-    ]
-
-## Running several commands
-
-If an exec call in a script fails, it aborts the script. This may be stopped by wrapping a call in `audit { … }`. For example, to see if three tools exist and what status they return:
-
-    let probe = audit { attempt { cat --version }; attempt { sed --version }; attempt { python3 --version } }
-    map { |c| [tool: $c[argv][0], status: $c[status]] } !{commands $probe}
-
-One row per command, each with its own `argv`, `status`, `stdout` and `stderr`; always prefer this to one blob of text you must re-parse. `succeeds` answers a bare true/false:
-
-    let has_python = !{succeeds { python3 --version > /dev/null }}
-
-When what you want is the merged text of every step, put the block on the byte channel — a pipe or a redirect takes what *every* part writes:
-
-    let steps = { attempt { sort in.txt > sorted.txt }; attempt { wc -l sorted.txt } }
-    let text  = !$steps | from-string     # every step's stdout, as one String
-    !$steps > log.txt                     # or straight to a file
-
-In summary: `;` sequences, `attempt` tolerates a failure, `?` supplies a fallback, `2>` and `>` redirect, and `within [dir: …]` changes directory. Do not use `sh -c`, as e.g. `sh -c 'a; b; c'` payload throws away what `ral` would have told you — three commands collapse into one opaque child with one undifferentiated stdout, and a failure in the middle becomes invisible.
+`$xs` retrieves a value, `{ length $xs }` packages a computation, and `!{length $xs}` forces it. `$[…]` evaluates an arithmetic or Boolean expression; Boolean negation is `not`, as in `$[not !{is-file $path}]`.
 
 ## Strings
 
@@ -135,7 +83,7 @@ In summary: `;` sequences, `attempt` tolerates a failure, `?` supplies a fallbac
 - Words never glue: `$dir/file` is a parse error; interpolate instead: `"$dir/file"`.
 - In double quotes, a leading `~` or `~/` expands to the home directory, e.g. `ls "~/Work Invoices"`. `!{home}` is the same value.
 - Escapes are a fixed set (`\n`, `\r`, `\t`, `\\`, `\"`, `\$`, `\!`, `\~`, `\0`, `\e`, `\xNN` for ASCII, `\u{…}`, and backslash-newline continuation).
-- A raw string is written `#'…'#`: no escapes, no interpolation. If the content itself contains `'#`, add more hashes, e.g. `#####'…'#####`. Always use this form to pass arguments to an external tool, e.g. `sed -i #'s|^old_value$|new_value|'# config.txt`.
+- A raw string is written `#'…'#`: no escapes, no interpolation. If the content itself contains `'#`, add more hashes, e.g. `#####'…'#####`. Prefer this form for literal payloads passed to an external tool, e.g. `sed -i #'s|^old_value$|new_value|'# config.txt`. Pass computed values directly as `$arg`, or interpolate when constructing text.
 - `dedent` strips the common leading indentation from a multiline string.
 - There are no `<<EOF` heredocs. `cmd << $body` or `cmd << #'…'#` feeds a string to `cmd`'s stdin. One newline at the very start of the string is dropped, so the body can start on the line under the command.
 - There is no `1>&2`. Say it with `warn "…"`, which puts one line on stderr and returns unit: a note for the human, off the byte channel a caller may be binding. `2> f` and `2>&1` are unchanged, for an external command's own stderr. Those, with `< f`, `<< str`, `> f`, `>> f` and `>~ f`, are the whole of ral's fd vocabulary: there is no fd plumbing, so `1< f`, `1> f`, `0< f`, `0> f` and any fd past 2 are parse errors rather than something quietly reinterpreted, and `echo 1>file` is refused rather than writing an empty file. Each stream takes at most one redirect (`cmd > a > b` and `2> e 2>&1` are parse errors), and `2>&1` means "stderr goes wherever stdout goes" whichever side of `> f` it is written.
@@ -158,7 +106,7 @@ Arithmetic and Boolean expressions must be in `$[…]` blocks: `$[$x == 0]`, `$[
 
 `if` takes a Boolean value and blocks, written out or in hand:
 
-    if !{equal $s #'quit'#} { #'bye'# } else { #'continuing'# }  # WARNING: ! HERE IS NOT NEGATION, IT IS FORCING A BLOCK
+    if $[$s == #'quit'#] { #'bye'# } else { #'continuing'# }
     if    $[$x == 0] { #'zero'#     }
     elsif $[$x > 0 ] { f #'positive'# }
     else             { g #'negative'# }
@@ -205,9 +153,70 @@ A nullary tag still binds a value (`()`) — ignore it with `_`. An arm is a blo
 `range 1 11` returns the list `[1, …, 10]` (`seq` is the external coreutil, and prints bytes).
 
 
+## Pipelines
+
+`ral` pipes carry bytes from the stdout of a script to the stdin of another (UNIX-style). The *last* stage in a pipeline may also return a `ral` value.
+
+Codecs bridge bytes to values: `from-line` takes `Bytes` to a `String` with no trailing `\n`, and `from-string` with it; `from-lines` gives a list of lines; `from-json` turns JSON bytes into a `ral` value:
+
+    let cfg     = curl -s https://api.example.com/cfg | from-json
+    let first   = head -n1 notes.txt
+    let commits = git log --oneline | from-lines
+
+There are also corresponding `to-line`, `to-string`, `to-lines`, `to-json` that take values to bytes. Text decoders require UTF-8; use `from-bytes` when bytes are not text.
+
+Decoders read from the byte channel.  To decode bytes in a definition, use `bytes-to-string $r[stdout]`.
+
+`from-json` and `from-jsonl` results are checked against how the script uses the value: a read of a field the file lacks, or a number used as text, fails at the decode, naming the JSON pointer (`/items/3/size`) and the line of the use. To read one value out of a document, `from-json-at ['items', '3', 'size'] < $file` takes the path as a list of keys and indexes, never as a spliced string.
+
+A decoder ends the byte pipeline: its value never travels down a further `|`, so `git log --oneline | from-lines | head -n5` is refused — a stage feeds the next by writing, and `from-lines` returns a list. Bind the list, then `take 5 $commits`.
+
+## I/O
+
+Read with `from-X < PATH`, write with `to-X $v > PATH`:
+
+    let body  = from-string < $file    # String
+    let rows  = from-lines < $file     # [String]
+    let cfg   = from-json < $file      # record
+    to-string $report >  $file         # write (atomic)
+    to-string $report >> $file         # append
+    to-json   $cfg    >  $file         # JSON write
+
+Write a file with `echo #'…'# > path`.
+
+<critical>
+For a literal multi-line file body, prefer a raw string, ideally with many hashes:
+
+    echo #####'first line
+    second 'quoted' line'##### > $file
+</critical>
+
+## Within
+
+`within` is an effect handler that runs a block with a changed directory, environment, or handling of a command call:
+
+    within [dir: #'exarch'#] { cargo check }
+    let h = defer { within [env: [LOG_LEVEL: #'debug'#]] { convert-all } }
+    within [ env : [ API_KEY : #''# ], handlers: [curl: { |args| echo #'offline stub'# }]] { fetch-all }
+    let all_stubbed = { |name args| echo "stubbed: $name ...$args" }
+    within [handler: $all_stubbed ] { run-all }
+    within [handlers: [ curl: { |args| echo "stubbed" } ] ] { !$job }
+
+A per-command `handlers:` entry is a one-arg function receiving argvs. Like `case`'s arms, the `handlers:` list is syntax: it is written out in place, because each name in it is bound in the body — a table held in a variable is a parse error, though an individual arm may be. The catch-all `handler:` is a two-arg function that intercepts EVERY external command, and is ordinary data, so it may be written out or bound. A handler stands in for a bare command name and writes what the command would write; `^name` runs the binary regardless. A handler is a stub, not a sandbox.
+
+`within`'s brackets are the form's own, not a collection literal: `[]` is the empty option set, `[:]` names no options at all, and the option names are always written in the bracket — a bundle bound elsewhere (`within $o { … }`) or spread in is a parse error — while their values may be computed: `within [dir: $d] { … }`. A misspelled option is a static error naming the form's own list.
+
+`grant` runs a block with reduced authority; it can only narrow what the surrounding frame permits:
+
+    grant [net: `offline] { cargo check --offline }
+
+Call `explain grant` for the capability fields, tagged paths, and examples.
+
+Use `within` instead of `cd`. Paths in results are relative to the `within` directory, so consume them under the same `within`. `env:` values must be scalars.
+
 ## Failure
 
-A failed call ends a `ral` script, much like `set -euo pipefail` in `bash`. Definitions that completed before the failure are still bound. Resume from the step that failed; do not replay the script from the top, which re-runs the writes and spawns that already happened.
+A failed call ends a `ral` script unless its failure is caught. Definitions that completed before the failure are still bound. Resume from the step that failed; do not replay the script from the top, which re-runs the writes and spawns that already happened.
 
 `try` catches a failed command; without it, a non-zero exit aborts the entire script. Its handler receives an error record with fields `status`, `reason`, `cmd`, `message`, `site` (`` `some [script, line, col] `` or `` `none ``) — the same record an `audit` report's `` `err `` outcome carries, so failure reads the same either way:
 
@@ -232,6 +241,48 @@ Prelude functions cover common cases:
 
 An error may be raised deliberately using e.g. `fail [status: 2, message: #'failure caused by x'#]`.
 
+
+## Audit
+
+`audit { … }` evaluates its body and returns a report with two fields: `outcome`, which is `` `ok `` of the value the body returned or `` `err `` of an error record, and `trail`, a flat list of everything the body did. `audit` turns recoverable runtime failures into data; `exit`, Ctrl-C, and the tool timeout stop the run instead. It keeps each command's stdout and stderr apart, so you need not `2>&1` to capture stderr.
+
+Read a report with two prelude functions: `succeeded $r` is a `Bool`, and `commands $r` gives the trail's exec calls in order, each with its own `argv`, exit `status`, `stdout`, `stderr` and `error`. This is how you read a tool whose exit code is data, e.g. `grep` exit 1 meaning no match:
+
+    let r   = audit { grep -c ERROR app.log }
+    let out = bytes-to-string !{commands $r}[0][stdout]
+    if !{succeeded $r} { $out } else { #'no matches'# }
+
+Each command retains at most 1 MiB per stream. `stdout-total` and
+`stderr-total` count everything written, so the bytes are complete exactly
+when the total equals `length $c[stdout]`. Capture includes intermediate
+pipeline output; all bytes still flow to their destination. Redirect large
+output to a file and read a bounded window when you need more.
+
+Prefer `!{commands $r}` to a `case` on the trail whenever only commands matter. When you want the failure itself, `case` on the outcome — the `` `err `` record is exactly what `try` hands its handler:
+
+    case $r[outcome] [
+      `ok:  { |v| $v },
+      `err: { |e| echo $e[message] },
+    ]
+
+## Running several commands
+
+If an exec call in a script fails, it aborts the script. This may be stopped by wrapping a call in `audit { … }`. For example, to see if three tools exist and what status they return:
+
+    let probe = audit { attempt { cat --version }; attempt { sed --version }; attempt { python3 --version } }
+    map { |c| [tool: $c[argv][0], status: $c[status]] } !{commands $probe}
+
+One row per command, each with its own `argv`, `status`, `stdout` and `stderr`; always prefer this to one blob of text you must re-parse. `succeeds` answers a bare true/false:
+
+    let has_python = !{succeeds { python3 --version > /dev/null }}
+
+When what you want is the merged text of every step, put the block on the byte channel — a pipe or a redirect takes what *every* part writes:
+
+    let steps = { attempt { sort in.txt > sorted.txt }; attempt { wc -l sorted.txt } }
+    let text  = !$steps | from-string     # every step's stdout, as one String
+    !$steps > log.txt                     # or straight to a file
+
+In summary: `;` sequences, `attempt` tolerates a failure, `?` supplies a fallback, `2>` and `>` redirect, and `within [dir: …]` changes directory. Do not use `sh -c`, as e.g. `sh -c 'a; b; c'` payload throws away what `ral` would have told you — three commands collapse into one opaque child with one undifferentiated stdout, and a failure in the middle becomes invisible.
 
 ## Concurrency
 
@@ -272,43 +323,6 @@ Should you wish for a service that runs *after* the session is over, use `detach
 
 `detach` takes a description of the task, a binary to call (not a block!), and some arguments. It then asks the OS to run this binary with these arguments, returning a receipt `[pid, desc]`. Stdin, stdout and stderr are `/dev/null`, so you will not receive any updates. Polling and killing can happen only through the OS — and, from inside a grant, only through what the survivor serves: each grant's children live in their own process namespace, so a later grant cannot `ps` or `kill` a survivor an earlier one detached.
 
-## Within
-
-`within` is an effect handler that runs a block with a changed directory, environment, or handling of a command call:
-
-    within [dir: #'exarch'#] { cargo check }
-    let h = defer { within [env: [LOG_LEVEL: #'debug'#]] { convert-all } }
-    within [ env : [ API_KEY : #''# ], handlers: [curl: { |args| echo #'offline stub'# }]] { fetch-all }
-    let all_stubbed = { |name args| echo "stubbed: $name ...$args" }
-    within [handler: $all_stubbed ] { run-all }
-    within [handlers: [ curl: { |args| echo "stubbed" } ] ] { !$job }
-
-A per-command `handlers:` entry is a one-arg function receiving argvs. Like `case`'s arms, the `handlers:` list is syntax: it is written out in place, because each name in it is bound in the body — a table held in a variable is a parse error, though an individual arm may be. The catch-all `handler:` is a two-arg function that intercepts EVERY external command, and is ordinary data, so it may be written out or bound. A handler stands in for a bare command name and writes what the command would write; `^name` runs the binary regardless. A handler is a stub, not a sandbox.
-
-`within`'s and `grant`'s brackets are the forms' own, not collection literals: `[]` is the empty option set (so `grant [] { … }` is the empty grant), `[:]` names no options at all, and the option names are always written in the bracket — a bundle bound elsewhere (`within $o { … }`) or spread in is a parse error — while their values may be computed: `within [dir: $d] { … }`. A misspelled option is a static error naming the form's own list. `grant`'s own keys are `exec`, `fs`, `net`, `editor` and `shell`, each optional and each only ever narrowing what the surrounding frame already holds — the same record a sub-agent's `` grant: `restrict `` takes. Their values are tagged: `exec: [allow: [`name git, `dir `system], deny: [`name rm]]` (targets are `` `name N``, a place, or `` `dir <place or selector>``, a selector being `` `path``, `` `system`` or a package manager such as `` `rustup`` or `` `homebrew``; no argument filtering), `fs: [read: [`cwd .], write: [`cwd build], deny: [`cwd .git]]` (places: `` `absolute`` takes an absolute path; the anchors `` `cwd``, `` `home``, `` `tempdir``, `` `gitdir``, `` `xdg-config|data|cache|state|bin`` each take a relative subpath, `.` for the anchor), `` net: `offline``, and verb lists `` editor: [`read, `write, `tui]``, `` shell: [`chdir, `detach]``. Lists are sets; a written dimension restricts, an omitted one inherits, and `` shell: [`chdir]`` withholds `detach`.
-
-Use `within` instead of `cd`. Paths in results are relative to the `within` directory, so consume them under the same `within`. `env:` values must be scalars.
-
-## I/O
-
-Read with `from-X < PATH`, write with `to-X $v > PATH`:
-
-    let body  = from-string < $file    # String
-    let rows  = from-lines < $file     # [String]
-    let cfg   = from-json < $file      # record
-    to-string $report >  $file         # write (atomic)
-    to-string $report >> $file         # append
-    to-json   $cfg    >  $file         # JSON write
-
-Write a file with `echo #'…'# > path`.
-
-<critical>
-Writing a multi-line file must use a raw string, ideally with many hashes:
-
-    echo #####'first line
-    second 'quoted' line'##### > $file
-</critical>
-
 ## Exploring
 
 The exploration tools skip dotfiles and `.gitignore`d files, unless stated otherwise.
@@ -329,14 +343,4 @@ All Rust uutils are available.
 
 ## Help
 
-When you are unsure how to use something, call `explain <name>`. It covers
-language forms such as `grant` and `within` as well as builtins and prelude
-functions, and gives a standalone guide followed by labelled type and source
-facts.
-
-Do not reach for `which`. It is a PATH lookup, so it cannot see anything ral
-itself provides: it reports `/bin/echo` for `echo`, which never runs, and fails
-outright on `length` or any other builtin — a failure that stops the rest of
-the block. `explain <name>` names the entry that actually applies on its
-`Source:` line and, when relevant, lists what it hides on its `Shadows:` line,
-the PATH binary included.
+When you are unsure how to use something, call `explain <name>`. It covers language forms such as `grant` and `within` as well as builtins and prelude functions, and gives a standalone guide followed by labelled type and source facts. Do not reach for `which`, as that only covers executables in the PATH.

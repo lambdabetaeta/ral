@@ -10,8 +10,8 @@ echo !{has !{env} PWD}
 within [env: [USER: bob]] { echo !{user} }
 
 # home is what ~ abbreviates
-echo !{equal "!{home}/x" "~/x"}
+echo $["!{home}/x" == "~/x"]
 
 # a let of a read binds what it returns
 let h = home
-echo !{equal $h !{home}}
+echo $[$h == !{home}]

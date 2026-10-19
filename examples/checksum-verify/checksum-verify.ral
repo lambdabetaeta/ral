@@ -19,7 +19,7 @@ let checked = par { |[want: want, file: file]|
     let got = try {
         return !{sha256sum -- "$base/$file" | from-words}[0]
     } { |_| return '' }
-    return [file: $file, ok: !{equal $want $got}]
+    return [file: $file, ok: $[$want == $got]]
 } $entries !{nproc}
 
 for $checked { |[file: file, ok: ok]|

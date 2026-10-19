@@ -8,7 +8,7 @@
 let [path, field, want] = args
 
 let matches = { |r|
-    if !{has $r $field} { return !{equal !{str $r[$field]} $want} }
+    if !{has $r $field} { return $[!{str $r[$field]} == $want] }
     else { return false }
 }
 

@@ -6,7 +6,7 @@ Every tag answers the list after the change, one record `[ id: Int, desc: String
     exarch-tasks `status [id, status: `open|`doing|`blocked|`done]
     exarch-tasks `tag [id, tag] / `untag [id, tag] / `note [id, note] / `retag [id, tags]
 
-Mark a task `doing before you start it and `done when it is finished. Done tasks stay listed until you `clear. An invalid status warns and changes nothing. Query with `filter`/`first-where`, e.g. `filter { |t| equal $t[status] \`doing } !{exarch-tasks \`list}`.
+Mark a task `doing before you start it and `done when it is finished. Done tasks stay listed until you `clear. An invalid status warns and changes nothing. Query with `filter`/`first-where`, e.g. `filter { |t| $[$t[status] == \`doing] } !{exarch-tasks \`list}`.
 
 ## Goal
 

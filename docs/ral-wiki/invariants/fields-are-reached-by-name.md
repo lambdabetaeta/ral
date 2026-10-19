@@ -15,8 +15,9 @@ whose cost argument is that the entries behind an open spread are unreachable
 under every sound typing. Such a builtin is a language decision, not a
 convenience.
 
-One operation *detects* what it cannot name: `equal` is `∀α β. α → β → Bool`
-and compares a record's key–value pairs whole (`docs/SPEC.md` §4.8). Detection
+One operation *detects* what it cannot name: structural equality (`==` / `!=`)
+compares a record's key–value pairs whole (`docs/SPEC.md` §4.8). Its operands
+have one data type, with no blocks or handles at any depth. Detection
 is not reading — it yields no field's value, so the unreachability argument
 stands — and it is what makes the weaker typing of a merge unsound rather than
 merely useless: a closed row describing a value with unnamed extra fields is

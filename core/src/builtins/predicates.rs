@@ -1,5 +1,5 @@
 //! Map predicates: `keys`, `has`.  Comparison is [`Value::equals`] and
-//! [`Value::compare`]; `equal`, `lt`, `gt` and `is-empty` are the prelude's.
+//! [`Value::compare`]; `lt`, `gt` and `is-empty` are the prelude's.
 //! The filesystem probes (`exists`, `is-file`, …) live in [`super::fs`].
 
 use crate::types::{Settled, Value};

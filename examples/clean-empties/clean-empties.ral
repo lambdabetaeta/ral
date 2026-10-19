@@ -9,7 +9,7 @@ let [root] = args
 let dir = !{resolve-path $root}
 
 let found   = filter { |p| is-file $p } !{glob "$dir/**/*"}
-let files   = filter { |p| equal $p !{resolve-path $p} } $found
+let files   = filter { |p| $[$p == !{resolve-path $p}] } $found
 let empties = filter { |p| file-empty $p } $files
 
 for $empties { |p|

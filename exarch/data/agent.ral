@@ -76,12 +76,12 @@ let tasks-next-id = { |ts|
 let tasks-card = { |ts|
   let row = { |t|
     let chrome =
-      if    !{equal $t[status] `done}    { [role: "ok",    word: "done"] }
-      elsif !{equal $t[status] `doing}   { [role: "warn",  word: "doing"] }
-      elsif !{equal $t[status] `blocked} { [role: "bad",   word: "blocked"] }
+      if    $[$t[status] == `done]    { [role: "ok",    word: "done"] }
+      elsif $[$t[status] == `doing]   { [role: "warn",  word: "doing"] }
+      elsif $[$t[status] == `blocked] { [role: "bad",   word: "blocked"] }
       else                                { [role: "muted", word: "open"] }
     let tag-str  = if !{is-empty $t[tags]}  { "" } else { " [!{intercalate "," $t[tags]}]" }
-    let note-str = if !{equal $t[notes] ""} { "" } else { " -- $t[notes]" }
+    let note-str = if $[$t[notes] == ""] { "" } else { " -- $t[notes]" }
     [label: "#$t[id]", value: `text [spans: [
       [role: $chrome[role], text: $chrome[word]],
       [role: "", text: "  $t[desc]"],
@@ -90,7 +90,7 @@ let tasks-card = { |ts|
     ]]]
   }
   `card [`text [spans: [[role: "strong", text: "tasks"]]],
-         `measure [label: "completed", value: !{length !{filter { |t| equal $t[status] `done} $ts}}, max: !{length $ts}],
+         `measure [label: "completed", value: !{length !{filter { |t| $[$t[status] == `done]} $ts}}, max: !{length $ts}],
          `fields [rows: !{map $row $ts}]]
 }
 
@@ -112,9 +112,9 @@ let tasks-decode = { |v|
               `fields:  { |[rows: rs]| [kind: "fields",  rows: $rs] },
             ] }
             let [d0, d1, d2] = map $describe $marks
-            if !{equal $d0[kind] "text"}    { () } else { fail [status: 1, message: "not task-shaped"] }
-            if !{equal $d1[kind] "measure"} { () } else { fail [status: 1, message: "not task-shaped"] }
-            if !{equal $d2[kind] "fields"}  { () } else { fail [status: 1, message: "not task-shaped"] }
+            if $[$d0[kind] == "text"]    { () } else { fail [status: 1, message: "not task-shaped"] }
+            if $[$d1[kind] == "measure"] { () } else { fail [status: 1, message: "not task-shaped"] }
+            if $[$d2[kind] == "fields"]  { () } else { fail [status: 1, message: "not task-shaped"] }
             map { |r|
               let [label: lbl, value: valv] = $r
               case $valv [
@@ -125,15 +125,15 @@ let tasks-decode = { |v|
                   let [text: tagtext]  = $s2
                   let [text: notetext] = $s3
                   let status =
-                    if    !{equal $word "done"}    { `done }
-                    elsif !{equal $word "doing"}   { `doing }
-                    elsif !{equal $word "blocked"} { `blocked }
-                    elsif !{equal $word "open"}    { `open }
+                    if    $[$word == "done"]    { `done }
+                    elsif $[$word == "doing"]   { `doing }
+                    elsif $[$word == "blocked"] { `blocked }
+                    elsif $[$word == "open"]    { `open }
                     else  { fail [status: 1, message: "not task-shaped"] }
                   let tags =
-                    if !{equal $tagtext ""} { [] }
+                    if $[$tagtext == ""] { [] }
                     else { re-split "," !{slice $tagtext 2 $[!{length $tagtext} - 3]} }
-                  let notes = if !{equal $notetext ""} { "" } else { slice $notetext 4 $[!{length $notetext} - 4] }
+                  let notes = if $[$notetext == ""] { "" } else { slice $notetext 4 $[!{length $notetext} - 4] }
                   [ id: !{int !{slice $lbl 1 $[!{length $lbl} - 1]}}, desc: !{slice $dtext 2 $[!{length $dtext} - 2]},
                     status: $status, tags: $tags, notes: $notes ]
                 },
@@ -186,7 +186,7 @@ let exarch-tasks = { |cmd|
                  } },
     `tag:    { |[id: id, tag: g]|    check-tag "tag" $g
                                      tasks-edit $id { |t| task-set-tags $t [...$t[tags], $g] } },
-    `untag:  { |[id: id, tag: g]|    tasks-edit $id { |t| task-set-tags $t !{filter { |x| $[not !{equal $x $g}] } $t[tags]} } },
+    `untag:  { |[id: id, tag: g]|    tasks-edit $id { |t| task-set-tags $t !{filter { |x| $[$x != $g] } $t[tags]} } },
     `note:   { |[id: id, note: n]|   tasks-edit $id { |t| task-set-notes $t $n } },
     `retag:  { |[id: id, tags: gs]|  for $gs { |g| check-tag "retag" $g }
                                      tasks-edit $id { |t| task-set-tags $t $gs } },

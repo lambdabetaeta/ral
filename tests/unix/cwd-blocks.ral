@@ -3,7 +3,7 @@
 
 let root = temp-dir
 mkdir -p "$root/outer" "$root/inner/sub"
-let cwd-is = { |path| echo !{equal !{cwd} !{resolve-path $path}} }
+let cwd-is = { |path| echo $[!{cwd} == !{resolve-path $path}] }
 cd "$root/outer"
 
 # An absolute, a no-op and a relative `cd` inside `within [dir:]` stay in its cell
@@ -21,7 +21,7 @@ cwd-is "$root/outer"
 # A child launched after the `cd` starts in the moved cell, and a redirect resolves there
 within [dir: "$root/inner"] { cd sub; ^pwd > here.txt }
 echo !{exists "$root/inner/sub/here.txt"}
-echo !{equal !{within [dir: "$root/inner"] { cd sub; ^pwd }} !{resolve-path "$root/inner/sub"}}
+echo $[!{within [dir: "$root/inner"] { cd sub; ^pwd }} == !{resolve-path "$root/inner/sub"}]
 
 # Nested handlers each restore their own cell
 let back = !{ within [dir: "$root/inner"] {
@@ -30,17 +30,17 @@ let back = !{ within [dir: "$root/inner"] {
     cwd
 } }
 echo !{exists "$root/outer/deep.txt"}
-echo !{equal $back !{resolve-path "$root/inner/sub"}}
+echo $[$back == !{resolve-path "$root/inner/sub"}]
 cwd-is "$root/outer"
 
 # Entering `within [dir:]` needs no chdir authority; a `cd` inside it does
-echo !{equal !{grant [shell: []] { within [dir: "$root/inner"] { cwd } }} !{resolve-path "$root/inner"}}
+echo $[!{grant [shell: []] { within [dir: "$root/inner"] { cwd } }} == !{resolve-path "$root/inner"}]
 try { grant [shell: []] { within [dir: "$root/inner"] { cd sub } } } { |e|
     echo $e[message]
 }
 
 # ...and the scoped directory may be one an fs grant confines to
-echo !{equal !{grant [shell: [], fs: [read: [`absolute "$root/inner"]]] { within [dir: "$root/inner"] { cwd } }} !{resolve-path "$root/inner"}}
+echo $[!{grant [shell: [], fs: [read: [`absolute "$root/inner"]]] { within [dir: "$root/inner"] { cwd } }} == !{resolve-path "$root/inner"}]
 
 # Every other block shares the ambient cell: a `cd` inside persists
 within [env: [PROBE: x]] { cd "$root/inner" }

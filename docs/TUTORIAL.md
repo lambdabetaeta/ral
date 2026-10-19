@@ -238,9 +238,9 @@ truthiness conversion. `/` on two integers is integer division.
 
     if $debug { echo 'debug logging enabled' }
 
-    if !{equal $mode 'check'} {
+    if $[$mode == 'check'] {
         echo checking
-    } elsif !{equal $mode 'build'} {
+    } elsif $[$mode == 'build'] {
         echo building
     } else {
         fail [status: 2, message: "unknown mode: $mode"]
@@ -252,7 +252,7 @@ A two-armed `if` returns a value:
         if $[$n < 0] { return negative }
         else         { return nonnegative }
 
-`equal` compares values. `lt` and `gt` compare strings lexicographically.
+`==` inside `$[…]` compares data structurally. `lt` and `gt` compare strings lexicographically.
 
 Failure and falsehood are different:
 

@@ -5,14 +5,14 @@ let d = temp-dir
 # A CRLF at the opener is dropped whole, never split
 let crlf = "\r\nabc"
 let got = from-string << $crlf
-echo !{equal $got abc}
+echo $[$got == abc]
 # Expected: true
 
 # A payload far past the pipe buffer must not deadlock the writer
 let block = "xxxxxxxxxxxxxxxx"
 let big = !{fold { |acc _| return "$acc$acc" } $block [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]}
 let echoed = from-string << $big
-echo !{equal $echoed $big} !{length $big}
+echo $[$echoed == $big] !{length $big}
 
 # One source feeds fd 0: a file or a string
 echo "[!{from-string < /dev/null}]"

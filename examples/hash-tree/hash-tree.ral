@@ -10,8 +10,8 @@ let workers = if !{is-empty $rest} { return 8 } else { return !{int $rest[0]} }
 
 let walk = { |dir|
     let entries = list-dir $dir
-    let here = map { |e| return "$dir/$e[name]" } !{filter { |e| equal $e[type] `file } $entries}
-    let below = flat-map { |e| walk "$dir/$e[name]" } !{filter { |e| equal $e[type] `dir } $entries}
+    let here = map { |e| return "$dir/$e[name]" } !{filter { |e| $[$e[type] == `file] } $entries}
+    let below = flat-map { |e| walk "$dir/$e[name]" } !{filter { |e| $[$e[type] == `dir] } $entries}
     return [...$here, ...$below]
 }
 

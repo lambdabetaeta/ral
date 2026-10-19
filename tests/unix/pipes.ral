@@ -52,24 +52,24 @@ echo "[$result]"
 
 # from-line strips trailing newline
 let s = printf "hello\n" | from-line
-if $[not !{equal $s "hello"}] { fail [status: 1, message: "from-line did not strip the trailing newline"] }
+if $[$s != "hello"] { fail [status: 1, message: "from-line did not strip the trailing newline"] }
 echo "from-line: $s"
 # Expected: from-line: hello
 
 # from-line preserves internal newlines, strips only the final one
 let s2 = printf "foo\nbar\n" | from-line
-if $[not !{equal $s2 "foo\nbar"}] { fail [status: 1, message: "from-line stripped an internal newline it should have kept"] }
+if $[$s2 != "foo\nbar"] { fail [status: 1, message: "from-line stripped an internal newline it should have kept"] }
 
 # from-line on bytes with no trailing newline is a no-op
 let s3 = printf "no-newline" | from-line
-if $[not !{equal $s3 "no-newline"}] { fail [status: 1, message: "from-line altered bytes with no trailing newline"] }
+if $[$s3 != "no-newline"] { fail [status: 1, message: "from-line altered bytes with no trailing newline"] }
 
 # Capturing an external strips exactly one terminator, CRLF counting as one;
 # a lone CR is text
 let c1 = printf 'a\r\n\r\n'
-if $[not !{equal $c1 "a\r\n"}] { fail [status: 1, message: "capture did not strip exactly one CRLF"] }
+if $[$c1 != "a\r\n"] { fail [status: 1, message: "capture did not strip exactly one CRLF"] }
 let c2 = printf 'a\r'
-if $[not !{equal $c2 "a\r"}] { fail [status: 1, message: "capture stripped a lone CR"] }
+if $[$c2 != "a\r"] { fail [status: 1, message: "capture stripped a lone CR"] }
 
 # Here-string: `<< str` feeds the string to stdin; one newline at the
 # very front of the value is dropped so the body starts below the command
@@ -77,10 +77,10 @@ let h1 = cat << #'
 alpha
 beta
 '# | from-string
-if $[not !{equal $h1 "alpha\nbeta\n"}] { fail [status: 1, message: "here-string did not drop the leading newline"] }
+if $[$h1 != "alpha\nbeta\n"] { fail [status: 1, message: "here-string did not drop the leading newline"] }
 let body = "\ngamma"
 let h2 = from-string << $body
-if $[not !{equal $h2 "gamma"}] { fail [status: 1, message: "here-string body did not round-trip through from-string"] }
+if $[$h2 != "gamma"] { fail [status: 1, message: "here-string body did not round-trip through from-string"] }
 
 # Cleanup
 rm /tmp/al-test-out.txt /tmp/al-test-err.txt /tmp/al-test-append.txt

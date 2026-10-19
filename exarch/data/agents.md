@@ -18,7 +18,7 @@ variant). After receiving a notification you may access this value by ``
 exarch-agents `read <name> ``. Bind it and project
 
     let r = exarch-agents `read 'plan-review'
-    if !{equal $r[reply][verdict] `ok} { … } else { for $r[reply][issues] { |i| … } }
+    if $[$r[reply][verdict] == `ok] { … } else { for $r[reply][issues] { |i| … } }
 
 The reply is checked at `` `read `` against the fields you project: if the agent's reply has no `verdict`, the call fails there, saying `/reply/verdict` is missing, rather than when a later step reads it.
 
@@ -53,6 +53,6 @@ Every tag but `` `list `` and `` `read `` answers `[live: Int, replied: Int]` af
 
 You may message anyone on that list, but only cancel or read an agent you started — one whose `spawner` is you, or that sits under one. To find just your own:
 
-    filter { |r| equal $r[spawner] `agent 'my-name' } !{exarch-agents `list}
+    filter { |r| $[$r[spawner] == `agent 'my-name'] } !{exarch-agents `list}
 
 `` exarch-agents `cancel <name> `` stops an agent you started. It takes effect at the next tool boundary, so there might be some delay.

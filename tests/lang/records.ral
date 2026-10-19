@@ -4,7 +4,7 @@
 let rec = [host: prod1, port: 8080, debug: false]
 echo $rec[host]
 echo $rec[port]
-echo !{equal $rec[debug] false}
+echo $[$rec[debug] == false]
 
 # Nested records: inner fields retain their types
 let config = [db: [host: localhost, port: 5432], workers: 4]
@@ -20,11 +20,11 @@ greet [name: bob, dept: eng]
 
 # try returns the body's value on success.
 let ok = try { return 42 } { |_| return -1 }
-echo !{equal $ok 42}
+echo $[$ok == 42]
 
 # try calls the handler on failure with a typed error record.
 let status = try { fail [status: 7, message: 'typed error record test'] } { |e| return $e[status] }
-echo !{equal $status 7}
+echo $[$status == 7]
 
 # Inline form: handler can echo, return, or further dispatch.
 try { fail [status: 3, message: 'inline dispatch test'] } { |err|

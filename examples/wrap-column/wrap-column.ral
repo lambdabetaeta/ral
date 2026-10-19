@@ -11,7 +11,7 @@ for !{from-lines < $path} { |line|
     let ws = words $line
     if !{is-empty $ws} { echo $line } else {
         let packed = fold { |acc word|
-            if !{equal $acc[cur] ''} { return [out: $acc[out], cur: $word] }
+            if $[$acc[cur] == ''] { return [out: $acc[out], cur: $word] }
             elsif $[!{length $acc[cur]} + 1 + !{length $word} <= $w] {
                 return [out: $acc[out], cur: "$acc[cur] $word"]
             } else {

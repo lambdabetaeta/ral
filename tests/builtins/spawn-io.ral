@@ -56,7 +56,7 @@ let target = temp-dir
 within [dir: $target] {
     let h8 = spawn { cwd }
     let r8 = await $h8
-    echo !{equal $r8[value] $target}
+    echo $[$r8[value] == $target]
 }
 rm -rf $target
 

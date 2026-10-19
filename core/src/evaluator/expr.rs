@@ -119,9 +119,7 @@ fn not_numeric(val: &Value) -> Error {
     .with_hint("use int or float to convert")
 }
 
-/// `==`/`!=` are [`Value::equals`], as `equal` is, so comparing a pair of
-/// closures errors on both surfaces instead of answering a non-reflexive
-/// `false`.
+/// `==`/`!=` use [`Value::equals`]; closures refuse comparison.
 fn binop(l: &Value, op: BinaryOp, r: &Value) -> Settled<Value> {
     match op {
         BinaryOp::Eq(EqOp::Eq) => Ok(Value::Bool(l.equals(r)?)),

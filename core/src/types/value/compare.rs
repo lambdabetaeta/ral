@@ -1,5 +1,5 @@
 //! ral's equality and order: one pair of `Value` methods, behind `==`, `<`,
-//! `equal`, `lt`, `gt`, `sort-list` and the rest.
+//! `lt`, `gt`, `sort-list` and the rest.
 
 use super::Value;
 use crate::first_order::Finite;
@@ -87,7 +87,7 @@ impl Value {
             (a, b) if a.opacity().is_some() || b.opacity().is_some() => {
                 return Err(sig_hint(
                     format!(
-                        "equal: cannot compare {} with {}",
+                        "equality: cannot compare {} with {}",
                         a.type_name(),
                         b.type_name()
                     ),

@@ -10,7 +10,7 @@ let [path, field, want] = args
 let rows = from-json < $path
 
 let matching = { |row|
-    if !{has $row $field} { return !{equal !{str $row[$field]} $want} }
+    if !{has $row $field} { return $[!{str $row[$field]} == $want] }
     else { return false }
 }
 

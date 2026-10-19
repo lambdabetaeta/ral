@@ -23,11 +23,11 @@ let results = par $probe !{args} !{nproc}
 for $results { |r| echo "$r[code] $r[url]" }
 
 let classes = group-by { |r|
-    if !{equal $r[code] '000'} { return 'unreachable' } else { return "$[!{slice $r[code] 0 1}]xx" }
+    if $[$r[code] == '000'] { return 'unreachable' } else { return "$[!{slice $r[code] 0 1}]xx" }
 } $results
 for !{keys $classes} { |c| echo "$c: $[!{length $classes[$c]}]" }
 
-let dead = filter { |r| equal $r[code] '000' } $results
+let dead = filter { |r| $[$r[code] == '000'] } $results
 if !{is-empty $dead} { return () } else {
     fail [status: 1, message: "unreachable: $[!{intercalate ', ' !{map { |r| return $r[url] } $dead}}]"]
 }

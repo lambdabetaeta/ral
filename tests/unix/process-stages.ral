@@ -9,7 +9,7 @@ echo !{length $text}
 let before = !{pwd}
 let wander = { from-line; cd /tmp; return () }
 !{echo x | !$wander}
-echo !{equal $before !{pwd}}
+echo $[$before == !{pwd}]
 # Expected: true
 
 # Commands run inside a stage still reach the enclosing audit

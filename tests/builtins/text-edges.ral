@@ -2,7 +2,7 @@
 
 let refusal = { |body| try $body { |e| echo $e[message]; return () } }
 let check = { |name expected actual|
-    if !{equal $expected $actual} { echo "ok: $name" } else {
+    if $[$expected == $actual] { echo "ok: $name" } else {
         fail [status: 1, message: "assertion failed: $name"]
     }
 }

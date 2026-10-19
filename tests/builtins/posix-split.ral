@@ -1,7 +1,7 @@
 # Test: posix-split — POSIX tokenization of shell-quoted strings.
 
 let assert_eq = { |name expected actual|
-    if $[not !{equal $expected $actual}] {
+    if $[$expected != $actual] {
         warn "FAIL: $name"
         warn "  expected: !{to-json $expected}"
         warn "  actual:   !{to-json $actual}"

@@ -25,11 +25,11 @@ within [env: [A: 1]] {
 let original = !{cwd}
 let target = temp-dir
 let observed = !{ within [dir: $target] { cwd } }
-if !{equal $observed $target} { echo 'dir changed' } else { echo 'dir mismatch!' }
+if $[$observed == $target] { echo 'dir changed' } else { echo 'dir mismatch!' }
 
 # dir doesn't leak
 let after = !{cwd}
-if !{equal $original $after} { echo 'cwd restored' } else { echo 'cwd leaked!' }
+if $[$original == $after] { echo 'cwd restored' } else { echo 'cwd leaked!' }
 rm -rf $target
 
 # handlers key (per-name)

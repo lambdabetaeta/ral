@@ -126,7 +126,7 @@ This shape is forced, and it is what makes the witness trustworthy:
 
 **The witness lexes as a string.** A bare `edit-hash` argument that parses as an
 integer elaborates to `Val::Int`, not `Val::String`, before the type checker
-runs; an all-digit digest at the hash position would then fail its `equal`
+runs; an all-digit digest at the hash position would then fail its equality check
 against the recomputed string hash. `line_hash` — and therefore every witness,
 which ends in a `line_hash` — always begins with `h`, keeping the token
 un-numeric at any call site ([[decisions/260608_witness-hash-h-prefix|witness-hash-h-prefix]]).

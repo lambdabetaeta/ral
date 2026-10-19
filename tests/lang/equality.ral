@@ -1,0 +1,25 @@
+# Test: §4.8 structural equality
+
+# Same type comparisons
+echo $[42 == 42]
+echo $[42 == 43]
+echo $[3.14 == 3.14]
+echo $[true == true]
+echo $[true == false]
+echo $[hello == hello]
+echo $[hello == world]
+
+# Collections
+echo $[[1, 2, 3] == [1, 2, 3]]
+echo $[[1, 2] == [1, 3]]
+echo $[[a: 1, b: 2] == [a: 1, b: 2]]
+echo $[[a: 1] == [a: 2]]
+
+# Nested
+echo $[[a: [1, 2]] == [a: [1, 2]]]
+
+# Empty collections
+echo $[[] == []]
+echo $[[:] == [:]]
+
+echo 'equality tests done'
