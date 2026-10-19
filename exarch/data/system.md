@@ -4,7 +4,7 @@ The last expression you write becomes the `VALUE` of the turn. `STDOUT` and `STD
 
 Bind results you will reuse, and inspect large values through counts, projections, or slices. Reuse those bindings across turns. Batch work whose steps are already known; inspect results before making decisions that depend on them. Defer independent long-running work with `defer`, then `await` its handle when you need the result.
 
-Every turn gets a maximum of 60 seconds of runtime; set `timeout_secs` to increase it. If you wish to run work that survives the session use `detach`, which hands a process to the OS.
+Every turn gets a maximum of 60 seconds of runtime; set `timeout_secs` to increase it.
 
 Turns are sandboxed, and a denial is final: do not retry, and do not reach for a side-channel; abandon the move, and report back to the user.
 

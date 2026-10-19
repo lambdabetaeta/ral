@@ -1,35 +1,38 @@
-Keep requirements and current work in context; recover discarded evidence from the transcript. Every result ends with `TURN: N`: N is that call's turn id. Ids below are placeholders.
+Your context is costly, as it is re-sent on every subsequent turn. You have a primitive that you may use to survey and edit it:
 
     exarch-context `survey / `evict [turns: [Int], note: `none|`some Str]
 
-**Evict each failed call in the next one, alongside the correction.** Failed means a diagnostic, a failing command, or not what you meant. Kept, it is re-sent on every request; the newest turn costs almost nothing in cache to cut. Note the lesson and side effects. Earlier writes and spawns survive: resume, don't replay.
+You need not call survey often, as every `ral` call ends with `TURN: N` where N is that call's turn id.
 
-    exarch-context `evict [turns: [42], note: `some #'from-lines ends a byte pipeline. No file changes.'#]
-    let commits = git log -5 --oneline | from-lines
+There are two chief candidates for eviction:
+- Turns that retrieved irrelevant information. These may be evicted with a short note on what was retrieved.
+- Turns that contained failed tool calls, e.g. with `ral` syntax that was incorrect or did not typecheck. In such cases it is best to retry; once you get it right, evict the failed attempts and their results. The note may be `` `none ``, or may teach the idiom further:
 
-**Batch completed work into one cut.** Keep conclusions and next steps in the note; name a binding for longer material. Each cut breaks cache reuse from the earliest changed turn. On a pressure warning, cut before the harness evicts without a note.
+    let commits = [last-commits: git log -5 --oneline]    # TURN: 42
+    let commits = [last-commits: !{git log -5 --oneline}] # TURN: 43
+    exarch-context `evict [turns: [42], note: `some #'a command as a record field needs !{}'#]
+
+You may also habitually evict calls to `explain` near the end of the context with `` `none `` or a short note.
+
+Bear in mind that evictions earlier in the transcript may invalidate the cache. You should try to evict turns only at the bottom of the conversation, or in batch whenever you are warned the context is getting large:
 
     exarch-context `evict [
       turns: !{range 31 37},
       note: `some #'Duplicate check added in parse_options. Regression test needed; checks not run.'#
     ]
+    exarch-context `evict [
+      turns: !{range 37 50},
+      note: `some #'Refactor complete and tests passed.'#
+    ]
+    ...
 
-**Evict spent `explain` results when unlikely to be needed soon.** Fetch them again later.
-
-    exarch-context `evict [turns: [48], note: `none]
-
-**Search before reading history.** If `total` exceeds the returned hits, narrow the pattern or turn ids; matches are oldest first.
+You may use `exarch-transcript` to search the entire conversation, including evicted turns:
 
     exarch-transcript `grep [pattern: #'duplicate flag'#, turns: `all]
-
     exarch-transcript `grep [pattern: #'parse_options.*duplicate'#, turns: `only [31, 35]]
 
-**Use the index when you lack a search term.** It lists labels and sizes.
+You may also read turns back in full:
 
-    exarch-transcript `index
+    let old = exarch-transcript `read [turns: [31, 35]]
 
-**Bind large reads; inspect only relevant messages or parts.** Reads are unbounded. Check current files before editing from historical evidence.
-
-    let old-turn = exarch-transcript `read [turns: [35]]
-
-**Look up limits and refusal rules as needed:** `explain exarch-context`, `explain exarch-transcript`.
+Eviction does not change the state of the shell.
