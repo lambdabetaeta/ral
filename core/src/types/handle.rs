@@ -7,22 +7,11 @@ use crate::io::ByteBuffer;
 use crate::process::ScopeNode;
 use crate::sync::LockExt as _;
 use std::ops::ControlFlow;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 pub(crate) mod surface;
-
-/// A once-only claim, contested across threads: the first [`Self::claim`] wins.
-#[derive(Debug, Clone, Default)]
-pub struct Latch(Arc<AtomicBool>);
-
-impl Latch {
-    pub(crate) fn claim(&self) -> bool {
-        !self.0.swap(true, Ordering::AcqRel)
-    }
-}
 
 /// Whether `v` structurally reaches a running handle — the binding-lease
 /// reaper's pin check, so a name still holding live work is never pruned.
@@ -62,18 +51,8 @@ pub enum HandleState {
 pub struct CompletedHandle {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
-    /// Drained once from [`HandleInner::surface_buf`], and replayed through
-    /// the awaiting run's surface by `await`/`race` — never by `poll`.
-    pub surface: Vec<crate::first_order::FOValue>,
     pub(crate) end: ThreadEnd,
 }
-
-/// Bounded buffer of the structured events a worker defers rather
-/// than emitting live, its spawning run having possibly ended.
-///
-/// The bound lives in [`surface::DeferredSurface`], so a runaway emitter
-/// cannot grow this without limit.
-pub type SurfaceBuffer = Arc<Mutex<Vec<crate::first_order::FOValue>>>;
 
 /// Shared handle to a spawned computation.
 #[derive(Debug, Clone)]
@@ -94,15 +73,6 @@ pub struct HandleInner {
     /// watched handle, whose lines surface live through `Sink::Watch`.
     pub stdout_buf: ByteBuffer,
     pub stderr_buf: ByteBuffer,
-    /// Where a worker's `surface` events land, the spawning run's
-    /// live sink being possibly gone.  Drained once into
-    /// [`CompletedHandle::surface`].
-    pub surface_buf: SurfaceBuffer,
-    /// Deliver-once latch, contested by the two renderers of the deferred
-    /// batch: an eliminator's replay and the host's boundary delivery.  The
-    /// loser skips, so a batch never renders twice and a never-awaited worker
-    /// still delivers exactly once.
-    pub joined: Latch,
     /// When an eliminator last named this handle: renewed by `poll` and by
     /// every `await`/`race` sweep, read by the idle lease chain in
     /// `builtins::concurrency`.  Cancelling or listing never renews it.
@@ -151,8 +121,6 @@ impl HandleInner {
             state: StateCell(Arc::new(Mutex::new(HandleState::Running))),
             stdout_buf: ByteBuffer::default(),
             stderr_buf: ByteBuffer::default(),
-            surface_buf: Arc::new(Mutex::new(Vec::new())),
-            joined: Latch::default(),
             last_observed: Observed(Arc::new(Mutex::new(Instant::now()))),
             cmd: cmd.into(),
             site: None,
@@ -244,7 +212,6 @@ impl HandleInner {
         let completed = CompletedHandle {
             stdout: self.stdout_buf.take(),
             stderr: self.stderr_buf.take(),
-            surface: std::mem::take(&mut *self.surface_buf.lock_ignore_poison()),
             end,
         };
         *self.cached.lock_ignore_poison() = Some(completed.clone());

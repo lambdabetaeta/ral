@@ -2,29 +2,12 @@
 //! lines, and the note a value of no class they know is dropped with.
 
 use ral_core::first_order::FOValue;
-use ral_core::first_order::datum::{Datum as _, untag};
-use ral_core::record;
-use ral_core::types::Observation;
-
-/// One `'watch` line: the worker's label and what it wrote.
-struct Watched {
-    label: String,
-    line: String,
-}
-
-record!(Watched {
-    label: "label",
-    line: "line",
-});
+use ral_core::first_order::datum::untag;
+use ral_core::types::{Observation, WatchEvent};
 
 /// `'watch {label, line}`'s printed line, if `v` is one.
 pub(crate) fn watch_line(v: &FOValue) -> Option<String> {
-    let Some(("watch", Some(payload))) = untag(v) else {
-        return None;
-    };
-    Watched::decode(payload)
-        .ok()
-        .map(|w| format!("[{}] {}", w.label, w.line))
+    WatchEvent::from_surface(v).map(|w| format!("[{}] {}", w.label, w.line))
 }
 
 /// The note `v` is dropped with; none for an observation, which neither

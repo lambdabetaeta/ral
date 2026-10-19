@@ -9,8 +9,8 @@ use crate::first_order::FOValue;
 use crate::io::new_buffer;
 use crate::process::{CancelCause, DurableRoot, Scope, ScopeNode, WorkerStop};
 use crate::types::{
-    Break, CompletedHandle, DeferredSink, Error, Escape, EventSink, HandleInner, HandleState,
-    LeaseClass, Map, ReapCause, Status, SurfaceBuffer, ThreadEnd, WorkerLease,
+    Break, CompletedHandle, DeferredSink, Error, Escape, HandleInner, HandleState, LeaseClass, Map,
+    ReapCause, Status, ThreadEnd, WatchEvent, WorkerLease,
 };
 use std::sync::{Arc, Mutex, mpsc};
 
@@ -94,10 +94,9 @@ fn a_polled_panic_is_reraised() {
 #[test]
 fn an_awaited_panic_is_reraised() {
     let shell = crate::test_helper::core_shell();
-    let m = Mooring::adrift();
     let handle = handle_with_disconnected_worker(b"", b"");
     let raised = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        await_handle(&handle, &m, &shell)
+        await_handle(&handle, &shell)
     }));
     assert!(raised.is_err(), "await must re-raise a worker's panic");
 }
@@ -106,12 +105,10 @@ fn an_awaited_panic_is_reraised() {
 #[test]
 fn a_raced_panic_is_reraised() {
     let shell = crate::test_helper::core_shell();
-    let m = Mooring::adrift();
     let handle = handle_with_disconnected_worker(b"", b"");
     let args = [Value::list(vec![Value::Handle(Box::new(handle))])];
-    let raised = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        builtin_race(&args, &m, &shell)
-    }));
+    let raised =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| builtin_race(&args, &shell)));
     assert!(raised.is_err(), "race must re-raise a worker's panic");
 }
 
@@ -140,7 +137,7 @@ fn spawn_polling_worker(shell: &Shell, cancel_via: impl FnOnce(&ScopeNode)) -> (
     let (ready_tx, ready_rx) = mpsc::channel();
     let (done_tx, done_rx) = mpsc::channel();
     let node = shell.session.root.worker();
-    let worker_mooring = Mooring::for_worker(&Mooring::adrift(), node.clone(), Arc::new(()));
+    let worker_mooring = Mooring::for_worker(&Mooring::adrift(), node.clone(), None);
     let _join = shell
         .spawn_thread(worker_mooring, "test-worker", move |_, child| {
             ready_tx.send(()).unwrap();
@@ -165,7 +162,7 @@ fn spawn_polling_worker(shell: &Shell, cancel_via: impl FnOnce(&ScopeNode)) -> (
 fn worker_scope_cancel_stops_the_worker() {
     let shell = crate::test_helper::core_shell();
     let sibling = shell.session.root.worker();
-    let sibling_mooring = Mooring::for_worker(&Mooring::adrift(), sibling.clone(), Arc::new(()));
+    let sibling_mooring = Mooring::for_worker(&Mooring::adrift(), sibling.clone(), None);
     let _idle_join = shell
         .spawn_thread(sibling_mooring, "test-sibling", |_, _| ())
         .expect("spawn_thread");
@@ -206,7 +203,7 @@ fn foreground_cancel_spares_worker() {
     let shell = crate::test_helper::core_shell();
     let m = Mooring::adrift();
     let worker_scope = shell.session.root.worker();
-    let worker_mooring = Mooring::for_worker(&m, worker_scope.clone(), Arc::new(()));
+    let worker_mooring = Mooring::for_worker(&m, worker_scope.clone(), None);
     let _join = shell
         .spawn_thread(worker_mooring, "test-worker", |_, _| ())
         .expect("spawn_thread");
@@ -240,7 +237,7 @@ fn await_unwinds_on_foreground_cancel_sparing_the_worker() {
     shell.scope = Scope::clone(&m.home);
     m.home.cancel(crate::process::CancelCause::Interrupted);
 
-    let err = await_handle(&handle, &m, &shell)
+    let err = await_handle(&handle, &shell)
         .expect_err("await must unwind on a foreground cancel, not block");
     assert!(matches!(err, Break::Escape(Escape::Stopped { .. })));
     assert!(
@@ -441,7 +438,7 @@ fn polled_worker_survives_past_its_idle_lease() {
     assert_eq!(shell.local.workers.count(), 1, "the babysat entry stays");
 
     gate_tx.send(()).unwrap();
-    await_handle(&handle, &m, &shell).expect("await after the gate opens");
+    await_handle(&handle, &shell).expect("await after the gate opens");
     assert!(!scope.is_cancelled(), "the worker finished by itself");
 }
 
@@ -979,55 +976,7 @@ fn detach_returns_a_receipt_of_a_pid_and_a_desc() {
     assert!(matches!(fields.get("pid").as_deref(), Some(Value::Int(p)) if *p > 0));
 }
 
-/// A worker's `surface` events replay through the *awaiting* run
-/// exactly once: `poll` never, the first `await` yes, a second no.
-#[test]
-fn deferred_surface_replays_once_on_await_not_poll() {
-    struct Rec(Arc<Mutex<Vec<FOValue>>>);
-    impl EventSink for Rec {
-        fn emit(&self, ev: &FOValue) {
-            self.0.lock().unwrap().push(ev.clone());
-        }
-    }
-
-    let shell = crate::test_helper::core_shell();
-    let log = Arc::new(Mutex::new(Vec::new()));
-    let mut m = Mooring::adrift();
-    m.surface = Some(Arc::new(Rec(log.clone())));
-
-    // A settled handle carrying one buffered event; the sender stays alive,
-    // so the receiver sees a value rather than a disconnect.
-    let (tx, rx) = mpsc::channel::<ThreadEnd>();
-    tx.send(ThreadEnd::Settled(Ok(Value::Unit))).unwrap();
-    let surface_buf: SurfaceBuffer = Arc::new(Mutex::new(vec![FOValue::Variant {
-        label: "patch".into(),
-        payload: None,
-    }]));
-    let handle = HandleInner {
-        surface_buf,
-        ..handle_over(rx)
-    };
-
-    builtin_poll(&[Value::Handle(Box::new(handle.clone()))], &shell).expect("poll ok");
-    assert_eq!(log.lock().unwrap().len(), 0, "poll must not replay surface");
-
-    await_handle(&handle, &m, &shell).expect("await ok");
-    assert_eq!(
-        log.lock().unwrap().len(),
-        1,
-        "await replays the deferred card"
-    );
-
-    await_handle(&handle, &m, &shell).expect("await ok");
-    assert_eq!(
-        log.lock().unwrap().len(),
-        1,
-        "repeat await must not duplicate"
-    );
-}
-
-/// A deferred-sink double for the agent host.  The deliver-once test-and-set
-/// lives at `DeferredSurface::flush`, so this just records what it is handed.
+/// A deferred-sink double for the agent host: records what it is handed.
 struct RecDeferred(Arc<Mutex<Vec<Vec<FOValue>>>>);
 
 impl DeferredSink for RecDeferred {
@@ -1073,8 +1022,7 @@ fn worker_flushes_done_to_deferred_sink() {
         let batches = Arc::new(Mutex::new(Vec::new()));
         let mut m = Mooring::adrift();
         m.deferred = Some(Arc::new(RecDeferred(batches.clone())));
-        // Hold the handle so the channel stays connected until the flush;
-        // never observed, so no eliminator competes for the `joined` latch.
+        // Hold the handle so the channel stays connected until the flush.
         let _handle = spawn_child(&m, &mut shell, Birth::Spawn, "<block>", work).unwrap();
         let mut got = wait_for_batch(&batches);
         assert_eq!(got.len(), 1, "one batch per completed worker");
@@ -1123,21 +1071,13 @@ fn watched_lines_surface_one_by_one() {
         Ok(Value::Unit)
     })
     .unwrap();
-    await_handle(&handle, &m, &shell).expect("await ok");
+    await_handle(&handle, &shell).expect("await ok");
     let lines: Vec<(String, String)> = batches
         .lock()
         .unwrap()
         .iter()
         .filter_map(|batch| match batch.as_slice() {
-            [
-                FOValue::Variant {
-                    label,
-                    payload: Some(p),
-                },
-            ] if label == "watch" => Some((
-                p.field("label")?.as_str()?.to_string(),
-                p.field("line")?.as_str()?.to_string(),
-            )),
+            [ev] => WatchEvent::from_surface(ev).map(|w| (w.label, w.line)),
             _ => None,
         })
         .collect();
@@ -1199,96 +1139,25 @@ fn deferred_batch_carries_body_surface_before_done() {
     }
 }
 
-/// With no deferred sink installed (the bare REPL) a completed worker
-/// flushes nothing, and its surface reaches a sink only via `await`/`race`.
+/// With no deferred sink installed a worker has no surface at all.
 #[test]
 fn no_deferred_sink_means_no_delivery() {
     let mut shell = crate::test_helper::core_shell();
-    let mut m = Mooring::adrift();
-    assert!(m.deferred.is_none(), "a bare REPL installs none");
+    let m = Mooring::adrift();
+    assert!(m.deferred.is_none(), "no deferred sink installed");
     let handle = spawn_child(
         &m,
         &mut shell,
         Birth::Spawn,
         "<block>",
         |mooring, _child| {
-            if let Some(sink) = mooring.surface.as_ref() {
-                sink.emit(&FOValue::Variant {
-                    label: "card".into(),
-                    payload: None,
-                });
-            }
+            assert!(mooring.surface.is_none(), "a worker has no surface");
             Ok(Value::Unit)
         },
     )
     .unwrap();
 
-    // Nothing was delivered, so the `joined` latch is unset and the `await`
-    // replay still surfaces the body's card.
-    let log = Arc::new(Mutex::new(Vec::new()));
-    struct Rec(Arc<Mutex<Vec<FOValue>>>);
-    impl EventSink for Rec {
-        fn emit(&self, ev: &FOValue) {
-            self.0.lock().unwrap().push(ev.clone());
-        }
-    }
-    m.surface = Some(Arc::new(Rec(log.clone())));
-    await_handle(&handle, &m, &shell).expect("await ok");
-    let replayed = log.lock().unwrap().clone();
-    assert_eq!(
-        replayed.as_slice(),
-        &[FOValue::Variant {
-            label: "card".into(),
-            payload: None,
-        }],
-        "no deferred sink appends no `done; await replays only the body's card"
-    );
-}
-
-/// Deliver-once across the two regimes: once the deferred sink has won the
-/// `joined` latch, a later `await` replays nothing yet still returns its record.
-#[test]
-fn deferred_delivery_suppresses_a_later_await_replay() {
-    let mut shell = crate::test_helper::core_shell();
-    let batches = Arc::new(Mutex::new(Vec::new()));
-    let mut m = Mooring::adrift();
-    m.deferred = Some(Arc::new(RecDeferred(batches.clone())));
-    let handle = spawn_child(
-        &m,
-        &mut shell,
-        Birth::Spawn,
-        "<block>",
-        |mooring, _child| {
-            if let Some(sink) = mooring.surface.as_ref() {
-                sink.emit(&FOValue::Variant {
-                    label: "card".into(),
-                    payload: None,
-                });
-            }
-            Ok(Value::Unit)
-        },
-    )
-    .unwrap();
-
-    // The deferred sink wins the latch first, recording one batch.
-    wait_for_batch(&batches);
-    assert!(!handle.joined.claim(), "the deferred flush set `joined");
-
-    // A later `await` finds the latch set, so it replays nothing.
-    let log = Arc::new(Mutex::new(Vec::new()));
-    struct Rec(Arc<Mutex<Vec<FOValue>>>);
-    impl EventSink for Rec {
-        fn emit(&self, ev: &FOValue) {
-            self.0.lock().unwrap().push(ev.clone());
-        }
-    }
-    m.surface = Some(Arc::new(Rec(log.clone())));
-    await_handle(&handle, &m, &shell).expect("await still returns the result record");
-    assert_eq!(
-        log.lock().unwrap().len(),
-        0,
-        "the deferred sink already delivered, so the replay is suppressed"
-    );
+    await_handle(&handle, &shell).expect("await ok");
 }
 
 // ── worker registry (pure bookkeeping, no policy) ────────────────────
@@ -1328,7 +1197,7 @@ fn eliminators_remove_the_entry_except_a_pending_poll() {
 
     // `await` removes.
     let h1 = spawn_child(&m, &mut shell, Birth::Spawn, "<a>", |_, _c| Ok(Value::Unit)).unwrap();
-    await_handle(&h1, &m, &shell).expect("await ok");
+    await_handle(&h1, &shell).expect("await ok");
     assert_eq!(shell.local.workers.count(), 0, "await removes its entry");
 
     // `cancel` removes.
@@ -1372,7 +1241,7 @@ fn eliminators_remove_the_entry_except_a_pending_poll() {
         "a pending poll must not touch the registry"
     );
     unblock_tx.send(()).unwrap();
-    await_handle(&h4, &m, &shell).expect("await ok");
+    await_handle(&h4, &shell).expect("await ok");
 }
 
 /// `race` removes the winner and every cancelled loser: nothing lingers in
@@ -1407,7 +1276,7 @@ fn race_removes_winner_and_cancelled_losers() {
         Value::Handle(Box::new(loser1)),
         Value::Handle(Box::new(loser2)),
     ])];
-    builtin_race(&args, &m, &shell).expect("race must succeed");
+    builtin_race(&args, &shell).expect("race must succeed");
     assert_eq!(
         shell.local.workers.count(),
         0,
@@ -1631,7 +1500,7 @@ fn running_entries_are_never_stamped_or_expired() {
     );
 
     gate_tx.send(()).unwrap();
-    await_handle(&handle, &m, &shell).expect("await after the gate opens");
+    await_handle(&handle, &shell).expect("await after the gate opens");
 }
 
 // ── the admission cap ────────────────────────────────────────────────
@@ -1768,7 +1637,7 @@ fn awaiting_a_cancelled_worker_is_the_awaiters_error() {
     let m = Mooring::adrift();
     let handle = spawn_child(&m, &mut shell, Birth::Spawn, "<test>", check_loop).unwrap();
     builtin_cancel(&[Value::Handle(Box::new(handle.clone()))], &shell).unwrap();
-    let err = await_handle(&handle, &m, &shell).expect_err("a cancelled worker has no value");
+    let err = await_handle(&handle, &shell).expect_err("a cancelled worker has no value");
     expect_worker_stop(&stopped_error(err), WorkerStop::Cancelled);
 }
 
@@ -1779,7 +1648,7 @@ fn awaiting_a_leased_out_worker_is_the_awaiters_error() {
     let mut m = Mooring::adrift();
     m.deferred_lease = Some(lease_ms(10_000, 20));
     let handle = spawn_child(&m, &mut shell, Birth::Spawn, "<test>", check_loop).unwrap();
-    let err = await_handle(&handle, &m, &shell).expect_err("the lease expired");
+    let err = await_handle(&handle, &shell).expect_err("the lease expired");
     expect_worker_stop(&stopped_error(err), WorkerStop::TimedOut);
 }
 
@@ -1795,7 +1664,7 @@ fn a_lease_that_fires_during_the_last_step_is_still_the_awaiters_error() {
         Ok(Value::Unit)
     })
     .unwrap();
-    let err = await_handle(&handle, &m, &shell).expect_err("the closing poll reads the lease");
+    let err = await_handle(&handle, &shell).expect_err("the closing poll reads the lease");
     expect_worker_stop(&stopped_error(err), WorkerStop::TimedOut);
 }
 
@@ -1812,7 +1681,7 @@ fn a_cancel_during_await_is_the_awaiters_error() {
             canceller.cancel.cancel(CancelCause::Cancelled);
         }
     });
-    let err = await_handle(&handle, &m, &shell).expect_err("cancelled while awaited");
+    let err = await_handle(&handle, &shell).expect_err("cancelled while awaited");
     join.join().unwrap();
     expect_worker_stop(&stopped_error(err), WorkerStop::Cancelled);
 }
@@ -1830,7 +1699,7 @@ fn exiting_worker(shell: &mut Shell) -> HandleInner {
 fn awaiting_an_exited_worker_exits() {
     let mut shell = crate::test_helper::core_shell();
     let handle = exiting_worker(&mut shell);
-    let err = await_handle(&handle, &Mooring::adrift(), &shell).expect_err("exit passes");
+    let err = await_handle(&handle, &shell).expect_err("exit passes");
     assert!(matches!(err, Break::Escape(Escape::Exit(3))), "{err:?}");
 }
 
@@ -1856,7 +1725,7 @@ fn a_foreign_stop_is_reraised_by_await_and_poll() {
         ))
     };
     let awaited = spawn_child(&m, &mut shell, Birth::Spawn, "<a>", body.clone()).unwrap();
-    let err = await_handle(&awaited, &m, &shell).expect_err("a foreign stop passes");
+    let err = await_handle(&awaited, &shell).expect_err("a foreign stop passes");
     assert!(
         matches!(
             err,

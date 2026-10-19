@@ -61,8 +61,9 @@ recognised card: an unknown mark label or role degrades to plain `text`,
 because a card is a deliberate user-facing act, not a sentinel that might be
 malformed. The `diff` mark reads a `path` and a `hunks` list — each hunk its
 first line before (`old`) and after (`new`) the edit, and a `rows` list of `{tag, text}` records; a missing `hunks`
-lifts to empty so a bare diff still renders. Workers buffer their
-`exarch-surface` calls and replay them on `await`, so a card replays for free.
+lifts to empty so a bare diff still renders. A worker's cards
+arrive in its settled batch and decode here unchanged
+([[decisions/260622_surface-delivers-itself|surface-delivers-itself]]).
 
 ## Encode — `encode_card`
 

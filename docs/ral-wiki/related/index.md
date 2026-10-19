@@ -34,3 +34,7 @@ revisit.
 - [[related/call-by-push-value|call-by-push-value]] — Levy 1999/2003: the
   substrate taken as surface design; ral adds the
   pipe as a combinator outside the calculus, and drops computation products.
+- [[related/asynchronous-effects|asynchronous-effects]] — Ahman–Pretnar
+  2021/2024: signals out, interrupts in, a synchronous call derived from both —
+  the engine protocol's calculus, with `enquire` kept primitive and a session
+  scope at which a worker's signals wait.

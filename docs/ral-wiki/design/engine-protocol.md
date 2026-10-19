@@ -1,18 +1,18 @@
 ---
-generated_at_commit: 8aa9355b
+generated_at_commit: 62f8f2a9
 ---
 
 # The engine protocol
 
 **A front-end and a `ral` engine share exactly one duplex stream, sorted into
-four channels by direction and by whether a message is answered, and the
-stream is realised by exactly two bindings — a direct call in one address
-space, or a codec across a socket, a re-exec'd process, or a vsock into a
-guest.** Nothing exists in one binding and not the other: *identity* is the
-trivial instantiation of the algebra *wire* encodes, never a second design.
-Growing the protocol never means a new channel: every host facility yet to be
-invented is a class inside an existing channel's payload, decoded by one more
-arm.
+channels by direction, by whether a message is answered, and by the scope of
+the handler that receives it; the stream is realised by exactly two bindings —
+a direct call in one address space, or a codec across a socket, a re-exec'd
+process, or a vsock into a guest.** Nothing exists in one binding and not the
+other: *identity* is the trivial instantiation of the algebra *wire* encodes,
+never a second design. A channel is a scope, never a purpose: every host
+facility yet to be invented is a class inside an existing channel's payload,
+decoded by one more arm.
 
 ## One engine, two carriers
 
@@ -53,16 +53,17 @@ and a binding is only the carriage around it.
 - **One meaning per verb.** `Control`, reentrancy, and every probe class are
   defined once, and each carrier applies the same definition.
 
-## Four channels, two directions
+## Channels: direction, answer, scope
 
 |                   | answered (call)                                                    | one-way (notice)                                              |
 | ----------------- | ------------------------------------------------------------------- | --------------------------------------------------------------- |
 | **host → engine** | `Dispatch → Report` — one whole run: clocked, walled, cancel-scoped  | `Control` — interrupt, cancel, terminate, abort, out-of-band     |
-| **engine → host** | `Enquiry → Answer` — nested inside a run, no clock of its own       | `Surface` — live values ordered before the Report, or a worker's deferred batch |
+| **engine → host** | `Enquiry → Answer` — nested inside a run, no clock of its own       | `Surface` — a run's live values, ordered before its Report; a worker's batch, on the session |
 
-Each direction owns one answered channel and one one-way channel. The
-remaining asymmetries are semantic, not accidental, and are never smoothed
-into a fake mirror pair:
+Each direction owns one answered channel and one one-way channel, and the
+engine's one-way traffic splits once more by scope (below). The remaining
+asymmetries are semantic, not accidental, and are never smoothed into a fake
+mirror pair:
 
 - *Mood.* `Control` is imperative while `Surface` is indicative: this
   happened, this is now true. `Control` has four verbs, each meaning one
@@ -87,8 +88,43 @@ into a fake mirror pair:
   it — no wall of its own, and a `Control::Cancel` must wake an engine
   parked on an unanswered enquiry.
 
-A fifth frame, `Probe`, rides the `Dispatch → Report` rail rather than
-opening a fifth channel (see *Probes*, below).
+A further frame, `Probe`, rides the `Dispatch → Report` rail rather than
+opening a channel of its own (see *Probes*, below).
+
+## Two scopes of `Surface`
+
+**`Surface` is two channels, because a producer can outlive the dispatch that
+started it.** A surfaced value is handled by the innermost host handler whose
+lifetime contains its producer:
+
+- *Dispatch scope* — `Event::Surface`: a running dispatch's values, rendered as
+  they arrive and ordered before its `Report`.
+- *Session scope* — `SessionEvent::DeferredSurface`: a detached worker's values,
+  delivered to the host's `DeferredSink` as one batch when the worker settles,
+  closed by its `` `done ``, or a `watch` line as it arrives; rendered at the
+  host's next boundary. A worker holds no live sink and no desk, so it cannot
+  speak on a dispatch-scoped channel at all
+  ([[decisions/260622_surface-delivers-itself|surface-delivers-itself]]).
+
+Both carry the same vocabulary and meet the same decoder; only the scope
+differs.
+
+## The channels as asynchronous effects
+
+**Read through Ahman and Pretnar's asynchronous effects, engine and host are two
+processes in parallel, exchanging operations rather than calls
+([[related/asynchronous-effects|asynchronous-effects]]).**
+
+- `Surface` is an outgoing *signal*: issued, never answered.
+- `Control` is an incoming *interrupt*, arriving at any point of a run; its
+  handlers are the runtime's (`Scopes::apply`), never the program's.
+- A `spawn` handle is a *promise*, and `await` its eliminator.
+- `Enquiry → Answer` is a synchronous operation — in Æff a signal, a promise of
+  the reply, and an `await` — fused into one primitive, so that it stays inside
+  its dispatch's window, ordered before the `Report`.
+- The session scope has no Æff counterpart: an Æff signal propagates at once,
+  while a worker's waits for its scope's boundary — as a kernel makes a pending
+  signal visible only on a return to user mode.
 
 ## Payloads: first-order or it does not cross
 

@@ -1,15 +1,14 @@
 //! A worker's birth: the one door `spawn`, `watch` and `service` share.
 
-use super::watch_event;
 use crate::fact::Worker;
 use crate::io::{Sink, new_buffer};
 use crate::process::{Scope, WorkerStop};
 use crate::types::{
-    Break, CapReached, DeferredSurface, Done, Error, Escape, FlushGuard, HandleInner, Latch,
-    LeaseChain, LeaseClass, Mooring, Observed, Settled, Shell, SurfaceBuffer, ThreadEnd, Value,
+    Break, CapReached, DeferredSurface, Done, Error, Escape, FlushGuard, HandleInner, LeaseChain,
+    LeaseClass, Mooring, Observed, Settled, Shell, SurfaceSink, ThreadEnd, Value, WatchEvent,
     WorkerEntry, WorkerId, final_poll, sig,
 };
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 
 /// Which birth [`spawn_child`] is serving.  One door carries three surface
@@ -77,15 +76,12 @@ where
 
     let (stdout_sink, stdout_buf) = new_buffer();
     let (stderr_sink, stderr_buf) = new_buffer();
-    let surface_buf: SurfaceBuffer = Arc::new(Mutex::new(Vec::new()));
     // Taken from the spawning run's mooring, so the destination outlives that
-    // run's teardown; the `joined` latch is shared with the eliminators.
-    let worker_surface = Arc::new(DeferredSurface::new(
-        surface_buf.clone(),
-        mooring.deferred.clone(),
-    ));
-    let joined = Latch::default();
-    let worker_joined = joined.clone();
+    // run's teardown.
+    let worker_surface = mooring
+        .deferred
+        .clone()
+        .map(|d| Arc::new(DeferredSurface::new(d)));
     let (stdout, stderr) = match birth {
         Birth::Spawn | Birth::Service => (stdout_sink, stderr_sink),
         Birth::Watch { label } => {
@@ -103,7 +99,9 @@ where
                 Sink::Watch {
                     line: Arc::new(move |line| {
                         if let Some(deferred) = &deferred {
-                            deferred.deliver(vec![watch_event(&label, line)]);
+                            let (label, line) =
+                                (label.clone(), String::from_utf8_lossy(line).into_owned());
+                            deferred.deliver(vec![WatchEvent { label, line }.to_surface()]);
                         }
                     }),
                     pending: Vec::new(),
@@ -118,14 +116,16 @@ where
     let worker_cmd = cmd.clone();
 
     let node = shell.session.root.worker();
-    let worker_mooring = Mooring::for_worker(mooring, node.clone(), worker_surface.clone());
+    let worker_mooring = Mooring::for_worker(
+        mooring,
+        node.clone(),
+        worker_surface.clone().map(|s| s as SurfaceSink),
+    );
     // Minted before the thread so the worker can hold a clone: its exit mark is
     // what ends the lease chain silently on a finished worker.
     let handle = HandleInner {
         stdout_buf,
         stderr_buf,
-        surface_buf,
-        joined,
         ..HandleInner::new(cmd.clone(), node, Some(rx))
     };
     let worker = handle.clone();
@@ -136,7 +136,7 @@ where
             child.io.stdout = stdout;
             child.io.stderr = stderr;
 
-            let guard = FlushGuard::new(worker_surface, worker_joined, id, worker_cmd);
+            let guard = FlushGuard::new(worker_surface, id, worker_cmd);
 
             let end = match ThreadEnd::of(|| work(mooring, child)) {
                 // The base's return clause: the closing poll, then the switch.

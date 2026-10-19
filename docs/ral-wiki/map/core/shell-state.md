@@ -323,11 +323,12 @@ already holds the wire form: `Shell::observe_stamped` (`types/audit/door.rs`) re
 with `Observation::to_surface`, tagged `` `observed `` so a host dispatches on
 the tag alone without re-encoding a `Value` it never had. Run-scoped, not
 a persistent capability — a run door installs it, so a clone of it has no
-liveness role and can never decide a run is over. A worker does not receive the live sink: its events
-buffer into a `SurfaceBuffer` and are delivered exactly once — replayed through
-the awaiting run's surface on the first `await` / `race`, or handed to the
-session-lived `deferred` sink at the worker's own completion, whichever renders
-first (a shared `joined` latch decides).
+liveness role and can never decide a run is over. A worker does not receive the live sink: its surface is a
+`DeferredSurface` (`types/handle/surface.rs`) that buffers and, under a
+`FlushGuard`, delivers the batch once to the session's `DeferredSink` when the
+worker settles, before its result is sent; a mooring without that sink gives
+its workers no surface
+([[decisions/260622_surface-delivers-itself|surface-delivers-itself]]).
 
 ### Terminal handoff
 

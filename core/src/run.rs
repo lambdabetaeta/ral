@@ -72,7 +72,7 @@ pub struct RunRequest {
     /// Run-local sink for structured events; `None` is the identity.
     pub surface: Option<SurfaceSink>,
     /// Session-lived destination a settling worker delivers its surface batch
-    /// to; `None` leaves it reachable only through `await`/`race`.
+    /// to; `None` drops a worker's surface.
     pub deferred: Option<Arc<dyn DeferredSink>>,
     /// Run-local enquiry desk. Same-thread children inherit it, as they do the
     /// fork door below; deferred workers get neither.

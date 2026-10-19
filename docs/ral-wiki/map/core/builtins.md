@@ -116,8 +116,7 @@ Bodies are grouped by concern, one submodule each:
   verbs of birth, `concurrency/birth.rs` the `Birth` door (`spawn_child`),
   `concurrency/eliminate.rs` the eliminators, `concurrency/tests.rs` the
   tests; the worker's deferred surface and its `FlushGuard` live in
-  `types/handle/surface.rs`, and the `joined` deliver-once cell is a
-  `Latch` whose `claim` one side wins (builtins under their bare names; `par`
+  `types/handle/surface.rs` (builtins under their bare names; `par`
   and the `is-done` predicate are prelude code over them, not builtins). All
   but the host-installed three seed through `CORE_BUILTINS`; those live here
   too but reach a session via `WATCH_BUILTIN` / `SERVICE_BUILTIN` /

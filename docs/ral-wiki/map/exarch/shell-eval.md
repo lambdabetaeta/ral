@@ -251,9 +251,8 @@ never by the decoder or by the seam that records it (`surface::record`):
 The producer is a direct `exarch-surface` call at each kit site, with no cross-language
 sentinel constant. Same-thread children inherit the sink; workers do
 not inherit the live sink. Core buffers their `exarch-surface` calls and flushes a
-settled batch to exarch's deferred sink (the inbox path); without that host
-sink, the ordinary `await`/`race` path replays it into the awaiting run. Either
-path keeps a bus `Emitter` clone from outliving the tool run. Across the
+settled batch to exarch's deferred sink (the inbox path), so no bus `Emitter`
+clone outlives the tool run. Across the
 OS-sandbox
 boundary the events are buffered in the confined child and replayed through the
 parent's sink ([[map/core/capabilities|carried on the IPC response]]), so they

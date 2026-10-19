@@ -34,7 +34,7 @@ mod handle;
 pub(crate) use handle::idle_handle;
 pub(crate) use handle::pins_running_work;
 pub(crate) use handle::surface::{DeferredSurface, FlushGuard};
-pub use handle::{CompletedHandle, HandleInner, HandleState, Latch, SurfaceBuffer};
+pub use handle::{CompletedHandle, HandleInner, HandleState};
 
 // A boundary's checked type, and what a door admits against it.
 mod admit;
@@ -110,7 +110,9 @@ pub use shell::{Bequest, DEFAULT_STACK_LIMIT, LocalState, Runtime, SessionState,
 pub(crate) use shell::{Image, Terms};
 
 pub(crate) use shell::workers::{CapReached, LeaseChain};
-pub use shell::workers::{Done, DoneEvent, ReapCause, ReapNotice, WorkerEntry, WorkerLease};
+pub use shell::workers::{
+    Done, DoneEvent, ReapCause, ReapNotice, WatchEvent, WorkerEntry, WorkerLease,
+};
 
 pub use shell::bindings::{BindingLease, Pruned};
 pub use shell::notice::Notice;

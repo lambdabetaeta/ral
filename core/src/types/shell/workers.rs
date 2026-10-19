@@ -204,6 +204,35 @@ impl DoneEvent {
     }
 }
 
+/// One line of a watched stream, as it crosses the surface channel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WatchEvent {
+    pub label: String,
+    pub line: String,
+}
+
+record!(WatchEvent {
+    label: "label",
+    line: "line",
+});
+
+impl WatchEvent {
+    /// The tag a watched line carries on the surface channel.
+    pub const SURFACE_TAG: &str = "watch";
+
+    pub fn to_surface(self) -> FOValue {
+        tag(Self::SURFACE_TAG, Some(self.encode()))
+    }
+
+    /// Inverse of [`Self::to_surface`]; `None` for any other surface event.
+    pub fn from_surface(v: &FOValue) -> Option<Self> {
+        match untag(v)? {
+            (Self::SURFACE_TAG, Some(body)) => Self::decode(body).ok(),
+            _ => None,
+        }
+    }
+}
+
 /// What a reap leaves for the transcript event, minus the handle it
 /// deliberately does not keep alive.
 ///

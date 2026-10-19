@@ -4,7 +4,7 @@
 use crate::fact::Io;
 use crate::process::WorkerStop;
 use crate::types::{
-    Break, CompletedHandle, Error, ErrorRecord, HandleInner, HandleState, Mooring, Settled, Shell,
+    Break, CompletedHandle, Error, ErrorRecord, HandleInner, HandleState, Settled, Shell,
     ThreadEnd, Value, outcome_value, sig,
 };
 
@@ -28,21 +28,6 @@ pub(crate) fn builtin_cancel(args: &[Value], shell: &Shell) -> Settled<Value> {
     stop_handle(handle);
     shell.local.workers.remove(handle);
     Ok(Value::Unit)
-}
-
-/// Replay a finished worker's buffered surface events through the
-/// awaiting run's *current* surface, once.  Only `await`/`race` call this, so a
-/// polled-but-never-awaited handle emits nothing and a repeat `await` does not
-/// duplicate.
-fn replay_deferred_surface(handle: &HandleInner, completed: &CompletedHandle, mooring: &Mooring) {
-    if !handle.joined.claim() {
-        return;
-    }
-    if let Some(sink) = mooring.surface.as_ref() {
-        for ev in &completed.surface {
-            sink.emit(ev);
-        }
-    }
 }
 
 /// Admit the value a worker settled with against the site its handle was
@@ -123,23 +108,18 @@ fn wait_first_settled<'a>(
     }
 }
 
-/// Block in the foreground until `handle` completes, replay its buffered
-/// surface, and return its result record, re-raising a failed block.
-pub(super) fn await_handle(
-    handle: &HandleInner,
-    mooring: &Mooring,
-    shell: &Shell,
-) -> Settled<Value> {
+/// Block in the foreground until `handle` completes and return its result
+/// record, re-raising a failed block.
+pub(super) fn await_handle(handle: &HandleInner, shell: &Shell) -> Settled<Value> {
     let (_, completed) = wait_first_settled(&[handle], shell)?;
     shell.local.workers.remove(handle);
-    replay_deferred_surface(handle, &completed, mooring);
     project_completed(completed, handle, shell)
 }
 
 /// `await <handle>` -- wait for a concurrent block to complete and return its result record.
-pub(crate) fn builtin_await(args: &[Value], mooring: &Mooring, shell: &Shell) -> Settled<Value> {
+pub(crate) fn builtin_await(args: &[Value], shell: &Shell) -> Settled<Value> {
     let handle = args[0].expect_handle("await")?;
-    await_handle(handle, mooring, shell)
+    await_handle(handle, shell)
 }
 
 /// `poll <handle>` -- non-blocking, total sample of a concurrent block:
@@ -193,7 +173,7 @@ pub(crate) fn builtin_poll(args: &[Value], shell: &Shell) -> Settled<Value> {
 
 /// `race <handles>` -- wait for the first of several blocks to finish, stopping
 /// the rest, then project the winner's outcome as `await` does.
-pub(crate) fn builtin_race(args: &[Value], mooring: &Mooring, shell: &Shell) -> Settled<Value> {
+pub(crate) fn builtin_race(args: &[Value], shell: &Shell) -> Settled<Value> {
     let values: Vec<Value> = args[0]
         .as_list("race")?
         .iter()
@@ -212,7 +192,6 @@ pub(crate) fn builtin_race(args: &[Value], mooring: &Mooring, shell: &Shell) -> 
             shell.local.workers.remove(h);
         }
     }
-    replay_deferred_surface(winner, &completed, mooring);
     project_completed(completed, winner, shell)
 }
 

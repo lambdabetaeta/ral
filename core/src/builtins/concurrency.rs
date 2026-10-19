@@ -6,8 +6,8 @@
 //! deadline or interrupt cannot reach it.  Its bytes are buffered per handle
 //! (surfaced live line by line, for `watch`) and projected out of one cached
 //! [`CompletedHandle`]; its `surface` events are buffered too — the spawning
-//! run may be over — and reach a sink exactly once, by an eliminator's replay
-//! or by the completion delivery, whichever wins the `joined` latch.
+//! run may be over — and delivered once, at completion, to the session's
+//! deferred sink.
 
 mod birth;
 mod eliminate;
@@ -15,7 +15,6 @@ mod eliminate;
 mod tests;
 
 use crate::evaluator::machine;
-use crate::first_order::FOValue;
 use crate::types::{Closure, Mooring, Settled, Shell, Value, sig};
 use birth::{Birth, spawn_child};
 pub(super) use eliminate::{builtin_await, builtin_cancel, builtin_poll, builtin_race};
@@ -60,23 +59,6 @@ pub(crate) fn builtin_spawn(
 }
 
 // ── watch ────────────────────────────────────────────────────────────────
-
-/// One line of a watched stream as the `` `watch [label, line] `` surface.
-fn watch_event(label: &str, line: &[u8]) -> FOValue {
-    let text = |value: String| FOValue::String { value };
-    FOValue::Variant {
-        label: "watch".into(),
-        payload: Some(Box::new(FOValue::Map {
-            entries: vec![
-                ("label".into(), text(label.to_string())),
-                (
-                    "line".into(),
-                    text(String::from_utf8_lossy(line).into_owned()),
-                ),
-            ],
-        })),
-    }
-}
 
 /// `watch <label> <thunk>` -- spawn a concurrent block whose output lines
 /// surface live to the host, each labelled.

@@ -17,7 +17,7 @@ use std::time::Duration;
 ///
 /// `Send + Sync` so a same-thread thunk body may share it with the rest of
 /// the child subtree; a deferred worker never gets the live sink, only a
-/// bounded buffering one it replays on `await`.
+/// bounded buffering one that delivers at completion.
 pub trait EventSink: Send + Sync {
     fn emit(&self, ev: &crate::first_order::FOValue);
 }
@@ -134,18 +134,13 @@ pub enum Fork {
     Seal,
 }
 
-/// Host-installed destination for a deferred worker's surface batch, delivered
-/// when the worker settles.
+/// Host-installed destination for deferred workers' surface.
 ///
-/// Session-lived, unlike [`SurfaceSink`], and cloned into spawned workers so a
-/// nested `spawn` delivers at its own completion. `None` outside an agent
-/// host, where the batch reaches a sink only through `await`/`race`.
+/// Session-lived, unlike [`SurfaceSink`], and cloned into spawned workers. It
+/// receives a settled worker's batch once and a `watch` worker's lines one at
+/// a time; where absent, a worker's surface is dropped.
 pub trait DeferredSink: Send + Sync {
-    /// Deliver a settled worker's surfaced values as one batch.
-    ///
-    /// Deliver-once is the *caller's* discipline: the completion path wins the
-    /// test-and-set on the `joined` latch it shares with the eliminators before
-    /// invoking this, so an implementation cannot forget the latch.
+    /// Deliver surfaced values: a settled worker's whole batch, or one watched line.
     fn deliver(&self, batch: Vec<crate::first_order::FOValue>);
 }
 
@@ -214,9 +209,9 @@ impl Mooring {
     /// cap carry over, so a nested `spawn` is governed alike.  `node` is the
     /// caller's [`worker`](DurableRoot::worker) of the session root: a SIGTERM
     /// reaches it, a Ctrl-C does not.
-    pub(crate) fn for_worker(parent: &Self, node: ScopeNode, surface: SurfaceSink) -> Self {
+    pub(crate) fn for_worker(parent: &Self, node: ScopeNode, surface: Option<SurfaceSink>) -> Self {
         Self {
-            surface: Some(surface),
+            surface,
             deferred: parent.deferred.clone(),
             desk: None,
             fork: None,
