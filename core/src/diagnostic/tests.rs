@@ -9,7 +9,7 @@ fn parse_error_with(message: &str, span: Option<Span>) -> ParseError {
     ParseError {
         message: message.into(),
         span,
-        kind: ParseErrorKind::Plain,
+        kind: ParseErrorKind::Plain { hint: None },
         incomplete: false,
     }
 }

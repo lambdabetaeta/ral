@@ -821,8 +821,11 @@ fn parse_quoted_key_makes_a_map() {
 /// refused with the quoted-key spelling.
 #[test]
 fn parse_colon_then_entries_is_refused() {
-    let err = parse("[:, a: 1, b: 2]").unwrap_err();
-    assert!(err.message.contains("[\"a\": 1, \"b\": 2]"), "{err}");
+    refused_helping(&[(
+        "[:, a: 1, b: 2]",
+        "`[:]` is the empty map",
+        "[\"a\": 1, \"b\": 2]",
+    )]);
 }
 
 /// A tag names a variant, so it keys nothing: not a record, not a map,
@@ -2532,6 +2535,25 @@ fn refused_saying(cases: &[(&str, &str)]) {
     }
 }
 
+/// Every program is refused with the message and the help paired with it.
+fn refused_helping(cases: &[(&str, &str, &str)]) {
+    for (src, said, help) in cases {
+        let err = parse(src).expect_err(src);
+        assert!(
+            err.message.contains(said),
+            "{src:?} must say {said:?}, got: {}",
+            err.message
+        );
+        let ParseErrorKind::Plain { hint: Some(hint) } = &err.kind else {
+            panic!("{src:?} must offer help, got: {err:?}");
+        };
+        assert!(
+            hint.contains(help),
+            "{src:?} must help with {help:?}, got: {hint}"
+        );
+    }
+}
+
 /// A closer that closes nothing open is the lexer's definite error, so the
 /// REPL does not wait for the line that cannot repair it.
 #[test]
@@ -2680,6 +2702,11 @@ fn an_entry_that_runs_a_command_says_how() {
         ("[k: let x = 1]", Binding),
         ("[1 2]", Value),
         ("within [dir: pwd -P] { ls }", Command),
+        ("[a | b]", Command),
+        ("[k: $x | f]", Command),
+        ("[a ? b]", Command),
+        ("[a > f]", Command),
+        ("[1 | 2]", Value),
     ] {
         let err = parse(src).expect_err(src);
         let ParseErrorKind::EntryRuns { reading, .. } = err.kind else {
@@ -2708,19 +2735,21 @@ fn a_glued_equals_in_a_binding_says_to_space_it() {
 
 #[test]
 fn a_key_with_its_colon_glued_to_its_value_says_to_space_it() {
-    refused_saying(&[
+    refused_helping(&[
         (
             "echo [host:\"h\"]",
-            "`host:` is one word; for the key `host`, put a space after the colon: \
-             `host: value`",
+            "`host:` is one word",
+            "for the key `host`, put a space after the colon: `host: value`",
         ),
         (
             "echo [a: 1, port:$p]",
-            "`port:` is one word; for the key `port`",
+            "`port:` is one word",
+            "for the key `port`",
         ),
         (
             "within [dir:$d] { a }",
-            "`dir:` is one word; for the key `dir`",
+            "`dir:` is one word",
+            "for the key `dir`",
         ),
     ]);
     assert!(parse("echo [http://x, y]").is_ok());
@@ -2762,4 +2791,63 @@ fn a_forced_variable_touching_an_atom_is_reported_whole() {
     };
     let src = "f !$x'a'";
     assert_eq!(&src[first.start as usize..first.end as usize], "!$x");
+}
+
+/// Every refusal of a bracket's syntax says, in its help, what to write.
+#[test]
+fn a_misshapen_bracket_says_what_to_write() {
+    refused_helping(&[
+        ("[,]", "this `,` follows no entry", "remove the extra `,`"),
+        (
+            "[a,, b]",
+            "this `,` follows no entry",
+            "remove the extra `,`",
+        ),
+        (
+            "[a; b]",
+            "expected `,` or `]` after the entry",
+            "separate each entry from the next with `,`",
+        ),
+        (
+            "let [a: x; b: y] = $r",
+            "expected `,` or `]` after the entry",
+            "`[a: x, b: y]`",
+        ),
+        (
+            "case $x [`a: { |v| 1 } `b: { |v| 2 }]",
+            "expected `,` or `]` after the `case` arm",
+            "separate each `case` arm from the next with `,`",
+        ),
+        (
+            "let [x | xs] = $l",
+            "`|` does not split a list pattern",
+            "`[head, ...rest]`",
+        ),
+        ("[a:]", "this key has no value", "`[name: 1]`"),
+        ("[a: , b: 1]", "this key has no value", "`[name: 1]`"),
+        (
+            "echo name: 1",
+            "`:` stands only between a key and its value, inside `[ ]`",
+            "for a record, write `[name: …]`; for text, quote it: `'name:'`",
+        ),
+        ("let r = name: 1", "inside `[ ]`", "`[name: …]`"),
+        ("[a, : 1]", "inside `[ ]`", "write a key before it"),
+        (
+            "[1, a: 2]",
+            "this entry has no key",
+            "or drop every key to make a list",
+        ),
+        ("[a: 1, 2]", "this entry has no key", "`name: value`"),
+        ("[42: 1]", "`42` is a number", "`'42': value`"),
+        (
+            "[k: 1, ...$r]",
+            "a record's spread comes first",
+            "`[...$r, k: v]`",
+        ),
+        (
+            "let [a, ...] = $x",
+            "needs a name after it",
+            "`[x, ...rest]`",
+        ),
+    ]);
 }

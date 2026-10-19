@@ -1,0 +1,4 @@
+# codes: P0001
+# contains: expected `,` or `]` after the entry
+# contains: Help: separate each entry from the next with `,`
+let xs = [a; b]

@@ -88,7 +88,8 @@ byte indexing (`IndexType::Byte`) so a `Span` is the label's own coordinate;
 last char, so every label is drawable. With no primary label, `Report::plain`
 is the compact one-liner. The builders sit with their errors:
 `ParseError::report` in `syntax/report.rs` (the `L000x` messages come from
-`LexErrorKind::headline` alone), `TypeError::report` in
+`LexErrorKind::headline` alone; a plain `P0001` carries its own help, the
+message saying what is wrong and the help what to write), `TypeError::report` in
 `typecheck/explain.rs`, and `Error::render` / `Error::compact`
 (`types/error.rs`, resolving the error's `Span` against a `SourceDb`).
 

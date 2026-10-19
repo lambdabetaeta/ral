@@ -72,8 +72,8 @@ exceptions that must *touch*: `^ ls` is an error naming `^ls`, not a spacing.
 
 **A collection entry is one atom.** A list element, an entry's value, a
 spread and an option are value contexts, read by `parse_entry_value`; a second
-atom after the first is an application written where `!{…}` belongs, or a
-missing `,`. It is refused as P0003 over the run up to the next `,` or `]`,
+atom after the first, or a `|`, `?` or redirect, is a command written where
+`!{…}` belongs, or a missing `,`. It is refused as P0003 over the run up to the next `,` or `]`,
 the help choosing its readings by the first token (`EntryReading`): `if`
 wants `!{if …}`, a `let` wants hoisting before the collection, a command head offers `!{…}` or a `,`, any other value
 only the `,`.

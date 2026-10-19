@@ -1,0 +1,3 @@
+# codes: P0003
+# contains: Help: `ls | wc` runs a command: write `!{ls | wc}`, or, if these are separate entries, put `,` between them
+let counts = [ls | wc]

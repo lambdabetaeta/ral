@@ -17,25 +17,27 @@ impl ParseError {
     /// Two labels where the failure's structure gives two; otherwise one red
     /// label on the offending token, or on the end of input.
     pub fn report(&self, src: &Source) -> Report {
+        let plain = |hint: Option<&String>| Report {
+            code: Some("P0001"),
+            message: self.message.clone(),
+            at: Some(label(self.span, "here")),
+            also: None,
+            hint: hint.cloned(),
+        };
         match &self.kind {
-            ParseErrorKind::Lex(kind) => lex_report(src, kind, self.span),
+            ParseErrorKind::Lex(kind) => {
+                lex_report(src, kind, self.span).unwrap_or_else(|| plain(None))
+            }
             ParseErrorKind::Touching { first, second, run } => {
-                Some(self.touching(src, *first, *second, *run))
+                self.touching(src, *first, *second, *run)
             }
             ParseErrorKind::EntryRuns {
                 entry,
                 head,
                 reading,
-            } => Some(self.entry_runs(src, *entry, *head, reading)),
-            ParseErrorKind::Plain => None,
+            } => self.entry_runs(src, *entry, *head, reading),
+            ParseErrorKind::Plain { hint } => plain(hint.as_ref()),
         }
-        .unwrap_or_else(|| Report {
-            code: Some("P0001"),
-            message: self.message.clone(),
-            at: Some(label(self.span, "here")),
-            also: None,
-            hint: None,
-        })
     }
 
     /// Two touching atoms, with both readings spelled out in the help.

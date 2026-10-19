@@ -44,10 +44,14 @@ pub struct ParseError {
     pub(crate) incomplete: bool,
 }
 
-/// The structure the diagnostic layer needs to draw more than one label.
+/// What the diagnostic layer draws beyond the message: a plain error's help,
+/// or the structure behind a second label and a help built from the source.
 #[derive(Debug, Clone)]
 pub(crate) enum ParseErrorKind {
-    Plain,
+    /// One label on the offending token, and the repair where one is known.
+    Plain {
+        hint: Option<String>,
+    },
     Lex(LexErrorKind),
     /// Two atoms with nothing between them: the unit before, the first atom
     /// after it, and the whole touching run.
@@ -56,8 +60,8 @@ pub(crate) enum ParseErrorKind {
         second: Span,
         run: Span,
     },
-    /// An entry whose value is followed by more: the would-be application
-    /// up to the next `,` or `]`, and the value it opens with.
+    /// An entry whose value is followed by more: the would-be command up to
+    /// the next `,` or `]`, and the value it opens with.
     EntryRuns {
         entry: Span,
         head: Span,
@@ -96,8 +100,20 @@ impl ParseError {
         Self {
             message: message.into(),
             span,
-            kind: ParseErrorKind::Plain,
+            kind: ParseErrorKind::Plain { hint: None },
             incomplete: false,
+        }
+    }
+
+    /// The repair a plain error's help line offers: what to write instead,
+    /// shown as code wherever it can be.
+    pub(crate) fn with_hint(self, hint: impl Into<String>) -> Self {
+        debug_assert!(matches!(self.kind, ParseErrorKind::Plain { hint: None }));
+        Self {
+            kind: ParseErrorKind::Plain {
+                hint: Some(hint.into()),
+            },
+            ..self
         }
     }
 
@@ -181,11 +197,43 @@ enum KeyAlphabet {
     Data,
 }
 
-/// Loop-body verdict for [`Parser::parse_separated_until`]: keep going after
+/// Loop-body verdict for [`Parser::parse_bracket_items`]: keep going after
 /// this item, or treat it as the last one.
 enum SepFlow {
     Cont,
     Stop,
+}
+
+/// The bracket [`Parser::parse_bracket_items`] is reading, which names its
+/// items and shows them separated.
+#[derive(Clone, Copy)]
+enum Bracketed {
+    Collection,
+    Options,
+    CaseArms,
+    ListPattern,
+    MapPattern,
+}
+
+impl Bracketed {
+    fn item(self) -> &'static str {
+        match self {
+            Self::Collection | Self::MapPattern => "entry",
+            Self::Options => "option",
+            Self::CaseArms => "`case` arm",
+            Self::ListPattern => "element",
+        }
+    }
+
+    fn example(self) -> &'static str {
+        match self {
+            Self::Collection => "`[a, b]` or `[a: 1, b: 2]`",
+            Self::Options => "`[a: 1, b: 2]`",
+            Self::CaseArms => "[`ok: { |v| … }, `err: { |e| … }]",
+            Self::ListPattern => "`[x, y]`",
+            Self::MapPattern => "`[a: x, b: y]`",
+        }
+    }
 }
 
 /// A control operator's operands for the arity message: how many it takes,
@@ -378,27 +426,37 @@ impl Parser {
         Ok(Spanned::new(span, item))
     }
 
-    /// Drive a comma-separated list terminated by `end`, with a trailing comma
-    /// allowed.  `label` names the construct in the missing-separator error.
-    fn parse_separated_until(
+    /// Drive the comma-separated items of a bracket whose `[` is consumed, up
+    /// to and including its `]`, with a trailing comma allowed.
+    fn parse_bracket_items(
         &mut self,
-        end: &Token,
-        label: &str,
+        what: Bracketed,
         mut item: impl FnMut(&mut Self) -> Result<SepFlow, ParseError>,
     ) -> Result<(), ParseError> {
         loop {
-            if self.eat(end) {
+            if self.eat(&Token::RBracket) {
                 return Ok(());
+            }
+            if self.peek() == &Token::Comma {
+                return Err(self
+                    .error(format!("this `,` follows no {}", what.item()))
+                    .with_hint("remove the extra `,`"));
             }
             match item(self)? {
                 SepFlow::Cont => {
-                    if !self.eat(&Token::Comma) && self.peek() != end {
-                        return Err(self.error(format!("expected ',' or '{end}' in {label}")));
+                    if !self.eat(&Token::Comma) && self.peek() != &Token::RBracket {
+                        return Err(self
+                            .error(format!("expected `,` or `]` after the {}", what.item()))
+                            .with_hint(format!(
+                                "separate each {} from the next with `,`, as in {}",
+                                what.item(),
+                                what.example()
+                            )));
                     }
                 }
                 SepFlow::Stop => {
                     self.eat(&Token::Comma);
-                    self.expect(end)?;
+                    self.expect(&Token::RBracket)?;
                     return Ok(());
                 }
             }
@@ -691,7 +749,7 @@ impl Parser {
             )));
         }
         let mut items = Vec::new();
-        self.parse_separated_until(&Token::RBracket, "the options", |p| {
+        self.parse_bracket_items(Bracketed::Options, |p| {
             items.push(p.parse_collection_item()?);
             Ok(SepFlow::Cont)
         })?;
@@ -855,7 +913,7 @@ impl Parser {
             ));
         }
         let mut arms: Vec<CaseArm> = Vec::new();
-        self.parse_separated_until(&Token::RBracket, "`case` arms", |p| {
+        self.parse_bracket_items(Bracketed::CaseArms, |p| {
             let arm = p.parse_case_arm()?;
             if let Some(prev) = arms.iter().find(|a| a.tag.item == arm.tag.item) {
                 let label = &arm.tag.item;
@@ -1152,32 +1210,40 @@ impl Parser {
         let mut elems = Vec::new();
         let mut rest = None;
 
-        self.parse_separated_until(&Token::RBracket, "list pattern", |p| {
+        self.parse_bracket_items(Bracketed::ListPattern, |p| {
             // `...name` is terminal: `SepFlow::Stop` is what forbids elements
             // after it.
             if p.eat(&Token::Spread) {
                 p.attached(SPREAD_ATTACHES)?;
                 let Token::Word(Word::Plain(name)) = p.peek().clone() else {
-                    return Err(p.error("expected name after '...'"));
+                    return Err(p
+                        .error("`...` in a pattern needs a name after it")
+                        .with_hint("name the rest: `[x, ...rest]`"));
                 };
                 if is_reserved(&name) {
                     return Err(p.error(crate::syntax::reserved_keyword_message(&name)));
                 }
                 if !lexer::is_ident(&name) {
-                    return Err(p.error(
-                        "rest pattern `...name` needs a plain identifier after the dots, \
-                         e.g. `...rest`",
-                    ));
+                    return Err(p
+                        .error("a rest pattern binds a plain name")
+                        .with_hint("write a name after the dots, as in `...rest`"));
                 }
                 p.advance();
                 let closes = |ahead| p.peek_at(ahead) == &Token::RBracket;
                 if !(closes(0) || p.peek() == &Token::Comma && closes(1)) {
-                    return Err(p.error("`...rest` takes the remaining elements, so it comes last"));
+                    return Err(p
+                        .error("`...rest` takes the remaining elements, so it comes last")
+                        .with_hint("move it to the end: `[x, ...rest]`"));
                 }
                 rest = Some(name.into());
                 return Ok(SepFlow::Stop);
             }
             elems.push(p.parse_pattern()?);
+            if p.peek() == &Token::Pipe {
+                return Err(p
+                    .error("`|` does not split a list pattern")
+                    .with_hint("bind the rest with `...`, as in `[head, ...rest]`"));
+            }
             Ok(SepFlow::Cont)
         })?;
 
@@ -1187,7 +1253,7 @@ impl Parser {
     fn parse_map_pattern(&mut self) -> Result<Pattern, ParseError> {
         let mut entries = Vec::new();
 
-        self.parse_separated_until(&Token::RBracket, "map pattern", |p| {
+        self.parse_bracket_items(Bracketed::MapPattern, |p| {
             let (key_span, key) = p.capture_span(Self::parse_static_key)?;
             // Parsed keys, not token spellings: `[a: x, 'a': y]` repeats and
             // `[a: [a: x]]` does not.  A record has one value per field, so a
@@ -1196,11 +1262,11 @@ impl Parser {
             if entries.iter().any(|e: &MapPatternEntry| e.key == key) {
                 return Err(ParseError::new(
                     Some(key_span),
-                    format!(
-                        "this pattern binds '{key}' twice, and a record has one value per \
-                         field: keep whichever '{key}' you meant"
-                    ),
-                ));
+                    format!("this pattern binds '{key}' twice"),
+                )
+                .with_hint(format!(
+                    "a record has one value per field: keep whichever '{key}' you meant"
+                )));
             }
             p.expect(&Token::Colon)?;
             let pattern = p.parse_pattern()?;
@@ -1223,13 +1289,19 @@ impl Parser {
                 self.advance();
                 Ok(k)
             }
-            Token::Tag(label) => Err(self.error(format!(
-                "`` `{label} `` names a variant, so it cannot be a key: a tag says \
-                 *which of* several alternatives, and a key says *which part of* one \
-                 value. Write the field as `{label}`, or, if these are the arms of a \
-                 match, write them as case $x [`{label}: {{ |p| … }}, …]."
-            ))),
-            _ => Err(self.error("expected a key: a name or a 'quoted string'")),
+            Token::Tag(label) => Err(self
+                .error(format!(
+                    "`` `{label} `` names a variant, so it cannot be a key: a tag says \
+                     *which of* several alternatives, and a key says *which part of* one \
+                     value"
+                ))
+                .with_hint(format!(
+                    "write the field as `{label}`, or, if these are the arms of a match, \
+                     write them as case $x [`{label}: {{ |p| … }}, …]"
+                ))),
+            _ => Err(self
+                .error("expected a key")
+                .with_hint("a key is a name or a 'quoted string', as in `[name: x]`")),
         }
     }
 
@@ -1253,12 +1325,14 @@ impl Parser {
                 p.advance();
                 Ok(Ast::Variable(name))
             })?)),
-            Token::Word(Word::Plain(k)) if WordLiteral::classify(&k).is_some() => Err(self.error(
-                "map keys must be identifiers or quoted strings, not numbers; use '0': val",
+            Token::Word(Word::Plain(k)) if WordLiteral::classify(&k).is_some() => Err(self
+                .error(format!(
+                    "`{k}` is a number, and a key is a name or a string"
+                ))
+                .with_hint(format!("quote it: `'{k}': value`"))),
+            _ => Err(self.error("expected a key").with_hint(
+                "a key is a name, a 'quoted string', a \"string\" or `$var`, as in `[name: 1]`",
             )),
-            _ => {
-                Err(self.error("expected a key: a name, a 'quoted string', a \"string\", or $var"))
-            }
         }
     }
 
@@ -1606,6 +1680,7 @@ impl Parser {
                 parse_expr_block(tokens, at)
             }
             Token::Caret => Err(self.error("'^name' is only valid in command-head position")),
+            Token::Colon => Err(self.stray_colon()),
             Token::Bang => self.parse_bang(),
             Token::Tag(label) => {
                 self.advance();
@@ -1619,6 +1694,23 @@ impl Parser {
             }
             _ => Err(self.error(format!("unexpected token: {}", self.peek()))),
         }
+    }
+
+    /// A `:` where a value belongs: a `key: value` entry outside `[ ]`, or
+    /// one whose key is missing — and, as in `echo name: 1`, perhaps text.
+    fn stray_colon(&self) -> ParseError {
+        let key = match self.pos.checked_sub(1).map(|i| &self.tokens[i].token) {
+            Some(Token::Word(Word::Plain(k))) if lexer::is_ident(k) => Some(k),
+            _ => None,
+        };
+        let hint = match key {
+            Some(k) => format!("for a record, write `[{k}: …]`; for text, quote it: `'{k}:'`"),
+            None => {
+                "write a key before it, as in `[name: 1]`, or quote a literal colon: `':'`".into()
+            }
+        };
+        self.error("`:` stands only between a key and its value, inside `[ ]`")
+            .with_hint(hint)
     }
 
     /// Separators and closers, at which a backtick tag stays nullary.  It is
@@ -1735,15 +1827,16 @@ impl Parser {
             if self.eat(&Token::RBracket) {
                 return Ok(Ast::Map(vec![]));
             }
-            return Err(self.error(
-                "`[:]` is the empty map, and the only literal that opens with `:`; a map \
-                 on written keys quotes them, `[\"a\": 1, \"b\": 2]`: a \"quoted\" key is \
-                 data, where a bare `a:` or `'a':` is a record's label",
-            ));
+            return Err(self
+                .error("`[:]` is the empty map, and the only literal that opens with `:`")
+                .with_hint(
+                    "a map on written keys quotes them, `[\"a\": 1, \"b\": 2]`: a \"quoted\" \
+                     key is data, where a bare `a:` or `'a':` is a record's label",
+                ));
         }
 
         let mut items = Vec::new();
-        self.parse_separated_until(&Token::RBracket, "collection", |p| {
+        self.parse_bracket_items(Bracketed::Collection, |p| {
             items.push(p.parse_collection_item()?);
             Ok(SepFlow::Cont)
         })?;
@@ -1762,6 +1855,13 @@ impl Parser {
         if self.key_colon_here(KeyAlphabet::Data) {
             let key = self.parse_map_key()?;
             self.expect(&Token::Colon)?;
+            if matches!(self.peek(), Token::Comma | Token::RBracket) {
+                return Err(ParseError::new(
+                    Some(self.prev_byte_span()),
+                    "this key has no value after its `:`",
+                )
+                .with_hint("write the value after the `:`, as in `[name: 1]`"));
+            }
             return Ok(CollectionItem::Entry {
                 key,
                 value: self.parse_entry_value()?,
@@ -1771,20 +1871,22 @@ impl Parser {
             && let Some(key) = word.strip_suffix(':')
             && self.touches_next()
         {
-            return Err(self.error(format!(
-                "`{word}` is one word; for the key `{key}`, put a space after the \
-                 colon: `{key}: value`"
-            )));
+            return Err(self
+                .error(format!("`{word}` is one word"))
+                .with_hint(format!(
+                    "for the key `{key}`, put a space after the colon: `{key}: value`"
+                )));
         }
         Ok(CollectionItem::Elem(self.parse_entry_value()?))
     }
 
-    /// An entry is one atom: a command written as one is refused with the
-    /// readings it may have meant.
+    /// An entry is one atom: a command written as one — arguments, a pipe, a
+    /// `?` or a redirect after its first value — is refused with the readings
+    /// it may have meant.
     fn parse_entry_value(&mut self) -> Result<Spanned<Ast>, ParseError> {
         let first = self.pos;
         let (head, value) = self.capture_span(Self::parse_atom)?;
-        if !is_atom_start(self.peek()) {
+        if !continues_command(self.peek()) {
             return Ok(Spanned::new(head, value));
         }
         let entry = head.join(self.entry_end());
@@ -2062,8 +2164,11 @@ const SPREAD_ATTACHES: &str = "`...` attaches to the value it spreads: write `..
 
 const SPREAD_NEEDS_A_VALUE: &str = "`...` spreads the value after it: write `...$xs`";
 
-const KEYED_ELEM_ERROR: &str = "this collection has `key: value` entries, so every entry \
-     needs a key: or drop the keys to make it a list";
+/// An entry without a key among entries with one.
+fn unkeyed_entry(at: Option<Span>) -> ParseError {
+    ParseError::new(at, "this entry has no key, but others in the same `[ ]` do")
+        .with_hint("give it one, as in `name: value`, or drop every key to make a list")
+}
 
 /// A bracket literal as its items arrive. Each item lifts it to at least its
 /// own kind along list < record < map, so no item meets a kind already ruled out.
@@ -2089,7 +2194,7 @@ impl Literal {
                     .into_iter()
                     .map(|elem| match elem {
                         ListElem::Spread(a) => Ok(RecordEntry::Spread(a)),
-                        ListElem::Single(a) => Err(ParseError::new(a.span, KEYED_ELEM_ERROR)),
+                        ListElem::Single(a) => Err(unkeyed_entry(a.span)),
                     })
                     .collect::<Result<_, _>>()?;
                 Self::Record(items).push(entry)
@@ -2121,9 +2226,7 @@ impl Literal {
                     .collect();
                 Self::Map(entries).push(entry)
             }
-            (Self::Record(_) | Self::Map(_), CollectionItem::Elem(a)) => {
-                Err(ParseError::new(a.span, KEYED_ELEM_ERROR))
-            }
+            (Self::Record(_) | Self::Map(_), CollectionItem::Elem(a)) => Err(unkeyed_entry(a.span)),
             (Self::Map(mut entries), CollectionItem::Spread(a)) => {
                 entries.push(MapEntry::Spread(a));
                 Ok(Self::Map(entries))
@@ -2161,18 +2264,20 @@ fn record_literal(entries: Vec<RecordEntry>) -> Result<Ast, ParseError> {
     if let Some((_, second)) = spreads.next() {
         return Err(ParseError::new(
             second.span,
-            "a record can be written over one other record, not two: \
-             write out the fields you need from this one, as in \
+            "a record can be written over one other record, not two",
+        )
+        .with_hint(
+            "write out the fields you need from this one, as in \
              `[...$base, y: $other[y]]`, or merge them in a block",
         ));
     }
     if let Some((i, spread)) = first
         && i > 0
     {
-        return Err(ParseError::new(
-            spread.span,
-            "a record's spread comes first: `[...$r, k: v]`",
-        ));
+        return Err(
+            ParseError::new(spread.span, "a record's spread comes first")
+                .with_hint("move it before the fields: `[...$r, k: v]`"),
+        );
     }
     Ok(Ast::Record(entries))
 }
@@ -2220,6 +2325,16 @@ fn parse_expr_block(tokens: Vec<Lexeme>, at: Span) -> Result<Ast, ParseError> {
         |found| format!("expected an operator before {found}: `$[…]` holds one expression"),
         |p| Ok(*p.parse_expr_prec(0)?.item),
     )
+}
+
+/// What may follow a command's first word: an argument, or what hands its
+/// result on.
+fn continues_command(tok: &Token) -> bool {
+    is_atom_start(tok)
+        || matches!(
+            tok,
+            Token::Pipe | Token::Question | Token::Redirect { .. } | Token::StderrToStdout
+        )
 }
 
 /// The tokens an atom may begin with.

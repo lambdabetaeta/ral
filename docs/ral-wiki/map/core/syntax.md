@@ -50,9 +50,15 @@ sees raw bytes and bare words.
   alike, since a tag keys nothing. The items are read in one pass, each
   lifting the literal to at least its own kind, so no token-level lookahead has
   to skip a spread's nested brackets. Every item is one atom
-  (`parse_entry_value`): a command written as one is P0003
-  (`ParseErrorKind::EntryRuns`), whose help `syntax/report.rs` draws from
-  `EntryReading`. The `$[…]`
+  (`parse_entry_value`): a command written as one — an argument, `|`, `?` or
+  redirect after the value — is P0003 (`ParseErrorKind::EntryRuns`), whose
+  help `syntax/report.rs` draws from `EntryReading`. Every other refusal of a
+  bracket's shape is a P0001 whose help shows what to write
+  (`ParseErrorKind::Plain { hint }`, set by `ParseError::with_hint`):
+  `parse_bracket_items` reads the items of every `[…]` — literal, options,
+  `case` arms, list and map pattern — and names them (`Bracketed`) when a `,`
+  is missing or extra; `stray_colon` catches a `key: value` written outside
+  `[ ]`. The `$[…]`
   body is a Pratt parser whose operands are
   `parse_atom`'s atoms, plus `(…)` grouping and the prefixes `-` and `not`;
   an operator in operand position, or two operands with no operator between

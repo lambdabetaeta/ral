@@ -1,0 +1,4 @@
+# codes: P0001
+# contains: this key has no value after its `:`
+# contains: Help: write the value after the `:`
+let r = [a: , b: 1]

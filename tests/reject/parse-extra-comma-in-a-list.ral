@@ -1,0 +1,4 @@
+# codes: P0001
+# contains: this `,` follows no entry
+# contains: Help: remove the extra `,`
+let xs = [a,, b]

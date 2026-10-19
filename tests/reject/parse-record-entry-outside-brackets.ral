@@ -1,0 +1,4 @@
+# codes: P0001
+# contains: `:` stands only between a key and its value, inside `[ ]`
+# contains: Help: for a record, write `[name: …]`; for text, quote it: `'name:'`
+echo name: 1

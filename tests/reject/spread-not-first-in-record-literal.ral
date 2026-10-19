@@ -1,3 +1,4 @@
-# contains: a record's spread comes first: `[...$r, k: v]`
+# contains: a record's spread comes first
+# contains: Help: move it before the fields: `[...$r, k: v]`
 let r = [a: 1]
 return [k: 2, ...$r]
