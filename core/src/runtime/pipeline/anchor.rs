@@ -9,6 +9,8 @@
 /// outright, so the anchor never stops and never needs resuming.
 #[cfg(unix)]
 pub(crate) fn serve() -> u8 {
+    use std::io::Write;
+
     crate::uutils::init_signal_dispositions();
     for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT] {
         unsafe {
@@ -20,6 +22,16 @@ pub(crate) fn serve() -> u8 {
             libc::signal(sig, libc::SIG_IGN);
         }
     }
+    // Zero admits the terminal loan only after every handler is installed.
+    let mut report = std::io::stdout().lock();
+    if report
+        .write_all(&[0])
+        .and_then(|()| report.flush())
+        .is_err()
+    {
+        return 1;
+    }
+    drop(report);
     let _ = std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink());
     0
 }

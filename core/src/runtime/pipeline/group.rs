@@ -133,7 +133,7 @@ impl AnchorProcess {
         cmd.stdin(crate::process::StdioSpec::from_pipe_reader(reader));
         cmd.stderr(crate::process::StdioSpec::null());
         #[cfg(unix)]
-        let report = {
+        let mut report = {
             let (report, writer) =
                 crate::process::cloexec_pipe().map_err(|e| Error::io("pipeline anchor", &e))?;
             cmd.stdout(crate::process::StdioSpec::from_pipe_writer(writer));
@@ -144,6 +144,7 @@ impl AnchorProcess {
         let (mut child, leader, _jail) = cmd
             .spawn(PgidPolicy::NewLeader)
             .map_err(|e| Error::io("pipeline anchor", &e))?;
+        drop(cmd);
         if shell.has_active_capabilities() {
             command::brake(&mut child, PgidPolicy::NewLeader, leader)?;
         }
@@ -155,6 +156,24 @@ impl AnchorProcess {
         };
         #[cfg(unix)]
         let (child, reporter) = {
+            use std::io::{ErrorKind, Read};
+
+            let mut ready = [0u8; 1];
+            let readiness = report.read_exact(&mut ready).and_then(|()| {
+                if ready == [0] {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::new(
+                        ErrorKind::InvalidData,
+                        "expected the anchor's readiness byte",
+                    ))
+                }
+            });
+            if let Err(e) = readiness {
+                let _ = child.kill();
+                let _ = child.reap();
+                return Err(Error::io("pipeline anchor did not become ready", &e).into());
+            }
             let report_tx = tx.clone();
             let reporter = std::thread::Builder::new()
                 .name("ral pipeline anchor report reader".to_string())
@@ -293,13 +312,6 @@ mod tests {
         let shell = crate::test_helper::core_shell();
         let (tx, rx) = std::sync::mpsc::channel();
         let group = PipelineGroup::prepare(&shell, tx).expect("anchor spawns");
-        assert!(
-            rx.recv_timeout(std::time::Duration::from_millis(200))
-                .is_err(),
-            "an unsignalled anchor must report nothing"
-        );
-        // Past the window between the anchor's exec and its handler install.
-        std::thread::sleep(std::time::Duration::from_millis(300));
         for signal in [libc::SIGINT, libc::SIGTERM] {
             group
                 .leader_pgid()
@@ -310,5 +322,6 @@ mod tests {
                 None => panic!("signal {signal} was never reported"),
             }
         }
+        assert!(rx.try_recv().is_err(), "readiness is not a signal report");
     }
 }

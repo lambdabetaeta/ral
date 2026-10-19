@@ -1,5 +1,5 @@
 ---
-generated_at_commit: d834a9da
+generated_at_commit: 3bf43d16fc35212e3a3b354a91ffa2fcac136724
 generated_at_date: 2026-10-19
 covers_paths: [core/src/builtins/, core/src/builtins.rs, core/src/uutils.rs]
 ---
@@ -244,8 +244,11 @@ Bodies are grouped by concern, one submodule each:
   registries, never the caller's block. `LANGUAGE_DOCS` gives every parser
   keyword and Boolean literal a standalone guide; a completeness test pairs
   that table with `CONTROL_OPERATORS`, `FLOW_KEYWORDS`, and
-  `LANGUAGE_CONSTANTS`, so new syntax cannot land undocumented. The `grant`
-  guide owns the capability schema and examples of exclusions and computed
+  `LANGUAGE_CONSTANTS`, so new syntax cannot land undocumented. `LANGUAGE_GUIDES`
+  adds reference topics to the same lookup and index, including `redirects`.
+  `within` owns handler and option restrictions, and `return` covers host
+  configuration records; `try` details the error record's optional source
+  location. The `grant` guide owns the capability schema and examples of exclusions and computed
   paths; the agent prompt points here for those details. One `Where`
   answers both halves of a resolved command entry: the line naming the frame
   that would run, and the doc ladder that asks *that* registry — a session

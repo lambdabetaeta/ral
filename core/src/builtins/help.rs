@@ -25,7 +25,8 @@ static LANGUAGE_DOCS: &[(&str, &str)] = &[
         "audit { body }  — run a block and return its outcome and a structured trail instead of failing.\n\n\
          The result is `[outcome: `ok value | `err error, trail: observations]`. The trail records commands, reads, writes, workers, host acts, and denied capability checks performed by the body. Each command observation keeps `argv`, `status`, `stdout`, `stderr`, and total byte counts; each stream retains at most 1 MiB.\n\n\
          Use `succeeded $report` for a Boolean and `commands $report` for just the command observations. Inspect a failure with `case $report[outcome] [...]`. Output still flows to the surrounding pipe or redirect while it is recorded.\n\n\
-         Example:\n  let report = audit { grep -c ERROR app.log }\n  if !{succeeded $report} { bytes-to-string !{commands $report}[0][stdout] } else { 'no matches' }",
+         An uncaught failure stops the body; wrap individual calls in `attempt` when later calls should still run.\n\n\
+         Example:\n  let report = audit { grep -c ERROR app.log }\n  case $report[outcome] [\n    `ok: { |_| bytes-to-string !{commands $report}[0][stdout] },\n    `err: { |e|\n      if $[$e[reason] == `exited 1] { 'no matches' } else { fail $e }\n    }\n  ]",
     ),
     (
         "case",
@@ -81,6 +82,7 @@ static LANGUAGE_DOCS: &[(&str, &str)] = &[
         "return",
         "return [value]  — finish successfully with a value; without one, return `()`.\n\n\
          `return` constructs a successful computation; it does not exit the process and does not escape an enclosing function early. A block's result is the final computation it runs, so `return` is most useful when lifting data explicitly or returning unit from an otherwise empty path.\n\n\
+         In an rc file, plugin manifest, or capability profile whose terminal result a host checks against a fixed keyset, return a record: `return [edit-mode: 'vi']`. A misspelled key is a type error before the file runs. `return [\"edit-mode\": 'vi']` is a map, and `[]` is a list; neither is a configuration record. A file with nothing to set returns `()`.\n\n\
          Example:\n  let twice = { |n| return $[$n * 2] }",
     ),
     (
@@ -91,16 +93,27 @@ static LANGUAGE_DOCS: &[(&str, &str)] = &[
     (
         "try",
         "try { body } { |error| handler }  — recover from a failure raised while running body.\n\n\
-         On success, return the body's value without running the handler. On failure, call the handler with `[cmd, status, reason, message, site]`; branch on `reason`, and use `fail $error` to re-raise. Body and handler must return compatible results. Output is not captured: use `audit` when stdout, stderr, or the full trail is needed. Exits and internal control escapes bypass the handler.\n\n\
+         On success, return the body's value without running the handler. On failure, call the handler with a record with fields `cmd`, `status`, `reason`, `message`, and `site`; branch on `reason`, and use `fail $error` to re-raise. `site` is `some` carrying a record with fields `script`, `line`, and `col`, or `none` when no source location is available. Body and handler must return compatible results. Output is not captured: use `audit` when stdout, stderr, or the full trail is needed. Exits and internal control escapes bypass the handler.\n\n\
          Example:\n  try { from-string < config.txt } { |error|\n    warn \"config: $error[message]\"\n    return #'{}'#\n  }",
     ),
     (
         "within",
         "within [options] { body }  — run a block with temporary shell context.\n\n\
          Options are `dir: path`, `env: map`, `handlers: [name: handler, ...]`, and `handler: catch-all`. `dir` changes the logical working directory; `env` overlays variables, with `unset removing one. Named handlers receive the command's argument list. The catch-all receives the unresolved command name and then its argument list. Options compose, and the previous context returns when the body finishes.\n\n\
+         The outer brackets are syntax: write option names in place, with computed values such as `within [dir: $d] { ... }`. A bound option bundle or spread is a parse error; a misspelled option is a static error. `[]` and `[:]` both name no options.\n\n\
+         Write the `handlers:` table in place too: its names are bound in the body, so a bound table or spread is a parse error. Each entry is a one-argument block or a name holding one. The catch-all `handler:` is ordinary data: a two-argument function, written inline or bound, that intercepts every external command reached by a bare name. `^name` bypasses handlers and runs the binary. A handler is a stub, not a sandbox.\n\n\
          Example:\n  within [\n    dir: project,\n    env: [MODE: 'test', TOKEN: `unset],\n    handlers: [notify: { |args| echo ...$args }],\n  ] {\n    notify building\n    make check\n  }",
     ),
 ];
+
+static LANGUAGE_GUIDES: &[(&str, &str)] = &[(
+    "redirects",
+    "Redirects bind a computation's byte streams.\n\n\
+         `< file` reads stdin from a file; `<< text` feeds a string, dropping one newline at its very start. `> file` writes stdout atomically, `>> file` appends, and `>~ file` truncates and streams output directly. `2> file` and `2>~ file` truncate and stream stderr, while `2>> file` appends it. `2>&1` sends stderr wherever stdout goes, whichever side of `> file` it is written.\n\n\
+         Each stream takes at most one redirect: `cmd > a > b` and `cmd 2> e 2>&1` are parse errors. There is no general fd plumbing: `1<`, `1>`, `0<`, `0>`, `1>&2`, and descriptors past 2 are refused. `echo 1>file` is refused rather than writing an empty file. Use `warn \"message\"` to write one line to stderr and return unit.\n\n\
+         Example:\n  sort in.txt > sorted.txt 2> errors.txt\n\n\
+         See `explain from-string` and `explain to-string` for reading and writing text values.",
+)];
 
 /// A checked `let` installs its generalised scheme beside the value, so a
 /// definition's most general type reads straight off its binding — the baked
@@ -120,6 +133,7 @@ fn prelude_doc(name: &str) -> Option<&'static str> {
 fn language_doc(name: &str) -> Option<&'static str> {
     LANGUAGE_DOCS
         .iter()
+        .chain(LANGUAGE_GUIDES)
         .find(|(n, _)| *n == name)
         .map(|&(_, doc)| doc)
 }
@@ -144,7 +158,16 @@ fn by_name<'a>(mut rows: Vec<(&'a str, &'a str)>) -> Vec<(&'a str, &'a str)> {
 /// of the search, though `explain` named it exactly still answers.
 fn registries(shell: &Shell) -> [(&'static str, Vec<(&str, &str)>); 4] {
     [
-        ("Language", LANGUAGE_DOCS.to_vec()),
+        (
+            "Language",
+            by_name(
+                LANGUAGE_DOCS
+                    .iter()
+                    .chain(LANGUAGE_GUIDES)
+                    .copied()
+                    .collect(),
+            ),
+        ),
         (
             "Builtins",
             by_name(

@@ -26,11 +26,8 @@ const HOUSE_RULES: &str = "house-rules.md";
 /// 1. **persona** (unheaded, `data/system.md`) — an office assistant who
 ///    works by scripting but never speaks of it.
 /// 2. **Ral** — the language reference, `include_str!`'d straight out of
-///    exarch's `data/ral.md`, plus synod's own `data/ral-examples.md`
-///    demonstrating the same constructs in the vocabulary this grant
-///    actually admits (`soffice`, `pandoc`, `csvcut`, `python3`, ...).  The
-///    rules are forked nowhere — only the examples are, because they are
-///    what a model imitates, and exarch's are commands `grant.rs` denies.
+///    exarch's `data/ral.md`, plus synod's own `data/office-examples.md`
+///    demonstrating table inspection and verified document conversion.
 /// 3. **Editing** — exarch's `data/edit-replace.md`, again by
 ///    `include_str!`.  Synod has no `--edit` flag and so must *choose*: the
 ///    line-hash scheme exists to keep a coding agent's many small line edits
@@ -79,7 +76,7 @@ pub fn assemble(workspace: &Path, folder_name: &str, config_dir: &Path) -> Resul
         format!(
             "{}\n{}",
             include_str!("../../exarch/data/ral.md"),
-            include_str!("../data/ral-examples.md")
+            include_str!("../data/office-examples.md")
         ),
     ));
     sections.push((

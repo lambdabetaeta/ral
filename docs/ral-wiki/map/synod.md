@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e028f5a3
-generated_at_date: 2026-10-13
+generated_at_commit: 3bf43d16fc35212e3a3b354a91ffa2fcac136724
+generated_at_date: 2026-10-19
 covers_paths: [synod/, vm-manager/, ral-daemon/, ral-initramfs/, vm-image/, core/src/protocol/channel.rs, core/src/carrier.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs]
 ---
 
@@ -85,9 +85,10 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
   agent guest truths only. The ral language
   body itself is exarch's shared `data/ral.md`, included verbatim
   (`include_str!("../../exarch/data/ral.md")`), with synod's own
-  `data/ral-examples.md` supplying the per-product examples beside it —
-  exarch keeps its own `data/ral-examples.md` the same way for itself. One
-  set of rules, two sets of demonstrations. Synod's base ends in
+  `data/office-examples.md` adding table inspection and document conversion:
+  retain the table while returning a bounded sample, then audit a conversion
+  and reopen its output before reporting success. Exarch includes only the
+  shared reference. Synod's base ends in
   **Talking to the user** (`data/surface.md`); the shared exarch per-agent
   resolver then appends **Agent** to returning helpers, after that office
   guidance, while the conversing synod trunk receives no return section. The

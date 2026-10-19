@@ -1,6 +1,6 @@
 ---
-verified_at_commit: dad6a1b3
-verified_at_date: 2026-10-17
+verified_at_commit: 3bf43d16fc35212e3a3b354a91ffa2fcac136724
+verified_at_date: 2026-10-19
 anchors: [PipeNode, PipeNode::launch, resolve_pipeline, resolve_launch, StageLaunch, StageLaunch::Direct, open_stage_routes, spawn_stage, launch_thread_stage, ThreadStage, StageHandle, file_external_end, file_thread_end, Slot, Event, Event::Heard, Event::Wrote, SettleOnDrop, Effect, Effect::ArmEdge, Effect::KillStage, Effect::CancelAll, Event::AnchorDied, step, StageObservation, StageEnd, CollectState, CollectState::fold, CollectState::run, CollectState::recv, CollectState::escalate, CollectState::cancel_all, CollectState::addresses, Address, kill_live, stronger, rank, grace_signal, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, PipelineGroup::membership, Group, Membership, Membership::owes, AnchorProcess, ChildHandle, into_watch, Watch, Pumps::join_under, TerminalLoan, PipelineGroup::lend, PipelineGroup::end_anchor, TerminalLease, terminal_lease, Capture, infer_pipeline, sentinel::listen, Edge, HeldEdge]
 ---
 
@@ -138,7 +138,10 @@ rest of the group, which the kernel can still stop directly. Every termination s
 handler writes the signal number to stdout and the anchor lives on. That
 immunity is what makes the group addressable from the moment `prepare`
 returns, rather than from a first real stage spawn: the anchor is a genuine
-member already, so the pgid is never child-less.
+member already, so the pgid is never child-less. On Unix, the anchor writes
+a zero readiness byte after installing all signal dispositions; `prepare`
+waits for it before exposing the group. A key on the lent terminal therefore
+cannot race the anchor's handler installation.
 `PipeNode::launch` lends the terminal as soon as the group exists, before
 any edge is opened and so before any stage runs — `PipelineGroup::lend`
 (`group.rs`) borrows the `&TerminalLease`, and only an owning group lends.

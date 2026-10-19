@@ -1,6 +1,6 @@
 ---
-generated_at_commit: dad6a1b3
-generated_at_date: 2026-10-17
+generated_at_commit: 3bf43d16fc35212e3a3b354a91ffa2fcac136724
+generated_at_date: 2026-10-19
 covers_paths: [core/src/runtime.rs, core/src/runtime/]
 ---
 
@@ -203,11 +203,13 @@ evaluator item; the evaluator reaches it at
     (`PipelineGroup::prepare` spawns the pgid anchor —
     `--ral-pipeline-anchor`, ignoring `SIGTSTP`/`SIGTTIN`/`SIGTTOU` outright
     and immune to termination signals — on every
-    platform before any stage exists, and starts its witness in the same act:
+    platform before any stage exists. On Unix it waits for a zero readiness
+    byte after the signal handlers are installed, before lending the terminal
+    or admitting stages. It starts its witness in the same act:
     a report reader blocking to EOF on the anchor's stdout, posting
     `Event::Heard(signal)` raw per swallowed signal, and the anchor's own
     `ChildHandle` handed to the reaper as a `Watch` whose posting closure maps
-    its every exit to `Event::Cancelled(Terminate)`. Ownership is the anchor's presence, not a
+    its every exit to `Event::AnchorDied`. Ownership is the anchor's presence, not a
     flag: `group()` is `Group::Owns(leader)` exactly when the anchor is, and
     only that pgid may be signalled or killed; a joining group answers
     `Group::Joins(membership)` and lends no terminal on its own account,

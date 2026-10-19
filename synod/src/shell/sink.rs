@@ -20,8 +20,8 @@ use exarch::bus::Sink;
 use exarch::card::{Card, Field, Hunk, Mark, Measure, Span, change_card, observation_display_card};
 use exarch::clock;
 use exarch::provider::ProviderError;
-use exarch::record::{AgentId, Born};
 use exarch::record::fault::{Datum, Readout, Remedy};
+use exarch::record::{AgentId, Born};
 use exarch::record::{
     Display, Forensic, Protocol, Record, Recorded, Settlement, Transient, context_rows_card,
 };
@@ -464,9 +464,7 @@ fn project_transient(t: &Transient) -> Option<SynodEvent> {
         Transient::StopReason(reason) => Some(SynodEvent::StopReason {
             reason: reason.clone(),
         }),
-        Transient::Resources { card, .. } => {
-            process_card(Some(card.clone()))
-        }
+        Transient::Resources { card, .. } => process_card(Some(card.clone())),
         // A seam append failure or a channel elision marker: the plumbing's
         // own diagnostic, with nowhere durable to go, so the window is the
         // one place left to lose it.
@@ -490,9 +488,7 @@ fn project_transient(t: &Transient) -> Option<SynodEvent> {
 #[allow(clippy::match_same_arms)]
 fn project_transient_helper(t: &Transient) -> Option<SynodEvent> {
     match t {
-        Transient::Resources { card, .. } => {
-            process_card(Some(card.clone()))
-        }
+        Transient::Resources { card, .. } => process_card(Some(card.clone())),
         Transient::Fault { text } => Some(SynodEvent::Error {
             message: text.clone(),
         }),

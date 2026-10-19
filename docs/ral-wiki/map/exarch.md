@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 38a02883d4b4526b1ae6a3c890081b016847dfdb
+generated_at_commit: 3bf43d16fc35212e3a3b354a91ffa2fcac136724
 generated_at_date: 2026-10-19
 covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/data/system.md, exarch/data/agents.md, exarch/data/spawned.md, exarch/data/reply.md, exarch/data/ral.md, exarch/data/context.md]
 ---
@@ -202,16 +202,21 @@ agent, so a root, identity fork, and wire child each receive their own surface.
   the session as *one continuing shell script*: definitions, working directory,
   and worker threads persist across turns. It teaches selective binding, bounded
   inspection, batching known steps, and deferring independent work.
-- **`Ral`** (`data/ral.md`) is the language and tool reference; its handler docs
-  follow the lambda-only install rule
-  ([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]):
-  per-command `handlers:` entries are unary `{ |args| … }`, the catch-all
-  `handler:` binary `{ |name args| … }`. It directs the model to `explain` for
-  standalone language-form and command guides and names the labelled `Type:`,
-  `Source:`, and `Shadows:` facts that make those results machine-readable.
-  Returned values, captured stdout, and forcing are introduced together; blocks
-  retain their lexical bindings when a helper is shadowed;
-  the capability schema and worked examples live in `explain grant`.
+- **`Ral`** (`data/ral.md`) is the language and tool reference. The CBPV
+  introduction leads into values, computations, capture, and forcing, followed
+  by help and exploration. String arguments remain intact; list spreading and
+  glob expansion are explicit. Blocks retain their lexical bindings when a
+  helper is shadowed. Specialist details live in `explain redirects`,
+  `explain within`, `explain return`, `explain grant`, `explain try`,
+  `explain await`, `explain poll`, and `explain detach`; the prompt keeps
+  common forms and examples.
+  Failure guidance separates recovery, inspection, and deliberate suppression;
+  deferred work is independent until its result is awaited and inspected.
+  The audit example distinguishes an expected nonzero exit from an error;
+  independent calls use individual `attempt`s so one failure does not skip the
+  rest, then inspect each command's status rather than the enclosing audit's
+  success. Exarch includes this reference directly; synod appends its own
+  office examples ([[map/synod|synod]]).
 - **`Editing`** documents the file-editing scheme the `--edit` flag selects:
   line-hash over `view-hash` (`data/edit-hash.md`, `--edit hash`) or
   string-replace over `view-text` (`data/edit-replace.md`, `--edit replace`); only the

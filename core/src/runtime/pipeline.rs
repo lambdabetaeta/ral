@@ -207,8 +207,6 @@ mod tests {
             |scope, pid| {
                 let pid = rustix::process::Pid::from_raw(pid).expect("a live pid");
                 let pgid = rustix::process::getpgid(Some(pid)).expect("the trapper's group");
-                // Past the window between the anchor's exec and its handler install.
-                std::thread::sleep(Duration::from_millis(300));
                 unsafe { libc::kill(-pgid.as_raw_nonzero().get(), libc::SIGINT) };
                 eventually(Duration::from_secs(5), || {
                     (trapper.hits() > 0).then_some(())
