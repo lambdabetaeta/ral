@@ -358,7 +358,7 @@ fn project_display_helper(display: &Display) -> Option<SynodEvent> {
 fn project_forensic(forensic: &Forensic) -> Option<SynodEvent> {
     match forensic {
         // An unreported turn carries no figures; the stall readout says what happened.
-        Forensic::UsageDelta { usage } if usage.unreported == 0 => Some(SynodEvent::Usage {
+        Forensic::UsageDelta { usage, .. } if usage.unreported == 0 => Some(SynodEvent::Usage {
             input: usage.input,
             output: usage.output,
             dollars: usage.dollars,
@@ -405,7 +405,7 @@ fn project_forensic(forensic: &Forensic) -> Option<SynodEvent> {
 fn project_forensic_helper(forensic: &Forensic) -> Option<SynodEvent> {
     match forensic {
         // An unreported turn carries no figures; the stall readout says what happened.
-        Forensic::UsageDelta { usage } if usage.unreported == 0 => Some(SynodEvent::Usage {
+        Forensic::UsageDelta { usage, .. } if usage.unreported == 0 => Some(SynodEvent::Usage {
             input: usage.input,
             output: usage.output,
             dollars: usage.dollars,
@@ -805,7 +805,11 @@ mod tests {
             unreported: 1,
             ..exarch::provider::Usage::default()
         };
-        let fact = Record::Forensic(Forensic::UsageDelta { usage });
+        let fact = Record::Forensic(Forensic::UsageDelta {
+            usage,
+            generation: None,
+            provider: None,
+        });
         for id in [0, 1] {
             assert!(router.route_fact(AgentId::new(id), &fact).is_none());
         }
@@ -825,7 +829,11 @@ mod tests {
             unmetered: false,
             unreported: 0,
         };
-        let fact = Record::Forensic(Forensic::UsageDelta { usage });
+        let fact = Record::Forensic(Forensic::UsageDelta {
+            usage,
+            generation: None,
+            provider: None,
+        });
         let Some(SynodEvent::Usage { input, .. }) = router.route_fact(AgentId::new(1), &fact)
         else {
             panic!("a helper's usage must still reach the window");

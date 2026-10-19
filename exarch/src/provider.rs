@@ -41,7 +41,7 @@ pub use rations::Rations;
 pub(crate) use request::Request;
 pub use request::{EFFORT_LADDER, Tuning, default_effort_label, effort_by_label, effort_label};
 pub use retry::Recovery;
-pub use stream::{Delta, StepOut};
+pub use stream::{Delta, Served, StepOut};
 pub use tools::Toolset;
 pub use transport::Engine;
 pub use usage::{Usage, UsageParts, humanize_tokens};

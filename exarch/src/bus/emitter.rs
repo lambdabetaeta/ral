@@ -42,7 +42,7 @@ pub(crate) struct FleetSink {
 
 impl Publish for FleetSink {
     fn fact(&self, recorded: Recorded<Record>) {
-        if let Record::Forensic(Forensic::UsageDelta { usage }) = recorded.value() {
+        if let Record::Forensic(Forensic::UsageDelta { usage, .. }) = recorded.value() {
             self.meter.add(*usage);
         }
         if self
@@ -275,10 +275,18 @@ mod tests {
         child_seam.attach(child.fleet_sink());
 
         let _recorded = root_seam
-            .emit(Forensic::UsageDelta { usage: root_usage })
+            .emit(Forensic::UsageDelta {
+                usage: root_usage,
+                generation: None,
+                provider: None,
+            })
             .expect("a fileless seam still stamps");
         let _recorded = child_seam
-            .emit(Forensic::UsageDelta { usage: child_usage })
+            .emit(Forensic::UsageDelta {
+                usage: child_usage,
+                generation: None,
+                provider: None,
+            })
             .expect("a fileless seam still stamps");
 
         let total = bus.usage_total();

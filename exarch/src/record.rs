@@ -383,13 +383,20 @@ pub enum Forensic {
     TurnStarted {
         turn: u64,
         tuning: Tuning,
-        /// The serving provider actually pinned, which is not the selection's
-        /// stored pin: a service that does not route drops it.
+        /// The serving provider requested, which is not the selection's stored
+        /// pin (a service that does not route drops it) nor the provider that
+        /// answered: that is `UsageDelta::provider`.
         #[serde(skip_serializing_if = "Option::is_none")]
         route: Option<String>,
     },
+    /// One call's usage, with who answered it where the backend says: the
+    /// response's generation id and the upstream provider it was served by.
     UsageDelta {
         usage: Usage,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        generation: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
     },
     /// Ctrl-C or Esc mid-turn.
     Cancelled,

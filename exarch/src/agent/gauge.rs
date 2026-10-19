@@ -8,7 +8,7 @@ pub(crate) mod ration;
 
 use crate::agent::Avatar;
 use crate::latch::Latch;
-use crate::provider::{Provider, Usage};
+use crate::provider::{Provider, Served, Usage};
 use crate::record::Forensic;
 use ral_core::carrier::Severed;
 use std::io;
@@ -170,11 +170,15 @@ pub(crate) fn suffix_keep_budget(history_bytes: usize) -> usize {
 impl Avatar {
     /// Record a completion's usage; its input count, where reported, becomes
     /// the measure the gauges weigh.
-    pub(super) fn measure(&mut self, usage: Usage) -> io::Result<()> {
+    pub(super) fn measure(&mut self, usage: Usage, served: Served) -> io::Result<()> {
         let at = {
             let log = self.log.borrow();
             log.record_emitter()
-                .emit(Forensic::UsageDelta { usage })
+                .emit(Forensic::UsageDelta {
+                    usage,
+                    generation: served.generation,
+                    provider: served.provider,
+                })
                 .map(drop)?;
             log.context().log_len()
         };

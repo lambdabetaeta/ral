@@ -1,6 +1,6 @@
 //! Canned replies for the `Backend::Scripted` arm, so tests never dial out.
 
-use super::{CutShort, Delta, ProviderError, StepOut, Usage};
+use super::{CutShort, Delta, ProviderError, Served, StepOut, Usage};
 use genai::chat::{ChatMessage, StopReason, ToolCall};
 use ral_core::sync::LockExt;
 use std::collections::VecDeque;
@@ -30,6 +30,7 @@ impl Reply {
                 usage: Usage::default(),
                 stop_reason: Some(StopReason::Completed("end_turn".into())),
                 cut_short: None,
+                served: Served::default(),
             }),
         }
     }
@@ -50,6 +51,7 @@ impl Reply {
                 cut_short: Some(CutShort::Stalled(ProviderError::local_transient(
                     "model response body read timed out",
                 ))),
+                served: Served::default(),
             }),
         }
     }
@@ -70,6 +72,7 @@ impl Reply {
                 usage: Usage::default(),
                 stop_reason: Some(StopReason::ToolCall("tool_use".into())),
                 cut_short: None,
+                served: Served::default(),
             }),
         }
     }
@@ -93,6 +96,7 @@ impl Reply {
                 cut_short: Some(CutShort::OutputCap {
                     stop_reason: "max_tokens".into(),
                 }),
+                served: Served::default(),
             }),
         }
     }
@@ -110,6 +114,7 @@ impl Reply {
                 usage: Usage::default(),
                 stop_reason: Some(StopReason::Completed("end_turn".into())),
                 cut_short: None,
+                served: Served::default(),
             }),
         }
     }

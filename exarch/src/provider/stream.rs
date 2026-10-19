@@ -10,7 +10,13 @@ use super::{ProviderError, Selection};
 use crate::cancel;
 use futures_util::StreamExt;
 use genai::adapter::AdapterKind;
-use genai::chat::{ChatMessage, ChatStreamEvent, StopReason, StreamEnd, ToolCall};
+use genai::chat::{
+    ChatFrameSink, ChatMessage, ChatStreamEvent, FrameCtx, RawFrameRef, StopReason, StreamEnd,
+    ToolCall,
+};
+use ral_core::sync::LockExt;
+use serde::Deserialize;
+use std::sync::{Arc, Mutex};
 
 /// One streamed assistant response.
 pub struct StepOut {
@@ -19,6 +25,39 @@ pub struct StepOut {
     pub usage: Usage,
     pub stop_reason: Option<StopReason>,
     pub cut_short: Option<CutShort>,
+    pub served: Served,
+}
+
+/// Who answered a call, as far as the backend says: the response's generation
+/// id and, on a router such as `OpenRouter`, the upstream provider it served.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Served {
+    #[serde(rename = "id")]
+    pub generation: Option<String>,
+    pub provider: Option<String>,
+}
+
+/// Reads [`Served`] off the wire frames, which genai's normalised events drop.
+#[derive(Default)]
+struct ServedSink(Mutex<Served>);
+
+impl ChatFrameSink for ServedSink {
+    fn on_frame(&self, _: &FrameCtx, frame: RawFrameRef<'_>) {
+        let mut served = self.0.lock_ignore_poison();
+        if served.generation.is_some() && served.provider.is_some() {
+            return;
+        }
+        if let Ok(head) = serde_json::from_str::<Served>(frame.data) {
+            served.generation = served.generation.take().or(head.generation);
+            served.provider = served.provider.take().or(head.provider);
+        }
+    }
+}
+
+impl ServedSink {
+    fn served(&self) -> Served {
+        self.0.lock_ignore_poison().clone()
+    }
 }
 
 /// One streamed event of an assistant turn.
@@ -77,6 +116,8 @@ impl Engine {
                 heard = false;
                 let wire =
                     manufacture(adapter, request.system, request.transcript, &tools).into_request();
+                let sink = Arc::new(ServedSink::default());
+                let options = options.clone().with_raw_frame_sink_arc(sink.clone());
                 let mut spoke = false;
                 let mut streamed = String::new();
                 let mut streamed_reasoning = String::new();
@@ -139,14 +180,20 @@ impl Engine {
                 // Prose already streamed live cannot be unsent, so a failure the
                 // driver would retry commits as `Stalled` once it has spoken;
                 // any other failure, or one before prose, goes to the driver.
+                let served = sink.served();
                 match attempt_result {
-                    Ok(end) => {
-                        Attempt::Done(step_out_from_end(model, end, transport.metered(), adapter))
-                    }
+                    Ok(end) => Attempt::Done(step_out_from_end(
+                        model,
+                        end,
+                        served,
+                        transport.metered(),
+                        adapter,
+                    )),
                     Err(error) if spoke && error.retryable() => Attempt::Done(stalled_step_out(
                         &streamed,
                         &streamed_reasoning,
                         &error,
+                        served,
                         transport.metered(),
                     )),
                     Err(error) => Attempt::Failed(error),
@@ -156,7 +203,13 @@ impl Engine {
     }
 }
 
-fn step_out_from_end(model: &str, end: StreamEnd, metered: bool, adapter: AdapterKind) -> StepOut {
+fn step_out_from_end(
+    model: &str,
+    end: StreamEnd,
+    served: Served,
+    metered: bool,
+    adapter: AdapterKind,
+) -> StepOut {
     let usage = end.captured_usage.as_ref().map_or_else(
         || Usage::unreported(metered),
         |raw| usage_from(model, raw, metered, adapter),
@@ -164,6 +217,7 @@ fn step_out_from_end(model: &str, end: StreamEnd, metered: bool, adapter: Adapte
     let stop_reason = end.captured_stop_reason.clone();
     let reasoning = end.captured_reasoning_content.clone();
     let content = end.captured_content.clone().unwrap_or_default();
+    let response_id = end.captured_response_id.clone();
     let tool_calls = end.captured_into_tool_calls().unwrap_or_default();
     let cut_short = match &stop_reason {
         Some(StopReason::MaxTokens(raw)) => Some(CutShort::OutputCap {
@@ -177,6 +231,10 @@ fn step_out_from_end(model: &str, end: StreamEnd, metered: bool, adapter: Adapte
         usage,
         stop_reason,
         cut_short,
+        served: Served {
+            generation: response_id.or(served.generation),
+            ..served
+        },
     }
 }
 
@@ -184,6 +242,7 @@ fn stalled_step_out(
     streamed: &str,
     streamed_reasoning: &str,
     cause: &ProviderError,
+    served: Served,
     metered: bool,
 ) -> StepOut {
     let reasoning = (!streamed_reasoning.is_empty()).then(|| streamed_reasoning.to_string());
@@ -194,6 +253,7 @@ fn stalled_step_out(
         usage: Usage::unreported(metered),
         stop_reason: None,
         cut_short: Some(CutShort::Stalled(cause.clone())),
+        served,
     }
 }
 
@@ -218,6 +278,35 @@ mod tests {
         }
     }
 
+    fn frame(data: &str) -> RawFrameRef<'_> {
+        RawFrameRef {
+            index: 0,
+            event: None,
+            data,
+            elapsed_us: 0,
+        }
+    }
+
+    #[test]
+    fn served_sink_keeps_the_first_id_and_provider_seen() {
+        let ctx = FrameCtx {
+            stream_id: 0,
+            model_iden: ModelIden::new(AdapterKind::OpenAI, "m"),
+        };
+        let sink = ServedSink::default();
+        for data in [
+            r#"{"choices":[]}"#,
+            r#"{"id":"gen-1","provider":"DeepInfra","choices":[]}"#,
+            r#"{"id":"gen-2","provider":"Other"}"#,
+            "[DONE]",
+        ] {
+            sink.on_frame(&ctx, frame(data));
+        }
+        let served = sink.served();
+        assert_eq!(served.generation.as_deref(), Some("gen-1"));
+        assert_eq!(served.provider.as_deref(), Some("DeepInfra"));
+    }
+
     #[test]
     fn step_out_preserves_reasoning_content() {
         let end = StreamEnd {
@@ -225,7 +314,13 @@ mod tests {
             captured_reasoning_content: Some("let me think".into()),
             ..Default::default()
         };
-        let out = step_out_from_end("deepseek-v4-pro", end, true, AdapterKind::DeepSeek);
+        let out = step_out_from_end(
+            "deepseek-v4-pro",
+            end,
+            Served::default(),
+            true,
+            AdapterKind::DeepSeek,
+        );
         assert!(out.assistant_message.content.iter().any(|part| matches!(
             part,
             ContentPart::ReasoningContent(reasoning) if reasoning == "let me think"
@@ -238,7 +333,13 @@ mod tests {
             captured_content: Some(MessageContent::from("answer")),
             ..Default::default()
         };
-        let out = step_out_from_end("deepseek-v4-pro", end, true, AdapterKind::DeepSeek);
+        let out = step_out_from_end(
+            "deepseek-v4-pro",
+            end,
+            Served::default(),
+            true,
+            AdapterKind::DeepSeek,
+        );
         assert!(
             !out.assistant_message
                 .content
@@ -254,7 +355,7 @@ mod tests {
             captured_stop_reason: Some(StopReason::MaxTokens("max_tokens".into())),
             ..Default::default()
         };
-        let out = step_out_from_end("m", end, true, AdapterKind::Anthropic);
+        let out = step_out_from_end("m", end, Served::default(), true, AdapterKind::Anthropic);
         assert!(
             matches!(
                 &out.cut_short,
@@ -274,7 +375,7 @@ mod tests {
             captured_stop_reason: Some(StopReason::Completed("end_turn".into())),
             ..Default::default()
         };
-        let out = step_out_from_end("m", end, true, AdapterKind::Anthropic);
+        let out = step_out_from_end("m", end, Served::default(), true, AdapterKind::Anthropic);
         assert!(out.cut_short.is_none());
     }
 
@@ -292,7 +393,7 @@ mod tests {
             captured_stop_reason: Some(StopReason::MaxTokens("length".into())),
             ..Default::default()
         };
-        let out = step_out_from_end("m", end, true, AdapterKind::Anthropic);
+        let out = step_out_from_end("m", end, Served::default(), true, AdapterKind::Anthropic);
         assert!(matches!(out.cut_short, Some(CutShort::OutputCap { .. })));
         assert_eq!(out.tool_calls.len(), 1);
         assert_eq!(out.tool_calls[0].fn_name, "ral");
@@ -304,7 +405,13 @@ mod tests {
             &web_stream_http(StatusCode::SERVICE_UNAVAILABLE),
             "test-model",
         );
-        let step = stalled_step_out("partial answer so far", "", &cause, false);
+        let step = stalled_step_out(
+            "partial answer so far",
+            "",
+            &cause,
+            Served::default(),
+            false,
+        );
         assert!(
             matches!(
                 step.cut_short,
@@ -339,6 +446,7 @@ mod tests {
             "partial answer",
             "let me work through the cases",
             &cause,
+            Served::default(),
             false,
         );
         assert!(step.assistant_message.content.iter().any(|part| matches!(

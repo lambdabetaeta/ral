@@ -163,6 +163,8 @@ fn a_clear_leaves_its_marker_and_the_usage() {
                 input: 100,
                 ..Usage::default()
             },
+            generation: None,
+            provider: None,
         },
     );
     assert_eq!(
@@ -353,6 +355,8 @@ fn last_input_is_the_latest_turn_while_usage_sums() {
             input,
             ..Usage::default()
         },
+        generation: None,
+        provider: None,
     };
     let mut memo = Blocks::default();
     let _ = memo.step_forensic(Seq::new(1), &delta(100));

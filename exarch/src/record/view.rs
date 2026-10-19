@@ -396,7 +396,7 @@ impl Blocks {
 
     fn step_forensic(&mut self, seq: Seq, f: &Forensic) -> Delta {
         match f {
-            Forensic::UsageDelta { usage } => {
+            Forensic::UsageDelta { usage, .. } => {
                 if let Some(input) = usage.measured_input() {
                     self.last_input = input;
                 }

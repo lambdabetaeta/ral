@@ -110,7 +110,11 @@ impl Avatar {
                 if let Delta::Retry { cause, lost } = delta {
                     recorder.transient(Transient::Boundary);
                     if let Some(usage) = lost {
-                        recorder.emit_or_report(Forensic::UsageDelta { usage });
+                        recorder.emit_or_report(Forensic::UsageDelta {
+                            usage,
+                            generation: None,
+                            provider: None,
+                        });
                     }
                     recorder.emit_or_report(Forensic::Retried {
                         error: cause.clone(),
@@ -172,6 +176,7 @@ impl Avatar {
             usage,
             stop_reason,
             cut_short,
+            served,
         } = step;
         // The committed message, not the streaming accumulator, is the
         // outcome's source of truth: a provider may return final text with no
@@ -180,7 +185,7 @@ impl Avatar {
             .content
             .first_text()
             .is_some_and(|text| !text.is_empty());
-        self.measure(usage)?;
+        self.measure(usage, served)?;
         // Routine boundaries and `MaxTokens` (handled below) stay silent.
         if let Some(reason) = &stop_reason
             && !matches!(
