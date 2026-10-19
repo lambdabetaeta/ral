@@ -1,11 +1,11 @@
-Keep requirements and current work in context; recover discarded evidence from the transcript. Use ids from `TURN: <id>`; examples below use placeholders.
+Keep requirements and current work in context; recover discarded evidence from the transcript. Every result ends with `TURN: N`: N is that call's turn id. Ids below are placeholders.
 
-**Evict failures in the next call, alongside the correction.** Note the lesson and side effects. Earlier writes and spawns survive: resume, don't replay.
+    exarch-context `survey / `evict [turns: [Int], note: `none|`some Str]
 
-    let after-cut = exarch-context `evict [
-      turns: [42], note: `some #'from-lines ends a byte pipeline. No file changes.'#
-    ]
-    git log -5 --oneline
+**Evict each failed call in the next one, alongside the correction.** Failed means a diagnostic, a failing command, or not what you meant. Kept, it is re-sent on every request; the newest turn costs almost nothing in cache to cut. Note the lesson and side effects. Earlier writes and spawns survive: resume, don't replay.
+
+    exarch-context `evict [turns: [42], note: `some #'from-lines ends a byte pipeline. No file changes.'#]
+    let commits = git log -5 --oneline | from-lines
 
 **Batch completed work into one cut.** Keep conclusions and next steps in the note; name a binding for longer material. Each cut breaks cache reuse from the earliest changed turn. On a pressure warning, cut before the harness evicts without a note.
 
@@ -32,7 +32,4 @@ Keep requirements and current work in context; recover discarded evidence from t
 
     let old-turn = exarch-transcript `read [turns: [35]]
 
-**Look up shapes, limits, and refusal rules as needed.**
-
-    explain exarch-context
-    explain exarch-transcript
+**Look up limits and refusal rules as needed:** `explain exarch-context`, `explain exarch-transcript`.

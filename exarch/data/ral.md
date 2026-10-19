@@ -18,6 +18,7 @@ A string argument stays one argument: its contents are never implicitly split, g
 - `{ … }` packages a computation as a block, without running it.
 - `!{ … }` forces an anonymous block where a value is needed; `!$f` forces a bound block.
 - `$[ … ]` evaluates arithmetic or Boolean expressions. Boolean negation is `not`: `$[not !{is-file $path}]`. `!` always means forcing.
+- `( … )` never groups: pass a call's result as `!{…}`, e.g. `for !{take 30 $xs} { |x| … }`, or `let` it first.
 
 A computation can return a value and can write bytes to stdout. `let` binds the returned value of a computation such as `length` or `from-json`. For a byte-writing command such as `date` or `echo`, it instead captures stdout as a `String`, removing one trailing line terminator if present:
 
@@ -105,12 +106,12 @@ Bindings are immutable but shadowable. Blocks capture lexically: earlier blocks 
       echo "hi $first-name $(last-name): $h[file] line $h[line], today !{date +%F | from-line}, sum $[2 + 3]"
 
 - Parentheses delimit a variable inside an interpolated word: `"$(today)-checkout"`. `$(…)` never runs a command. To capture command output, use `let` or force the command inside double quotes with `!{…}`.
-- Words never glue: `$dir/file` is a parse error; interpolate instead: `"$dir/file"`.
+- Words never glue: `$dir/file`, `-j!{nproc}` and `--format=#'%H'#` are parse errors. Quote the whole word: `"$dir/file"`, `"-j!{nproc}"`, `#'--format=%(refname:short)'#`.
 - In double quotes, a leading `~` or `~/` expands to the home directory, e.g. `ls "~/Work Invoices"`. `!{home}` is the same value.
-- Double quotes process escapes such as `\n`, `\t`, `\\`, `\"`, `\$`, and `\!`.
-- Write literal text as a raw string, `#'…'#`, with no escapes or interpolation. The delimiters are mirror images: `#'` opens, `'#` closes. If the text contains `'#`, use more hashes on both sides: `###'…'###`. Use raw strings for literal payloads passed to external tools, e.g. `sed -i #'s|^old_value$|new_value|'# config.txt`. Pass computed values directly as `$arg`, or interpolate when constructing text.
+- Double quotes process escapes such as `\n`, `\t`, `\\`, `\"`, `\$`, and `\!`; any other, like `\|`, is an error.
+- Write literal text as a raw string, `#'…'#`, with no escapes or interpolation. The delimiters are mirror images: `#'` opens, `'#` closes, touching: `#'…'` and `#'…' #` never close. Any other word starting with `#` begins a comment, so `#/app/x#` is no string; paths and flags need no quotes: `[--out, /app/x.whl]`. If the text contains `'#`, use more hashes on both sides: `###'…'###`. Use raw strings for literal payloads passed to external tools, e.g. `sed -i #'s|^old_value$|new_value|'# config.txt`. Pass computed values directly as `$arg`, or interpolate when constructing text.
 - `dedent` strips the common leading indentation from a multiline string.
-- There are no `<<EOF` heredocs. `cmd << $body` or `cmd << #'…'#` feeds a string to `cmd`'s stdin. One newline at the very start of the string is dropped, so the body can start on the line under the command.
+- There are no heredocs. `cmd << $body` or `python3 << #'…'#` feeds a string to stdin; the raw string is the whole body, with no `EOF` label. One newline at the very start of the string is dropped, so the body can start on the line under the command.
 - Split captured text explicitly with `lines $text`.
 - Parse numeric text with `int $text` or `float $text`.
 
@@ -126,7 +127,7 @@ A bare word that looks like a number IS that number: `echo 007` prints `7`, `ech
 
     let ver = #'3.10'#                 # a version is text; bare, it would be 3.1
 
-Arithmetic and Boolean expressions must be in `$[…]` blocks: `$[$x == 0]`, `$[$a + $b]`, `$[$x > 0 && $x < 10]`, `$[not !{re-match #'x'# $s}]` are computed to values. An operand may be any value — `$[$s == #'quit'#]` compares strings, and `==` is structural on every kind — but arithmetic and `<`/`>` want numbers. Such blocks do not nest; one layer suffices.
+Arithmetic and Boolean expressions must be in `$[…]` blocks: `$[$x == 0]`, `$[$a + $b]`, `$[$x > 0 && $x < 10]`, `$[not !{re-match #'x'# $s}]` are computed to values. An operand may be any value — `$[$s == #'quit'#]` compares strings, and `==` is structural on every kind — but arithmetic and `<`/`>` want numbers. Such blocks do not nest; one layer suffices. Force calls inside: `$[!{length $xs} == 3]`.
 
 `if` takes a Boolean value and blocks, written out or in hand:
 
@@ -152,7 +153,7 @@ Every element of a list shares one type; use a record for fields of different ty
 
 Collection literals contain values, so force calls inside them: `[!{length $xs}, 2]`, not `[length $xs, 2]`. The same rule applies to record fields: `[count: !{length $xs}]`.
 
-Indexing `$h[key]` works in any context (pipelines, blocks, double quoted): e.g. `view-text-around $h[file] $h[line] 3`.
+Indexing `$h[key]` works in any context (pipelines, blocks, double quoted): e.g. `view-text-around $h[file] $h[line] 3`. It reads a list by Int, a record by label and a map by key, nothing else: not text, bytes or a handle, and no slices. Use `take 5 !{drop 2 $xs}`, `slice $s 0 80`, `!{commands $r}[0][stdout]`.
 
 A map is not a record: its keys are runtime data and its values all share one type. A literal is a map if any key is data: `"quoted"` (`["a": 1, "b": 2]`) or computed (`[$k: 1]`). A bare key or a raw string key (`#'label'#`) is a label, and labels alone make a record; `[:]` is the empty map. Only maps support `keys`, `values`, `has`, `get` (with default), `union`, `entries`, and only a map is read by a computed key (`$m[$k]`); a bare key like `$r[host]` always reads a record field.
 
@@ -195,7 +196,7 @@ Decoders read from the byte channel. To decode bytes already stored in a value, 
 
 `from-json` and `from-jsonl` results are checked against how the script uses the value: a read of a field the file lacks, or a number used as text, fails at the decode, naming the JSON pointer (`/items/3/size`) and the line of the use. To read one value out of a document, `from-json-at [#'items'#, #'3'#, #'size'#] < $file` takes the path as a list of keys and indexes, never as a spliced string.
 
-A decoder ends the byte pipeline: its value never travels down a further `|`, so `git log --oneline | from-lines | head -n5` is refused — a stage feeds the next by writing, and `from-lines` returns a list. Bind the list, then `take 5 $commits`.
+Only a pipeline's last stage may return a value; every earlier stage must write bytes. So `git log | from-lines | head -n5` and `lines $t | take 5` are refused, and value functions such as `bytes-to-string`, `lines`, `take`, `map` and `filter` never read stdin. Nest them instead: `take 5 !{lines $t}`.
 
 ## I/O
 
@@ -216,10 +217,12 @@ Read with `from-X < PATH`, write with `to-X $v > PATH`:
 
 Write a file with `echo #'…'# > path`.
 
-<CRITICAL> For a literal multi-line file body, prefer a raw string, ideally with many hashes:
+<CRITICAL> For a new file's literal multi-line body, prefer a raw string, ideally with many hashes:
 
     echo #####'first line
     second 'quoted' line'##### > $file
+
+To change an existing file, edit it.
 </CRITICAL>
 
 ## Within
