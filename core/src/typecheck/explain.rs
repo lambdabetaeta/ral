@@ -190,8 +190,14 @@ impl TypeErrorKind {
             Self::IndexOnLiteral { literal, key } => format!(
                 "`[{key}]` reads from {literal} itself: an index attaches to the one word right before it"
             ),
-            Self::DynamicIndexOnScalar { ty: Ty::Record(_) } => {
-                format!("{INDEX_RULE}: a record takes a literal label")
+            Self::DynamicIndexOnScalar {
+                ty: Ty::Record(row),
+            } => {
+                let rule = format!("{INDEX_RULE}: a record takes a literal label");
+                match available_fields(row) {
+                    Some(fields) => format!("{rule} {fields}"),
+                    None => rule,
+                }
             }
             Self::DynamicIndexOnScalar { ty } => {
                 let ctx = FmtCtx::for_value_types(&[ty]);
@@ -1110,15 +1116,20 @@ fn argument_hint(kind: &TypeErrorKind) -> Option<String> {
                     (Label::Field(name), Ty::String) => Some(name),
                     _ => None,
                 })?;
-                let fields: Vec<_> = row.fields().map(|(label, _)| label.name()).collect();
                 Some(format!(
-                    "this is a record (available: {}): did you mean one of its fields, \
+                    "this is a record {}: did you mean one of its fields, \
                      as in `$x[{text}]`?",
-                    fields.join(", ")
+                    available_fields(row)?
                 ))
             }
             _ => None,
         })
+}
+
+/// Renders the labels of a record's known fields as `(available: a, b)`; an open row's tail is not listed.
+fn available_fields(row: &Row) -> Option<String> {
+    let fields: Vec<_> = row.fields().map(|(label, _)| label.name()).collect();
+    (!fields.is_empty()).then(|| format!("(available: {})", fields.join(", ")))
 }
 
 /// Reasons where two types meet on equal footing, so a hint read off
