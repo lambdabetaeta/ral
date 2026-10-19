@@ -59,7 +59,10 @@ mixed endings behind.
   reader takes it back unchanged; a missing path is an error,
   not an empty search; CRLF-aware, so `$` anchors before `\r\n` and a hit's text
   is the row `view-text` shows; binary detection quits at NUL, the walk the
-  shared one below). Surfaces exactly one
+  shared one below, kept to `path`'s filesystem). Each file is streamed, never
+  read whole: every read polls the shell's scope, the line ending is learnt as
+  the bytes pass, and a line past 16 MiB skips its file with a note on stderr.
+  Surfaces exactly one
   `Observed::Grep { scope, pattern }` observation for the whole search
   ([[map/exarch/io-surface|io-surface]]).
 - `edit-hash <path> <edits>` → `Unit`. The edit verb: `edits` is a list of

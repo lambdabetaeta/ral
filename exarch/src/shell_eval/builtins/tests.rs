@@ -33,6 +33,36 @@ fn eol_round_trips_byte_for_byte() {
     );
 }
 
+/// A `\r\n` split across reads still counts as one CRLF ending.
+#[test]
+fn eol_scan_agrees_with_eol_across_chunks() {
+    for body in ["a\r\nb\r\n", "\na\r\n", "a\r\nb\n", "a\r\r\nb"] {
+        let bytes = body.as_bytes();
+        for cut in 0..=bytes.len() {
+            let mut scan = EolScan::default();
+            scan.feed(&bytes[..cut]);
+            scan.feed(&bytes[cut..]);
+            assert_eq!(
+                matches!(scan.eol(), Eol::Crlf),
+                matches!(Eol::of(bytes), Eol::Crlf),
+                "{body:?} cut at {cut}"
+            );
+        }
+    }
+}
+
+/// A line may reach the limit but not pass it, whichever reads carry it.
+#[test]
+fn line_run_names_the_first_long_line() {
+    let at = vec![b'x'; LONGEST_LINE];
+    let mut run = LineRun::default();
+    assert!(run.feed(b"short\n").is_ok());
+    assert!(run.feed(&at).is_ok());
+    assert!(run.feed(b"\nshort\nx").is_ok());
+    let past = run.feed(&at).expect_err("one byte past the limit");
+    assert_eq!(past.0, 4);
+}
+
 /// In a file shorter than a full floor window, every window clamps to the
 /// whole file, so lines are told apart by offset alone, all at the floor.
 #[test]

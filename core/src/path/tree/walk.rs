@@ -48,6 +48,13 @@ impl Walk {
         self
     }
 
+    /// Enter no mount beneath `root`: no `/proc`, `/sys`, or `/dev`.
+    #[must_use]
+    pub fn one_file_system(mut self) -> Self {
+        self.0.same_file_system(true);
+        self
+    }
+
     /// Enter only the entries `keep` admits, and nothing beneath the rest.
     #[must_use]
     pub fn keeping(mut self, keep: impl Fn(&Path) -> bool + Send + Sync + 'static) -> Self {

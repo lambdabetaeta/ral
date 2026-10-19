@@ -163,13 +163,9 @@ enum Eol {
 
 impl Eol {
     fn of(bytes: &[u8]) -> Self {
-        let bare_lf =
-            bytes.starts_with(b"\n") || bytes.windows(2).any(|w| w[1] == b'\n' && w[0] != b'\r');
-        if bytes.contains(&b'\n') && !bare_lf {
-            Self::Crlf
-        } else {
-            Self::Lf
-        }
+        let mut scan = EolScan::default();
+        scan.feed(bytes);
+        scan.eol()
     }
 
     const fn terminator(self) -> &'static str {
@@ -299,6 +295,120 @@ fn builtin_view_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
     ))
 }
 
+/// [`Eol::of`] as a fold, for bytes that arrive in chunks.
+#[derive(Default)]
+struct EolScan {
+    lf: bool,
+    bare_lf: bool,
+    last: Option<u8>,
+}
+
+impl EolScan {
+    fn feed(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            if b == b'\n' {
+                self.lf = true;
+                self.bare_lf |= self.last != Some(b'\r');
+            }
+            self.last = Some(b);
+        }
+    }
+
+    const fn eol(&self) -> Eol {
+        if self.lf && !self.bare_lf {
+            Eol::Crlf
+        } else {
+            Eol::Lf
+        }
+    }
+}
+
+/// The longest line a search buffers; past it the file is skipped.
+const LONGEST_LINE: usize = 16 << 20;
+
+/// A line past [`LONGEST_LINE`], by its 1-based number.
+#[derive(Debug)]
+struct LongLine(u64);
+
+impl std::fmt::Display for LongLine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "line {} is longer than {} MiB; is the file minified or generated?",
+            self.0,
+            LONGEST_LINE >> 20
+        )
+    }
+}
+
+impl std::error::Error for LongLine {}
+
+/// The line a stream is in, and how far into it.
+struct LineRun {
+    line: u64,
+    run: usize,
+}
+
+impl Default for LineRun {
+    fn default() -> Self {
+        Self { line: 1, run: 0 }
+    }
+}
+
+impl LineRun {
+    fn feed(&mut self, bytes: &[u8]) -> Result<(), LongLine> {
+        let mut segments = bytes.split(|&b| b == b'\n');
+        self.run += segments.next().map_or(0, <[u8]>::len);
+        for segment in segments {
+            self.check()?;
+            self.line += 1;
+            self.run = segment.len();
+        }
+        self.check()
+    }
+
+    const fn check(&self) -> Result<(), LongLine> {
+        if self.run > LONGEST_LINE {
+            Err(LongLine(self.line))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// A file as [`search_tree`] streams it: each read first polls the shell's
+/// scope, so a stop lands mid-file, and the bytes feed its [`EolScan`] and
+/// [`LineRun`], whose limit is what bounds the searcher's buffer.
+struct Scanned<'a> {
+    file: std::fs::File,
+    shell: &'a Shell,
+    eol: EolScan,
+    run: LineRun,
+}
+
+impl<'a> Scanned<'a> {
+    fn new(file: std::fs::File, shell: &'a Shell) -> Self {
+        Self {
+            file,
+            shell,
+            eol: EolScan::default(),
+            run: LineRun::default(),
+        }
+    }
+}
+
+impl std::io::Read for Scanned<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.shell.poll().is_err() {
+            return Err(std::io::Error::other("stopped"));
+        }
+        let n = self.file.read(buf)?;
+        self.eol.feed(&buf[..n]);
+        self.run.feed(&buf[..n]).map_err(std::io::Error::other)?;
+        Ok(n)
+    }
+}
+
 /// One matching line from [`search_tree`], its file named as `view-text` takes it.
 struct SearchHit {
     file: String,
@@ -312,11 +422,13 @@ const fn grep_name(hidden: bool) -> &'static str {
 }
 
 /// Search `path`, a file or a directory walked recursively (Rust regex),
-/// reading each file's bytes once.  Beneath `path` the walk skips hidden and
-/// ignored entries, or with `hidden` only `.git`; `path` itself is always
-/// searched.  A file is read through the door on the object it names, and
-/// binary detection quits at NUL; this is the one site both grep builtins
-/// compose over.  A hit names its file as its admitted [`Walk`] does.
+/// streaming each file once.  Beneath `path` the walk skips hidden and
+/// ignored entries, or with `hidden` only `.git`, and never leaves `path`'s
+/// filesystem; `path` itself is always searched.  A file is read through the
+/// door on the object it names, binary detection quits at NUL, and a file
+/// whose read fails midway is noted on stderr and skipped; this is the one
+/// site both grep builtins compose over.  A hit names its file as its
+/// admitted [`Walk`] does.
 fn search_tree(
     shell: &mut Shell,
     hidden: bool,
@@ -341,41 +453,47 @@ fn search_tree(
         .build();
 
     let mut results = Vec::new();
-    let mut walk = tree.admitted(shell, name, path);
+    let mut walk = tree.one_file_system().admitted(shell, name, path);
     while let Some(entry) = walk.next(shell)? {
         if !entry.is_file() {
             continue;
         }
-        let Some(located) = shell.locate_if_admitted(&entry.path, &FsOp::Read) else {
+        let Some(file) = shell
+            .locate_if_admitted(&entry.path, &FsOp::Read)
+            .and_then(|located| located.read().ok())
+        else {
             continue;
         };
-        let mut bytes = Vec::new();
-        if located
-            .read()
-            .and_then(|mut f| f.read_to_end(&mut bytes))
-            .is_err()
-        {
+        let mut scanned = Scanned::new(file, shell);
+        let mut lines = Vec::new();
+        let searched = searcher.search_reader(
+            &matcher,
+            &mut scanned,
+            Lossy(|line, text| {
+                lines.push((line, text.to_string()));
+                Ok(true)
+            }),
+        );
+        let eol = scanned.eol.eol();
+        shell.poll()?;
+        if let Err(e) = searched {
+            let shown = entry.path.as_path().display();
+            let _ = shell.write_stderr(format!("{name}: {shown}: skipped: {e}\n").as_bytes());
             continue;
         }
-        // Cut by the file's own ending, so a hit is the row `view-text` shows.
-        let term = Eol::of(&bytes).terminator();
-        let mut lines = Vec::new();
-        searcher
-            .search_slice(
-                &matcher,
-                &bytes,
-                Lossy(|line, text| {
-                    lines.push((line, text.strip_suffix(term).unwrap_or(text).to_string()));
-                    Ok(true)
-                }),
-            )
-            .map_err(|e| sig(format!("{name}: {}: {e}", entry.path.as_path().display())))?;
         if !lines.is_empty() {
+            // Cut by the file's own ending, so a hit is the row `view-text` shows.
+            let term = eol.terminator();
             let file = entry.name()?;
-            results.extend(lines.into_iter().map(|(line, text)| SearchHit {
-                file: file.clone(),
-                line,
-                text,
+            results.extend(lines.into_iter().map(|(line, mut text)| {
+                if text.ends_with(term) {
+                    text.truncate(text.len() - term.len());
+                }
+                SearchHit {
+                    file: file.clone(),
+                    line,
+                    text,
+                }
             }));
         }
     }
@@ -1025,7 +1143,7 @@ static EXARCH_BUILTINS_ARR: [BuiltinEntry; 12] = [
     BuiltinEntry::new(
         Cow::Borrowed("grep-files"),
         scheme_grep_files,
-        "grep-files <pattern> <path>  — search PATH, a file or a directory walked recursively (Rust regex), in one read per matched file, giving [{file, line, text}]; `file` is named as view-text takes it. The walk skips hidden and ignored entries beneath PATH, never PATH itself: name one to search it.",
+        "grep-files <pattern> <path>  — search PATH, a file or a directory walked recursively (Rust regex), giving [{file, line, text}]; `file` is named as view-text takes it. The walk skips hidden and ignored entries beneath PATH, never PATH itself: name one to search it. It stays on PATH's filesystem, so `/proc` and other mounts beneath PATH are not searched.",
         BuiltinBody::Static(builtin_grep_files),
     ),
     BuiltinEntry::new(
