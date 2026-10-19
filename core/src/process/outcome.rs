@@ -160,7 +160,21 @@ pub enum SpawnFailure {
     PermissionDenied {
         found: Option<Box<std::path::Path>>,
     },
+    /// The walk stopped at something that is no program, whatever its mode.
+    NotAProgram {
+        /// As for `PermissionDenied`.
+        found: Option<Box<std::path::Path>>,
+        kind: Unrunnable,
+    },
     Io(Box<str>),
+}
+
+/// What a path head names instead of a program.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unrunnable {
+    Directory,
+    /// A file lacking the executable bit.
+    File,
 }
 
 impl SpawnFailure {
@@ -170,6 +184,19 @@ impl SpawnFailure {
             Self::NotFound => 127,
             _ => 126,
         }
+    }
+
+    /// The likeliest intent behind a path that names no program: itself as
+    /// text, bound to `binder` when the head is the whole right-hand side of
+    /// that `let`.
+    pub(crate) fn text_hint(&self, cmd: &str, binder: Option<&str>) -> Option<String> {
+        let Self::NotAProgram { found: None, .. } = self else {
+            return None;
+        };
+        Some(match binder {
+            Some(name) => format!("to bind the path as text, write `let {name} = #'{cmd}'#`"),
+            None => format!("to use the path as text, write `#'{cmd}'#`"),
+        })
     }
 }
 
@@ -216,6 +243,16 @@ impl CommandFailure {
                 "{cmd}: permission denied ({} is not executable)",
                 shown(path)
             ),
+            Self::Spawn(SpawnFailure::NotAProgram { found, kind }) => {
+                let what = match kind {
+                    Unrunnable::Directory => "a directory, not a command",
+                    Unrunnable::File => "a file, not an executable",
+                };
+                match found {
+                    Some(path) => format!("{cmd}: {} is {what}", shown(path)),
+                    None => format!("{cmd} is {what}"),
+                }
+            }
             Self::Spawn(SpawnFailure::Io(msg)) => format!("{cmd}: {msg}"),
         }
     }

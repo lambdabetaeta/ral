@@ -57,3 +57,29 @@ fn a_more_specific_hint_survives() {
         out.stderr
     );
 }
+
+/// `attempt` cannot make a command run, so a step that never became a process
+/// is not told to wrap itself in one; a path naming no program offers itself
+/// as text instead, bound when it is the whole of a `let`.
+#[test]
+fn a_command_that_never_ran_is_not_told_to_attempt() {
+    let out = run(
+        "ral_abandoned_unrunnable",
+        "echo a\nnosuchcmd-xyz\necho b\n",
+    );
+    assert!(!out.stderr.contains("attempt"), "stderr: {}", out.stderr);
+
+    let out = run("ral_abandoned_directory", "let d = /usr\necho b\n");
+    assert!(
+        out.stderr.contains("/usr is a directory, not a command"),
+        "stderr: {}",
+        out.stderr
+    );
+    assert!(
+        out.stderr
+            .contains("to bind the path as text, write `let d = #'/usr'#`"),
+        "stderr: {}",
+        out.stderr
+    );
+    assert!(!out.stderr.contains("attempt"), "stderr: {}", out.stderr);
+}

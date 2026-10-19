@@ -32,6 +32,11 @@ pub struct Error {
     pub(crate) site: Option<Box<CallSite>>,
 }
 
+/// Said the same way wherever a block is sequenced: a phrase list
+/// (`evaluator::run_phrases`) and a `Bind` chain (`evaluator::machine`).
+const ABANDONED_TAIL_HINT: &str = "later steps in this block did not run; wrap a step in \
+                                   `attempt` if its failure should not stop the rest";
+
 const _: () = assert!(
     std::mem::size_of::<Error>() < 128,
     "Error must stay under clippy's result_large_err threshold"
@@ -120,8 +125,23 @@ impl Error {
     /// A command that never became a process, whether the pre-spawn probe or
     /// the spawn itself found out.
     pub(crate) fn spawn_failure(cmd: &str, failure: SpawnFailure) -> Self {
+        let hint = failure.text_hint(cmd, None);
         let failure = CommandFailure::Spawn(failure);
-        Self::with_status(failure.message(cmd), Status::Process(failure))
+        Self {
+            hint: hint.map(Into::into),
+            ..Self::with_status(failure.message(cmd), Status::Process(failure))
+        }
+    }
+
+    /// The error of a step that halted a sequence with steps after it.  A
+    /// command that never became a process gets no advice to `attempt` it,
+    /// which cannot make it run; a hint already carried says more.
+    pub(crate) fn abandoning_tail(self) -> Self {
+        match self.status {
+            Status::Process(CommandFailure::Spawn(_)) => self,
+            _ if self.hint.is_some() => self,
+            _ => self.with_hint(ABANDONED_TAIL_HINT),
+        }
     }
 
     /// A bare exit code takes its hint from the session's `exit_hints` table.

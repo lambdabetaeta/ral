@@ -881,10 +881,8 @@ impl Machine {
     ) -> Settled<Focus> {
         match frame {
             Frame::To { .. } => Err(match s {
-                Break::Error(e) if e.hint.is_none() => {
-                    Break::Error(e.with_hint(super::ABANDONED_TAIL_HINT))
-                }
-                s => s,
+                Break::Error(e) => Break::Error(e.abandoning_tail()),
+                s @ Break::Escape(_) => s,
             }),
 
             Frame::Capture { mut prev, buf, .. } => {

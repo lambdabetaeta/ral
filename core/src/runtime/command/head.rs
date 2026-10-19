@@ -10,10 +10,10 @@
 use crate::capability::Program;
 use crate::ir::CommandName;
 use crate::path::{PathSearch, RealPath, is_executable_file};
-use crate::process::SpawnFailure;
+use crate::process::{SpawnFailure, Unrunnable};
 use crate::types::{Context, Error};
 use std::io::ErrorKind;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug)]
 pub(crate) struct Head {
@@ -85,12 +85,25 @@ impl Missing {
             // The walk kept the file it stopped at, so the refusal can name
             // it: "permission denied" alone leaves the user guessing which of
             // several `PATH` directories shadowed the one they meant.
-            Self::NotExecutable(found) => Error::spawn_failure(
-                shown,
-                SpawnFailure::PermissionDenied {
-                    found: Some(found.as_path().into()),
-                },
-            ),
+            Self::NotExecutable(found) => Error::spawn_failure(shown, refusal(shown, found)),
+        }
+    }
+}
+
+/// What stands at `found`, which the walk would not spawn.  A file the stat
+/// cannot reach, or one carrying `+x`, is refused by the OS: permission.
+fn refusal(shown: &str, found: &Path) -> SpawnFailure {
+    let not_a_program = |kind| SpawnFailure::NotAProgram {
+        found: (!shown.contains(['/', '\\'])).then(|| found.into()),
+        kind,
+    };
+    if found.is_dir() {
+        not_a_program(Unrunnable::Directory)
+    } else if found.exists() && !is_executable_file(found) {
+        not_a_program(Unrunnable::File)
+    } else {
+        SpawnFailure::PermissionDenied {
+            found: Some(found.into()),
         }
     }
 }

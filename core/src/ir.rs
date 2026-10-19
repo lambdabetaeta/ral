@@ -492,6 +492,19 @@ impl Comp {
             _ => None,
         }
     }
+
+    /// The command this computation is, looking through the checker's value
+    /// boundary: `Capture`, then its `Decode`.
+    pub(crate) fn command(&self) -> Option<&Exec> {
+        match &self.item {
+            CompKind::Exec(exec) => Some(exec),
+            CompKind::Capture(body) => body.command(),
+            CompKind::Bind { comp, rest, .. } if matches!(rest.item, CompKind::Decode(_)) => {
+                comp.command()
+            }
+            _ => None,
+        }
+    }
 }
 
 impl Mentions for Comp {

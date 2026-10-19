@@ -10,20 +10,15 @@ pub(crate) mod scope;
 pub(crate) mod val;
 
 use crate::ir::{Comp, Pattern, Phrase};
+use crate::process::CommandFailure;
 use crate::source::Spanned;
 use crate::ty::Scheme;
-use crate::types::{Binding, Break, Env, Mooring, Settled, Shell, Value};
+use crate::types::{Binding, Break, Env, Error, Mooring, Settled, Shell, Status, Value};
 use std::sync::Arc;
 
 pub use crate::runtime::capture::with_capture;
 #[cfg(all(test, unix))]
 pub(crate) use machine::STAGE_EVAL;
-
-/// A halt in a non-final step abandons what follows it. Said the same way
-/// wherever a block is sequenced: a phrase list here, a `Bind` chain in
-/// [`machine`].
-const ABANDONED_TAIL_HINT: &str = "later steps in this block did not run; wrap a step in \
-                                   `attempt` if its failure should not stop the rest";
 
 // ── Phrases ──────────────────────────────────────────────────────────────
 
@@ -86,10 +81,10 @@ pub(crate) fn run_phrases(
             });
         match result {
             Ok(v) => ran.outcome = Ok(v),
-            // A non-final phrase's own hintless error gets the same
-            // abandonment hint `Frame::To`'s halt gives a chain step.
-            Err(Break::Error(e)) if i != last && e.hint.is_none() => {
-                ran.outcome = Err(Break::Error(e.with_hint(ABANDONED_TAIL_HINT)));
+            // A non-final phrase's error says what it abandoned, as
+            // `Frame::To`'s halt does for a chain step.
+            Err(Break::Error(e)) if i != last => {
+                ran.outcome = Err(Break::Error(e.abandoning_tail()));
                 break;
             }
             Err(err) => {
@@ -117,7 +112,13 @@ impl Ran {
         shell: &mut Shell,
     ) -> Settled<Value> {
         let session = matches!(mode, Mode::Session);
-        let v = machine::evaluate(Arc::clone(comp), self.env.clone(), mooring, shell)?;
+        let v =
+            machine::evaluate(Arc::clone(comp), self.env.clone(), mooring, shell).map_err(|b| {
+                match b {
+                    Break::Error(e) => Break::Error(as_let_text(e, pattern, comp)),
+                    b @ Break::Escape(_) => b,
+                }
+            })?;
         for (name, value) in pattern::destructure(pattern, &v)? {
             let scheme = schemes
                 .iter()
@@ -134,6 +135,27 @@ impl Ran {
             shell.env = self.env.clone();
         }
         Ok(Value::Unit)
+    }
+}
+
+/// A `let` whose right-hand side is one bare word naming no program: the
+/// hint says how to bind that word as text.
+fn as_let_text(e: Error, pattern: &Pattern, comp: &Comp) -> Error {
+    let (
+        Pattern::Name(binder),
+        Some(exec),
+        Some(cmd),
+        Status::Process(CommandFailure::Spawn(failure)),
+    ) = (pattern, comp.command(), e.command.as_deref(), &e.status)
+    else {
+        return e;
+    };
+    match failure
+        .text_hint(cmd, Some(binder))
+        .filter(|_| exec.args.is_empty())
+    {
+        Some(hint) => e.with_hint(hint),
+        None => e,
     }
 }
 

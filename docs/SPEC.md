@@ -1410,9 +1410,11 @@ command with the same byte-pipe, failure, audit, and sandbox behavior as an
 external program. Use a path head to select a particular system binary.
 
 A missing bare command fails with status 127. A file found on `PATH` but not
-executable fails with status 126. A non-zero process result is a failure,
-except in a non-final byte-pipe stage that was still running when the stage
-reading it ended.
+executable fails with status 126, as does a path naming a directory; the
+diagnostic says which, and a path head offers itself as text (`#'…'#`). A
+command that never became a process is not advised to `attempt`. A non-zero
+process result is a failure, except in a non-final byte-pipe stage that was
+still running when the stage reading it ended.
 
 ### 6.8. Returned values and emitted bytes
 

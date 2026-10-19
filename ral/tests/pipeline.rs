@@ -1312,9 +1312,8 @@ fn pipeline_path_literal_exec_failure_reports_127() {
 
 #[test]
 fn pipeline_permission_denied_path_reports_126() {
-    // A non-executable file in a pipeline produces ExecReport with
-    // PermissionDenied and exit 126 — the POSIX status for "found
-    // but not executable".
+    // A non-executable file in a pipeline is refused with exit 126 — the
+    // POSIX status for "found but not executable" — and named as a file.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("not_exec");
     std::fs::write(&path, b"#!/bin/sh\necho hi\n").unwrap();
@@ -1328,8 +1327,8 @@ fn pipeline_permission_denied_path_reports_126() {
         .expect("permission-denied pipeline hung");
     assert_eq!(o.status, 126, "stderr: {}", o.stderr);
     assert!(
-        o.stderr.to_lowercase().contains("permission denied"),
-        "must mention permission denied; stderr: {}",
+        o.stderr.contains("is a file, not an executable"),
+        "must say what the path is; stderr: {}",
         o.stderr
     );
 }

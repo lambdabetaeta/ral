@@ -22,7 +22,7 @@ pub(crate) mod slot;
 pub(crate) mod spawn_lock;
 pub(crate) mod tree;
 
-pub(crate) use outcome::{ChildEnd, CommandFailure, Signal, SpawnFailure, WaitOutcome};
+pub(crate) use outcome::{ChildEnd, CommandFailure, Signal, SpawnFailure, Unrunnable, WaitOutcome};
 
 pub(crate) use launch::{Launch, StdioSpec};
 pub use lease::{RequestedTerminalAccess, TerminalLease};
