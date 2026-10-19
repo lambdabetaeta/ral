@@ -109,9 +109,9 @@ pub struct Service {
     pub auth: Auth,
     /// The sole authority on whether this service's turns cost money.
     pub billing: Billing,
-    /// Whether this service takes `vendor/model` slugs and serving-endpoint
-    /// pins — true for `OpenRouter` alone, and the reason no code below compares
-    /// a service name against the string "openrouter".
+    /// Whether this service takes `vendor/model` slugs and admits a
+    /// [`Via`](super::Via) — true for `OpenRouter` alone, and the reason no code
+    /// below compares a service name against the string "openrouter".
     pub routes: bool,
     pub meter: Meter,
 }

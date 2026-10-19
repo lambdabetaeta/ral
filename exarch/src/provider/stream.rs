@@ -86,7 +86,6 @@ impl Engine {
         &self,
         transport: &Transport,
         selection: &Selection,
-        route: Option<&str>,
         request: Request<'_>,
         on_delta: &mut F,
         cancel: &cancel::Token,
@@ -99,7 +98,7 @@ impl Engine {
             self.cache_key(),
             selection.max_tokens_override,
             &selection.tuning,
-            route,
+            selection.via.as_ref(),
         );
 
         let mut heard = false;

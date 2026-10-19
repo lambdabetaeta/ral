@@ -199,10 +199,8 @@ fn apply_model_switch(app: &mut App, ctx: &CommandCtx<'_>, tab: AgentId, pick: &
     let provider = agent.provider.clone();
     // The token override is no part of the selection, so it rides across by hand.
     let built = match ctx.bureau.build(
-        &pick.account,
-        pick.model.clone(),
+        pick.choice.clone(),
         &pick.tuning,
-        pick.route.clone(),
         provider.current().max_tokens_override(),
     ) {
         Ok(built) => built,
@@ -221,11 +219,11 @@ fn apply_model_switch(app: &mut App, ctx: &CommandCtx<'_>, tab: AgentId, pick: &
     if let Some(sb) = app.tabs.scrollback(tab) {
         sb.recorder()
             .emit_or_report(crate::record::Forensic::ModelChanged {
-                model: pick.model.clone(),
+                model: pick.choice.model.clone(),
                 context_window,
-                label: identity::label(&pick.account, &available),
-                service: pick.account.service.name.as_str().to_string(),
-                account: pick.account.id.as_str().to_string(),
+                label: identity::label(&pick.choice.account, &available),
+                service: pick.choice.account.service.name.as_str().to_string(),
+                account: pick.choice.account.id.as_str().to_string(),
             });
     }
 }

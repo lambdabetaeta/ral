@@ -350,7 +350,7 @@ fn deliberation_and_its_work_read_as_one_group() {
         Record::Forensic(Forensic::TurnStarted {
             turn: 1,
             tuning: crate::provider::Tuning::initial(),
-            route: None,
+            via: None,
         }),
     );
     let _ = log.call(&mut sb, "read the block", "read 'block.rs'");

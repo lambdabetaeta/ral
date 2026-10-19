@@ -275,7 +275,7 @@ fn the_door_answers_one_element_per_turn() {
     s.record_emitter().emit_or_report(Forensic::TurnStarted {
         turn: s.context().next_id(),
         tuning: Tuning::default(),
-        route: None,
+        via: None,
     });
     s.append_assistant(ChatMessage::assistant("first answer"), vec![], None)
         .unwrap();

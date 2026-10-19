@@ -6,18 +6,19 @@
 //! cwd, so the sandboxed agent has no path to it and needs no deny-list
 //! entry.
 
-use crate::provider::Provider;
 use crate::provider::identity::{self, Account};
 use crate::provider::models::{
     ListFailure, Listed, resolve_account, resolve_model_provider, resolve_pinned_provider,
 };
+use crate::provider::{Choice, Provider, Via};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 const STATE_FILE: &str = "state.json";
 
-/// The persisted selection: provider and model only. Unknown keys are
-/// ignored, so a file written by another version of exarch still loads.
+/// The persisted choice — account, model and via; tuning is never replayed.
+/// Unknown keys are ignored, so a file written by another version of exarch
+/// still loads.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct State {
     /// The selected account's [`identity::AccountId::as_str`] rendering,
@@ -31,24 +32,29 @@ pub struct State {
     #[serde(default)]
     pub provider_name: String,
     pub model: String,
+    /// The upstreams the model was served via, rechecked against its
+    /// endpoints when restored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<Via>,
 }
 
 impl State {
-    /// Build state from a live selection. `available` is the set `account`
+    /// Build state from a live choice. `available` is the set its account
     /// was chosen from — needed only to compute [`Self::provider_name`]'s
     /// snapshot, per [`identity::label`]'s own rule that a label is always
     /// computed against the set in hand, never cached on the account itself.
-    pub fn new(account: &Account, available: &[Account], model: &str) -> Self {
+    pub fn new(choice: &Choice, available: &[Account]) -> Self {
         Self {
-            provider: account.id.as_str().to_string(),
-            provider_name: identity::label(account, available),
-            model: model.to_string(),
+            provider: choice.account.id.as_str().to_string(),
+            provider_name: identity::label(&choice.account, available),
+            model: choice.model.clone(),
+            via: choice.via.clone(),
         }
     }
 
     /// The persisted form of `provider`, the selection in force.
     pub fn of(provider: &Provider, available: &[Account]) -> Self {
-        Self::new(&provider.account, available, provider.model())
+        Self::new(&provider.choice(), available)
     }
 
     /// The stored account-id rendering matched against the live `available`
@@ -60,57 +66,56 @@ impl State {
     }
 }
 
-/// An account and one of its models.
-pub(crate) struct Pair {
-    pub(crate) account: Account,
-    pub(crate) model: String,
-}
-
 /// What a launch opens on, before the bureau weighs it.
 pub(crate) enum Opening {
-    /// The pair the flags named; its refusal ends the launch.
-    Named(Pair),
-    /// The pair remembered for this project; its refusal opens the picker over
-    /// these accounts instead.
-    Restored(Pair, Vec<Account>),
-    /// No pair to try: the picker over these accounts, saying why when that
+    /// The choice the flags named; its refusal ends the launch.
+    Named(Choice),
+    /// The choice remembered for this project; its refusal opens the picker
+    /// over these accounts instead.
+    Restored(Choice, Vec<Account>),
+    /// No choice to try: the picker over these accounts, saying why when that
     /// is news.
     Choose(Vec<Account>, Option<String>),
 }
 
-/// What the flags and `saved`, the selection remembered for this project, ask
-/// a launch to open on.
+/// What the flags and `saved`, the choice remembered for this project, ask a
+/// launch to open on.
 ///
-/// `--model` names a pair outright, on `--provider`'s account or else the one
-/// whose listing names the model. `--provider` alone restores the model saved
-/// for that account, else asks for one. With neither, the saved pair is
-/// restored, else the user is asked.
+/// `--model` names a choice outright, on `--provider`'s account or else the
+/// one whose listing names the model, via `--via`'s upstreams when given.
+/// `--provider` alone restores the model saved for that account, else asks
+/// for one. With neither, the saved choice is restored, else the user is
+/// asked. A restore carries the saved via.
 pub(crate) fn opening(
     provider_flag: Option<&str>,
     model_flag: Option<&str>,
+    via_flag: Option<&Via>,
     saved: Option<&State>,
     available: &[Account],
     listing: impl FnMut(&Account) -> Result<Vec<Listed>, ListFailure>,
 ) -> Result<Opening, String> {
     if let Some(model) = model_flag {
         let remedy = "pass --provider to say which";
-        return named(provider_flag, model, available, listing, remedy).map(Opening::Named);
+        return named(provider_flag, model, via_flag, available, listing, remedy)
+            .map(Opening::Named);
     }
-    let pair = |account: Account, model: String| Pair { account, model };
+    let restore = |account: Account, s: &State| Choice {
+        account,
+        model: s.model.clone(),
+        via: s.via.clone(),
+    };
     let pinned = provider_flag
         .map(|name| resolve_pinned_provider(name, available))
         .transpose()?;
     Ok(match pinned {
         Some(account) => match saved.filter(|s| s.provider == account.id.as_str()) {
-            Some(s) => Opening::Restored(pair(account.clone(), s.model.clone()), vec![account]),
+            Some(s) => Opening::Restored(restore(account.clone(), s), vec![account]),
             None => Opening::Choose(vec![account], None),
         },
         None => match saved {
             None => Opening::Choose(available.to_vec(), None),
             Some(s) => match s.account(available) {
-                Some(account) => {
-                    Opening::Restored(pair(account, s.model.clone()), available.to_vec())
-                }
+                Some(account) => Opening::Restored(restore(account, s), available.to_vec()),
                 None => Opening::Choose(
                     available.to_vec(),
                     Some(format!(
@@ -123,23 +128,25 @@ pub(crate) fn opening(
     })
 }
 
-/// The pair `model` names: on `provider`'s account, else on the one account
-/// whose listing names it. `remedy` tells the human how to choose when
-/// several do.
+/// The choice `model` names: on `provider`'s account, else on the one
+/// account whose listing names it, served via `via`. `remedy` tells the human
+/// how to choose when several accounts list it.
 pub(crate) fn named(
     provider: Option<&str>,
     model: &str,
+    via: Option<&Via>,
     available: &[Account],
     listing: impl FnMut(&Account) -> Result<Vec<Listed>, ListFailure>,
     remedy: &str,
-) -> Result<Pair, String> {
+) -> Result<Choice, String> {
     let account = match provider {
         Some(name) => resolve_pinned_provider(name, available)?,
         None => resolve_model_provider(model, available, listing, remedy)?,
     };
-    Ok(Pair {
+    Ok(Choice {
         account,
         model: model.to_string(),
+        via: via.cloned(),
     })
 }
 
@@ -195,12 +202,20 @@ mod tests {
         dir
     }
 
+    fn choice(account: &Account, model: &str) -> Choice {
+        Choice {
+            account: account.clone(),
+            model: model.into(),
+            via: None,
+        }
+    }
+
     #[test]
     fn save_load_round_trip() {
         let dir = tmp_dir();
         let deepseek = Account::built_in("deepseek");
         let available = [Account::built_in("anthropic"), deepseek.clone()];
-        let state = State::new(&deepseek, &available, "deepseek-reasoner");
+        let state = State::new(&choice(&deepseek, "deepseek-reasoner"), &available);
         save(&dir, &state).unwrap();
         let loaded = load(&dir).expect("state should load");
         assert_eq!(loaded, state);
@@ -218,11 +233,40 @@ mod tests {
             Auth::Key("LOCAL_LLAMA_API_KEY".into()),
         ));
         let available = [llama.clone()];
-        let state = State::new(&llama, &available, "model-a");
+        let state = State::new(&choice(&llama, "model-a"), &available);
         save(&dir, &state).unwrap();
         let loaded = load(&dir).expect("state should load");
         assert_eq!(loaded.provider, "local-llama");
         assert_eq!(loaded.account(&available), Some(llama));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_via_round_trips() {
+        let dir = tmp_dir();
+        let openrouter = Account::built_in("openrouter");
+        let available = [openrouter.clone()];
+        let via = Via::parse("deepinfra/fp8,novita").unwrap();
+        let state = State::new(
+            &Choice {
+                via: Some(via),
+                ..choice(&openrouter, "vendor/model-a")
+            },
+            &available,
+        );
+        save(&dir, &state).unwrap();
+        assert_eq!(load(&dir), Some(state));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_state_without_a_via_writes_no_via_key() {
+        let dir = tmp_dir();
+        let anthropic = Account::built_in("anthropic");
+        save(&dir, &saved(&anthropic, "model-a")).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path_in(&dir)).unwrap()).unwrap();
+        assert!(json.get("via").is_none(), "{json}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -247,6 +291,7 @@ mod tests {
             provider: "mistral".into(),
             provider_name: "mistral".into(),
             model: "m".into(),
+            via: None,
         };
         let available = [Account::built_in("anthropic")];
         assert!(state.account(&available).is_none());
@@ -275,7 +320,7 @@ mod tests {
     }
 
     fn saved(account: &Account, model: &str) -> State {
-        State::new(account, std::slice::from_ref(account), model)
+        State::new(&choice(account, model), std::slice::from_ref(account))
     }
 
     fn lists(models: &[&str]) -> impl FnMut(&Account) -> Result<Vec<Listed>, ListFailure> {
@@ -291,15 +336,13 @@ mod tests {
         match opening(
             Some("anthropic"),
             None,
+            None,
             Some(&state),
             &available,
             lists(&[]),
         ) {
-            Ok(Opening::Restored(pair, among)) => {
-                assert_eq!(
-                    (pair.account, pair.model.as_str()),
-                    (anthropic.clone(), "model-a")
-                );
+            Ok(Opening::Restored(restored, among)) => {
+                assert_eq!(restored, choice(&anthropic, "model-a"));
                 assert_eq!(among, [anthropic]);
             }
             _ => panic!("the saved model is restored"),
@@ -315,6 +358,7 @@ mod tests {
         match opening(
             Some("anthropic"),
             None,
+            None,
             Some(&state),
             &available,
             lists(&[]),
@@ -329,7 +373,7 @@ mod tests {
         let gone = Account::declared("gone");
         let state = saved(&gone, "model-a");
         let available = [Account::built_in("anthropic")];
-        match opening(None, None, Some(&state), &available, lists(&[])) {
+        match opening(None, None, None, Some(&state), &available, lists(&[])) {
             Ok(Opening::Choose(among, Some(why))) => {
                 assert_eq!(among, available);
                 assert!(why.contains("'gone'"), "got: {why}");
@@ -344,9 +388,47 @@ mod tests {
             Account::built_in("anthropic"),
             Account::built_in("deepseek"),
         ];
-        match opening(None, None, None, &available, lists(&[])) {
+        match opening(None, None, None, None, &available, lists(&[])) {
             Ok(Opening::Choose(among, None)) => assert_eq!(among, available),
             _ => panic!("a choice among every account"),
+        }
+    }
+
+    #[test]
+    fn model_with_via_names_a_choice_carrying_it() {
+        let openrouter = Account::built_in("openrouter");
+        let via = Via::parse("deepinfra/fp8").unwrap();
+        match opening(
+            None,
+            Some("vendor/model-a"),
+            Some(&via),
+            None,
+            std::slice::from_ref(&openrouter),
+            lists(&["vendor/model-a"]),
+        ) {
+            Ok(Opening::Named(named)) => assert_eq!(
+                named,
+                Choice {
+                    via: Some(via),
+                    ..choice(&openrouter, "vendor/model-a")
+                }
+            ),
+            _ => panic!("--model names a choice"),
+        }
+    }
+
+    #[test]
+    fn a_restore_carries_the_saved_via() {
+        let openrouter = Account::built_in("openrouter");
+        let via = Via::parse("deepinfra/fp8").unwrap();
+        let state = State {
+            via: Some(via.clone()),
+            ..saved(&openrouter, "vendor/model-a")
+        };
+        let available = [openrouter];
+        match opening(None, None, None, Some(&state), &available, lists(&[])) {
+            Ok(Opening::Restored(restored, _)) => assert_eq!(restored.via, Some(via)),
+            _ => panic!("the saved choice is restored"),
         }
     }
 }

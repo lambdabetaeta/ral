@@ -98,6 +98,9 @@ selection persists per project under `$XDG_STATE_HOME/exarch/<project>/`
 Because it lives outside the working directory, the sandboxed agent cannot
 reach it. For headless or scripted runs, `--model <name>` sets the initial
 model (its provider is the one available provider whose list contains it).
+On OpenRouter, `--via <tags>` pins the upstreams that serve it, comma-separated
+and most preferred first; a request none of them can serve fails rather than
+falling back elsewhere.
 A model its provider does not list is never run. No provider is given a model
 of its own: with no `--model` and nothing saved — or a saved model that no
 longer stands — exarch opens the picker before the session starts, and a

@@ -1,7 +1,7 @@
 //! Provider-independent request shaping.
 
-use super::Toolset;
 use super::tls::{STREAM_HEADER_TIMEOUT, STREAM_READ_TIMEOUT};
+use super::{Toolset, Via};
 use genai::chat::{ChatMessage, ChatOptions, ReasoningEffort};
 use serde::{Deserialize, Serialize};
 
@@ -109,13 +109,12 @@ impl PartialEq for Tuning {
     }
 }
 
-/// `OpenRouter`'s provider-routing extra body: pin to `slug` with fallbacks
-/// off, so an explicitly chosen route errors rather than silently landing on a
-/// different upstream.
-fn openrouter_extra_body(slug: &str) -> serde_json::Value {
+/// `OpenRouter`'s provider-routing body: `via`'s upstreams in order, and no
+/// others.
+fn via_body(via: &Via) -> serde_json::Value {
     serde_json::json!({
         "provider": {
-            "order": [slug],
+            "order": via.tags(),
             "allow_fallbacks": false,
         }
     })
@@ -129,7 +128,7 @@ pub(super) fn complete_options(
     cache_key: &str,
     max_tokens_override: Option<u32>,
     tuning: &Tuning,
-    route: Option<&str>,
+    via: Option<&Via>,
 ) -> ChatOptions {
     let mut options = ChatOptions::default()
         .with_capture_usage(true)
@@ -151,8 +150,8 @@ pub(super) fn complete_options(
     if let Some(top_p) = tuning.top_p {
         options = options.with_top_p(top_p);
     }
-    if let Some(slug) = route {
-        options = options.with_extra_body(openrouter_extra_body(slug));
+    if let Some(via) = via {
+        options = options.with_extra_body(via_body(via));
     }
     options
 }
@@ -174,12 +173,13 @@ mod tests {
     }
 
     #[test]
-    fn openrouter_route_pins_slug_without_fallback() {
-        let options = complete_options("cache", None, &Tuning::default(), Some("deepinfra"));
+    fn a_via_orders_its_upstreams_without_fallback() {
+        let via = Via::parse("deepinfra/fp8,novita").unwrap();
+        let options = complete_options("cache", None, &Tuning::default(), Some(&via));
         assert_eq!(
             options.extra_body,
             Some(serde_json::json!({
-                "provider": { "order": ["deepinfra"], "allow_fallbacks": false }
+                "provider": { "order": ["deepinfra/fp8", "novita"], "allow_fallbacks": false }
             }))
         );
     }

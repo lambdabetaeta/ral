@@ -26,7 +26,7 @@ fn a_rewind_cuts_from_the_anchors_first_block() {
     let started = |turn| Forensic::TurnStarted {
         turn,
         tuning: Tuning::default(),
-        route: None,
+        via: None,
     };
     let answer = |text: &str| Display::Answer { text: text.into() };
     let mut memo = Blocks::default();
@@ -189,7 +189,7 @@ fn a_started_turn_opens_a_turn_block() {
         &Forensic::TurnStarted {
             turn: 7,
             tuning: Tuning::default(),
-            route: None,
+            via: None,
         },
     );
     assert_eq!(delta, Delta::Opened(BlockId::new(Seq::new(1))));

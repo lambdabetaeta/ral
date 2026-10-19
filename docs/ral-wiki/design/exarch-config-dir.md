@@ -20,7 +20,7 @@ to trust:
   one directory the operator writes and the agent never can.
 - **state home** — `$XDG_STATE_HOME/exarch/<project-slug>/` via
   `app::EXARCH.project_dir(cwd)`
-  — the persisted provider-and-model pair (`state.json`) and the per-run session logs,
+  — the persisted choice of provider, model and via (`state.json`) and the per-run session logs,
   keyed by a slug of the launch `cwd` so a project's exarch state is one findable
   directory, never scattered into the working tree.
 - **cache home** — `$XDG_CACHE_HOME/exarch/` — the model catalog cache, a

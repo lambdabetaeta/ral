@@ -50,14 +50,15 @@ impl Listed {
     }
 }
 
-/// One upstream provider `OpenRouter` can route a given model to — a row of the
-/// `/model` overlay's provider control, distilled from the per-model
-/// `/endpoints` listing.
+/// One upstream `OpenRouter` can serve a given model through — a tag of the
+/// `/model` overlay's via row, distilled from the per-model `/endpoints`
+/// listing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderEndpoint {
     pub provider_name: String,
-    /// The full endpoint tag accepted by `provider.order`, including variants.
-    pub slug: String,
+    /// The full endpoint tag `provider.order` takes, variant included, e.g.
+    /// `deepinfra/fp4`.
+    pub tag: String,
     pub context_length: Option<u64>,
     pub quantization: Option<String>,
 }
@@ -307,7 +308,7 @@ struct EndpointsData {
 struct EndpointWire {
     #[serde(default)]
     provider_name: String,
-    /// `provider-slug/variant`, e.g. `"deepinfra/fp4"`.
+    /// `provider/variant`, e.g. `"deepinfra/fp4"`.
     #[serde(default)]
     tag: String,
     context_length: Option<u64>,
@@ -318,7 +319,7 @@ impl ProviderEndpoint {
     fn from_wire(wire: EndpointWire) -> Self {
         Self {
             provider_name: wire.provider_name,
-            slug: wire.tag,
+            tag: wire.tag,
             context_length: wire.context_length,
             quantization: wire.quantization,
         }
@@ -733,21 +734,21 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_slug_preserves_the_full_tag() {
+    fn an_endpoint_keeps_its_full_tag() {
         let with_variant = ProviderEndpoint::from_wire(EndpointWire {
             provider_name: "DeepInfra".into(),
             tag: "deepinfra/fp4".into(),
             context_length: Some(163_840),
             quantization: Some("fp4".into()),
         });
-        assert_eq!(with_variant.slug, "deepinfra/fp4");
+        assert_eq!(with_variant.tag, "deepinfra/fp4");
         let bare = ProviderEndpoint::from_wire(EndpointWire {
             provider_name: "StreamLake".into(),
             tag: "streamlake".into(),
             context_length: Some(128_000),
             quantization: None,
         });
-        assert_eq!(bare.slug, "streamlake");
+        assert_eq!(bare.tag, "streamlake");
     }
 
     #[test]
@@ -758,7 +759,7 @@ mod tests {
             model.to_string(),
             Ok(vec![ProviderEndpoint {
                 provider_name: "DeepInfra".into(),
-                slug: "deepinfra".into(),
+                tag: "deepinfra".into(),
                 context_length: Some(163_840),
                 quantization: Some("fp4".into()),
             }]),

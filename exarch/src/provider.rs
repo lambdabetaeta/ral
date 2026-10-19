@@ -30,9 +30,10 @@ pub mod tls;
 pub mod tools;
 mod transport;
 mod usage;
+pub mod via;
 mod wire;
 
-pub use bureau::{Bureau, Holdings};
+pub use bureau::{Bureau, Choice, Holdings};
 pub use error::{CancelSite, CutShort, Limit, ProviderError, Refusal};
 pub(crate) use error::{error_object, extract_url};
 pub use identity::{Account, AccountId, Auth, Billing, Meter, Service, ServiceName};
@@ -45,6 +46,7 @@ pub use stream::{Delta, Served, StepOut};
 pub use tools::Toolset;
 pub use transport::Engine;
 pub use usage::{Usage, UsageParts, humanize_tokens};
+pub use via::Via;
 
 pub use genai::chat::{ReasoningEffort, StopReason, ToolCall};
 
@@ -77,10 +79,12 @@ pub(crate) struct Selection {
     pub(crate) model: String,
     pub(crate) max_tokens_override: Option<u32>,
     pub(crate) tuning: Tuning,
-    pub(crate) route: Option<String>,
+    /// `Some` only on a service that routes — [`Bureau::build`] refuses it
+    /// elsewhere.
+    pub(crate) via: Option<Via>,
 }
 
-/// A session's chosen model, tuning, and routing, plus the backend its
+/// A session's chosen model, tuning, and upstreams, plus the backend its
 /// requests run on.
 pub struct Provider {
     backend: Backend,
@@ -134,7 +138,7 @@ impl Provider {
                 model: model.to_string(),
                 max_tokens_override: None,
                 tuning: Tuning::default(),
-                route: None,
+                via: None,
             },
             None,
         )
@@ -158,6 +162,21 @@ impl Provider {
     /// The account this selection authenticates as.
     pub fn account(&self) -> &Account {
         &self.account
+    }
+
+    /// The upstreams this selection is served via; `None` leaves the choice
+    /// to the service.
+    pub fn via(&self) -> Option<&Via> {
+        self.selection.via.as_ref()
+    }
+
+    /// The account, model and via this selection was minted for.
+    pub fn choice(&self) -> Choice {
+        Choice {
+            account: self.account.clone(),
+            model: self.selection.model.clone(),
+            via: self.selection.via.clone(),
+        }
     }
 
     /// The record's last reading of this selection's account; empty when
@@ -210,14 +229,8 @@ impl Provider {
                 rations,
             } => {
                 rations.admit(&self.account, self.model(), meters)?;
-                let outcome = engine.complete(
-                    transport,
-                    &self.selection,
-                    self.openrouter_route(),
-                    request,
-                    on_delta,
-                    cancel,
-                );
+                let outcome =
+                    engine.complete(transport, &self.selection, request, on_delta, cancel);
                 rations.settle(&self.account.id, self.model(), &outcome);
                 outcome
             }
@@ -232,16 +245,6 @@ impl Provider {
             }
             error
         })
-    }
-
-    /// The `OpenRouter` serving-provider pin, when this selection's service
-    /// actually routes — never sent to a service for which the string would
-    /// mean nothing.  What the request carries, hence what the trace records.
-    pub fn openrouter_route(&self) -> Option<&str> {
-        self.selection
-            .route
-            .as_deref()
-            .filter(|_| self.account.service.routes)
     }
 }
 
@@ -259,19 +262,4 @@ pub fn admit_login(holdings: &Holdings, token: &oauth::OAuthToken) -> (AccountId
         let label = identity::label(&account, &store.available());
         (account.id, label)
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn openrouter_route_is_ignored_by_other_providers() {
-        let mut provider = Provider::scripted("model-a", scripted::Script::new());
-        provider.selection.route = Some("deepinfra".into());
-        assert_eq!(provider.openrouter_route(), None);
-
-        provider.account = Account::built_in("openrouter");
-        assert_eq!(provider.openrouter_route(), Some("deepinfra"));
-    }
 }

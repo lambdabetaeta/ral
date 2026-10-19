@@ -35,7 +35,7 @@ pub use session::{
 pub use view::{BLOCKS_WINDOW, Block, BlockKind, Delta, Verdict, View, context_rows_card};
 
 use crate::card::{Card, Change, DoneOutcome};
-use crate::provider::{Provider, ProviderError, Tuning, Usage};
+use crate::provider::{Provider, ProviderError, Tuning, Usage, Via};
 use genai::chat::ChatMessage;
 use ral_core::first_order::FOValue;
 use serde::{Deserialize, Serialize};
@@ -378,16 +378,15 @@ pub enum Forensic {
     /// [`Self::SessionEnded`] is written on every drop and says no such thing.
     SessionClosed,
     /// The meta half of taking a turn: the shape the request goes out under,
-    /// sampling and routing both.  `turn` is the id the request will produce,
+    /// sampling and upstreams both.  `turn` is the id the request will produce,
     /// so a retaken request shows the same one twice.
     TurnStarted {
         turn: u64,
         tuning: Tuning,
-        /// The serving provider requested, which is not the selection's stored
-        /// pin (a service that does not route drops it) nor the provider that
-        /// answered: that is `UsageDelta::provider`.
+        /// The upstreams the request asked for, as the selection holds them —
+        /// not the one that answered, which is `UsageDelta::provider`.
         #[serde(skip_serializing_if = "Option::is_none")]
-        route: Option<String>,
+        via: Option<Via>,
     },
     /// One call's usage, with who answered it where the backend says: the
     /// response's generation id and the upstream provider it was served by.

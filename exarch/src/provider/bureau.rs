@@ -17,7 +17,7 @@ use ral_core::sync::LockExt;
 use super::allowance::{LiveMeters, Survey};
 use super::credential::CredentialStore;
 use super::models::{Listed, LiveSource, ModelCatalog, ModelSource, ProviderEndpoint, listing_of};
-use super::{Account, Backend, Engine, Provider, Rations, Selection, Tuning, oauth, pricing};
+use super::{Account, Backend, Engine, Provider, Rations, Selection, Tuning, Via, oauth, pricing};
 use crate::app::App;
 
 /// The credentials, model catalog, and allowance record an application shares.
@@ -54,20 +54,20 @@ impl Holdings {
     }
 
     /// `model`'s serving endpoints: the catalog's, else fetched and recorded;
-    /// `None` when the fetch fails.
-    fn endpoints_of(&self, model: &str) -> Option<Vec<ProviderEndpoint>> {
+    /// the fetch's own error when it fails.
+    fn endpoints_of(&self, model: &str) -> Result<Vec<ProviderEndpoint>, String> {
         let source = {
             let catalog = self.catalog.lock_ignore_poison();
             if let Some(cached) = catalog.cached_endpoints(model) {
-                return Some(cached);
+                return Ok(cached);
             }
             catalog.source().clone()
         };
-        let fetched = source.endpoints(model).ok()?;
+        let fetched = source.endpoints(model)?;
         self.catalog
             .lock_ignore_poison()
             .record_endpoints(model, fetched.clone());
-        Some(fetched)
+        Ok(fetched)
     }
 
     /// Change the credentials, and have the catalog list with them as they
@@ -78,6 +78,16 @@ impl Holdings {
         self.catalog.lock_ignore_poison().set_roster(store.roster());
         out
     }
+}
+
+/// An account, one of its models, and the upstreams it is served via: what a
+/// mint is asked for. `via` is `None` to leave the upstream to a routing
+/// service, and must be for any other.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Choice {
+    pub account: Account,
+    pub model: String,
+    pub via: Option<Via>,
 }
 
 /// Where a session's providers come from.
@@ -107,9 +117,26 @@ fn window_of(
     Ok(entry.context_window.or_else(|| fallback(model)))
 }
 
-/// The window of the endpoint `slug` among `endpoints`, when it lists one.
-fn pinned_window(endpoints: &[ProviderEndpoint], slug: &str) -> Option<u64> {
-    endpoints.iter().find(|e| e.slug == slug)?.context_length
+/// The window `model` runs under via `via` on `account`: refused unless its
+/// service routes and the model's endpoints, fetched by `endpoints`, list every
+/// upstream `via` names; else the least its upstreams hold.
+fn window_via(
+    account: &Account,
+    label: &str,
+    model: &str,
+    via: &Via,
+    listed: Option<u64>,
+    endpoints: impl FnOnce() -> Result<Vec<ProviderEndpoint>, String>,
+) -> Result<Option<u64>, String> {
+    if !account.service.routes {
+        return Err(format!(
+            "'{label}' does not route, so it cannot serve '{model}' via {via}"
+        ));
+    }
+    let endpoints =
+        endpoints().map_err(|why| format!("could not list the upstreams of '{model}': {why}"))?;
+    via.window(&endpoints, listed)
+        .map_err(|why| format!("'{model}' via {via}: {why}"))
 }
 
 /// The selection `account` can carry: a plan refuses sampling and an output
@@ -118,7 +145,7 @@ fn selection(
     account: &Account,
     model: String,
     tuning: &Tuning,
-    route: Option<String>,
+    via: Option<Via>,
     max_tokens: Option<u32>,
 ) -> Selection {
     if account.service.shares_a_plan() {
@@ -129,14 +156,14 @@ fn selection(
                 effort: tuning.effort.clone(),
                 ..Tuning::default()
             },
-            route,
+            via,
         }
     } else {
         Selection {
             model,
             max_tokens_override: max_tokens,
             tuning: tuning.clone(),
-            route,
+            via,
         }
     }
 }
@@ -155,40 +182,46 @@ impl Bureau {
         }
     }
 
-    /// Mint a provider on this session's engine — the only caller of
-    /// [`Provider::build`], and so the one door every selection passes:
-    /// `account` must list `model`.
+    /// Mint `choice` on this session's engine — the only caller of
+    /// [`Provider::build`], and so the one door every selection passes: its
+    /// account must list its model, and serve it via its upstreams.
     ///
     /// # Errors
-    /// If the bureau is scripted, if `account` has no resolved credential, if
-    /// its listing cannot be had, or if the listing does not name `model`.
+    /// If the bureau is scripted, if the account has no resolved credential,
+    /// if its listing cannot be had or does not name the model, or if the via
+    /// is refused: on a service that does not route, or naming an upstream
+    /// the model's endpoints do not list.
     pub fn build(
         &self,
-        account: &Account,
-        model: String,
+        choice: Choice,
         tuning: &Tuning,
-        route: Option<String>,
         max_tokens: Option<u32>,
     ) -> Result<Arc<Provider>, String> {
         let Self::Live { engine, holdings } = self else {
             return Err(mints_nothing());
         };
+        let Choice {
+            account,
+            model,
+            via,
+        } = choice;
         // Locked only long enough to clone the roster out; the reads the meter
         // later runs have the lock long released.
         let roster = holdings.store.lock_ignore_poison().roster();
-        let label = roster.label(account);
+        let label = roster.label(&account);
         let credential = roster
             .credential(&account.id)
             .ok_or_else(|| format!("{label} has no resolved credential"))?;
-        let listed = listing_of(&holdings.catalog, &account.id)
+        let listing = listing_of(&holdings.catalog, &account.id)
             .map_err(|why| format!("{label} could not list its models: {why}"))?;
-        // A pinned endpoint's own window binds, not the model's.
-        let context_window = route
-            .as_deref()
-            .filter(|_| account.service.routes)
-            .and_then(|slug| pinned_window(&holdings.endpoints_of(&model)?, slug))
-            .or(window_of(&listed, &model, &label, pricing::context_window)?);
-        let transport = engine.transport_for(account, &model, credential);
+        let listed = window_of(&listing, &model, &label, pricing::context_window)?;
+        let context_window = match &via {
+            None => listed,
+            Some(via) => window_via(&account, &label, &model, via, listed, || {
+                holdings.endpoints_of(&model)
+            })?,
+        };
+        let transport = engine.transport_for(&account, &model, credential);
         let backend = Backend::Live {
             engine: Arc::clone(engine),
             transport,
@@ -197,8 +230,8 @@ impl Bureau {
         };
         Ok(Arc::new(Provider::build(
             backend,
-            account,
-            selection(account, model, tuning, route, max_tokens),
+            &account,
+            selection(&account, model, tuning, via, max_tokens),
             context_window,
         )))
     }
@@ -294,18 +327,65 @@ mod tests {
         assert_eq!(window_of(&models, "m", "acct", |_| None), Ok(None));
     }
 
-    #[test]
-    fn a_pinned_endpoint_names_its_own_window() {
-        let endpoint = |slug: &str, n| ProviderEndpoint {
-            provider_name: slug.into(),
-            slug: slug.into(),
-            context_length: n,
+    fn endpoint(tag: &str, window: Option<u64>) -> ProviderEndpoint {
+        ProviderEndpoint {
+            provider_name: tag.into(),
+            tag: tag.into(),
+            context_length: window,
             quantization: None,
-        };
-        let eps = [endpoint("ionet", Some(262_000)), endpoint("bare", None)];
-        assert_eq!(pinned_window(&eps, "ionet"), Some(262_000));
-        assert_eq!(pinned_window(&eps, "bare"), None);
-        assert_eq!(pinned_window(&eps, "absent"), None);
+        }
+    }
+
+    #[test]
+    fn a_via_on_a_service_that_does_not_route_is_refused() {
+        let via = Via::parse("deepinfra").unwrap();
+        let err = window_via(
+            &Account::built_in("anthropic"),
+            "anthropic",
+            "m",
+            &via,
+            None,
+            || panic!("a service that does not route lists no upstreams"),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "'anthropic' does not route, so it cannot serve 'm' via deepinfra"
+        );
+    }
+
+    #[test]
+    fn a_via_whose_upstreams_cannot_be_listed_is_refused() {
+        let via = Via::parse("deepinfra").unwrap();
+        let err = window_via(
+            &Account::built_in("openrouter"),
+            "openrouter",
+            "m",
+            &via,
+            None,
+            || Err("network down".into()),
+        )
+        .unwrap_err();
+        assert_eq!(err, "could not list the upstreams of 'm': network down");
+    }
+
+    #[test]
+    fn a_routed_via_gets_the_least_window_its_upstreams_hold() {
+        let via = Via::parse("ionet,deepinfra/fp8").unwrap();
+        let window = window_via(
+            &Account::built_in("openrouter"),
+            "openrouter",
+            "m",
+            &via,
+            Some(64_000),
+            || {
+                Ok(vec![
+                    endpoint("ionet", Some(262_000)),
+                    endpoint("deepinfra/fp8", Some(131_072)),
+                ])
+            },
+        );
+        assert_eq!(window, Ok(Some(131_072)));
     }
 
     #[test]

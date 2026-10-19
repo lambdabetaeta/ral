@@ -249,7 +249,15 @@ impl Conversation {
             engine: Engine::new(),
             holdings: holdings.clone(),
         });
-        let provider = bureau.build(&account, model, &tuning, None, None)?;
+        let provider = bureau.build(
+            provider::Choice {
+                account,
+                model,
+                via: None,
+            },
+            &tuning,
+            None,
+        )?;
 
         let config = exarch::agent::RootConfig {
             system,

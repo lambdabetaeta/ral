@@ -85,7 +85,7 @@ impl Avatar {
             .emit(Forensic::TurnStarted {
                 turn,
                 tuning: provider.tuning().clone(),
-                route: provider.openrouter_route().map(str::to_owned),
+                via: provider.via().cloned(),
             })
             .map(drop)?;
         let messages = self.log.borrow().render_messages().map_err(Fault::Log)?;

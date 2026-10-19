@@ -24,17 +24,17 @@ fn loaded_picker() -> Picker {
     p
 }
 
-/// Context window and quantization elided: these tests read only the slug.
-fn endpoint(name: &str, slug: &str) -> ProviderEndpoint {
+/// Context window and quantization elided: these tests read only the tag.
+fn endpoint(name: &str, tag: &str) -> ProviderEndpoint {
     ProviderEndpoint {
         provider_name: name.into(),
-        slug: slug.into(),
+        tag: tag.into(),
         context_length: None,
         quantization: None,
     }
 }
 
-/// `vendor/model` ids — the case the serving-provider control exists for.
+/// `vendor/model` ids — the case the via row exists for.
 fn openrouter_picker() -> Picker {
     let openrouter = Account::built_in("openrouter");
     let mut p = Picker::new(vec![openrouter.clone()], &Tuning::default(), caps_unknown);
@@ -175,8 +175,8 @@ fn enter_selects_highlighted_model() {
     // To the second row, anthropic / model-b.
     p.key(KeyCode::Down);
     let pick = p.key(KeyCode::Enter).expect("a listed row is picked");
-    assert_eq!(pick.account, Account::built_in("anthropic"));
-    assert_eq!(pick.model, "model-b");
+    assert_eq!(pick.choice.account, Account::built_in("anthropic"));
+    assert_eq!(pick.choice.model, "model-b");
 }
 
 /// A declared service lists and selects exactly like a built-in one.
@@ -186,11 +186,11 @@ fn declared_provider_lists_and_selects() {
     let mut p = Picker::new(vec![llama.clone()], &Tuning::default(), caps_unknown);
     p.set_models(&llama.id, ModelsState::Loaded(vec!["model-a".into()]));
     let pick = p.key(KeyCode::Enter).expect("a listed row is picked");
-    assert_eq!(pick.account, llama);
-    assert_eq!(pick.model, "model-a");
+    assert_eq!(pick.choice.account, llama);
+    assert_eq!(pick.choice.model, "model-a");
 }
 
-/// These models do not route, so the cycle skips the provider control:
+/// These models do not route, so the cycle skips the via row:
 /// Search → Effort → Temperature → `TopP` → Search.
 #[test]
 fn tab_cycles_focus_and_arrows_drive_the_focused_control() {
@@ -381,9 +381,9 @@ fn unsupported_effort_is_masked_and_remembered() {
 }
 
 /// Cycling clamps at both ends rather than wrapping, never moves the
-/// highlighted model, and the chosen slug rides Enter.
+/// highlighted model, and the chosen tag rides Enter.
 #[test]
-fn provider_cycles_serving_endpoints_without_moving_the_model() {
+fn via_cycles_upstreams_without_moving_the_model() {
     let mut p = openrouter_picker();
     p.key(KeyCode::Down); // highlight vendor-b/model-b
     let model = "vendor-b/model-b";
@@ -396,29 +396,29 @@ fn provider_cycles_serving_endpoints_without_moving_the_model() {
         ]),
     );
 
-    p.key(KeyCode::Tab); // Search → Provider
-    assert_eq!(p.focus, Focus::Provider);
+    p.key(KeyCode::Tab); // Search → Via
+    assert_eq!(p.focus, Focus::Via);
 
     p.key(KeyCode::Right);
-    assert_eq!(p.active_route(), Some("deepinfra"));
+    assert_eq!(p.active_via(), Some("deepinfra"));
     assert_eq!(
         p.highlighted_model().as_deref(),
         Some(model),
-        "the highlighted model never moves when picking a provider"
+        "the highlighted model never moves when picking an upstream"
     );
     p.key(KeyCode::Right);
-    assert_eq!(p.active_route(), Some("novita"));
+    assert_eq!(p.active_via(), Some("novita"));
     p.key(KeyCode::Right);
-    assert_eq!(p.active_route(), Some("novita"));
+    assert_eq!(p.active_via(), Some("novita"));
     p.key(KeyCode::Left);
-    assert_eq!(p.active_route(), Some("deepinfra"));
+    assert_eq!(p.active_via(), Some("deepinfra"));
     p.key(KeyCode::Left);
-    assert_eq!(p.active_route(), None);
+    assert_eq!(p.active_via(), None);
 
     p.key(KeyCode::Right); // auto → deepinfra
     let pick = p.key(KeyCode::Enter).expect("a listed row is picked");
-    assert_eq!(pick.model, model);
-    assert_eq!(pick.route.as_deref(), Some("deepinfra"));
+    assert_eq!(pick.choice.model, model);
+    assert_eq!(pick.choice.via, Some(Via::one("deepinfra".into())));
 }
 
 #[test]
@@ -438,18 +438,18 @@ fn every_endpoint_is_reachable_past_variants_and_repeated_tags() {
         ]),
     );
     p.key(KeyCode::Tab);
-    let slugs = [
+    let tags = [
         "wafer/us",
         "wafer",
         "mistral/zdr",
         "mistral/nvfp4",
         "together",
     ];
-    for slug in slugs {
+    for tag in tags {
         p.key(KeyCode::Right);
-        assert_eq!(p.active_route(), Some(slug));
-        let row = p.provider_line(80).to_string();
-        let name = match slug {
+        assert_eq!(p.active_via(), Some(tag));
+        let row = p.via_line(80).to_string();
+        let name = match tag {
             "wafer/us" => "Wafer/us",
             "wafer" => "Wafer",
             "mistral/zdr" => "Mistral/zdr",
@@ -458,25 +458,25 @@ fn every_endpoint_is_reachable_past_variants_and_repeated_tags() {
         };
         assert!(row.contains(name), "{row}");
     }
-    for slug in slugs.into_iter().rev().skip(1) {
+    for tag in tags.into_iter().rev().skip(1) {
         p.key(KeyCode::Left);
-        assert_eq!(p.active_route(), Some(slug));
+        assert_eq!(p.active_via(), Some(tag));
     }
     let pick = p.key(KeyCode::Enter).expect("a listed row is picked");
-    assert_eq!(pick.route.as_deref(), Some("wafer/us"));
+    assert_eq!(pick.choice.via, Some(Via::one("wafer/us".into())));
     p.key(KeyCode::Left);
-    assert_eq!(p.active_route(), None);
-    for _ in slugs {
+    assert_eq!(p.active_via(), None);
+    for _ in tags {
         p.key(KeyCode::Right);
     }
     let pick = p.key(KeyCode::Enter).expect("a listed row is picked");
-    assert_eq!(pick.route.as_deref(), Some("together"));
+    assert_eq!(pick.choice.via, Some(Via::one("together".into())));
 }
 
-/// Moving the highlight off a route's model deactivates it, and coming back
+/// Moving the highlight off a via's model deactivates it, and coming back
 /// restores it — the choice never rides a model it was not made for.
 #[test]
-fn route_is_inactive_off_its_model_and_returns_on_it() {
+fn via_is_inactive_off_its_model_and_returns_on_it() {
     let mut p = openrouter_picker();
     p.key(KeyCode::Down); // vendor-b/model-b
     let model = "vendor-b/model-b";
@@ -484,31 +484,27 @@ fn route_is_inactive_off_its_model_and_returns_on_it() {
         model,
         EndpointsState::Loaded(vec![endpoint("DeepInfra", "deepinfra")]),
     );
-    p.key(KeyCode::Tab); // Provider
+    p.key(KeyCode::Tab); // Via
     p.key(KeyCode::Right); // choose deepinfra
-    assert_eq!(p.active_route(), Some("deepinfra"));
+    assert_eq!(p.active_via(), Some("deepinfra"));
 
     for _ in 0..4 {
-        p.key(KeyCode::Tab); // Provider → Effort → Temperature → TopP → Search
+        p.key(KeyCode::Tab); // Via → Effort → Temperature → TopP → Search
     }
     assert_eq!(p.focus, Focus::Search);
     p.key(KeyCode::Down); // vendor-b/model-c
     assert_ne!(p.highlighted_model().as_deref(), Some(model));
-    assert_eq!(
-        p.active_route(),
-        None,
-        "the route does not ride another model"
-    );
+    assert_eq!(p.active_via(), None, "the via does not ride another model");
 
     p.key(KeyCode::Up);
     assert_eq!(p.highlighted_model().as_deref(), Some(model));
-    assert_eq!(p.active_route(), Some("deepinfra"));
+    assert_eq!(p.active_via(), Some("deepinfra"));
 }
 
-/// A model that does not route skips the provider control, and nothing
-/// requests endpoints for it.
+/// A model that does not route skips the via row, and nothing requests
+/// endpoints for it.
 #[test]
-fn provider_control_skipped_for_non_openrouter_model() {
+fn via_row_skipped_for_non_openrouter_model() {
     let mut p = loaded_picker();
     assert!(p.highlighted_model().is_some());
     p.key(KeyCode::Tab);
@@ -516,9 +512,9 @@ fn provider_control_skipped_for_non_openrouter_model() {
     assert!(p.model_needing_endpoints().is_none());
 }
 
-/// Highlighting an `OpenRouter` model is the cue to fetch, before the
-/// provider control is focused; once the driver seeds the in-flight state the
-/// fetch is not requested again.
+/// Highlighting an `OpenRouter` model is the cue to fetch, before the via row
+/// is focused; once the driver seeds the in-flight state the fetch is not
+/// requested again.
 #[test]
 fn highlighting_requests_endpoints_once() {
     let mut p = openrouter_picker(); // first row: vendor-a/model-a

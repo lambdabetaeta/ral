@@ -22,7 +22,7 @@ pub enum FetchState<T> {
 pub type ModelsState = FetchState<Vec<String>>;
 
 /// One model's serving-provider (`OpenRouter` `/endpoints`) fetch state, keyed
-/// by model id; `Failed` leaves the route on `auto`, `OpenRouter`'s own choice.
+/// by model id; `Failed` leaves the via on `auto`, `OpenRouter`'s own choice.
 pub type EndpointsState = FetchState<Vec<ProviderEndpoint>>;
 
 /// A keyed background-fetch pump: one thread per key, all reporting through one

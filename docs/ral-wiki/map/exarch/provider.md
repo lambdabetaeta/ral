@@ -6,8 +6,8 @@ covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/mode
 
 # Map: exarch / provider
 
-`provider.rs` is the LLM facade over `genai`: it owns `Provider`, its live or
-scripted `Backend`, and OpenRouter route admission. The transcript owns
+`provider.rs` is the LLM facade over `genai`: it owns `Provider` and its live
+or scripted `Backend`. The transcript owns
 history; the provider only sends bytes and parses replies. Invariants are
 local below the facade: `provider/identity.rs` owns selectable identity,
 `request.rs` per-request `ChatOptions` and tuning (`Tuning`, the
@@ -17,8 +17,9 @@ that turns the transcript's `ChatMessage`s into an owned `genai::ChatRequest` (b
 execution, `retry.rs` recovery timing, `usage.rs` accounting,
 `error.rs` fault classification, `listing.rs` model-list fetch
 orchestration, `tools.rs` the tools a request may advertise (`ToolSpec`,
-`Toolset`, wire definitions only; dispatch is `agent::tools`'), and `state.rs`
-the persisted selection. The public facade
+`Toolset`, wire definitions only; dispatch is `agent::tools`'), `via.rs` the
+upstreams a routing service serves a model via (`Via`), and `state.rs` the
+persisted choice. The public facade
 re-exports their established types; sibling modules meet through narrow
 methods on `Engine` and `Transport`, not visible fields.
 
@@ -55,7 +56,7 @@ plus chatgpt — as struct literals rather than a value enum. A declared
 endpoint is the *same struct* parsed from a hand-written `config.ral`, with
 the protocol mapped onto genai's `AdapterKind` at decode time; provenance is
 not a type. See [[decisions/260613_provider-config-ral-script|provider-config-ral-script]].
-`Service::routes` is true for OpenRouter alone, and carries route pinning, so
+`Service::routes` is true for OpenRouter alone, and is what admits a `Via`, so
 no code compares a service name against the string `"openrouter"`.
 `Service::auth` says how a service authenticates — `Key(var)`, `OAuth`, or
 `Keyless` — and never the secret itself. A declared endpoint's `var` is
@@ -352,7 +353,7 @@ beside `factory`.
 
 **An account's own listing is the authority on what it serves.** The picker
 offers only listed models, `--model` alone resolves to the one account whose
-listing names it, and `Bureau::build` refuses any other pair, so no account is
+listing names it, and `Bureau::build` refuses any other choice, so no account is
 ever asked for a model it does not list. `ModelCatalog` memoises and
 disk-caches both paths:
 
@@ -361,7 +362,10 @@ disk-caches both paths:
   (repeatable) resolves MODEL exactly as `--model` does through
   `state::named` — to the one account whose listing names it, or to the account
   `--role-provider NAME=ACCOUNT` gives (ACCOUNT as `--provider` accepts it),
-  the tie-breaker the ambiguity error asks for. `Roles::mint` builds each pair
+  the tie-breaker the ambiguity error asks for; `--role-via NAME=TAGS` gives
+  the upstreams that serve it (TAGS as `--via` takes them). Each of the three
+  flags refuses a name given twice, and the latter two a name no `--role`
+  binds. `Roles::mint` builds each `Choice`
   through `Bureau::build` once, at launch, with the launch's `Tuning`
   (`Tuning::initial` plus `--effort`) and `--max-tokens`; a later `/model`
   changes only the switching agent's own provider. Roles are flags only, never
@@ -384,7 +388,11 @@ disk-caches both paths:
   authenticated by their live OAuth cell after the common stale-token check;
   only entries whose `visibility` is `"list"` are kept, in server order, with
   each entry's `context_window`.
-- `Bureau::build` is the one door a selection passes. A plan account
+- `Bureau::build` is the one door a selection passes, and takes a `Choice`:
+  an account, one of its models, and the `Via` it is served through, if any.
+  It refuses a via on a service that does not route, or one naming an upstream
+  the model's endpoints do not list; a via's window is the least its
+  upstreams hold, an upstream listing none holding the model's. A plan account
   (`Service::shares_a_plan`) gets a selection carrying reasoning effort alone:
   the token-sharing route refuses `temperature`, `top_p` and
   `max_output_tokens`, so none rides one. It reads the serving
@@ -403,21 +411,28 @@ disk-caches both paths:
   Re-login updates the cell in place; a login that has since learnt its email
   is renamed where it stands, its identity being the account id throughout.
 - OpenRouter serving endpoints remain a separate request per model; the
-  `/model` overlay makes it for whichever OpenRouter model is highlighted.
-  Routing preserves the full endpoint tag, including variant or region suffixes.
-  The picker shows those suffixes and keeps one row per distinct tag, in server
-  order: selection resolves by tag, so repeated tags would trap navigation.
+  `/model` overlay makes it for whichever OpenRouter model is highlighted, and
+  `Bureau::build` for a model minted with a via. `ProviderEndpoint::tag` keeps
+  the full endpoint tag, including variant or region suffixes. A `Via` is an
+  ordered, non-empty, duplicate-free list of those tags, most preferred first,
+  sent as `provider.order` with `allow_fallbacks: false`: every request is
+  served by an upstream the via names, or by none. `--via`, `--role-via` and
+  the picker's via row (one tag) choose one; without one, OpenRouter chooses
+  per request. The picker shows the suffixes and keeps one row per distinct
+  tag, in server order: selection resolves by tag, so repeated tags would trap
+  navigation.
 - `listing.rs` states the picker-side orchestration once for every front-end
   (the `/model` overlay and synod's window alike): the `FetchState` vocabulary,
   a keyed background-fetch pump (`Fetches`), and the per-provider `Listing`
   that seeds from the catalog's cache and fills misses in as they land.
-- `state.rs` remembers the *pair alone* — provider and model — as the
-  project's `state.json`, so tuning and route are never replayed: a remembered
-  effort or route can be one the new model rejects, and the flags and the
-  picker set the rest. `opening(flags, saved, available, listing)` decides what
-  a launch opens on (`Opening::Named` from the flags, `Restored` from the saved
-  pair, else `Choose` — the picker); a refused restore opens the picker instead
-  of ending the launch.
+- `state.rs` remembers the *choice* — account, model and via — as the
+  project's `state.json`; tuning is never replayed: a remembered effort can be
+  one the new model rejects, and the flags and the picker set it. A restored
+  via is rechecked against the model's endpoints like any other.
+  `opening(flags, saved, available, listing)` decides what a launch opens on
+  (`Opening::Named` from the flags, `Restored` from the saved choice, else
+  `Choose` — the picker); a refused restore opens the picker instead of ending
+  the launch or, headless, fails.
 
 ## The streaming path
 
@@ -525,8 +540,8 @@ when stated, and is never retried by `retry.rs`. A stated `limit` narrows the
 `Provider`'s interior-mutable window (it only ever shrinks, and dies with a
 `/model` swap), recorded as `Forensic::WindowNarrowed` so every reader agrees;
 `Avatar::deliberate` then sheds the older half and retries the turn once.
-A resume replays the learned window for the same model; a pinned endpoint
-is minted at its own listed window, not the model's.
+A resume replays the learned window for the same model; a model minted with
+a via starts at the least window its upstreams hold.
 
 Each retryable and 4xx variant carries the parsed body (boxed at the error
 boundary) as an optional JSON value, so the renderer can print a

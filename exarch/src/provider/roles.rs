@@ -1,8 +1,8 @@
 //! The models the human bound to names at launch for spawned agents.
 
 use crate::provider::models::{ListFailure, Listed};
-use crate::provider::state::{Pair, named};
-use crate::provider::{Account, Bureau, Provider, Tuning};
+use crate::provider::state::named;
+use crate::provider::{Account, Bureau, Choice, Provider, Tuning, Via};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -21,63 +21,96 @@ pub fn binding(s: &str) -> Result<(String, String), String> {
         .ok_or_else(|| format!("expected NAME=VALUE, got '{s}'"))
 }
 
-/// Each `--role` resolved to its account and model, on its `--role-provider`
-/// account when one is given.
+/// Split `NAME=TAGS` as [`binding`] does, the tags as [`Via::parse`] takes
+/// them; a clap value parser.
 ///
 /// # Errors
-/// If a role or a `--role-provider` is given twice, if a `--role-provider`
-/// names no role, or if a role's model resolves to no single account.
+/// As [`binding`], or as [`Via::parse`] naming the role.
+pub fn via_binding(s: &str) -> Result<(String, Via), String> {
+    let (name, tags) = binding(s)?;
+    let via = Via::parse(&tags).map_err(|why| format!("role '{name}': {why}"))?;
+    Ok((name, via))
+}
+
+/// The value `rows` gives `name`.
+fn lookup<'a, T>(rows: &'a [(String, T)], name: &str) -> Option<&'a T> {
+    rows.iter()
+        .find(|(row, _)| row == name)
+        .map(|(_, value)| value)
+}
+
+/// Refuse a name `flag` gives twice.
+fn once_each<T>(flag: &str, rows: &[(String, T)]) -> Result<(), String> {
+    let mut seen = BTreeSet::new();
+    match rows.iter().find(|(name, _)| !seen.insert(name)) {
+        Some((name, _)) => Err(format!("{flag} '{name}' is given twice")),
+        None => Ok(()),
+    }
+}
+
+/// Refuse a name `flag` gives that no `--role` in `roles` binds.
+fn bound<T>(flag: &str, rows: &[(String, T)], roles: &[(String, String)]) -> Result<(), String> {
+    match rows.iter().find(|(name, _)| lookup(roles, name).is_none()) {
+        Some((name, _)) => Err(format!("{flag} names '{name}', but no --role binds it")),
+        None => Ok(()),
+    }
+}
+
+/// Each `--role` resolved to its choice: its model, on its `--role-provider`
+/// account when one is given, via its `--role-via` upstreams when those are.
+///
+/// # Errors
+/// If a role, a `--role-provider` or a `--role-via` is given twice, if a
+/// `--role-provider` or a `--role-via` names no role, or if a role's model
+/// resolves to no single account.
 pub(crate) fn bindings(
     roles: &[(String, String)],
     providers: &[(String, String)],
+    vias: &[(String, Via)],
     available: &[Account],
     mut listing: impl FnMut(&Account) -> Result<Vec<Listed>, ListFailure>,
-) -> Result<Vec<(String, Pair)>, String> {
-    for (flag, rows) in [("--role", roles), ("--role-provider", providers)] {
-        let mut seen = BTreeSet::new();
-        if let Some((name, _)) = rows.iter().find(|(name, _)| !seen.insert(name)) {
-            return Err(format!("{flag} '{name}' is given twice"));
-        }
-    }
-    if let Some((name, _)) = providers
-        .iter()
-        .find(|(name, _)| roles.iter().all(|(role, _)| role != name))
-    {
-        return Err(format!(
-            "--role-provider names '{name}', but no --role binds it"
-        ));
-    }
+) -> Result<Vec<(String, Choice)>, String> {
+    once_each("--role", roles)?;
+    once_each("--role-provider", providers)?;
+    once_each("--role-via", vias)?;
+    bound("--role-provider", providers, roles)?;
+    bound("--role-via", vias, roles)?;
     roles
         .iter()
         .map(|(name, model)| {
-            let provider = providers
-                .iter()
-                .find(|(role, _)| role == name)
-                .map(|(_, account)| account.as_str());
+            let provider = lookup(providers, name).map(String::as_str);
             let remedy = format!("pass --role-provider {name}=ACCOUNT to say which");
-            named(provider, model, available, &mut listing, &remedy)
-                .map(|pair| (name.clone(), pair))
-                .map_err(|why| format!("role '{name}': {why}"))
+            named(
+                provider,
+                model,
+                lookup(vias, name),
+                available,
+                &mut listing,
+                &remedy,
+            )
+            .map(|choice| (name.clone(), choice))
+            .map_err(|why| format!("role '{name}': {why}"))
         })
         .collect()
 }
 
 impl Roles {
-    /// Mint each pair on `bureau` with the launch's `tuning` and `max_tokens`.
+    /// Mint each choice on `bureau` with the launch's `tuning` and
+    /// `max_tokens`.
     ///
     /// # Errors
     /// As [`Bureau::build`], naming the role.
     pub(crate) fn mint(
-        pairs: Vec<(String, Pair)>,
+        choices: Vec<(String, Choice)>,
         bureau: &Bureau,
         tuning: &Tuning,
         max_tokens: Option<u32>,
     ) -> Result<Self, String> {
-        pairs
+        choices
             .into_iter()
-            .map(|(name, Pair { account, model })| {
+            .map(|(name, choice)| {
                 bureau
-                    .build(&account, model, tuning, None, max_tokens)
+                    .build(choice, tuning, max_tokens)
                     .map(|provider| (name.clone(), provider))
                     .map_err(|why| format!("role '{name}': {why}"))
             })
@@ -137,6 +170,10 @@ mod tests {
         (a.into(), b.into())
     }
 
+    fn via(name: &str, tags: &str) -> (String, Via) {
+        (name.into(), Via::parse(tags).unwrap())
+    }
+
     #[test]
     fn a_binding_splits_at_the_first_equals() {
         assert_eq!(binding("r=m"), Ok(pair("r", "m")));
@@ -153,28 +190,63 @@ mod tests {
     fn a_name_given_twice_is_refused() {
         let available = [Account::built_in("anthropic")];
         let twice = [pair("r", "m"), pair("r", "n")];
-        let err = bindings(&twice, &[], &available, lists(&["m", "n"]))
+        let err = bindings(&twice, &[], &[], &available, lists(&["m", "n"]))
             .err()
             .unwrap();
         assert_eq!(err, "--role 'r' is given twice");
         let err = bindings(
             &[pair("r", "m")],
             &[pair("r", "anthropic"), pair("r", "x")],
+            &[],
             &available,
             lists(&["m"]),
         )
         .err()
         .unwrap();
         assert_eq!(err, "--role-provider 'r' is given twice");
+        let err = bindings(
+            &[pair("r", "m")],
+            &[],
+            &[via("r", "a"), via("r", "b")],
+            &available,
+            lists(&["m"]),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(err, "--role-via 'r' is given twice");
     }
 
     #[test]
     fn a_role_provider_without_a_role_is_refused() {
         let available = [Account::built_in("anthropic")];
-        let err = bindings(&[], &[pair("x", "anthropic")], &available, lists(&[]))
+        let err = bindings(&[], &[pair("x", "anthropic")], &[], &available, lists(&[]))
             .err()
             .unwrap();
         assert_eq!(err, "--role-provider names 'x', but no --role binds it");
+    }
+
+    #[test]
+    fn a_role_via_without_a_role_is_refused() {
+        let available = [Account::built_in("openrouter")];
+        let err = bindings(&[], &[], &[via("x", "a")], &available, lists(&[]))
+            .err()
+            .unwrap();
+        assert_eq!(err, "--role-via names 'x', but no --role binds it");
+    }
+
+    #[test]
+    fn a_roles_via_rides_its_choice() {
+        let available = [Account::built_in("openrouter")];
+        let bound = bindings(
+            &[pair("r", "m"), pair("s", "m")],
+            &[],
+            &[via("r", "deepinfra/fp8,novita")],
+            &available,
+            lists(&["m"]),
+        )
+        .unwrap();
+        assert_eq!(bound[0].1.via, Some(via("r", "deepinfra/fp8,novita").1));
+        assert_eq!(bound[1].1.via, None);
     }
 
     #[test]
@@ -183,7 +255,7 @@ mod tests {
             Account::built_in("anthropic"),
             Account::built_in("deepseek"),
         ];
-        let err = bindings(&[pair("r", "m")], &[], &available, lists(&["m"]))
+        let err = bindings(&[pair("r", "m")], &[], &[], &available, lists(&["m"]))
             .err()
             .unwrap();
         assert!(err.starts_with("role 'r': "), "{err}");
@@ -191,6 +263,7 @@ mod tests {
         let tied = bindings(
             &[pair("r", "m")],
             &[pair("r", "deepseek")],
+            &[],
             &available,
             lists(&["m"]),
         )

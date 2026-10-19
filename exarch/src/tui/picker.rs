@@ -2,10 +2,11 @@
 //! account, with the effort, temperature and top-p to send. A launch with no
 //! model to restore opens it alone, before its session.
 //!
-//! An `OpenRouter` model adds a provider row that pins `provider.order`; it is
-//! a routing choice, not a filter, so it never moves the highlight. A tuning
-//! row the highlighted model's catalog entry positively lacks is grayed and
-//! masked out of the [`Tuning`], but kept for the next model that admits it.
+//! An `OpenRouter` model adds a via row that chooses the upstream serving it;
+//! it is a choice of upstream, not a filter, so it never moves the highlight.
+//! A tuning row the highlighted model's catalog entry positively lacks is
+//! grayed and masked out of the [`Tuning`], but kept for the next model that
+//! admits it.
 //!
 //! Display and input only: `model_picker.rs` fetches, and feeds results in
 //! through [`Picker::set_models`] and [`Picker::set_endpoints`].
@@ -16,7 +17,7 @@ use super::text;
 use crate::provider::identity::{self, Account, AccountId};
 use crate::provider::models::ProviderEndpoint;
 use crate::provider::pricing::{ModelCaps, Param};
-use crate::provider::{EFFORT_LADDER, Tuning};
+use crate::provider::{Choice, EFFORT_LADDER, Tuning, Via};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -26,18 +27,17 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub use crate::provider::listing::{EndpointsState, ModelsState};
 
-/// A serving provider, bound to the model it was chosen for and inert off it.
-struct Route {
+/// An upstream, bound to the model it was chosen for and inert off it.
+struct Upstream {
     model: String,
-    slug: String,
+    tag: String,
 }
 
-/// A listed model chosen with Enter; `route` is `None` for auto.
+/// A listed model chosen with Enter, and the tuning to run it on; its via is
+/// `None` for auto.
 pub struct Pick {
-    pub account: Account,
-    pub model: String,
+    pub choice: Choice,
     pub tuning: Tuning,
-    pub route: Option<String>,
 }
 
 /// A rendered list row: a listed model and the account that lists it.
@@ -46,7 +46,7 @@ type Row = (Account, String);
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Focus {
     Search,
-    Provider,
+    Via,
     Effort,
     Temperature,
     TopP,
@@ -56,7 +56,7 @@ impl Focus {
     const fn label(self) -> &'static str {
         match self {
             Self::Search => "search",
-            Self::Provider => "provider",
+            Self::Via => "via",
             Self::Effort => "effort",
             Self::Temperature => "temp",
             Self::TopP => "top-p",
@@ -64,10 +64,10 @@ impl Focus {
     }
 }
 
-/// [`Picker::cycle`] drops `Provider` for a model that does not route.
+/// [`Picker::cycle`] drops `Via` for a model that does not route.
 const FOCUS_ORDER: &[Focus] = &[
     Focus::Search,
-    Focus::Provider,
+    Focus::Via,
     Focus::Effort,
     Focus::Temperature,
     Focus::TopP,
@@ -146,11 +146,11 @@ fn step_knob(value: Option<f64>, up: bool, step: f64, max: f64, places: usize) -
     }
 }
 
-/// A provider's name, context window and quantization, space-padded so the
+/// An upstream's name, context window and quantization, space-padded so the
 /// active tag reverses as a block.
-fn provider_tag(endpoint: &ProviderEndpoint) -> String {
+fn upstream_label(endpoint: &ProviderEndpoint) -> String {
     let mut text = endpoint.provider_name.clone();
-    if let Some((_, variant)) = endpoint.slug.split_once('/') {
+    if let Some((_, variant)) = endpoint.tag.split_once('/') {
         text.push('/');
         text.push_str(variant);
     }
@@ -178,7 +178,7 @@ pub struct Picker {
     selected: usize,
     focus: Focus,
     /// `None` throughout is auto.
-    route: Option<Route>,
+    via: Option<Upstream>,
     effort_idx: usize,
     temperature: Option<f64>,
     top_p: Option<f64>,
@@ -211,7 +211,7 @@ impl Picker {
             rows: Vec::new(),
             selected: 0,
             focus: Focus::Search,
-            route: None,
+            via: None,
             effort_idx,
             temperature: initial.temperature,
             top_p: initial.top_p,
@@ -240,9 +240,9 @@ impl Picker {
 
     pub fn set_endpoints(&mut self, model: &str, mut state: EndpointsState) {
         if let EndpointsState::Loaded(endpoints) = &mut state {
-            // Selection by slug requires one row per routing target.
+            // Selection by tag requires one row per upstream.
             let mut seen = BTreeSet::new();
-            endpoints.retain(|endpoint| seen.insert(endpoint.slug.clone()));
+            endpoints.retain(|endpoint| seen.insert(endpoint.tag.clone()));
         }
         self.endpoints.insert(model.to_string(), state);
     }
@@ -272,23 +272,23 @@ impl Picker {
             .map(|(_, model)| model.clone())
     }
 
-    /// The route slug, while the model it was chosen for is highlighted.
-    fn active_route(&self) -> Option<&str> {
-        let route = self.route.as_ref()?;
-        (self.highlighted_routed_model().as_deref() == Some(route.model.as_str()))
-            .then_some(route.slug.as_str())
+    /// The via row's tag, while the model it was chosen for is highlighted.
+    fn active_via(&self) -> Option<&str> {
+        let via = self.via.as_ref()?;
+        (self.highlighted_routed_model().as_deref() == Some(via.model.as_str()))
+            .then_some(via.tag.as_str())
     }
 
-    /// The active route's place among the highlighted model's endpoints;
-    /// `None` is auto.
+    /// The active tag's place among the highlighted model's endpoints; `None`
+    /// is auto.
     fn active_index(&self) -> Option<usize> {
-        let slug = self.active_route()?;
+        let tag = self.active_via()?;
         let Some(EndpointsState::Loaded(endpoints)) =
             self.endpoints.get(&self.highlighted_routed_model()?)
         else {
             return None;
         };
-        endpoints.iter().position(|e| e.slug == slug)
+        endpoints.iter().position(|e| e.tag == tag)
     }
 
     /// Whether the highlighted model admits `param`; an unknown one does.
@@ -344,10 +344,12 @@ impl Picker {
     fn apply(&self) -> Option<Pick> {
         let (account, model) = self.rows.get(self.selected)?;
         Some(Pick {
-            account: account.clone(),
-            model: model.clone(),
+            choice: Choice {
+                account: account.clone(),
+                model: model.clone(),
+                via: self.active_via().map(|tag| Via::one(tag.to_owned())),
+            },
             tuning: self.tuning(),
-            route: self.active_route().map(str::to_string),
         })
     }
 
@@ -356,7 +358,7 @@ impl Picker {
         let order = FOCUS_ORDER
             .iter()
             .copied()
-            .filter(|f| routed || *f != Focus::Provider);
+            .filter(|f| routed || *f != Focus::Via);
         let before = |f: &Focus| *f != self.focus;
         let both = order.clone().chain(order);
         if forward {
@@ -377,7 +379,7 @@ impl Picker {
                     self.selected = self.selected.saturating_sub(1);
                 }
             }
-            Focus::Provider => {
+            Focus::Via => {
                 let Some(model) = self.highlighted_routed_model() else {
                     return;
                 };
@@ -393,9 +395,9 @@ impl Picker {
                 } else {
                     at.and_then(|i| i.checked_sub(1))
                 };
-                self.route = next.map(|i| Route {
+                self.via = next.map(|i| Upstream {
                     model,
-                    slug: endpoints[i].slug.clone(),
+                    tag: endpoints[i].tag.clone(),
                 });
             }
             Focus::Effort => {
@@ -472,7 +474,7 @@ impl Picker {
     pub fn render(&self, f: &mut Frame, frame: Rect) {
         let width = overlay::body_width(BODY_W, frame);
         let notes = self.note_lines(width);
-        // The provider row stands even for a model that does not route, so the
+        // The via row stands even for a model that does not route, so the
         // height never jumps; the list's border takes two more.
         let heights = [
             1,
@@ -496,13 +498,13 @@ impl Picker {
                 " Tab next field · ←→ change value · Enter apply · Esc cancel "
             },
         );
-        let [search, status, list, provider, effort, temp, top_p, note] =
+        let [search, status, list, via, effort, temp, top_p, note] =
             Layout::vertical(heights.map(Constraint::Length)).areas(body);
         self.render_list(f, list);
         for (line, at) in [
             (self.search_line(), search),
             (self.status_line(), status),
-            (self.provider_line(provider.width), provider),
+            (self.via_line(via.width), via),
             (self.effort_line(self.supports(Param::Reasoning)), effort),
             (self.temp_line(self.supports(Param::Temperature)), temp),
             (self.top_p_line(self.supports(Param::TopP)), top_p),
@@ -625,9 +627,9 @@ impl Picker {
         ])
     }
 
-    fn provider_line(&self, width: u16) -> Line<'static> {
-        let focused = self.focus == Focus::Provider;
-        let label = self.field_label(Focus::Provider);
+    fn via_line(&self, width: u16) -> Line<'static> {
+        let focused = self.focus == Focus::Via;
+        let label = self.field_label(Focus::Via);
         let dim = Style::default().fg(SLATE).add_modifier(Modifier::DIM);
         let auto_style = |active: bool| {
             if active && focused {
@@ -684,7 +686,7 @@ impl Picker {
                             } else {
                                 Style::default().fg(hue).add_modifier(Modifier::DIM)
                             };
-                            Span::styled(provider_tag(endpoint), style)
+                            Span::styled(upstream_label(endpoint), style)
                         }),
                 )
                 .collect();

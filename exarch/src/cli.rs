@@ -30,6 +30,21 @@ pub struct Cli {
     /// the next run.
     #[arg(long)]
     pub model: Option<String>,
+    /// Choose the upstreams that serve `--model` on a routing service.
+    ///
+    /// Give the endpoint tags `OpenRouter` lists for the model, such as
+    /// `deepinfra/fp8`, separated by commas, most preferred first. Every request
+    /// goes to one of them and never elsewhere: when none can serve it, the request
+    /// fails rather than fall back. Without this option the service chooses an
+    /// upstream for each request. Exarch checks each tag against the model's
+    /// endpoints when it starts, and saves the choice with the model.
+    #[arg(
+        long,
+        value_name = "TAGS",
+        value_parser = crate::provider::Via::parse,
+        requires = "model"
+    )]
+    pub via: Option<crate::provider::Via>,
     /// Choose the provider or signed-in account that Exarch uses when it starts.
     ///
     /// Give an account ID, a service name such as `anthropic` or `openai`, or
@@ -45,9 +60,10 @@ pub struct Cli {
     /// Give NAME=MODEL and repeat this option for more roles. A child started
     /// with model `role 'NAME'` runs on MODEL, with this run's `--effort` and
     /// `--max-tokens`. MODEL is resolved as `--model` is: to the one account
-    /// that lists it, or to the one that `--role-provider` names. Without
-    /// roles, every child runs on its parent's model. Roles last for this run
-    /// only and are not saved.
+    /// that lists it, or to the one that `--role-provider` names, and served
+    /// via the upstreams that `--role-via` names when given. Without roles,
+    /// every child runs on its parent's model. Roles last for this run only
+    /// and are not saved.
     #[arg(
         long,
         value_name = "NAME=MODEL",
@@ -66,6 +82,16 @@ pub struct Cli {
         conflicts_with = "chat"
     )]
     pub role_provider: Vec<(String, String)>,
+    /// Choose the upstreams that serve a role's model.
+    ///
+    /// Give NAME=TAGS, with TAGS as `--via` takes them.
+    #[arg(
+        long = "role-via",
+        value_name = "NAME=TAGS",
+        value_parser = crate::provider::roles::via_binding,
+        conflicts_with = "chat"
+    )]
+    pub role_via: Vec<(String, crate::provider::Via)>,
     /// Run one headless exchange with this prompt.
     ///
     /// This implies `--headless`. Exarch passes the text to the model exactly

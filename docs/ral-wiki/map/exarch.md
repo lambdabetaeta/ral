@@ -59,15 +59,17 @@ exit code.
   uses ([[internals/session-record|session-record]]).
 - **Session.** Absent a subcommand, `run` settles what to open on
   (`--provider` pins the identity; `--model` names a model its account must
-  list; `--effort` names a rung of the `/model` picker's own `EFFORT_LADDER`;
+  list; `--via` names the upstreams that serve it on a routing service;
+  `--effort` names a rung of the `/model` picker's own `EFFORT_LADDER`;
   `--chat` drops the system prompt and all tools). The saved project selection
-  is the ground each of those is laid over. A pair the flags name must build or
-  the launch fails; a saved pair that no longer builds, or no pair at all,
+  is the ground each of those is laid over. A choice the flags name must build or
+  the launch fails; a saved choice that no longer builds, or no choice at all,
   opens the picker alone on the screen before any session exists (`tui::choose`)
   — or, headless, fails asking for `--model`. A session is therefore born with a
-  listed model and never holds none, and the pair it opens on is saved back, so
-  a flag and the picker leave the same trace. `--role NAME=MODEL` (and
-  `--role-provider NAME=ACCOUNT` to break a tie) binds the models a spawned
+  listed model and never holds none, and the choice it opens on is saved back, so
+  a flag and the picker leave the same trace. `--role NAME=MODEL` (with
+  `--role-provider NAME=ACCOUNT` to break a tie, and `--role-via NAME=TAGS` to
+  choose its upstreams) binds the models a spawned
   agent may run on, minted at launch with this run's `--effort` and
   `--max-tokens` and never saved; without roles every child inherits
   ([[map/exarch/provider|provider]]). Then `run` composes the capability lattice

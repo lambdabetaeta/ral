@@ -46,8 +46,8 @@ pub mod wallet;
 
 use agent::Avatar;
 use clap::Parser;
-use provider::state::{Opening, Pair, opening};
-use provider::{Bureau, Engine, Holdings};
+use provider::state::{Opening, opening};
+use provider::{Bureau, Choice, Engine, Holdings};
 use std::sync::Arc;
 
 /// The one boot recipe table, for the identity seat and the `--engine` child
@@ -219,13 +219,18 @@ pub fn run() -> Result<(), String> {
     let opening = opening(
         c.provider.as_deref(),
         c.model.as_deref(),
+        c.via.as_ref(),
         saved.as_ref(),
         &available,
         |account| provider::models::listing_of(&holdings.catalog, &account.id),
     )?;
-    let roles = provider::roles::bindings(&c.role, &c.role_provider, &available, |account| {
-        provider::models::listing_of(&holdings.catalog, &account.id)
-    })?;
+    let roles = provider::roles::bindings(
+        &c.role,
+        &c.role_provider,
+        &c.role_via,
+        &available,
+        |account| provider::models::listing_of(&holdings.catalog, &account.id),
+    )?;
 
     let invocation = policy::for_invocation(&cwd, &c.base, c.extend.as_deref(), &c.restrict)?;
     let scratch =
@@ -406,12 +411,12 @@ fn resolve_run(
 }
 
 /// The provider a launch opens with: `opening` built, or — when it names no
-/// pair, or a remembered one no longer stands — one chosen on a screen taken
+/// choice, or a remembered one no longer stands — one chosen on a screen taken
 /// in `attended`, the run directory of a launch with a human at it. That
 /// screen is handed back for the session to keep.
 ///
 /// # Errors
-/// If a named pair does not build, if a choice is needed with no human to
+/// If a named choice does not build, if a choice is needed with no human to
 /// make it, or if the user backs out of the picker.
 fn open(
     opening: Opening,
@@ -420,7 +425,7 @@ fn open(
     bureau: &Bureau,
     max_tokens: Option<u32>,
 ) -> Result<(Arc<provider::Provider>, Option<tui::TerminalGuard>), String> {
-    let build = |pair: Pair| bureau.build(&pair.account, pair.model, tuning, None, max_tokens);
+    let build = |choice: Choice| bureau.build(choice, tuning, max_tokens);
     let choose = |among, why: Option<String>| {
         let Some(run_dir) = attended else {
             return Err(format!(
@@ -430,18 +435,12 @@ fn open(
         };
         let mut screen = tui::enter(run_dir)?;
         let pick = tui::choose(&mut screen, bureau, among, tuning, why)?;
-        let provider = bureau.build(
-            &pick.account,
-            pick.model,
-            &pick.tuning,
-            pick.route,
-            max_tokens,
-        )?;
+        let provider = bureau.build(pick.choice, &pick.tuning, max_tokens)?;
         Ok((provider, Some(screen)))
     };
     match opening {
-        Opening::Named(pair) => Ok((build(pair)?, None)),
-        Opening::Restored(pair, among) => match build(pair) {
+        Opening::Named(choice) => Ok((build(choice)?, None)),
+        Opening::Restored(choice, among) => match build(choice) {
             Ok(provider) => Ok((provider, None)),
             Err(why) => choose(
                 among,

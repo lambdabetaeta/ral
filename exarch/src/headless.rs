@@ -443,10 +443,12 @@ pub fn run(
     let mut stdout = io::stdout();
     let mut stderr = io::stderr();
     // The account id, not a label: a label is relative to a set this banner
-    // does not have, and the id is what `--provider` takes to reproduce the run.
+    // does not have, and the id is what `--provider` takes to reproduce the run;
+    // `via=` prints what `--via` takes.
+    let via = p.via().map(|via| format!(" via={via}")).unwrap_or_default();
     let _ = writeln!(
         stderr,
-        "exarch: provider={} model={} base={}",
+        "exarch: provider={} model={}{via} base={}",
         p.account().id,
         p.model(),
         info.base

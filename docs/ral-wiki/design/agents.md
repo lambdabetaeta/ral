@@ -234,7 +234,8 @@ field stays a static error.
 `` `inherit `` takes the parent's own `Arc<Provider>` verbatim, allocating
 nothing. `` `role `` names a **role**: a provider the human bound to a name at
 launch with `--role NAME=MODEL` (and, only to break a tie between accounts
-listing the model, `--role-provider NAME=ACCOUNT`), minted through
+listing the model, `--role-provider NAME=ACCOUNT`; to choose the upstreams
+that serve it on a routing service, `--role-via NAME=TAGS`), minted through
 `Bureau::build` — the one door every provider passes, which refuses a model its
 account does not list — before any child exists. Roles are fixed at launch,
 flags only, never persisted, and carry nothing but a provider: no grant, no
