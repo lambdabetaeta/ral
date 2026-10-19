@@ -882,6 +882,14 @@ echo $colur                  # error: undefined variable: $colur
                              # help: did you mean `$colour`?
 ```
 
+A `-` inside a name continues it, so `"$os-gnu"` reads `$os-gnu`; `"$(os)-gnu"` ends it.
+(A trailing `-` does not: `"$os-$arch"` is `$os`, a `-`, and `$arch`.)
+
+```ral
+echo "$os-gnu"               # error: undefined variable: $os-gnu
+                             # help: `$os` is defined, and `-` continues a name: write `$(os)` to end it there
+```
+
 A binding shadows a command of the same name, at every scope, whatever is on
 the current `PATH`: a program means the same on every host. `^name` reaches the
 external command.

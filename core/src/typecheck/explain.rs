@@ -758,9 +758,14 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
         TypeErrorKind::BuiltinNotFirstClass { name } => {
             Some(format!("did you mean to invoke `{name} ...` in command position?"))
         }
-        TypeErrorKind::UnboundVariable { name, suggestions } => {
-            Some(unbound_variable_hint(name, suggestions))
-        }
+        TypeErrorKind::UnboundVariable {
+            name,
+            suggestions,
+            boundary,
+        } => Some(match boundary {
+            Some(prefix) => hyphen_boundary_hint(prefix),
+            None => unbound_variable_hint(name, suggestions),
+        }),
         TypeErrorKind::HeadBoundToValue { name, .. } => Some(format!(
             "`${name}` is the value; if you meant a command named `{name}`, `^{name}` runs it"
         )),
@@ -1236,6 +1241,18 @@ fn byte_writer_hint(expected: &Ty, actual: &Ty) -> Option<String> {
 pub(crate) const NO_STATUS_REGISTER: &str = "there is no status register: a failure raises an \
     error record that carries its own status: catch it with `try` and read \
     `$err[status]` from the handler's argument";
+
+/// The longest prefix of `name` that ends just before a `-` and is bound:
+/// `-` continues a name, so `$os-$arch` reads `$os-`.
+pub(crate) fn hyphen_boundary(name: &str, is_bound: impl Fn(&str) -> bool) -> Option<&str> {
+    name.rmatch_indices('-')
+        .map(|(i, _)| &name[..i])
+        .find(|p| !p.is_empty() && is_bound(p))
+}
+
+pub(crate) fn hyphen_boundary_hint(prefix: &str) -> String {
+    format!("`${prefix}` is defined, and `-` continues a name: write `$({prefix})` to end it there")
+}
 
 /// What an unbound `$name` most likely meant, most specific first.
 fn unbound_variable_hint(name: &str, suggestions: &[String]) -> String {

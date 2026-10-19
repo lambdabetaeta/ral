@@ -1,0 +1,5 @@
+# codes: T0071
+# contains: write `$(my-os)` to end it there
+let my = "x"
+let my-os = "linux"
+echo $my-os-x

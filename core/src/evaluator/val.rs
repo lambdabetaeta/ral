@@ -48,8 +48,17 @@ pub(crate) fn form(val: &Val, env: &Env, sig: &Signature) -> Result<Value, Error
             .cloned()
             .ok_or_else(|| {
                 let hint = match name.as_ref() {
-                    "STATUS" => crate::typecheck::NO_STATUS_REGISTER,
-                    _ => "check spelling, or ensure the variable is defined before this line",
+                    "STATUS" => crate::typecheck::NO_STATUS_REGISTER.to_string(),
+                    _ => crate::typecheck::hyphen_boundary(name, |p| {
+                        crate::types::lookup(p, env, sig).is_some()
+                    })
+                    .map_or_else(
+                        || {
+                            "check spelling, or ensure the variable is defined before this line"
+                                .into()
+                        },
+                        crate::typecheck::hyphen_boundary_hint,
+                    ),
                 };
                 Error::new(format!("undefined variable: ${name}")).with_hint(hint)
             }),

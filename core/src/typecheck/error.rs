@@ -264,6 +264,8 @@ pub enum TypeErrorKind {
     UnboundVariable {
         name: String,
         suggestions: Vec<String>,
+        /// The longest bound prefix of `name` that ends before a `-`.
+        boundary: Option<String>,
     },
     /// A binding of data run as a program: a bare head, `$name args`, or `!$name`.
     HeadBoundToValue {

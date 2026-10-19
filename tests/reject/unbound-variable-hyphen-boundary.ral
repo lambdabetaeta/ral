@@ -1,0 +1,4 @@
+# codes: T0071
+# contains: write `$(os)` to end it there
+let os = "linux"
+echo "$os-gnu"

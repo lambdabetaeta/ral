@@ -21,7 +21,7 @@ pub use self::builtins::{Decl, Manifest, builtin_type_hint};
 pub use self::contract::{Form, Table};
 pub use self::env::{InferCtx, TyEnv};
 pub use self::error::{CycleVia, KindFound, Reason, Standing, TypeError, TypeErrorKind};
-pub(crate) use self::explain::NO_STATUS_REGISTER;
+pub(crate) use self::explain::{NO_STATUS_REGISTER, hyphen_boundary, hyphen_boundary_hint};
 pub use self::unify::Unifier;
 
 use self::env::HandlerOrigin;

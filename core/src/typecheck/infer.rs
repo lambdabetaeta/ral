@@ -1339,9 +1339,16 @@ impl Inferencer<'_> {
             .into_iter()
             .map(str::to_string)
             .collect();
+        let boundary = super::explain::hyphen_boundary(name, |p| {
+            self.env.lookup_binding(p).is_some()
+                || self.env.builtins.value_names().any(|n| n == p)
+                || LANGUAGE_CONSTANTS.iter().any(|&(c, _)| c == p)
+        })
+        .map(str::to_string);
         self.ctx.diagnose(TypeErrorKind::UnboundVariable {
             name: name.to_string(),
             suggestions,
+            boundary,
         });
     }
 
