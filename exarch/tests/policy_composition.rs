@@ -121,10 +121,11 @@ fn two_restricts_compose_to_the_same_grant_in_either_order() {
         "a.ral",
         "return [fs: [read: [`cwd .], write: [`cwd .]], exec: [allow: [`name git, `name ls]]]\n",
     );
+    // `rustc`, not `cat`: an all-in-one coreutils makes `cat` and `ls` one file.
     let b = profile(
         &dir,
         "b.ral",
-        "return [exec: [allow: [`name ls, `name cat]], net: `offline]\n",
+        "return [exec: [allow: [`name ls, `name rustc]], net: `offline]\n",
     );
     let cwd = dir.path().to_string_lossy().into_owned();
 
@@ -139,11 +140,12 @@ fn two_restricts_compose_to_the_same_grant_in_either_order() {
         install(&mut shell, stack);
         check_file(&mut shell, &ls, &[])
             .expect("what both files name is admitted regardless of restrict argv order");
-        for one_sided in ["git", "cat"] {
-            let message = refusal(check_file(&mut shell, &on_path(one_sided), &[]));
+        for one_sided in ["git", "rustc"] {
+            let real = on_path(one_sided);
+            let message = refusal(check_file(&mut shell, &real, &[]));
             assert!(
-                message.contains(one_sided),
-                "a name only one restrict file carries must be refused, by name: {message}"
+                message.contains(&real),
+                "a name only one restrict file carries must be refused, by its real path: {message}"
             );
         }
         assert!(
