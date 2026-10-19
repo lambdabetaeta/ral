@@ -233,7 +233,7 @@ Do NOT use `try` for tools that report through their exit codes (`grep`, `diff`,
 
 Prelude functions cover common cases:
 
-    if !{succeeds { grep -q ERROR log.txt }} { echo #'clean'# } else { echo ###'broken'### }
+    if !{succeeds { grep -q ERROR log.txt }} { echo #'ERROR found'# } else { echo #'grep did not succeed'# }
     attempt { rm stale.lock }          # suppress any failure
     retry 3 { curl -s $url }           # up to 3 attempts
 
