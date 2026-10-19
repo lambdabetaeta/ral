@@ -1,8 +1,8 @@
 //! What the OS reported when a child ended, and the user-facing failure it
 //! becomes: a `CommandFailure` travels on as `Status::Process` in `types/error.rs`.
 
-use crate::path::shown;
 use super::cancel::CancelCause;
+use crate::path::shown;
 
 /// The exit code ral's every Windows kill uses (ASCII "RALK"), there being
 /// no signal a terminated Windows process could carry.  A child exiting with

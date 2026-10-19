@@ -2,65 +2,12 @@
 //! into a fresh [`Context`] through the same [`Context::step`] the live
 //! path runs.
 
-use super::Context;
+use super::{Context, Model};
 use crate::record::log::Log;
-use crate::record::{Forensic, Record, Recorded};
+use crate::record::{Fold as _, Forensic, Record, Selection};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
-
-/// The bytes past the last complete JSONL line — a torn write from a session
-/// that did not shut down cleanly.
-struct CrashTail {
-    bytes: Vec<u8>,
-    complete_len: u64,
-}
-
-/// The `(model, window)` an overflow taught the live provider.
-pub type Learned = Option<(String, u64)>;
-
-/// What a root's head record says about the session.
-pub struct Head {
-    pub model: String,
-    pub label: String,
-}
-
-/// Scanned backwards from the end, a window at a time, rather than forwards
-/// through the whole file: the tail is one torn record long however long the
-/// log behind it is.
-const CRASH_SCAN_WINDOW: u64 = 8 * 1024;
-
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:model-fold-crash-scan] scans record.jsonl's tail for a torn trailing write before resume folds it; output infra, not turn-time data I/O"
-)]
-fn find_crash_tail(path: &Path) -> io::Result<Option<CrashTail>> {
-    let mut file = File::open(path)?;
-    let len = file.metadata()?.len();
-    let mut complete_len = 0;
-    let mut cursor = len;
-    while cursor > 0 {
-        let window = cursor.saturating_sub(CRASH_SCAN_WINDOW);
-        let mut chunk = vec![0; usize::try_from(cursor - window).unwrap_or(usize::MAX)];
-        let _ = file.seek(SeekFrom::Start(window))?;
-        file.read_exact(&mut chunk)?;
-        if let Some(last) = chunk.iter().rposition(|byte| *byte == b'\n') {
-            complete_len = window + last as u64 + 1;
-            break;
-        }
-        cursor = window;
-    }
-    if complete_len == len {
-        return Ok(None);
-    }
-    let mut bytes = Vec::new();
-    let _ = file.seek(SeekFrom::Start(complete_len))?;
-    let _ = file.read_to_end(&mut bytes)?;
-    Ok(Some(CrashTail {
-        bytes,
-        complete_len,
-    }))
-}
 
 /// Move a torn tail to `record.jsonl.crash` and trim the live file back to
 /// its last complete line.
@@ -68,7 +15,15 @@ fn find_crash_tail(path: &Path) -> io::Result<Option<CrashTail>> {
     clippy::disallowed_methods,
     reason = "[silent:model-fold-crash-quarantine] sidecars and trims a torn record.jsonl tail before resume folds it; output infra, not turn-time data I/O"
 )]
-fn quarantine_tail(path: &Path, tail: &CrashTail) -> io::Result<()> {
+fn quarantine_tail(path: &Path) -> io::Result<()> {
+    let complete_len = Log::complete_len(path)?;
+    let mut file = File::open(path)?;
+    let mut tail = Vec::new();
+    let _ = file.seek(SeekFrom::Start(complete_len))?;
+    let _ = file.read_to_end(&mut tail)?;
+    if tail.is_empty() {
+        return Ok(());
+    }
     let mut sidecar_name = path.file_name().unwrap_or_default().to_os_string();
     sidecar_name.push(".crash");
     let sidecar = path.with_file_name(sidecar_name);
@@ -76,25 +31,25 @@ fn quarantine_tail(path: &Path, tail: &CrashTail) -> io::Result<()> {
         .create(true)
         .append(true)
         .open(&sidecar)?;
-    quarantine.write_all(&tail.bytes)?;
+    quarantine.write_all(&tail)?;
     quarantine.flush()?;
     quarantine.sync_all()?;
 
     let file = OpenOptions::new().write(true).open(path)?;
-    file.set_len(tail.complete_len)?;
+    file.set_len(complete_len)?;
     file.sync_all()?;
     ral_core::errln!(
         "exarch: quarantined {} bytes from {} in {} before trimming the live log",
-        tail.bytes.len(),
+        tail.len(),
         path.display(),
         sidecar.display()
     );
     Ok(())
 }
 
-/// Fold `record.jsonl` into a fresh [`Context`]: quarantine a torn tail, read
-/// the session's identity off the file's first record, then hand every
-/// protocol record to [`Context::step`].
+/// Fold `record.jsonl` into a fresh [`Context`]: quarantine a torn tail, check
+/// the file's first record heads a root, then hand every record to
+/// [`Model::step`] and every forensic one to a [`Selection`].
 ///
 /// There is nothing to compare the result with, and nothing to check it
 /// against: the law is that the fold refuses what it cannot admit, and what
@@ -104,37 +59,19 @@ fn quarantine_tail(path: &Path, tail: &CrashTail) -> io::Result<()> {
 /// The pass is a stream rather than a collection, so what a resume holds is
 /// the structure it is building and never the log it is building it from.
 ///
-/// Returns the structure alongside the [`Head`] the first record
-/// identifies the session by, and the `(model, window)` an overflow last taught
-/// the live provider unless a later selection forgot it. `AgentLog::resume`
-/// reads its model and label from here rather than re-deriving them; the name
-/// is the one `AgentLog::live_roots` read off the same record.
-///
 /// # Errors
 /// Returns an error if the file cannot be read, cannot be quarantined, is not
 /// headed by a root's `SessionStarted { parent: None, .. }`, or holds a
 /// protocol record the fold refuses.
-pub fn resume(path: &Path) -> io::Result<(Context, Head, Learned)> {
-    if let Some(tail) = find_crash_tail(path)? {
-        quarantine_tail(path, &tail)?;
-    }
+pub fn resume(path: &Path) -> io::Result<(Context, Selection)> {
+    quarantine_tail(path)?;
     let mut context = Context::new(path.to_path_buf());
-    let mut identity = None;
-    let mut in_force = String::new();
-    let mut learned: Learned = None;
-    for record in Log::read(path)? {
+    let mut selection = Selection::default();
+    for (n, record) in Log::read(path)?.enumerate() {
         let record = record?;
-        if identity.is_none() {
-            identity = Some(match record.value() {
-                Record::Forensic(Forensic::SessionStarted {
-                    parent: None,
-                    model,
-                    label,
-                    ..
-                }) => Head {
-                    model: model.clone(),
-                    label: label.clone(),
-                },
+        if n == 0 {
+            match record.value() {
+                Record::Forensic(Forensic::SessionStarted { parent: None, .. }) => {}
                 Record::Forensic(Forensic::SessionStarted {
                     session_id, parent, ..
                 }) => {
@@ -149,37 +86,19 @@ pub fn resume(path: &Path) -> io::Result<(Context, Head, Learned)> {
                         path.display()
                     )));
                 }
-            });
+            }
         }
-        let protocol = match record.value() {
-            Record::Protocol(protocol) => protocol,
-            Record::Forensic(
-                Forensic::SessionStarted { model, .. } | Forensic::ModelChanged { model, .. },
-            ) => {
-                in_force.clone_from(model);
-                learned = None;
-                continue;
-            }
-            Record::Forensic(Forensic::SessionResumed { model, .. }) => {
-                in_force.clone_from(model);
-                learned = learned.filter(|(learned, _)| learned == model);
-                continue;
-            }
-            Record::Forensic(Forensic::WindowNarrowed { context_window }) => {
-                learned = Some((in_force.clone(), *context_window));
-                continue;
-            }
-            Record::Display(_) | Record::Forensic(_) => continue,
-        };
-        context
-            .step(Recorded::new(record.locus().clone(), protocol.clone()))
+        if let Record::Forensic(forensic) = record.value() {
+            selection.step(forensic);
+        }
+        Model::step(&mut context, record)
             .map_err(|refusal| io::Error::other(refusal.to_string()))?;
     }
-    let Some(head) = identity else {
+    if selection.model().is_none() {
         return Err(io::Error::other(format!(
             "cannot resume {}: no complete session records were found; is the file truncated?",
             path.display()
         )));
-    };
-    Ok((context, head, learned))
+    }
+    Ok((context, selection))
 }

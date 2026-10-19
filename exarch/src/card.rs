@@ -83,7 +83,7 @@ impl Role {
 /// which is [`Measure`]'s and [`Mark::Diff`]'s work.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Span {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<Role>,
     pub text: String,
 }
@@ -112,9 +112,9 @@ impl Span {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Readout {
     pub value: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
 }
 

@@ -4,32 +4,23 @@
 use super::{Context, Held, OPENING_CHARS, Turn, message_bytes, resident_messages, runs};
 use genai::chat::ChatMessage;
 
-/// The table as the provider reads it: a maximal run of departed turns is one
-/// hole, and every resident turn is itself. The one walk the rendering, the
-/// weight and the record count all read, so the three agree by construction.
+/// The table as the provider reads it: withdrawn turns are passed over, a
+/// maximal run of evicted turns is one hole, and every resident turn is
+/// itself. The one walk the rendering, the weight and the record count all
+/// read, so the three agree by construction.
 enum Piece<'a> {
-    Hole(&'a [Turn]),
+    Hole(Vec<&'a Turn>),
     Turn(&'a Turn),
 }
 
 fn pieces(turns: &[Turn]) -> Vec<Piece<'_>> {
     let mut pieces: Vec<Piece<'_>> = Vec::new();
-    let mut hole: Option<usize> = None;
-    for (index, turn) in turns.iter().enumerate() {
-        match (turn.is_resident(), hole) {
-            (false, None) => hole = Some(index),
-            (false, Some(_)) => {}
-            (true, opened) => {
-                if let Some(from) = opened {
-                    pieces.push(Piece::Hole(&turns[from..index]));
-                    hole = None;
-                }
-                pieces.push(Piece::Turn(turn));
-            }
+    for turn in turns.iter().filter(|turn| !turn.is_withdrawn()) {
+        match (turn.is_resident(), pieces.last_mut()) {
+            (false, Some(Piece::Hole(hole))) => hole.push(turn),
+            (false, _) => pieces.push(Piece::Hole(vec![turn])),
+            (true, _) => pieces.push(Piece::Turn(turn)),
         }
-    }
-    if let Some(from) = hole {
-        pieces.push(Piece::Hole(&turns[from..]));
     }
     pieces
 }
@@ -105,11 +96,12 @@ const MARKER_ROLE: usize = 9;
 /// In the user's voice, bracketed: the harness may state a fact about the
 /// conversation, never speak in the model's own voice — a placeholder in the
 /// assistant's voice is read back as something it chose to say, and imitated.
-pub(super) fn render_marker(context: &Context, hole: &[Turn]) -> String {
+pub(super) fn render_marker(context: &Context, hole: &[&Turn]) -> String {
     // Grouped by cut, so each note follows the rows it belongs to.
     let by_cut: Vec<Vec<&Turn>> = (0..context.notes().len())
         .map(|cut| {
             hole.iter()
+                .copied()
                 .filter(|turn| turn.held() == Held::Evicted { cut })
                 .collect()
         })
@@ -150,7 +142,7 @@ pub(super) fn render_marker(context: &Context, hole: &[Turn]) -> String {
 /// How the hole's own turns are read back: `` `read `` names them by the
 /// range this hole spans, and the other two doors reach the whole
 /// transcript.
-fn whereabouts(hole: &[Turn]) -> String {
+fn whereabouts(hole: &[&Turn]) -> String {
     let (from, past) = match (hole.first(), hole.last()) {
         (Some(first), Some(last)) => (first.id, last.id + 1),
         _ => return String::new(),

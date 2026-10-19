@@ -1,6 +1,7 @@
 use super::*;
 use crate::agent::testkit::*;
 use crate::bus::{Emitter, Post};
+use crate::record::Voice;
 
 /// The card is a heading plus one matrix, one field per row, the cap
 /// rendered into the figure only when armed.
@@ -41,7 +42,7 @@ fn context_survey_records_a_display_commit() {
     let session = Avatar::for_test("system").unwrap();
     {
         let mut log = session.log.borrow_mut();
-        log.append_user("one".into(), None).unwrap();
+        log.append_user("one".into(), None, Voice::Human).unwrap();
         log.append_assistant(genai::chat::ChatMessage::assistant("answer"), vec![], None)
             .unwrap();
     }

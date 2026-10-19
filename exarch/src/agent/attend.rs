@@ -14,7 +14,7 @@ use crate::bus::{
 };
 use crate::clock;
 use crate::provider::{Limit, ProviderError, Recovery};
-use crate::record::{AgentState, QuiesceReason, Transient};
+use crate::record::{AgentState, Forensic, QuiesceReason, Transient};
 use crate::schedule::Trigger;
 use ral_core::carrier::Severed;
 use ral_core::sync::LockExt;
@@ -180,8 +180,7 @@ impl Avatar {
             self.agent.token.reset();
             self.inbox.drop_nudges();
         }
-        let opens = self.log.borrow().opens(item.continues());
-        self.arrive(item, opens);
+        self.arrive(item);
         let outcome = match self.attempt(item, emit) {
             Ok(outcome) => Ok(outcome),
             Err(Fault::Provider(error)) => {
@@ -220,7 +219,12 @@ impl Avatar {
         // item rather than mid-item.
         let active = self.agent.provider.current();
         let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.deliberate(&active, Some(item.text()), item.continues(), emit)
+            self.deliberate(
+                &active,
+                Some((item.text(), item.voice())),
+                item.continues(),
+                emit,
+            )
         }));
         // A provider error or an unwind can leave the session mid-protocol;
         // quiesce now so the next prompt — nudge or user — is admissible.
@@ -237,10 +241,9 @@ impl Avatar {
     /// trunk keeps no registry, and its failures must still reach the human —
     /// and arm the resume a refusal with a known reset earns.
     fn record_failure(&self, error: &ProviderError) {
-        let recorded = self.log.borrow_mut().record_provider_error(error);
-        if let Err(unrecorded) = recorded {
-            self.recorder().report_fault(&unrecorded);
-        }
+        self.recorder().emit_or_report(Forensic::ProviderError {
+            error: error.clone(),
+        });
         if let ProviderError::Refused(refusal) = error
             && self.resumes_at_reset()
             && let Recovery::Deferred(at) = refusal.recovery()
@@ -268,7 +271,7 @@ impl Avatar {
         let nudged = self
             .readings
             .nudges
-            .react(outcome, &facts, &mut self.log.borrow_mut());
+            .react(outcome, &facts, &self.log.borrow());
         let Some(text) = nudged else {
             return Ok(());
         };

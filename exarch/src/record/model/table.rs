@@ -1,18 +1,17 @@
 //! The turns and the cuts made in them. The `Vec`s are private to this
-//! module, so a turn changes where it is only through [`Table::evict`] and
-//! leaves only through [`Table::rewind`] — the former departs exactly the ids
-//! [`Context::resolve_cut`](super::Context::resolve_cut) handed it, that
-//! being the one place the survivor rule lives.
+//! module, so a turn leaves only through [`Table::evict`] or
+//! [`Table::withdraw`], and no row is ever removed — the former departs exactly
+//! the ids [`Context::resolve_cut`](super::Context::resolve_cut) handed it,
+//! that being the one place the survivor rule lives.
 
-use super::{Body, Held, Linked, Pointer, Turn};
+use super::{Body, Held, Linked, Pointer, Turn, message_bytes, resident_messages};
 use crate::record::{Protocol, Recorded};
 use crate::record::{Role, TurnKind};
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 pub(super) struct Table {
     turns: Vec<Turn>,
-    /// One note slot per eviction; [`Body::There`]'s `cut` indexes it.
+    /// One note slot per eviction; an evicted [`Body::There`]'s `cut` indexes it.
     notes: Vec<Option<String>>,
     /// Own `record.jsonl`: where a turn first recorded here points once it
     /// leaves.
@@ -86,27 +85,33 @@ impl Table {
 
     /// A link's own step: the parent's rows and notes become this log's, so
     /// the child's marker, survey and index are the same projections of the
-    /// same structure. A resident row's weight is zeroed because the seed's
-    /// records follow and the fold sums them as they land.
-    pub(super) fn install(&mut self, turns: &[Linked], notes: &[Option<String>]) {
+    /// same structure. A resident row holds `seeds`' next entry — its
+    /// admissible prefix, read back from the parent's file — and weighs it.
+    pub(super) fn install(
+        &mut self,
+        turns: &[Linked],
+        notes: &[Option<String>],
+        seeds: Vec<Vec<Recorded<Protocol>>>,
+    ) {
+        let mut seeds = seeds.into_iter();
         self.turns = turns
             .iter()
             .map(|Linked { row, at }| {
+                let at = at.clone();
                 let (bytes, body) = match row.held {
-                    Held::Resident => (
-                        0,
-                        Body::Here {
-                            records: Vec::new(),
-                            origin: Some(at.clone()),
-                        },
-                    ),
-                    Held::Evicted { cut } => (
-                        row.bytes,
-                        Body::There {
-                            at: at.clone(),
-                            cut,
-                        },
-                    ),
+                    Held::Resident => {
+                        let records = seeds.next().expect("one seed per resident row");
+                        let bytes = message_bytes(&resident_messages(&records));
+                        (
+                            bytes,
+                            Body::Here {
+                                records,
+                                origin: Some(at),
+                            },
+                        )
+                    }
+                    Held::Evicted { cut } => (row.bytes, Body::There { at, cut: Some(cut) }),
+                    Held::Withdrawn => (row.bytes, Body::There { at, cut: None }),
                 };
                 Turn {
                     id: row.id,
@@ -121,34 +126,27 @@ impl Table {
         self.notes = notes.to_vec();
     }
 
-    /// `/rewind`: turn `anchor` and every row after it leave the structure.
-    /// Notes stay, since rows before the anchor may still index them.
-    pub(super) fn rewind(&mut self, anchor: u64) {
-        let kept = self
-            .turns
-            .iter()
-            .take_while(|turn| turn.id < anchor)
-            .count();
-        self.turns.truncate(kept);
+    /// `/clear` and `/rewind`: every turn from `from` on departs with no cut,
+    /// and so with no marker. An evicted turn keeps its address and loses its
+    /// cut, which is how a withdrawal leaves no note behind. Notes stay,
+    /// since rows before `from` may still index them.
+    pub(super) fn withdraw(&mut self, from: u64) {
+        self.depart(|id| id >= from, None);
     }
 
     /// Move the turns `leaving` from here to there, and record the model's
     /// note in the slot the departed rows now index.
     pub(super) fn evict(&mut self, leaving: &[u64], note: Option<String>) {
         let cut = self.notes.len();
-        self.depart(leaving, cut);
+        self.depart(|id| leaving.contains(&id), Some(cut));
         self.notes.push(note);
     }
 
     /// The address a departing turn keeps: its `origin` where it has one, else
     /// this log's own file and the loci its records were measured at.
-    fn depart(&mut self, leaving: &[u64], cut: usize) {
-        let leaving: HashSet<u64> = leaving.iter().copied().collect();
+    fn depart(&mut self, leaving: impl Fn(u64) -> bool, cut: Option<usize>) {
         let source = self.source.clone();
-        for turn in &mut self.turns {
-            if !leaving.contains(&turn.id) {
-                continue;
-            }
+        for turn in self.turns.iter_mut().filter(|turn| leaving(turn.id)) {
             let at = match &mut turn.body {
                 Body::Here { records, origin } => origin.take().unwrap_or_else(|| Pointer {
                     source: source.clone(),
@@ -157,7 +155,10 @@ impl Table {
                         .map(|recorded| recorded.locus().clone())
                         .collect(),
                 }),
-                Body::There { .. } => continue,
+                Body::There { cut: held, .. } => {
+                    *held = cut;
+                    continue;
+                }
             };
             turn.body = Body::There { at, cut };
         }

@@ -23,9 +23,9 @@
 //! [`RealPath::frozen`](super::RealPath::frozen) for exec, and no other:
 //! `surface` leaves the type only as a `String`, for rendering.
 
-use crate::path::shown;
 use super::PathRules;
 use super::identity::{Polarity, path_within};
+use crate::path::shown;
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 

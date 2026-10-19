@@ -10,7 +10,7 @@ use exarch::bus::{Emitter, channel};
 use exarch::provider::Provider;
 use exarch::provider::Toolset;
 use exarch::provider::scripted::{Reply, Script};
-use exarch::record::{self, Blocks, Refusal, View};
+use exarch::record::{self, Blocks, Refusal, View, Voice};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
@@ -44,7 +44,12 @@ fn kind_contains(blocks: &Blocks, needle: &str) -> bool {
 fn drive(session: &mut Avatar, provider: &Arc<Provider>, prompt: &str) {
     let (tx, _rx) = channel();
     let emit = Emitter::new(tx, session.id());
-    let outcome = session.deliberate(provider, Some(prompt.to_string()), None, &emit);
+    let outcome = session.deliberate(
+        provider,
+        Some((prompt.to_string(), Voice::Human)),
+        None,
+        &emit,
+    );
     assert!(matches!(outcome, Ok(Outcome::Complete)));
 }
 
@@ -223,6 +228,7 @@ fn resume_child() {
     let record = exarch::record::Record::Protocol(exarch::record::Protocol::UserPrompt {
         turn: 3,
         text: "crash prompt".into(),
+        voice: Voice::Human,
     });
     let path = dir.join("sessions/0/record.jsonl");
     let mut file = OpenOptions::new()

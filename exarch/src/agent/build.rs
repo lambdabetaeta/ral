@@ -55,11 +55,6 @@ pub(crate) struct Build {
     /// The tab-bar identity, held before construction; the agent's name is
     /// the claim's.
     pub(crate) claim: Claim,
-    /// The launch's template resolved for this node's own grants — what
-    /// reaches the model.  The caller resolves it because the log's
-    /// `SessionStarted` bookend records the resolved length, and the log must
-    /// exist before the agent it describes does.
-    pub(crate) system_prompt: String,
     pub(crate) caps: ral_core::capability::GrantStack,
     /// Already through its identity ceremony: `assemble` seats no engine of
     /// its own, so every construction site states which seat kind it builds.
@@ -266,7 +261,6 @@ impl Avatar {
     pub(crate) fn assemble(b: Build) -> Result<Self, Unborn> {
         let Build {
             claim,
-            system_prompt,
             caps,
             seat,
             log,
@@ -282,7 +276,6 @@ impl Avatar {
             name: claim.name().to_string(),
             log_dir: log.dir().to_path_buf(),
             started: Instant::now(),
-            system: system_prompt.into(),
             caps,
             role,
             fuel,
@@ -377,14 +370,13 @@ impl Avatar {
         provider: Arc<Provider>,
     ) -> io::Result<(Self, Resumed)> {
         let live = provider.clone();
-        let name = claim.name().to_string();
         let (avatar, resumed) = Self::hatch(
             fleet,
             claim,
             seat,
             provider,
-            |sessions, _, account, bytes| {
-                let mut log = AgentLog::resume(sessions, id, &name)?;
+            |sessions, _, account, system| {
+                let mut log = AgentLog::resume(sessions, id)?;
                 let resumed = log.resumed_summary();
                 if let Some((model, window)) = log.learned_window()
                     && model == live.model()
@@ -394,7 +386,7 @@ impl Avatar {
                 log.record_resumed(
                     &RecordedModel::of(&live),
                     account,
-                    bytes,
+                    system,
                     crate::app::now_unix_ms(),
                 )?;
                 Ok((log, resumed))
@@ -426,8 +418,9 @@ impl Avatar {
             claim,
             seat,
             provider,
-            |sessions, model, account, bytes| {
-                AgentLog::root(sessions, id, TRUNK_NAME, model, account, bytes).map(|log| (log, ()))
+            |sessions, model, account, system| {
+                AgentLog::root(sessions, id, TRUNK_NAME, model, account, system, None)
+                    .map(|log| (log, ()))
             },
         )
         .map(|(avatar, ())| avatar)
@@ -447,7 +440,7 @@ impl Avatar {
         claim: Claim,
         seat: Seat,
         provider: Arc<Provider>,
-        open: impl FnOnce(&Path, &RecordedModel, &RecordedAccount, usize) -> io::Result<(AgentLog, T)>,
+        open: impl FnOnce(&Path, &RecordedModel, &RecordedAccount, &str) -> io::Result<(AgentLog, T)>,
     ) -> io::Result<(Self, T)> {
         let launch = &fleet.launch;
         let role = launch.trunk.role();
@@ -461,11 +454,10 @@ impl Avatar {
             &launch.sessions_root,
             &RecordedModel::of(&provider),
             &account,
-            system_prompt.len(),
+            &system_prompt,
         )?;
         let avatar = Self::assemble(Build {
             claim,
-            system_prompt,
             caps: launch.caps.clone(),
             seat,
             log,
@@ -500,27 +492,24 @@ impl Avatar {
         let fuel = parent.fuel.saturating_sub(1);
         let role = Role::child(parent);
         // Against the *child's* grants, never the parent's, so the opening
-        // bookend records the child's real system length.  Its grant layer
-        // was resolved in its own engine, so only that engine can name it.
+        // records the child's real prompt.  Its grant layer was resolved in
+        // its own engine, so only that engine can name it.
         let system_prompt = launch
             .prompt_for(&seat, &parent.caps, &role, fuel, claim.name())
             .map_err(|lost| EngineLost::starting(&lost, parent.run_dir()).to_string())?;
         let account = RecordedAccount::of(provider.account(), &launch.bureau.available());
-        let mut log = parent_log
+        let log = parent_log
             .fork(
                 fresh_id(),
                 claim.name(),
-                system_prompt.len(),
                 &RecordedModel::of(&provider),
                 &account,
+                &system_prompt,
+                memory,
             )
             .map_err(|e| format!("could not fork child session log: {e}"))?;
-        if memory == Memory::Mnemon {
-            log.import_context(parent_log.inherited_context())?;
-        }
         Self::assemble(Build {
             claim,
-            system_prompt,
             // The child's engine holds its own layer; the stack it runs under
             // is its parent's.
             caps: parent.caps.clone(),
@@ -536,7 +525,6 @@ impl Avatar {
     }
 
     pub(crate) fn clear(&mut self) -> io::Result<()> {
-        let at_unix_ms = crate::app::now_unix_ms();
         // The queue goes first, before the seat reboot below spends real time
         // booting a shell: what is waiting *now* is old context, but a prompt
         // typed during the reboot was typed against an already-blanked screen
@@ -547,17 +535,12 @@ impl Avatar {
         // its registered workers — `/clear` outranks every lease. First of
         // the rest, so a seat that cannot reboot refuses before anything goes.
         self.seat.clear().map_err(io::Error::other)?;
-        // Abandon the subtree — this agent itself stays live — before the
-        // segment rotates below, so no live descendant can still resolve an
-        // ancestry link into a replaced file.
+        // `/clear` ends the subtree; this agent itself stays live.
         self.agent.forget();
-        let record = self
-            .log
-            .borrow_mut()
-            .clear(self.agent.system.len(), at_unix_ms)?;
+        self.log.borrow_mut().clear()?;
         // A rebuilt context has been measured and told nothing.
         self.readings = self.readings.reborn();
-        record.rotation_error.map_or(Ok(()), Err)
+        Ok(())
     }
 
     /// `/rewind`: turn `anchor` and every turn after it cease to be, for the
@@ -567,10 +550,6 @@ impl Avatar {
         // — publishes live.
         self.couple(emit);
         self.log.borrow_mut().rewind(anchor)?;
-        self.recorder()
-            .emit(crate::record::Display::Rewound { anchor })
-            .map(drop)
-            .map_err(|e| e.to_string())?;
         // A nudge decided for the rewound prompt must neither commit nor
         // leave its edges consumed.
         self.inbox.drop_nudges();
@@ -717,10 +696,8 @@ impl Drop for Avatar {
         if std::thread::panicking() {
             return;
         }
-        let mut log = self.log.borrow_mut();
-        if let Err(error) = log.record_session_ended() {
-            log.record_emitter().report_fault(&error);
-        }
+        self.recorder()
+            .emit_or_report(crate::record::Forensic::SessionEnded);
     }
 }
 

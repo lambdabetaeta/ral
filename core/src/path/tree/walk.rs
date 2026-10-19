@@ -9,8 +9,8 @@
 
 use crate::capability::FsOp;
 use crate::path::LexicalPath;
-use crate::path::sigil::literal_relative;
 use crate::path::shown;
+use crate::path::sigil::literal_relative;
 use crate::process::Scope;
 use crate::types::{Settled, Shell, sig};
 use ignore::WalkBuilder;

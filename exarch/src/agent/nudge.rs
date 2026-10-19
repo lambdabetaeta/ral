@@ -27,7 +27,7 @@
 use crate::agent::gauge::Reminder;
 use crate::agent::outcome::Outcome;
 use crate::provider::{CutShort, ProviderError};
-use crate::record::{AgentLog, Spent};
+use crate::record::{AgentLog, Forensic, Spent};
 
 /// Consecutive model-visible repairs, distinct from the provider's transport
 /// retries.
@@ -148,11 +148,14 @@ impl Nudges {
     /// A standing condition's reminder for the tool boundary, its breadcrumb
     /// recorded.  Budget-free: the condition, not the exchange, decides when
     /// it is owed.
-    pub fn remind(&self, reminder: &Reminder, log: &mut AgentLog) -> Option<String> {
+    pub fn remind(&self, reminder: &Reminder, log: &AgentLog) -> Option<String> {
         if !self.steers {
             return None;
         }
-        record_nudge(log, reminder.cause(), None);
+        log.record_emitter().emit_or_report(Forensic::Nudge {
+            cause: reminder.cause(),
+            spent: None,
+        });
         Some(wrap_reminder(&reminder.body()))
     }
 
@@ -162,7 +165,7 @@ impl Nudges {
         &mut self,
         attempt: Result<&Outcome, &ProviderError>,
         facts: &Facts,
-        log: &mut AgentLog,
+        log: &AgentLog,
     ) -> Option<String> {
         if !self.steers || !facts.quiet {
             return None;
@@ -192,39 +195,39 @@ impl Nudges {
         }
     }
 
-    fn repair(&mut self, cause: String, message: &str, log: &mut AgentLog) -> Option<String> {
+    fn repair(&mut self, cause: String, message: &str, log: &AgentLog) -> Option<String> {
         if self.used >= BUDGET {
-            record_error(
-                log,
-                format!("nudge budget exhausted ({BUDGET} attempts; last cause: {cause})"),
-            );
+            log.record_emitter().emit_or_report(Forensic::Error {
+                text: format!("nudge budget exhausted ({BUDGET} attempts; last cause: {cause})"),
+            });
             return None;
         }
         self.used += 1;
-        record_nudge(log, cause, Some(self.spent()));
+        log.record_emitter().emit_or_report(Forensic::Nudge {
+            cause,
+            spent: Some(self.spent()),
+        });
         Some(wrap_reminder(message))
     }
 
-    fn on_complete(&mut self, facts: &Facts, log: &mut AgentLog) -> Option<String> {
+    fn on_complete(&mut self, facts: &Facts, log: &AgentLog) -> Option<String> {
         let mut parts = Vec::new();
         if facts.must_reply {
             if self.used >= BUDGET {
                 // The un-replied finish is accepted; `agent_outcome` maps it
                 // to Failed.  Returning here leaves the edges below armed.
-                record_error(
-                    log,
-                    "agent finished without calling `reply` after the nudge budget; \
-                     returning a failure"
+                log.record_emitter().emit_or_report(Forensic::Error {
+                    text: "agent finished without calling `reply` after the nudge budget; \
+                           returning a failure"
                         .into(),
-                );
+                });
                 return None;
             }
             self.used += 1;
-            record_nudge(
-                log,
-                "no-reply finish (returning agent)".into(),
-                Some(self.spent()),
-            );
+            log.record_emitter().emit_or_report(Forensic::Nudge {
+                cause: "no-reply finish (returning agent)".into(),
+                spent: Some(self.spent()),
+            });
             parts.push(REPLY_MESSAGE.to_string());
         }
         // Edge-triggered: the edge is consumed in the same act as the part's
@@ -233,7 +236,10 @@ impl Nudges {
         match &facts.pinned {
             Some(pinned) if self.pinned_told.as_ref() != Some(pinned) => {
                 self.pinned_told = Some(pinned.clone());
-                record_nudge(log, "pinned-state reminder".into(), None);
+                log.record_emitter().emit_or_report(Forensic::Nudge {
+                    cause: "pinned-state reminder".into(),
+                    spent: None,
+                });
                 parts.push(format!("There is pinned state: {pinned}"));
             }
             Some(_) => {}
@@ -241,20 +247,6 @@ impl Nudges {
             None => self.pinned_told = None,
         }
         (!parts.is_empty()).then(|| wrap_reminder(&parts.join(" ")))
-    }
-}
-
-/// Durable and published in one call; a log that cannot take the breadcrumb
-/// reports the fault, and the nudge still reaches the model.
-fn record_nudge(log: &mut AgentLog, cause: String, spent: Option<Spent>) {
-    if let Err(error) = log.record_nudge(cause, spent) {
-        log.record_emitter().report_fault(&error);
-    }
-}
-
-fn record_error(log: &mut AgentLog, text: String) {
-    if let Err(error) = log.record_error(text) {
-        log.record_emitter().report_fault(&error);
     }
 }
 

@@ -7,6 +7,7 @@ use super::*;
 use crate::agent::outcome::Outcome;
 use crate::agent::testkit::*;
 use crate::provider::scripted::{Reply, Script};
+use crate::record::Voice;
 use ral_core::Shell;
 use ral_core::Value;
 use ral_core::ty::{Scheme, Ty};
@@ -37,7 +38,7 @@ fn let_bound_context_read_does_not_echo_the_transcript() {
     let session = Avatar::for_test("system").unwrap();
     {
         let mut log = session.log.borrow_mut();
-        log.append_user("material that must stay bound".into(), None)
+        log.append_user("material that must stay bound".into(), None, Voice::Human)
             .unwrap();
         log.append_assistant(
             genai::chat::ChatMessage::assistant("the answer stays in the binding"),
@@ -113,7 +114,12 @@ fn worker_panic_preserves_completed_bindings_and_clean_context() {
     let provider2 = scripted("test-model", Script::new().then(Reply::text("ok")));
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.agent.id);
-    match session.deliberate(&provider2, Some("continue".into()), None, &emit) {
+    match session.deliberate(
+        &provider2,
+        Some(("continue".into(), Voice::Human)),
+        None,
+        &emit,
+    ) {
         Ok(Outcome::Complete) => {}
         other => panic!("next exchange on the healed shell must complete, got {other:?}"),
     }

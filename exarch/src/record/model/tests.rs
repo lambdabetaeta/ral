@@ -1,4 +1,3 @@
-use super::render::render_marker;
 use super::*;
 use crate::record::Seq;
 
@@ -18,8 +17,8 @@ fn here(id: u64, role: Role, label: &str, bytes: usize) -> Turn {
     }
 }
 
-/// A departed turn: `cut` indexes the notes.
-fn there(id: u64, role: Role, label: &str, bytes: usize, cut: usize) -> Turn {
+/// A departed turn: `Some(cut)` indexes the notes, `None` is withdrawn.
+fn there(id: u64, role: Role, label: &str, bytes: usize, cut: Option<usize>) -> Turn {
     Turn {
         body: Body::There {
             at: Pointer {
@@ -91,21 +90,14 @@ fn prose_beats_intent_and_an_undeclared_call_stays_unlabelled() {
     assert_eq!(message_label(&prose), "now the write");
 }
 
-/// Every hole's marker, in the order [`Context::rendered`] stands them.
+/// Every hole's marker, in the order [`Context::rendered`] stands them: the
+/// turns here hold no records, so markers are all it renders.
 fn markers(context: &Context) -> Vec<String> {
-    let turns = context.table.turns();
-    let mut markers = Vec::new();
-    let mut at = 0;
-    while at < turns.len() {
-        if turns[at].is_resident() {
-            at += 1;
-            continue;
-        }
-        let end = at + turns[at..].iter().take_while(|t| !t.is_resident()).count();
-        markers.push(render_marker(context, &turns[at..end]));
-        at = end;
-    }
-    markers
+    context
+        .rendered()
+        .iter()
+        .filter_map(|message| message.content.first_text().map(str::to_string))
+        .collect()
 }
 
 /// The one marker a table with a single hole draws.
@@ -185,24 +177,23 @@ fn an_empty_log_has_no_current_turn() {
     assert_eq!(empty.current_prompt(), None);
 }
 
-/// An imported message opens a turn in its own voice: the link carries no
-/// role of its own, and the message is the one datum that says whose it
-/// was.
+/// An imported message opens a fresh turn in its own voice: the message is
+/// the one datum that says whose it was.
 #[test]
 fn an_import_opens_a_turn_in_its_messages_voice() {
     let mut context = Context::new(PathBuf::from("record.jsonl"));
     step(
         &mut context,
-        Protocol::ContextMessage {
-            id: 1,
+        Protocol::Import {
+            turn: 1,
             message: ChatMessage::user("the parent's prompt"),
         },
     )
     .expect("an import at a ready boundary");
     step(
         &mut context,
-        Protocol::ContextMessage {
-            id: 2,
+        Protocol::Import {
+            turn: 2,
             message: ChatMessage::assistant("the parent's answer"),
         },
     )
@@ -379,7 +370,13 @@ fn a_marker_row_sets_id_role_label_and_weight() {
     let context = context(
         vec![
             here(1, Role::User, "fix the parser", 10),
-            there(2, Role::Assistant, "I will fix the parser", 12 * 1024, 0),
+            there(
+                2,
+                Role::Assistant,
+                "I will fix the parser",
+                12 * 1024,
+                Some(0),
+            ),
             here(3, Role::User, "next", 10),
         ],
         vec![Some("the parser is fixed".into())],
@@ -408,11 +405,11 @@ fn a_marker_row_sets_id_role_label_and_weight() {
 fn a_marker_draws_a_row_per_departed_turn() {
     let context = context(
         vec![
-            there(1, Role::User, "fix the parser", 12 * 1024, 0),
-            there(2, Role::Assistant, "", 0, 0),
-            there(3, Role::Assistant, "", 0, 0),
+            there(1, Role::User, "fix the parser", 12 * 1024, Some(0)),
+            there(2, Role::Assistant, "", 0, Some(0)),
+            there(3, Role::Assistant, "", 0, Some(0)),
             here(4, Role::User, "add tests for the fold", 0),
-            there(5, Role::Assistant, "the fold reads", 85 * 1024, 1),
+            there(5, Role::Assistant, "the fold reads", 85 * 1024, Some(1)),
             here(6, Role::Assistant, "", 10),
         ],
         vec![Some("the parser is fixed".into()), None],
@@ -457,9 +454,9 @@ fn two_holes_render_two_markers_in_place() {
     let context = context(
         vec![
             here(1, Role::User, "one", 10),
-            there(2, Role::Assistant, "", 4 * 1024, 0),
+            there(2, Role::Assistant, "", 4 * 1024, Some(0)),
             here(3, Role::User, "three", 10),
-            there(4, Role::Assistant, "", 8 * 1024, 1),
+            there(4, Role::Assistant, "", 8 * 1024, Some(1)),
             here(5, Role::User, "five", 10),
         ],
         vec![None, None],
@@ -505,17 +502,17 @@ fn a_suffix_cut_may_empty_the_context() {
     assert_eq!(context.rendered().len(), 1, "the marker stands alone");
 }
 
-/// A rewind drops rows outright — departed ones too — leaving no hole
-/// where they stood, and the notes the rows before it still index.
+/// A withdrawal keeps every row, leaves no marker where its turns stood —
+/// an earlier eviction they covered included — and mints no id twice.
 #[test]
-fn a_rewind_truncates_the_table_and_keeps_no_hole() {
+fn a_rewind_withdraws_from_the_anchor_on_and_leaves_no_hole() {
     let mut context = context(
         vec![
-            there(1, Role::User, "one", 10, 0),
-            there(2, Role::Assistant, "", 10, 0),
+            there(1, Role::User, "one", 10, Some(0)),
+            there(2, Role::Assistant, "", 10, Some(0)),
             here(3, Role::User, "three", 10),
             here(4, Role::Assistant, "", 10),
-            there(5, Role::User, "five", 10, 1),
+            there(5, Role::User, "five", 10, Some(1)),
             here(6, Role::Assistant, "", 10),
         ],
         vec![Some("first".into()), None],
@@ -531,30 +528,181 @@ fn a_rewind_truncates_the_table_and_keeps_no_hole() {
             (1, Held::Evicted { cut: 0 }),
             (2, Held::Evicted { cut: 0 }),
             (3, Held::Resident),
-            (4, Held::Resident)
+            (4, Held::Resident),
+            (5, Held::Withdrawn),
+            (6, Held::Withdrawn),
         ]
     );
-    assert_eq!(markers(&context).len(), 1);
+    assert_eq!(markers(&context).len(), 1, "turn 5's cut leaves no marker");
     assert_eq!(context.notes().len(), 2, "notes are never dropped");
-    assert_eq!(context.next_id(), 5);
+    assert_eq!(context.next_id(), 7, "ids stay monotone");
     assert!(context.is_ready());
     assert!(context.token_measure_is_stale(0));
+    assert_eq!(
+        context.rewindable(6).unwrap_err(),
+        "turn 6 was already rewound or cleared away; the earliest you can rewind to is turn 1"
+    );
+    context
+        .rewindable(1)
+        .expect("an evicted anchor may be rewound to");
 
-    step(&mut context, Protocol::Rewound { anchor: 1 }).expect("a departed anchor");
-    assert_eq!(held(&context), Vec::new());
+    step(&mut context, Protocol::Rewound { anchor: 1 }).expect("an evicted anchor");
+    assert!(
+        held(&context)
+            .iter()
+            .all(|(_, held)| *held == Held::Withdrawn)
+    );
     assert_eq!(
         context.rendered().len(),
         0,
-        "nothing stands where the hole was"
+        "not even the earlier eviction's marker stands"
     );
-    assert_eq!(context.next_id(), 1);
+    assert_eq!(context.next_id(), 7);
+    assert_eq!(
+        context.rewindable(1).unwrap_err(),
+        "turn 1 was already rewound or cleared away; nothing has been said since the last \
+         /clear or /rewind"
+    );
+    for (anchor, said) in [(1, "already withdrawn"), (9, "never recorded")] {
+        assert!(
+            matches!(
+                step(&mut context, Protocol::Rewound { anchor }),
+                Err(Refusal::Foreign { reason, .. }) if reason.contains(said)
+            ),
+            "a rewind to turn {anchor} is foreign"
+        );
+    }
+}
+
+/// A clear withdraws every turn, keeps the system prompt, and waits for the
+/// batch in flight.
+#[test]
+fn a_clear_withdraws_every_turn_and_keeps_the_system_prompt() {
+    let mut context = context(
+        vec![
+            there(1, Role::User, "one", 10, Some(0)),
+            here(2, Role::Assistant, "", 10),
+            here(3, Role::User, "three", 10),
+        ],
+        vec![None],
+    );
+    step(
+        &mut context,
+        Protocol::System {
+            text: "be brief".into(),
+        },
+    )
+    .expect("a system prompt");
+    context.state = State::AwaitingToolResults {
+        pending_ids: vec!["call".into()],
+    };
     assert!(
         matches!(
-            step(&mut context, Protocol::Rewound { anchor: 1 }),
-            Err(Refusal::Foreign { reason, .. }) if reason.contains("never recorded")
+            step(&mut context, Protocol::Cleared),
+            Err(Refusal::Foreign { .. })
         ),
-        "a rewind to a turn that is not there is foreign"
+        "a clear is refused mid-batch"
     );
+    context.state = State::default();
+    step(&mut context, Protocol::Cleared).expect("a clear at rest");
+    assert!(
+        held(&context)
+            .iter()
+            .all(|(_, held)| *held == Held::Withdrawn)
+    );
+    assert_eq!(&**context.system(), "be brief");
+    assert_eq!(context.state, State::default());
+    assert_eq!(context.rendered().len(), 0);
+    assert_eq!(context.next_id(), 4);
+}
+
+/// `System` is folded, and neither opens a turn nor moves the automaton.
+#[test]
+fn a_system_prompt_is_folded_and_sequencing_neutral() {
+    let mut context = Context::new(PathBuf::from("record.jsonl"));
+    assert_eq!(&**context.system(), "");
+    context.state = State::AwaitingToolResults {
+        pending_ids: vec!["call".into()],
+    };
+    step(
+        &mut context,
+        Protocol::System {
+            text: "first".into(),
+        },
+    )
+    .expect("mid-batch");
+    step(
+        &mut context,
+        Protocol::System {
+            text: "second".into(),
+        },
+    )
+    .expect("a later prompt");
+    assert_eq!(&**context.system(), "second");
+    assert_eq!(context.transcript_index(), Vec::<TurnRow>::new());
+    assert_eq!(
+        context.state,
+        State::AwaitingToolResults {
+            pending_ids: vec!["call".into()]
+        }
+    );
+    assert_eq!(
+        context.rendered().len(),
+        0,
+        "the prompt travels beside the transcript"
+    );
+}
+
+/// A hole is a maximal run of evicted turns once withdrawn ones are passed
+/// over, and the marker names only the evicted.
+#[test]
+fn withdrawn_turns_are_passed_over_when_forming_holes() {
+    let context = context(
+        vec![
+            there(3, Role::User, "three", 10, Some(0)),
+            there(4, Role::Assistant, "", 10, Some(0)),
+            there(5, Role::User, "five", 10, None),
+            there(8, Role::Assistant, "", 10, None),
+            there(9, Role::User, "nine", 10, Some(0)),
+            here(10, Role::User, "ten", 10),
+        ],
+        vec![None],
+    );
+    let marker = marker(&context);
+    assert!(
+        marker.starts_with("[EXARCH // Turns 3–4, 9 have left your context."),
+        "{marker}"
+    );
+    assert_eq!(
+        marker.lines().filter(|line| line.contains(" KB")).count(),
+        3,
+        "no row for a withdrawn turn: {marker}"
+    );
+}
+
+/// A stale import is refused; a fresh one opens a turn under its own id.
+#[test]
+fn an_import_must_be_fresh() {
+    let mut context = context(
+        vec![
+            here(1, Role::User, "one", 10),
+            here(2, Role::Assistant, "", 10),
+        ],
+        Vec::new(),
+    );
+    assert!(matches!(
+        step(&mut context, Protocol::Import { turn: 2, message: ChatMessage::user("again") }),
+        Err(Refusal::Foreign { reason, .. }) if reason.contains("moved past")
+    ));
+    step(
+        &mut context,
+        Protocol::Import {
+            turn: 3,
+            message: ChatMessage::user("fresh"),
+        },
+    )
+    .expect("a fresh import");
+    assert_eq!(context.current_turn(), Some(3));
 }
 
 /// The plan spends the last turn's weight and its prompt's up front, then
@@ -660,4 +808,38 @@ fn a_marker_attributes_a_survivor_user_turn_to_the_cut_that_took_it() {
         marker.starts_with("[EXARCH // Turns 3–6 have left your context."),
         "{marker}"
     );
+}
+
+/// A link whose parent's file will not read back is refused as unreadable,
+/// by the file's name, and leaves the structure as it was.
+#[test]
+fn an_unreadable_parent_refuses_the_link_and_changes_nothing() {
+    let source = PathBuf::from("/nonexistent/parent/record.jsonl");
+    let mut context = Context::new(PathBuf::from("record.jsonl"));
+    let link = Protocol::Inherited {
+        turns: vec![Linked {
+            row: TurnRow {
+                id: 1,
+                role: Role::User,
+                kind: TurnKind::Inherited,
+                label: "one".into(),
+                bytes: 10,
+                held: Held::Resident,
+            },
+            at: Pointer {
+                source: source.clone(),
+                loci: vec![Locus::placeholder(Seq::new(1))],
+            },
+        }],
+        notes: Vec::new(),
+    };
+    let Err(Refusal::Unreadable(error)) = step(&mut context, link) else {
+        panic!("a missing parent file is unreadable")
+    };
+    assert!(
+        error.to_string().contains(&source.display().to_string()),
+        "{error}"
+    );
+    assert_eq!(context.log_len(), 0);
+    assert_eq!(context.transcript_index(), Vec::<TurnRow>::new());
 }

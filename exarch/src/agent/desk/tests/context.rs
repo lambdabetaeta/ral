@@ -35,7 +35,8 @@ fn context_survey_rows_every_resident_turn() {
             .expect("evict");
         log.import_note(genai::chat::ChatMessage::user("inherited\ncontext"))
             .expect("import");
-        log.append_user("live".into(), None).expect("live prompt");
+        log.append_user("live".into(), None, Voice::Human)
+            .expect("live prompt");
     }
     let expected_bytes = desk.services.log.borrow().context().history_bytes();
 
@@ -154,7 +155,7 @@ fn transcript_read_names_the_role_of_every_turn_it_answers() {
     desk.services
         .log
         .borrow_mut()
-        .append_user("live".into(), None)
+        .append_user("live".into(), None, Voice::Human)
         .expect("live prompt");
     let error = desk
         .ask(transcript_read_request(&[5]))

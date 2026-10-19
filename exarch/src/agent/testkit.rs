@@ -11,6 +11,7 @@ use crate::cancel::InterruptTarget;
 use crate::provider::Toolset;
 use crate::provider::scripted::Script;
 use crate::provider::{Provider, ToolCall};
+use crate::record::Voice;
 use ral_core::HostSurface;
 use ral_core::Runtime;
 use ral_core::Shell;
@@ -205,7 +206,6 @@ pub(crate) fn test_agent(
         started: Instant::now()
             .checked_sub(idle)
             .expect("a test's backdated birth stays inside the monotonic clock"),
-        system: Arc::from(""),
         caps,
         role,
         fuel,
@@ -252,7 +252,7 @@ pub(crate) fn scope_has(session: &Avatar, name: &str) -> bool {
 /// to this module, so a test outside it reaches an exchange through here.
 pub(crate) fn close_exchange(session: &Avatar, prompt: &str, answer: &str) {
     let mut log = session.log.borrow_mut();
-    log.append_user(prompt.to_string(), None)
+    log.append_user(prompt.to_string(), None, Voice::Human)
         .expect("a test prompt");
     log.append_assistant(
         genai::chat::ChatMessage::assistant(answer),

@@ -9,6 +9,7 @@ pub(crate) mod ration;
 use crate::agent::Avatar;
 use crate::latch::Latch;
 use crate::provider::{Provider, Usage};
+use crate::record::Forensic;
 use ral_core::carrier::Severed;
 use std::io;
 use std::path::Path;
@@ -171,8 +172,10 @@ impl Avatar {
     /// the measure the gauges weigh.
     pub(super) fn measure(&mut self, usage: Usage) -> io::Result<()> {
         let at = {
-            let mut log = self.log.borrow_mut();
-            log.record_usage(usage)?;
+            let log = self.log.borrow();
+            log.record_emitter()
+                .emit(Forensic::UsageDelta { usage })
+                .map(drop)?;
             log.context().log_len()
         };
         if let Some(tokens) = usage.measured_input() {

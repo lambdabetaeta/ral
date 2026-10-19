@@ -79,8 +79,7 @@ pub trait Sink {
     /// vocabulary from it, which it draws from
     /// [`BlockKind`](crate::record::BlockKind) off the memo instead, so a
     /// second hand-rolled projection cannot compile.  A sink narrates one
-    /// exchange, which no `/clear` crosses, and keeps no cursor into the log,
-    /// so it is not told the fact's segment.
+    /// exchange and keeps no cursor into the log.
     fn fact(&mut self, _id: AgentId, _rec: &Recorded<Record>) {}
 
     /// An agent's birth, ahead of anything it sends.
@@ -111,7 +110,7 @@ pub trait Sink {
     /// Route one raw signal to `fact`, `born` or `transient`.
     fn accept(&mut self, sig: Signal) {
         match sig {
-            Signal::Fact(id, _, fact) => self.fact(id, &fact),
+            Signal::Fact(id, fact) => self.fact(id, &fact),
             Signal::Born(id, born) => self.born(id, &born),
             Signal::Transient(id, t) => self.transient(id, &t),
         }
@@ -168,7 +167,7 @@ where
 pub(crate) fn drain_records(rx: &BusReceiver) -> Vec<Record> {
     std::iter::from_fn(|| rx.try_recv().ok())
         .filter_map(|sig| match sig {
-            Signal::Fact(_, _, rec) => Some(rec.into_value()),
+            Signal::Fact(_, rec) => Some(rec.into_value()),
             Signal::Born(..) | Signal::Transient(..) => None,
         })
         .collect()

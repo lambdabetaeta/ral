@@ -9,8 +9,8 @@ use crate::agent::EngineLost;
 use crate::agent::desk;
 use crate::agent::digest::{OPAQUE_CAP, clip, render};
 use crate::bus::Emitter;
-use crate::record::AgentState;
 use crate::record::{AgentLog, EditAuthority};
+use crate::record::{AgentState, Forensic};
 use crate::shell_eval;
 use atomic_refcell::{AtomicRef, AtomicRefCell, AtomicRefMut};
 use ral_core::first_order::FOValue;
@@ -93,24 +93,20 @@ impl Avatar {
     }
 
     /// Evict on an authority no act row speaks for — the harness's pressure
-    /// cut, the user's `/rewind` — so the eviction draws its own row.
+    /// cut — so the eviction draws its own row.
     pub(crate) fn evict_unbidden(&self, turns: &[u64], by: EditAuthority) -> Result<(), String> {
-        let cut = self.log.borrow_mut().evict(turns, None, by)?;
-        self.recorder()
-            .emit(crate::record::Display::Evicted { cut, by })
-            .map(drop)
-            .map_err(|e| e.to_string())
+        self.log.borrow_mut().evict(turns, None, by).map(drop)
     }
 
-    /// `record_error` is durable and published in one call, so there is no
-    /// second write to keep in step with it.  A log that cannot take it is
-    /// the one failure that cannot go through the log, so the line rides a
-    /// fault transient instead — never lost silently.
+    /// A log that cannot take the error is the one failure that cannot go
+    /// through the log, so the line rides a fault transient instead — never
+    /// lost silently.
     pub(crate) fn note_error(&self, msg: &str) {
-        let recorded = self.log.borrow_mut().record_error(msg.to_string());
-        if let Err(error) = recorded {
-            self.recorder()
-                .report_fault(&io::Error::new(error.kind(), format!("{msg} ({error})")));
+        let recorder = self.recorder();
+        if let Err(error) = recorder.emit(Forensic::Error {
+            text: msg.to_string(),
+        }) {
+            recorder.report_fault(&io::Error::new(error.kind(), format!("{msg} ({error})")));
         }
     }
 

@@ -7,7 +7,7 @@ use crate::agent::Avatar;
 use crate::bus::Emitter;
 use crate::provider::tools::{CALL_TIMEOUT_SECS, DESCRIPTION_MAX, RAL};
 use crate::record::ToolResult as SessionToolResult;
-use crate::record::{BlockId, Display};
+use crate::record::{BlockId, Display, Verdict};
 use serde_json::Value;
 
 #[cfg_attr(test, derive(Debug))]
@@ -88,17 +88,14 @@ fn record_call(session: &Avatar, cmd: String, summary: Option<String>) -> Option
     }
 }
 
-/// The paired half: the byte-identical result string, addressed at the call
-/// commit it answers.
+/// The paired half: what the result told, addressed at the call commit it
+/// answers.
 fn record_result(session: &Avatar, content: &str, failed: bool, call: Option<BlockId>) {
     let Some(call) = call else { return };
-    if let Err(error) = session.recorder().emit(Display::Result {
-        text: content.to_string(),
-        failed,
+    session.recorder().emit_or_report(Display::Verdict {
         call,
-    }) {
-        session.recorder().report_fault(&error);
-    }
+        verdict: Verdict::of(content, failed),
+    });
 }
 
 /// Parse, announce on the rail, run.  Always yields a result: the provider

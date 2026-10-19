@@ -7,8 +7,8 @@
 // crash recovery only reclaims profiles. Ported units keep upstream's names
 // so each diffs against the one it was taken from.
 
-use crate::path::shown;
 use super::DaclError;
+use crate::path::shown;
 use std::io;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;

@@ -3,11 +3,12 @@
 //! lock gone — each record checked against its [`Locus`] digest before it
 //! is parsed.
 
-use super::{Body, Context, Pointer, Turn, into_chat_messages, not_recorded_refusal_turn};
+use super::state::admissible_prefix;
+use super::{Body, Context, Held, Linked, Pointer, Turn, chat_messages, not_recorded_refusal_turn};
 use crate::provider::tools::RAL_TOOL;
 use crate::record::{
-    Entry, GrepAnswer, GrepHit, Locus, Protocol, Record, Role, TranscriptMessage, TranscriptPart,
-    TranscriptTurn,
+    Entry, GrepAnswer, GrepHit, Locus, Protocol, Record, Recorded, Refusal, Role,
+    TranscriptMessage, TranscriptPart, TranscriptTurn,
 };
 use genai::chat::{Binary, BinarySource, ChatMessage, ContentPart, CustomPart, ToolCall};
 use regex::Regex;
@@ -39,10 +40,10 @@ fn read_at(reader: &mut File, locus: &Locus) -> io::Result<Protocol> {
         return Err(io::Error::other(
             "a record did not hash to the locus that named it: the log at this \
              path is no longer the file those byte ranges were measured in; a \
-             rotated segment, a copied session directory, or an edited log",
+             copied session directory or an edited log",
         ));
     }
-    let entry: Entry = serde_json::from_slice(line).map_err(io::Error::other)?;
+    let entry: Entry<Record> = serde_json::from_slice(line).map_err(io::Error::other)?;
     match entry.record {
         Record::Protocol(p) => Ok(p),
         Record::Display(_) | Record::Forensic(_) => Err(io::Error::other(
@@ -80,11 +81,7 @@ fn sourced(turn: &Turn) -> Sourced {
 
 /// One turn's own material, wherever the lineage keeps it.
 fn turn_messages(records: &[Protocol]) -> Vec<ChatMessage> {
-    records
-        .iter()
-        .cloned()
-        .flat_map(into_chat_messages)
-        .collect()
+    records.iter().flat_map(chat_messages).collect()
 }
 
 /// What a read does where a turn's file will not read back: refuse by path,
@@ -188,6 +185,34 @@ fn read_pointer(
     }
     let (_, file) = open.as_mut().expect("just opened, or already open");
     loci.iter().map(|locus| read_at(file, locus)).collect()
+}
+
+/// Each resident row of a link read back through its pointer, and cut to its
+/// admissible prefix, so no dangling `tool_use` reaches the child's wire.
+pub(super) fn read_seeds(turns: &[Linked]) -> Result<Vec<Vec<Recorded<Protocol>>>, Refusal> {
+    let mut open = None;
+    turns
+        .iter()
+        .filter(|linked| linked.row.held == Held::Resident)
+        .map(|Linked { row, at }| {
+            let read = read_pointer(&mut open, &at.source, &at.loci).map_err(|error| {
+                Refusal::Unreadable(io::Error::other(format!(
+                    "turn {} was inherited from {}, which no longer reads back ({error}); was that session's directory moved, copied or edited?",
+                    row.id,
+                    at.source.display()
+                )))
+            })?;
+            let mut records: Vec<_> = at
+                .loci
+                .iter()
+                .cloned()
+                .zip(read)
+                .map(|(locus, protocol)| Recorded::new(locus, protocol))
+                .collect();
+            records.truncate(admissible_prefix(&records));
+            Ok(records)
+        })
+        .collect()
 }
 
 impl Context {

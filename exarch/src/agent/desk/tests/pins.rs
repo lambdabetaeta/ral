@@ -174,7 +174,7 @@ fn live_surfaces_record_their_seam_twins() {
     let mut transients: Vec<&'static str> = Vec::new();
     while let Ok(sig) = rx.try_recv() {
         match sig {
-            Signal::Fact(_, _, fact) => facts.push(match fact.value() {
+            Signal::Fact(_, fact) => facts.push(match fact.value() {
                 Record::Display(Display::Observation { .. }) => "io",
                 Record::Display(Display::Card { .. }) => "card",
                 Record::Display(Display::Done {

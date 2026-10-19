@@ -191,22 +191,16 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ("exarch/src/egress.rs", "silent:net-audit-open"),
     ("exarch/src/egress.rs", "silent:net-audit-rotate"),
     ("exarch/src/egress.rs", "silent:net-audit-size"),
-    ("exarch/src/record/session.rs", "silent:record-file"),
     ("exarch/src/record/session.rs", "silent:session-dir"),
     ("exarch/src/prompt/host.rs", "silent:git-launch"),
     ("exarch/src/record/log.rs", "silent:record-file-append"),
     ("exarch/src/record/log.rs", "silent:record-file-create"),
     ("exarch/src/record/log.rs", "silent:record-file-read"),
     ("exarch/src/record/log.rs", "silent:record-replay-read"),
-    ("exarch/src/record/log.rs", "silent:record-file-rotate"),
-    ("exarch/src/record/log.rs", "silent:record-readable-mirror"),
+    ("exarch/src/record/log.rs", "silent:record-complete-len"),
     (
         "exarch/src/record/model/resume.rs",
         "silent:model-fold-crash-quarantine",
-    ),
-    (
-        "exarch/src/record/model/resume.rs",
-        "silent:model-fold-crash-scan",
     ),
     (
         "exarch/src/record/model/transcript.rs",
@@ -261,8 +255,7 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ("exarch/src/tui/terminal.rs", "silent:editor-compose"),
     ("exarch/src/tui/terminal.rs", "silent:stderr-log"),
     ("exarch/src/tui/terminal.rs", "silent:stderr-log-windows"),
-    ("exarch/src/tui/scrollback.rs", "silent:export"),
-    ("exarch/src/tui/scrollback.rs", "silent:scrollback-log"),
+    ("exarch/src/tui/export.rs", "silent:export"),
     // ── ral ───────────────────────────────────────────────────────────────
     ("ral/build.rs", "silent:git-probe"),
     ("ral/src/batch.rs", "silent:script-read"),

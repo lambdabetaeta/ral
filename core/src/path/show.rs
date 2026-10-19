@@ -6,7 +6,11 @@ use std::path::Path;
 
 /// `p` as ral shows it.
 pub fn shown(p: impl AsRef<Path>) -> String {
-    fold_for(&dunce::simplified(p.as_ref()).to_string_lossy(), PathRules::HOST).into_owned()
+    fold_for(
+        &dunce::simplified(p.as_ref()).to_string_lossy(),
+        PathRules::HOST,
+    )
+    .into_owned()
 }
 
 /// The separator fold: a Windows path reads `/`-separated unless its head

@@ -56,7 +56,7 @@ pub struct Headless<'a> {
     root_id: AgentId,
     started: Instant,
     projection: Projection,
-    /// Counted, not tracked: a `Display::Turn { id }` names the request's own
+    /// Counted, not tracked: a `Forensic::TurnStarted { turn }` names the request's own
     /// id, and a cancelled request retaken names it twice.
     turns: u32,
     last_stop: Option<String>,
@@ -235,7 +235,7 @@ impl Sink for Headless<'_> {
             }
             // A pin overwrites a TUI register; headless has none.  The stream
             // boundary retires a live edge nothing here holds, and the turn
-            // it closes is counted off `Display::Turn` instead.
+            // it closes is counted off `Forensic::TurnStarted` instead.
             Transient::Boundary
             | Transient::Token(_)
             | Transient::Thinking(_)
@@ -256,7 +256,7 @@ impl Headless<'_> {
     fn step(&mut self, id: AgentId, rec: &Recorded<Record>) {
         let mut fold = self.folds.remove(&id).unwrap_or_default();
         let delta = fold.step(rec);
-        if let (Delta::Opened(_), Some(block)) = (delta, fold.blocks().last()) {
+        if let (Delta::Opened(_) | Delta::Cleared, Some(block)) = (delta, fold.blocks().last()) {
             self.print_block(id, block.kind());
         }
         let _ = self.folds.insert(id, fold);
@@ -351,6 +351,9 @@ impl Headless<'_> {
             }
             K::Rewound { anchor } => {
                 let _ = writeln!(self.err, "[rewound to turn {anchor}]");
+            }
+            K::Cleared => {
+                let _ = writeln!(self.err, "[cleared]");
             }
             // Interactive-only, pure presentation, or — the nudge — the agent
             // steering itself, which stays forensic and never addresses the

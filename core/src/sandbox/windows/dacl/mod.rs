@@ -222,11 +222,7 @@ impl std::fmt::Display for DaclError {
                 at,
                 target,
             } => {
-                write!(
-                    f,
-                    "'{}' was granted by its real path, but ",
-                    shown(granted)
-                )?;
+                write!(f, "'{}' was granted by its real path, but ", shown(granted))?;
                 match target {
                     Some(t) => write!(f, "'{}' is now a link to '{}'", shown(at), shown(t))?,
                     None => write!(f, "'{}' is now a reparse point", shown(at))?,

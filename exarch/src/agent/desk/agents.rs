@@ -266,7 +266,10 @@ impl ExarchDesk {
         let refused = verdict.is_err();
         let (Ok(Said { payload, text }) | Err(Said { payload, text })) = verdict;
         s.commit_act(act, Some(subject), payload, refused);
-        s.record_forensic(crate::record::Forensic::HarnessResult { text: text.clone() });
+        s.log
+            .borrow()
+            .record_emitter()
+            .emit_or_report(crate::record::Forensic::HarnessResult { text: text.clone() });
         if refused {
             Err(Error::new(text))
         } else {
@@ -332,13 +335,18 @@ impl ExarchDesk {
         };
         match content {
             Ok(reply) => {
-                s.record_forensic(crate::record::Forensic::HarnessResult {
-                    text: format!("read agent '{name}'s reply"),
-                });
+                s.log.borrow().record_emitter().emit_or_report(
+                    crate::record::Forensic::HarnessResult {
+                        text: format!("read agent '{name}'s reply"),
+                    },
+                );
                 Ok(Deposit { name, reply }.encode())
             }
             Err(text) => {
-                s.record_forensic(crate::record::Forensic::HarnessResult { text: text.clone() });
+                s.log
+                    .borrow()
+                    .record_emitter()
+                    .emit_or_report(crate::record::Forensic::HarnessResult { text: text.clone() });
                 Err(Error::new(text))
             }
         }

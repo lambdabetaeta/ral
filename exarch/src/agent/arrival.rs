@@ -8,23 +8,14 @@ use crate::record::Display;
 use crate::shell_eval::surface;
 
 impl Avatar {
-    /// `opens` is the turn a prompt opens ([`crate::record::AgentLog::opens`]),
-    /// `None` for steering.
-    ///
     /// A direct child's result means it is no longer awaited, and
     /// [`Avatar::settle`] delivers before it retires, so a parked parent never
     /// sees "no live child" without the result already queued.  Every item
     /// here already survived the inbox's pop-time fence against a `/clear`, so
     /// the `Surface` arm is a routing tripwire, not an admission.
-    pub(super) fn arrive(&self, item: &Item, opens: Option<u64>) {
+    pub(super) fn arrive(&self, item: &Item) {
         let recorder = self.recorder();
         match item {
-            Item::Human(_) | Item::Wakeup(_) | Item::Message(_) => {
-                recorder.emit_or_report(Display::Prompt {
-                    text: item.text(),
-                    turn: opens,
-                });
-            }
             Item::Agent(r) => {
                 self.agent.heard(r.id);
                 recorder.emit_or_report(Display::SubagentDone {
@@ -42,8 +33,8 @@ impl Avatar {
                 );
                 surface::replay(&recorder, values);
             }
-            // An internal continuation: quiet.
-            Item::Nudge { .. } => {}
+            // A prompt is drawn from its `Protocol` record; a nudge is quiet.
+            Item::Human(_) | Item::Wakeup(_) | Item::Message(_) | Item::Nudge { .. } => {}
         }
     }
 }

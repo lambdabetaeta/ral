@@ -20,7 +20,7 @@ use exarch::provider::scripted::{Reply, Script};
 use exarch::provider::{CutShort, Provider, ProviderError};
 use exarch::record::{AgentId, AgentState};
 use exarch::record::{Cut, EditAuthority};
-use exarch::record::{Display, Forensic, Protocol, Record, Transient};
+use exarch::record::{Display, Forensic, Protocol, Record, Transient, Voice};
 use genai::chat::{ChatRole, ContentPart, ToolCall};
 use std::sync::Arc;
 
@@ -50,13 +50,18 @@ fn drive_deliberate(session: &mut Avatar, provider: &Arc<Provider>, prompt: Opti
     let id: AgentId = session.id();
     let (tx, rx) = channel();
     let emit = Emitter::new(tx, id);
-    let outcome = session.deliberate(provider, prompt.map(str::to_string), None, &emit);
+    let outcome = session.deliberate(
+        provider,
+        prompt.map(|p| (p.to_string(), Voice::Human)),
+        None,
+        &emit,
+    );
     drop(emit);
     let mut facts = Vec::new();
     let mut transients = Vec::new();
     for sig in rx {
         match sig {
-            exarch::bus::Signal::Fact(_, _, fact) => facts.push(fact.into_value()),
+            exarch::bus::Signal::Fact(_, fact) => facts.push(fact.into_value()),
             exarch::bus::Signal::Transient(_, transient) => transients.push(transient),
             exarch::bus::Signal::Born(..) => {}
         }
@@ -270,7 +275,7 @@ fn stalled_stream_commits_partial_and_truncates() {
         "the streamed prefix must be committed, got {committed:?}",
     );
     // One fact, one record: the returned cut is the whole report of it, and
-    // the caller's `record_provider_error` the one site that writes it down —
+    // the caller's `Forensic::ProviderError` the one record of it —
     // so `deliberate` leaves no forensic of its own beside it.
     assert!(
         !facts.iter().any(|f| matches!(

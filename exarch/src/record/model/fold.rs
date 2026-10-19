@@ -1,10 +1,11 @@
-//! The one fold: [`Context::step`] judges a record and applies it, and an
-//! eviction is the one step that moves a turn from here to there — its
+//! The one fold: [`Context::step`] judges a record and applies it. An eviction
+//! or a withdrawal is what moves a turn from here to there — the eviction's
 //! resolution and its planning live beside it.
 
 use super::state::{admissible, advance, resting};
+use super::transcript::read_seeds;
 use super::{
-    Context, Held, Turn, into_chat_messages, message_bytes, message_label, message_role,
+    Context, Held, Turn, chat_messages, message_bytes, message_label, message_role,
     not_recorded_refusal_turn, opening_line, runs,
 };
 use crate::record::{Protocol, Record, Recorded, Refusal, Role, TurnKind};
@@ -81,13 +82,23 @@ impl Context {
     }
 
     /// Whether `/rewind anchor` may be recorded now: the anchor is a turn the
-    /// lineage recorded, resident or not, and no batch is awaiting results.
+    /// lineage recorded and has not yet withdrawn, resident or evicted, and no
+    /// batch is awaiting results.
     ///
     /// # Errors
     /// Names the bad anchor, or what the session is waiting for.
     pub(crate) fn rewindable(&self, anchor: u64) -> Result<(), String> {
-        if self.turn(anchor).is_none() {
+        let Some(turn) = self.turn(anchor) else {
             return Err(not_recorded_refusal_turn(anchor, self.reach()));
+        };
+        if turn.is_withdrawn() {
+            let earliest = match self.table.turns().iter().find(|turn| !turn.is_withdrawn()) {
+                Some(first) => format!("the earliest you can rewind to is turn {}", first.id),
+                None => "nothing has been said since the last /clear or /rewind".into(),
+            };
+            return Err(format!(
+                "turn {anchor} was already rewound or cleared away; {earliest}"
+            ));
         }
         if !self.is_ready() {
             return Err(format!(
@@ -165,40 +176,47 @@ impl Context {
     ///
     /// # Errors
     /// Returns [`Refusal::Foreign`] for a record no live session could have
-    /// written at this point in the log.
+    /// written at this point in the log, and [`Refusal::Unreadable`] for a
+    /// link whose ancestor's file will not read back.
     pub(crate) fn step(&mut self, record: Recorded<Protocol>) -> Result<(), Refusal> {
         let index = self.len;
         self.judge(index, record.value())?;
-        self.len = index + 1;
-        self.state = advance(&self.state, record.value());
-        match record.value() {
+        let (locus, protocol) = record.into_parts();
+        let mut state = advance(&self.state, &protocol);
+        match &protocol {
+            Protocol::System { text } => self.system = text.as_str().into(),
             Protocol::Inherited { turns, notes } => {
-                self.table.install(turns, notes);
-                return Ok(());
+                // Read first: a failure leaves the structure as it was.
+                let seeds = read_seeds(turns)?;
+                self.table.install(turns, notes, seeds);
             }
             Protocol::Evicted { cut, .. } => {
                 self.table.evict(&cut.turns, cut.note.clone());
                 self.newest_edit = Some(index);
-                return Ok(());
             }
-            Protocol::Rewound { anchor } => {
-                self.table.rewind(*anchor);
-                // The automaton rests where the kept prefix leaves it.
-                self.state = resting(self.table.turns().last().map_or(&[], Turn::records));
+            Protocol::Rewound { .. } | Protocol::Cleared => {
+                let from = if let Protocol::Rewound { anchor } = protocol {
+                    anchor
+                } else {
+                    0
+                };
+                self.table.withdraw(from);
+                // The automaton rests where the newest resident turn leaves it.
+                state = resting(self.resident().last().map_or(&[], Turn::records));
                 self.newest_edit = Some(index);
-                return Ok(());
             }
             Protocol::UserPrompt { .. }
             | Protocol::Steering { .. }
-            | Protocol::ContextMessage { .. }
+            | Protocol::Import { .. }
             | Protocol::AssistantMessage { .. }
             | Protocol::ToolResults { .. } => {}
         }
-        let Some(at) = self.place(record.value()) else {
-            return Ok(());
-        };
-        let bytes = message_bytes(&into_chat_messages(record.value().clone()));
-        self.table.absorb(at, record, bytes);
+        self.len = index + 1;
+        self.state = state;
+        if let Some(at) = self.place(&protocol) {
+            let bytes = message_bytes(&chat_messages(&protocol));
+            self.table.absorb(at, Recorded::new(locus, protocol), bytes);
+        }
         Ok(())
     }
 
@@ -248,10 +266,15 @@ impl Context {
             }
         }
         if let Protocol::Rewound { anchor } = protocol
-            && self.turn(*anchor).is_none()
+            && let Some(gone) = match self.turn(*anchor) {
+                None => Some("was never recorded"),
+                Some(turn) => turn
+                    .is_withdrawn()
+                    .then_some("a /clear or /rewind had already withdrawn"),
+            }
         {
             return Err(foreign(format!(
-                "record {n} rewinds to turn {anchor}, which was never recorded; was record.jsonl hand-edited?"
+                "record {n} rewinds to turn {anchor}, which {gone}; was record.jsonl hand-edited?"
             )));
         }
         if let Protocol::Evicted { cut, .. } = protocol {
@@ -277,50 +300,43 @@ impl Context {
             )));
         }
         if let Some(turn) = self.extends(protocol).filter(|turn| !turn.is_resident()) {
-            let id = turn.id;
-            return Err(foreign(
-                if matches!(protocol, Protocol::ContextMessage { .. }) {
-                    format!(
-                        "record {n} imports turn {id}, which the link says has already left the context: a fork re-records only what its parent still had"
-                    )
-                } else {
-                    format!("record {n} extends turn {id}, which has already left the context")
-                },
-            ));
+            return Err(foreign(format!(
+                "record {n} extends turn {}, which has already left the context",
+                turn.id
+            )));
         }
         Ok(())
     }
 
-    /// An id the log had already moved past: a prompt always opens a turn, an
-    /// assistant message is always freshly minted, and an imported message
-    /// names a turn the link brought over.
+    /// An id the log had already moved past: a prompt, an import and an
+    /// assistant message each open a turn under a freshly minted id.
     fn stale(&self, protocol: &Protocol) -> Option<u64> {
-        let reach = self.reach();
         match protocol {
-            Protocol::UserPrompt { turn, .. } | Protocol::AssistantMessage { turn, .. } => {
-                Some(*turn).filter(|id| Some(*id) <= reach)
-            }
-            Protocol::ContextMessage { id, .. } => {
-                Some(*id).filter(|id| Some(*id) <= reach && self.turn(*id).is_none())
-            }
-            Protocol::Steering { .. }
+            Protocol::UserPrompt { turn, .. }
+            | Protocol::AssistantMessage { turn, .. }
+            | Protocol::Import { turn, .. } => Some(*turn).filter(|id| Some(*id) <= self.reach()),
+            Protocol::System { .. }
+            | Protocol::Steering { .. }
             | Protocol::ToolResults { .. }
             | Protocol::Evicted { .. }
             | Protocol::Rewound { .. }
+            | Protocol::Cleared
             | Protocol::Inherited { .. } => None,
         }
     }
 
-    /// The turn a record's material would extend, where it opens none — the
-    /// newest row, or the row a [`Protocol::ContextMessage`] names.
+    /// The turn a record's material would extend, where it opens none: the
+    /// newest row.
     fn extends(&self, protocol: &Protocol) -> Option<&Turn> {
         match protocol {
             Protocol::Steering { .. } | Protocol::ToolResults { .. } => self.table.turns().last(),
-            Protocol::ContextMessage { id, .. } => self.turn(*id),
-            Protocol::UserPrompt { .. }
+            Protocol::System { .. }
+            | Protocol::UserPrompt { .. }
+            | Protocol::Import { .. }
             | Protocol::AssistantMessage { .. }
             | Protocol::Evicted { .. }
             | Protocol::Rewound { .. }
+            | Protocol::Cleared
             | Protocol::Inherited { .. } => None,
         }
     }
@@ -328,15 +344,11 @@ impl Context {
     /// Which row a record's material lands on, opening one where the record
     /// bears an id the structure has not reached.
     ///
-    /// A prompt opens a turn of its own; a steering line extends the newest.
-    /// An imported message names its turn outright, the table having arrived
-    /// whole with the link, and only a note that inherits nothing opens one of
-    /// its own.
+    /// A prompt or an import opens a turn of its own; a steering line extends
+    /// the newest.
     fn place(&mut self, protocol: &Protocol) -> Option<usize> {
-        let reach = self.reach();
-        let last = self.table.turns().len().checked_sub(1);
         match protocol {
-            Protocol::UserPrompt { turn, text } => {
+            Protocol::UserPrompt { turn, text, .. } => {
                 Some(
                     self.table
                         .open(*turn, Role::User, TurnKind::Own, opening_line(text)),
@@ -348,23 +360,20 @@ impl Context {
                 TurnKind::Own,
                 message_label(message),
             )),
-            Protocol::ContextMessage { id, message } => {
-                if let Some(at) = self.table.turns().iter().position(|turn| turn.id == *id) {
-                    return Some(at);
-                }
-                (Some(*id) > reach).then(|| {
-                    self.table.open(
-                        *id,
-                        message_role(message),
-                        TurnKind::Import,
-                        message_label(message),
-                    )
-                })
+            Protocol::Import { turn, message } => Some(self.table.open(
+                *turn,
+                message_role(message),
+                TurnKind::Import,
+                message_label(message),
+            )),
+            Protocol::Steering { .. } | Protocol::ToolResults { .. } => {
+                self.table.turns().len().checked_sub(1)
             }
-            Protocol::Steering { .. } | Protocol::ToolResults { .. } => last,
-            Protocol::Evicted { .. } | Protocol::Rewound { .. } | Protocol::Inherited { .. } => {
-                None
-            }
+            Protocol::System { .. }
+            | Protocol::Evicted { .. }
+            | Protocol::Rewound { .. }
+            | Protocol::Cleared
+            | Protocol::Inherited { .. } => None,
         }
     }
 }

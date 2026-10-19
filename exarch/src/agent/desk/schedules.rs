@@ -57,9 +57,12 @@ impl ExarchDesk {
             Err(e) => (format!("refused: {e}"), format!("could not schedule: {e}")),
         };
         s.commit_act(DeskAct::Schedule, Some(&label), payload, result.is_err());
-        s.record_forensic(crate::record::Forensic::HarnessResult {
-            text: content.clone(),
-        });
+        s.log
+            .borrow()
+            .record_emitter()
+            .emit_or_report(crate::record::Forensic::HarnessResult {
+                text: content.clone(),
+            });
         match result {
             Ok(_) => Ok(self.schedule_table()),
             Err(_) => Err(Error::new(content)),
@@ -90,7 +93,10 @@ impl ExarchDesk {
             )
         };
         s.commit_act(DeskAct::Unschedule, Some(label), payload, !removed);
-        s.record_forensic(crate::record::Forensic::HarnessResult { text: content });
+        s.log
+            .borrow()
+            .record_emitter()
+            .emit_or_report(crate::record::Forensic::HarnessResult { text: content });
         Ok(self.schedule_table())
     }
 }

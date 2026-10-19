@@ -102,26 +102,15 @@ pub fn run(
     fleet.wait_empty();
     r.map_err(|e| e.to_string())?;
 
-    let logs = tui
-        .app
-        .tabs
-        .flush_logs()
-        .map_err(|e| format!("session logs: {e}"));
+    let logs = tui.app.tabs.log_dirs();
     let usage = tui.app.total_usage();
     // Restore the terminal first, so the paths below land on the user's shell
     // rather than the alt screen.
     drop(tui);
-    if let Ok(paths) = &logs {
-        for p in paths {
-            if let Some(dir) = p.parent() {
-                ral_core::outln!("Agent logs: {} (user.log + record.jsonl)", dir.display());
-            } else {
-                ral_core::outln!("Agent log: {}", p.display());
-            }
-        }
-    } else if let Err(e) = logs {
-        ral_core::errln!("exarch: {e}");
+    for dir in &logs {
+        ral_core::outln!("Session log: {}/record.jsonl", dir.display());
     }
+    ral_core::outln!("render one with `exarch export <dir>`");
     ral_core::outln!("{usage}");
     Ok(())
 }
@@ -129,7 +118,7 @@ pub fn run(
 /// Route one `Signal` to its `App` entry point.
 fn dispatch(tui: &mut Tui, rx: &BusReceiver, sig: Signal) {
     match sig {
-        Signal::Fact(id, segment, fact) => tui.app.fact(id, segment, &fact),
+        Signal::Fact(id, fact) => tui.app.fact(id, &fact),
         Signal::Born(id, born) => tui.app.born(id, &born),
         Signal::Transient(id, t) => tui.app.transient(id, t, rx),
     }

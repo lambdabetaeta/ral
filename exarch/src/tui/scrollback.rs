@@ -1,45 +1,32 @@
 //! Per-session collapsible scrollback.
 //!
-//! A [`Scrollback`] *mirrors* the view fold: one [`Block`] — the reader's atom —
-//! per incident as it arrived, built from the [`Delta`] each record produces,
-//! with the deliberation and work of one burst collapsed into a group as they
-//! land.  Nothing is re-derived: the mirror renders those blocks into the
-//! screen's visual rows and into the session's `user.log`, the durable
-//! counterpart to the one record log.  The whole alt-screen frame is redrawn
-//! each tick, so scrollback is ours, not the host terminal's, and every tab
-//! keeps its own scroll position.
+//! A [`Scrollback`] holds a [`Mirror`] of the view fold — one [`Block`], the
+//! reader's atom, per incident as it arrived — and draws it: the visual rows
+//! of the screen, the viewport, and the live tail.  The whole alt-screen frame
+//! is redrawn each tick, so scrollback is ours, not the host terminal's, and
+//! every tab keeps its own scroll position.
 //!
-//! [`Scrollback::fact`] is the sole producer: it steps the fold beside the
-//! mirror and acts on what the step reports, and `App::transient` draws
-//! whatever is live-only — [`Scrollback::push_chrome`], the chrome door, and
-//! [`Scrollback::push_token`] and [`Scrollback::push_thinking`], which carry
-//! the open lines the live tail draws.
+//! [`Scrollback::fact`] is the sole producer: it steps the mirror and acts on
+//! what the step reports, and `App::transient` draws whatever is live-only —
+//! [`Scrollback::push_chrome`], the chrome door, and [`Scrollback::push_token`]
+//! and [`Scrollback::push_thinking`], which carry the open lines the live tail
+//! draws.
 //!
 //! The mirror is a cursor over one log, and the channel only its fast path:
-//! what the channel cannot vouch for — the log as it stood at birth, a gap, a
-//! new segment — it reads from the log itself ([`Scrollback::catch_up`]), and
-//! a record heard twice folds once.
+//! what the channel cannot vouch for — the log as it stood at birth, a gap —
+//! it reads from the log itself ([`Scrollback::catch_up`]), and a record heard
+//! twice folds once.
 
-use super::block::{Block, BlockKind, Chrome, Member, seam};
+use super::block::{Block, Chrome, Member, seam};
 use super::dial::{Detail, Part};
 use super::fidelity::Fidelity;
-use super::group;
+use super::mirror::{Mirror, continues_prose};
 use super::palette::{AgentSlot, READ_W};
 use super::row::Row;
 use super::select::{Cell, plain_slice};
-use super::text::is_blank;
-use crate::card::{self, Card, Change, Landed, observation_card, observation_spans};
+use crate::card::Card;
 use crate::provider::Usage;
-use crate::record::{
-    self, BlockId, Blocks, Cursor, Delta, Emitter as Recorder, Record, Recorded, Segment, Seq,
-};
-use ral_core::first_order::datum::Datum as _;
-use ral_core::types::{Observation, Observed};
-use std::fs;
-use std::io;
-use std::io::{Seek, Write};
-use std::path::{Path, PathBuf};
-use std::time::Duration;
+use crate::record::{self, Cursor, Delta, Emitter as Recorder, Record, Recorded};
 
 /// Carry a lane's open line across one delta: the text after the last newline
 /// is exactly what no record holds yet, since the worker cuts its records at
@@ -65,11 +52,8 @@ pub(super) struct Hit {
 }
 
 pub(super) struct Scrollback {
-    /// This session's scrollback, oldest block first — the mirror of the
-    /// fold's own window, and the only thing between the fold and the screen.
-    blocks: Vec<Block>,
-    /// Palette slot stamped onto every rail glyph; root is `0`.
-    agent: AgentSlot,
+    /// This session's scrollback: the blocks and the fold they mirror.
+    mirror: Mirror,
     /// The answer's open line: assistant text past the last newline, which is
     /// past the last [`Display::Answer`](crate::record::Display::Answer)
     /// record the worker has cut.  It is drawn inside the block it will join
@@ -78,16 +62,12 @@ pub(super) struct Scrollback {
     /// The thinking lane's open line — `answer`'s twin on the `∴` lane, drawn
     /// by [`Self::live_tail`] and grown by [`Self::push_thinking`].
     thinking_line: String,
-    /// This mirror's own view-fold memo, stepped by every [`Self::fact`].
-    /// Its window is the one window: a block leaves the mirror exactly as the
-    /// block it was built from leaves the fold.
-    fold: Blocks,
     /// The log this mirrors, read back whenever the channel cannot vouch for
     /// the next record.
     recorder: Recorder,
     /// How far the mirror has read its log; `None` until it first does.
     cursor: Option<Cursor>,
-    /// The chrome a segment opens under: a root's session card.
+    /// The chrome a clear, and the first read, open under: a root's session card.
     opening: Option<Card>,
     /// Top visible absolute row, per-scrollback so each tab keeps its place.
     offset: usize,
@@ -98,15 +78,6 @@ pub(super) struct Scrollback {
     head_rows: usize,
     /// Follow the tail.  Cleared by a scroll either way, re-armed at the bottom.
     sticky: bool,
-    log_path: PathBuf,
-    log: Log,
-    /// The rung a group's deliberation is born at — `/thinking`'s standing
-    /// datum, which [`Self::set_thinking_level`] moves on every group at once
-    /// and every group still to arrive is born at.
-    thinking: Detail,
-    /// The most recent `ral` script, which an answer's echo signal is read
-    /// against — a fact about the stream, accumulated as the calls land.
-    last_ral_cmd: Option<String>,
 }
 
 /// A window's place in the buffer, saved and restored around a preview.
@@ -132,163 +103,20 @@ struct Tail {
     live: Vec<Row>,
 }
 
-/// What one fold block contributes to the mirror, in arrival order.
-enum Item {
-    /// Something a group may take in.
-    Member(Member),
-    /// A barrier: its own block, ending whatever group stood at the tail.
-    Barrier(BlockKind),
-    /// A file change: it joins the run of changes standing at the tail, or
-    /// opens one.
-    Change(Change),
-}
-
-/// The session's rendered transcript, `user.log`.
-///
-/// A block is written once, when the mirror's head trim drops it
-/// ([`Self::retire`]), into a prefix that only ever grows — so the file keeps
-/// the whole session however long it runs, while the mirror keeps only what
-/// the fold's window holds.  The blocks still resident are written past that
-/// prefix on demand ([`Self::flush`]) and rewound by the next retirement,
-/// which is what lets `/export` read a whole transcript mid-session without
-/// the tail being written twice.
-///
-/// A path that will not open leaves [`Self::file`] `None` and the transcript
-/// silently unrecorded, so a log failure never disables the scrollback.
-struct Log {
-    file: Option<fs::File>,
-    /// Bytes of retired blocks; everything past this is provisional.
-    durable: u64,
-    /// Whether the retired prefix ends blank, so a block joining it collapses
-    /// its leading blanks exactly as the screen does.
-    prev_blank: bool,
-    /// Leading mirror blocks this file already holds: a resumed session's
-    /// seeded prefix, which the run that recorded it already wrote.
-    seeded: usize,
-}
-
-impl Log {
-    /// `append` continues a resumed session's transcript; otherwise the file
-    /// starts empty, since a fresh session shares none of its history.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:scrollback-log] opens the scrollback's rendered-text log; render dump infra, not turn-time data I/O"
-    )]
-    fn open(path: &Path, append: bool) -> Self {
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(!append)
-            .open(path)
-            .ok();
-        let durable = if append {
-            file.as_ref()
-                .and_then(|f| f.metadata().ok())
-                .map_or(0, |m| m.len())
-        } else {
-            0
-        };
-        Self {
-            file,
-            durable,
-            prev_blank: true,
-            seeded: 0,
-        }
-    }
-
-    /// Render `blocks` at the end of the retired prefix, forced whole — the
-    /// script, diff and prose are on the record even while reduced on screen —
-    /// returning the length and the seam state that keeping them would leave.
-    fn write(&mut self, blocks: &[Block], agent: AgentSlot) -> io::Result<(u64, bool)> {
-        let mut prev_blank = self.prev_blank;
-        let Some(file) = self.file.as_mut() else {
-            return Ok((self.durable, prev_blank));
-        };
-        file.set_len(self.durable)?;
-        file.seek(io::SeekFrom::Start(self.durable))?;
-        {
-            let mut out = io::BufWriter::new(&mut *file);
-            for block in blocks {
-                for row in block.log_rows(agent) {
-                    let line = row.into_line();
-                    if is_blank(&line) {
-                        if prev_blank {
-                            continue;
-                        }
-                        prev_blank = true;
-                    } else {
-                        prev_blank = false;
-                    }
-                    for s in &line.spans {
-                        out.write_all(s.content.as_bytes())?;
-                    }
-                    out.write_all(b"\n")?;
-                }
-            }
-            out.flush()?;
-        }
-        Ok((file.stream_position()?, prev_blank))
-    }
-
-    /// Write `blocks` and keep them: they have left the mirror and no later
-    /// write may rewind over them.  A transcript that will not write is
-    /// abandoned rather than retried, so a failing disk costs one attempt.
-    fn retire(&mut self, blocks: &[Block], agent: AgentSlot) {
-        match self.write(blocks, agent) {
-            Ok((durable, prev_blank)) => {
-                self.durable = durable;
-                self.prev_blank = prev_blank;
-            }
-            Err(_) => self.file = None,
-        }
-    }
-
-    /// Write `blocks` provisionally, so the file reads whole right now.
-    ///
-    /// # Errors
-    /// Returns the write's own error, which `/export` reports.
-    fn flush(&mut self, blocks: &[Block], agent: AgentSlot) -> io::Result<()> {
-        self.write(blocks, agent).map(|_| ())
-    }
-}
-
-/// Copy a flushed `user.log` to `dest` for `/export` — the caller resolves
-/// `dest`, refuses to overwrite, and flushes.  Beside [`Log::open`], so all
-/// `user.log` I/O lives in one place.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:export] copies a flushed user.log to the user-chosen export path; output infra, not turn-time data I/O"
-)]
-pub(super) fn export_log(src: &Path, dest: &Path) -> io::Result<u64> {
-    fs::copy(src, dest)
-}
-
 impl Scrollback {
-    /// `append` continues a resumed session's `user.log` where the run that
-    /// recorded it left off; a fresh session starts the file empty.  The
-    /// resumed mirror itself is built by [`Self::recall`], which is what keeps
-    /// the continuation from repeating what the file already holds.
     /// `thinking` is the standing rung a view is born at — owned by the caller
     /// ([`super::tabs::Tabs`]'s own), so a new view is never told twice, nor
     /// left disagreeing.  The mirror holds nothing until it reads `recorder`.
     pub(super) fn new(
-        log_path: PathBuf,
         agent: AgentSlot,
-        append: bool,
         thinking: Detail,
         recorder: Recorder,
         opening: Option<Card>,
     ) -> Self {
         Self {
-            log: Log::open(&log_path, append),
-            blocks: Vec::new(),
-            agent,
+            mirror: Mirror::new(agent, thinking),
             answer: String::new(),
             thinking_line: String::new(),
-            fold: Blocks::default(),
             recorder,
             cursor: None,
             opening,
@@ -296,43 +124,41 @@ impl Scrollback {
             head: 0,
             head_rows: 0,
             sticky: true,
-            log_path,
-            thinking,
-            last_ral_cmd: None,
         }
     }
 
     /// Mirror a resumed session's history: the records in the log's first
-    /// `bytes`.  The run that recorded them already wrote their blocks into
-    /// `user.log`, so the file is withheld from `trim` meanwhile and the
-    /// mirror marked as its own: the transcript continues rather than repeats.
+    /// `bytes`.
     pub(super) fn recall(&mut self, bytes: u64) {
-        let file = self.log.file.take();
         self.read_log(|rec| rec.locus().bytes().start < bytes);
-        self.log.file = file;
-        self.log.seeded = self.blocks.len();
     }
 
-    /// Read the log past this mirror's cursor — all of the current segment
-    /// when the mirror holds an older one — exactly as if it had arrived
-    /// live.
-    pub(super) fn catch_up(&mut self) {
-        self.read_log(|_| true);
+    /// Read the log past this mirror's cursor — all of it when the mirror has
+    /// none — exactly as if it had arrived live.  Reports whether a clear
+    /// went by.
+    pub(super) fn catch_up(&mut self) -> bool {
+        self.read_log(|_| true)
     }
 
     /// [`Self::catch_up`], stopping at the first record `keep` refuses.
-    fn read_log(&mut self, keep: impl Fn(&Recorded<Record>) -> bool) {
+    fn read_log(&mut self, keep: impl Fn(&Recorded<Record>) -> bool) -> bool {
+        let mut cleared = false;
         let read = self
             .recorder
             .since(self.cursor)
             .and_then(|(from, records)| {
-                self.adopt(from);
+                if self.cursor.is_none() {
+                    self.cursor = Some(from);
+                    if let Some(card) = self.opening.clone() {
+                        self.mirror.push_chrome(Chrome::Opening(card));
+                    }
+                }
                 for rec in records {
                     let rec = rec?;
                     if !keep(&rec) {
                         break;
                     }
-                    self.step(&rec);
+                    cleared |= self.step(&rec);
                 }
                 Ok(())
             });
@@ -341,22 +167,7 @@ impl Scrollback {
                 "record.jsonl did not read back: {e}; this view may be missing some of it"
             )));
         }
-    }
-
-    /// Read on from `from`.  A newer segment than the mirror's starts it over
-    /// under its opening; the log never hands back an older one.
-    fn adopt(&mut self, from: Cursor) {
-        let held = self.cursor.map(Cursor::segment);
-        if held >= Some(from.segment()) {
-            return;
-        }
-        if held.is_some() {
-            self.reset();
-        }
-        self.cursor = Some(from);
-        if let Some(card) = self.opening.clone() {
-            self.push_chrome(Chrome::Opening(card));
-        }
+        cleared
     }
 
     /// The log this view mirrors, for a command the frontend records into it.
@@ -365,24 +176,27 @@ impl Scrollback {
     }
 
     pub(super) fn agent(&self) -> AgentSlot {
-        self.agent
+        self.mirror.agent
     }
 
-    /// This segment's spend — the matrix's per-agent readout.
+    /// This session's spend — the matrix's per-agent readout.
     pub(super) fn usage(&self) -> Usage {
-        self.fold.usage()
+        self.mirror.fold.usage()
     }
 
     /// The focused gauge's `(last prompt size, context window)`.
     pub(super) fn gauge(&self) -> (u64, Option<u64>) {
-        (self.fold.last_input(), self.fold.context_window())
+        (
+            self.mirror.fold.last_input(),
+            self.mirror.fold.context_window(),
+        )
     }
 
     /// Per-turn "had a tool call" flags, oldest first: one bool per turn
     /// block the fold holds, which the matrix renders `●` or `○`.
     pub(super) fn turns(&self) -> Vec<bool> {
         let mut turns: Vec<bool> = Vec::new();
-        for block in self.fold.blocks() {
+        for block in self.mirror.fold.blocks() {
             match block.kind() {
                 record::BlockKind::Turn { .. } => turns.push(false),
                 record::BlockKind::ToolCall { .. } => {
@@ -399,14 +213,19 @@ impl Scrollback {
     /// Summed changed lines over this session's cards — the matrix's size
     /// readout.  `0` for a read-only agent; prose never inflates it.
     pub(super) fn lines_touched(&self) -> u32 {
-        self.blocks.iter().filter_map(Block::lines_changed).sum()
+        self.mirror
+            .blocks
+            .iter()
+            .filter_map(Block::lines_changed)
+            .sum()
     }
 
     /// Whether the session's last recorded block is a failure — the matrix
     /// leads a dying row with `╳` rather than `√`.  A cancelled turn is not
     /// one: the work broke off either way, but the human stopped it.
     pub(super) fn last_is_error(&self) -> bool {
-        self.fold
+        self.mirror
+            .fold
             .blocks()
             .iter()
             .rev()
@@ -430,49 +249,13 @@ impl Scrollback {
             rows += 1;
             bytes += row.bytes() as u64;
         }
-        (self.blocks.len() as u64, rows, bytes)
-    }
-
-    /// Wipe scrollback, scroll state, and streaming buffers, truncating
-    /// `user.log` by reopening it: `/clear`.  The log and opening carry over;
-    /// the cursor is the caller's to set.
-    fn reset(&mut self) {
-        *self = Self::new(
-            self.log_path.clone(),
-            self.agent,
-            false,
-            self.thinking,
-            self.recorder.clone(),
-            self.opening.take(),
-        );
-    }
-
-    /// Consume this view once its sub-agent has died and lingered out,
-    /// returning the `user.log` path.
-    ///
-    /// The scrollback is retired to `user.log` on the way out — a dead view's
-    /// blocks are the last stretch of it nothing else would ever write.
-    pub(super) fn into_log(mut self) -> PathBuf {
-        self.retire(self.blocks.len());
-        self.log_path
-    }
-
-    /// Write the provisional tail past the retired prefix and flush, so
-    /// `user.log` reads as the whole session right now — what `/export` copies
-    /// and what session end leaves behind.  The caller owns the I/O error policy.
-    ///
-    /// # Errors
-    /// Returns the write's own error.
-    pub(super) fn flush_log(&mut self) -> io::Result<&Path> {
-        let from = self.log.seeded.min(self.blocks.len());
-        self.log.flush(&self.blocks[from..], self.agent)?;
-        Ok(&self.log_path)
+        (self.mirror.blocks.len() as u64, rows, bytes)
     }
 
     /// Append chrome at the tail.  A chrome block is a barrier like any
     /// other, so it ends whatever group the tail held.
     pub(super) fn push_chrome(&mut self, chrome: Chrome) {
-        self.blocks.push(Block::chrome(chrome, None));
+        self.mirror.push_chrome(chrome);
     }
 
     /// Stream a live thinking delta into [`Self::thinking_line`] — the open
@@ -480,216 +263,6 @@ impl Scrollback {
     /// as the worker's record of that line lands.
     pub(super) fn push_thinking(&mut self, text: &str) {
         carry(&mut self.thinking_line, text);
-    }
-
-    // ── the mirror ────────────────────────────────────────────────────────
-
-    /// Draw the block the fold opened at `at`: tail-merge into the group
-    /// standing there, or push what the incident reads as on its own.
-    fn opened(&mut self, at: usize) {
-        let Some(block) = self.fold.blocks().get(at) else {
-            return;
-        };
-        let seq = block.id().seq();
-        let kind = block.kind();
-        let ral = match kind {
-            record::BlockKind::ToolCall { tool, cmd, .. } if tool == "ral" => Some(cmd.clone()),
-            _ => None,
-        };
-        let prose = matches!(kind, record::BlockKind::Answer { .. });
-        let items = self.items(kind, seq);
-        if let Some(cmd) = ral {
-            self.last_ral_cmd = Some(cmd);
-        }
-        for item in items {
-            self.absorb(seq, item);
-        }
-        if prose && let Some(tail) = self.blocks.len().checked_sub(1) {
-            self.grain(tail);
-        }
-    }
-
-    /// Grow the block the fold's tail row is drawn in — its prose, or its
-    /// group's last stretch of thinking — to the text the memo now holds.
-    fn grew(&mut self, id: BlockId) {
-        let Some(block) = self.fold.blocks().iter().rev().find(|b| b.id() == id) else {
-            return;
-        };
-        let (text, prose) = match block.kind() {
-            record::BlockKind::Answer { text } => (text.clone(), true),
-            record::BlockKind::Thinking { text } => (text.clone(), false),
-            _ => return,
-        };
-        let ink = prose.then(|| self.fidelity(&text));
-        // The fold grows only its own tail row, whose home is the last block
-        // a record authored — past whatever chrome was drawn beside it since.
-        let Some(at) = self.blocks.iter().rposition(|b| b.seq().is_some()) else {
-            return;
-        };
-        self.blocks[at].set_text(text);
-        if let Some(ink) = ink {
-            self.blocks[at].set_fidelity(ink);
-            self.grain(at);
-        }
-    }
-
-    /// Settle the call the fold patched with the verdict its result earned.
-    fn patched(&mut self, call: BlockId) {
-        let Some(verdict) = self
-            .fold
-            .blocks()
-            .iter()
-            .rev()
-            .find(|b| b.id() == call)
-            .and_then(|b| match b.kind() {
-                record::BlockKind::ToolCall { verdict, .. } => *verdict,
-                _ => None,
-            })
-        else {
-            return;
-        };
-        let at = call.seq();
-        for block in self.blocks.iter_mut().rev() {
-            if block.settle(at, verdict) {
-                break;
-            }
-        }
-    }
-
-    /// Weigh the deliberation above the prose block at `at` against it: the
-    /// grain's denominator is the mass of the prose that deliberation became,
-    /// which the commit precedes and the view therefore measures.
-    fn grain(&mut self, at: usize) {
-        let Some(chars) = self.blocks[at].prose_chars() else {
-            return;
-        };
-        if let Some(above) = at.checked_sub(1) {
-            self.blocks[above].set_answer_chars(chars);
-        }
-    }
-
-    /// Take `item` into the group it belongs to, or draw it as its own block.
-    fn absorb(&mut self, seq: Seq, item: Item) {
-        match item {
-            // An effect belongs to the call that issued it, and a redirect
-            // writes at the seam mid-call: so the walk passes whatever barrier
-            // landed since — the `▎` run of changes above all — back to the
-            // nearest call.  `read a · write b · read c` is one run.
-            Item::Member(mut member @ Member::Effect(_)) => {
-                for block in self.blocks.iter_mut().rev() {
-                    match block.admit(member) {
-                        None => return,
-                        Some(back) => member = back,
-                    }
-                }
-                self.open(seq, member);
-            }
-            // Deliberation and work grow the tail alone: a barrier between
-            // them is a boundary, not a seam.
-            Item::Member(member) => {
-                let spare = match self.blocks.last_mut() {
-                    Some(tail) => tail.admit(member),
-                    None => Some(member),
-                };
-                if let Some(member) = spare {
-                    self.open(seq, member);
-                }
-            }
-            // What the work between two calls wrote reads as one patch: a
-            // change joins the run standing at the tail, which effects pass
-            // over on their way back to their call.
-            Item::Change(change) => {
-                let spare = match self.blocks.last_mut() {
-                    Some(tail) => tail.admit_change(change),
-                    None => Some(change),
-                };
-                if let Some(change) = spare {
-                    let kind = BlockKind::Changes {
-                        changes: vec![change],
-                    };
-                    self.blocks.push(Block::new(kind, Some(seq)));
-                }
-            }
-            Item::Barrier(kind) => self.blocks.push(Block::new(kind, Some(seq))),
-        }
-    }
-
-    /// The block a member with no group to join reads as: deliberation and
-    /// work each open one, an effect that reached the mirror with no call
-    /// belongs to none and renders alone, and a turn rule outside a burst is
-    /// the boundary it draws.
-    fn open(&mut self, seq: Seq, member: Member) {
-        let block = match member {
-            Member::Thinking(_) | Member::Call(_) => Block::group(member, self.thinking, Some(seq)),
-            Member::Effect(e) => Block::new(
-                BlockKind::Card {
-                    card: observation_card(&Landed::Effect(e)),
-                    framed: false,
-                },
-                Some(seq),
-            ),
-            Member::Turn => Block::chrome(Chrome::Turn, Some(seq)),
-        };
-        self.blocks.push(block);
-    }
-
-    /// Trim the mirror's head to the fold's own window, retiring what goes
-    /// into `user.log` — the one bound, and the moment a block becomes
-    /// durable.
-    ///
-    /// Chrome inherits the expiry of the block it was drawn after, having no
-    /// commit of its own; chrome drawn before any block — the banner — lives
-    /// exactly as long as the fold still holds the session's opening block.
-    fn trim(&mut self) {
-        let Some(first) = self.fold.blocks().first().map(|b| b.id().seq()) else {
-            return;
-        };
-        let mut expired = self.fold.origin() != Some(first);
-        let mut n = 0;
-        for block in &self.blocks {
-            if let Some(seq) = block.seq() {
-                expired = seq < first;
-            }
-            if !expired {
-                break;
-            }
-            n += 1;
-        }
-        if n > 0 {
-            self.retire(n);
-        }
-    }
-
-    /// Write the mirror's first `n` blocks into the durable prefix and drop
-    /// them.
-    fn retire(&mut self, n: usize) {
-        let before = self.rows().count();
-        self.head += n;
-        let gone: Vec<Block> = self.blocks.drain(..n).collect();
-        // What left the screen, not the gone blocks' own rows: the new head's
-        // leading blank no longer collapses against them.
-        self.head_rows += before - self.rows().count();
-        let seeded = self.log.seeded.min(n);
-        self.log.seeded -= seeded;
-        self.log.retire(&gone[seeded..], self.agent);
-    }
-
-    /// The epistemic signal prose is stamped with: the turn's context
-    /// pressure, and how far this text merely restates the script it followed.
-    fn fidelity(&self, text: &str) -> Fidelity {
-        Fidelity {
-            context: self.context_floor(),
-            echo: self
-                .last_ral_cmd
-                .as_deref()
-                .map_or(0, |cmd| super::fidelity::echo_delta(text, cmd)),
-        }
-    }
-
-    /// The turn's degradation floor, graded against the last prompt's size.
-    /// Both terms are the fold's own: the model in force carries its window.
-    fn context_floor(&self) -> u8 {
-        super::fidelity::context_floor(self.fold.last_input(), self.fold.context_window())
     }
 
     // ── interaction ──────────────────────────────────────────────────────
@@ -700,8 +273,8 @@ impl Scrollback {
         let mut left = row.checked_sub(self.head_rows)?;
         for (block, rows) in self.screen() {
             if left < rows.len() {
-                let trimmed = self.blocks[block].rendered().len() - rows.len();
-                let part = self.blocks[block].part_at(left + trimmed);
+                let trimmed = self.mirror.blocks[block].rendered().len() - rows.len();
+                let part = self.mirror.blocks[block].part_at(left + trimmed);
                 return Some(Hit {
                     block: self.head + block,
                     part,
@@ -718,8 +291,8 @@ impl Scrollback {
         let mut at = self.head_rows;
         for (block, rows) in self.screen() {
             if block == want {
-                let trimmed = self.blocks[block].rendered().len() - rows.len();
-                let start = self.blocks[block]
+                let trimmed = self.mirror.blocks[block].rendered().len() - rows.len();
+                let start = self.mirror.blocks[block]
                     .part_start(hit.part)
                     .saturating_sub(trimmed);
                 return (start < rows.len()).then_some(at + start);
@@ -742,7 +315,7 @@ impl Scrollback {
     pub(super) fn block_dialable(&self, hit: Hit) -> bool {
         hit.block
             .checked_sub(self.head)
-            .and_then(|i| self.blocks.get(i))
+            .and_then(|i| self.mirror.blocks.get(i))
             .is_some_and(|b| b.dialable(hit.part))
     }
 
@@ -750,17 +323,14 @@ impl Scrollback {
     pub(super) fn cycle_block(&mut self, hit: Hit) -> bool {
         hit.block
             .checked_sub(self.head)
-            .and_then(|i| self.blocks.get_mut(i))
+            .and_then(|i| self.mirror.blocks.get_mut(i))
             .is_some_and(|b| b.cycle(hit.part))
     }
 
     /// Set the rung every group's deliberation reads at: the groups on screen
     /// move now, and the ones still to come are born there.
     pub(super) fn set_thinking_level(&mut self, level: Detail) {
-        self.thinking = level;
-        for block in &mut self.blocks {
-            block.set_thinking(level);
-        }
+        self.mirror.set_thinking_level(level);
     }
 
     pub(super) fn scroll_up(&mut self, n: usize) {
@@ -803,7 +373,8 @@ impl Scrollback {
 
     /// The turn-opening prompts on screen, oldest first, with their turns.
     pub(super) fn prompts(&self) -> Vec<(u64, String)> {
-        self.fold
+        self.mirror
+            .fold
             .prompts()
             .map(|(turn, text)| (turn, text.to_owned()))
             .collect()
@@ -813,10 +384,13 @@ impl Scrollback {
     /// most recent [`Self::render_window`].  Chrome drawn before the cut
     /// block stays, as the mirror's trim would keep it.
     pub(super) fn cut_row(&self, anchor: u64) -> Option<usize> {
-        let cut = self.fold.rewind_point(anchor)?.seq();
+        let cut = self.mirror.fold.rewind_point(anchor)?.seq();
         let mut at = self.head_rows;
         for (block, rows) in self.screen() {
-            if self.blocks[block].seq().is_some_and(|seq| seq >= cut) {
+            if self.mirror.blocks[block]
+                .seq()
+                .is_some_and(|seq| seq >= cut)
+            {
                 return Some(at);
             }
             at += rows.len();
@@ -854,6 +428,7 @@ impl Scrollback {
     /// prompt bounds it, and ending the turn on one leaves the reply empty.
     pub(super) fn latest_reply_md(&self) -> String {
         let mut tail: Vec<&str> = self
+            .mirror
             .fold
             .blocks()
             .iter()
@@ -870,19 +445,11 @@ impl Scrollback {
 
     // ── rendering ────────────────────────────────────────────────────────
 
-    /// The screen, block by block: each block's memoised rows with the leading
-    /// blanks the seam collapses against an already-blank tail dropped.  One
-    /// walk, and every row index the frontend hands around is measured against
-    /// it.
+    /// The screen, block by block: [`screen`] over this mirror's blocks.  One
+    /// walk, and every row index the frontend hands around is measured
+    /// against it.
     fn screen(&self) -> impl Iterator<Item = (usize, &[Row])> {
-        self.blocks
-            .iter()
-            .enumerate()
-            .scan(false, |prev_blank, (i, block)| {
-                let rows = seam(*prev_blank, block.rendered());
-                *prev_blank = rows.last().map_or(*prev_blank, Row::is_blank);
-                Some((i, rows))
-            })
+        screen(&self.mirror.blocks)
     }
 
     fn rows(&self) -> impl Iterator<Item = &Row> {
@@ -915,7 +482,7 @@ impl Scrollback {
         } else {
             &self.thinking_line
         };
-        let all = self.blocks.len();
+        let all = self.mirror.blocks.len();
         if open.is_empty() {
             let (rows, _) = self.upto(all);
             return Tail {
@@ -927,7 +494,7 @@ impl Scrollback {
         // The block the line continues: the one at the tail, when the line's
         // record would grow it.  This splice and the fold's rule for growing a
         // block must agree, or the commit moves the picture.
-        let joins = self.blocks.last().is_some_and(if answering {
+        let joins = self.mirror.blocks.last().is_some_and(if answering {
             Block::takes_prose
         } else {
             Block::takes_thinking
@@ -937,19 +504,27 @@ impl Scrollback {
         let fresh = (!joins).then(|| {
             if answering {
                 let ink = self
+                    .mirror
                     .blocks
                     .last()
                     .map_or_else(Fidelity::default, Block::fidelity);
-                Block::prose(String::new(), ink, continues_prose(&self.blocks), None)
+                Block::prose(
+                    String::new(),
+                    ink,
+                    continues_prose(&self.mirror.blocks),
+                    None,
+                )
             } else {
                 // No prose has followed the run yet — that is what makes it live.
-                Block::group(Member::Thinking(String::new()), self.thinking, None)
+                Block::group(Member::Thinking(String::new()), self.mirror.thinking, None)
             }
         });
-        let tail = fresh.as_ref().unwrap_or_else(|| &self.blocks[blocks]);
+        let tail = fresh
+            .as_ref()
+            .unwrap_or_else(|| &self.mirror.blocks[blocks]);
         // Rendered with the newline the line is about to gain, since markdown
         // reads an unterminated last line differently from a whole one.
-        let live = tail.live(width, self.agent, &format!("{open}\n"));
+        let live = tail.live(width, self.mirror.agent, &format!("{open}\n"));
         Tail {
             blocks,
             rows,
@@ -960,8 +535,8 @@ impl Scrollback {
     /// Fill every block's render memo at `width`, so one walk of
     /// [`Self::screen`] sees the whole buffer.
     fn render_blocks(&mut self, width: u16) {
-        let agent = self.agent;
-        for block in &mut self.blocks {
+        let agent = self.mirror.agent;
+        for block in &mut self.mirror.blocks {
             block.fill(width, agent);
         }
     }
@@ -1021,6 +596,21 @@ impl Scrollback {
     }
 }
 
+/// Each block's memoised rows with the leading blanks the seam collapses
+/// against an already-blank tail dropped.
+fn screen<'a>(
+    blocks: impl IntoIterator<Item = &'a Block>,
+) -> impl Iterator<Item = (usize, &'a [Row])> {
+    blocks
+        .into_iter()
+        .enumerate()
+        .scan(false, |prev_blank, (i, block)| {
+            let rows = seam(*prev_blank, block.rendered());
+            *prev_blank = rows.last().map_or(*prev_blank, Row::is_blank);
+            Some((i, rows))
+        })
+}
+
 /// A fold block that draws nothing: a harness result is already said by its
 /// act row, and a nudge is the agent steering itself.  Neither breaks a prose
 /// run nor stands between the matrix and the last block it can see.
@@ -1029,128 +619,6 @@ fn silent(kind: &record::BlockKind) -> bool {
         kind,
         record::BlockKind::Nudge { .. } | record::BlockKind::HarnessResult { .. }
     )
-}
-
-/// Whether a prose block appended after `blocks` continues a paragraph run: a
-/// block that renders nothing does not break one.
-fn continues_prose(blocks: &[Block]) -> bool {
-    blocks
-        .iter()
-        .rev()
-        .find(|b| b.renders())
-        .is_some_and(Block::is_prose)
-}
-
-// ── the record vocabulary, decoded once ─────────────────────────────────────
-
-impl Scrollback {
-    /// One fold block, decoded into what it contributes to the mirror — a
-    /// card built here once rather than at every frame, an effect as the bare
-    /// fact its call will group.  A kind that draws nothing contributes
-    /// nothing.
-    fn items(&self, kind: &record::BlockKind, seq: Seq) -> Vec<Item> {
-        use record::BlockKind as K;
-        let chrome = |c: Chrome| vec![Item::Barrier(BlockKind::Chrome(c))];
-        let note = |text: &str| chrome(Chrome::Note(text.to_owned()));
-        match kind {
-            K::Thinking { text } => vec![Item::Member(Member::Thinking(text.clone()))],
-            K::Prompt { text, .. } => chrome(Chrome::Prompt(text.clone())),
-            K::Answer { text } => vec![Item::Barrier(BlockKind::Prose {
-                src: text.clone(),
-                fidelity: self.fidelity(text),
-                continues: continues_prose(&self.blocks),
-            })],
-            K::ToolCall {
-                cmd,
-                summary,
-                verdict,
-                ..
-            } => match summary {
-                Some(summary) => {
-                    let mut call =
-                        group::Call::open(seq, summary.clone(), cmd.clone(), self.context_floor());
-                    if let Some(verdict) = verdict {
-                        call.settle(*verdict);
-                    }
-                    vec![Item::Member(Member::Call(call))]
-                }
-                None => vec![Item::Barrier(BlockKind::Tool {
-                    details: (cmd != crate::agent::tools::ral::INVALID_INPUT).then(|| cmd.clone()),
-                })],
-            },
-            K::HarnessCall {
-                verb,
-                subject,
-                payload,
-                failed,
-            } => vec![Item::Barrier(BlockKind::Act {
-                verb: verb.clone(),
-                subject: subject.clone(),
-                payload: payload.clone(),
-                failed: *failed,
-            })],
-            K::SubagentDone {
-                name,
-                outcome,
-                elapsed_ms,
-            } => chrome(Chrome::Subagent {
-                name: name.clone(),
-                outcome: outcome.clone(),
-                elapsed: Duration::from_millis(*elapsed_ms),
-            }),
-            K::Observation { value } => observation_items(value),
-            K::Change { change } => vec![Item::Change(change.clone())],
-            K::Card { card } => vec![surfaced(card.clone())],
-            // Not a card: a settled block is announced, not bounded — a line
-            // on the rail, exactly as a subagent's answer arrives.  The shape
-            // holds however it settled: `╳` is the turn's own failure (a
-            // provider error, a stall), never a nonzero exit, which reads as a
-            // red status in the row here just as it does on an exec.
-            K::Done { id, cmd, outcome } => {
-                chrome(Chrome::Settled(card::settled_spans(*id, cmd, outcome)))
-            }
-            K::Context { turns } => {
-                vec![surfaced(record::context_rows_card(turns))]
-            }
-            K::Cancelled => chrome(Chrome::Cancelled),
-            K::Error { text } => chrome(Chrome::Error(text.clone())),
-            K::Nudge { .. } | K::HarnessResult { .. } => Vec::new(),
-            K::ProviderError { error } => chrome(Chrome::ProviderError(error.clone())),
-            K::Stalled { error } => chrome(Chrome::Stalled(error.clone())),
-            K::SystemNote { text } => note(text),
-            K::Turn { .. } => vec![Item::Member(Member::Turn)],
-            K::Evicted { cut, by } => {
-                let runs = crate::record::model::runs(&cut.turns);
-                note(&format!("[turns {runs} left the context ({})]", by.name()))
-            }
-            K::Rewound { anchor } => note(&format!("[rewound to turn {anchor}]")),
-        }
-    }
-}
-
-fn surfaced(card: Card) -> Item {
-    Item::Barrier(BlockKind::Card { card, framed: true })
-}
-
-/// Decode one [`Display::Observation`](crate::record::Display::Observation),
-/// through the same [`Landed::of`] the live rail draws from — a rendering, never
-/// recorded, built as the fact arrives.
-fn observation_items(value: &ral_core::first_order::FOValue) -> Vec<Item> {
-    let Ok(obs) = Observation::decode(value) else {
-        return Vec::new();
-    };
-    observed_items(&obs.what)
-}
-
-fn observed_items(what: &Observed) -> Vec<Item> {
-    match Landed::of(what) {
-        None => Vec::new(),
-        Some(Landed::Effect(e)) => vec![Item::Member(Member::Effect(e))],
-        Some(l @ Landed::Surfaced(_)) => vec![surfaced(observation_card(&l))],
-        Some(l @ Landed::Announced(_)) => vec![Item::Barrier(BlockKind::Chrome(Chrome::Spawned(
-            observation_spans(&l),
-        )))],
-    }
 }
 
 // ── the sole live producer ──────────────────────────────────────────────────
@@ -1175,62 +643,45 @@ impl Scrollback {
         self.thinking_line.clear();
     }
 
-    /// Mirror one fact heard live in `segment`, first reading the log when
-    /// the fact is not the next one this mirror holds: a newer segment, or a
-    /// gap.  A straggler from an older segment is dropped.  Reports whether
-    /// the fact started the mirror over — a `/clear`.
-    pub(super) fn fact(&mut self, segment: Segment, rec: &Recorded<Record>) -> bool {
-        let held = self.cursor.map(Cursor::segment);
-        if Some(segment) < held {
-            return false;
-        }
-        let seq = rec.locus().seq().get();
-        if Some(segment) > held || self.cursor.is_some_and(|c| seq > c.next()) {
-            self.catch_up();
-            // A catch-up that could not read leaves the channel to trust.
-            self.adopt(Cursor::at(segment));
-        }
-        if let Some(cursor) = self.cursor
-            && cursor.segment() == segment
-            && seq >= cursor.next()
+    /// Mirror one fact heard live, first reading the log when it is not the
+    /// next one this mirror holds: none yet, or a gap.  A record heard twice
+    /// folds once.  Reports whether the mirror started over — a `/clear`.
+    pub(super) fn fact(&mut self, rec: &Recorded<Record>) -> bool {
+        match self
+            .cursor
+            .map(|cursor| rec.locus().seq().get().cmp(&cursor.next()))
         {
-            self.step(rec);
+            Some(std::cmp::Ordering::Less) => false,
+            Some(std::cmp::Ordering::Equal) => self.step(rec),
+            _ => self.catch_up(),
         }
-        held.is_some() && self.cursor.map(Cursor::segment) != held
     }
 
-    /// Step the fold beside the mirror and draw what the step reports.  A
-    /// record moves one block, so the work here is that block's and not the
-    /// window's around it — the difference between a session that costs more
-    /// the longer it runs and one that does not.
-    ///
-    /// The record is handed over only to step that memo: the drawing below
-    /// reads [`record::BlockKind`] off the fold, never the record vocabulary,
-    /// so a second hand-rolled projection cannot compile.
-    fn step(&mut self, rec: &Recorded<Record>) {
+    /// Step the mirror and account for what left it: the screen rows and
+    /// blocks it retired, and — on a clear — the open lines and scroll state,
+    /// under the opening again.  Reports whether the record was a clear.
+    fn step(&mut self, rec: &Recorded<Record>) -> bool {
         self.cursor = self.cursor.map(|cursor| cursor.past(rec.locus()));
-        match self.fold.step(rec) {
-            Delta::Opened(_) => {
-                if let Some(at) = self.fold.blocks().len().checked_sub(1) {
-                    self.opened(at);
-                }
+        let (delta, gone) = self.mirror.step(rec);
+        let all: usize = screen(gone.iter().chain(&self.mirror.blocks))
+            .map(|(_, rows)| rows.len())
+            .sum();
+        // What left the screen, not the gone blocks' own rows: the new head's
+        // leading blank no longer collapses against them.
+        self.head_rows += all - self.rows().count();
+        self.head += gone.len();
+        let cleared = delta == Delta::Cleared;
+        if cleared {
+            self.answer.clear();
+            self.thinking_line.clear();
+            self.sticky = true;
+            if let Some(card) = self.opening.clone() {
+                self.mirror
+                    .blocks
+                    .insert(0, Block::chrome(Chrome::Opening(card), None));
             }
-            Delta::Grew(id) => self.grew(id),
-            Delta::Patched(id) => self.patched(id),
-            Delta::Rewound(cut) => {
-                let gone =
-                    cut.and_then(|id| self.blocks.iter().position(|b| b.seq() == Some(id.seq())));
-                if let Some(at) = gone {
-                    self.blocks.truncate(at);
-                    self.log.seeded = self.log.seeded.min(at);
-                }
-                if let Some(at) = self.fold.blocks().len().checked_sub(1) {
-                    self.opened(at);
-                }
-            }
-            Delta::Quiet => {}
         }
-        self.trim();
+        cleared
     }
 }
 

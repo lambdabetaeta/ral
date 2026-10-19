@@ -5,7 +5,7 @@
 //! driver and the error it can refuse a session with.
 
 use super::log::Log;
-use super::{Fold, Record, Recorded};
+use super::{Fold, Record};
 use std::fmt;
 use std::io;
 use std::path::Path;
@@ -50,8 +50,7 @@ impl From<io::Error> for Refusal {
 /// refuses one of its records.
 pub fn replay<F: Fold>(path: &Path, seed: F::Memo) -> Result<F::Memo, Refusal> {
     Log::read(path)?.try_fold(seed, |mut memo, record| {
-        let record: Recorded<Record> = record?;
-        F::step(&mut memo, &record)?;
+        F::step(&mut memo, record?)?;
         Ok(memo)
     })
 }

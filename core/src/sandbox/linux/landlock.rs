@@ -364,7 +364,8 @@ fn admit_exec(
         };
         // A file admit names that file alone, never what a directory since
         // put there holds.
-        if shape(&fd).map_err(|e| Error::admit(crate::path::shown(name), e))? == FileType::Directory {
+        if shape(&fd).map_err(|e| Error::admit(crate::path::shown(name), e))? == FileType::Directory
+        {
             continue;
         }
         (ruleset.admit(fd.as_fd(), Access::EXECUTE))

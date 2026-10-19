@@ -1,6 +1,7 @@
 use super::*;
+use crate::provider::Tuning;
 use crate::record::model::Held;
-use crate::record::{TurnKind, TurnRow};
+use crate::record::{Spent, TurnKind};
 use genai::chat::{ContentPart, ToolCall};
 use regex::Regex;
 use std::io::Write as _;
@@ -33,7 +34,7 @@ fn assistant_with_tool(id: &str) -> ChatMessage {
 }
 
 fn complete_round(s: &mut AgentLog, user: &str, answer: &str) {
-    s.append_user(user.into(), None).unwrap();
+    s.append_user(user.into(), None, Voice::Human).unwrap();
     s.append_assistant(ChatMessage::assistant(answer), vec![], None)
         .unwrap();
 }
@@ -85,10 +86,13 @@ fn records(log: &AgentLog) -> Vec<Record> {
 #[test]
 fn turn_partition_joins_steering_and_opens_one_turn_per_id() {
     let mut s = fresh_root();
-    s.record_error("before the first prompt".into()).unwrap();
+    s.record_emitter().emit_or_report(Forensic::Error {
+        text: "before the first prompt".into(),
+    });
     s.import_note(ChatMessage::user("inherited")).unwrap();
     complete_round(&mut s, "prompt", "answer");
-    s.append_user("tool prompt".into(), None).unwrap();
+    s.append_user("tool prompt".into(), None, Voice::Human)
+        .unwrap();
     s.append_assistant(assistant_with_tool("call"), vec!["call".into()], None)
         .unwrap();
     s.append_tool_results(vec![ToolResult {
@@ -96,7 +100,7 @@ fn turn_partition_joins_steering_and_opens_one_turn_per_id() {
         content: "result".into(),
     }])
     .unwrap();
-    s.append_steering("steer".into()).unwrap();
+    s.append_steering("steer".into(), Voice::Human).unwrap();
     s.append_assistant(ChatMessage::assistant("finished"), vec![], None)
         .unwrap();
 
@@ -151,7 +155,9 @@ fn ids_mint_monotonically_across_edits() {
 fn continues_resolution_requires_the_live_prompt() {
     let mut joins = fresh_root();
     complete_round(&mut joins, "one", "one");
-    joins.append_user("nudge".into(), Some(1)).unwrap();
+    joins
+        .append_user("nudge".into(), Some(1), Voice::Human)
+        .unwrap();
     assert_eq!(joins.context().current_prompt(), Some(1));
     assert_eq!(
         joins.context().transcript_index().len(),
@@ -164,13 +170,17 @@ fn continues_resolution_requires_the_live_prompt() {
     rewound
         .evict(&answered(&rewound, &[1]), None, EditAuthority::Model)
         .unwrap();
-    rewound.append_user("fresh".into(), Some(1)).unwrap();
+    rewound
+        .append_user("fresh".into(), Some(1), Voice::Human)
+        .unwrap();
     assert_eq!(rewound.context().current_prompt(), Some(3));
 
     let mut intervened = fresh_root();
     complete_round(&mut intervened, "one", "one");
     complete_round(&mut intervened, "two", "two");
-    intervened.append_user("fresh".into(), Some(1)).unwrap();
+    intervened
+        .append_user("fresh".into(), Some(1), Voice::Human)
+        .unwrap();
     assert_eq!(intervened.context().current_prompt(), Some(5));
 
     let mut moved_past = fresh_root();
@@ -179,7 +189,9 @@ fn continues_resolution_requires_the_live_prompt() {
     moved_past
         .evict(&answered(&moved_past, &[3]), None, EditAuthority::Model)
         .unwrap();
-    moved_past.append_user("fresh".into(), Some(1)).unwrap();
+    moved_past
+        .append_user("fresh".into(), Some(1), Voice::Human)
+        .unwrap();
     assert_eq!(
         moved_past.context().current_prompt(),
         Some(5),
@@ -191,7 +203,7 @@ fn continues_resolution_requires_the_live_prompt() {
 #[test]
 fn evict_refuses_the_unclosed_turn_the_unknown_the_departed_and_the_empty_set() {
     let mut live = fresh_root();
-    live.append_user("live".into(), None).unwrap();
+    live.append_user("live".into(), None, Voice::Human).unwrap();
     assert_eq!(
         live.evict(&[1], None, EditAuthority::Model).unwrap_err(),
         "turn 1 is being written now: an eviction keeps the work in hand"
@@ -223,7 +235,8 @@ fn evict_refuses_the_unclosed_turn_the_unknown_the_departed_and_the_empty_set() 
 #[test]
 fn the_survivor_rule_keeps_a_prompt_and_refuses_a_cut_that_takes_nothing() {
     let mut s = fresh_root();
-    s.append_user("work on the parser".into(), None).unwrap();
+    s.append_user("work on the parser".into(), None, Voice::Human)
+        .unwrap();
     s.append_assistant(assistant_with_tool("call"), vec!["call".into()], None)
         .unwrap();
     s.append_tool_results(vec![ToolResult {
@@ -257,8 +270,13 @@ fn the_survivor_rule_keeps_a_prompt_and_refuses_a_cut_that_takes_nothing() {
 #[test]
 fn the_door_answers_one_element_per_turn() {
     let mut s = fresh_root();
-    s.append_user("first prompt".into(), None).unwrap();
-    s.record_turn_start(Tuning::default(), None).unwrap();
+    s.append_user("first prompt".into(), None, Voice::Human)
+        .unwrap();
+    s.record_emitter().emit_or_report(Forensic::TurnStarted {
+        turn: s.context().next_id(),
+        tuning: Tuning::default(),
+        route: None,
+    });
     s.append_assistant(ChatMessage::assistant("first answer"), vec![], None)
         .unwrap();
     complete_round(&mut s, "second prompt", "second answer");
@@ -297,11 +315,11 @@ fn the_door_answers_one_element_per_turn() {
     );
 }
 
-/// A rewind leaves the structure as it stood before the anchor opened:
-/// no row, no hole, the anchor's id minted again by the next prompt, and
-/// the whole of it rebuilt by replay.
+/// A rewind withdraws the anchor on: no row is removed and no marker stands
+/// where they were, the next prompt takes the id after the newest ever
+/// minted, the withdrawn turns stay readable, and replay rebuilds the lot.
 #[test]
-fn a_rewind_removes_the_anchor_on_and_the_next_prompt_takes_its_id() {
+fn a_rewind_withdraws_the_anchor_on_and_the_next_prompt_takes_the_next_id() {
     let sessions = sessions_root("rewind");
     let mut s = AgentLog::root(
         sessions.path(),
@@ -309,7 +327,8 @@ fn a_rewind_removes_the_anchor_on_and_the_next_prompt_takes_its_id() {
         "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
-        0,
+        "",
+        None,
     )
     .unwrap();
     complete_round(&mut s, "one", "one");
@@ -323,35 +342,176 @@ fn a_rewind_removes_the_anchor_on_and_the_next_prompt_takes_its_id() {
         s.context()
             .transcript_index()
             .iter()
-            .map(|row| row.id)
+            .map(|row| row.held)
             .collect::<Vec<_>>(),
-        vec![1, 2],
-        "the index reaches nothing from the anchor on"
+        [
+            [Held::Evicted { cut: 0 }; 2].as_slice(),
+            [Held::Withdrawn; 4].as_slice()
+        ]
+        .concat(),
+        "the index still reaches every turn"
     );
     assert_eq!(
         s.context().rendered().len(),
         1,
-        "the hole's marker stands alone"
+        "the evicted turns' marker stands alone"
     );
     assert!(s.context().is_ready());
-    assert_eq!(s.context().next_id(), 3);
+    assert_eq!(s.context().next_id(), 7);
+    assert_eq!(
+        s.context()
+            .read_transcript(&[3, 4, 5, 6])
+            .expect("withdrawn turns read back")
+            .len(),
+        4
+    );
+    assert_eq!(
+        s.rewind(5).unwrap_err(),
+        "turn 5 was already rewound or cleared away; the earliest you can rewind to is turn 1"
+    );
 
     complete_round(&mut s, "three again", "again");
-    assert_eq!(s.context().current_turn(), Some(4));
-    s.rewind(1).expect("a departed anchor may be rewound to");
+    assert_eq!(s.context().current_turn(), Some(8));
+    s.rewind(1).expect("an evicted anchor may be rewound to");
     assert_eq!(s.context().rendered().len(), 0, "the context may empty");
-    assert_eq!(s.context().next_id(), 1);
+    assert_eq!(s.context().next_id(), 9);
+    assert_eq!(
+        s.rewind(1).unwrap_err(),
+        "turn 1 was already rewound or cleared away; nothing has been said since the last \
+         /clear or /rewind"
+    );
     complete_round(&mut s, "fresh", "fresh");
 
     let expected = serde_json::to_vec(&s.context().rendered().iter().collect::<Vec<_>>()).unwrap();
+    let index = s.context().transcript_index();
     drop(s);
-    let resumed =
-        AgentLog::resume(sessions.path(), AgentId::new(0), "main").expect("resume after rewinds");
+    let resumed = AgentLog::resume(sessions.path(), AgentId::new(0)).expect("resume after rewinds");
     assert_eq!(
         serde_json::to_vec(&resumed.context().rendered().iter().collect::<Vec<_>>()).unwrap(),
         expected
     );
-    assert_eq!(resumed.context().current_turn(), Some(2));
+    assert_eq!(resumed.context().transcript_index(), index);
+    assert_eq!(resumed.context().current_turn(), Some(10));
+}
+
+/// A clear is a rewind to the start that keeps the system prompt: one file,
+/// one `cleared` line, every turn withdrawn and readable, the next prompt
+/// above them all — and it waits for a batch in flight.
+#[test]
+fn a_clear_withdraws_every_turn_in_the_same_file() {
+    let sessions = sessions_root("clear");
+    let mut s = AgentLog::root(
+        sessions.path(),
+        AgentId::new(0),
+        "main",
+        &RecordedModel::for_test("model"),
+        &RecordedAccount::for_test("provider"),
+        "be brief",
+        None,
+    )
+    .unwrap();
+    complete_round(&mut s, "one", "one");
+    complete_round(&mut s, "two", "two");
+    s.evict(&answered(&s, &[3]), None, EditAuthority::Model)
+        .unwrap();
+
+    s.clear().expect("clear");
+    assert_eq!(
+        fs::read_dir(s.dir())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>(),
+        ["record.jsonl"]
+    );
+    assert!(
+        records(&s)
+            .iter()
+            .any(|r| matches!(r, Record::Protocol(Protocol::Cleared)))
+    );
+    assert!(
+        s.context()
+            .transcript_index()
+            .iter()
+            .all(|row| row.held == Held::Withdrawn),
+        "the evicted turns are withdrawn too"
+    );
+    assert_eq!(
+        s.context().rendered().len(),
+        0,
+        "no marker survives a clear"
+    );
+    assert_eq!(&**s.context().system(), "be brief");
+    assert!(s.context().is_ready());
+    assert_eq!(s.context().read_transcript(&[1, 4]).unwrap().len(), 2);
+    complete_round(&mut s, "fresh", "fresh");
+    assert_eq!(s.context().current_prompt(), Some(5));
+
+    s.append_user("work".into(), None, Voice::Human).unwrap();
+    s.append_assistant(assistant_with_tool("call"), vec!["call".into()], None)
+        .unwrap();
+    assert_eq!(
+        s.clear().unwrap_err().to_string(),
+        "cannot clear while the session is waiting for 1 tool result"
+    );
+}
+
+/// A rewind landing just past an abandoned exchange leaves a withdrawn row
+/// newest while the automaton still awaits a reply: no turn is being written,
+/// so `read` must not refuse the row.
+#[test]
+fn the_newest_withdrawn_turn_reads_back() {
+    let mut s = fresh_root();
+    s.append_user("abandoned".into(), None, Voice::Human)
+        .unwrap();
+    s.quiesce(QuiesceReason::Cancelled);
+    complete_round(&mut s, "next", "answer");
+    s.rewind(2).expect("rewind past the abandoned exchange");
+    assert!(s.context().is_awaiting_assistant());
+    let read = s
+        .context()
+        .read_transcript(&[3])
+        .expect("nothing is being written");
+    assert_eq!(openings(&read), vec!["answer"]);
+    s.append_steering("late".into(), Voice::Human)
+        .expect_err("steering cannot extend a withdrawn turn");
+}
+
+/// Both resumes agree with the live session across a clear and a rewind.
+#[test]
+fn resume_after_a_clear_and_a_rewind_yields_the_live_table() {
+    let sessions = sessions_root("resume-withdrawals");
+    let mut live = AgentLog::root(
+        sessions.path(),
+        AgentId::new(0),
+        "main",
+        &RecordedModel::for_test("model"),
+        &RecordedAccount::for_test("provider"),
+        "sys",
+        None,
+    )
+    .unwrap();
+    complete_round(&mut live, "one", "one");
+    complete_round(&mut live, "two", "two");
+    live.evict(&prefix(&live, 2), Some("note".into()), EditAuthority::Model)
+        .unwrap();
+    live.clear().unwrap();
+    complete_round(&mut live, "three", "three");
+    complete_round(&mut live, "four", "four");
+    live.rewind(7).unwrap();
+    let rows = live.context().transcript_index();
+    let notes = live.context().notes().to_vec();
+    let expected =
+        serde_json::to_vec(&live.context().rendered().iter().collect::<Vec<_>>()).unwrap();
+    drop(live);
+
+    let resumed = AgentLog::resume(sessions.path(), AgentId::new(0)).expect("resume");
+    assert_eq!(resumed.context().transcript_index(), rows);
+    assert_eq!(resumed.context().notes(), notes.as_slice());
+    assert_eq!(&**resumed.context().system(), "sys");
+    assert_eq!(
+        serde_json::to_vec(&resumed.context().rendered().iter().collect::<Vec<_>>()).unwrap(),
+        expected
+    );
 }
 
 /// A rewind is refused while a batch is in flight; the anchor named must
@@ -359,7 +519,7 @@ fn a_rewind_removes_the_anchor_on_and_the_next_prompt_takes_its_id() {
 #[test]
 fn a_rewind_waits_for_the_batch_in_flight() {
     let mut s = fresh_root();
-    s.append_user("first".into(), None).unwrap();
+    s.append_user("first".into(), None, Voice::Human).unwrap();
     s.append_assistant(assistant_with_tool("call"), vec!["call".into()], None)
         .unwrap();
     assert_eq!(
@@ -384,7 +544,8 @@ fn head_marker(s: &AgentLog) -> Option<String> {
 #[test]
 fn a_cut_between_a_prompt_and_its_answer_keeps_the_prompt() {
     let mut s = fresh_root();
-    s.append_user("work on the parser".into(), None).unwrap();
+    s.append_user("work on the parser".into(), None, Voice::Human)
+        .unwrap();
     s.append_assistant(assistant_with_tool("call"), vec!["call".into()], None)
         .unwrap();
     s.append_tool_results(vec![ToolResult {
@@ -485,7 +646,8 @@ fn head_marker_is_a_pure_function_of_the_table() {
         "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
-        0,
+        "",
+        None,
     )
     .unwrap();
     for prompt in ["one", "two", "three"] {
@@ -501,7 +663,7 @@ fn head_marker_is_a_pure_function_of_the_table() {
     assert_eq!(head_marker(&live).as_ref(), Some(&first));
     drop(live);
 
-    let resumed = AgentLog::resume(sessions.path(), AgentId::new(0), "main").expect("resume");
+    let resumed = AgentLog::resume(sessions.path(), AgentId::new(0)).expect("resume");
     assert_eq!(head_marker(&resumed), Some(first));
 }
 
@@ -608,7 +770,7 @@ fn evict_refuses_a_turn_already_gone_and_the_unclosed_one() {
         s.evict(&[2], None, EditAuthority::Model).unwrap_err(),
         "turn 2 has already left your context: the earliest still in it is 5"
     );
-    s.append_user("four".into(), None).unwrap();
+    s.append_user("four".into(), None, Voice::Human).unwrap();
     assert_eq!(
         s.evict(&[7], None, EditAuthority::Model).unwrap_err(),
         "turn 7 is being written now: an eviction keeps the work in hand"
@@ -690,7 +852,7 @@ fn transcript_index_lists_every_turn_with_how_it_is_held() {
         .unwrap();
     s.evict(&answered(&s, &[3]), None, EditAuthority::Model)
         .unwrap();
-    s.append_user("live".into(), None).unwrap();
+    s.append_user("live".into(), None, Voice::Human).unwrap();
 
     let index = s.context().transcript_index();
     assert_eq!(
@@ -721,7 +883,7 @@ fn transcript_index_lists_every_turn_with_how_it_is_held() {
 #[test]
 fn the_door_refuses_the_turn_being_written() {
     let mut s = fresh_root();
-    s.append_user("work".into(), None).unwrap();
+    s.append_user("work".into(), None, Voice::Human).unwrap();
     s.append_assistant(assistant_with_tool("call"), vec!["call".into()], None)
         .unwrap();
     s.append_tool_results(vec![ToolResult {
@@ -906,7 +1068,8 @@ fn a_user_ending_import_turn_is_never_torn() {
 #[test]
 fn abandoned_work_is_kept_whole_and_read_whole() {
     let mut s = fresh_root();
-    s.append_user("interrupted".into(), None).unwrap();
+    s.append_user("interrupted".into(), None, Voice::Human)
+        .unwrap();
     s.quiesce(QuiesceReason::Cancelled);
     assert!(s.context().is_ready());
     assert!(
@@ -930,7 +1093,8 @@ fn abandoned_work_is_kept_whole_and_read_whole() {
 #[test]
 fn abandoned_work_keeps_its_tool_turns_in_context() {
     let mut s = fresh_root();
-    s.append_user("run the tool".into(), None).unwrap();
+    s.append_user("run the tool".into(), None, Voice::Human)
+        .unwrap();
     s.append_assistant(assistant_with_tool("call"), vec!["call".into()], None)
         .unwrap();
     s.append_tool_results(vec![ToolResult {
@@ -962,7 +1126,8 @@ fn abandoned_work_keeps_its_tool_turns_in_context() {
 #[test]
 fn quiesce_answers_tool_calls_that_never_ran_and_nothing_else() {
     let mut s = fresh_root();
-    s.append_user("run the tool".into(), None).unwrap();
+    s.append_user("run the tool".into(), None, Voice::Human)
+        .unwrap();
     s.append_assistant(assistant_with_tool("call"), vec!["call".into()], None)
         .unwrap();
     assert!(
@@ -984,7 +1149,7 @@ fn quiesce_answers_tool_calls_that_never_ran_and_nothing_else() {
         )),
         "the answer is owed; a closing assistant turn is not"
     );
-    s.append_user("next".into(), None).unwrap();
+    s.append_user("next".into(), None, Voice::Human).unwrap();
 }
 
 /// A `reply` ends the work it was asked for, so its capstone is earned —
@@ -993,7 +1158,8 @@ fn quiesce_answers_tool_calls_that_never_ran_and_nothing_else() {
 #[test]
 fn a_reply_keeps_its_capstone_and_stays_visible() {
     let mut s = fresh_root();
-    s.append_user("do the work".into(), None).unwrap();
+    s.append_user("do the work".into(), None, Voice::Human)
+        .unwrap();
     s.append_assistant(assistant_with_tool("call"), vec!["call".into()], None)
         .unwrap();
     s.append_tool_results(vec![ToolResult {
@@ -1051,7 +1217,8 @@ fn resume_refuses_an_eviction_of_a_turn_not_in_the_context() {
         "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
-        0,
+        "",
+        None,
     )
     .unwrap();
     complete_round(&mut live, "one", "one");
@@ -1070,7 +1237,7 @@ fn resume_refuses_an_eviction_of_a_turn_not_in_the_context() {
     file.write_all(b"\n").unwrap();
     file.flush().unwrap();
 
-    let error = AgentLog::resume(sessions.path(), AgentId::new(0), "main")
+    let error = AgentLog::resume(sessions.path(), AgentId::new(0))
         .err()
         .expect("an eviction of a turn not in the context is foreign data");
     let text = error.to_string();
@@ -1082,10 +1249,15 @@ fn resume_refuses_an_eviction_of_a_turn_not_in_the_context() {
 
 #[test]
 fn diagnostic_records_round_trip_through_record_jsonl() {
-    let mut s = fresh_root();
-    s.record_error("boom".into()).unwrap();
-    s.record_nudge("stop=length".into(), Some(Spent { used: 2, max: 3 }))
-        .unwrap();
+    let s = fresh_root();
+    let emit = s.record_emitter();
+    emit.emit_or_report(Forensic::Error {
+        text: "boom".into(),
+    });
+    emit.emit_or_report(Forensic::Nudge {
+        cause: "stop=length".into(),
+        spent: Some(Spent { used: 2, max: 3 }),
+    });
     let parsed = records(&s);
     assert!(parsed.iter().any(
         |record| matches!(record, Record::Forensic(Forensic::Error { text }) if text == "boom")
@@ -1106,9 +1278,10 @@ fn a_forked_log_records_the_selection_it_was_handed() {
         .fork(
             AgentId::new(1),
             "child",
-            0,
             &RecordedModel::for_test("other-model"),
             &RecordedAccount::for_test("other-provider"),
+            "",
+            Memory::Amnemon,
         )
         .expect("child log");
     let opened = records(&child)
@@ -1122,21 +1295,6 @@ fn a_forked_log_records_the_selection_it_was_handed() {
         opened,
         ("other-model".to_string(), "other-provider".to_string())
     );
-}
-
-#[test]
-fn clear_rotates_record_jsonl_and_resets_the_table() {
-    let mut s = fresh_root();
-    complete_round(&mut s, "one", "one");
-    complete_round(&mut s, "two", "two");
-    s.evict(&answered(&s, &[3]), None, EditAuthority::Model)
-        .unwrap();
-
-    let record = s.dir().join("record.jsonl");
-    s.clear(0, 2).expect("clear");
-    assert!(record.with_extension("jsonl.0").exists());
-    assert_eq!(s.context().transcript_index(), Vec::<TurnRow>::new());
-    assert!(s.context().is_ready());
 }
 
 #[test]
@@ -1161,7 +1319,8 @@ fn resume_replays_a_scripted_history_and_preserves_the_context() {
         "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
-        0,
+        "",
+        None,
     )
     .unwrap();
     live.import_note(ChatMessage::user("inherited")).unwrap();
@@ -1173,7 +1332,7 @@ fn resume_replays_a_scripted_history_and_preserves_the_context() {
         serde_json::to_vec(&live.context().rendered().iter().collect::<Vec<_>>()).unwrap();
     drop(live);
 
-    let resumed = AgentLog::resume(sessions.path(), AgentId::new(0), "main").expect("resume");
+    let resumed = AgentLog::resume(sessions.path(), AgentId::new(0)).expect("resume");
     assert!(resumed.context().is_ready());
     assert_eq!(
         serde_json::to_vec(&resumed.context().rendered().iter().collect::<Vec<_>>()).unwrap(),
@@ -1190,15 +1349,17 @@ fn resume_quiesces_a_torn_turn_after_reopening_append_mode() {
         "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
-        0,
+        "",
+        None,
     )
     .unwrap();
-    live.append_user("run the tool".into(), None).unwrap();
+    live.append_user("run the tool".into(), None, Voice::Human)
+        .unwrap();
     live.append_assistant(assistant_with_tool("call"), vec!["call".into()], None)
         .unwrap();
     drop(live);
 
-    let mut resumed = AgentLog::resume(sessions.path(), AgentId::new(0), "main").expect("resume");
+    let mut resumed = AgentLog::resume(sessions.path(), AgentId::new(0)).expect("resume");
     assert!(resumed.context().is_ready());
     let recorded = records(&resumed);
     assert!(
@@ -1206,7 +1367,9 @@ fn resume_quiesces_a_torn_turn_after_reopening_append_mode() {
             .iter()
             .any(|record| matches!(record, Record::Protocol(Protocol::ToolResults { .. })))
     );
-    resumed.append_user("continue".into(), None).unwrap();
+    resumed
+        .append_user("continue".into(), None, Voice::Human)
+        .unwrap();
     let recorded = records(&resumed);
     assert!(matches!(
         recorded.last(),
@@ -1223,7 +1386,8 @@ fn resume_quarantines_only_an_unterminated_final_fragment() {
         "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
-        0,
+        "",
+        None,
     )
     .unwrap();
     let path = sessions.path().join("0/record.jsonl");
@@ -1234,8 +1398,8 @@ fn resume_quarantines_only_an_unterminated_final_fragment() {
     file.write_all(fragment).unwrap();
     file.flush().unwrap();
 
-    let resumed = AgentLog::resume(sessions.path(), AgentId::new(0), "main")
-        .expect("torn tail is recoverable");
+    let resumed =
+        AgentLog::resume(sessions.path(), AgentId::new(0)).expect("torn tail is recoverable");
     assert!(resumed.context().is_ready());
     assert_eq!(fs::read(&path).unwrap(), prefix);
     assert_eq!(
@@ -1253,7 +1417,8 @@ fn resume_refuses_a_complete_garbage_line_without_mutating_the_file() {
         "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
-        0,
+        "",
+        None,
     )
     .unwrap();
     let path = sessions.path().join("0/record.jsonl");
@@ -1264,8 +1429,12 @@ fn resume_refuses_a_complete_garbage_line_without_mutating_the_file() {
     let before = fs::read(&path).unwrap();
 
     assert!(
-        AgentLog::resume(sessions.path(), AgentId::new(0), "main").is_err(),
+        AgentLog::resume(sessions.path(), AgentId::new(0)).is_err(),
         "garbage is not a crash tail"
+    );
+    assert!(
+        AgentLog::live_roots(sessions.path()).is_err(),
+        "a session that does not parse is named, not hidden"
     );
     assert_eq!(fs::read(&path).unwrap(), before);
 }
@@ -1279,7 +1448,8 @@ fn resume_refuses_foreign_protocol_data_without_mutating_the_file() {
         "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
-        0,
+        "",
+        None,
     )
     .unwrap();
     let path = sessions.path().join("0/record.jsonl");
@@ -1297,7 +1467,7 @@ fn resume_refuses_foreign_protocol_data_without_mutating_the_file() {
     file.flush().unwrap();
     let before = fs::read(&path).unwrap();
 
-    let error = AgentLog::resume(sessions.path(), AgentId::new(0), "main")
+    let error = AgentLog::resume(sessions.path(), AgentId::new(0))
         .err()
         .expect("foreign data must refuse");
     let text = error.to_string();
@@ -1314,13 +1484,15 @@ fn resume_refuses_a_steering_line_with_no_turn_to_steer() {
         "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
-        0,
+        "",
+        None,
     )
     .unwrap();
     let path = sessions.path().join("0/record.jsonl");
     drop(live);
     let orphan = Record::Protocol(Protocol::Steering {
         text: "steer".into(),
+        voice: Voice::Human,
     });
     let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
     file.write_all(&crate::record::envelope_line(&orphan))
@@ -1328,7 +1500,7 @@ fn resume_refuses_a_steering_line_with_no_turn_to_steer() {
     file.write_all(b"\n").unwrap();
     file.flush().unwrap();
 
-    let error = AgentLog::resume(sessions.path(), AgentId::new(0), "main")
+    let error = AgentLog::resume(sessions.path(), AgentId::new(0))
         .err()
         .expect("a steering line with no turn is foreign data");
     let text = error.to_string();
@@ -1347,7 +1519,8 @@ fn resume_refuses_a_stale_id_as_foreign_data() {
         "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
-        0,
+        "",
+        None,
     )
     .unwrap();
     complete_round(&mut live, "one", "one");
@@ -1357,6 +1530,7 @@ fn resume_refuses_a_stale_id_as_foreign_data() {
     let stale = Record::Protocol(Protocol::UserPrompt {
         turn: 1,
         text: "stale".into(),
+        voice: Voice::Human,
     });
     let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
     file.write_all(&crate::record::envelope_line(&stale))
@@ -1365,7 +1539,7 @@ fn resume_refuses_a_stale_id_as_foreign_data() {
     file.flush().unwrap();
     let before = fs::read(&path).unwrap();
 
-    let error = AgentLog::resume(sessions.path(), AgentId::new(0), "main")
+    let error = AgentLog::resume(sessions.path(), AgentId::new(0))
         .err()
         .expect("a stale id is foreign data");
     let text = error.to_string();
@@ -1383,20 +1557,22 @@ fn resume_refuses_a_child_log() {
         "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
-        0,
+        "",
+        None,
     )
     .unwrap();
     let child = parent
         .fork(
             AgentId::new(1),
             "child",
-            0,
             &RecordedModel::for_test("model"),
             &RecordedAccount::for_test("provider"),
+            "",
+            Memory::Amnemon,
         )
         .unwrap();
     drop((parent, child));
-    let error = AgentLog::resume(sessions.path(), AgentId::new(1), "main")
+    let error = AgentLog::resume(sessions.path(), AgentId::new(1))
         .err()
         .expect("a child log has a parent, so it is no root");
     assert!(
@@ -1412,7 +1588,7 @@ fn resume_refuses_a_pre_plan_session_with_no_record_log() {
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("events.jsonl"), b"").unwrap();
 
-    let error = AgentLog::resume(sessions.path(), AgentId::new(0), "main")
+    let error = AgentLog::resume(sessions.path(), AgentId::new(0))
         .err()
         .expect("a directory with no record.jsonl must refuse, not start empty");
     let text = error.to_string();
@@ -1432,10 +1608,12 @@ fn resume_refuses_an_interior_tool_answer_lost_from_disk() {
         "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
-        0,
+        "",
+        None,
     )
     .unwrap();
-    live.append_user("first".into(), None).unwrap();
+    live.append_user("first".into(), None, Voice::Human)
+        .unwrap();
     live.append_assistant(assistant_with_tool("call"), vec!["call".into()], None)
         .unwrap();
     live.quiesce(QuiesceReason::Aborted);
@@ -1454,7 +1632,7 @@ fn resume_refuses_an_interior_tool_answer_lost_from_disk() {
     }
     fs::write(&path, &torn).unwrap();
 
-    let error = AgentLog::resume(sessions.path(), AgentId::new(0), "main")
+    let error = AgentLog::resume(sessions.path(), AgentId::new(0))
         .err()
         .expect("an interior gap is a hand-edited file");
     let text = error.to_string();
@@ -1476,7 +1654,8 @@ fn resume_matches_live_after_a_small_edit_sequence_family() {
             "main",
             &RecordedModel::for_test("model"),
             &RecordedAccount::for_test("provider"),
-            0,
+            "",
+            None,
         )
         .unwrap();
         complete_round(&mut live, "one", "one");
@@ -1524,9 +1703,14 @@ fn resume_matches_live_after_a_small_edit_sequence_family() {
                 .unwrap();
             }
             7 => {
-                live.record_error("forensics".into()).unwrap();
-                live.record_nudge("retry".into(), Some(Spent { used: 1, max: 2 }))
-                    .unwrap();
+                let emit = live.record_emitter();
+                emit.emit_or_report(Forensic::Error {
+                    text: "forensics".into(),
+                });
+                emit.emit_or_report(Forensic::Nudge {
+                    cause: "retry".into(),
+                    spent: Some(Spent { used: 1, max: 2 }),
+                });
             }
             8 => {
                 live.evict(&prefix(&live, 2), None, EditAuthority::Harness)
@@ -1539,8 +1723,8 @@ fn resume_matches_live_after_a_small_edit_sequence_family() {
         let expected =
             serde_json::to_vec(&live.context().rendered().iter().collect::<Vec<_>>()).unwrap();
         drop(live);
-        let resumed = AgentLog::resume(sessions.path(), AgentId::new(0), "main")
-            .expect("resume edit sequence");
+        let resumed =
+            AgentLog::resume(sessions.path(), AgentId::new(0)).expect("resume edit sequence");
         assert!(resumed.context().is_ready());
         assert_eq!(
             serde_json::to_vec(&resumed.context().rendered().iter().collect::<Vec<_>>()).unwrap(),
@@ -1562,10 +1746,12 @@ fn resume_rebuilds_the_same_rows_and_notes() {
         "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
-        0,
+        "",
+        None,
     )
     .unwrap();
-    live.append_user("interrupted".into(), None).unwrap();
+    live.append_user("interrupted".into(), None, Voice::Human)
+        .unwrap();
     live.quiesce(QuiesceReason::Cancelled);
     for prompt in ["one", "two", "three"] {
         complete_round(&mut live, prompt, prompt);
@@ -1580,7 +1766,7 @@ fn resume_rebuilds_the_same_rows_and_notes() {
     let notes = live.context().notes().to_vec();
     drop(live);
 
-    let resumed = AgentLog::resume(sessions.path(), AgentId::new(0), "main").expect("resume");
+    let resumed = AgentLog::resume(sessions.path(), AgentId::new(0)).expect("resume");
     assert_eq!(resumed.context().transcript_index(), rows);
     assert_eq!(resumed.context().notes(), notes.as_slice());
 }
@@ -1597,7 +1783,8 @@ fn a_departed_turn_reads_back_after_resume() {
         "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
-        0,
+        "",
+        None,
     )
     .unwrap();
     complete_round(&mut live, "one", "answer one");
@@ -1610,7 +1797,7 @@ fn a_departed_turn_reads_back_after_resume() {
     );
     drop(live);
 
-    let resumed = AgentLog::resume(sessions.path(), AgentId::new(0), "main").expect("resume");
+    let resumed = AgentLog::resume(sessions.path(), AgentId::new(0)).expect("resume");
     assert_eq!(
         resumed
             .context()
@@ -1635,18 +1822,16 @@ fn a_departed_turn_reads_back_after_resume() {
 /// A `mnemon` child of `parent`: its own log under the same sessions
 /// root, opened with the table and the link the parent hands over.
 fn mnemon(parent: &AgentLog, child_id: AgentId) -> AgentLog {
-    let inherited = parent.inherited_context();
-    let mut child = parent
+    parent
         .fork(
             child_id,
             "child",
-            0,
             &RecordedModel::for_test("model"),
             &RecordedAccount::for_test("provider"),
+            "",
+            Memory::Mnemon,
         )
-        .expect("child log");
-    child.import_context(inherited).expect("import");
-    child
+        .expect("child log")
 }
 
 fn seed_has_a_tool_call(log: &AgentLog) -> bool {
@@ -1666,7 +1851,9 @@ fn seed_has_a_tool_call(log: &AgentLog) -> bool {
 fn a_seed_cut_never_owes_a_tool_result() {
     let mut parent = fresh_root();
     complete_round(&mut parent, "one", "one");
-    parent.append_user("two".into(), None).unwrap();
+    parent
+        .append_user("two".into(), None, Voice::Human)
+        .unwrap();
     parent
         .append_assistant(assistant_with_tool("call-1"), vec!["call-1".into()], None)
         .unwrap();
@@ -1696,7 +1883,9 @@ fn a_seed_cut_never_owes_a_tool_result() {
 fn a_seed_cut_never_owes_a_tool_result_with_no_edit() {
     let mut parent = fresh_root();
     complete_round(&mut parent, "one", "one");
-    parent.append_user("two".into(), None).unwrap();
+    parent
+        .append_user("two".into(), None, Voice::Human)
+        .unwrap();
     parent
         .append_assistant(assistant_with_tool("call-1"), vec!["call-1".into()], None)
         .unwrap();
@@ -1728,11 +1917,14 @@ fn a_seeded_turn_reads_back_from_its_origin() {
         "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
-        0,
+        "",
+        None,
     )
     .unwrap();
     complete_round(&mut parent, "one", "one");
-    parent.append_user("two".into(), None).unwrap();
+    parent
+        .append_user("two".into(), None, Voice::Human)
+        .unwrap();
     parent
         .append_assistant(assistant_with_tool("call-1"), vec!["call-1".into()], None)
         .unwrap();
@@ -1791,7 +1983,8 @@ fn a_mnemon_child_reads_an_ancestors_evicted_turns_and_mints_ids_above_it() {
         "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
-        0,
+        "",
+        None,
     )
     .unwrap();
     for prompt in ["one", "two", "three", "four"] {
@@ -1854,11 +2047,12 @@ fn turns_split_across_a_fork_read_back_out_of_both_files() {
         "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
-        0,
+        "",
+        None,
     )
     .unwrap();
     parent
-        .append_user("work on the parser".into(), None)
+        .append_user("work on the parser".into(), None, Voice::Human)
         .unwrap();
     parent
         .append_assistant(assistant_with_tool("call"), vec!["call".into()], None)
@@ -1912,7 +2106,8 @@ fn an_empty_parent_context_still_floors_the_childs_first_id() {
         "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
-        0,
+        "",
+        None,
     )
     .unwrap();
     complete_round(&mut parent, "one", "one");
@@ -1924,7 +2119,9 @@ fn an_empty_parent_context_still_floors_the_childs_first_id() {
 
     let mut child = mnemon(&parent, AgentId::new(1));
     assert_eq!(child.context().context_survey().rows.len(), 0);
-    child.append_user("first".into(), None).unwrap();
+    child
+        .append_user("first".into(), None, Voice::Human)
+        .unwrap();
     assert_eq!(child.context().current_prompt(), Some(5));
 }
 
@@ -1939,7 +2136,8 @@ fn admission_refuses_inherited_after_the_first_turn() {
         "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
-        0,
+        "",
+        None,
     )
     .unwrap();
     complete_round(&mut live, "one", "one");
@@ -1955,7 +2153,7 @@ fn admission_refuses_inherited_after_the_first_turn() {
     file.write_all(b"\n").unwrap();
     file.flush().unwrap();
 
-    let error = AgentLog::resume(sessions.path(), AgentId::new(0), "main")
+    let error = AgentLog::resume(sessions.path(), AgentId::new(0))
         .err()
         .expect("a late link is foreign data");
     let text = error.to_string();
@@ -1976,7 +2174,8 @@ fn a_broken_ancestry_link_is_refused_by_path_and_fault() {
         "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
-        0,
+        "",
+        None,
     )
     .unwrap();
     for prompt in ["one", "two"] {
@@ -2038,7 +2237,8 @@ fn resume_rebuilds_the_same_rows_and_notes_across_a_link() {
         "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
-        0,
+        "",
+        None,
     )
     .unwrap();
     for prompt in ["one", "two", "three"] {
@@ -2051,7 +2251,6 @@ fn resume_rebuilds_the_same_rows_and_notes_across_a_link() {
             EditAuthority::Model,
         )
         .unwrap();
-    let inherited = ancestor.inherited_context();
 
     let sessions = sessions_root("fold-equals-memo-inherited");
     let mut live = AgentLog::root(
@@ -2060,10 +2259,10 @@ fn resume_rebuilds_the_same_rows_and_notes_across_a_link() {
         "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
-        0,
+        "",
+        Some(ancestor.inherited_context()),
     )
     .unwrap();
-    live.import_context(inherited).unwrap();
     assert_eq!(
         live.context().notes(),
         [Some("the parser is fixed".to_string())],
@@ -2090,7 +2289,7 @@ fn resume_rebuilds_the_same_rows_and_notes_across_a_link() {
     let notes = live.context().notes().to_vec();
     drop(live);
 
-    let resumed = AgentLog::resume(sessions.path(), AgentId::new(0), "main").expect("resume");
+    let resumed = AgentLog::resume(sessions.path(), AgentId::new(0)).expect("resume");
     assert_eq!(resumed.context().transcript_index(), rows);
     assert_eq!(resumed.context().notes(), notes.as_slice());
 }
@@ -2107,7 +2306,8 @@ fn transcript_index_carries_the_inherited_table() {
         "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
-        0,
+        "",
+        None,
     )
     .unwrap();
     for prompt in ["one", "two", "three"] {
@@ -2152,7 +2352,8 @@ fn grep_walks_resident_then_freed_then_ancestors() {
         "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
-        0,
+        "",
+        None,
     )
     .unwrap();
     complete_round(&mut parent, "the parser is broken", "I will fix the parser");
@@ -2201,7 +2402,8 @@ fn an_unnarrowed_grep_passes_over_an_unreadable_file() {
         "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
-        0,
+        "",
+        None,
     )
     .unwrap();
     complete_round(&mut parent, "the parser is broken", "I will fix the parser");
@@ -2234,33 +2436,213 @@ fn an_unnarrowed_grep_passes_over_an_unreadable_file() {
 #[test]
 fn resume_replays_a_learned_window_until_a_selection_forgets_it() {
     let sessions = sessions_root("resume-learned");
-    let mut live = AgentLog::root(
+    let live = AgentLog::root(
         sessions.path(),
         AgentId::new(0),
         "main",
         &RecordedModel::for_test("m"),
         &RecordedAccount::for_test("provider"),
-        0,
+        "",
+        None,
     )
     .unwrap();
-    live.record_forensic(Forensic::WindowNarrowed {
-        context_window: 250_000,
-    })
-    .unwrap();
+    live.record_emitter()
+        .emit_or_report(Forensic::WindowNarrowed {
+            context_window: 250_000,
+        });
     let learned = |sessions: &tempfile::TempDir| {
-        AgentLog::resume(sessions.path(), AgentId::new(0), "main")
+        AgentLog::resume(sessions.path(), AgentId::new(0))
             .expect("resume")
             .learned_window()
             .cloned()
     };
     assert_eq!(learned(&sessions), Some(("m".into(), 250_000)));
-    live.record_forensic(Forensic::ModelChanged {
-        model: "m".into(),
-        context_window: None,
-        label: "provider".into(),
-        service: None,
-        account: None,
-    })
-    .unwrap();
+    live.record_emitter()
+        .emit_or_report(Forensic::ModelChanged {
+            model: "m".into(),
+            context_window: None,
+            label: "provider".into(),
+            service: "provider".into(),
+            account: "provider".into(),
+        });
     assert_eq!(learned(&sessions), None);
+}
+
+/// A log opens with its bookend, then the link where there is one, then the
+/// system prompt.
+#[test]
+fn a_log_opens_with_started_then_inherited_then_system() {
+    let parent = fresh_root();
+    let child = parent
+        .fork(
+            AgentId::new(1),
+            "child",
+            &RecordedModel::for_test("model"),
+            &RecordedAccount::for_test("provider"),
+            "child prompt",
+            Memory::Mnemon,
+        )
+        .unwrap();
+    let kinds: Vec<&str> = records(&child)
+        .iter()
+        .map(|record| match record {
+            Record::Forensic(Forensic::SessionStarted { .. }) => "started",
+            Record::Protocol(Protocol::Inherited { .. }) => "inherited",
+            Record::Protocol(Protocol::System { .. }) => "system",
+            _ => "other",
+        })
+        .collect();
+    assert_eq!(kinds, ["started", "inherited", "system"]);
+    assert_eq!(&**child.context().system(), "child prompt");
+    assert_eq!(&**parent.context().system(), "");
+}
+
+/// A resume records the prompt only when it differs from the one held.
+#[test]
+fn record_resumed_records_the_system_prompt_only_when_it_changed() {
+    let sessions = sessions_root("resume-system");
+    let log = AgentLog::root(
+        sessions.path(),
+        AgentId::new(0),
+        "main",
+        &RecordedModel::for_test("model"),
+        &RecordedAccount::for_test("provider"),
+        "same",
+        None,
+    )
+    .unwrap();
+    drop(log);
+    let systems = |log: &AgentLog| {
+        records(log)
+            .into_iter()
+            .filter_map(|record| match record {
+                Record::Protocol(Protocol::System { text }) => Some(text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let (model, account) = (
+        RecordedModel::for_test("model"),
+        RecordedAccount::for_test("provider"),
+    );
+    let mut resumed = AgentLog::resume(sessions.path(), AgentId::new(0)).unwrap();
+    resumed.record_resumed(&model, &account, "same", 1).unwrap();
+    assert_eq!(systems(&resumed), ["same"]);
+    resumed
+        .record_resumed(&model, &account, "changed", 2)
+        .unwrap();
+    assert_eq!(systems(&resumed), ["same", "changed"]);
+    assert_eq!(&**resumed.context().system(), "changed");
+}
+
+/// A fork after a clear or a rewind carries the withdrawn rows as such: no
+/// marker draws them, and the child can still read them.
+#[test]
+fn a_fork_carries_withdrawn_rows_unmarked_and_readable() {
+    let mut parent = fresh_root();
+    for prompt in ["one", "two", "three"] {
+        complete_round(&mut parent, prompt, prompt);
+    }
+    parent.rewind(3).unwrap();
+    let child = mnemon(&parent, AgentId::new(1));
+    assert_eq!(
+        child
+            .context()
+            .transcript_index()
+            .iter()
+            .map(|row| row.held)
+            .collect::<Vec<_>>(),
+        [
+            [Held::Resident; 2].as_slice(),
+            [Held::Withdrawn; 4].as_slice()
+        ]
+        .concat()
+    );
+    assert_eq!(
+        child.context().rendered().len(),
+        2,
+        "turns 1 and 2, and no marker for the rest"
+    );
+    assert_eq!(
+        openings(&child.context().read_transcript(&[3, 4]).unwrap()),
+        vec!["two", "two"]
+    );
+
+    let mut cleared = fresh_root();
+    complete_round(&mut cleared, "one", "one");
+    cleared.clear().unwrap();
+    let child = mnemon(&cleared, AgentId::new(1));
+    assert_eq!(child.context().rendered().len(), 0);
+    assert_eq!(
+        openings(&child.context().read_transcript(&[1]).unwrap()),
+        vec!["one"]
+    );
+}
+
+/// A fork's resident rows are read through their pointers, each cut to its
+/// admissible prefix and weighing what the parent's did; a grandchild's
+/// pointers lead to the grandparent's file.
+#[test]
+fn a_forks_resident_rows_are_read_through_their_pointers() {
+    let mut parent = fresh_root();
+    complete_round(&mut parent, "one", "one");
+    parent
+        .append_user("two".into(), None, Voice::Human)
+        .unwrap();
+    parent
+        .append_assistant(assistant_with_tool("call"), vec!["call".into()], None)
+        .unwrap();
+
+    let child = mnemon(&parent, AgentId::new(1));
+    let weights = |log: &AgentLog| {
+        log.context()
+            .context_survey()
+            .rows
+            .iter()
+            .map(|row| (row.id, row.bytes))
+            .collect::<Vec<_>>()
+    };
+    let (theirs, ours) = (weights(&parent), weights(&child));
+    assert_eq!(&ours[..3], &theirs[..3], "closed turns weigh the same");
+    assert_eq!(ours[3], (4, 0), "the turn owing a result loses its tail");
+    assert_eq!(child.context().rendered().len(), 3);
+
+    let grandchild = mnemon(&child, AgentId::new(2));
+    assert_eq!(weights(&grandchild), ours);
+    assert_eq!(
+        openings(&grandchild.context().read_transcript(&[1, 2]).unwrap()),
+        vec!["one", "one"]
+    );
+    fs::remove_file(record_path(&parent)).unwrap();
+    assert!(
+        grandchild.context().read_transcript(&[1]).is_err(),
+        "the grandchild's pointers lead to the grandparent's own file"
+    );
+}
+
+/// A parent that no longer reads back refuses the fork by naming its file.
+#[test]
+fn an_unreadable_parent_refuses_the_fork_by_file() {
+    let mut parent = fresh_root();
+    complete_round(&mut parent, "one", "one");
+    let source = record_path(&parent);
+    let inherited = parent.inherited_context();
+    fs::remove_file(&source).unwrap();
+    let sessions = sessions_root("unreadable-parent");
+    let error = AgentLog::root(
+        sessions.path(),
+        AgentId::new(5),
+        "orphan",
+        &RecordedModel::for_test("model"),
+        &RecordedAccount::for_test("provider"),
+        "",
+        Some(inherited),
+    )
+    .err()
+    .expect("the parent's file is gone");
+    let text = error.to_string();
+    assert!(
+        text.contains("turn 1 was inherited from") && text.contains(&source.display().to_string()),
+        "{text}"
+    );
 }

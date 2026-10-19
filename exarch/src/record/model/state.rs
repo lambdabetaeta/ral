@@ -19,8 +19,8 @@ pub(super) enum State {
 
 impl Context {
     /// Whether a record that opens or extends a turn — a
-    /// [`Protocol::UserPrompt`], a [`Protocol::Steering`] line, an imported
-    /// [`Protocol::ContextMessage`] — is admissible here. Weaker than [`State::ReadyForUser`]: work that
+    /// [`Protocol::UserPrompt`], a [`Protocol::Steering`] line, a
+    /// [`Protocol::Import`] — is admissible here. Weaker than [`State::ReadyForUser`]: work that
     /// never reached a reply is abandoned by the next prompt rather than
     /// closed by a fabricated one, so only outstanding tool calls hold the
     /// log.
@@ -39,12 +39,14 @@ impl Context {
 
     /// The turn being written, when the protocol is mid-turn: the one turn no
     /// eviction takes and no door reads back, the turns before it having
-    /// closed. `None` at [`State::ReadyForUser`], where nothing
-    /// is in hand.
-    pub(super) fn unclosed_turn(&self) -> Option<u64> {
-        (!matches!(self.state, State::ReadyForUser))
-            .then(|| self.reach())
-            .flatten()
+    /// closed. `None` at [`State::ReadyForUser`], where nothing is in hand, and
+    /// while the newest row is withdrawn: no turn is being written then.
+    pub(crate) fn unclosed_turn(&self) -> Option<u64> {
+        self.table
+            .turns()
+            .last()
+            .filter(|turn| turn.is_resident() && !matches!(self.state, State::ReadyForUser))
+            .map(|turn| turn.id)
     }
 
     pub(crate) fn is_awaiting_assistant(&self) -> bool {
@@ -100,15 +102,17 @@ pub(super) fn advance(state: &State, protocol: &Protocol) -> State {
         },
         Protocol::AssistantMessage { .. } => State::ReadyForUser,
         Protocol::ToolResults { .. } => State::AwaitingAssistantAfterToolResults,
-        Protocol::ContextMessage { .. }
+        Protocol::System { .. }
+        | Protocol::Import { .. }
         | Protocol::Evicted { .. }
         | Protocol::Rewound { .. }
+        | Protocol::Cleared
         | Protocol::Inherited { .. } => state.clone(),
     }
 }
 
 /// Where the automaton rests after one turn's records, the turn having
-/// opened from rest — what a rewind leaves it at.
+/// opened from rest — what a withdrawal leaves it at.
 pub(super) fn resting(records: &[Recorded<Protocol>]) -> State {
     records.iter().fold(State::default(), |state, record| {
         advance(&state, record.value())
@@ -118,7 +122,7 @@ pub(super) fn resting(records: &[Recorded<Protocol>]) -> State {
 /// Protocol sequencing legality.
 pub(super) fn admissible(state: &State, protocol: &Protocol) -> bool {
     match protocol {
-        Protocol::UserPrompt { .. } | Protocol::Steering { .. } | Protocol::ContextMessage { .. } => {
+        Protocol::UserPrompt { .. } | Protocol::Steering { .. } | Protocol::Import { .. } => {
             admits_new_turn(state)
         }
         Protocol::AssistantMessage { message, .. } => {
@@ -135,11 +139,10 @@ pub(super) fn admissible(state: &State, protocol: &Protocol) -> bool {
                 false
             }
         }
-        Protocol::Rewound { .. } => admits_new_turn(state),
-        Protocol::Evicted { .. }
+        Protocol::Rewound { .. } | Protocol::Cleared => admits_new_turn(state),
         // Sequencing-neutral; where a link may stand is its own rule in
         // [`Context::judge`], needing more than a [`State`].
-        | Protocol::Inherited { .. } => true,
+        Protocol::System { .. } | Protocol::Evicted { .. } | Protocol::Inherited { .. } => true,
     }
 }
 
@@ -150,18 +153,18 @@ fn admits_new_turn(state: &State) -> bool {
     !matches!(state, State::AwaitingToolResults { .. })
 }
 
-/// The longest prefix of `records` that owes no tool result — the only shape
-/// a `mnemon` seed may take, the child's own launch prompt landing behind it.
-pub(super) fn admissible_prefix<'a, 'b>(records: &'b [&'a Protocol]) -> &'b [&'a Protocol] {
+/// The length of the longest prefix of `records` that owes no tool result:
+/// all of a closed turn, less the tail of one cut off mid-batch.
+pub(super) fn admissible_prefix(records: &[Recorded<Protocol>]) -> usize {
     let mut state = State::default();
     let mut end = 0;
     for (index, record) in records.iter().enumerate() {
-        state = advance(&state, record);
+        state = advance(&state, record.value());
         if admits_new_turn(&state) {
             end = index + 1;
         }
     }
-    &records[..end]
+    end
 }
 
 /// The answer a tool call that never ran is given.  It does not name what

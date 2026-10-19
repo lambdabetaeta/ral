@@ -1,22 +1,11 @@
 use super::*;
-use crate::record::{Display, Locus, Record, Recorded};
+use crate::card::{Card, Mark};
+use crate::record::{
+    BlockId, Display, Forensic, Locus, Protocol, Record, Recorded, Seq, Verdict, Voice,
+};
 
 fn scrollback() -> Scrollback {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    static N: AtomicUsize = AtomicUsize::new(0);
-    let path = std::env::temp_dir().join(format!(
-        "exarch-scrollback-test-{}-{}.log",
-        std::process::id(),
-        N.fetch_add(1, Ordering::Relaxed),
-    ));
-    Scrollback::new(
-        path,
-        AgentSlot(0),
-        false,
-        Detail::Full,
-        Recorder::none(),
-        None,
-    )
+    Scrollback::new(AgentSlot(0), Detail::Full, Recorder::none(), None)
 }
 
 fn rail_rows(rows: &[Row], glyph: &str) -> Vec<usize> {
@@ -163,11 +152,16 @@ fn scroll_down_while_sticky_clamps_to_max_off() {
     assert!(sb.sticky, "re-armed at the bottom after the clamp");
 }
 
-fn prompts(sb: &mut Scrollback, n: usize) {
+/// Past the fold's window the oldest blocks retire: `n` records past a full
+/// window, the first `n` blocks are gone.
+fn fill(sb: &mut Scrollback, log: &mut Stream, n: usize) {
     for i in 0..n {
-        sb.push_chrome(Chrome::Prompt(format!(
-            "block {i} a\nblock {i} b\nblock {i} c"
-        )));
+        let _ = log.land(
+            sb,
+            Record::Forensic(Forensic::SystemNote {
+                text: format!("marker {i}"),
+            }),
+        );
     }
 }
 
@@ -176,12 +170,13 @@ fn prompts(sb: &mut Scrollback, n: usize) {
 #[test]
 fn a_hit_survives_the_head_being_trimmed() {
     let mut sb = scrollback();
-    prompts(&mut sb, 10);
+    let mut log = Stream::new();
+    fill(&mut sb, &mut log, record::BLOCKS_WINDOW);
     let _ = sb.render_window(READ_W, 10);
-    let row = 30;
+    let row = sb.rows().count() / 2;
     let hit = sb.block_at(row).expect("the row is on screen");
     let head = sb.block_head(hit);
-    sb.retire(3);
+    fill(&mut sb, &mut log, 3);
     let _ = sb.render_window(READ_W, 10);
     assert!(
         sb.block_at(row) == Some(hit),
@@ -199,11 +194,12 @@ fn a_hit_survives_the_head_being_trimmed() {
 #[test]
 fn an_unstuck_viewport_keeps_its_absolute_offset_across_a_head_trim() {
     let mut sb = scrollback();
-    prompts(&mut sb, 10);
+    let mut log = Stream::new();
+    fill(&mut sb, &mut log, record::BLOCKS_WINDOW);
     let _ = sb.render_window(READ_W, 10);
     sb.scroll_to(12);
     assert_eq!(sb.render_window(READ_W, 10).offset, 12);
-    sb.retire(2);
+    fill(&mut sb, &mut log, 2);
     let w = sb.render_window(READ_W, 10);
     assert_eq!(w.offset, 12, "the window stays on the same rows");
     assert!(!sb.sticky);
@@ -239,22 +235,6 @@ fn committed_thinking_stays_visible_in_sticky_scrollback() {
         !rail_rows(&committed.lines, "∴ ").is_empty(),
         "committed thinking stays visible in a sticky scrollback: {:?}",
         committed.lines.iter().map(Row::plain).collect::<Vec<_>>()
-    );
-}
-
-/// Consuming a view retires its whole transcript to `user.log` and hands
-/// back the path, so the log stays readable.
-#[test]
-fn into_log_retires_the_transcript_and_returns_the_path() {
-    let mut sb = scrollback();
-    sb.push_chrome(Chrome::Note("marker".into()));
-    let log_path = sb.log_path.clone();
-
-    assert_eq!(sb.into_log(), log_path);
-    assert_eq!(
-        logged(&log_path, "marker"),
-        1,
-        "the transcript is in user.log"
     );
 }
 
@@ -316,10 +296,9 @@ fn a_result_stamps_the_call_it_names() {
     );
     let _ = log.land(
         &mut sb,
-        Record::Display(Display::Result {
-            text: "a line\n".repeat(40),
-            failed: false,
+        Record::Display(Display::Verdict {
             call: BlockId::new(call),
+            verdict: Verdict::of(&"a line\n".repeat(40), false),
         }),
     );
 
@@ -341,9 +320,10 @@ fn the_mirror_draws_what_the_fold_reports() {
     let mut log = Stream::new();
     let _ = log.land(
         &mut sb,
-        Record::Display(Display::Prompt {
+        Record::Protocol(Protocol::UserPrompt {
+            turn: 1,
             text: "hello".into(),
-            turn: Some(1),
+            voice: Voice::Human,
         }),
     );
     log.say(&mut sb, "hi back");
@@ -365,12 +345,19 @@ fn deliberation_and_its_work_read_as_one_group() {
         }),
     );
     let _ = log.call(&mut sb, "read the renderer", "read 'line.rs'");
-    let _ = log.land(&mut sb, Record::Display(Display::Turn { id: 1 }));
+    let _ = log.land(
+        &mut sb,
+        Record::Forensic(Forensic::TurnStarted {
+            turn: 1,
+            tuning: crate::provider::Tuning::initial(),
+            route: None,
+        }),
+    );
     let _ = log.call(&mut sb, "read the block", "read 'block.rs'");
-    assert_eq!(sb.blocks.len(), 1, "one group holds the whole burst");
+    assert_eq!(sb.mirror.blocks.len(), 1, "one group holds the whole burst");
 
     log.say(&mut sb, "and so\n");
-    assert_eq!(sb.blocks.len(), 2, "prose closes the group");
+    assert_eq!(sb.mirror.blocks.len(), 2, "prose closes the group");
     let w = sb.render_window(READ_W, 60);
     let (thinking, run) = (rail_rows(&w.lines, "∴ "), rail_rows(&w.lines, "▸ "));
     assert_eq!(thinking.len(), 1, "one deliberation head");
@@ -456,17 +443,19 @@ fn chrome_holds_its_place_among_the_commits() {
     let mut log = Stream::new();
     let _ = log.land(
         &mut sb,
-        Record::Display(Display::Prompt {
+        Record::Protocol(Protocol::UserPrompt {
+            turn: 1,
             text: "one".into(),
-            turn: Some(1),
+            voice: Voice::Human,
         }),
     );
     sb.push_chrome(Chrome::Note("between".into()));
     let _ = log.land(
         &mut sb,
-        Record::Display(Display::Prompt {
+        Record::Protocol(Protocol::UserPrompt {
+            turn: 3,
             text: "two".into(),
-            turn: Some(3),
+            voice: Voice::Human,
         }),
     );
 
@@ -488,122 +477,14 @@ fn chrome_holds_its_place_among_the_commits() {
     );
 }
 
-// ── the transcript ──────────────────────────────────────────────────────
+// ── the log ─────────────────────────────────────────────────────────────
 
-/// Lines of `sb`'s `user.log` ending in `marker`, which is how a test asks
-/// whether a block reached the transcript, and how many times.
-fn logged(path: &Path, marker: &str) -> usize {
-    fs::read_to_string(path)
-        .expect("the transcript reads back")
-        .lines()
-        .filter(|l| l.ends_with(marker))
-        .count()
-}
-
-/// The mirror is bounded; the transcript is not.  What the fold's window
-/// drops is on disk by the time it goes, so a session outliving that
-/// window still leaves a whole `user.log` behind.
-#[test]
-fn the_transcript_keeps_what_the_window_drops() {
-    let mut sb = scrollback();
-    let mut log = Stream::new();
-    let total = record::BLOCKS_WINDOW + 50;
-    for i in 0..total {
-        let _ = log.land(
-            &mut sb,
-            Record::Forensic(crate::record::Forensic::SystemNote {
-                text: format!("marker {i}"),
-            }),
-        );
-    }
-    assert_eq!(
-        sb.blocks.len(),
-        record::BLOCKS_WINDOW,
-        "the mirror is bounded by the fold's own window"
-    );
-    let path = sb
-        .flush_log()
-        .expect("the transcript flushes")
-        .to_path_buf();
-    let text = fs::read_to_string(&path).expect("the transcript reads back");
-    let last = format!("marker {}", total - 1);
-    assert_eq!(logged(&path, "marker 0"), 1, "the dropped head is on disk");
-    assert_eq!(logged(&path, &last), 1, "and so is the resident tail");
-    assert!(
-        text.find("marker 0") < text.find(&last),
-        "in the order they were written"
-    );
-}
-
-/// A flush writes the resident mirror provisionally, so `/export`
-/// mid-session reads a whole transcript; the next one rewinds over it
-/// rather than writing the same blocks twice.
-#[test]
-fn a_second_flush_rewinds_the_provisional_tail() {
-    let mut sb = scrollback();
-    for i in 0..3 {
-        sb.push_chrome(Chrome::Note(format!("marker {i}")));
-    }
-    let path = sb
-        .flush_log()
-        .expect("the transcript flushes")
-        .to_path_buf();
-    let once = fs::read_to_string(&path).expect("the transcript reads back");
-
-    sb.push_chrome(Chrome::Note("marker 3".into()));
-    sb.flush_log().expect("the transcript flushes");
-    let twice = fs::read_to_string(&path).expect("the transcript reads back");
-
-    assert!(twice.starts_with(&once), "the first flush is a prefix");
-    assert_eq!(logged(&path, "marker 0"), 1, "written once, not twice");
-    assert_eq!(logged(&path, "marker 3"), 1, "and the new block joins it");
-}
-
-fn prompt(text: &str) -> Display {
-    Display::Prompt {
+fn prompt(text: &str) -> Protocol {
+    Protocol::UserPrompt {
+        turn: 1,
         text: text.into(),
-        turn: None,
+        voice: Voice::Human,
     }
-}
-
-/// A resumed session's mirror was rendered by the run that recorded it, so
-/// the continuation appends to that transcript instead of repeating it —
-/// including what the new run recorded before its tab first read the log.
-#[test]
-fn a_resumed_transcript_continues_rather_than_repeats() {
-    let dir = tempfile::tempdir().expect("a temp dir");
-    let record = dir.path().join("record.jsonl");
-    let recorder = Recorder::create(&record).expect("a record log");
-    let path = dir.path().join("user.log");
-    let new = |append| {
-        Scrollback::new(
-            path.clone(),
-            AgentSlot(0),
-            append,
-            Detail::Full,
-            recorder.clone(),
-            None,
-        )
-    };
-    let _recorded = recorder.emit(prompt("one")).expect("the log appends");
-    let mut first = new(false);
-    first.catch_up();
-    first.flush_log().expect("the transcript flushes");
-    assert_eq!(logged(&path, "one"), 1);
-
-    let history = fs::metadata(&record).expect("the log exists").len();
-    let _recorded = recorder.emit(prompt("two")).expect("the log appends");
-    let mut resumed = new(true);
-    resumed.recall(history);
-    resumed.catch_up();
-    resumed.flush_log().expect("the transcript flushes");
-
-    assert_eq!(
-        logged(&path, "one"),
-        1,
-        "the recalled prefix is not rewritten"
-    );
-    assert_eq!(logged(&path, "two"), 1, "and the new block joins it");
 }
 
 /// A record log publishing onto a fresh channel, and the facts it has sent.
@@ -613,10 +494,10 @@ fn on_air(recorder: &Recorder) -> crate::bus::BusReceiver {
     rx
 }
 
-fn heard(rx: &crate::bus::BusReceiver) -> Vec<(Segment, Recorded<Record>)> {
+fn heard(rx: &crate::bus::BusReceiver) -> Vec<Recorded<Record>> {
     std::iter::from_fn(|| rx.try_recv().ok())
         .filter_map(|sig| match sig {
-            crate::bus::Signal::Fact(_, segment, rec) => Some((segment, rec)),
+            crate::bus::Signal::Fact(_, rec) => Some(rec),
             crate::bus::Signal::Born(..) | crate::bus::Signal::Transient(..) => None,
         })
         .collect()
@@ -634,22 +515,15 @@ fn a_late_mirror_catches_up_hears_nothing_twice_and_reads_past_a_gap() {
     emit("alpha");
     let rx = on_air(&recorder);
     emit("bravo");
-    let mut sb = Scrollback::new(
-        dir.path().join("user.log"),
-        AgentSlot(0),
-        false,
-        Detail::Full,
-        recorder.clone(),
-        None,
-    );
+    let mut sb = Scrollback::new(AgentSlot(0), Detail::Full, recorder.clone(), None);
     sb.catch_up();
-    for (segment, rec) in heard(&rx) {
-        sb.fact(segment, &rec);
+    for rec in heard(&rx) {
+        sb.fact(&rec);
     }
     emit("charlie");
     emit("delta");
-    let (segment, delta) = heard(&rx).pop().expect("delta is heard");
-    sb.fact(segment, &delta);
+    let delta = heard(&rx).pop().expect("delta is heard");
+    sb.fact(&delta);
 
     let all = text(&mut sb);
     for word in ["alpha", "bravo", "charlie", "delta"] {
@@ -657,35 +531,35 @@ fn a_late_mirror_catches_up_hears_nothing_twice_and_reads_past_a_gap() {
     }
 }
 
-/// A fact from a newer segment starts the mirror over on that segment —
-/// a `/clear` — and a straggler from the segment it left is dropped.
+/// A `/clear` is a record like any other: the mirror drops what it held,
+/// draws the opening again, and reads on from where it was.
 #[test]
-fn a_new_segment_starts_the_mirror_over_and_drops_the_old_ones_stragglers() {
+fn a_cleared_record_starts_the_mirror_over_and_keeps_the_cursor() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let recorder = Recorder::create(&dir.path().join("record.jsonl")).expect("a record log");
     let rx = on_air(&recorder);
     let _recorded = recorder.emit(prompt("before")).expect("the log appends");
-    let mut sb = Scrollback::new(
-        dir.path().join("user.log"),
-        AgentSlot(0),
-        false,
-        Detail::Full,
-        recorder.clone(),
-        None,
-    );
+    let opening = Card(vec![Mark::heading("the session card")]);
+    let mut sb = Scrollback::new(AgentSlot(0), Detail::Full, recorder.clone(), Some(opening));
     sb.catch_up();
-    recorder
-        .rotate(Some(&dir.path().join("record.1.jsonl")))
-        .expect("the log rotates");
+    assert!(text(&mut sb).contains("before"));
+    let _recorded = recorder.emit(Protocol::Cleared).expect("the log appends");
     let _recorded = recorder.emit(prompt("after")).expect("the log appends");
     let mut live = heard(&rx);
-    let (newer, after) = live.pop().expect("the new segment's fact");
-    let (older, before) = live.pop().expect("the old segment's fact");
+    let after = live.pop().expect("the prompt after the clear");
+    let cleared = live.pop().expect("the clear");
 
-    assert!(sb.fact(newer, &after), "a new segment is a clear");
-    assert!(!sb.fact(older, &before), "a straggler is not");
+    assert!(sb.fact(&cleared), "a clear starts the mirror over");
+    assert!(!sb.fact(&after), "a prompt does not");
 
     let all = text(&mut sb);
+    assert!(all.contains("the session card"), "{all:?}");
+    assert!(all.contains("[cleared]"), "{all:?}");
     assert!(all.contains("after"), "{all:?}");
     assert!(!all.contains("before"), "{all:?}");
+    assert_eq!(
+        sb.cursor.map(Cursor::next),
+        Some(after.locus().seq().get() + 1),
+        "the cursor stayed on the log"
+    );
 }

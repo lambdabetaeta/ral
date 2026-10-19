@@ -6,7 +6,7 @@ use super::inbox::{Inbox, Mailbox};
 use super::signal::Signal;
 use crate::provider::Usage;
 use crate::record::AgentId;
-use crate::record::{Born, Forensic, Publish, Record, Recorded, Segment, Transient};
+use crate::record::{Born, Forensic, Publish, Record, Recorded, Transient};
 use ral_core::sync::LockExt;
 use std::sync::{Arc, Mutex};
 
@@ -41,13 +41,13 @@ pub(crate) struct FleetSink {
 }
 
 impl Publish for FleetSink {
-    fn fact(&self, segment: Segment, recorded: Recorded<Record>) {
+    fn fact(&self, recorded: Recorded<Record>) {
         if let Record::Forensic(Forensic::UsageDelta { usage }) = recorded.value() {
             self.meter.add(*usage);
         }
         if self
             .tx
-            .send_signal(Signal::Fact(self.id, segment, recorded))
+            .send_signal(Signal::Fact(self.id, recorded))
             .is_err()
         {
             // No live receiver; the record is already durable on disk, which is

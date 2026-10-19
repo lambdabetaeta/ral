@@ -126,12 +126,12 @@ impl Limit {
 pub struct Refusal {
     pub limit: Limit,
     /// The latest instant it names for asking again.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub resets_at: Option<Timestamp>,
     /// When it was read: the instant its named wait runs from.
     pub received: Timestamp,
     pub cause: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<Body>,
 }
 

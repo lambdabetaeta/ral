@@ -2,7 +2,7 @@ use super::*;
 use crate::agent::testkit::*;
 use crate::bus::{Emitter, Item, Next, Post};
 use crate::provider::scripted::Script;
-use crate::record::Memory;
+use crate::record::{Memory, Voice};
 use genai::chat::ChatMessage;
 use std::fs;
 
@@ -129,7 +129,7 @@ fn mnemon_root_imports_context_withholds_reply_and_resumes() {
     parent
         .log
         .borrow_mut()
-        .append_user("what did we learn?".into(), None)
+        .append_user("what did we learn?".into(), None, Voice::Human)
         .unwrap();
     parent
         .log
@@ -176,7 +176,6 @@ fn mnemon_root_imports_context_withholds_reply_and_resumes() {
                 .and_then(|n| n.parse().ok())
                 .expect("numeric session dir"),
         ),
-        "fork",
     )
     .expect("a mnemon root's record folds back through resume");
     assert_eq!(
@@ -404,7 +403,7 @@ fn rewind_validates_the_anchor_and_sheds_nudges() {
             ("two", "answer two"),
             ("three", "answer three"),
         ] {
-            log.append_user(prompt.into(), None).unwrap();
+            log.append_user(prompt.into(), None, Voice::Human).unwrap();
             log.append_assistant(ChatMessage::assistant(answer), Vec::new(), None)
                 .unwrap();
         }
@@ -452,13 +451,6 @@ fn rewind_validates_the_anchor_and_sheds_nudges() {
         )),
         "rewind must be durable on the trace"
     );
-    assert!(
-        records.iter().any(|record| matches!(
-            record,
-            crate::record::Record::Display(crate::record::Display::Rewound { anchor: 3 })
-        )),
-        "and drawn"
-    );
 }
 
 /// A fork is armed over the whole scope it snapshotted, sealing parent
@@ -501,10 +493,12 @@ fn resumed_agent_adds_only_the_fresh_shell_note() {
         "main",
         &RecordedModel::for_test("old-model"),
         &RecordedAccount::for_test("old-provider"),
-        0,
+        "system",
+        None,
     )
     .unwrap();
-    log.append_user("before the crash".into(), None).unwrap();
+    log.append_user("before the crash".into(), None, Voice::Human)
+        .unwrap();
     log.append_assistant(ChatMessage::assistant("saved answer"), vec![], None)
         .unwrap();
     let before = log.context().rendered();
@@ -550,72 +544,43 @@ fn resumed_agent_adds_only_the_fresh_shell_note() {
     )));
 }
 
-/// The rotation swaps the segment behind the recorder, never the
-/// recorder itself: one handed out before the clear, and the bus coupled
-/// before it, both keep publishing afterwards.  Swapping the recorder
-/// instead left the frontend dark for the whole first exchange of the
-/// cleared session.
+/// `/clear` appends to the one `record.jsonl`: a recorder handed out before
+/// it, and the bus coupled before it, both keep publishing afterwards.
 #[test]
-fn clear_rotates_record_jsonl_and_shared_emitters_follow_the_new_segment() {
+fn clear_appends_to_the_one_record_and_shared_emitters_keep_publishing() {
+    use crate::record::{Forensic, Protocol, Record};
     let mut session = Avatar::for_test("system").unwrap();
     let record = session.log_dir().join("record.jsonl");
-    fs::write(record.with_file_name("record.jsonl.0"), b"reserved").unwrap();
     let (tx, rx) = crate::bus::channel();
     session.couple(&Emitter::new(tx, session.agent.id));
     let recorder = session.recorder();
 
-    session.clear().expect("clear rotation");
+    session.clear().expect("clear");
 
-    let rotated_record = record.with_file_name("record.jsonl.1");
-    assert!(rotated_record.is_file());
-    assert!(record.is_file());
-    assert!(
-        fs::read(record.with_file_name("record.jsonl.0"))
-            .unwrap()
-            .starts_with(b"reserved")
-    );
-
+    assert!(!record.with_file_name("record.jsonl.0").exists());
     let _recorded = recorder
-        .emit(crate::record::Display::Prompt {
+        .emit(Forensic::SystemNote {
             text: "after the clear".into(),
-            turn: Some(1),
         })
         .expect("the pre-clear recorder still appends");
 
-    let current_records = crate::record::read_records(&record).unwrap();
-    assert!(matches!(
-        current_records.first().expect("new session head"),
-        crate::record::Record::Forensic(crate::record::Forensic::SessionStarted { .. })
-    ));
+    let after = |r: &Record| matches!(r, Record::Forensic(Forensic::SystemNote { text }) if text == "after the clear");
+    let records = crate::record::read_records(&record).unwrap();
     assert!(
-        current_records.iter().any(|r| matches!(
-            r,
-            crate::record::Record::Display(crate::record::Display::Prompt { text, .. })
-                if text == "after the clear"
-        )),
-        "the pre-clear recorder must write into the new segment, not the rotated one"
+        records
+            .iter()
+            .any(|r| matches!(r, Record::Protocol(Protocol::Cleared))),
+        "the clear is a record of the same file"
     );
-
-    let published: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
-        .filter_map(|s| match s {
-            crate::bus::Signal::Fact(_, segment, rec) => Some((segment, rec.into_value())),
-            crate::bus::Signal::Born(..) | crate::bus::Signal::Transient(..) => None,
-        })
-        .collect();
-    assert!(
-        published.iter().any(|(_, r)| matches!(
-            r,
-            crate::record::Record::Display(crate::record::Display::Prompt { text, .. })
-                if text == "after the clear"
-        )),
-        "and the bus coupled before the clear must still see it"
-    );
+    assert!(records.iter().any(after), "and the file goes on after it");
+    let published = crate::bus::drain_records(&rx);
     assert!(
         published
             .iter()
-            .all(|&(segment, _)| segment > crate::record::Segment::placeholder()),
-        "under a new segment, which is how a mirror learns of the clear"
+            .any(|r| matches!(r, Record::Protocol(Protocol::Cleared))),
+        "the bus coupled before the clear sees it"
     );
+    assert!(published.iter().any(after), "and what follows");
 }
 
 #[test]
@@ -628,7 +593,8 @@ fn resume_seeds_child_ids_past_existing_session_directories() {
         "main",
         &RecordedModel::for_test("old-model"),
         &RecordedAccount::for_test("old-provider"),
-        0,
+        "system",
+        None,
     )
     .unwrap();
     fs::create_dir_all(sessions.join("1")).unwrap();

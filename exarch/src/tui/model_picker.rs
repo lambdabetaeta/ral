@@ -224,8 +224,8 @@ fn apply_model_switch(app: &mut App, ctx: &CommandCtx<'_>, tab: AgentId, pick: &
                 model: pick.model.clone(),
                 context_window,
                 label: identity::label(&pick.account, &available),
-                service: Some(pick.account.service.name.as_str().to_string()),
-                account: Some(pick.account.id.as_str().to_string()),
+                service: pick.account.service.name.as_str().to_string(),
+                account: pick.account.id.as_str().to_string(),
             });
     }
 }

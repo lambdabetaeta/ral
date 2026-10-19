@@ -6,7 +6,6 @@
 use crate::agent::Avatar;
 use crate::bus::{AgentOutcome, Emitter};
 use crate::record::{AgentLog, Born, Memory, Resumed, Transient};
-use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
@@ -35,13 +34,10 @@ pub(crate) fn hatch_root(
         claim,
         seat,
         session.agent.current_provider(),
-        |sessions, model, account, bytes| {
+        |sessions, model, account, system| {
             let id = crate::agent::fresh_id();
-            let mut log = AgentLog::root(sessions, id, &name, model, account, bytes)?;
-            if let Some(inherited) = inherited {
-                log.import_context(inherited).map_err(io::Error::other)?;
-            }
-            Ok((log, ()))
+            AgentLog::root(sessions, id, &name, model, account, system, inherited)
+                .map(|log| (log, ()))
         },
     )
     .map(|(root, ())| root)

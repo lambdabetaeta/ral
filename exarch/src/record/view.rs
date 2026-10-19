@@ -1,20 +1,21 @@
-//! The view fold: folds [`Display`] commits and the [`Forensic`] rows a
-//! scrollback draws into [`Blocks`] — the memo `tui` and `headless` each keep
-//! their own of, stepped by the record and read through [`BlockKind`].
+//! The view fold: folds the [`Protocol`] facts a scrollback draws, the
+//! [`Display`] commits and the [`Forensic`] rows into [`Blocks`] — the memo
+//! `tui` and `headless` each keep their own of, stepped by the record and read
+//! through [`BlockKind`].
 //!
 //! [`Block`]'s constructor is private to this module: a printer draws a
 //! block, it cannot mint one.  [`Blocks::step`] is one exhaustive match over
-//! the outer `Record`, and `Protocol` is skipped by an explicit arm — this
-//! fold carries no model-context state, so it has nothing to fold a protocol
-//! record into.
+//! the outer `Record`, matching by reference: an arm that moves no block
+//! clones nothing.
 
 use super::{
-    BlockId, Cut, Display, EditAuthority, Fold, Forensic, Recorded, Refusal, Role, Seq, Settlement,
-    Spent, TurnRow,
+    BlockId, Cut, Display, EditAuthority, Fold, Forensic, Protocol, Record, Recorded, Refusal,
+    Role, Selection, Seq, Settlement, Spent, TurnRow, Voice,
 };
 use crate::card::{Card, Change, DoneOutcome, Field, FieldVal, Mark, Role as Ink, Span};
 use crate::provider::{ProviderError, Usage};
 use ral_core::first_order::FOValue;
+use serde::{Deserialize, Serialize};
 
 /// What a [`Block`] carries: the [`Display`] commits verbatim, plus the
 /// [`Forensic`] rows this fold draws — errors, notes, nudge marks.
@@ -97,14 +98,24 @@ pub enum BlockKind {
     Rewound {
         anchor: u64,
     },
+    Cleared,
 }
 
 /// What a result told the call it answers: how much it moved, and whether
 /// the run failed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Verdict {
     pub lines: u32,
     pub failed: bool,
+}
+
+impl Verdict {
+    pub fn of(text: &str, failed: bool) -> Self {
+        Self {
+            lines: u32::try_from(text.lines().count()).unwrap_or(u32::MAX),
+            failed,
+        }
+    }
 }
 
 /// One committed block of scrollback, named by the [`Seq`] of the record that
@@ -138,7 +149,10 @@ pub enum Delta {
     /// Every block from the named one on was dropped — `None` when that block
     /// had already left the window — and a block opened at the tail.
     Rewound(Option<BlockId>),
-    /// The record moved no block: ambient totals, or a class this fold skips.
+    /// Every earlier block was dropped; the memo holds only the clear's own
+    /// marker, [`BlockKind::Cleared`].
+    Cleared,
+    /// The record moved no block: ambient totals, or a record that draws nothing.
     Quiet,
 }
 
@@ -163,11 +177,7 @@ pub struct Blocks {
     usage: Usage,
     /// The last turn's prompt size — the context gauge's numerator.
     last_input: u64,
-    /// The model in force: the one the session opened under, and then each
-    /// [`Forensic::ModelChanged`]'s.
-    model: Option<(String, String)>,
-    /// The window the provider reported for [`Self::model`], when it did.
-    context_window: Option<u64>,
+    selection: Selection,
     /// The [`Seq`] of the first block this fold ever held, remembered past
     /// eviction — the door [`Self::blocks`] no longer names once the window
     /// has moved off the session's opening block.
@@ -205,27 +215,28 @@ impl Blocks {
     /// `(model, provider)` in force — total from the session's first record,
     /// its head bookend, onward.
     pub fn model(&self) -> Option<(&str, &str)> {
-        self.model.as_ref().map(|(m, p)| (m.as_str(), p.as_str()))
+        self.selection.model()
     }
 
     /// The context window the model in force was minted with, if known.
     pub fn context_window(&self) -> Option<u64> {
-        self.context_window
+        self.selection.window()
     }
 
     /// Fold one witnessed fact in, reporting what it moved.  A record the
     /// memo has already folded moves nothing, so the same log stepped twice
     /// and stepped once are the same memo.
-    pub fn step(&mut self, record: &Recorded<super::Record>) -> Delta {
+    pub fn step(&mut self, record: &Recorded<Record>) -> Delta {
         let seq = record.locus().seq();
         if self.seen.is_some_and(|folded| seq <= folded) {
             return Delta::Quiet;
         }
         self.seen = Some(seq);
-        match record.value().clone() {
-            super::Record::Protocol(_) => Delta::Quiet,
-            super::Record::Display(d) => self.step_display(seq, d),
-            super::Record::Forensic(f) => self.step_forensic(seq, f),
+        match record.value() {
+            Record::Protocol(p) => self.step_protocol(seq, p),
+            // Every display block keeps its whole record.
+            Record::Display(d) => self.step_display(seq, d.clone()),
+            Record::Forensic(f) => self.step_forensic(seq, f),
         }
     }
 
@@ -265,25 +276,77 @@ impl Blocks {
         Delta::Opened(BlockId::new(seq))
     }
 
-    /// Attach a result's line count to the call it names — a patch record
-    /// addressed by `BlockId`.  A target this fold cannot find — evicted, or
-    /// simply never resident — is [`Delta::Quiet`] rather than a panic.
-    fn attach_result(&mut self, call: BlockId, text: &str, failed: bool) -> Delta {
-        let lines = u32::try_from(text.lines().count()).unwrap_or(u32::MAX);
+    /// Attach a verdict to the call it names — a patch record addressed by
+    /// `BlockId`.  A target this fold cannot find — evicted, or simply never
+    /// resident — is [`Delta::Quiet`] rather than a panic.
+    fn attach_verdict(&mut self, call: BlockId, verdict: Verdict) -> Delta {
         let target = call.seq();
         if let Some(block) = self.blocks.iter_mut().find(|b| b.seq == target)
-            && let BlockKind::ToolCall { verdict, .. } = &mut block.kind
+            && let BlockKind::ToolCall { verdict: slot, .. } = &mut block.kind
         {
-            *verdict = Some(Verdict { lines, failed });
+            *slot = Some(verdict);
             return Delta::Patched(call);
         }
         Delta::Quiet
     }
 
+    fn step_protocol(&mut self, seq: Seq, p: &Protocol) -> Delta {
+        match p {
+            Protocol::UserPrompt { turn, text, voice } if *voice != Voice::Harness => self.push(
+                seq,
+                BlockKind::Prompt {
+                    text: text.clone(),
+                    turn: Some(*turn),
+                },
+            ),
+            Protocol::Steering { text, voice } if *voice != Voice::Harness => self.push(
+                seq,
+                BlockKind::Prompt {
+                    text: text.clone(),
+                    turn: None,
+                },
+            ),
+            Protocol::Evicted {
+                cut,
+                by: by @ EditAuthority::Harness,
+            } => self.push(
+                seq,
+                BlockKind::Evicted {
+                    cut: cut.clone(),
+                    by: *by,
+                },
+            ),
+            Protocol::Rewound { anchor } => {
+                let from = self.rewind_at(*anchor);
+                let cut = from.map(|at| self.blocks[at].id());
+                self.blocks.truncate(from.unwrap_or(self.blocks.len()));
+                let _ = self.push(seq, BlockKind::Rewound { anchor: *anchor });
+                Delta::Rewound(cut)
+            }
+            Protocol::Cleared => {
+                self.blocks.clear();
+                self.origin = None;
+                self.last_input = 0;
+                let _ = self.push(seq, BlockKind::Cleared);
+                Delta::Cleared
+            }
+            Protocol::Evicted {
+                by: EditAuthority::Model,
+                ..
+            }
+            | Protocol::UserPrompt { .. }
+            | Protocol::Steering { .. }
+            | Protocol::System { .. }
+            | Protocol::Import { .. }
+            | Protocol::Inherited { .. }
+            | Protocol::AssistantMessage { .. }
+            | Protocol::ToolResults { .. } => Delta::Quiet,
+        }
+    }
+
     fn step_display(&mut self, seq: Seq, d: Display) -> Delta {
         match d {
             Display::Thinking { text } => self.push(seq, BlockKind::Thinking { text }),
-            Display::Prompt { text, turn } => self.push(seq, BlockKind::Prompt { text, turn }),
             Display::Answer { text } => self.push(seq, BlockKind::Answer { text }),
             Display::ToolCall { tool, cmd, summary } => self.push(
                 seq,
@@ -308,7 +371,7 @@ impl Blocks {
                     failed,
                 },
             ),
-            Display::Result { text, failed, call } => self.attach_result(call, &text, failed),
+            Display::Verdict { call, verdict } => self.attach_verdict(call, verdict),
             Display::SubagentDone {
                 name,
                 outcome,
@@ -328,30 +391,27 @@ impl Blocks {
                 self.push(seq, BlockKind::Done { id, cmd, outcome })
             }
             Display::Context { turns } => self.push(seq, BlockKind::Context { turns }),
-            Display::Turn { id } => self.push(seq, BlockKind::Turn { id }),
-            Display::Evicted { cut, by } => self.push(seq, BlockKind::Evicted { cut, by }),
-            Display::Rewound { anchor } => {
-                let from = self.rewind_at(anchor);
-                let cut = from.map(|at| self.blocks[at].id());
-                self.blocks.truncate(from.unwrap_or(self.blocks.len()));
-                let _ = self.push(seq, BlockKind::Rewound { anchor });
-                Delta::Rewound(cut)
-            }
         }
     }
 
-    fn step_forensic(&mut self, seq: Seq, f: Forensic) -> Delta {
+    fn step_forensic(&mut self, seq: Seq, f: &Forensic) -> Delta {
         match f {
             Forensic::UsageDelta { usage } => {
                 if let Some(input) = usage.measured_input() {
                     self.last_input = input;
                 }
-                self.usage += usage;
+                self.usage += *usage;
                 Delta::Quiet
             }
             Forensic::Cancelled => self.push(seq, BlockKind::Cancelled),
-            Forensic::Error { text } => self.push(seq, BlockKind::Error { text }),
-            Forensic::Nudge { cause, spent } => self.push(seq, BlockKind::Nudge { cause, spent }),
+            Forensic::Error { text } => self.push(seq, BlockKind::Error { text: text.clone() }),
+            Forensic::Nudge { cause, spent } => self.push(
+                seq,
+                BlockKind::Nudge {
+                    cause: cause.clone(),
+                    spent: *spent,
+                },
+            ),
             // One record, two blocks: a stall wears the chrome that says the
             // exchange survived it, and draws its cause rather than the
             // truncation wrapping it.
@@ -362,14 +422,33 @@ impl Blocks {
                         error: cause.clone(),
                     },
                 ),
-                None => self.push(seq, BlockKind::ProviderError { error }),
+                None => self.push(
+                    seq,
+                    BlockKind::ProviderError {
+                        error: error.clone(),
+                    },
+                ),
             },
-            Forensic::SystemNote { text } => self.push(seq, BlockKind::SystemNote { text }),
-            Forensic::HarnessResult { text } => self.push(seq, BlockKind::HarnessResult { text }),
+            Forensic::SystemNote { text } => {
+                self.push(seq, BlockKind::SystemNote { text: text.clone() })
+            }
+            Forensic::HarnessResult { text } => {
+                self.push(seq, BlockKind::HarnessResult { text: text.clone() })
+            }
+            Forensic::TurnStarted { turn, .. } => self.push(seq, BlockKind::Turn { id: *turn }),
+            // A head bookend opens the session under a model exactly as a
+            // switch names one mid-session: all land in the selection and none
+            // draws a block.
+            Forensic::SessionStarted { .. }
+            | Forensic::SessionResumed { .. }
+            | Forensic::ModelChanged { .. }
+            | Forensic::WindowNarrowed { .. } => {
+                self.selection.step(f);
+                Delta::Quiet
+            }
             // The history informs a resume note; the live register follows the
             // shell boundary and is not restored — so neither is a scrollback
-            // block this fold draws.  The tail bookend and a turn's effort dial
-            // draw none either: evidence with a display twin, or with none.
+            // block this fold draws.  The tail bookend draws none either.
             // Core's housekeeping is the log's alone.
             Forensic::Pin { .. }
             | Forensic::Reap { .. }
@@ -377,37 +456,7 @@ impl Blocks {
             | Forensic::Unpin { .. }
             | Forensic::SessionEnded
             | Forensic::SessionClosed
-            | Forensic::Retried { .. }
-            | Forensic::TurnStarted { .. } => Delta::Quiet,
-            // A head bookend opens the session under a model exactly as a
-            // switch names one mid-session, so all three land in the memo and
-            // none of them draws a block.
-            Forensic::SessionStarted {
-                model,
-                label,
-                context_window,
-                ..
-            }
-            | Forensic::SessionResumed {
-                model,
-                label,
-                context_window,
-                ..
-            }
-            | Forensic::ModelChanged {
-                model,
-                label,
-                context_window,
-                ..
-            } => {
-                self.model = Some((model, label));
-                self.context_window = context_window;
-                Delta::Quiet
-            }
-            Forensic::WindowNarrowed { context_window } => {
-                self.context_window = Some(context_window);
-                Delta::Quiet
-            }
+            | Forensic::Retried { .. } => Delta::Quiet,
         }
     }
 }
@@ -445,15 +494,14 @@ impl Blocks {
     }
 }
 
-/// The view fold: [`Fold::step`] over [`Display`] and [`Forensic`], skipping
-/// [`super::Protocol`] by an explicit arm rather than a wildcard.
+/// The view fold: [`Fold::step`] over every class of [`Record`].
 pub struct View;
 
 impl Fold for View {
     type Memo = Blocks;
 
-    fn step(memo: &mut Blocks, record: &Recorded<super::Record>) -> Result<(), Refusal> {
-        let _ = memo.step(record);
+    fn step(memo: &mut Blocks, record: Recorded<Record>) -> Result<(), Refusal> {
+        let _ = memo.step(&record);
         Ok(())
     }
 }

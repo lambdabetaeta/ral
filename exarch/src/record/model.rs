@@ -14,8 +14,13 @@
 //! through untouched: this fold projects the protocol subsequence alone.
 //!
 //! No recorded protocol record is ever discarded: a turn that leaves the
-//! context keeps the address its records were measured at, and `read_at`
-//! reads them back through it one record at a time.
+//! context, by eviction or by withdrawal, keeps the address its records were
+//! measured at, and `read_at` reads them back through it one record at a time.
+//! Rows are never removed, so ids stay monotone down the lineage.
+//!
+//! A link ([`Protocol::Inherited`]) is the one record whose meaning lies in
+//! another file: its step reads the parent's records through digest-checked
+//! pointers, and that file only ever grows.
 
 mod fold;
 mod render;
@@ -29,9 +34,10 @@ pub use resume::resume;
 use super::{Fold, Locus, Protocol, Record, Recorded, Refusal, Role, TurnKind};
 use genai::chat::{ChatMessage, ChatRole, ContentPart, ToolResponse};
 use serde::{Deserialize, Serialize};
+use state::State;
 pub(super) use state::validate_result_ids;
-use state::{State, admissible_prefix};
 use std::path::PathBuf;
+use std::sync::Arc;
 use table::Table;
 
 /// Marker type implementing [`Fold`] for the model projection; carries no
@@ -41,10 +47,10 @@ pub struct Model;
 impl Fold for Model {
     type Memo = Context;
 
-    fn step(memo: &mut Context, record: &Recorded<Record>) -> Result<(), Refusal> {
-        match record.value() {
-            Record::Protocol(p) => memo.step(Recorded::new(record.locus().clone(), p.clone())),
-            Record::Display(_) | Record::Forensic(_) => Ok(()),
+    fn step(memo: &mut Context, record: Recorded<Record>) -> Result<(), Refusal> {
+        match record.into_parts() {
+            (locus, Record::Protocol(p)) => memo.step(Recorded::new(locus, p)),
+            (_, Record::Display(_) | Record::Forensic(_)) => Ok(()),
         }
     }
 }
@@ -67,6 +73,9 @@ pub struct ContextSurvey {
 pub struct Context {
     table: Table,
     state: State,
+    /// The prompt every request goes out under; empty until the first
+    /// [`Protocol::System`].
+    system: Arc<str>,
     /// Protocol records folded.
     len: usize,
     /// The index of the last context edit — a token measure taken at or
@@ -93,14 +102,15 @@ struct Turn {
 /// Where one turn's records are.
 enum Body {
     /// In the context. `origin` is `Some` for a turn first recorded in an
-    /// ancestor's file: `records` are what the seed re-recorded here and what
-    /// the model is sent; the transcript's copy is at `origin`.
+    /// ancestor's file: `records` are the admissible prefix read back from it,
+    /// which the model is sent; the transcript's copy is at `origin`.
     Here {
         records: Vec<Recorded<Protocol>>,
         origin: Option<Pointer>,
     },
-    /// Departed. `cut` indexes [`Context::notes`].
-    There { at: Pointer, cut: usize },
+    /// Departed. `Some(cut)` indexes [`Context::notes`]: an eviction, drawn in
+    /// a marker. `None` is a withdrawal, which is never drawn.
+    There { at: Pointer, cut: Option<usize> },
 }
 
 /// Where a turn's records lie: a file, and their loci in it.
@@ -133,6 +143,8 @@ pub enum Held {
     Evicted {
         cut: usize,
     },
+    /// Taken out by `/clear` or `/rewind`: no marker, no note.
+    Withdrawn,
 }
 
 impl Held {
@@ -141,6 +153,7 @@ impl Held {
         match self {
             Self::Resident => "resident",
             Self::Evicted { .. } => "evicted",
+            Self::Withdrawn => "withdrawn",
         }
     }
 }
@@ -171,7 +184,8 @@ impl Turn {
     fn held(&self) -> Held {
         match &self.body {
             Body::Here { .. } => Held::Resident,
-            Body::There { cut, .. } => Held::Evicted { cut: *cut },
+            Body::There { cut: Some(cut), .. } => Held::Evicted { cut: *cut },
+            Body::There { cut: None, .. } => Held::Withdrawn,
         }
     }
 
@@ -183,6 +197,10 @@ impl Turn {
 
     fn is_resident(&self) -> bool {
         matches!(self.body, Body::Here { .. })
+    }
+
+    fn is_withdrawn(&self) -> bool {
+        matches!(self.body, Body::There { cut: None, .. })
     }
 
     /// The records this turn holds in memory; empty once it has left.
@@ -205,8 +223,7 @@ fn message_bytes(messages: &[ChatMessage]) -> usize {
 fn resident_messages(records: &[Recorded<Protocol>]) -> Vec<ChatMessage> {
     records
         .iter()
-        .map(|recorded| recorded.value().clone())
-        .flat_map(into_chat_messages)
+        .flat_map(|recorded| chat_messages(recorded.value()))
         .collect()
 }
 
@@ -218,9 +235,16 @@ impl Context {
         Self {
             table: Table::new(source),
             state: State::default(),
+            system: Arc::default(),
             len: 0,
             newest_edit: None,
         }
+    }
+
+    /// The prompt every request goes out under.
+    #[must_use]
+    pub fn system(&self) -> &Arc<str> {
+        &self.system
     }
 
     /// The model's own line to its future self, one slot per eviction.
@@ -356,34 +380,6 @@ impl Context {
         self.newest_edit.is_some_and(|index| index >= measured_at)
     }
 
-    /// The material a `mnemon` child's seed carries, turn by turn under this
-    /// log's own ids: the one other place ownership genuinely transfers,
-    /// beside the wire door.
-    ///
-    /// The last turn seeds through [`admissible_prefix`], cut to the longest
-    /// run that owes no tool result — a batch in flight and a dangling edit
-    /// left after it both fall out of that same rule.
-    pub(crate) fn inherited_seed(&self) -> Vec<(u64, Vec<ChatMessage>)> {
-        let resident: Vec<&Turn> = self.resident().collect();
-        let Some((last, held)) = resident.split_last() else {
-            return Vec::new();
-        };
-        let mut seed: Vec<(u64, Vec<ChatMessage>)> = held
-            .iter()
-            .map(|turn| (turn.id, resident_messages(turn.records())))
-            .collect();
-        let records: Vec<&Protocol> = last.records().iter().map(Recorded::value).collect();
-        seed.push((
-            last.id,
-            admissible_prefix(&records)
-                .iter()
-                .map(|record| (*record).clone())
-                .flat_map(into_chat_messages)
-                .collect(),
-        ));
-        seed
-    }
-
     /// One row per resident turn, at the weight the fold summed, beside the
     /// truth about what is sent: `total_bytes` is [`Self::history_bytes`],
     /// not a second opinion on it, so each marker's weight is counted once
@@ -494,21 +490,23 @@ fn not_recorded_refusal_turn(turn: u64, reach: Option<u64>) -> String {
     }
 }
 
-fn into_chat_messages(protocol: Protocol) -> Vec<ChatMessage> {
+fn chat_messages(protocol: &Protocol) -> Vec<ChatMessage> {
     match protocol {
-        Protocol::UserPrompt { text, .. } | Protocol::Steering { text } => {
-            vec![ChatMessage::user(text)]
+        Protocol::UserPrompt { text, .. } | Protocol::Steering { text, .. } => {
+            vec![ChatMessage::user(text.clone())]
         }
-        Protocol::ContextMessage { message, .. } | Protocol::AssistantMessage { message, .. } => {
-            vec![message]
+        Protocol::Import { message, .. } | Protocol::AssistantMessage { message, .. } => {
+            vec![message.clone()]
         }
         Protocol::ToolResults { results } => results
-            .into_iter()
+            .iter()
             .map(|r| ChatMessage::from(ToolResponse::new(&r.id, &r.content)))
             .collect(),
-        Protocol::Evicted { .. } | Protocol::Rewound { .. } | Protocol::Inherited { .. } => {
-            Vec::new()
-        }
+        Protocol::System { .. }
+        | Protocol::Evicted { .. }
+        | Protocol::Rewound { .. }
+        | Protocol::Cleared
+        | Protocol::Inherited { .. } => Vec::new(),
     }
 }
 

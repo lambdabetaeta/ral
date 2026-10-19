@@ -148,7 +148,6 @@ fn a_pin_never_splits_a_coalesced_observation_run() {
         seq += 1;
         app.fact(
             root.id,
-            Segment::placeholder(),
             &Recorded::new(Locus::placeholder(Seq::new(seq)), Record::Display(display)),
         );
     };
@@ -223,7 +222,6 @@ fn a_dying_tab_admits_no_straggler() {
     let locus = Locus::placeholder(Seq::new(1));
     app.fact(
         helper,
-        Segment::placeholder(),
         &Recorded::new(
             locus,
             Record::Display(Display::Answer {
@@ -242,7 +240,6 @@ fn a_dying_tab_admits_no_straggler() {
     let locus = Locus::placeholder(Seq::new(2));
     app.fact(
         helper,
-        Segment::placeholder(),
         &Recorded::new(
             locus,
             Record::Display(Display::Answer {
@@ -272,7 +269,7 @@ fn a_dying_tab_admits_no_straggler() {
 #[test]
 fn a_clear_wipes_the_pins_and_the_state() {
     use crate::bus::Signal;
-    use crate::record::{Display, Emitter as Recorder};
+    use crate::record::{Emitter as Recorder, Protocol, Voice};
 
     let dir = tempfile::tempdir().expect("a temp dir");
     let recorder = Recorder::create(&dir.path().join("record.jsonl")).expect("a record log");
@@ -295,16 +292,18 @@ fn a_clear_wipes_the_pins_and_the_state() {
         mpsc::channel().0,
     );
     let hear = |app: &mut App| {
-        while let Ok(Signal::Fact(_, segment, rec)) = rx.try_recv() {
-            app.fact(root.id, segment, &rec);
+        while let Ok(Signal::Fact(_, rec)) = rx.try_recv() {
+            app.fact(root.id, &rec);
         }
     };
-    let prompt = |text: &str| Display::Prompt {
-        text: text.into(),
-        turn: None,
-    };
 
-    let _recorded = recorder.emit(prompt("before")).expect("the log appends");
+    let _recorded = recorder
+        .emit(Protocol::UserPrompt {
+            turn: 1,
+            text: "before".into(),
+            voice: Voice::Human,
+        })
+        .expect("the log appends");
     hear(&mut app);
     app.transient(root.id, Transient::State(AgentState::Evaluating), &rx);
     app.transient(
@@ -318,10 +317,7 @@ fn a_clear_wipes_the_pins_and_the_state() {
     let status = app.tabs.status(root.id).expect("root has a status");
     assert!(status.state.state == AgentState::Evaluating && !status.pins().is_empty());
 
-    recorder
-        .rotate(Some(&dir.path().join("record.1.jsonl")))
-        .expect("the log rotates");
-    let _recorded = recorder.emit(prompt("after")).expect("the log appends");
+    let _recorded = recorder.emit(Protocol::Cleared).expect("the log appends");
     hear(&mut app);
 
     let status = app.tabs.status(root.id).expect("root has a status");
@@ -336,7 +332,7 @@ fn a_clear_wipes_the_pins_and_the_state() {
 #[test]
 fn rewind_acts_on_the_tab_it_was_opened_on() {
     use crate::bus::{Inbox, Next, Rewrite};
-    use crate::record::{Display, Locus, Seq};
+    use crate::record::{Locus, Protocol, Seq, Voice};
 
     let fleet = Fleet::for_test();
     let inbox = Inbox::new();
@@ -361,12 +357,12 @@ fn rewind_acts_on_the_tab_it_was_opened_on() {
     born(&mut app, child, "child", root.id);
     app.fact(
         root.id,
-        Segment::placeholder(),
         &Recorded::new(
             Locus::placeholder(Seq::new(1)),
-            Record::Display(Display::Prompt {
+            Record::Protocol(Protocol::UserPrompt {
+                turn: 1,
                 text: "hello".into(),
-                turn: Some(1),
+                voice: Voice::Human,
             }),
         ),
     );

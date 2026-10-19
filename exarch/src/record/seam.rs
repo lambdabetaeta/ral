@@ -10,7 +10,7 @@
 //! sequence number.
 
 use super::log::Log;
-use super::{Class, Cursor, Publish, Record, Recorded, Transient};
+use super::{Cursor, Publish, Record, Recorded, Transient};
 use std::fmt;
 use std::io;
 use std::path::Path;
@@ -61,18 +61,6 @@ impl Emitter {
         }
     }
 
-    /// Point this seam at a fresh segment — `Some(path)` a new file, `None`
-    /// the store-less seam tests build.  `/clear` rotates the file, not
-    /// the seam, so the attached bus and every clone already handed out follow
-    /// the new segment rather than going quiet on the old one.
-    ///
-    /// # Errors
-    /// Returns `Err` if the new segment cannot be opened; the old one stays
-    /// live.
-    pub fn rotate(&self, path: Option<&Path>) -> io::Result<()> {
-        self.log.rotate(path)
-    }
-
     /// Point this session's log at a [`Publish`]er; facts append and
     /// publish under one lock from then on.  Idempotent, and re-attaching
     /// after a per-exchange bus died is the ordinary path back on air.
@@ -80,32 +68,35 @@ impl Emitter {
         self.log.attach(sink);
     }
 
-    /// A mirror's catch-up: where `after` stands in the current segment,
-    /// and the records past it.  See [`super::log::Log::since`].
+    /// A mirror's catch-up: where `after` stands, and the records past it.
+    /// See [`super::log::Log::since`].
     ///
     /// # Errors
     /// The log will not open.
     pub(crate) fn since(
         &self,
         after: Option<Cursor>,
-    ) -> io::Result<(Cursor, impl Iterator<Item = io::Result<Recorded<Record>>> + use<>)> {
+    ) -> io::Result<(
+        Cursor,
+        impl Iterator<Item = io::Result<Recorded<Record>>> + use<>,
+    )> {
         self.log.since(after)
     }
 
-    /// Append `value` and publish it, in that order, under one lock.
+    /// Append `record` and publish it, in that order, under one lock.
     ///
     /// # Errors
     /// Propagates a failed append: a write to the one authoritative log is a
     /// session error, never a shrug.
-    pub fn emit<C: Class>(&self, value: C) -> io::Result<Recorded<C>> {
-        let stamp = self.log.append(value.clone().into())?;
-        Ok(Recorded::new(stamp, value))
+    pub fn emit(&self, record: impl Into<Record>) -> io::Result<Recorded<Record>> {
+        let record = record.into();
+        Ok(Recorded::new(self.log.append(&record)?, record))
     }
 
     /// [`Self::emit`] where a failed append has nowhere to go but
     /// [`Self::report_fault`].
-    pub fn emit_or_report<C: Class>(&self, value: C) {
-        if let Err(error) = self.emit(value) {
+    pub fn emit_or_report(&self, record: impl Into<Record>) {
+        if let Err(error) = self.emit(record) {
             self.report_fault(&error);
         }
     }

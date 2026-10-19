@@ -178,7 +178,7 @@ pub(super) fn draw(app: &mut App, term: &mut Term, bureau: &Bureau) -> io::Resul
         }
     }
     // The screen flatten — one of the two seams where a margin rejoins its
-    // content, the other being `user.log`.
+    // content, the other being the export.
     let lines: Vec<Line<'static>> = rows.into_iter().map(Row::into_line).collect();
 
     app.prompt_state.style_prompt(app.is_steerable());

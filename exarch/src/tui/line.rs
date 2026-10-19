@@ -48,7 +48,7 @@ pub(super) fn thinking_header(
 // ── Public line builders ─────────────────────────────────────────────────────
 
 /// Turn separator: one blank line.  The number itself reaches only
-/// `events.jsonl` / `user.log`; on screen the boundary is whitespace alone.
+/// the export; on screen the boundary is whitespace alone.
 pub(super) fn turn() -> Vec<Line<'static>> {
     vec![Line::default()]
 }

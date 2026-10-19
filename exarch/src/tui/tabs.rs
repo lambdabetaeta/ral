@@ -2,8 +2,7 @@
 //! in id order.  [`super::App`]'s `tabs` field.
 
 use std::collections::HashSet;
-use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -79,8 +78,8 @@ enum Life {
     Live(Scrollback),
     /// Frozen since the instant: still drawn, but no further event belongs in it.
     Lingering(Scrollback, Instant),
-    /// Out of the bar: its whole transcript is in `user.log`, and only the path remains.
-    Gone(PathBuf),
+    /// Out of the bar: only its record remains, under [`Tab::log_dir`].
+    Gone,
 }
 
 /// One session's view, and the frontend's whole handle on the agent behind it.
@@ -95,8 +94,9 @@ pub(super) struct Tab {
     /// ends.  `None` for a root.
     parent: Option<AgentId>,
     status: Status,
-    /// Retained past death and past bar expiry, so [`Tabs::flush_logs`] can
-    /// still name this session's `user.log`.
+    /// The session's directory, kept past death and bar expiry so
+    /// [`Tabs::log_dirs`] can still name it.
+    log_dir: PathBuf,
     life: Life,
 }
 
@@ -114,10 +114,9 @@ impl Tab {
             name: born.name.clone(),
             parent: born.parent,
             status: Status::new(),
+            log_dir: born.log_dir.clone(),
             life: Life::Live(Scrollback::new(
-                born.log_dir.join("user.log"),
                 slot,
-                born.resumed.is_some(),
                 thinking,
                 born.recorder.clone(),
                 opening,
@@ -127,7 +126,7 @@ impl Tab {
 
     /// Whether the bar still shows this row.
     fn in_bar(&self) -> bool {
-        !matches!(self.life, Life::Gone(_))
+        !matches!(self.life, Life::Gone)
     }
 
     /// Frozen: still drawing its final frame, but no further event belongs in
@@ -144,20 +143,20 @@ impl Tab {
     fn scrollback(&self) -> Option<&Scrollback> {
         match &self.life {
             Life::Live(sb) | Life::Lingering(sb, _) => Some(sb),
-            Life::Gone(_) => None,
+            Life::Gone => None,
         }
     }
 
     fn scrollback_mut(&mut self) -> Option<&mut Scrollback> {
         match &mut self.life {
             Life::Live(sb) | Life::Lingering(sb, _) => Some(sb),
-            Life::Gone(_) => None,
+            Life::Gone => None,
         }
     }
 
     /// Freeze a live tab as of `at`; a tab already frozen or gone keeps its life.
     fn retire(&mut self, at: Instant) {
-        self.life = match std::mem::replace(&mut self.life, Life::Gone(PathBuf::new())) {
+        self.life = match std::mem::replace(&mut self.life, Life::Gone) {
             Life::Live(sb) => Life::Lingering(sb, at),
             other => other,
         };
@@ -202,7 +201,7 @@ pub(super) struct TabRow<'a> {
 /// a tab that aged out — to the first tab in the bar.
 #[allow(clippy::struct_field_names)] // `tabs` is the natural name for the tab list.
 pub(super) struct Tabs {
-    /// Id order: the one order [`Self::flush_logs`] lists paths in, and the
+    /// Id order: the one order [`Self::log_dirs`] lists paths in, and the
     /// matrix's row order, across runs.
     tabs: Vec<Tab>,
     focus: AgentId,
@@ -311,18 +310,18 @@ impl Tabs {
     }
 
     /// Age lingering tabs out past [`LINGER`], once per frame.  An expired view
-    /// goes to its log path rather than being dropped: the tab must survive for
-    /// the `/resources` dead-view count and [`Self::flush_logs`]'s listing.
+    /// is dropped but its tab is not: the tab must survive for the
+    /// `/resources` dead-view count and [`Self::log_dirs`]'s listing.
     /// Returns whether a tab went — the cue to repaint.
     pub fn tick(&mut self) -> bool {
         let now = Instant::now();
         let mut expired = Vec::new();
         for tab in &mut self.tabs {
-            tab.life = match std::mem::replace(&mut tab.life, Life::Gone(PathBuf::new())) {
-                Life::Lingering(sb, at) if now.duration_since(at) >= LINGER => {
+            tab.life = match std::mem::replace(&mut tab.life, Life::Gone) {
+                Life::Lingering(_, at) if now.duration_since(at) >= LINGER => {
                     expired.push(tab.id);
                     tab.status = Status::new();
-                    Life::Gone(sb.into_log())
+                    Life::Gone
                 }
                 other => other,
             };
@@ -335,9 +334,8 @@ impl Tabs {
         !expired.is_empty()
     }
 
-    /// Open a tab for an agent the stream has just announced, `append`ing to
-    /// its `user.log` when it is resumed.  Once per agent: a birth is sent by
-    /// minting the agent's one emitter.
+    /// Open a tab for an agent the stream has just announced.  Once per agent:
+    /// a birth is sent by minting the agent's one emitter.
     pub(super) fn born(&mut self, id: AgentId, born: &Born, opening: Option<Card>) {
         let at = self.tabs.partition_point(|t| t.id < id);
         let tab = Tab::new(id, born, self.tabs.len(), self.thinking, opening);
@@ -428,17 +426,14 @@ impl Tabs {
         self.scrollback(self.focused())
     }
 
-    /// Flush every scrollback — live or lingering — to its session's `user.log`;
-    /// a gone tab's was written on its way out.  Returns the paths in id order,
-    /// stable across runs.
-    pub(super) fn flush_logs(&mut self) -> io::Result<Vec<PathBuf>> {
-        self.tabs
-            .iter_mut()
-            .map(|t| match &mut t.life {
-                Life::Live(sb) | Life::Lingering(sb, _) => Ok(sb.flush_log()?.to_path_buf()),
-                Life::Gone(path) => Ok(path.clone()),
-            })
-            .collect()
+    /// Every session's directory, in id order, stable across runs.
+    pub(super) fn log_dirs(&self) -> Vec<PathBuf> {
+        self.tabs.iter().map(|t| t.log_dir.clone()).collect()
+    }
+
+    /// The focused session's directory, where its `record.jsonl` lives.
+    pub(super) fn focused_log_dir(&self) -> &Path {
+        &self.focused_tab().log_dir
     }
 
     /// Rows in the bar — not the tab count, which outlives them.

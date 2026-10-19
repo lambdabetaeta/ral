@@ -135,37 +135,20 @@ impl HostServices {
     /// rail row always, the fragment only when `refused` is false, so a verb
     /// cannot draw one and miss the other.
     fn commit_act(&self, act: DeskAct, subject: Option<&str>, payload: String, refused: bool) {
-        self.record_display(crate::record::Display::HarnessCall {
-            verb: act.verb().to_string(),
-            subject: subject.map(str::to_string),
-            payload,
-            failed: refused,
-        });
+        self.log
+            .borrow()
+            .record_emitter()
+            .emit_or_report(crate::record::Display::HarnessCall {
+                verb: act.verb().to_string(),
+                subject: subject.map(str::to_string),
+                payload,
+                failed: refused,
+            });
         if !refused {
             self.acts
                 .0
                 .borrow_mut()
                 .push((act, subject.map(str::to_string)));
-        }
-    }
-
-    /// Author one display commit through the session's record seam.  A desk
-    /// handler runs while the attend thread is parked in `run_shell`, so the
-    /// log cell is free to lend the seam; the append failure a handler cannot
-    /// propagate surfaces as its own error row instead of a shrug.
-    fn record_display(&self, commit: crate::record::Display) {
-        let recorder = self.log.borrow().record_emitter();
-        if let Err(error) = recorder.emit(commit) {
-            recorder.report_fault(&error);
-        }
-    }
-
-    /// [`Self::record_display`] for the forensic class — the harness-result
-    /// breadcrumbs that pair with an act's row.
-    fn record_forensic(&self, fact: crate::record::Forensic) {
-        let recorder = self.log.borrow().record_emitter();
-        if let Err(error) = recorder.emit(fact) {
-            recorder.report_fault(&error);
         }
     }
 }

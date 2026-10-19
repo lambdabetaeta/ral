@@ -62,8 +62,6 @@ pub struct Agent {
     pub(crate) name: String,
     pub(crate) log_dir: PathBuf,
     started: Instant,
-    /// `Arc<str>`: a fork's per-turn read must not re-copy the template.
-    pub(crate) system: Arc<str>,
     pub(crate) caps: ral_core::capability::GrantStack,
     pub(crate) role: Role,
     /// Weak: a child that fails to upgrade has settled, and is pruned.
@@ -148,7 +146,6 @@ pub(crate) struct Birth {
     pub name: String,
     pub log_dir: PathBuf,
     pub started: Instant,
-    pub system: Arc<str>,
     pub caps: ral_core::capability::GrantStack,
     pub role: Role,
     pub fuel: u32,
@@ -239,7 +236,6 @@ impl Agent {
             name,
             log_dir,
             started,
-            system,
             caps,
             role,
             fuel,
@@ -253,7 +249,6 @@ impl Agent {
             name,
             log_dir,
             started,
-            system,
             caps,
             role,
             children: Mutex::new(Vec::new()),

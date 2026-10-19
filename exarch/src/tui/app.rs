@@ -21,15 +21,13 @@ use crate::agent::fleet::Fleet;
 use crate::bus::{BusReceiver, Post, UsageMeter};
 use crate::card::Card;
 use crate::provider::{Bureau, Usage};
-use crate::record::{AgentId, AgentState, Born, Record, Recorded, Resumed, Segment, Transient};
+use crate::record::{AgentId, AgentState, Born, Record, Recorded, Resumed, Transient};
 use clipboard::Clipboard;
 
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use std::{
-    io::{self},
-    path::PathBuf,
     sync::{Arc, mpsc},
     time::Duration,
 };
@@ -296,11 +294,11 @@ impl App {
     /// over is a `/clear`, which retires the agent's descendants' tabs.  A
     /// tab in the linger window is frozen: it still renders its final frame
     /// and ages out, but no further event belongs in it.
-    pub fn fact(&mut self, id: AgentId, segment: Segment, rec: &Recorded<Record>) {
+    pub fn fact(&mut self, id: AgentId, rec: &Recorded<Record>) {
         if self.tabs.lingering(id) {
             return;
         }
-        if self.with_scrollback(id, |sb| sb.fact(segment, rec)) == Some(true) {
+        if self.with_scrollback(id, |sb| sb.fact(rec)) == Some(true) {
             if let Some(status) = self.tabs.status_mut(id) {
                 *status = Status::new();
             }
@@ -652,16 +650,6 @@ impl App {
             .focused_scrollback()
             .map(Scrollback::latest_reply_md)
             .unwrap_or_default()
-    }
-
-    /// Flush the focused tab's `user.log` and return its path for `/export`.
-    pub(in crate::tui) fn flush_focused_log(&mut self) -> io::Result<PathBuf> {
-        let focused = self.tabs.focused();
-        let sb = self
-            .tabs
-            .scrollback_mut(focused)
-            .expect("focused tab always has a scrollback");
-        Ok(sb.flush_log()?.to_path_buf())
     }
 }
 

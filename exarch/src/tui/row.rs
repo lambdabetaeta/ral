@@ -6,8 +6,8 @@
 //! so no amount of span coalescing or restyling can smuggle chrome into a
 //! clipboard.  Rail marks are set in one place — `Block::railed`, through
 //! [`Row::rail`] — and rows are flattened by [`Row::into_line`] at exactly two
-//! seams: the screen in [`super::render`] and `user.log` in
-//! `super::scrollback`.
+//! seams: the screen in [`super::render`] and the export in
+//! `super::export`.
 
 use super::palette::{GHOST, RAIL_W, content_w};
 use super::text::{self, is_blank};
@@ -133,9 +133,9 @@ impl Row {
         )
     }
 
-    /// Margin then content: the one flatten, for the screen and for `user.log`.
+    /// Margin then content: the one flatten, for the screen and for the export.
     /// A row with nothing in either flattens to nothing rather than to a margin
-    /// of trailing spaces — invisible on screen, and `user.log` stays clean.
+    /// of trailing spaces — invisible on screen, and an export stays clean.
     pub(super) fn into_line(self) -> Line<'static> {
         if self.is_blank() && self.gutter.content.trim().is_empty() {
             return Line::default();

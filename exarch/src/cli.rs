@@ -204,6 +204,18 @@ pub enum Command {
     },
     /// List the `ChatGPT` accounts that are signed in to Exarch.
     Accounts,
+    /// Render a session's transcript as text.
+    ///
+    /// Give a session directory or its `record.jsonl`. Exarch writes the
+    /// transcript as the scrollback showed it, to standard output unless you
+    /// use `--out`.
+    Export {
+        /// A session directory, or the `record.jsonl` inside one.
+        session: std::path::PathBuf,
+        /// Write the transcript to this file instead of standard output.
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+    },
 }
 
 /// Resolve `--prompt/--file` into an optional initial prompt.

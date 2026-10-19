@@ -139,7 +139,7 @@ fn steering_typed_during_a_tool_batch_is_committed_between_results_and_reply() {
     );
     let (tx, rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.agent.id);
-    match session.deliberate(&provider, Some("go".into()), None, &emit) {
+    match session.deliberate(&provider, Some(("go".into(), Voice::Human)), None, &emit) {
         Ok(Outcome::Complete) => {}
         other => panic!("the steering prompt must be admitted mid-exchange, got {other:?}"),
     }
@@ -166,10 +166,12 @@ fn steering_typed_during_a_tool_batch_is_committed_between_results_and_reply() {
             .into_iter()
             .any(|record| matches!(
                 record,
-                crate::record::Record::Display(crate::record::Display::Prompt { text, .. })
-                    if text.contains("and report")
+                crate::record::Record::Protocol(crate::record::Protocol::Steering {
+                    text,
+                    voice: Voice::Human,
+                }) if text.contains("and report")
             )),
-        "the arrival must be announced as it enters context"
+        "the arrival must be recorded as human steering as it enters context"
     );
     assert!(session.is_ready());
 }
@@ -193,7 +195,7 @@ fn pressure_rides_the_steering_channel_once_per_excursion() {
             usize::midpoint(PRESSURE_THRESHOLD_FALLBACK, EVICT_THRESHOLD) / (EXCHANGES * 2),
         );
         for _ in 0..EXCHANGES {
-            log.append_user(bulk.clone(), None).unwrap();
+            log.append_user(bulk.clone(), None, Voice::Human).unwrap();
             log.append_assistant(
                 genai::chat::ChatMessage::assistant(bulk.clone()),
                 vec![],
@@ -217,7 +219,7 @@ fn pressure_rides_the_steering_channel_once_per_excursion() {
     );
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.agent.id);
-    match session.deliberate(&provider, Some("go".into()), None, &emit) {
+    match session.deliberate(&provider, Some(("go".into(), Voice::Human)), None, &emit) {
         Ok(Outcome::Complete) => {}
         other => panic!("the run must reach its reply, got {other:?}"),
     }
@@ -292,7 +294,7 @@ fn an_overflow_narrows_the_window_evicts_and_retries_once() {
         } else {
             "x".repeat(1000)
         };
-        log.append_user(prompt, None).unwrap();
+        log.append_user(prompt, None, Voice::Human).unwrap();
         log.append_assistant(
             genai::chat::ChatMessage::assistant("y".repeat(1000)),
             vec![],
@@ -316,7 +318,7 @@ fn an_overflow_narrows_the_window_evicts_and_retries_once() {
     );
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.agent.id);
-    let outcome = session.deliberate(&provider, Some("go".into()), None, &emit);
+    let outcome = session.deliberate(&provider, Some(("go".into(), Voice::Human)), None, &emit);
     assert!(matches!(outcome, Ok(Outcome::Complete)), "got {outcome:?}");
     assert_eq!(provider.context_window(), Some(250_000));
     assert!(
@@ -340,7 +342,7 @@ fn a_second_overflow_ends_the_exchange_with_the_listed_window_stamped() {
         } else {
             "x".repeat(1000)
         };
-        log.append_user(prompt, None).unwrap();
+        log.append_user(prompt, None, Voice::Human).unwrap();
         log.append_assistant(
             genai::chat::ChatMessage::assistant("y".repeat(1000)),
             vec![],
@@ -364,7 +366,7 @@ fn a_second_overflow_ends_the_exchange_with_the_listed_window_stamped() {
     );
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.agent.id);
-    match session.deliberate(&provider, Some("go".into()), None, &emit) {
+    match session.deliberate(&provider, Some(("go".into(), Voice::Human)), None, &emit) {
         Err(Fault::Provider(ProviderError::Overflow { limit, listed, .. })) => {
             assert_eq!((limit, listed), (Some(250_000), Some(250_000)));
         }
@@ -377,7 +379,8 @@ fn stale_token_measure_is_unknown_until_the_next_completion() {
     let mut session = Avatar::for_test("system").unwrap();
     {
         let mut log = session.log.borrow_mut();
-        log.append_user("old context".into(), None).unwrap();
+        log.append_user("old context".into(), None, Voice::Human)
+            .unwrap();
         log.append_assistant(genai::chat::ChatMessage::assistant("answer"), vec![], None)
             .unwrap();
     }
@@ -405,7 +408,12 @@ fn stale_token_measure_is_unknown_until_the_next_completion() {
     );
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.agent.id);
-    let outcome = session.deliberate(&provider, Some("new context".into()), None, &emit);
+    let outcome = session.deliberate(
+        &provider,
+        Some(("new context".into(), Voice::Human)),
+        None,
+        &emit,
+    );
     assert!(matches!(outcome, Ok(Outcome::Complete)));
     assert_eq!(session.measured_input(), Some(0));
 }
@@ -521,7 +529,7 @@ fn cancel_between_run_batch_and_drain_does_not_leak_reply_into_next_deliberation
     );
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.agent.id);
-    match session.deliberate(&provider, Some("go".into()), None, &emit) {
+    match session.deliberate(&provider, Some(("go".into(), Voice::Human)), None, &emit) {
         Ok(Outcome::Cancelled) => {}
         other => panic!("expected the cancel to win before the reply drains, got {other:?}"),
     }
@@ -541,7 +549,12 @@ fn cancel_between_run_batch_and_drain_does_not_leak_reply_into_next_deliberation
             .then(Reply::tool_calls(vec![ral_call("c3", "1")]))
             .then(Reply::text("done")),
     );
-    match session.deliberate(&provider2, Some("continue".into()), None, &emit) {
+    match session.deliberate(
+        &provider2,
+        Some(("continue".into(), Voice::Human)),
+        None,
+        &emit,
+    ) {
         Ok(Outcome::Complete) => {}
         other => panic!(
             "a reply staged in a cancelled batch must not leak into the next deliberation, got {other:?}"
@@ -637,7 +650,7 @@ fn a_read_queued_mid_exchange_runs_at_the_tool_boundary_ahead_of_the_next_step()
         .position(|sig| {
             matches!(
                 sig,
-                crate::bus::Signal::Fact(_, _, rec) if matches!(
+                crate::bus::Signal::Fact(_, rec) if matches!(
                     rec.value(),
                     crate::record::Record::Protocol(
                         crate::record::Protocol::AssistantMessage { message, .. }
@@ -694,15 +707,15 @@ fn a_read_queued_after_a_prompt_runs_after_it_lands() {
         .position(|sig| {
             matches!(
                 sig,
-                crate::bus::Signal::Fact(_, _, rec) if matches!(
+                crate::bus::Signal::Fact(_, rec) if matches!(
                     rec.value(),
-                    crate::record::Record::Display(
-                        crate::record::Display::Prompt { text, .. }
+                    crate::record::Record::Protocol(
+                        crate::record::Protocol::Steering { text, .. }
                     ) if text == "queued prompt"
                 )
             )
         })
-        .expect("the prompt's arrival is announced");
+        .expect("the prompt's arrival is recorded");
     let fold = signals
         .iter()
         .position(|sig| {

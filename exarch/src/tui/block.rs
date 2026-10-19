@@ -363,7 +363,7 @@ pub(super) fn lay_rows(
 /// `rows` after a tail that is or is not blank: a block's leading blanks
 /// collapse against an already-blank tail, so a turn separator before
 /// leading-blank chrome reads as one gap.  The transcript's one seam rule,
-/// read by the screen, by a group's two parts, and by `user.log` alike.
+/// read by the screen, by a group's two parts, and by the export alike.
 pub(super) fn seam(prev_blank: bool, rows: &[Row]) -> &[Row] {
     if !prev_blank {
         return rows;

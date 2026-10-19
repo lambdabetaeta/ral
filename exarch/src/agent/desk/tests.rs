@@ -16,7 +16,7 @@ use crate::provider::{
 };
 use crate::record::AgentLog;
 use crate::record::EditAuthority;
-use crate::record::{AgentId, Memory};
+use crate::record::{AgentId, Memory, Voice};
 use crate::record::{Display, Record, Transient};
 use crate::schedule::{Trigger, parse_duration};
 use ral_core::first_order::datum::tag;
@@ -74,7 +74,8 @@ fn desk() -> ExarchDesk {
 }
 
 fn append_prompt_and_answer(log: &mut AgentLog, prompt: &str, answer: &str) {
-    log.append_user(prompt.to_string(), None).expect("prompt");
+    log.append_user(prompt.to_string(), None, Voice::Human)
+        .expect("prompt");
     log.append_assistant(
         genai::chat::ChatMessage::assistant(answer),
         Vec::new(),

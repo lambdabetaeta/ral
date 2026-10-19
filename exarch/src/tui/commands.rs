@@ -6,12 +6,12 @@ use std::path::PathBuf;
 use super::App;
 use super::app::CommandCtx;
 use super::block::Chrome;
+use super::export::{Format, export_to};
 use super::gesture::Toast;
 use super::login;
 use super::model_picker::pick_model;
 use super::providers;
 use super::rewind;
-use super::scrollback;
 use crate::SessionInfo;
 use crate::agent::Agent;
 use crate::agent::fleet::Fleet;
@@ -346,8 +346,8 @@ pub(super) fn cmd_copy(app: &mut App) {
         .note_copy(sent, Toast::Reply(reply.lines().count()));
 }
 
-/// Write the focused tab's rendered `user.log` to `arg`, never over an existing
-/// file.  The copy goes through [`scrollback::export_log`], the I/O door.
+/// Render the focused tab's `record.jsonl` to `arg`, never over an existing
+/// file.
 pub(super) fn cmd_export(app: &mut App, arg: &str, info: &SessionInfo<'_>) {
     let id = app.tabs.focused();
     let dest = resolve_export_path(arg, info.cwd);
@@ -355,15 +355,9 @@ pub(super) fn cmd_export(app: &mut App, arg: &str, info: &SessionInfo<'_>) {
         app.push_error(id, &format!("refusing to overwrite {}", dest.display()));
         return;
     }
-    let src = match app.flush_focused_log() {
-        Ok(p) => p,
-        Err(e) => {
-            app.push_error(id, &format!("could not flush transcript: {e}"));
-            return;
-        }
-    };
-    match scrollback::export_log(&src, &dest) {
-        Ok(_) => app.push_note(id, &format!("[exported user view to {}]", dest.display())),
+    let record = app.tabs.focused_log_dir().join("record.jsonl");
+    match export_to(&record, &dest, Format::Plain) {
+        Ok(()) => app.push_note(id, &format!("[exported transcript to {}]", dest.display())),
         Err(e) => app.push_error(id, &format!("could not write {}: {e}", dest.display())),
     }
 }

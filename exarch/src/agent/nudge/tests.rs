@@ -27,7 +27,7 @@ const EMPTY: Result<&Outcome, &ProviderError> = Ok(&Outcome::Empty);
 #[test]
 fn transient_surfaces_without_nudge() {
     let mut nudges = Nudges::new(true);
-    let mut log = fresh_log();
+    let log = fresh_log();
     let error = ProviderError::Transient {
         cause: "model response headers timed out".into(),
         attempts: 3,
@@ -35,7 +35,7 @@ fn transient_surfaces_without_nudge() {
         status: None,
     };
     assert!(
-        nudges.react(Err(&error), &facts(), &mut log).is_none(),
+        nudges.react(Err(&error), &facts(), &log).is_none(),
         "transient provider failures are surfaced directly"
     );
     assert_eq!(nudges.used, 0);
@@ -46,11 +46,11 @@ fn transient_surfaces_without_nudge() {
 #[test]
 fn provider_failures_do_not_consume_budget() {
     let mut nudges = Nudges::new(true);
-    let mut log = fresh_log();
+    let log = fresh_log();
     let error = ProviderError::Refused(Refusal::for_test(Limit::Rate, None));
     for _ in 0..=BUDGET {
         assert!(
-            nudges.react(Err(&error), &facts(), &mut log).is_none(),
+            nudges.react(Err(&error), &facts(), &log).is_none(),
             "provider failure should stop, not nudge"
         );
     }
@@ -60,8 +60,8 @@ fn provider_failures_do_not_consume_budget() {
 #[test]
 fn empty_turn_nudges_and_consumes_budget() {
     let mut nudges = Nudges::new(true);
-    let mut log = fresh_log();
-    match nudges.react(EMPTY, &facts(), &mut log) {
+    let log = fresh_log();
+    match nudges.react(EMPTY, &facts(), &log) {
         Some(msg) => assert!(msg.contains("no text and no tool calls")),
         None => panic!("empty turn must nudge, not stop"),
     }
@@ -71,25 +71,25 @@ fn empty_turn_nudges_and_consumes_budget() {
 #[test]
 fn exhausted_budget_stops() {
     let mut nudges = Nudges::new(true);
-    let mut log = fresh_log();
+    let log = fresh_log();
     for _ in 0..BUDGET {
-        assert!(nudges.react(EMPTY, &facts(), &mut log).is_some());
+        assert!(nudges.react(EMPTY, &facts(), &log).is_some());
     }
-    assert!(nudges.react(EMPTY, &facts(), &mut log).is_none());
+    assert!(nudges.react(EMPTY, &facts(), &log).is_none());
 }
 
 /// A stall is not an output cap: the model is told the connection failed.
 #[test]
 fn a_stalled_truncation_gets_its_own_message_and_cause() {
     let mut nudges = Nudges::new(true);
-    let mut log = fresh_log();
+    let log = fresh_log();
     let error = ProviderError::Truncated {
         cause: Box::new(CutShort::Stalled(ProviderError::local_transient(
             "model response body read timed out",
         ))),
     };
     assert_eq!(
-        nudges.react(Err(&error), &facts(), &mut log),
+        nudges.react(Err(&error), &facts(), &log),
         Some(wrap_reminder(STALLED_MESSAGE))
     );
     assert_eq!(nudges.used, 1);
@@ -98,13 +98,13 @@ fn a_stalled_truncation_gets_its_own_message_and_cause() {
 #[test]
 fn reset_restores_the_spent_budget() {
     let mut nudges = Nudges::new(true);
-    let mut log = fresh_log();
+    let log = fresh_log();
     for _ in 0..BUDGET {
-        assert!(nudges.react(EMPTY, &facts(), &mut log).is_some());
+        assert!(nudges.react(EMPTY, &facts(), &log).is_some());
     }
-    assert!(nudges.react(EMPTY, &facts(), &mut log).is_none());
+    assert!(nudges.react(EMPTY, &facts(), &log).is_none());
     nudges.reset();
-    assert!(nudges.react(EMPTY, &facts(), &mut log).is_some());
+    assert!(nudges.react(EMPTY, &facts(), &log).is_some());
 }
 
 /// A toolless trunk has nothing to be steered toward: no repair, no
@@ -112,13 +112,13 @@ fn reset_restores_the_spent_budget() {
 #[test]
 fn a_trunk_that_steers_nothing_says_nothing() {
     let mut nudges = Nudges::new(false);
-    let mut log = fresh_log();
-    assert!(nudges.react(EMPTY, &facts(), &mut log).is_none());
+    let log = fresh_log();
+    assert!(nudges.react(EMPTY, &facts(), &log).is_none());
     let pressure = Reminder::Pressure {
         detail: "400 of 500 tokens".into(),
         planned: None,
     };
-    assert!(nudges.remind(&pressure, &mut log).is_none());
+    assert!(nudges.remind(&pressure, &log).is_none());
     assert_eq!(nudges.used, 0);
 }
 
@@ -128,13 +128,13 @@ fn a_trunk_that_steers_nothing_says_nothing() {
 #[test]
 fn no_reply_finish_re_nudges_up_to_budget_then_fails() {
     let mut nudges = Nudges::new(true);
-    let mut log = fresh_log();
+    let log = fresh_log();
     let f = || Facts {
         must_reply: true,
         ..facts()
     };
     for _ in 0..BUDGET {
-        match nudges.react(COMPLETE, &f(), &mut log) {
+        match nudges.react(COMPLETE, &f(), &log) {
             Some(msg) => assert!(msg.contains("`reply`")),
             None => {
                 panic!("a returning agent that did not reply must re-nudge while budget remains")
@@ -146,7 +146,7 @@ fn no_reply_finish_re_nudges_up_to_budget_then_fails() {
         "the no-reply nudge now draws on the budget"
     );
     assert!(
-        nudges.react(COMPLETE, &f(), &mut log).is_none(),
+        nudges.react(COMPLETE, &f(), &log).is_none(),
         "past the budget the un-replied finish is accepted (mapped to Failed downstream)"
     );
 }
@@ -155,8 +155,8 @@ fn no_reply_finish_re_nudges_up_to_budget_then_fails() {
 #[test]
 fn root_completion_is_never_reply_nudged() {
     let mut nudges = Nudges::new(true);
-    let mut log = fresh_log();
-    assert!(nudges.react(COMPLETE, &facts(), &mut log).is_none());
+    let log = fresh_log();
+    assert!(nudges.react(COMPLETE, &facts(), &log).is_none());
 }
 
 /// A live child *is* the next action, so every nudge — the pin reminder
@@ -165,14 +165,14 @@ fn root_completion_is_never_reply_nudged() {
 #[test]
 fn pinned_state_waits_while_children_live() {
     let mut nudges = Nudges::new(true);
-    let mut log = fresh_log();
+    let log = fresh_log();
     let busy = Facts {
         pinned: Some("tasks 3/8".into()),
         quiet: false,
         ..facts()
     };
     assert!(
-        nudges.react(COMPLETE, &busy, &mut log).is_none(),
+        nudges.react(COMPLETE, &busy, &log).is_none(),
         "a live descendant is the next action, so the pin reminder should wait"
     );
     assert_eq!(nudges.used, 0, "waiting must not spend nudge budget");
@@ -183,7 +183,7 @@ fn pinned_state_waits_while_children_live() {
         ..facts()
     };
     let msg = nudges
-        .react(COMPLETE, &quiet, &mut log)
+        .react(COMPLETE, &quiet, &log)
         .expect("the first quiet completion after settling should nudge");
     assert!(msg.contains("There is pinned state: tasks 3/8"));
 }
@@ -193,14 +193,14 @@ fn pinned_state_waits_while_children_live() {
 #[test]
 fn returning_agent_gets_both_reply_and_pinned_nudges() {
     let mut nudges = Nudges::new(true);
-    let mut log = fresh_log();
+    let log = fresh_log();
     let f = Facts {
         must_reply: true,
         pinned: Some("tasks 3/8".into()),
         ..facts()
     };
     let msg = nudges
-        .react(COMPLETE, &f, &mut log)
+        .react(COMPLETE, &f, &log)
         .expect("a returning agent with pinned state should nudge");
     assert!(
         msg.contains("`reply`"),
@@ -216,8 +216,8 @@ fn returning_agent_gets_both_reply_and_pinned_nudges() {
 #[test]
 fn reset_clears_budget() {
     let mut nudges = Nudges::new(true);
-    let mut log = fresh_log();
-    let _ = nudges.react(EMPTY, &facts(), &mut log);
+    let log = fresh_log();
+    let _ = nudges.react(EMPTY, &facts(), &log);
     assert!(nudges.used >= 1);
     nudges.reset();
     assert_eq!(nudges.used, 0, "reset clears the budget");
@@ -228,13 +228,13 @@ fn reset_clears_budget() {
 #[test]
 fn any_reply_is_accepted_outright() {
     let mut nudges = Nudges::new(true);
-    let mut log = fresh_log();
+    let log = fresh_log();
     for must_reply in [false, true] {
         let f = Facts {
             must_reply,
             ..facts()
         };
-        assert!(nudges.react(Ok(&Outcome::Replied), &f, &mut log).is_none());
+        assert!(nudges.react(Ok(&Outcome::Replied), &f, &log).is_none());
     }
     assert_eq!(nudges.used, 0);
 }
@@ -245,27 +245,25 @@ fn any_reply_is_accepted_outright() {
 #[test]
 fn pin_reminder_fires_once_per_register_change() {
     let mut nudges = Nudges::new(true);
-    let mut log = fresh_log();
+    let log = fresh_log();
     let with = |digest: &str| Facts {
         pinned: Some(digest.into()),
         ..facts()
     };
 
     let first = nudges
-        .react(COMPLETE, &with("tasks 3/8"), &mut log)
+        .react(COMPLETE, &with("tasks 3/8"), &log)
         .expect("the first sighting of a digest must nudge");
     assert!(first.contains("tasks 3/8"));
     for _ in 0..3 {
         assert!(
-            nudges
-                .react(COMPLETE, &with("tasks 3/8"), &mut log)
-                .is_none(),
+            nudges.react(COMPLETE, &with("tasks 3/8"), &log).is_none(),
             "a stationary digest must not re-fire"
         );
     }
 
     let changed = nudges
-        .react(COMPLETE, &with("tasks 4/8"), &mut log)
+        .react(COMPLETE, &with("tasks 4/8"), &log)
         .expect("a changed digest must fire again");
     assert!(changed.contains("tasks 4/8"));
 
@@ -275,9 +273,9 @@ fn pin_reminder_fires_once_per_register_change() {
         pinned: None,
         ..facts()
     };
-    assert!(nudges.react(COMPLETE, &none, &mut log).is_none());
+    assert!(nudges.react(COMPLETE, &none, &log).is_none());
     let refired = nudges
-        .react(COMPLETE, &with("tasks 4/8"), &mut log)
+        .react(COMPLETE, &with("tasks 4/8"), &log)
         .expect("re-pinning even the identical digest after an empty register must fire");
     assert!(refired.contains("tasks 4/8"));
 }
@@ -287,13 +285,13 @@ fn pin_reminder_fires_once_per_register_change() {
 #[test]
 fn exhausted_reply_budget_leaves_the_pin_edge_armed() {
     let mut nudges = Nudges::new(true);
-    let mut log = fresh_log();
+    let log = fresh_log();
     let must_reply = Facts {
         must_reply: true,
         ..facts()
     };
     for _ in 0..BUDGET {
-        assert!(nudges.react(COMPLETE, &must_reply, &mut log).is_some());
+        assert!(nudges.react(COMPLETE, &must_reply, &log).is_some());
     }
     let pin_due = Facts {
         must_reply: true,
@@ -301,7 +299,7 @@ fn exhausted_reply_budget_leaves_the_pin_edge_armed() {
         ..facts()
     };
     assert!(
-        nudges.react(COMPLETE, &pin_due, &mut log).is_none(),
+        nudges.react(COMPLETE, &pin_due, &log).is_none(),
         "past budget the un-replied finish is accepted"
     );
 
@@ -311,7 +309,7 @@ fn exhausted_reply_budget_leaves_the_pin_edge_armed() {
         ..facts()
     };
     let msg = nudges
-        .react(COMPLETE, &no_must_reply, &mut log)
+        .react(COMPLETE, &no_must_reply, &log)
         .expect("after reset the pin edge must still be armed");
     assert!(msg.contains("There is pinned state: tasks 3/8"), "{msg}");
 }
@@ -321,21 +319,21 @@ fn exhausted_reply_budget_leaves_the_pin_edge_armed() {
 #[test]
 fn reset_does_not_rearm_edges() {
     let mut nudges = Nudges::new(true);
-    let mut log = fresh_log();
+    let log = fresh_log();
     let f = Facts {
         pinned: Some("tasks 3/8".into()),
         ..facts()
     };
-    assert!(nudges.react(COMPLETE, &f, &mut log).is_some());
+    assert!(nudges.react(COMPLETE, &f, &log).is_some());
     nudges.reset();
     assert!(
-        nudges.react(COMPLETE, &f, &mut log).is_none(),
+        nudges.react(COMPLETE, &f, &log).is_none(),
         "reset must not re-arm a told edge"
     );
 
     nudges = nudges.reborn();
     assert!(
-        nudges.react(COMPLETE, &f, &mut log).is_some(),
+        nudges.react(COMPLETE, &f, &log).is_some(),
         "the rebirth must fire again"
     );
 }
@@ -378,7 +376,7 @@ fn pressure_without_a_planned_cut_states_the_reading_alone() {
 #[test]
 fn a_reminder_spends_no_budget() {
     let nudges = Nudges::new(true);
-    let mut log = fresh_log();
+    let log = fresh_log();
     let reminder = Reminder::Ration {
         service: "openrouter".into(),
         label: "5 hours".into(),
@@ -387,7 +385,7 @@ fn a_reminder_spends_no_budget() {
         resumes: true,
     };
     let text = nudges
-        .remind(&reminder, &mut log)
+        .remind(&reminder, &log)
         .expect("a steering trunk is reminded");
     assert!(
         text.contains("91% spent") && text.contains("pauses until it resets"),

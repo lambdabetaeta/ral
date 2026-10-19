@@ -19,12 +19,14 @@ mod log;
 pub(crate) mod model;
 mod replay;
 mod seam;
+mod selection;
 mod session;
 mod view;
 
 pub use model::{Held, Linked, Pointer, TurnRow};
 pub use replay::{Refusal, replay};
 pub use seam::Emitter;
+pub use selection::Selection;
 pub(crate) use session::role_label;
 pub use session::{
     AgentLog, GrepAnswer, GrepHit, Inherited, Resumed, TranscriptMessage, TranscriptPart,
@@ -128,7 +130,7 @@ impl AgentState {
 /// that ride beside them: the one door onto the live channel, attachable after
 /// the log exists because the log outlives any bus.
 pub(crate) trait Publish: Send {
-    fn fact(&self, segment: Segment, recorded: Recorded<Record>);
+    fn fact(&self, recorded: Recorded<Record>);
     fn transient(&self, t: Transient);
 }
 
@@ -152,30 +154,11 @@ pub enum Record {
 /// Deliberately not `#[serde(flatten)]`: flattening would swallow the class
 /// enums' own `deny_unknown_fields` into this envelope's unknown-key check,
 /// which defeats the reason that attribute is on them.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Entry {
+#[derive(Serialize, Deserialize)]
+struct Entry<R> {
     at_unix_ms: u64,
-    record: Record,
+    record: R,
 }
-
-mod sealed {
-    pub trait Sealed {}
-}
-
-/// The three record classes a [`Recorded`] may carry, sealed so a fourth
-/// cannot be minted outside this module.
-///
-/// [`emit`](Emitter::emit) is generic over `C: Class`, and folds demand
-/// `&Protocol` / `&Display` / `&Forensic` in their own signatures rather
-/// than matching `Record` themselves.
-pub trait Class: sealed::Sealed + Clone + Into<Record> {}
-
-impl sealed::Sealed for Protocol {}
-impl sealed::Sealed for Display {}
-impl sealed::Sealed for Forensic {}
-impl Class for Protocol {}
-impl Class for Display {}
-impl Class for Forensic {}
 
 impl From<Protocol> for Record {
     fn from(p: Protocol) -> Self {
@@ -194,30 +177,33 @@ impl From<Forensic> for Record {
 }
 
 /// Verbatim payloads the model fold needs — the provider's exact `ChatMessage`
-/// and tool-call ids.
+/// and tool-call ids — and every fact with a protocol form, recorded once.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Protocol {
+    /// The system prompt every later request goes out under, until the next.
+    System {
+        text: String,
+    },
     /// A prompt opening a user turn of its own, under the id it carries.
     UserPrompt {
         turn: u64,
         text: String,
+        voice: Voice,
     },
     /// A user line extending the newest turn: a steering line, or a nudge
     /// continuing the prompt in hand.
     Steering {
         text: String,
+        voice: Voice,
     },
-    /// A message a `mnemon` child inherits from its parent's context, under
-    /// the turn id the parent gave it.
-    ContextMessage {
-        id: u64,
+    /// A harness-authored message opening a turn of its own: the resume note.
+    Import {
+        turn: u64,
         message: ChatMessage,
     },
     /// The link a `mnemon` child opens with: the parent's whole turn table,
-    /// each row carrying the address its transcript copy lies at.  Written
-    /// once, before the [`Protocol::ContextMessage`]s that re-record the
-    /// resident ones as this log's own.
+    /// each row carrying the address its transcript copy lies at.
     Inherited {
         /// The parent's table at the fork, every row `kind: Inherited` and
         /// `held` as the parent had it, beside where that turn was first
@@ -244,12 +230,24 @@ pub enum Protocol {
         cut: Cut,
         by: EditAuthority,
     },
-    /// The user's `/rewind`: turn `anchor` and every turn after it leave the
-    /// structure outright — no marker, no address, the next prompt minted
-    /// `anchor` again.  Their records stay in the file as forensic fact.
+    /// `/rewind`: turn `anchor` and every turn after it are withdrawn.
     Rewound {
         anchor: u64,
     },
+    /// `/clear`: every turn is withdrawn; the system prompt stays.
+    Cleared,
+}
+
+/// Who spoke a user-voice message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Voice {
+    Human,
+    Wakeup,
+    Peer,
+    /// Nudges, the harness's own reminders, child results and surface notices:
+    /// everything the screen already speaks for elsewhere or not at all.
+    Harness,
 }
 
 /// How a child's run ended, as its `↘` breadcrumb reports it.
@@ -281,12 +279,6 @@ pub enum Display {
     Thinking {
         text: String,
     },
-    /// Any item entering context — prompt, wakeup, or peer message — and
-    /// the user turn it opens; `None` for a line extending the turn in hand.
-    Prompt {
-        text: String,
-        turn: Option<u64>,
-    },
     /// One line of the assistant's own prose, cut at the newline that
     /// completed it — so one `AssistantMessage` yields many of these, and a
     /// reader sees the answer as it is spoken.  Consecutive ones grow one
@@ -305,17 +297,10 @@ pub enum Display {
         payload: String,
         failed: bool,
     },
-    /// The byte-identical third copy of a result: emitted, drawn, and
-    /// recorded from the one clipped string the model saw.
-    ///
-    /// `call` names the `ToolCall` commit this result belongs to — the
-    /// producer already knows it, being the one that just emitted that
-    /// commit — so the view fold addresses it directly rather than walking
-    /// backward to the nearest resident tail.
-    Result {
-        text: String,
-        failed: bool,
+    /// What a call's result told it; the text itself is `Protocol::ToolResults`'.
+    Verdict {
         call: BlockId,
+        verdict: Verdict,
     },
     /// A child's landed line.  No body: the reply is a value on the child's own
     /// agent, fetched with `` exarch-agents `read ``, never copied into the parent's
@@ -341,30 +326,12 @@ pub enum Display {
         card: Card,
     },
     Done {
-        #[serde(default)]
         id: Option<u64>,
         cmd: String,
         outcome: DoneOutcome,
     },
     Context {
         turns: Vec<model::TurnRow>,
-    },
-    /// Beside `Forensic::TurnStarted`, whose `tuning` the screen never
-    /// showed — the display class never derives from the twin it duplicates a
-    /// field of.  `id` is the id the request will produce, so a cancelled
-    /// request retaken shows the same one twice.
-    Turn {
-        id: u64,
-    },
-    /// Beside `Protocol::Evicted`, for the same reason.
-    Evicted {
-        cut: Cut,
-        by: EditAuthority,
-    },
-    /// Beside `Protocol::Rewound`: the view cuts back to where turn `anchor`
-    /// opened.
-    Rewound {
-        anchor: u64,
     },
 }
 
@@ -383,36 +350,26 @@ pub enum Forensic {
         /// The tree parent; `None` for every root, whatever opened it.
         parent: Option<AgentId>,
         model: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         context_window: Option<u64>,
         /// What the account was called when the session started — a
         /// snapshot, the right thing for a log to hold even once a sibling
         /// account arrives or a plan changes.
         #[serde(rename = "provider")]
         label: String,
-        /// `service` and `account` join `label` once an account carries a
-        /// service name and an id of its own; both absent on a `record.jsonl`
-        /// written before this pair existed, which still resumes on `label`
-        /// alone.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        service: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        account: Option<String>,
-        system_prompt_bytes: usize,
+        service: String,
+        account: String,
         log_dir: PathBuf,
         at_unix_ms: u64,
     },
     SessionResumed {
         model: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         context_window: Option<u64>,
         #[serde(rename = "provider")]
         label: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        service: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        account: Option<String>,
-        system_prompt_bytes: usize,
+        service: String,
+        account: String,
         at_unix_ms: u64,
     },
     /// Tail bookend.
@@ -421,13 +378,14 @@ pub enum Forensic {
     /// [`Self::SessionEnded`] is written on every drop and says no such thing.
     SessionClosed,
     /// The meta half of taking a turn: the shape the request goes out under,
-    /// sampling and routing both.  The id the request will produce is the
-    /// display twin's.
+    /// sampling and routing both.  `turn` is the id the request will produce,
+    /// so a retaken request shows the same one twice.
     TurnStarted {
+        turn: u64,
         tuning: Tuning,
         /// The serving provider actually pinned, which is not the selection's
         /// stored pin: a service that does not route drops it.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         route: Option<String>,
     },
     UsageDelta {
@@ -443,7 +401,7 @@ pub enum Forensic {
     /// standing-condition reminder spends nothing.
     Nudge {
         cause: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         spent: Option<Spent>,
     },
     ProviderError {
@@ -487,14 +445,12 @@ pub enum Forensic {
     /// from `SessionStarted` once the run outlives its first selection.
     ModelChanged {
         model: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         context_window: Option<u64>,
         #[serde(rename = "provider")]
         label: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        service: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        account: Option<String>,
+        service: String,
+        account: String,
     },
     /// An overflow taught the selection a tighter window than its catalog
     /// listed.
@@ -603,7 +559,7 @@ impl EditAuthority {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cut {
     pub turns: Vec<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
 }
 
@@ -747,62 +703,31 @@ impl Seq {
     }
 }
 
-/// Which file of a log a live fact was appended to.
-///
-/// One per `/clear`, counted by the log from its opening.  A [`Seq`]
-/// numbers lines within one segment, so a consumer's cursor is the pair.
-/// Process-local and never persisted: a persisted [`Locus`] names its file by
-/// path instead.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Segment(u64);
-
-impl Segment {
-    fn next(self) -> Self {
-        Self(self.0 + 1)
-    }
-
-    /// The segment a log opens on, for a test's hand-built fact.
-    #[cfg(test)]
-    pub(crate) fn placeholder() -> Self {
-        Self(0)
-    }
-}
-
-/// How far a reader has come through one log: a segment, and the last record
-/// of it read — its [`Seq`] and the byte its line ends at — if any.
+/// How far a reader has come through one log: the last record of it read —
+/// its [`Seq`] and the byte its line ends at — if any.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cursor {
-    segment: Segment,
     seq: u64,
     end: u64,
 }
 
 impl Cursor {
-    /// The head of `segment`, before its first record.
-    pub fn at(segment: Segment) -> Self {
-        Self {
-            segment,
-            seq: 0,
-            end: 0,
-        }
+    /// The head of the log, before its first record.
+    pub fn start() -> Self {
+        Self { seq: 0, end: 0 }
     }
 
-    pub fn segment(self) -> Segment {
-        self.segment
-    }
-
-    /// The [`Seq`] the segment's next record carries.
+    /// The [`Seq`] the log's next record carries.
     pub fn next(self) -> u64 {
         self.seq + 1
     }
 
-    /// Past `locus`, a record of this segment.
+    /// Past `locus`.
     #[must_use]
     pub fn past(self, locus: &Locus) -> Self {
         Self {
             seq: locus.seq().get(),
             end: locus.bytes().end,
-            ..self
         }
     }
 }
@@ -816,9 +741,9 @@ pub struct Locus {
     seq: Seq,
     bytes: Range<u64>,
     /// Blake3 of the record's own bytes, truncated: a range read back
-    /// against a file it was not measured in — a rotated segment, a
-    /// copied directory, a torn write — fails to match rather than
-    /// returning a plausible neighbour.
+    /// against a file it was not measured in — a copied directory, an
+    /// edited log, a torn write — fails to match rather than returning a
+    /// plausible neighbour.
     digest: u64,
 }
 
@@ -895,16 +820,10 @@ impl<R> Recorded<R> {
     pub fn into_value(self) -> R {
         self.1
     }
-}
 
-/// Widen a witnessed class-typed record into the [`Record`] enum
-/// [`Fold::step`] expects.
-///
-/// The bridge from `Emitter::emit`'s typed return to the class-blind
-/// dispatcher, for the attend thread's inline advance.
-pub fn widen<C: Class>(recorded: Recorded<C>) -> Recorded<Record> {
-    let locus = recorded.locus().clone();
-    Recorded::new(locus, recorded.into_value().into())
+    pub fn into_parts(self) -> (Locus, R) {
+        (self.0, self.1)
+    }
 }
 
 /// A named commit in the view fold's memo — a block is named by its own
@@ -932,9 +851,8 @@ pub use view::Blocks;
 /// function, two drivers.
 ///
 /// An impl's `step` is one outer-class match over `Record` delegating to
-/// class-typed functions (the model fold's takes `&Protocol`; the view
-/// fold's take `&Display` / `&Forensic`); no arm is a wildcard, and a
-/// [`Refusal`] during replay refuses the whole session.
+/// class-typed functions; no arm is a wildcard, and a [`Refusal`] during
+/// replay refuses the whole session.
 pub trait Fold {
     /// No `Default` bound: a memo the fold cannot build from nothing — the
     /// model's, which needs its log's path — seeds [`replay()`] by value.
@@ -943,7 +861,7 @@ pub trait Fold {
     /// # Errors
     /// Returns [`Refusal`] when this fold does not recognise the record —
     /// during replay that refuses the session rather than skip it silently.
-    fn step(memo: &mut Self::Memo, record: &Recorded<Record>) -> Result<(), Refusal>;
+    fn step(memo: &mut Self::Memo, record: Recorded<Record>) -> Result<(), Refusal>;
 }
 
 /// Read `path`'s [`Record`]s back, past their `Entry` envelope, for tests
@@ -966,12 +884,7 @@ pub(crate) fn read_records(path: &std::path::Path) -> std::io::Result<Vec<Record
 /// for the private [`Entry`] type itself.
 #[cfg(test)]
 pub(crate) fn envelope_line(record: &Record) -> Vec<u8> {
-    #[derive(Serialize)]
-    struct Envelope<'a> {
-        at_unix_ms: u64,
-        record: &'a Record,
-    }
-    serde_json::to_vec(&Envelope {
+    serde_json::to_vec(&Entry {
         at_unix_ms: 0,
         record,
     })
@@ -985,9 +898,5 @@ pub(crate) fn envelope_line(record: &Record) -> Vec<u8> {
 /// Returns `Err` when `line` does not parse as the `Entry` envelope.
 #[cfg(test)]
 pub(crate) fn record_from_line(line: &[u8]) -> serde_json::Result<Record> {
-    #[derive(Deserialize)]
-    struct Envelope {
-        record: Record,
-    }
-    serde_json::from_slice::<Envelope>(line).map(|e| e.record)
+    serde_json::from_slice::<Entry<Record>>(line).map(|entry| entry.record)
 }

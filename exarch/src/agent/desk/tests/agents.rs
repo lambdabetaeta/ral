@@ -426,7 +426,7 @@ fn surface_then_spawn_observes_the_surface_first() {
     while let Ok(sig) = rx.try_recv() {
         match sig {
             Signal::Transient(_, Transient::Unpin { .. }) => saw_unpin = true,
-            Signal::Fact(_, _, fact) => {
+            Signal::Fact(_, fact) => {
                 if let Record::Display(Display::HarnessCall { verb, .. }) = fact.value()
                     && verb == "spawn"
                 {

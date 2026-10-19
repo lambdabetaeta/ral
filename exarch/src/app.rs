@@ -398,7 +398,7 @@ impl App {
 
     /// The per-run log directory, `<project>/<YYYY-MM-DD-HHMMSS>-<pid>/` — the
     /// pid keeps two runs launched in the same second and project apart.  Holds
-    /// `sessions/<id>/{record.jsonl,record.log,user.log}` durably, unlike the
+    /// `sessions/<id>/record.jsonl` durably, unlike the
     /// disposable [`Scratch`].
     ///
     /// What sits *beside* `sessions/` is the front-end's, not this function's,

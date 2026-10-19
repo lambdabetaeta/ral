@@ -9,12 +9,12 @@
 //! door records.  The sandbox projects the same authority off the same folds,
 //! so the two cannot drift.
 
-use crate::path::shown;
 use crate::capability::{
     Admitted, ExecDenial, Flag, FsOp, FsScope, GrantStack, Program, Refused, ShellVerb, Withheld,
     ral_binary,
 };
 use crate::path::LexicalPath;
+use crate::path::shown;
 use crate::text::code;
 use crate::types::{Check, Context, Error, Resource, Settled, sig};
 use std::fmt::Display;

@@ -68,7 +68,10 @@ impl ExarchDesk {
             Err(error) => error.clone(),
         };
         self.services
-            .record_forensic(crate::record::Forensic::HarnessResult { text });
+            .log
+            .borrow()
+            .record_emitter()
+            .emit_or_report(crate::record::Forensic::HarnessResult { text });
         survey
             .map(|survey| Survey::from(survey).encode())
             .map_err(Error::new)

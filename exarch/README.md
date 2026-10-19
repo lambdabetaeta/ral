@@ -26,9 +26,9 @@ conversation.  Every session is recorded under
 `$XDG_STATE_HOME/exarch/<project>/<run>/sessions/<id>/`, whose directory is
 printed at exit: `record.jsonl` is the full record, including unabridged
 stdout and stderr from every command (the TUI itself shows a head/tail
-digest for noisy commands), `record.log` a readable rendering of it, and
-`user.log` the screen's transcript.  Type `/quit` (or send EOF) to
-exit.
+digest for noisy commands).  `/export <path>` renders the screen's
+transcript from it, and `exarch export <dir>` does the same for any session
+directory afterwards.  Type `/quit` (or send EOF) to exit.
 
 Run one headless exchange with `--prompt`; it implies `--headless`, writes the
 final reply to standard output, and exits. A file can still seed the interactive

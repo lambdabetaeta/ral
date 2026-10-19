@@ -1,6 +1,6 @@
 use super::limits_card;
 use super::{
-    Command, command_candidates, lookup_command, resolve_export_path, route_submit,
+    Command, cmd_export, command_candidates, lookup_command, resolve_export_path, route_submit,
     unrecognized_command,
 };
 use crate::card::Mark;
@@ -175,4 +175,17 @@ fn all_unmetered_collapses_to_one_sentence_naming_the_accounts() {
     };
     assert!(spans[0].text.contains("anthropic, openai, deepseek"));
     assert!(spans[0].text.contains("publishes a ration"));
+}
+
+/// `/export` writes a new file only; the one already there is left alone.
+#[test]
+fn export_refuses_to_overwrite() {
+    let (mut app, _rx, root) = app();
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let dest = dir.path().join("out.txt");
+    std::fs::write(&dest, "keep me").expect("a file to protect");
+    cmd_export(&mut app, dest.to_str().expect("a utf-8 path"), ctx().info);
+    assert_eq!(std::fs::read_to_string(&dest).expect("it reads"), "keep me");
+    let all = text(&mut app, root.id);
+    assert!(all.contains("refusing to overwrite"), "{all:?}");
 }

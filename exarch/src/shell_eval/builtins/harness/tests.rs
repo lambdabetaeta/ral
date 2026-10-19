@@ -1,4 +1,5 @@
 use crate::agent::testkit::ral_call;
+use crate::record::Voice;
 
 /// Every bare tag the door admits: the bases, plus `` `inherit ``, which
 /// names none and so is the one admitted tag policy has nothing to resolve.
@@ -700,7 +701,12 @@ fn double_reply_in_one_exchange_is_last_wins() {
     let (tx, _rx) = crate::bus::channel();
     let emit = crate::bus::Emitter::new(tx, session.agent.id);
     let provider_handle = session.agent.current_provider();
-    let outcome = session.deliberate(&provider_handle, Some("go".into()), None, &emit);
+    let outcome = session.deliberate(
+        &provider_handle,
+        Some(("go".into(), Voice::Human)),
+        None,
+        &emit,
+    );
     match outcome {
         Ok(crate::agent::outcome::Outcome::Replied) => {
             let v = session.agent.reply().expect("the reply is deposited");

@@ -162,6 +162,24 @@ pub fn run() -> Result<(), String> {
                 }
                 Ok(())
             }
+            cli::Command::Export { session, out } => {
+                let record = if session.is_dir() {
+                    session.join("record.jsonl")
+                } else {
+                    session
+                };
+                if !record.is_file() {
+                    return Err(format!(
+                        "no record.jsonl at {}; is this a session directory under $XDG_STATE_HOME/exarch?",
+                        record.display()
+                    ));
+                }
+                match &out {
+                    Some(dest) => tui::export_to(&record, dest, tui::Format::Plain),
+                    None => tui::export(&record, &mut std::io::stdout().lock(), tui::Format::Plain),
+                }
+                .map_err(|e| format!("could not export {}: {e}", record.display()))
+            }
         };
     }
     let seed = cli::load_seed(c.prompt, c.file)?;

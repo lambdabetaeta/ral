@@ -14,7 +14,7 @@ use crate::bus::{Emitter, Next};
 use crate::provider::{Delta, Provider, ProviderError, StepOut, StopReason, ToolCall};
 use crate::record::ToolResult as SessionToolResult;
 use crate::record::commit::Stream;
-use crate::record::{AgentState, EditAuthority, Forensic, QuiesceReason, Transient};
+use crate::record::{AgentState, EditAuthority, Forensic, QuiesceReason, Transient, Voice};
 use ral_core::first_order::FOValue;
 use ral_core::process::CancelCause;
 use std::ops::ControlFlow;
@@ -30,7 +30,7 @@ enum Turn {
 }
 
 impl Avatar {
-    /// Run one deliberation: optionally commit `prompt`, then drive
+    /// Run one deliberation: optionally commit `prompt` and its voice, then drive
     /// round-trips to quiescence over `provider`, read once by the caller so a
     /// `/model` swap lands on the next item rather than mid-item.
     ///
@@ -40,7 +40,7 @@ impl Avatar {
     pub fn deliberate(
         &mut self,
         provider: &Arc<Provider>,
-        prompt: Option<String>,
+        prompt: Option<(String, Voice)>,
         continues: Option<u64>,
         emit: &Emitter,
     ) -> Result<Outcome, Fault> {
@@ -48,10 +48,10 @@ impl Avatar {
         // Entry is the one point every route into a deliberation crosses, so a
         // reply staged by a batch a cancel or an error cut short dies here.
         self.reply.borrow_mut().take();
-        if let Some(p) = prompt {
+        if let Some((text, voice)) = prompt {
             self.log
                 .borrow_mut()
-                .append_user(p, continues)
+                .append_user(text, continues, voice)
                 .map_err(Fault::Log)?;
         }
         let mut retried = false;
@@ -78,20 +78,23 @@ impl Avatar {
     /// `retried` is whether this round-trip already follows an overflow's
     /// eviction, which is never taken twice running.
     fn round_trip(&mut self, provider: &Provider, retried: bool) -> Result<Turn, Fault> {
-        // The turn's live row derives from the `Display::Turn` record this
-        // authors alongside the protocol one.
-        self.log.borrow_mut().record_turn_start(
-            provider.tuning().clone(),
-            provider.openrouter_route().map(str::to_owned),
-        )?;
-        let messages = self.log.borrow().render_messages().map_err(Fault::Log)?;
         let recorder = self.recorder();
+        let turn = self.log.borrow().context().next_id();
+        recorder
+            .emit(Forensic::TurnStarted {
+                turn,
+                tuning: provider.tuning().clone(),
+                route: provider.openrouter_route().map(str::to_owned),
+            })
+            .map(drop)?;
+        let messages = self.log.borrow().render_messages().map_err(Fault::Log)?;
+        let system = self.log.borrow().context().system().clone();
         recorder.transient(Transient::State(AgentState::AwaitingModel));
         let mut stream = Stream::default();
         let token = &self.agent.token;
         let taken = provider.complete(
             crate::provider::Request {
-                system: &self.agent.system,
+                system: &system,
                 transcript: &messages,
                 tools: self.fleet.launch.tools,
                 search: self.agent.search,
@@ -199,7 +202,7 @@ impl Avatar {
             .map_err(Fault::Log)?;
         match (cut_short, tool_calls.is_empty()) {
             // The cut rides on whole, cause and all: the caller's own
-            // `record_provider_error` is its one record, and the renderers
+            // `Forensic::ProviderError` is its one record, and the renderers
             // read the remedy off the cause itself.
             (Some(cause), true) => Err(ProviderError::Truncated {
                 cause: Box::new(cause),
@@ -258,10 +261,10 @@ impl Avatar {
             match next {
                 Next::Read(read) => self.read(&read, emit),
                 Next::Item(item) => {
-                    self.arrive(&item, None);
+                    self.arrive(&item);
                     self.log
                         .borrow_mut()
-                        .append_steering(item.text())
+                        .append_steering(item.text(), item.voice())
                         .map_err(Fault::Log)?;
                 }
                 Next::Rewrite(_) => unreachable!("the mid-exchange drain holds at a rewrite"),
@@ -272,7 +275,7 @@ impl Avatar {
         if !steering.is_empty() {
             self.log
                 .borrow_mut()
-                .append_steering(steering.join("\n"))
+                .append_steering(steering.join("\n"), Voice::Harness)
                 .map_err(Fault::Log)?;
         }
         // A `reply` in the fully drained batch ends the run here, not at
@@ -293,10 +296,9 @@ impl Avatar {
                     self.note(line);
                     None
                 }
-                Warning::Model(reminder) => self
-                    .readings
-                    .nudges
-                    .remind(&reminder, &mut self.log.borrow_mut()),
+                Warning::Model(reminder) => {
+                    self.readings.nudges.remind(&reminder, &self.log.borrow())
+                }
             })
             .collect()
     }

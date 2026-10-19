@@ -36,13 +36,13 @@
 //! [`PolicyError`], never a wider grant.  `tempdir` alone trusts its source as
 //! given, `TMPDIR` being the launching user's to set.
 
-use crate::path::shown;
 use super::toolchains::{self, Toolchain};
 use crate::host::resolve_xdg;
 use crate::path::XdgKind;
 use crate::path::git::{BadPointer, Pointer, discover_git_dir};
 use crate::path::identity::windows_identity_components;
 use crate::path::lex::{Root, root};
+use crate::path::shown;
 use crate::path::sigil::parse_xdg_token;
 use crate::path::tilde::TildePath;
 use crate::path::{Allow, FrozenPath, PathRules};

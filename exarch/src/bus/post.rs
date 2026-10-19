@@ -7,7 +7,7 @@ use ral_core::first_order::FOValue;
 use std::fmt;
 use std::time::Duration;
 
-use crate::record::{AgentId, Memory, Settlement};
+use crate::record::{AgentId, Memory, Settlement, Voice};
 
 /// A schedule's id: monotonic, and never reused, not even across `/clear`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -385,6 +385,16 @@ impl Item {
             Self::Agent(r) => r.render(),
             Self::Message(m) => m.render(),
             Self::Surface { values, .. } => surface_notice(values),
+        }
+    }
+
+    /// Who the record credits with this item.
+    pub(crate) fn voice(&self) -> Voice {
+        match self {
+            Self::Human(_) => Voice::Human,
+            Self::Wakeup(_) => Voice::Wakeup,
+            Self::Message(_) => Voice::Peer,
+            Self::Agent(_) | Self::Nudge { .. } | Self::Surface { .. } => Voice::Harness,
         }
     }
 

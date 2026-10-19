@@ -4,9 +4,9 @@
 //! prelude function, or host-installed library entry to its documentation and
 //! place in the shell.
 
-use crate::path::shown;
 use crate::ansi::{BOLD, CYAN, DIM, RESET};
 use crate::ir::CommandName;
+use crate::path::shown;
 use crate::prelude_manifest::PRELUDE_DOCS;
 use crate::runtime::command::Head;
 use crate::terminal;

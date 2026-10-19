@@ -82,7 +82,10 @@ mod identity_cancel_tests {
         let _signals = transport.control().forward_signals();
         let worker = {
             let transport = transport.clone();
-            #[allow(clippy::disallowed_methods, reason = "native: sh reads the command line")]
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "native: sh reads the command line"
+            )]
             let src = format!("sh -c 'touch {}; exec sleep 30'", marker.display());
             std::thread::spawn(move || crate::carrier::testkit::eval(&transport, &src))
         };

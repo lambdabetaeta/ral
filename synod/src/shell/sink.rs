@@ -270,12 +270,14 @@ fn project_protocol(protocol: &Protocol) -> Option<SynodEvent> {
     match protocol {
         Protocol::UserPrompt { .. }
         | Protocol::Steering { .. }
-        | Protocol::ContextMessage { .. }
+        | Protocol::System { .. }
+        | Protocol::Import { .. }
         | Protocol::Inherited { .. }
         | Protocol::AssistantMessage { .. }
         | Protocol::ToolResults { .. }
         | Protocol::Evicted { .. }
-        | Protocol::Rewound { .. } => None,
+        | Protocol::Rewound { .. }
+        | Protocol::Cleared => None,
     }
 }
 
@@ -318,19 +320,12 @@ fn project_display(display: &Display) -> Option<SynodEvent> {
         // The trunk's committed reasoning, its prose cut line by line for
         // the durable scrollback, a tool result already said on its call row,
         // a settled background block — a worker thread is no business of a
-        // secretary's — the turn breadcrumb, which is the CLI's register and
-        // no fact of the conversation, and a display twin of a protocol fact
-        // the screen never actually drew live: none of these are narrated to
-        // the window, which draws only from the live deltas and the acts
-        // above.
+        // secretary's: none of these are narrated to the window, which draws
+        // only from the live deltas and the acts above.
         Display::Done { .. }
         | Display::Thinking { .. }
-        | Display::Prompt { .. }
         | Display::Answer { .. }
-        | Display::Result { .. }
-        | Display::Turn { .. }
-        | Display::Evicted { .. }
-        | Display::Rewound { .. } => None,
+        | Display::Verdict { .. } => None,
         // Intercepted by `Router::route_fact` before this fold ever runs.
         Display::SubagentDone { .. } => None,
     }
@@ -350,14 +345,10 @@ fn project_display_helper(display: &Display) -> Option<SynodEvent> {
         Display::Context { turns } => process_card(Some(context_rows_card(turns))),
         Display::Done { .. }
         | Display::Thinking { .. }
-        | Display::Prompt { .. }
         | Display::Answer { .. }
         | Display::ToolCall { .. }
         | Display::HarnessCall { .. }
-        | Display::Result { .. }
-        | Display::Turn { .. }
-        | Display::Evicted { .. }
-        | Display::Rewound { .. } => None,
+        | Display::Verdict { .. } => None,
         Display::SubagentDone { .. } => None,
     }
 }
