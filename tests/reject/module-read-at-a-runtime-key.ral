@@ -1,4 +1,4 @@
-# contains: with a runtime key
+# contains: a record takes a literal label
 let m = use 'lib/versioned.ral'
 let k = 'version'
 return $m[$k]

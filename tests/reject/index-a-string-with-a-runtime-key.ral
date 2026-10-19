@@ -1,4 +1,5 @@
 # codes: T0062
-# contains: can't index a value of type String
+# contains: String cannot be indexed
+# contains: text cannot be indexed; use `slice $s 0 80` or `lines $s`
 let x = 'hello'
 echo $x[0]

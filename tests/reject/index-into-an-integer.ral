@@ -1,4 +1,4 @@
 # codes: T0062
-# contains: with a runtime key
+# contains: Integer cannot be indexed
 let xs = 42
 return $xs[0]

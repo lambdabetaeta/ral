@@ -1,0 +1,4 @@
+# codes: T0061
+# contains: lists cannot be sliced; use `take 2 $xs`
+let xs = [1, 2, 3]
+return $xs[0..2]

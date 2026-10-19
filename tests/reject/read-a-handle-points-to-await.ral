@@ -1,0 +1,4 @@
+# codes: T0061
+# contains: await the handle first: `await $h`
+let h = spawn { printf hi }
+return $h[value]

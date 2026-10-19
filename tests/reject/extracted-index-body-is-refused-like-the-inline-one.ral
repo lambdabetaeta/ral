@@ -1,4 +1,4 @@
 # codes: T0062
-# contains: index a value of type Integer
+# contains: Integer cannot be indexed
 let f = { |x| $x[$x] }
 map $f [1]

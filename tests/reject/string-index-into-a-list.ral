@@ -1,4 +1,4 @@
 # codes: T0061
-# contains: only records have fields
+# contains: a list takes an Integer, not `hello`
 let xs = [1, 2, 3]
 return $xs[hello]

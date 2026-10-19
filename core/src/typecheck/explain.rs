@@ -180,20 +180,22 @@ impl TypeErrorKind {
             }
             Self::FieldOnNonRecord { label, ty } => {
                 let ctx = FmtCtx::for_value_types(&[ty]);
-                format!(
-                    "you tried to read `{label}` (a field or a key) from a value of type {}, but only records have fields and only maps have keys",
-                    fmt_ty_ctx(ty, &ctx)
-                )
+                match ty {
+                    Ty::List(_) => {
+                        format!("{INDEX_RULE}: a list takes an Integer, not `{label}`")
+                    }
+                    _ => format!("{INDEX_RULE}: {} cannot be indexed", fmt_ty_ctx(ty, &ctx)),
+                }
             }
             Self::IndexOnLiteral { literal, key } => format!(
                 "`[{key}]` reads from {literal} itself: an index attaches to the one word right before it"
             ),
+            Self::DynamicIndexOnScalar { ty: Ty::Record(_) } => {
+                format!("{INDEX_RULE}: a record takes a literal label")
+            }
             Self::DynamicIndexOnScalar { ty } => {
                 let ctx = FmtCtx::for_value_types(&[ty]);
-                format!(
-                    "can't index a value of type {} with a runtime key",
-                    fmt_ty_ctx(ty, &ctx)
-                )
+                format!("{INDEX_RULE}: {} cannot be indexed", fmt_ty_ctx(ty, &ctx))
             }
             Self::DeadPipeEdge { feed } => format!(
                 "the pipe writes into a stdin this `{}` replaces",
@@ -835,22 +837,12 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
              (`!$t[field]` reads `field` off `$t` and forces *that*)"
                 .to_string(),
         ),
-        TypeErrorKind::FieldOnNonRecord { .. } => {
-            Some(
-                "check that the value you're indexing is a record like `[a: 1, b: 2]` or a map like `[\"a\": 1]`"
-                    .to_string(),
-            )
-        }
+        TypeErrorKind::FieldOnNonRecord { label, ty } => index_hint(ty, Some(label)),
         TypeErrorKind::IndexOnLiteral { literal, key } => Some(format!(
             "did you mean to index what a command returns? Force the command first, \
              then index its result: `!{{… {literal}}}[{key}]`"
         )),
-        TypeErrorKind::DynamicIndexOnScalar { .. } => Some(
-            "only lists (key: Integer) and maps (key: String) \
-             accept a key computed at runtime: for a record \
-             field, use a static name like $r[fieldname]"
-                .to_string(),
-        ),
+        TypeErrorKind::DynamicIndexOnScalar { ty } => index_hint(ty, None),
         TypeErrorKind::CaseOnNonVariant { .. } => {
             Some(format!(
                 "construct the value with a tag ({}) before scrutinising it",
@@ -1189,6 +1181,33 @@ fn shape_hint(kind: &TypeErrorKind) -> Option<String> {
         );
     }
     byte_writer_hint(expected, actual)
+}
+
+/// The rule every refused `[…]` states.
+const INDEX_RULE: &str = "`[…]` reads a list by Integer, a record by label, or a map by key";
+
+/// A fix for a refused `[…]`, by the head of the value it read; `label` is absent for a computed index.
+fn index_hint(ty: &Ty, label: Option<&str>) -> Option<String> {
+    Some(match ty {
+        Ty::String => "text cannot be indexed; use `slice $s 0 80` or `lines $s`".into(),
+        Ty::Bytes => "decode bytes first: `bytes-to-string $b`".into(),
+        Ty::Handle(_) => "await the handle first: `await $h`".into(),
+        Ty::List(_) => {
+            let (lo, hi) = label?.split_once("..")?;
+            let (lo, hi) = (lo.parse::<u32>().ok()?, hi.parse::<u32>().ok()?);
+            let from = if lo == 0 {
+                "$xs".into()
+            } else {
+                format!("!{{drop {lo} $xs}}")
+            };
+            format!(
+                "lists cannot be sliced; use `take {} {from}`",
+                hi.saturating_sub(lo)
+            )
+        }
+        Ty::Record(_) => "read a record field by name: `$r[fieldname]`".into(),
+        _ => return None,
+    })
 }
 
 /// Whether a row carries `status: Int`.  An error carries the row as it stood

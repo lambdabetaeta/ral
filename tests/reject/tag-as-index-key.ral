@@ -1,4 +1,4 @@
 # codes: T0062
-# contains: with a runtime key
+# contains: a record takes a literal label
 let r = [a: 1, b: hello]
 return $r[`a]

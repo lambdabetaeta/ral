@@ -1,4 +1,4 @@
 # codes: T0061
-# contains: only records have fields
+# contains: Integer cannot be indexed
 let xs = [1, 2]
 return $xs[0][a]

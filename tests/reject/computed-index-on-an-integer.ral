@@ -1,4 +1,4 @@
 # codes: T0062
-# contains: index a value of type Integer
+# contains: Integer cannot be indexed
 let pick = { |m k| $m[$k] }
 let x = pick 5 5
