@@ -5,6 +5,8 @@ generated_at_commit: ced3518c
 
 # An eviction is a set of turns
 
+> Superseded in part: `Display::Rewound` is gone, and `/rewind` withdraws turns instead of truncating the table, so the 261007 note below is reversed on readability (withdrawn turns stay readable through `exarch-transcript`) and on re-minting the anchor (ids stay lineage-monotone). See [[internals/session-record|session-record]].
+
 **There is one context edit. It takes a set of resident turns out of the
 context, wherever they lie, leaves a marker standing where they were, and
 carries the model's optional note. Every way of addressing the context and

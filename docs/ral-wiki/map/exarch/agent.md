@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 38a02883d4b4526b1ae6a3c890081b016847dfdb
+generated_at_commit: 11950445365e2a5381b0bc988f6b6142ae16bb52
 generated_at_date: 2026-10-19
 covers_paths: [exarch/src/agent.rs, exarch/src/latch.rs, exarch/src/agent/, exarch/src/signals.rs, exarch/src/cancel.rs, exarch/src/schedule.rs, exarch/src/enquiry.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
@@ -129,8 +129,8 @@ fleet and hatches `main` (`TRUNK_NAME`) over a fresh `AgentLog::root`;
 root's `SessionStarted { parent: None, .. }` and holds no `SessionClosed`, in
 id order, with its recorded name; a record that cannot be read is an error
 naming its session, not a skipped root), founds the fleet seated for the first,
-and hatches each over its record replayed (`AgentLog::resume` takes that same
-name, which `Head` therefore no longer carries), the rest seated through the
+and hatches each over its record replayed (`AgentLog::resume(sessions_root, id)`; the name is `live_roots`' alone),
+the rest seated through the
 launch's `genesis`. It hands back one `Resumed { turn, bytes }` (`record/session.rs`)
 per root, which the TUI's tab notes after mirroring the log.
 
@@ -141,8 +141,9 @@ built), reads the builtin index and `$EXARCH_SCRATCH` off it, substitutes the
 scratch placeholder into the prompt template, and settles the `Launch`; it
 refuses a fuelled wire root with no `factory`. `hatch` makes one root of that
 fleet under the name its `Claim` holds (each caller claims first, then seats, then hatches, so a refused name boots no engine), resolves the prompt
-(`Launch::prompt_for`), opens the log through `open` (which may hand a fact of
-the opening back beside it, as `resume` does its `Resumed`), and `assemble`s it
+(`Launch::prompt_for`), opens the log through `open` (which takes the prompt
+as `system: &str` — the log records it as `Protocol::System` — and may hand a
+fact of the opening back beside it, as `resume` does its `Resumed`), and `assemble`s it
 under the launch's `Trunk` role, `caps`, `fuel` and `search`. The recorded
 account is derived there, as `Avatar::child_of` derives it. `RootConfig` carries
 the prompt, caps, `fuel` (exarch's and synod's launch sites pass `SPAWN_FUEL`),
@@ -172,7 +173,7 @@ copy ([[design/egress|egress]], [[map/synod|synod]]). Host-mode exarch, which
 has no guest to police, still keeps `Egress` for one thing: the `search` bit,
 which every fork inherits verbatim. `provider::wire::tool_defs` attaches the
 hosted search tool per request, only where the adapter has one, so a `/model`
-swap or a `named` child provider never leaves a stale verdict behind.
+swap or a `role` child provider never leaves a stale verdict behind.
 
 A node built to converse — every attended or embedded root — withholds
 `reply`; whether it also parks for a human is the launch's say, not the
@@ -709,17 +710,17 @@ swap on one agent never disturbs another. `fork` seeds the child's own handle
 from the parent's current provider (`ProviderHandle::new(self.provider.current())`),
 so the child inherits the model in force at spawn and may diverge afterward.
 
-A builtin spawn may say otherwise. `` exarch-agents `start ``'s `provider` and
-`model` fields each name `` `inherit `` or `` `named <Str> ``, and
-`ExarchDesk::child_provider` reads them **before the `SeatKind` split**, so
-both arms share one resolution and a refusal unwinds nothing — no adopted
-fork, no forked log, no engine made. A selection that resolves to the
-parent's own pair shares the parent's `Arc<Provider>`, allocating nothing; any
-other goes through `provider::Bureau::reselect`, which inherits the parent's
-tuning and output cap but not its `OpenRouter` route, chosen for the parent's
-model alone, and mints through `Bureau::build`, refusing a model the account
-does not list ([[map/exarch/provider|provider]]). A scripted session holds
-`Bureau::Scripted` and refuses, saying it mints nothing.
+A builtin spawn may say otherwise. `` exarch-agents `start ``'s `model` field
+names `` `inherit `` or `` `role <Str> ``, and `ExarchDesk::child_provider`
+reads it **before the `SeatKind` split**, so both arms share one resolution and
+a refusal unwinds nothing — no adopted fork, no forked log, no engine made.
+`` `inherit `` shares the parent's `Arc<Provider>`, allocating nothing; a role
+is the `Arc<Provider>` the human bound to that name at launch
+(`Launch::roles`, [[map/exarch/provider|provider]]), minted once with the
+launch's tuning and output cap. With no roles configured, or an unknown name,
+the spawn is refused saying so. The agent names neither a provider nor a model,
+and a `Roles` prompt section lists the roles to an agent that spawns, only when
+any exist.
 
 The one `AgentLog::fork` call site — `Avatar::child_of`, which the desk's
 `start` arm calls — hands the child log the *live* model and account rather than copying the parent log's,
@@ -727,6 +728,16 @@ which were fixed at its session start: a child forked after a `/model` on the
 parent's tab records what it actually runs, not the pre-switch model. A root
 hatched by `/new` or `/branch` likewise starts on the focused agent's current
 provider.
+
+`AgentLog` authors `Protocol` and its own bookends and nothing else: its
+protocol mutations go through one funnel that emits and then advances the model
+fold, and every other fact (usage, nudges, errors, `TurnStarted`, session
+end) is emitted by its worker through the agent's `Emitter`, with
+`emit_or_report` where a failure is a fault rather than an error. `fork`
+(`pub(crate)`) takes the child's `system` prompt and a `Memory`, and a `mnemon`
+child's log opens with `SessionStarted`, `Inherited`, `System` in that order;
+the `/new` and `/branch` roots (`spawn::hatch_root`) pass the prompt they built
+and, for `/branch`, the `Inherited` they computed.
 
 ## Lifecycle: clear, close, evict, resume, hatch, fork
 
@@ -737,20 +748,15 @@ identity root boots a fresh engine through `IdentityTransport::boot` from the
 same `Attach`, so the scratch it names and the prompt that names it stay true,
 onto the *same* interrupt target, and resets the escalation ladder; a wire
 seat or an adopted fork has no recipe to reboot in place and answers `/clear`
-with a sentence. The identity seat rotates `record.jsonl` to the
-first-free `.n`, then starts a fresh record ledger; it never truncates the
-old record. The record rename is the rotation commit point. The rotation
-swaps the *file* behind the seam, never the seam: the `Emitter` and its
-attached bus sink are the session's, so every clone already handed out — the
-surface buffer's, the frontend's coupled channel — writes into the new
-segment and keeps publishing, under the log's next `Segment` — which is how
-the frontend learns of the clear, its mirror starting over on the first fact
-that carries it. Swapping the `Emitter` instead stranded them on the
-rotated-away file, and the frontend stayed dark for the whole first exchange
-of the cleared session. A failed clear rotates nothing and is an error note
-alone. Clear then has the agent `forget` — cancel
+with a sentence. It then has the agent `forget` — cancel
 its subtree, drop what it was awaiting, clear its wakeups and its pins — and
-rebirths the avatar's `Readings` whole, a rebuilt context having been
+records `Protocol::Cleared` through `AgentLog::clear`, in the same
+`record.jsonl` and through the same seam: every turn is *withdrawn* from the
+context, the system prompt stays, and the log keeps every record, so the cleared
+turns stay readable through `exarch-transcript`. `clear` refuses while tool
+results are outstanding, and a cleared child keeps its parentage. The frontend
+learns of the clear from the record itself, its mirror stepping `Delta::Cleared`.
+Clear then rebirths the avatar's `Readings` whole, a rebuilt context having been
 measured and told nothing. It touches no process-wide state: a `/clear` on
 one tab is that tab's. Replacing the
 transport drops the outgoing shell, whose `LocalState` teardown cancels
@@ -767,11 +773,15 @@ not a fleet-wide reset.
 root of the run, each from its own `record.jsonl` (`AgentLog::resume`, which
 accepts any root head, not session 0 alone), validating and replaying it,
 quarantining only an unterminated crash fragment, then reopening the file for
-append. The live model and provider are selected again, while each shell is
-fresh and receives a note describing the
+append. The live model and provider are selected again, the freshly built
+prompt is recorded as `Protocol::System` iff it differs from the one in force
+(`AgentLog::record_resumed`), while each shell is
+fresh and receives a note, imported as a `Protocol::Import` turn, describing the
 bindings, workers, cwd, scratch, pins, and schedules that were not durable.
-A `mnemon` root's record, headed by `Protocol::Inherited` and its
-`ContextMessage`s, folds back like any other. Wire seats, chat runs and child
+A `mnemon` root's record, headed by `Protocol::Inherited`, folds back like any
+other by reading its resident rows through the pointers the link carries, so a
+resumed `/branch` root needs its source session's `record.jsonl`; an unreadable
+source refuses the resume, naming the file. Wire seats, chat runs and child
 logs are refused rather than half-resumed; a headless `--resume` takes exactly
 one live root and otherwise refuses, naming the count — the only place roots
 are counted.
@@ -791,7 +801,7 @@ window's reserve (`gauge.rs`'s `eviction_due` — used tokens into the top 15%
 of a known window; `EVICT_THRESHOLD`, 500 KiB of serialised history, is the
 fallback when the window is unknown) and `Context::can_evict` holds (no
 pending tool results). It is called **at the top of every `deliberate` loop
-iteration**, before `record_turn_start`: every turn boundary is a boundary the
+iteration**, before the `TurnStarted` record: every turn boundary is a boundary the
 protocol is well-formed at, and the turn a cut would take is never the one in
 hand, so there is no iteration where weighing is unsafe
 ([[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]]). Long
@@ -834,19 +844,20 @@ model reaches the other two: `` exarch-context `survey ``/``
 model's own `` `evict `` carries a `note`. The user's own hand is
 `/rewind`, a picker over the prompts on screen ([[map/exarch/frontend|frontend]]),
 which is **not an eviction**: `AgentLog::rewind(anchor)`
-records `Protocol::Rewound { anchor }` and the fold step truncates the table
-at the anchor, so the anchor and every later turn — departed rows included —
-leave the structure outright, with no hole, no marker and no door; the next
-prompt is minted `anchor` again, the automaton rests where the kept prefix
-leaves it (`state::resting`), and `exarch-transcript` cannot reach what the
-table no longer holds, their records staying in `record.jsonl` as forensic
-fact. `Avatar::rewind` publishes `Display::Rewound { anchor }` beside it, sheds
-queued self-nudges, and rebuilds the nudge state. The shell is not rewound,
-and the picker says so. `AgentLog::opens(continues)` decides once whether a
-prompt opens a turn (`UserPrompt { turn }`) or extends the live one
-(`Steering`), and `arrive` stamps that same verdict on the prompt's
-`Display::Prompt { turn }` echo, so the screen knows exactly which turn each
-prompt opened;
+records `Protocol::Rewound { anchor }` alone, and the fold step *withdraws* the
+anchor and every later turn — departed rows included — from the context, with no
+hole and no marker. The turns stay readable through `exarch-transcript`, the next
+prompt is minted `reach + 1` so ids stay monotone, the automaton rests where the
+kept prefix leaves it (`state::resting`), and an anchor already withdrawn is
+refused. `Avatar::rewind` sheds
+queued self-nudges and rebuilds the nudge state; the screen learns of the rewind
+from the record. The shell is not rewound,
+and the picker says so. `AgentLog::append_user(text, continues, voice)` decides
+once whether a prompt opens a turn (`UserPrompt { turn, voice }`) or extends the
+live one (`Steering`), and the view fold draws the prompt off that very record
+iff its `Voice` is not `Harness`, so the screen knows exactly which turn each
+prompt opened (`Item::voice`: `Human` and `Wakeup` as themselves, a peer
+`Message` as `Peer`, and a child result, nudge or surface notice as `Harness`);
 `/context` surveys the context without editing it — `emit_context_survey`
 posts the survey's turns as a `Display::Context` fact, and `context_rows_card`
 groups them off their roles at draw time, one field per prompt with the

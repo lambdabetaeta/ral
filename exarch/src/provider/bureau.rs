@@ -16,10 +16,7 @@ use ral_core::sync::LockExt;
 
 use super::allowance::{LiveMeters, Survey};
 use super::credential::CredentialStore;
-use super::models::{
-    AvailableModel, Listed, LiveSource, ModelCatalog, ModelSource, ProviderEndpoint,
-    available_models, listing_of,
-};
+use super::models::{Listed, LiveSource, ModelCatalog, ModelSource, ProviderEndpoint, listing_of};
 use super::{Account, Backend, Engine, Provider, Rations, Selection, Tuning, oauth, pricing};
 use crate::app::App;
 
@@ -37,7 +34,7 @@ use crate::app::App;
 /// the one place both are held at once, store first. [`Rations`]' own lock is a
 /// leaf, held for one map access and never with either. A UI thread must never
 /// hold the store or catalog while waiting on an agent thread, which takes
-/// both, one after the other, whenever it mints a child's provider.
+/// both, one after the other, whenever it builds a provider.
 #[derive(Clone)]
 pub struct Holdings {
     pub store: Arc<Mutex<CredentialStore>>,
@@ -158,13 +155,6 @@ impl Bureau {
         }
     }
 
-    pub(crate) fn models(&self) -> Result<Vec<AvailableModel>, String> {
-        let Self::Live { holdings, .. } = self else {
-            return Err(mints_nothing());
-        };
-        available_models(&holdings.catalog, &self.available())
-    }
-
     /// Mint a provider on this session's engine — the only caller of
     /// [`Provider::build`], and so the one door every selection passes:
     /// `account` must list `model`.
@@ -211,30 +201,6 @@ impl Bureau {
             selection(account, model, tuning, route, max_tokens),
             context_window,
         )))
-    }
-
-    /// Mint a provider that differs from `current` only in its account and
-    /// model — the spawn's door.
-    ///
-    /// Tuning and the output cap are the operator's knobs rather than part of
-    /// a model's identity, so they carry across; the route was chosen for
-    /// `current`'s model, so it does not.
-    ///
-    /// # Errors
-    /// As [`Bureau::build`].
-    pub fn reselect(
-        &self,
-        current: &Provider,
-        account: &Account,
-        model: String,
-    ) -> Result<Arc<Provider>, String> {
-        self.build(
-            account,
-            model,
-            current.tuning(),
-            None,
-            current.max_tokens_override(),
-        )
     }
 
     /// Admit a freshly signed-in `ChatGPT` token, returning who it now is and

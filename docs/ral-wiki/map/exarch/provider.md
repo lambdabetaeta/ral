@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 38a02883d4b4526b1ae6a3c890081b016847dfdb
+generated_at_commit: 11950445365e2a5381b0bc988f6b6142ae16bb52
 generated_at_date: 2026-10-19
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs]
 ---
@@ -356,11 +356,21 @@ listing names it, and `Bureau::build` refuses any other pair, so no account is
 ever asked for a model it does not list. `ModelCatalog` memoises and
 disk-caches both paths:
 
-- `Bureau::models` exposes those listings to `exarch-agents models` and
-  `grep-models` as provider/model pairs. Providers are exact account IDs so
-  distinct logins remain selectable. A listing failure names the account and
-  refuses the query. Fuzzy search ranks model and provider together through
-  `text::rank_by`, the picker's matcher; it adds no catalog or network path.
+- **Roles** (`provider/roles.rs`) are the one way a spawned agent gets a
+  model other than its parent's, and the human binds them. `--role NAME=MODEL`
+  (repeatable) resolves MODEL exactly as `--model` does through
+  `state::named` — to the one account whose listing names it, or to the account
+  `--role-provider NAME=ACCOUNT` gives (ACCOUNT as `--provider` accepts it),
+  the tie-breaker the ambiguity error asks for. `Roles::mint` builds each pair
+  through `Bureau::build` once, at launch, with the launch's `Tuning`
+  (`Tuning::initial` plus `--effort`) and `--max-tokens`; a later `/model`
+  changes only the switching agent's own provider. Roles are flags only, never
+  persisted, and absent by default: with none, every child inherits and the
+  system prompt says nothing of roles. `Roles` rides `RootConfig` into
+  `Launch`; the desk's `child_provider` resolves `` `role <name> `` against it,
+  and the `Roles` prompt section (`data/roles.md` plus one `name: model` line
+  per role) is taught only to an agent that spawns. The agent never lists
+  models or names an account: the catalog is not an ambient authority.
 
 - Anthropic, DeepSeek and Gemini list through exarch's own `GET /models`
   (paged to the end for Anthropic and Gemini), because each reports a context

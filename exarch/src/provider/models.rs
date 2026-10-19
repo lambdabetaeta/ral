@@ -40,23 +40,6 @@ pub struct Listed {
     pub context_window: Option<u64>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct AvailableModel {
-    pub provider: String,
-    pub model: String,
-}
-
-pub(crate) fn grep_models(query: &str, models: Vec<AvailableModel>) -> Vec<AvailableModel> {
-    let rows = models
-        .into_iter()
-        .map(|row| (format!("{} {}", row.model, row.provider), row))
-        .collect();
-    ral_core::text::rank_by(query.trim(), rows, |row: &(String, _)| row.0.as_str())
-        .into_iter()
-        .map(|(_, row)| row)
-        .collect()
-}
-
 impl Listed {
     /// A model whose provider reports no window.
     pub fn bare(id: impl Into<String>) -> Self {
@@ -504,22 +487,6 @@ pub fn listing_of<S: ModelSource + Clone>(
     Ok(listed)
 }
 
-pub(super) fn available_models<S: ModelSource + Clone>(
-    catalog: &Mutex<ModelCatalog<S>>,
-    accounts: &[Account],
-) -> Result<Vec<AvailableModel>, String> {
-    let mut models = Vec::new();
-    for account in accounts {
-        let listed = listing_of(catalog, &account.id)
-            .map_err(|why| format!("provider '{}' could not list its models: {why}", account.id))?;
-        models.extend(listed.into_iter().map(|model| AvailableModel {
-            provider: account.id.to_string(),
-            model: model.id,
-        }));
-    }
-    Ok(models)
-}
-
 /// `None` when no cache base resolves (`HOME` unset, no absolute override) —
 /// the catalog then runs memo-only.
 fn cache_path(app: crate::app::App) -> Option<PathBuf> {
@@ -558,11 +525,12 @@ pub fn resolve_account(id: &str, available: &[Account]) -> Option<Account> {
 /// # Errors
 /// Returns `Err` if no account is available, if none lists `name` — naming
 /// those whose listing could not be had — or if several do, since a choice
-/// among credentials is the user's to make with `--provider`.
+/// among credentials is the user's to make, as `remedy` says how.
 pub fn resolve_model_provider(
     name: &str,
     available: &[Account],
     mut listing: impl FnMut(&Account) -> Result<Vec<Listed>, ListFailure>,
+    remedy: &str,
 ) -> Result<Account, String> {
     if available.is_empty() {
         return Err(no_provider_error());
@@ -602,8 +570,7 @@ pub fn resolve_model_provider(
             ))
         }
         many => Err(format!(
-            "model '{name}' is listed by more than one available account ({}): \
-             pass --provider to say which",
+            "model '{name}' is listed by more than one available account ({}): {remedy}",
             many.iter()
                 .map(|account| label(account))
                 .collect::<Vec<_>>()
@@ -748,93 +715,6 @@ mod tests {
     }
 
     #[test]
-    fn available_models_keep_account_identity_and_reuse_the_catalog() {
-        let accounts = [
-            Account::chatgpt("a", "same@x"),
-            Account::chatgpt("b", "same@x"),
-        ];
-        let source = FakeSource::new(Lists::from_iter(
-            accounts
-                .iter()
-                .map(|a| (a.id.clone(), Ok(bare(&["shared-model"])))),
-        ));
-        let calls = Rc::clone(&source.calls);
-        let catalog = Mutex::new(ModelCatalog::memo_only(source));
-        let rows = available_models(&catalog, &accounts).unwrap();
-        assert_eq!(rows.len(), 2);
-        for (row, account) in rows.iter().zip(&accounts) {
-            assert_eq!(row.model, "shared-model");
-            assert_eq!(
-                resolve_pinned_provider(&row.provider, &accounts)
-                    .unwrap()
-                    .id,
-                account.id
-            );
-        }
-        assert_eq!(available_models(&catalog, &accounts).unwrap(), rows);
-        assert_eq!(calls.get(), 2);
-        assert_eq!(available_models(&catalog, &[]).unwrap(), []);
-    }
-
-    #[test]
-    fn available_models_report_a_failed_account_instead_of_a_partial_list() {
-        let accounts = [
-            Account::built_in("anthropic"),
-            Account::built_in("deepseek"),
-        ];
-        let catalog = Mutex::new(ModelCatalog::memo_only(FakeSource::new(Lists::from([
-            (accounts[0].id.clone(), Ok(bare(&["model-a"]))),
-            (
-                accounts[1].id.clone(),
-                Err(ListFailure::Request("offline".into())),
-            ),
-        ]))));
-        assert_eq!(
-            available_models(&catalog, &accounts).unwrap_err(),
-            "provider 'deepseek' could not list its models: offline"
-        );
-    }
-
-    #[test]
-    fn grep_models_matches_both_fields_and_ranks_fuzzy_matches() {
-        let rows = vec![
-            AvailableModel {
-                provider: "vendor-a".into(),
-                model: "alpha".into(),
-            },
-            AvailableModel {
-                provider: "vendor-b".into(),
-                model: "alpine".into(),
-            },
-            AvailableModel {
-                provider: "vendor-a".into(),
-                model: "beta".into(),
-            },
-        ];
-        assert_eq!(grep_models("apha", rows.clone()), vec![rows[0].clone()]);
-        assert_eq!(
-            grep_models("vendor-b alp", rows.clone()),
-            vec![rows[1].clone()]
-        );
-        assert_eq!(grep_models("absent", rows.clone()), []);
-        assert_eq!(grep_models("  ", rows.clone()), rows);
-        let ranked = vec![
-            AvailableModel {
-                provider: "vendor".into(),
-                model: "axlxp".into(),
-            },
-            AvailableModel {
-                provider: "vendor".into(),
-                model: "alp".into(),
-            },
-        ];
-        assert_eq!(
-            grep_models("alp", ranked.clone()),
-            vec![ranked[1].clone(), ranked[0].clone()]
-        );
-    }
-
-    #[test]
     fn a_failed_fetch_keeps_its_reason_and_caches_nothing() {
         let deepseek = Account::built_in("deepseek");
         let lists = Lists::from([(
@@ -901,7 +781,12 @@ mod tests {
         ]);
         let available = [anthropic, llama.clone()];
         assert_eq!(
-            resolve_model_provider("model-b", &available, lookup(&lists)),
+            resolve_model_provider(
+                "model-b",
+                &available,
+                lookup(&lists),
+                "pass --provider to say which"
+            ),
             Ok(llama)
         );
     }
@@ -915,7 +800,13 @@ mod tests {
             (work.id.clone(), Ok(bare(&["model-a"]))),
         ]);
         let available = [personal, work];
-        let err = resolve_model_provider("model-a", &available, lookup(&lists)).unwrap_err();
+        let err = resolve_model_provider(
+            "model-a",
+            &available,
+            lookup(&lists),
+            "pass --provider to say which",
+        )
+        .unwrap_err();
         assert!(err.contains("--provider"), "{err}");
         assert!(err.contains("alex@bristol.ac.uk"), "{err}");
         assert!(err.contains("alex@work"), "{err}");
@@ -928,7 +819,13 @@ mod tests {
         let openrouter = Account::built_in("openrouter");
         let lists = Lists::from([(openrouter.id.clone(), Ok(bare(&["vendor/model-a"])))]);
         let available = [openrouter];
-        let err = resolve_model_provider("vendor/model-b", &available, lookup(&lists)).unwrap_err();
+        let err = resolve_model_provider(
+            "vendor/model-b",
+            &available,
+            lookup(&lists),
+            "pass --provider to say which",
+        )
+        .unwrap_err();
         assert!(err.contains("not listed"), "got: {err}");
     }
 
@@ -944,13 +841,19 @@ mod tests {
             ),
         ]);
         let available = [anthropic, deepseek];
-        let err = resolve_model_provider("model-b", &available, lookup(&lists)).unwrap_err();
+        let err = resolve_model_provider(
+            "model-b",
+            &available,
+            lookup(&lists),
+            "pass --provider to say which",
+        )
+        .unwrap_err();
         assert!(err.contains("deepseek (network down)"), "got: {err}");
     }
 
     #[test]
     fn resolve_with_no_providers_errors() {
-        let err = resolve_model_provider("model-a", &[], lookup(&Lists::new())).unwrap_err();
+        let err = resolve_model_provider("model-a", &[], lookup(&Lists::new()), "").unwrap_err();
         assert!(err.contains("no provider available"), "got: {err}");
     }
 

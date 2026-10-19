@@ -28,6 +28,7 @@ fn converse_trunk(tag: &str, script: Script) -> Avatar {
             egress: crate::egress::Egress::for_test(),
             factory: None,
             bureau: Arc::new(crate::provider::Bureau::Scripted),
+            roles: crate::provider::roles::Roles::default(),
         },
         RootSeat::Identity {
             scratch,
@@ -367,6 +368,7 @@ fn settled_trunk(tag: &str, script: Script, allow_schedule: bool, resume_on_rese
             egress: crate::egress::Egress::for_test(),
             factory: None,
             bureau: Arc::new(crate::provider::Bureau::Scripted),
+            roles: crate::provider::roles::Roles::default(),
         },
         RootSeat::Identity {
             scratch,

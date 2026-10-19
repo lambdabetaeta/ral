@@ -25,7 +25,7 @@ the maximal run of departed turns it stands in, so a marker adjacent to the
 next prompt puts two user-voice messages in a row, whether the hole is at
 message 0 before the oldest surviving prompt or mid-history
 ([[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]); an
-inherited import can end on a user message with the child's launch prompt
+inherited turn can end on a user message with the child's launch prompt
 behind it, and a prompt whose predecessor's answers were interrupted follows
 those answers' last tool results or steering directly
 ([[invariants/turn-ends-ready|exchange-ends-ready]]). genai's Anthropic
@@ -81,7 +81,22 @@ Three adjacent obligations keep the invariant whole:
   a property of the file rather than a habit of the writer
   ([[decisions/260906_context-rollover|context-rollover]]). What the link
   carries — the parent's whole table and its cuts — is
-  [[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]]'s.
+  [[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]]'s. It is also
+  the one record whose meaning lies in another file: its step reads each
+  resident row's records back through digest-checked pointers, keeping each
+  row's admissible prefix so that no dangling `tool_use` of the parent's
+  spawning batch reaches the child's wire, and an unreadable parent refuses
+  the record before the table changes
+  ([[internals/session-record|session-record]]).
+- **`System` and `Cleared` are edits, not messages.** `Protocol::System` sets the
+  prompt every later request goes out under and, like `Inherited`, is
+  sequencing-neutral; it never enters the transcript, the prompt travelling in
+  `Request.system`. `Protocol::Cleared` withdraws every turn and, like
+  `Rewound`, is admitted whenever a new turn is, so it too is refused only
+  while tool results are owed.
+- **A harness-authored turn is an `Import`.** `Protocol::Import { turn, message }`
+  always opens a fresh turn under a newly minted id, and a stale one is refused;
+  it carries no inherited material.
 - **A JSON-body 4xx is classified, not lost (X3).** `json_status_code` reads
   a JSON `"code": <code>` from the nested or flat error body, so an
   OpenRouter-shaped `{"code":400,…}` becomes a structured `Api` error rather

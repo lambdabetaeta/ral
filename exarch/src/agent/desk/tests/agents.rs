@@ -86,46 +86,78 @@ fn start_answers_the_fleets_state_not_a_receipt() {
     let _ = wait_for_settle(&parent_inbox);
 }
 
-/// The parent's own pair, inherited or spelt out, is the parent's own
-/// `Arc<Provider>`: nothing is allocated and the bureau is asked nothing.
+/// `Inherit` is the parent's own `Arc<Provider>`, and a configured role the
+/// very `Arc` the human bound.
 #[test]
-fn the_parents_own_pair_hands_the_child_the_parents_provider() {
-    let desk = desk();
+fn inherit_is_the_parents_provider_and_a_role_the_bound_one() {
+    let bound = Arc::new(Provider::scripted("role-model", Script::new()));
+    let roles = crate::provider::roles::Roles(std::collections::BTreeMap::from([(
+        "cheap".to_string(),
+        Arc::clone(&bound),
+    )]));
+    let launch = crate::agent::fleet::Launch {
+        roles,
+        ..crate::agent::fleet::Launch::for_test()
+    };
+    let desk = ExarchDesk {
+        services: services_with(3, launch).0,
+    };
     let parent = desk.services.agent.current_provider();
-    for model in [Selection::Inherit, Selection::Named(parent.model().into())] {
-        let child = desk
-            .child_provider(&Selection::Inherit, &model)
-            .expect("the parent's own pair needs no minting");
-        assert!(Arc::ptr_eq(&parent, &child));
-    }
+    let inherited = desk.child_provider(&Selection::Inherit).unwrap();
+    assert!(Arc::ptr_eq(&parent, &inherited));
+    let child = desk
+        .child_provider(&Selection::Role("cheap".into()))
+        .unwrap();
+    assert!(Arc::ptr_eq(&bound, &child));
 }
 
-/// A scripted session mints nothing, so a spawn that names a selection is
-/// refused saying so, before anything is adopted: no child is registered.
+/// A role no one bound, or none bound at all, is refused before anything is
+/// adopted: no child is registered.
 #[test]
-fn a_refused_selection_never_registers_a_child() {
-    let (desk, _fleet, _parent_inbox) = spawnable_desk(3);
-    // Refused before any fork is taken up, so none need be parked.
-    let err = desk
-        .ask(start(
-            ForkClaim::Parked(NurseryId(0)),
-            Spec {
-                model: Selection::Named("other-model".into()),
-                ..spec("go", "helper")
-            },
-        ))
-        .expect_err("a scripted bureau must refuse to mint");
-    assert!(
-        err.message.contains("`` exarch-agents `start `` refused")
-            && err.message.contains("mints no others"),
-        "the refusal must name the tag and the reason, got: {}",
-        err.message
-    );
-    assert_eq!(
-        summary(&desk.services.agent).live,
-        0,
-        "a refused selection must never register a child"
-    );
+fn a_refused_role_never_registers_a_child() {
+    let bound = Arc::new(Provider::scripted("role-model", Script::new()));
+    let configured = crate::agent::fleet::Launch {
+        roles: crate::provider::roles::Roles(std::collections::BTreeMap::from([(
+            "cheap".to_string(),
+            bound,
+        )])),
+        ..crate::agent::fleet::Launch::for_test()
+    };
+    for (launch, said) in [
+        (
+            crate::agent::fleet::Launch::for_test(),
+            "no roles are configured, so every child runs on your own model",
+        ),
+        (
+            configured,
+            "no role 'other': the configured roles are cheap; or pass model: `inherit",
+        ),
+    ] {
+        let desk = ExarchDesk {
+            services: services_with(3, launch).0,
+        };
+        // Refused before any fork is taken up, so none need be parked.
+        let err = desk
+            .ask(start(
+                ForkClaim::Parked(NurseryId(0)),
+                Spec {
+                    model: Selection::Role("other".into()),
+                    ..spec("go", "helper")
+                },
+            ))
+            .expect_err("an unbound role must be refused");
+        assert!(
+            err.message.contains("`` exarch-agents `start `` refused")
+                && err.message.contains(said),
+            "the refusal must name the tag and the reason, got: {}",
+            err.message
+        );
+        assert_eq!(
+            summary(&desk.services.agent).live,
+            0,
+            "a refused role must never register a child"
+        );
+    }
 }
 
 /// A `` `start `` whose spec record `edit` has spoilt, as no door sends it.
@@ -154,7 +186,7 @@ fn start_refuses_a_spec_missing_a_field_by_name() {
         .expect_err("a spec missing `name` must be refused");
     assert_eq!(
         err.message,
-        "`` exarch-agents `start ``: `spec: no `name field in a record of 4 fields"
+        "`` exarch-agents `start ``: `spec: no `name field in a record of 3 fields"
     );
 }
 
@@ -338,7 +370,7 @@ fn refused_enquiry_leaves_the_nursery_empty() {
     let (desk, _fleet, _parent_inbox) = spawnable_desk(3);
     let (answer, left_parked) = parked_by(
         &desk,
-        r"exarch-agents `start [prompt: #'go'#, name: 'helper', type: `amnemon, grant: `restrict [net: 'yes'], provider: `inherit, model: `inherit]",
+        r"exarch-agents `start [prompt: #'go'#, name: 'helper', type: `amnemon, grant: `restrict [net: 'yes'], model: `inherit]",
         |desk, session| {
             let answer = desk.ask(start_req(session, "go", "helper"));
             (answer, still_parked(desk, session))
@@ -415,7 +447,7 @@ fn surface_then_spawn_observes_the_surface_first() {
     let session = crate::agent::Avatar::for_test("system").unwrap();
     let (tx, rx) = channel();
     let emit = Emitter::new(tx, session.agent.id);
-    let _ = session.ral(r#"exarch-pins `clear "test-marker"; exarch-agents `start [prompt: #'go'#, name: 't', type: `amnemon, grant: `confined, provider: `inherit, model: `inherit]"#,
+    let _ = session.ral(r#"exarch-pins `clear "test-marker"; exarch-agents `start [prompt: #'go'#, name: 't', type: `amnemon, grant: `confined, model: `inherit]"#,
         5,
         &emit,
     );

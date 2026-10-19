@@ -5,12 +5,12 @@ Prepare inputs in bindings, including reusable helper blocks. A child receives a
     let plan = from-string < #'design.md'#
     let inspect-diff = { git diff -- src/solver/ }
 
-Give the child a bounded task and an explicit reply shape. Use `amnemon` when you can describe the task in a prompt and point to current shell bindings or files; use `mnemon` when it needs the entire conversation up to this point. Inherit the provider and model unless the task calls for another selection:
+Give the child a bounded task and an explicit reply shape. Use `amnemon` when you can describe the task in a prompt and point to current shell bindings or files; use `mnemon` when it needs the entire conversation up to this point:
 
     exarch-agents `start [
       prompt: #'Review $plan against src/solver/ and the changes returned by inspect-diff. Identify correctness issues; do not edit. Reply [verdict: `ok|`revise, issues: [[file: Str, line: Int, why: Str]]].'#,
       name: #'plan-review'#, type: `amnemon, grant: `read-only,
-      provider: `inherit, model: `inherit
+      model: `inherit
     ]
 
 Do independent work while the child runs. Do not poll: if nothing remains, end your turn and wait for its notice. Then bind the reply and inspect the fields you need. Their presence and types are checked at `read`:
@@ -36,7 +36,7 @@ Files are shared. Give concurrent editors non-overlapping write grants when star
       prompt: #'Fix the issues in $review[reply][issues] affecting src/solver/. Reply [changed: [Str], summary: Str].'#,
       name: #'solver-edit'#, type: `amnemon,
       grant: `restrict [fs: [read: [`cwd #'.'#], write: [`cwd #'src/solver/'#]]],
-      provider: `inherit, model: `inherit
+      model: `inherit
     ]
 
 Inspect the changes after the editors reply:
@@ -47,11 +47,6 @@ Cancel a child whose work is no longer needed. Cancellation also reaches its des
 
     exarch-agents `cancel #'plan-review'#
 
-Look up provider/model pairs before choosing another selection. Fuzzy-search both names, or list the full catalog:
-
-    exarch-agents `grep-models #'claude'#
-    exarch-agents `models
-
-For permissions, selection syntax, fan-out, and result schemas, consult the command guide:
+For permissions, fan-out, and result schemas, consult the command guide:
 
     explain exarch-agents

@@ -67,6 +67,7 @@ fn root_config(run_dir: &Path) -> RootConfig {
         egress: exarch::egress::Egress::for_test(),
         factory: None,
         bureau: Arc::new(exarch::provider::Bureau::Scripted),
+        roles: exarch::provider::roles::Roles::default(),
     }
 }
 

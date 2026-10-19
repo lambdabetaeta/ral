@@ -1,30 +1,33 @@
 ---
-verified_at_commit: d9abfb52
-verified_at_date: 2026-09-11
-anchors: [Emitter::emit, Log::append, Log::read, Signal::Fact, Signal::Transient, Record, Protocol, Display, Forensic, Transient, Model::step, View::step, BLOCKS_WINDOW, Blocks::step, Delta, Sink::fact, Blocks::model, replay, model::resume, Scrollback::fact, Scrollback::trim, seed, flush_log, rotate, clear, Context, Turn, Body, Pointer, TurnRow, Held, Locus, render_marker, Context::step, Context::plan_eviction, Context::resolve_cut, Context::place]
+verified_at_commit: 62f8f2a9
+verified_at_date: 2026-10-19
+anchors: [Emitter::emit, Log::append, Log::read, Signal::Fact, Signal::Transient, Record, Protocol, Display, Forensic, Transient, Model::step, Blocks::step, BLOCKS_WINDOW, Delta, Sink::fact, Blocks::model, Selection, replay, model::resume, Mirror::step, Scrollback::fact, export_to, AgentLog::clear, AgentLog::rewind, Context, Turn, Body, Pointer, TurnRow, Held, Locus, Table::withdraw, Context::step, read_seeds, render_marker, Context::plan_eviction, Context::resolve_cut, Context::place]
 ---
 
 # Session record: one seam, one log
 
 **A session has one durable source: `sessions/<id>/record.jsonl`.** Workers
 author facts through one cloneable `record::Emitter`; the model projection, the
-scrollback projection, and the rendered `user.log` are folds or presentations
-of that record. The bus is delivery, not a second authority. This is the
+scrollback projection, and an exported transcript are folds or presentations
+of that record, and a fact with a protocol form is recorded once. The bus is delivery, not a second authority.
+This is the
 operational path behind the [[map/exarch/frontend|frontend]],
 [[map/exarch/cards|cards]], and [[map/exarch/io-surface|io-surface]] maps.
 
 ## The seam
 
-`Emitter::emit` is generic over the sealed `record::Class` set, so a live
-producer can append only a `Protocol`, `Display`, or `Forensic` record. It
-delegates to `record::Log::append`, whose mutex protects the whole critical
-section:
+`Emitter::emit` takes `impl Into<Record>`, so a live producer can append only
+a `Protocol`, `Display`, or `Forensic` record, and returns the
+`Recorded<Record>` it minted. It delegates to `record::Log::append`, whose mutex
+protects the whole critical section:
 
-1. Wrap the record with its append timestamp and serialize the `Entry` envelope.
+1. Serialize the record under its append timestamp as an `Entry` envelope, from
+   a borrow.
 2. Write and flush the line.
 3. Advance the `Seq` and byte cursor and build the `Recorded<Record>` locus.
 4. Meter usage where applicable and publish `Signal::Fact(AgentId, recorded)`
-   through the attached weak fleet sink before releasing the lock.
+   through the attached weak fleet sink before releasing the lock; the record
+   is cloned only for that channel.
 
 Append-then-publish makes channel order log order, so a missing or slow
 receiver cannot lose the fact: it is already in the file and a later replay
@@ -45,27 +48,44 @@ replay path.
 
 ## Three durable classes, one live edge
 
-The outer `Record` vocabulary is closed:
+The outer `Record` vocabulary is closed, and **a fact is recorded in the one
+class that can say it.**
 
-- `Protocol` is the provider-facing history: prompts, context messages, the
-  ancestry link, assistant messages, tool results, and context edits. The
-  model fold consumes this class alone, and every record in it acts on the
-  fold.
-- `Display` is worker-authored presentation data: chopped prose and reasoning,
-  tool calls and results, one observation per observation, cards, notices, done
-  outcomes, and other committed rows. `record/commit.rs` does the chopping
+- `Protocol` is the provider-facing history, and every input of every request:
+  the system prompt (`System`), prompts and steering lines each tagged with the
+  `Voice` that spoke them (`Human`, `Wakeup`, `Peer`, `Harness`), a
+  harness-authored `Import` opening a turn of its own (the resume note), the
+  ancestry link (`Inherited`), assistant messages, tool results, and the context
+  edits `Evicted`, `Rewound` and `Cleared`. The model fold consumes this class
+  alone and every record in it acts on the fold; the view fold reads it too, for
+  the facts the screen draws from it (below).
+- `Display` is worker-authored presentation data that has *no* protocol form:
+  chopped prose and reasoning, tool calls and each call's `Verdict`, one
+  observation per observation, cards, notices, done outcomes, and other committed
+  rows. `record/commit.rs` does the chopping
   before the fact reaches the seam; grouping a call's effects is the frontend's,
   derived online ([[map/exarch/io-surface|io-surface]]). Cards and observations
   carry their round-trippable data, not a pre-rendered terminal image; the view
-  fold builds the marks again.
+  fold builds the marks again. `Answer`, `Thinking`, `ToolCall` and `Verdict`
+  stay here though a protocol record covers the same ground, because each is
+  *recorded at a different moment* and so is not its twin: `Answer` and
+  `Thinking` land line by line while the model streams, before any
+  `AssistantMessage` exists — a cancelled or failed step never commits one, and
+  some providers never return reasoning in the message at all, so they are the
+  only durable form of what was shown; `ToolCall` lands when the call *starts
+  executing*, which is what the scrollback groups effects under, where the
+  assistant message lands every call at once; `Verdict` lands per call as it
+  finishes, where `ToolResults` lands only when the batch ends and carries no
+  `failed`. A verdict is a line count and a flag; the result text is
+  `ToolResults`' alone.
 - `Forensic` is durable evidence that is not model context: the session
   bookends (`SessionStarted`, which names the session and its tree parent,
   `SessionResumed`, `SessionEnded`) and `SessionClosed`, the one record that
   says `/close` ended a session for good, so resume skips it (a record that
   cannot be read at all is an error naming its session, never a silent skip);
-  the shape a turn's request goes out under — sampling and routing both
-  (`TurnStarted`),
-  usage deltas, cancellation, an overflow-learned window (`WindowNarrowed`),
+  the shape a turn's request goes out under — sampling and routing both,
+  beside the id the request will produce (`TurnStarted`), so a retaken request
+  shows the same id twice; usage deltas, cancellation, an overflow-learned window (`WindowNarrowed`),
   provider/stall/error rows, nudges, and other breadcrumbs. The view fold
   admits the rows that belong on scrollback; the model fold ignores them.
 
@@ -74,7 +94,7 @@ captured prefix and its retention metadata exactly; replay adds no further
 truncation.
 
 `Transient` is deliberately outside `Record`: token and thinking deltas, state
-changes, boundaries, child lifecycle, stop reasons, clear acknowledgements,
+changes, boundaries, child lifecycle, stop reasons,
 live pins/resources, and seam faults. These are drawn or routed while the
 process is alive. They are not a hidden fourth record class, and no resume
 attempts to reconstruct them.
@@ -86,9 +106,12 @@ attempts to reconstruct them.
 and calls the fold's exhaustive `step`; a parse error or an unrecognised
 record is a `Refusal`, so replay does not silently skip a vocabulary change.
 
-The model path is `record::Model::step` over `Protocol` records only. During a
-live turn, `AgentLog::advance` applies that same step immediately after the
-seam returns from `emit`.
+`Fold::step` takes each record by value, and `replay` hands over the ones it
+reads. The model path is `record::Model::step` over `Protocol` records only.
+During a live turn, `AgentLog::advance` applies that same step immediately after
+the seam returns from `emit`. `AgentLog` authors `Protocol` and its own
+bookends and nothing else; every other worker emits through the agent's
+`Emitter`.
 
 ### One structure, one fold, everything else a projection
 
@@ -102,34 +125,35 @@ where each one is**
 
 - `turns: Vec<Turn>` in id order — `{ id, role, kind, label, bytes, body }` —
   `role` being `user` or `assistant`, and `kind` `own`, `import` or
-  `inherited`; which assistant turns answer a given prompt is a function of
+  `inherited`; rows are never removed; which assistant turns answer a given prompt is a function of
   role and order, derived where the survivor rule and `plan_eviction` need it
   and held nowhere
   ([[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]);
 - a turn's `body` is either `Here { records, origin }`, its records in memory,
   or `There { at, cut }`, a `Pointer` to the file and byte ranges that hold
-  them; the *context* is the `Here` subsequence;
+  them; the *context* is the `Here` subsequence. A turn that left has left one
+  of two ways, and `cut` says which: `Some` is an eviction, which indexes a
+  note and is drawn in a marker; `None` is a *withdrawal*, which is never drawn;
 - `notes: Vec<Option<String>>`, one slot per eviction, which `There::cut`
   indexes — `None` is a cut made without a note, the harness's own, and the
   marker then has no line to draw;
 - `source`, this log's own `record.jsonl`, where a turn recorded here points
-  once it leaves; the protocol's resting state; and the count of records
+  once it leaves; the system prompt in force (`Context::system`, set by
+  `Protocol::System`); the protocol's resting state; and the count of records
   folded, beside the index of the newest context edit.
 
 Those first three live in a `Table` private to `model/table.rs`, which hands
 the rest of the module a `&[Turn]` and nothing writable. A turn therefore
-changes where it is only through `Table::evict`, the one function that moves a
-turn from here to there, and leaves only through `Table::rewind`, which
-truncates the table at the anchor a `Protocol::Rewound { anchor }` names — so
-the invariant *the
-first resident turn is a user turn* is kept by construction rather than by
-every caller remembering the survivor rule.
+changes where it is only through `Table::evict` and `Table::withdraw`, the two
+functions that move a turn from here to there, and no row ever leaves the table
+— so the invariant *the first resident turn is a user turn* is kept by
+construction rather than by every caller remembering the survivor rule.
 
 `Turn` and `Body` are private to the module: a turn holds records, so it is
 not a value to hand out. Two projections take its place. `Turn::row` yields a
 `TurnRow { id, role, kind, label, bytes, held }`, `Held` read *off the body* —
-`Here` is `Resident`, `There { cut }` is `Evicted { cut }`, and there is no
-third state — so residency and the structure cannot
+`Here` is `Resident`, `There { cut: Some(cut) }` is `Evicted { cut }`, and
+`There { cut: None }` is `Withdrawn` — so residency and the structure cannot
 disagree, and a row states which eviction took its turn rather than leaving a
 reader to infer it from an id window. `Context::linked` yields one
 `Linked { row, at }` per turn: the row, and the address of its transcript
@@ -143,8 +167,8 @@ answers the whole set a pressure cut would take — and `sourced`.
 `Context::step` is the one
 fold — it judges a record before applying it, so a hand-edited or foreign file
 is refused by the same function that folds a live one, and a resume has
-nothing to compare its result with. `Table::evict`
-is the one place a turn moves from here to there.
+nothing to compare its result with. `Table::evict` and
+`Table::withdraw` are the two places a turn moves from here to there.
 
 **A recorded cut is the resolved cut.** `Context::resolve_cut` applies the
 survivor rule at the writer — a prompt whose answers still hold a resident
@@ -153,13 +177,13 @@ that actually left. Replay departs exactly those and `judge` refuses a record
 naming a turn that is not resident, re-deriving nothing
 ([[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]).
 
-**Eviction is a change of address, not a deletion.** The table sets each
-departing turn's body to `There { at, cut }`, where `at` is its `origin`
+**Leaving the context is a change of address, not a deletion.** The table sets
+each departing turn's body to `There { at, cut }`, where `at` is its `origin`
 if it has one and otherwise this log's `source` beside the `Locus` of every
 record it held; the records leave memory and nothing durable is touched. Every
 read of a range checks the record's bytes against the digest the `Locus`
 carries, *before* the parse, so a range that no longer names what it
-measured — a rotated segment, a copied session directory, an edited log — is
+measured — a copied session directory, an edited log — is
 refused as the mismatch it is rather than answered with whatever now lies at
 those offsets. The door reads a turn at a time, so a search never holds more
 than one turn, and it holds one descriptor, reopening only where
@@ -169,19 +193,71 @@ transcript as well as its identity
 
 **A turn's transcript copy is where it was first recorded.** A fork's link
 (`Protocol::Inherited { turns: Vec<Linked>, notes }`) carries an address for
-every row, resident or not, so a turn a `mnemon` seed re-recorded only in part
-still reads back whole from its `origin`, and evicting it in the child points
-at that original copy rather than the short one. The lineage is flattened at
-each fork — a grandchild's row already names the grandparent's file — so
-nothing walks an ancestry, and `Context::sourced` is the whole of "seek in the
-structure, then the file".
+every row, resident, evicted or withdrawn, and the child records no copy of
+the parent's messages: its resident rows are *read back through those
+addresses*, each row's `origin` keeping the original copy, so evicting one in
+the child points there. The lineage is flattened at each fork — a grandchild's
+row already names the grandparent's file — so nothing walks an ancestry, and
+`Context::sourced` is the whole of "seek in the structure, then the file".
+
+**A link is the one record whose meaning lies in another file.** Its step reads
+the parent's records through digest-checked pointers (`read_seeds`, after
+`judge` and before any mutation, so a failed read leaves the structure as it
+was), keeps the *admissible prefix* of every resident row —
+a parent's spawning batch, or an ancestor's turn cut the same way, loses its
+unanswered tail, so no dangling `tool_use` reaches the child's wire — and
+weighs each row by those messages. That file only ever grows, which is what
+makes the pointers safe. A child whose parent's file no longer reads back
+refuses with `Refusal::Unreadable`, naming the file; a live fork then fails the
+spawn, and a resumed `/branch` root, which inherits from its source session,
+needs that session's file to read back.
+
+### Withdrawal: `/clear` and `/rewind`
+
+**A clear and a rewind are one operation: the turns leave the context, leaving
+no marker, and stay in the transcript.** `Protocol::Cleared` is
+`Table::withdraw(0)` and `Protocol::Rewound { anchor }` is
+`Table::withdraw(anchor)`; both keep the system prompt.
+
+- Every turn with `id >= from` departs with `cut: None`. A resident turn gets
+  the address `Table::evict` would give it; an evicted turn keeps its address
+  and *loses its cut*. That is why a withdrawal leaves no eviction note behind,
+  even for turns an earlier eviction had taken: a marker for turns the model is
+  meant to have forgotten would bring them back. A cut straddling a rewind's
+  anchor keeps its cut on the rows below it, and its note may then mention
+  withdrawn turns.
+- Rendering skips withdrawn turns before it forms holes, so a hole is a maximal
+  run of *evicted* turns once withdrawn ones are passed over.
+- A withdrawn turn stays readable: `transcript_index`, `` `read `` and
+  `` `grep `` walk every turn through its pointer, withdrawn ones included, and
+  `` exarch-transcript `` says so.
+- **Ids stay lineage-monotone.** The next prompt after either takes `reach + 1`;
+  a rewind does not mint `anchor` again. `AgentLog::rewind` refuses an anchor
+  already withdrawn, naming the earliest turn still rewindable (an evicted
+  anchor stays rewindable), and `Context::step` refuses a replayed `Rewound`
+  of a withdrawn anchor as foreign. `AgentLog::clear` refuses while tool
+  results are outstanding. After a clear the automaton rests at its default;
+  after a rewind it rests where the newest resident turn below the anchor leaves
+  it.
+- `unclosed_turn` names the newest row only while it is resident: after a rewind
+  that lands past an abandoned exchange the newest row is withdrawn, and no turn
+  is being written, so `` `read `` does not refuse it as "being written now".
+- A cleared child keeps its parentage: `Cleared` changes the context, not the
+  lineage, so a cleared fork resumes as a fork and not as a root.
+- Old logs are refused: `Log::records` fails on a line this exarch does not
+  write, with a message asking whether an older exarch recorded it. The vocabulary
+  carries no reader for earlier shapes.
+
+Withdrawal keeps the law of
+[[decisions/260906_context-rollover|context-rollover]]: every closed record is
+in the transcript for the life of the log.
 
 ### The provider-facing context is a pure function of the structure
 
 `Context::rendered()` builds an owned `Vec<ChatMessage>`, with no render memo
 behind it. Assembly is one walk: at each **hole** — a maximal run of departed
 turns — the one marker `render_marker` yields for it, and every resident turn's
-messages, in order — a prompt whose answers were interrupted
+messages, in order, withdrawn turns passed over — a prompt whose answers were interrupted
 short of a reply included, as they lie
 ([[invariants/turn-ends-ready|exchange-ends-ready]]). `history_bytes` is the
 same walk over the per-turn sums with no turn rendered at all, and
@@ -212,29 +288,53 @@ it and where it stays: `manufacture` takes `&[ChatMessage]` inside
 [[map/exarch/provider|the provider map]] describes that one door,
 `provider/wire.rs`, where those messages become an owned `genai::ChatRequest`.
 
-The other place an owned whole-history `Vec<ChatMessage>` is materialised is
-`Context::inherited_seed` — one entry per resident parent turn under the
-parent's own ids, its last turn cut to `admissible_prefix`, the longest run
-owing no tool result — the context a `mnemon` child inherits at spawn, where
-ownership genuinely transfers into the child's own log. The link's rows and
-notes cross beside it, so the child's marker, survey and index are the same
-projections of the same structure rather than values copied over.
+**The system prompt is a record, not a field.** `Protocol::System { text }` sets
+`Context::system`; it is sequencing-neutral (`advance` leaves the state alone
+and `admissible` answers `true`), and `into_chat_messages` never renders it, since
+the prompt travels in `Request.system`. A round-trip reads the prompt off the
+fold, so the log holds every input of every request. A log opens in one fixed
+order — `SessionStarted`, then `Inherited` when there is one, then `System` —
+which keeps the link the first protocol record of a fork, and a resume records
+`System` again only when the freshly built prompt differs from the one in force.
+The price is the prompt's size, once per log (about 50 KB), and again on each
+change.
 
-`record::model::resume` quarantines a torn crash tail, reads the session's
-identity off the file's first record, and streams every `Protocol` record
-through `Context::step`. There is no second fold and nothing to compare: what
-guards a read-back is the digest, at the moment of the read, where the risk
-is. A missing `record.jsonl` is a named refusal, not an invitation to start an
-empty resumed session.
+`record::model::resume` quarantines a torn crash tail, checks the file's first
+record heads a root, and streams every record through `Model::step` and every
+forensic one through a `Selection`. `Log::read` reads only through the last
+newline, so an unterminated tail is never parsed; one function in `log.rs`
+answers that length for the reader and for the quarantine. There is no second
+fold and nothing to compare: what guards a read-back is the digest, at the moment
+of the read, where the risk is. A missing `record.jsonl` is a named refusal, not
+an invitation to start an empty resumed session. `AgentLog::resume` takes
+the session id alone: the name is `live_roots`', read off the same head record,
+and `live_roots` refuses a session whose record does not parse rather than
+hiding it.
 
-The view path is `Blocks::step` over `Display` and `Forensic`; it skips
-`Protocol` explicitly. `Blocks::push` joins consecutive records of one lane
+**`Selection` is the model in force, folded once.** `SessionStarted` and
+`ModelChanged` name the `(model, provider label)` and the window the catalog
+listed, clearing any narrower window an overflow taught; `SessionResumed` names
+them and keeps what was taught only when the model is unchanged;
+`WindowNarrowed` sets the narrowed window. Resume reads `learned()` off it and
+the view fold reads `model()` and `window()`, so neither keeps a copy.
+
+The view path is `Blocks::step` over all three classes, with one exhaustive match
+over `Protocol`: a `UserPrompt` or `Steering` draws a prompt block iff its
+`Voice` is not `Harness` (nudges, reminders, child results and surface notices
+are spoken for elsewhere); an `Evicted` by the harness draws a marker, while the
+model's own is drawn by its `HarnessCall` act row; `Rewound` truncates the blocks
+from its anchor and opens `BlockKind::Rewound`; `Cleared` drops every block and
+opens `BlockKind::Cleared`, returning `Delta::Cleared`, while usage, the
+selection and the sequences already folded persist; `System`, `Import`,
+`Inherited`, `AssistantMessage` and `ToolResults` are `Quiet`. A
+`Display::Verdict` patches its call, and `Forensic::TurnStarted { turn }` opens
+the turn rule. `Blocks::push` joins consecutive records of one lane
 into a block, while a different kind opens the next block. `Block` construction
 is private to the fold, and the memo keeps a bounded resident window
 (`BLOCKS_WINDOW`) — the one window, for every frontend.
 
 Each step reports what it did as a `Delta`: `Opened` a block, `Grew` the lane
-the tail held, `Patched` a call with its result, or `Quiet`. A frontend is a
+the tail held, `Patched` a call with its verdict, `Rewound` or `Cleared` the blocks, or `Quiet`. A frontend is a
 `bus::Sink`: it owns its own `Blocks` memo, steps it through
 `Sink::fact(id, rec)` — the witnessed record, since a fold is stepped by the
 record *and* its locus — and draws that increment, so a frontend is itself a
@@ -242,65 +342,58 @@ fold over the one log, and cannot invent a third block projection: it renders
 from `BlockKind` off its memo, never from the record vocabulary
 ([[decisions/260909_the-fold-reports-the-printer-mirrors|the-fold-reports-the-printer-mirrors]]).
 Beside the blocks the memo holds the ambient facts none of them draws:
-cumulative usage from the forensic deltas, and the model in force — named by
-the session's head bookend, renamed by each `Forensic::ModelChanged`, so
-`Blocks::model` is total from a session's first record and the context floor a
-frontend stamps prose with reads both of its terms off the fold rather than
-being told the denominator.
-The TUI keeps a 1:1 mirror of its memo, one `tui::Block` per incident, with
-deliberation and the work it ordered collapsed into a group as they land;
-headless keeps one memo per source agent and prints each opened block.
+cumulative usage from the forensic deltas, and the model in force, a
+`Selection` stepped by the bookends and `ModelChanged`, so `Blocks::model` is
+total from a session's first record and the context floor a frontend stamps
+prose with reads both of its terms off the fold rather than being told the
+denominator.
+The TUI keeps a 1:1 mirror of its memo (`tui::Mirror`), one `tui::Block` per
+incident, with deliberation and the work it ordered collapsed into a group as
+they land; headless keeps one memo per source agent and prints each opened
+block.
 
 Live and replay use the same view fold. The TUI's `App::fact` and
 `App::transient` are the two distinct doors: durable blocks are fold-backed,
 while an open answer/thinking line or chrome row remains provisional until a
 later record or boundary resolves it.
 
-## Resume and the user view
+## Resume, clear and export
 
-On TUI resume, each reopened root's `Born` carries its summary and `App::replay`
-folds that root's `record.jsonl` into `Blocks`, handing the memo to the
-scrollback, which becomes its owner:
-`Scrollback::seed` builds its mirror block by block, exactly as a live commit
-does, and marks it as already present in `user.log`. The resumed session
-appends after that seeded prefix instead of writing the replayed window twice.
-Cumulative usage comes from the replayed forensic deltas; the resumed note is
-the boundary between history and new live signals.
+**Resume and a live tab are one construction.** A tab's `Scrollback` is a
+cursor over the log: `Scrollback::fact` steps a record that is next, ignores one
+heard twice, and otherwise catches up from the file, so birth, a gap and a
+resumed session all read the history exactly as if it had arrived live. A
+resumed root's tab reads only the bytes that predate this run and then draws the
+"resumed" note at the true boundary. Cumulative usage comes from the replayed
+forensic deltas.
 
-`user.log` is the rendered user view, not the source of truth. There is one
-window: after every step `Scrollback::trim` walks the mirror's head against the
-fold's own first block, renders what it drops once into the retired prefix, and
-advances the prefix's durable offset. Resident
-blocks are provisional: `Scrollback::flush_log` writes them past that prefix for
-session-end output and `/export`, while the next retirement rewinds to the
-prefix before extending it, so no block is duplicated. A tombstoned scrollback
-retires its remaining blocks before dropping its heap state; there is no
-reload-from-`user.log` fold. Crash recovery remains the responsibility of
-`record.jsonl`, which is flushed per record.
+`/clear` cancels the in-flight exchange, abandons the agent's subtree, reboots the
+shell, and records `Protocol::Cleared` through the same seam and in the same
+file. The frontend learns of it from the record itself: the mirror steps
+`Delta::Cleared`, retires every block it held, resets its open lines and scroll
+state, redraws the opening, and `App` retires the cleared agent's descendant
+tabs. No file is replaced, so existing `Emitter` clones and the attached bus keep
+publishing without a handoff.
 
-## Clear and segment rotation
-
-`/clear` cancels the in-flight exchange, resets the scrollback (including its
-`user.log` segment), and arms the frontend's drain gate so straggler signals
-from the old exchange cannot paint the new context. The `Cleared` transient, or
-the next fresh prompt when that acknowledgement is lost, closes that gate.
-
-The session record is rotated without replacing the seam. `AgentLog::clear`
-renames the current segment, then `Emitter::rotate` asks the same shared
-`record::Log` to open a fresh `record.jsonl` and reset its sequence/cursor while
-retaining the attached `FleetSink`. Existing `Emitter` clones and the bus
-coupled before the clear therefore continue publishing into the new segment.
+**A transcript is rendered on demand, not written.** `tui::export_to(record,
+dest, format)` is the one place a transcript file is created, and it never
+overwrites; both `/export` and `exarch export <session> [--out FILE]` call it.
+`export` replays `record.jsonl` through the same `Mirror` the scrollback uses and
+hands each block it lets go to a `Render`er — `Plain` forces every block whole,
+the script and prose the screen reduces — behind a `Format` seam that admits
+HTML later. Because the mirror retires its blocks on a clear, an export keeps the
+transcript from before it, then `[cleared]`, then what follows. A torn tail is
+never parsed.
 
 The resulting trust boundary is small: `record.jsonl` is the durable fact
 stream, `Record` classes say which fold may project each fact, `Signal::Fact`
-delivers stamped commits live, `Transient` carries only process-lifetime edges,
-and `user.log` is the scrollback's rendered stream: a retired prefix plus a
-provisional resident tail.
+delivers stamped commits live, and `Transient` carries only process-lifetime
+edges.
 
 See [[decisions/260814_one-seam-one-log|one-seam-one-log]] for the seam and
 fold law, [[decisions/260814_a-trace-is-a-fold|a-trace-is-a-fold]] for the
 single durable record, [[decisions/260816_the-window-is-not-the-transcript|the-window-is-not-the-transcript]]
-for retirement, and
+for the window, and
 [[decisions/260621_session-lifetime-event-bus|session-lifetime-event-bus]] for
 the live bus lifetime. The broader accumulator/fold distinction is in
 [[design/residency|residency]], and the visual projection discipline is in

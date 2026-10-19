@@ -14,26 +14,6 @@ use std::sync::Arc;
 use super::{DeskAct, ExarchDesk};
 
 impl ExarchDesk {
-    pub(super) fn models(&self, query: Option<&str>) -> Result<FOValue, Error> {
-        let verb = if query.is_some() {
-            "grep-models"
-        } else {
-            "models"
-        };
-        let models = self
-            .services
-            .fleet
-            .launch
-            .bureau
-            .models()
-            .map_err(|why| Error::new(format!("`` exarch-agents `{verb} `` refused: {why}")))?;
-        Ok(match query {
-            Some(query) => crate::provider::models::grep_models(query, models),
-            None => models,
-        }
-        .encode())
-    }
-
     /// The spawn spine behind `` `start ``: take up the fork, fork its log off
     /// the parent's, assemble it at one less unit of fuel, hand it to
     /// `spawn_async`. Every cheap guard runs before the fork is taken up; a
@@ -74,7 +54,7 @@ impl ExarchDesk {
 
         // Before the seat split, so both arms share one resolution and a
         // refusal unwinds nothing: no adopted shell, no forked log, no helper engine.
-        let provider = self.child_provider(&spec.provider, &spec.model)?;
+        let provider = self.child_provider(&spec.model)?;
 
         let seat = self.fork_seat(fork)?;
         let child = Avatar::child_of(
@@ -90,35 +70,19 @@ impl ExarchDesk {
         self.spawn_child(child, name, spec.prompt)
     }
 
-    /// The child's provider: the parent's own `Arc` verbatim when the
-    /// selection resolves to the parent's own pair, and otherwise one minted
-    /// by [`Bureau::reselect`](crate::provider::Bureau::reselect), which
-    /// refuses a model the account does not list.
-    pub(super) fn child_provider(
-        &self,
-        provider: &Selection,
-        model: &Selection,
-    ) -> Result<Arc<Provider>, Error> {
+    /// The child's provider: the parent's own `Arc` for `Inherit`, else the
+    /// one the human bound to the named role at launch.
+    pub(super) fn child_provider(&self, model: &Selection) -> Result<Arc<Provider>, Error> {
         let s = &self.services;
-        let current = s.agent.current_provider();
-        let refused =
-            |why: String| Error::new(format!("`` exarch-agents `start `` refused: {why}"));
-        let bureau = &s.fleet.launch.bureau;
-        let account = match provider {
-            Selection::Inherit => current.account().clone(),
-            Selection::Named(name) => {
-                crate::provider::models::resolve_pinned_provider(name, &bureau.available())
-                    .map_err(refused)?
-            }
-        };
-        let model = match model {
-            Selection::Inherit => current.model().to_string(),
-            Selection::Named(model) => model.clone(),
-        };
-        if account.id == current.account().id && model == current.model() {
-            return Ok(current);
+        match model {
+            Selection::Inherit => Ok(s.agent.current_provider()),
+            Selection::Role(name) => s
+                .fleet
+                .launch
+                .roles
+                .get(name)
+                .map_err(|why| Error::new(format!("`` exarch-agents `start `` refused: {why}"))),
         }
-        bureau.reselect(&current, &account, model).map_err(refused)
     }
 
     /// Take up the fork a builtin body left for this desk: adopt it out of

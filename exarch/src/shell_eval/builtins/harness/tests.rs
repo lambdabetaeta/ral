@@ -1,20 +1,6 @@
 use crate::agent::testkit::ral_call;
 use crate::record::Voice;
 
-#[test]
-fn models_reaches_the_catalog_and_refuses_a_scripted_session() {
-    let session = crate::agent::Avatar::for_test("system").unwrap();
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-    for call in [
-        "exarch-agents `models",
-        "exarch-agents `grep-models #'claude'#",
-    ] {
-        let result = session.ral(call, 5, &emit).text;
-        assert!(result.contains("scripted provider"), "{result}");
-    }
-}
-
 /// Every bare tag the door admits: the bases, plus `` `inherit ``, which
 /// names none and so is the one admitted tag policy has nothing to resolve.
 fn bare_grant_tags() -> impl Iterator<Item = &'static str> {
@@ -28,7 +14,7 @@ fn unknown_grant_label_errors_before_any_enquiry_crosses() {
     let session = crate::agent::Avatar::for_test("system").unwrap();
     let (tx, _rx) = crate::bus::channel();
     let emit = crate::bus::Emitter::new(tx, session.agent.id);
-    let result = session.ral(r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `bogus, provider: `inherit, model: `inherit]",
+    let result = session.ral(r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `bogus, model: `inherit]",
         5,
         &emit,
     ).text;
@@ -49,7 +35,7 @@ fn dangerous_is_no_longer_a_spawn_grant_and_the_refusal_points_at_inherit() {
     let session = crate::agent::Avatar::for_test("system").unwrap();
     let (tx, _rx) = crate::bus::channel();
     let emit = crate::bus::Emitter::new(tx, session.agent.id);
-    let result = session.ral(r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `dangerous, provider: `inherit, model: `inherit]",
+    let result = session.ral(r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `dangerous, model: `inherit]",
         5,
         &emit,
     ).text;
@@ -70,7 +56,7 @@ fn a_bare_restrict_errors_before_any_enquiry_crosses() {
     let session = crate::agent::Avatar::for_test("system").unwrap();
     let (tx, _rx) = crate::bus::channel();
     let emit = crate::bus::Emitter::new(tx, session.agent.id);
-    let result = session.ral(r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `restrict, provider: `inherit, model: `inherit]",
+    let result = session.ral(r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `restrict, model: `inherit]",
         5,
         &emit,
     ).text;
@@ -86,7 +72,7 @@ fn a_bare_restrict_errors_before_any_enquiry_crosses() {
 
 /// Both new spellings pass the grant door — the open `grant` row carries a
 /// payload-bearing tag too — so what comes back is the *next* door's
-/// refusal, naming `provider`, and still no child.
+/// refusal, naming `model`, and still no child.
 #[test]
 fn inherit_and_restrict_pass_the_grant_door() {
     let session = crate::agent::Avatar::for_test("system").unwrap();
@@ -94,14 +80,14 @@ fn inherit_and_restrict_pass_the_grant_door() {
     let emit = crate::bus::Emitter::new(tx, session.agent.id);
     for grant in ["`inherit", "`restrict [net: `offline]"] {
         let result = session.ral(&format!(
-                r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: {grant}, provider: `guess, model: `inherit]"
+                r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: {grant}, model: `guess]"
             ),
             5,
             &emit,
         ).text;
         assert!(
-            result.contains("`provider") && !result.contains("`grant"),
-            "{grant} must pass the grant door and be refused at `provider`, got: {result}"
+            result.contains("`model") && !result.contains("`grant"),
+            "{grant} must pass the grant door and be refused at `model`, got: {result}"
         );
         assert!(
             crate::agent::roster::summary(&session.agent).live == 0,
@@ -115,7 +101,7 @@ fn unknown_type_tag_errors_before_any_enquiry_crosses() {
     let session = crate::agent::Avatar::for_test("system").unwrap();
     let (tx, _rx) = crate::bus::channel();
     let emit = crate::bus::Emitter::new(tx, session.agent.id);
-    let result = session.ral(r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `bogus, grant: `confined, provider: `inherit, model: `inherit]",
+    let result = session.ral(r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `bogus, grant: `confined, model: `inherit]",
         5,
         &emit,
     ).text;
@@ -127,18 +113,18 @@ fn unknown_type_tag_errors_before_any_enquiry_crosses() {
     );
 }
 
-/// The `provider`/`model` rows are open too, so an unrecognised arm must
-/// reach the door and be told the two that exist.
+/// The `model` row is open too, so an unrecognised arm must reach the door
+/// and be told the two that exist.
 #[test]
 fn unknown_selection_tag_errors_naming_both_arms() {
     let session = crate::agent::Avatar::for_test("system").unwrap();
     let (tx, _rx) = crate::bus::channel();
     let emit = crate::bus::Emitter::new(tx, session.agent.id);
-    let result = session.ral(r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `confined, provider: `guess, model: `inherit]",
+    let result = session.ral(r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `confined, model: `guess]",
         5,
         &emit,
     ).text;
-    for arm in ["inherit", "named"] {
+    for arm in ["inherit", "role"] {
         assert!(result.contains(arm), "must name `{arm}, got: {result}");
     }
     assert!(
@@ -147,13 +133,13 @@ fn unknown_selection_tag_errors_naming_both_arms() {
     );
 }
 
-/// An empty name is a mistake, not a way of spelling `` `inherit ``.
+/// An empty role name is a mistake, not a way of spelling `` `inherit ``.
 #[test]
-fn an_empty_named_selection_is_refused() {
+fn an_empty_role_name_is_refused() {
     let session = crate::agent::Avatar::for_test("system").unwrap();
     let (tx, _rx) = crate::bus::channel();
     let emit = crate::bus::Emitter::new(tx, session.agent.id);
-    let result = session.ral(r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `confined, provider: `inherit, model: `named '']",
+    let result = session.ral(r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `confined, model: `role '']",
         5,
         &emit,
     ).text;
@@ -172,7 +158,7 @@ fn invalid_name_errors_before_any_enquiry_crosses() {
     let session = crate::agent::Avatar::for_test("system").unwrap();
     let (tx, _rx) = crate::bus::channel();
     let emit = crate::bus::Emitter::new(tx, session.agent.id);
-    let result = session.ral(r#"exarch-agents `start [prompt: #'hi'#, name: "has space", type: `amnemon, grant: `confined, provider: `inherit, model: `inherit]"#,
+    let result = session.ral(r#"exarch-agents `start [prompt: #'hi'#, name: "has space", type: `amnemon, grant: `confined, model: `inherit]"#,
         5,
         &emit,
     ).text;
@@ -183,7 +169,7 @@ fn invalid_name_errors_before_any_enquiry_crosses() {
     );
 }
 
-/// `scheme_agents`'s outer tag row (`ρ3`) is open, so an unrecognised tag
+/// `scheme_agents`'s outer tag row (`ρ4`) is open, so an unrecognised tag
 /// must reach `builtin_agents`'s door rather than die as a row mismatch.
 #[test]
 fn unknown_outer_tag_reaches_the_door_naming_every_legal_label() {
@@ -191,9 +177,7 @@ fn unknown_outer_tag_reaches_the_door_naming_every_legal_label() {
     let (tx, _rx) = crate::bus::channel();
     let emit = crate::bus::Emitter::new(tx, session.agent.id);
     let result = session.ral("exarch-agents `stop 'x'", 5, &emit).text;
-    for tag in [
-        "list", "models", "start", "message", "cancel", "reply", "read",
-    ] {
+    for tag in ["list", "start", "message", "cancel", "reply", "read"] {
         assert!(result.contains(tag), "must name `{tag}, got: {result}");
     }
 }
@@ -205,10 +189,13 @@ fn missing_agent_field_errors_statically_naming_the_field() {
     let session = crate::agent::Avatar::for_test("system").unwrap();
     let (tx, _rx) = crate::bus::channel();
     let emit = crate::bus::Emitter::new(tx, session.agent.id);
-    let result = session.ral(r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, provider: `inherit, model: `inherit]",
-        5,
-        &emit,
-    ).text;
+    let result = session
+        .ral(
+            r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, model: `inherit]",
+            5,
+            &emit,
+        )
+        .text;
     assert!(
         result.contains("field named 'grant'"),
         "the diagnostic must name the missing field, got: {result}"
@@ -227,7 +214,7 @@ fn misspelled_start_field_errors_statically_naming_the_field() {
     let session = crate::agent::Avatar::for_test("system").unwrap();
     let (tx, _rx) = crate::bus::channel();
     let emit = crate::bus::Emitter::new(tx, session.agent.id);
-    let result = session.ral(r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grnat: `confined, provider: `inherit, model: `inherit]",
+    let result = session.ral(r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grnat: `confined, model: `inherit]",
         5,
         &emit,
     ).text;
@@ -261,7 +248,7 @@ fn agent_full_stack_round_trip_answers_the_summary_and_parks_a_reply() {
     let (tx, _rx) = crate::bus::channel();
     let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
-    let result = session.ral(r"exarch-agents `start [prompt: #'say hi'#, name: 'helper', type: `amnemon, grant: `read-only, provider: `inherit, model: `inherit]",
+    let result = session.ral(r"exarch-agents `start [prompt: #'say hi'#, name: 'helper', type: `amnemon, grant: `read-only, model: `inherit]",
         5,
         &emit,
     ).text;
@@ -644,7 +631,7 @@ fn reply_full_stack_round_trip_delivers_structured_record_to_parent_inbox() {
     let (tx, _rx) = crate::bus::channel();
     let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
-    let result = session.ral(r"exarch-agents `start [prompt: #'find files'#, name: 'finder', type: `amnemon, grant: `read-only, provider: `inherit, model: `inherit]",
+    let result = session.ral(r"exarch-agents `start [prompt: #'find files'#, name: 'finder', type: `amnemon, grant: `read-only, model: `inherit]",
         5,
         &emit,
     ).text;
@@ -761,7 +748,7 @@ fn pin_read_full_stack_round_trip_returns_canonical_card_to_parent() {
     let (tx, _rx) = crate::bus::channel();
     let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
-    let result = session.ral(r"exarch-agents `start [prompt: #'pin and read back'#, name: 'pinner', type: `amnemon, grant: `read-only, provider: `inherit, model: `inherit]",
+    let result = session.ral(r"exarch-agents `start [prompt: #'pin and read back'#, name: 'pinner', type: `amnemon, grant: `read-only, model: `inherit]",
         5,
         &emit,
     ).text;
@@ -822,7 +809,7 @@ fn a_reply_missing_a_projected_field_is_refused_at_the_read() {
     let (tx, _rx) = crate::bus::channel();
     let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
-    session.ral(r"exarch-agents `start [prompt: #'reply without a verdict'#, name: 'lazy', type: `amnemon, grant: `read-only, provider: `inherit, model: `inherit]",
+    session.ral(r"exarch-agents `start [prompt: #'reply without a verdict'#, name: 'lazy', type: `amnemon, grant: `read-only, model: `inherit]",
         5,
         &emit,
     );
@@ -869,7 +856,7 @@ fn pin_read_full_stack_absent_key_replies_none() {
     let (tx, _rx) = crate::bus::channel();
     let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
-    let result = session.ral(r"exarch-agents `start [prompt: #'read an absent key'#, name: 'reader', type: `amnemon, grant: `read-only, provider: `inherit, model: `inherit]",
+    let result = session.ral(r"exarch-agents `start [prompt: #'read an absent key'#, name: 'reader', type: `amnemon, grant: `read-only, model: `inherit]",
         5,
         &emit,
     ).text;
@@ -1023,7 +1010,7 @@ fn sub_agent_pinning_tasks_leaves_the_parents_register_untouched() {
     ));
     session.agent.provider.swap(provider);
 
-    let result = session.ral(r"exarch-agents `start [prompt: #'add a task'#, name: 'tasker', type: `amnemon, grant: `read-only, provider: `inherit, model: `inherit]",
+    let result = session.ral(r"exarch-agents `start [prompt: #'add a task'#, name: 'tasker', type: `amnemon, grant: `read-only, model: `inherit]",
         5,
         &emit,
     ).text;
@@ -1401,7 +1388,7 @@ fn a_run_with_no_fork_door_refuses_in_its_own_words() {
 
     let mut shell = crate::boot::test_shell();
     let report = shell.run(RunRequest::from(Run::captured(
-        r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `inherit, provider: `inherit, model: `inherit]",
+        r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `inherit, model: `inherit]",
         "<test>",
     )));
     let RunReport::Ran { ending, .. } = report else {

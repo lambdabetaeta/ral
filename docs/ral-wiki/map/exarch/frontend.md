@@ -1,5 +1,5 @@
 ---
-generated_at_commit: f448310e
+generated_at_commit: 62f8f2a9
 generated_at_date: 2026-10-19
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/record/session.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/cancel.rs, exarch/src/boot.rs, exarch/src/agent/seat.rs, exarch/src/signals.rs, exarch/src/prompt/host.rs]
 ---
@@ -85,21 +85,20 @@ one inbound inbox**, mapped by `bus.rs`'s module doc across its submodules:
   class and the elided count. `/resources` reads `BusReceiver::depth`/`bytes`
   for its `bus.depth`/`bus.bytes` rows.
 - what the channel carries is `Signal` (`bus/signal.rs`): a seam-witnessed fact
-  (`Signal::Fact`, an `AgentId` beside the log `Segment` it was appended to and
-  its `Recorded<Record>`), an agent's birth (`Signal::Born`, sent by minting
+  (`Signal::Fact`, an `AgentId` beside its `Recorded<Record>`), an agent's birth (`Signal::Born`, sent by minting
   the agent's emitter, `bus::Emitter::child`, so it precedes everything that
   emitter carries), or an unrecorded delta (`Signal::Transient`, the `AgentId`
   beside its `Transient`) — one channel, so the TUI's single per-fleet
   dispatch loop routes all three by `AgentId` without restructuring.
 
 `record.rs` + `record/` is the one-seam-one-log module tree
-([[internals/session-record|session-record]]): the sealed
+([[internals/session-record|session-record]]): the closed
 `Record { Protocol, Display, Forensic }` vocabulary and the disjoint
 `Transient`; `record/seam.rs` (`Emitter::emit` above, the only publisher —
 its one lock is the log's own mutex, so channel order is log order); `record/log.rs` (the `record.jsonl` syscall site, with the attachable
 `FleetSink` inside the writer's mutex — a record appended with no sink, or
 onto a dead channel, is published nowhere — and `Log::since`, a mirror's
-catch-up, which fixes the current segment, its extent and a read handle under
+catch-up, which fixes the log's extent and a read handle under
 that same mutex and streams the records past a `record::Cursor` outside it, so
 whatever lands after the extent reaches the channel instead); `record/replay.rs` (the generic
 `fold == memo` driver and `Refusal`, with `Log::read` streaming one entry at a
@@ -115,20 +114,20 @@ and [[decisions/260827_the-transcript-is-a-value|the-transcript-is-a-value]]);
 A frontend has the `bus::Sink` shape (`fact`/`transient`): it is itself a
 fold over the one log, owning its own `Blocks` memo,
 stepping it per witnessed record (`Sink::fact(id, rec)`) and acting on the
-`Delta` that step reports — `Opened`, `Grew`, `Patched`, `Quiet`
+`Delta` that step reports — `Opened`, `Grew`, `Patched`, `Rewound`, `Cleared`, `Quiet`
 ([[decisions/260909_the-fold-reports-the-printer-mirrors|the-fold-reports-the-printer-mirrors]]).
 It is handed the record only to step that memo, and renders from
 `record::BlockKind` off it. `Headless` implements `Sink` for the pipe; the
 TUI's `App` has the same `fact`/`transient` pair without the trait, its
 `ui_loop` draining on the render cadence rather than `Sink::drive`'s blocking
 one, and owns one `Scrollback` per session, each a mirror with a memo of its own
-and a `record::Cursor` into its log — the `Segment` it holds, and the `Seq`
+and a `record::Cursor` into its log — the `Seq`
 and closing byte of the last record folded. The channel is only the mirror's fast path:
 `Scrollback::fact` steps a fact that is next, and reads the log
 (`Scrollback::catch_up`, over `record::Emitter::since`) whenever the channel
-cannot vouch for one — at birth, past a gap, on a newer segment — while a
-straggler from an older segment is dropped and a record heard twice folds once.
-So birth, resume, a gap and `/clear` are one construction, and no frontend
+cannot vouch for one — at birth, or past a gap — while a record heard twice
+folds once. So birth, resume and a gap are one construction, a `/clear` is
+just a record the mirror folds, and no frontend
 depends on the order a fact and a birth reach it. A `Sink` (headless, synod)
 narrates what it hears and never catches up.
 
@@ -160,33 +159,28 @@ stays visible until quiescence.
   beside it ([[decisions/260814_one-seam-one-log|one-seam-one-log]]).
   Oversize tool-result sections are elided head+tail at the [[map/exarch/agent|digest]]
   caps before they ever enter the log. A directory with no `record.jsonl`
-  refuses to resume, with a named error. `/clear` rotates the record segment
-  behind the same seam, so existing emitters and the attached bus continue
-  into the fresh file, and bumps the log's `Segment`, which every fact
-  published from then on carries.
+  refuses to resume, with a named error. `/clear` records `Protocol::Cleared` in
+  the same file: nothing is replaced, so existing emitters and the attached bus
+  carry on, and every earlier turn stays in the log, withdrawn from the context.
 
-The TUI renders a sibling `user.log` — the "user view" — as a stream the
-scrollback is a window over: a block is written once, when the mirror's head
-trim drops it (`Scrollback::trim`), into a retired prefix that only ever grows,
-and the blocks still resident are written past that prefix provisionally at
-flush points (session end, `/export`), which the next retirement rewinds over
-rather than repeating
-([[decisions/260816_the-window-is-not-the-transcript|the-window-is-not-the-transcript]]).
-So the file keeps the whole session however long it runs, while the window
-keeps only what fits; crash durability still lives in `record.jsonl`, which is
-flushed per record. Both files live under the durable per-run log directory
-(`App::log_run_dir`, `app.rs`,
-`$XDG_STATE_HOME/exarch/<project>/<run>/sessions/<id>/`). Every touch of that
-file lives in one place: `tui/scrollback.rs` keeps both the writer (`Log`) and
-the `/export` copy (`export_log`) beside each other, the single `user.log` I/O
-door, so the `/export` handler (`tui/commands.rs`, `resolve_export_path`)
-resolves and guards the destination but never reaches the filesystem itself.
+A session directory holds `record.jsonl` alone, under the durable per-run log
+directory (`App::log_run_dir`, `app.rs`,
+`$XDG_STATE_HOME/exarch/<project>/<run>/sessions/<id>/`). A transcript is
+rendered from it on demand: `tui/export.rs`'s `export_to(record, dest, format)`
+is the one place a transcript file is created, and both `/export`
+(`tui/commands.rs`, which resolves and guards the destination) and
+`exarch export <session> [--out FILE]` call it. It replays the record through a
+`tui/mirror.rs` `Mirror` — the record-to-`Block` half of `Scrollback`, shared with
+the live view — and hands each block the mirror lets go to a `Render`er behind
+the `Format` seam (`Plain` today). At session end the TUI prints one
+`Session log: <dir>/record.jsonl` line per session
+(`Tabs::log_dirs`) and the `exarch export <dir>` hint
+([[internals/session-record|session-record]]).
 
 On resume, a resumed root's `Born` carries its `Resumed` summary, whose
 `bytes` is the log's extent before this run wrote to it. Its tab mirrors that
 history by `Scrollback::recall` — the birth catch-up, stopped at that byte,
-with `user.log` writes withheld and the mirror marked as already in that file,
-written by the run that recorded it — then draws the "resumed" note and
+— then draws the "resumed" note and
 catches up on whatever this run has recorded since, so the resumed transcript
 continues rather than repeats, and the note sits at the true boundary however
 late the tab is born. Every reopened root does so for its own tab. The run's
@@ -202,7 +196,7 @@ it).
 Two presentation surfaces, both folding the one `Signal` vocabulary through
 `fact`/`transient`:
 
- `tui.rs` (+ `tui/{app,banner,block,commands,dial,diff,fidelity,gauge,gesture,group,highlight,line,login,matrix,md,model_picker,overlay,palette,picker,prompt,providers,rail,render,resources,rewind,row,scrollback,select,status,tabs,terminal,text,tui_loop}.rs`) — the full-screen
+ `tui.rs` (+ `tui/{app,banner,block,commands,dial,diff,export,fidelity,gauge,gesture,group,highlight,line,login,matrix,md,mirror,model_picker,overlay,palette,picker,prompt,providers,rail,render,resources,rewind,row,scrollback,select,status,tabs,terminal,text,tui_loop}.rs`) — the full-screen
  TUI. It owns the alternate screen and its own scrollback: each session is a
  `Vec<Block>` (`tui/block.rs`) mirroring the view fold one incident at a time,
  and the whole frame is redrawn each tick from each block's own memoised visual
@@ -224,8 +218,8 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  literal it is. `tui/group.rs` renders the `▸`
  part of a group — one burst of `ral` work as a single dialable object, its
  body at one of three `Detail` rungs (`Tally`, `Summary`, `Full`);
- `tui/scrollback.rs` the per-session mirror of the view fold, scroll position,
- and `user.log` writer; `tui/rail.rs` the data-encoding marginal rail, and
+ `tui/mirror.rs` the per-session mirror of the view fold, one `Block` per
+ incident, and `tui/scrollback.rs` its viewport, live tail and cursor over the log; `tui/rail.rs` the data-encoding marginal rail, and
  `tui/row.rs` the `Row { gutter, content }` that *represents* the margin so
  copy and selection can never reach it.
 
@@ -318,7 +312,7 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
    with a stated intent, an observation-origin card and a turn rule all join
    the `Block::Group` standing at the tail, which renders its `∴` part above
    its `▸` part; every other kind is a barrier that pushes its own block and
-   ends the group. Blocks, their record ids and `user.log` are all in arrival
+   ends the group. Blocks and their record ids are in arrival
    order, and so is the group — only its two parts are read in a fixed order.
    Each part carries its own `Dial` — the `Detail` rung it is read at and the
    floor a cycle wraps to — so one group answers two dials and
@@ -422,14 +416,14 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  ([[decisions/260621_session-lifetime-event-bus|session-lifetime-event-bus]]).
  Once `LINGER` elapses, `Tabs::tick` turns the tab `Life::Gone`: the
  scrollback (blocks and their render memos, streaming buffers) is dropped
- after its blocks are retired to `user.log`, and the `Status` is reset,
- releasing its pins; only the log path stays, which `Tabs::status` and
- `status_mut` no longer answer for; no reload-from-`user.log` machinery is built. Every live
+ and the `Status` is reset, releasing its pins; only the session directory
+ stays (`Tabs::log_dirs`), which `Tabs::status` and
+ `status_mut` no longer answer for. Every live
  scrollback is bounded by exactly one window, the view fold's own:
  `BLOCKS_WINDOW` resident blocks (`record/view.rs`), oldest dropped as new ones
- land. After every step `Scrollback::trim` walks the mirror's head against the
- fold's first block — one comparison — and what it drops is retired to
- `user.log` on the way out, so a block is durable by the time it leaves heap.
+ land. After every step `Mirror::step` walks the mirror's head against the
+ fold's first block — one comparison — and drops what the fold has dropped; the
+ record keeps everything.
  Chrome, which no record authors, inherits the expiry of the block it was drawn
  after; the banner, drawn before any block, lives while the fold still holds
  the session's opening block (`Blocks::origin`). Nothing is rebuilt: a record
@@ -439,10 +433,10 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  the `Rewrite` behind the interrupt, so the streaming `select!` in
  `provider::complete` unwinds within one `wait_for_cancel` poll (~50 ms)
  rather than running to its natural end. `/clear` does not blank the view at
- the keystroke: the cleared log's first fact arrives under a newer `Segment`,
- `Scrollback::fact` starts the mirror over on it — reset, the session card,
- a catch-up of the new segment — and reports it, and `App` retires `id`'s
- descendant tabs (`Tabs::retire_subtree`). A clear that failed rotates
+ the keystroke: the `Cleared` record arrives, `Mirror::step` returns
+ `Delta::Cleared` having retired every block it held, `Scrollback::fact` resets
+ its open lines and scroll state and redraws the opening, and `App` retires
+ `id`'s descendant tabs (`Tabs::retire_subtree`). A clear that failed records
  nothing, so the view stays; the run's total usage is not reset.
  The TUI owns the REPL loop and the raw-mode / bracketed-paste /
  alt-screen / mouse-capture guard. Every tab shares one submit path: a typed
@@ -470,7 +464,7 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  into, the focused tab: a tab is a tab, and none is the root. `/rewind` takes
  no argument: it opens
  the `tui/rewind.rs` overlay over the focused tab's turn-opening prompts (the
- fold's `Blocks::prompts`, since `Display::Prompt` carries the `turn` it
+ fold's `Blocks::prompts`, since `Protocol::UserPrompt` carries the `turn` it
  opens — `None` for a steering line, which opens none), the latest
  highlighted. The eight-row list keeps the selection near its centre, shows
  its position in the history, and supports Page Up/Down and Home/End. While

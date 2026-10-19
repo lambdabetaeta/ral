@@ -129,6 +129,8 @@ pub struct RootConfig {
     /// that mints no providers of its own passes
     /// [`Bureau::Scripted`](crate::provider::Bureau::Scripted).
     pub bureau: Arc<crate::provider::Bureau>,
+    /// The roles the human bound at launch; `Roles::default()` binds none.
+    pub roles: crate::provider::roles::Roles,
 }
 
 /// Where the first root's engine lives — the root constructors' one
@@ -181,6 +183,7 @@ impl Fleet {
             egress,
             factory,
             bureau,
+            roles,
         } = cfg;
         // Stated, not discovered by a model calling `agent`: a fuelled wire
         // root with no engine factory to make helpers with cannot ever answer
@@ -233,6 +236,7 @@ impl Fleet {
                 disk_warn_bytes,
                 factory,
                 bureau,
+                roles,
                 system: system
                     .replace(crate::prompt::SCRATCH_PLACEHOLDER, &scratch)
                     .into(),
@@ -637,6 +641,7 @@ impl Avatar {
             egress,
             factory: None,
             bureau: Arc::new(crate::provider::Bureau::Scripted),
+            roles: crate::provider::roles::Roles::default(),
         };
         let seat = RootSeat::Identity {
             scratch,

@@ -280,6 +280,7 @@ impl Conversation {
             // before the machine it wraps.
             factory: None,
             bureau,
+            roles: exarch::provider::roles::Roles::default(),
         };
         let (factory, agent, net_wire) = seat_machine(machine, config, provider)?;
         let net = net_seat(net_wire, egress)?;

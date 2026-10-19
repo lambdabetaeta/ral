@@ -105,7 +105,7 @@ fn main() {
     let spawn_cmd = format!(
         "exarch-agents `start [prompt: #'write the text {HELPER_TEXT:?} into {HELPER_FILE}, \
          then reply confirming the write'#, name: 'helper', type: `amnemon, grant: `edit-only, \
-         provider: `inherit, model: `inherit]"
+         model: `inherit]"
     );
     let write_and_reply = vec![
         // `/bin/echo`, never the `echo` builtin: this example is the only
@@ -158,6 +158,7 @@ fn main() {
         factory: None,
         // The provider above is scripted, so nothing here ever mints one.
         bureau: Arc::new(Bureau::Scripted),
+        roles: exarch::provider::roles::Roles::default(),
     };
     // `_net` is held open only so its EOF ends the session; this example
     // wants no guest network of its own.

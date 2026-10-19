@@ -223,6 +223,9 @@ pub fn run() -> Result<(), String> {
         &available,
         |account| provider::models::listing_of(&holdings.catalog, &account.id),
     )?;
+    let roles = provider::roles::bindings(&c.role, &c.role_provider, &available, |account| {
+        provider::models::listing_of(&holdings.catalog, &account.id)
+    })?;
 
     let invocation = policy::for_invocation(&cwd, &c.base, c.extend.as_deref(), &c.restrict)?;
     let scratch =
@@ -262,6 +265,7 @@ pub fn run() -> Result<(), String> {
     // One runtime for the whole fleet; per-credential transports warm lazily.
     let engine = Engine::new();
     let bureau = Arc::new(Bureau::Live { engine, holdings });
+    let roles = provider::roles::Roles::mint(roles, &bureau, &tuning, c.max_tokens)?;
     let (provider, screen) = open(
         opening,
         &tuning,
@@ -297,6 +301,7 @@ pub fn run() -> Result<(), String> {
         egress,
         factory: None,
         bureau: Arc::clone(&bureau),
+        roles,
     };
     let seat = agent::RootSeat::Identity {
         scratch,

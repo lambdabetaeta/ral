@@ -113,14 +113,12 @@ fn family_req(family: &str, label: &str, payload: Option<FOValue>) -> FOValue {
     tag(family, Some(tag(label, payload)))
 }
 
-/// The model's plainest spawn record: `` `amnemon ``, inheriting
-/// provider and model.
+/// The model's plainest spawn record: `` `amnemon ``, inheriting its model.
 pub(super) fn spec(prompt: &str, name: &str) -> Spec {
     Spec {
         prompt: prompt.to_string(),
         name: Name(name.to_string()),
         memory: Memory::Amnemon,
-        provider: Selection::Inherit,
         model: Selection::Inherit,
     }
 }
@@ -223,7 +221,7 @@ fn with_parked<R: Send + 'static>(
 ) -> R {
     parked_by(
         desk,
-        r"exarch-agents `start [prompt: #'go'#, name: 'parked', type: `amnemon, grant: `inherit, provider: `inherit, model: `inherit]",
+        r"exarch-agents `start [prompt: #'go'#, name: 'parked', type: `amnemon, grant: `inherit, model: `inherit]",
         f,
     )
 }

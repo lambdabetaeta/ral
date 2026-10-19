@@ -4,6 +4,8 @@ status: accepted
 
 # The window is not the transcript
 
+> Superseded in part: there is no retired `user.log` prefix; the scrollback is a mirror over `record.jsonl` and `exarch export` and `/export` render a transcript from it on demand. See [[internals/session-record|session-record]].
+
 Amended by [[decisions/260909_the-fold-reports-the-printer-mirrors|the-fold-reports-the-printer-mirrors]]: the growing durable prefix stands, but the printer now mirrors the fold rather than re-deriving it, so the `Block::rev` revision, the rebuild floor and the printer's own window all go — and with them the "deliberately left" paragraph below.
 
 **A block is written to `user.log` once, when it leaves the viewport's window,

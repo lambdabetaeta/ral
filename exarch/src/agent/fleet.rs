@@ -32,6 +32,7 @@ use crate::app::Scratch;
 use crate::enquiry::check_name;
 use crate::provider::Bureau;
 use crate::provider::Toolset;
+use crate::provider::roles::Roles;
 use ral_core::capability::GrantStack;
 use ral_core::carrier::Severed;
 use ral_core::engine::EngineInstaller;
@@ -70,6 +71,8 @@ pub(crate) struct Launch {
     pub factory: Option<Arc<dyn Factory>>,
     /// The one owner of provider construction.
     pub bureau: Arc<Bureau>,
+    /// The models the human bound to names at launch.
+    pub roles: Roles,
     /// The prompt template, still carrying the builtin-index placeholder, and
     /// the index each node resolves it against for its own grants.
     pub system: Arc<str>,
@@ -150,6 +153,7 @@ impl Launch {
                     role,
                     allow_schedule: self.allow_schedule,
                     spawns: fuel > 0,
+                    roles: &self.roles,
                 },
                 name,
             )
@@ -170,6 +174,7 @@ impl Launch {
             disk_warn_bytes: None,
             factory: None,
             bureau: Arc::new(Bureau::Scripted),
+            roles: Roles::default(),
             system: Arc::from(""),
             index: BuiltinIndex::resolve(
                 ral_core::test_helper::core_shell()

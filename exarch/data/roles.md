@@ -1,0 +1,1 @@
+The human bound these roles to models for your children. Pass `` model: `inherit `` to run a child on your own model, or `` model: `role #'<name>'# `` to run it on that role's model. Choose a role only when the task calls for it.

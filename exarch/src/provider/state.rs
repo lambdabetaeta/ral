@@ -92,21 +92,20 @@ pub(crate) fn opening(
     available: &[Account],
     listing: impl FnMut(&Account) -> Result<Vec<Listed>, ListFailure>,
 ) -> Result<Opening, String> {
+    if let Some(model) = model_flag {
+        let remedy = "pass --provider to say which";
+        return named(provider_flag, model, available, listing, remedy).map(Opening::Named);
+    }
     let pair = |account: Account, model: String| Pair { account, model };
     let pinned = provider_flag
         .map(|name| resolve_pinned_provider(name, available))
         .transpose()?;
-    Ok(match (pinned, model_flag) {
-        (Some(account), Some(model)) => Opening::Named(pair(account, model.to_string())),
-        (None, Some(model)) => Opening::Named(pair(
-            resolve_model_provider(model, available, listing)?,
-            model.to_string(),
-        )),
-        (Some(account), None) => match saved.filter(|s| s.provider == account.id.as_str()) {
+    Ok(match pinned {
+        Some(account) => match saved.filter(|s| s.provider == account.id.as_str()) {
             Some(s) => Opening::Restored(pair(account.clone(), s.model.clone()), vec![account]),
             None => Opening::Choose(vec![account], None),
         },
-        (None, None) => match saved {
+        None => match saved {
             None => Opening::Choose(available.to_vec(), None),
             Some(s) => match s.account(available) {
                 Some(account) => {
@@ -121,6 +120,26 @@ pub(crate) fn opening(
                 ),
             },
         },
+    })
+}
+
+/// The pair `model` names: on `provider`'s account, else on the one account
+/// whose listing names it. `remedy` tells the human how to choose when
+/// several do.
+pub(crate) fn named(
+    provider: Option<&str>,
+    model: &str,
+    available: &[Account],
+    listing: impl FnMut(&Account) -> Result<Vec<Listed>, ListFailure>,
+    remedy: &str,
+) -> Result<Pair, String> {
+    let account = match provider {
+        Some(name) => resolve_pinned_provider(name, available)?,
+        None => resolve_model_provider(model, available, listing, remedy)?,
+    };
+    Ok(Pair {
+        account,
+        model: model.to_string(),
     })
 }
 

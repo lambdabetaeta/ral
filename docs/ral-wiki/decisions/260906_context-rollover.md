@@ -5,6 +5,8 @@ generated_at_commit: 14c8cae4
 
 # Context rollover: evict, don't summarise
 
+> Superseded in part: a `mnemon` fork references the parent's records through the link's pointers instead of re-recording them, and `/clear` is a `Protocol::Cleared` record in the same file rather than a segment rotation. See [[internals/session-record|session-record]].
+
 > Superseded in part by
 > [[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]], which keeps
 > every argument below and changes the unit they act on: a cut is addressed by

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d4299048
-generated_at_date: 2026-10-18
+generated_at_commit: 62f8f2a9
+generated_at_date: 2026-10-19
 covers_paths: [exarch/src/agent/tools.rs, exarch/src/agent/tools/, exarch/src/provider/tools.rs, exarch/src/agent/spawn.rs]
 ---
 
@@ -43,14 +43,15 @@ for every tool.
   with nothing left to `await` them by
   ([[map/exarch/shell-eval|shell-eval]]).
   Every accepted or malformed call emits a `Display::ToolCall` followed by a
-  `Display::Result` addressed by the call's `BlockId`, so a result never has to
-  search backward for its tool row. The result carries `failed` — rejected,
-  raised, nonzero, or severed — which the view fold settles onto the call as a
-  `Verdict` beside its line count, and the TUI draws a failed call's script in
-  solid red. Malformed JSON uses `<invalid input>` as the
-  call label but still gets a paired diagnostic result; if the call row itself
+  `Display::Verdict` addressed by the call's `BlockId`, so a verdict never has to
+  search backward for its tool row. `Verdict::of(content, failed)` is the result's
+  line count and `failed` — rejected, raised, nonzero, or severed — which the
+  view fold settles onto the call, and the TUI draws a failed call's script in
+  solid red; the result text itself is recorded once, in `Protocol::ToolResults`.
+  Malformed JSON uses `<invalid input>` as the
+  call label but still gets a paired diagnostic verdict; if the call row itself
   cannot be appended, the seam reports a transient fault and cannot invent a
-  result target.
+  verdict target.
 - **`thinking`** (`agent/tools/thinking.rs`) — offered only under the
   hidden `--thinking-tool` flag: a relay whose one field, `thought`, is recorded
   as a single `Display::Thinking` — the same lane the provider's own reasoning

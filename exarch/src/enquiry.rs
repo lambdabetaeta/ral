@@ -6,7 +6,6 @@
 //! ill-shaped request is refused in the same words at either end.
 
 use crate::card::{Card, encode_card, value_to_card};
-use crate::provider::models::AvailableModel;
 use crate::record::model::ContextSurvey;
 use crate::record::{Memory, TranscriptPart};
 use crate::schedule::{CronSchedule, ScheduleInfo, Trigger, fmt_duration, parse_duration};
@@ -144,7 +143,6 @@ impl Request {
     pub(crate) fn owed(&self) -> fn(&FOValue) -> Result<(), String> {
         match self {
             Self::Agents(Agents::List) => is::<Vec<AgentInfo>>,
-            Self::Agents(Agents::Models | Agents::GrepModels(_)) => is::<Vec<AvailableModel>>,
             Self::Agents(Agents::Read(_)) => is::<Deposit>,
             Self::Pins(Pins::Set(_) | Pins::Clear(_)) => unit,
             Self::Agents(_) => is::<Summary>,
@@ -192,8 +190,6 @@ fn pinned(v: &FOValue) -> Result<(), String> {
 
 pub(crate) enum Agents {
     List,
-    Models,
-    GrepModels(String),
     Start(Start),
     Message(Message),
     Cancel(String),
@@ -203,16 +199,7 @@ pub(crate) enum Agents {
 
 impl Family for Agents {
     const CLASS: &'static str = "agents";
-    const TAGS: &'static [&'static str] = &[
-        "list",
-        "models",
-        "grep-models",
-        "start",
-        "message",
-        "cancel",
-        "reply",
-        "read",
-    ];
+    const TAGS: &'static [&'static str] = &["list", "start", "message", "cancel", "reply", "read"];
 
     fn request(self) -> Request {
         Request::Agents(self)
@@ -221,8 +208,6 @@ impl Family for Agents {
     fn encode(self) -> FOValue {
         match self {
             Self::List => tag("list", None),
-            Self::Models => tag("models", None),
-            Self::GrepModels(query) => tag("grep-models", Some(query.encode())),
             Self::Start(start) => tag("start", Some(start.encode())),
             Self::Message(message) => tag("message", Some(message.encode())),
             Self::Cancel(name) => tag("cancel", Some(name.encode())),
@@ -234,8 +219,6 @@ impl Family for Agents {
     fn decode(label: &str, payload: Option<&FOValue>) -> Option<Result<Self, String>> {
         Some(match label {
             "list" => bare(payload).map(|()| Self::List),
-            "models" => bare(payload).map(|()| Self::Models),
-            "grep-models" => datum(payload).map(Self::GrepModels),
             "start" => datum(payload).map(Self::Start),
             "message" => datum(payload).map(Self::Message),
             "cancel" => datum(payload).map(Self::Cancel),
@@ -245,11 +228,6 @@ impl Family for Agents {
         })
     }
 }
-
-record!(AvailableModel {
-    provider: "provider",
-    model: "model",
-});
 
 /// A model's own `exarch-agents` argument: a whole request, or a spawn's
 /// spec alone, since the fork it needs is its door's to mint.
@@ -315,7 +293,6 @@ pub(crate) struct Spec {
     pub(crate) prompt: String,
     pub(crate) name: Name,
     pub(crate) memory: Memory,
-    pub(crate) provider: Selection,
     pub(crate) model: Selection,
 }
 
@@ -323,7 +300,6 @@ record!(Spec {
     prompt: "prompt",
     name: "name",
     memory: "type",
-    provider: "provider",
     model: "model",
 });
 
@@ -427,33 +403,33 @@ impl Datum for Grant {
     }
 }
 
-/// One half of a child's model selection: the spawner's own, or one named
-/// outright. ral has no optional field, so the absence of a choice is data.
+/// A child's model: the spawner's own, or a role the human bound at launch.
+/// ral has no optional field, so the absence of a choice is data.
 pub(crate) enum Selection {
     Inherit,
-    Named(String),
+    Role(String),
 }
 
 impl Datum for Selection {
     fn encode(self) -> FOValue {
         match self {
             Self::Inherit => tag("inherit", None),
-            Self::Named(name) => tag("named", Some(name.encode())),
+            Self::Role(name) => tag("role", Some(name.encode())),
         }
     }
 
     fn decode(v: &FOValue) -> Result<Self, String> {
         match untag(v) {
             Some(("inherit", None)) => Ok(Self::Inherit),
-            Some(("named", Some(FOValue::String { value }))) if !value.is_empty() => {
-                Ok(Self::Named(value.clone()))
+            Some(("role", Some(FOValue::String { value }))) if !value.is_empty() => {
+                Ok(Self::Role(value.clone()))
             }
-            Some(("named", payload)) => Err(format!(
-                "`named must carry a non-empty Str, got {}",
+            Some(("role", payload)) => Err(format!(
+                "`role must carry a non-empty Str, got {}",
                 payload.map_or_else(|| "nothing".to_string(), FOValue::shape)
             )),
             _ => Err(format!(
-                "expected `inherit (whatever you are running on) or `named '<name>', got {}",
+                "expected `inherit (your own model) or `role '<name>' (one the human bound at launch), got {}",
                 v.shape()
             )),
         }
@@ -1261,7 +1237,6 @@ mod tests {
                 prompt: "go".into(),
                 name: Name("scout".into()),
                 memory,
-                provider: Selection::Inherit,
                 model,
             },
         }
@@ -1282,14 +1257,12 @@ mod tests {
         let start = |spec, fork| Request::Agents(Agents::Start(Start { spec, fork }));
         round_trips([
             Request::Agents(Agents::List),
-            Request::Agents(Agents::Models),
-            Request::Agents(Agents::GrepModels("claude".into())),
             start(
                 spec(Memory::Amnemon, Selection::Inherit),
                 ForkClaim::Parked(NurseryId(3)),
             ),
             start(
-                spec(Memory::Mnemon, Selection::Named("other-model".into())),
+                spec(Memory::Mnemon, Selection::Role("other-model".into())),
                 ForkClaim::Sealed(
                     ral_core::seed::seal(
                         &ral_core::HostSurface::default()
@@ -1307,24 +1280,6 @@ mod tests {
             Request::Agents(Agents::Reply(restriction())),
             Request::Agents(Agents::Read("scout".into())),
         ]);
-    }
-
-    #[test]
-    fn model_queries_owe_provider_model_records() {
-        let rows = vec![AvailableModel {
-            provider: "account".into(),
-            model: "model".into(),
-        }]
-        .encode();
-        for request in [
-            Request::Agents(Agents::Models),
-            Request::Agents(Agents::GrepModels("m".into())),
-        ] {
-            assert!((request.owed())(&rows).is_ok());
-            assert!((request.owed())(&vec!["model".to_string()].encode()).is_err());
-        }
-        assert!(family::<Agents>(&tag("models", Some("query".to_string().encode()))).is_err());
-        assert!(family::<Agents>(&tag("grep-models", None)).is_err());
     }
 
     #[test]

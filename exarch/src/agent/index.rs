@@ -3,6 +3,8 @@
 
 use crate::agent::Role;
 use crate::prompt::{BUILTIN_INDEX_PLACEHOLDER, NAME_PLACEHOLDER};
+use crate::provider::roles::Roles;
+use std::borrow::Cow;
 
 /// One agent's construction-fixed authorities — the same facts the desk reads
 /// when refusing, so prompt and refusal cannot disagree.
@@ -10,6 +12,7 @@ pub(crate) struct Grants<'a> {
     pub role: &'a Role,
     pub allow_schedule: bool,
     pub spawns: bool,
+    pub roles: &'a Roles,
 }
 
 /// Each grant admits a family of verbs to the index and, where the family has
@@ -24,8 +27,8 @@ pub(crate) struct Grants<'a> {
 /// agent with no fuel left still holds `reply`. So the verb name is withheld
 /// only when *neither* grant holds, while the sections that teach it each
 /// gate on their own grant alone.
-type Section = Option<(&'static str, &'static str)>;
-fn families(g: &Grants) -> [(bool, &'static [&'static str], Section); 5] {
+type Section = Option<(&'static str, Cow<'static, str>)>;
+fn families(g: &Grants) -> [(bool, &'static [&'static str], Section); 6] {
     let returns = g.role.returns();
     [
         (g.allow_schedule, &["exarch-schedules"], None),
@@ -33,17 +36,28 @@ fn families(g: &Grants) -> [(bool, &'static [&'static str], Section); 5] {
         (
             g.spawns,
             &[],
-            Some(("Agents", include_str!("../../data/agents.md"))),
+            Some((
+                "Agents",
+                Cow::Borrowed(include_str!("../../data/agents.md")),
+            )),
+        ),
+        (
+            g.spawns && !g.roles.is_empty(),
+            &[],
+            Some(("Roles", Cow::Owned(g.roles.prompt()))),
         ),
         (
             matches!(g.role, Role::Child { .. }),
             &[],
-            Some(("Spawned", include_str!("../../data/spawned.md"))),
+            Some((
+                "Spawned",
+                Cow::Borrowed(include_str!("../../data/spawned.md")),
+            )),
         ),
         (
             returns,
             &[],
-            Some(("Reply", include_str!("../../data/reply.md"))),
+            Some(("Reply", Cow::Borrowed(include_str!("../../data/reply.md")))),
         ),
     ]
 }
@@ -119,7 +133,7 @@ impl BuiltinIndex {
             .replace(NAME_PLACEHOLDER, name);
         for (held, _, section) in families(grants) {
             if let (true, Some((heading, body))) = (held, section) {
-                append_section(&mut resolved, heading, body);
+                append_section(&mut resolved, heading, &body);
             }
         }
         resolved
@@ -135,4 +149,34 @@ fn append_section(prompt: &mut String, heading: &str, body: &str) {
     prompt.push_str("\n\n");
     prompt.push_str(body.trim_end());
     prompt.push('\n');
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::Provider;
+    use crate::provider::scripted::Script;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    #[test]
+    fn roles_are_taught_iff_the_agent_spawns_and_roles_exist() {
+        let index = BuiltinIndex::resolve(vec![]);
+        let provider = Arc::new(Provider::scripted("small-model", Script::default()));
+        let some = Roles(BTreeMap::from([("cheap".into(), provider)]));
+        let prompt = |spawns, roles| {
+            let role = Role::Converses;
+            let grants = Grants {
+                role: &role,
+                allow_schedule: false,
+                spawns,
+                roles,
+            };
+            index.apply("", &grants, "x")
+        };
+        let taught = prompt(true, &some);
+        assert!(taught.contains("# Roles") && taught.contains("- cheap: small-model"));
+        assert!(!prompt(false, &some).contains("# Roles"));
+        assert!(!prompt(true, &Roles::default()).contains("# Roles"));
+    }
 }

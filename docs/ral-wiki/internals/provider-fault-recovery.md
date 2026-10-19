@@ -203,7 +203,7 @@ Two more `ProviderError` variants never come from `from_genai`:
   That is also the whole record of the cut. The stall once wrote a second
   record of its own at the point it happened, so a survived stall drew two
   error blocks — one saying the turn resumes, one immediately reading as the
-  end of the run. Now the caller's `record_provider_error` writes it once, and
+  end of the run. Now the caller emits `Forensic::ProviderError` once, and
   `ProviderError::stall_cause` is the one place a stall that kept its partial
   reply is told from a fatal error (whether the exchange goes on is the
   nudge's to say): the TUI fold, synod's seam and the headless printer each

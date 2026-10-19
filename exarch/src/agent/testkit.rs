@@ -339,6 +339,7 @@ fn root(trunk: Trunk, tools: Toolset) -> Avatar {
             egress: crate::egress::Egress::for_test(),
             factory: None,
             bureau: Arc::new(crate::provider::Bureau::Scripted),
+            roles: crate::provider::roles::Roles::default(),
         },
         RootSeat::Identity {
             scratch: Arc::new(scratch),
@@ -414,7 +415,7 @@ pub(crate) fn started_child(parent: &Avatar, name: &str) -> Avatar {
         child: std::sync::Mutex::default(),
     });
     let script = format!(
-        "exarch-agents `start [prompt: #'go'#, name: '{name}', type: `amnemon, grant: `inherit, provider: `inherit, model: `inherit]"
+        "exarch-agents `start [prompt: #'go'#, name: '{name}', type: `amnemon, grant: `inherit, model: `inherit]"
     );
     let report = ral_core::carrier::dispatch_to_report(
         &*transport,

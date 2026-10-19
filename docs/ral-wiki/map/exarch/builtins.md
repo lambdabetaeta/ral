@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 38a02883d4b4526b1ae6a3c890081b016847dfdb
+generated_at_commit: 11950445365e2a5381b0bc988f6b6142ae16bb52
 generated_at_date: 2026-10-19
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/skill.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/src/enquiry.rs, exarch/src/library.rs, exarch/data/agent.ral]
 ---
@@ -274,7 +274,7 @@ so the model has the address before it asks for one.
     to its future self, drawn beneath the rows of the cut that took them; the
     harness's own eviction is this same edit under another authority and
     writes none; `/rewind` is a different record, `Protocol::Rewound`, which
-    truncates the table and leaves no marker at all. `note` is `` `none `` or `` `some Str ``, so absence is data and the
+    withdraws turns and leaves no marker at all. `note` is `` `none `` or `` `some Str ``, so absence is data and the
     `evict` record stays closed. The desk refuses a note it will not draw — a
     marker reading `Your note at eviction: ""` is a defect, which is why an
     empty `` `some `` is refused and `` `none `` is the spelling of no note. Its size and shape are
@@ -353,9 +353,8 @@ so the model has the address before it asks for one.
   is searchable that is not readable.
 
 The `exarch-agents` guide documents its operations, grant profiles,
-write restrictions with inherited execution, model selection, and fan-out
-with literal binding references. Model discovery uses the bureau's catalog;
-fuzzy search shares the picker's matcher. `data/agents.md`
+write restrictions with inherited execution, role selection, and fan-out
+with literal binding references. `data/agents.md`
 keeps point/call guidance for delegation, disjoint write grants, waiting,
 reading, follow-ups, and cancellation. Each child's system prompt renders its
 own grant, including the parent's restriction. Replying parks a child and starts
@@ -363,19 +362,15 @@ its one-hour follow-up lease; working time is outside that lease
 ([[map/exarch/agent|agent]]).
 
 - **`exarch-agents <tag>`** → `∀α. F α`. One verb for the fleet, over an **open** row
-  of eight tags — `` `list ``, `` `models ``, `` `grep-models <query> ``,
-  `` `start ``, `` `message ``, `` `cancel ``, `` `reply <value> ``,
+  of six tags — `` `list ``, `` `start ``, `` `message ``, `` `cancel ``,
+  `` `reply <value> ``,
   `` `read <name> ``. The acting tags answer `[live: Int, replied: Int]` *afterwards* — other live agents in the reader's tree, and how many of
   its own children hold a deposited reply (reading does not consume it) — rather than a
   receipt of its own. The rule is unchanged (the answer is the world after the
   transition); what changed is its cost, since a roster on every spawn of a
   fan-out is O(fleet) restating what the caller mostly chose, while `replied` is
   the one count it could not derive and the one asking for an action.
-  `` `models `` and `` `grep-models `` answer `[[provider: Str, model: Str]]`:
-  exact account IDs accepted by `start`, paired with listed model IDs.
-  `grep-models` fuzzy-ranks both fields through `text::rank_by`; empty queries
-  match all, no matches returns `[]`. A listing failure refuses the query with
-  the account and reason. `` `list `` answers the roster rows,
+  `` `list `` answers the roster rows,
   `[[name: Str, spawner: <root|agent Str>, state: <busy|waiting-on-agents|replied|waiting>, idle-s: Int, elapsed-s: Int, log-dir: Str]]`
   — the reader's whole tree, itself among them, since what it may *message* is
   wider than what it spawned. The climb stops at a root, so one root session
@@ -389,12 +384,12 @@ its one-hour follow-up lease; working time is outside that lease
   outer row is open so an unknown tag reaches a door that enumerates the tags; each known
   tag's payload keeps its exact type, so the closed record inside `` `start ``
   still makes a missing or misspelled field a static error naming it, while the
-  `type`/`grant`/`provider`/`model` rows *inside* that record stay open for the
+  `type`/`grant`/`model` rows *inside* that record stay open for the
   same reason one level down. Every family door refuses a block or a handle at
   any depth of its argument (`first_order`), so the type variables its argument
   mentions are `data` and its row variables deep (`door` in `harness.rs`;
   [[decisions/260930_operators-are-kinded|operators-are-kinded]]).
-  `` `start [prompt: …, name: …, type: …, grant: …, provider: …, model: …] `` is the one
+  `` `start [prompt: …, name: …, type: …, grant: …, model: …] `` is the one
   spawn: launch-only and always asynchronous, a one-line notice arriving
   through the inbox when the child replies, and the child's row in the answer carrying the `name` and
   `log-dir` the old receipt did. `name` is the child's identity — the tab-bar
@@ -417,14 +412,15 @@ its one-hour follow-up lease; working time is outside that lease
   ([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]]). There is
   no `search` field: hosted web search is a tool, present in a request or not,
   so the model never reasons about it in prose; a child inherits its parent's
-  bit verbatim ([[map/exarch/agent|agent]]). `provider` and `model` are
-  each `` `inherit `` or `` `named <Str> ``, and both are always written:
-  ral has no optional field, so absence is *data* carried by a variant
+  bit verbatim ([[map/exarch/agent|agent]]). `model` is
+  `` `inherit `` or `` `role <Str> ``, and is always written: ral has no
+  optional field, so absence is *data* carried by a variant
   ([[invariants/optionality-via-variants|optionality-via-variants]]) and the
-  record row stays closed. `` `inherit `` takes the parent's half and
-  `` `named `` another; the parent's own pair shares its `Arc<Provider>`
-  verbatim, and any other is minted by `Bureau::reselect`, which refuses a
-  model the account does not list. Fuel bounds delegation depth,
+  record row stays closed. `` `inherit `` shares the parent's `Arc<Provider>`
+  verbatim; `` `role `` takes the provider the human bound to that name at
+  launch (`--role NAME=MODEL`, [[map/exarch/provider|provider]]), and is
+  refused when none is configured or none bears the name. The agent never
+  names a provider or a model, so it cannot discover one. Fuel bounds delegation depth,
   not fan-out — refused only once the caller's own `fuel` reaches zero.
   `` `cancel <name> `` is descendant-only, resolved by name and enforced at
   the desk; a scope violation raises. `` `message [to: …, text: …] `` is not:

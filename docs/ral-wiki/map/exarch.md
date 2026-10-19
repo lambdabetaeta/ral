@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 3bf43d16fc35212e3a3b354a91ffa2fcac136724
+generated_at_commit: 11950445
 generated_at_date: 2026-10-19
-covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/data/system.md, exarch/data/agents.md, exarch/data/spawned.md, exarch/data/reply.md, exarch/data/ral.md, exarch/data/context.md]
+covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/data/system.md, exarch/data/agents.md, exarch/data/spawned.md, exarch/data/reply.md, exarch/data/roles.md, exarch/data/ral.md, exarch/data/context.md]
 ---
 
 # Map: exarch
@@ -52,7 +52,11 @@ exit code.
   confined-path tests cannot run.
 - **Subcommands** (`cli.rs`) run an out-of-band action and exit before any session
   setup: `login` / `logout` / `accounts` manage signed-in ChatGPT accounts (see
-  below), `--model` and the session flags are ignored on this path.
+  below), `--model` and the session flags are ignored on this path. `export
+  <session> [--out FILE]` renders a session's `record.jsonl` (given as its
+  directory or the file) as the plain-text transcript the scrollback showed, to
+  standard output or a new file, through the same `tui::export_to` that `/export`
+  uses ([[internals/session-record|session-record]]).
 - **Session.** Absent a subcommand, `run` settles what to open on
   (`--provider` pins the identity; `--model` names a model its account must
   list; `--effort` names a rung of the `/model` picker's own `EFFORT_LADDER`;
@@ -62,7 +66,11 @@ exit code.
   opens the picker alone on the screen before any session exists (`tui::choose`)
   — or, headless, fails asking for `--model`. A session is therefore born with a
   listed model and never holds none, and the pair it opens on is saved back, so
-  a flag and the picker leave the same trace. Then `run` composes the capability lattice
+  a flag and the picker leave the same trace. `--role NAME=MODEL` (and
+  `--role-provider NAME=ACCOUNT` to break a tie) binds the models a spawned
+  agent may run on, minted at launch with this run's `--effort` and
+  `--max-tokens` and never saved; without roles every child inherits
+  ([[map/exarch/provider|provider]]). Then `run` composes the capability lattice
   (`policy::for_invocation`, → [[map/exarch/policy|policy]]),
   assembles the system prompt (`prompt::assemble`), builds the first root
   [[map/exarch/agent|`Avatar`]] via `Avatar::root(RootConfig, RootSeat, provider)`
@@ -187,7 +195,8 @@ the shell every seat starts from.
   (`project_slug`), holding the persisted model selection (`state.json`); and
   `App::log_run_dir` is the durable per-run
   [[map/exarch/frontend|session-log]] directory
-  `$XDG_STATE_HOME/<app>/<project>/<run>/`, so logs survive an abnormal exit.
+  `$XDG_STATE_HOME/<app>/<project>/<run>/`, so logs survive an abnormal exit; each
+  session's `sessions/<id>/` holds `record.jsonl` alone.
 
 ## System prompt
 
@@ -206,12 +215,17 @@ agent, so a root, identity fork, and wire child each receive their own surface.
   introduction leads into values, computations, capture, and forcing, followed
   by help and exploration. String arguments remain intact; list spreading and
   glob expansion are explicit. Blocks retain their lexical bindings when a
-  helper is shadowed. Specialist details live in `explain redirects`,
+  helper is shadowed. Examples collect multiple reads into one returned value
+  and force computations inside homogeneous lists and heterogeneous records;
+  string guidance distinguishes variable delimiters from command capture and
+  teaches hash-delimited raw strings as the spelling for literal text.
+  Specialist details live in `explain redirects`,
   `explain within`, `explain return`, `explain grant`, `explain try`,
   `explain await`, `explain poll`, and `explain detach`; the prompt keeps
   common forms and examples.
   Failure guidance separates recovery, inspection, and deliberate suppression;
   deferred work is independent until its result is awaited and inspected.
+  Repeated awaits read the same result; another `defer` starts another execution.
   The audit example distinguishes an expected nonzero exit from an error;
   independent calls use individual `attempt`s so one failure does not skip the
   rest, then inspect each command's status rather than the enclosing audit's
@@ -273,9 +287,17 @@ agent, so a root, identity fork, and wire child each receive their own surface.
   reply, and the idle wait for follow-ups. A headless root therefore gets
   `Reply` but never `Spawned`. `Agents` uses point/call examples: pass bindings,
   request a reply shape, assign disjoint write grants, wait without polling,
-  read, follow up, cancel, and look up models.
+  read, follow up, and cancel. **`Roles`** (`data/roles.md` plus one
+  `name: model` line per `--role`) follows `Agents`, iff the agent spawns and
+  the human bound any.
   The detailed permissions, schemas, and fan-out examples live in
   `explain exarch-agents`.
+
+The assembled prompt is a fact of the session: every opening of a log (a root,
+a fork, a `/new` or `/branch` root) records it as `Protocol::System`, and a
+resume records the freshly built prompt only if it differs from the one in
+force. A round-trip reads it off the model fold, so `Agent` and `Birth` hold no
+copy.
 
 `--system FILE...` replaces *only* the persona slot with the user-supplied files;
 the per-agent index and optional sections still resolve from the stored base.

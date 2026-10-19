@@ -5,6 +5,8 @@ generated_at_commit: 14c8cae4
 
 # The turn is the atom of eviction
 
+> Superseded in part: a fork no longer re-records the parent's messages as `ContextMessage`s; its link is read back through digest-checked pointers into the parent's file, and a turn may also leave the context by *withdrawal* (`/clear`, `/rewind`). See [[internals/session-record|session-record]].
+
 **The context is a table of *turns*; an eviction is a cut in it, addressed by
 a turn id, weighed at every turn boundary.** One growing structure, one fold,
 everything else a projection: the log is the structure, `Folded` — a table of

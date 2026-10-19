@@ -20,6 +20,7 @@ fn root_config(run_dir: &Path, fuel: u32) -> RootConfig {
         egress: crate::egress::Egress::for_test(),
         factory: None,
         bureau: Arc::new(crate::provider::Bureau::Scripted),
+        roles: crate::provider::roles::Roles::default(),
     }
 }
 

@@ -66,6 +66,10 @@ Look at a directory with `ls`. To compute over its entries, `list-dir $path` ret
 
 Scope any of these with `within [dir: …]`. A walk skips only what it finds: a path you name is always searched, so `grep-files #'x'# target` searches a gitignored directory and `grep-files #'x'# .env` a dot file.
 
+`view-text` and `view-text-around` return their lines as values. Only the final expression becomes `VALUE`, so collect several reads into one result:
+
+    [source: !{view-text src/main.rs 1 20}, config: !{view-text Cargo.toml 1 20}]
+
 ## Blocks
 
 A bound block can be called by name in command position:
@@ -100,11 +104,11 @@ Bindings are immutable but shadowable. Blocks capture lexically: earlier blocks 
 
       echo "hi $first-name $(last-name): $h[file] line $h[line], today !{date +%F | from-line}, sum $[2 + 3]"
 
-- Parentheses delimit a variable inside an interpolated word: `"$(today)-checkout"`.
+- Parentheses delimit a variable inside an interpolated word: `"$(today)-checkout"`. `$(…)` never runs a command. To capture command output, use `let` or force the command inside double quotes with `!{…}`.
 - Words never glue: `$dir/file` is a parse error; interpolate instead: `"$dir/file"`.
 - In double quotes, a leading `~` or `~/` expands to the home directory, e.g. `ls "~/Work Invoices"`. `!{home}` is the same value.
 - Double quotes process escapes such as `\n`, `\t`, `\\`, `\"`, `\$`, and `\!`.
-- Single quotes are literal: `'…'` has no escapes or interpolation. Add matching hashes to include quotes: `#'…'#`; if the content itself contains `'#`, add more hashes, e.g. `#####'…'#####`. Prefer these raw strings for literal payloads passed to an external tool, e.g. `sed -i #'s|^old_value$|new_value|'# config.txt`. Pass computed values directly as `$arg`, or interpolate when constructing text.
+- Write literal text as a raw string, `#'…'#`, with no escapes or interpolation. The delimiters are mirror images: `#'` opens, `'#` closes. If the text contains `'#`, use more hashes on both sides: `###'…'###`. Use raw strings for literal payloads passed to external tools, e.g. `sed -i #'s|^old_value$|new_value|'# config.txt`. Pass computed values directly as `$arg`, or interpolate when constructing text.
 - `dedent` strips the common leading indentation from a multiline string.
 - There are no `<<EOF` heredocs. `cmd << $body` or `cmd << #'…'#` feeds a string to `cmd`'s stdin. One newline at the very start of the string is dropped, so the body can start on the line under the command.
 - Split captured text explicitly with `lines $text`.
@@ -120,9 +124,9 @@ Search and replacement are regex builtins (Rust regex syntax — #'a|b'#, DO NOT
 
 A bare word that looks like a number IS that number: `echo 007` prints `7`, `echo 1.50` prints `1.5`, and `echo #'3.100'#` prints `3.100`:
 
-    let ver = '3.10'                 # a version is text; bare, it would be 3.1
+    let ver = #'3.10'#                 # a version is text; bare, it would be 3.1
 
-Arithmetic and Boolean expressions must be in `$[…]` blocks: `$[$x == 0]`, `$[$a + $b]`, `$[$x > 0 && $x < 10]`, `$[not !{re-match #'x'# $s}]` are computed to values. An operand may be any value — `$[$s == 'quit']` compares strings, and `==` is structural on every kind — but arithmetic and `<`/`>` want numbers. Such blocks do not nest; one layer suffices.
+Arithmetic and Boolean expressions must be in `$[…]` blocks: `$[$x == 0]`, `$[$a + $b]`, `$[$x > 0 && $x < 10]`, `$[not !{re-match #'x'# $s}]` are computed to values. An operand may be any value — `$[$s == #'quit'#]` compares strings, and `==` is structural on every kind — but arithmetic and `<`/`>` want numbers. Such blocks do not nest; one layer suffices.
 
 `if` takes a Boolean value and blocks, written out or in hand:
 
@@ -135,6 +139,8 @@ Arithmetic and Boolean expressions must be in `$[…]` blocks: `$[$x == 0]`, `$[
 
 ## Structured values
 
+Every element of a list shares one type; use a record for fields of different types:
+
     let xs = [a, b, c]                   # list, with elements separated by commas
     $xs[0]                               # #'a'#
     let r = [host: #'h'#, port: 80]        # record — fixed, heterogeneous fields
@@ -144,9 +150,11 @@ Arithmetic and Boolean expressions must be in `$[…]` blocks: `$[$x == 0]`, `$[
     let at_start = [d, e, ...$xs]        # prepending by spreading
     ls ...$flags ...$dirs                # …and to splice arguments
 
+Collection literals contain values, so force calls inside them: `[!{length $xs}, 2]`, not `[length $xs, 2]`. The same rule applies to record fields: `[count: !{length $xs}]`.
+
 Indexing `$h[key]` works in any context (pipelines, blocks, double quoted): e.g. `view-text-around $h[file] $h[line] 3`.
 
-A map is not a record: its keys are runtime data and its values all share one type. A literal is a map if any key is data: `"quoted"` (`["a": 1, "b": 2]`) or computed (`[$k: 1]`). A bare or `'single-quoted'` key is a label, and labels alone make a record; `[:]` is the empty map. Only maps support `keys`, `values`, `has`, `get` (with default), `union`, `entries`, and only a map is read by a computed key (`$m[$k]`); a bare key like `$r[host]` always reads a record field.
+A map is not a record: its keys are runtime data and its values all share one type. A literal is a map if any key is data: `"quoted"` (`["a": 1, "b": 2]`) or computed (`[$k: 1]`). A bare key or a raw string key (`#'label'#`) is a label, and labels alone make a record; `[:]` is the empty map. Only maps support `keys`, `values`, `has`, `get` (with default), `union`, `entries`, and only a map is read by a computed key (`$m[$k]`); a bare key like `$r[host]` always reads a record field.
 
 For host configuration records, call `explain return`.
 
@@ -185,7 +193,7 @@ There are also corresponding `to-line`, `to-string`, `to-lines`, `to-json` that 
 
 Decoders read from the byte channel. To decode bytes already stored in a value, use `bytes-to-string $r[stdout]`.
 
-`from-json` and `from-jsonl` results are checked against how the script uses the value: a read of a field the file lacks, or a number used as text, fails at the decode, naming the JSON pointer (`/items/3/size`) and the line of the use. To read one value out of a document, `from-json-at ['items', '3', 'size'] < $file` takes the path as a list of keys and indexes, never as a spliced string.
+`from-json` and `from-jsonl` results are checked against how the script uses the value: a read of a field the file lacks, or a number used as text, fails at the decode, naming the JSON pointer (`/items/3/size`) and the line of the use. To read one value out of a document, `from-json-at [#'items'#, #'3'#, #'size'#] < $file` takes the path as a list of keys and indexes, never as a spliced string.
 
 A decoder ends the byte pipeline: its value never travels down a further `|`, so `git log --oneline | from-lines | head -n5` is refused — a stage feeds the next by writing, and `from-lines` returns a list. Bind the list, then `take 5 $commits`.
 
@@ -296,7 +304,7 @@ When what you want is the merged text of every step, put the block on the byte c
     let text  = !$steps | from-string     # every step's stdout, as one String
     !$steps > log.txt                     # or straight to a file
 
-Do not use `sh -c`, as e.g. `sh -c 'a; b; c'` payload throws away what `ral` would have told you — three commands collapse into one opaque child with one undifferentiated stdout, and a failure in the middle becomes invisible.
+Do not use `sh -c`, as e.g. `sh -c #'a; b; c'#` payload throws away what `ral` would have told you — three commands collapse into one opaque child with one undifferentiated stdout, and a failure in the middle becomes invisible.
 
 ## Concurrency
 
@@ -319,7 +327,7 @@ While it runs, do other independent work. When you need its result, `await` the 
       `err: { |e| fail $e },
     ]
 
-Like `audit`, deferred blocks turn recoverable failures into data. You can await the same handle across turns. Call `explain await` and `explain poll` for cancellation, exit, and polling behavior.
+Like `audit`, deferred blocks turn recoverable failures into data. Awaiting the same handle again, even across turns, reads its completed result; it does not run the block again. Calling `defer` again starts another execution. Call `explain await` and `explain poll` for cancellation, exit, and polling behavior.
 
 Use `cancel $h` to stop a thread that is no longer required.
 

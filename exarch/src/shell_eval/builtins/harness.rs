@@ -143,15 +143,15 @@ fn door(data: &[TyVar], answers: &[TyVar], rows: &[RowVar], ty: Ty) -> Scheme {
     scheme(&vars, &rows, ty)
 }
 
-/// `exarch-agents :: ∀β:data α ρ1^d ρ2^d ρ3^d ρ4^d ρ5^d. <list | models | grep-models Str | start [prompt: Str, name: Str, type: Variant ρ1, grant: Variant ρ2, provider: Variant ρ3, model: Variant ρ4] | message [to: Str, text: Str] | cancel Str | reply β | read Str | ρ5> → F α`
+/// `exarch-agents :: ∀β:data α ρ1^d ρ2^d ρ3^d ρ4^d. <list | start [prompt: Str, name: Str, type: Variant ρ1, grant: Variant ρ2, model: Variant ρ3] | message [to: Str, text: Str] | cancel Str | reply β | read Str | ρ4> → F α`
 ///
-/// The outer tag row is open (`ρ5`) so an unrecognised tag reaches the
+/// The outer tag row is open (`ρ4`) so an unrecognised tag reaches the
 /// runtime door that names the legal ones, rather than dying as a
 /// row-unification mismatch.
 ///
 /// The answer is not one fixed shape: `` `list `` answers the roster
-/// `[[name, spawner, state, idle-s, elapsed-s, log-dir]]`, `` `models `` and `` `grep-models `` the
-/// catalog `[[provider, model]]`, the acting tags the summary `[live, replied]`,
+/// `[[name, spawner, state, idle-s, elapsed-s, log-dir]]`, the acting tags the
+/// summary `[live, replied]`,
 /// and `` `read `` the value a
 /// descendant handed up, whose shape this call cannot know — so `α` is left
 /// free rather than fixed to one of these. This is the
@@ -161,7 +161,7 @@ fn door(data: &[TyVar], answers: &[TyVar], rows: &[RowVar], ty: Ty) -> Scheme {
 /// `start`'s and `message`'s record rows are closed because a record
 /// literal with literal keys infers an exact one (`infer_map_val` builds on
 /// `Row::Empty`), so a missing or misspelled field is a static error naming
-/// it. The `type`, `grant`, `provider` and `model` rows *inside* `start` stay
+/// it. The `type`, `grant` and `model` rows *inside* `start` stay
 /// open, because a literal tag infers its own open row: closing them would
 /// make `` `bogus `` a bare row-mismatch diagnostic that never reaches the
 /// vocabulary's decoders, which enumerate the legal labels.
@@ -170,7 +170,6 @@ fn door(data: &[TyVar], answers: &[TyVar], rows: &[RowVar], ty: Ty) -> Scheme {
 fn scheme_agents(u: &mut Unifier) -> Scheme {
     let type_row = u.fresh_row_var();
     let grant_row = u.fresh_row_var();
-    let provider_row = u.fresh_row_var();
     let model_row = u.fresh_row_var();
     let tag_row = u.fresh_row_var();
     let reply_ty = u.fresh_tyvar();
@@ -178,13 +177,11 @@ fn scheme_agents(u: &mut Unifier) -> Scheme {
     door(
         &[reply_ty],
         &[answer_ty],
-        &[type_row, grant_row, provider_row, model_row, tag_row],
+        &[type_row, grant_row, model_row, tag_row],
         thunk(fun(
             open_variant(
                 &[
                     ("list", Ty::Unit),
-                    ("models", Ty::Unit),
-                    ("grep-models", Ty::String),
                     (
                         "start",
                         closed_record(&[
@@ -192,7 +189,6 @@ fn scheme_agents(u: &mut Unifier) -> Scheme {
                             ("name", Ty::String),
                             ("type", Ty::Variant(Row::Var(type_row))),
                             ("grant", Ty::Variant(Row::Var(grant_row))),
-                            ("provider", Ty::Variant(Row::Var(provider_row))),
                             ("model", Ty::Variant(Row::Var(model_row))),
                         ]),
                     ),
@@ -370,10 +366,10 @@ Start a child
     exarch-agents `start [
       prompt: #'Review $plan against src/solver/. Reply [verdict: `ok|`revise, issues: [[file: Str, line: Int, why: Str]]].'#,
       name: #'plan-review'#, type: `amnemon, grant: `read-only,
-      provider: `inherit, model: `inherit
+      model: `inherit
     ]
 
-All six fields are required. name must be unique among live agents, 1–24 ASCII
+All five fields are required. name must be unique among live agents, 1–24 ASCII
 letters, digits, hyphens, or underscores. start returns immediately; a notice
 arrives when the child replies or ends. Do not poll for completion.
 
@@ -417,20 +413,8 @@ explicit denies; unrestricted exec alone implies no reads. A present fs table
 allows only listed writes. Records may specify exec, fs, net, detach, editor,
 and shell; explain grant gives their shapes.
 
-provider and model each accept `inherit or `named #'name'#. Inherit both unless
-the task calls for another selection. Look up available pairs:
-
-    exarch-agents `models
-    exarch-agents `grep-models #'claude'#
-
-Both return [[provider: Str, model: Str]] from the configured accounts' cached
-or freshly fetched catalogs. provider is an exact account ID accepted by start.
-grep-models fuzzy-matches both fields, best first; words narrow the matches,
-an empty query matches all, and no matches returns []. This is not a regex.
-A failed listing refuses the call, naming the account and reason.
-
-For a chosen row $choice, pass provider: `named $choice[provider] and
-model: `named $choice[model] to start. An unavailable selection is refused.
+model is `inherit, your own model, or `role #'name'#, a model the human bound to that name at
+launch. Your system prompt lists any roles.
 
 Read a reply
 
@@ -504,7 +488,7 @@ Run independent tasks concurrently
       exarch-agents `start [
         prompt: #'Summarise $material. Reply [topic: Str, claims: [Str]].'#,
         name: $job[name], type: `amnemon, grant: `confined,
-        provider: `inherit, model: `inherit
+        model: `inherit
       ]
     }
 

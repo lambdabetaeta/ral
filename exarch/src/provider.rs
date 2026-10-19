@@ -21,6 +21,7 @@ mod rations;
 mod request;
 pub(crate) mod reset;
 mod retry;
+pub mod roles;
 pub mod scripted;
 mod secret_file;
 pub mod state;

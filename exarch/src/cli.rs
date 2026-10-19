@@ -40,6 +40,32 @@ pub struct Cli {
     /// starts.
     #[arg(long)]
     pub provider: Option<String>,
+    /// Bind a role that a spawned agent may run on.
+    ///
+    /// Give NAME=MODEL and repeat this option for more roles. A child started
+    /// with model `role 'NAME'` runs on MODEL, with this run's `--effort` and
+    /// `--max-tokens`. MODEL is resolved as `--model` is: to the one account
+    /// that lists it, or to the one that `--role-provider` names. Without
+    /// roles, every child runs on its parent's model. Roles last for this run
+    /// only and are not saved.
+    #[arg(
+        long,
+        value_name = "NAME=MODEL",
+        value_parser = crate::provider::roles::binding,
+        conflicts_with = "chat"
+    )]
+    pub role: Vec<(String, String)>,
+    /// Choose the account that a role's model runs on.
+    ///
+    /// Give NAME=ACCOUNT, with ACCOUNT as `--provider` accepts it. You need
+    /// this only when several accounts list the role's model.
+    #[arg(
+        long = "role-provider",
+        value_name = "NAME=ACCOUNT",
+        value_parser = crate::provider::roles::binding,
+        conflicts_with = "chat"
+    )]
+    pub role_provider: Vec<(String, String)>,
     /// Run one headless exchange with this prompt.
     ///
     /// This implies `--headless`. Exarch passes the text to the model exactly

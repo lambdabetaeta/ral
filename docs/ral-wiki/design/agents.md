@@ -140,9 +140,9 @@ that decision left open).
 The `` exarch-agents `start `` tag is **launch-only and always asynchronous**
 ([[decisions/260617_async-agent-tool|async-agent-tool]]). Its argument is a
 single closed record
-`[prompt: …, name: …, type: …, grant: …, provider: …, model: …]` —
+`[prompt: …, name: …, type: …, grant: …, model: …]` —
 a record literal, so a missing or misspelled field is a *static* error naming
-it, while the `type` (`` `amnemon ``/`` `mnemon ``), `grant`, `provider` and
+it, while the `type` (`` `amnemon ``/`` `mnemon ``), `grant` and
 `model` tags are
 checked at the runtime door that enumerates their legal labels
 ([[decisions/260719_agent-names-and-schedule-labels|names-and-schedule-labels]]).
@@ -200,10 +200,10 @@ Inheritance is **the parent's table, under the parent's own ids**. Ahead of
 everything goes one `Protocol::Inherited { turns, notes }` — the parent's whole
 turn table, each row `kind: Inherited`, `held` as the parent had it and
 carrying the address of its transcript copy, beside the notes made at the cuts
-that emptied those rows. The child then records one
-`Protocol::ContextMessage { id, message }` per message under the parent's own
-turn ids and roles, re-recording the resident turns as its
-own: `` exarch-context `survey `` shows them as individual `import` rows, and
+that emptied those rows. The child records no copy of the parent's messages:
+folding the link reads each resident row's records back through its address
+and keeps them under the parent's own turn ids and roles.
+`` exarch-context `survey `` shows them as `inherited` rows, and
 `` exarch-context `evict `` names any of them by turn id, exactly as it names the
 child's own. Nothing
 marker-shaped crosses by value — the child's markers, survey and index are the
@@ -212,9 +212,9 @@ same projections of the same fold
 [[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]).
 That link is what makes the two logs **one transcript**: an id at or below the
 reach
-resolves against the ancestry, walking each ancestor file once into a memoised
-index and following that ancestor's own link on to the grandparent, so a
-`mnemon` child can `` exarch-transcript `read `` or `` `grep `` anything its lineage
+resolves through its row's address into the file that first recorded it — the
+link flattens the lineage, so a grandchild's row names the grandparent's file
+directly — so a `mnemon` child can `` exarch-transcript `read `` or `` `grep `` anything its lineage
 ever recorded, evicted from the parent's context long before the fork included.
 Ids are therefore lineage-monotone: the child mints its first prompt above the
 parent's floor, and along any lineage an id names exactly one turn. The
@@ -222,31 +222,37 @@ chain breaks only where an ancestor's file has been taken away by hand, and
 the refusal names the ancestor and the path rather than calling the turn
 unrecorded ([[decisions/260906_context-rollover|context-rollover]]).
 
-The spawn's **`provider`** and **`model`** fields choose what the child runs
-on. ral has no optional record field and no null: absence is *data*, carried
-by a variant ([[invariants/optionality-via-variants|optionality-via-variants]]),
-so both fields are required and their values carry the optionality —
-`` `inherit `` or `` `named <Str> ``. The record row therefore stays closed,
-and a misspelled field stays a static error.
+The spawn's **`model`** field chooses what the child runs on, and **the agent
+discovers no model**: which models an agent may delegate to is the human's
+decision, not ambient authority an agent could search for. ral has no optional
+record field and no null: absence is *data*, carried by a variant
+([[invariants/optionality-via-variants|optionality-via-variants]]), so the
+field is required and its value carries the optionality — `` `inherit `` or
+`` `role <Str> ``. The record row therefore stays closed, and a misspelled
+field stays a static error.
 
-Each field is read on its own: `` `inherit `` takes the parent's half, and
-`` `named `` names another — an account by `resolve_pinned_provider`, a model
-by its name. A pair that comes out as the parent's own shares the parent's
-`Arc<Provider>` verbatim, allocating nothing. Any other is minted by
-`Bureau::reselect` through `Bureau::build`, the one door every provider passes,
-which refuses a model its account does not list, or one whose listing cannot be
-had, before any child exists.
+`` `inherit `` takes the parent's own `Arc<Provider>` verbatim, allocating
+nothing. `` `role `` names a **role**: a provider the human bound to a name at
+launch with `--role NAME=MODEL` (and, only to break a tie between accounts
+listing the model, `--role-provider NAME=ACCOUNT`), minted through
+`Bureau::build` — the one door every provider passes, which refuses a model its
+account does not list — before any child exists. Roles are fixed at launch,
+flags only, never persisted, and carry nothing but a provider: no grant, no
+persona, no prompt. With none configured every child inherits, `` `role `` is
+refused saying that only the human can add one, and the system prompt says
+nothing about roles; otherwise a `Roles` section lists each `name: model` to
+agents that spawn.
 
-Tuning (effort, temperature, `top_p`) and the output cap are the operator's
-knobs rather than part of a model's identity, so they always inherit; the
-`OpenRouter` route was chosen for the parent's model, so a child on any other
-pair runs with none.
+A role's tuning is the launch's (`Tuning::initial` plus `--effort`) and
+`--max-tokens`, captured when it is minted; a later `/model` changes only the
+switching agent's own provider, and roles are untouched. The reachable set is
+the root's selection together with the roles' providers.
 
 `provider::Bureau` is what makes any of this possible: `Provider::build` needs
 an engine and a credential that no `Provider` retains, so the bureau names that
 trio once and is the only place a live provider is minted
 ([[map/exarch/provider|provider]]). A scripted session holds `Bureau::Scripted`
-and refuses a named selection in one sentence saying so.
+and mints no roles.
 
 ### Bind and hand: context as a value
 
@@ -264,7 +270,6 @@ exarch-agents `start [
   name: 'researcher',
   type: `amnemon,
   grant: `read-only,
-  provider: `inherit,
   model: `inherit,
 ]
 ```
