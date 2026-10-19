@@ -42,7 +42,7 @@ fn plain(line: &Line<'_>) -> String {
 fn nonblank(lines: &[Line<'static>]) -> Vec<String> {
     lines
         .iter()
-        .filter(|l| !line::is_blank(l))
+        .filter(|l| !text::is_blank(l))
         .map(plain)
         .collect()
 }
@@ -60,5 +60,5 @@ fn live_tip_anchors_on_latest_settled_call_not_a_pending_one() {
     );
     assert!(!head.contains("pending grep"), "not the in-flight call");
     // The pending call still counts toward the sparkline, as its shortest bar.
-    assert!(head.ends_with(line::spark_glyph(None)));
+    assert!(head.ends_with(gauge::spark_glyph(None)));
 }

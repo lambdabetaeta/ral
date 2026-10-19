@@ -1,9 +1,10 @@
 //! A patch rendered as a block: a header with its size and grain, hunks
 //! numbered against one shared gutter, and elision rows where content is cut.
 
-use super::block::Detail;
-use super::line::{card_span, grain_run, hang, size_bar};
-use super::palette::{Col, LIME_HOT, RED_HOT, SLATE};
+use super::dial::Detail;
+use super::gauge::{grain_run, size_bar};
+use super::palette::{Col, LIME_HOT, RED_HOT, SLATE, card_span};
+use super::text::hang;
 use crate::card::{self, Change, Diff, Hunk, Row as DiffRow, Seg};
 use ral_core::types::WriteOutcome;
 use ratatui::{

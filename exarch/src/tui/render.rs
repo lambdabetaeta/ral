@@ -2,6 +2,7 @@
 //! into a [`Term`].
 
 use std::io::{self, Write};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crossterm::{
     execute,
@@ -15,6 +16,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Padding, Paragraph},
 };
 
+use crate::provider::{Bureau, effort_label, identity};
 use crate::record::AgentState;
 
 use super::App;
@@ -23,11 +25,11 @@ use super::block::queued_prompt_rows;
 use super::gesture::{FrameGeom, Toast};
 use super::line;
 use super::matrix::strip;
-use super::palette::{AGENT_HUES, BANNER_CRIMSON, LIME_HOT, READ_W, SLATE};
+use super::palette::{BANNER_CRIMSON, LIME_HOT, READ_W, SLATE};
 use super::row::Row;
-use super::scrollback::{Scrollback, StateSpan};
+use super::scrollback::Scrollback;
 use super::select::highlight_range;
-use super::status::rule_line;
+use super::status::{StateSpan, rule_line};
 use super::terminal::Term;
 
 const PROMPT_PAD_H: u16 = 1;
@@ -44,7 +46,7 @@ const LEFT_MARGIN: u16 = 2;
 /// `READ_W`-capped transcript, and then takes all of them.
 const REGISTER_MIN_W: u16 = 35;
 
-/// Braille spinner for the terminal tab title; one glyph per four loop ticks.
+/// Braille spinner for the terminal tab title; one glyph per 64 ms.
 const SPINNER: &[char] = &[
     '\u{280B}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283C}', '\u{2834}', '\u{2826}', '\u{2827}',
     '\u{2807}', '\u{280F}',
@@ -71,8 +73,8 @@ fn strips(app: &App, area: Rect, queued_h: u16, tab_h: u16) -> Strips {
     // `area.width` stands in for the content row's width.
     let has_pins = app
         .tabs
-        .scrollback(app.tabs.focused())
-        .is_some_and(|sb| !sb.pins().is_empty());
+        .focused_status()
+        .is_some_and(|status| !status.pins().is_empty());
     let register_w = area.width.saturating_sub(LEFT_MARGIN + READ_W);
     let show_register = has_pins && register_w >= REGISTER_MIN_W;
     // The transcript's floor is a budget `matrix_height` spends, never a
@@ -118,7 +120,7 @@ fn indent(r: Rect) -> Rect {
 }
 
 /// Paint one frame into `term`.
-pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
+pub(super) fn draw(app: &mut App, term: &mut Term, bureau: &Bureau) -> io::Result<()> {
     let area = Rect::from((Position::ORIGIN, term.size()?));
     let focused = app.tabs.focused();
     // Both strips are owned lines, so this frame's rows are read here and
@@ -128,8 +130,7 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
     let queued_lines = queued_lines(app, area);
     let tab_h = matrix_height(app, area, queued_lines.len(), rows.len());
     let cursor = app.matrix_cursor(&rows);
-    let matrix_lines =
-        (tab_h > 0).then(|| strip(&rows, focused, app.matrix_sort, cursor, usize::from(tab_h)));
+    let matrix_lines = (tab_h > 0).then(|| strip(&rows, focused, cursor, usize::from(tab_h)));
     let navigating = app.matrix_navigating();
     let s = strips(
         app,
@@ -138,18 +139,18 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
         tab_h,
     );
     // Built before the `scrollback_mut` borrow that `render_window` needs.
-    let register_lines: Vec<Line<'static>> = match (app.tabs.scrollback(focused), s.register) {
-        (Some(sb), Some(reg)) => {
-            let hue = AGENT_HUES
-                .get(sb.agent().0 as usize)
-                .copied()
-                .unwrap_or(AGENT_HUES[0]);
-            line::render_register(sb.pins(), reg.width, hue)
+    let register_lines: Vec<Line<'static>> = match (
+        app.tabs.status(focused),
+        app.tabs.scrollback(focused),
+        s.register,
+    ) {
+        (Some(status), Some(sb), Some(reg)) => {
+            line::render_register(status.pins(), reg.width, sb.agent().hue())
         }
         _ => Vec::new(),
     };
     let cut = match &app.overlay {
-        Some(Overlay::Rewind(overlay)) => Some(overlay.anchor()),
+        Some(Overlay::Rewind(o)) if o.tab == focused => Some(o.anchor()),
         _ => None,
     };
     let (mut rows, offset, scroll_pct, cut_row) = match app.tabs.scrollback_mut(focused) {
@@ -163,6 +164,11 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
         }
         None => (Vec::new(), 0, None, None),
     };
+    app.gesture.record_frame(FrameGeom {
+        text: s.text,
+        offset,
+        tab: focused,
+    });
     paint_selection(app, &mut rows, offset);
     paint_hover(app, &mut rows, offset);
     // Ghost every row from the cut: the preview of what Enter would undo.
@@ -174,28 +180,32 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
     // The screen flatten — one of the two seams where a margin rejoins its
     // content, the other being `user.log`.
     let lines: Vec<Line<'static>> = rows.into_iter().map(Row::into_line).collect();
-    app.gesture.record_frame(FrameGeom {
-        text: s.text,
-        offset,
-    });
 
     app.prompt_state.style_prompt(app.is_steerable());
     let state = app
         .tabs
-        .scrollback(focused)
-        .map_or_else(|| StateSpan::new(AgentState::Ready), Scrollback::state);
+        .status(focused)
+        .map_or_else(|| StateSpan::new(AgentState::Ready), |status| status.state);
     let (last_input, context_window) = app
         .tabs
         .scrollback(focused)
         .map_or((0, None), Scrollback::gauge);
     let total_usage = app.total_usage();
+    // The focused agent's provider, labelled relative to the accounts so two
+    // logins on one email still read apart; the rung in force is the picker's
+    // own ladder label, a model with no reasoning control reading `auto`.
+    let status_model = app.tabs.focused_agent().map_or_else(String::new, |agent| {
+        let p = agent.current_provider();
+        let label = identity::label(p.account(), &bureau.available());
+        let effort = effort_label(&p.tuning().effort).unwrap_or("custom");
+        format!("{label}/{} ({effort})", p.model())
+    });
     // Field-wise from here: the editor draws through `&mut prompt_state` while
     // the rest of the frame reads its siblings.
     let App {
         prompt_state,
         gesture,
         overlay,
-        status_model,
         ..
     } = &mut *app;
 
@@ -221,7 +231,7 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
                 &total_usage,
                 last_input,
                 context_window,
-                status_model,
+                &status_model,
             )),
             s.status,
         );
@@ -282,7 +292,7 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
         }
         // Last, so the overlay floats over every strip already painted.
         match overlay {
-            Some(Overlay::Picker(p)) => p.render(f, area),
+            Some(Overlay::Picker(s, _)) => s.picker.render(f, area),
             Some(Overlay::Login(l)) => l.render(f, area),
             Some(Overlay::Rewind(r)) => r.render(f, area),
             Some(Overlay::Providers(p)) => p.render(f, area),
@@ -290,7 +300,6 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
         }
     });
     execute!(io::stdout(), EndSynchronizedUpdate)?;
-    emit_tab_title(app);
     drawn?;
     Ok(())
 }
@@ -343,10 +352,15 @@ fn queued_lines(app: &App, area: Rect) -> Vec<Line<'static>> {
 
 /// Set the terminal tab title: a spinner until the focused agent yields to the
 /// human, a block once it waits.  Skipped when the composed title is unchanged.
-fn emit_tab_title(app: &mut App) {
+pub(super) fn emit_tab_title(app: &mut App) {
     let working = !app.focused_waiting();
     let glyph = if working {
-        SPINNER[(app.tabs.title_frame() / 4) as usize % SPINNER.len()]
+        SPINNER[(SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            / 64) as usize
+            % SPINNER.len()]
     } else {
         '█'
     };

@@ -1,5 +1,4 @@
-use super::super::block::AgentSlot;
-use super::super::palette::PROMPT_INK;
+use super::super::palette::{AgentSlot, PROMPT_INK};
 use super::super::rail::{RAIL_SHAPES, span as rail_span};
 use super::*;
 use ratatui::style::Style;

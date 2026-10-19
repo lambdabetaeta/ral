@@ -22,9 +22,8 @@ use unicode_width::UnicodeWidthStr;
 
 use super::fidelity::Fidelity;
 use super::highlight::highlight_ral;
-use super::line::{is_blank, wrap_line};
-use super::palette::{CYAN, LIME, READ_W, SLATE};
-use super::rail::{desaturate, mix};
+use super::palette::{CYAN, LIME, READ_W, SLATE, desaturate, mix};
+use super::text::{is_blank, wrap_line};
 
 /// Left inset for assistant markdown within content space, holding the model's
 /// voice off the chrome.  On screen it reads as `RAIL_W + MD_INDENT`.
@@ -560,7 +559,7 @@ fn heading_style(level: HeadingLevel) -> Style {
 // ── tables ───────────────────────────────────────────────────────────────
 
 /// Consume events through `End(Table)` into a boxed table.  Cell content past
-/// its column wraps ([`super::line::wrap_line`]) rather than being clipped.
+/// its column wraps ([`super::text::wrap_line`]) rather than being clipped.
 fn render_table<'a, I: Iterator<Item = Event<'a>>>(
     p: &mut I,
     aligns: &[Alignment],

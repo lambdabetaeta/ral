@@ -3,15 +3,15 @@
 //! previews the cut — every row from the highlighted prompt on is ghosted
 //! (`render::draw`, from the row `Scrollback::render_cut_window` returns) and
 //! scrolled into view — so what Enter undoes is seen before it is done.
-//! Display and input only; [`rewind`] drives it and posts the [`Rewrite`].
+//! Display and input only; [`input`] drives it and posts the [`Rewrite`].
 
-use super::app::Overlay;
-use super::commands;
-use super::line::truncate_spans;
+use super::app::{App, Input, Overlay};
 use super::overlay::{self, Anchor};
 use super::palette::{CYAN, Col, SLATE};
-use super::tui_loop::{OverlayTick, Tui, overlay_tick};
+use super::scrollback::Viewport;
+use super::text::truncate_spans;
 use crate::bus::{Post, Rewrite};
+use crate::record::AgentId;
 use ratatui::Frame;
 use ratatui::crossterm::event::KeyCode;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -26,13 +26,21 @@ pub(super) struct RewindOverlay {
     /// Turn-opening prompts on screen, oldest first; never empty.
     prompts: Vec<(u64, String)>,
     selected: usize,
+    /// The tab being rewound and where its viewport sat, which the preview moves.
+    pub(super) tab: AgentId,
+    viewport: Viewport,
 }
 
 impl RewindOverlay {
     /// Over `prompts`, the latest highlighted; `None` with nothing to rewind.
-    fn new(prompts: Vec<(u64, String)>) -> Option<Self> {
+    fn new(prompts: Vec<(u64, String)>, tab: AgentId, viewport: Viewport) -> Option<Self> {
         let selected = prompts.len().checked_sub(1)?;
-        Some(Self { prompts, selected })
+        Some(Self {
+            prompts,
+            selected,
+            tab,
+            viewport,
+        })
     }
 
     /// The turn the highlighted prompt opened — the anchor Enter would post.
@@ -125,39 +133,39 @@ impl RewindOverlay {
 /// `/rewind`: choose a prompt on the focused tab's transcript and post the
 /// rewind to before it.  The viewport the preview moved is put back either way;
 /// a rewind that lands truncates the mirror as it always did.
-pub(super) fn rewind(tui: &mut Tui) {
-    let focused = tui.app.tabs.focused();
-    let Some(sb) = tui.app.tabs.scrollback_mut(focused) else {
+pub(super) fn rewind(app: &mut App) {
+    let focused = app.tabs.focused();
+    let Some(sb) = app.tabs.scrollback_mut(focused) else {
         return;
     };
-    let Some(overlay) = RewindOverlay::new(sb.prompts()) else {
-        tui.app
-            .push_error(focused, "nothing to rewind: no prompt is on screen yet");
+    let Some(overlay) = RewindOverlay::new(sb.prompts(), focused, sb.viewport()) else {
+        app.push_error(focused, "nothing to rewind: no prompt is on screen yet");
         return;
     };
-    let viewport = sb.viewport();
-    tui.app.overlay = Some(Overlay::Rewind(overlay));
-    let anchor = drive(tui);
-    tui.app.overlay = None;
-    if let Some(sb) = tui.app.tabs.scrollback_mut(focused) {
-        sb.set_viewport(viewport);
-    }
-    if let Some(anchor) = anchor {
-        commands::post(tui, Post::Rewrite(Rewrite::Rewind(anchor)));
-    }
+    app.open(Overlay::Rewind(overlay));
 }
 
-/// Poll keys until the overlay resolves; `None` on cancel.
-fn drive(tui: &mut Tui) -> Option<u64> {
-    loop {
-        match overlay_tick(tui) {
-            OverlayTick::Idle | OverlayTick::Save | OverlayTick::Paste(_) => {}
-            OverlayTick::Key(code) => {
-                if let Some(anchor) = tui.app.rewind_mut()?.key(code) {
-                    return Some(anchor);
-                }
-            }
-            OverlayTick::Cancel | OverlayTick::TerminalLost => return None,
+/// Move the highlight; Enter posts the rewind and Esc keeps, both closing.
+pub(super) fn input(r: &mut RewindOverlay, input: &Input, app: &mut App) -> bool {
+    let anchor = match input {
+        Input::Cancel => None,
+        Input::Key(code) => match r.key(*code) {
+            None => return true,
+            anchor => anchor,
+        },
+        Input::Save | Input::Paste(_) => return true,
+    };
+    if let Some(sb) = app.tabs.scrollback_mut(r.tab) {
+        sb.set_viewport(r.viewport);
+    }
+    if let Some(anchor) = anchor {
+        app.gesture.clear();
+        if let Some(agent) = app.tabs.agent(r.tab) {
+            agent.mailbox.push(Post::Rewrite(Rewrite::Rewind(anchor)));
+        } else {
+            let focused = app.tabs.focused();
+            app.push_error(focused, "the agent you were rewinding has ended");
         }
     }
+    false
 }

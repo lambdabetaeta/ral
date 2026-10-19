@@ -7,8 +7,8 @@
 //! nothing here adds or drops a character, it only hands spans a hue from
 //! [`super::palette`].
 
-use super::line::fold_styled_lines;
 use super::palette::{CODE_KEYWORD, CODE_STRING, CODE_TAG, CODE_VARIABLE, SLATE};
+use super::text::fold_styled_lines;
 use ral_core::syntax::highlight::{Class, classify};
 use ratatui::{
     style::{Color, Style},

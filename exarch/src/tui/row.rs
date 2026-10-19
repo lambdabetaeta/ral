@@ -9,8 +9,8 @@
 //! seams: the screen in [`super::render`] and `user.log` in
 //! `super::scrollback`.
 
-use super::line::{self, is_blank};
 use super::palette::{GHOST, RAIL_W, content_w};
+use super::text::{self, is_blank};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
@@ -129,7 +129,7 @@ impl Row {
     pub(super) fn wash(self, bg: Color, width: u16) -> Self {
         Self::new(
             Span::styled(self.gutter.content, self.gutter.style.bg(bg)),
-            line::wash(self.content, bg, Some(content_w(width).into())),
+            text::wash(self.content, bg, Some(content_w(width).into())),
         )
     }
 

@@ -305,7 +305,7 @@ impl Log {
     /// arrives as an `Err` item, leaving the fold to refuse the session.
     #[allow(
         clippy::disallowed_methods,
-        reason = "[silent:record-file-read] streams the session's record.jsonl for replay; output infra, not turn-time data I/O"
+        reason = "[silent:record-replay-read] streams the session's record.jsonl for replay; output infra, not turn-time data I/O"
     )]
     pub(super) fn read(
         path: &Path,

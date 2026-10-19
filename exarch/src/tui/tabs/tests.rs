@@ -44,9 +44,9 @@ fn parent_focus_climbs_past_a_lingering_ancestor() {
 }
 
 /// Killing one agent is never paid for out of a sibling's scrollback:
-/// tombstoning frees only the expired view.
+/// only the expired view goes.
 #[test]
-fn tick_tombstones_only_the_expired_view_leaving_a_live_sibling_untouched() {
+fn tick_retires_only_the_expired_view_leaving_a_live_sibling_untouched() {
     let (fleet, root) = root(Duration::ZERO);
     let mut tabs = Tabs::new(root.id, &Born::for_test("main", None), fleet, None);
     let child = AgentId::new(root.id.get() + 1);
@@ -58,20 +58,63 @@ fn tick_tombstones_only_the_expired_view_leaving_a_live_sibling_untouched() {
     }
     tabs.died(child);
     // Backdate rather than wait LINGER out in a test.
-    tabs.tab_mut(child).expect("the child has a tab").retired =
-        Instant::now().checked_sub(LINGER + Duration::from_secs(1));
+    let tab = tabs.tab_mut(child).expect("the child has a tab");
+    let Life::Lingering(_, at) = &mut tab.life else {
+        panic!("a dead child lingers");
+    };
+    *at = Instant::now()
+        .checked_sub(LINGER + Duration::from_secs(1))
+        .expect("an instant a minute back");
 
     assert!(tabs.tick(), "the expiry is a repaint cue");
 
-    assert_eq!(
-        tabs.scrollback(child).unwrap().probe_figures().0,
-        0,
-        "the dead child is tombstoned once past LINGER, its scrollback gone"
+    assert!(
+        tabs.scrollback(child).is_none(),
+        "the dead child is gone once past LINGER, its scrollback with it"
     );
     assert_eq!(
         tabs.scrollback(root.id).unwrap().probe_figures().0,
         1,
-        "the live root's own block survives the sibling's tombstoning untouched"
+        "the live root's own block survives the sibling's expiry untouched"
     );
     assert_eq!(tabs.len(), 1, "and the bar is back to root alone");
+}
+
+/// The first retirement's stamp stands: a death after a `/clear` does not
+/// restart the clock.
+#[test]
+fn the_first_retirement_stamp_wins() {
+    let (fleet, root) = root(Duration::ZERO);
+    let mut tabs = Tabs::new(root.id, &Born::for_test("main", None), fleet, None);
+    let child = AgentId::new(root.id.get() + 1);
+    born(&mut tabs, child, "child", Some(root.id));
+    tabs.retire_subtree(root.id);
+    let stamp = |tabs: &Tabs| match tabs.tab(child).map(|t| &t.life) {
+        Some(Life::Lingering(_, at)) => *at,
+        _ => panic!("the child lingers"),
+    };
+    let first = stamp(&tabs);
+
+    tabs.died(child);
+
+    assert_eq!(stamp(&tabs), first);
+}
+
+/// Re-pinning overwrites a slot in place and `drop_pin` removes one.
+#[test]
+fn pins_overwrite_in_place_and_keep_insertion_order() {
+    use crate::card::Mark;
+    let raw = |b: &[u8]| Card(vec![Mark::Raw { bytes: b.to_vec() }]);
+    let keys = |s: &Status| s.pins().iter().map(|(k, _)| k.clone()).collect::<Vec<_>>();
+    let mut status = Status::new();
+    status.set_pin("tasks".into(), raw(b"v1"));
+    status.set_pin("build".into(), raw(b"ok"));
+    assert_eq!(keys(&status), ["tasks", "build"]);
+
+    status.set_pin("tasks".into(), raw(b"v2"));
+    assert_eq!(keys(&status), ["tasks", "build"]);
+    assert!(matches!(&status.pins()[0].1.0[..], [Mark::Raw { bytes }] if bytes == b"v2"));
+
+    status.drop_pin("tasks");
+    assert_eq!(keys(&status), ["build"]);
 }

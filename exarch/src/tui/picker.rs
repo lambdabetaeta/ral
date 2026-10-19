@@ -10,9 +10,9 @@
 //! Display and input only: `model_picker.rs` fetches, and feeds results in
 //! through [`Picker::set_models`] and [`Picker::set_endpoints`].
 
-use super::line;
 use super::overlay::{self, Anchor};
-use super::palette::{CYAN, Col, OVERLAY_BG, RED, SLATE};
+use super::palette::{CYAN, Col, OVERLAY_BG, RED, SLATE, mix};
+use super::text;
 use crate::provider::identity::{self, Account, AccountId};
 use crate::provider::models::ProviderEndpoint;
 use crate::provider::pricing::{ModelCaps, Param};
@@ -591,11 +591,11 @@ impl Picker {
                         Style::default().fg(color)
                     }
                 };
-                let model = line::truncate_spans(
+                let model = text::truncate_spans(
                     &[Span::styled(model.clone(), style(CYAN))],
                     width.saturating_sub(label_width + 2),
                 );
-                let label = line::truncate_spans(
+                let label = text::truncate_spans(
                     &[Span::styled(self.label(account), style(SLATE))],
                     label_width,
                 );
@@ -702,8 +702,8 @@ impl Picker {
         let mut spans = vec![label, Span::styled("← ", arrow(active.is_some()))];
         // Auto leads the tags.
         let at = active.map_or(0, |i| i + 1);
-        let visible = line::window_around(&tags, at, room, dim);
-        let visible = line::truncate_spans(&visible, room);
+        let visible = text::window_around(&tags, at, room, dim);
+        let visible = text::truncate_spans(&visible, room);
         let used: usize = visible.iter().map(Span::width).sum();
         spans.extend(visible);
         spans.push(Span::raw(" ".repeat(room.saturating_sub(used))));
@@ -724,7 +724,7 @@ impl Picker {
                 clippy::cast_precision_loss,
                 reason = "enumerate index over a small const-length slice"
             )]
-            let value = super::rail::mix(EFFORT_DIM, EFFORT_BRIGHT, i as f32 / last);
+            let value = mix(EFFORT_DIM, EFFORT_BRIGHT, i as f32 / last);
             let mut style = Style::default().fg(value);
             if !focused {
                 style = style.add_modifier(Modifier::DIM);
@@ -798,7 +798,7 @@ impl Picker {
             clippy::cast_precision_loss,
             reason = "enumerate index over a small const-length range"
         )]
-        let hue = |i: usize| super::rail::mix(COLD, WARM, i as f32 / last);
+        let hue = |i: usize| mix(COLD, WARM, i as f32 / last);
         self.track_line(
             Focus::Temperature,
             self.temperature,
@@ -825,13 +825,13 @@ impl Picker {
         let plain = Style::default().fg(RED);
         self.notes()
             .flat_map(|(headline, reason)| {
-                let head = line::hang(
+                let head = text::hang(
                     &[Span::styled("⚠ ", bold)],
                     vec![Span::styled(headline, bold)],
                     width,
                 );
                 let body = reason.into_iter().flat_map(|reason| {
-                    line::hang(&[Span::raw("  ")], vec![Span::styled(reason, plain)], width)
+                    text::hang(&[Span::raw("  ")], vec![Span::styled(reason, plain)], width)
                 });
                 std::iter::once(Line::default())
                     .chain(head)

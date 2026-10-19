@@ -9,17 +9,12 @@ use clipboard::Copied;
 use ratatui::crossterm::event::MouseEvent;
 use ratatui::layout::{Position, Rect};
 
+use crate::record::AgentId;
+
 use super::scrollback::{Hit, Scrollback};
+use super::select::Cell;
 
 pub(super) const COPY_TOAST_TTL: Duration = Duration::from_secs(2);
-
-/// A buffer cell: a scrolled buffer row and a text-area column (0 = left
-/// edge).  The derived order is row-major, so `min`/`max` sort a selection.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) struct Cell {
-    pub(super) row: usize,
-    pub(super) col: u16,
-}
 
 /// Where the content area sat in the last drawn frame; the only place mouse
 /// coordinates become buffer cells.
@@ -28,6 +23,8 @@ pub(super) struct FrameGeom {
     pub(super) text: Rect,
     /// First visible buffer row.
     pub(super) offset: usize,
+    /// The tab this frame drew.
+    pub(super) tab: AgentId,
 }
 
 impl FrameGeom {
@@ -132,7 +129,15 @@ impl GestureState {
     }
 
     pub(super) fn record_frame(&mut self, frame: FrameGeom) {
+        if self.frame.is_some_and(|f| f.tab != frame.tab) {
+            self.clear();
+        }
         self.frame = Some(frame);
+    }
+
+    /// Whether the last drawn frame was `tab`'s.
+    pub(super) fn drawn_for(&self, tab: AgentId) -> bool {
+        self.frame.is_some_and(|f| f.tab == tab)
     }
 
     /// The dialable part under the pointer.  Its whole vertical extent claims
@@ -215,8 +220,9 @@ impl GestureState {
         Effect::Scroll(dir * page as isize)
     }
 
-    pub(super) fn clear_selection(&mut self) {
+    pub(super) fn clear(&mut self) {
         self.phase = Phase::Idle;
+        self.hover = None;
     }
 
     /// The live selection as `(lo, hi)` in buffer order.

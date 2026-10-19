@@ -123,11 +123,11 @@ fn shadow(f: &mut Frame, area: Rect) {
             continue;
         };
         match cell.fg {
-            Color::Rgb(..) => cell.fg = super::rail::mix(cell.fg, UMBRA, SHADOW_ALPHA),
+            Color::Rgb(..) => cell.fg = super::palette::mix(cell.fg, UMBRA, SHADOW_ALPHA),
             _ => cell.modifier.insert(Modifier::DIM),
         }
         cell.bg = match cell.bg {
-            Color::Rgb(..) => super::rail::mix(cell.bg, UMBRA, SHADOW_ALPHA),
+            Color::Rgb(..) => super::palette::mix(cell.bg, UMBRA, SHADOW_ALPHA),
             _ => UMBRA,
         };
     }

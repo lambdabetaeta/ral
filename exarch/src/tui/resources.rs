@@ -26,8 +26,8 @@ pub(super) struct ScrollbackFigures {
 #[derive(Clone, Copy)]
 pub(super) struct ViewFigures {
     pub live: u64,
-    /// Views whose agent has died — lingering, or already tombstoned down to
-    /// (id, status, log path) once past `tui::LINGER`.
+    /// Views whose agent has died — lingering, or already gone down to
+    /// its log path once past `tui::LINGER`.
     pub dead: u64,
     pub agents: u64,
 }
@@ -91,7 +91,7 @@ pub(super) fn frontend_rows(
             views.dead,
             None,
             Policy::Evict,
-            Some("tombstoned (id, status, log path) once past LINGER".to_string()),
+            Some("gone down to its log path once past LINGER".to_string()),
         ),
         ProbeRow::new(
             "bus.depth",

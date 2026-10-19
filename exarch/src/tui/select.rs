@@ -13,6 +13,14 @@ use super::row::Row;
 use ratatui::{style::Modifier, text::Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+/// A buffer cell: a scrolled buffer row and a text-area column (0 = left
+/// edge).  The derived order is row-major, so `min`/`max` sort a selection.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct Cell {
+    pub(super) row: usize,
+    pub(super) col: u16,
+}
+
 /// Screen cell columns to ordered content columns; a column inside the margin
 /// clamps to the content's first.
 #[allow(

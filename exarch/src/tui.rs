@@ -13,8 +13,10 @@ mod app;
 mod banner;
 mod block;
 mod commands;
+mod dial;
 mod diff;
 mod fidelity;
+mod gauge;
 mod gesture;
 mod group;
 mod highlight;
@@ -38,6 +40,7 @@ mod select;
 mod status;
 mod tabs;
 mod terminal;
+mod text;
 mod tui_loop;
 
 use std::path::Path;

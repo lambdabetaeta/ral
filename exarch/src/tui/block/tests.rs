@@ -11,7 +11,7 @@ fn notification_text_shares_one_wrap_boundary() {
     ] {
         let lines = chrome.render(24);
         assert!(lines.iter().all(|line| line.width() <= 24));
-        let text = lines.iter().map(line::text).collect::<Vec<_>>().join(" ");
+        let text = lines.iter().map(text::text).collect::<Vec<_>>().join(" ");
         let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(words(&text).ends_with(message), "{text}");
     }
@@ -51,12 +51,12 @@ fn subagent_failure_wraps_at_each_width_without_losing_its_reason() {
 
 fn act(verb: &str, subject: Option<&str>, payload: &str, failed: bool) -> Block {
     Block::new(
-        BlockKind::act(
-            verb.into(),
-            subject.map(str::to_string),
-            payload.into(),
+        BlockKind::Act {
+            verb: verb.into(),
+            subject: subject.map(str::to_string),
+            payload: payload.into(),
             failed,
-        ),
+        },
         None,
     )
 }
@@ -129,7 +129,7 @@ fn an_act_pins_its_verb_column_and_nothing_else() {
     let rendered = |verb, subject: Option<&str>, payload: &str| {
         let block = act(verb, subject, payload, false);
         let lines = block.body(READ_W, Detail::Summary, "");
-        line::text(lines.last().expect("an act renders one content row"))
+        text::text(lines.last().expect("an act renders one content row"))
     };
     assert_eq!(
         rendered(
@@ -207,7 +207,7 @@ fn an_act_carries_no_magnitude_and_no_bar() {
     let block = act("message", Some("hunter"), "focus on it", false);
     assert!(block.magnitude().is_none(), "an act ranks nothing");
     for at in [Detail::Summary, Detail::Full] {
-        let text: String = block.body(READ_W, at, "").iter().map(line::text).collect();
+        let text: String = block.body(READ_W, at, "").iter().map(text::text).collect();
         assert!(
             !text.contains('\u{2588}') && !text.contains('\u{2591}'),
             "no size-bar on an act row at {at:?}: {text:?}"
@@ -223,7 +223,7 @@ fn a_refused_act_tiers_its_outcome_hot() {
     let lines = block.body(READ_W, Detail::Summary, "");
     let row = lines.last().expect("an act renders one content row");
     assert_eq!(
-        line::text(row),
+        text::text(row),
         "cancel     [hunter] refused: not a descendant"
     );
     let outcome = row.spans.last().expect("the payload span");
@@ -265,7 +265,7 @@ fn a_long_payload_truncates_reduced_and_returns_whole_on_the_dial() {
 
     let reduced = block.body(READ_W, Detail::Summary, "");
     assert_eq!(reduced.len(), 2, "reduced, an act is one row and its blank");
-    let head = line::text(&reduced[1]);
+    let head = text::text(&reduced[1]);
     assert!(
         head.ends_with('\u{2026}'),
         "the cut payload ends in an ellipsis: {head:?}"
@@ -278,7 +278,7 @@ fn a_long_payload_truncates_reduced_and_returns_whole_on_the_dial() {
     let full: String = block
         .body(READ_W, Detail::Full, "")
         .iter()
-        .map(|l| line::text(l).trim_start().to_string())
+        .map(|l| text::text(l).trim_start().to_string())
         .collect::<Vec<_>>()
         .join(" ");
     for word in ["one-sentence", "argument", "for", "each"] {
@@ -325,15 +325,20 @@ fn each_part_walks_its_own_rungs() {
 
     let mut group = run("read it");
     assert!(group.dialable(Part::Run) && !group.dialable(Part::Thinking));
-    let rungs = |b: &Block| match &b.kind {
-        BlockKind::Group(g) => (g.thinking.dial.at, g.run.at),
-        _ => panic!("a group"),
-    };
-    assert_eq!(rungs(&group).1, Detail::Summary, "work arrives collapsed");
+    let rung = |b: &Block| b.dials[Part::Run as usize].map(|d| d.at);
+    assert_eq!(
+        rung(&group),
+        Some(Detail::Summary),
+        "work arrives collapsed"
+    );
     assert!(group.cycle(Part::Run));
-    assert_eq!(rungs(&group).1, Detail::Full);
+    assert_eq!(rung(&group), Some(Detail::Full));
     assert!(group.cycle(Part::Run));
-    assert_eq!(rungs(&group).1, Detail::Tally, "a run wraps to its tally");
+    assert_eq!(
+        rung(&group),
+        Some(Detail::Tally),
+        "a run wraps to its tally"
+    );
 }
 
 /// An open line reads inside the part that will absorb it, and never

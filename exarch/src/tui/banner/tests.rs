@@ -1,7 +1,7 @@
 use super::{SessionInfo, legend_panel, session_card};
 use crate::card::{FieldVal, Mark, Role};
 use crate::tui::palette::{READ_W, content_w};
-use crate::tui::{line, rail};
+use crate::tui::{rail, text};
 use std::path::PathBuf;
 
 fn sample(base: &'static str) -> SessionInfo<'static> {
@@ -99,7 +99,7 @@ fn security_paths_are_roled_present_and_muted_when_absent() {
 fn legend_names_every_rail_shape() {
     let text: String = legend_panel(content_w(READ_W))
         .iter()
-        .map(line::text)
+        .map(text::text)
         .collect::<Vec<_>>()
         .join("\n");
     for (_, name) in rail::RAIL_SHAPES {

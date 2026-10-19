@@ -3,9 +3,8 @@
 //! [`super::tabs`] and [`super::scrollback`]; [`Matrix`] is the one retained
 //! value, and it holds an agent identity, never a row number.
 
-use super::line;
-use super::palette::{AGENT_HUES, Col, PROMPT_INK, SLATE};
-use super::rail;
+use super::gauge;
+use super::palette::{self, Col, PROMPT_INK, SLATE};
 use super::scrollback::Scrollback;
 use super::tabs::TabRow;
 use crate::provider;
@@ -16,17 +15,6 @@ use ratatui::text::{Line, Span};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::time::Duration;
-
-/// Row order for the matrix: `Spawn` leaves the spawn tree alone (roots first,
-/// each one's descendants depth-first, in birth order); `Cost` keeps that same
-/// tree but sorts each parent's children by cumulative token spend, heaviest
-/// first.
-#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
-pub(super) enum MatrixSort {
-    #[default]
-    Spawn,
-    Cost,
-}
 
 /// Name characters a row label keeps; the column is then measured, not fixed here.
 pub(super) const MATRIX_LABEL_W: usize = 10;
@@ -94,7 +82,6 @@ fn focus_label(name: &str, hue: Color, focused: bool, dying: bool) -> (String, S
 pub(super) fn strip(
     rows: &[TabRow<'_>],
     focused: AgentId,
-    sort: MatrixSort,
     cursor: Option<AgentId>,
     height: usize,
 ) -> Vec<Line<'static>> {
@@ -103,7 +90,7 @@ pub(super) fn strip(
     let max_tokens = rows.iter().map(token_spend).max().unwrap_or(0);
     // Widths are measured over every row, not the visible slice, so scrolling
     // does not reflow the columns.
-    let display: Vec<MatrixRow> = forest(rows, sort)
+    let display: Vec<MatrixRow> = forest(rows)
         .iter()
         .map(|tree| {
             let row = &rows[tree.index];
@@ -205,9 +192,8 @@ struct TreeRow {
 }
 
 /// Depth-first walk of the forest the rows' parents describe.  A root is a row
-/// with no parent, or whose parent is not itself a row.  [`MatrixSort::Cost`]
-/// reorders each sibling group alone, so the tree survives the sort.
-fn forest(rows: &[TabRow<'_>], sort: MatrixSort) -> Vec<TreeRow> {
+/// with no parent, or whose parent is not itself a row.
+fn forest(rows: &[TabRow<'_>]) -> Vec<TreeRow> {
     let live: HashSet<AgentId> = rows.iter().map(|row| row.id).collect();
     let mut kids: HashMap<AgentId, Vec<usize>> = HashMap::new();
     let mut roots: Vec<usize> = Vec::new();
@@ -215,12 +201,6 @@ fn forest(rows: &[TabRow<'_>], sort: MatrixSort) -> Vec<TreeRow> {
         match row.parent {
             Some(p) if live.contains(&p) => kids.entry(p).or_default().push(i),
             _ => roots.push(i),
-        }
-    }
-    if sort == MatrixSort::Cost {
-        roots.sort_by_key(|&i| std::cmp::Reverse(token_spend(&rows[i])));
-        for group in kids.values_mut() {
-            group.sort_by_key(|&i| std::cmp::Reverse(token_spend(&rows[i])));
         }
     }
     let mut out = Vec::with_capacity(rows.len());
@@ -276,13 +256,8 @@ fn descend(
 
 /// The agent one row from `cursor` in the drawn order — `cursor` itself at
 /// either end.
-pub(super) fn neighbour(
-    rows: &[TabRow<'_>],
-    sort: MatrixSort,
-    cursor: AgentId,
-    down: bool,
-) -> AgentId {
-    let order = forest(rows, sort);
+pub(super) fn neighbour(rows: &[TabRow<'_>], cursor: AgentId, down: bool) -> AgentId {
+    let order = forest(rows);
     let Some(at) = order.iter().position(|row| rows[row.index].id == cursor) else {
         return cursor;
     };
@@ -346,10 +321,7 @@ impl MatrixRow {
         cursor: bool,
     ) -> Self {
         let (id, sb) = (row.id, row.sb);
-        let hue = AGENT_HUES
-            .get(sb.agent().0 as usize)
-            .copied()
-            .unwrap_or(AGENT_HUES[0]);
+        let hue = sb.agent().hue();
         let dim = row.lingering;
         let idle = row.demoted;
         let demoted = idle.is_some();
@@ -367,7 +339,7 @@ impl MatrixRow {
         let tokens = token_spend(row);
         let value = relative_value_step(tokens, max_tokens);
         let token_style = Style::default()
-            .fg(rail::lighten(hue, value))
+            .fg(palette::lighten(hue, value))
             .add_modifier(if dim {
                 Modifier::DIM
             } else {
@@ -382,7 +354,7 @@ impl MatrixRow {
                 None => turn_cells(sb, dim),
             },
             tokens: provider::humanize_tokens(tokens),
-            bar: line::size_bar_text(sb.lines_touched()),
+            bar: gauge::size_bar_text(sb.lines_touched()),
             label_style,
             hue,
             token_style,
@@ -450,7 +422,7 @@ fn turn_cells(sb: &Scrollback, dying: bool) -> String {
 }
 
 /// Bucket `tokens` by quartile of the frame's `max_tokens` into a `0..=3` step
-/// for [`rail::lighten`]; with no spend anywhere, every row reads at base hue.
+/// for [`palette::lighten`]; with no spend anywhere, every row reads at base hue.
 fn relative_value_step(tokens: u64, max_tokens: u64) -> u8 {
     if max_tokens == 0 {
         return 0;

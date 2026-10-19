@@ -7,17 +7,19 @@
 //! a diff card carries the one.  Prose is product to read rather than process
 //! to reduce, and chrome is already a line or two, so both render whole.
 //!
-//! A block memoises the visual rows it last produced, keyed by the width they
-//! were built at, so a dial re-renders one block and a resize the mirror.
+//! A block memoises the visual rows it last produced, keyed by the width and
+//! dials they were built at, so a dial re-renders one block and a resize the mirror.
 
 use super::banner;
+use super::dial::{Detail, Dial, Part};
 use super::fidelity::Fidelity;
 use super::group;
-use super::line::{self, is_blank};
+use super::line;
 use super::md::{self, MD_INDENT};
-use super::palette::{QUEUED_PROMPT_BG, READ_W, SLATE, content_w};
+use super::palette::{AgentSlot, QUEUED_PROMPT_BG, READ_W, SLATE, content_w};
 use super::rail::{self, RailKind};
 use super::row::Row;
+use super::text::{self, is_blank};
 use crate::card::{Card, Change, Effect, Span as CardSpan};
 use crate::provider::ProviderError;
 use crate::record::fault::Readout;
@@ -25,12 +27,6 @@ use crate::record::{Seq, Settlement, Verdict};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::time::Duration;
-
-/// Index into [`super::palette::AGENT_HUES`], wrapping: root is `0`, each
-/// subagent the next slot at birth.  Carried by value, so the rail needs no
-/// lookup on `App`.
-#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
-pub(super) struct AgentSlot(pub u8);
 
 /// Chrome as data: every builder renders itself fresh at the width its block
 /// is shown at, rather than laying out once against a fixed budget the mirror
@@ -102,7 +98,7 @@ impl Chrome {
         };
         lines
             .iter()
-            .flat_map(|line| line::wrap_line(line, width.into()))
+            .flat_map(|line| text::wrap_line(line, width.into()))
             .collect()
     }
 
@@ -123,73 +119,17 @@ impl Chrome {
     }
 }
 
-/// How much of a dialable part is disclosed, low to high; `Ord` compares the
-/// rungs.  A run of `ral` work and a diff reach [`Self::Tally`]; a
-/// deliberation and an act floor at [`Self::Summary`].
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-pub(super) enum Detail {
-    /// The numbers alone: a run's `|>` effects counted on one line, a diff's
-    /// header with its size bar and grain.
-    Tally,
-    /// The representative slice: the run's live tip, a deliberation's header,
-    /// an act's row, a diff's first [`super::diff::DIFF_PEEK_ROWS`] rows.
-    Summary,
-    /// The whole thing: every call with its source, the whole deliberation,
-    /// the whole payload, every hunk.
-    Full,
-}
-
-/// A dialable part's rung, and the floor a cycle past [`Detail::Full`] wraps to.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) struct Dial {
-    at: Detail,
-    floor: Detail,
-}
-
-impl Dial {
-    /// One rung up, the ceiling wrapping to the floor, so a dial walks every
-    /// reachable rung rather than toggling the extremes.
-    fn cycle(&mut self) {
-        self.at = match self.at {
-            Detail::Tally => Detail::Summary,
-            Detail::Summary => Detail::Full,
-            Detail::Full => self.floor,
-        };
-    }
-}
-
-/// One of a [`Group`]'s two dialable parts — the `∴` deliberation, or the `▸`
-/// run of work.  Every other block has the one dial, which answers to
-/// [`Self::Run`].
-#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
-pub(super) enum Part {
-    Thinking,
-    #[default]
-    Run,
-}
-
 /// A group's `∴` part: each stretch of thinking the fold committed, in
 /// arrival order; the mass of the prose they became — the deliberation
 /// grain's denominator, which the commit cannot carry, being recorded before
-/// the prose it precedes — and the dial the part is read by.
+/// the prose it precedes.
+#[derive(Default)]
 pub(super) struct Thinking {
     text: Vec<String>,
     answer_chars: u32,
-    dial: Dial,
 }
 
 impl Thinking {
-    fn new(at: Detail) -> Self {
-        Self {
-            text: Vec::new(),
-            answer_chars: 0,
-            dial: Dial {
-                at,
-                floor: Detail::Summary,
-            },
-        }
-    }
-
     fn is_empty(&self) -> bool {
         self.text.is_empty()
     }
@@ -220,8 +160,6 @@ impl Thinking {
 pub(super) struct Group {
     thinking: Thinking,
     calls: Vec<group::Call>,
-    /// The `▸` part's own dial, apart from the `∴` part's.
-    run: Dial,
     /// Which part the last member arrived on — what an open line grows.
     last: Part,
 }
@@ -241,15 +179,11 @@ pub(super) enum Member {
 }
 
 impl Group {
-    /// Open a group on `member`, its deliberation born at the standing rung.
-    fn opening(member: Member, thinking: Detail) -> Self {
+    /// Open a group on `member`.
+    fn opening(member: Member) -> Self {
         let mut group = Self {
-            thinking: Thinking::new(thinking),
+            thinking: Thinking::default(),
             calls: Vec::new(),
-            run: Dial {
-                at: Detail::Summary,
-                floor: Detail::Tally,
-            },
             last: Part::Run,
         };
         let _ = group.grow(member);
@@ -339,22 +273,19 @@ pub(super) enum BlockKind {
         subject: Option<String>,
         payload: String,
         failed: bool,
-        dial: Dial,
     },
     /// A run of file changes, read as one patch: whatever the work between
     /// two calls wrote or edited.
     Changes {
         changes: Vec<Change>,
-        dial: Dial,
     },
     /// A render document a kit surfaced — a stack of [`Card`] marks
-    /// re-rendered from data at every width.  Its `dial` is `Some` exactly
-    /// when it holds a `diff` mark.
+    /// re-rendered from data at every width.  It is dialable exactly when it
+    /// holds a `diff` mark.
     Card {
         card: Card,
         /// A surfaced denial is framed; a lone effect is not.
         framed: bool,
-        dial: Option<Dial>,
     },
     /// A summary-less tool call, inert under the shut triangle.  `details` is
     /// `None` for a parse failure (`INVALID_INPUT`): such a call renders
@@ -364,49 +295,6 @@ pub(super) enum BlockKind {
     },
     /// Meta content the mirror draws itself, not authored by a fold block.
     Chrome(Chrome),
-}
-
-impl BlockKind {
-    /// An act at its opening rung: its row, the payload cut to its column.
-    pub(super) fn act(
-        verb: String,
-        subject: Option<String>,
-        payload: String,
-        failed: bool,
-    ) -> Self {
-        Self::Act {
-            verb,
-            subject,
-            payload,
-            failed,
-            dial: Dial {
-                at: Detail::Summary,
-                floor: Detail::Summary,
-            },
-        }
-    }
-
-    /// A run opening on its first change, at the rung a diff opens at.
-    pub(super) fn changes(change: Change) -> Self {
-        Self::Changes {
-            changes: vec![change],
-            dial: Dial {
-                at: Detail::Summary,
-                floor: Detail::Tally,
-            },
-        }
-    }
-
-    /// A card at its opening rung: a diff arrives as its first rows, so the
-    /// change is read before it is measured; every other card is inert and
-    /// renders whole.
-    pub(super) fn card(card: Card, framed: bool) -> Self {
-        let dial = card.has_diff().then_some(Dial {
-            at: Detail::Summary,
-            floor: Detail::Tally,
-        });
-        Self::Card { card, framed, dial }
-    }
 }
 
 /// Rows for what the human has typed and is still waiting on — prompts and the
@@ -490,6 +378,8 @@ struct Memo {
     /// Visual rows the `∴` part holds; the rest are the `▸` part's.  `0` for
     /// every block that has only the one part.
     thinking: usize,
+    /// The dials it was built under: a dial moved is a memo stale.
+    dials: [Option<Dial>; 2],
 }
 
 /// A block paired with the visual rows it last rendered.
@@ -499,14 +389,30 @@ pub(super) struct Block {
     /// record authors.  It is this block's place in the fold's order, so the
     /// mirror's head trim and a result patch both address it by this.
     seq: Option<Seq>,
+    /// A dial per [`Part`], by `part as usize`; `None` where the kind has none.
+    dials: [Option<Dial>; 2],
     memo: Option<Memo>,
 }
 
 impl Block {
     pub(super) fn new(kind: BlockKind, seq: Option<Seq>) -> Self {
+        let run = |floor| {
+            Some(Dial {
+                at: Detail::Summary,
+                floor,
+            })
+        };
+        let dials = match &kind {
+            BlockKind::Group(_) => [run(Detail::Summary), run(Detail::Tally)],
+            BlockKind::Act { .. } => [None, run(Detail::Summary)],
+            BlockKind::Changes { .. } => [None, run(Detail::Tally)],
+            BlockKind::Card { card, .. } if card.has_diff() => [None, run(Detail::Tally)],
+            _ => [None, None],
+        };
         Self {
             kind,
             seq,
+            dials,
             memo: None,
         }
     }
@@ -529,7 +435,9 @@ impl Block {
 
     /// A group opening on `member`, its deliberation born at `thinking`.
     pub(super) fn group(member: Member, thinking: Detail, seq: Option<Seq>) -> Self {
-        Self::new(BlockKind::Group(Group::opening(member, thinking)), seq)
+        let mut block = Self::new(BlockKind::Group(Group::opening(member)), seq);
+        block.set_thinking(thinking);
+        block
     }
 
     pub(super) fn chrome(chrome: Chrome, seq: Option<Seq>) -> Self {
@@ -689,31 +597,12 @@ impl Block {
     /// `part`'s dial, `None` where the part has none — the one answer every
     /// question of disclosure reads.
     fn dial(&self, part: Part) -> Option<Dial> {
-        match (&self.kind, part) {
-            (BlockKind::Group(g), Part::Thinking) => {
-                (!g.thinking.is_empty()).then_some(g.thinking.dial)
-            }
-            (BlockKind::Group(g), Part::Run) => (!g.calls.is_empty()).then_some(g.run),
-            (BlockKind::Act { dial, .. } | BlockKind::Changes { dial, .. }, Part::Run) => {
-                Some(*dial)
-            }
-            (BlockKind::Card { dial, .. }, Part::Run) => *dial,
-            _ => None,
-        }
-    }
-
-    fn dial_mut(&mut self, part: Part) -> Option<&mut Dial> {
-        match (&mut self.kind, part) {
-            (BlockKind::Group(g), Part::Thinking) => {
-                (!g.thinking.is_empty()).then_some(&mut g.thinking.dial)
-            }
-            (BlockKind::Group(g), Part::Run) => (!g.calls.is_empty()).then_some(&mut g.run),
-            (BlockKind::Act { dial, .. } | BlockKind::Changes { dial, .. }, Part::Run) => {
-                Some(dial)
-            }
-            (BlockKind::Card { dial, .. }, Part::Run) => dial.as_mut(),
-            _ => None,
-        }
+        let present = match (&self.kind, part) {
+            (BlockKind::Group(g), Part::Thinking) => !g.thinking.is_empty(),
+            (BlockKind::Group(g), Part::Run) => !g.calls.is_empty(),
+            _ => true,
+        };
+        self.dials[part as usize].filter(|_| present)
     }
 
     /// Whether `part` is dialable — a property of its kind, not its rung, so
@@ -724,28 +613,29 @@ impl Block {
 
     /// One click on `part`: a rung up, wrapping at the ceiling to its floor.
     pub(super) fn cycle(&mut self, part: Part) -> bool {
-        let Some(dial) = self.dial_mut(part) else {
+        let Some(mut dial) = self.dial(part) else {
             return false;
         };
         dial.cycle();
-        self.memo = None;
+        self.dials[part as usize] = Some(dial);
         true
     }
 
     /// Move this block's deliberation to the standing `/thinking` rung.
     pub(super) fn set_thinking(&mut self, at: Detail) {
-        if let BlockKind::Group(g) = &mut self.kind
-            && g.thinking.dial.at != at
-        {
-            g.thinking.dial.at = at;
-            self.memo = None;
+        if let Some(dial) = &mut self.dials[Part::Thinking as usize] {
+            dial.at = at;
         }
     }
 
     /// Fill the render memo at `width`, so one walk of the mirror sees the
     /// whole screen.  A block whose memo already stands renders nothing again.
     pub(super) fn fill(&mut self, width: u16, agent: AgentSlot) {
-        if self.memo.as_ref().is_some_and(|m| m.width == width) {
+        if self
+            .memo
+            .as_ref()
+            .is_some_and(|m| m.width == width && m.dials == self.dials)
+        {
             return;
         }
         self.memo = Some(self.wrapped(width, agent, None, ""));
@@ -800,6 +690,7 @@ impl Block {
             width,
             rows,
             thinking,
+            dials: self.dials,
         }
     }
 
@@ -816,15 +707,18 @@ impl Block {
     ) -> (Vec<Row>, usize) {
         let content = content_w(width);
         if let BlockKind::Group(g) = &self.kind {
+            let rung = |part: Part| {
+                at.unwrap_or_else(|| self.dials[part as usize].map_or(Detail::Summary, |d| d.at))
+            };
             let mut rows = Vec::new();
             if !g.thinking.is_empty() || !open.is_empty() {
-                let body = g.deliberation(at.unwrap_or(g.thinking.dial.at), content, open);
+                let body = g.deliberation(rung(Part::Thinking), content, open);
                 let glyph = rail::span(RailKind::Thinking, agent, Some(g.thinking.lines(open)));
                 rows.extend(Row::rail(body, Some(glyph)));
             }
             let split = rows.len();
             if !g.calls.is_empty() {
-                let run = at.unwrap_or(g.run.at);
+                let run = rung(Part::Run);
                 let body = group::body(&g.calls, run, content.into());
                 let glyph = rail::span(
                     RailKind::ToolCall(run >= Detail::Full),
@@ -937,7 +831,7 @@ impl Block {
             // The mirror collapses the gap against a blank tail, so framing
             // here reads as one row between neighbours, never two.
             BlockKind::Chrome(chrome) => {
-                let body = trim_blanks(chrome.render(width), |l| line::is_blank(l));
+                let body = trim_blanks(chrome.render(width), |l| text::is_blank(l));
                 if body.is_empty() {
                     // The turn rule *is* a gap; there is nothing to frame.
                     vec![Line::default()]

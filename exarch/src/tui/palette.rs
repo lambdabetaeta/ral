@@ -1,7 +1,11 @@
 //! Colour and width constants shared by the line-builders ([`super::line`])
 //! and the sibling render modules, kept apart so they read as one table.
 
-use ratatui::style::Color;
+use crate::card::{Role, Span as CardSpan};
+use ratatui::{
+    style::{Color, Modifier, Style},
+    text::Span,
+};
 use unicode_width::UnicodeWidthStr;
 
 // ── Color palette ────────────────────────────────────────────────────────────
@@ -47,7 +51,7 @@ pub(super) const CODE_KEYWORD: Color = Color::Rgb(168, 154, 208);
 pub(super) const CODE_STRING: Color = Color::Rgb(150, 186, 146);
 pub(super) const CODE_VARIABLE: Color = Color::Rgb(206, 166, 130);
 pub(super) const CODE_TAG: Color = Color::Rgb(202, 150, 178);
-/// One hue per producing agent, indexed by [`super::block::AgentSlot`]; root
+/// One hue per producing agent, indexed by [`AgentSlot`]; root
 /// keeps [`CYAN`].  Hue is the sole identity channel — shape already carries
 /// kind and value carries magnitude — so the six also descend an `L*` ladder
 /// (≈77 → 47) to stay separable under deuteranopia and protanopia, which hue
@@ -66,6 +70,21 @@ pub(super) const AGENT_HUES: [Color; 6] = [
     AGENT_OLIVE,
     AGENT_PLUM,
 ];
+
+/// Index into [`AGENT_HUES`], wrapping: root is `0`, each
+/// subagent the next slot at birth.  Carried by value, so the rail needs no
+/// lookup on `App`.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub(super) struct AgentSlot(pub u8);
+
+impl AgentSlot {
+    pub(super) fn hue(self) -> Color {
+        AGENT_HUES
+            .get(usize::from(self.0))
+            .copied()
+            .unwrap_or(AGENT_HUES[0])
+    }
+}
 
 /// The startup banner's wordmark and eagle — the only saturated ink in the app,
 /// so nothing in the session below competes with the splash.
@@ -142,3 +161,85 @@ pub(super) const RAIL_W: usize = 2;
 pub(super) const fn content_w(width: u16) -> u16 {
     width.saturating_sub(RAIL_W as u16)
 }
+
+/// Channel-wise lerp of `from` toward `to` by `t`, clamped to `0.0..=1.0` — the
+/// one definition of colour interpolation, which the value ramp, the fidelity
+/// drain in `super::md`, and the picker's effort ramp all route through. A
+/// non-RGB `from` passes through unchanged; the palette is RGB, so only themed
+/// fallbacks take that path.
+pub(super) fn mix(from: Color, to: Color, t: f32) -> Color {
+    let (Color::Rgb(fr, fg, fb), Color::Rgb(tr, tg, tb)) = (from, to) else {
+        return from;
+    };
+    let t = t.clamp(0.0, 1.0);
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "explicitly clamped to 0..=255 before cast"
+    )]
+    #[allow(
+        clippy::suboptimal_flops,
+        reason = "u8-rounded colour math; mul_add adds no precision and obscures the standard lerp/luma formula"
+    )]
+    let lerp = |a: u8, b: u8| -> u8 {
+        (f32::from(a) + (f32::from(b) - f32::from(a)) * t)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    Color::Rgb(lerp(fr, tr), lerp(fg, tg), lerp(fb, tb))
+}
+
+/// Carry `c` toward white by `step / 3` of the remaining distance, so step 3 is
+/// white. Hue survives the ramp, so agent identity never collides with value.
+pub(super) fn lighten(c: Color, step: u8) -> Color {
+    mix(c, Color::Rgb(255, 255, 255), f32::from(step) / 3.0)
+}
+
+/// Drain `c` toward the grey of its own Rec. 601 luma by `t`: hue goes, and
+/// lightness stays. Holding luminance is the point — this is the fidelity drain
+/// `super::md` applies, and it must not disturb the lightness channel magnitude
+/// rides, so a degraded passage stays as legible as a sound one.
+pub(super) fn desaturate(c: Color, t: f32) -> Color {
+    let Color::Rgb(r, g, b) = c else {
+        return c;
+    };
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "Rec.601 luma weights sum to 1.0 over byte-range inputs, result stays in 0..=255"
+    )]
+    #[allow(
+        clippy::suboptimal_flops,
+        reason = "u8-rounded colour math; mul_add adds no precision and obscures the standard lerp/luma formula"
+    )]
+    let luma = (0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b)).round() as u8;
+    mix(c, Color::Rgb(luma, luma, luma), t)
+}
+
+/// Cards name roles, never colours: every card hue lives here.
+fn role_style(role: Role) -> Style {
+    match role {
+        Role::Path => Style::default().fg(CYAN),
+        Role::Code => Style::default().fg(Color::White),
+        Role::Ok => Style::default().fg(LIME).add_modifier(Modifier::BOLD),
+        Role::Warn => Style::default().fg(ORANGE).add_modifier(Modifier::BOLD),
+        Role::Bad => Style::default().fg(RED).add_modifier(Modifier::BOLD),
+        Role::Muted => Style::default().fg(SLATE).add_modifier(Modifier::DIM),
+        Role::Strong => Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    }
+}
+
+/// Roled spans bind through [`role_style`]; roleless ones take plain white ink.
+pub(super) fn span_style(role: Option<Role>) -> Style {
+    role.map_or_else(|| Style::default().fg(Color::White), role_style)
+}
+
+/// One card span in the ink its role binds.
+pub(super) fn card_span(cs: &CardSpan) -> Span<'static> {
+    Span::styled(cs.text.clone(), span_style(cs.role))
+}
+
+#[cfg(test)]
+mod tests;

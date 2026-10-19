@@ -10,29 +10,28 @@
 //! keeps its own scroll position.
 //!
 //! [`Scrollback::fact`] is the sole producer: it steps the fold beside the
-//! mirror and acts on what the step reports, and [`Scrollback::transient`]
-//! draws whatever is live-only — [`Scrollback::push_chrome`], the chrome door,
-//! and [`Scrollback::push_thinking`], which carries the open line the live
-//! tail draws.
+//! mirror and acts on what the step reports, and `App::transient` draws
+//! whatever is live-only — [`Scrollback::push_chrome`], the chrome door, and
+//! [`Scrollback::push_token`] and [`Scrollback::push_thinking`], which carry
+//! the open lines the live tail draws.
 //!
 //! The mirror is a cursor over one log, and the channel only its fast path:
 //! what the channel cannot vouch for — the log as it stood at birth, a gap, a
 //! new segment — it reads from the log itself ([`Scrollback::catch_up`]), and
 //! a record heard twice folds once.
 
-use super::block::{AgentSlot, Block, BlockKind, Chrome, Detail, Member, Part, seam};
+use super::block::{Block, BlockKind, Chrome, Member, seam};
+use super::dial::{Detail, Part};
 use super::fidelity::Fidelity;
-use super::gesture::Cell;
 use super::group;
-use super::line::is_blank;
-use super::palette::READ_W;
+use super::palette::{AgentSlot, READ_W};
 use super::row::Row;
-use super::select::plain_slice;
+use super::select::{Cell, plain_slice};
+use super::text::is_blank;
 use crate::card::{self, Card, Change, Landed, observation_card, observation_spans};
 use crate::provider::Usage;
 use crate::record::{
     self, BlockId, Blocks, Cursor, Delta, Emitter as Recorder, Record, Recorded, Segment, Seq,
-    Transient,
 };
 use ral_core::first_order::datum::Datum as _;
 use ral_core::types::{Observation, Observed};
@@ -40,7 +39,7 @@ use std::fs;
 use std::io;
 use std::io::{Seek, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Carry a lane's open line across one delta: the text after the last newline
 /// is exactly what no record holds yet, since the worker cuts its records at
@@ -69,9 +68,6 @@ pub(super) struct Scrollback {
     /// This session's scrollback, oldest block first — the mirror of the
     /// fold's own window, and the only thing between the fold and the screen.
     blocks: Vec<Block>,
-    /// Set once evicted ([`Self::evict_to_tombstone`]); `blocks` is empty from
-    /// that point on, and `false` for a live or still-lingering view.
-    tombstoned: bool,
     /// Palette slot stamped onto every rail glyph; root is `0`.
     agent: AgentSlot,
     /// The answer's open line: assistant text past the last newline, which is
@@ -93,19 +89,17 @@ pub(super) struct Scrollback {
     cursor: Option<Cursor>,
     /// The chrome a segment opens under: a root's session card.
     opening: Option<Card>,
-    /// Top visible visual row, per-scrollback so each tab keeps its place.
+    /// Top visible absolute row, per-scrollback so each tab keeps its place.
     offset: usize,
+    /// Blocks drained from the head since this mirror began; every block index
+    /// the API hands out counts from the mirror's origin, not from `blocks[0]`.
+    head: usize,
+    /// The screen rows that left with those blocks; row indices likewise.
+    head_rows: usize,
     /// Follow the tail.  Cleared by a scroll either way, re-armed at the bottom.
     sticky: bool,
     log_path: PathBuf,
     log: Log,
-    /// Total, never absent: the status line always has a state to name.
-    state: StateSpan,
-    /// Kit-authored *state*: a `key → Card` register drawn as the right-hand
-    /// column.  Never logged, and wiped by [`Self::reset`] so a pin is
-    /// generation-bounded like the scrollback.  A `Vec`, not a map, so render
-    /// order is first-seen insertion order.
-    pins: Vec<(String, Card)>,
     /// The rung a group's deliberation is born at — `/thinking`'s standing
     /// datum, which [`Self::set_thinking_level`] moves on every group at once
     /// and every group still to arrive is born at.
@@ -113,34 +107,6 @@ pub(super) struct Scrollback {
     /// The most recent `ral` script, which an answer's echo signal is read
     /// against — a fact about the stream, accumulated as the calls land.
     last_ral_cmd: Option<String>,
-}
-
-/// The agent's state, when it was entered, and the model text that has arrived
-/// since — the status line's whole datum, so one transition resets all three.
-/// The instant anchors the elapsed-wait bar to that transition rather than to
-/// the last event of any kind, which is what makes a silent stream legible.
-#[derive(Clone, Copy)]
-pub(super) struct StateSpan {
-    pub(super) state: crate::record::AgentState,
-    since: Instant,
-    /// Characters of model text arrived in this state.  A count that stops
-    /// growing under a growing [`Self::elapsed`] is a stalled stream.
-    pub(super) streamed: usize,
-}
-
-impl StateSpan {
-    pub(super) fn new(state: crate::record::AgentState) -> Self {
-        Self {
-            state,
-            since: Instant::now(),
-            streamed: 0,
-        }
-    }
-
-    /// Time in state.
-    pub(super) fn elapsed(self) -> Duration {
-        self.since.elapsed()
-    }
 }
 
 /// A window's place in the buffer, saved and restored around a preview.
@@ -319,7 +285,6 @@ impl Scrollback {
         Self {
             log: Log::open(&log_path, append),
             blocks: Vec::new(),
-            tombstoned: false,
             agent,
             answer: String::new(),
             thinking_line: String::new(),
@@ -328,10 +293,10 @@ impl Scrollback {
             cursor: None,
             opening,
             offset: 0,
+            head: 0,
+            head_rows: 0,
             sticky: true,
             log_path,
-            state: StateSpan::new(crate::record::AgentState::Ready),
-            pins: Vec::new(),
             thinking,
             last_ral_cmd: None,
         }
@@ -357,17 +322,20 @@ impl Scrollback {
 
     /// [`Self::catch_up`], stopping at the first record `keep` refuses.
     fn read_log(&mut self, keep: impl Fn(&Recorded<Record>) -> bool) {
-        let read = self.recorder.since(self.cursor).and_then(|(from, records)| {
-            self.adopt(from);
-            for rec in records {
-                let rec = rec?;
-                if !keep(&rec) {
-                    break;
+        let read = self
+            .recorder
+            .since(self.cursor)
+            .and_then(|(from, records)| {
+                self.adopt(from);
+                for rec in records {
+                    let rec = rec?;
+                    if !keep(&rec) {
+                        break;
+                    }
+                    self.step(&rec);
                 }
-                self.step(&rec);
-            }
-            Ok(())
-        });
+                Ok(())
+            });
         if let Err(e) = read {
             self.push_chrome(Chrome::Error(format!(
                 "record.jsonl did not read back: {e}; this view may be missing some of it"
@@ -465,25 +433,6 @@ impl Scrollback {
         (self.blocks.len() as u64, rows, bytes)
     }
 
-    /// Enter `state`, restarting the clock and the streamed count.  Re-entering
-    /// the state already held is a no-op: a turn that re-drives the same wait
-    /// must not reset the clock measuring how long that wait has run.
-    pub(super) fn set_state(&mut self, state: crate::record::AgentState) {
-        if self.state.state != state {
-            self.state = StateSpan::new(state);
-        }
-    }
-
-    /// Count `chars` of arriving model text against the current state — what
-    /// separates a stream that is delivering from one that has gone silent.
-    pub(super) fn note_streamed(&mut self, chars: usize) {
-        self.state.streamed = self.state.streamed.saturating_add(chars);
-    }
-
-    pub(super) fn state(&self) -> StateSpan {
-        self.state
-    }
-
     /// Wipe scrollback, scroll state, and streaming buffers, truncating
     /// `user.log` by reopening it: `/clear`.  The log and opening carry over;
     /// the cursor is the caller's to set.
@@ -498,27 +447,14 @@ impl Scrollback {
         );
     }
 
-    /// Whether this view has been evicted — the one bit that says its tab has
-    /// left the bar, since the two happen together.
-    pub(super) fn tombstoned(&self) -> bool {
-        self.tombstoned
-    }
-
-    /// Drop this view's heap state once its sub-agent has died and lingered
-    /// out.  Idempotent: a second call finds the view already clean.
+    /// Consume this view once its sub-agent has died and lingered out,
+    /// returning the `user.log` path.
     ///
-    /// The scrollback is retired to `user.log` on the way out — `log_path`
-    /// stays put, so that log is readable, and a dead view's blocks are the
-    /// last stretch of it nothing else would ever write.
-    pub(super) fn evict_to_tombstone(&mut self) {
-        if self.tombstoned {
-            return;
-        }
-        self.tombstoned = true;
+    /// The scrollback is retired to `user.log` on the way out — a dead view's
+    /// blocks are the last stretch of it nothing else would ever write.
+    pub(super) fn into_log(mut self) -> PathBuf {
         self.retire(self.blocks.len());
-        self.answer = String::new();
-        self.thinking_line = String::new();
-        self.pins = Vec::new();
+        self.log_path
     }
 
     /// Write the provisional tail past the retired prefix and flush, so
@@ -531,26 +467,6 @@ impl Scrollback {
         let from = self.log.seeded.min(self.blocks.len());
         self.log.flush(&self.blocks[from..], self.agent)?;
         Ok(&self.log_path)
-    }
-
-    // ── pinned state (the register) ────────────────────────────────────────
-    // The in-place analogue of a scrollback block: a pin writes a keyed slot,
-    // touching neither screen nor log — pinned state is ambient, not scrollback.
-
-    /// Overwrite the register slot `key`, or append it, keeping first-seen order.
-    pub(super) fn set_pin(&mut self, key: String, card: Card) {
-        match self.pins.iter_mut().find(|(k, _)| *k == key) {
-            Some((_, slot)) => *slot = card,
-            None => self.pins.push((key, card)),
-        }
-    }
-
-    pub(super) fn drop_pin(&mut self, key: &str) {
-        self.pins.retain(|(k, _)| k != key);
-    }
-
-    pub(super) fn pins(&self) -> &[(String, Card)] {
-        &self.pins
     }
 
     /// Append chrome at the tail.  A chrome block is a barrier like any
@@ -688,8 +604,10 @@ impl Scrollback {
                     None => Some(change),
                 };
                 if let Some(change) = spare {
-                    self.blocks
-                        .push(Block::new(BlockKind::changes(change), Some(seq)));
+                    let kind = BlockKind::Changes {
+                        changes: vec![change],
+                    };
+                    self.blocks.push(Block::new(kind, Some(seq)));
                 }
             }
             Item::Barrier(kind) => self.blocks.push(Block::new(kind, Some(seq))),
@@ -704,7 +622,10 @@ impl Scrollback {
         let block = match member {
             Member::Thinking(_) | Member::Call(_) => Block::group(member, self.thinking, Some(seq)),
             Member::Effect(e) => Block::new(
-                BlockKind::card(observation_card(&Landed::Effect(e)), false),
+                BlockKind::Card {
+                    card: observation_card(&Landed::Effect(e)),
+                    framed: false,
+                },
                 Some(seq),
             ),
             Member::Turn => Block::chrome(Chrome::Turn, Some(seq)),
@@ -742,7 +663,12 @@ impl Scrollback {
     /// Write the mirror's first `n` blocks into the durable prefix and drop
     /// them.
     fn retire(&mut self, n: usize) {
+        let before = self.rows().count();
+        self.head += n;
         let gone: Vec<Block> = self.blocks.drain(..n).collect();
+        // What left the screen, not the gone blocks' own rows: the new head's
+        // leading blank no longer collapses against them.
+        self.head_rows += before - self.rows().count();
         let seeded = self.log.seeded.min(n);
         self.log.seeded -= seeded;
         self.log.retire(&gone[seeded..], self.agent);
@@ -768,26 +694,30 @@ impl Scrollback {
 
     // ── interaction ──────────────────────────────────────────────────────
 
-    /// The block and part owning visual row `row` — valid only against the
+    /// The block and part owning absolute row `row` — valid only against the
     /// most recent [`Self::render_window`].
     pub(super) fn block_at(&self, row: usize) -> Option<Hit> {
-        let mut left = row;
+        let mut left = row.checked_sub(self.head_rows)?;
         for (block, rows) in self.screen() {
             if left < rows.len() {
                 let trimmed = self.blocks[block].rendered().len() - rows.len();
                 let part = self.blocks[block].part_at(left + trimmed);
-                return Some(Hit { block, part });
+                return Some(Hit {
+                    block: self.head + block,
+                    part,
+                });
             }
             left -= rows.len();
         }
         None
     }
 
-    /// The first visual row of `hit`'s part — the one carrying its rail glyph.
+    /// The first absolute row of `hit`'s part — the one carrying its rail glyph.
     pub(super) fn block_head(&self, hit: Hit) -> Option<usize> {
-        let mut at = 0;
+        let want = hit.block.checked_sub(self.head)?;
+        let mut at = self.head_rows;
         for (block, rows) in self.screen() {
-            if block == hit.block {
+            if block == want {
                 let trimmed = self.blocks[block].rendered().len() - rows.len();
                 let start = self.blocks[block]
                     .part_start(hit.part)
@@ -799,24 +729,28 @@ impl Scrollback {
         None
     }
 
-    /// Rendered cell width of visual row `row` — its content's extent, not the
+    /// Rendered cell width of absolute row `row` — its content's extent, not the
     /// pane's, so a gesture binds tight to the text and ignores the dead margin.
     pub(super) fn row_width(&self, row: usize) -> Option<usize> {
-        self.rows().nth(row).map(Row::width)
+        self.rows()
+            .nth(row.checked_sub(self.head_rows)?)
+            .map(Row::width)
     }
 
     /// Whether `hit` names a dialable part — a property of its kind, not its
     /// rung, so a click on it claims the gesture even at the ceiling.
     pub(super) fn block_dialable(&self, hit: Hit) -> bool {
-        self.blocks
-            .get(hit.block)
+        hit.block
+            .checked_sub(self.head)
+            .and_then(|i| self.blocks.get(i))
             .is_some_and(|b| b.dialable(hit.part))
     }
 
     /// Cycle `hit`'s part a rung on — the click-on-rail affordance.
     pub(super) fn cycle_block(&mut self, hit: Hit) -> bool {
-        self.blocks
-            .get_mut(hit.block)
+        hit.block
+            .checked_sub(self.head)
+            .and_then(|i| self.blocks.get_mut(i))
             .is_some_and(|b| b.cycle(hit.part))
     }
 
@@ -859,7 +793,7 @@ impl Scrollback {
         self.sticky = viewport.sticky;
     }
 
-    /// Scroll so visual row `row` is the top one; the next render clamps.
+    /// Scroll so absolute row `row` is the top one; the next render clamps.
     pub(super) fn scroll_to(&mut self, row: usize) {
         self.sticky = false;
         self.offset = row;
@@ -875,12 +809,12 @@ impl Scrollback {
             .collect()
     }
 
-    /// The first visual row `/rewind anchor` would cut — valid against the
+    /// The first absolute row `/rewind anchor` would cut — valid against the
     /// most recent [`Self::render_window`].  Chrome drawn before the cut
     /// block stays, as the mirror's trim would keep it.
     pub(super) fn cut_row(&self, anchor: u64) -> Option<usize> {
         let cut = self.fold.rewind_point(anchor)?.seq();
-        let mut at = 0;
+        let mut at = self.head_rows;
         for (block, rows) in self.screen() {
             if self.blocks[block].seq().is_some_and(|seq| seq >= cut) {
                 return Some(at);
@@ -893,14 +827,18 @@ impl Scrollback {
     /// Plain text a drag selection copies, `lo <= hi` in buffer order; the rail
     /// glyph is stripped automatically.
     pub(super) fn selection_text(&self, lo: Cell, hi: Cell) -> String {
-        let slice = |row: usize, a, b| self.rows().nth(row).map(|r| plain_slice(r, a, b));
+        let slice = |row: usize, a, b| {
+            let rel = row.checked_sub(self.head_rows)?;
+            self.rows().nth(rel).map(|r| plain_slice(r, a, b))
+        };
+        let rel = |row: usize| row.saturating_sub(self.head_rows);
         if lo.row == hi.row {
             return slice(lo.row, lo.col, hi.col).unwrap_or_default();
         }
         let interior = self
             .rows()
-            .skip(lo.row + 1)
-            .take(hi.row.saturating_sub(lo.row + 1))
+            .skip(rel(lo.row + 1))
+            .take(rel(hi.row).saturating_sub(rel(lo.row + 1)))
             .map(Row::plain);
         slice(lo.row, lo.col, u16::MAX)
             .into_iter()
@@ -1053,24 +991,25 @@ impl Scrollback {
         let tail = self.live_tail(content);
         let total = tail.rows + tail.live.len();
         let max_off = total.saturating_sub(height);
-        if self.sticky {
-            self.offset = max_off;
+        let rel = if self.sticky {
+            max_off
         } else {
-            self.offset = self.offset.min(max_off);
-            self.sticky = self.offset >= max_off;
-        }
+            let rel = self.offset.saturating_sub(self.head_rows).min(max_off);
+            self.sticky = rel >= max_off;
+            rel
+        };
+        self.offset = self.head_rows + rel;
         #[allow(
             clippy::cast_possible_truncation,
             reason = "scroll percentage already clamped to 0..=100"
         )]
-        let scroll_pct =
-            (max_off > 0).then(|| (self.offset.min(max_off) * 100 / max_off).min(100) as u16);
+        let scroll_pct = (max_off > 0).then(|| (rel * 100 / max_off).min(100) as u16);
         let lines: Vec<Row> = self
             .screen()
             .take(tail.blocks)
             .flat_map(|(_, rows)| rows)
             .chain(tail.live.iter())
-            .skip(self.offset)
+            .skip(rel)
             .take(height)
             .cloned()
             .collect();
@@ -1144,12 +1083,12 @@ impl Scrollback {
                 subject,
                 payload,
                 failed,
-            } => vec![Item::Barrier(BlockKind::act(
-                verb.clone(),
-                subject.clone(),
-                payload.clone(),
-                *failed,
-            ))],
+            } => vec![Item::Barrier(BlockKind::Act {
+                verb: verb.clone(),
+                subject: subject.clone(),
+                payload: payload.clone(),
+                failed: *failed,
+            })],
             K::SubagentDone {
                 name,
                 outcome,
@@ -1190,7 +1129,7 @@ impl Scrollback {
 }
 
 fn surfaced(card: Card) -> Item {
-    Item::Barrier(BlockKind::card(card, true))
+    Item::Barrier(BlockKind::Card { card, framed: true })
 }
 
 /// Decode one [`Display::Observation`](crate::record::Display::Observation),
@@ -1217,52 +1156,23 @@ fn observed_items(what: &Observed) -> Vec<Item> {
 // ── the sole live producer ──────────────────────────────────────────────────
 
 impl Scrollback {
-    /// A transient never authors scrollback: [`Transient::Token`] and
-    /// [`Transient::Thinking`] only carry their lane's open line, which the
-    /// live tail draws ([`Self::live_tail`], [`Self::push_thinking`]).  Every
-    /// line the worker has finished arrives as a record through [`Self::fact`]
-    /// instead — a mirror never mints a [`record::Block`] of its own — and
-    /// grows the block it belongs to.
-    ///
-    /// [`Transient::Died`], [`Transient::Resources`], and
-    /// [`Transient::Limits`] reach no-ops here: each needs either the tabs a
-    /// bare `Scrollback` cannot see or routing by id, so `App::transient`
-    /// intercepts and answers them itself, ahead of this call.
-    pub(super) fn transient(&mut self, t: &Transient) {
-        match t {
-            // Prose ends the thinking run, on this side exactly as on the
-            // worker's: the run's tail records where the prose begins, so the
-            // line it left open is covered by then, and at most one lane is
-            // ever open at once.
-            Transient::Token(text) => {
-                self.note_streamed(text.chars().count());
-                self.thinking_line.clear();
-                carry(&mut self.answer, text);
-            }
-            Transient::Thinking(text) => {
-                self.note_streamed(text.chars().count());
-                self.push_thinking(text);
-            }
-            Transient::State(state) => self.set_state(*state),
-            Transient::StopReason(raw) => {
-                self.push_chrome(Chrome::StopReason(raw.clone()));
-            }
-            Transient::Pin { key, card } => self.set_pin(key.clone(), card.clone()),
-            Transient::Unpin { key } => self.drop_pin(key),
-            Transient::Fault { text } => {
-                self.push_chrome(Chrome::Error(text.clone()));
-            }
-            // The turn's stream is sealed: the worker has recorded every
-            // line it means to, tails included, so an open line still
-            // standing here stands for text the producer chose not to record
-            // — a cancelled deliberation, a whitespace-only tail.  Dropping it is
-            // what keeps an open line from outliving its turn.
-            Transient::Boundary => {
-                self.answer.clear();
-                self.thinking_line.clear();
-            }
-            Transient::Died | Transient::Resources { .. } | Transient::Limits { .. } => {}
-        }
+    /// Prose ends the thinking run, on this side exactly as on the
+    /// worker's: the run's tail records where the prose begins, so the
+    /// line it left open is covered by then, and at most one lane is
+    /// ever open at once.
+    pub(super) fn push_token(&mut self, text: &str) {
+        self.thinking_line.clear();
+        carry(&mut self.answer, text);
+    }
+
+    /// The turn's stream is sealed: the worker has recorded every
+    /// line it means to, tails included, so an open line still
+    /// standing here stands for text the producer chose not to record
+    /// — a cancelled deliberation, a whitespace-only tail.  Dropping it is
+    /// what keeps an open line from outliving its turn.
+    pub(super) fn close_lanes(&mut self) {
+        self.answer.clear();
+        self.thinking_line.clear();
     }
 
     /// Mirror one fact heard live in `segment`, first reading the log when
@@ -1299,14 +1209,7 @@ impl Scrollback {
     /// so a second hand-rolled projection cannot compile.
     fn step(&mut self, rec: &Recorded<Record>) {
         self.cursor = self.cursor.map(|cursor| cursor.past(rec.locus()));
-        // `Blocks::step` never actually refuses a live commit — no arm returns
-        // `Err` — so a refusal here would mean the fold learned a new failure
-        // mode this mirror does not yet know to report.
-        let delta = self
-            .fold
-            .step(rec)
-            .expect("the view fold never refuses a live commit");
-        match delta {
+        match self.fold.step(rec) {
             Delta::Opened(_) => {
                 if let Some(at) = self.fold.blocks().len().checked_sub(1) {
                     self.opened(at);

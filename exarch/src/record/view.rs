@@ -216,21 +216,17 @@ impl Blocks {
     /// Fold one witnessed fact in, reporting what it moved.  A record the
     /// memo has already folded moves nothing, so the same log stepped twice
     /// and stepped once are the same memo.
-    ///
-    /// # Errors
-    /// Returns [`Refusal`] when this fold does not recognise the record —
-    /// during replay that refuses the session rather than skip it silently.
-    pub fn step(&mut self, record: &Recorded<super::Record>) -> Result<Delta, Refusal> {
+    pub fn step(&mut self, record: &Recorded<super::Record>) -> Delta {
         let seq = record.locus().seq();
         if self.seen.is_some_and(|folded| seq <= folded) {
-            return Ok(Delta::Quiet);
+            return Delta::Quiet;
         }
         self.seen = Some(seq);
-        Ok(match record.value().clone() {
+        match record.value().clone() {
             super::Record::Protocol(_) => Delta::Quiet,
             super::Record::Display(d) => self.step_display(seq, d),
             super::Record::Forensic(f) => self.step_forensic(seq, f),
-        })
+        }
     }
 
     /// Drop the oldest resident blocks past [`BLOCKS_WINDOW`], as each block
@@ -457,7 +453,8 @@ impl Fold for View {
     type Memo = Blocks;
 
     fn step(memo: &mut Blocks, record: &Recorded<super::Record>) -> Result<(), Refusal> {
-        memo.step(record).map(drop)
+        let _ = memo.step(record);
+        Ok(())
     }
 }
 

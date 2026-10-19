@@ -9,15 +9,17 @@ use ratatui::text::{Line, Span};
 use crate::SessionInfo;
 use crate::card::{Card, Field, FieldVal, Mark, Role, Span as CardSpan};
 
-use super::block::{AgentSlot, Detail};
+use super::dial::Detail;
 use super::fidelity::Fidelity;
+use super::gauge;
 use super::line;
 use super::md;
 use super::palette::{
-    AGENT_HUES, BANNER_CRIMSON, BANNER_GOLD, CODE_BG, EFFECT_BG, QUEUED_PROMPT_BG, SLATE,
+    AGENT_HUES, AgentSlot, BANNER_CRIMSON, BANNER_GOLD, CODE_BG, EFFECT_BG, QUEUED_PROMPT_BG, SLATE,
 };
 use super::rail::{self, RailKind};
 use super::status::{ctx_ramp, scroll_text, wait_bar};
+use super::text;
 
 const ART: &str = include_str!("../../data/banner.txt");
 const EAGLE: &str = include_str!("../../data/eagle.txt");
@@ -55,7 +57,7 @@ pub(super) fn session_card(s: &SessionInfo<'_>) -> Card {
     ];
 
     // Provider, model and context window are absent by design: the status bar
-    // carries them live and repaints on `/model` (`App::update_live_model`).
+    // carries them live and repaints on `/model` (`render::draw`).
     let base_role = if s.base == "dangerous" {
         Role::Bad
     } else {
@@ -179,7 +181,7 @@ pub(super) fn legend_panel(width: u16) -> Vec<Line<'static>> {
     ls.push(Line::default());
     ls.push(head("strata · background = which region, never magnitude"));
     let swatch = |text: &str, bg: Option<Color>| match bg {
-        Some(bg) => line::wash(Line::from(Span::raw(text.to_string())), bg, None).spans,
+        Some(bg) => text::wash(Line::from(Span::raw(text.to_string())), bg, None).spans,
         None => vec![note(text)],
     };
     ls.extend(line::legend_rows(
@@ -219,12 +221,12 @@ pub(super) fn legend_panel(width: u16) -> Vec<Line<'static>> {
         vec![
             (
                 "size",
-                vec![line::size_bar(120), note("  log-scaled magnitude")],
+                vec![gauge::size_bar(120), note("  log-scaled magnitude")],
             ),
             (
                 "grain",
                 vec![
-                    line::grain_run(9, 1),
+                    gauge::grain_run(9, 1),
                     note("  diff: ⣿ all adds to ⣀ all deletes; thinking: thought against what it became"),
                 ],
             ),
@@ -234,7 +236,7 @@ pub(super) fn legend_panel(width: u16) -> Vec<Line<'static>> {
                     Span::styled(
                         [None, Some(2), Some(40), Some(8), Some(300)]
                             .into_iter()
-                            .map(line::spark_glyph)
+                            .map(gauge::spark_glyph)
                             .collect::<String>(),
                         Style::default().fg(SLATE),
                     ),

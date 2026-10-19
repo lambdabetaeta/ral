@@ -18,8 +18,6 @@ use crossterm::{
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 
-use super::tui_loop::Tui;
-
 pub type Term = Terminal<CrosstermBackend<Stdout>>;
 
 pub static TUI_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -164,17 +162,6 @@ pub(super) fn edit_text_in_editor(draft: &str) -> io::Result<Option<String>> {
     };
     let _ = std::fs::remove_file(&path);
     Ok(edited)
-}
-
-/// Drive the `C-x C-e` hatch from the UI loop, which owns the terminal the
-/// editor must borrow.  Repaints over whatever the editor left on the screen.
-pub fn compose_in_editor(tui: &mut Tui) -> io::Result<()> {
-    let draft = tui.app.prompt_state.prompt_text();
-    if let Some(edited) = edit_text_in_editor(&draft)? {
-        tui.app.prompt_state.adopt_draft(&edited);
-    }
-    tui.guard.term().clear()?;
-    Ok(())
 }
 
 /// RAII guard over the terminal modes and a redirect of fd 2.

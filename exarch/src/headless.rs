@@ -228,7 +228,7 @@ impl Sink for Headless<'_> {
             Transient::Fault { text } => {
                 let _ = writeln!(self.err, "{text}");
             }
-            Transient::Resources { card, .. } | Transient::Limits { card } => {
+            Transient::Resources { card, .. } => {
                 for line in card_stderr(card) {
                     let _ = writeln!(self.err, "{line}");
                 }
@@ -255,9 +255,7 @@ impl Headless<'_> {
     /// a patched call's line count reaches stderr through no line either.
     fn step(&mut self, id: AgentId, rec: &Recorded<Record>) {
         let mut fold = self.folds.remove(&id).unwrap_or_default();
-        let delta = fold
-            .step(rec)
-            .expect("the view fold never refuses a live Display/Forensic record");
+        let delta = fold.step(rec);
         if let (Delta::Opened(_), Some(block)) = (delta, fold.blocks().last()) {
             self.print_block(id, block.kind());
         }

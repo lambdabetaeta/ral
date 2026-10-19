@@ -3,14 +3,14 @@
 
 use std::{
     io::{self},
-    sync::Arc,
+    sync::{
+        Arc,
+        mpsc::{self, Receiver},
+    },
     time::{Duration, Instant},
 };
 
-use crossterm::event::{
-    Event as CtEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, poll as ct_poll,
-    read as ct_read,
-};
+use crossterm::event::{Event as CtEvent, poll as ct_poll, read as ct_read};
 
 use crate::{
     SessionInfo,
@@ -20,22 +20,24 @@ use crate::{
         spawn::{AsyncSpawn, spawn_async},
     },
     bus::{BusReceiver, FleetBus, Pass, Signal},
-    provider::{Bureau, Provider},
+    provider::Bureau,
     record::Resumed,
 };
 use std::sync::mpsc::TryRecvError;
 
 use super::{
-    App, banner, commands,
-    render::draw,
-    terminal::{self, TerminalGuard},
+    App,
+    app::{CommandCtx, Job, Overlay},
+    banner, commands,
+    render::{draw, emit_tab_title},
+    terminal::{TerminalGuard, edit_text_in_editor},
 };
 
 /// Terminal and app, kept as two fields so the loop can borrow `guard.term()`
 /// and `&mut app` at once.
-pub(super) struct Tui {
-    pub(super) guard: TerminalGuard,
-    pub(super) app: App,
+struct Tui {
+    guard: TerminalGuard,
+    app: App,
 }
 
 /// Attend every root, the `seed` prompt going to the first, until the last
@@ -50,7 +52,6 @@ pub(super) struct Tui {
 pub fn run(
     screen: TerminalGuard,
     roots: Vec<(Avatar, Option<Resumed>)>,
-    provider: &Arc<Provider>,
     info: &SessionInfo<'_>,
     bureau: &Bureau,
     mut seed: Option<String>,
@@ -78,6 +79,7 @@ pub fn run(
             "the first signal of a run was not a root's birth: there is no tab to open".into(),
         );
     };
+    let (jobs, inbox) = mpsc::channel::<Job>();
     let mut tui = Tui {
         guard: screen,
         app: App::new(
@@ -87,12 +89,12 @@ pub fn run(
             bus.meter(),
             vi,
             banner::session_card(info),
+            jobs,
         ),
     };
-    tui.app.update_live_model(provider, &bureau.available());
 
     let ctx = CommandCtx { bureau, info };
-    let r = ui_loop(&mut tui, &bus, &fleet, &ctx);
+    let r = ui_loop(&mut tui, &bus, &fleet, &inbox, &ctx);
     if r.is_err() {
         commands::quit(&fleet);
     }
@@ -102,6 +104,7 @@ pub fn run(
 
     let logs = tui
         .app
+        .tabs
         .flush_logs()
         .map_err(|e| format!("session logs: {e}"));
     let usage = tui.app.total_usage();
@@ -121,14 +124,6 @@ pub fn run(
     }
     ral_core::outln!("{usage}");
     Ok(())
-}
-
-/// The handles a submitted line is serviced against, bundled so the command
-/// path — `route_submit` into `pick_model` / `login` — threads one context.
-/// Every agent-side reach is the tabs' own, so no fleet handle rides here.
-pub struct CommandCtx<'a> {
-    pub(super) bureau: &'a Bureau,
-    pub(super) info: &'a SessionInfo<'a>,
 }
 
 /// Route one `Signal` to its `App` entry point.
@@ -170,7 +165,13 @@ fn drain_signals(
 /// The merged render + input loop, on the UI thread beside the roots' workers.
 /// Returns once the fleet is empty, after one last frame that includes
 /// everything they emitted.
-fn ui_loop(tui: &mut Tui, bus: &FleetBus, fleet: &Fleet, ctx: &CommandCtx<'_>) -> io::Result<()> {
+fn ui_loop(
+    tui: &mut Tui,
+    bus: &FleetBus,
+    fleet: &Fleet,
+    inbox: &Receiver<Job>,
+    ctx: &CommandCtx<'_>,
+) -> io::Result<()> {
     const BATCH: usize = 64;
     let frame = Duration::from_millis(16); // ~60 FPS max
     let rx = bus.rx();
@@ -200,12 +201,20 @@ fn ui_loop(tui: &mut Tui, bus: &FleetBus, fleet: &Fleet, ctx: &CommandCtx<'_>) -
                 // empty the channel uncapped before the final frame.
                 drain_signals(rx, true, None, |sig| dispatch(tui, rx, sig));
                 tui.app.mark_ready();
-                draw(&mut tui.app, tui.guard.term())?;
+                draw(&mut tui.app, tui.guard.term(), ctx.bureau)?;
+                emit_tab_title(&mut tui.app);
                 return Ok(());
             }
             Pass::More => true,
             Pass::Idle => false,
         };
+        for job in inbox.try_iter() {
+            job(&mut tui.app, ctx);
+            dirty = true;
+        }
+        if let Some(Overlay::Picker(s, _)) = &mut tui.app.overlay {
+            s.poll(ctx.bureau);
+        }
         dirty |= handled_any;
         let now_waiting = tui.app.focused_waiting();
         dirty |= now_waiting != prev_waiting;
@@ -216,7 +225,8 @@ fn ui_loop(tui: &mut Tui, bus: &FleetBus, fleet: &Fleet, ctx: &CommandCtx<'_>) -
             let ticked = tui.app.tabs.tick();
             let animating = tui.app.animating(frame);
             if dirty || ticked || animating {
-                draw(&mut tui.app, tui.guard.term())?;
+                draw(&mut tui.app, tui.guard.term(), ctx.bureau)?;
+                emit_tab_title(&mut tui.app);
                 dirty = false;
             }
             // A skipped frame still advances the clock, or the poll timeout
@@ -232,64 +242,15 @@ fn ui_loop(tui: &mut Tui, bus: &FleetBus, fleet: &Fleet, ctx: &CommandCtx<'_>) -
         };
         if ct_poll(timeout)? {
             match ct_read()? {
-                CtEvent::Key(k) if k.kind == KeyEventKind::Press => {
+                CtEvent::Key(k) => {
                     dirty = true;
-                    let steerable = tui.app.is_steerable();
-                    // An open slash-command popup owns its own keys — Enter
-                    // takes the highlighted command instead of submitting the
-                    // line under it, Tab walks the list instead of the tabs.
-                    // The interrupt is the one key no overlay is offered;
-                    // everything else, Esc included, the popup may claim —
-                    // Esc dismisses it.
-                    let action = key_action(&k, steerable);
-                    let consumed =
-                        action != KeyAction::Interrupt && tui.app.prompt_state.menu_key(k.code);
-                    // Matrix navigation is modal: while it owns the keyboard
-                    // every key but the interrupt is a matrix gesture or is
-                    // swallowed, so Esc leaves the surface instead of
-                    // cancelling the focused turn, and nothing reaches the
-                    // draft.
-                    if !consumed && action != KeyAction::Interrupt && tui.app.matrix_navigating() {
-                        tui.app.key(k);
-                    } else {
-                        match action {
-                            _ if consumed => {}
-                            // The focused agent cancels its token and its current
-                            // dispatch scope by handle — published ahead of the
-                            // engine lock, so the keypress cannot land on a run
-                            // that just ended — and never its durable root: the
-                            // exchange dies, its descendants do not, and the
-                            // agent lives to take a next run.
-                            KeyAction::Cancel | KeyAction::Interrupt => {
-                                if let Some(agent) = tui.app.tabs.focused_agent() {
-                                    agent.interrupt();
-                                }
-                            }
-                            KeyAction::Submit => {
-                                if let Some(text) = tui.app.prompt_state.submit() {
-                                    // Every tab funnels through the one path,
-                                    // which parses before it forks on the
-                                    // focused tab — so no slash line can be
-                                    // mailed to the model.
-                                    commands::route_submit(text, tui, ctx);
-                                }
-                            }
-                            KeyAction::Edit => {
-                                tui.app.key(k);
-                                if tui.app.prompt_state.take_editor_request() {
-                                    terminal::compose_in_editor(tui)?;
-                                }
-                            }
-                        }
+                    if tui.app.key(k, ctx) {
+                        compose_in_editor(tui)?;
                     }
                 }
                 CtEvent::Paste(s) => {
                     dirty = true;
-                    // A matrix cursor is a modal surface: pasted bytes must
-                    // never leak into the draft underneath it.
-                    if !tui.app.matrix_navigating() {
-                        tui.app.prompt_state.paste(&s);
-                    }
+                    tui.app.paste(&s, ctx);
                 }
                 CtEvent::Mouse(m) => {
                     dirty = true;
@@ -301,95 +262,20 @@ fn ui_loop(tui: &mut Tui, bus: &FleetBus, fleet: &Fleet, ctx: &CommandCtx<'_>) -
                 _ => {}
             }
         }
-        // A matrix Enter, or a focused agent ending mid-drain, moves the banner
-        // and ctx% gauge onto the newly focused provider. Purely presentational:
-        // nothing agent-side reads focus, so there is nothing else to wake.
-        let now_focus = tui.app.tabs.focused();
-        if now_focus != prev_focus {
+        // A matrix Enter, or a focused agent ending mid-drain, moves focus.
+        if tui.app.tabs.focused() != prev_focus {
             dirty = true;
-            if let Some(agent) = tui.app.tabs.agent(now_focus) {
-                tui.app
-                    .update_live_model(&agent.current_provider(), &ctx.bureau.available());
-            }
         }
     }
 }
 
-/// Whether `k` is `c` pressed with the Control modifier.
-pub fn ctrl_key(k: &KeyEvent, c: char) -> bool {
-    k.code == KeyCode::Char(c) && k.modifiers.contains(KeyModifiers::CONTROL)
-}
-
-/// What one overlay poll tick resolved to.  `model_picker`'s `drive`
-/// and `login`'s `drive_login` both run their modal on this tick, so their
-/// cancel chord and release filtering stay identical.
-pub(super) enum OverlayTick {
-    Idle,
-    Key(KeyCode),
-    /// Ctrl-C, Ctrl-D, or Esc: every overlay's one cancel chord.
-    Cancel,
-    /// Ctrl-S: the save chord of an overlay that holds a form.
-    Save,
-    /// Bracketed paste; only an overlay with a text field reads it.
-    Paste(String),
-    TerminalLost,
-}
-
-/// Redraw `tui.app` and poll up to 100ms for the overlay's next live key.
-pub(super) fn overlay_tick(tui: &mut Tui) -> OverlayTick {
-    if draw(&mut tui.app, tui.guard.term()).is_err() {
-        return OverlayTick::TerminalLost;
+/// Drive the `C-x C-e` hatch from the UI loop, which owns the terminal the
+/// editor must borrow.  Repaints over whatever the editor left on the screen.
+fn compose_in_editor(tui: &mut Tui) -> io::Result<()> {
+    let draft = tui.app.prompt_state.prompt_text();
+    if let Some(edited) = edit_text_in_editor(&draft)? {
+        tui.app.prompt_state.adopt_draft(&edited);
     }
-    overlay_key()
-}
-
-/// Poll up to 100ms for an overlay's next live key, the cancel chord resolved.
-pub(super) fn overlay_key() -> OverlayTick {
-    if !ct_poll(Duration::from_millis(100)).unwrap_or(false) {
-        return OverlayTick::Idle;
-    }
-    let k = match ct_read() {
-        Ok(CtEvent::Key(k)) if k.kind == KeyEventKind::Press => k,
-        Ok(CtEvent::Paste(text)) => return OverlayTick::Paste(text),
-        _ => return OverlayTick::Idle,
-    };
-    if ctrl_key(&k, 'c') || ctrl_key(&k, 'd') || k.code == KeyCode::Esc {
-        return OverlayTick::Cancel;
-    }
-    if ctrl_key(&k, 's') {
-        return OverlayTick::Save;
-    }
-    OverlayTick::Key(k.code)
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum KeyAction {
-    Edit,
-    Submit,
-    /// Esc — cancels, but an open overlay may claim it first to dismiss itself.
-    Cancel,
-    /// Ctrl-C — the interrupt, offered to no overlay: it outranks every one.
-    Interrupt,
-}
-
-/// Classify one key press in the running UI loop: Ctrl-C interrupts, Esc
-/// cancels, a bare Enter submits when the focused tab is steerable, everything
-/// else edits.  The modal overlays bypass this and read their chord from
-/// [`overlay_tick`].
-pub(super) fn key_action(k: &KeyEvent, enter_submits: bool) -> KeyAction {
-    if ctrl_key(k, 'c') {
-        return KeyAction::Interrupt;
-    }
-    if k.code == KeyCode::Esc {
-        return KeyAction::Cancel;
-    }
-    if enter_submits
-        && k.code == KeyCode::Enter
-        && !k.modifiers.contains(KeyModifiers::SHIFT)
-        && !k.modifiers.contains(KeyModifiers::ALT)
-    {
-        KeyAction::Submit
-    } else {
-        KeyAction::Edit
-    }
+    tui.guard.term().clear()?;
+    Ok(())
 }

@@ -1,16 +1,15 @@
 //! The `/providers` overlay — every account, and the keys, endpoints and
 //! sign-ins behind them, changed from inside a running session.
 //!
-//! [`ProvidersOverlay`] is display and input only; [`providers`] drives it and
+//! [`ProvidersOverlay`] is display and input only; [`input`] drives it and
 //! applies each [`Action`] through the [`Wallet`], live in the store and
 //! catalog as well as on disk — the same split `login.rs` makes.
 
-use super::app::Overlay;
-use super::line;
-use super::login;
+use super::app::{App, CommandCtx, Input, Overlay};
+use super::login::LoginOverlay;
 use super::overlay::{self, Anchor};
 use super::palette::{CYAN, Col, LIME, ORANGE, PURPLE, RED, SLATE};
-use super::tui_loop::{CommandCtx, OverlayTick, Tui, overlay_tick};
+use super::text;
 use crate::provider::Holdings;
 use crate::provider::accounts::{Entry, Source, entries};
 use crate::provider::identity;
@@ -23,7 +22,6 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use std::sync::mpsc;
 use std::thread;
 
 const BODY_W: u16 = 94;
@@ -165,7 +163,7 @@ pub(super) enum Change {
     Remove(String),
 }
 
-/// What a key press asks the driver to do.
+/// What a key press asks the overlay to do.
 pub(super) enum Action {
     None,
     Change(Change),
@@ -214,16 +212,18 @@ pub(super) struct ProvidersOverlay {
     cursor: usize,
     mode: Mode,
     status: Option<Result<String, String>>,
+    wallet: Wallet,
 }
 
 impl ProvidersOverlay {
-    fn new(entries: Vec<Entry>, vault: String) -> Self {
+    fn new(entries: Vec<Entry>, wallet: Wallet) -> Self {
         Self {
             entries,
-            vault,
+            vault: wallet.keychain.vault().to_string(),
             cursor: 0,
             mode: Mode::List,
             status: None,
+            wallet,
         }
     }
 
@@ -415,7 +415,7 @@ impl ProvidersOverlay {
                         "{var} is set in your environment and takes priority; \
                          a key saved here is used when it isn't."
                     );
-                    lines.extend(line::hang(
+                    lines.extend(text::hang(
                         &[Span::raw("  ")],
                         vec![Span::styled(note, DIM)],
                         width,
@@ -453,7 +453,7 @@ impl ProvidersOverlay {
                 Ok(text) => (text, LIME),
                 Err(text) => (text, RED),
             };
-            lines.extend(line::hang(
+            lines.extend(text::hang(
                 &[Span::raw("  ")],
                 vec![Span::styled(text.clone(), Style::new().fg(ink))],
                 width,
@@ -545,103 +545,96 @@ impl ProvidersOverlay {
     }
 }
 
-pub(super) fn providers(tui: &mut Tui, ctx: &CommandCtx<'_>) {
+pub(super) fn providers(app: &mut App, ctx: &CommandCtx<'_>) {
     let Some(holdings) = ctx.bureau.holdings() else {
-        let focused = tui.app.tabs.focused();
-        tui.app.push_error(
+        let focused = app.tabs.focused();
+        app.push_error(
             focused,
             "this session replays a scripted provider and keeps no accounts",
         );
         return;
     };
-    let wallet = Wallet::exarch();
-    loop {
-        let table = entries(&holdings.store.lock_ignore_poison());
-        let vault = wallet.keychain.vault().to_string();
-        tui.app.overlay = Some(Overlay::Providers(ProvidersOverlay::new(table, vault)));
-        let sign_in = drive(tui, ctx, holdings, &wallet);
-        tui.app.overlay = None;
-        if !sign_in {
-            return;
-        }
-        login::login(tui, ctx);
-    }
+    let table = entries(&holdings.store.lock_ignore_poison());
+    app.open(Overlay::Providers(ProvidersOverlay::new(
+        table,
+        Wallet::exarch(),
+    )));
 }
 
-/// Poll keys and apply each [`Action`] until the overlay closes; `true` when
-/// it closed to sign in, which the caller runs before reopening.
-fn drive(tui: &mut Tui, ctx: &CommandCtx<'_>, holdings: &Holdings, wallet: &Wallet) -> bool {
-    let (revoked, revocations) = mpsc::channel::<(String, Result<(), String>)>();
-    loop {
-        let tick = overlay_tick(tui);
-        let Some(overlay) = tui.app.providers_mut() else {
+/// Apply one input and the [`Action`] it asks for; the overlay closes on its
+/// cancel from the list, or to sign in.
+pub(super) fn input(
+    o: &mut ProvidersOverlay,
+    input: &Input,
+    app: &mut App,
+    ctx: &CommandCtx<'_>,
+) -> bool {
+    let Some(holdings) = ctx.bureau.holdings() else {
+        return false;
+    };
+    let action = match input {
+        Input::Cancel => return !o.cancel(),
+        Input::Paste(text) => {
+            o.paste(text);
+            return true;
+        }
+        Input::Save => o.save(),
+        Input::Key(code) => o.key(*code),
+    };
+    let (done, id, result) = match action {
+        Action::None => return true,
+        Action::SignIn => {
+            app.open(Overlay::Login(LoginOverlay::new(true)));
             return false;
-        };
-        while let Ok((label, result)) = revocations.try_recv() {
-            overlay.status = Some(match result {
-                Ok(()) => Ok(format!("signed out of {label}; OpenAI revoked the token")),
-                Err(e) => Err(format!(
-                    "signed out of {label} here, but OpenAI did not revoke the token: {e}"
-                )),
-            });
         }
-        let action = match tick {
-            OverlayTick::TerminalLost => return false,
-            OverlayTick::Cancel => {
-                if overlay.cancel() {
-                    return false;
-                }
-                continue;
-            }
-            OverlayTick::Idle => continue,
-            OverlayTick::Paste(text) => {
-                overlay.paste(&text);
-                continue;
-            }
-            OverlayTick::Save => overlay.save(),
-            OverlayTick::Key(code) => overlay.key(code),
-        };
-        let (done, id, result) = match action {
-            Action::None => continue,
-            Action::SignIn => return true,
-            Action::SignOut(id) => {
-                let result = ctx.bureau.sign_out(&id).map(|token| {
-                    let (label, revoked) = (overlay.label(&id), revoked.clone());
-                    // The local sign-out has happened: a lost revocation is best-effort.
-                    thread::spawn(move || {
-                        drop(revoked.send((label, oauth::revoke_blocking(&token))));
-                    });
+        Action::SignOut(id) => {
+            let result = ctx.bureau.sign_out(&id).map(|token| {
+                let (label, jobs, opened) = (o.label(&id), app.jobs.clone(), app.overlay_gen);
+                // The local sign-out has happened: a lost revocation is best-effort.
+                thread::spawn(move || {
+                    let revoked = oauth::revoke_blocking(&token);
+                    drop(jobs.send(Box::new(move |app, _| {
+                        if app.overlay_gen == opened
+                            && let Some(Overlay::Providers(p)) = &mut app.overlay
+                        {
+                            p.status = Some(match revoked {
+                                Ok(()) => Ok(format!("signed out of {label}; OpenAI revoked the token")),
+                                Err(e) => Err(format!(
+                                    "signed out of {label} here, but OpenAI did not revoke the token: {e}"
+                                )),
+                            });
+                        }
+                    })));
                 });
-                ("signed out of", id, result)
-            }
-            Action::Change(change) => change.apply(wallet, holdings),
-        };
-        let label = overlay.label(&id);
-        let fresh = entries(&holdings.store.lock_ignore_poison());
-        let now = fresh.iter().find(|e| e.id == id);
-        let lost = result.is_ok() && now.is_none_or(|e| e.source == Source::None);
-        let outranked = now
-            .filter(|e| e.source == Source::Environment)
-            .and_then(|e| e.env_var.clone());
-        let outcome = result.map(|()| match outranked {
-            Some(var) => format!("{done} {label}; {var} from your environment stays in force"),
-            None => format!("{done} {label}"),
-        });
-        overlay.settled(outcome, fresh);
-        let tabs = &tui.app.tabs;
-        let active = tabs
-            .ids()
-            .into_iter()
-            .filter_map(|tab| tabs.agent(tab))
-            .any(|agent| agent.current_provider().account().id.as_str() == id);
-        if lost && active {
-            let text = format!(
-                "[{done} {label}; the running model keeps its connection until you /model]"
-            );
-            tui.app
-                .tabs
-                .focused_recorder()
-                .emit_or_report(crate::record::Forensic::SystemNote { text });
+            });
+            ("signed out of", id, result)
         }
+        Action::Change(change) => change.apply(&o.wallet, holdings),
+    };
+    let label = o.label(&id);
+    let fresh = entries(&holdings.store.lock_ignore_poison());
+    let now = fresh.iter().find(|e| e.id == id);
+    let lost = result.is_ok() && now.is_none_or(|e| e.source == Source::None);
+    let outranked = now
+        .filter(|e| e.source == Source::Environment)
+        .and_then(|e| e.env_var.clone());
+    let outcome = result.map(|()| match outranked {
+        Some(var) => format!("{done} {label}; {var} from your environment stays in force"),
+        None => format!("{done} {label}"),
+    });
+    o.settled(outcome, fresh);
+    let tabs = &app.tabs;
+    let active = tabs
+        .ids()
+        .into_iter()
+        .filter_map(|tab| tabs.agent(tab))
+        .any(|agent| agent.current_provider().account().id.as_str() == id);
+    if lost && active {
+        let text =
+            format!("[{done} {label}; the running model keeps its connection until you /model]");
+        app.tabs
+            .focused_recorder()
+            .emit_or_report(crate::record::Forensic::SystemNote { text });
     }
+    true
 }

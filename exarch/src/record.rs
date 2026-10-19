@@ -508,7 +508,7 @@ pub enum Forensic {
 #[derive(Debug, Clone)]
 pub struct Born {
     /// What the frontend must still know once the agent has settled: the
-    /// row's label and indentation, the tombstone's log path.
+    /// row's label and indentation, the gone agent's log path.
     pub log_dir: PathBuf,
     pub name: String,
     /// `None` for a root, which opens a session of its own.
@@ -555,10 +555,6 @@ pub enum Transient {
     StopReason(String),
     /// Drawn, not recorded.
     Resources {
-        card: Card,
-    },
-    /// Drawn, not recorded.
-    Limits {
         card: Card,
     },
     /// The live register's copy of a pin — [`Forensic::Pin`] is the durable

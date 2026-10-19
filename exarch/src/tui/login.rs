@@ -2,15 +2,15 @@
 //! session.
 //!
 //! [`LoginOverlay`] is display and input only; the flow runs on a background
-//! thread over [`oauth::login_flow`], reporting staged [`LoginPhase`]s over an
-//! `mpsc` channel while [`drive_login`] polls keys and redraws — the same
-//! component/orchestration split `model_picker.rs` makes.
+//! thread over [`oauth::login_flow`], reporting staged [`LoginPhase`]s as
+//! [`Job`]s for the UI loop to apply — the same component/orchestration split
+//! `model_picker.rs` makes.
 
-use super::app::Overlay;
-use super::line;
+use super::app::{App, CommandCtx, Input, Job, Overlay};
 use super::overlay::{self, Anchor};
 use super::palette::{CYAN, Col, RED, SLATE};
-use super::tui_loop::{CommandCtx, OverlayTick, Tui, overlay_tick};
+use super::providers;
+use super::text;
 use crate::provider::identity;
 use crate::provider::oauth::{self, LoginPhase, OAuthToken, SignIn};
 use ratatui::Frame;
@@ -21,7 +21,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
 
 /// Wide enough for an id-qualified account label beside its blurb.
 const BODY_W: u16 = 62;
@@ -36,7 +35,7 @@ enum Mode {
     Choosing,
     /// `None` until the first phase report lands, an instant after the thread
     /// spawns; it renders as every station pending. No key is live here — the
-    /// driver's cancel chord is the only way out.
+    /// cancel chord is the only way out.
     Running(Option<LoginPhase>),
     Failed(String),
 }
@@ -56,11 +55,15 @@ pub(super) struct LoginOverlay {
     /// OSC 52 is never acknowledged, so this records what exarch sent, not
     /// what the terminal on the other end of the connection did with it.
     yanked: bool,
+    /// The cancel flag of the flow in flight, if one is.
+    flow: Option<Arc<AtomicBool>>,
+    /// Whether closing returns to `/providers`, which opened this.
+    back: bool,
 }
 
 impl LoginOverlay {
     /// A new registration first, then each signed-in account to sign in again.
-    fn new() -> Self {
+    pub(super) fn new(back: bool) -> Self {
         let tokens = oauth::load_all();
         let accounts: Vec<_> = tokens.iter().map(oauth::to_account).collect();
         let renewals = tokens
@@ -83,6 +86,8 @@ impl LoginOverlay {
             cursor: 0,
             mode: Mode::Choosing,
             yanked: false,
+            flow: None,
+            back,
         }
     }
 
@@ -96,8 +101,8 @@ impl LoginOverlay {
     }
 }
 
-/// What a key press resolved to. No cancel variant: `overlay_tick` resolves
-/// the cancel chord before a key ever reaches [`LoginOverlay::key`].
+/// What a key press resolved to. No cancel variant: [`Input`] resolves the
+/// cancel chord before a key ever reaches [`LoginOverlay::key`].
 pub(super) enum LoginAction {
     None,
     Start(SignIn),
@@ -275,115 +280,103 @@ fn dim() -> Style {
 }
 
 /// A labelled row whose value wraps on under the value column, through the
-/// shared display-width-aware [`line::hang`].  Wrapping is what stops
+/// shared display-width-aware [`text::hang`].  Wrapping is what stops
 /// a long value clipping at the bezel and reading as a shorter one.
 fn field(label: &str, text: &str, style: Style, width: usize) -> Vec<Line<'static>> {
     let head = [Span::styled(
         format!("{INDENT}{}", LABEL.left(label)),
         dim(),
     )];
-    line::hang(&head, vec![Span::styled(text.to_string(), style)], width)
+    text::hang(&head, vec![Span::styled(text.to_string(), style)], width)
 }
 
 // ---------------------------------------------------------------------------
 // Orchestration
 // ---------------------------------------------------------------------------
 
-/// Message from the flow thread to the overlay loop.
-enum LoginMsg {
-    Phase(LoginPhase),
-    /// The persisted token and whether it replaced an account, or the failure.
-    Done(Result<(OAuthToken, bool), String>),
+pub(super) fn login(app: &mut App) {
+    app.open(Overlay::Login(LoginOverlay::new(false)));
 }
 
-pub(super) fn login(tui: &mut Tui, ctx: &CommandCtx<'_>) {
-    tui.app.overlay = Some(Overlay::Login(LoginOverlay::new()));
-    let outcome = drive_login(tui);
-    tui.app.overlay = None;
-    if let Some((token, replaced)) = outcome {
-        apply_login(tui, ctx, &token, replaced);
-    }
-}
-
-/// A flow thread in flight. Cancelling trips the flag — `login_flow`'s wait
-/// loops poll it every 100 ms, freeing the loopback listener — and returns at
-/// once, leaving the orphan's last message to land in a dropped `Receiver`.
-struct FlowHandle {
-    rx: mpsc::Receiver<LoginMsg>,
-    cancel: Arc<AtomicBool>,
-}
-
-/// Poll keys and the flow's messages until the overlay resolves; `None` on
-/// cancel or close. The flow's own thread keeps this loop off the network.
-fn drive_login(tui: &mut Tui) -> Option<(OAuthToken, bool)> {
-    let mut flow: Option<FlowHandle> = None;
-    loop {
-        let mut clear_flow = false;
-        if let Some(handle) = flow.as_ref() {
-            loop {
-                match handle.rx.try_recv() {
-                    Ok(LoginMsg::Phase(phase)) => {
-                        if let Some(l) = tui.app.login_mut() {
-                            l.set_phase(phase);
-                        }
-                    }
-                    Ok(LoginMsg::Done(Ok(pair))) => return Some(pair),
-                    Ok(LoginMsg::Done(Err(e))) => {
-                        if let Some(l) = tui.app.login_mut() {
-                            l.set_failed(e);
-                        }
-                        clear_flow = true;
-                        break;
-                    }
-                    Err(_) => break,
-                }
+/// Cancelling trips the flow's flag — `login_flow`'s wait loops poll it every
+/// 100 ms, freeing the loopback listener — and returns at once; the orphan's
+/// last jobs see the flag and do nothing.
+pub(super) fn input(
+    l: &mut LoginOverlay,
+    input: &Input,
+    app: &mut App,
+    ctx: &CommandCtx<'_>,
+) -> bool {
+    match input {
+        Input::Cancel => {
+            if let Some(flow) = &l.flow {
+                // `Relaxed` suffices: the flag publishes no data of its own,
+                // and the phase and result payloads ride the jobs.
+                flow.store(true, Ordering::Relaxed);
             }
-        }
-        if clear_flow {
-            flow = None;
-        }
-
-        match overlay_tick(tui) {
-            OverlayTick::TerminalLost => return None,
-            OverlayTick::Idle | OverlayTick::Save | OverlayTick::Paste(_) => {}
-            OverlayTick::Cancel => {
-                if let Some(handle) = &flow {
-                    // `Relaxed` suffices: the flag publishes no data of its own,
-                    // and the phase and result payloads ride the channel.
-                    handle.cancel.store(true, Ordering::Relaxed);
-                }
-                return None;
+            if l.back {
+                providers::providers(app, ctx);
             }
-            OverlayTick::Key(code) => match tui.app.login_mut()?.key(code) {
+            false
+        }
+        Input::Key(code) => {
+            match l.key(*code) {
                 LoginAction::Start(sign_in) => {
-                    let (tx, rx) = mpsc::channel();
                     let cancel = Arc::new(AtomicBool::new(false));
-                    let flag = Arc::clone(&cancel);
-                    let phase_tx = tx.clone();
+                    l.flow = Some(Arc::clone(&cancel));
+                    let jobs = app.jobs.clone();
                     std::thread::spawn(move || {
+                        let (phase_jobs, flag) = (jobs.clone(), Arc::clone(&cancel));
                         let result = oauth::login_flow(
                             &sign_in,
-                            move |p| {
-                                let _ = phase_tx.send(LoginMsg::Phase(p));
+                            move |phase| {
+                                let flag = Arc::clone(&flag);
+                                let job: Job = Box::new(move |app, _| {
+                                    if !flag.load(Ordering::Relaxed)
+                                        && let Some(Overlay::Login(l)) = &mut app.overlay
+                                    {
+                                        l.set_phase(phase);
+                                    }
+                                });
+                                let _ = phase_jobs.send(job);
                             },
-                            &flag,
+                            &cancel,
                         );
-                        let _ = tx.send(LoginMsg::Done(result));
+                        let _ = jobs.send(Box::new(move |app, ctx| {
+                            if cancel.load(Ordering::Relaxed) {
+                                return;
+                            }
+                            match result {
+                                Ok((token, replaced)) => {
+                                    let back =
+                                        matches!(app.overlay.take(), Some(Overlay::Login(l)) if l.back);
+                                    apply_login(app, ctx, &token, replaced);
+                                    if back {
+                                        providers::providers(app, ctx);
+                                    }
+                                }
+                                Err(e) => {
+                                    if let Some(Overlay::Login(l)) = &mut app.overlay {
+                                        l.set_failed(e);
+                                        l.flow = None;
+                                    }
+                                }
+                            }
+                        }));
                     });
-                    flow = Some(FlowHandle { rx, cancel });
                 }
                 // Only the write is ours to judge: over OSC 52 no reply comes, so
                 // whether the terminal at the far end honoured it is unknowable.
                 LoginAction::Yank(text) => {
-                    if tui.app.clipboard.copy(&text, true).is_ok()
-                        && let Some(l) = tui.app.login_mut()
-                    {
+                    if app.clipboard.copy(&text, true).is_ok() {
                         l.yanked = true;
                     }
                 }
                 LoginAction::None => {}
-            },
+            }
+            true
         }
+        Input::Save | Input::Paste(_) => true,
     }
 }
 
@@ -391,17 +384,16 @@ fn drive_login(tui: &mut Tui) -> Option<(OAuthToken, bool)> {
 /// credential store and catalog. No provider swap: an account names no model
 /// of its own, so the user picks one through `/model`; and a re-login upserts
 /// the very cell the focused tab already reads through.
-fn apply_login(tui: &mut Tui, ctx: &CommandCtx<'_>, token: &OAuthToken, replaced: bool) {
+fn apply_login(app: &mut App, ctx: &CommandCtx<'_>, token: &OAuthToken, replaced: bool) {
     let admitted = ctx.bureau.admit(token);
     let (id, label) = match admitted {
         Ok(admitted) => admitted,
         Err(e) => {
-            tui.app.push_error(tui.app.tabs.focused(), &e);
+            app.push_error(app.tabs.focused(), &e);
             return;
         }
     };
-    let already_active = tui
-        .app
+    let already_active = app
         .tabs
         .focused_agent()
         .is_some_and(|agent| agent.current_provider().account().id == id);
@@ -416,8 +408,7 @@ fn apply_login(tui: &mut Tui, ctx: &CommandCtx<'_>, token: &OAuthToken, replaced
         "; run /model to use it"
     };
     let text = format!("[{action} ChatGPT account {label}{next}]");
-    tui.app
-        .tabs
+    app.tabs
         .focused_recorder()
         .emit_or_report(crate::record::Forensic::SystemNote { text });
 }

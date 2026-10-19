@@ -9,7 +9,14 @@ fn scrollback() -> Scrollback {
         std::process::id(),
         N.fetch_add(1, Ordering::Relaxed),
     ));
-    Scrollback::new(path, AgentSlot(0), false, Detail::Full, Recorder::none(), None)
+    Scrollback::new(
+        path,
+        AgentSlot(0),
+        false,
+        Detail::Full,
+        Recorder::none(),
+        None,
+    )
 }
 
 fn rail_rows(rows: &[Row], glyph: &str) -> Vec<usize> {
@@ -60,28 +67,6 @@ fn text(sb: &mut Scrollback) -> String {
         .join("\n")
 }
 
-/// Re-pinning overwrites a slot in place, `drop_pin` removes one, `reset`
-/// wipes the lot — the same generation discipline that bounds scrollback.
-#[test]
-fn pins_overwrite_in_place_and_keep_insertion_order() {
-    use crate::card::Mark;
-    let raw = |b: &[u8]| Card(vec![Mark::Raw { bytes: b.to_vec() }]);
-    let keys = |sb: &Scrollback| sb.pins().iter().map(|(k, _)| k.clone()).collect::<Vec<_>>();
-    let mut sb = scrollback();
-    sb.set_pin("tasks".into(), raw(b"v1"));
-    sb.set_pin("build".into(), raw(b"ok"));
-    assert_eq!(keys(&sb), ["tasks", "build"]);
-
-    sb.set_pin("tasks".into(), raw(b"v2"));
-    assert_eq!(keys(&sb), ["tasks", "build"]);
-    assert!(matches!(&sb.pins()[0].1.0[..], [Mark::Raw { bytes }] if bytes == b"v2"));
-
-    sb.drop_pin("tasks");
-    assert_eq!(keys(&sb), ["build"]);
-    sb.reset();
-    assert!(sb.pins().is_empty(), "reset wipes the register");
-}
-
 /// The open line reads inside the block it will join, and the record that
 /// completes it changes the text without changing the picture — the one
 /// claim that says live and committed are the same rendering.
@@ -92,7 +77,7 @@ fn the_record_that_completes_a_line_does_not_change_the_picture() {
 
     // A fence opens and a line of code streams: the fence is recorded, the
     // line is still open.
-    sb.transient(&Transient::Token("```ral\nlet x = 1".into()));
+    sb.push_token("```ral\nlet x = 1");
     log.say(&mut sb, "```ral\n");
     let live = format!("{:?}", sb.render_window(READ_W, 24).lines);
     assert!(
@@ -106,7 +91,7 @@ fn the_record_that_completes_a_line_does_not_change_the_picture() {
     );
 
     // Its record lands and the printer's own newline rule closes it.
-    sb.transient(&Transient::Token("\n".into()));
+    sb.push_token("\n");
     log.say(&mut sb, "let x = 1\n");
     assert_eq!(
         format!("{:?}", sb.render_window(READ_W, 24).lines),
@@ -121,7 +106,7 @@ fn the_record_that_completes_a_line_does_not_change_the_picture() {
 #[test]
 fn prose_ends_the_open_thinking_line_and_the_boundary_clears_both() {
     let mut sb = scrollback();
-    sb.transient(&Transient::Thinking("considering the shape".into()));
+    sb.push_thinking("considering the shape");
 
     let all = text(&mut sb);
     assert!(
@@ -134,14 +119,14 @@ fn prose_ends_the_open_thinking_line_and_the_boundary_clears_both() {
         "and wears the thinking rail: {all:?}"
     );
 
-    sb.transient(&Transient::Token("First words".into()));
+    sb.push_token("First words");
     let all = text(&mut sb);
     assert!(
         !all.contains("considering the shape") && all.contains("First words"),
         "prose closed the run, whose tail the worker recorded at the same delta: {all:?}"
     );
 
-    sb.transient(&Transient::Boundary);
+    sb.close_lanes();
     let all = text(&mut sb);
     assert!(
         !all.contains("First words"),
@@ -178,6 +163,52 @@ fn scroll_down_while_sticky_clamps_to_max_off() {
     assert!(sb.sticky, "re-armed at the bottom after the clamp");
 }
 
+fn prompts(sb: &mut Scrollback, n: usize) {
+    for i in 0..n {
+        sb.push_chrome(Chrome::Prompt(format!(
+            "block {i} a\nblock {i} b\nblock {i} c"
+        )));
+    }
+}
+
+/// Rows and blocks count from the mirror's origin, so a click held across a
+/// head trim still names the block it landed on.
+#[test]
+fn a_hit_survives_the_head_being_trimmed() {
+    let mut sb = scrollback();
+    prompts(&mut sb, 10);
+    let _ = sb.render_window(READ_W, 10);
+    let row = 30;
+    let hit = sb.block_at(row).expect("the row is on screen");
+    let head = sb.block_head(hit);
+    sb.retire(3);
+    let _ = sb.render_window(READ_W, 10);
+    assert!(
+        sb.block_at(row) == Some(hit),
+        "the same row names the same block"
+    );
+    assert_eq!(sb.block_head(hit), head, "and the block keeps its head row");
+    assert!(sb.block_at(0).is_none(), "a retired row names nothing");
+    assert!(
+        sb.block_head(Hit { block: 0, ..hit }).is_none(),
+        "nor does a retired block"
+    );
+}
+
+/// A scrolled-up viewport holds its place when rows retire above it.
+#[test]
+fn an_unstuck_viewport_keeps_its_absolute_offset_across_a_head_trim() {
+    let mut sb = scrollback();
+    prompts(&mut sb, 10);
+    let _ = sb.render_window(READ_W, 10);
+    sb.scroll_to(12);
+    assert_eq!(sb.render_window(READ_W, 10).offset, 12);
+    sb.retire(2);
+    let w = sb.render_window(READ_W, 10);
+    assert_eq!(w.offset, 12, "the window stays on the same rows");
+    assert!(!sb.sticky);
+}
+
 /// The committed deliberation renders in a sticky scrollback too, once its
 /// record lands past a full window of chrome.
 #[test]
@@ -190,7 +221,7 @@ fn committed_thinking_stays_visible_in_sticky_scrollback() {
             "block {i} line a\nblock {i} line b"
         )));
     }
-    sb.transient(&Transient::Thinking("considering the shape".into()));
+    sb.push_thinking("considering the shape");
     let live = sb.render_window(READ_W, 8);
     assert!(
         !rail_rows(&live.lines, "∴ ").is_empty(),
@@ -211,33 +242,20 @@ fn committed_thinking_stays_visible_in_sticky_scrollback() {
     );
 }
 
-/// Eviction drops the scrollback and the pinned register, keeping only
-/// the fact that the view is dead; `log_path` is untouched, so the log
-/// stays readable.
+/// Consuming a view retires its whole transcript to `user.log` and hands
+/// back the path, so the log stays readable.
 #[test]
-fn evict_to_tombstone_drops_scrollback_and_register() {
+fn into_log_retires_the_transcript_and_returns_the_path() {
     let mut sb = scrollback();
-    sb.push_chrome(Chrome::Note("hello".into()));
-    sb.set_pin("k".into(), Card(Vec::new()));
-    assert!(!sb.blocks.is_empty());
-
+    sb.push_chrome(Chrome::Note("marker".into()));
     let log_path = sb.log_path.clone();
-    sb.evict_to_tombstone();
 
-    assert_eq!(sb.log_path, log_path);
-    assert!(sb.blocks.is_empty(), "the scrollback is dropped");
-    assert!(sb.pins().is_empty(), "the pinned register is dropped");
-}
-
-/// Re-evicting is a harmless no-op: the view is already clean.
-#[test]
-fn evict_to_tombstone_is_idempotent() {
-    let mut sb = scrollback();
-    sb.push_chrome(Chrome::Error("boom".into()));
-    sb.evict_to_tombstone();
-    assert!(sb.blocks.is_empty());
-    sb.evict_to_tombstone();
-    assert!(sb.blocks.is_empty());
+    assert_eq!(sb.into_log(), log_path);
+    assert_eq!(
+        logged(&log_path, "marker"),
+        1,
+        "the transcript is in user.log"
+    );
 }
 
 /// An act is a barrier: it ends the group before it, so it renders
@@ -310,7 +328,7 @@ fn a_result_stamps_the_call_it_names() {
     assert_eq!(w.lines[act[0]].plain(), "cancel     [hunter]");
     let run = w.lines[rail_rows(&w.lines, "▸ ")[0]].plain();
     assert!(
-        run.ends_with(crate::tui::line::spark_glyph(Some(40))),
+        run.ends_with(crate::tui::gauge::spark_glyph(Some(40))),
         "the `ral` call keeps the magnitude it earned: {run:?}"
     );
 }
@@ -558,7 +576,14 @@ fn a_resumed_transcript_continues_rather_than_repeats() {
     let recorder = Recorder::create(&record).expect("a record log");
     let path = dir.path().join("user.log");
     let new = |append| {
-        Scrollback::new(path.clone(), AgentSlot(0), append, Detail::Full, recorder.clone(), None)
+        Scrollback::new(
+            path.clone(),
+            AgentSlot(0),
+            append,
+            Detail::Full,
+            recorder.clone(),
+            None,
+        )
     };
     let _recorded = recorder.emit(prompt("one")).expect("the log appends");
     let mut first = new(false);
@@ -573,7 +598,11 @@ fn a_resumed_transcript_continues_rather_than_repeats() {
     resumed.catch_up();
     resumed.flush_log().expect("the transcript flushes");
 
-    assert_eq!(logged(&path, "one"), 1, "the recalled prefix is not rewritten");
+    assert_eq!(
+        logged(&path, "one"),
+        1,
+        "the recalled prefix is not rewritten"
+    );
     assert_eq!(logged(&path, "two"), 1, "and the new block joins it");
 }
 

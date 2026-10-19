@@ -3,15 +3,42 @@
 //! scroll readout. `/legend` in `super::banner` draws the same marks as samples.
 
 use super::line::usage_text;
-use super::palette::{CYAN, Col, PURPLE, SLATE};
+use super::palette::{self, CYAN, Col, PURPLE, SLATE};
 use super::rail;
-use super::scrollback::StateSpan;
 use crate::provider::Usage;
 use crate::record::AgentState;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthStr;
+
+/// The agent's state, when it was entered, and the model text that has arrived
+/// since — the status line's whole datum, so one transition resets all three.
+/// The instant anchors the elapsed-wait bar to that transition rather than to
+/// the last event of any kind, which is what makes a silent stream legible.
+#[derive(Clone, Copy)]
+pub(super) struct StateSpan {
+    pub(super) state: crate::record::AgentState,
+    since: Instant,
+    /// Characters of model text arrived in this state.  A count that stops
+    /// growing under a growing [`Self::elapsed`] is a stalled stream.
+    pub(super) streamed: usize,
+}
+
+impl StateSpan {
+    pub(super) fn new(state: crate::record::AgentState) -> Self {
+        Self {
+            state,
+            since: Instant::now(),
+            streamed: 0,
+        }
+    }
+
+    /// Time in state.
+    pub(super) fn elapsed(self) -> Duration {
+        self.since.elapsed()
+    }
+}
 
 pub(super) fn rule_line(
     width: usize,
@@ -176,7 +203,7 @@ pub(super) fn ctx_ramp(pct: u64) -> Vec<Span<'static>> {
         reason = "pct already clamped to 0..=100"
     )]
     let pct_u32 = pct as u32;
-    let fill_col = rail::lighten(CYAN, rail::value_step(Some(pct_u32)));
+    let fill_col = palette::lighten(CYAN, rail::value_step(Some(pct_u32)));
     let mut spans = vec![Span::styled("ctx ", Style::default().fg(SLATE))];
     spans.extend(bar_cells(filled, CTX_BAR_W, fill_col));
     spans.push(Span::styled(" ", Style::default().fg(SLATE)));
@@ -231,7 +258,7 @@ pub(super) fn wait_bar(elapsed: Option<Duration>) -> Vec<Span<'static>> {
         reason = "log2 of a small positive count, then min-clamped"
     )]
     let filled = ((((secs + 1) as f64).log2() * 1.7).round() as usize).min(WAIT_BAR_W);
-    let fill_col = rail::lighten(PURPLE, wait_step(secs));
+    let fill_col = palette::lighten(PURPLE, wait_step(secs));
     let mut spans = bar_cells(filled, WAIT_BAR_W, fill_col);
     spans.push(Span::styled(
         WAIT_READOUT.right(&clock_text(secs)),

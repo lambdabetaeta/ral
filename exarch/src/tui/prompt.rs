@@ -12,7 +12,6 @@ pub(super) struct PromptState {
     hist_pos: Option<usize>,
     draft: String,
     cx_pending: bool,
-    editor_request: bool,
     /// The live slash-command popup, re-derived from the line by every path
     /// that moves the cursor or touches the buffer.
     menu: Option<Menu>,
@@ -29,7 +28,6 @@ impl PromptState {
             hist_pos: None,
             draft: String::new(),
             cx_pending: false,
-            editor_request: false,
             menu: None,
         }
     }
@@ -73,12 +71,6 @@ impl PromptState {
         self.set_prompt(text);
     }
 
-    /// Take the pending `C-x C-e` request — the UI loop drains it after every edit
-    /// key and suspends into `terminal::compose_in_editor`.
-    pub(super) fn take_editor_request(&mut self) -> bool {
-        std::mem::take(&mut self.editor_request)
-    }
-
     /// Arm the `C-x` prefix: the next `C-e` opens the editor.
     pub(super) fn set_cx_pending(&mut self) {
         self.cx_pending = true;
@@ -90,10 +82,6 @@ impl PromptState {
 
     pub(super) fn take_cx_pending(&mut self) -> bool {
         std::mem::take(&mut self.cx_pending)
-    }
-
-    pub(super) fn request_editor(&mut self) {
-        self.editor_request = true;
     }
 
     pub(super) fn prompt_text(&self) -> String {

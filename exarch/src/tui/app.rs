@@ -4,21 +4,23 @@
 //! scrollback blocks.
 
 use super::block::Chrome;
+use super::commands;
 use super::gesture::{Effect, GestureState, Toast};
-use super::login::LoginOverlay;
-use super::matrix::{self, Matrix, MatrixSort, Nav};
-use super::picker::Picker;
+use super::login::{self, LoginOverlay};
+use super::matrix::{self, Matrix, Nav};
+use super::model_picker::{self, PickerSession};
 use super::prompt::PromptState;
-use super::providers::ProvidersOverlay;
+use super::providers::{self, ProvidersOverlay};
 use super::resources::{BusFigures, ScrollbackFigures, frontend_rows};
-use super::rewind::RewindOverlay;
+use super::rewind::{self, RewindOverlay};
 use super::scrollback::Scrollback;
-use super::tabs::{TabRow, Tabs};
+use super::tabs::{Status, TabRow, Tabs};
+use crate::SessionInfo;
+use crate::agent::Agent;
 use crate::agent::fleet::Fleet;
-use crate::bus::{BusReceiver, UsageMeter};
+use crate::bus::{BusReceiver, Post, UsageMeter};
 use crate::card::Card;
-use crate::provider::identity::Account;
-use crate::provider::{Provider, Usage};
+use crate::provider::{Bureau, Usage};
 use crate::record::{AgentId, AgentState, Born, Record, Recorded, Resumed, Segment, Transient};
 use clipboard::Clipboard;
 
@@ -28,7 +30,7 @@ use ratatui::crossterm::event::{
 use std::{
     io::{self},
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, mpsc},
     time::Duration,
 };
 
@@ -36,16 +38,85 @@ use std::{
 /// move a frame height, measured per-keystroke off the last drawn content.
 const SCROLL_STEP: isize = 3;
 
+/// The handles a submitted line is serviced against, bundled so the command
+/// path — `route_submit` into `pick_model` / `login` — threads one context.
+/// Every agent-side reach is the tabs' own, so no fleet handle rides here.
+pub struct CommandCtx<'a> {
+    pub(super) bureau: &'a Bureau,
+    pub(super) info: &'a SessionInfo<'a>,
+}
+
+/// Work finished off the UI thread, applied on it.
+pub(super) type Job = Box<dyn FnOnce(&mut App, &CommandCtx<'_>) + Send>;
+
+/// An overlay's input, its chords already resolved.
+pub(super) enum Input {
+    Key(KeyCode),
+    /// Ctrl-C, Ctrl-D, or Esc: every overlay's one cancel chord.
+    Cancel,
+    /// Ctrl-S: the save chord of an overlay that holds a form.
+    Save,
+    /// Bracketed paste; only an overlay with a text field reads it.
+    Paste(String),
+}
+
+/// Ctrl-C, Ctrl-D, Esc → `Cancel`; Ctrl-S → `Save`; anything else its code.
+pub(super) fn input_of(k: &KeyEvent) -> Input {
+    if ctrl_key(k, 'c') || ctrl_key(k, 'd') || k.code == KeyCode::Esc {
+        return Input::Cancel;
+    }
+    if ctrl_key(k, 's') {
+        return Input::Save;
+    }
+    Input::Key(k.code)
+}
+
+/// Whether `k` is `c` pressed with the Control modifier.
+pub fn ctrl_key(k: &KeyEvent, c: char) -> bool {
+    k.code == KeyCode::Char(c) && k.modifiers.contains(KeyModifiers::CONTROL)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum KeyAction {
+    Edit,
+    Submit,
+    /// Esc — cancels, but an open overlay may claim it first to dismiss itself.
+    Cancel,
+    /// Ctrl-C — the interrupt; inside an overlay it closes the overlay instead.
+    Interrupt,
+}
+
+/// Classify one key press in the running UI loop: Ctrl-C interrupts, Esc
+/// cancels, a bare Enter submits when the focused tab is steerable, everything
+/// else edits.  The modal overlays bypass this and read their chord from
+/// [`input_of`].
+pub(super) fn key_action(k: &KeyEvent, enter_submits: bool) -> KeyAction {
+    if ctrl_key(k, 'c') {
+        return KeyAction::Interrupt;
+    }
+    if k.code == KeyCode::Esc {
+        return KeyAction::Cancel;
+    }
+    if enter_submits
+        && k.code == KeyCode::Enter
+        && !k.modifiers.contains(KeyModifiers::SHIFT)
+        && !k.modifiers.contains(KeyModifiers::ALT)
+    {
+        KeyAction::Submit
+    } else {
+        KeyAction::Edit
+    }
+}
+
 /// The one modal overlay that may be open at a time.
 pub(super) enum Overlay {
-    Picker(Picker),
+    Picker(PickerSession, AgentId),
     Login(LoginOverlay),
     Rewind(RewindOverlay),
     Providers(ProvidersOverlay),
 }
 
-/// The focused tab's committed lines flow into the host terminal's native
-/// scrollback; off-focus tabs accumulate locally and replay in full on focus.
+/// The frontend's whole state: every tab, the prompt, gestures and the open overlay.
 pub(crate) struct App {
     pub(super) tabs: Tabs,
     pub(super) prompt_state: PromptState,
@@ -55,14 +126,15 @@ pub(crate) struct App {
     meter: UsageMeter,
     /// What the resumed sessions' histories had spent.
     recalled: Usage,
-    pub(super) status_model: String,
-    /// Modal in behaviour — an early-return guard in [`Self::key`] — and in
+    /// Modal in behaviour — [`Self::key`] hands it every key — and in
     /// rendering: drawn last, over the dimmed session.
     pub(super) overlay: Option<Overlay>,
+    /// Counts overlays opened, so a [`Job`] can tell whether its overlay is still up.
+    pub(super) overlay_gen: u64,
+    /// Where off-thread work sends the [`Job`] that applies its result.
+    pub(super) jobs: mpsc::Sender<Job>,
     pub(super) gesture: GestureState,
     pub(super) clipboard: Clipboard,
-    /// A render-time projection over `tabs`, never a reshuffle of the model.
-    pub(super) matrix_sort: MatrixSort,
     /// The matrix's cursor, deliberately separate from [`Tabs::focus`]: moving
     /// around the matrix must not retarget the prompt until the user presses
     /// Enter.
@@ -82,6 +154,7 @@ impl App {
         meter: UsageMeter,
         vi: bool,
         opening: Card,
+        jobs: mpsc::Sender<Job>,
     ) -> Self {
         let cwd_basename = std::env::current_dir()
             .ok()
@@ -93,11 +166,11 @@ impl App {
             recalled: Usage::default(),
             prompt_state: PromptState::new(vi),
             opening,
-            status_model: String::new(),
             overlay: None,
+            overlay_gen: 0,
+            jobs,
             gesture: GestureState::new(),
             clipboard: Clipboard::default(),
-            matrix_sort: MatrixSort::default(),
             matrix: Matrix::Watching,
             cwd_basename,
             last_title: String::new(),
@@ -108,19 +181,6 @@ impl App {
 
     pub fn total_usage(&self) -> Usage {
         self.recalled + self.meter.total()
-    }
-
-    /// Set the status bar label from the focused agent's provider. Call at
-    /// startup and after every focus or model change.
-    /// `accounts` is the set the label is drawn relative to, so two logins on
-    /// one email still read apart on the status line.
-    pub fn update_live_model(&mut self, p: &Provider, accounts: &[Account]) {
-        let status_provider = crate::provider::identity::label(p.account(), accounts);
-        // The rung in force, in the picker's own ladder label: a model the
-        // catalog says takes no reasoning control reads `auto`, which is what
-        // goes on the wire.
-        let effort = crate::provider::effort_label(&p.tuning().effort).unwrap_or("custom");
-        self.status_model = format!("{status_provider}/{} ({effort})", p.model());
     }
 
     /// Whether the focused tab has an agent to steer: its handle upgrades for
@@ -169,12 +229,7 @@ impl App {
             }
             (Nav::Toggle | Nav::Leave, Some(_)) => (Matrix::Watching, None),
             (Nav::Up | Nav::Down, Some(cursor)) => (
-                Matrix::Navigating(matrix::neighbour(
-                    &rows,
-                    self.matrix_sort,
-                    cursor,
-                    nav == Nav::Down,
-                )),
+                Matrix::Navigating(matrix::neighbour(&rows, cursor, nav == Nav::Down)),
                 None,
             ),
             // Enter attaches and leaves, so attach-and-type is one gesture.
@@ -188,35 +243,25 @@ impl App {
         }
     }
 
-    /// Mutable access to the active `/model` picker, for `model_picker`'s `drive`.
-    pub(super) fn picker_mut(&mut self) -> Option<&mut Picker> {
-        match self.overlay.as_mut() {
-            Some(Overlay::Picker(p)) => Some(p),
-            _ => None,
-        }
+    /// Open `overlay` in place of any other.
+    pub(super) fn open(&mut self, overlay: Overlay) {
+        self.overlay = Some(overlay);
+        self.overlay_gen += 1;
     }
 
-    /// Mutable access to the active `/login` overlay, for `drive_login`.
-    pub(super) fn login_mut(&mut self) -> Option<&mut LoginOverlay> {
-        match self.overlay.as_mut() {
-            Some(Overlay::Login(l)) => Some(l),
-            _ => None,
-        }
-    }
-
-    /// Mutable access to the active `/providers` overlay, for `providers::drive`.
-    pub(super) fn providers_mut(&mut self) -> Option<&mut ProvidersOverlay> {
-        match self.overlay.as_mut() {
-            Some(Overlay::Providers(p)) => Some(p),
-            _ => None,
-        }
-    }
-
-    /// Mutable access to the active `/rewind` overlay, for `rewind::drive`.
-    pub(super) fn rewind_mut(&mut self) -> Option<&mut RewindOverlay> {
-        match self.overlay.as_mut() {
-            Some(Overlay::Rewind(r)) => Some(r),
-            _ => None,
+    /// Hand `input` to the open overlay; it stays open unless its handler closes it.
+    pub(super) fn overlay_input(&mut self, input: &Input, ctx: &CommandCtx<'_>) {
+        let Some(mut overlay) = self.overlay.take() else {
+            return;
+        };
+        let keep = match &mut overlay {
+            Overlay::Picker(s, tab) => model_picker::input(s, *tab, input, self, ctx),
+            Overlay::Login(l) => login::input(l, input, self, ctx),
+            Overlay::Rewind(r) => rewind::input(r, input, self),
+            Overlay::Providers(p) => providers::input(p, input, self, ctx),
+        };
+        if keep {
+            self.overlay = Some(overlay);
         }
     }
 
@@ -225,20 +270,24 @@ impl App {
     /// cannot — the exit, where the loop is over and nothing more will arrive.
     pub fn mark_ready(&mut self) {
         let focused = self.tabs.focused();
-        if let Some(sb) = self.tabs.scrollback_mut(focused) {
-            sb.set_state(AgentState::Ready);
+        if let Some(status) = self.tabs.status_mut(focused) {
+            status.set_state(AgentState::Ready);
         }
     }
 
     /// True while a time-driven visual must keep repainting with no event to
-    /// drive it: the elapsed-wait bar, the tab-title spinner, or a copy toast —
-    /// which needs one draw past its own expiry to erase itself, hence `margin`.
+    /// drive it: the elapsed-wait bar, the tab-title spinner, a copy toast —
+    /// which needs one draw past its own expiry to erase itself, hence `margin` —
+    /// or an open overlay, which repaints for jobs and the picker's polling.
     pub(super) fn animating(&self, margin: Duration) -> bool {
         let pending = self
             .tabs
-            .focused_scrollback()
-            .is_some_and(|sb| sb.state().state.pending());
-        pending || self.gesture.toast_live(margin) || !self.focused_waiting()
+            .focused_status()
+            .is_some_and(|status| status.state.state.pending());
+        pending
+            || self.gesture.toast_live(margin)
+            || !self.focused_waiting()
+            || self.overlay.is_some()
     }
 
     /// Fold one witnessed record fact into the screen — the sole way a
@@ -252,8 +301,11 @@ impl App {
             return;
         }
         if self.with_scrollback(id, |sb| sb.fact(segment, rec)) == Some(true) {
+            if let Some(status) = self.tabs.status_mut(id) {
+                *status = Status::new();
+            }
             self.tabs.retire_subtree(id);
-            self.gesture.clear_selection();
+            self.gesture.clear();
         }
     }
 
@@ -286,9 +338,8 @@ impl App {
 
     /// Draw one live-only transient directly, with no log-backed fold: the
     /// mirror of [`Self::fact`] for [`crate::bus::Signal::Transient`].
-    /// [`Transient::Died`]/[`Transient::Resources`] need the tabs a bare
-    /// `Scrollback` cannot see, so they are answered here; everything else
-    /// forwards to [`Scrollback::transient`] on the recording scrollback.
+    /// Every variant is routed here: to the tabs, the tab's [`Status`], or its
+    /// scrollback.
     pub fn transient(&mut self, id: AgentId, t: Transient, bus: &BusReceiver) {
         if self.tabs.lingering(id) {
             return;
@@ -296,9 +347,37 @@ impl App {
         match t {
             Transient::Died => self.tabs.died(id),
             Transient::Resources { card, .. } => self.frontend_resources(id, card, bus),
-            Transient::Limits { card } => self.push_chrome(id, Chrome::Framed(card)),
-            other => {
-                self.with_scrollback(id, |sb| sb.transient(&other));
+            Transient::State(state) => {
+                if let Some(status) = self.tabs.status_mut(id) {
+                    status.set_state(state);
+                }
+            }
+            Transient::Pin { key, card } => {
+                if let Some(status) = self.tabs.status_mut(id) {
+                    status.set_pin(key, card);
+                }
+            }
+            Transient::Unpin { key } => {
+                if let Some(status) = self.tabs.status_mut(id) {
+                    status.drop_pin(&key);
+                }
+            }
+            Transient::Token(text) => {
+                if let Some(status) = self.tabs.status_mut(id) {
+                    status.note_streamed(text.chars().count());
+                }
+                self.with_scrollback(id, |sb| sb.push_token(&text));
+            }
+            Transient::Thinking(text) => {
+                if let Some(status) = self.tabs.status_mut(id) {
+                    status.note_streamed(text.chars().count());
+                }
+                self.with_scrollback(id, |sb| sb.push_thinking(&text));
+            }
+            Transient::StopReason(raw) => self.push_chrome(id, Chrome::StopReason(raw)),
+            Transient::Fault { text } => self.push_chrome(id, Chrome::Error(text)),
+            Transient::Boundary => {
+                self.with_scrollback(id, Scrollback::close_lanes);
             }
         }
     }
@@ -331,7 +410,11 @@ impl App {
     }
 
     /// Hand the session's scrollback to `f`.
-    fn with_scrollback<R>(&mut self, id: AgentId, f: impl FnOnce(&mut Scrollback) -> R) -> Option<R> {
+    fn with_scrollback<R>(
+        &mut self,
+        id: AgentId,
+        f: impl FnOnce(&mut Scrollback) -> R,
+    ) -> Option<R> {
         let Some(sb) = self.tabs.scrollback_mut(id) else {
             ral_core::dbg_trace!(
                 "tui",
@@ -358,49 +441,102 @@ impl App {
     pub(super) fn push_error(&mut self, id: AgentId, message: &str) {
         self.push_chrome(id, Chrome::Error(message.to_owned()));
     }
-    pub fn key(&mut self, k: KeyEvent) {
+
+    /// Run `f` on the focused tab's agent, or say it has ended.
+    pub(super) fn session(&mut self, f: impl FnOnce(&Agent)) {
+        if let Some(agent) = self.tabs.focused_agent() {
+            f(&agent);
+        } else {
+            let focused = self.tabs.focused();
+            self.push_error(focused, "this tab's agent has ended");
+        }
+    }
+
+    /// Queue `post` on the focused tab's agent.
+    pub(super) fn post(&mut self, post: Post) {
+        self.session(|agent| agent.mailbox.push(post));
+    }
+
+    /// Route one key press; `true` when the user asked to compose the draft in
+    /// `$EDITOR`, which only the UI loop, owning the terminal, can do.
+    pub fn key(&mut self, k: KeyEvent, ctx: &CommandCtx<'_>) -> bool {
         if k.kind != KeyEventKind::Press {
-            return;
+            return false;
         }
-        // An overlay is exclusive; its own keys are handled by its driver
-        // (`model_picker`, `login`, `rewind`). This guard only stops a stray
-        // key leaking through.
         if self.overlay.is_some() {
-            return;
+            self.overlay_input(&input_of(&k), ctx);
+            return false;
         }
-        // Matrix navigation is a modal keyboard surface of its own; Tab is
-        // global, so it enters and leaves even with an editor prefix armed.
-        if let Some(nav) = matrix::nav(&k, self.matrix_navigating()) {
-            self.matrix_nav(nav);
-            return;
+        let action = key_action(&k, self.is_steerable());
+        // An open slash-command popup owns its own keys — Enter takes the
+        // highlighted command instead of submitting the line under it, Tab
+        // walks the list instead of the tabs.  The interrupt is the one key no
+        // popup is offered; everything else, Esc included, it may claim — Esc
+        // dismisses it.
+        if action != KeyAction::Interrupt
+            && (self.prompt_state.menu_key(k.code) || self.matrix_key(&k))
+        {
+            return false;
         }
-        if self.matrix_navigating() {
-            // Paging still reads the transcript under the matrix; every other
-            // key is swallowed so it cannot reach the draft.
-            match k.code {
-                KeyCode::PageUp => self.apply(self.gesture.scroll_page(-1)),
-                KeyCode::PageDown => self.apply(self.gesture.scroll_page(1)),
-                _ => {}
+        match action {
+            // The focused agent cancels its token and its current dispatch
+            // scope by handle — published ahead of the engine lock, so the
+            // keypress cannot land on a run that just ended — and never its
+            // durable root: the exchange dies, its descendants do not, and the
+            // agent lives to take a next run.
+            KeyAction::Interrupt | KeyAction::Cancel => {
+                if let Some(agent) = self.tabs.focused_agent() {
+                    agent.interrupt();
+                }
             }
-            return;
+            KeyAction::Submit => {
+                if let Some(text) = self.prompt_state.submit() {
+                    // Every tab funnels through the one path, which parses
+                    // before it forks on the focused tab — so no slash line can
+                    // be mailed to the model.
+                    commands::route_submit(text, self, ctx);
+                }
+            }
+            KeyAction::Edit => return self.edit(k),
         }
+        false
+    }
+
+    /// Matrix navigation is modal: while it owns the keyboard every key but the
+    /// interrupt is a matrix gesture or is swallowed, so Esc leaves the surface
+    /// instead of cancelling the focused turn, and nothing reaches the draft.
+    /// Tab is global, so it enters and leaves even with an editor prefix armed.
+    fn matrix_key(&mut self, k: &KeyEvent) -> bool {
+        if let Some(nav) = matrix::nav(k, self.matrix_navigating()) {
+            self.matrix_nav(nav);
+            return true;
+        }
+        if !self.matrix_navigating() {
+            return false;
+        }
+        // Paging still reads the transcript under the matrix.
+        match k.code {
+            KeyCode::PageUp => self.apply(self.gesture.scroll_page(-1)),
+            KeyCode::PageDown => self.apply(self.gesture.scroll_page(1)),
+            _ => {}
+        }
+        true
+    }
+
+    /// Edit the draft; `true` when the Ctrl-X prefix's Ctrl-E asks for `$EDITOR`.
+    fn edit(&mut self, k: KeyEvent) -> bool {
         let can_edit = self.is_steerable();
         // Ctrl-X opens the editor-command prefix (emacs convention): Ctrl-E
-        // composes the prompt in `$EDITOR` — drained by the UI loop, which owns
-        // the terminal it must suspend — and any other key cancels. The
+        // composes the prompt in `$EDITOR` and any other key cancels.  The
         // widget's own Ctrl-X (cut) yields; killing stays on Ctrl-W / Ctrl-K.
         if self.prompt_state.take_cx_pending() {
-            if can_edit
+            return can_edit
                 && k.code == KeyCode::Char('e')
-                && k.modifiers.contains(KeyModifiers::CONTROL)
-            {
-                self.prompt_state.request_editor();
-            }
-            return;
+                && k.modifiers.contains(KeyModifiers::CONTROL);
         }
         if can_edit && k.code == KeyCode::Char('x') && k.modifiers.contains(KeyModifiers::CONTROL) {
             self.prompt_state.set_cx_pending();
-            return;
+            return false;
         }
         // Every key reaches the textarea only on an editable tab, so a lingering
         // subagent is watch-only and the global prompt stays pristine until
@@ -438,11 +574,30 @@ impl App {
             }
             _ => {}
         }
+        false
     }
+
+    /// Pasted text goes to the open overlay, else the draft — never under a
+    /// matrix cursor, a modal surface its bytes must not leak past.
+    pub fn paste(&mut self, s: &str, ctx: &CommandCtx<'_>) {
+        if self.overlay.is_some() {
+            self.overlay_input(&Input::Paste(s.to_owned()), ctx);
+        } else if !self.matrix_navigating() {
+            self.prompt_state.paste(s);
+        }
+    }
+
     /// The wheel scrolls, a left-drag selects and copies on release, a click
     /// that never dragged opens its block. Shift+left falls through to the
     /// terminal's own selection, so we never see — or fight — it.
     pub fn mouse(&mut self, me: MouseEvent) {
+        if self.overlay.is_some() {
+            return;
+        }
+        if !self.gesture.drawn_for(self.tabs.focused()) {
+            self.gesture.clear();
+            return;
+        }
         self.prompt_state.clear_cx_pending();
         // Motion and press alike, so the dial glyph brightens the instant the
         // pointer crosses a dialable block.
@@ -490,15 +645,6 @@ impl App {
         }
     }
 
-    /// Flush every scrollback — live, dying, or aged-out — to its session's
-    /// `user.log`. Returns the paths in id order, stable across runs.
-    pub fn flush_logs(&mut self) -> io::Result<Vec<PathBuf>> {
-        self.tabs
-            .views_mut()
-            .map(|sb| Ok(sb.flush_log()?.to_path_buf()))
-            .collect()
-    }
-
     /// The focused tab's latest reply as raw markdown, for `/copy`. Empty when
     /// the tab has no scrollback or its last block is not prose.
     pub(in crate::tui) fn latest_reply(&self) -> String {
@@ -520,4 +666,4 @@ impl App {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

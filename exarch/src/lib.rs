@@ -314,7 +314,7 @@ pub fn run() -> Result<(), String> {
             Some(screen) => screen,
             None => tui::enter(&run_dir)?,
         };
-        tui::run(screen, roots, &provider, &info, &bureau, seed, c.vi)
+        tui::run(screen, roots, &info, &bureau, seed, c.vi)
     }
 }
 

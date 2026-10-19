@@ -18,11 +18,12 @@
 
 use std::fmt::Write;
 
-use super::block::Detail;
+use super::dial::Detail;
+use super::gauge;
 use super::highlight::highlight_ral;
-use super::line::{self, wash, wrap_line};
 use super::md;
-use super::palette::{CODE_BG, EFFECT_BG, RED, SLATE};
+use super::palette::{self, CODE_BG, EFFECT_BG, RED, SLATE};
+use super::text::{self, wash, wrap_line};
 use crate::card::{self, Effect, Listing, Role, exec_listing, greps_listing, reads_listing};
 use crate::record::{Seq, Verdict};
 use ral_core::fact::Grep;
@@ -144,12 +145,12 @@ fn effect_rows(call: &Call, at: Detail, width: usize) -> Vec<Line<'static>> {
 /// item hangs under the first; at `Summary`, the items that fit one row and a
 /// count of the rest, as a diff shows its peek.
 fn listing_rows(l: &Listing, at: Detail, width: usize) -> Vec<Line<'static>> {
-    let mut head: Vec<_> = l.head.iter().map(line::card_span).collect();
+    let mut head: Vec<_> = l.head.iter().map(palette::card_span).collect();
     head.push(Span::raw(" "));
     let items: Vec<Vec<Span<'static>>> = l
         .items
         .iter()
-        .map(|i| i.iter().map(line::card_span).collect())
+        .map(|i| i.iter().map(palette::card_span).collect())
         .collect();
     let n = items.len();
     let sep_w = l.sep.width();
@@ -162,7 +163,7 @@ fn listing_rows(l: &Listing, at: Detail, width: usize) -> Vec<Line<'static>> {
         }))
         .collect();
     let more =
-        |k: usize| line::card_span(&card::Span::new(Role::Muted, format!("… +{} more", n - k)));
+        |k: usize| palette::card_span(&card::Span::new(Role::Muted, format!("… +{} more", n - k)));
     let kept = if at >= Detail::Full || ends[n] <= width {
         n
     } else {
@@ -184,7 +185,7 @@ fn listing_rows(l: &Listing, at: Detail, width: usize) -> Vec<Line<'static>> {
         }
         body.extend(item);
     }
-    line::hang(&head, body, width)
+    text::hang(&head, body, width)
 }
 
 /// Columns held clear at the right edge, so the per-call bars and the tip's
@@ -369,21 +370,21 @@ fn source_rows(call: &Call, width: usize) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// The whole-run sparkline: one [`line::spark_glyph`] per call in call order, as
+/// The whole-run sparkline: one [`gauge::spark_glyph`] per call in call order, as
 /// one slate span — a bar chart of how much each call moved.
 fn sparkline(calls: &[Call]) -> Span<'static> {
     let skip = calls.len().saturating_sub(MAX_SPARKLINE);
     let glyphs: String = calls
         .iter()
         .skip(skip)
-        .map(|c| line::spark_glyph(c.magnitude()))
+        .map(|c| gauge::spark_glyph(c.magnitude()))
         .collect();
     Span::styled(glyphs, Style::default().fg(SLATE))
 }
 
 fn bar(magnitude: Option<u32>) -> Span<'static> {
     Span::styled(
-        line::spark_glyph(magnitude).to_string(),
+        gauge::spark_glyph(magnitude).to_string(),
         Style::default().fg(SLATE),
     )
 }

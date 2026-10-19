@@ -4,6 +4,7 @@ use std::fmt::Write;
 use std::path::PathBuf;
 
 use super::App;
+use super::app::CommandCtx;
 use super::block::Chrome;
 use super::gesture::Toast;
 use super::login;
@@ -11,7 +12,6 @@ use super::model_picker::pick_model;
 use super::providers;
 use super::rewind;
 use super::scrollback;
-use super::tui_loop::Tui;
 use crate::SessionInfo;
 use crate::agent::Agent;
 use crate::agent::fleet::Fleet;
@@ -22,182 +22,159 @@ use crate::record::Memory;
 use jiff::Timestamp;
 use prompt_editor::completion::Candidate;
 use ral_core::path::sigil::expand_path_prefix;
-/// The slash commands, by name.  The one list behind the prompt-box
-/// highlight, the completion, the `/help` listing, and the routing: adding a
-/// command is adding a variant, and [`Verb::meta`], [`Verb::parse`] and
-/// [`run`] each match it exhaustively.
-macro_rules! verbs {
-    ($($verb:ident),* $(,)?) => {
-        #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-        pub(super) enum Verb { $($verb),* }
-        impl Verb {
-            pub(super) const ALL: &'static [Verb] = &[$(Verb::$verb),*];
-        }
-    };
+/// A command's trailing argument.
+pub(super) enum Arg {
+    No,
+    Optional(&'static str),
+    Required(&'static str),
 }
 
-verbs! {
-    Help, Legend, Thinking, Clear, Copy, Export, Model, Login, Providers, Limits, New, Branch,
-    Close, Focus, Evict, Context, Rewind, Resources, Quit,
-}
-
-pub(super) struct Meta {
+pub(super) struct Spec {
     pub(super) name: &'static str,
     pub(super) aliases: &'static [&'static str],
-    /// The trailing argument, e.g. `Some("<path>")` for `/export`; `None` marks
-    /// a command that matches only when typed alone.
-    pub(super) arg: Option<&'static str>,
+    pub(super) arg: Arg,
     pub(super) help: &'static str,
+    /// Builds the command from its argument, already checked against `arg`.
+    command: fn(&str) -> Command,
 }
 
-const fn meta(
-    name: &'static str,
-    aliases: &'static [&'static str],
-    arg: Option<&'static str>,
-    help: &'static str,
-) -> Meta {
-    Meta {
-        name,
-        aliases,
-        arg,
-        help,
-    }
-}
-
-impl Verb {
-    pub(super) const fn meta(self) -> Meta {
-        match self {
-            Self::Help => meta("/help", &[], None, "List the available commands."),
-            Self::Legend => meta(
-                "/legend",
-                &[],
-                None,
-                "Decode the rail, bars, grain, and fidelity treatments.",
-            ),
-            Self::Thinking => meta(
-                "/thinking",
-                &[],
-                None,
-                "Collapse or expand thinking, on screen and to come.",
-            ),
-            Self::Clear => meta(
-                "/clear",
-                &[],
-                None,
-                "Forget the conversation and clear the screen.",
-            ),
-            Self::Copy => meta(
-                "/copy",
-                &[],
-                None,
-                "Copy the latest reply to the clipboard.",
-            ),
-            Self::Export => meta(
-                "/export",
-                &[],
-                Some("<path>"),
-                "Write the user view to a file.",
-            ),
-            Self::Model => meta("/model", &[], None, "Switch the model or provider."),
-            Self::Login => meta(
-                "/login",
-                &[],
-                None,
-                "Sign in with ChatGPT: adds a plan-backed provider.",
-            ),
-            Self::Providers => meta(
-                "/providers",
-                &[],
-                None,
-                "Manage providers: API keys, custom endpoints, ChatGPT sign-in.",
-            ),
-            Self::Limits => meta(
-                "/limits",
-                &[],
-                None,
-                "Show what is left of each subscription's ration.",
-            ),
-            Self::New => meta("/new", &[], Some("[name]"), "Open a new, empty session."),
-            Self::Branch => meta(
-                "/branch",
-                &[],
-                Some("[name]"),
-                "Open a new session with this tab's context (fresh shell).",
-            ),
-            Self::Close => meta(
-                "/close",
-                &[],
-                None,
-                "End this session for good: --resume will not reopen it.",
-            ),
-            Self::Focus => meta(
-                "/focus",
-                &[],
-                Some("<name>"),
-                "Attach to a live agent by name.",
-            ),
-            Self::Evict => meta(
-                "/evict",
-                &[],
-                None,
-                "Evict the older half of the context; it stays readable to the model.",
-            ),
-            Self::Context => meta(
-                "/context",
-                &[],
-                None,
-                "Survey the model context without changing it.",
-            ),
-            Self::Rewind => meta(
-                "/rewind",
-                &[],
-                None,
-                "Pick a prompt to go back to; descendants and the shell are untouched.",
-            ),
-            Self::Resources => meta(
-                "/resources",
-                &[],
-                None,
-                "Show the agent's resource probes: workers, inbox, log, disk.",
-            ),
-            Self::Quit => meta(
-                "/quit",
-                &["/exit"],
-                None,
-                "End every session; --resume reopens them.",
-            ),
-        }
-    }
-
-    /// Type the trailing argument, or say how it is malformed — the usage
-    /// hints live here, so [`run`] receives only well-formed commands.
-    fn parse(self, arg: &str) -> Result<Command, String> {
-        let named = || (!arg.is_empty()).then(|| arg.to_string());
-        Ok(match self {
-            Self::Help => Command::Help,
-            Self::Legend => Command::Legend,
-            Self::Thinking => Command::Thinking,
-            Self::Clear => Command::Clear,
-            Self::Copy => Command::Copy,
-            Self::Model => Command::Model,
-            Self::Login => Command::Login,
-            Self::Providers => Command::Providers,
-            Self::Limits => Command::Limits,
-            Self::Close => Command::Close,
-            Self::Evict => Command::Evict,
-            Self::Context => Command::Context,
-            Self::Resources => Command::Resources,
-            Self::Rewind => Command::Rewind,
-            Self::Quit => Command::Quit,
-            Self::New => Command::Hatch(Memory::Amnemon, named()),
-            Self::Branch => Command::Hatch(Memory::Mnemon, named()),
-            Self::Export if arg.is_empty() => return Err("usage: /export <path>".into()),
-            Self::Export => Command::Export(arg.to_string()),
-            Self::Focus if arg.is_empty() => return Err("usage: /focus <name>".into()),
-            Self::Focus => Command::Focus(arg.to_string()),
-        })
-    }
-}
+/// The slash commands, in `/help` order: the one list behind the highlight,
+/// the completion, the listing and the routing.
+const COMMANDS: &[Spec] = &[
+    Spec {
+        name: "/help",
+        aliases: &[],
+        arg: Arg::No,
+        help: "List the available commands.",
+        command: |_| Command::Help,
+    },
+    Spec {
+        name: "/legend",
+        aliases: &[],
+        arg: Arg::No,
+        help: "Decode the rail, bars, grain, and fidelity treatments.",
+        command: |_| Command::Legend,
+    },
+    Spec {
+        name: "/thinking",
+        aliases: &[],
+        arg: Arg::No,
+        help: "Collapse or expand thinking, on screen and to come.",
+        command: |_| Command::Thinking,
+    },
+    Spec {
+        name: "/clear",
+        aliases: &[],
+        arg: Arg::No,
+        help: "Forget the conversation and clear the screen.",
+        command: |_| Command::Clear,
+    },
+    Spec {
+        name: "/copy",
+        aliases: &[],
+        arg: Arg::No,
+        help: "Copy the latest reply to the clipboard.",
+        command: |_| Command::Copy,
+    },
+    Spec {
+        name: "/export",
+        aliases: &[],
+        arg: Arg::Required("<path>"),
+        help: "Write the user view to a file.",
+        command: |a| Command::Export(a.to_owned()),
+    },
+    Spec {
+        name: "/model",
+        aliases: &[],
+        arg: Arg::No,
+        help: "Switch the model or provider.",
+        command: |_| Command::Model,
+    },
+    Spec {
+        name: "/login",
+        aliases: &[],
+        arg: Arg::No,
+        help: "Sign in with ChatGPT: adds a plan-backed provider.",
+        command: |_| Command::Login,
+    },
+    Spec {
+        name: "/providers",
+        aliases: &[],
+        arg: Arg::No,
+        help: "Manage providers: API keys, custom endpoints, ChatGPT sign-in.",
+        command: |_| Command::Providers,
+    },
+    Spec {
+        name: "/limits",
+        aliases: &[],
+        arg: Arg::No,
+        help: "Show what is left of each subscription's ration.",
+        command: |_| Command::Limits,
+    },
+    Spec {
+        name: "/new",
+        aliases: &[],
+        arg: Arg::Optional("[name]"),
+        help: "Open a new, empty session.",
+        command: |a| Command::Hatch(Memory::Amnemon, (!a.is_empty()).then(|| a.to_owned())),
+    },
+    Spec {
+        name: "/branch",
+        aliases: &[],
+        arg: Arg::Optional("[name]"),
+        help: "Open a new session with this tab's context (fresh shell).",
+        command: |a| Command::Hatch(Memory::Mnemon, (!a.is_empty()).then(|| a.to_owned())),
+    },
+    Spec {
+        name: "/close",
+        aliases: &[],
+        arg: Arg::No,
+        help: "End this session for good: --resume will not reopen it.",
+        command: |_| Command::Close,
+    },
+    Spec {
+        name: "/focus",
+        aliases: &[],
+        arg: Arg::Required("<name>"),
+        help: "Attach to a live agent by name.",
+        command: |a| Command::Focus(a.to_owned()),
+    },
+    Spec {
+        name: "/evict",
+        aliases: &[],
+        arg: Arg::No,
+        help: "Evict the older half of the context; it stays readable to the model.",
+        command: |_| Command::Evict,
+    },
+    Spec {
+        name: "/context",
+        aliases: &[],
+        arg: Arg::No,
+        help: "Survey the model context without changing it.",
+        command: |_| Command::Context,
+    },
+    Spec {
+        name: "/rewind",
+        aliases: &[],
+        arg: Arg::No,
+        help: "Pick a prompt to go back to; descendants and the shell are untouched.",
+        command: |_| Command::Rewind,
+    },
+    Spec {
+        name: "/resources",
+        aliases: &[],
+        arg: Arg::No,
+        help: "Show the agent's resource probes: workers, inbox, log, disk.",
+        command: |_| Command::Resources,
+    },
+    Spec {
+        name: "/quit",
+        aliases: &["/exit"],
+        arg: Arg::No,
+        help: "End every session; --resume reopens them.",
+        command: |_| Command::Quit,
+    },
+];
 
 /// A typed command, ready to run.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -225,23 +202,22 @@ pub(super) enum Command {
 }
 
 /// The command a token names, by its own name or by one of its aliases.
-fn by_token(token: &str) -> Option<Verb> {
-    Verb::ALL.iter().copied().find(|v| {
-        let m = v.meta();
-        m.name == token || m.aliases.contains(&token)
-    })
+fn by_token(token: &str) -> Option<&'static Spec> {
+    COMMANDS
+        .iter()
+        .find(|c| c.name == token || c.aliases.contains(&token))
 }
 
 /// The command named by `trimmed`'s first token, with the trimmed remainder as
 /// its argument.  An argument-less command matches only when typed alone, so
 /// `/copy this` declines and the line proceeds to the model as a prompt.
-pub(super) fn lookup_command(trimmed: &str) -> Option<(Verb, &str)> {
+pub(super) fn lookup_command(trimmed: &str) -> Option<(&'static Spec, &str)> {
     let (head, rest) = split_head(trimmed);
-    let verb = by_token(head)?;
-    if verb.meta().arg.is_none() && !rest.is_empty() {
+    let spec = by_token(head)?;
+    if matches!(spec.arg, Arg::No) && !rest.is_empty() {
         return None;
     }
-    Some((verb, rest))
+    Some((spec, rest))
 }
 
 /// Whether `line` is still a bare command token: a `/` and the characters a
@@ -265,21 +241,20 @@ pub(super) fn command_candidates(line: &str) -> Vec<Candidate> {
     if !composing_command(line) {
         return Vec::new();
     }
-    let tokens: Vec<&'static str> = Verb::ALL
+    let tokens: Vec<&'static str> = COMMANDS
         .iter()
-        .map(|v| v.meta())
-        .flat_map(|m| std::iter::once(m.name).chain(m.aliases.iter().copied()))
+        .flat_map(|c| std::iter::once(c.name).chain(c.aliases.iter().copied()))
         .collect();
     ral_core::text::rank(line, tokens)
         .into_iter()
         .map(|token| {
-            let meta = by_token(token).map(Verb::meta);
+            let spec = by_token(token);
             Candidate {
-                display: match meta.as_ref().and_then(|m| m.arg) {
-                    Some(arg) => format!("{token} {arg}"),
-                    None => token.to_string(),
+                display: match spec.map(|c| &c.arg) {
+                    Some(Arg::Optional(hint) | Arg::Required(hint)) => format!("{token} {hint}"),
+                    _ => token.to_string(),
                 },
-                detail: meta.map(|m| m.help.to_string()),
+                detail: spec.map(|c| c.help.to_string()),
                 replacement: token.to_string(),
             }
         })
@@ -324,13 +299,12 @@ pub(super) fn resolve_export_path(arg: &str, cwd: &str) -> PathBuf {
 /// listing is one block with the card's own column alignment rather than a
 /// column of notes.
 pub(super) fn cmd_help(app: &mut App) {
-    let rows = Verb::ALL
+    let rows = COMMANDS
         .iter()
-        .map(|v| v.meta())
         .map(|c| {
             let mut label = c.name.to_string();
-            if let Some(arg) = c.arg {
-                let _ = write!(label, " {arg}");
+            if let Arg::Optional(hint) | Arg::Required(hint) = c.arg {
+                let _ = write!(label, " {hint}");
             }
             if !c.aliases.is_empty() {
                 let _ = write!(label, " ({})", c.aliases.join(", "));
@@ -406,7 +380,7 @@ pub(super) fn cmd_focus(app: &mut App, arg: &str) {
 
 /// Survey every account's ration on a background thread, so the card lands
 /// whole or not at all — a per-account failure is already a row on it.
-pub(super) fn cmd_limits(app: &mut App, ctx: &super::tui_loop::CommandCtx<'_>) {
+pub(super) fn cmd_limits(app: &mut App, ctx: &CommandCtx<'_>) {
     let id = app.tabs.focused();
     match ctx.bureau.survey_allowances() {
         None => app.push_error(
@@ -414,10 +388,14 @@ pub(super) fn cmd_limits(app: &mut App, ctx: &super::tui_loop::CommandCtx<'_>) {
             "this session replays a scripted provider and surveys no accounts",
         ),
         Some(survey) => {
-            let recorder = app.tabs.focused_recorder().clone();
+            let jobs = app.jobs.clone();
             std::thread::spawn(move || {
                 let card = limits_card(&survey.settle());
-                recorder.transient(crate::record::Transient::Limits { card });
+                let _ = jobs.send(Box::new(move |app, _| {
+                    if !app.tabs.lingering(id) {
+                        app.push_chrome(id, Chrome::Framed(card));
+                    }
+                }));
             });
         }
     }
@@ -490,25 +468,25 @@ fn allowance_field(a: &Allowance, now: Timestamp) -> Field {
 /// The one submit path for every tab: parse once, then act on the parse and the
 /// focused tab.  A plain line steers the focused tab's agent.  Errors land on
 /// the focused tab, where the user typed.
-pub(super) fn route_submit(text: String, tui: &mut Tui, ctx: &super::tui_loop::CommandCtx<'_>) {
+pub(super) fn route_submit(text: String, app: &mut App, ctx: &CommandCtx<'_>) {
     let trimmed = text.trim();
-    let focused = tui.app.tabs.focused();
+    let focused = app.tabs.focused();
     match lookup_command(trimmed) {
-        Some((verb, arg)) => match verb.parse(arg) {
-            Ok(command) => run(command, tui, ctx),
-            Err(usage) => tui.app.push_error(focused, &usage),
+        Some((spec, arg)) => match spec.arg {
+            Arg::Required(hint) if arg.is_empty() => {
+                app.push_error(focused, &format!("usage: {} {hint}", spec.name));
+            }
+            _ => run((spec.command)(arg), app, ctx),
         },
         // A typo is not a prompt in disguise: say so rather than mail it to the
         // model as one.
         None => match unrecognized_command(trimmed) {
-            Some(head) => tui
-                .app
-                .push_error(focused, &format!("unknown command: {head} (see /help)")),
+            Some(head) => app.push_error(focused, &format!("unknown command: {head} (see /help)")),
             // `steer` is the one delivery door: it renews the agent's idle
             // lease, and the line is dropped if that agent died since it was
             // focused.
             None => {
-                if let Some(agent) = tui.app.tabs.agent(focused) {
+                if let Some(agent) = app.tabs.agent(focused) {
                     agent.mailbox.steer(text);
                 }
             }
@@ -530,47 +508,32 @@ pub(super) fn quit(fleet: &Fleet) {
     }
 }
 
-/// Run `f` on the focused tab's agent, or say it has ended.
-fn session(tui: &mut Tui, f: impl FnOnce(&Agent)) {
-    if let Some(agent) = tui.app.tabs.focused_agent() {
-        f(&agent);
-    } else {
-        let focused = tui.app.tabs.focused();
-        tui.app.push_error(focused, "this tab's agent has ended");
-    }
-}
-
-/// Queue `post` on the focused tab's agent.
-pub(super) fn post(tui: &mut Tui, post: Post) {
-    session(tui, |agent| agent.mailbox.push(post));
-}
-
 /// Act on a well-formed command.  A view command (`/help`, `/legend`, `/copy`,
 /// `/export`, `/model`, `/login`, `/limits`, `/thinking`) touches only the App,
 /// clipboard, file, or picker, so it runs here on the UI thread; a session
 /// command becomes its [`Read`] or [`Rewrite`] and rides the focused agent's
 /// inbox to its attend thread, which owns the context.  `/rewind` is both: its
 /// picker runs here, and the choice rides the inbox.
-fn run(command: Command, tui: &mut Tui, ctx: &super::tui_loop::CommandCtx<'_>) {
+fn run(command: Command, app: &mut App, ctx: &CommandCtx<'_>) {
     match command {
-        Command::Focus(name) => cmd_focus(&mut tui.app, &name),
-        Command::Thinking => cmd_thinking(&mut tui.app),
-        Command::Help => cmd_help(&mut tui.app),
-        Command::Legend => cmd_legend(&mut tui.app),
-        Command::Copy => cmd_copy(&mut tui.app),
-        Command::Export(path) => cmd_export(&mut tui.app, &path, ctx.info),
-        Command::Model => pick_model(tui, ctx),
-        Command::Login => login::login(tui, ctx),
-        Command::Providers => providers::providers(tui, ctx),
-        Command::Limits => cmd_limits(&mut tui.app, ctx),
-        Command::Clear => session(tui, |agent| end(agent, Rewrite::Clear)),
-        Command::Close => session(tui, |agent| end(agent, Rewrite::Close)),
-        Command::Quit => quit(tui.app.tabs.fleet()),
-        Command::Evict => post(tui, Post::Rewrite(Rewrite::Evict)),
-        Command::Rewind => rewind::rewind(tui),
-        Command::Hatch(memory, name) => post(tui, Post::Read(Read::Hatch { memory, name })),
-        Command::Context => post(tui, Post::Read(Read::Context)),
-        Command::Resources => post(tui, Post::Read(Read::Resources)),
+        Command::Focus(name) => cmd_focus(app, &name),
+        Command::Thinking => cmd_thinking(app),
+        Command::Help => cmd_help(app),
+        Command::Legend => cmd_legend(app),
+        Command::Copy => cmd_copy(app),
+        Command::Export(path) => cmd_export(app, &path, ctx.info),
+        Command::Model => pick_model(app, ctx),
+        Command::Login => login::login(app),
+        Command::Providers => providers::providers(app, ctx),
+        Command::Limits => cmd_limits(app, ctx),
+        Command::Clear => app.session(|agent| end(agent, Rewrite::Clear)),
+        Command::Close => app.session(|agent| end(agent, Rewrite::Close)),
+        Command::Quit => quit(app.tabs.fleet()),
+        Command::Evict => app.post(Post::Rewrite(Rewrite::Evict)),
+        Command::Rewind => rewind::rewind(app),
+        Command::Hatch(memory, name) => app.post(Post::Read(Read::Hatch { memory, name })),
+        Command::Context => app.post(Post::Read(Read::Context)),
+        Command::Resources => app.post(Post::Read(Read::Resources)),
     }
 }
 

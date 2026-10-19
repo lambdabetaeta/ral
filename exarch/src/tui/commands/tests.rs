@@ -1,9 +1,11 @@
 use super::limits_card;
 use super::{
-    Command, command_candidates, lookup_command, resolve_export_path, unrecognized_command,
+    Command, command_candidates, lookup_command, resolve_export_path, route_submit,
+    unrecognized_command,
 };
 use crate::card::Mark;
 use crate::provider::allowance::{Allowance, Consumption, Reading};
+use crate::tui::app::tests::{app, ctx, text};
 use std::time::Duration;
 
 fn replacements(line: &str) -> Vec<String> {
@@ -14,11 +16,18 @@ fn replacements(line: &str) -> Vec<String> {
 }
 
 fn dispatch(input: &str) -> Option<(&'static str, String)> {
-    lookup_command(input).map(|(v, arg)| (v.meta().name, arg.to_string()))
+    lookup_command(input).map(|(spec, arg)| (spec.name, arg.to_string()))
 }
 
-fn parse(input: &str) -> Option<Result<Command, String>> {
-    lookup_command(input).map(|(v, arg)| v.parse(arg))
+fn parse(input: &str) -> Option<Command> {
+    lookup_command(input).map(|(spec, arg)| (spec.command)(arg))
+}
+
+/// What submitting `line` leaves on the focused tab.
+fn submitted(line: &str) -> String {
+    let (mut app, _rx, root) = app();
+    route_submit(line.into(), &mut app, &ctx());
+    text(&mut app, root.id)
 }
 
 #[test]
@@ -28,7 +37,7 @@ fn argless_command_matches_alone_but_not_with_trailing_text() {
     assert_eq!(dispatch("/exit"), Some(("/quit", String::new())));
     assert_eq!(dispatch("/resources"), Some(("/resources", String::new())));
     assert_eq!(dispatch("/context"), Some(("/context", String::new())));
-    assert_eq!(parse("/rewind"), Some(Ok(Command::Rewind)));
+    assert_eq!(parse("/rewind"), Some(Command::Rewind));
     assert_eq!(dispatch("/rewind 7"), None);
 }
 
@@ -42,10 +51,10 @@ fn export_consumes_its_path_argument() {
         dispatch("/export   /tmp/a.txt  "),
         Some(("/export", "/tmp/a.txt".to_string()))
     );
-    // A bare command matches; the parse turns the empty argument into the
+    // A bare command matches; routing turns the empty argument into the
     // usage hint rather than letting the line fall through to the model.
     assert_eq!(dispatch("/export"), Some(("/export", String::new())));
-    assert!(matches!(parse("/export"), Some(Err(usage)) if usage.starts_with("usage:")));
+    assert!(submitted("/export").contains("usage: /export <path>"));
 }
 
 #[test]
@@ -54,7 +63,7 @@ fn focus_consumes_its_name_argument() {
         dispatch("/focus scout"),
         Some(("/focus", "scout".to_string()))
     );
-    assert!(matches!(parse("/focus"), Some(Err(usage)) if usage.starts_with("usage:")));
+    assert!(submitted("/focus").contains("usage: /focus <name>"));
 }
 
 #[test]

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 00bf6d29
+generated_at_commit: f448310e
 generated_at_date: 2026-10-19
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/record/session.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/cancel.rs, exarch/src/boot.rs, exarch/src/agent/seat.rs, exarch/src/signals.rs, exarch/src/prompt/host.rs]
 ---
@@ -202,7 +202,7 @@ it).
 Two presentation surfaces, both folding the one `Signal` vocabulary through
 `fact`/`transient`:
 
- `tui.rs` (+ `tui/{app,banner,block,commands,diff,fidelity,gesture,group,highlight,line,login,matrix,md,model_picker,palette,picker,prompt,providers,rail,render,row,scrollback,select,status,tabs,terminal,tui_loop}.rs`) — the full-screen
+ `tui.rs` (+ `tui/{app,banner,block,commands,dial,diff,fidelity,gauge,gesture,group,highlight,line,login,matrix,md,model_picker,overlay,palette,picker,prompt,providers,rail,render,resources,rewind,row,scrollback,select,status,tabs,terminal,text,tui_loop}.rs`) — the full-screen
  TUI. It owns the alternate screen and its own scrollback: each session is a
  `Vec<Block>` (`tui/block.rs`) mirroring the view fold one incident at a time,
  and the whole frame is redrawn each tick from each block's own memoised visual
@@ -372,12 +372,13 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  clock: the track is the scale the filled cells are read against and stays put
  between turns, while the readout goes blank, nothing being timed. The width is
  the same either way, so no field shifts. The `StateSpan` (state, entry instant,
- characters streamed since) lives on `Scrollback`, not `App`, so each tab times
- its own.
+ characters streamed since) lives in the tab's `Status` (`tui/tabs.rs`, beside
+ its pins), not on `App`, so each tab times its own.
  A tab is the birth facts off its `Born` notice (name, parent, log path), its
- scrollback — which holds the agent's own record seam, both to catch up from
- and to record a command the frontend owns (`/model`, `/limits`) into that
- tab's log — and a linger clock: one `Tab` per agent the stream has announced,
+ `Status` (state span and pins), and its `Life` — `Live` or `Lingering` over
+ a scrollback, which holds the agent's own record seam, both to catch up from
+ and to record a command the frontend owns (`/model`) into that
+ tab's log, then `Gone`: one `Tab` per agent the stream has announced,
  in a single `Vec` in id order. There is no root tab: every root is a tab born
  by its own `Signal::Born`, and `Tabs` is non-empty by construction:
  `tui_loop::run` takes the run's first signal, which is the first root's birth
@@ -419,12 +420,11 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  agent on the session-lived bus streams its tab the same way, and `/clear`
  retires the cleared agent's descendant tabs through the same linger window
  ([[decisions/260621_session-lifetime-event-bus|session-lifetime-event-bus]]).
- Once `LINGER` elapses, `Tabs::tick` tombstones the dead view
- (`Scrollback::evict_to_tombstone`): its mirror (blocks and their render
- memos), streaming buffers, and pins are dropped, while its agent, last state,
- log, and the `BLOCKS_WINDOW`-bounded fold memo stay — the blocks retired to
- `user.log` first, since the tombstone promises that
- log is readable; no reload-from-`user.log` machinery is built. Every live
+ Once `LINGER` elapses, `Tabs::tick` turns the tab `Life::Gone`: the
+ scrollback (blocks and their render memos, streaming buffers) is dropped
+ after its blocks are retired to `user.log`, and the `Status` is reset,
+ releasing its pins; only the log path stays, which `Tabs::status` and
+ `status_mut` no longer answer for; no reload-from-`user.log` machinery is built. Every live
  scrollback is bounded by exactly one window, the view fold's own:
  `BLOCKS_WINDOW` resident blocks (`record/view.rs`), oldest dropped as new ones
  land. After every step `Scrollback::trim` walks the mirror's head against the
@@ -477,7 +477,9 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  it is open, `Scrollback::render_cut_window` positions the cut a third down
  the transcript, clamped at either end, and returns its row, from which
  rows are ghosted (`Row::ghost`) in `render::draw`. The viewport is restored
- on close; ⏎ posts `Rewrite::Rewind(turn)`. Both cuts use `Blocks::rewind_point`.
+ on close, and the preview is drawn only while the overlay's tab is the
+ focused one; ⏎ posts `Rewrite::Rewind(turn)` to the tab the overlay was
+ opened on, not to wherever focus has since moved. Both cuts use `Blocks::rewind_point`.
  `/new [name]` and `/branch [name]` open a *root session*: a new tab with an
  engine of its own, named by the human or by a minted `root-{N}`, and parked
  for them rather than seeded with a prompt — blank for `/new`, carrying the
@@ -501,10 +503,10 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
   already *spells* the highlighted command, where accepting would be the
   identity: the popup then closes and declines the key, which falls through to
   the submit it looked like all along. Ctrl-C is never
-  offered to it at all: the interrupt outranks every overlay. This is deliberately
+  offered to it at all: the interrupt outranks it. This is deliberately
   unlike a Tab-only menu that splices
   a lone match without showing one — typing here must never move the buffer on
-  its own. Each row also carries the registry's own `Meta.help` line —
+  its own. Each row also carries the registry's own `Spec::help` line —
   the same sentence `/help` lists — in a dimmer second column, so the popup
   never says less than the listing does; `Menu` drops that column first when
   the terminal is too narrow to hold it.
@@ -522,12 +524,14 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
   sign in or out of ChatGPT. A row whose key comes from the environment names
   the variable, in its own colour, with any saved key beneath it; saving or
   clearing a key there says the variable stays in force. `ProvidersOverlay` is display
-  and input only; its `Action`s are applied by the driver through exarch's
-  `Wallet`, so each change is persisted and live at once. Overlay ticks carry
+  and input only; its `Action`s are applied by `providers::input` through exarch's
+  `Wallet`, so each change is persisted and live at once. Overlay `Input`s carry
   `Paste` and `Save` (Ctrl-S) for it; the other overlays ignore both. Sign-in
-  closes the screen, runs the `/login` flow, and reopens it; sign-out is
+  swaps in the `/login` overlay, which reopens this one when it closes; sign-out is
   local at once (`Bureau::sign_out`), and the issuer's revocation runs on its
-  own thread, its outcome landing in the status line.
+  own thread, its outcome landing in the status line as a `Job` that applies
+  only while the overlay that spawned it is still the one open
+  (`App::overlay_gen`, bumped by every `App::open`).
 - `/model`, `/login`, `/providers` and `/rewind` are framed by
   `overlay::draw`: each states only its body's size, and gets one plane,
   margin, double-line bezel, title, hint, padding and translucent shadow
@@ -570,7 +574,7 @@ shell is ever foregrounded (tool runs are `Run::captured`, the terminal
 `Denied`), so a key has no process-wide half: a key interrupts one agent, an
 OS signal reaches every root.
 The TUI key table keeps UI control separate from cancellation: a modal
-overlay's (`/model`, `/login`, `/providers`) Ctrl-C/Ctrl-D/Esc close it (`overlay_tick`), only
+overlay's (`/model`, `/login`, `/providers`, `/rewind`) Ctrl-C/Ctrl-D/Esc close it (`input_of`), only
 `/quit`/`/exit` end the session, and Ctrl-C/Esc otherwise always drive the
 focused tab's non-escalating cancel (`key_action`). A single press stops the exchange /
 in-flight HTTP future and unwinds the in-flight eval at its next poll point;
@@ -599,23 +603,27 @@ agent's `InterruptTarget` (`cancel.rs`), so Esc and SIGINT after `/clear` still
 reach the new shell. `prompt/host.rs` snapshots the machine (OS, date, cwd,
 user, home, git state, exarch's log directory) once at startup for the [[map/exarch/policy|system prompt]].
         - `tui.rs` — thin façade: module declarations, re-exports, `LINGER`, `DEMOTE_IDLE`
-        - `tui/app.rs` — the `App` orchestrator: event routing, a birth (tab, catch-up), per-kind push methods
-        - `tui/tui_loop.rs` — REPL/ui loop: `run` (every root through `spawn_async`, the UI loop until the fleet is empty, then `Fleet::wait_empty`), `Tui`, `CommandCtx`, `ui_loop`, `OverlayTick`, `overlay_tick`, `KeyAction`, `key_action`, `ctrl_key`
-        - `tui/terminal.rs` — terminal lifetime: `TerminalGuard`, raw mode, alt screen, panic hook, stderr redirect, editor hatch, `compose_in_editor`
-        - `tui/tabs.rs` — session/view lifecycle: `Tab` (`Weak<Agent>`, birth facts, `Scrollback`, linger clock), `Tabs` as one id-ordered `Vec` with no root, `TabRow` (the matrix's per-frame projection, demotion included), titles, attachment management, the parent climb, `tick`'s tombstone eviction past `LINGER`
+        - `tui/app.rs` — the `App` orchestrator: the one key router (`App::key`, then `overlay_input`), `App::open` (the one way an overlay opens, bumping `overlay_gen`), `CommandCtx`, `Job`, `Input`, `KeyAction`, a birth (tab, catch-up), per-kind push methods
+        - `tui/tui_loop.rs` — REPL/ui loop: `run` (every root through `spawn_async`, the UI loop until the fleet is empty, then `Fleet::wait_empty`), `Tui`, `ui_loop`, `compose_in_editor`; the loop drains the bus, then the `Job` inbox (work finished off the UI thread, applied on it), polls the open picker, and hands each event to `App::key` / `App::paste` — overlays are states of this one loop, not nested ones
+        - `tui/terminal.rs` — terminal lifetime: `TerminalGuard`, raw mode, alt screen, panic hook, stderr redirect, editor hatch
+        - `tui/tabs.rs` — session/view lifecycle: `Tab` (birth facts, `Status`, `Life`), `Tabs` as one id-ordered `Vec` with no root, `TabRow` (the matrix's per-frame projection, demotion included), titles, attachment management, the parent climb, `tick`'s retirement to `Life::Gone` past `LINGER`
         - `tui/scrollback.rs` — per-session scrollback as a mirror of the view fold: `Scrollback`, `Scrollback::fact` acting on a `Delta` (`opened`/`grew`/`patched`), the record vocabulary decoded once into `Item`s, `absorb`'s tail rules (an effect walks back to its call, a change joins the run of changes at the tail, everything else grows the tail), `trim`'s head retirement against the fold's own window, `live_tail`, `screen`'s one seam rule, the `Log` transcript writer
         - `record/commit.rs` — the model's stream, cut into records worker-side: `Stream`/`Chopper` into `Display::Answer`/`Thinking` commits
         - `tui/prompt.rs` — prompt editor state: `PromptState`, history, draft, editor request, key input, the live slash-command popup (`refresh_menu`, `menu_key`)
-        - `tui/gesture.rs` — the mouse as a transition system: `Cell`, `FrameGeom` (the one place pointer → buffer cell), `Phase` (Idle/Pressed/Dragging/Selected), copy `Toast`, hover. Reads come in as `&Scrollback`; writes go out as an `Effect` (`Scroll`, `CycleBlock`, `Copy`) that `App::apply` runs — the module never mutates a scrollback or touches the terminal
-        - `tui/render.rs` — `strips` lays the frame out as a value, `draw` paints it; `paint_selection`, `paint_hover`, `footer_hint`, `emit_tab_title`; the screen-side `Row::into_line` flatten
+        - `tui/gesture.rs` — the mouse as a transition system: `Cell`, `FrameGeom` (the one place pointer → buffer cell, stamped with the tab it drew, so a gesture never outlives its frame's tab), `Phase` (Idle/Pressed/Dragging/Selected), copy `Toast`, hover. Reads come in as `&Scrollback`; writes go out as an `Effect` (`Scroll`, `CycleBlock`, `Copy`) that `App::apply` runs — the module never mutates a scrollback or touches the terminal
+        - `tui/render.rs` — `strips` lays the frame out as a value, `draw` paints it; `paint_selection`, `paint_hover`, `footer_hint`, `emit_tab_title`; the screen-side `Row::into_line` flatten; `draw` records the frame's geometry before painting selection or hover
         - `tui/row.rs` — the transcript row: `Row { gutter, content }`, `rail`/`wash`/`hover`/`plain`/`into_line`, the `RAIL_W` gutter-width invariant
         - `tui/banner.rs` — startup metadata: `SessionInfo`, `session_card` (including the compile-time package version, omitting the disposable scratch path), `legend_panel`, ART/EAGLE constants; `opening` lays the wordmark over the width-matched card as the one rail-free `Chrome::Opening`, neither paying an inset of its own so both start in the column the rail margin already opens
-        - `tui/commands.rs` — slash command registry: the `Verb` list and its `Meta`, `Command`, `lookup_command`, `command_candidates`, `route_submit`, handler functions
-        - `tui/status.rs` — status line: `rule_line`, `ctx_ramp`, `wait_bar`, `wait_step`
-        - `tui/matrix.rs` — bounded agent-tree matrix: `Matrix` (the one retained value, an agent identity), `Nav`/`nav` reading a key as a gesture, `MatrixSort`, `forest`/`TreeRow` and their connectors, the closed-form `view` and its boundary lines, `neighbour`, `strip`'s justified row projection, `turn_cells`
+        - `tui/commands.rs` — slash command registry: the `COMMANDS` table of `Spec`s (name, aliases, `Arg`, help), `Command`, `lookup_command`, `command_candidates`, `route_submit`, handler functions
+        - `tui/status.rs` — status line: `StateSpan`, `rule_line`, `ctx_ramp`, `wait_bar`, `wait_step`
+        - `tui/text.rs` — span-level text primitives: `text`, `wash`, `wrap_line`, `truncate_spans`, `hang`
+        - `tui/gauge.rs` — magnitude glyphs: `size_bar`, `spark_glyph`, `grain_run`
+        - `tui/dial.rs` — the disclosure dial: `Detail` rungs and the `Part` a click turns
+        - `tui/resources.rs` — the `/resources` rows for the accumulators the frontend owns
+        - `tui/matrix.rs` — bounded agent-tree matrix: `Matrix` (the one retained value, an agent identity), `Nav`/`nav` reading a key as a gesture, `forest`/`TreeRow` and their connectors, the closed-form `view` and its boundary lines, `neighbour`, `strip`'s justified row projection, `turn_cells`
         - `tui/diff.rs` — a patch as a block: `DIFF_PEEK_ROWS`, `diff_body`'s graded rungs, `header`'s size and grain, the hunk rows numbered against one `DiffCols` gutter, `elision_row`
         - `tui/group.rs` — the `▸` part of a group: `Call`, one burst of `ral` work that its effects join, `aggregate_magnitude`, `body`
-        - `tui/line.rs` — line builders turning a typed `Card` into rows: `text`, `size_bar`, `thinking_header`, `user_prompt`, `act_row`, `wash`; no rail glyph, which `Block::railed` sets
+        - `tui/line.rs` — line builders turning a typed `Card` into rows: `render_card_unframed`/`render_card_framed`, `thinking_header`, `user_prompt`, `act_row`; no rail glyph, which `Block::railed` sets
         - `tui/rail.rs` — the marginal rail: `RailKind` for shape, hue from `palette::AGENT_HUES`, `value_step`/`lighten` for lightness
         - `tui/md.rs` — markdown to lines over `pulldown-cmark`: `render_md`, `render_thinking`, the `$…$`/`$$…$$` typesetting, `apply_context`
         - `tui/highlight.rs` — ral source coloured by ral's own lexer: `highlight_ral`, `highlight_ral_spans`
@@ -623,8 +631,8 @@ user, home, git state, exarch's log directory) once at startup for the [[map/exa
         - `tui/select.rs` — drag-selection geometry in text-area columns: `highlight_range` for painting, `plain_slice` for copying
         - `tui/overlay.rs` — the chrome every modal overlay floats in: `draw`, `body_width`, `Anchor`
         - `tui/picker.rs` — the `/model` tuning overlay: `Picker`, `Pick`
-        - `tui/palette.rs` — the TUI colour constants (`CODE_BG`, `SLATE`, `PROMPT_INK`, the agent hues) and the width vocabulary: `RAIL_W`, `READ_W`, `content_w`, and `Col`, the one column primitive every gutter that holds a cell is built from ([[map/exarch/cards|cards]])
-        - `tui/model_picker.rs` — model choice: `drive` over a `Stage` (the live `Tui` for `pick_model` and `apply_model_switch`, or the picker `Alone` for a launch's `choose`); list fetching rides [[map/exarch/provider|provider]]'s `Listing`/`Fetches` pumps
-        - `tui/login.rs` — the `/login` overlay: `LoginOverlay`, `drive_login`, `apply_login`
-        - `tui/providers.rs` — the `/providers` overlay: `ProvidersOverlay`, `Action`, `providers`, `drive`
+        - `tui/palette.rs` — the TUI colour constants (`CODE_BG`, `SLATE`, `PROMPT_INK`, the agent hues), `span_style`/`role_style` (the one place a card role becomes a hue) and the width vocabulary: `RAIL_W`, `READ_W`, `content_w`, and `Col`, the one column primitive every gutter that holds a cell is built from ([[map/exarch/cards|cards]])
+        - `tui/model_picker.rs` — model choice: `PickerSession` (`poll`, `input`; it remembers the tab it opened on, which a pick switches) for the live `/model` overlay and `apply_model_switch`, and `choose` for a launch's picker alone on the screen; list fetching rides [[map/exarch/provider|provider]]'s `Listing`/`Fetches` pumps
+        - `tui/login.rs` — the `/login` overlay: `LoginOverlay`, `input`, `apply_login`
+        - `tui/providers.rs` — the `/providers` overlay: `ProvidersOverlay`, `Action`, `providers`, `input`
         - `tui/rewind.rs` — the `/rewind` overlay: `RewindOverlay`, `rewind`; `Scrollback::render_cut_window` positions the preview and returns the cut row that `render::draw` ghosts from

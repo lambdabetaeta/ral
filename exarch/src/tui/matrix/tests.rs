@@ -7,8 +7,12 @@ use std::sync::Arc;
 fn tree() -> (Arc<crate::agent::Agent>, super::super::tabs::Tabs) {
     let fleet = Fleet::for_test();
     let root = test_agent(&fleet, TestAgentSpec::new("main")).expect("fresh root");
-    let mut tabs =
-        super::super::tabs::Tabs::new(root.id, &crate::record::Born::for_test("main", None), fleet, None);
+    let mut tabs = super::super::tabs::Tabs::new(
+        root.id,
+        &crate::record::Born::for_test("main", None),
+        fleet,
+        None,
+    );
     let a = AgentId::new(root.id.get() + 1);
     let a1 = AgentId::new(root.id.get() + 2);
     let a2 = AgentId::new(root.id.get() + 3);
@@ -30,7 +34,7 @@ fn tree() -> (Arc<crate::agent::Agent>, super::super::tabs::Tabs) {
 fn prefixes_keep_full_forest_shape() {
     let (root, tabs) = tree();
     let rows = tabs.rows();
-    let ordered = forest(&rows, MatrixSort::Spawn);
+    let ordered = forest(&rows);
     let prefixes: Vec<&str> = ordered.iter().map(|row| row.prefix.as_str()).collect();
     assert_eq!(
         prefixes,
@@ -73,7 +77,7 @@ fn the_view_holds_the_cursor_and_fills_its_lines() {
 fn neighbour_walks_the_drawn_order_and_stops_at_the_ends() {
     let (root, tabs) = tree();
     let rows = tabs.rows();
-    let step = |id, down| neighbour(&rows, MatrixSort::Spawn, id, down);
+    let step = |id, down| neighbour(&rows, id, down);
 
     assert_eq!(step(root.id, false), root.id, "the first row is the top");
     let mut id = root.id;
