@@ -14,6 +14,26 @@ use std::sync::Arc;
 use super::{DeskAct, ExarchDesk};
 
 impl ExarchDesk {
+    pub(super) fn models(&self, query: Option<&str>) -> Result<FOValue, Error> {
+        let verb = if query.is_some() {
+            "grep-models"
+        } else {
+            "models"
+        };
+        let models = self
+            .services
+            .fleet
+            .launch
+            .bureau
+            .models()
+            .map_err(|why| Error::new(format!("`` exarch-agents `{verb} `` refused: {why}")))?;
+        Ok(match query {
+            Some(query) => crate::provider::models::grep_models(query, models),
+            None => models,
+        }
+        .encode())
+    }
+
     /// The spawn spine behind `` `start ``: take up the fork, fork its log off
     /// the parent's, assemble it at one less unit of fuel, hand it to
     /// `spawn_async`. Every cheap guard runs before the fork is taken up; a

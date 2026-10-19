@@ -1,58 +1,57 @@
-An agent is a function from a prompt and your bindings to a value. It runs in a copy of your shell, reads what you point it at, and replies with first-order ral data that you compute with. 
+Agents run delegated subtasks in their own shell and model context, then return structured values. Use them for independent investigations, reviews, or edits you can specify and check.
 
-`` exarch-agents `start [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: `inherit|`confined|`read-only|`edit-only|`reasonable|`restrict <caps>, provider: `inherit|`named <Str>, model: `inherit|`named <Str>] `` asynchronously launches an agent. `name` is a descriptive handle ('todo-scan', 'chunk-3'). `grant` is `` `inherit `` to run the child on your own authority verbatim, one of the profiles `` `confined ``, `` `read-only ``, `` `edit-only ``, `` `reasonable ``, or `` `restrict R `` for a capability record `R` — `[exec, fs, net, detach, editor, shell]`, every key optional, the same shape the `grant [...] { … }` form takes. Every form is one more layer on what you already hold, and a layer only narrows: a child can never be granted more than you have, and asking for more silently yields less rather than failing. An agent that only reads bindings and answers needs `` `confined ``. `explain exarch-agents` has the full documentation.
+Prepare inputs in bindings, including reusable helper blocks. A child receives a snapshot of your bindings, cwd, and environment at start; later definitions do not propagate. Pass binding names in raw prompts, not copies of their contents:
 
-`provider` and `model` say what the child runs on; write `` `inherit `` for both to run it on your own selection. Spend a cheaper, faster model on a child whose task is mechanical and whose answer you will check — a scan, a summary, a fan-out over chunks — with `` model: `named '<model>' `` and `` provider: `inherit ``, which keeps your own account. Keep your own model for work that needs judgement.
+    let plan = from-string < #'design.md'#
+    let inspect-diff = { git diff -- src/solver/ }
 
-An agent's shell is a snapshot of yours at `start`, and has exactly the same definitions and cwd. 
+Give the child a bounded task and an explicit reply shape. Use `amnemon` when you can describe the task in a prompt and point to current shell bindings or files; use `mnemon` when it needs the entire conversation up to this point. Inherit the provider and model unless the task calls for another selection:
 
-The agent's initial prompt may be constructed by using `ral`:
+    exarch-agents `start [
+      prompt: #'Review $plan against src/solver/ and the changes returned by inspect-diff. Identify correctness issues; do not edit. Reply [verdict: `ok|`revise, issues: [[file: Str, line: Int, why: Str]]].'#,
+      name: #'plan-review'#, type: `amnemon, grant: `read-only,
+      provider: `inherit, model: `inherit
+    ]
 
-    let ctx = from-string < design.md
-    exarch-agents `start [prompt: #'Review the plan bound at $ctx against src/solver/. Reply [verdict: `ok|`revise, issues: [[file, line, why]]].'#, name: 'plan-review', type: `amnemon, grant: `read-only, provider: `inherit, model: `inherit]
+Do independent work while the child runs. Do not poll: if nothing remains, end your turn and wait for its notice. Then bind the reply and inspect the fields you need. Their presence and types are checked at `read`:
 
-Do not quote something that an agent can access from a binding. Never read a binding to echo it to an agent. The same goes for repeatable scripts, e.g. define `let run-suite = { … }` and ask the agent to run it by name. 
+    let review = exarch-agents `read #'plan-review'#
+    [verdict: $review[reply][verdict], issues: $review[reply][issues]]
 
-Agents end their session with a `ral` value (a record with fields, a list, a
-variant). After receiving a notification you may access this value by ``
-exarch-agents `read <name> ``. Bind it and project
+Message a running agent to correct its direction, supply a discovery, or change its scope. You can also message another live agent in your tree, including your parent or siblings:
 
-    let r = exarch-agents `read 'plan-review'
-    if $[$r[reply][verdict] == `ok] { … } else { for $r[reply][issues] { |i| … } }
+    exarch-agents `message [
+      to: #'plan-review'#, text: #'The empty-input behavior is intentional. Focus on whether the new duplicate check changes error precedence.'#
+    ]
 
-The reply is checked at `` `read `` against the fields you project: if the agent's reply has no `verdict`, the call fails there, saying `/reply/verdict` is missing, rather than when a later step reads it.
+Reuse a replied child for related work: it retains its context and shell. Each reply starts a one-hour follow-up window; a new message resumes work, and its next reply starts a fresh window. Wait for the new notice before reading again, since `read` still exposes the previous reply while it works:
 
-Example:
+    exarch-agents `message [
+      to: #'plan-review'#, text: #'Check src/parser/ for the same error-precedence issue. Return the same shape.'#
+    ]
 
-    let chunks = map { |f| from-string < $f } !{glob #'notes/*.md'#}
-    for !{range 0 !{length $chunks}} { |i|
-      exarch-agents `start [prompt: "Summarise the text bound at $chunks[$i]. Reply [topic: Str, claims: [Str]].", name: "chunk-$i", type: `amnemon, grant: `confined, provider: `inherit, model: `inherit]
-    }
+Files are shared. Give concurrent editors non-overlapping write grants when starting them; each child's system prompt shows its grant:
 
-When all the agents are done:
+    exarch-agents `start [
+      prompt: #'Fix the issues in $review[reply][issues] affecting src/solver/. Reply [changed: [Str], summary: Str].'#,
+      name: #'solver-edit'#, type: `amnemon,
+      grant: `restrict [fs: [read: [`cwd #'.'#], write: [`cwd #'src/solver/'#]]],
+      provider: `inherit, model: `inherit
+    ]
 
-    let parts = map { |i| let r = exarch-agents `read "chunk-$i"; $r[reply] } !{range 0 !{length $chunks}}
+Inspect the changes after the editors reply:
 
-`` `restrict `` takes a record you compute, so a fan-out can hand each child its own ceiling — here, one agent per corpus directory, each able to read only the directory it was given and none of the others, and none of them online:
+    git diff -- src/solver/ src/parser/
 
-    let dirs = glob #'corpus/*'#
-    for !{range 0 !{length $dirs}} { |i|
-      let only-mine = [net: `offline, fs: [read: [`cwd "$dirs[$i]"]]]
-      exarch-agents `start [prompt: "Summarise the notes under $dirs[$i]. Reply [topic: Str, claims: [Str]].", name: "corpus-$i", type: `amnemon, grant: `restrict $only-mine, provider: `inherit, model: `inherit]
-    }
+Cancel a child whose work is no longer needed. Cancellation also reaches its descendants:
 
-DO NOT POLL AGENTS. Wait to be notified of their completion.
+    exarch-agents `cancel #'plan-review'#
 
-`` exarch-agents `message [to: <name>, text: <text>] `` messages an agent. An agent that has replied remains idle for an hour, and can still be messaged to have its context re-used, if a similar task has come in. Any live agent may be messaged by name — a child of yours, a sibling, or whoever started you — and `` `list `` names them all, so you can reach anyone you can see.
+Look up provider/model pairs before choosing another selection. Fuzzy-search both names, or list the full catalog:
 
-There are two types of agents, and `type` is required. `` `amnemon `` begins a fresh session that sees only what your bindings and prompt carry. `` `mnemon `` forks your conversation with `prompt` as its final turn; use it only when the conversation itself is the input the child needs, and cannot be bound.
+    exarch-agents `grep-models #'claude'#
+    exarch-agents `models
 
-Every tag but `` `list `` and `` `read `` answers `[live: Int, replied: Int]` afterwards: how many other agents are alive around you, and how many of the agents you started are parked holding a value you have not fetched. A non-zero `replied` means go and `` `read ``.
+For permissions, selection syntax, fan-out, and result schemas, consult the command guide:
 
-`` exarch-agents `list `` gives the rows, `[[name, spawner, state, idle-s, elapsed-s, log-dir]]` — every live agent in your tree, you included, not only what you started. `spawner` says who started each one: `` `root `` for an agent a human started, `` `agent <name> `` otherwise. `state` one of `` `busy ``, `` `waiting-on-agents ``, `` `replied ``, `` `waiting ``.
-
-You may message anyone on that list, but only cancel or read an agent you started — one whose `spawner` is you, or that sits under one. To find just your own:
-
-    filter { |r| $[$r[spawner] == `agent 'my-name'] } !{exarch-agents `list}
-
-`` exarch-agents `cancel <name> `` stops an agent you started. It takes effect at the next tool boundary, so there might be some delay.
+    explain exarch-agents

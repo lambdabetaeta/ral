@@ -1,6 +1,20 @@
 use crate::agent::testkit::ral_call;
 use crate::record::Voice;
 
+#[test]
+fn models_reaches_the_catalog_and_refuses_a_scripted_session() {
+    let session = crate::agent::Avatar::for_test("system").unwrap();
+    let (tx, _rx) = crate::bus::channel();
+    let emit = crate::bus::Emitter::new(tx, session.agent.id);
+    for call in [
+        "exarch-agents `models",
+        "exarch-agents `grep-models #'claude'#",
+    ] {
+        let result = session.ral(call, 5, &emit).text;
+        assert!(result.contains("scripted provider"), "{result}");
+    }
+}
+
 /// Every bare tag the door admits: the bases, plus `` `inherit ``, which
 /// names none and so is the one admitted tag policy has nothing to resolve.
 fn bare_grant_tags() -> impl Iterator<Item = &'static str> {
@@ -177,7 +191,9 @@ fn unknown_outer_tag_reaches_the_door_naming_every_legal_label() {
     let (tx, _rx) = crate::bus::channel();
     let emit = crate::bus::Emitter::new(tx, session.agent.id);
     let result = session.ral("exarch-agents `stop 'x'", 5, &emit).text;
-    for tag in ["list", "start", "message", "cancel"] {
+    for tag in [
+        "list", "models", "start", "message", "cancel", "reply", "read",
+    ] {
         assert!(result.contains(tag), "must name `{tag}, got: {result}");
     }
 }

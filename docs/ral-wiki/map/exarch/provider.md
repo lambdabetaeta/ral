@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d13f07b0
-generated_at_date: 2026-10-17
+generated_at_commit: 38a02883d4b4526b1ae6a3c890081b016847dfdb
+generated_at_date: 2026-10-19
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs]
 ---
 
@@ -355,6 +355,12 @@ offers only listed models, `--model` alone resolves to the one account whose
 listing names it, and `Bureau::build` refuses any other pair, so no account is
 ever asked for a model it does not list. `ModelCatalog` memoises and
 disk-caches both paths:
+
+- `Bureau::models` exposes those listings to `exarch-agents models` and
+  `grep-models` as provider/model pairs. Providers are exact account IDs so
+  distinct logins remain selectable. A listing failure names the account and
+  refuses the query. Fuzzy search ranks model and provider together through
+  `text::rank_by`, the picker's matcher; it adds no catalog or network path.
 
 - Anthropic, DeepSeek and Gemini list through exarch's own `GET /models`
   (paged to the end for Anthropic and Gemini), because each reports a context

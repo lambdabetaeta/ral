@@ -1,5 +1,5 @@
 ---
-generated_at_commit: d834a9da
+generated_at_commit: 38a02883d4b4526b1ae6a3c890081b016847dfdb
 generated_at_date: 2026-10-19
 covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/data/system.md, exarch/data/agents.md, exarch/data/spawned.md, exarch/data/reply.md, exarch/data/ral.md, exarch/data/context.md]
 ---
@@ -226,11 +226,15 @@ agent, so a root, identity fork, and wire child each receive their own surface.
   (`fuel > 0`) — are in reach,
   without a live `Shell`; zero-fuel agents omit `agents` alone.
 - **`Tasks`** (`data/tasks.md`) is the task-management kit API.
-- **`Context management`** (`data/context.md`) is strategy, not reference — the
-  builtins' `explain` text owns the shapes and rules: the context is the only
-  memory that can be taken away, so promote before evicting, evict with a note,
-  search `grep`-first then `read`, and recover from failure by cutting the failed
-  turns and resuming rather than replaying.
+- **`Context management`** (`data/context.md`) teaches the coding workflow:
+  bind large results and inspect projections, discard failed attempts in the
+  next call with a short lesson and an account of side effects, preserve
+  conclusions in bindings and eviction notes, and batch cuts of completed
+  work, including spent `explain` results. Each instruction is paired with
+  an example call; the operation-by-operation `explain` guides in
+  `shell_eval/builtins/harness.rs` own returned shapes, limits, refusals, and
+  recovery details. Eviction changes visibility, never filesystem or shell
+  state.
 - **`Host`** opens by naming the reader — the one host fact that is not the
   host's, since a name is what every other agent addresses it by and the only
   way it picks its own row out of a roster — then gives the environment snapshot
@@ -262,7 +266,11 @@ agent, so a root, identity fork, and wire child each receive their own surface.
   (`data/reply.md`) iff it returns at all. `Reply` says only what is true of
   any receiver; `Spawned` carries the spawner's snapshot, its binding the
   reply, and the idle wait for follow-ups. A headless root therefore gets
-  `Reply` but never `Spawned`.
+  `Reply` but never `Spawned`. `Agents` uses point/call examples: pass bindings,
+  request a reply shape, assign disjoint write grants, wait without polling,
+  read, follow up, cancel, and look up models.
+  The detailed permissions, schemas, and fan-out examples live in
+  `explain exarch-agents`.
 
 `--system FILE...` replaces *only* the persona slot with the user-supplied files;
 the per-agent index and optional sections still resolve from the stored base.

@@ -168,6 +168,8 @@ impl ExarchDesk {
     pub(crate) fn handle(&self, req: &FOValue) -> Result<FOValue, Error> {
         match Request::decode(req).map_err(Error::new)? {
             Request::Agents(Agents::List) => Ok(listing(&self.services.agent).encode()),
+            Request::Agents(Agents::Models) => self.models(None),
+            Request::Agents(Agents::GrepModels(query)) => self.models(Some(&query)),
             Request::Agents(Agents::Start(start)) => self.launch(start),
             Request::Agents(Agents::Message(message)) => self.message(message),
             Request::Agents(Agents::Cancel(name)) => self.agent_cancel(&name),

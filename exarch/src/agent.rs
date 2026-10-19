@@ -134,6 +134,8 @@ struct Status {
     /// The last value passed to `reply`.  Survives a wake: a messaged agent
     /// works again with its reply still standing.
     reply: Option<FOValue>,
+    /// The reply whose follow-up lease is armed; cleared when work resumes.
+    replied_at: Option<Instant>,
     /// Direct children spoken to and not yet heard back from.  Kept on the
     /// consuming side, so the park verdict flips exactly when a result is
     /// taken up.
@@ -263,6 +265,7 @@ impl Agent {
             status: Mutex::new(Status {
                 rest: None,
                 reply: None,
+                replied_at: None,
                 awaiting: BTreeSet::new(),
             }),
         })
@@ -306,13 +309,32 @@ impl Agent {
         }
     }
 
+    pub(crate) fn disarm_reply_lease(&self) {
+        self.status.lock_ignore_poison().replied_at = None;
+    }
+
     /// Stage `reply` for this agent's consumer to fetch, then report
     /// [`AgentOutcome::Replied`] — deposit first, so a parent woken by the
     /// notice always finds the value already there.  A root reports to
     /// nobody; its driver reads the deposit off [`Self::reply`].
-    pub(crate) fn deposit_reply(&self, reply: FOValue) {
-        self.status.lock_ignore_poison().reply = Some(reply);
+    pub(crate) fn deposit_reply(self: &Arc<Self>, fleet: &Arc<Fleet>, reply: FOValue) {
+        let since = Instant::now();
+        {
+            let mut status = self.status.lock_ignore_poison();
+            status.reply = Some(reply);
+            status.replied_at = Some(since);
+        }
+        fleet.lease_reply(self, since);
         self.report(AgentOutcome::Replied);
+    }
+
+    pub(crate) fn reply_since(&self) -> Option<Instant> {
+        let since = self.status.lock_ignore_poison().replied_at?;
+        // A queued follow-up protects the child before its loop takes it up.
+        self.mailbox
+            .last_exchange()
+            .is_none_or(|at| at <= since)
+            .then_some(since)
     }
 
     /// Deliver `outcome` to the parent's inbox as this agent's result.  A root

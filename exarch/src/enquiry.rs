@@ -6,6 +6,7 @@
 //! ill-shaped request is refused in the same words at either end.
 
 use crate::card::{Card, encode_card, value_to_card};
+use crate::provider::models::AvailableModel;
 use crate::record::model::ContextSurvey;
 use crate::record::{Memory, TranscriptPart};
 use crate::schedule::{CronSchedule, ScheduleInfo, Trigger, fmt_duration, parse_duration};
@@ -143,6 +144,7 @@ impl Request {
     pub(crate) fn owed(&self) -> fn(&FOValue) -> Result<(), String> {
         match self {
             Self::Agents(Agents::List) => is::<Vec<AgentInfo>>,
+            Self::Agents(Agents::Models | Agents::GrepModels(_)) => is::<Vec<AvailableModel>>,
             Self::Agents(Agents::Read(_)) => is::<Deposit>,
             Self::Pins(Pins::Set(_) | Pins::Clear(_)) => unit,
             Self::Agents(_) => is::<Summary>,
@@ -190,6 +192,8 @@ fn pinned(v: &FOValue) -> Result<(), String> {
 
 pub(crate) enum Agents {
     List,
+    Models,
+    GrepModels(String),
     Start(Start),
     Message(Message),
     Cancel(String),
@@ -199,7 +203,16 @@ pub(crate) enum Agents {
 
 impl Family for Agents {
     const CLASS: &'static str = "agents";
-    const TAGS: &'static [&'static str] = &["list", "start", "message", "cancel", "reply", "read"];
+    const TAGS: &'static [&'static str] = &[
+        "list",
+        "models",
+        "grep-models",
+        "start",
+        "message",
+        "cancel",
+        "reply",
+        "read",
+    ];
 
     fn request(self) -> Request {
         Request::Agents(self)
@@ -208,6 +221,8 @@ impl Family for Agents {
     fn encode(self) -> FOValue {
         match self {
             Self::List => tag("list", None),
+            Self::Models => tag("models", None),
+            Self::GrepModels(query) => tag("grep-models", Some(query.encode())),
             Self::Start(start) => tag("start", Some(start.encode())),
             Self::Message(message) => tag("message", Some(message.encode())),
             Self::Cancel(name) => tag("cancel", Some(name.encode())),
@@ -219,6 +234,8 @@ impl Family for Agents {
     fn decode(label: &str, payload: Option<&FOValue>) -> Option<Result<Self, String>> {
         Some(match label {
             "list" => bare(payload).map(|()| Self::List),
+            "models" => bare(payload).map(|()| Self::Models),
+            "grep-models" => datum(payload).map(Self::GrepModels),
             "start" => datum(payload).map(Self::Start),
             "message" => datum(payload).map(Self::Message),
             "cancel" => datum(payload).map(Self::Cancel),
@@ -228,6 +245,11 @@ impl Family for Agents {
         })
     }
 }
+
+record!(AvailableModel {
+    provider: "provider",
+    model: "model",
+});
 
 /// A model's own `exarch-agents` argument: a whole request, or a spawn's
 /// spec alone, since the fork it needs is its door's to mint.
@@ -511,11 +533,7 @@ pub struct Summary {
     /// Other live agents in `reader`'s tree — company, not bookkeeping.  Zero
     /// is the honest "you are alone here".
     pub live: usize,
-    /// How many of `reader`'s own children park holding a value it has not
-    /// fetched.  Direct children alone: a reply is deposited for the spawner,
-    /// so a deeper descendant's value is owed to its own parent, not up the
-    /// whole chain.  The only number that asks for an action (`` `read ``), and
-    /// the one an eviction cannot take away.
+    /// Direct children holding a reply; reading does not consume it.
     pub replied: usize,
 }
 
@@ -1264,6 +1282,8 @@ mod tests {
         let start = |spec, fork| Request::Agents(Agents::Start(Start { spec, fork }));
         round_trips([
             Request::Agents(Agents::List),
+            Request::Agents(Agents::Models),
+            Request::Agents(Agents::GrepModels("claude".into())),
             start(
                 spec(Memory::Amnemon, Selection::Inherit),
                 ForkClaim::Parked(NurseryId(3)),
@@ -1287,6 +1307,24 @@ mod tests {
             Request::Agents(Agents::Reply(restriction())),
             Request::Agents(Agents::Read("scout".into())),
         ]);
+    }
+
+    #[test]
+    fn model_queries_owe_provider_model_records() {
+        let rows = vec![AvailableModel {
+            provider: "account".into(),
+            model: "model".into(),
+        }]
+        .encode();
+        for request in [
+            Request::Agents(Agents::Models),
+            Request::Agents(Agents::GrepModels("m".into())),
+        ] {
+            assert!((request.owed())(&rows).is_ok());
+            assert!((request.owed())(&vec!["model".to_string()].encode()).is_err());
+        }
+        assert!(family::<Agents>(&tag("models", Some("query".to_string().encode()))).is_err());
+        assert!(family::<Agents>(&tag("grep-models", None)).is_err());
     }
 
     #[test]

@@ -143,17 +143,18 @@ fn door(data: &[TyVar], answers: &[TyVar], rows: &[RowVar], ty: Ty) -> Scheme {
     scheme(&vars, &rows, ty)
 }
 
-/// `exarch-agents :: ∀β:data α ρ1^d ρ2^d ρ3^d ρ4^d ρ5^d. <list | start [prompt: Str, name: Str, type: Variant ρ1, grant: Variant ρ2, provider: Variant ρ3, model: Variant ρ4] | message [to: Str, text: Str] | cancel Str | reply β | read Str | ρ5> → F α`
+/// `exarch-agents :: ∀β:data α ρ1^d ρ2^d ρ3^d ρ4^d ρ5^d. <list | models | grep-models Str | start [prompt: Str, name: Str, type: Variant ρ1, grant: Variant ρ2, provider: Variant ρ3, model: Variant ρ4] | message [to: Str, text: Str] | cancel Str | reply β | read Str | ρ5> → F α`
 ///
 /// The outer tag row is open (`ρ5`) so an unrecognised tag reaches the
-/// runtime door that names the six legal ones, rather than dying as a
+/// runtime door that names the legal ones, rather than dying as a
 /// row-unification mismatch.
 ///
 /// The answer is not one fixed shape: `` `list `` answers the roster
-/// `[[name, spawner, state, idle-s, elapsed-s, log-dir]]`, every other tag but
-/// `` `read `` the summary `[live, replied]`, and `` `read `` the value a
+/// `[[name, spawner, state, idle-s, elapsed-s, log-dir]]`, `` `models `` and `` `grep-models `` the
+/// catalog `[[provider, model]]`, the acting tags the summary `[live, replied]`,
+/// and `` `read `` the value a
 /// descendant handed up, whose shape this call cannot know — so `α` is left
-/// free rather than fixed to any of the three. This is the
+/// free rather than fixed to one of these. This is the
 /// `` `exarch-pins `read `` / `from-json` move ([`scheme_pins`]): the door
 /// admits whichever shape [`Request::owed`] names for the tag it sent.
 ///
@@ -182,6 +183,8 @@ fn scheme_agents(u: &mut Unifier) -> Scheme {
             open_variant(
                 &[
                     ("list", Ty::Unit),
+                    ("models", Ty::Unit),
+                    ("grep-models", Ty::String),
                     (
                         "start",
                         closed_record(&[
@@ -359,7 +362,156 @@ static HARNESS_BUILTINS_ARR: [BuiltinEntry; 5] = [
     BuiltinEntry::boundary(
         Cow::Borrowed("exarch-agents"),
         scheme_agents,
-        "exarch-agents <tag>  — your agents: start, message, and cancel descendants, and reply to whoever launched you.\n\nexarch-agents `list  — every extant agent, you included, with its `spawner` (or `root), `state`, and `idle-s` (seconds since it parked). `state` is `busy, `waiting-on-agents (held only by a descendant), `waiting (parked, no reply yet), or `replied.\nexarch-agents `start [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: <permission>, provider: `inherit|`named <Str>, model: `inherit|`named <Str>]  — launch an agent; its reply arrives later as a notice. An `amnemon starts with an empty context, a `mnemon inherits yours and its cache. It shares your bindings, cwd, and env, but not live job handles. `name` is unique, non-empty ASCII, at most 24 characters. `grant` can only narrow your authority: `inherit, `confined (offline, no home reads), `read-only (writes only scratch), `edit-only (edits the cwd, no build tooling), `reasonable (everyday tooling), or `restrict <record>, shaped as for `grant [...]` (exec, fs, net, editor, shell). `provider` and `model` `inherit yours or name another; an unlisted model is refused.\nexarch-agents `message [to: <Str>, text: <Str>]  — deliver `text` to agent `to` as a marked item.\nexarch-agents `cancel <name>  — stop a descendant as soon as possible.\nexarch-agents `reply <value>  — hand `value` to whoever launched you; first-order data only (no blocks, handles, or environments).\nexarch-agents `read <name>  — what descendant `name` last replied, as [name: Str, reply: <value>].",
+        r"exarch-agents <tag>  — delegate work, collect replies, and follow up with live agents.
+
+Start a child
+
+    let plan = from-string < #'design.md'#
+    exarch-agents `start [
+      prompt: #'Review $plan against src/solver/. Reply [verdict: `ok|`revise, issues: [[file: Str, line: Int, why: Str]]].'#,
+      name: #'plan-review'#, type: `amnemon, grant: `read-only,
+      provider: `inherit, model: `inherit
+    ]
+
+All six fields are required. name must be unique among live agents, 1–24 ASCII
+letters, digits, hyphens, or underscores. start returns immediately; a notice
+arrives when the child replies or ends. Do not poll for completion.
+
+Both types inherit a snapshot of your bindings, cwd, and environment, but not
+live job handles. Files remain shared. Later bindings in either shell do not
+update the other shell.
+
+- `amnemon starts without your conversation. Pass the task and binding names.
+- `mnemon inherits your conversation and its cache, then receives the new prompt.
+
+Raw prompts keep references such as $plan literal. The child reads the binding;
+there is no need to interpolate or copy its contents into the prompt. Bound
+blocks are inherited too: define a helper once and ask the child to call it.
+
+Choose permissions and a model
+
+grant adds a restriction to your authority; it cannot grant anything you lack:
+
+- `inherit keeps your authority.
+- `confined permits working-tree and scratch I/O and local tooling, offline.
+- `read-only permits project reads; writes are limited to scratch.
+- `edit-only permits project edits, without build tooling.
+- `reasonable permits everyday development tooling.
+- `restrict R accepts a capability record as in grant [...] { ... }.
+
+Set non-overlapping write grants for concurrent editors. For example, this
+permits project reads and writes only under src/solver/, within your authority:
+
+    grant: `restrict [fs: [read: [`cwd #'.'#], write: [`cwd #'src/solver/'#]]]
+
+On Unix, preserve all parent-permitted reads while narrowing writes:
+
+    grant: `restrict [fs: [read: [`absolute #'/'#], write: [`cwd #'src/solver/'#]]]
+
+The child's system prompt automatically shows its grant, including inherited
+restrictions. Messaging it does not change that grant.
+
+Omitted axes inherit, so neither example narrows exec. Executables allowed by
+name, path, or directory also become readable, subject to enclosing grants and
+explicit denies; unrestricted exec alone implies no reads. A present fs table
+allows only listed writes. Records may specify exec, fs, net, detach, editor,
+and shell; explain grant gives their shapes.
+
+provider and model each accept `inherit or `named #'name'#. Inherit both unless
+the task calls for another selection. Look up available pairs:
+
+    exarch-agents `models
+    exarch-agents `grep-models #'claude'#
+
+Both return [[provider: Str, model: Str]] from the configured accounts' cached
+or freshly fetched catalogs. provider is an exact account ID accepted by start.
+grep-models fuzzy-matches both fields, best first; words narrow the matches,
+an empty query matches all, and no matches returns []. This is not a regex.
+A failed listing refuses the call, naming the account and reason.
+
+For a chosen row $choice, pass provider: `named $choice[provider] and
+model: `named $choice[model] to start. An unavailable selection is refused.
+
+Read a reply
+
+    let review = exarch-agents `read #'plan-review'#
+    $review[reply][issues]
+
+Returns [name: Str, reply: Value]. The reply is checked against the fields and
+types your script uses; a missing field is reported at read, with its path.
+Only descendants may be read. A missing agent or one without a reply is refused.
+Reading does not consume the value: repeated reads return the last reply until
+another is deposited. After a follow-up, wait for the new notice before reading
+so you do not mistake the previous reply for the new answer.
+
+Message a running or replied agent
+
+    exarch-agents `message [
+      to: #'plan-review'#, text: #'Check src/parser/ for the same issue. Return the same shape.'#
+    ]
+
+Steer running work with a correction or new information, or give a replied
+agent a follow-up task. A message can reach any other live agent in your tree,
+including a parent or sibling. A missing recipient or your own name is refused.
+A replied child parks for one hour from its reply. A follow-up disarms that deadline while it works;
+its next reply starts a fresh hour. Reading a reply does not extend the lease.
+
+Reply to your caller
+
+    exarch-agents `reply [verdict: `ok, issues: []]
+
+Available to spawned and headless agents; interactive roots converse with the
+user instead. Return first-order data: no blocks, handles, or environments.
+Write reply last: the value is deposited after the enclosing ral batch drains.
+Final prose alone does not deliver a reply. A child cancels its descendants and
+parks after replying; a headless root finishes.
+
+Cancel a descendant
+
+    exarch-agents `cancel #'plan-review'#
+
+Requests cancellation of that agent and its subtree. Cancellation is not
+instantaneous, so the agent may still appear in list. An absent name is a no-op;
+a live agent outside your descendants is refused.
+
+List live agents
+
+    exarch-agents `list
+
+Returns your whole tree, including you:
+
+    [[name: Str, spawner: `root|`agent Str,
+      state: `busy|`waiting-on-agents|`replied|`waiting,
+      idle-s: Int, elapsed-s: Int, log-dir: Str]]
+
+spawner identifies the parent, or `root. state distinguishes working, waiting
+for descendants, parked with a reply, and parked without one. idle-s counts
+seconds since parking, zero while busy; elapsed-s counts seconds since birth.
+Use list to recover names or inspect the tree, not as a completion poll.
+
+Every operation except list and read returns [live: Int, replied: Int]. live
+counts other live agents in your tree; replied counts direct children holding
+a reply. Reading does not decrement replied, so it is not an unread count.
+
+Run independent tasks concurrently
+
+    let jobs = [
+      [name: #'notes-a'#, file: #'notes/a.md'#],
+      [name: #'notes-b'#, file: #'notes/b.md'#]
+    ]
+    for $jobs { |job|
+      let material = from-string < $job[file]
+      exarch-agents `start [
+        prompt: #'Summarise $material. Reply [topic: Str, claims: [Str]].'#,
+        name: $job[name], type: `amnemon, grant: `confined,
+        provider: `inherit, model: `inherit
+      ]
+    }
+
+Each child receives material as bound at its own start. The prompt stays literal;
+only the binding changes. After both completion notices, collect the replies:
+
+    map { |job| exarch-agents `read $job[name] } $jobs",
         builtin_agents,
     ),
     BuiltinEntry::new(
@@ -377,13 +529,132 @@ static HARNESS_BUILTINS_ARR: [BuiltinEntry; 5] = [
     BuiltinEntry::new(
         Cow::Borrowed("exarch-context"),
         scheme_context,
-        "exarch-context <tag>  — the turns your next request will send. A turn is a user turn (a prompt, or an import's opening) or an assistant turn (one assistant message, its tool results, and any steering before the next request). Ids rise per lineage and are never reused; every tool result ends with `TURN: <id>`, the assistant turn it closes. Every tag returns the survey: [rows: [[id: Int, role: Str, kind: Str, label: Str, bytes: Int]], total-bytes: Int]. Foreground only: inside spawn { … } every tag errors.\n\nexarch-context `survey  — read the survey, one row per turn, oldest first. `role` is `user` or `assistant`; `kind` is `own`, `import` (imported by the harness, e.g. on resume), or `inherited` (recorded by an ancestor before your fork); `label` is the turn's first 50 characters, or its first tool call's `description`; `bytes` is its serialised size. `total-bytes` is what is actually sent, markers included: weigh it against the provider's window.\nexarch-context `evict [turns: [Int], note: `none|`some Str]  — remove turns from the context, e.g. `turns: !{range 41 44}` for [41, 42, 43]. Refused: an unknown id, one already gone, or the turn this call belongs to. A user turn stays while any assistant turn answering it stays; a set emptied by this rule is refused. Each run of evicted turns leaves one marker listing them, with the note (one line, at most 240 bytes); `exarch-transcript `read` reads them back. Cost: the provider's cache is lost from the earliest evicted turn onward.\n\nNear the provider's window the harness evicts the oldest turns itself, without a note, after warning you once; evict first to attach one. A tag that raises may still have landed; `survey shows what is resident.",
+        r"exarch-context <tag>  — inspect or evict the turns sent on your next model request.
+
+Eviction removes conversation from context while keeping it readable through
+exarch-transcript. It preserves bindings, files, and running work. Call this
+command from the foreground; inside spawn { … } every tag errors.
+
+Turns and ids
+
+A user turn contains a prompt (or an import's opening). An assistant turn contains
+one assistant message, its tool results, and any steering before the next request.
+Eviction always removes whole turns. Ids rise per lineage and are never reused;
+every tool result ends with TURN: <id>, the assistant turn it closes. Use those
+ids, not positions in a list.
+
+Survey
+
+    exarch-context `survey
+
+Returns the resident turns, oldest first:
+
+    [rows: [[id: Int, role: Str, kind: Str, label: Str, bytes: Int]], total-bytes: Int]
+
+role is #'user'# or #'assistant'#. kind is #'own'#, #'import'# (imported by the harness),
+or #'inherited'# (recorded by an ancestor before your fork). label is the first
+50 characters of the turn, or its first tool call's description. bytes is the
+turn's serialized size; total-bytes measures the current conversation including
+eviction markers. These are byte counts, not token counts.
+
+Evict
+
+    exarch-context `evict [turns: [41, 43], note: `some #'Search ruled out the lexer; inspect parse_options next. No edits.'#]
+
+turns accepts a list of ids, including nonadjacent ones. For a contiguous run,
+turns: !{range 41 44} names [41, 42, 43]. Both turns and note are required.
+Use `none for no note, or `some #'text'# for a nonempty, single-line note of at most
+240 UTF-8 bytes. Longer notes and notes containing a newline are refused.
+
+Each run of removed turns leaves a marker naming the turns and carrying your
+note. The result is the survey after the edit, in the same shape as above.
+
+Unknown ids, already departed turns, and the current unclosed turn are refused.
+A user prompt is retained if any assistant turn answering it remains outside the
+cut. A cut that removes nothing is refused. Check the returned survey to see
+which turns remain.
+
+Recovery and cost
+
+An eviction that reports an error may already have landed. Survey before retrying
+so you do not name turns that have already left. Read evicted material with:
+
+    exarch-transcript `read [turns: [41]]
+
+Provider cache reuse is lost from the earliest evicted turn onward. Batch cuts
+of completed work; removing a just-failed turn affects only the recent end.
+Near the context limit the harness warns once, then evicts old turns without a
+note. Evict first if you want to leave your own conclusion.",
         BuiltinBody::Static(builtin_family::<Context>),
     ),
     BuiltinEntry::boundary(
         Cow::Borrowed("exarch-transcript"),
         scheme_transcript,
-        "exarch-transcript <tag>  — every turn of this session, by the ids `exarch-context `survey` shows. `index`, `read` and `grep` reach every turn, including evicted ones and those withdrawn by /rewind or /clear.\n\nexarch-transcript `index  — [[id: Int, role: Str, kind: Str, label: Str, bytes: Int, held: Str]], every turn in order: the survey's fields, and `held`: `resident`, `evicted` or `withdrawn`.\nexarch-transcript `read [turns: [Int]]  — [[turn: Int, role: Str, messages: [Message]]] in id order, each message exactly as sent. A Message is [role: `system|`user|`assistant|`tool, parts: [Part]]; a Part is `text [content: Str], `program [tool: Str, source: Str, keys: [Str]] (a tool call: the ral tool's script in `source`, any other tool's argument names in `keys`), `result [content: Str], `reasoning [content: Str], `binary [content-type: Str, name: Str, bytes: Int] (metadata only), or `custom [provider: Str, model: Str].\nexarch-transcript `grep [pattern: Str, turns: `all|`only [Int]]  — [hits: [[turn: Int, role: Str, line: Int, text: Str]], total: Int]: lines matching `pattern` (a Rust regex), at most the 100 oldest, `text` clipped to 200 bytes, `line` 1-based within its message; `total` counts them all.",
+        r"exarch-transcript <tag>  — search and read recorded conversation, including evicted turns.
+
+Use the same turn ids as exarch-context and the TURN: <id> tool-result footer.
+The transcript includes your session and inherited history, including turns
+withdrawn by /rewind or /clear. These operations only read; they do not restore
+turns to their old positions in context. The current unclosed turn is unreadable.
+
+Search by content
+
+    exarch-transcript `grep [pattern: #'duplicate flag'#, turns: `all]
+    exarch-transcript `grep [pattern: #'duplicate flag'#, turns: `only [31, 35]]
+
+Both pattern and turns are required. pattern is a Rust regex; turns is `all or
+`only a list of ids. The search covers message text, tool scripts, tool results,
+and recorded reasoning. It returns:
+
+    [hits: [[turn: Int, role: Str, line: Int, text: Str]], total: Int]
+
+turn identifies the containing turn; role is the message's role as a string.
+line is 1-based within that message's searched text, not a source-file line.
+There are at most 100 hits, oldest first, and each hit's text is clipped to
+200 bytes. total counts all matches. If total exceeds the returned hit count,
+narrow the pattern or turn ids: the returned hits may omit recent matches.
+
+Find turns by label or size
+
+    exarch-transcript `index
+
+Returns every recorded turn in order:
+
+    [[id: Int, role: Str, kind: Str, label: Str, bytes: Int, held: Str]]
+
+The first five fields have the same meaning as in exarch-context `survey.
+held is #'resident'#, #'evicted'#, or #'withdrawn'#. bytes is the serialized size of
+the original turn, not its eviction marker. Use the index when you know the
+stretch of work you want but do not have a useful search term.
+
+Read selected turns
+
+    exarch-transcript `read [turns: [35]]
+
+Returns one record per selected turn, in id order:
+
+    [[turn: Int, role: Str, messages: [Message]]]
+
+read does not truncate the contents. Read a small turn directly; bind a large
+one before inspecting the relevant messages or parts:
+
+    let old-turn = exarch-transcript `read [turns: [35]]
+
+A Message is [role: `system|`user|`assistant|`tool, parts: [Part]]. Its role is a
+variant; the outer turn's role is a string. A Part is one of:
+
+    `text [content: Str]
+    `program [tool: Str, source: Str, keys: [Str]]
+    `result [content: Str]
+    `reasoning [content: Str]
+    `binary [content-type: Str, name: Str, bytes: Int]
+    `custom [provider: Str, model: Str]
+
+A program holds the ral script in source; for another tool it gives the tool
+name and argument names in keys. A result holds tool output. A binary part
+contains media metadata only. Use case to select a part's payload; keys reads
+maps, not variants. Search hits are previews: read their turn when you need the
+complete diagnostic or script, and check current files before reusing old code.",
         boundary_family::<Transcript>,
     ),
 ];

@@ -45,6 +45,7 @@ impl Avatar {
         emit: &Emitter,
     ) -> Result<Outcome, Fault> {
         self.couple(emit);
+        self.agent.disarm_reply_lease();
         // Entry is the one point every route into a deliberation crosses, so a
         // reply staged by a batch a cancel or an error cut short dies here.
         self.reply.borrow_mut().take();
@@ -386,7 +387,7 @@ impl Avatar {
     /// parentless agent's `attend` loop stops here.
     fn replied(&self, payload: FOValue) -> Outcome {
         self.agent.cancel_descendants(CancelCause::Cancelled);
-        self.agent.deposit_reply(payload);
+        self.agent.deposit_reply(&self.fleet, payload);
         self.log.borrow_mut().quiesce(QuiesceReason::Replied);
         Outcome::Replied
     }

@@ -16,7 +16,10 @@ use ral_core::sync::LockExt;
 
 use super::allowance::{LiveMeters, Survey};
 use super::credential::CredentialStore;
-use super::models::{Listed, LiveSource, ModelCatalog, ModelSource, ProviderEndpoint, listing_of};
+use super::models::{
+    AvailableModel, Listed, LiveSource, ModelCatalog, ModelSource, ProviderEndpoint,
+    available_models, listing_of,
+};
 use super::{Account, Backend, Engine, Provider, Rations, Selection, Tuning, oauth, pricing};
 use crate::app::App;
 
@@ -153,6 +156,13 @@ impl Bureau {
             Self::Live { holdings, .. } => holdings.store.lock_ignore_poison().available(),
             Self::Scripted => Vec::new(),
         }
+    }
+
+    pub(crate) fn models(&self) -> Result<Vec<AvailableModel>, String> {
+        let Self::Live { holdings, .. } = self else {
+            return Err(mints_nothing());
+        };
+        available_models(&holdings.catalog, &self.available())
     }
 
     /// Mint a provider on this session's engine — the only caller of

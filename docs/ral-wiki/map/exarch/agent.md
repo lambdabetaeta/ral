@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 00bf6d29
+generated_at_commit: 38a02883d4b4526b1ae6a3c890081b016847dfdb
 generated_at_date: 2026-10-19
 covers_paths: [exarch/src/agent.rs, exarch/src/latch.rs, exarch/src/agent/, exarch/src/signals.rs, exarch/src/cancel.rs, exarch/src/schedule.rs, exarch/src/enquiry.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
@@ -15,7 +15,7 @@ cancel::Token` and the eval-layer `reach: InterruptTarget`, both in the crate-le
 of its own `mailbox`, an owned hot-swappable `provider: ProviderHandle`, the
 per-node config fixed at birth (`caps`, `fuel`, `role`, `search`, the
 resolved `system` prompt), the single-writer `status: Mutex<Status>` — `{
-rest, reply, awaiting }` — and a weak `children: Mutex<Vec<Weak<Agent>>>`.
+rest, reply, replied_at, awaiting }` — and a weak `children: Mutex<Vec<Weak<Agent>>>`.
 **`role: Role`** says whom the agent answers: `Converses` (an attended or
 embedded root, rooting its own tree), `Headless` (the
 headless root, replying once to the process's caller), or `Child { parent,
@@ -106,9 +106,10 @@ the whole of the cross-type lock discipline.
 **`last_exchange` lives on the inbox, not on `Agent::status`.** It was never
 agent state — it is "when did a human or a parent last push into this
 mailbox", a fact the `Mailbox` itself witnesses. `Agent::engaged()` reads
-it, `Agent::idle()` reads
-`mailbox.last_exchange().unwrap_or(started).elapsed()` — the roster's
-`idle-s` and the reaper's bound, in one door.
+it, and `Agent::idle()` reads
+`mailbox.last_exchange().unwrap_or(started).elapsed()` for the TUI's idle age.
+The roster's `idle-s` reads `Status::rest`; the reply lease reads
+`Status::replied_at`. These clocks have different origins.
 
 **Up is strong, down is weak.** `Role::Child`'s parent is a strong `Arc`, so
 `deposit_reply` and the scope climb (`Agent::descendant`) never dangle: a
@@ -613,7 +614,7 @@ shares through `Fleet` is only identity resolution and the lease.
   `Unborn::SessionDead` (the parent raced a cancel), is decided in `enrol`.
   A refused agent never appears in the fleet, however briefly: only after
   the name is live is the agent adopted into its parent's `children` or
-  pushed onto `roots`, and a parented birth arms its lease (`arm_lease`).
+  pushed onto `roots`. Birth arms no reply lease.
 - **The fleet is alive while `roots` prunes to empty** — the literal "dies
   when no active agents remain" (`Fleet::is_empty`; `Fleet::wait_empty`
   blocks on it, woken by `Fleet::departed`, which `spawn_async`'s worker calls
@@ -624,23 +625,17 @@ shares through `Fleet` is only identity resolution and the lease.
   leaves when it is reaped. There is no human-less daemon: nothing lingers
   without a present human, running work, a bounded lease, or a bounded
   self-schedule.
-- **The idle lease is dynamic; focus is not.** A leased child — every
-  agent `Fleet::enrol` gave a parent, i.e. every returning sub-agent; the
-  lease is a consequence of having a reporting parent and of nothing else,
-  no caller chooses it — is reaped once its idle span (`Agent::idle`,
-  measured off the *inbox's* last-exchange clock, seeded at birth) exceeds
-  the fleet's bound: the reaper (`agent/fleet.rs`'s `lease_fire`, on the process
-  reaper daemon thread) re-arms itself for the remaining margin on every
-  fire that finds the agent's `Weak` still upgrading and under bound, and
-  cancels the subtree with `CancelCause::Deadline`
-  (`Agent::cancel_tree`) once it is not. The one thing that renews the
-  clock is a delivered message — a human's (`Mailbox::steer`) or the
-  parent's (`Agent::message`); nothing else does — not matrix navigation,
-  not the attachment its `Enter` sets (`tui::tabs::Tabs::focus`, a
-  presentation-only `AgentId` neither the fleet nor `park_mode` ever
-  reads), not a `/resources` probe. A returning agent's `reply` cancels its
-  proper descendants and parks it, regardless of which tab the human is
-  attached to.
+- **The follow-up lease starts at reply.** `Agent::deposit_reply` records
+  `Status::replied_at` and calls `Fleet::lease_reply` for a child only. After
+  `AGENT_LEASE_IDLE` (one hour), `lease_fire` cancels the subtree with
+  `CancelCause::TimedOut` only if that reply's timestamp still matches.
+  `deliberate` clears it through `disarm_reply_lease` when model work resumes;
+  read-only commands leave it alone. `reply_since` also checks
+  the inbox exchange clock so a queued human or agent message protects the
+  child before the loop takes it up. A later reply arms a fresh deadline;
+  an old callback cannot reap that new waiting period. Working children and
+  roots have no reply lease. `nearest_reap` reports only active reply leases.
+  Reading a reply, focusing a tab, or probing resources renews nothing.
 
 ## Cancellation cascades the subtree, across both layers
 

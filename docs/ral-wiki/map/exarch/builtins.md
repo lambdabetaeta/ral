@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d4299048
-generated_at_date: 2026-10-18
+generated_at_commit: 38a02883d4b4526b1ae6a3c890081b016847dfdb
+generated_at_date: 2026-10-19
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/skill.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/src/enquiry.rs, exarch/src/library.rs, exarch/data/agent.ral]
 ---
 
@@ -219,6 +219,13 @@ whatever it likes — which is why a cron expression is parsed
 
 ### Context stewardship
 
+The `explain` guides in `shell_eval/builtins/harness.rs` document each
+operation with examples, return shapes, limits, and recovery advice.
+`data/context.md` keeps the working strategy: prompt eviction of failures,
+preserving conclusions, and selective retrieval. The command reference
+explicitly distinguishes bytes from tokens, requires nonempty single-line
+UTF-8 eviction notes, and warns that transcript reads are unbounded.
+
 Two verbs over two things: `exarch-context` is **what the provider is sent** and the
 model pays for, and `exarch-transcript` is **the record**, every turn this session or
 its ancestors ever recorded
@@ -290,7 +297,7 @@ so the model has the address before it asks for one.
   Both records are **closed**; `` `grep ``'s `turns` is `` `all `` or
   `` `only [Int] ``, absence being data.
   - `` `index `` → the survey's own rows over every turn the transcript holds,
-    plus `held: Str` — `resident` or `evicted` — oldest first.
+    plus `held: Str` — `resident`, `evicted`, or `withdrawn` — oldest first.
     `kind` is `own`, `import`, or `inherited` (an ancestor's). A departed
     turn is listed at the weight it carried when it left.
   - `` `read [turns: [Int]] `` →
@@ -345,17 +352,30 @@ so the model has the address before it asks for one.
   and a provider extension carrying no text a pattern could mean — so nothing
   is searchable that is not readable.
 
+The `exarch-agents` guide documents its operations, grant profiles,
+write restrictions with inherited execution, model selection, and fan-out
+with literal binding references. Model discovery uses the bureau's catalog;
+fuzzy search shares the picker's matcher. `data/agents.md`
+keeps point/call guidance for delegation, disjoint write grants, waiting,
+reading, follow-ups, and cancellation. Each child's system prompt renders its
+own grant, including the parent's restriction. Replying parks a child and starts
+its one-hour follow-up lease; working time is outside that lease
+([[map/exarch/agent|agent]]).
+
 - **`exarch-agents <tag>`** → `∀α. F α`. One verb for the fleet, over an **open** row
-  of six tags — `` `list ``, `` `start ``, `` `message ``, `` `cancel ``,
-  `` `reply <value> ``, `` `read <name> `` — each taking one argument. Every
-  tag but `` `list `` and `` `read `` answers `` `summary [live: Int, replied:
-  Int] `` *afterwards* — other live agents in the reader's tree, and how many of
-  its own children park holding a value it has not fetched — rather than a
+  of eight tags — `` `list ``, `` `models ``, `` `grep-models <query> ``,
+  `` `start ``, `` `message ``, `` `cancel ``, `` `reply <value> ``,
+  `` `read <name> ``. The acting tags answer `[live: Int, replied: Int]` *afterwards* — other live agents in the reader's tree, and how many of
+  its own children hold a deposited reply (reading does not consume it) — rather than a
   receipt of its own. The rule is unchanged (the answer is the world after the
   transition); what changed is its cost, since a roster on every spawn of a
   fan-out is O(fleet) restating what the caller mostly chose, while `replied` is
   the one count it could not derive and the one asking for an action.
-  `` `list `` alone answers the rows,
+  `` `models `` and `` `grep-models `` answer `[[provider: Str, model: Str]]`:
+  exact account IDs accepted by `start`, paired with listed model IDs.
+  `grep-models` fuzzy-ranks both fields through `text::rank_by`; empty queries
+  match all, no matches returns `[]`. A listing failure refuses the query with
+  the account and reason. `` `list `` answers the roster rows,
   `[[name: Str, spawner: <root|agent Str>, state: <busy|waiting-on-agents|replied|waiting>, idle-s: Int, elapsed-s: Int, log-dir: Str]]`
   — the reader's whole tree, itself among them, since what it may *message* is
   wider than what it spawned. The climb stops at a root, so one root session
@@ -366,7 +386,7 @@ so the model has the address before it asks for one.
   return path of a returning agent — first-orderness checked at the door,
   refused on every non-returning agent with the desk's own didactic text, last
   write wins within a run, deposited once the enclosing `ral` batch drains. The
-  outer row is open so an unknown tag reaches a door that enumerates the six; each known
+  outer row is open so an unknown tag reaches a door that enumerates the tags; each known
   tag's payload keeps its exact type, so the closed record inside `` `start ``
   still makes a missing or misspelled field a static error naming it, while the
   `type`/`grant`/`provider`/`model` rows *inside* that record stay open for the

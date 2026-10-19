@@ -111,9 +111,12 @@ fn sub_agent_without_reply_is_re_nudged_then_fails() {
 fn deposited_reply_suppresses_every_nudge() {
     let parent = Avatar::for_test("system").unwrap();
     let mut child = parent.fork().expect("fork child");
-    child.agent.deposit_reply(FOValue::String {
-        value: "already replied".into(),
-    });
+    child.agent.deposit_reply(
+        &parent.fleet,
+        FOValue::String {
+            value: "already replied".into(),
+        },
+    );
 
     child
         .agent

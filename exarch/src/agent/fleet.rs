@@ -43,13 +43,9 @@ use std::fmt;
 use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-/// A child's idle lease: the span since its last human exchange (birth is the
-/// epoch) before its whole subtree is reaped.
-///
-/// Only a human message renews the clock, so a never-renewed lease fires
-/// exactly this long after birth.
+/// How long a replied child waits for a follow-up.
 pub const AGENT_LEASE_IDLE: Duration = Duration::from_hours(1);
 
 /// What every node of one run shares, fixed at launch: the recipe for a root,
@@ -256,8 +252,7 @@ pub struct Fleet {
 }
 
 impl Fleet {
-    /// A fleet for one run, whose reporting children are reaped `lease` after
-    /// their last exchange.
+    /// A fleet whose children wait `lease` after each reply.
     pub(crate) fn new(launch: Launch, lease: Duration) -> Arc<Self> {
         Arc::new(Self {
             names: Mutex::new(HashMap::new()),
@@ -311,10 +306,8 @@ impl Fleet {
     }
 
     /// Bring a newborn `agent` into the fleet under the name `claim` holds:
-    /// hang it under its parent or push it onto [`Self::roots`], and arm the
-    /// lease a reporting child is bounded by.  The one door — construction is
-    /// the only place an agent joins, and no agent can join under a name no
-    /// claim holds.
+    /// hang it under its parent or push it onto [`Self::roots`]. Construction
+    /// is the only join door, and every name requires a claim.
     ///
     /// # Errors
     /// [`Unborn::SessionDead`] when the parent is already terminated — a spawn
@@ -332,10 +325,7 @@ impl Fleet {
         // Adopted (or rooted) only after the name is live: a refused agent
         // must never appear in the fleet, however briefly.
         match agent.role.parent() {
-            Some(parent) => {
-                parent.adopt(agent);
-                arm_lease(self, agent, self.lease);
-            }
+            Some(parent) => parent.adopt(agent),
             None => self.roots.lock_ignore_poison().push(Arc::downgrade(agent)),
         }
         Ok(())
@@ -391,8 +381,16 @@ impl Fleet {
         self.roots()
             .iter()
             .flat_map(|root| root.walk())
-            .map(|live| lease.saturating_sub(live.idle()))
+            .filter_map(|live| live.reply_since())
+            .map(|since| lease.saturating_sub(since.elapsed()))
             .min()
+    }
+
+    pub(crate) fn lease_reply(&self, agent: &Arc<Agent>, since: Instant) {
+        if agent.role.parent().is_some() {
+            let agent = Arc::downgrade(agent);
+            process::arm_callback(self.lease, move || lease_fire(&agent, since)).keep();
+        }
     }
 }
 
@@ -422,27 +420,12 @@ impl fmt::Display for Unborn {
     }
 }
 
-/// Arm one link of `agent`'s idle-lease chain, to fire `after`.
-fn arm_lease(fleet: &Arc<Fleet>, agent: &Arc<Agent>, after: Duration) {
-    let fleet = Arc::clone(fleet);
-    let agent = Arc::downgrade(agent);
-    process::arm_callback(after, move || lease_fire(&fleet, &agent)).keep();
-}
-
-/// One firing of an agent's idle lease, on the reaper daemon thread.  A
-/// settled agent — one whose avatar has gone — ends the chain silently, and one
-/// still short of its bound re-arms for the remaining margin: only a steer or a
-/// peer message ever touches the exchange clock this reads, and neither reaches
-/// the reaper, so this lazy re-arm is the whole mechanism.
-fn lease_fire(fleet: &Arc<Fleet>, agent: &Weak<Agent>) {
-    let Some(agent) = agent.upgrade() else {
-        return;
-    };
-    let ttl = fleet.lease;
-    let idle = agent.idle();
-    match ttl.checked_sub(idle) {
-        Some(margin) if !margin.is_zero() => arm_lease(fleet, &agent, margin),
-        _ => agent.cancel_tree(CancelCause::TimedOut),
+/// A stale deadline cannot cancel work or a later reply's waiting period.
+fn lease_fire(agent: &Weak<Agent>, since: Instant) {
+    if let Some(agent) = agent.upgrade()
+        && agent.reply_since() == Some(since)
+    {
+        agent.cancel_tree(CancelCause::TimedOut);
     }
 }
 

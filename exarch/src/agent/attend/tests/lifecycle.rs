@@ -107,39 +107,8 @@ fn engaged_child_answers_a_second_steer_with_no_focus_involved() {
     handle.join().expect("worker thread must not panic");
 }
 
-/// A never-renewed lease that lands before the child has taken up its seed
-/// still settles it [`crate::bus::AgentOutcome::Cancelled`]: the attend loop,
-/// having settled no item, ends on the cancel that stopped it drawing.  The
-/// test orders the reap before the loop starts, so the seed is never taken
-/// up — the empty script would panic if it were.
 #[test]
-fn ms_lease_reaping_a_child_before_its_seed_is_cancelled() {
-    let parent = Avatar::for_test_with(crate::agent::TestTrunk {
-        lease: Duration::from_millis(1),
-        ..crate::agent::TestTrunk::new("system")
-    })
-    .unwrap();
-    let child = parent.fork_named("child-a").expect("fork child a");
-    child.seed("go".into());
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while !child.agent.token.terminated() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the never-renewed lease must reap the child"
-        );
-        std::thread::sleep(Duration::from_millis(1));
-    }
-    let handle = attend_and_deliver(child);
-    assert_reaped_cancelled(&parent, handle);
-}
-
-/// A never-renewed lease reaps a child mid-exchange: the child's one tool
-/// call blocks until cancelled, so the exchange cannot end on its own and the
-/// reap is what ends it.  Where the bound lands against the take-up is the
-/// scheduler's, but not the outcome: a bound that beats it is
-/// [`ms_lease_reaping_a_child_before_its_seed_is_cancelled`].
-#[test]
-fn ms_lease_reaping_a_child_mid_exchange_is_cancelled() {
+fn a_child_working_past_the_reply_lease_is_not_reaped() {
     let parent = Avatar::for_test_with(crate::agent::TestTrunk {
         lease: Duration::from_millis(25),
         installers: crate::agent::testkit::dressed(|runtime| {
@@ -157,31 +126,63 @@ fn ms_lease_reaping_a_child_mid_exchange_is_cancelled() {
         )])),
     )));
     child.seed("go".into());
+    let child_agent = child.agent.clone();
     let handle = attend_and_deliver(child);
-    assert_reaped_cancelled(&parent, handle);
+    std::thread::sleep(Duration::from_millis(150));
+    let reaped = child_agent.token.terminated();
+    child_agent.cancel_tree(ral_core::process::CancelCause::Cancelled);
+    handle.join().expect("worker thread must not panic");
+    assert!(!reaped, "the reply lease must not limit working time");
+    assert!(matches!(
+        wait_for_settle(&parent.inbox()),
+        crate::bus::Next::Item(crate::bus::Item::Agent(crate::bus::AgentResult {
+            outcome: crate::bus::AgentOutcome::Cancelled,
+            ..
+        }))
+    ));
 }
 
-/// The reaped child delivers exactly one
-/// [`crate::bus::AgentOutcome::Cancelled`] to the parent inbox, and settles.
-fn assert_reaped_cancelled(parent: &Avatar, handle: std::thread::JoinHandle<()>) {
+#[test]
+fn child_is_reaped_after_its_reply_not_before_its_seed() {
+    let parent = Avatar::for_test_with(crate::agent::TestTrunk {
+        lease: Duration::from_millis(50),
+        ..crate::agent::TestTrunk::new("system")
+    })
+    .unwrap();
+    let child = parent.fork_named("child-a").expect("fork child");
+    child.agent.provider.swap(Arc::new(Provider::scripted(
+        "test-model",
+        Script::new().then(Reply::tool_calls(vec![ral_call(
+            "reply",
+            "exarch-agents `reply 42",
+        )])),
+    )));
+    child.seed("go".into());
+    let child_agent = child.agent.clone();
+    std::thread::sleep(Duration::from_millis(150));
+    assert!(
+        !child_agent.token.terminated(),
+        "birth does not arm the reply lease"
+    );
+    let handle = attend_and_deliver(child);
     match wait_for_settle(&parent.inbox()) {
         crate::bus::Next::Item(crate::bus::Item::Agent(result)) => {
-            assert!(
-                matches!(result.outcome, crate::bus::AgentOutcome::Cancelled),
-                "a never-renewed lease reaps with Cancelled, got {:?}",
-                result.outcome
-            );
+            assert!(matches!(result.outcome, crate::bus::AgentOutcome::Replied));
         }
-        other => panic!("expected an Agent result item, got {other:?}"),
+        other => panic!("expected the child's reply, got {other:?}"),
+    }
+    assert_eq!(child_agent.reply(), Some(FOValue::Int { value: 42 }));
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !child_agent.token.terminated() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "reply lease must expire"
+        );
+        std::thread::sleep(Duration::from_millis(5));
     }
     handle.join().expect("worker thread must not panic");
     assert!(
         parent.inbox().next_item().is_none(),
-        "the reap is reported exactly once"
-    );
-    assert_eq!(
-        crate::agent::roster::summary(&parent.agent).live,
-        0,
-        "the reaped child settles, and the walk that looked for it pruned it"
+        "expiry must not duplicate the reply notice"
     );
 }

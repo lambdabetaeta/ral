@@ -41,18 +41,25 @@ fn ended(engine: &IdentityTransport) -> Option<i32> {
         .expect("an identity transport answers")
 }
 
-/// A lease is a consequence of having a reporting parent, and of nothing
-/// else.  Asserted behaviourally, since there is no guard to peek at: the
-/// reap only stamps the cancel layers.
+/// Only a replied child has a deadline.
 #[test]
-fn a_lease_is_armed_only_for_a_reporting_child() {
+fn a_lease_is_armed_only_after_a_child_replies() {
     let fleet = Fleet::leased_for_test(Duration::from_millis(50));
     let trunk = agent(&fleet, "trunk", None);
     let branch = agent(&fleet, "branch", None);
     let (reach, worker_engine) = reach_into();
     let mut worker = spec("worker", Some(&trunk));
     worker.reach = reach;
-    let _worker = born(&fleet, worker).expect("a fresh child of a live trunk");
+    let worker = born(&fleet, worker).expect("a fresh child of a live trunk");
+    std::thread::sleep(Duration::from_millis(150));
+    assert!(
+        ended(&worker_engine).is_none(),
+        "working children have no reply lease"
+    );
+    assert!(fleet.nearest_reap().is_none());
+    worker.deposit_reply(&fleet, ral_core::first_order::FOValue::Int { value: 1 });
+    branch.deposit_reply(&fleet, ral_core::first_order::FOValue::Int { value: 1 });
+    assert!(fleet.nearest_reap().is_some());
 
     assert!(
         eventually(Duration::from_secs(2), || ended(&worker_engine)).is_some(),
@@ -411,7 +418,7 @@ fn the_summary_counts_company_and_what_is_owed() {
     assert_eq!(alone.live, 3, "trunk, sibling and child are all out there");
     assert_eq!(alone.replied, 0, "none of them holds a value yet");
 
-    child.deposit_reply(ral_core::first_order::FOValue::Int { value: 1 });
+    child.deposit_reply(&fleet, ral_core::first_order::FOValue::Int { value: 1 });
     let owed = roster::summary(&mid);
     assert_eq!(
         owed.live, 3,
@@ -505,30 +512,70 @@ fn a_name_borne_by_a_live_agent_refuses_a_second() {
     );
 }
 
-/// `steer` is the one door that stamps the exchange clock, and it always
-/// delivers too.
 #[test]
-fn a_steer_defers_the_fire() {
-    let ttl = Duration::from_millis(300);
-    let fleet = Fleet::leased_for_test(ttl);
+fn followups_disarm_the_old_reply_and_the_next_reply_gets_a_new_lease() {
+    for peer_message in [false, true] {
+        let fleet = Fleet::leased_for_test(Duration::from_secs(60));
+        let trunk = agent(&fleet, "trunk", None);
+        let child = agent(&fleet, "child", Some(&trunk));
+        child.deposit_reply(&fleet, ral_core::first_order::FOValue::Int { value: 1 });
+        let first = child.reply_since().expect("reply armed the lease");
+        if peer_message {
+            trunk.message(&child, "follow up".into());
+        } else {
+            child.mailbox.steer("follow up".into());
+        }
+        lease_fire(&Arc::downgrade(&child), first);
+        assert!(
+            !child.token.terminated(),
+            "a queued message protects the child"
+        );
+        assert!(fleet.nearest_reap().is_none());
+
+        child.disarm_reply_lease();
+        assert!(child.reply_since().is_none(), "working has no deadline");
+        child.deposit_reply(&fleet, ral_core::first_order::FOValue::Int { value: 2 });
+        let second = child.reply_since().expect("second reply armed a new lease");
+        assert!(second > first);
+        lease_fire(&Arc::downgrade(&child), first);
+        assert!(
+            !child.token.terminated(),
+            "an old deadline cannot reap a newer reply"
+        );
+        lease_fire(&Arc::downgrade(&child), second);
+        assert!(
+            child.token.terminated(),
+            "the current reply's deadline reaps"
+        );
+    }
+}
+
+#[test]
+fn resumed_work_disarms_the_reply_even_without_a_message() {
+    let fleet = Fleet::for_test();
     let trunk = agent(&fleet, "trunk", None);
-    let (reach, engine) = reach_into();
-    let mut child = spec("child", Some(&trunk));
-    child.reach = reach;
-    let child = born(&fleet, child).expect("a fresh child of a live trunk");
+    let child = agent(&fleet, "child", Some(&trunk));
+    child.deposit_reply(&fleet, ral_core::first_order::FOValue::Int { value: 1 });
+    let since = child.reply_since().expect("reply armed the lease");
+    child.disarm_reply_lease();
+    lease_fire(&Arc::downgrade(&child), since);
+    assert!(!child.token.terminated());
+    assert!(fleet.nearest_reap().is_none());
+}
 
-    std::thread::sleep(ttl / 2);
-    child.mailbox.steer("still there".into());
-
-    std::thread::sleep(ttl / 2 + Duration::from_millis(50));
-    assert!(
-        ended(&engine).is_none(),
-        "steered at half the ttl, still alive past the original bound"
-    );
-    assert!(
-        eventually(Duration::from_secs(2), || ended(&engine)).is_some(),
-        "reaped once the renewed span elapses"
-    );
+#[test]
+fn observing_status_does_not_disarm_the_reply_lease() {
+    let fleet = Fleet::for_test();
+    let trunk = agent(&fleet, "trunk", None);
+    let child = agent(&fleet, "child", Some(&trunk));
+    child.deposit_reply(&fleet, ral_core::first_order::FOValue::Int { value: 1 });
+    let since = child.reply_since().expect("reply armed the lease");
+    child.set_resting(false);
+    child.set_resting(true);
+    assert_eq!(child.reply_since(), Some(since));
+    assert!(fleet.nearest_reap().is_some());
+    lease_fire(&Arc::downgrade(&child), since);
+    assert!(child.token.terminated());
 }
 
 #[test]
@@ -538,6 +585,7 @@ fn settling_before_the_fire_ends_the_chain_silently() {
     let trunk = agent(&fleet, "trunk", None);
     let child = born(&fleet, spec("child", Some(&trunk))).expect("a fresh child of a live trunk");
     let token = child.token.clone();
+    child.deposit_reply(&fleet, ral_core::first_order::FOValue::Int { value: 1 });
 
     drop(child);
 
@@ -558,6 +606,7 @@ fn a_clear_outranks_the_lease() {
     child.reach = reach;
     let child = born(&fleet, child).expect("a fresh child of a live trunk");
 
+    child.deposit_reply(&fleet, ral_core::first_order::FOValue::Int { value: 1 });
     trunk.forget();
     assert_eq!(
         ended(&engine),

@@ -59,8 +59,8 @@ one place ([[map/exarch/agent|agent]]). Parking is **computed, not stored** — 
 derived on every wake: a conversing agent with a human attached (the launch's
 `attended` — the TUI) parks `Held` while its own cancel token is unterminated,
 an unattended conversing root (synod's, driven one exchange at a time) holds
-for live children and quiesces once they settle, a returning agent a human has
-exchanged a message with parks `Engaged` bounded by the fleet's idle lease, and
+for live children and quiesces once they settle, a child that has received a
+message or deposited a reply parks `Engaged` (a reply arms its follow-up lease), and
 everyone else quiesces. Whether a node converses and whether a human will type
 into it are two facts — one per node, one per run — and the park verdict
 reads both.
@@ -411,20 +411,14 @@ Shift-Tab) move the cursor, and `Enter` attaches the human to the cursor's row
 modal: while it owns the keyboard `Esc` leaves the surface rather than
 cancelling the focused exchange — `Ctrl-C` alone still interrupts — and no
 other key reaches the draft. The attached tab receives typed lines; moving
-either cursor and looking at a tab keep nothing alive. What keeps a
-non-conversing returning child alive past quiescence is a renewable **idle
-lease** the fleet arms at birth for every parented agent (`Fleet::enrol`; one
-hour, `AGENT_LEASE_IDLE`, a fleet-level bound rather than a per-agent field),
-not the human's attention: the one thing that renews it is a delivered
-*message* — a human's typed line (`Mailbox::steer`) or the parent's
-`` exarch-agents `message `` (`Agent::message`) — both of which stamp the recipient's
-own inbox exchange clock before the item is pushed, so a child that is being
-talked to, and a child parked on a deposited reply, keep their lease fresh
-(`Agent::idle`, read off that same clock), while a lease that is never renewed
-fires at exactly its birth-seeded hour. A root is parent-less —
-`Fleet::enrol` arms no lease for it — and so never idle-reaps.
-Neither matrix navigation nor a `/resources` probe touches the exchange
-clock — enumeration and attention alone can never immortalise a child.
+either cursor and looking at a tab keep nothing alive. A child's follow-up
+lease starts when it deposits a reply: one hour (`AGENT_LEASE_IDLE`) to receive
+another task. Birth and active work have no such deadline. A queued human or
+agent message disarms the old lease; taking up work clears its reply timestamp,
+and a later reply starts a fresh hour. The callback retains the timestamp it
+was armed for, so an old deadline cannot cancel a later reply's waiting period.
+Roots have no reply lease. Reading replies, matrix navigation, and resource
+probes do not extend it.
 
 A tab whose agent is parked waiting for input and has sat idle for five
 minutes demotes in place to a compact slate matrix row carrying its idle age —

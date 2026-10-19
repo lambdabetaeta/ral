@@ -251,9 +251,7 @@ impl Fleet {
 }
 
 impl Avatar {
-    /// Build an agent and its avatar in one step: the agent is in its parent's
-    /// subtree, holds its name, and carries a lease before this returns, so no
-    /// caller can ever hold an unenrolled child.
+    /// Build an agent and its avatar, already named and enrolled in its tree.
     ///
     /// # Errors
     /// Whatever [`Fleet::enrol`] refuses.  The refusal is decided before the

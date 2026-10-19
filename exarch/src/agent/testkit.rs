@@ -179,7 +179,7 @@ const UNWRITABLE_LOG_DIR: &str = "/nonexistent/test-agent";
 const UNWRITABLE_LOG_DIR: &str = r"\\.\NUL\test-agent";
 
 /// The `Arc<Agent>` a real fork or root carries, born exactly as one is —
-/// enrolled, adopted, leased — so the caller holds the only strong reference
+/// enrolled and adopted — so the caller holds the only strong reference
 /// and dropping it settles the agent.
 ///
 /// # Errors
