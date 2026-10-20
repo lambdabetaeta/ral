@@ -488,6 +488,7 @@ mod tests {
         false
     }
 
+    #[cfg(unix)]
     fn only<'a>(present: &'a [&'a str]) -> impl Fn(&str) -> bool + 'a {
         move |p| present.contains(&p)
     }

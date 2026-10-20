@@ -16,23 +16,12 @@ use ral_core::capability::Capabilities;
 use ral_core::carrier::IdentityTransport;
 use ral_core::fact::Read;
 use ral_core::first_order::datum::Datum as _;
+use ral_core::path::shown;
 use ral_core::types::WriteOutcome;
 use ral_core::types::{
     CallSite, Done, DoneEvent, Notice, Observation, Observed, Pruned, ReapCause, ReapNotice,
     WorkerId,
 };
-
-/// Render a path without a trailing separator.  Some hosts return
-/// `"/tmp/"` from `std::env::temp_dir()` while `Shell::cwd()` never
-/// carries one; the `len > 1` guard keeps "/" itself intact.
-fn display_no_trailing_sep(path: &std::path::Path) -> String {
-    let s = path.display().to_string();
-    if s.len() > 1 {
-        s.trim_end_matches(std::path::MAIN_SEPARATOR).to_string()
-    } else {
-        s
-    }
-}
 
 fn fresh() -> IdentityTransport {
     crate::boot::test_transport()
@@ -246,7 +235,7 @@ fn tool_call_cd_persists_across_calls() {
     // Beneath the temp dir the engine boots in, so the `cd` moves it.
     let dir = scratch_dir("cd-persists");
     let tmp = dir.path().to_path_buf();
-    let tmp_disp = display_no_trailing_sep(&tmp);
+    let tmp_disp = shown(&tmp);
     let cd = run_once(&engine, &format!("cd '{tmp_disp}'"));
     assert_eq!(
         cd.exit,
@@ -256,7 +245,7 @@ fn tool_call_cd_persists_across_calls() {
     );
     let pwd = run_once(&engine, "cwd");
     assert_eq!(pwd.exit, 0, "cwd in the second call should succeed");
-    let canon = display_no_trailing_sep(&tmp.canonicalize().unwrap_or_else(|_| tmp.clone()));
+    let canon = shown(tmp.canonicalize().unwrap_or_else(|_| tmp.clone()));
     let got = pwd
         .value
         .as_deref()
@@ -287,7 +276,7 @@ target
     keep me
 ";
     std::fs::write(&repeated, original).expect("write repeated fixture");
-    let repeated_str = display_no_trailing_sep(&repeated);
+    let repeated_str = shown(&repeated);
     // `target` is line 2 = index 1; its witness differs from line 6's.
     let edited = run_once(
         &engine,
@@ -320,7 +309,7 @@ target
     let run = tmp.path().join("run.txt");
     let run_original = "head\ndup\ndup\ndup\ndup\ndup\ndup\ndup\ndup\ntail\n";
     std::fs::write(&run, run_original).expect("write run fixture");
-    let run_str = display_no_trailing_sep(&run);
+    let run_str = shown(&run);
     let buried = run_once(
         &engine,
         &format!(
@@ -359,7 +348,7 @@ expand-me
 keep-bottom
 ";
     std::fs::write(&path, original).expect("write batch fixture");
-    let path_str = display_no_trailing_sep(&path);
+    let path_str = shown(&path);
 
     // `hzzzzzz` is not `h` + six hex, so it can match no witness.
     let poisoned = run_once(
@@ -1092,7 +1081,7 @@ fn programmatic_todo_sweep_rewrites_every_match() {
     )
     .expect("write a");
     std::fs::write(tmp.path().join("b.txt"), "gamma\ndelta [TODO] three\n").expect("write b");
-    let tmp_str = display_no_trailing_sep(tmp.path());
+    let tmp_str = shown(tmp.path());
 
     let src = format!(
         r"cd '{tmp_str}'
@@ -1145,7 +1134,7 @@ fn grep_files_scopes_to_a_file_or_a_subtree() {
     std::fs::create_dir_all(tmp.join("src")).expect("create src");
     std::fs::write(tmp.join("src").join("a.txt"), "x\nNEEDLE one\n").expect("write a");
     std::fs::write(tmp.join("gates.txt"), "NEEDLE two\n").expect("write gates");
-    let root = display_no_trailing_sep(&tmp);
+    let root = shown(&tmp);
 
     let r = run_once(
         &engine,
@@ -1202,7 +1191,7 @@ fn grep_walks_skip_only_what_they_find() {
     ] {
         std::fs::write(tmp.join(file), body).expect("write fixture");
     }
-    let root = display_no_trailing_sep(&tmp);
+    let root = shown(&tmp);
     let files = |search: &str| -> String {
         let r = run_once(
             &engine,
@@ -1420,7 +1409,7 @@ fn skill_name_validation_confines_the_join_to_the_skills_root() {
         "TOPSECRET\n",
     )
     .expect("write secret fixture");
-    let root = display_no_trailing_sep(tmp.path());
+    let root = shown(tmp.path());
 
     let loaded = run_once(&engine, &format!("cd '{root}'; skill 'demo'"));
     let body = loaded.value.as_deref().expect("skill returns its body");
@@ -1448,7 +1437,7 @@ fn skill_name_validation_confines_the_join_to_the_skills_root() {
 fn absent_skill_is_not_found_not_unreadable() {
     let engine = fresh();
     let tmp = scratch_dir("skill-absent");
-    let root = display_no_trailing_sep(tmp.path());
+    let root = shown(tmp.path());
     // `root` has no `.exarch/skills`, so the local root lacks `nowhere`;
     // the config root must still be consulted before declaring it missing.
     let r = run_once(&engine, &format!("cd '{root}'; skill 'nowhere'"));
@@ -1535,7 +1524,7 @@ fn scratch_file(tag: &str, name: &str, body: &str) -> (tempfile::TempDir, String
     let dir = scratch_dir(tag);
     let path = dir.path().join(name);
     std::fs::write(&path, body).expect("write scratch fixture");
-    let disp = display_no_trailing_sep(&path);
+    let disp = shown(&path);
     (dir, disp)
 }
 
@@ -2020,7 +2009,7 @@ fn the_prompt_grep_idioms_run() {
         .expect("canonical scratch dir");
     std::fs::create_dir_all(tmp.join("src")).expect("create src");
     std::fs::write(tmp.join("src").join("a.rs"), "x\nfn parse_a() {}\ny\n").expect("write a");
-    let root = display_no_trailing_sep(&tmp);
+    let root = shown(&tmp);
     let first = "let hits = grep-files #'fn parse_'# src";
     for (md, witnessed) in [
         (include_str!("../../data/edit-hash.md"), true),

@@ -158,6 +158,8 @@ impl Report {
     /// A fault outside the run's own report (a panicked engine worker, a
     /// report the frame fuse would not pass): the run may have run, in part or
     /// whole, so it is no refusal. Rendered as the same one-liner a refusal is.
+    /// Only the wire engine, a unix process, has an outside to fault in.
+    #[cfg(unix)]
     pub(crate) fn faulted(message: impl Into<String>) -> Self {
         let (rendered, status) = super::render_spanless(&Error::new(message));
         Self::Faulted {
@@ -297,15 +299,11 @@ mod static_diagnostic_seam_tests {
         assert!(rendered.ends_with('\n'));
     }
 
-    /// A refusal is a `Static`, a fault is a `Faulted`; both are the one-liner.
+    /// A fault is a `Faulted`, not the `Static` a refusal is, yet the same
+    /// one-liner.
+    #[cfg(unix)]
     #[test]
-    fn a_refusal_and_a_fault_are_distinct_one_liners() {
-        let Report::Static { rendered, status } = Report::refused("engine busy") else {
-            panic!("a refusal must be Report::Static");
-        };
-        assert_eq!(status.get(), 1);
-        assert!(rendered.contains("engine busy") && !rendered.contains('╰'));
-
+    fn a_fault_is_a_faulted_one_liner() {
         let Report::Faulted { rendered, status } = Report::faulted("worker panicked") else {
             panic!("a fault must be Report::Faulted");
         };

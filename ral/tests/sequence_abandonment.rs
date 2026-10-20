@@ -14,7 +14,10 @@ use common::run;
 
 #[test]
 fn a_failing_final_part_abandons_nothing() {
-    let out = run("ral_abandoned_none", "echo first\n/usr/bin/false\n");
+    let out = run(
+        "ral_abandoned_none",
+        "echo first\nfail [status: 1, message: boom]\n",
+    );
     assert!(
         !out.stderr.contains("did not run"),
         "nothing followed the failure, so nothing was abandoned; stderr: {}",
@@ -27,7 +30,7 @@ fn a_failing_final_part_abandons_nothing() {
 fn the_hint_belongs_to_the_innermost_sequence() {
     let out = run(
         "ral_abandoned_innermost",
-        "echo outer\n!{ echo inner; /usr/bin/false; echo a; echo b }\necho last\n",
+        "echo outer\n!{ echo inner; fail [status: 1, message: boom]; echo a; echo b }\necho last\n",
     );
     assert!(
         out.stderr.contains("later steps in this block did not run"),
@@ -69,15 +72,22 @@ fn a_command_that_never_ran_is_not_told_to_attempt() {
     );
     assert!(!out.stderr.contains("attempt"), "stderr: {}", out.stderr);
 
-    let out = run("ral_abandoned_directory", "let d = /usr\necho b\n");
+    // This crate's own directory: one that exists, spelled with a separator.
+    let dir = env!("CARGO_MANIFEST_DIR");
+    let out = run(
+        "ral_abandoned_directory",
+        &format!("let d = {dir}\necho b\n"),
+    );
     assert!(
-        out.stderr.contains("/usr is a directory, not a command"),
+        out.stderr
+            .contains(&format!("{dir} is a directory, not a command")),
         "stderr: {}",
         out.stderr
     );
     assert!(
-        out.stderr
-            .contains("to bind the path as text, write `let d = #'/usr'#`"),
+        out.stderr.contains(&format!(
+            "to bind the path as text, write `let d = #'{dir}'#`"
+        )),
         "stderr: {}",
         out.stderr
     );

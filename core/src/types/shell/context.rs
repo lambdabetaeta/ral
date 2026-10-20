@@ -39,13 +39,14 @@ impl Context {
         self.env_overrides.home()
     }
 
-    /// [`Self::home`], or the one sentence that names an unset `HOME`, shared
-    /// by `~` and `home`.
+    /// [`Self::home`] as ral shows it ([`crate::path::shown`]), or the one
+    /// sentence that names an unset `HOME`.  The one spelling `~` and `home`
+    /// share, so `~/x` and `"!{home}/x"` are the same string on every host.
     ///
     /// # Errors
     /// `HOME` is unset.
     pub(crate) fn home_dir(&self) -> Result<String, crate::types::Error> {
-        self.home().ok_or_else(|| {
+        self.home().map(crate::path::shown).ok_or_else(|| {
             crate::types::Error::new("HOME is unset, so `~` and `home` name no directory")
                 .with_hint("set HOME, or spell out an explicit path")
         })
