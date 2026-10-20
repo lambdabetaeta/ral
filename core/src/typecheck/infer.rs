@@ -490,7 +490,7 @@ impl Inferencer<'_> {
 
     /// `arg` demanded as a block running as `wanted`, as an argument is: a
     /// block written out is checked against it, one in hand adapted to it.
-    pub(super) fn demand_block(&mut self, arg: &Spanned<Val>, wanted: CompTy) {
+    fn demand_block(&mut self, arg: &Spanned<Val>, wanted: CompTy) {
         self.with_span(arg.span, |this| match &arg.item {
             Val::Thunk(body) => {
                 let given = this.with_scope(|this| this.check_comp(body.shape(), &wanted));
@@ -1956,7 +1956,7 @@ impl Inferencer<'_> {
             CompKind::Guard { body, cleanup } => self.infer_guard(body, cleanup),
             CompKind::Audit { body } => self.infer_audit(body),
             CompKind::Spawn { title, body } => self.infer_spawn(title.as_ref(), body),
-            CompKind::All { tasks } => self.infer_all(tasks),
+            CompKind::Gather { body } => self.infer_gather(body),
             // Installs fds, not its own type; carries the body as an
             // `Arc<Comp>` rather than a thunk-shaped `Val` like the scope
             // forms above, so infer it directly.  A stdout redirect takes a

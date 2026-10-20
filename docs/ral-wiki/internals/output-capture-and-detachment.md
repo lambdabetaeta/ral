@@ -139,11 +139,12 @@ another worker hangs under that worker): the *handle* is its evidence
 owner ends it: no policy reaps a running worker for neglect or age**
 ([[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]]).
 
-- A *calling expression* — `par`, `all`, `race` — owns the children it
-  starts or is given, and has ended every one before the call returns.
-- The *session* owns a `spawn` or `watch` worker, which ends by completing,
-  by `cancel`, or with the session: dropping the shell cancels every
-  registered worker through `Roster`'s `Drop`.
+- A *gather* — a `gather { … }`, or a worker's body — owns every `spawn` or
+  `watch` born inside it, and has ended every one before it exits
+  ([[decisions/261020_gather|gather]]).
+- The *session* owns a `spawn` or `watch` worker born outside any gather,
+  which ends by completing, by `cancel`, or with the session: dropping the
+  shell cancels every registered worker through `Roster`'s `Drop`.
 - *Nobody* owns a `detach`ed process: it files nothing here, because it is not
   a worker at all — it is meant to outlive the host
   ([[decisions/260725_survives-exit-is-its-own-verb|survives-exit-is-its-own-verb]]).
@@ -154,8 +155,8 @@ run, and teardown cancels the rest.
 
 - Every worker files a `WorkerEntry` in its shell's `WorkerRegistry` the
   instant it starts (`core/src/types/shell/workers.rs`): the handle itself
-  and its `Owner` — the session, the worker it was born inside, or the calling
-  expression that birthed it. The handle carries the rest: its `WorkerId`,
+  and its `Owner` — the session, the worker whose body it was born in, or the
+  `gather` that owns it. The handle carries the rest: its `WorkerId`,
   its title, and its clock — a birth `Stamp` (one instant on the monotonic
   clock durations are measured on and the wall clock a reader is shown), and
   an end `Stamp` set once its thread ends. Every report of time reads those

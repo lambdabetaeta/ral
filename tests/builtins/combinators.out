@@ -4,3 +4,9 @@ item 0.01
 par failed status=3
 hi 42
 fast
+0 1 2
+1
+2
+0
+hi 42
+fast

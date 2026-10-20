@@ -1,15 +1,17 @@
-//! Where a loose birth hangs, and who answers for it.
+//! Where a birth hangs, and who answers for it.
 
 use super::HandleInner;
 use crate::fact::WorkerId;
-use crate::process::{Scope, ScopeNode};
+use crate::process::Scope;
 use crate::sync::LockExt as _;
+use crate::types::Owner;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// Where this shell's loose births hang: under `under`, and, inside a
-/// worker, enrolled in that worker's brood.  A run's cradle is loose under
-/// the session root and answers for nothing (the turn is the wrong parent).
+/// Where this shell's births hang: under `under`, and, inside a gather (a
+/// `gather { … }`, or a worker's body), enrolled in its brood.  A run's
+/// cradle is loose under the session root and answers for nothing (the turn
+/// is the wrong parent).
 #[derive(Clone)]
 pub(crate) struct Cradle {
     pub(crate) under: Scope,
@@ -21,33 +23,51 @@ impl Cradle {
         Self { under, brood: None }
     }
 
-    pub(crate) fn of_worker(home: &ScopeNode, brood: Brood) -> Self {
+    pub(crate) fn owning(under: Scope, brood: Brood) -> Self {
         Self {
-            under: Scope::clone(home),
+            under,
             brood: Some(brood),
         }
     }
 }
 
-/// The loose births a worker made, in birth order: what its base settles.
+/// Who answers for a brood: the worker whose body it is, or a `gather`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BroodOwner {
+    Worker(WorkerId),
+    Gather,
+}
+
+impl From<BroodOwner> for Owner {
+    fn from(owner: BroodOwner) -> Self {
+        match owner {
+            BroodOwner::Worker(id) => Self::Worker(id),
+            BroodOwner::Gather => Self::Gather,
+        }
+    }
+}
+
+/// The births a gather made, in birth order: what its exit settles.
 #[derive(Clone)]
 pub(crate) struct Brood {
-    /// The worker it belongs to, which its children's entries name as owner.
-    pub(crate) worker: WorkerId,
+    /// Whom its children's entries name as owner.
+    pub(crate) owner: BroodOwner,
     children: Arc<Mutex<Vec<HandleInner>>>,
 }
 
 impl Brood {
-    pub(crate) fn new(worker: WorkerId) -> Self {
+    pub(crate) fn new(owner: BroodOwner) -> Self {
         Self {
-            worker,
+            owner,
             children: Arc::default(),
         }
     }
 
+    /// Prunes only a child that is claimed and has ended: a cancelled one
+    /// still running stays for [`Self::wait_cancelled`].
     pub(crate) fn enrol(&self, handle: HandleInner) {
         let mut children = self.children.lock_ignore_poison();
-        children.retain(|child| !child.is_claimed());
+        children.retain(|child| !(child.is_claimed() && child.has_ended()));
         children.push(handle);
     }
 
@@ -56,10 +76,31 @@ impl Brood {
         self.children.lock_ignore_poison().clone()
     }
 
-    /// The halt rule: [`end_unclaimed`] over this brood.
-    pub(crate) fn end(&self, grace: Duration) {
-        end_unclaimed(&self.children(), grace);
+    /// I4′: wait up to `grace` for every child whose scope is cancelled and
+    /// whose thread has not ended — the ones this brood stopped, and the ones
+    /// a `cancel` in the body or from outside stopped.  A child an outside
+    /// claimer took and left running is that claimer's, and is not waited for.
+    pub(crate) fn wait_cancelled(&self, grace: Duration) {
+        wait_cancelled_of(&self.children(), grace);
     }
+
+    /// The halt rule (I4) with its drain (I4′): claim and stop every child no
+    /// one has claimed, then wait up to `grace` for every cancelled child to end.
+    pub(crate) fn end(&self, grace: Duration) {
+        let children = self.children();
+        for child in &children {
+            child.claim_and_stop();
+        }
+        wait_cancelled_of(&children, grace);
+    }
+}
+
+fn wait_cancelled_of(children: &[HandleInner], grace: Duration) {
+    let cancelled: Vec<&HandleInner> = children
+        .iter()
+        .filter(|h| h.cancel.is_cancelled())
+        .collect();
+    wait_ended(&cancelled, grace);
 }
 
 /// Claim and stop every handle no one has claimed, then wait for their

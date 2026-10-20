@@ -30,7 +30,7 @@ pub(crate) use handler::{
 
 // The shared state behind `Value::Handle`.
 mod handle;
-pub(crate) use handle::brood::{Brood, Cradle, end_unclaimed};
+pub(crate) use handle::brood::{Brood, BroodOwner, Cradle, end_unclaimed};
 #[cfg(test)]
 pub(crate) use handle::idle_handle;
 pub(crate) use handle::pins_running_work;

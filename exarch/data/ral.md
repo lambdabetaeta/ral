@@ -320,9 +320,17 @@ A block may `spawn` inside itself: those workers belong to it, and it finishes o
 
 `poll $h` samples without waiting, printing or claiming: `pending` with the output so far and the seconds elapsed, or `settled` with the output, the time it took and `ok`/`err`, after which `await $h` still works. Use it to read a long-running server's output; to wait, `sleep 30; poll $h`.
 
-Fan-out that must leave nothing behind is a combinator, not a set of spawns: `par f items jobs` maps in parallel and keeps input order; `all [build: { cargo build }, lint: { cargo clippy }]` runs several blocks and returns a record of their values; `race [$a, $b]` claims the first to finish and cancels the rest. Each ends every worker it started before it returns, and the first failure cancels the others and is raised.
+Fan-out that must leave nothing behind is a `gather`, not a set of loose spawns:
 
-<CRITICAL>A worker lives as long as this session. Nothing but its own completion, `cancel`, or the session's end stops it.</CRITICAL>
+    gather {
+        let b = spawn "build" { cargo build }
+        let l = spawn "lint"  { cargo clippy }
+        return [build: !{await $b}, lint: !{await $l}]
+    }
+
+Every worker spawned inside a `gather` is its own: when the block returns, each one not yet awaited is awaited in birth order, and on a failure or a stop they are all cancelled. The prelude builds on it: `par f items jobs` maps in parallel and keeps input order; `both { … } { … }` runs two blocks at once and returns `[fst: …, snd: …]`, awaiting `fst` then `snd`, so a failure in either is raised only in its turn and the other is then cancelled; `first-of [{ … }, { … }]` behaves as the first block to finish and cancels the rest; `race [$a, $b]` does the same for handles you already hold. In `par`, `first-of` and `race`, the first failure cancels the others and is raised. A `gather` is synchronous, so it finishes within this call: work that should outlive the turn is a loose `spawn` outside any `gather`.
+
+<CRITICAL>A loose `spawn`, outside any `gather`, lives as long as this session: nothing but its own completion, `cancel`, or the session's end stops it. One inside a `gather` ends with it.</CRITICAL>
 
 Should you wish for a process that runs *after* the session is over, use `detach`:
 

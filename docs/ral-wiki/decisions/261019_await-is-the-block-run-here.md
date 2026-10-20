@@ -2,10 +2,42 @@
 status: active
 generated_at_commit: fe9cd32d
 verified_at_commit: 8826b170
-anchors: [await_handle, join, claim_first, claim_settled, claim_and_stop, Settler, Cradle, Brood, Litter, Birth, convert_own_stop, TitlePolicy, Stamp, Owner, WorkerRow, builtin_worker, builtin_par, all_form, spawn_form]
+anchors: [await_handle, join, claim_first, claim_settled, claim_and_stop, Settler, Cradle, Brood, Birth, convert_own_stop, TitlePolicy, Stamp, Owner, WorkerRow, builtin_worker, spawn_form]
 ---
 
 # `await` is the block run here, and a worker ends with its children
+
+> Amended 2026-10-20 by [[decisions/261020_gather|gather]]: there is one
+> ownership mechanism, the brood, and `gather { … }` is its syntax; a worker's
+> body is an implicit gather.
+> - **I2** names two data observations: `poll` of one handle, and
+>   `first-settled`, the index of the first of several to settle; neither
+>   writes or claims, and both treat a claimed handle as `await` does.
+> - **I3–I5** name a *gather* as the third owner in place of the calling
+>   expression: a `gather { … }` or a worker's body owns every `spawn` and
+>   `watch` born inside it, hung under the scope current when it was entered;
+>   the session owns a birth with no brood in scope; nobody owns `detach`. I4
+>   is a gather's exit rule, a worker's base applying it to its own brood, and
+>   I5's call-owned node is the gather's entry scope.
+> - **I4′ is added**: a gather's exit waits, within the grace, for every child
+>   it started whose scope is cancelled and whose thread has not ended,
+>   however it was cancelled.
+> - **`par`/`all` as a `Litter` is retired**: `par` is prelude code over
+>   `gather`, `spawn`, `first-settled`, `poll` and `await`, keeping input order
+>   in bytes and values; the `all` form is deleted (`both` covers two blocks);
+>   `race` is kept in Rust over handles already held, since it must drain
+>   losers no gather owns; `first-of` races fresh blocks. The "Three owners"
+>   table's calling-expression row and the account of `par` and `all` below
+>   are superseded.
+> - **`Birth::Call` is subsumed**: every gather-owned birth, a worker's child
+>   included, is registered, uses the run's live surface and announces no
+>   birth and no `` `done ``; only a session birth is announced. `workers`
+>   shows `` `gather `` where it showed `` `call ``.
+> - **The rejection of "a `gather { … }` delimiter" below is reversed.** One
+>   ownership mechanism beats two: a gather is the worker's own scope given
+>   syntax, not a fourth owner, and it replaces the call owner rather than
+>   joining it; and the argument that it was redundant with `par`, `all` and
+>   `race` no longer holds once those are prelude code over `gather`.
 
 > **Amended 2026-10-20.** A handle's result is claimed once. `await`, `race`
 > (its winner and every loser), `cancel` and the handle's owner each *claim* it.
@@ -380,8 +412,7 @@ code renders anything.
 `core/src/builtins/concurrency/eliminate.rs`; `HandleState`, `Sample`,
 `Settler` in `core/src/types/handle.rs`; `Birth`, `convert_own_stop` in
 `core/src/builtins/concurrency/birth.rs`; `spawn_form` in
-`core/src/builtins/concurrency.rs`; `Litter`, `builtin_par`, `all_form` in
-`core/src/builtins/concurrency/combinators.rs`; `Cradle`, `Brood` in
+`core/src/builtins/concurrency.rs`; `Cradle`, `Brood` in
 `core/src/types/handle/brood.rs`; `Stamp` in `core/src/types/handle.rs`;
 `Owner` in `core/src/types/shell/workers.rs`; `TitlePolicy` in
 `core/src/types/mooring.rs`; `WorkerRow` in `core/src/protocol/probe.rs`. The

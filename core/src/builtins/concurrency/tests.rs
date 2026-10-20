@@ -10,8 +10,8 @@ use crate::io::new_buffer;
 use crate::process::{CancelCause, DurableRoot, Scope, ScopeNode, WorkerStop};
 use crate::ty::{Grade, Ty};
 use crate::types::{
-    Break, DeferredSink, Error, Escape, HandleInner, Map, Owner, ReapCause, Sample, Status,
-    ThreadEnd, WatchEvent, WorkerId,
+    Break, Brood, BroodOwner, Cradle, DeferredSink, Error, Escape, HandleInner, Map, Owner,
+    ReapCause, Sample, Status, ThreadEnd, WatchEvent, WorkerId,
 };
 use std::sync::{Arc, Mutex, mpsc};
 
@@ -530,15 +530,16 @@ fn run_captured(
         crate::protocol::Run {
             worker_cap,
             ..crate::protocol::Run::captured(src, "<test>")
-        },
+        }
+        .into(),
     )
 }
 
-/// [`run_captured`] under a frame the caller dressed.
-fn run_framed(shell: &mut Shell, run: crate::protocol::Run) -> (Settled<Value>, Vec<u8>) {
-    use crate::run::{RunReport, RunRequest};
-    let src = format!("{:?}", run.program);
-    match shell.run(RunRequest::from(run)) {
+/// [`run_captured`] under a frame, and with loans, the caller dressed.
+fn run_framed(shell: &mut Shell, request: crate::run::RunRequest) -> (Settled<Value>, Vec<u8>) {
+    use crate::run::RunReport;
+    let src = format!("{:?}", request.run.program);
+    match shell.run(request) {
         RunReport::Ran {
             ending, captured, ..
         } => (
@@ -881,6 +882,117 @@ fn race_refuses_an_empty_list() {
     match builtin_race(&[Value::list(vec![])], &Mooring::adrift(), &mut shell) {
         Err(Break::Error(e)) => assert!(e.message.contains("race: no handles"), "{}", e.message),
         other => panic!("an empty race must be refused, got {other:?}"),
+    }
+}
+
+// ── first-settled ────────────────────────────────────────────────────
+
+/// `first-settled` names the released one of two gated workers and claims
+/// nothing: both stay awaitable.
+#[test]
+fn first_settled_names_the_first_to_settle() {
+    let mut shell = crate::test_helper::core_shell();
+    let m = Mooring::adrift();
+    let gated = |shell: &mut Shell, title: &str, v: i64| {
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let handle = spawn_child(&m, shell, spawned(title), move |_, _| {
+            gate_rx.recv().unwrap();
+            Ok(Value::Int(v))
+        })
+        .unwrap();
+        (handle, gate_tx)
+    };
+    let (a, open_a) = gated(&mut shell, "<a>", 1);
+    let (b, open_b) = gated(&mut shell, "<b>", 2);
+    open_b.send(()).unwrap();
+    let args = [Value::list(vec![
+        Value::Handle(Box::new(a.clone())),
+        Value::Handle(Box::new(b.clone())),
+    ])];
+    assert_eq!(
+        builtin_first_settled(&args, &shell).expect("b settles"),
+        Value::Int(1)
+    );
+    open_a.send(()).unwrap();
+    assert_eq!(
+        await_handle(&a, "await", &mut shell).unwrap(),
+        Value::Int(1)
+    );
+    assert_eq!(
+        await_handle(&b, "await", &mut shell).unwrap(),
+        Value::Int(2)
+    );
+}
+
+/// A handle another caller claimed is skipped.
+#[test]
+fn first_settled_skips_a_claimed_handle() {
+    let mut shell = crate::test_helper::core_shell();
+    let m = Mooring::adrift();
+    let claimed = spawn_child(&m, &mut shell, spawned("<claimed>"), |_, _| {
+        Ok(Value::Int(1))
+    })
+    .unwrap();
+    await_handle(&claimed, "await", &mut shell).expect("awaited");
+    let live = spawn_child(&m, &mut shell, spawned("<live>"), |_, _| Ok(Value::Int(2))).unwrap();
+    let args = [Value::list(vec![
+        Value::Handle(Box::new(claimed)),
+        Value::Handle(Box::new(live)),
+    ])];
+    assert_eq!(
+        builtin_first_settled(&args, &shell).expect("the live handle settles"),
+        Value::Int(1)
+    );
+}
+
+#[test]
+fn first_settled_fails_when_every_handle_is_claimed() {
+    let mut shell = crate::test_helper::core_shell();
+    let m = Mooring::adrift();
+    let awaited = spawn_child(&m, &mut shell, spawned("<awaited>"), |_, _| {
+        Ok(Value::Int(1))
+    })
+    .unwrap();
+    await_handle(&awaited, "await", &mut shell).expect("awaited");
+    let cancelled = spawn_child(&m, &mut shell, spawned("<cancelled>"), check_loop).unwrap();
+    builtin_cancel(&[Value::Handle(Box::new(cancelled.clone()))]).unwrap();
+    let args = [Value::list(vec![
+        Value::Handle(Box::new(awaited)),
+        Value::Handle(Box::new(cancelled)),
+    ])];
+    expect_claimed(
+        builtin_first_settled(&args, &shell).expect_err("every handle is claimed"),
+        "first-settled",
+    );
+}
+
+/// A foreground cancel unwinds the wait, and the handles stay unclaimed.
+#[test]
+fn first_settled_is_cancel_aware() {
+    let mut shell = crate::test_helper::core_shell();
+    let m = Mooring::adrift();
+    let running = spawn_child(&m, &mut shell, spawned("<running>"), check_loop).unwrap();
+    let foreground = Mooring::adrift();
+    shell.scope = Scope::clone(&foreground.home);
+    foreground.home.cancel(CancelCause::Interrupted);
+    let args = [Value::list(vec![Value::Handle(Box::new(running.clone()))])];
+    let err =
+        builtin_first_settled(&args, &shell).expect_err("a cancelled foreground cuts the wait");
+    assert!(matches!(err, Break::Escape(Escape::Stopped { .. })));
+    assert!(!running.is_claimed(), "first-settled claims nothing");
+    running.claim_and_stop();
+}
+
+#[test]
+fn first_settled_refuses_an_empty_list() {
+    let shell = crate::test_helper::core_shell();
+    match builtin_first_settled(&[Value::list(vec![])], &shell) {
+        Err(Break::Error(e)) => assert!(
+            e.message.contains("first-settled: no handles"),
+            "{}",
+            e.message
+        ),
+        other => panic!("an empty first-settled must be refused, got {other:?}"),
     }
 }
 
@@ -2069,75 +2181,7 @@ fn a_title_must_be_legible() {
     assert_eq!(shell.local.workers.count(), 0);
 }
 
-// ── the combinators ──────────────────────────────────────────────────
-
-/// The first failure ends the call and every sibling with it; so does a stop
-/// from the frame the call runs in.
-#[test]
-fn par_cancels_its_siblings_on_a_failure_and_on_a_stop() {
-    let body = "par { |x| if $[$x == 1] { fail [status: 3, message: x] } else { sleep 30 } }";
-    let mut shell = crate::test_helper::core_shell();
-    let started = std::time::Instant::now();
-    let (ended, _) = run_captured(&mut shell, &format!("{body} [1, 2] 2"), None);
-    assert_eq!(status(ended.expect_err("item 1 failed")), 3);
-    assert!(started.elapsed() < std::time::Duration::from_secs(6));
-    assert_eq!(shell.local.workers.count(), 0, "every sibling is claimed");
-
-    let (ended, _) = run_framed(
-        &mut shell,
-        crate::protocol::Run {
-            wall: Some(std::time::Duration::from_millis(50)),
-            ..crate::protocol::Run::captured(format!("{body} [2, 3] 2").as_str(), "<test>")
-        },
-    );
-    assert!(
-        matches!(ended, Err(Break::Escape(Escape::Stopped { .. }))),
-        "{ended:?}"
-    );
-    assert_eq!(shell.local.workers.count(), 0, "every child is claimed");
-}
-
-/// Item 0 finishes second, yet its output and value come first.
-#[test]
-fn par_replays_in_input_order() {
-    let mut shell = crate::test_helper::core_shell();
-    let (ended, stdout) = run_captured(
-        &mut shell,
-        "par { |x| sleep $x; echo $x; return $x } [0.1, 0.05] 2",
-        None,
-    );
-    let float = |x| Value::Float(crate::first_order::Finite::new(x).expect("finite"));
-    assert_eq!(
-        ended.expect("par returned"),
-        Value::list(vec![float(0.1), float(0.05)])
-    );
-    assert_eq!(String::from_utf8_lossy(&stdout), "0.1\n0.05\n");
-}
-
-#[test]
-fn all_returns_a_record_and_captures_a_command() {
-    let mut shell = crate::test_helper::core_shell();
-    let (ended, stdout) = run_captured(&mut shell, "all [a: { echo hi }, b: { return 2 }]", None);
-    let record = ended.expect("all returned");
-    let fields = expect_map(&record);
-    assert_eq!(fields.get("a").as_deref(), Some(&Value::string("hi")));
-    assert_eq!(fields.get("b").as_deref(), Some(&Value::Int(2)));
-    assert!(stdout.is_empty(), "a captured command writes nothing");
-}
-
-#[test]
-fn all_raises_the_first_failure_and_cancels_the_rest() {
-    let mut shell = crate::test_helper::core_shell();
-    let started = std::time::Instant::now();
-    let (ended, _) = run_captured(
-        &mut shell,
-        "all [a: { fail [status: 4, message: a] }, b: { sleep 30 }]",
-        None,
-    );
-    assert_eq!(status(ended.expect_err("task a failed")), 4);
-    assert!(started.elapsed() < std::time::Duration::from_secs(6));
-    assert_eq!(shell.local.workers.count(), 0, "task b is claimed");
-}
+// ── race ─────────────────────────────────────────────────────────────
 
 #[test]
 fn race_drains_its_losers() {
@@ -2181,22 +2225,28 @@ fn a_cut_race_ends_what_it_was_given() {
     assert_eq!(shell.local.workers.count(), 0);
 }
 
-/// A combinator's child is registered, so the cap bounds it, but its birth
-/// is the call's business, not announced.
+// ── a gather's ownership ─────────────────────────────────────────────
+
+/// A gather's child is registered, so the cap bounds it, but its birth is
+/// the gather's business, not announced.
 #[test]
-fn call_owned_children_are_registered_but_not_announced() {
+fn gather_owned_children_are_registered_but_not_announced() {
     let mut shell = crate::test_helper::core_shell();
-    let report = run_captured(&mut shell, "audit { par { |x| return $x } [1] 1 }", None)
-        .0
-        .expect("audit over par must succeed");
+    let report = run_captured(
+        &mut shell,
+        "audit { gather { let h = spawn \"g\" { return 1 } } }",
+        None,
+    )
+    .0
+    .expect("audit over gather must succeed");
     assert!(
         births(&trail_of(&report)).is_empty(),
-        "a call's child is not announced"
+        "a gather's child is not announced"
     );
 
     run_captured(
         &mut shell,
-        "let h = spawn \"gate\" { par { |x| sleep 30 } [1] 1 }",
+        "let h = spawn \"gate\" { gather { spawn \"g\" { sleep 30 } } }",
         None,
     )
     .0
@@ -2210,7 +2260,7 @@ fn call_owned_children_are_registered_but_not_announced() {
             .map(|e| e.owner)
             .collect()
     };
-    assert!(within(2, || owners(&shell).contains(&Owner::Call)));
+    assert!(within(2, || owners(&shell).contains(&Owner::Gather)));
     let gate = shell
         .local
         .workers
@@ -2260,19 +2310,19 @@ fn retention_spares_a_running_workers_settled_child() {
     assert_eq!(shell.local.workers.count(), 0);
 }
 
-/// Retention leaves a call's settled child to the call that will claim it.
+/// Retention leaves a gather's settled child to the gather that will join it.
 #[test]
-fn retention_spares_a_calls_settled_child() {
+fn retention_spares_a_gathers_settled_child() {
     let mut shell = crate::test_helper::core_shell();
     shell.arm_worker_retention(1);
-    let birth = Birth::Call {
-        under: shell.scope.clone(),
-        title: "<call>".into(),
-        verb: "par",
-    };
-    let child = spawn_child(&Mooring::adrift(), &mut shell, birth, |_, _| {
-        Ok(Value::Int(2))
-    })
+    let brood = Brood::new(BroodOwner::Gather);
+    shell.local.cradle = Cradle::owning(shell.scope.clone(), brood.clone());
+    let child = spawn_child(
+        &Mooring::adrift(),
+        &mut shell,
+        spawned("<gathered>"),
+        |_, _| Ok(Value::Int(2)),
+    )
     .unwrap();
     wait_settled(&child);
     for _ in 0..2 {
@@ -2285,6 +2335,226 @@ fn retention_spares_a_calls_settled_child() {
         "nothing is reaped"
     );
 
-    await_handle(&child, "par", &mut shell).expect("the call claims its child");
+    exit_brood(
+        &brood,
+        Ok(Value::Unit),
+        std::time::Duration::ZERO,
+        &mut shell,
+    )
+    .expect("the gather joins its child");
+    assert!(child.is_claimed());
     assert_eq!(shell.local.workers.count(), 0);
+}
+
+/// I4 for a gather: its return awaits the children it left, so their bytes
+/// follow its own.  Were the child the session's, the gather would return
+/// before it.
+#[test]
+fn a_gather_joins_its_children_on_return() {
+    let mut shell = crate::test_helper::core_shell();
+    let (ended, stdout) = run_captured(
+        &mut shell,
+        "gather { spawn \"c\" { echo child; return 2 }; echo parent; return 1 }",
+        None,
+    );
+    assert_eq!(ended.expect("the gather returned"), Value::Int(1));
+    assert_eq!(String::from_utf8_lossy(&stdout), "parent\nchild\n");
+    assert_eq!(shell.local.workers.count(), 0, "the child is claimed");
+}
+
+/// The halt rule under a stop: a wall striking the body parked in `sleep`
+/// cancels and drains the gather's child before the run ends.
+#[test]
+fn a_walled_gather_drains_its_children_within_the_grace() {
+    let mut shell = crate::test_helper::core_shell();
+    let started = std::time::Instant::now();
+    let (ended, _) = run_framed(
+        &mut shell,
+        crate::protocol::Run {
+            wall: Some(std::time::Duration::from_millis(50)),
+            ..crate::protocol::Run::captured(
+                "gather { spawn \"c\" { sleep 30 }; sleep 30 }",
+                "<test>",
+            )
+        }
+        .into(),
+    );
+    assert!(matches!(
+        ended.expect_err("the wall stops the run"),
+        Break::Escape(Escape::Stopped {
+            cause: CancelCause::TimedOut,
+            ..
+        })
+    ));
+    assert!(started.elapsed() < std::time::Duration::from_secs(6));
+    assert_eq!(shell.local.workers.count(), 0, "the child is claimed");
+}
+
+#[test]
+fn a_gather_childs_failure_is_the_gathers() {
+    let mut shell = crate::test_helper::core_shell();
+    let (ended, _) = run_captured(
+        &mut shell,
+        "gather { spawn \"c\" { fail [status: 7, message: c] }; return 1 }",
+        None,
+    );
+    assert_eq!(status(ended.expect_err("the child failed")), 7);
+}
+
+#[test]
+fn a_halting_gather_drains_its_children_within_the_grace() {
+    let mut shell = crate::test_helper::core_shell();
+    let started = std::time::Instant::now();
+    let (ended, _) = run_captured(
+        &mut shell,
+        "gather { spawn \"nap\" { sleep 30 }; fail [status: 3, message: halt] }",
+        None,
+    );
+    assert_eq!(status(ended.expect_err("the gather failed")), 3);
+    assert!(started.elapsed() < std::time::Duration::from_secs(6));
+    assert!(nothing_runs(&shell));
+}
+
+/// I5 for a gather: its child hangs under the run's scope, so a stop striking
+/// the run while the body is parked on the child reaches the child itself.
+#[test]
+fn a_gather_cancels_its_children_on_an_interrupt() {
+    let mut shell = crate::test_helper::core_shell();
+    let m = Mooring::adrift();
+    shell.scope = Scope::clone(&m.home);
+    let brood = Brood::new(BroodOwner::Gather);
+    shell.local.cradle = Cradle::owning(shell.scope.clone(), brood.clone());
+    let child = spawn_child(&m, &mut shell, spawned("<parked>"), check_loop).unwrap();
+    let run = m.home.clone();
+    let striker = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        run.cancel(CancelCause::Interrupted);
+    });
+    let err = await_handle(&child, "await", &mut shell).expect_err("the stop cuts the wait");
+    striker.join().unwrap();
+    assert!(matches!(err, Break::Escape(Escape::Stopped { .. })));
+    assert!(
+        child.cancel.is_cancelled(),
+        "the run's stop reaches the child"
+    );
+    assert!(within(6, || child.has_ended()));
+    assert!(nothing_runs(&shell));
+    brood.end(std::time::Duration::ZERO);
+}
+
+/// I4′: a gather's exit waits for a child the body cancelled, though the
+/// `cancel` claimed it.  The child outlives its cancel by a beat, as an
+/// external's teardown does, so a gather that did not wait returns first.
+#[test]
+fn a_cancelled_child_is_drained_at_the_gathers_exit() {
+    let mut shell = crate::test_helper::core_shell();
+    let brood = Brood::new(BroodOwner::Gather);
+    shell.local.cradle = Cradle::owning(shell.scope.clone(), brood.clone());
+    let child = spawn_child(
+        &Mooring::adrift(),
+        &mut shell,
+        spawned("<slow>"),
+        |_, child| loop {
+            if let Err(stop) = child.poll() {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                return Err(stop);
+            }
+            std::thread::yield_now();
+        },
+    )
+    .unwrap();
+    builtin_cancel(&[Value::Handle(Box::new(child.clone()))]).unwrap();
+    let started = std::time::Instant::now();
+    exit_brood(
+        &brood,
+        Ok(Value::Unit),
+        std::time::Duration::from_secs(5),
+        &mut shell,
+    )
+    .expect("the gather returns");
+    assert!(child.has_ended(), "the exit waited for the cancelled child");
+    assert!(started.elapsed() < std::time::Duration::from_secs(6));
+}
+
+/// D-3: a worker's own child is its owner's to deliver, so one unit makes one
+/// birth in the trail and one `` `done `` on the deferred sink.
+#[test]
+fn a_spawn_inside_a_worker_is_not_announced() {
+    let mut shell = crate::test_helper::core_shell();
+    let batches = Arc::new(Mutex::new(Vec::new()));
+    let report = run_framed(
+        &mut shell,
+        crate::run::RunRequest {
+            deferred: Some(Arc::new(RecDeferred(batches.clone()))),
+            ..crate::protocol::Run::captured(
+                "audit { let h = spawn \"outer\" { spawn \"inner\" { return 1 } }; await $h }",
+                "<test>",
+            )
+            .into()
+        },
+    )
+    .0
+    .expect("audit over the spawn must succeed");
+    assert_eq!(
+        only_birth(&trail_of(&report)).get("title").as_deref(),
+        Some(&Value::string("outer"))
+    );
+    let dones = batches
+        .lock()
+        .unwrap()
+        .iter()
+        .flatten()
+        .filter(|ev| crate::types::DoneEvent::from_surface(ev).is_some())
+        .count();
+    assert_eq!(dones, 1, "only the outer worker reports its completion");
+}
+
+/// A claimed, running child stays enrolled for I4′; a claimed, ended one is
+/// pruned at the next `enrol`.
+#[test]
+fn a_brood_prunes_only_a_claimed_and_ended_child() {
+    let brood = Brood::new(BroodOwner::Gather);
+    let (running, _settler) = {
+        let (_, out) = new_buffer();
+        let (_, err) = new_buffer();
+        HandleInner::new(
+            WorkerId::mint(),
+            "<running>",
+            DurableRoot::default().worker(),
+            out,
+            err,
+        )
+    };
+    let ended = handle_with_panicked_worker(b"", b"");
+    for child in [&running, &ended] {
+        child.claim_and_stop();
+        brood.enrol(child.clone());
+    }
+    let next = handle_with_panicked_worker(b"", b"");
+    brood.enrol(next.clone());
+    assert_eq!(brood.children(), [running, next]);
+}
+
+// ── prelude combinators over gather ──────────────────────────────────
+
+/// The liveness half; `tests/builtins/combinators.ral` pins the value.
+#[test]
+fn first_of_takes_the_winner_and_drains_losers() {
+    let mut shell = crate::Shell::root(
+        crate::boot::boot_runtime(
+            crate::terminal::TerminalState::default(),
+            crate::boot::BakedPrelude::runtime(),
+            &crate::HostSurface::default(),
+        )
+        .into(),
+    );
+    let started = std::time::Instant::now();
+    let (ended, _) = run_captured(
+        &mut shell,
+        "first-of [{ sleep 30; return 2 }, { return 1 }]",
+        None,
+    );
+    assert_eq!(ended.expect("the winner returned"), Value::Int(1));
+    assert!(started.elapsed() < std::time::Duration::from_secs(6));
+    assert!(nothing_runs(&shell));
 }

@@ -230,3 +230,52 @@ fn a_par_childs_external_dies_with_the_call() {
     let out = tree.assert_gone(out);
     assert_eq!(out.stdout, "caught\n");
 }
+
+/// The cleanup grace a batch run's gather drains within.
+const GRACE: Duration = Duration::from_secs(5);
+
+/// I4′: a gather whose body cancels its child returns within the grace, and
+/// the child's external tree is gone.  The body cancels only once the tree
+/// is up.
+#[test]
+fn a_cancelled_child_is_drained_at_the_gathers_exit() {
+    let tree = Tree::new();
+    let started = Instant::now();
+    let out = run_with_timeout(
+        "ral_worker_teardown",
+        &[],
+        &format!(
+            "gather {{ let h = spawn \"slow\" {{ {} }}; cat {}; cancel $h; return () }}\n",
+            tree.fixture.display(),
+            tree.gate.display()
+        ),
+        GATE_TIMEOUT,
+    );
+    let elapsed = started.elapsed();
+    tree.assert_gone(out);
+    assert!(elapsed < GRACE + Duration::from_secs(1), "took {elapsed:?}");
+}
+
+/// `par` raises the first failure in time, not in input order: item 1 fails
+/// while item 0's tree runs, and the call raises within the grace with the
+/// sibling's tree gone.  Item 1 fails only once item 0's tree is up.
+#[test]
+fn par_raises_the_first_failure_at_once() {
+    let tree = Tree::new();
+    let started = Instant::now();
+    let out = run_with_timeout(
+        "ral_worker_teardown",
+        &[],
+        &format!(
+            "try {{ par {{ |x| if $[$x == 1] {{ cat {}; fail [status: 1, message: x] }} \
+             else {{ {} }} }} [0, 1] 2 }} {{ |_| echo caught; return [] }}\n",
+            tree.gate.display(),
+            tree.fixture.display()
+        ),
+        GATE_TIMEOUT,
+    );
+    let elapsed = started.elapsed();
+    let out = tree.assert_gone(out);
+    assert_eq!(out.stdout, "caught\n");
+    assert!(elapsed < GRACE + Duration::from_secs(1), "took {elapsed:?}");
+}

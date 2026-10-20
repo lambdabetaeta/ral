@@ -565,10 +565,10 @@ impl Elaborator {
                         body: self.to_val(body, binds),
                     }
                 ),
-                ScopeAst::All { tasks } => comp!(
+                ScopeAst::Gather { body } => comp!(
                     self,
-                    CompKind::All {
-                        tasks: self.lower_options(tasks, binds),
+                    CompKind::Gather {
+                        body: self.to_val(body, binds),
                     }
                 ),
             },

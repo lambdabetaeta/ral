@@ -1,5 +1,6 @@
-# Test: the structured combinators `par`, `all` and `race`.  Each owns what
-# it starts: nothing outlives the call, and output keeps the written order.
+# Test: `gather` and the structured combinators `par`, `both`, `first-of` and
+# `race`.  Each owns what it starts: nothing outlives the call, and output
+# keeps the written order.
 
 # par keeps input order, in its output and its value, whatever finishes first.
 let xs = par { |x| sleep $x; echo "item $x"; return $x } [0.2, 0.01] 2
@@ -12,8 +13,12 @@ try {
 } { |e| echo "par failed status=$e[status]"; return [] }
 # Expected: par failed status=3
 
-# all returns a record of its tasks' values; a command's value is its output.
-let r = all [greeting: { echo hi }, answer: { return 42 }]
+# gather owns the workers spawned inside it; a command's value is its output.
+let r = gather {
+    let g = spawn "greeting" { echo hi }
+    let a = spawn "answer" { return 42 }
+    return [greeting: !{await $g}, answer: !{await $a}]
+}
 echo $r[greeting] $r[answer]
 # Expected: hi 42
 
@@ -21,4 +26,30 @@ echo $r[greeting] $r[answer]
 let slow = spawn "slow" { sleep 30; return slow }
 let fast = spawn "fast" { return fast }
 echo !{race [$slow, $fast]}
+# Expected: fast
+
+# par starts the next item as soon as any running one settles: on two slots,
+# item 0 waits for a flag only item 2 raises, so item 2 must take item 1's
+# slot.  The log order is forced by scheduling alone; values keep input order.
+let d = temp-dir
+let wait-for = { |p| if !{exists $p} { return () } else { sleep 0.01; wait-for $p } }
+let step = { |x|
+    if $[$x == 0] { wait-for "$d/flag" }
+    echo $x >> "$d/log"
+    if $[$x == 2] { echo up > "$d/flag" }
+    return $x
+}
+let ys = par $step [0, 1, 2] 2
+echo ...$ys
+cat "$d/log"
+rm -rf $d
+# Expected: 0 1 2 / 1 / 2 / 0
+
+# both runs two blocks at once and returns their values as `fst` and `snd`.
+let p = both { echo hi } { return 42 }
+echo $p[fst] $p[snd]
+# Expected: hi 42
+
+# first-of behaves as the first block to finish; the losers are cancelled.
+echo !{first-of [{ sleep 30; return slow }, { return fast }]}
 # Expected: fast

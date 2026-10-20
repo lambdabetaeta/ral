@@ -1,7 +1,7 @@
 //! Logical working directory and path-resolution verbs.
 //!
 //! `cd` moves the shell-owned [`Cwd`] on `context.cwd`, never the process cwd:
-//! that one is OS-global, and a worker (`spawn`, `par`, `all`) or a pipeline
+//! that one is OS-global, and a worker (`spawn`, `watch`) or a pipeline
 //! stage would see a sibling's `cd` as a sudden reorder.  Children still land right —
 //! `apply_env` in `core/src/runtime/command/process.rs` passes [`Shell::cwd`]
 //! as `Command::current_dir` and exports it as `PWD`.

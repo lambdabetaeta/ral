@@ -7,6 +7,7 @@
 //! loops.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::builtins::concurrency::{self, legible_title};
 use crate::guard::decode_capability_map;
@@ -20,9 +21,9 @@ use crate::runtime::pipeline;
 use crate::runtime::redirect::scope::{RedirectState, WriteFate};
 use crate::source::Span;
 use crate::types::{
-    Binding, Break, CapturePolicy, Closure, Env, Error, Escape, FrameHandle, HandlerArity,
-    HandlerFrame, Mooring, Settled, Shell, Signature, TrailScope, Value, report_value, sig,
-    sig_hint,
+    Binding, Break, Brood, BroodOwner, CapturePolicy, Closure, Cradle, Env, Error, Escape,
+    FrameHandle, HandlerArity, HandlerFrame, Mooring, Settled, Shell, Signature, TrailScope, Value,
+    report_value, sig, sig_hint,
 };
 
 use super::assemble;
@@ -94,6 +95,12 @@ enum Frame {
     /// Where its layer sits: a session frame pushed above survives the pop.
     Grant(usize),
     Audit(TrailScope),
+    /// `gather`: the brood its body's births enrol in, and the cradle to
+    /// restore when it exits.
+    Gather {
+        brood: Brood,
+        prev: Cradle,
+    },
 }
 
 /// `Redirect` and `Unmask` are boxed: any alone would exceed the cap.
@@ -713,14 +720,16 @@ impl Machine {
                 )?))
             }
 
-            CompKind::All { tasks } => {
-                let formed = tasks
-                    .iter()
-                    .map(|(k, v)| Ok((k.to_string(), form(&v.item, &env, &shell.sig)?)))
-                    .collect::<Settled<Vec<_>>>()?;
-                Focus::Return(Terminal::Value(concurrency::all_form(
-                    formed, mooring, shell,
-                )?))
+            CompKind::Gather { body } => {
+                let body = form(body, &env, &shell.sig)?;
+                let brood = Brood::new(BroodOwner::Gather);
+                let slot = self.reserve(shell)?;
+                let prev = std::mem::replace(
+                    &mut shell.local.cradle,
+                    Cradle::owning(shell.scope.clone(), brood.clone()),
+                );
+                slot.push(Frame::Gather { brood, prev });
+                Self::force(body, mooring, shell)?
             }
         })
     }
@@ -892,6 +901,12 @@ impl Machine {
                 let v = as_value(t)?;
                 Ok(Focus::Return(Terminal::Value(report_value(Ok(v), trail))))
             }
+
+            Frame::Gather { brood, prev } => {
+                shell.local.cradle = prev;
+                let v = concurrency::exit_brood(&brood, as_value(t), mooring.cleanup_grace, shell)?;
+                Ok(Focus::Return(Terminal::Value(v)))
+            }
         }
     }
 
@@ -969,6 +984,12 @@ impl Machine {
                     Err(escape)
                 }
             },
+
+            Frame::Gather { brood, prev } => {
+                shell.local.cradle = prev;
+                brood.end(mooring.cleanup_grace);
+                Err(s)
+            }
         }
     }
 }
@@ -979,7 +1000,8 @@ impl Frame {
     /// that has nothing to read back.  `Capture` restores `io.stdout`;
     /// `Redirect` as its own rule; `Unmask` restores; `Audit` closes its scope,
     /// discarding the trail no one is left to read; `Within` applies its undo;
-    /// `Grant` removes its layer.  The rest do nothing.
+    /// `Grant` removes its layer; `Gather` restores the cradle and ends its
+    /// brood without waiting.  The rest do nothing.
     fn abandon(self, shell: &mut Shell) {
         match self {
             Self::Capture { prev, .. } => shell.io.stdout = prev,
@@ -989,6 +1011,10 @@ impl Frame {
             Self::Within(undo) => undo.apply(shell),
             Self::Grant(at) => shell.context.grants.remove(at, 1),
             Self::Cleanup { prev, .. } => shell.scope = prev,
+            Self::Gather { brood, prev } => {
+                shell.local.cradle = prev;
+                brood.end(Duration::ZERO);
+            }
             Self::To { .. } | Self::Apply { .. } | Self::Try { .. } | Self::Guard { .. } => {}
         }
     }

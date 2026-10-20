@@ -64,8 +64,9 @@ The core entries group by what they compute:
   `resolve-path` `absolute-path` `abbreviate-home` `temp-dir` / `temp-file`.
 - **Codecs** — the `from-X` / `to-X` pairs and the streaming `fold-lines`: the
   typed byte↔value crossing, given its own page ([[design/codecs|codecs]]).
-- **Concurrency** — `await` `poll` `race` `cancel` `par` `worker` `workers`
-  and the host's `watch`, beside the `spawn` and `all` control operators: a
+- **Concurrency** — `await` `poll` `first-settled` `race` `cancel` `worker`
+  `workers` and the host's `watch`, beside the `spawn` and `gather` control
+  operators (`par`, `both` and `first-of` are prelude code over them): a
   worker scheduler and the graded `Handle^ε α` values only the host runtime can
   mint. `await` behaves as the block run where it is written; `poll` is the
   non-blocking probe of a handle — total over a finished block, reporting

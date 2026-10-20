@@ -146,10 +146,10 @@ let retry = { |n body|
     }
 }
 
-# Concurrency, cleanup, observability — `spawn` and `all` are control
-# operators; `watch`, `await`, `poll`, `race`, `cancel` and `par` are
-# builtins (see `core/src/builtins.rs`).  `par`, `all` and `race` run over
-# one call-owned birth path (`core/src/builtins/concurrency/combinators.rs`).
+# Concurrency, cleanup, observability — `spawn`, `gather` and `watch` are
+# control forms; `await`, `poll`, `race`, `first-settled`, `cancel`,
+# `workers` and `worker` are builtins (see `core/src/builtins.rs`).  `par`,
+# `both` and `first-of` are library code over `gather`.
 
 ## True once a handle has settled, false while its block is still running.
 ## A `settled` block (whether it returned or failed) reports `true`, only a
@@ -163,6 +163,63 @@ let is-done = { |h|
         `pending: { |_| return false }
     ]
 }
+
+## par <f> <items> <jobs>  — parallel map: run `f` over `items` on at most
+## `jobs` workers at once (`jobs <= 0`: one per item), owned by this call.
+## Values and output keep input order, whatever order the items finish in.
+## A new worker starts as soon as any running one settles.  The first failure
+## in time is raised at once, and the rest are cancelled and drained.  Nothing
+## started by `par` outlives the call.  Quadratic in `items`: `born` is
+## rebuilt per start.
+let par = { |f items jobs|
+    let limit = if $[$jobs <= 0] { length $items } else { return $jobs }
+    gather {
+        ## A settled child that failed is awaited now: its bytes replay and its
+        ## failure is raised here, and the gather ends the rest.  A success
+        ## keeps its result for the ordered pass below.
+        let _raise-if-failed = { |h|
+            case !{poll $h} [
+                `settled: { |s| case $s[outcome] [`err: { |_| await $h; return () }, `ok: { |_| return () }] },
+                `pending: { |_| return () }
+            ]
+        }
+        ## `running`: the children holding a slot; `pending`: the unstarted
+        ## items; `i`: the count started, for the title; `born`: every child so
+        ## far, in input order.  Destructuring, not `$xs[$k]`: an index by a
+        ## computed key would make `par` monomorphic (`typecheck/index.rs`).
+        let _schedule = { |running pending i born|
+            if $[!{length $running} < $limit && !{length $pending} > 0] {
+                let [x, ...later] = $pending
+                let h = spawn "par #$i" { $f $x }
+                _schedule [...$running, $h] $later $[$i + 1] [...$born, $h]
+            } elsif !{is-empty $running} { return $born } else {
+                let k = first-settled $running
+                let [settled, ...younger] = !{drop $k $running}
+                _raise-if-failed $settled
+                _schedule [...!{take $k $running}, ...$younger] $pending $i $born
+            }
+        }
+        map { |h| await $h } !{_schedule [] $items 0 []}
+    }
+}
+
+## both <a> <b>  — run two blocks at once, owned by this call, and return
+## `[fst: …, snd: …]`: the fixed-arity form of fan-out into a record.  `fst`
+## is awaited, then `snd`, so it does not fail fast: a failure in either is the
+## call's, and the other is cancelled and drained at the gather's exit.
+let both = { |a b|
+    gather {
+        let ha = spawn "both.fst" { !$a }
+        let hb = spawn "both.snd" { !$b }
+        return [fst: !{await $ha}, snd: !{await $hb}]
+    }
+}
+
+## first-of <blocks>  — run several blocks at once and behave as the first to
+## finish: its output and value, or its failure.  `race` over fresh blocks:
+## `race` claims the winner and cancels and drains the losers, and the gather's
+## exit waits for them all.
+let first-of = { |blocks| gather { race !{map { |b| spawn "first-of" { !$b } } $blocks} } }
 
 ## Run body; suppress failure and return unit.  For fire-and-forget commands
 ## where the outcome is irrelevant.

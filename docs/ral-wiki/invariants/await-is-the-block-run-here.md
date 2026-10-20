@@ -30,11 +30,17 @@ concurrently, in the worker's own shell, and the equation does not hold for:
 - *`exit`*, which ends the run that awaits, possibly a later one than the run
   that spawned it.
 
-`poll` is the one observation that returns the bytes as data instead: it
-never writes and never claims, so a settled poll leaves the handle to the one
-`await` that replays it. Do not add a second data-valued eliminator, or an
-`await` that returns a record: the eliminators are this equation and its one
-data projection.
+**Two observations return data instead, and neither claims.** `poll` returns
+one handle's bytes and state; `first-settled` returns the index of the first
+of several handles to settle. Neither writes nor claims, so the handle either
+names is left to the one `await` that replays it; both treat a claimed handle
+as `await` does. Do not add an eliminator that returns a record, or an `await`
+that does: the eliminators are this equation, and its data projections these
+two observations.
+
+The owner's join is this same `await`: a gather — a `gather { … }` or a
+worker's body — claims each child no one has claimed at its exit and replays
+it here ([[invariants/a-worker-ends-with-its-children|a-worker-ends-with-its-children]]).
 
 See [[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]]
-(I1, I2) and `docs/SPEC.md` §11.2.
+(I1), [[decisions/261020_gather|gather]] (I2) and `docs/SPEC.md` §11.2.

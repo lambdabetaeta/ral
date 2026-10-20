@@ -133,17 +133,12 @@ pub fn walk_comp(comp: &Comp, visit: &mut impl FnMut(&Comp)) {
             }
             walk_val(body, visit);
         }
-        CompKind::Audit { body } => walk_val(body, visit),
+        CompKind::Audit { body } | CompKind::Gather { body } => walk_val(body, visit),
         CompKind::Spawn { title, body } => {
             if let Some(t) = title {
                 walk_val(&t.item, visit);
             }
             walk_val(body, visit);
-        }
-        CompKind::All { tasks } => {
-            for (_, v) in tasks {
-                walk_val(&v.item, visit);
-            }
         }
         _ => {}
     }

@@ -26,7 +26,10 @@ combinators (`for`, `reduce`, `take-while`, `drop-while`, `take`, `drop`,
 `extension`, `max`, `min`, `maximum`, `minimum`, `map-lines`, `commands` (an `audit`
 report's `` `command `` facts, in trail order), `succeeded` (an `audit`
 report's outcome as a `Bool`), …) layered over the directly-registered Rust
-builtins (`each`, `map`, `filter`, `fold`, …). These are ordinary
+builtins (`each`, `map`, `filter`, `fold`, …), and the structured fan-out
+over the `gather` and `spawn` control operators: `par` (a bounded parallel
+map that keeps input order in bytes and values), `both` and `first-of`, beside
+`is-done` ([[decisions/261020_gather|gather]]). These are ordinary
 [[design/cbpv|values]] of fixed arity ([[invariants/fixed-arity|fixed-arity]]).
 
 Structural equality is the `==` / `!=` expression operator; callbacks use

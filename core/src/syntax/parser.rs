@@ -696,12 +696,11 @@ impl Parser {
                     body: Box::new(body),
                 }
             }
-            "all" => {
-                let mut form = Form::new("all", "tasks", 1);
-                self.operand_slot(&mut form)?;
-                let (tasks, _) = self.parse_options(form, false, "build: { cargo build }")?;
+            "gather" => {
+                let mut form = Form::new("gather", "body", 1);
+                let body = Box::new(self.operand(&mut form)?);
                 self.no_more_operands(form)?;
-                ScopeAst::All { tasks }
+                ScopeAst::Gather { body }
             }
             _ => unreachable!("parse_stage admits only CONTROL_OPERATORS"),
         };

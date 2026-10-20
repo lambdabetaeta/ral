@@ -132,7 +132,7 @@
 ;    as keywords for the eye) ─────────────────────────────────────────────────
 ;
 ; Overrides @function.call above for these specific heads: try/guard/within/
-; grant/audit/spawn/all are real keywords (core::syntax::is_keyword) with no
+; grant/audit/spawn/gather are real keywords (core::syntax::is_keyword) with no
 ; dedicated grammar node — they parse as an ordinary `application` whose head
 ; happens to be one of these names — and the rest are library functions
 ; styled as keywords for the eye.
@@ -140,7 +140,7 @@
 (application
   . (identifier) @keyword.control
   (#match? @keyword.control
-    "^(try|guard|within|grant|audit|spawn|all|for|await|race|watch|detach|par|map|filter|fold|reduce|each)$"))
+    "^(try|guard|within|grant|audit|spawn|gather|for|await|race|watch|detach|par|map|filter|fold|reduce|each)$"))
 
 ; Sandbox / scoping builtins read as keywords for the eye
 (application

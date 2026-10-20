@@ -235,8 +235,10 @@ agent, so a root, identity fork, and wire child each receive their own surface.
   claims the result once, so a second `await` fails. `worker <id>` recovers a
   lost handle, `workers` lists every worker, `poll` samples a long-running
   server without waiting or claiming, a block's own spawns finish before it does, and
-  fan-out that must leave nothing behind is `par`, `all` or `race`. A worker
-  lives as long as the session; `detach` is for a process that must outlive
+  fan-out that must leave nothing behind is a `gather { … }`, with `par`,
+  `both`, `first-of` over it and `race` for handles already held; a `gather`
+  is synchronous, so work that should outlive the turn is a loose `spawn`
+  outside it. A loose worker lives as long as the session; `detach` is for a process that must outlive
   it.
   The audit example distinguishes an expected nonzero exit from an error;
   independent calls use individual `attempt`s so one failure does not skip the

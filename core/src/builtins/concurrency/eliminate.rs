@@ -1,6 +1,6 @@
-//! The eliminators `await`, `poll`, `race` and `cancel`: how a worker's handle
-//! is observed, claimed and stopped; `workers`, the listing, which is data;
-//! and `worker`, the door back from it to a handle.
+//! The eliminators `await`, `poll`, `first-settled`, `race` and `cancel`: how
+//! a worker's handle is observed, claimed and stopped; `workers`, the
+//! listing, which is data; and `worker`, the door back from it to a handle.
 //!
 //! `await` behaves as if the block had run where it is awaited: the bytes the
 //! worker wrote are written to the awaiter's own streams, then it ends as the
@@ -8,10 +8,10 @@
 //! `await` on the first to settle, the rest stopped and drained.  A handle's
 //! result is claimed once: by `await`, by `race` (its winner and every loser),
 //! by `cancel`, or by the handle's owner; a second `await` is a failure, a
-//! second `cancel` nothing.  `poll` is the one observation that returns data
-//! instead: it writes nothing and claims nothing, and it is total on an
-//! unclaimed handle: a block stopped by its scope settles as `` `err ``, and a
-//! handle `cancel` claimed fails.
+//! second `cancel` nothing.  `poll` and `first-settled` are the observations
+//! that return data instead: they write nothing and claim nothing.  `poll` is
+//! total on an unclaimed handle: a block stopped by its scope settles as
+//! `` `err ``, and a handle `cancel` claimed fails.
 
 use crate::fact::Io;
 use crate::ty::Site;
@@ -108,21 +108,22 @@ fn exact(settle: CompletedHandle, handle: &HandleInner, shell: &mut Shell) -> Se
     conclude(settle.end, handle, shell)
 }
 
-/// One cancel-aware foreground wait, shared by `await`, `race` and a worker's
-/// join: sweep until a handle settles, and claim the first settled, in list
-/// order; `None` once every handle is claimed by another.  Between sweeps it
-/// polls the shell, so a foreground cancel unwinds the wait, and a loose
-/// worker, which does not hang under the awaiter's scope, stays to be claimed
-/// later.
-fn claim_first<'a>(
-    handles: &[&'a HandleInner],
+/// One cancel-aware foreground wait, shared by `await`, `race`, a gather's
+/// join and `first-settled`: sweep the handles in list order with `sample`
+/// until one is ready, polling the shell between sweeps so a foreground
+/// cancel unwinds the wait and a loose worker, which does not hang under
+/// the waiter's scope, stays to be claimed later: the index of the first
+/// ready, or `None` once every handle is claimed by another.
+fn first_ready<R>(
+    handles: &[HandleInner],
+    sample: impl Fn(&HandleInner) -> Sample<R>,
     shell: &Shell,
-) -> Settled<Option<(&'a HandleInner, CompletedHandle)>> {
+) -> Settled<Option<(usize, R)>> {
     loop {
         let mut pending = false;
-        for &handle in handles {
-            match handle.claim_settled() {
-                Sample::Settled(settle) => return Ok(Some((handle, settle))),
+        for (i, handle) in handles.iter().enumerate() {
+            match sample(handle) {
+                Sample::Settled(r) => return Ok(Some((i, r))),
                 Sample::Pending => pending = true,
                 Sample::Claimed => {}
             }
@@ -135,11 +136,19 @@ fn claim_first<'a>(
     }
 }
 
+/// [`first_ready`], claiming the first settled.
+fn claim_first(
+    handles: &[HandleInner],
+    shell: &Shell,
+) -> Settled<Option<(usize, CompletedHandle)>> {
+    first_ready(handles, HandleInner::claim_settled, shell)
+}
+
 /// Block until `handle` settles, then, if this caller claims it, behave as if
 /// its block had run here.  `None` if another claimer has it: the owner's
 /// join, which skips such a child.
 pub(crate) fn join(handle: &HandleInner, shell: &mut Shell) -> Settled<Option<Value>> {
-    claim_first(&[handle], shell)?
+    claim_first(std::slice::from_ref(handle), shell)?
         .map(|(_, settle)| exact(settle, handle, shell))
         .transpose()
 }
@@ -198,24 +207,37 @@ pub(crate) fn builtin_poll(args: &[Value], shell: &Shell) -> Settled<Value> {
 /// handle claimed by another is skipped; with every one claimed, `race`
 /// fails.
 pub(crate) fn builtin_race(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    let values: Vec<Value> = args[0]
-        .as_list("race")?
-        .iter()
-        .map(std::borrow::Cow::into_owned)
-        .collect();
-    let handles = values
-        .iter()
-        .map(|v| v.expect_handle("race"))
-        .collect::<Result<Vec<_>, _>>()?;
-    if handles.is_empty() {
-        return Err(sig("race: no handles to wait for"));
-    }
-
+    let handles = handles_of(&args[0], "race")?;
     let first = claim_first(&handles, shell);
     // Whatever ends the wait, nothing given to `race` runs on past it.
-    end_unclaimed(handles.iter().copied(), mooring.cleanup_grace);
+    end_unclaimed(&handles, mooring.cleanup_grace);
     let (winner, settle) = first?.ok_or_else(|| already_claimed("race"))?;
-    exact(settle, winner, shell)
+    exact(settle, &handles[winner], shell)
+}
+
+/// `first-settled <handles>` -- the 0-based index of the first handle to
+/// settle: cancel-aware, writing and claiming nothing, so the caller may
+/// `await` the one it names.  A handle another caller claimed is skipped;
+/// with every handle claimed, it fails as `await` does.  An empty list is
+/// an error.
+pub(crate) fn builtin_first_settled(args: &[Value], shell: &Shell) -> Settled<Value> {
+    let handles = handles_of(&args[0], "first-settled")?;
+    let (index, ()) = first_ready(&handles, HandleInner::sample, shell)?
+        .ok_or_else(|| already_claimed("first-settled"))?;
+    Ok(Value::Int(index.try_into().expect("an index fits an Int")))
+}
+
+/// The handles in `verb`'s list argument; an empty list is `verb`'s failure.
+fn handles_of(list: &Value, verb: &str) -> Settled<Vec<HandleInner>> {
+    let handles = list
+        .as_list(verb)?
+        .iter()
+        .map(|v| v.expect_handle(verb).cloned())
+        .collect::<Result<Vec<_>, _>>()?;
+    if handles.is_empty() {
+        return Err(sig(format!("{verb}: no handles to wait for")));
+    }
+    Ok(handles)
 }
 
 /// `io` as a record with more fields, the shape `Ty::extend` gives `poll`'s

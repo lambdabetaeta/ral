@@ -14,8 +14,9 @@ mod report;
 pub use quote::{is_bare_word, quote_word};
 
 /// The control operators: the stage heads `parse_control_op` reads.
-pub(crate) const CONTROL_OPERATORS: [&str; 7] =
-    ["try", "guard", "within", "grant", "audit", "spawn", "all"];
+pub(crate) const CONTROL_OPERATORS: [&str; 7] = [
+    "try", "guard", "within", "grant", "audit", "spawn", "gather",
+];
 
 /// The reserved flow and binding words, beside [`CONTROL_OPERATORS`].
 pub(crate) const FLOW_KEYWORDS: [&str; 6] = ["if", "elsif", "else", "let", "return", "case"];

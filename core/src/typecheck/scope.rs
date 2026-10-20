@@ -1,5 +1,5 @@
 //! Typing rules for the `within`, `grant`, `try`, `guard`, `audit`, `spawn`
-//! and `all` scope nodes.  The eighth scope node, `CompKind::Redirect`, is
+//! and `gather` scope nodes.  The eighth scope node, `CompKind::Redirect`, is
 //! typed inline in `infer.rs`.
 //!
 //! A form's options are syntax: the parser owns the bracket's shape and this
@@ -31,7 +31,7 @@ use crate::fact::ErrorRecord;
 use crate::ir::{HandlerArmV, OptionsV, Val};
 use crate::source::{Spanned, WithSpan};
 use crate::ty::Typed as _;
-use crate::ty::{CompTy, Producer, Scheme, Ty, closed_record};
+use crate::ty::{CompTy, Producer, Scheme, Ty};
 
 impl Inferencer<'_> {
     /// Hold each written option to what `table` says of its label, each
@@ -192,18 +192,10 @@ impl Inferencer<'_> {
         CompTy::pure(Ty::Handle(grade, Box::new(ty)))
     }
 
-    /// `all [k: B_k] : F [k: α_k]`: each task demands a value, `U(F α_k)`,
-    /// coerced as an argument is.
-    pub(super) fn infer_all(&mut self, tasks: &OptionsV) -> CompTy {
-        let fields: Vec<(&str, Ty)> = tasks
-            .iter()
-            .map(|(label, task)| {
-                let alpha = self.ctx.unifier.fresh_ty();
-                self.demand_block(task, CompTy::pure(alpha.clone()));
-                (label.as_ref(), alpha)
-            })
-            .collect();
-        CompTy::pure(closed_record(&fields))
+    /// `gather BODY : F^ε α` for `BODY : U(F^ε α)`: the body's type passes
+    /// through; joining the brood is a run-time effect.
+    pub(super) fn infer_gather(&mut self, body: &Val) -> CompTy {
+        self.scope_body(body)
     }
 
     /// Constrain `body` to a thunk of a computation ready to run, and return

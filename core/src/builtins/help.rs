@@ -21,12 +21,6 @@ use std::path::PathBuf;
 /// `LANGUAGE_CONSTANTS`; the test below makes drift loud.
 static LANGUAGE_DOCS: &[(&str, &str)] = &[
     (
-        "all",
-        "all [name: { body }, ...]  — run several blocks at once, owned by this expression, and return a record of their values.\n\n\
-         Each task runs on a worker of its own and is awaited in the order written, so their output appears in that order. A task's block is demanded as a value, as a function argument is: a command's value is its output. The first task to fail cancels the others, which are drained before the failure is raised; a stop, an exit or a panic cancels them too. Nothing started by `all` outlives the call.\n\n\
-         Example:\n  let r = all [build: { cargo build -q }, lint: { cargo clippy -q }]\n  $r[lint]",
-    ),
-    (
         "audit",
         "audit { body }  — run a block and return its outcome and a structured trail instead of failing.\n\n\
          The result is `[outcome: `ok value | `err error, trail: observations]`. The trail records commands, reads, writes, workers, host acts, and denied capability checks performed by the body. Each command observation keeps `argv`, `status`, `stdout`, `stderr`, and total byte counts; each stream retains at most 1 MiB.\n\n\
@@ -54,6 +48,12 @@ static LANGUAGE_DOCS: &[(&str, &str)] = &[
         "false",
         "false  — the Boolean false value.\n\n\
          It is a successful value, not a failure: `?` does not react to it and `try` does not catch it. It selects another `if` branch, and a top-level result of `false` gives the process status 1.",
+    ),
+    (
+        "gather",
+        "gather { body }  — run a block that owns the workers spawned inside it: nothing it started outlives it.\n\n\
+         A `spawn` inside `gather` is the gather's: its node hangs under this expression, so an interrupt or a timeout on the run reaches it. When the block returns, every such worker whose result no one has claimed is awaited in birth order, as `await` would: its output joins the block's, and the first failure, in birth order, is the block's, the rest cancelled and drained. A raise, an exit or a stop cancels and drains them. A worker's body is a gather of its own. So a gather leaves nothing running.\n\n\
+         Example:\n  gather {\n    let b = spawn \"build\" { cargo build }\n    let l = spawn \"lint\"  { cargo clippy }\n    return [build: !{await $b}, lint: !{await $l}]\n  }",
     ),
     (
         "grant",
@@ -94,7 +94,7 @@ static LANGUAGE_DOCS: &[(&str, &str)] = &[
     (
         "spawn",
         "spawn \"title\" { body }  — run a block on a worker thread and return its handle at once.\n\n\
-         The title names the work to people: it appears in `workers`, in the birth and completion notices, and is required by the exarch host (the interactive shell accepts `spawn { body }`, naming the worker by its line). The worker is owned by the session, or by the worker it was started inside: it lives until it finishes, is cancelled, or the session ends, and a worker finishes only after every worker it started has. `await $h` behaves as if the block had run there; `poll $h` samples it; `cancel $h` stops it and everything it started; `worker <id>` recovers a handle whose binding is gone.\n\n\
+         The title names the work to people: it appears in `workers`, in the birth and completion notices, and is required by the exarch host (the interactive shell accepts `spawn { body }`, naming the worker by its line). The worker is owned by the `gather` or the worker it was started inside, else by the session: it lives until it finishes, is cancelled, or the session ends, and a worker finishes only after every worker it started has. `await $h` behaves as if the block had run there; `poll $h` samples it; `cancel $h` stops it and everything it started; `worker <id>` recovers a handle whose binding is gone.\n\n\
          Example:\n  let h = spawn \"sort the log\" { sort huge.log > sorted.log }\n  …\n  await $h",
     ),
     (

@@ -166,27 +166,18 @@ fn spawn_is_typed_by_its_body() {
     );
 }
 
-/// `all` demands a value of each task, as an argument is demanded: a command
-/// task's field is its output.
+/// `gather` passes its body's type through, grade and all.
 #[test]
-fn all_is_typed_field_by_field() {
-    let top = toplevel_ok("let r = { all [a: { echo hi }, b: { 1 }] }\nreturn ()");
-    assert_eq!(scheme_at(&top, 0), "Returns [a: String, b: Integer]");
-    assert!(
-        parse("all [a: { 1 }, a: { 2 }]").is_err(),
-        "a repeated task label is a parse error"
-    );
+fn gather_passes_its_bodys_type() {
+    let top = toplevel_ok("let c = { gather { echo hi } }\nlet n = { gather { 1 } }\nreturn ()");
+    assert_eq!(scheme_at(&top, 0), "Command");
+    assert_eq!(scheme_at(&top, 1), "Returns Integer");
 }
 
-/// `par` is a builtin demanding a value of its callback, so a command's
-/// output is what each item maps to.
+/// `par` demands a value of its callback, so a command's output is what each
+/// item maps to.
 #[test]
 fn par_demands_a_value_and_returns_a_list() {
-    let table = common::manifest(&ral_core::HostSurface::default());
-    assert_eq!(
-        ral_core::typecheck::builtin_type_hint(&table, "par").as_deref(),
-        Some("∀α β. {α → Returns β} → [α] → Integer → Returns [β]")
-    );
     let top = toplevel_ok("let xs = par { |x| echo $x } [1, 2] 2\nreturn ()");
     assert_eq!(scheme_at(&top, 0), "[String]");
 }

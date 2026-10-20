@@ -128,6 +128,15 @@ fn prelude_schemes_carry_their_grades() {
     );
     assert_eq!(shown("each-line"), "∀α ν. {String → ν α} → Returns Unit");
     assert_eq!(shown("bytes-to-string"), "Bytes → Returns String");
+    assert_eq!(
+        shown("par"),
+        "∀α β. {α → Returns β} → [α] → Integer → Returns [β]"
+    );
+    assert_eq!(
+        shown("both"),
+        "∀α β. {Returns α} → {Returns β} → Returns [fst: α, snd: β]"
+    );
+    assert_eq!(shown("first-of"), "∀α ν. [{ν α}] → ν α");
 }
 
 /// The builtin rows the design grades: writers are commands, the runners of

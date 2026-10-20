@@ -1,16 +1,13 @@
-//! Concurrency: the births `spawn`, `watch`, `detach`, the combinators `par`
-//! and `all`, the listing `workers` and the reacquisition `worker`, and the
-//! eliminators `await`, `poll`, `race`, `cancel`.
+//! Concurrency: the births `spawn`, `watch`, `detach`, the listing `workers`
+//! and the reacquisition `worker`, and the eliminators `await`, `poll`,
+//! `first-settled`, `race`, `cancel`.
 //!
-//! Every worker has one owner, fixed at birth: the calling expression (`par`,
-//! `all`, `race`), which ends it before returning, on the call's live sink;
-//! the session or the worker it was born inside (`spawn`, `watch`), which it
-//! hangs under, buffering its surface until one `done` on the deferred sink;
-//! or nobody (`detach`).  A worker's bytes are buffered per handle and
-//! replayed by `await`.
+//! Every worker has one owner, fixed at birth: the gather it was born inside
+//! (a `gather { … }`, or a worker's body), which joins it at its exit; the
+//! session; or nobody (`detach`).  A worker's bytes are buffered per handle
+//! and replayed by `await`.
 
 mod birth;
-mod combinators;
 mod eliminate;
 #[cfg(test)]
 mod tests;
@@ -19,12 +16,12 @@ mod tests;
 use super::util::check_arity;
 use crate::evaluator::machine;
 use crate::types::{Closure, Mooring, Settled, Shell, TitlePolicy, Value, sig, sig_hint};
+pub(crate) use birth::exit_brood;
 use birth::{Birth, spawn_child};
-pub(crate) use combinators::all_form;
-pub(super) use combinators::builtin_par;
-use eliminate::{await_handle, join};
+use eliminate::join;
 pub(super) use eliminate::{
-    builtin_await, builtin_cancel, builtin_poll, builtin_race, builtin_worker, builtin_workers,
+    builtin_await, builtin_cancel, builtin_first_settled, builtin_poll, builtin_race,
+    builtin_worker, builtin_workers,
 };
 
 // ── spawn ────────────────────────────────────────────────────────────────

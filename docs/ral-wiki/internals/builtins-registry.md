@@ -37,8 +37,8 @@ a zero `status` on `fail` wants `return`. Everything a type can state is in the
 scheme — including whether a row writes, which is its result grade (`Command`),
 not a facet ([[decisions/260930_graded-f|graded-f]]). Bodies are grouped by concern
 (`strings.rs`, `collections.rs`, `predicates.rs`, `fs.rs`, `codecs.rs`,
-`concurrency/` for the eliminators, `par`, `workers`, `worker` and `watch`
-(`spawn` and `all` are control operators), `modules.rs` for `use`, `misc.rs` for
+`concurrency/` for the eliminators, `first-settled`, `workers`, `worker` and
+`watch` (`spawn` and `gather` are control operators, `par` prelude code), `modules.rs` for `use`, `misc.rs` for
 the ones with no cluster — `fail`, `exit`, `surface`, `warn`, `ask` — …).
 
 **The two halves are the two argument conventions, and the choice is visible in

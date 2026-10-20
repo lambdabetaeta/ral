@@ -108,18 +108,21 @@ Bodies are grouped by concern, one submodule each:
 - `shell.rs` — `cd`, `alias` / `unalias`;
 - `concurrency.rs` — the `spawn` form's door (`spawn_form`), `watch` /
   `detach`, the handle verbs
-  `await` / `poll` / `race` / `cancel` / `worker`, and the `workers` listing
-  (`builtin_workers`), split by concern: the root keeps the
-  verbs of birth, `concurrency/birth.rs` the `Birth` door (`spawn_child`),
-  `concurrency/eliminate.rs` the eliminators and `worker`,
-  `concurrency/combinators.rs` the structured fan-out — `par` (`builtin_par`,
-  a Rust builtin), the `all` form's door (`all_form`) and the `Litter` they
-  share (`race` ends its losers through `end_unclaimed`) — and `concurrency/tests.rs` the tests; the worker's
+  `await` / `poll` / `first-settled` / `race` / `cancel` / `worker`, and the
+  `workers` listing (`builtin_workers`), split by concern: the root keeps the
+  verbs of birth, `concurrency/birth.rs` the `Birth` door (`spawn_child`) and
+  the one exit rule a gather and a worker's base share (`exit_brood`),
+  `concurrency/eliminate.rs` the eliminators, `worker`, and the one
+  cancel-aware sweep (`first_ready`) under `await`, `race`, a gather's join and
+  `first-settled` (`builtin_first_settled`; `race` ends its losers through
+  `end_unclaimed`), and `concurrency/tests.rs` the tests; the worker's
   deferred surface lives in `types/handle/surface.rs`, its
   cradle and brood in `types/handle/brood.rs` (builtins under their bare
-  names; the `is-done` predicate is prelude code over them). `spawn` and
-  `all` are control operators, not rows: the machine forms their operands and
-  calls the two doors ([[map/core/evaluator|evaluator]]). All
+  names; `is-done`, `par`, `both` and `first-of` are prelude code over them,
+  [[map/core/prelude|prelude]]). `spawn` and `gather` are control operators,
+  not rows: the machine forms `spawn`'s operands and calls its door, and runs
+  `gather` as a frame (`Frame::Gather`) that settles its brood by
+  `exit_brood` ([[map/core/evaluator|evaluator]]). All
   but `worker` and the host-installed two seed through `CORE_BUILTINS`;
   `worker` seeds through `BOUNDARY_BUILTINS`, and the other two live here
   too but reach a session via `WATCH_BUILTIN` / `DETACH_BUILTIN`, not core. `builtin_detach` is the surface discipline
@@ -174,20 +177,23 @@ Bodies are grouped by concern, one submodule each:
   [[decisions/260615_poll-total-failed-arm|the settle decision]],
   [[decisions/260702_partial-poll-pending-output|partial-poll-pending-output]]).
   A `spawn` or `watch` worker hangs under its shell's cradle, not the run's
-  foreground scope: under the durable session root in a run, so a foreground
-  cancel never reaps it, and under its parent worker's node inside a worker,
-  whose base settles it (`Brood`: each child it claims awaited on return,
-  cancelled and drained on a halt, a child another claimer has skipped), so
-  `cancel` of a worker reaches its tree. A `par` or `all` child hangs under
-  the call's current scope and is the call's to end (`Litter`). `await` shares
-  `race`'s cancel-aware wait loop (`claim_first`), so a deadline unwinds
-  the wait while a session worker survives
-  ([[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]]).
-  The spawn door is `spawn_child`, which takes a `Birth` — `Spawn`, `Watch` or
-  a calling expression's `Call` — and so the verb a refusal names, where the
-  child's node hangs, its `Owner`, whether its birth is announced, and how its
-  bytes are wired: a `Call` child writes to the call's live sink, as a
-  pipeline stage does, and flushes no `` `done ``. It mints the worker's
+  foreground scope: under the durable session root in a run outside any
+  gather, so a foreground cancel never reaps it, and inside a gather — a
+  worker's body or a `gather { … }` — under the gather's entry scope, enrolled
+  in its `Brood` (`Cradle::owning`): each child awaited on return, cancelled
+  and drained on a halt, a child another claimer has skipped, and every
+  cancelled child waited for within the grace (`Brood::wait_cancelled`), so
+  `cancel` of a worker reaches its tree. `await` shares `race`'s
+  cancel-aware wait loop (`claim_first`, over `first_ready`), so a deadline
+  unwinds the wait while a session worker survives
+  ([[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]],
+  [[decisions/261020_gather|gather]]).
+  The spawn door is `spawn_child`, which takes a `Birth` — `Spawn` or
+  `Watch` — and reads the owner off the cradle: with a brood in scope the
+  child is the brood's (`Owner::Gather` or `Owner::Worker`, from its
+  `BroodOwner`), enrolled, writing to the run's live sink as a pipeline stage
+  does, unannounced and flushing no `` `done ``; with none it is the
+  session's, announced, its surface deferred. It mints the worker's
   `WorkerId` first and builds the handle around it: `HandleInner` carries the
   `id`, the `title`, and the worker's clock, a birth `Stamp` and an end
   `Stamp` that its `Settler` sets on every exit path of the worker thread, from
@@ -196,11 +202,11 @@ Bodies are grouped by concern, one submodule each:
   eliminator's error, the trail, and the completion event use — comes from the
   birth itself: a `spawn`'s title (non-empty and one line, `legible_title`),
   else `shell.call_site()` — `block at <script>, line N` — which the run's
-  `TitlePolicy` may refuse before any birth; a watch's label; a `par` child's
-  `par #i`, an `all` child's label. The completion event (`DoneEvent`) carries
+  `TitlePolicy` may refuse before any birth; a watch's label. The completion
+  event (`DoneEvent`) carries
   the handle's id, title and elapsed time beside its outcome, including on
   failure and panic. No policy reaps a running worker: it ends by completing,
-  by `cancel`, or with its session. `worker <id>` (`builtin_worker`, a
+  by `cancel`, or with its owner. `worker <id>` (`builtin_worker`, a
   boundary row) takes back the handle of any worker still in the registry,
   running or settled, by that id; the value it settles with is admitted at the
   `await` site (`admit_handled`). The spawn door also enforces the frame's
@@ -234,14 +240,14 @@ Bodies are grouped by concern, one submodule each:
   `spawn_child` also files the freshly-minted handle on `shell.local.workers`
   — a per-shell registry, host-independent and carrying no policy
   ([[map/core/shell-state|shell-state]]); `await`, `race`'s winner and its
-  cancelled losers, `cancel`, and a brood's or litter's end claim the handle
-  (so no other brood or litter answers for it) and remove the entry from
+  cancelled losers, `cancel`, and a brood's join or end claim the handle
+  (so no other brood answers for it) and remove the entry from
   whichever shell claims it, and `poll`, on either arm, or a `workers` listing
   never touches the registry. **A listing is data; `worker <id>` is the
   door.** `workers` maps every entry, running or retained, ids ascending,
   through `worker_row` (`types/shell/host.rs`, shared with the `` `workers ``
   probe) to a seven-field record — `id`, `title`, `owner` (`` `session ``, ``
-  `worker id ``, `` `call ``), `state` (`` `running `` or `` `done `` with the
+  `worker id ``, `` `gather ``), `state` (`` `running `` or `` `done `` with the
   `Done` ending), `started` (Unix seconds), `elapsed` (seconds, off the
   handle's `Stamp`s), `settled` (`` `some `` Unix seconds or `` `none ``) —
   reading the state with `settled`, which caches but claims nothing, and

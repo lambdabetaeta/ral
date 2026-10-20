@@ -1,6 +1,6 @@
 //! The worker registry: a per-[`Shell`](super::Shell) directory of every
-//! worker (`spawn`, `watch`, and `par`/`all` children) spawned from it. Pure
-//! bookkeeping, never a policy itself.
+//! worker (`spawn` and `watch`, a `gather`'s children included) spawned from
+//! it. Pure bookkeeping, never a policy itself.
 //!
 //! `spawn_child` in `builtins::concurrency` files an entry as it mints the
 //! handle. The entry is gone once the worker's result is *claimed*, which
@@ -55,18 +55,18 @@ pub enum ReapCause {
 label!(ReapCause);
 
 /// Who settles a worker: the session, the worker it was born inside, or the
-/// calling expression that birthed it (`par`, `all`).
+/// `gather` it was born inside.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Owner {
     Session,
     Worker(WorkerId),
-    Call,
+    Gather,
 }
 
 variant!(typed Owner {
     Session: "session",
     Worker(WorkerId): "worker",
-    Call: "call",
+    Gather: "gather",
 });
 
 /// How a worker ended, as its `` `done `` event says: no return
@@ -373,7 +373,7 @@ impl WorkerRegistry {
     /// never runs retroactively over a quiet period. A claimed entry is gone
     /// under the same lock, so it is never reaped; this catches the rest,
     /// polled or not.
-    /// A settled child of a running worker, or of a call, is left alone: its
+    /// A settled child of a running worker, or of a gather, is left alone: its
     /// owner joins it.
     pub(crate) fn sweep_retention(&self) {
         let mut inner = self.unclaimed();
@@ -391,7 +391,7 @@ impl WorkerRegistry {
         while i < inner.entries.len() {
             let entry = &inner.entries[i];
             let held = running.contains(&entry.handle.id)
-                || entry.owner == Owner::Call
+                || entry.owner == Owner::Gather
                 || matches!(entry.owner, Owner::Worker(parent) if running.contains(&parent));
             match (held, entry.settled_epoch) {
                 (false, None) => {

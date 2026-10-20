@@ -587,18 +587,33 @@ handles. When a binding is gone, `worker` takes the id back to the handle:
     workers
     await !{worker 7}
 
-Fan-out that must leave nothing running is a call rather than a set of
-spawns:
+Fan-out that must leave nothing running is a `gather`, a block that owns
+the workers spawned inside it:
+
+    gather {
+        let t = spawn "tests" { cargo test -q }
+        let l = spawn "lint"  { cargo clippy -q }
+        return [tests: !{await $t}, lint: !{await $l}]
+    }
+
+When the block returns, every worker in it that no one has awaited is awaited
+in the order it was born; when it fails or is interrupted, they are all
+cancelled. The prelude builds the common shapes on it:
 
     par { |file| convert $file } $files !{nproc}
-    all [tests: { cargo test -q }, lint: { cargo clippy -q }]
+    both { cargo test -q } { cargo clippy -q }
+    first-of [{ fetch-from a }, { fetch-from b }]
     race [$first, $second]
 
 `par` is a bounded parallel `map` that keeps input order, output included.
-`all` runs several blocks at once and returns a record of their values,
-`[tests: …, lint: …]`. `race` claims the first handle to finish and cancels the
-rest. None leaves anything running when it returns: the first failure cancels
-the others and is raised, and Ctrl-C cancels them all.
+`both` runs two blocks at once and returns `[fst: …, snd: …]`; it awaits `fst`
+then `snd`, so a failure in either is raised when its turn comes and the other
+is cancelled. `first-of` runs several blocks and behaves as the first to
+finish, cancelling the rest. `race` does the same for handles you already hold:
+it claims the first to finish and cancels the others. In `par`, `first-of` and
+`race` the first failure cancels the others and is raised, and Ctrl-C cancels
+them all. A gather leaves nothing running when it
+returns.
 
 `watch build { make -j !{nproc} }` is a spawn that streams labelled output.
 Spawned blocks inherit immutable values, so there is no shared mutable state

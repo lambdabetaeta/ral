@@ -7,6 +7,15 @@ anchors: [Escape::Stopped, Break::stopped, Break::of_child, final_poll, ThreadEn
 
 # Delimiters are handlers for `poll`
 
+> Amended 2026-10-20 by [[decisions/261020_gather|gather]]: in the construct
+> table, the `par` row is the `gather` row. `gather B` — and with it `par`,
+> `both` and `first-of`, prelude code over it — cancels and drains the
+> children it owns on every halt of its body, a failure, an `exit` or a stop
+> alike, then passes the halt; a panic cancels them without waiting. `par` is
+> prelude code again, and still cancels and drains its siblings on every
+> exit. `all` is deleted. Law 9 and `convert_own_stop` are unchanged: a
+> gather is not a worker base and converts nothing.
+
 > Amended 2026-10-19 by [[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]]:
 > a worker's base consumes every `Cancelled` or `TimedOut` stop whose owner
 > is not the session root, not only one naming its own node, so "consumed iff

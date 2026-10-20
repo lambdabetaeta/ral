@@ -562,17 +562,15 @@ pub mod scheme {
         on_handle(u, |handle, body, _| fun(Ty::list(handle), body))
     }
 
+    /// `first-settled :: ∀ε α. [Handle^ε α] → F Int`: which settled first.
+    pub(crate) fn first_settled(u: &mut Unifier) -> Scheme {
+        on_handle(u, |handle, _, _| fun(Ty::list(handle), pure(Ty::Int)))
+    }
+
     /// `cancel :: ∀ε α. Handle^ε α → F Unit`
     pub(crate) fn cancel_op(u: &mut Unifier) -> Scheme {
         on_handle(u, |handle, _, _| fun(handle, pure(Ty::Unit)))
     }
-
-    // par :: ∀α β. U(α → F β) → [α] → Int → F [β]
-    scheme!(par_op<av: Kind::ANY, bv: Kind::ANY>: [
-        thunk(fun(Ty::Var(av), pure(Ty::Var(bv)))),
-        Ty::list(Ty::Var(av)),
-        Ty::Int
-    ] -> Ty::list(Ty::Var(bv)));
 
     // workers :: F [WorkerRow]
     scheme!(workers_op: pure Ty::list(WorkerRow::ty()));

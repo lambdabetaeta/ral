@@ -1,7 +1,7 @@
 # Control flow is library; seven operators are syntax
 
 **ral's grammar reserves syntax for exactly seven control operators** —
-`within`, `grant`, `try`, `guard`, `audit`, `spawn`, `all` — alongside the
+`within`, `grant`, `try`, `guard`, `audit`, `spawn`, `gather` — alongside the
 syntactic forms `if`, `case`, and `?`. Everything else a shell usually bakes in (`for`, `while`, `map`,
 `each`, `retry`) is an ordinary prelude function taking thunks.
 
@@ -20,14 +20,14 @@ the body can observe:
 - `within` / `grant` / `audit` scope handler frames, capability frames, and
   audit ownership over the body's whole dynamic extent, persisting across tail
   calls;
-- `spawn` runs its body on a worker owned by the session or by the enclosing
-  worker, and its title is optional — an operand only syntax may leave out,
+- `spawn` runs its body on a worker owned by the enclosing gather or by the
+  session, and its title is optional — an operand only syntax may leave out,
   since no value's signature spells an optional argument
   ([[invariants/fixed-arity|fixed-arity]]);
-- `all` runs its labelled bodies on workers the expression owns and types the
-  record of their values field by field, each body demanded as a value, a
-  rule no function over a record of thunks has
-  ([[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]]).
+- `gather` scopes the ownership of concurrent work over its body's dynamic
+  extent, as `within` scopes handlers: every `spawn` and `watch` inside it is
+  its own, joined on return and cancelled and drained on a halt, its type the
+  body's ([[decisions/261020_gather|gather]]).
 
 `if`, `case`, `?` are in the grammar for ergonomics — they take arbitrarily many
 arms — but their typing is ordinary. What `?` and `try` *do* — the failure model

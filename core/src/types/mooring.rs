@@ -231,7 +231,7 @@ impl Mooring {
         }
     }
 
-    /// The mooring a stage thread, or a combinator's child, runs under: the
+    /// The mooring a stage thread, or a gather's child, runs under: the
     /// node's own surface and deferred sink carry over — a stage's audit and
     /// `spawn` deliveries are the pipeline's, not a worker's own — but no
     /// desk, no fork, and no terminal authority, since only the node itself

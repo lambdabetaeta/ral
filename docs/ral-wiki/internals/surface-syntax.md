@@ -155,7 +155,7 @@ then resolves binding → handler → PATH at *evaluation* time
 (`ir.rs` `CommandWord`), so handler installation and PATH state are read when
 the command runs, not when it was parsed. The seven reserved
 [[design/control-operators|control operators]] (`try`, `guard`, `within`,
-`grant`, `audit`, `spawn`, `all`) are recognised at the parser layer, by a
+`grant`, `audit`, `spawn`, `gather`) are recognised at the parser layer, by a
 `match` in `parse_control_op` over `syntax::CONTROL_OPERATORS`; `spawn` takes
 one operand or two, a second before the command's end or a redirect making
 the first its title — optionality lives in syntax, as `if`'s `else` does,

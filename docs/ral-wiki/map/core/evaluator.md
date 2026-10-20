@@ -74,7 +74,7 @@ Internals:
   folds the `Err` into `Focus::Halt` once. `reserve` is the stack cap and
   hands back the `Slot` that is the only way to push, so "infallible after
   reserve" is a type; `Frame::abandon` is the one undo for `Unmask`, `Within`,
-  `Grant` and `Audit`, shared by the rules and the panic walk. `Focus::Eval` and
+  `Grant`, `Audit` and `Gather`, shared by the rules and the panic walk. `Focus::Eval` and
   `Terminal::Lambda` hold a computation closure `{ comp, env }`, a type apart
   from the thunk value's `Closure`; `Frame::To` alone carries an `Env`, and
   `Apply`, `Try` and `Guard` none. `CompKind::Capture(body)` pushes
@@ -125,9 +125,12 @@ Internals:
   ([[map/core/runtime|runtime]]).
 - `scope.rs` — dynamic-frame installation implementing [[design/scoping|scoping]]
   and the frame-installing [[design/control-operators|control operators]] (`WithinScope`; a failed `try`/`guard`/`audit`
-  body becomes an `ErrorRecord` through `Error::record`). `spawn` and `all`
-  install no frame: `machine.rs` forms their operands and hands them to
-  `concurrency::spawn_form` / `all_form` ([[map/core/builtins|builtins]]). The
+  body becomes an `ErrorRecord` through `Error::record`). `spawn` installs no
+  frame: `machine.rs` forms its operands and hands them to
+  `concurrency::spawn_form` ([[map/core/builtins|builtins]]). `gather` is
+  `Frame::Gather` in `machine.rs`: it swaps the shell's cradle for one owning a
+  fresh `Brood` (`Cradle::owning`), and on exit restores it and settles the
+  brood by `concurrency::exit_brood` on return, `Brood::end` on a halt. The
   `within` form installs command handlers: a per-name handler and every alias
   must be a unary lambda `{ |args| ... }`, the catch-all a binary lambda `{
   |name args| ... }`; the calling convention is fixed by the surface form and

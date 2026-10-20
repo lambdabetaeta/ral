@@ -1,7 +1,7 @@
 ---
 verified_at_commit: dad6a1b3
 verified_at_date: 2026-10-17
-anchors: [Machine, step_eval, eval_rules, step_return, step_halt, Frame, Focus, Terminal, Closure, Closure::new, Node::new, Env, restrict, Signature, lookup, form, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, EngineSeed, NESTED_MACHINE_LIMIT, force, force_val, launch_thread_stage, Assemble]
+anchors: [Machine, step_eval, eval_rules, step_return, step_halt, Frame, Focus, Terminal, Closure, Closure::new, Node::new, Env, restrict, Signature, lookup, form, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, EngineSeed, NESTED_MACHINE_LIMIT, force, force_val, launch_thread_stage, Assemble, Frame::Gather, exit_brood]
 ---
 
 # The evaluator: a CEK machine over computation closures
@@ -25,7 +25,7 @@ the stack. A terminal has two shapes, `Terminal::Value(v)` and
 value, so a `Lam` in focus returns as `Lambda` and the frame above decides:
 `Apply` consumes it by β, a computation-holed frame (`Redirect`, `Unmask`,
 `Within`, `Grant`, `Try`) passes it through, a value-holed frame
-(`To`, `Capture`, `Guard`, `Cleanup`, `Audit`) halts with the
+(`To`, `Capture`, `Guard`, `Cleanup`, `Audit`, `Gather`) halts with the
 bare-lambda error — unreachable for a checked program, since the checker
 η-expands every arrow-typed computation into a thunked λ (SPEC §17.8).
 `Decode` has no frame: the kernel's `decode` takes a value, so it closes and
@@ -67,7 +67,7 @@ literal eagerly instead, forming each element with `sig`. Inspecting a
 its value, `Bind` pushes `To`, `App`
 closes its arguments then pushes `Apply` and evaluates the head, `Rec`
 unfolds the n-ary group, `Exec` classifies the head through the lexical
-environment, `Pipeline` launches and joins its node, the six handler forms
+environment, `Pipeline` launches and joins its node, the seven handler forms
 close their operands, install, push their frame and force the body …);
 `Assemble` is the one rule that does O(data) work over what looks like value
 syntax: a list, record, or map literal with a spread or a computed key
@@ -92,7 +92,8 @@ a caret.)
 any effect, and returns the `Slot` that holds the stack's only `push`; a rule
 cannot push without having asked. `Frame::abandon` is the one undo for the
 frames whose effect is only undone (`Unmask`, `Within`, `Grant`, and `Audit`
-on an escape), used by the rules and by the panic walk alike.
+on an escape), used by the rules and by the panic walk alike; on `Gather` it
+restores the cradle and stops the brood without waiting.
 
 **`To` holds its environment, which is what makes extent structural.** `M to
 x. N` pushes `To { bind, env: E }` *before* M runs; when M
@@ -111,7 +112,11 @@ write is observed when the body settles, carrying its target before and after),
 `Within(WithinUndo)` restores env overrides, the whole cwd cell and handlers, `Grant` pops
 the capability stack, `Unmask` restores the masked handler, `Audit`
 closes its trail scope and restores the capture policy; `Try` holds only its
-handler. `Frame` is at most 128 bytes (asserted at compile
+handler. `Gather { brood, prev }` holds the brood its body's births enrol in
+and the cradle it displaced: on return it restores the cradle and settles the
+brood by `exit_brood` — the exit rule a worker's base shares — and on a halt
+it restores the cradle and ends the brood within the cleanup grace
+([[invariants/a-worker-ends-with-its-children|a-worker-ends-with-its-children]]). `Frame` is at most 128 bytes (asserted at compile
 time; `Redirect` and `Unmask` are boxed).
 
 **`Capture` holds the sink it replaced.** `cap M` pushes a fresh buffer as
@@ -180,11 +185,11 @@ takes a `Mode` — `Session`, `Local`, `Module`, `Prelude` — which alone
 decides leases.
 
 **Boundaries.** Three things start a fresh machine over the empty stack: a
-run-door phrase, a worker thread (a `spawn` or `watch`, or a child of `par` or
-`all`), and a pipeline stage thread (`runtime/pipeline/thread.rs`). The
-`spawn` and `all` forms push no frame: their rule forms the operands and
-births the workers in one step (`spawn_form`, `all_form`), and `all` awaits
-its children inside that step. A native that applies a user function — the
+run-door phrase, a worker thread (a `spawn` or `watch`), and a pipeline stage
+thread (`runtime/pipeline/thread.rs`). The `spawn` form pushes no frame: its
+rule forms the operands and births the worker in one step (`spawn_form`). A
+`gather` is a frame like any handler's, not a boundary: its body runs on the
+same machine, and only the births inside it start machines of their own. A native that applies a user function — the
 collection combinators, hook dispatch — runs a *nested*
 machine on the host stack through `machine::apply`; `NESTED_MACHINE_LIMIT`
 (calibrated by `nested_machines_fit_a_worker_stack` on a 2 MiB thread, a

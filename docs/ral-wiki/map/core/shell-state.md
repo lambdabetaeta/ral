@@ -162,15 +162,17 @@ checkpoint, since a run never writes it.
   residue once run and session state are named. The `cradle`
   (`types/handle/brood.rs`) says where a loose birth hangs and who settles
   it: loose under the root, answering for nothing, for a run and an aside
-  (`Shell::construct`, `Shell::join_session`); a worker's own node and its
-  `Brood`, the handles of every `spawn`/`watch` born inside it, set first
-  thing in the worker closure; a stage shares its parent's, so a `spawn` in a
-  stage inside a worker is that worker's
+  (`Shell::construct`, `Shell::join_session`); inside a gather, its entry
+  scope and its `Brood`, the handles of every `spawn`/`watch` born inside it
+  (`Cradle::owning`) — set first thing in the worker closure for a worker's
+  body, and by `Frame::Gather` for the extent of a `gather { … }`; a stage
+  shares its parent's, so a `spawn` in a stage inside a gather is that
+  gather's
   ([[invariants/a-worker-ends-with-its-children|a-worker-ends-with-its-children]]). The worker registry
   (`shell/workers.rs`) is a per-`Shell` directory of every `spawn`/`watch`ed
   worker, one per agent: a `WorkerEntry` is the `HandleInner` and its
-  `Owner` (the session, the worker it was born inside, or a calling
-  expression), the id, title and clock being the handle's own; `Shell::spawn_thread` shares it by `Arc` into
+  `Owner` (the session, the worker whose body it was born in, or a
+  `gather`), the id, title and clock being the handle's own; `Shell::spawn_thread` shares it by `Arc` into
   a spawned worker's or a pipeline stage's own shell (so a nested `spawn`
   registers alongside its parent), but a sub-agent fork or an aside starts
   with a fresh, empty one carrying the parent's retention. Beside the entries it keeps the `ReapNotice` ledger the reap policies
@@ -434,18 +436,16 @@ registry, root file, call site and exit hints. The kinds differ only in their
 `Holding` — cancel root and anchor, roster, lease ledger, detach budget,
 fixings:
 
-- `spawn_thread` — a spawned worker (`spawn`, `watch`, a `par` or `all`
-  child) *and* a ral-written pipeline stage
+- `spawn_thread` — a spawned worker (`spawn`, `watch`) *and* a ral-written pipeline stage
   ([[map/core/runtime|runtime]]'s `pipeline/thread.rs`) — a pipeline never
   rides a re-exec'd child — on a fresh OS thread that owns its own IO, seeded
   from the spawning shell's session, built on the spawning thread; the body's
   capture rides in its closure, and nothing flows back. A worker's mooring is rebuilt by `Mooring::for_worker` on the
   calling thread (so the door can hand the caller the worker's scope) and moved
   into the thread, which is why it runs under a child of its cradle — the
-  durable root in a run, the parent worker's node inside a worker — rather
-  than the foreground scope, and a run timeout or Esc does not reach it (a
-  `par` or `all` child hangs under the call's current scope instead, so they
-  do); a stage thread instead gets `Mooring::for_stage_thread`, a child of the
+  durable root in a run, so a run timeout or Esc does not reach it; inside a
+  gather its entry scope, the parent worker's node inside a worker or the
+  run's scope at a `gather`, which they do reach; a stage thread instead gets `Mooring::for_stage_thread`, a child of the
   *node's own* cancel scope, so a pipeline-wide cancel reaches every stage
   transitively and the pipeline's own surface/deferred rail carries over
   rather than a worker's fresh one. It shares the session's root, roster,

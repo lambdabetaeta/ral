@@ -247,8 +247,8 @@ pub enum ScopeAst {
         title: Option<Box<Spanned<Ast>>>,
         body: Box<Ast>,
     },
-    /// `all [k: BODY, …]` — run every task concurrently, owned by this form.
-    All { tasks: Options },
+    /// `gather BODY` — run `body`, owning the workers spawned inside it.
+    Gather { body: Box<Ast> },
 }
 
 /// A form's written options: each label is syntax, each value a term.
@@ -347,13 +347,12 @@ impl ScopeAst {
                 ops.push(body);
                 ops
             }
-            Self::Audit { body } => vec![body],
+            Self::Audit { body } | Self::Gather { body } => vec![body],
             Self::Spawn { title, body } => {
                 let mut ops: Vec<&Ast> = title.iter().map(|t| &t.item).collect();
                 ops.push(body);
                 ops
             }
-            Self::All { tasks } => tasks.iter().map(|(_, v)| &v.item).collect(),
         }
     }
 }

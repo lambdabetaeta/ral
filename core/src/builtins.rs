@@ -362,14 +362,14 @@ builtin_registry! {
     Race { names: ["race"], ty: scheme::race,
         doc: "race <handles>  — wait for the first of several concurrent blocks to finish, then claim it and behave as `await` on it; the rest are claimed, cancelled and drained before `race` returns. A handle another caller claimed is skipped; if every handle is claimed, `race` fails.",
         call: |args, mooring, shell| concurrency::builtin_race(args, mooring, shell), },
+    FirstSettled { names: ["first-settled"], ty: scheme::first_settled,
+        doc: "first-settled <handles>  — the index of the first of several concurrent blocks to finish, without claiming it: a pure observation like `poll`, so `await` of the one it names still works. Cancel-aware. A handle another caller claimed is skipped; if every handle is claimed, or the list is empty, it fails.",
+        call: |args, _mooring, shell| concurrency::builtin_first_settled(args, shell), },
     Cancel { names: ["cancel"], ty: scheme::cancel_op,
         doc: "cancel <handle>  — claim a concurrent block and cancel it; nothing if its result was already claimed.",
         call: |args, _mooring, _shell| concurrency::builtin_cancel(args), },
-    Par { names: ["par"], ty: scheme::par_op,
-        doc: "par <f> <items> <jobs>  — parallel map: run `f` over `items` on at most `jobs` workers at once (`jobs <= 0`: one per item), owned by this call. Results keep input order, and each item's output appears in that order. The first failure cancels the remaining items, which are drained before it is raised; a stop, an exit or a panic cancels them too. Nothing started by `par` outlives the call.",
-        call: |args, mooring, shell| concurrency::builtin_par(args, mooring, shell), },
     Workers { names: ["workers"], ty: scheme::workers_op,
-        doc: "workers  — every worker this session registered, running or with a retained result, as one record each: `id`, `title`, `owner` (`session, `worker id, or `call for one a `par`/`all` owns), `state` (`running, or `done with how it ended), `started` (unix seconds), `elapsed` (seconds, so far or in total), `settled` (`some unix seconds, or `none). Data only: `worker <id>` gives the handle back.",
+        doc: "workers  — every worker this session registered, running or with a retained result, as one record each: `id`, `title`, `owner` (`session, `worker id, or `gather for one a `gather` owns), `state` (`running, or `done with how it ended), `started` (unix seconds), `elapsed` (seconds, so far or in total), `settled` (`some unix seconds, or `none). Data only: `worker <id>` gives the handle back.",
         call: |_args, _mooring, shell| Ok(concurrency::builtin_workers(shell)), },
     // The bundled uutils tools (cat, yes, head, wc, …) are deliberately absent:
     // `runtime::command` runs each as a `ral --ral-bundled-tool <tool>` child, so

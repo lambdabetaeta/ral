@@ -260,9 +260,7 @@ fn strip_scope(op: ScopeAst) -> ScopeAst {
             title: title.map(|t| Box::new(Spanned::synthetic(strip_one(t.item)))),
             body: s(body),
         },
-        ScopeAst::All { tasks } => ScopeAst::All {
-            tasks: strip_opts(tasks),
-        },
+        ScopeAst::Gather { body } => ScopeAst::Gather { body: s(body) },
     }
 }
 
@@ -2490,6 +2488,27 @@ fn parse_audit_with_trailing_redirect() {
 }
 
 #[test]
+fn parse_gather_one_block() {
+    let op = unwrap_single_scope(parse("gather { body }").unwrap());
+    assert!(matches!(op, ScopeAst::Gather { .. }));
+}
+
+#[test]
+fn parse_gather_two_args_is_error() {
+    let err = parse("gather a b").unwrap_err();
+    assert!(
+        err.message.contains("gather requires 1") && err.message.contains("got 2"),
+        "msg: {err}"
+    );
+}
+
+#[test]
+fn parse_gather_zero_args_is_error() {
+    let err = parse("gather").unwrap_err();
+    assert!(err.message.contains("gather requires 1"), "msg: {err}");
+}
+
+#[test]
 fn parse_spawn_body_only() {
     let op = unwrap_single_scope(parse("spawn { body }").unwrap());
     assert!(
@@ -2528,21 +2547,6 @@ fn parse_spawn_three_operands_is_error() {
     );
 }
 
-#[test]
-fn parse_all_tasks() {
-    let op = unwrap_single_scope(parse("all [build: { cargo build }, lint: $l]").unwrap());
-    let ScopeAst::All { tasks } = op else {
-        panic!("expected ScopeAst::All, got {op:?}");
-    };
-    let labels: Vec<&str> = tasks.iter().map(|(k, _)| k.as_str()).collect();
-    assert_eq!(labels, ["build", "lint"]);
-    let err = parse("all [build: { a }, build: { b }]").unwrap_err();
-    assert!(
-        err.message.contains("`build` is written twice"),
-        "msg: {err}"
-    );
-}
-
 // ── Reserved-name binding rejection ─────────────────────────────────
 
 #[test]
@@ -2553,7 +2557,7 @@ fn parse_let_try_rejected() {
 
 #[test]
 fn parse_let_spawn_rejected() {
-    for word in ["spawn", "all"] {
+    for word in ["spawn", "gather"] {
         let err = parse(&format!("let {word} = 1")).unwrap_err();
         assert!(err.message.contains(&format!("'{word}'")), "msg: {err}");
     }

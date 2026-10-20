@@ -1,7 +1,7 @@
 ---
 verified_at_commit: e4025de9
 verified_at_date: 2026-10-17
-anchors: [Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, Break::code, Break::of_child, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, Terminate, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, ChildEnd, WaitOutcome::classify, KILL_EXIT_CODE, CancelCause::code, Signal::status, RunningChild::wait, Membership::owes, break_pipeline_group, escalation_pending, Cradle, Brood, Litter]
+anchors: [Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, Break::code, Break::of_child, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, Terminate, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, ChildEnd, WaitOutcome::classify, KILL_EXIT_CODE, CancelCause::code, Signal::status, RunningChild::wait, Membership::owes, break_pipeline_group, escalation_pending, Cradle, Brood, Frame::Gather, exit_brood, Brood::wait_cancelled]
 ---
 
 # Cancellation
@@ -82,8 +82,8 @@ A scope node is `{ flag, cancelled_at, parent, shield }` in a tree of
 - **Seven minting points**, each a frame or a base: the session root
   (`DurableRoot::new`); the session anchor (`DurableRoot::worker`); a
   worker's node, minted under its shell's *cradle* (`Cradle`) — the session
-  root in a run, the parent worker's own node inside a worker — or, for a
-  child of `par` or `all`, under the calling expression's *current* scope; a
+  root in a run outside any gather, else the gather's entry scope: the parent
+  worker's own node inside a worker, the run's scope at a `gather`; a
   host's dispatch scope (`run_cancel_handle`, the anchor's child); a run's
   node (`dispatch`, the base of a run); a stage's node (`launch_thread_stage`,
   a child of the *current* scope, so a pipeline inside a cleanup is masked
@@ -91,7 +91,7 @@ A scope node is `{ flag, cancelled_at, parent, shield }` in a tree of
 - **One writer per node.** The root by SIGTERM/SIGHUP/Ctrl-`\`; the dispatch
   scope by the host's interrupt; a run's node by its wall and by the key its
   terminal tenant heard; a worker's by `cancel`, a `race` loss, its parent's
-  halt rule (`Brood`), a combinator's end (`Litter`), the session wipe; a
+  gather's halt rule (`Brood`), the session wipe; a
   stage's by its **collector alone**, with the cause of whatever teardown it
   runs (`ReaderGone` for a reader that left, `Aborted`
   for a panic, `Cancelled` for a sibling's `exit`, `Terminated` for the
@@ -103,7 +103,7 @@ A scope node is `{ flag, cancelled_at, parent, shield }` in a tree of
   |---|---|---|---|
   | `ReaderGone` | 1 | a pipeline stage's reader has ended | the pipeline collector |
   | `Interrupted` | 2 | user asked the foreground to stop | Ctrl-C / Esc / batch SIGINT |
-  | `Cancelled` | 3 | a targeted worker teardown | `cancel <handle>`, `race` loser, a parent's halt rule, a combinator's end |
+  | `Cancelled` | 3 | a targeted worker teardown | `cancel <handle>`, `race` loser, a gather's halt rule |
   | `TimedOut` | 4 | a wall-clock deadline expired | `process::deadline` |
   | `Terminated` | 5 | the process was asked to shut down | SIGTERM / SIGHUP |
   | `Aborted` | 6 | the session root is being reaped | Ctrl-`\` |
@@ -126,19 +126,23 @@ discipline ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]):
 - `DurableRoot::worker` mints the session anchor, beside a run's own
   extent. A run's frame nests under the anchor, so cancelling it never
   reaches a session worker, while cancelling the root reaches both.
-- **A worker is a scope over its births.** A shell's `LocalState::cradle`
-  says where a loose birth hangs and who settles it: a run's is loose under
-  the root and answers for nothing; a worker's is its own node and its
-  `Brood`, the handles of every `spawn` or `watch` born inside it; a stage
-  shares its parent's. The worker's base settles the brood: on return it
-  claims and awaits each child no one has claimed, in birth order, the first
-  failure being its own; on a halt it claims and cancels every such child and
-  waits for its thread up to the cleanup grace without polling, since its own
-  scope may be the one cancelled. Claiming is one transition under the handle's lock, so a child
-  claimed elsewhere first is skipped, and the join and that claimer never both
-  replay it. A `par` or `all` owns its children as a `Litter` and ends it the
-  same way before the call returns; `race` drains its losers likewise. So
-  `cancel $h` reaches everything `$h` started
+- **A gather is a scope over its births.** A shell's `LocalState::cradle`
+  says where a birth hangs and who settles it: a run's is loose under the
+  root and answers for nothing; inside a *gather* — a worker's body, or a
+  `gather { … }` (`Frame::Gather`, which swaps the cradle for its body's
+  extent) — it is the gather's entry scope and its `Brood`, the handles of
+  every `spawn` or `watch` born inside it; a stage shares its parent's. One
+  exit rule, `exit_brood`, settles the brood for both: on return it claims
+  and awaits each child no one has claimed, in birth order, the first failure
+  being the gather's; on a halt (`Brood::end`) it claims and cancels every
+  such child. Either way it then waits, up to the cleanup grace and without
+  polling, for every cancelled child whose thread has not ended
+  (`Brood::wait_cancelled`), since its own scope may be the one cancelled.
+  Claiming is one transition under the handle's lock, so a child claimed
+  elsewhere first is skipped, and the join and that claimer never both replay
+  it. `race` drains its losers by the same claim-and-stop. So `cancel $h`
+  reaches everything `$h` started, and nothing a gather started outlives it by
+  more than the grace
   ([[invariants/a-worker-ends-with-its-children|a-worker-ends-with-its-children]]).
 - **The tree is the runs' dynamic extent.** `Shell::dispatch` nests each entry
   under the frame the run door displaces, not beside it under the root, so a

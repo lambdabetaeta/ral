@@ -99,10 +99,10 @@ pub struct HandleInner {
     /// unit that reacquires its handle admits it against the type it uses it
     /// at.  Each `worker` call is a site of its own.
     pub site: Option<Arc<crate::ty::Site>>,
-    /// The worker's own node: a child of its cradle's for a loose birth (the
-    /// session root in a run, the parent worker's node inside one), of the
-    /// call's scope for a combinator's child.  `cancel`, a halting parent and
-    /// `race`'s losers fire it, and the worker stops at its next poll.
+    /// The worker's own node: a child of its cradle's `under`, the session
+    /// root for a session birth, the gather's entry scope (a worker's own
+    /// node, for its body) for a gather's child.  `cancel`, a halting parent
+    /// and `race`'s losers fire it, and the worker stops at its next poll.
     pub cancel: ScopeNode,
 }
 
